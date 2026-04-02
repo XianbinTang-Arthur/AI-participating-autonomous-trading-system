@@ -19,9 +19,11 @@ import {
 import { buildPhase1ShadowDrawer } from "./modules/shadow-drawer.js";
 import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewSpecs } from "./modules/store.js";
 import {
+  readableFamilyExecutionSummary,
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
+  readableOverlayParentSignalSummary,
   readableState,
   reviewStatusLabel,
   toneForOrderStatus,
@@ -35,6 +37,7 @@ import { renderAdminView } from "./modules/views/admin-view.js";
 import { renderExecutionSections, renderExecutionView } from "./modules/views/execution-view.js";
 import { renderHomeView } from "./modules/views/home-view.js";
 import { renderOverviewView } from "./modules/views/overview-view.js";
+import { renderReplaySections, renderReplayView } from "./modules/views/replay-view.js";
 import { renderRiskSections, renderRiskView } from "./modules/views/risk-view.js";
 import { renderStrategySections, renderStrategyView } from "./modules/views/strategy-view.js";
 
@@ -44,6 +47,7 @@ const VIEW_ROUTES = {
   strategy: "/ui/strategy",
   execution: "/ui/execution",
   risk: "/ui/risk",
+  replay: "/ui/replay",
   aiAnalysis: "/ui/ai-analysis",
   aiConfig: "/ui/ai-config",
   admin: "/ui/settings",
@@ -85,6 +89,13 @@ const VIEW_META = {
     copy: "关注阻断原因、对账结论、恢复状态、账户快照和是否需要人工确认。",
     hidePageHead: false,
   },
+  replay: {
+    docTitle: "AATS 自动交易监控台 | 回放与复盘",
+    eyebrow: "回放与复盘",
+    heading: "Replay 工作区",
+    copy: "这里专门对读 replay 父腿复盘、历史校验和腿级对账异常。",
+    hidePageHead: false,
+  },
   aiAnalysis: {
     docTitle: "AATS 自动交易监控台 | AI 分析",
     eyebrow: "AI 分析",
@@ -114,6 +125,7 @@ const VIEW_LABELS = {
   strategy: "策略判断",
   execution: "委托与成交",
   risk: "风险与恢复",
+  replay: "回放与复盘",
   aiAnalysis: "AI 分析",
   aiConfig: "AI 配置",
   admin: "账户与权限",
@@ -149,6 +161,7 @@ const nodes = {
   strategyContent: document.getElementById("strategyContent"),
   executionContent: document.getElementById("executionContent"),
   riskContent: document.getElementById("riskContent"),
+  replayContent: document.getElementById("replayContent"),
   aiAnalysisContent: document.getElementById("aiAnalysisContent"),
   aiConfigContent: document.getElementById("aiConfigContent"),
   adminContent: document.getElementById("adminContent"),
@@ -349,7 +362,17 @@ function renderStatusRibbon() {
         pill(`人工复核 ${reviewStatusLabel(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
       ],
       metrics: [
-        { label: "最近决策", value: latestDecision.decision_id ? readableState(latestDecision.position_target?.position_intent || "hold") : "暂无", meta: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
+        {
+          label: "最近决策",
+          value: latestDecision.decision_id ? readableFamilyExecutionSummary(latestDecision.position_target || {}, "保持当前仓位") : "暂无",
+          meta: latestDecision.decision_id
+            ? [
+                formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts),
+                readableOverlayParentSignalSummary(latestDecision.position_target || {}, ""),
+              ].filter(Boolean).join(" | ")
+            : formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts),
+          tone: latestDecision.decision_id ? "info" : "neutral",
+        },
         { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
         { label: "恢复限制", value: isPausedAwaitingResume(recovery) ? "当前可手动恢复" : primaryBlocker ? (primaryBlocker.title || localizeError(primaryBlocker.blocker)) : recovery.safe_to_trade ? "当前无硬阻断" : localizedRecoveryReasons(), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "恢复与对账共同决定交易资格"), tone: isPausedAwaitingResume(recovery) ? "warning" : blockers.length > 0 || reconciliation?.halt_required ? "danger" : recovery.safe_to_trade ? "positive" : "warning" },
         { label: "账户权益", value: formatNumber(portfolio.total_equity), meta: `活动委托 ${formatNumber(metrics.current_open_order_count)}`, tone: "info" },
@@ -481,6 +504,20 @@ function renderActiveView() {
   }
   if (state.activeView === "risk") {
     patchRenderedSections(renderRiskSections(viewData), () => nodes.riskContent, () => renderRiskView(viewData));
+    return;
+  }
+  if (state.activeView === "replay") {
+    patchRenderedSections(
+      renderReplaySections(viewData, state.ui.replay, {
+        recentReplayValidationsLimit: state.pageLimits.recentReplayValidations,
+        defaultReplayValidationsLimit: DEFAULT_PAGE_LIMITS.recentReplayValidations,
+      }),
+      () => nodes.replayContent,
+      () => renderReplayView(viewData, state.ui.replay, {
+        recentReplayValidationsLimit: state.pageLimits.recentReplayValidations,
+        defaultReplayValidationsLimit: DEFAULT_PAGE_LIMITS.recentReplayValidations,
+      }),
+    );
     return;
   }
   if (state.activeView === "aiAnalysis" && nodes.aiAnalysisContent) {
@@ -870,6 +907,9 @@ async function dispatchAction(action, value, target = null) {
   if (action === "collapse-ai-shadow-decisions") return resetPageLimit("recentAIShadowDecisions");
   if (action === "load-more-ai-shadow-evaluations") return adjustPageLimit("recentAIShadowEvaluations", PAGE_LOAD_STEP);
   if (action === "collapse-ai-shadow-evaluations") return resetPageLimit("recentAIShadowEvaluations");
+  if (action === "load-more-replay-validations") return adjustPageLimit("recentReplayValidations", PAGE_LOAD_STEP);
+  if (action === "collapse-replay-validations") return resetPageLimit("recentReplayValidations");
+  if (action === "set-replay-parent-filter") return setReplayParentFilter(value);
   if (action === "toggle-user") return toggleOperatorUser(value);
   if (action === "change-user-role") return updateOperatorUserRole(value);
   if (action === "reset-user-password") return resetOperatorPassword(value);
@@ -993,6 +1033,13 @@ async function adjustPageLimit(key, delta) {
 async function resetPageLimit(key) {
   state.pageLimits[key] = DEFAULT_PAGE_LIMITS[key] || state.pageLimits[key];
   await refreshDashboard();
+}
+
+const VIEW_REPLAY_FILTERS = new Set(["all", "inventory_only", "target_only", "target_and_inventory"]);
+
+function setReplayParentFilter(value) {
+  state.ui.replay.parentFilter = VIEW_REPLAY_FILTERS.has(value) ? value : "all";
+  renderShell();
 }
 
 function setActionPending(target, pendingLabel) {
@@ -1266,6 +1313,10 @@ function renderLoadingView() {
     patchHtml(nodes.riskContent, html);
     return;
   }
+  if (state.activeView === "replay" && nodes.replayContent) {
+    patchHtml(nodes.replayContent, html);
+    return;
+  }
   if (state.activeView === "aiAnalysis" && nodes.aiAnalysisContent) {
     patchHtml(nodes.aiAnalysisContent, html);
     return;
@@ -1286,6 +1337,7 @@ function renderRefreshIndicators() {
     ["strategy", nodes.strategyContent],
     ["execution", nodes.executionContent],
     ["risk", nodes.riskContent],
+    ["replay", nodes.replayContent],
     ["aiAnalysis", nodes.aiAnalysisContent],
     ["aiConfig", nodes.aiConfigContent],
     ["admin", nodes.adminContent],
@@ -1343,7 +1395,7 @@ function loadingMarkupForView(view) {
     `;
   }
 
-  if (view === "strategy" || view === "execution" || view === "risk" || view === "aiAnalysis" || view === "aiConfig" || view === "admin") {
+  if (view === "strategy" || view === "execution" || view === "risk" || view === "replay" || view === "aiAnalysis" || view === "aiConfig" || view === "admin") {
     return `
       <div class="panel-grid skeleton-grid" aria-hidden="true">
         <section class="surface-card hero-card skeleton-surface skeleton-card span-7">

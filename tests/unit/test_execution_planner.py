@@ -5,7 +5,12 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.exchange import InstrumentMetadata
-from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope, ExecutionParameterSuggestion, ExecutionPlan
+from aats.schemas.execution import (
+    AIExecutionParameterSuggestionEnvelope,
+    ExecutionParameterSuggestion,
+    ExecutionPlan,
+    order_intent_from_leg_order_intent,
+)
 from aats.services.execution_engine.planner import ExecutionPlanner
 
 
@@ -43,13 +48,13 @@ class TestExecutionPlanner(unittest.TestCase):
 
         self.assertIsNotNone(plan)
         self.assertEqual(plan.execution_action, "scale_in")
-        self.assertEqual(plan.position_intent, "open_long")
+        self.assertEqual(plan.position_intent, "scale_in_long")
 
         intent = planner.build_intent(plan=plan)
 
         self.assertIsNotNone(intent)
         self.assertEqual(intent.execution_action, "scale_in")
-        self.assertEqual(intent.position_intent, "open_long")
+        self.assertEqual(intent.position_intent, "scale_in_long")
 
     def test_build_leg_plan_and_intent_preserve_derivatives_execution_semantics(self) -> None:
         planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
@@ -98,6 +103,154 @@ class TestExecutionPlanner(unittest.TestCase):
         self.assertEqual(intent.action, "close")
         self.assertEqual(intent.instrument_family, "BTC-USDT")
         self.assertEqual(intent.settle_currency, "USDT")
+
+    def test_build_leg_plan_and_intent_preserve_scale_in_position_intent(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_leg_plan(
+            decision_id="decision_scale_in_leg",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            pos_side="long",
+            action="open",
+            quantity=Decimal("0.01"),
+            urgency="medium",
+            max_slippage_tolerance_bps=25,
+            product_type="derivatives",
+            target_leverage=3.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            position_intent="scale_in_long",
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.position_intent, "scale_in_long")
+        self.assertEqual(plan.execution_action, "enter")
+
+        leg_intent = planner.build_leg_intent(plan=plan)
+
+        self.assertIsNotNone(leg_intent)
+        assert leg_intent is not None
+        self.assertEqual(leg_intent.position_intent, "scale_in_long")
+        self.assertEqual(leg_intent.action, "open")
+
+        order_intent = order_intent_from_leg_order_intent(leg_intent)
+
+        self.assertEqual(order_intent.position_intent, "scale_in_long")
+        self.assertEqual(order_intent.execution_action, "enter")
+        self.assertEqual(order_intent.side, "buy")
+
+    def test_build_leg_plan_and_intent_preserve_execution_chain_id(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_leg_plan(
+            decision_id="decision_chain_preserve",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            pos_side="long",
+            action="open",
+            quantity=Decimal("0.01"),
+            urgency="medium",
+            max_slippage_tolerance_bps=25,
+            product_type="derivatives",
+            target_leverage=3.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            execution_chain_id="independent:decision_chain_preserve:long:open",
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.execution_chain_id, "independent:decision_chain_preserve:long:open")
+
+        leg_intent = planner.build_leg_intent(plan=plan)
+
+        self.assertIsNotNone(leg_intent)
+        assert leg_intent is not None
+        self.assertEqual(leg_intent.execution_chain_id, "independent:decision_chain_preserve:long:open")
+
+        order_intent = order_intent_from_leg_order_intent(leg_intent)
+
+        self.assertEqual(order_intent.execution_chain_id, "independent:decision_chain_preserve:long:open")
+
+    def test_build_leg_plan_applies_explicit_passive_first_preferences(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_leg_plan(
+            decision_id="decision_passive_first",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            pos_side="long",
+            action="open",
+            quantity=Decimal("0.01"),
+            urgency="low",
+            max_slippage_tolerance_bps=20,
+            reference_price=Decimal("100"),
+            product_type="derivatives",
+            target_leverage=3.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            execution_style_preference="bounded_limit_ioc",
+            order_type_preference="limit",
+            time_in_force_preference="IOC",
+            limit_offset_bps_preference=Decimal("1.5"),
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.execution_style, "bounded_limit_ioc")
+        self.assertEqual(plan.order_type, "limit")
+        self.assertEqual(plan.time_in_force, "IOC")
+        self.assertEqual(plan.limit_price, Decimal("100.0150"))
+
+        leg_intent = planner.build_leg_intent(plan=plan)
+
+        self.assertIsNotNone(leg_intent)
+        assert leg_intent is not None
+        self.assertEqual(leg_intent.execution_style, "bounded_limit_ioc")
+        self.assertEqual(leg_intent.order_type, "limit")
+        self.assertEqual(leg_intent.time_in_force, "IOC")
+        self.assertEqual(leg_intent.limit_price, Decimal("100.0150"))
+
+    def test_build_leg_plan_applies_explicit_market_preferences(self) -> None:
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_leg_plan(
+            decision_id="decision_market_preference",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            pos_side="long",
+            action="close",
+            quantity=Decimal("0.01"),
+            urgency="high",
+            max_slippage_tolerance_bps=20,
+            reference_price=Decimal("100"),
+            product_type="derivatives",
+            target_leverage=3.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            instrument_family="BTC-USDT",
+            settle_currency="USDT",
+            execution_style_preference="taker",
+            order_type_preference="market",
+            time_in_force_preference="IOC",
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.execution_style, "taker")
+        self.assertEqual(plan.order_type, "market")
+        self.assertEqual(plan.time_in_force, "IOC")
+        self.assertIsNone(plan.limit_price)
 
     def test_build_plan_rejects_signed_derivatives_flow_in_long_short_mode(self) -> None:
         planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))

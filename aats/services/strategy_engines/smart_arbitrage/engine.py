@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.exchange import ExchangeAccountSnapshot
+from aats.schemas.market import MarketSnapshot
 from aats.schemas.strategy_runtime import StrategyCandidate
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.services.strategy_engines.base import StrategyEngineInput
@@ -11,7 +12,6 @@ from aats.services.strategy_engines.smart_arbitrage.capabilities import resolve_
 from aats.services.strategy_engines.smart_arbitrage.cost_model import build_cost_breakdown
 from aats.services.strategy_engines.smart_arbitrage.discovery import basis_bps, load_market_pair
 from aats.services.strategy_engines.smart_arbitrage.leg_planner import build_legs
-from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
 from aats.services.strategy_engines.smart_arbitrage.schemas import ArbitrageOpportunity
 from aats.services.strategy_engines.smart_arbitrage.sizer import entry_pair_qty
 from aats.services.strategy_engines.smart_arbitrage.state_machine import resolve_pair_state
@@ -34,6 +34,8 @@ class SmartArbitrageStrategyEngine:
         self.account_service = account_service
 
     def evaluate(self, engine_input: StrategyEngineInput) -> StrategyCandidate:
+        pair_definitions = tuple(engine_input.resolved_pair_definitions_by_family.get("smart_arbitrage", ()))
+        resolved_pair_metrics = self._resolved_pair_configuration_metrics(pair_definitions)
         if not self.settings.smart_arbitrage_enabled:
             return StrategyCandidate(
                 family="smart_arbitrage",
@@ -46,6 +48,7 @@ class SmartArbitrageStrategyEngine:
                 recommended_symbol=engine_input.context.symbol,
                 reason_codes=["smart_arbitrage_disabled"],
                 state_phase="inactive",
+                metrics=resolved_pair_metrics,
             )
         if engine_input.context.product_type != "derivatives":
             return StrategyCandidate(
@@ -59,12 +62,9 @@ class SmartArbitrageStrategyEngine:
                 recommended_symbol=engine_input.context.symbol,
                 reason_codes=["smart_arbitrage_derivatives_runtime_required"],
                 state_phase="inactive",
+                metrics=resolved_pair_metrics,
             )
 
-        pair_definitions = load_pair_definitions(
-            settings=self.settings,
-            primary_symbol=engine_input.context.symbol,
-        )
         if not pair_definitions:
             return StrategyCandidate(
                 family="smart_arbitrage",
@@ -73,9 +73,10 @@ class SmartArbitrageStrategyEngine:
                 selectable=False,
                 execution_compatible=False,
                 route_action="advisory_only",
-                headline="Spot and derivatives companion symbols are not configured.",
+                headline="Spot and derivatives companion symbols are not configured in the family input contract.",
                 reason_codes=["smart_arbitrage_symbol_pair_missing"],
                 state_phase="inactive",
+                metrics=resolved_pair_metrics,
             )
 
         candidates = [self._evaluate_pair(pair=pair, engine_input=engine_input) for pair in pair_definitions]
@@ -83,6 +84,7 @@ class SmartArbitrageStrategyEngine:
         selected = self._aggregate_candidates(candidates=candidates, selected_pairs=selected_pairs)
         selected.metrics = {
             **selected.metrics,
+            **resolved_pair_metrics,
             "evaluated_pairs": [
                 {
                     "pair_id": item.pair_id,
@@ -118,10 +120,78 @@ class SmartArbitrageStrategyEngine:
         }
         return selected
 
-    def _evaluate_pair(self, *, pair, engine_input: StrategyEngineInput) -> StrategyCandidate:
-        spot_snapshot, hedge_snapshot = load_market_pair(
+    @staticmethod
+    def _resolved_pair_configuration_metrics(pair_definitions) -> dict[str, object]:
+        serialized_pairs = [
+            pair.model_dump(mode="json")
+            for pair in pair_definitions
+        ]
+        warning_codes = list(
+            dict.fromkeys(
+                code
+                for pair in pair_definitions
+                for code in pair.metadata.get("configuration_warning_codes", [])
+                if str(code).strip()
+            )
+        )
+        error_codes = list(
+            dict.fromkeys(
+                code
+                for pair in pair_definitions
+                for code in pair.metadata.get("configuration_error_codes", [])
+                if str(code).strip()
+            )
+        )
+        return {
+            "pair_definitions": serialized_pairs,
+            "pair_registry_warning_codes": warning_codes,
+            "pair_registry_error_codes": error_codes,
+            "pair_registry_source": "coordinator_resolved",
+        }
+
+    def _load_market_pair(
+        self,
+        *,
+        pair,
+        engine_input: StrategyEngineInput,
+    ) -> tuple[MarketSnapshot | None, MarketSnapshot | None]:
+        family_market_snapshots = engine_input.latest_market_snapshots_by_symbol
+        if family_market_snapshots:
+            return (
+                family_market_snapshots.get(pair.spot_symbol),
+                family_market_snapshots.get(pair.hedge_symbol),
+            )
+        return load_market_pair(
             pair=pair,
             market_snapshot_loader=self.market_snapshot_loader,
+        )
+
+    def _evaluate_pair(self, *, pair, engine_input: StrategyEngineInput) -> StrategyCandidate:
+        hedge_margin_mode = self._resolved_hedge_margin_mode(engine_input)
+        if hedge_margin_mode is None:
+            return StrategyCandidate(
+                family="smart_arbitrage",
+                state="blocked",
+                enabled=True,
+                selectable=False,
+                execution_compatible=False,
+                route_action="advisory_only",
+                headline="Smart arbitrage 缺少运行时对冲保证金模式，当前不会生成执行腿。",
+                recommended_symbol=pair.spot_symbol,
+                pair_id=pair.pair_id,
+                opportunity_kind="configuration_missing",
+                state_phase="blocked",
+                reason_codes=["smart_arbitrage_runtime_margin_mode_missing"],
+                blocking_reasons=["smart_arbitrage_runtime_margin_mode_missing"],
+                metrics={
+                    "pair_id": pair.pair_id,
+                    "spot_symbol": pair.spot_symbol,
+                    "derivatives_symbol": pair.hedge_symbol,
+                },
+            )
+        spot_snapshot, hedge_snapshot = self._load_market_pair(
+            pair=pair,
+            engine_input=engine_input,
         )
         if spot_snapshot is None or hedge_snapshot is None:
             return StrategyCandidate(
@@ -167,29 +237,37 @@ class SmartArbitrageStrategyEngine:
             engine_input=engine_input,
             hedge_symbol=pair.hedge_symbol,
         )
+        sleeve_product_scope = str(engine_input.directional_target.product_type or engine_input.context.product_type)
+        sleeve_margin_scope = hedge_margin_mode
         sleeve_cash_spot_qty = self._current_sleeve_quantity(
             engine_input=engine_input,
             primary_symbol=engine_input.context.symbol,
+            sleeve_product_scope=sleeve_product_scope,
+            sleeve_margin_scope=sleeve_margin_scope,
             symbol_scope=(pair.spot_symbol, pair.hedge_symbol),
             symbol=pair.spot_symbol,
-            product_type="spot",
-            margin_mode="cash",
+            leg_product_type="spot",
+            leg_margin_mode="cash",
         )
         sleeve_margin_spot_qty = self._current_sleeve_quantity(
             engine_input=engine_input,
             primary_symbol=engine_input.context.symbol,
+            sleeve_product_scope=sleeve_product_scope,
+            sleeve_margin_scope=sleeve_margin_scope,
             symbol_scope=(pair.spot_symbol, pair.hedge_symbol),
             symbol=pair.spot_symbol,
-            product_type="spot",
-            margin_mode=self.settings.smart_arbitrage_margin_short_spot_margin_mode,
+            leg_product_type="spot",
+            leg_margin_mode=self.settings.smart_arbitrage_margin_short_spot_margin_mode,
         )
         sleeve_hedge_qty = self._current_sleeve_quantity(
             engine_input=engine_input,
             primary_symbol=engine_input.context.symbol,
+            sleeve_product_scope=sleeve_product_scope,
+            sleeve_margin_scope=sleeve_margin_scope,
             symbol_scope=(pair.spot_symbol, pair.hedge_symbol),
             symbol=pair.hedge_symbol,
-            product_type="derivatives",
-            margin_mode=self.settings.margin_mode,
+            leg_product_type="derivatives",
+            leg_margin_mode=sleeve_margin_scope,
         )
         pair_state = resolve_pair_state(
             pair_id=pair.pair_id,
@@ -246,6 +324,8 @@ class SmartArbitrageStrategyEngine:
                 pair_state=pair_state,
                 capability=capability,
                 spot_price=spot_price,
+                reference_ts=engine_input.context.as_of_ts,
+                hedge_margin_mode=hedge_margin_mode,
             )
         return self._candidate_from_opportunity(
             pair=pair,
@@ -260,6 +340,7 @@ class SmartArbitrageStrategyEngine:
             spot_price=spot_price,
             hedge_price=hedge_price,
             capability=capability,
+            hedge_margin_mode=hedge_margin_mode,
         )
 
     def _build_opportunity(
@@ -272,6 +353,8 @@ class SmartArbitrageStrategyEngine:
         pair_state,
         capability,
         spot_price: Decimal,
+        reference_ts,
+        hedge_margin_mode: str,
     ) -> ArbitrageOpportunity:
         positive_basis_active = pair_basis_bps >= entry_threshold
         negative_basis_active = pair_basis_bps <= -entry_threshold
@@ -280,6 +363,9 @@ class SmartArbitrageStrategyEngine:
                 settings=self.settings,
                 basis_bps=pair_basis_bps,
                 execution_mode=None,
+                reference_ts=reference_ts,
+                hedge_margin_mode=hedge_margin_mode,
+                require_explicit_hedge_margin_mode=True,
                 spot_symbol=pair.spot_symbol,
                 hedge_symbol=pair.hedge_symbol,
                 account_service=self.account_service,
@@ -376,6 +462,8 @@ class SmartArbitrageStrategyEngine:
                     entry_threshold=entry_threshold,
                     exit_threshold=exit_threshold,
                     execution_mode=execution_mode,
+                    reference_ts=reference_ts,
+                    hedge_margin_mode=hedge_margin_mode,
                     direction="positive_basis",
                     reason_code="smart_arbitrage_spot_carry_not_allowed",
                 )
@@ -401,6 +489,8 @@ class SmartArbitrageStrategyEngine:
                 exit_threshold=exit_threshold,
                 capability=capability,
                 spot_price=spot_price,
+                reference_ts=reference_ts,
+                hedge_margin_mode=hedge_margin_mode,
             )
         else:
             observation_mode = (
@@ -418,6 +508,9 @@ class SmartArbitrageStrategyEngine:
                 settings=self.settings,
                 basis_bps=pair_basis_bps,
                 execution_mode=observation_mode,
+                reference_ts=reference_ts,
+                hedge_margin_mode=hedge_margin_mode,
+                require_explicit_hedge_margin_mode=True,
                 spot_symbol=pair.spot_symbol,
                 hedge_symbol=pair.hedge_symbol,
                 account_service=self.account_service,
@@ -441,6 +534,9 @@ class SmartArbitrageStrategyEngine:
             settings=self.settings,
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
+            reference_ts=reference_ts,
+            hedge_margin_mode=hedge_margin_mode,
+            require_explicit_hedge_margin_mode=True,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -488,6 +584,8 @@ class SmartArbitrageStrategyEngine:
         exit_threshold: Decimal,
         capability,
         spot_price: Decimal,
+        reference_ts,
+        hedge_margin_mode: str,
     ) -> ArbitrageOpportunity:
         requested_mode = self.settings.smart_arbitrage_negative_basis_mode
         if requested_mode in {"disabled", "advisory_only"}:
@@ -510,6 +608,8 @@ class SmartArbitrageStrategyEngine:
                     entry_threshold=entry_threshold,
                     exit_threshold=exit_threshold,
                     execution_mode=execution_mode,
+                    reference_ts=reference_ts,
+                    hedge_margin_mode=hedge_margin_mode,
                     direction="negative_basis",
                     reason_code="smart_arbitrage_inventory_reverse_carry_not_allowed",
                 )
@@ -551,6 +651,8 @@ class SmartArbitrageStrategyEngine:
                     entry_threshold=entry_threshold,
                     exit_threshold=exit_threshold,
                     execution_mode=execution_mode,
+                    reference_ts=reference_ts,
+                    hedge_margin_mode=hedge_margin_mode,
                     direction="negative_basis",
                     reason_code="smart_arbitrage_margin_reverse_carry_not_allowed",
                 )
@@ -589,6 +691,9 @@ class SmartArbitrageStrategyEngine:
             settings=self.settings,
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
+            reference_ts=reference_ts,
+            hedge_margin_mode=hedge_margin_mode,
+            require_explicit_hedge_margin_mode=True,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -643,6 +748,7 @@ class SmartArbitrageStrategyEngine:
         spot_price: Decimal,
         hedge_price: Decimal,
         capability,
+        hedge_margin_mode: str,
     ) -> StrategyCandidate:
         account_spot_qty, sleeve_spot_qty = self._selected_spot_quantities(
             opportunity=opportunity,
@@ -672,6 +778,8 @@ class SmartArbitrageStrategyEngine:
                     "route_action": route_action,
                 }
             ),
+            hedge_margin_mode=hedge_margin_mode,
+            require_explicit_hedge_margin_mode=True,
             account_spot_qty=account_spot_qty,
             account_hedge_qty=account_hedge_qty,
             sleeve_spot_qty=sleeve_spot_qty,
@@ -720,6 +828,7 @@ class SmartArbitrageStrategyEngine:
                 "derivatives_symbol": pair.hedge_symbol,
                 "spot_price": spot_price,
                 "derivatives_price": hedge_price,
+                "derivatives_margin_mode": hedge_margin_mode,
                 "basis_bps": opportunity.basis_bps,
                 "entry_threshold_bps": opportunity.entry_threshold_bps,
                 "exit_threshold_bps": opportunity.exit_threshold_bps,
@@ -849,6 +958,8 @@ class SmartArbitrageStrategyEngine:
         entry_threshold: Decimal,
         exit_threshold: Decimal,
         execution_mode: str,
+        reference_ts,
+        hedge_margin_mode: str,
         direction: str,
         reason_code: str,
     ) -> ArbitrageOpportunity:
@@ -856,6 +967,9 @@ class SmartArbitrageStrategyEngine:
             settings=self.settings,
             basis_bps=pair_basis_bps,
             execution_mode=execution_mode,
+            reference_ts=reference_ts,
+            hedge_margin_mode=hedge_margin_mode,
+            require_explicit_hedge_margin_mode=True,
             spot_symbol=pair.spot_symbol,
             hedge_symbol=pair.hedge_symbol,
             account_service=self.account_service,
@@ -918,6 +1032,10 @@ class SmartArbitrageStrategyEngine:
         if opening_pairs:
             return self._parallel_safe_candidates(candidates=opening_pairs, existing=[], limit=max_pairs)
         return ranked[:1]
+
+    def _resolved_hedge_margin_mode(self, engine_input: StrategyEngineInput) -> str | None:
+        normalized = str(getattr(engine_input.directional_target, "margin_mode", "") or "").strip()
+        return normalized or None
 
     def _aggregate_candidates(
         self,
@@ -1336,10 +1454,12 @@ class SmartArbitrageStrategyEngine:
         *,
         engine_input: StrategyEngineInput,
         primary_symbol: str,
+        sleeve_product_scope: str,
+        sleeve_margin_scope: str,
         symbol_scope: tuple[str, ...],
         symbol: str,
-        product_type: str,
-        margin_mode: str,
+        leg_product_type: str,
+        leg_margin_mode: str,
     ) -> Decimal:
         if self.sleeve_inventory_loader is None:
             if symbol == engine_input.context.symbol:
@@ -1349,12 +1469,12 @@ class SmartArbitrageStrategyEngine:
             self.sleeve_inventory_loader.quantity_for_strategy(
                 family="smart_arbitrage",
                 primary_symbol=primary_symbol,
-                product_scope=engine_input.context.product_type,
-                margin_scope=self.settings.margin_mode,
+                product_scope=sleeve_product_scope,
+                margin_scope=sleeve_margin_scope,
                 symbol_scope=symbol_scope,
                 symbol=symbol,
-                product_type=product_type,
-                margin_mode=margin_mode,
+                product_type=leg_product_type,
+                margin_mode=leg_margin_mode,
             )
         )
 

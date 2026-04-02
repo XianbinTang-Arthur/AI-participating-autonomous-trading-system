@@ -3,7 +3,7 @@ from __future__ import annotations
 from threading import Lock
 
 from aats.schemas.common import utc_now
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.schemas.execution import FillEvent, OrderIntent, OrderState, side_from_position_intent
 from aats.storage.execution_fill_repo_v2 import ExecutionFillRepositoryV2
 from aats.storage.execution_order_repo import ExecutionOrderHistoryRepository, ExecutionOrderRepository
 
@@ -196,10 +196,12 @@ class Phase1ExecutionShadowService:
     def intent_from_order_state(order_state: OrderState) -> OrderIntent:
         return OrderIntent(
             intent_id=order_state.intent_id,
+            execution_chain_id=order_state.execution_chain_id,
+            execution_attempt_id=order_state.execution_attempt_id,
             leg_intent_id=order_state.leg_intent_id,
             decision_id=order_state.decision_id,
             symbol=order_state.symbol,
-            side="buy" if order_state.position_intent not in {"open_short", "reduce_short", "close_short"} else "sell",
+            side=side_from_position_intent(order_state.position_intent) or "buy",
             quantity=order_state.requested_qty,
             execution_style=order_state.submission_mode or "shadow",
             order_type="market",
@@ -228,6 +230,8 @@ class Phase1ExecutionShadowService:
     def intent_from_fill(fill: FillEvent) -> OrderIntent:
         return OrderIntent(
             intent_id=fill.intent_id,
+            execution_chain_id=fill.execution_chain_id,
+            execution_attempt_id=fill.execution_attempt_id,
             leg_intent_id=fill.leg_intent_id,
             decision_id=fill.decision_id,
             symbol=fill.symbol,

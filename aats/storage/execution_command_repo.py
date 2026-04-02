@@ -26,6 +26,9 @@ class ExecutionCommandRepository(Protocol):
     def pending_commands(self, *, limit: int, sent_stale_before: datetime | None = None) -> list[dict]:
         ...
 
+    def command_counts(self, *, sent_stale_before: datetime | None = None) -> dict[str, int]:
+        ...
+
     def claim_command(
         self,
         *,

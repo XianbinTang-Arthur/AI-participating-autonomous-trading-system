@@ -1,3 +1,3 @@
-from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
+from __future__ import annotations
 
-__all__ = ["StrategyCoordinatorService"]
+__all__: list[str] = []

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Callable
 
 from aats.schemas.common import new_id
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState
+from aats.schemas.execution import FillEvent, OrderIntent, OrderState, execution_attempt_id_from_components
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
 from aats.services.governance_engine.runtime_layers import EnvironmentCapabilities
 from aats.services.portfolio_service.decimals import to_decimal
@@ -45,11 +45,19 @@ class PaperExecutionAdapter(ExchangeAdapter):
     async def submit(self, intent: OrderIntent) -> tuple[OrderState, list[FillEvent]]:
         now = datetime.now(timezone.utc)
         client_order_id = self.preview_client_order_id(intent) or new_id("clord")
+        execution_attempt_id = execution_attempt_id_from_components(
+            execution_attempt_id=intent.execution_attempt_id,
+            client_order_id=client_order_id,
+            execution_chain_id=intent.execution_chain_id,
+            intent_id=intent.intent_id,
+        )
         exchange_order_id = new_id("paper")
         fill_price = to_decimal(self.price_provider(intent.symbol))
         if self._limit_ioc_expired(intent=intent, execution_price=fill_price):
             state = OrderState(
                 decision_id=intent.decision_id,
+                execution_chain_id=intent.execution_chain_id,
+                execution_attempt_id=execution_attempt_id,
                 intent_id=intent.intent_id,
                 symbol=intent.symbol,
                 client_order_id=client_order_id,
@@ -100,6 +108,8 @@ class PaperExecutionAdapter(ExchangeAdapter):
         if self._slippage_exceeded(intent=intent, execution_price=fill_price):
             state = OrderState(
                 decision_id=intent.decision_id,
+                execution_chain_id=intent.execution_chain_id,
+                execution_attempt_id=execution_attempt_id,
                 intent_id=intent.intent_id,
                 symbol=intent.symbol,
                 client_order_id=client_order_id,
@@ -150,6 +160,8 @@ class PaperExecutionAdapter(ExchangeAdapter):
         fee_amount = intent.quantity * fill_price * (to_decimal(self.taker_fee_bps) / to_decimal(10_000))
         state = OrderState(
             decision_id=intent.decision_id,
+            execution_chain_id=intent.execution_chain_id,
+            execution_attempt_id=execution_attempt_id,
             intent_id=intent.intent_id,
             symbol=intent.symbol,
             client_order_id=client_order_id,
@@ -202,6 +214,8 @@ class PaperExecutionAdapter(ExchangeAdapter):
         fill = FillEvent(
             fill_id=new_id("fill"),
             decision_id=intent.decision_id,
+            execution_chain_id=intent.execution_chain_id,
+            execution_attempt_id=execution_attempt_id,
             intent_id=intent.intent_id,
             client_order_id=client_order_id,
             exchange_order_id=exchange_order_id,
@@ -333,5 +347,6 @@ class PaperExecutionAdapter(ExchangeAdapter):
             "allocationId": intent.allocation_id or "",
             "strategyBundleId": intent.strategy_bundle_id or "",
             "strategyLegRole": intent.strategy_leg_role or "",
+            "executionAttemptId": intent.execution_attempt_id or "",
             "executionStyle": intent.execution_style,
         }

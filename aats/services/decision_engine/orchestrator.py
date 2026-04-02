@@ -11,6 +11,7 @@ from aats.services.ai_service.inference import AIInferenceService
 from aats.services.decision_engine.baseline import BaselineStrategy
 from aats.services.decision_engine.context_builder import DecisionContextBuilder
 from aats.services.decision_engine.target_position import TargetPositionEngine
+from aats.services.strategy_engines.overlay_parent_exposure import overlay_parent_exposure_record
 
 
 class DecisionOrchestrator:
@@ -116,6 +117,7 @@ class DecisionOrchestrator:
                 context=context,
                 baseline=baseline,
                 directional_target=target,
+                ai_assessment=ai_assessment,
             )
             strategy_envelope = await publish_model(
                 bus=self.bus,
@@ -179,13 +181,31 @@ class DecisionOrchestrator:
                 payload_model=shadow_decision,
                 source_component="decision_engine",
             )
-        await publish_model(
+        position_target_envelope = await publish_model(
             bus=self.bus,
             topic=topics.POSITION_TARGETS,
             key=symbol,
             payload_model=target,
             source_component="decision_engine",
         )
+        overlay_parent_record = overlay_parent_exposure_record(
+            decision_id=target.decision_id,
+            product_type=target.product_type,
+            strategy_family=target.strategy_family,
+            strategy_sleeve_id=target.strategy_sleeve_id,
+            allocation_id=target.allocation_id,
+            source_stage="position_target",
+            source_ref=position_target_envelope.event_id,
+            parent_exposure=target.overlay_parent_exposure,
+        )
+        if overlay_parent_record is not None:
+            await publish_model(
+                bus=self.bus,
+                topic=topics.OVERLAY_PARENT_EXPOSURES,
+                key=symbol,
+                payload_model=overlay_parent_record,
+                source_component="decision_engine",
+            )
         if shadow_assessment is not None:
             await self._publish_shadow_evaluation_best_effort(
                 decision_id=context.decision_id,

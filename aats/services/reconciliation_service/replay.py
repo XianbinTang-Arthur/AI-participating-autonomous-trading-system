@@ -11,7 +11,14 @@ from aats.events import topics
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.decision import DecisionContext, DecisionOutcome, PositionTarget
-from aats.schemas.execution import ExecutionPlan, FillEvent, LegExecutionPlan, OrderIntent, OrderState
+from aats.schemas.execution import (
+    ExecutionPlan,
+    FillEvent,
+    LegExecutionPlan,
+    OrderIntent,
+    OrderState,
+    execution_attempt_id_from_components,
+)
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.schemas.market import MarketSnapshot
@@ -789,6 +796,30 @@ class ReplayEngine:
                     f"execution_chain_missing_order_state decision_id={intent.decision_id} intent_id={intent_id}"
                 )
                 continue
+            intent_chain_id = self._effective_execution_chain_id(intent)
+            order_state_chain_id = self._effective_execution_chain_id(order_state)
+            intent_attempt_id = self._effective_execution_attempt_id(intent)
+            order_state_attempt_id = self._effective_execution_attempt_id(order_state)
+            if (
+                intent_chain_id is not None
+                and order_state_chain_id is not None
+                and intent_chain_id != order_state_chain_id
+            ):
+                issues.append(
+                    "execution_chain_order_state_execution_chain_mismatch "
+                    f"intent_id={intent_id} intent_execution_chain_id={intent_chain_id} "
+                    f"order_state_execution_chain_id={order_state_chain_id}"
+                )
+            if (
+                intent_attempt_id is not None
+                and order_state_attempt_id is not None
+                and intent_attempt_id != order_state_attempt_id
+            ):
+                issues.append(
+                    "execution_chain_order_state_execution_attempt_mismatch "
+                    f"intent_id={intent_id} intent_execution_attempt_id={intent_attempt_id} "
+                    f"order_state_execution_attempt_id={order_state_attempt_id}"
+                )
             if order_state.decision_id != intent.decision_id:
                 issues.append(
                     "execution_chain_order_state_decision_mismatch "
@@ -850,6 +881,32 @@ class ReplayEngine:
                     f"fill_id={fill_id} fill_decision_id={fill.decision_id} intent_decision_id={intent.decision_id}"
                 )
             else:
+                intent_chain_id = self._effective_execution_chain_id(intent)
+                fill_chain_id = self._effective_execution_chain_id(fill)
+                intent_attempt_id = self._effective_execution_attempt_id(intent)
+                fill_attempt_id = self._effective_execution_attempt_id(fill)
+                if (
+                    intent_chain_id is not None
+                    and fill_chain_id is not None
+                    and intent_chain_id != fill_chain_id
+                ):
+                    issues.append(
+                        "execution_chain_fill_execution_chain_mismatch "
+                        f"fill_id={fill_id} intent_id={fill.intent_id} "
+                        f"intent_execution_chain_id={intent_chain_id} "
+                        f"fill_execution_chain_id={fill_chain_id}"
+                    )
+                if (
+                    intent_attempt_id is not None
+                    and fill_attempt_id is not None
+                    and intent_attempt_id != fill_attempt_id
+                ):
+                    issues.append(
+                        "execution_chain_fill_execution_attempt_mismatch "
+                        f"fill_id={fill_id} intent_id={fill.intent_id} "
+                        f"intent_execution_attempt_id={intent_attempt_id} "
+                        f"fill_execution_attempt_id={fill_attempt_id}"
+                    )
                 issues.extend(
                     self._execution_semantic_mismatches(
                         left=intent,
@@ -870,6 +927,19 @@ class ReplayEngine:
                     "execution_chain_client_order_mismatch "
                     f"fill_id={fill_id} intent_id={fill.intent_id} "
                     f"fill_client_order_id={fill.client_order_id} order_state_client_order_id={order_state.client_order_id}"
+                )
+            order_state_attempt_id = self._effective_execution_attempt_id(order_state)
+            fill_attempt_id = self._effective_execution_attempt_id(fill)
+            if (
+                order_state_attempt_id is not None
+                and fill_attempt_id is not None
+                and order_state_attempt_id != fill_attempt_id
+            ):
+                issues.append(
+                    "execution_chain_order_state_fill_execution_attempt_mismatch "
+                    f"fill_id={fill_id} intent_id={fill.intent_id} "
+                    f"order_state_execution_attempt_id={order_state_attempt_id} "
+                    f"fill_execution_attempt_id={fill_attempt_id}"
                 )
             if order_state.decision_id != fill.decision_id:
                 issues.append(
@@ -898,6 +968,28 @@ class ReplayEngine:
             for issue in state_machine.validate_path(ordered_states):
                 issues.append(f"execution_chain_invalid_state_transition client_order_id={client_order_id} {issue}")
         return issues
+
+    @staticmethod
+    def _effective_execution_chain_id(item) -> str | None:
+        chain_id = getattr(item, "execution_chain_id", None)
+        if chain_id not in {None, ""}:
+            return str(chain_id)
+        leg_intent_id = getattr(item, "leg_intent_id", None)
+        if leg_intent_id not in {None, ""}:
+            return str(leg_intent_id)
+        intent_id = getattr(item, "intent_id", None)
+        if intent_id not in {None, ""}:
+            return str(intent_id)
+        return None
+
+    @staticmethod
+    def _effective_execution_attempt_id(item) -> str | None:
+        return execution_attempt_id_from_components(
+            execution_attempt_id=getattr(item, "execution_attempt_id", None),
+            client_order_id=getattr(item, "client_order_id", None),
+            execution_chain_id=getattr(item, "execution_chain_id", None),
+            intent_id=getattr(item, "intent_id", None),
+        )
 
     @staticmethod
     def _execution_semantic_mismatches(
@@ -1196,6 +1288,8 @@ class ReplayEngine:
             )
 
             intent_ids: set[str] = set()
+            intent_chain_ids_by_intent_id: dict[str, str] = {}
+            intent_attempt_ids_by_intent_id: dict[str, str] = {}
             for ref in record.order_intent_refs:
                 event = self._validate_ref(
                     issues=issues,
@@ -1210,6 +1304,12 @@ class ReplayEngine:
                     continue
                 intent = OrderIntent.model_validate(event.payload)
                 intent_ids.add(intent.intent_id)
+                chain_id = self._effective_execution_chain_id(intent)
+                attempt_id = self._effective_execution_attempt_id(intent)
+                if chain_id is not None:
+                    intent_chain_ids_by_intent_id[intent.intent_id] = chain_id
+                if attempt_id is not None:
+                    intent_attempt_ids_by_intent_id[intent.intent_id] = attempt_id
 
             order_state_intent_ids: set[str] = set()
             for ref in record.order_state_refs:
@@ -1231,6 +1331,33 @@ class ReplayEngine:
                         "decision_chain_order_state_not_linked_to_audited_intent "
                         f"decision_id={decision_id} intent_id={order_state.intent_id}"
                     )
+                    continue
+                intent_chain_id = intent_chain_ids_by_intent_id.get(order_state.intent_id)
+                order_state_chain_id = self._effective_execution_chain_id(order_state)
+                intent_attempt_id = intent_attempt_ids_by_intent_id.get(order_state.intent_id)
+                order_state_attempt_id = self._effective_execution_attempt_id(order_state)
+                if (
+                    intent_chain_id is not None
+                    and order_state_chain_id is not None
+                    and intent_chain_id != order_state_chain_id
+                ):
+                    issues.append(
+                        "decision_chain_order_state_execution_chain_mismatch "
+                        f"decision_id={decision_id} intent_id={order_state.intent_id} "
+                        f"intent_execution_chain_id={intent_chain_id} "
+                        f"order_state_execution_chain_id={order_state_chain_id}"
+                    )
+                if (
+                    intent_attempt_id is not None
+                    and order_state_attempt_id is not None
+                    and intent_attempt_id != order_state_attempt_id
+                ):
+                    issues.append(
+                        "decision_chain_order_state_execution_attempt_mismatch "
+                        f"decision_id={decision_id} intent_id={order_state.intent_id} "
+                        f"intent_execution_attempt_id={intent_attempt_id} "
+                        f"order_state_execution_attempt_id={order_state_attempt_id}"
+                    )
 
             fill_ids: set[str] = set()
             for ref in record.fill_event_refs:
@@ -1250,6 +1377,33 @@ class ReplayEngine:
                 if fill.intent_id not in intent_ids:
                     issues.append(
                         f"decision_chain_fill_not_linked_to_audited_intent decision_id={decision_id} fill_id={fill.fill_id}"
+                    )
+                    continue
+                intent_chain_id = intent_chain_ids_by_intent_id.get(fill.intent_id)
+                fill_chain_id = self._effective_execution_chain_id(fill)
+                intent_attempt_id = intent_attempt_ids_by_intent_id.get(fill.intent_id)
+                fill_attempt_id = self._effective_execution_attempt_id(fill)
+                if (
+                    intent_chain_id is not None
+                    and fill_chain_id is not None
+                    and intent_chain_id != fill_chain_id
+                ):
+                    issues.append(
+                        "decision_chain_fill_execution_chain_mismatch "
+                        f"decision_id={decision_id} fill_id={fill.fill_id} "
+                        f"intent_execution_chain_id={intent_chain_id} "
+                        f"fill_execution_chain_id={fill_chain_id}"
+                    )
+                if (
+                    intent_attempt_id is not None
+                    and fill_attempt_id is not None
+                    and intent_attempt_id != fill_attempt_id
+                ):
+                    issues.append(
+                        "decision_chain_fill_execution_attempt_mismatch "
+                        f"decision_id={decision_id} fill_id={fill.fill_id} "
+                        f"intent_execution_attempt_id={intent_attempt_id} "
+                        f"fill_execution_attempt_id={fill_attempt_id}"
                     )
                 order_state = order_states_by_intent_id.get(fill.intent_id)
                 if order_state is None:
@@ -1342,6 +1496,37 @@ class ReplayEngine:
                 issues.append(
                     f"decision_chain_outcome_not_finalized decision_id={decision_id}"
                 )
+            independent_family = (
+                (final_outcome is not None and final_outcome.selected_strategy_family == "independent")
+                or (target is not None and target.strategy_family == "independent")
+            )
+            if independent_family:
+                family_summary = (
+                    None
+                    if final_outcome is None
+                    else final_outcome.family_execution_summary
+                ) or (None if target is None else target.family_execution_summary)
+                if family_summary is not None and family_summary.family == "independent":
+                    book_runtime_states = list(family_summary.book_runtime_states or [])
+                    if not book_runtime_states:
+                        if final_outcome is not None and final_outcome.book_runtime_states:
+                            book_runtime_states = list(final_outcome.book_runtime_states)
+                        elif target is not None and target.book_runtime_states:
+                            book_runtime_states = list(target.book_runtime_states)
+                    if not book_runtime_states:
+                        issues.append(
+                            f"decision_chain_independent_book_runtime_states_missing decision_id={decision_id}"
+                        )
+                    else:
+                        legs = {
+                            str(item.leg).strip().lower()
+                            for item in book_runtime_states
+                        }
+                        if not {"long", "short"}.issubset(legs):
+                            issues.append(
+                                "decision_chain_independent_book_runtime_states_incomplete "
+                                f"decision_id={decision_id}"
+                            )
             if risk is not None and (not risk.approved or risk.halt_required) and record.order_intent_refs:
                 issues.append(
                     f"decision_chain_risk_blocked_but_intent_emitted decision_id={decision_id}"

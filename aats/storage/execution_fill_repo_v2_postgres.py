@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import asc, func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
@@ -43,22 +44,13 @@ class PostgresExecutionFillRepositoryV2:
         raw_payload: dict,
     ) -> bool:
         venue_fill_id = raw_payload.get("venue_fill_id")
-        if session.get(ExecutionFillModelV2, fill.fill_id) is not None:
-            return False
-        if venue_fill_id is not None:
-            duplicate = session.scalar(
-                select(ExecutionFillModelV2)
-                .where(ExecutionFillModelV2.source_system == source)
-                .where(ExecutionFillModelV2.venue_fill_id == str(venue_fill_id))
-                .limit(1)
-            )
-            if duplicate is not None:
-                return False
-        session.add(
-            ExecutionFillModelV2(
+        inserted_fill_id = session.scalar(
+            insert(ExecutionFillModelV2)
+            .values(
                 fill_id=fill.fill_id,
                 venue_fill_id=None if venue_fill_id is None else str(venue_fill_id),
                 order_id=order_id,
+                execution_attempt_id=fill.execution_attempt_id,
                 venue_order_id=fill.exchange_order_id,
                 client_order_id=fill.client_order_id,
                 decision_id=fill.decision_id,
@@ -90,8 +82,22 @@ class PostgresExecutionFillRepositoryV2:
                 raw_payload=dump_payload_exact(raw_payload or fill),
                 created_at=fill.created_at,
             )
+            .returning(ExecutionFillModelV2.fill_id)
+            .on_conflict_do_nothing()
         )
-        return True
+        if inserted_fill_id is not None:
+            return True
+        duplicate = session.get(ExecutionFillModelV2, fill.fill_id)
+        if duplicate is None and venue_fill_id is not None:
+            duplicate = session.scalar(
+                select(ExecutionFillModelV2)
+                .where(ExecutionFillModelV2.source_system == source)
+                .where(ExecutionFillModelV2.venue_fill_id == str(venue_fill_id))
+                .limit(1)
+            )
+        if duplicate is not None:
+            return False
+        raise RuntimeError("execution_fill_insert_conflict_without_existing_row")
 
     def get_fill(self, fill_id: str) -> dict | None:
         with self.session_factory() as session:
@@ -152,6 +158,7 @@ def _fill_row_to_dict(row: ExecutionFillModelV2) -> dict:
         "fill_id": row.fill_id,
         "venue_fill_id": row.venue_fill_id,
         "order_id": row.order_id,
+        "execution_attempt_id": row.execution_attempt_id,
         "venue_order_id": row.venue_order_id,
         "client_order_id": row.client_order_id,
         "decision_id": row.decision_id,

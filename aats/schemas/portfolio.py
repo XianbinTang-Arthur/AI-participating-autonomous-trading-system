@@ -154,6 +154,8 @@ class PortfolioBalanceDelta(SchemaBase):
 class FillOutcomeRecord(SchemaBase):
     fill_id: str
     decision_id: str | None = None
+    execution_chain_id: str | None = None
+    execution_attempt_id: str | None = None
     intent_id: str | None = None
     order_id: str | None = None
     symbol: str
@@ -218,6 +220,8 @@ class FillOutcomeRecord(SchemaBase):
                 **balance_delta.model_dump(mode="python"),
                 "venue": fill.venue,
                 "side": fill.side,
+                "execution_chain_id": fill.execution_chain_id,
+                "execution_attempt_id": fill.execution_attempt_id,
                 "position_key": position_key,
                 "fill_qty": fill.fill_qty,
                 "fill_price": fill.fill_price,

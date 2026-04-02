@@ -42,6 +42,7 @@ class ExecutionPlanner:
         self,
         *,
         decision_id: str,
+        execution_chain_id: str | None = None,
         symbol: str,
         current_position_qty: Decimal | float,
         target_position_qty: Decimal | float,
@@ -146,6 +147,7 @@ class ExecutionPlanner:
             )
         return ExecutionPlan(
             plan_id=new_id("plan"),
+            execution_chain_id=execution_chain_id,
             decision_id=decision_id,
             symbol=symbol,
             current_position_qty=normalized_current_position_qty,
@@ -250,6 +252,8 @@ class ExecutionPlanner:
         intent_id = new_id("intent")
         return OrderIntent(
             intent_id=intent_id,
+            execution_chain_id=plan.execution_chain_id or intent_id,
+            execution_attempt_id=plan.execution_attempt_id,
             decision_id=plan.decision_id,
             symbol=plan.symbol,
             side=plan.side,
@@ -304,6 +308,7 @@ class ExecutionPlanner:
         self,
         *,
         decision_id: str,
+        execution_chain_id: str | None = None,
         symbol: str,
         side: Literal["buy", "sell"],
         pos_side: Literal["long", "short"],
@@ -339,6 +344,11 @@ class ExecutionPlanner:
         strategy_opportunity_kind: str | None = None,
         strategy_execution_mode: str | None = None,
         strategy_state_phase: str | None = None,
+        position_intent: str | None = None,
+        execution_style_preference: str | None = None,
+        order_type_preference: Literal["market", "limit"] | None = None,
+        time_in_force_preference: str | None = None,
+        limit_offset_bps_preference: Decimal | float | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
     ) -> LegExecutionPlan | None:
         normalized_quantity = to_decimal(quantity)
@@ -354,7 +364,7 @@ class ExecutionPlanner:
         )
         if normalized_quantity <= EPSILON_DECIMAL_12:
             return None
-        position_intent = position_intent_from_leg_intent(
+        resolved_position_intent = position_intent or position_intent_from_leg_intent(
             side=side,
             pos_side=pos_side,
             action=action,
@@ -393,8 +403,23 @@ class ExecutionPlanner:
                 preview=translated_suggestion.translation_preview,
                 max_slippage_tolerance_bps=effective_slippage_tolerance_bps,
             )
+        execution_style, order_type, time_in_force, limit_price = self._apply_explicit_leg_execution_preference(
+            side=side,
+            reference_price=reference_price,
+            max_slippage_tolerance_bps=effective_slippage_tolerance_bps,
+            execution_style=execution_style,
+            order_type=order_type,
+            time_in_force=time_in_force,
+            limit_price=limit_price,
+            execution_style_preference=execution_style_preference,
+            order_type_preference=order_type_preference,
+            time_in_force_preference=time_in_force_preference,
+            limit_offset_bps_preference=limit_offset_bps_preference,
+        )
         return LegExecutionPlan(
             plan_id=new_id("leg_plan"),
+            execution_chain_id=execution_chain_id,
+            execution_attempt_id=None,
             leg_intent_id=new_id("leg_intent"),
             decision_id=decision_id,
             symbol=symbol,
@@ -414,12 +439,12 @@ class ExecutionPlanner:
             td_mode=(td_mode or margin_mode),  # type: ignore[arg-type]
             position_mode="long_short_mode",
             reduce_only_reason=default_reduce_only_reason(
-                position_intent=position_intent,
+                position_intent=resolved_position_intent,
                 leg_action=action,
                 reduce_only=reduce_only,
             ),
             close_only_reason=default_close_only_reason(
-                position_intent=position_intent,
+                position_intent=resolved_position_intent,
                 leg_action=action,
                 close_only=close_only,
             ),
@@ -459,8 +484,57 @@ class ExecutionPlanner:
             margin_mode=margin_mode,  # type: ignore[arg-type]
             exposure_side=self._leg_exposure_side(pos_side=pos_side, action=action),  # type: ignore[arg-type]
             execution_action=execution_action_from_leg_action(action),
-            position_intent=position_intent,
+            position_intent=resolved_position_intent,
             ai_execution_parameter_suggestion=translated_suggestion,
+        )
+
+    def _apply_explicit_leg_execution_preference(
+        self,
+        *,
+        side: str,
+        reference_price: Decimal | float | None,
+        max_slippage_tolerance_bps: int,
+        execution_style: str,
+        order_type: Literal["market", "limit"],
+        time_in_force: str,
+        limit_price: Decimal | None,
+        execution_style_preference: str | None,
+        order_type_preference: Literal["market", "limit"] | None,
+        time_in_force_preference: str | None,
+        limit_offset_bps_preference: Decimal | float | None,
+    ) -> tuple[str, Literal["market", "limit"], str, Decimal | None]:
+        preferred_order_type = None if order_type_preference is None else str(order_type_preference).strip().lower()
+        if preferred_order_type == "market":
+            return (
+                execution_style_preference or "taker",
+                "market",
+                time_in_force_preference or time_in_force,
+                None,
+            )
+        if preferred_order_type != "limit":
+            return execution_style, order_type, time_in_force, limit_price
+        limit_offset_bps = to_decimal(limit_offset_bps_preference or Decimal("0"))
+        if reference_price is None or to_decimal(reference_price) <= Decimal("0") or limit_offset_bps <= Decimal("0"):
+            return execution_style, order_type, time_in_force, limit_price
+        preview = ExecutionParameterTranslationPreview(
+            execution_style=execution_style_preference or "bounded_limit_ioc",
+            order_type="limit",
+            time_in_force=time_in_force_preference or "IOC",
+            limit_offset_bps=limit_offset_bps,
+        )
+        bounded_limit_price = self._bounded_live_limit_price(
+            side=side,
+            reference_price=reference_price,
+            preview=preview,
+            max_slippage_tolerance_bps=max_slippage_tolerance_bps,
+        )
+        if bounded_limit_price is None:
+            return execution_style, order_type, time_in_force, limit_price
+        return (
+            preview.execution_style,
+            "limit",
+            preview.time_in_force,
+            bounded_limit_price,
         )
 
     def build_leg_intent(self, *, plan: LegExecutionPlan) -> LegOrderIntent | None:
@@ -468,6 +542,8 @@ class ExecutionPlanner:
             return None
         return LegOrderIntent(
             leg_intent_id=plan.leg_intent_id,
+            execution_chain_id=plan.execution_chain_id or plan.leg_intent_id,
+            execution_attempt_id=plan.execution_attempt_id,
             decision_id=plan.decision_id,
             symbol=plan.symbol,
             side=plan.side,
@@ -513,6 +589,7 @@ class ExecutionPlanner:
             target_leverage=plan.target_leverage,
             margin_mode=plan.margin_mode,
             exposure_side=plan.exposure_side,
+            position_intent=plan.position_intent,
             ai_execution_parameter_suggestion=plan.ai_execution_parameter_suggestion,
         )
 
@@ -596,7 +673,7 @@ class ExecutionPlanner:
         target_qty = to_decimal(target_position_qty)
         if current_qty > EPSILON_DECIMAL_12:
             if target_qty > current_qty:
-                return "open_long"
+                return "scale_in_long"
             if target_qty > EPSILON_DECIMAL_12:
                 return "reduce_long"
             if target_qty < -EPSILON_DECIMAL_12:
@@ -604,7 +681,7 @@ class ExecutionPlanner:
             return "close_long"
         if current_qty < -EPSILON_DECIMAL_12:
             if target_qty < current_qty:
-                return "open_short"
+                return "scale_in_short"
             if target_qty < -EPSILON_DECIMAL_12:
                 return "reduce_short"
             if target_qty > EPSILON_DECIMAL_12:

@@ -60,6 +60,9 @@ class EventStore(Protocol):
     def recent_by_topic(self, topic: str, *, limit: int) -> list[EventEnvelope]:
         ...
 
+    def recent_by_topic_and_key(self, topic: str, *, key: str, limit: int) -> list[EventEnvelope]:
+        ...
+
     def by_topic_scoped(
         self,
         topic: str,

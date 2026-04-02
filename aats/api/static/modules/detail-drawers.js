@@ -10,9 +10,26 @@ import {
   listOrDash,
   rawJson,
 } from "./formatters.js";
-import { localizeError, readableState } from "./terms.js";
+import {
+  localizeError,
+  readableBookExpectancySummary,
+  readableBookRuntimeStateSummary,
+  readableIndependentAdaptiveMeta,
+  readableIndependentAdaptiveSummary,
+  readableExpectedVsRealizedMeta,
+  readableExpectedVsRealizedSummary,
+  readableFamilyExecutionDirection,
+  readableFamilyExecutionSummary,
+  readableOverlayParentLegQuantitySummary,
+  readableOverlayParentPostmortemMeta,
+  readableOverlayParentSignalSummary,
+  readableIndependentTransitionExceptionMeta,
+  readableIndependentTransitionExceptionSummary,
+  readableState,
+} from "./terms.js";
 import {
   decisionDrawerRows,
+  fillFeeText,
   fillDrawerRows,
   fillSceneSummary,
   orderDrawerRows,
@@ -35,6 +52,12 @@ export function buildDecisionDrawer(detail) {
   const aiExecutionSuggestion = detail.ai_execution_suggestion || null;
   const decisionOutcome = detail.decision_outcome || null;
   const hedgeModeAudit = detail.hedge_mode_audit || null;
+  const overlayParentPostmortem =
+    aiDecisionAudit?.overlay_parent_exposure_summary
+    || hedgeModeAudit?.overlay?.overlay_parent_exposure_summary
+    || aiDecisionAudit?.overlay_parent_exposure
+    || hedgeModeAudit?.overlay?.overlay_parent_exposure
+    || null;
 
   return {
     eyebrow: "决策链详情",
@@ -77,6 +100,12 @@ export function buildDecisionDrawer(detail) {
         ? surfaceCard({
             title: "Overlay 审计",
             content: kvList(decisionOverlayAuditRows(hedgeModeAudit.overlay)),
+          })
+        : "",
+      overlayParentPostmortem && Object.keys(overlayParentPostmortem).length
+        ? surfaceCard({
+            title: "父腿暴露复盘",
+            content: kvList(decisionOverlayParentPostmortemRows(overlayParentPostmortem)),
           })
         : "",
       hedgeModeAudit?.leg_orders?.total_count
@@ -127,7 +156,7 @@ export function buildOrderDrawer(detail) {
               fills.map((fill) => [
                 fill.fill_id || "成交编号待同步",
                 `${formatNumber(fill.fill_qty)} @ ${formatNumber(fill.fill_price)}`,
-                `${readableState(fill.side)} | 手续费 ${formatNumber(fill.fee_amount)} ${fill.fee_currency || ""}`,
+                `${readableState(fill.side)} | ${fillFeeText(fill)}`,
               ]),
             )
           : emptyState("这笔委托暂时还没有对应成交。"),
@@ -212,7 +241,7 @@ function decisionEconomicRows(aiEconomic, decisionOutcome) {
   return [
     ["这轮值不值得让 AI 直接接管", booleanWord(aiEconomic.economically_actionable), `最低净优势要求 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
     ["本轮预估边际", `${formatNumber(aiEconomic.estimated_edge_bps ?? 0, 2)} 个基点`, `成本 ${formatNumber(aiEconomic.estimated_cost_bps ?? 0, 2)} / 净优势 ${formatNumber(aiEconomic.estimated_net_edge_bps ?? 0, 2)} 个基点`],
-    ["目标动作预估边际", `${formatNumber(aiEconomic.target_expected_signal_edge_bps ?? 0, 2)} 个基点`, `成本 ${formatNumber(aiEconomic.target_expected_cost_bps ?? 0, 2)} / 净优势 ${formatNumber(aiEconomic.target_expected_net_edge_bps ?? 0, 2)} 个基点`],
+    ["目标动作预估边际", `${formatNumber(aiEconomic.target_expected_signal_edge_bps ?? 0, 2)} 个基点`, targetExpectancyDisciplineSummary(aiEconomic)],
     ["最终门槛", `${formatNumber(aiEconomic.required_total_edge_bps ?? 0, 2)} 个基点`, `噪声缓冲 ${formatNumber(aiEconomic.noise_buffer_bps ?? 0, 2)} / 最低净优势 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
     ["这轮最终采用谁的结论", decisionSourceLabel(decisionOutcome?.decision_source), decisionSourceNarrative(decisionOutcome)],
     ["行情和账户状态", `行情快照 ${booleanWord(aiEconomic.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiEconomic.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiEconomic.safe_to_trade)} / ${drawerText(aiEconomic.execution_condition, "当前没有额外执行条件")}`],
@@ -221,10 +250,68 @@ function decisionEconomicRows(aiEconomic, decisionOutcome) {
   ];
 }
 
+function targetExpectancyDisciplineSummary(aiEconomic = {}) {
+  const parts = [
+    `成本 ${formatNumber(aiEconomic.target_expected_cost_bps ?? 0, 2)} / 净优势 ${formatNumber(aiEconomic.target_expected_net_edge_bps ?? 0, 2)} 个基点`,
+  ];
+  if (aiEconomic.target_required_safe_net_edge_bps !== undefined && aiEconomic.target_required_safe_net_edge_bps !== null) {
+    parts.push(`安全净边际 ${formatNumber(aiEconomic.target_required_safe_net_edge_bps, 2)} 个基点`);
+  }
+  if (
+    aiEconomic.target_max_acceptable_cost_bps !== undefined
+    && aiEconomic.target_max_acceptable_cost_bps !== null
+    && Number(aiEconomic.target_max_acceptable_cost_bps) > 0
+  ) {
+    parts.push(`成本上限 ${formatNumber(aiEconomic.target_max_acceptable_cost_bps, 2)} 个基点`);
+  }
+  if (aiEconomic.target_weak_edge_execution_mode) {
+    parts.push(`弱边际 ${readableState(aiEconomic.target_weak_edge_execution_mode, aiEconomic.target_weak_edge_execution_mode)}`);
+  }
+  if (aiEconomic.target_weak_edge_report_only === true) {
+    parts.push("本轮只保留报告");
+  }
+  if (aiEconomic.target_passive_first_required === true) {
+    parts.push("要求被动优先");
+  }
+  if (aiEconomic.target_book_action) {
+    parts.push(`腿动作 ${readableState(aiEconomic.target_book_action, aiEconomic.target_book_action)}`);
+  }
+  if (aiEconomic.target_close_reason) {
+    parts.push(`退出原因 ${localizeError(aiEconomic.target_close_reason, aiEconomic.target_close_reason)}`);
+  }
+  if (aiEconomic.target_policy_reason) {
+    parts.push(`执行策略 ${readableState(aiEconomic.target_policy_reason, aiEconomic.target_policy_reason)}`);
+  }
+  if (aiEconomic.target_execution_policy_urgency) {
+    parts.push(`优先级 ${readableState(aiEconomic.target_execution_policy_urgency, aiEconomic.target_execution_policy_urgency)}`);
+  }
+  if (
+    aiEconomic.target_execution_style_preference
+    || aiEconomic.target_order_type_preference
+    || aiEconomic.target_time_in_force_preference
+  ) {
+    const executionParts = [
+      aiEconomic.target_execution_style_preference ? readableState(aiEconomic.target_execution_style_preference, aiEconomic.target_execution_style_preference) : null,
+      aiEconomic.target_order_type_preference ? readableState(aiEconomic.target_order_type_preference, aiEconomic.target_order_type_preference) : null,
+      aiEconomic.target_time_in_force_preference ? readableState(aiEconomic.target_time_in_force_preference, aiEconomic.target_time_in_force_preference) : null,
+    ].filter(Boolean);
+    if (executionParts.length) {
+      parts.push(`执行偏好 ${executionParts.join(" / ")}`);
+    }
+  }
+  return parts.join(" | ");
+}
+
 function decisionAuditRows(aiDecisionAudit, decisionOutcome) {
+  const executionSummary = aiDecisionAudit?.family_execution_summary || decisionOutcome?.family_execution_summary || {};
   return [
     ["当前运行模式与评估方式", `${readableState(aiDecisionAudit.configured_mode || "unknown")} / ${readableState(aiDecisionAudit.assessment_operating_mode || "unknown")}`, drawerText(aiDecisionAudit.provider_name, "当前没有模型服务说明")],
-    ["方向判断对比", `基础策略 ${readableState(aiDecisionAudit.baseline_direction || "unknown")} / AI ${readableState(aiDecisionAudit.ai_direction || "unknown")}`, `最终结论 ${readableState(aiDecisionAudit.final_direction || "unknown")}`],
+    ["方向判断对比", `基础策略 ${readableState(aiDecisionAudit.baseline_direction || "unknown")} / AI ${readableState(aiDecisionAudit.ai_direction || "unknown")}`, `最终结论 ${readableFamilyExecutionDirection(executionSummary, readableState(aiDecisionAudit.final_direction || "unknown"))} / ${readableFamilyExecutionSummary(executionSummary, "当前没有额外执行摘要")}`],
+    ["每条书预期边际", readableBookExpectancySummary(executionSummary, "当前没有每条书的边际拆解"), drawerText(executionSummary?.book_expectancy_summary?.source || executionSummary?.bookExpectancySummary?.source, "当前没有额外来源说明")],
+    ["每条书当前状态", readableBookRuntimeStateSummary(aiDecisionAudit, "当前没有每条书的原生状态"), "按 long / short 账本原生状态对象记录"],
+    ["自适应阈值与仓位因子", readableIndependentAdaptiveSummary(aiDecisionAudit, "当前还没有独立双书自适应摘要"), readableIndependentAdaptiveMeta(aiDecisionAudit, "当前没有额外自适应说明")],
+    ["迁移异常摘要", readableIndependentTransitionExceptionSummary(aiDecisionAudit, "当前没有独立双书迁移异常摘要"), readableIndependentTransitionExceptionMeta(aiDecisionAudit, "当前没有额外迁移异常说明")],
+    ["预期 vs 已实现", readableExpectedVsRealizedSummary(aiDecisionAudit, "当前还没有预期与已实现诊断"), readableExpectedVsRealizedMeta(aiDecisionAudit, "当前没有额外诊断说明")],
     ["这轮最终采用谁的结论", decisionSourceLabel(aiDecisionAudit.decision_source), `${decisionSourceNarrative(decisionOutcome)} / ${decisionAuthorityLabel(aiDecisionAudit.decision_authority)}`],
     ["为什么没有直接采用 AI", drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有额外决策链路阻断项"), drawerListText(aiDecisionAudit.guardrail_flags, "当前没有额外保护规则")],
     ["行情和账户状态", `行情快照 ${booleanWord(aiDecisionAudit.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiDecisionAudit.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiDecisionAudit.safe_to_trade)} / ${drawerText(aiDecisionAudit.execution_condition, "当前没有额外执行条件")}`],
@@ -283,6 +370,7 @@ function decisionHedgeModeRows(hedgeModeAudit) {
 
 function decisionOverlayAuditRows(overlay) {
   const items = Array.isArray(overlay?.items) ? overlay.items : [];
+  const parentSignalSummary = readableOverlayParentSignalSummary(overlay, "");
   return [
     [
       "当前 overlay 模式",
@@ -300,6 +388,11 @@ function decisionOverlayAuditRows(overlay) {
       `long ${formatNumber(overlay?.long_leg_score ?? 0, 2)} / short ${formatNumber(overlay?.short_leg_score ?? 0, 2)}`,
     ],
     [
+      "父腿暴露信号",
+      parentSignalSummary || "当前没有额外父腿信号说明",
+      drawerText(localizeError(overlay?.signal_source), "当前没有额外来源说明"),
+    ],
+    [
       "腿来源与动作",
       items.length
         ? items
@@ -313,6 +406,21 @@ function decisionOverlayAuditRows(overlay) {
           .map((item) => `目标 ${drawerText(item.target_position_qty, "0")} / Δ ${drawerText(item.delta_position_qty, "0")} / 原因 ${drawerListText((item.trigger_reason_codes || []).map(localizeError), "当前没有触发原因")}`)
           .join(" / ")
         : "当前没有额外腿级触发说明",
+    ],
+  ];
+}
+
+function decisionOverlayParentPostmortemRows(summary) {
+  return [
+    [
+      "父腿阶段",
+      readableOverlayParentSignalSummary(summary, "当前没有额外父腿阶段说明"),
+      readableOverlayParentPostmortemMeta(summary, "当前没有额外父腿契约说明"),
+    ],
+    [
+      "双腿数量拆解",
+      readableOverlayParentLegQuantitySummary(summary, "当前没有父腿多空数量拆解"),
+      `来源 ${drawerText(localizeError(summary?.signal_source), "当前没有额外来源说明")}`,
     ],
   ];
 }
@@ -532,5 +640,5 @@ function describeDecisionIntent(detail) {
   if (rawIntent === "hold" && currentQty === 0 && targetQty === 0 && openOrders.length === 0) {
     return "继续观望";
   }
-  return readableState(rawIntent);
+  return readableFamilyExecutionSummary(target, readableState(rawIntent));
 }

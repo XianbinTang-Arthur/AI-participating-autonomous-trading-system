@@ -1,7 +1,23 @@
 ﻿import { actionButton, callout, kvList, pill, responsiveTable, statGrid, summaryStrip, surfaceCard } from "../components.js";
 import { localizeList, summarizeLocalizedList } from "../copy.js";
 import { escapeHtml, formatDuration, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
-import { localizeError, readableState } from "../terms.js";
+import {
+  hasFamilyExecutionSummary,
+  localizeError,
+  readableBookExpectancySummary,
+  readableBookRuntimeStateSummary,
+  readableIndependentAdaptiveMeta,
+  readableIndependentAdaptiveSummary,
+  readableExpectedVsRealizedMeta,
+  readableExpectedVsRealizedSummary,
+  readableFamilyExecutionDirection,
+  readableFamilyExecutionMeta,
+  readableFamilyExecutionSummary,
+  readableIndependentTransitionExceptionMeta,
+  readableIndependentTransitionExceptionSummary,
+  readableOverlayParentSignalSummary,
+  readableState,
+} from "../terms.js";
 import { decisionTableHeaders, inferTradeScene } from "../trade-display.js";
 
 export function renderStrategySections(data) {
@@ -30,6 +46,7 @@ export function renderStrategySections(data) {
   const sleeveInventorySummary = strategyAttribution.sleeve_inventory_summary || [];
   const strategyFamilyEnablement = strategyRuntime.family_enablement || {};
   const baseline = latestDecision.baseline_assessment || {};
+  const targetExpectancy = resolvedTargetExpectancyMetrics(latestDecision.position_target || strategyAppliedTarget || {});
   const ai = latestDecision.ai_assessment || {};
   const target = latestDecision.position_target || {};
   const policy = latestDecision.policy_decision || {};
@@ -74,6 +91,46 @@ export function renderStrategySections(data) {
   const displayedTrialReviewActions = trialReviewRecentActions.slice(0, 5);
   const tradeCostConfig = strategyRuntime.configured_parameters?.trade_costs || {};
   const directionalConfig = strategyRuntime.configured_parameters?.directional || {};
+  const independentExpectedVsRealized = strategyRuntime.independent_expected_vs_realized_summary || {};
+  const independentAdaptiveSummary = strategyRuntime.independent_adaptive_summary || {};
+  const independentTransitionExceptionSummary = strategyRuntime.independent_transition_exception_summary || {};
+  const independentAdaptiveCopy = readableIndependentAdaptiveSummary(independentAdaptiveSummary, "");
+  const independentAdaptiveMeta = independentAdaptiveCopy
+    ? readableIndependentAdaptiveMeta(independentAdaptiveSummary, "当前没有额外自适应说明")
+    : "";
+  const independentTransitionExceptionCopy = readableIndependentTransitionExceptionSummary(
+    independentTransitionExceptionSummary,
+    "",
+  );
+  const independentTransitionExceptionMeta = independentTransitionExceptionCopy
+    ? readableIndependentTransitionExceptionMeta(independentTransitionExceptionSummary, "当前没有额外迁移异常说明")
+    : "";
+  const expectedVsRealizedCopy = readableExpectedVsRealizedSummary(independentExpectedVsRealized, "");
+  const expectedVsRealizedMeta = expectedVsRealizedCopy
+    ? readableExpectedVsRealizedMeta(independentExpectedVsRealized, "当前没有额外诊断说明")
+    : "";
+  const coordinatorDiagnostics = [];
+  if (independentAdaptiveCopy) {
+    coordinatorDiagnostics.push([
+      "独立双书自适应阈值",
+      independentAdaptiveCopy,
+      independentAdaptiveMeta,
+    ]);
+  }
+  if (expectedVsRealizedCopy) {
+    coordinatorDiagnostics.push([
+      "独立双书预期 vs 已实现",
+      expectedVsRealizedCopy,
+      expectedVsRealizedMeta,
+    ]);
+  }
+  if (independentTransitionExceptionCopy) {
+    coordinatorDiagnostics.push([
+      "独立双书迁移异常",
+      independentTransitionExceptionCopy,
+      independentTransitionExceptionMeta,
+    ]);
+  }
 
   return {
     strategyHero: surfaceCard({
@@ -162,7 +219,7 @@ export function renderStrategySections(data) {
         ])}
         ${kvList([
           ["本轮结论", strategyNarrative(latestDecision), `${readableState(target.strategy_family || latestDecision.decision_outcome?.selected_strategy_family || "directional")} | ${regimeLabel}`],
-          ["执行约束", listText(target.guardrail_flags, "当前没有额外执行限制"), `预期净优势 ${formatBps(target.expected_net_edge_bps)} | 信号 ${formatBps(target.expected_signal_edge_bps)} | 成本 ${formatBps(target.expected_cost_bps)}`],
+          ["执行约束", listText(target.guardrail_flags, "当前没有额外执行限制"), targetExpectancySummary(targetExpectancy)],
           ["当前保护规则", listText(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
           ["最近执行质量", `${formatNumber(strategyHealth.recent_closed_trade_count, 0)} 笔闭合样本 | 胜率 ${formatRatio(strategyHealth.recent_win_rate)}`, `费用拖累 ${formatRatio(strategyHealth.recent_fee_drag_ratio)} | 来回交易占比 ${formatRatio(strategyHealth.recent_churn_ratio)}`],
         ])}
@@ -188,9 +245,9 @@ export function renderStrategySections(data) {
             tone: "info",
           },
           {
-            label: "最近执行 Bundle",
+            label: "最近执行包",
             value: readableState(strategyRuntimeSummary.latest_bundle_status || "unknown"),
-            meta: latestBundle.bundle_id ? middleEllipsis(latestBundle.bundle_id, 10, 8, "当前没有策略执行 bundle") : "当前没有策略执行 bundle",
+            meta: latestBundle.bundle_id ? middleEllipsis(latestBundle.bundle_id, 10, 8, "当前没有策略执行包") : "当前没有策略执行包",
             tone: strategyRuntimeSummary.latest_bundle_status === "blocked" ? "warning" : "info",
           },
           {
@@ -202,29 +259,35 @@ export function renderStrategySections(data) {
         ])}
         ${kvList([
           ["调度结论", strategyRuntimeSummary.operator_summary || "当前还没有多策略调度快照。", reasonListText(strategyRuntimeSummary.latest_selection_reason_codes, "当前没有额外调度原因说明")],
-          ["当前路由", readableState(strategyRuntimeSummary.latest_selected_route_action || "override_target"), strategyRuntimeSummary.protective_fallback_active ? "当前保留了保护性减仓/退出路径。" : "当前没有触发保护性回退。"],
-          ["Allocator 结论", latestAllocationDecision.operator_summary || "当前还没有 allocator 决策。", reasonListText(latestAllocationDecision.reason_codes, "当前没有 allocator 级原因说明")],
+          ["当前路由", strategyRouteActionLabel(strategyRuntimeSummary.latest_selected_route_action, strategyRuntimeSummary.latest_selected_family_action), strategyRuntimeSummary.protective_fallback_active ? "当前保留了保护性减仓/退出路径。" : "当前没有触发保护性回退。"],
+          ["组合分配结论", latestAllocationDecision.operator_summary || "当前还没有组合分配决策。", reasonListText(latestAllocationDecision.reason_codes, "当前没有额外分配原因说明")],
           [
             "Hedge 保护 / 方向削减",
             `${formatSigned(strategyRuntimeSummary.latest_hedge_protected_notional)} / ${formatSigned(strategyRuntimeSummary.latest_directional_reduced_notional)}`,
-            "前者表示为保护 hedge 结构而保留的名义金额，后者表示 allocator 主动削减的方向暴露。",
+            "前者表示为保护 hedge 结构而保留的名义金额，后者表示组合分配器主动削减的方向暴露。",
           ],
           [
-            "最近 Bundle / 已应用目标",
+            "最近执行包 / 已应用目标",
             `${readableState(latestBundle.status || strategyRuntimeSummary.latest_bundle_status || "unknown")} / ${formatSigned(strategyAppliedTarget.target_position_qty)}`,
-            `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableState(strategyAppliedTarget.position_intent || "hold")}`,
+            `${formatNumber(recentBundles[0]?.legs?.length ?? latestBundle.legs?.length ?? 0, 0, "0")} 条腿 | ${readableFamilyExecutionSummary(strategyAppliedTarget, "保持当前仓位")}${familyExpectancySuffix(strategyAppliedTarget)}`,
           ],
         ])}
         ${renderStrategyCandidateTable(displayedStrategyCandidates, smartArbitrageConfig, { policy, risk })}
         ${renderRecentSleeveIntentTable(recentSleeveIntents.slice(0, 5), { policy, risk })}
+        ${coordinatorDiagnostics.length ? renderExpandableSection("高级诊断：独立双书", kvList(coordinatorDiagnostics), {
+          meta: "默认收起，只在核对阈值和预期偏差时查看",
+        }) : ""}
         ${renderExpandableSection("预算快照", renderAllocatorBudgetSnapshotTable(recentBudgetSnapshots), {
           meta: `${formatNumber(strategyRuntimeSummary.latest_budget_snapshot_count, 0, "0")} 条`,
+          open: true,
         })}
         ${renderExpandableSection("冲突解算", renderAllocatorConflictResolutionTable(recentConflictResolutions), {
           meta: `${formatNumber(strategyRuntimeSummary.latest_conflict_resolution_count, 0, "0")} 条`,
+          open: true,
         })}
         ${renderExpandableSection("净额决策", renderAllocatorNettingDecisionTable(recentNettingDecisions), {
           meta: `${formatNumber(strategyRuntimeSummary.latest_netting_decision_count, 0, "0")} 条`,
+          open: true,
         })}
       `,
     }),
@@ -250,19 +313,19 @@ export function renderStrategySections(data) {
             tone: strategyRuntimeSummary.auto_parallel_enabled ? "positive" : "warning",
           },
           {
-            label: "活跃 Sleeve",
+            label: "活跃子策略",
             value: formatNumber(strategyRuntimeSummary.automation_active_count, 0, "0"),
             meta: "当前在自动预算内正常运行",
             tone: "positive",
           },
           {
-            label: "收缩中的 Sleeve",
+            label: "收缩中的子策略",
             value: formatNumber(strategyRuntimeSummary.automation_contracted_count, 0, "0"),
             meta: "预算已收缩或只保留保护性管理",
             tone: strategyRuntimeSummary.automation_contracted_count ? "warning" : "info",
           },
           {
-            label: "暂停中的 Sleeve",
+            label: "暂停中的子策略",
             value: formatNumber(strategyRuntimeSummary.automation_paused_count, 0, "0"),
             meta: "当前已被系统自动暂停",
             tone: strategyRuntimeSummary.automation_paused_count ? "danger" : "info",
@@ -271,7 +334,7 @@ export function renderStrategySections(data) {
         ${kvList([
           [
             "最新预算权重",
-            Object.keys(strategyRuntimeSummary.latest_approved_sleeve_weights || {}).length ? "allocator 已生成权重" : "当前没有新的预算权重",
+            Object.keys(strategyRuntimeSummary.latest_approved_sleeve_weights || {}).length ? "已生成预算权重" : "当前没有新的预算权重",
             Object.entries(strategyRuntimeSummary.latest_approved_sleeve_weights || {})
               .map(([sleeveId, weight]) => `${sleeveId}: ${formatNumber(weight, 2, "0")}`)
               .join(" | ") || "本轮没有批准新的 sleeve 预算。",
@@ -287,7 +350,7 @@ export function renderStrategySections(data) {
           ],
         ])}
         ${responsiveTable(
-          ["Sleeve", "自动状态", "预算倍率", "权重", "最近净收益"],
+          ["子策略", "自动状态", "预算倍率", "权重", "最近净收益"],
           displayedAutomationDecisions.map((item) => [
             `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
             `<div><strong>${escapeHtml(readableState(item.automation_state || "unknown"))}</strong><div class="table-meta">${escapeHtml(item.operator_summary || "当前没有额外说明")}</div></div>`,
@@ -319,7 +382,7 @@ export function renderStrategySections(data) {
             tone: Number(attributionSummary.combined_net_realized_pnl || 0) >= 0 ? "positive" : "warning",
           },
           {
-            label: "库存最大 Sleeve",
+            label: "库存最大子策略",
             value: attributionSummary.top_inventory_sleeve_id || "当前没有库存",
             meta: attributionSummary.top_inventory_notional == null ? "当前没有库存名义金额" : `名义金额 ${formatSigned(attributionSummary.top_inventory_notional)}`,
             tone: "info",
@@ -333,31 +396,31 @@ export function renderStrategySections(data) {
         ])}
         ${kvList([
           [
-            "主要 Sleeve 收益",
-            sleeveProfitability[0]?.strategy_sleeve_id || "当前没有 sleeve 级收益记录",
+            "主要子策略收益",
+            sleeveProfitability[0]?.strategy_sleeve_id || "当前没有子策略收益记录",
             sleeveProfitability[0] ? `净收益 ${formatSigned(sleeveProfitability[0].combined_net_realized_pnl)} | 记录 ${formatNumber(sleeveProfitability[0].record_count, 0, "0")} 条` : "等第一批 fill / funding fee 归因记录落地后，这里会自动出现。",
           ],
           [
             "库存归属概览",
-            sleeveInventorySummary[0]?.strategy_sleeve_id || "当前没有 open lot",
-            sleeveInventorySummary[0] ? `库存名义金额 ${formatSigned(sleeveInventorySummary[0].inventory_notional)} | ${formatNumber(sleeveInventorySummary[0].open_lot_count, 0, "0")} 个 lot` : "当前没有需要追踪的 sleeve 库存。",
+            sleeveInventorySummary[0]?.strategy_sleeve_id || "当前没有持仓批次",
+            sleeveInventorySummary[0] ? `库存名义金额 ${formatSigned(sleeveInventorySummary[0].inventory_notional)} | ${formatNumber(sleeveInventorySummary[0].open_lot_count, 0, "0")} 个持仓批次` : "当前没有需要追踪的子策略库存。",
           ],
           [
-            "Bundle 归因",
+            "执行包归因",
             formatNumber((strategyAttribution.profitability_by_strategy_bundle || []).length, 0, "0"),
-            "按 allocation / bundle 的收益归因已经进入组合报表，可用于排查多腿执行后的收益归属。",
+            "按 allocation / 执行包 的收益归因已经进入组合报表，可用于排查多腿执行后的收益归属。",
           ],
         ])}
         ${responsiveTable(
-          ["Sleeve", "净收益", "资金费", "库存变化", "库存名义金额"],
+          ["子策略", "净收益", "资金费", "库存变化", "库存名义金额"],
           displayedSleeveProfitability.map((item) => {
             const inventory = sleeveInventorySummary.find((row) => row.strategy_sleeve_id === item.strategy_sleeve_id) || {};
             return [
               `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml((item.families || []).join(" / ") || "当前没有家族标签")}</div></div>`,
               `<div><strong>${formatSigned(item.combined_net_realized_pnl)}</strong><div class="table-meta">实现 ${formatSigned(item.realized_pnl)}</div></div>`,
-              `<div><strong>${formatSigned(item.funding_fee_amount)}</strong><div class="table-meta">费用 ${formatSigned(item.fee_amount)}</div></div>`,
+              `<div><strong>${formatSigned(item.funding_fee_amount)}</strong><div class="table-meta">费用 ${formatRawFeeImpact(item.fee_amount)}</div></div>`,
               `<div><strong>${formatSigned(item.inventory_move_qty)}</strong><div class="table-meta">${formatNumber(item.record_count, 0, "0")} 条记录</div></div>`,
-              `<div><strong>${formatSigned(inventory.inventory_notional)}</strong><div class="table-meta">${formatNumber(inventory.open_lot_count, 0, "0")} 个 open lot</div></div>`,
+              `<div><strong>${formatSigned(inventory.inventory_notional)}</strong><div class="table-meta">${formatNumber(inventory.open_lot_count, 0, "0")} 个持仓批次</div></div>`,
             ];
           }),
           "当前还没有可展示的 sleeve 归因记录。"
@@ -450,9 +513,11 @@ export function renderStrategySections(data) {
         ])}
         ${renderExpandableSection("最近观察周期", renderForwardValidationPeriods(displayedForwardPeriods), {
           meta: `${formatNumber(displayedForwardPeriods.length, 0, "0")} 个周期`,
+          open: true,
         })}
         ${renderExpandableSection("最近处理记录", renderTrialReviewHistory(displayedTrialReviewActions), {
           meta: `${formatNumber(displayedTrialReviewActions.length, 0, "0")} 条`,
+          open: true,
         })}
       `,
     }),
@@ -505,13 +570,13 @@ export function renderStrategyView(data) {
     data?.strategyRuntime?.configured_parameters?.smart_arbitrage || {}
   ).length > 0;
   const referenceCards = [
-    `<div class="span-6">${sections.strategyTradeCosts}</div>`,
-    `<div class="span-6">${sections.strategyDirectionalConfig}</div>`,
+    `<div class="span-12">${sections.strategyTradeCosts}</div>`,
+    `<div class="span-12">${sections.strategyDirectionalConfig}</div>`,
   ];
   if (hasSmartArbitrageReference) {
     referenceCards.push(
-      `<div class="span-7">${sections.strategySmartArbitrageConfig}</div>`,
-      `<div class="span-5">${sections.strategySmartArbitrageCost}</div>`
+      `<div class="span-12">${sections.strategySmartArbitrageConfig}</div>`,
+      `<div class="span-12">${sections.strategySmartArbitrageCost}</div>`
     );
   }
   return `
@@ -720,7 +785,7 @@ function renderDirectionalShortConfigCard(config = {}, latestDecision = {}, deci
           config?.short_reversal_alpha_min,
           config?.short_reversal_confidence_min
         ),
-        meta: `当前执行 ${escapeHtml(readableState(target?.position_intent || "hold"))}`,
+        meta: `当前执行 ${escapeHtml(readableFamilyExecutionSummary(target, "保持当前仓位"))}`,
         tone: shortBiasEnabled ? "info" : "warning",
       }
       : {
@@ -1095,6 +1160,18 @@ function directionalShortConfigRows(config = {}) {
       `机会腿仍受独立比例、最小持有和冷却约束；同时还会额外受费耗上限 ${formatRatio(config?.hedge_opportunistic_max_fee_drag_ratio)} / churn 上限 ${formatRatio(config?.hedge_opportunistic_max_churn_ratio)} 约束。`,
     ],
     [
+      "strategy_hedge_opportunistic_min_safe_net_edge_bps / strategy_hedge_opportunistic_expected_slippage_buffer_bps / strategy_hedge_opportunistic_expected_execution_buffer_bps",
+      `${formatNumber(config?.hedge_opportunistic_min_safe_net_edge_bps, 2, "待确认")} / ${formatNumber(config?.hedge_opportunistic_expected_slippage_buffer_bps, 2, "待确认")} / ${formatNumber(config?.hedge_opportunistic_expected_execution_buffer_bps, 2, "待确认")}`,
+      "机会腿净边际安全垫 / 滑点缓冲 / 执行缓冲",
+      "机会腿现在也会先检查预期净边际是否覆盖安全净边际、预估滑点与执行缓冲，而不是只看机会分本身。",
+    ],
+    [
+      "strategy_hedge_opportunistic_weak_edge_execution_mode / strategy_hedge_opportunistic_max_acceptable_cost_bps / strategy_hedge_opportunistic_passive_first_enabled",
+      `${String(config?.hedge_opportunistic_weak_edge_execution_mode || "待确认")} / ${formatNumber(config?.hedge_opportunistic_max_acceptable_cost_bps, 2, "待确认")} / ${config?.hedge_opportunistic_passive_first_enabled ? "true" : "false"}`,
+      "机会腿弱边际执行 / 成本上限 / 被动优先",
+      "当机会腿边际偏弱时，系统会根据这组约束决定是直接阻止、仅保留报告，还是要求 planner 优先走更保守的被动执行。",
+    ],
+    [
       "strategy_hedge_independent_enabled",
       config?.hedge_independent_enabled ? "true" : "false",
       "独立双书总开关",
@@ -1113,6 +1190,12 @@ function directionalShortConfigRows(config = {}) {
       "只有当某一边自己的双书分继续抬高时，系统才会独立放大该腿。",
     ],
     [
+      "strategy_hedge_independent_long_close_threshold / strategy_hedge_independent_short_close_threshold",
+      `${formatNumber(config?.hedge_independent_long_close_threshold, 2, "待确认")} / ${formatNumber(config?.hedge_independent_short_close_threshold, 2, "待确认")}`,
+      "双书收回阈值",
+      "只有当对应 book 的双书分回落到 close 阈值下方后，系统才会考虑独立收回该腿。",
+    ],
+    [
       "strategy_hedge_independent_long_min_hold_seconds / strategy_hedge_independent_short_min_hold_seconds / strategy_hedge_independent_rebalance_cooldown_seconds",
       `${formatDuration(config?.hedge_independent_long_min_hold_seconds, "待确认")} / ${formatDuration(config?.hedge_independent_short_min_hold_seconds, "待确认")} / ${formatDuration(config?.hedge_independent_rebalance_cooldown_seconds, "待确认")}`,
       "双书最小持有 / 重平衡冷却",
@@ -1123,6 +1206,60 @@ function directionalShortConfigRows(config = {}) {
       config?.hedge_independent_trial_guard_enabled ? "true" : "false",
       "腿级试盘守护",
       "独立双书会按 long / short 两条腿分别评估样本、胜率和近期净收益，不再把一条腿的坏表现直接扩散到另一条腿。",
+    ],
+    [
+      "strategy_hedge_independent_min_confirm_ticks / strategy_hedge_independent_min_score_stability_bps / strategy_hedge_independent_min_liquidity_quality",
+      `${formatNumber(config?.hedge_independent_min_confirm_ticks, 0, "待确认")} / ${formatNumber(config?.hedge_independent_min_score_stability_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_min_liquidity_quality, 2, "待确认")}`,
+      "确认次数 / 稳定性 / 流动性门槛",
+      "独立双书开仓前，会要求当前机会具备足够确认次数、分数稳定性和流动性质量，避免只凭刚过线的一跳噪声直接入场。",
+    ],
+    [
+      "strategy_hedge_independent_require_execution_health_ok",
+      config?.hedge_independent_require_execution_health_ok ? "true" : "false",
+      "执行健康度必须正常",
+      "打开后，long / short 任一腿如果近期执行健康度已经退化，本轮就不会继续新增独立风险暴露。",
+    ],
+    [
+      "strategy_hedge_independent_max_thesis_age_seconds / strategy_hedge_independent_de_risk_net_edge_bps / strategy_hedge_independent_failed_thesis_net_edge_bps",
+      `${formatDuration(config?.hedge_independent_max_thesis_age_seconds, "待确认")} / ${formatNumber(config?.hedge_independent_de_risk_net_edge_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_failed_thesis_net_edge_bps, 2, "待确认")}`,
+      "thesis 时效 / 降风险边际 / 失败边际",
+      "独立双书退出已升级成 thesis-aware state machine，会按 thesis 时效、边际变薄和 thesis 失效三类路径决定 hold、de-risk 或 close。",
+    ],
+    [
+      "strategy_hedge_independent_execution_health_de_risk_enabled / strategy_hedge_independent_liquidity_de_risk_enabled",
+      `${config?.hedge_independent_execution_health_de_risk_enabled ? "true" : "false"} / ${config?.hedge_independent_liquidity_de_risk_enabled ? "true" : "false"}`,
+      "执行健康 / 流动性降风险开关",
+      "打开后，执行健康度或流动性一旦恶化，独立双书会优先降风险，而不是继续维持原始风险暴露。",
+    ],
+    [
+      "strategy_hedge_independent_min_safe_net_edge_bps / strategy_hedge_independent_expected_slippage_buffer_bps / strategy_hedge_independent_expected_execution_buffer_bps",
+      `${formatNumber(config?.hedge_independent_min_safe_net_edge_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_expected_slippage_buffer_bps, 2, "待确认")} / ${formatNumber(config?.hedge_independent_expected_execution_buffer_bps, 2, "待确认")}`,
+      "净边际安全垫 / 滑点缓冲 / 执行缓冲",
+      "独立双书会先要求预期净边际覆盖安全净边际、预估滑点和执行缓冲，再决定是否允许开腿。",
+    ],
+    [
+      "strategy_hedge_independent_weak_edge_execution_mode / strategy_hedge_independent_max_acceptable_cost_bps / strategy_hedge_independent_passive_first_enabled",
+      `${String(config?.hedge_independent_weak_edge_execution_mode || "待确认")} / ${formatNumber(config?.hedge_independent_max_acceptable_cost_bps, 2, "待确认")} / ${config?.hedge_independent_passive_first_enabled ? "true" : "false"}`,
+      "弱边际执行 / 成本上限 / 被动优先",
+      "当双书边际偏弱时，系统会根据这组约束决定是否只做报告、限制可接受成本，并优先尝试更保守的被动执行。",
+    ],
+    [
+      "strategy_hedge_independent_entry_execution_mode / strategy_hedge_independent_scale_in_execution_mode / strategy_hedge_independent_de_risk_execution_mode / strategy_hedge_independent_close_failed_thesis_execution_mode / strategy_hedge_independent_close_stale_execution_mode",
+      `${String(config?.hedge_independent_entry_execution_mode || "待确认")} / ${String(config?.hedge_independent_scale_in_execution_mode || "待确认")} / ${String(config?.hedge_independent_de_risk_execution_mode || "待确认")} / ${String(config?.hedge_independent_close_failed_thesis_execution_mode || "待确认")} / ${String(config?.hedge_independent_close_stale_execution_mode || "待确认")}`,
+      "开仓 / 加仓 / 降风险 / thesis失效 / thesis过期",
+      "这组 execution mode 决定 independent 在不同 book_action 下采用哪一类执行风格，而不是继续共用单一的弱边际分支。",
+    ],
+    [
+      "strategy_hedge_independent_limit_offset_bps_entry / strategy_hedge_independent_limit_offset_bps_scale_in / strategy_hedge_independent_limit_offset_bps_stale_close",
+      `${formatNumber(config?.hedge_independent_limit_offset_bps_entry, 2, "待确认")} / ${formatNumber(config?.hedge_independent_limit_offset_bps_scale_in, 2, "待确认")} / ${formatNumber(config?.hedge_independent_limit_offset_bps_stale_close, 2, "待确认")}`,
+      "开仓 / 加仓 / stale close 限价偏移",
+      "当 independent 使用 bounded-limit IOC 路径时，会按这三组偏移值分别约束 entry、scale-in 和 stale thesis close 的限价保护。",
+    ],
+    [
+      "strategy_hedge_independent_emit_book_level_metrics / strategy_hedge_independent_emit_expected_vs_realized_metrics / strategy_hedge_independent_emit_close_reason_metrics / strategy_hedge_independent_emit_execution_policy_metrics",
+      `${config?.hedge_independent_emit_book_level_metrics ? "true" : "false"} / ${config?.hedge_independent_emit_expected_vs_realized_metrics ? "true" : "false"} / ${config?.hedge_independent_emit_close_reason_metrics ? "true" : "false"} / ${config?.hedge_independent_emit_execution_policy_metrics ? "true" : "false"}`,
+      "book级 / 预期对比 / 退出原因 / 执行策略诊断",
+      "打开后，runtime、决策详情和 replay 校验会持续输出独立双书的预期与已实现对比、退出原因分布和执行策略使用情况。",
     ],
   ];
 }
@@ -1156,6 +1293,10 @@ function directionalHedgeOverlayMeta(config = {}, target = {}, decisionScene = "
   const overlayLabel = directionalOverlayLabel(config, overlay);
   const mode = directionalOverlayMode(config, overlay);
   const enabledInMode = directionalOverlayEnabledInMode(config, overlay);
+  const overlayReasonSummary = Array.isArray(overlay?.reason_codes) && overlay.reason_codes.length
+    ? summarizeLocalizedList(overlay.reason_codes, { limit: 3, suffix: "等状态说明" })
+    : "";
+  const expectancySummary = readableBookExpectancySummary(target, "");
   if (config?.hedge_overlay_enabled !== true) {
     return "当前不会在主腿外额外生成 overlay 腿。";
   }
@@ -1171,11 +1312,15 @@ function directionalHedgeOverlayMeta(config = {}, target = {}, decisionScene = "
   if (Array.isArray(overlay?.blocked_reasons) && overlay.blocked_reasons.length) {
     return summarizeLocalizedList(overlay.blocked_reasons, { limit: 3, suffix: "等阻断原因" });
   }
-  if (Array.isArray(overlay?.reason_codes) && overlay.reason_codes.length) {
-    return summarizeLocalizedList(overlay.reason_codes, { limit: 3, suffix: "等状态说明" });
-  }
   if (mode === "independent") {
-    return `long entry ${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / short entry ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")} / rebalance ${formatDuration(config?.hedge_independent_rebalance_cooldown_seconds, "待确认")}`;
+    const closeReasonLabel = overlay?.close_reason ? readableState(overlay.close_reason) : "";
+    return `long open ${formatNumber(config?.hedge_independent_long_entry_threshold, 2, "待确认")} / short open ${formatNumber(config?.hedge_independent_short_entry_threshold, 2, "待确认")} / long close ${formatNumber(config?.hedge_independent_long_close_threshold, 2, "待确认")} / short close ${formatNumber(config?.hedge_independent_short_close_threshold, 2, "待确认")} / stale ${formatDuration(config?.hedge_independent_max_thesis_age_seconds, "待确认")} / de-risk ${formatNumber(config?.hedge_independent_de_risk_net_edge_bps, 2, "待确认")} bps / failed ${formatNumber(config?.hedge_independent_failed_thesis_net_edge_bps, 2, "待确认")} bps / passive-first ${config?.hedge_independent_passive_first_enabled ? "true" : "false"}${closeReasonLabel ? ` | ${closeReasonLabel}` : ""}${expectancySummary ? ` | ${expectancySummary}` : ""}${overlayReasonSummary ? ` | ${overlayReasonSummary}` : ""}`;
+  }
+  if (mode === "opportunistic") {
+    return `open ${formatNumber(config?.hedge_opportunistic_open_threshold, 2, "待确认")} / close ${formatNumber(config?.hedge_opportunistic_close_threshold, 2, "待确认")} / safe net ${formatNumber(config?.hedge_opportunistic_min_safe_net_edge_bps, 2, "待确认")} bps / max cost ${formatNumber(config?.hedge_opportunistic_max_acceptable_cost_bps, 2, "待确认")} bps / weak-edge ${escapeHtml(readableState(config?.hedge_opportunistic_weak_edge_execution_mode || "待确认"))} / passive-first ${config?.hedge_opportunistic_passive_first_enabled ? "true" : "false"}${expectancySummary ? ` | ${expectancySummary}` : ""}${overlayReasonSummary ? ` | ${overlayReasonSummary}` : ""}`;
+  }
+  if (overlayReasonSummary) {
+    return overlayReasonSummary;
   }
   return `open ${formatNumber(config?.hedge_open_threshold, 2, "待确认")} / close ${formatNumber(config?.hedge_close_threshold, 2, "待确认")} / max ${formatRatio(config?.hedge_max_ratio)}`;
 }
@@ -1223,11 +1368,13 @@ function directionalHedgeOverlayDetail(overlay = {}, config = {}, decisionScene 
   }
   if (mode === "independent") {
     const books = directionalIndependentOverlayBooks(target, overlay);
+    const runtimeStateSummary = readableBookRuntimeStateSummary(target, "");
     return [
       `long book ${formatSigned(books.long?.current_position_qty, 4, "0")}/${formatSigned(books.long?.target_position_qty, 4, "0")}`,
       `short book ${formatSigned(books.short?.current_position_qty, 4, "0")}/${formatSigned(books.short?.target_position_qty, 4, "0")}`,
       `状态 ${escapeHtml(readableState(overlay?.state || "disabled"))}`,
-    ].join(" | ");
+      runtimeStateSummary || null,
+    ].filter(Boolean).join(" | ");
   }
   return [
     `主腿 ${readableState(overlay?.main_leg_signal || "flat")} ${formatSigned(overlay?.main_leg_current_qty)}/${formatSigned(overlay?.main_leg_target_qty)}`,
@@ -1282,6 +1429,10 @@ function directionalHedgeOverlayDetailMeta(overlay = {}, config = {}, target = {
     );
   } else if (overlay?.pressure_score !== undefined && overlay?.pressure_score !== null) {
     reasons.push(`${scoreLabel} ${formatNumber(overlay.pressure_score, 2, "0.00")} | open ${formatNumber(overlay.open_threshold, 2, "0.00")} / close ${formatNumber(overlay.close_threshold, 2, "0.00")}`);
+  }
+  const parentSignalSummary = readableOverlayParentSignalSummary(overlay, "");
+  if (parentSignalSummary) {
+    reasons.push(parentSignalSummary);
   }
   return [...timing, ...reasons].join(" | ") || "当前没有额外的 overlay 状态说明。";
 }
@@ -1440,6 +1591,10 @@ function renderSmartArbitrageCostCard(summary = {}) {
 
 function smartArbitrageConfigPairs(config = {}) {
   return Array.isArray(config?.pair_definitions) ? config.pair_definitions : [];
+}
+
+function smartArbitragePairRegistrySourceLabel(config = {}) {
+  return readableState(config?.pair_registry_source || "settings_fallback");
 }
 
 function smartArbitragePairConfigIssues(pairDefinitions = []) {
@@ -1607,7 +1762,7 @@ function smartArbitrageCommonConfigRows(config = {}, tradeCosts = {}) {
       "smart_arbitrage_pair_definitions",
       "可交易配对定义",
       `${formatNumber(pairDefinitions.length, 0, "0")} 组`,
-      smartArbitragePairSummaryMeta(pairDefinitions),
+      `${smartArbitragePairSummaryMeta(pairDefinitions)} | 配对来源 ${smartArbitragePairRegistrySourceLabel(config)}`,
       pairIssues.length
         ? `当前有 ${formatNumber(pairIssues.length, 0, "0")} 组配对带配置告警，建议先处理完再放量。`
         : derivedPairs.length
@@ -2063,7 +2218,7 @@ function smartArbitrageConfigRisks(config = {}, tradeCosts = {}, familyStatus = 
     risks.push("至少有一组配对与其它 pair 使用相同现货/合约 scope；后续重复定义当前会被忽略。");
   }
   if (Array.isArray(config?.pair_registry_error_codes) && config.pair_registry_error_codes.length) {
-    risks.push(`pair registry 当前还有 ${formatNumber(config.pair_registry_error_codes.length, 0, "0")} 条配置级错误。`);
+    risks.push(`pair registry 当前还有 ${formatNumber(config.pair_registry_error_codes.length, 0, "0")} 条配置级错误；来源：${smartArbitragePairRegistrySourceLabel(config)}。`);
   }
   return risks;
 }
@@ -2314,7 +2469,7 @@ function readableIntent(detail) {
   if (rawIntent === "hold" && currentQty === 0 && targetQty === 0 && openOrders.length === 0) {
     return "继续观望";
   }
-  return readableState(rawIntent);
+  return readableFamilyExecutionSummary(target, readableState(rawIntent));
 }
 
 function readableRecentIntent(item) {
@@ -2324,7 +2479,7 @@ function readableRecentIntent(item) {
   if (rawIntent === "hold" && currentQty === 0 && targetQty === 0) {
     return "继续观望";
   }
-  return readableState(rawIntent);
+  return readableFamilyExecutionSummary(item, readableState(rawIntent));
 }
 
 function inferDecisionScene(latestDecision, recentDecisions) {
@@ -2346,6 +2501,12 @@ function formatBps(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "待确认";
   return `${formatNumber(number, 1)} 个基点`;
+}
+
+function formatRawFeeImpact(value, digits = 4, fallback = "待确认") {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return formatSigned(number === 0 ? 0 : -number, digits, fallback);
 }
 
 function forwardVerdictLabel(value) {
@@ -2403,13 +2564,13 @@ function renderStrategyCandidateTable(candidates, smartArbitrageConfig = {}, con
 
 function renderRecentSleeveIntentTable(items, context = {}) {
   if (!Array.isArray(items) || !items.length) {
-    return `<p class="meta-copy">当前还没有新的 sleeve 意图记录。</p>`;
+    return `<p class="meta-copy">当前还没有新的子策略意图记录。</p>`;
   }
   return responsiveTable(
-    ["最近 Sleeve 意图", "当前状态", "本轮目标", "自动预算", "原因说明"],
+    ["最近子策略意图", "当前状态", "本轮目标", "自动预算", "原因说明"],
     items.map((item) => [
       `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))} | ${escapeHtml(item.symbol || "标的待确认")}</div></div>`,
-      `<div><strong>${escapeHtml(readableState(item.state || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableState(item.route_action || "hold_current"))}</div></div>`,
+      `<div><strong>${escapeHtml(readableState(item.state || "unknown"))}</strong><div class="table-meta">${escapeHtml(strategyRouteActionLabel(item.route_action, item.family_action))}</div></div>`,
       `<div><strong>${escapeHtml(strategySleeveIntentTargetLabel(item))}</strong><div class="table-meta">${escapeHtml(strategySleeveIntentTargetMeta(item, context))}</div></div>`,
       `<div><strong>${item.automatic_enabled ? "自动管理" : "人工冻结"}</strong><div class="table-meta">倍率 ${formatNumber(item.budget_multiplier, 2, "0")} | 权重 ${formatNumber(item.allocator_weight, 2, "0")}</div></div>`,
       `<div><strong>${escapeHtml(strategySleeveIntentReason(item, context))}</strong><div class="table-meta">${escapeHtml(reasonListText(item.control_reason_codes?.length ? item.control_reason_codes : item.reason_codes, "当前没有额外原因"))}</div></div>`,
@@ -2512,12 +2673,32 @@ function strategyCandidateRouteLabel(candidate) {
   if (smartArbitrageBelowEntryThreshold(candidate)) return "本轮不入场";
   if (candidate?.route_action === "advisory_only") return "仅参考，不直接执行";
   if (candidate?.route_action === "hold_current") return "保持当前仓位";
-  if (candidate?.route_action === "override_target") return "接管本轮目标";
+  if (candidate?.route_action === "override_target") {
+    return strategyRouteActionLabel(candidate?.route_action, candidate?.family_action);
+  }
   return readableState(candidate?.route_action || "hold_current");
 }
 
 function strategyCandidateRouteMeta(candidate) {
   return `优先级 ${escapeFallbackReadableState(candidate?.urgency, "low")}`;
+}
+
+function strategyRouteActionLabel(routeAction, familyAction) {
+  const normalizedRoute = String(routeAction || "").trim().toLowerCase();
+  const normalizedFamilyAction = String(familyAction || "").trim().toLowerCase();
+  if (
+    normalizedRoute === "override_target" &&
+    [
+      "close_protection_leg",
+      "close_opportunity_leg",
+      "de_risk_independent_book",
+      "close_failed_thesis_independent_book",
+      "close_stale_thesis_independent_book",
+    ].includes(normalizedFamilyAction)
+  ) {
+    return readableState(normalizedFamilyAction);
+  }
+  return readableState(normalizedRoute || "hold_current");
 }
 
 function strategyCandidateTargetLabel(candidate) {
@@ -2580,13 +2761,13 @@ function strategyCandidateTargetMeta(candidate, context = {}) {
 
 function renderAllocatorBudgetSnapshotTable(items) {
   if (!Array.isArray(items) || !items.length) {
-    return `<p class="meta-copy">当前还没有 allocator 预算快照。</p>`;
+    return `<p class="meta-copy">当前还没有组合预算快照。</p>`;
   }
   return `
     <div class="section-block">
       <h4>预算快照</h4>
       ${responsiveTable(
-        ["Sleeve", "优先级", "请求名义 / 批准名义", "组合预算变化", "原因"],
+        ["子策略", "优先级", "请求名义 / 批准名义", "组合预算变化", "原因"],
         items.map((item) => [
           `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
           `<div><strong>${escapeHtml(readableState(item.hedge_priority_class || "standard"))}</strong><div class="table-meta">rank ${escapeHtml(String(item.priority_rank ?? 0))}</div></div>`,
@@ -2594,7 +2775,7 @@ function renderAllocatorBudgetSnapshotTable(items) {
           `<div><strong>${formatSigned(item.portfolio_requested_notional)} -> ${formatSigned(item.portfolio_approved_notional)}</strong><div class="table-meta">削减 ${formatSigned(item.portfolio_budget_cut_notional)}</div></div>`,
           `<div><strong>${escapeHtml(item.clamped ? "已裁剪" : "未裁剪")}</strong><div class="table-meta">${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</div></div>`,
         ]),
-        "当前没有 allocator 预算快照。"
+        "当前没有组合预算快照。"
       )}
     </div>
   `;
@@ -2608,10 +2789,10 @@ function renderAllocatorConflictResolutionTable(items) {
     <div class="section-block">
       <h4>冲突解算</h4>
       ${responsiveTable(
-        ["类型", "参与 Sleeve", "请求 / 批准 / 阻断", "保护 / 削减", "原因"],
+        ["类型", "参与子策略", "请求 / 批准 / 阻断", "保护 / 削减", "原因"],
         items.map((item) => [
           `<div><strong>${escapeHtml(readableState(item.conflict_type || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableState(item.resolution_action || "unknown"))}</div></div>`,
-          `<div><strong>${escapeHtml((item.input_sleeve_ids || []).join(" | ") || "当前没有输入 sleeve")}</strong><div class="table-meta">批准 ${escapeHtml((item.approved_sleeve_ids || []).join(" | ") || "无")}</div></div>`,
+          `<div><strong>${escapeHtml((item.input_sleeve_ids || []).join(" | ") || "当前没有输入子策略")}</strong><div class="table-meta">批准 ${escapeHtml((item.approved_sleeve_ids || []).join(" | ") || "无")}</div></div>`,
           `<div><strong>${formatSigned(item.gross_requested_qty)} / ${formatSigned(item.net_approved_qty)}</strong><div class="table-meta">阻断 ${formatSigned(item.blocked_qty)}</div></div>`,
           `<div><strong>${formatSigned(item.protected_notional)}</strong><div class="table-meta">方向削减 ${formatSigned(item.reduced_notional)}</div></div>`,
           `<div><strong>${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</strong></div>`,
@@ -2630,10 +2811,10 @@ function renderAllocatorNettingDecisionTable(items) {
     <div class="section-block">
       <h4>净额决策</h4>
       ${responsiveTable(
-        ["标的", "参与 Sleeve", "总买 / 总卖", "净批准数量", "原因"],
+        ["标的", "参与子策略", "总买 / 总卖", "净批准数量", "原因"],
         items.map((item) => [
           `<div><strong>${escapeHtml(item.symbol || "标的待确认")}</strong><div class="table-meta">${escapeHtml(readableState(item.product_type || "unknown"))} | ${escapeHtml(readableState(item.margin_mode || "unknown"))}</div></div>`,
-          `<div><strong>${escapeHtml((item.participating_sleeve_ids || []).join(" | ") || "当前没有参与 sleeve")}</strong></div>`,
+          `<div><strong>${escapeHtml((item.participating_sleeve_ids || []).join(" | ") || "当前没有参与子策略")}</strong></div>`,
           `<div><strong>${formatSigned(item.gross_buy_qty)} / ${formatSigned(item.gross_sell_qty)}</strong></div>`,
           `<div><strong>${formatSigned(item.net_approved_qty)}</strong></div>`,
           `<div><strong>${escapeHtml(reasonListText(item.reason_codes, "当前没有额外原因"))}</strong></div>`,
@@ -2706,6 +2887,7 @@ function strategySleeveIntentTargetMeta(item, context = {}) {
 
 function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
   const legs = candidate?.legs;
+  const expectancySummary = readableBookExpectancySummary(candidate, "");
   if (!Array.isArray(legs) || !legs.length) {
     if (candidate?.family === "smart_arbitrage") {
       if (smartArbitrageBelowEntryThreshold(candidate)) {
@@ -2716,7 +2898,7 @@ function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
       const compact = smartArbitrageCostCompact(candidate);
       return compact ? `${marketAvailability} | ${compact}` : marketAvailability;
     }
-    return "当前没有附带腿说明";
+    return expectancySummary ? `当前没有附带腿说明。 | ${expectancySummary}` : "当前没有附带腿说明";
   }
   const legSummary = legs
     .map((item) => {
@@ -2724,9 +2906,83 @@ function strategyLegSummary(candidate, smartArbitrageConfig = {}) {
       return `${readableState(item.product_type)} ${readableState(item.side)} ${item.symbol || "标的待确认"}${mode}`;
     })
     .join(" | ");
+  if (candidate?.family === "independent" || candidate?.family === "opportunistic") {
+    return expectancySummary ? `${legSummary} | ${expectancySummary}` : legSummary;
+  }
   if (candidate?.family !== "smart_arbitrage") return legSummary;
   const compact = smartArbitrageCostCompact(candidate);
   return compact ? `${legSummary} | ${compact}` : legSummary;
+}
+
+function normalizedBookExpectancySummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (Array.isArray(source.books)) return source;
+  const direct = source.book_expectancy_summary || source.bookExpectancySummary;
+  if (direct && typeof direct === "object") return direct;
+  const familySummary = source.family_execution_summary || source.familyExecutionSummary;
+  if (!familySummary || typeof familySummary !== "object") return {};
+  const nested = familySummary.book_expectancy_summary || familySummary.bookExpectancySummary;
+  return nested && typeof nested === "object" ? nested : {};
+}
+
+function resolvedTargetExpectancyMetrics(source = {}) {
+  const summary = normalizedBookExpectancySummary(source);
+  const books = Array.isArray(summary?.books) ? summary.books : [];
+  if (books.length === 1 && books[0] && typeof books[0] === "object") {
+    return {
+      expected_signal_edge_bps: books[0].expected_signal_edge_bps,
+      expected_cost_bps: books[0].expected_cost_bps,
+      expected_net_edge_bps: books[0].expected_net_edge_bps,
+      required_safe_net_edge_bps: books[0].required_safe_net_edge_bps,
+      max_acceptable_cost_bps: books[0].max_acceptable_cost_bps,
+      weak_edge_execution_mode: books[0].weak_edge_execution_mode,
+      weak_edge_report_only: books[0].weak_edge_report_only,
+      passive_first_required: books[0].passive_first_required,
+    };
+  }
+  return {
+    expected_signal_edge_bps: source?.expected_signal_edge_bps,
+    expected_cost_bps: source?.expected_cost_bps,
+    expected_net_edge_bps: source?.expected_net_edge_bps,
+    required_safe_net_edge_bps: null,
+    max_acceptable_cost_bps: null,
+    weak_edge_execution_mode: null,
+    weak_edge_report_only: null,
+    passive_first_required: null,
+  };
+}
+
+function targetExpectancySummary(targetExpectancy = {}) {
+  const parts = [
+    `预期净优势 ${formatBps(targetExpectancy.expected_net_edge_bps)}`,
+    `信号 ${formatBps(targetExpectancy.expected_signal_edge_bps)}`,
+    `成本 ${formatBps(targetExpectancy.expected_cost_bps)}`,
+  ];
+  if (targetExpectancy.required_safe_net_edge_bps !== undefined && targetExpectancy.required_safe_net_edge_bps !== null) {
+    parts.push(`安全净边际 ${formatBps(targetExpectancy.required_safe_net_edge_bps)}`);
+  }
+  if (
+    targetExpectancy.max_acceptable_cost_bps !== undefined
+    && targetExpectancy.max_acceptable_cost_bps !== null
+    && Number(targetExpectancy.max_acceptable_cost_bps) > 0
+  ) {
+    parts.push(`成本上限 ${formatBps(targetExpectancy.max_acceptable_cost_bps)}`);
+  }
+  if (targetExpectancy.weak_edge_execution_mode) {
+    parts.push(`弱边际 ${readableState(targetExpectancy.weak_edge_execution_mode, targetExpectancy.weak_edge_execution_mode)}`);
+  }
+  if (targetExpectancy.weak_edge_report_only === true) {
+    parts.push("本轮只保留报告");
+  }
+  if (targetExpectancy.passive_first_required === true) {
+    parts.push("要求被动优先");
+  }
+  return parts.join(" | ");
+}
+
+function familyExpectancySuffix(source = {}) {
+  const summary = readableBookExpectancySummary(source, "");
+  return summary ? ` | ${summary}` : "";
 }
 
 function smartArbitrageMarketAvailability(candidate, smartArbitrageConfig = {}) {
@@ -3158,6 +3414,9 @@ function numberMeta(label, value, fallback) {
 }
 
 function isHoldIntent(target = {}) {
+  if (hasFamilyExecutionSummary(target)) {
+    return false;
+  }
   return String(target.position_intent || target.route_action || "").trim().toLowerCase() === "hold";
 }
 
@@ -3183,8 +3442,8 @@ function targetDirectionLabel(target = {}, decisionScene) {
   if (isHoldIntent(target)) {
     return decisionScene === "derivatives" ? "保持当前净仓位" : "保持当前持仓";
   }
-  return readableState(
-    target.target_exposure_side || target.position_intent,
+  return readableFamilyExecutionDirection(
+    target,
     decisionScene === "derivatives" ? "当前没有新的方向调整" : "当前没有新的持仓方向调整",
   );
 }
@@ -3201,10 +3460,10 @@ function targetPositionValue(target = {}, decisionScene) {
 }
 
 function targetPlanMeta(target = {}, decisionScene) {
-  return `${readableState(target.position_intent || "hold")} | ${
+  return `${readableFamilyExecutionSummary(target, "保持当前仓位")} | ${
     decisionScene === "derivatives"
       ? numberMeta("目标杠杆", target.target_leverage, "当前没有目标杠杆")
-      : optionalState(target.target_exposure_side, "当前没有方向补充说明")
+      : readableFamilyExecutionMeta(target, "当前没有方向补充说明")
   }`;
 }
 

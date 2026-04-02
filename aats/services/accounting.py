@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from decimal import Decimal
+from typing import Any
 
 from aats.schemas.execution import FillEvent, OrderObligation
 from aats.services.portfolio_service.decimals import to_decimal
+
+
+class UnsupportedFeeCurrencyError(ValueError):
+    pass
 
 
 def resolve_symbol_currencies(
@@ -115,6 +120,24 @@ def fill_fee_cost_in_quote(
     )
 
 
+def try_fill_fee_cost_in_quote(
+    fill: FillEvent,
+    *,
+    base_currency: str | None = None,
+    quote_currency: str | None = None,
+) -> tuple[Decimal | None, UnsupportedFeeCurrencyError | None]:
+    fee_delta, error = try_fill_fee_delta_in_quote(
+        fill,
+        base_currency=base_currency,
+        quote_currency=quote_currency,
+    )
+    if error is not None:
+        return None, error
+    if fee_delta is None:
+        return None, None
+    return abs(fee_delta), None
+
+
 def fill_fee_delta_in_quote(
     fill: FillEvent,
     *,
@@ -133,8 +156,63 @@ def fill_fee_delta_in_quote(
         base_currency=resolved_base,
         quote_currency=resolved_quote,
     )
-    if fee_currency == resolved_quote or fee_currency is None:
+    if fee_currency == resolved_quote and fee_currency is not None:
         return fee_amount
     if fee_currency == resolved_base:
         return fee_amount * to_decimal(fill.fill_price)
-    return Decimal("0")
+    raise UnsupportedFeeCurrencyError(
+        "unsupported_fill_fee_currency:"
+        f"{fee_currency or 'UNRESOLVED'}:"
+        f"{fill.symbol}:"
+        f"{resolved_base or 'UNKNOWN'}:"
+        f"{resolved_quote or 'UNKNOWN'}"
+    )
+
+
+def try_fill_fee_delta_in_quote(
+    fill: FillEvent,
+    *,
+    base_currency: str | None = None,
+    quote_currency: str | None = None,
+) -> tuple[Decimal | None, UnsupportedFeeCurrencyError | None]:
+    try:
+        return (
+            fill_fee_delta_in_quote(
+                fill,
+                base_currency=base_currency,
+                quote_currency=quote_currency,
+            ),
+            None,
+        )
+    except UnsupportedFeeCurrencyError as exc:
+        return None, exc
+
+
+def unsupported_fee_currency_details(
+    fill: FillEvent,
+    *,
+    base_currency: str | None = None,
+    quote_currency: str | None = None,
+    error: UnsupportedFeeCurrencyError | None = None,
+) -> dict[str, Any]:
+    resolved_base = base_currency
+    resolved_quote = quote_currency
+    if resolved_base is None and resolved_quote is None:
+        resolved_base, resolved_quote = resolve_symbol_currencies(fill.symbol)
+    fee_currency = resolved_fee_currency(
+        fill=fill,
+        base_currency=resolved_base,
+        quote_currency=resolved_quote,
+    )
+    return {
+        "fill_id": fill.fill_id,
+        "symbol": fill.symbol,
+        "fee_currency": fee_currency,
+        "base_currency": resolved_base,
+        "quote_currency": resolved_quote,
+        "venue": fill.venue,
+        "side": fill.side,
+        "fill_price": str(fill.fill_price),
+        "fee_amount": str(fill.fee_amount),
+        "error": None if error is None else str(error),
+    }

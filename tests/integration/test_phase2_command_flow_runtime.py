@@ -69,7 +69,7 @@ class TestPhase2CommandFlowRuntime(unittest.IsolatedAsyncioTestCase):
             state = runtime.execution_repo.get_order_state("clphase2_runtime_1")
             self.assertIsNotNone(state)
             self.assertEqual(state.status, "FILLED")
-            command = runtime.execution_command_repo.get_by_idempotency_key("submit:intent_phase2_runtime_1")
+            command = runtime.execution_command_repo.get_by_idempotency_key("submit:clphase2_runtime_1")
             self.assertIsNotNone(command)
             self.assertEqual(command["state"], "ACKED")
             processor_snapshot = runtime.execution_command_processor.snapshot()

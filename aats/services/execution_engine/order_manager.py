@@ -17,6 +17,7 @@ from aats.schemas.execution import (
     OrderIntent,
     OrderObligation,
     OrderState,
+    execution_attempt_id_from_components,
     leg_intent_from_order_intent,
     order_intent_from_leg_order_intent,
 )
@@ -155,6 +156,11 @@ class OrderManager:
             if callable(preview_client_order_id_fn)
             else None
         ) or intent.idempotency_key or new_id("clord")
+        intent, leg_intent = self._apply_execution_attempt_id(
+            intent=intent,
+            client_order_id=preview_client_order_id,
+            leg_intent=leg_intent,
+        )
         initial_obligation = None
         async with self._reservation_lock:
             if self.execution_repo.has_intent(intent.intent_id):
@@ -186,6 +192,8 @@ class OrderManager:
             except ExecutionReservationError as exc:
                 blocked_state = OrderState(
                     decision_id=intent.decision_id,
+                    execution_chain_id=intent.execution_chain_id,
+                    execution_attempt_id=intent.execution_attempt_id,
                     intent_id=intent.intent_id,
                     symbol=intent.symbol,
                     client_order_id=preview_client_order_id,
@@ -233,6 +241,8 @@ class OrderManager:
                 return
             created_state = OrderState(
                 decision_id=intent.decision_id,
+                execution_chain_id=intent.execution_chain_id,
+                execution_attempt_id=intent.execution_attempt_id,
                 intent_id=intent.intent_id,
                 symbol=intent.symbol,
                 client_order_id=preview_client_order_id,
@@ -280,7 +290,9 @@ class OrderManager:
                 submit_command = {
                     "command_id": new_id("cmd"),
                     "command_type": "submit",
-                    "idempotency_key": self.persistent_order_service.submit_command_idempotency_key(intent.intent_id),
+                    "idempotency_key": self.persistent_order_service.submit_command_idempotency_key(
+                        created_state.client_order_id
+                    ),
                     "payload": self.persistent_order_service.submit_command_payload(
                         intent=intent,
                         client_order_id=created_state.client_order_id,
@@ -345,6 +357,11 @@ class OrderManager:
             if current is not None and current.status not in {"CREATED", "SUBMITTING"}:
                 return current
         resolved_client_order_id = client_order_id or intent.idempotency_key or new_id("clord")
+        intent, leg_intent = self._apply_execution_attempt_id(
+            intent=intent,
+            client_order_id=resolved_client_order_id,
+            leg_intent=leg_intent,
+        )
         intent, leg_intent, blocked_state = self._apply_leg_submit_guards(
             intent=intent,
             client_order_id=resolved_client_order_id,
@@ -374,10 +391,17 @@ class OrderManager:
         leg_intent: LegOrderIntent | None = None,
     ) -> OrderState:
         resolved_client_order_id = client_order_id or intent.idempotency_key or new_id("clord")
+        intent, leg_intent = self._apply_execution_attempt_id(
+            intent=intent,
+            client_order_id=resolved_client_order_id,
+            leg_intent=leg_intent,
+        )
         current = self.execution_repo.get_order_state(resolved_client_order_id)
         if current is None:
             current = OrderState(
                 decision_id=intent.decision_id,
+                execution_chain_id=intent.execution_chain_id,
+                execution_attempt_id=intent.execution_attempt_id,
                 intent_id=intent.intent_id,
                 symbol=intent.symbol,
                 client_order_id=resolved_client_order_id,
@@ -436,6 +460,8 @@ class OrderManager:
         except Exception as exc:
             order_state = OrderState(
                 decision_id=intent.decision_id,
+                execution_chain_id=intent.execution_chain_id,
+                execution_attempt_id=intent.execution_attempt_id,
                 intent_id=intent.intent_id,
                 symbol=intent.symbol,
                 client_order_id=resolved_client_order_id,
@@ -497,7 +523,19 @@ class OrderManager:
 
         for fill in fills:
             if fill.client_order_id != persisted_order_state.client_order_id:
-                fill = fill.model_copy(update={"client_order_id": persisted_order_state.client_order_id})
+                fill = fill.model_copy(
+                    update={
+                        "client_order_id": persisted_order_state.client_order_id,
+                        "execution_attempt_id": (
+                            persisted_order_state.execution_attempt_id
+                            or execution_attempt_id_from_components(
+                                client_order_id=persisted_order_state.client_order_id,
+                                execution_chain_id=persisted_order_state.execution_chain_id,
+                                intent_id=persisted_order_state.intent_id,
+                            )
+                        ),
+                    }
+                )
             await self._persist_fill(fill)
         self._finalize_obligation(order_state=persisted_order_state)
         return persisted_order_state
@@ -811,6 +849,15 @@ class OrderManager:
                 continue
             return OrderState(
                 decision_id=intent.decision_id,
+                execution_chain_id=intent.execution_chain_id,
+                execution_attempt_id=(
+                    intent.execution_attempt_id
+                    or execution_attempt_id_from_components(
+                        client_order_id=intent.idempotency_key,
+                        execution_chain_id=intent.execution_chain_id,
+                        intent_id=intent.intent_id,
+                    )
+                ),
                 intent_id=intent.intent_id,
                 symbol=intent.symbol,
                 client_order_id=intent.idempotency_key or new_id("clord"),
@@ -981,6 +1028,8 @@ class OrderManager:
     ) -> OrderState:
         return OrderState(
             decision_id=intent.decision_id,
+            execution_chain_id=intent.execution_chain_id,
+            execution_attempt_id=intent.execution_attempt_id,
             intent_id=intent.intent_id,
             symbol=intent.symbol,
             client_order_id=client_order_id,
@@ -1032,8 +1081,9 @@ class OrderManager:
             return None
         if order_state.status not in {"CREATED", "SUBMITTING", "CANCEL_PENDING"}:
             return None
-        submit_command = self.persistent_order_service.execution_command_repo.get_by_idempotency_key(
-            f"submit:{order_state.intent_id}"
+        submit_command = self._lookup_submit_command(
+            client_order_id=order_state.client_order_id,
+            intent_id=order_state.intent_id,
         )
         command_state = str(submit_command.get("state") or "").upper() if submit_command is not None else None
         if submit_command is not None and command_state not in {"PENDING", "ACKED", "FAILED"}:
@@ -1062,6 +1112,51 @@ class OrderManager:
         self._finalize_obligation(order_state=persisted)
         return persisted
 
+    def _lookup_submit_command(
+        self,
+        *,
+        client_order_id: str | None,
+        intent_id: str | None,
+    ) -> dict | None:
+        if self.persistent_order_service is None:
+            return None
+        repo = self.persistent_order_service.execution_command_repo
+        for key in self.persistent_order_service.submit_command_lookup_keys(
+            client_order_id=client_order_id,
+            intent_id=intent_id,
+        ):
+            command = repo.get_by_idempotency_key(key)
+            if command is not None:
+                return command
+        return None
+
+    @staticmethod
+    def _apply_execution_attempt_id(
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+        leg_intent: LegOrderIntent | None = None,
+    ) -> tuple[OrderIntent, LegOrderIntent | None]:
+        attempt_id = execution_attempt_id_from_components(
+            execution_attempt_id=intent.execution_attempt_id,
+            client_order_id=client_order_id,
+            execution_chain_id=intent.execution_chain_id,
+            intent_id=intent.intent_id,
+        )
+        updated_intent = (
+            intent
+            if attempt_id == intent.execution_attempt_id
+            else intent.model_copy(update={"execution_attempt_id": attempt_id})
+        )
+        if leg_intent is None:
+            return updated_intent, None
+        updated_leg_intent = (
+            leg_intent
+            if attempt_id == leg_intent.execution_attempt_id
+            else leg_intent.model_copy(update={"execution_attempt_id": attempt_id})
+        )
+        return updated_intent, updated_leg_intent
+
     def _phase2_execution_order_row(self, client_order_id: str) -> dict | None:
         execution_order_repo = getattr(self.persistent_order_service, "execution_order_repo", None)
         if execution_order_repo is not None:
@@ -1089,6 +1184,14 @@ class OrderManager:
             if not isinstance(submission_payload, dict):
                 submission_payload = {}
             payload.setdefault("decision_id", row.get("decision_id"))
+            payload.setdefault(
+                "execution_chain_id",
+                raw_payload.get("execution_chain_id") or submission_payload.get("executionChainId"),
+            )
+            payload.setdefault(
+                "execution_attempt_id",
+                raw_payload.get("execution_attempt_id") or submission_payload.get("executionAttemptId"),
+            )
             payload.setdefault("intent_id", row.get("intent_id"))
             payload.setdefault("symbol", row.get("symbol"))
             payload.setdefault("client_order_id", row.get("client_order_id") or row.get("order_id"))
@@ -1129,6 +1232,15 @@ class OrderManager:
         requested_qty = row.get("requested_qty")
         return OrderState(
             decision_id=str(row.get("decision_id") or ""),
+            execution_chain_id=raw_payload.get("execution_chain_id"),
+            execution_attempt_id=(
+                raw_payload.get("execution_attempt_id")
+                or execution_attempt_id_from_components(
+                    client_order_id=str(row.get("client_order_id") or row.get("order_id") or ""),
+                    execution_chain_id=raw_payload.get("execution_chain_id"),
+                    intent_id=str(row.get("intent_id") or ""),
+                )
+            ),
             intent_id=str(row.get("intent_id") or ""),
             symbol=str(row.get("symbol") or self.settings.default_symbol),
             client_order_id=str(row.get("client_order_id") or row.get("order_id") or ""),

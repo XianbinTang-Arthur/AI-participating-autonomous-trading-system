@@ -2,6 +2,10 @@ import { actionButton, pill, primaryStatusPanel, responsiveTable, summaryStrip, 
 import { localizeList } from "../copy.js";
 import { booleanWord, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import {
+  hasFamilyExecutionSummary,
+  readableFamilyExecutionDirection,
+  readableFamilyExecutionSummary,
+  readableOverlayParentSignalSummary,
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
@@ -46,7 +50,7 @@ export function renderOverviewView(data) {
           ],
           metrics: [
             { label: "最新决策时间", value: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), meta: formatRelativeAge(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
-            { label: "目标仓位变化", value: formatSigned(latestDecision.position_target?.delta_position_qty), meta: readableState(latestDecision.position_target?.target_exposure_side || latestDecision.position_target?.position_intent, "方向待确认"), tone: latestDecision.decision_id ? "info" : "neutral" },
+            { label: "目标仓位变化", value: formatSigned(latestDecision.position_target?.delta_position_qty), meta: readableFamilyExecutionDirection(latestDecision.position_target || {}, "方向待确认"), tone: latestDecision.decision_id ? "info" : "neutral" },
             { label: "策略门禁", value: booleanWord(latestDecision.policy_decision?.execution_allowed), meta: localizeList(latestDecision.policy_decision?.blocker_reasons, "当前没有额外门禁说明"), tone: latestDecision.policy_decision?.execution_allowed ? "positive" : "warning" },
             { label: "风控结论", value: booleanWord(latestDecision.risk_decision?.approved), meta: localizeList(latestDecision.risk_decision?.rejection_reasons, "当前没有额外风控说明"), tone: latestDecision.risk_decision?.approved ? "positive" : "danger" },
           ],
@@ -351,6 +355,11 @@ function buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation
 
 function overviewIntentLabel(detail) {
   const target = detail.position_target || {};
+  if (hasFamilyExecutionSummary(target)) {
+    const summary = readableFamilyExecutionSummary(target, readableState(target.position_intent || "hold"));
+    const parentSignalSummary = readableOverlayParentSignalSummary(target, "");
+    return parentSignalSummary ? `${summary} | ${parentSignalSummary}` : summary;
+  }
   const rawIntent = String(target.position_intent || "hold").toLowerCase();
   const currentQty = Number(target.current_position_qty ?? detail.decision_context?.current_position_qty ?? 0);
   const targetQty = Number(target.target_position_qty ?? 0);
@@ -358,5 +367,5 @@ function overviewIntentLabel(detail) {
   if (rawIntent === "hold" && currentQty === 0 && targetQty === 0 && openOrders.length === 0) {
     return "继续观望";
   }
-  return readableState(rawIntent);
+  return readableFamilyExecutionSummary(target, readableState(rawIntent));
 }

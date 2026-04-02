@@ -61,6 +61,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("renderAIAnalysisView", js_text)
         self.assertIn('aiAnalysis: "/ui/ai-analysis"', js_text)
         self.assertIn("fetchDashboardBundle", js_text)
+        self.assertIn("readableFamilyExecutionSummary", js_text)
         self.assertIn("buildDashboardBundlePath", js_text)
         self.assertIn("syncRefreshDisabledButtons", js_text)
         self.assertIn("currentRefreshInteractivityRoots", js_text)
@@ -283,6 +284,7 @@ console.log(JSON.stringify({
             cwd=repo_root,
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
@@ -322,6 +324,7 @@ const html = renderStrategyView({
         hedge_overlay_enabled: true,
         hedge_overlay_mode: 'opportunistic',
         hedge_overlay_runtime_supported: true,
+        hedge_overlay_enabled_in_mode: true,
         hedge_overlay_mode_ready: true,
         hedge_overlay_effective_enabled: true,
         hedge_open_threshold: 0.58,
@@ -337,6 +340,12 @@ const html = renderStrategyView({
         hedge_opportunistic_rebalance_cooldown_seconds: 90,
         hedge_opportunistic_max_fee_drag_ratio: 0.18,
         hedge_opportunistic_max_churn_ratio: 0.22,
+        hedge_opportunistic_min_safe_net_edge_bps: 3.0,
+        hedge_opportunistic_expected_slippage_buffer_bps: 1.0,
+        hedge_opportunistic_expected_execution_buffer_bps: 2.0,
+        hedge_opportunistic_weak_edge_execution_mode: 'report_only',
+        hedge_opportunistic_max_acceptable_cost_bps: 7.5,
+        hedge_opportunistic_passive_first_enabled: true,
       },
     },
     latest_snapshot: { candidates: [], automation_decisions: [] },
@@ -366,6 +375,24 @@ const html = renderStrategyView({
       current_position_qty: 0.05,
       target_position_qty: 0.03,
       delta_position_qty: -0.02,
+      book_expectancy_summary: {
+        source: 'opportunistic_overlay',
+        books: [
+          {
+            leg: 'short',
+            expected_gross_edge_bps: 8.0,
+            expected_signal_edge_bps: 8.0,
+            expected_slippage_bps: 1.0,
+            expected_cost_bps: 4.0,
+            expected_net_edge_bps: 4.0,
+            required_safe_net_edge_bps: 6.0,
+            max_acceptable_cost_bps: 7.5,
+            weak_edge_execution_mode: 'report_only',
+            weak_edge_report_only: true,
+            passive_first_required: true,
+          },
+        ],
+      },
       guardrail_flags: ['opportunistic_hedge_overlay_active'],
       hedge_overlay_decision: {
         enabled: true,
@@ -401,6 +428,9 @@ const html = renderStrategyView({
 console.log(JSON.stringify({
   hasOverlayLabel: html.includes('机会型对冲'),
   hasOpportunisticThresholds: html.includes('strategy_hedge_opportunistic_open_threshold / strategy_hedge_opportunistic_close_threshold'),
+  hasExecutionDiscipline: html.includes('strategy_hedge_opportunistic_min_safe_net_edge_bps / strategy_hedge_opportunistic_expected_slippage_buffer_bps / strategy_hedge_opportunistic_expected_execution_buffer_bps')
+    && html.includes('strategy_hedge_opportunistic_weak_edge_execution_mode / strategy_hedge_opportunistic_max_acceptable_cost_bps / strategy_hedge_opportunistic_passive_first_enabled'),
+  hasOpportunisticExpectancyMeta: html.includes('safe net 3 bps / max cost 7.5 bps') && html.includes('空腿 毛/成本/净 8.00/4.00/4.00 基点'),
   hasOpportunityLeg: html.includes('机会腿'),
   hasOpportunityReason: html.includes('机会分已经超过开仓阈值'),
   hasModeCopy: html.includes('机会型对冲 有没有介入') || html.includes('机会型对冲 的腿级状态'),
@@ -417,9 +447,299 @@ console.log(JSON.stringify({
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hasOverlayLabel":true', result.stdout)
         self.assertIn('"hasOpportunisticThresholds":true', result.stdout)
+        self.assertIn('"hasExecutionDiscipline":true', result.stdout)
+        self.assertIn('"hasOpportunisticExpectancyMeta":true', result.stdout)
         self.assertIn('"hasOpportunityLeg":true', result.stdout)
         self.assertIn('"hasOpportunityReason":true', result.stdout)
         self.assertIn('"hasModeCopy":true', result.stdout)
+
+    def test_strategy_view_surfaces_overlay_residual_close_summary_copy(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const sharedPayload = {
+  strategyRuntime: {
+    configured_parameters: {
+      directional: {
+        product_type: 'derivatives',
+        hedge_overlay_enabled: true,
+        hedge_overlay_mode: 'protective',
+        hedge_overlay_runtime_supported: true,
+        hedge_overlay_mode_ready: true,
+        hedge_overlay_effective_enabled: true,
+      },
+    },
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {
+      configured_active_family: 'directional',
+      latest_selected_family: 'protective',
+      latest_selected_state: 'closing',
+      latest_selected_route_action: 'override_target',
+      latest_selected_family_action: 'close_protection_leg',
+      latest_bundle_status: 'ready',
+      latest_portfolio_requested_notional: 0,
+      latest_portfolio_approved_notional: 0,
+      latest_portfolio_budget_cut_notional: 0,
+      latest_hedge_protected_notional: 0,
+      latest_directional_reduced_notional: 0,
+      latest_selection_reason_codes: [],
+      protective_fallback_active: false,
+      operator_summary: '',
+    },
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+    smart_arbitrage_cost_summary: {},
+  },
+  latestDecision: {
+    baseline_assessment: {},
+    ai_assessment: {},
+    position_target: {},
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+};
+
+const protectiveHtml = renderStrategyView({
+  ...sharedPayload,
+  strategyRuntime: {
+    ...sharedPayload.strategyRuntime,
+    latest_snapshot: {
+      candidates: [
+        {
+          family: 'protective',
+          state: 'closing',
+          route_action: 'override_target',
+          family_action: 'close_protection_leg',
+          urgency: 'low',
+          symbol: 'BTC-USDT-SWAP',
+          reason_codes: ['protective_overlay_main_signal_inferred_from_inventory'],
+        },
+      ],
+      automation_decisions: [],
+    },
+    summary: {
+      ...sharedPayload.strategyRuntime.summary,
+      operator_summary: '当前选中的策略家族正在收回保护腿。',
+    },
+    latest_allocation_decision: {
+      operator_summary: '当前 allocator v2 已批准收回保护腿的账户级执行目标。',
+      reason_codes: [],
+    },
+    recent_sleeve_intents: [
+      {
+        strategy_sleeve_id: 'protective_close',
+        family: 'protective',
+        symbol: 'BTC-USDT-SWAP',
+        state: 'closing',
+        route_action: 'override_target',
+        family_action: 'close_protection_leg',
+        automatic_enabled: true,
+        budget_multiplier: 1,
+        allocator_weight: 1,
+        reason_codes: ['protective_overlay_main_signal_inferred_from_inventory'],
+        control_reason_codes: [],
+      },
+    ],
+  },
+});
+
+const opportunityHtml = renderStrategyView({
+  ...sharedPayload,
+  strategyRuntime: {
+    ...sharedPayload.strategyRuntime,
+    latest_snapshot: {
+      candidates: [
+        {
+          family: 'opportunistic',
+          state: 'closing',
+          route_action: 'override_target',
+          family_action: 'close_opportunity_leg',
+          urgency: 'low',
+          symbol: 'BTC-USDT-SWAP',
+          reason_codes: ['opportunistic_overlay_main_signal_inferred_from_inventory'],
+        },
+      ],
+      automation_decisions: [],
+    },
+    summary: {
+      ...sharedPayload.strategyRuntime.summary,
+      latest_selected_family: 'opportunistic',
+      latest_selected_family_action: 'close_opportunity_leg',
+      operator_summary: '当前选中的策略家族正在收回机会腿。',
+    },
+    latest_allocation_decision: {
+      operator_summary: '当前 allocator v2 已批准收回机会腿的账户级执行目标。',
+      reason_codes: [],
+    },
+    recent_sleeve_intents: [
+      {
+        strategy_sleeve_id: 'opportunistic_close',
+        family: 'opportunistic',
+        symbol: 'BTC-USDT-SWAP',
+        state: 'closing',
+        route_action: 'override_target',
+        family_action: 'close_opportunity_leg',
+        automatic_enabled: true,
+        budget_multiplier: 1,
+        allocator_weight: 1,
+        reason_codes: ['opportunistic_overlay_main_signal_inferred_from_inventory'],
+        control_reason_codes: [],
+      },
+    ],
+  },
+});
+
+console.log(JSON.stringify({
+  hasProtectiveCloseCopy: protectiveHtml.includes('当前选中的策略家族正在收回保护腿。'),
+  hasProtectiveRouteLabel: (protectiveHtml.match(/收回保护腿/g) || []).length >= 3,
+  hasProtectiveAllocatorCopy: protectiveHtml.includes('当前 allocator v2 已批准收回保护腿的账户级执行目标。'),
+  hasOpportunityCloseCopy: opportunityHtml.includes('当前选中的策略家族正在收回机会腿。'),
+  hasOpportunityRouteLabel: (opportunityHtml.match(/收回机会腿/g) || []).length >= 3,
+  hasOpportunityAllocatorCopy: opportunityHtml.includes('当前 allocator v2 已批准收回机会腿的账户级执行目标。'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasProtectiveCloseCopy":true', result.stdout)
+        self.assertIn('"hasProtectiveRouteLabel":true', result.stdout)
+        self.assertIn('"hasProtectiveAllocatorCopy":true', result.stdout)
+        self.assertIn('"hasOpportunityCloseCopy":true', result.stdout)
+        self.assertIn('"hasOpportunityRouteLabel":true', result.stdout)
+        self.assertIn('"hasOpportunityAllocatorCopy":true', result.stdout)
+
+    def test_strategy_view_surfaces_opportunistic_execution_discipline_summary(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  strategyRuntime: {
+    configured_parameters: {
+      directional: {
+        product_type: 'derivatives',
+        hedge_overlay_enabled: true,
+        hedge_overlay_mode: 'opportunistic',
+        hedge_overlay_runtime_supported: true,
+        hedge_overlay_enabled_in_mode: true,
+        hedge_overlay_mode_ready: true,
+        hedge_overlay_effective_enabled: true,
+        hedge_opportunistic_enabled: true,
+        hedge_opportunistic_open_threshold: 0.62,
+        hedge_opportunistic_close_threshold: 0.46,
+        hedge_opportunistic_min_safe_net_edge_bps: 3.0,
+        hedge_opportunistic_expected_slippage_buffer_bps: 1.0,
+        hedge_opportunistic_expected_execution_buffer_bps: 2.0,
+        hedge_opportunistic_weak_edge_execution_mode: 'report_only',
+        hedge_opportunistic_max_acceptable_cost_bps: 7.5,
+        hedge_opportunistic_passive_first_enabled: true,
+      },
+    },
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {},
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    baseline_assessment: { direction_bias: 'long', composite_alpha_score: 0.28, confidence: 0.84 },
+    ai_assessment: { directional_edge: -0.25 },
+    position_target: {
+      position_intent: 'hold',
+      target_exposure_side: 'long',
+      current_position_qty: 0.05,
+      target_position_qty: 0.03,
+      delta_position_qty: -0.02,
+      book_expectancy_summary: {
+        source: 'opportunistic_overlay',
+        books: [
+          {
+            leg: 'short',
+            expected_gross_edge_bps: 8.0,
+            expected_signal_edge_bps: 8.0,
+            expected_slippage_bps: 1.0,
+            expected_cost_bps: 4.0,
+            expected_net_edge_bps: 4.0,
+            required_safe_net_edge_bps: 6.0,
+            max_acceptable_cost_bps: 7.5,
+            weak_edge_execution_mode: 'report_only',
+            weak_edge_report_only: true,
+            passive_first_required: true,
+          },
+        ],
+      },
+      guardrail_flags: ['opportunistic_hedge_overlay_active'],
+      hedge_overlay_decision: {
+        enabled: true,
+        runtime_supported: true,
+        configured_mode: 'opportunistic',
+        effective_mode: 'opportunistic',
+        active: true,
+        state: 'opening',
+        main_leg_signal: 'long',
+        hedge_leg_signal: 'short',
+        main_leg_current_qty: 0.05,
+        hedge_leg_current_qty: 0.0,
+        main_leg_target_qty: 0.04,
+        hedge_leg_target_qty: 0.014,
+        hedge_ratio: 0.35,
+        max_ratio: 0.35,
+        pressure_score: 0.71,
+        open_threshold: 0.62,
+        close_threshold: 0.46,
+        reason_codes: ['opportunistic_overlay_signal_above_open_threshold'],
+        blocked_reasons: [],
+      },
+    },
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  hasExpectancySummary:
+    html.includes('空腿 毛/成本/净 8.00/4.00/4.00 基点')
+    && html.includes('安全净边际 6.00 基点')
+    && html.includes('弱边际 仅报告')
+    && html.includes('本轮只保留报告')
+    && html.includes('要求被动优先'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasExpectancySummary":true', result.stdout)
 
     def test_strategy_view_surfaces_independent_overlay_config_and_state(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -455,12 +775,37 @@ const html = renderStrategyView({
         hedge_independent_enabled: true,
         hedge_independent_long_entry_threshold: 0.66,
         hedge_independent_short_entry_threshold: 0.64,
+        hedge_independent_long_close_threshold: 0.52,
+        hedge_independent_short_close_threshold: 0.50,
         hedge_independent_long_scale_in_threshold: 0.70,
         hedge_independent_short_scale_in_threshold: 0.68,
         hedge_independent_long_min_hold_seconds: 300,
         hedge_independent_short_min_hold_seconds: 420,
         hedge_independent_rebalance_cooldown_seconds: 120,
         hedge_independent_trial_guard_enabled: true,
+        hedge_independent_min_confirm_ticks: 2,
+        hedge_independent_min_score_stability_bps: 2.0,
+        hedge_independent_min_liquidity_quality: 0.55,
+        hedge_independent_require_execution_health_ok: true,
+        hedge_independent_max_thesis_age_seconds: 1800,
+        hedge_independent_de_risk_net_edge_bps: 2.0,
+        hedge_independent_failed_thesis_net_edge_bps: -1.0,
+        hedge_independent_execution_health_de_risk_enabled: true,
+        hedge_independent_liquidity_de_risk_enabled: true,
+        hedge_independent_min_safe_net_edge_bps: 3.0,
+        hedge_independent_expected_slippage_buffer_bps: 1.0,
+        hedge_independent_expected_execution_buffer_bps: 2.0,
+        hedge_independent_weak_edge_execution_mode: 'report_only',
+        hedge_independent_max_acceptable_cost_bps: 7.5,
+        hedge_independent_passive_first_enabled: true,
+        hedge_independent_entry_execution_mode: 'passive_first',
+        hedge_independent_scale_in_execution_mode: 'bounded_limit',
+        hedge_independent_de_risk_execution_mode: 'bounded_taker',
+        hedge_independent_close_failed_thesis_execution_mode: 'aggressive_bounded_taker',
+        hedge_independent_close_stale_execution_mode: 'bounded_limit',
+        hedge_independent_limit_offset_bps_entry: 1.5,
+        hedge_independent_limit_offset_bps_scale_in: 1.0,
+        hedge_independent_limit_offset_bps_stale_close: 0.8,
       },
     },
     latest_snapshot: { candidates: [], automation_decisions: [] },
@@ -534,6 +879,15 @@ const html = renderStrategyView({
 console.log(JSON.stringify({
   hasIndependentLabel: html.includes('独立双书'),
   hasIndependentThresholds: html.includes('strategy_hedge_independent_long_entry_threshold / strategy_hedge_independent_short_entry_threshold'),
+  hasIndependentCloseThresholds: html.includes('strategy_hedge_independent_long_close_threshold / strategy_hedge_independent_short_close_threshold'),
+  hasIndependentQualityGate: html.includes('strategy_hedge_independent_min_confirm_ticks / strategy_hedge_independent_min_score_stability_bps / strategy_hedge_independent_min_liquidity_quality'),
+  hasIndependentHealthGate: html.includes('strategy_hedge_independent_require_execution_health_ok'),
+  hasIndependentThesisExit: html.includes('strategy_hedge_independent_max_thesis_age_seconds / strategy_hedge_independent_de_risk_net_edge_bps / strategy_hedge_independent_failed_thesis_net_edge_bps'),
+  hasIndependentDeRiskSwitches: html.includes('strategy_hedge_independent_execution_health_de_risk_enabled / strategy_hedge_independent_liquidity_de_risk_enabled'),
+  hasIndependentSafetyBuffers: html.includes('strategy_hedge_independent_min_safe_net_edge_bps / strategy_hedge_independent_expected_slippage_buffer_bps / strategy_hedge_independent_expected_execution_buffer_bps'),
+  hasIndependentExecutionDiscipline: html.includes('strategy_hedge_independent_weak_edge_execution_mode / strategy_hedge_independent_max_acceptable_cost_bps / strategy_hedge_independent_passive_first_enabled'),
+  hasIndependentExecutionModes: html.includes('strategy_hedge_independent_entry_execution_mode / strategy_hedge_independent_scale_in_execution_mode / strategy_hedge_independent_de_risk_execution_mode / strategy_hedge_independent_close_failed_thesis_execution_mode / strategy_hedge_independent_close_stale_execution_mode'),
+  hasIndependentExecutionOffsets: html.includes('strategy_hedge_independent_limit_offset_bps_entry / strategy_hedge_independent_limit_offset_bps_scale_in / strategy_hedge_independent_limit_offset_bps_stale_close'),
   hasIndependentBooks: html.includes('双书分 long 0.74 / short 0.68 | 目标 +0.03 / -0.01'),
   hasIndependentReasons: html.includes('long book 的双书分已经超过开仓阈值') && html.includes('long book 的试盘守护已经触发'),
 }));
@@ -549,6 +903,15 @@ console.log(JSON.stringify({
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hasIndependentLabel":true', result.stdout)
         self.assertIn('"hasIndependentThresholds":true', result.stdout)
+        self.assertIn('"hasIndependentCloseThresholds":true', result.stdout)
+        self.assertIn('"hasIndependentQualityGate":true', result.stdout)
+        self.assertIn('"hasIndependentHealthGate":true', result.stdout)
+        self.assertIn('"hasIndependentThesisExit":true', result.stdout)
+        self.assertIn('"hasIndependentDeRiskSwitches":true', result.stdout)
+        self.assertIn('"hasIndependentSafetyBuffers":true', result.stdout)
+        self.assertIn('"hasIndependentExecutionDiscipline":true', result.stdout)
+        self.assertIn('"hasIndependentExecutionModes":true', result.stdout)
+        self.assertIn('"hasIndependentExecutionOffsets":true', result.stdout)
         self.assertIn('"hasIndependentBooks":true', result.stdout)
         self.assertIn('"hasIndependentReasons":true', result.stdout)
 
@@ -1589,6 +1952,7 @@ const html = renderStrategyView({
           },
         ],
         pair_registry_error_codes: ['smart_arbitrage_pair_execution_modes_invalid'],
+        pair_registry_source: 'coordinator_resolved',
         basis_entry_bps: 40,
         basis_exit_bps: 6,
         estimated_cost_bps: 34,
@@ -1662,6 +2026,103 @@ console.log(JSON.stringify({
         self.assertIn('"hidesBlockedReadyHeadline":true', result.stdout)
         self.assertIn('"showsBlockedReasonCopy":true', result.stdout)
         self.assertIn('"showsPairConfigRisk":true', result.stdout)
+
+    def test_strategy_view_surfaces_pair_registry_source_labels_for_smart_arbitrage(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const coordinatorHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: {
+      smart_arbitrage: {
+        enabled: true,
+        pair_definitions: [{ pair_id: 'btc_usdt_swap', spot_symbol: 'BTC-USDT', hedge_symbol: 'BTC-USDT-SWAP' }],
+        pair_registry_error_codes: ['smart_arbitrage_pair_execution_modes_invalid'],
+        pair_registry_source: 'coordinator_resolved',
+        basis_entry_bps: 40,
+        basis_exit_bps: 6,
+        estimated_cost_bps: 20,
+        quote_budget_per_trade: 200,
+        max_pair_notional: 2000,
+        cost_model_enabled: true,
+        funding_cost_enabled: false,
+        borrow_cost_enabled: false,
+        negative_basis_mode: 'advisory_only',
+      },
+      directional: {},
+      trade_costs: {},
+    },
+    smart_arbitrage_cost_summary: {},
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: true, runtime_supported: true, execution_compatible: true } },
+  },
+  strategyAttribution: { summary: {} },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const fallbackHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: {
+      smart_arbitrage: {
+        enabled: true,
+        pair_definitions: [],
+        pair_registry_error_codes: ['smart_arbitrage_pair_execution_modes_invalid'],
+        pair_registry_source: 'settings_fallback',
+        basis_entry_bps: 40,
+        basis_exit_bps: 6,
+        estimated_cost_bps: 20,
+        quote_budget_per_trade: 200,
+        max_pair_notional: 2000,
+        cost_model_enabled: true,
+        funding_cost_enabled: false,
+        borrow_cost_enabled: false,
+        negative_basis_mode: 'advisory_only',
+      },
+      directional: {},
+      trade_costs: {},
+    },
+    smart_arbitrage_cost_summary: {},
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: { smart_arbitrage: { enabled: true, runtime_supported: true, execution_compatible: true } },
+  },
+  strategyAttribution: { summary: {} },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  showsCoordinatorSource: coordinatorHtml.includes('协调器已解析结果'),
+  showsFallbackSource: fallbackHtml.includes('环境文件默认策略'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"showsCoordinatorSource":true', result.stdout)
+        self.assertIn('"showsFallbackSource":true', result.stdout)
 
     def test_strategy_view_localizes_negative_basis_reason_copy_across_advisory_opening_and_blocked_states(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -1925,7 +2386,7 @@ console.log(JSON.stringify({
             check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn('"thresholdCopyCount":1', result.stdout)
+        self.assertIn('"thresholdCopyCount":2', result.stdout)
         self.assertIn('"hasObserveRoute":true', result.stdout)
         self.assertIn('"hasObserveTarget":true', result.stdout)
         self.assertIn('"hasNoLegPlanCopy":true', result.stdout)
@@ -2442,7 +2903,7 @@ const overviewHtml = renderOverviewView({
 const drawer = buildDecisionDrawer({
   decision_id: 'dec-hedge',
   decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0.01 },
-  position_target: { position_intent: 'open_long', current_position_qty: 0.01, target_position_qty: 0.03 },
+  position_target: { position_intent: 'scale_in_long', current_position_qty: 0.01, target_position_qty: 0.03 },
   policy_decision: { execution_allowed: true },
   risk_decision: { approved: true },
   hedge_mode_audit: {
@@ -2497,6 +2958,1139 @@ console.log(JSON.stringify({
         self.assertIn('"drawerHasHedgeAudit":true', result.stdout)
         self.assertIn('"drawerHasLegOrderAudit":true', result.stdout)
         self.assertIn('"drawerHasLegReconciliationAudit":true', result.stdout)
+
+    def _legacy_test_terms_localize_scale_in_position_intents(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { readableState } from './aats/api/static/modules/terms.js';
+
+console.log(JSON.stringify({
+  scaleInLong: readableState('scale_in_long'),
+  scaleInShort: readableState('scale_in_short'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"scaleInLong":"加多"', result.stdout)
+        self.assertIn('"scaleInShort":"加空"', result.stdout)
+
+    def test_terms_localize_scale_in_position_intents(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { readableState } from './aats/api/static/modules/terms.js';
+
+console.log(JSON.stringify({
+  scaleInLong: readableState('scale_in_long'),
+  scaleInShort: readableState('scale_in_short'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"scaleInLong":"加多"', stdout)
+        self.assertIn('"scaleInShort":"加空"', stdout)
+
+    def test_responsive_table_generates_mobile_cards_when_explicit_cards_are_missing(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { responsiveTable } from './aats/api/static/modules/components.js';
+
+const html = responsiveTable(
+  ['状态', '说明', '附加信息'],
+  [[
+    '<div><strong>已就绪</strong><div class="table-meta">最新一轮</div></div>',
+    '<div>这里是说明</div>',
+    '<span class="signal-pill tone-positive">正常</span>',
+  ]],
+  '当前没有记录'
+);
+
+console.log(JSON.stringify({
+  hasTable: html.includes('data-table'),
+  hasMobileList: html.includes('mobile-record-list'),
+  hasFallbackCard: html.includes('mobile-record-card'),
+  keepsFirstColumnAsDetail: html.includes('查看首列信息') && html.includes('状态') && html.includes('已就绪') && html.includes('最新一轮'),
+  keepsOtherColumnsAsFields: html.includes('说明') && html.includes('这里是说明') && html.includes('附加信息') && html.includes('正常'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasTable":true', stdout)
+        self.assertIn('"hasMobileList":true', stdout)
+        self.assertIn('"hasFallbackCard":true', stdout)
+        self.assertIn('"keepsFirstColumnAsDetail":true', stdout)
+        self.assertIn('"keepsOtherColumnsAsFields":true', stdout)
+
+    def test_trade_display_preserves_reverse_to_direction_specific_labels(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { fillDrawerRows, fillRowTitle, orderDrawerRows, orderRowTitle } from './aats/api/static/modules/trade-display.js';
+
+const reverseLongOrder = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'reverse',
+  position_intent: 'reverse_to_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  target_leverage: 5,
+  status: 'SUBMITTED',
+  requested_qty: 0.01,
+  remaining_qty: 0.01,
+  filled_qty: 0,
+};
+
+const reverseShortFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'reverse',
+  position_intent: 'reverse_to_short',
+  margin_mode: 'cross',
+  exposure_side: 'short',
+  side: 'sell',
+  liquidity_role: 'taker',
+  fill_qty: 0.01,
+  fill_price: 66500,
+  starting_position_qty: 0.01,
+  ending_position_qty: -0.01,
+  fee_amount: 0,
+};
+
+const orderRows = orderDrawerRows(reverseLongOrder);
+const fillRows = fillDrawerRows(reverseShortFill);
+
+console.log(JSON.stringify({
+  orderTitleIsDirectional: orderRowTitle(reverseLongOrder) === '反手做多',
+  fillTitleIsDirectional: fillRowTitle(reverseShortFill) === '反手做空',
+  orderDrawerIsDirectional: orderRows[1][1] === '反手做多',
+  fillDrawerIsDirectional: fillRows[1][1] === '反手做空',
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"orderTitleIsDirectional":true', stdout)
+        self.assertIn('"fillTitleIsDirectional":true', stdout)
+        self.assertIn('"orderDrawerIsDirectional":true', stdout)
+        self.assertIn('"fillDrawerIsDirectional":true', stdout)
+
+    def test_trade_display_preserves_reduce_and_close_direction_specific_labels(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { fillDrawerRows, fillRowTitle, orderDrawerRows, orderRowTitle } from './aats/api/static/modules/trade-display.js';
+
+const reduceLongOrder = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'reduce',
+  position_intent: 'reduce_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  target_leverage: 5,
+  status: 'SUBMITTED',
+  requested_qty: 0.01,
+  remaining_qty: 0.01,
+  filled_qty: 0,
+};
+
+const closeShortOrder = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'exit',
+  position_intent: 'close_short',
+  margin_mode: 'cross',
+  exposure_side: 'short',
+  target_leverage: 5,
+  status: 'SUBMITTED',
+  requested_qty: 0.01,
+  remaining_qty: 0.01,
+  filled_qty: 0,
+};
+
+const reduceShortFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'reduce',
+  position_intent: 'reduce_short',
+  margin_mode: 'cross',
+  exposure_side: 'short',
+  side: 'buy',
+  liquidity_role: 'taker',
+  fill_qty: 0.01,
+  fill_price: 66500,
+  starting_position_qty: -0.02,
+  ending_position_qty: -0.01,
+  fee_amount: 0,
+};
+
+const closeLongFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'exit',
+  position_intent: 'close_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  side: 'sell',
+  liquidity_role: 'taker',
+  fill_qty: 0.01,
+  fill_price: 66500,
+  starting_position_qty: 0.01,
+  ending_position_qty: 0,
+  fee_amount: 0,
+};
+
+const reduceLongRows = orderDrawerRows(reduceLongOrder);
+const closeShortRows = orderDrawerRows(closeShortOrder);
+const reduceShortFillRows = fillDrawerRows(reduceShortFill);
+const closeLongFillRows = fillDrawerRows(closeLongFill);
+
+console.log(JSON.stringify({
+  reduceLongOrderTitle: orderRowTitle(reduceLongOrder),
+  reduceLongOrderDrawer: reduceLongRows[1][1],
+  closeShortOrderTitle: orderRowTitle(closeShortOrder),
+  closeShortOrderDrawer: closeShortRows[1][1],
+  reduceShortFillTitle: fillRowTitle(reduceShortFill),
+  reduceShortFillDrawer: reduceShortFillRows[1][1],
+  closeLongFillTitle: fillRowTitle(closeLongFill),
+  closeLongFillDrawer: closeLongFillRows[1][1],
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"reduceLongOrderTitle":"减多"', stdout)
+        self.assertIn('"reduceLongOrderDrawer":"减多"', stdout)
+        self.assertIn('"closeShortOrderTitle":"平空"', stdout)
+        self.assertIn('"closeShortOrderDrawer":"平空"', stdout)
+        self.assertIn('"reduceShortFillTitle":"减空"', stdout)
+        self.assertIn('"reduceShortFillDrawer":"减空"', stdout)
+        self.assertIn('"closeLongFillTitle":"平多"', stdout)
+        self.assertIn('"closeLongFillDrawer":"平多"', stdout)
+
+    def test_trade_display_preserves_open_and_scale_in_direction_specific_labels(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { fillDrawerRows, fillRowTitle, orderDrawerRows, orderRowTitle } from './aats/api/static/modules/trade-display.js';
+
+const openLongOrder = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'enter',
+  position_intent: 'open_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  target_leverage: 5,
+  status: 'SUBMITTED',
+  requested_qty: 0.01,
+  remaining_qty: 0.01,
+  filled_qty: 0,
+};
+
+const openShortOrder = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'enter',
+  position_intent: 'open_short',
+  margin_mode: 'cross',
+  exposure_side: 'short',
+  target_leverage: 5,
+  status: 'SUBMITTED',
+  requested_qty: 0.01,
+  remaining_qty: 0.01,
+  filled_qty: 0,
+};
+
+const scaleInLongFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'scale_in',
+  position_intent: 'scale_in_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  side: 'buy',
+  liquidity_role: 'taker',
+  fill_qty: 0.01,
+  fill_price: 66500,
+  starting_position_qty: 0.01,
+  ending_position_qty: 0.02,
+  fee_amount: 0,
+};
+
+const scaleInShortFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'scale_in',
+  position_intent: 'scale_in_short',
+  margin_mode: 'cross',
+  exposure_side: 'short',
+  side: 'sell',
+  liquidity_role: 'taker',
+  fill_qty: 0.01,
+  fill_price: 66500,
+  starting_position_qty: -0.01,
+  ending_position_qty: -0.02,
+  fee_amount: 0,
+};
+
+const openLongRows = orderDrawerRows(openLongOrder);
+const openShortRows = orderDrawerRows(openShortOrder);
+const scaleInLongFillRows = fillDrawerRows(scaleInLongFill);
+const scaleInShortFillRows = fillDrawerRows(scaleInShortFill);
+
+console.log(JSON.stringify({
+  openLongOrderTitle: orderRowTitle(openLongOrder),
+  openLongOrderDrawer: openLongRows[1][1],
+  openShortOrderTitle: orderRowTitle(openShortOrder),
+  openShortOrderDrawer: openShortRows[1][1],
+  scaleInLongFillTitle: fillRowTitle(scaleInLongFill),
+  scaleInLongFillDrawer: scaleInLongFillRows[1][1],
+  scaleInShortFillTitle: fillRowTitle(scaleInShortFill),
+  scaleInShortFillDrawer: scaleInShortFillRows[1][1],
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"openLongOrderTitle":"开多"', stdout)
+        self.assertIn('"openLongOrderDrawer":"开多"', stdout)
+        self.assertIn('"openShortOrderTitle":"开空"', stdout)
+        self.assertIn('"openShortOrderDrawer":"开空"', stdout)
+        self.assertIn('"scaleInLongFillTitle":"加多"', stdout)
+        self.assertIn('"scaleInLongFillDrawer":"加多"', stdout)
+        self.assertIn('"scaleInShortFillTitle":"加空"', stdout)
+        self.assertIn('"scaleInShortFillDrawer":"加空"', stdout)
+
+    def test_execution_view_shows_fee_as_negative_cost_and_positive_rebate(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderExecutionSections } from './aats/api/static/modules/views/execution-view.js';
+
+const sections = renderExecutionSections({
+  executionLatest: {},
+  recentOrders: { orders: [] },
+  recentFills: {
+    fills: [
+      {
+        product_type: 'derivatives',
+        symbol: 'BTC-USDT-SWAP',
+        execution_action: 'enter',
+        position_intent: 'open_long',
+        margin_mode: 'cross',
+        exposure_side: 'long',
+        side: 'buy',
+        liquidity_role: 'taker',
+        fill_id: 'fill_cost',
+        fill_qty: 0.01,
+        fill_price: 68494,
+        fee_amount: 0.3425,
+        realized_pnl: -0.3425,
+        ingestion_timestamp: '2026-04-01T10:49:08Z',
+      },
+      {
+        product_type: 'derivatives',
+        symbol: 'BTC-USDT-SWAP',
+        execution_action: 'enter',
+        position_intent: 'open_long',
+        margin_mode: 'cross',
+        exposure_side: 'long',
+        side: 'buy',
+        liquidity_role: 'maker',
+        fill_id: 'fill_rebate',
+        fill_qty: 0.01,
+        fill_price: 68494,
+        fee_amount: -0.125,
+        realized_pnl: 0.125,
+        ingestion_timestamp: '2026-04-01T10:50:08Z',
+      },
+    ],
+    total_available: 2,
+    has_more: false,
+    limit: 8,
+  },
+  executionErrors: { errors: [] },
+  metrics: { current_open_order_count: 0 },
+});
+
+const html = sections.executionFills;
+console.log(JSON.stringify({
+  showsNegativeFeeCost: html.includes('手续费 -0.3425'),
+  showsPositiveFeeRebate: html.includes('手续费 +0.125'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"showsNegativeFeeCost":true', stdout)
+        self.assertIn('"showsPositiveFeeRebate":true', stdout)
+
+    def test_trade_display_and_order_drawer_show_fee_cost_as_negative_and_rebate_as_positive(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildOrderDrawer } from './aats/api/static/modules/detail-drawers.js';
+import { fillDrawerRows, fillImpactMeta } from './aats/api/static/modules/trade-display.js';
+
+const feeCostFill = {
+  product_type: 'derivatives',
+  symbol: 'BTC-USDT-SWAP',
+  execution_action: 'enter',
+  position_intent: 'open_long',
+  margin_mode: 'cross',
+  exposure_side: 'long',
+  side: 'buy',
+  liquidity_role: 'taker',
+  fill_id: 'fill_cost',
+  fill_qty: 0.01,
+  fill_price: 68494,
+  fee_amount: 0.3425,
+  fee_currency: 'USDT',
+  realized_pnl: -0.3425,
+};
+
+const feeRebateFill = {
+  ...feeCostFill,
+  fill_id: 'fill_rebate',
+  liquidity_role: 'maker',
+  fee_amount: -0.125,
+  realized_pnl: 0.125,
+};
+
+const fillDrawer = fillDrawerRows(feeCostFill);
+const orderDrawerHtml = buildOrderDrawer({
+  order: {
+    client_order_id: 'ord-1',
+    product_type: 'derivatives',
+    symbol: 'BTC-USDT-SWAP',
+    margin_mode: 'cross',
+    exposure_side: 'long',
+    status: 'FILLED',
+  },
+  fills: [feeCostFill, feeRebateFill],
+}).body;
+
+console.log(JSON.stringify({
+  impactMetaShowsNegativeFeeCost: fillImpactMeta(feeCostFill).includes('手续费 -0.3425 USDT'),
+  fillDrawerShowsNegativeFeeCost: fillDrawer[5][2] === '手续费 -0.3425 USDT',
+  orderDrawerShowsNegativeFeeCost: orderDrawerHtml.includes('手续费 -0.3425 USDT'),
+  orderDrawerShowsPositiveFeeRebate: orderDrawerHtml.includes('手续费 +0.125 USDT'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"impactMetaShowsNegativeFeeCost":true', stdout)
+        self.assertIn('"fillDrawerShowsNegativeFeeCost":true', stdout)
+        self.assertIn('"orderDrawerShowsNegativeFeeCost":true', stdout)
+        self.assertIn('"orderDrawerShowsPositiveFeeRebate":true', stdout)
+
+    def test_strategy_attribution_and_risk_view_preserve_fee_and_funding_sign_semantics(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const strategyHtml = renderStrategyView({
+  latestDecision: {},
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    latest_bundle: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    latest_applied_target: {},
+    latest_allocation_decision: {},
+    configured_parameters: { directional: {}, smart_arbitrage: {} },
+    family_enablement: {},
+    smart_arbitrage_cost_summary: {},
+  },
+  strategyAttribution: {
+    summary: {
+      sleeve_pnl_record_count: 2,
+      combined_net_realized_pnl: 1.25,
+      funding_fee_net_pnl: -0.6,
+      protected_fill_count: 0,
+      unprotected_fill_count: 2,
+    },
+    profitability_by_strategy_sleeve: [
+      {
+        strategy_sleeve_id: 'sleeve_cost',
+        families: ['directional'],
+        combined_net_realized_pnl: 1.2,
+        realized_pnl: 1.5,
+        funding_fee_amount: -0.3,
+        fee_amount: 0.3425,
+        inventory_move_qty: 0.01,
+        record_count: 1,
+      },
+      {
+        strategy_sleeve_id: 'sleeve_rebate',
+        families: ['directional'],
+        combined_net_realized_pnl: 0.5,
+        realized_pnl: 0.4,
+        funding_fee_amount: 0.2,
+        fee_amount: -0.125,
+        inventory_move_qty: 0,
+        record_count: 1,
+      },
+    ],
+    sleeve_inventory_summary: [],
+    profitability_by_attribution_type: [],
+    profitability_by_strategy_bundle: [],
+  },
+  trialReviewSummary: { summary: {}, recommendation: {}, sections: {} },
+  trialReviewHistory: {},
+  forwardValidation: {},
+  scalingReadiness: {},
+});
+
+const riskHtml = renderRiskView({
+  blockerControl: { blockers: [], secondary_blockers: [], next_step_summary: '' },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: true,
+      review_required: false,
+      resume_eligible: true,
+      halted: false,
+      rebaseline_available: false,
+      resume_blocked_reasons: [],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-clean',
+      severity: 'CLEAN',
+      halt_required: false,
+      review_required: false,
+      observational_only: false,
+      recommended_operator_action: null,
+    },
+    exchange_bills_summary: {},
+  },
+  guardedLiveRunPacket: {
+    status: 'healthy',
+    summary: 'ok',
+    operator_actions: [],
+    summary_metrics: {
+      combined_net_realized_pnl: 12.5,
+      funding_fee_net_pnl: -4.2,
+      execution_blocker_count: 0,
+      current_initial_margin_usage_fraction: 0.12,
+      nearest_liquidation_gap_ratio: 0.35,
+      open_position_count: 1,
+    },
+  },
+  trialGuard: {
+    status: 'healthy',
+    summary: 'ok',
+    fill_count: 10,
+    min_closed_fills: 5,
+    daily_combined_net_realized: 8.4,
+    daily_trading_net_realized: 10.1,
+    daily_funding_fee_net: -1.7,
+    consecutive_losses: 0,
+    breaches: [],
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-04-01T10:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: { healthy: true, recent_validations: [] },
+  metrics: {},
+  health: { runtime_state: 'healthy' },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+console.log(JSON.stringify({
+  strategyShowsNegativeFeeCost: strategyHtml.includes('费用 -0.3425'),
+  strategyShowsPositiveFeeRebate: strategyHtml.includes('费用 +0.125'),
+  strategyKeepsFundingDirection: strategyHtml.includes('-0.3') && strategyHtml.includes('+0.2'),
+  riskShowsSignedGuardedLiveNet: riskHtml.includes('+12.5') && riskHtml.includes('资金费 -4.2'),
+  riskShowsSignedTrialGuardNet: riskHtml.includes('+8.4') && riskHtml.includes('交易净收益 +10.1') && riskHtml.includes('资金费 -1.7'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsNegativeFeeCost":true', stdout)
+        self.assertIn('"strategyShowsPositiveFeeRebate":true', stdout)
+        self.assertIn('"strategyKeepsFundingDirection":true', stdout)
+        self.assertIn('"riskShowsSignedGuardedLiveNet":true', stdout)
+        self.assertIn('"riskShowsSignedTrialGuardNet":true', stdout)
+
+    def test_family_cutover_ui_prefers_family_execution_summary_over_net_position_fields(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { renderHomeView } from './aats/api/static/modules/views/home-view.js';
+import { renderOverviewView } from './aats/api/static/modules/views/overview-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const familyExecutionSummary = {
+  summary_mode: 'multi_leg',
+  family: 'independent',
+  route_action: 'override_target',
+  family_action: 'open_independent_book',
+  leg_count: 2,
+  position_intents: ['open_long', 'open_short'],
+  directions: ['long', 'short'],
+  leg_actions: ['open'],
+  execution_modes: ['independent_long_book', 'independent_short_book'],
+  parent_target_signal: 'flat',
+  parent_current_signal: 'long',
+  parent_effective_signal: 'long',
+  signal_source: 'inventory',
+  parent_lifecycle_state: 'inventory_only',
+  parent_target_active: false,
+  parent_inventory_active: true,
+};
+
+const latestDecision = {
+  decision_id: 'dec-cutover',
+  decision_time: '2026-03-30T12:00:00Z',
+  decision_context: { as_of_ts: '2026-03-30T12:00:00Z', symbol: 'BTC-USDT-SWAP' },
+  position_target: {
+    position_intent: 'hold',
+    target_exposure_side: 'flat',
+    current_position_qty: 0,
+    target_position_qty: 0,
+    delta_position_qty: 0,
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: { directional: {} },
+    latest_applied_target: latestDecision.position_target,
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    recent_sleeve_intents: [],
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision,
+});
+
+const homeHtml = renderHomeView({
+  latestDecision,
+  executionLatest: {},
+  reconciliationLatest: {},
+  health: { halted: false },
+  mode: { execution_route: 'derivatives_live' },
+  runtime: { environment_capabilities: { exchange_submission_target: 'derivatives_live' } },
+  systemRecovery: { recovery: { safe_to_trade: true, halted: false, resume_eligible: true } },
+  blockers: { blockers: [] },
+  portfolio: { portfolio: { total_equity: 1200, unrealized_pnl: 0, gross_exposure: 0, net_exposure: 0 } },
+  accountState: { connected: true, fresh: true, ready: true, blockers: [] },
+  metrics: { current_open_order_count: 0 },
+  uiHints: {},
+});
+
+const overviewHtml = renderOverviewView({
+  latestDecision,
+  executionLatest: {},
+  reconciliationLatest: {},
+  health: { runtime_state: 'healthy', overall_status: 'healthy' },
+  mode: { default_symbol: 'BTC-USDT-SWAP' },
+  runtime: { symbols: ['BTC-USDT-SWAP'] },
+  systemRecovery: { recovery: { safe_to_trade: true, halted: false, resume_eligible: true } },
+  blockers: { blockers: [] },
+  portfolio: { portfolio: { total_equity: 1200, realized_pnl: 0, unrealized_pnl: 0, gross_exposure: 0, net_exposure: 0, positions: [] } },
+  positions: { local_instrument_positions: [] },
+  metrics: {},
+  uiHints: {},
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-cutover',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
+  position_target: latestDecision.position_target,
+  decision_outcome: {
+    final_action: 'enter',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+  },
+  ai_decision_audit: {
+    final_action: 'enter',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+});
+
+console.log(JSON.stringify({
+  strategyUsesFamilySummary: strategyHtml.includes('2 条腿联动') && strategyHtml.includes('开多') && strategyHtml.includes('开空'),
+  homeUsesFamilySummary: homeHtml.includes('2 条腿联动') && homeHtml.includes('开多') && homeHtml.includes('开空'),
+  overviewUsesFamilySummary: overviewHtml.includes('2 条腿联动') && overviewHtml.includes('开多') && overviewHtml.includes('开空'),
+  drawerUsesFamilySummary: drawer.body.includes('2 条腿联动') && drawer.body.includes('开多') && drawer.body.includes('开空') && drawer.body.includes('双向'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyUsesFamilySummary":true', stdout)
+        self.assertIn('"homeUsesFamilySummary":true', stdout)
+        self.assertIn('"overviewUsesFamilySummary":true', stdout)
+        self.assertIn('"drawerUsesFamilySummary":true', stdout)
+
+    def test_home_and_overview_views_surface_parent_signal_summary_from_family_execution_summary(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderHomeView } from './aats/api/static/modules/views/home-view.js';
+import { renderOverviewView } from './aats/api/static/modules/views/overview-view.js';
+
+const familyExecutionSummary = {
+  summary_mode: 'single_leg',
+  family: 'protective',
+  route_action: 'override_target',
+  family_action: 'close_protection_leg',
+  leg_count: 1,
+  position_intents: ['close_short'],
+  directions: ['short'],
+  leg_actions: ['close'],
+  execution_modes: ['protective_overlay'],
+  parent_target_signal: 'flat',
+  parent_current_signal: 'long',
+  parent_effective_signal: 'long',
+  signal_source: 'inventory',
+  parent_lifecycle_state: 'inventory_only',
+  parent_target_active: false,
+  parent_inventory_active: true,
+};
+
+const latestDecision = {
+  decision_id: 'dec-parent-signal-home-overview',
+  decision_time: '2026-03-30T12:00:00Z',
+  decision_context: { as_of_ts: '2026-03-30T12:00:00Z', symbol: 'BTC-USDT-SWAP' },
+  position_target: {
+    position_intent: 'close_short',
+    target_exposure_side: 'flat',
+    current_position_qty: 0.03,
+    target_position_qty: 0,
+    delta_position_qty: -0.03,
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+};
+
+const homeHtml = renderHomeView({
+  latestDecision,
+  executionLatest: {},
+  reconciliationLatest: {},
+  health: { halted: false },
+  mode: { execution_route: 'derivatives_live' },
+  runtime: { environment_capabilities: { exchange_submission_target: 'derivatives_live' } },
+  systemRecovery: { recovery: { safe_to_trade: true, halted: false, resume_eligible: true } },
+  blockers: { blockers: [] },
+  portfolio: { portfolio: { total_equity: 1200, unrealized_pnl: 0, gross_exposure: 0, net_exposure: 0 } },
+  accountState: { connected: true, fresh: true, ready: true, blockers: [] },
+  metrics: { current_open_order_count: 0 },
+  uiHints: {},
+});
+
+const overviewHtml = renderOverviewView({
+  latestDecision,
+  executionLatest: {},
+  reconciliationLatest: {},
+  health: { runtime_state: 'healthy', overall_status: 'healthy' },
+  mode: { default_symbol: 'BTC-USDT-SWAP' },
+  runtime: { symbols: ['BTC-USDT-SWAP'] },
+  systemRecovery: { recovery: { safe_to_trade: true, halted: false, resume_eligible: true } },
+  blockers: { blockers: [] },
+  portfolio: { portfolio: { total_equity: 1200, realized_pnl: 0, unrealized_pnl: 0, gross_exposure: 0, net_exposure: 0, positions: [] } },
+  positions: { local_instrument_positions: [] },
+  metrics: {},
+  uiHints: {},
+});
+
+console.log(JSON.stringify({
+  homeShowsParentSignals:
+    homeHtml.includes('这次判断主要由真实库存驱动，库存延续，最终按偏多方向生效'),
+  overviewShowsParentSignals:
+    overviewHtml.includes('这次判断主要由真实库存驱动，库存延续，最终按偏多方向生效'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"homeShowsParentSignals":true', stdout)
+        self.assertIn('"overviewShowsParentSignals":true', stdout)
+
+    def test_independent_expectancy_summary_surfaces_in_runtime_and_decision_ui(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const bookExpectancySummary = {
+  source: 'independent_book',
+  books: [
+    {
+      leg: 'long',
+      expected_gross_edge_bps: 18.0,
+      expected_signal_edge_bps: 18.0,
+      expected_slippage_bps: 1.5,
+      expected_cost_bps: 6.0,
+      expected_net_edge_bps: 12.0,
+    },
+    {
+      leg: 'short',
+      expected_gross_edge_bps: 4.0,
+      expected_signal_edge_bps: 4.0,
+      expected_slippage_bps: 1.5,
+      expected_cost_bps: 6.0,
+      expected_net_edge_bps: -2.0,
+    },
+  ],
+};
+
+const familyExecutionSummary = {
+  summary_mode: 'multi_leg',
+  family: 'independent',
+  route_action: 'override_target',
+  family_action: 'open_independent_book',
+  leg_count: 2,
+  position_intents: ['open_long', 'open_short'],
+  directions: ['long', 'short'],
+  leg_actions: ['open'],
+  execution_modes: ['independent_long_book', 'independent_short_book'],
+  book_expectancy_summary: bookExpectancySummary,
+};
+
+const latestDecision = {
+  decision_id: 'dec-independent-expectancy',
+  decision_time: '2026-03-30T12:00:00Z',
+  decision_context: { as_of_ts: '2026-03-30T12:00:00Z', symbol: 'BTC-USDT-SWAP' },
+  baseline_assessment: { direction_bias: 'long', confidence: 0.84, composite_alpha_score: 0.32 },
+  ai_assessment: { directional_edge: 0.2 },
+  position_target: {
+    position_intent: 'hold',
+    target_exposure_side: 'flat',
+    current_position_qty: 0,
+    target_position_qty: 0,
+    delta_position_qty: 0,
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true, blocker_reasons: [], allow_reasons: [] },
+  risk_decision: { approved: true, rejection_reasons: [], approval_reasons: [] },
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: {
+      candidates: [
+        {
+          family: 'independent',
+          state: 'opening',
+          route_action: 'override_target',
+          family_action: 'open_independent_book',
+          urgency: 'medium',
+          target_position_qty: 0,
+          delta_position_qty: 0,
+          headline: 'Independent family candidate',
+          reason_codes: ['independent_long_book_signal_above_entry_threshold'],
+          metrics: {},
+          book_expectancy_summary: bookExpectancySummary,
+          legs: [
+            { symbol: 'BTC-USDT-SWAP', product_type: 'derivatives', side: 'buy', execution_mode: 'independent_long_book' },
+            { symbol: 'BTC-USDT-SWAP', product_type: 'derivatives', side: 'sell', execution_mode: 'independent_short_book' },
+          ],
+        },
+      ],
+      automation_decisions: [],
+    },
+    configured_parameters: { directional: {} },
+    latest_applied_target: latestDecision.position_target,
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    recent_sleeve_intents: [],
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision,
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: latestDecision.decision_id,
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
+  position_target: latestDecision.position_target,
+  decision_outcome: {
+    final_action: 'enter',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+  },
+  ai_decision_audit: {
+    configured_mode: 'baseline_only',
+    assessment_operating_mode: 'baseline_only',
+    final_action: 'enter',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+    market_snapshot_fresh: true,
+    account_snapshot_fresh: true,
+    safe_to_trade: true,
+    recent_fee_drag_ratio: 0.03,
+    recent_churn_ratio: 0.02,
+    recent_low_edge_trade_streak: 1,
+    current_open_order_count: 0,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+});
+
+console.log(JSON.stringify({
+  strategyShowsCandidateExpectancy:
+    strategyHtml.includes('多书 毛/成本/净 18.00/6.00/12.00 基点')
+    && strategyHtml.includes('空书 毛/成本/净 4.00/6.00/-2.00 基点'),
+  drawerShowsExpectancy:
+    drawer.body.includes('每条书预期边际')
+    && drawer.body.includes('多书 毛/成本/净 18.00/6.00/12.00 基点')
+    && drawer.body.includes('空书 毛/成本/净 4.00/6.00/-2.00 基点'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsCandidateExpectancy":true', stdout)
+        self.assertIn('"drawerShowsExpectancy":true', stdout)
+
+    def test_independent_expected_vs_realized_summary_surfaces_in_runtime_and_decision_ui(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const diagnostics = {
+  family: 'independent',
+  sample_count: 4,
+  expected_sample_count: 4,
+  realized_sample_count: 3,
+  overlap_sample_count: 3,
+  entry_count: 2,
+  scale_in_count: 1,
+  close_count: 1,
+  de_risk_count: 0,
+  weak_edge_entry_count: 1,
+  avg_expected_net_edge_bps: 8.5,
+  avg_realized_gross_bps: 7.2,
+  avg_realized_fee_bps: 1.1,
+  avg_realized_slippage_bps: 0.8,
+  avg_realized_net_bps: 5.3,
+  fee_drag_ratio: 0.24,
+  churn_ratio: 0.25,
+  passive_first_usage_ratio: 0.6667,
+  expected_realized_net_gap_bps: -3.2,
+  expected_realized_correlation: 0.72,
+  close_reason_distribution: [{ reason: 'stale_thesis', count: 1 }],
+  book_breakdown: [
+    { leg: 'long', sample_count: 2, avg_expected_net_edge_bps: 9.0, avg_realized_net_bps: 6.0 },
+    { leg: 'short', sample_count: 2, avg_expected_net_edge_bps: 8.0, avg_realized_net_bps: 4.6 },
+  ],
+};
+
+const familyExecutionSummary = {
+  summary_mode: 'multi_leg',
+  family: 'independent',
+  route_action: 'override_target',
+  family_action: 'rebalance_independent_books',
+  leg_count: 2,
+  position_intents: ['open_long', 'close_short'],
+  directions: ['long', 'short'],
+  leg_actions: ['open', 'close'],
+  execution_modes: ['independent_long_book', 'independent_short_book'],
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    independent_expected_vs_realized_summary: diagnostics,
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: {
+      directional: {
+        hedge_independent_emit_book_level_metrics: true,
+        hedge_independent_emit_expected_vs_realized_metrics: true,
+        hedge_independent_emit_close_reason_metrics: true,
+        hedge_independent_emit_execution_policy_metrics: true,
+      },
+    },
+    latest_applied_target: { family_execution_summary: familyExecutionSummary },
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    recent_sleeve_intents: [],
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    decision_id: 'dec-independent-evr',
+    decision_time: '2026-03-30T12:00:00Z',
+    decision_context: { as_of_ts: '2026-03-30T12:00:00Z', symbol: 'BTC-USDT-SWAP' },
+    baseline_assessment: {},
+    ai_assessment: {},
+    position_target: { family_execution_summary: familyExecutionSummary },
+    policy_decision: { execution_allowed: true, blocker_reasons: [], allow_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], approval_reasons: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-independent-evr',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0.01 },
+  position_target: { family_execution_summary: familyExecutionSummary },
+  decision_outcome: {
+    final_action: 'exit',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+  },
+  ai_decision_audit: {
+    configured_mode: 'baseline_only',
+    assessment_operating_mode: 'baseline_only',
+    final_action: 'exit',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+    independent_expected_vs_realized_summary: diagnostics,
+    market_snapshot_fresh: true,
+    account_snapshot_fresh: true,
+    safe_to_trade: true,
+    recent_fee_drag_ratio: 0.03,
+    recent_churn_ratio: 0.02,
+    recent_low_edge_trade_streak: 1,
+    current_open_order_count: 0,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+});
+
+console.log(JSON.stringify({
+  strategyShowsDiagnostics:
+    strategyHtml.includes('独立双书预期 vs 已实现')
+    && strategyHtml.includes('样本 4（预期 4 / 已实现 3 / 重合 3）')
+    && strategyHtml.includes('预期净边际 8.50 基点')
+    && strategyHtml.includes('已实现净收益 5.30 基点')
+    && strategyHtml.includes('被动优先 66.7%')
+    && strategyHtml.includes('退出原因 thesis过期 1 次'),
+  drawerShowsDiagnostics:
+    drawer.body.includes('预期 vs 已实现')
+    && drawer.body.includes('样本 4（预期 4 / 已实现 3 / 重合 3）')
+    && drawer.body.includes('预期偏差 -3.20 基点')
+    && drawer.body.includes('多书 样本 2 / 预期 9.00 / 已实现 6.00 基点')
+    && drawer.body.includes('空书 样本 2 / 预期 8.00 / 已实现 4.60 基点'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsDiagnostics":true', stdout)
+        self.assertIn('"drawerShowsDiagnostics":true', stdout)
 
     def test_decision_drawer_surfaces_independent_overlay_audit_and_leg_trial_guard(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -2575,6 +4169,574 @@ console.log(JSON.stringify({
         self.assertIn('"hasLongTrialGuardCopy":true', result.stdout)
         self.assertIn('"hasIndependentBookLabel":true', result.stdout)
 
+    def test_decision_drawer_surfaces_execution_discipline_summary(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const familyExecutionSummary = {
+  summary_mode: 'single_leg',
+  family: 'opportunistic',
+  route_action: 'override_target',
+  family_action: 'open_opportunity_leg',
+  leg_count: 1,
+  position_intents: ['open_short'],
+  directions: ['short'],
+  leg_actions: ['open'],
+  execution_modes: ['opportunistic_overlay'],
+  book_runtime_states: [
+    {
+      leg: 'short',
+      current_qty: '0',
+      target_qty: '0.02',
+      state: 'opening',
+      book_action: 'open',
+      policy_reason: 'opportunistic_entry_guarded_passive_first',
+    },
+  ],
+  book_expectancy_summary: {
+    source: 'opportunistic_overlay',
+    books: [
+      {
+        leg: 'short',
+        expected_gross_edge_bps: 8.0,
+        expected_signal_edge_bps: 8.0,
+        expected_slippage_bps: 1.0,
+        expected_cost_bps: 4.0,
+        expected_net_edge_bps: 4.0,
+        required_safe_net_edge_bps: 6.0,
+        max_acceptable_cost_bps: 7.5,
+        weak_edge_execution_mode: 'report_only',
+        weak_edge_report_only: true,
+        passive_first_required: true,
+      },
+    ],
+  },
+};
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-opportunistic-discipline',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0.05 },
+  position_target: {
+    symbol: 'BTC-USDT-SWAP',
+    expected_signal_edge_bps: 30.0,
+    expected_cost_bps: 9.0,
+    expected_net_edge_bps: 21.0,
+    family_execution_summary: familyExecutionSummary,
+    book_expectancy_summary: familyExecutionSummary.book_expectancy_summary,
+  },
+  decision_outcome: {
+    final_action: 'enter',
+    final_direction: 'short',
+    family_execution_summary: familyExecutionSummary,
+  },
+  ai_economic_actionability: {
+    economically_actionable: true,
+    min_required_net_edge_bps: 2.0,
+    estimated_edge_bps: 15.0,
+    estimated_cost_bps: 5.0,
+    estimated_net_edge_bps: 10.0,
+    target_expected_signal_edge_bps: 8.0,
+    target_expected_cost_bps: 4.0,
+    target_expected_net_edge_bps: 4.0,
+    target_required_safe_net_edge_bps: 6.0,
+    target_max_acceptable_cost_bps: 7.5,
+    target_weak_edge_execution_mode: 'report_only',
+    target_weak_edge_report_only: true,
+    target_passive_first_required: true,
+  },
+  ai_decision_audit: {
+    configured_mode: 'baseline_only',
+    assessment_operating_mode: 'baseline_only',
+    final_action: 'enter',
+    final_direction: 'short',
+    family_execution_summary: familyExecutionSummary,
+    market_snapshot_fresh: true,
+    account_snapshot_fresh: true,
+    safe_to_trade: true,
+    recent_fee_drag_ratio: 0.03,
+    recent_churn_ratio: 0.02,
+    recent_low_edge_trade_streak: 1,
+    current_open_order_count: 0,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+});
+
+console.log(JSON.stringify({
+  hasEconomicDiscipline:
+    drawer.body.includes('安全净边际 6 个基点')
+    && drawer.body.includes('成本上限 7.5 个基点')
+    && drawer.body.includes('弱边际 仅报告')
+    && drawer.body.includes('本轮只保留报告')
+    && drawer.body.includes('要求被动优先'),
+  hasAuditExpectancy:
+    drawer.body.includes('空腿 毛/成本/净 8.00/4.00/4.00 基点')
+    && drawer.body.includes('安全净边际 6.00 基点')
+    && drawer.body.includes('本轮只保留报告')
+    && drawer.body.includes('要求被动优先'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasEconomicDiscipline":true', stdout)
+        self.assertIn('"hasAuditExpectancy":true', stdout)
+
+    def test_decision_drawer_surfaces_book_runtime_state_summary(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const familyExecutionSummary = {
+  summary_mode: 'multi_leg',
+  family: 'independent',
+  route_action: 'override_target',
+  family_action: 'rebalance_independent_books',
+  leg_count: 2,
+  position_intents: ['open_long', 'close_short'],
+  directions: ['long', 'short'],
+  leg_actions: ['open', 'close'],
+  execution_modes: ['independent_long_book', 'independent_short_book'],
+  book_runtime_states: [
+    {
+      leg: 'long',
+      current_qty: '0',
+      target_qty: '0.01',
+      state: 'opening',
+      book_action: 'open',
+      policy_reason: 'independent_entry_strong_edge_aggressive',
+    },
+    {
+      leg: 'short',
+      current_qty: '0.02',
+      target_qty: '0',
+      state: 'closing',
+      book_action: 'close_failed_thesis',
+      close_reason: 'failed_thesis',
+      policy_reason: 'independent_failed_thesis_force_exit',
+      execution_policy_urgency: 'high',
+    },
+  ],
+};
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-independent-book-runtime',
+  decision_outcome: {
+    final_action: 'exit',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+  },
+  ai_decision_audit: {
+    configured_mode: 'baseline_only',
+    assessment_operating_mode: 'baseline_only',
+    final_action: 'exit',
+    final_direction: 'flat',
+    family_execution_summary: familyExecutionSummary,
+    book_runtime_states: familyExecutionSummary.book_runtime_states,
+    market_snapshot_fresh: true,
+    account_snapshot_fresh: true,
+    safe_to_trade: true,
+    recent_fee_drag_ratio: 0.01,
+    recent_churn_ratio: 0.01,
+    recent_low_edge_trade_streak: 0,
+    current_open_order_count: 0,
+  },
+});
+
+    console.log(JSON.stringify({
+      hasRuntimeStateRow:
+        drawer.body.includes('每条书当前状态')
+        && drawer.body.includes('多书准备开仓')
+        && drawer.body.includes('空书准备收口')
+        && drawer.body.includes('thesis失效'),
+    }));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"hasRuntimeStateRow":true', result.stdout or "")
+
+    def test_overlay_parent_signal_summary_surfaces_in_runtime_and_decision_drawer(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const overlay = {
+  enabled: true,
+  runtime_supported: true,
+  configured_mode: 'protective',
+  effective_mode: 'protective',
+  active: true,
+  state: 'holding',
+  main_leg_signal: 'long',
+  hedge_leg_signal: 'short',
+  main_leg_current_qty: 0.05,
+  hedge_leg_current_qty: 0.01,
+  main_leg_target_qty: 0.00,
+  hedge_leg_target_qty: 0.01,
+  hedge_ratio: 0.2,
+  max_ratio: 0.5,
+  pressure_score: 0.72,
+  open_threshold: 0.58,
+  close_threshold: 0.42,
+  parent_target_signal: 'flat',
+  parent_current_signal: 'long',
+  parent_effective_signal: 'long',
+  signal_source: 'inventory',
+  parent_lifecycle_state: 'inventory_only',
+  parent_target_active: false,
+  parent_inventory_active: true,
+  reason_codes: ['protective_overlay_main_signal_inferred_from_inventory'],
+  blocked_reasons: [],
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    configured_parameters: {
+      directional: {
+        product_type: 'derivatives',
+        hedge_overlay_enabled: true,
+        hedge_overlay_mode: 'protective',
+        hedge_overlay_runtime_supported: true,
+        hedge_overlay_effective_enabled: true,
+      },
+    },
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {},
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    baseline_assessment: {},
+    ai_assessment: {},
+    position_target: {
+      position_intent: 'hold',
+      target_exposure_side: 'flat',
+      hedge_overlay_decision: overlay,
+    },
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-overlay-parent-signal',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0.04 },
+  position_target: { position_intent: 'hold', hedge_overlay_decision: overlay },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+  hedge_mode_audit: {
+    position_mode: {
+      configured_derivatives_position_mode: 'hedge',
+      required_exchange_position_mode: 'long_short_mode',
+      exchange_position_mode: 'long_short_mode',
+      exchange_position_mode_matches_configured: true,
+      position_mode_match_required: true,
+      observed_position_modes: ['long_short_mode'],
+      observed_pos_sides: ['long', 'short'],
+      mode_change_detected: false,
+      contract_mismatch_detected: false,
+    },
+    overlay: {
+      ...overlay,
+      overlay_source: 'protective',
+      items: [],
+    },
+    leg_trial_guard: {},
+    leg_orders: { total_count: 0, open_count: 0, reduce_count: 0, close_count: 0, pos_sides: [], symbols: [], items: [] },
+    leg_reconciliation: { total_count: 0, missing_execution_chain_count: 0, items: [] },
+  },
+});
+
+console.log(JSON.stringify({
+  strategyShowsParentSignals:
+    strategyHtml.includes('这次判断主要由真实库存驱动，库存延续，最终按偏多方向生效'),
+  drawerShowsParentSignals:
+    drawer.body.includes('父腿暴露信号')
+    && drawer.body.includes('这次判断主要由真实库存驱动，库存延续，最终按偏多方向生效'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsParentSignals":true', stdout)
+        self.assertIn('"drawerShowsParentSignals":true', stdout)
+
+    def test_overlay_parent_postmortem_summary_surfaces_in_decision_drawer_and_risk_view(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const overlayParentSummary = {
+  parent_family: 'directional',
+  symbol: 'BTC-USDT-SWAP',
+  target_leverage: 2,
+  margin_mode: 'cross',
+  target_long_qty: 0,
+  target_short_qty: 0,
+  current_long_qty: 0.03,
+  current_short_qty: 0,
+  target_qty: 0,
+  current_qty: 0.03,
+  effective_qty: 0.03,
+  target_signal: 'flat',
+  current_signal: 'long',
+  effective_signal: 'long',
+  signal_source: 'inventory',
+  source_of_truth: 'inventory',
+  lifecycle_state: 'inventory_only',
+  target_active: false,
+  inventory_active: true,
+};
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-overlay-parent-postmortem',
+  decision_outcome: {
+    final_action: 'exit',
+    final_direction: 'flat',
+  },
+  ai_decision_audit: {
+    configured_mode: 'baseline_only',
+    assessment_operating_mode: 'baseline_only',
+    final_action: 'exit',
+    final_direction: 'flat',
+    overlay_parent_exposure_summary: overlayParentSummary,
+    market_snapshot_fresh: true,
+    account_snapshot_fresh: true,
+    safe_to_trade: true,
+    recent_fee_drag_ratio: 0,
+    recent_churn_ratio: 0,
+    recent_low_edge_trade_streak: 0,
+    current_open_order_count: 0,
+  },
+});
+
+const riskHtml = renderRiskView({
+  blockerControl: { blockers: [], secondary_blockers: [], next_step_summary: '' },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: true,
+      review_required: false,
+      resume_eligible: true,
+      halted: false,
+      rebaseline_available: false,
+      resume_blocked_reasons: [],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-clean',
+      severity: 'CLEAN',
+      halt_required: false,
+      review_required: false,
+      observational_only: false,
+      recommended_operator_action: null,
+    },
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-03-31T16:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'dec-overlay-parent-postmortem',
+      validated_at: '2026-03-31T16:00:00Z',
+      overlay_parent_exposure_summary: overlayParentSummary,
+    },
+  },
+  metrics: {},
+  health: { runtime_state: 'healthy' },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+console.log(JSON.stringify({
+  drawerShowsPostmortem:
+    drawer.body.includes('父腿暴露复盘')
+    && drawer.body.includes('方向策略 / BTC-USDT-SWAP / 全仓 / 2x / 按真实库存判定')
+    && drawer.body.includes('目标多头 0 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
+  riskShowsReplayPostmortem:
+    riskHtml.includes('回放父腿复盘')
+    && riskHtml.includes('方向策略 / BTC-USDT-SWAP / 全仓 / 2x / 按真实库存判定')
+    && riskHtml.includes('目标多头 0 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"drawerShowsPostmortem":true', stdout)
+        self.assertIn('"riskShowsReplayPostmortem":true', stdout)
+
+    def test_risk_view_surfaces_replay_overlay_parent_history_table(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const inventorySummary = {
+  parent_family: 'directional',
+  symbol: 'BTC-USDT-SWAP',
+  target_leverage: 2,
+  margin_mode: 'cross',
+  target_long_qty: 0,
+  target_short_qty: 0,
+  current_long_qty: 0.03,
+  current_short_qty: 0,
+  target_qty: 0,
+  current_qty: 0.03,
+  effective_qty: 0.03,
+  target_signal: 'flat',
+  current_signal: 'long',
+  effective_signal: 'long',
+  signal_source: 'inventory',
+  source_of_truth: 'inventory',
+  lifecycle_state: 'inventory_only',
+  target_active: false,
+  inventory_active: true,
+};
+
+const mixedSummary = {
+  parent_family: 'directional',
+  symbol: 'BTC-USDT-SWAP',
+  target_leverage: 3,
+  margin_mode: 'cross',
+  target_long_qty: 0.02,
+  target_short_qty: 0,
+  current_long_qty: 0.03,
+  current_short_qty: 0,
+  target_qty: 0.02,
+  current_qty: 0.03,
+  effective_qty: 0.03,
+  target_signal: 'long',
+  current_signal: 'long',
+  effective_signal: 'long',
+  signal_source: 'mixed',
+  source_of_truth: 'mixed',
+  lifecycle_state: 'target_and_inventory',
+  target_active: true,
+  inventory_active: true,
+};
+
+const html = renderRiskView({
+  blockerControl: { blockers: [], secondary_blockers: [], next_step_summary: '' },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: true,
+      review_required: false,
+      resume_eligible: true,
+      halted: false,
+      rebaseline_available: false,
+      resume_blocked_reasons: [],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-clean',
+      severity: 'CLEAN',
+      halt_required: false,
+      review_required: false,
+      observational_only: false,
+      recommended_operator_action: null,
+    },
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-03-31T16:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'dec-overlay-parent-postmortem',
+      validated_at: '2026-03-31T16:00:00Z',
+      overlay_parent_exposure_summary: inventorySummary,
+    },
+    recent_validations: [
+      {
+        decision_id: 'dec-overlay-parent-postmortem',
+        validated_at: '2026-03-31T16:00:00Z',
+        healthy: true,
+        divergence_count: 0,
+        chain_health_score: 0.98,
+        overlay_parent_exposure_summary: inventorySummary,
+      },
+      {
+        decision_id: 'dec-overlay-parent-mixed',
+        validated_at: '2026-03-31T15:00:00Z',
+        healthy: true,
+        divergence_count: 1,
+        chain_health_score: 0.9,
+        overlay_parent_exposure_summary: mixedSummary,
+      },
+    ],
+  },
+  metrics: {},
+  health: { runtime_state: 'healthy' },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+console.log(JSON.stringify({
+  hasReplayHistoryCard:
+    html.includes('回放父腿历史')
+    && html.includes('回放时间 / 决策')
+    && html.includes('父腿阶段')
+    && html.includes('契约口径')
+    && html.includes('双腿数量拆解'),
+  hasInventoryHistoryRow:
+    html.includes('方向策略 / BTC-USDT-SWAP / 全仓 / 2x / 按真实库存判定')
+    && html.includes('目标多头 0 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
+  hasMixedHistoryRow:
+    html.includes('方向策略 / BTC-USDT-SWAP / 全仓 / 3x / 按目标与库存判定')
+    && html.includes('目标多头 +0.02 / 目标空头 0 / 当前多头 +0.03 / 当前空头 0'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasReplayHistoryCard":true', stdout)
+        self.assertIn('"hasInventoryHistoryRow":true', stdout)
+        self.assertIn('"hasMixedHistoryRow":true', stdout)
+
     def test_terms_prioritize_manual_review_over_only_reduce_labels(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """
@@ -2604,6 +4766,580 @@ console.log(JSON.stringify({
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"tradingReview":true', result.stdout)
         self.assertIn('"recoveryReview":true', result.stdout)
+
+    def test_overlay_parent_quantity_summary_surfaces_in_views_and_drawer(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderHomeView } from './aats/api/static/modules/views/home-view.js';
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const familyExecutionSummary = {
+  summary_mode: 'single_leg',
+  family: 'protective',
+  route_action: 'override_target',
+  family_action: 'close_protection_leg',
+  leg_count: 1,
+  position_intents: ['close_short'],
+  directions: ['short'],
+  leg_actions: ['close'],
+  execution_modes: ['protective_overlay'],
+  parent_target_signal: 'flat',
+  parent_current_signal: 'long',
+  parent_effective_signal: 'long',
+  signal_source: 'inventory',
+  parent_lifecycle_state: 'inventory_only',
+  parent_target_active: false,
+  parent_inventory_active: true,
+  parent_source_of_truth: 'inventory',
+  parent_target_qty: 0,
+  parent_current_qty: 0.03,
+  parent_effective_qty: 0.03,
+};
+
+const overlayDecision = {
+  ...familyExecutionSummary,
+  configured_mode: 'protective',
+  effective_mode: 'protective',
+  overlay_source: 'protective',
+  active: true,
+  state: 'holding',
+  main_leg_signal: 'long',
+  hedge_leg_signal: 'short',
+};
+
+const latestDecision = {
+  decision_id: 'dec-parent-qty-ui',
+  decision_time: '2026-03-31T12:00:00Z',
+  decision_context: { as_of_ts: '2026-03-31T12:00:00Z', symbol: 'BTC-USDT-SWAP' },
+  position_target: {
+    position_intent: 'close_short',
+    target_exposure_side: 'flat',
+    current_position_qty: 0.03,
+    target_position_qty: 0,
+    delta_position_qty: -0.03,
+    family_execution_summary: familyExecutionSummary,
+    hedge_overlay_decision: overlayDecision,
+  },
+  decision_outcome: {
+    final_action: 'exit',
+    final_direction: 'short',
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: { directional: {} },
+    latest_applied_target: latestDecision.position_target,
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    recent_sleeve_intents: [],
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision,
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const homeHtml = renderHomeView({
+  latestDecision,
+  executionLatest: {},
+  reconciliationLatest: {},
+  health: { halted: false },
+  mode: { execution_route: 'derivatives_live' },
+  runtime: { environment_capabilities: { exchange_submission_target: 'derivatives_live' } },
+  systemRecovery: { recovery: { safe_to_trade: true, halted: false, resume_eligible: true } },
+  blockers: { blockers: [] },
+  portfolio: { portfolio: { total_equity: 1200, unrealized_pnl: 0, gross_exposure: 0, net_exposure: 0 } },
+  accountState: { connected: true, fresh: true, ready: true, blockers: [] },
+  metrics: { current_open_order_count: 0 },
+  uiHints: {},
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-parent-qty-ui',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0.03 },
+  position_target: latestDecision.position_target,
+  decision_outcome: latestDecision.decision_outcome,
+  ai_decision_audit: {
+    final_action: 'exit',
+    final_direction: 'short',
+    family_execution_summary: familyExecutionSummary,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+  hedge_mode_audit: {
+    overlay: {
+      ...overlayDecision,
+      items: [],
+    },
+    position_mode: {},
+    leg_trial_guard: {},
+    leg_orders: { total_count: 0, open_count: 0, reduce_count: 0, close_count: 0, pos_sides: [], symbols: [], items: [] },
+    leg_reconciliation: { total_count: 0, missing_execution_chain_count: 0, items: [] },
+  },
+});
+
+const fragment = '这次判断主要由真实库存驱动，库存延续，最终按偏多方向生效，生效仓位 +0.03，目标 / 当前 0 / +0.03';
+
+console.log(JSON.stringify({
+  strategyShowsParentQty: strategyHtml.includes(fragment),
+  homeShowsParentQty: homeHtml.includes(fragment),
+  drawerShowsParentQty: drawer.body.includes(fragment),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsParentQty":true', stdout)
+        self.assertIn('"homeShowsParentQty":true', stdout)
+        self.assertIn('"drawerShowsParentQty":true', stdout)
+
+
+class TestReplayWorkspaceUI(unittest.TestCase):
+    def test_replay_workspace_route_and_module_are_available(self) -> None:
+        app = FastAPI()
+        app.include_router(auth_router)
+        app.include_router(ui_router)
+        app.state.runtime = SimpleNamespace(settings=AATSSettings.model_validate({}))
+
+        with TestClient(app) as client:
+            replay = client.get("/ui/replay")
+            replay_js = client.get("/ui/modules/views/replay-view.js")
+
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay_js.status_code, 200)
+        self.assertIn("/ui/replay", replay.text)
+        self.assertIn('data-view="replay"', replay.text)
+        self.assertIn("renderReplayView", replay_js.text)
+        self.assertIn("回放父腿历史", replay_js.text)
+        self.assertIn("父腿复盘与腿级对账联读", replay_js.text)
+
+    def test_replay_view_surfaces_filter_collapse_and_linked_reconciliation(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderReplayView } from './aats/api/static/modules/views/replay-view.js';
+
+const inventorySummary = {
+  parent_family: 'directional',
+  symbol: 'BTC-USDT-SWAP',
+  target_leverage: 2,
+  margin_mode: 'cross',
+  target_long_qty: 0,
+  target_short_qty: 0,
+  current_long_qty: 0.03,
+  current_short_qty: 0,
+  target_qty: 0,
+  current_qty: 0.03,
+  effective_qty: 0.03,
+  target_signal: 'flat',
+  current_signal: 'long',
+  effective_signal: 'long',
+  signal_source: 'inventory',
+  source_of_truth: 'inventory',
+  lifecycle_state: 'inventory_only',
+  target_active: false,
+  inventory_active: true,
+};
+
+const targetSummary = {
+  parent_family: 'directional',
+  symbol: 'BTC-USDT-SWAP',
+  target_leverage: 3,
+  margin_mode: 'cross',
+  target_long_qty: 0.02,
+  target_short_qty: 0,
+  current_long_qty: 0,
+  current_short_qty: 0,
+  target_qty: 0.02,
+  current_qty: 0,
+  effective_qty: 0.02,
+  target_signal: 'long',
+  current_signal: 'flat',
+  effective_signal: 'long',
+  signal_source: 'target_position',
+  source_of_truth: 'target_position',
+  lifecycle_state: 'target_only',
+  target_active: true,
+  inventory_active: false,
+};
+
+const html = renderReplayView({
+  replayStatus: {
+    healthy: false,
+    last_validation: {
+      decision_id: 'dec-inventory',
+      validated_at: '2026-03-31T16:00:00Z',
+      healthy: false,
+      divergence_count: 2,
+      replayed_event_count: 15,
+      chain_health_score: 0.87,
+      overlay_parent_exposure_summary: inventorySummary,
+    },
+  },
+  replayRecentValidations: {
+    validations: [
+      {
+        decision_id: 'dec-inventory',
+        validated_at: '2026-03-31T16:00:00Z',
+        healthy: false,
+        divergence_count: 2,
+        chain_health_score: 0.87,
+        overlay_parent_exposure_summary: inventorySummary,
+      },
+      {
+        decision_id: 'dec-target',
+        validated_at: '2026-03-31T15:00:00Z',
+        healthy: true,
+        divergence_count: 0,
+        chain_health_score: 0.98,
+        overlay_parent_exposure_summary: targetSummary,
+      },
+    ],
+    has_more: true,
+    total_available: 14,
+    limit: 20,
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      severity: 'SOFT_MISMATCH',
+      halt_required: false,
+    },
+    mismatch_summary: {
+      leg_mismatch_summary: {
+        total_count: 2,
+        missing_execution_chain_count: 1,
+        items: [
+          {
+            symbol: 'BTC-USDT-SWAP',
+            leg_side: 'short',
+            stored_qty: 0,
+            exchange_qty: 0.01,
+          },
+        ],
+      },
+    },
+  },
+}, { parentFilter: 'inventory_only' }, { recentReplayValidationsLimit: 20, defaultReplayValidationsLimit: 8 });
+
+console.log(JSON.stringify({
+  hasReplayWorkspace: html.includes('父腿复盘与腿级对账联读') && html.includes('回放父腿历史'),
+  hasFilterButtons:
+    html.includes('全部阶段')
+    && html.includes('仅库存活跃')
+    && html.includes('仅目标活跃')
+    && html.includes('目标与库存'),
+  hasPagingButtons: html.includes('查看更多') && html.includes('收起历史'),
+  hasLinkedRead:
+    html.includes('父腿仍靠真实库存维持，同时最新对账还有腿级差异')
+    && html.includes('缺少执行链 1 条'),
+  inventoryRowRetained: html.includes('dec-inventory'),
+  targetRowFilteredOut: !html.includes('dec-target'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasReplayWorkspace":true', stdout)
+        self.assertIn('"hasFilterButtons":true', stdout)
+        self.assertIn('"hasPagingButtons":true', stdout)
+        self.assertIn('"hasLinkedRead":true', stdout)
+        self.assertIn('"inventoryRowRetained":true', stdout)
+        self.assertIn('"targetRowFilteredOut":true', stdout)
+
+    def test_independent_adaptive_summary_surfaces_in_strategy_drawer_and_replay_view(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { renderReplayView } from './aats/api/static/modules/views/replay-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const adaptiveSummary = {
+  family: 'independent',
+  shadow_only: false,
+  rollout_enabled: true,
+  live_applied: true,
+  health_enforcement_enabled: true,
+  size_down_entry_enabled: true,
+  long_short_asymmetry_enabled: true,
+  reason_codes: ['adaptive_shadow_confidence_adjusted', 'independent_short_book_asymmetry_penalty_applied'],
+  long_leg: {
+    leg: 'long',
+    live_applied: true,
+    entry_threshold: 0.60,
+    adaptive_entry_threshold: 0.66,
+    effective_entry_threshold: 0.66,
+    close_threshold: 0.48,
+    adaptive_close_threshold: 0.50,
+    effective_close_threshold: 0.50,
+    scale_in_threshold: 0.90,
+    adaptive_scale_in_threshold: 0.96,
+    effective_scale_in_threshold: 0.96,
+    thesis_age_seconds: 1800,
+    adaptive_thesis_age_seconds: 1500,
+    de_risk_net_edge_bps: 2.0,
+    adaptive_de_risk_net_edge_bps: 2.6,
+  },
+  short_leg: {
+    leg: 'short',
+    live_applied: true,
+    entry_threshold: 0.60,
+    adaptive_entry_threshold: 0.68,
+    effective_entry_threshold: 0.68,
+    close_threshold: 0.48,
+    adaptive_close_threshold: 0.50,
+    effective_close_threshold: 0.50,
+    scale_in_threshold: 0.90,
+    adaptive_scale_in_threshold: 0.97,
+    effective_scale_in_threshold: 0.97,
+    thesis_age_seconds: 1800,
+    adaptive_thesis_age_seconds: 1500,
+    de_risk_net_edge_bps: 2.0,
+    adaptive_de_risk_net_edge_bps: 2.7,
+  },
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    configured_parameters: {
+      directional: { product_type: 'derivatives' },
+      independent: {
+        adaptive_rollout_enabled: true,
+        health_enforcement_enabled: true,
+        size_down_entry_enabled: true,
+        long_short_asymmetry_enabled: true,
+      },
+    },
+    independent_adaptive_summary: adaptiveSummary,
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {},
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    position_target: {},
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'decision_adaptive_ui',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
+  position_target: { position_intent: 'open_long', current_position_qty: 0, target_position_qty: 0.02 },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+  decision_outcome: {
+    decision_source: 'baseline',
+    decision_authority: 'reference_only',
+  },
+  ai_decision_audit: {
+    independent_adaptive_summary: adaptiveSummary,
+  },
+});
+
+const replayHtml = renderReplayView({
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'decision_adaptive_ui',
+      validated_at: '2026-04-01T12:00:00Z',
+      healthy: true,
+      divergence_count: 0,
+      replayed_event_count: 12,
+      chain_health_score: 1,
+      independent_adaptive_summary: adaptiveSummary,
+    },
+  },
+  replayRecentValidations: { validations: [] },
+  reconciliationLatest: { mismatch_summary: { leg_mismatch_summary: { total_count: 0, missing_execution_chain_count: 0, items: [] } } },
+});
+
+console.log(JSON.stringify({
+  strategyShowsAdaptiveCard: strategyHtml.includes('独立双书自适应阈值') && strategyHtml.includes('当前已按动态阈值重评估'),
+  drawerShowsAdaptiveSummary: drawer.body.includes('自适应阈值与仓位因子') && drawer.body.includes('当前已按动态阈值重评估'),
+  replayShowsAdaptivePostmortem: replayHtml.includes('最新自适应复盘') && replayHtml.includes('当前已按动态阈值重评估'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsAdaptiveCard":true', stdout)
+        self.assertIn('"drawerShowsAdaptiveSummary":true', stdout)
+        self.assertIn('"replayShowsAdaptivePostmortem":true', stdout)
+
+    def test_transition_exception_summary_surfaces_in_strategy_drawer_replay_and_risk_views(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { renderReplayView } from './aats/api/static/modules/views/replay-view.js';
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const transitionSummary = {
+  family: 'independent',
+  total_books: 2,
+  invalid_transition_count: 1,
+  affected_legs: ['long'],
+  violation_reasons: ['independent_transition_invalid:cooldown->building'],
+  blocking: true,
+  items: [
+    {
+      leg: 'long',
+      state: 'blocked',
+      book_state: 'building',
+      prior_book_state: 'cooldown',
+      book_action: 'blocked',
+      transition_valid: false,
+      transition_violation_reason: 'independent_transition_invalid:cooldown->building',
+    },
+  ],
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    configured_parameters: {
+      directional: { product_type: 'derivatives' },
+      independent: {},
+    },
+    independent_transition_exception_summary: transitionSummary,
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {},
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    position_target: {},
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'decision_transition_ui',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
+  position_target: { position_intent: 'open_long', current_position_qty: 0, target_position_qty: 0.02 },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+  decision_outcome: {
+    decision_source: 'baseline',
+    decision_authority: 'reference_only',
+  },
+  ai_decision_audit: {
+    independent_transition_exception_summary: transitionSummary,
+  },
+});
+
+const replayHtml = renderReplayView({
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'decision_transition_ui',
+      validated_at: '2026-04-01T12:00:00Z',
+      healthy: true,
+      divergence_count: 0,
+      replayed_event_count: 12,
+      chain_health_score: 1,
+      independent_transition_exception_summary: transitionSummary,
+    },
+  },
+  replayRecentValidations: { validations: [] },
+  reconciliationLatest: { mismatch_summary: { leg_mismatch_summary: { total_count: 0, missing_execution_chain_count: 0, items: [] } } },
+});
+
+const riskHtml = renderRiskView({
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'decision_transition_ui',
+      validated_at: '2026-04-01T12:00:00Z',
+      healthy: true,
+      divergence_count: 0,
+      replayed_event_count: 12,
+      chain_health_score: 1,
+      independent_transition_exception_summary: transitionSummary,
+    },
+    recent_validations: [],
+  },
+  reconciliationLatest: { mismatch_summary: { leg_mismatch_summary: { total_count: 0, missing_execution_chain_count: 0, items: [] } } },
+  blockerControl: { blockers: [], secondary_blockers: [] },
+  blockers: { blockers: [] },
+  systemRecovery: { recovery: { safe_to_trade: true, resume_eligible: true, review_required: false } },
+  accountState: { fresh: true },
+  portfolio: { portfolio: { total_equity: 0, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  positions: { local_instrument_positions: [] },
+  health: { runtime_state: 'healthy' },
+});
+
+console.log(JSON.stringify({
+  strategyShowsTransitionCard: strategyHtml.includes('独立双书迁移异常') && strategyHtml.includes('非法迁移'),
+  drawerShowsTransitionSummary: drawer.body.includes('迁移异常摘要') && drawer.body.includes('非法迁移'),
+  replayShowsTransitionPostmortem: replayHtml.includes('最新迁移异常复盘') && replayHtml.includes('非法迁移'),
+  riskShowsTransitionPostmortem: riskHtml.includes('回放迁移异常') && riskHtml.includes('非法迁移'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsTransitionCard":true', stdout)
+        self.assertIn('"drawerShowsTransitionSummary":true', stdout)
+        self.assertIn('"replayShowsTransitionPostmortem":true', stdout)
+        self.assertIn('"riskShowsTransitionPostmortem":true', stdout)
 
 
 if __name__ == "__main__":

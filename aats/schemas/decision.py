@@ -7,10 +7,17 @@ from typing import Literal
 from pydantic import Field
 from pydantic import BaseModel
 
-from aats.schemas.common import SchemaBase
+from aats.schemas.common import SchemaBase, new_id, utc_now
 from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope
 from aats.schemas.portfolio import InstrumentPositionState, PositionLegState
-from aats.schemas.strategy_runtime import StrategyFamily, StrategyLegIntent, StrategyRouteAction
+from aats.schemas.strategy_runtime import (
+    StrategyFamily,
+    StrategyFamilyAction,
+    StrategyBookExpectancySummary,
+    StrategyBookRuntimeState,
+    StrategyLegIntent,
+    StrategyRouteAction,
+)
 from aats.schemas.system import MarginModelType, ProductType
 
 
@@ -259,6 +266,41 @@ class ProfileControlDecision(SchemaBase):
     activation_record_ref: str | None = None
 
 
+class OverlayParentExposureAudit(SchemaBase):
+    parent_family: StrategyFamily | None = None
+    symbol: str | None = None
+    target_leverage: float | None = None
+    margin_mode: MarginModelType | None = None
+    target_long_qty: Decimal | None = None
+    target_short_qty: Decimal | None = None
+    current_long_qty: Decimal | None = None
+    current_short_qty: Decimal | None = None
+    target_qty: Decimal | None = None
+    current_qty: Decimal | None = None
+    effective_qty: Decimal | None = None
+    target_signal: Literal["long", "short", "flat"] | None = None
+    current_signal: Literal["long", "short", "flat"] | None = None
+    effective_signal: Literal["long", "short", "flat"] | None = None
+    signal_source: str | None = None
+    source_of_truth: str | None = None
+    lifecycle_state: str | None = None
+    target_active: bool | None = None
+    inventory_active: bool | None = None
+    source: str | None = None
+
+
+class OverlayParentExposureRecord(OverlayParentExposureAudit):
+    overlay_parent_exposure_id: str = Field(default_factory=lambda: new_id("ovlpexp"))
+    decision_id: str
+    product_type: ProductType | None = None
+    strategy_family: StrategyFamily | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
+    source_stage: Literal["position_target", "decision_outcome"]
+    source_ref: str | None = None
+    captured_at: datetime = Field(default_factory=utc_now)
+
+
 class DecisionOutcome(SchemaBase):
     decision_id: str
     symbol: str
@@ -283,9 +325,26 @@ class DecisionOutcome(SchemaBase):
     selected_strategy_family: StrategyFamily = "directional"
     selected_strategy_sleeve_id: str | None = None
     selected_strategy_route_action: StrategyRouteAction = "override_target"
+    selected_strategy_family_action: StrategyFamilyAction | None = None
     allocation_id: str | None = None
     strategy_selection_reason_codes: list[str] = Field(default_factory=list)
     strategy_selection_headline: str | None = None
+    family_execution_summary: StrategyExecutionSummary | None = None
+    book_expectancy_summary: StrategyBookExpectancySummary | None = None
+    book_runtime_states: list[StrategyBookRuntimeState] = Field(default_factory=list)
+    diagnostic_metric_flags: dict[str, bool] = Field(default_factory=dict)
+    overlay_parent_exposure: OverlayParentExposureAudit | None = None
+    parent_target_signal: Literal["long", "short", "flat"] | None = None
+    parent_current_signal: Literal["long", "short", "flat"] | None = None
+    parent_effective_signal: Literal["long", "short", "flat"] | None = None
+    signal_source: str | None = None
+    parent_lifecycle_state: str | None = None
+    parent_target_active: bool | None = None
+    parent_inventory_active: bool | None = None
+    parent_source_of_truth: str | None = None
+    parent_target_qty: Decimal | None = None
+    parent_current_qty: Decimal | None = None
+    parent_effective_qty: Decimal | None = None
     active_profile_id: str | None = None
     profile_control_source: ProfileControlSource | None = None
     ai_fallback_used: bool = False
@@ -294,6 +353,35 @@ class DecisionOutcome(SchemaBase):
 
 HedgeOverlayMode = Literal["protective", "opportunistic", "independent"]
 HedgeOverlayState = Literal["disabled", "inactive", "opening", "holding", "closing", "blocked"]
+StrategyExecutionSummaryMode = Literal["none", "single_leg", "multi_leg"]
+
+
+class StrategyExecutionSummary(SchemaBase):
+    summary_mode: StrategyExecutionSummaryMode = "none"
+    family: StrategyFamily = "directional"
+    route_action: StrategyRouteAction = "override_target"
+    family_action: StrategyFamilyAction | None = None
+    leg_count: int = 0
+    position_intents: list[str] = Field(default_factory=list)
+    directions: list[str] = Field(default_factory=list)
+    leg_actions: list[str] = Field(default_factory=list)
+    execution_modes: list[str] = Field(default_factory=list)
+    overlay_parent_exposure: OverlayParentExposureAudit | None = None
+    parent_target_signal: Literal["long", "short", "flat"] | None = None
+    parent_current_signal: Literal["long", "short", "flat"] | None = None
+    parent_effective_signal: Literal["long", "short", "flat"] | None = None
+    signal_source: str | None = None
+    parent_lifecycle_state: str | None = None
+    parent_target_active: bool | None = None
+    parent_inventory_active: bool | None = None
+    parent_source_of_truth: str | None = None
+    parent_target_qty: Decimal | None = None
+    parent_current_qty: Decimal | None = None
+    parent_effective_qty: Decimal | None = None
+    close_reason: str | None = None
+    book_expectancy_summary: StrategyBookExpectancySummary | None = None
+    book_runtime_states: list[StrategyBookRuntimeState] = Field(default_factory=list)
+    diagnostic_metric_flags: dict[str, bool] = Field(default_factory=dict)
 
 
 class HedgeOverlayDecision(SchemaBase):
@@ -306,6 +394,19 @@ class HedgeOverlayDecision(SchemaBase):
     state: HedgeOverlayState = "disabled"
     main_leg_signal: Literal["long", "short", "flat"] = "flat"
     hedge_leg_signal: Literal["long", "short", "flat"] = "flat"
+    overlay_parent_exposure: OverlayParentExposureAudit | None = None
+    parent_target_signal: Literal["long", "short", "flat"] | None = None
+    parent_current_signal: Literal["long", "short", "flat"] | None = None
+    parent_effective_signal: Literal["long", "short", "flat"] | None = None
+    signal_source: str | None = None
+    parent_lifecycle_state: str | None = None
+    parent_target_active: bool | None = None
+    parent_inventory_active: bool | None = None
+    parent_source_of_truth: str | None = None
+    parent_target_qty: Decimal | None = None
+    parent_current_qty: Decimal | None = None
+    parent_effective_qty: Decimal | None = None
+    close_reason: str | None = None
     main_leg_current_qty: Decimal = Decimal("0")
     hedge_leg_current_qty: Decimal = Decimal("0")
     main_leg_target_qty: Decimal = Decimal("0")
@@ -323,6 +424,8 @@ class HedgeOverlayDecision(SchemaBase):
     short_leg_score: float = 0.0
     long_leg_reason_codes: list[str] = Field(default_factory=list)
     short_leg_reason_codes: list[str] = Field(default_factory=list)
+    long_leg_close_reason: str | None = None
+    short_leg_close_reason: str | None = None
     long_leg_blocked_reasons: list[str] = Field(default_factory=list)
     short_leg_blocked_reasons: list[str] = Field(default_factory=list)
     reason_codes: list[str] = Field(default_factory=list)
@@ -352,9 +455,11 @@ class PositionTarget(SchemaBase):
     position_intent: Literal[
         "hold",
         "open_long",
+        "scale_in_long",
         "reduce_long",
         "close_long",
         "open_short",
+        "scale_in_short",
         "reduce_short",
         "close_short",
         "reverse_to_long",
@@ -367,6 +472,7 @@ class PositionTarget(SchemaBase):
     expected_cost_bps: float = 0.0
     expected_net_edge_bps: float = 0.0
     strategy_family: StrategyFamily = "directional"
+    strategy_family_action: StrategyFamilyAction | None = None
     strategy_sleeve_id: str | None = None
     strategy_route_action: StrategyRouteAction = "override_target"
     strategy_pair_id: str | None = None
@@ -379,6 +485,22 @@ class PositionTarget(SchemaBase):
     allocation_id: str | None = None
     strategy_bundle_id: str | None = None
     strategy_execution_legs: list[StrategyLegIntent] = Field(default_factory=list)
+    family_execution_summary: StrategyExecutionSummary | None = None
+    book_expectancy_summary: StrategyBookExpectancySummary | None = None
+    book_runtime_states: list[StrategyBookRuntimeState] = Field(default_factory=list)
+    diagnostic_metric_flags: dict[str, bool] = Field(default_factory=dict)
+    overlay_parent_exposure: OverlayParentExposureAudit | None = None
+    parent_target_signal: Literal["long", "short", "flat"] | None = None
+    parent_current_signal: Literal["long", "short", "flat"] | None = None
+    parent_effective_signal: Literal["long", "short", "flat"] | None = None
+    signal_source: str | None = None
+    parent_lifecycle_state: str | None = None
+    parent_target_active: bool | None = None
+    parent_inventory_active: bool | None = None
+    parent_source_of_truth: str | None = None
+    parent_target_qty: Decimal | None = None
+    parent_current_qty: Decimal | None = None
+    parent_effective_qty: Decimal | None = None
     hedge_overlay_decision: HedgeOverlayDecision | None = None
     guardrail_flags: list[str] = Field(default_factory=list)
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None

@@ -2,6 +2,7 @@
 import { formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import { localizeError, readableState, toneForOrderStatus } from "../terms.js";
 import {
+  fillFeeText,
   fillImpactMeta,
   fillRowMeta,
   fillRowTitle,
@@ -268,8 +269,7 @@ function fillImpactDisplay(fill, scene) {
   }
 
   const realizedPnl = Number(fill?.realized_pnl);
-  const fee = Number(fill?.fee ?? fill?.fee_amount);
-  const feeText = Number.isFinite(fee) ? `手续费 ${formatSigned(fee)}` : "手续费待同步";
+  const feeText = fillFeeText(fill, { includeCurrency: false });
   if (Number.isFinite(realizedPnl)) {
     return {
       value: formatSigned(realizedPnl),

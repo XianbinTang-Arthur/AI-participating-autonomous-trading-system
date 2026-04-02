@@ -7,8 +7,8 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState
-from aats.services.accounting import fill_fee_cost_in_quote
+from aats.schemas.execution import FillEvent, OrderIntent, OrderState, side_from_position_intent
+from aats.services.accounting import try_fill_fee_cost_in_quote
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
 from aats.services.runtime_scope import RuntimeStateScope
@@ -316,9 +316,11 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         payload = dict(row.get("raw_payload") or {})
         order_payload = payload.get("order_state")
         if isinstance(order_payload, dict):
+            order_payload.setdefault("execution_attempt_id", row.get("execution_attempt_id"))
             return OrderState.model_validate(order_payload)
         return OrderState(
             decision_id=str(row.get("decision_id") or ""),
+            execution_attempt_id=row.get("execution_attempt_id"),
             intent_id=str(row.get("intent_id") or ""),
             symbol=str(row.get("symbol") or ""),
             client_order_id=str(row.get("client_order_id") or row.get("order_id") or ""),
@@ -391,12 +393,16 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         average_fill_price = None
         if total_filled_qty > Decimal("0"):
             average_fill_price = total_notional / total_filled_qty
-        total_fees = sum((fill_fee_cost_in_quote(fill) for fill in fills), Decimal("0"))
+        total_fees = Decimal("0")
+        for fill in fills:
+            fee_cost, _fee_error = try_fill_fee_cost_in_quote(fill)
+            total_fees += fee_cost or Decimal("0")
         last_fill = fills[-1]
         remaining_qty = max(requested_qty - total_filled_qty, Decimal("0"))
         status = last_fill.order_status_after_fill or ("FILLED" if remaining_qty <= Decimal("0") else "PARTIALLY_FILLED")
         order_state = OrderState(
             decision_id=str(row.decision_id or last_fill.decision_id or ""),
+            execution_attempt_id=row.execution_attempt_id or last_fill.execution_attempt_id,
             intent_id=str(row.intent_id or last_fill.intent_id or ""),
             symbol=str(row.symbol or last_fill.symbol),
             client_order_id=str(row.client_order_id or row.order_id),
@@ -451,10 +457,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         payload = dict(row.get("raw_payload") or {})
         fill_payload = payload.get("fill_event")
         if isinstance(fill_payload, dict):
+            fill_payload.setdefault("execution_attempt_id", row.get("execution_attempt_id"))
             return FillEvent.model_validate(fill_payload)
         return FillEvent(
             fill_id=str(row["fill_id"]),
             decision_id=str(row.get("decision_id") or ""),
+            execution_attempt_id=row.get("execution_attempt_id"),
             intent_id=str(row.get("intent_id") or ""),
             client_order_id=str(row.get("client_order_id") or row.get("order_id") or ""),
             exchange_order_id=str(row.get("venue_order_id") or ""),
@@ -490,11 +498,10 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
 
     @staticmethod
     def _intent_from_order_state(order_state: OrderState) -> OrderIntent:
-        side = "buy"
-        if order_state.position_intent in {"open_short", "reduce_short", "close_short"}:
-            side = "sell"
+        side = side_from_position_intent(order_state.position_intent) or "buy"
         return OrderIntent(
             intent_id=order_state.intent_id,
+            execution_attempt_id=order_state.execution_attempt_id,
             decision_id=order_state.decision_id,
             symbol=order_state.symbol,
             side=side,
@@ -536,6 +543,7 @@ def _order_model_to_dict(row: ExecutionOrderModel) -> dict:
         "order_id": row.order_id,
         "intent_id": row.intent_id,
         "decision_id": row.decision_id,
+        "execution_attempt_id": row.execution_attempt_id,
         "client_order_id": row.client_order_id,
         "venue_order_id": row.venue_order_id,
         "symbol": row.symbol,
@@ -577,6 +585,7 @@ def _fill_model_to_dict(row: ExecutionFillModelV2) -> dict:
         "fill_id": row.fill_id,
         "venue_fill_id": row.venue_fill_id,
         "order_id": row.order_id,
+        "execution_attempt_id": row.execution_attempt_id,
         "venue_order_id": row.venue_order_id,
         "client_order_id": row.client_order_id,
         "decision_id": row.decision_id,

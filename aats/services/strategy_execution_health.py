@@ -7,7 +7,7 @@ from decimal import Decimal
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.execution import FillEvent
 from aats.schemas.portfolio import PortfolioSnapshot
-from aats.services.accounting import fill_fee_cost_in_quote, resolve_symbol_currencies
+from aats.services.accounting import resolve_symbol_currencies, try_fill_fee_cost_in_quote
 from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
 
@@ -387,13 +387,12 @@ def _walk_symbol_fills(
         if close_qty <= EPSILON_DECIMAL_12:
             continue
         base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
-        fee_cost_quote = to_decimal(
-            fill_fee_cost_in_quote(
-                fill=fill,
-                base_currency=base_currency,
-                quote_currency=quote_currency,
-            )
+        fee_cost_quote, _fee_error = try_fill_fee_cost_in_quote(
+            fill=fill,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
         )
+        fee_cost_quote = to_decimal(fee_cost_quote or Decimal("0"))
         close_fee_quote = fee_cost_quote
         if fill_qty > EPSILON_DECIMAL_12 and close_qty < fill_qty:
             close_fee_quote = fee_cost_quote * (close_qty / fill_qty)
@@ -460,13 +459,12 @@ def _walk_leg_fills(
         if close_qty <= EPSILON_DECIMAL_12:
             continue
         base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
-        fee_cost_quote = to_decimal(
-            fill_fee_cost_in_quote(
-                fill=fill,
-                base_currency=base_currency,
-                quote_currency=quote_currency,
-            )
+        fee_cost_quote, _fee_error = try_fill_fee_cost_in_quote(
+            fill=fill,
+            base_currency=base_currency,
+            quote_currency=quote_currency,
         )
+        fee_cost_quote = to_decimal(fee_cost_quote or Decimal("0"))
         fill_qty = to_decimal(fill.fill_qty)
         close_fee_quote = fee_cost_quote
         if fill_qty > EPSILON_DECIMAL_12 and close_qty < fill_qty:

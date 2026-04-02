@@ -85,7 +85,8 @@ from aats.services.operator.strategy_profiles import StrategyProfileControlServi
 from aats.services.projections.ledger_portfolio import LedgerBackedPortfolioService
 from aats.services.recovery_control import ExecutionLedgerRecoveryService, RecoveryReconciliationClassifier
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
-from aats.services.strategy_engines import StrategyCoordinatorService
+from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
+from aats.services.strategy_engines.overlay_parent_exposure import overlay_parent_exposure_record
 from aats.services.strategy_engines.sleeve_pnl_projection import SleevePnLProjectionService
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta
 from aats.services.portfolio_service.decimals import to_decimal
@@ -750,6 +751,8 @@ def _validate_startup_profile_settings(settings: AATSSettings, runtime_layering:
         raise ValueError(f"{error_prefix}_requires_operator_auth")
     if settings.operator_unsafe_write_without_auth:
         raise ValueError(f"{error_prefix}_disallows_unsafe_operator_write_without_auth")
+    if settings.operator_session_configured and not settings.operator_session_cookie_secure:
+        raise ValueError(f"{error_prefix}_requires_secure_operator_session_cookie")
 
 
 def _exchange_runtime_hardening_kind(
@@ -1118,13 +1121,31 @@ def _build_position_target_handler(
         )
         if finalized_outcome is None:
             return
-        await publish_model(
+        outcome_envelope = await publish_model(
             bus=bus,
             topic=topics.DECISION_OUTCOMES,
             key=target.symbol,
             payload_model=finalized_outcome,
             source_component="decision_engine",
         )
+        overlay_parent_record = overlay_parent_exposure_record(
+            decision_id=finalized_outcome.decision_id,
+            product_type=target.product_type,
+            strategy_family=finalized_outcome.selected_strategy_family,
+            strategy_sleeve_id=finalized_outcome.selected_strategy_sleeve_id,
+            allocation_id=finalized_outcome.allocation_id,
+            source_stage="decision_outcome",
+            source_ref=outcome_envelope.event_id,
+            parent_exposure=finalized_outcome.overlay_parent_exposure,
+        )
+        if overlay_parent_record is not None:
+            await publish_model(
+                bus=bus,
+                topic=topics.OVERLAY_PARENT_EXPOSURES,
+                key=target.symbol,
+                payload_model=overlay_parent_record,
+                source_component="decision_engine",
+            )
 
     def _reference_price_for_target(target: PositionTarget) -> Decimal | None:
         target_reference_price = (
@@ -1213,7 +1234,7 @@ def _build_position_target_handler(
     def _position_intent_for_target(*, current_qty: Decimal, target_qty: Decimal) -> str:
         if current_qty > Decimal("1e-12"):
             if target_qty > current_qty:
-                return "open_long"
+                return "scale_in_long"
             if target_qty > Decimal("1e-12"):
                 return "reduce_long"
             if target_qty < Decimal("-1e-12"):
@@ -1221,7 +1242,7 @@ def _build_position_target_handler(
             return "close_long"
         if current_qty < Decimal("-1e-12"):
             if target_qty < current_qty:
-                return "open_short"
+                return "scale_in_short"
             if target_qty < Decimal("-1e-12"):
                 return "reduce_short"
             if target_qty > Decimal("1e-12"):
@@ -1308,6 +1329,7 @@ def _build_position_target_handler(
             "action": action,
             "side": side,
             "quantity": quantity,
+            "position_intent": _position_intent_for_target(current_qty=current_qty, target_qty=target_qty),
         }
 
     def _plan_for_strategy_leg(
@@ -1351,12 +1373,13 @@ def _build_position_target_handler(
         ):
             provisional_plan = execution_planner.build_leg_plan(
                 decision_id=base_target.decision_id,
+                execution_chain_id=getattr(leg, "execution_chain_id", None),
                 symbol=leg.symbol,
                 side=semantics["side"],
                 pos_side=semantics["pos_side"],
                 action=semantics["action"],
                 quantity=semantics["quantity"],
-                urgency=base_target.urgency,
+                urgency=getattr(leg, "execution_policy_urgency", None) or base_target.urgency,
                 max_slippage_tolerance_bps=base_target.max_slippage_tolerance_bps,
                 reference_price=reference_price,
                 product_type=str(getattr(leg, "product_type", "derivatives") or "derivatives"),
@@ -1384,6 +1407,11 @@ def _build_position_target_handler(
                 strategy_opportunity_kind=getattr(leg, "opportunity_kind", None) or base_target.strategy_opportunity_kind,
                 strategy_execution_mode=getattr(leg, "execution_mode", None) or base_target.strategy_execution_mode,
                 strategy_state_phase=getattr(leg, "state_phase", None) or base_target.strategy_state_phase,
+                position_intent=semantics["position_intent"],
+                execution_style_preference=getattr(leg, "execution_style_preference", None),
+                order_type_preference=getattr(leg, "order_type_preference", None),
+                time_in_force_preference=getattr(leg, "time_in_force_preference", None),
+                limit_offset_bps_preference=getattr(leg, "limit_offset_bps_preference", None),
                 ai_execution_parameter_suggestion=base_target.ai_execution_parameter_suggestion,
             )
             if provisional_plan is None:
@@ -2550,6 +2578,7 @@ async def build_runtime(
             ),
             execution_order_repo=storage.execution_order_repo,
             execution_order_history_repo=storage.execution_order_history_repo,
+            execution_fill_repo=storage.execution_fill_repo_v2,
         )
     if (
         storage.database_runtime is not None

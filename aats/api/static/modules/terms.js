@@ -34,6 +34,7 @@
   replay_only: "仅回放",
   dry_run: "dry-run",
   live: "实盘",
+  coordinator_resolved: "协调器已解析结果",
   settings_fallback: "环境文件默认策略",
   review_required: "待人工确认",
   clean: "账实一致",
@@ -61,6 +62,7 @@
   canceled: "已撤单",
   failed: "失败",
   blocked_order: "已阻断",
+  block: "直接阻止",
   rejected_order: "已拒绝",
   local: "本地",
   exchange: "交易所",
@@ -87,6 +89,9 @@
   long: "偏多",
   short: "偏空",
   flat: "空仓",
+  target_only: "仅目标活跃",
+  inventory_only: "仅库存活跃",
+  target_and_inventory: "目标与库存同时活跃",
   hold: "保持当前仓位",
   enter: "建仓",
   scale_in: "加仓",
@@ -97,15 +102,40 @@
   hold_current: "保持当前仓位",
   advisory_only: "仅参考，不直接执行",
   protective_fallback: "保护性回退",
+  hold_family: "保持当前家族状态",
+  blocked: "当前家族被拦住",
+  protect: "建立保护腿",
+  rebalance_protection: "调整保护腿",
+  close_protection_leg: "收回保护腿",
+  open_opportunity_leg: "建立机会腿",
+  close_opportunity_leg: "收回机会腿",
+  report_only: "仅报告",
+  open_independent_book: "打开独立书",
+  scale_independent_book: "放大独立书",
+  rebalance_independent_books: "重配独立双书",
+  de_risk_independent_book: "降低独立双书风险",
+  close_failed_thesis_independent_book: "按 thesis 失效关闭独立双书",
+  close_stale_thesis_independent_book: "按 thesis 过期关闭独立双书",
+  close_independent_book: "关闭独立书",
+  failed_thesis: "thesis失效",
+  stale_thesis: "thesis过期",
+  weak_edge_de_risk: "边际变薄先降风险",
+  execution_health_degraded: "执行健康度退化",
+  liquidity_degraded: "流动性恶化",
   executed: "已执行",
   open_long: "开多",
+  scale_in_long: "加多",
   reduce_long: "减多",
   close_long: "平多",
   open_short: "开空",
+  scale_in_short: "加空",
   reduce_short: "减空",
   close_short: "平空",
   reverse_to_long: "反手做多",
   reverse_to_short: "反手做空",
+  target_position: "方向目标",
+  inventory: "真实库存",
+  mixed: "目标与库存混合",
   trend: "趋势",
   regime_range: "市场处于震荡区间",
   trend_aggressive: "趋势激进",
@@ -228,6 +258,15 @@
   independent_overlay_rollout_replay_only: "独立双书当前只允许回放验证，运行线不会真正放开",
   independent_overlay_rollout_stage_blocks_live_runtime: "独立双书当前只放开到 dry-run，这条实盘运行线不会启用",
   strategy_hedge_independent_rollout_stage_live_not_allowed_in_phase_d: "当前阶段还不允许把独立双书直接放开到实盘",
+  independent_long_book_size_down_entry_enabled: "多书开仓按动态资本因子缩量",
+  independent_short_book_size_down_entry_enabled: "空书开仓按动态资本因子缩量",
+  independent_short_book_asymmetry_penalty_applied: "空书按 long/short 非对称规则额外收缩",
+  independent_long_book_de_risk_execution_health_degraded: "多书因执行健康恶化转为降风险",
+  independent_short_book_de_risk_execution_health_degraded: "空书因执行健康恶化转为降风险",
+  independent_long_book_de_risk_liquidity_degraded: "多书因流动性恶化转为降风险",
+  independent_short_book_de_risk_liquidity_degraded: "空书因流动性恶化转为降风险",
+  independent_long_book_de_risk_weak_edge: "多书因边际转弱转为降风险",
+  independent_short_book_de_risk_weak_edge: "空书因边际转弱转为降风险",
   directional_strategy_target: "沿用方向策略目标",
   smart_arbitrage_disabled: "智能套利未启用",
   smart_arbitrage_derivatives_runtime_required: "智能套利自动执行当前仅支持合约运行域",
@@ -423,6 +462,17 @@
   taker_bias: "偏主动",
   bounded_limit_ioc: "受限限价成交",
   bounded_taker_cap: "受限主动成交",
+  independent_entry_strong_edge_aggressive: "强边际直接开仓",
+  independent_entry_guarded_passive_first: "守纪律开仓，优先被动",
+  independent_entry_guarded_aggressive_fallback: "守纪律开仓，但当前回退主动成交",
+  independent_scale_strong_edge_aggressive: "强边际加仓",
+  independent_scale_guarded_passive_first: "守纪律加仓，优先被动",
+  independent_scale_guarded_aggressive_fallback: "守纪律加仓，但当前回退主动成交",
+  independent_weak_edge_guarded_reduce: "弱边际先降风险",
+  independent_liquidity_degraded_guarded_reduce: "流动性转差，先守纪律降风险",
+  independent_execution_health_urgent_exit: "执行健康恶化，优先快速退出",
+  independent_failed_thesis_force_exit: "交易 thesis 失效，立即退出",
+  independent_stale_thesis_guarded_exit: "交易 thesis 变陈旧，守纪律退出",
   not_requested: "未请求",
 };
 
@@ -645,6 +695,708 @@ const ERROR_MAP = {
 export function readableState(value, fallback = "待确认") {
   if (value === null || value === undefined || value === "") return fallback;
   return TERM_MAP[String(value).toLowerCase()] || String(value);
+}
+
+function normalizedFamilyExecutionSummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (Array.isArray(source.position_intents) || Array.isArray(source.directions)) {
+    return source;
+  }
+  const nested = source.family_execution_summary || source.familyExecutionSummary;
+  return nested && typeof nested === "object" ? nested : {};
+}
+
+function normalizedSummaryList(value) {
+  return Array.isArray(value)
+    ? value
+      .map((item) => String(item || "").trim().toLowerCase())
+      .filter(Boolean)
+    : [];
+}
+
+function normalizedBookExpectancySummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (Array.isArray(source.books)) {
+    return source;
+  }
+  const direct = source.book_expectancy_summary || source.bookExpectancySummary;
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const familySummary = normalizedFamilyExecutionSummary(source);
+  if (!familySummary || typeof familySummary !== "object") {
+    return {};
+  }
+  const nested = familySummary.book_expectancy_summary || familySummary.bookExpectancySummary;
+  return nested && typeof nested === "object" ? nested : {};
+}
+
+function normalizedExpectedVsRealizedSummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (
+    Object.prototype.hasOwnProperty.call(source, "sample_count")
+    || Object.prototype.hasOwnProperty.call(source, "avg_expected_net_edge_bps")
+    || Object.prototype.hasOwnProperty.call(source, "avg_realized_net_bps")
+    || Object.prototype.hasOwnProperty.call(source, "close_reason_distribution")
+    || Object.prototype.hasOwnProperty.call(source, "book_breakdown")
+  ) {
+    return source;
+  }
+  const direct = source.independent_expected_vs_realized_summary || source.independentExpectedVsRealizedSummary;
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const audit = source.ai_decision_audit || source.aiDecisionAudit;
+  if (audit && typeof audit === "object") {
+    const nested = audit.independent_expected_vs_realized_summary || audit.independentExpectedVsRealizedSummary;
+    if (nested && typeof nested === "object") {
+      return nested;
+    }
+  }
+  return {};
+}
+
+function normalizedIndependentAdaptiveSummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (
+    Object.prototype.hasOwnProperty.call(source, "long_leg")
+    || Object.prototype.hasOwnProperty.call(source, "short_leg")
+    || Object.prototype.hasOwnProperty.call(source, "rollout_enabled")
+    || Object.prototype.hasOwnProperty.call(source, "live_applied")
+  ) {
+    return source;
+  }
+  const direct = source.independent_adaptive_summary || source.independentAdaptiveSummary;
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const audit = source.ai_decision_audit || source.aiDecisionAudit;
+  if (audit && typeof audit === "object") {
+    const nested = audit.independent_adaptive_summary || audit.independentAdaptiveSummary;
+    if (nested && typeof nested === "object") {
+      return nested;
+    }
+  }
+  return {};
+}
+
+function normalizedIndependentTransitionExceptionSummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (
+    Object.prototype.hasOwnProperty.call(source, "invalid_transition_count")
+    || Object.prototype.hasOwnProperty.call(source, "violation_reasons")
+    || Object.prototype.hasOwnProperty.call(source, "blocking")
+  ) {
+    return source;
+  }
+  const direct = source.independent_transition_exception_summary || source.independentTransitionExceptionSummary;
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const audit = source.ai_decision_audit || source.aiDecisionAudit;
+  if (audit && typeof audit === "object") {
+    const nested = audit.independent_transition_exception_summary || audit.independentTransitionExceptionSummary;
+    if (nested && typeof nested === "object") {
+      return nested;
+    }
+  }
+  return {};
+}
+
+function normalizedOverlayDecision(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  const directAudit = source.overlay_parent_exposure
+    || source.overlayParentExposure
+    || source.overlay_parent_exposure_summary
+    || source.overlayParentExposureSummary;
+  if (directAudit && typeof directAudit === "object") {
+    return {
+      ...source,
+      ...directAudit,
+      parent_target_signal: directAudit.target_signal,
+      parent_current_signal: directAudit.current_signal,
+      parent_effective_signal: directAudit.effective_signal,
+      parent_lifecycle_state: directAudit.lifecycle_state,
+      parent_target_active: directAudit.target_active,
+      parent_inventory_active: directAudit.inventory_active,
+      parent_source_of_truth: directAudit.source_of_truth,
+      parent_target_qty: directAudit.target_qty,
+      parent_current_qty: directAudit.current_qty,
+      parent_effective_qty: directAudit.effective_qty,
+    };
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(source, "target_signal")
+    || Object.prototype.hasOwnProperty.call(source, "current_signal")
+    || Object.prototype.hasOwnProperty.call(source, "effective_signal")
+    || Object.prototype.hasOwnProperty.call(source, "source_of_truth")
+    || Object.prototype.hasOwnProperty.call(source, "effective_qty")
+  ) {
+    return {
+      ...source,
+      parent_target_signal: source.target_signal,
+      parent_current_signal: source.current_signal,
+      parent_effective_signal: source.effective_signal,
+      parent_lifecycle_state: source.lifecycle_state,
+      parent_target_active: source.target_active,
+      parent_inventory_active: source.inventory_active,
+      parent_source_of_truth: source.source_of_truth,
+      parent_target_qty: source.target_qty,
+      parent_current_qty: source.current_qty,
+      parent_effective_qty: source.effective_qty,
+    };
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(source, "main_leg_signal")
+    || Object.prototype.hasOwnProperty.call(source, "parent_effective_signal")
+    || Object.prototype.hasOwnProperty.call(source, "parent_source_of_truth")
+    || Object.prototype.hasOwnProperty.call(source, "parent_effective_qty")
+  ) {
+    return source;
+  }
+  const direct = source.hedge_overlay_decision || source.hedgeOverlayDecision;
+  if (direct && typeof direct === "object") {
+    const nestedAudit = direct.overlay_parent_exposure || direct.overlayParentExposure;
+    if (nestedAudit && typeof nestedAudit === "object") {
+      return {
+        ...direct,
+        ...nestedAudit,
+        parent_target_signal: nestedAudit.target_signal,
+        parent_current_signal: nestedAudit.current_signal,
+        parent_effective_signal: nestedAudit.effective_signal,
+        parent_lifecycle_state: nestedAudit.lifecycle_state,
+        parent_target_active: nestedAudit.target_active,
+        parent_inventory_active: nestedAudit.inventory_active,
+        parent_source_of_truth: nestedAudit.source_of_truth,
+        parent_target_qty: nestedAudit.target_qty,
+        parent_current_qty: nestedAudit.current_qty,
+        parent_effective_qty: nestedAudit.effective_qty,
+      };
+    }
+    return direct;
+  }
+  const familySummary = normalizedFamilyExecutionSummary(source);
+  if (
+    familySummary
+    && typeof familySummary === "object"
+    && (
+      Object.prototype.hasOwnProperty.call(familySummary, "parent_target_signal")
+      || Object.prototype.hasOwnProperty.call(familySummary, "parent_current_signal")
+      || Object.prototype.hasOwnProperty.call(familySummary, "parent_effective_signal")
+      || Object.prototype.hasOwnProperty.call(familySummary, "signal_source")
+      || Object.prototype.hasOwnProperty.call(familySummary, "parent_source_of_truth")
+      || Object.prototype.hasOwnProperty.call(familySummary, "parent_effective_qty")
+    )
+  ) {
+    return familySummary;
+  }
+  if (familySummary && typeof familySummary === "object") {
+    const nestedAudit = familySummary.overlay_parent_exposure || familySummary.overlayParentExposure;
+    if (nestedAudit && typeof nestedAudit === "object") {
+      return {
+        ...familySummary,
+        ...nestedAudit,
+        parent_target_signal: nestedAudit.target_signal,
+        parent_current_signal: nestedAudit.current_signal,
+        parent_effective_signal: nestedAudit.effective_signal,
+        parent_lifecycle_state: nestedAudit.lifecycle_state,
+        parent_target_active: nestedAudit.target_active,
+        parent_inventory_active: nestedAudit.inventory_active,
+        parent_source_of_truth: nestedAudit.source_of_truth,
+        parent_target_qty: nestedAudit.target_qty,
+        parent_current_qty: nestedAudit.current_qty,
+        parent_effective_qty: nestedAudit.effective_qty,
+      };
+    }
+  }
+  return {};
+}
+
+function readableBookLabel(leg, source = "") {
+  if (source === "opportunistic_overlay" || source === "protective_overlay") {
+    return leg === "short" ? "空腿" : "多腿";
+  }
+  return leg === "short" ? "空书" : "多书";
+}
+
+function readableExpectancyBps(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "0.00";
+  return number.toFixed(2);
+}
+
+function readablePercentRatio(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "";
+  return `${(number * 100).toFixed(1)}%`;
+}
+
+function readableSignedQuantity(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "待确认";
+  const normalized = number.toFixed(4).replace(/\.?0+$/, "");
+  if (!normalized || normalized === "-0") return "0";
+  return number > 0 ? `+${normalized}` : normalized;
+}
+
+function readableCloseReasonDistribution(items = []) {
+  if (!Array.isArray(items) || !items.length) return "";
+  return items
+    .slice(0, 3)
+    .map((item) => `${localizeError(item?.reason, item?.reason || "待确认")} ${Number(item?.count || 0)} 次`)
+    .join("、");
+}
+
+function readableExpectedVsRealizedBookBreakdown(summary = {}) {
+  const items = Array.isArray(summary?.book_breakdown) ? summary.book_breakdown : [];
+  if (!items.length) return "";
+  return items
+    .map((item) => {
+      const leg = readableBookLabel(String(item?.leg || "").trim().toLowerCase(), "independent_book");
+      return `${leg} 样本 ${Number(item?.sample_count || 0)} / 预期 ${readableExpectancyBps(item?.avg_expected_net_edge_bps)} / 已实现 ${readableExpectancyBps(item?.avg_realized_net_bps)} 基点`;
+    })
+    .join(" | ");
+}
+
+export function hasFamilyExecutionSummary(source = {}) {
+  const summary = normalizedFamilyExecutionSummary(source);
+  return normalizedSummaryList(summary.position_intents).length > 0;
+}
+
+export function readableFamilyExecutionSummary(source = {}, fallback = "保持当前仓位") {
+  const summary = normalizedFamilyExecutionSummary(source);
+  const intents = normalizedSummaryList(summary.position_intents);
+  if (intents.length === 1) {
+    return readableState(intents[0], fallback);
+  }
+  if (intents.length > 1) {
+    const legCount = Number(summary.leg_count || intents.length || 0);
+    return `${legCount > 0 ? `${legCount} 条腿联动：` : "多腿联动："}${intents.map((item) => readableState(item, item)).join(" / ")}`;
+  }
+  if (source && typeof source === "object") {
+    return readableState(source.position_intent || "hold", fallback);
+  }
+  return fallback;
+}
+
+export function readableFamilyExecutionDirection(source = {}, fallback = "方向待确认") {
+  const summary = normalizedFamilyExecutionSummary(source);
+  const directions = normalizedSummaryList(summary.directions);
+  if (directions.length === 1) {
+    return readableState(directions[0], fallback);
+  }
+  if (directions.length > 1) {
+    return "双向";
+  }
+  if (source && typeof source === "object") {
+    return readableState(source.target_exposure_side || source.position_intent, fallback);
+  }
+  return fallback;
+}
+
+export function readableFamilyExecutionMeta(source = {}, fallback = "当前没有额外执行摘要") {
+  const summary = normalizedFamilyExecutionSummary(source);
+  const intents = normalizedSummaryList(summary.position_intents);
+  if (intents.length > 1) {
+    const legCount = Number(summary.leg_count || intents.length || 0);
+    return `${legCount > 0 ? legCount : intents.length} 条腿联动`;
+  }
+  if (intents.length === 1) {
+    const legCount = Number(summary.leg_count || 1);
+    return `${legCount} 条腿执行`;
+  }
+  return fallback;
+}
+
+export function readableBookExpectancySummary(source = {}, fallback = "当前没有每条书的边际拆解") {
+  const summary = normalizedBookExpectancySummary(source);
+  const books = Array.isArray(summary.books) ? summary.books : [];
+  if (!books.length) return fallback;
+  const summarySource = String(summary?.source || "").trim().toLowerCase();
+  return books
+    .map((book) => {
+      const leg = readableBookLabel(String(book?.leg || "").trim().toLowerCase(), summarySource);
+      const discipline = [];
+      if (book?.required_safe_net_edge_bps !== undefined && book?.required_safe_net_edge_bps !== null) {
+        discipline.push(`安全净边际 ${readableExpectancyBps(book.required_safe_net_edge_bps)} 基点`);
+      }
+      if (
+        book?.max_acceptable_cost_bps !== undefined
+        && book?.max_acceptable_cost_bps !== null
+        && Number(book.max_acceptable_cost_bps) > 0
+      ) {
+        discipline.push(`成本上限 ${readableExpectancyBps(book.max_acceptable_cost_bps)} 基点`);
+      }
+      if (book?.weak_edge_execution_mode) {
+        discipline.push(`弱边际 ${readableState(book.weak_edge_execution_mode, book.weak_edge_execution_mode)}`);
+      }
+      if (book?.weak_edge_report_only === true) {
+        discipline.push("本轮只保留报告");
+      }
+      if (book?.passive_first_required === true) {
+        discipline.push("要求被动优先");
+      }
+      if (book?.book_action) {
+        discipline.push(`腿动作 ${readableState(book.book_action, book.book_action)}`);
+      }
+      if (book?.close_reason) {
+        discipline.push(`退出原因 ${localizeError(book.close_reason, book.close_reason)}`);
+      }
+      if (book?.policy_reason) {
+        discipline.push(`执行策略 ${readableState(book.policy_reason, book.policy_reason)}`);
+      }
+      if (book?.execution_policy_urgency) {
+        discipline.push(`优先级 ${readableState(book.execution_policy_urgency, book.execution_policy_urgency)}`);
+      }
+      if (book?.execution_style_preference || book?.order_type_preference || book?.time_in_force_preference) {
+        const executionParts = [
+          book?.execution_style_preference ? readableState(book.execution_style_preference, book.execution_style_preference) : null,
+          book?.order_type_preference ? readableState(book.order_type_preference, book.order_type_preference) : null,
+          book?.time_in_force_preference ? readableState(book.time_in_force_preference, book.time_in_force_preference) : null,
+        ].filter(Boolean);
+        if (executionParts.length) {
+          discipline.push(`执行偏好 ${executionParts.join(" / ")}`);
+        }
+      }
+      if (book?.liquidity_quality_score !== undefined && book?.liquidity_quality_score !== null) {
+        discipline.push(`流动性质量 ${readableExpectancyBps(book.liquidity_quality_score)}`);
+      }
+      if (book?.execution_health_state) {
+        discipline.push(`执行健康 ${readableState(book.execution_health_state, book.execution_health_state)}`);
+      }
+      const suffix = discipline.length ? `（${discipline.join(" / ")}）` : "";
+      return `${leg} 毛/成本/净 ${readableExpectancyBps(book?.expected_gross_edge_bps)}/${readableExpectancyBps(book?.expected_cost_bps)}/${readableExpectancyBps(book?.expected_net_edge_bps)} 基点${suffix}`;
+    })
+    .join(" | ");
+}
+
+export function readableExpectedVsRealizedSummary(source = {}, fallback = "当前还没有预期与已实现诊断") {
+  const summary = normalizedExpectedVsRealizedSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const parts = [];
+  const sampleCount = Number(summary?.sample_count || 0);
+  const expectedSampleCount = Number(summary?.expected_sample_count || 0);
+  const realizedSampleCount = Number(summary?.realized_sample_count || 0);
+  const overlapSampleCount = Number(summary?.overlap_sample_count || 0);
+  if (sampleCount > 0 || expectedSampleCount > 0 || realizedSampleCount > 0) {
+    parts.push(
+      `样本 ${sampleCount}（预期 ${expectedSampleCount} / 已实现 ${realizedSampleCount} / 重合 ${overlapSampleCount}）`
+    );
+  }
+  if (
+    Number(summary?.entry_count || 0) > 0
+    || Number(summary?.scale_in_count || 0) > 0
+    || Number(summary?.close_count || 0) > 0
+    || Number(summary?.de_risk_count || 0) > 0
+  ) {
+    parts.push(
+      `开/加/收/降 ${Number(summary?.entry_count || 0)}/${Number(summary?.scale_in_count || 0)}/${Number(summary?.close_count || 0)}/${Number(summary?.de_risk_count || 0)}`
+    );
+  }
+  if (summary?.avg_expected_net_edge_bps !== undefined && summary?.avg_expected_net_edge_bps !== null) {
+    parts.push(`预期净边际 ${readableExpectancyBps(summary.avg_expected_net_edge_bps)} 基点`);
+  }
+  if (summary?.avg_realized_net_bps !== undefined && summary?.avg_realized_net_bps !== null) {
+    parts.push(`已实现净收益 ${readableExpectancyBps(summary.avg_realized_net_bps)} 基点`);
+  }
+  return parts.length ? parts.join(" | ") : fallback;
+}
+
+export function readableExpectedVsRealizedMeta(source = {}, fallback = "当前没有额外诊断说明") {
+  const summary = normalizedExpectedVsRealizedSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const parts = [];
+  if (
+    summary?.avg_realized_gross_bps !== undefined
+    && summary?.avg_realized_gross_bps !== null
+    && summary?.avg_realized_fee_bps !== undefined
+    && summary?.avg_realized_fee_bps !== null
+  ) {
+    parts.push(
+      `毛收益/费用 ${readableExpectancyBps(summary.avg_realized_gross_bps)}/${readableExpectancyBps(summary.avg_realized_fee_bps)} 基点`
+    );
+  }
+  if (summary?.avg_realized_slippage_bps !== undefined && summary?.avg_realized_slippage_bps !== null) {
+    parts.push(`滑点 ${readableExpectancyBps(summary.avg_realized_slippage_bps)} 基点`);
+  }
+  if (summary?.expected_realized_net_gap_bps !== undefined && summary?.expected_realized_net_gap_bps !== null) {
+    parts.push(`预期偏差 ${readableExpectancyBps(summary.expected_realized_net_gap_bps)} 基点`);
+  }
+  if (summary?.expected_realized_correlation !== undefined && summary?.expected_realized_correlation !== null) {
+    parts.push(`相关性 ${Number(summary.expected_realized_correlation).toFixed(2)}`);
+  }
+  if (summary?.fee_drag_ratio !== undefined && summary?.fee_drag_ratio !== null) {
+    parts.push(`费用拖累 ${readablePercentRatio(summary.fee_drag_ratio)}`);
+  }
+  if (summary?.churn_ratio !== undefined && summary?.churn_ratio !== null) {
+    parts.push(`来回交易占比 ${readablePercentRatio(summary.churn_ratio)}`);
+  }
+  if (summary?.passive_first_usage_ratio !== undefined && summary?.passive_first_usage_ratio !== null) {
+    parts.push(`被动优先 ${readablePercentRatio(summary.passive_first_usage_ratio)}`);
+  }
+  if (Number(summary?.weak_edge_entry_count || 0) > 0) {
+    parts.push(`弱边际入场 ${Number(summary.weak_edge_entry_count)} 次`);
+  }
+  const closeReasonSummary = readableCloseReasonDistribution(summary?.close_reason_distribution);
+  if (closeReasonSummary) {
+    parts.push(`退出原因 ${closeReasonSummary}`);
+  }
+  const breakdown = readableExpectedVsRealizedBookBreakdown(summary);
+  if (breakdown) {
+    parts.push(`分腿 ${breakdown}`);
+  }
+  return parts.length ? parts.join(" | ") : fallback;
+}
+
+function readableIndependentAdaptiveLegSummary(legSummary = {}) {
+  if (!legSummary || typeof legSummary !== "object" || !Object.keys(legSummary).length) return "";
+  const leg = readableBookLabel(String(legSummary.leg || "").trim().toLowerCase(), "independent_book");
+  const mode = legSummary.live_applied ? "已生效" : "影子阈值";
+  return [
+    `${leg}${mode}`,
+    `开 ${readableExpectancyBps(legSummary.entry_threshold)}→${readableExpectancyBps(legSummary.adaptive_entry_threshold)}（生效 ${readableExpectancyBps(legSummary.effective_entry_threshold)}）`,
+    `收 ${readableExpectancyBps(legSummary.close_threshold)}→${readableExpectancyBps(legSummary.adaptive_close_threshold)}（生效 ${readableExpectancyBps(legSummary.effective_close_threshold)}）`,
+    `加 ${readableExpectancyBps(legSummary.scale_in_threshold)}→${readableExpectancyBps(legSummary.adaptive_scale_in_threshold)}（生效 ${readableExpectancyBps(legSummary.effective_scale_in_threshold)}）`,
+    `持有时长 ${readableExpectancyBps(legSummary.thesis_age_seconds)}→${readableExpectancyBps(legSummary.adaptive_thesis_age_seconds)} 秒`,
+    `降风险阈值 ${readableExpectancyBps(legSummary.de_risk_net_edge_bps)}→${readableExpectancyBps(legSummary.adaptive_de_risk_net_edge_bps)} 基点`,
+  ].join("，");
+}
+
+export function readableIndependentAdaptiveSummary(source = {}, fallback = "当前还没有独立双书自适应摘要") {
+  const summary = normalizedIndependentAdaptiveSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const parts = [
+    readableIndependentAdaptiveLegSummary(summary.long_leg),
+    readableIndependentAdaptiveLegSummary(summary.short_leg),
+  ].filter(Boolean);
+  return parts.length ? parts.join(" | ") : fallback;
+}
+
+export function readableIndependentAdaptiveMeta(source = {}, fallback = "当前没有额外自适应说明") {
+  const summary = normalizedIndependentAdaptiveSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const parts = [
+    summary.live_applied ? "当前已按动态阈值重评估" : summary.rollout_enabled ? "当前只输出影子阈值" : "当前没有启用动态阈值",
+    `健康约束 ${summary.health_enforcement_enabled ? "已启用" : "未启用"}`,
+    `缩量入场 ${summary.size_down_entry_enabled ? "已启用" : "未启用"}`,
+    `多空非对称 ${summary.long_short_asymmetry_enabled ? "已启用" : "未启用"}`,
+  ];
+  const codes = Array.isArray(summary.reason_codes) ? summary.reason_codes : [];
+  if (codes.length) {
+    parts.push(codes.slice(0, 3).map((item) => localizeError(item, item)).join(" / "));
+  }
+  return parts.join(" | ");
+}
+
+function readableTransitionViolationReason(reason) {
+  const normalized = String(reason || "").trim();
+  if (!normalized) return "迁移原因待确认";
+  if (normalized.startsWith("independent_transition_invalid:")) {
+    const transition = normalized.slice("independent_transition_invalid:".length);
+    const [fromState, toState] = transition.split("->");
+    if (fromState && toState) {
+      return `非法迁移 ${readableState(fromState, fromState)} -> ${readableState(toState, toState)}`;
+    }
+  }
+  return localizeError(normalized, normalized);
+}
+
+export function readableIndependentTransitionExceptionSummary(source = {}, fallback = "当前没有独立双书迁移异常摘要") {
+  const summary = normalizedIndependentTransitionExceptionSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const invalidCount = Number(summary.invalid_transition_count || 0);
+  if (invalidCount <= 0) return fallback;
+  const affectedLegs = Array.isArray(summary.affected_legs) ? summary.affected_legs : [];
+  const affectedLegCopy = affectedLegs.length
+    ? affectedLegs
+      .map((leg) => readableBookLabel(String(leg || "").trim().toLowerCase(), "independent_book"))
+      .join(" / ")
+    : "待确认腿";
+  const firstReason = Array.isArray(summary.violation_reasons) && summary.violation_reasons.length
+    ? readableTransitionViolationReason(summary.violation_reasons[0])
+    : "";
+  return [
+    `检测到 ${invalidCount} 条独立双书迁移异常`,
+    `涉及 ${affectedLegCopy}`,
+    firstReason,
+  ].filter(Boolean).join("，");
+}
+
+export function readableIndependentTransitionExceptionMeta(source = {}, fallback = "当前没有额外迁移异常说明") {
+  const summary = normalizedIndependentTransitionExceptionSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const invalidCount = Number(summary.invalid_transition_count || 0);
+  if (invalidCount <= 0) return fallback;
+  const parts = [
+    summary.blocking ? "当前包含阻断态迁移异常" : "当前迁移异常尚未进入阻断态",
+  ];
+  const items = Array.isArray(summary.items) ? summary.items : [];
+  const itemCopy = items
+    .slice(0, 2)
+    .map((item) => {
+      const leg = readableBookLabel(String(item?.leg || "").trim().toLowerCase(), "independent_book");
+      const priorBookState = String(item?.prior_book_state || "").trim();
+      const bookState = String(item?.book_state || "").trim();
+      const transition = priorBookState && bookState
+        ? `${readableState(priorBookState, priorBookState)} -> ${readableState(bookState, bookState)}`
+        : readableTransitionViolationReason(item?.transition_violation_reason);
+      const bookAction = item?.book_action
+        ? `动作 ${readableState(item.book_action, item.book_action)}`
+        : null;
+      return [leg, transition, bookAction].filter(Boolean).join(" / ");
+    })
+    .filter(Boolean)
+    .join(" | ");
+  if (itemCopy) {
+    parts.push(itemCopy);
+  }
+  const reasons = Array.isArray(summary.violation_reasons) ? summary.violation_reasons : [];
+  if (reasons.length) {
+    parts.push(reasons.slice(0, 2).map((reason) => readableTransitionViolationReason(reason)).join(" / "));
+  }
+  return parts.join(" | ");
+}
+
+function normalizedBookRuntimeStates(source = {}) {
+  if (!source || typeof source !== "object") return [];
+  if (Array.isArray(source.book_runtime_states)) return source.book_runtime_states;
+  if (Array.isArray(source.bookRuntimeStates)) return source.bookRuntimeStates;
+  const summary = source.family_execution_summary || source.familyExecutionSummary;
+  if (summary && typeof summary === "object") {
+    if (Array.isArray(summary.book_runtime_states)) return summary.book_runtime_states;
+    if (Array.isArray(summary.bookRuntimeStates)) return summary.bookRuntimeStates;
+  }
+  return [];
+}
+
+export function readableBookRuntimeStateSummary(source = {}, fallback = "当前没有每条书的原生状态") {
+  const states = normalizedBookRuntimeStates(source);
+  if (!states.length) return fallback;
+  return states
+    .map((item) => {
+      const leg = readableBookLabel(String(item?.leg || "").trim().toLowerCase(), "independent_book");
+      const parts = [`${leg}${readableState(item?.state || "inactive", item?.state || "inactive")}`];
+      if (item?.book_action) {
+        parts.push(`动作 ${readableState(item.book_action, item.book_action)}`);
+      }
+      if (item?.close_reason) {
+        parts.push(`退出原因 ${localizeError(item.close_reason, item.close_reason)}`);
+      }
+      if (item?.policy_reason) {
+        parts.push(`执行策略 ${readableState(item.policy_reason, item.policy_reason)}`);
+      }
+      if (item?.execution_policy_urgency) {
+        parts.push(`优先级 ${readableState(item.execution_policy_urgency, item.execution_policy_urgency)}`);
+      }
+      if (item?.thesis_age_seconds !== undefined && item?.thesis_age_seconds !== null) {
+        parts.push(`thesis 已持续 ${readableExpectancyBps(item.thesis_age_seconds)} 秒`);
+      }
+      if (item?.cooldown_until) {
+        parts.push(`冷却到 ${String(item.cooldown_until)}`);
+      }
+      return parts.join(" / ");
+    })
+    .join(" | ");
+}
+
+function overlayDriverLabel(signalSource, sourceOfTruth) {
+  const normalized = String(signalSource || sourceOfTruth || "").trim().toLowerCase();
+  if (!normalized) return "当前驱动来源待确认";
+  if (normalized === "inventory" || normalized === "inventory_only") return "真实库存";
+  if (normalized === "target_position" || normalized === "target_only" || normalized === "target") return "目标仓位";
+  if (normalized === "mixed" || normalized === "target_and_inventory") return "目标与库存";
+  return localizeError(normalized, normalized);
+}
+
+function overlayLifecycleLabel(lifecycleState, targetActive, inventoryActive) {
+  const normalized = String(lifecycleState || "").trim().toLowerCase();
+  if (normalized === "target_only" || (targetActive === true && inventoryActive === false)) return "目标主导";
+  if (normalized === "inventory_only" || (targetActive === false && inventoryActive === true)) return "库存延续";
+  if (normalized === "target_and_inventory" || (targetActive === true && inventoryActive === true)) return "目标与库存共同生效";
+  return lifecycleState ? readableState(lifecycleState, lifecycleState) : "";
+}
+
+export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
+  const overlay = normalizedOverlayDecision(source);
+  if (!overlay || typeof overlay !== "object" || !Object.keys(overlay).length) return fallback;
+  const targetSignal = overlay.parent_target_signal;
+  const currentSignal = overlay.parent_current_signal;
+  const effectiveSignal = overlay.parent_effective_signal;
+  const signalSource = overlay.signal_source;
+  const lifecycleState = overlay.parent_lifecycle_state;
+  const targetActive = overlay.parent_target_active;
+  const inventoryActive = overlay.parent_inventory_active;
+  const sourceOfTruth = overlay.parent_source_of_truth;
+  const targetQty = overlay.parent_target_qty;
+  const currentQty = overlay.parent_current_qty;
+  const effectiveQty = overlay.parent_effective_qty;
+  if (
+    !targetSignal
+    && !currentSignal
+    && !effectiveSignal
+    && !signalSource
+    && lifecycleState === undefined
+    && targetActive === undefined
+    && inventoryActive === undefined
+    && !sourceOfTruth
+    && targetQty === undefined
+    && currentQty === undefined
+    && effectiveQty === undefined
+  ) return fallback;
+  const parts = [
+    `这次判断主要由${overlayDriverLabel(signalSource, sourceOfTruth)}驱动`,
+    `${overlayLifecycleLabel(lifecycleState, targetActive, inventoryActive) || "阶段待确认"}`,
+    `最终按${readableState(effectiveSignal || targetSignal || currentSignal, "待确认")}方向生效`,
+  ];
+  if (effectiveQty !== undefined && effectiveQty !== null) {
+    parts.push(`生效仓位 ${readableSignedQuantity(effectiveQty)}`);
+  }
+  if (targetQty !== undefined && targetQty !== null && currentQty !== undefined && currentQty !== null) {
+    parts.push(`目标 / 当前 ${readableSignedQuantity(targetQty)} / ${readableSignedQuantity(currentQty)}`);
+  }
+  return parts.join("，");
+}
+
+export function readableOverlayParentPostmortemMeta(source = {}, fallback = "") {
+  const overlay = normalizedOverlayDecision(source);
+  if (!overlay || typeof overlay !== "object" || !Object.keys(overlay).length) return fallback;
+  const parts = [];
+  if (overlay.parent_family) {
+    parts.push(readableState(overlay.parent_family, overlay.parent_family));
+  }
+  if (overlay.symbol) {
+    parts.push(overlay.symbol);
+  }
+  if (overlay.margin_mode) {
+    parts.push(readableState(overlay.margin_mode, overlay.margin_mode));
+  }
+  const leverage = Number(overlay.target_leverage);
+  if (Number.isFinite(leverage) && leverage > 0) {
+    parts.push(`${leverage.toFixed(2).replace(/\.?0+$/, "")}x`);
+  }
+  const sourceOfTruth = overlay.source_of_truth || overlay.parent_source_of_truth;
+  if (sourceOfTruth) {
+    parts.push(`按${overlayDriverLabel("", sourceOfTruth)}判定`);
+  }
+  return parts.length ? parts.join(" / ") : fallback;
+}
+
+export function readableOverlayParentLegQuantitySummary(source = {}, fallback = "") {
+  const overlay = normalizedOverlayDecision(source);
+  if (!overlay || typeof overlay !== "object" || !Object.keys(overlay).length) return fallback;
+  const hasLegQuantities = [
+    overlay.target_long_qty,
+    overlay.target_short_qty,
+    overlay.current_long_qty,
+    overlay.current_short_qty,
+  ].some((value) => value !== undefined && value !== null);
+  if (!hasLegQuantities) return fallback;
+  return [
+    `目标多头 ${readableSignedQuantity(overlay.target_long_qty)}`,
+    `目标空头 ${readableSignedQuantity(overlay.target_short_qty)}`,
+    `当前多头 ${readableSignedQuantity(overlay.current_long_qty)}`,
+    `当前空头 ${readableSignedQuantity(overlay.current_short_qty)}`,
+  ].join(" / ");
 }
 
 export function localizeError(value, fallback = "当前没有额外说明") {

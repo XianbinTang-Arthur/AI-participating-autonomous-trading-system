@@ -185,6 +185,23 @@ class TestTask57LotProjectionAndConvergence(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(close_events[0]["strategy_sleeve_id"], "sleeve-smart-arb")
         self.assertEqual(close_events[0]["allocation_id"], "alloc-1")
 
+    def test_lot_projection_quarantines_fill_with_unsupported_fee_currency(self) -> None:
+        builder = LotBasedProjectionBuilder()
+        fills = [
+            _fill(fill_id="fill_open_supported", side="buy", qty="1", price="100"),
+            _fill(fill_id="fill_bad_fee", side="sell", qty="0.5", price="110").model_copy(
+                update={"venue": "OKX", "fee_currency": "ETH", "fee_amount": Decimal("0.5")}
+            ),
+        ]
+
+        lot_book = builder.rebuild_lot_book(fills=fills)
+
+        self.assertEqual(lot_book.applied_fill_ids, {"fill_open_supported"})
+        self.assertEqual(lot_book.quarantined_fill_ids, {"fill_bad_fee"})
+        self.assertEqual(lot_book.processing_failures[0]["fill_id"], "fill_bad_fee")
+        self.assertEqual(lot_book.processing_failures[0]["details"]["fee_currency"], "ETH")
+        self.assertIn("unsupported_fill_fee_currency", lot_book.processing_failures[0]["message"])
+
     def test_lot_projection_and_reconstruction_follow_exchange_timestamp_when_ingestion_matches(self) -> None:
         builder = LotBasedProjectionBuilder()
         base_ts = utc_now()

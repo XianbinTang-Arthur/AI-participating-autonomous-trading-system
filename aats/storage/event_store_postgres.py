@@ -128,6 +128,28 @@ class PostgresEventStore:
         rows.sort(key=lambda row: getattr(row, "source_sequence_id", getattr(row, "sequence_id")))
         return [self._to_schema(row) for row in rows[-limit:]]
 
+    def recent_by_topic_and_key(self, topic: str, *, key: str, limit: int) -> list[EventEnvelope]:
+        if limit <= 0:
+            return []
+        with self.session_factory() as session:
+            hot_rows = session.scalars(
+                select(EventEnvelopeModel)
+                .where(EventEnvelopeModel.topic == topic)
+                .where(EventEnvelopeModel.event_key == key)
+                .order_by(desc(EventEnvelopeModel.sequence_id))
+                .limit(limit)
+            ).all()
+            archive_rows = session.scalars(
+                select(EventEnvelopeArchiveModel)
+                .where(EventEnvelopeArchiveModel.topic == topic)
+                .where(EventEnvelopeArchiveModel.event_key == key)
+                .order_by(desc(EventEnvelopeArchiveModel.source_sequence_id))
+                .limit(limit)
+            ).all()
+        rows = [*archive_rows, *hot_rows]
+        rows.sort(key=lambda row: getattr(row, "source_sequence_id", getattr(row, "sequence_id")))
+        return [self._to_schema(row) for row in rows[-limit:]]
+
     def by_topic_scoped(
         self,
         topic: str,

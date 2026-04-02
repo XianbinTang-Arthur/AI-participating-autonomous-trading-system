@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 import hashlib
 
 from aats.schemas.execution import FillEvent
-from aats.services.accounting import fill_fee_delta_in_quote
+from aats.services.accounting import try_fill_fee_delta_in_quote, unsupported_fee_currency_details
 from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.decimals import is_effectively_zero, to_decimal
 from aats.services.portfolio_service.position_keys import (
@@ -66,6 +66,8 @@ class LotBookSnapshot:
     total_fees_paid: Decimal
     applied_fill_ids: set[str]
     positions: dict[str, PositionRecord]
+    quarantined_fill_ids: set[str] = field(default_factory=set)
+    processing_failures: list[dict] = field(default_factory=list)
 
 
 class LotBasedProjectionBuilder:
@@ -79,16 +81,31 @@ class LotBasedProjectionBuilder:
         realized_pnl = Decimal("0")
         total_fees_paid = Decimal("0")
         applied_fill_ids: set[str] = set()
+        quarantined_fill_ids: set[str] = set()
+        processing_failures: list[dict] = []
         lot_events: list[LotEventRecord] = []
 
         for fill in sorted(fills, key=fill_processing_sort_key):
-            applied_fill_ids.add(fill.fill_id)
             fill_qty = to_decimal(fill.fill_qty)
             if is_effectively_zero(fill_qty):
+                applied_fill_ids.add(fill.fill_id)
                 continue
             fill_price = to_decimal(fill.fill_price)
             signed_qty = fill_qty if fill.side == "buy" else -fill_qty
-            fee_quote = to_decimal(fill_fee_delta_in_quote(fill))
+            fee_quote, fee_error = try_fill_fee_delta_in_quote(fill)
+            if fee_error is not None:
+                quarantined_fill_ids.add(fill.fill_id)
+                processing_failures.append(
+                    {
+                        "fill_id": fill.fill_id,
+                        "symbol": fill.symbol,
+                        "message": str(fee_error),
+                        "details": unsupported_fee_currency_details(fill, error=fee_error),
+                    }
+                )
+                continue
+            applied_fill_ids.add(fill.fill_id)
+            fee_quote = to_decimal(fee_quote or Decimal("0"))
             total_fees_paid += fee_quote
 
             position_key = position_key_for_fill(fill)
@@ -319,6 +336,8 @@ class LotBasedProjectionBuilder:
             total_fees_paid=total_fees_paid,
             applied_fill_ids=applied_fill_ids,
             positions=positions,
+            quarantined_fill_ids=quarantined_fill_ids,
+            processing_failures=processing_failures,
         )
 
     def rebuild_portfolio_state(

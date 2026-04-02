@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from decimal import Decimal
 from typing import Callable
 
@@ -26,6 +26,7 @@ from aats.services.runtime_scope import (
     order_states_for_scope,
     runtime_state_scope,
 )
+from aats.services.strategy_engines.independent.replay import recovery_snapshots_from_allocation_decisions
 from aats.storage.base import (
     ExecutionObligationRepository,
     ExecutionRepository,
@@ -106,12 +107,24 @@ class ExecutionRecoveryService:
         released_orphan_obligation_count = self._cleanup_orphan_obligations()
         if released_orphan_obligation_count:
             notes.append(f"released_orphan_obligations:{released_orphan_obligation_count}")
+        scoped_strategy_bundles = self._scoped_recent_strategy_bundles()
         bundle_recovery = scoped_bundle_recovery_assessment(
             scope=self.runtime_scope,
             order_states=scoped_order_states,
             obligations=self._scoped_active_obligations(),
-            strategy_bundles=self._scoped_recent_strategy_bundles(),
+            strategy_bundles=scoped_strategy_bundles,
         )
+        independent_recovery_snapshots = self._independent_recovery_snapshots(
+            scoped_order_states=scoped_order_states,
+            strategy_bundles=scoped_strategy_bundles,
+        )
+        if independent_recovery_snapshots:
+            notes.append(f"independent_recovery_snapshots:{len(independent_recovery_snapshots)}")
+            blocked_snapshot_count = sum(
+                1 for item in independent_recovery_snapshots if item.recovery_blockers
+            )
+            if blocked_snapshot_count:
+                notes.append(f"independent_recovery_blocked_books:{blocked_snapshot_count}")
         if bundle_recovery.bundle_recovery_required:
             notes.append(f"bundle_recovery_required:{bundle_recovery.open_bundle_count}")
             if bundle_recovery.unbundled_open_order_count:
@@ -309,6 +322,7 @@ class ExecutionRecoveryService:
             recoverable_bundle_count=bundle_recovery.recoverable_bundle_count,
             unbundled_open_order_count=bundle_recovery.unbundled_open_order_count,
             bundle_summaries=list(bundle_recovery.bundle_summaries),
+            independent_recovery_snapshots=[asdict(item) for item in independent_recovery_snapshots],
             baseline_imported=account_baseline is not None,
             baseline_status=account_baseline.baseline_status if account_baseline is not None else None,
             baseline_imported_at=account_baseline.imported_at if account_baseline is not None else None,
@@ -442,6 +456,58 @@ class ExecutionRecoveryService:
             for bundle in bundles
             if self.runtime_scope.symbol_allowed(bundle.selected_symbol)
         ]
+
+    def _scoped_recent_allocation_decisions(
+        self,
+        *,
+        strategy_bundles: list,
+    ) -> list:
+        if self.strategy_runtime_repo is None:
+            return []
+        decisions: list = []
+        seen: set[str] = set()
+        latest = self.strategy_runtime_repo.latest_allocation_decision(
+            product_type=self.runtime_scope.product_type,
+            margin_mode=self.runtime_scope.margin_mode,
+        )
+        if latest is not None and self.runtime_scope.symbol_allowed(latest.symbol):
+            decisions.append(latest)
+            seen.add(latest.allocation_id)
+        get_allocation_decision = getattr(self.strategy_runtime_repo, "get_allocation_decision", None)
+        if not callable(get_allocation_decision):
+            return decisions
+        for bundle in strategy_bundles:
+            allocation_id = str(getattr(bundle, "allocation_id", "") or "").strip()
+            if not allocation_id or allocation_id in seen:
+                continue
+            decision = get_allocation_decision(allocation_id)
+            if decision is None or not self.runtime_scope.symbol_allowed(decision.symbol):
+                continue
+            seen.add(allocation_id)
+            decisions.append(decision)
+        return decisions
+
+    def _independent_recovery_snapshots(
+        self,
+        *,
+        scoped_order_states: list[OrderState],
+        strategy_bundles: list,
+    ):
+        if self.strategy_runtime_repo is None:
+            return ()
+        decisions = self._scoped_recent_allocation_decisions(strategy_bundles=strategy_bundles)
+        if not decisions:
+            return ()
+        open_orders = [
+            order
+            for order in scoped_order_states
+            if str(order.status).upper() not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}
+        ]
+        return recovery_snapshots_from_allocation_decisions(
+            decisions=decisions,
+            open_orders=open_orders,
+            recent_bundles=strategy_bundles,
+        )
 
     def _resolved_obligation(
         self,

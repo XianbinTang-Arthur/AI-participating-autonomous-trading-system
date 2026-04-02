@@ -34,13 +34,33 @@ ai_outcome_max_churn_ratio_delta: 0.12
 # [常用可调] ai_execution_suggestion_mode：AI 执行建议输出模式。可选值：disabled / diagnostic_only / shadow_translation / enabled_live；推荐值：diagnostic_only。
 ai_execution_suggestion_mode: diagnostic_only
 
-# 策略家族
-# [常用可调] strategy_family_active：默认主策略家族。可选值：directional / smart_arbitrage / spot_grid / dca；推荐值：directional。
-strategy_family_active: directional
-# [常用可调] strategy_family_auto_selection_enabled：是否允许系统自动选择策略家族。当前 `independent` 是 directional 内部的双书模式，不是独立家族；如需把 independent 作为实盘主模式，必须固定 family 为 directional。可选值：true / false；推荐值：false。
+# 策略家族路由
+# [常用可调] strategy_family_active：默认主策略家族。当前这条实盘线显式固定为 independent，避免控制面继续显示 directional 兼容主语义。可选值：directional / smart_arbitrage / spot_grid / dca / protective / opportunistic / independent；推荐值：independent。
+strategy_family_active: independent
+# [常用可调] strategy_family_auto_selection_enabled：是否允许系统自动选择策略家族。可选值：true / false；推荐值：false。
 strategy_family_auto_selection_enabled: false
+# [常用可调] strategy_family_independent_enabled：是否启用 independent family。可选值：true / false；推荐值：true。
+strategy_family_independent_enabled: true
+# [进阶可调] strategy_family_independent_shadow_mode_enabled：是否仅让 independent family 以 shadow 方式评估。当前这条实盘线已直接接管执行主路径，需关闭 shadow-only。可选值：true / false；推荐值：false。
+strategy_family_independent_shadow_mode_enabled: false
+# [常用可调] strategy_family_independent_live_execution_enabled：是否允许 independent family 直接接管实盘 allocator / apply 主路径。可选值：true / false；推荐值：true。
+strategy_family_independent_live_execution_enabled: true
 
-# ai自动换档
+# 兼容 family 兜底开关
+# [常用可调] strategy_family_protective_enabled：是否启用 protective family cutover。当前实盘主模式不是 protective，默认关闭；切换到 protective 前需显式打开。可选值：true / false；推荐值：false。
+strategy_family_protective_enabled: false
+# [进阶可调] strategy_family_protective_shadow_mode_enabled：是否只让 protective family 参与 shadow 评估。当前 profile 不做 protective 灰度接管，推荐保持 false。可选值：true / false；推荐值：false。
+strategy_family_protective_shadow_mode_enabled: false
+# [常用可调] strategy_family_protective_live_execution_enabled：是否允许 protective family 直接接管实盘 allocator / apply 主路径。当前实盘主模式不是 protective，默认关闭。可选值：true / false；推荐值：false。
+strategy_family_protective_live_execution_enabled: false
+# [常用可调] strategy_family_opportunistic_enabled：是否启用 opportunistic family cutover。当前实盘主模式不是 opportunistic，默认关闭；切换前需显式打开。可选值：true / false；推荐值：false。
+strategy_family_opportunistic_enabled: false
+# [进阶可调] strategy_family_opportunistic_shadow_mode_enabled：是否只让 opportunistic family 参与 shadow 评估。当前 profile 不做 opportunistic 灰度接管，推荐保持 false。可选值：true / false；推荐值：false。
+strategy_family_opportunistic_shadow_mode_enabled: false
+# [常用可调] strategy_family_opportunistic_live_execution_enabled：是否允许 opportunistic family 直接接管实盘 allocator / apply 主路径。当前实盘主模式不是 opportunistic，默认关闭。可选值：true / false；推荐值：false。
+strategy_family_opportunistic_live_execution_enabled: false
+
+# 自动档位与应急换档
 # [常用可调] strategy_profile_auto_control_enabled：是否启用策略档位自动换档。这是唯一主开关；true 时系统会自动评估并默认启用自动激活规则，false 时只允许手动切档。可选值：true / false；推荐值：false。
 strategy_profile_auto_control_enabled: false
 # [常用可调] strategy_profile_auto_rollback_enabled：自动换档后是否允许自动回滚。可选值：true / false；推荐值：true。
@@ -80,8 +100,8 @@ trade_cost_margin_slippage_bps: 1.5
 trade_cost_derivatives_spread_bps: 0.5
 trade_cost_derivatives_slippage_bps: 1.0
 
-# 多策略启停
-# [常用可调] smart_arbitrage_enabled：是否启用智能套利策略。当前这条 live 交易线专用于 independent 实盘，需关闭以避免与 directional 双书发生策略家族抢占。可选值：true / false；推荐值：false。
+# smart_arbitrage（当前实盘关闭）
+# [常用可调] smart_arbitrage_enabled：是否启用智能套利策略。当前这条 live 交易线专用于 independent family 实盘，需关闭以避免家族层抢占。可选值：true / false；推荐值：false。
 smart_arbitrage_enabled: false
 # [常用可调] smart_arbitrage_basis_entry_bps：基差入场阈值。可选值：0.0 ~ 200.0；推荐值：18.0。
 smart_arbitrage_basis_entry_bps: 40.0
@@ -153,8 +173,6 @@ smart_arbitrage_borrow_interest_free_ratio: 0.0
 smart_arbitrage_estimated_funding_bps: 0.0
 # [进阶可调] smart_arbitrage_estimated_borrow_bps：细分借币费预估。可选值：0.0 以上；推荐值：0.0。
 smart_arbitrage_estimated_borrow_bps: 0.0
-
-# 现货专属的 spot_grid / dca 参数统一维护在 spot*.yaml；合约 profile 不再重复保留这些历史遗留项。
 
 # 决策节奏
 # [常用可调] max_decisions_per_minute：每分钟最多允许多少次决策。可选值：1 ~ 20；推荐值：5。
@@ -237,11 +255,13 @@ strategy_short_reversal_alpha_min: 0.18
 # [进阶可调] strategy_short_reversal_confidence_min：反手做空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.55。
 strategy_short_reversal_confidence_min: 0.55
 
+# overlay 总开关与主模式
 # [进阶可调] strategy_hedge_overlay_enabled：overlay 总开关。当前只在合约 hedge 运行域生效；关闭后 protective / opportunistic / independent 都不会运行。可选值：true / false；推荐值：true。
 strategy_hedge_overlay_enabled: true
 # [进阶可调] strategy_hedge_overlay_mode：directional 对冲 overlay 模式。当前已开放 protective / opportunistic / independent；当前主模式按独立双书运行，推荐值：independent。
 strategy_hedge_overlay_mode: independent
 
+# protective
 # [进阶可调] strategy_hedge_protective_enabled：是否开启 protective 的独立开关。可选值：true / false；推荐值：true。
 strategy_hedge_protective_enabled: false
 # [进阶可调] strategy_hedge_open_threshold：保护性对冲开启阈值。可选值：0.0 ~ 1.0；推荐值：0.58。
@@ -255,10 +275,11 @@ strategy_hedge_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_rebalance_cooldown_seconds：保护腿再平衡冷却秒数。可选值：0 ~ 86400；推荐值：120.0。
 strategy_hedge_rebalance_cooldown_seconds: 120.0
 
+# opportunistic
 # [进阶可调] strategy_hedge_opportunistic_enabled：是否开启机会型 overlay 的独立开关。可选值：true / false；推荐值：true。
 strategy_hedge_opportunistic_enabled: false
-# [进阶可调] strategy_hedge_opportunistic_rollout_stage：机会型 overlay 的灰度阶段。可选值：replay_only / dry_run / live；推荐值：live。
-strategy_hedge_opportunistic_rollout_stage: live
+# [进阶可调] strategy_hedge_opportunistic_rollout_stage：机会型 overlay 的灰度阶段。当前实盘主策略已切到 independent，机会腿保持 dry_run 以免配置面出现“已关闭但仍是 live 阶段”的旧语义。可选值：replay_only / dry_run / live；推荐值：dry_run。
+strategy_hedge_opportunistic_rollout_stage: dry_run
 # [进阶可调] strategy_hedge_opportunistic_open_threshold：机会腿开启阈值。可选值：0.0 ~ 1.0；推荐值：0.62。
 strategy_hedge_opportunistic_open_threshold: 0.62
 # [进阶可调] strategy_hedge_opportunistic_close_threshold：机会腿关闭阈值。可选值：0.0 ~ 1.0；推荐值：0.46。
@@ -273,19 +294,37 @@ strategy_hedge_opportunistic_rebalance_cooldown_seconds: 90.0
 strategy_hedge_opportunistic_max_fee_drag_ratio: 0.18
 # [进阶可调] strategy_hedge_opportunistic_max_churn_ratio：机会腿允许的最大 churn 比例。可选值：0.0 ~ 1.0；推荐值：0.22。
 strategy_hedge_opportunistic_max_churn_ratio: 0.22
+# [进阶可调] strategy_hedge_opportunistic_min_safe_net_edge_bps：机会腿要求的最小安全净边际。可选值：>= 0；推荐值：3.0。
+strategy_hedge_opportunistic_min_safe_net_edge_bps: 3.0
+# [进阶可调] strategy_hedge_opportunistic_expected_slippage_buffer_bps：机会腿额外预留的滑点缓冲。可选值：>= 0；推荐值：1.0。
+strategy_hedge_opportunistic_expected_slippage_buffer_bps: 1.0
+# [进阶可调] strategy_hedge_opportunistic_expected_execution_buffer_bps：机会腿额外预留的执行缓冲。可选值：>= 0；推荐值：2.0。
+strategy_hedge_opportunistic_expected_execution_buffer_bps: 2.0
+# [进阶可调] strategy_hedge_opportunistic_weak_edge_execution_mode：弱边际机会腿的处理方式。可选值：block / report_only；推荐值：report_only。
+strategy_hedge_opportunistic_weak_edge_execution_mode: report_only
+# [进阶可调] strategy_hedge_opportunistic_max_acceptable_cost_bps：机会腿允许的最大预估执行成本。可选值：>= 0；推荐值：7.5。
+strategy_hedge_opportunistic_max_acceptable_cost_bps: 7.5
+# [进阶可调] strategy_hedge_opportunistic_passive_first_enabled：弱边际机会腿是否优先走被动执行。可选值：true / false；推荐值：true。
+strategy_hedge_opportunistic_passive_first_enabled: true
 
+# independent
+# 开仓与持有阈值
 # [进阶可调] strategy_hedge_independent_enabled：是否开启独立双书模式。可选值：true / false；推荐值：true。
 strategy_hedge_independent_enabled: true
 # [进阶可调] strategy_hedge_independent_rollout_stage：独立双书的灰度阶段。推荐值：live。
 strategy_hedge_independent_rollout_stage: live
-# [进阶可调] strategy_hedge_independent_long_entry_threshold：独立 long book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.24。
+# [进阶可调] strategy_hedge_independent_long_entry_threshold：独立 long book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.30。
 strategy_hedge_independent_long_entry_threshold: 0.30
-# [进阶可调] strategy_hedge_independent_short_entry_threshold：独立 short book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.24。
+# [进阶可调] strategy_hedge_independent_short_entry_threshold：独立 short book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.30。
 strategy_hedge_independent_short_entry_threshold: 0.30
-# [进阶可调] strategy_hedge_independent_long_scale_in_threshold：独立 long book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.32。
+# [进阶可调] strategy_hedge_independent_long_close_threshold：独立 long book 的平仓阈值。显式低于 entry，用于建立 hysteresis。可选值：0.0 ~ entry threshold；推荐值：0.24。
+strategy_hedge_independent_long_close_threshold: 0.24
+# [进阶可调] strategy_hedge_independent_short_close_threshold：独立 short book 的平仓阈值。显式低于 entry，用于建立 hysteresis。可选值：0.0 ~ entry threshold；推荐值：0.24。
+strategy_hedge_independent_short_close_threshold: 0.24
+# [进阶可调] strategy_hedge_independent_long_scale_in_threshold：独立 long book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.40。
 strategy_hedge_independent_long_scale_in_threshold: 0.40
-# [进阶可调] strategy_hedge_independent_short_scale_in_threshold：独立 short book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘推荐值：0.32。
-strategy_hedge_independent_short_scale_in_threshold: 0.40
+# [进阶可调] strategy_hedge_independent_short_scale_in_threshold：独立 short book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.40。
+strategy_hedge_independent_short_scale_in_threshold: 0.36
 # [进阶可调] strategy_hedge_independent_long_min_hold_seconds：独立 long book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
 strategy_hedge_independent_long_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_independent_short_min_hold_seconds：独立 short book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
@@ -293,8 +332,85 @@ strategy_hedge_independent_short_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_independent_rebalance_cooldown_seconds：独立双书的再平衡冷却秒数。可选值：0 ~ 86400；推荐值：120.0。
 strategy_hedge_independent_rebalance_cooldown_seconds: 120.0
 
+# 开仓质量门控
 # [进阶可调] strategy_hedge_independent_trial_guard_enabled：是否启用按腿试盘守护。可选值：true / false；推荐值：true。
 strategy_hedge_independent_trial_guard_enabled: true
+# [进阶可调] strategy_hedge_independent_min_safe_net_edge_bps：独立双书开仓需要预留的最小净边际安全垫。可选值：0.0 以上；推荐值：3.0。
+strategy_hedge_independent_min_safe_net_edge_bps: 3.0
+# [进阶可调] strategy_hedge_independent_expected_slippage_buffer_bps：独立双书开仓的预期滑点缓冲。可选值：0.0 以上；推荐值：1.0。
+strategy_hedge_independent_expected_slippage_buffer_bps: 1.0
+# [进阶可调] strategy_hedge_independent_expected_execution_buffer_bps：独立双书开仓的执行缓冲。可选值：0.0 以上；推荐值：2.0。
+strategy_hedge_independent_expected_execution_buffer_bps: 2.0
+# [进阶可调] strategy_hedge_independent_weak_edge_execution_mode：弱边际开仓如何处理。可选值：block / report_only；推荐值：report_only。
+strategy_hedge_independent_weak_edge_execution_mode: report_only
+# [进阶可调] strategy_hedge_independent_max_acceptable_cost_bps：独立双书允许的最大单腿预期成本。可选值：0.0 以上；推荐值：7.5。
+strategy_hedge_independent_max_acceptable_cost_bps: 7.5
+# [进阶可调] strategy_hedge_independent_passive_first_enabled：弱边际开仓是否优先走 bounded-limit IOC。可选值：true / false；推荐值：true。
+strategy_hedge_independent_passive_first_enabled: true
+# [进阶可调] strategy_hedge_independent_min_confirm_ticks：独立双书开仓前要求的最少确认次数。可选值：>= 1；推荐值：2。
+strategy_hedge_independent_min_confirm_ticks: 2
+# [进阶可调] strategy_hedge_independent_min_score_stability_bps：独立双书允许的最大短期分数回撤。可选值：>= 0；推荐值：2.0。
+strategy_hedge_independent_min_score_stability_bps: 2.0
+# [进阶可调] strategy_hedge_independent_min_liquidity_quality：独立双书开仓要求的最低流动性质量分。可选值：0.0 ~ 1.0；推荐值：0.55。
+strategy_hedge_independent_min_liquidity_quality: 0.55
+# [进阶可调] strategy_hedge_independent_require_execution_health_ok：独立双书开仓是否要求执行健康度保持正常。可选值：true / false；推荐值：true。
+strategy_hedge_independent_require_execution_health_ok: true
+
+# thesis 生命周期与降风险
+# [进阶可调] strategy_hedge_independent_max_thesis_age_seconds：独立双书 thesis 最长持有秒数，超过后允许按 stale thesis 退出。可选值：>= 1；推荐值：1800。
+strategy_hedge_independent_max_thesis_age_seconds: 1800
+# [进阶可调] strategy_hedge_independent_de_risk_net_edge_bps：净边际变薄时触发 de-risk 的阈值。可选值：>= 0；推荐值：2.0。
+strategy_hedge_independent_de_risk_net_edge_bps: 2.0
+# [进阶可调] strategy_hedge_independent_failed_thesis_net_edge_bps：净边际低于该值时视为 thesis 失效并直接收口。可选值：<= de-risk threshold；推荐值：-1.0。
+strategy_hedge_independent_failed_thesis_net_edge_bps: -1.0
+# [进阶可调] strategy_hedge_independent_execution_health_de_risk_enabled：执行健康度退化时是否优先降风险。可选值：true / false；推荐值：true。
+strategy_hedge_independent_execution_health_de_risk_enabled: true
+# [进阶可调] strategy_hedge_independent_liquidity_de_risk_enabled：流动性质量恶化时是否优先降风险。可选值：true / false；推荐值：true。
+strategy_hedge_independent_liquidity_de_risk_enabled: true
+
+# 执行矩阵
+# [进阶可调] strategy_hedge_independent_entry_execution_mode：independent 开仓动作采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：passive_first。
+strategy_hedge_independent_entry_execution_mode: passive_first
+# [进阶可调] strategy_hedge_independent_scale_in_execution_mode：independent 加仓动作采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：bounded_limit。
+strategy_hedge_independent_scale_in_execution_mode: bounded_limit
+# [进阶可调] strategy_hedge_independent_de_risk_execution_mode：independent 降风险动作采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：bounded_taker。
+strategy_hedge_independent_de_risk_execution_mode: bounded_taker
+# [进阶可调] strategy_hedge_independent_close_failed_thesis_execution_mode：independent thesis 失效退出采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：aggressive_bounded_taker。
+strategy_hedge_independent_close_failed_thesis_execution_mode: aggressive_bounded_taker
+# [进阶可调] strategy_hedge_independent_close_stale_execution_mode：independent thesis 过期退出采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：bounded_limit。
+strategy_hedge_independent_close_stale_execution_mode: bounded_limit
+# [进阶可调] strategy_hedge_independent_limit_offset_bps_entry：independent 开仓走 bounded-limit IOC 时使用的限价偏移。可选值：>= 0；推荐值：1.5。
+strategy_hedge_independent_limit_offset_bps_entry: 1.5
+# [进阶可调] strategy_hedge_independent_limit_offset_bps_scale_in：independent 加仓走 bounded-limit IOC 时使用的限价偏移。可选值：>= 0；推荐值：1.0。
+strategy_hedge_independent_limit_offset_bps_scale_in: 1.0
+# [进阶可调] strategy_hedge_independent_limit_offset_bps_stale_close：independent stale thesis 收口走 bounded-limit IOC 时使用的限价偏移。可选值：>= 0；推荐值：0.8。
+strategy_hedge_independent_limit_offset_bps_stale_close: 0.8
+
+# 诊断输出
+# [进阶可调] strategy_hedge_independent_emit_book_level_metrics：是否输出独立双书的 book 级诊断指标。可选值：true / false；推荐值：true。
+strategy_hedge_independent_emit_book_level_metrics: true
+# [进阶可调] strategy_hedge_independent_emit_expected_vs_realized_metrics：是否输出预期 vs 已实现诊断。可选值：true / false；推荐值：true。
+strategy_hedge_independent_emit_expected_vs_realized_metrics: true
+# [进阶可调] strategy_hedge_independent_emit_close_reason_metrics：是否输出退出原因分布诊断。可选值：true / false；推荐值：true。
+strategy_hedge_independent_emit_close_reason_metrics: true
+# [进阶可调] strategy_hedge_independent_emit_execution_policy_metrics：是否输出执行策略与被动优先使用诊断。可选值：true / false；推荐值：true。
+strategy_hedge_independent_emit_execution_policy_metrics: true
+
+# 受控 rollout 开关
+# [进阶可调] strategy_hedge_independent_adaptive_rollout_enabled：是否把自适应阈值层正式接入 live 语义。当前实盘继续保持显式关闭，只输出 shadow 摘要。可选值：true / false；推荐值：false。
+strategy_hedge_independent_adaptive_rollout_enabled: false
+# [进阶可调] strategy_hedge_independent_health_enforcement_enabled：是否把健康内核从摘要提升为行为约束。当前实盘继续保持显式关闭。可选值：true / false；推荐值：false。
+strategy_hedge_independent_health_enforcement_enabled: false
+# [进阶可调] strategy_hedge_independent_size_down_entry_enabled：是否对 entry 启用按资本/波动的缩尺。当前实盘继续保持显式关闭。可选值：true / false；推荐值：false。
+strategy_hedge_independent_size_down_entry_enabled: false
+# [进阶可调] strategy_hedge_independent_long_short_asymmetry_enabled：是否启用 long/short 非对称 sizing。当前实盘继续保持显式关闭。可选值：true / false；推荐值：false。
+strategy_hedge_independent_long_short_asymmetry_enabled: false
+# [进阶可调] strategy_hedge_independent_short_asymmetry_penalty_multiplier：启用 short 非对称时的缩尺倍率。当前 profile 显式钉住默认值，避免继续隐式回落到 settings 默认。可选值：0.0 ~ 1.0；推荐值：0.85。
+strategy_hedge_independent_short_asymmetry_penalty_multiplier: 0.85
+# [进阶可调] strategy_hedge_independent_entry_size_down_floor：启用 size-down 时的最小 entry 倍率下限。当前 profile 显式钉住默认值。可选值：0.0 ~ 1.0；推荐值：0.50。
+strategy_hedge_independent_entry_size_down_floor: 0.50
+
+# 通用策略行为约束
 # [常用可调] strategy_min_hold_seconds：最短持仓秒数。可选值：0 ~ 86400；推荐值：900.0。
 strategy_min_hold_seconds: 720.0
 # [常用可调] strategy_post_close_cooldown_seconds：平仓后冷却秒数。可选值：0 ~ 86400；推荐值：300.0。
@@ -314,7 +430,7 @@ strategy_transient_close_retry_cooldown_seconds: 90.0
 
 # 试盘守护
 # [常用可调] trial_guard_enabled：是否启用试盘守护。可选值：true / false；推荐值：true。
-trial_guard_enabled: false
+trial_guard_enabled: true
 # [常用可调] trial_guard_poll_interval_seconds：试盘守护轮询间隔。可选值：1.0 ~ 300.0；推荐值：15.0。
 trial_guard_poll_interval_seconds: 15.0
 # [常用可调] trial_guard_lookback_fills：回看成交数量。可选值：1 ~ 500；推荐值：30。
@@ -322,7 +438,7 @@ trial_guard_lookback_fills: 30
 # [常用可调] trial_guard_min_closed_fills：开始评估前要求的最少已平仓成交数。可选值：1 ~ 100；推荐值：5。
 trial_guard_min_closed_fills: 5
 # [常用可调] trial_guard_max_daily_loss_usdt：当日最大亏损阈值。可选值：正数；推荐值：20.0。
-trial_guard_max_daily_loss_usdt: 20.0
+trial_guard_max_daily_loss_usdt: 30.0
 # [常用可调] trial_guard_max_consecutive_losses：最大连续亏损次数。可选值：1 ~ 20；推荐值：4。
 trial_guard_max_consecutive_losses: 6
 # [常用可调] trial_guard_max_fee_to_notional_ratio：最大费耗/名义金额比。可选值：0.0 ~ 1.0；推荐值：0.0012。

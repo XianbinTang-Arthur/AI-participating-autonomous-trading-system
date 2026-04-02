@@ -78,7 +78,9 @@ class PostgresOperatorUserRepository:
     def record_login(self, username: str, logged_in_at: datetime) -> None:
         with self.session_factory() as session:
             row = session.scalar(
-                select(OperatorUserModel).where(OperatorUserModel.username == username)
+                select(OperatorUserModel)
+                .where(OperatorUserModel.username == username)
+                .with_for_update()
             )
             if row is None:
                 return
@@ -106,7 +108,9 @@ class PostgresOperatorUserRepository:
     ) -> OperatorUserRecord | None:
         with self.session_factory() as session:
             row = session.scalar(
-                select(OperatorUserModel).where(OperatorUserModel.username == username)
+                select(OperatorUserModel)
+                .where(OperatorUserModel.username == username)
+                .with_for_update()
             )
             if row is None:
                 return None

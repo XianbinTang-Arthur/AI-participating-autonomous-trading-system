@@ -15,6 +15,7 @@ from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
+from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
 from aats.storage.execution_order_repo_postgres import (
     PostgresExecutionOrderHistoryRepository,
     PostgresExecutionOrderRepository,
@@ -33,6 +34,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
         try:
             event_store = PostgresEventStore(runtime.session_factory)
             execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
             obligation_repo = PostgresExecutionObligationRepository(runtime.session_factory)
             outbox_repo = PostgresOutboxRepository(runtime.session_factory)
             bus = InMemoryEventBus()
@@ -49,6 +51,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 obligation_repo=obligation_repo,
                 outbox_repo=outbox_repo,
                 bus=bus,
+                execution_order_repo=order_repo,
             )
             state = self._order_state(client_order_id="clord_outbox_ok", status="SUBMITTED")
 
@@ -62,6 +65,9 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored.position_mode, "long_short_mode")
             self.assertEqual(stored.pos_side, "long")
             self.assertTrue(stored.reduce_only)
+            stored_row = order_repo.get_order(state.client_order_id)
+            self.assertIsNotNone(stored_row)
+            self.assertEqual(stored_row["execution_attempt_id"], "execution_attempt:clord_outbox_ok")
             self.assertEqual(event_store.count(topic=topics.ORDER_UPDATES), 1)
             self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
             self.assertEqual(len(received), 1)
@@ -255,11 +261,142 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
 
+    async def test_enqueue_command_treats_duplicate_idempotency_key_as_idempotent_success(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            command_repo = PostgresExecutionCommandRepository(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            state = self._order_state(client_order_id="clord_command_idem", status="CREATED")
+            order_repo.create_order(
+                order_id=state.client_order_id,
+                intent=OrderIntent(
+                    intent_id=state.intent_id,
+                    decision_id=state.decision_id,
+                    symbol=state.symbol,
+                    side="sell",
+                    quantity=Decimal("0.001"),
+                    execution_style="taker",
+                    order_type="market",
+                    reference_price=Decimal("60000"),
+                    urgency="medium",
+                    time_in_force="IOC",
+                    reduce_only=True,
+                    close_only=True,
+                    td_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                    idempotency_key="submit:intent_command_idem",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    execution_attempt_id="execution_attempt:clord_command_idem",
+                    position_intent="close_long",
+                ),
+                initial_state="CREATED",
+                created_at=utc_now(),
+                raw_payload={"client_order_id": state.client_order_id},
+            )
+            created_at = utc_now()
+
+            command_repo.enqueue_command(
+                command_id="cmd_command_idem_1",
+                order_id=state.client_order_id,
+                command_type="submit",
+                idempotency_key="submit:intent_command_idem",
+                payload={"client_order_id": state.client_order_id},
+                created_at=created_at,
+            )
+            command_repo.enqueue_command(
+                command_id="cmd_command_idem_2",
+                order_id=state.client_order_id,
+                command_type="submit",
+                idempotency_key="submit:intent_command_idem",
+                payload={"client_order_id": state.client_order_id},
+                created_at=created_at,
+            )
+
+            pending = command_repo.pending_commands(limit=10)
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0]["command_id"], "cmd_command_idem_1")
+            self.assertEqual(pending[0]["idempotency_key"], "submit:intent_command_idem")
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
+    async def test_command_attempt_count_tracks_claims_without_double_counting_terminal_updates(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            command_repo = PostgresExecutionCommandRepository(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            created_at = utc_now()
+            state = self._order_state(client_order_id="clord_attempt_count_1", status="CREATED")
+            order_repo.create_order(
+                order_id=state.client_order_id,
+                intent=OrderIntent(
+                    intent_id=state.intent_id,
+                    decision_id=state.decision_id,
+                    symbol=state.symbol,
+                    side="sell",
+                    quantity=Decimal("0.001"),
+                    execution_style="taker",
+                    order_type="market",
+                    reference_price=Decimal("60000"),
+                    urgency="medium",
+                    time_in_force="IOC",
+                    reduce_only=True,
+                    close_only=True,
+                    td_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                    idempotency_key="submit:intent_attempt_count_1",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    execution_attempt_id="execution_attempt:clord_attempt_count_1",
+                    position_intent="close_long",
+                ),
+                initial_state="CREATED",
+                created_at=created_at,
+                raw_payload={"client_order_id": state.client_order_id},
+            )
+            command_repo.enqueue_command(
+                command_id="cmd_attempt_count_1",
+                order_id="clord_attempt_count_1",
+                command_type="submit",
+                idempotency_key="submit:intent_attempt_count_1",
+                payload={"client_order_id": "clord_attempt_count_1"},
+                created_at=created_at,
+            )
+            pending = command_repo.pending_commands(limit=10)
+            self.assertEqual(len(pending), 1)
+            claimed = command_repo.claim_command(
+                command_id="cmd_attempt_count_1",
+                expected_state="PENDING",
+                expected_updated_at=pending[0]["updated_at"],
+                updated_at=utc_now(),
+            )
+            self.assertTrue(claimed)
+            command_repo.mark_acked("cmd_attempt_count_1", updated_at=utc_now())
+
+            stored = command_repo.get_command("cmd_attempt_count_1")
+
+            self.assertIsNotNone(stored)
+            assert stored is not None
+            self.assertEqual(stored["state"], "ACKED")
+            self.assertEqual(stored["attempt_count"], 1)
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
     async def test_persist_fill_updates_obligation_in_same_commit(self) -> None:
         runtime, admin_engine, schema_name = self._schema_runtime()
         try:
             event_store = PostgresEventStore(runtime.session_factory)
             execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            fill_repo = PostgresExecutionFillRepositoryV2(runtime.session_factory)
             obligation_repo = PostgresExecutionObligationRepository(runtime.session_factory)
             outbox_repo = PostgresOutboxRepository(runtime.session_factory)
             bus = InMemoryEventBus()
@@ -270,6 +407,8 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 obligation_repo=obligation_repo,
                 outbox_repo=outbox_repo,
                 bus=bus,
+                execution_order_repo=order_repo,
+                execution_fill_repo=fill_repo,
             )
             base_obligation = OrderObligation(
                 client_order_id="clord_fill_atomic",
@@ -289,6 +428,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             fill = FillEvent(
                 fill_id="fill_atomic_1",
                 decision_id="decision_fill_atomic",
+                execution_attempt_id="execution_attempt:clord_fill_atomic",
                 intent_id="intent_fill_atomic",
                 client_order_id="clord_fill_atomic",
                 exchange_order_id="ord_fill_atomic",
@@ -332,12 +472,108 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_fills[0].td_mode, "cross")
             self.assertEqual(stored_fills[0].instrument_family, "BTC-USDT")
             self.assertTrue(stored_fills[0].close_only)
+            stored_fill_row = fill_repo.get_fill("fill_atomic_1")
+            self.assertIsNotNone(stored_fill_row)
+            self.assertEqual(stored_fill_row["execution_attempt_id"], "execution_attempt:clord_fill_atomic")
             stored_obligation = obligation_repo.get_obligation("clord_fill_atomic")
             self.assertIsNotNone(stored_obligation)
             self.assertEqual(stored_obligation.consumed_amount, Decimal("60.0"))
             self.assertEqual(stored_obligation.status, "RELEASED")
             self.assertEqual(event_store.count(topic=topics.FILL_EVENTS), 1)
             self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
+    async def test_save_fill_treats_duplicate_source_and_venue_fill_as_idempotent_success(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            execution_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            fill_repo = PostgresExecutionFillRepositoryV2(runtime.session_factory)
+            order_state = self._order_state(client_order_id="clord_fill_idem", status="SUBMITTED")
+            execution_repo.create_order(
+                order_id=order_state.client_order_id,
+                intent=OrderIntent(
+                    intent_id=order_state.intent_id,
+                    decision_id=order_state.decision_id,
+                    symbol=order_state.symbol,
+                    side="sell",
+                    quantity=Decimal("0.001"),
+                    execution_style="taker",
+                    order_type="market",
+                    reference_price=Decimal("60000"),
+                    urgency="medium",
+                    time_in_force="IOC",
+                    reduce_only=True,
+                    close_only=True,
+                    td_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                    idempotency_key="submit:intent_fill_idem",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    execution_attempt_id="execution_attempt:clord_fill_idem",
+                    position_intent="close_long",
+                ),
+                initial_state="SUBMITTED",
+                created_at=utc_now(),
+                raw_payload={"client_order_id": order_state.client_order_id},
+            )
+            exchange_ts = utc_now()
+            ingestion_ts = utc_now()
+            fill = FillEvent(
+                fill_id="fill_idem_1",
+                decision_id=order_state.decision_id,
+                execution_attempt_id="execution_attempt:clord_fill_idem",
+                intent_id=order_state.intent_id,
+                client_order_id=order_state.client_order_id,
+                exchange_order_id=order_state.exchange_order_id,
+                symbol=order_state.symbol,
+                venue="OKX",
+                side="sell",
+                fill_qty=Decimal("0.001"),
+                fill_price=Decimal("60000"),
+                fee_amount=Decimal("0"),
+                fee_currency="USDT",
+                reduce_only=True,
+                close_only=True,
+                td_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                reduce_only_reason="position_intent_close_path",
+                close_only_reason="position_intent_close_path",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_intent="close_long",
+                liquidity_role="taker",
+                exchange_timestamp=exchange_ts,
+                ingestion_timestamp=ingestion_ts,
+                order_status_after_fill="FILLED",
+            )
+
+            first = fill_repo.save_fill(
+                fill=fill,
+                order_id=order_state.client_order_id,
+                source="OKX",
+                raw_payload={"venue_fill_id": "venue_fill_idem_1"},
+            )
+            second = fill_repo.save_fill(
+                fill=fill.model_copy(update={"fill_id": "fill_idem_2"}),
+                order_id=order_state.client_order_id,
+                source="OKX",
+                raw_payload={"venue_fill_id": "venue_fill_idem_1"},
+            )
+
+            self.assertTrue(first)
+            self.assertFalse(second)
+            self.assertEqual(fill_repo.count_fills(), 1)
+            stored = fill_repo.get_fill_by_dedupe_key("OKX", "venue_fill_idem_1")
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored["fill_id"], "fill_idem_1")
         finally:
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
@@ -415,6 +651,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             product_type="derivatives",
             margin_mode="cross",
             position_intent="close_long",
+            execution_attempt_id=f"execution_attempt:{client_order_id}",
             submission_payload={"instId": "BTC-USDT-SWAP", "tdMode": "cross", "posSide": "long"},
         )
 

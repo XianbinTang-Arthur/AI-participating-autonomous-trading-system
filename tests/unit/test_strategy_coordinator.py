@@ -12,10 +12,23 @@ from aats.schemas.decision import BaselineAssessment, DecisionContext, DecisionO
 from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, ExchangePosition
 from aats.schemas.market import MarketSnapshot
-from aats.schemas.portfolio import SleevePnLRecord
+from aats.schemas.portfolio import PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
-from aats.schemas.strategy_runtime import StrategyLegIntent
+from aats.schemas.strategy_runtime import (
+    StrategyBookRuntimeState,
+    StrategyCandidate,
+    StrategyCoordinatorSnapshot,
+    StrategyLegIntent,
+    StrategySleeveIntent,
+)
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.strategy_engines.allocator import PortfolioAllocatorV2Phase2
+from aats.services.strategy_engines.base import (
+    StrategyEngineInput,
+    StrategyEvaluationContext,
+    StrategyFamilyRuntimeControl,
+    StrategyMarketHistoryRequest,
+)
 from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
 from aats.services.strategy_engines.sleeve_identity import build_strategy_sleeve_id
 from aats.storage.event_store import InMemoryEventStore
@@ -58,6 +71,29 @@ def _market_snapshot(symbol: str, price: str) -> MarketSnapshot:
         kline_1h={"close": price_decimal},
         recent_trades=[],
         orderbook_depth={},
+    )
+
+
+def _portfolio_snapshot(
+    *,
+    product_type: str,
+    margin_mode: str,
+    total_equity: str = "1000",
+) -> PortfolioSnapshot:
+    total_equity_decimal = Decimal(total_equity)
+    return PortfolioSnapshot(
+        snapshot_ts=utc_now(),
+        balances={"USDT": total_equity_decimal},
+        positions=[],
+        cost_basis={},
+        realized_pnl=Decimal("0"),
+        unrealized_pnl=Decimal("0"),
+        total_equity=total_equity_decimal,
+        gross_exposure=Decimal("0"),
+        net_exposure=Decimal("0"),
+        risk_budget_usage={},
+        product_type=product_type,
+        margin_mode=margin_mode,
     )
 
 
@@ -203,6 +239,336 @@ def _fill_event(
 
 
 class TestStrategyCoordinator(unittest.TestCase):
+    def test_recent_market_snapshots_fetch_each_symbol_independently(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT", "ETH-USDT"),
+                "spot_grid_enabled": True,
+                "spot_grid_anchor_lookback_snapshots": 2,
+            }
+        )
+        event_store = InMemoryEventStore()
+        for symbol, price in (
+            ("ETH-USDT", "200"),
+            ("ETH-USDT", "201"),
+            ("BTC-USDT", "100"),
+            ("BTC-USDT", "101"),
+            ("BTC-USDT", "102"),
+            ("BTC-USDT", "103"),
+            ("BTC-USDT", "104"),
+        ):
+            event_store.append(
+                build_envelope(
+                    topic=topics.MARKET_SNAPSHOTS,
+                    key=symbol,
+                    payload_model=_market_snapshot(symbol, price),
+                    source_component="test",
+                )
+            )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=event_store,
+            market_gateway=_FakeMarketGateway(
+                {
+                    "BTC-USDT": _market_snapshot("BTC-USDT", "104"),
+                    "ETH-USDT": _market_snapshot("ETH-USDT", "201"),
+                }
+            ),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        rows = coordinator._recent_market_snapshots(
+            requests={
+                "spot_grid": StrategyMarketHistoryRequest(
+                    family="spot_grid",
+                    symbols=("BTC-USDT", "ETH-USDT"),
+                    topic=topics.MARKET_SNAPSHOTS,
+                    sampling_source="event_store_recent",
+                    lookback_snapshots=2,
+                )
+            }
+        )
+
+        self.assertEqual(
+            [snapshot.last_price for snapshot in rows["BTC-USDT"]],
+            [Decimal("103"), Decimal("104")],
+        )
+        self.assertEqual(
+            [snapshot.last_price for snapshot in rows["ETH-USDT"]],
+            [Decimal("200"), Decimal("201")],
+        )
+
+    def test_recent_market_snapshots_are_dispatched_with_family_specific_windows(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "spot_grid_enabled": True,
+                "spot_grid_anchor_lookback_snapshots": 1,
+                "dca_enabled": True,
+                "dca_pullback_only_enabled": True,
+            }
+        )
+        event_store = InMemoryEventStore()
+        for price in ("100", "99", "98"):
+            event_store.append(
+                build_envelope(
+                    topic=topics.MARKET_SNAPSHOTS,
+                    key="BTC-USDT",
+                    payload_model=_market_snapshot("BTC-USDT", price),
+                    source_component="test",
+                )
+            )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=event_store,
+            market_gateway=_FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "98")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        resolved_pair_definitions_by_family = coordinator._resolved_pair_definitions_by_family(
+            primary_symbol="BTC-USDT"
+        )
+        requests = coordinator._market_history_requests(
+            primary_symbol="BTC-USDT",
+            resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+        )
+        latest_market_snapshots_by_symbol_by_family = coordinator._latest_market_snapshots_by_symbol_by_family(
+            requests=requests,
+        )
+        latest_snapshots = coordinator._latest_market_snapshots_by_family(
+            requests=requests,
+            latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
+        )
+        rows = coordinator._recent_market_snapshots(requests=requests)
+        directional_target = _position_target(
+            symbol="BTC-USDT",
+            product_type="spot",
+            margin_mode="cash",
+            current_qty="0",
+            target_qty="0",
+        )
+        overlay_parent_exposures_by_family = coordinator._overlay_parent_exposures_by_family(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
+            directional_target=directional_target,
+        )
+        windows = {
+            family: request.lookback_snapshots
+            for family, request in requests.items()
+        }
+        evaluation_context = StrategyEvaluationContext.from_engine_input(
+            StrategyEngineInput(
+                context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
+                baseline=_baseline(symbol="BTC-USDT", regime="range"),
+                directional_target=directional_target,
+                latest_snapshot=None,
+                latest_account_snapshot=None,
+                latest_market_snapshot=_market_snapshot("BTC-USDT", "98"),
+                resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+                latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
+                latest_market_snapshots_by_family=latest_snapshots,
+                overlay_parent_exposures_by_family=overlay_parent_exposures_by_family,
+                recent_market_snapshots=rows,
+                recent_targets_by_family={},
+                recent_market_snapshot_windows_by_family=windows,
+                market_history_requests_by_family=requests,
+            ),
+            family_runtime_controls={
+                "directional": StrategyFamilyRuntimeControl(enabled=True, live_execution_enabled=True),
+                "smart_arbitrage": StrategyFamilyRuntimeControl(),
+                "spot_grid": StrategyFamilyRuntimeControl(enabled=True, live_execution_enabled=True),
+                "dca": StrategyFamilyRuntimeControl(enabled=True, live_execution_enabled=True),
+                "protective": StrategyFamilyRuntimeControl(),
+                "opportunistic": StrategyFamilyRuntimeControl(),
+                "independent": StrategyFamilyRuntimeControl(),
+            },
+        )
+
+        self.assertEqual(requests["directional"].sampling_source, "not_required")
+        self.assertEqual(requests["directional"].latest_snapshot_source, "not_required")
+        self.assertEqual(requests["smart_arbitrage"].sampling_source, "not_required")
+        self.assertIn("BTC-USDT", requests["smart_arbitrage"].symbols)
+        self.assertEqual(requests["smart_arbitrage"].latest_snapshot_source, "gateway_or_event_store_latest")
+        self.assertIn("BTC-USDT", requests["smart_arbitrage"].latest_snapshot_symbols)
+        self.assertEqual(requests["spot_grid"].sampling_source, "event_store_recent")
+        self.assertEqual(requests["spot_grid"].topic, topics.MARKET_SNAPSHOTS)
+        self.assertEqual(requests["spot_grid"].symbols, ("BTC-USDT",))
+        self.assertEqual(requests["spot_grid"].latest_snapshot_symbols, ("BTC-USDT",))
+        self.assertEqual(requests["spot_grid"].latest_snapshot_symbol, "BTC-USDT")
+        self.assertEqual(requests["spot_grid"].latest_snapshot_topic, topics.MARKET_SNAPSHOTS)
+        self.assertEqual(requests["spot_grid"].latest_snapshot_source, "gateway_or_event_store_latest")
+        self.assertEqual(requests["dca"].sampling_source, "event_store_recent")
+        self.assertEqual(requests["dca"].symbols, ("BTC-USDT",))
+        self.assertEqual(requests["dca"].latest_snapshot_symbols, ("BTC-USDT",))
+        self.assertEqual(requests["dca"].latest_snapshot_symbol, "BTC-USDT")
+        self.assertEqual(requests["dca"].latest_snapshot_topic, topics.MARKET_SNAPSHOTS)
+        self.assertEqual(requests["dca"].latest_snapshot_source, "gateway_or_event_store_latest")
+        self.assertEqual(windows["spot_grid"], 1)
+        self.assertEqual(windows["dca"], 2)
+        self.assertEqual(len(rows["BTC-USDT"]), 2)
+        self.assertIsNone(latest_snapshots["directional"])
+        self.assertEqual(latest_market_snapshots_by_symbol_by_family["smart_arbitrage"]["BTC-USDT"].symbol, "BTC-USDT")
+        self.assertEqual(latest_snapshots["spot_grid"].symbol, "BTC-USDT")
+        self.assertEqual(latest_snapshots["dca"].symbol, "BTC-USDT")
+        self.assertEqual(evaluation_context.for_family("directional").recent_market_snapshots, {})
+        self.assertIsNone(evaluation_context.for_family("directional").latest_market_snapshot)
+        self.assertEqual(len(evaluation_context.for_family("spot_grid").recent_market_snapshots["BTC-USDT"]), 1)
+        self.assertEqual(evaluation_context.for_family("spot_grid").latest_market_snapshot.symbol, "BTC-USDT")
+        self.assertEqual(len(evaluation_context.for_family("dca").recent_market_snapshots["BTC-USDT"]), 2)
+        self.assertEqual(evaluation_context.for_family("dca").latest_market_snapshot.symbol, "BTC-USDT")
+        self.assertIsNotNone(evaluation_context.for_family("protective").overlay_parent_exposure)
+        self.assertIsNotNone(evaluation_context.for_family("opportunistic").overlay_parent_exposure)
+        self.assertEqual(
+            evaluation_context.for_family("protective").overlay_parent_exposure.parent_family,
+            "directional",
+        )
+        self.assertEqual(
+            evaluation_context.for_family("protective").overlay_parent_exposure.symbol,
+            "BTC-USDT",
+        )
+        self.assertEqual(
+            evaluation_context.for_family("protective").overlay_parent_exposure.lifecycle_state,
+            "flat",
+        )
+
+    def test_latest_portfolio_and_account_snapshots_are_dispatched_with_family_specific_requests(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "smart_arbitrage_enabled": True,
+            }
+        )
+        portfolio_repo = InMemoryPortfolioRepository()
+        portfolio_repo.save_snapshot(
+            _portfolio_snapshot(
+                product_type="derivatives",
+                margin_mode="cross",
+                total_equity="2500",
+            )
+        )
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=Decimal("2500"), available=Decimal("2400"))],
+            positions=[],
+            account_mode="cross",
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway(
+                {
+                    "BTC-USDT": _market_snapshot("BTC-USDT", "99"),
+                    "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100"),
+                }
+            ),
+            portfolio_repo=portfolio_repo,
+            account_service=_StaticAccountService(account_snapshot),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        resolved_pair_definitions_by_family = coordinator._resolved_pair_definitions_by_family(
+            primary_symbol="BTC-USDT-SWAP"
+        )
+        requests = coordinator._market_history_requests(
+            primary_symbol="BTC-USDT-SWAP",
+            resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+        )
+        latest_snapshots = coordinator._latest_snapshots_by_family(
+            requests=requests,
+            latest_snapshot=coordinator._latest_portfolio_snapshot(),
+        )
+        latest_account_snapshots = coordinator._latest_account_snapshots_by_family(
+            requests=requests,
+            latest_account_snapshot=coordinator._latest_account_snapshot(),
+        )
+        latest_market_snapshots_by_symbol_by_family = coordinator._latest_market_snapshots_by_symbol_by_family(
+            requests=requests,
+        )
+        latest_market_snapshots = coordinator._latest_market_snapshots_by_family(
+            requests=requests,
+            latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
+        )
+        evaluation_context = StrategyEvaluationContext.from_engine_input(
+            StrategyEngineInput(
+                context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+                baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+                directional_target=_position_target(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    current_qty="0",
+                    target_qty="0",
+                ),
+                latest_snapshot=coordinator._latest_portfolio_snapshot(),
+                latest_account_snapshot=coordinator._latest_account_snapshot(),
+                latest_market_snapshot=_market_snapshot("BTC-USDT-SWAP", "100"),
+                recent_market_snapshots={},
+                recent_targets_by_family={},
+                latest_snapshots_by_family=latest_snapshots,
+                latest_account_snapshots_by_family=latest_account_snapshots,
+                resolved_pair_definitions_by_family=resolved_pair_definitions_by_family,
+                latest_market_snapshots_by_symbol_by_family=latest_market_snapshots_by_symbol_by_family,
+                latest_market_snapshots_by_family=latest_market_snapshots,
+                recent_market_snapshot_windows_by_family={
+                    family: request.lookback_snapshots
+                    for family, request in requests.items()
+                },
+                market_history_requests_by_family=requests,
+            ),
+            family_runtime_controls={
+                "directional": StrategyFamilyRuntimeControl(enabled=True, live_execution_enabled=True),
+                "smart_arbitrage": StrategyFamilyRuntimeControl(enabled=True, live_execution_enabled=True),
+                "spot_grid": StrategyFamilyRuntimeControl(),
+                "dca": StrategyFamilyRuntimeControl(),
+                "protective": StrategyFamilyRuntimeControl(),
+                "opportunistic": StrategyFamilyRuntimeControl(),
+                "independent": StrategyFamilyRuntimeControl(),
+            },
+        )
+
+        self.assertEqual(requests["smart_arbitrage"].latest_portfolio_snapshot_source, "runtime_scope_latest")
+        self.assertEqual(requests["smart_arbitrage"].latest_account_snapshot_source, "account_service_latest")
+        self.assertEqual(requests["smart_arbitrage"].latest_snapshot_source, "gateway_or_event_store_latest")
+        self.assertEqual(len(resolved_pair_definitions_by_family["smart_arbitrage"]), 1)
+        self.assertIn("BTC-USDT", requests["smart_arbitrage"].latest_snapshot_symbols)
+        self.assertIn("BTC-USDT-SWAP", requests["smart_arbitrage"].latest_snapshot_symbols)
+        self.assertEqual(requests["spot_grid"].latest_portfolio_snapshot_source, "not_required")
+        self.assertEqual(requests["spot_grid"].latest_account_snapshot_source, "not_required")
+        self.assertIsNotNone(latest_snapshots["smart_arbitrage"])
+        self.assertIsNotNone(latest_account_snapshots["smart_arbitrage"])
+        self.assertEqual(
+            set(latest_market_snapshots_by_symbol_by_family["smart_arbitrage"]),
+            {"BTC-USDT", "BTC-USDT-SWAP"},
+        )
+        self.assertEqual(latest_market_snapshots["smart_arbitrage"].symbol, "BTC-USDT")
+        self.assertIsNone(latest_snapshots["spot_grid"])
+        self.assertIsNone(latest_account_snapshots["spot_grid"])
+        self.assertIsNone(evaluation_context.for_family("directional").latest_snapshot)
+        self.assertIsNone(evaluation_context.for_family("directional").latest_account_snapshot)
+        self.assertEqual(
+            evaluation_context.for_family("smart_arbitrage").latest_snapshot.total_equity,
+            Decimal("2500"),
+        )
+        self.assertEqual(
+            evaluation_context.for_family("smart_arbitrage").latest_account_snapshot.account_mode,
+            "cross",
+        )
+        self.assertEqual(
+            set(evaluation_context.for_family("smart_arbitrage").latest_market_snapshots_by_symbol),
+            {"BTC-USDT", "BTC-USDT-SWAP"},
+        )
+
     def test_spot_grid_can_override_directional_target(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -700,6 +1066,281 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertIn("smart_arbitrage_derivatives_runtime_required", snapshot.selection_reason_codes)
         self.assertNotIn("legacy_configured_strategy_family_smart_arbitrage", snapshot.selection_reason_codes)
 
+    def test_derivatives_fixed_independent_blocked_keeps_independent_selection(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "independent",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_family_independent_enabled": True,
+                "strategy_family_independent_live_execution_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        selected_family, candidate, reason_codes = coordinator._select_candidate(
+            candidates_by_family={
+                "directional": StrategyCandidate(
+                    family="directional",
+                    state="ready",
+                    enabled=True,
+                    selectable=True,
+                    execution_compatible=True,
+                    route_action="override_target",
+                    family_action="hold_family",
+                    headline="directional ready",
+                ),
+                "independent": StrategyCandidate(
+                    family="independent",
+                    state="blocked",
+                    enabled=True,
+                    selectable=False,
+                    execution_compatible=False,
+                    route_action="advisory_only",
+                    family_action="blocked",
+                    headline="independent blocked",
+                    reason_codes=["independent_family_candidate_inactive"],
+                    blocking_reasons=["independent_long_book_expected_cost_above_max_acceptable"],
+                ),
+            },
+        )
+
+        self.assertEqual(selected_family, "independent")
+        self.assertEqual(candidate.family, "independent")
+        self.assertIn("legacy_configured_strategy_family_independent_unavailable", reason_codes)
+        self.assertIn("legacy_configured_strategy_family_independent_hold_only", reason_codes)
+        self.assertNotIn("legacy_configured_strategy_directional_fallback", reason_codes)
+
+    def test_derivatives_fixed_independent_incompatible_falls_back_to_directional_selection(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "independent",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_family_independent_enabled": True,
+                "strategy_family_independent_live_execution_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        selected_family, candidate, reason_codes = coordinator._select_candidate(
+            candidates_by_family={
+                "directional": StrategyCandidate(
+                    family="directional",
+                    state="ready",
+                    enabled=True,
+                    selectable=True,
+                    execution_compatible=True,
+                    route_action="override_target",
+                    family_action="hold_family",
+                    headline="directional ready",
+                ),
+                "independent": StrategyCandidate(
+                    family="independent",
+                    state="incompatible",
+                    enabled=True,
+                    selectable=False,
+                    execution_compatible=False,
+                    route_action="advisory_only",
+                    family_action="blocked",
+                    headline="independent incompatible",
+                    reason_codes=["hedge_overlay_runtime_not_supported"],
+                    blocking_reasons=["hedge_overlay_runtime_not_supported"],
+                ),
+            },
+        )
+
+        self.assertEqual(selected_family, "directional")
+        self.assertEqual(candidate.family, "directional")
+        self.assertIn("legacy_configured_strategy_family_independent_unavailable", reason_codes)
+        self.assertIn("legacy_configured_strategy_directional_fallback", reason_codes)
+        self.assertNotIn("legacy_configured_strategy_family_independent_hold_only", reason_codes)
+
+    def test_derivatives_fixed_independent_unavailable_does_not_approve_directional_or_retain_legs(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "independent",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_family_independent_enabled": True,
+                "strategy_family_independent_live_execution_enabled": True,
+            }
+        )
+        allocator = PortfolioAllocatorV2Phase2(settings=settings)
+        directional_leg = StrategyLegIntent(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            side="buy",
+            position_mode="long_short_mode",
+            pos_side="long",
+            action="open",
+            family="directional",
+            role="primary",
+            margin_mode="cross",
+            current_position_qty=Decimal("0"),
+            target_position_qty=Decimal("0.01"),
+            delta_position_qty=Decimal("0.01"),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0.01",
+            position_intent="open_long",
+        ).model_copy(
+            update={
+                "strategy_family": "directional",
+                "strategy_execution_legs": [directional_leg],
+            }
+        )
+        independent_sleeve_id = build_strategy_sleeve_id(
+            family="independent",
+            primary_symbol="BTC-USDT-SWAP",
+            product_scope="derivatives",
+            margin_scope="cross",
+            symbol_scope=("BTC-USDT-SWAP",),
+        )
+        directional_sleeve_id = build_strategy_sleeve_id(
+            family="directional",
+            primary_symbol="BTC-USDT-SWAP",
+            product_scope="derivatives",
+            margin_scope="cross",
+            symbol_scope=("BTC-USDT-SWAP",),
+        )
+        sleeve_intents = [
+            StrategySleeveIntent(
+                decision_id=base_target.decision_id,
+                family="independent",
+                strategy_sleeve_id=independent_sleeve_id,
+                state="blocked",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                inventory_policy="inventory_accumulation",
+                route_action="advisory_only",
+                family_action="blocked",
+                headline="independent blocked",
+                selectable=False,
+                execution_compatible=False,
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0"),
+                delta_position_qty=Decimal("0"),
+                reason_codes=["independent_family_candidate_inactive"],
+                blocking_reasons=["independent_long_book_expected_cost_above_max_acceptable"],
+            ).model_copy(update={"allocation_id": "alloc_fixed_independent"}),
+            StrategySleeveIntent(
+                decision_id=base_target.decision_id,
+                family="directional",
+                strategy_sleeve_id=directional_sleeve_id,
+                state="ready",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                inventory_policy="account_net_inventory",
+                route_action="override_target",
+                family_action="hold_family",
+                headline="directional ready",
+                selectable=True,
+                execution_compatible=True,
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0.01"),
+                delta_position_qty=Decimal("0.01"),
+                reason_codes=["directional_strategy_target"],
+                legs=[directional_leg],
+            ).model_copy(update={"allocation_id": "alloc_fixed_directional"}),
+        ]
+
+        allocation = allocator.allocate(
+            base_target=base_target,
+            selected_family="independent",
+            selection_reason_codes=["legacy_configured_strategy_family_independent_unavailable"],
+            sleeve_intents=sleeve_intents,
+        )
+
+        self.assertEqual(allocation.primary_family, "independent")
+        self.assertEqual(allocation.route_action, "advisory_only")
+        self.assertEqual(allocation.approved_families, [])
+        self.assertEqual(allocation.execution_legs, [])
+        self.assertIn("allocator_primary_family_independent", allocation.reason_codes)
+
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        snapshot = StrategyCoordinatorSnapshot(
+            decision_id=base_target.decision_id,
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            active_family="independent",
+            selected_family="independent",
+            selected_state="blocked",
+            selected_route_action="advisory_only",
+            selected_family_action="blocked",
+            selected_headline="independent blocked",
+            selection_reason_codes=allocation.reason_codes,
+            active_families=["directional", "independent"],
+            approved_families=[],
+            candidates=[
+                StrategyCandidate(
+                    family="independent",
+                    state="blocked",
+                    enabled=True,
+                    selectable=False,
+                    execution_compatible=False,
+                    route_action="advisory_only",
+                    family_action="blocked",
+                    headline="independent blocked",
+                    reason_codes=["independent_family_candidate_inactive"],
+                    blocking_reasons=["independent_long_book_expected_cost_above_max_acceptable"],
+                ),
+                StrategyCandidate(
+                    family="directional",
+                    state="ready",
+                    enabled=True,
+                    selectable=True,
+                    execution_compatible=True,
+                    route_action="override_target",
+                    family_action="hold_family",
+                    headline="directional ready",
+                ),
+            ],
+            sleeve_intents=sleeve_intents,
+            allocation_decision=allocation,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(applied.strategy_family, "independent")
+        self.assertEqual(applied.strategy_route_action, "advisory_only")
+        self.assertEqual(applied.target_position_qty, Decimal("0"))
+        self.assertEqual(applied.strategy_execution_legs, [])
+        self.assertNotIn("directional_strategy_execution_legs_retained", applied.strategy_reason_codes)
+
     def test_dca_interval_uses_last_real_dca_target_instead_of_hold_cycles(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -1085,7 +1726,7 @@ class TestStrategyCoordinator(unittest.TestCase):
 
         self.assertEqual(snapshot.selected_family, "spot_grid")
         self.assertEqual(snapshot.allocation_decision.approved_families, ["spot_grid", "dca"])
-        self.assertEqual(len(snapshot.sleeve_intents), 4)
+        self.assertEqual(len(snapshot.sleeve_intents), 7)
         self.assertEqual(len(applied.strategy_execution_legs), 2)
         self.assertEqual({leg.family for leg in applied.strategy_execution_legs}, {"spot_grid", "dca"})
         self.assertEqual(applied.strategy_route_action, "override_target")
@@ -1457,6 +2098,37 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertNotIn("smart_arbitrage_inventory_backed_ready", candidate.reason_codes)
         self.assertEqual(candidate.legs[0].margin_mode, "cross")
 
+    def test_snapshot_margin_mode_prefers_directional_target_runtime_value(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "66000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP"),
+            directional_target=_position_target(
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="isolated",
+                current_qty="0",
+                target_qty="0",
+            ),
+        )
+
+        self.assertEqual(snapshot.margin_mode, "isolated")
+
     def test_smart_arbitrage_negative_basis_inventory_backed_does_not_fall_back_to_margin_mode(self) -> None:
         settings = AATSSettings.model_validate(
             {
@@ -1738,6 +2410,122 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(candidate.delta_position_qty, Decimal("0"))
         self.assertEqual(applied.strategy_family, "smart_arbitrage")
         self.assertEqual(len(applied.strategy_execution_legs), 0)
+
+    def test_smart_arbitrage_uses_target_margin_scope_for_sleeve_inventory_identity(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "smart_arbitrage",
+                "smart_arbitrage_enabled": True,
+                "smart_arbitrage_negative_basis_mode": "margin_backed",
+                "smart_arbitrage_margin_short_enabled": True,
+                "smart_arbitrage_margin_short_execution_ready": True,
+                "smart_arbitrage_margin_short_spot_margin_mode": "isolated",
+                "smart_arbitrage_basis_entry_bps": 5.0,
+                "smart_arbitrage_basis_exit_bps": 5.0,
+            }
+        )
+        execution_repo = InMemoryExecutionRepository()
+        sleeve_id = build_strategy_sleeve_id(
+            family="smart_arbitrage",
+            primary_symbol="BTC-USDT-SWAP",
+            product_scope="derivatives",
+            margin_scope="isolated",
+            symbol_scope=("BTC-USDT", "BTC-USDT-SWAP"),
+        )
+        execution_repo.save_fill(
+            _fill_event(
+                fill_id="fill_isolated_spot_short",
+                symbol="BTC-USDT",
+                side="sell",
+                qty="0.5",
+                price="100",
+                product_type="spot",
+                margin_mode="isolated",
+                strategy_family="smart_arbitrage",
+                strategy_sleeve_id=sleeve_id,
+                strategy_leg_role="primary",
+                position_intent="open_short",
+            )
+        )
+        execution_repo.save_fill(
+            _fill_event(
+                fill_id="fill_isolated_hedge_long",
+                symbol="BTC-USDT-SWAP",
+                side="buy",
+                qty="0.5",
+                price="99",
+                product_type="derivatives",
+                margin_mode="isolated",
+                strategy_family="smart_arbitrage",
+                strategy_sleeve_id=sleeve_id,
+                strategy_leg_role="hedge",
+                position_intent="open_long",
+            )
+        )
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=Decimal("1000"), available=Decimal("1000"))],
+            positions=[
+                ExchangePosition(
+                    instrument_id="BTC-USDT",
+                    symbol="BTC-USDT",
+                    quantity=Decimal("0.5"),
+                    side="short",
+                    margin_mode="isolated",
+                ),
+                ExchangePosition(
+                    instrument_id="BTC-USDT-SWAP",
+                    symbol="BTC-USDT-SWAP",
+                    quantity=Decimal("0.5"),
+                    side="long",
+                    margin_mode="isolated",
+                ),
+            ],
+            account_mode="isolated",
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway(
+                {
+                    "BTC-USDT": _market_snapshot("BTC-USDT", "101"),
+                    "BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100"),
+                }
+            ),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            execution_repo=execution_repo,
+            account_service=_StaticAccountService(account_snapshot),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="isolated",
+            current_qty="0.5",
+            target_qty="0.5",
+            position_intent="hold",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0.5"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=base_target,
+        )
+        candidate = next(item for item in snapshot.candidates if item.family == "smart_arbitrage")
+
+        self.assertEqual(candidate.state_phase, "active")
+        self.assertEqual(candidate.execution_mode, "margin_reverse_carry")
+        self.assertEqual(candidate.metrics["current_sleeve_spot_qty"], Decimal("-0.5"))
+        self.assertEqual(candidate.metrics["current_sleeve_margin_spot_qty"], Decimal("-0.5"))
+        self.assertEqual(candidate.metrics["current_sleeve_derivatives_qty"], Decimal("0.5"))
+        self.assertEqual(candidate.metrics["foreign_spot_qty"], Decimal("0"))
+        self.assertEqual(candidate.metrics["foreign_derivatives_qty"], Decimal("0"))
+        self.assertEqual(candidate.delta_position_qty, Decimal("0"))
 
     def test_smart_arbitrage_can_select_multiple_pairs_up_to_configured_limit(self) -> None:
         settings = AATSSettings.model_validate(
@@ -2468,6 +3256,1062 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(hedge_leg.current_position_qty, Decimal("-0.5"))
         self.assertEqual(hedge_leg.target_position_qty, Decimal("0"))
         self.assertEqual(hedge_leg.delta_position_qty, Decimal("0.5"))
+
+    def test_registry_skeleton_families_appear_in_snapshot_with_distinct_identity(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "directional",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_family_protective_enabled": False,
+                "strategy_family_opportunistic_enabled": False,
+                "strategy_family_independent_enabled": False,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "65000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT-SWAP", product_type="derivatives", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT-SWAP", regime="trend"),
+            directional_target=_position_target(
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                current_qty="0",
+                target_qty="0",
+                position_intent="hold",
+            ),
+        )
+
+        families = {item.family: item for item in snapshot.candidates}
+        self.assertIn("protective", families)
+        self.assertIn("opportunistic", families)
+        self.assertIn("independent", families)
+        self.assertEqual(families["protective"].state, "disabled")
+        self.assertEqual(families["opportunistic"].state, "disabled")
+        self.assertEqual(families["independent"].state, "disabled")
+        self.assertIn("strategy_family_protective_disabled", families["protective"].reason_codes)
+        self.assertIn("strategy_family_opportunistic_disabled", families["opportunistic"].reason_codes)
+        self.assertIn("strategy_family_independent_disabled", families["independent"].reason_codes)
+
+    def test_protective_family_engine_emits_real_business_candidate_when_enabled(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "directional",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_hedge_overlay_enabled": True,
+                "strategy_hedge_overlay_mode": "protective",
+                "strategy_hedge_protective_enabled": True,
+                "strategy_family_protective_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "65000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        context = _decision_context(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            current_position_qty="0.02",
+        ).model_copy(
+            update={
+                "current_long_position_qty": Decimal("0.02"),
+                "current_net_position_qty": Decimal("0.02"),
+                "current_gross_position_qty": Decimal("0.02"),
+                "current_exposure_side": "long",
+                "current_long_leg_opened_at": utc_now() - timedelta(minutes=20),
+            }
+        )
+        baseline = _baseline(symbol="BTC-USDT-SWAP", regime="trend", confidence=1.0).model_copy(
+            update={
+                "direction_bias": "short",
+                "volatility_state": "high",
+                "composite_alpha_score": -1.0,
+                "factor_scores": {
+                    "microstructure_alpha": -0.5,
+                    "momentum_alpha": -0.5,
+                    "trend_alpha": -0.5,
+                },
+            }
+        )
+        snapshot = coordinator.evaluate(
+            context=context,
+            baseline=baseline,
+            directional_target=_position_target(
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                current_qty="0.02",
+                target_qty="0.02",
+                position_intent="hold",
+            ),
+        )
+
+        self.assertEqual(snapshot.selected_family, "directional")
+        protective = next(item for item in snapshot.candidates if item.family == "protective")
+        self.assertEqual(protective.state, "opening")
+        self.assertEqual(protective.execution_mode, "protective_overlay")
+        self.assertFalse(protective.selectable)
+        self.assertTrue(protective.execution_compatible)
+        self.assertNotIn("strategy_family_protective_placeholder_not_migrated", protective.reason_codes)
+        self.assertFalse(bool(protective.metrics.get("skeleton_mode")))
+        self.assertEqual(protective.metrics["execution_owner"], "protective")
+        self.assertNotIn("legacy_execution_owner", protective.metrics)
+        self.assertEqual(protective.legs[0].family, "protective")
+        self.assertEqual(protective.legs[0].pos_side, "short")
+        self.assertEqual(protective.legs[0].action, "open")
+
+    def test_opportunistic_family_engine_emits_real_business_candidate_when_enabled(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "directional",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_hedge_overlay_enabled": True,
+                "strategy_hedge_overlay_mode": "opportunistic",
+                "strategy_hedge_opportunistic_enabled": True,
+                "strategy_family_opportunistic_enabled": True,
+                "strategy_hedge_opportunistic_open_threshold": 0.62,
+                "strategy_hedge_opportunistic_close_threshold": 0.46,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "65000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        context = _decision_context(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            current_position_qty="0.02",
+        ).model_copy(
+            update={
+                "current_long_position_qty": Decimal("0.02"),
+                "current_net_position_qty": Decimal("0.02"),
+                "current_gross_position_qty": Decimal("0.02"),
+                "current_exposure_side": "long",
+                "current_long_leg_opened_at": utc_now() - timedelta(minutes=20),
+            }
+        )
+        baseline = _baseline(symbol="BTC-USDT-SWAP", regime="uncertain", confidence=1.0).model_copy(
+            update={
+                "direction_bias": "long",
+                "volatility_state": "high",
+                "composite_alpha_score": 0.28,
+                "factor_scores": {
+                    "microstructure_alpha": -1.0,
+                    "momentum_alpha": -1.0,
+                    "trend_alpha": -1.0,
+                },
+            }
+        )
+        snapshot = coordinator.evaluate(
+            context=context,
+            baseline=baseline,
+            directional_target=_position_target(
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                current_qty="0.02",
+                target_qty="0.02",
+                position_intent="hold",
+            ),
+        )
+
+        self.assertEqual(snapshot.selected_family, "directional")
+        opportunistic = next(item for item in snapshot.candidates if item.family == "opportunistic")
+        self.assertEqual(opportunistic.state, "opening")
+        self.assertEqual(opportunistic.execution_mode, "opportunistic_overlay")
+        self.assertFalse(opportunistic.selectable)
+        self.assertTrue(opportunistic.execution_compatible)
+        self.assertNotIn("strategy_family_opportunistic_placeholder_not_migrated", opportunistic.reason_codes)
+        self.assertFalse(bool(opportunistic.metrics.get("skeleton_mode")))
+        self.assertEqual(opportunistic.metrics["execution_owner"], "opportunistic")
+        self.assertNotIn("legacy_execution_owner", opportunistic.metrics)
+        self.assertEqual(opportunistic.legs[0].family, "opportunistic")
+        self.assertEqual(opportunistic.legs[0].pos_side, "short")
+        self.assertEqual(opportunistic.legs[0].action, "open")
+        self.assertIsNotNone(opportunistic.book_expectancy_summary)
+        self.assertEqual(opportunistic.book_expectancy_summary.source, "opportunistic_overlay")
+        self.assertEqual(opportunistic.book_expectancy_summary.books[0].leg, "short")
+        self.assertGreater(opportunistic.book_expectancy_summary.books[0].expected_cost_bps, 0.0)
+
+    def test_protective_family_cutover_selects_protective_and_updates_top_level_semantics(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "directional",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_hedge_overlay_enabled": True,
+                "strategy_hedge_overlay_mode": "protective",
+                "strategy_hedge_protective_enabled": True,
+                "strategy_family_protective_enabled": True,
+                "strategy_family_protective_live_execution_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "65000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        context = _decision_context(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            current_position_qty="0.02",
+        ).model_copy(
+            update={
+                "current_long_position_qty": Decimal("0.02"),
+                "current_net_position_qty": Decimal("0.02"),
+                "current_gross_position_qty": Decimal("0.02"),
+                "current_exposure_side": "long",
+                "current_long_leg_opened_at": utc_now() - timedelta(minutes=20),
+            }
+        )
+        baseline = _baseline(symbol="BTC-USDT-SWAP", regime="trend", confidence=1.0).model_copy(
+            update={
+                "direction_bias": "short",
+                "volatility_state": "high",
+                "composite_alpha_score": -1.0,
+                "factor_scores": {
+                    "microstructure_alpha": -0.5,
+                    "momentum_alpha": -0.5,
+                    "trend_alpha": -0.5,
+                },
+            }
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.02",
+            target_qty="0.02",
+            position_intent="hold",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=context,
+            baseline=baseline,
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(snapshot.selected_family, "protective")
+        self.assertEqual(snapshot.selected_family_action, "protect")
+        self.assertIn("strategy_family_protective_live_cutover", snapshot.selection_reason_codes)
+        self.assertEqual(snapshot.approved_families, ["protective"])
+        self.assertEqual(applied.strategy_family, "protective")
+        self.assertEqual(applied.strategy_family_action, "protect")
+        self.assertEqual(applied.strategy_route_action, "override_target")
+        self.assertEqual(applied.position_intent, "open_short")
+        self.assertTrue(applied.strategy_execution_legs)
+        self.assertEqual(applied.strategy_execution_legs[0].family, "protective")
+        self.assertIsNotNone(applied.family_execution_summary)
+        self.assertEqual(applied.family_execution_summary.summary_mode, "single_leg")
+        self.assertEqual(applied.family_execution_summary.position_intents, ["open_short"])
+        self.assertEqual(applied.family_execution_summary.directions, ["short"])
+        self.assertIsNotNone(applied.overlay_parent_exposure)
+        self.assertEqual(applied.overlay_parent_exposure.parent_family, "directional")
+        self.assertEqual(applied.overlay_parent_exposure.source_of_truth, "mixed")
+        self.assertEqual(applied.overlay_parent_exposure.lifecycle_state, "target_and_inventory")
+        self.assertEqual(applied.overlay_parent_exposure.target_signal, "long")
+        self.assertEqual(applied.overlay_parent_exposure.current_signal, "long")
+        self.assertEqual(applied.family_execution_summary.overlay_parent_exposure.source_of_truth, "mixed")
+        assert applied.decision_outcome is not None
+        self.assertEqual(applied.decision_outcome.selected_strategy_family, "protective")
+        self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "protect")
+        self.assertEqual(applied.decision_outcome.final_action, "enter")
+        self.assertEqual(applied.decision_outcome.final_direction, "short")
+        self.assertIsNotNone(applied.decision_outcome.family_execution_summary)
+        self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_short"])
+        self.assertIsNotNone(applied.decision_outcome.overlay_parent_exposure)
+        self.assertEqual(applied.decision_outcome.overlay_parent_exposure.source_of_truth, "mixed")
+
+    def test_protective_family_cutover_preserves_close_semantics_for_residual_inventory(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "directional",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_hedge_overlay_enabled": True,
+                "strategy_hedge_overlay_mode": "protective",
+                "strategy_hedge_protective_enabled": True,
+                "strategy_family_protective_enabled": True,
+                "strategy_family_protective_live_execution_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "65000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        context = _decision_context(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            current_position_qty="0.03",
+        ).model_copy(
+            update={
+                "current_long_position_qty": Decimal("0.05"),
+                "current_short_position_qty": Decimal("0.02"),
+                "current_net_position_qty": Decimal("0.03"),
+                "current_gross_position_qty": Decimal("0.07"),
+                "current_exposure_side": "long",
+                "current_long_leg_opened_at": utc_now() - timedelta(minutes=20),
+                "current_short_leg_opened_at": utc_now() - timedelta(minutes=20),
+            }
+        )
+        baseline = _baseline(symbol="BTC-USDT-SWAP", regime="range", confidence=0.90).model_copy(
+            update={
+                "direction_bias": "long",
+                "volatility_state": "medium",
+                "composite_alpha_score": Decimal("0.10"),
+                "factor_scores": {
+                    "microstructure_alpha": Decimal("0.10"),
+                    "momentum_alpha": Decimal("0.10"),
+                    "trend_alpha": Decimal("0.10"),
+                },
+            }
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.03",
+            target_qty="0",
+            position_intent="reduce_long",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=context,
+            baseline=baseline,
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(snapshot.selected_family, "protective")
+        self.assertEqual(snapshot.selected_family_action, "close_protection_leg")
+        self.assertIsNotNone(snapshot.allocation_decision)
+        self.assertEqual(
+            snapshot.allocation_decision.operator_summary,
+            "当前 allocator v2 已批准收回保护腿的账户级执行目标。",
+        )
+        self.assertEqual(applied.strategy_family, "protective")
+        self.assertEqual(applied.strategy_family_action, "close_protection_leg")
+        self.assertEqual(applied.strategy_route_action, "override_target")
+        self.assertEqual(applied.position_intent, "close_short")
+        self.assertTrue(applied.strategy_execution_legs)
+        self.assertEqual(applied.strategy_execution_legs[0].family, "protective")
+        self.assertEqual(applied.strategy_execution_legs[0].action, "close")
+        assert applied.decision_outcome is not None
+        self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "close_protection_leg")
+        self.assertEqual(applied.decision_outcome.final_action, "exit")
+        self.assertEqual(applied.decision_outcome.final_direction, "short")
+        self.assertIsNotNone(applied.family_execution_summary)
+        self.assertEqual(applied.family_execution_summary.position_intents, ["close_short"])
+
+    def test_opportunistic_family_cutover_selects_opportunistic_and_updates_top_level_semantics(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "directional",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_hedge_overlay_enabled": True,
+                "strategy_hedge_overlay_mode": "opportunistic",
+                "strategy_hedge_opportunistic_enabled": True,
+                "strategy_hedge_opportunistic_open_threshold": 0.62,
+                "strategy_hedge_opportunistic_close_threshold": 0.46,
+                "strategy_family_opportunistic_enabled": True,
+                "strategy_family_opportunistic_live_execution_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "65000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        context = _decision_context(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            current_position_qty="0.02",
+        ).model_copy(
+            update={
+                "current_long_position_qty": Decimal("0.02"),
+                "current_net_position_qty": Decimal("0.02"),
+                "current_gross_position_qty": Decimal("0.02"),
+                "current_exposure_side": "long",
+                "current_long_leg_opened_at": utc_now() - timedelta(minutes=20),
+            }
+        )
+        baseline = _baseline(symbol="BTC-USDT-SWAP", regime="uncertain", confidence=1.0).model_copy(
+            update={
+                "direction_bias": "long",
+                "volatility_state": "high",
+                "composite_alpha_score": 0.28,
+                "factor_scores": {
+                    "microstructure_alpha": -1.0,
+                    "momentum_alpha": -1.0,
+                    "trend_alpha": -1.0,
+                },
+            }
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.02",
+            target_qty="0.02",
+            position_intent="hold",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=context,
+            baseline=baseline,
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(snapshot.selected_family, "opportunistic")
+        self.assertEqual(snapshot.selected_family_action, "open_opportunity_leg")
+        self.assertIn("strategy_family_opportunistic_live_cutover", snapshot.selection_reason_codes)
+        self.assertEqual(snapshot.approved_families, ["opportunistic"])
+        self.assertEqual(applied.strategy_family, "opportunistic")
+        self.assertEqual(applied.strategy_family_action, "open_opportunity_leg")
+        self.assertEqual(applied.strategy_route_action, "override_target")
+        self.assertEqual(applied.position_intent, "open_short")
+        self.assertTrue(applied.strategy_execution_legs)
+        self.assertEqual(applied.strategy_execution_legs[0].family, "opportunistic")
+        self.assertIsNotNone(applied.family_execution_summary)
+        self.assertEqual(applied.family_execution_summary.summary_mode, "single_leg")
+        self.assertEqual(applied.family_execution_summary.position_intents, ["open_short"])
+        self.assertEqual(applied.family_execution_summary.directions, ["short"])
+        self.assertIsNotNone(applied.family_execution_summary.book_expectancy_summary)
+        self.assertEqual(applied.family_execution_summary.book_expectancy_summary.source, "opportunistic_overlay")
+        self.assertIsNotNone(applied.overlay_parent_exposure)
+        self.assertEqual(applied.overlay_parent_exposure.parent_family, "directional")
+        self.assertEqual(applied.overlay_parent_exposure.source_of_truth, "mixed")
+        self.assertEqual(applied.overlay_parent_exposure.lifecycle_state, "target_and_inventory")
+        self.assertEqual(applied.family_execution_summary.overlay_parent_exposure.source_of_truth, "mixed")
+        self.assertIsNotNone(applied.book_expectancy_summary)
+        self.assertEqual(applied.book_expectancy_summary.source, "opportunistic_overlay")
+        assert applied.decision_outcome is not None
+        self.assertEqual(applied.decision_outcome.selected_strategy_family, "opportunistic")
+        self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "open_opportunity_leg")
+        self.assertEqual(applied.decision_outcome.final_action, "enter")
+        self.assertEqual(applied.decision_outcome.final_direction, "short")
+        self.assertIsNotNone(applied.decision_outcome.family_execution_summary)
+        self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_short"])
+        self.assertIsNotNone(applied.decision_outcome.book_expectancy_summary)
+        self.assertEqual(applied.decision_outcome.book_expectancy_summary.source, "opportunistic_overlay")
+        self.assertIsNotNone(applied.decision_outcome.overlay_parent_exposure)
+        self.assertEqual(applied.decision_outcome.overlay_parent_exposure.source_of_truth, "mixed")
+        self.assertEqual(applied.book_expectancy_summary.books[0].required_safe_net_edge_bps, 0.0)
+        self.assertEqual(
+            applied.book_expectancy_summary.books[0].weak_edge_execution_mode,
+            settings.strategy_hedge_opportunistic_weak_edge_execution_mode,
+        )
+
+    def test_opportunistic_family_cutover_preserves_close_semantics_for_residual_inventory(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "directional",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_hedge_overlay_enabled": True,
+                "strategy_hedge_overlay_mode": "opportunistic",
+                "strategy_hedge_opportunistic_enabled": True,
+                "strategy_hedge_opportunistic_open_threshold": 0.62,
+                "strategy_hedge_opportunistic_close_threshold": 0.46,
+                "strategy_hedge_opportunistic_min_hold_seconds": 0.0,
+                "strategy_hedge_opportunistic_rebalance_cooldown_seconds": 0.0,
+                "strategy_family_opportunistic_enabled": True,
+                "strategy_family_opportunistic_live_execution_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "65000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        context = _decision_context(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            current_position_qty="0.03",
+        ).model_copy(
+            update={
+                "current_long_position_qty": Decimal("0.05"),
+                "current_short_position_qty": Decimal("0.02"),
+                "current_net_position_qty": Decimal("0.03"),
+                "current_gross_position_qty": Decimal("0.07"),
+                "current_exposure_side": "long",
+                "current_long_leg_opened_at": utc_now() - timedelta(minutes=20),
+                "current_short_leg_opened_at": utc_now() - timedelta(minutes=20),
+            }
+        )
+        baseline = _baseline(symbol="BTC-USDT-SWAP", regime="range", confidence=0.70).model_copy(
+            update={
+                "direction_bias": "long",
+                "volatility_state": "medium",
+                "composite_alpha_score": Decimal("0.10"),
+                "factor_scores": {
+                    "microstructure_alpha": Decimal("0.10"),
+                    "momentum_alpha": Decimal("0.10"),
+                    "trend_alpha": Decimal("0.10"),
+                },
+            }
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.03",
+            target_qty="0",
+            position_intent="reduce_long",
+        )
+
+        snapshot = coordinator.evaluate(
+            context=context,
+            baseline=baseline,
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(snapshot.selected_family, "opportunistic")
+        self.assertEqual(snapshot.selected_family_action, "close_opportunity_leg")
+        self.assertIsNotNone(snapshot.allocation_decision)
+        self.assertEqual(
+            snapshot.allocation_decision.operator_summary,
+            "当前 allocator v2 已批准收回机会腿的账户级执行目标。",
+        )
+        self.assertEqual(applied.strategy_family, "opportunistic")
+        self.assertEqual(applied.strategy_family_action, "close_opportunity_leg")
+        self.assertEqual(applied.strategy_route_action, "override_target")
+        self.assertEqual(applied.position_intent, "close_short")
+        self.assertTrue(applied.strategy_execution_legs)
+        self.assertEqual(applied.strategy_execution_legs[0].family, "opportunistic")
+        self.assertEqual(applied.strategy_execution_legs[0].action, "close")
+        assert applied.decision_outcome is not None
+        self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "close_opportunity_leg")
+        self.assertEqual(applied.decision_outcome.final_action, "exit")
+        self.assertEqual(applied.decision_outcome.final_direction, "short")
+        self.assertIsNotNone(applied.family_execution_summary)
+        self.assertEqual(applied.family_execution_summary.position_intents, ["close_short"])
+
+    def test_independent_family_engine_emits_real_business_candidate_when_enabled(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "directional",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_short_bias_enabled": True,
+                "strategy_hedge_overlay_enabled": True,
+                "strategy_hedge_overlay_mode": "independent",
+                "strategy_hedge_independent_enabled": True,
+                "strategy_hedge_independent_long_entry_threshold": 0.60,
+                "strategy_hedge_independent_short_entry_threshold": 0.60,
+                "strategy_hedge_independent_long_close_threshold": 0.48,
+                "strategy_hedge_independent_short_close_threshold": 0.48,
+                "strategy_hedge_independent_long_scale_in_threshold": 0.72,
+                "strategy_hedge_independent_short_scale_in_threshold": 0.72,
+                "strategy_family_independent_enabled": True,
+                "strategy_family_independent_live_execution_enabled": False,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "65000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        context = _decision_context(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            current_position_qty="0",
+        ).model_copy(
+            update={
+                "current_long_position_qty": Decimal("0"),
+                "current_short_position_qty": Decimal("0"),
+                "current_net_position_qty": Decimal("0"),
+                "current_gross_position_qty": Decimal("0"),
+                "current_exposure_side": "flat",
+            }
+        )
+        baseline = _baseline(symbol="BTC-USDT-SWAP", regime="trend", confidence=1.0).model_copy(
+            update={
+                "direction_bias": "long",
+                "volatility_state": "high",
+                "composite_alpha_score": 1.0,
+                "factor_scores": {
+                    "microstructure_alpha": 0.8,
+                    "momentum_alpha": 0.8,
+                    "trend_alpha": 0.8,
+                },
+            }
+        )
+        snapshot = coordinator.evaluate(
+            context=context,
+            baseline=baseline,
+            directional_target=_position_target(
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                current_qty="0",
+                target_qty="0",
+                position_intent="hold",
+            ).model_copy(
+                update={
+                    "expected_signal_edge_bps": 18.0,
+                    "expected_cost_bps": 4.0,
+                    "expected_net_edge_bps": 14.0,
+                }
+            ),
+        )
+
+        self.assertEqual(snapshot.selected_family, "directional")
+        independent = next(item for item in snapshot.candidates if item.family == "independent")
+        self.assertEqual(independent.execution_mode, "independent_books")
+        self.assertFalse(independent.selectable)
+        self.assertTrue(independent.execution_compatible)
+        self.assertNotIn("strategy_family_independent_placeholder_not_migrated", independent.reason_codes)
+        self.assertFalse(bool(independent.metrics.get("skeleton_mode")))
+        self.assertEqual(independent.metrics["execution_owner"], "independent")
+        self.assertNotIn("legacy_execution_owner", independent.metrics)
+        self.assertEqual(independent.state, "opening")
+        self.assertEqual(independent.legs[0].family, "independent")
+        self.assertEqual(independent.legs[0].pos_side, "long")
+        self.assertEqual(independent.legs[0].action, "open")
+
+    def test_independent_family_cutover_selects_independent_and_updates_top_level_semantics(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "strategy_family_active": "directional",
+                "strategy_family_auto_selection_enabled": False,
+                "strategy_short_bias_enabled": True,
+                "strategy_hedge_overlay_enabled": True,
+                "strategy_hedge_overlay_mode": "independent",
+                "strategy_hedge_independent_enabled": True,
+                "strategy_hedge_independent_long_entry_threshold": 0.60,
+                "strategy_hedge_independent_short_entry_threshold": 0.60,
+                "strategy_hedge_independent_long_close_threshold": 0.48,
+                "strategy_hedge_independent_short_close_threshold": 0.48,
+                "strategy_hedge_independent_long_scale_in_threshold": 0.72,
+                "strategy_hedge_independent_short_scale_in_threshold": 0.72,
+                "strategy_family_independent_enabled": True,
+                "strategy_family_independent_live_execution_enabled": True,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "65000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        context = _decision_context(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            current_position_qty="0",
+        ).model_copy(
+            update={
+                "current_long_position_qty": Decimal("0"),
+                "current_short_position_qty": Decimal("0"),
+                "current_net_position_qty": Decimal("0"),
+                "current_gross_position_qty": Decimal("0"),
+                "current_exposure_side": "flat",
+            }
+        )
+        baseline = _baseline(symbol="BTC-USDT-SWAP", regime="trend", confidence=1.0).model_copy(
+            update={
+                "direction_bias": "long",
+                "volatility_state": "high",
+                "composite_alpha_score": 1.0,
+                "factor_scores": {
+                    "microstructure_alpha": 0.8,
+                    "momentum_alpha": 0.8,
+                    "trend_alpha": 0.8,
+                },
+            }
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0",
+            position_intent="hold",
+        ).model_copy(
+            update={
+                "expected_signal_edge_bps": 18.0,
+                "expected_cost_bps": 4.0,
+                "expected_net_edge_bps": 14.0,
+            }
+        )
+
+        snapshot = coordinator.evaluate(
+            context=context,
+            baseline=baseline,
+            directional_target=base_target,
+        )
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertEqual(snapshot.selected_family, "independent")
+        self.assertEqual(snapshot.selected_family_action, "open_independent_book")
+        self.assertIn("strategy_family_independent_live_cutover", snapshot.selection_reason_codes)
+        self.assertEqual(snapshot.approved_families, ["independent"])
+        self.assertEqual(applied.strategy_family, "independent")
+        self.assertEqual(applied.strategy_family_action, "open_independent_book")
+        self.assertEqual(applied.strategy_route_action, "override_target")
+        self.assertEqual(applied.position_intent, "open_long")
+        self.assertTrue(applied.strategy_execution_legs)
+        self.assertEqual(applied.strategy_execution_legs[0].family, "independent")
+        self.assertTrue(applied.strategy_execution_legs[0].execution_chain_id)
+        self.assertIsNotNone(applied.family_execution_summary)
+        self.assertEqual(applied.family_execution_summary.summary_mode, "single_leg")
+        self.assertEqual(applied.family_execution_summary.position_intents, ["open_long"])
+        self.assertEqual(applied.family_execution_summary.directions, ["long"])
+        self.assertIsNotNone(applied.family_execution_summary.book_expectancy_summary)
+        self.assertEqual(applied.family_execution_summary.book_expectancy_summary.source, "independent_book")
+        self.assertTrue(applied.family_execution_summary.diagnostic_metric_flags["emit_expected_vs_realized_metrics"])
+        self.assertEqual(
+            [item.leg for item in applied.family_execution_summary.book_runtime_states],
+            ["long", "short"],
+        )
+        self.assertIsNotNone(applied.book_expectancy_summary)
+        self.assertEqual(applied.book_expectancy_summary.source, "independent_book")
+        self.assertEqual([item.leg for item in applied.book_runtime_states], ["long", "short"])
+        self.assertTrue(applied.book_runtime_states[0].execution_chain_id)
+        self.assertTrue(applied.diagnostic_metric_flags["emit_expected_vs_realized_metrics"])
+        assert applied.decision_outcome is not None
+        self.assertEqual(applied.decision_outcome.selected_strategy_family, "independent")
+        self.assertEqual(applied.decision_outcome.selected_strategy_family_action, "open_independent_book")
+        self.assertEqual(applied.decision_outcome.final_action, "enter")
+        self.assertIsNotNone(applied.decision_outcome.family_execution_summary)
+        self.assertEqual(applied.decision_outcome.family_execution_summary.position_intents, ["open_long"])
+        self.assertIsNotNone(applied.decision_outcome.family_execution_summary.book_expectancy_summary)
+        self.assertIsNotNone(applied.decision_outcome.book_expectancy_summary)
+        self.assertEqual(applied.decision_outcome.book_expectancy_summary.source, "independent_book")
+        self.assertTrue(applied.decision_outcome.diagnostic_metric_flags["emit_expected_vs_realized_metrics"])
+        self.assertEqual(
+            [item.leg for item in applied.decision_outcome.book_runtime_states],
+            ["long", "short"],
+        )
+        self.assertTrue(applied.decision_outcome.book_runtime_states[0].execution_chain_id)
+
+    def test_family_execution_summary_preserves_multi_leg_cutover_without_forcing_single_intent(self) -> None:
+        summary = StrategyCoordinatorService._family_execution_summary(
+            selected_family="independent",
+            family_action="open_independent_book",
+            route_action="override_target",
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="buy",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="open",
+                    family="independent",
+                    role="primary",
+                    strategy_sleeve_id="independent_long",
+                    allocation_id="alloc_independent",
+                    margin_mode="cross",
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("0.01"),
+                    delta_position_qty=Decimal("0.01"),
+                    execution_mode="independent_long_book",
+                ),
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="sell",
+                    position_mode="long_short_mode",
+                    pos_side="short",
+                    action="open",
+                    family="independent",
+                    role="primary",
+                    strategy_sleeve_id="independent_short",
+                    allocation_id="alloc_independent",
+                    margin_mode="cross",
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("-0.01"),
+                    delta_position_qty=Decimal("-0.01"),
+                    execution_mode="independent_short_book",
+                ),
+            ],
+        )
+
+        assert summary is not None
+        self.assertEqual(summary.summary_mode, "multi_leg")
+        self.assertEqual(summary.leg_count, 2)
+        self.assertEqual(summary.position_intents, ["open_long", "open_short"])
+        self.assertEqual(summary.directions, ["long", "short"])
+        self.assertEqual(summary.leg_actions, ["open"])
+        self.assertEqual(summary.execution_modes, ["independent_long_book", "independent_short_book"])
+
+    def test_family_execution_summary_preserves_overlay_parent_signal_fields(self) -> None:
+        summary = StrategyCoordinatorService._family_execution_summary(
+            selected_family="protective",
+            family_action="protect",
+            route_action="override_target",
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="sell",
+                    position_mode="long_short_mode",
+                    pos_side="short",
+                    action="open",
+                    family="protective",
+                    role="hedge",
+                    strategy_sleeve_id="protective_short",
+                    allocation_id="alloc_protective",
+                    margin_mode="cross",
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("-0.02"),
+                    delta_position_qty=Decimal("-0.02"),
+                    execution_mode="protective_overlay",
+                ),
+            ],
+            selected_candidate=StrategyCandidate(
+                family="protective",
+                state="ready",
+                enabled=True,
+                selectable=True,
+                execution_compatible=True,
+                route_action="override_target",
+                family_action="protect",
+                headline="protective",
+                metrics={
+                    "overlay_parent_exposure": {
+                        "parent_family": "directional",
+                        "symbol": "BTC-USDT-SWAP",
+                        "target_leverage": 2.0,
+                        "margin_mode": "cross",
+                        "target_long_qty": Decimal("0"),
+                        "target_short_qty": Decimal("0"),
+                        "current_long_qty": Decimal("0.02"),
+                        "current_short_qty": Decimal("0"),
+                        "target_qty": Decimal("0"),
+                        "current_qty": Decimal("0.02"),
+                        "effective_qty": Decimal("0.02"),
+                        "target_signal": "flat",
+                        "current_signal": "long",
+                        "effective_signal": "long",
+                        "signal_source": "inventory",
+                        "source_of_truth": "inventory",
+                        "lifecycle_state": "inventory_only",
+                        "target_active": False,
+                        "inventory_active": True,
+                        "source": "directional_target_with_inventory_continuity",
+                    },
+                    "parent_target_signal": "flat",
+                    "parent_current_signal": "long",
+                    "parent_effective_signal": "long",
+                    "parent_exposure_signal_source": "inventory",
+                    "parent_source_of_truth": "inventory",
+                    "parent_target_qty": Decimal("0"),
+                    "parent_current_qty": Decimal("0.02"),
+                    "parent_effective_qty": Decimal("0.02"),
+                },
+            ),
+        )
+
+        assert summary is not None
+        self.assertIsNotNone(summary.overlay_parent_exposure)
+        self.assertEqual(summary.parent_target_signal, "flat")
+        self.assertEqual(summary.parent_current_signal, "long")
+        self.assertEqual(summary.parent_effective_signal, "long")
+        self.assertEqual(summary.signal_source, "inventory")
+        self.assertEqual(summary.parent_source_of_truth, "inventory")
+        self.assertEqual(summary.parent_target_qty, Decimal("0"))
+        self.assertEqual(summary.parent_current_qty, Decimal("0.02"))
+        self.assertEqual(summary.parent_effective_qty, Decimal("0.02"))
+        self.assertEqual(summary.overlay_parent_exposure.target_signal, "flat")
+        self.assertEqual(summary.overlay_parent_exposure.current_signal, "long")
+        self.assertEqual(summary.overlay_parent_exposure.effective_signal, "long")
+        self.assertEqual(summary.overlay_parent_exposure.parent_family, "directional")
+        self.assertEqual(summary.overlay_parent_exposure.symbol, "BTC-USDT-SWAP")
+        self.assertEqual(summary.overlay_parent_exposure.target_leverage, 2.0)
+        self.assertEqual(summary.overlay_parent_exposure.margin_mode, "cross")
+        self.assertEqual(summary.overlay_parent_exposure.source_of_truth, "inventory")
+        self.assertEqual(summary.overlay_parent_exposure.target_qty, Decimal("0"))
+        self.assertEqual(summary.overlay_parent_exposure.current_qty, Decimal("0.02"))
+        self.assertEqual(summary.overlay_parent_exposure.effective_qty, Decimal("0.02"))
+
+    def test_family_execution_summary_preserves_independent_close_reason(self) -> None:
+        summary = StrategyCoordinatorService._family_execution_summary(
+            selected_family="independent",
+            family_action="close_failed_thesis_independent_book",
+            route_action="override_target",
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="sell",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="close",
+                    family="independent",
+                    role="primary",
+                    strategy_sleeve_id="independent_long",
+                    allocation_id="alloc_independent",
+                    margin_mode="cross",
+                    current_position_qty=Decimal("0.02"),
+                    target_position_qty=Decimal("0"),
+                    delta_position_qty=Decimal("-0.02"),
+                    execution_mode="independent_long_book",
+                ),
+            ],
+            selected_candidate=StrategyCandidate(
+                family="independent",
+                state="unwinding",
+                enabled=True,
+                selectable=True,
+                execution_compatible=True,
+                route_action="override_target",
+                family_action="close_failed_thesis_independent_book",
+                headline="independent close",
+                metrics={"close_reason": "failed_thesis"},
+            ),
+        )
+
+        assert summary is not None
+        self.assertEqual(summary.close_reason, "failed_thesis")
+
+    def test_family_execution_summary_preserves_independent_book_runtime_states(self) -> None:
+        summary = StrategyCoordinatorService._family_execution_summary(
+            selected_family="independent",
+            family_action="open_independent_book",
+            route_action="override_target",
+            strategy_execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="buy",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="open",
+                    family="independent",
+                    role="primary",
+                    strategy_sleeve_id="independent_long",
+                    allocation_id="alloc_independent",
+                    margin_mode="cross",
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("0.01"),
+                    delta_position_qty=Decimal("0.01"),
+                    execution_mode="independent_long_book",
+                ),
+            ],
+            selected_candidate=StrategyCandidate(
+                family="independent",
+                state="opening",
+                enabled=True,
+                selectable=True,
+                execution_compatible=True,
+                route_action="override_target",
+                family_action="open_independent_book",
+                headline="independent open",
+                book_runtime_states=[
+                    StrategyBookRuntimeState(
+                        leg="long",
+                        current_qty=Decimal("0"),
+                        target_qty=Decimal("0.01"),
+                        state="opening",
+                        book_action="open",
+                    ),
+                    StrategyBookRuntimeState(
+                        leg="short",
+                        current_qty=Decimal("0.01"),
+                        target_qty=Decimal("0"),
+                        state="holding",
+                        book_action="hold",
+                    ),
+                ],
+            ),
+        )
+
+        assert summary is not None
+        self.assertEqual([item.leg for item in summary.book_runtime_states], ["long", "short"])
+
+    def test_final_action_for_selected_family_maps_independent_thesis_actions(self) -> None:
+        self.assertEqual(
+            StrategyCoordinatorService._final_action_for_selected_family(
+                family_action="de_risk_independent_book",
+                route_action="override_target",
+                strategy_execution_legs=[],
+            ),
+            "reduce",
+        )
+        self.assertEqual(
+            StrategyCoordinatorService._final_action_for_selected_family(
+                family_action="close_failed_thesis_independent_book",
+                route_action="override_target",
+                strategy_execution_legs=[],
+            ),
+            "exit",
+        )
+        self.assertEqual(
+            StrategyCoordinatorService._final_action_for_selected_family(
+                family_action="close_stale_thesis_independent_book",
+                route_action="override_target",
+                strategy_execution_legs=[],
+            ),
+            "exit",
+        )
 
 
 if __name__ == "__main__":

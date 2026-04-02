@@ -5,7 +5,6 @@ from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
-from aats.schemas.common import utc_now
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.strategy_engines.smart_arbitrage.schemas import ArbitrageCostBreakdown
@@ -18,6 +17,9 @@ def build_cost_breakdown(
     settings: AATSSettings,
     basis_bps: Decimal,
     execution_mode: str | None,
+    reference_ts: datetime,
+    hedge_margin_mode: str | None = None,
+    require_explicit_hedge_margin_mode: bool = True,
     spot_symbol: str | None = None,
     hedge_symbol: str | None = None,
     account_service: Any | None = None,
@@ -39,6 +41,10 @@ def build_cost_breakdown(
     source_flags: list[str] = []
     drag_calculator = TradeDragCalculator()
     trade_cost_service = TradeCostService(settings=settings, fee_resolver=fee_resolver)
+    resolved_hedge_margin_mode = _resolve_required_hedge_margin_mode(
+        hedge_margin_mode=hedge_margin_mode,
+        require_explicit_hedge_margin_mode=require_explicit_hedge_margin_mode,
+    )
 
     if not settings.smart_arbitrage_cost_model_enabled:
         fallback_total = max(to_decimal(settings.smart_arbitrage_estimated_cost_bps), Decimal("0"))
@@ -70,6 +76,7 @@ def build_cost_breakdown(
         settings=settings,
         trade_cost_service=trade_cost_service,
         execution_mode=execution_mode,
+        hedge_margin_mode=resolved_hedge_margin_mode,
         spot_symbol=spot_symbol,
         hedge_symbol=hedge_symbol,
     )
@@ -80,6 +87,7 @@ def build_cost_breakdown(
         settings=settings,
         trade_cost_service=trade_cost_service,
         execution_mode=execution_mode,
+        hedge_margin_mode=resolved_hedge_margin_mode,
         spot_symbol=spot_symbol,
         hedge_symbol=hedge_symbol,
     )
@@ -88,6 +96,7 @@ def build_cost_breakdown(
         settings=settings,
         trade_cost_service=trade_cost_service,
         execution_mode=execution_mode,
+        hedge_margin_mode=resolved_hedge_margin_mode,
         spot_symbol=spot_symbol,
         hedge_symbol=hedge_symbol,
     )
@@ -102,7 +111,6 @@ def build_cost_breakdown(
     if time_decay_cost_bps > Decimal("0"):
         source_flags.append("time_decay_configured")
 
-    funding_reference_ts = _funding_reference_ts(account_service=account_service)
     funding_schedule = _funding_schedule(
         account_service=account_service,
         hedge_symbol=hedge_symbol,
@@ -110,7 +118,7 @@ def build_cost_breakdown(
     expected_funding_events, funding_event_projection_active, funding_schedule_source_flag = _expected_funding_events(
         settings=settings,
         expected_hold_hours=expected_hold_hours,
-        reference_ts=funding_reference_ts,
+        reference_ts=reference_ts,
         funding_schedule=funding_schedule,
     )
     if funding_schedule_source_flag is not None:
@@ -192,6 +200,7 @@ def _fee_cost_components(
     settings: AATSSettings,
     trade_cost_service: TradeCostService,
     execution_mode: str | None,
+    hedge_margin_mode: str,
     spot_symbol: str | None,
     hedge_symbol: str | None,
 ) -> tuple[Decimal, Decimal, list[str]]:
@@ -210,7 +219,7 @@ def _fee_cost_components(
     hedge_fee_bps = trade_cost_service.estimated_execution_fee_bps_decimal(
         symbol=hedge_symbol,
         product_type="derivatives",
-        margin_mode=settings.margin_mode,
+        margin_mode=hedge_margin_mode,
         execution_style="taker",
         order_type="market",
     )
@@ -231,6 +240,7 @@ def _spread_cost_component(
     settings: AATSSettings,
     trade_cost_service: TradeCostService,
     execution_mode: str | None,
+    hedge_margin_mode: str,
     spot_symbol: str | None,
     hedge_symbol: str | None,
 ) -> tuple[Decimal, list[str]]:
@@ -247,7 +257,7 @@ def _spread_cost_component(
     hedge_spread_bps = trade_cost_service.default_spread_bps(
         symbol=hedge_symbol,
         product_type="derivatives",
-        margin_mode=settings.margin_mode,
+        margin_mode=hedge_margin_mode,
     )
     total = spot_spread_bps + hedge_spread_bps
     if total > Decimal("0"):
@@ -260,6 +270,7 @@ def _slippage_cost_component(
     settings: AATSSettings,
     trade_cost_service: TradeCostService,
     execution_mode: str | None,
+    hedge_margin_mode: str,
     spot_symbol: str | None,
     hedge_symbol: str | None,
 ) -> tuple[Decimal, list[str]]:
@@ -276,7 +287,7 @@ def _slippage_cost_component(
     hedge_slippage_bps = trade_cost_service.default_slippage_bps(
         symbol=hedge_symbol,
         product_type="derivatives",
-        margin_mode=settings.margin_mode,
+        margin_mode=hedge_margin_mode,
     )
     total = spot_slippage_bps + hedge_slippage_bps
     if total > Decimal("0"):
@@ -288,13 +299,13 @@ def _expected_funding_events(
     *,
     settings: AATSSettings,
     expected_hold_hours: Decimal,
-    reference_ts: datetime | None,
+    reference_ts: datetime,
     funding_schedule: dict[str, Any] | None,
 ) -> tuple[int, bool, str | None]:
     explicit_events = max(int(settings.smart_arbitrage_expected_funding_events or 0), 0)
     if explicit_events > 0:
         return explicit_events, False, "funding_events_explicit_override"
-    normalized_reference_ts = _normalize_reference_ts(reference_ts or utc_now())
+    normalized_reference_ts = _normalize_reference_ts(reference_ts)
     if expected_hold_hours <= Decimal("0"):
         return 0, False, None
     if funding_schedule:
@@ -322,16 +333,6 @@ def _expected_funding_events(
         interval_hours=interval_hours,
     )
     return count, projection_active, "funding_schedule_projected_from_config"
-
-
-def _funding_reference_ts(*, account_service: Any | None) -> datetime:
-    getter = getattr(account_service, "latest_snapshot", None)
-    if callable(getter):
-        snapshot = getter()
-        fetched_at = getattr(snapshot, "fetched_at", None)
-        if isinstance(fetched_at, datetime):
-            return _normalize_reference_ts(fetched_at)
-    return utc_now()
 
 
 def _normalize_reference_ts(timestamp: datetime) -> datetime:
@@ -491,3 +492,18 @@ def _borrow_cost_component(
 
     source_flags.append("borrow_absent")
     return Decimal("0"), borrow_hour_windows, source_flags
+
+
+def _resolve_required_hedge_margin_mode(
+    *,
+    hedge_margin_mode: str | None,
+    require_explicit_hedge_margin_mode: bool,
+) -> str:
+    normalized = str(hedge_margin_mode or "").strip().lower()
+    if normalized:
+        return normalized
+    # The derivatives hedge margin scope is now a required runtime input.
+    # `require_explicit_hedge_margin_mode` is retained only for call-site compatibility.
+    if require_explicit_hedge_margin_mode or not normalized:
+        raise ValueError("smart_arbitrage_hedge_margin_mode_required")
+    raise ValueError("smart_arbitrage_hedge_margin_mode_required")

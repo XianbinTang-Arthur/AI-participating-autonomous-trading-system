@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, InstrumentMetadata
 from aats.schemas.execution import FillEvent
+from aats.services.accounting import UnsupportedFeeCurrencyError
 from aats.services.portfolio_service.positions import PortfolioState
 
 
@@ -137,6 +138,30 @@ class TestPortfolioState(unittest.TestCase):
 
         self.assertEqual(state.balances["USDT"], Decimal("9930.0"))
         self.assertEqual(state.balances["BTC"], Decimal("0.0009995"))
+
+    def test_unknown_fee_currency_raises_without_mutating_portfolio_state(self) -> None:
+        state = PortfolioState(initial_usdt_balance=10_000.0)
+
+        with self.assertRaisesRegex(
+            UnsupportedFeeCurrencyError,
+            "unsupported_fill_fee_currency:ETH:BTC-USDT:BTC:USDT",
+        ):
+            state.apply_fill(
+                build_fill(
+                    fill_id="fill_unknown_fee_currency",
+                    side="buy",
+                    qty=0.001,
+                    price=70_000.0,
+                    fee=0.1,
+                    fee_currency="ETH",
+                    venue="OKX",
+                )
+            )
+
+        self.assertEqual(state.positions, {})
+        self.assertEqual(state.balances["USDT"], Decimal("10000.0"))
+        self.assertEqual(state.realized_pnl, Decimal("0"))
+        self.assertEqual(state.total_fees_paid, Decimal("0"))
 
     def test_load_exchange_snapshot_synthesizes_spot_positions_from_balances(self) -> None:
         state = PortfolioState(initial_usdt_balance=0.0)

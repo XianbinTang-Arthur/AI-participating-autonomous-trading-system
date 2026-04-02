@@ -197,8 +197,8 @@ operator_unsafe_write_without_auth: false
 operator_session_cookie_name: aats_operator_session
 # [常用可调] operator_session_max_age_seconds：会话最大有效秒数。可选值：300~604800；推荐值：43200。
 operator_session_max_age_seconds: 43200
-# [运行必改] operator_session_cookie_secure：是否仅通过 HTTPS 传输 cookie。可选值：true / false；推荐值：false（本地 HTTP 基线）。
-operator_session_cookie_secure: false
+# [运行必改] operator_session_cookie_secure：是否仅通过 HTTPS 传输 cookie。可选值：true / false；推荐值：true（默认安全）。
+operator_session_cookie_secure: true
 
 # [常用可调] log_level：日志级别。可选值：DEBUG / INFO / WARNING / ERROR；推荐值：INFO。
 log_level: INFO

@@ -9,11 +9,12 @@ from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, Orde
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.services.accounting import (
     derivatives_initial_margin_requirement,
-    fill_fee_delta_in_quote,
     remaining_obligation_amount,
     resolved_fee_currency,
     resolve_symbol_currencies,
     spot_buy_quote_requirement,
+    try_fill_fee_delta_in_quote,
+    unsupported_fee_currency_details,
 )
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.decimals import to_decimal
@@ -136,7 +137,18 @@ class ExecutionObligationService:
             return None
         if fill.fill_id in obligation.consumed_fill_ids:
             return obligation
-        consume_amount = self._fill_consumption_amount(fill=fill, obligation=obligation)
+        if fill.fill_id in obligation.blocked_fill_ids:
+            return obligation
+        consume_amount, processing_failure = self._fill_consumption_amount(fill=fill, obligation=obligation)
+        if processing_failure is not None:
+            return obligation.model_copy(
+                update={
+                    "blocked_fill_ids": [*obligation.blocked_fill_ids, fill.fill_id],
+                    "processing_failure_reason": "unsupported_fee_currency",
+                    "processing_failure_details": processing_failure,
+                    "last_update_ts": utc_now(),
+                }
+            )
         if consume_amount <= self._EPSILON:
             return obligation
         consumed_amount = obligation.consumed_amount + consume_amount
@@ -144,6 +156,8 @@ class ExecutionObligationService:
             update={
                 "consumed_amount": consumed_amount,
                 "consumed_fill_ids": [*obligation.consumed_fill_ids, fill.fill_id],
+                "processing_failure_reason": None,
+                "processing_failure_details": {},
                 "status": self._consumption_status(
                     reserved_amount=obligation.reserved_amount,
                     consumed_amount=consumed_amount,
@@ -179,6 +193,8 @@ class ExecutionObligationService:
             update={
                 "released_amount": obligation.released_amount + max(remaining_amount, Decimal("0")),
                 "status": terminal_status,
+                "processing_failure_reason": obligation.processing_failure_reason,
+                "processing_failure_details": dict(obligation.processing_failure_details),
                 "last_update_ts": utc_now(),
             }
         )
@@ -233,19 +249,26 @@ class ExecutionObligationService:
         *,
         fill: FillEvent,
         obligation: OrderObligation,
-    ) -> Decimal:
+    ) -> tuple[Decimal, dict | None]:
         base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
         if obligation.product_type == "spot":
             if obligation.reserve_currency == quote_currency:
-                return max(
-                    (fill.fill_qty * fill.fill_price)
-                    + fill_fee_delta_in_quote(
-                        fill,
-                        base_currency=base_currency,
-                        quote_currency=quote_currency,
-                    ),
-                    Decimal("0"),
+                fee_delta, fee_error = try_fill_fee_delta_in_quote(
+                    fill,
+                    base_currency=base_currency,
+                    quote_currency=quote_currency,
                 )
+                if fee_error is not None:
+                    return (
+                        Decimal("0"),
+                        unsupported_fee_currency_details(
+                            fill,
+                            base_currency=base_currency,
+                            quote_currency=quote_currency,
+                            error=fee_error,
+                        ),
+                    )
+                return max((fill.fill_qty * fill.fill_price) + (fee_delta or Decimal("0")), Decimal("0")), None
             if obligation.reserve_currency == base_currency:
                 fee_currency = resolved_fee_currency(
                     fill=fill,
@@ -253,10 +276,10 @@ class ExecutionObligationService:
                     quote_currency=quote_currency,
                 )
                 fee_in_reserve = to_decimal(fill.fee_amount) if fee_currency == base_currency else Decimal("0")
-                return max(fill.fill_qty + fee_in_reserve, Decimal("0"))
-            return Decimal("0")
+                return max(fill.fill_qty + fee_in_reserve, Decimal("0")), None
+            return Decimal("0"), None
         leverage = max(to_decimal(fill.target_leverage), Decimal("1"))
-        return (abs(fill.fill_qty) * fill.fill_price) / to_decimal(leverage)
+        return (abs(fill.fill_qty) * fill.fill_price) / to_decimal(leverage), None
 
     def _reference_price(self, symbol: str) -> Decimal | None:
         if self.price_provider is None:

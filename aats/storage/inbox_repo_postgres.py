@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import asc, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
@@ -23,15 +24,9 @@ class PostgresExternalInboxRepository:
         received_at: datetime,
     ) -> bool:
         with self.session_factory() as session:
-            row = session.get(ExternalEventInboxModel, inbox_id)
-            if row is None:
-                row = session.scalar(
-                    select(ExternalEventInboxModel).where(ExternalEventInboxModel.dedupe_key == dedupe_key).limit(1)
-                )
-            if row is not None:
-                return False
-            session.add(
-                ExternalEventInboxModel(
+            inserted_inbox_id = session.scalar(
+                insert(ExternalEventInboxModel)
+                .values(
                     inbox_id=inbox_id,
                     source_system=source_system,
                     dedupe_key=dedupe_key,
@@ -41,9 +36,21 @@ class PostgresExternalInboxRepository:
                     processing_result=None,
                     last_error=None,
                 )
+                .returning(ExternalEventInboxModel.inbox_id)
+                .on_conflict_do_nothing()
             )
+            if inserted_inbox_id is not None:
+                session.commit()
+                return True
+            row = session.get(ExternalEventInboxModel, inbox_id)
+            if row is None:
+                row = session.scalar(
+                    select(ExternalEventInboxModel).where(ExternalEventInboxModel.dedupe_key == dedupe_key).limit(1)
+                )
+            if row is None:
+                raise RuntimeError("external_inbox_insert_conflict_without_existing_row")
             session.commit()
-            return True
+            return False
 
     def mark_processed(
         self,

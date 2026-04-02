@@ -9,15 +9,23 @@ from typing import TYPE_CHECKING, Any
 from aats.bootstrap.logging import get_logger
 from aats.events import topics
 from aats.events.envelopes import build_envelope
-from aats.schemas.common import EventEnvelope, utc_now
+from aats.schemas.common import EventEnvelope, dump_payload_exact, utc_now
 from aats.schemas.blocker_control import BlockerControlSnapshot
 from aats.schemas.decision import AIDecisionIntent, BaselineReference, DecisionOutcome, normalize_ai_operating_mode
-from aats.schemas.execution import FillEvent, OrderState, execution_action_from_position_intent
+from aats.schemas.execution import (
+    FillEvent,
+    OrderState,
+    execution_action_from_position_intent,
+    execution_attempt_id_from_components,
+)
 from aats.schemas.portfolio import SleevePnLRecord
 from aats.schemas.strategy_runtime import (
     PortfolioAllocationDecision,
     StrategyCoordinatorSnapshot,
     StrategyExecutionBundle,
+    StrategyExecutionAttemptDiagnostics,
+    StrategyExpectedVsRealizedBookDiagnostics,
+    StrategyExpectedVsRealizedSummary,
     StrategySleeveIntent,
 )
 from aats.schemas.operator import (
@@ -29,7 +37,10 @@ from aats.schemas.operator import (
 )
 from aats.services.blocker_control import BlockerControlService
 from aats.services.blocker_control.actions import BlockerActionService
-from aats.services.accounting import fill_fee_cost_in_quote, fill_fee_delta_in_quote
+from aats.services.accounting import (
+    try_fill_fee_cost_in_quote,
+    try_fill_fee_delta_in_quote,
+)
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
@@ -106,11 +117,15 @@ class OperatorQueryService:
         self.blocker_queries = BlockerQueryFacade(self)
 
     def _cached(self, key: str, loader):
+        if not hasattr(self, "_cache"):
+            self._cache = {}
         if key not in self._cache:
             self._cache[key] = loader()
         return self._cache[key]
 
     def _cached_ttl(self, key: str, ttl_seconds: int, loader):
+        if not hasattr(self, "_ttl_cache"):
+            self._ttl_cache = {}
         now = utc_now()
         cached = self._ttl_cache.get(key)
         if cached is not None:
@@ -154,6 +169,12 @@ class OperatorQueryService:
         return self._cached(
             "scoped_fill_outcomes",
             lambda: fill_outcomes_for_scope(self.runtime.fill_outcome_repo, self.state_scope),
+        )
+
+    def _scoped_closed_fill_outcomes(self):
+        return self._cached(
+            "scoped_closed_fill_outcomes",
+            lambda: [item for item in self._scoped_fill_outcomes() if self._is_closed_fill_outcome(item)],
         )
 
     def _refresh_sleeve_pnl_projection(self) -> list[SleevePnLRecord]:
@@ -1349,21 +1370,17 @@ class OperatorQueryService:
         fill_price = self._record_value(record, "fill_price")
         if symbol in {None, ""} or side in {None, ""} or fill_price in {None, ""}:
             return abs(fee_amount)
-        return abs(
-            self._to_decimal(
-                fill_fee_cost_in_quote(
-                    SimpleNamespace(
-                        symbol=symbol,
-                        fee_amount=fee_amount,
-                        fee_currency=self._record_value(record, "fee_currency"),
-                        venue=self._record_value(record, "venue") or "OKX",
-                        side=side,
-                        fill_price=fill_price,
-                    )
-                )
+        fee_cost, _fee_error = try_fill_fee_cost_in_quote(
+            SimpleNamespace(
+                symbol=symbol,
+                fee_amount=fee_amount,
+                fee_currency=self._record_value(record, "fee_currency"),
+                venue=self._record_value(record, "venue") or "OKX",
+                side=side,
+                fill_price=fill_price,
             )
-            or Decimal("0")
         )
+        return None if fee_cost is None else abs(self._to_decimal(fee_cost) or Decimal("0"))
 
     def _signed_fee_delta_in_quote(self, record: Any) -> Decimal | None:
         fee_amount = self._to_decimal(self._record_value(record, "fee_amount"))
@@ -1373,18 +1390,17 @@ class OperatorQueryService:
         if fee_amount is not None:
             if symbol in {None, ""} or side in {None, ""} or fill_price in {None, ""}:
                 return fee_amount
-            return self._to_decimal(
-                fill_fee_delta_in_quote(
-                    SimpleNamespace(
-                        symbol=symbol,
-                        fee_amount=fee_amount,
-                        fee_currency=self._record_value(record, "fee_currency"),
-                        venue=self._record_value(record, "venue") or "OKX",
-                        side=side,
-                        fill_price=fill_price,
-                    )
+            fee_delta, _fee_error = try_fill_fee_delta_in_quote(
+                SimpleNamespace(
+                    symbol=symbol,
+                    fee_amount=fee_amount,
+                    fee_currency=self._record_value(record, "fee_currency"),
+                    venue=self._record_value(record, "venue") or "OKX",
+                    side=side,
+                    fill_price=fill_price,
                 )
             )
+            return self._to_decimal(fee_delta)
         fee_delta = self._to_decimal(self._record_value(record, "fee_delta"))
         fee_quote_amount = self._to_decimal(self._record_value(record, "fee_quote_amount"))
         if fee_delta is not None:
@@ -1445,7 +1461,7 @@ class OperatorQueryService:
                 "execution_plan": None,
                 "decision_outcome": None,
             }
-        position_target = self.payload_by_ref(audit.position_target_ref)
+        position_target = self._position_target_payload(self.payload_by_ref(audit.position_target_ref))
         decision_outcome = self.payload_by_ref(audit.decision_outcome_ref)
         if decision_outcome is None and isinstance(position_target, dict):
             native_outcome = position_target.get("decision_outcome")
@@ -1573,6 +1589,8 @@ class OperatorQueryService:
         return {
             "fill_id": fill_payload.get("fill_id"),
             "decision_id": fill_payload.get("decision_id"),
+            "execution_chain_id": fill_payload.get("execution_chain_id"),
+            "execution_attempt_id": fill_payload.get("execution_attempt_id"),
             "intent_id": fill_payload.get("intent_id"),
             "order_id": fill_payload.get("client_order_id"),
             "symbol": fill_payload.get("symbol"),
@@ -1953,23 +1971,47 @@ class OperatorQueryService:
         )
         latest_target_payload = None
         if latest_target_event is not None:
-            target_payload = dict(latest_target_event.payload)
+            target_payload = self._position_target_payload(dict(latest_target_event.payload)) or {}
+            book_expectancy_summary = target_payload.get("book_expectancy_summary")
+            book_runtime_states = list(target_payload.get("book_runtime_states") or [])
+            independent_adaptive_summary = target_payload.get("independent_adaptive_summary")
+            independent_transition_exception_summary = target_payload.get("independent_transition_exception_summary")
+            diagnostic_metric_flags = self._effective_diagnostic_metric_flags(target_payload)
+            target_family = str(target_payload.get("strategy_family") or "directional")
+            overlay_parent_exposure = self._resolved_overlay_parent_exposure(target_payload)
+            parent_signal_fields = self._resolved_overlay_parent_signal_fields(target_payload) or {}
             latest_target_payload = {
                 "decision_id": target_payload.get("decision_id"),
                 "symbol": target_payload.get("symbol"),
                 "target_position_qty": target_payload.get("target_position_qty"),
                 "delta_position_qty": target_payload.get("delta_position_qty"),
                 "position_intent": target_payload.get("position_intent"),
-                "strategy_family": target_payload.get("strategy_family", "directional"),
+                "strategy_family": target_family,
                 "strategy_sleeve_id": target_payload.get("strategy_sleeve_id"),
                 "allocation_id": target_payload.get("allocation_id"),
                 "strategy_route_action": target_payload.get("strategy_route_action", "override_target"),
                 "strategy_reason_codes": list(target_payload.get("strategy_reason_codes") or []),
                 "strategy_headline": target_payload.get("strategy_headline"),
                 "strategy_execution_legs": list(target_payload.get("strategy_execution_legs") or []),
+                "family_execution_summary": target_payload.get("family_execution_summary"),
+                "book_expectancy_summary": book_expectancy_summary,
+                "book_runtime_states": book_runtime_states,
+                "independent_adaptive_summary": independent_adaptive_summary,
+                "independent_transition_exception_summary": independent_transition_exception_summary,
+                "diagnostic_metric_flags": diagnostic_metric_flags,
+                "overlay_parent_exposure": overlay_parent_exposure,
+                "overlay_parent_exposure_summary": self._resolved_overlay_parent_exposure_summary(target_payload),
                 "hedge_overlay_decision": target_payload.get("hedge_overlay_decision"),
                 "event_timestamp": latest_target_event.event_timestamp,
+                **parent_signal_fields,
             }
+            if target_family == "independent":
+                latest_target_payload["independent_expected_vs_realized_summary"] = (
+                    self._independent_expected_vs_realized_summary(
+                        decision_ids={str(target_payload.get("decision_id") or "").strip()},
+                        limit=1,
+                    )
+                )
         sleeve_records = []
         sleeve_repo = getattr(self.runtime, "strategy_sleeve_repo", None)
         if sleeve_repo is not None and hasattr(sleeve_repo, "list_sleeves"):
@@ -1999,6 +2041,45 @@ class OperatorQueryService:
                 "runtime_supported": self.runtime.settings.trading_product_type == "spot",
                 "execution_compatible": self.runtime.settings.trading_product_type == "spot",
             },
+            "protective": {
+                "enabled": bool(self.runtime.settings.strategy_family_protective_enabled),
+                "runtime_supported": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+                "execution_compatible": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+            },
+            "opportunistic": {
+                "enabled": bool(self.runtime.settings.strategy_family_opportunistic_enabled),
+                "runtime_supported": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+                "execution_compatible": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+            },
+            "independent": {
+                "enabled": bool(self.runtime.settings.strategy_family_independent_enabled),
+                "runtime_supported": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+                "execution_compatible": (
+                    self.runtime.settings.trading_product_type == "derivatives"
+                    and self.runtime.settings.margin_mode != "cash"
+                    and self.runtime.settings.derivatives_position_mode == "hedge"
+                ),
+            },
         }
         automation_decisions = [] if latest_snapshot is None else list(latest_snapshot.get("automation_decisions") or [])
         selected_candidate_payload = None
@@ -2025,6 +2106,9 @@ class OperatorQueryService:
             "latest_allocation_id": None if latest_target_payload is None else latest_target_payload.get("allocation_id"),
             "latest_selected_state": None if latest_snapshot is None else latest_snapshot.get("selected_state"),
             "latest_selected_route_action": None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
+            "latest_selected_family_action": (
+                None if latest_snapshot is None else latest_snapshot.get("selected_family_action")
+            ),
             "latest_selected_pair_id": (
                 None if selected_candidate_payload is None else selected_candidate_payload.get("pair_id")
             ),
@@ -2101,41 +2185,38 @@ class OperatorQueryService:
                 item.get("family"): item.get("automation_state")
                 for item in automation_decisions
             },
-            "operator_summary": (
-                "当前还没有产生多策略协调快照。"
-                if latest_snapshot is None
-                else "当前多策略协调结果已经生成。"
+            "operator_summary": self._strategy_runtime_operator_summary(
+                latest_snapshot_present=latest_snapshot is not None,
+                route_action=None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
+                family_action=None if latest_snapshot is None else latest_snapshot.get("selected_family_action"),
             ),
         }
-        route_action = summary["latest_selected_route_action"]
-        if latest_snapshot is not None:
-            if route_action == "override_target":
-                summary["operator_summary"] = "当前选中的策略家族正在直接接管本轮目标仓位。"
-            elif route_action == "protective_fallback":
-                summary["operator_summary"] = "当前选中的策略家族没有直接接管仓位，系统保留了方向策略的保护性减仓或退出。"
-            elif route_action == "advisory_only":
-                summary["operator_summary"] = "当前选中的策略家族只提供参考，不会直接接管实盘执行。"
-            else:
-                summary["operator_summary"] = "当前选中的策略家族没有生成可执行目标，系统继续保持当前仓位。"
-        smart_arbitrage_pairs = load_pair_definitions(
-            settings=self.runtime.settings,
-            primary_symbol=self.runtime.settings.default_symbol,
+        independent_expected_vs_realized_summary = self._independent_expected_vs_realized_summary()
+        independent_adaptive_summary = self._independent_adaptive_summary_from_payload(latest_target_payload)
+        independent_transition_exception_summary = self._independent_transition_exception_summary_from_payload(
+            latest_target_payload
         )
-        smart_arbitrage_pair_registry_warning_codes = list(
-            dict.fromkeys(
-                code
-                for pair in smart_arbitrage_pairs
-                for code in pair.metadata.get("configuration_warning_codes", [])
-                if str(code).strip()
+        if independent_expected_vs_realized_summary is not None:
+            summary["latest_independent_expected_vs_realized_sample_count"] = (
+                independent_expected_vs_realized_summary.get("sample_count")
             )
-        )
-        smart_arbitrage_pair_registry_error_codes = list(
-            dict.fromkeys(
-                code
-                for pair in smart_arbitrage_pairs
-                for code in pair.metadata.get("configuration_error_codes", [])
-                if str(code).strip()
+            summary["latest_independent_expected_vs_realized_net_bps"] = (
+                independent_expected_vs_realized_summary.get("avg_realized_net_bps")
             )
+        if isinstance(independent_adaptive_summary, dict):
+            summary["latest_independent_adaptive_live_applied"] = bool(independent_adaptive_summary.get("live_applied"))
+            summary["latest_independent_adaptive_shadow_only"] = bool(independent_adaptive_summary.get("shadow_only"))
+        if isinstance(independent_transition_exception_summary, dict):
+            summary["latest_independent_transition_invalid_count"] = int(
+                independent_transition_exception_summary.get("invalid_transition_count") or 0
+            )
+        (
+            smart_arbitrage_pair_definitions,
+            smart_arbitrage_pair_registry_warning_codes,
+            smart_arbitrage_pair_registry_error_codes,
+            smart_arbitrage_pair_registry_source,
+        ) = self._smart_arbitrage_runtime_pair_configuration(
+            latest_snapshot=latest_snapshot,
         )
         smart_arbitrage_cost_summary = self._smart_arbitrage_cost_summary(latest_snapshot=latest_snapshot)
         return {
@@ -2144,14 +2225,18 @@ class OperatorQueryService:
             "family_enablement": family_enablement,
             "configured_parameters": self._configured_strategy_runtime_parameters(
                 configured_family=configured_family,
-                smart_arbitrage_pairs=smart_arbitrage_pairs,
+                smart_arbitrage_pair_definitions=smart_arbitrage_pair_definitions,
                 smart_arbitrage_pair_registry_warning_codes=smart_arbitrage_pair_registry_warning_codes,
                 smart_arbitrage_pair_registry_error_codes=smart_arbitrage_pair_registry_error_codes,
+                smart_arbitrage_pair_registry_source=smart_arbitrage_pair_registry_source,
             ),
             "latest_snapshot": latest_snapshot,
             "latest_allocation_decision": latest_allocation_decision,
             "latest_bundle": latest_bundle,
             "latest_applied_target": latest_target_payload,
+            "independent_adaptive_summary": independent_adaptive_summary,
+            "independent_transition_exception_summary": independent_transition_exception_summary,
+            "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
             "strategy_sleeves": sleeve_records,
             "recent_sleeve_intents": recent_sleeve_intents,
             "recent_budget_profiles": recent_budget_profiles,
@@ -2165,13 +2250,41 @@ class OperatorQueryService:
             "truth_source": "strategy_runtime_repo_plus_event_store" if strategy_runtime_repo is not None else "strategy_coordinator_snapshots",
         }
 
+    @staticmethod
+    def _strategy_runtime_operator_summary(
+        *,
+        latest_snapshot_present: bool,
+        route_action: str | None,
+        family_action: str | None,
+    ) -> str:
+        if not latest_snapshot_present:
+            return "当前还没有产生多策略协调快照。"
+        if route_action == "override_target":
+            if family_action == "close_protection_leg":
+                return "当前选中的策略家族正在收回保护腿。"
+            if family_action == "close_opportunity_leg":
+                return "当前选中的策略家族正在收回机会腿。"
+            if family_action == "de_risk_independent_book":
+                return "当前选中的策略家族正在降低独立双书风险暴露。"
+            if family_action == "close_failed_thesis_independent_book":
+                return "当前选中的策略家族正在按 thesis 失效关闭独立双书。"
+            if family_action == "close_stale_thesis_independent_book":
+                return "当前选中的策略家族正在按 thesis 过期关闭独立双书。"
+            return "当前选中的策略家族正在直接接管本轮目标仓位。"
+        if route_action == "protective_fallback":
+            return "当前选中的策略家族没有直接接管仓位，系统保留了方向策略的保护性减仓或退出。"
+        if route_action == "advisory_only":
+            return "当前选中的策略家族只提供参考，不会直接接管实盘执行。"
+        return "当前选中的策略家族没有生成可执行目标，系统继续保持当前仓位。"
+
     def _configured_strategy_runtime_parameters(
         self,
         *,
         configured_family: str,
-        smart_arbitrage_pairs: list[Any],
+        smart_arbitrage_pair_definitions: list[dict[str, Any]],
         smart_arbitrage_pair_registry_warning_codes: list[str],
         smart_arbitrage_pair_registry_error_codes: list[str],
+        smart_arbitrage_pair_registry_source: str,
     ) -> dict[str, Any]:
         configured_parameters: dict[str, Any] = {
             "strategy_family_active": configured_family,
@@ -2188,9 +2301,10 @@ class OperatorQueryService:
         }
         if self.runtime.settings.trading_product_type == "derivatives":
             configured_parameters["smart_arbitrage"] = self._smart_arbitrage_configured_parameters(
-                smart_arbitrage_pairs=smart_arbitrage_pairs,
+                smart_arbitrage_pair_definitions=smart_arbitrage_pair_definitions,
                 smart_arbitrage_pair_registry_warning_codes=smart_arbitrage_pair_registry_warning_codes,
                 smart_arbitrage_pair_registry_error_codes=smart_arbitrage_pair_registry_error_codes,
+                smart_arbitrage_pair_registry_source=smart_arbitrage_pair_registry_source,
             )
         if self.runtime.settings.trading_product_type == "spot":
             configured_parameters["spot_grid"] = {
@@ -2324,16 +2438,57 @@ class OperatorQueryService:
             "hedge_opportunistic_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_opportunistic_rebalance_cooldown_seconds,
             "hedge_opportunistic_max_fee_drag_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_fee_drag_ratio,
             "hedge_opportunistic_max_churn_ratio": self.runtime.settings.strategy_hedge_opportunistic_max_churn_ratio,
+            "hedge_opportunistic_min_safe_net_edge_bps": self.runtime.settings.strategy_hedge_opportunistic_min_safe_net_edge_bps,
+            "hedge_opportunistic_expected_slippage_buffer_bps": self.runtime.settings.strategy_hedge_opportunistic_expected_slippage_buffer_bps,
+            "hedge_opportunistic_expected_execution_buffer_bps": self.runtime.settings.strategy_hedge_opportunistic_expected_execution_buffer_bps,
+            "hedge_opportunistic_weak_edge_execution_mode": self.runtime.settings.strategy_hedge_opportunistic_weak_edge_execution_mode,
+            "hedge_opportunistic_max_acceptable_cost_bps": self.runtime.settings.strategy_hedge_opportunistic_max_acceptable_cost_bps,
+            "hedge_opportunistic_passive_first_enabled": self.runtime.settings.strategy_hedge_opportunistic_passive_first_enabled,
             "hedge_independent_enabled": self.runtime.settings.strategy_hedge_independent_enabled,
             "hedge_independent_rollout_stage": self.runtime.settings.strategy_hedge_independent_rollout_stage,
             "hedge_independent_long_entry_threshold": self.runtime.settings.strategy_hedge_independent_long_entry_threshold,
             "hedge_independent_short_entry_threshold": self.runtime.settings.strategy_hedge_independent_short_entry_threshold,
+            "hedge_independent_long_close_threshold": self.runtime.settings.strategy_hedge_independent_long_close_threshold,
+            "hedge_independent_short_close_threshold": self.runtime.settings.strategy_hedge_independent_short_close_threshold,
             "hedge_independent_long_scale_in_threshold": self.runtime.settings.strategy_hedge_independent_long_scale_in_threshold,
             "hedge_independent_short_scale_in_threshold": self.runtime.settings.strategy_hedge_independent_short_scale_in_threshold,
             "hedge_independent_long_min_hold_seconds": self.runtime.settings.strategy_hedge_independent_long_min_hold_seconds,
             "hedge_independent_short_min_hold_seconds": self.runtime.settings.strategy_hedge_independent_short_min_hold_seconds,
             "hedge_independent_rebalance_cooldown_seconds": self.runtime.settings.strategy_hedge_independent_rebalance_cooldown_seconds,
             "hedge_independent_trial_guard_enabled": self.runtime.settings.strategy_hedge_independent_trial_guard_enabled,
+            "hedge_independent_min_safe_net_edge_bps": self.runtime.settings.strategy_hedge_independent_min_safe_net_edge_bps,
+            "hedge_independent_expected_slippage_buffer_bps": self.runtime.settings.strategy_hedge_independent_expected_slippage_buffer_bps,
+            "hedge_independent_expected_execution_buffer_bps": self.runtime.settings.strategy_hedge_independent_expected_execution_buffer_bps,
+            "hedge_independent_weak_edge_execution_mode": self.runtime.settings.strategy_hedge_independent_weak_edge_execution_mode,
+            "hedge_independent_max_acceptable_cost_bps": self.runtime.settings.strategy_hedge_independent_max_acceptable_cost_bps,
+            "hedge_independent_passive_first_enabled": self.runtime.settings.strategy_hedge_independent_passive_first_enabled,
+            "hedge_independent_min_confirm_ticks": self.runtime.settings.strategy_hedge_independent_min_confirm_ticks,
+            "hedge_independent_min_score_stability_bps": self.runtime.settings.strategy_hedge_independent_min_score_stability_bps,
+            "hedge_independent_min_liquidity_quality": self.runtime.settings.strategy_hedge_independent_min_liquidity_quality,
+            "hedge_independent_require_execution_health_ok": self.runtime.settings.strategy_hedge_independent_require_execution_health_ok,
+            "hedge_independent_max_thesis_age_seconds": self.runtime.settings.strategy_hedge_independent_max_thesis_age_seconds,
+            "hedge_independent_de_risk_net_edge_bps": self.runtime.settings.strategy_hedge_independent_de_risk_net_edge_bps,
+            "hedge_independent_failed_thesis_net_edge_bps": self.runtime.settings.strategy_hedge_independent_failed_thesis_net_edge_bps,
+            "hedge_independent_execution_health_de_risk_enabled": self.runtime.settings.strategy_hedge_independent_execution_health_de_risk_enabled,
+            "hedge_independent_liquidity_de_risk_enabled": self.runtime.settings.strategy_hedge_independent_liquidity_de_risk_enabled,
+            "hedge_independent_entry_execution_mode": self.runtime.settings.strategy_hedge_independent_entry_execution_mode,
+            "hedge_independent_scale_in_execution_mode": self.runtime.settings.strategy_hedge_independent_scale_in_execution_mode,
+            "hedge_independent_de_risk_execution_mode": self.runtime.settings.strategy_hedge_independent_de_risk_execution_mode,
+            "hedge_independent_close_failed_thesis_execution_mode": self.runtime.settings.strategy_hedge_independent_close_failed_thesis_execution_mode,
+            "hedge_independent_close_stale_execution_mode": self.runtime.settings.strategy_hedge_independent_close_stale_execution_mode,
+            "hedge_independent_limit_offset_bps_entry": self.runtime.settings.strategy_hedge_independent_limit_offset_bps_entry,
+            "hedge_independent_limit_offset_bps_scale_in": self.runtime.settings.strategy_hedge_independent_limit_offset_bps_scale_in,
+            "hedge_independent_limit_offset_bps_stale_close": self.runtime.settings.strategy_hedge_independent_limit_offset_bps_stale_close,
+            "hedge_independent_emit_book_level_metrics": self.runtime.settings.strategy_hedge_independent_emit_book_level_metrics,
+            "hedge_independent_emit_expected_vs_realized_metrics": self.runtime.settings.strategy_hedge_independent_emit_expected_vs_realized_metrics,
+            "hedge_independent_emit_close_reason_metrics": self.runtime.settings.strategy_hedge_independent_emit_close_reason_metrics,
+            "hedge_independent_emit_execution_policy_metrics": self.runtime.settings.strategy_hedge_independent_emit_execution_policy_metrics,
+            "hedge_independent_adaptive_rollout_enabled": self.runtime.settings.strategy_hedge_independent_adaptive_rollout_enabled,
+            "hedge_independent_health_enforcement_enabled": self.runtime.settings.strategy_hedge_independent_health_enforcement_enabled,
+            "hedge_independent_size_down_entry_enabled": self.runtime.settings.strategy_hedge_independent_size_down_entry_enabled,
+            "hedge_independent_long_short_asymmetry_enabled": self.runtime.settings.strategy_hedge_independent_long_short_asymmetry_enabled,
+            "hedge_independent_short_asymmetry_penalty_multiplier": self.runtime.settings.strategy_hedge_independent_short_asymmetry_penalty_multiplier,
+            "hedge_independent_entry_size_down_floor": self.runtime.settings.strategy_hedge_independent_entry_size_down_floor,
             "hedge_rollout": {
                 "runtime_stage": overlay_runtime_stage(self.runtime.settings),
                 "current_mode": overlay_mode,
@@ -2367,18 +2522,17 @@ class OperatorQueryService:
     def _smart_arbitrage_configured_parameters(
         self,
         *,
-        smart_arbitrage_pairs: list[Any],
+        smart_arbitrage_pair_definitions: list[dict[str, Any]],
         smart_arbitrage_pair_registry_warning_codes: list[str],
         smart_arbitrage_pair_registry_error_codes: list[str],
+        smart_arbitrage_pair_registry_source: str,
     ) -> dict[str, Any]:
         return {
             "enabled": self.runtime.settings.smart_arbitrage_enabled,
-            "pair_definitions": [
-                pair.model_dump(mode="json")
-                for pair in smart_arbitrage_pairs
-            ],
+            "pair_definitions": [dict(item) for item in smart_arbitrage_pair_definitions],
             "pair_registry_warning_codes": smart_arbitrage_pair_registry_warning_codes,
             "pair_registry_error_codes": smart_arbitrage_pair_registry_error_codes,
+            "pair_registry_source": smart_arbitrage_pair_registry_source,
             "basis_entry_bps": self.runtime.settings.smart_arbitrage_basis_entry_bps,
             "basis_exit_bps": self.runtime.settings.smart_arbitrage_basis_exit_bps,
             "estimated_cost_bps": self.runtime.settings.smart_arbitrage_estimated_cost_bps,
@@ -2412,6 +2566,85 @@ class OperatorQueryService:
             "estimated_funding_bps": self.runtime.settings.smart_arbitrage_estimated_funding_bps,
             "estimated_borrow_bps": self.runtime.settings.smart_arbitrage_estimated_borrow_bps,
         }
+
+    @staticmethod
+    def _smart_arbitrage_runtime_pair_configuration_from_snapshot(
+        latest_snapshot: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[str], list[str], str] | None:
+        if latest_snapshot is None:
+            return None
+        smart_candidate = next(
+            (
+                candidate
+                for candidate in (latest_snapshot.get("candidates") or [])
+                if candidate.get("family") == "smart_arbitrage"
+            ),
+            None,
+        )
+        if smart_candidate is None:
+            return None
+        metrics = dict(smart_candidate.get("metrics") or {})
+        pair_definitions = [
+            dict(item)
+            for item in (metrics.get("pair_definitions") or [])
+            if isinstance(item, dict)
+        ]
+        if not pair_definitions:
+            return None
+        warning_codes = list(
+            dict.fromkeys(
+                str(code)
+                for code in (metrics.get("pair_registry_warning_codes") or [])
+                if str(code).strip()
+            )
+        )
+        error_codes = list(
+            dict.fromkeys(
+                str(code)
+                for code in (metrics.get("pair_registry_error_codes") or [])
+                if str(code).strip()
+            )
+        )
+        return (
+            pair_definitions,
+            warning_codes,
+            error_codes,
+            str(metrics.get("pair_registry_source") or "coordinator_resolved"),
+        )
+
+    def _smart_arbitrage_runtime_pair_configuration(
+        self,
+        *,
+        latest_snapshot: dict[str, Any] | None,
+    ) -> tuple[list[dict[str, Any]], list[str], list[str], str]:
+        from_snapshot = self._smart_arbitrage_runtime_pair_configuration_from_snapshot(latest_snapshot)
+        if from_snapshot is not None:
+            return from_snapshot
+        smart_arbitrage_pairs = load_pair_definitions(
+            settings=self.runtime.settings,
+            primary_symbol=self.runtime.settings.default_symbol,
+        )
+        pair_definitions = [
+            pair.model_dump(mode="json")
+            for pair in smart_arbitrage_pairs
+        ]
+        warning_codes = list(
+            dict.fromkeys(
+                code
+                for pair in smart_arbitrage_pairs
+                for code in pair.metadata.get("configuration_warning_codes", [])
+                if str(code).strip()
+            )
+        )
+        error_codes = list(
+            dict.fromkeys(
+                code
+                for pair in smart_arbitrage_pairs
+                for code in pair.metadata.get("configuration_error_codes", [])
+                if str(code).strip()
+            )
+        )
+        return pair_definitions, warning_codes, error_codes, "settings_fallback"
 
     def _smart_arbitrage_cost_summary(self, *, latest_snapshot: dict[str, Any] | None) -> dict[str, Any]:
         smart_candidate = None
@@ -3439,6 +3672,7 @@ class OperatorQueryService:
         funding_fee_summary = None
         if hasattr(self.runtime.account_service, "recent_funding_fee_summary"):
             funding_fee_summary = self.runtime.account_service.recent_funding_fee_summary(symbol=symbol)
+        target_expectancy = self._target_expectancy_metrics(position_target)
         return {
             "economically_actionable": ai_assessment.get("economically_actionable"),
             "fallback_used": ai_assessment.get("fallback_used"),
@@ -3454,9 +3688,25 @@ class OperatorQueryService:
             "min_required_net_edge_bps": self.runtime.settings.strategy_min_net_edge_bps,
             "noise_buffer_bps": self.runtime.settings.strategy_edge_noise_buffer_bps,
             "required_total_edge_bps": required_total_edge_bps,
-            "target_expected_signal_edge_bps": position_target.get("expected_signal_edge_bps") if position_target else None,
-            "target_expected_cost_bps": position_target.get("expected_cost_bps") if position_target else None,
-            "target_expected_net_edge_bps": position_target.get("expected_net_edge_bps") if position_target else None,
+            "target_expected_signal_edge_bps": target_expectancy["expected_signal_edge_bps"],
+            "target_expected_cost_bps": target_expectancy["expected_cost_bps"],
+            "target_expected_net_edge_bps": target_expectancy["expected_net_edge_bps"],
+            "target_required_safe_net_edge_bps": target_expectancy["required_safe_net_edge_bps"],
+            "target_max_acceptable_cost_bps": target_expectancy["max_acceptable_cost_bps"],
+            "target_weak_edge_execution_mode": target_expectancy["weak_edge_execution_mode"],
+            "target_weak_edge_report_only": target_expectancy["weak_edge_report_only"],
+            "target_passive_first_required": target_expectancy["passive_first_required"],
+            "target_book_action": target_expectancy["book_action"],
+            "target_close_reason": target_expectancy["close_reason"],
+            "target_policy_reason": target_expectancy["policy_reason"],
+            "target_execution_policy_urgency": target_expectancy["execution_policy_urgency"],
+            "target_execution_style_preference": target_expectancy["execution_style_preference"],
+            "target_order_type_preference": target_expectancy["order_type_preference"],
+            "target_time_in_force_preference": target_expectancy["time_in_force_preference"],
+            "target_limit_offset_bps_preference": target_expectancy["limit_offset_bps_preference"],
+            "target_liquidity_quality_score": target_expectancy["liquidity_quality_score"],
+            "target_execution_health_state": target_expectancy["execution_health_state"],
+            "target_edge_strength": target_expectancy["edge_strength"],
             "validation_flags": list(ai_assessment.get("validation_flags") or []),
             "rejection_flags": list(ai_assessment.get("rejection_flags") or []),
             "market_snapshot_fresh": None if ai_decision_brief is None else ai_decision_brief.get("market_snapshot_fresh"),
@@ -3483,22 +3733,1219 @@ class OperatorQueryService:
         return "flat"
 
     @staticmethod
-    def _action_from_position_intent(position_intent: Any) -> str | None:
+    def _directional_action_from_position_intent(position_intent: Any) -> str | None:
+        if position_intent is None:
+            return None
+        normalized = str(position_intent).strip().lower()
+        return normalized or "hold"
+
+    @staticmethod
+    def _abstract_action_from_position_intent(position_intent: Any) -> str | None:
         if position_intent is None:
             return None
         return execution_action_from_position_intent(str(position_intent)) or "hold"
 
+    @staticmethod
+    def _book_expectancy_summary_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        direct = payload.get("book_expectancy_summary")
+        if isinstance(direct, dict):
+            return dict(direct)
+        family_summary = payload.get("family_execution_summary")
+        if not isinstance(family_summary, dict):
+            return None
+        nested = family_summary.get("book_expectancy_summary")
+        if isinstance(nested, dict):
+            return dict(nested)
+        return None
+
+    @staticmethod
+    def _book_runtime_states_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        direct = payload.get("book_runtime_states")
+        if isinstance(direct, list) and direct:
+            return [dict(item) for item in direct if isinstance(item, dict)]
+        family_summary = payload.get("family_execution_summary")
+        if not isinstance(family_summary, dict):
+            return []
+        nested = family_summary.get("book_runtime_states")
+        if isinstance(nested, list):
+            return [dict(item) for item in nested if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _independent_adaptive_summary_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        direct = payload.get("independent_adaptive_summary")
+        if isinstance(direct, dict) and direct:
+            return dict(direct)
+        runtime_states = OperatorQueryService._book_runtime_states_from_payload(payload)
+        if not runtime_states:
+            return None
+        legs: dict[str, dict[str, Any]] = {}
+        reason_codes: list[str] = []
+        for state in runtime_states:
+            leg = str(state.get("leg") or "").strip().lower()
+            if leg not in {"long", "short"}:
+                continue
+            threshold = state.get("threshold_snapshot")
+            if not isinstance(threshold, dict) or not threshold:
+                continue
+            leg_summary = {
+                "leg": leg,
+                "shadow_only": bool(threshold.get("shadow_only", True)),
+                "rollout_enabled": bool(threshold.get("rollout_enabled", False)),
+                "live_applied": bool(threshold.get("live_applied", False)),
+                "health_enforcement_enabled": bool(threshold.get("health_enforcement_enabled", False)),
+                "size_down_entry_enabled": bool(threshold.get("size_down_entry_enabled", False)),
+                "long_short_asymmetry_enabled": bool(threshold.get("long_short_asymmetry_enabled", False)),
+                "entry_threshold": threshold.get("entry_threshold"),
+                "adaptive_entry_threshold": threshold.get("adaptive_entry_threshold"),
+                "effective_entry_threshold": threshold.get("effective_entry_threshold"),
+                "close_threshold": threshold.get("close_threshold"),
+                "adaptive_close_threshold": threshold.get("adaptive_close_threshold"),
+                "effective_close_threshold": threshold.get("effective_close_threshold"),
+                "scale_in_threshold": threshold.get("scale_in_threshold"),
+                "adaptive_scale_in_threshold": threshold.get("adaptive_scale_in_threshold"),
+                "effective_scale_in_threshold": threshold.get("effective_scale_in_threshold"),
+                "thesis_age_seconds": threshold.get("thesis_age_seconds"),
+                "adaptive_thesis_age_seconds": threshold.get("adaptive_thesis_age_seconds"),
+                "effective_thesis_age_seconds": threshold.get("effective_thesis_age_seconds"),
+                "de_risk_net_edge_bps": threshold.get("de_risk_net_edge_bps"),
+                "adaptive_de_risk_net_edge_bps": threshold.get("adaptive_de_risk_net_edge_bps"),
+                "effective_de_risk_net_edge_bps": threshold.get("effective_de_risk_net_edge_bps"),
+                "capital_multiplier": threshold.get("capital_multiplier"),
+                "confidence_multiplier": threshold.get("confidence_multiplier"),
+                "volatility_multiplier": threshold.get("volatility_multiplier"),
+                "liquidity_multiplier": threshold.get("liquidity_multiplier"),
+                "health_multiplier": threshold.get("health_multiplier"),
+                "direction_bias_multiplier": threshold.get("direction_bias_multiplier"),
+                "book_state": state.get("book_state"),
+                "holding_phase": state.get("holding_phase"),
+                "health_state": state.get("health_state"),
+                "eligibility_state": state.get("eligibility_state"),
+                "current_qty": state.get("current_qty"),
+                "target_qty": state.get("target_qty"),
+                "size_multiplier": state.get("size_multiplier"),
+                "reason_codes": list(threshold.get("reason_codes") or []),
+            }
+            legs[leg] = leg_summary
+            reason_codes.extend(leg_summary["reason_codes"])
+        if not legs:
+            return None
+        ordered_reasons = list(dict.fromkeys(code for code in reason_codes if str(code or "").strip()))
+        live_applied = any(bool(item.get("live_applied")) for item in legs.values())
+        rollout_enabled = any(bool(item.get("rollout_enabled")) for item in legs.values())
+        health_enforcement_enabled = any(bool(item.get("health_enforcement_enabled")) for item in legs.values())
+        size_down_entry_enabled = any(bool(item.get("size_down_entry_enabled")) for item in legs.values())
+        long_short_asymmetry_enabled = any(bool(item.get("long_short_asymmetry_enabled")) for item in legs.values())
+        return {
+            "family": "independent",
+            "shadow_only": not live_applied,
+            "rollout_enabled": rollout_enabled,
+            "live_applied": live_applied,
+            "health_enforcement_enabled": health_enforcement_enabled,
+            "size_down_entry_enabled": size_down_entry_enabled,
+            "long_short_asymmetry_enabled": long_short_asymmetry_enabled,
+            "reason_codes": ordered_reasons,
+            "long_leg": legs.get("long"),
+            "short_leg": legs.get("short"),
+        }
+
+    @staticmethod
+    def _independent_transition_exception_summary_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        runtime_states = OperatorQueryService._book_runtime_states_from_payload(payload)
+        if not runtime_states:
+            return None
+        items: list[dict[str, Any]] = []
+        violation_reasons: list[str] = []
+        affected_legs: list[str] = []
+        for state in runtime_states:
+            transition_valid = bool(state.get("transition_valid", True))
+            transition_violation_reason = str(state.get("transition_violation_reason") or "").strip() or None
+            if transition_valid and transition_violation_reason is None:
+                continue
+            leg = str(state.get("leg") or "").strip().lower()
+            normalized_leg = leg if leg in {"long", "short"} else None
+            if normalized_leg is not None:
+                affected_legs.append(normalized_leg)
+            if transition_violation_reason is not None:
+                violation_reasons.append(transition_violation_reason)
+            items.append(
+                {
+                    "leg": normalized_leg,
+                    "state": state.get("state"),
+                    "book_state": state.get("book_state"),
+                    "prior_book_state": state.get("prior_book_state"),
+                    "book_action": state.get("book_action"),
+                    "last_transition_reason": state.get("last_transition_reason"),
+                    "execution_chain_id": state.get("execution_chain_id"),
+                    "transition_valid": transition_valid,
+                    "transition_violation_reason": transition_violation_reason,
+                }
+            )
+        if not items:
+            return None
+        return {
+            "family": "independent",
+            "total_books": len(runtime_states),
+            "invalid_transition_count": len(items),
+            "affected_legs": list(dict.fromkeys(leg for leg in affected_legs if leg in {"long", "short"})),
+            "violation_reasons": list(dict.fromkeys(reason for reason in violation_reasons if reason)),
+            "blocking": bool(items),
+            "items": items,
+        }
+
+    @staticmethod
+    def _overlay_parent_exposure_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        direct_object = payload.get("overlay_parent_exposure")
+        if isinstance(direct_object, dict) and any(value is not None for value in direct_object.values()):
+            return dict(direct_object)
+        direct = {
+            "parent_family": payload.get("parent_family"),
+            "symbol": payload.get("symbol"),
+            "target_leverage": payload.get("target_leverage"),
+            "margin_mode": payload.get("margin_mode"),
+            "target_long_qty": payload.get("target_long_qty"),
+            "target_short_qty": payload.get("target_short_qty"),
+            "current_long_qty": payload.get("current_long_qty"),
+            "current_short_qty": payload.get("current_short_qty"),
+            "target_qty": payload.get("parent_target_qty"),
+            "current_qty": payload.get("parent_current_qty"),
+            "effective_qty": payload.get("parent_effective_qty"),
+            "target_signal": payload.get("parent_target_signal"),
+            "current_signal": payload.get("parent_current_signal"),
+            "effective_signal": payload.get("parent_effective_signal"),
+            "signal_source": payload.get("signal_source"),
+            "source_of_truth": payload.get("parent_source_of_truth"),
+            "lifecycle_state": payload.get("parent_lifecycle_state"),
+            "target_active": payload.get("parent_target_active"),
+            "inventory_active": payload.get("parent_inventory_active"),
+            "source": payload.get("main_leg_contract_source"),
+        }
+        overlay_specific_values = (
+            direct["parent_family"],
+            direct["target_long_qty"],
+            direct["target_short_qty"],
+            direct["current_long_qty"],
+            direct["current_short_qty"],
+            direct["target_qty"],
+            direct["current_qty"],
+            direct["effective_qty"],
+            direct["target_signal"],
+            direct["current_signal"],
+            direct["effective_signal"],
+            direct["signal_source"],
+            direct["source_of_truth"],
+            direct["lifecycle_state"],
+            direct["target_active"],
+            direct["inventory_active"],
+            direct["source"],
+        )
+        if any(value is not None for value in overlay_specific_values):
+            return direct
+        for nested_key in ("hedge_overlay_decision", "family_execution_summary"):
+            nested_payload = payload.get(nested_key)
+            if not isinstance(nested_payload, dict):
+                continue
+            nested_object = nested_payload.get("overlay_parent_exposure")
+            if isinstance(nested_object, dict) and any(value is not None for value in nested_object.values()):
+                return dict(nested_object)
+            nested = {
+                "parent_family": nested_payload.get("parent_family"),
+                "symbol": nested_payload.get("symbol"),
+                "target_leverage": nested_payload.get("target_leverage"),
+                "margin_mode": nested_payload.get("margin_mode"),
+                "target_long_qty": nested_payload.get("target_long_qty"),
+                "target_short_qty": nested_payload.get("target_short_qty"),
+                "current_long_qty": nested_payload.get("current_long_qty"),
+                "current_short_qty": nested_payload.get("current_short_qty"),
+                "target_qty": nested_payload.get("parent_target_qty") if "parent_target_qty" in nested_payload else nested_payload.get("target_qty"),
+                "current_qty": nested_payload.get("parent_current_qty") if "parent_current_qty" in nested_payload else nested_payload.get("current_qty"),
+                "effective_qty": nested_payload.get("parent_effective_qty") if "parent_effective_qty" in nested_payload else nested_payload.get("effective_qty"),
+                "target_signal": nested_payload.get("parent_target_signal") if "parent_target_signal" in nested_payload else nested_payload.get("target_signal"),
+                "current_signal": nested_payload.get("parent_current_signal") if "parent_current_signal" in nested_payload else nested_payload.get("current_signal"),
+                "effective_signal": nested_payload.get("parent_effective_signal") if "parent_effective_signal" in nested_payload else nested_payload.get("effective_signal"),
+                "signal_source": nested_payload.get("signal_source"),
+                "source_of_truth": nested_payload.get("parent_source_of_truth") if "parent_source_of_truth" in nested_payload else nested_payload.get("source_of_truth"),
+                "lifecycle_state": nested_payload.get("parent_lifecycle_state") if "parent_lifecycle_state" in nested_payload else nested_payload.get("lifecycle_state"),
+                "target_active": nested_payload.get("parent_target_active") if "parent_target_active" in nested_payload else nested_payload.get("target_active"),
+                "inventory_active": nested_payload.get("parent_inventory_active") if "parent_inventory_active" in nested_payload else nested_payload.get("inventory_active"),
+                "source": nested_payload.get("main_leg_contract_source") if "main_leg_contract_source" in nested_payload else nested_payload.get("source"),
+            }
+            if any(value is not None for value in nested.values()):
+                return nested
+        return None
+
+    @staticmethod
+    def _overlay_parent_exposure_summary_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        overlay_parent_exposure = OperatorQueryService._overlay_parent_exposure_from_payload(payload)
+        if overlay_parent_exposure is None:
+            return None
+        return {
+            "parent_family": overlay_parent_exposure.get("parent_family"),
+            "symbol": overlay_parent_exposure.get("symbol"),
+            "target_leverage": overlay_parent_exposure.get("target_leverage"),
+            "margin_mode": overlay_parent_exposure.get("margin_mode"),
+            "target_long_qty": overlay_parent_exposure.get("target_long_qty"),
+            "target_short_qty": overlay_parent_exposure.get("target_short_qty"),
+            "current_long_qty": overlay_parent_exposure.get("current_long_qty"),
+            "current_short_qty": overlay_parent_exposure.get("current_short_qty"),
+            "target_qty": overlay_parent_exposure.get("target_qty"),
+            "current_qty": overlay_parent_exposure.get("current_qty"),
+            "effective_qty": overlay_parent_exposure.get("effective_qty"),
+            "target_signal": overlay_parent_exposure.get("target_signal"),
+            "current_signal": overlay_parent_exposure.get("current_signal"),
+            "effective_signal": overlay_parent_exposure.get("effective_signal"),
+            "signal_source": overlay_parent_exposure.get("signal_source"),
+            "source_of_truth": overlay_parent_exposure.get("source_of_truth"),
+            "lifecycle_state": overlay_parent_exposure.get("lifecycle_state"),
+            "target_active": overlay_parent_exposure.get("target_active"),
+            "inventory_active": overlay_parent_exposure.get("inventory_active"),
+            "source": overlay_parent_exposure.get("source"),
+        }
+
+    @staticmethod
+    def _decision_id_from_payload(payload: dict[str, Any] | None) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        decision_id = payload.get("decision_id")
+        if isinstance(decision_id, str) and decision_id.strip():
+            return decision_id
+        nested_outcome = payload.get("decision_outcome")
+        if isinstance(nested_outcome, dict):
+            nested_decision_id = nested_outcome.get("decision_id")
+            if isinstance(nested_decision_id, str) and nested_decision_id.strip():
+                return nested_decision_id
+        return None
+
+    def _overlay_parent_exposure_record_for_decision(
+        self,
+        decision_id: str | None,
+    ) -> dict[str, Any] | None:
+        normalized_decision_id = str(decision_id or "").strip()
+        if not normalized_decision_id:
+            return None
+        event_store = getattr(self.runtime, "event_store", None)
+        if event_store is None:
+            return None
+
+        def _load() -> dict[str, Any] | None:
+            events = [
+                event
+                for event in event_store.by_decision(normalized_decision_id)
+                if event.topic == topics.OVERLAY_PARENT_EXPOSURES
+            ]
+            if not events:
+                return None
+            preferred_event = next(
+                (
+                    event
+                    for event in reversed(events)
+                    if str(event.payload.get("source_stage") or "").strip().lower() == "decision_outcome"
+                ),
+                events[-1],
+            )
+            return dict(preferred_event.payload)
+
+        count_loader = getattr(event_store, "count", None)
+        if callable(count_loader):
+            overlay_event_count = int(
+                count_loader(
+                    topic=topics.OVERLAY_PARENT_EXPOSURES,
+                    decision_id=normalized_decision_id,
+                )
+                or 0
+            )
+            return self._cached(
+                f"overlay_parent_exposure_record:{normalized_decision_id}:{overlay_event_count}",
+                _load,
+            )
+        return _load()
+
+    def _resolved_overlay_parent_exposure(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        decision_id = self._decision_id_from_payload(payload)
+        record = self._overlay_parent_exposure_record_for_decision(decision_id)
+        if isinstance(record, dict) and any(
+            record.get(key) is not None
+            for key in (
+                "target_signal",
+                "current_signal",
+                "effective_signal",
+                "source_of_truth",
+                "lifecycle_state",
+                "effective_qty",
+            )
+        ):
+            return dict(record)
+        return self._overlay_parent_exposure_from_payload(payload)
+
+    def _resolved_overlay_parent_exposure_summary(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        overlay_parent_exposure = self._resolved_overlay_parent_exposure(payload)
+        if overlay_parent_exposure is None:
+            return None
+        return {
+            "overlay_parent_exposure_id": overlay_parent_exposure.get("overlay_parent_exposure_id"),
+            "decision_id": overlay_parent_exposure.get("decision_id"),
+            "source_stage": overlay_parent_exposure.get("source_stage"),
+            "source_ref": overlay_parent_exposure.get("source_ref"),
+            "captured_at": overlay_parent_exposure.get("captured_at"),
+            "strategy_family": overlay_parent_exposure.get("strategy_family"),
+            "strategy_sleeve_id": overlay_parent_exposure.get("strategy_sleeve_id"),
+            "allocation_id": overlay_parent_exposure.get("allocation_id"),
+            "parent_family": overlay_parent_exposure.get("parent_family"),
+            "symbol": overlay_parent_exposure.get("symbol"),
+            "target_leverage": overlay_parent_exposure.get("target_leverage"),
+            "margin_mode": overlay_parent_exposure.get("margin_mode"),
+            "target_long_qty": overlay_parent_exposure.get("target_long_qty"),
+            "target_short_qty": overlay_parent_exposure.get("target_short_qty"),
+            "current_long_qty": overlay_parent_exposure.get("current_long_qty"),
+            "current_short_qty": overlay_parent_exposure.get("current_short_qty"),
+            "target_qty": overlay_parent_exposure.get("target_qty"),
+            "current_qty": overlay_parent_exposure.get("current_qty"),
+            "effective_qty": overlay_parent_exposure.get("effective_qty"),
+            "target_signal": overlay_parent_exposure.get("target_signal"),
+            "current_signal": overlay_parent_exposure.get("current_signal"),
+            "effective_signal": overlay_parent_exposure.get("effective_signal"),
+            "signal_source": overlay_parent_exposure.get("signal_source"),
+            "source_of_truth": overlay_parent_exposure.get("source_of_truth"),
+            "lifecycle_state": overlay_parent_exposure.get("lifecycle_state"),
+            "target_active": overlay_parent_exposure.get("target_active"),
+            "inventory_active": overlay_parent_exposure.get("inventory_active"),
+            "source": overlay_parent_exposure.get("source"),
+        }
+
+    @staticmethod
+    def _overlay_parent_signal_fields_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        overlay_parent_exposure = OperatorQueryService._overlay_parent_exposure_from_payload(payload)
+        if overlay_parent_exposure is None:
+            return None
+        return {
+            "parent_target_signal": overlay_parent_exposure.get("target_signal"),
+            "parent_current_signal": overlay_parent_exposure.get("current_signal"),
+            "parent_effective_signal": overlay_parent_exposure.get("effective_signal"),
+            "signal_source": overlay_parent_exposure.get("signal_source"),
+            "parent_lifecycle_state": overlay_parent_exposure.get("lifecycle_state"),
+            "parent_target_active": overlay_parent_exposure.get("target_active"),
+            "parent_inventory_active": overlay_parent_exposure.get("inventory_active"),
+            "parent_source_of_truth": overlay_parent_exposure.get("source_of_truth"),
+            "parent_target_qty": overlay_parent_exposure.get("target_qty"),
+            "parent_current_qty": overlay_parent_exposure.get("current_qty"),
+            "parent_effective_qty": overlay_parent_exposure.get("effective_qty"),
+        }
+
+    def _resolved_overlay_parent_signal_fields(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        overlay_parent_exposure = self._resolved_overlay_parent_exposure(payload)
+        if overlay_parent_exposure is None:
+            return None
+        return {
+            "parent_target_signal": overlay_parent_exposure.get("target_signal"),
+            "parent_current_signal": overlay_parent_exposure.get("current_signal"),
+            "parent_effective_signal": overlay_parent_exposure.get("effective_signal"),
+            "signal_source": overlay_parent_exposure.get("signal_source"),
+            "parent_lifecycle_state": overlay_parent_exposure.get("lifecycle_state"),
+            "parent_target_active": overlay_parent_exposure.get("target_active"),
+            "parent_inventory_active": overlay_parent_exposure.get("inventory_active"),
+            "parent_source_of_truth": overlay_parent_exposure.get("source_of_truth"),
+            "parent_target_qty": overlay_parent_exposure.get("target_qty"),
+            "parent_current_qty": overlay_parent_exposure.get("current_qty"),
+            "parent_effective_qty": overlay_parent_exposure.get("effective_qty"),
+        }
+
+    def _independent_diagnostics_flags(self, *, payloads: list[dict[str, Any]] | None = None) -> dict[str, bool]:
+        defaults = {
+            "emit_book_level_metrics": bool(self.runtime.settings.strategy_hedge_independent_emit_book_level_metrics),
+            "emit_expected_vs_realized_metrics": bool(
+                self.runtime.settings.strategy_hedge_independent_emit_expected_vs_realized_metrics
+            ),
+            "emit_close_reason_metrics": bool(self.runtime.settings.strategy_hedge_independent_emit_close_reason_metrics),
+            "emit_execution_policy_metrics": bool(
+                self.runtime.settings.strategy_hedge_independent_emit_execution_policy_metrics
+            ),
+        }
+        if not payloads:
+            return defaults
+        payload_flags = [
+            self._diagnostic_metric_flags_from_payload(payload)
+            for payload in payloads
+        ]
+        available = [flags for flags in payload_flags if flags]
+        if not available:
+            return defaults
+        resolved: dict[str, bool] = {}
+        for key, fallback in defaults.items():
+            matching = [bool(flags[key]) for flags in available if key in flags]
+            resolved[key] = fallback if not matching else any(matching)
+        return resolved
+
+    @staticmethod
+    def _diagnostic_metric_flags_from_payload(payload: dict[str, Any] | None) -> dict[str, bool]:
+        if not isinstance(payload, dict):
+            return {}
+        candidates = []
+        direct = payload.get("diagnostic_metric_flags")
+        if isinstance(direct, dict):
+            candidates.append(direct)
+        family_summary = payload.get("family_execution_summary")
+        if isinstance(family_summary, dict):
+            nested = family_summary.get("diagnostic_metric_flags")
+            if isinstance(nested, dict):
+                candidates.append(nested)
+        normalized: dict[str, bool] = {}
+        for source in candidates:
+            for key in (
+                "emit_book_level_metrics",
+                "emit_expected_vs_realized_metrics",
+                "emit_close_reason_metrics",
+                "emit_execution_policy_metrics",
+            ):
+                if key in source:
+                    normalized[key] = bool(source.get(key))
+        return normalized
+
+    @staticmethod
+    def _strategy_family_from_payload(payload: dict[str, Any] | None) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        family_name = str(
+            payload.get("strategy_family")
+            or payload.get("selected_strategy_family")
+            or ""
+        ).strip().lower()
+        if family_name:
+            return family_name
+        family_summary = payload.get("family_execution_summary")
+        if isinstance(family_summary, dict):
+            nested_family = str(family_summary.get("family") or "").strip().lower()
+            if nested_family:
+                return nested_family
+        return None
+
+    def _effective_diagnostic_metric_flags(self, *payloads: dict[str, Any] | None) -> dict[str, bool]:
+        normalized_payloads = [
+            payload for payload in payloads
+            if isinstance(payload, dict)
+        ]
+        merged: dict[str, bool] = {}
+        for payload in normalized_payloads:
+            merged.update(self._diagnostic_metric_flags_from_payload(payload))
+        runtime_settings = getattr(getattr(self, "runtime", None), "settings", None)
+        if any(self._strategy_family_from_payload(payload) == "independent" for payload in normalized_payloads) and runtime_settings is not None:
+            return self._independent_diagnostics_flags(payloads=normalized_payloads)
+        return merged
+
+    def _recent_independent_target_payloads(
+        self,
+        *,
+        limit: int = 40,
+        decision_ids: set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        if decision_ids:
+            for decision_id in decision_ids:
+                audit = self.runtime.audit_repo.get(decision_id)
+                if audit is None:
+                    continue
+                payload = self._position_target_payload(self.payload_by_ref(audit.position_target_ref))
+                if not isinstance(payload, dict):
+                    continue
+                family_summary = payload.get("family_execution_summary")
+                family_name = payload.get("strategy_family")
+                if family_name == "independent" or (
+                    isinstance(family_summary, dict) and family_summary.get("family") == "independent"
+                ):
+                    payloads.append(payload)
+            return payloads[: max(limit, 1)]
+
+        events = list(
+            self.runtime.event_store.by_topic_scoped(
+                topics.POSITION_TARGETS,
+                scope=self.state_scope,
+                limit=max(limit * 8, 40),
+            )
+        )
+        events.sort(key=lambda item: item.event_timestamp, reverse=True)
+        for event in events:
+            payload = self._position_target_payload(event.payload)
+            if not isinstance(payload, dict):
+                continue
+            family_summary = payload.get("family_execution_summary")
+            family_name = payload.get("strategy_family")
+            if family_name != "independent" and not (
+                isinstance(family_summary, dict) and family_summary.get("family") == "independent"
+            ):
+                continue
+            payloads.append(payload)
+            if len(payloads) >= max(limit, 1):
+                break
+        return payloads
+
+    @staticmethod
+    def _independent_book_action_bucket(action: Any) -> str | None:
+        normalized = str(action or "").strip().lower()
+        if not normalized or normalized == "hold":
+            return None
+        if normalized == "open":
+            return "entry"
+        if normalized == "scale_in":
+            return "scale_in"
+        if normalized == "de_risk":
+            return "de_risk"
+        if normalized.startswith("close") or normalized in {"close_failed_thesis", "close_stale_thesis", "close"}:
+            return "close"
+        return None
+
+    @staticmethod
+    def _bps_from_amount(*, amount: Decimal, notional: Decimal, epsilon: Decimal) -> float | None:
+        if abs(notional) <= epsilon:
+            return None
+        return float((amount / notional) * Decimal("10000"))
+
+    @staticmethod
+    def _average_decimal(values: list[Decimal]) -> float | None:
+        if not values:
+            return None
+        return float(sum(values, start=Decimal("0")) / Decimal(len(values)))
+
+    @staticmethod
+    def _average_float(values: list[float]) -> float | None:
+        if not values:
+            return None
+        return float(sum(values) / len(values))
+
+    @staticmethod
+    def _pearson_correlation(pairs: list[tuple[float, float]]) -> float | None:
+        if len(pairs) < 2:
+            return None
+        xs = [item[0] for item in pairs]
+        ys = [item[1] for item in pairs]
+        mean_x = sum(xs) / len(xs)
+        mean_y = sum(ys) / len(ys)
+        numerator = sum((x - mean_x) * (y - mean_y) for x, y in pairs)
+        denominator_x = sum((x - mean_x) ** 2 for x in xs)
+        denominator_y = sum((y - mean_y) ** 2 for y in ys)
+        denominator = (denominator_x * denominator_y) ** 0.5
+        if denominator <= 1e-12:
+            return None
+        return numerator / denominator
+
+    @staticmethod
+    def _independent_fill_leg(row: dict[str, Any]) -> str | None:
+        normalized = str(row.get("pos_side") or row.get("exposure_side") or "").strip().lower()
+        if normalized in {"long", "short"}:
+            return normalized
+        position_intent = str(row.get("position_intent") or "").strip().lower()
+        if position_intent.endswith("long"):
+            return "long"
+        if position_intent.endswith("short"):
+            return "short"
+        return None
+
+    @staticmethod
+    def _independent_runtime_sample_key(*, decision_id: str, state: dict[str, Any]) -> str | None:
+        chain_id = str(state.get("execution_chain_id") or "").strip()
+        if chain_id:
+            return f"execution_chain:{chain_id}"
+        leg = str(state.get("leg") or "").strip().lower()
+        if decision_id and leg in {"long", "short"}:
+            return f"decision_leg:{decision_id}:{leg}"
+        return None
+
+    def _independent_fill_sample_key(self, row: dict[str, Any]) -> str | None:
+        chain_id = str(row.get("execution_chain_id") or "").strip()
+        if chain_id:
+            return f"execution_chain:{chain_id}"
+        decision_id = str(row.get("decision_id") or "").strip()
+        leg = self._independent_fill_leg(row)
+        if decision_id and leg in {"long", "short"}:
+            return f"decision_leg:{decision_id}:{leg}"
+        return None
+
+    def _independent_fill_attempt_key(self, row: dict[str, Any]) -> str | None:
+        attempt_id = execution_attempt_id_from_components(
+            execution_attempt_id=str(row.get("execution_attempt_id") or "").strip() or None,
+            client_order_id=str(row.get("client_order_id") or row.get("order_id") or "").strip() or None,
+            execution_chain_id=str(row.get("execution_chain_id") or "").strip() or None,
+            intent_id=str(row.get("intent_id") or "").strip() or None,
+        )
+        return attempt_id
+
+    def _independent_expected_vs_realized_summary(
+        self,
+        *,
+        decision_ids: set[str] | None = None,
+        limit: int = 40,
+    ) -> dict[str, Any] | None:
+        target_payloads = self._recent_independent_target_payloads(limit=limit, decision_ids=decision_ids)
+        metric_flags = self._independent_diagnostics_flags(payloads=target_payloads)
+        if not any(metric_flags.values()):
+            return None
+        default_flags = self._independent_diagnostics_flags()
+        relevant_decision_ids = {
+            str(item.get("decision_id") or "").strip()
+            for item in target_payloads
+            if str(item.get("decision_id") or "").strip()
+        }
+        if decision_ids:
+            relevant_decision_ids.update(str(item).strip() for item in decision_ids if str(item).strip())
+
+        expected_net_edges: list[Decimal] = []
+        close_reason_counts: dict[str, int] = {}
+        book_metrics: dict[str, dict[str, Any]] = {
+            "long": {
+                "sample_count": 0,
+                "entry_count": 0,
+                "scale_in_count": 0,
+                "close_count": 0,
+                "de_risk_count": 0,
+                "expected_net_edges": [],
+                "realized_net_amount": Decimal("0"),
+                "realized_notional": Decimal("0"),
+            },
+            "short": {
+                "sample_count": 0,
+                "entry_count": 0,
+                "scale_in_count": 0,
+                "close_count": 0,
+                "de_risk_count": 0,
+                "expected_net_edges": [],
+                "realized_net_amount": Decimal("0"),
+                "realized_notional": Decimal("0"),
+            },
+        }
+        expected_by_sample: dict[str, float] = {}
+        expected_metric_sample_keys: set[str] = set()
+        expected_sample_count = 0
+        entry_count = 0
+        scale_in_count = 0
+        close_count = 0
+        de_risk_count = 0
+        weak_edge_entry_count = 0
+        passive_first_count = 0
+        passive_first_eligible_count = 0
+        realized_metric_decision_ids: set[str] = set()
+        book_level_decision_ids: set[str] = set()
+        book_level_sample_keys: set[str] = set()
+
+        for payload in target_payloads:
+            payload_metric_flags = self._diagnostic_metric_flags_from_payload(payload) or dict(default_flags)
+            if not any(payload_metric_flags.values()):
+                continue
+            decision_id = str(payload.get("decision_id") or "").strip()
+            emit_expected_metrics = bool(payload_metric_flags["emit_expected_vs_realized_metrics"])
+            emit_book_metrics = bool(payload_metric_flags["emit_book_level_metrics"])
+            emit_close_metrics = bool(payload_metric_flags["emit_close_reason_metrics"])
+            emit_execution_metrics = bool(payload_metric_flags["emit_execution_policy_metrics"])
+            expectancy_summary = self._book_expectancy_summary_from_payload(payload) or {}
+            books_by_leg = {
+                str(item.get("leg") or "").strip().lower(): dict(item)
+                for item in list(expectancy_summary.get("books") or [])
+                if isinstance(item, dict) and str(item.get("leg") or "").strip().lower() in {"long", "short"}
+            }
+            runtime_states = self._book_runtime_states_from_payload(payload)
+            for state in runtime_states:
+                leg = str(state.get("leg") or "").strip().lower()
+                if leg not in {"long", "short"}:
+                    continue
+                action_bucket = self._independent_book_action_bucket(state.get("book_action"))
+                if action_bucket is None:
+                    continue
+                sample_key = self._independent_runtime_sample_key(
+                    decision_id=decision_id,
+                    state=state,
+                )
+                book = books_by_leg.get(leg, {})
+                if emit_expected_metrics:
+                    expected_sample_count += 1
+                    if sample_key is not None:
+                        expected_metric_sample_keys.add(sample_key)
+                    if action_bucket == "entry":
+                        entry_count += 1
+                    elif action_bucket == "scale_in":
+                        scale_in_count += 1
+                    elif action_bucket == "close":
+                        close_count += 1
+                    elif action_bucket == "de_risk":
+                        de_risk_count += 1
+
+                if emit_book_metrics:
+                    book_metrics[leg]["sample_count"] += 1
+                    if sample_key is not None:
+                        book_level_sample_keys.add(sample_key)
+                    if action_bucket == "entry":
+                        book_metrics[leg]["entry_count"] += 1
+                    elif action_bucket == "scale_in":
+                        book_metrics[leg]["scale_in_count"] += 1
+                    elif action_bucket == "close":
+                        book_metrics[leg]["close_count"] += 1
+                    elif action_bucket == "de_risk":
+                        book_metrics[leg]["de_risk_count"] += 1
+
+                expected_net_edge = self._to_decimal(book.get("expected_net_edge_bps"))
+                if expected_net_edge is not None and emit_expected_metrics:
+                    expected_net_edges.append(expected_net_edge)
+                    if sample_key is not None:
+                        expected_by_sample[sample_key] = float(expected_net_edge)
+                if expected_net_edge is not None and emit_book_metrics:
+                    book_metrics[leg]["expected_net_edges"].append(expected_net_edge)
+
+                if emit_close_metrics:
+                    close_reason = str(state.get("close_reason") or book.get("close_reason") or "").strip()
+                    if close_reason:
+                        close_reason_counts[close_reason] = close_reason_counts.get(close_reason, 0) + 1
+
+                if emit_execution_metrics:
+                    if action_bucket in {"entry", "scale_in"}:
+                        passive_first_eligible_count += 1
+                        if bool(book.get("passive_first_required")):
+                            passive_first_count += 1
+                        if bool(book.get("weak_edge_report_only")):
+                            weak_edge_entry_count += 1
+
+            if decision_id and emit_expected_metrics:
+                realized_metric_decision_ids.add(decision_id)
+            if decision_id and emit_book_metrics:
+                book_level_decision_ids.add(decision_id)
+
+        fill_rows: list[dict[str, Any]] = []
+        book_level_fill_rows: list[dict[str, Any]] = []
+        attempt_candidate_rows: list[dict[str, Any]] = []
+        for outcome in self._scoped_fill_outcomes():
+            if str(getattr(outcome, "strategy_family", "") or "") != "independent":
+                continue
+            decision_id = str(getattr(outcome, "decision_id", "") or "").strip()
+            if realized_metric_decision_ids and decision_id not in realized_metric_decision_ids:
+                if not (book_level_decision_ids and decision_id in book_level_decision_ids):
+                    continue
+            elif not realized_metric_decision_ids and relevant_decision_ids and decision_id not in relevant_decision_ids:
+                continue
+            row = self._execution_quality_row(outcome)
+            sample_key = self._independent_fill_sample_key(row)
+            if decision_id in realized_metric_decision_ids:
+                attempt_candidate_rows.append(row)
+            if decision_id in realized_metric_decision_ids and sample_key in expected_metric_sample_keys:
+                fill_rows.append(row)
+            if decision_id in book_level_decision_ids and sample_key in book_level_sample_keys:
+                book_level_fill_rows.append(row)
+
+        realized_total_notional = sum(
+            (abs(self._to_decimal(item.get("fill_notional")) or Decimal("0")) for item in fill_rows),
+            start=Decimal("0"),
+        )
+        realized_gross_total = sum(
+            (self._to_decimal(item.get("gross_realized_pnl")) or Decimal("0") for item in fill_rows),
+            start=Decimal("0"),
+        )
+        realized_net_total = sum(
+            (self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0") for item in fill_rows),
+            start=Decimal("0"),
+        )
+        realized_fee_total = sum(
+            (self._fee_cost_in_quote(item) or Decimal("0") for item in fill_rows),
+            start=Decimal("0"),
+        )
+        realized_slippage_weighted_total = Decimal("0")
+        realized_slippage_weight_total = Decimal("0")
+        for item in fill_rows:
+            slippage_value = self._to_decimal(item.get("adverse_slippage_bps"))
+            fill_notional = abs(self._to_decimal(item.get("fill_notional")) or Decimal("0"))
+            if slippage_value is None or fill_notional <= self._DECIMAL_EPSILON:
+                continue
+            realized_slippage_weighted_total += slippage_value * fill_notional
+            realized_slippage_weight_total += fill_notional
+        realized_by_sample: dict[str, dict[str, Decimal]] = {}
+        for item in fill_rows:
+            sample_key = self._independent_fill_sample_key(item)
+            if sample_key is None:
+                continue
+            bucket = realized_by_sample.setdefault(
+                sample_key,
+                {"net": Decimal("0"), "notional": Decimal("0")},
+            )
+            bucket["net"] += self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")
+            bucket["notional"] += abs(self._to_decimal(item.get("fill_notional")) or Decimal("0"))
+        for item in book_level_fill_rows:
+            leg = self._independent_fill_leg(item)
+            if leg in {"long", "short"}:
+                book_metrics[leg]["realized_net_amount"] += self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")
+                book_metrics[leg]["realized_notional"] += abs(self._to_decimal(item.get("fill_notional")) or Decimal("0"))
+
+        attempt_buckets: dict[str, dict[str, Any]] = {}
+        attempts_by_chain: dict[str, set[str]] = {}
+        for item in attempt_candidate_rows:
+            attempt_key = self._independent_fill_attempt_key(item)
+            if attempt_key is None:
+                continue
+            sample_key = self._independent_fill_sample_key(item)
+            bucket = attempt_buckets.setdefault(
+                attempt_key,
+                {
+                    "matched": False,
+                    "net": Decimal("0"),
+                    "notional": Decimal("0"),
+                    "slippage_weighted": Decimal("0"),
+                    "slippage_weight": Decimal("0"),
+                },
+            )
+            if sample_key is not None:
+                attempts_by_chain.setdefault(sample_key, set()).add(attempt_key)
+                if sample_key in expected_metric_sample_keys:
+                    bucket["matched"] = True
+            fill_notional = abs(self._to_decimal(item.get("fill_notional")) or Decimal("0"))
+            if fill_notional <= self._DECIMAL_EPSILON:
+                continue
+            bucket["net"] += self._to_decimal(item.get("realized_pnl_delta")) or Decimal("0")
+            bucket["notional"] += fill_notional
+            slippage_value = self._to_decimal(item.get("adverse_slippage_bps"))
+            if slippage_value is not None:
+                bucket["slippage_weighted"] += slippage_value * fill_notional
+                bucket["slippage_weight"] += fill_notional
+
+        overlap_pairs: list[tuple[float, float]] = []
+        for sample_key, expected_value in expected_by_sample.items():
+            realized_bucket = realized_by_sample.get(sample_key)
+            if realized_bucket is None or abs(realized_bucket["notional"]) <= self._DECIMAL_EPSILON:
+                continue
+            overlap_pairs.append(
+                (
+                    expected_value,
+                    float((realized_bucket["net"] / realized_bucket["notional"]) * Decimal("10000")),
+                )
+            )
+        overlap_expected_average = (
+            sum(item[0] for item in overlap_pairs) / len(overlap_pairs)
+            if overlap_pairs
+            else None
+        )
+        overlap_realized_average = (
+            sum(item[1] for item in overlap_pairs) / len(overlap_pairs)
+            if overlap_pairs
+            else None
+        )
+
+        realized_sample_count = sum(
+            1
+            for bucket in realized_by_sample.values()
+            if abs(bucket["notional"]) > self._DECIMAL_EPSILON
+        )
+
+        book_breakdown: list[StrategyExpectedVsRealizedBookDiagnostics] = []
+        if metric_flags["emit_book_level_metrics"]:
+            for leg in ("long", "short"):
+                metrics = book_metrics[leg]
+                book_breakdown.append(
+                    StrategyExpectedVsRealizedBookDiagnostics(
+                        leg=leg,
+                        sample_count=int(metrics["sample_count"]),
+                        entry_count=int(metrics["entry_count"]),
+                        scale_in_count=int(metrics["scale_in_count"]),
+                        close_count=int(metrics["close_count"]),
+                        de_risk_count=int(metrics["de_risk_count"]),
+                        avg_expected_net_edge_bps=self._average_decimal(metrics["expected_net_edges"]),
+                        avg_realized_net_bps=self._bps_from_amount(
+                            amount=metrics["realized_net_amount"],
+                            notional=metrics["realized_notional"],
+                            epsilon=self._DECIMAL_EPSILON,
+                        ),
+                    )
+                )
+
+        matched_attempt_buckets = [bucket for bucket in attempt_buckets.values() if bool(bucket["matched"])]
+        filled_attempt_buckets = [
+            bucket
+            for bucket in attempt_buckets.values()
+            if abs(bucket["notional"]) > self._DECIMAL_EPSILON
+        ]
+        attempt_net_bps_values = [
+            float((bucket["net"] / bucket["notional"]) * Decimal("10000"))
+            for bucket in filled_attempt_buckets
+        ]
+        attempt_slippage_values = [
+            float(bucket["slippage_weighted"] / bucket["slippage_weight"])
+            for bucket in filled_attempt_buckets
+            if bucket["slippage_weight"] > self._DECIMAL_EPSILON
+        ]
+        attempt_diagnostics = (
+            StrategyExecutionAttemptDiagnostics(
+                attempt_count=len(attempt_buckets),
+                matched_attempt_count=len(matched_attempt_buckets),
+                unmatched_attempt_count=max(len(attempt_buckets) - len(matched_attempt_buckets), 0),
+                filled_attempt_count=len(filled_attempt_buckets),
+                multi_attempt_chain_count=sum(
+                    1 for attempt_keys in attempts_by_chain.values() if len(attempt_keys) > 1
+                ),
+                avg_attempts_per_chain=(
+                    round(
+                        float(sum(len(attempt_keys) for attempt_keys in attempts_by_chain.values()))
+                        / float(len(attempts_by_chain)),
+                        6,
+                    )
+                    if attempts_by_chain
+                    else None
+                ),
+                avg_realized_net_bps_per_attempt=(
+                    round(sum(attempt_net_bps_values) / len(attempt_net_bps_values), 6)
+                    if attempt_net_bps_values
+                    else None
+                ),
+                avg_realized_slippage_bps_per_attempt=(
+                    round(sum(attempt_slippage_values) / len(attempt_slippage_values), 6)
+                    if attempt_slippage_values
+                    else None
+                ),
+            )
+            if metric_flags["emit_expected_vs_realized_metrics"]
+            else None
+        )
+
+        summary = StrategyExpectedVsRealizedSummary(
+            family="independent",
+            sample_count=expected_sample_count,
+            expected_sample_count=expected_sample_count,
+            realized_sample_count=realized_sample_count,
+            overlap_sample_count=len(overlap_pairs),
+            entry_count=entry_count,
+            scale_in_count=scale_in_count,
+            close_count=close_count,
+            de_risk_count=de_risk_count,
+            weak_edge_entry_count=weak_edge_entry_count if metric_flags["emit_execution_policy_metrics"] else 0,
+            avg_expected_net_edge_bps=(
+                self._average_decimal(expected_net_edges)
+                if metric_flags["emit_expected_vs_realized_metrics"]
+                else None
+            ),
+            avg_realized_gross_bps=(
+                self._bps_from_amount(
+                    amount=realized_gross_total,
+                    notional=realized_total_notional,
+                    epsilon=self._DECIMAL_EPSILON,
+                )
+                if metric_flags["emit_expected_vs_realized_metrics"]
+                else None
+            ),
+            avg_realized_fee_bps=(
+                self._bps_from_amount(
+                    amount=realized_fee_total,
+                    notional=realized_total_notional,
+                    epsilon=self._DECIMAL_EPSILON,
+                )
+                if metric_flags["emit_expected_vs_realized_metrics"]
+                else None
+            ),
+            avg_realized_slippage_bps=(
+                (
+                    float(realized_slippage_weighted_total / realized_slippage_weight_total)
+                    if realized_slippage_weight_total > self._DECIMAL_EPSILON
+                    else None
+                )
+                if metric_flags["emit_expected_vs_realized_metrics"]
+                else None
+            ),
+            avg_realized_net_bps=(
+                self._bps_from_amount(
+                    amount=realized_net_total,
+                    notional=realized_total_notional,
+                    epsilon=self._DECIMAL_EPSILON,
+                )
+                if metric_flags["emit_expected_vs_realized_metrics"]
+                else None
+            ),
+            fee_drag_ratio=(
+                1.0
+                if abs(realized_gross_total) <= self._DECIMAL_EPSILON and realized_fee_total > 0
+                else (
+                    float(realized_fee_total / abs(realized_gross_total))
+                    if abs(realized_gross_total) > self._DECIMAL_EPSILON
+                    else 0.0
+                )
+                if metric_flags["emit_expected_vs_realized_metrics"]
+                else None
+            ),
+            churn_ratio=(
+                round(
+                    float(close_count + de_risk_count) / float(max(entry_count + scale_in_count, 1)),
+                    6,
+                )
+                if metric_flags["emit_expected_vs_realized_metrics"]
+                else None
+            ),
+            passive_first_usage_ratio=(
+                round(float(passive_first_count) / float(passive_first_eligible_count), 6)
+                if metric_flags["emit_execution_policy_metrics"] and passive_first_eligible_count > 0
+                else None
+            ),
+            expected_realized_net_gap_bps=(
+                None
+                if not metric_flags["emit_expected_vs_realized_metrics"]
+                else (
+                    None
+                    if overlap_expected_average is None or overlap_realized_average is None
+                    else overlap_realized_average - overlap_expected_average
+                )
+            ),
+            expected_realized_correlation=(
+                self._pearson_correlation(overlap_pairs)
+                if metric_flags["emit_expected_vs_realized_metrics"]
+                else None
+            ),
+            close_reason_distribution=(
+                [
+                    {"reason": key, "count": value}
+                    for key, value in sorted(close_reason_counts.items(), key=lambda item: (-item[1], item[0]))
+                ]
+                if metric_flags["emit_close_reason_metrics"]
+                else []
+            ),
+            book_breakdown=book_breakdown,
+            attempt_diagnostics=attempt_diagnostics,
+            emitted_metric_flags=metric_flags,
+            truth_source="position_targets_plus_fill_outcomes",
+        )
+        return summary.model_dump(mode="json")
+
+    def _target_expectancy_metrics(self, payload: dict[str, Any] | None) -> dict[str, Any | None]:
+        if not isinstance(payload, dict):
+            return {
+                "expected_signal_edge_bps": None,
+                "expected_cost_bps": None,
+                "expected_net_edge_bps": None,
+                "required_safe_net_edge_bps": None,
+                "max_acceptable_cost_bps": None,
+                "weak_edge_execution_mode": None,
+                "weak_edge_report_only": None,
+                "passive_first_required": None,
+                "book_action": None,
+                "close_reason": None,
+                "policy_reason": None,
+                "execution_policy_urgency": None,
+                "execution_style_preference": None,
+                "order_type_preference": None,
+                "time_in_force_preference": None,
+                "limit_offset_bps_preference": None,
+                "liquidity_quality_score": None,
+                "execution_health_state": None,
+                "edge_strength": None,
+            }
+        summary = self._book_expectancy_summary_from_payload(payload)
+        if isinstance(summary, dict):
+            books = summary.get("books")
+            if isinstance(books, list) and len(books) == 1 and isinstance(books[0], dict):
+                book = books[0]
+                return {
+                    "expected_signal_edge_bps": book.get("expected_signal_edge_bps"),
+                    "expected_cost_bps": book.get("expected_cost_bps"),
+                    "expected_net_edge_bps": book.get("expected_net_edge_bps"),
+                    "required_safe_net_edge_bps": book.get("required_safe_net_edge_bps"),
+                    "max_acceptable_cost_bps": book.get("max_acceptable_cost_bps"),
+                    "weak_edge_execution_mode": book.get("weak_edge_execution_mode"),
+                    "weak_edge_report_only": book.get("weak_edge_report_only"),
+                    "passive_first_required": book.get("passive_first_required"),
+                    "book_action": book.get("book_action"),
+                    "close_reason": book.get("close_reason"),
+                    "policy_reason": book.get("policy_reason"),
+                    "execution_policy_urgency": book.get("execution_policy_urgency"),
+                    "execution_style_preference": book.get("execution_style_preference"),
+                    "order_type_preference": book.get("order_type_preference"),
+                    "time_in_force_preference": book.get("time_in_force_preference"),
+                    "limit_offset_bps_preference": book.get("limit_offset_bps_preference"),
+                    "liquidity_quality_score": book.get("liquidity_quality_score"),
+                    "execution_health_state": book.get("execution_health_state"),
+                    "edge_strength": book.get("edge_strength"),
+                }
+        return {
+            "expected_signal_edge_bps": payload.get("expected_signal_edge_bps"),
+            "expected_cost_bps": payload.get("expected_cost_bps"),
+            "expected_net_edge_bps": payload.get("expected_net_edge_bps"),
+            "required_safe_net_edge_bps": None,
+            "max_acceptable_cost_bps": None,
+            "weak_edge_execution_mode": None,
+            "weak_edge_report_only": None,
+            "passive_first_required": None,
+            "book_action": None,
+            "close_reason": None,
+            "policy_reason": None,
+            "execution_policy_urgency": None,
+            "execution_style_preference": None,
+            "order_type_preference": None,
+            "time_in_force_preference": None,
+            "limit_offset_bps_preference": None,
+            "liquidity_quality_score": None,
+            "execution_health_state": None,
+            "edge_strength": None,
+        }
+
+    def _position_target_payload(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return payload
+        normalized = dict(payload)
+        if normalized.get("book_expectancy_summary") is None:
+            normalized["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(normalized)
+        if not normalized.get("book_runtime_states"):
+            normalized["book_runtime_states"] = self._book_runtime_states_from_payload(normalized)
+        if normalized.get("independent_adaptive_summary") is None:
+            normalized["independent_adaptive_summary"] = self._independent_adaptive_summary_from_payload(normalized)
+        if normalized.get("independent_transition_exception_summary") is None:
+            normalized["independent_transition_exception_summary"] = (
+                self._independent_transition_exception_summary_from_payload(normalized)
+            )
+        if not normalized.get("diagnostic_metric_flags"):
+            normalized["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(normalized)
+        overlay_parent_exposure = self._resolved_overlay_parent_exposure(normalized)
+        if overlay_parent_exposure is not None:
+            if normalized.get("overlay_parent_exposure") is None:
+                normalized["overlay_parent_exposure"] = overlay_parent_exposure
+            if normalized.get("overlay_parent_exposure_summary") is None:
+                normalized["overlay_parent_exposure_summary"] = self._resolved_overlay_parent_exposure_summary(normalized)
+            family_execution_summary = normalized.get("family_execution_summary")
+            if isinstance(family_execution_summary, dict) and family_execution_summary.get("overlay_parent_exposure") is None:
+                family_execution_summary = dict(family_execution_summary)
+                family_execution_summary["overlay_parent_exposure"] = overlay_parent_exposure
+                normalized["family_execution_summary"] = family_execution_summary
+            hedge_overlay_decision = normalized.get("hedge_overlay_decision")
+            if isinstance(hedge_overlay_decision, dict) and hedge_overlay_decision.get("overlay_parent_exposure") is None:
+                hedge_overlay_decision = dict(hedge_overlay_decision)
+                hedge_overlay_decision["overlay_parent_exposure"] = overlay_parent_exposure
+                normalized["hedge_overlay_decision"] = hedge_overlay_decision
+        parent_signal_fields = self._resolved_overlay_parent_signal_fields(normalized)
+        if parent_signal_fields is not None:
+            for key, value in parent_signal_fields.items():
+                if normalized.get(key) is None:
+                    normalized[key] = value
+        return normalized
+
     def _action_from_execution_fields(self, *, execution_action: Any, position_intent: Any) -> str | None:
+        directional_action = self._directional_action_from_position_intent(position_intent)
+        if directional_action is not None:
+            return directional_action
         if execution_action is not None:
             normalized = str(execution_action).strip().lower()
             if normalized:
                 return normalized
-        return self._action_from_position_intent(position_intent)
+        return None
 
     def _execution_record_payload(self, record: Any) -> dict[str, Any]:
         if isinstance(record, dict):
             payload = dict(record)
             raw_payload = dict(payload.get("raw_payload") or {})
+            nested_payload = next(
+                (
+                    dict(candidate)
+                    for candidate in (
+                        raw_payload.get("fill_event"),
+                        raw_payload.get("order_state"),
+                        raw_payload.get("intent"),
+                    )
+                    if isinstance(candidate, dict)
+                ),
+                {},
+            )
             if "state" in payload and "status" not in payload:
                 payload["status"] = payload.get("state")
             if "requested_qty" in payload and "quantity" not in payload:
@@ -3507,6 +4954,18 @@ class OperatorQueryService:
                 payload["exchange_timestamp"] = payload.get("exchange_ts")
             if "ingestion_ts" in payload and "ingestion_timestamp" not in payload:
                 payload["ingestion_timestamp"] = payload.get("ingestion_ts")
+            payload["execution_chain_id"] = (
+                payload.get("execution_chain_id")
+                or raw_payload.get("execution_chain_id")
+                or nested_payload.get("execution_chain_id")
+                or nested_payload.get("submission_payload", {}).get("executionChainId")
+            )
+            payload["execution_attempt_id"] = (
+                payload.get("execution_attempt_id")
+                or raw_payload.get("execution_attempt_id")
+                or nested_payload.get("execution_attempt_id")
+                or nested_payload.get("submission_payload", {}).get("executionAttemptId")
+            )
             payload["truth_source"] = payload.get("truth_source") or (
                 "execution_fill_repo_v2" if payload.get("fill_id") else "execution_order_repo"
             )
@@ -3847,12 +5306,32 @@ class OperatorQueryService:
             "active": bool(overlay_payload.get("active")),
             "main_leg_signal": overlay_payload.get("main_leg_signal"),
             "hedge_leg_signal": overlay_payload.get("hedge_leg_signal"),
+            "overlay_parent_exposure": self._overlay_parent_exposure_from_payload(
+                {"hedge_overlay_decision": overlay_payload}
+            ),
+            "overlay_parent_exposure_summary": self._overlay_parent_exposure_summary_from_payload(
+                {"hedge_overlay_decision": overlay_payload}
+            ),
+            "parent_target_signal": overlay_payload.get("parent_target_signal"),
+            "parent_current_signal": overlay_payload.get("parent_current_signal"),
+            "parent_effective_signal": overlay_payload.get("parent_effective_signal"),
+            "signal_source": overlay_payload.get("signal_source"),
+            "parent_lifecycle_state": overlay_payload.get("parent_lifecycle_state"),
+            "parent_target_active": overlay_payload.get("parent_target_active"),
+            "parent_inventory_active": overlay_payload.get("parent_inventory_active"),
+            "parent_source_of_truth": overlay_payload.get("parent_source_of_truth"),
+            "parent_target_qty": overlay_payload.get("parent_target_qty"),
+            "parent_current_qty": overlay_payload.get("parent_current_qty"),
+            "parent_effective_qty": overlay_payload.get("parent_effective_qty"),
+            "close_reason": overlay_payload.get("close_reason"),
             "reason_codes": list(overlay_payload.get("reason_codes") or []),
             "blocked_reasons": list(overlay_payload.get("blocked_reasons") or []),
             "long_leg_score": overlay_payload.get("long_leg_score"),
             "short_leg_score": overlay_payload.get("short_leg_score"),
             "long_leg_reason_codes": list(overlay_payload.get("long_leg_reason_codes") or []),
             "short_leg_reason_codes": list(overlay_payload.get("short_leg_reason_codes") or []),
+            "long_leg_close_reason": overlay_payload.get("long_leg_close_reason"),
+            "short_leg_close_reason": overlay_payload.get("short_leg_close_reason"),
             "long_leg_blocked_reasons": list(overlay_payload.get("long_leg_blocked_reasons") or []),
             "short_leg_blocked_reasons": list(overlay_payload.get("short_leg_blocked_reasons") or []),
             "items": leg_items,
@@ -4022,7 +5501,43 @@ class OperatorQueryService:
         if all(item is None for item in (baseline_assessment, ai_assessment, position_target, policy_decision, risk_decision, finalized_decision_outcome)):
             return None
         if isinstance(finalized_decision_outcome, dict):
-            return finalized_decision_outcome
+            payload = dict(finalized_decision_outcome)
+            payload["finalized"] = bool(payload.get("finalized", True))
+            if payload.get("family_execution_summary") is None and isinstance(position_target, dict):
+                payload["family_execution_summary"] = position_target.get("family_execution_summary")
+            if payload.get("book_expectancy_summary") is None:
+                payload["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(payload) or self._book_expectancy_summary_from_payload(position_target)
+            if not payload.get("book_runtime_states"):
+                payload["book_runtime_states"] = self._book_runtime_states_from_payload(payload) or self._book_runtime_states_from_payload(position_target)
+            if payload.get("independent_adaptive_summary") is None:
+                payload["independent_adaptive_summary"] = self._independent_adaptive_summary_from_payload(payload) or self._independent_adaptive_summary_from_payload(position_target)
+            if payload.get("independent_transition_exception_summary") is None:
+                payload["independent_transition_exception_summary"] = (
+                    self._independent_transition_exception_summary_from_payload(payload)
+                    or self._independent_transition_exception_summary_from_payload(position_target)
+                )
+            if not payload.get("diagnostic_metric_flags"):
+                payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(payload, position_target)
+            overlay_parent_exposure = self._resolved_overlay_parent_exposure(payload) or self._resolved_overlay_parent_exposure(position_target)
+            if overlay_parent_exposure is not None:
+                if payload.get("overlay_parent_exposure") is None:
+                    payload["overlay_parent_exposure"] = overlay_parent_exposure
+                if payload.get("overlay_parent_exposure_summary") is None:
+                    payload["overlay_parent_exposure_summary"] = (
+                        self._resolved_overlay_parent_exposure_summary(payload)
+                        or self._resolved_overlay_parent_exposure_summary(position_target)
+                    )
+                family_execution_summary = payload.get("family_execution_summary")
+                if isinstance(family_execution_summary, dict) and family_execution_summary.get("overlay_parent_exposure") is None:
+                    family_execution_summary = dict(family_execution_summary)
+                    family_execution_summary["overlay_parent_exposure"] = overlay_parent_exposure
+                    payload["family_execution_summary"] = family_execution_summary
+            parent_signal_fields = self._resolved_overlay_parent_signal_fields(payload) or self._resolved_overlay_parent_signal_fields(position_target)
+            if parent_signal_fields is not None:
+                for key, value in parent_signal_fields.items():
+                    if payload.get(key) is None:
+                        payload[key] = value
+            return payload
         native_outcome = None if position_target is None else position_target.get("decision_outcome")
         native_profile_control = None if position_target is None else position_target.get("profile_control_decision")
         if isinstance(native_outcome, dict):
@@ -4052,7 +5567,7 @@ class OperatorQueryService:
                 payload.get("active_profile_id")
                 or activation.get("active_profile_id")
             )
-            payload["finalized"] = bool(payload.get("finalized", False))
+            payload["finalized"] = bool(payload.get("finalized", True))
             if payload.get("profile_control_source") is None:
                 if isinstance(native_profile_control, dict):
                     payload["profile_control_source"] = (
@@ -4073,6 +5588,40 @@ class OperatorQueryService:
                     if code in list(payload.get("position_management_reason_codes") or []):
                         payload["exit_attribution"] = code
                         break
+            if payload.get("family_execution_summary") is None:
+                payload["family_execution_summary"] = None if position_target is None else position_target.get("family_execution_summary")
+            if payload.get("book_expectancy_summary") is None:
+                payload["book_expectancy_summary"] = self._book_expectancy_summary_from_payload(payload) or self._book_expectancy_summary_from_payload(position_target)
+            if not payload.get("book_runtime_states"):
+                payload["book_runtime_states"] = self._book_runtime_states_from_payload(payload) or self._book_runtime_states_from_payload(position_target)
+            if payload.get("independent_adaptive_summary") is None:
+                payload["independent_adaptive_summary"] = self._independent_adaptive_summary_from_payload(payload) or self._independent_adaptive_summary_from_payload(position_target)
+            if payload.get("independent_transition_exception_summary") is None:
+                payload["independent_transition_exception_summary"] = (
+                    self._independent_transition_exception_summary_from_payload(payload)
+                    or self._independent_transition_exception_summary_from_payload(position_target)
+                )
+            if not payload.get("diagnostic_metric_flags"):
+                payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(payload, position_target)
+            overlay_parent_exposure = self._resolved_overlay_parent_exposure(payload) or self._resolved_overlay_parent_exposure(position_target)
+            if overlay_parent_exposure is not None:
+                if payload.get("overlay_parent_exposure") is None:
+                    payload["overlay_parent_exposure"] = overlay_parent_exposure
+                if payload.get("overlay_parent_exposure_summary") is None:
+                    payload["overlay_parent_exposure_summary"] = (
+                        self._resolved_overlay_parent_exposure_summary(payload)
+                        or self._resolved_overlay_parent_exposure_summary(position_target)
+                    )
+                family_execution_summary = payload.get("family_execution_summary")
+                if isinstance(family_execution_summary, dict) and family_execution_summary.get("overlay_parent_exposure") is None:
+                    family_execution_summary = dict(family_execution_summary)
+                    family_execution_summary["overlay_parent_exposure"] = overlay_parent_exposure
+                    payload["family_execution_summary"] = family_execution_summary
+            parent_signal_fields = self._resolved_overlay_parent_signal_fields(payload) or self._resolved_overlay_parent_signal_fields(position_target)
+            if parent_signal_fields is not None:
+                for key, value in parent_signal_fields.items():
+                    if payload.get(key) is None:
+                        payload[key] = value
             return payload
         mode_value = (
             None if ai_assessment is None else ai_assessment.get("operating_mode")
@@ -4123,6 +5672,9 @@ class OperatorQueryService:
                 break
         profile_snapshot = self.strategy_profile_snapshot()
         activation = profile_snapshot.get("activation", {})
+        native_outcome = finalized_decision_outcome
+        if not isinstance(native_outcome, dict):
+            native_outcome = None if position_target is None else position_target.get("decision_outcome")
         outcome = DecisionOutcome(
             decision_id=str(
                 (position_target or {}).get("decision_id")
@@ -4137,15 +5689,29 @@ class OperatorQueryService:
                 or ""
             ),
             ai_operating_mode=canonical_mode,
-            finalized=False,
+            finalized=(
+                True
+                if native_outcome is None
+                else bool(native_outcome.get("finalized", True))
+            ),
             decision_source=decision_source,
             decision_authority=decision_authority_map[canonical_mode],
             final_direction=(
+                None
+                if native_outcome is None
+                else native_outcome.get("final_direction")
+            ) or (
                 None if position_target is None else position_target.get("target_exposure_side")
             ) or ai_direction or (
                 None if baseline_assessment is None else baseline_assessment.get("direction_bias")
             ),
-            final_action=self._action_from_position_intent(None if position_target is None else position_target.get("position_intent")),
+            final_action=(
+                None
+                if native_outcome is None
+                else native_outcome.get("final_action")
+            ) or self._abstract_action_from_position_intent(
+                None if position_target is None else position_target.get("position_intent")
+            ),
             final_target_qty=None if final_target_qty is None else Decimal(str(final_target_qty)),
             baseline_reference=self._baseline_reference_payload(
                 baseline_assessment=baseline_assessment,
@@ -4170,12 +5736,22 @@ class OperatorQueryService:
             selected_strategy_route_action=str((position_target or {}).get("strategy_route_action") or "override_target"),
             strategy_selection_reason_codes=list((position_target or {}).get("strategy_reason_codes") or []),
             strategy_selection_headline=(position_target or {}).get("strategy_headline"),
+            family_execution_summary=(
+                None
+                if native_outcome is None
+                else native_outcome.get("family_execution_summary")
+            ) or (
+                None if position_target is None else position_target.get("family_execution_summary")
+            ),
+            book_expectancy_summary=self._book_expectancy_summary_from_payload(native_outcome) or self._book_expectancy_summary_from_payload(position_target),
+            book_runtime_states=self._book_runtime_states_from_payload(native_outcome) or self._book_runtime_states_from_payload(position_target),
+            diagnostic_metric_flags=self._effective_diagnostic_metric_flags(native_outcome, position_target),
             active_profile_id=activation.get("active_profile_id"),
             profile_control_source="system" if activation.get("active_profile_id") else "env_default",
             ai_fallback_used=bool((ai_assessment or {}).get("fallback_used")),
             ai_degraded=bool((ai_assessment or {}).get("degraded")),
         )
-        return outcome.model_dump(mode="json")
+        return dump_payload_exact(outcome.model_dump(mode="python"))
 
     @staticmethod
     def _profile_control_decision_payload(*, position_target: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -4193,12 +5769,30 @@ class OperatorQueryService:
         position_target: dict[str, Any] | None,
         finalized_decision_outcome: dict[str, Any] | None,
         strategy_execution_health: dict[str, Any] | None,
+        independent_expected_vs_realized_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         if ai_assessment is None and position_target is None:
             return None
         native_outcome = finalized_decision_outcome
         if not isinstance(native_outcome, dict):
             native_outcome = None if position_target is None else position_target.get("decision_outcome")
+        family_execution_summary = (
+            None
+            if native_outcome is None
+            else native_outcome.get("family_execution_summary")
+        )
+        if family_execution_summary is None and position_target is not None:
+            family_execution_summary = position_target.get("family_execution_summary")
+        book_expectancy_summary = self._book_expectancy_summary_from_payload(native_outcome) or self._book_expectancy_summary_from_payload(position_target)
+        book_runtime_states = self._book_runtime_states_from_payload(native_outcome) or self._book_runtime_states_from_payload(position_target)
+        independent_adaptive_summary = self._independent_adaptive_summary_from_payload(native_outcome) or self._independent_adaptive_summary_from_payload(position_target)
+        independent_transition_exception_summary = (
+            self._independent_transition_exception_summary_from_payload(native_outcome)
+            or self._independent_transition_exception_summary_from_payload(position_target)
+        )
+        overlay_parent_exposure = self._resolved_overlay_parent_exposure(native_outcome) or self._resolved_overlay_parent_exposure(position_target)
+        overlay_parent_exposure_summary = self._resolved_overlay_parent_exposure_summary(native_outcome) or self._resolved_overlay_parent_exposure_summary(position_target)
+        parent_signal_fields = self._resolved_overlay_parent_signal_fields(native_outcome) or self._resolved_overlay_parent_signal_fields(position_target) or {}
         return {
             "configured_mode": self.runtime.settings.ai_operating_mode,
             "assessment_operating_mode": None if ai_assessment is None else ai_assessment.get("operating_mode"),
@@ -4206,9 +5800,30 @@ class OperatorQueryService:
             "provider_request_id": None if ai_assessment is None else ai_assessment.get("provider_request_id"),
             "fallback_used": None if ai_assessment is None else ai_assessment.get("fallback_used"),
             "degraded": None if ai_assessment is None else ai_assessment.get("degraded"),
+            "finalized": True if native_outcome is None else bool(native_outcome.get("finalized", True)),
+            "overlay_parent_exposure": overlay_parent_exposure,
+            "overlay_parent_exposure_summary": overlay_parent_exposure_summary,
             "baseline_direction": None if baseline_assessment is None else baseline_assessment.get("direction_bias"),
             "ai_direction": self._direction_from_edge(None if ai_assessment is None else ai_assessment.get("directional_edge")),
-            "final_direction": None if position_target is None else position_target.get("target_exposure_side"),
+            "final_direction": (
+                None
+                if native_outcome is None
+                else native_outcome.get("final_direction")
+            ) or (None if position_target is None else position_target.get("target_exposure_side")),
+            "final_action": (
+                None
+                if native_outcome is None
+                else native_outcome.get("final_action")
+            ) or self._abstract_action_from_position_intent(
+                None if position_target is None else position_target.get("position_intent")
+            ),
+            "family_execution_summary": family_execution_summary,
+            "book_expectancy_summary": book_expectancy_summary,
+            "book_runtime_states": book_runtime_states,
+            "independent_adaptive_summary": independent_adaptive_summary,
+            "independent_transition_exception_summary": independent_transition_exception_summary,
+            "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
+            **parent_signal_fields,
             "decision_source": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_source"),
             "decision_authority": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_authority"),
             "profile_control_source": None if not isinstance(native_outcome, dict) else native_outcome.get("profile_control_source"),
@@ -4282,7 +5897,7 @@ class OperatorQueryService:
         ai_decision_brief = self.payload_by_ref(audit.ai_decision_brief_ref) if ai_visible else None
         ai_assessment = self.payload_by_ref(audit.ai_market_assessment_ref) if ai_visible else None
         baseline_assessment = self.payload_by_ref(audit.baseline_assessment_ref)
-        position_target = self.payload_by_ref(audit.position_target_ref)
+        position_target = self._position_target_payload(self.payload_by_ref(audit.position_target_ref))
         policy_decision = self.payload_by_ref(audit.policy_decision_ref)
         risk_decision = self._risk_decision_payload(self.payload_by_ref(audit.risk_decision_ref))
         finalized_decision_outcome = self.payload_by_ref(audit.decision_outcome_ref)
@@ -4298,6 +5913,12 @@ class OperatorQueryService:
             fills=fills,
             reconciliations=reconciliations,
         )
+        independent_expected_vs_realized_summary = None
+        if isinstance(position_target, dict) and str(position_target.get("strategy_family") or "") == "independent":
+            independent_expected_vs_realized_summary = self._independent_expected_vs_realized_summary(
+                decision_ids={decision_id},
+                limit=1,
+            )
         return {
             "decision_id": decision_id,
             "health_snapshot": health_snapshot,
@@ -4342,6 +5963,7 @@ class OperatorQueryService:
             "reconciliations": reconciliations,
             "strategy_execution_health": strategy_execution_health,
             "hedge_mode_audit": hedge_mode_audit,
+            "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
             "ai_decision_audit": self._ai_decision_audit(
                 audit=audit,
                 decision_context=decision_context,
@@ -4351,6 +5973,7 @@ class OperatorQueryService:
                 position_target=position_target,
                 finalized_decision_outcome=finalized_decision_outcome,
                 strategy_execution_health=strategy_execution_health,
+                independent_expected_vs_realized_summary=independent_expected_vs_realized_summary,
             ),
             "ai_economic_actionability": self._ai_economic_actionability(
                 ai_assessment=ai_assessment,
@@ -4384,9 +6007,15 @@ class OperatorQueryService:
         payloads: list[dict[str, Any]] = []
         for record in paged_rows:
             context = self.payload_by_ref(record.decision_context_ref)
-            target = self.payload_by_ref(record.position_target_ref)
+            target = self._position_target_payload(self.payload_by_ref(record.position_target_ref))
             policy = self.payload_by_ref(record.policy_decision_ref)
             risk = self.payload_by_ref(record.risk_decision_ref)
+            independent_expected_vs_realized_summary = None
+            if isinstance(target, dict) and str(target.get("strategy_family") or "") == "independent":
+                independent_expected_vs_realized_summary = self._independent_expected_vs_realized_summary(
+                    decision_ids={record.decision_id},
+                    limit=1,
+                )
             payloads.append(
                 {
                     "decision_id": record.decision_id,
@@ -4418,6 +6047,16 @@ class OperatorQueryService:
                         if target
                         else None
                     ),
+                    "family_execution_summary": target.get("family_execution_summary") if target else None,
+                    "book_expectancy_summary": target.get("book_expectancy_summary") if target else None,
+                    "book_runtime_states": self._book_runtime_states_from_payload(target),
+                    "independent_adaptive_summary": self._independent_adaptive_summary_from_payload(target),
+                    "independent_transition_exception_summary": self._independent_transition_exception_summary_from_payload(target),
+                    "diagnostic_metric_flags": self._effective_diagnostic_metric_flags(target),
+                    "overlay_parent_exposure": self._resolved_overlay_parent_exposure(target),
+                    "overlay_parent_exposure_summary": self._resolved_overlay_parent_exposure_summary(target),
+                    **(self._resolved_overlay_parent_signal_fields(target) or {}),
+                    "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
                     "strategy_reason_codes": [] if target is None else list(target.get("strategy_reason_codes") or []),
                     "guardrail_flags": target.get("guardrail_flags") if target else [],
                     "expected_net_edge_bps": target.get("expected_net_edge_bps") if target else None,
@@ -4988,6 +6627,180 @@ class OperatorQueryService:
     def execution_quality_report(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
         return self.report_queries.execution_quality_report(limit=limit, offset=offset)
 
+    def execution_attempt_report(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        return self.report_queries.execution_attempt_report(limit=limit, offset=offset)
+
+    @staticmethod
+    def _execution_attempt_key(row: dict[str, Any]) -> str | None:
+        return execution_attempt_id_from_components(
+            execution_attempt_id=str(row.get("execution_attempt_id") or "").strip() or None,
+            client_order_id=str(row.get("order_id") or row.get("client_order_id") or "").strip() or None,
+            execution_chain_id=str(row.get("execution_chain_id") or "").strip() or None,
+            intent_id=str(row.get("intent_id") or "").strip() or None,
+        )
+
+    def _execution_attempt_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        if not rows:
+            return {
+                "attempt_count": 0,
+                "multi_fill_attempt_count": 0,
+                "avg_fills_per_attempt": None,
+                "avg_realized_net_bps_per_attempt": None,
+                "avg_adverse_slippage_bps_per_attempt": None,
+                "truth_source": "execution_quality_rows_grouped_by_attempt",
+            }
+        buckets: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            attempt_key = self._execution_attempt_key(row)
+            if attempt_key is None:
+                continue
+            bucket = buckets.setdefault(
+                attempt_key,
+                {
+                    "fill_count": 0,
+                    "realized_net_amount": Decimal("0"),
+                    "fill_notional": Decimal("0"),
+                    "slippage_weighted": Decimal("0"),
+                    "slippage_weight": Decimal("0"),
+                },
+            )
+            bucket["fill_count"] += 1
+            fill_notional = abs(self._to_decimal(row.get("fill_notional")) or Decimal("0"))
+            if fill_notional > self._DECIMAL_EPSILON:
+                bucket["fill_notional"] += fill_notional
+                bucket["realized_net_amount"] += self._to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
+                slippage = self._to_decimal(row.get("adverse_slippage_bps"))
+                if slippage is not None:
+                    bucket["slippage_weighted"] += slippage * fill_notional
+                    bucket["slippage_weight"] += fill_notional
+        if not buckets:
+            return {
+                "attempt_count": 0,
+                "multi_fill_attempt_count": 0,
+                "avg_fills_per_attempt": None,
+                "avg_realized_net_bps_per_attempt": None,
+                "avg_adverse_slippage_bps_per_attempt": None,
+                "truth_source": "execution_quality_rows_grouped_by_attempt",
+            }
+        realized_net_values = [
+            float((bucket["realized_net_amount"] / bucket["fill_notional"]) * Decimal("10000"))
+            for bucket in buckets.values()
+            if bucket["fill_notional"] > self._DECIMAL_EPSILON
+        ]
+        slippage_values = [
+            float(bucket["slippage_weighted"] / bucket["slippage_weight"])
+            for bucket in buckets.values()
+            if bucket["slippage_weight"] > self._DECIMAL_EPSILON
+        ]
+        return {
+            "attempt_count": len(buckets),
+            "multi_fill_attempt_count": sum(1 for bucket in buckets.values() if int(bucket["fill_count"]) > 1),
+            "avg_fills_per_attempt": round(float(len(rows)) / float(len(buckets)), 6) if buckets else None,
+            "avg_realized_net_bps_per_attempt": (
+                round(sum(realized_net_values) / len(realized_net_values), 6)
+                if realized_net_values
+                else None
+            ),
+            "avg_adverse_slippage_bps_per_attempt": (
+                round(sum(slippage_values) / len(slippage_values), 6)
+                if slippage_values
+                else None
+            ),
+            "truth_source": "execution_quality_rows_grouped_by_attempt",
+        }
+
+    def _execution_attempt_rows(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        buckets: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            attempt_key = self._execution_attempt_key(row)
+            if attempt_key is None:
+                continue
+            bucket = buckets.setdefault(
+                attempt_key,
+                {
+                    "execution_attempt_id": attempt_key,
+                    "execution_chain_id": row.get("execution_chain_id"),
+                    "decision_id": row.get("decision_id"),
+                    "intent_id": row.get("intent_id"),
+                    "order_id": row.get("order_id"),
+                    "symbol": row.get("symbol"),
+                    "side": row.get("side"),
+                    "strategy_family": row.get("strategy_family"),
+                    "fill_count": 0,
+                    "fill_notional": Decimal("0"),
+                    "realized_net_amount": Decimal("0"),
+                    "slippage_weighted": Decimal("0"),
+                    "slippage_weight": Decimal("0"),
+                    "first_submitted_timestamp": row.get("submitted_timestamp"),
+                    "first_exchange_fill_timestamp": row.get("exchange_fill_timestamp"),
+                    "last_exchange_fill_timestamp": row.get("exchange_fill_timestamp"),
+                },
+            )
+            bucket["fill_count"] += 1
+            fill_notional = abs(self._to_decimal(row.get("fill_notional")) or Decimal("0"))
+            bucket["fill_notional"] += fill_notional
+            bucket["realized_net_amount"] += self._to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
+            slippage = self._to_decimal(row.get("adverse_slippage_bps"))
+            if slippage is not None and fill_notional > self._DECIMAL_EPSILON:
+                bucket["slippage_weighted"] += slippage * fill_notional
+                bucket["slippage_weight"] += fill_notional
+            submitted_ts = row.get("submitted_timestamp")
+            exchange_fill_ts = row.get("exchange_fill_timestamp")
+            if bucket["first_submitted_timestamp"] is None or (
+                submitted_ts is not None and submitted_ts < bucket["first_submitted_timestamp"]
+            ):
+                bucket["first_submitted_timestamp"] = submitted_ts
+            if bucket["first_exchange_fill_timestamp"] is None or (
+                exchange_fill_ts is not None and exchange_fill_ts < bucket["first_exchange_fill_timestamp"]
+            ):
+                bucket["first_exchange_fill_timestamp"] = exchange_fill_ts
+            if bucket["last_exchange_fill_timestamp"] is None or (
+                exchange_fill_ts is not None and exchange_fill_ts > bucket["last_exchange_fill_timestamp"]
+            ):
+                bucket["last_exchange_fill_timestamp"] = exchange_fill_ts
+        attempt_rows: list[dict[str, Any]] = []
+        for bucket in buckets.values():
+            fill_notional = bucket["fill_notional"]
+            slippage_weight = bucket["slippage_weight"]
+            attempt_rows.append(
+                {
+                    "execution_attempt_id": bucket["execution_attempt_id"],
+                    "execution_chain_id": bucket["execution_chain_id"],
+                    "decision_id": bucket["decision_id"],
+                    "intent_id": bucket["intent_id"],
+                    "order_id": bucket["order_id"],
+                    "symbol": bucket["symbol"],
+                    "side": bucket["side"],
+                    "strategy_family": bucket["strategy_family"],
+                    "fill_count": bucket["fill_count"],
+                    "fill_notional": fill_notional,
+                    "avg_realized_net_bps": (
+                        (bucket["realized_net_amount"] / fill_notional) * Decimal("10000")
+                        if fill_notional > self._DECIMAL_EPSILON
+                        else None
+                    ),
+                    "avg_adverse_slippage_bps": (
+                        bucket["slippage_weighted"] / slippage_weight
+                        if slippage_weight > self._DECIMAL_EPSILON
+                        else None
+                    ),
+                    "first_submitted_timestamp": bucket["first_submitted_timestamp"],
+                    "first_exchange_fill_timestamp": bucket["first_exchange_fill_timestamp"],
+                    "last_exchange_fill_timestamp": bucket["last_exchange_fill_timestamp"],
+                    "truth_source": "execution_quality_rows_grouped_by_attempt",
+                }
+            )
+        attempt_rows.sort(
+            key=lambda item: (
+                item.get("last_exchange_fill_timestamp")
+                or item.get("first_exchange_fill_timestamp")
+                or datetime.min.replace(tzinfo=timezone.utc),
+                str(item.get("execution_attempt_id") or ""),
+            ),
+            reverse=True,
+        )
+        return attempt_rows
+
     def _execution_quality_summary(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
         if not rows:
             return {
@@ -5002,6 +6815,7 @@ class OperatorQueryService:
                 "high_slippage_ratio": None,
                 "slow_submit_to_fill_count": 0,
                 "slow_submit_to_fill_ratio": None,
+                "attempt_metrics": self._execution_attempt_summary([]),
             }
 
         def _avg_float(key: str) -> float | None:
@@ -5046,11 +6860,43 @@ class OperatorQueryService:
             "high_slippage_ratio": None if not rows else round(high_slippage_count / len(rows), 6),
             "slow_submit_to_fill_count": slow_submit_to_fill_count,
             "slow_submit_to_fill_ratio": None if not rows else round(slow_submit_to_fill_count / len(rows), 6),
+            "attempt_metrics": self._execution_attempt_summary(rows),
         }
 
     @staticmethod
     def _fill_outcome_event_timestamp(record: Any) -> datetime | None:
         return getattr(record, "ingestion_timestamp", None) or getattr(record, "exchange_timestamp", None) or getattr(record, "created_at", None)
+
+    @classmethod
+    def _same_position_direction(cls, left: Decimal, right: Decimal) -> bool:
+        if abs(left) <= cls._DECIMAL_EPSILON or abs(right) <= cls._DECIMAL_EPSILON:
+            return True
+        return (left > 0 and right > 0) or (left < 0 and right < 0)
+
+    def _is_closed_fill_outcome(self, outcome: Any) -> bool:
+        starting_qty = self._to_decimal(getattr(outcome, "starting_position_qty", None))
+        ending_qty = self._to_decimal(getattr(outcome, "ending_position_qty", None))
+        if starting_qty is not None and ending_qty is not None:
+            if abs(starting_qty) <= self._DECIMAL_EPSILON:
+                return False
+            if abs(ending_qty) + self._DECIMAL_EPSILON < abs(starting_qty):
+                return True
+            if not self._same_position_direction(starting_qty, ending_qty):
+                return True
+            return False
+
+        realized_pnl_delta = self._to_decimal(getattr(outcome, "realized_pnl_delta", None))
+        if realized_pnl_delta is not None and abs(realized_pnl_delta) > self._DECIMAL_EPSILON:
+            return True
+
+        action_tokens = " ".join(
+            str(value or "").lower()
+            for value in (
+                getattr(outcome, "execution_action", None),
+                getattr(outcome, "position_intent", None),
+            )
+        )
+        return any(token in action_tokens for token in ("close", "reduce", "exit", "reverse"))
 
     def _fill_outcome_position_key(self, outcome: Any) -> str:
         if getattr(outcome, "position_key", None):
@@ -5357,7 +7203,7 @@ class OperatorQueryService:
     def _build_forward_validation_report(self, *, window_days: int, period_count: int) -> dict[str, Any]:
         normalized_window_days = max(int(window_days), 1)
         normalized_period_count = max(int(period_count), 1)
-        all_rows = [self._execution_quality_row(item) for item in self._scoped_fill_outcomes()]
+        all_rows = [self._profitability_fill_row(item) for item in self._scoped_closed_fill_outcomes()]
         all_rows.sort(
             key=lambda item: item.get("ingestion_timestamp") or item.get("exchange_fill_timestamp") or datetime.min,
             reverse=True,

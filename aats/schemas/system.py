@@ -158,6 +158,8 @@ class RuntimeModeState(SchemaBase):
 class RecoveryBundleLegStatus(SchemaBase):
     client_order_id: str
     exchange_order_id: str | None = None
+    execution_chain_id: str | None = None
+    execution_attempt_id: str | None = None
     symbol: str
     product_type: ProductType
     margin_mode: MarginModelType
@@ -195,6 +197,38 @@ class RecoveryBundleSummary(SchemaBase):
     legs: list[RecoveryBundleLegStatus] = Field(default_factory=list)
 
 
+class IndependentRecoverySnapshot(SchemaBase):
+    decision_id: str | None = None
+    allocation_id: str | None = None
+    symbol: str
+    strategy_sleeve_id: str | None = None
+    leg: Literal["long", "short"]
+    book_state: str | None = None
+    holding_phase: str | None = None
+    health_state: str | None = None
+    current_qty: Decimal = Decimal("0")
+    target_qty: Decimal = Decimal("0")
+    prior_book_state: str | None = None
+    current_scale_in_count: int = 0
+    current_de_risk_count: int = 0
+    expected_chain_ids: list[str] = Field(default_factory=list)
+    active_execution_chain_ids: list[str] = Field(default_factory=list)
+    unresolved_attempt_ids: list[str] = Field(default_factory=list)
+    recovery_posture: str = "idle"
+    recovery_blockers: list[str] = Field(default_factory=list)
+    last_recovery_incident_at: datetime | None = None
+    recovery_version: str = "independent_phase6_additive_v1"
+    suspended_until: datetime | None = None
+    cooldown_until: datetime | None = None
+    state_version: int = 1
+    threshold_snapshot: dict[str, Any] | None = None
+    health_snapshot: dict[str, Any] | None = None
+    replay_snapshot: dict[str, Any] | None = None
+    decision_snapshot: dict[str, Any] | None = None
+    transition_valid: bool = True
+    transition_violation_reason: str | None = None
+
+
 class RecoveryStatus(SchemaBase):
     status: str
     recovery_source: str | None = None
@@ -209,6 +243,12 @@ class RecoveryStatus(SchemaBase):
     reconciliation_classification: str | None = None
     open_order_count: int = 0
     pending_command_count: int = 0
+    pending_submit_command_count: int = 0
+    pending_cancel_command_count: int = 0
+    sent_stale_command_count: int = 0
+    sent_stale_submit_command_count: int = 0
+    sent_stale_cancel_command_count: int = 0
+    stuck_sent_submit_order_count: int = 0
     divergence_count: int = 0
     safe_startup: bool = True
     safe_to_trade: bool = False
@@ -225,6 +265,7 @@ class RecoveryStatus(SchemaBase):
     recoverable_bundle_count: int = 0
     unbundled_open_order_count: int = 0
     bundle_summaries: list[RecoveryBundleSummary] = Field(default_factory=list)
+    independent_recovery_snapshots: list[IndependentRecoverySnapshot] = Field(default_factory=list)
     baseline_imported: bool = False
     baseline_status: str | None = None
     baseline_imported_at: datetime | None = None

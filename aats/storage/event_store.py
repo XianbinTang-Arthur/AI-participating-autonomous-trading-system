@@ -74,6 +74,11 @@ class InMemoryEventStore:
             return []
         return self.by_topic(topic)[-limit:]
 
+    def recent_by_topic_and_key(self, topic: str, *, key: str, limit: int) -> list[EventEnvelope]:
+        if limit <= 0:
+            return []
+        return [event for event in self.by_topic(topic) if event.key == key][-limit:]
+
     def by_topic_scoped(
         self,
         topic: str,

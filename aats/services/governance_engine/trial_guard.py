@@ -11,7 +11,7 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
-from aats.services.accounting import fill_fee_cost_in_quote
+from aats.services.accounting import try_fill_fee_cost_in_quote
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.runtime_scope import event_matches_scope, runtime_state_scope
 
@@ -111,6 +111,12 @@ class ForwardTrialGuardService:
                 cutoff=manual_reset_after,
                 timestamp_keys=("ingestion_timestamp", "exchange_fill_timestamp"),
             )
+            recent_fill_ids = {str(row.get("fill_id") or "") for row in recent_rows if row.get("fill_id")}
+            anomaly_fill_ids_present = any(row.get("fill_id") for row in anomaly_rows)
+            if recent_fill_ids and anomaly_fill_ids_present:
+                anomaly_rows = [
+                    row for row in anomaly_rows if str(row.get("fill_id") or "") in recent_fill_ids
+                ]
         now = utc_now()
         daily_cutoff = now - timedelta(hours=24)
 
@@ -147,8 +153,18 @@ class ForwardTrialGuardService:
             )
         else:
             fee_ratio = _to_decimal(summary.get("fee_to_notional_ratio"))
-            high_slippage_count = int(anomaly_summary.get("high_slippage_count") or 0)
-            slow_submit_to_fill_count = int(anomaly_summary.get("slow_submit_to_fill_count") or 0)
+            summary_high_slippage_count = summary.get("high_slippage_count")
+            summary_slow_fill_count = summary.get("slow_submit_to_fill_count")
+            high_slippage_count = int(
+                summary_high_slippage_count
+                if summary_high_slippage_count is not None
+                else anomaly_summary.get("high_slippage_count") or 0
+            )
+            slow_submit_to_fill_count = int(
+                summary_slow_fill_count
+                if summary_slow_fill_count is not None
+                else anomaly_summary.get("slow_submit_to_fill_count") or 0
+            )
         high_slippage_ratio = None if fill_count == 0 else round(high_slippage_count / fill_count, 6)
         slow_submit_to_fill_ratio = None if fill_count == 0 else round(slow_submit_to_fill_count / fill_count, 6)
 
@@ -325,18 +341,17 @@ class ForwardTrialGuardService:
         fill_price = row.get("fill_price")
         if symbol in {None, ""} or side in {None, ""} or fill_price in {None, ""}:
             return abs(fee_amount)
-        return abs(
-            fill_fee_cost_in_quote(
-                SimpleNamespace(
-                    symbol=symbol,
-                    fee_amount=fee_amount,
-                    fee_currency=row.get("fee_currency"),
-                    venue=row.get("venue") or "OKX",
-                    side=side,
-                    fill_price=fill_price,
-                )
+        fee_cost, _fee_error = try_fill_fee_cost_in_quote(
+            SimpleNamespace(
+                symbol=symbol,
+                fee_amount=fee_amount,
+                fee_currency=row.get("fee_currency"),
+                venue=row.get("venue") or "OKX",
+                side=side,
+                fill_price=fill_price,
             )
         )
+        return None if fee_cost is None else abs(fee_cost)
 
     def _trial_observation_active(self) -> bool:
         mode = str(getattr(self.settings, "mode", "") or "").lower()

@@ -63,7 +63,7 @@ export function orderRowMeta(order = {}) {
 
 export function fillRowTitle(fill = {}) {
   return inferTradeScene(fill) === "derivatives"
-    ? readableState(fill.execution_action || fill.position_intent, "成交方向待确认")
+    ? readableState(preferredDerivativesPositionAction(fill), "成交方向待确认")
     : readableState(fill.side, "成交方向待确认");
 }
 
@@ -75,11 +75,32 @@ export function fillRowMeta(fill = {}) {
 }
 
 export function fillImpactMeta(fill = {}) {
-  const fee = `手续费 ${formatNumber(fill.fee_amount, 4, "待同步")} ${fill.fee_currency || ""}`.trim();
+  const fee = fillFeeText(fill);
   if (inferTradeScene(fill) === "derivatives") {
     return fee || "手续费待同步";
   }
   return `成交额 ${formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price)} | ${fee || "手续费待同步"}`;
+}
+
+export function normalizedFillFeeImpact(fill = {}) {
+  const feeAmount = Number(fill?.fee ?? fill?.fee_amount);
+  if (Number.isFinite(feeAmount)) return feeAmount === 0 ? 0 : -feeAmount;
+
+  const feeQuoteAmount = Number(fill?.fee_quote_amount);
+  if (Number.isFinite(feeQuoteAmount)) return feeQuoteAmount === 0 ? 0 : -feeQuoteAmount;
+
+  const feeDelta = Number(fill?.fee_delta);
+  if (Number.isFinite(feeDelta)) return feeDelta === 0 ? 0 : -feeDelta;
+
+  return null;
+}
+
+export function fillFeeText(fill = {}, { includeCurrency = true, fallback = "手续费待同步" } = {}) {
+  const feeImpact = normalizedFillFeeImpact(fill);
+  if (!Number.isFinite(feeImpact)) return fallback;
+  const amountText = formatSigned(feeImpact, 4, "待同步");
+  const feeCurrency = includeCurrency ? String(fill?.fee_currency || "").trim() : "";
+  return `手续费 ${amountText}${feeCurrency ? ` ${feeCurrency}` : ""}`;
 }
 
 export function orderDrawerRows(order = {}) {
@@ -104,18 +125,18 @@ export function fillDrawerRows(fill = {}) {
   if (inferTradeScene(fill) === "derivatives") {
     return [
       ["合约标的", fill.symbol || "标的待确认", `${readableState(fill.margin_mode, "保证金模式待确认")} | ${readableState(fill.exposure_side, "方向待确认")}`],
-      ["仓位动作", readableState(fill.execution_action || fill.position_intent, "仓位动作待确认"), `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.liquidity_role, "流动性角色待确认")}`],
+      ["仓位动作", readableState(preferredDerivativesPositionAction(fill), "仓位动作待确认"), `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.liquidity_role, "流动性角色待确认")}`],
       ["成交仓位", formatNumber(fill.fill_qty), `成交均价 ${formatQuotePrice(fill.symbol, fill.fill_price)}`],
       ["成交名义价值", formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price), `交易所时间 ${fill.exchange_timestamp || "待同步"}`],
       ["仓位前后", `${formatSigned(fill.starting_position_qty)} -> ${formatSigned(fill.ending_position_qty)}`, `均价 ${formatNumber(fill.starting_avg_entry_price, 4, "待同步")} -> ${formatNumber(fill.ending_avg_entry_price, 4, "待同步")}`],
-      ["已实现盈亏", formatSigned(fill.realized_pnl), `手续费 ${formatNumber(fill.fee_amount, 4, "待同步")} ${fill.fee_currency || ""}`.trim()],
+      ["已实现盈亏", formatSigned(fill.realized_pnl), fillFeeText(fill)],
     ];
   }
 
   return [
     ["现货标的", fill.symbol || "标的待确认", `${readableState(fill.side, "买卖方向待确认")} | ${readableState(fill.execution_action || fill.position_intent, "成交意图待确认")}`],
     ["成交数量", formatAssetAmount(fill.symbol, fill.fill_qty), `成交单价 ${formatQuotePrice(fill.symbol, fill.fill_price)}`],
-    ["成交金额", formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price), `手续费 ${formatNumber(fill.fee_amount, 4, "待同步")} ${fill.fee_currency || ""}`.trim()],
+    ["成交金额", formatQuoteNotional(fill.symbol, fill.fill_qty, fill.fill_price), fillFeeText(fill)],
     ["盈亏影响", formatSigned(fill.realized_pnl), readableState(fill.liquidity_role, "流动性角色待确认")],
   ];
 }
@@ -159,7 +180,26 @@ function spotOrderAction(order = {}) {
 }
 
 function derivativesOrderAction(order = {}) {
-  return readableState(order.execution_action || order.position_intent || order.exposure_side, "仓位动作待确认");
+  return readableState(preferredDerivativesPositionAction(order) || order.exposure_side, "仓位动作待确认");
+}
+
+function preferredDerivativesPositionAction(record = {}) {
+  const positionIntent = String(record.position_intent || "").toLowerCase();
+  if (
+    positionIntent === "open_long" ||
+    positionIntent === "scale_in_long" ||
+    positionIntent === "open_short" ||
+    positionIntent === "scale_in_short" ||
+    positionIntent === "reduce_long" ||
+    positionIntent === "reduce_short" ||
+    positionIntent === "close_long" ||
+    positionIntent === "close_short" ||
+    positionIntent === "reverse_to_long" ||
+    positionIntent === "reverse_to_short"
+  ) {
+    return positionIntent;
+  }
+  return record.execution_action || record.position_intent;
 }
 
 function formatAssetAmount(symbol, value, signed = false) {

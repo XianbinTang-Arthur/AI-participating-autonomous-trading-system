@@ -7,7 +7,13 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import OrderObligation, OrderState
 from aats.schemas.portfolio import PortfolioSnapshot
-from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent
+from aats.schemas.strategy_runtime import (
+    PortfolioAllocationDecision,
+    StrategyBookRuntimeState,
+    StrategyExecutionBundle,
+    StrategyLegIntent,
+    StrategySleeveIntent,
+)
 from aats.services.execution_engine.recovery import ExecutionRecoveryService
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.portfolio_service.positions import PortfolioState
@@ -467,6 +473,243 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertFalse(artifacts.status.resume_eligible)
         self.assertTrue(artifacts.status.only_reduce_required)
         self.assertIn("derivatives_margin_usage_requires_only_reduce", artifacts.status.resume_blocked_reasons)
+
+    def test_recovery_surfaces_independent_recovery_snapshots_from_runtime_and_open_orders(self) -> None:
+        strategy_runtime_repo = InMemoryStrategyRuntimeRepository()
+        long_runtime_state = StrategyBookRuntimeState(
+            leg="long",
+            execution_chain_id="independent:decision_independent_1:long:open",
+            current_qty=Decimal("0"),
+            target_qty=Decimal("0.02"),
+            state="opening",
+            score=0.81,
+            score_raw=0.81,
+            score_adjusted=0.81,
+            book_state="probing",
+            holding_phase="entry",
+            health_state="ok",
+            book_action="open",
+            policy_reason="independent_entry_guarded_passive_first",
+            expected_signal_edge_bps=6.0,
+            expected_cost_bps=1.5,
+            expected_net_edge_bps=4.5,
+            liquidity_quality_score=0.82,
+            execution_health_state="ok",
+            execution_policy_urgency="low",
+            reason_codes=["independent_long_book_signal_above_entry_threshold"],
+            blocked_reasons=[],
+        )
+        short_runtime_state = StrategyBookRuntimeState(
+            leg="short",
+            current_qty=Decimal("0"),
+            target_qty=Decimal("0"),
+            state="inactive",
+            score=0.11,
+            score_raw=0.11,
+            score_adjusted=0.11,
+            book_state="flat",
+            holding_phase=None,
+            health_state="ok",
+            book_action="inactive",
+            reason_codes=["independent_short_book_signal_below_entry_threshold"],
+            blocked_reasons=[],
+        )
+        strategy_runtime_repo.save_allocation_decision(
+            PortfolioAllocationDecision(
+                allocation_id="alloc_independent_1",
+                decision_id="decision_independent_1",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                primary_family="independent",
+                approved_families=["independent"],
+                sleeve_intents=[
+                    StrategySleeveIntent(
+                        decision_id="decision_independent_1",
+                        family="independent",
+                        strategy_sleeve_id="sleeve_independent_long_short",
+                        state="candidate",
+                        symbol="BTC-USDT-SWAP",
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        inventory_policy="paired_inventory",
+                        route_action="override_target",
+                        family_action="open_independent_book",
+                        selectable=True,
+                        execution_compatible=True,
+                        metrics={
+                            "book_runtime_states": [
+                                long_runtime_state.model_dump(mode="json"),
+                                short_runtime_state.model_dump(mode="json"),
+                            ],
+                            "long_threshold_snapshot": {
+                                "leg": "long",
+                                "shadow_only": True,
+                                "entry_threshold": 0.7,
+                                "close_threshold": 0.3,
+                                "scale_in_threshold": 0.9,
+                                "adaptive_entry_threshold": 0.73,
+                                "adaptive_close_threshold": 0.32,
+                                "adaptive_scale_in_threshold": 0.94,
+                                "adaptive_thesis_age_seconds": 1500.0,
+                                "adaptive_de_risk_net_edge_bps": 2.4,
+                                "capital_multiplier": 0.91,
+                                "reason_codes": ["adaptive_shadow_confidence_adjusted"],
+                            },
+                            "long_health_snapshot": {
+                                "leg": "long",
+                                "health_state": "ok",
+                                "halt_openings": False,
+                                "only_reduce": False,
+                                "suspended": False,
+                                "warnings": [],
+                                "blockers": [],
+                            },
+                            "long_replay_snapshot": {
+                                "leg": "long",
+                                "score": 0.81,
+                                "state": "opening",
+                                "book_state": "probing",
+                                "holding_phase": "entry",
+                                "health_state": "ok",
+                                "book_action": "open",
+                                "policy_reason": "independent_entry_guarded_passive_first",
+                                "prior_book_state": "flat",
+                                "transition_reconstructed": True,
+                                "transition_source": "current_qty_inference",
+                            },
+                            "family_health_overall_state": "ok",
+                            "family_health_blockers": [],
+                            "long_execution_style_preference": "bounded_limit_ioc",
+                            "long_order_type_preference": "limit",
+                            "long_time_in_force_preference": "IOC",
+                        },
+                    )
+                ],
+                execution_legs=[
+                    StrategyLegIntent(
+                        symbol="BTC-USDT-SWAP",
+                        execution_chain_id="independent:decision_independent_1:long:open",
+                        product_type="derivatives",
+                        side="buy",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                        action="open",
+                        family="independent",
+                        role="hedge",
+                        strategy_sleeve_id="sleeve_independent_long_short",
+                        margin_mode="cross",
+                        current_position_qty=Decimal("0"),
+                        target_position_qty=Decimal("0.02"),
+                        delta_position_qty=Decimal("0.02"),
+                        execution_compatible=True,
+                        execution_mode="independent_long_book",
+                    )
+                ],
+            )
+        )
+        execution_repo = InMemoryExecutionRepository()
+        now = utc_now()
+        execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_independent_1",
+                execution_chain_id="independent:decision_independent_1:long:open",
+                execution_attempt_id="attempt_independent_1",
+                intent_id="intent_independent_1",
+                symbol="BTC-USDT-SWAP",
+                client_order_id="cl_independent_recovery_1",
+                venue="OKX",
+                exchange_order_id=None,
+                status="SUBMITTED",
+                submission_mode="guarded_simulated_submit",
+                submitted_ts=now,
+                last_update_ts=now,
+                requested_qty=Decimal("0.02"),
+                filled_qty=Decimal("0"),
+                remaining_qty=Decimal("0.02"),
+                average_fill_price=None,
+                fees=Decimal("0"),
+                product_type="derivatives",
+                margin_mode="cross",
+                strategy_family="independent",
+                strategy_sleeve_id="sleeve_independent_long_short",
+                allocation_id="alloc_independent_1",
+                strategy_bundle_id="bundle_independent_1",
+                strategy_leg_role="hedge",
+                pos_side="long",
+                submission_payload={},
+            )
+        )
+        strategy_runtime_repo.save_execution_bundle(
+            StrategyExecutionBundle(
+                bundle_id="bundle_independent_1",
+                decision_id="decision_independent_1",
+                family="independent",
+                participating_families=["independent"],
+                strategy_sleeve_refs=["sleeve_independent_long_short"],
+                allocation_id="alloc_independent_1",
+                product_type="derivatives",
+                margin_mode="cross",
+                allowed_symbols=("BTC-USDT-SWAP",),
+                route_action="override_target",
+                bundle_type="single_sleeve",
+                status="partial_fill_recovery",
+                selected_symbol="BTC-USDT-SWAP",
+                legs=[
+                    StrategyLegIntent(
+                        symbol="BTC-USDT-SWAP",
+                        execution_chain_id="independent:decision_independent_1:long:open",
+                        product_type="derivatives",
+                        side="buy",
+                        position_mode="long_short_mode",
+                        pos_side="long",
+                        action="open",
+                        family="independent",
+                        role="hedge",
+                        strategy_sleeve_id="sleeve_independent_long_short",
+                        margin_mode="cross",
+                        current_position_qty=Decimal("0"),
+                        target_position_qty=Decimal("0.02"),
+                        delta_position_qty=Decimal("0.02"),
+                        execution_compatible=True,
+                        execution_mode="independent_long_book",
+                    )
+                ],
+            )
+        )
+        recovery = self._service(
+            execution_repo=execution_repo,
+            strategy_runtime_repo=strategy_runtime_repo,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        self.assertTrue(artifacts.status.independent_recovery_snapshots)
+        long_snapshot = next(
+            snapshot
+            for snapshot in artifacts.status.independent_recovery_snapshots
+            if snapshot.leg == "long"
+        )
+        self.assertEqual(long_snapshot.recovery_posture, "pending_execution_attempts")
+        self.assertEqual(
+            long_snapshot.expected_chain_ids,
+            ["independent:decision_independent_1:long:open"],
+        )
+        self.assertEqual(
+            long_snapshot.active_execution_chain_ids,
+            ["independent:decision_independent_1:long:open"],
+        )
+        self.assertEqual(long_snapshot.unresolved_attempt_ids, ["attempt_independent_1"])
+        self.assertEqual(long_snapshot.decision_snapshot["execution_policy"]["order_type_preference"], "limit")
+        self.assertEqual(long_snapshot.replay_snapshot["prior_book_state"], "flat")
+        self.assertIn("adaptive_entry_threshold", long_snapshot.threshold_snapshot)
+        self.assertIn("independent_recovery_snapshots:2", artifacts.status.notes)
 
     @staticmethod
     def _service(

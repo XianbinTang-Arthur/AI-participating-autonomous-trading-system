@@ -14,11 +14,10 @@ class ReportQueryFacade:
 
     def profitability_overview(self, *, limit: int = 100) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
-        outcomes = list(self.owner._scoped_fill_outcomes())
+        outcomes = list(self.owner._scoped_closed_fill_outcomes())
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
-        closed_rows = [self.owner._execution_quality_row(item) for item in outcomes[:normalized_limit]]
-        execution_quality = self.execution_quality_report(limit=normalized_limit, offset=0)
-        execution_quality_summary = dict(execution_quality.get("summary") or {})
+        closed_rows = [self.owner._profitability_fill_row(item) for item in outcomes[:normalized_limit]]
+        execution_quality_summary = self.owner._execution_quality_summary(closed_rows)
 
         funding_records = list(self.owner._scoped_funding_fee_records())
         funding_records.sort(
@@ -77,7 +76,15 @@ class ReportQueryFacade:
             },
             "recent_closed_fills": closed_rows,
             "recent_realized_events": realized_events,
-            "execution_quality": execution_quality,
+            "execution_quality": {
+                "rows": closed_rows,
+                "limit": normalized_limit,
+                "offset": 0,
+                "total_available": len(outcomes),
+                "has_more": len(outcomes) > normalized_limit,
+                "truth_source": "fill_outcomes_closed_only",
+                "summary": execution_quality_summary,
+            },
             "funding_fee_summary": funding_fee_summary,
             "truth_source": "fill_outcomes_plus_funding_fee_records",
         }
@@ -98,6 +105,25 @@ class ReportQueryFacade:
             "has_more": offset + len(paged) < len(rows),
             "truth_source": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
             "summary": self.owner._execution_quality_summary(rows),
+        }
+
+    def execution_attempt_report(self, *, limit: int = 50, offset: int = 0) -> dict[str, Any]:
+        source_rows = (
+            self.owner._phase5_fill_rows(limit=None)
+            if self.owner._phase5_control_plane_enabled()
+            else list(reversed(self.owner._scoped_fills()))
+        )
+        rows = [self.owner._execution_quality_row(fill) for fill in source_rows]
+        attempt_rows = self.owner._execution_attempt_rows(rows)
+        paged = attempt_rows[offset : offset + limit]
+        return {
+            "rows": paged,
+            "limit": limit,
+            "offset": offset,
+            "total_available": len(attempt_rows),
+            "has_more": offset + len(paged) < len(attempt_rows),
+            "truth_source": "execution_fill_repo_v2" if self.owner._phase5_control_plane_enabled() else "execution_repo",
+            "summary": self.owner._execution_attempt_summary(rows),
         }
 
     def forward_validation_report(self, *, window_days: int = 7, period_count: int = 4) -> dict[str, Any]:

@@ -149,6 +149,7 @@ def _protected_dashboard_panel_payload(
     recent_decisions_limit: int,
     recent_orders_limit: int,
     recent_fills_limit: int,
+    recent_replay_validations_limit: int,
     recent_ai_assessments_limit: int,
     recent_ai_shadow_decisions_limit: int,
     recent_ai_shadow_evaluations_limit: int,
@@ -211,6 +212,8 @@ def _protected_dashboard_panel_payload(
         return query.guarded_live_run_packet()
     if panel_key == "replayStatus":
         return query.replay_status()
+    if panel_key == "replayRecentValidations":
+        return query.replay_recent_validations(limit=recent_replay_validations_limit, offset=0)
     if panel_key == "aiOverview":
         return query.ai_overview()
     if panel_key == "aiRuntime":
@@ -326,6 +329,7 @@ async def dashboard_bundle(
     recent_decisions: int = Query(default=8, alias="recentDecisions", ge=1, le=100),
     recent_orders: int = Query(default=8, alias="recentOrders", ge=1, le=200),
     recent_fills: int = Query(default=8, alias="recentFills", ge=1, le=200),
+    recent_replay_validations: int = Query(default=8, alias="recentReplayValidations", ge=1, le=100),
     recent_ai_assessments: int = Query(default=8, alias="recentAIAssessments", ge=1, le=100),
     recent_ai_shadow_decisions: int = Query(default=8, alias="recentAIShadowDecisions", ge=1, le=100),
     recent_ai_shadow_evaluations: int = Query(default=8, alias="recentAIShadowEvaluations", ge=1, le=100),
@@ -364,6 +368,7 @@ async def dashboard_bundle(
                     recent_decisions_limit=recent_decisions,
                     recent_orders_limit=recent_orders,
                     recent_fills_limit=recent_fills,
+                    recent_replay_validations_limit=recent_replay_validations,
                     recent_ai_assessments_limit=recent_ai_assessments,
                     recent_ai_shadow_decisions_limit=recent_ai_shadow_decisions,
                     recent_ai_shadow_evaluations_limit=recent_ai_shadow_evaluations,

@@ -199,6 +199,7 @@ def require_admin_access(
 def _write_api_key_compatibility_enabled(runtime: ApplicationRuntime) -> bool:
     if not runtime.settings.operator_write_api_key:
         return False
-    if runtime.settings.environment == "prod" and runtime.environment_capabilities.exchange_coupled:
-        return False
-    return True
+    return bool(
+        runtime.environment_capabilities.local_only
+        or runtime.settings.storage_mode == "memory"
+    )
