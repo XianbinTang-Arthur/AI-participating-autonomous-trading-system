@@ -9,12 +9,13 @@
 - 本地组合状态、审计、回放、对账与恢复
 - OKX 模拟盘提交流程验证
 
-当前仓库**不支持真实资金自动交易**。  
+当前仓库**不支持无保护或自治型的真实资金自动交易**。  
 目前可稳定使用的是：
 
 - 本地演示行情 + 本地 paper execution
 - OKX 真实行情 + 本地 paper execution
 - OKX 模拟盘受保护提交
+- 经过风控、恢复、审计与 operator 前提约束的 guarded live 托管 profile（`spot_live` / `derivatives_live`）
 
 ## 当前能力边界
 
@@ -44,11 +45,11 @@
 
 ### 明确不支持
 
-- 真实资金自动交易
+- 无保护或自治型真实资金自动交易
 - `autonomous_live`
-- 非模拟盘的 OKX 真实提交
+- 绕过 guarded live 门禁的非模拟盘 OKX 真实提交
 
-代码里保留了部分未来扩展边界，但当前版本会显式阻断真实资金实盘线路。
+代码里保留了更高自动化扩展边界，但当前版本只允许受保护的 guarded live 实盘线路；不允许绕过风控、恢复、审计与 operator 门禁直接进入真实资金自动交易。
 
 ## 系统主链路
 
@@ -180,7 +181,7 @@ Run spot and derivatives side by side with separate API ports:
 - 默认仅交易单一标的
 - 默认仅启用 `15m` 决策周期
 - 保持 `AATS_GUARDED_EXECUTION_DRY_RUN=false` 仅在 OKX 模拟盘验证时使用
-- 不要把任何真实资金交易目标暴露给当前版本
+- 未完成小资金验证、恢复演练和 operator 预检前，不要把超出试运行范围的真实资金目标暴露给 `*_live` profile
 
 ### 交易配置建议
 
@@ -274,7 +275,7 @@ Run spot and derivatives side by side with separate API ports:
 
 当前版本仍然有明确边界，不应忽略：
 
-- 不支持真实资金自动交易
+- 不支持 `autonomous_live` 或无保护真实资金自动交易
 - reservation 已落地，但还不是完整总账系统
 - 部分下游 projection 仍是最终一致，而不是全链原子
 - 真实收益能力仍需继续观察，不应把“可以稳定运行”误解为“已证明正期望”
@@ -302,6 +303,7 @@ Run spot and derivatives side by side with separate API ports:
 
 - 真实行情下的策略观察能力
 - OKX 模拟盘受保护提交流程
+- 受保护的 OKX guarded live 托管 profile
 - 审计、恢复、对账、operator 控制面
 
 但它的正确使用方式仍然应该是：
@@ -309,4 +311,5 @@ Run spot and derivatives side by side with separate API ports:
 - 先做本地验证
 - 再做真实行情 paper
 - 再做 OKX 模拟盘
-- 最后再讨论是否值得为真实资金交易继续补工程和策略验证
+- 再做小资金 guarded live
+- 最后再讨论是否值得继续放量或迈向更高自动化级别

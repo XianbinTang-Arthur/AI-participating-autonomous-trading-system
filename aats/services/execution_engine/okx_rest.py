@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import hmac
@@ -45,6 +46,9 @@ class OKXRequestError(RuntimeError):
         row_message: str | None = None,
         status_code: int | None = None,
         payload: dict[str, Any] | None = None,
+        classification: str | None = None,
+        retryable: bool = False,
+        retry_after_seconds: float | None = None,
     ) -> None:
         self.path = path
         self.code = code
@@ -53,9 +57,14 @@ class OKXRequestError(RuntimeError):
         self.row_message = row_message
         self.status_code = status_code
         self.payload = payload or {}
+        self.classification = classification
+        self.retryable = retryable
+        self.retry_after_seconds = retry_after_seconds
         detail_parts = [f"path={path}"]
         if status_code is not None:
             detail_parts.append(f"http_status={status_code}")
+        if classification:
+            detail_parts.append(f"classification={classification}")
         if code is not None:
             detail_parts.append(f"code={code}")
         if msg:
@@ -68,6 +77,10 @@ class OKXRequestError(RuntimeError):
 
 
 class OKXRESTClient:
+    _QUERY_RETRY_LIMIT = 2
+    _QUERY_RETRY_BASE_DELAY_SECONDS = 0.25
+    _QUERY_RETRY_MAX_DELAY_SECONDS = 1.0
+
     def __init__(self, *, settings: AATSSettings) -> None:
         self.settings = settings
         self._client: httpx.AsyncClient | None = None
@@ -145,36 +158,46 @@ class OKXRESTClient:
             headers["x-simulated-trading"] = "1"
 
         client = await self._client_handle()
-        response = await client.request(
-            method=method.upper(),
-            url=request_path,
-            headers=headers,
-            content=body_text if body_text else None,
-        )
-        payload = self._parse_json_payload(response)
-        if response.status_code >= 400:
-            row_code, row_message = self._extract_row_error(payload)
-            raise OKXRequestError(
-                path=path,
-                code=str(payload.get("code")) if payload else None,
-                msg=str(payload.get("msg")) if payload and payload.get("msg") else response.reason_phrase,
-                row_code=row_code,
-                row_message=row_message,
-                status_code=response.status_code,
-                payload=payload,
-            )
-        if str(payload.get("code")) != "0":
-            row_code, row_message = self._extract_row_error(payload)
-            raise OKXRequestError(
-                path=path,
-                code=str(payload.get("code")) if payload.get("code") is not None else None,
-                msg=str(payload.get("msg")) if payload.get("msg") else None,
-                row_code=row_code,
-                row_message=row_message,
-                status_code=response.status_code,
-                payload=payload,
-            )
-        return payload
+        normalized_method = method.upper()
+        attempt = 0
+        while True:
+            try:
+                response = await client.request(
+                    method=normalized_method,
+                    url=request_path,
+                    headers=headers,
+                    content=body_text if body_text else None,
+                )
+                payload = self._parse_json_payload(response)
+                if response.status_code >= 400:
+                    raise self._http_response_error(
+                        method=normalized_method,
+                        path=path,
+                        response=response,
+                        payload=payload,
+                    )
+                if str(payload.get("code")) != "0":
+                    raise self._business_response_error(
+                        path=path,
+                        response=response,
+                        payload=payload,
+                    )
+                return payload
+            except OKXRequestError as exc:
+                if not self._should_retry_request(method=normalized_method, attempt=attempt, error=exc):
+                    raise
+                await asyncio.sleep(self._retry_delay_seconds(attempt=attempt, error=exc))
+                attempt += 1
+            except httpx.TransportError as exc:
+                error = self._transport_error(
+                    method=normalized_method,
+                    path=path,
+                    exc=exc,
+                )
+                if not self._should_retry_request(method=normalized_method, attempt=attempt, error=error):
+                    raise error from exc
+                await asyncio.sleep(self._retry_delay_seconds(attempt=attempt, error=error))
+                attempt += 1
 
     async def _client_handle(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -534,6 +557,110 @@ class OKXRESTClient:
         except ValueError:
             payload = {}
         return payload if isinstance(payload, dict) else {}
+
+    @classmethod
+    def _should_retry_request(
+        cls,
+        *,
+        method: str,
+        attempt: int,
+        error: OKXRequestError,
+    ) -> bool:
+        return (
+            method.upper() == "GET"
+            and error.retryable
+            and attempt < cls._QUERY_RETRY_LIMIT
+        )
+
+    @classmethod
+    def _retry_delay_seconds(cls, *, attempt: int, error: OKXRequestError) -> float:
+        if error.retry_after_seconds is not None and error.retry_after_seconds > 0:
+            return min(error.retry_after_seconds, cls._QUERY_RETRY_MAX_DELAY_SECONDS)
+        return min(
+            cls._QUERY_RETRY_BASE_DELAY_SECONDS * (2**attempt),
+            cls._QUERY_RETRY_MAX_DELAY_SECONDS,
+        )
+
+    @classmethod
+    def _http_response_error(
+        cls,
+        *,
+        method: str,
+        path: str,
+        response: httpx.Response,
+        payload: dict[str, Any],
+    ) -> OKXRequestError:
+        row_code, row_message = cls._extract_row_error(payload)
+        status_code = response.status_code
+        retryable = method.upper() == "GET" and (status_code == 429 or status_code >= 500)
+        if status_code == 429:
+            classification = "rate_limited"
+        elif status_code >= 500:
+            classification = "server_error"
+        else:
+            classification = "http_error"
+        return OKXRequestError(
+            path=path,
+            code=str(payload.get("code")) if payload and payload.get("code") is not None else None,
+            msg=str(payload.get("msg")) if payload and payload.get("msg") else response.reason_phrase,
+            row_code=row_code,
+            row_message=row_message,
+            status_code=status_code,
+            payload=payload,
+            classification=classification,
+            retryable=retryable,
+            retry_after_seconds=cls._retry_after_seconds(response),
+        )
+
+    @classmethod
+    def _business_response_error(
+        cls,
+        *,
+        path: str,
+        response: httpx.Response,
+        payload: dict[str, Any],
+    ) -> OKXRequestError:
+        row_code, row_message = cls._extract_row_error(payload)
+        return OKXRequestError(
+            path=path,
+            code=str(payload.get("code")) if payload.get("code") is not None else None,
+            msg=str(payload.get("msg")) if payload.get("msg") else None,
+            row_code=row_code,
+            row_message=row_message,
+            status_code=response.status_code,
+            payload=payload,
+            classification="business_error",
+            retryable=False,
+        )
+
+    @classmethod
+    def _transport_error(
+        cls,
+        *,
+        method: str,
+        path: str,
+        exc: httpx.TransportError,
+    ) -> OKXRequestError:
+        classification = "timeout" if isinstance(exc, httpx.TimeoutException) else "transport_error"
+        if isinstance(exc, httpx.NetworkError):
+            classification = "network_error"
+        return OKXRequestError(
+            path=path,
+            msg=str(exc) or type(exc).__name__,
+            payload={},
+            classification=classification,
+            retryable=method.upper() == "GET",
+        )
+
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> float | None:
+        raw_retry_after = response.headers.get("Retry-After")
+        if raw_retry_after in {None, ""}:
+            return None
+        try:
+            return max(float(raw_retry_after), 0.0)
+        except (TypeError, ValueError):
+            return None
 
     @staticmethod
     def _extract_row_error(payload: Mapping[str, Any] | None) -> tuple[str | None, str | None]:

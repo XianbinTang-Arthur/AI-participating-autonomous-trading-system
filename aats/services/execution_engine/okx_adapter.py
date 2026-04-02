@@ -867,6 +867,21 @@ class OKXExecutionAdapter(ExchangeAdapter):
             return abs(quantity)
         return quantity
 
+    @staticmethod
+    def _is_risk_reducing_intent(intent: OrderIntent) -> bool:
+        reduce_path = bool(
+            intent.reduce_only
+            or reduce_only_from_leg_action(intent.leg_action)
+            or reduce_only_from_position_intent(intent.position_intent)
+            or intent.execution_action in {"reduce", "exit"}
+        )
+        close_path = bool(
+            intent.close_only
+            or close_only_from_leg_action(intent.leg_action)
+            or close_only_from_position_intent(intent.position_intent)
+        )
+        return reduce_path or close_path
+
     def _submission_gate_error(self, *, intent: OrderIntent) -> str | None:
         if self.mode_controller.kill_switch.halted:
             return "kill_switch_active"
@@ -880,10 +895,17 @@ class OKXExecutionAdapter(ExchangeAdapter):
             return "okx_simulated_trading_required"
         if intent.symbol not in self.settings.expanded_allowed_symbols():
             return "symbol_not_allowed"
-        if self._current_open_order_count(intent.symbol) >= self.settings.max_open_orders:
+        if (
+            not self._is_risk_reducing_intent(intent)
+            and self._current_open_order_count(intent.symbol) >= self.settings.max_open_orders
+        ):
             return "max_open_orders_reached"
         price = to_decimal(self.price_provider(intent.symbol)) if self.price_provider is not None else Decimal("0")
-        if price > 0 and (intent.quantity * price) > to_decimal(self.settings.max_notional_per_symbol):
+        if (
+            not self._is_risk_reducing_intent(intent)
+            and price > 0
+            and (intent.quantity * price) > to_decimal(self.settings.max_notional_per_symbol)
+        ):
             return "max_notional_per_symbol_exceeded"
         account_status = self.account_service.status()
         if not account_status.get("ready", False):
@@ -912,6 +934,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 price=reference_price,
             )
         except Exception as exc:
+            if self._is_risk_reducing_intent(intent):
+                return None
             return f"okx_max_order_quantity_precheck_failed:{type(exc).__name__}"
         row = self._first_row(response)
         requested = to_decimal(requested_size)

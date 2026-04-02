@@ -75,6 +75,7 @@ class TestOKXLiveSubmitPath(unittest.IsolatedAsyncioTestCase):
                 "okx_simulated_trading": False,
                 "trading_product_type": "derivatives",
                 "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
                 "default_symbol": "BTC-USDT-240329",
                 "allowed_symbols": ("BTC-USDT-240329",),
                 "max_notional_per_symbol": 10_000.0,
@@ -554,6 +555,248 @@ class TestOKXLiveSubmitPath(unittest.IsolatedAsyncioTestCase):
         assert isinstance(place_order_requests[0]["json"], dict)
         self.assertEqual(place_order_requests[0]["json"]["side"], "sell")
         self.assertEqual(place_order_requests[0]["json"]["posSide"], "long")
+        self.assertEqual(place_order_requests[0]["json"]["reduceOnly"], "true")
+
+    async def test_live_futures_close_leg_submit_tolerates_max_size_precheck_failure(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "market_data_backend": "okx",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "okx_simulated_trading": False,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+                "default_symbol": "BTC-USDT-240329",
+                "allowed_symbols": ("BTC-USDT-240329",),
+                "max_notional_per_symbol": 10_000.0,
+                "max_open_orders": 2,
+                "max_target_leverage": 5.0,
+                "okx_api_key": "live_key",
+                "okx_api_secret": "live_secret",
+                "okx_api_passphrase": "live_passphrase",
+            }
+        )
+        captured_requests: list[dict[str, object]] = []
+        max_size_attempts = 0
+
+        def response_payload(request: httpx.Request) -> httpx.Response:
+            nonlocal max_size_attempts
+            query = {key: values[-1] for key, values in parse_qs(request.url.query.decode("utf-8")).items()}
+            request_body = request.content.decode("utf-8") if request.content else ""
+            json_body = json.loads(request_body) if request_body else None
+            captured_requests.append(
+                {
+                    "method": request.method,
+                    "path": request.url.path,
+                    "query": query,
+                    "headers": {key.lower(): value for key, value in request.headers.items()},
+                    "json": json_body,
+                }
+            )
+
+            if request.url.path == "/api/v5/account/balance":
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": "0",
+                        "data": [{"details": [{"ccy": "USDT", "eq": "100", "cashBal": "100", "availEq": "100", "availBal": "100"}]}],
+                    },
+                )
+            if request.url.path == "/api/v5/account/instruments":
+                inst_type = query.get("instType")
+                if inst_type == "FUTURES":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "code": "0",
+                            "data": [
+                                {
+                                    "instId": "BTC-USDT-240329",
+                                    "instType": "FUTURES",
+                                    "instFamily": "BTC-USDT",
+                                    "uly": "BTC-USDT",
+                                    "settleCcy": "USDT",
+                                    "ctValCcy": "BTC",
+                                    "ctVal": "0.01",
+                                    "lotSz": "1",
+                                    "tickSz": "0.1",
+                                    "minSz": "1",
+                                    "lever": "20",
+                                    "maxMktSz": "100",
+                                    "maxLmtSz": "100",
+                                    "state": "live",
+                                }
+                            ],
+                        },
+                    )
+                return httpx.Response(200, json={"code": "0", "data": []})
+            if request.url.path == "/api/v5/trade/orders-pending":
+                return httpx.Response(200, json={"code": "0", "data": []})
+            if request.url.path == "/api/v5/trade/fills":
+                if query.get("ordId") == "ord_live_future_close_retry":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "code": "0",
+                            "data": [
+                                {
+                                    "instId": "BTC-USDT-240329",
+                                    "ordId": "ord_live_future_close_retry",
+                                    "clOrdId": query.get("clOrdId", "unknown"),
+                                    "tradeId": "trade_live_future_close_retry",
+                                    "side": "sell",
+                                    "fillSz": "2",
+                                    "fillPx": "80000",
+                                    "fee": "-0.12",
+                                    "feeCcy": "USDT",
+                                    "fillTime": "1700000001000",
+                                }
+                            ],
+                        },
+                    )
+                return httpx.Response(200, json={"code": "0", "data": []})
+            if request.url.path == "/api/v5/account/positions":
+                if query.get("instType") == "FUTURES":
+                    return httpx.Response(
+                        200,
+                        json={
+                            "code": "0",
+                            "data": [
+                                {
+                                    "instId": "BTC-USDT-240329",
+                                    "pos": "2",
+                                    "avgPx": "80000",
+                                    "markPx": "80000",
+                                    "notionalUsd": "1600",
+                                    "posSide": "long",
+                                    "mgnMode": "cross",
+                                    "ccy": "USDT",
+                                    "lever": "3",
+                                }
+                            ],
+                        },
+                    )
+                return httpx.Response(200, json={"code": "0", "data": []})
+            if request.url.path == "/api/v5/account/config":
+                return httpx.Response(
+                    200,
+                    json={"code": "0", "data": [{"acctLv": "2", "posMode": "long_short_mode", "autoLoan": False}]},
+                )
+            if request.url.path == "/api/v5/account/trade-fee":
+                return httpx.Response(200, json={"code": "0", "data": [{"maker": "-0.0008", "taker": "0.001"}]})
+            if request.url.path == "/api/v5/account/account-position-risk":
+                return httpx.Response(
+                    200,
+                    json={"code": "0", "data": [{"adjEq": "100", "availEq": "100", "imr": "5", "mmr": "2", "mgnRatio": "50"}]},
+                )
+            if request.url.path == "/api/v5/system/status":
+                return httpx.Response(200, json={"code": "0", "data": []})
+            if request.url.path == "/api/v5/account/max-size":
+                max_size_attempts += 1
+                return httpx.Response(500, json={"code": "500", "msg": "temporary"})
+            if request.url.path == "/api/v5/trade/order" and request.method == "POST":
+                assert isinstance(json_body, dict)
+                return httpx.Response(
+                    200,
+                    json={"code": "0", "data": [{"sCode": "0", "sMsg": "", "ordId": "ord_live_future_close_retry", "clOrdId": json_body["clOrdId"]}]},
+                )
+            if request.url.path == "/api/v5/trade/order" and request.method == "GET":
+                return httpx.Response(
+                    200,
+                    json={
+                        "code": "0",
+                        "data": [
+                            {
+                                "instId": "BTC-USDT-240329",
+                                "ordId": "ord_live_future_close_retry",
+                                "clOrdId": query.get("clOrdId", "unknown"),
+                                "state": "filled",
+                                "posSide": "long",
+                                "sz": "2",
+                                "accFillSz": "2",
+                                "avgPx": "80000",
+                                "cTime": "1700000000000",
+                                "uTime": "1700000001000",
+                            }
+                        ],
+                    },
+                )
+            raise AssertionError(f"unexpected_okx_request:{request.method}:{request.url}")
+
+        kill_switch = KillSwitch()
+        controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        rest_client = OKXRESTClient(settings=settings)
+        original_base_delay = OKXRESTClient._QUERY_RETRY_BASE_DELAY_SECONDS
+        original_max_delay = OKXRESTClient._QUERY_RETRY_MAX_DELAY_SECONDS
+        OKXRESTClient._QUERY_RETRY_BASE_DELAY_SECONDS = 0.0
+        OKXRESTClient._QUERY_RETRY_MAX_DELAY_SECONDS = 0.0
+        rest_client._client = httpx.AsyncClient(
+            base_url=settings.okx_rest_url,
+            transport=httpx.MockTransport(response_payload),
+        )
+        account_service = OKXAccountService(settings=settings, client=rest_client)
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=rest_client,
+            account_service=account_service,
+            mode_controller=controller,
+            price_provider=lambda _symbol: Decimal("80000"),
+        )
+        execution_repo = InMemoryExecutionRepository()
+        bus = InMemoryEventBus(event_store=InMemoryEventStore())
+        manager = OrderManager(
+            settings=settings,
+            bus=bus,
+            adapter=adapter,
+            execution_repo=execution_repo,
+            kill_switch=kill_switch,
+        )
+
+        leg_intent = LegOrderIntent(
+            leg_intent_id="leg_live_future_close_retry",
+            decision_id="decision_leg_live_future_close_retry",
+            symbol="BTC-USDT-240329",
+            side="sell",
+            pos_side="long",
+            action="close",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="leg_live_future_close_retry",
+            product_type="derivatives",
+            margin_mode="cross",
+            td_mode="cross",
+            target_leverage=3.0,
+            exposure_side="flat",
+        )
+
+        try:
+            await manager.submit_leg_order(leg_intent=leg_intent)
+        finally:
+            OKXRESTClient._QUERY_RETRY_BASE_DELAY_SECONDS = original_base_delay
+            OKXRESTClient._QUERY_RETRY_MAX_DELAY_SECONDS = original_max_delay
+            await rest_client.aclose()
+
+        stored_states = execution_repo.order_states()
+        self.assertEqual(len(stored_states), 1)
+        self.assertEqual(stored_states[0].status, "FILLED")
+        self.assertEqual(stored_states[0].leg_action, "close")
+        self.assertEqual(max_size_attempts, 3)
+
+        place_order_requests = [
+            request
+            for request in captured_requests
+            if request["path"] == "/api/v5/trade/order" and request["method"] == "POST"
+        ]
+        self.assertEqual(len(place_order_requests), 1)
+        assert isinstance(place_order_requests[0]["json"], dict)
         self.assertEqual(place_order_requests[0]["json"]["reduceOnly"], "true")
 
     async def test_live_futures_leg_order_risk_block_prevents_exchange_submission(self) -> None:

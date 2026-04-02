@@ -436,6 +436,175 @@ class TestGuardedLive(unittest.IsolatedAsyncioTestCase):
         self.assertIn("risk_budget_multiplier_applied", decision.constraints_applied)
         self.assertIn("execution_aggressiveness_contracted", decision.constraints_applied)
 
+    def test_leg_risk_engine_inherits_adaptive_budget_and_execution_contraction(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "live_submit_enabled": True,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "max_abs_position_qty": 0.2,
+                "max_notional_per_symbol": 5_000,
+                "max_gross_notional_per_symbol": 5_000,
+                "max_pending_notional_per_symbol": 5_000,
+                "max_total_open_notional": 10_000,
+                "max_target_leverage": 5,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        account_service = FakeAccountService(symbol="BTC-USDT-SWAP")
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=account_service,  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: Decimal("30000"),
+            mode_controller=mode_controller,
+            obligation_repo=InMemoryExecutionObligationRepository(),
+            live_runtime_guard_provider=FakeAdaptiveRuntimeGuardProvider(),
+            trial_guard_provider=FakeBreachedTrialGuardProvider(),
+        )
+
+        decision = risk.evaluate_leg_order(
+            LegOrderIntent(
+                leg_intent_id="adaptive_leg_risk",
+                decision_id="adaptive_leg_risk",
+                symbol="BTC-USDT-SWAP",
+                side="buy",
+                pos_side="long",
+                action="open",
+                quantity=Decimal("0.01"),
+                execution_style="taker",
+                order_type="market",
+                urgency="medium",
+                time_in_force="IOC",
+                idempotency_key="adaptive_leg_risk",
+                product_type="derivatives",
+                margin_mode="cross",
+                td_mode="cross",
+                target_leverage=3.0,
+                exposure_side="long",
+            )
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertLess(decision.risk_budget_multiplier, Decimal("1"))
+        self.assertLess(decision.execution_aggressiveness_multiplier, Decimal("1"))
+        self.assertIn("risk_budget_multiplier_applied", decision.constraints_applied)
+        self.assertIn("execution_aggressiveness_contracted", decision.constraints_applied)
+        self.assertTrue(decision.modified)
+        self.assertEqual(decision.risk_budget_state.get("source"), "risk_engine_snapshot")
+
+    def test_leg_bundle_risk_engine_inherits_adaptive_budget_and_execution_contraction(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "mode": "guarded_live",
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "live_submit_enabled": True,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "max_abs_position_qty": 0.2,
+                "max_notional_per_symbol": 5_000,
+                "max_gross_notional_per_symbol": 5_000,
+                "max_pending_notional_per_symbol": 5_000,
+                "max_total_open_notional": 10_000,
+                "max_target_leverage": 5,
+            }
+        )
+        kill_switch = KillSwitch()
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=kill_switch)
+        account_service = FakeAccountService(symbol="BTC-USDT-SWAP")
+        health_service = SystemHealthService(
+            settings=settings,
+            mode_controller=mode_controller,
+            kill_switch=kill_switch,
+            market_provider=FakeHealthyMarketProvider(),  # type: ignore[arg-type]
+            account_provider=account_service,  # type: ignore[arg-type]
+            execution_provider=FakeExecutionProvider(),  # type: ignore[arg-type]
+            reconciliation_repo=FakeHealthyReconciliationRepo(),  # type: ignore[arg-type]
+        )
+        risk = RiskEngine(
+            settings=settings,
+            account_service=account_service,  # type: ignore[arg-type]
+            health_service=health_service,
+            trigger_policy=DecisionTriggerPolicy(settings=settings),
+            price_provider=lambda _symbol: Decimal("30000"),
+            mode_controller=mode_controller,
+            obligation_repo=InMemoryExecutionObligationRepository(),
+            live_runtime_guard_provider=FakeAdaptiveRuntimeGuardProvider(),
+            trial_guard_provider=FakeBreachedTrialGuardProvider(),
+        )
+
+        decision = risk.evaluate_leg_order_bundle(
+            [
+                LegOrderIntent(
+                    leg_intent_id="adaptive_bundle_long",
+                    decision_id="adaptive_bundle",
+                    symbol="BTC-USDT-SWAP",
+                    side="buy",
+                    pos_side="long",
+                    action="open",
+                    quantity=Decimal("0.01"),
+                    execution_style="taker",
+                    order_type="market",
+                    urgency="medium",
+                    time_in_force="IOC",
+                    idempotency_key="adaptive_bundle_long",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    td_mode="cross",
+                    target_leverage=3.0,
+                    exposure_side="long",
+                ),
+                LegOrderIntent(
+                    leg_intent_id="adaptive_bundle_short",
+                    decision_id="adaptive_bundle",
+                    symbol="BTC-USDT-SWAP",
+                    side="sell",
+                    pos_side="short",
+                    action="open",
+                    quantity=Decimal("0.005"),
+                    execution_style="taker",
+                    order_type="market",
+                    urgency="medium",
+                    time_in_force="IOC",
+                    idempotency_key="adaptive_bundle_short",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    td_mode="cross",
+                    target_leverage=3.0,
+                    exposure_side="short",
+                ),
+            ]
+        )
+
+        self.assertTrue(decision.approved)
+        self.assertLess(decision.risk_budget_multiplier, Decimal("1"))
+        self.assertLess(decision.execution_aggressiveness_multiplier, Decimal("1"))
+        self.assertIn("risk_budget_multiplier_applied", decision.constraints_applied)
+        self.assertIn("execution_aggressiveness_contracted", decision.constraints_applied)
+        self.assertTrue(decision.modified)
+        self.assertEqual(decision.execution_aggressiveness_state.get("source"), "risk_engine_snapshot")
+
     def test_policy_and_risk_block_unsafe_live_path(self) -> None:
         settings = AATSSettings.model_validate(
             {

@@ -433,6 +433,22 @@ class FakeRoundedDerivativeOKXClient(FakeOKXClient):
         }
 
 
+class FakeMaxSizeLookupFailureOKXClient(FakeRoundedDerivativeOKXClient):
+    async def get_max_order_quantity(self, *, symbol: str, td_mode: str, leverage=None, price=None):
+        _ = symbol
+        _ = td_mode
+        _ = leverage
+        _ = price
+        raise OKXRequestError(
+            path="/api/v5/account/max-size",
+            msg="temporary_failure",
+            status_code=500,
+            payload={},
+            classification="server_error",
+            retryable=True,
+        )
+
+
 def make_settings(overrides: dict | None = None) -> AATSSettings:
     payload = {
         "mode": "guarded_live",
@@ -462,6 +478,62 @@ def make_intent() -> OrderIntent:
         time_in_force="IOC",
         idempotency_key="intent_1",
     )
+
+
+def make_derivatives_account_service(
+    *,
+    symbol: str = "BTC-USDT-SWAP",
+    position_qty: Decimal = Decimal("0.02"),
+    position_side: str = "long",
+    position_mode: str = "net_mode",
+    open_order_count: int = 0,
+) -> FakeAccountService:
+    account_service = FakeAccountService(open_order_count=open_order_count)
+    positions = []
+    if position_qty > Decimal("0"):
+        positions.append(
+            ExchangePosition(
+                instrument_id=symbol,
+                symbol=symbol,
+                quantity=position_qty,
+                average_entry_price=Decimal("67000"),
+                mark_price=Decimal("68000"),
+                notional_usd=position_qty * Decimal("68000"),
+                side=position_side,
+            )
+        )
+    account_service._snapshot = account_service._snapshot.model_copy(
+        update={
+            "positions": positions,
+            "instruments": [
+                InstrumentMetadata(
+                    instrument_id=symbol,
+                    symbol=symbol,
+                    base_currency="BTC",
+                    quote_currency="USDT",
+                    lot_size=Decimal("1"),
+                    tick_size=Decimal("0.1"),
+                    min_size=Decimal("1"),
+                    contract_value=Decimal("0.01"),
+                    settle_currency="USDT",
+                    state="live",
+                )
+            ],
+            "account_mode": "2",
+            "account_configuration": ExchangeAccountConfiguration(
+                account_level_code="2",
+                account_level_label="single_currency_margin",
+                position_mode=position_mode,
+                position_mode_label="net" if position_mode == "net_mode" else "long_short",
+                raw={"posMode": position_mode},
+            ),
+            "raw": {"account_config": {"data": [{"posMode": position_mode}]}}
+        }
+    )
+    account_service.instrument_metadata = (
+        lambda requested_symbol: account_service._snapshot.instruments[0] if requested_symbol == symbol else None
+    )
+    return account_service
 
 
 class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
@@ -580,6 +652,195 @@ class TestGuardedSimulatedExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].venue, "OKX")
         self.assertEqual(fills[0].fill_id, "trade_1")
+
+    async def test_reduce_only_submit_bypasses_max_notional_gate(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeRoundedDerivativeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=make_derivatives_account_service(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        intent = OrderIntent(
+            intent_id="intent_reduce_notional_bypass",
+            decision_id="decision_reduce_notional_bypass",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_reduce_notional_bypass",
+            product_type="derivatives",
+            target_leverage=2.0,
+            margin_mode="cross",
+            exposure_side="flat",
+            position_intent="close_long",
+        )
+
+        state, fills = await adapter.submit(intent)
+
+        self.assertEqual(state.status, "FILLED")
+        self.assertEqual(state.execution_error, None)
+        self.assertEqual(len(client.place_order_calls), 1)
+        self.assertEqual(len(fills), 1)
+
+    async def test_reduce_only_submit_bypasses_open_order_limit_gate(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+                "max_open_orders": 1,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeRoundedDerivativeOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=make_derivatives_account_service(open_order_count=1),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        intent = OrderIntent(
+            intent_id="intent_reduce_open_orders_bypass",
+            decision_id="decision_reduce_open_orders_bypass",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_reduce_open_orders_bypass",
+            product_type="derivatives",
+            target_leverage=2.0,
+            margin_mode="cross",
+            exposure_side="flat",
+            position_intent="close_long",
+        )
+
+        state, fills = await adapter.submit(intent)
+
+        self.assertEqual(state.status, "FILLED")
+        self.assertEqual(state.execution_error, None)
+        self.assertEqual(len(client.place_order_calls), 1)
+        self.assertEqual(len(fills), 1)
+
+    async def test_reduce_only_submit_allows_max_size_precheck_failure(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeMaxSizeLookupFailureOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=make_derivatives_account_service(),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        intent = OrderIntent(
+            intent_id="intent_reduce_precheck_bypass",
+            decision_id="decision_reduce_precheck_bypass",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_reduce_precheck_bypass",
+            product_type="derivatives",
+            target_leverage=2.0,
+            margin_mode="cross",
+            exposure_side="flat",
+            position_intent="close_long",
+        )
+
+        state, fills = await adapter.submit(intent)
+
+        self.assertEqual(state.status, "FILLED")
+        self.assertEqual(state.execution_error, None)
+        self.assertEqual(len(client.place_order_calls), 1)
+        self.assertEqual(len(fills), 1)
+
+    async def test_opening_submit_remains_blocked_when_max_size_precheck_fails(self) -> None:
+        settings = make_settings(
+            {
+                "live_submit_enabled": True,
+                "guarded_execution_dry_run": False,
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_notional_per_symbol": 10_000.0,
+            }
+        )
+        mode_controller = RuntimeModeController(settings=settings, kill_switch=KillSwitch())
+        client = FakeMaxSizeLookupFailureOKXClient()
+        adapter = OKXExecutionAdapter(
+            settings=settings,
+            client=client,  # type: ignore[arg-type]
+            account_service=make_derivatives_account_service(position_qty=Decimal("0")),  # type: ignore[arg-type]
+            mode_controller=mode_controller,
+            health_service=FakeHealthService(),
+            price_provider=lambda _symbol: Decimal("68000"),
+        )
+        intent = OrderIntent(
+            intent_id="intent_open_precheck_fail",
+            decision_id="decision_open_precheck_fail",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.02"),
+            execution_style="taker",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="intent_open_precheck_fail",
+            product_type="derivatives",
+            target_leverage=2.0,
+            margin_mode="cross",
+            exposure_side="long",
+            position_intent="open_long",
+        )
+
+        state, fills = await adapter.submit(intent)
+
+        self.assertEqual(state.status, "BLOCKED")
+        self.assertEqual(state.execution_error, "okx_max_order_quantity_precheck_failed:OKXRequestError")
+        self.assertEqual(fills, [])
+        self.assertEqual(client.place_order_calls, [])
 
     def test_readiness_does_not_recurse_through_health_service(self) -> None:
         settings = make_settings()

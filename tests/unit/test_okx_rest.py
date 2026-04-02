@@ -5,7 +5,7 @@ import unittest
 import httpx
 
 from aats.bootstrap.settings import AATSSettings
-from aats.services.execution_engine.okx_rest import OKXRESTClient
+from aats.services.execution_engine.okx_rest import OKXRESTClient, OKXRequestError
 
 
 class _CapturingOKXRESTClient(OKXRESTClient):
@@ -83,7 +83,16 @@ class TestOKXRESTClient(unittest.IsolatedAsyncioTestCase):
             captured_headers = {key.lower(): value for key, value in request.headers.items()}
             return httpx.Response(200, json={"code": "0", "data": []})
 
-        client = OKXRESTClient(settings=AATSSettings.model_validate({"okx_simulated_trading": False}))
+        client = OKXRESTClient(
+            settings=AATSSettings.model_validate(
+                {
+                    "okx_simulated_trading": False,
+                    "okx_api_key": "test_key",
+                    "okx_api_secret": "test_secret",
+                    "okx_api_passphrase": "test_passphrase",
+                }
+            )
+        )
         client._client = httpx.AsyncClient(
             base_url=client.settings.okx_rest_url,
             transport=httpx.MockTransport(handler),
@@ -116,6 +125,83 @@ class TestOKXRESTClient(unittest.IsolatedAsyncioTestCase):
             await client.aclose()
 
         self.assertEqual(captured_headers.get("x-simulated-trading"), "1")
+
+    async def test_get_request_retries_transient_server_error_and_succeeds(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return httpx.Response(500, json={"code": "500", "msg": "temporary"})
+            return httpx.Response(200, json={"code": "0", "data": [{"instId": "BTC-USDT"}]})
+
+        client = OKXRESTClient(
+            settings=AATSSettings.model_validate(
+                {
+                    "okx_simulated_trading": False,
+                    "okx_api_key": "test_key",
+                    "okx_api_secret": "test_secret",
+                    "okx_api_passphrase": "test_passphrase",
+                }
+            )
+        )
+        original_base_delay = OKXRESTClient._QUERY_RETRY_BASE_DELAY_SECONDS
+        original_max_delay = OKXRESTClient._QUERY_RETRY_MAX_DELAY_SECONDS
+        OKXRESTClient._QUERY_RETRY_BASE_DELAY_SECONDS = 0.0
+        OKXRESTClient._QUERY_RETRY_MAX_DELAY_SECONDS = 0.0
+        client._client = httpx.AsyncClient(
+            base_url=client.settings.okx_rest_url,
+            transport=httpx.MockTransport(handler),
+        )
+
+        try:
+            payload = await client.get_market_ticker(symbol="BTC-USDT")
+        finally:
+            OKXRESTClient._QUERY_RETRY_BASE_DELAY_SECONDS = original_base_delay
+            OKXRESTClient._QUERY_RETRY_MAX_DELAY_SECONDS = original_max_delay
+            await client.aclose()
+
+        self.assertEqual(payload["code"], "0")
+        self.assertEqual(attempts, 2)
+
+    async def test_post_request_does_not_retry_transient_server_error(self) -> None:
+        attempts = 0
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(500, json={"code": "500", "msg": "temporary"})
+
+        client = OKXRESTClient(
+            settings=AATSSettings.model_validate(
+                {
+                    "okx_simulated_trading": False,
+                    "okx_api_key": "test_key",
+                    "okx_api_secret": "test_secret",
+                    "okx_api_passphrase": "test_passphrase",
+                }
+            )
+        )
+        original_base_delay = OKXRESTClient._QUERY_RETRY_BASE_DELAY_SECONDS
+        original_max_delay = OKXRESTClient._QUERY_RETRY_MAX_DELAY_SECONDS
+        OKXRESTClient._QUERY_RETRY_BASE_DELAY_SECONDS = 0.0
+        OKXRESTClient._QUERY_RETRY_MAX_DELAY_SECONDS = 0.0
+        client._client = httpx.AsyncClient(
+            base_url=client.settings.okx_rest_url,
+            transport=httpx.MockTransport(handler),
+        )
+
+        try:
+            with self.assertRaises(OKXRequestError) as context:
+                await client.place_order({"instId": "BTC-USDT", "tdMode": "cash", "side": "buy", "ordType": "market", "sz": "1"})
+        finally:
+            OKXRESTClient._QUERY_RETRY_BASE_DELAY_SECONDS = original_base_delay
+            OKXRESTClient._QUERY_RETRY_MAX_DELAY_SECONDS = original_max_delay
+            await client.aclose()
+
+        self.assertEqual(attempts, 1)
+        self.assertEqual(context.exception.classification, "server_error")
 
 
 if __name__ == "__main__":
