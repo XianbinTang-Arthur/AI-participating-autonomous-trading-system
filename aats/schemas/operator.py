@@ -7,7 +7,7 @@ from pydantic import Field
 
 from aats.schemas.common import SchemaBase, new_id, utc_now
 from aats.schemas.decision import OverlayParentExposureAudit
-from aats.schemas.strategy_runtime import StrategyExpectedVsRealizedSummary
+from aats.schemas.strategy_runtime import StrategyExpectedVsRealizedSummary, StrategyFamily
 from aats.schemas.system import MarginModelType, OperatingState, ProductType
 
 
@@ -59,6 +59,39 @@ class ProcessingFailureRecord(SchemaBase):
     details: dict[str, Any] = Field(default_factory=dict)
 
 
+class IndependentTransitionExceptionItem(SchemaBase):
+    leg: Literal["long", "short"] | None = None
+    state: str | None = None
+    book_state: str | None = None
+    prior_book_state: str | None = None
+    book_action: str | None = None
+    last_transition_reason: str | None = None
+    execution_chain_id: str | None = None
+    transition_valid: bool = True
+    transition_violation_reason: str | None = None
+
+
+class IndependentTransitionExceptionSummary(SchemaBase):
+    family: Literal["independent"] = "independent"
+    total_books: int = 0
+    invalid_transition_count: int = 0
+    affected_legs: list[Literal["long", "short"]] = Field(default_factory=list)
+    violation_reasons: list[str] = Field(default_factory=list)
+    blocking: bool = False
+    items: list[IndependentTransitionExceptionItem] = Field(default_factory=list)
+
+
+class OverlayParentExposureSummary(OverlayParentExposureAudit):
+    overlay_parent_exposure_id: str | None = None
+    decision_id: str | None = None
+    source_stage: Literal["position_target", "decision_outcome"] | None = None
+    source_ref: str | None = None
+    captured_at: datetime | None = None
+    strategy_family: StrategyFamily | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
+
+
 class ReplayValidationSummary(SchemaBase):
     validation_id: str = Field(default_factory=lambda: new_id("replay"))
     validated_at: datetime
@@ -92,7 +125,8 @@ class ReplayValidationSummary(SchemaBase):
     healthy: bool
     independent_expected_vs_realized_summary: StrategyExpectedVsRealizedSummary | None = None
     independent_adaptive_summary: dict[str, Any] | None = None
-    overlay_parent_exposure_summary: OverlayParentExposureAudit | None = None
+    independent_transition_exception_summary: IndependentTransitionExceptionSummary | None = None
+    overlay_parent_exposure_summary: OverlayParentExposureSummary | None = None
 
 
 class ReconciliationValidationSummary(SchemaBase):

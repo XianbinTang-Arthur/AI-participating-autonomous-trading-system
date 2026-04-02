@@ -5,6 +5,8 @@ import { overlayParentPostmortemMeta, overlayParentPostmortemRows, renderOverlay
 import {
   readableIndependentAdaptiveMeta,
   readableIndependentAdaptiveSummary,
+  readableIndependentTransitionExceptionMeta,
+  readableIndependentTransitionExceptionSummary,
   readableOverlayParentSignalSummary,
   readableState,
   toneForReconciliationSeverity,
@@ -30,6 +32,7 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
   const latestValidation = replay.last_validation || recentValidations[0] || null;
   const latestSummary = latestValidation?.overlay_parent_exposure_summary || null;
   const latestAdaptiveSummary = latestValidation?.independent_adaptive_summary || null;
+  const latestTransitionSummary = latestValidation?.independent_transition_exception_summary || null;
   const replayFilter = textOrFallback(uiState.parentFilter, DEFAULT_REPLAY_PARENT_FILTER);
   const filteredValidations = filterReplayValidations(recentValidations, replayFilter);
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
@@ -104,6 +107,20 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
           ]),
         })
       : "",
+    replayTransitionPostmortem: latestTransitionSummary
+      ? surfaceCard({
+          title: "最新迁移异常复盘",
+          kicker: "状态机异常",
+          copy: "把独立双书里非法状态迁移单独收口，方便快速确认是哪条书、哪次 prior -> next 迁移出了问题。",
+          content: kvList([
+            [
+              "迁移异常摘要",
+              readableIndependentTransitionExceptionSummary(latestTransitionSummary, "当前没有独立双书迁移异常摘要"),
+              readableIndependentTransitionExceptionMeta(latestTransitionSummary, "当前没有额外迁移异常说明"),
+            ],
+          ]),
+        })
+      : "",
     replayLinkedRead: surfaceCard({
       title: "父腿复盘与腿级对账联读",
       kicker: "回放与对账联读",
@@ -133,8 +150,9 @@ export function renderReplayView(data, uiState = {}, paging = {}) {
   return `
     <div class="panel-grid">
       <div class="span-12">${sections.replayHero}</div>
-      ${sections.replayLatestPostmortem ? `<div class="span-5">${sections.replayLatestPostmortem}</div>` : ""}
-      ${sections.replayAdaptivePostmortem ? `<div class="${sections.replayLatestPostmortem ? "span-7" : "span-12"}">${sections.replayAdaptivePostmortem}</div>` : ""}
+      ${sections.replayLatestPostmortem ? `<div class="${sections.replayAdaptivePostmortem || sections.replayTransitionPostmortem ? "span-4" : "span-12"}">${sections.replayLatestPostmortem}</div>` : ""}
+      ${sections.replayAdaptivePostmortem ? `<div class="${sections.replayLatestPostmortem && sections.replayTransitionPostmortem ? "span-4" : sections.replayLatestPostmortem || sections.replayTransitionPostmortem ? "span-8" : "span-12"}">${sections.replayAdaptivePostmortem}</div>` : ""}
+      ${sections.replayTransitionPostmortem ? `<div class="${sections.replayLatestPostmortem && sections.replayAdaptivePostmortem ? "span-4" : sections.replayLatestPostmortem || sections.replayAdaptivePostmortem ? "span-8" : "span-12"}">${sections.replayTransitionPostmortem}</div>` : ""}
       <div class="span-12">${sections.replayLinkedRead}</div>
       <div class="span-12">${sections.replayHistory}</div>
     </div>

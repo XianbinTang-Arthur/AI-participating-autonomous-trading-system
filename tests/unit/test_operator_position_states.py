@@ -6,9 +6,13 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from aats.events import topics
+from aats.events.envelopes import build_envelope
 from aats.schemas.exchange import ExchangeAccountConfiguration, ExchangeAccountSnapshot, ExchangePosition
+from aats.schemas.decision import OverlayParentExposureRecord
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioSnapshot, Position
 from aats.services.operator.query_service import OperatorQueryService
+from aats.storage.event_store import InMemoryEventStore
 
 
 class TestOperatorPositionStates(unittest.TestCase):
@@ -264,6 +268,183 @@ class TestOperatorPositionStates(unittest.TestCase):
         )
 
         self.assertIsNone(payload)
+
+    def test_overlay_parent_exposure_prefers_dedicated_persisted_record(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(event_store=InMemoryEventStore())
+        query._cache = {}
+        query._ttl_cache = {}
+        query.runtime.event_store.append(
+            build_envelope(
+                topic=topics.OVERLAY_PARENT_EXPOSURES,
+                key="BTC-USDT-SWAP",
+                payload_model=OverlayParentExposureRecord(
+                    decision_id="decision_overlay_record",
+                    product_type="derivatives",
+                    strategy_family="protective",
+                    strategy_sleeve_id="protective_sleeve",
+                    allocation_id="alloc_overlay_record",
+                    source_stage="position_target",
+                    source_ref="evt_position_target_overlay_record",
+                    parent_family="directional",
+                    symbol="BTC-USDT-SWAP",
+                    margin_mode="cross",
+                    target_signal="flat",
+                    current_signal="short",
+                    effective_signal="short",
+                    source_of_truth="inventory",
+                    lifecycle_state="inventory_only",
+                    target_qty=Decimal("0"),
+                    current_qty=Decimal("-0.05"),
+                    effective_qty=Decimal("-0.05"),
+                    target_active=False,
+                    inventory_active=True,
+                ),
+                source_component="test",
+            )
+        )
+
+        overlay = query._resolved_overlay_parent_exposure(
+            {
+                "decision_id": "decision_overlay_record",
+                "symbol": "BTC-USDT-SWAP",
+                "overlay_parent_exposure": {
+                    "parent_family": "directional",
+                    "symbol": "BTC-USDT-SWAP",
+                    "margin_mode": "cross",
+                    "target_signal": "flat",
+                    "current_signal": "long",
+                    "effective_signal": "long",
+                    "source_of_truth": "target_position",
+                    "lifecycle_state": "target_only",
+                    "target_qty": "0",
+                    "current_qty": "0.01",
+                    "effective_qty": "0",
+                },
+            }
+        )
+
+        assert overlay is not None
+        self.assertEqual(overlay["current_signal"], "short")
+        self.assertEqual(overlay["effective_qty"], "-0.05")
+        self.assertEqual(overlay["source_stage"], "position_target")
+        self.assertEqual(overlay["strategy_sleeve_id"], "protective_sleeve")
+
+    def test_overlay_parent_exposure_cache_refreshes_when_new_stage_record_arrives(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(event_store=InMemoryEventStore())
+        query._cache = {}
+        query._ttl_cache = {}
+        payload = {"decision_id": "decision_overlay_record_refresh", "symbol": "BTC-USDT-SWAP"}
+        query.runtime.event_store.append(
+            build_envelope(
+                topic=topics.OVERLAY_PARENT_EXPOSURES,
+                key="BTC-USDT-SWAP",
+                payload_model=OverlayParentExposureRecord(
+                    decision_id="decision_overlay_record_refresh",
+                    product_type="derivatives",
+                    strategy_family="protective",
+                    strategy_sleeve_id="protective_sleeve_pt",
+                    allocation_id="alloc_overlay_record_refresh",
+                    source_stage="position_target",
+                    source_ref="evt_position_target_overlay_record_refresh",
+                    parent_family="directional",
+                    symbol="BTC-USDT-SWAP",
+                    margin_mode="cross",
+                    target_signal="flat",
+                    current_signal="short",
+                    effective_signal="short",
+                    source_of_truth="inventory",
+                    lifecycle_state="inventory_only",
+                    target_qty=Decimal("0"),
+                    current_qty=Decimal("-0.05"),
+                    effective_qty=Decimal("-0.05"),
+                    target_active=False,
+                    inventory_active=True,
+                ),
+                source_component="test",
+            )
+        )
+
+        first = query._resolved_overlay_parent_exposure(payload)
+        assert first is not None
+        self.assertEqual(first["source_stage"], "position_target")
+        self.assertEqual(first["strategy_sleeve_id"], "protective_sleeve_pt")
+
+        query.runtime.event_store.append(
+            build_envelope(
+                topic=topics.OVERLAY_PARENT_EXPOSURES,
+                key="BTC-USDT-SWAP",
+                payload_model=OverlayParentExposureRecord(
+                    decision_id="decision_overlay_record_refresh",
+                    product_type="derivatives",
+                    strategy_family="protective",
+                    strategy_sleeve_id="protective_sleeve_do",
+                    allocation_id="alloc_overlay_record_refresh",
+                    source_stage="decision_outcome",
+                    source_ref="evt_decision_outcome_overlay_record_refresh",
+                    parent_family="directional",
+                    symbol="BTC-USDT-SWAP",
+                    margin_mode="cross",
+                    target_signal="flat",
+                    current_signal="long",
+                    effective_signal="long",
+                    source_of_truth="inventory",
+                    lifecycle_state="inventory_only",
+                    target_qty=Decimal("0"),
+                    current_qty=Decimal("0.03"),
+                    effective_qty=Decimal("0.03"),
+                    target_active=False,
+                    inventory_active=True,
+                ),
+                source_component="test",
+            )
+        )
+
+        refreshed = query._resolved_overlay_parent_exposure(payload)
+        assert refreshed is not None
+        self.assertEqual(refreshed["source_stage"], "decision_outcome")
+        self.assertEqual(refreshed["strategy_sleeve_id"], "protective_sleeve_do")
+        self.assertEqual(refreshed["current_signal"], "long")
+        self.assertEqual(refreshed["effective_qty"], "0.03")
+
+    def test_transition_exception_summary_detects_invalid_book_transitions(self) -> None:
+        summary = OperatorQueryService._independent_transition_exception_summary_from_payload(
+            {
+                "book_runtime_states": [
+                    {
+                        "leg": "long",
+                        "state": "opening",
+                        "book_state": "building",
+                        "prior_book_state": "cooldown",
+                        "book_action": "open",
+                        "transition_valid": False,
+                        "transition_violation_reason": "independent_transition_invalid:cooldown->building",
+                    },
+                    {
+                        "leg": "short",
+                        "state": "inactive",
+                        "book_state": "flat",
+                        "prior_book_state": "flat",
+                        "book_action": "inactive",
+                        "transition_valid": True,
+                        "transition_violation_reason": None,
+                    },
+                ]
+            }
+        )
+
+        assert summary is not None
+        self.assertEqual(summary["family"], "independent")
+        self.assertEqual(summary["total_books"], 2)
+        self.assertEqual(summary["invalid_transition_count"], 1)
+        self.assertEqual(summary["affected_legs"], ["long"])
+        self.assertEqual(
+            summary["violation_reasons"],
+            ["independent_transition_invalid:cooldown->building"],
+        )
+        self.assertEqual(summary["items"][0]["prior_book_state"], "cooldown")
+        self.assertEqual(summary["items"][0]["book_state"], "building")
 
     def test_independent_expected_vs_realized_summary_respects_payload_specific_metric_flags(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
@@ -1247,6 +1428,57 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(audit["overlay_parent_exposure_summary"]["source_of_truth"], "inventory")
         self.assertEqual(audit["overlay_parent_exposure_summary"]["lifecycle_state"], "inventory_only")
         self.assertEqual(audit["overlay_parent_exposure_summary"]["effective_qty"], "0.03")
+
+    def test_ai_decision_audit_surfaces_transition_exception_summary(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(settings=SimpleNamespace(ai_operating_mode="baseline_only"))
+
+        audit = query._ai_decision_audit(
+            audit=SimpleNamespace(
+                order_intent_refs=[],
+                order_state_refs=[],
+                fill_event_refs=[],
+                reconciliation_refs=[],
+                ai_shadow_decision_refs=[],
+                ai_shadow_evaluation_refs=[],
+            ),
+            decision_context=None,
+            ai_decision_brief=None,
+            baseline_assessment={"direction_bias": "long"},
+            ai_assessment=None,
+            position_target={
+                "position_intent": "open_long",
+                "target_exposure_side": "long",
+                "book_runtime_states": [
+                    {
+                        "leg": "long",
+                        "state": "blocked",
+                        "book_state": "building",
+                        "prior_book_state": "cooldown",
+                        "book_action": "blocked",
+                        "transition_valid": False,
+                        "transition_violation_reason": "independent_transition_invalid:cooldown->building",
+                    }
+                ],
+            },
+            finalized_decision_outcome={
+                "decision_source": "baseline",
+                "decision_authority": "reference_only",
+                "profile_control_source": "system",
+                "final_action": "enter",
+                "final_direction": "long",
+            },
+            strategy_execution_health=None,
+        )
+
+        assert audit is not None
+        self.assertIsNotNone(audit["independent_transition_exception_summary"])
+        self.assertEqual(audit["independent_transition_exception_summary"]["invalid_transition_count"], 1)
+        self.assertTrue(audit["independent_transition_exception_summary"]["blocking"])
+        self.assertEqual(
+            audit["independent_transition_exception_summary"]["items"][0]["transition_violation_reason"],
+            "independent_transition_invalid:cooldown->building",
+        )
 
     def test_ai_economic_actionability_prefers_single_book_expectancy_summary_over_directional_target_edge(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)

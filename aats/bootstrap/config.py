@@ -86,6 +86,7 @@ from aats.services.projections.ledger_portfolio import LedgerBackedPortfolioServ
 from aats.services.recovery_control import ExecutionLedgerRecoveryService, RecoveryReconciliationClassifier
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
 from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
+from aats.services.strategy_engines.overlay_parent_exposure import overlay_parent_exposure_record
 from aats.services.strategy_engines.sleeve_pnl_projection import SleevePnLProjectionService
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta
 from aats.services.portfolio_service.decimals import to_decimal
@@ -1120,13 +1121,31 @@ def _build_position_target_handler(
         )
         if finalized_outcome is None:
             return
-        await publish_model(
+        outcome_envelope = await publish_model(
             bus=bus,
             topic=topics.DECISION_OUTCOMES,
             key=target.symbol,
             payload_model=finalized_outcome,
             source_component="decision_engine",
         )
+        overlay_parent_record = overlay_parent_exposure_record(
+            decision_id=finalized_outcome.decision_id,
+            product_type=target.product_type,
+            strategy_family=finalized_outcome.selected_strategy_family,
+            strategy_sleeve_id=finalized_outcome.selected_strategy_sleeve_id,
+            allocation_id=finalized_outcome.allocation_id,
+            source_stage="decision_outcome",
+            source_ref=outcome_envelope.event_id,
+            parent_exposure=finalized_outcome.overlay_parent_exposure,
+        )
+        if overlay_parent_record is not None:
+            await publish_model(
+                bus=bus,
+                topic=topics.OVERLAY_PARENT_EXPOSURES,
+                key=target.symbol,
+                payload_model=overlay_parent_record,
+                source_component="decision_engine",
+            )
 
     def _reference_price_for_target(target: PositionTarget) -> Decimal | None:
         target_reference_price = (

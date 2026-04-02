@@ -23,6 +23,8 @@ import {
   readableOverlayParentLegQuantitySummary,
   readableOverlayParentPostmortemMeta,
   readableOverlayParentSignalSummary,
+  readableIndependentTransitionExceptionMeta,
+  readableIndependentTransitionExceptionSummary,
   readableState,
 } from "./terms.js";
 import {
@@ -308,6 +310,7 @@ function decisionAuditRows(aiDecisionAudit, decisionOutcome) {
     ["每条书预期边际", readableBookExpectancySummary(executionSummary, "当前没有每条书的边际拆解"), drawerText(executionSummary?.book_expectancy_summary?.source || executionSummary?.bookExpectancySummary?.source, "当前没有额外来源说明")],
     ["每条书当前状态", readableBookRuntimeStateSummary(aiDecisionAudit, "当前没有每条书的原生状态"), "按 long / short 账本原生状态对象记录"],
     ["自适应阈值与仓位因子", readableIndependentAdaptiveSummary(aiDecisionAudit, "当前还没有独立双书自适应摘要"), readableIndependentAdaptiveMeta(aiDecisionAudit, "当前没有额外自适应说明")],
+    ["迁移异常摘要", readableIndependentTransitionExceptionSummary(aiDecisionAudit, "当前没有独立双书迁移异常摘要"), readableIndependentTransitionExceptionMeta(aiDecisionAudit, "当前没有额外迁移异常说明")],
     ["预期 vs 已实现", readableExpectedVsRealizedSummary(aiDecisionAudit, "当前还没有预期与已实现诊断"), readableExpectedVsRealizedMeta(aiDecisionAudit, "当前没有额外诊断说明")],
     ["这轮最终采用谁的结论", decisionSourceLabel(aiDecisionAudit.decision_source), `${decisionSourceNarrative(decisionOutcome)} / ${decisionAuthorityLabel(aiDecisionAudit.decision_authority)}`],
     ["为什么没有直接采用 AI", drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有额外决策链路阻断项"), drawerListText(aiDecisionAudit.guardrail_flags, "当前没有额外保护规则")],

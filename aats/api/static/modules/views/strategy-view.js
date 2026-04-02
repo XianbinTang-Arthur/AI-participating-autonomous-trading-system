@@ -13,6 +13,8 @@ import {
   readableFamilyExecutionDirection,
   readableFamilyExecutionMeta,
   readableFamilyExecutionSummary,
+  readableIndependentTransitionExceptionMeta,
+  readableIndependentTransitionExceptionSummary,
   readableOverlayParentSignalSummary,
   readableState,
 } from "../terms.js";
@@ -91,9 +93,17 @@ export function renderStrategySections(data) {
   const directionalConfig = strategyRuntime.configured_parameters?.directional || {};
   const independentExpectedVsRealized = strategyRuntime.independent_expected_vs_realized_summary || {};
   const independentAdaptiveSummary = strategyRuntime.independent_adaptive_summary || {};
+  const independentTransitionExceptionSummary = strategyRuntime.independent_transition_exception_summary || {};
   const independentAdaptiveCopy = readableIndependentAdaptiveSummary(independentAdaptiveSummary, "");
   const independentAdaptiveMeta = independentAdaptiveCopy
     ? readableIndependentAdaptiveMeta(independentAdaptiveSummary, "当前没有额外自适应说明")
+    : "";
+  const independentTransitionExceptionCopy = readableIndependentTransitionExceptionSummary(
+    independentTransitionExceptionSummary,
+    "",
+  );
+  const independentTransitionExceptionMeta = independentTransitionExceptionCopy
+    ? readableIndependentTransitionExceptionMeta(independentTransitionExceptionSummary, "当前没有额外迁移异常说明")
     : "";
   const expectedVsRealizedCopy = readableExpectedVsRealizedSummary(independentExpectedVsRealized, "");
   const expectedVsRealizedMeta = expectedVsRealizedCopy
@@ -112,6 +122,13 @@ export function renderStrategySections(data) {
       "独立双书预期 vs 已实现",
       expectedVsRealizedCopy,
       expectedVsRealizedMeta,
+    ]);
+  }
+  if (independentTransitionExceptionCopy) {
+    coordinatorDiagnostics.push([
+      "独立双书迁移异常",
+      independentTransitionExceptionCopy,
+      independentTransitionExceptionMeta,
     ]);
   }
 
@@ -401,7 +418,7 @@ export function renderStrategySections(data) {
             return [
               `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml((item.families || []).join(" / ") || "当前没有家族标签")}</div></div>`,
               `<div><strong>${formatSigned(item.combined_net_realized_pnl)}</strong><div class="table-meta">实现 ${formatSigned(item.realized_pnl)}</div></div>`,
-              `<div><strong>${formatSigned(item.funding_fee_amount)}</strong><div class="table-meta">费用 ${formatSigned(item.fee_amount)}</div></div>`,
+              `<div><strong>${formatSigned(item.funding_fee_amount)}</strong><div class="table-meta">费用 ${formatRawFeeImpact(item.fee_amount)}</div></div>`,
               `<div><strong>${formatSigned(item.inventory_move_qty)}</strong><div class="table-meta">${formatNumber(item.record_count, 0, "0")} 条记录</div></div>`,
               `<div><strong>${formatSigned(inventory.inventory_notional)}</strong><div class="table-meta">${formatNumber(inventory.open_lot_count, 0, "0")} 个持仓批次</div></div>`,
             ];
@@ -2484,6 +2501,12 @@ function formatBps(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return "待确认";
   return `${formatNumber(number, 1)} 个基点`;
+}
+
+function formatRawFeeImpact(value, digits = 4, fallback = "待确认") {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return fallback;
+  return formatSigned(number === 0 ? 0 : -number, digits, fallback);
 }
 
 function forwardVerdictLabel(value) {

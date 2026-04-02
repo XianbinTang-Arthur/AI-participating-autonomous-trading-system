@@ -780,6 +780,29 @@ function normalizedIndependentAdaptiveSummary(source = {}) {
   return {};
 }
 
+function normalizedIndependentTransitionExceptionSummary(source = {}) {
+  if (!source || typeof source !== "object") return {};
+  if (
+    Object.prototype.hasOwnProperty.call(source, "invalid_transition_count")
+    || Object.prototype.hasOwnProperty.call(source, "violation_reasons")
+    || Object.prototype.hasOwnProperty.call(source, "blocking")
+  ) {
+    return source;
+  }
+  const direct = source.independent_transition_exception_summary || source.independentTransitionExceptionSummary;
+  if (direct && typeof direct === "object") {
+    return direct;
+  }
+  const audit = source.ai_decision_audit || source.aiDecisionAudit;
+  if (audit && typeof audit === "object") {
+    const nested = audit.independent_transition_exception_summary || audit.independentTransitionExceptionSummary;
+    if (nested && typeof nested === "object") {
+      return nested;
+    }
+  }
+  return {};
+}
+
 function normalizedOverlayDecision(source = {}) {
   if (!source || typeof source !== "object") return {};
   const directAudit = source.overlay_parent_exposure
@@ -1161,6 +1184,75 @@ export function readableIndependentAdaptiveMeta(source = {}, fallback = "当前�
   const codes = Array.isArray(summary.reason_codes) ? summary.reason_codes : [];
   if (codes.length) {
     parts.push(codes.slice(0, 3).map((item) => localizeError(item, item)).join(" / "));
+  }
+  return parts.join(" | ");
+}
+
+function readableTransitionViolationReason(reason) {
+  const normalized = String(reason || "").trim();
+  if (!normalized) return "迁移原因待确认";
+  if (normalized.startsWith("independent_transition_invalid:")) {
+    const transition = normalized.slice("independent_transition_invalid:".length);
+    const [fromState, toState] = transition.split("->");
+    if (fromState && toState) {
+      return `非法迁移 ${readableState(fromState, fromState)} -> ${readableState(toState, toState)}`;
+    }
+  }
+  return localizeError(normalized, normalized);
+}
+
+export function readableIndependentTransitionExceptionSummary(source = {}, fallback = "当前没有独立双书迁移异常摘要") {
+  const summary = normalizedIndependentTransitionExceptionSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const invalidCount = Number(summary.invalid_transition_count || 0);
+  if (invalidCount <= 0) return fallback;
+  const affectedLegs = Array.isArray(summary.affected_legs) ? summary.affected_legs : [];
+  const affectedLegCopy = affectedLegs.length
+    ? affectedLegs
+      .map((leg) => readableBookLabel(String(leg || "").trim().toLowerCase(), "independent_book"))
+      .join(" / ")
+    : "待确认腿";
+  const firstReason = Array.isArray(summary.violation_reasons) && summary.violation_reasons.length
+    ? readableTransitionViolationReason(summary.violation_reasons[0])
+    : "";
+  return [
+    `检测到 ${invalidCount} 条独立双书迁移异常`,
+    `涉及 ${affectedLegCopy}`,
+    firstReason,
+  ].filter(Boolean).join("，");
+}
+
+export function readableIndependentTransitionExceptionMeta(source = {}, fallback = "当前没有额外迁移异常说明") {
+  const summary = normalizedIndependentTransitionExceptionSummary(source);
+  if (!summary || typeof summary !== "object" || !Object.keys(summary).length) return fallback;
+  const invalidCount = Number(summary.invalid_transition_count || 0);
+  if (invalidCount <= 0) return fallback;
+  const parts = [
+    summary.blocking ? "当前包含阻断态迁移异常" : "当前迁移异常尚未进入阻断态",
+  ];
+  const items = Array.isArray(summary.items) ? summary.items : [];
+  const itemCopy = items
+    .slice(0, 2)
+    .map((item) => {
+      const leg = readableBookLabel(String(item?.leg || "").trim().toLowerCase(), "independent_book");
+      const priorBookState = String(item?.prior_book_state || "").trim();
+      const bookState = String(item?.book_state || "").trim();
+      const transition = priorBookState && bookState
+        ? `${readableState(priorBookState, priorBookState)} -> ${readableState(bookState, bookState)}`
+        : readableTransitionViolationReason(item?.transition_violation_reason);
+      const bookAction = item?.book_action
+        ? `动作 ${readableState(item.book_action, item.book_action)}`
+        : null;
+      return [leg, transition, bookAction].filter(Boolean).join(" / ");
+    })
+    .filter(Boolean)
+    .join(" | ");
+  if (itemCopy) {
+    parts.push(itemCopy);
+  }
+  const reasons = Array.isArray(summary.violation_reasons) ? summary.violation_reasons : [];
+  if (reasons.length) {
+    parts.push(reasons.slice(0, 2).map((reason) => readableTransitionViolationReason(reason)).join(" / "));
   }
   return parts.join(" | ");
 }

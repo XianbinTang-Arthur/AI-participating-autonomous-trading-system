@@ -17,7 +17,7 @@ from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.decision import DecisionContext, DecisionOutcome, PositionTarget
 
 
-def _adaptive_family_execution_summary(*, live_applied: bool) -> dict[str, object]:
+def _adaptive_family_execution_summary(*, live_applied: bool, invalid_transition: bool = False) -> dict[str, object]:
     return {
         "summary_mode": "multi_leg",
         "family": "independent",
@@ -48,6 +48,10 @@ def _adaptive_family_execution_summary(*, live_applied: bool) -> dict[str, objec
                 "capital_multiplier": 0.73,
                 "current_scale_in_count": 0,
                 "current_de_risk_count": 0,
+                "transition_valid": not invalid_transition,
+                "transition_violation_reason": (
+                    None if not invalid_transition else "independent_transition_invalid:cooldown->building"
+                ),
                 "threshold_snapshot": {
                     "leg": "long",
                     "shadow_only": not live_applied,
@@ -100,6 +104,8 @@ def _adaptive_family_execution_summary(*, live_applied: bool) -> dict[str, objec
                 "blocked_reasons": [],
                 "current_scale_in_count": 0,
                 "current_de_risk_count": 0,
+                "transition_valid": True,
+                "transition_violation_reason": None,
                 "threshold_snapshot": {
                     "leg": "short",
                     "shadow_only": not live_applied,
@@ -181,6 +187,40 @@ class TestIndependentReplayIntegration(unittest.IsolatedAsyncioTestCase):
             recent_row["independent_adaptive_summary"]["reason_codes"],
         )
 
+    async def test_replay_validation_surfaces_transition_exception_summary(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            strategy_hedge_overlay_enabled=True,
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_family_independent_enabled=True,
+        )
+        decision_id = "decision_independent_replay_transition_exception"
+        self._append_independent_decision(
+            runtime,
+            decision_id=decision_id,
+            live_applied=True,
+            invalid_transition=True,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            validation = client.post(f"/replay/validate/{decision_id}").json()
+            recent = client.get("/replay/recent-validations?limit=5").json()
+
+        self.assertIsNotNone(validation["independent_transition_exception_summary"])
+        self.assertEqual(validation["independent_transition_exception_summary"]["invalid_transition_count"], 1)
+        self.assertEqual(validation["independent_transition_exception_summary"]["affected_legs"], ["long"])
+        self.assertIn(
+            "independent_transition_invalid:cooldown->building",
+            validation["independent_transition_exception_summary"]["violation_reasons"],
+        )
+        recent_row = next(item for item in recent["validations"] if item["decision_id"] == decision_id)
+        self.assertTrue(recent_row["independent_transition_exception_summary"]["blocking"])
+
     async def _runtime(self, **overrides):
         settings = AATSSettings.model_validate(
             {
@@ -214,7 +254,13 @@ class TestIndependentReplayIntegration(unittest.IsolatedAsyncioTestCase):
         return app
 
     @staticmethod
-    def _append_independent_decision(runtime, *, decision_id: str, live_applied: bool) -> None:
+    def _append_independent_decision(
+        runtime,
+        *,
+        decision_id: str,
+        live_applied: bool,
+        invalid_transition: bool = False,
+    ) -> None:
         now = datetime.now(timezone.utc)
         decision_context = DecisionContext(
             decision_id=decision_id,
@@ -231,7 +277,10 @@ class TestIndependentReplayIntegration(unittest.IsolatedAsyncioTestCase):
             margin_mode=runtime.settings.margin_mode,
             current_exposure_side="flat",
         )
-        family_execution_summary = _adaptive_family_execution_summary(live_applied=live_applied)
+        family_execution_summary = _adaptive_family_execution_summary(
+            live_applied=live_applied,
+            invalid_transition=invalid_transition,
+        )
         decision_outcome = DecisionOutcome(
             decision_id=decision_id,
             symbol=runtime.settings.default_symbol,

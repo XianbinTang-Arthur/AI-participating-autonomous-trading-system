@@ -93,9 +93,17 @@ class AuditReplayQueryFacade:
         overlay_parent_exposure_summary = self.owner._overlay_parent_exposure_summary_from_payload(
             detail.get("decision_outcome")
         ) or self.owner._overlay_parent_exposure_summary_from_payload(detail.get("position_target"))
+        overlay_parent_exposure_summary = (
+            self.owner._resolved_overlay_parent_exposure_summary(detail.get("decision_outcome"))
+            or self.owner._resolved_overlay_parent_exposure_summary(detail.get("position_target"))
+            or overlay_parent_exposure_summary
+        )
         independent_adaptive_summary = self.owner._independent_adaptive_summary_from_payload(
             detail.get("decision_outcome")
         ) or self.owner._independent_adaptive_summary_from_payload(detail.get("position_target"))
+        independent_transition_exception_summary = self.owner._independent_transition_exception_summary_from_payload(
+            detail.get("decision_outcome")
+        ) or self.owner._independent_transition_exception_summary_from_payload(detail.get("position_target"))
         summary = self._replay_summary(
             result,
             symbol=context.get("symbol"),
@@ -103,6 +111,7 @@ class AuditReplayQueryFacade:
             active_profile_id=profile_state.get("active_profile_id"),
             margin_mode=(detail.get("position_target") or {}).get("margin_mode"),
             independent_adaptive_summary=independent_adaptive_summary,
+            independent_transition_exception_summary=independent_transition_exception_summary,
             overlay_parent_exposure_summary=overlay_parent_exposure_summary,
         )
         self.owner._append_event(
@@ -131,6 +140,7 @@ class AuditReplayQueryFacade:
         active_profile_id: str | None = None,
         margin_mode: str | None = None,
         independent_adaptive_summary: dict[str, Any] | None = None,
+        independent_transition_exception_summary: dict[str, Any] | None = None,
         overlay_parent_exposure_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         replayed_event_count = max(result.replayed_event_count, 1)
@@ -182,6 +192,7 @@ class AuditReplayQueryFacade:
             "healthy": result.divergence_count == 0,
             "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
             "independent_adaptive_summary": independent_adaptive_summary,
+            "independent_transition_exception_summary": independent_transition_exception_summary,
             "overlay_parent_exposure_summary": overlay_parent_exposure_summary,
         }
 

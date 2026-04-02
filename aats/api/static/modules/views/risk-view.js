@@ -1,12 +1,14 @@
 ﻿import { actionButton, pill, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
 import { kvList } from "../components.js";
 import { localizeList, textOrFallback } from "../copy.js";
-import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge, middleEllipsis } from "../formatters.js";
+import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import { overlayParentPostmortemRows, renderOverlayParentHistoryTable } from "../overlay-parent-renderers.js";
 import {
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
+  readableIndependentTransitionExceptionMeta,
+  readableIndependentTransitionExceptionSummary,
   readableState,
   recoveryStatusLabel,
   reviewStatusLabel,
@@ -45,6 +47,7 @@ export function renderRiskSections(data) {
   const derivativesLiveGuard = account.derivatives_live_guard || {};
   const currentDerivativesExposure = derivativesLiveGuard.current_derivatives_exposure || {};
   const replayParentPostmortem = replay.last_validation?.overlay_parent_exposure_summary || null;
+  const replayTransitionPostmortem = replay.last_validation?.independent_transition_exception_summary || null;
   const replayRecentValidations = Array.isArray(replay.recent_validations) ? replay.recent_validations : [];
 
   return {
@@ -158,6 +161,20 @@ export function renderRiskSections(data) {
           kicker: "最近一次回放",
           copy: "把最近一次回放里的父腿暴露阶段单独收口，方便核对库存延续、目标主导和混合来源。",
           content: kvList(overlayParentPostmortemRows(replayParentPostmortem)),
+        })
+      : "",
+    riskReplayTransitionPostmortem: replayTransitionPostmortem
+      ? surfaceCard({
+          title: "回放迁移异常",
+          kicker: "最近一次回放",
+          copy: "这里单独汇总独立双书状态机里的非法迁移，方便和回放健康度、对账风险一起判断是否还能继续信任当前状态。",
+          content: kvList([
+            [
+              "迁移异常摘要",
+              readableIndependentTransitionExceptionSummary(replayTransitionPostmortem, "当前没有独立双书迁移异常摘要"),
+              readableIndependentTransitionExceptionMeta(replayTransitionPostmortem, "当前没有额外迁移异常说明"),
+            ],
+          ]),
         })
       : "",
     riskReplayHistory: replayRecentValidations.length
@@ -312,8 +329,8 @@ export function renderRiskSections(data) {
         },
         {
           label: "综合净收益",
-          value: formatNumber(guardedLiveRunPacket.summary_metrics?.combined_net_realized_pnl),
-          meta: `资金费 ${formatNumber(guardedLiveRunPacket.summary_metrics?.funding_fee_net_pnl)}，活动阻断 ${formatNumber(guardedLiveRunPacket.summary_metrics?.execution_blocker_count || 0, 0)} 个`,
+          value: formatSigned(guardedLiveRunPacket.summary_metrics?.combined_net_realized_pnl),
+          meta: `资金费 ${formatSigned(guardedLiveRunPacket.summary_metrics?.funding_fee_net_pnl)}，活动阻断 ${formatNumber(guardedLiveRunPacket.summary_metrics?.execution_blocker_count || 0, 0)} 个`,
           tone: Number(guardedLiveRunPacket.summary_metrics?.combined_net_realized_pnl || 0) >= 0 ? "positive" : "warning",
         },
         {
@@ -384,8 +401,8 @@ export function renderRiskSections(data) {
         },
         {
           label: "最近 24 小时综合净收益",
-          value: formatNumber(trialGuard.daily_combined_net_realized ?? trialGuard.daily_net_realized),
-          meta: `交易净收益 ${formatNumber(trialGuard.daily_trading_net_realized)}，资金费 ${formatNumber(trialGuard.daily_funding_fee_net)}，连续亏损 ${formatNumber(trialGuard.consecutive_losses, 0)} 笔`,
+          value: formatSigned(trialGuard.daily_combined_net_realized ?? trialGuard.daily_net_realized),
+          meta: `交易净收益 ${formatSigned(trialGuard.daily_trading_net_realized)}，资金费 ${formatSigned(trialGuard.daily_funding_fee_net)}，连续亏损 ${formatNumber(trialGuard.consecutive_losses, 0)} 笔`,
           tone: Number((trialGuard.daily_combined_net_realized ?? trialGuard.daily_net_realized) || 0) >= 0 ? "positive" : "warning",
         },
         {
@@ -458,11 +475,12 @@ export function renderRiskSections(data) {
 
 export function renderRiskView(data) {
   const sections = renderRiskSections(data);
-  const replaySectionMarkup = sections.riskReplayPostmortem || sections.riskReplayHistory
+  const replaySectionMarkup = sections.riskReplayPostmortem || sections.riskReplayTransitionPostmortem || sections.riskReplayHistory
     ? `
       <div class="panel-grid strategy-page-grid">
-        ${sections.riskReplayPostmortem ? `<div class="span-5">${sections.riskReplayPostmortem}</div>` : ""}
-        <div class="${sections.riskReplayPostmortem ? "span-7" : "span-12"}">${sections.riskBlockers}</div>
+        ${sections.riskReplayPostmortem ? `<div class="${sections.riskReplayTransitionPostmortem ? "span-4" : "span-5"}">${sections.riskReplayPostmortem}</div>` : ""}
+        ${sections.riskReplayTransitionPostmortem ? `<div class="${sections.riskReplayPostmortem ? "span-4" : "span-5"}">${sections.riskReplayTransitionPostmortem}</div>` : ""}
+        <div class="${sections.riskReplayPostmortem || sections.riskReplayTransitionPostmortem ? sections.riskReplayPostmortem && sections.riskReplayTransitionPostmortem ? "span-4" : "span-7" : "span-12"}">${sections.riskBlockers}</div>
         ${sections.riskReplayHistory ? `<div class="span-12">${sections.riskReplayHistory}</div>` : ""}
         <div class="span-6">${sections.riskBills}</div>
         <div class="span-6">${sections.riskMetrics}</div>

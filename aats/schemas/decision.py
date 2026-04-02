@@ -7,7 +7,7 @@ from typing import Literal
 from pydantic import Field
 from pydantic import BaseModel
 
-from aats.schemas.common import SchemaBase
+from aats.schemas.common import SchemaBase, new_id, utc_now
 from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope
 from aats.schemas.portfolio import InstrumentPositionState, PositionLegState
 from aats.schemas.strategy_runtime import (
@@ -287,6 +287,18 @@ class OverlayParentExposureAudit(SchemaBase):
     target_active: bool | None = None
     inventory_active: bool | None = None
     source: str | None = None
+
+
+class OverlayParentExposureRecord(OverlayParentExposureAudit):
+    overlay_parent_exposure_id: str = Field(default_factory=lambda: new_id("ovlpexp"))
+    decision_id: str
+    product_type: ProductType | None = None
+    strategy_family: StrategyFamily | None = None
+    strategy_sleeve_id: str | None = None
+    allocation_id: str | None = None
+    source_stage: Literal["position_target", "decision_outcome"]
+    source_ref: str | None = None
+    captured_at: datetime = Field(default_factory=utc_now)
 
 
 class DecisionOutcome(SchemaBase):

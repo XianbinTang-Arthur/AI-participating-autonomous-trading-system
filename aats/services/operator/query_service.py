@@ -117,11 +117,15 @@ class OperatorQueryService:
         self.blocker_queries = BlockerQueryFacade(self)
 
     def _cached(self, key: str, loader):
+        if not hasattr(self, "_cache"):
+            self._cache = {}
         if key not in self._cache:
             self._cache[key] = loader()
         return self._cache[key]
 
     def _cached_ttl(self, key: str, ttl_seconds: int, loader):
+        if not hasattr(self, "_ttl_cache"):
+            self._ttl_cache = {}
         now = utc_now()
         cached = self._ttl_cache.get(key)
         if cached is not None:
@@ -1971,10 +1975,11 @@ class OperatorQueryService:
             book_expectancy_summary = target_payload.get("book_expectancy_summary")
             book_runtime_states = list(target_payload.get("book_runtime_states") or [])
             independent_adaptive_summary = target_payload.get("independent_adaptive_summary")
+            independent_transition_exception_summary = target_payload.get("independent_transition_exception_summary")
             diagnostic_metric_flags = self._effective_diagnostic_metric_flags(target_payload)
             target_family = str(target_payload.get("strategy_family") or "directional")
-            overlay_parent_exposure = self._overlay_parent_exposure_from_payload(target_payload)
-            parent_signal_fields = self._overlay_parent_signal_fields_from_payload(target_payload) or {}
+            overlay_parent_exposure = self._resolved_overlay_parent_exposure(target_payload)
+            parent_signal_fields = self._resolved_overlay_parent_signal_fields(target_payload) or {}
             latest_target_payload = {
                 "decision_id": target_payload.get("decision_id"),
                 "symbol": target_payload.get("symbol"),
@@ -1992,8 +1997,10 @@ class OperatorQueryService:
                 "book_expectancy_summary": book_expectancy_summary,
                 "book_runtime_states": book_runtime_states,
                 "independent_adaptive_summary": independent_adaptive_summary,
+                "independent_transition_exception_summary": independent_transition_exception_summary,
                 "diagnostic_metric_flags": diagnostic_metric_flags,
                 "overlay_parent_exposure": overlay_parent_exposure,
+                "overlay_parent_exposure_summary": self._resolved_overlay_parent_exposure_summary(target_payload),
                 "hedge_overlay_decision": target_payload.get("hedge_overlay_decision"),
                 "event_timestamp": latest_target_event.event_timestamp,
                 **parent_signal_fields,
@@ -2186,6 +2193,9 @@ class OperatorQueryService:
         }
         independent_expected_vs_realized_summary = self._independent_expected_vs_realized_summary()
         independent_adaptive_summary = self._independent_adaptive_summary_from_payload(latest_target_payload)
+        independent_transition_exception_summary = self._independent_transition_exception_summary_from_payload(
+            latest_target_payload
+        )
         if independent_expected_vs_realized_summary is not None:
             summary["latest_independent_expected_vs_realized_sample_count"] = (
                 independent_expected_vs_realized_summary.get("sample_count")
@@ -2196,6 +2206,10 @@ class OperatorQueryService:
         if isinstance(independent_adaptive_summary, dict):
             summary["latest_independent_adaptive_live_applied"] = bool(independent_adaptive_summary.get("live_applied"))
             summary["latest_independent_adaptive_shadow_only"] = bool(independent_adaptive_summary.get("shadow_only"))
+        if isinstance(independent_transition_exception_summary, dict):
+            summary["latest_independent_transition_invalid_count"] = int(
+                independent_transition_exception_summary.get("invalid_transition_count") or 0
+            )
         (
             smart_arbitrage_pair_definitions,
             smart_arbitrage_pair_registry_warning_codes,
@@ -2221,6 +2235,7 @@ class OperatorQueryService:
             "latest_bundle": latest_bundle,
             "latest_applied_target": latest_target_payload,
             "independent_adaptive_summary": independent_adaptive_summary,
+            "independent_transition_exception_summary": independent_transition_exception_summary,
             "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
             "strategy_sleeves": sleeve_records,
             "recent_sleeve_intents": recent_sleeve_intents,
@@ -3841,6 +3856,52 @@ class OperatorQueryService:
         }
 
     @staticmethod
+    def _independent_transition_exception_summary_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(payload, dict):
+            return None
+        runtime_states = OperatorQueryService._book_runtime_states_from_payload(payload)
+        if not runtime_states:
+            return None
+        items: list[dict[str, Any]] = []
+        violation_reasons: list[str] = []
+        affected_legs: list[str] = []
+        for state in runtime_states:
+            transition_valid = bool(state.get("transition_valid", True))
+            transition_violation_reason = str(state.get("transition_violation_reason") or "").strip() or None
+            if transition_valid and transition_violation_reason is None:
+                continue
+            leg = str(state.get("leg") or "").strip().lower()
+            normalized_leg = leg if leg in {"long", "short"} else None
+            if normalized_leg is not None:
+                affected_legs.append(normalized_leg)
+            if transition_violation_reason is not None:
+                violation_reasons.append(transition_violation_reason)
+            items.append(
+                {
+                    "leg": normalized_leg,
+                    "state": state.get("state"),
+                    "book_state": state.get("book_state"),
+                    "prior_book_state": state.get("prior_book_state"),
+                    "book_action": state.get("book_action"),
+                    "last_transition_reason": state.get("last_transition_reason"),
+                    "execution_chain_id": state.get("execution_chain_id"),
+                    "transition_valid": transition_valid,
+                    "transition_violation_reason": transition_violation_reason,
+                }
+            )
+        if not items:
+            return None
+        return {
+            "family": "independent",
+            "total_books": len(runtime_states),
+            "invalid_transition_count": len(items),
+            "affected_legs": list(dict.fromkeys(leg for leg in affected_legs if leg in {"long", "short"})),
+            "violation_reasons": list(dict.fromkeys(reason for reason in violation_reasons if reason)),
+            "blocking": bool(items),
+            "items": items,
+        }
+
+    @staticmethod
     def _overlay_parent_exposure_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return None
@@ -3952,8 +4013,136 @@ class OperatorQueryService:
         }
 
     @staticmethod
+    def _decision_id_from_payload(payload: dict[str, Any] | None) -> str | None:
+        if not isinstance(payload, dict):
+            return None
+        decision_id = payload.get("decision_id")
+        if isinstance(decision_id, str) and decision_id.strip():
+            return decision_id
+        nested_outcome = payload.get("decision_outcome")
+        if isinstance(nested_outcome, dict):
+            nested_decision_id = nested_outcome.get("decision_id")
+            if isinstance(nested_decision_id, str) and nested_decision_id.strip():
+                return nested_decision_id
+        return None
+
+    def _overlay_parent_exposure_record_for_decision(
+        self,
+        decision_id: str | None,
+    ) -> dict[str, Any] | None:
+        normalized_decision_id = str(decision_id or "").strip()
+        if not normalized_decision_id:
+            return None
+        event_store = getattr(self.runtime, "event_store", None)
+        if event_store is None:
+            return None
+
+        def _load() -> dict[str, Any] | None:
+            events = [
+                event
+                for event in event_store.by_decision(normalized_decision_id)
+                if event.topic == topics.OVERLAY_PARENT_EXPOSURES
+            ]
+            if not events:
+                return None
+            preferred_event = next(
+                (
+                    event
+                    for event in reversed(events)
+                    if str(event.payload.get("source_stage") or "").strip().lower() == "decision_outcome"
+                ),
+                events[-1],
+            )
+            return dict(preferred_event.payload)
+
+        count_loader = getattr(event_store, "count", None)
+        if callable(count_loader):
+            overlay_event_count = int(
+                count_loader(
+                    topic=topics.OVERLAY_PARENT_EXPOSURES,
+                    decision_id=normalized_decision_id,
+                )
+                or 0
+            )
+            return self._cached(
+                f"overlay_parent_exposure_record:{normalized_decision_id}:{overlay_event_count}",
+                _load,
+            )
+        return _load()
+
+    def _resolved_overlay_parent_exposure(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        decision_id = self._decision_id_from_payload(payload)
+        record = self._overlay_parent_exposure_record_for_decision(decision_id)
+        if isinstance(record, dict) and any(
+            record.get(key) is not None
+            for key in (
+                "target_signal",
+                "current_signal",
+                "effective_signal",
+                "source_of_truth",
+                "lifecycle_state",
+                "effective_qty",
+            )
+        ):
+            return dict(record)
+        return self._overlay_parent_exposure_from_payload(payload)
+
+    def _resolved_overlay_parent_exposure_summary(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        overlay_parent_exposure = self._resolved_overlay_parent_exposure(payload)
+        if overlay_parent_exposure is None:
+            return None
+        return {
+            "overlay_parent_exposure_id": overlay_parent_exposure.get("overlay_parent_exposure_id"),
+            "decision_id": overlay_parent_exposure.get("decision_id"),
+            "source_stage": overlay_parent_exposure.get("source_stage"),
+            "source_ref": overlay_parent_exposure.get("source_ref"),
+            "captured_at": overlay_parent_exposure.get("captured_at"),
+            "strategy_family": overlay_parent_exposure.get("strategy_family"),
+            "strategy_sleeve_id": overlay_parent_exposure.get("strategy_sleeve_id"),
+            "allocation_id": overlay_parent_exposure.get("allocation_id"),
+            "parent_family": overlay_parent_exposure.get("parent_family"),
+            "symbol": overlay_parent_exposure.get("symbol"),
+            "target_leverage": overlay_parent_exposure.get("target_leverage"),
+            "margin_mode": overlay_parent_exposure.get("margin_mode"),
+            "target_long_qty": overlay_parent_exposure.get("target_long_qty"),
+            "target_short_qty": overlay_parent_exposure.get("target_short_qty"),
+            "current_long_qty": overlay_parent_exposure.get("current_long_qty"),
+            "current_short_qty": overlay_parent_exposure.get("current_short_qty"),
+            "target_qty": overlay_parent_exposure.get("target_qty"),
+            "current_qty": overlay_parent_exposure.get("current_qty"),
+            "effective_qty": overlay_parent_exposure.get("effective_qty"),
+            "target_signal": overlay_parent_exposure.get("target_signal"),
+            "current_signal": overlay_parent_exposure.get("current_signal"),
+            "effective_signal": overlay_parent_exposure.get("effective_signal"),
+            "signal_source": overlay_parent_exposure.get("signal_source"),
+            "source_of_truth": overlay_parent_exposure.get("source_of_truth"),
+            "lifecycle_state": overlay_parent_exposure.get("lifecycle_state"),
+            "target_active": overlay_parent_exposure.get("target_active"),
+            "inventory_active": overlay_parent_exposure.get("inventory_active"),
+            "source": overlay_parent_exposure.get("source"),
+        }
+
+    @staticmethod
     def _overlay_parent_signal_fields_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
         overlay_parent_exposure = OperatorQueryService._overlay_parent_exposure_from_payload(payload)
+        if overlay_parent_exposure is None:
+            return None
+        return {
+            "parent_target_signal": overlay_parent_exposure.get("target_signal"),
+            "parent_current_signal": overlay_parent_exposure.get("current_signal"),
+            "parent_effective_signal": overlay_parent_exposure.get("effective_signal"),
+            "signal_source": overlay_parent_exposure.get("signal_source"),
+            "parent_lifecycle_state": overlay_parent_exposure.get("lifecycle_state"),
+            "parent_target_active": overlay_parent_exposure.get("target_active"),
+            "parent_inventory_active": overlay_parent_exposure.get("inventory_active"),
+            "parent_source_of_truth": overlay_parent_exposure.get("source_of_truth"),
+            "parent_target_qty": overlay_parent_exposure.get("target_qty"),
+            "parent_current_qty": overlay_parent_exposure.get("current_qty"),
+            "parent_effective_qty": overlay_parent_exposure.get("effective_qty"),
+        }
+
+    def _resolved_overlay_parent_signal_fields(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
+        overlay_parent_exposure = self._resolved_overlay_parent_exposure(payload)
         if overlay_parent_exposure is None:
             return None
         return {
@@ -4702,12 +4891,18 @@ class OperatorQueryService:
             normalized["book_runtime_states"] = self._book_runtime_states_from_payload(normalized)
         if normalized.get("independent_adaptive_summary") is None:
             normalized["independent_adaptive_summary"] = self._independent_adaptive_summary_from_payload(normalized)
+        if normalized.get("independent_transition_exception_summary") is None:
+            normalized["independent_transition_exception_summary"] = (
+                self._independent_transition_exception_summary_from_payload(normalized)
+            )
         if not normalized.get("diagnostic_metric_flags"):
             normalized["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(normalized)
-        overlay_parent_exposure = self._overlay_parent_exposure_from_payload(normalized)
+        overlay_parent_exposure = self._resolved_overlay_parent_exposure(normalized)
         if overlay_parent_exposure is not None:
             if normalized.get("overlay_parent_exposure") is None:
                 normalized["overlay_parent_exposure"] = overlay_parent_exposure
+            if normalized.get("overlay_parent_exposure_summary") is None:
+                normalized["overlay_parent_exposure_summary"] = self._resolved_overlay_parent_exposure_summary(normalized)
             family_execution_summary = normalized.get("family_execution_summary")
             if isinstance(family_execution_summary, dict) and family_execution_summary.get("overlay_parent_exposure") is None:
                 family_execution_summary = dict(family_execution_summary)
@@ -4718,7 +4913,7 @@ class OperatorQueryService:
                 hedge_overlay_decision = dict(hedge_overlay_decision)
                 hedge_overlay_decision["overlay_parent_exposure"] = overlay_parent_exposure
                 normalized["hedge_overlay_decision"] = hedge_overlay_decision
-        parent_signal_fields = self._overlay_parent_signal_fields_from_payload(normalized)
+        parent_signal_fields = self._resolved_overlay_parent_signal_fields(normalized)
         if parent_signal_fields is not None:
             for key, value in parent_signal_fields.items():
                 if normalized.get(key) is None:
@@ -5316,18 +5511,28 @@ class OperatorQueryService:
                 payload["book_runtime_states"] = self._book_runtime_states_from_payload(payload) or self._book_runtime_states_from_payload(position_target)
             if payload.get("independent_adaptive_summary") is None:
                 payload["independent_adaptive_summary"] = self._independent_adaptive_summary_from_payload(payload) or self._independent_adaptive_summary_from_payload(position_target)
+            if payload.get("independent_transition_exception_summary") is None:
+                payload["independent_transition_exception_summary"] = (
+                    self._independent_transition_exception_summary_from_payload(payload)
+                    or self._independent_transition_exception_summary_from_payload(position_target)
+                )
             if not payload.get("diagnostic_metric_flags"):
                 payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(payload, position_target)
-            overlay_parent_exposure = self._overlay_parent_exposure_from_payload(payload) or self._overlay_parent_exposure_from_payload(position_target)
+            overlay_parent_exposure = self._resolved_overlay_parent_exposure(payload) or self._resolved_overlay_parent_exposure(position_target)
             if overlay_parent_exposure is not None:
                 if payload.get("overlay_parent_exposure") is None:
                     payload["overlay_parent_exposure"] = overlay_parent_exposure
+                if payload.get("overlay_parent_exposure_summary") is None:
+                    payload["overlay_parent_exposure_summary"] = (
+                        self._resolved_overlay_parent_exposure_summary(payload)
+                        or self._resolved_overlay_parent_exposure_summary(position_target)
+                    )
                 family_execution_summary = payload.get("family_execution_summary")
                 if isinstance(family_execution_summary, dict) and family_execution_summary.get("overlay_parent_exposure") is None:
                     family_execution_summary = dict(family_execution_summary)
                     family_execution_summary["overlay_parent_exposure"] = overlay_parent_exposure
                     payload["family_execution_summary"] = family_execution_summary
-            parent_signal_fields = self._overlay_parent_signal_fields_from_payload(payload) or self._overlay_parent_signal_fields_from_payload(position_target)
+            parent_signal_fields = self._resolved_overlay_parent_signal_fields(payload) or self._resolved_overlay_parent_signal_fields(position_target)
             if parent_signal_fields is not None:
                 for key, value in parent_signal_fields.items():
                     if payload.get(key) is None:
@@ -5391,18 +5596,28 @@ class OperatorQueryService:
                 payload["book_runtime_states"] = self._book_runtime_states_from_payload(payload) or self._book_runtime_states_from_payload(position_target)
             if payload.get("independent_adaptive_summary") is None:
                 payload["independent_adaptive_summary"] = self._independent_adaptive_summary_from_payload(payload) or self._independent_adaptive_summary_from_payload(position_target)
+            if payload.get("independent_transition_exception_summary") is None:
+                payload["independent_transition_exception_summary"] = (
+                    self._independent_transition_exception_summary_from_payload(payload)
+                    or self._independent_transition_exception_summary_from_payload(position_target)
+                )
             if not payload.get("diagnostic_metric_flags"):
                 payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(payload, position_target)
-            overlay_parent_exposure = self._overlay_parent_exposure_from_payload(payload) or self._overlay_parent_exposure_from_payload(position_target)
+            overlay_parent_exposure = self._resolved_overlay_parent_exposure(payload) or self._resolved_overlay_parent_exposure(position_target)
             if overlay_parent_exposure is not None:
                 if payload.get("overlay_parent_exposure") is None:
                     payload["overlay_parent_exposure"] = overlay_parent_exposure
+                if payload.get("overlay_parent_exposure_summary") is None:
+                    payload["overlay_parent_exposure_summary"] = (
+                        self._resolved_overlay_parent_exposure_summary(payload)
+                        or self._resolved_overlay_parent_exposure_summary(position_target)
+                    )
                 family_execution_summary = payload.get("family_execution_summary")
                 if isinstance(family_execution_summary, dict) and family_execution_summary.get("overlay_parent_exposure") is None:
                     family_execution_summary = dict(family_execution_summary)
                     family_execution_summary["overlay_parent_exposure"] = overlay_parent_exposure
                     payload["family_execution_summary"] = family_execution_summary
-            parent_signal_fields = self._overlay_parent_signal_fields_from_payload(payload) or self._overlay_parent_signal_fields_from_payload(position_target)
+            parent_signal_fields = self._resolved_overlay_parent_signal_fields(payload) or self._resolved_overlay_parent_signal_fields(position_target)
             if parent_signal_fields is not None:
                 for key, value in parent_signal_fields.items():
                     if payload.get(key) is None:
@@ -5571,9 +5786,13 @@ class OperatorQueryService:
         book_expectancy_summary = self._book_expectancy_summary_from_payload(native_outcome) or self._book_expectancy_summary_from_payload(position_target)
         book_runtime_states = self._book_runtime_states_from_payload(native_outcome) or self._book_runtime_states_from_payload(position_target)
         independent_adaptive_summary = self._independent_adaptive_summary_from_payload(native_outcome) or self._independent_adaptive_summary_from_payload(position_target)
-        overlay_parent_exposure = self._overlay_parent_exposure_from_payload(native_outcome) or self._overlay_parent_exposure_from_payload(position_target)
-        overlay_parent_exposure_summary = self._overlay_parent_exposure_summary_from_payload(native_outcome) or self._overlay_parent_exposure_summary_from_payload(position_target)
-        parent_signal_fields = self._overlay_parent_signal_fields_from_payload(native_outcome) or self._overlay_parent_signal_fields_from_payload(position_target) or {}
+        independent_transition_exception_summary = (
+            self._independent_transition_exception_summary_from_payload(native_outcome)
+            or self._independent_transition_exception_summary_from_payload(position_target)
+        )
+        overlay_parent_exposure = self._resolved_overlay_parent_exposure(native_outcome) or self._resolved_overlay_parent_exposure(position_target)
+        overlay_parent_exposure_summary = self._resolved_overlay_parent_exposure_summary(native_outcome) or self._resolved_overlay_parent_exposure_summary(position_target)
+        parent_signal_fields = self._resolved_overlay_parent_signal_fields(native_outcome) or self._resolved_overlay_parent_signal_fields(position_target) or {}
         return {
             "configured_mode": self.runtime.settings.ai_operating_mode,
             "assessment_operating_mode": None if ai_assessment is None else ai_assessment.get("operating_mode"),
@@ -5602,6 +5821,7 @@ class OperatorQueryService:
             "book_expectancy_summary": book_expectancy_summary,
             "book_runtime_states": book_runtime_states,
             "independent_adaptive_summary": independent_adaptive_summary,
+            "independent_transition_exception_summary": independent_transition_exception_summary,
             "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
             **parent_signal_fields,
             "decision_source": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_source"),
@@ -5831,9 +6051,11 @@ class OperatorQueryService:
                     "book_expectancy_summary": target.get("book_expectancy_summary") if target else None,
                     "book_runtime_states": self._book_runtime_states_from_payload(target),
                     "independent_adaptive_summary": self._independent_adaptive_summary_from_payload(target),
+                    "independent_transition_exception_summary": self._independent_transition_exception_summary_from_payload(target),
                     "diagnostic_metric_flags": self._effective_diagnostic_metric_flags(target),
-                    "overlay_parent_exposure": self._overlay_parent_exposure_from_payload(target),
-                    **(self._overlay_parent_signal_fields_from_payload(target) or {}),
+                    "overlay_parent_exposure": self._resolved_overlay_parent_exposure(target),
+                    "overlay_parent_exposure_summary": self._resolved_overlay_parent_exposure_summary(target),
+                    **(self._resolved_overlay_parent_signal_fields(target) or {}),
                     "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
                     "strategy_reason_codes": [] if target is None else list(target.get("strategy_reason_codes") or []),
                     "guardrail_flags": target.get("guardrail_flags") if target else [],

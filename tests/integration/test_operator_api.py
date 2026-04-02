@@ -25,6 +25,7 @@ from aats.schemas.decision import (
     DecisionContext,
     DecisionOutcome,
     HedgeOverlayDecision,
+    OverlayParentExposureRecord,
     PositionTarget,
     ProfileControlDecision,
 )
@@ -1845,6 +1846,115 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(replay_validation["overlay_parent_exposure_summary"]["effective_qty"], "0.03")
         self.assertIsNotNone(replay_recent_row["overlay_parent_exposure_summary"])
         self.assertEqual(replay_recent_row["overlay_parent_exposure_summary"]["effective_signal"], "long")
+
+    async def test_operator_prefers_dedicated_overlay_parent_exposure_event(self) -> None:
+        runtime = await self._runtime()
+        decision_id = "decision_overlay_parent_entity"
+        now = utc_now()
+        decision_context = DecisionContext(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            as_of_ts=now,
+            market_snapshot_ref="evt_market_snapshot_overlay_entity",
+            feature_snapshot_ref="evt_feature_snapshot_overlay_entity",
+            portfolio_snapshot_ref="evt_portfolio_snapshot_overlay_entity",
+            health_snapshot_ref="evt_health_snapshot_overlay_entity",
+            mode=runtime.settings.mode,
+            current_position_qty=Decimal("0.01"),
+            product_type="derivatives",
+            current_exposure_side="long",
+        )
+        position_target = PositionTarget(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            current_position_qty=Decimal("0.01"),
+            target_position_qty=Decimal("0"),
+            delta_position_qty=Decimal("-0.01"),
+            current_notional=Decimal("700"),
+            target_notional=Decimal("0"),
+            rebalance_reason="overlay_parent_entity_operator_preference",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"protective": 1.0},
+            decision_expiry_ts=now + timedelta(minutes=5),
+            product_type="derivatives",
+            current_exposure_side="long",
+            target_exposure_side="flat",
+            position_intent="close_short",
+            target_leverage=1.0,
+            margin_mode="cross",
+            strategy_family="protective",
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key="BTC-USDT-SWAP",
+            payload_model=decision_context,
+            source_component="test",
+        )
+        target_event = build_envelope(
+            topic=topics.POSITION_TARGETS,
+            key="BTC-USDT-SWAP",
+            payload_model=position_target,
+            source_component="test",
+        )
+        overlay_event = build_envelope(
+            topic=topics.OVERLAY_PARENT_EXPOSURES,
+            key="BTC-USDT-SWAP",
+            payload_model=OverlayParentExposureRecord(
+                decision_id=decision_id,
+                product_type="derivatives",
+                strategy_family="protective",
+                strategy_sleeve_id="protective_overlay_entity",
+                allocation_id="alloc_overlay_entity",
+                source_stage="position_target",
+                source_ref=target_event.event_id,
+                parent_family="directional",
+                symbol="BTC-USDT-SWAP",
+                margin_mode="cross",
+                target_signal="flat",
+                current_signal="short",
+                effective_signal="short",
+                source_of_truth="inventory",
+                lifecycle_state="inventory_only",
+                target_qty=Decimal("0"),
+                current_qty=Decimal("-0.05"),
+                effective_qty=Decimal("-0.05"),
+                target_active=False,
+                inventory_active=True,
+            ),
+            source_component="test",
+        )
+        runtime.event_store.append(context_event)
+        runtime.event_store.append(target_event)
+        runtime.event_store.append(overlay_event)
+        runtime.audit_repo.upsert(
+            DecisionAuditRecord(
+                decision_id=decision_id,
+                decision_context_ref=context_event.event_id,
+                position_target_ref=target_event.event_id,
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            detail = client.get(f"/decision/{decision_id}").json()
+            latest = client.get("/decision/latest").json()
+            recent = client.get("/decision/recent?limit=10").json()
+
+        recent_row = next(item for item in recent["decisions"] if item["decision_id"] == decision_id)
+        self.assertEqual(detail["position_target"]["overlay_parent_exposure"]["current_signal"], "short")
+        self.assertEqual(detail["position_target"]["overlay_parent_exposure"]["effective_qty"], "-0.05")
+        self.assertEqual(detail["position_target"]["overlay_parent_exposure_summary"]["source_stage"], "position_target")
+        self.assertEqual(detail["position_target"]["overlay_parent_exposure_summary"]["strategy_sleeve_id"], "protective_overlay_entity")
+        self.assertEqual(latest["summary"]["overlay_parent_exposure"]["current_signal"], "short")
+        self.assertEqual(latest["summary"]["overlay_parent_exposure"]["effective_qty"], "-0.05")
+        self.assertEqual(latest["summary"]["overlay_parent_exposure_summary"]["source_stage"], "position_target")
+        self.assertEqual(latest["summary"]["overlay_parent_exposure_summary"]["strategy_sleeve_id"], "protective_overlay_entity")
+        self.assertEqual(recent_row["overlay_parent_exposure"]["current_signal"], "short")
+        self.assertEqual(recent_row["overlay_parent_exposure"]["effective_qty"], "-0.05")
+        self.assertEqual(recent_row["overlay_parent_exposure_summary"]["source_stage"], "position_target")
+        self.assertEqual(recent_row["overlay_parent_exposure_summary"]["strategy_sleeve_id"], "protective_overlay_entity")
 
     async def test_guarded_live_preflight_and_run_packet_surface_structural_and_margin_failures(self) -> None:
         FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(

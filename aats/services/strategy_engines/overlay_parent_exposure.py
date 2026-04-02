@@ -5,8 +5,14 @@ from decimal import Decimal
 from typing import Literal
 
 from aats.bootstrap.settings import AATSSettings
-from aats.schemas.decision import DecisionContext, OverlayParentExposureAudit, PositionTarget
+from aats.schemas.decision import (
+    DecisionContext,
+    OverlayParentExposureAudit,
+    OverlayParentExposureRecord,
+    PositionTarget,
+)
 from aats.schemas.strategy_runtime import StrategyFamily
+from aats.schemas.system import ProductType
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 
 OverlayParentExposureLifecycleState = Literal[
@@ -86,6 +92,35 @@ def overlay_parent_exposure_audit(
         target_active=parent_exposure.target_active,
         inventory_active=parent_exposure.inventory_active,
         source=parent_exposure.source,
+    )
+
+
+def overlay_parent_exposure_record(
+    *,
+    decision_id: str,
+    product_type: ProductType,
+    strategy_family: StrategyFamily | None,
+    strategy_sleeve_id: str | None,
+    allocation_id: str | None,
+    source_stage: Literal["position_target", "decision_outcome"],
+    source_ref: str | None,
+    parent_exposure: OverlayParentExposureAudit | OverlayParentExposureLifecycle | None,
+) -> OverlayParentExposureRecord | None:
+    if isinstance(parent_exposure, OverlayParentExposureAudit):
+        audit = parent_exposure
+    else:
+        audit = overlay_parent_exposure_audit(parent_exposure)
+    if audit is None:
+        return None
+    return OverlayParentExposureRecord(
+        decision_id=decision_id,
+        product_type=product_type,
+        strategy_family=strategy_family,
+        strategy_sleeve_id=strategy_sleeve_id,
+        allocation_id=allocation_id,
+        source_stage=source_stage,
+        source_ref=source_ref,
+        **audit.model_dump(mode="python"),
     )
 
 

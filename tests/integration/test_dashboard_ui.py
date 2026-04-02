@@ -3438,6 +3438,150 @@ console.log(JSON.stringify({
         self.assertIn('"orderDrawerShowsNegativeFeeCost":true', stdout)
         self.assertIn('"orderDrawerShowsPositiveFeeRebate":true', stdout)
 
+    def test_strategy_attribution_and_risk_view_preserve_fee_and_funding_sign_semantics(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+
+const strategyHtml = renderStrategyView({
+  latestDecision: {},
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    latest_bundle: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    latest_applied_target: {},
+    latest_allocation_decision: {},
+    configured_parameters: { directional: {}, smart_arbitrage: {} },
+    family_enablement: {},
+    smart_arbitrage_cost_summary: {},
+  },
+  strategyAttribution: {
+    summary: {
+      sleeve_pnl_record_count: 2,
+      combined_net_realized_pnl: 1.25,
+      funding_fee_net_pnl: -0.6,
+      protected_fill_count: 0,
+      unprotected_fill_count: 2,
+    },
+    profitability_by_strategy_sleeve: [
+      {
+        strategy_sleeve_id: 'sleeve_cost',
+        families: ['directional'],
+        combined_net_realized_pnl: 1.2,
+        realized_pnl: 1.5,
+        funding_fee_amount: -0.3,
+        fee_amount: 0.3425,
+        inventory_move_qty: 0.01,
+        record_count: 1,
+      },
+      {
+        strategy_sleeve_id: 'sleeve_rebate',
+        families: ['directional'],
+        combined_net_realized_pnl: 0.5,
+        realized_pnl: 0.4,
+        funding_fee_amount: 0.2,
+        fee_amount: -0.125,
+        inventory_move_qty: 0,
+        record_count: 1,
+      },
+    ],
+    sleeve_inventory_summary: [],
+    profitability_by_attribution_type: [],
+    profitability_by_strategy_bundle: [],
+  },
+  trialReviewSummary: { summary: {}, recommendation: {}, sections: {} },
+  trialReviewHistory: {},
+  forwardValidation: {},
+  scalingReadiness: {},
+});
+
+const riskHtml = renderRiskView({
+  blockerControl: { blockers: [], secondary_blockers: [], next_step_summary: '' },
+  systemRecovery: {
+    recovery: {
+      safe_to_trade: true,
+      review_required: false,
+      resume_eligible: true,
+      halted: false,
+      rebaseline_available: false,
+      resume_blocked_reasons: [],
+    },
+  },
+  reconciliationLatest: {
+    reconciliation: {
+      reconciliation_id: 'recon-clean',
+      severity: 'CLEAN',
+      halt_required: false,
+      review_required: false,
+      observational_only: false,
+      recommended_operator_action: null,
+    },
+    exchange_bills_summary: {},
+  },
+  guardedLiveRunPacket: {
+    status: 'healthy',
+    summary: 'ok',
+    operator_actions: [],
+    summary_metrics: {
+      combined_net_realized_pnl: 12.5,
+      funding_fee_net_pnl: -4.2,
+      execution_blocker_count: 0,
+      current_initial_margin_usage_fraction: 0.12,
+      nearest_liquidation_gap_ratio: 0.35,
+      open_position_count: 1,
+    },
+  },
+  trialGuard: {
+    status: 'healthy',
+    summary: 'ok',
+    fill_count: 10,
+    min_closed_fills: 5,
+    daily_combined_net_realized: 8.4,
+    daily_trading_net_realized: 10.1,
+    daily_funding_fee_net: -1.7,
+    consecutive_losses: 0,
+    breaches: [],
+  },
+  accountState: { fresh: true, last_refresh_timestamp: '2026-04-01T10:00:00Z', ready: true, blockers: [] },
+  portfolio: { portfolio: { total_equity: 200, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  replayStatus: { healthy: true, recent_validations: [] },
+  metrics: {},
+  health: { runtime_state: 'healthy' },
+  uiHints: { recoveryReasonsText: '', controlPermissionMessage: '' },
+});
+
+console.log(JSON.stringify({
+  strategyShowsNegativeFeeCost: strategyHtml.includes('费用 -0.3425'),
+  strategyShowsPositiveFeeRebate: strategyHtml.includes('费用 +0.125'),
+  strategyKeepsFundingDirection: strategyHtml.includes('-0.3') && strategyHtml.includes('+0.2'),
+  riskShowsSignedGuardedLiveNet: riskHtml.includes('+12.5') && riskHtml.includes('资金费 -4.2'),
+  riskShowsSignedTrialGuardNet: riskHtml.includes('+8.4') && riskHtml.includes('交易净收益 +10.1') && riskHtml.includes('资金费 -1.7'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsNegativeFeeCost":true', stdout)
+        self.assertIn('"strategyShowsPositiveFeeRebate":true', stdout)
+        self.assertIn('"strategyKeepsFundingDirection":true', stdout)
+        self.assertIn('"riskShowsSignedGuardedLiveNet":true', stdout)
+        self.assertIn('"riskShowsSignedTrialGuardNet":true', stdout)
+
     def test_family_cutover_ui_prefers_family_execution_summary_over_net_position_fields(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """
@@ -5062,6 +5206,140 @@ console.log(JSON.stringify({
         self.assertIn('"strategyShowsAdaptiveCard":true', stdout)
         self.assertIn('"drawerShowsAdaptiveSummary":true', stdout)
         self.assertIn('"replayShowsAdaptivePostmortem":true', stdout)
+
+    def test_transition_exception_summary_surfaces_in_strategy_drawer_replay_and_risk_views(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { renderReplayView } from './aats/api/static/modules/views/replay-view.js';
+import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const transitionSummary = {
+  family: 'independent',
+  total_books: 2,
+  invalid_transition_count: 1,
+  affected_legs: ['long'],
+  violation_reasons: ['independent_transition_invalid:cooldown->building'],
+  blocking: true,
+  items: [
+    {
+      leg: 'long',
+      state: 'blocked',
+      book_state: 'building',
+      prior_book_state: 'cooldown',
+      book_action: 'blocked',
+      transition_valid: false,
+      transition_violation_reason: 'independent_transition_invalid:cooldown->building',
+    },
+  ],
+};
+
+const strategyHtml = renderStrategyView({
+  strategyRuntime: {
+    configured_parameters: {
+      directional: { product_type: 'derivatives' },
+      independent: {},
+    },
+    independent_transition_exception_summary: transitionSummary,
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    summary: {},
+    recent_sleeve_intents: [],
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {
+    position_target: {},
+    policy_decision: { execution_allowed: true, rejection_reasons: [] },
+    risk_decision: { approved: true, rejection_reasons: [], constraints_applied: [] },
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'decision_transition_ui',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
+  position_target: { position_intent: 'open_long', current_position_qty: 0, target_position_qty: 0.02 },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+  decision_outcome: {
+    decision_source: 'baseline',
+    decision_authority: 'reference_only',
+  },
+  ai_decision_audit: {
+    independent_transition_exception_summary: transitionSummary,
+  },
+});
+
+const replayHtml = renderReplayView({
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'decision_transition_ui',
+      validated_at: '2026-04-01T12:00:00Z',
+      healthy: true,
+      divergence_count: 0,
+      replayed_event_count: 12,
+      chain_health_score: 1,
+      independent_transition_exception_summary: transitionSummary,
+    },
+  },
+  replayRecentValidations: { validations: [] },
+  reconciliationLatest: { mismatch_summary: { leg_mismatch_summary: { total_count: 0, missing_execution_chain_count: 0, items: [] } } },
+});
+
+const riskHtml = renderRiskView({
+  replayStatus: {
+    healthy: true,
+    last_validation: {
+      decision_id: 'decision_transition_ui',
+      validated_at: '2026-04-01T12:00:00Z',
+      healthy: true,
+      divergence_count: 0,
+      replayed_event_count: 12,
+      chain_health_score: 1,
+      independent_transition_exception_summary: transitionSummary,
+    },
+    recent_validations: [],
+  },
+  reconciliationLatest: { mismatch_summary: { leg_mismatch_summary: { total_count: 0, missing_execution_chain_count: 0, items: [] } } },
+  blockerControl: { blockers: [], secondary_blockers: [] },
+  blockers: { blockers: [] },
+  systemRecovery: { recovery: { safe_to_trade: true, resume_eligible: true, review_required: false } },
+  accountState: { fresh: true },
+  portfolio: { portfolio: { total_equity: 0, realized_pnl: 0, unrealized_pnl: 0, margin_usage: 0, gross_exposure: 0 } },
+  positions: { local_instrument_positions: [] },
+  health: { runtime_state: 'healthy' },
+});
+
+console.log(JSON.stringify({
+  strategyShowsTransitionCard: strategyHtml.includes('独立双书迁移异常') && strategyHtml.includes('非法迁移'),
+  drawerShowsTransitionSummary: drawer.body.includes('迁移异常摘要') && drawer.body.includes('非法迁移'),
+  replayShowsTransitionPostmortem: replayHtml.includes('最新迁移异常复盘') && replayHtml.includes('非法迁移'),
+  riskShowsTransitionPostmortem: riskHtml.includes('回放迁移异常') && riskHtml.includes('非法迁移'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyShowsTransitionCard":true', stdout)
+        self.assertIn('"drawerShowsTransitionSummary":true', stdout)
+        self.assertIn('"replayShowsTransitionPostmortem":true', stdout)
+        self.assertIn('"riskShowsTransitionPostmortem":true', stdout)
 
 
 if __name__ == "__main__":
