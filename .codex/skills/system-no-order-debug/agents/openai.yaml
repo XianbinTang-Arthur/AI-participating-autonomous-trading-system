@@ -1,4 +1,0 @@
-interface:
-  display_name: "No Order Debug"
-  short_description: "Trace why the trading system is not placing orders."
-  default_prompt: "Use $system-no-order-debug to locate why the trading system has signals but no execution orders or fills, then report the blocked layer, evidence, direct cause, and next step."
