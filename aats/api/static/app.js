@@ -904,9 +904,14 @@ function setActiveView(view, { pushHistory = false, refresh = true } = {}) {
     const lastRefresh = state.viewRefreshedAt[nextView];
     const isFresh = lastRefresh && Date.now() - lastRefresh < VIEW_FRESHNESS_MS;
     if (changed && isFresh && state.readyViews[nextView]) {
+      // Data is very fresh — skip network request entirely
       state.loadingView = null;
       renderActiveView();
     } else {
+      // Stale-while-revalidate: render cached data immediately, then refresh
+      if (changed && state.readyViews[nextView]) {
+        state.loadingView = null;
+      }
       void refreshDashboard();
     }
   }

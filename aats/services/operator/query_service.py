@@ -103,14 +103,23 @@ class OperatorQueryService:
     _STUCK_SUBMISSION_STATUSES = {"CREATED", "SUBMITTING"}
     _DECIMAL_EPSILON = Decimal("1e-12")
 
+    _shared_init_lock = __import__("threading").Lock()
+    _shared_stores: dict[int, tuple[dict, "__import__('threading').RLock"]] = {}
+
     def __init__(self, runtime: ApplicationRuntime) -> None:
         self.runtime = runtime
         self.logger = get_logger("aats.operator_api")
         self.recovery_posture = RecoveryPostureEvaluator(runtime)
         self.state_scope = runtime_state_scope(runtime.settings)
         self._cache: dict[str, Any] = {}
-        self._ttl_cache: dict[str, tuple[datetime, Any]] = {}
-        self._cache_lock = __import__("threading").RLock()
+        runtime_id = id(runtime)
+        with OperatorQueryService._shared_init_lock:
+            if runtime_id not in OperatorQueryService._shared_stores:
+                OperatorQueryService._shared_stores[runtime_id] = (
+                    {},
+                    __import__("threading").RLock(),
+                )
+        self._ttl_cache, self._cache_lock = OperatorQueryService._shared_stores[runtime_id]
         self.strategy_profiles = StrategyProfileControlService(runtime)
         self.blocker_control_service = BlockerControlService(self)
         self.blocker_action_service = BlockerActionService(self)
@@ -149,7 +158,10 @@ class OperatorQueryService:
     def _invalidate_cache(self) -> None:
         with self._cache_lock:
             self._cache.clear()
-            self._ttl_cache.clear()
+            scope_fragment = self._scope_cache_fragment()
+            stale_keys = [k for k in self._ttl_cache if scope_fragment in k]
+            for k in stale_keys:
+                del self._ttl_cache[k]
 
     def _scope_cache_fragment(self) -> str:
         return (
@@ -9242,6 +9254,7 @@ class OperatorQueryService:
             key="capital_scale",
             payload_model=action,
         )
+        self._invalidate_cache()
         payload = action.model_dump(mode="json")
         payload["_event_id"] = envelope.event_id
         payload["_topic"] = envelope.topic
@@ -9292,6 +9305,7 @@ class OperatorQueryService:
             key="trial_review",
             payload_model=action,
         )
+        self._invalidate_cache()
         payload = action.model_dump(mode="json")
         payload["_event_id"] = envelope.event_id
         payload["_topic"] = envelope.topic
@@ -10305,6 +10319,7 @@ class OperatorQueryService:
             source_component="operator_api",
         )
         self.runtime.event_store.append(envelope)
+        self._invalidate_cache()
         return envelope
 
     def _scoped_fills_for_order(self, client_order_id: str):
