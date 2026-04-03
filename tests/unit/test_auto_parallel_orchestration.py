@@ -106,6 +106,7 @@ class TestAutoParallelOrchestration(TestCase):
 
         self.assertFalse(decision.approved_for_execution)
         self.assertFalse(decision.automatic_enabled)
+        self.assertTrue(decision.execution_prerequisites_supported)
         self.assertEqual(decision.execution_control_mode, "permission_denied")
         self.assertEqual(decision.execution_behavior, "advisory_only")
         self.assertEqual(decision.compatibility["legacy_automation_state"], "paused")
@@ -130,6 +131,7 @@ class TestAutoParallelOrchestration(TestCase):
         controlled_candidate = controlled_candidates["dca"]
 
         self.assertTrue(decision.approved_for_execution)
+        self.assertTrue(decision.execution_prerequisites_supported)
         self.assertEqual(decision.execution_control_mode, "approved")
         self.assertEqual(decision.execution_behavior, "execute_target")
         self.assertEqual(decision.compatibility["legacy_automation_state"], "active")
@@ -166,6 +168,7 @@ class TestAutoParallelOrchestration(TestCase):
         controlled_intent = controlled_intents[0]
 
         self.assertTrue(decision.approved_for_execution)
+        self.assertTrue(decision.execution_prerequisites_supported)
         self.assertTrue(decision.budget_zero_suppressed)
         self.assertEqual(decision.execution_control_mode, "budget_zero_suppressed")
         self.assertEqual(decision.execution_behavior, "suppressed_after_approval")
@@ -205,6 +208,7 @@ class TestAutoParallelOrchestration(TestCase):
         controlled_intent = controlled_intents[0]
 
         self.assertTrue(decision.approved_for_execution)
+        self.assertTrue(decision.execution_prerequisites_supported)
         self.assertEqual(decision.execution_control_mode, "protective_override")
         self.assertEqual(decision.execution_behavior, "protective_execute")
         self.assertEqual(decision.automation_state, "protective_only")
@@ -227,6 +231,7 @@ class TestAutoParallelOrchestration(TestCase):
         controlled_intent = controlled_intents[0]
 
         self.assertFalse(decision.approved_for_execution)
+        self.assertFalse(decision.execution_prerequisites_supported)
         self.assertEqual(decision.permission_mode, "unsupported")
         self.assertIn("candidate_execution_incompatible", decision.permission_reason_codes)
         self.assertFalse(decision.automatic_enabled)

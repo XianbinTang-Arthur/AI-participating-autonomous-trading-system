@@ -85,7 +85,14 @@ class StrategySleeveAutomationDecision(SchemaBase):
         default=True,
         description="当前这条 sleeve 是否满足自动进入执行链的前置条件；该值与 approved_for_execution 对齐。",
     )
-    runtime_supported: bool = True
+    runtime_supported: bool = Field(
+        default=True,
+        description="兼容字段，只反映 candidate.state 层是否支持自动进入执行链；不等价于完整自动执行前置条件。",
+    )
+    execution_prerequisites_supported: bool = Field(
+        default=True,
+        description="当前是否同时满足 state 层运行态支持与执行兼容性等自动入链前置条件。",
+    )
     approved_for_execution: bool = True
     permission_mode: str = "approved"
     execution_control_mode: StrategySleeveExecutionControlMode | None = None
@@ -187,6 +194,10 @@ class StrategySleeveIntent(SchemaBase):
     automatic_enabled: bool = Field(
         default=True,
         description="当前这条 sleeve intent 是否仍允许自动进入执行链；该值与 approved_for_execution 对齐。",
+    )
+    execution_prerequisites_supported: bool = Field(
+        default=True,
+        description="当前 intent 是否满足自动进入执行链的执行前置条件（state 层支持 + execution compatibility）。",
     )
     approved_for_execution: bool = True
     permission_mode: str = "approved"

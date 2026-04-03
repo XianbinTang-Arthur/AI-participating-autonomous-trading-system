@@ -30,7 +30,10 @@ class SleeveRoutingComposer:
         if permission.is_protective_override:
             composed_legs = self._annotate_legs(
                 raw.requested_legs,
-                note=f"composition:protective_override:{raw.route_action}",
+                notes=(
+                    "execution_permission:protective_override",
+                    "composition:protective_execute",
+                ),
             )
             return ComposedSleeveRoutingDecision(
                 route_action=raw.route_action,
@@ -54,7 +57,10 @@ class SleeveRoutingComposer:
             route_action = "hold_current" if raw.active_inventory else "advisory_only"
             composed_legs = self._hold_legs(
                 raw.requested_legs,
-                hold_reason=f"composition:permission_denied:{route_action}",
+                hold_notes=(
+                    "execution_permission:denied",
+                    f"composition:{route_action}",
+                ),
             )
             return ComposedSleeveRoutingDecision(
                 route_action=route_action,
@@ -80,7 +86,11 @@ class SleeveRoutingComposer:
             route_action = "hold_current" if raw.active_inventory else "advisory_only"
             composed_legs = self._hold_legs(
                 raw.requested_legs,
-                hold_reason=f"composition:budget_zero_suppressed:{route_action}",
+                hold_notes=(
+                    "execution_permission:approved",
+                    "budget_control:zero_suppressed",
+                    f"composition:{route_action}",
+                ),
             )
             return ComposedSleeveRoutingDecision(
                 route_action=route_action,
@@ -108,7 +118,10 @@ class SleeveRoutingComposer:
         )
         composed_legs = self._annotate_legs(
             budget.scaled_legs,
-            note=f"composition:approved:{raw.route_action}",
+            notes=(
+                "execution_permission:approved",
+                f"composition:{raw.route_action}",
+            ),
         )
         return ComposedSleeveRoutingDecision(
             route_action=raw.route_action,
@@ -129,7 +142,7 @@ class SleeveRoutingComposer:
         )
 
     @staticmethod
-    def _hold_legs(legs: tuple, *, hold_reason: str) -> tuple:
+    def _hold_legs(legs: tuple, *, hold_notes: tuple[str, ...]) -> tuple:
         held = []
         for leg in legs:
             current_qty = to_decimal(leg.current_position_qty)
@@ -138,25 +151,28 @@ class SleeveRoutingComposer:
                     update={
                         "delta_position_qty": Decimal("0"),
                         "target_position_qty": quantize_decimal(current_qty),
-                        "note": SleeveRoutingComposer._combined_note(leg.note, hold_reason),
+                        "note": SleeveRoutingComposer._combined_notes(leg.note, hold_notes),
                     }
                 )
             )
         return tuple(held)
 
     @staticmethod
-    def _annotate_legs(legs: tuple, *, note: str) -> tuple:
+    def _annotate_legs(legs: tuple, *, notes: tuple[str, ...]) -> tuple:
         annotated = []
         for leg in legs:
             annotated.append(
                 leg.model_copy(
                     update={
-                        "note": SleeveRoutingComposer._combined_note(leg.note, note),
+                        "note": SleeveRoutingComposer._combined_notes(leg.note, notes),
                     }
                 )
             )
         return tuple(annotated)
 
     @staticmethod
-    def _combined_note(existing_note: str | None, note: str) -> str:
-        return f"{existing_note} | {note}" if existing_note else note
+    def _combined_notes(existing_note: str | None, notes: tuple[str, ...]) -> str:
+        ordered_notes = [note for note in notes if str(note or "").strip()]
+        if existing_note:
+            ordered_notes.insert(0, existing_note)
+        return " | ".join(ordered_notes)

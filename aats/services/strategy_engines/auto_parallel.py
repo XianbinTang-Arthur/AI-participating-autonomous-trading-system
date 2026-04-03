@@ -160,11 +160,13 @@ class StrategySleeveAutoController:
             budget=budget,
             composed=composed,
         )
+        execution_prerequisites_supported = self._execution_prerequisites_supported(raw=raw)
         return StrategySleeveAutomationDecision(
             family=raw.family,
             strategy_sleeve_id=raw.strategy_sleeve_id,
             automatic_enabled=bool(permission.approved_for_execution),
             runtime_supported=raw.candidate_state_runtime_supported,
+            execution_prerequisites_supported=execution_prerequisites_supported,
             approved_for_execution=permission.approved_for_execution,
             permission_mode=permission.permission_mode,
             execution_control_mode=composed.execution_control_mode,
@@ -260,6 +262,7 @@ class StrategySleeveAutoController:
                 "requested_target_position_qty": quantize_decimal(raw.target_position_qty),
                 "requested_delta_position_qty": quantize_decimal(raw.delta_position_qty),
                 "automatic_enabled": decision.automatic_enabled,
+                "execution_prerequisites_supported": decision.execution_prerequisites_supported,
                 "approved_for_execution": decision.approved_for_execution,
                 "permission_mode": decision.permission_mode,
                 "execution_control_mode": decision.execution_control_mode,
@@ -282,6 +285,7 @@ class StrategySleeveAutoController:
                     "auto_permission_mode": decision.permission_mode,
                     "auto_execution_control_mode": decision.execution_control_mode,
                     "auto_execution_behavior": decision.execution_behavior,
+                    "auto_execution_prerequisites_supported": decision.execution_prerequisites_supported,
                     "auto_budget_zero_suppressed": decision.budget_zero_suppressed,
                     "auto_requested_delta_position_qty": decision.requested_delta_position_qty,
                     "auto_composed_delta_position_qty": decision.composed_delta_position_qty,
@@ -323,6 +327,7 @@ class StrategySleeveAutoController:
                     "auto_permission_mode": decision.permission_mode,
                     "auto_execution_control_mode": decision.execution_control_mode,
                     "auto_execution_behavior": decision.execution_behavior,
+                    "auto_execution_prerequisites_supported": decision.execution_prerequisites_supported,
                     "auto_budget_zero_suppressed": decision.budget_zero_suppressed,
                     "auto_requested_delta_position_qty": decision.requested_delta_position_qty,
                     "auto_composed_delta_position_qty": decision.composed_delta_position_qty,
@@ -418,6 +423,10 @@ class StrategySleeveAutoController:
                 or budget.budget_zero_suppressed
             )
         )
+
+    @staticmethod
+    def _execution_prerequisites_supported(*, raw: RawSleeveCandidateInputs) -> bool:
+        return bool(raw.candidate_state_runtime_supported and raw.candidate_execution_compatible)
 
     @staticmethod
     def _scaled_target_notional(
@@ -522,6 +531,9 @@ class StrategySleeveAutoController:
                 "candidate_state_runtime_supported": permission.candidate_state_runtime_supported,
                 "candidate_enabled": permission.candidate_enabled,
                 "candidate_execution_compatible": permission.candidate_execution_compatible,
+                "execution_prerequisites_supported": (
+                    permission.candidate_state_runtime_supported and permission.candidate_execution_compatible
+                ),
                 "protective_intent": permission.protective_intent,
                 "approved_for_execution": permission.approved_for_execution,
                 "permission_mode": permission.permission_mode,
