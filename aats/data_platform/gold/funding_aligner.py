@@ -65,6 +65,12 @@ def align_funding_to_bars(
 ) -> dict[datetime, tuple[Decimal | None, datetime | None]]:
     """For each bar ts, find the most recent funding event at or before it.
 
+    This implements an **as-of join** (also called a point-in-time join):
+    each bar inherits the latest-known funding rate as of its timestamp.
+    This matches how a live system would observe funding — it only sees
+    rates that have already been published.  Do NOT change this to an
+    exact-match or interval-interior join without updating replay semantics.
+
     Returns {bar_ts: (aligned_funding_rate, funding_source_ts)}.
     """
     result: dict[datetime, tuple[Decimal | None, datetime | None]] = {}

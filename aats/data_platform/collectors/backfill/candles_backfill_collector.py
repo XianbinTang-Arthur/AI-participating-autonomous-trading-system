@@ -31,6 +31,21 @@ log = logging.getLogger(__name__)
 BATCH_SIZE = 2000
 
 
+def resolve_candle_timeframe(
+    *,
+    cli_timeframe: str | None,
+    timeframe_hint: str | None,
+) -> str | None:
+    """Single-point timeframe decision for candle backfill.
+
+    Priority:
+      1. Explicit CLI --timeframe override
+      2. Directory-inferred timeframe_hint from file discovery
+      3. None (caller must handle as skip/fail)
+    """
+    return cli_timeframe or timeframe_hint or None
+
+
 def _write_candle_staging_batch(
     session: Session,
     table: str,

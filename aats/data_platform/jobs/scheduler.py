@@ -38,27 +38,59 @@ _TF_SECONDS = {
 
 _FUNDING_CADENCE_SECONDS = 900  # 15 minutes
 
-# Bucket-based dedup: prevents re-firing the same cadence window even if
-# the scheduler loop ticks more than once within the 60-second tolerance.
+# ---------------------------------------------------------------------------
+# Bucket-based cadence dedup (single-process, in-memory)
+# ---------------------------------------------------------------------------
+# NOTE: This is a best-effort, single-process dedup mechanism.  The bucket
+# state lives in process memory only.  Known limitations:
+#   - After a process restart, the first tick may re-fire a bucket that
+#     already ran before the restart.  This is acceptable because the
+#     downstream merge pipeline is idempotent (upsert on PK).
+#   - Multiple worker processes would each maintain independent state,
+#     potentially causing duplicate fires.  Phase 1 runs a single
+#     scheduler process, so this is not a current concern.
+# If persistent dedup is needed later, store the last-fired bucket in
+# meta.ingest_checkpoints.notes or a dedicated meta.scheduler_state table.
 _last_candle_bucket: dict[tuple[str, str], int] = {}
 _last_funding_bucket: dict[str, int] = {}
+
+
+def _bucket_for_timeframe(now_utc: datetime, timeframe: str) -> int:
+    """Compute the cadence bucket index for a given timeframe.
+
+    Each bucket represents one cadence period.  E.g. for 5m, bucket 0 covers
+    epoch [0, 300), bucket 1 covers [300, 600), etc.
+    """
+    seconds = _TF_SECONDS[timeframe]
+    return int(now_utc.timestamp()) // seconds
+
+
+def _bucket_for_funding(now_utc: datetime) -> int:
+    """Compute the 15-minute cadence bucket for funding collection."""
+    return int(now_utc.timestamp()) // _FUNDING_CADENCE_SECONDS
+
+
+def _is_on_cadence_boundary(now_utc: datetime, cadence_seconds: int) -> bool:
+    """Return True if *now_utc* falls within the first 60 seconds of a cadence window."""
+    return (int(now_utc.timestamp()) % cadence_seconds) < 60
 
 
 def _should_fire_candle(now_utc: datetime, symbol: str, timeframe: str) -> bool:
     """Return True if this (symbol, timeframe) should fire now.
 
-    Checks cadence boundary AND ensures the same bucket is not fired twice.
+    Checks two conditions:
+      1. Current time is within 60s of a cadence boundary for *timeframe*.
+      2. This cadence bucket has not already been fired (in-memory dedup).
     """
     seconds = _TF_SECONDS.get(timeframe)
     if seconds is None:
         return True  # unknown timeframe — always eligible
-    epoch_seconds = int(now_utc.timestamp())
-    if (epoch_seconds % seconds) >= 60:
-        return False  # not on boundary
-    bucket = epoch_seconds // seconds
+    if not _is_on_cadence_boundary(now_utc, seconds):
+        return False
+    bucket = _bucket_for_timeframe(now_utc, timeframe)
     key = (symbol, timeframe)
     if _last_candle_bucket.get(key) == bucket:
-        return False  # already fired this bucket
+        return False
     _last_candle_bucket[key] = bucket
     return True
 
@@ -66,12 +98,12 @@ def _should_fire_candle(now_utc: datetime, symbol: str, timeframe: str) -> bool:
 def _should_fire_funding(now_utc: datetime, symbol: str) -> bool:
     """Return True if this symbol's funding should fire now.
 
-    Checks 15-min boundary AND ensures the same bucket is not fired twice.
+    Checks 15-min cadence boundary AND ensures the same bucket is not
+    fired twice (in-memory dedup — see module-level note on limitations).
     """
-    epoch_seconds = int(now_utc.timestamp())
-    if (epoch_seconds % _FUNDING_CADENCE_SECONDS) >= 60:
+    if not _is_on_cadence_boundary(now_utc, _FUNDING_CADENCE_SECONDS):
         return False
-    bucket = epoch_seconds // _FUNDING_CADENCE_SECONDS
+    bucket = _bucket_for_funding(now_utc)
     if _last_funding_bucket.get(symbol) == bucket:
         return False
     _last_funding_bucket[symbol] = bucket

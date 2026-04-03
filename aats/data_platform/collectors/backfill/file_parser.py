@@ -87,8 +87,14 @@ def parse_candle_csv_rows(reader: csv.reader, symbol_hint: str) -> list[CandleRo
         # Detect header row on the first valid line
         if header is None:
             # If the first cell is NOT a pure integer (ms epoch), treat as header
-            if not line[0].strip().isdigit():
-                header = [c.strip().lower().replace(" ", "_") for c in line]
+            first_cell = line[0].strip().strip('"').strip("'")
+            # Strip BOM if present (Excel or non-standard UTF-8 encoders)
+            first_cell = first_cell.lstrip("\ufeff")
+            if not first_cell.isdigit():
+                header = [
+                    c.strip().strip('"').strip("'").lstrip("\ufeff").lower().replace(" ", "_")
+                    for c in line
+                ]
                 for i, name in enumerate(header):
                     mapped = _CANDLE_HEADER_MAP.get(name)
                     if mapped:
@@ -169,7 +175,9 @@ def parse_funding_csv_rows(reader: csv.reader, symbol_hint: str) -> list[Funding
             continue
         # Skip header: first cell is non-numeric (e.g. "instrument_name")
         if not header_skipped:
-            if not line[2].strip().isdigit():
+            # Strip BOM, quotes, whitespace for robust header detection
+            cell = line[2].strip().strip('"').strip("'").lstrip("\ufeff")
+            if not cell.isdigit():
                 header_skipped = True
                 continue
             header_skipped = True

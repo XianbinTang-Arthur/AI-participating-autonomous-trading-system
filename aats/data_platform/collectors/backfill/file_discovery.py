@@ -22,9 +22,22 @@ from aats.data_platform.models import utc_now
 # ---------------------------------------------------------------------------
 # Directory-based timeframe inference
 # ---------------------------------------------------------------------------
-# OKX historical downloads are commonly organized with timeframe directories:
-#   downloads/BTC-USDT/1m/BTC-USDT-candlesticks-2026-04-01.zip
-#   downloads/1H/ETH-USDT-SWAP-candlesticks-2026-03.zip
+# OKX candle filenames do NOT carry timeframe (e.g. BTC-USDT-candlesticks-2026-04-01.zip).
+# To route candle files to the correct staging table, the timeframe must come from
+# either the directory structure or a CLI --timeframe override.
+#
+# Supported directory convention (Phase 1 freeze):
+#   Place candle ZIPs under a directory whose name is ONE of the allowed timeframes.
+#   Examples:
+#     downloads/1m/BTC-USDT-candlesticks-2026-04-01.zip    -> timeframe = 1m
+#     downloads/BTC-USDT/15m/BTC-USDT-candlesticks-2026-04-01.zip -> timeframe = 15m
+#     downloads/1H/ETH-USDT-SWAP-candlesticks-2026-03.zip  -> timeframe = 1H
+#
+# If the directory name does not match any key in _DIR_TIMEFRAME_MAP, the timeframe
+# will be None and the file will be skipped/failed unless --timeframe is given.
+#
+# Phase 1 allowed timeframes: 1m, 5m, 15m, 1H
+# Additional recognized aliases (for forward-compat): 1h->1H, 4h->4H, 4H, 1d->1D, 1D
 
 _DIR_TIMEFRAME_MAP: dict[str, str] = {
     "1m": "1m", "5m": "5m", "15m": "15m",
@@ -180,6 +193,30 @@ def register_source_file(
         ),
     )
     return file_id
+
+
+def mark_source_file_status(
+    session: Session,
+    source_file_id: str,
+    *,
+    ingested_status: str,
+    parse_error: str | None = None,
+) -> None:
+    """Explicitly update a source file's ingested_status and optional error reason.
+
+    Use this when a file must be skipped or marked failed before the normal
+    collector pipeline runs (e.g. missing timeframe for candle files).
+    """
+    session.execute(
+        text("""
+            UPDATE meta.raw_source_files
+            SET ingested_status = :status,
+                parse_error = :err,
+                updated_at = :now
+            WHERE source_file_id = :fid
+        """),
+        dict(status=ingested_status, err=parse_error, now=utc_now(), fid=source_file_id),
+    )
 
 
 def discover_and_register(session: Session, root_dir: str | Path) -> list[str]:

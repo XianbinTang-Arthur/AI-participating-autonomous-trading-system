@@ -28,8 +28,14 @@ def main() -> None:
 
     from sqlalchemy import text
 
-    from aats.data_platform.collectors.backfill.candles_backfill_collector import collect_backfill_candle_file
-    from aats.data_platform.collectors.backfill.file_discovery import discover_and_register
+    from aats.data_platform.collectors.backfill.candles_backfill_collector import (
+        collect_backfill_candle_file,
+        resolve_candle_timeframe,
+    )
+    from aats.data_platform.collectors.backfill.file_discovery import (
+        discover_and_register,
+        mark_source_file_status,
+    )
     from aats.data_platform.collectors.backfill.funding_backfill_collector import collect_backfill_funding_file
     from aats.data_platform.config import get_settings
     from aats.data_platform.db import get_session
@@ -66,19 +72,30 @@ def main() -> None:
 
             domain = row["dataset_domain"]
             symbol = row["symbol_hint"]
-            tf = row["timeframe_hint"] or args.timeframe  # CLI fallback
             path = row["source_path"]
 
-            log.info("Processing: %s (%s, %s, tf=%s)", path, domain, symbol, tf)
+            log.info("Processing: %s (%s, %s)", path, domain, symbol)
 
             try:
                 if domain == "candles":
+                    tf = resolve_candle_timeframe(
+                        cli_timeframe=args.timeframe,
+                        timeframe_hint=row["timeframe_hint"],
+                    )
                     if not tf:
-                        log.warning(
-                            "Skipping candle file (no timeframe): %s — "
-                            "use --timeframe or organize files in timeframe directories",
-                            path,
+                        reason = (
+                            "Missing timeframe: OKX candle filenames do not carry "
+                            "timeframe. Use --timeframe or organize files under "
+                            "timeframe directories (1m/, 5m/, 15m/, 1H/)."
                         )
+                        log.warning("Skipping candle file: %s — %s", path, reason)
+                        mark_source_file_status(
+                            session,
+                            file_id,
+                            ingested_status="skipped",
+                            parse_error=reason,
+                        )
+                        session.commit()
                         continue
                     run_id = collect_backfill_candle_file(
                         session,
@@ -108,9 +125,26 @@ def main() -> None:
                         ingest_run_id=run_id,
                     )
                 else:
-                    log.warning("Skipping unknown domain: %s", domain)
+                    log.warning("Skipping unknown domain: %s for %s", domain, path)
+                    mark_source_file_status(
+                        session,
+                        file_id,
+                        ingested_status="skipped",
+                        parse_error=f"Unsupported dataset_domain: {domain}",
+                    )
+                    session.commit()
             except Exception:
                 log.exception("Failed to process file: %s", path)
+                try:
+                    mark_source_file_status(
+                        session,
+                        file_id,
+                        ingested_status="failed",
+                        parse_error="Unhandled exception during backfill processing",
+                    )
+                    session.commit()
+                except Exception:
+                    log.exception("Could not update source file status for: %s", path)
 
     log.info("Backfill complete.")
 

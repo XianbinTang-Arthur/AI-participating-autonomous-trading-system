@@ -152,6 +152,23 @@ def _write_staging(
     return total
 
 
+def _dedupe_candle_rows(rows: list[CandleRow]) -> list[CandleRow]:
+    """Deduplicate candle rows by (symbol, ts).
+
+    OKX returns results newest-first and backward pagination using ``after``
+    can produce overlapping rows at page boundaries.  This removes duplicates
+    while preserving the first occurrence.
+    """
+    seen: set[tuple[str, datetime]] = set()
+    result: list[CandleRow] = []
+    for r in rows:
+        key = (r.symbol, r.ts)
+        if key not in seen:
+            seen.add(key)
+            result.append(r)
+    return result
+
+
 def collect_candles_incremental(
     session: Session,
     settings: ResearchPlatformSettings,
@@ -233,15 +250,7 @@ def collect_candles_incremental(
         if checkpoint_ts:
             all_rows = [r for r in all_rows if r.ts > checkpoint_ts]
 
-        # Deduplicate by (symbol, ts) — API pages can overlap at boundaries
-        seen: set[tuple[str, datetime]] = set()
-        deduped: list[CandleRow] = []
-        for r in all_rows:
-            key = (r.symbol, r.ts)
-            if key not in seen:
-                seen.add(key)
-                deduped.append(r)
-        all_rows = deduped
+        all_rows = _dedupe_candle_rows(all_rows)
 
         count = _write_staging(session, table, all_rows, run_id, dataset_version)
 

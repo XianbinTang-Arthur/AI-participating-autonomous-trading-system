@@ -5,6 +5,10 @@ Both file sources and API sources must use the same canonical symbols.
 
 from __future__ import annotations
 
+# Phase 1 frozen symbol whitelist.
+# This covers only the 4 instruments in scope for Phase 1.
+# It is NOT a general-purpose symbol registry — future phases should
+# replace this with a database-driven lookup or config-file mapping.
 _CANONICAL_MAP: dict[str, str] = {
     # Spot
     "BTC-USDT": "BTC-USDT",

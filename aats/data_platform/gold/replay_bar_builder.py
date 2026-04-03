@@ -95,6 +95,14 @@ def build_gold_replay_bars(
             funding_map = align_funding_to_bars(bar_timestamps, funding_events)
 
         # Build and insert gold bars
+        #
+        # Volume semantics note:
+        #   Gold `volume`       <- Silver `vol`       (base currency for spot, contracts for swap)
+        #   Gold `quote_volume` <- Silver `vol_quote` (quote currency volume)
+        #   These are NOT semantically identical across spot/swap.  Spot `vol` is
+        #   base-asset quantity; swap `vol` is number of contracts.  Downstream
+        #   replay/analytics must account for instrument type when interpreting
+        #   these fields.  Phase 1 preserves the raw mapping without unification.
         now = utc_now()
         values: list[dict[str, Any]] = []
         for c in candles:
