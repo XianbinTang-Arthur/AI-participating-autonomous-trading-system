@@ -62,7 +62,7 @@ class SleeveExecutionPermissionPolicy:
         configured_auto_execution_enabled = effective_non_protective_auto_execution_enabled(self.settings)
         candidate_enabled = bool(raw.candidate_enabled)
         candidate_execution_compatible = bool(raw.candidate_execution_compatible)
-        state_runtime_supported = bool(raw.state_runtime_supported)
+        candidate_state_runtime_supported = bool(raw.candidate_state_runtime_supported)
         protective_intent = bool(raw.protective_intent)
 
         reason_codes: tuple[str, ...]
@@ -70,7 +70,7 @@ class SleeveExecutionPermissionPolicy:
         approved_for_execution: bool
         blocks_non_protective_execution = False
 
-        if not state_runtime_supported:
+        if not candidate_state_runtime_supported:
             approved_for_execution = False
             permission_mode = "unsupported"
             blocks_non_protective_execution = True
@@ -105,7 +105,7 @@ class SleeveExecutionPermissionPolicy:
 
         return ExecutionPermissionDecision(
             configured_auto_execution_enabled=configured_auto_execution_enabled,
-            state_runtime_supported=state_runtime_supported,
+            candidate_state_runtime_supported=candidate_state_runtime_supported,
             candidate_enabled=candidate_enabled,
             candidate_execution_compatible=candidate_execution_compatible,
             protective_intent=protective_intent,
@@ -116,7 +116,7 @@ class SleeveExecutionPermissionPolicy:
             human_summary=self._human_summary(
                 permission_mode=permission_mode,
                 active_inventory=raw.active_inventory,
-                state_runtime_supported=state_runtime_supported,
+                candidate_state_runtime_supported=candidate_state_runtime_supported,
                 candidate_execution_compatible=candidate_execution_compatible,
             ),
         )
@@ -126,7 +126,7 @@ class SleeveExecutionPermissionPolicy:
         *,
         permission_mode: str,
         active_inventory: bool,
-        state_runtime_supported: bool,
+        candidate_state_runtime_supported: bool,
         candidate_execution_compatible: bool,
     ) -> str:
         if permission_mode == "approved":
@@ -134,7 +134,7 @@ class SleeveExecutionPermissionPolicy:
         if permission_mode == "protective_override":
             return "当前虽然关闭了普通自动执行，但保护性意图仍允许继续执行。"
         if permission_mode == "unsupported":
-            if not state_runtime_supported:
+            if not candidate_state_runtime_supported:
                 return "当前运行环境不支持这条 sleeve 自动进入执行链。"
             if not candidate_execution_compatible:
                 return "当前 sleeve 候选不满足执行兼容性要求，因此不会自动进入执行链。"

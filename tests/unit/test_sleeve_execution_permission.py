@@ -42,7 +42,7 @@ def _raw(**overrides) -> RawSleeveCandidateInputs:
         "candidate_selectable": True,
         "candidate_score": 0.7,
         "candidate_confidence": 0.8,
-        "state_runtime_supported": True,
+        "candidate_state_runtime_supported": True,
         "active_inventory": False,
         "current_inventory_notional": Decimal("0"),
         "protective_intent": False,
@@ -89,7 +89,7 @@ class TestSleeveExecutionPermissionPolicy(TestCase):
     def test_runtime_unsupported_denies_execution(self) -> None:
         policy = SleeveExecutionPermissionPolicy(_settings(strategy_sleeve_auto_execution_enabled=True))
 
-        decision = policy.evaluate(raw=_raw(state_runtime_supported=False))
+        decision = policy.evaluate(raw=_raw(candidate_state_runtime_supported=False))
 
         self.assertFalse(decision.approved_for_execution)
         self.assertEqual(decision.permission_mode, "unsupported")
@@ -107,7 +107,9 @@ class TestSleeveExecutionPermissionPolicy(TestCase):
     def test_candidate_execution_incompatible_denies_execution_even_when_runtime_supported(self) -> None:
         policy = SleeveExecutionPermissionPolicy(_settings(strategy_sleeve_auto_execution_enabled=True))
 
-        decision = policy.evaluate(raw=_raw(candidate_execution_compatible=False, state_runtime_supported=True))
+        decision = policy.evaluate(
+            raw=_raw(candidate_execution_compatible=False, candidate_state_runtime_supported=True)
+        )
 
         self.assertFalse(decision.approved_for_execution)
         self.assertEqual(decision.permission_mode, "unsupported")

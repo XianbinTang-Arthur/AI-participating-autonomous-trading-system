@@ -234,13 +234,13 @@ export function renderStrategySections(data) {
       content: `
         ${summaryStrip([
           {
-            label: "自动执行主开关",
-            value: entryAutoExecutionEnabled ? "已启用" : "未启用",
+            label: "当前自动入链资格",
+            value: entryAutoExecutionEnabled ? "允许自动进入执行链" : "当前不允许自动进入执行链",
             meta: entryExecutionGuard.active
               ? (entryExecutionGuard.headline || entryExecutionGuard.summary || "当前非保护性开仓自动执行已降级为仅参考。")
               : entryAutoExecutionEnabled
-                ? "当前按系统规则自动启停和分配预算。"
-                : "当前没有启用 sleeve 自动预算控制。",
+                ? "当前这类 sleeve 满足自动进入执行链的前置条件，后续仍会继续经过预算控制和执行约束。"
+                : "当前这类 sleeve 还不能自动进入执行链；系统只会保留参考或保护性动作。",
             tone: entryAutoExecutionEnabled ? "positive" : "warning",
           },
           {
@@ -297,10 +297,10 @@ export function renderStrategySections(data) {
           [
             "自动控制阈值",
             entryExecutionGuard.active
-              ? "当前非保护性开仓自动执行已降级"
+              ? "当前非保护性开仓不允许自动进入执行链"
               : strategyRuntime.configured_parameters?.strategy_sleeve_auto_execution_enabled
-                ? "按运行参数自动控制"
-                : "当前未启用自动控制",
+                ? "当前满足自动入链前置条件"
+                : "当前不满足自动入链前置条件",
             [
               `最小预算倍率 ${formatNumber(strategyRuntime.configured_parameters?.strategy_sleeve_auto_min_budget_multiplier, 2, "暂无预算阈值")}`,
               `软亏损 ${formatSigned(strategyRuntime.configured_parameters?.strategy_sleeve_auto_soft_loss_usdt)}`,

@@ -2940,7 +2940,7 @@ class OperatorQueryService:
             ),
             "compatibility": {
                 "legacy_automation_state_note": (
-                    "coarse compatibility projection; prefer execution_control_mode and execution_behavior"
+                    "compatibility-only coarse projection; prefer execution_control_mode and execution_behavior and do not use legacy automation_state for primary diagnosis"
                 ),
                 "legacy_automation_state_counts": {
                     "active": len(active_automation),

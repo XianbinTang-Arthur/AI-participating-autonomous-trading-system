@@ -143,15 +143,16 @@ class SleeveBudgetController:
             current_qty = to_decimal(leg.current_position_qty)
             delta_qty = to_decimal(leg.delta_position_qty)
             scaled_delta = quantize_decimal(delta_qty * multiplier)
+            budget_note = f"budget_control:effective_scale={format(multiplier, 'f')}"
             scaled.append(
                 leg.model_copy(
                     update={
                         "delta_position_qty": scaled_delta,
                         "target_position_qty": current_qty + scaled_delta,
                         "note": (
-                            f"{leg.note} | auto_budget_effective_scale={format(multiplier, 'f')}"
+                            f"{leg.note} | {budget_note}"
                             if leg.note
-                            else f"auto_budget_effective_scale={format(multiplier, 'f')}"
+                            else budget_note
                         ),
                     }
                 )

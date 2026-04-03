@@ -6,6 +6,7 @@ from unittest import TestCase
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import BaselineAssessment
+from aats.schemas.strategy_runtime import StrategyLegIntent
 from aats.services.strategy_engines.sleeve_budget_controller import SleeveBudgetController
 from aats.services.strategy_engines.sleeve_routing_models import RawSleeveCandidateInputs
 
@@ -40,6 +41,17 @@ def _baseline(volatility_target_scale: float = 1.0) -> BaselineAssessment:
     )
 
 
+def _leg(delta_qty: str = "0.25") -> StrategyLegIntent:
+    return StrategyLegIntent(
+        symbol="BTC-USDT",
+        product_type="spot",
+        side="buy",
+        current_position_qty=Decimal("0"),
+        target_position_qty=Decimal(delta_qty),
+        delta_position_qty=Decimal(delta_qty),
+    )
+
+
 def _raw(**overrides) -> RawSleeveCandidateInputs:
     payload = {
         "family": "dca",
@@ -51,7 +63,7 @@ def _raw(**overrides) -> RawSleeveCandidateInputs:
         "account_current_position_qty": Decimal("0"),
         "target_notional": Decimal("25"),
         "route_action": "override_target",
-        "requested_legs": tuple(),
+        "requested_legs": (_leg(),),
         "metrics": {},
         "candidate_state": "ready",
         "candidate_enabled": True,
@@ -59,7 +71,7 @@ def _raw(**overrides) -> RawSleeveCandidateInputs:
         "candidate_execution_compatible": True,
         "candidate_score": 0.7,
         "candidate_confidence": 0.8,
-        "state_runtime_supported": True,
+        "candidate_state_runtime_supported": True,
         "active_inventory": False,
         "current_inventory_notional": Decimal("0"),
         "protective_intent": False,
@@ -81,6 +93,7 @@ class TestSleeveBudgetController(TestCase):
 
         self.assertEqual(decision.effective_scale, Decimal("1"))
         self.assertFalse(decision.budget_zero_suppressed)
+        self.assertEqual(decision.scaled_legs[0].note, "budget_control:effective_scale=1")
 
     def test_pnl_contraction_reduces_scale(self) -> None:
         controller = SleeveBudgetController(_settings(strategy_sleeve_auto_soft_loss_usdt=10.0))

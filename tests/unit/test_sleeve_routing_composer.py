@@ -42,7 +42,7 @@ def _raw(**overrides) -> RawSleeveCandidateInputs:
         "candidate_execution_compatible": True,
         "candidate_score": 0.7,
         "candidate_confidence": 0.8,
-        "state_runtime_supported": True,
+        "candidate_state_runtime_supported": True,
         "active_inventory": False,
         "current_inventory_notional": Decimal("0"),
         "protective_intent": False,
@@ -54,7 +54,7 @@ def _raw(**overrides) -> RawSleeveCandidateInputs:
 def _permission(**overrides) -> ExecutionPermissionDecision:
     payload = {
         "configured_auto_execution_enabled": True,
-        "state_runtime_supported": True,
+        "candidate_state_runtime_supported": True,
         "candidate_enabled": True,
         "candidate_execution_compatible": True,
         "protective_intent": False,
@@ -105,7 +105,7 @@ class TestSleeveRoutingComposer(TestCase):
         self.assertEqual(decision.composed_delta_position_qty, Decimal("0"))
         self.assertEqual(
             decision.composed_legs[0].note,
-            "auto_parallel_permission_denied_advisory_only",
+            "composition:permission_denied:advisory_only",
         )
 
     def test_permission_denied_with_inventory_composes_hold_current(self) -> None:
@@ -122,7 +122,7 @@ class TestSleeveRoutingComposer(TestCase):
         self.assertEqual(decision.execution_behavior, "hold_current")
         self.assertEqual(
             decision.composed_legs[0].note,
-            "auto_parallel_permission_denied_hold_current",
+            "composition:permission_denied:hold_current",
         )
 
     def test_approved_with_positive_scale_composes_override_target(self) -> None:
@@ -144,6 +144,10 @@ class TestSleeveRoutingComposer(TestCase):
         self.assertEqual(decision.execution_control_mode, "approved")
         self.assertEqual(decision.execution_behavior, "execute_target")
         self.assertEqual(decision.composed_delta_position_qty, Decimal("0.125"))
+        self.assertEqual(
+            decision.composed_legs[0].note,
+            "composition:approved:override_target",
+        )
 
     def test_approved_with_zero_budget_preserves_permission_but_suppresses_delta(self) -> None:
         composer = SleeveRoutingComposer()
@@ -168,7 +172,7 @@ class TestSleeveRoutingComposer(TestCase):
         self.assertEqual(decision.route_action, "advisory_only")
         self.assertEqual(
             decision.composed_legs[0].note,
-            "auto_parallel_budget_zero_suppressed_advisory_only",
+            "composition:budget_zero_suppressed:advisory_only",
         )
 
     def test_protective_override_path(self) -> None:
@@ -189,3 +193,7 @@ class TestSleeveRoutingComposer(TestCase):
         self.assertEqual(decision.execution_control_mode, "protective_override")
         self.assertEqual(decision.execution_behavior, "protective_execute")
         self.assertEqual(decision.composed_delta_position_qty, Decimal("0.25"))
+        self.assertEqual(
+            decision.composed_legs[0].note,
+            "composition:protective_override:override_target",
+        )

@@ -31,7 +31,7 @@ class RawSleeveCandidateInputs:
     candidate_execution_compatible: bool
     candidate_score: float
     candidate_confidence: float
-    state_runtime_supported: bool
+    candidate_state_runtime_supported: bool
     active_inventory: bool
     current_inventory_notional: Decimal
     protective_intent: bool
@@ -40,7 +40,7 @@ class RawSleeveCandidateInputs:
 @dataclass(frozen=True)
 class ExecutionPermissionDecision:
     configured_auto_execution_enabled: bool
-    state_runtime_supported: bool
+    candidate_state_runtime_supported: bool
     candidate_enabled: bool
     candidate_execution_compatible: bool
     protective_intent: bool

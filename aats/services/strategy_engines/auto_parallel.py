@@ -125,7 +125,7 @@ class StrategySleeveAutoController:
             candidate_execution_compatible=bool(candidate.execution_compatible),
             candidate_score=float(candidate.score or 0.0),
             candidate_confidence=float(candidate.confidence or 0.0),
-            state_runtime_supported=candidate.state != "incompatible",
+            candidate_state_runtime_supported=candidate.state != "incompatible",
             active_inventory=current_inventory_notional > EPSILON_DECIMAL_12,
             current_inventory_notional=quantize_decimal(current_inventory_notional),
             protective_intent=self._is_protective_intent(intent),
@@ -163,10 +163,8 @@ class StrategySleeveAutoController:
         return StrategySleeveAutomationDecision(
             family=raw.family,
             strategy_sleeve_id=raw.strategy_sleeve_id,
-            automatic_enabled=bool(
-                permission.configured_auto_execution_enabled and raw.candidate_enabled
-            ),
-            runtime_supported=raw.state_runtime_supported,
+            automatic_enabled=bool(permission.approved_for_execution),
+            runtime_supported=raw.candidate_state_runtime_supported,
             approved_for_execution=permission.approved_for_execution,
             permission_mode=permission.permission_mode,
             execution_control_mode=composed.execution_control_mode,
@@ -175,7 +173,7 @@ class StrategySleeveAutoController:
             compatibility={
                 "legacy_automation_state": automation_state,
                 "legacy_automation_state_note": (
-                    "compatibility-only coarse projection; prefer execution_control_mode and execution_behavior"
+                    "compatibility-only coarse projection; prefer execution_control_mode and execution_behavior and do not use legacy automation_state for primary diagnosis"
                 ),
                 "legacy_automation_projection": {
                     "source_execution_control_mode": composed.execution_control_mode,
@@ -412,7 +410,7 @@ class StrategySleeveAutoController:
     ) -> bool:
         return bool(
             raw.candidate_execution_compatible
-            and raw.state_runtime_supported
+            and raw.candidate_state_runtime_supported
             and (
                 permission.approved_for_execution
                 or raw.protective_intent
@@ -519,8 +517,9 @@ class StrategySleeveAutoController:
             "execution_behavior": composed.execution_behavior,
             "permission": {
                 "configured_auto_execution_enabled": permission.configured_auto_execution_enabled,
-                "runtime_supported": permission.state_runtime_supported,
-                "state_runtime_supported": permission.state_runtime_supported,
+                "runtime_supported": permission.candidate_state_runtime_supported,
+                "state_runtime_supported": permission.candidate_state_runtime_supported,
+                "candidate_state_runtime_supported": permission.candidate_state_runtime_supported,
                 "candidate_enabled": permission.candidate_enabled,
                 "candidate_execution_compatible": permission.candidate_execution_compatible,
                 "protective_intent": permission.protective_intent,

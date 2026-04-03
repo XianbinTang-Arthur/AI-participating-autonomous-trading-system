@@ -81,7 +81,10 @@ AllocatorHedgePriorityClass = Literal["standard", "inventory", "hedge", "critica
 class StrategySleeveAutomationDecision(SchemaBase):
     family: StrategyFamily
     strategy_sleeve_id: str
-    automatic_enabled: bool = True
+    automatic_enabled: bool = Field(
+        default=True,
+        description="当前这条 sleeve 是否满足自动进入执行链的前置条件；该值与 approved_for_execution 对齐。",
+    )
     runtime_supported: bool = True
     approved_for_execution: bool = True
     permission_mode: str = "approved"
@@ -92,7 +95,7 @@ class StrategySleeveAutomationDecision(SchemaBase):
         description=(
             "兼容字段（compatibility-only）；新的 operator/runtime 诊断应优先使用 "
             "execution_control_mode 与 execution_behavior，legacy 值同步下沉到 "
-            "compatibility.legacy_automation_state。"
+            "compatibility.legacy_automation_state；新的控制逻辑与诊断逻辑不应再依赖该字段。"
         ),
         json_schema_extra={"deprecated": True},
     )
@@ -181,7 +184,10 @@ class StrategySleeveIntent(SchemaBase):
     requested_delta_position_qty: Decimal = Decimal("0")
     priority_score: float = 0.0
     reason_codes: list[str] = Field(default_factory=list)
-    automatic_enabled: bool = True
+    automatic_enabled: bool = Field(
+        default=True,
+        description="当前这条 sleeve intent 是否仍允许自动进入执行链；该值与 approved_for_execution 对齐。",
+    )
     approved_for_execution: bool = True
     permission_mode: str = "approved"
     execution_control_mode: StrategySleeveExecutionControlMode | None = None

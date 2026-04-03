@@ -1433,6 +1433,94 @@ console.log(JSON.stringify({
         self.assertNotIn("recent_netting_decisions", trimmed)
         self.assertNotIn("recent_sleeve_intents", trimmed)
 
+    def test_strategy_view_explains_automatic_enabled_as_execution_chain_eligibility(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  strategyRuntime: {
+    summary: {
+      entry_auto_execution_enabled: true,
+      budget_zero_suppression_count: 0,
+      execution_control_mode_counts: {
+        approved: 1,
+        permission_denied: 0,
+        budget_zero_suppressed: 0,
+        protective_override: 0,
+      },
+      execution_behavior_counts: {
+        execute_target: 1,
+        hold_current: 0,
+        advisory_only: 0,
+        suppressed_after_approval: 0,
+        protective_execute: 0,
+      },
+      execution_control_summary: {
+        active: true,
+        primary_mode: 'approved',
+        headline: '最近自动执行主路径正常放行',
+        summary: '最近样本以允许自动进入执行链为主。',
+        total_recent_intents: 1,
+      },
+      execution_behavior_summary: {
+        active: true,
+        primary_behavior: 'execute_target',
+        headline: '最近执行行为以继续沿目标执行为主',
+        summary: '最近样本会继续沿目标仓位进入执行链。',
+        total_recent_intents: 1,
+      },
+      latest_approved_sleeve_weights: {},
+      entry_execution_guard: {
+        active: false,
+      },
+    },
+    latest_snapshot: {
+      candidates: [],
+      automation_decisions: [],
+    },
+    configured_parameters: {
+      strategy_sleeve_auto_execution_enabled: true,
+      strategy_sleeve_auto_min_budget_multiplier: 0.25,
+      strategy_sleeve_auto_soft_loss_usdt: 20,
+      strategy_sleeve_auto_hard_loss_usdt: 50,
+    },
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {},
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  showsEligibilityCopy: html.includes('当前自动入链资格')
+    && html.includes('允许自动进入执行链')
+    && html.includes('当前这类 sleeve 满足自动进入执行链的前置条件，后续仍会继续经过预算控制和执行约束。'),
+  hidesLegacySwitchCopy: !html.includes('自动执行主开关')
+    && !html.includes('当前按系统规则自动启停和分配预算。'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"showsEligibilityCopy":true', result.stdout)
+        self.assertIn('"hidesLegacySwitchCopy":true', result.stdout)
+
     def test_ai_analysis_bundle_path_includes_recent_panels_and_ai_limits(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

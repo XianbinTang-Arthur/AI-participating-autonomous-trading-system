@@ -105,6 +105,7 @@ class TestAutoParallelOrchestration(TestCase):
         controlled_candidate = controlled_candidates["dca"]
 
         self.assertFalse(decision.approved_for_execution)
+        self.assertFalse(decision.automatic_enabled)
         self.assertEqual(decision.execution_control_mode, "permission_denied")
         self.assertEqual(decision.execution_behavior, "advisory_only")
         self.assertEqual(decision.compatibility["legacy_automation_state"], "paused")
@@ -137,11 +138,13 @@ class TestAutoParallelOrchestration(TestCase):
             "approved",
         )
         self.assertEqual(decision.automation_state, decision.compatibility["legacy_automation_state"])
+        self.assertTrue(decision.automatic_enabled)
         self.assertTrue(controlled_intent.execution_compatible)
         self.assertTrue(controlled_candidate.execution_compatible)
         self.assertEqual(controlled_intent.route_action, "override_target")
         self.assertEqual(controlled_intent.control_trace["execution_control_mode"], "approved")
         self.assertTrue(controlled_intent.control_trace["permission"]["state_runtime_supported"])
+        self.assertTrue(controlled_intent.control_trace["permission"]["candidate_state_runtime_supported"])
 
     def test_approved_budget_zero_is_explicitly_suppressed_after_approval(self) -> None:
         controller = StrategySleeveAutoController(settings=_settings())
@@ -169,6 +172,7 @@ class TestAutoParallelOrchestration(TestCase):
         self.assertEqual(decision.automation_state, "contracted")
         self.assertEqual(decision.compatibility["legacy_automation_state"], "contracted")
         self.assertEqual(decision.automation_state, decision.compatibility["legacy_automation_state"])
+        self.assertTrue(decision.automatic_enabled)
         self.assertTrue(controlled_intent.execution_compatible)
         self.assertEqual(controlled_intent.route_action, "advisory_only")
         self.assertTrue(controlled_intent.control_trace["budget"]["budget_zero_suppressed"])
@@ -206,6 +210,7 @@ class TestAutoParallelOrchestration(TestCase):
         self.assertEqual(decision.automation_state, "protective_only")
         self.assertEqual(decision.compatibility["legacy_automation_state"], "protective_only")
         self.assertEqual(decision.automation_state, decision.compatibility["legacy_automation_state"])
+        self.assertTrue(decision.automatic_enabled)
         self.assertTrue(controlled_intent.execution_compatible)
         self.assertEqual(controlled_intent.control_trace["execution_behavior"], "protective_execute")
 
@@ -224,6 +229,8 @@ class TestAutoParallelOrchestration(TestCase):
         self.assertFalse(decision.approved_for_execution)
         self.assertEqual(decision.permission_mode, "unsupported")
         self.assertIn("candidate_execution_incompatible", decision.permission_reason_codes)
+        self.assertFalse(decision.automatic_enabled)
         self.assertFalse(controlled_intent.execution_compatible)
         self.assertFalse(controlled_intent.control_trace["permission"]["candidate_execution_compatible"])
         self.assertTrue(controlled_intent.control_trace["permission"]["state_runtime_supported"])
+        self.assertTrue(controlled_intent.control_trace["permission"]["candidate_state_runtime_supported"])
