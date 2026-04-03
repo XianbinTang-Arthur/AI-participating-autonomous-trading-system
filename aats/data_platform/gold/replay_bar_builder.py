@@ -100,11 +100,12 @@ def build_gold_replay_bars(
         for c in candles:
             sym, ts, o, h, l, cl, vol, qvol, confirm = c
             aligned_rate, funding_ts = funding_map.get(ts, (None, None))
+            # Gold is_closed derives from Silver confirm — explicit bool cast
             values.append(dict(
                 symbol=sym, ts=ts,
                 open=o, high=h, low=l, close=cl,
                 volume=vol, quote_volume=qvol,
-                is_closed=confirm,
+                is_closed=bool(confirm),
                 aligned_funding_rate=aligned_rate,
                 funding_source_ts=funding_ts,
                 source_candle_dataset_version=candle_dataset_version,

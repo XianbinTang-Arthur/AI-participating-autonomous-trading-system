@@ -20,27 +20,32 @@ from sqlalchemy.orm import Session
 from aats.data_platform.models import utc_now
 
 # ---------------------------------------------------------------------------
-# File name patterns
+# File name patterns — matched against real OKX historical download filenames
 # ---------------------------------------------------------------------------
-# Examples:
-#   BTC-USDT-SWAP-1m-2026-04-01.zip          (candles, day)
-#   ETH-USDT-1H-2026-03.zip                  (candles, month)
-#   BTC-USDT-SWAP-funding-rate-2026-04-01.zip (funding, day)
+# Real examples:
+#   BTC-USDT-candlesticks-2026-04-01.zip          (spot candles, day)
+#   ETH-USDT-SWAP-candlesticks-2026-03.zip        (swap candles, month)
+#   BTC-USDT-SWAP-fundingrates-2026-04-01.zip     (funding, day)
+#   ETH-USDT-SWAP-fundingrates-2026-03.zip        (funding, month)
+#
+# NOTE: OKX candle filenames do NOT carry timeframe — timeframe_hint will
+# be None for candles discovered from files.  The caller (backfill script)
+# must determine the timeframe from directory structure or user input.
 
 _CANDLE_DAY_RE = re.compile(
-    r"^(?P<symbol>[A-Z0-9\-]+)-(?P<tf>1m|5m|15m|1H)-(?P<date>\d{4}-\d{2}-\d{2})\.zip$",
+    r"^(?P<symbol>[A-Z0-9]+-[A-Z0-9]+(?:-SWAP)?)-candlesticks-(?P<date>\d{4}-\d{2}-\d{2})\.zip$",
     re.IGNORECASE,
 )
 _CANDLE_MONTH_RE = re.compile(
-    r"^(?P<symbol>[A-Z0-9\-]+)-(?P<tf>1m|5m|15m|1H)-(?P<month>\d{4}-\d{2})\.zip$",
+    r"^(?P<symbol>[A-Z0-9]+-[A-Z0-9]+(?:-SWAP)?)-candlesticks-(?P<month>\d{4}-\d{2})\.zip$",
     re.IGNORECASE,
 )
 _FUNDING_DAY_RE = re.compile(
-    r"^(?P<symbol>[A-Z0-9\-]+)-funding-rate-(?P<date>\d{4}-\d{2}-\d{2})\.zip$",
+    r"^(?P<symbol>[A-Z0-9]+-[A-Z0-9]+(?:-SWAP)?)-fundingrates-(?P<date>\d{4}-\d{2}-\d{2})\.zip$",
     re.IGNORECASE,
 )
 _FUNDING_MONTH_RE = re.compile(
-    r"^(?P<symbol>[A-Z0-9\-]+)-funding-rate-(?P<month>\d{4}-\d{2})\.zip$",
+    r"^(?P<symbol>[A-Z0-9]+-[A-Z0-9]+(?:-SWAP)?)-fundingrates-(?P<month>\d{4}-\d{2})\.zip$",
     re.IGNORECASE,
 )
 
@@ -58,7 +63,11 @@ def _infer_instrument_type(symbol: str) -> str | None:
 
 
 def _parse_filename(name: str) -> dict[str, Any] | None:
-    """Extract metadata from a filename.  Returns None if unrecognised."""
+    """Extract metadata from a filename.  Returns None if unrecognised.
+
+    NOTE: OKX candle filenames do not carry timeframe, so ``timeframe_hint``
+    will be ``None`` for candle files.
+    """
     for pat, domain, gran in [
         (_CANDLE_DAY_RE, "candles", "day"),
         (_CANDLE_MONTH_RE, "candles", "month"),
@@ -71,7 +80,7 @@ def _parse_filename(name: str) -> dict[str, Any] | None:
             return dict(
                 dataset_domain=domain,
                 symbol_hint=gd["symbol"].upper(),
-                timeframe_hint=gd.get("tf"),
+                timeframe_hint=None,  # OKX filenames do not carry timeframe
                 source_granularity=gran,
                 date_hint=gd.get("date") or gd.get("month"),
             )

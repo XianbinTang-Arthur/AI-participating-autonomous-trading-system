@@ -195,29 +195,47 @@ def collect_candles_incremental(
 
     try:
         all_rows: list[CandleRow] = []
-        after_ms: int | None = None
+        checkpoint_ts: datetime | None = None
         if cp and cp.get("last_successful_ts"):
-            after_ms = _ts_ms(cp["last_successful_ts"])
+            checkpoint_ts = cp["last_successful_ts"]
+
+        # OKX history-candles semantics (results newest-first):
+        #   before=X -> returns records with ts > X  (NEWER than X)
+        #   after=X  -> returns records with ts < X  (OLDER than X)
+        #
+        # Rolling strategy: fetch latest data, then page backward
+        # toward the checkpoint to collect everything new.
 
         with httpx.Client() as client:
-            for _ in range(max_pages):
-                raw_data = _fetch_candles(client, settings, symbol, timeframe, after_ms=after_ms)
-                if not raw_data:
-                    break
+            # First request: get the latest bars (no params)
+            raw_data = _fetch_candles(client, settings, symbol, timeframe)
+            page = 0
+            while raw_data and page < max_pages:
                 for item in raw_data:
                     row = _parse_api_candle(item, symbol)
                     if row:
                         all_rows.append(row)
-                # OKX returns newest first; after= means "older than this ts"
-                oldest_ts = min(int(d[0]) for d in raw_data)
-                after_ms = oldest_ts
+                # Check if we've reached data older than our checkpoint
+                oldest_ts_in_page = min(int(d[0]) for d in raw_data)
+                if checkpoint_ts and oldest_ts_in_page <= _ts_ms(checkpoint_ts):
+                    break  # we've overlapped with existing data
                 if len(raw_data) < _API_LIMIT:
-                    break
+                    break  # no more pages
+                # Page backward: get records older than this page's oldest
                 time.sleep(settings.okx_rate_limit_sleep)
+                raw_data = _fetch_candles(
+                    client, settings, symbol, timeframe,
+                    after_ms=oldest_ts_in_page,
+                )
+                page += 1
+
+        # Filter: only keep rows strictly newer than checkpoint
+        if checkpoint_ts:
+            all_rows = [r for r in all_rows if r.ts > checkpoint_ts]
 
         count = _write_staging(session, table, all_rows, run_id, dataset_version)
 
-        # Update checkpoint
+        # Advance checkpoint
         if all_rows:
             newest_ts = max(r.ts for r in all_rows)
             next_ts = newest_ts + delta
