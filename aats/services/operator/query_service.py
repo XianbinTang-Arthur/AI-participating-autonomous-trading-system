@@ -110,6 +110,7 @@ class OperatorQueryService:
         self.state_scope = runtime_state_scope(runtime.settings)
         self._cache: dict[str, Any] = {}
         self._ttl_cache: dict[str, tuple[datetime, Any]] = {}
+        self._cache_lock = __import__("threading").RLock()
         self.strategy_profiles = StrategyProfileControlService(runtime)
         self.blocker_control_service = BlockerControlService(self)
         self.blocker_action_service = BlockerActionService(self)
@@ -126,26 +127,29 @@ class OperatorQueryService:
     def _cached(self, key: str, loader):
         if not hasattr(self, "_cache"):
             self._cache = {}
-        if key not in self._cache:
-            self._cache[key] = loader()
-        return self._cache[key]
+        with self._cache_lock:
+            if key not in self._cache:
+                self._cache[key] = loader()
+            return self._cache[key]
 
     def _cached_ttl(self, key: str, ttl_seconds: int, loader):
         if not hasattr(self, "_ttl_cache"):
             self._ttl_cache = {}
-        now = utc_now()
-        cached = self._ttl_cache.get(key)
-        if cached is not None:
-            expires_at, value = cached
-            if expires_at > now:
-                return value
-        value = loader()
-        self._ttl_cache[key] = (now + timedelta(seconds=max(int(ttl_seconds), 1)), value)
-        return value
+        with self._cache_lock:
+            now = utc_now()
+            cached = self._ttl_cache.get(key)
+            if cached is not None:
+                expires_at, value = cached
+                if expires_at > now:
+                    return value
+            value = loader()
+            self._ttl_cache[key] = (now + timedelta(seconds=max(int(ttl_seconds), 1)), value)
+            return value
 
     def _invalidate_cache(self) -> None:
-        self._cache.clear()
-        self._ttl_cache.clear()
+        with self._cache_lock:
+            self._cache.clear()
+            self._ttl_cache.clear()
 
     def _scope_cache_fragment(self) -> str:
         return (
@@ -8956,11 +8960,11 @@ class OperatorQueryService:
                     runtime_constraints=runtime_constraints,
                     action_items=action_items,
                 ),
-                "guarded_live_run_packet": {
-                    "status": self.guarded_live_run_packet().get("status"),
-                    "summary": self.guarded_live_run_packet().get("summary"),
-                    "summary_metrics": self.guarded_live_run_packet().get("summary_metrics"),
-                },
+                "guarded_live_run_packet": (lambda _p: {
+                    "status": _p.get("status"),
+                    "summary": _p.get("summary"),
+                    "summary_metrics": _p.get("summary_metrics"),
+                })(self.guarded_live_run_packet()),
                 "strategy_segments": {
                     "group_by": segments.get("group_by"),
                     "strongest_segment": strongest_segment,

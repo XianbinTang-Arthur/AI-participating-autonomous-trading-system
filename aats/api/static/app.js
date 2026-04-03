@@ -20,6 +20,7 @@ import {
 import { buildPhase1ShadowDrawer } from "./modules/shadow-drawer.js";
 import {
   AUTO_REFRESH_MS,
+  VIEW_FRESHNESS_MS,
   CORE_SPECS,
   DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS,
   DEFAULT_EXIT_EXECUTION_HISTORY_PAGING,
@@ -449,6 +450,7 @@ async function refreshDashboard({ manual = false } = {}) {
     }
     applyPanelResults(results);
     state.readyViews[refreshingView] = true;
+    state.viewRefreshedAt[refreshingView] = Date.now();
     if (shouldRedirectToLogin()) {
       window.location.replace("/login");
       return;
@@ -899,7 +901,14 @@ function setActiveView(view, { pushHistory = false, refresh = true } = {}) {
   viewSections.forEach((section) => section.classList.toggle("is-active", section.dataset.view === nextView));
   renderShell();
   if (refresh) {
-    void refreshDashboard();
+    const lastRefresh = state.viewRefreshedAt[nextView];
+    const isFresh = lastRefresh && Date.now() - lastRefresh < VIEW_FRESHNESS_MS;
+    if (changed && isFresh && state.readyViews[nextView]) {
+      state.loadingView = null;
+      renderActiveView();
+    } else {
+      void refreshDashboard();
+    }
   }
 }
 
