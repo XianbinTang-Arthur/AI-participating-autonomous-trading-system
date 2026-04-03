@@ -20,6 +20,30 @@ from sqlalchemy.orm import Session
 from aats.data_platform.models import utc_now
 
 # ---------------------------------------------------------------------------
+# Directory-based timeframe inference
+# ---------------------------------------------------------------------------
+# OKX historical downloads are commonly organized with timeframe directories:
+#   downloads/BTC-USDT/1m/BTC-USDT-candlesticks-2026-04-01.zip
+#   downloads/1H/ETH-USDT-SWAP-candlesticks-2026-03.zip
+
+_DIR_TIMEFRAME_MAP: dict[str, str] = {
+    "1m": "1m", "5m": "5m", "15m": "15m",
+    "1h": "1H", "1H": "1H",
+    "4h": "4H", "4H": "4H",
+    "1d": "1D", "1D": "1D",
+}
+
+
+def _infer_timeframe_from_path(path: Path) -> str | None:
+    """Try to infer timeframe from ancestor directory names."""
+    for parent in path.parents:
+        tf = _DIR_TIMEFRAME_MAP.get(parent.name)
+        if tf:
+            return tf
+    return None
+
+
+# ---------------------------------------------------------------------------
 # File name patterns — matched against real OKX historical download filenames
 # ---------------------------------------------------------------------------
 # Real examples:
@@ -95,6 +119,9 @@ def discover_files(root_dir: str | Path) -> list[dict[str, Any]]:
         info = _parse_filename(path.name)
         if info is None:
             continue
+        # For candle files (no timeframe in filename), try directory inference
+        if info["timeframe_hint"] is None and info["dataset_domain"] == "candles":
+            info["timeframe_hint"] = _infer_timeframe_from_path(path)
         info["source_path"] = str(path.resolve())
         info["file_size_bytes"] = path.stat().st_size
         results.append(info)

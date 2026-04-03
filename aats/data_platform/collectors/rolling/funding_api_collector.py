@@ -202,6 +202,16 @@ def collect_funding_incremental(
         if checkpoint_ts:
             all_rows = [r for r in all_rows if r.ts > checkpoint_ts]
 
+        # Deduplicate by (symbol, ts) — API pages can overlap at boundaries
+        seen: set[tuple[str, datetime]] = set()
+        deduped: list[FundingRow] = []
+        for r in all_rows:
+            key = (r.symbol, r.ts)
+            if key not in seen:
+                seen.add(key)
+                deduped.append(r)
+        all_rows = deduped
+
         count = _write_staging(session, table, all_rows, run_id, dataset_version)
 
         if all_rows:

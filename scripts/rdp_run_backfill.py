@@ -21,6 +21,9 @@ log = logging.getLogger("rdp_backfill")
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run historical backfill")
     parser.add_argument("--dir", type=str, default=None, help="Override historical download directory")
+    parser.add_argument("--timeframe", type=str, default=None,
+                        help="Timeframe for candle files (e.g. 1m, 5m, 15m, 1H). "
+                             "Required when OKX filenames/directories don't carry timeframe.")
     args = parser.parse_args()
 
     from sqlalchemy import text
@@ -63,13 +66,20 @@ def main() -> None:
 
             domain = row["dataset_domain"]
             symbol = row["symbol_hint"]
-            tf = row["timeframe_hint"]
+            tf = row["timeframe_hint"] or args.timeframe  # CLI fallback
             path = row["source_path"]
 
-            log.info("Processing: %s (%s, %s, %s)", path, domain, symbol, tf)
+            log.info("Processing: %s (%s, %s, tf=%s)", path, domain, symbol, tf)
 
             try:
-                if domain == "candles" and tf:
+                if domain == "candles":
+                    if not tf:
+                        log.warning(
+                            "Skipping candle file (no timeframe): %s — "
+                            "use --timeframe or organize files in timeframe directories",
+                            path,
+                        )
+                        continue
                     run_id = collect_backfill_candle_file(
                         session,
                         source_file_id=file_id,
@@ -98,7 +108,7 @@ def main() -> None:
                         ingest_run_id=run_id,
                     )
                 else:
-                    log.warning("Skipping unknown domain/tf: %s/%s", domain, tf)
+                    log.warning("Skipping unknown domain: %s", domain)
             except Exception:
                 log.exception("Failed to process file: %s", path)
 

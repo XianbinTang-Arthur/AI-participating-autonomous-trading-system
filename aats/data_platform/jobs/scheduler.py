@@ -20,7 +20,11 @@ from aats.data_platform.collectors.rolling.candles_api_collector import collect_
 from aats.data_platform.collectors.rolling.funding_api_collector import collect_funding_incremental
 from aats.data_platform.config import ResearchPlatformSettings, get_settings
 from aats.data_platform.db import get_session
-from aats.data_platform.merge.merge_pipeline import run_candle_merge_pipeline, run_funding_merge_pipeline
+from aats.data_platform.merge.merge_pipeline import (
+    ValidationBlockedError,
+    run_candle_merge_pipeline,
+    run_funding_merge_pipeline,
+)
 from aats.data_platform.models import SUPPORTED_SYMBOLS, FUNDING_SYMBOLS
 
 log = logging.getLogger(__name__)
@@ -34,25 +38,44 @@ _TF_SECONDS = {
 
 _FUNDING_CADENCE_SECONDS = 900  # 15 minutes
 
+# Bucket-based dedup: prevents re-firing the same cadence window even if
+# the scheduler loop ticks more than once within the 60-second tolerance.
+_last_candle_bucket: dict[tuple[str, str], int] = {}
+_last_funding_bucket: dict[str, int] = {}
 
-def _is_on_cadence(now_utc: datetime, timeframe: str) -> bool:
-    """Return True if *now_utc* is aligned to the cadence for *timeframe*.
 
-    We check whether the current minute (for sub-hour) or the current hour
-    boundary is a multiple of the timeframe interval.  A 30-second tolerance
-    is applied so the scheduler doesn't need sub-second precision.
+def _should_fire_candle(now_utc: datetime, symbol: str, timeframe: str) -> bool:
+    """Return True if this (symbol, timeframe) should fire now.
+
+    Checks cadence boundary AND ensures the same bucket is not fired twice.
     """
     seconds = _TF_SECONDS.get(timeframe)
     if seconds is None:
         return True  # unknown timeframe — always eligible
     epoch_seconds = int(now_utc.timestamp())
-    return (epoch_seconds % seconds) < 60  # within the first minute of the boundary
+    if (epoch_seconds % seconds) >= 60:
+        return False  # not on boundary
+    bucket = epoch_seconds // seconds
+    key = (symbol, timeframe)
+    if _last_candle_bucket.get(key) == bucket:
+        return False  # already fired this bucket
+    _last_candle_bucket[key] = bucket
+    return True
 
 
-def _is_funding_due(now_utc: datetime) -> bool:
-    """Return True if now is within the first minute of a 15-min boundary."""
+def _should_fire_funding(now_utc: datetime, symbol: str) -> bool:
+    """Return True if this symbol's funding should fire now.
+
+    Checks 15-min boundary AND ensures the same bucket is not fired twice.
+    """
     epoch_seconds = int(now_utc.timestamp())
-    return (epoch_seconds % _FUNDING_CADENCE_SECONDS) < 60
+    if (epoch_seconds % _FUNDING_CADENCE_SECONDS) >= 60:
+        return False
+    bucket = epoch_seconds // _FUNDING_CADENCE_SECONDS
+    if _last_funding_bucket.get(symbol) == bucket:
+        return False
+    _last_funding_bucket[symbol] = bucket
+    return True
 
 
 def run_one_rolling_cycle(settings: ResearchPlatformSettings | None = None) -> None:
@@ -63,11 +86,11 @@ def run_one_rolling_cycle(settings: ResearchPlatformSettings | None = None) -> N
     settings = settings or get_settings()
     now_utc = datetime.now(timezone.utc)
 
-    # Candles — only fire timeframes that are on cadence
+    # Candles — only fire timeframes on cadence, with bucket dedup
     if settings.rolling_candles_enabled:
         for symbol in settings.rolling_candles_symbols:
             for tf in settings.rolling_candles_timeframes:
-                if not _is_on_cadence(now_utc, tf):
+                if not _should_fire_candle(now_utc, symbol, tf):
                     continue
                 try:
                     with get_session(settings) as session:
@@ -78,12 +101,16 @@ def run_one_rolling_cycle(settings: ResearchPlatformSettings | None = None) -> N
                         run_candle_merge_pipeline(
                             session, symbol=symbol, timeframe=tf, ingest_run_id=run_id,
                         )
+                except ValidationBlockedError:
+                    log.warning("Candle merge blocked by quality gate: %s %s", symbol, tf)
                 except Exception:
                     log.exception("Rolling candle failed: %s %s", symbol, tf)
 
-    # Funding — every 15 minutes
-    if settings.rolling_funding_enabled and _is_funding_due(now_utc):
+    # Funding — every 15 minutes, with bucket dedup
+    if settings.rolling_funding_enabled:
         for symbol in settings.rolling_funding_symbols:
+            if not _should_fire_funding(now_utc, symbol):
+                continue
             try:
                 with get_session(settings) as session:
                     run_id = collect_funding_incremental(
@@ -93,6 +120,8 @@ def run_one_rolling_cycle(settings: ResearchPlatformSettings | None = None) -> N
                     run_funding_merge_pipeline(
                         session, symbol=symbol, ingest_run_id=run_id,
                     )
+            except ValidationBlockedError:
+                log.warning("Funding merge blocked by quality gate: %s", symbol)
             except Exception:
                 log.exception("Rolling funding failed: %s", symbol)
 
