@@ -20,7 +20,7 @@
   - baseline regime/volatility
   - reconciliation state
   - recent sleeve PnL
-  - runtime setting `strategy_sleeve_auto_parallel_enabled`
+  - runtime setting `strategy_sleeve_auto_execution_enabled`
 - Outputs:
   - `ExecutionPermissionDecision`
   - `BudgetControlDecision`
@@ -67,7 +67,7 @@
 - Rollback is straightforward: revert new modules and restore old auto-parallel logic.
 
 ## Configuration and Environment Isolation
-- Continue using `strategy_sleeve_auto_parallel_enabled` in phase 1.
+- Historical note: phase 1 still used the old key name. The live code now uses only `strategy_sleeve_auto_execution_enabled`.
 - Live/paper behavior differences remain controlled by existing runtime settings.
 
 ## Code Organization and Dependencies

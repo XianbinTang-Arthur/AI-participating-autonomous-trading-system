@@ -26,11 +26,7 @@ def effective_non_protective_auto_execution_enabled(settings: AATSSettings) -> b
 
 def non_protective_entry_execution_guard(settings: AATSSettings) -> dict[str, object]:
     automatic_entry_enabled = effective_non_protective_auto_execution_enabled(settings)
-    config_key = (
-        "strategy_sleeve_auto_parallel_enabled"
-        if settings.strategy_sleeve_auto_execution_uses_deprecated_key
-        else "strategy_sleeve_auto_execution_enabled"
-    )
+    config_key = settings.strategy_sleeve_auto_execution_config_source
     if automatic_entry_enabled:
         return {
             "active": False,
@@ -40,7 +36,7 @@ def non_protective_entry_execution_guard(settings: AATSSettings) -> dict[str, ob
             "summary": "当前非保护性开仓与加仓的自动执行已开启；新的 opening intent 可以继续进入 allocator 和执行链。",
             "operator_summary": "当前允许非保护性开仓与加仓自动执行，系统不会再把 opening intent 统一降级成仅参考。",
             "protective_execution_preserved": True,
-            "configured_auto_parallel_enabled": True,
+            "configured_auto_execution_enabled": True,
             "effective_config_key": config_key,
             "using_deprecated_key": settings.strategy_sleeve_auto_execution_uses_deprecated_key,
         }
@@ -52,7 +48,7 @@ def non_protective_entry_execution_guard(settings: AATSSettings) -> dict[str, ob
         "summary": "当前非保护性开仓与加仓只做参考（advisory-only），不会自动下单；保护性收缩与退出仍可继续执行。",
         "operator_summary": "当前非保护性开仓与加仓自动执行已关闭；opening intent 会在 allocator 前被降级成 advisory_only 或 hold_current。",
         "protective_execution_preserved": True,
-        "configured_auto_parallel_enabled": False,
+        "configured_auto_execution_enabled": False,
         "effective_config_key": config_key,
         "using_deprecated_key": settings.strategy_sleeve_auto_execution_uses_deprecated_key,
     }
@@ -66,7 +62,7 @@ class SleeveExecutionPermissionPolicy:
         configured_auto_execution_enabled = effective_non_protective_auto_execution_enabled(self.settings)
         candidate_enabled = bool(raw.candidate_enabled)
         candidate_execution_compatible = bool(raw.candidate_execution_compatible)
-        runtime_supported = bool(raw.runtime_supported)
+        state_runtime_supported = bool(raw.state_runtime_supported)
         protective_intent = bool(raw.protective_intent)
 
         reason_codes: tuple[str, ...]
@@ -74,7 +70,7 @@ class SleeveExecutionPermissionPolicy:
         approved_for_execution: bool
         blocks_non_protective_execution = False
 
-        if not runtime_supported:
+        if not state_runtime_supported:
             approved_for_execution = False
             permission_mode = "unsupported"
             blocks_non_protective_execution = True
@@ -109,7 +105,7 @@ class SleeveExecutionPermissionPolicy:
 
         return ExecutionPermissionDecision(
             configured_auto_execution_enabled=configured_auto_execution_enabled,
-            runtime_supported=runtime_supported,
+            state_runtime_supported=state_runtime_supported,
             candidate_enabled=candidate_enabled,
             candidate_execution_compatible=candidate_execution_compatible,
             protective_intent=protective_intent,
@@ -120,7 +116,7 @@ class SleeveExecutionPermissionPolicy:
             human_summary=self._human_summary(
                 permission_mode=permission_mode,
                 active_inventory=raw.active_inventory,
-                runtime_supported=runtime_supported,
+                state_runtime_supported=state_runtime_supported,
                 candidate_execution_compatible=candidate_execution_compatible,
             ),
         )
@@ -130,7 +126,7 @@ class SleeveExecutionPermissionPolicy:
         *,
         permission_mode: str,
         active_inventory: bool,
-        runtime_supported: bool,
+        state_runtime_supported: bool,
         candidate_execution_compatible: bool,
     ) -> str:
         if permission_mode == "approved":
@@ -138,7 +134,7 @@ class SleeveExecutionPermissionPolicy:
         if permission_mode == "protective_override":
             return "当前虽然关闭了普通自动执行，但保护性意图仍允许继续执行。"
         if permission_mode == "unsupported":
-            if not runtime_supported:
+            if not state_runtime_supported:
                 return "当前运行环境不支持这条 sleeve 自动进入执行链。"
             if not candidate_execution_compatible:
                 return "当前 sleeve 候选不满足执行兼容性要求，因此不会自动进入执行链。"

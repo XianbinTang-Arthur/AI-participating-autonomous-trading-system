@@ -125,7 +125,7 @@ class StrategySleeveAutoController:
             candidate_execution_compatible=bool(candidate.execution_compatible),
             candidate_score=float(candidate.score or 0.0),
             candidate_confidence=float(candidate.confidence or 0.0),
-            runtime_supported=candidate.state != "incompatible",
+            state_runtime_supported=candidate.state != "incompatible",
             active_inventory=current_inventory_notional > EPSILON_DECIMAL_12,
             current_inventory_notional=quantize_decimal(current_inventory_notional),
             protective_intent=self._is_protective_intent(intent),
@@ -166,7 +166,7 @@ class StrategySleeveAutoController:
             automatic_enabled=bool(
                 permission.configured_auto_execution_enabled and raw.candidate_enabled
             ),
-            runtime_supported=raw.runtime_supported,
+            runtime_supported=raw.state_runtime_supported,
             approved_for_execution=permission.approved_for_execution,
             permission_mode=permission.permission_mode,
             execution_control_mode=composed.execution_control_mode,
@@ -174,6 +174,13 @@ class StrategySleeveAutoController:
             automation_state=automation_state,
             compatibility={
                 "legacy_automation_state": automation_state,
+                "legacy_automation_state_note": (
+                    "compatibility-only coarse projection; prefer execution_control_mode and execution_behavior"
+                ),
+                "legacy_automation_projection": {
+                    "source_execution_control_mode": composed.execution_control_mode,
+                    "source_execution_behavior": composed.execution_behavior,
+                },
             },
             budget_multiplier=budget.effective_scale,
             effective_scale=budget.effective_scale,
@@ -273,7 +280,7 @@ class StrategySleeveAutoController:
                     "auto_allocator_weight": decision.allocator_weight,
                     "auto_recent_net_pnl": decision.recent_net_pnl,
                     "auto_current_inventory_notional": decision.current_inventory_notional,
-                    "auto_automation_state": decision.automation_state,
+                    "auto_legacy_automation_state": decision.automation_state,
                     "auto_permission_mode": decision.permission_mode,
                     "auto_execution_control_mode": decision.execution_control_mode,
                     "auto_execution_behavior": decision.execution_behavior,
@@ -314,7 +321,7 @@ class StrategySleeveAutoController:
                     "auto_allocator_weight": decision.allocator_weight,
                     "auto_recent_net_pnl": decision.recent_net_pnl,
                     "auto_current_inventory_notional": decision.current_inventory_notional,
-                    "auto_automation_state": decision.automation_state,
+                    "auto_legacy_automation_state": decision.automation_state,
                     "auto_permission_mode": decision.permission_mode,
                     "auto_execution_control_mode": decision.execution_control_mode,
                     "auto_execution_behavior": decision.execution_behavior,
@@ -405,7 +412,7 @@ class StrategySleeveAutoController:
     ) -> bool:
         return bool(
             raw.candidate_execution_compatible
-            and raw.runtime_supported
+            and raw.state_runtime_supported
             and (
                 permission.approved_for_execution
                 or raw.protective_intent
@@ -512,7 +519,8 @@ class StrategySleeveAutoController:
             "execution_behavior": composed.execution_behavior,
             "permission": {
                 "configured_auto_execution_enabled": permission.configured_auto_execution_enabled,
-                "runtime_supported": permission.runtime_supported,
+                "runtime_supported": permission.state_runtime_supported,
+                "state_runtime_supported": permission.state_runtime_supported,
                 "candidate_enabled": permission.candidate_enabled,
                 "candidate_execution_compatible": permission.candidate_execution_compatible,
                 "protective_intent": permission.protective_intent,

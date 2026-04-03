@@ -40,8 +40,6 @@
 - 默认产品类型：`derivatives`
 - 默认保证金模式：`cross`
 - 默认 OKX 模式：`实盘`
-- 当前托管主策略：`independent`
-- 当前托管 overlay 模式：`independent`
 
 ## `.env` 里应该保留什么
 
@@ -49,15 +47,6 @@
 - 数据库、端口、日志目录
 - 交易所与 OpenAI 凭证
 - 账户级仓位/杠杆/风控上限
-
-## 数据库清空后能不能删 `migrations`
-
-- 不能删。
-- 空库初始化、启动自迁移、升级路径测试都依赖 `migrations/*.sql`。
-- 当前仓库至少需要保留：
-  - `0001_postgres_latest_schema.sql`
-  - `0002_postgres_legacy_upgrade.sql`
-  - `0003_postgres_execution_attempt_id_columns.sql`
 
 ## 按字段分组的修改指南
 
@@ -135,8 +124,11 @@
   - `strategy_short_bias_enabled`
   - `strategy_dynamic_leverage_enabled`
   - `strategy_entry_*`
+  - `strategy_short_entry_*`
   - `strategy_scale_in_*`
+  - `strategy_short_scale_in_*`
   - `strategy_reversal_*`
+  - `strategy_short_reversal_*`
   - `strategy_min_hold_seconds`
   - `strategy_post_close_cooldown_seconds`
   - `strategy_max_fee_drag_ratio`
@@ -147,13 +139,12 @@
 - 改 `configs/strategy_profiles/<profile>.yaml`。
 - 主要字段：
   - `smart_arbitrage_enabled`
-  - `smart_arbitrage_pair_definitions`
   - `smart_arbitrage_basis_entry_bps`
   - `smart_arbitrage_basis_exit_bps`
   - `smart_arbitrage_estimated_cost_bps`
   - `smart_arbitrage_quote_budget_per_trade`
   - `smart_arbitrage_max_pair_notional`
-  - `smart_arbitrage_negative_basis_mode`
+  - `smart_arbitrage_hedge_target_leverage`
 
 ### 想改现货网格（spot_grid）去哪
 
@@ -184,8 +175,7 @@
 - 主要字段：
   - `strategy_family_active`
   - `strategy_family_auto_selection_enabled`
-  - `strategy_sleeve_auto_execution_enabled`（主配置键）
-  - `strategy_sleeve_auto_parallel_enabled`（旧键；仅保留兼容读取窗口与迁移诊断）
+  - `strategy_sleeve_auto_execution_enabled`
   - `strategy_sleeve_auto_min_budget_multiplier`
   - `strategy_sleeve_auto_reconciliation_contraction_multiplier`
   - `strategy_sleeve_auto_soft_loss_usdt`
@@ -234,8 +224,7 @@
 
 - `strategy_family_active`
 - `strategy_family_auto_selection_enabled`
-- `strategy_sleeve_auto_execution_enabled`（主配置键）
-- `strategy_sleeve_auto_parallel_enabled`（旧键；仅兼容窗口）
+- `strategy_sleeve_auto_execution_enabled`
 - `strategy_sleeve_auto_min_budget_multiplier`
 - `strategy_sleeve_auto_reconciliation_contraction_multiplier`
 - `strategy_sleeve_auto_soft_loss_usdt`
@@ -265,12 +254,22 @@
 - `strategy_entry_min_signal_edge_bps`
 - `strategy_entry_alpha_min`
 - `strategy_entry_confidence_min`
+- `strategy_short_entry_allowed_regimes`
+- `strategy_short_entry_min_signal_edge_bps`
+- `strategy_short_entry_alpha_min`
+- `strategy_short_entry_confidence_min`
 - `strategy_scale_in_min_signal_edge_bps`
 - `strategy_scale_in_alpha_min`
 - `strategy_scale_in_confidence_min`
+- `strategy_short_scale_in_min_signal_edge_bps`
+- `strategy_short_scale_in_alpha_min`
+- `strategy_short_scale_in_confidence_min`
 - `strategy_reversal_min_signal_edge_bps`
 - `strategy_reversal_alpha_min`
 - `strategy_reversal_confidence_min`
+- `strategy_short_reversal_min_signal_edge_bps`
+- `strategy_short_reversal_alpha_min`
+- `strategy_short_reversal_confidence_min`
 - `strategy_min_hold_seconds`
 - `strategy_post_close_cooldown_seconds`
 - `strategy_max_fee_drag_ratio`
@@ -306,13 +305,3 @@
 - 仍保留给非托管/manual `config_profile` 路径与测试使用
 - 托管 profile（`spot/derivatives/spot_live/derivatives_live`）不再叠加这些 YAML
 - 新的策略调参统一走 `configs/strategy_profiles/*.yaml`
-
-## unknown write 复核阈值
-
-- 放根目录对应 profile 的 `.env.*`
-- 主要字段：
-  - `AATS_EXECUTION_UNKNOWN_SUBMIT_REVIEW_AFTER_SECONDS`
-  - `AATS_EXECUTION_UNKNOWN_CANCEL_REVIEW_AFTER_SECONDS`
-- 语义：
-  - `submit` 写结果未知超过阈值后，系统会把这笔单升级为 `review_required`
-  - `cancel` 写结果未知超过阈值后，系统会把这笔单升级为 `review_required`

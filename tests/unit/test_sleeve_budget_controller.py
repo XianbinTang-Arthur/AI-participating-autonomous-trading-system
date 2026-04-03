@@ -59,7 +59,7 @@ def _raw(**overrides) -> RawSleeveCandidateInputs:
         "candidate_execution_compatible": True,
         "candidate_score": 0.7,
         "candidate_confidence": 0.8,
-        "runtime_supported": True,
+        "state_runtime_supported": True,
         "active_inventory": False,
         "current_inventory_notional": Decimal("0"),
         "protective_intent": False,

@@ -1,7 +1,7 @@
 # Task 200 - Auto Parallel Phase 5 Runtime Compatibility and Execution Behavior
 
 ## Business objectives and boundaries
-- Continue shrinking deprecated `strategy_sleeve_auto_parallel_enabled` exposure so the full `/strategy/runtime` payload treats `strategy_sleeve_auto_execution_enabled` as the only first-class config knob.
+- Continue shrinking deprecated-key exposure so the full `/strategy/runtime` payload treats `strategy_sleeve_auto_execution_enabled` as the only first-class config knob.
 - Keep the deprecated key available only inside a read-only compatibility window for migration diagnostics.
 - Promote `budget_zero_suppressed` from a payload-only marker into an explicit runtime and allocator-visible execution behavior semantic.
 - Keep allocator route semantics unchanged in this phase; do not introduce a new route action.
@@ -44,7 +44,7 @@
 
 ## Migration, rollback, compatibility
 - `strategy_sleeve_auto_execution_enabled` remains the canonical config field.
-- `strategy_sleeve_auto_parallel_enabled` remains readable only through compatibility metadata for migration visibility.
+- Historical note: at phase 5 the old key still survived in compatibility metadata. It has since been removed from active inputs.
 - Rollback is low risk because route semantics are unchanged; existing downstream allocator selection still keys off `route_action` and quantities.
 
 ## Testing strategy

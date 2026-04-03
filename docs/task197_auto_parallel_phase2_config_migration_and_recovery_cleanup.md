@@ -1,7 +1,7 @@
 # Task 197 - Auto Parallel Phase 2 Config Migration And Recovery Cleanup
 
 ## Business objectives and boundaries
-- Introduce the new config key `strategy_sleeve_auto_execution_enabled` while keeping backward compatibility with `strategy_sleeve_auto_parallel_enabled`.
+- Introduce the new config key `strategy_sleeve_auto_execution_enabled` while the old compatibility key still existed during that phase. The old key has since been removed.
 - Emit explicit deprecation warnings when startup still relies on the old key.
 - Preserve phase 1 permission/budget/composition semantics without changing allocator route actions.
 - Fix the two repository-wide failing unit tests that are unrelated to phase 1 logic but currently keep the full unit suite from going green.
@@ -15,7 +15,7 @@
 
 ## Input/output interfaces
 - Input:
-  - YAML / env settings with either `strategy_sleeve_auto_execution_enabled` or `strategy_sleeve_auto_parallel_enabled`
+  - YAML / env settings with `strategy_sleeve_auto_execution_enabled`
   - existing recovery / operator payloads
 - Output:
   - effective runtime setting value
@@ -67,7 +67,7 @@
 - No new external dependencies.
 
 ## Documentation and Operations Manual
-- Operators should understand that `strategy_sleeve_auto_parallel_enabled` is deprecated in favor of `strategy_sleeve_auto_execution_enabled`.
+- Operators should understand that the old `strategy_sleeve_auto_parallel_enabled` path has been retired and only `strategy_sleeve_auto_execution_enabled` remains valid.
 
 ## Deployment and Acceptance Criteria
 - New key works and takes precedence over old key.

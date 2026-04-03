@@ -29,7 +29,6 @@ export function renderStrategySections(data) {
   const executionBehaviorSummary = strategyRuntimeSummary.execution_behavior_summary || {};
   const entryAutoExecutionEnabled = Boolean(
     strategyRuntimeSummary.entry_auto_execution_enabled
-    ?? strategyRuntimeSummary.auto_parallel_enabled
     ?? strategyRuntime.configured_parameters?.strategy_sleeve_auto_execution_enabled
   );
   const executeTargetCount = Number(executionBehaviorCounts.execute_target || 0);

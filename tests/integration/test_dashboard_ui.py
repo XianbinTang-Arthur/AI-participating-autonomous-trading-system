@@ -1374,7 +1374,7 @@ console.log(JSON.stringify({
                 "strategy_sleeve_auto_execution_uses_deprecated_key": False,
                 "compatibility": {
                     "deprecated_auto_execution_key": "strategy_sleeve_auto_parallel_enabled",
-                    "deprecated_auto_execution_value": True,
+                    "deprecated_auto_execution_value": None,
                 },
                 "strategy_sleeve_auto_min_budget_multiplier": 0.4,
                 "strategy_sleeve_auto_reconciliation_contraction_multiplier": 0.7,
@@ -1427,7 +1427,7 @@ console.log(JSON.stringify({
             trimmed["configured_parameters"]["compatibility"]["deprecated_auto_execution_key"],
             "strategy_sleeve_auto_parallel_enabled",
         )
-        self.assertTrue(trimmed["configured_parameters"]["compatibility"]["deprecated_auto_execution_value"])
+        self.assertIsNone(trimmed["configured_parameters"]["compatibility"]["deprecated_auto_execution_value"])
         self.assertNotIn("recent_budget_snapshots", trimmed)
         self.assertNotIn("recent_conflict_resolutions", trimmed)
         self.assertNotIn("recent_netting_decisions", trimmed)
@@ -1795,15 +1795,11 @@ const html = renderStrategyView({
       latest_portfolio_requested_notional: 0,
       latest_portfolio_approved_notional: 0,
       latest_portfolio_budget_cut_notional: 0,
-      auto_parallel_enabled: false,
       entry_execution_guard: {
         active: true,
         headline: '当前 non-protective entry execution 已被降级为 advisory-only。',
         summary: '当前 non-protective entry execution 已被降级为 advisory-only；新的非保护性开仓/加仓只做参考，不会自动下单，保护性收缩仍可继续执行。',
       },
-      automation_active_count: 0,
-      automation_contracted_count: 0,
-      automation_paused_count: 0,
       latest_approved_sleeve_weights: {},
       latest_selection_reason_codes: ['smart_arbitrage_basis_below_entry_threshold'],
     },
@@ -1962,10 +1958,6 @@ import { renderStrategyView } from './aats/api/static/modules/views/strategy-vie
 const html = renderStrategyView({
   strategyRuntime: {
     summary: {
-      auto_parallel_enabled: true,
-      automation_active_count: 1,
-      automation_contracted_count: 0,
-      automation_paused_count: 0,
       budget_zero_suppression_count: 2,
       execution_behavior_counts: {
         execute_target: 0,
@@ -2058,10 +2050,6 @@ import { renderStrategyView } from './aats/api/static/modules/views/strategy-vie
 const html = renderStrategyView({
   strategyRuntime: {
     summary: {
-      auto_parallel_enabled: false,
-      automation_active_count: 0,
-      automation_contracted_count: 0,
-      automation_paused_count: 1,
       budget_zero_suppression_count: 0,
       execution_control_mode_counts: {
         approved: 0,
@@ -2094,8 +2082,8 @@ const html = renderStrategyView({
         active: true,
         summary: '当前 non-protective entry execution 已被降级为 advisory-only。',
       },
-      entry_auto_execution_config_source: 'strategy_sleeve_auto_parallel_enabled',
-      entry_auto_execution_uses_deprecated_key: true,
+      entry_auto_execution_config_source: 'strategy_sleeve_auto_execution_enabled',
+      entry_auto_execution_uses_deprecated_key: false,
       latest_approved_sleeve_weights: {},
     },
     latest_snapshot: {
@@ -2119,11 +2107,11 @@ const html = renderStrategyView({
     },
     configured_parameters: {
       strategy_sleeve_auto_execution_enabled: false,
-      strategy_sleeve_auto_execution_config_source: 'strategy_sleeve_auto_parallel_enabled',
-      strategy_sleeve_auto_execution_uses_deprecated_key: true,
+      strategy_sleeve_auto_execution_config_source: 'strategy_sleeve_auto_execution_enabled',
+      strategy_sleeve_auto_execution_uses_deprecated_key: false,
       compatibility: {
         deprecated_auto_execution_key: 'strategy_sleeve_auto_parallel_enabled',
-        deprecated_auto_execution_value: false,
+        deprecated_auto_execution_value: null,
       },
       strategy_sleeve_auto_min_budget_multiplier: 0.25,
       strategy_sleeve_auto_soft_loss_usdt: 20,
@@ -2179,7 +2167,7 @@ console.log(JSON.stringify({
             check=False,
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
-        self.assertIn('"showsDeprecatedConfigCallout":true', result.stdout)
+        self.assertIn('"showsDeprecatedConfigCallout":false', result.stdout)
         self.assertIn('"showsControlModeDistribution":true', result.stdout)
         self.assertIn('"showsExecutionControlSummaryKv":true', result.stdout)
         self.assertIn('"showsExecutionBehaviorSummaryKv":true', result.stdout)
@@ -2232,10 +2220,6 @@ const html = renderStrategyView({
       latest_portfolio_requested_notional: 100,
       latest_portfolio_approved_notional: 100,
       latest_portfolio_budget_cut_notional: 0,
-      auto_parallel_enabled: true,
-      automation_active_count: 1,
-      automation_contracted_count: 0,
-      automation_paused_count: 0,
       latest_approved_sleeve_weights: {},
       latest_selection_reason_codes: ['spot_grid_rebalance_ready'],
     },
@@ -2369,10 +2353,6 @@ const html = renderStrategyView({
       latest_portfolio_requested_notional: 0,
       latest_portfolio_approved_notional: 0,
       latest_portfolio_budget_cut_notional: 0,
-      auto_parallel_enabled: true,
-      automation_active_count: 1,
-      automation_contracted_count: 0,
-      automation_paused_count: 0,
       latest_approved_sleeve_weights: {},
       latest_selection_reason_codes: ['signal_edge_clear'],
     },

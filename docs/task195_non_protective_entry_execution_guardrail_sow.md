@@ -1,7 +1,7 @@
 # Task 195 - Non-Protective Entry Execution Guardrail
 
 ## Business objectives and boundaries
-- Restore `derivatives_live` non-protective automatic entry execution by re-enabling `strategy_sleeve_auto_parallel_enabled`.
+- Restore `derivatives_live` non-protective automatic entry execution by re-enabling `strategy_sleeve_auto_execution_enabled`.
 - Make the “entry execution has been downgraded to advisory-only” state explicit at startup and in runtime/operator surfaces.
 - Keep the change scoped to configuration, observability, and UI messaging.
 - Do not refactor `auto_parallel` architecture or change allocator / execution semantics.
@@ -15,7 +15,7 @@
 - `aats/api/static/modules/views/strategy-view.js`: operator-facing runtime warning in the dashboard.
 
 ## Input/output interfaces
-- Input: existing runtime setting `strategy_sleeve_auto_parallel_enabled`.
+- Input: existing runtime setting `strategy_sleeve_auto_execution_enabled`.
 - Output:
   - startup structured warning log when disabled
   - runtime summary field `entry_execution_guard`
@@ -41,8 +41,8 @@
 - Runtime/operator summaries remain backward compatible by adding fields only.
 
 ## State Transition and Lifecycle
-- When `strategy_sleeve_auto_parallel_enabled=true`, non-protective opening / scale-in intents may proceed to allocator as usual.
-- When `strategy_sleeve_auto_parallel_enabled=false`, non-protective entry execution is treated as advisory-only; protection/de-risking remains allowed.
+- When `strategy_sleeve_auto_execution_enabled=true`, non-protective opening / scale-in intents may proceed to allocator as usual.
+- When `strategy_sleeve_auto_execution_enabled=false`, non-protective entry execution is treated as advisory-only; protection/de-risking remains allowed.
 
 ## Caching and Performance
 - Guard summary is constant-time and settings-derived.
@@ -73,9 +73,9 @@
 
 ## Documentation and Operations Manual
 - Operators should interpret the warning as: new non-protective entries will not auto-submit while protective reductions can still run.
-- If the warning appears unexpectedly in live, verify the active runtime profile and `strategy_sleeve_auto_parallel_enabled`.
+- If the warning appears unexpectedly in live, verify the active runtime profile and `strategy_sleeve_auto_execution_enabled`.
 
 ## Deployment and Acceptance Criteria
-- `derivatives_live` restores `strategy_sleeve_auto_parallel_enabled: true`.
+- `derivatives_live` restores `strategy_sleeve_auto_execution_enabled: true`.
 - Runtime start emits no advisory-only guard warning when enabled.
 - When disabled in tests, startup log, runtime API, profile-control summary, and strategy page all clearly state the advisory-only downgrade.

@@ -7,8 +7,7 @@ description: Use this when implementing a feature or bugfix that requires planni
 Implement scoped changes safely and predictably.
 
 # Workflow
-1. Read the relevant files and summarize the current behavior.(under \AIParticipatingAutonomousTradingSystem\docs)
-2. Create a brief plan that clearly outlines each sub-step, then generate a statement of work and save it in the directory: \AIParticipatingAutonomousTradingSystem\docs. 
+1. Create a brief plan that clearly outlines each sub-step, then generate a statement of work and save it in the directory: \AIParticipatingAutonomousTradingSystem\docs. 
 Requirements:
 Business objectives and boundaries
 Module responsibilities and domain model
@@ -26,10 +25,10 @@ Configuration and Environment Isolation
 Code Organization and Dependencies
 Documentation and Operations Manual
 Deployment and Acceptance Criteria
-3. Make the smallest correct change.
-4. Add or update tests.
-5. Run validation commands.
-6. Return a concise delivery report:
+2. Make the smallest correct change.
+3. Add or update tests.
+4. Run validation commands.
+5. Return a concise delivery report:
    - files changed
    - behavior changed
    - tests run

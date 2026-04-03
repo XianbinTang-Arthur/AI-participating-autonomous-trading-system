@@ -63,6 +63,9 @@ SmartArbitrageFeeSourceMode = Literal["configured", "account_schedule"]
 SmartArbitrageFundingSourceMode = Literal["configured", "account_proxy"]
 SmartArbitrageBorrowSourceMode = Literal["configured", "apr_window_model"]
 
+PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY = "strategy_sleeve_auto_execution_enabled"
+DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY = "strategy_sleeve_auto_parallel_enabled"
+
 _PLACEHOLDER_TOKENS = (
     "REPLACE_WITH_",
     "CHANGE_ME",
@@ -273,8 +276,7 @@ class AATSSettings(BaseSettings):
     strategy_family_protective_live_execution_enabled: bool = False
     strategy_family_opportunistic_live_execution_enabled: bool = False
     strategy_family_independent_live_execution_enabled: bool = False
-    strategy_sleeve_auto_execution_enabled: bool | None = None
-    strategy_sleeve_auto_parallel_enabled: bool = True
+    strategy_sleeve_auto_execution_enabled: bool = True
     strategy_sleeve_auto_min_budget_multiplier: float = 0.35
     strategy_sleeve_auto_reconciliation_contraction_multiplier: float = 0.50
     strategy_sleeve_auto_soft_loss_usdt: float = 10.0
@@ -519,24 +521,24 @@ class AATSSettings(BaseSettings):
                 normalized.append(text)
         return tuple(normalized)
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_sleeve_auto_parallel_key(cls, value: Any) -> Any:
+        if isinstance(value, dict) and DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY in value:
+            raise ValueError(
+                "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled"
+            )
+        return value
+
     @model_validator(mode="after")
     def validate_supported_runtime_overrides(self) -> "AATSSettings":
         # The current market/feature pipeline is still built around fixed
         # 15m + 1h snapshots. Exposing broader timeframe configurability in
         # env/YAML without enforcing this creates misleading configs.
-        explicit_old_sleeve_auto_key = "strategy_sleeve_auto_parallel_enabled" in self.model_fields_set
-        explicit_new_sleeve_auto_key = "strategy_sleeve_auto_execution_enabled" in self.model_fields_set
-        effective_sleeve_auto_execution_enabled = (
-            self.strategy_sleeve_auto_execution_enabled
-            if self.strategy_sleeve_auto_execution_enabled is not None
-            else self.strategy_sleeve_auto_parallel_enabled
-        )
-        self.strategy_sleeve_auto_execution_enabled = bool(effective_sleeve_auto_execution_enabled)
-        self.strategy_sleeve_auto_parallel_enabled = bool(effective_sleeve_auto_execution_enabled)
-        if not explicit_old_sleeve_auto_key:
-            self.__pydantic_fields_set__.discard("strategy_sleeve_auto_parallel_enabled")
+        explicit_new_sleeve_auto_key = PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY in self.model_fields_set
+        self.strategy_sleeve_auto_execution_enabled = bool(self.strategy_sleeve_auto_execution_enabled)
         if not explicit_new_sleeve_auto_key:
-            self.__pydantic_fields_set__.discard("strategy_sleeve_auto_execution_enabled")
+            self.__pydantic_fields_set__.discard(PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY)
         if "strategy_hedge_independent_long_close_threshold" not in self.model_fields_set:
             self.strategy_hedge_independent_long_close_threshold = float(
                 self.strategy_hedge_independent_long_entry_threshold
@@ -713,18 +715,27 @@ class AATSSettings(BaseSettings):
 
     @property
     def effective_strategy_sleeve_auto_execution_enabled(self) -> bool:
-        return bool(
-            self.strategy_sleeve_auto_execution_enabled
-            if self.strategy_sleeve_auto_execution_enabled is not None
-            else self.strategy_sleeve_auto_parallel_enabled
-        )
+        return bool(self.strategy_sleeve_auto_execution_enabled)
 
     @property
     def strategy_sleeve_auto_execution_uses_deprecated_key(self) -> bool:
-        return (
-            "strategy_sleeve_auto_parallel_enabled" in self.model_fields_set
-            and "strategy_sleeve_auto_execution_enabled" not in self.model_fields_set
-        )
+        return False
+
+    @property
+    def strategy_sleeve_auto_execution_config_source(self) -> str:
+        return PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY
+
+    @property
+    def strategy_sleeve_auto_execution_deprecated_key(self) -> str:
+        return DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY
+
+    @property
+    def strategy_sleeve_auto_execution_primary_key(self) -> str:
+        return PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY
+
+    @property
+    def strategy_sleeve_auto_execution_deprecated_value(self) -> bool | None:
+        return None
 
     @property
     def operator_session_configured(self) -> bool:

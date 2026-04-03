@@ -191,6 +191,10 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("automation_active_count", payload["summary"])
         self.assertNotIn("automation_contracted_count", payload["summary"])
         self.assertNotIn("automation_paused_count", payload["summary"])
+        self.assertIn(
+            "coarse compatibility projection",
+            payload["summary"]["compatibility"]["legacy_automation_state_note"],
+        )
         legacy_state_counts = payload["summary"]["compatibility"]["legacy_automation_state_counts"]
         automation_decisions = payload["latest_snapshot"]["automation_decisions"]
         self.assertEqual(
@@ -215,6 +219,10 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(dca_control["execution_control_mode"], "approved")
         self.assertEqual(dca_control["execution_behavior"], "execute_target")
         self.assertEqual(dca_control["compatibility"]["legacy_automation_state"], "active")
+        self.assertEqual(
+            dca_control["compatibility"]["legacy_automation_projection"]["source_execution_behavior"],
+            "execute_target",
+        )
         self.assertEqual(dca_control["automation_state"], dca_control["compatibility"]["legacy_automation_state"])
         self.assertEqual(
             payload["configured_parameters"]["dca"]["quote_budget_per_cycle"],
@@ -222,7 +230,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_strategy_runtime_endpoint_exposes_entry_execution_guard_when_auto_parallel_disabled(self) -> None:
-        settings = self._settings(strategy_sleeve_auto_parallel_enabled=False)
+        settings = self._settings(strategy_sleeve_auto_execution_enabled=False)
         runtime = await build_runtime(settings)
 
         app = self._app(runtime)
@@ -243,12 +251,12 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             payload["configured_parameters"]["compatibility"]["deprecated_auto_execution_key"],
             "strategy_sleeve_auto_parallel_enabled",
         )
-        self.assertFalse(payload["configured_parameters"]["compatibility"]["deprecated_auto_execution_value"])
+        self.assertIsNone(payload["configured_parameters"]["compatibility"]["deprecated_auto_execution_value"])
         self.assertEqual(
             payload["summary"]["entry_auto_execution_config_source"],
-            "strategy_sleeve_auto_parallel_enabled",
+            "strategy_sleeve_auto_execution_enabled",
         )
-        self.assertTrue(payload["summary"]["entry_auto_execution_uses_deprecated_key"])
+        self.assertFalse(payload["summary"]["entry_auto_execution_uses_deprecated_key"])
         self.assertEqual(
             payload["summary"]["entry_execution_guard"]["warning_code"],
             "non_protective_entry_execution_advisory_only",

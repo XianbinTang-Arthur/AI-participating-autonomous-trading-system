@@ -229,27 +229,49 @@ class TestAATSSettings(unittest.TestCase):
     def test_strategy_sleeve_auto_execution_new_key_takes_precedence_over_deprecated_key(self) -> None:
         settings = AATSSettings.model_validate(
             {
-                "strategy_sleeve_auto_parallel_enabled": False,
                 "strategy_sleeve_auto_execution_enabled": True,
             }
         )
 
         self.assertTrue(settings.effective_strategy_sleeve_auto_execution_enabled)
         self.assertTrue(settings.strategy_sleeve_auto_execution_enabled)
-        self.assertTrue(settings.strategy_sleeve_auto_parallel_enabled)
         self.assertFalse(settings.strategy_sleeve_auto_execution_uses_deprecated_key)
-
-    def test_strategy_sleeve_auto_execution_old_key_still_works_but_marks_deprecated_source(self) -> None:
-        settings = AATSSettings.model_validate(
-            {
-                "strategy_sleeve_auto_parallel_enabled": False,
-            }
+        self.assertEqual(
+            settings.strategy_sleeve_auto_execution_config_source,
+            "strategy_sleeve_auto_execution_enabled",
         )
+        self.assertEqual(
+            settings.strategy_sleeve_auto_execution_deprecated_key,
+            "strategy_sleeve_auto_parallel_enabled",
+        )
+        self.assertIsNone(settings.strategy_sleeve_auto_execution_deprecated_value)
 
-        self.assertFalse(settings.effective_strategy_sleeve_auto_execution_enabled)
-        self.assertFalse(settings.strategy_sleeve_auto_execution_enabled)
-        self.assertFalse(settings.strategy_sleeve_auto_parallel_enabled)
-        self.assertTrue(settings.strategy_sleeve_auto_execution_uses_deprecated_key)
+    def test_strategy_sleeve_auto_execution_old_key_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_sleeve_auto_parallel_enabled": False,
+                }
+            )
+
+    def test_load_settings_rejects_removed_sleeve_auto_parallel_env_key(self) -> None:
+        with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
+            with patch.dict(
+                os.environ,
+                {
+                    **_non_aats_environment(),
+                    "AATS_STRATEGY_SLEEVE_AUTO_PARALLEL_ENABLED": "false",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled",
+                ):
+                    load_settings()
 
     def test_spot_cash_runtime_rejects_non_unit_leverage(self) -> None:
         with self.assertRaisesRegex(ValueError, "spot_cash_runtime_requires_unit_leverage"):

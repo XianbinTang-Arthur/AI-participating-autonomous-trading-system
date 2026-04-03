@@ -91,7 +91,7 @@ def _intent(**overrides) -> StrategySleeveIntent:
 class TestAutoParallelOrchestration(TestCase):
     def test_permission_denied_composes_advisory_only_end_to_end(self) -> None:
         controller = StrategySleeveAutoController(
-            settings=_settings(strategy_sleeve_auto_parallel_enabled=False)
+            settings=_settings(strategy_sleeve_auto_execution_enabled=False)
         )
 
         controlled_candidates, controlled_intents, decisions = controller.apply(
@@ -108,6 +108,7 @@ class TestAutoParallelOrchestration(TestCase):
         self.assertEqual(decision.execution_control_mode, "permission_denied")
         self.assertEqual(decision.execution_behavior, "advisory_only")
         self.assertEqual(decision.compatibility["legacy_automation_state"], "paused")
+        self.assertIn("coarse projection", decision.compatibility["legacy_automation_state_note"])
         self.assertEqual(decision.automation_state, decision.compatibility["legacy_automation_state"])
         self.assertFalse(controlled_intent.execution_compatible)
         self.assertEqual(controlled_intent.route_action, "advisory_only")
@@ -131,11 +132,16 @@ class TestAutoParallelOrchestration(TestCase):
         self.assertEqual(decision.execution_control_mode, "approved")
         self.assertEqual(decision.execution_behavior, "execute_target")
         self.assertEqual(decision.compatibility["legacy_automation_state"], "active")
+        self.assertEqual(
+            decision.compatibility["legacy_automation_projection"]["source_execution_control_mode"],
+            "approved",
+        )
         self.assertEqual(decision.automation_state, decision.compatibility["legacy_automation_state"])
         self.assertTrue(controlled_intent.execution_compatible)
         self.assertTrue(controlled_candidate.execution_compatible)
         self.assertEqual(controlled_intent.route_action, "override_target")
         self.assertEqual(controlled_intent.control_trace["execution_control_mode"], "approved")
+        self.assertTrue(controlled_intent.control_trace["permission"]["state_runtime_supported"])
 
     def test_approved_budget_zero_is_explicitly_suppressed_after_approval(self) -> None:
         controller = StrategySleeveAutoController(settings=_settings())
@@ -169,7 +175,7 @@ class TestAutoParallelOrchestration(TestCase):
 
     def test_protective_override_continues_execution_when_auto_execution_disabled(self) -> None:
         controller = StrategySleeveAutoController(
-            settings=_settings(strategy_sleeve_auto_parallel_enabled=False)
+            settings=_settings(strategy_sleeve_auto_execution_enabled=False)
         )
 
         _, controlled_intents, decisions = controller.apply(
@@ -220,3 +226,4 @@ class TestAutoParallelOrchestration(TestCase):
         self.assertIn("candidate_execution_incompatible", decision.permission_reason_codes)
         self.assertFalse(controlled_intent.execution_compatible)
         self.assertFalse(controlled_intent.control_trace["permission"]["candidate_execution_compatible"])
+        self.assertTrue(controlled_intent.control_trace["permission"]["state_runtime_supported"])

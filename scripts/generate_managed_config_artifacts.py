@@ -283,7 +283,7 @@ STRATEGY_FIELD_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
         (
             "strategy_family_active",
             "strategy_family_auto_selection_enabled",
-            "strategy_sleeve_auto_parallel_enabled",
+            "strategy_sleeve_auto_execution_enabled",
             "strategy_sleeve_auto_min_budget_multiplier",
             "strategy_sleeve_auto_reconciliation_contraction_multiplier",
             "strategy_sleeve_auto_soft_loss_usdt",
@@ -659,7 +659,7 @@ def _render_reference() -> str:
         "- 主要字段：",
         "  - `strategy_family_active`",
         "  - `strategy_family_auto_selection_enabled`",
-        "  - `strategy_sleeve_auto_parallel_enabled`",
+        "  - `strategy_sleeve_auto_execution_enabled`",
         "  - `strategy_sleeve_auto_min_budget_multiplier`",
         "  - `strategy_sleeve_auto_reconciliation_contraction_multiplier`",
         "  - `strategy_sleeve_auto_soft_loss_usdt`",

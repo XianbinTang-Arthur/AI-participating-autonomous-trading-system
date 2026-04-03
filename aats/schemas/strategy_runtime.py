@@ -94,6 +94,7 @@ class StrategySleeveAutomationDecision(SchemaBase):
             "execution_control_mode 与 execution_behavior，legacy 值同步下沉到 "
             "compatibility.legacy_automation_state。"
         ),
+        json_schema_extra={"deprecated": True},
     )
     compatibility: dict[str, Any] = Field(
         default_factory=dict,

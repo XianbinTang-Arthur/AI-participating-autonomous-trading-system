@@ -3147,7 +3147,7 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertLess(grid_control.budget_multiplier, Decimal("1"))
         self.assertEqual(grid_control.permission_mode, "approved")
         self.assertIn("reconciliation_contraction_active", grid_control.budget_reason_codes)
-        self.assertEqual(grid_candidate.metrics["auto_automation_state"], "contracted")
+        self.assertEqual(grid_candidate.metrics["auto_legacy_automation_state"], "contracted")
         self.assertEqual(grid_candidate.metrics["auto_budget_multiplier"], Decimal("0.4"))
 
     def test_auto_parallel_distinguishes_permission_denied_from_budget_zero_suppression(self) -> None:
@@ -3161,7 +3161,7 @@ class TestStrategyCoordinator(unittest.TestCase):
                 "dca_interval_seconds": 0.0,
                 "dca_quote_budget_per_cycle": 100.0,
                 "max_abs_position_qty": 2.0,
-                "strategy_sleeve_auto_parallel_enabled": False,
+                "strategy_sleeve_auto_execution_enabled": False,
             }
         )
         coordinator = StrategyCoordinatorService(

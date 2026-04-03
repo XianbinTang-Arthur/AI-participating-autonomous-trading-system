@@ -48,7 +48,14 @@ class SleeveRoutingComposer:
 
         if not permission.approved_for_execution:
             route_action = "hold_current" if raw.active_inventory else "advisory_only"
-            composed_legs = self._hold_legs(raw.requested_legs)
+            composed_legs = self._hold_legs(
+                raw.requested_legs,
+                hold_reason=(
+                    "auto_parallel_permission_denied_hold_current"
+                    if route_action == "hold_current"
+                    else "auto_parallel_permission_denied_advisory_only"
+                ),
+            )
             return ComposedSleeveRoutingDecision(
                 route_action=route_action,
                 approved_for_execution=False,
@@ -71,7 +78,14 @@ class SleeveRoutingComposer:
 
         if budget.budget_zero_suppressed:
             route_action = "hold_current" if raw.active_inventory else "advisory_only"
-            composed_legs = self._hold_legs(raw.requested_legs)
+            composed_legs = self._hold_legs(
+                raw.requested_legs,
+                hold_reason=(
+                    "auto_parallel_budget_zero_suppressed_hold_current"
+                    if route_action == "hold_current"
+                    else "auto_parallel_budget_zero_suppressed_advisory_only"
+                ),
+            )
             return ComposedSleeveRoutingDecision(
                 route_action=route_action,
                 approved_for_execution=True,
@@ -115,7 +129,7 @@ class SleeveRoutingComposer:
         )
 
     @staticmethod
-    def _hold_legs(legs: tuple) -> tuple:
+    def _hold_legs(legs: tuple, *, hold_reason: str) -> tuple:
         held = []
         for leg in legs:
             current_qty = to_decimal(leg.current_position_qty)
@@ -125,9 +139,9 @@ class SleeveRoutingComposer:
                         "delta_position_qty": Decimal("0"),
                         "target_position_qty": quantize_decimal(current_qty),
                         "note": (
-                            f"{leg.note} | auto_parallel_hold_current"
+                            f"{leg.note} | {hold_reason}"
                             if leg.note
-                            else "auto_parallel_hold_current"
+                            else hold_reason
                         ),
                     }
                 )

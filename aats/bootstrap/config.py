@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -11,7 +12,10 @@ import yaml
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.managed_profiles import MANAGED_PROFILE_DERIVED_ENV_KEYS, load_managed_profile_values
 from aats.bootstrap.metrics import MetricsRegistry
-from aats.bootstrap.settings import AATSSettings
+from aats.bootstrap.settings import (
+    AATSSettings,
+    DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY,
+)
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope, parse_payload, publish_model
@@ -239,6 +243,10 @@ def resilient_subscription_handler(
 
 
 def load_settings() -> AATSSettings:
+    if "AATS_STRATEGY_SLEEVE_AUTO_PARALLEL_ENABLED" in os.environ:
+        raise ValueError(
+            "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled"
+        )
     sources, init_kwargs = AATSSettings._settings_init_sources()
     explicit_overrides = AATSSettings._settings_build_values(sources, init_kwargs)
     env_template_profile = explicit_overrides.get("env_template_profile")
@@ -259,6 +267,11 @@ def load_settings() -> AATSSettings:
         source_values = load_yaml_config(environment, config_profile)
     else:
         source_values = load_managed_profile_values(env_template_profile)
+    for container in (source_values, explicit_overrides):
+        if DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY in container:
+            raise ValueError(
+                "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled"
+            )
     if env_template_profile is not None:
         derived_field_names = {
             key.removeprefix("AATS_").lower()
@@ -2365,15 +2378,6 @@ async def build_runtime(
         state_scope = runtime_state_scope(runtime_settings)
         _validate_runtime_settings(runtime_settings, runtime_layering)
         _validate_operator_auth_settings(runtime_settings, storage)
-        if base_settings.strategy_sleeve_auto_execution_uses_deprecated_key:
-            log_event(
-                get_logger("aats.bootstrap"),
-                "startup_deprecated_auto_parallel_key",
-                level="warning",
-                deprecated_key="strategy_sleeve_auto_parallel_enabled",
-                replacement_key="strategy_sleeve_auto_execution_enabled",
-                effective_value=base_settings.effective_strategy_sleeve_auto_execution_enabled,
-            )
         seed_strategy_profiles(settings=runtime_settings, repo=storage.strategy_profile_repo)
         entry_execution_guard = non_protective_entry_execution_guard(runtime_settings)
         if entry_execution_guard.get("active"):
@@ -2978,11 +2982,7 @@ async def build_runtime(
     runtime = ApplicationRuntime(
         started_at=utc_now(),
         settings=runtime_settings,
-        sleeve_auto_execution_config_source=(
-            "strategy_sleeve_auto_parallel_enabled"
-            if base_settings.strategy_sleeve_auto_execution_uses_deprecated_key
-            else "strategy_sleeve_auto_execution_enabled"
-        ),
+        sleeve_auto_execution_config_source=base_settings.strategy_sleeve_auto_execution_config_source,
         sleeve_auto_execution_uses_deprecated_key=base_settings.strategy_sleeve_auto_execution_uses_deprecated_key,
         runtime_profile_resolution=profile_resolution,
         runtime_layering=runtime_layering,

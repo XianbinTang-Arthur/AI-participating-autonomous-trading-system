@@ -2939,6 +2939,9 @@ class OperatorQueryService:
                 family_action=None if latest_snapshot is None else latest_snapshot.get("selected_family_action"),
             ),
             "compatibility": {
+                "legacy_automation_state_note": (
+                    "coarse compatibility projection; prefer execution_control_mode and execution_behavior"
+                ),
                 "legacy_automation_state_counts": {
                     "active": len(active_automation),
                     "contracted": len(contracted_automation),
@@ -3012,6 +3015,7 @@ class OperatorQueryService:
 
     @staticmethod
     def _legacy_automation_state(item: dict[str, Any] | None) -> str:
+        """Compatibility-only coarse legacy automation state projection."""
         payload = item if isinstance(item, dict) else {}
         compatibility = payload.get("compatibility") if isinstance(payload.get("compatibility"), dict) else {}
         value = compatibility.get("legacy_automation_state", payload.get("automation_state"))
@@ -3285,8 +3289,8 @@ class OperatorQueryService:
                 self.runtime.settings.effective_strategy_sleeve_auto_execution_enabled
             ),
             "compatibility": {
-                "deprecated_auto_execution_key": "strategy_sleeve_auto_parallel_enabled",
-                "deprecated_auto_execution_value": self.runtime.settings.strategy_sleeve_auto_parallel_enabled,
+                "deprecated_auto_execution_key": self.runtime.settings.strategy_sleeve_auto_execution_deprecated_key,
+                "deprecated_auto_execution_value": self.runtime.settings.strategy_sleeve_auto_execution_deprecated_value,
             },
             "strategy_sleeve_auto_execution_config_source": getattr(
                 self.runtime,
