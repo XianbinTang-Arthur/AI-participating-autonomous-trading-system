@@ -169,24 +169,38 @@ def collect_funding_incremental(
 
     try:
         all_rows: list[FundingRow] = []
-        after_ms: int | None = None
+        checkpoint_ts: datetime | None = None
         if cp and cp.get("last_successful_ts"):
-            after_ms = _ts_ms(cp["last_successful_ts"])
+            checkpoint_ts = cp["last_successful_ts"]
+
+        # OKX funding-rate-history semantics (results newest-first):
+        #   before=X -> records with fundingTime > X  (NEWER)
+        #   after=X  -> records with fundingTime < X  (OLDER)
+        #
+        # Rolling: fetch latest, page backward toward checkpoint.
 
         with httpx.Client() as client:
-            for _ in range(max_pages):
-                raw_data = _fetch_funding(client, settings, symbol, after_ms=after_ms)
-                if not raw_data:
-                    break
+            raw_data = _fetch_funding(client, settings, symbol)
+            page = 0
+            while raw_data and page < max_pages:
                 for item in raw_data:
                     row = _parse_api_funding(item, symbol)
                     if row:
                         all_rows.append(row)
                 oldest_ts = min(int(d["fundingTime"]) for d in raw_data)
-                after_ms = oldest_ts
+                if checkpoint_ts and oldest_ts <= _ts_ms(checkpoint_ts):
+                    break
                 if len(raw_data) < _API_LIMIT:
                     break
                 time.sleep(settings.okx_rate_limit_sleep)
+                raw_data = _fetch_funding(
+                    client, settings, symbol, after_ms=oldest_ts,
+                )
+                page += 1
+
+        # Filter: only keep rows strictly newer than checkpoint
+        if checkpoint_ts:
+            all_rows = [r for r in all_rows if r.ts > checkpoint_ts]
 
         count = _write_staging(session, table, all_rows, run_id, dataset_version)
 

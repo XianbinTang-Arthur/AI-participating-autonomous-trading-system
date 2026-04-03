@@ -22,9 +22,27 @@ def load_silver_funding(
     start_ts: datetime,
     end_ts: datetime,
 ) -> list[dict[str, Any]]:
-    """Load funding events from silver in the given window."""
+    """Load funding events from silver for alignment.
+
+    Includes the most recent funding event **before** ``start_ts`` so that
+    bars at the beginning of the window can inherit a carry-forward rate.
+    """
     table = funding_table_name("silver")
-    rows = session.execute(
+
+    # 1. Most recent funding event strictly before the window
+    pre_row = session.execute(
+        text(f"""
+            SELECT ts, funding_rate
+            FROM {table}
+            WHERE symbol = :sym AND ts < :start
+            ORDER BY ts DESC
+            LIMIT 1
+        """),
+        dict(sym=symbol.upper(), start=start_ts),
+    ).fetchone()
+
+    # 2. All funding events within [start_ts, end_ts]
+    window_rows = session.execute(
         text(f"""
             SELECT ts, funding_rate
             FROM {table}
@@ -33,7 +51,12 @@ def load_silver_funding(
         """),
         dict(sym=symbol.upper(), start=start_ts, end_ts=end_ts),
     ).fetchall()
-    return [{"ts": r[0], "funding_rate": r[1]} for r in rows]
+
+    result = []
+    if pre_row:
+        result.append({"ts": pre_row[0], "funding_rate": pre_row[1]})
+    result.extend({"ts": r[0], "funding_rate": r[1]} for r in window_rows)
+    return result
 
 
 def align_funding_to_bars(
