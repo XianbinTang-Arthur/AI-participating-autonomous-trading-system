@@ -8182,6 +8182,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cold_start_active", payload["control_summary"]["evidence"])
         self.assertIn("safety_profile_required", payload["control_summary"])
         self.assertIn("adaptive_controls", payload["control_summary"])
+        self.assertIn("entry_execution_guard", payload["control_summary"])
         self.assertIn("risk_budget", payload["control_summary"]["adaptive_controls"])
         self.assertIn("execution_aggressiveness", payload["control_summary"]["adaptive_controls"])
         self.assertIn("active_profile_id", payload["activation"])

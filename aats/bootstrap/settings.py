@@ -273,6 +273,7 @@ class AATSSettings(BaseSettings):
     strategy_family_protective_live_execution_enabled: bool = False
     strategy_family_opportunistic_live_execution_enabled: bool = False
     strategy_family_independent_live_execution_enabled: bool = False
+    strategy_sleeve_auto_execution_enabled: bool | None = None
     strategy_sleeve_auto_parallel_enabled: bool = True
     strategy_sleeve_auto_min_budget_multiplier: float = 0.35
     strategy_sleeve_auto_reconciliation_contraction_multiplier: float = 0.50
@@ -523,6 +524,19 @@ class AATSSettings(BaseSettings):
         # The current market/feature pipeline is still built around fixed
         # 15m + 1h snapshots. Exposing broader timeframe configurability in
         # env/YAML without enforcing this creates misleading configs.
+        explicit_old_sleeve_auto_key = "strategy_sleeve_auto_parallel_enabled" in self.model_fields_set
+        explicit_new_sleeve_auto_key = "strategy_sleeve_auto_execution_enabled" in self.model_fields_set
+        effective_sleeve_auto_execution_enabled = (
+            self.strategy_sleeve_auto_execution_enabled
+            if self.strategy_sleeve_auto_execution_enabled is not None
+            else self.strategy_sleeve_auto_parallel_enabled
+        )
+        self.strategy_sleeve_auto_execution_enabled = bool(effective_sleeve_auto_execution_enabled)
+        self.strategy_sleeve_auto_parallel_enabled = bool(effective_sleeve_auto_execution_enabled)
+        if not explicit_old_sleeve_auto_key:
+            self.__pydantic_fields_set__.discard("strategy_sleeve_auto_parallel_enabled")
+        if not explicit_new_sleeve_auto_key:
+            self.__pydantic_fields_set__.discard("strategy_sleeve_auto_execution_enabled")
         if "strategy_hedge_independent_long_close_threshold" not in self.model_fields_set:
             self.strategy_hedge_independent_long_close_threshold = float(
                 self.strategy_hedge_independent_long_entry_threshold
@@ -696,6 +710,21 @@ class AATSSettings(BaseSettings):
     def strategy_profile_auto_control_is_enabled_for_mode(self, operating_mode: str | None) -> bool:
         _ = operating_mode
         return bool(self.strategy_profile_auto_control_enabled)
+
+    @property
+    def effective_strategy_sleeve_auto_execution_enabled(self) -> bool:
+        return bool(
+            self.strategy_sleeve_auto_execution_enabled
+            if self.strategy_sleeve_auto_execution_enabled is not None
+            else self.strategy_sleeve_auto_parallel_enabled
+        )
+
+    @property
+    def strategy_sleeve_auto_execution_uses_deprecated_key(self) -> bool:
+        return (
+            "strategy_sleeve_auto_parallel_enabled" in self.model_fields_set
+            and "strategy_sleeve_auto_execution_enabled" not in self.model_fields_set
+        )
 
     @property
     def operator_session_configured(self) -> bool:

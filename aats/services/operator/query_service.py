@@ -74,6 +74,7 @@ from aats.services.strategy_engines.independent.payload_normalization import (
     normalize_independent_payload,
     normalize_independent_runtime_state_payloads,
 )
+from aats.services.strategy_engines.sleeve_execution_permission import non_protective_entry_execution_guard
 from aats.services.strategy_overlay_rollout import (
     overlay_global_rollback_sequence,
     overlay_rollout_status,
@@ -2806,10 +2807,43 @@ class OperatorQueryService:
             item for item in automation_decisions if item.get("automation_state") in {"contracted", "protective_only"}
         ]
         paused_automation = [item for item in automation_decisions if item.get("automation_state") == "paused"]
+        entry_execution_guard = non_protective_entry_execution_guard(self.runtime.settings)
+        entry_auto_execution_config_source = getattr(
+            self.runtime,
+            "sleeve_auto_execution_config_source",
+            entry_execution_guard.get("effective_config_key"),
+        )
+        entry_auto_execution_uses_deprecated_key = bool(
+            getattr(
+                self.runtime,
+                "sleeve_auto_execution_uses_deprecated_key",
+                entry_execution_guard.get("using_deprecated_key"),
+            )
+        )
+        execution_control_mode_counts = self._execution_control_mode_counts(recent_sleeve_intents)
+        execution_behavior_counts = self._execution_behavior_counts(recent_sleeve_intents)
+        advisory_only_due_to_permission_count = execution_control_mode_counts["permission_denied"]
+        budget_zero_suppression_count = execution_control_mode_counts["budget_zero_suppressed"]
+        execution_control_summary = self._execution_control_summary(execution_control_mode_counts)
+        execution_behavior_summary = self._execution_behavior_summary(execution_behavior_counts)
         summary = {
             "configured_active_family": configured_family,
             "automatic_selection_enabled": bool(self.runtime.settings.strategy_family_auto_selection_enabled),
-            "auto_parallel_enabled": bool(self.runtime.settings.strategy_sleeve_auto_parallel_enabled),
+            "auto_parallel_enabled": bool(self.runtime.settings.effective_strategy_sleeve_auto_execution_enabled),
+            "entry_execution_guard": entry_execution_guard,
+            "entry_auto_execution_enabled": bool(
+                self.runtime.settings.effective_strategy_sleeve_auto_execution_enabled
+            ),
+            "entry_auto_execution_config_source": entry_auto_execution_config_source,
+            "entry_auto_execution_uses_deprecated_key": entry_auto_execution_uses_deprecated_key,
+            "execution_control_mode_counts": execution_control_mode_counts,
+            "execution_behavior_counts": execution_behavior_counts,
+            "execution_control_summary": execution_control_summary,
+            "execution_behavior_summary": execution_behavior_summary,
+            "advisory_only_due_to_permission_count": advisory_only_due_to_permission_count,
+            "budget_zero_suppression_count": budget_zero_suppression_count,
+            "protective_override_count": execution_control_mode_counts["protective_override"],
+            "approved_execution_control_count": execution_control_mode_counts["approved"],
             "env_template_profile": self.runtime.settings.env_template_profile,
             "latest_selected_family": None if latest_snapshot is None else latest_snapshot.get("selected_family"),
             "latest_selected_strategy_sleeve_id": (
@@ -2897,6 +2931,16 @@ class OperatorQueryService:
                 item.get("family"): item.get("automation_state")
                 for item in automation_decisions
             },
+            "latest_automation_execution_control_modes": {
+                item.get("family"): self._sleeve_execution_control_mode(item)
+                for item in automation_decisions
+                if item.get("family")
+            },
+            "latest_automation_execution_behaviors": {
+                item.get("family"): self._sleeve_execution_behavior(item)
+                for item in automation_decisions
+                if item.get("family")
+            },
             "operator_summary": self._strategy_runtime_operator_summary(
                 latest_snapshot_present=latest_snapshot is not None,
                 route_action=None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
@@ -2934,6 +2978,7 @@ class OperatorQueryService:
         return {
             "generated_at": utc_now(),
             "summary": summary,
+            "entry_execution_guard": entry_execution_guard,
             "family_enablement": family_enablement,
             "configured_parameters": self._configured_strategy_runtime_parameters(
                 configured_family=configured_family,
@@ -2960,6 +3005,231 @@ class OperatorQueryService:
             "recent_execution_bundles": recent_bundles,
             "smart_arbitrage_cost_summary": smart_arbitrage_cost_summary,
             "truth_source": "strategy_runtime_repo_plus_event_store" if strategy_runtime_repo is not None else "strategy_coordinator_snapshots",
+        }
+
+    @staticmethod
+    def _sleeve_execution_control_mode(item: dict[str, Any] | None) -> str:
+        payload = item if isinstance(item, dict) else {}
+        control_trace = payload.get("control_trace") if isinstance(payload.get("control_trace"), dict) else {}
+        permission = control_trace.get("permission") if isinstance(control_trace.get("permission"), dict) else {}
+        budget = control_trace.get("budget") if isinstance(control_trace.get("budget"), dict) else {}
+        composition = control_trace.get("composition") if isinstance(control_trace.get("composition"), dict) else {}
+        for value in (
+            payload.get("execution_control_mode"),
+            composition.get("execution_control_mode"),
+        ):
+            normalized = str(value or "").strip()
+            if normalized in {"approved", "permission_denied", "budget_zero_suppressed", "protective_override"}:
+                return normalized
+        permission_mode = str(
+            payload.get("permission_mode")
+            or permission.get("permission_mode")
+            or ""
+        ).strip()
+        approved_for_execution = payload.get("approved_for_execution")
+        if approved_for_execution is None:
+            approved_for_execution = permission.get("approved_for_execution")
+        budget_zero_suppressed = bool(
+            payload.get("budget_zero_suppressed")
+            or budget.get("budget_zero_suppressed")
+            or composition.get("budget_zero_suppressed")
+        )
+        if permission_mode == "protective_override":
+            return "protective_override"
+        if budget_zero_suppressed:
+            return "budget_zero_suppressed"
+        if approved_for_execution is False or permission_mode in {"advisory_only", "hold_current", "unsupported"}:
+            return "permission_denied"
+        return "approved"
+
+    def _execution_control_mode_counts(self, items: list[dict[str, Any]] | None) -> dict[str, int]:
+        counts = {
+            "approved": 0,
+            "permission_denied": 0,
+            "budget_zero_suppressed": 0,
+            "protective_override": 0,
+        }
+        for item in items or []:
+            mode = self._sleeve_execution_control_mode(item)
+            counts[mode] = counts.get(mode, 0) + 1
+        return counts
+
+    @staticmethod
+    def _sleeve_execution_behavior(item: dict[str, Any] | None) -> str:
+        payload = item if isinstance(item, dict) else {}
+        control_trace = payload.get("control_trace") if isinstance(payload.get("control_trace"), dict) else {}
+        composition = control_trace.get("composition") if isinstance(control_trace.get("composition"), dict) else {}
+        for value in (
+            payload.get("execution_behavior"),
+            composition.get("execution_behavior"),
+        ):
+            normalized = str(value or "").strip()
+            if normalized in {
+                "execute_target",
+                "hold_current",
+                "advisory_only",
+                "suppressed_after_approval",
+                "protective_execute",
+            }:
+                return normalized
+        execution_control_mode = OperatorQueryService._sleeve_execution_control_mode(payload)
+        route_action = str(payload.get("route_action") or composition.get("route_action") or "").strip()
+        if execution_control_mode == "protective_override":
+            return "protective_execute"
+        if execution_control_mode == "budget_zero_suppressed":
+            return "suppressed_after_approval"
+        if route_action == "override_target":
+            return "execute_target"
+        if route_action == "hold_current":
+            return "hold_current"
+        return "advisory_only"
+
+    def _execution_behavior_counts(self, items: list[dict[str, Any]] | None) -> dict[str, int]:
+        counts = {
+            "execute_target": 0,
+            "hold_current": 0,
+            "advisory_only": 0,
+            "suppressed_after_approval": 0,
+            "protective_execute": 0,
+        }
+        for item in items or []:
+            behavior = self._sleeve_execution_behavior(item)
+            counts[behavior] = counts.get(behavior, 0) + 1
+        return counts
+
+    @staticmethod
+    def _execution_control_summary(counts: dict[str, int]) -> dict[str, Any]:
+        approved = int(counts.get("approved", 0))
+        permission_denied = int(counts.get("permission_denied", 0))
+        budget_zero_suppressed = int(counts.get("budget_zero_suppressed", 0))
+        protective_override = int(counts.get("protective_override", 0))
+        total_recent_intents = approved + permission_denied + budget_zero_suppressed + protective_override
+        if permission_denied > 0:
+            return {
+                "active": True,
+                "primary_mode": "permission_denied",
+                "tone": "warning",
+                "headline": "最近自动执行主要受权限拒绝影响",
+                "summary": (
+                    f"最近 {permission_denied} 条 sleeve intent 因执行权限未通过被降级为 advisory-only 或 hold-current。"
+                ),
+                "operator_summary": "当前主要阻断来自执行权限层，而不是预算压缩。",
+                "total_recent_intents": total_recent_intents,
+            }
+        if budget_zero_suppressed > 0:
+            return {
+                "active": True,
+                "primary_mode": "budget_zero_suppressed",
+                "tone": "warning",
+                "headline": "最近自动执行主要受预算压零抑制",
+                "summary": (
+                    f"最近 {budget_zero_suppressed} 条 sleeve intent 已允许自动执行，但预算层把可执行量压成了 0。"
+                ),
+                "operator_summary": "当前主要阻断来自预算层压零，而不是执行权限拒绝。",
+                "total_recent_intents": total_recent_intents,
+            }
+        if approved > 0:
+            return {
+                "active": True,
+                "primary_mode": "approved",
+                "tone": "positive",
+                "headline": "最近自动执行主路径正常放行",
+                "summary": f"最近 {approved} 条 sleeve intent 处于正常批准执行模式。",
+                "operator_summary": "当前自动执行主路径正常，最近样本以已批准执行为主。",
+                "total_recent_intents": total_recent_intents,
+            }
+        if protective_override > 0:
+            return {
+                "active": True,
+                "primary_mode": "protective_override",
+                "tone": "info",
+                "headline": "最近仅观察到保护性例外执行",
+                "summary": f"最近 {protective_override} 条 sleeve intent 走保护性例外执行路径。",
+                "operator_summary": "当前最近样本主要是保护性例外，不代表常规开仓自动执行已恢复。",
+                "total_recent_intents": total_recent_intents,
+            }
+        return {
+            "active": False,
+            "primary_mode": None,
+            "tone": "info",
+            "headline": "最近还没有新的自动控制样本",
+            "summary": "等下一轮自动预算与调度落地后，这里会出现更直白的控制结果摘要。",
+            "operator_summary": "当前没有新的 sleeve 自动控制样本可供汇总。",
+            "total_recent_intents": 0,
+        }
+
+    @staticmethod
+    def _execution_behavior_summary(counts: dict[str, int]) -> dict[str, Any]:
+        execute_target = int(counts.get("execute_target", 0))
+        hold_current = int(counts.get("hold_current", 0))
+        advisory_only = int(counts.get("advisory_only", 0))
+        suppressed_after_approval = int(counts.get("suppressed_after_approval", 0))
+        protective_execute = int(counts.get("protective_execute", 0))
+        total_recent_intents = (
+            execute_target
+            + hold_current
+            + advisory_only
+            + suppressed_after_approval
+            + protective_execute
+        )
+        if suppressed_after_approval > 0:
+            return {
+                "active": True,
+                "primary_behavior": "suppressed_after_approval",
+                "tone": "warning",
+                "headline": "最近执行行为以批准后压零为主",
+                "summary": f"最近 {suppressed_after_approval} 条 sleeve intent 已获批准，但最终执行行为仍是压零保留。",
+                "operator_summary": "当前 allocator/runtime 主行为是批准后压零，而不是直接拒绝或直接执行。",
+                "total_recent_intents": total_recent_intents,
+            }
+        if advisory_only > 0:
+            return {
+                "active": True,
+                "primary_behavior": "advisory_only",
+                "tone": "warning",
+                "headline": "最近执行行为以仅参考为主",
+                "summary": f"最近 {advisory_only} 条 sleeve intent 的最终执行行为是 advisory-only。",
+                "operator_summary": "当前 allocator/runtime 主行为是仅参考，不会自动下单。",
+                "total_recent_intents": total_recent_intents,
+            }
+        if hold_current > 0:
+            return {
+                "active": True,
+                "primary_behavior": "hold_current",
+                "tone": "info",
+                "headline": "最近执行行为以持仓保持为主",
+                "summary": f"最近 {hold_current} 条 sleeve intent 的最终执行行为是 hold-current。",
+                "operator_summary": "当前 allocator/runtime 主行为是保持现有仓位，而不是主动下新单。",
+                "total_recent_intents": total_recent_intents,
+            }
+        if execute_target > 0:
+            return {
+                "active": True,
+                "primary_behavior": "execute_target",
+                "tone": "positive",
+                "headline": "最近执行行为以直接执行目标为主",
+                "summary": f"最近 {execute_target} 条 sleeve intent 的最终执行行为是直接执行目标。",
+                "operator_summary": "当前 allocator/runtime 主行为是直接执行目标仓位。",
+                "total_recent_intents": total_recent_intents,
+            }
+        if protective_execute > 0:
+            return {
+                "active": True,
+                "primary_behavior": "protective_execute",
+                "tone": "info",
+                "headline": "最近执行行为以保护性执行为主",
+                "summary": f"最近 {protective_execute} 条 sleeve intent 走保护性执行路径。",
+                "operator_summary": "当前 allocator/runtime 主行为是保护性执行，不代表常规开仓已恢复。",
+                "total_recent_intents": total_recent_intents,
+            }
+        return {
+            "active": False,
+            "primary_behavior": None,
+            "tone": "info",
+            "headline": "最近还没有新的执行行为样本",
+            "summary": "等下一轮 allocator/runtime 落地后，这里会出现更直白的执行行为摘要。",
+            "operator_summary": "当前没有新的执行行为样本可供汇总。",
+            "total_recent_intents": 0,
         }
 
     @staticmethod
@@ -3001,7 +3271,21 @@ class OperatorQueryService:
         configured_parameters: dict[str, Any] = {
             "strategy_family_active": configured_family,
             "strategy_family_auto_selection_enabled": self.runtime.settings.strategy_family_auto_selection_enabled,
-            "strategy_sleeve_auto_parallel_enabled": self.runtime.settings.strategy_sleeve_auto_parallel_enabled,
+            "strategy_sleeve_auto_execution_enabled": (
+                self.runtime.settings.effective_strategy_sleeve_auto_execution_enabled
+            ),
+            "compatibility": {
+                "deprecated_auto_execution_key": "strategy_sleeve_auto_parallel_enabled",
+                "deprecated_auto_execution_value": self.runtime.settings.strategy_sleeve_auto_parallel_enabled,
+            },
+            "strategy_sleeve_auto_execution_config_source": getattr(
+                self.runtime,
+                "sleeve_auto_execution_config_source",
+                "strategy_sleeve_auto_execution_enabled",
+            ),
+            "strategy_sleeve_auto_execution_uses_deprecated_key": bool(
+                getattr(self.runtime, "sleeve_auto_execution_uses_deprecated_key", False)
+            ),
             "strategy_sleeve_auto_min_budget_multiplier": self.runtime.settings.strategy_sleeve_auto_min_budget_multiplier,
             "strategy_sleeve_auto_reconciliation_contraction_multiplier": self.runtime.settings.strategy_sleeve_auto_reconciliation_contraction_multiplier,
             "strategy_sleeve_auto_soft_loss_usdt": self.runtime.settings.strategy_sleeve_auto_soft_loss_usdt,
@@ -4496,6 +4780,21 @@ class OperatorQueryService:
         return []
 
     @staticmethod
+    def _raw_book_runtime_states_from_payload(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        direct = payload.get("book_runtime_states")
+        if isinstance(direct, list) and direct:
+            return [dict(item) for item in direct if isinstance(item, dict)]
+        family_summary = payload.get("family_execution_summary")
+        if not isinstance(family_summary, dict):
+            return []
+        nested = family_summary.get("book_runtime_states")
+        if isinstance(nested, list):
+            return [dict(item) for item in nested if isinstance(item, dict)]
+        return []
+
+    @staticmethod
     def _independent_adaptive_summary_from_payload(payload: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(payload, dict):
             return None
@@ -4582,10 +4881,12 @@ class OperatorQueryService:
         runtime_states = OperatorQueryService._book_runtime_states_from_payload(payload)
         if not runtime_states:
             return None
+        raw_runtime_states = OperatorQueryService._raw_book_runtime_states_from_payload(payload)
         items: list[dict[str, Any]] = []
         violation_reasons: list[str] = []
         affected_legs: list[str] = []
-        for state in runtime_states:
+        for index, state in enumerate(runtime_states):
+            raw_state = raw_runtime_states[index] if index < len(raw_runtime_states) else {}
             transition_valid = bool(state.get("transition_valid", True))
             transition_violation_reason = str(state.get("transition_violation_reason") or "").strip() or None
             if transition_valid and transition_violation_reason is None:
@@ -4600,13 +4901,13 @@ class OperatorQueryService:
                 {
                     "leg": normalized_leg,
                     "state": state.get("state"),
-                    "book_state": state.get("book_state"),
-                    "guard_state": state.get("guard_state"),
-                    "prior_book_state": state.get("prior_book_state"),
-                    "prior_guard_state": state.get("prior_guard_state"),
+                    "book_state": raw_state.get("book_state", state.get("book_state")),
+                    "guard_state": raw_state.get("guard_state", state.get("guard_state")),
+                    "prior_book_state": raw_state.get("prior_book_state", state.get("prior_book_state")),
+                    "prior_guard_state": raw_state.get("prior_guard_state", state.get("prior_guard_state")),
                     "book_action": state.get("book_action"),
-                    "last_transition_reason": state.get("last_transition_reason"),
-                    "execution_chain_id": state.get("execution_chain_id"),
+                    "last_transition_reason": raw_state.get("last_transition_reason", state.get("last_transition_reason")),
+                    "execution_chain_id": raw_state.get("execution_chain_id", state.get("execution_chain_id")),
                     "transition_valid": transition_valid,
                     "transition_violation_reason": transition_violation_reason,
                 }

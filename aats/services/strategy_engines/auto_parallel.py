@@ -11,6 +11,20 @@ from aats.schemas.strategy_runtime import (
 )
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, quantize_decimal, to_decimal
 from aats.services.runtime_scope import latest_reconciliation_for_scope, runtime_state_scope, sleeve_pnl_records_for_scope
+from aats.services.strategy_engines.sleeve_budget_controller import SleeveBudgetController
+from aats.services.strategy_engines.sleeve_execution_permission import SleeveExecutionPermissionPolicy
+from aats.services.strategy_engines.sleeve_reason_codes import (
+    AUTO_EXECUTION_DISABLED_BY_PROFILE,
+    CANDIDATE_DISABLED,
+    RUNTIME_NOT_SUPPORTED,
+)
+from aats.services.strategy_engines.sleeve_routing_composer import SleeveRoutingComposer
+from aats.services.strategy_engines.sleeve_routing_models import (
+    BudgetControlDecision,
+    ComposedSleeveRoutingDecision,
+    ExecutionPermissionDecision,
+    RawSleeveCandidateInputs,
+)
 
 
 class StrategySleeveAutoController:
@@ -25,6 +39,9 @@ class StrategySleeveAutoController:
         self.reconciliation_repo = reconciliation_repo
         self.sleeve_pnl_repo = sleeve_pnl_repo
         self.state_scope = runtime_state_scope(settings)
+        self.permission_policy = SleeveExecutionPermissionPolicy(settings)
+        self.budget_controller = SleeveBudgetController(settings)
+        self.routing_composer = SleeveRoutingComposer()
 
     def apply(
         self,
@@ -41,17 +58,35 @@ class StrategySleeveAutoController:
 
         for intent in sleeve_intents:
             candidate = candidates_by_family[intent.family]
-            decision = self._build_decision(
+            raw = self._extract_raw_inputs(candidate=candidate, intent=intent)
+            recent_net_pnl = recent_net_by_sleeve.get(intent.strategy_sleeve_id, Decimal("0"))
+            permission = self.permission_policy.evaluate(raw=raw)
+            budget = self.budget_controller.evaluate(
+                raw=raw,
                 baseline=baseline,
-                candidate=candidate,
-                intent=intent,
-                recent_net_pnl=recent_net_by_sleeve.get(intent.strategy_sleeve_id, Decimal("0")),
+                recent_net_pnl=recent_net_pnl,
                 latest_reconciliation=latest_reconciliation,
+            )
+            composed = self.routing_composer.compose(
+                raw=raw,
+                permission=permission,
+                budget=budget,
+            )
+            decision = self._build_decision(
+                raw=raw,
+                permission=permission,
+                budget=budget,
+                composed=composed,
+                recent_net_pnl=recent_net_pnl,
             )
             controlled_candidate, controlled_intent = self._apply_decision(
                 candidate=candidate,
                 intent=intent,
+                raw=raw,
                 decision=decision,
+                permission=permission,
+                budget=budget,
+                composed=composed,
             )
             controlled_candidates[intent.family] = controlled_candidate
             controlled_intents.append(controlled_intent)
@@ -60,142 +95,103 @@ class StrategySleeveAutoController:
             controlled_candidates.setdefault(family, candidate)
         return controlled_candidates, controlled_intents, decisions
 
+    def _extract_raw_inputs(
+        self,
+        *,
+        candidate: StrategyCandidate,
+        intent: StrategySleeveIntent,
+    ) -> RawSleeveCandidateInputs:
+        current_inventory_notional = self._inventory_notional(intent=intent)
+        return RawSleeveCandidateInputs(
+            family=intent.family,
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            symbol=intent.symbol,
+            current_position_qty=to_decimal(intent.current_position_qty),
+            target_position_qty=to_decimal(intent.target_position_qty),
+            delta_position_qty=to_decimal(intent.delta_position_qty),
+            account_current_position_qty=(
+                None
+                if intent.account_current_position_qty is None
+                else to_decimal(intent.account_current_position_qty)
+            ),
+            target_notional=None if intent.target_notional is None else to_decimal(intent.target_notional),
+            route_action=intent.route_action,
+            requested_legs=tuple(leg.model_copy(deep=True) for leg in intent.legs),
+            metrics=dict(intent.metrics or {}),
+            candidate_state=str(candidate.state),
+            candidate_enabled=bool(candidate.enabled),
+            candidate_selectable=bool(candidate.selectable),
+            candidate_execution_compatible=bool(candidate.execution_compatible),
+            candidate_score=float(candidate.score or 0.0),
+            candidate_confidence=float(candidate.confidence or 0.0),
+            runtime_supported=candidate.state != "incompatible",
+            active_inventory=current_inventory_notional > EPSILON_DECIMAL_12,
+            current_inventory_notional=quantize_decimal(current_inventory_notional),
+            protective_intent=self._is_protective_intent(intent),
+        )
+
     def _build_decision(
         self,
         *,
-        baseline: BaselineAssessment,
-        candidate: StrategyCandidate,
-        intent: StrategySleeveIntent,
+        raw: RawSleeveCandidateInputs,
+        permission: ExecutionPermissionDecision,
+        budget: BudgetControlDecision,
+        composed: ComposedSleeveRoutingDecision,
         recent_net_pnl: Decimal,
-        latest_reconciliation,
     ) -> StrategySleeveAutomationDecision:
-        min_budget = self._decimal(self.settings.strategy_sleeve_auto_min_budget_multiplier)
-        reconciliation_contraction = self._decimal(
-            self.settings.strategy_sleeve_auto_reconciliation_contraction_multiplier
+        allocator_weight = self._allocator_weight(
+            raw=raw,
+            permission=permission,
+            budget=budget,
+            composed=composed,
         )
-        budget_multiplier = Decimal("1")
-        automation_state = "active"
-        automatic_enabled = bool(self.settings.strategy_sleeve_auto_parallel_enabled and candidate.enabled)
-        runtime_supported = candidate.state != "incompatible"
-        approved_for_execution = automatic_enabled and runtime_supported
-        reason_codes: list[str] = []
-
-        current_inventory_notional = self._inventory_notional(intent=intent)
-        protective_intent = self._is_protective_intent(intent)
-        active_inventory = current_inventory_notional > EPSILON_DECIMAL_12
-
-        if not candidate.enabled:
-            automatic_enabled = False
-            approved_for_execution = False
-            automation_state = "disabled"
-            reason_codes.append(f"{intent.family}_candidate_disabled")
-        elif not runtime_supported:
-            automatic_enabled = False
-            approved_for_execution = False
-            automation_state = "disabled"
-            reason_codes.append(f"{intent.family}_runtime_not_supported")
-
-        if (
-            self.settings.strategy_sleeve_auto_volatility_cap_enabled
-            and automatic_enabled
-            and not protective_intent
-        ):
-            volatility_cap = self._clamp(
-                to_decimal(baseline.volatility_target_scale),
-                lower=min_budget,
-                upper=Decimal("1"),
-            )
-            if volatility_cap < Decimal("1") - EPSILON_DECIMAL_12:
-                budget_multiplier = min(budget_multiplier, volatility_cap)
-                automation_state = "contracted"
-                reason_codes.append("sleeve_budget_scaled_by_baseline_volatility_target")
-
-        if latest_reconciliation is not None and automatic_enabled and not protective_intent:
-            if latest_reconciliation.halt_required or latest_reconciliation.resume_blocking:
-                if active_inventory:
-                    budget_multiplier = min(budget_multiplier, reconciliation_contraction)
-                    automation_state = "protective_only"
-                    reason_codes.append("sleeve_reconciliation_resume_blocking")
-                else:
-                    automatic_enabled = False
-                    approved_for_execution = False
-                    budget_multiplier = Decimal("0")
-                    automation_state = "paused"
-                    reason_codes.append("sleeve_reconciliation_hard_block")
-            elif (
-                latest_reconciliation.only_reduce_required
-                or latest_reconciliation.review_required
-                or str(latest_reconciliation.severity or "").upper() not in {"", "CLEAN"}
-            ):
-                budget_multiplier = min(budget_multiplier, reconciliation_contraction)
-                automation_state = "protective_only" if active_inventory else "contracted"
-                reason_codes.append("sleeve_reconciliation_contracted")
-
-        if automatic_enabled and not protective_intent and recent_net_pnl < -EPSILON_DECIMAL_12:
-            soft_loss = self._decimal(self.settings.strategy_sleeve_auto_soft_loss_usdt)
-            hard_loss = self._decimal(self.settings.strategy_sleeve_auto_hard_loss_usdt)
-            if intent.family != "directional" and not active_inventory and hard_loss > EPSILON_DECIMAL_12:
-                if abs(recent_net_pnl) >= hard_loss:
-                    automatic_enabled = False
-                    approved_for_execution = False
-                    budget_multiplier = Decimal("0")
-                    automation_state = "paused"
-                    reason_codes.append("sleeve_hard_loss_pause")
-            if automatic_enabled and soft_loss > EPSILON_DECIMAL_12:
-                loss_ratio = min(abs(recent_net_pnl) / soft_loss, Decimal("1"))
-                pnl_multiplier = max(min_budget, Decimal("1") - (loss_ratio * Decimal("0.5")))
-                if pnl_multiplier < Decimal("1") - EPSILON_DECIMAL_12:
-                    budget_multiplier = min(budget_multiplier, pnl_multiplier)
-                    if automation_state == "active":
-                        automation_state = "contracted"
-                    reason_codes.append("sleeve_recent_loss_contracted")
-
-        if automatic_enabled and budget_multiplier <= EPSILON_DECIMAL_12 and not protective_intent:
-            if active_inventory:
-                automation_state = "protective_only"
-                budget_multiplier = min_budget
-                reason_codes.append("sleeve_inventory_hold_without_new_budget")
-            else:
-                automatic_enabled = False
-                approved_for_execution = False
-                automation_state = "paused"
-                reason_codes.append("sleeve_zero_budget_pause")
-
-        if automatic_enabled and runtime_supported:
-            approved_for_execution = True
-        allocator_weight = Decimal("0")
-        if approved_for_execution:
-            base_weight = max(
-                self._decimal(candidate.confidence if candidate.confidence > 0 else 0.5),
-                Decimal("0.25"),
-            )
-            score_weight = max(self._decimal(candidate.score if candidate.score > 0 else 0.25), Decimal("0.25"))
-            allocator_weight = quantize_decimal(max(budget_multiplier, min_budget) * base_weight * score_weight)
-            if allocator_weight <= EPSILON_DECIMAL_12:
-                allocator_weight = min_budget
-
-        if not reason_codes:
-            reason_codes.append("sleeve_auto_parallel_nominal")
-        operator_summary = self._operator_summary(
-            family=intent.family,
-            automation_state=automation_state,
-            budget_multiplier=budget_multiplier,
-            recent_net_pnl=recent_net_pnl,
-            active_inventory=active_inventory,
+        permission_reason_codes = list(permission.reason_codes)
+        budget_reason_codes = list(budget.contraction_reason_codes)
+        composition_reason_codes = list(composed.composition_reason_codes)
+        merged_reason_codes = list(
+            dict.fromkeys(permission_reason_codes + budget_reason_codes + composition_reason_codes)
         )
+        if not merged_reason_codes:
+            merged_reason_codes = ["sleeve_auto_parallel_nominal"]
         return StrategySleeveAutomationDecision(
-            family=intent.family,
-            strategy_sleeve_id=intent.strategy_sleeve_id,
-            automatic_enabled=automatic_enabled,
-            runtime_supported=runtime_supported,
-            approved_for_execution=approved_for_execution,
-            automation_state=automation_state,
-            budget_multiplier=quantize_decimal(budget_multiplier),
-            allocator_weight=quantize_decimal(allocator_weight),
+            family=raw.family,
+            strategy_sleeve_id=raw.strategy_sleeve_id,
+            automatic_enabled=bool(
+                permission.configured_auto_execution_enabled and raw.candidate_enabled
+            ),
+            runtime_supported=raw.runtime_supported,
+            approved_for_execution=permission.approved_for_execution,
+            permission_mode=permission.permission_mode,
+            execution_control_mode=composed.execution_control_mode,
+            execution_behavior=composed.execution_behavior,
+            automation_state=self._automation_state(
+                raw=raw,
+                permission=permission,
+                budget=budget,
+                composed=composed,
+            ),
+            budget_multiplier=budget.effective_scale,
+            effective_scale=budget.effective_scale,
+            allocator_weight=allocator_weight,
             recent_net_pnl=quantize_decimal(recent_net_pnl),
-            current_inventory_notional=quantize_decimal(current_inventory_notional),
-            reason_codes=reason_codes,
-            operator_summary=operator_summary,
+            current_inventory_notional=raw.current_inventory_notional,
+            requested_delta_position_qty=quantize_decimal(raw.delta_position_qty),
+            composed_delta_position_qty=quantize_decimal(composed.composed_delta_position_qty),
+            composed_route_action=composed.route_action,
+            protective_intent=raw.protective_intent,
+            budget_zero_suppressed=composed.budget_zero_suppressed,
+            reason_codes=merged_reason_codes,
+            permission_reason_codes=permission_reason_codes,
+            budget_reason_codes=budget_reason_codes,
+            composition_reason_codes=composition_reason_codes,
+            scale_trace=list(budget.scale_trace),
+            operator_summary=self._operator_summary(
+                raw=raw,
+                permission=permission,
+                budget=budget,
+                composed=composed,
+                recent_net_pnl=recent_net_pnl,
+            ),
         )
 
     def _apply_decision(
@@ -203,109 +199,126 @@ class StrategySleeveAutoController:
         *,
         candidate: StrategyCandidate,
         intent: StrategySleeveIntent,
+        raw: RawSleeveCandidateInputs,
         decision: StrategySleeveAutomationDecision,
+        permission: ExecutionPermissionDecision,
+        budget: BudgetControlDecision,
+        composed: ComposedSleeveRoutingDecision,
     ) -> tuple[StrategyCandidate, StrategySleeveIntent]:
-        route_action = intent.route_action
-        scaled_delta = to_decimal(intent.delta_position_qty)
-        scaled_legs = [leg.model_copy(deep=True) for leg in intent.legs]
-        active_inventory = decision.current_inventory_notional > EPSILON_DECIMAL_12
-        protective_intent = self._is_protective_intent(intent)
-
-        if not decision.approved_for_execution and not protective_intent:
-            scaled_delta = Decimal("0")
-            scaled_legs = self._hold_legs(scaled_legs)
-            route_action = "hold_current" if active_inventory else "advisory_only"
-        elif (
-            decision.budget_multiplier < Decimal("1") - EPSILON_DECIMAL_12
-            and not protective_intent
-            and abs(scaled_delta) > EPSILON_DECIMAL_12
-        ):
-            scaled_delta = quantize_decimal(scaled_delta * decision.budget_multiplier)
-            if abs(scaled_delta) <= EPSILON_DECIMAL_12:
-                route_action = "hold_current" if active_inventory else "advisory_only"
-            scaled_legs = self._scale_legs(scaled_legs, decision.budget_multiplier)
-
-        current_qty = to_decimal(intent.current_position_qty)
-        target_qty = current_qty + scaled_delta
-        account_current_qty = (
-            None if intent.account_current_position_qty is None else to_decimal(intent.account_current_position_qty)
+        route_action = composed.route_action
+        composed_delta = quantize_decimal(composed.composed_delta_position_qty)
+        account_current_qty = raw.account_current_position_qty
+        account_target_qty = None if account_current_qty is None else quantize_decimal(account_current_qty + composed_delta)
+        target_notional = self._scaled_target_notional(
+            target_notional=raw.target_notional,
+            metrics=raw.metrics,
+            target_qty=composed.composed_target_position_qty,
         )
-        account_target_qty = (
-            None if account_current_qty is None else account_current_qty + scaled_delta
+        merged_reason_codes = list(
+            dict.fromkeys(
+                decision.permission_reason_codes
+                + decision.budget_reason_codes
+                + decision.composition_reason_codes
+            )
         )
-        target_notional = self._scaled_target_notional(intent=intent, target_qty=target_qty)
-
+        control_trace = self._control_trace(
+            permission=permission,
+            budget=budget,
+            composed=composed,
+        )
+        intent_execution_compatible = self._execution_compatible(
+            raw=raw,
+            permission=permission,
+            budget=budget,
+        )
+        intent_selectable = route_action in {"override_target", "hold_current"} and (
+            route_action == "override_target" or raw.active_inventory or raw.protective_intent
+        )
         controlled_intent = intent.model_copy(
             update={
                 "route_action": route_action,
-                "target_position_qty": target_qty,
-                "delta_position_qty": scaled_delta,
+                "selectable": intent_selectable,
+                "execution_compatible": intent_execution_compatible,
+                "target_position_qty": quantize_decimal(
+                    composed.composed_target_position_qty
+                    if composed.composed_target_position_qty is not None
+                    else raw.current_position_qty
+                ),
+                "delta_position_qty": composed_delta,
                 "account_target_position_qty": account_target_qty,
                 "target_notional": target_notional,
+                "requested_target_position_qty": quantize_decimal(raw.target_position_qty),
+                "requested_delta_position_qty": quantize_decimal(raw.delta_position_qty),
                 "automatic_enabled": decision.automatic_enabled,
+                "approved_for_execution": decision.approved_for_execution,
+                "permission_mode": decision.permission_mode,
+                "execution_control_mode": decision.execution_control_mode,
+                "execution_behavior": decision.execution_behavior,
+                "budget_zero_suppressed": decision.budget_zero_suppressed,
                 "budget_multiplier": decision.budget_multiplier,
                 "allocator_weight": decision.allocator_weight,
-                "control_reason_codes": list(decision.reason_codes),
+                "control_reason_codes": merged_reason_codes,
                 "control_summary": decision.operator_summary,
-                "legs": scaled_legs,
+                "control_trace": control_trace,
+                "legs": list(composed.composed_legs),
                 "metrics": {
                     **intent.metrics,
                     "auto_budget_multiplier": decision.budget_multiplier,
+                    "auto_effective_scale": decision.effective_scale,
                     "auto_allocator_weight": decision.allocator_weight,
                     "auto_recent_net_pnl": decision.recent_net_pnl,
                     "auto_current_inventory_notional": decision.current_inventory_notional,
                     "auto_automation_state": decision.automation_state,
+                    "auto_permission_mode": decision.permission_mode,
+                    "auto_execution_control_mode": decision.execution_control_mode,
+                    "auto_execution_behavior": decision.execution_behavior,
+                    "auto_budget_zero_suppressed": decision.budget_zero_suppressed,
+                    "auto_requested_delta_position_qty": decision.requested_delta_position_qty,
+                    "auto_composed_delta_position_qty": decision.composed_delta_position_qty,
+                    "auto_control_trace": control_trace,
                 },
             }
         )
 
-        candidate_state = candidate.state
         aggregate_smart_arbitrage = (
             candidate.family == "smart_arbitrage"
             and bool((candidate.metrics or {}).get("aggregate_candidate"))
         )
         candidate_route_action = route_action if route_action != "protective_fallback" else candidate.route_action
-        candidate_selectable = route_action in {"override_target", "hold_current"} and (
-            route_action == "override_target" or active_inventory or protective_intent
-        )
-        candidate_execution_compatible = candidate.execution_compatible and (
-            decision.runtime_supported and (decision.automatic_enabled or protective_intent or active_inventory)
-        )
-        if not decision.runtime_supported or not decision.automatic_enabled:
-            if candidate.state in {"disabled", "incompatible"}:
-                candidate_state = candidate.state
-            elif route_action == "advisory_only":
-                candidate_state = "advisory_only"
-            elif route_action == "hold_current":
-                candidate_state = "inactive"
-        elif decision.automation_state in {"contracted", "protective_only"} and candidate.state == "ready":
-            candidate_state = "ready"
         controlled_candidate = candidate.model_copy(
             update={
-                "state": candidate_state,
-                "selectable": candidate_selectable,
-                "execution_compatible": candidate_execution_compatible,
+                "state": str(candidate.state),
+                "selectable": intent_selectable,
+                "execution_compatible": intent_execution_compatible,
                 "route_action": candidate_route_action,
                 "target_position_qty": (
                     None
                     if aggregate_smart_arbitrage
-                    else (account_target_qty if account_target_qty is not None else target_qty)
+                    else (account_target_qty if account_target_qty is not None else controlled_intent.target_position_qty)
                 ),
-                "delta_position_qty": None if aggregate_smart_arbitrage else scaled_delta,
+                "delta_position_qty": None if aggregate_smart_arbitrage else composed_delta,
                 "automatic_enabled": decision.automatic_enabled,
                 "budget_multiplier": decision.budget_multiplier,
                 "allocator_weight": decision.allocator_weight,
-                "control_reason_codes": list(decision.reason_codes),
+                "control_reason_codes": merged_reason_codes,
                 "control_summary": decision.operator_summary,
                 "metrics": {
                     **candidate.metrics,
                     "auto_budget_multiplier": decision.budget_multiplier,
+                    "auto_effective_scale": decision.effective_scale,
                     "auto_allocator_weight": decision.allocator_weight,
                     "auto_recent_net_pnl": decision.recent_net_pnl,
                     "auto_current_inventory_notional": decision.current_inventory_notional,
                     "auto_automation_state": decision.automation_state,
+                    "auto_permission_mode": decision.permission_mode,
+                    "auto_execution_control_mode": decision.execution_control_mode,
+                    "auto_execution_behavior": decision.execution_behavior,
+                    "auto_budget_zero_suppressed": decision.budget_zero_suppressed,
+                    "auto_requested_delta_position_qty": decision.requested_delta_position_qty,
+                    "auto_composed_delta_position_qty": decision.composed_delta_position_qty,
+                    "auto_control_trace": control_trace,
                 },
-                "legs": scaled_legs,
+                "legs": list(composed.composed_legs),
             }
         )
         return controlled_candidate, controlled_intent
@@ -360,54 +373,54 @@ class StrategySleeveAutoController:
             return True
         return abs(target_abs - current_abs) <= EPSILON_DECIMAL_12 and str(intent.route_action) == "hold_current"
 
-    @staticmethod
-    def _scale_legs(legs, multiplier: Decimal):
-        scaled = []
-        for leg in legs:
-            current_qty = to_decimal(leg.current_position_qty)
-            delta_qty = to_decimal(leg.delta_position_qty)
-            scaled_delta = quantize_decimal(delta_qty * multiplier)
-            scaled.append(
-                leg.model_copy(
-                    update={
-                        "delta_position_qty": scaled_delta,
-                        "target_position_qty": current_qty + scaled_delta,
-                        "note": (
-                            f"{leg.note} | auto_parallel_budget_multiplier={format(multiplier, 'f')}"
-                            if leg.note
-                            else f"auto_parallel_budget_multiplier={format(multiplier, 'f')}"
-                        ),
-                    }
-                )
-            )
-        return scaled
+    def _allocator_weight(
+        self,
+        *,
+        raw: RawSleeveCandidateInputs,
+        permission: ExecutionPermissionDecision,
+        budget: BudgetControlDecision,
+        composed: ComposedSleeveRoutingDecision,
+    ) -> Decimal:
+        if not permission.approved_for_execution or composed.budget_zero_suppressed:
+            return Decimal("0")
+        min_budget = self._decimal(self.settings.strategy_sleeve_auto_min_budget_multiplier)
+        base_weight = max(self._decimal(raw.candidate_confidence if raw.candidate_confidence > 0 else 0.5), Decimal("0.25"))
+        score_weight = max(self._decimal(raw.candidate_score if raw.candidate_score > 0 else 0.25), Decimal("0.25"))
+        allocator_weight = quantize_decimal(max(budget.effective_scale, min_budget) * base_weight * score_weight)
+        if allocator_weight <= EPSILON_DECIMAL_12:
+            return Decimal("0")
+        return allocator_weight
 
     @staticmethod
-    def _hold_legs(legs):
-        held = []
-        for leg in legs:
-            current_qty = to_decimal(leg.current_position_qty)
-            held.append(
-                leg.model_copy(
-                    update={
-                        "delta_position_qty": Decimal("0"),
-                        "target_position_qty": current_qty,
-                        "note": (
-                            f"{leg.note} | auto_parallel_hold_current"
-                            if leg.note
-                            else "auto_parallel_hold_current"
-                        ),
-                    }
-                )
+    def _execution_compatible(
+        *,
+        raw: RawSleeveCandidateInputs,
+        permission: ExecutionPermissionDecision,
+        budget: BudgetControlDecision,
+    ) -> bool:
+        return bool(
+            raw.candidate_execution_compatible
+            and raw.runtime_supported
+            and (
+                permission.approved_for_execution
+                or raw.protective_intent
+                or raw.active_inventory
+                or budget.budget_zero_suppressed
             )
-        return held
+        )
 
-    def _scaled_target_notional(self, *, intent: StrategySleeveIntent, target_qty: Decimal) -> Decimal | None:
-        if intent.target_notional is None:
-            return None
-        reference_price = self._reference_price(intent.metrics)
+    @staticmethod
+    def _scaled_target_notional(
+        *,
+        target_notional: Decimal | None,
+        metrics: dict[str, object],
+        target_qty: Decimal | None,
+    ) -> Decimal | None:
+        if target_notional is None or target_qty is None:
+            return target_notional
+        reference_price = StrategySleeveAutoController._reference_price(metrics)
         if reference_price <= EPSILON_DECIMAL_12:
-            return quantize_decimal(intent.target_notional)
+            return quantize_decimal(target_notional)
         return quantize_decimal(abs(target_qty) * reference_price)
 
     @staticmethod
@@ -419,38 +432,100 @@ class StrategySleeveAutoController:
         return Decimal("0")
 
     @staticmethod
-    def _operator_summary(
+    def _automation_state(
         *,
-        family: str,
-        automation_state: str,
-        budget_multiplier: Decimal,
-        recent_net_pnl: Decimal,
-        active_inventory: bool,
+        raw: RawSleeveCandidateInputs,
+        permission: ExecutionPermissionDecision,
+        budget: BudgetControlDecision,
+        composed: ComposedSleeveRoutingDecision,
     ) -> str:
-        if automation_state == "disabled":
-            return f"{family} 当前在本运行域内不可自动执行。"
-        if automation_state == "paused":
-            return f"{family} 已被系统自动暂停；当前没有新的预算分配。"
-        if automation_state == "protective_only":
-            return (
-                f"{family} 当前只保留保护性仓位管理；预算已收缩到 {format(budget_multiplier, 'f')}。"
-            )
-        if automation_state == "contracted":
-            return (
-                f"{family} 当前仍可自动运行，但预算已收缩到 {format(budget_multiplier, 'f')}；"
-                f"最近净收益 {format(recent_net_pnl, 'f')}。"
-            )
-        if active_inventory:
-            return f"{family} 当前自动运行正常，并继续管理已有库存。"
-        return f"{family} 当前自动运行正常，预算倍率为 {format(budget_multiplier, 'f')}。"
+        if permission.is_protective_override:
+            return "protective_only"
+        if RUNTIME_NOT_SUPPORTED in permission.reason_codes or CANDIDATE_DISABLED in permission.reason_codes:
+            return "disabled"
+        if AUTO_EXECUTION_DISABLED_BY_PROFILE in permission.reason_codes:
+            return "protective_only" if raw.active_inventory else "paused"
+        if composed.budget_zero_suppressed:
+            return "protective_only" if raw.active_inventory else "paused"
+        if budget.effective_scale < Decimal("1") - EPSILON_DECIMAL_12:
+            return "protective_only" if raw.active_inventory else "contracted"
+        return "active"
 
     @staticmethod
-    def _clamp(value: Decimal, *, lower: Decimal, upper: Decimal) -> Decimal:
-        if value < lower:
-            return lower
-        if value > upper:
-            return upper
-        return value
+    def _operator_summary(
+        *,
+        raw: RawSleeveCandidateInputs,
+        permission: ExecutionPermissionDecision,
+        budget: BudgetControlDecision,
+        composed: ComposedSleeveRoutingDecision,
+        recent_net_pnl: Decimal,
+    ) -> str:
+        if permission.is_protective_override:
+            return (
+                f"{raw.family} 当前走保护性例外通道；即使普通自动执行关闭，保护性收缩仍继续提交。"
+            )
+        if RUNTIME_NOT_SUPPORTED in permission.reason_codes:
+            return f"{raw.family} 当前运行环境不支持自动执行，因此这条 sleeve 只保留状态，不进入执行链。"
+        if CANDIDATE_DISABLED in permission.reason_codes:
+            return f"{raw.family} 当前候选未启用，因此不会自动进入执行链。"
+        if AUTO_EXECUTION_DISABLED_BY_PROFILE in permission.reason_codes:
+            return (
+                f"{raw.family} 当前非保护性自动执行被配置关闭；新的开仓/加仓只保留参考，不会自动下单。"
+            )
+        if composed.budget_zero_suppressed:
+            return (
+                f"{raw.family} 当前允许自动执行，但预算层把可执行量压成了 0；"
+                f"最近净收益 {format(recent_net_pnl, 'f')}，系统本轮保持仓位。"
+            )
+        if budget.effective_scale < Decimal("1") - EPSILON_DECIMAL_12:
+            return (
+                f"{raw.family} 当前仍可自动执行，但预算已收缩到 {format(budget.effective_scale, 'f')}；"
+                f"最近净收益 {format(recent_net_pnl, 'f')}。"
+            )
+        if raw.active_inventory:
+            return f"{raw.family} 当前自动运行正常，并继续管理已有库存。"
+        return f"{raw.family} 当前自动运行正常，可按本轮目标继续进入执行链。"
+
+    @staticmethod
+    def _control_trace(
+        *,
+        permission: ExecutionPermissionDecision,
+        budget: BudgetControlDecision,
+        composed: ComposedSleeveRoutingDecision,
+    ) -> dict[str, object]:
+        return {
+            "execution_control_mode": composed.execution_control_mode,
+            "execution_behavior": composed.execution_behavior,
+            "permission": {
+                "configured_auto_execution_enabled": permission.configured_auto_execution_enabled,
+                "runtime_supported": permission.runtime_supported,
+                "candidate_enabled": permission.candidate_enabled,
+                "protective_intent": permission.protective_intent,
+                "approved_for_execution": permission.approved_for_execution,
+                "permission_mode": permission.permission_mode,
+                "reason_codes": list(permission.reason_codes),
+                "human_summary": permission.human_summary,
+            },
+            "budget": {
+                "base_scale": str(budget.base_scale),
+                "effective_scale": str(budget.effective_scale),
+                "requested_delta_position_qty": str(budget.requested_delta_position_qty),
+                "scaled_delta_position_qty": str(budget.scaled_delta_position_qty),
+                "budget_zero_suppressed": budget.budget_zero_suppressed,
+                "reason_codes": list(budget.contraction_reason_codes),
+                "scale_trace": list(budget.scale_trace),
+            },
+            "composition": {
+                "route_action": composed.route_action,
+                "approved_for_execution": composed.approved_for_execution,
+                "execution_control_mode": composed.execution_control_mode,
+                "execution_behavior": composed.execution_behavior,
+                "requested_delta_position_qty": str(composed.requested_delta_position_qty),
+                "composed_delta_position_qty": str(composed.composed_delta_position_qty),
+                "budget_zero_suppressed": composed.budget_zero_suppressed,
+                "reason_codes": list(composed.composition_reason_codes),
+            },
+        }
 
     @staticmethod
     def _decimal(value: Decimal | float | int | str | None) -> Decimal:

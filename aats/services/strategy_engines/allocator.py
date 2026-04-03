@@ -301,6 +301,13 @@ class PortfolioAllocatorV2Phase2:
             if primary_intent is None and preserve_selected_family
             else ("directional" if primary_intent is None else primary_intent.family)
         )
+        suppressed_after_approval_intents = [
+            intent
+            for intent in sleeve_intents
+            if str(getattr(intent, "execution_behavior", "") or "").strip() == "suppressed_after_approval"
+        ]
+        if suppressed_after_approval_intents and "allocator_sleeve_suppressed_after_approval" not in blocked_reason_codes:
+            blocked_reason_codes.append("allocator_sleeve_suppressed_after_approval")
         fallback_primary_intent = None if not preserve_selected_family else intents_by_family.get(selected_family)
         reason_codes = list(
             dict.fromkeys(
@@ -320,6 +327,8 @@ class PortfolioAllocatorV2Phase2:
             budget_state = "hedge_protected"
         if execution_legs:
             operator_summary = self._operator_summary_for_primary_intent(primary_intent=primary_intent)
+        elif suppressed_after_approval_intents:
+            operator_summary = "当前 allocator v2 识别到已批准但被预算压零的 sleeve；本轮没有新的可执行 delta。"
         elif approved_families:
             operator_summary = "当前 allocator v2 识别到活跃 sleeve，但本轮没有新的可执行 delta。"
         else:

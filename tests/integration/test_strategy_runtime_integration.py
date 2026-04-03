@@ -19,7 +19,7 @@ from aats.schemas.decision import DecisionContext, DecisionOutcome, HedgeOverlay
 from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioSnapshot
-from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent
+from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent, StrategySleeveIntent
 
 
 class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
@@ -201,6 +201,146 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             payload["configured_parameters"]["dca"]["quote_budget_per_cycle"],
             100.0,
+        )
+
+    async def test_strategy_runtime_endpoint_exposes_entry_execution_guard_when_auto_parallel_disabled(self) -> None:
+        settings = self._settings(strategy_sleeve_auto_parallel_enabled=False)
+        runtime = await build_runtime(settings)
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        self.assertIn("entry_execution_guard", payload["summary"])
+        self.assertTrue(payload["summary"]["entry_execution_guard"]["active"])
+        self.assertFalse(payload["configured_parameters"]["strategy_sleeve_auto_execution_enabled"])
+        self.assertNotIn("strategy_sleeve_auto_parallel_enabled", payload["configured_parameters"])
+        self.assertEqual(
+            payload["configured_parameters"]["compatibility"]["deprecated_auto_execution_key"],
+            "strategy_sleeve_auto_parallel_enabled",
+        )
+        self.assertFalse(payload["configured_parameters"]["compatibility"]["deprecated_auto_execution_value"])
+        self.assertEqual(
+            payload["summary"]["entry_auto_execution_config_source"],
+            "strategy_sleeve_auto_parallel_enabled",
+        )
+        self.assertTrue(payload["summary"]["entry_auto_execution_uses_deprecated_key"])
+        self.assertEqual(
+            payload["summary"]["entry_execution_guard"]["warning_code"],
+            "non_protective_entry_execution_advisory_only",
+        )
+        self.assertIn("advisory-only", payload["summary"]["entry_execution_guard"]["summary"])
+
+    async def test_strategy_runtime_endpoint_distinguishes_permission_denied_from_budget_zero_suppression(self) -> None:
+        settings = self._settings()
+        runtime = await build_runtime(settings)
+        runtime.strategy_runtime_repo.save_sleeve_intent(
+            StrategySleeveIntent(
+                decision_id="dec-permission-denied",
+                family="dca",
+                strategy_sleeve_id="sleeve_permission_denied",
+                state="inactive",
+                symbol=settings.default_symbol,
+                product_type=settings.trading_product_type,
+                margin_mode=settings.margin_mode,
+                inventory_policy="account_net_inventory",
+                route_action="advisory_only",
+                family_action="hold_family",
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0"),
+                delta_position_qty=Decimal("0"),
+                requested_delta_position_qty=Decimal("0.01"),
+                approved_for_execution=False,
+                permission_mode="advisory_only",
+                control_trace={
+                    "permission": {
+                        "approved_for_execution": False,
+                        "permission_mode": "advisory_only",
+                    },
+                    "budget": {
+                        "budget_zero_suppressed": False,
+                    },
+                },
+            )
+        )
+        runtime.strategy_runtime_repo.save_sleeve_intent(
+            StrategySleeveIntent(
+                decision_id="dec-budget-zero",
+                family="spot_grid",
+                strategy_sleeve_id="sleeve_budget_zero",
+                state="inactive",
+                symbol=settings.default_symbol,
+                product_type=settings.trading_product_type,
+                margin_mode=settings.margin_mode,
+                inventory_policy="account_net_inventory",
+                route_action="hold_current",
+                family_action="hold_family",
+                current_position_qty=Decimal("0.1"),
+                target_position_qty=Decimal("0.1"),
+                delta_position_qty=Decimal("0"),
+                requested_delta_position_qty=Decimal("0.02"),
+                approved_for_execution=True,
+                permission_mode="approved",
+                budget_zero_suppressed=True,
+                control_trace={
+                    "permission": {
+                        "approved_for_execution": True,
+                        "permission_mode": "approved",
+                    },
+                    "budget": {
+                        "budget_zero_suppressed": True,
+                        "effective_scale": "0.25",
+                    },
+                },
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        self.assertTrue(payload["summary"]["entry_auto_execution_enabled"])
+        self.assertEqual(
+            payload["summary"]["execution_control_mode_counts"],
+            {
+                "approved": 0,
+                "permission_denied": 1,
+                "budget_zero_suppressed": 1,
+                "protective_override": 0,
+            },
+        )
+        self.assertEqual(payload["summary"]["advisory_only_due_to_permission_count"], 1)
+        self.assertEqual(payload["summary"]["budget_zero_suppression_count"], 1)
+        self.assertEqual(payload["summary"]["protective_override_count"], 0)
+        self.assertEqual(
+            payload["summary"]["execution_behavior_counts"],
+            {
+                "execute_target": 0,
+                "hold_current": 0,
+                "advisory_only": 1,
+                "suppressed_after_approval": 1,
+                "protective_execute": 0,
+            },
+        )
+        self.assertEqual(
+            payload["summary"]["execution_control_summary"]["primary_mode"],
+            "permission_denied",
+        )
+        self.assertIn(
+            "权限未通过",
+            payload["summary"]["execution_control_summary"]["summary"],
+        )
+        self.assertEqual(
+            payload["summary"]["execution_behavior_summary"]["primary_behavior"],
+            "suppressed_after_approval",
+        )
+        self.assertIn(
+            "批准，但最终执行行为仍是压零保留",
+            payload["summary"]["execution_behavior_summary"]["summary"],
         )
 
     async def test_dca_pullback_only_runtime_requires_anchor_history_before_activation(self) -> None:

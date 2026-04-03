@@ -51,6 +51,19 @@ StrategyCandidateState = Literal[
     "recovery",
 ]
 StrategyRouteAction = Literal["override_target", "hold_current", "advisory_only", "protective_fallback"]
+StrategySleeveExecutionControlMode = Literal[
+    "approved",
+    "permission_denied",
+    "budget_zero_suppressed",
+    "protective_override",
+]
+StrategySleeveExecutionBehavior = Literal[
+    "execute_target",
+    "hold_current",
+    "advisory_only",
+    "suppressed_after_approval",
+    "protective_execute",
+]
 StrategyExecutionBundleStatus = Literal[
     "blocked",
     "planned",
@@ -71,12 +84,25 @@ class StrategySleeveAutomationDecision(SchemaBase):
     automatic_enabled: bool = True
     runtime_supported: bool = True
     approved_for_execution: bool = True
+    permission_mode: str = "approved"
+    execution_control_mode: StrategySleeveExecutionControlMode | None = None
+    execution_behavior: StrategySleeveExecutionBehavior | None = None
     automation_state: StrategySleeveAutomationState = "active"
     budget_multiplier: Decimal = Decimal("1")
+    effective_scale: Decimal = Decimal("1")
     allocator_weight: Decimal = Decimal("1")
     recent_net_pnl: Decimal = Decimal("0")
     current_inventory_notional: Decimal = Decimal("0")
+    requested_delta_position_qty: Decimal = Decimal("0")
+    composed_delta_position_qty: Decimal = Decimal("0")
+    composed_route_action: StrategyRouteAction = "hold_current"
+    protective_intent: bool = False
+    budget_zero_suppressed: bool = False
     reason_codes: list[str] = Field(default_factory=list)
+    permission_reason_codes: list[str] = Field(default_factory=list)
+    budget_reason_codes: list[str] = Field(default_factory=list)
+    composition_reason_codes: list[str] = Field(default_factory=list)
+    scale_trace: list[str] = Field(default_factory=list)
     operator_summary: str | None = None
 
 
@@ -139,13 +165,21 @@ class StrategySleeveIntent(SchemaBase):
     account_current_position_qty: Decimal | None = None
     account_target_position_qty: Decimal | None = None
     target_notional: Decimal | None = None
+    requested_target_position_qty: Decimal | None = None
+    requested_delta_position_qty: Decimal = Decimal("0")
     priority_score: float = 0.0
     reason_codes: list[str] = Field(default_factory=list)
     automatic_enabled: bool = True
+    approved_for_execution: bool = True
+    permission_mode: str = "approved"
+    execution_control_mode: StrategySleeveExecutionControlMode | None = None
+    execution_behavior: StrategySleeveExecutionBehavior | None = None
+    budget_zero_suppressed: bool = False
     budget_multiplier: Decimal = Decimal("1")
     allocator_weight: Decimal = Decimal("1")
     control_reason_codes: list[str] = Field(default_factory=list)
     control_summary: str | None = None
+    control_trace: dict[str, Any] = Field(default_factory=dict)
     pair_id: str | None = None
     opportunity_kind: str | None = None
     execution_mode: str | None = None

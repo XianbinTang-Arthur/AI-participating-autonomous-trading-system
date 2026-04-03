@@ -90,6 +90,7 @@ from aats.services.recovery_control.startup_recovery import (
     startup_refresh_exit_execution_truth,
 )
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
+from aats.services.strategy_engines.sleeve_execution_permission import non_protective_entry_execution_guard
 from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
 from aats.services.strategy_engines.overlay_parent_exposure import overlay_parent_exposure_record
 from aats.services.strategy_engines.sleeve_pnl_projection import SleevePnLProjectionService
@@ -370,6 +371,8 @@ class ApplicationRuntime:
     strategy_sleeve_repo: StrategySleeveRepository
     strategy_runtime_repo: StrategyRuntimeRepository
     recovery_status: RecoveryStatus
+    sleeve_auto_execution_config_source: str = "strategy_sleeve_auto_execution_enabled"
+    sleeve_auto_execution_uses_deprecated_key: bool = False
     exit_execution_repo: ExitExecutionRepository | None = None
     execution_order_repo: PostgresExecutionOrderRepository | None = None
     execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
@@ -2362,7 +2365,27 @@ async def build_runtime(
         state_scope = runtime_state_scope(runtime_settings)
         _validate_runtime_settings(runtime_settings, runtime_layering)
         _validate_operator_auth_settings(runtime_settings, storage)
+        if base_settings.strategy_sleeve_auto_execution_uses_deprecated_key:
+            log_event(
+                get_logger("aats.bootstrap"),
+                "startup_deprecated_auto_parallel_key",
+                level="warning",
+                deprecated_key="strategy_sleeve_auto_parallel_enabled",
+                replacement_key="strategy_sleeve_auto_execution_enabled",
+                effective_value=base_settings.effective_strategy_sleeve_auto_execution_enabled,
+            )
         seed_strategy_profiles(settings=runtime_settings, repo=storage.strategy_profile_repo)
+        entry_execution_guard = non_protective_entry_execution_guard(runtime_settings)
+        if entry_execution_guard.get("active"):
+            log_event(
+                get_logger("aats.bootstrap"),
+                "startup_entry_execution_guard_active",
+                level="warning",
+                warning_code=entry_execution_guard.get("warning_code"),
+                status=entry_execution_guard.get("status"),
+                summary=entry_execution_guard.get("summary"),
+                operator_summary=entry_execution_guard.get("operator_summary"),
+            )
     except Exception:
         if storage.database_runtime is not None:
             storage.database_runtime.dispose()
@@ -2955,6 +2978,12 @@ async def build_runtime(
     runtime = ApplicationRuntime(
         started_at=utc_now(),
         settings=runtime_settings,
+        sleeve_auto_execution_config_source=(
+            "strategy_sleeve_auto_parallel_enabled"
+            if base_settings.strategy_sleeve_auto_execution_uses_deprecated_key
+            else "strategy_sleeve_auto_execution_enabled"
+        ),
+        sleeve_auto_execution_uses_deprecated_key=base_settings.strategy_sleeve_auto_execution_uses_deprecated_key,
         runtime_profile_resolution=profile_resolution,
         runtime_layering=runtime_layering,
         runtime_profile=runtime_layering.runtime_profile,

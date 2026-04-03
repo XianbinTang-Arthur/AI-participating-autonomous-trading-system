@@ -226,6 +226,31 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.market_data_backend, "okx")
         self.assertEqual(settings.default_symbol, "ETH-USDT-SWAP")
 
+    def test_strategy_sleeve_auto_execution_new_key_takes_precedence_over_deprecated_key(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "strategy_sleeve_auto_parallel_enabled": False,
+                "strategy_sleeve_auto_execution_enabled": True,
+            }
+        )
+
+        self.assertTrue(settings.effective_strategy_sleeve_auto_execution_enabled)
+        self.assertTrue(settings.strategy_sleeve_auto_execution_enabled)
+        self.assertTrue(settings.strategy_sleeve_auto_parallel_enabled)
+        self.assertFalse(settings.strategy_sleeve_auto_execution_uses_deprecated_key)
+
+    def test_strategy_sleeve_auto_execution_old_key_still_works_but_marks_deprecated_source(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "strategy_sleeve_auto_parallel_enabled": False,
+            }
+        )
+
+        self.assertFalse(settings.effective_strategy_sleeve_auto_execution_enabled)
+        self.assertFalse(settings.strategy_sleeve_auto_execution_enabled)
+        self.assertFalse(settings.strategy_sleeve_auto_parallel_enabled)
+        self.assertTrue(settings.strategy_sleeve_auto_execution_uses_deprecated_key)
+
     def test_spot_cash_runtime_rejects_non_unit_leverage(self) -> None:
         with self.assertRaisesRegex(ValueError, "spot_cash_runtime_requires_unit_leverage"):
             AATSSettings.model_validate(

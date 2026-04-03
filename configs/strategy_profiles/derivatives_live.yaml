@@ -71,8 +71,8 @@ strategy_profile_emergency_safety_fast_track_enabled: true
 strategy_profile_emergency_safety_confidence_min: 0.67
 
 # 多策略 sleeve 自动控制
-# [常用可调] strategy_sleeve_auto_parallel_enabled：是否启用多策略 sleeve 自动并行控制。可选值：true / false；推荐值：true。
-strategy_sleeve_auto_parallel_enabled: false
+# [常用可调] strategy_sleeve_auto_execution_enabled：是否允许自动下发非保护性 sleeve delta。可选值：true / false；推荐值：true。
+strategy_sleeve_auto_execution_enabled: true
 # [常用可调] strategy_sleeve_auto_min_budget_multiplier：自动收缩后的最小预算倍率。可选值：0.1 ~ 1.0；推荐值：0.35。
 strategy_sleeve_auto_min_budget_multiplier: 0.35
 # [常用可调] strategy_sleeve_auto_reconciliation_contraction_multiplier：对账压力下的预算收缩倍率。可选值：0.1 ~ 1.0；推荐值：0.50。

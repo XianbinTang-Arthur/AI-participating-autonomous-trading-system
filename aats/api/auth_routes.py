@@ -243,11 +243,22 @@ def _strategy_view_strategy_runtime_payload(payload: dict[str, Any]) -> dict[str
     return {
         "generated_at": payload.get("generated_at"),
         "summary": payload.get("summary") or {},
+        "entry_execution_guard": payload.get("entry_execution_guard") or {},
         "family_enablement": payload.get("family_enablement") or {},
         "configured_parameters": {
             "strategy_family_active": configured_parameters.get("strategy_family_active"),
             "strategy_family_auto_selection_enabled": configured_parameters.get("strategy_family_auto_selection_enabled"),
-            "strategy_sleeve_auto_parallel_enabled": configured_parameters.get("strategy_sleeve_auto_parallel_enabled"),
+            "strategy_sleeve_auto_execution_enabled": configured_parameters.get("strategy_sleeve_auto_execution_enabled"),
+            "strategy_sleeve_auto_execution_config_source": configured_parameters.get("strategy_sleeve_auto_execution_config_source"),
+            "strategy_sleeve_auto_execution_uses_deprecated_key": configured_parameters.get("strategy_sleeve_auto_execution_uses_deprecated_key"),
+            "compatibility": {
+                "deprecated_auto_execution_key": (
+                    configured_parameters.get("compatibility", {}) or {}
+                ).get("deprecated_auto_execution_key"),
+                "deprecated_auto_execution_value": (
+                    configured_parameters.get("compatibility", {}) or {}
+                ).get("deprecated_auto_execution_value"),
+            },
             "strategy_sleeve_auto_min_budget_multiplier": configured_parameters.get("strategy_sleeve_auto_min_budget_multiplier"),
             "strategy_sleeve_auto_reconciliation_contraction_multiplier": configured_parameters.get("strategy_sleeve_auto_reconciliation_contraction_multiplier"),
             "strategy_sleeve_auto_soft_loss_usdt": configured_parameters.get("strategy_sleeve_auto_soft_loss_usdt"),

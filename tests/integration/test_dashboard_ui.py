@@ -1369,7 +1369,13 @@ console.log(JSON.stringify({
             "configured_parameters": {
                 "strategy_family_active": "directional",
                 "strategy_family_auto_selection_enabled": True,
-                "strategy_sleeve_auto_parallel_enabled": True,
+                "strategy_sleeve_auto_execution_enabled": True,
+                "strategy_sleeve_auto_execution_config_source": "strategy_sleeve_auto_execution_enabled",
+                "strategy_sleeve_auto_execution_uses_deprecated_key": False,
+                "compatibility": {
+                    "deprecated_auto_execution_key": "strategy_sleeve_auto_parallel_enabled",
+                    "deprecated_auto_execution_value": True,
+                },
                 "strategy_sleeve_auto_min_budget_multiplier": 0.4,
                 "strategy_sleeve_auto_reconciliation_contraction_multiplier": 0.7,
                 "strategy_sleeve_auto_soft_loss_usdt": 25.0,
@@ -1411,6 +1417,17 @@ console.log(JSON.stringify({
         self.assertNotIn("trade_costs", trimmed["configured_parameters"])
         self.assertNotIn("directional", trimmed["configured_parameters"])
         self.assertNotIn("smart_arbitrage", trimmed["configured_parameters"])
+        self.assertEqual(
+            trimmed["configured_parameters"]["strategy_sleeve_auto_execution_config_source"],
+            "strategy_sleeve_auto_execution_enabled",
+        )
+        self.assertFalse(trimmed["configured_parameters"]["strategy_sleeve_auto_execution_uses_deprecated_key"])
+        self.assertNotIn("strategy_sleeve_auto_parallel_enabled", trimmed["configured_parameters"])
+        self.assertEqual(
+            trimmed["configured_parameters"]["compatibility"]["deprecated_auto_execution_key"],
+            "strategy_sleeve_auto_parallel_enabled",
+        )
+        self.assertTrue(trimmed["configured_parameters"]["compatibility"]["deprecated_auto_execution_value"])
         self.assertNotIn("recent_budget_snapshots", trimmed)
         self.assertNotIn("recent_conflict_resolutions", trimmed)
         self.assertNotIn("recent_netting_decisions", trimmed)
@@ -1779,6 +1796,11 @@ const html = renderStrategyView({
       latest_portfolio_approved_notional: 0,
       latest_portfolio_budget_cut_notional: 0,
       auto_parallel_enabled: false,
+      entry_execution_guard: {
+        active: true,
+        headline: '当前 non-protective entry execution 已被降级为 advisory-only。',
+        summary: '当前 non-protective entry execution 已被降级为 advisory-only；新的非保护性开仓/加仓只做参考，不会自动下单，保护性收缩仍可继续执行。',
+      },
       automation_active_count: 0,
       automation_contracted_count: 0,
       automation_paused_count: 0,
@@ -1916,6 +1938,9 @@ console.log(JSON.stringify({
     && !html.includes('smart_arbitrage_quote_budget_per_trade')
     && !html.includes('smart_arbitrage_cost_model_enabled')
     && !html.includes('BTC-USDT &lt;-&gt; BTC-USDT-SWAP'),
+  showsEntryExecutionGuard: html.includes('当前非保护性开仓已降级为仅参考')
+    && html.includes('当前 non-protective entry execution 已被降级为 advisory-only')
+    && html.includes('保护性收缩仍可执行'),
 }));
 """
         result = subprocess.run(
@@ -1927,6 +1952,234 @@ console.log(JSON.stringify({
         )
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hidesReferenceCards":true', result.stdout)
+        self.assertIn('"showsEntryExecutionGuard":true', result.stdout)
+
+    def test_strategy_view_surfaces_budget_zero_suppression_as_non_permission_block(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  strategyRuntime: {
+    summary: {
+      auto_parallel_enabled: true,
+      automation_active_count: 1,
+      automation_contracted_count: 0,
+      automation_paused_count: 0,
+      budget_zero_suppression_count: 2,
+      execution_behavior_counts: {
+        execute_target: 0,
+        hold_current: 0,
+        advisory_only: 0,
+        suppressed_after_approval: 2,
+        protective_execute: 0,
+      },
+      execution_control_summary: {
+        active: true,
+        primary_mode: 'budget_zero_suppressed',
+        headline: '最近自动执行主要受预算压零抑制',
+        summary: '最近 2 条 sleeve intent 已允许自动执行，但预算层把可执行量压成了 0。',
+        total_recent_intents: 2,
+      },
+      execution_behavior_summary: {
+        active: true,
+        primary_behavior: 'suppressed_after_approval',
+        headline: '最近执行行为以批准后压零为主',
+        summary: '最近 2 条 sleeve intent 已获批准，但最终执行行为仍是压零保留。',
+        total_recent_intents: 2,
+      },
+      latest_approved_sleeve_weights: {},
+      entry_execution_guard: {
+        active: false,
+      },
+    },
+    latest_snapshot: {
+      candidates: [],
+      automation_decisions: [],
+    },
+    configured_parameters: {
+      strategy_sleeve_auto_execution_enabled: true,
+      strategy_sleeve_auto_min_budget_multiplier: 0.25,
+      strategy_sleeve_auto_soft_loss_usdt: 20,
+      strategy_sleeve_auto_hard_loss_usdt: 50,
+    },
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {},
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  showsExecutionControlSummaryCallout: html.includes('最近自动执行主要受预算压零抑制')
+    && html.includes('预算压零')
+    && html.includes('最近样本 2')
+    && html.includes('最近 2 条 sleeve intent 已允许自动执行，但预算层把可执行量压成了 0。'),
+  showsBudgetZeroSuppressionKv: html.includes('预算压零抑制')
+    && html.includes('表示权限已通过，但预算层把最终可执行量压成了 0。'),
+  showsExecutionControlSummaryKv: html.includes('最近自动控制摘要')
+    && html.includes('最近自动执行主要受预算压零抑制'),
+  showsExecutionBehaviorSummaryKv: html.includes('最近执行行为摘要')
+    && html.includes('最近执行行为以批准后压零为主')
+    && html.includes('最近 2 条 sleeve intent 已获批准，但最终执行行为仍是压零保留。'),
+  showsExecutionBehaviorDistributionKv: html.includes('最近执行行为分布')
+    && html.includes('批准后压零 2'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"showsExecutionControlSummaryCallout":true', result.stdout)
+        self.assertIn('"showsBudgetZeroSuppressionKv":true', result.stdout)
+        self.assertIn('"showsExecutionControlSummaryKv":true', result.stdout)
+        self.assertIn('"showsExecutionBehaviorSummaryKv":true', result.stdout)
+        self.assertIn('"showsExecutionBehaviorDistributionKv":true', result.stdout)
+
+    def test_strategy_view_surfaces_control_mode_distribution_and_deprecated_config_source(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  strategyRuntime: {
+    summary: {
+      auto_parallel_enabled: false,
+      automation_active_count: 0,
+      automation_contracted_count: 0,
+      automation_paused_count: 1,
+      budget_zero_suppression_count: 0,
+      execution_control_mode_counts: {
+        approved: 0,
+        permission_denied: 1,
+        budget_zero_suppressed: 0,
+        protective_override: 1,
+      },
+      execution_behavior_counts: {
+        execute_target: 0,
+        hold_current: 0,
+        advisory_only: 1,
+        suppressed_after_approval: 0,
+        protective_execute: 1,
+      },
+      execution_control_summary: {
+        active: true,
+        primary_mode: 'permission_denied',
+        headline: '最近自动执行主要受权限拒绝影响',
+        summary: '最近 1 条 sleeve intent 因执行权限未通过被降级为 advisory-only 或 hold-current。',
+        total_recent_intents: 2,
+      },
+      execution_behavior_summary: {
+        active: true,
+        primary_behavior: 'advisory_only',
+        headline: '最近执行行为以仅参考为主',
+        summary: '最近 1 条 sleeve intent 的最终执行行为是 advisory-only。',
+        total_recent_intents: 2,
+      },
+      entry_execution_guard: {
+        active: true,
+        summary: '当前 non-protective entry execution 已被降级为 advisory-only。',
+      },
+      entry_auto_execution_config_source: 'strategy_sleeve_auto_parallel_enabled',
+      entry_auto_execution_uses_deprecated_key: true,
+      latest_approved_sleeve_weights: {},
+    },
+    latest_snapshot: {
+      candidates: [],
+      automation_decisions: [
+        {
+          strategy_sleeve_id: 'sleeve_protective',
+          family: 'protective',
+          automation_state: 'protective_only',
+          execution_control_mode: 'protective_override',
+          execution_behavior: 'protective_execute',
+          budget_multiplier: 1,
+          allocator_weight: 0,
+          recent_net_pnl: 0,
+          operator_summary: '保护性例外仍可执行',
+        },
+      ],
+    },
+    configured_parameters: {
+      strategy_sleeve_auto_execution_enabled: false,
+      strategy_sleeve_auto_execution_config_source: 'strategy_sleeve_auto_parallel_enabled',
+      strategy_sleeve_auto_execution_uses_deprecated_key: true,
+      compatibility: {
+        deprecated_auto_execution_key: 'strategy_sleeve_auto_parallel_enabled',
+        deprecated_auto_execution_value: false,
+      },
+      strategy_sleeve_auto_min_budget_multiplier: 0.25,
+      strategy_sleeve_auto_soft_loss_usdt: 20,
+      strategy_sleeve_auto_hard_loss_usdt: 50,
+    },
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  latestDecision: {},
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: { summary: {}, sections: {} },
+});
+
+console.log(JSON.stringify({
+  showsDeprecatedConfigCallout: html.includes('自动执行仍在使用旧配置键')
+    && html.includes('strategy_sleeve_auto_parallel_enabled')
+    && html.includes('建议迁移到 strategy_sleeve_auto_execution_enabled'),
+  showsControlModeDistribution: html.includes('最近控制模式分布')
+    && html.includes('正常放行 0')
+    && html.includes('权限拒绝 1')
+    && html.includes('预算压零 0')
+    && html.includes('保护性例外 1'),
+  showsExecutionControlSummaryKv: html.includes('最近自动控制摘要')
+    && html.includes('最近自动执行主要受权限拒绝影响')
+    && html.includes('最近 1 条 sleeve intent 因执行权限未通过被降级为 advisory-only 或 hold-current。'),
+  showsExecutionBehaviorSummaryKv: html.includes('最近执行行为摘要')
+    && html.includes('最近执行行为以仅参考为主')
+    && html.includes('最近 1 条 sleeve intent 的最终执行行为是 advisory-only。'),
+  showsExecutionBehaviorDistributionKv: html.includes('最近执行行为分布')
+    && html.includes('仅参考 1')
+    && html.includes('保护性执行 1'),
+  showsProtectiveOverrideRowMeta: html.includes('保护性例外')
+    && html.includes('保护性执行')
+    && html.includes('保护性例外仍可执行'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"showsDeprecatedConfigCallout":true', result.stdout)
+        self.assertIn('"showsControlModeDistribution":true', result.stdout)
+        self.assertIn('"showsExecutionControlSummaryKv":true', result.stdout)
+        self.assertIn('"showsExecutionBehaviorSummaryKv":true', result.stdout)
+        self.assertIn('"showsExecutionBehaviorDistributionKv":true', result.stdout)
+        self.assertIn('"showsProtectiveOverrideRowMeta":true', result.stdout)
 
     def test_strategy_view_hides_derivatives_only_reference_blocks_for_spot_runtime(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

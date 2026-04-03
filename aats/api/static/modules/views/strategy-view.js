@@ -21,6 +21,22 @@ export function renderStrategySections(data) {
   const executionLatest = data.executionLatest || {};
   const strategyRuntime = data.strategyRuntime || {};
   const strategyRuntimeSummary = strategyRuntime.summary || {};
+  const entryExecutionGuard = strategyRuntime.entry_execution_guard || strategyRuntimeSummary.entry_execution_guard || {};
+  const budgetZeroSuppressionCount = Number(strategyRuntimeSummary.budget_zero_suppression_count || 0);
+  const executionControlModeCounts = strategyRuntimeSummary.execution_control_mode_counts || {};
+  const executionControlSummary = strategyRuntimeSummary.execution_control_summary || {};
+  const executionBehaviorCounts = strategyRuntimeSummary.execution_behavior_counts || {};
+  const executionBehaviorSummary = strategyRuntimeSummary.execution_behavior_summary || {};
+  const entryAutoExecutionConfigSource =
+    strategyRuntimeSummary.entry_auto_execution_config_source
+    || strategyRuntime.configured_parameters?.strategy_sleeve_auto_execution_config_source
+    || entryExecutionGuard.effective_config_key
+    || "strategy_sleeve_auto_execution_enabled";
+  const entryAutoExecutionUsesDeprecatedKey = Boolean(
+    strategyRuntimeSummary.entry_auto_execution_uses_deprecated_key
+    ?? strategyRuntime.configured_parameters?.strategy_sleeve_auto_execution_uses_deprecated_key
+    ?? entryExecutionGuard.using_deprecated_key
+  );
   const strategyRuntimeSnapshot = strategyRuntime.latest_snapshot || {};
   const latestBundle = strategyRuntime.latest_bundle || {};
   const strategyAppliedTarget = strategyRuntime.latest_applied_target || {};
@@ -211,7 +227,11 @@ export function renderStrategySections(data) {
           {
             label: "自动并行运行",
             value: strategyRuntimeSummary.auto_parallel_enabled ? "已启用" : "未启用",
-            meta: strategyRuntimeSummary.auto_parallel_enabled ? "当前按系统规则自动启停和分配预算。" : "当前没有启用 sleeve 自动预算控制。",
+            meta: entryExecutionGuard.active
+              ? (entryExecutionGuard.headline || entryExecutionGuard.summary || "当前非保护性开仓自动执行已降级为仅参考。")
+              : strategyRuntimeSummary.auto_parallel_enabled
+                ? "当前按系统规则自动启停和分配预算。"
+                : "当前没有启用 sleeve 自动预算控制。",
             tone: strategyRuntimeSummary.auto_parallel_enabled ? "positive" : "warning",
           },
           {
@@ -233,6 +253,30 @@ export function renderStrategySections(data) {
             tone: strategyRuntimeSummary.automation_paused_count ? "danger" : "info",
           },
         ])}
+        ${entryExecutionGuard.active ? callout({
+          title: "当前非保护性开仓已降级为仅参考",
+          copy: entryExecutionGuard.summary || "当前 non-protective entry execution 已被降级为 advisory-only；新的非保护性开仓/加仓不会自动下单。",
+          pills: [
+            pill("高优先级提示", "warning"),
+            pill("保护性收缩仍可执行", "positive"),
+          ],
+        }) : ""}
+        ${entryAutoExecutionUsesDeprecatedKey ? callout({
+          title: "自动执行仍在使用旧配置键",
+          copy: `当前运行态仍通过 ${entryAutoExecutionConfigSource} 控制 sleeve 自动执行；建议迁移到 strategy_sleeve_auto_execution_enabled。`,
+          pills: [
+            pill("迁移提醒", "warning"),
+            pill("兼容读取中", "info"),
+          ],
+        }) : ""}
+        ${!entryExecutionGuard.active && executionControlSummary.active && executionControlSummary.primary_mode && executionControlSummary.primary_mode !== "approved" ? callout({
+          title: executionControlSummary.headline || "最近自动控制存在额外限制",
+          copy: executionControlSummary.summary || "最近自动控制样本显示当前并非所有 sleeve 都能直接进入执行链。",
+          pills: [
+            pill(readableExecutionControlMode(executionControlSummary.primary_mode), executionControlSummaryTone(executionControlSummary.primary_mode)),
+            pill(`最近样本 ${formatNumber(executionControlSummary.total_recent_intents, 0, "0")}`, "info"),
+          ],
+        }) : ""}
         ${kvList([
           [
             "最新预算权重",
@@ -243,19 +287,50 @@ export function renderStrategySections(data) {
           ],
           [
             "自动控制阈值",
-            strategyRuntime.configured_parameters?.strategy_sleeve_auto_parallel_enabled ? "按运行参数自动控制" : "当前未启用自动控制",
+            entryExecutionGuard.active
+              ? "当前非保护性开仓自动执行已降级"
+              : strategyRuntime.configured_parameters?.strategy_sleeve_auto_execution_enabled
+                ? "按运行参数自动控制"
+                : "当前未启用自动控制",
             [
               `最小预算倍率 ${formatNumber(strategyRuntime.configured_parameters?.strategy_sleeve_auto_min_budget_multiplier, 2, "暂无预算阈值")}`,
               `软亏损 ${formatSigned(strategyRuntime.configured_parameters?.strategy_sleeve_auto_soft_loss_usdt)}`,
               `硬亏损 ${formatSigned(strategyRuntime.configured_parameters?.strategy_sleeve_auto_hard_loss_usdt)}`,
             ].join(" | "),
           ],
+          [
+            "最近自动控制摘要",
+            executionControlSummary.headline || "最近还没有新的自动控制样本",
+            executionControlSummary.summary || "等下一轮自动预算与调度落地后，这里会出现更直白的控制结果摘要。",
+          ],
+          [
+            "最近执行行为摘要",
+            executionBehaviorSummary.headline || "最近还没有新的执行行为样本",
+            executionBehaviorSummary.summary || "等下一轮 allocator/runtime 落地后，这里会出现更直白的执行行为摘要。",
+          ],
+          [
+            "最近控制模式分布",
+            executionControlModeDistributionText(executionControlModeCounts),
+            `配置来源 ${entryAutoExecutionConfigSource}${entryAutoExecutionUsesDeprecatedKey ? "（旧键兼容中）" : ""}`,
+          ],
+          [
+            "最近执行行为分布",
+            executionBehaviorDistributionText(executionBehaviorCounts),
+            executionBehaviorSummary.operator_summary || "当前还没有新的执行行为汇总。",
+          ],
+          [
+            "预算压零抑制",
+            formatNumber(budgetZeroSuppressionCount, 0, "0"),
+            budgetZeroSuppressionCount
+              ? "表示权限已通过，但预算层把最终可执行量压成了 0。"
+              : "最近没有出现“已允许执行但预算压成 0”的 sleeve intent。",
+          ],
         ])}
         ${responsiveTable(
           ["子策略", "自动状态", "预算倍率", "权重", "最近净收益"],
           displayedAutomationDecisions.map((item) => [
             `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
-            `<div><strong>${escapeHtml(readableState(item.automation_state || "unknown"))}</strong><div class="table-meta">${escapeHtml(item.operator_summary || "当前没有额外说明")}</div></div>`,
+            `<div><strong>${escapeHtml(readableState(item.automation_state || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableExecutionBehavior(item.execution_behavior || item.metrics?.auto_execution_behavior))} | ${escapeHtml(readableExecutionControlMode(item.execution_control_mode || item.metrics?.auto_execution_control_mode))} | ${escapeHtml(item.operator_summary || "当前没有额外说明")}</div></div>`,
             formatNumber(item.budget_multiplier, 2, "0"),
             formatNumber(item.allocator_weight, 2, "0"),
             formatSigned(item.recent_net_pnl),
@@ -2380,6 +2455,64 @@ function formatRawFeeImpact(value, digits = 4, fallback = "待确认") {
   const number = Number(value);
   if (!Number.isFinite(number)) return fallback;
   return formatSigned(number === 0 ? 0 : -number, digits, fallback);
+}
+
+function readableExecutionControlMode(value) {
+  const labels = {
+    approved: "正常放行",
+    permission_denied: "权限拒绝",
+    budget_zero_suppressed: "预算压零",
+    protective_override: "保护性例外",
+  };
+  const normalized = String(value || "").trim();
+  return labels[normalized] || "当前没有控制模式";
+}
+
+function readableExecutionBehavior(value) {
+  const labels = {
+    execute_target: "直接执行目标",
+    hold_current: "保持当前仓位",
+    advisory_only: "仅参考",
+    suppressed_after_approval: "批准后压零",
+    protective_execute: "保护性执行",
+  };
+  const normalized = String(value || "").trim();
+  return labels[normalized] || "当前没有执行行为";
+}
+
+function executionControlSummaryTone(value) {
+  if (value === "approved") return "positive";
+  if (value === "permission_denied" || value === "budget_zero_suppressed") return "warning";
+  if (value === "protective_override") return "info";
+  return "info";
+}
+
+function executionControlModeDistributionText(counts = {}) {
+  const approved = Number(counts?.approved || 0);
+  const permissionDenied = Number(counts?.permission_denied || 0);
+  const budgetZeroSuppressed = Number(counts?.budget_zero_suppressed || 0);
+  const protectiveOverride = Number(counts?.protective_override || 0);
+  return [
+    `正常放行 ${formatNumber(approved, 0, "0")}`,
+    `权限拒绝 ${formatNumber(permissionDenied, 0, "0")}`,
+    `预算压零 ${formatNumber(budgetZeroSuppressed, 0, "0")}`,
+    `保护性例外 ${formatNumber(protectiveOverride, 0, "0")}`,
+  ].join(" | ");
+}
+
+function executionBehaviorDistributionText(counts = {}) {
+  const executeTarget = Number(counts?.execute_target || 0);
+  const holdCurrent = Number(counts?.hold_current || 0);
+  const advisoryOnly = Number(counts?.advisory_only || 0);
+  const suppressedAfterApproval = Number(counts?.suppressed_after_approval || 0);
+  const protectiveExecute = Number(counts?.protective_execute || 0);
+  return [
+    `直接执行目标 ${formatNumber(executeTarget, 0, "0")}`,
+    `保持当前仓位 ${formatNumber(holdCurrent, 0, "0")}`,
+    `仅参考 ${formatNumber(advisoryOnly, 0, "0")}`,
+    `批准后压零 ${formatNumber(suppressedAfterApproval, 0, "0")}`,
+    `保护性执行 ${formatNumber(protectiveExecute, 0, "0")}`,
+  ].join(" | ");
 }
 
 function forwardVerdictLabel(value) {

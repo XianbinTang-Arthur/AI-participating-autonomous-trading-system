@@ -101,7 +101,7 @@ class RecoveryPostureEvaluator:
             return False
         if status.baseline_requires_operator_review or ai_requires_manual_review or trial_guard_breached:
             return False
-        if status.resume_blocked_reasons or status.only_reduce_required:
+        if any(blocker in self._PERSISTENT_STATUS_BLOCKERS for blocker in status.resume_blocked_reasons):
             return False
         if bundle_recovery.bundle_recovery_required or bundle_recovery.recovery_blocking:
             return False

@@ -184,7 +184,8 @@
 - 主要字段：
   - `strategy_family_active`
   - `strategy_family_auto_selection_enabled`
-  - `strategy_sleeve_auto_parallel_enabled`
+  - `strategy_sleeve_auto_execution_enabled`（主配置键）
+  - `strategy_sleeve_auto_parallel_enabled`（旧键；仅保留兼容读取窗口与迁移诊断）
   - `strategy_sleeve_auto_min_budget_multiplier`
   - `strategy_sleeve_auto_reconciliation_contraction_multiplier`
   - `strategy_sleeve_auto_soft_loss_usdt`
@@ -233,7 +234,8 @@
 
 - `strategy_family_active`
 - `strategy_family_auto_selection_enabled`
-- `strategy_sleeve_auto_parallel_enabled`
+- `strategy_sleeve_auto_execution_enabled`（主配置键）
+- `strategy_sleeve_auto_parallel_enabled`（旧键；仅兼容窗口）
 - `strategy_sleeve_auto_min_budget_multiplier`
 - `strategy_sleeve_auto_reconciliation_contraction_multiplier`
 - `strategy_sleeve_auto_soft_loss_usdt`
