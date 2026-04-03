@@ -20,6 +20,14 @@ from aats.data_platform.validate.funding_quality_checker import validate_funding
 log = logging.getLogger(__name__)
 
 
+class ValidationBlockedError(Exception):
+    """Raised when quality validation returns ``fail`` and merge is blocked."""
+
+    def __init__(self, quality: dict[str, Any]) -> None:
+        self.quality = quality
+        super().__init__(f"Validation blocked merge: {quality.get('quality_status')}")
+
+
 def run_candle_merge_pipeline(
     session: Session,
     *,
@@ -29,7 +37,13 @@ def run_candle_merge_pipeline(
     dataset_version: str = "v1.0",
     run_item_id: str | None = None,
 ) -> dict[str, Any]:
-    """Validate staging, merge to bronze, then merge to silver."""
+    """Validate staging, merge to bronze, then merge to silver.
+
+    Quality gate:
+    - ``fail`` -> merge is **blocked**, raises ``ValidationBlockedError``
+    - ``warn`` -> merge proceeds, warning logged
+    - ``pass`` -> merge proceeds normally
+    """
     inst_type = instrument_type_for_symbol(symbol)
     stg_table = candle_table_name("staging", symbol, timeframe)
 
@@ -45,6 +59,19 @@ def run_candle_merge_pipeline(
         instrument_type=inst_type,
     )
     log.info("Candle quality: %s (%d rows)", quality["quality_status"], quality["total_rows"])
+
+    # Quality gate
+    if quality["quality_status"] == "fail":
+        log.error("Candle validation FAILED for %s %s run=%s — merge blocked",
+                  symbol, timeframe, ingest_run_id)
+        if run_item_id:
+            finish_run_item(session, run_item_id, status="failed",
+                            error_message="validation failed, merge blocked")
+        raise ValidationBlockedError(quality)
+
+    if quality["quality_status"] == "warn":
+        log.warning("Candle validation WARN for %s %s run=%s — proceeding with merge",
+                    symbol, timeframe, ingest_run_id)
 
     # 2. Merge staging -> bronze
     bronze_count = merge_candles_to_bronze(
@@ -78,7 +105,10 @@ def run_funding_merge_pipeline(
     dataset_version: str = "v1.0",
     run_item_id: str | None = None,
 ) -> dict[str, Any]:
-    """Validate staging funding, merge to bronze, then merge to silver."""
+    """Validate staging funding, merge to bronze, then merge to silver.
+
+    Quality gate: same as candle pipeline — ``fail`` blocks merge.
+    """
     stg_table = funding_table_name("staging")
 
     quality = validate_funding(
@@ -91,6 +121,18 @@ def run_funding_merge_pipeline(
         instrument_type="swap",
     )
     log.info("Funding quality: %s (%d rows)", quality["quality_status"], quality["total_rows"])
+
+    if quality["quality_status"] == "fail":
+        log.error("Funding validation FAILED for %s run=%s — merge blocked",
+                  symbol, ingest_run_id)
+        if run_item_id:
+            finish_run_item(session, run_item_id, status="failed",
+                            error_message="validation failed, merge blocked")
+        raise ValidationBlockedError(quality)
+
+    if quality["quality_status"] == "warn":
+        log.warning("Funding validation WARN for %s run=%s — proceeding with merge",
+                    symbol, ingest_run_id)
 
     bronze_count = merge_funding_to_bronze(
         session, symbol=symbol, ingest_run_id=ingest_run_id,
