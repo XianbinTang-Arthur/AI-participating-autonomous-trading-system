@@ -76,6 +76,7 @@ from aats.services.governance_engine.adaptive_controls import (
     resolve_execution_aggressiveness_state,
     resolve_risk_budget_state,
 )
+from aats.services.strategy_engines.sleeve_execution_permission import non_protective_entry_execution_guard
 from aats.storage.base import EventStore
 
 if TYPE_CHECKING:
@@ -476,6 +477,7 @@ class StrategyProfileControlService:
             ),
             "evidence": evidence,
             "adaptive_controls": adaptive_controls,
+            "entry_execution_guard": non_protective_entry_execution_guard(self.settings),
         }
 
     def _adaptive_control_summary(self, *, context: dict[str, Any]) -> dict[str, Any]:

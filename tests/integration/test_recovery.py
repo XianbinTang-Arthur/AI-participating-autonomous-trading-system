@@ -20,6 +20,10 @@ from aats.schemas.exchange import (
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent
+from aats.services.execution_engine.exit_intent_aggregator import (
+    child_exit_order_ref_from_order_state,
+    create_exit_execution_intent_from_order_state,
+)
 from aats.services.operator.query_service import OperatorQueryService
 from aats.storage.sqlalchemy_models import EventEnvelopeModel, PortfolioSnapshotModel, ReconciliationReportModel
 from tests.support.postgres import temporary_postgres_url
@@ -917,6 +921,696 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
             recovery["latest_reconciliation_summary"]["leg_mismatch_summary"]["instrument_items"][0]["symbol"],
             "BTC-USDT-SWAP",
         )
+
+    async def test_recovery_view_surfaces_unknown_write_review_required_from_reconciliation(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+            }
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        runtime.reconciliation_repo.save_report(
+            ReconciliationReport(
+                reconciliation_id="recon_integration_unknown_write",
+                as_of_ts=utc_now(),
+                allowed_symbols=["BTC-USDT"],
+                exchange_comparison_enabled=False,
+                order_diff={"reconstructed": {}, "exchange": {}},
+                fill_diff={"replayed": {}, "exchange": {}},
+                balance_diff={"reconstructed": {}, "exchange": {}},
+                position_diff={
+                    "stored": {},
+                    "reconstructed": {},
+                    "reconstructed_mismatches": {},
+                    "exchange": {},
+                    "exchange_mismatches": {},
+                },
+                mismatch_categories=[],
+                mismatch_reasons=[],
+                safety_impacts=["execution_truth_pending_for_unknown_write"],
+                severity="REVIEW_REQUIRED",
+                review_required=True,
+                resume_blocking=True,
+                recovery_classification="manual_review_required",
+                unknown_state_details=[
+                    {
+                        "kind": "unknown_submit_unresolved",
+                        "symbol": "BTC-USDT",
+                        "client_order_id": "clord_unknown_write",
+                        "unknown_write_operation": "submit",
+                        "exchange_truth_pending": True,
+                        "operator_review_required": True,
+                    }
+                ],
+                recommended_operator_action="review_unknown_write_and_refresh_exchange_state",
+            )
+        )
+
+        query = OperatorQueryService(runtime)
+        recovery = query.recovery_view()
+
+        self.assertEqual(recovery["recovery_state"], "review_required")
+        self.assertTrue(recovery["review_required"])
+        self.assertFalse(recovery["safe_to_trade"])
+        self.assertEqual(
+            recovery["latest_reconciliation"]["recommended_operator_action"],
+            "review_unknown_write_and_refresh_exchange_state",
+        )
+        self.assertEqual(
+            recovery["latest_reconciliation"]["unknown_state_details"][0]["kind"],
+            "unknown_submit_unresolved",
+        )
+
+    async def test_recovery_view_surfaces_parent_exit_review_overlay_from_reconciliation(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "execution_unknown_submit_review_after_seconds": 0.0,
+            }
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        now = utc_now()
+        unknown_state = OrderState(
+            decision_id="decision_parent_review_overlay",
+            execution_chain_id="chain_parent_review_overlay",
+            intent_id="intent_parent_review_overlay",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_parent_review_overlay",
+            venue="OKX",
+            exchange_order_id=None,
+            status="SUBMITTED",
+            exchange_status="live",
+            submitted_ts=now,
+            last_update_ts=now,
+            requested_qty=Decimal("2"),
+            filled_qty=Decimal("0"),
+            remaining_qty=Decimal("2"),
+            average_fill_price=None,
+            fees=Decimal("0"),
+            reduce_only=True,
+            close_only=True,
+            product_type="derivatives",
+            margin_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            exposure_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+            execution_error="submission_unknown_check_exchange:OKXRequestError",
+        )
+        runtime.execution_repo.save_order_state(unknown_state)
+        parent = create_exit_execution_intent_from_order_state(unknown_state)
+        runtime.exit_execution_repo.save_exit_execution_intent(parent)
+        runtime.exit_execution_repo.save_child_exit_order_ref(
+            child_exit_order_ref_from_order_state(
+                parent_intent_id=parent.parent_intent_id,
+                order_state=unknown_state,
+                settings=settings,
+            )
+        )
+
+        await runtime.reconciliation_service.validate_now(reason="parent_exit_review_overlay")
+
+        query = OperatorQueryService(runtime)
+        recovery = query.recovery_view()
+
+        self.assertEqual(recovery["recovery_state"], "review_required")
+        self.assertTrue(recovery["review_required"])
+        self.assertIn(
+            "exit_execution_parent_review_required",
+            [str(detail.get("kind")) for detail in recovery["latest_reconciliation"]["unknown_state_details"]],
+        )
+        self.assertEqual(
+            recovery["latest_reconciliation"]["recommended_operator_action"],
+            "review_exit_execution_parent_and_refresh_exchange_state",
+        )
+
+    async def test_recovery_view_surfaces_exit_execution_review_items_without_reconciliation(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        now = utc_now()
+        partial_state = OrderState(
+            decision_id="decision_parent_resume_issue_view",
+            execution_chain_id="chain_parent_resume_issue_view",
+            intent_id="intent_parent_resume_issue_view",
+            symbol="BTC-USDT-SWAP",
+            client_order_id="clord_parent_resume_issue_view",
+            venue="OKX",
+            exchange_order_id="ord_parent_resume_issue_view",
+            status="FILLED",
+            exchange_status="filled",
+            submitted_ts=now,
+            last_update_ts=now,
+            requested_qty=Decimal("2"),
+            filled_qty=Decimal("2"),
+            remaining_qty=Decimal("0"),
+            average_fill_price=Decimal("80000"),
+            fees=Decimal("0"),
+            reduce_only=True,
+            close_only=True,
+            product_type="derivatives",
+            margin_mode="cross",
+            position_mode="long_short_mode",
+            pos_side="long",
+            exposure_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+        )
+        parent = create_exit_execution_intent_from_order_state(partial_state).model_copy(
+            update={
+                "target_exit_quantity": Decimal("5"),
+                "metadata": {
+                    "dispatch_template": {
+                        "intent_id": "intent_parent_resume_issue_view",
+                        "execution_chain_id": "chain_parent_resume_issue_view",
+                        "decision_id": "decision_parent_resume_issue_view",
+                        "symbol": "BTC-USDT-SWAP",
+                        "side": "sell",
+                        "quantity": "5",
+                        "execution_style": "exchange",
+                        "order_type": "market",
+                        "urgency": "medium",
+                        "time_in_force": "IOC",
+                        "reduce_only": True,
+                        "close_only": True,
+                        "position_mode": "long_short_mode",
+                        "pos_side": "long",
+                        "execution_action": "exit",
+                        "leg_action": "close",
+                        "position_intent": "close_long",
+                        "product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "exposure_side": "long",
+                        "idempotency_key": "intent_parent_resume_issue_view",
+                    },
+                    "resume_issue": {
+                        "kind": "resume_limit_lookup_failed",
+                        "operator_review_required": True,
+                        "updated_at": now.isoformat(),
+                        "error": "max_size_limit_unavailable",
+                    },
+                },
+            }
+        )
+        runtime.exit_execution_repo.save_exit_execution_intent(parent)
+
+        query = OperatorQueryService(runtime)
+        recovery = query.recovery_view()
+
+        self.assertEqual(len(recovery["exit_execution_review_items"]), 1)
+        self.assertEqual(
+            recovery["exit_execution_review_items"][0]["kind"],
+            "exit_execution_resume_limit_lookup_failed",
+        )
+        self.assertEqual(
+            recovery["exit_execution_review_items"][0]["resume_block_reason"],
+            "resume_limit_lookup_failed",
+        )
+
+    async def test_recovery_view_surfaces_truth_pending_exit_execution_item_without_reconciliation(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        parent = create_exit_execution_intent_from_order_state(
+            OrderState(
+                decision_id="decision_truth_pending_view",
+                execution_chain_id="chain_truth_pending_view",
+                intent_id="intent_truth_pending_view",
+                symbol="BTC-USDT-SWAP",
+                client_order_id="clord_truth_pending_view",
+                venue="OKX",
+                exchange_order_id=None,
+                status="SUBMITTED",
+                exchange_status="live",
+                submitted_ts=utc_now(),
+                last_update_ts=utc_now(),
+                requested_qty=Decimal("2"),
+                filled_qty=Decimal("0"),
+                remaining_qty=Decimal("2"),
+                average_fill_price=None,
+                fees=Decimal("0"),
+                reduce_only=True,
+                close_only=True,
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                exposure_side="long",
+                execution_action="exit",
+                leg_action="close",
+                position_intent="close_long",
+                execution_error="submission_unknown_check_exchange:OKXRequestError",
+            )
+        ).model_copy(
+            update={
+                "aggregate_status": "WORKING",
+                "reconciliation_state": "truth_pending",
+                "open_child_unknown_quantity": Decimal("2"),
+                "target_exit_quantity": Decimal("3"),
+                "remaining_dispatchable_quantity": Decimal("1"),
+                "remaining_unresolved_quantity": Decimal("3"),
+                "metadata": {
+                    "dispatch_template": {
+                        "execution_chain_id": "chain_truth_pending_view",
+                        "symbol": "BTC-USDT-SWAP",
+                    }
+                },
+            }
+        )
+        runtime.exit_execution_repo.save_exit_execution_intent(parent)
+
+        recovery = OperatorQueryService(runtime).recovery_view()
+
+        self.assertEqual(len(recovery["exit_execution_review_items"]), 1)
+        self.assertEqual(
+            recovery["exit_execution_review_items"][0]["kind"],
+            "exit_execution_truth_pending",
+        )
+        self.assertFalse(recovery["exit_execution_review_items"][0]["operator_review_required"])
+        self.assertTrue(recovery["exit_execution_review_items"][0]["blocks_resume"])
+
+    async def test_recovery_view_surfaces_childless_exit_execution_item_without_reconciliation(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "storage_mode": "memory",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        parent = create_exit_execution_intent_from_order_state(
+            OrderState(
+                decision_id="decision_childless_view",
+                execution_chain_id="chain_childless_view",
+                intent_id="intent_childless_view",
+                symbol="BTC-USDT-SWAP",
+                client_order_id="clord_childless_view",
+                venue="OKX",
+                exchange_order_id="ord_childless_view",
+                status="FILLED",
+                exchange_status="filled",
+                submitted_ts=utc_now(),
+                last_update_ts=utc_now(),
+                requested_qty=Decimal("2"),
+                filled_qty=Decimal("2"),
+                remaining_qty=Decimal("0"),
+                average_fill_price=Decimal("80000"),
+                fees=Decimal("0"),
+                reduce_only=True,
+                close_only=True,
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                exposure_side="long",
+                execution_action="exit",
+                leg_action="close",
+                position_intent="close_long",
+            )
+        ).model_copy(
+            update={
+                "target_exit_quantity": Decimal("5"),
+                "aggregate_status": "PARTIALLY_FILLED",
+                "aggregated_filled_quantity": Decimal("2"),
+                "remaining_dispatchable_quantity": Decimal("3"),
+                "remaining_unresolved_quantity": Decimal("3"),
+                "metadata": {
+                    "dispatch_template": {
+                        "execution_chain_id": "chain_childless_view",
+                        "symbol": "BTC-USDT-SWAP",
+                    }
+                },
+            }
+        )
+        runtime.exit_execution_repo.save_exit_execution_intent(parent)
+        runtime.order_manager._refresh_exit_execution_intents()
+
+        recovery = OperatorQueryService(runtime).recovery_view()
+
+        self.assertEqual(len(recovery["exit_execution_review_items"]), 1)
+        self.assertEqual(
+            recovery["exit_execution_review_items"][0]["kind"],
+            "exit_execution_missing_child_refs_for_parent",
+        )
+        self.assertEqual(
+            recovery["exit_execution_review_items"][0]["resume_block_reason"],
+            "missing_child_refs_for_parent",
+        )
+
+    async def test_postgres_startup_recovery_refreshes_stale_parent_exit_projection(self) -> None:
+        runtime = None
+        recovered_runtime = None
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
+            runtime = await build_runtime(settings)
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=settings.default_symbol,
+                    iterations=4,
+                    interval_seconds=0.0,
+                )
+                now = utc_now()
+                filled_state = OrderState(
+                    decision_id="decision_postgres_startup_parent_refresh",
+                    execution_chain_id="chain_postgres_startup_parent_refresh",
+                    intent_id="intent_postgres_startup_parent_refresh",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_postgres_startup_parent_refresh",
+                    venue="OKX",
+                    exchange_order_id="ord_postgres_startup_parent_refresh",
+                    status="FILLED",
+                    exchange_status="filled",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    requested_qty=Decimal("2"),
+                    filled_qty=Decimal("2"),
+                    remaining_qty=Decimal("0"),
+                    average_fill_price=Decimal("80000"),
+                    fees=Decimal("0"),
+                    reduce_only=True,
+                    close_only=True,
+                    product_type="spot",
+                    margin_mode="cash",
+                    position_mode="net_mode",
+                    pos_side="net",
+                    exposure_side="long",
+                    execution_action="exit",
+                    leg_action="close",
+                    position_intent="close_long",
+                    submission_payload={},
+                )
+                runtime.execution_repo.save_order_state(filled_state)
+                stale_parent = create_exit_execution_intent_from_order_state(filled_state).model_copy(
+                    update={
+                        "aggregate_status": "WORKING",
+                        "aggregated_filled_quantity": Decimal("0"),
+                        "remaining_dispatchable_quantity": Decimal("2"),
+                        "remaining_unresolved_quantity": Decimal("2"),
+                    }
+                )
+                runtime.exit_execution_repo.save_exit_execution_intent(stale_parent)
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+
+            recovered_runtime = await build_runtime(settings, bootstrap_portfolio_snapshot=False)
+            try:
+                refreshed_parent = recovered_runtime.exit_execution_repo.get_exit_execution_intent(
+                    "exit_parent:chain_postgres_startup_parent_refresh"
+                )
+                self.assertIsNotNone(refreshed_parent)
+                assert refreshed_parent is not None
+                self.assertEqual(refreshed_parent.aggregate_status, "COMPLETED")
+                self.assertEqual(refreshed_parent.aggregated_filled_quantity, Decimal("2"))
+                self.assertEqual(refreshed_parent.remaining_dispatchable_quantity, Decimal("0"))
+                self.assertEqual(refreshed_parent.remaining_unresolved_quantity, Decimal("0"))
+                self.assertEqual(
+                    refreshed_parent.child_order_ids,
+                    ["clord_postgres_startup_parent_refresh"],
+                )
+                self.assertIn(
+                    "startup_exit_execution_parent_refresh_count:1",
+                    recovered_runtime.recovery_status.notes,
+                )
+            finally:
+                if recovered_runtime.database_runtime is not None:
+                    recovered_runtime.database_runtime.dispose()
+
+    async def test_postgres_startup_recovery_promotes_parent_resume_issue_into_recovery_status(self) -> None:
+        runtime = None
+        recovered_runtime = None
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
+            runtime = await build_runtime(settings)
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=settings.default_symbol,
+                    iterations=4,
+                    interval_seconds=0.0,
+                )
+                now = utc_now()
+                partial_state = OrderState(
+                    decision_id="decision_postgres_startup_parent_review",
+                    execution_chain_id="chain_postgres_startup_parent_review",
+                    intent_id="intent_postgres_startup_parent_review",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_postgres_startup_parent_review",
+                    venue="OKX",
+                    exchange_order_id="ord_postgres_startup_parent_review",
+                    status="FILLED",
+                    exchange_status="filled",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    requested_qty=Decimal("2"),
+                    filled_qty=Decimal("2"),
+                    remaining_qty=Decimal("0"),
+                    average_fill_price=Decimal("80000"),
+                    fees=Decimal("0"),
+                    reduce_only=True,
+                    close_only=True,
+                    product_type="spot",
+                    margin_mode="cash",
+                    position_mode="net_mode",
+                    pos_side="net",
+                    exposure_side="long",
+                    execution_action="exit",
+                    leg_action="close",
+                    position_intent="close_long",
+                    submission_payload={},
+                )
+                runtime.execution_repo.save_order_state(partial_state)
+                parent = create_exit_execution_intent_from_order_state(partial_state).model_copy(
+                    update={
+                        "target_exit_quantity": Decimal("5"),
+                        "aggregate_status": "PARTIALLY_FILLED",
+                        "aggregated_filled_quantity": Decimal("2"),
+                        "remaining_dispatchable_quantity": Decimal("3"),
+                        "remaining_unresolved_quantity": Decimal("3"),
+                        "metadata": {
+                            "dispatch_template": {
+                                "execution_chain_id": "chain_postgres_startup_parent_review",
+                                "symbol": "BTC-USDT",
+                            },
+                            "resume_issue": {
+                                "kind": "resume_limit_lookup_failed",
+                                "operator_review_required": True,
+                                "updated_at": now.isoformat(),
+                                "error": "max_size_limit_unavailable",
+                            },
+                        },
+                    }
+                )
+                runtime.exit_execution_repo.save_exit_execution_intent(parent)
+            finally:
+                if runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+
+            recovered_runtime = await build_runtime(settings, bootstrap_portfolio_snapshot=False)
+            try:
+                self.assertEqual(recovered_runtime.recovery_status.recovery_state, "review_required")
+                self.assertTrue(recovered_runtime.recovery_status.review_required)
+                self.assertFalse(recovered_runtime.recovery_status.resume_eligible)
+                self.assertFalse(recovered_runtime.recovery_status.safe_to_trade)
+                self.assertFalse(recovered_runtime.recovery_status.safe_startup)
+                self.assertIn(
+                    "exit_execution_resume_limit_lookup_failed",
+                    recovered_runtime.recovery_status.resume_blocked_reasons,
+                )
+                self.assertIn(
+                    "startup_exit_execution_review_required_count:1",
+                    recovered_runtime.recovery_status.notes,
+                )
+                self.assertIn(
+                    "startup_exit_execution_review_snapshot_saved",
+                    recovered_runtime.recovery_status.notes,
+                )
+                self.assertEqual(
+                    recovered_runtime.recovery_status.unknown_state_details[0]["kind"],
+                    "exit_execution_resume_limit_lookup_failed",
+                )
+
+                query = OperatorQueryService(recovered_runtime)
+                recovery = query.recovery_view()
+                self.assertEqual(recovery["recovery_state"], "review_required")
+                self.assertTrue(recovery["review_required"])
+                self.assertFalse(recovery["resume_eligible"])
+                self.assertIsNotNone(recovery["latest_state_snapshot"])
+                self.assertEqual(
+                    recovery["latest_state_snapshot"]["details_json"]["source"],
+                    "startup_exit_execution_review",
+                )
+                self.assertEqual(
+                    recovery["latest_state_snapshot"]["details_json"]["review_items"][0]["kind"],
+                    "exit_execution_resume_limit_lookup_failed",
+                )
+            finally:
+                if recovered_runtime.database_runtime is not None:
+                    recovered_runtime.database_runtime.dispose()
+
+    async def test_postgres_startup_recovery_blocks_resume_for_truth_pending_parent(self) -> None:
+        runtime = None
+        recovered_runtime = None
+        with temporary_postgres_url() as (database_url, _admin_engine, _schema_name):
+            settings = self._postgres_settings(database_url)
+            runtime = await build_runtime(settings)
+            try:
+                await runtime.market_gateway.run_local_publisher(
+                    symbol=settings.default_symbol,
+                    iterations=4,
+                    interval_seconds=0.0,
+                )
+                now = utc_now()
+                unknown_state = OrderState(
+                    decision_id="decision_postgres_startup_truth_pending",
+                    execution_chain_id="chain_postgres_startup_truth_pending",
+                    intent_id="intent_postgres_startup_truth_pending",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_postgres_startup_truth_pending",
+                    venue="OKX",
+                    exchange_order_id=None,
+                    status="SUBMITTED",
+                    exchange_status="live",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    requested_qty=Decimal("2"),
+                    filled_qty=Decimal("0"),
+                    remaining_qty=Decimal("2"),
+                    average_fill_price=None,
+                    fees=Decimal("0"),
+                    reduce_only=True,
+                    close_only=True,
+                    product_type="spot",
+                    margin_mode="cash",
+                    position_mode="net_mode",
+                    pos_side="net",
+                    exposure_side="long",
+                    execution_action="exit",
+                    leg_action="close",
+                    position_intent="close_long",
+                    execution_error="submission_unknown_check_exchange:OKXRequestError",
+                    submission_payload={},
+                )
+                runtime.execution_repo.save_order_state(unknown_state)
+                parent = create_exit_execution_intent_from_order_state(unknown_state).model_copy(
+                    update={
+                        "target_exit_quantity": Decimal("2"),
+                        "metadata": {
+                            "dispatch_template": {
+                                "execution_chain_id": "chain_postgres_startup_truth_pending",
+                                "symbol": "BTC-USDT",
+                            }
+                        },
+                    }
+                )
+                runtime.exit_execution_repo.save_exit_execution_intent(parent)
+                runtime.exit_execution_repo.save_child_exit_order_ref(
+                    child_exit_order_ref_from_order_state(
+                        parent_intent_id=parent.parent_intent_id,
+                        order_state=unknown_state,
+                        settings=settings,
+                    )
+                )
+            finally:
+                if runtime is not None and runtime.database_runtime is not None:
+                    runtime.database_runtime.dispose()
+
+            recovered_runtime = await build_runtime(settings, bootstrap_portfolio_snapshot=False)
+            try:
+                self.assertEqual(recovered_runtime.recovery_status.recovery_state, "resume_blocked")
+                self.assertFalse(recovered_runtime.recovery_status.resume_eligible)
+                self.assertFalse(recovered_runtime.recovery_status.safe_to_trade)
+                self.assertIn(
+                    "exit_execution_truth_pending",
+                    recovered_runtime.recovery_status.resume_blocked_reasons,
+                )
+                query = OperatorQueryService(recovered_runtime)
+                recovery = query.recovery_view()
+                self.assertEqual(
+                    recovery["latest_state_snapshot"]["details_json"]["review_items"][0]["kind"],
+                    "exit_execution_truth_pending",
+                )
+                self.assertEqual(
+                    recovery["latest_state_snapshot"]["details_json"]["review_items"][0]["resume_block_reason"],
+                    "unknown_child_truth_pending",
+                )
+            finally:
+                if recovered_runtime is not None and recovered_runtime.database_runtime is not None:
+                    recovered_runtime.database_runtime.dispose()
 
     async def test_resume_stays_blocked_when_derivatives_only_reduce_recovery_is_active(self) -> None:
         settings = AATSSettings.model_validate(

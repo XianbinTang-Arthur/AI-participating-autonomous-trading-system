@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import unittest
 from decimal import Decimal
 
+from aats.schemas.strategy_runtime import StrategyBookRuntimeState, StrategySleeveIntent
 from aats.services.strategy_engines.independent.adaptive import threshold_snapshot
 from aats.services.strategy_engines.independent.health import evaluate_leg_health
 from aats.services.strategy_engines.independent.models import IndependentBookDecision
-from aats.services.strategy_engines.independent.replay import replay_snapshot_from_decision
+from aats.services.strategy_engines.independent.replay import (
+    _normalized_threshold_snapshot_value,
+    replay_snapshot_from_decision,
+)
 from aats.services.strategy_engines.independent.state_machine import snapshot_from_decision
 from tests.support.strategy_family import make_derivatives_hedge_settings
 
@@ -41,10 +46,12 @@ class TestIndependentReplay(unittest.TestCase):
         )
 
         self.assertEqual(snapshot.book_state, "probing")
+        self.assertIsNone(snapshot.guard_state)
         self.assertEqual(snapshot.holding_phase, "entry")
         self.assertEqual(snapshot.health_state, "ok")
         self.assertIsNotNone(snapshot.threshold_snapshot)
         self.assertEqual(snapshot.prior_book_state, "flat")
+        self.assertIsNone(snapshot.prior_guard_state)
         self.assertTrue(snapshot.transition_reconstructed)
         self.assertEqual(snapshot.transition_source, "runtime_state")
         self.assertIsNotNone(snapshot.threshold_snapshot.adaptive_entry_threshold)
@@ -77,6 +84,7 @@ class TestIndependentReplay(unittest.TestCase):
         self.assertIsNone(snapshot.transition_source)
 
     def test_replay_snapshot_surfaces_transition_violation(self) -> None:
+        as_of_ts = datetime(2026, 4, 2, tzinfo=timezone.utc)
         decision = IndependentBookDecision(
             leg="long",
             expectancy=None,
@@ -89,23 +97,63 @@ class TestIndependentReplay(unittest.TestCase):
             min_hold_remaining_seconds=0.0,
             rebalance_cooldown_remaining_seconds=0.0,
             book_action="scale_in",
-            prior_book_state="cooldown",
+            prior_book_state="holding",
+            prior_guard_state="cooldown",
             current_scale_in_count=2,
             state_version=4,
+            cooldown_until=as_of_ts + timedelta(seconds=30),
         )
 
         snapshot = replay_snapshot_from_decision(
             decision=decision,
             state_snapshot=snapshot_from_decision(decision=decision),
             health_snapshot=evaluate_leg_health(decision=decision),
-            prior_book_state="cooldown",
+            prior_book_state="holding",
+            prior_guard_state="cooldown",
             prior_state_source="runtime_state",
         )
 
         self.assertTrue(snapshot.transition_reconstructed)
         self.assertFalse(snapshot.transition_valid)
+        self.assertEqual(snapshot.prior_book_state, "holding")
+        self.assertEqual(snapshot.prior_guard_state, "cooldown")
         self.assertEqual(snapshot.transition_violation_reason, "independent_transition_invalid:cooldown->building")
 
+    def test_normalized_threshold_snapshot_backfills_legacy_drawdown_fields(self) -> None:
+        normalized = _normalized_threshold_snapshot_value(
+            sleeve_intent=StrategySleeveIntent(
+                decision_id="decision_threshold_backfill",
+                family="independent",
+                strategy_sleeve_id="sleeve_threshold_backfill",
+                state="candidate",
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                margin_mode="cross",
+                inventory_policy="paired_inventory",
+                route_action="override_target",
+                family_action="open_independent_book",
+                metrics={
+                    "min_score_stability_bps": 2.0,
+                    "effective_score_drawdown_threshold_bps": 6.0,
+                    "long_threshold_snapshot": {
+                        "leg": "long",
+                        "entry_threshold": 0.60,
+                        "effective_entry_threshold": 0.66,
+                    },
+                },
+            ),
+            leg="long",
+            runtime_state=StrategyBookRuntimeState(
+                leg="long",
+                current_qty=Decimal("0"),
+                target_qty=Decimal("0.01"),
+            ),
+        )
+
+        self.assertIsNotNone(normalized)
+        assert normalized is not None
+        self.assertEqual(normalized["score_drawdown_bps"], 6.0)
+        self.assertEqual(normalized["effective_score_drawdown_bps"], 6.0)
 
 if __name__ == "__main__":
     unittest.main()

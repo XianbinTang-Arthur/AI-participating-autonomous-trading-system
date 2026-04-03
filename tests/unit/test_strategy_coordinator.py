@@ -3037,8 +3037,16 @@ class TestStrategyCoordinator(unittest.TestCase):
 
         dca_candidate = next(item for item in snapshot.candidates if item.family == "dca")
         dca_control = next(item for item in snapshot.automation_decisions if item.family == "dca")
-        self.assertEqual(dca_control.automation_state, "paused")
-        self.assertFalse(dca_control.automatic_enabled)
+        self.assertEqual(dca_control.automation_state, "contracted")
+        self.assertTrue(dca_control.automatic_enabled)
+        self.assertTrue(dca_control.approved_for_execution)
+        self.assertTrue(dca_control.budget_zero_suppressed)
+        self.assertEqual(dca_control.execution_control_mode, "budget_zero_suppressed")
+        self.assertEqual(dca_control.execution_behavior, "suppressed_after_approval")
+        self.assertIn("hard_loss_budget_block", dca_control.budget_reason_codes)
+        self.assertIn("approved_but_budget_zero_suppressed", dca_control.composition_reason_codes)
+        self.assertEqual(snapshot.allocation_decision.operator_summary, "当前 allocator v2 识别到已批准但被预算压零的 sleeve；本轮没有新的可执行 delta。")
+        self.assertIn("allocator_sleeve_suppressed_after_approval", snapshot.allocation_decision.blocked_reason_codes)
         self.assertEqual(dca_candidate.route_action, "advisory_only")
         self.assertFalse(dca_candidate.selectable)
         self.assertEqual(snapshot.selected_family, "directional")
@@ -3135,10 +3143,71 @@ class TestStrategyCoordinator(unittest.TestCase):
         grid_control = next(item for item in snapshot.automation_decisions if item.family == "spot_grid")
         grid_candidate = next(item for item in snapshot.candidates if item.family == "spot_grid")
 
-        self.assertEqual(grid_control.automation_state, "protective_only")
+        self.assertEqual(grid_control.automation_state, "contracted")
         self.assertLess(grid_control.budget_multiplier, Decimal("1"))
-        self.assertEqual(grid_candidate.metrics["auto_automation_state"], "protective_only")
+        self.assertEqual(grid_control.permission_mode, "approved")
+        self.assertIn("reconciliation_contraction_active", grid_control.budget_reason_codes)
+        self.assertEqual(grid_candidate.metrics["auto_legacy_automation_state"], "contracted")
         self.assertEqual(grid_candidate.metrics["auto_budget_multiplier"], Decimal("0.4"))
+
+    def test_auto_parallel_distinguishes_permission_denied_from_budget_zero_suppression(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "spot",
+                "margin_mode": "cash",
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+                "dca_enabled": True,
+                "dca_interval_seconds": 0.0,
+                "dca_quote_budget_per_cycle": 100.0,
+                "max_abs_position_qty": 2.0,
+                "strategy_sleeve_auto_execution_enabled": False,
+            }
+        )
+        coordinator = StrategyCoordinatorService(
+            settings=settings,
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT": _market_snapshot("BTC-USDT", "100")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+
+        snapshot = coordinator.evaluate(
+            context=_decision_context(symbol="BTC-USDT", product_type="spot", current_position_qty="0"),
+            baseline=_baseline(symbol="BTC-USDT", regime="range"),
+            directional_target=_position_target(
+                symbol="BTC-USDT",
+                product_type="spot",
+                margin_mode="cash",
+                current_qty="0",
+                target_qty="0",
+            ),
+        )
+
+        dca_control = next(item for item in snapshot.automation_decisions if item.family == "dca")
+        dca_intent = next(item for item in snapshot.sleeve_intents if item.family == "dca")
+
+        self.assertFalse(dca_control.approved_for_execution)
+        self.assertEqual(dca_control.permission_mode, "advisory_only")
+        self.assertEqual(dca_control.execution_control_mode, "permission_denied")
+        self.assertEqual(dca_control.execution_behavior, "advisory_only")
+        self.assertFalse(dca_control.budget_zero_suppressed)
+        self.assertIn("auto_execution_disabled_by_profile", dca_control.permission_reason_codes)
+        self.assertEqual(dca_intent.route_action, "advisory_only")
+        self.assertEqual(dca_intent.execution_control_mode, "permission_denied")
+        self.assertEqual(dca_intent.execution_behavior, "advisory_only")
+        self.assertEqual(dca_intent.control_trace["execution_control_mode"], "permission_denied")
+        self.assertEqual(dca_intent.control_trace["execution_behavior"], "advisory_only")
+        self.assertEqual(
+            dca_intent.control_trace["composition"]["execution_control_mode"],
+            "permission_denied",
+        )
+        self.assertEqual(
+            dca_intent.control_trace["composition"]["execution_behavior"],
+            "advisory_only",
+        )
+        self.assertEqual(dca_intent.control_trace["permission"]["approved_for_execution"], False)
+        self.assertEqual(dca_intent.control_trace["budget"]["budget_zero_suppressed"], False)
 
     def test_smart_arbitrage_uses_sleeve_inventory_truth_when_unwinding_pair(self) -> None:
         settings = AATSSettings.model_validate(

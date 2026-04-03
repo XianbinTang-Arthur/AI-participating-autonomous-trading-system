@@ -204,11 +204,13 @@ class IndependentRecoverySnapshot(SchemaBase):
     strategy_sleeve_id: str | None = None
     leg: Literal["long", "short"]
     book_state: str | None = None
+    guard_state: str | None = None
     holding_phase: str | None = None
     health_state: str | None = None
     current_qty: Decimal = Decimal("0")
     target_qty: Decimal = Decimal("0")
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     expected_chain_ids: list[str] = Field(default_factory=list)
@@ -220,7 +222,7 @@ class IndependentRecoverySnapshot(SchemaBase):
     recovery_version: str = "independent_phase6_additive_v1"
     suspended_until: datetime | None = None
     cooldown_until: datetime | None = None
-    state_version: int = 1
+    state_version: int = 2
     threshold_snapshot: dict[str, Any] | None = None
     health_snapshot: dict[str, Any] | None = None
     replay_snapshot: dict[str, Any] | None = None

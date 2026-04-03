@@ -294,6 +294,209 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(persisted.status, "FAILED")
         self.assertIsNone(repo.get_order_state("preview_exception_id"))
 
+    async def test_unknown_submit_blocks_duplicate_submit_for_same_execution_chain(self) -> None:
+        repo = InMemoryExecutionRepository()
+        adapter = _CountingAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        now = utc_now()
+        repo.save_order_state(
+            OrderState(
+                decision_id="decision_unknown_chain_existing",
+                execution_chain_id="chain_unknown_1",
+                intent_id="intent_unknown_chain_existing",
+                symbol="BTC-USDT",
+                client_order_id="clord_unknown_chain_existing",
+                venue="OKX",
+                exchange_order_id=None,
+                status="SUBMITTED",
+                exchange_status="live",
+                submitted_ts=now,
+                last_update_ts=now,
+                requested_qty=0.001,
+                filled_qty=0.0,
+                remaining_qty=0.001,
+                average_fill_price=None,
+                fees=0.0,
+                execution_error="submission_unknown_check_exchange:OKXRequestError",
+            )
+        )
+        intent = OrderIntent(
+            intent_id="intent_unknown_chain_new",
+            execution_chain_id="chain_unknown_1",
+            decision_id="decision_unknown_chain_new",
+            symbol="BTC-USDT",
+            side="buy",
+            quantity=0.001,
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=False,
+            close_only=False,
+            idempotency_key="unknown_chain_new",
+        )
+        envelope = build_envelope(
+            topic=topics.ORDER_INTENTS,
+            key=intent.symbol,
+            payload_model=intent,
+            source_component="test",
+        )
+
+        await manager.handle_order_intent(
+            {"topic": topics.ORDER_INTENTS, "key": intent.symbol, "payload": envelope.model_dump(mode="json")}
+        )
+
+        blocked = repo.get_order_state("clunknown_chain_new")
+        self.assertIsNotNone(blocked)
+        self.assertEqual(blocked.status, "BLOCKED")
+        self.assertEqual(blocked.submission_mode, "unknown_write_duplicate_submit_blocked")
+        self.assertEqual(
+            blocked.execution_error,
+            "unknown_submit_requires_reconciliation_for_execution_chain:clord_unknown_chain_existing",
+        )
+        self.assertEqual(adapter.submit_calls, 0)
+
+    async def test_unknown_write_blocks_new_risk_submit_for_same_symbol(self) -> None:
+        repo = InMemoryExecutionRepository()
+        adapter = _CountingAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        now = utc_now()
+        repo.save_order_state(
+            OrderState(
+                decision_id="decision_unknown_symbol_existing",
+                execution_chain_id="chain_unknown_symbol_existing",
+                intent_id="intent_unknown_symbol_existing",
+                symbol="BTC-USDT",
+                client_order_id="clord_unknown_symbol_existing",
+                venue="OKX",
+                exchange_order_id="ord_unknown_symbol_existing",
+                status="CANCEL_PENDING",
+                exchange_status="live",
+                submitted_ts=now,
+                cancellation_requested_ts=now,
+                last_update_ts=now,
+                requested_qty=0.001,
+                filled_qty=0.0,
+                remaining_qty=0.001,
+                average_fill_price=None,
+                fees=0.0,
+                execution_error="cancel_unknown_check_exchange:OKXRequestError",
+            )
+        )
+        intent = OrderIntent(
+            intent_id="intent_unknown_symbol_new",
+            execution_chain_id="chain_unknown_symbol_new",
+            decision_id="decision_unknown_symbol_new",
+            symbol="BTC-USDT",
+            side="buy",
+            quantity=0.002,
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=False,
+            close_only=False,
+            idempotency_key="unknown_symbol_new",
+        )
+        envelope = build_envelope(
+            topic=topics.ORDER_INTENTS,
+            key=intent.symbol,
+            payload_model=intent,
+            source_component="test",
+        )
+
+        await manager.handle_order_intent(
+            {"topic": topics.ORDER_INTENTS, "key": intent.symbol, "payload": envelope.model_dump(mode="json")}
+        )
+
+        blocked = repo.get_order_state("clunknown_symbol_new")
+        self.assertIsNotNone(blocked)
+        self.assertEqual(blocked.status, "BLOCKED")
+        self.assertEqual(blocked.submission_mode, "unknown_write_symbol_risk_blocked")
+        self.assertEqual(
+            blocked.execution_error,
+            "unknown_cancel_blocks_new_risk_actions_for_symbol:clord_unknown_symbol_existing",
+        )
+        self.assertEqual(adapter.submit_calls, 0)
+
+    async def test_risk_reducing_submit_is_not_blocked_by_unknown_write_on_same_symbol(self) -> None:
+        repo = InMemoryExecutionRepository()
+        adapter = _CountingAdapter()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=adapter,
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        now = utc_now()
+        repo.save_order_state(
+            OrderState(
+                decision_id="decision_reduce_allowed_existing",
+                execution_chain_id="chain_reduce_allowed_existing",
+                intent_id="intent_reduce_allowed_existing",
+                symbol="BTC-USDT",
+                client_order_id="clord_reduce_allowed_existing",
+                venue="OKX",
+                exchange_order_id=None,
+                status="SUBMITTED",
+                exchange_status="live",
+                submitted_ts=now,
+                last_update_ts=now,
+                requested_qty=0.001,
+                filled_qty=0.0,
+                remaining_qty=0.001,
+                average_fill_price=None,
+                fees=0.0,
+                execution_error="submission_unknown_check_exchange:OKXRequestError",
+            )
+        )
+        intent = OrderIntent(
+            intent_id="intent_reduce_allowed_new",
+            execution_chain_id="chain_reduce_allowed_new",
+            decision_id="decision_reduce_allowed_new",
+            symbol="BTC-USDT",
+            side="sell",
+            quantity=0.001,
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=True,
+            close_only=True,
+            execution_action="exit",
+            position_intent="close_long",
+            idempotency_key="reduce_allowed_new",
+        )
+        envelope = build_envelope(
+            topic=topics.ORDER_INTENTS,
+            key=intent.symbol,
+            payload_model=intent,
+            source_component="test",
+        )
+
+        await manager.handle_order_intent(
+            {"topic": topics.ORDER_INTENTS, "key": intent.symbol, "payload": envelope.model_dump(mode="json")}
+        )
+
+        persisted = repo.get_order_state("reduce_allowed_new")
+        self.assertIsNotNone(persisted)
+        self.assertEqual(adapter.submit_calls, 1)
+        self.assertEqual(persisted.status, "FAILED")
+        self.assertEqual(persisted.execution_error, "simulated_failure")
+
     async def test_sync_backfills_terminal_filled_order_without_local_fills(self) -> None:
         repo = InMemoryExecutionRepository()
         adapter = _BackfillAdapter()
@@ -330,6 +533,67 @@ class TestOrderManagerExecutionErrorHistory(unittest.IsolatedAsyncioTestCase):
         fills = repo.fills_for_order("clord_fill_backfill")
         self.assertEqual(len(fills), 1)
         self.assertEqual(fills[0].fill_id, "fill_backfill_1")
+
+    def test_sync_candidates_prioritize_unknown_write_states(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_FailingAdapter(),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        now = utc_now()
+        normal_state = OrderState(
+            decision_id="decision_sync_normal",
+            intent_id="intent_sync_normal",
+            symbol="BTC-USDT",
+            client_order_id="clord_sync_normal",
+            venue="OKX",
+            exchange_order_id="ord_sync_normal",
+            status="SUBMITTED",
+            exchange_status="live",
+            submitted_ts=now,
+            last_update_ts=now,
+            last_exchange_update_ts=now,
+            requested_qty=0.001,
+            filled_qty=0.0,
+            remaining_qty=0.001,
+            average_fill_price=None,
+            fees=0.0,
+        )
+        unknown_state = normal_state.model_copy(
+            update={
+                "decision_id": "decision_sync_unknown",
+                "intent_id": "intent_sync_unknown",
+                "client_order_id": "clord_sync_unknown",
+                "exchange_order_id": None,
+                "execution_error": "submission_unknown_check_exchange:OKXRequestError",
+            }
+        )
+        terminal_filled = normal_state.model_copy(
+            update={
+                "decision_id": "decision_sync_filled",
+                "intent_id": "intent_sync_filled",
+                "client_order_id": "clord_sync_filled",
+                "exchange_order_id": "ord_sync_filled",
+                "status": "FILLED",
+                "exchange_status": "filled",
+                "filled_qty": 0.001,
+                "remaining_qty": 0.0,
+                "average_fill_price": 100.0,
+                "fees": 0.1,
+            }
+        )
+        repo.save_order_state(normal_state)
+        repo.save_order_state(unknown_state)
+        repo.save_order_state(terminal_filled)
+
+        candidates = manager._sync_candidates()
+
+        self.assertEqual(candidates[0].client_order_id, "clord_sync_unknown")
+        self.assertIn("clord_sync_normal", [state.client_order_id for state in candidates])
+        self.assertIn("clord_sync_filled", [state.client_order_id for state in candidates])
 
     async def test_transient_close_failures_enter_retry_cooldown(self) -> None:
         repo = InMemoryExecutionRepository()

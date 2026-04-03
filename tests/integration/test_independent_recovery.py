@@ -147,6 +147,7 @@ class TestIndependentRecoveryIntegration(unittest.IsolatedAsyncioTestCase):
                                 long_runtime_state.model_dump(mode="json"),
                                 short_runtime_state.model_dump(mode="json"),
                             ],
+                            "min_score_stability_bps": 2.0,
                             "family_health_overall_state": "ok",
                             "family_health_blockers": [],
                             "long_threshold_snapshot": long_runtime_state.threshold_snapshot,
@@ -297,6 +298,8 @@ class TestIndependentRecoveryIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["decision_snapshot"]["prior_book_state"], "flat")
         self.assertTrue(snapshot["threshold_snapshot"]["live_applied"])
         self.assertEqual(snapshot["threshold_snapshot"]["effective_entry_threshold"], 0.66)
+        self.assertEqual(snapshot["threshold_snapshot"]["score_drawdown_bps"], 2.0)
+        self.assertEqual(snapshot["threshold_snapshot"]["effective_score_drawdown_bps"], 2.0)
         self.assertEqual(
             snapshot["active_execution_chain_ids"],
             ["independent:decision_independent_recovery:long:open"],

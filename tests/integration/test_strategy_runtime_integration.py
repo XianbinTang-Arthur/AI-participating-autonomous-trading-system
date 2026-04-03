@@ -19,7 +19,7 @@ from aats.schemas.decision import DecisionContext, DecisionOutcome, HedgeOverlay
 from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioSnapshot
-from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent
+from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent, StrategySleeveIntent
 
 
 class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
@@ -187,7 +187,26 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(payload["summary"]["latest_portfolio_approved_notional"])
         self.assertEqual(payload["latest_applied_target"]["strategy_family"], "dca")
         self.assertIsNotNone(payload["latest_applied_target"]["strategy_sleeve_id"])
-        self.assertTrue(payload["summary"]["auto_parallel_enabled"])
+        self.assertTrue(payload["summary"]["entry_auto_execution_enabled"])
+        self.assertNotIn("automation_active_count", payload["summary"])
+        self.assertNotIn("automation_contracted_count", payload["summary"])
+        self.assertNotIn("automation_paused_count", payload["summary"])
+        self.assertIn(
+            "coarse projection",
+            payload["summary"]["compatibility"]["legacy_automation_state_note"],
+        )
+        legacy_state_counts = payload["summary"]["compatibility"]["legacy_automation_state_counts"]
+        automation_decisions = payload["latest_snapshot"]["automation_decisions"]
+        self.assertEqual(
+            legacy_state_counts["active"],
+            sum(
+                1
+                for item in automation_decisions
+                if item.get("compatibility", {}).get("legacy_automation_state") == "active"
+            ),
+        )
+        self.assertEqual(legacy_state_counts["contracted"], 0)
+        self.assertEqual(legacy_state_counts["paused"], 0)
         self.assertTrue(payload["recent_budget_profiles"])
         self.assertTrue(payload["recent_budget_assignments"])
         self.assertTrue(payload["recent_budget_snapshots"])
@@ -197,10 +216,179 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("target_account_position_qty", dca_candidate["metrics"])
         self.assertIn("auto_budget_multiplier", dca_candidate["metrics"])
         self.assertIn("expected_cost_bps", dca_candidate["metrics"])
-        self.assertEqual(dca_control["automation_state"], "active")
+        self.assertEqual(dca_control["execution_control_mode"], "approved")
+        self.assertEqual(dca_control["execution_behavior"], "execute_target")
+        self.assertTrue(dca_control["execution_prerequisites_supported"])
+        self.assertEqual(dca_control["compatibility"]["legacy_automation_state"], "active")
+        self.assertEqual(
+            dca_control["compatibility"]["legacy_automation_projection"]["source_execution_behavior"],
+            "execute_target",
+        )
+        self.assertEqual(dca_control["automation_state"], dca_control["compatibility"]["legacy_automation_state"])
         self.assertEqual(
             payload["configured_parameters"]["dca"]["quote_budget_per_cycle"],
             100.0,
+        )
+
+    async def test_strategy_runtime_endpoint_exposes_entry_execution_guard_when_auto_parallel_disabled(self) -> None:
+        settings = self._settings(strategy_sleeve_auto_execution_enabled=False)
+        runtime = await build_runtime(settings)
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        self.assertIn("entry_execution_guard", payload["summary"])
+        self.assertTrue(payload["summary"]["entry_execution_guard"]["active"])
+        self.assertNotIn("auto_parallel_enabled", payload["summary"])
+        self.assertNotIn("automation_active_count", payload["summary"])
+        self.assertNotIn("automation_contracted_count", payload["summary"])
+        self.assertNotIn("automation_paused_count", payload["summary"])
+        self.assertFalse(payload["configured_parameters"]["strategy_sleeve_auto_execution_enabled"])
+        self.assertNotIn("strategy_sleeve_auto_parallel_enabled", payload["configured_parameters"])
+        self.assertEqual(
+            payload["configured_parameters"]["compatibility"]["deprecated_auto_execution_key"],
+            "strategy_sleeve_auto_parallel_enabled",
+        )
+        self.assertIsNone(payload["configured_parameters"]["compatibility"]["deprecated_auto_execution_value"])
+        self.assertEqual(
+            payload["summary"]["entry_auto_execution_config_source"],
+            "strategy_sleeve_auto_execution_enabled",
+        )
+        self.assertFalse(payload["summary"]["entry_auto_execution_uses_deprecated_key"])
+        self.assertEqual(
+            payload["summary"]["entry_execution_guard"]["warning_code"],
+            "non_protective_entry_execution_advisory_only",
+        )
+        self.assertIn("advisory-only", payload["summary"]["entry_execution_guard"]["summary"])
+
+    async def test_strategy_runtime_endpoint_distinguishes_permission_denied_from_budget_zero_suppression(self) -> None:
+        settings = self._settings()
+        runtime = await build_runtime(settings)
+        runtime.strategy_runtime_repo.save_sleeve_intent(
+            StrategySleeveIntent(
+                decision_id="dec-permission-denied",
+                family="dca",
+                strategy_sleeve_id="sleeve_permission_denied",
+                state="inactive",
+                symbol=settings.default_symbol,
+                product_type=settings.trading_product_type,
+                margin_mode=settings.margin_mode,
+                inventory_policy="account_net_inventory",
+                route_action="advisory_only",
+                family_action="hold_family",
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0"),
+                delta_position_qty=Decimal("0"),
+                requested_delta_position_qty=Decimal("0.01"),
+                approved_for_execution=False,
+                permission_mode="advisory_only",
+                control_trace={
+                    "permission": {
+                        "approved_for_execution": False,
+                        "permission_mode": "advisory_only",
+                    },
+                    "budget": {
+                        "budget_zero_suppressed": False,
+                    },
+                },
+            )
+        )
+        runtime.strategy_runtime_repo.save_sleeve_intent(
+            StrategySleeveIntent(
+                decision_id="dec-budget-zero",
+                family="spot_grid",
+                strategy_sleeve_id="sleeve_budget_zero",
+                state="inactive",
+                symbol=settings.default_symbol,
+                product_type=settings.trading_product_type,
+                margin_mode=settings.margin_mode,
+                inventory_policy="account_net_inventory",
+                route_action="hold_current",
+                family_action="hold_family",
+                current_position_qty=Decimal("0.1"),
+                target_position_qty=Decimal("0.1"),
+                delta_position_qty=Decimal("0"),
+                requested_delta_position_qty=Decimal("0.02"),
+                approved_for_execution=True,
+                permission_mode="approved",
+                budget_zero_suppressed=True,
+                control_trace={
+                    "permission": {
+                        "approved_for_execution": True,
+                        "permission_mode": "approved",
+                    },
+                    "budget": {
+                        "budget_zero_suppressed": True,
+                        "effective_scale": "0.25",
+                    },
+                },
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            strategy_runtime = client.get("/strategy/runtime")
+
+        self.assertEqual(strategy_runtime.status_code, 200)
+        payload = strategy_runtime.json()
+        self.assertTrue(payload["summary"]["entry_auto_execution_enabled"])
+        self.assertEqual(
+            payload["summary"]["execution_control_mode_counts"],
+            {
+                "approved": 0,
+                "permission_denied": 1,
+                "budget_zero_suppressed": 1,
+                "protective_override": 0,
+            },
+        )
+        self.assertEqual(payload["summary"]["advisory_only_due_to_permission_count"], 1)
+        self.assertEqual(payload["summary"]["budget_zero_suppression_count"], 1)
+        self.assertEqual(payload["summary"]["protective_override_count"], 0)
+        self.assertEqual(
+            payload["summary"]["execution_behavior_counts"],
+            {
+                "execute_target": 0,
+                "hold_current": 0,
+                "advisory_only": 1,
+                "suppressed_after_approval": 1,
+                "protective_execute": 0,
+            },
+        )
+        self.assertEqual(
+            payload["summary"]["execution_control_summary"]["primary_mode"],
+            "permission_denied",
+        )
+        self.assertEqual(
+            payload["summary"]["compatibility"]["legacy_automation_state_counts"],
+            {
+                "active": 0,
+                "contracted": 0,
+                "paused": 0,
+            },
+        )
+        self.assertIn(
+            "权限未通过",
+            payload["summary"]["execution_control_summary"]["summary"],
+        )
+        self.assertEqual(
+            payload["summary"]["execution_behavior_summary"]["primary_behavior"],
+            "suppressed_after_approval",
+        )
+        self.assertIn(
+            "批准，但最终执行行为仍是压零保留",
+            payload["summary"]["execution_behavior_summary"]["summary"],
+        )
+        intents_by_decision = {
+            item["decision_id"]: item for item in payload["recent_sleeve_intents"]
+        }
+        self.assertTrue(
+            intents_by_decision["dec-permission-denied"]["execution_prerequisites_supported"]
+        )
+        self.assertTrue(
+            intents_by_decision["dec-budget-zero"]["execution_prerequisites_supported"]
         )
 
     async def test_dca_pullback_only_runtime_requires_anchor_history_before_activation(self) -> None:
@@ -418,7 +606,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(payload["summary"]["latest_budget_snapshot_count"], 1)
         self.assertGreaterEqual(payload["summary"]["latest_netting_decision_count"], 0)
         self.assertTrue(payload["summary"]["automatic_selection_enabled"])
-        self.assertTrue(payload["summary"]["auto_parallel_enabled"])
+        self.assertTrue(payload["summary"]["entry_auto_execution_enabled"])
         self.assertEqual(payload["latest_bundle"]["status"], "submitted")
         self.assertIsNotNone(payload["latest_bundle"]["strategy_sleeve_id"])
         self.assertIsNotNone(payload["latest_bundle"]["allocation_id"])
@@ -452,7 +640,16 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pair_registry_warning_codes", smart_arbitrage_candidate["metrics"])
         self.assertIn("pair_registry_error_codes", smart_arbitrage_candidate["metrics"])
         self.assertEqual(smart_arbitrage_candidate["metrics"]["pair_registry_source"], "coordinator_resolved")
-        self.assertEqual(smart_arbitrage_control["automation_state"], "active")
+        self.assertEqual(smart_arbitrage_control["execution_control_mode"], "approved")
+        self.assertEqual(
+            smart_arbitrage_control["execution_behavior"],
+            "execute_target" if smart_arbitrage_candidate["route_action"] == "override_target" else "hold_current",
+        )
+        self.assertEqual(smart_arbitrage_control["compatibility"]["legacy_automation_state"], "active")
+        self.assertEqual(
+            smart_arbitrage_control["automation_state"],
+            smart_arbitrage_control["compatibility"]["legacy_automation_state"],
+        )
         self.assertIsNotNone(payload["summary"]["latest_hedge_protected_notional"])
         self.assertTrue(payload["recent_budget_profiles"])
         self.assertTrue(payload["recent_budget_assignments"])
@@ -881,6 +1078,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             strategy_hedge_independent_trial_guard_enabled=True,
             strategy_hedge_independent_min_confirm_ticks=2,
             strategy_hedge_independent_min_score_stability_bps=2.0,
+            strategy_hedge_independent_min_score_drawdown_bps=6.0,
             strategy_hedge_independent_min_liquidity_quality=0.55,
             strategy_hedge_independent_require_execution_health_ok=True,
             strategy_hedge_independent_max_thesis_age_seconds=1800,
@@ -1064,6 +1262,8 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(directional["hedge_independent_min_safe_net_edge_bps"], 3.0)
         self.assertEqual(directional["hedge_independent_min_confirm_ticks"], 2)
         self.assertEqual(directional["hedge_independent_min_score_stability_bps"], 2.0)
+        self.assertEqual(directional["hedge_independent_min_score_drawdown_bps"], 6.0)
+        self.assertEqual(directional["hedge_independent_effective_score_drawdown_bps"], 6.0)
         self.assertEqual(directional["hedge_independent_min_liquidity_quality"], 0.55)
         self.assertTrue(directional["hedge_independent_require_execution_health_ok"])
         self.assertEqual(directional["hedge_independent_max_thesis_age_seconds"], 1800)
@@ -1565,7 +1765,16 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
             candidate["book_runtime_states"][0]["threshold_snapshot"]["entry_threshold"],
             candidate["metrics"]["long_threshold_snapshot"]["entry_threshold"],
         )
+        self.assertEqual(
+            candidate["book_runtime_states"][0]["threshold_snapshot"]["effective_score_drawdown_bps"],
+            candidate["metrics"]["long_threshold_snapshot"]["effective_score_drawdown_bps"],
+        )
+        self.assertIn("guard_state", candidate["book_runtime_states"][0])
+        self.assertIn("prior_guard_state", candidate["book_runtime_states"][0])
+        self.assertIsNone(candidate["book_runtime_states"][0]["guard_state"])
         self.assertIn("adaptive_entry_threshold", candidate["book_runtime_states"][0]["threshold_snapshot"])
+        self.assertIn("score_drawdown_bps", candidate["book_runtime_states"][0]["threshold_snapshot"])
+        self.assertIn("effective_score_drawdown_bps", candidate["book_runtime_states"][0]["threshold_snapshot"])
         self.assertIn("capital_multiplier", candidate["book_runtime_states"][0]["threshold_snapshot"])
         self.assertIn("reason_codes", candidate["book_runtime_states"][0]["threshold_snapshot"])
         self.assertIn(candidate["metrics"]["family_health_overall_state"], {"ok", "degraded", "blocked"})

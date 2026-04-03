@@ -17,7 +17,7 @@ import {
   tradingStatusLabel,
 } from "../terms.js";
 
-export function renderRiskSections(data) {
+export function renderRiskSections(data, uiState = data.uiState || {}) {
   const account = data.accountState || {};
   const portfolio = data.portfolio?.portfolio || {};
   const blockerControl = data.blockerControl || {};
@@ -38,6 +38,7 @@ export function renderRiskSections(data) {
   const metrics = data.metrics || {};
   const health = data.health || {};
   const uiHints = data.uiHints || {};
+  const pendingPanels = uiHints.pendingPanels || {};
   const phase1Shadow = data.phase1Shadow || metrics.phase1_shadow || {};
   const trialGuard = data.trialGuard || data.runtime?.trial_guard || {};
   const marginBuffer = account.margin_buffer_overview || data.runtime?.margin_buffer_overview || {};
@@ -49,6 +50,20 @@ export function renderRiskSections(data) {
   const replayParentPostmortem = replay.last_validation?.overlay_parent_exposure_summary || null;
   const replayTransitionPostmortem = replay.last_validation?.independent_transition_exception_summary || null;
   const replayRecentValidations = Array.isArray(replay.recent_validations) ? replay.recent_validations : [];
+  const exitExecutionItems = mergedExitExecutionReviewItems(recovery);
+  const exitExecutionActionHistory = Array.isArray(recovery.exit_execution_action_history)
+    ? recovery.exit_execution_action_history.filter((item) => item && typeof item === "object")
+    : [];
+  const exitExecutionActionHistoryPage = data.exitExecutionActionHistoryPage || {};
+  const replayPending = Boolean(pendingPanels.replayStatus) && !hasPanelPayload(replay);
+  const exitExecutionHistoryPending = Boolean(pendingPanels.exitExecutionActionHistoryPage) && !hasPanelPayload(exitExecutionActionHistoryPage);
+  const exitExecutionHistoryFilters = normalizedExitExecutionHistoryFilters(uiState.exitExecutionHistory);
+  const exitExecutionActionContext = {
+    session: data.session || {},
+    authProviders: data.authProviders || {},
+    runtime: data.runtime || {},
+    uiHints,
+  };
 
   return {
     riskHero: primaryStatusPanel({
@@ -151,10 +166,57 @@ export function renderRiskSections(data) {
       content: summaryStrip([
         { label: "恢复状态", value: recoveryStatusLabel(recovery), meta: recovery.safe_to_trade ? "当前允许继续自动运行" : recovery.halted && recovery.resume_eligible ? "当前处于手动暂停，可在确认后恢复自动运行" : "当前不允许继续自动运行", tone: recovery.safe_to_trade ? "positive" : recovery.resume_eligible ? "warning" : recovery.review_required ? "warning" : "danger" },
         { label: "人工复核", value: reviewStatusLabel(recovery.review_required), meta: recovery.rebaseline_available ? "允许重新确认基线" : "当前不允许重建基线", tone: recovery.review_required ? "warning" : "positive" },
-        { label: "回放健康度", value: booleanWord(replay.healthy), meta: textOrFallback(replay.last_validation?.decision_id, "最近没有回放验证"), tone: replay.healthy ? "positive" : "warning" },
-        { label: "最近回放时间", value: formatMaybeTimestamp(replay.last_validation?.validated_at), meta: formatRelativeAge(replay.last_validation?.validated_at), tone: replay.last_validation?.validated_at ? "info" : "neutral" },
+        {
+          label: "回放健康度",
+          value: replayPending ? "正在载入" : booleanWord(replay.healthy),
+          meta: replayPending ? "最近一次回放验证会在首屏后补载。" : textOrFallback(replay.last_validation?.decision_id, "最近没有回放验证"),
+          tone: replayPending ? "info" : replay.healthy ? "positive" : "warning",
+        },
+        {
+          label: "最近回放时间",
+          value: replayPending ? "正在载入" : formatMaybeTimestamp(replay.last_validation?.validated_at),
+          meta: replayPending ? "先保证当前主任务、恢复状态和对账结论尽快可见。" : formatRelativeAge(replay.last_validation?.validated_at),
+          tone: replayPending ? "info" : replay.last_validation?.validated_at ? "info" : "neutral",
+        },
       ]),
     }),
+    riskExitExecutionReview: exitExecutionItems.length
+      ? surfaceCard({
+          title: "退出任务人工处理",
+          kicker: "parent exit / child order",
+          copy: "这些退出任务在启动恢复或后续收敛后仍未完全闭环。先按这里的动作继续确认真相或安全收尾，不要直接重复下同方向新单。",
+          content: renderExitExecutionReviewList({ recovery, actionContext: exitExecutionActionContext }),
+        })
+      : "",
+    riskExitExecutionTimeline: exitExecutionActionHistory.length
+      ? surfaceCard({
+          title: "退出任务处理时间线",
+          kicker: "operator action timeline",
+          copy: "这里按时间顺序收口最近几次退出任务人工动作，方便直接回看每次处理后系统还卡在哪。",
+          content: renderExitExecutionActionHistoryList(exitExecutionActionHistory, exitExecutionHistoryFilters),
+        })
+      : "",
+    riskExitExecutionWorkspace: surfaceCard({
+      title: "退出任务工作区",
+      kicker: "parent exit operator workspace",
+      copy: "这里承接 parent-exit 的长历史查询、分页和人工动作回看。先在这里收敛筛选条件，再决定是否继续 refresh、重试上限查询或安全取消。",
+      actions: `<div class="stack-actions table-actions--compact">${actionButton("进入独立工作台", "navigate-view", "exitExecution", "ghost")}</div>`,
+      content: exitExecutionHistoryPending
+        ? renderDeferredPanelNotice("退出任务长历史正在补充", "先显示当前裁决和恢复上下文，完整 parent-exit 历史会在首屏后自动补载。")
+        : renderExitExecutionWorkspace({
+            page: exitExecutionActionHistoryPage,
+            filters: exitExecutionHistoryFilters,
+          }),
+    }),
+    riskReplayLoading: replayPending
+      ? surfaceCard({
+          title: "回放与复盘",
+          kicker: "补充诊断",
+          copy: "最近回放验证会在首屏后继续补载，不阻塞当前任务、恢复资格和对账结论。",
+          classes: "is-muted",
+          content: renderDeferredPanelNotice("回放状态正在补充", "如果这块长期不返回，再继续排查 replay 校验或 event store 读取是否过慢。"),
+        })
+      : "",
     riskReplayPostmortem: replayParentPostmortem
       ? surfaceCard({
           title: "回放父腿复盘",
@@ -473,11 +535,14 @@ export function renderRiskSections(data) {
   };
 }
 
-export function renderRiskView(data) {
-  const sections = renderRiskSections(data);
-  const replaySectionMarkup = sections.riskReplayPostmortem || sections.riskReplayTransitionPostmortem || sections.riskReplayHistory
+export function renderRiskView(data, uiState = data.uiState || {}) {
+  const sections = renderRiskSections(data, uiState);
+  const replaySectionMarkup = sections.riskReplayLoading || sections.riskReplayPostmortem || sections.riskReplayTransitionPostmortem || sections.riskReplayHistory
     ? `
       <div class="panel-grid strategy-page-grid">
+        ${sections.riskExitExecutionReview ? `<div class="span-12">${sections.riskExitExecutionReview}</div>` : ""}
+        ${sections.riskExitExecutionTimeline ? `<div class="span-12">${sections.riskExitExecutionTimeline}</div>` : ""}
+        ${sections.riskReplayLoading ? `<div class="span-12">${sections.riskReplayLoading}</div>` : ""}
         ${sections.riskReplayPostmortem ? `<div class="${sections.riskReplayTransitionPostmortem ? "span-4" : "span-5"}">${sections.riskReplayPostmortem}</div>` : ""}
         ${sections.riskReplayTransitionPostmortem ? `<div class="${sections.riskReplayPostmortem ? "span-4" : "span-5"}">${sections.riskReplayTransitionPostmortem}</div>` : ""}
         <div class="${sections.riskReplayPostmortem || sections.riskReplayTransitionPostmortem ? sections.riskReplayPostmortem && sections.riskReplayTransitionPostmortem ? "span-4" : "span-7" : "span-12"}">${sections.riskBlockers}</div>
@@ -488,6 +553,8 @@ export function renderRiskView(data) {
     `
     : `
       <div class="panel-grid strategy-page-grid">
+        ${sections.riskExitExecutionReview ? `<div class="span-12">${sections.riskExitExecutionReview}</div>` : ""}
+        ${sections.riskExitExecutionTimeline ? `<div class="span-12">${sections.riskExitExecutionTimeline}</div>` : ""}
         <div class="span-7">${sections.riskBlockers}</div>
         <div class="span-5">${sections.riskMetrics}</div>
         <div class="span-12">${sections.riskBills}</div>
@@ -499,6 +566,7 @@ export function renderRiskView(data) {
         <a class="section-nav__link" href="#risk-overview">当前任务</a>
         <a class="section-nav__link" href="#risk-recovery">恢复条件</a>
         <a class="section-nav__link" href="#risk-review">阻断与复盘</a>
+        <a class="section-nav__link" href="#risk-exit-workspace">退出任务工作区</a>
         <a class="section-nav__link" href="#risk-diagnostics">辅助诊断</a>
       </nav>
       ${renderRiskWorkspaceSection(
@@ -538,6 +606,17 @@ export function renderRiskView(data) {
         replaySectionMarkup
       )}
       ${renderRiskWorkspaceSection(
+        "risk-exit-workspace",
+        "退出任务工作区",
+        "退出任务长历史与人工动作工作台",
+        "这里单独承接 parent-exit 的长历史、分页和精确筛选。卡片上的筛选条件会同步到这里，方便继续下钻和翻页查看。",
+        `
+          <div class="panel-grid strategy-page-grid">
+            <div class="span-12">${sections.riskExitExecutionWorkspace}</div>
+          </div>
+        `
+      )}
+      ${renderRiskWorkspaceSection(
         "risk-diagnostics",
         "辅助诊断",
         "运行诊断与守护状态",
@@ -568,6 +647,599 @@ function renderRiskWorkspaceSection(id, kicker, title, copy, content) {
       ${content}
     </section>
   `;
+}
+
+function hasPanelPayload(payload) {
+  return Boolean(payload && typeof payload === "object" && Object.keys(payload).length);
+}
+
+function renderDeferredPanelNotice(title, detail) {
+  return summaryStrip([
+    {
+      label: "当前状态",
+      value: title,
+      meta: detail,
+      tone: "info",
+    },
+  ]);
+}
+
+export function mergedExitExecutionReviewItems(recovery = {}) {
+  const merged = [];
+  const mergedByKey = new Map();
+  const append = (items, source) => {
+    if (!Array.isArray(items)) return;
+    items.forEach((item) => {
+      if (!item || typeof item !== "object") return;
+      const parentIntentId = String(item.parent_intent_id || "").trim();
+      if (!parentIntentId) return;
+      const normalized = {
+        ...item,
+        review_source: source,
+        startup_snapshot_backed: source === "startup_snapshot",
+      };
+      const existingIndex = mergedByKey.get(parentIntentId);
+      if (existingIndex === undefined) {
+        mergedByKey.set(parentIntentId, merged.length);
+        merged.push(normalized);
+        return;
+      }
+      const existing = merged[existingIndex];
+      if (existing.review_source === "runtime" && source !== "runtime") {
+        merged[existingIndex] = {
+          ...existing,
+          startup_snapshot_backed: true,
+        };
+        return;
+      }
+      merged[existingIndex] = {
+        ...normalized,
+        startup_snapshot_backed: Boolean(existing.startup_snapshot_backed) || source === "startup_snapshot",
+      };
+    });
+  };
+  append(recovery.exit_execution_review_items, "runtime");
+  const latestStateSnapshot = recovery.latest_state_snapshot;
+  const snapshotDetails = latestStateSnapshot?.details_json;
+  if (snapshotDetails && snapshotDetails.source === "startup_exit_execution_review") {
+    append(snapshotDetails.review_items, "startup_snapshot");
+  }
+  return merged;
+}
+
+function renderExitExecutionReviewList({ recovery = {}, actionContext = {} } = {}) {
+  const items = mergedExitExecutionReviewItems(recovery);
+  if (!items.length) {
+    return `<p class="meta-copy">当前没有待人工处理的退出任务。</p>`;
+  }
+  return `
+    <div class="alert-list">
+      ${items.map((item) => renderExitExecutionReviewItem(item, actionContext)).join("")}
+    </div>
+  `;
+}
+
+function renderExitExecutionReviewItem(item, actionContext = {}) {
+  const title = `退出任务 ${textOrFallback(item.symbol, "未知标的")}`;
+  const subtitle = `${textOrFallback(item.parent_intent_id, "未知父任务")} / ${readableState(item.aggregate_status || "unknown")}`;
+  const detail = [
+    `目标退出 ${formatNumber(item.target_exit_quantity)}`,
+    `已成交 ${formatNumber(item.aggregated_filled_quantity)}`,
+    `在途 ${formatNumber(item.open_child_working_quantity)}`,
+    `未确认 ${formatNumber(item.open_child_unknown_quantity)}`,
+    `可续派 ${formatNumber(item.remaining_dispatchable_quantity)}`,
+  ].join("，");
+  const meta = exitExecutionReviewMeta(item);
+  const inlinePills = [
+    pill(item.review_source === "startup_snapshot" ? "启动快照" : "运行时视图", item.review_source === "startup_snapshot" ? "warning" : "info"),
+    item.startup_snapshot_backed && item.review_source !== "startup_snapshot" ? pill("快照可追溯", "outline") : "",
+    item.resume_issue_kind ? pill("续派问题", "warning") : "",
+    item.cancel_requested ? pill("已请求取消", "warning") : "",
+  ].filter(Boolean).join("");
+  const latestAction = exitExecutionLatestAction(item);
+  const recentActions = renderExitExecutionRecentActions(item);
+  const currentBlocker = exitExecutionCurrentBlocker(item);
+  return `
+    <article class="timeline-item">
+      <div class="panel-head">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <p class="meta-copy">${escapeHtml(subtitle)}</p>
+        </div>
+        <div class="inline-pills">${inlinePills}</div>
+      </div>
+      <p>${escapeHtml(exitExecutionReviewSummary(item))}</p>
+      <p class="meta-copy">${escapeHtml(detail)}</p>
+      <p class="meta-copy">${escapeHtml(meta)}</p>
+      ${latestAction}
+      ${recentActions}
+      ${currentBlocker}
+      ${renderExitExecutionReviewActions(item, actionContext)}
+    </article>
+  `;
+}
+
+function renderExitExecutionReviewActions(item, actionContext = {}) {
+  const buttons = normalizedExitExecutionOperatorActions(item).map((actionKind) => {
+    const descriptor = exitExecutionOperatorActionDescriptor(actionKind);
+    if (!descriptor) return "";
+    const disabledReason = exitExecutionActionDisabledReason(actionKind, actionContext);
+    return actionButton(
+      descriptor.label,
+      descriptor.action,
+      textOrFallback(item.parent_intent_id, ""),
+      descriptor.tone,
+      {
+        disabled: Boolean(disabledReason),
+        title: disabledReason || descriptor.title,
+      }
+    );
+  }).filter(Boolean);
+  if (!buttons.length) return "";
+  return `<div class="stack-actions">${buttons.join("")}</div>`;
+}
+
+export function renderExitExecutionActionHistoryList(items = [], filters = {}) {
+  const normalizedFilters = normalizedExitExecutionHistoryFilters(filters);
+  const filteredCount = filterExitExecutionActionHistory(items, normalizedFilters).length;
+  return `
+    <div data-exit-history-root>
+      ${renderExitExecutionActionHistoryFilters(normalizedFilters, { mode: "card" })}
+      ${items.length ? `
+        <div class="alert-list">
+          ${items.map((item) => renderExitExecutionActionHistoryItem(item, normalizedFilters)).join("")}
+        </div>
+      ` : ""}
+      <p class="meta-copy" data-exit-history-empty ${filteredCount > 0 ? "hidden" : ""}>当前筛选条件下没有退出任务处理记录。</p>
+    </div>
+  `;
+}
+
+export function renderExitExecutionWorkspace({ page = {}, filters = {} } = {}) {
+  const normalizedFilters = normalizedExitExecutionHistoryFilters(filters);
+  const items = Array.isArray(page.actions)
+    ? page.actions.filter((item) => item && typeof item === "object")
+    : [];
+  const limit = Number(page.limit || normalizedFilters.limit || 20);
+  const offset = Number(page.offset || normalizedFilters.offset || 0);
+  const totalAvailable = Number(page.total_available || 0);
+  const pageStart = totalAvailable > 0 ? offset + 1 : 0;
+  const pageEnd = totalAvailable > 0 ? offset + items.length : 0;
+  const hasMore = Boolean(page.has_more);
+  const hasPrev = offset > 0;
+  const filteredCount = filterExitExecutionActionHistory(items, normalizedFilters).length;
+  return `
+    <div data-exit-history-root data-exit-history-workspace>
+      ${renderExitExecutionActionHistoryFilters(normalizedFilters, { mode: "workspace" })}
+      <div class="panel-head">
+        <div>
+          <strong>完整时间线</strong>
+          <p class="meta-copy">当前显示 ${formatNumber(pageStart, 0)} - ${formatNumber(pageEnd, 0)} / ${formatNumber(totalAvailable, 0)} 条。</p>
+        </div>
+        <div class="stack-actions table-actions--compact">
+          ${actionButton("上一页", "paginate-exit-execution-history", "prev", "ghost", {
+            disabled: !hasPrev,
+            title: hasPrev ? "查看更早一页退出任务处理记录。" : "当前已经是第一页。",
+          })}
+          ${actionButton("下一页", "paginate-exit-execution-history", "next", "ghost", {
+            disabled: !hasMore,
+            title: hasMore ? "查看更晚一页退出任务处理记录。" : "当前没有更多记录。",
+          })}
+        </div>
+      </div>
+      ${items.length ? `
+        <div class="alert-list">
+          ${items.map((item) => renderExitExecutionActionHistoryItem(item, normalizedFilters)).join("")}
+        </div>
+      ` : ""}
+      <p class="meta-copy" data-exit-history-empty ${filteredCount > 0 ? "hidden" : ""}>当前筛选条件下没有退出任务处理记录。</p>
+      ${!items.length ? `<p class="meta-copy">当前工作区还没有命中的退出任务处理记录。你可以放宽筛选条件，或翻页查看更多历史。</p>` : ""}
+      <p class="meta-copy">这里展示的是独立 operator 工作区列表；卡片上的筛选条件会同步到这里，点击“应用到完整列表”后会按当前条件重新拉取长历史。</p>
+    </div>
+  `;
+}
+
+function renderExitExecutionActionHistoryItem(item, filters = {}) {
+  const title = `退出任务 ${textOrFallback(item.symbol, "未知标的")}`;
+  const statusSuffix = item.aggregate_status ? ` / 父任务 ${readableState(item.aggregate_status)}` : "";
+  const subtitle = `${textOrFallback(item.parent_intent_id, "未知父任务")} / ${exitExecutionLatestActionLabel(item.action)} / ${exitExecutionLatestActionStatus(item.status)}${statusSuffix}`;
+  const metaParts = [];
+  if (item.created_at) {
+    metaParts.push(`时间 ${formatMaybeTimestamp(item.created_at)}`);
+  }
+  if (item.actor_identity || item.actor_role) {
+    metaParts.push(`操作人 ${textOrFallback(item.actor_identity, textOrFallback(item.actor_role, "未知"))}`);
+  }
+  const blocker = item && typeof item === "object" ? item.remaining_blocker : null;
+  const blockerSummary = blocker && typeof blocker === "object"
+    ? textOrFallback(blocker.summary, localizeError(blocker.code, "当前还有未解除的退出任务阻断。"))
+    : "";
+  const visible = filterExitExecutionActionHistory([item], filters).length > 0;
+  return `
+    <article
+      class="timeline-item"
+      data-exit-history-entry
+      data-parent-intent-id="${escapeHtml(textOrFallback(item.parent_intent_id, ""))}"
+      data-actor-search="${escapeHtml(exitExecutionActionActorSearch(item))}"
+      data-action-kind="${escapeHtml(textOrFallback(item.action, ""))}"
+      data-created-at-ms="${escapeHtml(String(exitExecutionActionCreatedAtMs(item)))}"
+      ${visible ? "" : "hidden"}
+    >
+      <div class="panel-head">
+        <div>
+          <strong>${escapeHtml(title)}</strong>
+          <p class="meta-copy">${escapeHtml(subtitle)}</p>
+        </div>
+      </div>
+      ${item.summary ? `<p>${escapeHtml(String(item.summary))}</p>` : ""}
+      ${metaParts.length ? `<p class="meta-copy">${escapeHtml(metaParts.join("；"))}</p>` : ""}
+      ${blockerSummary ? `<p class="meta-copy"><strong>动作后仍卡在：</strong>${escapeHtml(blockerSummary)}</p>` : ""}
+    </article>
+  `;
+}
+
+function renderExitExecutionActionHistoryFilters(filters = {}, { mode = "card" } = {}) {
+  const normalizedFilters = normalizedExitExecutionHistoryFilters(filters);
+  const applyButton = actionButton(
+    mode === "workspace" ? "应用筛选" : "应用到完整列表",
+    "apply-exit-execution-history-workspace",
+    "",
+    "secondary",
+    {
+      title: mode === "workspace"
+        ? "按当前筛选条件重新拉取 parent-exit 长历史。"
+        : "把当前筛选条件同步到下方工作区列表，并按这些条件重新拉取完整历史。",
+    },
+  );
+  const resetButton = actionButton(
+    "重置筛选",
+    "reset-exit-execution-history-workspace",
+    "",
+    "ghost",
+    {
+      title: "清空 parent-exit 时间线筛选条件并回到第一页。",
+    },
+  );
+  return `
+    <div class="stack-actions table-actions--compact">
+      <label>
+        <span class="meta-copy">动作</span>
+        <select data-exit-history-filter="action">
+          ${renderExitExecutionActionFilterOptions(normalizedFilters.action)}
+        </select>
+      </label>
+      <label>
+        <span class="meta-copy">父任务</span>
+        <input
+          type="text"
+          data-exit-history-filter="parent"
+          value="${escapeHtml(normalizedFilters.parent)}"
+          placeholder="例如 exit_parent:btc_close"
+        />
+      </label>
+      <label>
+        <span class="meta-copy">操作人</span>
+        <input
+          type="text"
+          data-exit-history-filter="actor"
+          value="${escapeHtml(normalizedFilters.actor)}"
+          placeholder="例如 risk-admin"
+        />
+      </label>
+      <label>
+        <span class="meta-copy">时间窗口</span>
+        <select data-exit-history-filter="windowHours">
+          ${renderExitExecutionActionWindowOptions(normalizedFilters.windowHours)}
+        </select>
+      </label>
+      ${applyButton}
+      ${resetButton}
+    </div>
+  `;
+}
+
+function renderExitExecutionActionFilterOptions(selectedAction = "all") {
+  return [
+    ["all", "全部动作"],
+    ["refresh_exchange_state", "刷新交易所状态"],
+    ["retry_limit_lookup", "重试拆单上限查询"],
+    ["safe_cancel", "安全取消退出任务"],
+  ].map(([value, label]) => (
+    `<option value="${escapeHtml(value)}"${value === selectedAction ? " selected" : ""}>${escapeHtml(label)}</option>`
+  )).join("");
+}
+
+function renderExitExecutionActionWindowOptions(selectedWindow = "all") {
+  return [
+    ["all", "全部时间"],
+    ["1", "最近 1 小时"],
+    ["6", "最近 6 小时"],
+    ["24", "最近 24 小时"],
+    ["168", "最近 7 天"],
+    ["720", "最近 30 天"],
+  ].map(([value, label]) => (
+    `<option value="${escapeHtml(value)}"${value === selectedWindow ? " selected" : ""}>${escapeHtml(label)}</option>`
+  )).join("");
+}
+
+export function normalizedExitExecutionHistoryFilters(filters = {}) {
+  const action = String(filters?.action || "all").trim();
+  const normalizedAction = ["all", "refresh_exchange_state", "retry_limit_lookup", "safe_cancel"].includes(action)
+    ? action
+    : "all";
+  const windowHours = String(filters?.windowHours || "all").trim();
+  const normalizedWindowHours = ["all", "1", "6", "24", "168", "720"].includes(windowHours)
+    ? windowHours
+    : "all";
+  return {
+    action: normalizedAction,
+    parent: String(filters?.parent || "").trim(),
+    actor: String(filters?.actor || "").trim(),
+    windowHours: normalizedWindowHours,
+    offset: Math.max(Number(filters?.offset || 0), 0),
+    limit: Math.max(Number(filters?.limit || 20), 1),
+  };
+}
+
+function filterExitExecutionActionHistory(items = [], filters = {}) {
+  const normalized = normalizedExitExecutionHistoryFilters(filters);
+  const thresholdMs = exitExecutionHistoryWindowThresholdMs(normalized.windowHours);
+  return items.filter((item) => {
+    const actionMatches = normalized.action === "all" || String(item?.action || "").trim() === normalized.action;
+    const parentMatches = !normalized.parent
+      || String(item?.parent_intent_id || "").toLowerCase().includes(normalized.parent.toLowerCase());
+    const actorMatches = !normalized.actor
+      || exitExecutionActionActorSearch(item).includes(normalized.actor.toLowerCase());
+    const createdAtMs = exitExecutionActionCreatedAtMs(item);
+    const windowMatches = thresholdMs === null || createdAtMs >= thresholdMs;
+    return actionMatches && parentMatches && actorMatches && windowMatches;
+  });
+}
+
+function exitExecutionActionActorSearch(item) {
+  return `${String(item?.actor_identity || "").trim()} ${String(item?.actor_role || "").trim()}`.trim().toLowerCase();
+}
+
+function exitExecutionActionCreatedAtMs(item) {
+  const parsed = Date.parse(String(item?.created_at || ""));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function exitExecutionHistoryWindowThresholdMs(windowHours) {
+  const normalized = String(windowHours || "all").trim();
+  if (!normalized || normalized === "all") {
+    return null;
+  }
+  const hours = Number(normalized);
+  if (!Number.isFinite(hours) || hours <= 0) {
+    return null;
+  }
+  return Date.now() - (hours * 60 * 60 * 1000);
+}
+
+function exitExecutionActionDisabledReason(actionKind, actionContext = {}) {
+  const permissionMessage = textOrFallback(actionContext.uiHints?.controlPermissionMessage, "");
+  if (permissionMessage) {
+    return permissionMessage;
+  }
+  if (actionKind !== "retry_limit_lookup") {
+    return "";
+  }
+  return exitExecutionAdminPermissionReason(actionContext);
+}
+
+function exitExecutionAdminPermissionReason(actionContext = {}) {
+  if (hasExitExecutionAdminAccess(actionContext)) {
+    return "";
+  }
+  return "当前动作需要 admin 权限。请切换为 admin 账号，或在允许未认证写入的本地环境中执行。";
+}
+
+function hasExitExecutionAdminAccess(actionContext = {}) {
+  const authEnabled = Boolean(actionContext.authProviders?.auth_enabled);
+  const sessionRole = String(actionContext.session?.role || "").trim().toLowerCase();
+  if (!authEnabled) {
+    return Boolean(actionContext.runtime?.operator_auth?.unsafe_write_without_auth);
+  }
+  return sessionRole === "admin";
+}
+
+function normalizedExitExecutionOperatorActions(item) {
+  const actions = Array.isArray(item.available_operator_actions) ? item.available_operator_actions : [];
+  return Array.from(new Set(actions.map((value) => String(value || "").trim()).filter(Boolean)));
+}
+
+function exitExecutionOperatorActionDescriptor(actionKind) {
+  if (actionKind === "refresh_exchange_state") {
+    return {
+      label: "刷新交易所状态",
+      action: "trigger-exit-execution-refresh",
+      tone: "secondary",
+      title: "重新拉取交易所状态，并按当前启动期快照上下文继续收敛这条退出任务。",
+    };
+  }
+  if (actionKind === "retry_limit_lookup") {
+    return {
+      label: "重试拆单上限查询",
+      action: "trigger-exit-execution-retry-limit-lookup",
+      tone: "secondary",
+      title: "重新查询交易所单笔上限；如果条件满足，系统会继续串行续派后续子订单。",
+    };
+  }
+  if (actionKind === "safe_cancel") {
+    return {
+      label: "安全取消退出任务",
+      action: "trigger-exit-execution-safe-cancel",
+      tone: "warning",
+      title: "停止继续续派，并尝试撤销当前仍可取消的子订单。",
+    };
+  }
+  return null;
+}
+
+function exitExecutionReviewSummary(item) {
+  const reason = exitExecutionReviewReasonLabel(item);
+  const childCount = Array.isArray(item.child_order_ids) ? item.child_order_ids.length : 0;
+  return `${reason}。当前关联 ${formatNumber(childCount, 0)} 笔子订单。`;
+}
+
+function exitExecutionReviewReasonLabel(item) {
+  const kind = String(item.kind || "").trim();
+  if (kind === "exit_execution_truth_pending") {
+    return "退出任务仍有未确认的子订单真相，当前不能继续续派";
+  }
+  if (kind === "exit_execution_missing_child_refs_for_parent") {
+    return "退出任务缺少可重建的子订单引用，需要人工确认后再继续处理";
+  }
+  if (kind === "exit_execution_resume_limit_lookup_failed") {
+    return "退出任务续派被交易所单笔上限查询阻断";
+  }
+  if (kind === "exit_execution_resume_template_missing") {
+    return "退出任务缺少续派模板，当前不能自动继续派发";
+  }
+  if (kind === "exit_execution_parent_review_required") {
+    return "退出任务仍有未自动收敛的子订单状态，需要人工确认";
+  }
+  return textOrFallback(item.operator_review_reason, "退出任务需要人工确认");
+}
+
+function exitExecutionReviewMeta(item) {
+  const parts = [];
+  if (item.resume_block_reason) {
+    parts.push(`续派阻断：${localizeError(item.resume_block_reason)}`);
+  }
+  if (item.operator_review_reason) {
+    parts.push(`复核原因：${localizeError(item.operator_review_reason)}`);
+  }
+  if (item.resume_issue_kind) {
+    parts.push(`最近问题：${localizeError(item.resume_issue_kind)}`);
+  }
+  return parts.join("；") || "当前没有额外退出任务复核说明。";
+}
+
+function exitExecutionLatestAction(item) {
+  const latest = item && typeof item === "object" ? item.latest_operator_action : null;
+  if (!latest || typeof latest !== "object") {
+    return "";
+  }
+  const headline = `最近动作：${exitExecutionLatestActionLabel(latest.action)} / ${exitExecutionLatestActionStatus(latest.status)}`;
+  const metaParts = [];
+  if (latest.summary) {
+    metaParts.push(String(latest.summary));
+  }
+  if (latest.created_at) {
+    metaParts.push(`时间 ${formatMaybeTimestamp(latest.created_at)}`);
+  }
+  if (latest.actor_identity || latest.actor_role) {
+    metaParts.push(`操作人 ${textOrFallback(latest.actor_identity, textOrFallback(latest.actor_role, "未知"))}`);
+  }
+  return `
+    <p class="meta-copy"><strong>${escapeHtml(headline)}</strong></p>
+    ${metaParts.length ? `<p class="meta-copy">${escapeHtml(metaParts.join("；"))}</p>` : ""}
+  `;
+}
+
+function renderExitExecutionRecentActions(item) {
+  const latest = item && typeof item === "object" ? item.latest_operator_action : null;
+  const recentActions = Array.isArray(item?.recent_operator_actions)
+    ? item.recent_operator_actions.filter((action) => action && typeof action === "object")
+    : [];
+  if (!recentActions.length) {
+    return "";
+  }
+  const latestSignature = latest && typeof latest === "object"
+    ? exitExecutionOperatorActionSignature(latest)
+    : null;
+  const normalizedActions = latestSignature && exitExecutionOperatorActionSignature(recentActions[0]) === latestSignature
+    ? recentActions.slice(1)
+    : recentActions;
+  if (!normalizedActions.length) {
+    return "";
+  }
+  return `
+    <p class="meta-copy"><strong>最近处理记录</strong></p>
+    ${normalizedActions.map((action) => renderExitExecutionRecentAction(action)).join("")}
+  `;
+}
+
+function renderExitExecutionRecentAction(action) {
+  const headline = `${exitExecutionLatestActionLabel(action.action)} / ${exitExecutionLatestActionStatus(action.status)}`;
+  const metaParts = [];
+  if (action.created_at) {
+    metaParts.push(`时间 ${formatMaybeTimestamp(action.created_at)}`);
+  }
+  if (action.actor_identity || action.actor_role) {
+    metaParts.push(`操作人 ${textOrFallback(action.actor_identity, textOrFallback(action.actor_role, "未知"))}`);
+  }
+  const blocker = action.remaining_blocker && typeof action.remaining_blocker === "object"
+    ? action.remaining_blocker
+    : null;
+  const blockerSummary = blocker
+    ? textOrFallback(blocker.summary, localizeError(blocker.code, "当前还有未解除的退出任务阻断。"))
+    : "";
+  return `
+    <p class="meta-copy"><strong>${escapeHtml(headline)}</strong></p>
+    ${action.summary ? `<p class="meta-copy">${escapeHtml(String(action.summary))}</p>` : ""}
+    ${metaParts.length ? `<p class="meta-copy">${escapeHtml(metaParts.join("；"))}</p>` : ""}
+    ${blockerSummary ? `<p class="meta-copy"><strong>动作后仍卡在：</strong>${escapeHtml(blockerSummary)}</p>` : ""}
+  `;
+}
+
+function exitExecutionOperatorActionSignature(action) {
+  if (!action || typeof action !== "object") {
+    return "";
+  }
+  return [
+    String(action.action || "").trim(),
+    String(action.status || "").trim(),
+    String(action.created_at || "").trim(),
+    String(action.actor_identity || "").trim(),
+    String(action.actor_role || "").trim(),
+  ].join("|");
+}
+
+function exitExecutionCurrentBlocker(item) {
+  const latest = item && typeof item === "object" ? item.latest_operator_action : null;
+  const actionBlocker = latest && typeof latest === "object" ? latest.remaining_blocker : null;
+  const currentBlocker = item && typeof item === "object" ? item.current_blocker : null;
+  const normalizedActionBlocker = actionBlocker && typeof actionBlocker === "object" ? actionBlocker : null;
+  const normalizedCurrentBlocker = currentBlocker && typeof currentBlocker === "object" ? currentBlocker : null;
+  if (!normalizedActionBlocker && !normalizedCurrentBlocker) {
+    return "";
+  }
+  const renderBlockerLine = (headline, blocker) => {
+    const summary = textOrFallback(
+      blocker.summary,
+      localizeError(blocker.code, "当前还有未解除的退出任务阻断。")
+    );
+    return `<p class="meta-copy"><strong>${escapeHtml(headline)}</strong>${escapeHtml(summary)}</p>`;
+  };
+  if (normalizedActionBlocker && normalizedCurrentBlocker) {
+    const actionCode = String(normalizedActionBlocker.code || "").trim();
+    const currentCode = String(normalizedCurrentBlocker.code || "").trim();
+    if (actionCode && currentCode && actionCode !== currentCode) {
+      return [
+        renderBlockerLine("这次动作后仍卡在：", normalizedActionBlocker),
+        renderBlockerLine("当前已变成：", normalizedCurrentBlocker),
+      ].join("");
+    }
+    return renderBlockerLine("这次动作后仍卡在：", normalizedActionBlocker);
+  }
+  return renderBlockerLine("当前仍卡在：", normalizedCurrentBlocker || normalizedActionBlocker);
+}
+
+function exitExecutionLatestActionLabel(action) {
+  if (action === "refresh_exchange_state") return "刷新交易所状态";
+  if (action === "retry_limit_lookup") return "重试拆单上限查询";
+  if (action === "safe_cancel") return "安全取消退出任务";
+  return textOrFallback(action, "未知动作");
+}
+
+function exitExecutionLatestActionStatus(status) {
+  if (status === "completed") return "已完成";
+  if (status === "failed") return "失败";
+  if (status === "rejected") return "已拒绝";
+  return textOrFallback(status, "状态待确认");
 }
 
 function trialGuardStatusLabel(status) {

@@ -364,7 +364,8 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_hedge_independent_rebalance_cooldown_seconds"] == 120.0
         assert values["strategy_hedge_independent_trial_guard_enabled"] is True
         assert values["strategy_hedge_independent_min_confirm_ticks"] == 2
-        assert values["strategy_hedge_independent_min_score_stability_bps"] == 2.0
+        expected_independent_score_drawdown = 6.0 if profile == "derivatives_live" else 2.0
+        assert values["strategy_hedge_independent_min_score_drawdown_bps"] == expected_independent_score_drawdown
         assert values["strategy_hedge_independent_min_liquidity_quality"] == 0.55
         assert values["strategy_hedge_independent_require_execution_health_ok"] is True
         assert values["strategy_hedge_independent_max_thesis_age_seconds"] == 1800
@@ -416,7 +417,7 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_hedge_independent_long_close_threshold"] == 0.24
     assert values["strategy_hedge_independent_short_close_threshold"] == 0.24
     assert values["strategy_hedge_independent_min_confirm_ticks"] == 2
-    assert values["strategy_hedge_independent_min_score_stability_bps"] == 2.0
+    assert values["strategy_hedge_independent_min_score_drawdown_bps"] == 6.0
     assert values["strategy_hedge_independent_min_liquidity_quality"] == 0.55
     assert values["strategy_hedge_independent_require_execution_health_ok"] is True
     assert values["strategy_hedge_independent_max_thesis_age_seconds"] == 1800

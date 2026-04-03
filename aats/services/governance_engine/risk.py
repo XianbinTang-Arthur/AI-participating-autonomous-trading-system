@@ -220,8 +220,11 @@ class RiskEngine:
         snapshot = self._snapshot()
         enforce_exchange_margin_checks = self.environment_capabilities.account_state_source_kind == "exchange"
         mark_price = self._safe_reference_price(leg_intent.symbol)
-        risk_budget_multiplier = Decimal("1")
-        execution_aggressiveness_multiplier = Decimal("1")
+        adaptive_state = self._adaptive_control_states()
+        risk_budget_multiplier = to_decimal(adaptive_state["risk_budget"]["multiplier"])
+        execution_aggressiveness_multiplier = to_decimal(
+            adaptive_state["execution_aggressiveness"]["multiplier"]
+        )
         current_open_order_count = self._current_open_order_count(leg_intent.symbol)
         settle_currency = self._settle_or_quote_currency(leg_intent.symbol)
         available_equity = self._available_derivatives_equity(
@@ -315,6 +318,10 @@ class RiskEngine:
             rejection_reasons.extend(selected_leg_reasons)
             rejection_reasons.append("leg_only_reduce_mode_active")
             constraints_applied.extend(["only_reduce_required", *selected_leg_reasons])
+        if risk_budget_multiplier < Decimal("0.999999"):
+            constraints_applied.append("risk_budget_multiplier_applied")
+        if execution_aggressiveness_multiplier < Decimal("0.999999"):
+            constraints_applied.append("execution_aggressiveness_contracted")
 
         projected_exposure = self._apply_projected_margin_to_exposure(
             exposure=projected_exposure,
@@ -331,10 +338,18 @@ class RiskEngine:
             capped_target_notional=projected_exposure.net_notional,
             projected_margin_usage=projected_margin_usage,
         )
+        halt_required = bool(
+            any(
+                reason.endswith("_halt_required") or reason.endswith("_auto_halt")
+                for reason in rejection_reasons
+            )
+            or adaptive_state["risk_budget"].get("auto_halt_required")
+            or adaptive_state["execution_aggressiveness"].get("auto_halt_required")
+        )
         return RiskDecision(
             decision_id=leg_intent.decision_id,
             approved=approved,
-            modified=bool(selected_leg_reasons),
+            modified=bool(constraints_applied),
             capped_target_position_qty=projected_exposure.net_position_qty,
             capped_target_notional=projected_exposure.net_notional,
             required_initial_margin=required_initial_margin,
@@ -342,13 +357,13 @@ class RiskEngine:
             projected_notional=projected_notional,
             current_open_order_count=current_open_order_count,
             risk_budget_multiplier=risk_budget_multiplier,
-            risk_budget_state={},
+            risk_budget_state=adaptive_state["risk_budget"],
             execution_aggressiveness_multiplier=execution_aggressiveness_multiplier,
-            execution_aggressiveness_state={},
+            execution_aggressiveness_state=adaptive_state["execution_aggressiveness"],
             constraints_applied=list(dict.fromkeys(item for item in constraints_applied if item)),
             risk_score=risk_score,
             flatten_required=False,
-            halt_required=False,
+            halt_required=halt_required,
             only_reduce_required=bool(leg_only_reduce_constraints),
             leg_only_reduce_constraints=leg_only_reduce_constraints,
             risk_limit_breached=risk_limit_breached,
@@ -400,6 +415,11 @@ class RiskEngine:
 
         symbol = next(iter(symbols))
         snapshot = self._snapshot()
+        adaptive_state = self._adaptive_control_states()
+        risk_budget_multiplier = to_decimal(adaptive_state["risk_budget"]["multiplier"])
+        execution_aggressiveness_multiplier = to_decimal(
+            adaptive_state["execution_aggressiveness"]["multiplier"]
+        )
         mark_price = self._safe_reference_price(symbol)
         settle_currency = self._settle_or_quote_currency(symbol)
         available_equity = self._available_derivatives_equity(
@@ -424,7 +444,7 @@ class RiskEngine:
             equity_base=equity_base,
             total_initial_margin_hint=current_initial_margin,
         )
-        exposure_limits = self._derivatives_exposure_limits(risk_budget_multiplier=Decimal("1"))
+        exposure_limits = self._derivatives_exposure_limits(risk_budget_multiplier=risk_budget_multiplier)
         projected_exposure = current_exposure
         total_required_initial_margin = Decimal("0")
         total_added_notional = Decimal("0")
@@ -527,7 +547,9 @@ class RiskEngine:
             self._append_reasons_to_legs(only_reduce_constraints, net_legs, ["risk_max_net_notional_exceeded"])
 
         symbol_pending_notional = self._pending_notional_for_symbol(snapshot=snapshot, symbol=symbol)
-        max_pending_notional_per_symbol = to_decimal(self.settings.max_pending_notional_per_symbol)
+        max_pending_notional_per_symbol = (
+            to_decimal(self.settings.max_pending_notional_per_symbol) * risk_budget_multiplier
+        )
         if (
             max_pending_notional_per_symbol > Decimal("0")
             and symbol_pending_notional + total_added_notional > max_pending_notional_per_symbol + EPSILON_DECIMAL_12
@@ -536,7 +558,7 @@ class RiskEngine:
 
         total_pending_notional = self._total_pending_notional(snapshot=snapshot)
         current_total_position_notional = self._current_total_position_notional(snapshot=snapshot)
-        max_total_open_notional = to_decimal(self.settings.max_total_open_notional)
+        max_total_open_notional = to_decimal(self.settings.max_total_open_notional) * risk_budget_multiplier
         if (
             max_total_open_notional > Decimal("0")
             and current_total_position_notional + total_pending_notional + total_added_notional > max_total_open_notional + EPSILON_DECIMAL_12
@@ -573,29 +595,44 @@ class RiskEngine:
         rejection_reasons = list(dict.fromkeys(item for item in rejection_reasons if item))
         leg_only_reduce_constraints = self._leg_constraints_from_reason_map(only_reduce_constraints)
         approved = not rejection_reasons
+        constraints_applied: list[str] = []
+        if not approved:
+            constraints_applied.append("bundle_leg_risk_constraints_applied")
+        if risk_budget_multiplier < Decimal("0.999999"):
+            constraints_applied.append("risk_budget_multiplier_applied")
+        if execution_aggressiveness_multiplier < Decimal("0.999999"):
+            constraints_applied.append("execution_aggressiveness_contracted")
+        halt_required = bool(
+            any(
+                reason.endswith("_halt_required") or reason.endswith("_auto_halt")
+                for reason in rejection_reasons
+            )
+            or adaptive_state["risk_budget"].get("auto_halt_required")
+            or adaptive_state["execution_aggressiveness"].get("auto_halt_required")
+        )
         return RiskDecision(
             decision_id=decision_id,
             approved=approved,
-            modified=not approved,
+            modified=bool(constraints_applied),
             capped_target_position_qty=projected_exposure.net_position_qty,
             capped_target_notional=projected_exposure.net_notional,
             required_initial_margin=total_required_initial_margin,
             projected_margin_usage=projected_margin_usage,
             projected_notional=projected_exposure.gross_notional,
             current_open_order_count=current_open_order_count,
-            risk_budget_multiplier=Decimal("1"),
-            risk_budget_state={"bundle": True},
-            execution_aggressiveness_multiplier=Decimal("1"),
-            execution_aggressiveness_state={"bundle": True},
-            constraints_applied=[] if approved else ["bundle_leg_risk_constraints_applied"],
+            risk_budget_multiplier=risk_budget_multiplier,
+            risk_budget_state=adaptive_state["risk_budget"],
+            execution_aggressiveness_multiplier=execution_aggressiveness_multiplier,
+            execution_aggressiveness_state=adaptive_state["execution_aggressiveness"],
+            constraints_applied=list(dict.fromkeys(item for item in constraints_applied if item)),
             risk_score=self._risk_score(
                 capped_qty=projected_exposure.net_position_qty,
-                max_abs_qty=to_decimal(self.settings.max_abs_position_qty),
+                max_abs_qty=to_decimal(self.settings.max_abs_position_qty) * risk_budget_multiplier,
                 capped_target_notional=projected_exposure.net_notional,
                 projected_margin_usage=projected_margin_usage,
             ),
             flatten_required=False,
-            halt_required=False,
+            halt_required=halt_required,
             only_reduce_required=bool(leg_only_reduce_constraints),
             leg_only_reduce_constraints=leg_only_reduce_constraints,
             risk_limit_breached=not approved,
@@ -1795,7 +1832,7 @@ class RiskEngine:
         payload = snapshot_getter() if callable(snapshot_getter) else None
         return payload if isinstance(payload, dict) else {}
 
-    def _adaptive_control_states(self, *, target: PositionTarget) -> dict[str, Any]:
+    def _adaptive_control_states(self, *, target: PositionTarget | None = None) -> dict[str, Any]:
         _ = target
         health_snapshot = self.health_service.snapshot()
         runtime_guard = self._runtime_guard_state()

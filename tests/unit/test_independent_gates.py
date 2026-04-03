@@ -195,7 +195,7 @@ class TestIndependentGates(unittest.TestCase):
             min_score=0.52,
             max_score=0.55,
             mean_score=0.54,
-            max_drawdown_bps=3.0,
+            upward_excursion_bps=3.0,
             stable=False,
             source="recent_target_history",
         )

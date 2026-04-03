@@ -574,6 +574,21 @@ const ERROR_MAP = {
   phase1_shadow_lagging: "影子兼容层仍有积压，恢复前需要先确认影子同步已经追平。",
   phase1_shadow_degraded: "影子兼容层最近写入失败，恢复前需要先排查兼容层状态。",
   resume_blocked: "恢复检查未通过，系统暂不允许继续自动交易。",
+  exit_execution_parent_review_required: "退出任务仍有未自动收敛的子订单状态，需要人工确认。",
+  exit_execution_truth_pending: "退出任务仍有未确认的子订单真相，当前不能继续续派。",
+  exit_execution_missing_child_refs_for_parent: "退出任务缺少可重建的子订单引用，需要人工确认后再继续处理。",
+  exit_execution_resume_limit_lookup_failed: "交易所单笔上限查询仍未恢复，当前不能继续续派。",
+  exit_execution_resume_template_missing: "退出任务缺少续派模板，当前不能自动继续派发。",
+  child_unknown_truth_requires_review: "仍有子订单真相未确认，需要先人工复核。",
+  child_risk_reducing_invariant_breached: "子订单已经破坏减风险不变式，必须先人工复核。",
+  unknown_child_truth_pending: "仍有子订单状态未确认，系统暂不继续续派。",
+  missing_child_refs_for_parent: "父退出任务缺少可重建的子订单引用，当前不能自动继续续派。",
+  working_child_outstanding: "仍有子订单在途，系统会等当前子订单先收敛。",
+  dispatch_template_missing: "退出任务缺少续派模板，当前不能自动继续派发。",
+  cancel_requested: "父退出任务已经请求安全取消，系统不会继续续派。",
+  no_remaining_dispatchable_quantity: "当前没有可继续续派的剩余数量。",
+  parent_terminal: "父退出任务已经进入终态，不会继续续派。",
+  resume_limit_lookup_failed: "交易所单笔上限查询仍未恢复，当前不能继续续派。",
   investigate_state_divergence: "先排查本地状态与交易所状态为什么不一致。",
   review_and_rebaseline_if_expected: "先人工确认当前状态，确认无误后接受为新基线。",
   review_exchange_bills_and_rebaseline_if_expected: "先核对交易所账单，再在确认无误后接受为新基线。",
@@ -1237,9 +1252,19 @@ export function readableIndependentTransitionExceptionMeta(source = {}, fallback
       const leg = readableBookLabel(String(item?.leg || "").trim().toLowerCase(), "independent_book");
       const priorBookState = String(item?.prior_book_state || "").trim();
       const bookState = String(item?.book_state || "").trim();
-      const transition = priorBookState && bookState
-        ? `${readableState(priorBookState, priorBookState)} -> ${readableState(bookState, bookState)}`
-        : readableTransitionViolationReason(item?.transition_violation_reason);
+      const priorGuardState = String(item?.prior_guard_state || "").trim();
+      const guardState = String(item?.guard_state || "").trim();
+      const lifecycleTransition = item?.transition_violation_reason
+        ? readableTransitionViolationReason(item.transition_violation_reason)
+        : priorBookState && bookState
+          ? `${readableState(priorBookState, priorBookState)} -> ${readableState(bookState, bookState)}`
+          : readableTransitionViolationReason(item?.transition_violation_reason);
+      const guardSummary = priorGuardState
+        ? `守卫 ${readableState(priorGuardState, priorGuardState)}`
+        : guardState
+          ? `当前守卫 ${readableState(guardState, guardState)}`
+          : null;
+      const transition = [guardSummary, lifecycleTransition].filter(Boolean).join(" / ");
       const bookAction = item?.book_action
         ? `动作 ${readableState(item.book_action, item.book_action)}`
         : null;
@@ -1276,6 +1301,12 @@ export function readableBookRuntimeStateSummary(source = {}, fallback = "当前�
     .map((item) => {
       const leg = readableBookLabel(String(item?.leg || "").trim().toLowerCase(), "independent_book");
       const parts = [`${leg}${readableState(item?.state || "inactive", item?.state || "inactive")}`];
+      if (item?.book_state) {
+        parts.push(`生命周期 ${readableState(item.book_state, item.book_state)}`);
+      }
+      if (item?.guard_state) {
+        parts.push(`守卫 ${readableState(item.guard_state, item.guard_state)}`);
+      }
       if (item?.book_action) {
         parts.push(`动作 ${readableState(item.book_action, item.book_action)}`);
       }

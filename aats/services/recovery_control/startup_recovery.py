@@ -5,12 +5,249 @@ from datetime import timedelta
 
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.common import utc_now
+from aats.schemas.exit_execution import ExitExecutionIntent
+from aats.schemas.reconciliation import ReconciliationStateSnapshot
 from aats.schemas.system import RecoveryStatus
+from aats.services.execution_engine.exit_intent_aggregator import (
+    exit_execution_review_items,
+    refresh_exit_execution_intents,
+)
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService, RecoveryArtifacts
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.recovery_control.reconciliation_classifier import RecoveryReconciliationClassifier
 from aats.services.runtime_scope import latest_reconciliation_for_scope, latest_snapshot_for_scope, runtime_state_scope
+
+STARTUP_EXIT_EXECUTION_PARENT_REFRESH_FAILED_PREFIX = "startup_exit_execution_parent_refresh_failed"
+STARTUP_EXIT_EXECUTION_PARENT_REFRESH_STAGE_PREFIX = "startup_exit_execution_parent_refresh_stage"
+STARTUP_EXIT_EXECUTION_PARENT_REFRESH_SCOPE_PREFIX = "startup_exit_execution_parent_refresh_scope"
+STARTUP_EXIT_EXECUTION_PARENT_REFRESH_MESSAGE_PREFIX = "startup_exit_execution_parent_refresh_message"
+
+
+def startup_refresh_exit_execution_truth(
+    *,
+    settings: object,
+    execution_repo: object | None,
+    exit_execution_repo: object | None,
+    scope: object | None,
+) -> tuple[list[ExitExecutionIntent], list[str]]:
+    if execution_repo is None or exit_execution_repo is None:
+        return [], []
+    try:
+        refreshed = refresh_exit_execution_intents(
+            execution_repo=execution_repo,
+            exit_execution_repo=exit_execution_repo,
+            settings=settings,
+            scope=scope,
+        )
+    except Exception as exc:  # pragma: no cover - guarded by dedicated unit test via fake repo
+        return [], [
+            f"{STARTUP_EXIT_EXECUTION_PARENT_REFRESH_FAILED_PREFIX}:{type(exc).__name__}",
+            f"{STARTUP_EXIT_EXECUTION_PARENT_REFRESH_STAGE_PREFIX}:refresh_exit_execution_intents",
+            f"{STARTUP_EXIT_EXECUTION_PARENT_REFRESH_SCOPE_PREFIX}:{_startup_refresh_scope_summary(scope)}",
+            f"{STARTUP_EXIT_EXECUTION_PARENT_REFRESH_MESSAGE_PREFIX}:{_startup_refresh_exception_message(exc)}",
+        ]
+    if not refreshed:
+        return [], []
+    return list(refreshed), [f"startup_exit_execution_parent_refresh_count:{len(refreshed)}"]
+
+
+def _startup_refresh_scope_summary(scope: object | None) -> str:
+    if scope is None:
+        return "unknown_scope"
+    product_type = str(getattr(scope, "product_type", "") or "unknown_product")
+    margin_mode = str(getattr(scope, "margin_mode", "") or "unknown_margin")
+    default_symbol = str(getattr(scope, "default_symbol", "") or "unknown_symbol")
+    allowed_symbols = tuple(getattr(scope, "allowed_symbols", ()) or ())
+    return f"{product_type}/{margin_mode}/{default_symbol}/allowed_symbols={len(allowed_symbols)}"
+
+
+def _startup_refresh_exception_message(exc: Exception, *, limit: int = 160) -> str:
+    normalized = " ".join(str(exc or "").split()) or "no_exception_message"
+    return normalized[:limit]
+
+
+def _startup_refresh_note_value(refresh_notes: list[str] | None, prefix: str) -> str | None:
+    for note in refresh_notes or []:
+        if str(note or "").startswith(f"{prefix}:"):
+            return str(note).partition(":")[2] or None
+    return None
+
+
+def _startup_exit_execution_refresh_failure_items(*, refresh_notes: list[str] | None) -> list[dict[str, object]]:
+    items: list[dict[str, object]] = []
+    for note in refresh_notes or []:
+        if not str(note or "").startswith(f"{STARTUP_EXIT_EXECUTION_PARENT_REFRESH_FAILED_PREFIX}:"):
+            continue
+        _, _, exception_type = str(note).partition(":")
+        exception_label = exception_type or "UnknownError"
+        refresh_stage = _startup_refresh_note_value(
+            refresh_notes,
+            STARTUP_EXIT_EXECUTION_PARENT_REFRESH_STAGE_PREFIX,
+        ) or "refresh_exit_execution_intents"
+        scope_summary = _startup_refresh_note_value(
+            refresh_notes,
+            STARTUP_EXIT_EXECUTION_PARENT_REFRESH_SCOPE_PREFIX,
+        ) or "unknown_scope"
+        exception_message = _startup_refresh_note_value(
+            refresh_notes,
+            STARTUP_EXIT_EXECUTION_PARENT_REFRESH_MESSAGE_PREFIX,
+        ) or "no_exception_message"
+        items.append(
+            {
+                "kind": "startup_exit_execution_parent_refresh_failed",
+                "summary": f"启动期退出任务真相刷新失败：{exception_label}",
+                "detail": (
+                    "启动恢复阶段没有成功重建退出任务聚合真相，恢复视图可能不完整。"
+                    f"stage={refresh_stage} | scope={scope_summary} | message={exception_message} | raw={note}"
+                ),
+                "blocks_resume": True,
+                "operator_review_required": True,
+                "exception_type": exception_label,
+                "refresh_stage": refresh_stage,
+                "scope_summary": scope_summary,
+                "exception_message": exception_message,
+            }
+        )
+    return items
+
+
+def apply_startup_exit_execution_review_overlay(
+    *,
+    base_status: RecoveryStatus,
+    parent_intents: list[ExitExecutionIntent],
+    refresh_notes: list[str] | None = None,
+) -> RecoveryStatus:
+    review_items = [
+        *exit_execution_review_items(parent_intents),
+        *_startup_exit_execution_refresh_failure_items(refresh_notes=refresh_notes),
+    ]
+    if not review_items:
+        return base_status
+    review_required_count = sum(
+        1
+        for item in review_items
+        if bool(item.get("operator_review_required"))
+    )
+    blocks_resume = any(bool(item.get("blocks_resume", True)) for item in review_items)
+    blocker_kinds = [
+        str(item.get("kind") or "").strip()
+        for item in review_items
+        if str(item.get("kind") or "").strip()
+    ]
+    notes = list(base_status.notes)
+    notes.append(f"startup_exit_execution_overlay_count:{len(review_items)}")
+    if review_required_count:
+        notes.append(f"startup_exit_execution_review_required_count:{review_required_count}")
+    resume_blocked_reasons = list(base_status.resume_blocked_reasons)
+    resume_blocked_reasons.extend(
+        blocker for blocker in blocker_kinds if blocker not in resume_blocked_reasons
+    )
+    recovery_state = (
+        base_status.recovery_state
+        if base_status.recovery_state == "resume_blocked"
+        else "review_required"
+        if review_required_count
+        else "resume_blocked"
+    )
+    return base_status.model_copy(
+        update={
+            "recovery_state": recovery_state,
+            "review_required": bool(base_status.review_required or review_required_count),
+            "safe_startup": False if blocks_resume or review_required_count else base_status.safe_startup,
+            "safe_to_trade": False if blocks_resume or review_required_count else base_status.safe_to_trade,
+            "resume_eligible": False if blocks_resume or review_required_count else base_status.resume_eligible,
+            "rebaseline_available": bool(base_status.rebaseline_available or review_required_count),
+            "resume_blocked_reasons": list(dict.fromkeys(resume_blocked_reasons)),
+            "unknown_state_details": [
+                *base_status.unknown_state_details,
+                *review_items,
+            ],
+            "notes": list(dict.fromkeys(notes)),
+        }
+    )
+
+
+def persist_startup_exit_execution_state_snapshot(
+    *,
+    reconciliation_repo: object,
+    scope: object,
+    status: RecoveryStatus,
+    parent_intents: list[ExitExecutionIntent],
+    refresh_notes: list[str] | None = None,
+) -> list[str]:
+    review_items = [
+        *exit_execution_review_items(parent_intents),
+        *_startup_exit_execution_refresh_failure_items(refresh_notes=refresh_notes),
+    ]
+    if not review_items:
+        return []
+    latest_reconciliation = latest_reconciliation_for_scope(reconciliation_repo, scope)
+    if latest_reconciliation is None:
+        return ["startup_exit_execution_review_snapshot_skipped_missing_reconciliation_context"]
+    save_snapshot = getattr(reconciliation_repo, "save_state_snapshot", None)
+    latest_state_snapshot_getter = getattr(reconciliation_repo, "latest_state_snapshot_for_scope", None)
+    if not callable(save_snapshot) or not callable(latest_state_snapshot_getter):
+        return []
+    latest_state_snapshot = latest_state_snapshot_getter(scope=scope)
+    latest_generation_getter = getattr(reconciliation_repo, "latest_baseline_generation_for_scope", None)
+    latest_baseline_generation = (
+        latest_generation_getter(scope=scope)
+        if callable(latest_generation_getter)
+        else None
+    )
+    latest_ack_getter = getattr(reconciliation_repo, "latest_exchange_ack_watermark_for_scope", None)
+    latest_exchange_ack_watermark = (
+        latest_ack_getter(scope=scope)
+        if callable(latest_ack_getter)
+        else None
+    )
+    details = {
+        "source": "startup_exit_execution_review",
+        "review_item_count": len(review_items),
+        "review_items": review_items,
+        "reconciliation_severity": latest_reconciliation.severity,
+        "recovery_classification": latest_reconciliation.recovery_classification,
+    }
+    snapshot = ReconciliationStateSnapshot(
+        reconciliation_id=latest_reconciliation.reconciliation_id,
+        product_type=latest_reconciliation.product_type,
+        margin_mode=latest_reconciliation.margin_mode,
+        primary_symbol=(latest_reconciliation.allowed_symbols or [None])[0],
+        recovery_state=status.recovery_state,
+        resume_eligible=status.resume_eligible,
+        safe_to_trade=status.safe_to_trade,
+        review_required=status.review_required,
+        only_reduce_required=status.only_reduce_required,
+        halt_required=bool(latest_reconciliation.halt_required),
+        bundle_recovery_required=status.bundle_recovery_required,
+        resume_blocked_reasons_json=list(status.resume_blocked_reasons),
+        derived_from_generation_id=(
+            None if latest_baseline_generation is None else latest_baseline_generation.generation_id
+        ),
+        exchange_ack_watermark_id=(
+            None if latest_exchange_ack_watermark is None else latest_exchange_ack_watermark.watermark_id
+        ),
+        details_json=details,
+    )
+    should_persist = latest_state_snapshot is None or any(
+        (
+            latest_state_snapshot.reconciliation_id != snapshot.reconciliation_id,
+            latest_state_snapshot.recovery_state != snapshot.recovery_state,
+            latest_state_snapshot.resume_eligible != snapshot.resume_eligible,
+            latest_state_snapshot.safe_to_trade != snapshot.safe_to_trade,
+            latest_state_snapshot.review_required != snapshot.review_required,
+            latest_state_snapshot.only_reduce_required != snapshot.only_reduce_required,
+            latest_state_snapshot.halt_required != snapshot.halt_required,
+            latest_state_snapshot.bundle_recovery_required != snapshot.bundle_recovery_required,
+            list(latest_state_snapshot.resume_blocked_reasons_json) != list(snapshot.resume_blocked_reasons_json),
+            dict(latest_state_snapshot.details_json) != dict(snapshot.details_json),
+        )
+    )
+    if not should_persist:
+        return []
+    save_snapshot(snapshot)
+    return ["startup_exit_execution_review_snapshot_saved"]
 
 
 @dataclass(slots=True)

@@ -2654,6 +2654,143 @@ class TestReconciliationComparator(unittest.TestCase):
         )
         self.assertEqual(report.recommended_operator_action, "halt_execution_and_investigate_state_divergence")
 
+    def test_compare_reports_unknown_submit_as_soft_finding_before_review_threshold(self) -> None:
+        now = utc_now()
+        comparator = StateComparator(
+            settings=AATSSettings.model_validate({"execution_unknown_submit_review_after_seconds": 300.0})
+        )
+        report = comparator.compare(
+            decision_id="decision_unknown_submit_soft",
+            portfolio_snapshot_ref="evt_unknown_submit_soft",
+            order_states=[
+                OrderState(
+                    decision_id="decision_unknown_submit_soft",
+                    execution_chain_id="chain_unknown_submit_soft",
+                    intent_id="intent_unknown_submit_soft",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_unknown_submit_soft",
+                    venue="OKX",
+                    exchange_order_id=None,
+                    status="SUBMITTED",
+                    exchange_status="live",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    requested_qty=0.001,
+                    filled_qty=0.0,
+                    remaining_qty=0.001,
+                    average_fill_price=None,
+                    fees=0.0,
+                    execution_error="submission_unknown_check_exchange:OKXRequestError",
+                )
+            ],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 1000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=1000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 1000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=1000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+        )
+
+        self.assertEqual(report.severity, "SOFT_MISMATCH")
+        self.assertFalse(report.review_required)
+        self.assertEqual(report.recommended_operator_action, "refresh_exchange_state_for_unknown_write")
+        self.assertEqual(report.unknown_state_details[0]["kind"], "unknown_submit_unresolved")
+        finding = next(
+            item for item in report.findings if item.finding_type == "unknown_submit_unresolved"
+        )
+        self.assertEqual(finding.severity_class, "soft")
+        self.assertFalse(finding.review_required)
+        self.assertEqual(finding.reason_code, "unknown_submit_requires_exchange_reconciliation")
+
+    def test_compare_escalates_aged_unknown_cancel_to_review_required(self) -> None:
+        now = utc_now()
+        comparator = StateComparator(
+            settings=AATSSettings.model_validate({"execution_unknown_cancel_review_after_seconds": 30.0})
+        )
+        report = comparator.compare(
+            decision_id="decision_unknown_cancel_review",
+            portfolio_snapshot_ref="evt_unknown_cancel_review",
+            order_states=[
+                OrderState(
+                    decision_id="decision_unknown_cancel_review",
+                    execution_chain_id="chain_unknown_cancel_review",
+                    intent_id="intent_unknown_cancel_review",
+                    symbol="BTC-USDT",
+                    client_order_id="clord_unknown_cancel_review",
+                    venue="OKX",
+                    exchange_order_id="ord_unknown_cancel_review",
+                    status="CANCEL_PENDING",
+                    exchange_status="live",
+                    submitted_ts=now - timedelta(minutes=2),
+                    cancellation_requested_ts=now - timedelta(minutes=2),
+                    last_update_ts=now - timedelta(minutes=2),
+                    requested_qty=0.001,
+                    filled_qty=0.0,
+                    remaining_qty=0.001,
+                    average_fill_price=None,
+                    fees=0.0,
+                    execution_error="cancel_unknown_check_exchange:OKXRequestError",
+                )
+            ],
+            fills=[],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 1000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=1000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 1000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=1000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+            ),
+        )
+
+        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertTrue(report.review_required)
+        self.assertEqual(report.recommended_operator_action, "review_unknown_write_and_refresh_exchange_state")
+        self.assertEqual(report.unknown_state_details[0]["kind"], "unknown_cancel_unresolved")
+        self.assertTrue(report.unknown_state_details[0]["operator_review_required"])
+        finding = next(
+            item for item in report.findings if item.finding_type == "unknown_cancel_unresolved"
+        )
+        self.assertEqual(finding.severity_class, "review")
+        self.assertTrue(finding.review_required)
+        self.assertTrue(finding.blocks_resume)
+        self.assertEqual(finding.reason_code, "unknown_cancel_requires_exchange_reconciliation")
+
 
 class TestReconciliationServiceIdempotency(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_portfolio_snapshot_event_does_not_create_duplicate_report(self) -> None:

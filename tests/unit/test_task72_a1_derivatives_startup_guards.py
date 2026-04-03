@@ -119,6 +119,48 @@ class TestTask72A1DerivativesStartupGuards(unittest.IsolatedAsyncioTestCase):
                 )
             )
 
+    async def test_removed_old_auto_parallel_key_is_rejected_before_runtime_build(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "config_profile": "local_demo",
+                    "mode": "paper_live",
+                    "market_data_backend": "demo",
+                    "execution_backend": "paper",
+                    "account_backend": "disabled",
+                    "account_read_enabled": False,
+                    "storage_mode": "memory",
+                    "event_persistence_mode": "strict",
+                    "strategy_sleeve_auto_parallel_enabled": False,
+                }
+            )
+
+    async def test_new_auto_execution_key_avoids_deprecation_warning_but_keeps_guard_warning(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "strategy_sleeve_auto_execution_enabled": False,
+            }
+        )
+
+        with self.assertLogs("aats.bootstrap", level="WARNING") as captured:
+            await build_runtime(settings)
+
+        rendered = "\n".join(captured.output)
+        self.assertNotIn("startup_deprecated_auto_parallel_key", rendered)
+        self.assertIn("startup_entry_execution_guard_active", rendered)
+        self.assertIn("non_protective_entry_execution_advisory_only", rendered)
+
     async def test_derivatives_exchange_runtime_requires_database_url_and_credentials(self) -> None:
         with self.assertRaisesRegex(ValueError, "derivatives_exchange_runtime_requires_database_url"):
             await build_runtime(

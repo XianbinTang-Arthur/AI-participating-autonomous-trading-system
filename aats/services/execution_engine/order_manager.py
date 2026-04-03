@@ -30,12 +30,31 @@ from aats.services.execution_engine.bundle_status import (
     derive_strategy_bundle_status,
 )
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
+from aats.services.execution_engine.exit_intent_aggregator import (
+    child_exit_order_ref_from_order_state,
+    clear_resume_issue,
+    create_exit_execution_intent_from_order_intent,
+    create_exit_execution_intent_from_order_state,
+    dispatch_template_from_parent,
+    record_resume_issue,
+    refresh_exit_execution_intents,
+    recompute_exit_execution_intent,
+    resume_block_reason,
+    request_cancel_exit_execution_intent,
+)
 from aats.services.execution_engine.obligations import ExecutionObligationService, ExecutionReservationError
+from aats.services.execution_engine.order_truth import (
+    blocks_new_risk_actions,
+    is_risk_reducing_order_intent,
+    is_risk_reducing_order_state,
+    is_unknown_write_state,
+    unknown_write_operation,
+)
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.ledger.posting import Phase1LedgerMirrorService
 from aats.services.strategy_overlay_rollout import overlay_mode_from_execution_mode, overlay_rollout_status
-from aats.storage.base import ExecutionRepository
+from aats.storage.base import ExecutionRepository, ExitExecutionRepository
 from aats.storage.execution_fill_repo_v2 import ExecutionFillRepositoryV2
 from aats.storage.execution_order_repo import ExecutionOrderHistoryRepository, ExecutionOrderRepository
 
@@ -45,6 +64,7 @@ class OrderManager:
     _FILL_BACKFILL_RECENT_LIMIT = 100
     _FILL_BACKFILL_TERMINAL_STATUSES = ("FILLED", "CANCELED", "EXPIRED")
     _TRANSIENT_RETRY_PATTERNS = ("50013", "systems are busy", "service busy", "temporarily unavailable")
+    _EXIT_SPLIT_MAX_CHILDREN = 32
 
     def __init__(
         self,
@@ -53,6 +73,7 @@ class OrderManager:
         bus: EventBus,
         adapter: ExchangeAdapter,
         execution_repo: ExecutionRepository,
+        exit_execution_repo: ExitExecutionRepository | None = None,
         obligation_service: ExecutionObligationService | None = None,
         execution_outbox_publisher: PostgresExecutionOutboxPublisher | None = None,
         persistent_order_service: ExecutionOrderService | None = None,
@@ -69,6 +90,7 @@ class OrderManager:
         self.bus = bus
         self.adapter = adapter
         self.execution_repo = execution_repo
+        self.exit_execution_repo = exit_execution_repo
         self.obligation_service = obligation_service
         self.execution_outbox_publisher = execution_outbox_publisher
         self.persistent_order_service = persistent_order_service
@@ -182,6 +204,13 @@ class OrderManager:
             )
             if blocked_state is not None:
                 await self._persist_order_state(order_state=blocked_state, key=intent.symbol)
+                return
+            unknown_write_block = self._unknown_write_submit_block(
+                intent=intent,
+                client_order_id=preview_client_order_id,
+            )
+            if unknown_write_block is not None:
+                await self._persist_order_state(order_state=unknown_write_block, key=intent.symbol)
                 return
             try:
                 if self.obligation_service is not None:
@@ -369,6 +398,12 @@ class OrderManager:
         )
         if blocked_state is not None:
             return await self._persist_order_state(order_state=blocked_state, key=intent.symbol)
+        unknown_write_block = self._unknown_write_submit_block(
+            intent=intent,
+            client_order_id=resolved_client_order_id,
+        )
+        if unknown_write_block is not None:
+            return await self._persist_order_state(order_state=unknown_write_block, key=intent.symbol)
         return await self._execute_submit_intent(
             intent=intent,
             client_order_id=resolved_client_order_id,
@@ -396,7 +431,37 @@ class OrderManager:
             client_order_id=resolved_client_order_id,
             leg_intent=leg_intent,
         )
-        current = self.execution_repo.get_order_state(resolved_client_order_id)
+        await self._persist_submitting_state_for_intent(
+            intent=intent,
+            client_order_id=resolved_client_order_id,
+        )
+        split_limit = await self._serial_exit_split_limit(intent=intent)
+        if split_limit is not None:
+            split_state = await self._execute_serial_exit_split(
+                intent=intent,
+                client_order_id=resolved_client_order_id,
+                leg_intent=leg_intent,
+                split_limit=split_limit,
+            )
+            if split_state is not None:
+                return split_state
+            fallback_state = self.execution_repo.get_order_state(resolved_client_order_id)
+            if fallback_state is not None:
+                return fallback_state
+            raise RuntimeError("serial_exit_split_missing_anchor_state")
+        return await self._submit_single_order_intent(
+            intent=intent,
+            client_order_id=resolved_client_order_id,
+            leg_intent=leg_intent,
+        )
+
+    async def _persist_submitting_state_for_intent(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+    ) -> None:
+        current = self.execution_repo.get_order_state(client_order_id)
         if current is None:
             current = OrderState(
                 decision_id=intent.decision_id,
@@ -404,7 +469,7 @@ class OrderManager:
                 execution_attempt_id=intent.execution_attempt_id,
                 intent_id=intent.intent_id,
                 symbol=intent.symbol,
-                client_order_id=resolved_client_order_id,
+                client_order_id=client_order_id,
                 venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
                 exchange_order_id=None,
                 status="CREATED",
@@ -442,12 +507,49 @@ class OrderManager:
             )
         submitting_state = current.model_copy(
             update={
+                "decision_id": intent.decision_id,
+                "execution_chain_id": intent.execution_chain_id,
+                "execution_attempt_id": intent.execution_attempt_id,
+                "intent_id": intent.intent_id,
+                "symbol": intent.symbol,
+                "client_order_id": client_order_id,
                 "status": "SUBMITTING",
                 "last_update_ts": utc_now(),
+                "requested_qty": intent.quantity,
+                "remaining_qty": intent.quantity,
+                "reduce_only": intent.reduce_only,
+                "close_only": intent.close_only,
+                "td_mode": intent.td_mode,
+                "position_mode": intent.position_mode,
+                "pos_side": intent.pos_side,
+                "reduce_only_reason": intent.reduce_only_reason,
+                "close_only_reason": intent.close_only_reason,
+                "instrument_family": intent.instrument_family,
+                "settle_currency": intent.settle_currency,
+                "product_type": intent.product_type,
+                "target_leverage": intent.target_leverage,
+                "margin_mode": intent.margin_mode,
+                "exposure_side": intent.exposure_side,
+                "execution_action": intent.execution_action,
+                "leg_action": intent.leg_action,
+                "position_intent": intent.position_intent,
+                "leg_intent_id": intent.leg_intent_id,
+                "strategy_family": intent.strategy_family,
+                "strategy_sleeve_id": intent.strategy_sleeve_id,
+                "allocation_id": intent.allocation_id,
+                "strategy_bundle_id": intent.strategy_bundle_id,
+                "strategy_leg_role": intent.strategy_leg_role,
             }
         )
         await self._persist_order_state(order_state=submitting_state, key=intent.symbol)
 
+    async def _submit_single_order_intent(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+        leg_intent: LegOrderIntent | None = None,
+    ) -> OrderState:
         try:
             if leg_intent is not None:
                 submit_leg_order = getattr(self.adapter, "submit_leg_order", None)
@@ -464,7 +566,7 @@ class OrderManager:
                 execution_attempt_id=intent.execution_attempt_id,
                 intent_id=intent.intent_id,
                 symbol=intent.symbol,
-                client_order_id=resolved_client_order_id,
+                client_order_id=client_order_id,
                 venue="OKX" if self.adapter.readiness().get("backend") == "okx" else "PAPER",
                 exchange_order_id=None,
                 status="FAILED",
@@ -518,6 +620,7 @@ class OrderManager:
         persisted_order_state = await self._persist_order_state(
             order_state=order_state,
             key=intent.symbol,
+            intent=intent,
             obligation=self._terminal_outbox_obligation(order_state=order_state, fills=fills),
         )
 
@@ -540,6 +643,197 @@ class OrderManager:
         self._finalize_obligation(order_state=persisted_order_state)
         return persisted_order_state
 
+    async def _risk_reducing_max_order_quantity_limit(self, *, intent: OrderIntent) -> Decimal | None:
+        if not is_risk_reducing_order_intent(intent):
+            return None
+        limit_provider = getattr(self.adapter, "risk_reducing_max_order_quantity_limit", None)
+        if not callable(limit_provider):
+            return None
+        try:
+            limit = limit_provider(intent=intent)
+            if asyncio.iscoroutine(limit):
+                limit = await limit
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "exit_split_limit_lookup_failed",
+                level="warning",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    error=str(exc),
+                ),
+            )
+            return None
+        if limit is None:
+            return None
+        return max(Decimal(limit), Decimal("0"))
+
+    async def _serial_exit_split_limit(self, *, intent: OrderIntent) -> Decimal | None:
+        normalized_limit = await self._risk_reducing_max_order_quantity_limit(intent=intent)
+        if normalized_limit is None:
+            return None
+        if intent.quantity - normalized_limit <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+            return None
+        return normalized_limit
+
+    async def _execute_serial_exit_split(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+        leg_intent: LegOrderIntent | None,
+        split_limit: Decimal,
+        start_slice_index: int = 1,
+    ) -> OrderState | None:
+        last_state = self.execution_repo.get_order_state(client_order_id)
+        if split_limit <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+            return last_state or self.execution_repo.get_order_state(client_order_id)
+        for slice_index in range(start_slice_index, self._EXIT_SPLIT_MAX_CHILDREN + 1):
+            parent = self._parent_exit_execution_intent(intent=intent)
+            if parent is not None and (
+                parent.operator_review_required
+                or parent.aggregate_status in {"CANCEL_PENDING", "COMPLETED", "CANCELED", "FAILED_SAFE", "REVIEW_REQUIRED"}
+            ):
+                return last_state or self.execution_repo.get_order_state(client_order_id)
+            remaining_quantity = (
+                max(Decimal(intent.quantity), Decimal("0"))
+                if slice_index == start_slice_index and start_slice_index <= 1
+                else (
+                    parent.remaining_dispatchable_quantity
+                    if parent is not None
+                    else max(Decimal(intent.quantity), Decimal("0"))
+                )
+            )
+            if remaining_quantity <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+                return last_state or self.execution_repo.get_order_state(client_order_id)
+            child_quantity = min(split_limit, remaining_quantity)
+            if child_quantity <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+                return last_state or self.execution_repo.get_order_state(client_order_id)
+            child_intent, child_leg_intent = self._split_child_intent(
+                intent=intent,
+                leg_intent=leg_intent,
+                quantity=child_quantity,
+                slice_index=slice_index,
+            )
+            child_client_order_id = (
+                client_order_id
+                if slice_index == start_slice_index and start_slice_index <= 1
+                else self._derived_child_client_order_id(child_intent)
+            )
+            log_event(
+                self.logger,
+                "serial_exit_split_dispatch",
+                **correlation_fields(
+                    decision_id=child_intent.decision_id,
+                    intent_id=child_intent.intent_id,
+                    symbol=child_intent.symbol,
+                    execution_chain_id=child_intent.execution_chain_id,
+                    parent_intent_id=None if parent is None else parent.parent_intent_id,
+                    slice_index=slice_index,
+                    child_quantity=child_quantity,
+                    remaining_dispatchable_quantity=remaining_quantity,
+                    max_size_limit=split_limit,
+                ),
+            )
+            child_intent, child_leg_intent = self._apply_execution_attempt_id(
+                intent=child_intent,
+                client_order_id=child_client_order_id,
+                leg_intent=child_leg_intent,
+            )
+            if slice_index > start_slice_index or start_slice_index > 1:
+                await self._persist_submitting_state_for_intent(
+                    intent=child_intent,
+                    client_order_id=child_client_order_id,
+                )
+            last_state = await self._submit_single_order_intent(
+                intent=child_intent,
+                client_order_id=child_client_order_id,
+                leg_intent=child_leg_intent,
+            )
+            parent = self._parent_exit_execution_intent(intent=intent)
+            if not self._should_continue_serial_exit_split(
+                child_state=last_state,
+                parent=parent,
+                slice_index=slice_index,
+            ):
+                return last_state
+        return last_state or self.execution_repo.get_order_state(client_order_id)
+
+    def _should_continue_serial_exit_split(
+        self,
+        *,
+        child_state: OrderState,
+        parent,
+        slice_index: int,
+    ) -> bool:
+        if slice_index >= self._EXIT_SPLIT_MAX_CHILDREN:
+            return False
+        if not self.order_state_machine.is_terminal(child_state.status):
+            return False
+        if child_state.status in {"FAILED", "REJECTED", "BLOCKED"}:
+            return False
+        if is_unknown_write_state(child_state):
+            return False
+        if parent is None:
+            return False
+        if parent.operator_review_required or parent.aggregate_status in {"REVIEW_REQUIRED", "CANCEL_PENDING", "FAILED_SAFE"}:
+            return False
+        if parent.remaining_dispatchable_quantity <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+            return False
+        return child_state.filled_qty > self._OBLIGATION_ATOMIC_FINALIZE_EPSILON or child_state.status == "FILLED"
+
+    def _split_child_intent(
+        self,
+        *,
+        intent: OrderIntent,
+        leg_intent: LegOrderIntent | None,
+        quantity: Decimal,
+        slice_index: int,
+    ) -> tuple[OrderIntent, LegOrderIntent | None]:
+        if slice_index <= 1:
+            return (
+                intent.model_copy(update={"quantity": quantity}),
+                None if leg_intent is None else leg_intent.model_copy(update={"quantity": quantity}),
+            )
+        suffix = f":slice:{slice_index}"
+        child_intent = intent.model_copy(
+            update={
+                "intent_id": f"{intent.intent_id}{suffix}",
+                "quantity": quantity,
+                "idempotency_key": f"{intent.idempotency_key}{suffix}",
+                "execution_attempt_id": None,
+            }
+        )
+        child_leg_intent = None
+        if leg_intent is not None:
+            child_leg_intent = leg_intent.model_copy(
+                update={
+                    "leg_intent_id": f"{leg_intent.leg_intent_id}{suffix}",
+                    "quantity": quantity,
+                    "idempotency_key": f"{leg_intent.idempotency_key}{suffix}",
+                    "execution_attempt_id": None,
+                }
+            )
+        return child_intent, child_leg_intent
+
+    def _derived_child_client_order_id(self, intent: OrderIntent) -> str:
+        preview_client_order_id_fn = getattr(self.adapter, "preview_client_order_id", None)
+        return (
+            preview_client_order_id_fn(intent)
+            if callable(preview_client_order_id_fn)
+            else None
+        ) or intent.idempotency_key or new_id("clord")
+
+    def _parent_exit_execution_intent(self, *, intent: OrderIntent):
+        if self.exit_execution_repo is None:
+            return None
+        execution_chain_id = str(intent.execution_chain_id or intent.intent_id).strip()
+        if not execution_chain_id:
+            return None
+        return self.exit_execution_repo.get_exit_execution_intent_by_execution_chain(execution_chain_id)
+
     async def sync_exchange_state(self) -> None:
         order_states, fills = await self.adapter.sync(self._sync_candidates())
         persisted_states: list[OrderState] = []
@@ -555,11 +849,18 @@ class OrderManager:
             await self._persist_fill(fill)
         for order_state in persisted_states:
             self._finalize_obligation(order_state=order_state)
+        self._refresh_exit_execution_intents()
+        await self._resume_exit_execution_after_sync()
 
     def _sync_candidates(self) -> list[OrderState]:
+        open_states = self.execution_repo.open_order_states()
+        prioritized_open_states = [
+            *[state for state in open_states if self._is_unknown_write_state(state)],
+            *[state for state in open_states if not self._is_unknown_write_state(state)],
+        ]
         candidates: dict[str, OrderState] = {
             state.client_order_id: state
-            for state in self.execution_repo.open_order_states()
+            for state in prioritized_open_states
         }
         for state in self.execution_repo.recent_order_states(
             limit=self._FILL_BACKFILL_RECENT_LIMIT,
@@ -571,6 +872,153 @@ class OrderManager:
                 continue
             candidates.setdefault(state.client_order_id, state)
         return list(candidates.values())
+
+    @staticmethod
+    def _is_unknown_write_state(state: OrderState) -> bool:
+        return is_unknown_write_state(state)
+
+    def _refresh_exit_execution_intents(self) -> None:
+        if self.exit_execution_repo is None:
+            return
+        refresh_exit_execution_intents(
+            execution_repo=self.execution_repo,
+            exit_execution_repo=self.exit_execution_repo,
+            settings=self.settings,
+        )
+
+    async def _resume_exit_execution_after_sync(self) -> None:
+        if self.exit_execution_repo is None:
+            return
+        for parent in sorted(
+            self.exit_execution_repo.list_exit_execution_intents(),
+            key=lambda item: (item.updated_at, item.parent_intent_id),
+        ):
+            if resume_block_reason(parent) is not None:
+                continue
+            await self._resume_exit_execution_parent(parent=parent)
+
+    async def _resume_exit_execution_parent(self, *, parent) -> OrderState | None:
+        template = dispatch_template_from_parent(parent)
+        if template is None:
+            return None
+        parent = self.exit_execution_repo.get_exit_execution_intent(parent.parent_intent_id) or parent
+        if resume_block_reason(parent) is not None:
+            return None
+        child_refs = self.exit_execution_repo.child_refs_for_parent(parent_intent_id=parent.parent_intent_id)
+        next_slice_index = len(child_refs) + 1
+        if next_slice_index > self._EXIT_SPLIT_MAX_CHILDREN:
+            return None
+        intent = OrderIntent.model_validate(
+            {
+                **template,
+                "quantity": str(parent.remaining_dispatchable_quantity),
+            }
+        )
+        split_limit = await self._risk_reducing_max_order_quantity_limit(intent=intent)
+        if split_limit is None or split_limit <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+            self._save_exit_execution_parent(
+                record_resume_issue(
+                    parent,
+                    kind="resume_limit_lookup_failed",
+                    error="max_size_limit_unavailable",
+                )
+            )
+            log_event(
+                self.logger,
+                "serial_exit_split_resume_skipped",
+                level="warning",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    execution_chain_id=intent.execution_chain_id,
+                    parent_intent_id=parent.parent_intent_id,
+                    reason="missing_or_invalid_max_size_limit",
+                ),
+            )
+            return None
+        parent = self._save_exit_execution_parent(clear_resume_issue(parent))
+        log_event(
+            self.logger,
+            "serial_exit_split_resume",
+            **correlation_fields(
+                decision_id=intent.decision_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                execution_chain_id=intent.execution_chain_id,
+                parent_intent_id=parent.parent_intent_id,
+                next_slice_index=next_slice_index,
+                remaining_dispatchable_quantity=parent.remaining_dispatchable_quantity,
+                max_size_limit=split_limit,
+            ),
+        )
+        return await self._execute_serial_exit_split(
+            intent=intent,
+            client_order_id=intent.idempotency_key,
+            leg_intent=None,
+            split_limit=split_limit,
+            start_slice_index=next_slice_index,
+        )
+
+    def _unknown_write_submit_block(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+    ) -> OrderState | None:
+        blocker = self._blocking_unknown_write_state(intent=intent, client_order_id=client_order_id)
+        if blocker is None:
+            return None
+        operation = unknown_write_operation(blocker) or "submit"
+        if blocker.execution_chain_id and intent.execution_chain_id and blocker.execution_chain_id == intent.execution_chain_id:
+            execution_error = (
+                f"unknown_{operation}_requires_reconciliation_for_execution_chain:{blocker.client_order_id}"
+            )
+            submission_mode = "unknown_write_duplicate_submit_blocked"
+        elif blocker.intent_id == intent.intent_id:
+            execution_error = f"unknown_{operation}_requires_reconciliation_for_intent:{blocker.client_order_id}"
+            submission_mode = "unknown_write_duplicate_submit_blocked"
+        elif blocker.client_order_id == client_order_id:
+            execution_error = (
+                f"unknown_{operation}_requires_reconciliation_for_client_order_id:{blocker.client_order_id}"
+            )
+            submission_mode = "unknown_write_duplicate_submit_blocked"
+        else:
+            execution_error = f"unknown_{operation}_blocks_new_risk_actions_for_symbol:{blocker.client_order_id}"
+            submission_mode = "unknown_write_symbol_risk_blocked"
+        return self._blocked_order_state_from_intent(
+            intent=intent,
+            client_order_id=client_order_id,
+            submission_mode=submission_mode,
+            execution_error=execution_error,
+        )
+
+    def _blocking_unknown_write_state(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+    ) -> OrderState | None:
+        unknown_states = [
+            state
+            for state in self.execution_repo.order_states()
+            if self._is_unknown_write_state(state) and not self.order_state_machine.is_terminal(state.status)
+        ]
+        if not unknown_states:
+            return None
+        for state in unknown_states:
+            if state.execution_chain_id and intent.execution_chain_id and state.execution_chain_id == intent.execution_chain_id:
+                return state
+            if state.intent_id == intent.intent_id:
+                return state
+            if state.client_order_id == client_order_id:
+                return state
+        if is_risk_reducing_order_intent(intent):
+            return None
+        for state in unknown_states:
+            if state.symbol == intent.symbol and blocks_new_risk_actions(state):
+                return state
+        return None
 
     async def cancel_order(self, client_order_id: str) -> OrderState:
         current = self.resolve_order_state_for_control(client_order_id)
@@ -596,6 +1044,68 @@ class OrderManager:
             )
             return persisted_pending
         return await self._execute_cancel_from_state(persisted_pending)
+
+    def request_cancel_exit_intent(self, parent_intent_id: str):
+        if self.exit_execution_repo is None:
+            raise KeyError("exit_execution_repo_not_configured")
+        parent = self.exit_execution_repo.get_exit_execution_intent(parent_intent_id)
+        if parent is None:
+            raise KeyError(f"exit_execution_intent_not_found parent_intent_id={parent_intent_id}")
+        updated_parent = request_cancel_exit_execution_intent(parent)
+        recomputed = recompute_exit_execution_intent(
+            parent_intent=updated_parent,
+            child_refs=self.exit_execution_repo.child_refs_for_parent(parent_intent_id=parent_intent_id),
+        )
+        return self.exit_execution_repo.save_exit_execution_intent(recomputed)
+
+    async def retry_exit_execution_limit_lookup(self, parent_intent_id: str):
+        if self.exit_execution_repo is None:
+            raise KeyError("exit_execution_repo_not_configured")
+        self._refresh_exit_execution_intents()
+        parent = self.exit_execution_repo.get_exit_execution_intent(parent_intent_id)
+        if parent is None:
+            raise KeyError(f"exit_execution_intent_not_found parent_intent_id={parent_intent_id}")
+        block_reason = resume_block_reason(parent)
+        if block_reason is not None:
+            raise ValueError(f"exit_execution_resume_blocked:{block_reason}")
+        dispatched_state = await self._resume_exit_execution_parent(parent=parent)
+        refreshed_parent = self.exit_execution_repo.get_exit_execution_intent(parent_intent_id) or parent
+        return refreshed_parent, dispatched_state
+
+    async def safe_cancel_exit_intent(self, parent_intent_id: str):
+        if self.exit_execution_repo is None:
+            raise KeyError("exit_execution_repo_not_configured")
+        self._refresh_exit_execution_intents()
+        parent = self.request_cancel_exit_intent(parent_intent_id)
+        child_results: list[OrderState] = []
+        skipped_children: list[dict[str, str]] = []
+        seen_child_ids: set[str] = set()
+        for child_ref in self.exit_execution_repo.child_refs_for_parent(parent_intent_id=parent_intent_id):
+            client_order_id = str(child_ref.client_order_id or "").strip()
+            if not client_order_id or client_order_id in seen_child_ids:
+                continue
+            seen_child_ids.add(client_order_id)
+            current = self.resolve_order_state_for_control(client_order_id)
+            if current is None:
+                skipped_children.append(
+                    {
+                        "client_order_id": client_order_id,
+                        "reason": "order_state_not_found",
+                    }
+                )
+                continue
+            if self.order_state_machine.is_terminal(current.status):
+                skipped_children.append(
+                    {
+                        "client_order_id": client_order_id,
+                        "reason": "already_terminal",
+                        "status": current.status,
+                    }
+                )
+                continue
+            child_results.append(await self.cancel_order(client_order_id))
+        refreshed_parent = self.exit_execution_repo.get_exit_execution_intent(parent_intent_id) or parent
+        return refreshed_parent, child_results, skipped_children
 
     async def _execute_cancel_from_state(self, order_state: OrderState) -> OrderState:
         current = order_state
@@ -676,6 +1186,7 @@ class OrderManager:
             )
             self._shadow_write_order_state(order_state=persisted, intent=intent)
             self._sync_strategy_bundle_status(order_state=persisted)
+            self._sync_exit_execution_intent(order_state=persisted, intent=intent)
             return persisted
         previous = self.execution_repo.get_order_state(order_state.client_order_id)
         persisted = self.execution_repo.save_order_state(order_state)
@@ -702,7 +1213,79 @@ class OrderManager:
         await self._publish_execution_error_summary(previous=previous, persisted=persisted)
         self._shadow_write_order_state(order_state=persisted, intent=intent)
         self._sync_strategy_bundle_status(order_state=persisted)
+        self._sync_exit_execution_intent(order_state=persisted, intent=intent)
         return persisted
+
+    def _sync_exit_execution_intent(
+        self,
+        *,
+        order_state: OrderState,
+        intent: OrderIntent | None = None,
+    ) -> None:
+        if self.exit_execution_repo is None:
+            return
+        parent = self._ensure_exit_execution_intent(order_state=order_state, intent=intent)
+        if parent is None:
+            return
+        child_ref = child_exit_order_ref_from_order_state(
+            parent_intent_id=parent.parent_intent_id,
+            order_state=order_state,
+            settings=self.settings,
+        )
+        self.exit_execution_repo.save_child_exit_order_ref(child_ref)
+        recomputed = recompute_exit_execution_intent(
+            parent_intent=parent,
+            child_refs=self.exit_execution_repo.child_refs_for_parent(parent_intent_id=parent.parent_intent_id),
+        )
+        self.exit_execution_repo.save_exit_execution_intent(recomputed)
+
+    def _ensure_exit_execution_intent(
+        self,
+        *,
+        order_state: OrderState,
+        intent: OrderIntent | None = None,
+    ):
+        if self.exit_execution_repo is None:
+            return None
+        existing_parent_id = self.exit_execution_repo.parent_intent_id_for_child(
+            client_order_id=order_state.client_order_id,
+        )
+        if existing_parent_id is not None:
+            return self.exit_execution_repo.get_exit_execution_intent(existing_parent_id)
+        execution_chain_id = str(
+            order_state.execution_chain_id
+            or (intent.execution_chain_id if intent is not None else "")
+            or order_state.intent_id
+        )
+        if execution_chain_id:
+            existing = self.exit_execution_repo.get_exit_execution_intent_by_execution_chain(execution_chain_id)
+            if existing is not None:
+                if intent is not None and dispatch_template_from_parent(existing) is None:
+                    return self._save_exit_execution_intent_with_template(parent=existing, intent=intent)
+                return existing
+        if intent is not None and is_risk_reducing_order_intent(intent):
+            parent = create_exit_execution_intent_from_order_intent(intent)
+            return self._save_exit_execution_intent_with_template(parent=parent, intent=intent)
+        if is_risk_reducing_order_state(order_state):
+            parent = create_exit_execution_intent_from_order_state(order_state)
+            return self.exit_execution_repo.save_exit_execution_intent(parent)
+        return None
+
+    def _save_exit_execution_intent_with_template(self, *, parent, intent: OrderIntent):
+        if self.exit_execution_repo is None:
+            return parent
+        if ":slice:" in str(intent.intent_id or ""):
+            return self._save_exit_execution_parent(parent)
+        metadata = dict(parent.metadata)
+        metadata["dispatch_template"] = intent.model_dump(mode="json")
+        metadata["dispatch_template_version"] = 1
+        saved_parent = parent.model_copy(update={"metadata": metadata})
+        return self._save_exit_execution_parent(saved_parent)
+
+    def _save_exit_execution_parent(self, parent):
+        if self.exit_execution_repo is None:
+            return parent
+        return self.exit_execution_repo.save_exit_execution_intent(parent)
 
     def _sync_strategy_bundle_status(self, *, order_state: OrderState) -> None:
         if self.strategy_runtime_repo is None:

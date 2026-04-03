@@ -65,8 +65,28 @@ class RecoveryQueryFacade:
         if not self.owner._ai_history_visible():
             latest_ai_degradation = None
             latest_ai_shadow_evaluation = None
+        latest_state_snapshot_payload = (
+            latest_state_snapshot.model_dump(mode="json")
+            if latest_state_snapshot is not None
+            else None
+        )
+        if isinstance(latest_state_snapshot_payload, dict):
+            details_json = latest_state_snapshot_payload.get("details_json")
+            if isinstance(details_json, dict) and str(details_json.get("source") or "").strip() == "startup_exit_execution_review":
+                review_items = details_json.get("review_items")
+                if isinstance(review_items, list):
+                    details_json["review_items"] = self.owner._enrich_exit_execution_review_items(
+                        [dict(item) for item in review_items if isinstance(item, dict)]
+                    )
+                    latest_state_snapshot_payload["details_json"] = details_json
+
+        base_payload = base.model_dump(mode="json")
+        base_payload["independent_recovery_snapshots"] = self.owner._independent_recovery_snapshots_view(
+            base_payload.get("independent_recovery_snapshots") or []
+        )
+
         return {
-            **base.model_dump(mode="json"),
+            **base_payload,
             "last_rebaseline_action": latest_rebaseline_action,
             "last_resume_action": latest_resume_action,
             "latest_account_baseline": latest_baseline,
@@ -80,17 +100,15 @@ class RecoveryQueryFacade:
                 if latest_exchange_ack_watermark is not None
                 else None
             ),
-            "latest_state_snapshot": (
-                latest_state_snapshot.model_dump(mode="json")
-                if latest_state_snapshot is not None
-                else None
-            ),
+            "latest_state_snapshot": latest_state_snapshot_payload,
             "latest_reconciliation": (
                 latest_reconciliation.model_dump(mode="json")
                 if latest_reconciliation is not None
                 else None
             ),
             "latest_reconciliation_summary": self.owner._reconciliation_mismatch_summary(latest_reconciliation),
+            "exit_execution_review_items": self.owner._exit_execution_review_items(),
+            "exit_execution_action_history": self.owner._exit_execution_action_history(),
             "latest_ai_degradation": self.owner.payload(latest_ai_degradation),
             "latest_ai_shadow_evaluation": self.owner.payload(latest_ai_shadow_evaluation),
             "ai_runtime": self.owner.ai_runtime(),

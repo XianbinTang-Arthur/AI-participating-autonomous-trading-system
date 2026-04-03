@@ -9,6 +9,11 @@ from typing import TYPE_CHECKING, Literal
 from aats.schemas.decision import HedgeOverlayDecision
 from aats.schemas.strategy_runtime import StrategyLegIntent
 
+from .versioning import (
+    INDEPENDENT_SCORE_STABILITY_SEMANTICS_VERSION,
+    INDEPENDENT_STATE_MACHINE_VERSION,
+)
+
 if TYPE_CHECKING:
     from aats.services.strategy_engines.families.independent_models import IndependentBookRuntimeState
     from .adaptive import IndependentAdaptiveSnapshot
@@ -56,12 +61,38 @@ class ScoreStabilityMetrics:
     support_count: int
     min_score: float
     mean_score: float
-    max_drawdown_bps: float
     stable: bool
     source: Literal["recent_target_history", "current_signal_confirmation"]
+    max_drawdown_bps: float | None = None
     max_score: float | None = None
     score_slope: float | None = None
     score_volatility_bps: float | None = None
+    upward_excursion_bps: float | None = None
+    downward_drawdown_bps: float | None = None
+    max_drawdown_bps_compat_source: Literal["upward_excursion_bps"] | None = None
+    semantics_version: int = INDEPENDENT_SCORE_STABILITY_SEMANTICS_VERSION
+
+    def __post_init__(self) -> None:
+        upward_excursion = (
+            None
+            if self.upward_excursion_bps is None
+            else float(self.upward_excursion_bps)
+        )
+        compat_drawdown = (
+            None
+            if self.max_drawdown_bps is None
+            else float(self.max_drawdown_bps)
+        )
+        if upward_excursion is None and compat_drawdown is not None:
+            object.__setattr__(self, "upward_excursion_bps", compat_drawdown)
+            upward_excursion = compat_drawdown
+        if compat_drawdown is None and upward_excursion is not None:
+            object.__setattr__(self, "max_drawdown_bps", upward_excursion)
+            compat_drawdown = upward_excursion
+        if compat_drawdown is not None and self.max_drawdown_bps_compat_source is None:
+            object.__setattr__(self, "max_drawdown_bps_compat_source", "upward_excursion_bps")
+        if self.semantics_version < INDEPENDENT_SCORE_STABILITY_SEMANTICS_VERSION:
+            object.__setattr__(self, "semantics_version", INDEPENDENT_SCORE_STABILITY_SEMANTICS_VERSION)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,16 +160,18 @@ class IndependentBookDecision:
     eligibility: IndependentEligibilityOutcome | None = None
     sizing: IndependentSizingOutcome | None = None
     book_state: str | None = None
+    guard_state: str | None = None
     holding_phase: str | None = None
     health_state: str | None = None
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     last_transition_reason: str | None = None
     last_transition_at: datetime | None = None
     suspended_until: datetime | None = None
     cooldown_until: datetime | None = None
-    state_version: int = 1
+    state_version: int = INDEPENDENT_STATE_MACHINE_VERSION
     threshold_snapshot: "IndependentAdaptiveSnapshot | None" = None
     state_snapshot: "IndependentStateSnapshot | None" = None
     health_snapshot: "IndependentLegHealthSnapshot | None" = None

@@ -42,6 +42,8 @@ class Task69ProfileControlTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(report["control_summary"]["evidence"]["replay_validations"], 0)
         self.assertTrue(report["control_summary"]["evidence"]["cold_start_active"])
+        self.assertIn("entry_execution_guard", report["control_summary"])
+        self.assertFalse(report["control_summary"]["entry_execution_guard"]["active"])
         self.assertEqual(candidates["execution_degraded_safe"]["offline_replay_score"], 0.0)
         self.assertEqual(candidates["trend_normal"]["offline_replay_score"], 0.0)
         self.assertFalse(candidates["execution_degraded_safe"]["selection_eligible"])

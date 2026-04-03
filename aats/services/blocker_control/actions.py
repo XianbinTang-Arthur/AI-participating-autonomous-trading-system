@@ -19,6 +19,7 @@ class BlockerActionService:
         action_id: str,
         panel_version: str | None,
         blocker: str | None,
+        parent_intent_id: str | None,
         reason: str,
         actor_role: "OperatorRole",
         actor_identity: str | None = None,
@@ -90,6 +91,7 @@ class BlockerActionService:
         elif action_id == "refresh-exchange-state":
             result = await self.owner.refresh_exchange_state(
                 blocker=blocker,
+                parent_intent_id=parent_intent_id,
                 reason=reason,
                 actor_role=actor_role,
                 actor_identity=actor_identity,

@@ -226,6 +226,53 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.market_data_backend, "okx")
         self.assertEqual(settings.default_symbol, "ETH-USDT-SWAP")
 
+    def test_strategy_sleeve_auto_execution_new_key_takes_precedence_over_deprecated_key(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "strategy_sleeve_auto_execution_enabled": True,
+            }
+        )
+
+        self.assertTrue(settings.effective_strategy_sleeve_auto_execution_enabled)
+        self.assertTrue(settings.strategy_sleeve_auto_execution_enabled)
+        self.assertFalse(settings.strategy_sleeve_auto_execution_uses_deprecated_key)
+        self.assertEqual(
+            settings.strategy_sleeve_auto_execution_config_source,
+            "strategy_sleeve_auto_execution_enabled",
+        )
+        self.assertEqual(
+            settings.strategy_sleeve_auto_execution_deprecated_key,
+            "strategy_sleeve_auto_parallel_enabled",
+        )
+        self.assertIsNone(settings.strategy_sleeve_auto_execution_deprecated_value)
+
+    def test_strategy_sleeve_auto_execution_old_key_is_rejected(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_sleeve_auto_parallel_enabled": False,
+                }
+            )
+
+    def test_load_settings_rejects_removed_sleeve_auto_parallel_env_key(self) -> None:
+        with patch.object(AATSSettings, "model_config", {**AATSSettings.model_config, "env_file": None}):
+            with patch.dict(
+                os.environ,
+                {
+                    **_non_aats_environment(),
+                    "AATS_STRATEGY_SLEEVE_AUTO_PARALLEL_ENABLED": "false",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled",
+                ):
+                    load_settings()
+
     def test_spot_cash_runtime_rejects_non_unit_leverage(self) -> None:
         with self.assertRaisesRegex(ValueError, "spot_cash_runtime_requires_unit_leverage"):
             AATSSettings.model_validate(
@@ -355,6 +402,15 @@ class TestAATSSettings(unittest.TestCase):
             AATSSettings.model_validate(
                 {
                     "strategy_hedge_independent_min_score_stability_bps": -1.0,
+                }
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "strategy_hedge_independent_min_score_drawdown_bps_must_be_non_negative",
+        ):
+            AATSSettings.model_validate(
+                {
+                    "strategy_hedge_independent_min_score_drawdown_bps": -1.0,
                 }
             )
         with self.assertRaisesRegex(

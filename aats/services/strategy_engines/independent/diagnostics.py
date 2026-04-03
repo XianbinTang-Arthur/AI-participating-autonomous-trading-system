@@ -12,6 +12,7 @@ from .lifecycle import cooldown_until, last_transition_at
 from .adaptive import IndependentAdaptiveSnapshot
 from .health import IndependentLegHealthSnapshot
 from .models import IndependentBookDecision, IndependentLeg
+from .versioning import INDEPENDENT_STATE_MACHINE_VERSION
 
 
 def runtime_state_from_decision(
@@ -39,6 +40,14 @@ def runtime_state_from_decision(
         rebalance_cooldown_remaining_seconds=decision.rebalance_cooldown_remaining_seconds,
     )
     effective_cooldown = decision.cooldown_until or cooldown
+    effective_guard_state = decision.guard_state
+    if effective_guard_state is None:
+        if decision.suspended_until is not None and decision.suspended_until > context.as_of_ts:
+            effective_guard_state = "suspended"
+        elif health_snapshot is not None and bool(health_snapshot.suspended):
+            effective_guard_state = "suspended"
+        elif effective_cooldown is not None and effective_cooldown > context.as_of_ts:
+            effective_guard_state = "cooldown"
     return StrategyBookRuntimeState(
         leg=decision.leg,
         execution_chain_id=_execution_chain_id(
@@ -60,6 +69,7 @@ def runtime_state_from_decision(
             None if decision.sizing is None else float(decision.sizing.capital_multiplier)
         ),
         book_state=decision.book_state,
+        guard_state=effective_guard_state,
         holding_phase=decision.holding_phase,
         health_state=decision.health_state,
         eligibility_state=(
@@ -89,17 +99,16 @@ def runtime_state_from_decision(
             if decision.state_snapshot is None
             else decision.state_snapshot.prior_book_state
         ),
+        prior_guard_state=(
+            decision.prior_guard_state
+            if decision.state_snapshot is None
+            else decision.state_snapshot.prior_guard_state
+        ),
         last_transition_at=decision.last_transition_at or transition_at,
         last_transition_reason=transition_reason,
-        suspended_until=(
-            decision.suspended_until
-            if decision.suspended_until is not None
-            else effective_cooldown
-            if health_snapshot is not None and bool(health_snapshot.suspended)
-            else None
-        ),
+        suspended_until=decision.suspended_until,
         state_version=(
-            max(int(decision.state_version or 1), 1)
+            max(int(decision.state_version or INDEPENDENT_STATE_MACHINE_VERSION), INDEPENDENT_STATE_MACHINE_VERSION)
             if decision.state_snapshot is None
             else int(decision.state_snapshot.state_version)
         ),
@@ -150,6 +159,7 @@ def runtime_state_from_decision(
                     "scale_in_threshold": threshold_snapshot.scale_in_threshold,
                     "thesis_age_seconds": threshold_snapshot.thesis_age_seconds,
                     "de_risk_net_edge_bps": threshold_snapshot.de_risk_net_edge_bps,
+                    "score_drawdown_bps": threshold_snapshot.score_drawdown_bps,
                     "adaptive_entry_threshold": threshold_snapshot.adaptive_entry_threshold,
                     "adaptive_close_threshold": threshold_snapshot.adaptive_close_threshold,
                     "adaptive_scale_in_threshold": threshold_snapshot.adaptive_scale_in_threshold,
@@ -160,6 +170,7 @@ def runtime_state_from_decision(
                     "effective_scale_in_threshold": threshold_snapshot.effective_scale_in_threshold,
                     "effective_thesis_age_seconds": threshold_snapshot.effective_thesis_age_seconds,
                     "effective_de_risk_net_edge_bps": threshold_snapshot.effective_de_risk_net_edge_bps,
+                    "effective_score_drawdown_bps": threshold_snapshot.effective_score_drawdown_bps,
                     "capital_multiplier": threshold_snapshot.capital_multiplier,
                     "confidence_multiplier": threshold_snapshot.confidence_multiplier,
                     "volatility_multiplier": threshold_snapshot.volatility_multiplier,
@@ -209,9 +220,12 @@ def legacy_runtime_state_snapshot(
         execution_chain_id=runtime_state.execution_chain_id,
         thesis_started_at=runtime_state.thesis_started_at,
         thesis_age_seconds=runtime_state.thesis_age_seconds,
+        book_state=runtime_state.book_state,
+        holding_phase=runtime_state.holding_phase,
         current_scale_in_count=runtime_state.current_scale_in_count,
         current_de_risk_count=runtime_state.current_de_risk_count,
         prior_book_state=runtime_state.prior_book_state,
+        prior_guard_state=runtime_state.prior_guard_state,
         last_transition_at=runtime_state.last_transition_at,
         last_transition_reason=runtime_state.last_transition_reason,
         suspended_until=runtime_state.suspended_until,
@@ -229,6 +243,7 @@ def legacy_runtime_state_snapshot(
         reason_codes=tuple(runtime_state.reason_codes),
         blocked_reasons=tuple(runtime_state.blocked_reasons),
         book_action=runtime_state.book_action,
+        guard_state=runtime_state.guard_state,
         close_reason=runtime_state.close_reason,
         policy_reason=runtime_state.policy_reason,
         execution_policy_urgency=runtime_state.execution_policy_urgency,

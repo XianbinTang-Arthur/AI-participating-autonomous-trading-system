@@ -75,6 +75,7 @@ from aats.services.strategy_engines.independent.models import (
 )
 from aats.services.strategy_engines.independent.scoring import (
     compute_candidate_confidence as _candidate_confidence_v2,
+    effective_score_drawdown_threshold_bps as _effective_score_drawdown_threshold_bps,
     compute_raw_book_score as _independent_book_score_v2,
     compute_score_stability as _score_stability_metrics_v2,
     compute_signal_edge_bps as _independent_signal_edge_bps_v2,
@@ -136,6 +137,8 @@ def independent_candidate_from_directional_target(
         "max_acceptable_cost_bps": settings.strategy_hedge_independent_max_acceptable_cost_bps,
         "min_confirm_ticks": settings.strategy_hedge_independent_min_confirm_ticks,
         "min_score_stability_bps": settings.strategy_hedge_independent_min_score_stability_bps,
+        "min_score_drawdown_bps": settings.strategy_hedge_independent_min_score_drawdown_bps,
+        "effective_score_drawdown_threshold_bps": _effective_score_drawdown_threshold_bps(settings=settings),
         "min_liquidity_quality": settings.strategy_hedge_independent_min_liquidity_quality,
         "require_execution_health_ok": settings.strategy_hedge_independent_require_execution_health_ok,
         "max_thesis_age_seconds": settings.strategy_hedge_independent_max_thesis_age_seconds,
@@ -327,10 +330,20 @@ def independent_candidate_from_directional_target(
                 if result.long_book.score_stability_metrics is None
                 else result.long_book.score_stability_metrics.stable
             ),
-            "long_score_stability_max_drawdown_bps": (
+            "long_score_stability_upward_excursion_bps": (
                 None
                 if result.long_book.score_stability_metrics is None
-                else result.long_book.score_stability_metrics.max_drawdown_bps
+                else result.long_book.score_stability_metrics.upward_excursion_bps
+            ),
+            "long_score_stability_downward_drawdown_bps": (
+                None
+                if result.long_book.score_stability_metrics is None
+                else result.long_book.score_stability_metrics.downward_drawdown_bps
+            ),
+            "long_score_stability_semantics_version": (
+                None
+                if result.long_book.score_stability_metrics is None
+                else result.long_book.score_stability_metrics.semantics_version
             ),
             "long_score_stability_source": (
                 None
@@ -340,6 +353,7 @@ def independent_candidate_from_directional_target(
             "long_execution_health_state": result.long_book.execution_health_state,
             "long_health_state": result.long_book.health_state,
             "long_book_state": result.long_book.book_state,
+            "long_guard_state": result.long_book.guard_state,
             "long_holding_phase": result.long_book.holding_phase,
             "long_book_action": result.long_book.book_action,
             "long_close_reason": result.long_book.close_reason,
@@ -407,10 +421,20 @@ def independent_candidate_from_directional_target(
                 if result.short_book.score_stability_metrics is None
                 else result.short_book.score_stability_metrics.stable
             ),
-            "short_score_stability_max_drawdown_bps": (
+            "short_score_stability_upward_excursion_bps": (
                 None
                 if result.short_book.score_stability_metrics is None
-                else result.short_book.score_stability_metrics.max_drawdown_bps
+                else result.short_book.score_stability_metrics.upward_excursion_bps
+            ),
+            "short_score_stability_downward_drawdown_bps": (
+                None
+                if result.short_book.score_stability_metrics is None
+                else result.short_book.score_stability_metrics.downward_drawdown_bps
+            ),
+            "short_score_stability_semantics_version": (
+                None
+                if result.short_book.score_stability_metrics is None
+                else result.short_book.score_stability_metrics.semantics_version
             ),
             "short_score_stability_source": (
                 None
@@ -420,6 +444,7 @@ def independent_candidate_from_directional_target(
             "short_execution_health_state": result.short_book.execution_health_state,
             "short_health_state": result.short_book.health_state,
             "short_book_state": result.short_book.book_state,
+            "short_guard_state": result.short_book.guard_state,
             "short_holding_phase": result.short_book.holding_phase,
             "short_book_action": result.short_book.book_action,
             "short_close_reason": result.short_book.close_reason,
@@ -608,6 +633,7 @@ def _independent_book_expectancy_summary(
                 ),
                 health_state=book.health_state,
                 book_state=book.book_state,
+                guard_state=book.guard_state,
                 holding_phase=book.holding_phase,
                 edge_strength=(
                     None if book.execution_policy is None else book.execution_policy.edge_strength

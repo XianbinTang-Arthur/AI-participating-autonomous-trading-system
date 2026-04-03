@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -11,7 +12,10 @@ import yaml
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.managed_profiles import MANAGED_PROFILE_DERIVED_ENV_KEYS, load_managed_profile_values
 from aats.bootstrap.metrics import MetricsRegistry
-from aats.bootstrap.settings import AATSSettings
+from aats.bootstrap.settings import (
+    AATSSettings,
+    DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY,
+)
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope, parse_payload, publish_model
@@ -84,7 +88,13 @@ from aats.services.operator.runtime_profiles import runtime_profile_resolution
 from aats.services.operator.strategy_profiles import StrategyProfileControlService, seed_strategy_profiles
 from aats.services.projections.ledger_portfolio import LedgerBackedPortfolioService
 from aats.services.recovery_control import ExecutionLedgerRecoveryService, RecoveryReconciliationClassifier
+from aats.services.recovery_control.startup_recovery import (
+    apply_startup_exit_execution_review_overlay,
+    persist_startup_exit_execution_state_snapshot,
+    startup_refresh_exit_execution_truth,
+)
 from aats.services.runtime_scope import latest_matching_snapshot, runtime_state_scope, scoped_portfolio_event
+from aats.services.strategy_engines.sleeve_execution_permission import non_protective_entry_execution_guard
 from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
 from aats.services.strategy_engines.overlay_parent_exposure import overlay_parent_exposure_record
 from aats.services.strategy_engines.sleeve_pnl_projection import SleevePnLProjectionService
@@ -102,6 +112,7 @@ from aats.storage.audit_repo_postgres import PostgresAuditRepository
 from aats.storage.base import (
     AuditRepository,
     EventStore,
+    ExitExecutionRepository,
     FillOutcomeRepository,
     FundingFeeRepository,
     SleevePnLRepository,
@@ -113,6 +124,8 @@ from aats.storage.base import (
     StrategyRuntimeRepository,
 )
 from aats.storage.event_store import InMemoryEventStore
+from aats.storage.exit_execution_repo import InMemoryExitExecutionRepository
+from aats.storage.exit_execution_repo_postgres import PostgresExitExecutionRepository
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.execution_repo_converged_postgres import ConvergedPostgresExecutionRepository
@@ -230,6 +243,10 @@ def resilient_subscription_handler(
 
 
 def load_settings() -> AATSSettings:
+    if "AATS_STRATEGY_SLEEVE_AUTO_PARALLEL_ENABLED" in os.environ:
+        raise ValueError(
+            "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled"
+        )
     sources, init_kwargs = AATSSettings._settings_init_sources()
     explicit_overrides = AATSSettings._settings_build_values(sources, init_kwargs)
     env_template_profile = explicit_overrides.get("env_template_profile")
@@ -250,6 +267,11 @@ def load_settings() -> AATSSettings:
         source_values = load_yaml_config(environment, config_profile)
     else:
         source_values = load_managed_profile_values(env_template_profile)
+    for container in (source_values, explicit_overrides):
+        if DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY in container:
+            raise ValueError(
+                "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled"
+            )
     if env_template_profile is not None:
         derived_field_names = {
             key.removeprefix("AATS_").lower()
@@ -289,6 +311,7 @@ class StorageBackends:
     strategy_profile_repo: StrategyProfileRepository
     strategy_sleeve_repo: StrategySleeveRepository
     strategy_runtime_repo: StrategyRuntimeRepository
+    exit_execution_repo: ExitExecutionRepository | None = None
     execution_order_repo: PostgresExecutionOrderRepository | None = None
     execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
     execution_command_repo: PostgresExecutionCommandRepository | None = None
@@ -361,6 +384,9 @@ class ApplicationRuntime:
     strategy_sleeve_repo: StrategySleeveRepository
     strategy_runtime_repo: StrategyRuntimeRepository
     recovery_status: RecoveryStatus
+    sleeve_auto_execution_config_source: str = "strategy_sleeve_auto_execution_enabled"
+    sleeve_auto_execution_uses_deprecated_key: bool = False
+    exit_execution_repo: ExitExecutionRepository | None = None
     execution_order_repo: PostgresExecutionOrderRepository | None = None
     execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
     execution_command_repo: PostgresExecutionCommandRepository | None = None
@@ -836,6 +862,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             fill_outcome_repo=InMemoryFillOutcomeRepository(),
             sleeve_pnl_repo=InMemorySleevePnLRepository(),
             execution_repo=InMemoryExecutionRepository(),
+            exit_execution_repo=InMemoryExitExecutionRepository(),
             obligation_repo=InMemoryExecutionObligationRepository(),
             outbox_repo=None,
             reconciliation_repo=InMemoryReconciliationRepository(),
@@ -951,6 +978,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
         fill_outcome_repo=PostgresFillOutcomeRepository(database_runtime.session_factory),
         sleeve_pnl_repo=sleeve_pnl_repo,
         execution_repo=execution_repo,
+        exit_execution_repo=PostgresExitExecutionRepository(database_runtime.session_factory),
         obligation_repo=PostgresExecutionObligationRepository(database_runtime.session_factory),
         outbox_repo=PostgresOutboxRepository(database_runtime.session_factory),
         reconciliation_repo=PostgresReconciliationRepository(database_runtime.session_factory),
@@ -2351,6 +2379,17 @@ async def build_runtime(
         _validate_runtime_settings(runtime_settings, runtime_layering)
         _validate_operator_auth_settings(runtime_settings, storage)
         seed_strategy_profiles(settings=runtime_settings, repo=storage.strategy_profile_repo)
+        entry_execution_guard = non_protective_entry_execution_guard(runtime_settings)
+        if entry_execution_guard.get("active"):
+            log_event(
+                get_logger("aats.bootstrap"),
+                "startup_entry_execution_guard_active",
+                level="warning",
+                warning_code=entry_execution_guard.get("warning_code"),
+                status=entry_execution_guard.get("status"),
+                summary=entry_execution_guard.get("summary"),
+                operator_summary=entry_execution_guard.get("operator_summary"),
+            )
     except Exception:
         if storage.database_runtime is not None:
             storage.database_runtime.dispose()
@@ -2608,6 +2647,7 @@ async def build_runtime(
         bus=bus,
         adapter=execution_adapter,
         execution_repo=storage.execution_repo,
+        exit_execution_repo=storage.exit_execution_repo,
         obligation_service=obligation_service,
         execution_outbox_publisher=execution_outbox_publisher,
         persistent_order_service=execution_order_service,
@@ -2743,6 +2783,7 @@ async def build_runtime(
             snapshot_builder=snapshot_builder,
         ),
         price_provider=market_gateway.latest_price,
+        exit_execution_repo=storage.exit_execution_repo,
         bootstrap_portfolio_from_exchange=bootstrap_from_exchange,
         recovery_policy=runtime_layering.recovery_policy,
         metrics=metrics,
@@ -2890,6 +2931,34 @@ async def build_runtime(
     else:
         recovery_status = recovery_artifacts.status
 
+    if storage.database_runtime is not None and storage.exit_execution_repo is not None:
+        refreshed_exit_execution, startup_refresh_notes = startup_refresh_exit_execution_truth(
+            settings=runtime_settings,
+            execution_repo=storage.execution_repo,
+            exit_execution_repo=storage.exit_execution_repo,
+            scope=state_scope,
+        )
+        recovery_status = apply_startup_exit_execution_review_overlay(
+            base_status=recovery_status,
+            parent_intents=refreshed_exit_execution,
+            refresh_notes=startup_refresh_notes,
+        )
+        if startup_refresh_notes:
+            recovery_status = recovery_status.model_copy(
+                update={"notes": list(dict.fromkeys([*recovery_status.notes, *startup_refresh_notes]))}
+            )
+        startup_snapshot_notes = persist_startup_exit_execution_state_snapshot(
+            reconciliation_repo=storage.reconciliation_repo,
+            scope=state_scope,
+            status=recovery_status,
+            parent_intents=refreshed_exit_execution,
+            refresh_notes=startup_refresh_notes,
+        )
+        if startup_snapshot_notes:
+            recovery_status = recovery_status.model_copy(
+                update={"notes": list(dict.fromkeys([*recovery_status.notes, *startup_snapshot_notes]))}
+            )
+
     if (
         funding_fee_sync_posted_count > 0
         and hasattr(portfolio_service, "bootstrap_snapshot")
@@ -2913,6 +2982,8 @@ async def build_runtime(
     runtime = ApplicationRuntime(
         started_at=utc_now(),
         settings=runtime_settings,
+        sleeve_auto_execution_config_source=base_settings.strategy_sleeve_auto_execution_config_source,
+        sleeve_auto_execution_uses_deprecated_key=base_settings.strategy_sleeve_auto_execution_uses_deprecated_key,
         runtime_profile_resolution=profile_resolution,
         runtime_layering=runtime_layering,
         runtime_profile=runtime_layering.runtime_profile,
@@ -2946,6 +3017,7 @@ async def build_runtime(
         fill_outcome_repo=storage.fill_outcome_repo,
         sleeve_pnl_repo=storage.sleeve_pnl_repo,
         execution_repo=storage.execution_repo,
+        exit_execution_repo=storage.exit_execution_repo,
         obligation_repo=storage.obligation_repo,
         reconciliation_repo=storage.reconciliation_repo,
         operator_repo=storage.operator_repo,

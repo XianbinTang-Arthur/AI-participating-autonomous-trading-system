@@ -66,7 +66,8 @@ class TestIndependentLegSuspensionScenario(unittest.TestCase):
         )
 
         self.assertEqual(result.book_action, "blocked")
-        self.assertEqual(result.book_state, "suspended")
+        self.assertEqual(result.book_state, "flat")
+        self.assertEqual(result.guard_state, "suspended")
         self.assertIn("independent_long_book_trial_guard_active", result.blocked_reasons)
 
 

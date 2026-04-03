@@ -4,12 +4,14 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from decimal import Decimal
 
+from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangeOpenOrder
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationFinding, ReconciliationReport
 from aats.services.execution_engine.okx_bills import explain_okx_bills_for_reconciliation
+from aats.services.execution_engine.order_truth import unknown_write_state
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, to_decimal
 from aats.services.portfolio_service.instrument_states import (
@@ -38,6 +40,12 @@ class DerivativesUnknownStateAssessment:
 
 
 class StateComparator:
+    def __init__(self, *, settings: AATSSettings | None = None) -> None:
+        self.settings = settings
+
+    def configure(self, *, settings: AATSSettings) -> None:
+        self.settings = settings
+
     def compare(
         self,
         *,
@@ -114,6 +122,11 @@ class StateComparator:
             position_diff=position_diff,
             exchange_snapshot=exchange_snapshot,
         )
+        unknown_write_details = self._unknown_write_details(order_states=order_states)
+        combined_unknown_state_details = [
+            *derivatives_assessment.unknown_state_details,
+            *unknown_write_details,
+        ]
         mismatch_categories = self._dedupe_codes(
             [*mismatch_categories, *derivatives_assessment.mismatch_categories]
         )
@@ -145,6 +158,7 @@ class StateComparator:
             mismatch_reasons=mismatch_reasons,
             exchange_bills_summary=exchange_bills_summary or {},
             derivatives_assessment=derivatives_assessment,
+            unknown_write_details=unknown_write_details,
         )
         severity = self._severity(
             findings=findings,
@@ -186,6 +200,7 @@ class StateComparator:
         )
         recommended_operator_action = (
             derivatives_assessment.preferred_operator_action
+            or self._unknown_write_operator_action(details=unknown_write_details)
             or self._recommended_operator_action(
                 severity=severity,
                 mismatch_categories=mismatch_categories,
@@ -220,7 +235,7 @@ class StateComparator:
             review_required=review_required,
             only_reduce_required=derivatives_assessment.only_reduce_required,
             only_reduce_reasons=derivatives_assessment.only_reduce_reasons,
-            unknown_state_details=derivatives_assessment.unknown_state_details,
+            unknown_state_details=combined_unknown_state_details,
             recommended_operator_action=recommended_operator_action,
             remediation_action=remediation_action,
             halt_required=halt_required,
@@ -456,6 +471,47 @@ class StateComparator:
         if side in {"long", "short"}:
             return side
         return None
+
+    def _unknown_write_details(self, *, order_states: list[OrderState]) -> list[dict[str, object]]:
+        now = utc_now()
+        details: list[dict[str, object]] = []
+        for order in order_states:
+            state = unknown_write_state(order, now=now, settings=self.settings)
+            if state is None:
+                continue
+            details.append(
+                {
+                    "kind": f"unknown_{state.operation}_unresolved",
+                    "symbol": order.symbol,
+                    "client_order_id": order.client_order_id,
+                    "exchange_order_id": order.exchange_order_id,
+                    "intent_id": order.intent_id,
+                    "execution_chain_id": order.execution_chain_id,
+                    "status": order.status,
+                    "unknown_write_operation": state.operation,
+                    "exchange_truth_pending": state.exchange_truth_pending,
+                    "operator_review_required": state.review_required,
+                    "review_after_seconds": round(state.review_after_seconds, 6),
+                    "age_seconds": round(state.age_seconds, 6),
+                    "submitted_ts": order.submitted_ts.isoformat() if order.submitted_ts is not None else None,
+                    "cancellation_requested_ts": (
+                        order.cancellation_requested_ts.isoformat()
+                        if order.cancellation_requested_ts is not None
+                        else None
+                    ),
+                    "last_update_ts": order.last_update_ts.isoformat() if order.last_update_ts is not None else None,
+                    "execution_error": order.execution_error,
+                }
+            )
+        return details
+
+    @staticmethod
+    def _unknown_write_operator_action(*, details: list[dict[str, object]]) -> str | None:
+        if not details:
+            return None
+        if any(bool(detail.get("operator_review_required")) for detail in details):
+            return "review_unknown_write_and_refresh_exchange_state"
+        return "refresh_exchange_state_for_unknown_write"
 
     @staticmethod
     def _position_key_for_order_state(order: OrderState) -> str:
@@ -1205,6 +1261,7 @@ class StateComparator:
         mismatch_reasons: list[str],
         exchange_bills_summary: dict[str, object],
         derivatives_assessment: DerivativesUnknownStateAssessment,
+        unknown_write_details: list[dict[str, object]],
     ) -> list[ReconciliationFinding]:
         findings: list[ReconciliationFinding] = []
         primary_symbol = next(iter(allowed_symbols or []), None)
@@ -1494,6 +1551,28 @@ class StateComparator:
                 reason_code="derivatives_exchange_position_not_replayed_locally",
                 only_reduce_required=derivatives_assessment.only_reduce_required,
                 blocks_resume=True,
+            )
+
+        for detail in unknown_write_details:
+            kind = str(detail.get("kind") or "")
+            if kind not in {"unknown_submit_unresolved", "unknown_cancel_unresolved"}:
+                continue
+            review_required = bool(detail.get("operator_review_required"))
+            add_finding(
+                layer="structural",
+                finding_type=kind,
+                severity_class="review" if review_required else "soft",
+                reason_code=(
+                    "unknown_submit_requires_exchange_reconciliation"
+                    if kind == "unknown_submit_unresolved"
+                    else "unknown_cancel_requires_exchange_reconciliation"
+                ),
+                scope_kind="order",
+                scope_ref=str(detail.get("client_order_id") or detail.get("exchange_order_id") or ""),
+                primary_symbol_override=str(detail.get("symbol") or primary_symbol or ""),
+                review_required=review_required,
+                blocks_resume=review_required,
+                details_json={str(key): value for key, value in detail.items()},
             )
 
         for detail in derivatives_assessment.unknown_state_details:

@@ -63,6 +63,9 @@ SmartArbitrageFeeSourceMode = Literal["configured", "account_schedule"]
 SmartArbitrageFundingSourceMode = Literal["configured", "account_proxy"]
 SmartArbitrageBorrowSourceMode = Literal["configured", "apr_window_model"]
 
+PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY = "strategy_sleeve_auto_execution_enabled"
+DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY = "strategy_sleeve_auto_parallel_enabled"
+
 _PLACEHOLDER_TOKENS = (
     "REPLACE_WITH_",
     "CHANGE_ME",
@@ -203,6 +206,8 @@ class AATSSettings(BaseSettings):
     okx_market_rest_fallback_poll_interval_seconds: float = 5.0
     okx_account_refresh_interval_seconds: float = 15.0
     okx_execution_sync_interval_seconds: float = 5.0
+    execution_unknown_submit_review_after_seconds: float = 30.0
+    execution_unknown_cancel_review_after_seconds: float = 300.0
     execution_command_flow_enabled: bool = False
     execution_command_poll_interval_seconds: float = 1.0
     execution_command_sent_retry_after_seconds: float = 30.0
@@ -271,7 +276,7 @@ class AATSSettings(BaseSettings):
     strategy_family_protective_live_execution_enabled: bool = False
     strategy_family_opportunistic_live_execution_enabled: bool = False
     strategy_family_independent_live_execution_enabled: bool = False
-    strategy_sleeve_auto_parallel_enabled: bool = True
+    strategy_sleeve_auto_execution_enabled: bool = True
     strategy_sleeve_auto_min_budget_multiplier: float = 0.35
     strategy_sleeve_auto_reconciliation_contraction_multiplier: float = 0.50
     strategy_sleeve_auto_soft_loss_usdt: float = 10.0
@@ -410,6 +415,7 @@ class AATSSettings(BaseSettings):
     strategy_hedge_independent_passive_first_enabled: bool = False
     strategy_hedge_independent_min_confirm_ticks: int = 2
     strategy_hedge_independent_min_score_stability_bps: float = 2.0
+    strategy_hedge_independent_min_score_drawdown_bps: float | None = None
     strategy_hedge_independent_min_liquidity_quality: float = 0.55
     strategy_hedge_independent_require_execution_health_ok: bool = True
     strategy_hedge_independent_max_thesis_age_seconds: int = 1_800
@@ -515,11 +521,24 @@ class AATSSettings(BaseSettings):
                 normalized.append(text)
         return tuple(normalized)
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_sleeve_auto_parallel_key(cls, value: Any) -> Any:
+        if isinstance(value, dict) and DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY in value:
+            raise ValueError(
+                "strategy_sleeve_auto_parallel_enabled_has_been_removed_use_strategy_sleeve_auto_execution_enabled"
+            )
+        return value
+
     @model_validator(mode="after")
     def validate_supported_runtime_overrides(self) -> "AATSSettings":
         # The current market/feature pipeline is still built around fixed
         # 15m + 1h snapshots. Exposing broader timeframe configurability in
         # env/YAML without enforcing this creates misleading configs.
+        explicit_new_sleeve_auto_key = PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY in self.model_fields_set
+        self.strategy_sleeve_auto_execution_enabled = bool(self.strategy_sleeve_auto_execution_enabled)
+        if not explicit_new_sleeve_auto_key:
+            self.__pydantic_fields_set__.discard(PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY)
         if "strategy_hedge_independent_long_close_threshold" not in self.model_fields_set:
             self.strategy_hedge_independent_long_close_threshold = float(
                 self.strategy_hedge_independent_long_entry_threshold
@@ -619,6 +638,11 @@ class AATSSettings(BaseSettings):
             raise ValueError("strategy_hedge_independent_min_confirm_ticks_must_be_positive")
         if float(self.strategy_hedge_independent_min_score_stability_bps) < 0.0:
             raise ValueError("strategy_hedge_independent_min_score_stability_bps_must_be_non_negative")
+        if (
+            self.strategy_hedge_independent_min_score_drawdown_bps is not None
+            and float(self.strategy_hedge_independent_min_score_drawdown_bps) < 0.0
+        ):
+            raise ValueError("strategy_hedge_independent_min_score_drawdown_bps_must_be_non_negative")
         if not 0.0 <= float(self.strategy_hedge_independent_min_liquidity_quality) <= 1.0:
             raise ValueError("strategy_hedge_independent_min_liquidity_quality_must_be_between_zero_and_one")
         if int(self.strategy_hedge_independent_max_thesis_age_seconds) < 1:
@@ -688,6 +712,30 @@ class AATSSettings(BaseSettings):
     def strategy_profile_auto_control_is_enabled_for_mode(self, operating_mode: str | None) -> bool:
         _ = operating_mode
         return bool(self.strategy_profile_auto_control_enabled)
+
+    @property
+    def effective_strategy_sleeve_auto_execution_enabled(self) -> bool:
+        return bool(self.strategy_sleeve_auto_execution_enabled)
+
+    @property
+    def strategy_sleeve_auto_execution_uses_deprecated_key(self) -> bool:
+        return False
+
+    @property
+    def strategy_sleeve_auto_execution_config_source(self) -> str:
+        return PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY
+
+    @property
+    def strategy_sleeve_auto_execution_deprecated_key(self) -> str:
+        return DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY
+
+    @property
+    def strategy_sleeve_auto_execution_primary_key(self) -> str:
+        return PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY
+
+    @property
+    def strategy_sleeve_auto_execution_deprecated_value(self) -> bool | None:
+        return None
 
     @property
     def operator_session_configured(self) -> bool:

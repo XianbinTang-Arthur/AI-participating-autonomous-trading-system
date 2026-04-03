@@ -51,6 +51,19 @@ StrategyCandidateState = Literal[
     "recovery",
 ]
 StrategyRouteAction = Literal["override_target", "hold_current", "advisory_only", "protective_fallback"]
+StrategySleeveExecutionControlMode = Literal[
+    "approved",
+    "permission_denied",
+    "budget_zero_suppressed",
+    "protective_override",
+]
+StrategySleeveExecutionBehavior = Literal[
+    "execute_target",
+    "hold_current",
+    "advisory_only",
+    "suppressed_after_approval",
+    "protective_execute",
+]
 StrategyExecutionBundleStatus = Literal[
     "blocked",
     "planned",
@@ -68,15 +81,50 @@ AllocatorHedgePriorityClass = Literal["standard", "inventory", "hedge", "critica
 class StrategySleeveAutomationDecision(SchemaBase):
     family: StrategyFamily
     strategy_sleeve_id: str
-    automatic_enabled: bool = True
-    runtime_supported: bool = True
+    automatic_enabled: bool = Field(
+        default=True,
+        description="当前这条 sleeve 是否满足自动进入执行链的前置条件；该值与 approved_for_execution 对齐。",
+    )
+    runtime_supported: bool = Field(
+        default=True,
+        description="兼容字段，只反映 candidate.state 层是否支持自动进入执行链；不等价于完整自动执行前置条件。",
+    )
+    execution_prerequisites_supported: bool = Field(
+        default=True,
+        description="当前是否同时满足 state 层运行态支持与执行兼容性等自动入链前置条件。",
+    )
     approved_for_execution: bool = True
-    automation_state: StrategySleeveAutomationState = "active"
+    permission_mode: str = "approved"
+    execution_control_mode: StrategySleeveExecutionControlMode | None = None
+    execution_behavior: StrategySleeveExecutionBehavior | None = None
+    automation_state: StrategySleeveAutomationState = Field(
+        default="active",
+        description=(
+            "兼容字段（compatibility-only）；新的 operator/runtime 诊断应优先使用 "
+            "execution_control_mode 与 execution_behavior，legacy 值同步下沉到 "
+            "compatibility.legacy_automation_state；新的控制逻辑与诊断逻辑不应再依赖该字段。"
+        ),
+        json_schema_extra={"deprecated": True},
+    )
+    compatibility: dict[str, Any] = Field(
+        default_factory=dict,
+        description="兼容窗口；legacy 自动控制字段镜像统一保留在这里，供历史消费者只读兼容。",
+    )
     budget_multiplier: Decimal = Decimal("1")
+    effective_scale: Decimal = Decimal("1")
     allocator_weight: Decimal = Decimal("1")
     recent_net_pnl: Decimal = Decimal("0")
     current_inventory_notional: Decimal = Decimal("0")
+    requested_delta_position_qty: Decimal = Decimal("0")
+    composed_delta_position_qty: Decimal = Decimal("0")
+    composed_route_action: StrategyRouteAction = "hold_current"
+    protective_intent: bool = False
+    budget_zero_suppressed: bool = False
     reason_codes: list[str] = Field(default_factory=list)
+    permission_reason_codes: list[str] = Field(default_factory=list)
+    budget_reason_codes: list[str] = Field(default_factory=list)
+    composition_reason_codes: list[str] = Field(default_factory=list)
+    scale_trace: list[str] = Field(default_factory=list)
     operator_summary: str | None = None
 
 
@@ -139,13 +187,28 @@ class StrategySleeveIntent(SchemaBase):
     account_current_position_qty: Decimal | None = None
     account_target_position_qty: Decimal | None = None
     target_notional: Decimal | None = None
+    requested_target_position_qty: Decimal | None = None
+    requested_delta_position_qty: Decimal = Decimal("0")
     priority_score: float = 0.0
     reason_codes: list[str] = Field(default_factory=list)
-    automatic_enabled: bool = True
+    automatic_enabled: bool = Field(
+        default=True,
+        description="当前这条 sleeve intent 是否仍允许自动进入执行链；该值与 approved_for_execution 对齐。",
+    )
+    execution_prerequisites_supported: bool = Field(
+        default=True,
+        description="当前 intent 是否满足自动进入执行链的执行前置条件（state 层支持 + execution compatibility）。",
+    )
+    approved_for_execution: bool = True
+    permission_mode: str = "approved"
+    execution_control_mode: StrategySleeveExecutionControlMode | None = None
+    execution_behavior: StrategySleeveExecutionBehavior | None = None
+    budget_zero_suppressed: bool = False
     budget_multiplier: Decimal = Decimal("1")
     allocator_weight: Decimal = Decimal("1")
     control_reason_codes: list[str] = Field(default_factory=list)
     control_summary: str | None = None
+    control_trace: dict[str, Any] = Field(default_factory=dict)
     pair_id: str | None = None
     opportunity_kind: str | None = None
     execution_mode: str | None = None
@@ -338,6 +401,7 @@ class StrategyBookExpectancyEntry(SchemaBase):
     capital_multiplier: float | None = None
     health_state: str | None = None
     book_state: str | None = None
+    guard_state: str | None = None
     holding_phase: str | None = None
     edge_strength: Literal["weak", "medium", "strong"] | None = None
 
@@ -360,6 +424,7 @@ class StrategyAdaptiveThresholdSnapshot(SchemaBase):
     scale_in_threshold: float | None = None
     thesis_age_seconds: float | None = None
     de_risk_net_edge_bps: float | None = None
+    score_drawdown_bps: float | None = None
     adaptive_entry_threshold: float | None = None
     adaptive_close_threshold: float | None = None
     adaptive_scale_in_threshold: float | None = None
@@ -370,6 +435,7 @@ class StrategyAdaptiveThresholdSnapshot(SchemaBase):
     effective_scale_in_threshold: float | None = None
     effective_thesis_age_seconds: float | None = None
     effective_de_risk_net_edge_bps: float | None = None
+    effective_score_drawdown_bps: float | None = None
     capital_multiplier: float | None = None
     confidence_multiplier: float | None = None
     volatility_multiplier: float | None = None
@@ -401,6 +467,7 @@ class StrategyBookRuntimeState(SchemaBase):
     size_multiplier: float | None = None
     capital_multiplier: float | None = None
     book_state: str | None = None
+    guard_state: str | None = None
     holding_phase: str | None = None
     health_state: str | None = None
     eligibility_state: str | None = None
@@ -412,10 +479,11 @@ class StrategyBookRuntimeState(SchemaBase):
     current_scale_in_count: int = 0
     current_de_risk_count: int = 0
     prior_book_state: str | None = None
+    prior_guard_state: str | None = None
     last_transition_at: datetime | None = None
     last_transition_reason: str | None = None
     suspended_until: datetime | None = None
-    state_version: int = 1
+    state_version: int = 2
     expected_signal_edge_bps: float | None = None
     expected_cost_bps: float | None = None
     expected_net_edge_bps: float | None = None

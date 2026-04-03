@@ -33,6 +33,8 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
   const latestSummary = latestValidation?.overlay_parent_exposure_summary || null;
   const latestAdaptiveSummary = latestValidation?.independent_adaptive_summary || null;
   const latestTransitionSummary = latestValidation?.independent_transition_exception_summary || null;
+  const latestIndependentStateVersion = latestValidation?.independent_state_version ?? null;
+  const latestIndependentSemanticsVersion = latestValidation?.independent_score_stability_semantics_version ?? null;
   const replayFilter = textOrFallback(uiState.parentFilter, DEFAULT_REPLAY_PARENT_FILTER);
   const filteredValidations = filterReplayValidations(recentValidations, replayFilter);
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
@@ -121,6 +123,27 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
           ]),
         })
       : "",
+    replayIndependentVersions: latestIndependentStateVersion != null || latestIndependentSemanticsVersion != null
+      ? surfaceCard({
+          title: "独立双书回放代际",
+          kicker: "版本诊断",
+          copy: "这里明确显示这次回放验证使用的状态机版本和稳定性语义版本，避免历史回放排障时再靠代码语义猜解释口径。",
+          content: summaryStrip([
+            {
+              label: "状态机版本",
+              value: formatNumber(latestIndependentStateVersion, 0, "待确认"),
+              meta: textOrFallback(latestValidation?.decision_id, "当前没有决策编号"),
+              tone: latestIndependentStateVersion != null ? "info" : "neutral",
+            },
+            {
+              label: "稳定性语义版本",
+              value: formatNumber(latestIndependentSemanticsVersion, 0, "待确认"),
+              meta: "独立双书 score stability 解释代际",
+              tone: latestIndependentSemanticsVersion != null ? "info" : "neutral",
+            },
+          ]),
+        })
+      : "",
     replayLinkedRead: surfaceCard({
       title: "父腿复盘与腿级对账联读",
       kicker: "回放与对账联读",
@@ -153,6 +176,7 @@ export function renderReplayView(data, uiState = {}, paging = {}) {
       ${sections.replayLatestPostmortem ? `<div class="${sections.replayAdaptivePostmortem || sections.replayTransitionPostmortem ? "span-4" : "span-12"}">${sections.replayLatestPostmortem}</div>` : ""}
       ${sections.replayAdaptivePostmortem ? `<div class="${sections.replayLatestPostmortem && sections.replayTransitionPostmortem ? "span-4" : sections.replayLatestPostmortem || sections.replayTransitionPostmortem ? "span-8" : "span-12"}">${sections.replayAdaptivePostmortem}</div>` : ""}
       ${sections.replayTransitionPostmortem ? `<div class="${sections.replayLatestPostmortem && sections.replayAdaptivePostmortem ? "span-4" : sections.replayLatestPostmortem || sections.replayAdaptivePostmortem ? "span-8" : "span-12"}">${sections.replayTransitionPostmortem}</div>` : ""}
+      ${sections.replayIndependentVersions ? `<div class="span-12">${sections.replayIndependentVersions}</div>` : ""}
       <div class="span-12">${sections.replayLinkedRead}</div>
       <div class="span-12">${sections.replayHistory}</div>
     </div>

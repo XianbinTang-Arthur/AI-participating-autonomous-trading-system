@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from time import perf_counter
 from typing import Any
 
@@ -235,6 +236,46 @@ def _protected_dashboard_panel_payload(
     raise KeyError(f"dashboard_bundle_panel_not_found:{panel_key}")
 
 
+def _strategy_view_strategy_runtime_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    latest_snapshot = payload.get("latest_snapshot") if isinstance(payload, dict) else {}
+    configured_parameters = payload.get("configured_parameters") if isinstance(payload, dict) else {}
+    latest_snapshot = latest_snapshot if isinstance(latest_snapshot, dict) else {}
+    configured_parameters = configured_parameters if isinstance(configured_parameters, dict) else {}
+    return {
+        "generated_at": payload.get("generated_at"),
+        "summary": payload.get("summary") or {},
+        "entry_execution_guard": payload.get("entry_execution_guard") or {},
+        "family_enablement": payload.get("family_enablement") or {},
+        "configured_parameters": {
+            "strategy_family_active": configured_parameters.get("strategy_family_active"),
+            "strategy_family_auto_selection_enabled": configured_parameters.get("strategy_family_auto_selection_enabled"),
+            "strategy_sleeve_auto_execution_enabled": configured_parameters.get("strategy_sleeve_auto_execution_enabled"),
+            "strategy_sleeve_auto_execution_config_source": configured_parameters.get("strategy_sleeve_auto_execution_config_source"),
+            "strategy_sleeve_auto_execution_uses_deprecated_key": configured_parameters.get("strategy_sleeve_auto_execution_uses_deprecated_key"),
+            "compatibility": {
+                "deprecated_auto_execution_key": (
+                    configured_parameters.get("compatibility", {}) or {}
+                ).get("deprecated_auto_execution_key"),
+                "deprecated_auto_execution_value": (
+                    configured_parameters.get("compatibility", {}) or {}
+                ).get("deprecated_auto_execution_value"),
+            },
+            "strategy_sleeve_auto_min_budget_multiplier": configured_parameters.get("strategy_sleeve_auto_min_budget_multiplier"),
+            "strategy_sleeve_auto_reconciliation_contraction_multiplier": configured_parameters.get("strategy_sleeve_auto_reconciliation_contraction_multiplier"),
+            "strategy_sleeve_auto_soft_loss_usdt": configured_parameters.get("strategy_sleeve_auto_soft_loss_usdt"),
+            "strategy_sleeve_auto_hard_loss_usdt": configured_parameters.get("strategy_sleeve_auto_hard_loss_usdt"),
+            "strategy_sleeve_auto_volatility_cap_enabled": configured_parameters.get("strategy_sleeve_auto_volatility_cap_enabled"),
+            "env_template_profile": configured_parameters.get("env_template_profile"),
+        },
+        "latest_snapshot": {
+            "automation_decisions": list(latest_snapshot.get("automation_decisions") or []),
+        },
+        "latest_bundle": payload.get("latest_bundle") or {},
+        "latest_applied_target": payload.get("latest_applied_target") or {},
+        "truth_source": payload.get("truth_source"),
+    }
+
+
 @auth_router.get("/auth/session")
 async def auth_session(request: Request) -> dict[str, Any]:
     return _session_payload(request)
@@ -346,9 +387,7 @@ async def dashboard_bundle(
     except HTTPException as exc:
         read_error = exc
 
-    panels: dict[str, dict[str, Any]] = {}
-    panel_timings: dict[str, dict[str, float]] = {}
-    for panel_key in panel_keys:
+    def _load_panel_sync(panel_key: str) -> tuple[str, dict[str, Any], float]:
         panel_started_at = perf_counter()
         try:
             if panel_key == "session":
@@ -373,13 +412,20 @@ async def dashboard_bundle(
                     recent_ai_shadow_decisions_limit=recent_ai_shadow_decisions,
                     recent_ai_shadow_evaluations_limit=recent_ai_shadow_evaluations,
                 )
-            panels[panel_key] = {"data": payload, "error": None}
+                if panel_key == "strategyRuntime" and view == "strategy" and isinstance(payload, dict):
+                    payload = _strategy_view_strategy_runtime_payload(payload)
+            return panel_key, {"data": payload, "error": None}, round((perf_counter() - panel_started_at) * 1000.0, 3)
         except Exception as exc:
-            panels[panel_key] = {"data": None, "error": _dashboard_panel_error(exc)}
-        finally:
-            panel_timings[panel_key] = {
-                "duration_ms": round((perf_counter() - panel_started_at) * 1000.0, 3),
-            }
+            return panel_key, {"data": None, "error": _dashboard_panel_error(exc)}, round((perf_counter() - panel_started_at) * 1000.0, 3)
+
+    results = await asyncio.gather(
+        *[asyncio.to_thread(_load_panel_sync, key) for key in panel_keys]
+    )
+    panels: dict[str, dict[str, Any]] = {}
+    panel_timings: dict[str, dict[str, float]] = {}
+    for panel_key, panel_result, duration_ms in results:
+        panels[panel_key] = panel_result
+        panel_timings[panel_key] = {"duration_ms": duration_ms}
 
     return {
         "view": view,

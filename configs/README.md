@@ -24,3 +24,9 @@
 - 账户、数据库、端口、日志、凭证类 override 改根目录 `.env.*`
 - AI、自动换档、directional / smart_arbitrage / spot_grid / dca 调参改 `strategy_profiles/*.yaml`
 - 若新增设置字段，优先更新 `aats/bootstrap/settings.py`，再决定它应归属 `.env` 还是 `strategy_profiles/*.yaml`
+
+## unknown write 复核阈值放哪
+
+- `AATS_EXECUTION_UNKNOWN_SUBMIT_REVIEW_AFTER_SECONDS`
+- `AATS_EXECUTION_UNKNOWN_CANCEL_REVIEW_AFTER_SECONDS`
+- 这两个字段属于执行恢复参数，应该放根目录对应 profile 的 `.env.*`，不要写进 `strategy_profiles/*.yaml`

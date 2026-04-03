@@ -45,6 +45,7 @@ from .sizing import (
 )
 from .scoring import compute_raw_book_score, compute_score_stability
 from .state_machine import advance_state_snapshot, derive_book_state, derive_holding_phase, snapshot_from_decision
+from .versioning import INDEPENDENT_STATE_MACHINE_VERSION
 
 
 def evaluate_independent_book(
@@ -240,13 +241,25 @@ def _evaluate_book_core(
     )
     eligibility: IndependentEligibilityOutcome | None = None
     prior_book_state = _runtime_prior_book_state(prior_runtime_state=prior_runtime_state)
+    prior_guard_state = _runtime_prior_guard_state(
+        prior_runtime_state=prior_runtime_state,
+        as_of_ts=context.as_of_ts,
+    )
     prior_scale_in_count = _runtime_counter(prior_runtime_state=prior_runtime_state, field_name="current_scale_in_count")
     prior_de_risk_count = _runtime_counter(prior_runtime_state=prior_runtime_state, field_name="current_de_risk_count")
     prior_state_version = _runtime_state_version(prior_runtime_state=prior_runtime_state)
     prior_last_transition_reason = _runtime_text(prior_runtime_state=prior_runtime_state, field_name="last_transition_reason")
     prior_last_transition_at = None if prior_runtime_state is None else prior_runtime_state.last_transition_at
-    prior_suspended_until = None if prior_runtime_state is None else prior_runtime_state.suspended_until
-    prior_cooldown_until = None if prior_runtime_state is None else prior_runtime_state.cooldown_until
+    prior_suspended_until = _runtime_active_timestamp(
+        prior_runtime_state=prior_runtime_state,
+        field_name="suspended_until",
+        as_of_ts=context.as_of_ts,
+    )
+    prior_cooldown_until = _runtime_active_timestamp(
+        prior_runtime_state=prior_runtime_state,
+        field_name="cooldown_until",
+        as_of_ts=context.as_of_ts,
+    )
 
     if current_qty <= EPSILON_DECIMAL_12:
         if score >= entry_threshold:
@@ -413,6 +426,7 @@ def _evaluate_book_core(
         target_qty=target_qty,
         state=state,
         book_state=None,
+        guard_state=None,
         holding_phase=None,
         health_state=execution_health_state,
         reason_codes=reason_codes,
@@ -436,6 +450,7 @@ def _evaluate_book_core(
             sizing_reason_codes=tuple(reason_codes),
         ),
         prior_book_state=prior_book_state,
+        prior_guard_state=prior_guard_state,
         current_scale_in_count=prior_scale_in_count,
         current_de_risk_count=prior_de_risk_count,
         last_transition_reason=prior_last_transition_reason,
@@ -561,11 +576,15 @@ def _complete_decision(
             or decision.blocked_reasons[-1],
         )
     prior_book_state = advanced_state_snapshot.prior_book_state
+    prior_guard_state = advanced_state_snapshot.prior_guard_state
+    derived_guard_state = advanced_state_snapshot.guard_state
     stateful_decision = replace(
         decision,
         book_state=derived_book_state,
+        guard_state=derived_guard_state,
         holding_phase=derived_holding_phase,
         prior_book_state=prior_book_state,
+        prior_guard_state=prior_guard_state,
         current_scale_in_count=advanced_state_snapshot.current_scale_in_count,
         current_de_risk_count=advanced_state_snapshot.current_de_risk_count,
         last_transition_reason=advanced_state_snapshot.last_transition_reason,
@@ -610,6 +629,7 @@ def _complete_decision(
         state_snapshot=decided_state_snapshot,
         health_snapshot=health_snapshot,
         prior_book_state=prior_book_state,
+        prior_guard_state=prior_guard_state,
         prior_state_source=None if prior_book_state is None else "runtime_state",
     )
     return replace(
@@ -844,7 +864,26 @@ def _runtime_prior_book_state(*, prior_runtime_state: StrategyBookRuntimeState |
     if prior_runtime_state is None:
         return None
     value = str(prior_runtime_state.book_state or "").strip()
+    if value in {"cooldown", "suspended"}:
+        current_qty = max(to_decimal(prior_runtime_state.current_qty), Decimal("0"))
+        return "holding" if current_qty > EPSILON_DECIMAL_12 else "flat"
     return None if not value else value
+
+
+def _runtime_prior_guard_state(*, prior_runtime_state: StrategyBookRuntimeState | None, as_of_ts) -> str | None:
+    if prior_runtime_state is None:
+        return None
+    value = str(getattr(prior_runtime_state, "guard_state", None) or "").strip()
+    if value in {"cooldown", "suspended"}:
+        return value
+    suspended_until = getattr(prior_runtime_state, "suspended_until", None)
+    if suspended_until is not None and suspended_until > as_of_ts:
+        return "suspended"
+    cooldown_until = getattr(prior_runtime_state, "cooldown_until", None)
+    if cooldown_until is not None and cooldown_until > as_of_ts:
+        return "cooldown"
+    legacy_value = str(prior_runtime_state.book_state or "").strip()
+    return legacy_value if legacy_value in {"cooldown", "suspended"} else None
 
 
 def _runtime_counter(*, prior_runtime_state: StrategyBookRuntimeState | None, field_name: str) -> int:
@@ -856,8 +895,25 @@ def _runtime_counter(*, prior_runtime_state: StrategyBookRuntimeState | None, fi
 
 def _runtime_state_version(*, prior_runtime_state: StrategyBookRuntimeState | None) -> int:
     if prior_runtime_state is None:
-        return 1
-    return max(int(prior_runtime_state.state_version or 1), 1)
+        return INDEPENDENT_STATE_MACHINE_VERSION
+    return max(
+        int(prior_runtime_state.state_version or INDEPENDENT_STATE_MACHINE_VERSION),
+        INDEPENDENT_STATE_MACHINE_VERSION,
+    )
+
+
+def _runtime_active_timestamp(
+    *,
+    prior_runtime_state: StrategyBookRuntimeState | None,
+    field_name: str,
+    as_of_ts,
+):
+    if prior_runtime_state is None:
+        return None
+    value = getattr(prior_runtime_state, field_name, None)
+    if value is None or value <= as_of_ts:
+        return None
+    return value
 
 
 def _runtime_text(*, prior_runtime_state: StrategyBookRuntimeState | None, field_name: str) -> str | None:

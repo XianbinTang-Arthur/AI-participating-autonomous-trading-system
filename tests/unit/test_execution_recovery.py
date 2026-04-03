@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import timedelta
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
@@ -710,6 +711,101 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertEqual(long_snapshot.replay_snapshot["prior_book_state"], "flat")
         self.assertIn("adaptive_entry_threshold", long_snapshot.threshold_snapshot)
         self.assertIn("independent_recovery_snapshots:2", artifacts.status.notes)
+
+    def test_recovery_normalizes_legacy_guard_book_states_from_runtime_payload(self) -> None:
+        now = utc_now()
+        scenarios = (
+            ("cooldown", False, Decimal("0"), "flat", None),
+            ("cooldown", True, Decimal("0"), "flat", "cooldown"),
+            ("suspended", False, Decimal("0.01"), "holding", None),
+            ("suspended", True, Decimal("0.01"), "holding", "suspended"),
+        )
+        for legacy_guard, active_guard, current_qty, expected_book_state, expected_guard_state in scenarios:
+            with self.subTest(
+                legacy_guard=legacy_guard,
+                active_guard=active_guard,
+                current_qty=str(current_qty),
+            ):
+                strategy_runtime_repo = InMemoryStrategyRuntimeRepository()
+                runtime_state = {
+                    "leg": "long",
+                    "current_qty": format(current_qty, "f"),
+                    "target_qty": format(current_qty, "f"),
+                    "state": "blocked",
+                    "book_state": legacy_guard,
+                    "book_action": "blocked",
+                    "prior_book_state": legacy_guard,
+                    "blocked_reasons": ["independent_long_book_score_stability_below_threshold"],
+                    "cooldown_until": (
+                        None
+                        if legacy_guard != "cooldown" or not active_guard
+                        else (now + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+                    ),
+                    "suspended_until": (
+                        None
+                        if legacy_guard != "suspended" or not active_guard
+                        else (now + timedelta(seconds=30)).isoformat().replace("+00:00", "Z")
+                    ),
+                }
+                strategy_runtime_repo.save_allocation_decision(
+                    PortfolioAllocationDecision(
+                        allocation_id=f"alloc_legacy_{legacy_guard}_{'active' if active_guard else 'stale'}_{str(current_qty).replace('.', '_')}",
+                        decision_id=f"decision_legacy_{legacy_guard}_{'active' if active_guard else 'stale'}_{str(current_qty).replace('.', '_')}",
+                        symbol="BTC-USDT-SWAP",
+                        product_type="derivatives",
+                        margin_mode="cross",
+                        primary_family="independent",
+                        approved_families=["independent"],
+                        sleeve_intents=[
+                            StrategySleeveIntent(
+                                decision_id=f"decision_legacy_{legacy_guard}_{'active' if active_guard else 'stale'}_{str(current_qty).replace('.', '_')}",
+                                family="independent",
+                                strategy_sleeve_id="sleeve_independent_legacy_guard",
+                                state="candidate",
+                                symbol="BTC-USDT-SWAP",
+                                product_type="derivatives",
+                                margin_mode="cross",
+                                inventory_policy="paired_inventory",
+                                route_action="override_target",
+                                family_action="open_independent_book",
+                                selectable=True,
+                                execution_compatible=True,
+                                metrics={
+                                    "book_runtime_states": [runtime_state],
+                                    "long_replay_snapshot": {
+                                        "leg": "long",
+                                        "state": "blocked",
+                                        "book_state": legacy_guard,
+                                        "book_action": "blocked",
+                                        "prior_book_state": legacy_guard,
+                                    },
+                                },
+                            )
+                        ],
+                    )
+                )
+                recovery = self._service(
+                    strategy_runtime_repo=strategy_runtime_repo,
+                    settings_override={
+                        "trading_product_type": "derivatives",
+                        "margin_mode": "cross",
+                        "default_symbol": "BTC-USDT-SWAP",
+                        "allowed_symbols": ["BTC-USDT-SWAP"],
+                    },
+                )
+
+                artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+                self.assertTrue(artifacts.status.independent_recovery_snapshots)
+                long_snapshot = artifacts.status.independent_recovery_snapshots[0]
+                self.assertEqual(long_snapshot.book_state, expected_book_state)
+                self.assertEqual(long_snapshot.guard_state, expected_guard_state)
+                self.assertEqual(long_snapshot.prior_book_state, expected_book_state)
+                self.assertEqual(long_snapshot.prior_guard_state, expected_guard_state)
+                self.assertEqual(long_snapshot.decision_snapshot["book_state"], expected_book_state)
+                self.assertEqual(long_snapshot.decision_snapshot["guard_state"], expected_guard_state)
+                self.assertEqual(long_snapshot.replay_snapshot["book_state"], expected_book_state)
+                self.assertEqual(long_snapshot.replay_snapshot["guard_state"], expected_guard_state)
 
     @staticmethod
     def _service(

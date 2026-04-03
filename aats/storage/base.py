@@ -6,6 +6,7 @@ from typing import Protocol
 from aats.schemas.common import EventEnvelope
 from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.execution import FillEvent, OrderObligation, OrderState
+from aats.schemas.exit_execution import ChildExitOrderRef, ExitExecutionIntent
 from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import (
     BaselineGenerationRecord,
@@ -338,6 +339,32 @@ class ReconciliationRepository(Protocol):
         ...
 
     def latest_for_scope(self, *, scope: RuntimeStateScope) -> ReconciliationReport | None:
+        ...
+
+
+class ExitExecutionRepository(Protocol):
+    def save_exit_execution_intent(self, intent: ExitExecutionIntent) -> ExitExecutionIntent:
+        ...
+
+    def get_exit_execution_intent(self, parent_intent_id: str) -> ExitExecutionIntent | None:
+        ...
+
+    def get_exit_execution_intent_by_execution_chain(
+        self,
+        execution_chain_id: str,
+    ) -> ExitExecutionIntent | None:
+        ...
+
+    def list_exit_execution_intents(self) -> list[ExitExecutionIntent]:
+        ...
+
+    def save_child_exit_order_ref(self, child_ref: ChildExitOrderRef) -> ChildExitOrderRef:
+        ...
+
+    def child_refs_for_parent(self, *, parent_intent_id: str) -> list[ChildExitOrderRef]:
+        ...
+
+    def parent_intent_id_for_child(self, *, client_order_id: str) -> str | None:
         ...
 
 

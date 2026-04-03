@@ -71,8 +71,8 @@ strategy_profile_emergency_safety_fast_track_enabled: true
 strategy_profile_emergency_safety_confidence_min: 0.67
 
 # 多策略 sleeve 自动控制
-# [常用可调] strategy_sleeve_auto_parallel_enabled：是否启用多策略 sleeve 自动并行控制。可选值：true / false；推荐值：true。
-strategy_sleeve_auto_parallel_enabled: false
+# [常用可调] strategy_sleeve_auto_execution_enabled：是否允许自动下发非保护性 sleeve delta。可选值：true / false；推荐值：true。
+strategy_sleeve_auto_execution_enabled: true
 # [常用可调] strategy_sleeve_auto_min_budget_multiplier：自动收缩后的最小预算倍率。可选值：0.1 ~ 1.0；推荐值：0.35。
 strategy_sleeve_auto_min_budget_multiplier: 0.35
 # [常用可调] strategy_sleeve_auto_reconciliation_contraction_multiplier：对账压力下的预算收缩倍率。可选值：0.1 ~ 1.0；推荐值：0.50。
@@ -349,8 +349,8 @@ strategy_hedge_independent_max_acceptable_cost_bps: 7.5
 strategy_hedge_independent_passive_first_enabled: true
 # [进阶可调] strategy_hedge_independent_min_confirm_ticks：独立双书开仓前要求的最少确认次数。可选值：>= 1；推荐值：2。
 strategy_hedge_independent_min_confirm_ticks: 2
-# [进阶可调] strategy_hedge_independent_min_score_stability_bps：独立双书允许的最大短期分数回撤。可选值：>= 0；推荐值：2.0。
-strategy_hedge_independent_min_score_stability_bps: 2.0
+# [进阶可调] strategy_hedge_independent_min_score_drawdown_bps：独立双书允许的最大短期分数回撤。可选值：>= 0；推荐值：6.0。
+strategy_hedge_independent_min_score_drawdown_bps: 6.0
 # [进阶可调] strategy_hedge_independent_min_liquidity_quality：独立双书开仓要求的最低流动性质量分。可选值：0.0 ~ 1.0；推荐值：0.55。
 strategy_hedge_independent_min_liquidity_quality: 0.55
 # [进阶可调] strategy_hedge_independent_require_execution_health_ok：独立双书开仓是否要求执行健康度保持正常。可选值：true / false；推荐值：true。

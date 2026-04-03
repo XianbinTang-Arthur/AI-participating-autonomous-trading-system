@@ -1,6 +1,7 @@
 ﻿import { fetchPanels, requestJson } from "./modules/api-client.js";
 import { notice, pill, primaryStatusPanel } from "./modules/components.js";
 import { fetchDashboardBundle } from "./modules/api-client.js";
+import { textOrFallback } from "./modules/copy.js";
 import { syncRefreshDisabledButtons } from "./modules/refresh-interactivity.js";
 import {
   emptyState,
@@ -17,7 +18,18 @@ import {
   buildReconciliationDrawer,
 } from "./modules/detail-drawers.js";
 import { buildPhase1ShadowDrawer } from "./modules/shadow-drawer.js";
-import { AUTO_REFRESH_MS, CORE_SPECS, DEFAULT_PAGE_LIMITS, PAGE_LOAD_STEP, createState, viewSpecs } from "./modules/store.js";
+import {
+  AUTO_REFRESH_MS,
+  VIEW_FRESHNESS_MS,
+  CORE_SPECS,
+  DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS,
+  DEFAULT_EXIT_EXECUTION_HISTORY_PAGING,
+  DEFAULT_PAGE_LIMITS,
+  PAGE_LOAD_STEP,
+  buildDashboardBundleRequestPlan,
+  createState,
+  viewSpecs,
+} from "./modules/store.js";
 import {
   readableFamilyExecutionSummary,
   localizeError,
@@ -30,11 +42,11 @@ import {
   toneForRuntimeState,
   tradingStatusLabel,
 } from "./modules/terms.js";
-import { buildDashboardBundlePath } from "./modules/store.js";
 import { renderAIAnalysisView } from "./modules/views/ai-analysis-view.js";
 import { renderAIConfigView } from "./modules/views/ai-config-view.js";
 import { renderAdminView } from "./modules/views/admin-view.js";
 import { renderExecutionSections, renderExecutionView } from "./modules/views/execution-view.js";
+import { renderExitExecutionView } from "./modules/views/exit-execution-view.js";
 import { renderHomeView } from "./modules/views/home-view.js";
 import { renderOverviewView } from "./modules/views/overview-view.js";
 import { renderReplaySections, renderReplayView } from "./modules/views/replay-view.js";
@@ -47,6 +59,7 @@ const VIEW_ROUTES = {
   strategy: "/ui/strategy",
   execution: "/ui/execution",
   risk: "/ui/risk",
+  exitExecution: "/ui/exit-execution",
   replay: "/ui/replay",
   aiAnalysis: "/ui/ai-analysis",
   aiConfig: "/ui/ai-config",
@@ -89,6 +102,13 @@ const VIEW_META = {
     copy: "关注阻断原因、对账结论、恢复状态、账户快照和是否需要人工确认。",
     hidePageHead: false,
   },
+  exitExecution: {
+    docTitle: "AATS 自动交易监控台 | 退出任务工作台",
+    eyebrow: "退出任务工作台",
+    heading: "独立排查 parent-exit 的处理历史与剩余阻断",
+    copy: "这里专门查看 parent-exit 的长历史、分页和可恢复人工动作，不再和风险页的其他卡片混在一起。",
+    hidePageHead: false,
+  },
   replay: {
     docTitle: "AATS 自动交易监控台 | 回放与复盘",
     eyebrow: "回放与复盘",
@@ -125,14 +145,19 @@ const VIEW_LABELS = {
   strategy: "策略判断",
   execution: "委托与成交",
   risk: "风险与恢复",
+  exitExecution: "退出任务工作台",
   replay: "回放与复盘",
   aiAnalysis: "AI 分析",
   aiConfig: "AI 配置",
   admin: "账户与权限",
 };
 
+const EXIT_EXECUTION_HISTORY_ACTION_FILTERS = new Set(["all", "refresh_exchange_state", "retry_limit_lookup", "safe_cancel"]);
+const EXIT_EXECUTION_HISTORY_WINDOW_FILTERS = new Set(["all", "1", "6", "24", "168", "720"]);
+
 const state = createState();
 state.activeView = resolveViewFromLocation();
+hydrateViewStateFromLocation(state.activeView);
 state.loadingView = state.activeView;
 
 const viewLinks = Array.from(document.querySelectorAll(".workspace-link[data-view]"));
@@ -161,6 +186,7 @@ const nodes = {
   strategyContent: document.getElementById("strategyContent"),
   executionContent: document.getElementById("executionContent"),
   riskContent: document.getElementById("riskContent"),
+  exitExecutionContent: document.getElementById("exitExecutionContent"),
   replayContent: document.getElementById("replayContent"),
   aiAnalysisContent: document.getElementById("aiAnalysisContent"),
   aiConfigContent: document.getElementById("aiConfigContent"),
@@ -174,6 +200,155 @@ const nodes = {
   drawerBody: document.getElementById("drawerBody"),
 };
 const renderCache = new WeakMap();
+
+function ensureExitExecutionHistoryState(view = "risk") {
+  if (view === "exitExecution") {
+    state.ui.exitExecution = state.ui.exitExecution || {};
+    state.ui.exitExecution.exitExecutionHistory = {
+      ...DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS,
+      ...DEFAULT_EXIT_EXECUTION_HISTORY_PAGING.exitExecution,
+      ...(state.ui.exitExecution.exitExecutionHistory || {}),
+    };
+    return state.ui.exitExecution.exitExecutionHistory;
+  }
+  state.ui.risk = state.ui.risk || {};
+  state.ui.risk.exitExecutionHistory = {
+    ...DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS,
+    ...DEFAULT_EXIT_EXECUTION_HISTORY_PAGING.risk,
+    ...(state.ui.risk.exitExecutionHistory || {}),
+  };
+  return state.ui.risk.exitExecutionHistory;
+}
+
+function copyExitExecutionHistoryFilters(source, target) {
+  target.action = String(source?.action || "all");
+  target.parent = String(source?.parent || "");
+  target.actor = String(source?.actor || "");
+  target.windowHours = String(source?.windowHours || "all");
+}
+
+function syncExitExecutionHistoryFiltersAcrossViews(sourceView = "risk") {
+  const sourceState = ensureExitExecutionHistoryState(sourceView);
+  const riskState = ensureExitExecutionHistoryState("risk");
+  const exitExecutionState = ensureExitExecutionHistoryState("exitExecution");
+  copyExitExecutionHistoryFilters(sourceState, riskState);
+  copyExitExecutionHistoryFilters(sourceState, exitExecutionState);
+  if (sourceView !== "risk") {
+    riskState.offset = 0;
+  }
+  if (sourceView !== "exitExecution") {
+    exitExecutionState.offset = 0;
+  }
+}
+
+function activeExitExecutionHistoryView() {
+  return state.activeView === "exitExecution" ? "exitExecution" : "risk";
+}
+
+function activeExitExecutionHistoryState() {
+  return ensureExitExecutionHistoryState(activeExitExecutionHistoryView());
+}
+
+function readExitExecutionHistoryStateFromLocation() {
+  const params = new URLSearchParams(window.location.search || "");
+  const parsed = {
+    ...DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS,
+    ...DEFAULT_EXIT_EXECUTION_HISTORY_PAGING.exitExecution,
+  };
+  const action = String(params.get("action") || "").trim();
+  if (EXIT_EXECUTION_HISTORY_ACTION_FILTERS.has(action)) {
+    parsed.action = action;
+  }
+  const parentIntentId = String(params.get("parent_intent_id") || "").trim();
+  if (parentIntentId) {
+    parsed.parent = parentIntentId;
+  }
+  const actor = String(params.get("actor") || "").trim();
+  if (actor) {
+    parsed.actor = actor;
+  }
+  const windowHours = String(params.get("window_hours") || "").trim();
+  if (EXIT_EXECUTION_HISTORY_WINDOW_FILTERS.has(windowHours)) {
+    parsed.windowHours = windowHours;
+  }
+  const offset = Number(params.get("offset") || "");
+  if (Number.isFinite(offset) && offset >= 0) {
+    parsed.offset = offset;
+  }
+  const limit = Number(params.get("limit") || "");
+  if (Number.isFinite(limit) && limit > 0) {
+    parsed.limit = limit;
+  }
+  return parsed;
+}
+
+function hydrateViewStateFromLocation(view = state.activeView) {
+  if (view !== "exitExecution") {
+    return;
+  }
+  const parsed = readExitExecutionHistoryStateFromLocation();
+  state.ui.exitExecution = state.ui.exitExecution || {};
+  state.ui.exitExecution.exitExecutionHistory = parsed;
+  const riskState = ensureExitExecutionHistoryState("risk");
+  copyExitExecutionHistoryFilters(parsed, riskState);
+  riskState.offset = 0;
+}
+
+function buildExitExecutionViewPath() {
+  const historyState = ensureExitExecutionHistoryState("exitExecution");
+  const params = new URLSearchParams({
+    offset: String(Math.max(Number(historyState.offset) || 0, 0)),
+    limit: String(Math.max(Number(historyState.limit) || DEFAULT_EXIT_EXECUTION_HISTORY_PAGING.exitExecution.limit, 1)),
+  });
+  const parentIntentId = String(historyState.parent || "").trim();
+  const actor = String(historyState.actor || "").trim();
+  const action = String(historyState.action || "").trim();
+  const windowHours = String(historyState.windowHours || "").trim();
+  if (parentIntentId) {
+    params.set("parent_intent_id", parentIntentId);
+  }
+  if (actor) {
+    params.set("actor", actor);
+  }
+  if (action && action !== "all") {
+    params.set("action", action);
+  }
+  if (windowHours && windowHours !== "all") {
+    params.set("window_hours", windowHours);
+  }
+  return `${VIEW_ROUTES.exitExecution}?${params.toString()}`;
+}
+
+function buildViewPath(view = state.activeView) {
+  if (view === "exitExecution") {
+    return buildExitExecutionViewPath();
+  }
+  return VIEW_ROUTES[view] || VIEW_ROUTES.home;
+}
+
+function syncActiveViewLocationState({ pushHistory = false } = {}) {
+  const targetPath = buildViewPath(state.activeView);
+  const currentPath = `${window.location.pathname}${window.location.search}`;
+  if (currentPath === targetPath) {
+    return;
+  }
+  if (pushHistory) {
+    window.history.pushState({ view: state.activeView }, "", targetPath);
+    return;
+  }
+  window.history.replaceState({ view: state.activeView }, "", targetPath);
+}
+
+function syncExitExecutionNavigationLinks() {
+  const exitExecutionHref = buildViewPath("exitExecution");
+  viewLinks
+    .filter((link) => link.dataset.view === "exitExecution")
+    .forEach((link) => {
+      if (link.getAttribute("href") !== exitExecutionHref) {
+        link.setAttribute("href", exitExecutionHref);
+      }
+    });
+}
 
 init();
 
@@ -193,12 +368,16 @@ function bindEvents() {
   });
 
   window.addEventListener("popstate", () => {
-    setActiveView(resolveViewFromLocation(), { refresh: true });
+    const nextView = resolveViewFromLocation();
+    hydrateViewStateFromLocation(nextView);
+    setActiveView(nextView, { refresh: true });
   });
 
   window.addEventListener("pageshow", (event) => {
     if (!event.persisted) return;
-    setActiveView(resolveViewFromLocation(), { refresh: true });
+    const nextView = resolveViewFromLocation();
+    hydrateViewStateFromLocation(nextView);
+    setActiveView(nextView, { refresh: true });
   });
   document.addEventListener("visibilitychange", handleVisibilityChange);
 
@@ -233,6 +412,9 @@ function bindEvents() {
       void createOperatorUser();
     }
   });
+
+  document.addEventListener("input", handleExitExecutionHistoryFilterEvent);
+  document.addEventListener("change", handleExitExecutionHistoryFilterEvent);
 }
 
 async function refreshDashboard({ manual = false } = {}) {
@@ -253,13 +435,22 @@ async function refreshDashboard({ manual = false } = {}) {
     return;
   }
   const refreshingView = state.activeView;
+  const refreshPlan = buildDashboardBundleRequestPlan(refreshingView, state);
+  const refreshGeneration = state.refreshGeneration + 1;
+  let deferredRefreshStarted = false;
+  state.refreshGeneration = refreshGeneration;
+  setPendingPanels(refreshPlan.deferredPanels, Boolean(refreshPlan.deferredPath));
   cancelScheduledRefresh();
   state.refreshing = true;
   renderShell();
   try {
-    const results = await fetchDashboardBundle(buildDashboardBundlePath(refreshingView, state));
+    const results = await fetchDashboardBundle(refreshPlan.primaryPath);
+    if (state.refreshGeneration !== refreshGeneration) {
+      return;
+    }
     applyPanelResults(results);
     state.readyViews[refreshingView] = true;
+    state.viewRefreshedAt[refreshingView] = Date.now();
     if (shouldRedirectToLogin()) {
       window.location.replace("/login");
       return;
@@ -268,7 +459,18 @@ async function refreshDashboard({ manual = false } = {}) {
     if (manual) {
       state.flash = { tone: "info", message: "页面数据已刷新。" };
     }
+    if (refreshPlan.deferredPath) {
+      deferredRefreshStarted = true;
+      void refreshDeferredPanels({
+        path: refreshPlan.deferredPath,
+        panelKeys: refreshPlan.deferredPanels,
+        refreshGeneration,
+      });
+    }
   } finally {
+    if (!deferredRefreshStarted && state.refreshGeneration === refreshGeneration) {
+      setPendingPanels(refreshPlan.deferredPanels, false);
+    }
     state.refreshing = false;
     if (state.loadingView === refreshingView) {
       state.loadingView = null;
@@ -283,6 +485,29 @@ async function refreshDashboard({ manual = false } = {}) {
   }
 }
 
+async function refreshDeferredPanels({ path, panelKeys = [], refreshGeneration }) {
+  try {
+    const results = await fetchDashboardBundle(path);
+    if (state.refreshGeneration !== refreshGeneration) {
+      return;
+    }
+    applyPanelResults(results);
+  } catch (error) {
+    if (state.refreshGeneration !== refreshGeneration) {
+      return;
+    }
+    panelKeys.forEach((key) => {
+      state.errors[key] = error instanceof Error ? error.message : String(error);
+    });
+  } finally {
+    if (state.refreshGeneration !== refreshGeneration) {
+      return;
+    }
+    setPendingPanels(panelKeys, false);
+    renderShell();
+  }
+}
+
 function applyPanelResults(results) {
   for (const [key, result] of Object.entries(results || {})) {
     state.data[key] = result.data;
@@ -291,6 +516,7 @@ function applyPanelResults(results) {
 }
 
 function renderShell() {
+  syncExitExecutionNavigationLinks();
   viewLinks.forEach((link) => link.classList.toggle("is-active", link.dataset.view === state.activeView));
   viewSections.forEach((section) => section.classList.toggle("is-active", section.dataset.view === state.activeView));
   renderPageChrome();
@@ -484,6 +710,7 @@ function renderActiveView() {
     uiHints: {
       recoveryReasonsText: localizedRecoveryReasons(),
       controlPermissionMessage: controlPermissionMessage(),
+      pendingPanels: state.pendingPanels,
     },
   };
   if (state.activeView === "overview" && nodes.overviewContent) {
@@ -503,7 +730,18 @@ function renderActiveView() {
     return;
   }
   if (state.activeView === "risk") {
-    patchRenderedSections(renderRiskSections(viewData), () => nodes.riskContent, () => renderRiskView(viewData));
+    patchRenderedSections(
+      renderRiskSections(viewData, state.ui.risk),
+      () => nodes.riskContent,
+      () => renderRiskView(viewData, state.ui.risk),
+    );
+    return;
+  }
+  if (state.activeView === "exitExecution" && nodes.exitExecutionContent) {
+    patchHtml(
+      nodes.exitExecutionContent,
+      renderExitExecutionView(viewData, state.ui.exitExecution || {}),
+    );
     return;
   }
   if (state.activeView === "replay") {
@@ -651,16 +889,31 @@ function setActiveView(view, { pushHistory = false, refresh = true } = {}) {
     state.loadingView = state.readyViews[nextView] ? null : nextView;
   }
   if (pushHistory) {
-    const targetPath = VIEW_ROUTES[nextView];
-    if (window.location.pathname !== targetPath) {
+    const targetPath = buildViewPath(nextView);
+    const currentPath = `${window.location.pathname}${window.location.search}`;
+    if (currentPath !== targetPath) {
       window.history.pushState({ view: nextView }, "", targetPath);
     }
+  } else if (nextView === "exitExecution") {
+    syncActiveViewLocationState({ pushHistory: false });
   }
   viewLinks.forEach((link) => link.classList.toggle("is-active", link.dataset.view === nextView));
   viewSections.forEach((section) => section.classList.toggle("is-active", section.dataset.view === nextView));
   renderShell();
   if (refresh) {
-    void refreshDashboard();
+    const lastRefresh = state.viewRefreshedAt[nextView];
+    const isFresh = lastRefresh && Date.now() - lastRefresh < VIEW_FRESHNESS_MS;
+    if (changed && isFresh && state.readyViews[nextView]) {
+      // Data is very fresh — skip network request entirely
+      state.loadingView = null;
+      renderActiveView();
+    } else {
+      // Stale-while-revalidate: render cached data immediately, then refresh
+      if (changed && state.readyViews[nextView]) {
+        state.loadingView = null;
+      }
+      void refreshDashboard();
+    }
   }
 }
 
@@ -854,6 +1107,92 @@ async function recordTrialReviewAction(actionType, target = null) {
   );
 }
 
+function normalizeExitExecutionParentIntentId(value) {
+  const normalized = String(value || "").trim();
+  return normalized || null;
+}
+
+async function triggerExitExecutionRefresh(value, target = null) {
+  const parentIntentId = normalizeExitExecutionParentIntentId(value);
+  await runExitExecutionAction({
+    path: "/system/exit-execution/refresh",
+    body: {
+      reason: "ui_refresh_exit_execution_state",
+      parent_intent_id: parentIntentId,
+    },
+    successMessage: "已提交退出任务状态刷新请求。",
+    target,
+    pendingLabel: "正在刷新退出任务状态…",
+  });
+}
+
+async function triggerExitExecutionRetryLimitLookup(value, target = null) {
+  const parentIntentId = normalizeExitExecutionParentIntentId(value);
+  await runExitExecutionAction({
+    path: "/system/exit-execution/retry-limit-lookup",
+    body: {
+      reason: "ui_retry_exit_execution_limit_lookup",
+      parent_intent_id: parentIntentId,
+    },
+    successMessage: "已提交退出任务拆单上限重试请求。",
+    target,
+    pendingLabel: "正在重试拆单上限查询…",
+  });
+}
+
+async function triggerExitExecutionSafeCancel(value, target = null) {
+  const parentIntentId = normalizeExitExecutionParentIntentId(value);
+  await runExitExecutionAction({
+    path: "/system/exit-execution/safe-cancel",
+    body: {
+      reason: "ui_safe_cancel_exit_execution",
+      parent_intent_id: parentIntentId,
+    },
+    successMessage: "已提交退出任务安全取消请求。",
+    target,
+    pendingLabel: "正在安全取消退出任务…",
+    confirmMessage: "确认停止这条退出任务，并撤销当前仍可取消的子订单吗？",
+  });
+}
+
+async function runExitExecutionAction({
+  path,
+  body,
+  successMessage,
+  target = null,
+  pendingLabel = "正在提交请求…",
+  confirmMessage = "",
+} = {}) {
+  const clearPending = setActionPending(target, pendingLabel);
+  try {
+    if (confirmMessage && !window.confirm(confirmMessage)) return;
+    const result = await requestJson(path, { method: "POST", body });
+    state.flash = {
+      tone: "info",
+      message: exitExecutionActionFlashMessage(result, successMessage),
+    };
+    await refreshDashboard({ manual: true });
+  } catch (error) {
+    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    renderBanners();
+  } finally {
+    clearPending();
+  }
+}
+
+function exitExecutionActionFlashMessage(result, fallback = "操作已提交。") {
+  const base = textOrFallback(result?.message, fallback);
+  const blocker = result?.details?.current_blocker_after_action;
+  if (!blocker || typeof blocker !== "object") {
+    return base;
+  }
+  const summary = textOrFallback(
+    blocker.summary,
+    localizeError(blocker.code, "当前还有未解除的退出任务阻断。")
+  );
+  return `${base} 当前仍卡在：${summary}`;
+}
+
 async function logoutOperator() {
   try {
     await requestJson("/auth/logout", { method: "POST" });
@@ -885,6 +1224,12 @@ async function dispatchAction(action, value, target = null) {
   if (action === "trigger-rebaseline") return triggerRebaseline(target);
   if (action === "trigger-resume") return triggerResume(target);
   if (action === "trigger-halt") return triggerHalt(target);
+  if (action === "trigger-exit-execution-refresh") return triggerExitExecutionRefresh(value, target);
+  if (action === "trigger-exit-execution-retry-limit-lookup") return triggerExitExecutionRetryLimitLookup(value, target);
+  if (action === "trigger-exit-execution-safe-cancel") return triggerExitExecutionSafeCancel(value, target);
+  if (action === "apply-exit-execution-history-workspace") return applyExitExecutionHistoryWorkspaceFilters(target);
+  if (action === "reset-exit-execution-history-workspace") return resetExitExecutionHistoryWorkspaceFilters(target);
+  if (action === "paginate-exit-execution-history") return paginateExitExecutionHistory(value, target);
   if (action === "record-scaling-review") return recordScalingReview(value, target);
   if (action === "record-trial-review") return recordTrialReview(target);
   if (action === "record-trial-review-action") return recordTrialReviewAction(value, target);
@@ -1040,6 +1385,168 @@ const VIEW_REPLAY_FILTERS = new Set(["all", "inventory_only", "target_only", "ta
 function setReplayParentFilter(value) {
   state.ui.replay.parentFilter = VIEW_REPLAY_FILTERS.has(value) ? value : "all";
   renderShell();
+}
+
+function handleExitExecutionHistoryFilterEvent(event) {
+  const target = event.target;
+  if (!(target instanceof HTMLInputElement) && !(target instanceof HTMLSelectElement)) {
+    return;
+  }
+  const filterKey = target.dataset.exitHistoryFilter;
+  if (!filterKey) return;
+  const activeHistoryState = activeExitExecutionHistoryState();
+  if (filterKey === "action") {
+    activeHistoryState.action = EXIT_EXECUTION_HISTORY_ACTION_FILTERS.has(target.value) ? target.value : "all";
+  } else if (filterKey === "parent") {
+    activeHistoryState.parent = target.value || "";
+  } else if (filterKey === "actor") {
+    activeHistoryState.actor = target.value || "";
+  } else if (filterKey === "windowHours") {
+    activeHistoryState.windowHours = EXIT_EXECUTION_HISTORY_WINDOW_FILTERS.has(target.value) ? target.value : "all";
+  } else {
+    return;
+  }
+  activeHistoryState.offset = 0;
+  syncExitExecutionHistoryFiltersAcrossViews(activeExitExecutionHistoryView());
+  if (state.activeView === "exitExecution") {
+    syncActiveViewLocationState({ pushHistory: false });
+  }
+  syncExitExecutionHistoryFilterRoots();
+}
+
+function applyExitExecutionHistoryFilters(root) {
+  const actionFilter = normalizeExitExecutionHistoryFilterValue(
+    root.querySelector('[data-exit-history-filter="action"]')?.value,
+  );
+  const parentFilter = normalizeExitExecutionHistoryFilterValue(
+    root.querySelector('[data-exit-history-filter="parent"]')?.value,
+  );
+  const actorFilter = normalizeExitExecutionHistoryFilterValue(
+    root.querySelector('[data-exit-history-filter="actor"]')?.value,
+  );
+  const windowHoursFilter = normalizeExitExecutionHistoryFilterValue(
+    root.querySelector('[data-exit-history-filter="windowHours"]')?.value,
+  );
+  const thresholdMs = exitExecutionHistoryWindowThresholdMs(windowHoursFilter);
+  const entries = Array.from(root.querySelectorAll("[data-exit-history-entry]"));
+  let visibleCount = 0;
+  entries.forEach((entry) => {
+    if (!(entry instanceof HTMLElement)) return;
+    const matchesAction = !actionFilter || actionFilter === "all"
+      || normalizeExitExecutionHistoryFilterValue(entry.dataset.actionKind) === actionFilter;
+    const matchesParent = !parentFilter
+      || normalizeExitExecutionHistoryFilterValue(entry.dataset.parentIntentId).includes(parentFilter);
+    const matchesActor = !actorFilter
+      || normalizeExitExecutionHistoryFilterValue(entry.dataset.actorSearch).includes(actorFilter);
+    const entryCreatedAtMs = Number(entry.dataset.createdAtMs || "0");
+    const matchesWindow = thresholdMs === null || (Number.isFinite(entryCreatedAtMs) && entryCreatedAtMs >= thresholdMs);
+    const visible = matchesAction && matchesParent && matchesActor && matchesWindow;
+    entry.hidden = !visible;
+    if (visible) {
+      visibleCount += 1;
+    }
+  });
+  const emptyState = root.querySelector("[data-exit-history-empty]");
+  if (emptyState instanceof HTMLElement) {
+    emptyState.hidden = visibleCount > 0;
+  }
+}
+
+function normalizeExitExecutionHistoryFilterValue(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function syncExitExecutionHistoryFilterRoots() {
+  const filters = activeExitExecutionHistoryState();
+  syncExitExecutionNavigationLinks();
+  const roots = Array.from(document.querySelectorAll("[data-exit-history-root]"));
+  roots.forEach((root) => {
+    if (!(root instanceof HTMLElement)) return;
+    const actionInput = root.querySelector('[data-exit-history-filter="action"]');
+    const parentInput = root.querySelector('[data-exit-history-filter="parent"]');
+    const actorInput = root.querySelector('[data-exit-history-filter="actor"]');
+    const windowInput = root.querySelector('[data-exit-history-filter="windowHours"]');
+    if (actionInput instanceof HTMLSelectElement) {
+      actionInput.value = String(filters.action || "all");
+    }
+    if (parentInput instanceof HTMLInputElement) {
+      parentInput.value = String(filters.parent || "");
+    }
+    if (actorInput instanceof HTMLInputElement) {
+      actorInput.value = String(filters.actor || "");
+    }
+    if (windowInput instanceof HTMLSelectElement) {
+      windowInput.value = String(filters.windowHours || "all");
+    }
+    applyExitExecutionHistoryFilters(root);
+  });
+}
+
+function exitExecutionHistoryWindowThresholdMs(value) {
+  const normalized = normalizeExitExecutionHistoryFilterValue(value);
+  if (!normalized || normalized === "all") {
+    return null;
+  }
+  const hours = Number(normalized);
+  if (!Number.isFinite(hours) || hours <= 0) {
+    return null;
+  }
+  return Date.now() - (hours * 60 * 60 * 1000);
+}
+
+async function applyExitExecutionHistoryWorkspaceFilters(target = null) {
+  const historyState = activeExitExecutionHistoryState();
+  historyState.offset = 0;
+  syncExitExecutionHistoryFiltersAcrossViews(activeExitExecutionHistoryView());
+  if (state.activeView === "exitExecution") {
+    syncActiveViewLocationState({ pushHistory: false });
+  }
+  await refreshDashboard({ manual: true });
+  scrollExitExecutionWorkspaceIntoView(target);
+}
+
+async function resetExitExecutionHistoryWorkspaceFilters(target = null) {
+  const riskHistoryState = ensureExitExecutionHistoryState("risk");
+  const exitExecutionHistoryState = ensureExitExecutionHistoryState("exitExecution");
+  Object.assign(riskHistoryState, DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS, { offset: 0 });
+  Object.assign(exitExecutionHistoryState, DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS, { offset: 0 });
+  if (state.activeView === "exitExecution") {
+    syncActiveViewLocationState({ pushHistory: false });
+  }
+  syncExitExecutionHistoryFilterRoots();
+  await refreshDashboard({ manual: true });
+  scrollExitExecutionWorkspaceIntoView(target);
+}
+
+async function paginateExitExecutionHistory(direction, target = null) {
+  const historyState = activeExitExecutionHistoryState();
+  const limit = Math.max(Number(historyState.limit) || 20, 1);
+  const currentOffset = Math.max(Number(historyState.offset) || 0, 0);
+  let nextOffset = currentOffset;
+  if (direction === "next") {
+    nextOffset = currentOffset + limit;
+  } else if (direction === "prev") {
+    nextOffset = Math.max(currentOffset - limit, 0);
+  } else {
+    nextOffset = 0;
+  }
+  historyState.offset = nextOffset;
+  if (state.activeView === "exitExecution") {
+    syncActiveViewLocationState({ pushHistory: false });
+  }
+  await refreshDashboard({ manual: true });
+  scrollExitExecutionWorkspaceIntoView(target);
+}
+
+function scrollExitExecutionWorkspaceIntoView(target = null) {
+  const workspace = document.getElementById(state.activeView === "exitExecution" ? "exit-execution-workspace" : "risk-exit-workspace");
+  if (workspace instanceof HTMLElement) {
+    workspace.scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  if (target instanceof HTMLElement) {
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
 }
 
 function setActionPending(target, pendingLabel) {
@@ -1291,6 +1798,17 @@ function shouldRenderLoadingState(view) {
   return isBootstrapping() && !hasReadyView(view);
 }
 
+function setPendingPanels(panelKeys = [], pending = true) {
+  panelKeys.forEach((key) => {
+    if (!key) return;
+    if (pending) {
+      state.pendingPanels[key] = true;
+      return;
+    }
+    delete state.pendingPanels[key];
+  });
+}
+
 function renderLoadingView() {
   const html = loadingMarkupForView(state.activeView);
   if (state.activeView === "overview" && nodes.overviewContent) {
@@ -1311,6 +1829,10 @@ function renderLoadingView() {
   }
   if (state.activeView === "risk" && nodes.riskContent) {
     patchHtml(nodes.riskContent, html);
+    return;
+  }
+  if (state.activeView === "exitExecution" && nodes.exitExecutionContent) {
+    patchHtml(nodes.exitExecutionContent, html);
     return;
   }
   if (state.activeView === "replay" && nodes.replayContent) {
@@ -1337,6 +1859,7 @@ function renderRefreshIndicators() {
     ["strategy", nodes.strategyContent],
     ["execution", nodes.executionContent],
     ["risk", nodes.riskContent],
+    ["exitExecution", nodes.exitExecutionContent],
     ["replay", nodes.replayContent],
     ["aiAnalysis", nodes.aiAnalysisContent],
     ["aiConfig", nodes.aiConfigContent],
@@ -1395,7 +1918,7 @@ function loadingMarkupForView(view) {
     `;
   }
 
-  if (view === "strategy" || view === "execution" || view === "risk" || view === "replay" || view === "aiAnalysis" || view === "aiConfig" || view === "admin") {
+  if (view === "strategy" || view === "execution" || view === "risk" || view === "exitExecution" || view === "replay" || view === "aiAnalysis" || view === "aiConfig" || view === "admin") {
     return `
       <div class="panel-grid skeleton-grid" aria-hidden="true">
         <section class="surface-card hero-card skeleton-surface skeleton-card span-7">
@@ -1464,6 +1987,7 @@ function resolveViewFromLocation() {
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/ui";
   if (pathname === "/" || pathname === "/ui" || pathname === "/ui/home") return "home";
   if (pathname === "/ui/ai") return "aiAnalysis";
+  if (pathname === "/ui/exit-execution") return "exitExecution";
   const match = Object.entries(VIEW_ROUTES).find(([, route]) => route === pathname);
   return match?.[0] || "home";
 }

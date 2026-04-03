@@ -136,7 +136,7 @@ class OrderStateMachine:
                 "average_fill_price": average_fill_price,
                 "fees": max(current.fees, incoming.fees),
                 "cancel_reason": incoming.cancel_reason or current.cancel_reason,
-                "execution_error": incoming.execution_error or current.execution_error,
+                "execution_error": self._merge_execution_error(current=current, incoming=incoming),
                 "submission_payload": incoming.submission_payload or current.submission_payload,
             }
         )
@@ -182,9 +182,30 @@ class OrderStateMachine:
                     current.last_exchange_update_ts,
                     incoming.last_exchange_update_ts,
                 ),
-                "execution_error": current.execution_error or incoming.execution_error,
+                "execution_error": incoming.execution_error or current.execution_error,
             }
         )
+
+    @staticmethod
+    def _merge_execution_error(*, current: OrderState, incoming: OrderState) -> str | None:
+        if incoming.execution_error:
+            return incoming.execution_error
+        current_error = current.execution_error
+        if current_error is None:
+            return None
+        if "_unknown_check_exchange:" not in current_error:
+            return current_error
+        if current_error.startswith("submission_unknown_check_exchange:"):
+            if incoming.exchange_order_id and incoming.exchange_order_id != current.exchange_order_id:
+                return None
+            if incoming.status in {"PARTIALLY_FILLED", "FILLED", "CANCELED", "EXPIRED", "REJECTED", "FAILED"}:
+                return None
+            return current_error
+        if current_error.startswith("cancel_unknown_check_exchange:"):
+            if incoming.status in {"CANCELED", "FILLED", "EXPIRED", "FAILED"}:
+                return None
+            return current_error
+        return current_error
 
     def _normalize(self, state: OrderState) -> OrderState:
         filled_qty = min(max(state.filled_qty, Decimal("0")), state.requested_qty)
