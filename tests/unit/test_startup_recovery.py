@@ -119,7 +119,15 @@ class TestStartupRecovery(unittest.TestCase):
         )
 
         self.assertEqual(refreshed, [])
-        self.assertEqual(notes, ["startup_exit_execution_parent_refresh_failed:RuntimeError"])
+        self.assertEqual(
+            notes,
+            [
+                "startup_exit_execution_parent_refresh_failed:RuntimeError",
+                "startup_exit_execution_parent_refresh_stage:refresh_exit_execution_intents",
+                "startup_exit_execution_parent_refresh_scope:spot/cash/BTC-USDT/allowed_symbols=1",
+                "startup_exit_execution_parent_refresh_message:boom",
+            ],
+        )
 
     def test_startup_review_overlay_promotes_parent_refresh_failure_into_resume_block(self) -> None:
         overlaid = apply_startup_exit_execution_review_overlay(
@@ -137,6 +145,18 @@ class TestStartupRecovery(unittest.TestCase):
         self.assertEqual(
             overlaid.unknown_state_details[0]["kind"],
             "startup_exit_execution_parent_refresh_failed",
+        )
+        self.assertEqual(
+            overlaid.unknown_state_details[0]["refresh_stage"],
+            "refresh_exit_execution_intents",
+        )
+        self.assertEqual(
+            overlaid.unknown_state_details[0]["scope_summary"],
+            "unknown_scope",
+        )
+        self.assertEqual(
+            overlaid.unknown_state_details[0]["exception_message"],
+            "no_exception_message",
         )
         self.assertIn(
             "startup_exit_execution_overlay_count:1",
@@ -364,7 +384,12 @@ class TestStartupRecovery(unittest.TestCase):
         status = apply_startup_exit_execution_review_overlay(
             base_status=RecoveryStatus(status="recovered", recovery_state="normal_operation", safe_startup=True),
             parent_intents=[],
-            refresh_notes=["startup_exit_execution_parent_refresh_failed:RuntimeError"],
+            refresh_notes=[
+                "startup_exit_execution_parent_refresh_failed:RuntimeError",
+                "startup_exit_execution_parent_refresh_stage:refresh_exit_execution_intents",
+                "startup_exit_execution_parent_refresh_scope:derivatives/cross/BTC-USDT-SWAP/allowed_symbols=1",
+                "startup_exit_execution_parent_refresh_message:boom",
+            ],
         )
 
         notes = persist_startup_exit_execution_state_snapshot(
@@ -372,7 +397,12 @@ class TestStartupRecovery(unittest.TestCase):
             scope=scope,
             status=status,
             parent_intents=[],
-            refresh_notes=["startup_exit_execution_parent_refresh_failed:RuntimeError"],
+            refresh_notes=[
+                "startup_exit_execution_parent_refresh_failed:RuntimeError",
+                "startup_exit_execution_parent_refresh_stage:refresh_exit_execution_intents",
+                "startup_exit_execution_parent_refresh_scope:derivatives/cross/BTC-USDT-SWAP/allowed_symbols=1",
+                "startup_exit_execution_parent_refresh_message:boom",
+            ],
         )
 
         self.assertEqual(notes, ["startup_exit_execution_review_snapshot_saved"])
@@ -381,3 +411,15 @@ class TestStartupRecovery(unittest.TestCase):
         assert snapshot is not None
         self.assertEqual(snapshot.details_json["source"], "startup_exit_execution_review")
         self.assertEqual(snapshot.details_json["review_items"][0]["kind"], "startup_exit_execution_parent_refresh_failed")
+        self.assertEqual(
+            snapshot.details_json["review_items"][0]["refresh_stage"],
+            "refresh_exit_execution_intents",
+        )
+        self.assertEqual(
+            snapshot.details_json["review_items"][0]["scope_summary"],
+            "derivatives/cross/BTC-USDT-SWAP/allowed_symbols=1",
+        )
+        self.assertEqual(
+            snapshot.details_json["review_items"][0]["exception_message"],
+            "boom",
+        )

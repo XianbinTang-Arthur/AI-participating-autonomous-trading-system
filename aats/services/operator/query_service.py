@@ -3015,7 +3015,7 @@ class OperatorQueryService:
 
     @staticmethod
     def _legacy_automation_state(item: dict[str, Any] | None) -> str:
-        """Compatibility-only coarse legacy automation state projection."""
+        """Compatibility-only coarse legacy automation state projection; do not use for primary diagnosis."""
         payload = item if isinstance(item, dict) else {}
         compatibility = payload.get("compatibility") if isinstance(payload.get("compatibility"), dict) else {}
         value = compatibility.get("legacy_automation_state", payload.get("automation_state"))

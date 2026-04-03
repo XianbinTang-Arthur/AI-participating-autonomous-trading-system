@@ -18,6 +18,11 @@ from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.recovery_control.reconciliation_classifier import RecoveryReconciliationClassifier
 from aats.services.runtime_scope import latest_reconciliation_for_scope, latest_snapshot_for_scope, runtime_state_scope
 
+STARTUP_EXIT_EXECUTION_PARENT_REFRESH_FAILED_PREFIX = "startup_exit_execution_parent_refresh_failed"
+STARTUP_EXIT_EXECUTION_PARENT_REFRESH_STAGE_PREFIX = "startup_exit_execution_parent_refresh_stage"
+STARTUP_EXIT_EXECUTION_PARENT_REFRESH_SCOPE_PREFIX = "startup_exit_execution_parent_refresh_scope"
+STARTUP_EXIT_EXECUTION_PARENT_REFRESH_MESSAGE_PREFIX = "startup_exit_execution_parent_refresh_message"
+
 
 def startup_refresh_exit_execution_truth(
     *,
@@ -36,27 +41,72 @@ def startup_refresh_exit_execution_truth(
             scope=scope,
         )
     except Exception as exc:  # pragma: no cover - guarded by dedicated unit test via fake repo
-        return [], [f"startup_exit_execution_parent_refresh_failed:{type(exc).__name__}"]
+        return [], [
+            f"{STARTUP_EXIT_EXECUTION_PARENT_REFRESH_FAILED_PREFIX}:{type(exc).__name__}",
+            f"{STARTUP_EXIT_EXECUTION_PARENT_REFRESH_STAGE_PREFIX}:refresh_exit_execution_intents",
+            f"{STARTUP_EXIT_EXECUTION_PARENT_REFRESH_SCOPE_PREFIX}:{_startup_refresh_scope_summary(scope)}",
+            f"{STARTUP_EXIT_EXECUTION_PARENT_REFRESH_MESSAGE_PREFIX}:{_startup_refresh_exception_message(exc)}",
+        ]
     if not refreshed:
         return [], []
     return list(refreshed), [f"startup_exit_execution_parent_refresh_count:{len(refreshed)}"]
 
 
+def _startup_refresh_scope_summary(scope: object | None) -> str:
+    if scope is None:
+        return "unknown_scope"
+    product_type = str(getattr(scope, "product_type", "") or "unknown_product")
+    margin_mode = str(getattr(scope, "margin_mode", "") or "unknown_margin")
+    default_symbol = str(getattr(scope, "default_symbol", "") or "unknown_symbol")
+    allowed_symbols = tuple(getattr(scope, "allowed_symbols", ()) or ())
+    return f"{product_type}/{margin_mode}/{default_symbol}/allowed_symbols={len(allowed_symbols)}"
+
+
+def _startup_refresh_exception_message(exc: Exception, *, limit: int = 160) -> str:
+    normalized = " ".join(str(exc or "").split()) or "no_exception_message"
+    return normalized[:limit]
+
+
+def _startup_refresh_note_value(refresh_notes: list[str] | None, prefix: str) -> str | None:
+    for note in refresh_notes or []:
+        if str(note or "").startswith(f"{prefix}:"):
+            return str(note).partition(":")[2] or None
+    return None
+
+
 def _startup_exit_execution_refresh_failure_items(*, refresh_notes: list[str] | None) -> list[dict[str, object]]:
     items: list[dict[str, object]] = []
     for note in refresh_notes or []:
-        if not str(note or "").startswith("startup_exit_execution_parent_refresh_failed:"):
+        if not str(note or "").startswith(f"{STARTUP_EXIT_EXECUTION_PARENT_REFRESH_FAILED_PREFIX}:"):
             continue
         _, _, exception_type = str(note).partition(":")
         exception_label = exception_type or "UnknownError"
+        refresh_stage = _startup_refresh_note_value(
+            refresh_notes,
+            STARTUP_EXIT_EXECUTION_PARENT_REFRESH_STAGE_PREFIX,
+        ) or "refresh_exit_execution_intents"
+        scope_summary = _startup_refresh_note_value(
+            refresh_notes,
+            STARTUP_EXIT_EXECUTION_PARENT_REFRESH_SCOPE_PREFIX,
+        ) or "unknown_scope"
+        exception_message = _startup_refresh_note_value(
+            refresh_notes,
+            STARTUP_EXIT_EXECUTION_PARENT_REFRESH_MESSAGE_PREFIX,
+        ) or "no_exception_message"
         items.append(
             {
                 "kind": "startup_exit_execution_parent_refresh_failed",
                 "summary": f"启动期退出任务真相刷新失败：{exception_label}",
-                "detail": f"启动恢复阶段没有成功重建退出任务聚合真相，恢复视图可能不完整。原始记录：{note}",
+                "detail": (
+                    "启动恢复阶段没有成功重建退出任务聚合真相，恢复视图可能不完整。"
+                    f"stage={refresh_stage} | scope={scope_summary} | message={exception_message} | raw={note}"
+                ),
                 "blocks_resume": True,
                 "operator_review_required": True,
                 "exception_type": exception_label,
+                "refresh_stage": refresh_stage,
+                "scope_summary": scope_summary,
+                "exception_message": exception_message,
             }
         )
     return items

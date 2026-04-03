@@ -105,7 +105,7 @@ class TestSleeveRoutingComposer(TestCase):
         self.assertEqual(decision.composed_delta_position_qty, Decimal("0"))
         self.assertEqual(
             decision.composed_legs[0].note,
-            "composition:permission_denied:advisory_only",
+            "execution_permission:denied | composition:advisory_only",
         )
 
     def test_permission_denied_with_inventory_composes_hold_current(self) -> None:
@@ -122,7 +122,7 @@ class TestSleeveRoutingComposer(TestCase):
         self.assertEqual(decision.execution_behavior, "hold_current")
         self.assertEqual(
             decision.composed_legs[0].note,
-            "composition:permission_denied:hold_current",
+            "execution_permission:denied | composition:hold_current",
         )
 
     def test_approved_with_positive_scale_composes_override_target(self) -> None:
@@ -146,7 +146,7 @@ class TestSleeveRoutingComposer(TestCase):
         self.assertEqual(decision.composed_delta_position_qty, Decimal("0.125"))
         self.assertEqual(
             decision.composed_legs[0].note,
-            "composition:approved:override_target",
+            "execution_permission:approved | composition:override_target",
         )
 
     def test_approved_with_zero_budget_preserves_permission_but_suppresses_delta(self) -> None:
@@ -172,7 +172,7 @@ class TestSleeveRoutingComposer(TestCase):
         self.assertEqual(decision.route_action, "advisory_only")
         self.assertEqual(
             decision.composed_legs[0].note,
-            "composition:budget_zero_suppressed:advisory_only",
+            "execution_permission:approved | budget_control:zero_suppressed | composition:advisory_only",
         )
 
     def test_protective_override_path(self) -> None:
@@ -195,5 +195,5 @@ class TestSleeveRoutingComposer(TestCase):
         self.assertEqual(decision.composed_delta_position_qty, Decimal("0.25"))
         self.assertEqual(
             decision.composed_legs[0].note,
-            "composition:protective_override:override_target",
+            "execution_permission:protective_override | composition:protective_execute",
         )

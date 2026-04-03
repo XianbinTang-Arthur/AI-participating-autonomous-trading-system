@@ -4048,7 +4048,7 @@ console.log(JSON.stringify({
         self.assertIn('"hasRetryButton":true', stdout)
         self.assertIn('"hasRetryDisabled":true', stdout)
 
-    def test_risk_view_surfaces_independent_recovery_snapshot_versions(self) -> None:
+    def test_risk_view_hides_independent_recovery_snapshot_card(self) -> None:
         script = """
 import { renderRiskView } from './aats/api/static/modules/views/risk-view.js';
 
@@ -4089,16 +4089,16 @@ const html = renderRiskView({
 
 console.log(JSON.stringify({
   hasIndependentRecoveryCard: html.includes('独立双书恢复快照'),
-  showsStateVersion: html.includes('状态机版本') && html.includes('>2<'),
-  showsSemanticsVersion: html.includes('稳定性语义版本') && html.includes('independent:decision_independent_1:long:open'),
+  hasStateVersionDetail: html.includes('状态机版本') && html.includes('>2<'),
+  hasSemanticsVersionDetail: html.includes('稳定性语义版本') && html.includes('independent:decision_independent_1:long:open'),
 }));
 """
         result = _run_node_module(script, encoding="utf-8")
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         stdout = result.stdout or ""
-        self.assertIn('"hasIndependentRecoveryCard":true', stdout)
-        self.assertIn('"showsStateVersion":true', stdout)
-        self.assertIn('"showsSemanticsVersion":true', stdout)
+        self.assertIn('"hasIndependentRecoveryCard":false', stdout)
+        self.assertIn('"hasStateVersionDetail":false', stdout)
+        self.assertIn('"hasSemanticsVersionDetail":false', stdout)
 
     def test_risk_view_surfaces_leg_level_reconciliation_summary(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

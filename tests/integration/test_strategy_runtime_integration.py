@@ -192,7 +192,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("automation_contracted_count", payload["summary"])
         self.assertNotIn("automation_paused_count", payload["summary"])
         self.assertIn(
-            "coarse compatibility projection",
+            "coarse projection",
             payload["summary"]["compatibility"]["legacy_automation_state_note"],
         )
         legacy_state_counts = payload["summary"]["compatibility"]["legacy_automation_state_counts"]
@@ -218,6 +218,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("expected_cost_bps", dca_candidate["metrics"])
         self.assertEqual(dca_control["execution_control_mode"], "approved")
         self.assertEqual(dca_control["execution_behavior"], "execute_target")
+        self.assertTrue(dca_control["execution_prerequisites_supported"])
         self.assertEqual(dca_control["compatibility"]["legacy_automation_state"], "active")
         self.assertEqual(
             dca_control["compatibility"]["legacy_automation_projection"]["source_execution_behavior"],
@@ -379,6 +380,15 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "批准，但最终执行行为仍是压零保留",
             payload["summary"]["execution_behavior_summary"]["summary"],
+        )
+        intents_by_decision = {
+            item["decision_id"]: item for item in payload["recent_sleeve_intents"]
+        }
+        self.assertTrue(
+            intents_by_decision["dec-permission-denied"]["execution_prerequisites_supported"]
+        )
+        self.assertTrue(
+            intents_by_decision["dec-budget-zero"]["execution_prerequisites_supported"]
         )
 
     async def test_dca_pullback_only_runtime_requires_anchor_history_before_activation(self) -> None:

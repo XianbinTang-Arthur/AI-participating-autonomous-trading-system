@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 
+.codex
 .env
 .env.local
 .env.*
