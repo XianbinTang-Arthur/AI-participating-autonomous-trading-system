@@ -2802,11 +2802,11 @@ class OperatorQueryService:
                 if item.get("family") == selected_family:
                     selected_candidate_payload = item
                     break
-        active_automation = [item for item in automation_decisions if item.get("automation_state") == "active"]
+        active_automation = [item for item in automation_decisions if self._legacy_automation_state(item) == "active"]
         contracted_automation = [
-            item for item in automation_decisions if item.get("automation_state") in {"contracted", "protective_only"}
+            item for item in automation_decisions if self._legacy_automation_state(item) in {"contracted", "protective_only"}
         ]
-        paused_automation = [item for item in automation_decisions if item.get("automation_state") == "paused"]
+        paused_automation = [item for item in automation_decisions if self._legacy_automation_state(item) == "paused"]
         entry_execution_guard = non_protective_entry_execution_guard(self.runtime.settings)
         entry_auto_execution_config_source = getattr(
             self.runtime,
@@ -2829,7 +2829,6 @@ class OperatorQueryService:
         summary = {
             "configured_active_family": configured_family,
             "automatic_selection_enabled": bool(self.runtime.settings.strategy_family_auto_selection_enabled),
-            "auto_parallel_enabled": bool(self.runtime.settings.effective_strategy_sleeve_auto_execution_enabled),
             "entry_execution_guard": entry_execution_guard,
             "entry_auto_execution_enabled": bool(
                 self.runtime.settings.effective_strategy_sleeve_auto_execution_enabled
@@ -2924,13 +2923,6 @@ class OperatorQueryService:
             "protective_fallback_active": bool(
                 latest_snapshot is not None and latest_snapshot.get("selected_route_action") == "protective_fallback"
             ),
-            "automation_active_count": len(active_automation),
-            "automation_contracted_count": len(contracted_automation),
-            "automation_paused_count": len(paused_automation),
-            "latest_automation_states": {
-                item.get("family"): item.get("automation_state")
-                for item in automation_decisions
-            },
             "latest_automation_execution_control_modes": {
                 item.get("family"): self._sleeve_execution_control_mode(item)
                 for item in automation_decisions
@@ -2946,6 +2938,17 @@ class OperatorQueryService:
                 route_action=None if latest_snapshot is None else latest_snapshot.get("selected_route_action"),
                 family_action=None if latest_snapshot is None else latest_snapshot.get("selected_family_action"),
             ),
+            "compatibility": {
+                "legacy_automation_state_counts": {
+                    "active": len(active_automation),
+                    "contracted": len(contracted_automation),
+                    "paused": len(paused_automation),
+                },
+                "legacy_latest_automation_states": {
+                    item.get("family"): self._legacy_automation_state(item)
+                    for item in automation_decisions
+                },
+            },
         }
         independent_expected_vs_realized_summary = self._independent_expected_vs_realized_summary()
         independent_adaptive_summary = self._independent_adaptive_summary_from_payload(latest_target_payload)
@@ -3006,6 +3009,13 @@ class OperatorQueryService:
             "smart_arbitrage_cost_summary": smart_arbitrage_cost_summary,
             "truth_source": "strategy_runtime_repo_plus_event_store" if strategy_runtime_repo is not None else "strategy_coordinator_snapshots",
         }
+
+    @staticmethod
+    def _legacy_automation_state(item: dict[str, Any] | None) -> str:
+        payload = item if isinstance(item, dict) else {}
+        compatibility = payload.get("compatibility") if isinstance(payload.get("compatibility"), dict) else {}
+        value = compatibility.get("legacy_automation_state", payload.get("automation_state"))
+        return str(value or "").strip().lower()
 
     @staticmethod
     def _sleeve_execution_control_mode(item: dict[str, Any] | None) -> str:

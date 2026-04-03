@@ -38,8 +38,8 @@ def _raw(**overrides) -> RawSleeveCandidateInputs:
         "metrics": {},
         "candidate_state": "ready",
         "candidate_enabled": True,
-        "candidate_selectable": True,
         "candidate_execution_compatible": True,
+        "candidate_selectable": True,
         "candidate_score": 0.7,
         "candidate_confidence": 0.8,
         "runtime_supported": True,
@@ -103,3 +103,13 @@ class TestSleeveExecutionPermissionPolicy(TestCase):
         self.assertFalse(decision.approved_for_execution)
         self.assertEqual(decision.permission_mode, "advisory_only")
         self.assertIn("candidate_disabled", decision.reason_codes)
+
+    def test_candidate_execution_incompatible_denies_execution_even_when_runtime_supported(self) -> None:
+        policy = SleeveExecutionPermissionPolicy(_settings(strategy_sleeve_auto_parallel_enabled=True))
+
+        decision = policy.evaluate(raw=_raw(candidate_execution_compatible=False, runtime_supported=True))
+
+        self.assertFalse(decision.approved_for_execution)
+        self.assertEqual(decision.permission_mode, "unsupported")
+        self.assertFalse(decision.candidate_execution_compatible)
+        self.assertIn("candidate_execution_incompatible", decision.reason_codes)

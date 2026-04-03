@@ -3037,7 +3037,7 @@ class TestStrategyCoordinator(unittest.TestCase):
 
         dca_candidate = next(item for item in snapshot.candidates if item.family == "dca")
         dca_control = next(item for item in snapshot.automation_decisions if item.family == "dca")
-        self.assertEqual(dca_control.automation_state, "paused")
+        self.assertEqual(dca_control.automation_state, "contracted")
         self.assertTrue(dca_control.automatic_enabled)
         self.assertTrue(dca_control.approved_for_execution)
         self.assertTrue(dca_control.budget_zero_suppressed)
@@ -3143,11 +3143,11 @@ class TestStrategyCoordinator(unittest.TestCase):
         grid_control = next(item for item in snapshot.automation_decisions if item.family == "spot_grid")
         grid_candidate = next(item for item in snapshot.candidates if item.family == "spot_grid")
 
-        self.assertEqual(grid_control.automation_state, "protective_only")
+        self.assertEqual(grid_control.automation_state, "contracted")
         self.assertLess(grid_control.budget_multiplier, Decimal("1"))
         self.assertEqual(grid_control.permission_mode, "approved")
         self.assertIn("reconciliation_contraction_active", grid_control.budget_reason_codes)
-        self.assertEqual(grid_candidate.metrics["auto_automation_state"], "protective_only")
+        self.assertEqual(grid_candidate.metrics["auto_automation_state"], "contracted")
         self.assertEqual(grid_candidate.metrics["auto_budget_multiplier"], Decimal("0.4"))
 
     def test_auto_parallel_distinguishes_permission_denied_from_budget_zero_suppression(self) -> None:

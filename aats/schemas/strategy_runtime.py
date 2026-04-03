@@ -87,7 +87,18 @@ class StrategySleeveAutomationDecision(SchemaBase):
     permission_mode: str = "approved"
     execution_control_mode: StrategySleeveExecutionControlMode | None = None
     execution_behavior: StrategySleeveExecutionBehavior | None = None
-    automation_state: StrategySleeveAutomationState = "active"
+    automation_state: StrategySleeveAutomationState = Field(
+        default="active",
+        description=(
+            "兼容字段（compatibility-only）；新的 operator/runtime 诊断应优先使用 "
+            "execution_control_mode 与 execution_behavior，legacy 值同步下沉到 "
+            "compatibility.legacy_automation_state。"
+        ),
+    )
+    compatibility: dict[str, Any] = Field(
+        default_factory=dict,
+        description="兼容窗口；legacy 自动控制字段镜像统一保留在这里，供历史消费者只读兼容。",
+    )
     budget_multiplier: Decimal = Decimal("1")
     effective_scale: Decimal = Decimal("1")
     allocator_weight: Decimal = Decimal("1")

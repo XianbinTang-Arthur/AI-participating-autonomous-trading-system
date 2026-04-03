@@ -2105,6 +2105,9 @@ const html = renderStrategyView({
           strategy_sleeve_id: 'sleeve_protective',
           family: 'protective',
           automation_state: 'protective_only',
+          compatibility: {
+            legacy_automation_state: 'protective_only',
+          },
           execution_control_mode: 'protective_override',
           execution_behavior: 'protective_execute',
           budget_multiplier: 1,
@@ -2164,6 +2167,8 @@ console.log(JSON.stringify({
   showsProtectiveOverrideRowMeta: html.includes('保护性例外')
     && html.includes('保护性执行')
     && html.includes('保护性例外仍可执行'),
+  hidesLegacyAutomationStateLabel: !html.includes('protective_only'),
+  hidesLegacyAutomationStateField: !html.includes('legacy_automation_state'),
 }));
 """
         result = subprocess.run(
@@ -2180,6 +2185,8 @@ console.log(JSON.stringify({
         self.assertIn('"showsExecutionBehaviorSummaryKv":true', result.stdout)
         self.assertIn('"showsExecutionBehaviorDistributionKv":true', result.stdout)
         self.assertIn('"showsProtectiveOverrideRowMeta":true', result.stdout)
+        self.assertIn('"hidesLegacyAutomationStateLabel":true', result.stdout)
+        self.assertIn('"hidesLegacyAutomationStateField":true', result.stdout)
 
     def test_strategy_view_hides_derivatives_only_reference_blocks_for_spot_runtime(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

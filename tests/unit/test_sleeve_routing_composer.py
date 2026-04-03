@@ -56,6 +56,7 @@ def _permission(**overrides) -> ExecutionPermissionDecision:
         "configured_auto_execution_enabled": True,
         "runtime_supported": True,
         "candidate_enabled": True,
+        "candidate_execution_compatible": True,
         "protective_intent": False,
         "approved_for_execution": True,
         "blocks_non_protective_execution": False,

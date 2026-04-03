@@ -5,6 +5,7 @@ from collections.abc import Iterable
 APPROVED_FOR_NON_PROTECTIVE_EXECUTION = "approved_for_non_protective_execution"
 AUTO_EXECUTION_DISABLED_BY_PROFILE = "auto_execution_disabled_by_profile"
 CANDIDATE_DISABLED = "candidate_disabled"
+CANDIDATE_EXECUTION_INCOMPATIBLE = "candidate_execution_incompatible"
 RUNTIME_NOT_SUPPORTED = "runtime_not_supported"
 PROTECTIVE_INTENT_OVERRIDE = "protective_intent_override"
 

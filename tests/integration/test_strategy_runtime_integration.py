@@ -187,7 +187,22 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(payload["summary"]["latest_portfolio_approved_notional"])
         self.assertEqual(payload["latest_applied_target"]["strategy_family"], "dca")
         self.assertIsNotNone(payload["latest_applied_target"]["strategy_sleeve_id"])
-        self.assertTrue(payload["summary"]["auto_parallel_enabled"])
+        self.assertTrue(payload["summary"]["entry_auto_execution_enabled"])
+        self.assertNotIn("automation_active_count", payload["summary"])
+        self.assertNotIn("automation_contracted_count", payload["summary"])
+        self.assertNotIn("automation_paused_count", payload["summary"])
+        legacy_state_counts = payload["summary"]["compatibility"]["legacy_automation_state_counts"]
+        automation_decisions = payload["latest_snapshot"]["automation_decisions"]
+        self.assertEqual(
+            legacy_state_counts["active"],
+            sum(
+                1
+                for item in automation_decisions
+                if item.get("compatibility", {}).get("legacy_automation_state") == "active"
+            ),
+        )
+        self.assertEqual(legacy_state_counts["contracted"], 0)
+        self.assertEqual(legacy_state_counts["paused"], 0)
         self.assertTrue(payload["recent_budget_profiles"])
         self.assertTrue(payload["recent_budget_assignments"])
         self.assertTrue(payload["recent_budget_snapshots"])
@@ -197,7 +212,10 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("target_account_position_qty", dca_candidate["metrics"])
         self.assertIn("auto_budget_multiplier", dca_candidate["metrics"])
         self.assertIn("expected_cost_bps", dca_candidate["metrics"])
-        self.assertEqual(dca_control["automation_state"], "active")
+        self.assertEqual(dca_control["execution_control_mode"], "approved")
+        self.assertEqual(dca_control["execution_behavior"], "execute_target")
+        self.assertEqual(dca_control["compatibility"]["legacy_automation_state"], "active")
+        self.assertEqual(dca_control["automation_state"], dca_control["compatibility"]["legacy_automation_state"])
         self.assertEqual(
             payload["configured_parameters"]["dca"]["quote_budget_per_cycle"],
             100.0,
@@ -215,6 +233,10 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         payload = strategy_runtime.json()
         self.assertIn("entry_execution_guard", payload["summary"])
         self.assertTrue(payload["summary"]["entry_execution_guard"]["active"])
+        self.assertNotIn("auto_parallel_enabled", payload["summary"])
+        self.assertNotIn("automation_active_count", payload["summary"])
+        self.assertNotIn("automation_contracted_count", payload["summary"])
+        self.assertNotIn("automation_paused_count", payload["summary"])
         self.assertFalse(payload["configured_parameters"]["strategy_sleeve_auto_execution_enabled"])
         self.assertNotIn("strategy_sleeve_auto_parallel_enabled", payload["configured_parameters"])
         self.assertEqual(
@@ -329,6 +351,14 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             payload["summary"]["execution_control_summary"]["primary_mode"],
             "permission_denied",
+        )
+        self.assertEqual(
+            payload["summary"]["compatibility"]["legacy_automation_state_counts"],
+            {
+                "active": 0,
+                "contracted": 0,
+                "paused": 0,
+            },
         )
         self.assertIn(
             "权限未通过",
@@ -558,7 +588,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(payload["summary"]["latest_budget_snapshot_count"], 1)
         self.assertGreaterEqual(payload["summary"]["latest_netting_decision_count"], 0)
         self.assertTrue(payload["summary"]["automatic_selection_enabled"])
-        self.assertTrue(payload["summary"]["auto_parallel_enabled"])
+        self.assertTrue(payload["summary"]["entry_auto_execution_enabled"])
         self.assertEqual(payload["latest_bundle"]["status"], "submitted")
         self.assertIsNotNone(payload["latest_bundle"]["strategy_sleeve_id"])
         self.assertIsNotNone(payload["latest_bundle"]["allocation_id"])
@@ -592,7 +622,16 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertIn("pair_registry_warning_codes", smart_arbitrage_candidate["metrics"])
         self.assertIn("pair_registry_error_codes", smart_arbitrage_candidate["metrics"])
         self.assertEqual(smart_arbitrage_candidate["metrics"]["pair_registry_source"], "coordinator_resolved")
-        self.assertEqual(smart_arbitrage_control["automation_state"], "active")
+        self.assertEqual(smart_arbitrage_control["execution_control_mode"], "approved")
+        self.assertEqual(
+            smart_arbitrage_control["execution_behavior"],
+            "execute_target" if smart_arbitrage_candidate["route_action"] == "override_target" else "hold_current",
+        )
+        self.assertEqual(smart_arbitrage_control["compatibility"]["legacy_automation_state"], "active")
+        self.assertEqual(
+            smart_arbitrage_control["automation_state"],
+            smart_arbitrage_control["compatibility"]["legacy_automation_state"],
+        )
         self.assertIsNotNone(payload["summary"]["latest_hedge_protected_notional"])
         self.assertTrue(payload["recent_budget_profiles"])
         self.assertTrue(payload["recent_budget_assignments"])

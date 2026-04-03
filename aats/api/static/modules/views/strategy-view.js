@@ -27,6 +27,16 @@ export function renderStrategySections(data) {
   const executionControlSummary = strategyRuntimeSummary.execution_control_summary || {};
   const executionBehaviorCounts = strategyRuntimeSummary.execution_behavior_counts || {};
   const executionBehaviorSummary = strategyRuntimeSummary.execution_behavior_summary || {};
+  const entryAutoExecutionEnabled = Boolean(
+    strategyRuntimeSummary.entry_auto_execution_enabled
+    ?? strategyRuntimeSummary.auto_parallel_enabled
+    ?? strategyRuntime.configured_parameters?.strategy_sleeve_auto_execution_enabled
+  );
+  const executeTargetCount = Number(executionBehaviorCounts.execute_target || 0);
+  const managedOrSuppressedCount = Number(executionBehaviorCounts.hold_current || 0)
+    + Number(executionBehaviorCounts.suppressed_after_approval || 0)
+    + Number(executionBehaviorCounts.protective_execute || 0);
+  const advisoryOnlyCount = Number(executionBehaviorCounts.advisory_only || 0);
   const entryAutoExecutionConfigSource =
     strategyRuntimeSummary.entry_auto_execution_config_source
     || strategyRuntime.configured_parameters?.strategy_sleeve_auto_execution_config_source
@@ -219,38 +229,38 @@ export function renderStrategySections(data) {
     }),
     strategyAutomation: surfaceCard({
       title: "自动预算与启停",
-      kicker: "全自动并行运行",
+      kicker: "自动执行与预算控制",
       copy: "这里保留当前最关键的自动控制结果，更多预算细节已经收进调度卡的展开区。",
       classes: "strategy-compact-card",
       content: `
         ${summaryStrip([
           {
-            label: "自动并行运行",
-            value: strategyRuntimeSummary.auto_parallel_enabled ? "已启用" : "未启用",
+            label: "自动执行主开关",
+            value: entryAutoExecutionEnabled ? "已启用" : "未启用",
             meta: entryExecutionGuard.active
               ? (entryExecutionGuard.headline || entryExecutionGuard.summary || "当前非保护性开仓自动执行已降级为仅参考。")
-              : strategyRuntimeSummary.auto_parallel_enabled
+              : entryAutoExecutionEnabled
                 ? "当前按系统规则自动启停和分配预算。"
                 : "当前没有启用 sleeve 自动预算控制。",
-            tone: strategyRuntimeSummary.auto_parallel_enabled ? "positive" : "warning",
+            tone: entryAutoExecutionEnabled ? "positive" : "warning",
           },
           {
-            label: "活跃子策略",
-            value: formatNumber(strategyRuntimeSummary.automation_active_count, 0, "0"),
-            meta: "当前在自动预算内正常运行",
+            label: "直接执行目标",
+            value: formatNumber(executeTargetCount, 0, "0"),
+            meta: "表示当前会继续沿目标仓位进入执行链。",
             tone: "positive",
           },
           {
-            label: "收缩中的子策略",
-            value: formatNumber(strategyRuntimeSummary.automation_contracted_count, 0, "0"),
-            meta: "预算已收缩或只保留保护性管理",
-            tone: strategyRuntimeSummary.automation_contracted_count ? "warning" : "info",
+            label: "保留 / 收缩中的子策略",
+            value: formatNumber(managedOrSuppressedCount, 0, "0"),
+            meta: "包含保持当前仓位、批准后压零、保护性执行。",
+            tone: managedOrSuppressedCount ? "warning" : "info",
           },
           {
-            label: "暂停中的子策略",
-            value: formatNumber(strategyRuntimeSummary.automation_paused_count, 0, "0"),
-            meta: "当前已被系统自动暂停",
-            tone: strategyRuntimeSummary.automation_paused_count ? "danger" : "info",
+            label: "仅参考的子策略",
+            value: formatNumber(advisoryOnlyCount, 0, "0"),
+            meta: "表示当前只保留信号参考，不会自动下单。",
+            tone: advisoryOnlyCount ? "danger" : "info",
           },
         ])}
         ${entryExecutionGuard.active ? callout({
@@ -327,10 +337,10 @@ export function renderStrategySections(data) {
           ],
         ])}
         ${responsiveTable(
-          ["子策略", "自动状态", "预算倍率", "权重", "最近净收益"],
+          ["子策略", "执行 / 控制状态", "预算倍率", "权重", "最近净收益"],
           displayedAutomationDecisions.map((item) => [
             `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
-            `<div><strong>${escapeHtml(readableState(item.automation_state || "unknown"))}</strong><div class="table-meta">${escapeHtml(readableExecutionBehavior(item.execution_behavior || item.metrics?.auto_execution_behavior))} | ${escapeHtml(readableExecutionControlMode(item.execution_control_mode || item.metrics?.auto_execution_control_mode))} | ${escapeHtml(item.operator_summary || "当前没有额外说明")}</div></div>`,
+            `<div><strong>${escapeHtml(readableExecutionBehavior(item.execution_behavior || item.metrics?.auto_execution_behavior))}</strong><div class="table-meta">${escapeHtml(readableExecutionControlMode(item.execution_control_mode || item.metrics?.auto_execution_control_mode))} | ${escapeHtml(item.operator_summary || "当前没有额外说明")}</div></div>`,
             formatNumber(item.budget_multiplier, 2, "0"),
             formatNumber(item.allocator_weight, 2, "0"),
             formatSigned(item.recent_net_pnl),

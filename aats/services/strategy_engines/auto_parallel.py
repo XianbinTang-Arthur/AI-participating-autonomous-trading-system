@@ -16,6 +16,7 @@ from aats.services.strategy_engines.sleeve_execution_permission import SleeveExe
 from aats.services.strategy_engines.sleeve_reason_codes import (
     AUTO_EXECUTION_DISABLED_BY_PROFILE,
     CANDIDATE_DISABLED,
+    CANDIDATE_EXECUTION_INCOMPATIBLE,
     RUNTIME_NOT_SUPPORTED,
 )
 from aats.services.strategy_engines.sleeve_routing_composer import SleeveRoutingComposer
@@ -153,6 +154,12 @@ class StrategySleeveAutoController:
         )
         if not merged_reason_codes:
             merged_reason_codes = ["sleeve_auto_parallel_nominal"]
+        automation_state = self._automation_state(
+            raw=raw,
+            permission=permission,
+            budget=budget,
+            composed=composed,
+        )
         return StrategySleeveAutomationDecision(
             family=raw.family,
             strategy_sleeve_id=raw.strategy_sleeve_id,
@@ -164,12 +171,10 @@ class StrategySleeveAutoController:
             permission_mode=permission.permission_mode,
             execution_control_mode=composed.execution_control_mode,
             execution_behavior=composed.execution_behavior,
-            automation_state=self._automation_state(
-                raw=raw,
-                permission=permission,
-                budget=budget,
-                composed=composed,
-            ),
+            automation_state=automation_state,
+            compatibility={
+                "legacy_automation_state": automation_state,
+            },
             budget_multiplier=budget.effective_scale,
             effective_scale=budget.effective_scale,
             allocator_weight=allocator_weight,
@@ -441,14 +446,18 @@ class StrategySleeveAutoController:
     ) -> str:
         if permission.is_protective_override:
             return "protective_only"
-        if RUNTIME_NOT_SUPPORTED in permission.reason_codes or CANDIDATE_DISABLED in permission.reason_codes:
+        if (
+            RUNTIME_NOT_SUPPORTED in permission.reason_codes
+            or CANDIDATE_DISABLED in permission.reason_codes
+            or CANDIDATE_EXECUTION_INCOMPATIBLE in permission.reason_codes
+        ):
             return "disabled"
         if AUTO_EXECUTION_DISABLED_BY_PROFILE in permission.reason_codes:
             return "protective_only" if raw.active_inventory else "paused"
         if composed.budget_zero_suppressed:
-            return "protective_only" if raw.active_inventory else "paused"
+            return "contracted"
         if budget.effective_scale < Decimal("1") - EPSILON_DECIMAL_12:
-            return "protective_only" if raw.active_inventory else "contracted"
+            return "contracted"
         return "active"
 
     @staticmethod
@@ -466,6 +475,11 @@ class StrategySleeveAutoController:
             )
         if RUNTIME_NOT_SUPPORTED in permission.reason_codes:
             return f"{raw.family} 当前运行环境不支持自动执行，因此这条 sleeve 只保留状态，不进入执行链。"
+        if CANDIDATE_EXECUTION_INCOMPATIBLE in permission.reason_codes:
+            return (
+                f"{raw.family} 当前候选没有通过执行兼容性检查；因此不会进入自动执行链，"
+                "也不会再出现“权限已批准但 intent 仍不可执行”的语义分裂。"
+            )
         if CANDIDATE_DISABLED in permission.reason_codes:
             return f"{raw.family} 当前候选未启用，因此不会自动进入执行链。"
         if AUTO_EXECUTION_DISABLED_BY_PROFILE in permission.reason_codes:
@@ -500,6 +514,7 @@ class StrategySleeveAutoController:
                 "configured_auto_execution_enabled": permission.configured_auto_execution_enabled,
                 "runtime_supported": permission.runtime_supported,
                 "candidate_enabled": permission.candidate_enabled,
+                "candidate_execution_compatible": permission.candidate_execution_compatible,
                 "protective_intent": permission.protective_intent,
                 "approved_for_execution": permission.approved_for_execution,
                 "permission_mode": permission.permission_mode,

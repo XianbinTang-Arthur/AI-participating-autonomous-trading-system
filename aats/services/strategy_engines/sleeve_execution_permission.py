@@ -5,6 +5,7 @@ from aats.services.strategy_engines.sleeve_reason_codes import (
     APPROVED_FOR_NON_PROTECTIVE_EXECUTION,
     AUTO_EXECUTION_DISABLED_BY_PROFILE,
     CANDIDATE_DISABLED,
+    CANDIDATE_EXECUTION_INCOMPATIBLE,
     PROTECTIVE_INTENT_OVERRIDE,
     RUNTIME_NOT_SUPPORTED,
     unique_reason_codes,
@@ -64,6 +65,7 @@ class SleeveExecutionPermissionPolicy:
     def evaluate(self, *, raw: RawSleeveCandidateInputs) -> ExecutionPermissionDecision:
         configured_auto_execution_enabled = effective_non_protective_auto_execution_enabled(self.settings)
         candidate_enabled = bool(raw.candidate_enabled)
+        candidate_execution_compatible = bool(raw.candidate_execution_compatible)
         runtime_supported = bool(raw.runtime_supported)
         protective_intent = bool(raw.protective_intent)
 
@@ -75,8 +77,13 @@ class SleeveExecutionPermissionPolicy:
         if not runtime_supported:
             approved_for_execution = False
             permission_mode = "unsupported"
-            blocks_non_protective_execution = not protective_intent
+            blocks_non_protective_execution = True
             reason_codes = unique_reason_codes([RUNTIME_NOT_SUPPORTED])
+        elif not candidate_execution_compatible:
+            approved_for_execution = False
+            permission_mode = "unsupported"
+            blocks_non_protective_execution = True
+            reason_codes = unique_reason_codes([CANDIDATE_EXECUTION_INCOMPATIBLE])
         elif protective_intent and (not configured_auto_execution_enabled or not candidate_enabled):
             approved_for_execution = True
             permission_mode = "protective_override"
@@ -104,6 +111,7 @@ class SleeveExecutionPermissionPolicy:
             configured_auto_execution_enabled=configured_auto_execution_enabled,
             runtime_supported=runtime_supported,
             candidate_enabled=candidate_enabled,
+            candidate_execution_compatible=candidate_execution_compatible,
             protective_intent=protective_intent,
             approved_for_execution=approved_for_execution,
             blocks_non_protective_execution=blocks_non_protective_execution,
@@ -112,21 +120,31 @@ class SleeveExecutionPermissionPolicy:
             human_summary=self._human_summary(
                 permission_mode=permission_mode,
                 active_inventory=raw.active_inventory,
+                runtime_supported=runtime_supported,
+                candidate_execution_compatible=candidate_execution_compatible,
             ),
         )
 
     @staticmethod
-    def _human_summary(*, permission_mode: str, active_inventory: bool) -> str:
+    def _human_summary(
+        *,
+        permission_mode: str,
+        active_inventory: bool,
+        runtime_supported: bool,
+        candidate_execution_compatible: bool,
+    ) -> str:
         if permission_mode == "approved":
             return "当前允许非保护性自动执行。"
         if permission_mode == "protective_override":
             return "当前虽然关闭了普通自动执行，但保护性意图仍允许继续执行。"
         if permission_mode == "unsupported":
-            return "当前运行环境不支持这条 sleeve 自动进入执行链。"
+            if not runtime_supported:
+                return "当前运行环境不支持这条 sleeve 自动进入执行链。"
+            if not candidate_execution_compatible:
+                return "当前 sleeve 候选不满足执行兼容性要求，因此不会自动进入执行链。"
+            return "当前 sleeve 暂不满足自动执行前置条件。"
         if permission_mode == "hold_current":
-            return (
-                "当前不允许继续扩大风险，但系统会保持现有仓位。"
-                if active_inventory
-                else "当前不允许自动执行。"
-            )
+            if active_inventory:
+                return "当前不允许继续扩大风险，但系统会保持现有仓位。"
+            return "当前不允许自动执行。"
         return "当前不允许自动执行，系统只保留参考信号。"

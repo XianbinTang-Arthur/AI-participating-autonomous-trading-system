@@ -42,6 +42,7 @@ class ExecutionPermissionDecision:
     configured_auto_execution_enabled: bool
     runtime_supported: bool
     candidate_enabled: bool
+    candidate_execution_compatible: bool
     protective_intent: bool
     approved_for_execution: bool
     blocks_non_protective_execution: bool
