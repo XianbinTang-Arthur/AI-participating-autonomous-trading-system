@@ -1,20 +1,42 @@
-"""Research Data Platform configuration."""
+"""Research Data Platform configuration.
+
+All sensitive or environment-specific values are loaded from ``.env.research``
+(project root).  Code defaults are intentionally set to non-functional
+placeholders so the system will not accidentally connect with hardcoded
+credentials.
+
+The ``.env.research`` file is covered by ``.gitignore`` (matches ``.env.*``).
+A template with documentation is provided at
+``configs/templates/.env.research.example``.
+"""
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Resolve .env.research relative to the project root
+# (config.py lives at aats/data_platform/config.py → project root is 3 levels up)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_ENV_FILE = _PROJECT_ROOT / ".env.research"
+
 
 class ResearchPlatformSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="RDP_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="RDP_",
+        env_file=str(_ENV_FILE),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
     # Database
     database_url: str = Field(
-        default="postgresql+psycopg://postgres:123456@localhost:5432/aats_research",
-        description="PostgreSQL DSN for the research database",
+        default="postgresql+psycopg://localhost:5432/aats_research",
+        description="PostgreSQL DSN for the research database. "
+                    "Set via RDP_DATABASE_URL in .env.research.",
     )
 
     # Historical file directory

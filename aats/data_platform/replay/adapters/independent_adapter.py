@@ -1,0 +1,402 @@
+"""Independent family replay adapter.
+
+Phase 2 首批优先打通的 adapter。从 Gold replay bars 构建简化的评估上下文，
+复用 independent 策略的核心决策逻辑（评分、稳定性、资格门槛），输出逐 bar 决策。
+
+简化说明（对比生产系统）：
+- 不依赖 AI assessment（ai_component 置零）
+- 不依赖 orderbook depth（流动性分数置 1.0）
+- 不依赖真实 execution state（用简化状态机追踪）
+- 基于 OHLCV + funding rate 构造因子输入
+- 参数通过 ReplayParameterOverrides 注入，支持扫描
+
+上述简化是 Phase 2 设计决策 §8.4 明确的边界：
+  > Replay Core 在 Phase 2 不负责完整撮合仿真、PnL accounting、滑点模型、orderbook realism。
+"""
+
+from __future__ import annotations
+
+import math
+from collections import deque
+from decimal import Decimal
+
+from aats.data_platform.replay.adapters.base_adapter import BaseReplayAdapter
+from aats.data_platform.replay.core.replay_context import (
+    ReplayBar,
+    ReplayBarContext,
+    ReplayDecision,
+    ReplayParameterOverrides,
+    ReplayState,
+)
+
+
+# ---------------------------------------------------------------------------
+# 常量
+# ---------------------------------------------------------------------------
+
+# 评分权重（与生产 scoring.py 对齐，去掉 ai_component）
+_W_ALPHA = 0.34          # 原 0.28, AI 的 0.26 按比例分配到其他因子
+_W_MOMENTUM = 0.24       # 原 0.16
+_W_TREND = 0.18          # 原 0.12
+_W_MICRO = 0.12          # 原 0.08
+_W_CONFIDENCE = 0.12     # 原 0.10
+
+# 默认阈值（与生产 settings.py 对齐）
+_ENTRY_THRESHOLD = 0.40
+_CLOSE_THRESHOLD = 0.15
+_SCALE_IN_THRESHOLD = 0.60
+
+# 简化成本模型
+_DEFAULT_TAKER_FEE_BPS = 0.5       # OKX swap taker fee: 0.05% = 5 bps -> 这里用 0.5 bps 简化
+_DEFAULT_SLIPPAGE_BPS = 0.3
+_SCORE_HISTORY_WINDOW = 20         # 评分历史保留窗口
+
+
+class IndependentReplayAdapter(BaseReplayAdapter):
+    """Independent 策略的 replay adapter。
+
+    核心流程（每根 bar）：
+    1. 从 OHLCV 计算简化因子 -> 原始评分
+    2. 检查评分稳定性（min_confirm_ticks + score_stability_threshold）
+    3. 计算预期净边际（funding rate - cost）
+    4. 通过资格门槛（min_safe_net_edge_bps）
+    5. 更新状态机 -> 输出 ReplayDecision
+    """
+
+    def __init__(self) -> None:
+        self._bar_history: deque[ReplayBar] = deque(maxlen=50)
+        self._long_score_history: deque[float] = deque(maxlen=_SCORE_HISTORY_WINDOW)
+        self._short_score_history: deque[float] = deque(maxlen=_SCORE_HISTORY_WINDOW)
+
+    @property
+    def family_name(self) -> str:
+        return "independent"
+
+    def reset_state(self) -> ReplayState:
+        self._bar_history.clear()
+        self._long_score_history.clear()
+        self._short_score_history.clear()
+        return ReplayState()
+
+    # ------------------------------------------------------------------
+    # 主评估入口
+    # ------------------------------------------------------------------
+
+    def evaluate_bar(self, ctx: ReplayBarContext) -> ReplayDecision:
+        bar = ctx.bar
+        params = ctx.params
+        state = ctx.state
+
+        self._bar_history.append(bar)
+
+        # 1) 计算 long / short 原始评分
+        long_score = self._compute_book_score(bar, leg="long")
+        short_score = self._compute_book_score(bar, leg="short")
+
+        self._long_score_history.append(long_score)
+        self._short_score_history.append(short_score)
+
+        # 2) 选择较强方向
+        dominant_leg = "long" if long_score >= short_score else "short"
+        dominant_score = max(long_score, short_score)
+        score_history = (
+            list(self._long_score_history) if dominant_leg == "long"
+            else list(self._short_score_history)
+        )
+
+        # 3) 评分稳定性
+        score_stable = self._check_score_stability(
+            score=dominant_score,
+            history=score_history,
+            min_confirm_ticks=params.min_confirm_ticks,
+            threshold_bps=params.score_stability_threshold,
+        )
+
+        # 4) 计算预期净边际
+        expected_net_edge_bps = self._compute_expected_edge(bar, dominant_leg)
+
+        # 5) 资格评估
+        blocking_reasons: list[str] = []
+
+        if dominant_score < _ENTRY_THRESHOLD:
+            blocking_reasons.append("score_below_entry_threshold")
+        if not score_stable:
+            blocking_reasons.append("score_not_stable")
+        if expected_net_edge_bps < params.min_safe_net_edge_bps:
+            blocking_reasons.append("net_edge_below_safe_minimum")
+
+        selectable = dominant_score >= _ENTRY_THRESHOLD
+        execution_compatible = selectable and score_stable and (
+            expected_net_edge_bps >= params.min_safe_net_edge_bps
+        )
+
+        # 6) 状态机推进
+        action, new_state_label = self._advance_state(
+            state=state,
+            bar=bar,
+            dominant_leg=dominant_leg,
+            dominant_score=dominant_score,
+            execution_compatible=execution_compatible,
+            blocking_reasons=blocking_reasons,
+        )
+
+        # 7) 持仓变动
+        target_qty, delta_qty = self._compute_position_delta(
+            state=state,
+            action=action,
+            dominant_leg=dominant_leg,
+            bar=bar,
+        )
+
+        return ReplayDecision(
+            ts=bar.ts,
+            family="independent",
+            symbol=ctx.symbol,
+            timeframe=ctx.timeframe,
+            state=new_state_label,
+            selectable=selectable,
+            execution_compatible=execution_compatible,
+            long_score=round(long_score, 6),
+            short_score=round(short_score, 6),
+            blocking_reasons=blocking_reasons,
+            expected_net_edge_bps=round(expected_net_edge_bps, 4),
+            target_position_qty=target_qty,
+            delta_position_qty=delta_qty,
+            action=action,
+            score_stable=score_stable,
+            funding_rate=float(bar.aligned_funding_rate) if bar.aligned_funding_rate else None,
+            close_price=float(bar.close),
+            bar_index=ctx.bar_index,
+        )
+
+    # ------------------------------------------------------------------
+    # 简化评分（对齐生产 scoring.py 逻辑，基于 OHLCV 派生因子）
+    # ------------------------------------------------------------------
+
+    def _compute_book_score(self, bar: ReplayBar, *, leg: str) -> float:
+        """从 OHLCV 派生因子，计算简化的 book 评分。
+
+        因子来源：
+        - alpha:         (close - open) / open 的方向性
+        - momentum:      最近 N 根 bar 的累积动量
+        - trend:         SMA 趋势方向
+        - microstructure: bar 实体占比（body / range）
+        - confidence:    volume 加权置信度
+        """
+        if len(self._bar_history) < 2:
+            return 0.0
+
+        close_f = float(bar.close)
+        open_f = float(bar.open)
+        high_f = float(bar.high)
+        low_f = float(bar.low)
+
+        # --- alpha 因子：本根 bar 的方向性收益 ---
+        bar_return = (close_f - open_f) / open_f if open_f > 0 else 0.0
+        if leg == "short":
+            bar_return = -bar_return
+        alpha_raw = _sigmoid(bar_return * 500)  # 缩放到 [0, 1]
+
+        # --- momentum 因子：最近 5 根 bar 的累积收益 ---
+        lookback = min(5, len(self._bar_history))
+        bars = list(self._bar_history)[-lookback:]
+        if len(bars) >= 2:
+            momentum_return = (float(bars[-1].close) - float(bars[0].open)) / float(bars[0].open)
+        else:
+            momentum_return = bar_return
+        if leg == "short":
+            momentum_return = -momentum_return
+        momentum_raw = _sigmoid(momentum_return * 300)
+
+        # --- trend 因子：SMA(10) 方向 ---
+        sma_lookback = min(10, len(self._bar_history))
+        sma_bars = list(self._bar_history)[-sma_lookback:]
+        sma = sum(float(b.close) for b in sma_bars) / len(sma_bars)
+        trend_dir = (close_f - sma) / sma if sma > 0 else 0.0
+        if leg == "short":
+            trend_dir = -trend_dir
+        trend_raw = _sigmoid(trend_dir * 400)
+
+        # --- microstructure 因子：bar 实体占比 ---
+        bar_range = high_f - low_f
+        body = abs(close_f - open_f)
+        micro_raw = (body / bar_range) if bar_range > 0 else 0.5
+
+        # --- confidence 因子：volume 相对强度 ---
+        vol_lookback = min(10, len(self._bar_history))
+        vol_bars = list(self._bar_history)[-vol_lookback:]
+        avg_vol = sum(float(b.volume or 0) for b in vol_bars) / len(vol_bars) if vol_bars else 1.0
+        current_vol = float(bar.volume or 0)
+        vol_ratio = (current_vol / avg_vol) if avg_vol > 0 else 1.0
+        confidence_raw = min(_sigmoid((vol_ratio - 1.0) * 200), 1.0)
+
+        # --- 加权合成 ---
+        score = (
+            _W_ALPHA * alpha_raw
+            + _W_MOMENTUM * momentum_raw
+            + _W_TREND * trend_raw
+            + _W_MICRO * micro_raw
+            + _W_CONFIDENCE * confidence_raw
+        )
+        return max(0.0, min(1.0, score))
+
+    # ------------------------------------------------------------------
+    # 评分稳定性（对齐生产 scoring.py: compute_score_stability）
+    # ------------------------------------------------------------------
+
+    def _check_score_stability(
+        self,
+        *,
+        score: float,
+        history: list[float],
+        min_confirm_ticks: int,
+        threshold_bps: float,
+    ) -> bool:
+        """检查评分是否稳定。
+
+        逻辑：最近 min_confirm_ticks 根 bar 的评分都 >= entry_threshold，
+        且最大回撤 <= threshold_bps（以分数变化的 bps 衡量）。
+        """
+        if len(history) < min_confirm_ticks:
+            return False
+
+        recent = history[-min_confirm_ticks:]
+
+        # 条件 1：所有 recent 评分 >= entry_threshold
+        support_count = sum(1 for s in recent if s >= _ENTRY_THRESHOLD)
+        if support_count < min_confirm_ticks:
+            return False
+
+        # 条件 2：最大回撤（从峰值到当前）不超过阈值
+        peak = max(recent)
+        drawdown_bps = (peak - score) * 10000  # 评分差异 -> bps
+        if drawdown_bps > threshold_bps:
+            return False
+
+        return True
+
+    # ------------------------------------------------------------------
+    # 预期净边际（对齐生产 gates.py: required_safe_net_edge_bps）
+    # ------------------------------------------------------------------
+
+    def _compute_expected_edge(self, bar: ReplayBar, leg: str) -> float:
+        """计算预期净边际（bps）。
+
+        简化公式：
+        signal_edge = |funding_rate * 10000|  (funding rate -> bps)
+        net_edge = signal_edge - taker_fee - slippage
+
+        对于 short leg：正 funding rate 有利（做空收取 funding）
+        对于 long leg：负 funding rate 有利（做多收取 funding）
+        """
+        if bar.aligned_funding_rate is None:
+            return 0.0
+
+        fr = float(bar.aligned_funding_rate)
+        # funding rate 以百分比表示，转为 bps
+        funding_bps = fr * 10000
+
+        # 方向调整：short 收取正 funding，long 收取负 funding
+        if leg == "short":
+            signal_edge_bps = funding_bps
+        else:
+            signal_edge_bps = -funding_bps
+
+        # 扣减成本
+        net_edge = signal_edge_bps - _DEFAULT_TAKER_FEE_BPS - _DEFAULT_SLIPPAGE_BPS
+        return net_edge
+
+    # ------------------------------------------------------------------
+    # 状态机推进
+    # ------------------------------------------------------------------
+
+    def _advance_state(
+        self,
+        *,
+        state: ReplayState,
+        bar: ReplayBar,
+        dominant_leg: str,
+        dominant_score: float,
+        execution_compatible: bool,
+        blocking_reasons: list[str],
+    ) -> tuple[str, str]:
+        """推进简化状态机，返回 (action, state_label)。
+
+        状态转移（简化版）：
+        flat -> probing (score >= entry_threshold)
+        probing -> holding (execution_compatible && confirmed)
+        holding -> holding (继续持有)
+        holding -> flat (score < close_threshold or 方向反转)
+        * -> blocked (有阻断原因)
+        """
+        current_state = state.position_side
+
+        # --- 已持仓 ---
+        if current_state in ("long", "short"):
+            # 平仓条件
+            should_close = False
+            if dominant_score < _CLOSE_THRESHOLD:
+                should_close = True
+            elif current_state == "long" and dominant_leg == "short" and dominant_score > _ENTRY_THRESHOLD:
+                should_close = True  # 方向反转
+            elif current_state == "short" and dominant_leg == "long" and dominant_score > _ENTRY_THRESHOLD:
+                should_close = True
+
+            if should_close:
+                state.position_qty = Decimal("0")
+                state.position_side = "flat"
+                state.entry_price = None
+                state.last_close_ts = bar.ts
+                return "close", "flat"
+            else:
+                return "hold", "holding"
+
+        # --- 无持仓 ---
+        if execution_compatible:
+            # 开仓
+            state.position_side = dominant_leg  # type: ignore[assignment]
+            state.position_qty = Decimal("1")
+            state.entry_price = bar.close
+            state.entry_ts = bar.ts
+            return "open", "probing"
+
+        if dominant_score >= _ENTRY_THRESHOLD:
+            return "blocked", "probing"
+
+        return "hold", "flat"
+
+    # ------------------------------------------------------------------
+    # 持仓计算
+    # ------------------------------------------------------------------
+
+    def _compute_position_delta(
+        self,
+        *,
+        state: ReplayState,
+        action: str,
+        dominant_leg: str,
+        bar: ReplayBar,
+    ) -> tuple[Decimal, Decimal]:
+        """计算目标持仓和持仓变化。"""
+        if action == "open":
+            target = Decimal("1")
+            delta = Decimal("1")
+        elif action == "close":
+            target = Decimal("0")
+            delta = Decimal("-1")
+        else:
+            target = state.position_qty
+            delta = Decimal("0")
+        return target, delta
+
+
+# ---------------------------------------------------------------------------
+# 工具函数
+# ---------------------------------------------------------------------------
+
+def _sigmoid(x: float) -> float:
+    """Sigmoid 函数，将任意实数映射到 (0, 1)。"""
+    try:
+        return 1.0 / (1.0 + math.exp(-x))
+    except OverflowError:
+        return 0.0 if x < 0 else 1.0

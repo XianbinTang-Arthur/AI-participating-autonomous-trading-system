@@ -73,3 +73,7 @@ def reset_engine() -> None:
         _engine.dispose()
     _engine = None
     _session_factory = None
+
+
+if __name__ == "__main__":
+    run_migrations()
