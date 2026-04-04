@@ -5,13 +5,33 @@
 回答"最近为什么没下单"。
 
 Usage:
-    # 基础用法
+    # 基础用法（默认参数）
     python scripts/rdp_run_live_attribution.py \
         --family independent \
         --symbol BTC-USDT-SWAP \
         --timeframe 15m \
         --start 2026-03-31 \
         --end 2026-04-02
+
+    # 使用 Phase 2 推荐参数（parameter_candidates.json）
+    python scripts/rdp_run_live_attribution.py \
+        --family independent \
+        --symbol BTC-USDT-SWAP \
+        --timeframe 15m \
+        --start 2026-03-31 \
+        --end 2026-04-02 \
+        --params-json artifacts/research/step2_rounds/<id>/parameter_candidates.json \
+        --parameter-set independent_15m
+
+    # 手动覆盖参数（可叠加在 --params-json 之上）
+    python scripts/rdp_run_live_attribution.py \
+        --family independent \
+        --symbol BTC-USDT-SWAP \
+        --timeframe 15m \
+        --start 2026-03-31 \
+        --end 2026-04-02 \
+        --param min_confirm_ticks=3 \
+        --param signal_edge_scale_bps=12
 
     # 指定 live DB 连接
     python scripts/rdp_run_live_attribution.py \
@@ -21,15 +41,6 @@ Usage:
         --start 2026-03-31 \
         --end 2026-04-02 \
         --live-db-url "postgresql+psycopg://localhost:5432/aats_derivatives"
-
-    # 确保 schema 就绪
-    python scripts/rdp_run_live_attribution.py \
-        --family independent \
-        --symbol BTC-USDT-SWAP \
-        --timeframe 15m \
-        --start 2026-03-31 \
-        --end 2026-04-02 \
-        --ensure-schema
 
     # 跳过 live 查询（仅做 replay 分析）
     python scripts/rdp_run_live_attribution.py \
@@ -68,6 +79,96 @@ _DEFAULT_ARTIFACT_ROOT = pathlib.Path("artifacts/research/attribution_rounds")
 
 
 # =========================================================================
+# 参数加载（P0: Phase 2 -> Phase 3 参数闭环）
+# =========================================================================
+
+
+def _parse_params(param_strs: list[str]) -> dict[str, object]:
+    """解析 --param key=value 参数（复用 rdp_run_replay.py 逻辑）。"""
+    result: dict[str, object] = {}
+    for s in param_strs:
+        if "=" not in s:
+            log.warning("Ignoring malformed param: %s", s)
+            continue
+        k, v = s.split("=", 1)
+        try:
+            result[k] = int(v)
+        except ValueError:
+            try:
+                result[k] = float(v)
+            except ValueError:
+                result[k] = v
+    return result
+
+
+def _load_replay_params(
+    params_json: str | None,
+    parameter_set: str | None,
+    param_overrides: list[str],
+) -> Any:
+    """加载 replay 参数。
+
+    优先级（从低到高）：
+      1. 默认值（ReplayParameterOverrides 默认构造）
+      2. --params-json 文件（支持 parameter_candidates.json 格式或平坦 dict）
+      3. --param key=value 手动覆盖
+
+    Returns:
+        ReplayParameterOverrides 实例。
+    """
+    from aats.data_platform.replay.core.replay_context import ReplayParameterOverrides
+
+    param_dict: dict[str, Any] = {}
+
+    # 1. 从文件加载
+    if params_json:
+        log.info("Loading params from: %s", params_json)
+        with open(params_json, encoding="utf-8") as f:
+            data = json.load(f)
+
+        if "candidates" in data and parameter_set:
+            # parameter_candidates.json 格式
+            candidates = data["candidates"]
+            if parameter_set in candidates:
+                param_dict = dict(candidates[parameter_set])
+                log.info("  Loaded parameter set '%s': %s", parameter_set, param_dict)
+            else:
+                available = list(candidates.keys())
+                log.warning("  Parameter set '%s' not found. Available: %s",
+                            parameter_set, available)
+        elif "candidates" in data and not parameter_set:
+            log.warning("  --params-json contains 'candidates' but no --parameter-set specified. "
+                        "Using default params.")
+        elif "recommendations" in data and parameter_set is None:
+            # parameter_recommendations.json 格式（Step 1 输出）
+            recs = data.get("recommendations", {})
+            for k, v in recs.items():
+                if isinstance(v, dict) and "value" in v and v["value"] is not None:
+                    param_dict[k] = v["value"]
+            log.info("  Loaded recommendations: %s", param_dict)
+        else:
+            # 平坦 params dict
+            param_dict = {k: v for k, v in data.items()
+                          if not k.startswith("_") and k not in ("round_id", "scope", "pending_validation")}
+            log.info("  Loaded flat params: %s", param_dict)
+
+    # 2. 应用 CLI 覆盖（最高优先级）
+    cli_overrides = _parse_params(param_overrides)
+    if cli_overrides:
+        param_dict.update(cli_overrides)
+        log.info("  Applied CLI overrides: %s", cli_overrides)
+
+    # 3. 构造 ReplayParameterOverrides
+    if param_dict:
+        params = ReplayParameterOverrides.from_dict(param_dict)
+        log.info("  Final params: %s", params.to_dict())
+        return params
+
+    log.info("  Using default ReplayParameterOverrides")
+    return ReplayParameterOverrides()
+
+
+# =========================================================================
 # Replay 执行
 # =========================================================================
 
@@ -81,8 +182,13 @@ def _run_replay(
     dataset_version: str,
     start_ts: datetime,
     end_ts: datetime,
+    params: Any = None,
 ) -> list[dict[str, Any]]:
-    """运行 replay 并返回 decisions 字典列表。"""
+    """运行 replay 并返回 decisions 字典列表。
+
+    Args:
+        params: ReplayParameterOverrides 实例。None 则使用默认参数。
+    """
     from aats.data_platform.replay.adapters.directional_adapter import DirectionalReplayAdapter
     from aats.data_platform.replay.adapters.independent_adapter import IndependentReplayAdapter
     from aats.data_platform.replay.core.replay_context import ReplayParameterOverrides
@@ -95,7 +201,9 @@ def _run_replay(
     else:
         raise ValueError(f"Unknown family: {family}")
 
-    params = ReplayParameterOverrides()
+    if params is None:
+        params = ReplayParameterOverrides()
+
     decisions = run_replay(
         session,
         adapter=adapter,
@@ -107,7 +215,7 @@ def _run_replay(
         params=params,
     )
 
-    # 转换�� dict 列表
+    # 转换为 dict 列表
     rows: list[dict[str, Any]] = []
     for d in decisions:
         row = {
@@ -167,7 +275,7 @@ def _run_alignment_and_attribution(
     live_db_url: str | None,
     replay_only: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """执行对齐 + ���因，返回 (alignment_rows, classified_rows)。"""
+    """执行对齐 + 归因，返回 (alignment_rows, classified_rows)。"""
     from aats.data_platform.attribution.alignment import (
         align_replay_with_live,
         query_live_allocations,
@@ -182,7 +290,6 @@ def _run_alignment_and_attribution(
 
     if replay_only or not live_db_url:
         log.info("Replay-only mode: skipping live data queries")
-        # 生成 replay_only 对齐行
         alignment_rows = align_replay_with_live(
             replay_decisions, [],
             timeframe=timeframe,
@@ -194,7 +301,6 @@ def _run_alignment_and_attribution(
     live_session = _create_live_session(live_db_url)
 
     try:
-        # Step 1: 查询 live intents
         log.info("Querying live intents...")
         live_intents = query_live_intents(
             live_session,
@@ -203,14 +309,12 @@ def _run_alignment_and_attribution(
         )
         log.info("Found %d live intents", len(live_intents))
 
-        # Step 2: 对齐
         log.info("Aligning replay with live...")
         alignment_rows = align_replay_with_live(
             replay_decisions, live_intents,
             timeframe=timeframe,
         )
 
-        # Step 3: 批量查询关联数据
         alloc_ids = list({
             r["live_allocation_id"] for r in alignment_rows
             if r.get("live_allocation_id")
@@ -232,7 +336,6 @@ def _run_alignment_and_attribution(
         log.info("Querying orders...")
         orders = query_live_orders(live_session, decision_ids=decision_ids)
 
-        # 收集 order_ids for fills
         all_order_ids: list[str] = []
         for ords in orders.values():
             for o in ords:
@@ -247,7 +350,6 @@ def _run_alignment_and_attribution(
             start_ts=start_ts, end_ts=end_ts,
         )
 
-        # Step 4: 分层归因
         log.info("Running layer classification...")
         classified = classify_all(
             alignment_rows,
@@ -337,6 +439,19 @@ def main() -> None:
         "--artifact-root", type=str, default=str(_DEFAULT_ARTIFACT_ROOT),
     )
     parser.add_argument("--ensure-schema", action="store_true")
+    # ---- P0: 参数注入 ----
+    parser.add_argument(
+        "--params-json", default=None,
+        help="JSON 文件路径，支持 parameter_candidates.json 或平坦 dict ��式",
+    )
+    parser.add_argument(
+        "--parameter-set", default=None,
+        help="parameter_candidates.json 中的 key (e.g. independent_15m)",
+    )
+    parser.add_argument(
+        "--param", action="append", default=[],
+        help="手动覆盖参数 key=value (可多次指定，优先级最高)",
+    )
     args = parser.parse_args()
 
     # Live DB URL: CLI > env > None
@@ -351,6 +466,11 @@ def main() -> None:
     start_ts = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_ts = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
+    # 加载 replay 参数 (P0: Phase 2 -> Phase 3 闭环)
+    replay_params = _load_replay_params(
+        args.params_json, args.parameter_set, args.param,
+    )
+
     # 产物目录
     artifact_root = pathlib.Path(args.artifact_root)
     run_id = f"{args.family}_{args.timeframe}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
@@ -363,6 +483,7 @@ def main() -> None:
     log.info("  Timeframe : %s", args.timeframe)
     log.info("  Window    : %s ~ %s", args.start, args.end)
     log.info("  Replay-only: %s", args.replay_only)
+    log.info("  Params    : %s", replay_params.to_dict())
     log.info("  Output    : %s", run_dir)
     log.info("=" * 60)
 
@@ -385,6 +506,7 @@ def main() -> None:
             dataset_version=args.dataset_version,
             start_ts=start_ts,
             end_ts=end_ts,
+            params=replay_params,
         )
 
     # ---- Step 2: Alignment + Attribution ----
@@ -399,7 +521,6 @@ def main() -> None:
         replay_only=args.replay_only,
     )
 
-    # 给分类后的 rows 补充 family/symbol/timeframe
     for row in classified_rows:
         row.setdefault("family", args.family)
         row.setdefault("symbol", args.symbol)
@@ -422,6 +543,8 @@ def main() -> None:
     _write_alignment_csv(classified_rows, run_dir / "replay_live_alignment.csv")
     _write_json(summary, run_dir / "attribution_summary.json")
     _write_json(top_fm, run_dir / "top_failure_modes.json")
+    # 保存实际使用的参数，确保可追溯
+    _write_json(replay_params.to_dict(), run_dir / "replay_params_used.json")
 
     from aats.data_platform.attribution.report_builder import build_attribution_report
 

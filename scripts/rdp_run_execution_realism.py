@@ -11,31 +11,33 @@
     -> Slippage Estimation (bar-proxy 滑点模型)
     -> Execution Cost Summary
 
-V1 使用 Gold OHLCV bars 作为市场快照代理。
+V1 使用 Gold OHLCV bars 作为市场快照代理（Execution Proxy Realism）。
 
 Usage:
-    # 基础用法
+    # 基础用法（默认参数）
     python scripts/rdp_run_execution_realism.py \
         --family independent \
         --symbol BTC-USDT-SWAP \
         --timeframe 15m \
         --start 2026-03-31 --end 2026-04-02
 
-    # 指定 taker fee
+    # 使用 Phase 2 推荐参数（parameter_candidates.json）
     python scripts/rdp_run_execution_realism.py \
         --family independent \
         --symbol BTC-USDT-SWAP \
         --timeframe 15m \
         --start 2026-03-31 --end 2026-04-02 \
-        --taker-fee-bps 3.0
+        --params-json artifacts/research/step2_rounds/<id>/parameter_candidates.json \
+        --parameter-set independent_15m
 
-    # 确保 schema 就绪
+    # 手动覆盖参数 + 指定 taker fee
     python scripts/rdp_run_execution_realism.py \
         --family independent \
         --symbol BTC-USDT-SWAP \
         --timeframe 15m \
         --start 2026-03-31 --end 2026-04-02 \
-        --ensure-schema
+        --param min_confirm_ticks=3 \
+        --taker-fee-bps 3.0
 
 Exit codes:
     0 = 成功
@@ -64,7 +66,94 @@ _DEFAULT_ARTIFACT_ROOT = pathlib.Path("artifacts/research/execution_rounds")
 
 
 # =========================================================================
-# Replay 执行（与 Phase 3 相同模式）
+# 参数加载（P0: Phase 2 -> Phase 4 参数闭环）
+# =========================================================================
+
+
+def _parse_params(param_strs: list[str]) -> dict[str, object]:
+    """解析 --param key=value 参数。"""
+    result: dict[str, object] = {}
+    for s in param_strs:
+        if "=" not in s:
+            log.warning("Ignoring malformed param: %s", s)
+            continue
+        k, v = s.split("=", 1)
+        try:
+            result[k] = int(v)
+        except ValueError:
+            try:
+                result[k] = float(v)
+            except ValueError:
+                result[k] = v
+    return result
+
+
+def _load_replay_params(
+    params_json: str | None,
+    parameter_set: str | None,
+    param_overrides: list[str],
+) -> Any:
+    """加载 replay 参数。
+
+    优先级（从低到高）：
+      1. 默认值（ReplayParameterOverrides 默认构造）
+      2. --params-json 文件（支持 parameter_candidates.json 格式或平坦 dict）
+      3. --param key=value 手动覆盖
+
+    Returns:
+        ReplayParameterOverrides 实例。
+    """
+    from aats.data_platform.replay.core.replay_context import ReplayParameterOverrides
+
+    param_dict: dict[str, Any] = {}
+
+    # 1. 从文件加载
+    if params_json:
+        log.info("Loading params from: %s", params_json)
+        with open(params_json, encoding="utf-8") as f:
+            data = json.load(f)
+
+        if "candidates" in data and parameter_set:
+            candidates = data["candidates"]
+            if parameter_set in candidates:
+                param_dict = dict(candidates[parameter_set])
+                log.info("  Loaded parameter set '%s': %s", parameter_set, param_dict)
+            else:
+                available = list(candidates.keys())
+                log.warning("  Parameter set '%s' not found. Available: %s",
+                            parameter_set, available)
+        elif "candidates" in data and not parameter_set:
+            log.warning("  --params-json contains 'candidates' but no --parameter-set specified. "
+                        "Using default params.")
+        elif "recommendations" in data and parameter_set is None:
+            recs = data.get("recommendations", {})
+            for k, v in recs.items():
+                if isinstance(v, dict) and "value" in v and v["value"] is not None:
+                    param_dict[k] = v["value"]
+            log.info("  Loaded recommendations: %s", param_dict)
+        else:
+            param_dict = {k: v for k, v in data.items()
+                          if not k.startswith("_") and k not in ("round_id", "scope", "pending_validation")}
+            log.info("  Loaded flat params: %s", param_dict)
+
+    # 2. 应用 CLI 覆盖
+    cli_overrides = _parse_params(param_overrides)
+    if cli_overrides:
+        param_dict.update(cli_overrides)
+        log.info("  Applied CLI overrides: %s", cli_overrides)
+
+    # 3. 构造
+    if param_dict:
+        params = ReplayParameterOverrides.from_dict(param_dict)
+        log.info("  Final params: %s", params.to_dict())
+        return params
+
+    log.info("  Using default ReplayParameterOverrides")
+    return ReplayParameterOverrides()
+
+
+# =========================================================================
+# Replay 执行
 # =========================================================================
 
 
@@ -77,8 +166,13 @@ def _run_replay(
     dataset_version: str,
     start_ts: datetime,
     end_ts: datetime,
+    params: Any = None,
 ) -> list[dict[str, Any]]:
-    """运行 replay 并返回 decisions 字典列表。"""
+    """运行 replay 并返回 decisions 字典列表。
+
+    Args:
+        params: ReplayParameterOverrides 实例。None 则使用默认参数。
+    """
     from aats.data_platform.replay.adapters.directional_adapter import DirectionalReplayAdapter
     from aats.data_platform.replay.adapters.independent_adapter import IndependentReplayAdapter
     from aats.data_platform.replay.core.replay_context import ReplayParameterOverrides
@@ -91,7 +185,9 @@ def _run_replay(
     else:
         raise ValueError(f"Unknown family: {family}")
 
-    params = ReplayParameterOverrides()
+    if params is None:
+        params = ReplayParameterOverrides()
+
     decisions = run_replay(
         session,
         adapter=adapter,
@@ -147,7 +243,6 @@ def _write_csv(
     output_path: pathlib.Path,
     fieldnames: list[str],
 ) -> pathlib.Path:
-    """写入 CSV 文件。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if not rows:
         output_path.write_text("", encoding="utf-8")
@@ -164,7 +259,6 @@ def _write_csv(
 
 
 def _write_json(data: Any, output_path: pathlib.Path) -> pathlib.Path:
-    """写入 JSON 文件。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, ensure_ascii=False, default=str)
@@ -220,7 +314,7 @@ _SLIPPAGE_FIELDS = [
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="One-shot Execution Realism: 市场微观结构可行性分析",
+        description="One-shot Execution Realism: 市场微观结构可行性分析 (V1 bar-proxy)",
     )
     parser.add_argument("--family", required=True, choices=["independent", "directional"])
     parser.add_argument("--symbol", required=True)
@@ -230,16 +324,34 @@ def main() -> None:
     parser.add_argument("--dataset-version", default="v1.0")
     parser.add_argument(
         "--taker-fee-bps", type=float, default=5.0,
-        help="Taker fee in bps (default: 5.0)",
+        help="Taker fee in bps for Phase 4 slippage estimation (default: 5.0)",
     )
     parser.add_argument(
         "--artifact-root", type=str, default=str(_DEFAULT_ARTIFACT_ROOT),
     )
     parser.add_argument("--ensure-schema", action="store_true")
+    # ---- P0: 参数注入 ----
+    parser.add_argument(
+        "--params-json", default=None,
+        help="JSON 文件路径，支持 parameter_candidates.json 或平坦 dict 格式",
+    )
+    parser.add_argument(
+        "--parameter-set", default=None,
+        help="parameter_candidates.json 中的 key (e.g. independent_15m)",
+    )
+    parser.add_argument(
+        "--param", action="append", default=[],
+        help="手动覆盖 replay 参数 key=value (可多次指定，优先级最高)",
+    )
     args = parser.parse_args()
 
     start_ts = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_ts = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+
+    # 加载 replay 参数 (P0: Phase 2 -> Phase 4 闭环)
+    replay_params = _load_replay_params(
+        args.params_json, args.parameter_set, args.param,
+    )
 
     # 产物目录
     artifact_root = pathlib.Path(args.artifact_root)
@@ -247,12 +359,13 @@ def main() -> None:
     run_dir = artifact_root / run_id
 
     log.info("=" * 60)
-    log.info("Execution Realism Runner (Phase 4)")
+    log.info("Execution Realism Runner (Phase 4 — V1 Bar-Proxy)")
     log.info("  Family    : %s", args.family)
     log.info("  Symbol    : %s", args.symbol)
     log.info("  Timeframe : %s", args.timeframe)
     log.info("  Window    : %s ~ %s", args.start, args.end)
-    log.info("  Taker fee : %.1f bps", args.taker_fee_bps)
+    log.info("  Taker fee : %.1f bps (Phase 4 estimation)", args.taker_fee_bps)
+    log.info("  Params    : %s", replay_params.to_dict())
     log.info("  Output    : %s", run_dir)
     log.info("=" * 60)
 
@@ -275,6 +388,7 @@ def main() -> None:
             dataset_version=args.dataset_version,
             start_ts=start_ts,
             end_ts=end_ts,
+            params=replay_params,
         )
 
     # ---- Step 2: Market Alignment ----
@@ -328,6 +442,8 @@ def main() -> None:
     _write_csv(feasibility_rows, run_dir / "fill_feasibility_summary.csv", _FEASIBILITY_FIELDS)
     _write_csv(slippage_rows, run_dir / "slippage_summary.csv", _SLIPPAGE_FIELDS)
     _write_json(cost_summary, run_dir / "execution_cost_summary.json")
+    # 保存实际使用的参数，确保可追溯
+    _write_json(replay_params.to_dict(), run_dir / "replay_params_used.json")
 
     # ---- Step 7: Report ----
     log.info("Step 7: Building report...")

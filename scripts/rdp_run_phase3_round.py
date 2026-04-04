@@ -82,6 +82,7 @@ def _run_single_attribution(
     replay_only: bool,
     ensure_schema: bool,
     dataset_version: str,
+    params_json: str | None = None,
 ) -> dict[str, Any]:
     """通过子进程调用 rdp_run_live_attribution.py。"""
     existing = _list_subdirs(artifact_root)
@@ -102,6 +103,10 @@ def _run_single_attribution(
         cmd.append("--replay-only")
     if ensure_schema:
         cmd.append("--ensure-schema")
+    # P0: 参数闭环 — 传递 Phase 2 推荐参数
+    if params_json:
+        ft_key = f"{family}_{timeframe.lower()}"
+        cmd.extend(["--params-json", params_json, "--parameter-set", ft_key])
 
     log.info("  CMD: %s", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True)
@@ -156,7 +161,12 @@ def _run_single_attribution(
     return {
         "family": family,
         "timeframe": timeframe,
-        "status": "succeeded" if proc.returncode == 0 else "failed",
+        # P1b: 保留 partial_success 语义（exit=2 表示 replay 正常但 live 失败）
+        "status": (
+            "succeeded" if proc.returncode == 0
+            else "partial_success" if proc.returncode == 2
+            else "failed"
+        ),
         "run_dir": str(run_dir),
         "attribution_summary": summary,
         "top_failure_modes": tfm,
@@ -208,6 +218,11 @@ def main() -> None:
     )
     parser.add_argument("--ensure-schema", action="store_true")
     parser.add_argument("--no-print-summary", action="store_true")
+    # P0: 参数闭环 — 支持从 Phase 2 parameter_candidates.json 注入参数
+    parser.add_argument(
+        "--params-json", default=None,
+        help="Phase 2 parameter_candidates.json 路径，自动按 family_tf 分发参数",
+    )
     args = parser.parse_args()
 
     live_db_url = args.live_db_url or os.environ.get("RDP_LIVE_DATABASE_URL")
@@ -225,6 +240,7 @@ def main() -> None:
     log.info("  Symbol      : %s", _SYMBOL)
     log.info("  Window      : %s ~ %s", args.start, args.end)
     log.info("  Replay-only : %s", replay_only)
+    log.info("  Params JSON : %s", args.params_json or "(default)")
     log.info("  Combos      : %d", len(_COMBOS))
     log.info("  Output      : %s", round_dir)
     log.info("=" * 60)
@@ -247,12 +263,15 @@ def main() -> None:
             replay_only=replay_only,
             ensure_schema=args.ensure_schema and (i == 0),
             dataset_version=args.dataset_version,
+            params_json=args.params_json,
         )
         result["key"] = combo["key"]
         results.append(result)
 
         if result["status"] == "succeeded":
             log.info("  -> SUCCEEDED: %s", result.get("run_dir"))
+        elif result["status"] == "partial_success":
+            log.warning("  -> PARTIAL: %s", result.get("run_dir"))
         else:
             log.error("  -> FAILED: %s", (result.get("error") or "")[:200])
 
@@ -348,11 +367,13 @@ def main() -> None:
 
     # ---- 最终汇总 ----
     n_ok = sum(1 for r in results if r["status"] == "succeeded")
+    n_partial = sum(1 for r in results if r["status"] == "partial_success")
     n_fail = sum(1 for r in results if r["status"] == "failed")
 
     log.info("")
     log.info("=" * 60)
-    log.info("Phase 3 round completed: %d succeeded, %d failed", n_ok, n_fail)
+    log.info("Phase 3 round completed: %d succeeded, %d partial, %d failed",
+             n_ok, n_partial, n_fail)
     log.info("Round dir: %s", round_dir)
     log.info("=" * 60)
 
@@ -361,11 +382,11 @@ def main() -> None:
         print(f"=== Phase 3 Attribution Round: {round_id} ===")
         print(f"Symbol: {_SYMBOL}")
         print(f"Window: {args.start} ~ {args.end}")
-        print(f"Combos: {n_ok} succeeded, {n_fail} failed")
+        print(f"Combos: {n_ok} succeeded, {n_partial} partial, {n_fail} failed")
         print("")
 
         for r in results:
-            status_icon = "OK" if r["status"] == "succeeded" else "FAIL"
+            status_icon = {"succeeded": "OK", "partial_success": "PART", "failed": "FAIL"}.get(r["status"], "??")
             tfm = r.get("top_failure_modes", {})
             failures = tfm.get("total_failures", 0)
             success = tfm.get("total_success", 0)
@@ -376,8 +397,8 @@ def main() -> None:
         print(f"Conclusion: {round_dir / 'phase3_live_attribution_conclusion.md'}")
         print(f"Artifacts : {round_dir}")
 
-    # 退出码
-    if n_fail > 0 and n_ok == 0:
+    # 退出码: 0=全部成功/partial, 2=部分失败, 3=全部失败
+    if n_fail > 0 and (n_ok + n_partial) == 0:
         sys.exit(3)
     elif n_fail > 0:
         sys.exit(2)

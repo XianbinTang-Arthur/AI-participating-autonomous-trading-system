@@ -2,8 +2,9 @@
 
 基于市场微观结构数据评估 replay/live 候选订单的实际可执行性。
 
-V1 使用 Gold OHLCV bars（volume、high-low range）作为市场快照代理，
-后续版本可接入 orderbook depth 和 trades 数据提升精度。
+V1 (Execution Proxy Realism) 使用 Gold OHLCV bars（volume、high-low range）
+作为市场快照代理。这不是最终微观结构层，而是以 bar 数据为代理的
+execution 近似层。后续版本可接入 orderbook depth 和 trades 数据提升精度。
 
 子模块:
   market_alignment     — 候选订单与市场快照对齐
