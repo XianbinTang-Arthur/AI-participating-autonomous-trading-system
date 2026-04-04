@@ -75,6 +75,16 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="仅预览，不实际修改",
     )
+    p.add_argument(
+        "--force-warn",
+        action="store_true",
+        help="gate 返回 warn 时仍继续 apply（默认 warn 也会 apply，但会显式提示）",
+    )
+    p.add_argument(
+        "--skip-gate",
+        action="store_true",
+        help="跳过 pre-apply gate（仅限 dev 环境调试用，生产环境禁止）",
+    )
     return p.parse_args()
 
 
@@ -214,8 +224,60 @@ def action_approve(
         print("[DRY RUN] 将会:")
         print(f"  1. 将 recommendation 状态改为 approved")
         if also_apply and target.get("target_parameter_set_id"):
-            print(f"  2. 应用 parameter set {target['target_parameter_set_id']} 为 active")
+            print(f"  2. 运行 pre-apply gate")
+            print(f"  3. gate 通过后应用 parameter set {target['target_parameter_set_id']} 为 active")
         return 0
+
+    # ── Pre-Apply Gate（approve-and-apply 时必须运行）────────
+    gate_result = None
+    if also_apply and target.get("target_parameter_set_id"):
+        if args.skip_gate:
+            print("[WARNING] --skip-gate: 跳过 pre-apply gate（仅限调试）")
+            gate_result = {
+                "gate_run_id": "skipped",
+                "gate_status": "pass",
+                "allow_apply": True,
+                "warnings": [],
+                "blocking_reasons": [],
+            }
+        else:
+            from aats.data_platform.production_workflow.pre_apply_gate import (
+                run_pre_apply_gate,
+            )
+            print("运行 Pre-Apply Gate ...")
+            gate_result = run_pre_apply_gate(project_root, args.rec_id)
+            gate_status = gate_result.get("gate_status", "unknown")
+            print(f"  Gate Status: {gate_status.upper()}")
+            print(f"  Checks: {gate_result.get('passed_checks', 0)}/{gate_result.get('total_checks', 0)} passed")
+
+            if gate_result.get("blocking_reasons"):
+                for reason in gate_result["blocking_reasons"]:
+                    print(f"  [BLOCK] {reason}")
+
+            if gate_result.get("warnings"):
+                for warning in gate_result["warnings"]:
+                    print(f"  [WARN]  {warning}")
+
+            print()
+
+            if gate_status == "block":
+                print("[REJECTED] Gate 返回 BLOCK，拒绝 apply。")
+                print("请先解决 blocking reasons 后重试。")
+                # 仍然记录 gate 结果到日志
+                _write_approval_log(
+                    project_root,
+                    action="approve-and-apply-blocked",
+                    recommendation_id=args.rec_id,
+                    recommendation_type=target.get("recommendation_type"),
+                    family=target.get("family"),
+                    timeframe=target.get("timeframe"),
+                    reason=f"gate_blocked: {'; '.join(gate_result.get('blocking_reasons', []))}",
+                )
+                return 1
+
+            if gate_status == "warn" and not args.force_warn:
+                print("[INFO] Gate 返回 WARN。apply 将继续，但请注意以上 warnings。")
+                print("  如需跳过此提示，使用 --force-warn")
 
     # 执行审批
     target["status"] = "approved"
@@ -241,6 +303,7 @@ def action_approve(
     if also_apply and target.get("target_parameter_set_id"):
         parameter_applied = _apply_parameter_from_recommendation(
             project_root, target,
+            gate_result=gate_result,
         )
 
     # 输出后续指令
@@ -248,6 +311,8 @@ def action_approve(
     print("后续操作:")
     if parameter_applied:
         print(f"  [INFO] 已应用参数: {parameter_applied}")
+        if gate_result:
+            print(f"  [INFO] Gate Run ID: {gate_result.get('gate_run_id', 'N/A')}")
         print("  如果主交易系统正在运行，需要重启或 reload 使新参数生效:")
         print("    方式 1: 重启 API gateway")
         print("    方式 2: 调用 POST /system/rebaseline")
@@ -266,8 +331,14 @@ def action_approve(
 def _apply_parameter_from_recommendation(
     project_root: Path,
     recommendation: dict,
+    *,
+    gate_result: dict | None = None,
 ) -> str | None:
-    """从审批通过的 recommendation 应用参数."""
+    """从审批通过的 recommendation 应用参数.
+
+    gate_result 如果提供，会将 gate_run_id 和 gate_status 一并
+    记录到 approval log 和 apply history 中。
+    """
     from aats.bootstrap.active_parameters import write_active_parameter_set
     from aats.data_platform.governance.parameter_registry import load_registry
 
@@ -300,6 +371,10 @@ def _apply_parameter_from_recommendation(
         project_root=project_root,
     )
 
+    # 提取 gate 信息
+    gate_run_id = gate_result.get("gate_run_id") if gate_result else None
+    gate_status = gate_result.get("gate_status") if gate_result else None
+
     combo_key = f"{target_ps['family']}_{target_ps['timeframe'].lower()}"
     _write_approval_log(
         project_root,
@@ -309,7 +384,35 @@ def _apply_parameter_from_recommendation(
         family=target_ps["family"],
         timeframe=target_ps["timeframe"],
         parameter_set_applied=ps_id,
+        reason=f"gate={gate_status or 'not_run'}, gate_run_id={gate_run_id or 'N/A'}",
     )
+
+    # 同步记录到 parameter_apply_history（如果模块可用）
+    try:
+        from aats.data_platform.decision_system.active_parameter_apply import (
+            load_apply_history,
+            save_apply_history,
+        )
+        history = load_apply_history(project_root)
+        from uuid import uuid4
+        op = {
+            "operation_id": f"op_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}",
+            "operation_type": "apply",
+            "family": target_ps["family"],
+            "timeframe": target_ps["timeframe"],
+            "from_parameter_set_id": None,
+            "to_parameter_set_id": ps_id,
+            "recommendation_id": recommendation["recommendation_id"],
+            "gate_run_id": gate_run_id,
+            "gate_status": gate_status,
+            "actor": "approve_recommendation_and_apply.py",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "notes": f"via approve-and-apply, gate={gate_status or 'not_run'}",
+        }
+        history.setdefault("operations", []).append(op)
+        save_apply_history(history, project_root)
+    except Exception as exc:
+        print(f"  [WARNING] 未能同步 apply history: {exc}")
 
     return str(path)
 

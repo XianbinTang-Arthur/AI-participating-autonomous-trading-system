@@ -40,17 +40,61 @@ KNOWN_COMBOS: list[dict[str, str]] = [
 ]
 
 # ── RDP 参数 → 主系统设置字段的映射 ────────────────────────────────
+#
+# ⚠️  语义映射说明（P1 review item）
+#
+# 本映射表定义了 RDP 研究层参数名 → 主系统 AATSSettings 字段名的对应关系。
+# 每条映射标注了映射类型:
+#   [DIRECT]      — 同义映射，RDP 参数与生产字段描述同一概念
+#   [APPROXIMATE]  — 近似映射，RDP 参数语义接近但不完全等同生产字段
+#   [PLACEHOLDER] — 第一版占位，需后续确认语义是否准确
+#
+# 修改此映射前，必须同时更新:
+#   1. docs/operations/parameter_mapping_reference.md
+#   2. 确认 RDP 研究层计算该参数时使用的单位与生产端一致
+#
+# ────────────────────────────────────────────────────────────────────
 
 PARAMETER_MAPPING_INDEPENDENT: dict[str, str] = {
+    # [DIRECT] RDP 回测优化的信号边际阈值 (bps)
+    # → 生产端 independent hedge 的 de-risk 净边际阈值 (bps)
+    # 单位一致: bps; 语义: 最低要求的信号净收益边际
     "signal_edge_scale_bps": "strategy_hedge_independent_de_risk_net_edge_bps",
+
+    # [DIRECT] RDP 回测优化的最小确认 tick 数
+    # → 生产端 independent hedge 的确认 tick 数
+    # 单位一致: tick count; 语义: 信号确认所需的最少 tick
     "min_confirm_ticks": "strategy_hedge_independent_min_confirm_ticks",
+
+    # [DIRECT] RDP 回测的最小安全净边际 (bps)
+    # → 生产端 independent hedge 的最小安全净边际 (bps)
+    # 单位一致: bps; 语义: 交易执行的净边际安全线
     "min_safe_net_edge_bps": "strategy_hedge_independent_min_safe_net_edge_bps",
+
+    # [APPROXIMATE] RDP 回测的分数稳定性阈值 → 生产端最小 score drawdown (bps)
+    # RDP 端: score_stability_threshold 衡量分数波动容忍度（无量纲比率 0~1）
+    # 生产端: min_score_drawdown_bps 是分数回撤的 bps 阈值
+    # ⚠️ 语义张力: RDP 是"稳定性容忍度"，生产是"回撤 bps 门槛"
+    #    第一版假设: threshold * 100 ≈ bps 的近似换算在回测校准中完成
+    #    TODO: 确认 RDP Phase 2 输出此值时的单位是否已经是 bps
     "score_stability_threshold": "strategy_hedge_independent_min_score_drawdown_bps",
 }
 
 PARAMETER_MAPPING_DIRECTIONAL: dict[str, str] = {
+    # [PLACEHOLDER] RDP 方向性策略的趋势权重 → 生产端 entry alpha 最小值
+    # RDP 端: directional_trend_weight 是趋势信号在综合评分中的权重 (0~1)
+    # 生产端: strategy_entry_alpha_min 是入场信号的最小 alpha 阈值
+    # ⚠️ 语义张力较大: "权重" ≠ "最小阈值"
+    #    第一版占位: 假设 trend_weight 越高 → 要求的 alpha_min 越高
+    #    TODO: 需要明确两者的数学关系，或拆成独立映射
     "directional_trend_weight": "strategy_entry_alpha_min",
+
+    # [DIRECT] RDP 回测使用的 taker 手续费 → 生产端衍生品 taker 费
+    # 单位一致: bps; 语义: 同一概念
     "taker_fee_bps": "trade_cost_derivatives_taker_fee_bps",
+
+    # [DIRECT] RDP 回测使用的滑点估计 → 生产端衍生品滑点
+    # 单位一致: bps; 语义: 同一概念
     "slippage_bps": "trade_cost_derivatives_slippage_bps",
 }
 

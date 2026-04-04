@@ -391,9 +391,16 @@ def fetch_recent_fill_stats(
     """查询最近 N 小时的成交统计.
 
     用于 Phase 4 execution realism 分析。
+
+    注意: 时间窗口通过 Python 端计算 start_time 并作为绑定参数传入，
+    而非在 SQL INTERVAL 字符串中嵌入参数占位符（后者无法被正确参数化）。
     """
-    conditions = ["ingestion_ts >= NOW() - INTERVAL ':hours hours'"]
-    params: dict[str, Any] = {"hours": hours}
+    from datetime import timedelta
+
+    start_time = datetime.utcnow() - timedelta(hours=hours)
+
+    conditions = ["ingestion_ts >= :start_time"]
+    params: dict[str, Any] = {"start_time": start_time}
 
     if symbol:
         conditions.append("symbol = :symbol")
@@ -428,9 +435,16 @@ def fetch_recent_order_states(
     """查询最近 N 小时的订单状态分布.
 
     用于 Phase 3 attribution 分析。
+
+    注意: 时间窗口通过 Python 端计算 start_time 并作为绑定参数传入，
+    而非在 SQL INTERVAL 字符串中嵌入参数占位符（后者无法被正确参数化）。
     """
-    conditions = ["created_at >= NOW() - INTERVAL ':hours hours'"]
-    params: dict[str, Any] = {"hours": hours}
+    from datetime import timedelta
+
+    start_time = datetime.utcnow() - timedelta(hours=hours)
+
+    conditions = ["created_at >= :start_time"]
+    params: dict[str, Any] = {"start_time": start_time}
 
     if symbol:
         conditions.append("symbol = :symbol")
