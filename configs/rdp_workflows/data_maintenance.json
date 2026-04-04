@@ -1,0 +1,31 @@
+{
+  "workflow": "data_maintenance",
+  "description": "数据层维护: gap detection, gold build, 数据完整性检查",
+  "schedule_hint": "daily 06:00 UTC",
+  "tasks": [
+    {
+      "name": "gap_detection",
+      "description": "检测 Bronze 层数据缺口",
+      "command": "python -m aats.data_platform.validate.gap_detector --check",
+      "timeout_seconds": 120,
+      "enabled": true,
+      "allow_failure": true
+    },
+    {
+      "name": "gold_build",
+      "description": "构建 Gold 层聚合数据",
+      "command": "python -m aats.data_platform.gold.builder --incremental",
+      "timeout_seconds": 300,
+      "enabled": true,
+      "allow_failure": false
+    },
+    {
+      "name": "artifact_index_rebuild",
+      "description": "重建 artifact 索引",
+      "command": "python -m aats.data_platform.governance.artifact_indexer --rebuild",
+      "timeout_seconds": 60,
+      "enabled": true,
+      "allow_failure": true
+    }
+  ]
+}

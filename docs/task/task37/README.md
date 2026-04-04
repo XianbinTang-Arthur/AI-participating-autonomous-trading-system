@@ -54,10 +54,10 @@ Task37 的目标不是直接完成重构，而是形成一套足以指导后续�
 
 ## 4. 文档索引
 
-- [五阶段施工顺序总览](./phase-plan.md)
-- [第一阶段表结构 SQL](./phase1_schema.sql)
-- [新 Repo 接口定义](./repo-interfaces.md)
-- [现有文件到新模块迁移表](./migration-mapping.md)
+- [五阶段施工顺序总览](phase-plan.md)
+- [第一阶段表结构 SQL](phase1_schema.sql)
+- [新 Repo 接口定义](repo-interfaces.md)
+- [现有文件到新模块迁移表](migration-mapping.md)
 
 ## 5. 当前仓库中的保留区与重构区
 

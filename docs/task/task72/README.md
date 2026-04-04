@@ -29,13 +29,13 @@
 
 ## 4. 文档索引
 
-- [合约优先版独立实施清单](./derivatives_priority_checklist.md)
-- [合约优先版第一批具体开发任务](./derivatives_priority_batch1.md)
-- [合约优先版第二批具体开发任务](./derivatives_priority_batch2.md)
-- [合约优先版第三批具体开发任务](./derivatives_priority_batch3.md)
-- [合约优先版第四批具体开发任务](./derivatives_priority_batch4.md)
-- [合约优先版第五批具体开发任务（自动调参二期）](./derivatives_priority_batch5.md)
-- [现货版独立实施清单](./spot_checklist.md)
+- [合约优先版独立实施清单](derivatives_priority_checklist.md)
+- [合约优先版第一批具体开发任务](derivatives_priority_batch1.md)
+- [合约优先版第二批具体开发任务](derivatives_priority_batch2.md)
+- [合约优先版第三批具体开发任务](derivatives_priority_batch3.md)
+- [合约优先版第四批具体开发任务](derivatives_priority_batch4.md)
+- [合约优先版第五批具体开发任务（自动调参二期）](derivatives_priority_batch5.md)
+- [现货版独立实施清单](spot_checklist.md)
 - [单账户并行多策略架构升级任务书](../task73/README.md)
 
 ## 5. 使用方式

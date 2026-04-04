@@ -338,11 +338,11 @@
 
 首批可直接排期的细化任务见：
 
-- [合约优先版第一批具体开发任务](./derivatives_priority_batch1.md)
-- [合约优先版第五批具体开发任务（自动调参二期）](./derivatives_priority_batch5.md)
-- [合约优先版第二批具体开发任务](./derivatives_priority_batch2.md)
-- [合约优先版第三批具体开发任务](./derivatives_priority_batch3.md)
-- [合约优先版第四批具体开发任务](./derivatives_priority_batch4.md)
+- [合约优先版第一批具体开发任务](derivatives_priority_batch1.md)
+- [合约优先版第五批具体开发任务（自动调参二期）](derivatives_priority_batch5.md)
+- [合约优先版第二批具体开发任务](derivatives_priority_batch2.md)
+- [合约优先版第三批具体开发任务](derivatives_priority_batch3.md)
+- [合约优先版第四批具体开发任务](derivatives_priority_batch4.md)
 
 当前已经完成到第四批第一轮实现，当前新增的关键能力包括：
 

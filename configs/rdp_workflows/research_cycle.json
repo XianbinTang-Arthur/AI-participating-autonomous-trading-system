@@ -1,0 +1,31 @@
+{
+  "workflow": "research_cycle",
+  "description": "研究层周期: Step 2 research round, Phase 3 attribution, Phase 4 execution realism",
+  "schedule_hint": "weekly Sunday 08:00 UTC or on-demand",
+  "tasks": [
+    {
+      "name": "research_round",
+      "description": "Step 2 research round (参数搜索与回测)",
+      "command": "python -m aats.data_platform.replay.scan.batch_runner --step2",
+      "timeout_seconds": 600,
+      "enabled": true,
+      "allow_failure": false
+    },
+    {
+      "name": "attribution_round",
+      "description": "Phase 3 归因分析",
+      "command": "python -m aats.data_platform.attribution.runner --latest",
+      "timeout_seconds": 300,
+      "enabled": true,
+      "allow_failure": true
+    },
+    {
+      "name": "execution_realism_round",
+      "description": "Phase 4 执行真实性评估",
+      "command": "python -m aats.data_platform.execution_realism.runner --latest",
+      "timeout_seconds": 300,
+      "enabled": true,
+      "allow_failure": true
+    }
+  ]
+}

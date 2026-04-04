@@ -1,0 +1,31 @@
+{
+  "workflow": "governance_cycle",
+  "description": "治理层周期: quality monitor, artifact validation, active rounds refresh",
+  "schedule_hint": "daily 07:00 UTC",
+  "tasks": [
+    {
+      "name": "quality_monitor",
+      "description": "运行质量监控，更新 quality_monitor_summary.json",
+      "command": "python -m aats.data_platform.governance.quality_monitor --run",
+      "timeout_seconds": 120,
+      "enabled": true,
+      "allow_failure": false
+    },
+    {
+      "name": "artifact_validation",
+      "description": "验证治理层产物完整性",
+      "command": "python -m aats.data_platform.governance.artifact_indexer --validate",
+      "timeout_seconds": 60,
+      "enabled": true,
+      "allow_failure": true
+    },
+    {
+      "name": "active_rounds_refresh",
+      "description": "刷新 active_round_index.json",
+      "command": "python -m aats.data_platform.governance.round_manager --refresh-index",
+      "timeout_seconds": 60,
+      "enabled": true,
+      "allow_failure": true
+    }
+  ]
+}

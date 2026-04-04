@@ -1,0 +1,31 @@
+{
+  "workflow": "decision_cycle",
+  "description": "决策层周期: Phase 6 decision round, recommendation review, release observation check",
+  "schedule_hint": "weekly after research_cycle or on-demand",
+  "tasks": [
+    {
+      "name": "decision_round",
+      "description": "Phase 6 decision round",
+      "command": "python -m aats.data_platform.decision_system.decision_engine --run",
+      "timeout_seconds": 300,
+      "enabled": true,
+      "allow_failure": false
+    },
+    {
+      "name": "reliability_check",
+      "description": "运行可靠性检查并生成 alert summary",
+      "command": "python scripts/rdp_run_reliability_check.py",
+      "timeout_seconds": 120,
+      "enabled": true,
+      "allow_failure": true
+    },
+    {
+      "name": "observation_check",
+      "description": "检查所有 observing 状态的 release",
+      "command": "python scripts/rdp_build_alert_summary.py",
+      "timeout_seconds": 60,
+      "enabled": true,
+      "allow_failure": true
+    }
+  ]
+}

@@ -5,9 +5,9 @@
     "timeframe": "15m",
     "status": "active",
     "source_round_id": null,
-    "applied_at": "2026-04-04T17:20:22.970883+00:00",
+    "applied_at": "2026-04-04T17:30:44.636813+00:00",
     "applied_by": "rdp_apply (acceptance_test)",
-    "approval_recommendation_id": "rec_20260404_172022_d9d138"
+    "approval_recommendation_id": "rec_20260404_173044_0ec13b"
   },
   "values": {
     "signal_edge_scale_bps": 12.0,

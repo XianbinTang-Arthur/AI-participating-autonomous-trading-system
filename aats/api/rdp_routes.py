@@ -222,6 +222,28 @@ class RollbackRequest(BaseModel):
     notes: str | None = Field(default=None, description="操作备注")
 
 
+class CreateReleaseRequest(BaseModel):
+    recommendation_id: str = Field(..., description="已批准的 recommendation_id")
+    actor: str = Field(default="operator", description="操作人")
+    observation_window_hours: int = Field(default=24, description="观察窗口时长（小时）")
+    notes: str | None = Field(default=None, description="操作备注")
+    skip_gate: bool = Field(default=False, description="跳过 gate 检查")
+    skip_apply: bool = Field(default=False, description="只创建 release 不 apply")
+
+
+class RunObservationRequest(BaseModel):
+    release_id: str = Field(..., description="release_id")
+    family: str | None = Field(default=None, description="如不指定，从 release 推断")
+    timeframe: str | None = Field(default=None, description="如不指定，从 release 推断")
+    window_hours: int = Field(default=24)
+
+
+class EvaluateRollbackRequest(BaseModel):
+    release_id: str = Field(..., description="release_id")
+    family: str | None = Field(default=None)
+    timeframe: str | None = Field(default=None)
+
+
 # ── Recommendation Approve ─────────────────────────────────────────
 
 
@@ -380,4 +402,182 @@ async def rollback_parameter_api(
         to_parameter_set_id=body.to_parameter_set_id,
         actor=body.actor,
         notes=body.notes,
+    )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  Production Workflow 端点
+# ══════════════════════════════════════════════════════════════════
+
+
+# ── Gate ───────────────────────────────────────────────────────────
+
+
+@rdp_router.post(
+    "/gates/run",
+    dependencies=[Depends(require_read_access)],
+)
+async def run_gate_api(
+    request: Request,
+    body: ApplyRequest,
+) -> dict[str, Any]:
+    """运行 pre-apply gate 检查."""
+    from aats.data_platform.production_workflow.pre_apply_gate import (
+        run_pre_apply_gate,
+    )
+    root = _project_root(request)
+    return run_pre_apply_gate(root, body.recommendation_id)
+
+
+# ── Releases ───────────────────────────────────────────────────────
+
+
+@rdp_router.post(
+    "/releases/create",
+    dependencies=[Depends(require_write_access)],
+)
+async def create_release_api(
+    request: Request,
+    body: CreateReleaseRequest,
+) -> dict[str, Any]:
+    """创建 parameter release（gate + apply 完整流程）."""
+    from aats.data_platform.production_workflow.release_registry import (
+        create_parameter_release,
+    )
+    root = _project_root(request)
+    return create_parameter_release(
+        root,
+        recommendation_id=body.recommendation_id,
+        actor=body.actor,
+        observation_window_hours=body.observation_window_hours,
+        notes=body.notes,
+        run_gate=not body.skip_gate,
+        run_apply=not body.skip_apply,
+    )
+
+
+@rdp_router.get(
+    "/releases/latest",
+    dependencies=[Depends(require_read_access)],
+)
+async def latest_releases(
+    request: Request,
+    limit: int = Query(default=10, ge=1, le=50),
+) -> dict[str, Any]:
+    """最近的 parameter releases."""
+    from aats.data_platform.production_workflow.release_registry import (
+        load_release_history,
+    )
+    root = _project_root(request)
+    history = load_release_history(root)
+    releases = list(reversed(history.get("releases", [])))
+    return {
+        "total": len(releases),
+        "releases": releases[:limit],
+    }
+
+
+@rdp_router.get(
+    "/releases/history",
+    dependencies=[Depends(require_read_access)],
+)
+async def releases_history(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    """完整 release 历史."""
+    from aats.data_platform.production_workflow.release_registry import (
+        load_release_history,
+    )
+    root = _project_root(request)
+    history = load_release_history(root)
+    releases = list(reversed(history.get("releases", [])))
+    return {
+        "total": len(releases),
+        "releases": releases[:limit],
+    }
+
+
+# ── Observation ────────────────────────────────────────────────────
+
+
+@rdp_router.post(
+    "/observations/run",
+    dependencies=[Depends(require_read_access)],
+)
+async def run_observation_api(
+    request: Request,
+    body: RunObservationRequest,
+) -> dict[str, Any]:
+    """运行 post-apply observation 检查."""
+    from aats.data_platform.production_workflow.observation_window import (
+        run_observation,
+    )
+    from aats.data_platform.production_workflow.release_registry import (
+        find_release,
+        load_release_history,
+    )
+
+    root = _project_root(request)
+    family = body.family
+    timeframe = body.timeframe
+
+    if not family or not timeframe:
+        history = load_release_history(root)
+        release = find_release(history, body.release_id)
+        if release:
+            family = family or release.get("family")
+            timeframe = timeframe or release.get("timeframe")
+
+    if not family or not timeframe:
+        return {"ok": False, "message": "无法确定 family/timeframe"}
+
+    return run_observation(
+        root,
+        release_id=body.release_id,
+        family=family,
+        timeframe=timeframe,
+        window_hours=body.window_hours,
+    )
+
+
+# ── Rollback Recommendation ───────────────────────────────────────
+
+
+@rdp_router.post(
+    "/rollback-recommendation/evaluate",
+    dependencies=[Depends(require_read_access)],
+)
+async def evaluate_rollback_api(
+    request: Request,
+    body: EvaluateRollbackRequest,
+) -> dict[str, Any]:
+    """评估是否建议 rollback."""
+    from aats.data_platform.production_workflow.release_registry import (
+        find_release,
+        load_release_history,
+    )
+    from aats.data_platform.production_workflow.rollback_policy import (
+        evaluate_rollback_recommendation,
+    )
+
+    root = _project_root(request)
+    family = body.family
+    timeframe = body.timeframe
+
+    if not family or not timeframe:
+        history = load_release_history(root)
+        release = find_release(history, body.release_id)
+        if release:
+            family = family or release.get("family")
+            timeframe = timeframe or release.get("timeframe")
+
+    if not family or not timeframe:
+        return {"ok": False, "message": "无法确定 family/timeframe"}
+
+    return evaluate_rollback_recommendation(
+        root,
+        release_id=body.release_id,
+        family=family,
+        timeframe=timeframe,
     )
