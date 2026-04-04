@@ -41,6 +41,8 @@
   - [21.12 快速开始](#2112-快速开始)
   - [21.13 代码模块清单](#2113-代码模块清单)
   - [21.14 已知限制](#2114-已知限制)
+  - [21.15 治理与产品化 (Phase 5)](#2115-治理与产品化-phase-5)
+  - [21.16 闭环决策系统 (Phase 6)](#2116-闭环决策系统-phase-6)
 - [22. 安全边界与风险提示](#22-安全边界与风险提示)
 - [23. 开发建议](#23-开发建议)
 - [24. 常见问题](#24-常见问题)
@@ -838,6 +840,32 @@ artifacts/research/       # Phase 2 参数研究产物
   attribution_rounds/     #   Phase 3 归因轮次（replay/live 对齐 / attribution / conclusion）
   execution_rounds/       #   Phase 4 执行可行性轮次（market alignment / fill feasibility / slippage / conclusion）
 
+artifacts/governance/         # Phase 5 治理产物
+  artifact_index.json         #   全局 artifact 索引
+  active_round_index.json     #   当前 active round 索引
+  current_parameter_registry.json # 参数注册表（draft/candidate/frozen/deprecated）
+  quality_monitor_summary.json    # 最近一次质量巡检结果
+
+docs/operations/              # Phase 5 运营文档
+  platform_runbook.md         #   平台运行手册
+  artifact_conventions.md     #   Artifact 规范
+  parameter_governance.md     #   参数治理
+  round_lifecycle.md          #   Round 生命周期
+  operator_checklist.md       #   运维检查清单
+
+artifacts/decision_system/    # Phase 6 决策系统注册表
+  recommendation_registry.json  # 所有历史建议记录
+  active_decision_registry.json # 当前 family/tf 运营状态
+  evidence_bundle_index.json    # evidence bundle 引用索引
+
+artifacts/decision_rounds/<round_id>/  # Phase 6 决策 round 产物
+  round_manifest.json
+  evidence_summary.json
+  parameter_upgrade_candidates.json
+  family_timeframe_decisions.json
+  promotion_readiness_report.json
+  phase6_closed_loop_decision_conclusion.md
+
 configs/
   research_batches/       # 校准批次 JSON 模板
     independent_scale_calibration_15m.json
@@ -872,6 +900,16 @@ scripts/                  # 启动、seed、回放、报告脚本
   rdp_run_phase3_round.py    # Phase 3 批量归因 round（4 family×tf 组合 + 结论文档）
   rdp_run_execution_realism.py # Phase 4 one-shot execution realism（单次市场微观结构可行性分析）
   rdp_run_phase4_round.py    # Phase 4 批量 execution realism round（4 family×tf + 比较 + 结论）
+  rdp_validate_artifacts.py  # Phase 5 manifest 规范校验（支持 --fix 自动补全）
+  rdp_build_artifact_index.py # Phase 5 构建全局 artifact 索引
+  rdp_freeze_parameter_set.py # Phase 5 参数注册/冻结/废弃管理
+  rdp_list_active_rounds.py  # Phase 5 列出 active rounds + experiments
+  rdp_retry_failed_round.py  # Phase 5 失败 round 重跑计划与执行
+  rdp_run_quality_monitor.py # Phase 5 质量巡检（数据/artifact/结果/治理层）
+  rdp_run_decision_round.py  # Phase 6 完整闭环决策 round（证据收集+候选筛选+决策+readiness+registry）
+  rdp_select_parameter_upgrade.py # Phase 6 参数升级候选单独评估
+  rdp_evaluate_promotion_readiness.py # Phase 6 上线 readiness 评估
+  rdp_update_decision_registry.py # Phase 6 recommendation/decision registry 管理
   rdp_run_backfill.py     #   手动历史回填（保留）
   rdp_build_gold.py       #   手动 Gold 构建（单个 symbol x timeframe）
   rdp_build_gold_all.py   #   批量 Gold 构建（自动遍历所有 swap 组合）
@@ -1827,6 +1865,157 @@ SELECT 'swap_1h',        COUNT(*) FROM gold.market_swap_replay_bars_1h;
 | Execution realism V1 | Phase 4 无 orderbook depth / trades 数据，spread 和 impact 基于 bar OHLCV proxy |
 | Slippage 模型校准 | V1 的 half_spread_fraction (0.02) 和 impact_coefficient (1.0) 尚未经过真实数据校准 |
 | 仓位极小 | BTC-USDT-SWAP 1 合约 = 0.01 BTC，volume ratio 接近 0，feasibility 指标在小仓位下区分度有限 |
+
+### 21.15 治理与产品化 (Phase 5)
+
+Phase 5 不扩展研究能力，专注把平台从"能跑"推进到"可长期运行、可版本治理、可追溯、可交接"。
+
+#### 5 个子阶段
+
+| 子阶段 | 目标 | 核心交付 |
+|--------|------|----------|
+| 5-A | Artifact / 命名 / Manifest 规范化 | `artifact_index.json`, `rdp_validate_artifacts.py` |
+| 5-B | 参数与结论治理 | `current_parameter_registry.json`, `rdp_freeze_parameter_set.py` |
+| 5-C | 运行状态与失败治理 | `active_round_index.json`, `rdp_retry_failed_round.py` |
+| 5-D | 质量监控与巡检 | `quality_monitor_summary.json`, `rdp_run_quality_monitor.py` |
+| 5-E | 运行手册与交接文档 | `docs/operations/` 下 5 份文档 |
+
+#### 治理模块（`aats/data_platform/governance/`）
+
+| 文件 | 职责 |
+|------|------|
+| `manifest_validation.py` | Round manifest 规范校验 + 旧版 manifest 自动补全 |
+| `artifact_index.py` | 全局 artifact 索引构建（experiments + rounds） |
+| `parameter_registry.py` | 参数版本治理（draft/candidate/frozen/deprecated 生命周期） |
+| `round_status.py` | Active round 索引构建 + 状态查询 |
+| `retry_logic.py` | 失败 round 重跑计划生成 + 可重跑 round 发现 |
+| `quality_monitor.py` | 数据/artifact/结果/治理层四维质量巡检 |
+
+#### 治理脚本
+
+| 脚本 | 用途 |
+|------|------|
+| `rdp_validate_artifacts.py` | 校验 manifest 规范，支持 `--fix` 自动补全 |
+| `rdp_build_artifact_index.py` | 扫描全部 artifact 目录生成索引 |
+| `rdp_freeze_parameter_set.py` | 参数 show / import / freeze / deprecate |
+| `rdp_list_active_rounds.py` | 列出 active rounds，按 phase 分组 |
+| `rdp_retry_failed_round.py` | 失败 round 的 list / plan / rerun |
+| `rdp_run_quality_monitor.py` | 运行全量质量巡检 (exit: 0=healthy, 1=unhealthy, 2=degraded) |
+
+#### 参数生命周期
+
+```
+Step 2 产出 parameter_candidates.json
+  → 导入 Registry (status: draft)
+    → 初步验证 → candidate
+      → Phase 3/4 验证通过 → frozen
+        → 被新版本替代 → deprecated
+```
+
+冻结参数通过 `--params-json` 注入 Phase 3/4 round:
+
+```bash
+python scripts/rdp_run_phase3_round.py \
+    --start 2026-03-31 --end 2026-04-02 \
+    --params-json artifacts/research/experiments/.../parameter_candidates.json
+```
+
+#### Round 统一生命周期
+
+```
+pending → running → succeeded / partial_success / failed → deprecated
+```
+
+退出码: `0` = 成功, `2` = 部分成功, `3` = 全部失败
+
+#### 质量巡检
+
+```bash
+python scripts/rdp_run_quality_monitor.py
+```
+
+检查 4 个维度:
+- **artifact 层**: 目录存在性、manifest 完整性
+- **结果层**: opening_count 全 0、全 round 失败等异常
+- **参数层**: 参数文件可解析性、registry 完整性
+- **治理层**: 治理文件存在性、运营文档完整性
+
+#### 运营文档
+
+| 文档 | 内容 |
+|------|------|
+| `platform_runbook.md` | 平台全景 + 日常操作 + 治理操作 + 故障排查 |
+| `artifact_conventions.md` | 目录结构 + manifest 规范 + 关键文件说明 |
+| `parameter_governance.md` | 参数治理流程 + registry 结构 + 操作指南 |
+| `round_lifecycle.md` | 状态定义 + 退出码 + 失败处理 + active index |
+| `operator_checklist.md` | 日常巡检 + 运行前后检查 + 故障排查 + 交接须知 |
+
+### 21.16 闭环决策系统 (Phase 6)
+
+Phase 6 把前面所有 Phase 的研究、归因、execution realism、治理证据整合成统一的生产决策建议。
+**第一版只生成建议，不直接控制生产系统。**
+
+#### 5 个子阶段
+
+| 子阶段 | 目标 | 核心交付 |
+|--------|------|----------|
+| 6-A | Evidence Bundle 统一化 | `evidence_summary.json` |
+| 6-B | 参数升级候选选择 | `parameter_upgrade_candidates.json` |
+| 6-C | Family/Timeframe 状态决策 | `family_timeframe_decisions.json` |
+| 6-D | Promotion Readiness 评估 | `promotion_readiness_report.json` |
+| 6-E | Recommendation Registry 与闭环文档 | `recommendation_registry.json`, 结论 MD |
+
+#### 决策模块（`aats/data_platform/decision_system/`）
+
+| 文件 | 职责 |
+|------|------|
+| `evidence_bundle.py` | 跨 Phase 2/3/4/5 证据统一收集与完整度评估 |
+| `candidate_selector.py` | 规则化参数评分：4 维度（研究/归因/执行/治理）→ promote/hold/reject |
+| `decision_engine.py` | Family/Timeframe 状态决策：keep_active/lower_priority/pause/require_review |
+| `readiness_evaluator.py` | 7 项 check 评估上线就绪度 |
+| `recommendation_registry.py` | Recommendation + Active Decision + Evidence Bundle 三个 registry 管理 |
+| `report_builder.py` | 7 节结论文档生成 |
+
+#### 决策脚本
+
+```bash
+# 运行完整闭环决策 round（6 步全流程）
+python scripts/rdp_run_decision_round.py
+
+# 单独评估参数升级候选
+python scripts/rdp_select_parameter_upgrade.py
+
+# 单独评估上线就绪度
+python scripts/rdp_evaluate_promotion_readiness.py
+
+# 查看 / 管理 registry
+python scripts/rdp_update_decision_registry.py --action show-recommendations
+python scripts/rdp_update_decision_registry.py --action show-decisions
+python scripts/rdp_update_decision_registry.py --action approve --recommendation-id <id>
+```
+
+#### 参数升级评分体系
+
+4 个维度（总分 9.0）：
+
+| 维度 | 满分 | 评判标准 |
+|------|------|----------|
+| Phase 2 研究 | 3.0 | 开仓信号 + opening count + positive edge ratio |
+| Phase 3 归因 | 2.0 | combo 成功 + failure ratio 合理 |
+| Phase 4 执行 | 2.0 | cost-adjusted edge >= 0 + fill ratio >= 30% |
+| Phase 5 治理 | 2.0 | governance healthy + 参数状态 |
+
+决策规则：score_ratio >= 0.7 → promote_candidate，0.4~0.7 → hold，< 0.4 → reject
+
+#### Promotion Readiness 7 项 Check
+
+1. 研究结果稳定性（有开仓 + edge >= 15%）
+2. Attribution 无严重结构问题
+3. Execution realism 未严重吞噬 edge
+4. Governance 健康
+5. 参数可追溯（有 frozen/candidate）
+6. 至少有 promote_candidate 的参数
+7. 至少有 keep_active 的 family/timeframe
 
 ---
 
