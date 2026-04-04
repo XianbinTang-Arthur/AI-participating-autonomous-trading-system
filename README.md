@@ -889,6 +889,13 @@ tests/                    # 单元 / 集成 / 回放 / 场景测试
 
 ### 21.2 架构全景
 
+#### 研究管线（一键运行）
+
+```bash
+# 完整管线: Phase 2 参数研究 → Phase 3 归因 → Phase 4 执行可行性 → Phase 5 治理 → Phase 6 决策
+python scripts/rdp_run_full_pipeline.py --start 2026-03-31 --end 2026-04-02
+```
+
 #### 七阶段研究管线
 
 ```text
@@ -965,10 +972,18 @@ python scripts/rdp_start.py
 python scripts/rdp_build_gold_all.py --dry-run   # 预览
 python scripts/rdp_build_gold_all.py              # 构建
 
-# 6. 运行参数研究（可选）
-python scripts/rdp_run_replay.py \
-    --family independent --symbol BTC-USDT-SWAP --timeframe 1m \
-    --start 2026-03-31 --end 2026-04-02 --dataset-version v1.0
+# 6. 运行完整研究管线（Phase 2 → 3 → 4 → 5 → Decision 一键串联）
+python scripts/rdp_run_full_pipeline.py \
+    --start 2026-03-31 --end 2026-04-02
+
+# 或只跑部分阶段
+python scripts/rdp_run_full_pipeline.py --start 2026-03-31 --end 2026-04-02 \
+    --start-from phase3              # 从 Phase 3 开始（Phase 2 已完成）
+python scripts/rdp_run_full_pipeline.py --stop-after phase4  \
+    --start 2026-03-31 --end 2026-04-02   # 只跑到 Phase 4
+
+# 7. 审批并应用参数（人工确认）
+# python scripts/approve_recommendation_and_apply.py --rec-id <ID>
 ```
 
 **关键配置变量**（`.env.research`）：
@@ -1025,6 +1040,7 @@ Phase 2 在 Gold 数据之上构建参数研究闭环，回答"当参数变化�
 | `rdp_run_calibration_batch.py` | JSON 驱动的校准批处理 |
 | `rdp_run_step1_calibration.py` | Step 1 自动化校准编排 |
 | `rdp_run_step2_research.py` | Step 2 完整研究闭环（4 阶段） |
+| **`rdp_run_full_pipeline.py`** | **一键编排: Phase 2 → 3 → 4 → 5 → Decision（推荐）** |
 
 **产物目录**：`artifacts/research/experiments/`、`artifacts/research/calibration_batches/`、`artifacts/research/step2_rounds/`
 
