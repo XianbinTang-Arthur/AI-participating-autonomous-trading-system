@@ -1035,19 +1035,57 @@ Phase 2 在 Gold 数据之上构建参数研究闭环，回答"当参数变化�
 Gold replay bars
   -- Replay Core（逐 bar 重放引擎）
   -- Strategy Adapter（independent / directional 家族适配器）
-  -- Diagnostics Engine（结构化诊断指标）
+  -- Edge Contract（统一 4 层 edge 分解语义）
+  -- Cost Model（可配置的保守成本模型）
+  -- Diagnostics Engine（结构化诊断指标，含 edge 分解统计）
   -- Experiment Registry（实验元数据、产物路径追踪）
-  -- Parameter Scan Engine（参数网格批量扫描）
-  -- Report Builder（Markdown / JSON / CSV 报告生成）
+  -- Parameter Scan Engine（参数网格批量扫描，支持 partial_success 状态）
+  -- Report Builder（Markdown / JSON / CSV 报告，含 edge 来源分析）
 ```
 
-#### 首批冻结参数（3 个）
+#### 统一 Edge Contract
 
-| 参数 | 生产代码位置 | 说明 | 默认值 |
-|------|-------------|------|--------|
-| `min_confirm_ticks` | `settings.strategy_hedge_independent_min_confirm_ticks` | 信号确认强度 | 2 |
-| `score_stability_threshold` | `settings.strategy_hedge_independent_min_score_stability_bps` | 强信号是否被过度拦截 | 2.0 |
-| `min_safe_net_edge_bps` | `settings.strategy_hedge_independent_min_safe_net_edge_bps` | 边缘机会放行下限 | 0.0 |
+所有 family adapter 必须按以下 4 层分解输出 edge（bps 单位）：
+
+```text
+expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+```
+
+| 层 | 字段 | 说明 |
+|----|------|------|
+| Signal | `signal_edge_proxy_bps` | 来自策略信号（score / momentum / trend / alpha）的机会代理 |
+| Funding | `funding_adjustment_bps` | funding rate 的附加调整（附加项，不是全部） |
+| Cost | `cost_bps` | 交易成本（taker fee + slippage，来自 `ReplayCostConfig`） |
+| Net | `expected_net_edge_bps` | 最终净 edge = signal + funding - cost |
+
+两个 family 的 signal 内部估算方式可以不同，但输出语义统一，横向对比有效。
+
+#### 成本模型
+
+成本配置集中在 `ReplayCostConfig`，不硬编码在 adapter 里：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `taker_fee_bps` | 5.0 | OKX swap taker 0.05%，保守估计 |
+| `slippage_bps` | 2.0 | 保守滑点估计 |
+| **total_cost_bps** | **7.0** | 单边成本合计 |
+
+可通过 `--param taker_fee_bps=3 --param slippage_bps=1.5` 直接覆盖。
+
+#### 可覆盖参数
+
+所有参数均可通过 CLI `--param key=value` 覆盖：
+
+| 参数 | 类别 | 说明 | 默认值 |
+|------|------|------|--------|
+| `min_confirm_ticks` | 策略门槛 | 信号确认强度 | 2 |
+| `score_stability_threshold` | 策略门槛 | 强信号是否被过度拦截 | 2.0 |
+| `min_safe_net_edge_bps` | 策略门槛 | 边缘机会放行下限 | 0.0 |
+| `signal_edge_scale_bps` | 信号校准 | score -> bps 缩放系数 | 10.0 |
+| `directional_trend_weight` | 信号校准 | directional 趋势/return 混合权重 | 0.7 |
+| `directional_return_clamp_bps` | 信号校准 | directional bar return 限幅 | 20.0 |
+| `taker_fee_bps` | 成本模型 | taker 手续费（bps） | 5.0 |
+| `slippage_bps` | 成本模型 | 滑点（bps） | 2.0 |
 
 #### 运行方式
 
@@ -1061,6 +1099,21 @@ python scripts/rdp_run_replay.py \
     --dataset-version v1.0 \
     --param min_confirm_ticks=3 \
     --param min_safe_net_edge_bps=5
+
+# 覆盖成本模型
+python scripts/rdp_run_replay.py \
+    --family independent \
+    --symbol BTC-USDT-SWAP --timeframe 1m \
+    --start 2026-03-31 --end 2026-04-02 \
+    --param taker_fee_bps=3 --param slippage_bps=1.5
+
+# 覆盖 signal edge 校准参数
+python scripts/rdp_run_replay.py \
+    --family directional \
+    --symbol BTC-USDT-SWAP --timeframe 1m \
+    --start 2026-03-31 --end 2026-04-02 \
+    --param signal_edge_scale_bps=15 \
+    --param directional_trend_weight=0.8
 
 # 参数网格扫描（默认 3x3x3 = 27 组合）
 python scripts/rdp_run_parameter_scan.py \
@@ -1078,23 +1131,26 @@ python scripts/rdp_run_parameter_scan.py \
     --grid '{"min_confirm_ticks":[2,3],"min_safe_net_edge_bps":[0,5,10]}'
 ```
 
+注：replay / scan CLI 默认不跑 migration，需加 `--ensure-schema` 显式执行。
+
 #### 产物结构
 
 每次实验生成三个文件：
 
 ```text
 artifacts/research/experiments/<experiment_id>/
-  replay_decisions.csv    -- 逐 bar 决策明细
-  diagnostics.json        -- 诊断指标快照
-  report.md               -- Markdown 研究报告
+  replay_decisions.csv    -- 逐 bar 决策明细（含 edge 4 层分解）
+  diagnostics.json        -- 诊断指标快照（含 edge 分解统计）
+  report.md               -- Markdown 研究报告（含 Edge Breakdown 表格）
 ```
 
 参数扫描额外生成：
 
 ```text
 artifacts/research/experiments/<scan_run_id>/
-  comparison_summary.json -- 多组实验对比数据
+  comparison_summary.json -- 多组实验对比数据（含 edge 分解）
   comparison_report.md    -- 对比报告
+  failed_combos.json      -- 失败组合明细（label + params + error）
   <experiment_id>/        -- 每组参数各自的产物
 ```
 
@@ -1107,22 +1163,36 @@ artifacts/research/experiments/<scan_run_id>/
 | `selectable_ratio` | 评分达到入场阈值的 bar 占比 |
 | `execution_compatible_ratio` | 同时满足评分+稳定性+边际的 bar 占比 |
 | `top_blocking_reasons` | 拦截原因 Top N 排名 |
+| `mean_signal_edge_proxy_bps` | 平均信号代理 edge（bps） |
+| `mean_funding_adjustment_bps` | 平均 funding 调整（bps） |
+| `mean_cost_bps` | 平均成本（bps） |
 | `mean_expected_edge_bps` | 平均预期净边际（bps） |
+| `positive_edge_ratio` | 净 edge 为正的 bar 占比 |
 | `state_distribution` | 状态分布（flat/probing/holding/...） |
 | `action_distribution` | 动作分布（open/hold/close/blocked） |
 
 #### 策略适配器
 
-| 适配器 | 说明 |
-|--------|------|
-| `IndependentReplayAdapter` | 从 OHLCV + funding rate 派生简化因子，复用 independent 策略的评分/稳定性/资格门槛逻辑 |
-| `DirectionalReplayAdapter` | 基于 SMA crossover 的最小 directional 策略实现，受相同参数门槛约束 |
+| 适配器 | Signal Edge 来源 | 说明 |
+|--------|------------------|------|
+| `IndependentReplayAdapter` | `dominant_score * signal_edge_scale_bps` | 从 OHLCV 派生 alpha/momentum/trend/micro/confidence 因子，funding 作为附加项 |
+| `DirectionalReplayAdapter` | `trend_w * score * scale + (1-trend_w) * clamped_return` | SMA crossover 趋势强度 + bar return 混合，funding 作为附加项 |
 
-两个适配器均实现 `BaseReplayAdapter` 接口，新增家族只需继承基类并实现 `evaluate_bar()` 方法。
+两个适配器均实现 `BaseReplayAdapter` 接口，均遵循统一 Edge Contract 输出 4 层分解。新增家族只需继承基类并实现 `evaluate_bar()` 方法。
+
+#### Scan Run 状态
+
+| 状态 | 含义 |
+|------|------|
+| `pending` | 已创建，未开始 |
+| `running` | 正在执行 |
+| `succeeded` | 全部组合成功 |
+| `partial_success` | 部分成功、部分失败 |
+| `failed` | 全部失败 |
 
 #### 简化说明
 
-Phase 2 replay 使用简化评分模型（不含 AI assessment、orderbook depth、真实 execution state），与生产系统评分存在偏差。不包含撮合仿真、PnL accounting 和滑点模型（属于后续 Phase）。重点关注参数变化对决策结构的**相对影响**。
+Phase 2 replay 使用简化评分模型（不含 AI assessment、orderbook depth、真实 execution state），与生产系统评分存在偏差。不包含撮合仿真和 PnL accounting（属于后续 Phase）。成本模型使用可配置的保守估计（默认 7 bps），signal edge 通过可校准缩放系数映射。重点关注参数变化对决策结构的**相对影响**。
 
 ### 21.10 配置
 
@@ -1240,17 +1310,17 @@ python scripts/rdp_run_replay.py \
 
 | 文件 | 职责 |
 |------|------|
-| `core/replay_context.py` | 数据模型：ReplayBar, ReplayDecision, ReplayParameterOverrides, ReplayState |
+| `core/replay_context.py` | 数据模型：ReplayBar, ReplayCostConfig, ReplayParameterOverrides, ReplayDecision, ReplayState（含统一 Edge Contract 定义） |
 | `core/replay_runner.py` | 逐 bar 重放引擎（读取 Gold bars -> 调用 adapter -> 输出决策列表） |
 | `core/replay_result_writer.py` | 产物写入器（CSV / JSON） |
 | `adapters/base_adapter.py` | 策略适配器抽象基类（统一 evaluate_bar 接口） |
-| `adapters/independent_adapter.py` | Independent 策略 replay 适配器 |
-| `adapters/directional_adapter.py` | Directional 策略 replay 适配器 |
+| `adapters/independent_adapter.py` | Independent 策略 replay 适配器（signal 来自 OHLCV 因子，edge 4 层分解） |
+| `adapters/directional_adapter.py` | Directional 策略 replay 适配器（signal 来自 SMA + return 混合，edge 4 层分解） |
 | `registry/experiment_registry.py` | 实验元数据 CRUD + summary upsert（写入 research schema） |
-| `diagnostics/replay_diagnostics.py` | 诊断计算 + 多组对比（compute_diagnostics / compare_diagnostics） |
+| `diagnostics/replay_diagnostics.py` | 诊断计算 + 多组对比（含 edge 分解统计：signal / funding / cost） |
 | `scan/parameter_grid.py` | 参数网格定义与展开（DEFAULT_PARAMETER_GRID, build_grid） |
-| `scan/scan_runner.py` | 批量扫描引擎（run_parameter_scan） |
-| `reports/markdown_report_builder.py` | Markdown 报告生成（单实验 + 扫描对比） |
+| `scan/scan_runner.py` | 批量扫描引擎（支持 partial_success 状态 + failed_combos.json 产物） |
+| `reports/markdown_report_builder.py` | Markdown 报告生成（含 Edge Breakdown 表格 + edge 来源分析） |
 
 ### 21.14 已知限制
 
@@ -1261,7 +1331,10 @@ python scripts/rdp_run_replay.py \
 | Gold volume 语义 | spot vol = 基础币量，swap vol = 合约张数，未做跨类型统一 |
 | 单进程 | scheduler 设计为单进程，不支持多 worker 并行 |
 | Replay 评分 | Phase 2 使用简化评分模型（不含 AI assessment），与生产存在偏差 |
-| Replay 撮合 | Phase 2 不含撮合仿真、PnL accounting、滑点模型（后续 Phase） |
+| Replay 撮合 | Phase 2 不含撮合仿真和 PnL accounting（属于后续 Phase） |
+| Signal 校准 | `signal_edge_scale_bps` 当前为经验性默认值（10.0），尚未经过历史数据校准 |
+| Gold 版本语义 | Replay 输入只按 `source_candle_dataset_version` 过滤，未显式约束 funding version |
+| Report findings | 报告的核心发现生成逻辑仍较规则化，后续需增强 family-specific 分析能力 |
 
 ---
 
