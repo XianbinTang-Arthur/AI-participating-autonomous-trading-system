@@ -835,6 +835,8 @@ artifacts/research/       # Phase 2 参数研究产物
   calibration_batches/    #   校准批次产物（batch summary / report / per-experiment）
   calibration_rounds/     #   Step 1 校准轮次（round summary / recommendations / conclusion）
   step2_rounds/           #   Step 2 研究轮次（family×timeframe 汇总 / candidates / conclusion）
+  attribution_rounds/     #   Phase 3 归因轮次（replay/live 对齐 / attribution / conclusion）
+  execution_rounds/       #   Phase 4 执行可行性轮次（market alignment / fill feasibility / slippage / conclusion）
 
 configs/
   research_batches/       # 校准批次 JSON 模板
@@ -866,6 +868,10 @@ scripts/                  # 启动、seed、回放、报告脚本
   rdp_run_calibration_batch.py # Phase 2 校准批处理（JSON 驱动，轻量级批跑）
   rdp_run_step1_calibration.py # Phase 2 Step 1 校���编排（自动运行 3 batch + 规则推荐 + 结论文档）
   rdp_run_step2_research.py  # Phase 2 Step 2 正式研究闭环（4 family×tf 校准 + scan + 比较 + 结论）
+  rdp_run_live_attribution.py # Phase 3 one-shot live attribution（单次 replay/live 对照归因）
+  rdp_run_phase3_round.py    # Phase 3 批量归因 round（4 family×tf 组合 + 结论文档）
+  rdp_run_execution_realism.py # Phase 4 one-shot execution realism（单次市场微观结构可行性分析）
+  rdp_run_phase4_round.py    # Phase 4 批量 execution realism round（4 family×tf + 比较 + 结论）
   rdp_run_backfill.py     #   手动历史回填（保留）
   rdp_build_gold.py       #   手动 Gold 构建（单个 symbol x timeframe）
   rdp_build_gold_all.py   #   批量 Gold 构建（自动遍历所有 swap 组合）
@@ -1423,6 +1429,168 @@ artifacts/research/step2_rounds/<round_id>/
 | directional/15m | confirm_ticks × trend_weight × clamp | 18 |
 | directional/1H | confirm_ticks × trend_weight × clamp | 18 |
 
+#### Phase 3: Live Attribution / Replay 对照归因
+
+Phase 3 建立标准化 replay vs live 对照归因流程，回答"为什么 live 没下单"。
+
+**核心模块**（`aats/data_platform/attribution/`）：
+
+| 模块 | 职责 |
+|------|------|
+| `taxonomy.py` | 统一归因分类 + reason code（10 个 category, 30+ reason code） |
+| `alignment.py` | Replay/live 事件按 bar 时间窗口对齐 + live DB 查询 |
+| `layer_classifier.py` | 瀑布式分层归因（停在第一层失败处） |
+| `aggregation.py` | 按 category × reason 聚合 + top failure modes + layer analysis |
+| `report_builder.py` | Markdown 报告生成（单次 + 批量结论） |
+
+**归因瀑布（严格顺序）**：
+
+```text
+1. Strategy  → replay 想开, live strategy 也想开?
+2. Permission → automatic_enabled = true?
+3. Allocator → allocation 存在且 approved?
+4. Budget   → budget_multiplier > 0, 未被 clamp?
+5. Risk     → reconciliation 未阻止? (not only_reduce / halt)
+6. Execution → bundle 状态正常?
+7. Order    → order 创建且未 rejected?
+8. Fill     → fill 出现?
+```
+
+**One-shot Attribution**（`rdp_run_live_attribution.py`）：
+
+```bash
+# 对单个 family/timeframe 做 replay/live 归因
+python scripts/rdp_run_live_attribution.py \
+    --family independent --symbol BTC-USDT-SWAP --timeframe 15m \
+    --start 2026-03-31 --end 2026-04-02 \
+    --live-db-url "postgresql+psycopg://localhost:5432/aats_derivatives"
+
+# 仅做 replay 分析（无 live DB）
+python scripts/rdp_run_live_attribution.py \
+    --family independent --symbol BTC-USDT-SWAP --timeframe 15m \
+    --start 2026-03-31 --end 2026-04-02 --replay-only
+```
+
+**Phase 3 Round**（`rdp_run_phase3_round.py`）：
+
+```bash
+# 批量跑 4 个 family×tf 组合
+python scripts/rdp_run_phase3_round.py \
+    --start 2026-03-31 --end 2026-04-02
+```
+
+**产物结构**：
+
+```text
+artifacts/research/attribution_rounds/<round_id>/
+  round_manifest.json
+  family_timeframe_attribution_summary.csv
+  phase3_live_attribution_conclusion.md
+  per_combo/
+    independent_15m_<ts>/
+      replay_live_alignment.csv
+      attribution_summary.json
+      top_failure_modes.json
+      live_attribution_report.md
+    independent_1h_<ts>/...
+    directional_15m_<ts>/...
+    directional_1h_<ts>/...
+```
+
+**Live 数据源（只读，不修改）**：
+
+| 表 | 归因层 |
+|----|--------|
+| `strategy_sleeve_intents` | Strategy / Permission |
+| `portfolio_allocation_decisions` | Allocator |
+| `allocator_budget_snapshots` | Budget |
+| `reconciliation_state_snapshots` | Risk |
+| `strategy_execution_bundles` | Execution |
+| `execution_orders` | Order |
+| `execution_fills` | Fill |
+
+#### Phase 4: Execution Realism / 成交可行性研究
+
+Phase 4 进入市场微观结构层，回答"即使策略想开单，这笔单在真实市场条件下是否可成交、成本多少"。
+
+**核心模块**（`aats/data_platform/execution_realism/`）：
+
+| 模块 | 职责 |
+|------|------|
+| `market_alignment.py` | 候选订单与 Gold bar 市场快照对齐（OHLCV + volume 匹配） |
+| `fill_feasibility.py` | 基于 volume ratio 的可成交性评估（fully/partially/not fillable） |
+| `slippage_estimator.py` | Bar-proxy 滑点模型（half-spread + sqrt volume impact） |
+| `execution_cost_model.py` | 执行成本汇总（slippage + fee，与 Phase 2 默认假设比较） |
+| `aggregation.py` | 跨 family/timeframe 比较聚合 + 交叉发现 |
+| `report_builder.py` | Markdown 报告生成（单次 + Phase 4 结论） |
+
+**V1 分析链**：
+
+```text
+Replay Decision (action=open/close)
+  -> Gold Bar Matching (同一 bar timestamp)
+  -> Fill Feasibility (volume_ratio < 1%? → fully_fillable)
+  -> Slippage Estimate (half_spread + sqrt_impact)
+  -> Total Cost = slippage + taker_fee
+  -> Cost-Adjusted Edge = net_edge + assumed_cost - realistic_cost
+```
+
+**V1 滑点模型**（Bar-Based Proxy, 透明可解释）：
+- Half-spread: `max(0.5 bps, bar_range_bps × 0.02)`
+- Volume impact: `bar_range_bps × sqrt(volume_ratio)` (square root law)
+- 参数可通过真实 orderbook/trades 数据校准
+
+**One-shot Execution Realism**（`rdp_run_execution_realism.py`）：
+
+```bash
+# 对单个 family/timeframe 做 execution realism 分析
+python scripts/rdp_run_execution_realism.py \
+    --family independent --symbol BTC-USDT-SWAP --timeframe 15m \
+    --start 2026-03-31 --end 2026-04-02
+
+# 指定 taker fee
+python scripts/rdp_run_execution_realism.py \
+    --family independent --symbol BTC-USDT-SWAP --timeframe 15m \
+    --start 2026-03-31 --end 2026-04-02 --taker-fee-bps 3.0
+```
+
+**Phase 4 Round**（`rdp_run_phase4_round.py`）：
+
+```bash
+# 批量跑 4 个 family×tf 组合
+python scripts/rdp_run_phase4_round.py \
+    --start 2026-03-31 --end 2026-04-02
+```
+
+**产物结构**：
+
+```text
+artifacts/research/execution_rounds/<round_id>/
+  round_manifest.json
+  execution_realism_comparison.csv
+  phase4_execution_realism_conclusion.md
+  per_combo/
+    independent_15m_<ts>/
+      execution_alignment.csv
+      fill_feasibility_summary.csv
+      slippage_summary.csv
+      execution_cost_summary.json
+      live_execution_realism_report.md
+    independent_1h_<ts>/...
+    directional_15m_<ts>/...
+    directional_1h_<ts>/...
+```
+
+**V1 数据源与限制**：
+
+| 数据 | V1 使用 | 后续升级 |
+|------|---------|---------|
+| 价格 | Gold bar close | Orderbook mid-price |
+| 流动性 | Bar volume (contracts) | Orderbook depth levels |
+| Spread | Bar range × 0.02 proxy | Real best bid/ask spread |
+| Impact | sqrt(volume_ratio) model | Trades-based calibration |
+| 仓位 | 1 contract (0.01 BTC) | Portfolio-level sizing |
+
 ### 21.10 配置
 
 所有配置通过 `.env.research` 读取，前缀 `RDP_`。
@@ -1622,6 +1790,27 @@ SELECT 'swap_1h',        COUNT(*) FROM gold.market_swap_replay_bars_1h;
 | `scan/scan_runner.py` | 批量扫描引擎（支持 partial_success 状态 + failed_combos.json 产物） |
 | `reports/markdown_report_builder.py` | Markdown 报告生成（含 Edge Breakdown 表格 + edge 来源分析） |
 
+**Phase 3 Live Attribution**（`aats/data_platform/attribution/`）：
+
+| 文件 | 职责 |
+|------|------|
+| `taxonomy.py` | 统一归因分类（10 个 category, 30+ reason code, 严格瀑布顺序） |
+| `alignment.py` | Replay/live 事件按 bar 时间窗口对齐 + live DB SQL 查询（7 张表） |
+| `layer_classifier.py` | 瀑布式分层归因引擎（8 层 waterfall，停在第一层失败处） |
+| `aggregation.py` | category × reason 聚合 + top failure modes + layer analysis |
+| `report_builder.py` | Markdown 报告（单次 + 批量结论，含交叉 family/tf 比较） |
+
+**Phase 4 Execution Realism**（`aats/data_platform/execution_realism/`）：
+
+| 文件 | 职责 |
+|------|------|
+| `market_alignment.py` | Gold bar 查询 + replay decision → bar 对齐（OHLCV + volume 匹配） |
+| `fill_feasibility.py` | Volume-based 可成交性评估（4 类：fully/partially/not fillable, no data） |
+| `slippage_estimator.py` | V1 Bar-proxy 滑点模型（half-spread + sqrt impact, 成本调整后 edge） |
+| `execution_cost_model.py` | 执行成本汇总（分布统计 + Phase 2 比较 + edge 正负分析） |
+| `aggregation.py` | 跨 family/timeframe 比较表 + 交叉发现生成 |
+| `report_builder.py` | Markdown 报告（单次 realism report + Phase 4 conclusion） |
+
 ### 21.14 已知限制
 
 | 项目 | 说明 |
@@ -1635,6 +1824,9 @@ SELECT 'swap_1h',        COUNT(*) FROM gold.market_swap_replay_bars_1h;
 | Signal 校准 | `signal_edge_scale_bps` 当前为经验性默认值（10.0），尚未经过历史数据校准 |
 | Gold 版本语义 | Replay 输入只按 `source_candle_dataset_version` 过滤，未显式约束 funding version |
 | Report findings | 报告的核心发现生成逻辑仍较规则化，后续需增强 family-specific 分析能力 |
+| Execution realism V1 | Phase 4 无 orderbook depth / trades 数据，spread 和 impact 基于 bar OHLCV proxy |
+| Slippage 模型校准 | V1 的 half_spread_fraction (0.02) 和 impact_coefficient (1.0) 尚未经过真实数据校准 |
+| 仓位极小 | BTC-USDT-SWAP 1 合约 = 0.01 BTC，volume ratio 接近 0，feasibility 指标在小仓位下区分度有限 |
 
 ---
 
