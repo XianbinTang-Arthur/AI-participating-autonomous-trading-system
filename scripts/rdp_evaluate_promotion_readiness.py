@@ -64,9 +64,10 @@ def main() -> None:
     if reg_path.exists():
         with reg_path.open(encoding="utf-8") as f:
             reg = json.load(f)
+        # 默认只评估治理确认的参数集，不包括 draft
         parameter_sets = [
             ps for ps in reg.get("parameter_sets", [])
-            if ps["status"] in ("frozen", "candidate", "draft")
+            if ps["status"] in ("frozen", "candidate")
         ]
 
     # 评估

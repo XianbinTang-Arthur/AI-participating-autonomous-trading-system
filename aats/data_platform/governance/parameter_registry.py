@@ -76,13 +76,15 @@ def load_registry(path: pathlib.Path) -> dict[str, Any]:
 
 
 def save_registry(registry: dict[str, Any], path: pathlib.Path) -> None:
-    """保存 registry."""
+    """保存 registry（原子写入，防止并发损坏）."""
+    from ._atomic_io import atomic_json_write
+
     registry["generated_at"] = datetime.now(timezone.utc).isoformat()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(registry, f, indent=2, ensure_ascii=False, default=str)
-    log.info("保存 registry -> %s (%d parameter sets)",
-             path, len(registry.get("parameter_sets", [])))
+    # 版本号递增
+    registry["version"] = registry.get("version", 0) + 1
+    atomic_json_write(registry, path)
+    log.info("保存 registry -> %s (v%d, %d parameter sets)",
+             path, registry["version"], len(registry.get("parameter_sets", [])))
 
 
 def add_parameter_set(registry: dict[str, Any], ps: dict[str, Any]) -> None:

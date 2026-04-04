@@ -1849,6 +1849,29 @@ SELECT 'swap_1h',        COUNT(*) FROM gold.market_swap_replay_bars_1h;
 | `aggregation.py` | 跨 family/timeframe 比较表 + 交叉发现生成 |
 | `report_builder.py` | Markdown 报告（单次 realism report + Phase 4 conclusion） |
 
+**Phase 5 Governance**（`aats/data_platform/governance/`）：
+
+| 文件 | 职责 |
+|------|------|
+| `manifest_validation.py` | Round manifest 规范校验 + 旧版 manifest 自动补全（normalize_legacy_manifest） |
+| `artifact_index.py` | 全局 artifact 索引构建（experiments + rounds，含 diagnostics 摘要提取） |
+| `parameter_registry.py` | 参数版本治理 CRUD（draft/candidate/frozen/deprecated + 从 candidates/recommendations 导入） |
+| `round_status.py` | Active round 索引构建（按 phase 分组 + latest round 提取） |
+| `retry_logic.py` | 失败 round 重跑计划生成（自动构建 per-combo / 整轮重跑命令） |
+| `quality_monitor.py` | 四维质量巡检（artifact/结果/参数/治理层 × critical/warning/info） |
+| `_atomic_io.py` | 原子 JSON 写入（tmpfile → fsync → replace，防并发损坏） |
+
+**Phase 6 Closed-Loop Decision System**（`aats/data_platform/decision_system/`）：
+
+| 文件 | 职责 |
+|------|------|
+| `evidence_bundle.py` | 跨 Phase 证据收集（优先从治理索引取证，fallback 到目录扫描） |
+| `candidate_selector.py` | 规则化参数评分（4 维度 9 分：research / attribution / execution / governance） |
+| `decision_engine.py` | Family/Timeframe 状态决策引擎（信号计数 → keep_active/lower/pause/review） |
+| `readiness_evaluator.py` | 上线就绪度评估（7 项 check → ready_for_next_live_test / not_ready_*） |
+| `recommendation_registry.py` | 三个 registry 管理（recommendation / active decision / evidence bundle index） |
+| `report_builder.py` | 7 节结论文档生成 |
+
 ### 21.14 已知限制
 
 | 项目 | 说明 |

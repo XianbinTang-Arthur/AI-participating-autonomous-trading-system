@@ -58,6 +58,8 @@ def main() -> None:
         description="Phase 6: Closed-Loop Decision Round",
     )
     parser.add_argument("--artifact-root", default=str(_PROJECT_ROOT))
+    parser.add_argument("--include-draft", action="store_true",
+                        help="同时评估 draft 状态的参数集（默认只看 frozen + candidate）")
     parser.add_argument("--no-print-summary", action="store_true")
     args = parser.parse_args()
 
@@ -98,14 +100,20 @@ def main() -> None:
     # 从 governance registry 获取 parameter sets
     gov_registry_path = project_root / "artifacts/governance/current_parameter_registry.json"
     parameter_sets: list[dict] = []
+    # 默认只评估治理确认的参数集（frozen + candidate），
+    # draft 需要显式 --include-draft 才纳入
+    allowed_statuses = {"frozen", "candidate"}
+    if args.include_draft:
+        allowed_statuses.add("draft")
     if gov_registry_path.exists():
         with gov_registry_path.open(encoding="utf-8") as f:
             reg = json.load(f)
         parameter_sets = [
             ps for ps in reg.get("parameter_sets", [])
-            if ps.get("status") in ("frozen", "candidate", "draft")
+            if ps.get("status") in allowed_statuses
         ]
-    log.info("  Parameter sets to evaluate: %d", len(parameter_sets))
+    log.info("  Parameter sets to evaluate: %d (statuses: %s)",
+             len(parameter_sets), sorted(allowed_statuses))
 
     upgrade_candidates = select_parameter_upgrade_candidates(
         parameter_sets, evidence_bundle,

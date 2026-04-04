@@ -69,9 +69,10 @@ def main() -> None:
     if args.status:
         parameter_sets = [ps for ps in parameter_sets if ps["status"] == args.status]
     else:
+        # 默认只评估治理确认的参数集，不包括 draft
         parameter_sets = [
             ps for ps in parameter_sets
-            if ps["status"] in ("frozen", "candidate", "draft")
+            if ps["status"] in ("frozen", "candidate")
         ]
 
     log.info("评估 %d 个 parameter sets...", len(parameter_sets))

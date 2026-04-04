@@ -50,12 +50,13 @@ def load_recommendation_registry(path: pathlib.Path) -> dict[str, Any]:
 def save_recommendation_registry(
     registry: dict[str, Any], path: pathlib.Path,
 ) -> None:
+    from aats.data_platform.governance._atomic_io import atomic_json_write
+
     registry["generated_at"] = datetime.now(timezone.utc).isoformat()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(registry, f, indent=2, ensure_ascii=False, default=str)
-    log.info("保存 recommendation registry -> %s (%d items)",
-             path, len(registry.get("recommendations", [])))
+    registry["version"] = registry.get("version", 0) + 1
+    atomic_json_write(registry, path)
+    log.info("保存 recommendation registry -> %s (v%d, %d items)",
+             path, registry["version"], len(registry.get("recommendations", [])))
 
 
 def create_recommendation(
@@ -104,12 +105,13 @@ def load_active_decision_registry(path: pathlib.Path) -> dict[str, Any]:
 def save_active_decision_registry(
     registry: dict[str, Any], path: pathlib.Path,
 ) -> None:
+    from aats.data_platform.governance._atomic_io import atomic_json_write
+
     registry["generated_at"] = datetime.now(timezone.utc).isoformat()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(registry, f, indent=2, ensure_ascii=False, default=str)
-    log.info("保存 active decision registry -> %s (%d items)",
-             path, len(registry.get("decisions", [])))
+    registry["version"] = registry.get("version", 0) + 1
+    atomic_json_write(registry, path)
+    log.info("保存 active decision registry -> %s (v%d, %d items)",
+             path, registry["version"], len(registry.get("decisions", [])))
 
 
 def upsert_active_decision(
@@ -170,10 +172,10 @@ def load_evidence_bundle_index(path: pathlib.Path) -> dict[str, Any]:
 def save_evidence_bundle_index(
     index: dict[str, Any], path: pathlib.Path,
 ) -> None:
+    from aats.data_platform.governance._atomic_io import atomic_json_write
+
     index["generated_at"] = datetime.now(timezone.utc).isoformat()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(index, f, indent=2, ensure_ascii=False, default=str)
+    atomic_json_write(index, path)
 
 
 def register_evidence_bundle(
