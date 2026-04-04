@@ -212,64 +212,46 @@ AIParticipatingAutonomousTradingSystem（AATS）是一个以**事件驱动**为�
 ## 6. 主要模块说明
 
 ### 6.1 `aats/services/market_gateway`
-职责：
-- 行情接入
-- 行情规范化
-- 与交易所或本地 demo feed 的桥接
+职责：行情接入、行情规范化、与交易所或本地 demo feed 的桥接
 
 ### 6.2 `aats/services/feature_engine`
-职责：
-- 技术特征计算
-- 费用/滑点/状态辅助特征
-- 提供决策输入
+职责：技术特征计算（波动率/趋势/流动性/regime）、费用/滑点/状态辅助特征、提供决策输入
 
 ### 6.3 `aats/services/decision_engine`
-职责：
-- baseline 决策
-- AI 参与式决策
-- 决策上下文构建
-- 策略输出标准化
+职责：baseline 决策、AI 参与式决策、决策上下文构建、策略输出标准化
 
 ### 6.4 `aats/services/governance_engine`
-职责：
-- mode / policy / risk / health / kill switch
-- 控制系统“允许做什么，不允许做什么”
+职责：mode / policy / risk / health / kill switch / adaptive controls、控制系统”允许做什么，不允许做什么”
 
 ### 6.5 `aats/services/strategy_engines`
-职责：
-- 策略 family
-- sleeve 选择
-- execution permission / budget / routing
-- allocator 前的最终自动执行控制
+职责：策略 family（independent / opportunistic / protective）、sleeve 选择、execution permission / budget / routing、allocator 前的最终自动执行控制
 
 ### 6.6 `aats/services/execution_engine`
-职责：
-- execution plan
-- order lifecycle
-- adapter（paper / OKX）
-- unknown write recovery
-- exit execution parent / child 聚合
+职责：execution plan、order lifecycle、adapter（paper / OKX）、unknown write recovery、exit execution parent / child 聚合
 
 ### 6.7 `aats/services/portfolio_service`
-职责：
-- 仓位
-- PnL
-- 组合快照
-- 本地状态重建
+职责：仓位、PnL、组合快照、本地状态重建
 
 ### 6.8 `aats/services/reconciliation_service`
-职责：
-- 对账
-- repair
-- unresolved truth finding
-- 运行时一致性校验
+职责：对账、repair、unresolved truth finding、运行时一致性校验
 
 ### 6.9 `aats/services/operator`
-职责：
-- UI 查询接口
-- 控制动作
-- 审计聚合
-- summary / review / health surface
+职责：UI 查询接口、控制动作、审计聚合、summary / review / health surface、RDP 查询服务
+
+### 6.10 `aats/services/ai_service`
+职责：AI 评估器（OpenAI provider）、prompt 构建、推理结果验证
+
+### 6.11 `aats/services/execution_control`
+职责：命令服务（submit/cancel/amend）、订单状态机、shadow 执行追踪、执行监控
+
+### 6.12 `aats/services/blocker_control`
+职责���策略级执行拦截、优先级管理、blocker action 分发
+
+### 6.13 `aats/services/ledger`
+职责：交易分录、lot 投影、结算 posting、funding fee 同步
+
+### 6.14 `aats/services/recovery_control`
+职责：启动恢复（startup recovery）、对账异常分类与修复策略
 
 ---
 
@@ -769,159 +751,123 @@ allocator 通常不会继续生成 execution plan。
 ```text
 aats/
   api/                    # API 层与前端静态资源
-  bootstrap/              # settings / profile / env / config glue
+  bootstrap/              # settings / profile / env / config / active_parameters
   bus/                    # 事件总线与消息模型
   events/                 # 事件定义
-  schemas/                # 运行时 schema / DTO
+  schemas/                # 运行时 schema / DTO（24 文件）
   services/
     market_gateway/       # 行情接入
-    feature_engine/       # 特征计算
+    feature_engine/       # 特征计算（波动率/趋势/流动性/regime）
     decision_engine/      # baseline / AI 决策
-    governance_engine/    # policy / risk / health / kill switch
+    governance_engine/    # policy / risk / health / kill switch / adaptive controls
     strategy_engines/     # strategy family / sleeve / allocator / auto control
-    execution_engine/     # order manager / adapters / exit aggregation
+      families/           #   independent / opportunistic / protective
+      independent/        #   independent 策略引擎（16 文件）
+      smart_arbitrage/    #   套利策略引擎（9 文件）
+    execution_engine/     # order manager / adapters / exit aggregation / recovery
+    execution_control/    # 命令服务 / 订单状态机 / shadow / 监控
     portfolio_service/    # position / pnl / snapshots
     reconciliation_service/ # 对账与修复
-    operator/             # operator query / action / summary
-  storage/                # PostgreSQL / SQLAlchemy 持久化实现
+    recovery_control/     # 启动恢复 / 对账分类
+    operator/             # operator query / action / summary / RDP queries
+    ai_service/           # AI 评估器 / prompt / inference
+    blocker_control/      # 策略级执行拦截
+    ledger/               # 交易分录 / lot / settlement / funding fee
+  storage/                # PostgreSQL / SQLAlchemy 持久化实现（46 文件）
   data_platform/          # 研究数据平台（数仓，详见第 21 章）
     config.py             #   Pydantic 配置，从 .env.research 读取
     db.py                 #   数据库连接池 + migration runner
     models.py             #   数据模型 + 表名解析
-    collectors/           #   数据采集
-      backfill/           #     历史回填（ZIP 文件发现/注册/解析/入库）
-      rolling/            #     API 增量采集（candles + funding）
+    live_query_adapter.py #   Live DB 只读查询适配器
+    collectors/           #   数据采集（backfill + rolling）
     normalize/            #   symbol 映射 + 时间标准化
     validate/             #   质量检查 + 报告写入
     merge/                #   staging -> bronze -> silver 合并管道
     gold/                 #   funding 对齐 + Gold replay bar 构建
     jobs/                 #   scheduler / checkpoint / run registry / gap repair
-    test_data/            #   验收用 OKX 真实数据
-
-apps/
-  api_gateway/
-  decision_engine/
-  execution_engine/
-  feature_engine/
-  governance_engine/
-  market_gateway/
-  portfolio_service/
-  reconciliation_service/
+    replay/               #   Phase 2 逐 bar 重放引擎 + 适配器 + 扫描
+    attribution/          #   Phase 3 归因分析
+    execution_realism/    #   Phase 4 执行可行性
+    governance/           #   Phase 5 治理（artifact / registry / quality）
+    decision_system/      #   Phase 6 闭环决策
+    production_workflow/  #   工作流调度 / pre-apply gate
+    operations/           #   失败恢复 / 可靠性检查 / 告警 / 环境守卫
+    metrics/              #   持续改进指标 / 基线比较 / 发布评估
 
 configs/
-  strategy_profiles/      # 托管 profile 的策略调参
-  templates/              # .env 示例模板（含 .env.research.example）
+  base.yaml               # 主配置（含所有默认值）
+  dev.yaml / staging.yaml / prod.yaml
+  strategy_profiles/       # 托管 profile 的策略调参（spot/derivatives/live）
+  active_parameter_sets/   # RDP 回灌的 active parameter set
+  rdp_workflows/           # RDP 工作流 JSON 配置
+  research_batches/        # 校准批次 JSON 模板（16 个 batch 文件）
+  research_rounds/         # Step 2 研究轮次配置
+  templates/               # .env 示例模板
 
-docs/
-  configuration/          # 配置职责说明
-  task*/                  # 任务设计与演进文档
-
-migrations/               # 交易系统 PostgreSQL 迁移 SQL
+migrations/
+  0001_postgres_latest_schema.sql       # 主系统 schema（最新版合并）
+  0002_postgres_legacy_upgrade.sql      # 旧版升级迁移
+  0003_postgres_execution_attempt_id_columns.sql
+  0004_postgres_exit_execution_repository.sql
   research/               # 研究数据平台迁移 SQL（0001-0012）
 
 data/historical/          # 历史数据目录
   incoming/               #   放入 ZIP 文件，daemon 自动消费
-    candles_spot/1m|5m|…  #     按 instrument/timeframe 子目录组织
-    candles_swap/1m|5m|…
-    funding_swap/
   completed/              #   消费成功后自动移入
   failed/                 #   消费失败后自动移入（附 .error 日志）
 
-artifacts/research/       # Phase 2 参数研究产物
-  experiments/            #   replay decisions, diagnostics, reports
-  calibration_batches/    #   校准批次产物（batch summary / report / per-experiment）
-  calibration_rounds/     #   Step 1 校准轮次（round summary / recommendations / conclusion）
-  step2_rounds/           #   Step 2 研究轮次（family×timeframe 汇总 / candidates / conclusion）
-  attribution_rounds/     #   Phase 3 归因轮次（replay/live 对齐 / attribution / conclusion）
-  execution_rounds/       #   Phase 4 执行可行性轮次（market alignment / fill feasibility / slippage / conclusion）
+artifacts/
+  research/               # Phase 2-4 研究产物
+    experiments/           #   replay decisions, diagnostics, reports
+    calibration_batches/   #   校准批次产物
+    calibration_rounds/    #   Step 1 校准轮次
+    step2_rounds/          #   Step 2 研究轮次
+    attribution_rounds/    #   Phase 3 归因轮次
+    execution_rounds/      #   Phase 4 执行可行性轮次
+  governance/              # Phase 5 治理产物
+    artifact_index.json / current_parameter_registry.json / quality_monitor_summary.json
+  decision_system/         # Phase 6 决策注册表
+    recommendation_registry.json / active_decision_registry.json
+  decision_rounds/         # Phase 6 决策 round 产物（per round_id）
+  production_workflow/     # 参数发布 / gate / 观察记录
+  metrics/                 # 指标快照 / 历史 / 改进积压
+  operations/              # 工作流运行记录 / 失败记录 / 告警
+  reviews/                 # 周/月评审报告
 
-artifacts/governance/         # Phase 5 治理产物
-  artifact_index.json         #   全局 artifact 索引
-  active_round_index.json     #   当前 active round 索引
-  current_parameter_registry.json # 参数注册表（draft/candidate/frozen/deprecated）
-  quality_monitor_summary.json    # 最近一次质量巡检结果
+docs/
+  rdp/                    # RDP 技术详细参考（3 文件）
+  operations/             # RDP 运营文档（21 文件）
+  configuration/          # 配置职责说明
+  task*/                  # 历史任务设计与演进文档
 
-docs/operations/              # Phase 5 运营文档
-  platform_runbook.md         #   平台运行手册
-  artifact_conventions.md     #   Artifact 规范
-  parameter_governance.md     #   参数治理
-  round_lifecycle.md          #   Round 生命周期
-  operator_checklist.md       #   运维检查清单
-  live_schema_contract_for_rdp.md  # Live DB 表结构契约
-  active_parameter_application.md  # Active parameter 应用指南
-  operator_rdp_integration.md      # Operator RDP 整合指南
-  recommendation_to_production_workflow.md  # Recommendation 到生产流程
-
-artifacts/decision_system/    # Phase 6 决策系统注册表
-  recommendation_registry.json  # 所有历史建议记录
-  active_decision_registry.json # 当前 family/tf 运营状态
-  evidence_bundle_index.json    # evidence bundle 引用索引
-
-artifacts/decision_rounds/<round_id>/  # Phase 6 决策 round 产物
-  round_manifest.json
-  evidence_summary.json
-  parameter_upgrade_candidates.json
-  family_timeframe_decisions.json
-  promotion_readiness_report.json
-  phase6_closed_loop_decision_conclusion.md
-
-configs/
-  active_parameter_sets/  # Active parameter set 文件（整合层）
-    independent_15m.json    # independent/15m active 参数
-    independent_1h.json     # independent/1h active 参数
-    directional_15m.json    # directional/15m active 参数
-    directional_1h.json     # directional/1h active 参数
-  research_batches/       # 校准批次 JSON 模板
-    independent_scale_calibration_15m.json
-    independent_cost_sensitivity_15m.json
-    independent_confirm_ticks_15m.json
-    independent_scale_calibration_1h.json
-    independent_cost_sensitivity_1h.json
-    independent_confirm_ticks_1h.json
-    directional_scale_calibration_15m.json
-    directional_cost_sensitivity_15m.json
-    directional_confirm_ticks_15m.json
-    directional_trend_weight_15m.json
-    directional_return_clamp_15m.json
-    directional_scale_calibration_1h.json
-    directional_cost_sensitivity_1h.json
-    directional_confirm_ticks_1h.json
-    directional_trend_weight_1h.json
-    directional_return_clamp_1h.json
-  research_rounds/        # Step 2 研究轮次配置
-    step2_formal_scan_matrix.json
-
-scripts/                  # 启动、seed、回放、报告脚本
-  rdp_start.py            #   统一入口：一键启动历史+实时两个 daemon
-  rdp_historical_daemon.py #  历史数据聚合 daemon
-  rdp_realtime_daemon.py  #   实时数据聚合 daemon
-  rdp_run_replay.py       #   Phase 2 单次 replay 实验
-  rdp_run_parameter_scan.py # Phase 2 参数扫描
-  rdp_run_calibration_batch.py # Phase 2 校准批处理（JSON 驱动，轻量级批跑）
-  rdp_run_step1_calibration.py # Phase 2 Step 1 校���编排（自动运行 3 batch + 规则推荐 + 结论文档）
-  rdp_run_step2_research.py  # Phase 2 Step 2 正式研究闭环（4 family×tf 校准 + scan + 比较 + 结论）
-  rdp_run_live_attribution.py # Phase 3 one-shot live attribution（单次 replay/live 对照归因）
-  rdp_run_phase3_round.py    # Phase 3 批量归因 round（4 family×tf 组合 + 结论文档）
-  rdp_run_execution_realism.py # Phase 4 one-shot execution realism（单次市场微观结构可行性分析）
-  rdp_run_phase4_round.py    # Phase 4 批量 execution realism round（4 family×tf + 比较 + 结论）
-  rdp_validate_artifacts.py  # Phase 5 manifest 规范校验（支持 --fix 自动补全）
-  rdp_build_artifact_index.py # Phase 5 构建全局 artifact 索引
-  rdp_freeze_parameter_set.py # Phase 5 参数注册/冻结/废弃管理
-  rdp_list_active_rounds.py  # Phase 5 列出 active rounds + experiments
-  rdp_retry_failed_round.py  # Phase 5 失败 round 重跑计划与执行
-  rdp_run_quality_monitor.py # Phase 5 质量巡检（数据/artifact/结果/治理层）
-  rdp_run_decision_round.py  # Phase 6 完整闭环决策 round（证据收集+候选筛选+决策+readiness+registry）
-  rdp_select_parameter_upgrade.py # Phase 6 参数升级候选单独评估
-  rdp_evaluate_promotion_readiness.py # Phase 6 上线 readiness 评估
-  rdp_update_decision_registry.py # Phase 6 recommendation/decision registry 管理
-  rdp_check_live_db.py    # 整合层 验证 live DB 连接与表可读性
-  apply_active_parameter_set.py # 整合层 管理 active parameter sets
-  approve_recommendation_and_apply.py # 整合层 审批 recommendation 并应用参数
-  rdp_run_backfill.py     #   手动历史回填（保留）
-  rdp_build_gold.py       #   手动 Gold 构建（单个 symbol x timeframe）
-  rdp_build_gold_all.py   #   批量 Gold 构建（自动遍历所有 swap 组合）
-  rdp_detect_gaps.py      #   手动 gap 检测（保留）
-  rdp_phase1_acceptance.py #  Phase 1 验收脚本
+scripts/                  # 61 个 Python 脚本
+  # ── 主系统 ──
+  start_api.py / generate_managed_config_artifacts.py / archive_event_store.py
+  # ── RDP Phase 1: 数据 ──
+  rdp_start.py / rdp_historical_daemon.py / rdp_realtime_daemon.py
+  rdp_build_gold.py / rdp_build_gold_all.py / rdp_detect_gaps.py
+  # ── RDP Phase 2: 研究 ──
+  rdp_run_replay.py / rdp_run_parameter_scan.py / rdp_run_calibration_batch.py
+  rdp_run_step1_calibration.py / rdp_run_step2_research.py
+  # ── RDP Phase 3-4: 归因与执行 ──
+  rdp_run_live_attribution.py / rdp_run_phase3_round.py
+  rdp_run_execution_realism.py / rdp_run_phase4_round.py
+  # ── RDP Phase 5: 治理 ──
+  rdp_validate_artifacts.py / rdp_build_artifact_index.py / rdp_freeze_parameter_set.py
+  rdp_list_active_rounds.py / rdp_retry_failed_round.py / rdp_run_quality_monitor.py
+  # ── RDP Phase 6: 决策 ──
+  rdp_run_decision_round.py / rdp_select_parameter_upgrade.py
+  rdp_evaluate_promotion_readiness.py / rdp_update_decision_registry.py
+  # ── RDP 整合: 审批/应用/发布 ──
+  rdp_check_live_db.py / apply_active_parameter_set.py / approve_recommendation_and_apply.py
+  rdp_approve_recommendation.py / rdp_apply_approved_recommendation.py
+  rdp_create_parameter_release.py / rdp_run_pre_apply_gate.py
+  rdp_rollback_active_parameter_set.py / rdp_run_post_apply_observation.py
+  # ── RDP 运维: 调度/指标/可靠性 ──
+  rdp_run_scheduled_workflow.py / rdp_build_metrics_snapshot.py
+  rdp_compare_release_to_baseline.py / rdp_evaluate_release_effectiveness.py
+  rdp_run_periodic_review.py / rdp_generate_improvement_backlog.py
+  rdp_run_reliability_check.py / rdp_build_alert_summary.py
 tests/                    # 单元 / 集成 / 回放 / 场景测试
 ```
 
@@ -1210,18 +1156,25 @@ RDP 通过以下机制支持长期可靠运行：
 | [`docs/rdp/phase2_parameter_research_details.md`](docs/rdp/phase2_parameter_research_details.md) | Phase 2 完整参考：Edge Contract、成本模型、参数、CLI、产物、适配器 |
 | [`docs/rdp/phase3_4_attribution_execution_details.md`](docs/rdp/phase3_4_attribution_execution_details.md) | Phase 3-4 完整参考：归因瀑布、执行可行性、滑点模型、CLI |
 | [`docs/rdp/module_reference.md`](docs/rdp/module_reference.md) | 全部代码模块职责清单（Phase 1~6 + Integration + Operations + Metrics） |
-| **运维文档** | |
-| [`docs/operations/platform_runbook.md`](docs/operations/platform_runbook.md) | 平台全景 + 日常操作 + 故障排查 |
+| **运维 — 日常操作** | |
+| [`docs/operations/rdp_operator_workflow.md`](docs/operations/rdp_operator_workflow.md) | Operator 完整 SOP：查看/审批/应用/观察/回滚 |
 | [`docs/operations/operator_checklist.md`](docs/operations/operator_checklist.md) | 日常巡检 + 运行前后检查 + 交接须知 |
-| [`docs/operations/parameter_governance.md`](docs/operations/parameter_governance.md) | 参数治理流程 + registry 结构 |
+| [`docs/operations/platform_runbook.md`](docs/operations/platform_runbook.md) | 平台全景 + 日常操作 + 故障排查 |
+| [`docs/operations/operator_rdp_integration.md`](docs/operations/operator_rdp_integration.md) | RDP API 端点参考 + 数据源映射 |
+| **运维 — 参数治理** | |
+| [`docs/operations/parameter_governance.md`](docs/operations/parameter_governance.md) | 参数生命周期（draft→frozen→deprecated） |
+| [`docs/operations/parameter_apply_and_rollback.md`](docs/operations/parameter_apply_and_rollback.md) | 参数应用与回滚操作指南 |
+| [`docs/operations/production_parameter_change_runbook.md`](docs/operations/production_parameter_change_runbook.md) | 生产参数变更全流程（gate→release→observation→rollback） |
 | [`docs/operations/parameter_mapping_reference.md`](docs/operations/parameter_mapping_reference.md) | RDP↔主系统参数映射语义 |
-| [`docs/operations/rdp_scheduling_strategy.md`](docs/operations/rdp_scheduling_strategy.md) | 工作流调度策略 + Cron 示例 |
+| **运维 — 调度与可靠性** | |
+| [`docs/operations/rdp_scheduling_strategy.md`](docs/operations/rdp_scheduling_strategy.md) | 工作流调度策略 + JSON 配置 + Cron 示例 |
 | [`docs/operations/rdp_reliability_runbook.md`](docs/operations/rdp_reliability_runbook.md) | 可靠性 Runbook + 异常 SOP |
-| [`docs/operations/rdp_workflow_calendar.md`](docs/operations/rdp_workflow_calendar.md) | 工作流日历 + 依赖链 |
-| [`docs/operations/rdp_environment_matrix.md`](docs/operations/rdp_environment_matrix.md) | 环境隔离权限矩阵 |
+| [`docs/operations/rdp_environment_matrix.md`](docs/operations/rdp_environment_matrix.md) | 环境隔离权限矩阵（dev/staging/prod） |
+| [`docs/operations/rdp_metrics_framework.md`](docs/operations/rdp_metrics_framework.md) | 5 层 24 指标框架 |
 | **规范文档** | |
 | [`docs/operations/artifact_conventions.md`](docs/operations/artifact_conventions.md) | 目录结构 + manifest 规范 |
 | [`docs/operations/round_lifecycle.md`](docs/operations/round_lifecycle.md) | Round 状态定义 + 退出码 + 失败处理 |
+| [`docs/operations/live_schema_contract_for_rdp.md`](docs/operations/live_schema_contract_for_rdp.md) | Live DB 7 张表结构契约 |
 
 ---
 
