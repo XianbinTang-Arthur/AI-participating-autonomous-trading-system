@@ -13,7 +13,7 @@ from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
 from aats.services.accounting import remaining_obligation_amount
 from aats.services.execution_engine.bundle_recovery import obligation_matches_scope, scoped_bundle_recovery_assessment
-from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
+from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position

@@ -272,6 +272,7 @@ def fetch_latest_timestamps(session: Session) -> dict[str, str | None]:
                 )
             ).scalar()
             timestamps[table_name] = str(row) if row else None
-        except Exception:
+        except Exception as exc:
+            log.warning("Failed to fetch latest timestamp for %s: %s", table_name, exc)
             timestamps[table_name] = None
     return timestamps

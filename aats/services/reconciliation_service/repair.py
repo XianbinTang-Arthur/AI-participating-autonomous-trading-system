@@ -16,7 +16,7 @@ from aats.schemas.exit_execution import ExitExecutionIntent
 from aats.schemas.operator import ProcessingFailureRecord
 from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot
 from aats.schemas.reconciliation import ReconciliationReport
-from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
+from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.reconciliation_service.comparator import StateComparator

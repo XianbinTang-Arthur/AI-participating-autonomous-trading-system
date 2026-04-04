@@ -14,6 +14,15 @@ def _parse_ms_timestamp(value: str) -> datetime:
 
 
 @dataclass(slots=True)
+class CandleGap:
+    symbol: str
+    channel: str
+    last_ts: datetime
+    new_ts: datetime
+    expected_interval_seconds: int
+
+
+@dataclass(slots=True)
 class OKXTickerState:
     symbol: str
     snapshot_ts: datetime
@@ -56,8 +65,20 @@ class OKXInstrumentMarketState:
 
 
 class OKXMarketSnapshotNormalizer:
+    _CANDLE_INTERVALS: dict[str, int] = {
+        "candle15m": 900,
+        "candle1H": 3600,
+    }
+
     def __init__(self, exchange_name: str = "OKX") -> None:
         self.exchange_name = exchange_name
+        self._last_candle_ts: dict[tuple[str, str], datetime] = {}
+        self._detected_gaps: list[CandleGap] = []
+
+    def drain_detected_gaps(self) -> list[CandleGap]:
+        gaps = self._detected_gaps
+        self._detected_gaps = []
+        return gaps
 
     @staticmethod
     def okx_inst_id(symbol: str) -> str:
@@ -93,6 +114,7 @@ class OKXMarketSnapshotNormalizer:
             state.ticker = self._parse_ticker(symbol=symbol, payload=data[0])
         elif channel in {"candle15m", "candle1H"}:
             candle = self._parse_candle(channel=channel, payload=data[0])
+            self._check_candle_gap(symbol=symbol, channel=channel, new_ts=candle.snapshot_ts)
             if channel == "candle15m":
                 state.candle_15m = candle
             else:
@@ -145,6 +167,27 @@ class OKXMarketSnapshotNormalizer:
             volume=to_decimal(payload[5]),
             confirm=str(payload[8]) == "1" if len(payload) > 8 else False,
         )
+
+    def _check_candle_gap(self, *, symbol: str, channel: str, new_ts: datetime) -> None:
+        key = (symbol, channel)
+        last_ts = self._last_candle_ts.get(key)
+        if last_ts is not None and new_ts == last_ts:
+            return
+        self._last_candle_ts[key] = new_ts
+        if last_ts is None:
+            return
+        expected_interval = self._CANDLE_INTERVALS.get(channel)
+        if expected_interval is None:
+            return
+        gap_seconds = (new_ts - last_ts).total_seconds()
+        if gap_seconds > expected_interval * 1.5:
+            self._detected_gaps.append(CandleGap(
+                symbol=symbol,
+                channel=channel,
+                last_ts=last_ts,
+                new_ts=new_ts,
+                expected_interval_seconds=expected_interval,
+            ))
 
     def _build_snapshot(self, state: OKXInstrumentMarketState) -> MarketSnapshot | None:
         if state.ticker is None or state.candle_15m is None or state.candle_1h is None:

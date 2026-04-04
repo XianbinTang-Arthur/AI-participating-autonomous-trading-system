@@ -22,7 +22,7 @@ from aats.schemas.decision import (
 )
 from aats.schemas.features import FeatureSnapshot
 from aats.services.ai_service.evaluator import AIEvaluationTracker
-from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
+from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.ai_service.openai_provider import OpenAIProvider

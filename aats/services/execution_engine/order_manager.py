@@ -106,6 +106,8 @@ class OrderManager:
         self.order_state_machine = OrderStateMachine()
         # Serialize reservation preview/persist so concurrent intents cannot over-reserve the same balance window.
         self._reservation_lock = asyncio.Lock()
+        # Per-symbol lock to prevent concurrent submissions for the same trading pair.
+        self._symbol_locks: dict[str, asyncio.Lock] = {}
         self.logger = get_logger("aats.execution_engine")
 
     async def handle_order_intent(self, message: dict) -> None:
@@ -172,6 +174,16 @@ class OrderManager:
                 quantity=intent.quantity,
             ),
         )
+        symbol_lock = self._symbol_locks.setdefault(intent.symbol, asyncio.Lock())
+        async with symbol_lock:
+            await self._execute_guarded_order_intent(intent=intent, leg_intent=leg_intent)
+
+    async def _execute_guarded_order_intent(
+        self,
+        *,
+        intent: OrderIntent,
+        leg_intent: LegOrderIntent | None = None,
+    ) -> None:
         preview_client_order_id_fn = getattr(self.adapter, "preview_client_order_id", None)
         preview_client_order_id = (
             preview_client_order_id_fn(intent)

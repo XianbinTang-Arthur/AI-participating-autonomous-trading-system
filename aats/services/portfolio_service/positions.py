@@ -507,6 +507,11 @@ class PortfolioService:
 
     async def handle_fill_event(self, message: dict) -> None:
         fill = parse_payload(message, FillEvent)
+        if self.state.has_applied_fill(fill.fill_id):
+            return
+        if self.fill_outcome_repo.get_outcome(fill.fill_id) is not None:
+            self.state._applied_fill_ids.add(fill.fill_id)
+            return
         checkpoint = self.state.checkpoint()
         balances_before = dict(checkpoint.balances)
         try:

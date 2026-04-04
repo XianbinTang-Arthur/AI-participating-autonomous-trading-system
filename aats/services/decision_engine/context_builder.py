@@ -8,7 +8,7 @@ from aats.schemas.common import utc_now
 from aats.schemas.decision import DecisionContext
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.system import HealthSnapshot
-from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
+from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal

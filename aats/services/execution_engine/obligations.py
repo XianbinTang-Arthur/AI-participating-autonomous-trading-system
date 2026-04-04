@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from decimal import Decimal
 from collections.abc import Awaitable, Callable
 
@@ -41,6 +42,7 @@ class ExecutionObligationService:
         self.account_snapshot_loader = account_snapshot_loader
         self.price_provider = price_provider
         self.fee_resolver = fee_resolver or EffectiveFeeResolver(settings=settings)
+        self._reservation_lock = asyncio.Lock()
 
     async def reserve_for_intent(
         self,
@@ -48,13 +50,14 @@ class ExecutionObligationService:
         intent: OrderIntent,
         client_order_id: str,
     ) -> OrderObligation | None:
-        obligation = await self.preview_reservation_for_intent(
-            intent=intent,
-            client_order_id=client_order_id,
-        )
-        if obligation is None:
-            return None
-        return self.obligation_repo.save_obligation(obligation)
+        async with self._reservation_lock:
+            obligation = await self.preview_reservation_for_intent(
+                intent=intent,
+                client_order_id=client_order_id,
+            )
+            if obligation is None:
+                return None
+            return self.obligation_repo.save_obligation(obligation)
 
     def persist_previewed_obligation(self, obligation: OrderObligation | None) -> OrderObligation | None:
         if obligation is None:

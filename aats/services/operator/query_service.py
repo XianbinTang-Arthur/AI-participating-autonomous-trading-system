@@ -43,7 +43,7 @@ from aats.services.accounting import (
 )
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.execution_engine.exit_intent_aggregator import exit_execution_review_items
-from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
+from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.audit_replay_queries import AuditReplayQueryFacade

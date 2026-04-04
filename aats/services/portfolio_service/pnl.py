@@ -13,4 +13,10 @@ class PortfolioPnLCalculator:
         avg_entry_price: Decimal | float,
         mark_price: Decimal | float,
     ) -> Decimal:
+        """Compute unrealized PnL as (mark - entry) * qty.
+
+        ``position_qty`` is the raw signed quantity (positive=long, negative=short),
+        **not** adjusted by leverage.  Leverage only affects margin requirements
+        (handled separately in snapshot building), not PnL magnitude.
+        """
         return (to_decimal(mark_price) - to_decimal(avg_entry_price)) * to_decimal(position_qty)

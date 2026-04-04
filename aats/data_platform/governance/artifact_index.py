@@ -116,7 +116,8 @@ def _scan_experiment_dir(exp_dir: pathlib.Path, *, phase: str) -> dict[str, Any]
                 "opening_count": diag.get("opening_count"),
                 "positive_edge_ratio": diag.get("positive_edge_ratio"),
             }
-        except Exception:
+        except Exception as exc:
+            log.warning("Failed to read diagnostics.json in %s: %s", exp_dir, exc)
             entry["diagnostics_summary"] = None
 
     # 读 comparison_summary
@@ -128,8 +129,8 @@ def _scan_experiment_dir(exp_dir: pathlib.Path, *, phase: str) -> dict[str, Any]
             with comp_file.open(encoding="utf-8") as f:
                 comp = json.load(f)
             entry["experiment_count"] = comp.get("experiment_count")
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("Failed to read comparison_summary.json in %s: %s", exp_dir, exc)
 
     return entry
 

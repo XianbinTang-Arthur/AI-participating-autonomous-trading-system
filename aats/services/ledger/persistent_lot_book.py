@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from aats.schemas.execution import FillEvent
-from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
+from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
 from aats.storage.lot_repo import LotEventRepository, PositionLotRepository
 

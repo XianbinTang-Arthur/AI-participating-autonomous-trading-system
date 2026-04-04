@@ -10,6 +10,7 @@ from aats.schemas.common import utc_now
 from aats.schemas.market import MarketSnapshot
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
 from aats.services.market_gateway.okx_normalizer import (
+    CandleGap,
     OKXInstrumentMarketState,
     OKXMarketSnapshotNormalizer,
 )
@@ -301,11 +302,18 @@ class MarketDataGateway:
     async def _fetch_okx_rest_snapshot(self, *, symbol: str) -> MarketSnapshot:
         if self.okx_rest_client is None:
             raise RuntimeError("okx_rest_client_unavailable")
-        ticker_payload, candle_15m_payload, candle_1h_payload = await asyncio.gather(
+        _gather_results = await asyncio.gather(
             self.okx_rest_client.get_market_ticker(symbol=symbol),
             self.okx_rest_client.get_market_candles(symbol=symbol, bar="15m", limit=1),
             self.okx_rest_client.get_market_candles(symbol=symbol, bar="1H", limit=1),
+            return_exceptions=True,
         )
+        for _r in _gather_results:
+            if isinstance(_r, Exception):
+                self.logger.warning("gather task failed: %s", _r)
+        ticker_payload = _gather_results[0] if not isinstance(_gather_results[0], Exception) else {}
+        candle_15m_payload = _gather_results[1] if not isinstance(_gather_results[1], Exception) else {}
+        candle_1h_payload = _gather_results[2] if not isinstance(_gather_results[2], Exception) else {}
         ticker_rows = ticker_payload.get("data", [])
         candle_15m_rows = candle_15m_payload.get("data", [])
         candle_1h_rows = candle_1h_payload.get("data", [])
@@ -327,6 +335,9 @@ class MarketDataGateway:
             snapshots = self.okx_normalizer.apply_message(message=message, states=self._okx_states)
             for snapshot in snapshots:
                 await self._publish_snapshot(snapshot)
+            gaps = self.okx_normalizer.drain_detected_gaps()
+            if gaps:
+                await self._handle_candle_gaps(gaps)
         except Exception as exc:
             self._last_error = str(exc)
             log_event(
@@ -338,6 +349,36 @@ class MarketDataGateway:
             )
             # Market transport should stay alive even if a downstream consumer fails.
             return
+
+    async def _handle_candle_gaps(self, gaps: list[CandleGap]) -> None:
+        for gap in gaps:
+            log_event(
+                self.logger,
+                "okx_ws_candle_gap_detected",
+                level="warning",
+                symbol=gap.symbol,
+                channel=gap.channel,
+                last_ts=gap.last_ts.isoformat(),
+                new_ts=gap.new_ts.isoformat(),
+                gap_seconds=(gap.new_ts - gap.last_ts).total_seconds(),
+                expected_interval_seconds=gap.expected_interval_seconds,
+            )
+        if self.okx_rest_client is None:
+            return
+        affected_symbols = list(dict.fromkeys(gap.symbol for gap in gaps))
+        for symbol in affected_symbols:
+            try:
+                snapshot = await self._fetch_okx_rest_snapshot(symbol=symbol)
+                await self._publish_snapshot(snapshot)
+                log_event(self.logger, "okx_ws_gap_backfill_complete", symbol=symbol)
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "okx_ws_gap_backfill_failed",
+                    level="warning",
+                    symbol=symbol,
+                    error=str(exc),
+                )
 
     async def _publish_snapshot(self, snapshot: MarketSnapshot) -> None:
         received_at = utc_now()

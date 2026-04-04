@@ -8,7 +8,7 @@ import hashlib
 
 from aats.schemas.execution import FillEvent
 from aats.services.accounting import try_fill_fee_delta_in_quote, unsupported_fee_currency_details
-from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
+from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.decimals import is_effectively_zero, to_decimal
 from aats.services.portfolio_service.position_keys import (
     exposure_side_from_quantity,

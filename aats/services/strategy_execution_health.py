@@ -8,7 +8,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.execution import FillEvent
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.services.accounting import resolve_symbol_currencies, try_fill_fee_cost_in_quote
-from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
+from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
 
 _SMALL_PNL_CHURN_MULTIPLIER = Decimal("1.25")

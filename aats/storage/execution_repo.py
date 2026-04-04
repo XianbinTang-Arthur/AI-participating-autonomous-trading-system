@@ -4,7 +4,7 @@ from datetime import datetime
 
 from aats.schemas.execution import FillEvent, OrderState
 from aats.bootstrap.logging import get_logger, log_event
-from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
+from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.runtime_scope import RuntimeStateScope, filter_fills, filter_order_states
 

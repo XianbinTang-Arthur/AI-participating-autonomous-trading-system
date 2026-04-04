@@ -143,7 +143,7 @@ class OKXAccountService:
 
             try:
                 tracked_symbols = self._tracked_symbols()
-                balance_payload, instruments_payload = await asyncio.gather(
+                _gather_results_1 = await asyncio.gather(
                     self.client.get_balance(),
                     self._cached_aux_payload(
                         "instruments",
@@ -151,24 +151,43 @@ class OKXAccountService:
                         force=force,
                         fetcher=lambda: self._get_instruments_payload(tracked_symbols),
                     ),
+                    return_exceptions=True,
                 )
+                for _r in _gather_results_1:
+                    if isinstance(_r, Exception):
+                        self.logger.warning("gather task failed: %s", _r)
+                balance_payload = _gather_results_1[0] if not isinstance(_gather_results_1[0], Exception) else {}
+                instruments_payload = _gather_results_1[1] if not isinstance(_gather_results_1[1], Exception) else {}
                 instruments = self._parse_instruments(instruments_payload)
                 instrument_map = {instrument.symbol: instrument for instrument in instruments}
-                open_orders_payloads, fills_payloads, positions_payload = await asyncio.gather(
+                _gather_results_2 = await asyncio.gather(
                     asyncio.gather(*[
                         self.client.get_open_orders(symbol=symbol)
                         for symbol in tracked_symbols
-                    ]),
+                    ], return_exceptions=True),
                     asyncio.gather(*[
                         self.client.get_fills(
                             symbol=symbol,
                             limit=self.settings.okx_fill_fetch_limit,
                         )
                         for symbol in tracked_symbols
-                    ]),
+                    ], return_exceptions=True),
                     self._positions_payload(),
+                    return_exceptions=True,
                 )
-                account_config_payload, trade_fee_payload, account_risk_payload, system_status_payload, bills_payload, funding_rate_payloads = await asyncio.gather(
+                for _r in _gather_results_2:
+                    if isinstance(_r, Exception):
+                        self.logger.warning("gather task failed: %s", _r)
+                open_orders_payloads = _gather_results_2[0] if not isinstance(_gather_results_2[0], Exception) else []
+                fills_payloads = _gather_results_2[1] if not isinstance(_gather_results_2[1], Exception) else []
+                positions_payload = _gather_results_2[2] if not isinstance(_gather_results_2[2], Exception) else {}
+                # Log errors from nested gather results
+                for _nested in (open_orders_payloads, fills_payloads):
+                    if isinstance(_nested, list):
+                        for _r in _nested:
+                            if isinstance(_r, Exception):
+                                self.logger.warning("gather task failed: %s", _r)
+                _gather_results_3 = await asyncio.gather(
                     self._cached_aux_payload_optional(
                         "account_config",
                         refresh_interval_seconds=self.settings.okx_account_config_refresh_interval_seconds,
@@ -227,7 +246,17 @@ class OKXAccountService:
                         tracked_symbols=tracked_symbols,
                         force=force,
                     ),
+                    return_exceptions=True,
                 )
+                for _r in _gather_results_3:
+                    if isinstance(_r, Exception):
+                        self.logger.warning("gather task failed: %s", _r)
+                account_config_payload = _gather_results_3[0] if not isinstance(_gather_results_3[0], Exception) else {}
+                trade_fee_payload = _gather_results_3[1] if not isinstance(_gather_results_3[1], Exception) else {"code": "0", "data": []}
+                account_risk_payload = _gather_results_3[2] if not isinstance(_gather_results_3[2], Exception) else {"code": "0", "data": []}
+                system_status_payload = _gather_results_3[3] if not isinstance(_gather_results_3[3], Exception) else {"code": "0", "data": []}
+                bills_payload = _gather_results_3[4] if not isinstance(_gather_results_3[4], Exception) else {"code": "0", "data": []}
+                funding_rate_payloads = _gather_results_3[5] if not isinstance(_gather_results_3[5], Exception) else {}
                 self._latest_recent_bills = [
                     dict(row) for row in bills_payload.get("data", []) if isinstance(row, dict)
                 ]
@@ -399,8 +428,12 @@ class OKXAccountService:
                     fallback=self._raw_funding_rate_payload(symbol),
                 )
                 for symbol in funding_symbols
-            ]
+            ],
+            return_exceptions=True,
         )
+        for _r in payloads:
+            if isinstance(_r, Exception):
+                self.logger.warning("gather task failed: %s", _r)
         return {
             symbol: payload
             for symbol, payload in zip(funding_symbols, payloads, strict=False)

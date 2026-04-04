@@ -4,7 +4,7 @@ from decimal import Decimal
 from typing import Callable
 
 from aats.schemas.execution import FillEvent
-from aats.services.execution_engine.fill_ordering import fill_processing_sort_key
+from aats.services.fill_ordering import fill_processing_sort_key
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder

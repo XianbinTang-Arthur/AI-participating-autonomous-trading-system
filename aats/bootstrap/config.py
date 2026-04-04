@@ -9,7 +9,11 @@ from typing import Any
 
 import yaml
 
+import logging
+
 from aats.bootstrap.logging import get_logger, log_event
+
+_log = logging.getLogger(__name__)
 from aats.bootstrap.managed_profiles import MANAGED_PROFILE_DERIVED_ENV_KEYS, load_managed_profile_values
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import (
@@ -838,7 +842,8 @@ def _backfill_fill_outcomes_from_event_store(
     for event in event_store.by_topic(topics.PORTFOLIO_BALANCE_DELTAS):
         try:
             balance_delta = PortfolioBalanceDelta.model_validate(event.payload)
-        except Exception:
+        except Exception as exc:
+            _log.warning("PortfolioBalanceDelta.model_validate failed, skipping event: %s", exc)
             continue
         base_outcome = FillOutcomeRecord.from_balance_delta(balance_delta)
         fill = fill_by_id.get(base_outcome.fill_id)

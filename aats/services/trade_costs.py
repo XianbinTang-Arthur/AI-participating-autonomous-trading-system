@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from math import sqrt
+
+logger = logging.getLogger(__name__)
 
 from aats.schemas.market import MarketSnapshot
 from aats.bootstrap.settings import AATSSettings
@@ -409,7 +412,8 @@ def _level_notional(level: object, *, fallback_price: Decimal) -> Decimal | None
     try:
         resolved_size = max(to_decimal(size), Decimal("0"))
         resolved_price = max(to_decimal(price), Decimal("0")) if price is not None else Decimal("0")
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to parse orderbook level price/size: %s", exc)
         return None
     if resolved_size <= Decimal("0"):
         return None

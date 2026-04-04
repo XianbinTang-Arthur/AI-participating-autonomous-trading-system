@@ -24,8 +24,11 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
@@ -59,8 +62,8 @@ def _project_root(request: Request) -> Path:
             root = Path(rdp_settings.project_root).resolve()
             if root.exists():
                 return root
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to resolve project root from RDP settings: %s", exc)
     # 默认 cwd
     return Path(".").resolve()
 

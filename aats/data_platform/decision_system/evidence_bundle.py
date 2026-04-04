@@ -37,7 +37,8 @@ def _safe_load_json(path: pathlib.Path) -> dict | list | None:
     try:
         with path.open(encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except Exception as exc:
+        log.warning("Failed to load JSON from %s: %s", path, exc)
         return None
 
 

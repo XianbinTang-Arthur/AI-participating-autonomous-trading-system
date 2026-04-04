@@ -51,7 +51,7 @@ class OKXPublicWebSocketClient:
         if connect is None:
             raise RuntimeError("websockets_dependency_missing")
         public_args, business_args = self._subscription_args()
-        await asyncio.gather(
+        _gather_results = await asyncio.gather(
             self._consume(
                 connection_name="public",
                 url=self.settings.okx_public_ws_url,
@@ -64,7 +64,11 @@ class OKXPublicWebSocketClient:
                 subscribe_args=business_args,
                 on_message=on_message,
             ),
+            return_exceptions=True,
         )
+        for _r in _gather_results:
+            if isinstance(_r, Exception):
+                self.logger.warning("gather task failed: %s", _r)
 
     async def stop(self) -> None:
         self._stop_event.set()
