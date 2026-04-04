@@ -92,6 +92,105 @@ def add_recommendation(
     registry.setdefault("recommendations", []).append(rec)
 
 
+def find_recommendation(
+    registry: dict[str, Any], recommendation_id: str,
+) -> dict[str, Any] | None:
+    """按 recommendation_id 查找."""
+    for rec in registry.get("recommendations", []):
+        if rec.get("recommendation_id") == recommendation_id:
+            return rec
+    return None
+
+
+# ── Recommendation 状态流转 ──────────────────────────────────────────
+
+
+def approve_recommendation(
+    registry: dict[str, Any],
+    recommendation_id: str,
+    *,
+    approved_by: str = "operator",
+    notes: str | None = None,
+) -> dict[str, Any] | None:
+    """将 recommendation 从 draft → approved.
+
+    Returns
+    -------
+    dict | None  被审批的 recommendation，找不到或状态非 draft 返回 None
+    """
+    rec = find_recommendation(registry, recommendation_id)
+    if rec is None:
+        log.warning("approve: recommendation %s 不存在", recommendation_id)
+        return None
+
+    if rec["status"] != "draft":
+        log.warning(
+            "approve: recommendation %s 状态为 %s（非 draft）",
+            recommendation_id, rec["status"],
+        )
+
+    rec["status"] = "approved"
+    rec["approved_by"] = approved_by
+    rec["approved_at"] = datetime.now(timezone.utc).isoformat()
+    if notes:
+        rec["approval_notes"] = notes
+    return rec
+
+
+def reject_recommendation(
+    registry: dict[str, Any],
+    recommendation_id: str,
+    *,
+    rejected_by: str = "operator",
+    notes: str | None = None,
+) -> dict[str, Any] | None:
+    """将 recommendation 从 draft → rejected."""
+    rec = find_recommendation(registry, recommendation_id)
+    if rec is None:
+        log.warning("reject: recommendation %s 不存在", recommendation_id)
+        return None
+
+    if rec["status"] != "draft":
+        log.warning(
+            "reject: recommendation %s 状态为 %s（非 draft）",
+            recommendation_id, rec["status"],
+        )
+
+    rec["status"] = "rejected"
+    rec["rejected_by"] = rejected_by
+    rec["rejected_at"] = datetime.now(timezone.utc).isoformat()
+    if notes:
+        rec["approval_notes"] = notes
+    return rec
+
+
+def supersede_recommendation(
+    registry: dict[str, Any],
+    recommendation_id: str,
+    *,
+    superseded_by_id: str | None = None,
+    actor: str = "system",
+    notes: str | None = None,
+) -> dict[str, Any] | None:
+    """将 recommendation 标记为 superseded.
+
+    当新 recommendation 替代旧 recommendation 时使用。
+    """
+    rec = find_recommendation(registry, recommendation_id)
+    if rec is None:
+        log.warning("supersede: recommendation %s 不存在", recommendation_id)
+        return None
+
+    rec["status"] = "superseded"
+    rec["superseded_at"] = datetime.now(timezone.utc).isoformat()
+    rec["superseded_by"] = actor
+    if superseded_by_id:
+        rec["superseded_by_recommendation_id"] = superseded_by_id
+    if notes:
+        rec["approval_notes"] = notes
+    return rec
+
+
 # ── Active Decision Registry ────────────────────────────────────────
 
 

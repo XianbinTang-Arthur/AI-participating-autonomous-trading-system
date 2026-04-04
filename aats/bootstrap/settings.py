@@ -113,6 +113,17 @@ class AATSSettings(BaseSettings):
     bootstrap_portfolio_from_exchange: bool = False
     database_url: str | None = None
     database_auto_create_schema: bool = True
+    # ── Active Parameter Set (RDP 整合) ──────────────────────────────
+    active_parameter_registry_path: str | None = Field(
+        default=None,
+        description="Path to active_parameter_registry.json. "
+                    "If None, defaults to configs/active_parameter_sets/active_parameter_registry.json",
+    )
+    active_parameters_enabled: bool = Field(
+        default=False,
+        description="Master switch for loading active parameter set from RDP governance. "
+                    "When True, active parameters override strategy profile defaults.",
+    )
     database_single_runtime_guard_enabled: bool = True
     database_runtime_lock_key: int = 42_420_001
     max_abs_position_qty: float = 0.01

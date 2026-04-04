@@ -1,0 +1,16 @@
+{
+  "generated_at": "2026-04-04T17:20:22.974146+00:00",
+  "active_sets": {
+    "independent_15m": {
+      "parameter_set_id": "ps_20260404_072612_a5cc10",
+      "family": "independent",
+      "timeframe": "15m",
+      "values": {
+        "signal_edge_scale_bps": 12.0,
+        "min_confirm_ticks": 2,
+        "min_safe_net_edge_bps": 0.0,
+        "score_stability_threshold": 2.0
+      }
+    }
+  }
+}

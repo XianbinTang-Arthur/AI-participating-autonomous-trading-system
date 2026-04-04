@@ -43,6 +43,7 @@
   - [21.14 已知限制](#2114-已知限制)
   - [21.15 治理与产品化 (Phase 5)](#2115-治理与产品化-phase-5)
   - [21.16 闭环决策系统 (Phase 6)](#2116-闭环决策系统-phase-6)
+  - [21.17 主交易系统整合 (Integration)](#2117-主交易系统整合-integration)
 - [22. 安全边界与风险提示](#22-安全边界与风险提示)
 - [23. 开发建议](#23-开发建议)
 - [24. 常见问题](#24-常见问题)
@@ -852,6 +853,10 @@ docs/operations/              # Phase 5 运营文档
   parameter_governance.md     #   参数治理
   round_lifecycle.md          #   Round 生命周期
   operator_checklist.md       #   运维检查清单
+  live_schema_contract_for_rdp.md  # Live DB 表结构契约
+  active_parameter_application.md  # Active parameter 应用指南
+  operator_rdp_integration.md      # Operator RDP 整合指南
+  recommendation_to_production_workflow.md  # Recommendation 到生产流程
 
 artifacts/decision_system/    # Phase 6 决策系统注册表
   recommendation_registry.json  # 所有历史建议记录
@@ -867,6 +872,11 @@ artifacts/decision_rounds/<round_id>/  # Phase 6 决策 round 产物
   phase6_closed_loop_decision_conclusion.md
 
 configs/
+  active_parameter_sets/  # Active parameter set 文件（整合层）
+    independent_15m.json    # independent/15m active 参数
+    independent_1h.json     # independent/1h active 参数
+    directional_15m.json    # directional/15m active 参数
+    directional_1h.json     # directional/1h active 参数
   research_batches/       # 校准批次 JSON 模板
     independent_scale_calibration_15m.json
     independent_cost_sensitivity_15m.json
@@ -910,6 +920,9 @@ scripts/                  # 启动、seed、回放、报告脚本
   rdp_select_parameter_upgrade.py # Phase 6 参数升级候选单独评估
   rdp_evaluate_promotion_readiness.py # Phase 6 上线 readiness 评估
   rdp_update_decision_registry.py # Phase 6 recommendation/decision registry 管理
+  rdp_check_live_db.py    # 整合层 验证 live DB 连接与表可读性
+  apply_active_parameter_set.py # 整合层 管理 active parameter sets
+  approve_recommendation_and_apply.py # 整合层 审批 recommendation 并应用参数
   rdp_run_backfill.py     #   手动历史回填（保留）
   rdp_build_gold.py       #   手动 Gold 构建（单个 symbol x timeframe）
   rdp_build_gold_all.py   #   批量 Gold 构建（自动遍历所有 swap 组合）
@@ -1872,6 +1885,15 @@ SELECT 'swap_1h',        COUNT(*) FROM gold.market_swap_replay_bars_1h;
 | `recommendation_registry.py` | 三个 registry 管理（recommendation / active decision / evidence bundle index） |
 | `report_builder.py` | 7 节结论文档生成 |
 
+**Integration Layer — 主交易系统整合**：
+
+| 文件 | 职责 |
+|------|------|
+| `aats/data_platform/live_query_adapter.py` | Live DB 只读查询适配器（7 张表统一收口、时间窗口查询、健康检查） |
+| `aats/bootstrap/active_parameters.py` | Active Parameter Set 加载器（启动时注入 family/tf 参数，参数映射，原子写入） |
+| `aats/api/rdp_routes.py` | RDP 只读 API 路由（8 个 GET 端点：health/parameters/attribution/execution/decisions/recommendations/readiness） |
+| `aats/services/operator/rdp_queries.py` | RDP 查询服务（从治理/决策 artifact 读取结构化数据供 API 使用） |
+
 ### 21.14 已知限制
 
 | 项目 | 说明 |
@@ -2039,6 +2061,146 @@ python scripts/rdp_update_decision_registry.py --action approve --recommendation
 5. 参数可追溯（有 frozen/candidate）
 6. 至少有 promote_candidate 的参数
 7. 至少有 keep_active 的 family/timeframe
+
+### 21.17 主交易系统整合 (Integration)
+
+将 RDP 从独立研究平台整合为主交易系统的正式旁路子系统。
+
+#### 整合架构
+
+```text
+                       +---------------------------+
+                       |   主交易系统 (Realtime)    |
+                       |   Market → Feature →       |
+                       |   Decision → Governance →  |
+                       |   Strategy → Execution     |
+                       +-------------+-------------+
+                                     |
+                                     | 事实数据(只读) / 参数回灌
+                                     v
+                 +---------------------------------------------+
+                 | RDP (Research / Attribution / Governance)   |
+                 | Phase 1~6 + Integration Layer               |
+                 +-------------------+-------------------------+
+                                     |
+                                     | approved parameter set
+                                     v
+                     +--------------------------------------+
+                     |   configs/active_parameter_sets/     |
+                     +--------------------------------------+
+```
+
+#### 整合四阶段
+
+| 阶段 | 内容 | 核心交付物 |
+|------|------|-----------|
+| A. 事实数据对接 | RDP 只读访问 production DB | `live_query_adapter.py`, `live_schema_contract_for_rdp.md` |
+| B. 参数回灌机制 | Active parameter set 加载与注入 | `active_parameters.py`, `apply_active_parameter_set.py` |
+| C. Operator 可见性 | RDP 只读 API 暴露给 Operator | `rdp_routes.py`, `rdp_queries.py` |
+| D. 受控应用流程 | Recommendation → Approval → Apply | `approve_recommendation_and_apply.py` |
+
+#### 阶段 A — 事实数据与接口对接
+
+RDP 通过 `live_query_adapter.py` 只读访问 production DB 7 张关键表：
+
+| 表 | 用途 |
+|----|------|
+| `strategy_sleeve_intents` | Phase 3 策略意图分析 |
+| `portfolio_allocation_decisions` | Phase 3 组合分配分析 |
+| `allocator_budget_snapshots` | Phase 3 预算快照分析 |
+| `reconciliation_state_snapshots` | Phase 3 对账状态分析 |
+| `strategy_execution_bundles` | Phase 3/4 执行包分析 |
+| `execution_orders` | Phase 3/4 订单分析 |
+| `execution_fills` | Phase 4 成交分析 |
+
+配置（`.env.research`）：
+
+```env
+RDP_LIVE_DATABASE_URL=postgresql+psycopg://rdp_readonly:pw@host:5432/aats_prod
+RDP_LIVE_DB_READONLY=true
+```
+
+验证命令：
+
+```bash
+python scripts/rdp_check_live_db.py
+python scripts/rdp_check_live_db.py --table execution_fills --sample 3
+```
+
+#### 阶段 B — 参数回灌机制
+
+参数优先级（从低到高）：
+
+```text
+hardcoded defaults < strategy_profiles/*.yaml < active parameter set < runtime override
+```
+
+Active parameter set 文件位于 `configs/active_parameter_sets/<family>_<timeframe>.json`。
+
+操作命令：
+
+```bash
+# 查看 registry 中可用参数
+python scripts/apply_active_parameter_set.py --action show
+
+# 应用所有 frozen 参数
+python scripts/apply_active_parameter_set.py --action apply-frozen
+
+# 应用指定参数
+python scripts/apply_active_parameter_set.py --action apply --ps-id <id>
+
+# 查看当前 active sets
+python scripts/apply_active_parameter_set.py --action show-active
+```
+
+#### 阶段 C — Operator 可见性
+
+8 个只读 API 端点（`/rdp/` 前缀）：
+
+| 端点 | 说明 |
+|------|------|
+| `GET /rdp/health` | RDP 子系统健康状态 |
+| `GET /rdp/parameters/active` | 当前 active parameter sets |
+| `GET /rdp/attribution/latest` | 最近 attribution 结论 |
+| `GET /rdp/execution/latest` | 最近 execution realism 结论 |
+| `GET /rdp/decisions/latest` | 当前 family/tf 决策状态 |
+| `GET /rdp/recommendations/latest` | 最近 recommendations |
+| `GET /rdp/decision-round/latest` | 最近 decision round 结论 |
+| `GET /rdp/readiness` | Promotion readiness 评估 |
+
+#### 阶段 D — 受控应用流程
+
+```text
+Phase 6 → generate recommendation (draft)
+  → reviewer/operator approve
+  → apply active parameter set
+  → production restart / reload
+  → observe
+```
+
+操作命令：
+
+```bash
+# 查看待审批 recommendations
+python scripts/approve_recommendation_and_apply.py --action list
+
+# 审批并应用参数
+python scripts/approve_recommendation_and_apply.py --action approve-and-apply --rec-id <id>
+
+# 拒绝
+python scripts/approve_recommendation_and_apply.py --action reject --rec-id <id>
+
+# 查看审批历史
+python scripts/approve_recommendation_and_apply.py --action history
+```
+
+#### 整合原则
+
+1. **不侵入实时主链** — RDP 不阻塞实时交易，不成为同步依赖
+2. **旁路分析 + 受控回灌** — 离线/准实时研究，受控写回 active parameters
+3. **研究与生产隔离** — research DB 与 production DB 分离
+4. **建议与应用分离** — Phase 6 只产出 recommendation，不直接修改生产参数
+5. **第一版不做自动 apply** — 所有参数应用必须经过人工审批
 
 ---
 

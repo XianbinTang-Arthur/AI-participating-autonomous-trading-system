@@ -2373,7 +2373,24 @@ async def build_runtime(
     storage = build_storage_backends(base_settings)
     try:
         profile_resolution = runtime_profile_resolution(settings=base_settings)
-        runtime_settings = AATSSettings.model_validate(profile_resolution.resolved_settings)
+        # ── Active Parameter Set 注入（RDP 整合） ──────────────────
+        # 在 profile resolution 之后、settings validate 之前合并。
+        # fail-soft: 加载失败不阻断主系统启动。
+        _resolved_for_active = profile_resolution.resolved_settings
+        try:
+            from aats.bootstrap.active_parameters import apply_active_parameters_to_settings
+            _resolved_for_active = apply_active_parameters_to_settings(
+                profile_resolution.resolved_settings,
+                project_root=Path.cwd(),
+            )
+        except Exception as _active_param_exc:
+            log_event(
+                get_logger("aats.bootstrap"),
+                "active_parameter_load_failed",
+                level="warning",
+                error=str(_active_param_exc),
+            )
+        runtime_settings = AATSSettings.model_validate(_resolved_for_active)
         runtime_layering = resolve_runtime_layering(runtime_settings)
         state_scope = runtime_state_scope(runtime_settings)
         _validate_runtime_settings(runtime_settings, runtime_layering)

@@ -1,0 +1,429 @@
+"""Parameter Apply / Rollback 逻辑.
+
+工作包 C 交付物：将已批准 recommendation 受控地应用为 active parameter set，
+并支持回滚。
+
+核心约束:
+  - apply 必须是显式动作
+  - apply 必须可审计
+  - apply 必须可回滚
+  - recommendation 不能自动生效
+
+数据流:
+  approved recommendation
+    → 解析 target_parameter_set_id
+    → 从 parameter_registry 获取 values
+    → 写入 active_parameter_registry.json
+    → 写入 apply history
+
+回滚:
+  → 从 apply history 查找上一个 active parameter set
+  → 重新写为 active
+  → 写入 rollback history
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+log = logging.getLogger(__name__)
+
+# ── 路径常量 ───────────────────────────────────────────────────────
+
+PARAMETER_APPLY_HISTORY_FILENAME = "parameter_apply_history.json"
+DECISION_SYSTEM_DIR = "artifacts/decision_system"
+GOVERNANCE_DIR = "artifacts/governance"
+
+
+def _make_operation_id() -> str:
+    return f"op_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
+# ── Apply History 管理 ─────────────────────────────────────────────
+
+
+def _apply_history_path(project_root: Path) -> Path:
+    return project_root / DECISION_SYSTEM_DIR / PARAMETER_APPLY_HISTORY_FILENAME
+
+
+def load_apply_history(project_root: Path) -> dict[str, Any]:
+    """加载 parameter_apply_history.json."""
+    path = _apply_history_path(project_root)
+    if not path.exists():
+        return {"generated_at": None, "operations": []}
+    try:
+        with path.open(encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("无法加载 apply history %s: %s", path, exc)
+        return {"generated_at": None, "operations": []}
+
+
+def save_apply_history(history: dict[str, Any], project_root: Path) -> Path:
+    """保存 parameter_apply_history.json（原子写入）."""
+    from aats.data_platform.governance._atomic_io import atomic_json_write
+
+    path = _apply_history_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    history["generated_at"] = datetime.now(timezone.utc).isoformat()
+    atomic_json_write(history, path)
+    log.info("已保存 apply history -> %s (%d operations)", path, len(history.get("operations", [])))
+    return path
+
+
+def get_latest_operation_for_combo(
+    history: dict[str, Any],
+    family: str,
+    timeframe: str,
+) -> dict[str, Any] | None:
+    """获取指定 combo 最近的 apply/rollback 操作."""
+    combo_key = f"{family}_{timeframe.lower()}"
+    for op in reversed(history.get("operations", [])):
+        if op.get("family") == family and op.get("timeframe") == timeframe:
+            return op
+        # 兼容 combo_key 查找
+        if f"{op.get('family')}_{op.get('timeframe', '').lower()}" == combo_key:
+            return op
+    return None
+
+
+def get_previous_parameter_set_id(
+    history: dict[str, Any],
+    family: str,
+    timeframe: str,
+) -> str | None:
+    """获取指定 combo 上一个 active parameter set id.
+
+    用于回滚时确定回滚目标。
+    跳过最近的一条（当前），返回前一条。
+    """
+    combo_key = f"{family}_{timeframe.lower()}"
+    found_current = False
+    for op in reversed(history.get("operations", [])):
+        op_combo = f"{op.get('family')}_{op.get('timeframe', '').lower()}"
+        if op_combo != combo_key:
+            continue
+        if op.get("operation_type") != "apply":
+            continue
+        if not found_current:
+            found_current = True
+            continue
+        return op.get("to_parameter_set_id")
+    return None
+
+
+# ── Apply 操作 ─────────────────────────────────────────────────────
+
+
+def apply_approved_recommendation(
+    project_root: Path,
+    *,
+    recommendation_id: str,
+    actor: str = "operator",
+    notes: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """从已批准的 recommendation 应用参数到 active parameter set.
+
+    流程:
+      1. 从 recommendation_registry 查找已批准的 recommendation
+      2. 从 parameter_registry 查找 target_parameter_set_id
+      3. 写入 active_parameter_registry.json
+      4. 写入 apply history
+
+    Returns
+    -------
+    dict  操作结果 {"ok": bool, "message": str, ...}
+    """
+    from aats.bootstrap.active_parameters import upsert_active_registry, write_active_parameter_set
+    from aats.data_platform.decision_system.recommendation_registry import (
+        find_recommendation,
+        load_recommendation_registry,
+    )
+    from aats.data_platform.governance.parameter_registry import load_registry
+
+    # 1. 加载 recommendation
+    rec_path = project_root / DECISION_SYSTEM_DIR / "recommendation_registry.json"
+    rec_registry = load_recommendation_registry(rec_path)
+    rec = find_recommendation(rec_registry, recommendation_id)
+
+    if rec is None:
+        return {"ok": False, "message": f"未找到 recommendation: {recommendation_id}"}
+
+    if rec["status"] != "approved":
+        return {
+            "ok": False,
+            "message": f"recommendation 状态为 '{rec['status']}'，必须为 approved 才能 apply",
+        }
+
+    ps_id = rec.get("target_parameter_set_id")
+    if not ps_id:
+        return {
+            "ok": False,
+            "message": f"recommendation {recommendation_id} 没有 target_parameter_set_id",
+        }
+
+    # 2. 从 governance registry 获取参数值
+    gov_reg_path = project_root / GOVERNANCE_DIR / "current_parameter_registry.json"
+    gov_registry = load_registry(gov_reg_path)
+
+    target_ps = None
+    for ps in gov_registry.get("parameter_sets", []):
+        if ps["parameter_set_id"] == ps_id:
+            target_ps = ps
+            break
+
+    if target_ps is None:
+        return {"ok": False, "message": f"parameter_registry 中未找到 {ps_id}"}
+
+    family = target_ps["family"]
+    timeframe = target_ps["timeframe"]
+    values = target_ps["values"]
+    combo_key = f"{family}_{timeframe.lower()}"
+
+    result = {
+        "ok": True,
+        "operation_type": "apply",
+        "combo_key": combo_key,
+        "family": family,
+        "timeframe": timeframe,
+        "recommendation_id": recommendation_id,
+        "parameter_set_id": ps_id,
+        "values": values,
+    }
+
+    if dry_run:
+        result["message"] = f"[DRY RUN] 将 apply {ps_id} 到 {combo_key}"
+        return result
+
+    # 3. 查找当前 active set（用于历史记录 from_parameter_set_id）
+    from aats.bootstrap.active_parameters import load_active_parameter_registry
+
+    current_reg = load_active_parameter_registry(project_root=project_root)
+    current_entry = current_reg.get("active_sets", {}).get(combo_key, {})
+    from_ps_id = current_entry.get("parameter_set_id")
+
+    # 4. 写入 active parameter set
+    write_active_parameter_set(
+        family=family,
+        timeframe=timeframe,
+        parameter_set_id=ps_id,
+        values=values,
+        source_round_id=target_ps.get("source_round_id"),
+        approval_recommendation_id=recommendation_id,
+        applied_by=f"rdp_apply ({actor})",
+        project_root=project_root,
+    )
+    upsert_active_registry(
+        family=family,
+        timeframe=timeframe,
+        parameter_set_id=ps_id,
+        values=values,
+        project_root=project_root,
+    )
+
+    # 5. 写入 apply history
+    history = load_apply_history(project_root)
+    op_id = _make_operation_id()
+    history.setdefault("operations", []).append({
+        "operation_id": op_id,
+        "operation_type": "apply",
+        "family": family,
+        "timeframe": timeframe,
+        "from_parameter_set_id": from_ps_id,
+        "to_parameter_set_id": ps_id,
+        "recommendation_id": recommendation_id,
+        "actor": actor,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "notes": notes,
+    })
+    save_apply_history(history, project_root)
+
+    result["operation_id"] = op_id
+    result["from_parameter_set_id"] = from_ps_id
+    result["message"] = f"已 apply {ps_id} 到 {combo_key}"
+    return result
+
+
+# ── Rollback 操作 ──────────────────────────────────────────────────
+
+
+def rollback_active_parameter_set(
+    project_root: Path,
+    *,
+    family: str,
+    timeframe: str,
+    to_parameter_set_id: str | None = None,
+    actor: str = "operator",
+    notes: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """回滚 active parameter set 到上一版本.
+
+    如果指定 to_parameter_set_id，回滚到该版本。
+    否则自动从 apply history 查找上一个版本。
+
+    Returns
+    -------
+    dict  操作结果 {"ok": bool, "message": str, ...}
+    """
+    from aats.bootstrap.active_parameters import (
+        load_active_parameter_registry,
+        upsert_active_registry,
+        write_active_parameter_set,
+    )
+    from aats.data_platform.governance.parameter_registry import load_registry
+
+    combo_key = f"{family}_{timeframe.lower()}"
+
+    # 1. 确定当前 active set
+    current_reg = load_active_parameter_registry(project_root=project_root)
+    current_entry = current_reg.get("active_sets", {}).get(combo_key, {})
+    from_ps_id = current_entry.get("parameter_set_id")
+
+    if not from_ps_id:
+        return {"ok": False, "message": f"{combo_key} 没有当前 active parameter set"}
+
+    # 2. 确定回滚目标
+    if to_parameter_set_id is None:
+        # 从 history 查找上一个
+        history = load_apply_history(project_root)
+        to_parameter_set_id = get_previous_parameter_set_id(history, family, timeframe)
+        if to_parameter_set_id is None:
+            return {
+                "ok": False,
+                "message": f"{combo_key} 没有可回滚的历史版本",
+            }
+
+    if to_parameter_set_id == from_ps_id:
+        return {"ok": False, "message": f"回滚目标与当前版本相同: {from_ps_id}"}
+
+    # 3. 从 governance registry 获取目标参数
+    gov_reg_path = project_root / GOVERNANCE_DIR / "current_parameter_registry.json"
+    gov_registry = load_registry(gov_reg_path)
+
+    target_ps = None
+    for ps in gov_registry.get("parameter_sets", []):
+        if ps["parameter_set_id"] == to_parameter_set_id:
+            target_ps = ps
+            break
+
+    if target_ps is None:
+        return {"ok": False, "message": f"parameter_registry 中未找到回滚目标 {to_parameter_set_id}"}
+
+    values = target_ps["values"]
+
+    result = {
+        "ok": True,
+        "operation_type": "rollback",
+        "combo_key": combo_key,
+        "family": family,
+        "timeframe": timeframe,
+        "from_parameter_set_id": from_ps_id,
+        "to_parameter_set_id": to_parameter_set_id,
+        "values": values,
+    }
+
+    if dry_run:
+        result["message"] = f"[DRY RUN] 将 rollback {combo_key}: {from_ps_id} → {to_parameter_set_id}"
+        return result
+
+    # 4. 写入回滚后的 active parameter set
+    write_active_parameter_set(
+        family=family,
+        timeframe=timeframe,
+        parameter_set_id=to_parameter_set_id,
+        values=values,
+        source_round_id=target_ps.get("source_round_id"),
+        applied_by=f"rdp_rollback ({actor})",
+        project_root=project_root,
+    )
+    upsert_active_registry(
+        family=family,
+        timeframe=timeframe,
+        parameter_set_id=to_parameter_set_id,
+        values=values,
+        project_root=project_root,
+    )
+
+    # 5. 写入 rollback history
+    history = load_apply_history(project_root)
+    op_id = _make_operation_id()
+    history.setdefault("operations", []).append({
+        "operation_id": op_id,
+        "operation_type": "rollback",
+        "family": family,
+        "timeframe": timeframe,
+        "from_parameter_set_id": from_ps_id,
+        "to_parameter_set_id": to_parameter_set_id,
+        "recommendation_id": None,
+        "actor": actor,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "notes": notes or f"Rollback from {from_ps_id}",
+    })
+    save_apply_history(history, project_root)
+
+    result["operation_id"] = op_id
+    result["message"] = f"已 rollback {combo_key}: {from_ps_id} → {to_parameter_set_id}"
+    return result
+
+
+# ── 清除 active parameter set ──────────────────────────────────────
+
+
+def clear_active_parameter_set(
+    project_root: Path,
+    *,
+    family: str,
+    timeframe: str,
+    actor: str = "operator",
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """清除指定 combo 的 active parameter set（回退到 profile 默认值）."""
+    from aats.bootstrap.active_parameters import (
+        load_active_parameter_registry,
+        save_active_parameter_registry,
+    )
+
+    combo_key = f"{family}_{timeframe.lower()}"
+
+    # 从 registry 移除
+    reg = load_active_parameter_registry(project_root=project_root)
+    active_sets = reg.get("active_sets", {})
+    from_ps_id = active_sets.get(combo_key, {}).get("parameter_set_id")
+
+    if combo_key in active_sets:
+        del active_sets[combo_key]
+        save_active_parameter_registry(reg, project_root=project_root)
+
+    # 删除 per-file
+    from aats.bootstrap.active_parameters import DEFAULT_ACTIVE_DIR
+
+    per_file = project_root / DEFAULT_ACTIVE_DIR / f"{combo_key}.json"
+    if per_file.exists():
+        per_file.unlink()
+
+    # 记录 history
+    if from_ps_id:
+        history = load_apply_history(project_root)
+        op_id = _make_operation_id()
+        history.setdefault("operations", []).append({
+            "operation_id": op_id,
+            "operation_type": "clear",
+            "family": family,
+            "timeframe": timeframe,
+            "from_parameter_set_id": from_ps_id,
+            "to_parameter_set_id": None,
+            "recommendation_id": None,
+            "actor": actor,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "notes": notes or f"Cleared {combo_key}",
+        })
+        save_apply_history(history, project_root)
+
+    return {"ok": True, "combo_key": combo_key, "message": f"已清除 {combo_key}"}

@@ -103,6 +103,39 @@ class ResearchPlatformSettings(BaseSettings):
     # Dataset version prefix
     dataset_version_prefix: str = "v1"
 
+    # ── Live production DB (只读) ──────────────────────────────────────
+    live_database_url: str | None = Field(
+        default=None,
+        description="Production DB readonly DSN. "
+                    "Set via RDP_LIVE_DATABASE_URL in .env.research.",
+    )
+    live_db_readonly: bool = Field(
+        default=True,
+        description="Safety flag: enforce read-only access to live DB. "
+                    "Must be True in production.",
+    )
+    live_db_schema: str | None = Field(
+        default=None,
+        description="Production DB schema name (default: public). "
+                    "Set via RDP_LIVE_DB_SCHEMA if needed.",
+    )
+    live_db_connect_timeout_seconds: int = Field(
+        default=10,
+        description="Connection timeout for live DB in seconds.",
+    )
+
+    # ── 项目根目录 ─────────────────────────────────────────────────────
+    project_root: str = Field(
+        default=".",
+        description="Project root directory for resolving artifact paths.",
+    )
+
+    # ── Active parameter set 目录 ──────────────────────────────────────
+    active_parameter_sets_dir: str = Field(
+        default="configs/active_parameter_sets",
+        description="Directory for active parameter set files.",
+    )
+
 
 def get_settings() -> ResearchPlatformSettings:
     return ResearchPlatformSettings()
