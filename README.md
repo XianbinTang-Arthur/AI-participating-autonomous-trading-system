@@ -28,22 +28,16 @@
 - [20. 仓库目录结构](#20-仓库目录结构)
 - [21. 研究数据平台 (Research Data Platform)](#21-研究数据平台-research-data-platform)
   - [21.1 定位与边界](#211-定位与边界)
-  - [21.2 五层数据架构](#212-五层数据架构)
-  - [21.3 统一启动入口](#213-统一启动入口)
-  - [21.4 历史数据聚合](#214-历史数据聚合)
-  - [21.5 实时数据聚合](#215-实时数据聚合)
-  - [21.6 ���据流全景](#216-数据流全景)
-  - [21.7 覆盖范围](#217-覆盖范围phase-1-冻结)
-  - [21.8 质量验证与门控](#218-质量验证与门控)
-  - [21.9 参数研究平台 (Phase 2)](#219-参数研究平台-phase-2)
-  - [21.10 配置](#2110-配置)
-  - [21.11 数据库与迁移](#2111-数据库与迁移)
-  - [21.12 快速开始](#2112-快速开始)
-  - [21.13 代码模块清单](#2113-代码模块清单)
-  - [21.14 已知限制](#2114-已知限制)
-  - [21.15 治理与产品化 (Phase 5)](#2115-治理与产品化-phase-5)
-  - [21.16 闭环决策系统 (Phase 6)](#2116-闭环决策系统-phase-6)
-  - [21.17 主交易系统整合 (Integration)](#2117-主交易系统整合-integration)
+  - [21.2 架构全景](#212-架构全景)
+  - [21.3 快速开始](#213-快速开始)
+  - [21.4 Phase 1 — 数据仓库](#214-phase-1--数据仓库)
+  - [21.5 Phase 2 — 参数研究](#215-phase-2--参数研究)
+  - [21.6 Phase 3-4 — 归因与执行可行性](#216-phase-3-4--归因与执行可行性)
+  - [21.7 Phase 5-6 — 治理与闭环决策](#217-phase-5-6--治理与闭环决策)
+  - [21.8 主交易系统整合](#218-主交易系统整合)
+  - [21.9 运维与持续改进](#219-运维与持续改进)
+  - [21.10 已知限制](#2110-已知限制)
+  - [21.11 详细文档索引](#2111-详细文档索引)
 - [22. 安全边界与风险提示](#22-安全边界与风险提示)
 - [23. 开发建议](#23-开发建议)
 - [24. 常见问题](#24-常见问题)
@@ -935,770 +929,77 @@ tests/                    # 单元 / 集成 / 回放 / 场景测试
 
 ## 21. 研究数据平台 (Research Data Platform)
 
-研究数据平台（RDP）是独立于交易系统主链路的**离线数据仓库 + 参数研究**模块。Phase 1 负责从 OKX 采集、清洗、标准化市场数据，生成可直接用于回测的 Gold 行情；Phase 2 在此基础上构建参数研究平台，支持逐 bar replay、参数扫描和结构化诊断。
+研究数据平台（RDP）是独立于交易系统主链路的**离线参数研究子系统**。它从数据采集、参数扫描、归因分析、执行可行性验证到闭环决策推荐，形成完整的参数优化管线，最终通过受控审批流程将研究结论回灌到主交易系统。
 
 ### 21.1 定位与边界
 
 | 维度 | 说明 |
 |------|------|
-| 职责 | 离线/准实时数据采集、清洗、分层存储、质量验证、参数研究 |
-| 数据源 | OKX 历史文件下载（ZIP/CSV） + OKX REST API 增量 |
-| 输出 | Silver 标准化行情 + Gold 回放级 replay bars + 参数实验报告 |
+| 职责 | 离线/准实时数据采集 → 参数研究 → 归因分析 → 执行验证 → 治理 → 闭环决策 → 受控回灌 |
+| 数据源 | OKX 历史文件下载（ZIP/CSV） + OKX REST API 增量 + Production DB 只读 |
 | 数据库 | 独立库 `aats_research`（6 个 schema：meta/staging/bronze/silver/gold/research） |
 | 配置文件 | `.env.research`（`RDP_` 前缀），不与交易系统 `.env.*` 混用 |
+| 核心原则 | 不侵入实时主链 · 旁路分析 + 受控回灌 · 研究与生产分库 · 人工审批 |
 
-### 21.2 五层数据架构
+### 21.2 架构全景
+
+#### 七阶段研究管线
 
 ```text
-meta      -- 元数据：运行记录、checkpoint、质量报告、文件注册
-staging   -- 原始入库层，保留 raw_symbol / raw_ts / source_file_id 全链路溯源
-bronze    -- 去重 upsert 层，PK=(symbol, ts)，保留原始字段
-silver    -- 标准化层，经过质量验证的规范数据
-gold      -- 回放层，candle + funding 对齐后的 replay bars
-research  -- 参数研究层，实验元数据、诊断摘要、扫描批次记录
+Phase 1        Phase 2         Phase 3          Phase 4
+数据仓库  ───→  参数研究  ───→  归因分析  ───→  执行可行性
+(采集/清洗/     (replay/        (replay vs       (成交/滑点/
+ 分层存储)       扫描/校准)      live 对照)       成本验证)
+    │                                               │
+    │           Phase 5         Phase 6             │
+    └────────→  治理  ────────→  闭环决策  ←────────┘
+               (版本/质量/       (评分/推荐/
+                artifact)        readiness)
+                                    │
+                              Integration
+                            ───→ 主系统整合
+                               (审批/回灌/
+                                API/监控)
+```
+
+| 阶段 | 核心问题 | 主要产物 |
+|------|---------|---------|
+| Phase 1 | 数据从哪来？怎么保证质量？ | Silver 标准化行情 + Gold replay bars |
+| Phase 2 | 参数变化如何影响策略决策结构？ | 诊断报告 + parameter candidates |
+| Phase 3 | 为什么 live 没有按 replay 预期下单？ | 归因瀑布 + failure modes |
+| Phase 4 | 这笔单在真实市场能成交吗？成本多少？ | 成交可行性 + cost-adjusted edge |
+| Phase 5 | 产物可追溯吗？质量达标吗？ | artifact 索引 + 质量巡检 + 参数 registry |
+| Phase 6 | 哪组参数值得推上线？ | recommendations + readiness report |
+| Integration | 如何安全地把研究结论用到生产？ | active parameter sets + 审批 log |
+
+#### 五层数据架构
+
+```text
+meta      — 元数据：运行记录、checkpoint、质量报告、文件注册
+staging   — 原始入库层，保留 raw_symbol / raw_ts / source_file_id 全链路溯源
+bronze    — 去重 upsert 层，PK=(symbol, ts)，保留原始字段
+silver    — 标准化层，经过质量验证的规范数据
+gold      — 回放层，candle + funding rate as-of join 对齐后的 replay bars
+research  — 参数研究层，实验元数据、诊断摘要、扫描批次记录
 ```
 
 共 44 张表，通过 `migrations/research/0001-0012` SQL 文件管理。
 
-### 21.3 统一启动入口
-
-日常使用只需要一个命令：
-
-```powershell
-# 一键启动（历史消费 + 实时采集同时运行）
-python scripts/rdp_start.py
-
-# 只启动历史数据消费
-python scripts/rdp_start.py --historical-only
-
-# 只启动实时数据采集
-python scripts/rdp_start.py --realtime-only
-
-# 自定义扫描间隔
-python scripts/rdp_start.py --historical-interval 60 --realtime-interval 30
-
-# Ctrl+C 优雅退出
-```
-
-总启动脚本在同一进程内启动两个 daemon 线程：
-
-| daemon | 职责 | 默认间隔 |
-|--------|------|----------|
-| Historical | 定时扫描 `incoming/` 目录，发现新 ZIP 自动消费 | 30 秒 |
-| Realtime | 滚动采集 candles/funding + 定期构建 Gold + 定期检测 gap | 60 秒 |
-
-### 21.4 历史数据聚合
-
-#### 目录约定
-
-将 OKX 下载的 ZIP 文件放入 `incoming/` 对应子目录，daemon 自动消费：
+#### 数据流全景
 
 ```text
-data/historical/
-  incoming/                    -- 放入新 ZIP 文件
-    candles_spot/
-      1m/                      -- BTC-USDT-candlesticks-*.zip
-      5m/
-      15m/
-      1h/
-    candles_swap/
-      1m/                      -- BTC-USDT-SWAP-candlesticks-*.zip
-      5m/
-      15m/
-      1h/
-    funding_swap/              -- BTC-USDT-SWAP-fundingrates-*.zip
-  completed/                   -- 消费成功后自动移入（保留子目录结构）
-  failed/                      -- 消费失败后自动移入（附 .error 日志）
++-- 历史数据 daemon --------+    +-- 实时数据 daemon --------+
+|  incoming/ ZIP            |    |  OKX REST API             |
+|  → file discovery         |    |  → candles/funding 采集    |
+|  → staging → 质量门控     |    |  → staging → 质量门控      |
+|  → bronze → silver        |    |  → bronze → silver         |
+|  → 移到 completed/failed  |    |  → 定期 Gold 构建 + Gap 修复|
++---------------------------+    +----------------------------+
+              ↓                                ↓
+        Silver 标准化层  ──→  Gold 回放层  ──→  Phase 2-6 研究管线
 ```
 
-**timeframe 由子目录名自动推断**（`candles_spot/1m/` 即 spot + 1m），无需手动指定。
-
-#### 处理流程
-
-```text
-incoming/ 扫描发现 ZIP
-  -- file_discovery（SHA256 去重、注册到 meta.raw_source_files）
-  -- file_parser（解析 CSV，header 标准化，BOM/引号容错）
-  -- staging 写入
-  -- candle_quality_checker / funding_quality_checker（质量门控）
-  -- bronze_merger（staging -> bronze，upsert）
-  -- silver_merger（bronze -> silver，upsert）
-  -- 对 swap 数据自动触发 Gold 构建
-  -- 成功 -> 移到 completed/；失败 -> 移到 failed/（附 .error）
-```
-
-独立运行：`python scripts/rdp_historical_daemon.py [--once] [--interval 30]`
-
-### 21.5 实时数据聚合
-
-单循环内驱动四个子任务：
-
-| 子任务 | 触发条件 | 说明 |
-|--------|----------|------|
-| 滚动 candles | 每周期（cadence 自动判断） | 4 symbol x 4 timeframe |
-| 滚动 funding | 每 15 分钟 cadence | 2 swap symbol |
-| Gold 构建 | 每 60 个周期 | 对所有 swap 自动构建 replay bars |
-| Gap 检测+修复 | 每 120 个周期 | 自动检测 Silver 层缺口并创建 repair run |
-
-candles 采集节奏由 `scheduler.py` 的 cadence 控制：
-
-- 1m candles：每 1 分钟
-- 5m candles：每 5 分钟
-- 15m candles：每 15 分钟
-- 1H candles：每 1 小时
-- funding：每 15 分钟
-
-独立运行：`python scripts/rdp_realtime_daemon.py [--once] [--interval 60]`
-
-### 21.6 数据流全景
-
-```text
-+-- 历史数据聚合 daemon ---------+    +-- 实时数据聚合 daemon -----+
-|                                |    |                            |
-|  incoming/ ZIP                 |    |  OKX REST API              |
-|    -- file_discovery           |    |    -- candles_api_collector |
-|    -- file_parser              |    |    -- funding_api_collector |
-|    -- staging 写入             |    |    -- staging 写入          |
-|    -- 质量门控                 |    |    -- 质量门控              |
-|    -- bronze merge             |    |    -- bronze merge          |
-|    -- silver merge             |    |    -- silver merge          |
-|    -- 移到 completed/failed    |    |    -- checkpoint 推进       |
-|                                |    |    -- 定期 Gold 构建        |
-+--------------------------------+    |    -- 定期 Gap 检测         |
-                                      +----------------------------+
-                  |                                    |
-                  v                                    v
-          +-- Silver 标准化层 --+
-          |                     |
-          v                     v
-   +-- Gold 回放层 --+   +-- Phase 2 参数研究 --+
-   | replay bars     |   | replay -> diagnostics |
-   | (candle+funding)|   | -> scan -> report     |
-   +-----------------+   +----------------------+
-```
-
-### 21.7 覆盖范围（Phase 1 冻结）
-
-| 维度 | 范围 |
-|------|------|
-| 交易所 | OKX |
-| Spot | BTC-USDT, ETH-USDT |
-| Swap | BTC-USDT-SWAP, ETH-USDT-SWAP |
-| Timeframe | 1m, 5m, 15m, 1H |
-| 数据域 | candles (OHLCV) + funding rates |
-
-### 21.8 质量验证与门控
-
-#### Candle 质量检查
-
-| 检查项 | 级别 |
-|--------|------|
-| 重复 (symbol, ts) | `fail` -- 阻断 merge |
-| OHLC 非法 (h < l, price <= 0) | `fail` |
-| 时间乱序 | `fail` |
-| 缺失间隔 | `warn` -- 继续但记录 |
-| Volume 负值 | `warn` |
-| 可疑 bar (h < o 等) | `warn` |
-
-#### Funding 质量检查
-
-| 检查项 | 级别 |
-|--------|------|
-| 重复 (symbol, ts) | `fail` |
-| 时间乱序 | `fail` |
-| funding_rate 为 null | `warn` |
-
-质量报告写入 `meta.quality_reports`，每次验证有完整记录。
-
-### 21.9 参数研究平台 (Phase 2)
-
-Phase 2 在 Gold 数据之上构建参数研究闭环，回答"当参数变化时，策略行为结构如何改变"。
-
-#### 架构总览
-
-```text
-Gold replay bars
-  -- Replay Core（逐 bar 重放引擎）
-  -- Strategy Adapter（independent / directional 家族适配器）
-  -- Edge Contract（统一 4 层 edge 分解语义）
-  -- Cost Model（可配置的保守成本模型）
-  -- Diagnostics Engine（结构化诊断指标，含 edge 分解统计）
-  -- Experiment Registry（实验元数据、产物路径追踪）
-  -- Parameter Scan Engine（参数网格批量扫描，支持 partial_success 状态）
-  -- Report Builder（Markdown / JSON / CSV 报告，含 edge 来源分析）
-```
-
-#### 统一 Edge Contract
-
-所有 family adapter 必须按以下 4 层分解输出 edge（bps 单位）：
-
-```text
-expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
-```
-
-| 层 | 字段 | 说明 |
-|----|------|------|
-| Signal | `signal_edge_proxy_bps` | 来自策略信号（score / momentum / trend / alpha）的机会代理 |
-| Funding | `funding_adjustment_bps` | funding rate 的附加调整（附加项，不是全部） |
-| Cost | `cost_bps` | 交易成本（taker fee + slippage，来自 `ReplayCostConfig`） |
-| Net | `expected_net_edge_bps` | 最终净 edge = signal + funding - cost |
-
-两个 family 的 signal 内部估算方式可以不同，但输出语义统一，横向对比有效。
-
-#### 成本模型
-
-成本配置集中在 `ReplayCostConfig`，不硬编码在 adapter 里：
-
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `taker_fee_bps` | 5.0 | OKX swap taker 0.05%，保守估计 |
-| `slippage_bps` | 2.0 | 保守滑点估计 |
-| **total_cost_bps** | **7.0** | 单边成本合计 |
-
-可通过 `--param taker_fee_bps=3 --param slippage_bps=1.5` 直接覆盖。
-
-#### 可覆盖参数
-
-所有参数均可通过 CLI `--param key=value` 覆盖：
-
-| 参数 | 类别 | 说明 | 默认值 |
-|------|------|------|--------|
-| `min_confirm_ticks` | 策略门槛 | 信号确认强度 | 2 |
-| `score_stability_threshold` | 策略门槛 | 强信号是否被过度拦截 | 2.0 |
-| `min_safe_net_edge_bps` | 策略门槛 | 边缘机会放行下限 | 0.0 |
-| `signal_edge_scale_bps` | 信号校准 | score -> bps 缩放系数 | 10.0 |
-| `directional_trend_weight` | 信号校准 | directional 趋势/return 混合权重 | 0.7 |
-| `directional_return_clamp_bps` | 信号校准 | directional bar return 限幅 | 20.0 |
-| `taker_fee_bps` | 成本模型 | taker 手续费（bps） | 5.0 |
-| `slippage_bps` | 成本模型 | 滑点（bps） | 2.0 |
-
-#### 运行方式
-
-```powershell
-# 单次 replay 实验
-python scripts/rdp_run_replay.py \
-    --family independent \
-    --symbol BTC-USDT-SWAP \
-    --timeframe 1m \
-    --start 2026-03-31 --end 2026-04-02 \
-    --dataset-version v1.0 \
-    --param min_confirm_ticks=3 \
-    --param min_safe_net_edge_bps=5
-
-# 覆盖成本模型
-python scripts/rdp_run_replay.py \
-    --family independent \
-    --symbol BTC-USDT-SWAP --timeframe 1m \
-    --start 2026-03-31 --end 2026-04-02 \
-    --param taker_fee_bps=3 --param slippage_bps=1.5
-
-# 覆盖 signal edge 校准参数
-python scripts/rdp_run_replay.py \
-    --family directional \
-    --symbol BTC-USDT-SWAP --timeframe 1m \
-    --start 2026-03-31 --end 2026-04-02 \
-    --param signal_edge_scale_bps=15 \
-    --param directional_trend_weight=0.8
-
-# 参数网格扫描（默认 3x3x3 = 27 组合）
-python scripts/rdp_run_parameter_scan.py \
-    --family independent \
-    --symbol BTC-USDT-SWAP \
-    --timeframe 1m \
-    --start 2026-03-31 --end 2026-04-02
-
-# 自定义参数网格
-python scripts/rdp_run_parameter_scan.py \
-    --family independent \
-    --symbol BTC-USDT-SWAP \
-    --timeframe 1m \
-    --start 2026-03-31 --end 2026-04-02 \
-    --grid '{"min_confirm_ticks":[2,3],"min_safe_net_edge_bps":[0,5,10]}'
-```
-
-注：replay / scan CLI 默认不跑 migration，需加 `--ensure-schema` 显式执行。
-
-#### 产物结构
-
-每次实验生成三个文件：
-
-```text
-artifacts/research/experiments/<experiment_id>/
-  replay_decisions.csv    -- 逐 bar 决策明细（含 edge 4 层分解）
-  diagnostics.json        -- 诊断指标快照（含 edge 分解统计）
-  report.md               -- Markdown 研究报告（含 Edge Breakdown 表格）
-```
-
-参数扫描额外生成：
-
-```text
-artifacts/research/experiments/<scan_run_id>/
-  comparison_summary.json -- 多组实验对比数据（含 edge 分解）
-  comparison_report.md    -- 对比报告
-  failed_combos.json      -- 失败组合明细（label + params + error）
-  <experiment_id>/        -- 每组参数各自的产物
-```
-
-#### 诊断指标
-
-| 指标 | 说明 |
-|------|------|
-| `opening_count` | 触发开仓次数 |
-| `blocked_count` | 通过评分阈值但被门槛拦截的次数 |
-| `selectable_ratio` | 评分达到入场阈值的 bar 占比 |
-| `execution_compatible_ratio` | 同时满足评分+稳定性+边际的 bar 占比 |
-| `top_blocking_reasons` | 拦截原因 Top N 排名 |
-| `mean_signal_edge_proxy_bps` | 平均信号代理 edge（bps） |
-| `mean_funding_adjustment_bps` | 平均 funding 调整（bps） |
-| `mean_cost_bps` | 平均成本（bps） |
-| `mean_expected_edge_bps` | 平均预期净边际（bps） |
-| `positive_edge_ratio` | 净 edge 为正的 bar 占比 |
-| `state_distribution` | 状态分布（flat/probing/holding/...） |
-| `action_distribution` | 动作分布（open/hold/close/blocked） |
-
-#### 策略适配器
-
-| 适配器 | Signal Edge 来源 | 说明 |
-|--------|------------------|------|
-| `IndependentReplayAdapter` | `dominant_score * signal_edge_scale_bps` | 从 OHLCV 派生 alpha/momentum/trend/micro/confidence 因子，funding 作为附加项 |
-| `DirectionalReplayAdapter` | `trend_w * score * scale + (1-trend_w) * clamped_return` | SMA crossover 趋势强度 + bar return 混合，funding 作为附加项 |
-
-两个适配器均实现 `BaseReplayAdapter` 接口，均遵循统一 Edge Contract 输出 4 层分解。新增家族只需继承基类并实现 `evaluate_bar()` 方法。
-
-#### Scan Run 状态
-
-| 状态 | 含义 |
-|------|------|
-| `pending` | 已创建，未开始 |
-| `running` | 正在执行 |
-| `succeeded` | 全部组合成功 |
-| `partial_success` | 部分成功、部分失败 |
-| `failed` | 全部失败 |
-
-#### 简化说明
-
-Phase 2 replay 使用简化评分模型（不含 AI assessment、orderbook depth、真实 execution state），与生产系统评分存在偏差。不包含撮合仿真和 PnL accounting（属于后续 Phase）。成本模型使用可配置的保守估计（默认 7 bps），signal edge 通过可校准缩放系数映射。重点关注参数变化对决策结构的**相对影响**。
-
-#### 校准批处理 (Calibration Batch)
-
-`rdp_run_calibration_batch.py` 是一个轻量级批量校准工具，用于少量、人工设计的校准实验组合。与 `rdp_run_parameter_scan.py` 的参数网格笛卡尔积不同，校准批处理由 JSON 文件显式定义每组实验的参数和标签，适合以下场景：
-
-| 场景 | 典型扫参 |
-|------|----------|
-| Signal scale 校准 | `signal_edge_scale_bps = 8, 10, 12, 15, 20` |
-| 成本敏感性测试 | `(taker_fee_bps, slippage_bps)` = `(3,1)`, `(5,2)`, `(7,3)` |
-| Threshold 敏感性 | `min_confirm_ticks = 2, 3, 4, 5` |
-
-**用法：**
-
-```bash
-# JSON 文件驱动（推荐）
-python scripts/rdp_run_calibration_batch.py \
-    --batch-file configs/research_batches/independent_scale_calibration_15m.json
-
-# 内置预设（不需要额外 JSON 文件）
-python scripts/rdp_run_calibration_batch.py --preset independent_scale_15m
-
-# 失败即停 + 自定义产物目录
-python scripts/rdp_run_calibration_batch.py \
-    --batch-file my_batch.json \
-    --artifact-root artifacts/custom \
-    --stop-on-error
-```
-
-**JSON 批次文件格式：**
-
-```json
-{
-  "batch_name": "independent_scale_calibration_15m",
-  "description": "Calibrate signal_edge_scale_bps",
-  "family": "independent",
-  "symbol": "BTC-USDT-SWAP",
-  "timeframe": "15m",
-  "dataset_version": "v1.0",
-  "start": "2026-03-31",
-  "end": "2026-04-02",
-  "experiments": [
-    {"label": "scale_10", "params": {"signal_edge_scale_bps": 10}},
-    {"label": "scale_15", "params": {"signal_edge_scale_bps": 15}},
-    {"label": "scale_20", "params": {"signal_edge_scale_bps": 20}}
-  ]
-}
-```
-
-公共字段（family, symbol, timeframe, start, end）放顶层，每个实验只写 `label` + `params`。
-
-**产物结构：**
-
-```text
-artifacts/research/calibration_batches/<batch_run_id>/
-  batch_spec.json           # 原始输入规格副本（便于复现）
-  batch_summary.csv         # 人工快速比较（每行一组实验）
-  batch_summary.json        # 机器可读 summary
-  batch_report.md           # 批次级 Markdown 报告（含趋势分析）
-  failed_experiments.json   # 失败实验列表
-  experiment_refs.json      # label → experiment_id 映射
-  experiments/
-    <label>/
-      replay_decisions.csv  # 单实验决策记录
-      diagnostics.json      # 单实验诊断指标
-      report.md             # 单实验报告
-```
-
-**内置预设：**
-
-| 预设名 | 描述 |
-|--------|------|
-| `independent_scale_15m` | 扫 signal_edge_scale_bps = 8, 10, 12, 15, 20 |
-| `independent_cost_15m` | 扫 (taker_fee_bps, slippage_bps) = (3,1), (5,2), (7,3) |
-| `independent_confirm_ticks_15m` | 扫 min_confirm_ticks = 2, 3, 4, 5 |
-
-**与 Parameter Scan 的区别：**
-
-| 维度 | `rdp_run_parameter_scan.py` | `rdp_run_calibration_batch.py` |
-|------|----------------------------|-------------------------------|
-| 输入 | 参数网格 → 笛卡尔积 | JSON 显式定义每组实验 |
-| 定位 | 大范围参数空间探索 | 少量人工设计的校准实验 |
-| DB 记录 | 创建 scan_run 表记录 | 不创建新 DB 表，仅复用 experiment 表 |
-| 产物 | comparison_summary.json | batch_summary.csv/json + batch_report.md |
-| 报告 | 对比表 | 趋势分析 + 自动 findings |
-
-#### Step 1 校准编排 (Step 1 Calibration Orchestrator)
-
-`rdp_run_step1_calibration.py` 是 Step 1 的自动化编排脚本，将 3 个 calibration batch 串联为**可重复执行、可复现、可交付**的标准流程。
-
-**固定范围（Step 1）**：`independent` / `BTC-USDT-SWAP` / `15m`
-
-```bash
-# 一键执行 Step 1 完整流程
-python scripts/rdp_run_step1_calibration.py
-
-# 首次运行时确保 schema 就绪
-python scripts/rdp_run_step1_calibration.py --ensure-schema
-```
-
-**自动执行步骤：**
-
-1. 顺序运行 3 个固定 batch（scale → cost → confirm_ticks）
-2. 汇总 12 个实验结果为 round_summary
-3. 规则化推荐引擎生成参数建议（透明、可解释，非黑盒）
-4. 生成结论文档
-
-**产物结构：**
-
-```text
-artifacts/research/calibration_rounds/<round_id>/
-  round_manifest.json                       # 轮次元信息（时间、batch 状态）
-  round_summary.csv                         # 3 个 batch 12 个实验的汇总表
-  round_summary.json                        # 机器可读汇总
-  parameter_recommendations.json            # 规则化参数推荐 + confidence + reason
-  phase2_step1_calibration_conclusion.md    # 面向人的结论文档
-  batches/                                  # 3 个 batch 的完整产物
-```
-
-**推荐引擎规则：**
-
-| 参数 | 规则 |
-|------|------|
-| `signal_edge_scale_bps` | 最低 positive-edge scale → 向上找结构改善平衡点（开仓增长 >10% 或 positive_edge_ratio 改善 >15pp） |
-| `taker_fee_bps` / `slippage_bps` | 检查默认 (5,2) 的 edge 方向、成本敏感度、edge 脆弱性 |
-| `min_confirm_ticks` | 最保守 ticks（opening_count 不显著下降 >40%） |
-| `min_safe_net_edge_bps` | Step 1 标记为 pending���需专项 batch |
-
-#### Step 2 正式研究闭环 (Step 2 Research Orchestrator)
-
-`rdp_run_step2_research.py` 将 Step 1 的单范围校准推进到覆盖 **independent + directional、15m + 1H** 的完整研究闭环。
-
-**固定范围（Step 2）**：`BTC-USDT-SWAP` / `{independent, directional}` / `{15m, 1H}`
-
-```bash
-# 一键执行 Step 2 完整流程（4 phase）
-python scripts/rdp_run_step2_research.py
-
-# 首次运行确保 schema
-python scripts/rdp_run_step2_research.py --ensure-schema
-
-# 只跑 calibration（跳过 scan）
-python scripts/rdp_run_step2_research.py --skip-scan
-
-# 只跑 scan（跳过 calibration）
-python scripts/rdp_run_step2_research.py --skip-calibration
-```
-
-**四阶段执行流程：**
-
-| Phase | 内容 | 子任务数 |
-|-------|------|----------|
-| A: Calibration | independent/1H → directional/15m → directional/1H | 3 round × 3~5 batch = 13 batch |
-| B: Formal Scan | independent/15m, 1H + directional/15m, 1H | 4 scan (27+27+18+18 = 90 combo) |
-| C: Aggregation | 汇总 + 推荐 + parameter_candidates | — |
-| D: Conclusion | 比较报告 + 结论文档 | — |
-
-**Directional 特有参数：**
-
-Directional family 除共享参数外，额外校准两个特有参数：
-
-| 参数 | 含义 | 校准范围 |
-|------|------|----------|
-| `directional_trend_weight` | 趋势信号 vs bar return 的混合权重 (0~1) | 0.3, 0.5, 0.7, 0.85, 1.0 |
-| `directional_return_clamp_bps` | bar return 贡献的上限 (bps) | 10, 15, 20, 30, 50 |
-
-**产物结构：**
-
-```text
-artifacts/research/step2_rounds/<round_id>/
-  round_manifest.json                       # 轮次元信息
-  family_timeframe_summary.csv              # 按 family×timeframe 汇总的实验表
-  family_timeframe_summary.json             # 机器可读汇总
-  scan_comparison_summary.csv               # 4 组 scan 的统一比较表
-  scan_comparison_summary.json              # 机器可读 scan 汇总
-  parameter_candidates.json                 # 默认参数候选 (per family/tf)
-  phase2_step2_research_conclusion.md       # 结论文档（含 4 维比较）
-  batches/                                  # 13 个 calibration batch 的完整产物
-```
-
-**结论文档包含的比较维度：**
-
-1. Independent vs Directional on 15m
-2. Independent vs Directional on 1H
-3. 15m vs 1H within Independent
-4. 15m vs 1H within Directional
-
-**推荐引擎扩展（Directional 特有）：**
-
-| 参数 | 规则 |
-|------|------|
-| `directional_trend_weight` | positive edge 下选最优 opening/pos_ratio；接近时倾向更高 weight（更保守） |
-| `directional_return_clamp_bps` | positive edge 下选 pos_ratio 最高；检查跨 clamp 的 edge 波动稳定性 |
-
-**Scan Matrix 配置**（`configs/research_rounds/step2_formal_scan_matrix.json`）定义每个 family/timeframe 的参数网格：
-
-| 组合 | 网格维度 | 组合数 |
-|------|----------|--------|
-| independent/15m | confirm_ticks × scale × net_edge | 27 |
-| independent/1H | confirm_ticks × scale × net_edge | 27 |
-| directional/15m | confirm_ticks × trend_weight × clamp | 18 |
-| directional/1H | confirm_ticks × trend_weight × clamp | 18 |
-
-#### Phase 3: Live Attribution / Replay 对照归因
-
-Phase 3 建立标准化 replay vs live 对照归因流程，回答"为什么 live 没下单"。
-
-**核心模块**（`aats/data_platform/attribution/`）：
-
-| 模块 | 职责 |
-|------|------|
-| `taxonomy.py` | 统一归因分类 + reason code（10 个 category, 30+ reason code） |
-| `alignment.py` | Replay/live 事件按 bar 时间窗口对齐 + live DB 查询 |
-| `layer_classifier.py` | 瀑布式分层归因（停在第一层失败处） |
-| `aggregation.py` | 按 category × reason 聚合 + top failure modes + layer analysis |
-| `report_builder.py` | Markdown 报告生成（单次 + 批量结论） |
-
-**归因瀑布（严格顺序）**：
-
-```text
-1. Strategy  → replay 想开, live strategy 也想开?
-2. Permission → automatic_enabled = true?
-3. Allocator → allocation 存在且 approved?
-4. Budget   → budget_multiplier > 0, 未被 clamp?
-5. Risk     → reconciliation 未阻止? (not only_reduce / halt)
-6. Execution → bundle 状态正常?
-7. Order    → order 创建且未 rejected?
-8. Fill     → fill 出现?
-```
-
-**One-shot Attribution**（`rdp_run_live_attribution.py`）：
-
-```bash
-# 对单个 family/timeframe 做 replay/live 归因
-python scripts/rdp_run_live_attribution.py \
-    --family independent --symbol BTC-USDT-SWAP --timeframe 15m \
-    --start 2026-03-31 --end 2026-04-02 \
-    --live-db-url "postgresql+psycopg://localhost:5432/aats_derivatives"
-
-# 仅做 replay 分析（无 live DB）
-python scripts/rdp_run_live_attribution.py \
-    --family independent --symbol BTC-USDT-SWAP --timeframe 15m \
-    --start 2026-03-31 --end 2026-04-02 --replay-only
-```
-
-**Phase 3 Round**（`rdp_run_phase3_round.py`）：
-
-```bash
-# 批量跑 4 个 family×tf 组合
-python scripts/rdp_run_phase3_round.py \
-    --start 2026-03-31 --end 2026-04-02
-```
-
-**产物结构**：
-
-```text
-artifacts/research/attribution_rounds/<round_id>/
-  round_manifest.json
-  family_timeframe_attribution_summary.csv
-  phase3_live_attribution_conclusion.md
-  per_combo/
-    independent_15m_<ts>/
-      replay_live_alignment.csv
-      attribution_summary.json
-      top_failure_modes.json
-      live_attribution_report.md
-    independent_1h_<ts>/...
-    directional_15m_<ts>/...
-    directional_1h_<ts>/...
-```
-
-**Live 数据源（只读，不修改）**：
-
-| 表 | 归因层 |
-|----|--------|
-| `strategy_sleeve_intents` | Strategy / Permission |
-| `portfolio_allocation_decisions` | Allocator |
-| `allocator_budget_snapshots` | Budget |
-| `reconciliation_state_snapshots` | Risk |
-| `strategy_execution_bundles` | Execution |
-| `execution_orders` | Order |
-| `execution_fills` | Fill |
-
-#### Phase 4: Execution Realism / 成交可行性研究
-
-Phase 4 进入市场微观结构层，回答"即使策略想开单，这笔单在真实市场条件下是否可成交、成本多少"。
-
-**核心模块**（`aats/data_platform/execution_realism/`）：
-
-| 模块 | 职责 |
-|------|------|
-| `market_alignment.py` | 候选订单与 Gold bar 市场快照对齐（OHLCV + volume 匹配） |
-| `fill_feasibility.py` | 基于 volume ratio 的可成交性评估（fully/partially/not fillable） |
-| `slippage_estimator.py` | Bar-proxy 滑点模型（half-spread + sqrt volume impact） |
-| `execution_cost_model.py` | 执行成本汇总（slippage + fee，与 Phase 2 默认假设比较） |
-| `aggregation.py` | 跨 family/timeframe 比较聚合 + 交叉发现 |
-| `report_builder.py` | Markdown 报告生成（单次 + Phase 4 结论） |
-
-**V1 分析链**：
-
-```text
-Replay Decision (action=open/close)
-  -> Gold Bar Matching (同一 bar timestamp)
-  -> Fill Feasibility (volume_ratio < 1%? → fully_fillable)
-  -> Slippage Estimate (half_spread + sqrt_impact)
-  -> Total Cost = slippage + taker_fee
-  -> Cost-Adjusted Edge = net_edge + assumed_cost - realistic_cost
-```
-
-**V1 滑点模型**（Bar-Based Proxy, 透明可解释）：
-- Half-spread: `max(0.5 bps, bar_range_bps × 0.02)`
-- Volume impact: `bar_range_bps × sqrt(volume_ratio)` (square root law)
-- 参数可通过真实 orderbook/trades 数据校准
-
-**One-shot Execution Realism**（`rdp_run_execution_realism.py`）：
-
-```bash
-# 对单个 family/timeframe 做 execution realism 分析
-python scripts/rdp_run_execution_realism.py \
-    --family independent --symbol BTC-USDT-SWAP --timeframe 15m \
-    --start 2026-03-31 --end 2026-04-02
-
-# 指定 taker fee
-python scripts/rdp_run_execution_realism.py \
-    --family independent --symbol BTC-USDT-SWAP --timeframe 15m \
-    --start 2026-03-31 --end 2026-04-02 --taker-fee-bps 3.0
-```
-
-**Phase 4 Round**（`rdp_run_phase4_round.py`）：
-
-```bash
-# 批量跑 4 个 family×tf 组合
-python scripts/rdp_run_phase4_round.py \
-    --start 2026-03-31 --end 2026-04-02
-```
-
-**产物结构**：
-
-```text
-artifacts/research/execution_rounds/<round_id>/
-  round_manifest.json
-  execution_realism_comparison.csv
-  phase4_execution_realism_conclusion.md
-  per_combo/
-    independent_15m_<ts>/
-      execution_alignment.csv
-      fill_feasibility_summary.csv
-      slippage_summary.csv
-      execution_cost_summary.json
-      live_execution_realism_report.md
-    independent_1h_<ts>/...
-    directional_15m_<ts>/...
-    directional_1h_<ts>/...
-```
-
-**V1 数据源与限制**：
-
-| 数据 | V1 使用 | 后续升级 |
-|------|---------|---------|
-| 价格 | Gold bar close | Orderbook mid-price |
-| 流动性 | Bar volume (contracts) | Orderbook depth levels |
-| Spread | Bar range × 0.02 proxy | Real best bid/ask spread |
-| Impact | sqrt(volume_ratio) model | Trades-based calibration |
-| 仓位 | 1 contract (0.01 BTC) | Portfolio-level sizing |
-
-### 21.10 配置
-
-所有配置通过 `.env.research` 读取，前缀 `RDP_`。
-
-| 环境变量 | 说明 | 默认值 |
-|----------|------|--------|
-| `RDP_DATABASE_URL` | PostgreSQL 连接串 | `postgresql+psycopg://localhost:5432/aats_research` |
-| `RDP_HISTORICAL_INCOMING_DIR` | 历史 ZIP 输入目录 | `./data/historical/incoming` |
-| `RDP_HISTORICAL_COMPLETED_DIR` | 消费成功目录 | `./data/historical/completed` |
-| `RDP_HISTORICAL_FAILED_DIR` | 消费失败目录 | `./data/historical/failed` |
-| `RDP_HISTORICAL_SCAN_INTERVAL_SECONDS` | 历史扫描间隔 | `30` |
-| `RDP_OKX_REST_URL` | OKX REST API 地址 | `https://www.okx.com` |
-| `RDP_OKX_TIMEOUT_SECONDS` | API 超时 | `15` |
-| `RDP_OKX_RATE_LIMIT_SLEEP` | API 请求间隔 | `0.12` |
-| `RDP_ROLLING_CANDLES_ENABLED` | 滚动 candles 开关 | `true` |
-| `RDP_ROLLING_CANDLES_SYMBOLS` | 采集 symbol 列表 | `BTC-USDT,ETH-USDT,BTC-USDT-SWAP,ETH-USDT-SWAP` |
-| `RDP_ROLLING_CANDLES_TIMEFRAMES` | 采集 timeframe 列表 | `1m,5m,15m,1H` |
-| `RDP_ROLLING_FUNDING_ENABLED` | 滚动 funding 开关 | `true` |
-| `RDP_ROLLING_FUNDING_SYMBOLS` | funding symbol 列表 | `BTC-USDT-SWAP,ETH-USDT-SWAP` |
-| `RDP_GOLD_REPLAY_BUILD_ENABLED` | Gold 层构建开关 | `true` |
-| `RDP_GOLD_AUTO_BUILD_INTERVAL_CYCLES` | Gold 自动构建周期 | `60` |
-| `RDP_GAP_AUTO_DETECT_INTERVAL_CYCLES` | Gap 自动检测周期 | `120` |
-| `RDP_GAP_AUTO_DETECT_WINDOW_HOURS` | Gap 检测回溯窗口 | `24` |
-
-模板文件：`configs/templates/.env.research.example`
-
-### 21.11 数据库与迁移
-
-数仓使用独立数据库 `aats_research`，与交易系统分库。
-
-```powershell
-# 初始化数据库（自动创建库 + 执行全部迁移）
-python scripts/rdp_init_db.py
-
-# 或手动分步
-psql -U postgres -c "CREATE DATABASE aats_research"
-python -c "from aats.data_platform.db import run_migrations; run_migrations()"
-```
-
-迁移文件清单（`migrations/research/`）：
-
-| 文件 | 内容 | 表数 |
-|------|------|------|
-| `0001` | 创建 meta / staging / bronze / silver / gold 五个 schema | 0 |
-| `0002` | meta 表：dataset_manifests, raw_source_files, ingest_runs, ingest_run_items, ingest_checkpoints, quality_reports | 6 |
-| `0003` | staging candle 表 (spot/swap x 1m/5m/15m/1h) | 8 |
-| `0004` | staging funding 表 | 1 |
-| `0005` | bronze candle 表 | 8 |
-| `0006` | bronze funding 表 | 1 |
-| `0007` | silver candle 表 | 8 |
-| `0008` | silver funding 表 | 1 |
-| `0009` | gold replay bar 表 | 8 |
-| `0010` | 全表 updated_at 触发器 + 补充索引 | 0 |
-| `0011` | raw_source_files 增加 `skipped` 状态 | 0 |
-| `0012` | research schema：experiments, experiment_summaries, parameter_scan_runs | 3 |
-
-### 21.12 快速开始
+### 21.3 快速开始
 
 ```powershell
 # 1. 配置
@@ -1708,454 +1009,155 @@ cp configs/templates/.env.research.example .env.research
 # 2. 初始化数据库（自动建库 + 迁移 0001-0012）
 python scripts/rdp_init_db.py
 
-# 3. 放入历史数据
-# 将 OKX 下载的 ZIP 放入 data/historical/incoming/ 对应子目录
-# 例如：data/historical/incoming/candles_swap/1m/BTC-USDT-SWAP-candlesticks-2026-04-01.zip
+# 3. 放入历史数据（按目录约定放入 ZIP）
+# data/historical/incoming/candles_swap/1m/BTC-USDT-SWAP-candlesticks-*.zip
 
-# 4. 一键启动
+# 4. 一键启动（历史消费 + 实时采集同时运行）
 python scripts/rdp_start.py
-# 历史 daemon 自动消费 ZIP -> staging -> silver -> Gold
-# 实时 daemon 自动采集最新数据
 
-# 5. 验证 Gold 层数据（重要！）
-# daemon 只在"当次扫描有新 ZIP 被消费"时自动构建 Gold。
-# 如果 Silver 有数据但 Gold 为空，需要手动触发批量构建：
-python scripts/rdp_build_gold_all.py --dry-run   # 先预览
-python scripts/rdp_build_gold_all.py              # 正式构建
+# 5. 如果 Silver 有数据但 Gold 为空，手动触发 Gold 构建
+python scripts/rdp_build_gold_all.py --dry-run   # 预览
+python scripts/rdp_build_gold_all.py              # 构建
 
 # 6. 运行参数研究（可选）
 python scripts/rdp_run_replay.py \
-    --family independent \
-    --symbol BTC-USDT-SWAP --timeframe 1m \
-    --start 2026-03-31 --end 2026-04-02 \
-    --dataset-version v1.0
+    --family independent --symbol BTC-USDT-SWAP --timeframe 1m \
+    --start 2026-03-31 --end 2026-04-02 --dataset-version v1.0
 ```
 
-### 21.12.1 Gold 层构建说明
+**关键配置变量**（`.env.research`）：
 
-Gold 层是 Phase 2 参数研究的输入来源（replay bars = candle + funding 对齐）。了解其构建规则可避免"Silver 有数据但 Gold 为空"的困惑。
+| 环境变量 | 说明 | 默认值 |
+|----------|------|--------|
+| `RDP_DATABASE_URL` | Research PostgreSQL 连接串 | `postgresql+psycopg://localhost:5432/aats_research` |
+| `RDP_LIVE_DATABASE_URL` | Production DB 只读连接（Phase 3+ 需要） | — |
+| `RDP_HISTORICAL_INCOMING_DIR` | 历史 ZIP 输入目录 | `./data/historical/incoming` |
+| `RDP_ROLLING_CANDLES_SYMBOLS` | 采集 symbol 列表 | `BTC-USDT,ETH-USDT,BTC-USDT-SWAP,ETH-USDT-SWAP` |
+| `RDP_ROLLING_CANDLES_TIMEFRAMES` | 采集 timeframe 列表 | `1m,5m,15m,1H` |
+| `RDP_ENV` | 环境标识（dev/staging/prod） | `dev` |
 
-#### 自动构建触发条件
+完整配置模板：`configs/templates/.env.research.example`
 
-Gold 自动构建**仅在以下场景触发**：
+### 21.4 Phase 1 — 数据仓库
 
-| 触发源 | 条件 | 说明 |
-|--------|------|------|
-| 历史 daemon | 当次扫描有新 swap ZIP 被消费 | 只对刚消费的 (symbol, timeframe) 触发 |
-| 实时 daemon | 每 60 个采集周期（约 1 小时） | 遍历所有 swap symbol x timeframe |
+Phase 1 负责从 OKX 采集市场数据，经清洗、去重、标准化后存入分层数据仓库，最终生成可直接用于回测的 Gold replay bars。
 
-**不会自动触发的场景**：
-- 通过 `rdp_run_backfill.py` 手动导入的数据
-- daemon 之前已经消费过 ZIP（文件已移至 completed/）
-- daemon 上次运行时 Gold 构建静默失败（被 try/except 捕获）
-- Spot 数据（spot 无 funding rate，Gold 层按设计只构建 swap）
+**覆盖范围**：OKX · BTC-USDT / ETH-USDT / BTC-USDT-SWAP / ETH-USDT-SWAP · 1m / 5m / 15m / 1H · candles + funding rates
 
-#### 手动补建 Gold
+**数据采集**：
 
-当 Silver 有数据但 Gold 缺失时，使用批量构建脚本：
-
-```powershell
-# 预览：显示每个 Silver 表的数据范围和 Gold 现有行数
-python scripts/rdp_build_gold_all.py --dry-run
-
-# 构建所有 swap Gold 表（自动查询 Silver 时间范围）
-python scripts/rdp_build_gold_all.py
-
-# 只构建指定 symbol
-python scripts/rdp_build_gold_all.py --symbol BTC-USDT-SWAP
-
-# 只构建指定 timeframe
-python scripts/rdp_build_gold_all.py --timeframe 5m --timeframe 15m
-```
-
-或用单次构建脚本精确控制时间窗口：
-
-```powershell
-python scripts/rdp_build_gold.py \
-    --symbol BTC-USDT-SWAP --timeframe 5m \
-    --start 2026-03-01 --end 2026-04-03
-```
-
-#### 验证
-
-```sql
--- 检查所有 Gold 表的记录数
-SELECT 'swap_1m'  AS tf, COUNT(*) FROM gold.market_swap_replay_bars_1m
-UNION ALL
-SELECT 'swap_5m',        COUNT(*) FROM gold.market_swap_replay_bars_5m
-UNION ALL
-SELECT 'swap_15m',       COUNT(*) FROM gold.market_swap_replay_bars_15m
-UNION ALL
-SELECT 'swap_1h',        COUNT(*) FROM gold.market_swap_replay_bars_1h;
-```
-
-#### 为什么 Spot Gold 表是空的？
-
-这是设计决策，不是 bug。Gold 层的核心功能是 candle + funding rate 对齐（as-of join），而 funding rate 仅存在于永续合约（swap），现货（spot）没有资金费率概念。因此：
-
-- `gold.market_swap_replay_bars_*`：由 daemon 自动构建，包含 `aligned_funding_rate` 字段
-- `gold.market_spot_replay_bars_*`：当前为空，表结构已预留，后续如需 spot replay 可手动构建（funding 字段为 NULL）
-
-### 21.13 代码模块清单
-
-**Phase 1 数据仓库**（`aats/data_platform/`）：
-
-| 文件 | 职责 |
-|------|------|
-| `config.py` | Pydantic 配置，从 `.env.research` 加载 `RDP_` 前缀环境变量 |
-| `db.py` | 连接池管理 (pool_size=5, max_overflow=10) + migration runner |
-| `models.py` | CandleRow / FundingRow / ReplayBarRow 数据类 + 表名解析器 |
-| `collectors/backfill/file_discovery.py` | ZIP 文件扫描、SHA256 去重、meta 注册、目录 timeframe 推断 |
-| `collectors/backfill/file_parser.py` | OKX CSV/ZIP 解析、header 标准化 (BOM/引号/空格容错) |
-| `collectors/backfill/candles_backfill_collector.py` | candle 历史回填编排 + timeframe 路由决策 |
-| `collectors/backfill/funding_backfill_collector.py` | funding 历史回填编排 |
-| `collectors/rolling/candles_api_collector.py` | OKX REST API candle 增量采集 + 去重 + checkpoint |
-| `collectors/rolling/funding_api_collector.py` | OKX REST API funding 增量采集 + 去重 + checkpoint |
-| `normalize/time_normalizer.py` | ms epoch -> UTC datetime 转换 |
-| `validate/candle_quality_checker.py` | candle 质量检查（重复/缺失/乱序/OHLC/volume） |
-| `validate/funding_quality_checker.py` | funding 质量检查（重复/乱序/null rate） |
-| `validate/report_writer.py` | 质量报告写入 `meta.quality_reports` |
-| `merge/bronze_merger.py` | staging -> bronze upsert |
-| `merge/silver_merger.py` | bronze -> silver upsert |
-| `merge/merge_pipeline.py` | 端到端编排：validate -> bronze -> silver + 质量门控 |
-| `gold/funding_aligner.py` | as-of join：funding rate 对齐到 candle bar |
-| `gold/replay_bar_builder.py` | Gold replay bar 构建 + upsert |
-| `jobs/scheduler.py` | 滚动采集调度器 (cadence boundary + bucket 防重) |
-| `jobs/checkpoint_manager.py` | checkpoint 水位线管理 (get/upsert/advance) |
-| `jobs/run_registry.py` | ingest_run / run_item 生命周期管理 |
-| `jobs/gap_repair.py` | Silver 层 gap 检测 + repair run 创建 |
-
-**Phase 2 参数研究**（`aats/data_platform/replay/`）：
-
-| 文件 | 职责 |
-|------|------|
-| `core/replay_context.py` | 数据模型：ReplayBar, ReplayCostConfig, ReplayParameterOverrides, ReplayDecision, ReplayState（含统一 Edge Contract 定义） |
-| `core/replay_runner.py` | 逐 bar 重放引擎（读取 Gold bars -> 调用 adapter -> 输出决策列表） |
-| `core/replay_result_writer.py` | 产物写入器（CSV / JSON） |
-| `adapters/base_adapter.py` | 策略适配器抽象基类（统一 evaluate_bar 接口） |
-| `adapters/independent_adapter.py` | Independent 策略 replay 适配器（signal 来自 OHLCV 因子，edge 4 层分解） |
-| `adapters/directional_adapter.py` | Directional 策略 replay 适配器（signal 来自 SMA + return 混合，edge 4 层分解） |
-| `registry/experiment_registry.py` | 实验元数据 CRUD + summary upsert（写入 research schema） |
-| `diagnostics/replay_diagnostics.py` | 诊断计算 + 多组对比（含 edge 分解统计：signal / funding / cost） |
-| `scan/parameter_grid.py` | 参数网格定义与展开（DEFAULT_PARAMETER_GRID, build_grid） |
-| `scan/scan_runner.py` | 批量扫描引擎（支持 partial_success 状态 + failed_combos.json 产物） |
-| `reports/markdown_report_builder.py` | Markdown 报告生成（含 Edge Breakdown 表格 + edge 来源分析） |
-
-**Phase 3 Live Attribution**（`aats/data_platform/attribution/`）：
-
-| 文件 | 职责 |
-|------|------|
-| `taxonomy.py` | 统一归因分类（10 个 category, 30+ reason code, 严格瀑布顺序） |
-| `alignment.py` | Replay/live 事件按 bar 时间窗口对齐 + live DB SQL 查询（7 张表） |
-| `layer_classifier.py` | 瀑布式分层归因引擎（8 层 waterfall，停在第一层失败处） |
-| `aggregation.py` | category × reason 聚合 + top failure modes + layer analysis |
-| `report_builder.py` | Markdown 报告（单次 + 批量结论，含交叉 family/tf 比较） |
-
-**Phase 4 Execution Realism**（`aats/data_platform/execution_realism/`）：
-
-| 文件 | 职责 |
-|------|------|
-| `market_alignment.py` | Gold bar 查询 + replay decision → bar 对齐（OHLCV + volume 匹配） |
-| `fill_feasibility.py` | Volume-based 可成交性评估（4 类：fully/partially/not fillable, no data） |
-| `slippage_estimator.py` | V1 Bar-proxy 滑点模型（half-spread + sqrt impact, 成本调整后 edge） |
-| `execution_cost_model.py` | 执行成本汇总（分布统计 + Phase 2 比较 + edge 正负分析） |
-| `aggregation.py` | 跨 family/timeframe 比较表 + 交叉发现生成 |
-| `report_builder.py` | Markdown 报告（单次 realism report + Phase 4 conclusion） |
-
-**Phase 5 Governance**（`aats/data_platform/governance/`）：
-
-| 文件 | 职责 |
-|------|------|
-| `manifest_validation.py` | Round manifest 规范校验 + 旧版 manifest 自动补全（normalize_legacy_manifest） |
-| `artifact_index.py` | 全局 artifact 索引构建（experiments + rounds，含 diagnostics 摘要提取） |
-| `parameter_registry.py` | 参数版本治理 CRUD（draft/candidate/frozen/deprecated + 从 candidates/recommendations 导入） |
-| `round_status.py` | Active round 索引构建（按 phase 分组 + latest round 提取） |
-| `retry_logic.py` | 失败 round 重跑计划生成（自动构建 per-combo / 整轮重跑命令） |
-| `quality_monitor.py` | 四维质量巡检（artifact/结果/参数/治理层 × critical/warning/info） |
-| `_atomic_io.py` | 原子 JSON 写入（tmpfile → fsync → replace，防并发损坏） |
-
-**Phase 6 Closed-Loop Decision System**（`aats/data_platform/decision_system/`）：
-
-| 文件 | 职责 |
-|------|------|
-| `evidence_bundle.py` | 跨 Phase 证据收集（优先从治理索引取证，fallback 到目录扫描） |
-| `candidate_selector.py` | 规则化参数评分（4 维度 9 分：research / attribution / execution / governance） |
-| `decision_engine.py` | Family/Timeframe 状态决策引擎（信号计数 → keep_active/lower/pause/review） |
-| `readiness_evaluator.py` | 上线就绪度评估（7 项 check → ready_for_next_live_test / not_ready_*） |
-| `recommendation_registry.py` | 三个 registry 管理（recommendation / active decision / evidence bundle index） |
-| `report_builder.py` | 7 节结论文档生成 |
-
-**Integration Layer — 主交易系统整合**：
-
-| 文件 | 职责 |
-|------|------|
-| `aats/data_platform/live_query_adapter.py` | Live DB 只读查询适配器（7 张表统一收口、时间窗口查询、健康检查） |
-| `aats/bootstrap/active_parameters.py` | Active Parameter Set 加载器（启动时注入 family/tf 参数，参数映射，原子写入） |
-| `aats/api/rdp_routes.py` | RDP 只读 API 路由（8 个 GET 端点：health/parameters/attribution/execution/decisions/recommendations/readiness） |
-| `aats/services/operator/rdp_queries.py` | RDP 查询服务（从治理/决策 artifact 读取结构化数据供 API 使用） |
-
-### 21.14 已知限制
-
-| 项目 | 说明 |
-|------|------|
-| Scheduler 防重 | 进程内 in-memory bucket dedup，重启后可能重跑一次（下游 upsert 幂等） |
-| Symbol 白名单 | 硬编码 4 个 instrument，后续需改为数据库驱动 |
-| Gold volume 语义 | spot vol = 基础币量，swap vol = 合约张数，未做跨类型统一 |
-| 单进程 | scheduler 设计为单进程，不支持多 worker 并行 |
-| Replay 评分 | Phase 2 使用简化评分模型（不含 AI assessment），与生产存在偏差 |
-| Replay 撮合 | Phase 2 不含撮合仿真和 PnL accounting（属于后续 Phase） |
-| Signal 校准 | `signal_edge_scale_bps` 当前为经验性默认值（10.0），尚未经过历史数据校准 |
-| Gold 版本语义 | Replay 输入只按 `source_candle_dataset_version` 过滤，未显式约束 funding version |
-| Report findings | 报告的核心发现生成逻辑仍较规则化，后续需增强 family-specific 分析能力 |
-| Execution realism V1 | Phase 4 无 orderbook depth / trades 数据，spread 和 impact 基于 bar OHLCV proxy |
-| Slippage 模型校准 | V1 的 half_spread_fraction (0.02) 和 impact_coefficient (1.0) 尚未经过真实数据校准 |
-| 仓位极小 | BTC-USDT-SWAP 1 合约 = 0.01 BTC，volume ratio 接近 0，feasibility 指标在小仓位下区分度有限 |
-
-### 21.15 治理与产品化 (Phase 5)
-
-Phase 5 不扩展研究能力，专注把平台从"能跑"推进到"可长期运行、可版本治理、可追溯、可交接"。
-
-#### 5 个子阶段
-
-| 子阶段 | 目标 | 核心交付 |
+| daemon | 职责 | 默认间隔 |
 |--------|------|----------|
-| 5-A | Artifact / 命名 / Manifest 规范化 | `artifact_index.json`, `rdp_validate_artifacts.py` |
-| 5-B | 参数与结论治理 | `current_parameter_registry.json`, `rdp_freeze_parameter_set.py` |
-| 5-C | 运行状态与失败治理 | `active_round_index.json`, `rdp_retry_failed_round.py` |
-| 5-D | 质量监控与巡检 | `quality_monitor_summary.json`, `rdp_run_quality_monitor.py` |
-| 5-E | 运行手册与交接文档 | `docs/operations/` 下 5 份文档 |
+| Historical | 定时扫描 `incoming/` 目录，发现新 ZIP 自动消费 → staging → silver → Gold | 30 秒 |
+| Realtime | 滚动采集 candles/funding + 定期构建 Gold + 定期检测 gap | 60 秒 |
 
-#### 治理模块（`aats/data_platform/governance/`）
+**目录约定**：将 ZIP 放入 `data/historical/incoming/{candles_spot,candles_swap,funding_swap}/{1m,5m,15m,1h}/`，timeframe 由子目录名自动推断。消费成功移入 `completed/`，失败移入 `failed/`（附 `.error` 日志）。
 
-| 文件 | 职责 |
-|------|------|
-| `manifest_validation.py` | Round manifest 规范校验 + 旧版 manifest 自动补全 |
-| `artifact_index.py` | 全局 artifact 索引构建（experiments + rounds） |
-| `parameter_registry.py` | 参数版本治理（draft/candidate/frozen/deprecated 生命周期） |
-| `round_status.py` | Active round 索引构建 + 状态查询 |
-| `retry_logic.py` | 失败 round 重跑计划生成 + 可重跑 round 发现 |
-| `quality_monitor.py` | 数据/artifact/结果/治理层四维质量巡检 |
+**质量门控**：candle 检查重复/OHLC 非法/时间乱序（fail 级）+ 缺失间隔/volume 负值（warn 级）；funding 检查重复/乱序/null rate。质量报告写入 `meta.quality_reports`。
 
-#### 治理脚本
+**Gold 层**：通过 as-of join 将 funding rate 对齐到 candle bar。daemon 在消费新 swap ZIP 时自动构建；也可手动 `python scripts/rdp_build_gold_all.py`。Spot Gold 表按设计为空（spot 无 funding rate）。
+
+### 21.5 Phase 2 — 参数研究
+
+Phase 2 在 Gold 数据之上构建参数研究闭环，回答"当参数变化时，策略行为结构如何改变"。
+
+**核心概念**：
+
+- **Replay 引擎**：逐 bar 重放，调用 family adapter（independent / directional），输出结构化决策
+- **统一 Edge Contract**：所有 adapter 输出 4 层 edge 分解 — `net_edge = signal + funding - cost`（bps）
+- **参数扫描**：参数网格笛卡尔积探索（`rdp_run_parameter_scan.py`）
+- **校准批处理**：JSON 文件驱动的少量校准实验（`rdp_run_calibration_batch.py`）
+- **Step 1 校准**：independent / BTC-USDT-SWAP / 15m 单范围自动校准（`rdp_run_step1_calibration.py`）
+- **Step 2 闭环**：覆盖 {independent, directional} × {15m, 1H} 的完整研究闭环（`rdp_run_step2_research.py`）
+
+**关键脚本**：
 
 | 脚本 | 用途 |
 |------|------|
-| `rdp_validate_artifacts.py` | 校验 manifest 规范，支持 `--fix` 自动补全 |
-| `rdp_build_artifact_index.py` | 扫描全部 artifact 目录生成索引 |
-| `rdp_freeze_parameter_set.py` | 参数 show / import / freeze / deprecate |
-| `rdp_list_active_rounds.py` | 列出 active rounds，按 phase 分组 |
-| `rdp_retry_failed_round.py` | 失败 round 的 list / plan / rerun |
-| `rdp_run_quality_monitor.py` | 运行全量质量巡检 (exit: 0=healthy, 1=unhealthy, 2=degraded) |
+| `rdp_run_replay.py` | 单次 replay 实验 |
+| `rdp_run_parameter_scan.py` | 参数网格批量扫描（默认 27 组合） |
+| `rdp_run_calibration_batch.py` | JSON 驱动的校准批处理 |
+| `rdp_run_step1_calibration.py` | Step 1 自动化校准编排 |
+| `rdp_run_step2_research.py` | Step 2 完整研究闭环（4 阶段） |
 
-#### 参数生命周期
+**产物目录**：`artifacts/research/experiments/`、`artifacts/research/calibration_batches/`、`artifacts/research/step2_rounds/`
 
-```
-Step 2 产出 parameter_candidates.json
-  → 导入 Registry (status: draft)
-    → 初步验证 → candidate
-      → Phase 3/4 验证通过 → frozen
-        → 被新版本替代 → deprecated
-```
+> 详细参考：[Phase 2 参数研究详细文档](docs/rdp/phase2_parameter_research_details.md)
 
-冻结参数通过 `--params-json` 注入 Phase 3/4 round:
+### 21.6 Phase 3-4 — 归因与执行可行性
 
-```bash
-python scripts/rdp_run_phase3_round.py \
-    --start 2026-03-31 --end 2026-04-02 \
-    --params-json artifacts/research/experiments/.../parameter_candidates.json
-```
+**Phase 3（Live Attribution）** 建立 replay vs live 对照归因，回答"为什么 live 没下单"。
 
-#### Round 统一生命周期
+- 8 层瀑布归因：Strategy → Permission → Allocator → Budget → Risk → Execution → Order → Fill
+- 停在第一层失败处，聚合 top failure modes
+- 脚本：`rdp_run_live_attribution.py`（单次）/ `rdp_run_phase3_round.py`（批量 4 组合）
 
-```
-pending → running → succeeded / partial_success / failed → deprecated
-```
+**Phase 4（Execution Realism）** 进入市场微观结构层，回答"这笔单能成交吗、成本多少"。
 
-退出码: `0` = 成功, `2` = 部分成功, `3` = 全部失败
+- V1 分析链：Gold bar matching → fill feasibility → slippage estimate → cost-adjusted edge
+- V1 滑点模型：half-spread + sqrt(volume_ratio) impact（bar-proxy，透明可解释）
+- 脚本：`rdp_run_execution_realism.py`（单次）/ `rdp_run_phase4_round.py`（批量 4 组合）
 
-#### 质量巡检
+**产物目录**：`artifacts/research/attribution_rounds/`、`artifacts/research/execution_rounds/`
 
-```bash
-python scripts/rdp_run_quality_monitor.py
-```
+> 详细参考：[Phase 3-4 归因与执行可行性详细文档](docs/rdp/phase3_4_attribution_execution_details.md)
 
-检查 4 个维度:
-- **artifact 层**: 目录存在性、manifest 完整性
-- **结果层**: opening_count 全 0、全 round 失败等异常
-- **参数层**: 参数文件可解析性、registry 完整性
-- **治理层**: 治理文件存在性、运营文档完整性
+### 21.7 Phase 5-6 — 治理与闭环决策
 
-#### 运营文档
+**Phase 5（Governance）** 将平台从"能跑"推进到"可长期运行、可版本治理、可追溯"。
 
-| 文档 | 内容 |
-|------|------|
-| `platform_runbook.md` | 平台全景 + 日常操作 + 治理操作 + 故障排查 |
-| `artifact_conventions.md` | 目录结构 + manifest 规范 + 关键文件说明 |
-| `parameter_governance.md` | 参数治理流程 + registry 结构 + 操作指南 |
-| `round_lifecycle.md` | 状态定义 + 退出码 + 失败处理 + active index |
-| `operator_checklist.md` | 日常巡检 + 运行前后检查 + 故障排查 + 交接须知 |
+- Artifact 规范化 + 全局索引（`artifact_index.json`）
+- 参数生命周期：`draft → candidate → frozen → deprecated`
+- Round 状态管理：`pending → running → succeeded / partial_success / failed`
+- 四维质量巡检：artifact / 结果 / 参数 / 治理层（`rdp_run_quality_monitor.py`）
+- 失败 round 重跑计划（`rdp_retry_failed_round.py`）
 
-### 21.16 闭环决策系统 (Phase 6)
+**Phase 6（Decision System）** 整合所有 Phase 的证据，生成统一的生产决策建议。
 
-Phase 6 把前面所有 Phase 的研究、归因、execution realism、治理证据整合成统一的生产决策建议。
-**第一版只生成建议，不直接控制生产系统。**
+- 跨 Phase 2/3/4/5 证据收集（`evidence_bundle.py`）
+- 4 维度参数评分（研究 3 + 归因 2 + 执行 2 + 治理 2 = 满分 9）
+  - score_ratio ≥ 0.7 → promote · 0.4~0.7 → hold · < 0.4 → reject
+- Family/Timeframe 状态决策：keep_active / lower_priority / pause / require_review
+- 7 项 Promotion Readiness check
+- 脚本：`rdp_run_decision_round.py`（完整闭环）
 
-#### 5 个子阶段
+> 详细参考：[运营手册](docs/operations/platform_runbook.md) · [参数治理](docs/operations/parameter_governance.md) · [Operator 检查清单](docs/operations/operator_checklist.md)
 
-| 子阶段 | 目标 | 核心交付 |
-|--------|------|----------|
-| 6-A | Evidence Bundle 统一化 | `evidence_summary.json` |
-| 6-B | 参数升级候选选择 | `parameter_upgrade_candidates.json` |
-| 6-C | Family/Timeframe 状态决策 | `family_timeframe_decisions.json` |
-| 6-D | Promotion Readiness 评估 | `promotion_readiness_report.json` |
-| 6-E | Recommendation Registry 与闭环文档 | `recommendation_registry.json`, 结论 MD |
-
-#### 决策模块（`aats/data_platform/decision_system/`）
-
-| 文件 | 职责 |
-|------|------|
-| `evidence_bundle.py` | 跨 Phase 2/3/4/5 证据统一收集与完整度评估 |
-| `candidate_selector.py` | 规则化参数评分：4 维度（研究/归因/执行/治理）→ promote/hold/reject |
-| `decision_engine.py` | Family/Timeframe 状态决策：keep_active/lower_priority/pause/require_review |
-| `readiness_evaluator.py` | 7 项 check 评估上线就绪度 |
-| `recommendation_registry.py` | Recommendation + Active Decision + Evidence Bundle 三个 registry 管理 |
-| `report_builder.py` | 7 节结论文档生成 |
-
-#### 决策脚本
-
-```bash
-# 运行完整闭环决策 round（6 步全流程）
-python scripts/rdp_run_decision_round.py
-
-# 单独评估参数升级候选
-python scripts/rdp_select_parameter_upgrade.py
-
-# 单独评估上线就绪度
-python scripts/rdp_evaluate_promotion_readiness.py
-
-# 查看 / 管理 registry
-python scripts/rdp_update_decision_registry.py --action show-recommendations
-python scripts/rdp_update_decision_registry.py --action show-decisions
-python scripts/rdp_update_decision_registry.py --action approve --recommendation-id <id>
-```
-
-#### 参数升级评分体系
-
-4 个维度（总分 9.0）：
-
-| 维度 | 满分 | 评判标准 |
-|------|------|----------|
-| Phase 2 研究 | 3.0 | 开仓信号 + opening count + positive edge ratio |
-| Phase 3 归因 | 2.0 | combo 成功 + failure ratio 合理 |
-| Phase 4 执行 | 2.0 | cost-adjusted edge >= 0 + fill ratio >= 30% |
-| Phase 5 治理 | 2.0 | governance healthy + 参数状态 |
-
-决策规则：score_ratio >= 0.7 → promote_candidate，0.4~0.7 → hold，< 0.4 → reject
-
-#### Promotion Readiness 7 项 Check
-
-1. 研究结果稳定性（有开仓 + edge >= 15%）
-2. Attribution 无严重结构问题
-3. Execution realism 未严重吞噬 edge
-4. Governance 健康
-5. 参数可追溯（有 frozen/candidate）
-6. 至少有 promote_candidate 的参数
-7. 至少有 keep_active 的 family/timeframe
-
-### 21.17 主交易系统整合 (Integration)
+### 21.8 主交易系统整合
 
 将 RDP 从独立研究平台整合为主交易系统的正式旁路子系统。
 
-#### 整合架构
-
 ```text
-                       +---------------------------+
-                       |   主交易系统 (Realtime)    |
-                       |   Market → Feature →       |
-                       |   Decision → Governance →  |
-                       |   Strategy → Execution     |
-                       +-------------+-------------+
-                                     |
-                                     | 事实数据(只读) / 参数回灌
-                                     v
-                 +---------------------------------------------+
-                 | RDP (Research / Attribution / Governance)   |
-                 | Phase 1~6 + Integration Layer               |
-                 +-------------------+-------------------------+
-                                     |
-                                     | approved parameter set
-                                     v
-                     +--------------------------------------+
-                     |   configs/active_parameter_sets/     |
-                     +--------------------------------------+
+                      +---------------------------+
+                      |   主交易系统 (Realtime)    |
+                      |   Market → Feature →       |
+                      |   Decision → Governance →  |
+                      |   Strategy → Execution     |
+                      +-------------+-------------+
+                                    |
+                                    | 事实数据(只读) / 参数回灌
+                                    v
+                +---------------------------------------------+
+                | RDP (Phase 1~6 + Integration Layer)         |
+                +-------------------+-------------------------+
+                                    |
+                                    | approved parameter set
+                                    v
+                    +--------------------------------------+
+                    |   configs/active_parameter_sets/     |
+                    +--------------------------------------+
 ```
 
-#### 整合四阶段
+**四阶段整合**：
 
 | 阶段 | 内容 | 核心交付物 |
 |------|------|-----------|
-| A. 事实数据对接 | RDP 只读访问 production DB | `live_query_adapter.py`, `live_schema_contract_for_rdp.md` |
-| B. 参数回灌机制 | Active parameter set 加载与注入 | `active_parameters.py`, `apply_active_parameter_set.py` |
-| C. Operator 可见性 | RDP 只读 API 暴露给 Operator | `rdp_routes.py`, `rdp_queries.py` |
-| D. 受控应用流程 | Recommendation → Approval → Apply | `approve_recommendation_and_apply.py` |
+| A. 事实数据对接 | RDP 只读访问 production DB 7 张表 | `live_query_adapter.py` |
+| B. 参数回灌机制 | Active parameter set 加载与注入 | `active_parameters.py`、`apply_active_parameter_set.py` |
+| C. Operator 可见性 | 8 个 RDP 只读 API 端点（`/rdp/` 前缀） | `rdp_routes.py`、`rdp_queries.py` |
+| D. 受控应用流程 | Recommendation → Pre-apply Gate → Approval → Apply | `approve_recommendation_and_apply.py` |
 
-#### 阶段 A — 事实数据与接口对接
-
-RDP 通过 `live_query_adapter.py` 只读访问 production DB 7 张关键表：
-
-| 表 | 用途 |
-|----|------|
-| `strategy_sleeve_intents` | Phase 3 策略意图分析 |
-| `portfolio_allocation_decisions` | Phase 3 组合分配分析 |
-| `allocator_budget_snapshots` | Phase 3 预算快照分析 |
-| `reconciliation_state_snapshots` | Phase 3 对账状态分析 |
-| `strategy_execution_bundles` | Phase 3/4 执行包分析 |
-| `execution_orders` | Phase 3/4 订单分析 |
-| `execution_fills` | Phase 4 成交分析 |
-
-配置（`.env.research`）：
-
-```env
-RDP_LIVE_DATABASE_URL=postgresql+psycopg://rdp_readonly:pw@host:5432/aats_prod
-RDP_LIVE_DB_READONLY=true
-```
-
-验证命令：
-
-```bash
-python scripts/rdp_check_live_db.py
-python scripts/rdp_check_live_db.py --table execution_fills --sample 3
-```
-
-#### 阶段 B — 参数回灌机制
-
-参数优先级（从低到高）：
-
-```text
-hardcoded defaults < strategy_profiles/*.yaml < active parameter set < runtime override
-```
-
-Active parameter set 文件位于 `configs/active_parameter_sets/<family>_<timeframe>.json`。
-
-操作命令：
-
-```bash
-# 查看 registry 中可用参数
-python scripts/apply_active_parameter_set.py --action show
-
-# 应用所有 frozen 参数
-python scripts/apply_active_parameter_set.py --action apply-frozen
-
-# 应用指定参数
-python scripts/apply_active_parameter_set.py --action apply --ps-id <id>
-
-# 查看当前 active sets
-python scripts/apply_active_parameter_set.py --action show-active
-```
-
-#### 阶段 C — Operator 可见性
-
-8 个只读 API 端点（`/rdp/` 前缀）：
+**API 端点一览**（`/rdp/` 前缀）：
 
 | 端点 | 说明 |
 |------|------|
@@ -2168,39 +1170,58 @@ python scripts/apply_active_parameter_set.py --action show-active
 | `GET /rdp/decision-round/latest` | 最近 decision round 结论 |
 | `GET /rdp/readiness` | Promotion readiness 评估 |
 
-#### 阶段 D — 受控应用流程
+**整合原则**：不侵入实时主链 · 旁路分析 + 受控回灌 · 研究与生产分库 · 建议与应用分离 · 第一版不做自动 apply
 
-```text
-Phase 6 → generate recommendation (draft)
-  → reviewer/operator approve
-  → apply active parameter set
-  → production restart / reload
-  → observe
-```
+### 21.9 运维与持续改进
 
-操作命令：
+RDP 通过以下机制支持长期可靠运行：
 
-```bash
-# 查看待审批 recommendations
-python scripts/approve_recommendation_and_apply.py --action list
+**工作流调度**：JSON 配置驱动的 workflow dispatcher 支持 4 种工作流类型（research_round / decision_round / quality_check / maintenance）。详见 [调度策略](docs/operations/rdp_scheduling_strategy.md) · [工作流日历](docs/operations/rdp_workflow_calendar.md)。
 
-# 审批并应用参数
-python scripts/approve_recommendation_and_apply.py --action approve-and-apply --rec-id <id>
+**失败恢复**：failure registry 记录 + retry manager 支持单任务/整工作流重试 + 自动故障录入。
 
-# 拒绝
-python scripts/approve_recommendation_and_apply.py --action reject --rec-id <id>
+**可靠性**：7 项 reliability check（质量监控/活跃决策/工作流配置/产物目录/开放故障/发布历史/活跃参数）+ alert summary 构建与历史管理。详见 [可靠性 Runbook](docs/operations/rdp_reliability_runbook.md)。
 
-# 查看审批历史
-python scripts/approve_recommendation_and_apply.py --action history
-```
+**环境隔离**：dev / staging / prod 三环境策略矩阵，通过 `RDP_ENV` 控制参数应用、回滚、工作流执行、直接 DB 访问的权限。详见 [环境矩阵](docs/operations/rdp_environment_matrix.md)。
 
-#### 整合原则
+**持续改进指标**：5 层 24 个指标（研究/归因/执行/运维/可靠性）+ 基线比较（3 种策略）+ 发布有效性评估（4 维度）+ 周/月周期性评审 + 改进积压自动检测（6 个来源）。
 
-1. **不侵入实时主链** — RDP 不阻塞实时交易，不成为同步依赖
-2. **旁路分析 + 受控回灌** — 离线/准实时研究，受控写回 active parameters
-3. **研究与生产隔离** — research DB 与 production DB 分离
-4. **建议与应用分离** — Phase 6 只产出 recommendation，不直接修改生产参数
-5. **第一版不做自动 apply** — 所有参数应用必须经过人工审批
+**参数映射语义**：RDP 参数名与主系统 `AATSSettings` 字段名的映射关系分为 DIRECT / APPROXIMATE / PLACEHOLDER 三类，详见 [参数映射参考](docs/operations/parameter_mapping_reference.md)。
+
+### 21.10 已知限制
+
+| 项目 | 说明 |
+|------|------|
+| Scheduler 防重 | 进程内 in-memory bucket dedup，重启后可能重跑一次（下游 upsert 幂等） |
+| Symbol 白名单 | 硬编码 4 个 instrument，后续需改为数据库驱动 |
+| Gold volume 语义 | spot vol = 基础币量，swap vol = 合约张数，未做跨类型统一 |
+| 单进程 | scheduler 设计为单进程，不支持多 worker 并行 |
+| Replay 评分 | Phase 2 使用简化评分模型（不含 AI assessment），与生产存在偏差 |
+| Replay 撮合 | Phase 2 不含撮合仿真和 PnL accounting |
+| Signal 校准 | `signal_edge_scale_bps` 当前为经验性默认值（10.0），尚未经过历史数据校准 |
+| Execution realism V1 | Phase 4 无 orderbook depth / trades 数据，spread 和 impact 基于 bar OHLCV proxy |
+| 仓位极小 | BTC-USDT-SWAP 1 合约 = 0.01 BTC，volume ratio 接近 0，feasibility 指标在小仓位下区分度有限 |
+
+### 21.11 详细文档索引
+
+| 文档 | 内容 |
+|------|------|
+| **技术细节** | |
+| [`docs/rdp/phase2_parameter_research_details.md`](docs/rdp/phase2_parameter_research_details.md) | Phase 2 完整参考：Edge Contract、成本模型、参数、CLI、产物、适配器 |
+| [`docs/rdp/phase3_4_attribution_execution_details.md`](docs/rdp/phase3_4_attribution_execution_details.md) | Phase 3-4 完整参考：归因瀑布、执行可行性、滑点模型、CLI |
+| [`docs/rdp/module_reference.md`](docs/rdp/module_reference.md) | 全部代码模块职责清单（Phase 1~6 + Integration + Operations + Metrics） |
+| **运维文档** | |
+| [`docs/operations/platform_runbook.md`](docs/operations/platform_runbook.md) | 平台全景 + 日常操作 + 故障排查 |
+| [`docs/operations/operator_checklist.md`](docs/operations/operator_checklist.md) | 日常巡检 + 运行前后检查 + 交接须知 |
+| [`docs/operations/parameter_governance.md`](docs/operations/parameter_governance.md) | 参数治理流程 + registry 结构 |
+| [`docs/operations/parameter_mapping_reference.md`](docs/operations/parameter_mapping_reference.md) | RDP↔主系统参数映射语义 |
+| [`docs/operations/rdp_scheduling_strategy.md`](docs/operations/rdp_scheduling_strategy.md) | 工作流调度策略 + Cron 示例 |
+| [`docs/operations/rdp_reliability_runbook.md`](docs/operations/rdp_reliability_runbook.md) | 可靠性 Runbook + 异常 SOP |
+| [`docs/operations/rdp_workflow_calendar.md`](docs/operations/rdp_workflow_calendar.md) | 工作流日历 + 依赖链 |
+| [`docs/operations/rdp_environment_matrix.md`](docs/operations/rdp_environment_matrix.md) | 环境隔离权限矩阵 |
+| **规范文档** | |
+| [`docs/operations/artifact_conventions.md`](docs/operations/artifact_conventions.md) | 目录结构 + manifest 规范 |
+| [`docs/operations/round_lifecycle.md`](docs/operations/round_lifecycle.md) | Round 状态定义 + 退出码 + 失败处理 |
 
 ---
 
