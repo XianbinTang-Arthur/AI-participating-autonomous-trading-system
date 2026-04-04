@@ -833,6 +833,7 @@ data/historical/          # 历史数据目录
 artifacts/research/       # Phase 2 参数研究产物
   experiments/            #   replay decisions, diagnostics, reports
   calibration_batches/    #   校准批次产物（batch summary / report / per-experiment）
+  calibration_rounds/     #   Step 1 校准轮次（round summary / recommendations / conclusion）
 
 configs/
   research_batches/       # 校准批次 JSON 模板
@@ -847,6 +848,7 @@ scripts/                  # 启动、seed、回放、报告脚本
   rdp_run_replay.py       #   Phase 2 单次 replay 实验
   rdp_run_parameter_scan.py # Phase 2 参数扫描
   rdp_run_calibration_batch.py # Phase 2 校准批处理（JSON 驱动，轻量级批跑）
+  rdp_run_step1_calibration.py # Phase 2 Step 1 校准编排（自动运行 3 batch + 规则推荐 + 结论文档）
   rdp_run_backfill.py     #   手动历史回填（保留）
   rdp_build_gold.py       #   手动 Gold 构建（单个 symbol x timeframe）
   rdp_build_gold_all.py   #   批量 Gold 构建（自动遍历所有 swap 组合）
@@ -1286,6 +1288,48 @@ artifacts/research/calibration_batches/<batch_run_id>/
 | DB 记录 | 创建 scan_run 表记录 | 不创建新 DB 表，仅复用 experiment 表 |
 | 产物 | comparison_summary.json | batch_summary.csv/json + batch_report.md |
 | 报告 | 对比表 | 趋势分析 + 自动 findings |
+
+#### Step 1 校准编排 (Step 1 Calibration Orchestrator)
+
+`rdp_run_step1_calibration.py` 是 Step 1 的自动化编排脚本，将 3 个 calibration batch 串联为**可重复执行、可复现、可交付**的标准流程。
+
+**固定范围（Step 1）**：`independent` / `BTC-USDT-SWAP` / `15m`
+
+```bash
+# 一键执行 Step 1 完整流程
+python scripts/rdp_run_step1_calibration.py
+
+# 首次运行时确保 schema 就绪
+python scripts/rdp_run_step1_calibration.py --ensure-schema
+```
+
+**自动执行步骤：**
+
+1. 顺序运行 3 个固定 batch（scale → cost → confirm_ticks）
+2. 汇总 12 个实验结果为 round_summary
+3. 规则化推荐引擎生成参数建议（透明、可解释，非黑盒）
+4. 生成结论文档
+
+**产物结构：**
+
+```text
+artifacts/research/calibration_rounds/<round_id>/
+  round_manifest.json                       # 轮次元信息（时间、batch 状态）
+  round_summary.csv                         # 3 个 batch 12 个实验的汇总表
+  round_summary.json                        # 机器可读汇总
+  parameter_recommendations.json            # 规则化参数推荐 + confidence + reason
+  phase2_step1_calibration_conclusion.md    # 面向人的结论文档
+  batches/                                  # 3 个 batch 的完整产物
+```
+
+**推荐引擎规则：**
+
+| 参数 | 规则 |
+|------|------|
+| `signal_edge_scale_bps` | 最低 positive-edge scale → 向上找结构改善平衡点（开仓增长 >10% 或 positive_edge_ratio 改善 >15pp） |
+| `taker_fee_bps` / `slippage_bps` | 检查默认 (5,2) 的 edge 方向、成本敏感度、edge 脆弱性 |
+| `min_confirm_ticks` | 最保守 ticks（opening_count 不显著下降 >40%） |
+| `min_safe_net_edge_bps` | Step 1 标记为 pending，需专项 batch |
 
 ### 21.10 配置
 
