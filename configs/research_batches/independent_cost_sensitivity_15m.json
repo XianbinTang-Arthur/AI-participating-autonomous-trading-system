@@ -8,8 +8,8 @@
   "start": "2026-03-31",
   "end": "2026-04-02",
   "experiments": [
-    {"label": "cost_3_1", "params": {"taker_fee_bps": 3, "slippage_bps": 1}},
-    {"label": "cost_5_2", "params": {"taker_fee_bps": 5, "slippage_bps": 2}},
-    {"label": "cost_7_3", "params": {"taker_fee_bps": 7, "slippage_bps": 3}}
+    {"label": "cost_3_1", "params": {"cost_config": {"taker_fee_bps": 3, "slippage_bps": 1}}},
+    {"label": "cost_5_2", "params": {"cost_config": {"taker_fee_bps": 5, "slippage_bps": 2}}},
+    {"label": "cost_7_3", "params": {"cost_config": {"taker_fee_bps": 7, "slippage_bps": 3}}}
   ]
 }

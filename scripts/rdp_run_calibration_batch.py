@@ -81,9 +81,9 @@ _PRESETS: dict[str, dict[str, Any]] = {
         "start": "2026-03-31",
         "end": "2026-04-02",
         "experiments": [
-            {"label": "cost_3_1", "params": {"taker_fee_bps": 3, "slippage_bps": 1}},
-            {"label": "cost_5_2", "params": {"taker_fee_bps": 5, "slippage_bps": 2}},
-            {"label": "cost_7_3", "params": {"taker_fee_bps": 7, "slippage_bps": 3}},
+            {"label": "cost_3_1", "params": {"cost_config": {"taker_fee_bps": 3, "slippage_bps": 1}}},
+            {"label": "cost_5_2", "params": {"cost_config": {"taker_fee_bps": 5, "slippage_bps": 2}}},
+            {"label": "cost_7_3", "params": {"cost_config": {"taker_fee_bps": 7, "slippage_bps": 3}}},
         ],
     },
     "independent_confirm_ticks_15m": {
@@ -191,7 +191,7 @@ def _run_single_experiment(
     from aats.data_platform.replay.reports.markdown_report_builder import build_experiment_report
 
     label = exp_def["label"]
-    params_dict = dict(exp_def["params"])
+    raw_params = dict(exp_def["params"])
 
     family = spec["family"]
     symbol = spec["symbol"]
@@ -200,8 +200,24 @@ def _run_single_experiment(
     start_ts = datetime.strptime(spec["start"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_ts = datetime.strptime(spec["end"], "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
-    # 构造参数覆盖
-    params = ReplayParameterOverrides.from_dict(params_dict)
+    # ---------- P1-1: 显式参数归一化 ----------
+    # 将扁平 cost keys 组装成 cost_config 嵌套结构后再传给 from_dict()，
+    # 消除对 from_dict() ��部隐式收口逻辑的依赖。
+    # ��持两种写法：
+    #   (a) 扁平: {"taker_fee_bps": 3, "slippage_bps": 1}
+    #   (b) 嵌套: {"cost_config": {"taker_fee_bps": 3, "slippage_bps": 1}}
+    _FLAT_COST_KEYS = {"taker_fee_bps", "slippage_bps"}
+    flat_cost_keys = _FLAT_COST_KEYS & set(raw_params.keys())
+    if flat_cost_keys:
+        cost_dict = raw_params.pop("cost_config", {}) if isinstance(raw_params.get("cost_config"), dict) else {}
+        for ck in flat_cost_keys:
+            cost_dict[ck] = raw_params.pop(ck)
+        raw_params["cost_config"] = cost_dict
+        log.debug("Normalized flat cost keys %s → cost_config=%s", flat_cost_keys, cost_dict)
+
+    params = ReplayParameterOverrides.from_dict(raw_params)
+    # 保留用户原始写法用于 summary（不含归一化后的结构）
+    params_dict = exp_def["params"]
 
     # 1. 注册实验
     exp_id = create_experiment(
@@ -283,6 +299,7 @@ def _run_single_experiment(
         "top_blocking_reason_1": top_reasons[0]["reason"] if len(top_reasons) > 0 else "",
         "top_blocking_reason_2": top_reasons[1]["reason"] if len(top_reasons) > 1 else "",
         "result_path": str(result_path),
+        "summary_path": str(summary_path),
         "report_path": str(report_path),
         "diagnostics": diag,
     }
@@ -371,7 +388,12 @@ def _write_failed_experiments(
     failed: list[dict[str, Any]],
     output_path: pathlib.Path,
 ) -> pathlib.Path:
-    """写 failed_experiments.json。"""
+    """写 failed_experiments.json。
+
+    注意：traceback 内联在 JSON 中，方便快速调试。
+    如果后续文件体积过大，可改为只保留 error + error_type，
+    traceback 落到独立文件 (traceback_path)。
+    """
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(failed, f, indent=2, ensure_ascii=False)
@@ -385,7 +407,7 @@ def _write_experiment_refs(
     batch_run_id: str,
     output_path: pathlib.Path,
 ) -> pathlib.Path:
-    """写 experiment_refs.json：记录 label → experiment_id 映射。"""
+    """写 experiment_refs.json：记录 label → experiment_id + ���物路径映射。"""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     refs = {
         "batch_run_id": batch_run_id,
@@ -396,12 +418,18 @@ def _write_experiment_refs(
             "label": row["label"],
             "experiment_id": row["experiment_id"],
             "status": "succeeded",
+            "result_path": row.get("result_path"),
+            "summary_path": row.get("summary_path"),
+            "report_path": row.get("report_path"),
         })
     for f_item in failed:
         refs["refs"].append({
             "label": f_item["label"],
             "experiment_id": None,
             "status": "failed",
+            "result_path": None,
+            "summary_path": None,
+            "report_path": None,
         })
 
     with output_path.open("w", encoding="utf-8") as f:
@@ -540,7 +568,12 @@ def _generate_batch_findings(
     spec: dict[str, Any],
     rows: list[dict[str, Any]],
 ) -> list[str]:
-    """基于批次结果自动生成简单规则化总结。"""
+    """基于批次结果自动生成简单规则化总结。
+
+    限制：当前按单参数维度逐个分析趋势，适合单变量或少变量校准。
+    如果一个实验同时变动多个参数，趋势归因能力有限——
+    此时应使用 rdp_run_parameter_scan.py 的笛卡尔积 + compare_diagnostics。
+    """
     findings: list[str] = []
 
     if len(rows) < 2:
