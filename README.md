@@ -834,12 +834,28 @@ artifacts/research/       # Phase 2 参数研究产物
   experiments/            #   replay decisions, diagnostics, reports
   calibration_batches/    #   校准批次产物（batch summary / report / per-experiment）
   calibration_rounds/     #   Step 1 校准轮次（round summary / recommendations / conclusion）
+  step2_rounds/           #   Step 2 研究轮次（family×timeframe 汇总 / candidates / conclusion）
 
 configs/
   research_batches/       # 校准批次 JSON 模板
     independent_scale_calibration_15m.json
     independent_cost_sensitivity_15m.json
     independent_confirm_ticks_15m.json
+    independent_scale_calibration_1h.json
+    independent_cost_sensitivity_1h.json
+    independent_confirm_ticks_1h.json
+    directional_scale_calibration_15m.json
+    directional_cost_sensitivity_15m.json
+    directional_confirm_ticks_15m.json
+    directional_trend_weight_15m.json
+    directional_return_clamp_15m.json
+    directional_scale_calibration_1h.json
+    directional_cost_sensitivity_1h.json
+    directional_confirm_ticks_1h.json
+    directional_trend_weight_1h.json
+    directional_return_clamp_1h.json
+  research_rounds/        # Step 2 研究轮次配置
+    step2_formal_scan_matrix.json
 
 scripts/                  # 启动、seed、回放、报告脚本
   rdp_start.py            #   统一入口：一键启动历史+实时两个 daemon
@@ -848,7 +864,8 @@ scripts/                  # 启动、seed、回放、报告脚本
   rdp_run_replay.py       #   Phase 2 单次 replay 实验
   rdp_run_parameter_scan.py # Phase 2 参数扫描
   rdp_run_calibration_batch.py # Phase 2 校准批处理（JSON 驱动，轻量级批跑）
-  rdp_run_step1_calibration.py # Phase 2 Step 1 校准编排（自动运行 3 batch + 规则推荐 + 结论文档）
+  rdp_run_step1_calibration.py # Phase 2 Step 1 校���编排（自动运行 3 batch + 规则推荐 + 结论文档）
+  rdp_run_step2_research.py  # Phase 2 Step 2 正式研究闭环（4 family×tf 校准 + scan + 比较 + 结论）
   rdp_run_backfill.py     #   手动历史回填（保留）
   rdp_build_gold.py       #   手动 Gold 构建（单个 symbol x timeframe）
   rdp_build_gold_all.py   #   批量 Gold 构建（自动遍历所有 swap 组合）
@@ -1329,7 +1346,82 @@ artifacts/research/calibration_rounds/<round_id>/
 | `signal_edge_scale_bps` | 最低 positive-edge scale → 向上找结构改善平衡点（开仓增长 >10% 或 positive_edge_ratio 改善 >15pp） |
 | `taker_fee_bps` / `slippage_bps` | 检查默认 (5,2) 的 edge 方向、成本敏感度、edge 脆弱性 |
 | `min_confirm_ticks` | 最保守 ticks（opening_count 不显著下降 >40%） |
-| `min_safe_net_edge_bps` | Step 1 标记为 pending，需专项 batch |
+| `min_safe_net_edge_bps` | Step 1 标记为 pending���需专项 batch |
+
+#### Step 2 正式研究闭环 (Step 2 Research Orchestrator)
+
+`rdp_run_step2_research.py` 将 Step 1 的单范围校准推进到覆盖 **independent + directional、15m + 1H** 的完整研究闭环。
+
+**固定范围（Step 2）**：`BTC-USDT-SWAP` / `{independent, directional}` / `{15m, 1H}`
+
+```bash
+# 一键执行 Step 2 完整流程（4 phase）
+python scripts/rdp_run_step2_research.py
+
+# 首次运行确保 schema
+python scripts/rdp_run_step2_research.py --ensure-schema
+
+# 只跑 calibration（跳过 scan）
+python scripts/rdp_run_step2_research.py --skip-scan
+
+# 只跑 scan（跳过 calibration）
+python scripts/rdp_run_step2_research.py --skip-calibration
+```
+
+**四阶段执行流程：**
+
+| Phase | 内容 | 子任务数 |
+|-------|------|----------|
+| A: Calibration | independent/1H → directional/15m → directional/1H | 3 round × 3~5 batch = 13 batch |
+| B: Formal Scan | independent/15m, 1H + directional/15m, 1H | 4 scan (27+27+18+18 = 90 combo) |
+| C: Aggregation | 汇总 + 推荐 + parameter_candidates | — |
+| D: Conclusion | 比较报告 + 结论文档 | — |
+
+**Directional 特有参数：**
+
+Directional family 除共享参数外，额外校准两个特有参数：
+
+| 参数 | 含义 | 校准范围 |
+|------|------|----------|
+| `directional_trend_weight` | 趋势信号 vs bar return 的混合权重 (0~1) | 0.3, 0.5, 0.7, 0.85, 1.0 |
+| `directional_return_clamp_bps` | bar return 贡献的上限 (bps) | 10, 15, 20, 30, 50 |
+
+**产物结构：**
+
+```text
+artifacts/research/step2_rounds/<round_id>/
+  round_manifest.json                       # 轮次元信息
+  family_timeframe_summary.csv              # 按 family×timeframe 汇总的实验表
+  family_timeframe_summary.json             # 机器可读汇总
+  scan_comparison_summary.csv               # 4 组 scan 的统一比较表
+  scan_comparison_summary.json              # 机器可读 scan 汇总
+  parameter_candidates.json                 # 默认参数候选 (per family/tf)
+  phase2_step2_research_conclusion.md       # 结论文档（含 4 维比较）
+  batches/                                  # 13 个 calibration batch 的完整产物
+```
+
+**结论文档包含的比较维度：**
+
+1. Independent vs Directional on 15m
+2. Independent vs Directional on 1H
+3. 15m vs 1H within Independent
+4. 15m vs 1H within Directional
+
+**推荐引擎扩展（Directional 特有）：**
+
+| 参数 | 规则 |
+|------|------|
+| `directional_trend_weight` | positive edge 下选最优 opening/pos_ratio；接近时倾向更高 weight（更保守） |
+| `directional_return_clamp_bps` | positive edge 下选 pos_ratio 最高；检查跨 clamp 的 edge 波动稳定性 |
+
+**Scan Matrix 配置**（`configs/research_rounds/step2_formal_scan_matrix.json`）定义每个 family/timeframe 的参数网格：
+
+| 组合 | 网格维度 | 组合数 |
+|------|----------|--------|
+| independent/15m | confirm_ticks × scale × net_edge | 27 |
+| independent/1H | confirm_ticks × scale × net_edge | 27 |
+| directional/15m | confirm_ticks × trend_weight × clamp | 18 |
+| directional/1H | confirm_ticks × trend_weight × clamp | 18 |
 
 ### 21.10 配置
 
