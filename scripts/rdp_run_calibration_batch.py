@@ -27,6 +27,12 @@ Usage:
     python scripts/rdp_run_calibration_batch.py \\
         --batch-file my_batch.json \\
         --ensure-schema
+
+Exit codes:
+    0 = 全部成功
+    1 = 参数错误 / 启动失败
+    2 = 部分成功（有成功也有失败）
+    3 = 全部失败
 """
 
 from __future__ import annotations
@@ -839,8 +845,14 @@ def main() -> None:
         print("")
         print(f"Artifacts: {batch_dir}")
 
-    if n_fail > 0:
+    # 退出码策略：
+    #   0 = 全部成功
+    #   2 = 部分成功（有成功也有失败）
+    #   3 = 全部失败
+    if n_fail > 0 and n_ok > 0:
         sys.exit(2)
+    elif n_fail > 0 and n_ok == 0:
+        sys.exit(3)
 
 
 if __name__ == "__main__":
