@@ -329,7 +329,7 @@ def main() -> None:
                 "timeframe": r["timeframe"],
                 "status": r["status"],
                 "run_dir": r.get("run_dir"),
-                "candidates": r.get("cost_summary", {}).get("total_candidates", 0),
+                "candidates": (r.get("cost_summary") or {}).get("total_candidates", 0),
             }
             for r in results
         ],

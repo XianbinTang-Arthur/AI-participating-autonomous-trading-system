@@ -157,24 +157,32 @@ class ReplayParameterOverrides:
             "taker_fee_bps", "slippage_bps",
         }
 
+        # null-safe 取值：JSON null → 用默认值
+        def _v(key: str, default: float) -> float:
+            val = d.get(key)
+            return float(val) if val is not None else float(default)
+
         # 成本配置：优先从平铺 keys 组装，其次从嵌套 cost_config
         has_flat_cost = "taker_fee_bps" in d or "slippage_bps" in d
         if has_flat_cost:
             cost = ReplayCostConfig(
-                taker_fee_bps=float(d.get("taker_fee_bps", 5.0)),
-                slippage_bps=float(d.get("slippage_bps", 2.0)),
+                taker_fee_bps=_v("taker_fee_bps", 5.0),
+                slippage_bps=_v("slippage_bps", 2.0),
             )
         else:
             cost_raw = d.get("cost_config")
             cost = ReplayCostConfig.from_dict(cost_raw) if isinstance(cost_raw, dict) else ReplayCostConfig()
 
+        confirm_raw = d.get("min_confirm_ticks")
+        confirm = int(confirm_raw) if confirm_raw is not None else 2
+
         return cls(
-            min_confirm_ticks=int(d.get("min_confirm_ticks", 2)),
-            score_stability_threshold=float(d.get("score_stability_threshold", 2.0)),
-            min_safe_net_edge_bps=float(d.get("min_safe_net_edge_bps", 0.0)),
-            signal_edge_scale_bps=float(d.get("signal_edge_scale_bps", 10.0)),
-            directional_trend_weight=float(d.get("directional_trend_weight", 0.7)),
-            directional_return_clamp_bps=float(d.get("directional_return_clamp_bps", 20.0)),
+            min_confirm_ticks=confirm,
+            score_stability_threshold=_v("score_stability_threshold", 2.0),
+            min_safe_net_edge_bps=_v("min_safe_net_edge_bps", 0.0),
+            signal_edge_scale_bps=_v("signal_edge_scale_bps", 10.0),
+            directional_trend_weight=_v("directional_trend_weight", 0.7),
+            directional_return_clamp_bps=_v("directional_return_clamp_bps", 20.0),
             cost_config=cost,
             extra={k: v for k, v in d.items() if k not in known},
         )

@@ -144,7 +144,7 @@ def build_execution_alignment(
             alignment_status = ALIGNMENT_MATCHED
 
             # 预估 notional（USDT）
-            candidate_notional_usd = candidate_qty * _CONTRACT_MULTIPLIER_BTC * Decimal(str(mid_price))
+            candidate_notional_usd = Decimal(str(candidate_qty)) * _CONTRACT_MULTIPLIER_BTC * Decimal(str(mid_price))
 
             row = {
                 "family": family,
