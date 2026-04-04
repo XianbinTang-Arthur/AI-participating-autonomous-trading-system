@@ -1,0 +1,17 @@
+{
+  "batch_name": "directional_return_clamp_1h",
+  "description": "Calibrate directional_return_clamp_bps for directional family on BTC-USDT-SWAP 1H. Lower clamp = more conservative bar return limiting.",
+  "family": "directional",
+  "symbol": "BTC-USDT-SWAP",
+  "timeframe": "1H",
+  "dataset_version": "v1.0",
+  "start": "2026-03-31",
+  "end": "2026-04-02",
+  "experiments": [
+    {"label": "clamp_10", "params": {"directional_return_clamp_bps": 10}},
+    {"label": "clamp_15", "params": {"directional_return_clamp_bps": 15}},
+    {"label": "clamp_20", "params": {"directional_return_clamp_bps": 20}},
+    {"label": "clamp_30", "params": {"directional_return_clamp_bps": 30}},
+    {"label": "clamp_50", "params": {"directional_return_clamp_bps": 50}}
+  ]
+}

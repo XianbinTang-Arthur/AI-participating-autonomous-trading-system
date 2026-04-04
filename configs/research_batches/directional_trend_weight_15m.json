@@ -1,0 +1,17 @@
+{
+  "batch_name": "directional_trend_weight_15m",
+  "description": "Calibrate directional_trend_weight for directional family on BTC-USDT-SWAP 15m. Higher weight = more trend influence, lower = more bar return influence.",
+  "family": "directional",
+  "symbol": "BTC-USDT-SWAP",
+  "timeframe": "15m",
+  "dataset_version": "v1.0",
+  "start": "2026-03-31",
+  "end": "2026-04-02",
+  "experiments": [
+    {"label": "tw_030", "params": {"directional_trend_weight": 0.3}},
+    {"label": "tw_050", "params": {"directional_trend_weight": 0.5}},
+    {"label": "tw_070", "params": {"directional_trend_weight": 0.7}},
+    {"label": "tw_085", "params": {"directional_trend_weight": 0.85}},
+    {"label": "tw_100", "params": {"directional_trend_weight": 1.0}}
+  ]
+}

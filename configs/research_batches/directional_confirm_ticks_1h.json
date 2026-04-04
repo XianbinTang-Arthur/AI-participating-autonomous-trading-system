@@ -1,0 +1,16 @@
+{
+  "batch_name": "directional_confirm_ticks_1h",
+  "description": "Threshold sensitivity test: sweep min_confirm_ticks for directional on BTC-USDT-SWAP 1H",
+  "family": "directional",
+  "symbol": "BTC-USDT-SWAP",
+  "timeframe": "1H",
+  "dataset_version": "v1.0",
+  "start": "2026-03-31",
+  "end": "2026-04-02",
+  "experiments": [
+    {"label": "ticks_2", "params": {"min_confirm_ticks": 2}},
+    {"label": "ticks_3", "params": {"min_confirm_ticks": 3}},
+    {"label": "ticks_4", "params": {"min_confirm_ticks": 4}},
+    {"label": "ticks_5", "params": {"min_confirm_ticks": 5}}
+  ]
+}
