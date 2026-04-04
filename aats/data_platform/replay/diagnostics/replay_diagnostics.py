@@ -60,7 +60,10 @@ def compute_diagnostics(
     long_scores = [d.long_score for d in decisions]
     short_scores = [d.short_score for d in decisions]
 
-    # --- 边际分布 ---
+    # --- 边际分布（统一 edge contract 4 层分解） ---
+    signal_edges = [d.signal_edge_proxy_bps for d in decisions]
+    funding_adjustments = [d.funding_adjustment_bps for d in decisions]
+    costs = [d.cost_bps for d in decisions]
     edges = [d.expected_net_edge_bps for d in decisions]
     positive_edges = [e for e in edges if e > 0]
 
@@ -99,7 +102,10 @@ def compute_diagnostics(
         "mean_short_score": _safe_mean(short_scores),
         "max_long_score": round(max(long_scores), 6) if long_scores else None,
         "max_short_score": round(max(short_scores), 6) if short_scores else None,
-        # 边际
+        # 边际（统一 edge contract 4 层分解）
+        "mean_signal_edge_proxy_bps": _safe_mean(signal_edges),
+        "mean_funding_adjustment_bps": _safe_mean(funding_adjustments),
+        "mean_cost_bps": _safe_mean(costs),
         "mean_expected_edge_bps": _safe_mean(edges),
         "median_expected_edge_bps": _safe_median(edges),
         "p25_expected_edge_bps": _safe_percentile(edges, 25),
@@ -142,6 +148,10 @@ def compare_diagnostics(
             "blocked_count": diag.get("blocked_count", 0),
             "selectable_ratio": diag.get("selectable_ratio", 0),
             "execution_compatible_ratio": diag.get("execution_compatible_ratio", 0),
+            # edge 分解（统一 contract）
+            "mean_signal_edge_proxy_bps": diag.get("mean_signal_edge_proxy_bps"),
+            "mean_funding_adjustment_bps": diag.get("mean_funding_adjustment_bps"),
+            "mean_cost_bps": diag.get("mean_cost_bps"),
             "mean_expected_edge_bps": diag.get("mean_expected_edge_bps"),
             "median_expected_edge_bps": diag.get("median_expected_edge_bps"),
             "positive_edge_ratio": diag.get("positive_edge_ratio", 0),
@@ -176,6 +186,9 @@ def _empty_diagnostics() -> dict[str, Any]:
         "mean_short_score": None,
         "max_long_score": None,
         "max_short_score": None,
+        "mean_signal_edge_proxy_bps": None,
+        "mean_funding_adjustment_bps": None,
+        "mean_cost_bps": None,
         "mean_expected_edge_bps": None,
         "median_expected_edge_bps": None,
         "p25_expected_edge_bps": None,

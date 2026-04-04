@@ -114,7 +114,19 @@ def mark_scan_finished(
     failed: int,
     comparison_path: str | None = None,
 ) -> None:
-    status = "succeeded" if failed == 0 else ("failed" if completed == 0 else "succeeded")
+    """更新 scan run 最终状态。
+
+    状态逻辑（P1-2: 对"部分成功"诚实）：
+    - failed == 0               -> succeeded     全部成功
+    - completed == 0            -> failed         全部失败
+    - completed > 0 and failed > 0 -> partial_success 部分成功
+    """
+    if failed == 0:
+        status = "succeeded"
+    elif completed == 0:
+        status = "failed"
+    else:
+        status = "partial_success"
     session.execute(
         text("""
             UPDATE research.parameter_scan_runs
@@ -236,10 +248,17 @@ def run_parameter_scan(
     )
     session.commit()
 
+    final_status = "succeeded" if failed == 0 else ("failed" if completed == 0 else "partial_success")
     log.info(
-        "Parameter scan %s completed: %d/%d succeeded, %d failed",
-        scan_run_id, completed, len(combos), failed,
+        "Parameter scan %s finished [%s]: %d/%d succeeded, %d failed",
+        scan_run_id, final_status, completed, len(combos), failed,
     )
+    if failed > 0 and completed > 0:
+        log.warning(
+            "Scan %s has partial failures (%d/%d failed). "
+            "Check individual experiment logs for details.",
+            scan_run_id, failed, len(combos),
+        )
     return scan_run_id
 
 

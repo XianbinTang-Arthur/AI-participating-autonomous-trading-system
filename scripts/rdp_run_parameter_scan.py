@@ -47,6 +47,8 @@ def main() -> None:
     parser.add_argument("--end", required=True, help="YYYY-MM-DD (UTC)")
     parser.add_argument("--dataset-version", default="v1")
     parser.add_argument("--grid", default=None, help="JSON parameter grid")
+    parser.add_argument("--ensure-schema", action="store_true",
+                        help="Run DB migrations before scan (default: assume schema ready)")
     args = parser.parse_args()
 
     from aats.data_platform.config import get_settings
@@ -57,7 +59,9 @@ def main() -> None:
     from aats.data_platform.replay.scan.scan_runner import run_parameter_scan
 
     settings = get_settings()
-    run_migrations(settings)
+    if args.ensure_schema:
+        log.info("Running migrations (--ensure-schema)...")
+        run_migrations(settings)
 
     if args.family == "independent":
         adapter = IndependentReplayAdapter()

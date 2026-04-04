@@ -126,6 +126,21 @@ def build_experiment_report(
     # --- Edge Summary ---
     _add("## 5. Edge Summary")
     _add("")
+    _add("### Edge Breakdown (Unified Contract)")
+    _add("")
+    _add("```")
+    _add("expected_net_edge = signal_edge_proxy + funding_adjustment - cost")
+    _add("```")
+    _add("")
+    _add("| Component | Mean (bps) |")
+    _add("|-----------|-----------|")
+    _add(f"| Signal edge proxy | {_fmt(diagnostics.get('mean_signal_edge_proxy_bps'))} |")
+    _add(f"| Funding adjustment | {_fmt(diagnostics.get('mean_funding_adjustment_bps'))} |")
+    _add(f"| Cost (taker + slippage) | {_fmt(diagnostics.get('mean_cost_bps'))} |")
+    _add(f"| **Net expected edge** | **{_fmt(diagnostics.get('mean_expected_edge_bps'))}** |")
+    _add("")
+    _add("### Edge Distribution")
+    _add("")
     _add("| Metric | Value |")
     _add("|--------|-------|")
     _add(f"| Mean expected edge (bps) | {_fmt(diagnostics.get('mean_expected_edge_bps'))} |")
@@ -196,7 +211,12 @@ def build_scan_comparison_report(
     if rows:
         _add("## Comparison Table")
         _add("")
-        headers = ["Label", "Bars", "Opens", "Blocks", "Selectable%", "ExecCompat%", "MeanEdge", "MedianEdge", "PosEdge%", "TopBlock"]
+        _add("```")
+        _add("net_edge = signal_edge + funding_adj - cost")
+        _add("```")
+        _add("")
+        headers = ["Label", "Bars", "Opens", "Blocks", "Sel%", "Exec%",
+                   "Signal", "Funding", "Cost", "NetEdge", "PosEdge%", "TopBlock"]
         _add("| " + " | ".join(headers) + " |")
         _add("| " + " | ".join(["---"] * len(headers)) + " |")
         for r in rows:
@@ -207,8 +227,10 @@ def build_scan_comparison_report(
                 str(r.get("blocked_count", 0)),
                 _pct(r.get("selectable_ratio", 0)),
                 _pct(r.get("execution_compatible_ratio", 0)),
+                _fmt(r.get("mean_signal_edge_proxy_bps")),
+                _fmt(r.get("mean_funding_adjustment_bps")),
+                _fmt(r.get("mean_cost_bps")),
                 _fmt(r.get("mean_expected_edge_bps")),
-                _fmt(r.get("median_expected_edge_bps")),
                 _pct(r.get("positive_edge_ratio", 0)),
                 f"`{r.get('top_blocking_reason', 'none')}`",
             ]) + " |")
@@ -253,6 +275,7 @@ def _generate_findings(diagnostics: dict[str, Any], params: dict[str, Any]) -> s
     sel_ratio = diagnostics.get("selectable_ratio", 0)
     edge_mean = diagnostics.get("mean_expected_edge_bps")
 
+    # --- 开仓频率分析 ---
     if total > 0:
         open_ratio = opening / total
         if open_ratio < 0.01:
@@ -266,12 +289,34 @@ def _generate_findings(diagnostics: dict[str, Any], params: dict[str, Any]) -> s
         block_ratio = blocked / total
         findings.append(f"- Blocked ratio: {_pct(block_ratio)} ({blocked} bars met score threshold but failed gates)")
 
+    # --- Edge 分解分析 ---
+    signal_mean = diagnostics.get("mean_signal_edge_proxy_bps")
+    funding_mean = diagnostics.get("mean_funding_adjustment_bps")
+    cost_mean = diagnostics.get("mean_cost_bps")
+
     if edge_mean is not None:
         if edge_mean < 0:
-            findings.append(f"- Average expected edge is negative ({edge_mean:.2f} bps), cost exceeds signal")
+            findings.append(f"- Average net edge is **negative** ({edge_mean:.2f} bps), cost exceeds signal+funding")
         else:
-            findings.append(f"- Average expected edge: {edge_mean:.2f} bps")
+            findings.append(f"- Average net edge: {edge_mean:.2f} bps")
 
+    if signal_mean is not None and funding_mean is not None:
+        # 判断 edge 的主要来源
+        abs_signal = abs(signal_mean)
+        abs_funding = abs(funding_mean)
+        if abs_signal + abs_funding > 0:
+            signal_share = abs_signal / (abs_signal + abs_funding)
+            if signal_share > 0.7:
+                findings.append(f"- Edge primarily driven by signal ({signal_mean:.2f} bps), funding is secondary ({funding_mean:.2f} bps)")
+            elif signal_share < 0.3:
+                findings.append(f"- **Warning**: Edge primarily driven by funding ({funding_mean:.2f} bps), signal contribution low ({signal_mean:.2f} bps)")
+            else:
+                findings.append(f"- Edge balanced: signal={signal_mean:.2f} bps, funding={funding_mean:.2f} bps")
+
+    if cost_mean is not None and cost_mean > 0:
+        findings.append(f"- Cost model: {cost_mean:.1f} bps per trade (taker + slippage)")
+
+    # --- 阻断原因 ---
     top_reasons = diagnostics.get("top_blocking_reasons", [])
     if top_reasons:
         top = top_reasons[0]

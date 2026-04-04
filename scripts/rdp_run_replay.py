@@ -60,6 +60,8 @@ def main() -> None:
     parser.add_argument("--end", required=True, help="YYYY-MM-DD (UTC)")
     parser.add_argument("--dataset-version", default="v1")
     parser.add_argument("--param", action="append", default=[], help="key=value parameter override")
+    parser.add_argument("--ensure-schema", action="store_true",
+                        help="Run DB migrations before replay (default: assume schema ready)")
     args = parser.parse_args()
 
     # 延迟导入
@@ -84,7 +86,9 @@ def main() -> None:
     from aats.data_platform.replay.reports.markdown_report_builder import build_experiment_report
 
     settings = get_settings()
-    run_migrations(settings)
+    if args.ensure_schema:
+        log.info("Running migrations (--ensure-schema)...")
+        run_migrations(settings)
 
     # 创建 adapter
     if args.family == "independent":

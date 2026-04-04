@@ -12,6 +12,13 @@ Phase 2 首批优先打通的 adapter。从 Gold replay bars 构建简化的评�
 
 上述简化是 Phase 2 设计决策 §8.4 明确的边界：
   > Replay Core 在 Phase 2 不负责完整撮合仿真、PnL accounting、滑点模型、orderbook realism。
+
+Edge Contract（P0-3）：
+  expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+
+  signal_edge_proxy_bps:   从 score/momentum/trend/alpha 等因子派生
+  funding_adjustment_bps:  funding rate 作为附加项（不是全部）
+  cost_bps:               由 ReplayCostConfig 控制（默认 taker 5 bps + slippage 2 bps）
 """
 
 from __future__ import annotations
@@ -46,9 +53,11 @@ _ENTRY_THRESHOLD = 0.40
 _CLOSE_THRESHOLD = 0.15
 _SCALE_IN_THRESHOLD = 0.60
 
-# 简化成本模型
-_DEFAULT_TAKER_FEE_BPS = 0.5       # OKX swap taker fee: 0.05% = 5 bps -> 这里用 0.5 bps 简化
-_DEFAULT_SLIPPAGE_BPS = 0.3
+# signal edge proxy 缩放系数
+# 将 [0, 1] 区间的评分映射到合理的 bps 范围
+# 思路：一个 score=0.6 的信号 ~= 对策略来说有约 3 bps 的信号价值
+_SIGNAL_EDGE_SCALE_BPS = 10.0     # 满分 score=1.0 约 10 bps 信号代理
+
 _SCORE_HISTORY_WINDOW = 20         # 评分历史保留窗口
 
 
@@ -112,8 +121,12 @@ class IndependentReplayAdapter(BaseReplayAdapter):
             threshold_bps=params.score_stability_threshold,
         )
 
-        # 4) 计算预期净边际
-        expected_net_edge_bps = self._compute_expected_edge(bar, dominant_leg)
+        # 4) 计算预期净边际（统一 edge contract: signal + funding - cost）
+        edge = self._compute_edge_breakdown(bar, dominant_leg, dominant_score, params)
+        signal_edge_proxy_bps = edge["signal"]
+        funding_adjustment_bps = edge["funding"]
+        cost_bps = edge["cost"]
+        expected_net_edge_bps = edge["net"]
 
         # 5) 资格评估
         blocking_reasons: list[str] = []
@@ -159,6 +172,9 @@ class IndependentReplayAdapter(BaseReplayAdapter):
             long_score=round(long_score, 6),
             short_score=round(short_score, 6),
             blocking_reasons=blocking_reasons,
+            signal_edge_proxy_bps=round(signal_edge_proxy_bps, 4),
+            funding_adjustment_bps=round(funding_adjustment_bps, 4),
+            cost_bps=round(cost_bps, 4),
             expected_net_edge_bps=round(expected_net_edge_bps, 4),
             target_position_qty=target_qty,
             delta_position_qty=delta_qty,
@@ -276,35 +292,66 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         return True
 
     # ------------------------------------------------------------------
-    # 预期净边际（对齐生产 gates.py: required_safe_net_edge_bps）
+    # Edge 分解（P0-3 统一 contract）
     # ------------------------------------------------------------------
 
-    def _compute_expected_edge(self, bar: ReplayBar, leg: str) -> float:
-        """计算预期净边际（bps）。
+    def _compute_edge_breakdown(
+        self,
+        bar: ReplayBar,
+        leg: str,
+        dominant_score: float,
+        params: ReplayParameterOverrides,
+    ) -> dict[str, float]:
+        """计算 edge 的 4 层分解（bps）。
 
-        简化公式：
-        signal_edge = |funding_rate * 10000|  (funding rate -> bps)
-        net_edge = signal_edge - taker_fee - slippage
+        统一 Edge Contract:
+          expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
 
-        对于 short leg：正 funding rate 有利（做空收取 funding）
-        对于 long leg：负 funding rate 有利（做多收取 funding）
+        1) signal_edge_proxy_bps:
+           从评分因子派生。independent 的信号价值来自 score/momentum/trend/alpha
+           的综合评估，不应被简化为只看 funding。
+           公式: dominant_score * _SIGNAL_EDGE_SCALE_BPS
+           说明: score=0.6 -> 6 bps 信号代理; score=0.4 -> 4 bps
+
+        2) funding_adjustment_bps:
+           funding rate 作为附加项。对 short leg 正 funding 有利，对 long leg 负 funding 有利。
+           这是 independent 特有的 funding 附加收益，但不再是 edge 的全部。
+
+        3) cost_bps:
+           来自 ReplayCostConfig（默认 taker 5 bps + slippage 2 bps = 7 bps）
+
+        4) net = signal + funding - cost
         """
-        if bar.aligned_funding_rate is None:
-            return 0.0
+        cost = params.cost_config
 
-        fr = float(bar.aligned_funding_rate)
-        # funding rate 以百分比表示，转为 bps
-        funding_bps = fr * 10000
+        # --- 1) signal edge proxy: 来自策略评分的机会代理 ---
+        # 评分越高，信号越强，代理 edge 越大
+        # 将 score 映射到 bps: score * scale
+        signal_edge_proxy_bps = dominant_score * _SIGNAL_EDGE_SCALE_BPS
 
-        # 方向调整：short 收取正 funding，long 收取负 funding
-        if leg == "short":
-            signal_edge_bps = funding_bps
-        else:
-            signal_edge_bps = -funding_bps
+        # --- 2) funding adjustment: 附加项，不是全部 ---
+        funding_adjustment_bps = 0.0
+        if bar.aligned_funding_rate is not None:
+            fr = float(bar.aligned_funding_rate)
+            funding_bps = fr * 10000  # rate -> bps
+            # 方向调整: short 收取正 funding, long 收取负 funding
+            if leg == "short":
+                funding_adjustment_bps = funding_bps
+            else:
+                funding_adjustment_bps = -funding_bps
 
-        # 扣减成本
-        net_edge = signal_edge_bps - _DEFAULT_TAKER_FEE_BPS - _DEFAULT_SLIPPAGE_BPS
-        return net_edge
+        # --- 3) cost ---
+        cost_bps = cost.total_cost_bps
+
+        # --- 4) net ---
+        net_edge = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+
+        return {
+            "signal": signal_edge_proxy_bps,
+            "funding": funding_adjustment_bps,
+            "cost": cost_bps,
+            "net": net_edge,
+        }
 
     # ------------------------------------------------------------------
     # 状态机推进

@@ -27,6 +27,20 @@
 - [19. 测试与回放](#19-测试与回放)
 - [20. 仓库目录结构](#20-仓库目录结构)
 - [21. 研究数据平台 (Research Data Platform)](#21-研究数据平台-research-data-platform)
+  - [21.1 定位与边界](#211-定位与边界)
+  - [21.2 五层数据架构](#212-五层数据架构)
+  - [21.3 统一启动入口](#213-统一启动入口)
+  - [21.4 历史数据聚合](#214-历史数据聚合)
+  - [21.5 实时数据聚合](#215-实时数据聚合)
+  - [21.6 ���据流全景](#216-数据流全景)
+  - [21.7 覆盖范围](#217-覆盖范围phase-1-冻结)
+  - [21.8 质量验证与门控](#218-质量验证与门控)
+  - [21.9 参数研究平台 (Phase 2)](#219-参数研究平台-phase-2)
+  - [21.10 配置](#2110-配置)
+  - [21.11 数据库与迁移](#2111-数据库与迁移)
+  - [21.12 快速开始](#2112-快速开始)
+  - [21.13 代码模块清单](#2113-代码模块清单)
+  - [21.14 已知限制](#2114-已知限制)
 - [22. 安全边界与风险提示](#22-安全边界与风险提示)
 - [23. 开发建议](#23-开发建议)
 - [24. 常见问题](#24-常见问题)
@@ -806,10 +820,29 @@ docs/
   task*/                  # 任务设计与演进文档
 
 migrations/               # 交易系统 PostgreSQL 迁移 SQL
-  research/               # 研究数据平台迁移 SQL（0001-0011）
+  research/               # 研究数据平台迁移 SQL（0001-0012）
+
+data/historical/          # 历史数据目录
+  incoming/               #   放入 ZIP 文件，daemon 自动消费
+    candles_spot/1m|5m|…  #     按 instrument/timeframe 子目录组织
+    candles_swap/1m|5m|…
+    funding_swap/
+  completed/              #   消费成功后自动移入
+  failed/                 #   消费失败后自动移入（附 .error 日志）
+
+artifacts/research/       # Phase 2 参数研究产物
+  experiments/            #   replay decisions, diagnostics, reports
+
 scripts/                  # 启动、seed、回放、报告脚本
-  rdp_run_backfill.py     #   数仓历史回填入口
-  rdp_phase1_acceptance.py #  数仓 Phase 1 验收脚本
+  rdp_start.py            #   统一入口：一键启动历史+实时两个 daemon
+  rdp_historical_daemon.py #  历史数据聚合 daemon
+  rdp_realtime_daemon.py  #   实时数据聚合 daemon
+  rdp_run_replay.py       #   Phase 2 单次 replay 实验
+  rdp_run_parameter_scan.py # Phase 2 参数扫描
+  rdp_run_backfill.py     #   手动历史回填（保留）
+  rdp_build_gold.py       #   手动 Gold 构建（保留）
+  rdp_detect_gaps.py      #   手动 gap 检测（保留）
+  rdp_phase1_acceptance.py #  Phase 1 验收脚本
 tests/                    # 单元 / 集成 / 回放 / 场景测试
 ```
 
@@ -817,75 +850,149 @@ tests/                    # 单元 / 集成 / 回放 / 场景测试
 
 ## 21. 研究数据平台 (Research Data Platform)
 
-研究数据平台（RDP）是独立于交易系统主链路的**离线数据仓库**模块，负责从 OKX 采集、清洗、标准化市场数据，最终生成可直接用于回测/回放分析的 Gold 行情。
+研究数据平台（RDP）是独立于交易系统主链路的**离线数据仓库 + 参数研究**模块。Phase 1 负责从 OKX 采集、清洗、标准化市场数据，生成可直接用于回测的 Gold 行情；Phase 2 在此基础上构建参数研究平台，支持逐 bar replay、参数扫描和结构化诊断。
 
 ### 21.1 定位与边界
 
 | 维度 | 说明 |
 |------|------|
-| 职责 | 离线/准实时数据采集、清洗、分层存储、质量验证 |
+| 职责 | 离线/准实时数据采集、清洗、分层存储、质量验证、参数研究 |
 | 数据源 | OKX 历史文件下载（ZIP/CSV） + OKX REST API 增量 |
-| 输出 | Silver 标准化行情 + Gold 回放级 replay bars |
-| 数据库 | 独立库 `aats_research`，与交易系统分库隔离 |
+| 输出 | Silver 标准化行情 + Gold 回放级 replay bars + 参数实验报告 |
+| 数据库 | 独立库 `aats_research`（6 个 schema：meta/staging/bronze/silver/gold/research） |
 | 配置文件 | `.env.research`（`RDP_` 前缀），不与交易系统 `.env.*` 混用 |
 
 ### 21.2 五层数据架构
 
 ```text
-meta     ← 元数据：运行记录、checkpoint、质量报告、文件注册
-staging  ← 原始入库层，保留 raw_symbol / raw_ts / source_file_id 全链路溯源
-bronze   ← 去重 upsert 层，PK=(symbol, ts)，保留原始字段
-silver   ← 标准化层，经过质量验证的规范数据
-gold     ← 回放层，candle + funding 对齐后的 replay bars
+meta      -- 元数据：运行记录、checkpoint、质量报告、文件注册
+staging   -- 原始入库层，保留 raw_symbol / raw_ts / source_file_id 全链路溯源
+bronze    -- 去重 upsert 层，PK=(symbol, ts)，保留原始字段
+silver    -- 标准化层，经过质量验证的规范数据
+gold      -- 回放层，candle + funding 对齐后的 replay bars
+research  -- 参数研究层，实验元数据、诊断摘要、扫描批次记录
 ```
 
-共 41 张表，通过 `migrations/research/0001-0011` SQL 文件管理。
+共 44 张表，通过 `migrations/research/0001-0012` SQL 文件管理。
 
-### 21.3 数据流全景
+### 21.3 统一启动入口
 
-#### 历史回填 (Backfill)
+日常使用只需要一个命令：
+
+```powershell
+# 一键启动（历史消费 + 实时采集同时运行）
+python scripts/rdp_start.py
+
+# 只启动历史数据消费
+python scripts/rdp_start.py --historical-only
+
+# 只启动实时数据采集
+python scripts/rdp_start.py --realtime-only
+
+# 自定义扫描间隔
+python scripts/rdp_start.py --historical-interval 60 --realtime-interval 30
+
+# Ctrl+C 优雅退出
+```
+
+总启动脚本在同一进程内启动两个 daemon 线程：
+
+| daemon | 职责 | 默认间隔 |
+|--------|------|----------|
+| Historical | 定时扫描 `incoming/` 目录，发现新 ZIP 自动消费 | 30 秒 |
+| Realtime | 滚动采集 candles/funding + 定期构建 Gold + 定期检测 gap | 60 秒 |
+
+### 21.4 历史数据聚合
+
+#### 目录约定
+
+将 OKX 下载的 ZIP 文件放入 `incoming/` 对应子目录，daemon 自动消费：
 
 ```text
-OKX ZIP 文件
-  → file_discovery（扫描、SHA256 去重、注册到 meta.raw_source_files）
-  → file_parser（解析 CSV，header 标准化，BOM/引号容错）
-  → staging 写入
-  → candle_quality_checker / funding_quality_checker（质量门控）
-  → bronze_merger（staging -> bronze，upsert）
-  → silver_merger（bronze -> silver，upsert）
+data/historical/
+  incoming/                    -- 放入新 ZIP 文件
+    candles_spot/
+      1m/                      -- BTC-USDT-candlesticks-*.zip
+      5m/
+      15m/
+      1h/
+    candles_swap/
+      1m/                      -- BTC-USDT-SWAP-candlesticks-*.zip
+      5m/
+      15m/
+      1h/
+    funding_swap/              -- BTC-USDT-SWAP-fundingrates-*.zip
+  completed/                   -- 消费成功后自动移入（保留子目录结构）
+  failed/                      -- 消费失败后自动移入（附 .error 日志）
 ```
 
-运行入口：`python scripts/rdp_run_backfill.py --dir <目录> [--timeframe 1m]`
+**timeframe 由子目录名自动推断**（`candles_spot/1m/` 即 spot + 1m），无需手动指定。
 
-#### 滚动增量 (Rolling)
+#### 处理流程
 
 ```text
-OKX REST API
-  → candles_api_collector / funding_api_collector
-  → 分页抓取（newest-first, backward pagination）
-  → _dedupe_candle_rows / _dedupe_funding_rows（页边界去重）
-  → checkpoint 过滤（只取 > last_successful_ts 的新数据）
-  → staging 写入
-  → 质量验证 + merge pipeline
-  → checkpoint 推进
+incoming/ 扫描发现 ZIP
+  -- file_discovery（SHA256 去重、注册到 meta.raw_source_files）
+  -- file_parser（解析 CSV，header 标准化，BOM/引号容错）
+  -- staging 写入
+  -- candle_quality_checker / funding_quality_checker（质量门控）
+  -- bronze_merger（staging -> bronze，upsert）
+  -- silver_merger（bronze -> silver，upsert）
+  -- 对 swap 数据自动触发 Gold 构建
+  -- 成功 -> 移到 completed/；失败 -> 移到 failed/（附 .error）
 ```
 
-由 `scheduler.py` 驱动，每 60 秒 tick，按 cadence 触发：
+独立运行：`python scripts/rdp_historical_daemon.py [--once] [--interval 30]`
+
+### 21.5 实时数据聚合
+
+单循环内驱动四个子任务：
+
+| 子任务 | 触发条件 | 说明 |
+|--------|----------|------|
+| 滚动 candles | 每周期（cadence 自动判断） | 4 symbol x 4 timeframe |
+| 滚动 funding | 每 15 分钟 cadence | 2 swap symbol |
+| Gold 构建 | 每 60 个周期 | 对所有 swap 自动构建 replay bars |
+| Gap 检测+修复 | 每 120 个周期 | 自动检测 Silver 层缺口并创建 repair run |
+
+candles 采集节奏由 `scheduler.py` 的 cadence 控制：
+
 - 1m candles：每 1 分钟
 - 5m candles：每 5 分钟
 - 15m candles：每 15 分钟
 - 1H candles：每 1 小时
 - funding：每 15 分钟
 
-#### Gold 层构建
+独立运行：`python scripts/rdp_realtime_daemon.py [--once] [--interval 60]`
+
+### 21.6 数据流全景
 
 ```text
-Silver candles + Silver funding
-  → funding_aligner（as-of join：每根 bar 继承最新已发布 funding rate）
-  → replay_bar_builder（构建 Gold bars，upsert 写入 gold 表）
++-- 历史数据聚合 daemon ---------+    +-- 实时数据聚合 daemon -----+
+|                                |    |                            |
+|  incoming/ ZIP                 |    |  OKX REST API              |
+|    -- file_discovery           |    |    -- candles_api_collector |
+|    -- file_parser              |    |    -- funding_api_collector |
+|    -- staging 写入             |    |    -- staging 写入          |
+|    -- 质量门控                 |    |    -- 质量门控              |
+|    -- bronze merge             |    |    -- bronze merge          |
+|    -- silver merge             |    |    -- silver merge          |
+|    -- 移到 completed/failed    |    |    -- checkpoint 推进       |
+|                                |    |    -- 定期 Gold 构建        |
++--------------------------------+    |    -- 定期 Gap 检测         |
+                                      +----------------------------+
+                  |                                    |
+                  v                                    v
+          +-- Silver 标准化层 --+
+          |                     |
+          v                     v
+   +-- Gold 回放层 --+   +-- Phase 2 参数研究 --+
+   | replay bars     |   | replay -> diagnostics |
+   | (candle+funding)|   | -> scan -> report     |
+   +-----------------+   +----------------------+
 ```
 
-### 21.4 覆盖范围（Phase 1 冻结）
+### 21.7 覆盖范围（Phase 1 冻结）
 
 | 维度 | 范围 |
 |------|------|
@@ -895,16 +1002,16 @@ Silver candles + Silver funding
 | Timeframe | 1m, 5m, 15m, 1H |
 | 数据域 | candles (OHLCV) + funding rates |
 
-### 21.5 质量验证与门控
+### 21.8 质量验证与门控
 
 #### Candle 质量检查
 
 | 检查项 | 级别 |
 |--------|------|
-| 重复 (symbol, ts) | `fail` — 阻断 merge |
-| OHLC 非法 (h < l, 价格 <= 0) | `fail` |
+| 重复 (symbol, ts) | `fail` -- 阻断 merge |
+| OHLC 非法 (h < l, price <= 0) | `fail` |
 | 时间乱序 | `fail` |
-| 缺失间隔 | `warn` — 继续但记录 |
+| 缺失间隔 | `warn` -- 继续但记录 |
 | Volume 负值 | `warn` |
 | 可疑 bar (h < o 等) | `warn` |
 
@@ -918,34 +1025,116 @@ Silver candles + Silver funding
 
 质量报告写入 `meta.quality_reports`，每次验证有完整记录。
 
-### 21.6 可观测性
+### 21.9 参数研究平台 (Phase 2)
 
-| 机制 | 存储位置 | 说明 |
-|------|----------|------|
-| 运行追踪 | `meta.ingest_runs` + `meta.ingest_run_items` | 全链路 run_id 可审计 |
-| 文件状态 | `meta.raw_source_files` | pending / ingested / skipped / failed |
-| 质量报告 | `meta.quality_reports` | 每次验证的详细指标 |
-| Checkpoint | `meta.ingest_checkpoints` | 持久化水位线，gap 检测 |
-| Scheduler 防重 | 进程内 bucket dedup | 单进程 best-effort，重启可能重跑一次 |
+Phase 2 在 Gold 数据之上构建参数研究闭环，回答"当参数变化时，策略行为结构如何改变"。
 
-### 21.7 Timeframe 路由规则
+#### 架构总览
 
-OKX candle 文件名本身不携带 timeframe。路由优先级：
+```text
+Gold replay bars
+  -- Replay Core（逐 bar 重放引擎）
+  -- Strategy Adapter（independent / directional 家族适配器）
+  -- Diagnostics Engine（结构化诊断指标）
+  -- Experiment Registry（实验元数据、产物路径追踪）
+  -- Parameter Scan Engine（参数网格批量扫描）
+  -- Report Builder（Markdown / JSON / CSV 报告生成）
+```
 
-1. CLI `--timeframe` 显式指定（最高优先）
-2. 目录名推断（如 `downloads/1m/BTC-USDT-candlesticks-2026-04-01.zip`）
-3. 以上都没有 → 显式标记为 `skipped`，原因写入 `meta.raw_source_files.parse_error`
+#### 首批冻结参数（3 个）
 
-允许的目录名：`1m`, `5m`, `15m`, `1H`（以及别名 `1h`, `4h`, `4H`, `1d`, `1D`）。
+| 参数 | 生产代码位置 | 说明 | 默认值 |
+|------|-------------|------|--------|
+| `min_confirm_ticks` | `settings.strategy_hedge_independent_min_confirm_ticks` | 信号确认强度 | 2 |
+| `score_stability_threshold` | `settings.strategy_hedge_independent_min_score_stability_bps` | 强信号是否被过度拦截 | 2.0 |
+| `min_safe_net_edge_bps` | `settings.strategy_hedge_independent_min_safe_net_edge_bps` | 边缘机会放行下限 | 0.0 |
 
-### 21.8 配置
+#### 运行方式
+
+```powershell
+# 单次 replay 实验
+python scripts/rdp_run_replay.py \
+    --family independent \
+    --symbol BTC-USDT-SWAP \
+    --timeframe 1m \
+    --start 2026-03-31 --end 2026-04-02 \
+    --dataset-version v1.0 \
+    --param min_confirm_ticks=3 \
+    --param min_safe_net_edge_bps=5
+
+# 参数网格扫描（默认 3x3x3 = 27 组合）
+python scripts/rdp_run_parameter_scan.py \
+    --family independent \
+    --symbol BTC-USDT-SWAP \
+    --timeframe 1m \
+    --start 2026-03-31 --end 2026-04-02
+
+# 自定义参数网格
+python scripts/rdp_run_parameter_scan.py \
+    --family independent \
+    --symbol BTC-USDT-SWAP \
+    --timeframe 1m \
+    --start 2026-03-31 --end 2026-04-02 \
+    --grid '{"min_confirm_ticks":[2,3],"min_safe_net_edge_bps":[0,5,10]}'
+```
+
+#### 产物结构
+
+每次实验生成三个文件：
+
+```text
+artifacts/research/experiments/<experiment_id>/
+  replay_decisions.csv    -- 逐 bar 决策明细
+  diagnostics.json        -- 诊断指标快照
+  report.md               -- Markdown 研究报告
+```
+
+参数扫描额外生成：
+
+```text
+artifacts/research/experiments/<scan_run_id>/
+  comparison_summary.json -- 多组实验对比数据
+  comparison_report.md    -- 对比报告
+  <experiment_id>/        -- 每组参数各自的产物
+```
+
+#### 诊断指标
+
+| 指标 | 说明 |
+|------|------|
+| `opening_count` | 触发开仓次数 |
+| `blocked_count` | 通过评分阈值但被门槛拦截的次数 |
+| `selectable_ratio` | 评分达到入场阈值的 bar 占比 |
+| `execution_compatible_ratio` | 同时满足评分+稳定性+边际的 bar 占比 |
+| `top_blocking_reasons` | 拦截原因 Top N 排名 |
+| `mean_expected_edge_bps` | 平均预期净边际（bps） |
+| `state_distribution` | 状态分布（flat/probing/holding/...） |
+| `action_distribution` | 动作分布（open/hold/close/blocked） |
+
+#### 策略适配器
+
+| 适配器 | 说明 |
+|--------|------|
+| `IndependentReplayAdapter` | 从 OHLCV + funding rate 派生简化因子，复用 independent 策略的评分/稳定性/资格门槛逻辑 |
+| `DirectionalReplayAdapter` | 基于 SMA crossover 的最小 directional 策略实现，受相同参数门槛约束 |
+
+两个适配器均实现 `BaseReplayAdapter` 接口，新增家族只需继承基类并实现 `evaluate_bar()` 方法。
+
+#### 简化说明
+
+Phase 2 replay 使用简化评分模型（不含 AI assessment、orderbook depth、真实 execution state），与生产系统评分存在偏差。不包含撮合仿真、PnL accounting 和滑点模型（属于后续 Phase）。重点关注参数变化对决策结构的**相对影响**。
+
+### 21.10 配置
 
 所有配置通过 `.env.research` 读取，前缀 `RDP_`。
 
 | 环境变量 | 说明 | 默认值 |
 |----------|------|--------|
 | `RDP_DATABASE_URL` | PostgreSQL 连接串 | `postgresql+psycopg://localhost:5432/aats_research` |
-| `RDP_HISTORICAL_DOWNLOAD_DIR` | 历史文件下载根目录 | `./data/historical` |
+| `RDP_HISTORICAL_INCOMING_DIR` | 历史 ZIP 输入目录 | `./data/historical/incoming` |
+| `RDP_HISTORICAL_COMPLETED_DIR` | 消费成功目录 | `./data/historical/completed` |
+| `RDP_HISTORICAL_FAILED_DIR` | 消费失败目录 | `./data/historical/failed` |
+| `RDP_HISTORICAL_SCAN_INTERVAL_SECONDS` | 历史扫描间隔 | `30` |
 | `RDP_OKX_REST_URL` | OKX REST API 地址 | `https://www.okx.com` |
 | `RDP_OKX_TIMEOUT_SECONDS` | API 超时 | `15` |
 | `RDP_OKX_RATE_LIMIT_SLEEP` | API 请求间隔 | `0.12` |
@@ -955,66 +1144,72 @@ OKX candle 文件名本身不携带 timeframe。路由优先级：
 | `RDP_ROLLING_FUNDING_ENABLED` | 滚动 funding 开关 | `true` |
 | `RDP_ROLLING_FUNDING_SYMBOLS` | funding symbol 列表 | `BTC-USDT-SWAP,ETH-USDT-SWAP` |
 | `RDP_GOLD_REPLAY_BUILD_ENABLED` | Gold 层构建开关 | `true` |
+| `RDP_GOLD_AUTO_BUILD_INTERVAL_CYCLES` | Gold 自动构建周期 | `60` |
+| `RDP_GAP_AUTO_DETECT_INTERVAL_CYCLES` | Gap 自动检测周期 | `120` |
+| `RDP_GAP_AUTO_DETECT_WINDOW_HOURS` | Gap 检测回溯窗口 | `24` |
 
 模板文件：`configs/templates/.env.research.example`
 
-### 21.9 数据库与迁移
+### 21.11 数据库与迁移
 
 数仓使用独立数据库 `aats_research`，与交易系统分库。
 
 ```powershell
-# 创建数据库
+# 初始化数据库（自动创建库 + 执行全部迁移）
+python scripts/rdp_init_db.py
+
+# 或手动分步
 psql -U postgres -c "CREATE DATABASE aats_research"
-
-# 方式 A：通过 Python 执行迁移
 python -c "from aats.data_platform.db import run_migrations; run_migrations()"
-
-# 方式 B：手动逐个执行
-psql -U postgres -d aats_research -f migrations/research/0001_create_research_schemas.sql
-psql -U postgres -d aats_research -f migrations/research/0002_create_meta_tables.sql
-# ... 依次到 0011
 ```
 
 迁移文件清单（`migrations/research/`）：
 
-| 文件 | 内容 |
-|------|------|
-| `0001` | 创建 meta / staging / bronze / silver / gold 五个 schema |
-| `0002` | meta 表：dataset_manifests, raw_source_files, ingest_runs, ingest_run_items, ingest_checkpoints, quality_reports |
-| `0003` | staging candle 表 (8 张: spot/swap x 1m/5m/15m/1h) |
-| `0004` | staging funding 表 |
-| `0005` | bronze candle 表 (8 张) |
-| `0006` | bronze funding 表 |
-| `0007` | silver candle 表 (8 张) |
-| `0008` | silver funding 表 |
-| `0009` | gold replay bar 表 (8 张) |
-| `0010` | 全表 updated_at 触发器 + 补充索引 |
-| `0011` | raw_source_files 增加 `skipped` 状态 |
+| 文件 | 内容 | 表数 |
+|------|------|------|
+| `0001` | 创建 meta / staging / bronze / silver / gold 五个 schema | 0 |
+| `0002` | meta 表：dataset_manifests, raw_source_files, ingest_runs, ingest_run_items, ingest_checkpoints, quality_reports | 6 |
+| `0003` | staging candle 表 (spot/swap x 1m/5m/15m/1h) | 8 |
+| `0004` | staging funding 表 | 1 |
+| `0005` | bronze candle 表 | 8 |
+| `0006` | bronze funding 表 | 1 |
+| `0007` | silver candle 表 | 8 |
+| `0008` | silver funding 表 | 1 |
+| `0009` | gold replay bar 表 | 8 |
+| `0010` | 全表 updated_at 触发器 + 补充索引 | 0 |
+| `0011` | raw_source_files 增加 `skipped` 状态 | 0 |
+| `0012` | research schema：experiments, experiment_summaries, parameter_scan_runs | 3 |
 
-### 21.10 快速开始
+### 21.12 快速开始
 
 ```powershell
-# 1. 准备 .env.research
+# 1. 配置
 cp configs/templates/.env.research.example .env.research
-# 编辑 .env.research，填入真实数据库连接串
+# 编辑 .env.research，填入 RDP_DATABASE_URL
 
-# 2. 创建数据库并执行迁移
-python -c "
-from sqlalchemy import create_engine, text
-engine = create_engine('postgresql+psycopg://postgres:YOUR_PASSWORD@localhost:5432/postgres', isolation_level='AUTOCOMMIT')
-with engine.connect() as conn:
-    conn.execute(text('CREATE DATABASE aats_research'))
-"
-python -c "from aats.data_platform.db import run_migrations; run_migrations()"
+# 2. 初始化数据库（自动建库 + 迁移 0001-0012）
+python scripts/rdp_init_db.py
 
-# 3. 历史回填（以 1m 为例）
-python scripts/rdp_run_backfill.py --dir ./data/historical --timeframe 1m
+# 3. 放入历史数据
+# 将 OKX 下载的 ZIP 放入 data/historical/incoming/ 对应子目录
+# 例如：data/historical/incoming/candles_swap/1m/BTC-USDT-SWAP-candlesticks-2026-04-01.zip
 
-# 4. 运行验收
-python scripts/rdp_phase1_acceptance.py
+# 4. 一键启动
+python scripts/rdp_start.py
+# 历史 daemon 自动消费 ZIP -> staging -> silver -> Gold
+# 实时 daemon 自动采集最新数据
+
+# 5. 运行参数研究（可选）
+python scripts/rdp_run_replay.py \
+    --family independent \
+    --symbol BTC-USDT-SWAP --timeframe 1m \
+    --start 2026-03-31 --end 2026-04-02 \
+    --dataset-version v1.0
 ```
 
-### 21.11 代码模块清单
+### 21.13 代码模块清单
+
+**Phase 1 数据仓库**（`aats/data_platform/`）：
 
 | 文件 | 职责 |
 |------|------|
@@ -1027,7 +1222,6 @@ python scripts/rdp_phase1_acceptance.py
 | `collectors/backfill/funding_backfill_collector.py` | funding 历史回填编排 |
 | `collectors/rolling/candles_api_collector.py` | OKX REST API candle 增量采集 + 去重 + checkpoint |
 | `collectors/rolling/funding_api_collector.py` | OKX REST API funding 增量采集 + 去重 + checkpoint |
-| `normalize/symbol_mapper.py` | canonical symbol 映射（Phase 1: 4 个 instrument） |
 | `normalize/time_normalizer.py` | ms epoch -> UTC datetime 转换 |
 | `validate/candle_quality_checker.py` | candle 质量检查（重复/缺失/乱序/OHLC/volume） |
 | `validate/funding_quality_checker.py` | funding 质量检查（重复/乱序/null rate） |
@@ -1042,7 +1236,23 @@ python scripts/rdp_phase1_acceptance.py
 | `jobs/run_registry.py` | ingest_run / run_item 生命周期管理 |
 | `jobs/gap_repair.py` | Silver 层 gap 检测 + repair run 创建 |
 
-### 21.12 已知限制（Phase 1）
+**Phase 2 参数研究**（`aats/data_platform/replay/`）：
+
+| 文件 | 职责 |
+|------|------|
+| `core/replay_context.py` | 数据模型：ReplayBar, ReplayDecision, ReplayParameterOverrides, ReplayState |
+| `core/replay_runner.py` | 逐 bar 重放引擎（读取 Gold bars -> 调用 adapter -> 输出决策列表） |
+| `core/replay_result_writer.py` | 产物写入器（CSV / JSON） |
+| `adapters/base_adapter.py` | 策略适配器抽象基类（统一 evaluate_bar 接口） |
+| `adapters/independent_adapter.py` | Independent 策略 replay 适配器 |
+| `adapters/directional_adapter.py` | Directional 策略 replay 适配器 |
+| `registry/experiment_registry.py` | 实验元数据 CRUD + summary upsert（写入 research schema） |
+| `diagnostics/replay_diagnostics.py` | 诊断计算 + 多组对比（compute_diagnostics / compare_diagnostics） |
+| `scan/parameter_grid.py` | 参数网格定义与展开（DEFAULT_PARAMETER_GRID, build_grid） |
+| `scan/scan_runner.py` | 批量扫描引擎（run_parameter_scan） |
+| `reports/markdown_report_builder.py` | Markdown 报告生成（单实验 + 扫描对比） |
+
+### 21.14 已知限制
 
 | 项目 | 说明 |
 |------|------|
@@ -1050,6 +1260,8 @@ python scripts/rdp_phase1_acceptance.py
 | Symbol 白名单 | 硬编码 4 个 instrument，后续需改为数据库驱动 |
 | Gold volume 语义 | spot vol = 基础币量，swap vol = 合约张数，未做跨类型统一 |
 | 单进程 | scheduler 设计为单进程，不支持多 worker 并行 |
+| Replay 评分 | Phase 2 使用简化评分模型（不含 AI assessment），与生产存在偏差 |
+| Replay 撮合 | Phase 2 不含撮合仿真、PnL accounting、滑点模型（后续 Phase） |
 
 ---
 

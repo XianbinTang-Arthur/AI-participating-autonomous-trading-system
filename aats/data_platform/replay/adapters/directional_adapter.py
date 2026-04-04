@@ -9,7 +9,12 @@ Phase 2 设计决策 §9.4：
 - 使用 SMA crossover 作为简化信号
 - 同样受 min_confirm_ticks / min_safe_net_edge_bps 约束
 
-后续阶段可替换为更复杂的 directional 评估逻辑。
+Edge Contract（P0-3）：
+  expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+
+  signal_edge_proxy_bps:   directional 使用 bar return + trend strength 派生
+  funding_adjustment_bps:  funding rate 作为附加项
+  cost_bps:               由 ReplayCostConfig 控制
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from aats.data_platform.replay.core.replay_context import (
     ReplayBar,
     ReplayBarContext,
     ReplayDecision,
+    ReplayParameterOverrides,
     ReplayState,
 )
 
@@ -30,7 +36,10 @@ _FAST_PERIOD = 5
 _SLOW_PERIOD = 20
 _ENTRY_THRESHOLD = 0.45
 _CLOSE_THRESHOLD = 0.20
-_DEFAULT_COST_BPS = 0.8
+
+# signal edge proxy 缩放系数
+# directional 的信号价值来自趋势强度 + bar return
+_SIGNAL_EDGE_SCALE_BPS = 12.0     # 满分 score=1.0 约 12 bps 信号代理（directional 偏趋势型）
 
 
 class DirectionalReplayAdapter(BaseReplayAdapter):
@@ -72,8 +81,12 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
         # 稳定性检查
         score_stable = self._check_stability(params.min_confirm_ticks, params.score_stability_threshold)
 
-        # 预期边际
-        expected_net_edge_bps = self._compute_edge(bar, dominant_leg)
+        # 预期边际（统一 edge contract: signal + funding - cost）
+        edge = self._compute_edge_breakdown(bar, dominant_leg, dominant_score, params)
+        signal_edge_proxy_bps = edge["signal"]
+        funding_adjustment_bps = edge["funding"]
+        cost_bps = edge["cost"]
+        expected_net_edge_bps = edge["net"]
 
         # 资格评估
         blocking_reasons: list[str] = []
@@ -112,6 +125,9 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             long_score=round(long_score, 6),
             short_score=round(short_score, 6),
             blocking_reasons=blocking_reasons,
+            signal_edge_proxy_bps=round(signal_edge_proxy_bps, 4),
+            funding_adjustment_bps=round(funding_adjustment_bps, 4),
+            cost_bps=round(cost_bps, 4),
             expected_net_edge_bps=round(expected_net_edge_bps, 4),
             target_position_qty=target_qty,
             delta_position_qty=delta_qty,
@@ -154,13 +170,69 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
         drawdown_bps = (peak - current) * 10000
         return drawdown_bps <= threshold_bps
 
-    def _compute_edge(self, bar: ReplayBar, leg: str) -> float:
+    def _compute_edge_breakdown(
+        self,
+        bar: ReplayBar,
+        leg: str,
+        dominant_score: float,
+        params: ReplayParameterOverrides,
+    ) -> dict[str, float]:
+        """计算 edge 的 4 层分解（bps）。
+
+        统一 Edge Contract:
+          expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+
+        1) signal_edge_proxy_bps:
+           directional 的信号代理包含两部分：
+           - 趋势强度：dominant_score * scale
+           - bar return 修正：最近一根 bar 的方向收益提供短期确认
+           二者加权合成，使信号代理不只依赖单一来源。
+
+        2) funding_adjustment_bps:
+           与 independent 相同语义，funding rate 作为附加项。
+
+        3) cost_bps:
+           来自 ReplayCostConfig
+        """
+        cost = params.cost_config
+
+        # --- 1) signal edge proxy ---
+        # 趋势强度分量
+        trend_signal = dominant_score * _SIGNAL_EDGE_SCALE_BPS
+
+        # bar return 修正分量（短期方向确认）
         closes = list(self._close_history)
-        if len(closes) < 2:
-            return 0.0
-        bar_return = (closes[-1] - closes[-2]) / closes[-2] if closes[-2] != 0 else 0.0
-        dir_edge = bar_return * 10000 if leg == "long" else -bar_return * 10000
-        return dir_edge - _DEFAULT_COST_BPS
+        bar_return_bps = 0.0
+        if len(closes) >= 2 and closes[-2] != 0:
+            bar_return = (closes[-1] - closes[-2]) / closes[-2]
+            bar_return_bps = bar_return * 10000 if leg == "long" else -bar_return * 10000
+
+        # 加权: 70% 趋势强度 + 30% bar return（限制 bar return 影响范围）
+        bar_return_clamped = max(-20.0, min(20.0, bar_return_bps))  # 限幅 ±20 bps
+        signal_edge_proxy_bps = 0.7 * trend_signal + 0.3 * bar_return_clamped
+
+        # --- 2) funding adjustment ---
+        funding_adjustment_bps = 0.0
+        if bar.aligned_funding_rate is not None:
+            fr = float(bar.aligned_funding_rate)
+            funding_bps = fr * 10000
+            if leg == "short":
+                funding_adjustment_bps = funding_bps
+            else:
+                funding_adjustment_bps = -funding_bps
+
+        # --- 3) cost ---
+        cost_bps = cost.total_cost_bps
+
+        # --- 4) net ---
+        net_edge = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+
+        return {
+            "signal": signal_edge_proxy_bps,
+            "funding": funding_adjustment_bps,
+            "cost": cost_bps,
+            "net": net_edge,
+        }
 
     def _advance_state(self, state: ReplayState, bar: ReplayBar,
                        dominant_leg: str, score: float, exec_ok: bool) -> tuple[str, str]:

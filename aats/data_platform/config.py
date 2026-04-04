@@ -39,10 +39,26 @@ class ResearchPlatformSettings(BaseSettings):
                     "Set via RDP_DATABASE_URL in .env.research.",
     )
 
-    # Historical file directory
+    # Historical file directories (daemon mode)
     historical_download_dir: str = Field(
         default="./data/historical",
-        description="Root directory for OKX historical download files",
+        description="Root directory for OKX historical download files (legacy)",
+    )
+    historical_incoming_dir: str = Field(
+        default="./data/historical/incoming",
+        description="Incoming directory — place ZIP files here for auto-consumption",
+    )
+    historical_completed_dir: str = Field(
+        default="./data/historical/completed",
+        description="Completed directory — successfully consumed files are moved here",
+    )
+    historical_failed_dir: str = Field(
+        default="./data/historical/failed",
+        description="Failed directory — files that failed processing are moved here",
+    )
+    historical_scan_interval_seconds: int = Field(
+        default=30,
+        description="How often the historical daemon scans for new ZIP files",
     )
 
     # OKX API
@@ -69,6 +85,20 @@ class ResearchPlatformSettings(BaseSettings):
 
     # Gold build
     gold_replay_build_enabled: bool = True
+    gold_auto_build_interval_cycles: int = Field(
+        default=60,
+        description="In realtime daemon: rebuild Gold every N rolling cycles",
+    )
+
+    # Gap repair
+    gap_auto_detect_interval_cycles: int = Field(
+        default=120,
+        description="In realtime daemon: run gap detection every N rolling cycles",
+    )
+    gap_auto_detect_window_hours: int = Field(
+        default=24,
+        description="Gap detection lookback window in hours",
+    )
 
     # Dataset version prefix
     dataset_version_prefix: str = "v1"

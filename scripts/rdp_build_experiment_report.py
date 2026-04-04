@@ -26,6 +26,8 @@ _ARTIFACT_ROOT = pathlib.Path("artifacts/research/experiments")
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build experiment report")
     parser.add_argument("--experiment-id", required=True, help="Experiment UUID")
+    parser.add_argument("--ensure-schema", action="store_true",
+                        help="Run DB migrations before building report")
     args = parser.parse_args()
 
     from aats.data_platform.config import get_settings
@@ -37,7 +39,9 @@ def main() -> None:
     from aats.data_platform.replay.reports.markdown_report_builder import build_experiment_report
 
     settings = get_settings()
-    run_migrations(settings)
+    if args.ensure_schema:
+        log.info("Running migrations (--ensure-schema)...")
+        run_migrations(settings)
 
     exp_id = UUID(args.experiment_id)
 
