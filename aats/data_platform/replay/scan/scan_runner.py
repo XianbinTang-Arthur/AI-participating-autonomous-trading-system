@@ -203,6 +203,7 @@ def run_parameter_scan(
     failed = 0
     all_diagnostics: list[dict[str, Any]] = []
     all_labels: list[str] = []
+    failed_combos: list[dict[str, Any]] = []
 
     for i, params in enumerate(combos):
         label = combo_label(params)
@@ -225,20 +226,42 @@ def run_parameter_scan(
             all_diagnostics.append(diag)
             all_labels.append(label)
             completed += 1
-        except Exception:
+        except Exception as exc:
             log.exception("Combo %s failed", label)
+            failed_combos.append({
+                "label": label,
+                "parameters": params.to_dict(),
+                "error": str(exc),
+                "error_type": type(exc).__name__,
+            })
             failed += 1
 
         session.commit()
 
-    # 3. comparison summary
+    # 3. comparison summary + failed combos artifact
+    scan_dir = artifact_root / str(scan_run_id)
     comparison_path: str | None = None
     if all_diagnostics:
         comparison = compare_diagnostics(all_diagnostics, all_labels)
-        comp_file = artifact_root / str(scan_run_id) / "comparison_summary.json"
+        comp_file = scan_dir / "comparison_summary.json"
         write_summary_json(comparison, comp_file)
         comparison_path = str(comp_file)
         log.info("Wrote comparison summary to %s", comp_file)
+
+    # 写 failed combos artifact（无论有无失败都写，方便查验）
+    failed_file = scan_dir / "failed_combos.json"
+    write_summary_json(
+        {
+            "scan_run_id": str(scan_run_id),
+            "total_combinations": len(combos),
+            "failed_count": failed,
+            "completed_count": completed,
+            "failed_combos": failed_combos,
+        },
+        failed_file,
+    )
+    if failed_combos:
+        log.warning("Wrote %d failed combo(s) to %s", len(failed_combos), failed_file)
 
     # 4. 更新 scan_run
     mark_scan_finished(

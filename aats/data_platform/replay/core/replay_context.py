@@ -88,15 +88,36 @@ class ReplayCostConfig:
 class ReplayParameterOverrides:
     """可在 replay 实验中覆盖的策略参数。
 
-    Phase 2 首批冻结 3 个策略参数 + 可配置的成本模型：
-    - min_confirm_ticks        信号确认强度
-    - score_stability_threshold 强信号是否被过度拦截
-    - min_safe_net_edge_bps    边缘机会放行下限
-    - cost_config              交易成本配置（taker_fee_bps + slippage_bps）
+    Phase 2 冻结参数（均可通过 CLI --param key=value 覆盖）：
+
+    策略门槛参数：
+    - min_confirm_ticks           信号确认强度
+    - score_stability_threshold   强信号是否被过度拦截
+    - min_safe_net_edge_bps       边缘机会放行下限
+
+    Signal edge 校准参数：
+    - signal_edge_scale_bps       score -> bps 的缩放系数（影响 signal proxy 绝对值）
+    - directional_trend_weight    directional 的趋势/return 混合权重（0~1）
+    - directional_return_clamp_bps  directional bar return 限幅（bps）
+
+    成本模型（也可通过 --param taker_fee_bps=5 直接覆盖）：
+    - cost_config                 交易成本配置（taker_fee_bps + slippage_bps）
     """
     min_confirm_ticks: int = 2
     score_stability_threshold: float = 2.0
     min_safe_net_edge_bps: float = 0.0
+
+    # Signal edge 校准参数（收口在这里，不锁死在 adapter 内部常量）
+    signal_edge_scale_bps: float = 10.0
+    """score -> bps 的缩放系数。score=0.6 * 10 = 6 bps 信号代理。
+    两个 family 共用同一缩放基准，后续可做 scale calibration run。"""
+
+    directional_trend_weight: float = 0.7
+    """directional adapter 里 趋势强度 vs bar return 的混合权重。
+    signal = weight * trend_signal + (1-weight) * clamped_return。"""
+
+    directional_return_clamp_bps: float = 20.0
+    """directional adapter 里 bar return 的限幅（bps）。防止单根极端 bar 主导 signal。"""
 
     # 成本配置
     cost_config: ReplayCostConfig = dc.field(default_factory=ReplayCostConfig)
@@ -109,6 +130,9 @@ class ReplayParameterOverrides:
             "min_confirm_ticks": self.min_confirm_ticks,
             "score_stability_threshold": self.score_stability_threshold,
             "min_safe_net_edge_bps": self.min_safe_net_edge_bps,
+            "signal_edge_scale_bps": self.signal_edge_scale_bps,
+            "directional_trend_weight": self.directional_trend_weight,
+            "directional_return_clamp_bps": self.directional_return_clamp_bps,
             "cost_config": self.cost_config.to_dict(),
         }
         if self.extra:
@@ -117,16 +141,40 @@ class ReplayParameterOverrides:
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> ReplayParameterOverrides:
+        """从字典反序列化。
+
+        支持两种成本传入方式：
+        1. 嵌套: {"cost_config": {"taker_fee_bps": 5, "slippage_bps": 2}}
+        2. 平铺（CLI 友好）: {"taker_fee_bps": 5, "slippage_bps": 2}
+        平铺方式优先级更高（直接来自 --param）。
+        """
         known = {
             "min_confirm_ticks", "score_stability_threshold",
-            "min_safe_net_edge_bps", "cost_config",
+            "min_safe_net_edge_bps", "signal_edge_scale_bps",
+            "directional_trend_weight", "directional_return_clamp_bps",
+            "cost_config",
+            # 平铺 cost keys（from_dict 时消费，不进 extra）
+            "taker_fee_bps", "slippage_bps",
         }
-        cost_raw = d.get("cost_config")
-        cost = ReplayCostConfig.from_dict(cost_raw) if isinstance(cost_raw, dict) else ReplayCostConfig()
+
+        # 成本配置：优先从平铺 keys 组装，其次从嵌套 cost_config
+        has_flat_cost = "taker_fee_bps" in d or "slippage_bps" in d
+        if has_flat_cost:
+            cost = ReplayCostConfig(
+                taker_fee_bps=float(d.get("taker_fee_bps", 5.0)),
+                slippage_bps=float(d.get("slippage_bps", 2.0)),
+            )
+        else:
+            cost_raw = d.get("cost_config")
+            cost = ReplayCostConfig.from_dict(cost_raw) if isinstance(cost_raw, dict) else ReplayCostConfig()
+
         return cls(
             min_confirm_ticks=int(d.get("min_confirm_ticks", 2)),
             score_stability_threshold=float(d.get("score_stability_threshold", 2.0)),
             min_safe_net_edge_bps=float(d.get("min_safe_net_edge_bps", 0.0)),
+            signal_edge_scale_bps=float(d.get("signal_edge_scale_bps", 10.0)),
+            directional_trend_weight=float(d.get("directional_trend_weight", 0.7)),
+            directional_return_clamp_bps=float(d.get("directional_return_clamp_bps", 20.0)),
             cost_config=cost,
             extra={k: v for k, v in d.items() if k not in known},
         )

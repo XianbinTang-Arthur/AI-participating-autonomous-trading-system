@@ -53,11 +53,6 @@ _ENTRY_THRESHOLD = 0.40
 _CLOSE_THRESHOLD = 0.15
 _SCALE_IN_THRESHOLD = 0.60
 
-# signal edge proxy 缩放系数
-# 将 [0, 1] 区间的评分映射到合理的 bps 范围
-# 思路：一个 score=0.6 的信号 ~= 对策略来说有约 3 bps 的信号价值
-_SIGNAL_EDGE_SCALE_BPS = 10.0     # 满分 score=1.0 约 10 bps 信号代理
-
 _SCORE_HISTORY_WINDOW = 20         # 评分历史保留窗口
 
 
@@ -310,8 +305,9 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         1) signal_edge_proxy_bps:
            从评分因子派生。independent 的信号价值来自 score/momentum/trend/alpha
            的综合评估，不应被简化为只看 funding。
-           公式: dominant_score * _SIGNAL_EDGE_SCALE_BPS
-           说明: score=0.6 -> 6 bps 信号代理; score=0.4 -> 4 bps
+           公式: dominant_score * params.signal_edge_scale_bps
+           说明: score=0.6 * 10 = 6 bps 信号代理; score=0.4 * 10 = 4 bps
+           缩放系数 signal_edge_scale_bps 可通过参数覆盖（默认 10.0），支持 calibration run。
 
         2) funding_adjustment_bps:
            funding rate 作为附加项。对 short leg 正 funding 有利，对 long leg 负 funding 有利。
@@ -326,8 +322,8 @@ class IndependentReplayAdapter(BaseReplayAdapter):
 
         # --- 1) signal edge proxy: 来自策略评分的机会代理 ---
         # 评分越高，信号越强，代理 edge 越大
-        # 将 score 映射到 bps: score * scale
-        signal_edge_proxy_bps = dominant_score * _SIGNAL_EDGE_SCALE_BPS
+        # 将 score 映射到 bps: score * scale（scale 来自 params，可校准）
+        signal_edge_proxy_bps = dominant_score * params.signal_edge_scale_bps
 
         # --- 2) funding adjustment: 附加项，不是全部 ---
         funding_adjustment_bps = 0.0

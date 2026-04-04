@@ -37,10 +37,6 @@ _SLOW_PERIOD = 20
 _ENTRY_THRESHOLD = 0.45
 _CLOSE_THRESHOLD = 0.20
 
-# signal edge proxy 缩放系数
-# directional 的信号价值来自趋势强度 + bar return
-_SIGNAL_EDGE_SCALE_BPS = 12.0     # 满分 score=1.0 约 12 bps 信号代理（directional 偏趋势型）
-
 
 class DirectionalReplayAdapter(BaseReplayAdapter):
     """Directional 策略的最小 replay adapter。
@@ -184,9 +180,9 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
 
         1) signal_edge_proxy_bps:
            directional 的信号代理包含两部分：
-           - 趋势强度：dominant_score * scale
+           - 趋势强度：dominant_score * params.signal_edge_scale_bps
            - bar return 修正：最近一根 bar 的方向收益提供短期确认
-           二者加权合成，使信号代理不只依赖单一来源。
+           二者加权合成（权重、限幅均来自 params，可校准），使信号代理不只依赖单一来源。
 
         2) funding_adjustment_bps:
            与 independent 相同语义，funding rate 作为附加项。
@@ -195,10 +191,13 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
            来自 ReplayCostConfig
         """
         cost = params.cost_config
+        scale = params.signal_edge_scale_bps
+        trend_w = params.directional_trend_weight
+        clamp = params.directional_return_clamp_bps
 
         # --- 1) signal edge proxy ---
-        # 趋势强度分量
-        trend_signal = dominant_score * _SIGNAL_EDGE_SCALE_BPS
+        # 趋势强度分量（scale 来自 params，可校准）
+        trend_signal = dominant_score * scale
 
         # bar return 修正分量（短期方向确认）
         closes = list(self._close_history)
@@ -207,9 +206,9 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             bar_return = (closes[-1] - closes[-2]) / closes[-2]
             bar_return_bps = bar_return * 10000 if leg == "long" else -bar_return * 10000
 
-        # 加权: 70% 趋势强度 + 30% bar return（限制 bar return 影响范围）
-        bar_return_clamped = max(-20.0, min(20.0, bar_return_bps))  # 限幅 ±20 bps
-        signal_edge_proxy_bps = 0.7 * trend_signal + 0.3 * bar_return_clamped
+        # 加权（权重和限幅均来自 params，可校准）
+        bar_return_clamped = max(-clamp, min(clamp, bar_return_bps))
+        signal_edge_proxy_bps = trend_w * trend_signal + (1.0 - trend_w) * bar_return_clamped
 
         # --- 2) funding adjustment ---
         funding_adjustment_bps = 0.0

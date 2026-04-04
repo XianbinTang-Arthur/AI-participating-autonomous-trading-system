@@ -4,15 +4,31 @@
 Phase 2 入口脚本：运行一次 replay，生成 decisions artifact + diagnostics + report。
 
 Usage:
-    python scripts/rdp_run_replay.py \
-        --family independent \
-        --symbol BTC-USDT-SWAP \
-        --timeframe 15m \
-        --start 2026-01-01 \
-        --end 2026-04-01 \
-        --dataset-version v1 \
-        --param min_confirm_ticks=3 \
+    python scripts/rdp_run_replay.py \\
+        --family independent \\
+        --symbol BTC-USDT-SWAP \\
+        --timeframe 15m \\
+        --start 2026-01-01 \\
+        --end 2026-04-01 \\
+        --dataset-version v1 \\
+        --param min_confirm_ticks=3 \\
         --param min_safe_net_edge_bps=10
+
+    # 覆盖成本模型（平铺写法，自动组装到 cost_config）
+    python scripts/rdp_run_replay.py \\
+        --family independent \\
+        --symbol BTC-USDT-SWAP --timeframe 1m \\
+        --start 2026-03-31 --end 2026-04-02 \\
+        --param taker_fee_bps=3 \\
+        --param slippage_bps=1.5
+
+    # 覆盖 signal edge 校准参数
+    python scripts/rdp_run_replay.py \\
+        --family directional \\
+        --symbol BTC-USDT-SWAP --timeframe 1m \\
+        --start 2026-03-31 --end 2026-04-02 \\
+        --param signal_edge_scale_bps=15 \\
+        --param directional_trend_weight=0.8
 """
 
 from __future__ import annotations
