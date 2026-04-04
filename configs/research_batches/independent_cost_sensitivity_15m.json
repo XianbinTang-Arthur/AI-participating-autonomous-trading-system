@@ -1,0 +1,15 @@
+{
+  "batch_name": "independent_cost_sensitivity_15m",
+  "description": "Cost sensitivity test: sweep taker_fee_bps + slippage_bps on BTC-USDT-SWAP 15m",
+  "family": "independent",
+  "symbol": "BTC-USDT-SWAP",
+  "timeframe": "15m",
+  "dataset_version": "v1.0",
+  "start": "2026-03-31",
+  "end": "2026-04-02",
+  "experiments": [
+    {"label": "cost_3_1", "params": {"taker_fee_bps": 3, "slippage_bps": 1}},
+    {"label": "cost_5_2", "params": {"taker_fee_bps": 5, "slippage_bps": 2}},
+    {"label": "cost_7_3", "params": {"taker_fee_bps": 7, "slippage_bps": 3}}
+  ]
+}

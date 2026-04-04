@@ -832,6 +832,13 @@ data/historical/          # 历史数据目录
 
 artifacts/research/       # Phase 2 参数研究产物
   experiments/            #   replay decisions, diagnostics, reports
+  calibration_batches/    #   校准批次产物（batch summary / report / per-experiment）
+
+configs/
+  research_batches/       # 校准批次 JSON 模板
+    independent_scale_calibration_15m.json
+    independent_cost_sensitivity_15m.json
+    independent_confirm_ticks_15m.json
 
 scripts/                  # 启动、seed、回放、报告脚本
   rdp_start.py            #   统一入口：一键启动历史+实时两个 daemon
@@ -839,8 +846,10 @@ scripts/                  # 启动、seed、回放、报告脚本
   rdp_realtime_daemon.py  #   实时数据聚合 daemon
   rdp_run_replay.py       #   Phase 2 单次 replay 实验
   rdp_run_parameter_scan.py # Phase 2 参数扫描
+  rdp_run_calibration_batch.py # Phase 2 校准批处理（JSON 驱动，轻量级批跑）
   rdp_run_backfill.py     #   手动历史回填（保留）
-  rdp_build_gold.py       #   手动 Gold 构建（保留）
+  rdp_build_gold.py       #   手动 Gold 构建（单个 symbol x timeframe）
+  rdp_build_gold_all.py   #   批量 Gold 构建（自动遍历所有 swap 组合）
   rdp_detect_gaps.py      #   手动 gap 检测（保留）
   rdp_phase1_acceptance.py #  Phase 1 验收脚本
 tests/                    # 单元 / 集成 / 回放 / 场景测试
@@ -1194,6 +1203,90 @@ artifacts/research/experiments/<scan_run_id>/
 
 Phase 2 replay 使用简化评分模型（不含 AI assessment、orderbook depth、真实 execution state），与生产系统评分存在偏差。不包含撮合仿真和 PnL accounting（属于后续 Phase）。成本模型使用可配置的保守估计（默认 7 bps），signal edge 通过可校准缩放系数映射。重点关注参数变化对决策结构的**相对影响**。
 
+#### 校准批处理 (Calibration Batch)
+
+`rdp_run_calibration_batch.py` 是一个轻量级批量校准工具，用于少量、人工设计的校准实验组合。与 `rdp_run_parameter_scan.py` 的参数网格笛卡尔积不同，校准批处理由 JSON 文件显式定义每组实验的参数和标签，适合以下场景：
+
+| 场景 | 典型扫参 |
+|------|----------|
+| Signal scale 校准 | `signal_edge_scale_bps = 8, 10, 12, 15, 20` |
+| 成本敏感性测试 | `(taker_fee_bps, slippage_bps)` = `(3,1)`, `(5,2)`, `(7,3)` |
+| Threshold 敏感性 | `min_confirm_ticks = 2, 3, 4, 5` |
+
+**用法：**
+
+```bash
+# JSON 文件驱动（推荐）
+python scripts/rdp_run_calibration_batch.py \
+    --batch-file configs/research_batches/independent_scale_calibration_15m.json
+
+# 内置预设（不需要额外 JSON 文件）
+python scripts/rdp_run_calibration_batch.py --preset independent_scale_15m
+
+# 失败即停 + 自定义产物目录
+python scripts/rdp_run_calibration_batch.py \
+    --batch-file my_batch.json \
+    --artifact-root artifacts/custom \
+    --stop-on-error
+```
+
+**JSON 批次文件格式：**
+
+```json
+{
+  "batch_name": "independent_scale_calibration_15m",
+  "description": "Calibrate signal_edge_scale_bps",
+  "family": "independent",
+  "symbol": "BTC-USDT-SWAP",
+  "timeframe": "15m",
+  "dataset_version": "v1.0",
+  "start": "2026-03-31",
+  "end": "2026-04-02",
+  "experiments": [
+    {"label": "scale_10", "params": {"signal_edge_scale_bps": 10}},
+    {"label": "scale_15", "params": {"signal_edge_scale_bps": 15}},
+    {"label": "scale_20", "params": {"signal_edge_scale_bps": 20}}
+  ]
+}
+```
+
+公共字段（family, symbol, timeframe, start, end）放顶层，每个实验只写 `label` + `params`。
+
+**产物结构：**
+
+```text
+artifacts/research/calibration_batches/<batch_run_id>/
+  batch_spec.json           # 原始输入规格副本（便于复现）
+  batch_summary.csv         # 人工快速比较（每行一组实验）
+  batch_summary.json        # 机器可读 summary
+  batch_report.md           # 批次级 Markdown 报告（含趋势分析）
+  failed_experiments.json   # 失败实验列表
+  experiment_refs.json      # label → experiment_id 映射
+  experiments/
+    <label>/
+      replay_decisions.csv  # 单实验决策记录
+      diagnostics.json      # 单实验诊断指标
+      report.md             # 单实验报告
+```
+
+**内置预设：**
+
+| 预设名 | 描述 |
+|--------|------|
+| `independent_scale_15m` | 扫 signal_edge_scale_bps = 8, 10, 12, 15, 20 |
+| `independent_cost_15m` | 扫 (taker_fee_bps, slippage_bps) = (3,1), (5,2), (7,3) |
+| `independent_confirm_ticks_15m` | 扫 min_confirm_ticks = 2, 3, 4, 5 |
+
+**与 Parameter Scan 的区别：**
+
+| 维度 | `rdp_run_parameter_scan.py` | `rdp_run_calibration_batch.py` |
+|------|----------------------------|-------------------------------|
+| 输入 | 参数网格 → 笛卡尔积 | JSON 显式定义每组实验 |
+| 定位 | 大范围参数空间探索 | 少量人工设计的校准实验 |
+| DB 记录 | 创建 scan_run 表记录 | 不创建新 DB 表，仅复用 experiment 表 |
+| 产物 | comparison_summary.json | batch_summary.csv/json + batch_report.md |
+| 报告 | 对比表 | 趋势分析 + 自动 findings |
+
 ### 21.10 配置
 
 所有配置通过 `.env.research` 读取，前缀 `RDP_`。
@@ -1269,13 +1362,84 @@ python scripts/rdp_start.py
 # 历史 daemon 自动消费 ZIP -> staging -> silver -> Gold
 # 实时 daemon 自动采集最新数据
 
-# 5. 运行参数研究（可选）
+# 5. 验证 Gold 层数据（重要！）
+# daemon 只在"当次扫描有新 ZIP 被消费"时自动构建 Gold。
+# 如果 Silver 有数据但 Gold 为空，需要手动触发批量构建：
+python scripts/rdp_build_gold_all.py --dry-run   # 先预览
+python scripts/rdp_build_gold_all.py              # 正式构建
+
+# 6. 运行参数研究（可选）
 python scripts/rdp_run_replay.py \
     --family independent \
     --symbol BTC-USDT-SWAP --timeframe 1m \
     --start 2026-03-31 --end 2026-04-02 \
     --dataset-version v1.0
 ```
+
+### 21.12.1 Gold 层构建说明
+
+Gold 层是 Phase 2 参数研究的输入来源（replay bars = candle + funding 对齐）。了解其构建规则可避免"Silver 有数据但 Gold 为空"的困惑。
+
+#### 自动构建触发条件
+
+Gold 自动构建**仅在以下场景触发**：
+
+| 触发源 | 条件 | 说明 |
+|--------|------|------|
+| 历史 daemon | 当次扫描有新 swap ZIP 被消费 | 只对刚消费的 (symbol, timeframe) 触发 |
+| 实时 daemon | 每 60 个采集周期（约 1 小时） | 遍历所有 swap symbol x timeframe |
+
+**不会自动触发的场景**：
+- 通过 `rdp_run_backfill.py` 手动导入的数据
+- daemon 之前已经消费过 ZIP（文件已移至 completed/）
+- daemon 上次运行时 Gold 构建静默失败（被 try/except 捕获）
+- Spot 数据（spot 无 funding rate，Gold 层按设计只构建 swap）
+
+#### 手动补建 Gold
+
+当 Silver 有数据但 Gold 缺失时，使用批量构建脚本：
+
+```powershell
+# 预览：显示每个 Silver 表的数据范围和 Gold 现有行数
+python scripts/rdp_build_gold_all.py --dry-run
+
+# 构建所有 swap Gold 表（自动查询 Silver 时间范围）
+python scripts/rdp_build_gold_all.py
+
+# 只构建指定 symbol
+python scripts/rdp_build_gold_all.py --symbol BTC-USDT-SWAP
+
+# 只构建指定 timeframe
+python scripts/rdp_build_gold_all.py --timeframe 5m --timeframe 15m
+```
+
+或用单次构建脚本精确控制时间窗口：
+
+```powershell
+python scripts/rdp_build_gold.py \
+    --symbol BTC-USDT-SWAP --timeframe 5m \
+    --start 2026-03-01 --end 2026-04-03
+```
+
+#### 验证
+
+```sql
+-- 检查所有 Gold 表的记录数
+SELECT 'swap_1m'  AS tf, COUNT(*) FROM gold.market_swap_replay_bars_1m
+UNION ALL
+SELECT 'swap_5m',        COUNT(*) FROM gold.market_swap_replay_bars_5m
+UNION ALL
+SELECT 'swap_15m',       COUNT(*) FROM gold.market_swap_replay_bars_15m
+UNION ALL
+SELECT 'swap_1h',        COUNT(*) FROM gold.market_swap_replay_bars_1h;
+```
+
+#### 为什么 Spot Gold 表是空的？
+
+这是设计决策，不是 bug。Gold 层的核心功能是 candle + funding rate 对齐（as-of join），而 funding rate 仅存在于永续合约（swap），现货（spot）没有资金费率概念。因此：
+
+- `gold.market_swap_replay_bars_*`：由 daemon 自动构建，包含 `aligned_funding_rate` 字段
+- `gold.market_spot_replay_bars_*`：当前为空，表结构已预留，后续如需 spot replay 可手动构建（funding 字段为 NULL）
 
 ### 21.13 代码模块清单
 
