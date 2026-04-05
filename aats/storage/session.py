@@ -184,6 +184,9 @@ def create_database_runtime(database_url: str) -> DatabaseRuntime:
         database_url,
         future=True,
         pool_pre_ping=True,
+        pool_size=10,
+        max_overflow=20,
+        pool_timeout=30,
     )
     return DatabaseRuntime(
         engine=engine,

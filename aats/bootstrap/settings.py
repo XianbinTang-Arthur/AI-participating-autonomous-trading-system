@@ -209,8 +209,8 @@ class AATSSettings(BaseSettings):
     okx_timeout_seconds: float = 15.0
     okx_market_reconnect_delay_seconds: float = 4.0
     okx_market_reconnect_max_delay_seconds: float = 20.0
-    okx_ws_ping_interval_seconds: float = 30.0
-    okx_ws_ping_timeout_seconds: float = 30.0
+    okx_ws_ping_interval_seconds: float = 20.0
+    okx_ws_ping_timeout_seconds: float = 20.0
     okx_ws_open_timeout_seconds: float = 20.0
     okx_private_ws_idle_ping_interval_seconds: float = 20.0
     okx_market_rest_fallback_enabled: bool = True

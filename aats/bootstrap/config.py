@@ -542,13 +542,16 @@ class ApplicationRuntime:
             await asyncio.sleep(interval_seconds)
 
     async def _flush_execution_outbox_loop(self) -> None:
+        backoff = 1.0
         while True:
             try:
                 if self.execution_outbox_publisher is not None:
                     await self.execution_outbox_publisher.flush_pending()
+                backoff = 1.0
             except Exception as exc:
                 self._record_background_failure(subsystem="execution_outbox_flush", exc=exc)
-            await asyncio.sleep(1.0)
+                backoff = min(backoff * 2, 30.0)
+            await asyncio.sleep(backoff)
 
     async def _process_execution_commands_loop(self) -> None:
         interval_seconds = max(0.1, float(self.settings.execution_command_poll_interval_seconds))
