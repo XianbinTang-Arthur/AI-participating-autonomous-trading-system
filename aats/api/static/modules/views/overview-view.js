@@ -1,6 +1,6 @@
 import { actionButton, pill, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard, timeline } from "../components.js";
 import { localizeList } from "../copy.js";
-import { booleanWord, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
+import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import {
   hasFamilyExecutionSummary,
   readableFamilyExecutionDirection,
@@ -66,7 +66,7 @@ export function renderOverviewView(data) {
             { label: "总权益", value: formatNumber(portfolio.total_equity), meta: `已实现 ${formatSigned(portfolio.realized_pnl)}`, tone: "info" },
             { label: "未实现收益", value: formatSigned(portfolio.unrealized_pnl), meta: `总敞口 ${formatNumber(portfolio.gross_exposure)}`, tone: Number(portfolio.unrealized_pnl || 0) >= 0 ? "positive" : "warning" },
             { label: "持仓数量", value: formatNumber((portfolio.positions || []).length, 0), meta: currentPosition ? "详情请看下方当前持仓表" : "当前没有持仓", tone: "info" },
-            { label: "净敞口", value: formatSigned(portfolio.net_exposure), meta: portfolio.snapshot_ts ? `快照 ${formatMaybeTimestamp(portfolio.snapshot_ts)}` : "快照时间待同步", tone: Number(portfolio.net_exposure || 0) === 0 ? "neutral" : "info" },
+            { label: "净敞口", value: formatSigned(portfolio.net_exposure), meta: portfolio.snapshot_ts ? `快照 ${formatMaybeTimestamp(portfolio.snapshot_ts)}` : "快照时间待同步", tone: portfolio.net_exposure === null || portfolio.net_exposure === undefined ? "neutral" : Number(portfolio.net_exposure) === 0 ? "positive" : "info" },
           ]),
         })}
       </div>
@@ -232,7 +232,7 @@ function renderCurrentPositionsTable({ portfolio, positionsView = {}, fallbackSy
     return responsiveTable(
       ["标的", "仓位模式 / 双腿", "净敞口", "毛敞口", "浮盈亏 / 快照"],
       rows.map((position) => [
-        `<div><strong>${position.symbol || fallbackSymbol}</strong><div class="table-meta">${positionModeLabel(position.position_mode)} | ${readableState(position.margin_mode, "保证金模式待确认")}</div></div>`,
+        `<div><strong>${escapeHtml(position.symbol || fallbackSymbol)}</strong><div class="table-meta">${positionModeLabel(position.position_mode)} | ${readableState(position.margin_mode, "保证金模式待确认")}</div></div>`,
         `<div><strong>${position.dual_legged ? "双腿并存" : readableState(position.exposure_side || "flat")}</strong><div class="table-meta">多头 ${formatNumber(position.long_position_qty)} / 空头 ${formatNumber(position.short_position_qty)}</div></div>`,
         `<div><strong>${formatSigned(position.net_position_notional)}</strong><div class="table-meta">净数量 ${formatSigned(position.net_position_qty)}</div></div>`,
         `<div><strong>${formatNumber(position.gross_position_notional)}</strong><div class="table-meta">毛数量 ${formatNumber(position.gross_position_qty)} | 杠杆 ${formatNumber(position.target_leverage, 2)}</div></div>`,
@@ -265,7 +265,7 @@ function renderCurrentPositionsTable({ portfolio, positionsView = {}, fallbackSy
   return responsiveTable(
     ["标的", "方向与数量", "名义敞口", "开仓均价 / 保证金", "浮盈亏 / 快照"],
     positions.map((position) => [
-      `<div><strong>${position.symbol || fallbackSymbol}</strong><div class="table-meta">${readableState(position.product_type, "产品类型待确认")} | ${readableState(position.margin_mode, "保证金模式待确认")}</div></div>`,
+      `<div><strong>${escapeHtml(position.symbol || fallbackSymbol)}</strong><div class="table-meta">${readableState(position.product_type, "产品类型待确认")} | ${readableState(position.margin_mode, "保证金模式待确认")}</div></div>`,
       `<div><strong>${readableState(position.exposure_side || "flat")}</strong><div class="table-meta">数量 ${formatSigned(position.position_qty)}</div></div>`,
       `<div><strong>${formatSigned(position.position_notional)}</strong><div class="table-meta">杠杆 ${formatNumber(position.target_leverage, 2)}</div></div>`,
       `<div><strong>${formatNumber(position.avg_entry_price)}</strong><div class="table-meta">保证金 ${formatNumber(position.margin_allocated)}</div></div>`,

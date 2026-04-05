@@ -14,12 +14,15 @@ from .versioning import (
     INDEPENDENT_STATE_MACHINE_VERSION,
 )
 
+from aats.services.portfolio_service.decimals import clamp_float as clamp
+
 if TYPE_CHECKING:
     from aats.services.strategy_engines.families.independent_models import IndependentBookRuntimeState
     from .adaptive import IndependentAdaptiveSnapshot
     from .health import IndependentFamilyHealthSnapshot, IndependentLegHealthSnapshot
     from .replay import IndependentReplayDecisionSnapshot
     from .state_machine import IndependentStateSnapshot
+
 
 IndependentLeg = Literal["long", "short"]
 IndependentExecutionHealthState = Literal["ok", "degraded", "blocked"]

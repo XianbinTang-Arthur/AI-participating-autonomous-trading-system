@@ -13,6 +13,7 @@ from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
 from aats.services.accounting import remaining_obligation_amount
 from aats.services.execution_engine.bundle_recovery import obligation_matches_scope, scoped_bundle_recovery_assessment
+from aats.services.execution_engine.state_machine import TERMINAL_ORDER_STATES as _TERMINAL_ORDER_STATES
 from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
@@ -27,9 +28,11 @@ from aats.services.runtime_scope import (
     runtime_state_scope,
 )
 from aats.services.strategy_engines.independent.replay import recovery_snapshots_from_allocation_decisions
+from aats.bootstrap.logging import get_logger, log_event
 from aats.storage.base import (
     ExecutionObligationRepository,
     ExecutionRepository,
+    FillOutcomeRepository,
     PortfolioRepository,
     ReconciliationRepository,
     StrategyRuntimeRepository,
@@ -61,6 +64,8 @@ class ExecutionRecoveryService:
         bootstrap_portfolio_from_exchange: bool,
         reconciliation_stale_after_seconds: float,
         recovery_policy: RecoveryPolicy | None = None,
+        fill_outcome_repo: FillOutcomeRepository | None = None,
+        event_store: object | None = None,
     ) -> None:
         self.settings = settings
         self.execution_repo = execution_repo
@@ -73,6 +78,9 @@ class ExecutionRecoveryService:
         self.kill_switch = kill_switch
         self.bootstrap_portfolio_from_exchange = bootstrap_portfolio_from_exchange
         self.reconciliation_stale_after_seconds = reconciliation_stale_after_seconds
+        self.fill_outcome_repo = fill_outcome_repo
+        self.event_store = event_store
+        self.logger = get_logger("aats.recovery")
         self.recovery_policy = recovery_policy or RecoveryPolicy(
             name="default_recovery",
             product_type=settings.trading_product_type,
@@ -97,7 +105,7 @@ class ExecutionRecoveryService:
         latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
         latest_reconciliation = latest_reconciliation_for_scope(self.reconciliation_repo, self.runtime_scope)
         scoped_order_states = order_states_for_scope(self.execution_repo, self.runtime_scope)
-        open_orders = [order for order in scoped_order_states if str(order.status).upper() not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}]
+        open_orders = [order for order in scoped_order_states if str(order.status).upper() not in _TERMINAL_ORDER_STATES]
         notes: list[str] = []
         rebuilt_snapshot_saved = False
         rebuilt_snapshot_for_event: PortfolioSnapshot | None = None
@@ -154,14 +162,28 @@ class ExecutionRecoveryService:
             )
             divergence_count = self._divergence_count(latest_snapshot, rebuilt)
             if divergence_count:
-                self._halt_for_recovery(
-                    reason="recovery_portfolio_divergence",
-                    action="halted_for_portfolio_divergence",
-                    notes=notes,
+                # Fill event log is the more authoritative source — auto-heal
+                # by adopting the rebuilt snapshot derived from fills.
+                healed_snapshot = rebuilt.model_copy(
+                    update={
+                        "snapshot_origin": "recovery_auto_healed",
+                        "product_type": self.runtime_scope.product_type,
+                        "margin_mode": self.runtime_scope.margin_mode,
+                    }
                 )
-                recovery_action = "halted_for_portfolio_divergence"
-                safe_startup = False
-                notes.append("stored_snapshot_differs_from_fill_reconstruction")
+                portfolio_state.load_portfolio_snapshot(
+                    healed_snapshot,
+                    applied_fill_ids={fill.fill_id for fill in fills},
+                    total_fees_paid=PortfolioState.total_fee_delta_in_quote(fills),
+                )
+                self.portfolio_repo.save_snapshot(healed_snapshot)
+                rebuilt_snapshot_saved = True
+                # Note: intentionally NOT setting rebuilt_snapshot_for_event here.
+                # The snapshot is persisted above; publishing it as an event during
+                # bootstrap would trigger the reconciliation subscriber before the
+                # runtime is fully initialised, producing a premature halt finding.
+                notes.append(f"auto_healed_portfolio_divergence:{divergence_count}")
+                notes.append("stored_snapshot_replaced_by_fill_reconstruction")
             elif self.bootstrap_portfolio_from_exchange:
                 notes.append("reconstruction_validation_completed_bootstrap_exchange")
         elif fills:
@@ -196,6 +218,20 @@ class ExecutionRecoveryService:
                 notes.append("portfolio_rebuilt_from_fills")
         else:
             notes.append("cold_start_no_execution_state")
+
+        # --- Fill gap detection & compensation ---
+        gap_count = self._detect_and_compensate_fill_gaps(
+            fills=fills,
+            portfolio_state=portfolio_state,
+            notes=notes,
+        )
+        if gap_count:
+            notes.append(f"fill_gap_compensated:{gap_count}")
+
+        # --- Orphaned decision intent detection ---
+        orphaned_intent_count = self._detect_orphaned_intents()
+        if orphaned_intent_count:
+            notes.append(f"orphaned_order_intents:{orphaned_intent_count}")
 
         safe_startup, recovery_action = self._apply_reconciliation_safety(
             latest_reconciliation=latest_reconciliation,
@@ -501,7 +537,7 @@ class ExecutionRecoveryService:
         open_orders = [
             order
             for order in scoped_order_states
-            if str(order.status).upper() not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}
+            if str(order.status).upper() not in _TERMINAL_ORDER_STATES
         ]
         return recovery_snapshots_from_allocation_decisions(
             decisions=decisions,
@@ -517,7 +553,7 @@ class ExecutionRecoveryService:
     ) -> OrderObligation | None:
         if order_state is None:
             return self._terminalized_obligation(obligation=obligation, target_status="FAILED")
-        if order_state.status not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}:
+        if order_state.status not in _TERMINAL_ORDER_STATES:
             return None
         target_status = "CANCELED" if order_state.status == "CANCELED" else "RELEASED" if order_state.status == "FILLED" else "FAILED"
         return self._terminalized_obligation(obligation=obligation, target_status=target_status)
@@ -703,3 +739,114 @@ class ExecutionRecoveryService:
             ):
                 return True
         return False
+
+    def _detect_orphaned_intents(self) -> int:
+        """Detect order intents that were published but never reached execution.
+
+        Scans recent ``execution.order_intents`` events from the event store and
+        checks whether each intent has a corresponding order state in the
+        execution repository.  Orphaned intents are logged as warnings but are
+        NOT auto-retried — market conditions may have changed since the original
+        decision.
+
+        Returns the number of orphaned intents detected.
+        """
+        if self.event_store is None:
+            return 0
+
+        recent_by_topic = getattr(self.event_store, "recent_by_topic", None)
+        if not callable(recent_by_topic):
+            return 0
+
+        try:
+            recent_intents = recent_by_topic("execution.order_intents", limit=200)
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "orphaned_intent_scan_failed",
+                level="warning",
+                error=str(exc),
+            )
+            return 0
+
+        if not recent_intents:
+            return 0
+
+        orphaned = 0
+        for envelope in recent_intents:
+            payload = getattr(envelope, "payload", None) or {}
+            intent_id = str(payload.get("intent_id") or "").strip()
+            if not intent_id:
+                continue
+
+            # Check scope — only inspect intents for the current runtime scope.
+            intent_symbol = str(payload.get("symbol") or "")
+            intent_product = str(payload.get("product_type") or "")
+            intent_margin = str(payload.get("margin_mode") or "")
+            if intent_product and intent_product != self.runtime_scope.product_type:
+                continue
+            if intent_margin and intent_margin != self.runtime_scope.margin_mode:
+                continue
+            if intent_symbol and not self.runtime_scope.symbol_allowed(intent_symbol):
+                continue
+
+            if self.execution_repo.has_intent(intent_id):
+                continue
+
+            # This intent was published but has no order state — orphaned.
+            orphaned += 1
+            log_event(
+                self.logger,
+                "orphaned_order_intent_detected",
+                level="warning",
+                intent_id=intent_id,
+                symbol=intent_symbol,
+                side=str(payload.get("side") or ""),
+                quantity=str(payload.get("quantity") or ""),
+                decision_id=str(payload.get("decision_id") or ""),
+            )
+
+        return orphaned
+
+    def _detect_and_compensate_fill_gaps(
+        self,
+        *,
+        fills: list[FillEvent],
+        portfolio_state: PortfolioState,
+        notes: list[str],
+    ) -> int:
+        """Detect fills in execution_repo that have no FillOutcomeRecord.
+
+        Portfolio state is already correct from snapshot reconstruction
+        (P0-B auto-heal restores the authoritative fill-derived state).
+        This method provides **observability**: it logs fills whose
+        portfolio-side processing was never recorded — indicating a crash
+        occurred between fill persistence and portfolio event delivery.
+
+        Note: We cannot rely on ``portfolio_state.has_applied_fill()``
+        because ``load_portfolio_snapshot()`` pre-marks ALL fill IDs as
+        applied.  The sole reliable detection signal is the absence of a
+        FillOutcomeRecord in ``fill_outcome_repo``.
+
+        Returns the number of fills with missing outcome records.
+        """
+        if self.fill_outcome_repo is None or not fills:
+            return 0
+        gap_count = 0
+        for fill in sorted(fills, key=fill_processing_sort_key):
+            if self.fill_outcome_repo.get_outcome(fill.fill_id) is not None:
+                continue
+            # Fill exists in execution_repo but has no outcome record —
+            # portfolio service never completed processing for this fill.
+            # State is already correct via reconstruction; log for ops.
+            gap_count += 1
+            log_event(
+                self.logger,
+                "fill_missing_outcome_record",
+                level="warning",
+                fill_id=fill.fill_id,
+                symbol=fill.symbol,
+                side=fill.side,
+                qty=str(fill.fill_qty),
+            )
+        return gap_count

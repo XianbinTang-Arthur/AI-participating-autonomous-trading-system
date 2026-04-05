@@ -1,22 +1,24 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_envelope, publish_model
 from aats.schemas.features import (
     AlphaFactorSet,
     AnalysisContext,
+    DirectionalBias,
     FeatureSnapshot,
     MultiTimeframeContext,
     PositionSizingContext,
     TimeframeFeatureSet,
 )
-from aats.schemas.market import MarketSnapshot
+from aats.schemas.market import KlineBar, MarketSnapshot
 from aats.services.feature_engine.liquidity import LiquidityAnalyzer
 from aats.services.feature_engine.regime import RegimeClassifier
 from aats.services.feature_engine.trend import TrendCalculator
 from aats.services.feature_engine.volatility import VolatilityAnalyzer
-from aats.services.portfolio_service.decimals import to_decimal
 
 
 class FeatureCalculator:
@@ -78,8 +80,8 @@ class FeatureCalculator:
             snapshot_ts=snapshot.snapshot_ts,
             analysis_version="0.2.0",
             regime_version="0.2.0",
-            trend_bias=regime.trend_bias,  # type: ignore[arg-type]
-            regime_indicator=regime.regime_indicator,  # type: ignore[arg-type]
+            trend_bias=regime.trend_bias,
+            regime_indicator=regime.regime_indicator,
             regime_confidence=regime.regime_confidence,
             regime_reasons=list(regime.reasons),
             timeframe_features={
@@ -101,7 +103,7 @@ class FeatureCalculator:
             volatility_value=features_15m.volatility_value,
             momentum_score=features_15m.momentum_score,
             liquidity_score=liquidity.liquidity_score,
-            regime_indicator=regime.regime_indicator,  # type: ignore[arg-type]
+            regime_indicator=regime.regime_indicator,
             regime_confidence=regime.regime_confidence,
             multi_timeframe_alignment=multi_timeframe_context.regime_alignment_score,
             composite_alpha_score=alpha_factors.composite_alpha_score,
@@ -115,22 +117,22 @@ class FeatureCalculator:
         self,
         *,
         snapshot: MarketSnapshot,
-        timeframe: str,
-        kline: dict[str, object],
+        timeframe: Literal["15m", "1h"],
+        kline: KlineBar,
     ) -> TimeframeFeatureSet:
         trend_metrics = self.trend.analyze_kline(kline)
         volatility_metrics = self.volatility.analyze_kline(kline)
         return TimeframeFeatureSet(
             created_at=snapshot.snapshot_ts,
-            timeframe=timeframe,  # type: ignore[arg-type]
-            open_price=to_decimal(kline["open"]),
-            high_price=to_decimal(kline["high"]),
-            low_price=to_decimal(kline["low"]),
-            close_price=to_decimal(kline["close"]),
+            timeframe=timeframe,
+            open_price=kline.open,
+            high_price=kline.high,
+            low_price=kline.low,
+            close_price=kline.close,
             momentum_score=trend_metrics.momentum_score,
             trend_strength=trend_metrics.trend_strength,
             volatility_value=volatility_metrics.volatility_value,
-            volatility_state=volatility_metrics.volatility_state,  # type: ignore[arg-type]
+            volatility_state=volatility_metrics.volatility_state,
             candle_body_ratio=trend_metrics.candle_body_ratio,
             range_ratio=volatility_metrics.range_ratio,
         )
@@ -147,13 +149,14 @@ class FeatureCalculator:
         direction_1h = FeatureCalculator._direction(features_1h.momentum_score)
         if direction_15m == direction_1h:
             directional_alignment = direction_15m
-        elif direction_15m == "flat" and direction_1h == "flat":
-            directional_alignment = "flat"
         else:
             directional_alignment = "mixed"
-        momentum_alignment_score = min(
-            1.0 - abs(features_15m.momentum_score - features_1h.momentum_score),
-            1.0,
+        # Scale the raw momentum difference by 50x so that typical crypto
+        # divergences (0.001–0.02) map to a meaningful 0–1 range instead of
+        # being perpetually stuck near 1.0.
+        momentum_alignment_score = max(
+            1.0 - abs(features_15m.momentum_score - features_1h.momentum_score) * 50.0,
+            0.0,
         )
         if abs(features_15m.trend_strength) > abs(features_1h.trend_strength) + 0.1:
             dominant_timeframe = "15m"
@@ -163,14 +166,14 @@ class FeatureCalculator:
             dominant_timeframe = "balanced"
         return MultiTimeframeContext(
             created_at=snapshot_ts,
-            directional_alignment=directional_alignment,  # type: ignore[arg-type]
+            directional_alignment=directional_alignment,
             momentum_alignment_score=max(min(momentum_alignment_score, 1.0), -1.0),
             regime_alignment_score=max(min(regime_alignment_score, 1.0), 0.0),
-            dominant_timeframe=dominant_timeframe,  # type: ignore[arg-type]
+            dominant_timeframe=dominant_timeframe,
         )
 
     @staticmethod
-    def _direction(momentum: float) -> str:
+    def _direction(momentum: float) -> DirectionalBias:
         if momentum > 0.0:
             return "long"
         if momentum < 0.0:

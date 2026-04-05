@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment
 
-from .models import IndependentLeg, ScoreStabilityMetrics
+from .models import IndependentLeg, ScoreStabilityMetrics, clamp as _clamp
 
 
 def effective_score_drawdown_threshold_bps(*, settings: AATSSettings) -> float:
@@ -69,7 +69,31 @@ def compute_signal_edge_bps(
     momentum_bonus = max(directional_momentum - 0.08, 0.0) * 15.0
     trend_bonus = max(directional_trend - 0.08, 0.0) * 12.0
     ai_bonus = max(directional_ai - 0.1, 0.0) * 20.0
-    return alpha_edge + microstructure_bonus + momentum_bonus + trend_bonus + ai_bonus
+    component_edge = alpha_edge + microstructure_bonus + momentum_bonus + trend_bonus + ai_bonus
+
+    # ── RDP score-based 信号边际路径 ──────────────────────────────────
+    # 当 strategy_signal_edge_scale_bps 由 active_parameters 注入时，
+    # 额外计算 score_based_edge = composite_score × scale。
+    #
+    # 注意：RDP replay 仅使用 score*scale 单路径；生产端取 max(component, score*scale)，
+    # 因此生产端 signal_edge >= RDP 回测值，entry 行为可能与回测有差异。
+    # RDP Phase 2 验证 (120 天 BTC-USDT-SWAP): scale=20 → pos_ratio 97-98%。
+    #
+    # 取 max 确保:
+    #   1. 向后兼容 — 不降低已有信号强度估计
+    #   2. 当 composite score 整体较强时，score-based 路径可能提供更高估计
+    rdp_scale = settings.strategy_signal_edge_scale_bps
+    if rdp_scale is not None and float(rdp_scale) > 0:
+        composite_score = compute_raw_book_score(
+            settings=settings,
+            leg=leg,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        )
+        score_based_edge = composite_score * float(rdp_scale)
+        return max(component_edge, score_based_edge)
+
+    return component_edge
 
 
 def compute_score_stability(
@@ -160,7 +184,3 @@ def _signal_confirmation_count(
 
 def _ai_directional_edge(ai_assessment: AIMarketAssessment | None) -> float:
     return 0.0 if ai_assessment is None else ai_assessment.directional_edge
-
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(value, upper))

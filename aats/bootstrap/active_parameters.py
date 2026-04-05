@@ -56,10 +56,48 @@ KNOWN_COMBOS: list[dict[str, str]] = [
 # ────────────────────────────────────────────────────────────────────
 
 PARAMETER_MAPPING_INDEPENDENT: dict[str, str] = {
-    # [DIRECT] RDP 回测优化的信号边际阈值 (bps)
-    # → 生产端 independent hedge 的 de-risk 净边际阈值 (bps)
-    # 单位一致: bps; 语义: 最低要求的信号净收益边际
-    "signal_edge_scale_bps": "strategy_hedge_independent_de_risk_net_edge_bps",
+    # ════════════════════════════════════════════════════════════════
+    # RDP 研究层核心参数 — 自动映射到生产端
+    # ════════════════════════════════════════════════════════════════
+
+    # [DIRECT] signal_edge_scale_bps → strategy_signal_edge_scale_bps
+    #
+    # RDP 含义: composite_score → bps 的缩放系数 (signal_edge = score * scale)
+    # 生产端: 在 compute_signal_edge_bps() 中启用 score-based 信号边际路径。
+    #         当该值被注入后，生产端同时计算:
+    #           path1: alpha * strategy_alpha_edge_bps_scale + bonuses (组件路径)
+    #           path2: composite_score * strategy_signal_edge_scale_bps (RDP 路径)
+    #         最终 signal_edge = max(path1, path2)
+    #
+    # 历史: 曾错误映射到 de_risk_net_edge_bps（scale=15 导致开了就关）。
+    #       现映射到专用新字段 strategy_signal_edge_scale_bps，语义完全一致。
+    #
+    # RDP Phase 2 验证 (120 天 BTC-USDT-SWAP):
+    #   scale=20 → independent/15m: pos_ratio=97.5%, net_edge=+3.89bps
+    #   scale=20 → independent/1h:  pos_ratio=98.3%, net_edge=+4.91bps
+    "signal_edge_scale_bps": "strategy_signal_edge_scale_bps",
+
+    # [DIRECT] score_stability_threshold → min_score_stability_bps
+    #
+    # 历史: 此前因 bps 单位不一致（RDP ×10000 vs 生产 ×100）而被排除。
+    # 修复: RDP replay 端已统一为 ×100 (independent_adapter.py line 295)。
+    # 现在两端语义一致: score_stability_threshold=5.0 → 允许回撤 5/100=0.05
+    #
+    # ⚠️ 优先级关系（与 min_score_drawdown_bps 的交互）:
+    #   score_stability_threshold → strategy_hedge_independent_min_score_stability_bps (base)
+    #   min_score_drawdown_bps    → strategy_hedge_independent_min_score_drawdown_bps (override)
+    #
+    #   生产端 effective_score_drawdown_threshold_bps() 的判定顺序:
+    #     1. 若 min_score_drawdown_bps is not None → 使用 drawdown (override 优先)
+    #     2. 否则 → fallback 到 min_score_stability_bps (base)
+    #
+    #   当 active set 同时包含两个参数时, drawdown 优先,
+    #   score_stability_threshold 仅作为 fallback 兜底值。
+    "score_stability_threshold": "strategy_hedge_independent_min_score_stability_bps",
+
+    # ════════════════════════════════════════════════════════════════
+    # 原有映射（Phase 2）
+    # ════════════════════════════════════════════════════════════════
 
     # [DIRECT] RDP 回测优化的最小确认 tick 数
     # → 生产端 independent hedge 的确认 tick 数
@@ -71,13 +109,101 @@ PARAMETER_MAPPING_INDEPENDENT: dict[str, str] = {
     # 单位一致: bps; 语义: 交易执行的净边际安全线
     "min_safe_net_edge_bps": "strategy_hedge_independent_min_safe_net_edge_bps",
 
-    # [APPROXIMATE] RDP 回测的分数稳定性阈值 → 生产端最小 score drawdown (bps)
-    # RDP 端: score_stability_threshold 衡量分数波动容忍度（无量纲比率 0~1）
-    # 生产端: min_score_drawdown_bps 是分数回撤的 bps 阈值
-    # ⚠️ 语义张力: RDP 是"稳定性容忍度"，生产是"回撤 bps 门槛"
-    #    第一版假设: threshold * 100 ≈ bps 的近似换算在回测校准中完成
-    #    TODO: 确认 RDP Phase 2 输出此值时的单位是否已经是 bps
-    "score_stability_threshold": "strategy_hedge_independent_min_score_drawdown_bps",
+    # ════════════════════════════════════════════════════════════════
+    # Phase 1 扩展：进出场阈值
+    # ════════════════════════════════════════════════════════════════
+
+    # [DIRECT] 开仓评分阈值（long book）
+    # 单位一致: ratio 0~1; 语义: 评分达到此阈值才允许开多仓
+    "entry_threshold": "strategy_hedge_independent_long_entry_threshold",
+
+    # [DIRECT] 平仓评分阈值（long book）
+    # 单位一致: ratio 0~1; 语义: 评分低于此阈值触发平多仓
+    "close_threshold": "strategy_hedge_independent_long_close_threshold",
+
+    # [DIRECT] 加仓评分阈值（long book）
+    # 单位一致: ratio 0~1; 语义: 评分达到此阈值才允许多头加仓
+    # ⚠️ REPLAY 未模拟: replay 只有 open/hold/close 三态，无 scale-in 逻辑
+    #    该参数仅透传到生产端，RDP 回测不验证其效果
+    "scale_in_threshold": "strategy_hedge_independent_long_scale_in_threshold",
+
+    # [DIRECT] 开仓评分阈值（short book，非对称设置）
+    # 单位一致: ratio 0~1; 语义: 评分达到此阈值才允许开空仓
+    "short_entry_threshold": "strategy_hedge_independent_short_entry_threshold",
+
+    # [DIRECT] 平仓评分阈值（short book，非对称设置）
+    # 单位一致: ratio 0~1; 语义: 评分低于此阈值触发平空仓
+    "short_close_threshold": "strategy_hedge_independent_short_close_threshold",
+
+    # ════════════════════════════════════════════════════════════════
+    # Phase 1 扩展：持仓时间管理
+    # ════════════════════════════════════════════════════════════════
+
+    # [DIRECT] 最小持仓秒数
+    # 单位一致: seconds; 语义: 防止过频交易
+    # ⚠️ 仅映射 long 方向。如需 short 方向独立配置，需新增
+    #    short_min_hold_seconds → strategy_hedge_independent_short_min_hold_seconds
+    "min_hold_seconds": "strategy_hedge_independent_long_min_hold_seconds",
+
+    # [DIRECT] 平仓后冷却秒数
+    # 单位一致: seconds; 语义: 平仓后一段时间不开新仓
+    "rebalance_cooldown_seconds": "strategy_hedge_independent_rebalance_cooldown_seconds",
+
+    # [DIRECT] thesis 最长存活秒数
+    # 单位一致: seconds; 语义: 超过此时间允许按 stale 退出
+    "max_thesis_age_seconds": "strategy_hedge_independent_max_thesis_age_seconds",
+
+    # ════════════════════════════════════════════════════════════════
+    # Phase 1 扩展：风险管理阈值
+    # ════════════════════════════════════════════════════════════════
+
+    # [DIRECT] 降风险触发阈值
+    # 单位一致: bps; 语义: 净边际变薄时触发降风险
+    "de_risk_net_edge_bps": "strategy_hedge_independent_de_risk_net_edge_bps",
+
+    # [DIRECT] thesis 失效阈值
+    # 单位一致: bps; 语义: 净边际低于此值视为 thesis 失效
+    # 约束: 必须 <= de_risk_net_edge_bps
+    "failed_thesis_net_edge_bps": "strategy_hedge_independent_failed_thesis_net_edge_bps",
+
+    # ════════════════════════════════════════════════════════════════
+    # Phase 1 扩展：成本缓冲
+    # ════════════════════════════════════════════════════════════════
+
+    # [DIRECT] 开仓预期滑点缓冲
+    # 单位一致: bps; 语义: 叠加到成本估算中
+    "expected_slippage_buffer_bps": "strategy_hedge_independent_expected_slippage_buffer_bps",
+
+    # [DIRECT] 开仓执行缓冲
+    # 单位一致: bps; 语义: 叠加到成本估算中
+    "expected_execution_buffer_bps": "strategy_hedge_independent_expected_execution_buffer_bps",
+
+    # [DIRECT] 最大允许单边成本
+    # 单位一致: bps; 语义: 超出则阻断开仓
+    "max_acceptable_cost_bps": "strategy_hedge_independent_max_acceptable_cost_bps",
+
+    # ════════════════════════════════════════════════════════════════
+    # Phase 1 扩展：评分质量
+    # ════════════════════════════════════════════════════════════════
+
+    # [DIRECT] 评分最大回撤容忍度
+    # 单位一致: bps; 语义: 评分波动超过此值则视为不稳定
+    "min_score_drawdown_bps": "strategy_hedge_independent_min_score_drawdown_bps",
+
+    # [APPROXIMATE] 最低流动性质量分
+    # 单位一致: ratio 0~1; 语义: replay 默认 liq=1.0，此参数做灵敏度分析
+    # ⚠️ replay 不模拟真实流动性，此映射仅传递阈值到生产端
+    "min_liquidity_quality": "strategy_hedge_independent_min_liquidity_quality",
+
+    # ════════════════════════════════════════════════════════════════
+    # Phase 1 扩展：执行策略
+    # ════════════════════════════════════════════════════════════════
+
+    # [DIRECT] 开仓限价偏移
+    # 单位一致: bps; 语义: bounded-limit IOC 的价格偏移
+    # ⚠️ REPLAY 未模拟: replay 假设 bar close 即时成交，无 limit order 匹配模型
+    #    该参数仅透传到生产端，RDP 回测不验证其效果
+    "limit_offset_bps_entry": "strategy_hedge_independent_limit_offset_bps_entry",
 }
 
 PARAMETER_MAPPING_DIRECTIONAL: dict[str, str] = {
@@ -268,13 +394,26 @@ def load_all_active_parameter_sets(
             # 转换为与 per-file 兼容的格式
             result: dict[str, dict[str, Any]] = {}
             for combo_key, entry in active_sets.items():
+                meta: dict[str, Any] = {
+                    "parameter_set_id": entry.get("parameter_set_id", ""),
+                    "family": entry.get("family", ""),
+                    "timeframe": entry.get("timeframe", ""),
+                    "status": "active",
+                }
+                # 传递 recalibration 标记（如存在）
+                if entry.get("recalibration_needed"):
+                    meta["recalibration_needed"] = True
+                    meta["recalibration_reason"] = entry.get(
+                        "recalibration_reason", "unknown"
+                    )
+                    log.warning(
+                        "active parameter set %s 标记为需要重新校准 (reason: %s)，"
+                        "请重新运行 RDP pipeline 以获取修正后的参数",
+                        combo_key,
+                        meta["recalibration_reason"],
+                    )
                 result[combo_key] = {
-                    "meta": {
-                        "parameter_set_id": entry.get("parameter_set_id", ""),
-                        "family": entry.get("family", ""),
-                        "timeframe": entry.get("timeframe", ""),
-                        "status": "active",
-                    },
+                    "meta": meta,
                     "values": entry.get("values", {}),
                 }
             return result
@@ -297,6 +436,14 @@ def load_all_active_parameter_sets(
         if "values" not in data:
             continue
         result[combo_key] = data
+        meta = data.get("meta", {})
+        if meta.get("recalibration_needed"):
+            log.warning(
+                "active parameter set %s 标记为需要重新校准 (reason: %s)，"
+                "请重新运行 RDP pipeline 以获取修正后的参数",
+                combo_key,
+                meta.get("recalibration_reason", "unknown"),
+            )
         log.info("已加载 per-file active parameter: %s", combo_key)
 
     return result

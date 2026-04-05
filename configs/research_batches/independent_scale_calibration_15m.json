@@ -5,13 +5,38 @@
   "symbol": "BTC-USDT-SWAP",
   "timeframe": "15m",
   "dataset_version": "v1.0",
-  "start": "2026-03-31",
-  "end": "2026-04-02",
+  "start": "2025-12-07",
+  "end": "2026-04-04",
   "experiments": [
-    {"label": "scale_8",  "params": {"signal_edge_scale_bps": 8}},
-    {"label": "scale_10", "params": {"signal_edge_scale_bps": 10}},
-    {"label": "scale_12", "params": {"signal_edge_scale_bps": 12}},
-    {"label": "scale_15", "params": {"signal_edge_scale_bps": 15}},
-    {"label": "scale_20", "params": {"signal_edge_scale_bps": 20}}
+    {
+      "label": "scale_8",
+      "params": {
+        "signal_edge_scale_bps": 8
+      }
+    },
+    {
+      "label": "scale_10",
+      "params": {
+        "signal_edge_scale_bps": 10
+      }
+    },
+    {
+      "label": "scale_12",
+      "params": {
+        "signal_edge_scale_bps": 12
+      }
+    },
+    {
+      "label": "scale_15",
+      "params": {
+        "signal_edge_scale_bps": 15
+      }
+    },
+    {
+      "label": "scale_20",
+      "params": {
+        "signal_edge_scale_bps": 20
+      }
+    }
   ]
 }

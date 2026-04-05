@@ -14,7 +14,7 @@ from aats.schemas.strategy_runtime import (
     StrategyFamilyAction,
     StrategyLegIntent,
 )
-from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, clamp_float as _clamp, to_decimal
 from aats.services.strategy_engines.base import StrategyEvaluationContext, StrategyFamilyRuntimeControl
 from aats.services.strategy_engines.overlay_parent_exposure import (
     OverlayParentExposureContract,
@@ -392,23 +392,11 @@ def evaluate_opportunistic_overlay_decision(
     main_leg_signal = resolved_parent_exposure.effective_signal
     main_signal_inferred_from_inventory = resolved_parent_exposure.signal_source == "inventory"
     if main_leg_signal == "flat":
-        return HedgeOverlayDecision(
-            enabled=True,
-            runtime_supported=True,
+        return _inactive_opportunistic_decision(
+            settings=settings, context=context, rollout=rollout,
             configured_mode=configured_mode,
-            effective_mode="opportunistic",
-            overlay_source="opportunistic",
-            state="inactive",
-            main_leg_signal="flat",
-            hedge_leg_signal="flat",
-            max_ratio=to_decimal(settings.strategy_hedge_opportunistic_max_ratio),
-            open_threshold=settings.strategy_hedge_opportunistic_open_threshold,
-            close_threshold=settings.strategy_hedge_opportunistic_close_threshold,
-            fee_drag_ratio=context.recent_fee_drag_ratio,
-            churn_ratio=context.recent_churn_ratio,
+            main_leg_signal="flat", hedge_leg_signal="flat",
             reason_codes=["opportunistic_overlay_main_signal_flat"],
-            rollout_stage=rollout["configured_rollout_stage"],
-            runtime_rollout_stage=rollout["runtime_stage"],
         )
 
     if main_leg_signal == "long":
@@ -429,27 +417,15 @@ def evaluate_opportunistic_overlay_decision(
         latest_leg_fill_timestamp = context.latest_long_leg_fill_timestamp
 
     if main_leg_current_qty <= EPSILON_DECIMAL_12:
-        return HedgeOverlayDecision(
-            enabled=True,
-            runtime_supported=True,
-            configured_mode="opportunistic",
-            effective_mode="opportunistic",
-            overlay_source="opportunistic",
-            state="inactive",
-            main_leg_signal=main_leg_signal,
-            hedge_leg_signal=hedge_leg_signal,
+        return _inactive_opportunistic_decision(
+            settings=settings, context=context, rollout=rollout,
+            configured_mode=configured_mode,
+            main_leg_signal=main_leg_signal, hedge_leg_signal=hedge_leg_signal,
+            reason_codes=["opportunistic_overlay_no_existing_inventory"],
             main_leg_current_qty=main_leg_current_qty,
             hedge_leg_current_qty=Decimal("0"),
             main_leg_target_qty=main_leg_target_qty,
             hedge_leg_target_qty=Decimal("0"),
-            max_ratio=to_decimal(settings.strategy_hedge_opportunistic_max_ratio),
-            open_threshold=settings.strategy_hedge_opportunistic_open_threshold,
-            close_threshold=settings.strategy_hedge_opportunistic_close_threshold,
-            fee_drag_ratio=context.recent_fee_drag_ratio,
-            churn_ratio=context.recent_churn_ratio,
-            reason_codes=["opportunistic_overlay_no_existing_inventory"],
-            rollout_stage=rollout["configured_rollout_stage"],
-            runtime_rollout_stage=rollout["runtime_stage"],
         )
 
     opportunity_score = (
@@ -652,14 +628,9 @@ def opportunistic_overlay_score(
     baseline: BaselineAssessment,
     ai_assessment: AIMarketAssessment | None,
 ) -> float:
-    side_sign = 1.0 if main_leg_signal == "long" else -1.0
-    microstructure_alpha = float(baseline.factor_scores.get("microstructure_alpha", 0.0))
-    momentum_alpha = float(baseline.factor_scores.get("momentum_alpha", 0.0))
-    trend_alpha = float(baseline.factor_scores.get("trend_alpha", 0.0))
-    opposite_microstructure = max(0.0, -(side_sign * microstructure_alpha))
-    opposite_momentum = max(0.0, -(side_sign * momentum_alpha))
-    opposite_trend = max(0.0, -(side_sign * trend_alpha))
-    opposite_ai = max(0.0, -(side_sign * _ai_directional_edge(ai_assessment)))
+    opposite_microstructure, opposite_momentum, opposite_trend, opposite_ai = _opposite_signals(
+        main_leg_signal, baseline, ai_assessment,
+    )
     confidence = _clamp(float(baseline.confidence), 0.0, 1.0)
     opportunity = (
         (_clamp(opposite_microstructure, 0.0, 1.0) * 0.28)
@@ -723,12 +694,54 @@ def _first_reason(reasons: list[str]) -> str:
 
 
 
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(value, upper))
-
-
 def _ai_directional_edge(ai_assessment: AIMarketAssessment | None) -> float:
     return 0.0 if ai_assessment is None else ai_assessment.directional_edge
+
+
+def _opposite_signals(
+    main_leg_signal: str,
+    baseline: BaselineAssessment,
+    ai_assessment: AIMarketAssessment | None,
+) -> tuple[float, float, float, float]:
+    side_sign = 1.0 if main_leg_signal == "long" else -1.0
+    return (
+        max(0.0, -(side_sign * float(baseline.factor_scores.get("microstructure_alpha", 0.0)))),
+        max(0.0, -(side_sign * float(baseline.factor_scores.get("momentum_alpha", 0.0)))),
+        max(0.0, -(side_sign * float(baseline.factor_scores.get("trend_alpha", 0.0)))),
+        max(0.0, -(side_sign * _ai_directional_edge(ai_assessment))),
+    )
+
+
+def _inactive_opportunistic_decision(
+    *,
+    settings: AATSSettings,
+    context: DecisionContext,
+    rollout: dict,
+    configured_mode: str,
+    main_leg_signal: str,
+    hedge_leg_signal: str,
+    reason_codes: list[str],
+    **extra_fields: object,
+) -> HedgeOverlayDecision:
+    return HedgeOverlayDecision(
+        enabled=True,
+        runtime_supported=True,
+        configured_mode=configured_mode,
+        effective_mode="opportunistic",
+        overlay_source="opportunistic",
+        state="inactive",
+        main_leg_signal=main_leg_signal,
+        hedge_leg_signal=hedge_leg_signal,
+        max_ratio=to_decimal(settings.strategy_hedge_opportunistic_max_ratio),
+        open_threshold=settings.strategy_hedge_opportunistic_open_threshold,
+        close_threshold=settings.strategy_hedge_opportunistic_close_threshold,
+        fee_drag_ratio=context.recent_fee_drag_ratio,
+        churn_ratio=context.recent_churn_ratio,
+        reason_codes=reason_codes,
+        rollout_stage=rollout["configured_rollout_stage"],
+        runtime_rollout_stage=rollout["runtime_stage"],
+        **extra_fields,
+    )
 
 
 def _resolve_opportunistic_execution_discipline(
@@ -840,11 +853,9 @@ def _opportunistic_signal_edge_bps(
         float(settings.strategy_alpha_edge_bps_scale),
         0.0,
     )
-    side_sign = 1.0 if main_leg_signal == "long" else -1.0
-    opposite_microstructure = max(0.0, -(side_sign * float(baseline.factor_scores.get("microstructure_alpha", 0.0))))
-    opposite_momentum = max(0.0, -(side_sign * float(baseline.factor_scores.get("momentum_alpha", 0.0))))
-    opposite_trend = max(0.0, -(side_sign * float(baseline.factor_scores.get("trend_alpha", 0.0))))
-    opposite_ai = max(0.0, -(side_sign * _ai_directional_edge(ai_assessment)))
+    opposite_microstructure, opposite_momentum, opposite_trend, opposite_ai = _opposite_signals(
+        main_leg_signal, baseline, ai_assessment,
+    )
     bonus_bps = (
         max(opposite_microstructure - 0.08, 0.0) * 22.0
         + max(opposite_momentum - 0.08, 0.0) * 12.0

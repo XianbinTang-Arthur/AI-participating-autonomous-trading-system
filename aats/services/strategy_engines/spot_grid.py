@@ -5,7 +5,7 @@ from decimal import Decimal
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.strategy_runtime import StrategyCandidate
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
-from aats.services.strategy_engines.base import StrategyEngineInput
+from aats.services.strategy_engines.base import StrategyEngineInput, sleeve_quantity_for_family
 from aats.services.trade_costs import TradeCostService
 
 
@@ -177,18 +177,6 @@ class SpotGridStrategyEngine:
         )
 
     def _current_sleeve_quantity(self, engine_input: StrategyEngineInput) -> Decimal:
-        if self.sleeve_inventory_loader is None:
-            return to_decimal(engine_input.context.current_position_qty)
-        # spot_grid is a spot-only sleeve; inventory attribution must always use cash scope.
-        return to_decimal(
-            self.sleeve_inventory_loader.quantity_for_strategy(
-                family="spot_grid",
-                primary_symbol=engine_input.context.symbol,
-                product_scope=engine_input.context.product_type,
-                margin_scope="cash",
-                symbol_scope=(engine_input.context.symbol,),
-                symbol=engine_input.context.symbol,
-                product_type=engine_input.context.product_type,
-                margin_mode="cash",
-            )
+        return sleeve_quantity_for_family(
+            self.sleeve_inventory_loader, engine_input, "spot_grid", "cash",
         )

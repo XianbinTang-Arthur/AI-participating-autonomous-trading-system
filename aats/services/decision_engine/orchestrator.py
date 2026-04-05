@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bus.base import EventBus
@@ -13,6 +15,10 @@ from aats.services.decision_engine.context_builder import DecisionContextBuilder
 from aats.services.decision_engine.target_position import TargetPositionEngine
 from aats.services.strategy_engines.overlay_parent_exposure import overlay_parent_exposure_record
 
+if TYPE_CHECKING:
+    from aats.services.operator.strategy_profiles import StrategyProfileControlService
+    from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
+
 
 class DecisionOrchestrator:
     def __init__(
@@ -23,8 +29,8 @@ class DecisionOrchestrator:
         baseline_strategy: BaselineStrategy,
         ai_service: AIInferenceService,
         target_engine: TargetPositionEngine,
-        strategy_profile_service=None,
-        strategy_coordinator=None,
+        strategy_profile_service: StrategyProfileControlService | None = None,
+        strategy_coordinator: StrategyCoordinatorService | None = None,
         metrics: MetricsRegistry | None = None,
     ) -> None:
         self.bus = bus

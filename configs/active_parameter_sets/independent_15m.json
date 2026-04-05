@@ -1,18 +1,28 @@
 {
   "meta": {
-    "parameter_set_id": "ps_20260404_072612_a5cc10",
+    "parameter_set_id": "ps_20260405_213757_b4c69e",
     "family": "independent",
     "timeframe": "15m",
     "status": "active",
-    "source_round_id": null,
-    "applied_at": "2026-04-04T17:30:44.636813+00:00",
-    "applied_by": "rdp_apply (acceptance_test)",
-    "approval_recommendation_id": "rec_20260404_173044_0ec13b"
+    "source_round_id": "20260405_201039_3486e846",
+    "applied_at": "2026-04-05T21:38:25.279260+00:00",
+    "applied_by": "parameter_pipeline_fix",
+    "approval_recommendation_id": null
   },
   "values": {
+    "taker_fee_bps": 5.0,
+    "de_risk_net_edge_bps": 2.0,
+    "rebalance_cooldown_seconds": 60,
+    "expected_slippage_buffer_bps": 0.0,
     "signal_edge_scale_bps": 12.0,
+    "scale_in_threshold": 0.6,
     "min_confirm_ticks": 2,
+    "close_threshold": 0.1,
+    "slippage_bps": 2.0,
+    "expected_execution_buffer_bps": 0.0,
+    "failed_thesis_net_edge_bps": -1.0,
+    "entry_threshold": 0.25,
     "min_safe_net_edge_bps": 0.0,
-    "score_stability_threshold": 2.0
+    "min_hold_seconds": 120
   }
 }

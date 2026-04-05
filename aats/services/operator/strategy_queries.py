@@ -8,6 +8,12 @@ if TYPE_CHECKING:
 
 
 class StrategyQueryFacade:
+    _SEGMENT_DIMENSIONS = frozenset({
+        "symbol", "market_regime", "volatility_state", "timeframe", "side",
+        "execution_action", "position_intent", "active_profile_id",
+        "exit_attribution", "risk_protection",
+    })
+
     def __init__(self, owner: "OperatorQueryService") -> None:
         self.owner = owner
 
@@ -16,7 +22,7 @@ class StrategyQueryFacade:
         cache_key = f"strategy_runtime:{self.owner._scope_cache_fragment()}:{normalized_limit}"
         return self.owner._cached_ttl(
             cache_key,
-            10,
+            30,
             lambda: self.owner._build_strategy_runtime(limit=normalized_limit),
         )
 
@@ -26,19 +32,27 @@ class StrategyQueryFacade:
         limit: int = 200,
         group_by: tuple[str, ...] = ("symbol", "market_regime", "side", "execution_action"),
     ) -> dict[str, Any]:
-        allowed_dimensions = {
-            "symbol",
-            "market_regime",
-            "volatility_state",
-            "timeframe",
-            "side",
-            "execution_action",
-            "position_intent",
-            "active_profile_id",
-            "exit_attribution",
-            "risk_protection",
-        }
-        normalized_group_by = tuple(item for item in group_by if item in allowed_dimensions) or ("symbol",)
+        normalized_limit = max(int(limit), 1)
+        normalized_group_by_raw = tuple(
+            item for item in group_by if item in self._SEGMENT_DIMENSIONS
+        ) or ("symbol",)
+        cache_key = (
+            f"strategy_segment_report:{self.owner._scope_cache_fragment()}:"
+            f"{normalized_limit}:{','.join(normalized_group_by_raw)}"
+        )
+        return self.owner._cached_ttl(
+            cache_key,
+            60,
+            lambda: self._build_strategy_segment_report(limit=normalized_limit, group_by=normalized_group_by_raw),
+        )
+
+    def _build_strategy_segment_report(
+        self,
+        *,
+        limit: int = 200,
+        group_by: tuple[str, ...] = ("symbol", "market_regime", "side", "execution_action"),
+    ) -> dict[str, Any]:
+        normalized_group_by = tuple(item for item in group_by if item in self._SEGMENT_DIMENSIONS) or ("symbol",)
         outcomes = list(self.owner._scoped_fill_outcomes())
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
         rows = [self.owner._execution_quality_row(item) for item in outcomes[:limit]]
@@ -127,12 +141,20 @@ class StrategyQueryFacade:
 
     def strategy_attribution_report(self, *, limit: int = 200) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
+        cache_key = f"strategy_attribution_report:{self.owner._scope_cache_fragment()}:{normalized_limit}"
+        return self.owner._cached_ttl(
+            cache_key,
+            60,
+            lambda: self._build_strategy_attribution_report(limit=normalized_limit),
+        )
+
+    def _build_strategy_attribution_report(self, *, limit: int) -> dict[str, Any]:
         sleeve_records = list(self.owner._scoped_sleeve_pnl_records())
         sleeve_records.sort(key=lambda item: item.event_timestamp or item.created_at, reverse=True)
-        sleeve_rows = sleeve_records[:normalized_limit]
+        sleeve_rows = sleeve_records[:limit]
         outcomes = list(self.owner._scoped_fill_outcomes())
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
-        rows = [self.owner._execution_quality_row(item) for item in outcomes[:normalized_limit]]
+        rows = [self.owner._execution_quality_row(item) for item in outcomes[:limit]]
 
         def _bucket_by(key: str, fallback: str) -> list[dict[str, Any]]:
             buckets: dict[str, dict[str, Any]] = {}

@@ -8,6 +8,10 @@ EPSILON_DECIMAL_9 = Decimal("1e-9")
 SNAPSHOT_QUANTUM = Decimal("0.000000000001")
 
 
+def clamp_float(value: float, lower: float, upper: float) -> float:
+    return max(lower, min(value, upper))
+
+
 def to_decimal(value: Decimal | float | int | str | None) -> Decimal:
     if value is None:
         return ZERO_DECIMAL
@@ -16,9 +20,16 @@ def to_decimal(value: Decimal | float | int | str | None) -> Decimal:
     return Decimal(str(value))
 
 
+def to_decimal_or_none(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
 def to_float(value: Decimal | float | int) -> float:
-    if isinstance(value, Decimal):
-        return float(value)
     return float(value)
 
 

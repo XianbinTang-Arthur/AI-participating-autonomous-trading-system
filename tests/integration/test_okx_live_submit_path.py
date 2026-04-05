@@ -189,7 +189,7 @@ class TestOKXLiveSubmitPath(unittest.IsolatedAsyncioTestCase):
             if request.url.path == "/api/v5/account/config":
                 return httpx.Response(
                     200,
-                    json={"code": "0", "data": [{"acctLv": "2", "posMode": "net_mode", "autoLoan": False}]},
+                    json={"code": "0", "data": [{"acctLv": "2", "posMode": "long_short_mode", "autoLoan": False}]},
                 )
             if request.url.path == "/api/v5/account/trade-fee":
                 return httpx.Response(200, json={"code": "0", "data": [{"maker": "-0.0008", "taker": "0.001"}]})
@@ -273,6 +273,9 @@ class TestOKXLiveSubmitPath(unittest.IsolatedAsyncioTestCase):
             target_leverage=3.0,
             exposure_side="long",
             position_intent="open_long",
+            position_mode="long_short_mode",
+            pos_side="long",
+            leg_action="open",
         )
 
         try:

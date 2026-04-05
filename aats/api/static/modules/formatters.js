@@ -24,7 +24,7 @@ export function formatSigned(value, digits = 4, fallback = "待确认") {
 export function formatMaybeTimestamp(value, fallback = "时间待同步") {
   if (!value) return fallback;
   const date = parseDate(value);
-  if (!date) return String(value);
+  if (!date) return escapeHtml(String(value));
   return date.toLocaleString("zh-CN", { hour12: false });
 }
 

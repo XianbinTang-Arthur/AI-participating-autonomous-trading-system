@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from dataclasses import dataclass
 
 from fastapi import Header, HTTPException, Request
@@ -137,14 +138,14 @@ def require_read_access(
     if session_user is not None:
         return session_user
 
-    if _write_api_key_compatibility_enabled(runtime) and settings.operator_write_api_key and x_aats_api_key == settings.operator_write_api_key:
+    if x_aats_api_key is not None and _write_api_key_compatibility_enabled(runtime) and settings.operator_write_api_key and hmac.compare_digest(x_aats_api_key, settings.operator_write_api_key):
         return OperatorPrincipal(
             identity="api_key_write",
             role="admin",
             auth_enabled=True,
             auth_source="api_key",
         )
-    if settings.operator_read_api_key and x_aats_api_key == settings.operator_read_api_key:
+    if x_aats_api_key is not None and settings.operator_read_api_key and hmac.compare_digest(x_aats_api_key, settings.operator_read_api_key):
         return OperatorPrincipal(
             identity="api_key_read",
             role="viewer",

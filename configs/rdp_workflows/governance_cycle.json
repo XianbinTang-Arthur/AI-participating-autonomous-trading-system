@@ -26,6 +26,14 @@
       "timeout_seconds": 60,
       "enabled": true,
       "allow_failure": true
+    },
+    {
+      "name": "auto_import_candidates",
+      "description": "自动导入最新 Step 3 参数候选到 registry（全量导入）。注: full pipeline 已在 Step 3 后自动执行此步骤，此处仅在独立运行 governance_cycle 时生效（幂等安全）",
+      "command": "python -m aats.data_platform.governance.auto_import_candidates --run",
+      "timeout_seconds": 30,
+      "enabled": true,
+      "allow_failure": true
     }
   ]
 }

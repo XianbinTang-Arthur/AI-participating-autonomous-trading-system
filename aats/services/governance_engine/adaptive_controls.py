@@ -4,18 +4,10 @@ from decimal import Decimal
 from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
+from aats.services.portfolio_service.decimals import to_decimal_or_none as _to_decimal
 
 _DECIMAL_ZERO = Decimal("0")
 _DECIMAL_ONE = Decimal("1")
-
-
-def _to_decimal(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return None
 
 
 def _clamp_decimal(value: Decimal, minimum: Decimal, maximum: Decimal) -> Decimal:

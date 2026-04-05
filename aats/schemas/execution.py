@@ -527,6 +527,8 @@ class LegExecutionPlan(SchemaBase):
         "scale_in_short",
         "reduce_short",
         "close_short",
+        "reverse_to_long",
+        "reverse_to_short",
     ]
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
 

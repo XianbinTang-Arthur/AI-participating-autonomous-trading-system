@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
@@ -20,6 +21,17 @@ from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.services.trade_costs import TradeCostService
 from aats.schemas.strategy_runtime import StrategyLegIntent
+
+
+@dataclass(slots=True, frozen=True)
+class AdverseFactors:
+    """Result of position-adverse factor analysis."""
+
+    adverse_microstructure: bool
+    adverse_momentum: bool
+    adverse_trend: bool
+    adverse_ai: bool
+    adverse_count: int
 
 
 class TargetPositionEngine:
@@ -60,7 +72,7 @@ class TargetPositionEngine:
         )
 
     @staticmethod
-    def _decision_as_of(context: DecisionContext):
+    def _decision_as_of(context: DecisionContext) -> datetime:
         return context.as_of_ts
 
     def build_shadow(
@@ -661,7 +673,7 @@ class TargetPositionEngine:
         current_position_qty: Decimal,
         baseline: BaselineAssessment,
         ai_assessment: AIMarketAssessment | None,
-    ) -> dict[str, object]:
+    ) -> AdverseFactors:
         side_sign = self._sign(current_position_qty)
         microstructure = to_decimal(baseline.factor_scores.get("microstructure_alpha", 0.0))
         momentum_alpha = to_decimal(baseline.factor_scores.get("momentum_alpha", 0.0))
@@ -679,13 +691,13 @@ class TargetPositionEngine:
         adverse_ai = (
             side_sign * ai_edge
         ) <= -abs(to_decimal(self.settings.strategy_flat_exit_ai_edge_threshold))
-        return {
-            "adverse_microstructure": adverse_microstructure,
-            "adverse_momentum": adverse_momentum,
-            "adverse_trend": adverse_trend,
-            "adverse_ai": adverse_ai,
-            "adverse_count": sum((adverse_microstructure, adverse_momentum, adverse_trend, adverse_ai)),
-        }
+        return AdverseFactors(
+            adverse_microstructure=adverse_microstructure,
+            adverse_momentum=adverse_momentum,
+            adverse_trend=adverse_trend,
+            adverse_ai=adverse_ai,
+            adverse_count=sum((adverse_microstructure, adverse_momentum, adverse_trend, adverse_ai)),
+        )
 
     def _emergency_protective_exit_required(
         self,
@@ -700,10 +712,9 @@ class TargetPositionEngine:
             baseline=baseline,
             ai_assessment=ai_assessment,
         )
-        adverse_count = int(factors["adverse_count"])
-        if adverse_count >= 3:
+        if factors.adverse_count >= 3:
             return True
-        if baseline.volatility_state == "high" and baseline.regime in {"breakout", "trend"} and adverse_count >= 2:
+        if baseline.volatility_state == "high" and baseline.regime in {"breakout", "trend"} and factors.adverse_count >= 2:
             return True
         return False
 
@@ -865,38 +876,17 @@ class TargetPositionEngine:
             trade_kind=trade_kind,
             desired_target_qty=desired_target_qty,
         )
-        if trade_kind == "entry":
-            if alpha + float(EPSILON_DECIMAL_12) < alpha_threshold:
-                guardrail_flags.append(f"{flag_prefix}_alpha_below_threshold")
-                return current_position_qty
-            if confidence + float(EPSILON_DECIMAL_12) < confidence_threshold:
-                guardrail_flags.append(f"{flag_prefix}_confidence_below_threshold")
-                return current_position_qty
-            if signal_edge_bps + float(EPSILON_DECIMAL_12) < edge_threshold:
-                guardrail_flags.append(f"{flag_prefix}_signal_edge_below_threshold")
-                return current_position_qty
-            return desired_target_qty
-        if trade_kind == "scale_in":
-            if alpha + float(EPSILON_DECIMAL_12) < alpha_threshold:
-                guardrail_flags.append(f"{flag_prefix}_alpha_below_threshold")
-                return current_position_qty
-            if confidence + float(EPSILON_DECIMAL_12) < confidence_threshold:
-                guardrail_flags.append(f"{flag_prefix}_confidence_below_threshold")
-                return current_position_qty
-            if signal_edge_bps + float(EPSILON_DECIMAL_12) < edge_threshold:
-                guardrail_flags.append(f"{flag_prefix}_signal_edge_below_threshold")
-                return current_position_qty
-            return desired_target_qty
-        if trade_kind == "reversal":
-            if alpha + float(EPSILON_DECIMAL_12) < alpha_threshold:
-                guardrail_flags.append(f"{flag_prefix}_alpha_below_threshold")
-                return current_position_qty
-            if confidence + float(EPSILON_DECIMAL_12) < confidence_threshold:
-                guardrail_flags.append(f"{flag_prefix}_confidence_below_threshold")
-                return current_position_qty
-            if signal_edge_bps + float(EPSILON_DECIMAL_12) < edge_threshold:
-                guardrail_flags.append(f"{flag_prefix}_signal_edge_below_threshold")
-                return current_position_qty
+        # Unified threshold check for entry / scale_in / reversal — the
+        # per-kind differentiation is handled by _trade_thresholds above.
+        if alpha + float(EPSILON_DECIMAL_12) < alpha_threshold:
+            guardrail_flags.append(f"{flag_prefix}_alpha_below_threshold")
+            return current_position_qty
+        if confidence + float(EPSILON_DECIMAL_12) < confidence_threshold:
+            guardrail_flags.append(f"{flag_prefix}_confidence_below_threshold")
+            return current_position_qty
+        if signal_edge_bps + float(EPSILON_DECIMAL_12) < edge_threshold:
+            guardrail_flags.append(f"{flag_prefix}_signal_edge_below_threshold")
+            return current_position_qty
         return desired_target_qty
 
     def _apply_strategy_execution_guards(
@@ -1086,7 +1076,11 @@ class TargetPositionEngine:
             or self.settings.strategy_post_close_cooldown_seconds <= 0
         ):
             return False
-        return max((self._decision_as_of(context) - context.last_position_closed_at).total_seconds(), 0.0) < self.settings.strategy_post_close_cooldown_seconds
+        elapsed = max(
+            (self._decision_as_of(context) - context.last_position_closed_at).total_seconds(),
+            0.0,
+        )
+        return elapsed < self.settings.strategy_post_close_cooldown_seconds
 
     def _low_edge_cooldown_active(self, context: DecisionContext) -> bool:
         if (
@@ -1095,7 +1089,11 @@ class TargetPositionEngine:
             or self.settings.strategy_low_edge_cooldown_seconds <= 0
         ):
             return False
-        return max((self._decision_as_of(context) - context.recent_low_edge_trade_at).total_seconds(), 0.0) < self.settings.strategy_low_edge_cooldown_seconds
+        elapsed = max(
+            (self._decision_as_of(context) - context.recent_low_edge_trade_at).total_seconds(),
+            0.0,
+        )
+        return elapsed < self.settings.strategy_low_edge_cooldown_seconds
 
     def _performance_degraded(self, context: DecisionContext) -> bool:
         if context.recent_closed_trade_count < self.settings.strategy_performance_guard_min_closed_trades:
@@ -1131,9 +1129,8 @@ class TargetPositionEngine:
             return True
         if current_position_qty * desired_target_qty < 0:
             return True
-        if (current_position_qty > 0 and desired_target_qty > 0) or (current_position_qty < 0 and desired_target_qty < 0):
-            return abs(desired_target_qty) + EPSILON_DECIMAL_12 < abs(current_position_qty)
-        return False
+        # Same direction (guaranteed here): reducing only if target < current.
+        return abs(desired_target_qty) + EPSILON_DECIMAL_12 < abs(current_position_qty)
 
     def _explicit_flat_exit_required(
         self,
@@ -1147,10 +1144,9 @@ class TargetPositionEngine:
             baseline=baseline,
             ai_assessment=ai_assessment,
         )
-        adverse_count = int(factors["adverse_count"])
-        if adverse_count >= 2:
+        if factors.adverse_count >= 2:
             return True
-        if bool(factors["adverse_microstructure"]) and bool(factors["adverse_ai"]):
+        if factors.adverse_microstructure and factors.adverse_ai:
             return True
         return False
 
@@ -1598,6 +1594,14 @@ class TargetPositionEngine:
             exit_attribution = "alpha_decay_reduce"
         elif "risk_contraction_exit" in guardrail_flags:
             exit_attribution = "risk_contraction_exit"
+        ai_direction = (
+            None if ai_assessment is None
+            else (
+                ai_decision_intent.direction
+                if ai_decision_intent is not None
+                else self._direction_from_assessment(ai_assessment)
+            )
+        )
         return DecisionOutcome(
             decision_id=context.decision_id,
             symbol=context.symbol,
@@ -1617,10 +1621,10 @@ class TargetPositionEngine:
                 "suggested_position_scale": baseline.suggested_position_scale,
                 "reason_codes": list(baseline.reason_codes),
             },
-            baseline_disagreement=None if ai_assessment is None else {
-                "disagreed": (ai_decision_intent.direction if ai_decision_intent is not None else self._direction_from_assessment(ai_assessment)) != baseline.direction_bias,
+            baseline_disagreement=None if ai_direction is None else {
+                "disagreed": ai_direction != baseline.direction_bias,
                 "baseline_direction": baseline.direction_bias,
-                "ai_direction": ai_decision_intent.direction if ai_decision_intent is not None else self._direction_from_assessment(ai_assessment),
+                "ai_direction": ai_direction,
             },
             decision_blocked_reasons=blocked_reasons,
             guardrail_flags=list(dict.fromkeys(guardrail_flags)),
@@ -1731,9 +1735,9 @@ class TargetPositionEngine:
             ):
                 return current_state_margin_mode
         leg_margin_modes = {
-            self._normalize_margin_mode(getattr(leg, "margin_mode", None), fallback=fallback)
+            mode
             for leg in context.current_position_legs
-            if self._normalize_margin_mode(getattr(leg, "margin_mode", None), fallback=fallback) != "cash"
+            if (mode := self._normalize_margin_mode(getattr(leg, "margin_mode", None), fallback=fallback)) != "cash"
         }
         if len(leg_margin_modes) == 1:
             return next(iter(leg_margin_modes))

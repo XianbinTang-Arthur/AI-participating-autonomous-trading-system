@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from aats.schemas.execution import OrderState
 from aats.schemas.strategy_runtime import StrategyExecutionBundleStatus
+from aats.services.execution_engine.bundle_recovery import _is_open_order
+from aats.services.execution_engine.state_machine import TERMINAL_ORDER_STATES as _TERMINAL_ORDER_STATES
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
-
-_TERMINAL_ORDER_STATES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}
 _FAILURE_ORDER_STATES = {"REJECTED", "FAILED", "BLOCKED"}
 _BUNDLE_STATUS_REASON_CODES = {
     "strategy_bundle_partial_fill_recovery",
@@ -75,6 +75,3 @@ def _overlay_bundle_detected(order_states: list[OrderState]) -> bool:
             return True
     return False
 
-
-def _is_open_order(order_state: OrderState) -> bool:
-    return str(order_state.status or "").upper() not in _TERMINAL_ORDER_STATES

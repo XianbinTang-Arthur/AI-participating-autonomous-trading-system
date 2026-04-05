@@ -3,7 +3,14 @@ from __future__ import annotations
 from aats.bootstrap.settings import AATSSettings, RuntimeMode
 from aats.schemas.system import OperatingState
 from aats.services.governance_engine.kill_switch import KillSwitch
-from aats.services.governance_engine.runtime_layers import RuntimeLayering, resolve_runtime_layering
+from aats.services.governance_engine.runtime_layers import (
+    EnvironmentCapabilities,
+    PolicyProfile,
+    RecoveryPolicy,
+    RuntimeLayering,
+    RuntimeProfile,
+    resolve_runtime_layering,
+)
 
 
 class RuntimeModeController:
@@ -34,19 +41,19 @@ class RuntimeModeController:
         return self._mode
 
     @property
-    def runtime_profile(self):
+    def runtime_profile(self) -> RuntimeProfile:
         return self.runtime_layering.runtime_profile
 
     @property
-    def environment_capabilities(self):
+    def environment_capabilities(self) -> EnvironmentCapabilities:
         return self.runtime_layering.environment_capabilities
 
     @property
-    def policy_profile(self):
+    def policy_profile(self) -> PolicyProfile:
         return self.runtime_layering.policy_profile
 
     @property
-    def recovery_policy(self):
+    def recovery_policy(self) -> RecoveryPolicy:
         return self.runtime_layering.recovery_policy
 
     def operating_state(self) -> OperatingState:
@@ -94,25 +101,8 @@ class RuntimeModeController:
         account_read_source = (
             "okx" if self.environment_capabilities.account_state_source_kind == "exchange" else "disabled"
         )
-        operating_state = self.operating_state()
-        if self.runtime_profile.name == "paper_local" and operating_state == "local_demo":
-            return {
-                "market_data_source": market_data_source,
-                "account_read_source": account_read_source,
-                "execution_route": self.environment_capabilities.execution_route,
-                "exchange_submit_target": self.environment_capabilities.exchange_submission_target,
-                "exchange_submit_allowed": self.environment_capabilities.exchange_submission_enabled,
-                "submit_blocked_reasons": list(self.runtime_layering.mode_submit_blocked_reasons),
-            }
-        if self.runtime_profile.name == "paper_local":
-            return {
-                "market_data_source": market_data_source,
-                "account_read_source": account_read_source,
-                "execution_route": self.environment_capabilities.execution_route,
-                "exchange_submit_target": self.environment_capabilities.exchange_submission_target,
-                "exchange_submit_allowed": self.environment_capabilities.exchange_submission_enabled,
-                "submit_blocked_reasons": list(self.runtime_layering.mode_submit_blocked_reasons),
-            }
+        # All mode variants derive their behavior from environment_capabilities
+        # and policy_profile, which are already differentiated by runtime_layering.
         return {
             "market_data_source": market_data_source,
             "account_read_source": account_read_source,

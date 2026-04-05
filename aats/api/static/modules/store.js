@@ -1,5 +1,5 @@
 export const AUTO_REFRESH_MS = 30000;
-export const VIEW_FRESHNESS_MS = 8000;
+export const VIEW_FRESHNESS_MS = 30000;
 
 export const DEFAULT_PAGE_LIMITS = {
   recentDecisions: 8,
@@ -84,6 +84,8 @@ export const CORE_SPECS = [
 
 const DEFERRED_VIEW_PANELS = {
   risk: new Set(["replayStatus", "exitExecutionActionHistoryPage"]),
+  strategy: new Set(["trialReviewSummary", "strategyAttribution"]),
+  aiAnalysis: new Set(["aiShadowEvaluations", "profileControlSummary"]),
 };
 
 export function viewSpecs(view, state = null) {

@@ -386,12 +386,12 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_hedge_independent_emit_close_reason_metrics"] is True
         assert values["strategy_hedge_independent_emit_execution_policy_metrics"] is True
         if profile == "derivatives_live":
-            assert values["strategy_hedge_independent_long_close_threshold"] == 0.24
-            assert values["strategy_hedge_independent_short_close_threshold"] == 0.24
-            assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 3.0
-            assert values["strategy_hedge_independent_expected_slippage_buffer_bps"] == 1.0
-            assert values["strategy_hedge_independent_expected_execution_buffer_bps"] == 2.0
-            assert values["strategy_hedge_independent_weak_edge_execution_mode"] == "report_only"
+            assert values["strategy_hedge_independent_long_close_threshold"] == 0.15
+            assert values["strategy_hedge_independent_short_close_threshold"] == 0.15
+            assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 0.0
+            assert values["strategy_hedge_independent_expected_slippage_buffer_bps"] == 0.5
+            assert values["strategy_hedge_independent_expected_execution_buffer_bps"] == 0.5
+            assert values["strategy_hedge_independent_weak_edge_execution_mode"] == "block"
             assert values["strategy_hedge_independent_max_acceptable_cost_bps"] == 7.5
             assert values["strategy_hedge_independent_passive_first_enabled"] is True
 
@@ -414,8 +414,8 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_family_opportunistic_live_execution_enabled"] is False
     assert values["smart_arbitrage_enabled"] is False
     assert values["strategy_hedge_overlay_mode"] == "independent"
-    assert values["strategy_hedge_independent_long_close_threshold"] == 0.24
-    assert values["strategy_hedge_independent_short_close_threshold"] == 0.24
+    assert values["strategy_hedge_independent_long_close_threshold"] == 0.15
+    assert values["strategy_hedge_independent_short_close_threshold"] == 0.15
     assert values["strategy_hedge_independent_min_confirm_ticks"] == 2
     assert values["strategy_hedge_independent_min_score_drawdown_bps"] == 6.0
     assert values["strategy_hedge_independent_min_liquidity_quality"] == 0.55
@@ -443,10 +443,10 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_hedge_independent_long_short_asymmetry_enabled"] is False
     assert values["strategy_hedge_independent_short_asymmetry_penalty_multiplier"] == 0.85
     assert values["strategy_hedge_independent_entry_size_down_floor"] == 0.50
-    assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 3.0
-    assert values["strategy_hedge_independent_expected_slippage_buffer_bps"] == 1.0
-    assert values["strategy_hedge_independent_expected_execution_buffer_bps"] == 2.0
-    assert values["strategy_hedge_independent_weak_edge_execution_mode"] == "report_only"
+    assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 0.0
+    assert values["strategy_hedge_independent_expected_slippage_buffer_bps"] == 0.5
+    assert values["strategy_hedge_independent_expected_execution_buffer_bps"] == 0.5
+    assert values["strategy_hedge_independent_weak_edge_execution_mode"] == "block"
     assert values["strategy_hedge_independent_max_acceptable_cost_bps"] == 7.5
     assert values["strategy_hedge_independent_passive_first_enabled"] is True
 

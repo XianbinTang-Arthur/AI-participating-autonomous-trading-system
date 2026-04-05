@@ -30,9 +30,20 @@ ALIGNMENT_MATCHED = "matched"
 ALIGNMENT_NO_BAR_DATA = "no_bar_data"
 
 
+_VALID_TIMEFRAMES = frozenset({"15m", "1h", "4h", "1d"})
+
+
 def _gold_table_name(timeframe: str) -> str:
-    """根据 timeframe 返回 Gold swap bar 表名。"""
+    """根据 timeframe 返回 Gold swap bar 表名。
+
+    通过白名单校验防止 SQL 注入。
+    """
     tf_lower = timeframe.lower()
+    if tf_lower not in _VALID_TIMEFRAMES:
+        raise ValueError(
+            f"Invalid timeframe: {timeframe!r}. "
+            f"Must be one of {sorted(_VALID_TIMEFRAMES)}"
+        )
     return f"gold.market_swap_replay_bars_{tf_lower}"
 
 

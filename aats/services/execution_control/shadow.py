@@ -4,6 +4,7 @@ from threading import Lock
 
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState, side_from_position_intent
+from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.storage.execution_fill_repo_v2 import ExecutionFillRepositoryV2
 from aats.storage.execution_order_repo import ExecutionOrderHistoryRepository, ExecutionOrderRepository
 
@@ -194,37 +195,8 @@ class Phase1ExecutionShadowService:
 
     @staticmethod
     def intent_from_order_state(order_state: OrderState) -> OrderIntent:
-        return OrderIntent(
-            intent_id=order_state.intent_id,
-            execution_chain_id=order_state.execution_chain_id,
-            execution_attempt_id=order_state.execution_attempt_id,
-            leg_intent_id=order_state.leg_intent_id,
-            decision_id=order_state.decision_id,
-            symbol=order_state.symbol,
-            side=side_from_position_intent(order_state.position_intent) or "buy",
-            quantity=order_state.requested_qty,
-            execution_style=order_state.submission_mode or "shadow",
-            order_type="market",
-            urgency="medium",
-            time_in_force="IOC",
-            reduce_only=order_state.reduce_only,
-            close_only=order_state.close_only,
-            td_mode=order_state.td_mode,
-            position_mode=order_state.position_mode,
-            pos_side=order_state.pos_side,
-            reduce_only_reason=order_state.reduce_only_reason,
-            close_only_reason=order_state.close_only_reason,
-            instrument_family=order_state.instrument_family,
-            settle_currency=order_state.settle_currency,
-            idempotency_key=order_state.client_order_id,
-            product_type=order_state.product_type,
-            target_leverage=order_state.target_leverage,
-            margin_mode=order_state.margin_mode,
-            exposure_side=order_state.exposure_side,
-            execution_action=order_state.execution_action,
-            leg_action=order_state.leg_action,
-            position_intent=order_state.position_intent,
-        )
+        intent = ExecutionOrderService._intent_from_order_state(order_state)
+        return intent.model_copy(update={"execution_style": order_state.submission_mode or "shadow"})
 
     @staticmethod
     def intent_from_fill(fill: FillEvent) -> OrderIntent:
@@ -258,4 +230,8 @@ class Phase1ExecutionShadowService:
             execution_action=fill.execution_action,
             leg_action=fill.leg_action,
             position_intent=fill.position_intent,
+            strategy_family=fill.strategy_family,
+            strategy_sleeve_id=fill.strategy_sleeve_id,
+            allocation_id=fill.allocation_id,
+            strategy_bundle_id=fill.strategy_bundle_id,
         )

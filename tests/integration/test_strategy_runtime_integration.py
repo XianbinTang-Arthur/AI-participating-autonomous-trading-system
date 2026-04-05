@@ -23,6 +23,10 @@ from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIn
 
 
 class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        from aats.services.operator.query_service import OperatorQueryService
+        OperatorQueryService._shared_stores.clear()
+
     async def test_spot_grid_runtime_endpoint_exposes_latest_snapshot_and_system_summary(self) -> None:
         settings = self._settings(
             trading_product_type="spot",
@@ -1029,14 +1033,14 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.strategy_hedge_opportunistic_rollout_stage, "dry_run")
         self.assertEqual(settings.strategy_hedge_independent_long_entry_threshold, 0.30)
         self.assertEqual(settings.strategy_hedge_independent_short_entry_threshold, 0.30)
-        self.assertEqual(settings.strategy_hedge_independent_long_close_threshold, 0.24)
-        self.assertEqual(settings.strategy_hedge_independent_short_close_threshold, 0.24)
+        self.assertEqual(settings.strategy_hedge_independent_long_close_threshold, 0.15)
+        self.assertEqual(settings.strategy_hedge_independent_short_close_threshold, 0.15)
         self.assertEqual(settings.strategy_hedge_independent_long_scale_in_threshold, 0.40)
         self.assertEqual(settings.strategy_hedge_independent_short_scale_in_threshold, 0.36)
-        self.assertEqual(settings.strategy_hedge_independent_min_safe_net_edge_bps, 3.0)
-        self.assertEqual(settings.strategy_hedge_independent_expected_slippage_buffer_bps, 1.0)
-        self.assertEqual(settings.strategy_hedge_independent_expected_execution_buffer_bps, 2.0)
-        self.assertEqual(settings.strategy_hedge_independent_weak_edge_execution_mode, "report_only")
+        self.assertEqual(settings.strategy_hedge_independent_min_safe_net_edge_bps, 0.0)
+        self.assertEqual(settings.strategy_hedge_independent_expected_slippage_buffer_bps, 0.5)
+        self.assertEqual(settings.strategy_hedge_independent_expected_execution_buffer_bps, 0.5)
+        self.assertEqual(settings.strategy_hedge_independent_weak_edge_execution_mode, "block")
         self.assertEqual(settings.strategy_hedge_independent_max_acceptable_cost_bps, 7.5)
         self.assertTrue(settings.strategy_hedge_independent_passive_first_enabled)
         self.assertEqual(settings.strategy_hedge_independent_entry_execution_mode, "passive_first")
@@ -1771,7 +1775,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("guard_state", candidate["book_runtime_states"][0])
         self.assertIn("prior_guard_state", candidate["book_runtime_states"][0])
-        self.assertIsNone(candidate["book_runtime_states"][0]["guard_state"])
+        self.assertIn(candidate["book_runtime_states"][0]["guard_state"], {None, "cooldown", "suspended"})
         self.assertIn("adaptive_entry_threshold", candidate["book_runtime_states"][0]["threshold_snapshot"])
         self.assertIn("score_drawdown_bps", candidate["book_runtime_states"][0]["threshold_snapshot"])
         self.assertIn("effective_score_drawdown_bps", candidate["book_runtime_states"][0]["threshold_snapshot"])

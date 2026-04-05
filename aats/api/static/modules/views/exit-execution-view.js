@@ -1,6 +1,6 @@
 import { actionButton, summaryStrip, surfaceCard } from "../components.js";
 import { textOrFallback } from "../copy.js";
-import { formatNumber } from "../formatters.js";
+import { escapeHtml, formatNumber } from "../formatters.js";
 import {
   mergedExitExecutionReviewItems,
   normalizedExitExecutionHistoryFilters,
@@ -84,9 +84,9 @@ export function renderExitExecutionView(data, uiState = {}) {
             ? `<div class="alert-list">${reviewItems.slice(0, 5).map((item) => `
                 <article class="timeline-item">
                   <div class="panel-head">
-                    <strong>${textOrFallback(item.symbol, "未知标的")} / ${textOrFallback(item.parent_intent_id, "未知父任务")}</strong>
+                    <strong>${escapeHtml(textOrFallback(item.symbol, "未知标的"))} / ${escapeHtml(textOrFallback(item.parent_intent_id, "未知父任务"))}</strong>
                   </div>
-                  <p>${textOrFallback(item.review_summary, "当前仍需继续确认 parent-exit 的真实状态。")}</p>
+                  <p>${escapeHtml(textOrFallback(item.review_summary, "当前仍需继续确认 parent-exit 的真实状态。"))}</p>
                   <p class="meta-copy">
                     可续派 ${formatNumber(item.remaining_dispatchable_quantity)}，
                     未确认 ${formatNumber(item.open_child_unknown_quantity)}，

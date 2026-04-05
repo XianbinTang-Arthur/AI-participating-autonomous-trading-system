@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aats.schemas.decision import BaselineAssessment, DecisionContext
-from aats.schemas.features import FeatureSnapshot
+from aats.schemas.features import AnalysisContext, DirectionalBias, FeatureSnapshot, RegimeIndicator
 from aats.storage.base import EventStore
 
 
@@ -61,7 +61,7 @@ class BaselineStrategy:
             decision_id=context.decision_id,
             symbol=context.symbol,
             regime=features.regime_indicator,
-            direction_bias=direction_bias,  # type: ignore[arg-type]
+            direction_bias=direction_bias,
             trend_strength=features.trend_strength,
             volatility_state=features.volatility_state,
             confidence=confidence,
@@ -79,21 +79,27 @@ class BaselineStrategy:
     def _direction_bias(
         *,
         alpha_score: float,
-        regime_indicator: str,
+        regime_indicator: RegimeIndicator,
         microstructure_alpha: float,
-        directional_alignment: str,
-    ) -> str:
+        directional_alignment: DirectionalBias,
+    ) -> DirectionalBias:
         breakout_threshold = 0.1
         trend_threshold = 0.16
         range_threshold = 0.24
         uncertain_threshold = 0.3
         alignment_bonus = 0.02 if directional_alignment in {"long", "short"} else 0.0
-        microstructure_support = abs(microstructure_alpha) >= 0.08 and (
-            alpha_score == 0.0 or (alpha_score > 0.0 and microstructure_alpha > 0.0) or (alpha_score < 0.0 and microstructure_alpha < 0.0)
+        same_sign = (
+            alpha_score == 0.0
+            or (alpha_score > 0.0 and microstructure_alpha > 0.0)
+            or (alpha_score < 0.0 and microstructure_alpha < 0.0)
         )
-        microstructure_conflict = abs(microstructure_alpha) >= 0.08 and (
-            (alpha_score > 0.0 and microstructure_alpha < 0.0) or (alpha_score < 0.0 and microstructure_alpha > 0.0)
+        opposite_sign = (
+            (alpha_score > 0.0 and microstructure_alpha < 0.0)
+            or (alpha_score < 0.0 and microstructure_alpha > 0.0)
         )
+        significant_micro = abs(microstructure_alpha) >= 0.08
+        microstructure_support = significant_micro and same_sign
+        microstructure_conflict = significant_micro and opposite_sign
 
         def adjusted_threshold(value: float) -> float:
             threshold = value - alignment_bonus if microstructure_support else value
@@ -130,7 +136,7 @@ class BaselineStrategy:
         return "flat"
 
     @staticmethod
-    def _factor_reason_codes(analysis) -> list[str]:
+    def _factor_reason_codes(analysis: AnalysisContext) -> list[str]:
         reason_codes: list[str] = []
         factors = analysis.alpha_factors
         if abs(factors.momentum_alpha) >= 0.2:
@@ -150,7 +156,7 @@ class BaselineStrategy:
     @staticmethod
     def _microstructure_reason_codes(
         *,
-        direction_bias: str,
+        direction_bias: DirectionalBias,
         microstructure_alpha: float,
     ) -> list[str]:
         if abs(microstructure_alpha) < 0.08:

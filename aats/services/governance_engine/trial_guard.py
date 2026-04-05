@@ -13,16 +13,8 @@ from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
 from aats.services.accounting import try_fill_fee_cost_in_quote
 from aats.services.governance_engine.kill_switch import KillSwitch
+from aats.services.portfolio_service.decimals import to_decimal_or_none as _to_decimal
 from aats.services.runtime_scope import event_matches_scope, runtime_state_scope
-
-
-def _to_decimal(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return None
 
 
 def _coerce_datetime(value: Any) -> datetime | None:
@@ -123,15 +115,17 @@ class ForwardTrialGuardService:
         daily_trading_net_realized = Decimal("0")
         daily_funding_fee_net = Decimal("0")
         consecutive_losses = 0
+        consecutive_loss_counted = False
         for row in recent_rows:
             pnl = _to_decimal(row.get("realized_pnl_delta")) or Decimal("0")
             observed_at = _coerce_datetime(row.get("ingestion_timestamp") or row.get("exchange_fill_timestamp"))
             if observed_at is not None and observed_at >= daily_cutoff:
                 daily_trading_net_realized += pnl
-            if pnl < Decimal("0"):
-                consecutive_losses += 1
-            else:
-                break
+            if not consecutive_loss_counted:
+                if pnl < Decimal("0"):
+                    consecutive_losses += 1
+                else:
+                    consecutive_loss_counted = True
 
         for row in recent_realized_events:
             if str(row.get("event_kind") or "") != "funding_fee":
@@ -239,7 +233,6 @@ class ForwardTrialGuardService:
         snapshot = self._base_snapshot(
             status=status,
             fill_count=fill_count,
-            daily_net_realized=daily_combined_net_realized,
             daily_trading_net_realized=daily_trading_net_realized,
             daily_funding_fee_net=daily_funding_fee_net,
             daily_combined_net_realized=daily_combined_net_realized,
@@ -416,7 +409,6 @@ class ForwardTrialGuardService:
         *,
         status: str,
         fill_count: int = 0,
-        daily_net_realized: Decimal = Decimal("0"),
         daily_trading_net_realized: Decimal = Decimal("0"),
         daily_funding_fee_net: Decimal = Decimal("0"),
         daily_combined_net_realized: Decimal = Decimal("0"),
@@ -447,7 +439,7 @@ class ForwardTrialGuardService:
             "lookback_fills": int(self.settings.trial_guard_lookback_fills),
             "min_closed_fills": int(self.settings.trial_guard_min_closed_fills),
             "fill_count": fill_count,
-            "daily_net_realized": daily_net_realized,
+            "daily_net_realized": daily_combined_net_realized,
             "daily_trading_net_realized": daily_trading_net_realized,
             "daily_funding_fee_net": daily_funding_fee_net,
             "daily_combined_net_realized": daily_combined_net_realized,

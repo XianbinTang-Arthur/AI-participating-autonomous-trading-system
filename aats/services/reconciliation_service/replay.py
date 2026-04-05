@@ -798,7 +798,7 @@ class ReplayEngine:
                 continue
             intent_chain_id = self._effective_execution_chain_id(intent)
             order_state_chain_id = self._effective_execution_chain_id(order_state)
-            intent_attempt_id = self._effective_execution_attempt_id(intent)
+            intent_attempt_id = getattr(intent, "execution_attempt_id", None)
             order_state_attempt_id = self._effective_execution_attempt_id(order_state)
             if (
                 intent_chain_id is not None
@@ -883,7 +883,7 @@ class ReplayEngine:
             else:
                 intent_chain_id = self._effective_execution_chain_id(intent)
                 fill_chain_id = self._effective_execution_chain_id(fill)
-                intent_attempt_id = self._effective_execution_attempt_id(intent)
+                intent_attempt_id = getattr(intent, "execution_attempt_id", None)
                 fill_attempt_id = self._effective_execution_attempt_id(fill)
                 if (
                     intent_chain_id is not None
@@ -1305,7 +1305,7 @@ class ReplayEngine:
                 intent = OrderIntent.model_validate(event.payload)
                 intent_ids.add(intent.intent_id)
                 chain_id = self._effective_execution_chain_id(intent)
-                attempt_id = self._effective_execution_attempt_id(intent)
+                attempt_id = getattr(intent, "execution_attempt_id", None)
                 if chain_id is not None:
                     intent_chain_ids_by_intent_id[intent.intent_id] = chain_id
                 if attempt_id is not None:

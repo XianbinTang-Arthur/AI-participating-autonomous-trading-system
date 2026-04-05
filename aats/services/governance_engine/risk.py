@@ -144,10 +144,12 @@ class RiskEngine:
                 rejection_reasons.extend(derivatives_result["rejection_reasons"])
                 approved = approved and derivatives_result["approved"]
             else:
+                snapshot = self._snapshot()
                 spot_rejection_reasons = self._evaluate_spot_balance_constraints(
                     target=target,
                     capped_qty=capped_qty,
                     mark_price=mark_price,
+                    snapshot=snapshot,
                 )
                 if spot_rejection_reasons:
                     approved = False
@@ -277,11 +279,12 @@ class RiskEngine:
         elif added_notional > EPSILON_DECIMAL_12:
             projected_margin_usage = Decimal("1")
 
+        daily_realized_loss = self._daily_realized_loss_usdt()
         only_reduce_constraints = self._base_leg_only_reduce_constraints(
             current=current_exposure,
             product_type=leg_intent.product_type,
             exposure_limits=exposure_limits,
-            daily_realized_loss=self._daily_realized_loss_usdt(),
+            daily_realized_loss=daily_realized_loss,
             strategy_bundle_id=leg_intent.strategy_bundle_id,
         )
         constraints_applied: list[str] = []
@@ -304,7 +307,7 @@ class RiskEngine:
                 snapshot=snapshot,
                 symbol=leg_intent.symbol,
             ),
-            daily_realized_loss=self._daily_realized_loss_usdt(),
+            daily_realized_loss=daily_realized_loss,
             enforce_exchange_margin_checks=enforce_exchange_margin_checks,
         )
         for leg, reasons in blocked_leg_reasons.items():
@@ -487,11 +490,12 @@ class RiskEngine:
         elif total_added_notional > EPSILON_DECIMAL_12:
             projected_margin_usage = Decimal("1")
 
+        daily_realized_loss = self._daily_realized_loss_usdt()
         only_reduce_constraints = self._base_leg_only_reduce_constraints(
             current=current_exposure,
             product_type="derivatives",
             exposure_limits=exposure_limits,
-            daily_realized_loss=self._daily_realized_loss_usdt(),
+            daily_realized_loss=daily_realized_loss,
             strategy_bundle_id=next(
                 (
                     str(item.strategy_bundle_id)
@@ -565,7 +569,6 @@ class RiskEngine:
         ):
             rejection_reasons.append("max_total_open_notional_exceeded")
 
-        daily_realized_loss = self._daily_realized_loss_usdt()
         max_daily_realized_loss_usdt = to_decimal(self.settings.max_daily_realized_loss_usdt)
         if (
             max_daily_realized_loss_usdt > Decimal("0")
@@ -722,7 +725,7 @@ class RiskEngine:
         *,
         snapshot: ExchangeAccountSnapshot | None,
         symbol: str,
-    ):
+    ) -> object | None:
         if snapshot is None:
             return None
         states = instrument_position_states_from_exchange_positions(
@@ -735,7 +738,7 @@ class RiskEngine:
     def _derivatives_exposure_metrics_from_state(
         self,
         *,
-        state,
+        state: object | None,
         symbol: str,
         mark_price: Decimal,
         equity_base: Decimal,
@@ -949,6 +952,9 @@ class RiskEngine:
         exposure_limits: DerivativesExposureLimits,
         daily_realized_loss: Decimal,
         strategy_bundle_id: str | None = None,
+        precomputed_reconciliation_reasons: list[str] | None = None,
+        precomputed_runtime_guard_reasons: list[str] | None = None,
+        precomputed_recovery_status_reasons: list[str] | None = None,
     ) -> dict[str, list[str]]:
         _ = product_type
         reason_map: dict[str, list[str]] = {}
@@ -957,17 +963,23 @@ class RiskEngine:
         self._append_reasons_to_legs(
             reason_map,
             held_or_all_legs,
-            self._reconciliation_only_reduce_reasons(),
+            precomputed_reconciliation_reasons
+            if precomputed_reconciliation_reasons is not None
+            else self._reconciliation_only_reduce_reasons(),
         )
         self._append_reasons_to_legs(
             reason_map,
             held_or_all_legs,
-            self._runtime_guard_only_reduce_reasons(),
+            precomputed_runtime_guard_reasons
+            if precomputed_runtime_guard_reasons is not None
+            else self._runtime_guard_only_reduce_reasons(),
         )
         self._append_reasons_to_legs(
             reason_map,
             held_or_all_legs,
-            self._recovery_status_only_reduce_reasons(strategy_bundle_id=strategy_bundle_id),
+            precomputed_recovery_status_reasons
+            if precomputed_recovery_status_reasons is not None
+            else self._recovery_status_only_reduce_reasons(strategy_bundle_id=strategy_bundle_id),
         )
 
         if (
@@ -1056,15 +1068,16 @@ class RiskEngine:
         projected_leg_notional = (
             projected.long_notional if leg_intent.pos_side == "long" else projected.short_notional
         )
-        projected_pending_notional = symbol_pending_notional + self._leg_added_notional(
+        added_notional = self._leg_added_notional(
             current=current,
             projected=projected,
             leg=leg_intent.pos_side,
         )
+        projected_pending_notional = symbol_pending_notional + added_notional
         projected_total_open_notional = (
             current_total_position_notional
             + total_pending_notional
-            + self._leg_added_notional(current=current, projected=projected, leg=leg_intent.pos_side)
+            + added_notional
         )
 
         if (
@@ -1116,17 +1129,15 @@ class RiskEngine:
         ):
             reasons.append("max_daily_realized_loss_usdt_exceeded")
 
+        only_reduce_trigger = min(
+            to_decimal(self.settings.derivatives_only_reduce_trigger_margin_fraction),
+            to_decimal(self.settings.max_margin_usage_fraction),
+        )
         if (
             not reasons
             and enforce_exchange_margin_checks
-            and min(
-                to_decimal(self.settings.derivatives_only_reduce_trigger_margin_fraction),
-                to_decimal(self.settings.max_margin_usage_fraction),
-            ) > Decimal("0")
-            and projected_margin_usage >= min(
-                to_decimal(self.settings.derivatives_only_reduce_trigger_margin_fraction),
-                to_decimal(self.settings.max_margin_usage_fraction),
-            ) - EPSILON_DECIMAL_12
+            and only_reduce_trigger > Decimal("0")
+            and projected_margin_usage >= only_reduce_trigger - EPSILON_DECIMAL_12
             and projected.net_notional > current.net_notional + EPSILON_DECIMAL_12
         ):
             reasons.append("derivatives_margin_usage_requires_only_reduce")
@@ -1208,6 +1219,7 @@ class RiskEngine:
         target: PositionTarget,
         capped_qty: Decimal,
         mark_price: Decimal,
+        snapshot: ExchangeAccountSnapshot | None = None,
     ) -> list[str]:
         delta_qty = capped_qty - to_decimal(target.current_position_qty)
         base_currency, quote_currency = self._symbol_currencies(target.symbol)
@@ -1229,12 +1241,12 @@ class RiskEngine:
                 max_slippage_tolerance_bps=target.max_slippage_tolerance_bps,
                 taker_fee_bps=taker_fee_bps,
             ) or Decimal("0")
-            available_quote = self._available_balance(quote_currency)
+            available_quote = self._available_balance(quote_currency, snapshot=snapshot)
             if available_quote + EPSILON_DECIMAL_12 < required_quote:
                 return ["insufficient_quote_balance"]
         if not margin_short_open_sell and delta_qty < -EPSILON_DECIMAL_12 and base_currency is not None:
             required_base = abs(delta_qty)
-            available_base = self._available_balance(base_currency)
+            available_base = self._available_balance(base_currency, snapshot=snapshot)
             if available_base + EPSILON_DECIMAL_12 < required_base:
                 return ["insufficient_base_balance"]
         return []
@@ -1453,12 +1465,24 @@ class RiskEngine:
         rejection_reasons: list[str] = []
         approved = True
         flattened_target_qty = capped_qty
+
+        # Compute provider-based only-reduce reasons once to avoid duplicate
+        # calls (these are also forwarded to _base_leg_only_reduce_constraints).
+        reconciliation_only_reduce_reasons = self._reconciliation_only_reduce_reasons()
+        runtime_guard_only_reduce_reasons = self._runtime_guard_only_reduce_reasons()
+        recovery_status_only_reduce_reasons = self._recovery_status_only_reduce_reasons(
+            strategy_bundle_id=target.strategy_bundle_id,
+        )
+
         leg_reason_map = self._base_leg_only_reduce_constraints(
             current=current_derivatives_exposure,
             product_type=target.product_type,
             exposure_limits=derivatives_exposure_limits,
             daily_realized_loss=daily_realized_loss,
             strategy_bundle_id=target.strategy_bundle_id,
+            precomputed_reconciliation_reasons=reconciliation_only_reduce_reasons,
+            precomputed_runtime_guard_reasons=runtime_guard_only_reduce_reasons,
+            precomputed_recovery_status_reasons=recovery_status_only_reduce_reasons,
         )
         if only_reduce_causes:
             self._append_reasons_to_legs(
@@ -1481,74 +1505,42 @@ class RiskEngine:
             and abs(current_qty) > EPSILON_DECIMAL_12
             and abs(flattened_target_qty) <= EPSILON_DECIMAL_12
         )
-        recovery_only_reduce_reasons = self._reconciliation_only_reduce_reasons()
-        if recovery_only_reduce_reasons:
-            only_reduce_required = True
-            risk_limit_breached = True
-            self._append_reasons_to_legs(
-                leg_reason_map,
-                self._held_or_all_legs(current=current_derivatives_exposure),
-                recovery_only_reduce_reasons,
-            )
-            flattened_target_qty = self._reduce_only_target_qty(
-                current_qty=current_qty,
-                target_qty=flattened_target_qty,
-            )
-            constraints_applied.extend(["only_reduce_required", *recovery_only_reduce_reasons])
-            if abs(flattened_target_qty - current_qty) <= EPSILON_DECIMAL_12:
-                approved = False
-                rejection_reasons.extend(recovery_only_reduce_reasons)
-                rejection_reasons.append("only_reduce_mode_active")
-            flatten_required = (
-                abs(current_qty) > EPSILON_DECIMAL_12
-                and abs(flattened_target_qty) <= EPSILON_DECIMAL_12
-            )
-        runtime_guard_only_reduce_reasons = self._runtime_guard_only_reduce_reasons()
-        if runtime_guard_only_reduce_reasons:
-            only_reduce_required = True
-            risk_limit_breached = True
-            self._append_reasons_to_legs(
-                leg_reason_map,
-                self._held_or_all_legs(current=current_derivatives_exposure),
-                runtime_guard_only_reduce_reasons,
-            )
-            flattened_target_qty = self._reduce_only_target_qty(
-                current_qty=current_qty,
-                target_qty=flattened_target_qty,
-            )
-            constraints_applied.extend(["only_reduce_required", *runtime_guard_only_reduce_reasons])
-            if abs(flattened_target_qty - current_qty) <= EPSILON_DECIMAL_12:
-                approved = False
-                rejection_reasons.extend(runtime_guard_only_reduce_reasons)
-                rejection_reasons.append("only_reduce_mode_active")
-            flatten_required = (
-                abs(current_qty) > EPSILON_DECIMAL_12
-                and abs(flattened_target_qty) <= EPSILON_DECIMAL_12
-            )
-        recovery_status_only_reduce_reasons = self._recovery_status_only_reduce_reasons(
-            strategy_bundle_id=target.strategy_bundle_id,
+
+        # Apply provider-based only-reduce enforcement (reasons already in
+        # leg_reason_map via _base_leg_only_reduce_constraints above).
+        provider_only_reduce_reasons = (
+            reconciliation_only_reduce_reasons
+            + runtime_guard_only_reduce_reasons
+            + recovery_status_only_reduce_reasons
         )
-        if recovery_status_only_reduce_reasons:
+        if provider_only_reduce_reasons:
             only_reduce_required = True
             risk_limit_breached = True
-            self._append_reasons_to_legs(
-                leg_reason_map,
-                self._held_or_all_legs(current=current_derivatives_exposure),
-                recovery_status_only_reduce_reasons,
-            )
             flattened_target_qty = self._reduce_only_target_qty(
                 current_qty=current_qty,
                 target_qty=flattened_target_qty,
             )
-            constraints_applied.extend(["only_reduce_required", *recovery_status_only_reduce_reasons])
+            constraints_applied.extend(["only_reduce_required", *provider_only_reduce_reasons])
             if abs(flattened_target_qty - current_qty) <= EPSILON_DECIMAL_12:
                 approved = False
-                rejection_reasons.extend(recovery_status_only_reduce_reasons)
+                rejection_reasons.extend(provider_only_reduce_reasons)
                 rejection_reasons.append("only_reduce_mode_active")
             flatten_required = (
                 abs(current_qty) > EPSILON_DECIMAL_12
                 and abs(flattened_target_qty) <= EPSILON_DECIMAL_12
             )
+
+        # Recalculate margin requirement based on the (possibly flattened) target
+        # qty so that the returned diagnostic data is consistent with the actual
+        # position change.
+        flattened_added_exposure_qty = self._derivatives_added_exposure_qty(
+            current_qty=current_qty,
+            target_qty=flattened_target_qty,
+        )
+        flattened_required_initial_margin = (
+            abs(flattened_added_exposure_qty) * mark_price * fee_multiplier
+        ) / leverage
+
         flattened_projected_exposure = self._project_derivatives_exposure_for_target(
             target_qty=flattened_target_qty,
             mark_price=mark_price,
@@ -1558,8 +1550,8 @@ class RiskEngine:
         flattened_projected_exposure = flattened_projected_exposure.model_copy(
             update={
                 "total_initial_margin": (
-                    current_initial_margin + required_initial_margin
-                    if current_initial_margin + required_initial_margin > EPSILON_DECIMAL_12
+                    current_initial_margin + flattened_required_initial_margin
+                    if current_initial_margin + flattened_required_initial_margin > EPSILON_DECIMAL_12
                     else flattened_projected_exposure.total_initial_margin
                 )
             }
@@ -1568,7 +1560,7 @@ class RiskEngine:
             "approved": approved,
             "capped_qty": flattened_target_qty,
             "projected_notional": projected_notional,
-            "required_initial_margin": required_initial_margin,
+            "required_initial_margin": flattened_required_initial_margin,
             "projected_margin_usage": projected_margin_usage,
             "only_reduce_required": only_reduce_required,
             "leg_only_reduce_constraints": self._leg_constraints_from_reason_map(leg_reason_map),
@@ -1625,10 +1617,16 @@ class RiskEngine:
             price = Decimal("0")
         return max(price, Decimal("0"))
 
-    def _available_balance(self, currency: str | None) -> Decimal:
+    def _available_balance(
+        self,
+        currency: str | None,
+        *,
+        snapshot: ExchangeAccountSnapshot | None = None,
+    ) -> Decimal:
         if currency is None:
             return Decimal("0")
-        snapshot = self._snapshot()
+        if snapshot is None:
+            snapshot = self._snapshot()
         if snapshot is None:
             return Decimal("0")
         exchange_available = sum(balance.available for balance in snapshot.balances if balance.currency == currency)
@@ -1931,7 +1929,7 @@ class RiskEngine:
             return dumped if isinstance(dumped, dict) else {}
         return payload if isinstance(payload, dict) else {}
 
-    def _latest_scoped_reconciliation(self):
+    def _latest_scoped_reconciliation(self) -> object | None:
         if self.reconciliation_repo is None:
             return None
         latest_for_scope = getattr(self.reconciliation_repo, "latest_for_scope", None)

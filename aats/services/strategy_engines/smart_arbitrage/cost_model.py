@@ -72,30 +72,33 @@ def build_cost_breakdown(
             net_edge_bps=estimate.executable_edge_bps,
         )
 
+    spot_margin_mode = (
+        settings.smart_arbitrage_margin_short_spot_margin_mode
+        if execution_mode == "margin_reverse_carry"
+        else "cash"
+    )
     ideal_open_fee_bps, ideal_close_fee_bps, fee_flags = _fee_cost_components(
-        settings=settings,
         trade_cost_service=trade_cost_service,
-        execution_mode=execution_mode,
+        spot_margin_mode=spot_margin_mode,
         hedge_margin_mode=resolved_hedge_margin_mode,
         spot_symbol=spot_symbol,
         hedge_symbol=hedge_symbol,
+        fee_source_mode=settings.smart_arbitrage_fee_source_mode,
     )
     source_flags.extend(fee_flags)
     ideal_total_fee_bps = ideal_open_fee_bps + ideal_close_fee_bps
 
     executable_spread_bps, spread_flags = _spread_cost_component(
-        settings=settings,
         trade_cost_service=trade_cost_service,
-        execution_mode=execution_mode,
+        spot_margin_mode=spot_margin_mode,
         hedge_margin_mode=resolved_hedge_margin_mode,
         spot_symbol=spot_symbol,
         hedge_symbol=hedge_symbol,
     )
     source_flags.extend(spread_flags)
     executable_slippage_bps, slippage_flags = _slippage_cost_component(
-        settings=settings,
         trade_cost_service=trade_cost_service,
-        execution_mode=execution_mode,
+        spot_margin_mode=spot_margin_mode,
         hedge_margin_mode=resolved_hedge_margin_mode,
         spot_symbol=spot_symbol,
         hedge_symbol=hedge_symbol,
@@ -197,18 +200,13 @@ def build_cost_breakdown(
 
 def _fee_cost_components(
     *,
-    settings: AATSSettings,
     trade_cost_service: TradeCostService,
-    execution_mode: str | None,
+    spot_margin_mode: str,
     hedge_margin_mode: str,
     spot_symbol: str | None,
     hedge_symbol: str | None,
+    fee_source_mode: str,
 ) -> tuple[Decimal, Decimal, list[str]]:
-    spot_margin_mode = (
-        settings.smart_arbitrage_margin_short_spot_margin_mode
-        if execution_mode == "margin_reverse_carry"
-        else "cash"
-    )
     spot_fee_bps = trade_cost_service.estimated_execution_fee_bps_decimal(
         symbol=spot_symbol,
         product_type="spot",
@@ -225,7 +223,7 @@ def _fee_cost_components(
     )
     source_flag = (
         "fee_account_schedule"
-        if settings.smart_arbitrage_fee_source_mode == "account_schedule"
+        if fee_source_mode == "account_schedule"
         else "fee_trade_cost_defaults"
     )
     if spot_fee_bps > Decimal("0") or hedge_fee_bps > Decimal("0"):
@@ -237,18 +235,12 @@ def _fee_cost_components(
 
 def _spread_cost_component(
     *,
-    settings: AATSSettings,
     trade_cost_service: TradeCostService,
-    execution_mode: str | None,
+    spot_margin_mode: str,
     hedge_margin_mode: str,
     spot_symbol: str | None,
     hedge_symbol: str | None,
 ) -> tuple[Decimal, list[str]]:
-    spot_margin_mode = (
-        settings.smart_arbitrage_margin_short_spot_margin_mode
-        if execution_mode == "margin_reverse_carry"
-        else "cash"
-    )
     spot_spread_bps = trade_cost_service.default_spread_bps(
         symbol=spot_symbol,
         product_type="spot",
@@ -267,18 +259,12 @@ def _spread_cost_component(
 
 def _slippage_cost_component(
     *,
-    settings: AATSSettings,
     trade_cost_service: TradeCostService,
-    execution_mode: str | None,
+    spot_margin_mode: str,
     hedge_margin_mode: str,
     spot_symbol: str | None,
     hedge_symbol: str | None,
 ) -> tuple[Decimal, list[str]]:
-    spot_margin_mode = (
-        settings.smart_arbitrage_margin_short_spot_margin_mode
-        if execution_mode == "margin_reverse_carry"
-        else "cash"
-    )
     spot_slippage_bps = trade_cost_service.default_slippage_bps(
         symbol=spot_symbol,
         product_type="spot",
@@ -437,9 +423,6 @@ def _funding_cost_component(
             if funding_event_projection_active and expected_funding_events <= 0:
                 source_flags.append("funding_outside_projected_hold_window")
                 return Decimal("0"), source_flags
-            if expected_funding_events > 0 and per_event_proxy_bps is not None and per_event_proxy_bps > Decimal("0"):
-                source_flags.append("funding_account_proxy_per_event")
-                return per_event_proxy_bps * Decimal(expected_funding_events), source_flags
             source_flags.append("funding_account_proxy_total")
             return total_proxy_bps, source_flags
 
@@ -502,8 +485,4 @@ def _resolve_required_hedge_margin_mode(
     normalized = str(hedge_margin_mode or "").strip().lower()
     if normalized:
         return normalized
-    # The derivatives hedge margin scope is now a required runtime input.
-    # `require_explicit_hedge_margin_mode` is retained only for call-site compatibility.
-    if require_explicit_hedge_margin_mode or not normalized:
-        raise ValueError("smart_arbitrage_hedge_margin_mode_required")
     raise ValueError("smart_arbitrage_hedge_margin_mode_required")

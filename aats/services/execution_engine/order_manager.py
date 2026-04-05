@@ -515,6 +515,10 @@ class OrderManager:
                 allocation_id=intent.allocation_id,
                 strategy_bundle_id=intent.strategy_bundle_id,
                 strategy_leg_role=intent.strategy_leg_role,
+                strategy_pair_id=intent.strategy_pair_id,
+                strategy_opportunity_kind=intent.strategy_opportunity_kind,
+                strategy_execution_mode=intent.strategy_execution_mode,
+                strategy_state_phase=intent.strategy_state_phase,
                 submission_payload={},
             )
         submitting_state = current.model_copy(
@@ -551,6 +555,10 @@ class OrderManager:
                 "allocation_id": intent.allocation_id,
                 "strategy_bundle_id": intent.strategy_bundle_id,
                 "strategy_leg_role": intent.strategy_leg_role,
+                "strategy_pair_id": intent.strategy_pair_id,
+                "strategy_opportunity_kind": intent.strategy_opportunity_kind,
+                "strategy_execution_mode": intent.strategy_execution_mode,
+                "strategy_state_phase": intent.strategy_state_phase,
             }
         )
         await self._persist_order_state(order_state=submitting_state, key=intent.symbol)
@@ -612,6 +620,10 @@ class OrderManager:
                 allocation_id=intent.allocation_id,
                 strategy_bundle_id=intent.strategy_bundle_id,
                 strategy_leg_role=intent.strategy_leg_role,
+                strategy_pair_id=intent.strategy_pair_id,
+                strategy_opportunity_kind=intent.strategy_opportunity_kind,
+                strategy_execution_mode=intent.strategy_execution_mode,
+                strategy_state_phase=intent.strategy_state_phase,
                 cancel_reason=str(exc),
                 execution_error=str(exc),
                 submission_payload={},
@@ -701,14 +713,14 @@ class OrderManager:
     ) -> OrderState | None:
         last_state = self.execution_repo.get_order_state(client_order_id)
         if split_limit <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
-            return last_state or self.execution_repo.get_order_state(client_order_id)
+            return last_state
         for slice_index in range(start_slice_index, self._EXIT_SPLIT_MAX_CHILDREN + 1):
             parent = self._parent_exit_execution_intent(intent=intent)
             if parent is not None and (
                 parent.operator_review_required
                 or parent.aggregate_status in {"CANCEL_PENDING", "COMPLETED", "CANCELED", "FAILED_SAFE", "REVIEW_REQUIRED"}
             ):
-                return last_state or self.execution_repo.get_order_state(client_order_id)
+                return last_state
             remaining_quantity = (
                 max(Decimal(intent.quantity), Decimal("0"))
                 if slice_index == start_slice_index and start_slice_index <= 1
@@ -719,10 +731,10 @@ class OrderManager:
                 )
             )
             if remaining_quantity <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
-                return last_state or self.execution_repo.get_order_state(client_order_id)
+                return last_state
             child_quantity = min(split_limit, remaining_quantity)
             if child_quantity <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
-                return last_state or self.execution_repo.get_order_state(client_order_id)
+                return last_state
             child_intent, child_leg_intent = self._split_child_intent(
                 intent=intent,
                 leg_intent=leg_intent,
@@ -771,7 +783,7 @@ class OrderManager:
                 slice_index=slice_index,
             ):
                 return last_state
-        return last_state or self.execution_repo.get_order_state(client_order_id)
+        return last_state
 
     def _should_continue_serial_exit_split(
         self,
@@ -1011,9 +1023,15 @@ class OrderManager:
         intent: OrderIntent,
         client_order_id: str,
     ) -> OrderState | None:
+        non_terminal_query = getattr(self.execution_repo, "non_terminal_order_states", None)
+        candidate_states = (
+            non_terminal_query()
+            if callable(non_terminal_query)
+            else self.execution_repo.order_states()
+        )
         unknown_states = [
             state
-            for state in self.execution_repo.order_states()
+            for state in candidate_states
             if self._is_unknown_write_state(state) and not self.order_state_machine.is_terminal(state.status)
         ]
         if not unknown_states:
@@ -1308,11 +1326,16 @@ class OrderManager:
         bundle = self.strategy_runtime_repo.get_execution_bundle(bundle_id)
         if bundle is None:
             return
-        bundle_order_states = [
-            state
-            for state in self.execution_repo.order_states()
-            if str(state.strategy_bundle_id or "").strip() == bundle_id
-        ]
+        indexed_query = getattr(self.execution_repo, "order_states_by_bundle_id", None)
+        bundle_order_states = (
+            indexed_query(bundle_id)
+            if callable(indexed_query)
+            else [
+                state
+                for state in self.execution_repo.order_states()
+                if str(state.strategy_bundle_id or "").strip() == bundle_id
+            ]
+        )
         derived_status = derive_strategy_bundle_status(
             order_states=bundle_order_states,
             previous_status=bundle.status,
@@ -1489,6 +1512,10 @@ class OrderManager:
                 allocation_id=intent.allocation_id,
                 strategy_bundle_id=intent.strategy_bundle_id,
                 strategy_leg_role=intent.strategy_leg_role,
+                strategy_pair_id=intent.strategy_pair_id,
+                strategy_opportunity_kind=intent.strategy_opportunity_kind,
+                strategy_execution_mode=intent.strategy_execution_mode,
+                strategy_state_phase=intent.strategy_state_phase,
                 execution_error=f"transient_close_retry_cooldown_active:{state.execution_error or state.cancel_reason or 'transient_exchange_failure'}",
                 submission_payload={},
             )

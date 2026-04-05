@@ -17,7 +17,7 @@ from aats.schemas.strategy_runtime import (
     StrategyFamilyAction,
     StrategyLegIntent,
 )
-from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, clamp_float as _clamp, to_decimal
 from aats.services.strategy_engines.base import (
     StrategyEvaluationContext,
     StrategyFamilyRuntimeControl,
@@ -1863,7 +1863,3 @@ def _inactive_book(leg: IndependentLeg) -> IndependentBookEvaluation:
 
 def _ai_directional_edge(ai_assessment: AIMarketAssessment | None) -> float:
     return 0.0 if ai_assessment is None else ai_assessment.directional_edge
-
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(value, upper))

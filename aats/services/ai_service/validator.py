@@ -115,7 +115,7 @@ class AssessmentValidator:
         return AIMarketAssessment(
             decision_id=context.decision_id,
             symbol=context.symbol,
-            regime=payload.regime,
+            regime=regime,
             directional_edge=directional_edge,
             expected_volatility=expected_volatility,
             confidence=confidence,

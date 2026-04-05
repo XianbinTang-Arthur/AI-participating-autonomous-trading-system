@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from decimal import Decimal
 from typing import Any, Callable
 
@@ -100,28 +100,13 @@ class PortfolioState:
     def has_applied_fill(self, fill_id: str) -> bool:
         return fill_id in self._applied_fill_ids
 
+    def mark_fill_applied(self, fill_id: str) -> None:
+        self._applied_fill_ids.add(fill_id)
+
     def checkpoint(self) -> PortfolioStateCheckpoint:
         return PortfolioStateCheckpoint(
             positions={
-                symbol: PositionRecord(
-                    symbol=record.symbol,
-                    position_key=record.position_key,
-                    quantity=record.quantity,
-                    avg_entry_price=record.avg_entry_price,
-                    product_type=record.product_type,
-                    target_leverage=record.target_leverage,
-                    margin_mode=record.margin_mode,
-                    position_mode=record.position_mode,
-                    pos_side=record.pos_side,
-                    instrument_family=record.instrument_family,
-                    settle_currency=record.settle_currency,
-                    margin_allocated=record.margin_allocated,
-                    maintenance_margin=record.maintenance_margin,
-                    margin_ratio=record.margin_ratio,
-                    liquidation_price=record.liquidation_price,
-                    margin_source=record.margin_source,
-                    exposure_side=record.exposure_side,
-                )
+                symbol: _dc_replace(record)
                 for symbol, record in self.positions.items()
             },
             balances=dict(self.balances),
@@ -133,25 +118,7 @@ class PortfolioState:
 
     def restore(self, checkpoint: PortfolioStateCheckpoint) -> None:
         self.positions = {
-            symbol: PositionRecord(
-                symbol=record.symbol,
-                position_key=record.position_key,
-                quantity=record.quantity,
-                avg_entry_price=record.avg_entry_price,
-                product_type=record.product_type,
-                target_leverage=record.target_leverage,
-                margin_mode=record.margin_mode,
-                position_mode=record.position_mode,
-                pos_side=record.pos_side,
-                instrument_family=record.instrument_family,
-                settle_currency=record.settle_currency,
-                margin_allocated=record.margin_allocated,
-                maintenance_margin=record.maintenance_margin,
-                margin_ratio=record.margin_ratio,
-                liquidation_price=record.liquidation_price,
-                margin_source=record.margin_source,
-                exposure_side=record.exposure_side,
-            )
+            symbol: _dc_replace(record)
             for symbol, record in checkpoint.positions.items()
         }
         self.balances = dict(checkpoint.balances)
@@ -332,7 +299,6 @@ class PortfolioState:
         record.margin_ratio = None
         record.liquidation_price = None
         record.margin_source = "estimated"
-        record.exposure_side = exposure_side_from_quantity(record.quantity)
 
         if product_type != "derivatives":
             if quote_currency is not None:
@@ -510,7 +476,7 @@ class PortfolioService:
         if self.state.has_applied_fill(fill.fill_id):
             return
         if self.fill_outcome_repo.get_outcome(fill.fill_id) is not None:
-            self.state._applied_fill_ids.add(fill.fill_id)
+            self.state.mark_fill_applied(fill.fill_id)
             return
         checkpoint = self.state.checkpoint()
         balances_before = dict(checkpoint.balances)

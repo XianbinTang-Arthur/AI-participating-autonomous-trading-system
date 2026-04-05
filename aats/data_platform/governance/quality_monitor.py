@@ -365,3 +365,42 @@ def run_quality_monitor(project_root: pathlib.Path) -> dict[str, Any]:
         },
         "checks": all_checks,
     }
+
+
+# ── CLI 入口 ───────────────────────────────────────────────────────
+
+
+if __name__ == "__main__":
+    import argparse
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    parser = argparse.ArgumentParser(description="Quality Monitor: 治理层��量巡检")
+    parser.add_argument("--run", action="store_true", help="运行全部巡检")
+    args = parser.parse_args()
+
+    if not args.run:
+        parser.print_help()
+        sys.exit(2)
+
+    _project_root = pathlib.Path(__file__).resolve().parent.parent.parent.parent
+    result = run_quality_monitor(_project_root)
+
+    from ._atomic_io import atomic_json_write
+
+    gov_dir = _project_root / "artifacts" / "governance"
+    gov_dir.mkdir(parents=True, exist_ok=True)
+    out_path = gov_dir / "quality_monitor_summary.json"
+    atomic_json_write(result, out_path)
+
+    health = result["summary"]["health"]
+    log.info(
+        "Quality Monitor: %s (%d/%d passed)",
+        health, result["summary"]["passed"], result["summary"]["total_checks"],
+    )
+    log.info("写入 -> %s", out_path)
+    sys.exit(0)

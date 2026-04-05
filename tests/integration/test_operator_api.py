@@ -3173,6 +3173,42 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
     async def test_operator_visibility_endpoints_cover_decision_execution_reconciliation_and_audit(self) -> None:
         runtime = await self._runtime()
+        now = utc_now()
+        runtime.fill_outcome_repo.save_outcome(
+            FillOutcomeRecord(
+                fill_id="visibility_closing_fill",
+                order_id="visibility_closing_order",
+                symbol="BTC-USDT",
+                position_key="BTC-USDT",
+                venue="PAPER",
+                side="sell",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("100"),
+                fill_notional=Decimal("100"),
+                fee_amount=Decimal("0.05"),
+                fee_currency="USDT",
+                liquidity_role="taker",
+                exchange_timestamp=now - timedelta(minutes=5),
+                ingestion_timestamp=now - timedelta(minutes=5),
+                order_status_after_fill="FILLED",
+                exposure_side="flat",
+                execution_action="close_long",
+                position_intent="close_long",
+                position_mode="net_mode",
+                pos_side="net",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                starting_position_qty=Decimal("1"),
+                starting_avg_entry_price=Decimal("95"),
+                ending_position_qty=Decimal("0"),
+                ending_avg_entry_price=Decimal("0"),
+                realized_pnl_delta=Decimal("5"),
+                fee_delta=Decimal("-0.05"),
+                product_type="spot",
+                margin_mode="cash",
+                created_at=now - timedelta(minutes=5),
+            )
+        )
         app = self._app(runtime)
         with TestClient(app) as client:
             latest_decision = client.get("/decision/latest").json()

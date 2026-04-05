@@ -6,7 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
-from aats.schemas.features import FeatureSnapshot
+from aats.schemas.features import FeatureSnapshot, RegimeIndicator
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.common import utc_now
 from aats.services.portfolio_service.decimals import to_decimal
@@ -18,14 +18,17 @@ class TriggerState:
     last_market_snapshot_ts: datetime | None = None
     last_price: Decimal | None = None
     last_momentum_score: float | None = None
-    last_regime: str | None = None
+    last_regime: RegimeIndicator | None = None
 
 
 class DecisionTriggerPolicy:
     def __init__(self, *, settings: AATSSettings) -> None:
         self.settings = settings
         self._state: dict[tuple[str, str], TriggerState] = {}
-        self._decision_times: dict[tuple[str, str], deque] = defaultdict(deque)
+        _deque_maxlen = settings.max_decisions_per_minute * 2
+        self._decision_times: dict[tuple[str, str], deque[datetime]] = defaultdict(
+            lambda: deque(maxlen=_deque_maxlen)
+        )
 
     def enabled_timeframes(self) -> tuple[str, ...]:
         return tuple(self.settings.enabled_decision_timeframes)
@@ -98,7 +101,7 @@ class DecisionTriggerPolicy:
         decision_times = self._decision_times.get(state_key)
         return len(decision_times or ())
 
-    def latest_reasonable_market_ts(self, *, symbol: str, timeframe: str):
+    def latest_reasonable_market_ts(self, *, symbol: str, timeframe: str) -> datetime | None:
         state = self._state.get((symbol, timeframe))
         return state.last_market_snapshot_ts if state is not None else None
 
@@ -131,6 +134,6 @@ class DecisionTriggerPolicy:
         return 0.0
 
     @staticmethod
-    def _prune_decision_times(*, decision_times: deque, reference_ts: datetime) -> None:
+    def _prune_decision_times(*, decision_times: deque[datetime], reference_ts: datetime) -> None:
         while decision_times and (reference_ts - decision_times[0]).total_seconds() > 60.0:
             decision_times.popleft()

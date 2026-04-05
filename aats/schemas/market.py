@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from pydantic import Field
+from pydantic import BaseModel, Field
 from pydantic import field_validator
 
 from aats.schemas.common import SchemaBase
@@ -33,6 +33,31 @@ def _decimalize_nested(value: Any) -> Any:
     return _maybe_decimal(value)
 
 
+class KlineBar(BaseModel):
+    """Typed K-line (candlestick) bar with backward-compatible dict-style access."""
+
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal = Decimal("0")
+
+    @field_validator("open", "high", "low", "close", "volume", mode="before")
+    @classmethod
+    def _coerce_decimal(cls, value: Any) -> Any:
+        return _maybe_decimal(value)
+
+    def __getitem__(self, key: str) -> Any:
+        """Allow ``bar["open"]`` style access for backward compatibility."""
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key)
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and hasattr(self, key)
+
+
 class MarketSnapshot(SchemaBase):
     symbol: str
     exchange: str
@@ -43,12 +68,12 @@ class MarketSnapshot(SchemaBase):
     bid_size: Decimal
     ask_size: Decimal
     volume_24h: Decimal
-    kline_15m: dict[str, Any]
-    kline_1h: dict[str, Any]
+    kline_15m: KlineBar
+    kline_1h: KlineBar
     recent_trades: list[dict[str, Any]] = Field(default_factory=list)
     orderbook_depth: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("kline_15m", "kline_1h", "recent_trades", "orderbook_depth", mode="before")
+    @field_validator("recent_trades", "orderbook_depth", mode="before")
     @classmethod
     def _normalize_nested_numbers(cls, value: Any) -> Any:
         return _decimalize_nested(value)

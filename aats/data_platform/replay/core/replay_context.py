@@ -100,11 +100,29 @@ class ReplayParameterOverrides:
     - directional_trend_weight    directional 的趋势/return 混合权重（0~1）
     - directional_return_clamp_bps  directional bar return 限幅（bps）
 
+    Phase 1 扩展参数（与 production settings 直接语义对齐）：
+    - entry_threshold             开仓评分阈值（long）
+    - close_threshold             平仓评分阈值（long）
+    - scale_in_threshold          加仓评分阈值（long）
+    - short_entry_threshold       开仓评分阈值（short，None = 同 entry_threshold）
+    - short_close_threshold       平仓评分阈值（short，None = 同 close_threshold）
+    - min_hold_seconds            最小持仓秒数
+    - rebalance_cooldown_seconds  平仓后冷却秒数
+    - max_thesis_age_seconds      thesis 最长存活秒数
+    - de_risk_net_edge_bps        降风险触发阈值（bps）
+    - failed_thesis_net_edge_bps  thesis 失效阈值（bps）
+    - expected_slippage_buffer_bps 滑点缓冲（bps）
+    - expected_execution_buffer_bps 执行缓冲（bps）
+    - max_acceptable_cost_bps     最大允许单边成本（bps）
+    - min_score_drawdown_bps      最大评分回撤容忍（bps）
+    - min_liquidity_quality       最低流动性质量分
+    - limit_offset_bps_entry      限价偏移（bps）
+
     成本模型（也可通过 --param taker_fee_bps=5 直接覆盖）：
     - cost_config                 交易成本配置（taker_fee_bps + slippage_bps）
     """
     min_confirm_ticks: int = 2
-    score_stability_threshold: float = 2.0
+    score_stability_threshold: float = 5.0
     min_safe_net_edge_bps: float = 0.0
 
     # Signal edge 校准参数（收口在这里，不锁死在 adapter 内部常量）
@@ -119,11 +137,132 @@ class ReplayParameterOverrides:
     directional_return_clamp_bps: float = 20.0
     """directional adapter 里 bar return 的限幅（bps）。防止单根极端 bar 主导 signal。"""
 
+    # ── Phase 1 扩展：进出场阈值 ──────────────────────────────────
+    # 默认值对齐 adapter 内原有硬编码常量，确保向后兼容
+    entry_threshold: float = 0.40
+    """long book 开仓评分门槛。生产端映射: strategy_hedge_independent_long_entry_threshold"""
+
+    close_threshold: float = 0.15
+    """long book 平仓评分门槛。生产端映射: strategy_hedge_independent_long_close_threshold"""
+
+    scale_in_threshold: float = 0.60
+    """long book 加仓评分门槛。生产端映射: strategy_hedge_independent_long_scale_in_threshold
+    ⚠️ REPLAY 未模拟: 当前 replay 只有 open/hold/close 三态，没有 scale-in（加仓）逻辑。
+    该参数仅做透传映射到生产端，replay 回测不验证其效果。"""
+
+    short_entry_threshold: float | None = None
+    """short book 开仓阈值。None 时使用 entry_threshold（对称模式）。"""
+
+    short_close_threshold: float | None = None
+    """short book 平仓阈值。None 时使用 close_threshold（对称模式）。"""
+
+    # ── Phase 1 扩展：持仓时间管理 ────────────────────────────────
+    min_hold_seconds: float = 300.0
+    """最小持仓秒数，防止过频交易。生产端映射: strategy_hedge_independent_long_min_hold_seconds"""
+
+    rebalance_cooldown_seconds: float = 120.0
+    """平仓后冷却秒数。生产端映射: strategy_hedge_independent_rebalance_cooldown_seconds"""
+
+    max_thesis_age_seconds: float = 1800.0
+    """thesis 最长存活秒数。生产端映射: strategy_hedge_independent_max_thesis_age_seconds"""
+
+    # ── Phase 1 扩展：风险管理阈值 ────────────────────────────────
+    de_risk_net_edge_bps: float = 2.0
+    """净边际变薄时触发降风险的阈值（bps）。生产端映射: strategy_hedge_independent_de_risk_net_edge_bps"""
+
+    failed_thesis_net_edge_bps: float = -1.0
+    """净边际低于此值视为 thesis 失效并退出（bps）。
+    约束: 必须 <= de_risk_net_edge_bps。
+    生产端映射: strategy_hedge_independent_failed_thesis_net_edge_bps"""
+
+    # ── Phase 1 扩展：成本缓冲 ────────────────────────────────────
+    expected_slippage_buffer_bps: float = 0.5
+    """开仓预期滑点缓冲（bps）。叠加到 cost 计算中。
+    生产端映射: strategy_hedge_independent_expected_slippage_buffer_bps"""
+
+    expected_execution_buffer_bps: float = 0.5
+    """开仓执行缓冲（bps）。叠加到 cost 计算中。
+    生产端映射: strategy_hedge_independent_expected_execution_buffer_bps"""
+
+    max_acceptable_cost_bps: float = 7.5
+    """最大允许的单边预期成本（bps）。超出则阻断。
+    生产端映射: strategy_hedge_independent_max_acceptable_cost_bps"""
+
+    # ── Phase 1 扩展：评分质量 ────────────────────────────────────
+    min_score_drawdown_bps: float | None = None
+    """评分最大回撤容忍度（bps）。None 时仅使用 score_stability_threshold。
+    生产端映射: strategy_hedge_independent_min_score_drawdown_bps"""
+
+    min_liquidity_quality: float = 0.55
+    """最低流动性质量分。replay 默认 liq=1.0，此参数做灵敏度分析。
+    生产端映射: strategy_hedge_independent_min_liquidity_quality"""
+
+    # ── Phase 1 扩展：执行策略 ────────────────────────────────────
+    limit_offset_bps_entry: float = 1.5
+    """开仓限价偏移（bps）。影响成交率与滑点。
+    生产端映射: strategy_hedge_independent_limit_offset_bps_entry
+    ⚠️ REPLAY 未模拟: replay 假设 bar close 即时成交，不模拟 limit order 匹配。
+    该参数仅做透传映射到生产端，replay 回测不验证其效果。"""
+
     # 成本配置
     cost_config: ReplayCostConfig = dc.field(default_factory=ReplayCostConfig)
 
     # 可扩展的额外参数
     extra: dict[str, Any] = dc.field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """参数约束校验（frozen dataclass 只能 raise，不能 mutate）。"""
+        if self.failed_thesis_net_edge_bps > self.de_risk_net_edge_bps:
+            raise ValueError(
+                f"约束违反: failed_thesis_net_edge_bps ({self.failed_thesis_net_edge_bps}) "
+                f"必须 <= de_risk_net_edge_bps ({self.de_risk_net_edge_bps})"
+            )
+        if self.close_threshold > self.entry_threshold:
+            raise ValueError(
+                f"约束违反: close_threshold ({self.close_threshold}) "
+                f"应当 <= entry_threshold ({self.entry_threshold})"
+            )
+        if self.scale_in_threshold < self.entry_threshold:
+            raise ValueError(
+                f"约束违反: scale_in_threshold ({self.scale_in_threshold}) "
+                f"应当 >= entry_threshold ({self.entry_threshold})"
+            )
+        if self.short_entry_threshold is not None and self.short_close_threshold is not None:
+            if self.short_close_threshold > self.short_entry_threshold:
+                raise ValueError(
+                    f"约束违反: short_close_threshold ({self.short_close_threshold}) "
+                    f"应当 <= short_entry_threshold ({self.short_entry_threshold})"
+                )
+
+    # ── 工厂方法：按 family 获取合理默认参数 ─────────────────────
+    @classmethod
+    def for_family(cls, family: str = "independent") -> "ReplayParameterOverrides":
+        """获取指定 family 的默认参数。
+
+        directional 家族原始硬编码阈值与 independent 不同：
+          - directional: entry=0.45, close=0.20
+          - independent: entry=0.40, close=0.15
+        使用本方法可避免共享默认值导致的静默行为变更。
+        """
+        if family == "directional":
+            return cls(
+                entry_threshold=0.45,
+                close_threshold=0.20,
+            )
+        return cls()
+
+    # ── 辅助方法：获取方向特定阈值 ──────────────────────────────
+    def get_entry_threshold(self, leg: str = "long") -> float:
+        """获取指定方向的开仓阈值。"""
+        if leg == "short" and self.short_entry_threshold is not None:
+            return self.short_entry_threshold
+        return self.entry_threshold
+
+    def get_close_threshold(self, leg: str = "long") -> float:
+        """获取指定方向的平仓阈值。"""
+        if leg == "short" and self.short_close_threshold is not None:
+            return self.short_close_threshold
+        return self.close_threshold
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -133,6 +272,23 @@ class ReplayParameterOverrides:
             "signal_edge_scale_bps": self.signal_edge_scale_bps,
             "directional_trend_weight": self.directional_trend_weight,
             "directional_return_clamp_bps": self.directional_return_clamp_bps,
+            # Phase 1 扩展
+            "entry_threshold": self.entry_threshold,
+            "close_threshold": self.close_threshold,
+            "scale_in_threshold": self.scale_in_threshold,
+            "short_entry_threshold": self.short_entry_threshold,
+            "short_close_threshold": self.short_close_threshold,
+            "min_hold_seconds": self.min_hold_seconds,
+            "rebalance_cooldown_seconds": self.rebalance_cooldown_seconds,
+            "max_thesis_age_seconds": self.max_thesis_age_seconds,
+            "de_risk_net_edge_bps": self.de_risk_net_edge_bps,
+            "failed_thesis_net_edge_bps": self.failed_thesis_net_edge_bps,
+            "expected_slippage_buffer_bps": self.expected_slippage_buffer_bps,
+            "expected_execution_buffer_bps": self.expected_execution_buffer_bps,
+            "max_acceptable_cost_bps": self.max_acceptable_cost_bps,
+            "min_score_drawdown_bps": self.min_score_drawdown_bps,
+            "min_liquidity_quality": self.min_liquidity_quality,
+            "limit_offset_bps_entry": self.limit_offset_bps_entry,
             "cost_config": self.cost_config.to_dict(),
         }
         if self.extra:
@@ -155,12 +311,27 @@ class ReplayParameterOverrides:
             "cost_config",
             # 平铺 cost keys（from_dict 时消费，不进 extra）
             "taker_fee_bps", "slippage_bps",
+            # Phase 1 扩展参数
+            "entry_threshold", "close_threshold", "scale_in_threshold",
+            "short_entry_threshold", "short_close_threshold",
+            "min_hold_seconds", "rebalance_cooldown_seconds",
+            "max_thesis_age_seconds",
+            "de_risk_net_edge_bps", "failed_thesis_net_edge_bps",
+            "expected_slippage_buffer_bps", "expected_execution_buffer_bps",
+            "max_acceptable_cost_bps",
+            "min_score_drawdown_bps", "min_liquidity_quality",
+            "limit_offset_bps_entry",
         }
 
         # null-safe 取值：JSON null → 用默认值
         def _v(key: str, default: float) -> float:
             val = d.get(key)
             return float(val) if val is not None else float(default)
+
+        # null-safe 可选值
+        def _v_opt(key: str) -> float | None:
+            val = d.get(key)
+            return float(val) if val is not None else None
 
         # 成本配置：优先从平铺 keys 组装，其次从嵌套 cost_config
         has_flat_cost = "taker_fee_bps" in d or "slippage_bps" in d
@@ -178,11 +349,28 @@ class ReplayParameterOverrides:
 
         return cls(
             min_confirm_ticks=confirm,
-            score_stability_threshold=_v("score_stability_threshold", 2.0),
+            score_stability_threshold=_v("score_stability_threshold", 5.0),
             min_safe_net_edge_bps=_v("min_safe_net_edge_bps", 0.0),
             signal_edge_scale_bps=_v("signal_edge_scale_bps", 10.0),
             directional_trend_weight=_v("directional_trend_weight", 0.7),
             directional_return_clamp_bps=_v("directional_return_clamp_bps", 20.0),
+            # Phase 1 扩展
+            entry_threshold=_v("entry_threshold", 0.40),
+            close_threshold=_v("close_threshold", 0.15),
+            scale_in_threshold=_v("scale_in_threshold", 0.60),
+            short_entry_threshold=_v_opt("short_entry_threshold"),
+            short_close_threshold=_v_opt("short_close_threshold"),
+            min_hold_seconds=_v("min_hold_seconds", 300.0),
+            rebalance_cooldown_seconds=_v("rebalance_cooldown_seconds", 120.0),
+            max_thesis_age_seconds=_v("max_thesis_age_seconds", 1800.0),
+            de_risk_net_edge_bps=_v("de_risk_net_edge_bps", 2.0),
+            failed_thesis_net_edge_bps=_v("failed_thesis_net_edge_bps", -1.0),
+            expected_slippage_buffer_bps=_v("expected_slippage_buffer_bps", 0.5),
+            expected_execution_buffer_bps=_v("expected_execution_buffer_bps", 0.5),
+            max_acceptable_cost_bps=_v("max_acceptable_cost_bps", 7.5),
+            min_score_drawdown_bps=_v_opt("min_score_drawdown_bps"),
+            min_liquidity_quality=_v("min_liquidity_quality", 0.55),
+            limit_offset_bps_entry=_v("limit_offset_bps_entry", 1.5),
             cost_config=cost,
             extra={k: v for k, v in d.items() if k not in known},
         )
@@ -194,13 +382,21 @@ class ReplayParameterOverrides:
 
 @dc.dataclass
 class ReplayState:
-    """在 replay 过程中跨 bar 累积的可变状态。"""
+    """在 replay 过程中跨 bar 累积的可变状态。
+
+    字段生命周期：
+      - position_qty/side/entry_price/entry_ts: 由 adapter._advance_state 维护
+        不变量: position_side=="flat" 时 entry_price 和 entry_ts 必须为 None
+      - last_close_ts: 由 adapter._advance_state 在 close 时设置
+      - score_history: 由 replay_runner 外部 append（adapter 内部用独立 deque）
+      - bar_index: 由 replay_runner 外部设置（adapter 不读写）
+    """
     position_qty: Decimal = Decimal("0")        # 当前持仓
     position_side: Literal["flat", "long", "short"] = "flat"
     entry_price: Decimal | None = None
     entry_ts: datetime | None = None
-    score_history: list[float] = dc.field(default_factory=list)
-    bar_index: int = 0
+    score_history: list[float] = dc.field(default_factory=list)   # runner 维护，adapter 不使用
+    bar_index: int = 0                                            # runner 维护，adapter 不使用
     last_close_ts: datetime | None = None       # 上次平仓时间（冷却用）
 
 
@@ -254,6 +450,7 @@ class ReplayDecision:
 
     # 扩展字段
     action: str = "hold"                    # open / hold / close / blocked
+    close_reason: str = ""                  # thesis_failed / de_risk / score_below_close / direction_reversal / thesis_stale
     score_stable: bool = False
     funding_rate: float | None = None
     close_price: float | None = None
@@ -279,6 +476,7 @@ class ReplayDecision:
             "target_position_qty": str(self.target_position_qty),
             "delta_position_qty": str(self.delta_position_qty),
             "action": self.action,
+            "close_reason": self.close_reason,
             "score_stable": self.score_stable,
             "funding_rate": self.funding_rate,
             "close_price": self.close_price,

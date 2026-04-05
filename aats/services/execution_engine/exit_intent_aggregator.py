@@ -18,6 +18,7 @@ from aats.services.execution_engine.order_truth import (
     requires_unknown_write_review,
     unknown_write_state,
 )
+from aats.services.execution_engine.bundle_recovery import _ordered_unique
 from aats.storage.base import ExecutionRepository, ExitExecutionRepository
 
 
@@ -270,7 +271,6 @@ def derive_parent_status(
     has_unknown = any(ref.aggregate_category == "UNKNOWN_TRUTH" for ref in child_refs)
     has_pending_dispatch = any(ref.aggregate_category == "PENDING_DISPATCH" for ref in child_refs)
     has_working = any(ref.aggregate_category == "WORKING" for ref in child_refs)
-    has_terminal_nonfilled = any(ref.aggregate_category == "TERMINAL_NONFILLED" for ref in child_refs)
     if parent_intent.cancel_requested:
         if has_unknown or has_pending_dispatch or has_working:
             return "CANCEL_PENDING"
@@ -287,8 +287,6 @@ def derive_parent_status(
         return "COMPLETED"
     if aggregated_filled_quantity > _EPSILON:
         return "PARTIALLY_FILLED"
-    if has_terminal_nonfilled:
-        return "FAILED_SAFE"
     return "FAILED_SAFE"
 
 
@@ -868,16 +866,6 @@ def _parent_has_pending_resume(parent: ExitExecutionIntent) -> bool:
     )
 
 
-def _ordered_unique(values: list[str]) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for value in values:
-        normalized = str(value or "").strip()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        ordered.append(normalized)
-    return ordered
 
 
 def _finding_summary(findings: list[ReconciliationFinding]) -> dict[str, object]:

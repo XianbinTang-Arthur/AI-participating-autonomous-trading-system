@@ -180,6 +180,7 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 smart_arbitrage_enabled=True,
                 smart_arbitrage_basis_entry_bps=0.0,
                 smart_arbitrage_estimated_cost_bps=0.0,
+                smart_arbitrage_cost_model_enabled=False,
                 smart_arbitrage_quote_budget_per_trade=100.0,
                 smart_arbitrage_max_pair_notional=100.0,
                 account_backend="disabled",
@@ -197,8 +198,27 @@ class TestPersistenceAndReplay(unittest.IsolatedAsyncioTestCase):
                 )
                 await runtime.market_gateway.run_local_publisher(
                     symbol=settings.default_symbol,
-                    iterations=3,
+                    iterations=1,
                     interval_seconds=0.0,
+                )
+
+                # Inject controlled prices so the explicit run_cycle sees
+                # positive basis (hedge > spot) large enough to pass the
+                # cost model's executable-edge gate.
+                _now = utc_now()
+                runtime.market_gateway._latest_snapshots["BTC-USDT"] = MarketSnapshot(
+                    symbol="BTC-USDT", exchange="OKX", snapshot_ts=_now,
+                    best_bid=67_000.0, best_ask=67_010.0, last_price=67_005.0,
+                    bid_size=1.0, ask_size=1.0, volume_24h=100_000_000.0,
+                    kline_15m={"open": 67_000.0, "high": 67_100.0, "low": 66_900.0, "close": 67_005.0},
+                    kline_1h={"open": 66_800.0, "high": 67_200.0, "low": 66_700.0, "close": 67_005.0},
+                )
+                runtime.market_gateway._latest_snapshots["BTC-USDT-SWAP"] = MarketSnapshot(
+                    symbol="BTC-USDT-SWAP", exchange="OKX", snapshot_ts=_now,
+                    best_bid=67_100.0, best_ask=67_110.0, last_price=67_105.0,
+                    bid_size=1.0, ask_size=1.0, volume_24h=100_000_000.0,
+                    kline_15m={"open": 67_050.0, "high": 67_200.0, "low": 66_950.0, "close": 67_105.0},
+                    kline_1h={"open": 66_850.0, "high": 67_300.0, "low": 66_750.0, "close": 67_105.0},
                 )
 
                 target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)

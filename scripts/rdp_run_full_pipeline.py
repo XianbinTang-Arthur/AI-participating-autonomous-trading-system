@@ -35,6 +35,8 @@ import json
 import logging
 import subprocess
 import sys
+import time as _time
+import traceback as _tb
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -51,9 +53,11 @@ log = logging.getLogger("rdp_full_pipeline")
 # =========================================================================
 # 阶段定义
 # =========================================================================
-PHASE_ORDER = ["phase2", "phase3", "phase4", "phase5", "decision"]
+PHASE_ORDER = ["phase2", "step3", "import_candidates", "phase3", "phase4", "phase5", "decision"]
 PHASE_LABELS = {
-    "phase2": "Phase 2 — 参数研究",
+    "phase2": "Phase 2 — 参数研究 (Step 2)",
+    "step3": "Phase 2 — 扩展参数扫描 (Step 3)",
+    "import_candidates": "Step 3+ — 参数候选导入治理层",
     "phase3": "Phase 3 — 归因对照",
     "phase4": "Phase 4 — 执行可行性",
     "phase5": "Phase 5 — 治理刷新",
@@ -104,7 +108,10 @@ def parse_args() -> argparse.Namespace:
         "--stop-after", choices=PHASE_ORDER, default="decision",
         help="在指定阶段后停止 (默认: decision)",
     )
-    ctrl.add_argument("--skip-phase2", action="store_true", help="跳过 Phase 2")
+    ctrl.add_argument("--skip-phase2", action="store_true", help="跳过 Phase 2 (Step 2)")
+    ctrl.add_argument("--skip-step3", action="store_true", help="跳过 Step 3 扩展扫描")
+    ctrl.add_argument("--skip-import-candidates", action="store_true",
+                       help="跳过参数候选自动导入治理层")
     ctrl.add_argument("--skip-phase3", action="store_true", help="跳过 Phase 3")
     ctrl.add_argument("--skip-phase4", action="store_true", help="跳过 Phase 4")
     ctrl.add_argument("--skip-phase5", action="store_true", help="跳过 Phase 5 治理刷新")
@@ -120,7 +127,8 @@ def parse_args() -> argparse.Namespace:
     # Phase 3
     p3 = p.add_argument_group("Phase 3 参数")
     p3.add_argument("--live-db-url",
-                    help="Phase 3: Live AATS 数据库 URL (留空则 replay-only)")
+                    help="Phase 3: Live AATS 数据库 URL "
+                         "(未指定时自动启用 --replay-only)")
     p3.add_argument("--replay-only", action="store_true",
                     help="Phase 3: 仅 replay 分析, 不连接 live DB")
 
@@ -156,6 +164,8 @@ def _resolve_phases(args: argparse.Namespace) -> list[str]:
     phases = PHASE_ORDER[start_idx: stop_idx + 1]
     skip_map = {
         "phase2": args.skip_phase2,
+        "step3": args.skip_step3,
+        "import_candidates": args.skip_import_candidates,
         "phase3": args.skip_phase3,
         "phase4": args.skip_phase4,
         "phase5": args.skip_phase5,
@@ -165,15 +175,54 @@ def _resolve_phases(args: argparse.Namespace) -> list[str]:
 
 
 def _find_latest_params_json() -> Path | None:
-    """在 step2_rounds 中查找最新的 parameter_candidates.json."""
-    rounds_dir = _PROJECT_ROOT / "artifacts" / "research" / "step2_rounds"
-    if not rounds_dir.exists():
+    """查找最新��参数文件。
+
+    在 step3_rounds 和 step2_rounds 中分别查找最新文件,
+    然后按 round_id 时间戳 (YYYYMMDD_HHMMSS) 比较, 返回最晚的那个。
+    Step 3 的 merged 文件更完整, 但如果 Step 2 重跑后更新,
+    应返回更新的 Step 2 文件。
+    """
+    research_root = _PROJECT_ROOT / "artifacts" / "research"
+    candidates: list[Path] = []
+
+    # Step 3 merged params
+    s3_dir = research_root / "step3_rounds"
+    if s3_dir.exists():
+        s3_files = sorted(
+            s3_dir.glob("*/parameter_candidates_merged.json"), reverse=True,
+        )
+        if s3_files:
+            candidates.append(s3_files[0])
+
+    # Step 2 base params
+    s2_dir = research_root / "step2_rounds"
+    if s2_dir.exists():
+        s2_files = sorted(
+            s2_dir.glob("*/parameter_candidates.json"), reverse=True,
+        )
+        if s2_files:
+            candidates.append(s2_files[0])
+
+    if not candidates:
         return None
-    # round_id 以 YYYYMMDD_HHMMSS 开头, 按名称倒排即为时间倒排
-    candidates = sorted(
-        rounds_dir.glob("*/parameter_candidates.json"), reverse=True,
-    )
-    return candidates[0] if candidates else None
+
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # 比较 round_id 时间戳: parent.name 格式 YYYYMMDD_HHMMSS_hexsuffix
+    # 按 parent.name 倒排, 最新的在前
+    best = max(candidates, key=lambda p: p.parent.name)
+
+    # 如果 Step 2 更新但 Step 3 也存在, 给出提示
+    if best.parent.parent.name == "step2_rounds" and len(candidates) == 2:
+        other = [c for c in candidates if c != best][0]
+        log.info(
+            "Step 2 参数 (%s) 比 Step 3 (%s) 更新, 使用 Step 2 文件。"
+            "如需 Step 3 合并参数请重跑 Step 3。",
+            best.parent.name, other.parent.name,
+        )
+
+    return best
 
 
 def _run_phase(
@@ -206,6 +255,16 @@ def _run_phase(
             return {
                 "phase": name, "status": "success",
                 "exit_code": 0, "elapsed_s": elapsed,
+            }
+        elif result.returncode == 2:
+            # exit code 2 = 部分成功 (某些 batch 通过, 仍有可用产物)
+            log.warning(
+                "%s 部分成功 (exit=2, %.0fs) — 部分 batch 失败但仍有产物",
+                label, elapsed,
+            )
+            return {
+                "phase": name, "status": "partial_success",
+                "exit_code": 2, "elapsed_s": elapsed,
             }
         else:
             log.warning(
@@ -243,6 +302,22 @@ def _build_phase2_cmd(args: argparse.Namespace, *, ensure: bool) -> list[str]:
     return cmd
 
 
+def _build_step3_cmd(
+    args: argparse.Namespace,
+    *,
+    ensure: bool,
+    step2_round_dir: str | None = None,
+) -> list[str]:
+    """构建 Step 3 扩展参数扫描命令。"""
+    cmd = [sys.executable, str(_SCRIPT_DIR / "rdp_run_step3_research.py")]
+    if ensure:
+        cmd.append("--ensure-schema")
+    if step2_round_dir:
+        cmd.extend(["--step2-round-dir", step2_round_dir])
+    cmd.append("--no-print-summary")
+    return cmd
+
+
 def _build_phase3_cmd(
     args: argparse.Namespace,
     *,
@@ -258,8 +333,10 @@ def _build_phase3_cmd(
         cmd.append("--ensure-schema")
     if args.live_db_url:
         cmd.extend(["--live-db-url", args.live_db_url])
-    if args.replay_only:
+    if args.replay_only or not args.live_db_url:
         cmd.append("--replay-only")
+        if not args.replay_only and not args.live_db_url:
+            log.info("Phase 3: 未指定 --live-db-url, 自动启用 --replay-only 模式")
     if params_json:
         cmd.extend(["--params-json", params_json])
     cmd.append("--no-print-summary")
@@ -337,8 +414,8 @@ def main() -> int:
     params_json: str | None = args.params_json
     schema_done = False
 
-    # 如果跳过 Phase 2, 尝试自动查找已有的 params-json
-    if "phase2" not in phases and not params_json:
+    # 如果跳过 Phase 2 和 Step 3, 尝试自动查找已有的 params-json
+    if "phase2" not in phases and "step3" not in phases and not params_json:
         found = _find_latest_params_json()
         if found:
             params_json = str(found)
@@ -346,8 +423,11 @@ def main() -> int:
         else:
             log.info("未找到历史参数文件, Phase 3/4 将使用默认参数")
 
+    # 追踪 Step 2 最新 round dir (供 Step 3 使用)
+    step2_latest_round_dir: str | None = None
+
     for phase in phases:
-        # ── Phase 2 ──
+        # ── Phase 2 (Step 2) ──
         if phase == "phase2":
             ensure = args.ensure_schema and not schema_done
             cmd = _build_phase2_cmd(args, ensure=ensure)
@@ -357,16 +437,92 @@ def main() -> int:
             r = _run_phase("phase2", cmd, dry_run=args.dry_run)
             results.append(r)
 
-            # Phase 2 成功后, 自动查找其产出的 params-json
+            # Phase 2 有产物时 (success 或 partial_success), 记录目录并更新 params
+            if not args.dry_run and r["status"] in ("success", "partial_success"):
+                s2_dir = _PROJECT_ROOT / "artifacts" / "research" / "step2_rounds"
+                if s2_dir.exists():
+                    latest = sorted(
+                        [d for d in s2_dir.iterdir() if d.is_dir()],
+                        reverse=True,
+                    )
+                    if latest:
+                        step2_latest_round_dir = str(latest[0])
+                        log.info("Step 2 round dir: %s", step2_latest_round_dir)
+
+                if not args.params_json:
+                    found = _find_latest_params_json()
+                    if found:
+                        params_json = str(found)
+                        log.info("Phase 2 参数文件: %s", params_json)
+
+        # ── Step 3 (扩展参数扫描) ──
+        elif phase == "step3":
+            ensure = args.ensure_schema and not schema_done
+            cmd = _build_step3_cmd(
+                args, ensure=ensure,
+                step2_round_dir=step2_latest_round_dir,
+            )
+            if ensure:
+                schema_done = True
+
+            r = _run_phase("step3", cmd, dry_run=args.dry_run)
+            results.append(r)
+
+            # Step 3 有产物时, 用合并参数覆盖 params_json
             if (
                 not args.dry_run
-                and r["status"] == "success"
-                and not args.params_json  # 用户未手动指定
+                and r["status"] in ("success", "partial_success")
+                and not args.params_json
             ):
                 found = _find_latest_params_json()
                 if found:
                     params_json = str(found)
-                    log.info("Phase 2 参数文件: %s", params_json)
+                    log.info("Step 3 合并参数文件: %s", params_json)
+
+        # ── Import Candidates (Step 3 → Registry) ──
+        elif phase == "import_candidates":
+            if not args.dry_run:
+                log.info("")
+                log.info("=" * 60)
+                log.info("  %s", PHASE_LABELS["import_candidates"])
+                log.info("=" * 60)
+                t0 = _time.monotonic()
+                try:
+                    from aats.data_platform.governance.auto_import_candidates import (
+                        auto_import_latest_candidates,
+                    )
+                    import_result = auto_import_latest_candidates(_PROJECT_ROOT)
+                    elapsed = _time.monotonic() - t0
+                    status = import_result["status"]
+                    log.info(
+                        "参数导入结果: %s (导入 %d, 废弃 %d, %.1fs)",
+                        status,
+                        import_result["imported_count"],
+                        import_result["deprecated_count"],
+                        elapsed,
+                    )
+                    r = {
+                        "phase": "import_candidates",
+                        "status": "success" if status in ("imported", "already_imported", "parse_empty") else "failed",
+                        "duration_s": round(elapsed, 2),
+                        "detail": import_result,
+                    }
+                except Exception as exc:
+                    elapsed = _time.monotonic() - t0
+                    log.error(
+                        "参数导入失败 (%.1fs): %s\n%s",
+                        elapsed, exc, _tb.format_exc(),
+                    )
+                    r = {
+                        "phase": "import_candidates",
+                        "status": "error",
+                        "duration_s": round(elapsed, 2),
+                        "detail": str(exc),
+                    }
+            else:
+                log.info("[DRY-RUN] import_candidates: 自动导入 Step 3 参数到 registry")
+                r = {"phase": "import_candidates", "status": "dry_run", "duration_s": 0}
+            results.append(r)
 
         # ── Phase 3 ──
         elif phase == "phase3":
@@ -429,12 +585,14 @@ def main() -> int:
     ).total_seconds()
 
     ok = sum(1 for r in results if r["status"] in ("success", "dry_run"))
+    partial = sum(1 for r in results if r["status"] == "partial_success")
     fail = sum(1 for r in results if r["status"] in ("failed", "timeout", "error"))
     skipped = len(phases) - len(results)
     ran_phases = {r["phase"] for r in results}
 
     icon_map = {
         "success": "[OK]",
+        "partial_success": "[~~]",
         "dry_run": "[--]",
         "failed": "[!!]",
         "timeout": "[!!]",
@@ -462,7 +620,11 @@ def main() -> int:
             print(f"  [--] {label}  (跳过)")
 
     print()
-    print(f"  结果: {ok} 成功, {fail} 失败, {skipped} 跳过")
+    parts = [f"{ok} 成功"]
+    if partial:
+        parts.append(f"{partial} 部分成功")
+    parts.extend([f"{fail} 失败", f"{skipped} 跳过"])
+    print(f"  结果: {', '.join(parts)}")
 
     if params_json:
         print(f"  参数: {params_json}")

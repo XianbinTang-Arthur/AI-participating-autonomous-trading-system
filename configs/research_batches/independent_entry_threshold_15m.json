@@ -1,0 +1,42 @@
+{
+  "batch_name": "independent_entry_threshold_15m",
+  "description": "Sweep entry_threshold for independent family on BTC-USDT-SWAP 15m",
+  "family": "independent",
+  "symbol": "BTC-USDT-SWAP",
+  "timeframe": "15m",
+  "dataset_version": "v1.0",
+  "start": "2025-12-07",
+  "end": "2026-04-04",
+  "experiments": [
+    {
+      "label": "entry_0.25",
+      "params": {
+        "entry_threshold": 0.25
+      }
+    },
+    {
+      "label": "entry_0.30",
+      "params": {
+        "entry_threshold": 0.3
+      }
+    },
+    {
+      "label": "entry_0.35",
+      "params": {
+        "entry_threshold": 0.35
+      }
+    },
+    {
+      "label": "entry_0.40",
+      "params": {
+        "entry_threshold": 0.4
+      }
+    },
+    {
+      "label": "entry_0.45",
+      "params": {
+        "entry_threshold": 0.45
+      }
+    }
+  ]
+}

@@ -304,7 +304,7 @@ class SmartArbitrageStrategyEngine:
                 basis_bps=pair_basis_bps,
                 entry_threshold_bps=entry_threshold,
                 exit_threshold_bps=exit_threshold,
-                score=float(max(pair_basis_bps.copy_abs(), Decimal("0")) / max(entry_threshold or Decimal("1"), Decimal("1"))),
+                score=float(pair_basis_bps.copy_abs() / max(entry_threshold or Decimal("1"), Decimal("1"))),
                 confidence=min(0.95, 0.45 + (min(abs(float(pair_basis_bps)), 120.0) / 200.0)),
                 urgency="medium",
                 reason_codes=[
@@ -1025,7 +1025,6 @@ class SmartArbitrageStrategyEngine:
                 existing=active_pairs,
                 limit=max_pairs - len(active_pairs),
             )
-            max_pairs = max(int(self.settings.smart_arbitrage_max_concurrent_pairs or 1), 1)
             if len(active_pairs) >= max_pairs:
                 return active_pairs
             return [*active_pairs, *safe_opening_pairs]

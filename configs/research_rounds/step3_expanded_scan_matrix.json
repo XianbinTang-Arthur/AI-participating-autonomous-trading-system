@@ -1,0 +1,189 @@
+{
+  "description": "Step 3 expanded parameter scan matrix: Phase 1 RDP coverage expansion, grouped by theme to avoid combinatorial explosion. NOTE: this file is a REFERENCE overview of the full grid space. Actual experiments are defined in configs/research_batches/*.json (source of truth). Value ranges here may differ from batch files.",
+  "symbol": "BTC-USDT-SWAP",
+  "dataset_version": "v1.0",
+  "start": "2025-12-05",
+  "end": "2026-04-04",
+  "scans": {
+    "group_a_entry_close_independent_15m": {
+      "family": "independent",
+      "timeframe": "15m",
+      "description": "Group A: Entry/Close threshold sweep",
+      "grid": {
+        "entry_threshold": [
+          0.25,
+          0.3,
+          0.35,
+          0.4,
+          0.45
+        ],
+        "close_threshold": [
+          0.12,
+          0.15,
+          0.2,
+          0.24
+        ],
+        "min_confirm_ticks": [
+          2,
+          3
+        ]
+      }
+    },
+    "group_a_entry_close_independent_1h": {
+      "family": "independent",
+      "timeframe": "1H",
+      "description": "Group A: Entry/Close threshold sweep",
+      "grid": {
+        "entry_threshold": [
+          0.25,
+          0.3,
+          0.35,
+          0.4,
+          0.45
+        ],
+        "close_threshold": [
+          0.12,
+          0.15,
+          0.2,
+          0.24
+        ],
+        "min_confirm_ticks": [
+          2,
+          3
+        ]
+      }
+    },
+    "group_b_risk_independent_15m": {
+      "family": "independent",
+      "timeframe": "15m",
+      "description": "Group B: Risk management threshold sweep",
+      "grid": {
+        "de_risk_net_edge_bps": [
+          1.0,
+          2.0,
+          3.0
+        ],
+        "failed_thesis_net_edge_bps": [
+          -2.0,
+          -1.0,
+          0.0
+        ],
+        "min_safe_net_edge_bps": [
+          0,
+          3,
+          5
+        ]
+      }
+    },
+    "group_b_risk_independent_1h": {
+      "family": "independent",
+      "timeframe": "1H",
+      "description": "Group B: Risk management threshold sweep",
+      "grid": {
+        "de_risk_net_edge_bps": [
+          1.0,
+          2.0,
+          3.0
+        ],
+        "failed_thesis_net_edge_bps": [
+          -2.0,
+          -1.0,
+          0.0
+        ],
+        "min_safe_net_edge_bps": [
+          0,
+          3,
+          5
+        ]
+      }
+    },
+    "group_c_timing_independent_15m": {
+      "family": "independent",
+      "timeframe": "15m",
+      "description": "Group C: Timing parameter sweep",
+      "grid": {
+        "min_hold_seconds": [
+          120,
+          300,
+          600
+        ],
+        "rebalance_cooldown_seconds": [
+          60,
+          120,
+          240
+        ],
+        "max_thesis_age_seconds": [
+          900,
+          1800,
+          3600
+        ]
+      }
+    },
+    "group_c_timing_independent_1h": {
+      "family": "independent",
+      "timeframe": "1H",
+      "description": "Group C: Timing parameter sweep",
+      "grid": {
+        "min_hold_seconds": [
+          300,
+          900,
+          1800
+        ],
+        "rebalance_cooldown_seconds": [
+          120,
+          300,
+          600
+        ],
+        "max_thesis_age_seconds": [
+          1800,
+          3600,
+          7200
+        ]
+      }
+    },
+    "group_d_cost_independent_15m": {
+      "family": "independent",
+      "timeframe": "15m",
+      "description": "Group D: Cost sensitivity (extended with buffers)",
+      "grid": {
+        "expected_slippage_buffer_bps": [
+          0.0,
+          0.5,
+          1.0
+        ],
+        "expected_execution_buffer_bps": [
+          0.0,
+          0.5,
+          1.0
+        ],
+        "max_acceptable_cost_bps": [
+          5.0,
+          7.5,
+          10.0
+        ]
+      }
+    },
+    "group_d_cost_independent_1h": {
+      "family": "independent",
+      "timeframe": "1H",
+      "description": "Group D: Cost sensitivity (extended with buffers)",
+      "grid": {
+        "expected_slippage_buffer_bps": [
+          0.0,
+          0.5,
+          1.0
+        ],
+        "expected_execution_buffer_bps": [
+          0.0,
+          0.5,
+          1.0
+        ],
+        "max_acceptable_cost_bps": [
+          5.0,
+          7.5,
+          10.0
+        ]
+      }
+    }
+  }
+}

@@ -236,4 +236,13 @@ class ExecutionOrderService:
             execution_action=order_state.execution_action,
             leg_action=order_state.leg_action,
             position_intent=order_state.position_intent,
+            strategy_family=order_state.strategy_family,
+            strategy_sleeve_id=order_state.strategy_sleeve_id,
+            allocation_id=order_state.allocation_id,
+            strategy_bundle_id=order_state.strategy_bundle_id,
+            strategy_leg_role=order_state.strategy_leg_role,
+            strategy_pair_id=order_state.strategy_pair_id,
+            strategy_opportunity_kind=order_state.strategy_opportunity_kind,
+            strategy_execution_mode=order_state.strategy_execution_mode,
+            strategy_state_phase=order_state.strategy_state_phase,
         )

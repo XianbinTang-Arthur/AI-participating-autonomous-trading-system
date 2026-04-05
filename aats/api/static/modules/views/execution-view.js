@@ -1,5 +1,5 @@
 ﻿import { actionButton, alertQueue, pill, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
-import { formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
+import { escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import { localizeError, readableState, toneForOrderStatus } from "../terms.js";
 import {
   fillFeeText,
@@ -126,9 +126,9 @@ function renderOrderGroups(recentOrders) {
           ${responsiveTable(
             orderTableHeaders(group.scene),
             group.records.map((order) => [
-              `<div><strong>${order.symbol || "标的待确认"}</strong><div class="table-meta">${group.scene === "derivatives" ? `${readableState(order.margin_mode, "保证金模式待确认")} | ${readableState(order.exposure_side, "方向待确认")}` : readableState(order.order_type, "委托类型待确认")}</div></div>`,
+              `<div><strong>${escapeHtml(order.symbol || "标的待确认")}</strong><div class="table-meta">${group.scene === "derivatives" ? `${readableState(order.margin_mode, "保证金模式待确认")} | ${readableState(order.exposure_side, "方向待确认")}` : readableState(order.order_type, "委托类型待确认")}</div></div>`,
               `<div><strong>${orderRowTitle(order)}</strong><div class="table-meta">${orderRowMeta(order)}</div></div>`,
-              `<div><strong>${readableState(order.status)}</strong><div class="table-meta">${order.exchange_order_id || "等待交易所回执"}</div></div>`,
+              `<div><strong>${readableState(order.status)}</strong><div class="table-meta">${escapeHtml(order.exchange_order_id || "等待交易所回执")}</div></div>`,
               `<div><strong>${formatRelativeAge(order.last_update_ts || order.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(order.last_update_ts || order.created_at)}</div></div>`,
               `<div class="stack-actions">${actionButton("查看详情", "inspect-order", order.client_order_id)}${stuckButton(order)}</div>`,
             ]),
@@ -180,7 +180,7 @@ function renderFillGroups(recentFills) {
             group.records.map((fill) => {
               const impact = fillImpactDisplay(fill, group.scene);
               return [
-                `<div><strong>${fill.symbol || "标的待确认"}</strong><div class="table-meta">${group.scene === "derivatives" ? `${readableState(fill.margin_mode, "保证金模式待确认")} | ${readableState(fill.exposure_side, "方向待确认")}` : readableState(fill.side, "方向待确认")}</div></div>`,
+                `<div><strong>${escapeHtml(fill.symbol || "标的待确认")}</strong><div class="table-meta">${group.scene === "derivatives" ? `${readableState(fill.margin_mode, "保证金模式待确认")} | ${readableState(fill.exposure_side, "方向待确认")}` : readableState(fill.side, "方向待确认")}</div></div>`,
                 `<div><strong>${fillRowTitle(fill)}</strong><div class="table-meta">${fillRowMeta(fill)}</div></div>`,
                 `<div><strong>${impact.value}</strong><div class="table-meta">${impact.meta}</div></div>`,
                 `<div><strong>${formatRelativeAge(fill.ingestion_timestamp)}</strong><div class="table-meta">${formatMaybeTimestamp(fill.ingestion_timestamp)}</div></div>`,

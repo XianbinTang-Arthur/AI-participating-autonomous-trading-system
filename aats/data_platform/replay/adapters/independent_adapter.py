@@ -48,10 +48,11 @@ _W_TREND = 0.18          # 原 0.12
 _W_MICRO = 0.12          # 原 0.08
 _W_CONFIDENCE = 0.12     # 原 0.10
 
-# 默认阈值（与生产 settings.py 对齐）
-_ENTRY_THRESHOLD = 0.40
-_CLOSE_THRESHOLD = 0.15
-_SCALE_IN_THRESHOLD = 0.60
+# 默认阈值已迁移到 ReplayParameterOverrides 中，不再在此硬编码。
+# 以下常量仅保留为文档参考，实际运行时从 params 读取：
+#   entry_threshold  = 0.40  → params.entry_threshold
+#   close_threshold  = 0.15  → params.close_threshold
+#   scale_in_threshold = 0.60 → params.scale_in_threshold
 
 _SCORE_HISTORY_WINDOW = 20         # 评分历史保留窗口
 
@@ -109,11 +110,14 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         )
 
         # 3) 评分稳定性
+        entry_thresh = params.get_entry_threshold(dominant_leg)
         score_stable = self._check_score_stability(
             score=dominant_score,
             history=score_history,
             min_confirm_ticks=params.min_confirm_ticks,
             threshold_bps=params.score_stability_threshold,
+            entry_threshold=entry_thresh,
+            min_score_drawdown_bps=params.min_score_drawdown_bps,
         )
 
         # 4) 计算预期净边际（统一 edge contract: signal + funding - cost）
@@ -123,37 +127,39 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         cost_bps = edge["cost"]
         expected_net_edge_bps = edge["net"]
 
-        # 5) 资格评估
+        # 5) 资格评估（阈值从 params 读取，不再使用硬编码常量）
         blocking_reasons: list[str] = []
 
-        if dominant_score < _ENTRY_THRESHOLD:
+        if dominant_score < entry_thresh:
             blocking_reasons.append("score_below_entry_threshold")
         if not score_stable:
             blocking_reasons.append("score_not_stable")
         if expected_net_edge_bps < params.min_safe_net_edge_bps:
             blocking_reasons.append("net_edge_below_safe_minimum")
+        if cost_bps > params.max_acceptable_cost_bps:
+            blocking_reasons.append("cost_exceeds_max_acceptable")
 
-        selectable = dominant_score >= _ENTRY_THRESHOLD
+        selectable = dominant_score >= entry_thresh
         execution_compatible = selectable and score_stable and (
             expected_net_edge_bps >= params.min_safe_net_edge_bps
-        )
+        ) and cost_bps <= params.max_acceptable_cost_bps
 
-        # 6) 状态机推进
-        action, new_state_label = self._advance_state(
+        # 6) 状态机推进（注意: _advance_state 可能 append blocking_reasons — 副作用传参）
+        action, new_state_label, close_reason = self._advance_state(
             state=state,
             bar=bar,
+            params=params,
             dominant_leg=dominant_leg,
             dominant_score=dominant_score,
             execution_compatible=execution_compatible,
             blocking_reasons=blocking_reasons,
+            expected_net_edge_bps=expected_net_edge_bps,
         )
 
         # 7) 持仓变动
         target_qty, delta_qty = self._compute_position_delta(
             state=state,
             action=action,
-            dominant_leg=dominant_leg,
-            bar=bar,
         )
 
         return ReplayDecision(
@@ -174,8 +180,9 @@ class IndependentReplayAdapter(BaseReplayAdapter):
             target_position_qty=target_qty,
             delta_position_qty=delta_qty,
             action=action,
+            close_reason=close_reason,
             score_stable=score_stable,
-            funding_rate=float(bar.aligned_funding_rate) if bar.aligned_funding_rate else None,
+            funding_rate=float(bar.aligned_funding_rate) if bar.aligned_funding_rate is not None else None,
             close_price=float(bar.close),
             bar_index=ctx.bar_index,
         )
@@ -262,26 +269,35 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         history: list[float],
         min_confirm_ticks: int,
         threshold_bps: float,
+        entry_threshold: float,
+        min_score_drawdown_bps: float | None = None,
     ) -> bool:
         """检查评分是否稳定。
 
         逻辑：最近 min_confirm_ticks 根 bar 的评分都 >= entry_threshold，
         且最大回撤 <= threshold_bps（以分数变化的 bps 衡量）。
+
+        新增：如果 min_score_drawdown_bps 不为 None，则同时检查回撤
+        是否超过该 bps 阈值（与生产端 min_score_drawdown_bps 对齐）。
         """
         if len(history) < min_confirm_ticks:
             return False
 
         recent = history[-min_confirm_ticks:]
 
-        # 条件 1：所有 recent 评分 >= entry_threshold
-        support_count = sum(1 for s in recent if s >= _ENTRY_THRESHOLD)
+        # 条件 1：所有 recent 评��� >= entry_threshold（参数化）
+        support_count = sum(1 for s in recent if s >= entry_threshold)
         if support_count < min_confirm_ticks:
             return False
 
         # 条件 2：最大回撤（从峰值到当前）不超过阈值
         peak = max(recent)
-        drawdown_bps = (peak - score) * 10000  # 评分差异 -> bps
+        drawdown_bps = (peak - score) * 100.0  # 评分差异 -> bps (与生产端 ×100 对齐)
         if drawdown_bps > threshold_bps:
+            return False
+
+        # ���件 3（可选）：如果启用了 min_score_drawdown_bps，额外检查
+        if min_score_drawdown_bps is not None and drawdown_bps > min_score_drawdown_bps:
             return False
 
         return True
@@ -336,8 +352,12 @@ class IndependentReplayAdapter(BaseReplayAdapter):
             else:
                 funding_adjustment_bps = -funding_bps
 
-        # --- 3) cost ---
-        cost_bps = cost.total_cost_bps
+        # --- 3) cost: 基础成本 + 缓冲 ---
+        cost_bps = (
+            cost.total_cost_bps
+            + params.expected_slippage_buffer_bps
+            + params.expected_execution_buffer_bps
+        )
 
         # --- 4) net ---
         net_edge = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
@@ -358,12 +378,14 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         *,
         state: ReplayState,
         bar: ReplayBar,
+        params: ReplayParameterOverrides,
         dominant_leg: str,
         dominant_score: float,
         execution_compatible: bool,
         blocking_reasons: list[str],
-    ) -> tuple[str, str]:
-        """推进简化状态机，返回 (action, state_label)。
+        expected_net_edge_bps: float = 0.0,
+    ) -> tuple[str, str, str]:
+        """推进简化状态机，返回 (action, state_label, close_reason)。
 
         状态转移（简化版）：
         flat -> probing (score >= entry_threshold)
@@ -371,42 +393,90 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         holding -> holding (继续持有)
         holding -> flat (score < close_threshold or 方向反转)
         * -> blocked (有阻断原因)
+
+        Phase 1 扩展：
+        - 持仓未达 min_hold_seconds 前不平仓
+        - 上次平仓后 rebalance_cooldown_seconds 内不开新仓
+        - thesis 超龄（max_thesis_age_seconds）触发 stale 退出
+        - 净边际 < failed_thesis_net_edge_bps → thesis 失效退出
+        - 净边际 < de_risk_net_edge_bps → 降风险退出
+
+        close_reason 值域:
+          thesis_failed / de_risk / score_below_close /
+          direction_reversal / thesis_stale / ""（非 close 时）
         """
         current_state = state.position_side
+        close_thresh = params.get_close_threshold(current_state)
+        entry_thresh = params.get_entry_threshold(dominant_leg)
 
         # --- 已持仓 ---
         if current_state in ("long", "short"):
-            # 平仓条件
+            # 计算持仓时长
+            held_seconds = 0.0
+            if state.entry_ts is not None:
+                held_seconds = (bar.ts - state.entry_ts).total_seconds()
+
+            # min_hold_seconds 保护：持仓不够久则继续持有
+            if held_seconds < params.min_hold_seconds:
+                return "hold", "holding", ""
+
+            # 平仓条件（按优先级从高到低排列）
             should_close = False
-            if dominant_score < _CLOSE_THRESHOLD:
+            close_reason = ""
+
+            # thesis 失效（最紧急 — 净边际大幅为负）
+            if expected_net_edge_bps < params.failed_thesis_net_edge_bps:
                 should_close = True
-            elif current_state == "long" and dominant_leg == "short" and dominant_score > _ENTRY_THRESHOLD:
-                should_close = True  # 方向反转
-            elif current_state == "short" and dominant_leg == "long" and dominant_score > _ENTRY_THRESHOLD:
+                close_reason = "thesis_failed"
+            # 降风险（净边际变薄但未到失效）
+            elif expected_net_edge_bps < params.de_risk_net_edge_bps:
                 should_close = True
+                close_reason = "de_risk"
+            elif dominant_score < close_thresh:
+                should_close = True
+                close_reason = "score_below_close"
+            elif current_state == "long" and dominant_leg == "short" and dominant_score > entry_thresh:
+                should_close = True
+                close_reason = "direction_reversal"
+            elif current_state == "short" and dominant_leg == "long" and dominant_score > entry_thresh:
+                should_close = True
+                close_reason = "direction_reversal"
+            elif held_seconds >= params.max_thesis_age_seconds:
+                should_close = True
+                close_reason = "thesis_stale"
 
             if should_close:
                 state.position_qty = Decimal("0")
                 state.position_side = "flat"
                 state.entry_price = None
+                state.entry_ts = None
                 state.last_close_ts = bar.ts
-                return "close", "flat"
+                return "close", "flat", close_reason
             else:
-                return "hold", "holding"
+                return "hold", "holding", ""
 
         # --- 无持仓 ---
+        # rebalance_cooldown 保护：平仓后冷却期内不开新仓
+        if state.last_close_ts is not None:
+            cooldown_elapsed = (bar.ts - state.last_close_ts).total_seconds()
+            if cooldown_elapsed < params.rebalance_cooldown_seconds:
+                if dominant_score >= entry_thresh:
+                    blocking_reasons.append("rebalance_cooldown")
+                    return "blocked", "probing", ""
+                return "hold", "flat", ""
+
         if execution_compatible:
             # 开仓
             state.position_side = dominant_leg  # type: ignore[assignment]
             state.position_qty = Decimal("1")
             state.entry_price = bar.close
             state.entry_ts = bar.ts
-            return "open", "probing"
+            return "open", "probing", ""
 
-        if dominant_score >= _ENTRY_THRESHOLD:
-            return "blocked", "probing"
+        if dominant_score >= entry_thresh:
+            return "blocked", "probing", ""
 
-        return "hold", "flat"
+        return "hold", "flat", ""
 
     # ------------------------------------------------------------------
     # 持仓计算
@@ -417,8 +487,6 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         *,
         state: ReplayState,
         action: str,
-        dominant_leg: str,
-        bar: ReplayBar,
     ) -> tuple[Decimal, Decimal]:
         """计算目标持仓和持仓变化。"""
         if action == "open":

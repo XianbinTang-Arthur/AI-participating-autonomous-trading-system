@@ -8,6 +8,7 @@ from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.market import MarketSnapshot
+from aats.services.market_gateway.demo_provider import DemoMarketDataProvider
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
 from aats.services.market_gateway.okx_normalizer import (
     CandleGap,
@@ -20,14 +21,6 @@ from aats.services.execution_engine.okx_rest import OKXRESTClient
 
 
 class MarketDataGateway:
-    _PRICE_DELTAS: tuple[Decimal, ...] = (
-        Decimal("320.0"),
-        Decimal("260.0"),
-        Decimal("-380.0"),
-        Decimal("-310.0"),
-        Decimal("240.0"),
-        Decimal("-270.0"),
-    )
 
     def __init__(
         self,
@@ -46,18 +39,21 @@ class MarketDataGateway:
         self.okx_ws_client = okx_ws_client
         self.okx_rest_client = okx_rest_client
         self.logger = get_logger("aats.market_gateway")
+        self._demo_provider = DemoMarketDataProvider(exchange_name=settings.exchange_name)
         self._latest_snapshots: dict[str, MarketSnapshot] = {}
         self._latest_received_at: dict[str, Any] = {}
-        self._tick_by_symbol: dict[str, int] = {}
         self._okx_states: dict[str, OKXInstrumentMarketState] = {}
         self._background_task: asyncio.Task[None] | None = None
         self._fallback_task: asyncio.Task[None] | None = None
+        self._backfill_tasks: set[asyncio.Task[None]] = set()
         self._last_publish_ts = None
         self._last_error: str | None = None
+        self._consecutive_message_errors: int = 0
         self._rest_fallback_last_success_ts = None
         self._rest_fallback_last_attempt_ts = None
         self._rest_fallback_last_error: str | None = None
         self._rest_fallback_active = False
+        self._rest_fallback_consecutive_failures: int = 0
 
     async def start(self) -> None:
         if self.settings.market_data_backend != "okx":
@@ -92,6 +88,13 @@ class MarketDataGateway:
             except asyncio.CancelledError:
                 pass
             self._fallback_task = None
+        for task in list(self._backfill_tasks):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        self._backfill_tasks.clear()
 
     async def publish_local_snapshot(self, symbol: str | None = None) -> MarketSnapshot:
         trading_symbol = symbol or self.settings.default_symbol
@@ -132,10 +135,27 @@ class MarketDataGateway:
         snapshots: dict[str, MarketSnapshot] = {}
         try:
             if self.settings.market_data_backend == "okx":
-                for trading_symbol in tracked_symbols:
-                    snapshot = await self._fetch_okx_rest_snapshot(symbol=trading_symbol)
-                    await self._publish_snapshot(snapshot)
-                    snapshots[trading_symbol] = snapshot
+                results = await asyncio.gather(
+                    *(self._fetch_okx_rest_snapshot(symbol=sym) for sym in tracked_symbols),
+                    return_exceptions=True,
+                )
+                for sym, result in zip(tracked_symbols, results):
+                    if isinstance(result, Exception):
+                        log_event(
+                            self.logger,
+                            "refresh_snapshot_symbol_failed",
+                            level="warning",
+                            symbol=sym,
+                            error_type=type(result).__name__,
+                            error=str(result),
+                        )
+                        continue
+                    await self._publish_snapshot(result)
+                    snapshots[sym] = result
+                if not snapshots:
+                    raise RuntimeError(
+                        f"all_symbol_refresh_failed: symbols={list(tracked_symbols)}"
+                    )
             else:
                 for trading_symbol in tracked_symbols:
                     snapshot = await self.publish_local_snapshot(symbol=trading_symbol)
@@ -254,20 +274,34 @@ class MarketDataGateway:
         await self.okx_ws_client.run_forever(on_message=self._handle_okx_message)
 
     async def _run_okx_rest_fallback_loop(self) -> None:
+        _CIRCUIT_BREAKER_THRESHOLD = 10
+        _CIRCUIT_BREAKER_COOLDOWN_MULTIPLIER = 6
         while True:
             try:
-                await self._run_okx_rest_fallback_once()
+                refreshed = await self._run_okx_rest_fallback_once()
+                if refreshed:
+                    self._rest_fallback_consecutive_failures = 0
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                self._rest_fallback_consecutive_failures += 1
                 self._rest_fallback_last_error = str(exc)
+                circuit_open = self._rest_fallback_consecutive_failures >= _CIRCUIT_BREAKER_THRESHOLD
                 log_event(
                     self.logger,
                     "okx_market_rest_fallback_error",
-                    level="error",
+                    level="critical" if circuit_open else "error",
                     error_type=type(exc).__name__,
                     error=str(exc),
+                    consecutive_failures=self._rest_fallback_consecutive_failures,
+                    circuit_breaker_open=circuit_open,
                 )
+                if circuit_open:
+                    await asyncio.sleep(
+                        self.settings.okx_market_rest_fallback_poll_interval_seconds
+                        * _CIRCUIT_BREAKER_COOLDOWN_MULTIPLIER
+                    )
+                    continue
             await asyncio.sleep(self.settings.okx_market_rest_fallback_poll_interval_seconds)
 
     async def _run_okx_rest_fallback_once(self) -> bool:
@@ -285,16 +319,29 @@ class MarketDataGateway:
         self._rest_fallback_last_attempt_ts = utc_now()
         refreshed: dict[str, MarketSnapshot] = {}
         for symbol in stale_symbols:
-            snapshot = await self._fetch_okx_rest_snapshot(symbol=symbol)
-            await self._publish_snapshot(snapshot)
-            refreshed[symbol] = snapshot
+            try:
+                snapshot = await self._fetch_okx_rest_snapshot(symbol=symbol)
+                await self._publish_snapshot(snapshot)
+                refreshed[symbol] = snapshot
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "okx_rest_fallback_symbol_failed",
+                    level="warning",
+                    symbol=symbol,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+        if not refreshed:
+            return False
         self._rest_fallback_last_success_ts = utc_now()
         self._rest_fallback_last_error = None
         self._rest_fallback_active = True
         log_event(
             self.logger,
             "okx_market_rest_fallback_published",
-            symbols=stale_symbols,
+            symbols=list(refreshed.keys()),
+            failed_symbols=[s for s in stale_symbols if s not in refreshed],
             snapshot_ts_map={symbol: snapshot.snapshot_ts.isoformat() for symbol, snapshot in refreshed.items()},
         )
         return True
@@ -331,54 +378,75 @@ class MarketDataGateway:
         )
 
     async def _handle_okx_message(self, message: dict[str, Any]) -> None:
+        _CONSECUTIVE_ERROR_ESCALATION = 20
         try:
             snapshots = self.okx_normalizer.apply_message(message=message, states=self._okx_states)
             for snapshot in snapshots:
                 await self._publish_snapshot(snapshot)
             gaps = self.okx_normalizer.drain_detected_gaps()
             if gaps:
-                await self._handle_candle_gaps(gaps)
+                task = asyncio.create_task(
+                    self._handle_candle_gaps(gaps),
+                    name="aats_okx_gap_backfill",
+                )
+                self._backfill_tasks.add(task)
+                task.add_done_callback(self._backfill_tasks.discard)
+            self._consecutive_message_errors = 0
         except Exception as exc:
+            self._consecutive_message_errors += 1
             self._last_error = str(exc)
+            level = "error"
+            if self._consecutive_message_errors >= _CONSECUTIVE_ERROR_ESCALATION:
+                level = "critical"
             log_event(
                 self.logger,
                 "okx_market_message_error",
-                level="error",
+                level=level,
                 error_type=type(exc).__name__,
                 error=str(exc),
+                consecutive_errors=self._consecutive_message_errors,
             )
             # Market transport should stay alive even if a downstream consumer fails.
             return
 
     async def _handle_candle_gaps(self, gaps: list[CandleGap]) -> None:
-        for gap in gaps:
-            log_event(
-                self.logger,
-                "okx_ws_candle_gap_detected",
-                level="warning",
-                symbol=gap.symbol,
-                channel=gap.channel,
-                last_ts=gap.last_ts.isoformat(),
-                new_ts=gap.new_ts.isoformat(),
-                gap_seconds=(gap.new_ts - gap.last_ts).total_seconds(),
-                expected_interval_seconds=gap.expected_interval_seconds,
-            )
-        if self.okx_rest_client is None:
-            return
-        affected_symbols = list(dict.fromkeys(gap.symbol for gap in gaps))
-        for symbol in affected_symbols:
-            try:
-                snapshot = await self._fetch_okx_rest_snapshot(symbol=symbol)
-                await self._publish_snapshot(snapshot)
-                log_event(self.logger, "okx_ws_gap_backfill_complete", symbol=symbol)
-            except Exception as exc:
+        try:
+            for gap in gaps:
                 log_event(
                     self.logger,
-                    "okx_ws_gap_backfill_failed",
+                    "okx_ws_candle_gap_detected",
                     level="warning",
-                    symbol=symbol,
-                    error=str(exc),
+                    symbol=gap.symbol,
+                    channel=gap.channel,
+                    last_ts=gap.last_ts.isoformat(),
+                    new_ts=gap.new_ts.isoformat(),
+                    gap_seconds=(gap.new_ts - gap.last_ts).total_seconds(),
+                    expected_interval_seconds=gap.expected_interval_seconds,
                 )
+            if self.okx_rest_client is None:
+                return
+            affected_symbols = list(dict.fromkeys(gap.symbol for gap in gaps))
+            for symbol in affected_symbols:
+                try:
+                    snapshot = await self._fetch_okx_rest_snapshot(symbol=symbol)
+                    await self._publish_snapshot(snapshot)
+                    log_event(self.logger, "okx_ws_gap_backfill_complete", symbol=symbol)
+                except Exception as exc:
+                    log_event(
+                        self.logger,
+                        "okx_ws_gap_backfill_failed",
+                        level="warning",
+                        symbol=symbol,
+                        error=str(exc),
+                    )
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "okx_ws_gap_handler_error",
+                level="error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     async def _publish_snapshot(self, snapshot: MarketSnapshot) -> None:
         received_at = utc_now()
@@ -392,51 +460,4 @@ class MarketDataGateway:
         return symbols or (self.settings.default_symbol,)
 
     def _build_local_payload(self, symbol: str) -> dict[str, Any]:
-        tick = self._tick_by_symbol.get(symbol, 0)
-        previous_snapshot = self._latest_snapshots.get(symbol)
-        previous_price = previous_snapshot.last_price if previous_snapshot is not None else Decimal("67250.0")
-        delta = self._PRICE_DELTAS[tick % len(self._PRICE_DELTAS)]
-        last_price = previous_price + delta
-        high = max(previous_price, last_price) + Decimal("40.0")
-        low = min(previous_price, last_price) - Decimal("40.0")
-        self._tick_by_symbol[symbol] = tick + 1
-        return {
-            "symbol": symbol,
-            "exchange": self.settings.exchange_name,
-            "snapshot_ts": utc_now(),
-            "best_bid": last_price - Decimal("5.0"),
-            "best_ask": last_price + Decimal("5.0"),
-            "last_price": last_price,
-            "bid_size": Decimal("1.25") + (Decimal(tick) * Decimal("0.05")),
-            "ask_size": Decimal("1.10") + (Decimal(tick) * Decimal("0.04")),
-            "volume_24h": Decimal("128500000.0") + (Decimal(tick) * Decimal("250000.0")),
-            "kline_15m": {
-                "open": previous_price,
-                "high": high,
-                "low": low,
-                "close": last_price,
-                "volume": Decimal("1250.0") + (Decimal(tick) * Decimal("50.0")),
-            },
-            "kline_1h": {
-                "open": Decimal("67000.0"),
-                "high": max(Decimal("67000.0"), high),
-                "low": min(Decimal("67000.0"), low),
-                "close": last_price,
-                "volume": Decimal("4800.0") + (Decimal(tick) * Decimal("125.0")),
-            },
-            "recent_trades": [
-                {"price": last_price - Decimal("10.0"), "qty": Decimal("0.05"), "side": "buy"},
-                {"price": last_price, "qty": Decimal("0.04"), "side": "buy" if delta >= 0 else "sell"},
-                {"price": last_price + Decimal("10.0"), "qty": Decimal("0.03"), "side": "sell"},
-            ],
-            "orderbook_depth": {
-                "bids": [
-                    [last_price - Decimal("5.0"), Decimal("1.25")],
-                    [last_price - Decimal("10.0"), Decimal("1.5")],
-                ],
-                "asks": [
-                    [last_price + Decimal("5.0"), Decimal("1.10")],
-                    [last_price + Decimal("10.0"), Decimal("1.35")],
-                ],
-            },
-        }
+        return self._demo_provider.build_payload(symbol)

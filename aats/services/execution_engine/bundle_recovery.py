@@ -7,10 +7,8 @@ from decimal import Decimal
 from aats.schemas.execution import OrderObligation, OrderState
 from aats.schemas.strategy_runtime import StrategyExecutionBundle
 from aats.schemas.system import RecoveryBundleLegStatus, RecoveryBundleSummary
+from aats.services.execution_engine.state_machine import TERMINAL_ORDER_STATES as _TERMINAL_ORDER_STATES
 from aats.services.runtime_scope import RuntimeStateScope, order_state_matches_scope
-
-
-_TERMINAL_ORDER_STATES = {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}
 
 
 @dataclass(frozen=True, slots=True)

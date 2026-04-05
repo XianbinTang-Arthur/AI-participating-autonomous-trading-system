@@ -5,12 +5,20 @@ Checks: duplicate rows, out-of-order, funding_rate validity.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from aats.data_platform.validate.report_writer import write_quality_report
+
+
+def _to_utc(dt: datetime) -> datetime:
+    """归一化为 UTC, 防止 DST fold 场景下比较误判."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc)
+    return dt
 
 
 def validate_funding(
@@ -39,20 +47,23 @@ def validate_funding(
     out_of_order = 0
     invalid_rate = 0
 
-    seen_ts: set[str] = set()
-    prev_ts = None
+    seen_ts: set[int] = set()  # 用 UTC epoch 微秒做去重键
+    prev_ts_utc = None
 
     for row in rows:
         ts, rate = row
 
-        ts_key = str(ts)
-        if ts_key in seen_ts:
-            duplicates += 1
-        seen_ts.add(ts_key)
+        # 归一化为 UTC，避免 DST fold 误判
+        ts_utc = _to_utc(ts)
 
-        if prev_ts is not None and ts < prev_ts:
+        ts_epoch = int(ts_utc.timestamp() * 1_000_000)
+        if ts_epoch in seen_ts:
+            duplicates += 1
+        seen_ts.add(ts_epoch)
+
+        if prev_ts_utc is not None and ts_utc < prev_ts_utc:
             out_of_order += 1
-        prev_ts = ts
+        prev_ts_utc = ts_utc
 
         if rate is None:
             invalid_rate += 1

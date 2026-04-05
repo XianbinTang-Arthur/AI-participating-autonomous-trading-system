@@ -40,9 +40,11 @@ class TestDecisionContextBuilder(unittest.TestCase):
             risk_budget_usage={},
         )
 
-        quantity = DecisionContextBuilder._position_qty(snapshot, "BTC-USDT", "spot")
+        state = DecisionContextBuilder._position_state(snapshot, "BTC-USDT", "spot")
 
-        self.assertEqual(quantity, Decimal("0.0015"))
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(state.net_position_qty, Decimal("0.0015"))
 
     def test_position_qty_does_not_treat_balance_as_derivatives_position(self) -> None:
         snapshot = PortfolioSnapshot(
@@ -60,9 +62,9 @@ class TestDecisionContextBuilder(unittest.TestCase):
             margin_mode="cross",
         )
 
-        quantity = DecisionContextBuilder._position_qty(snapshot, "BTC-USDT-SWAP", "derivatives")
+        state = DecisionContextBuilder._position_state(snapshot, "BTC-USDT-SWAP", "derivatives")
 
-        self.assertEqual(quantity, Decimal("0"))
+        self.assertIsNone(state)
 
     def test_position_qty_aggregates_derivatives_legs_for_same_symbol(self) -> None:
         snapshot = PortfolioSnapshot(
@@ -105,10 +107,8 @@ class TestDecisionContextBuilder(unittest.TestCase):
             margin_mode="cross",
         )
 
-        quantity = DecisionContextBuilder._position_qty(snapshot, "BTC-USDT-SWAP", "derivatives")
         state = DecisionContextBuilder._position_state(snapshot, "BTC-USDT-SWAP", "derivatives")
 
-        self.assertEqual(quantity, Decimal("0.01"))
         self.assertIsNotNone(state)
         assert state is not None
         self.assertTrue(state.dual_legged)

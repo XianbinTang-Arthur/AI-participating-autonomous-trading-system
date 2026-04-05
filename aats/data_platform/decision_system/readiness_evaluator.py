@@ -69,8 +69,23 @@ def evaluate_promotion_readiness(
 
     if p3_round_count > 0:
         p3_latest = p3.get("latest_round", {})
-        p3_status = p3_latest.get("status", "unknown")
-        attribution_ok = p3_status in ("succeeded", "partial_success")
+        # 优先从 combos 推导状态（round manifest 可能无顶层 status 字段）
+        p3_combos = p3_latest.get("combos", {})
+        if p3_combos:
+            combo_statuses = [c.get("status", "unknown") for c in p3_combos.values()]
+            attribution_ok = any(
+                s in ("succeeded", "partial_success") for s in combo_statuses
+            )
+            p3_status = (
+                "succeeded" if all(s == "succeeded" for s in combo_statuses)
+                else "partial_success" if attribution_ok
+                else "failed"
+            )
+        else:
+            p3_status = p3_latest.get(
+                "overall_status", p3_latest.get("status", "unknown"),
+            )
+            attribution_ok = p3_status in ("succeeded", "partial_success")
         checks.append({
             "check": "attribution_no_severe_issue",
             "passed": attribution_ok,

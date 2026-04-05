@@ -334,8 +334,6 @@ class RecoveryPostureEvaluator:
             updates["latest_reconciliation_severity"] = latest_reconciliation.severity
             updates["reconciliation_classification"] = latest_reconciliation.recovery_classification
             updates["recovered_reconciliation_available"] = True
-            updates["only_reduce_required"] = only_reduce_required
-            updates["only_reduce_reasons"] = only_reduce_reasons
             updates["unknown_state_details"] = list(latest_reconciliation.unknown_state_details)
         finalized = status.model_copy(update=updates)
         self._persist_state_snapshot_if_changed(finalized=finalized, latest_reconciliation=latest_reconciliation)

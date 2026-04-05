@@ -17,10 +17,11 @@ class InMemoryEventStore:
         self._topic_index: dict[str, list[str]] = {}
         self._archive_decision_index: dict[str, list[str]] = {}
         self._archive_topic_index: dict[str, list[str]] = {}
+        self._archived_ids: set[str] = set()  # event_ids purged from _index; prevents re-append
         self._replay_offsets: dict[tuple[str, str, str, str], ReplayProjectionOffset] = {}
 
     def append(self, envelope: EventEnvelope) -> None:
-        if envelope.event_id in self._index:
+        if envelope.event_id in self._index or envelope.event_id in self._archived_ids:
             return
         self._events.append(envelope)
         self._index[envelope.event_id] = envelope
@@ -46,7 +47,14 @@ class InMemoryEventStore:
         )
 
     def get(self, event_id: str) -> EventEnvelope | None:
-        return self._index.get(event_id)
+        event = self._index.get(event_id)
+        if event is not None:
+            return event
+        # Fallback: linear search in archive (rare path, only after purge).
+        for e in self._archive_events:
+            if e.event_id == event_id:
+                return e
+        return None
 
     def latest(self, topic: str, key: str | None = None) -> EventEnvelope | None:
         for event in reversed(self._events):
@@ -64,10 +72,17 @@ class InMemoryEventStore:
         return None
 
     def by_topic(self, topic: str) -> list[EventEnvelope]:
+        # Hot events — resolved via _index (fast O(k) lookup).
+        hot_ids = self._topic_index.get(topic, [])
+        hot_events = [self._index[eid] for eid in hot_ids if eid in self._index]
+        # Archived events — _index no longer holds them after purge;
+        # fall back to a set-filtered linear scan (rare path).
         archive_ids = self._archive_topic_index.get(topic, [])
-        event_ids = self._topic_index.get(topic, [])
-        ordered_ids = [*archive_ids, *event_ids]
-        return [self._index[event_id] for event_id in ordered_ids if event_id in self._index]
+        if not archive_ids:
+            return hot_events
+        archive_id_set = set(archive_ids)
+        archive_events = [e for e in self._archive_events if e.event_id in archive_id_set]
+        return [*archive_events, *hot_events]
 
     def recent_by_topic(self, topic: str, *, limit: int) -> list[EventEnvelope]:
         if limit <= 0:
@@ -106,8 +121,14 @@ class InMemoryEventStore:
         return None
 
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
-        event_ids = [*self._archive_decision_index.get(decision_id, []), *self._decision_index.get(decision_id, [])]
-        return [self._index[event_id] for event_id in event_ids if event_id in self._index]
+        hot_ids = self._decision_index.get(decision_id, [])
+        hot_events = [self._index[eid] for eid in hot_ids if eid in self._index]
+        archive_ids = self._archive_decision_index.get(decision_id, [])
+        if not archive_ids:
+            return hot_events
+        archive_id_set = set(archive_ids)
+        archive_events = [e for e in self._archive_events if e.event_id in archive_id_set]
+        return [*archive_events, *hot_events]
 
     def between(
         self,
@@ -142,6 +163,12 @@ class InMemoryEventStore:
         self._decision_index = self._rebuild_decision_index(self._events)
         self._archive_topic_index = self._rebuild_topic_index(self._archive_events)
         self._archive_decision_index = self._rebuild_decision_index(self._archive_events)
+        # Purge archived event references from the primary index so it
+        # does not grow unbounded.  Archived events are reachable via
+        # _archive_topic_index / _archive_decision_index when needed.
+        for event in moved:
+            self._index.pop(event.event_id, None)
+            self._archived_ids.add(event.event_id)
         return {
             "archived_event_count": len(moved),
             "hot_event_count": len(self._events),

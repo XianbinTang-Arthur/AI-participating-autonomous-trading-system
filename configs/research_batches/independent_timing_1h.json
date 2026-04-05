@@ -1,0 +1,47 @@
+{
+  "batch_name": "independent_timing_1h",
+  "description": "Sweep min_hold_seconds and rebalance_cooldown_seconds for independent/1H",
+  "family": "independent",
+  "symbol": "BTC-USDT-SWAP",
+  "timeframe": "1H",
+  "dataset_version": "v1.0",
+  "start": "2025-12-05",
+  "end": "2026-04-04",
+  "experiments": [
+    {
+      "label": "hold_300_cool_120",
+      "params": {
+        "min_hold_seconds": 300,
+        "rebalance_cooldown_seconds": 120
+      }
+    },
+    {
+      "label": "hold_600_cool_120",
+      "params": {
+        "min_hold_seconds": 600,
+        "rebalance_cooldown_seconds": 120
+      }
+    },
+    {
+      "label": "hold_900_cool_240",
+      "params": {
+        "min_hold_seconds": 900,
+        "rebalance_cooldown_seconds": 240
+      }
+    },
+    {
+      "label": "hold_1800_cool_300",
+      "params": {
+        "min_hold_seconds": 1800,
+        "rebalance_cooldown_seconds": 300
+      }
+    },
+    {
+      "label": "hold_3600_cool_600",
+      "params": {
+        "min_hold_seconds": 3600,
+        "rebalance_cooldown_seconds": 600
+      }
+    }
+  ]
+}

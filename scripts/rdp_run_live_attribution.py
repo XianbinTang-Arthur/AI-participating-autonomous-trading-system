@@ -417,7 +417,7 @@ def _write_json(data: Any, output_path: pathlib.Path) -> pathlib.Path:
 # =========================================================================
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="One-shot Live Attribution: replay vs live 对照归因",
     )
@@ -456,12 +456,14 @@ def main() -> None:
 
     # Live DB URL: CLI > env > None
     live_db_url = args.live_db_url or os.environ.get("RDP_LIVE_DATABASE_URL")
+    live_fallback = False
     if not live_db_url and not args.replay_only:
         log.warning(
             "No --live-db-url or RDP_LIVE_DATABASE_URL set. "
             "Running in replay-only mode."
         )
         args.replay_only = True
+        live_fallback = True
 
     start_ts = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_ts = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -594,11 +596,10 @@ def main() -> None:
     print(f"Report: {run_dir / 'live_attribution_report.md'}")
     print(f"Artifacts: {run_dir}")
 
-    if args.replay_only and n_failures == 0 and n_success == 0:
-        sys.exit(0)
-    elif not args.replay_only and live_db_url and n_failures > 0:
-        sys.exit(0)
+    if live_fallback:
+        return 2  # partial: replay 正常但 live 不可用
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

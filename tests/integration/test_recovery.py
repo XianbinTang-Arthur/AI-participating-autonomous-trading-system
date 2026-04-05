@@ -346,6 +346,7 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
                 fills=[],
                 instruments=[],
                 account_mode="cross",
+                position_mode="net_mode",
             )
 
             with patch("aats.bootstrap.config.OKXAccountService", FakeBaselineAccountService):

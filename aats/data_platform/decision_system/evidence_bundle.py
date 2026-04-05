@@ -199,7 +199,10 @@ def _enrich_round_from_manifest(
     enriched: dict[str, Any] = {
         "round_id": round_info.get("round_id", round_dir.name),
         "started_at": round_info.get("started_at"),
-        "status": round_info.get("status", "unknown"),
+        "status": round_info.get(
+            "status",
+            manifest.get("overall_status", "unknown"),
+        ),
         "combos": {},
     }
 
@@ -212,6 +215,8 @@ def _enrich_round_from_manifest(
         run_dir = c.get("run_dir")
         if run_dir:
             run_path = pathlib.Path(run_dir)
+            if not run_path.is_absolute():
+                run_path = run_path.resolve()
 
             if phase == "phase3":
                 summary = _safe_load_json(run_path / "attribution_summary.json")
@@ -230,7 +235,7 @@ def _enrich_round_from_manifest(
                         "slippage_mean": cost.get("slippage", {}).get("mean", 0),
                         "total_cost_mean": cost.get("total_execution_cost", {}).get("mean", 0),
                         "cost_adjusted_edge_mean": cost.get("cost_adjusted_edge", {}).get("mean", 0),
-                        "positive_adjusted_edge_ratio": cost.get("positive_adjusted_edge_ratio", 0),
+                        "positive_edge_ratio": cost.get("positive_edge_ratio", 0),
                     }
 
         enriched["combos"][key] = combo_data
@@ -291,7 +296,8 @@ def collect_phase3_evidence(
             # 跳过 deprecated
             combos = manifest.get("combos", [])
             statuses = {c.get("status") for c in combos}
-            if manifest.get("status") in _UNTRUSTED_STATUSES:
+            round_status = manifest.get("overall_status", manifest.get("status"))
+            if round_status in _UNTRUSTED_STATUSES:
                 evidence["skipped_untrusted"] += 1
                 continue
 
@@ -299,7 +305,7 @@ def collect_phase3_evidence(
             enriched = _enrich_round_from_manifest(
                 {"round_id": manifest.get("round_id", subdir.name),
                  "started_at": manifest.get("started_at"),
-                 "status": manifest.get("status", "unknown"),
+                 "status": manifest.get("overall_status", manifest.get("status", "unknown")),
                  "path": str(subdir)},
                 "phase3",
             )
@@ -362,7 +368,8 @@ def collect_phase4_evidence(
                 continue
 
             evidence["round_count"] += 1
-            if manifest.get("status") in _UNTRUSTED_STATUSES:
+            round_status = manifest.get("overall_status", manifest.get("status"))
+            if round_status in _UNTRUSTED_STATUSES:
                 evidence["skipped_untrusted"] += 1
                 continue
 
@@ -370,7 +377,7 @@ def collect_phase4_evidence(
             enriched = _enrich_round_from_manifest(
                 {"round_id": manifest.get("round_id", subdir.name),
                  "started_at": manifest.get("started_at"),
-                 "status": manifest.get("status", "unknown"),
+                 "status": manifest.get("overall_status", manifest.get("status", "unknown")),
                  "path": str(subdir)},
                 "phase4",
             )

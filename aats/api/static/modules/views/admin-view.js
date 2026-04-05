@@ -1,5 +1,5 @@
-﻿import { callout, kvList, pill, primaryStatusPanel, responsiveTable, surfaceCard } from "../components.js";
-import { booleanWord, formatMaybeTimestamp, formatNumber, middleEllipsis } from "../formatters.js";
+﻿import { callout, kvList, notice, pill, primaryStatusPanel, responsiveTable, surfaceCard } from "../components.js";
+import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, middleEllipsis } from "../formatters.js";
 import { permissionStatusLabel, readableState } from "../terms.js";
 
 export function renderAdminView(data) {
@@ -89,12 +89,12 @@ export function renderAdminView(data) {
             ? "管理员可以在这里创建、停用、改角色、重置密码或删除控制台账号。"
             : "当前账号没有管理员权限，因此这里只能查看账户概览，不能改动。",
           content: `
-            ${operatorUsersError ? `<div class="notice-card tone-warning">${operatorUsersError}</div>` : ""}
+            ${operatorUsersError ? notice(operatorUsersError, "warning") : ""}
             ${renderCreateForm(canAdmin)}
             ${responsiveTable(
               ["用户名", "角色", "账号状态", "最近登录", "最近更新", "操作"],
               users.map((user) => [
-                `<div><strong>${user.username || "待确认"}</strong><div class="table-meta mono">${middleEllipsis(user.user_id)}</div></div>`,
+                `<div><strong>${escapeHtml(user.username || "待确认")}</strong><div class="table-meta mono">${middleEllipsis(user.user_id)}</div></div>`,
                 `${pill(readableState(user.role || "unknown"), user.role === "admin" ? "danger" : user.role === "operator" ? "info" : "outline")}`,
                 `<div>${pill(user.enabled ? "已启用" : "已停用", user.enabled ? "positive" : "warning")}${user.protected_last_admin ? '<div class="table-meta">当前最后一个启用中的管理员</div>' : ""}</div>`,
                 formatMaybeTimestamp(user.last_login_at),
@@ -174,10 +174,10 @@ function renderUserActions(user, canAdmin) {
   if (!canAdmin) return '<span class="table-meta">无管理权限</span>';
   return `
     <div class="table-actions table-actions--compact">
-      <button class="${user.enabled ? "warning-button" : "secondary-button"}" data-action="toggle-user" data-value="${user.username}">${user.enabled ? "停用" : "启用"}</button>
-      <button class="table-button" data-action="change-user-role" data-value="${user.username}">改角色</button>
-      <button class="table-button" data-action="reset-user-password" data-value="${user.username}">重置密码</button>
-      <button class="danger-button" data-action="delete-user" data-value="${user.username}">删除</button>
+      <button class="${user.enabled ? "warning-button" : "secondary-button"}" data-action="toggle-user" data-value="${escapeHtml(user.username)}">${user.enabled ? "停用" : "启用"}</button>
+      <button class="table-button" data-action="change-user-role" data-value="${escapeHtml(user.username)}">改角色</button>
+      <button class="table-button" data-action="reset-user-password" data-value="${escapeHtml(user.username)}">重置密码</button>
+      <button class="danger-button" data-action="delete-user" data-value="${escapeHtml(user.username)}">删除</button>
     </div>
   `;
 }

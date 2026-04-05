@@ -5,6 +5,9 @@ from decimal import Decimal
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.strategy_runtime import StrategyLegIntent
 from aats.services.portfolio_service.decimals import to_decimal
+from aats.services.strategy_engines.smart_arbitrage.cost_model import (
+    _resolve_required_hedge_margin_mode,
+)
 from aats.services.strategy_engines.smart_arbitrage.schemas import ArbitrageOpportunity, ArbitragePairDefinition
 
 
@@ -89,16 +92,3 @@ def build_legs(
     ]
 
 
-def _resolve_required_hedge_margin_mode(
-    *,
-    hedge_margin_mode: str | None,
-    require_explicit_hedge_margin_mode: bool,
-) -> str:
-    normalized = str(hedge_margin_mode or "").strip().lower()
-    if normalized:
-        return normalized
-    # The derivatives hedge margin scope is now a required runtime input.
-    # `require_explicit_hedge_margin_mode` is retained only for call-site compatibility.
-    if require_explicit_hedge_margin_mode or not normalized:
-        raise ValueError("smart_arbitrage_hedge_margin_mode_required")
-    raise ValueError("smart_arbitrage_hedge_margin_mode_required")

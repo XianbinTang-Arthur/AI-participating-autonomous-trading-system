@@ -10,7 +10,7 @@ from aats.schemas.strategy_runtime import (
     StrategyFamilyAction,
     StrategyLegIntent,
 )
-from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, clamp_float as _clamp, to_decimal
 from aats.services.strategy_engines.base import (
     StrategyEvaluationContext,
     StrategyFamilyRuntimeControl,
@@ -624,9 +624,6 @@ def _sign(value: Decimal) -> Decimal:
         return Decimal("-1")
     return Decimal("0")
 
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(value, upper))
 
 
 def _ai_directional_edge(ai_assessment: AIMarketAssessment | None) -> float:

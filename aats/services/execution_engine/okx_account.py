@@ -1152,7 +1152,15 @@ class OKXAccountService:
             return {"code": "0", "data": []}
         try:
             payload = await method(**kwargs)
-        except Exception:
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "optional_client_call_failed",
+                level="warning",
+                method=method_name,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
             return {"code": "0", "data": []}
         return payload if isinstance(payload, dict) else {"code": "0", "data": []}
 

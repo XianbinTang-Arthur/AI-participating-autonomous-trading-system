@@ -30,9 +30,12 @@ def verify_password(password: str, encoded_hash: str) -> bool:
         return False
     if scheme != _SCHEME:
         return False
-    salt = _decode(encoded_salt)
-    expected = _decode(encoded_digest)
-    candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, int(iterations))
+    try:
+        salt = _decode(encoded_salt)
+        expected = _decode(encoded_digest)
+        candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, int(iterations))
+    except Exception:
+        return False
     return hmac.compare_digest(candidate, expected)
 
 

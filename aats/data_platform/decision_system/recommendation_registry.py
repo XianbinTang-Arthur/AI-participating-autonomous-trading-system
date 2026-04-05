@@ -125,9 +125,10 @@ def approve_recommendation(
 
     if rec["status"] != "draft":
         log.warning(
-            "approve: recommendation %s 状态为 %s（非 draft）",
+            "approve: recommendation %s 状态为 %s（非 draft），拒绝审批",
             recommendation_id, rec["status"],
         )
+        return None
 
     rec["status"] = "approved"
     rec["approved_by"] = approved_by
@@ -152,9 +153,10 @@ def reject_recommendation(
 
     if rec["status"] != "draft":
         log.warning(
-            "reject: recommendation %s 状态为 %s（非 draft）",
+            "reject: recommendation %s 状态为 %s（非 draft），拒绝驳回",
             recommendation_id, rec["status"],
         )
+        return None
 
     rec["status"] = "rejected"
     rec["rejected_by"] = rejected_by

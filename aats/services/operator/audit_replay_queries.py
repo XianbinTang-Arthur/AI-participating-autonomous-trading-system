@@ -237,7 +237,10 @@ class AuditReplayQueryFacade:
         else:
             events = self.owner.runtime.event_store.by_topic(topics.ACCOUNT_BASELINES)
         if as_of_ts is not None:
-            events = [event for event in events if event.payload.get("imported_at") <= as_of_ts]
+            events = [
+                event for event in events
+                if (imported := event.payload.get("imported_at")) is not None and str(imported) <= as_of_ts
+            ]
         rows = []
         for event in events[-limit:]:
             payload = dict(event.payload)

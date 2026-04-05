@@ -255,22 +255,11 @@ class AccountBaselineImportService:
                 if not isinstance(exchange_bills_summary, dict)
                 else exchange_bills_summary.get("latest_bill_ts")
             ),
-            latest_fill_id=(
-                max(
-                    exchange_snapshot.fills,
-                    key=lambda item: ((item.fill_ts or exchange_snapshot.fetched_at), item.fill_id),
-                ).fill_id
-                if exchange_snapshot.fills
-                else None
-            ),
-            latest_fill_ts=(
-                max(
-                    exchange_snapshot.fills,
-                    key=lambda item: ((item.fill_ts or exchange_snapshot.fetched_at), item.fill_id),
-                ).fill_ts
-                if exchange_snapshot.fills
-                else None
-            ),
+            latest_fill_id=_latest_fill.fill_id if (_latest_fill := (
+                max(exchange_snapshot.fills, key=lambda item: ((item.fill_ts or exchange_snapshot.fetched_at), item.fill_id))
+                if exchange_snapshot.fills else None
+            )) else None,
+            latest_fill_ts=_latest_fill.fill_ts if _latest_fill else None,
             latest_order_snapshot_ts=exchange_snapshot.fetched_at,
             operator_action_ref=operator_action_ref,
         )

@@ -10,15 +10,7 @@ from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
 from aats.services.governance_engine.kill_switch import KillSwitch
-
-
-def _to_decimal(value: Any) -> Decimal | None:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return None
+from aats.services.portfolio_service.decimals import to_decimal_or_none as _to_decimal
 
 
 @dataclass(slots=True)

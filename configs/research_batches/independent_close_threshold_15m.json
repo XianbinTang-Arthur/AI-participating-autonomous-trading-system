@@ -1,0 +1,42 @@
+{
+  "batch_name": "independent_close_threshold_15m",
+  "description": "Sweep close_threshold for independent family on BTC-USDT-SWAP 15m",
+  "family": "independent",
+  "symbol": "BTC-USDT-SWAP",
+  "timeframe": "15m",
+  "dataset_version": "v1.0",
+  "start": "2025-12-07",
+  "end": "2026-04-04",
+  "experiments": [
+    {
+      "label": "close_0.10",
+      "params": {
+        "close_threshold": 0.1
+      }
+    },
+    {
+      "label": "close_0.15",
+      "params": {
+        "close_threshold": 0.15
+      }
+    },
+    {
+      "label": "close_0.20",
+      "params": {
+        "close_threshold": 0.2
+      }
+    },
+    {
+      "label": "close_0.24",
+      "params": {
+        "close_threshold": 0.24
+      }
+    },
+    {
+      "label": "close_0.28",
+      "params": {
+        "close_threshold": 0.28
+      }
+    }
+  ]
+}

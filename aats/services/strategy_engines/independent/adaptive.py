@@ -6,7 +6,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext
 
 from .health import IndependentLegHealthSnapshot
-from .models import IndependentBookDecision, IndependentLeg
+from .models import IndependentBookDecision, IndependentLeg, clamp as _clamp
 from .scoring import effective_score_drawdown_threshold_bps
 
 
@@ -262,5 +262,3 @@ def _context_reason(*, context: DecisionContext | None, leg: IndependentLeg) -> 
     return None
 
 
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(value, upper))

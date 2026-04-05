@@ -705,18 +705,16 @@ class StrategyCoordinatorService:
             else:
                 metrics = dict(candidate.metrics or {})
                 aggregate_smart_arbitrage = family == "smart_arbitrage" and self._is_aggregate_smart_arbitrage_candidate(candidate)
-                current_sleeve_qty = self._metric_decimal(metrics, "current_sleeve_position_qty")
-                if current_sleeve_qty is None and family == "smart_arbitrage":
-                    current_sleeve_qty = self._metric_decimal(metrics, "current_sleeve_derivatives_qty")
-                target_sleeve_qty = self._metric_decimal(metrics, "target_sleeve_position_qty")
-                if target_sleeve_qty is None and family == "smart_arbitrage":
-                    target_sleeve_qty = self._metric_decimal(metrics, "target_sleeve_derivatives_qty")
-                account_current_qty = self._metric_decimal(metrics, "current_account_position_qty")
-                if account_current_qty is None and family == "smart_arbitrage":
-                    account_current_qty = self._metric_decimal(metrics, "current_account_derivatives_qty")
-                account_target_qty = self._metric_decimal(metrics, "target_account_position_qty")
-                if account_target_qty is None and family == "smart_arbitrage":
-                    account_target_qty = self._metric_decimal(metrics, "target_account_derivatives_qty")
+                def _sa_metric(key: str, fallback_key: str) -> Decimal | None:
+                    value = self._metric_decimal(metrics, key)
+                    if value is None and family == "smart_arbitrage":
+                        value = self._metric_decimal(metrics, fallback_key)
+                    return value
+
+                current_sleeve_qty = _sa_metric("current_sleeve_position_qty", "current_sleeve_derivatives_qty")
+                target_sleeve_qty = _sa_metric("target_sleeve_position_qty", "target_sleeve_derivatives_qty")
+                account_current_qty = _sa_metric("current_account_position_qty", "current_account_derivatives_qty")
+                account_target_qty = _sa_metric("target_account_position_qty", "target_account_derivatives_qty")
                 if family in {"protective", "opportunistic", "independent"}:
                     candidate_target_qty = to_decimal(candidate.target_position_qty or Decimal("0"))
                     candidate_delta_qty = to_decimal(candidate.delta_position_qty or Decimal("0"))
@@ -1573,195 +1571,37 @@ class StrategyCoordinatorService:
             if hedge_overlay_decision is None
             else hedge_overlay_decision.overlay_parent_exposure
         )
+
+        def _or_chain(inner_attr: str, outer_attr: str) -> str | None:
+            return (
+                (getattr(summary_parent, inner_attr, None) if summary_parent is not None else None)
+                or (getattr(family_execution_summary, outer_attr, None) if family_execution_summary is not None else None)
+                or (getattr(overlay_parent, inner_attr, None) if overlay_parent is not None else None)
+                or (getattr(hedge_overlay_decision, outer_attr, None) if hedge_overlay_decision is not None else None)
+            )
+
+        def _nullable_chain(inner_attr: str, outer_attr: str) -> object:
+            for obj, attr in [
+                (summary_parent, inner_attr),
+                (family_execution_summary, outer_attr),
+                (overlay_parent, inner_attr),
+            ]:
+                if obj is not None and getattr(obj, attr, None) is not None:
+                    return getattr(obj, attr)
+            return getattr(hedge_overlay_decision, outer_attr, None) if hedge_overlay_decision is not None else None
+
         return {
-            "parent_target_signal": (
-                None
-                if summary_parent is None
-                else summary_parent.target_signal
-            ) or (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.parent_target_signal
-            ) or (
-                None if overlay_parent is None else overlay_parent.target_signal
-            ) or (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_target_signal
-            ),
-            "parent_current_signal": (
-                None
-                if summary_parent is None
-                else summary_parent.current_signal
-            ) or (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.parent_current_signal
-            ) or (
-                None if overlay_parent is None else overlay_parent.current_signal
-            ) or (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_current_signal
-            ),
-            "parent_effective_signal": (
-                None
-                if summary_parent is None
-                else summary_parent.effective_signal
-            ) or (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.parent_effective_signal
-            ) or (
-                None if overlay_parent is None else overlay_parent.effective_signal
-            ) or (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_effective_signal
-            ),
-            "signal_source": (
-                None
-                if summary_parent is None
-                else summary_parent.signal_source
-            ) or (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.signal_source
-            ) or (
-                None if overlay_parent is None else overlay_parent.signal_source
-            ) or (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.signal_source
-            ),
-            "parent_lifecycle_state": (
-                None
-                if summary_parent is None
-                else summary_parent.lifecycle_state
-            ) or (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.parent_lifecycle_state
-            ) or (
-                None if overlay_parent is None else overlay_parent.lifecycle_state
-            ) or (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_lifecycle_state
-            ),
-            "parent_target_active": (
-                None
-                if summary_parent is None
-                else summary_parent.target_active
-            ) if (
-                summary_parent is not None
-                and summary_parent.target_active is not None
-            ) else (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.parent_target_active
-            ) if (
-                family_execution_summary is not None
-                and family_execution_summary.parent_target_active is not None
-            ) else (
-                None if overlay_parent is None else overlay_parent.target_active
-            ) if (
-                overlay_parent is not None
-                and overlay_parent.target_active is not None
-            ) else (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_target_active
-            ),
-            "parent_inventory_active": (
-                None
-                if summary_parent is None
-                else summary_parent.inventory_active
-            ) if (
-                summary_parent is not None
-                and summary_parent.inventory_active is not None
-            ) else (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.parent_inventory_active
-            ) if (
-                family_execution_summary is not None
-                and family_execution_summary.parent_inventory_active is not None
-            ) else (
-                None if overlay_parent is None else overlay_parent.inventory_active
-            ) if (
-                overlay_parent is not None
-                and overlay_parent.inventory_active is not None
-            ) else (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_inventory_active
-            ),
-            "parent_source_of_truth": (
-                None
-                if summary_parent is None
-                else summary_parent.source_of_truth
-            ) or (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.parent_source_of_truth
-            ) or (
-                None if overlay_parent is None else overlay_parent.source_of_truth
-            ) or (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_source_of_truth
-            ),
-            "parent_target_qty": (
-                None
-                if summary_parent is None
-                else summary_parent.target_qty
-            ) if (
-                summary_parent is not None
-                and summary_parent.target_qty is not None
-            ) else (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.parent_target_qty
-            ) if (
-                family_execution_summary is not None
-                and family_execution_summary.parent_target_qty is not None
-            ) else (
-                None if overlay_parent is None else overlay_parent.target_qty
-            ) if (
-                overlay_parent is not None
-                and overlay_parent.target_qty is not None
-            ) else (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_target_qty
-            ),
-            "parent_current_qty": (
-                None
-                if summary_parent is None
-                else summary_parent.current_qty
-            ) if (
-                summary_parent is not None
-                and summary_parent.current_qty is not None
-            ) else (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.parent_current_qty
-            ) if (
-                family_execution_summary is not None
-                and family_execution_summary.parent_current_qty is not None
-            ) else (
-                None if overlay_parent is None else overlay_parent.current_qty
-            ) if (
-                overlay_parent is not None
-                and overlay_parent.current_qty is not None
-            ) else (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_current_qty
-            ),
-            "parent_effective_qty": (
-                None
-                if summary_parent is None
-                else summary_parent.effective_qty
-            ) if (
-                summary_parent is not None
-                and summary_parent.effective_qty is not None
-            ) else (
-                None
-                if family_execution_summary is None
-                else family_execution_summary.parent_effective_qty
-            ) if (
-                family_execution_summary is not None
-                and family_execution_summary.parent_effective_qty is not None
-            ) else (
-                None if overlay_parent is None else overlay_parent.effective_qty
-            ) if (
-                overlay_parent is not None
-                and overlay_parent.effective_qty is not None
-            ) else (
-                None if hedge_overlay_decision is None else hedge_overlay_decision.parent_effective_qty
-            ),
+            "parent_target_signal": _or_chain("target_signal", "parent_target_signal"),
+            "parent_current_signal": _or_chain("current_signal", "parent_current_signal"),
+            "parent_effective_signal": _or_chain("effective_signal", "parent_effective_signal"),
+            "signal_source": _or_chain("signal_source", "signal_source"),
+            "parent_lifecycle_state": _or_chain("lifecycle_state", "parent_lifecycle_state"),
+            "parent_target_active": _nullable_chain("target_active", "parent_target_active"),
+            "parent_inventory_active": _nullable_chain("inventory_active", "parent_inventory_active"),
+            "parent_source_of_truth": _or_chain("source_of_truth", "parent_source_of_truth"),
+            "parent_target_qty": _nullable_chain("target_qty", "parent_target_qty"),
+            "parent_current_qty": _nullable_chain("current_qty", "parent_current_qty"),
+            "parent_effective_qty": _nullable_chain("effective_qty", "parent_effective_qty"),
         }
 
     @staticmethod
@@ -1795,12 +1635,16 @@ class StrategyCoordinatorService:
         return action_map.get(family_action, "hold")
 
     @staticmethod
-    def _final_action_from_legs(strategy_execution_legs: list[StrategyLegIntent]) -> str | None:
-        actionable_legs = [
+    def _actionable_legs(strategy_execution_legs: list[StrategyLegIntent]) -> list[StrategyLegIntent]:
+        return [
             leg
             for leg in strategy_execution_legs
             if abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
         ]
+
+    @staticmethod
+    def _final_action_from_legs(strategy_execution_legs: list[StrategyLegIntent]) -> str | None:
+        actionable_legs = StrategyCoordinatorService._actionable_legs(strategy_execution_legs)
         if not actionable_legs:
             return None
         opening_legs = [leg for leg in actionable_legs if str(leg.action or "").lower() == "open"]
@@ -1901,19 +1745,13 @@ class StrategyCoordinatorService:
         unique = list(dict.fromkeys(derived))
         if len(unique) == 1:
             return unique[0]
-        if len(derived) == 1:
-            return derived[0]
         return None
 
     @staticmethod
     def _derived_leg_position_intents(
         strategy_execution_legs: list[StrategyLegIntent],
     ) -> list[str] | None:
-        actionable_legs = [
-            leg
-            for leg in strategy_execution_legs
-            if abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
-        ]
+        actionable_legs = StrategyCoordinatorService._actionable_legs(strategy_execution_legs)
         if not actionable_legs:
             return []
         derived: list[str] = []
@@ -1944,11 +1782,7 @@ class StrategyCoordinatorService:
         strategy_execution_legs: list[StrategyLegIntent],
         selected_candidate: StrategyCandidate | None = None,
     ) -> StrategyExecutionSummary | None:
-        actionable_legs = [
-            leg
-            for leg in strategy_execution_legs
-            if abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12
-        ]
+        actionable_legs = StrategyCoordinatorService._actionable_legs(strategy_execution_legs)
         if not actionable_legs:
             return None
         derived_intents = StrategyCoordinatorService._derived_leg_position_intents(actionable_legs) or []

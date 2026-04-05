@@ -372,8 +372,6 @@ def _resolve_operating_state(
         if settings.live_submit_enabled and not settings.guarded_execution_dry_run:
             return "guarded_live_enabled"
         return "guarded_live_blocked"
-    if settings.live_submit_enabled and not settings.guarded_execution_dry_run:
-        return "guarded_live_enabled"
     return "guarded_live_blocked"
 
 

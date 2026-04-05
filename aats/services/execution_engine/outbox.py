@@ -252,7 +252,7 @@ class PostgresExecutionOutboxPublisher:
                     error=str(exc),
                 )
                 if status != "FAILED":
-                    break
+                    break  # FIFO: retriable failure blocks subsequent messages until resolved
 
     @staticmethod
     def _seed_intent_from_command_payload(

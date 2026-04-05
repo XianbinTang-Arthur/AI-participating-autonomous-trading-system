@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.schemas.common import utc_now
 from aats.schemas.decision import DecisionContext
-from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.execution import FillEvent
+from aats.schemas.portfolio import InstrumentPositionState, PortfolioSnapshot
 from aats.schemas.system import HealthSnapshot
 from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.health import SystemHealthService
@@ -29,6 +32,16 @@ from aats.services.strategy_execution_health import (
     compute_strategy_execution_health,
 )
 from aats.storage.base import EventStore, ExecutionRepository, PortfolioRepository
+
+
+@dataclass(slots=True)
+class LegLifecycleState:
+    """Tracks lifecycle timestamps for a single position leg (long or short)."""
+
+    qty: Decimal = Decimal("0")
+    current_leg_opened_at: datetime | None = None
+    last_leg_closed_at: datetime | None = None
+    latest_fill_timestamp: datetime | None = None
 
 
 class DecisionContextBuilder:
@@ -92,11 +105,18 @@ class DecisionContextBuilder:
             raise RuntimeError("Portfolio snapshot is required before building decision context")
 
         current_position_state = self._position_state(portfolio_snapshot, symbol, self.settings.trading_product_type)
-        current_position_qty = (
-            current_position_state.net_position_qty
-            if current_position_state is not None
-            else Decimal("0")
-        )
+        # Extract position fields once to eliminate repeated None-checks.
+        _ZERO = Decimal("0")
+        _ps = current_position_state
+        current_position_qty = _ZERO if _ps is None else _ps.net_position_qty
+        current_long_qty = _ZERO if _ps is None else _ps.long_position_qty
+        current_short_qty = _ZERO if _ps is None else _ps.short_position_qty
+        current_gross_qty = _ZERO if _ps is None else _ps.gross_position_qty
+        current_net_notional = _ZERO if _ps is None else _ps.net_position_notional
+        current_gross_notional = _ZERO if _ps is None else _ps.gross_position_notional
+        current_long_notional = _ZERO if _ps is None else _ps.long_position_notional
+        current_short_notional = _ZERO if _ps is None else _ps.short_position_notional
+        current_legs = [] if _ps is None else list(_ps.legs)
         current_exposure_side = self._exposure_side(current_position_qty)
         open_orders = [
             order.client_order_id
@@ -106,42 +126,34 @@ class DecisionContextBuilder:
             )
             if order.symbol == symbol
         ]
+        # Cache fills once to avoid repeated queries and ensure data consistency
+        # across strategy_health, leg_strategy_health, and leg_lifecycle.
+        scoped_fills = self.execution_repo.fills_for_scope(scope=self.state_scope)
         strategy_health = compute_strategy_execution_health(
             settings=self.settings,
             symbol=symbol,
-            fills=self.execution_repo.fills_for_scope(scope=self.state_scope),
+            fills=scoped_fills,
             snapshots=portfolio_snapshots,
             current_position_qty=current_position_qty,
-            current_long_position_qty=(
-                Decimal("0") if current_position_state is None else current_position_state.long_position_qty
-            ),
-            current_short_position_qty=(
-                Decimal("0") if current_position_state is None else current_position_state.short_position_qty
-            ),
+            current_long_position_qty=current_long_qty,
+            current_short_position_qty=current_short_qty,
         )
         leg_strategy_health = compute_leg_strategy_execution_health(
             settings=self.settings,
             symbol=symbol,
-            fills=self.execution_repo.fills_for_scope(scope=self.state_scope),
+            fills=scoped_fills,
             snapshots=portfolio_snapshots,
-            current_long_position_qty=(
-                Decimal("0") if current_position_state is None else current_position_state.long_position_qty
-            ),
-            current_short_position_qty=(
-                Decimal("0") if current_position_state is None else current_position_state.short_position_qty
-            ),
+            current_long_position_qty=current_long_qty,
+            current_short_position_qty=current_short_qty,
         )
         leg_lifecycle = self._leg_lifecycle(
             symbol=symbol,
-            fills=self.execution_repo.fills_for_scope(scope=self.state_scope),
+            fills=scoped_fills,
             current_position_state=current_position_state,
             snapshot_ts=None if portfolio_snapshot is None else portfolio_snapshot.snapshot_ts,
             snapshots=portfolio_snapshots,
         )
-        current_leg_qty_by_side = {
-            "long": Decimal("0") if current_position_state is None else current_position_state.long_position_qty,
-            "short": Decimal("0") if current_position_state is None else current_position_state.short_position_qty,
-        }
+        current_leg_qty_by_side = {"long": current_long_qty, "short": current_short_qty}
         guardrails = strategy_health.active_guardrails(
             settings=self.settings,
             as_of=utc_now(),
@@ -168,37 +180,21 @@ class DecisionContextBuilder:
             },
             current_position_qty=current_position_qty,
             current_position_state=current_position_state,
-            current_position_legs=[] if current_position_state is None else list(current_position_state.legs),
-            current_net_position_qty=(
-                Decimal("0") if current_position_state is None else current_position_state.net_position_qty
-            ),
-            current_gross_position_qty=(
-                Decimal("0") if current_position_state is None else current_position_state.gross_position_qty
-            ),
-            current_long_position_qty=(
-                Decimal("0") if current_position_state is None else current_position_state.long_position_qty
-            ),
-            current_short_position_qty=(
-                Decimal("0") if current_position_state is None else current_position_state.short_position_qty
-            ),
-            current_net_position_notional=(
-                Decimal("0") if current_position_state is None else current_position_state.net_position_notional
-            ),
-            current_gross_position_notional=(
-                Decimal("0") if current_position_state is None else current_position_state.gross_position_notional
-            ),
-            current_long_position_notional=(
-                Decimal("0") if current_position_state is None else current_position_state.long_position_notional
-            ),
-            current_short_position_notional=(
-                Decimal("0") if current_position_state is None else current_position_state.short_position_notional
-            ),
-            current_long_leg_opened_at=leg_lifecycle["long"]["current_leg_opened_at"],
-            current_short_leg_opened_at=leg_lifecycle["short"]["current_leg_opened_at"],
-            last_long_leg_closed_at=leg_lifecycle["long"]["last_leg_closed_at"],
-            last_short_leg_closed_at=leg_lifecycle["short"]["last_leg_closed_at"],
-            latest_long_leg_fill_timestamp=leg_lifecycle["long"]["latest_fill_timestamp"],
-            latest_short_leg_fill_timestamp=leg_lifecycle["short"]["latest_fill_timestamp"],
+            current_position_legs=current_legs,
+            current_net_position_qty=current_position_qty,
+            current_gross_position_qty=current_gross_qty,
+            current_long_position_qty=current_long_qty,
+            current_short_position_qty=current_short_qty,
+            current_net_position_notional=current_net_notional,
+            current_gross_position_notional=current_gross_notional,
+            current_long_position_notional=current_long_notional,
+            current_short_position_notional=current_short_notional,
+            current_long_leg_opened_at=leg_lifecycle["long"].current_leg_opened_at,
+            current_short_leg_opened_at=leg_lifecycle["short"].current_leg_opened_at,
+            last_long_leg_closed_at=leg_lifecycle["long"].last_leg_closed_at,
+            last_short_leg_closed_at=leg_lifecycle["short"].last_leg_closed_at,
+            latest_long_leg_fill_timestamp=leg_lifecycle["long"].latest_fill_timestamp,
+            latest_short_leg_fill_timestamp=leg_lifecycle["short"].latest_fill_timestamp,
             current_open_orders=open_orders,
             product_type=self.settings.trading_product_type,
             current_exposure_side=current_exposure_side,
@@ -225,22 +221,11 @@ class DecisionContextBuilder:
         )
 
     @staticmethod
-    def _position_qty(
-        snapshot: PortfolioSnapshot | None,
-        symbol: str,
-        product_type: str = "spot",
-    ) -> Decimal:
-        state = DecisionContextBuilder._position_state(snapshot, symbol, product_type)
-        if state is not None:
-            return state.net_position_qty
-        return Decimal("0")
-
-    @staticmethod
     def _position_state(
         snapshot: PortfolioSnapshot | None,
         symbol: str,
         product_type: str = "spot",
-    ):
+    ) -> InstrumentPositionState | None:
         if snapshot is None:
             return None
         states = instrument_position_states_from_snapshot_positions(
@@ -282,25 +267,12 @@ class DecisionContextBuilder:
     def _leg_lifecycle(
         *,
         symbol: str,
-        fills,
-        current_position_state,
-        snapshot_ts=None,
+        fills: list[FillEvent],
+        current_position_state: InstrumentPositionState | None,
+        snapshot_ts: datetime | None = None,
         snapshots: list[PortfolioSnapshot] | None = None,
-    ) -> dict[str, dict[str, object | None]]:
-        lifecycle = {
-            "long": {
-                "qty": Decimal("0"),
-                "current_leg_opened_at": None,
-                "last_leg_closed_at": None,
-                "latest_fill_timestamp": None,
-            },
-            "short": {
-                "qty": Decimal("0"),
-                "current_leg_opened_at": None,
-                "last_leg_closed_at": None,
-                "latest_fill_timestamp": None,
-            },
-        }
+    ) -> dict[str, LegLifecycleState]:
+        lifecycle = {"long": LegLifecycleState(), "short": LegLifecycleState()}
         ordered_fills = sorted(
             [
                 fill
@@ -312,20 +284,20 @@ class DecisionContextBuilder:
         for fill in ordered_fills:
             side = str(fill.pos_side)
             leg_state = lifecycle[side]
-            previous_qty = to_decimal(leg_state["qty"])
+            previous_qty = to_decimal(leg_state.qty)
             fill_qty = abs(to_decimal(fill.fill_qty))
             delta_qty = (
                 fill_qty if (side == "long" and fill.side == "buy") or (side == "short" and fill.side == "sell")
                 else -fill_qty
             )
             next_qty = max(previous_qty + delta_qty, Decimal("0"))
-            leg_state["qty"] = next_qty
-            leg_state["latest_fill_timestamp"] = fill.ingestion_timestamp
+            leg_state.qty = next_qty
+            leg_state.latest_fill_timestamp = fill.ingestion_timestamp
             if previous_qty <= EPSILON_DECIMAL_12 and next_qty > EPSILON_DECIMAL_12:
-                leg_state["current_leg_opened_at"] = fill.ingestion_timestamp
+                leg_state.current_leg_opened_at = fill.ingestion_timestamp
             elif previous_qty > EPSILON_DECIMAL_12 and next_qty <= EPSILON_DECIMAL_12:
-                leg_state["last_leg_closed_at"] = fill.ingestion_timestamp
-                leg_state["current_leg_opened_at"] = None
+                leg_state.last_leg_closed_at = fill.ingestion_timestamp
+                leg_state.current_leg_opened_at = None
 
         current_long_qty = Decimal("0") if current_position_state is None else current_position_state.long_position_qty
         current_short_qty = Decimal("0") if current_position_state is None else current_position_state.short_position_qty
@@ -335,14 +307,14 @@ class DecisionContextBuilder:
         }
         for side, current_qty in current_by_side.items():
             leg_state = lifecycle[side]
-            reconstructed_qty = to_decimal(leg_state["qty"])
+            reconstructed_qty = to_decimal(leg_state.qty)
             if current_qty <= EPSILON_DECIMAL_12:
-                leg_state["qty"] = Decimal("0")
-                leg_state["current_leg_opened_at"] = None
+                leg_state.qty = Decimal("0")
+                leg_state.current_leg_opened_at = None
             elif abs(reconstructed_qty - current_qty) > EPSILON_DECIMAL_12:
-                leg_state["qty"] = current_qty
+                leg_state.qty = current_qty
                 conservative_anchor = (
-                    leg_state["latest_fill_timestamp"]
+                    leg_state.latest_fill_timestamp
                     or DecisionContextBuilder._continuous_open_anchor_from_snapshot_history(
                         snapshots=snapshots or [],
                         symbol=symbol,
@@ -350,8 +322,8 @@ class DecisionContextBuilder:
                     )
                     or snapshot_ts
                 )
-                leg_state["latest_fill_timestamp"] = conservative_anchor
-                leg_state["current_leg_opened_at"] = conservative_anchor
+                leg_state.latest_fill_timestamp = conservative_anchor
+                leg_state.current_leg_opened_at = conservative_anchor
         return lifecycle
 
     @staticmethod
@@ -360,7 +332,7 @@ class DecisionContextBuilder:
         snapshots: list[PortfolioSnapshot],
         symbol: str,
         side: str,
-    ):
+    ) -> datetime | None:
         anchor = None
         ordered_snapshots = sorted(snapshots, key=lambda snapshot: snapshot.snapshot_ts)
         for snapshot in ordered_snapshots:

@@ -246,6 +246,13 @@ def resilient_subscription_handler(
     return wrapped
 
 
+# ── load_settings 分层旁路记录 ─────────────────────────────────────
+# build_runtime() 中的 SettingsProvenanceTracker 可以读取此变量，
+# 从而追踪 load_settings 内部的 YAML/managed + env 分层。
+# 该变量仅在 load_settings() 调用时写入，不参与合并逻辑。
+_load_settings_layers: dict[str, dict[str, Any]] = {}
+
+
 def load_settings() -> AATSSettings:
     if "AATS_STRATEGY_SLEEVE_AUTO_PARALLEL_ENABLED" in os.environ:
         raise ValueError(
@@ -298,6 +305,15 @@ def load_settings() -> AATSSettings:
             for field_name, value in explicit_overrides.items()
             if field_name == "env_template_profile" or field_name not in derived_field_names
         }
+    # ── 旁路记录各层数据（供 provenance tracker 使用）───────────────
+    _load_settings_layers.clear()
+    _load_settings_layers["source_type"] = {
+        "env_template_profile": env_template_profile,
+        "environment": environment,
+        "config_profile": config_profile,
+    }
+    _load_settings_layers["yaml_or_managed"] = dict(source_values)
+    _load_settings_layers["env_overrides"] = dict(explicit_overrides)
     return AATSSettings.model_validate({**source_values, **explicit_overrides})
 
 
@@ -1448,6 +1464,14 @@ def _build_position_target_handler(
                 ai_execution_parameter_suggestion=base_target.ai_execution_parameter_suggestion,
             )
             if provisional_plan is None:
+                _log.warning(
+                    "strategy_leg_plan skip: build_leg_plan 返回 None | decision=%s symbol=%s pos_side=%s action=%s qty=%s",
+                    base_target.decision_id,
+                    getattr(leg, "symbol", "?"),
+                    getattr(semantics, "get", lambda k, d=None: semantics.get(k, d))("pos_side", "?") if isinstance(semantics, dict) else "?",
+                    getattr(semantics, "get", lambda k, d=None: semantics.get(k, d))("action", "?") if isinstance(semantics, dict) else "?",
+                    getattr(semantics, "get", lambda k, d=None: semantics.get(k, d))("quantity", "?") if isinstance(semantics, dict) else "?",
+                )
                 return {
                     "policy": policy_decision,
                     "risk": None,
@@ -1456,6 +1480,13 @@ def _build_position_target_handler(
                 }
             provisional_intent = execution_planner.build_leg_intent(plan=provisional_plan)
             if provisional_intent is None:
+                _log.warning(
+                    "strategy_leg_intent skip: build_leg_intent 返回 None | decision=%s symbol=%s pos_side=%s qty=%s",
+                    base_target.decision_id,
+                    provisional_plan.symbol,
+                    provisional_plan.pos_side,
+                    provisional_plan.quantity,
+                )
                 return {
                     "policy": policy_decision,
                     "risk": None,
@@ -1949,6 +1980,13 @@ def _build_position_target_handler(
                     if intent is None:
                         plan = item.get("plan")
                         if plan is None:
+                            _leg = item.get("leg")
+                            _log.warning(
+                                "bundle_leg skip: plan 和 intent 均为 None | decision=%s symbol=%s pos_side=%s",
+                                target.decision_id,
+                                getattr(_leg, "symbol", "?") if _leg else "?",
+                                getattr(_leg, "pos_side", "?") if _leg else "?",
+                            )
                             continue
                         intent = (
                             execution_planner.build_leg_intent(plan=plan)
@@ -2260,11 +2298,20 @@ def _build_position_target_handler(
 
         plan = _plan_for_target(target=target, risk_decision=risk_decision)
         if plan is None:
+            _log.warning(
+                "position_target skip: plan 为 None | decision=%s symbol=%s product=%s target_qty=%s current_qty=%s",
+                target.decision_id, target.symbol, target.product_type,
+                target.target_position_qty, target.current_position_qty,
+            )
             return
         await execution_planner.publish_plan(bus=bus, plan=plan)
 
         intent = execution_planner.build_intent(plan=plan)
         if intent is None:
+            _log.warning(
+                "position_target skip: intent 为 None | decision=%s symbol=%s delta=%s product=%s position_mode=%s",
+                plan.decision_id, plan.symbol, plan.delta_qty, plan.product_type, plan.position_mode,
+            )
             return
         metrics.increment("order_intents_generated")
         await execution_planner.publish_intent(bus=bus, intent=intent)
@@ -2377,17 +2424,37 @@ async def build_runtime(
     _validate_runtime_settings(base_settings, base_runtime_layering)
     storage = build_storage_backends(base_settings)
     try:
+        # ── Settings Provenance 追踪 ─────────────────────────────
+        from aats.bootstrap.settings_provenance import SettingsProvenanceTracker
+        _provenance = SettingsProvenanceTracker()
+        # 补充 load_settings 内部分层（仅当 settings 来自 load_settings 时）
+        _layers = _load_settings_layers if settings is None else {}
+        if _layers.get("yaml_or_managed"):
+            # hardcoded defaults — 使用 model_validate({}) 隔离环境变量
+            _defaults_baseline = AATSSettings.model_validate({}).model_dump(mode="python")
+            _provenance.snapshot("hardcoded_defaults", _defaults_baseline)
+            # YAML / managed profile 层
+            _yaml_merged = {**_defaults_baseline, **_layers["yaml_or_managed"]}
+            _provenance.snapshot("strategy_profile", _yaml_merged)
+            # env overrides 层
+            if _layers.get("env_overrides"):
+                _env_merged = {**_yaml_merged, **_layers["env_overrides"]}
+                _provenance.snapshot("env_overrides", _env_merged)
+        _provenance.snapshot("load_settings", base_settings.model_dump(mode="python"))
+
         profile_resolution = runtime_profile_resolution(settings=base_settings)
         # ── Active Parameter Set 注入（RDP 整合） ──────────────────
         # 在 profile resolution 之后、settings validate 之前合并。
         # fail-soft: 加载失败不阻断主系统启动。
         _resolved_for_active = profile_resolution.resolved_settings
+        _provenance.snapshot("profile_resolution", _resolved_for_active)
         try:
             from aats.bootstrap.active_parameters import apply_active_parameters_to_settings
             _resolved_for_active = apply_active_parameters_to_settings(
                 profile_resolution.resolved_settings,
                 project_root=Path.cwd(),
             )
+            _provenance.snapshot("active_parameters", _resolved_for_active)
         except Exception as _active_param_exc:
             log_event(
                 get_logger("aats.bootstrap"),
@@ -2396,6 +2463,18 @@ async def build_runtime(
                 error=str(_active_param_exc),
             )
         runtime_settings = AATSSettings.model_validate(_resolved_for_active)
+        _provenance.snapshot("final", runtime_settings.model_dump(mode="python"))
+        # ── 输出 Provenance 报告 ─────────────────────────────────
+        try:
+            _provenance.log_report()
+            _provenance.log_active_parameter_details()
+        except Exception as _prov_exc:
+            log_event(
+                get_logger("aats.bootstrap"),
+                "settings_provenance_report_failed",
+                level="warning",
+                error=str(_prov_exc),
+            )
         runtime_layering = resolve_runtime_layering(runtime_settings)
         state_scope = runtime_state_scope(runtime_settings)
         _validate_runtime_settings(runtime_settings, runtime_layering)
@@ -2827,6 +2906,14 @@ async def build_runtime(
         bootstrap_portfolio_from_exchange=bootstrap_from_exchange,
         reconciliation_stale_after_seconds=runtime_settings.reconciliation_stale_after_seconds,
         recovery_policy=runtime_layering.recovery_policy,
+        fill_outcome_repo=storage.fill_outcome_repo,
+        event_store=storage.event_store,
+    )
+    # OKXExecutionAdapter.client satisfies ExchangeOrderQuerier protocol.
+    _exchange_order_client = (
+        getattr(execution_adapter, "client", None)
+        if isinstance(execution_adapter, OKXExecutionAdapter)
+        else None
     )
     recovery_service = (
         ExecutionLedgerRecoveryService(
@@ -2838,6 +2925,7 @@ async def build_runtime(
             reconciliation_classifier=reconciliation_classifier or RecoveryReconciliationClassifier(),
             execution_order_repo=storage.execution_order_repo,
             execution_command_repo=storage.execution_command_repo,
+            exchange_order_client=_exchange_order_client,
         )
         if runtime_settings.recovery_reconciliation_execution_ledger_enabled
         else base_recovery_service
@@ -2926,6 +3014,11 @@ async def build_runtime(
         imported_baseline = None
         imported_baseline_event_id = None
         funding_fee_sync_posted_count = 0
+    # Pre-recovery: query exchange for stuck CREATED/SUBMITTING orders
+    # so that downstream recovery sees clean state and avoids unnecessary halts.
+    if hasattr(recovery_service, "pre_recover_exchange_reconciliation"):
+        await recovery_service.pre_recover_exchange_reconciliation()
+
     recovery_artifacts = recovery_service.recover(
         portfolio_state=portfolio_service.state,
         account_baseline=imported_baseline,

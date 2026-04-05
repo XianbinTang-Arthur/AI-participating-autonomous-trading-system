@@ -198,127 +198,101 @@ def resolve_execution_policy(
             bounded_limit_ioc=True,
             reason="independent_weak_edge_guarded_reduce",
         )
-    if book.book_action == "scale_in":
-        configured_mode = settings.strategy_hedge_independent_scale_in_execution_mode
-        if configured_mode != "adaptive":
-            return resolve_execution_policy_from_mode(
-                mode=configured_mode,
-                edge_strength=edge_strength,
-                urgency="low" if configured_mode in {"passive_first", "bounded_limit"} else "medium",
-                limit_offset_bps=to_decimal(settings.strategy_hedge_independent_limit_offset_bps_scale_in),
-                max_acceptable_cost_bps=max_cost,
-                policy_reason=f"independent_scale_in_configured_{configured_mode}",
-            )
-        if edge_strength == "strong" and not liquidity_degraded and not execution_degraded:
-            return IndependentExecutionPolicy(
-                edge_strength=edge_strength,
-                urgency="medium",
-                execution_style_preference="taker",
-                order_type_preference="market",
-                time_in_force_preference="IOC",
-                limit_offset_bps_preference=None,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason="independent_scale_strong_edge_aggressive",
-                mode="adaptive_scale_strong_edge_aggressive",
-                price_style="market",
-                bounded_taker=True,
-                reason="independent_scale_strong_edge_aggressive",
-            )
-        if bool(settings.strategy_hedge_independent_passive_first_enabled):
-            return IndependentExecutionPolicy(
-                edge_strength=edge_strength,
-                urgency="low",
-                execution_style_preference="bounded_limit_ioc",
-                order_type_preference="limit",
-                time_in_force_preference="IOC",
-                limit_offset_bps_preference=passive_limit_offset_bps,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason="independent_scale_guarded_passive_first",
-                mode="adaptive_scale_guarded_passive_first",
-                price_style="limit",
-                passive_first=True,
-                bounded_limit_ioc=True,
-                reason="independent_scale_guarded_passive_first",
-            )
-        return IndependentExecutionPolicy(
+    if book.book_action in {"scale_in", "open"}:
+        return _adaptive_entry_or_scale(
+            settings=settings,
+            book=book,
             edge_strength=edge_strength,
-            urgency="medium",
-            execution_style_preference="taker",
-            order_type_preference="market",
-            time_in_force_preference="IOC",
-            limit_offset_bps_preference=None,
-            max_acceptable_cost_bps=max_cost,
-            policy_reason="independent_scale_guarded_aggressive_fallback",
-            mode="adaptive_scale_guarded_aggressive_fallback",
-            price_style="market",
-            bounded_taker=True,
-            reason="independent_scale_guarded_aggressive_fallback",
-        )
-    if book.book_action == "open":
-        configured_mode = settings.strategy_hedge_independent_entry_execution_mode
-        if configured_mode != "adaptive":
-            return resolve_execution_policy_from_mode(
-                mode=configured_mode,
-                edge_strength=edge_strength,
-                urgency="low" if configured_mode in {"passive_first", "bounded_limit"} else "medium",
-                limit_offset_bps=to_decimal(settings.strategy_hedge_independent_limit_offset_bps_entry),
-                max_acceptable_cost_bps=max_cost,
-                policy_reason=f"independent_entry_configured_{configured_mode}",
-            )
-        if edge_strength == "strong" and not liquidity_degraded and not execution_degraded:
-            return IndependentExecutionPolicy(
-                edge_strength=edge_strength,
-                urgency="medium",
-                execution_style_preference="taker",
-                order_type_preference="market",
-                time_in_force_preference="IOC",
-                limit_offset_bps_preference=None,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason="independent_entry_strong_edge_aggressive",
-                mode="adaptive_entry_strong_edge_aggressive",
-                price_style="market",
-                bounded_taker=True,
-                reason="independent_entry_strong_edge_aggressive",
-            )
-        if bool(settings.strategy_hedge_independent_passive_first_enabled):
-            return IndependentExecutionPolicy(
-                edge_strength=edge_strength,
-                urgency="low",
-                execution_style_preference="bounded_limit_ioc",
-                order_type_preference="limit",
-                time_in_force_preference="IOC",
-                limit_offset_bps_preference=passive_limit_offset_bps,
-                max_acceptable_cost_bps=max_cost,
-                policy_reason=(
-                    "independent_weak_edge_passive_first_required"
-                    if book.weak_edge_report_only
-                    else "independent_entry_guarded_passive_first"
-                ),
-                mode="adaptive_entry_guarded_passive_first",
-                price_style="limit",
-                passive_first=True,
-                bounded_limit_ioc=True,
-                reason=(
-                    "independent_weak_edge_passive_first_required"
-                    if book.weak_edge_report_only
-                    else "independent_entry_guarded_passive_first"
-                ),
-            )
-        return IndependentExecutionPolicy(
-            edge_strength=edge_strength,
-            urgency="medium",
-            execution_style_preference="taker",
-            order_type_preference="market",
-            time_in_force_preference="IOC",
-            limit_offset_bps_preference=None,
-            max_acceptable_cost_bps=max_cost,
-            policy_reason="independent_entry_guarded_aggressive_fallback",
-            mode="adaptive_entry_guarded_aggressive_fallback",
-            price_style="market",
-            bounded_taker=True,
-            reason="independent_entry_guarded_aggressive_fallback",
+            liquidity_degraded=liquidity_degraded,
+            execution_degraded=execution_degraded,
+            passive_limit_offset_bps=passive_limit_offset_bps,
+            max_cost=max_cost,
         )
     return None
+
+
+def _adaptive_entry_or_scale(
+    *,
+    settings: AATSSettings,
+    book: IndependentBookDecision,
+    edge_strength: Literal["weak", "medium", "strong"],
+    liquidity_degraded: bool,
+    execution_degraded: bool,
+    passive_limit_offset_bps: Decimal,
+    max_cost: float | None,
+) -> IndependentExecutionPolicy:
+    is_scale = book.book_action == "scale_in"
+    label = "scale" if is_scale else "entry"
+    configured_mode = (
+        settings.strategy_hedge_independent_scale_in_execution_mode
+        if is_scale
+        else settings.strategy_hedge_independent_entry_execution_mode
+    )
+    limit_offset = (
+        to_decimal(settings.strategy_hedge_independent_limit_offset_bps_scale_in)
+        if is_scale
+        else to_decimal(settings.strategy_hedge_independent_limit_offset_bps_entry)
+    )
+    if configured_mode != "adaptive":
+        configured_label = "scale_in" if is_scale else "entry"
+        return resolve_execution_policy_from_mode(
+            mode=configured_mode,
+            edge_strength=edge_strength,
+            urgency="low" if configured_mode in {"passive_first", "bounded_limit"} else "medium",
+            limit_offset_bps=limit_offset,
+            max_acceptable_cost_bps=max_cost,
+            policy_reason=f"independent_{configured_label}_configured_{configured_mode}",
+        )
+    if edge_strength == "strong" and not liquidity_degraded and not execution_degraded:
+        return IndependentExecutionPolicy(
+            edge_strength=edge_strength,
+            urgency="medium",
+            execution_style_preference="taker",
+            order_type_preference="market",
+            time_in_force_preference="IOC",
+            limit_offset_bps_preference=None,
+            max_acceptable_cost_bps=max_cost,
+            policy_reason=f"independent_{label}_strong_edge_aggressive",
+            mode=f"adaptive_{label}_strong_edge_aggressive",
+            price_style="market",
+            bounded_taker=True,
+            reason=f"independent_{label}_strong_edge_aggressive",
+        )
+    if bool(settings.strategy_hedge_independent_passive_first_enabled):
+        passive_reason = (
+            f"independent_{label}_guarded_passive_first"
+            if is_scale or not book.weak_edge_report_only
+            else "independent_weak_edge_passive_first_required"
+        )
+        return IndependentExecutionPolicy(
+            edge_strength=edge_strength,
+            urgency="low",
+            execution_style_preference="bounded_limit_ioc",
+            order_type_preference="limit",
+            time_in_force_preference="IOC",
+            limit_offset_bps_preference=passive_limit_offset_bps,
+            max_acceptable_cost_bps=max_cost,
+            policy_reason=passive_reason,
+            mode=f"adaptive_{label}_guarded_passive_first",
+            price_style="limit",
+            passive_first=True,
+            bounded_limit_ioc=True,
+            reason=passive_reason,
+        )
+    return IndependentExecutionPolicy(
+        edge_strength=edge_strength,
+        urgency="medium",
+        execution_style_preference="taker",
+        order_type_preference="market",
+        time_in_force_preference="IOC",
+        limit_offset_bps_preference=None,
+        max_acceptable_cost_bps=max_cost,
+        policy_reason=f"independent_{label}_guarded_aggressive_fallback",
+        mode=f"adaptive_{label}_guarded_aggressive_fallback",
+        price_style="market",
+        bounded_taker=True,
+        reason=f"independent_{label}_guarded_aggressive_fallback",
+    )
 
 
 def _edge_strength(

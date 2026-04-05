@@ -67,8 +67,8 @@ def _market_snapshot(symbol: str, price: str) -> MarketSnapshot:
         bid_size=Decimal("10"),
         ask_size=Decimal("10"),
         volume_24h=Decimal("1000"),
-        kline_15m={"close": price_decimal},
-        kline_1h={"close": price_decimal},
+        kline_15m={"open": price_decimal, "high": price_decimal, "low": price_decimal, "close": price_decimal, "volume": Decimal("100")},
+        kline_1h={"open": price_decimal, "high": price_decimal, "low": price_decimal, "close": price_decimal, "volume": Decimal("400")},
         recent_trades=[],
         orderbook_depth={},
     )

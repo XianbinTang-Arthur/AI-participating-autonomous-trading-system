@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
+from aats.bootstrap.logging import get_logger
 from aats.schemas.market import MarketSnapshot
 from aats.services.portfolio_service.decimals import to_decimal
+
+_logger = get_logger("aats.okx_normalizer")
+
+# (symbol, channel) key for tracking per-instrument candle timestamps.
+_CandleKey = tuple[str, str]
 
 
 def _parse_ms_timestamp(value: str) -> datetime:
@@ -61,18 +68,28 @@ class OKXInstrumentMarketState:
     ticker: OKXTickerState | None = None
     candle_15m: OKXCandleState | None = None
     candle_1h: OKXCandleState | None = None
-    raw_messages: list[dict[str, Any]] = field(default_factory=list)
+    raw_messages: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=50))
 
 
 class OKXMarketSnapshotNormalizer:
     _CANDLE_INTERVALS: dict[str, int] = {
+        "candle1m": 60,
+        "candle3m": 180,
+        "candle5m": 300,
         "candle15m": 900,
+        "candle30m": 1800,
         "candle1H": 3600,
+        "candle2H": 7200,
+        "candle4H": 14400,
+        "candle6H": 21600,
+        "candle12H": 43200,
+        "candle1D": 86400,
+        "candle1W": 604800,
     }
 
     def __init__(self, exchange_name: str = "OKX") -> None:
         self.exchange_name = exchange_name
-        self._last_candle_ts: dict[tuple[str, str], datetime] = {}
+        self._last_candle_ts: dict[_CandleKey, datetime] = {}
         self._detected_gaps: list[CandleGap] = []
 
     def drain_detected_gaps(self) -> list[CandleGap]:
@@ -133,15 +150,26 @@ class OKXMarketSnapshotNormalizer:
         candle_15m_payload: list[str],
         candle_1h_payload: list[str],
     ) -> MarketSnapshot:
+        ticker = self._parse_ticker(symbol=symbol, payload=ticker_payload)
+        sanity_reason = self._sanity_check_ticker(ticker)
+        if sanity_reason is not None:
+            raise ValueError(
+                f"rest_snapshot_ticker_sanity_failed: symbol={symbol} reason={sanity_reason}"
+            )
         state = OKXInstrumentMarketState(
             symbol=symbol,
-            ticker=self._parse_ticker(symbol=symbol, payload=ticker_payload),
+            ticker=ticker,
             candle_15m=self._parse_candle(channel="candle15m", payload=candle_15m_payload),
             candle_1h=self._parse_candle(channel="candle1H", payload=candle_1h_payload),
         )
         snapshot = self._build_snapshot(state)
         if snapshot is None:
-            raise ValueError("unable_to_build_market_snapshot_from_rest_payloads")
+            raise ValueError(
+                f"rest_snapshot_build_failed: symbol={symbol} "
+                f"ticker={'present' if state.ticker else 'missing'} "
+                f"candle_15m={'present' if state.candle_15m else 'missing'} "
+                f"candle_1h={'present' if state.candle_1h else 'missing'}"
+            )
         return snapshot
 
     def _parse_ticker(self, *, symbol: str, payload: dict[str, Any]) -> OKXTickerState:
@@ -157,6 +185,10 @@ class OKXMarketSnapshotNormalizer:
         )
 
     def _parse_candle(self, *, channel: str, payload: list[str]) -> OKXCandleState:
+        if len(payload) < 6:
+            raise ValueError(
+                f"okx_candle_payload_too_short: channel={channel} len={len(payload)}, expected>=6"
+            )
         return OKXCandleState(
             channel=channel,
             snapshot_ts=_parse_ms_timestamp(str(payload[0])),
@@ -193,23 +225,52 @@ class OKXMarketSnapshotNormalizer:
         if state.ticker is None or state.candle_15m is None or state.candle_1h is None:
             return None
 
+        ticker = state.ticker
+        sanity_reason = self._sanity_check_ticker(ticker)
+        if sanity_reason is not None:
+            return None
+
         snapshot_ts = max(
-            state.ticker.snapshot_ts,
+            ticker.snapshot_ts,
             state.candle_15m.snapshot_ts,
             state.candle_1h.snapshot_ts,
         )
+        # Build a minimal orderbook from ticker top-of-book so that
+        # downstream LiquidityAnalyzer has at least one level of depth
+        # rather than operating on an empty dict.
+        orderbook_depth: dict[str, list[list[Decimal]]] = {
+            "bids": [[ticker.best_bid, ticker.bid_size]],
+            "asks": [[ticker.best_ask, ticker.ask_size]],
+        }
         return MarketSnapshot(
             symbol=state.symbol,
             exchange=self.exchange_name,
             snapshot_ts=snapshot_ts,
-            best_bid=state.ticker.best_bid,
-            best_ask=state.ticker.best_ask,
-            last_price=state.ticker.last_price,
-            bid_size=state.ticker.bid_size,
-            ask_size=state.ticker.ask_size,
-            volume_24h=state.ticker.volume_24h,
+            best_bid=ticker.best_bid,
+            best_ask=ticker.best_ask,
+            last_price=ticker.last_price,
+            bid_size=ticker.bid_size,
+            ask_size=ticker.ask_size,
+            volume_24h=ticker.volume_24h,
             kline_15m=state.candle_15m.to_market_kline(),
             kline_1h=state.candle_1h.to_market_kline(),
             recent_trades=[],
-            orderbook_depth={},
+            orderbook_depth=orderbook_depth,
         )
+
+    @staticmethod
+    def _sanity_check_ticker(ticker: OKXTickerState) -> str | None:
+        """Return ``None`` if the ticker is valid, or a reason string if invalid."""
+        if ticker.last_price <= 0:
+            reason = f"last_price_non_positive:{ticker.last_price}"
+            _logger.warning("okx_ticker_sanity_fail: %s symbol=%s", reason, ticker.symbol)
+            return reason
+        if ticker.best_bid <= 0 or ticker.best_ask <= 0:
+            reason = f"bid_ask_non_positive:bid={ticker.best_bid},ask={ticker.best_ask}"
+            _logger.warning("okx_ticker_sanity_fail: %s symbol=%s", reason, ticker.symbol)
+            return reason
+        if ticker.best_bid > ticker.best_ask:
+            reason = f"crossed_spread:bid={ticker.best_bid}>ask={ticker.best_ask}"
+            _logger.warning("okx_ticker_sanity_fail: %s symbol=%s", reason, ticker.symbol)
+            return reason
+        return None

@@ -49,6 +49,20 @@ class InMemoryEventBus(EventBus):
             except Exception as exc:
                 if first_error is None:
                     first_error = exc
+                else:
+                    # All handlers are called regardless of failures, but only the
+                    # first exception is raised.  Log subsequent ones so they are
+                    # visible in diagnostics instead of being silently discarded.
+                    log_event(
+                        self.logger,
+                        "event_handler_error_suppressed",
+                        level="error",
+                        topic=envelope.topic,
+                        key=envelope.key,
+                        handler=getattr(handler, "__qualname__", str(handler)),
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
         if first_error is not None:
             raise first_error
 

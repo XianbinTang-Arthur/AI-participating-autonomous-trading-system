@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from aats.schemas.features import DirectionalBias, RegimeIndicator, VolatilityState
+
 
 @dataclass(frozen=True, slots=True)
 class RegimeClassification:
-    regime_indicator: str
+    regime_indicator: RegimeIndicator
     regime_confidence: float
-    trend_bias: str
+    trend_bias: DirectionalBias
     regime_alignment_score: float
     reasons: list[str]
 
@@ -20,8 +22,8 @@ class RegimeClassifier:
         momentum_1h: float,
         trend_strength_15m: float,
         trend_strength_1h: float,
-        volatility_state_15m: str,
-        volatility_state_1h: str,
+        volatility_state_15m: VolatilityState,
+        volatility_state_1h: VolatilityState,
         liquidity_score: float,
     ) -> RegimeClassification:
         direction_15m = self._direction(momentum_15m)
@@ -84,7 +86,7 @@ class RegimeClassifier:
         )
 
     @staticmethod
-    def _direction(momentum: float) -> str:
+    def _direction(momentum: float) -> DirectionalBias:
         if momentum > 0.0:
             return "long"
         if momentum < 0.0:

@@ -6,13 +6,20 @@ volume non-negative, confirm legality.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from aats.data_platform.validate.report_writer import write_quality_report
+
+
+def _to_utc(dt: datetime) -> datetime:
+    """归一化为 UTC, 防止 DST fold 场景下比较误判."""
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc)
+    return dt
 
 # Timeframe -> expected interval
 _TF_DELTA = {
@@ -56,30 +63,33 @@ def validate_candles(
     invalid_volume = 0
     suspect = 0
 
-    seen_ts: set[str] = set()
-    prev_ts = None
+    seen_ts: set[int] = set()  # 用 UTC epoch 微秒做去重键
+    prev_ts_utc = None
 
     for row in rows:
         ts, o, h, l, c, vol, vol_ccy, vol_quote, confirm = row
 
-        # Duplicate check
-        ts_key = str(ts)
-        if ts_key in seen_ts:
-            duplicates += 1
-        seen_ts.add(ts_key)
+        # 归一化为 UTC，避免 DST fold 误判
+        ts_utc = _to_utc(ts)
 
-        # Order check
-        if prev_ts is not None and ts < prev_ts:
+        # Duplicate check — 用 epoch 微秒比较，消除时区表示差异
+        ts_epoch = int(ts_utc.timestamp() * 1_000_000)
+        if ts_epoch in seen_ts:
+            duplicates += 1
+        seen_ts.add(ts_epoch)
+
+        # Order check — UTC 比较
+        if prev_ts_utc is not None and ts_utc < prev_ts_utc:
             out_of_order += 1
 
-        # Missing interval check
-        if prev_ts is not None and delta:
-            expected = prev_ts + delta
-            if ts > expected:
-                gap_count = int((ts - prev_ts) / delta) - 1
+        # Missing interval check — UTC 比较
+        if prev_ts_utc is not None and delta:
+            expected = prev_ts_utc + delta
+            if ts_utc > expected:
+                gap_count = int((ts_utc - prev_ts_utc) / delta) - 1
                 missing += max(gap_count, 0)
 
-        prev_ts = ts
+        prev_ts_utc = ts_utc
 
         # OHLC validity
         if h < l or o <= 0 or h <= 0 or l <= 0 or c <= 0:

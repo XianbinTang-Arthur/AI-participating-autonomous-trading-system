@@ -1,0 +1,183 @@
+"""Pre-recovery exchange order reconciliation.
+
+Before the main recovery flow runs, this module queries the exchange for
+orders stuck in CREATED / SUBMITTING state (no venue_order_id).  If the
+exchange can definitively confirm or deny the order, the local state is
+updated so that downstream recovery sees clean data and avoids an
+unnecessary halt.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Protocol
+
+from aats.bootstrap.logging import get_logger, log_event
+
+logger = get_logger("aats.recovery.exchange_reconciler")
+
+# OKX order states that map to our terminal states.
+_OKX_TERMINAL_STATES = {"filled", "canceled", "mmp_canceled"}
+_OKX_LIVE_STATES = {"live", "partially_filled"}
+
+
+class ExchangeOrderQuerier(Protocol):
+    """Minimal interface to query a single order from the exchange."""
+
+    async def get_order(
+        self, *, symbol: str, client_order_id: str | None = None,
+    ) -> dict[str, Any]: ...
+
+
+class OrderStateUpdater(Protocol):
+    """Minimal interface to update a persisted order row."""
+
+    def update_order_state(
+        self, *, client_order_id: str, updates: dict[str, Any],
+    ) -> bool: ...
+
+
+async def reconcile_stuck_orders(
+    *,
+    open_orders: list[dict[str, Any]],
+    exchange_client: ExchangeOrderQuerier | None,
+    order_repo: Any | None,
+) -> tuple[int, int, list[str]]:
+    """Attempt to resolve stuck CREATED/SUBMITTING orders via exchange query.
+
+    Returns:
+        (resolved_count, unreachable_count, notes)
+    """
+    if exchange_client is None or order_repo is None:
+        return 0, 0, ["exchange_reconciler_skipped_no_client"]
+
+    update_fn = getattr(order_repo, "update_order_state", None)
+    if not callable(update_fn):
+        return 0, 0, ["exchange_reconciler_skipped_no_update_fn"]
+
+    stuck_orders = _collect_stuck_orders(open_orders)
+    if not stuck_orders:
+        return 0, 0, []
+
+    resolved = 0
+    unreachable = 0
+    notes: list[str] = []
+
+    for row in stuck_orders:
+        client_order_id = str(row.get("client_order_id") or row.get("order_id") or "")
+        symbol = str(row.get("symbol") or "")
+        if not client_order_id or not symbol:
+            continue
+
+        try:
+            response = await exchange_client.get_order(
+                symbol=symbol, client_order_id=client_order_id,
+            )
+        except Exception as exc:
+            unreachable += 1
+            log_event(
+                logger,
+                "exchange_order_query_failed",
+                level="warning",
+                client_order_id=client_order_id,
+                symbol=symbol,
+                error=str(exc),
+            )
+            continue
+
+        new_state = _interpret_exchange_response(response, client_order_id=client_order_id)
+        if new_state is None:
+            unreachable += 1
+            continue
+
+        try:
+            update_fn(client_order_id=client_order_id, updates=new_state)
+            resolved += 1
+            log_event(
+                logger,
+                "exchange_order_reconciled",
+                client_order_id=client_order_id,
+                symbol=symbol,
+                resolved_status=new_state.get("state"),
+            )
+        except Exception as exc:
+            unreachable += 1
+            log_event(
+                logger,
+                "exchange_order_update_failed",
+                level="warning",
+                client_order_id=client_order_id,
+                error=str(exc),
+            )
+
+    if resolved:
+        notes.append(f"exchange_reconciled_stuck_orders:{resolved}")
+    if unreachable:
+        notes.append(f"exchange_unreachable_stuck_orders:{unreachable}")
+    return resolved, unreachable, notes
+
+
+def _collect_stuck_orders(open_orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Filter for orders in CREATED/SUBMITTING with no venue_order_id."""
+    stuck = []
+    for row in open_orders:
+        state = str(row.get("state") or "").upper()
+        if state not in {"CREATED", "SUBMITTING"}:
+            continue
+        if row.get("venue_order_id"):
+            continue
+        stuck.append(row)
+    return stuck
+
+
+def _interpret_exchange_response(
+    response: dict[str, Any],
+    *,
+    client_order_id: str,
+) -> dict[str, Any] | None:
+    """Map exchange API response to a local state update dict.
+
+    Returns None if the response is ambiguous (exchange error, network issue).
+    """
+    code = str(response.get("code", ""))
+    data = response.get("data")
+
+    # OKX returns code "0" for success.
+    if code == "0" and isinstance(data, list) and data:
+        order_data = data[0]
+        okx_state = str(order_data.get("state", "")).lower()
+        venue_order_id = str(order_data.get("ordId", "")) or None
+
+        if okx_state in _OKX_LIVE_STATES:
+            return {
+                "state": "SUBMITTED",
+                "venue_order_id": venue_order_id,
+            }
+        if okx_state in _OKX_TERMINAL_STATES:
+            mapped = "FILLED" if okx_state == "filled" else "CANCELED"
+            return {
+                "state": mapped,
+                "venue_order_id": venue_order_id,
+            }
+        # Unknown exchange state — don't touch.
+        log_event(
+            logger,
+            "exchange_order_unknown_state",
+            level="warning",
+            client_order_id=client_order_id,
+            okx_state=okx_state,
+        )
+        return None
+
+    # OKX code "51603" = "Order does not exist" — order never reached exchange.
+    if code == "51603" or (code != "0" and "does not exist" in str(response).lower()):
+        return {"state": "FAILED"}
+
+    # Any other error — ambiguous, don't resolve.
+    log_event(
+        logger,
+        "exchange_order_ambiguous_response",
+        level="warning",
+        client_order_id=client_order_id,
+        response_code=code,
+    )
+    return None

@@ -368,9 +368,11 @@ class TestExecutionRecovery(unittest.TestCase):
 
         artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=1_000.0))
 
-        self.assertTrue(kill_switch.halted)
-        self.assertFalse(artifacts.status.safe_to_trade)
-        self.assertIn("stored_snapshot_differs_from_fill_reconstruction", artifacts.status.notes)
+        # P0-B auto-heal: divergence is automatically resolved by adopting the
+        # fill-derived reconstruction, so the system does NOT halt.
+        self.assertFalse(kill_switch.halted)
+        self.assertIn("auto_healed_portfolio_divergence", ":".join(artifacts.status.notes))
+        self.assertIn("stored_snapshot_replaced_by_fill_reconstruction", artifacts.status.notes)
 
     def test_recovery_marks_unknown_derivatives_position_as_review_required(self) -> None:
         reconciliation_repo = InMemoryReconciliationRepository()

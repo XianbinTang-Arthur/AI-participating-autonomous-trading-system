@@ -256,7 +256,7 @@ def build_artifact_index(
     with_manifest = sum(1 for e in entries if e.get("has_manifest"))
     valid_manifests = sum(
         1 for e in entries
-        if e.get("manifest_validation", {}).get("is_valid")
+        if (e.get("manifest_validation") or {}).get("is_valid")
     )
 
     index: dict[str, Any] = {

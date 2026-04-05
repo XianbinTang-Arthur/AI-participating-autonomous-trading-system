@@ -1,0 +1,42 @@
+{
+  "batch_name": "independent_de_risk_edge_15m",
+  "description": "Sweep de_risk_net_edge_bps for independent family on BTC-USDT-SWAP 15m",
+  "family": "independent",
+  "symbol": "BTC-USDT-SWAP",
+  "timeframe": "15m",
+  "dataset_version": "v1.0",
+  "start": "2025-12-07",
+  "end": "2026-04-04",
+  "experiments": [
+    {
+      "label": "derisk_0.5",
+      "params": {
+        "de_risk_net_edge_bps": 0.5
+      }
+    },
+    {
+      "label": "derisk_1.0",
+      "params": {
+        "de_risk_net_edge_bps": 1.0
+      }
+    },
+    {
+      "label": "derisk_2.0",
+      "params": {
+        "de_risk_net_edge_bps": 2.0
+      }
+    },
+    {
+      "label": "derisk_3.0",
+      "params": {
+        "de_risk_net_edge_bps": 3.0
+      }
+    },
+    {
+      "label": "derisk_5.0",
+      "params": {
+        "de_risk_net_edge_bps": 5.0
+      }
+    }
+  ]
+}

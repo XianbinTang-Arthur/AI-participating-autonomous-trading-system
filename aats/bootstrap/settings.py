@@ -360,6 +360,16 @@ class AATSSettings(BaseSettings):
     strategy_position_uncertain_reduce_fraction: float = 0.65
     strategy_cost_guard_enabled: bool = True
     strategy_alpha_edge_bps_scale: float = 100.0
+    strategy_signal_edge_scale_bps: float | None = Field(
+        default=None,
+        description=(
+            "RDP 研究层 composite-score → signal_edge_bps 缩放系数。"
+            "当设置为正数时，compute_signal_edge_bps() 会额外计算 "
+            "score_based_edge = composite_score × scale，并取 max(component_edge, score_edge)。"
+            "None 或 0 表示仅使用传统 alpha-based 路径。"
+            "由 active_parameters 从 signal_edge_scale_bps 自动注入。"
+        ),
+    )
     strategy_expected_slippage_bps_fraction: float = 0.28
     strategy_edge_noise_buffer_bps: float = 4.0
     strategy_min_net_edge_bps: float = 4.0

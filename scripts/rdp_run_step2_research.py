@@ -62,6 +62,44 @@ _SYMBOL = "BTC-USDT-SWAP"
 # 按任务书 §8 的固定执行顺序：independent/1H → directional/15m → directional/1H
 # independent/15m 已在 Step 1 完成，Step 2 不重复
 _CALIBRATION_DEFS: dict[str, dict[str, Any]] = {
+    # ── Step 3 扩展 independent/15m 校准（补齐 Step 1 未覆盖的参数）──
+    "independent_15m_expanded": {
+        "family": "independent",
+        "timeframe": "15m",
+        "description": "Step 3: independent / 15m expanded calibration (entry/close/risk/timing/cost)",
+        "batches": [
+            {
+                "key": "entry_threshold",
+                "file": "configs/research_batches/independent_entry_threshold_15m.json",
+                "description": "Entry threshold sensitivity test",
+            },
+            {
+                "key": "close_threshold",
+                "file": "configs/research_batches/independent_close_threshold_15m.json",
+                "description": "Close threshold sensitivity test",
+            },
+            {
+                "key": "de_risk_edge",
+                "file": "configs/research_batches/independent_de_risk_edge_15m.json",
+                "description": "De-risk net edge threshold sensitivity test",
+            },
+            {
+                "key": "failed_thesis_edge",
+                "file": "configs/research_batches/independent_failed_thesis_edge_15m.json",
+                "description": "Failed thesis net edge threshold sensitivity test",
+            },
+            {
+                "key": "timing",
+                "file": "configs/research_batches/independent_timing_15m.json",
+                "description": "Hold time and cooldown sensitivity test",
+            },
+            {
+                "key": "cost_buffer",
+                "file": "configs/research_batches/independent_cost_buffer_15m.json",
+                "description": "Slippage/execution buffer sensitivity test",
+            },
+        ],
+    },
     "independent_1h": {
         "family": "independent",
         "timeframe": "1H",
@@ -81,6 +119,44 @@ _CALIBRATION_DEFS: dict[str, dict[str, Any]] = {
                 "key": "confirm_ticks",
                 "file": "configs/research_batches/independent_confirm_ticks_1h.json",
                 "description": "Confirmation ticks sensitivity test",
+            },
+        ],
+    },
+    # ── Step 3 扩展 independent/1H 校准 ──
+    "independent_1h_expanded": {
+        "family": "independent",
+        "timeframe": "1H",
+        "description": "Step 3: independent / 1H expanded calibration (entry/close/risk/timing/cost)",
+        "batches": [
+            {
+                "key": "entry_threshold",
+                "file": "configs/research_batches/independent_entry_threshold_1h.json",
+                "description": "Entry threshold sensitivity test",
+            },
+            {
+                "key": "close_threshold",
+                "file": "configs/research_batches/independent_close_threshold_1h.json",
+                "description": "Close threshold sensitivity test",
+            },
+            {
+                "key": "de_risk_edge",
+                "file": "configs/research_batches/independent_de_risk_edge_1h.json",
+                "description": "De-risk net edge threshold sensitivity test",
+            },
+            {
+                "key": "failed_thesis_edge",
+                "file": "configs/research_batches/independent_failed_thesis_edge_1h.json",
+                "description": "Failed thesis net edge threshold sensitivity test",
+            },
+            {
+                "key": "timing",
+                "file": "configs/research_batches/independent_timing_1h.json",
+                "description": "Hold time and cooldown sensitivity test",
+            },
+            {
+                "key": "cost_buffer",
+                "file": "configs/research_batches/independent_cost_buffer_1h.json",
+                "description": "Slippage/execution buffer sensitivity test",
             },
         ],
     },
@@ -925,6 +1001,307 @@ def _recommend_net_edge_threshold() -> dict[str, Any]:
     }
 
 
+# ---------- Phase 1 扩展参数推荐 ----------
+
+
+def _recommend_entry_threshold(experiments: list[dict[str, Any]]) -> dict[str, Any]:
+    """规则化推荐 entry_threshold。
+
+    规则：选择 positive edge 条件下 opening_count 最多的阈值。
+    阈值过低会产生噪声交易，过高会错过机会。
+    """
+    if not experiments:
+        return {"value": 0.40, "confidence": "low",
+                "reason": "Entry threshold batch 未运行或无数据, 保留默认值 0.40"}
+
+    sorted_exps = sorted(
+        experiments,
+        key=lambda e: e.get("params", {}).get("entry_threshold", 0),
+    )
+    viable = [e for e in sorted_exps if (e.get("mean_expected_edge_bps") or 0) > 0]
+
+    if not viable:
+        best = max(sorted_exps, key=lambda e: e.get("mean_expected_edge_bps") or -999)
+        val = best.get("params", {}).get("entry_threshold", 0.40)
+        edge = best.get("mean_expected_edge_bps") or 0
+        return {
+            "value": val, "confidence": "low",
+            "reason": (
+                f"No entry_threshold achieves positive edge. "
+                f"Least negative ({val}) has edge {edge:.2f} bps."
+            ),
+        }
+
+    # 在 viable 中找最优平衡：positive_edge_ratio 最高且 opening 合理
+    best = max(viable, key=lambda e: (
+        e.get("positive_edge_ratio", 0),
+        e.get("opening_count", 0),
+    ))
+
+    val = best.get("params", {}).get("entry_threshold", 0.40)
+    edge = best.get("mean_expected_edge_bps", 0) or 0
+    opens = best.get("opening_count", 0)
+    pos_ratio = best.get("positive_edge_ratio", 0)
+    confidence = "high" if pos_ratio > 0.7 else ("medium" if pos_ratio > 0.4 else "low")
+
+    summary = [(
+        e.get("params", {}).get("entry_threshold"),
+        e.get("opening_count", 0),
+        round(e.get("mean_expected_edge_bps") or 0, 2),
+    ) for e in sorted_exps]
+
+    return {
+        "value": val, "confidence": confidence,
+        "reason": (
+            f"entry_threshold={val} 在 positive edge 条件下表现最优 "
+            f"(edge={edge:.2f}bps, opens={opens}, pos_ratio={pos_ratio:.1%}). "
+            f"各阈值: {summary}."
+        ),
+    }
+
+
+def _recommend_close_threshold(experiments: list[dict[str, Any]]) -> dict[str, Any]:
+    """规则化推荐 close_threshold。
+
+    规则：close 阈值过低会持仓过久（亏损扩大），过高会过早退出（利润不充分）。
+    选择 positive_edge_ratio 最高的值。
+    """
+    if not experiments:
+        return {"value": 0.15, "confidence": "low",
+                "reason": "Close threshold batch 未运行或无数据, 保留默认值 0.15"}
+
+    sorted_exps = sorted(
+        experiments,
+        key=lambda e: e.get("params", {}).get("close_threshold", 0),
+    )
+    viable = [e for e in sorted_exps if (e.get("mean_expected_edge_bps") or 0) > 0]
+
+    if not viable:
+        best = max(sorted_exps, key=lambda e: e.get("mean_expected_edge_bps") or -999)
+        val = best.get("params", {}).get("close_threshold", 0.15)
+        edge = best.get("mean_expected_edge_bps") or 0
+        return {
+            "value": val, "confidence": "low",
+            "reason": f"No close_threshold achieves positive edge. Best ({val}) edge {edge:.2f} bps.",
+        }
+
+    best = max(viable, key=lambda e: (
+        e.get("positive_edge_ratio", 0),
+        e.get("mean_expected_edge_bps") or 0,
+    ))
+
+    val = best.get("params", {}).get("close_threshold", 0.15)
+    edge = best.get("mean_expected_edge_bps", 0) or 0
+    opens = best.get("opening_count", 0)
+    pos_ratio = best.get("positive_edge_ratio", 0)
+    confidence = "high" if pos_ratio > 0.7 else ("medium" if pos_ratio > 0.4 else "low")
+
+    summary = [(
+        e.get("params", {}).get("close_threshold"),
+        e.get("opening_count", 0),
+        round(e.get("mean_expected_edge_bps") or 0, 2),
+    ) for e in sorted_exps]
+
+    return {
+        "value": val, "confidence": confidence,
+        "reason": (
+            f"close_threshold={val} 综合 edge 和 pos_ratio 最优 "
+            f"(edge={edge:.2f}bps, opens={opens}, pos_ratio={pos_ratio:.1%}). "
+            f"各阈值: {summary}."
+        ),
+    }
+
+
+def _recommend_de_risk_edge(experiments: list[dict[str, Any]]) -> dict[str, Any]:
+    """规则化推荐 de_risk_net_edge_bps。
+
+    规则：de_risk 阈值越高越保守（更快触发降风险）。
+    选择在 positive edge 条件下 opening_count 不显著下降的最高值。
+    """
+    if not experiments:
+        return {"value": 2.0, "confidence": "low",
+                "reason": "De-risk edge batch 未运行或无数据, 保留默认值 2.0"}
+
+    sorted_exps = sorted(
+        experiments,
+        key=lambda e: e.get("params", {}).get("de_risk_net_edge_bps", 0),
+    )
+
+    # de_risk 在 replay 层目前不直接影响 opening/edge（它是持仓期风控），
+    # 但通过 net_edge 阈值间接影响。选择与 net_edge 最匹配的值。
+    viable = [e for e in sorted_exps if (e.get("mean_expected_edge_bps") or 0) > 0]
+
+    if not viable:
+        return {"value": 2.0, "confidence": "low",
+                "reason": "No de_risk value achieves positive edge. 保留默认值 2.0."}
+
+    # 以最宽松值（最低 de_risk）的开仓数为基线，向上搜索最保守的值
+    recommended = viable[0]
+    baseline_opens = recommended.get("opening_count", 0)
+    for e in viable[1:]:
+        e_opens = e.get("opening_count", 0)
+        if baseline_opens > 0 and (baseline_opens - e_opens) / baseline_opens < 0.30:
+            recommended = e  # 选更高（更保守）的 de_risk
+
+    val = recommended.get("params", {}).get("de_risk_net_edge_bps", 2.0)
+    edge = recommended.get("mean_expected_edge_bps", 0) or 0
+    opens = recommended.get("opening_count", 0)
+    # P2-2: 动态计算置信度（与其他推荐函数对齐）
+    pos_ratio = recommended.get("positive_edge_ratio", 0)
+    confidence = "high" if pos_ratio > 0.7 else ("medium" if pos_ratio > 0.4 else "low")
+
+    return {
+        "value": val, "confidence": confidence,
+        "reason": (
+            f"de_risk={val} bps: opening 不显著下降前提下最保守 "
+            f"(edge={edge:.2f}bps, opens={opens}, pos_ratio={pos_ratio:.1%}, "
+            f"baseline_opens={baseline_opens})."
+        ),
+    }
+
+
+def _recommend_failed_thesis_edge(experiments: list[dict[str, Any]]) -> dict[str, Any]:
+    """规则化推荐 failed_thesis_net_edge_bps。
+
+    规则：failed_thesis 越低（更负）越宽松，越高越激进（更快退出）。
+    选择在 positive edge 条件下不过度减少开仓次数的最高（最激进）值。
+    约束: 必须 <= de_risk_net_edge_bps（由 __post_init__ 强制执行）。
+    """
+    if not experiments:
+        return {"value": -1.0, "confidence": "low",
+                "reason": "Failed thesis edge batch 未运行或无数据, 保留默认值 -1.0"}
+
+    sorted_exps = sorted(
+        experiments,
+        key=lambda e: e.get("params", {}).get("failed_thesis_net_edge_bps", 0),
+    )
+
+    viable = [e for e in sorted_exps if (e.get("mean_expected_edge_bps") or 0) > 0]
+
+    if not viable:
+        return {"value": -1.0, "confidence": "low",
+                "reason": "No failed_thesis value achieves positive edge. 保留默认值 -1.0."}
+
+    # 以最宽松值（最低/最负 failed_thesis）的开仓数为基线
+    recommended = viable[0]
+    baseline_opens = recommended.get("opening_count", 0)
+    for e in viable[1:]:
+        e_opens = e.get("opening_count", 0)
+        if baseline_opens > 0 and (baseline_opens - e_opens) / baseline_opens < 0.30:
+            recommended = e  # 选更高（更激进）的 failed_thesis
+
+    val = recommended.get("params", {}).get("failed_thesis_net_edge_bps", -1.0)
+    edge = recommended.get("mean_expected_edge_bps", 0) or 0
+    opens = recommended.get("opening_count", 0)
+    pos_ratio = recommended.get("positive_edge_ratio", 0)
+    confidence = "high" if pos_ratio > 0.7 else ("medium" if pos_ratio > 0.4 else "low")
+
+    return {
+        "value": val, "confidence": confidence,
+        "reason": (
+            f"failed_thesis={val} bps: opening 不显著下降前提下最激进 "
+            f"(edge={edge:.2f}bps, opens={opens}, pos_ratio={pos_ratio:.1%}, "
+            f"baseline_opens={baseline_opens})."
+        ),
+    }
+
+
+def _recommend_timing(experiments: list[dict[str, Any]]) -> dict[str, Any]:
+    """规则化推荐 min_hold_seconds 和 rebalance_cooldown_seconds。
+
+    规则：hold 和 cooldown 越长越保守，选择 positive edge 最高的组合。
+    """
+    if not experiments:
+        return {
+            "min_hold_seconds": {"value": 300.0, "confidence": "low",
+                                 "reason": "Timing batch 未运行或无数据, 保留默认值"},
+            "rebalance_cooldown_seconds": {"value": 120.0, "confidence": "low",
+                                           "reason": "Timing batch 未运行或无数据, 保留默认值"},
+        }
+
+    viable = [e for e in experiments if (e.get("mean_expected_edge_bps") or 0) > 0]
+
+    if not viable:
+        best = max(experiments, key=lambda e: e.get("mean_expected_edge_bps") or -999)
+        hold = best.get("params", {}).get("min_hold_seconds", 300.0)
+        cool = best.get("params", {}).get("rebalance_cooldown_seconds", 120.0)
+        return {
+            "min_hold_seconds": {"value": hold, "confidence": "low",
+                                 "reason": "No timing combo achieves positive edge."},
+            "rebalance_cooldown_seconds": {"value": cool, "confidence": "low",
+                                           "reason": "No timing combo achieves positive edge."},
+        }
+
+    best = max(viable, key=lambda e: (
+        e.get("positive_edge_ratio", 0),
+        e.get("mean_expected_edge_bps") or 0,
+    ))
+
+    hold = best.get("params", {}).get("min_hold_seconds", 300.0)
+    cool = best.get("params", {}).get("rebalance_cooldown_seconds", 120.0)
+    edge = best.get("mean_expected_edge_bps", 0) or 0
+    pos_ratio = best.get("positive_edge_ratio", 0)
+    confidence = "high" if pos_ratio > 0.7 else ("medium" if pos_ratio > 0.4 else "low")
+
+    return {
+        "min_hold_seconds": {
+            "value": hold, "confidence": confidence,
+            "reason": f"hold={hold}s + cooldown={cool}s 组合在 positive edge 下表现最优 (edge={edge:.2f}bps).",
+        },
+        "rebalance_cooldown_seconds": {
+            "value": cool, "confidence": confidence,
+            "reason": f"hold={hold}s + cooldown={cool}s 组合在 positive edge 下表现最优 (edge={edge:.2f}bps).",
+        },
+    }
+
+
+def _recommend_cost_buffers(experiments: list[dict[str, Any]]) -> dict[str, Any]:
+    """规则化推荐 expected_slippage_buffer_bps 和 expected_execution_buffer_bps。"""
+    if not experiments:
+        return {
+            "expected_slippage_buffer_bps": {"value": 0.5, "confidence": "low",
+                                             "reason": "Cost buffer batch 未运行或无数据"},
+            "expected_execution_buffer_bps": {"value": 0.5, "confidence": "low",
+                                              "reason": "Cost buffer batch 未运行或无数据"},
+        }
+
+    viable = [e for e in experiments if (e.get("mean_expected_edge_bps") or 0) > 0]
+
+    if not viable:
+        best = max(experiments, key=lambda e: e.get("mean_expected_edge_bps") or -999)
+        slip = best.get("params", {}).get("expected_slippage_buffer_bps", 0.5)
+        exec_buf = best.get("params", {}).get("expected_execution_buffer_bps", 0.5)
+        return {
+            "expected_slippage_buffer_bps": {"value": slip, "confidence": "low",
+                                             "reason": "No buffer combo achieves positive edge."},
+            "expected_execution_buffer_bps": {"value": exec_buf, "confidence": "low",
+                                              "reason": "No buffer combo achieves positive edge."},
+        }
+
+    # 选 positive edge 最高且 buffer 不为零的组合（有 buffer 更保守）
+    best = max(viable, key=lambda e: (
+        e.get("positive_edge_ratio", 0),
+        e.get("mean_expected_edge_bps") or 0,
+    ))
+
+    slip = best.get("params", {}).get("expected_slippage_buffer_bps", 0.5)
+    exec_buf = best.get("params", {}).get("expected_execution_buffer_bps", 0.5)
+    edge = best.get("mean_expected_edge_bps", 0) or 0
+    pos_ratio = best.get("positive_edge_ratio", 0)
+    confidence = "high" if pos_ratio > 0.7 else ("medium" if pos_ratio > 0.4 else "low")
+
+    return {
+        "expected_slippage_buffer_bps": {
+            "value": slip, "confidence": confidence,
+            "reason": f"slippage_buf={slip}, exec_buf={exec_buf} 组合 edge={edge:.2f}bps, pos_ratio={pos_ratio:.1%}.",
+        },
+        "expected_execution_buffer_bps": {
+            "value": exec_buf, "confidence": confidence,
+            "reason": f"slippage_buf={slip}, exec_buf={exec_buf} 组合 edge={edge:.2f}bps, pos_ratio={pos_ratio:.1%}.",
+        },
+    }
+
+
 def _generate_single_ft_recommendations(
     all_rows: list[dict[str, Any]],
     calibration_result: dict[str, Any],
@@ -973,6 +1350,36 @@ def _generate_single_ft_recommendations(
         clamp_name = batch_names.get("return_clamp", "")
         clamp_exps = _get_experiments_by_batch(ft_rows, clamp_name) if clamp_name else []
         rec["directional_return_clamp_bps"] = _recommend_return_clamp(clamp_exps)
+
+    # ── Phase 1 扩展参数推荐（independent 家族）──
+    if family == "independent":
+        entry_name = batch_names.get("entry_threshold", "")
+        entry_exps = _get_experiments_by_batch(ft_rows, entry_name) if entry_name else []
+        rec["entry_threshold"] = _recommend_entry_threshold(entry_exps)
+
+        close_name = batch_names.get("close_threshold", "")
+        close_exps = _get_experiments_by_batch(ft_rows, close_name) if close_name else []
+        rec["close_threshold"] = _recommend_close_threshold(close_exps)
+
+        derisk_name = batch_names.get("de_risk_edge", "")
+        derisk_exps = _get_experiments_by_batch(ft_rows, derisk_name) if derisk_name else []
+        rec["de_risk_net_edge_bps"] = _recommend_de_risk_edge(derisk_exps)
+
+        ft_edge_name = batch_names.get("failed_thesis_edge", "")
+        ft_edge_exps = _get_experiments_by_batch(ft_rows, ft_edge_name) if ft_edge_name else []
+        rec["failed_thesis_net_edge_bps"] = _recommend_failed_thesis_edge(ft_edge_exps)
+
+        timing_name = batch_names.get("timing", "")
+        timing_exps = _get_experiments_by_batch(ft_rows, timing_name) if timing_name else []
+        timing_rec = _recommend_timing(timing_exps)
+        rec["min_hold_seconds"] = timing_rec["min_hold_seconds"]
+        rec["rebalance_cooldown_seconds"] = timing_rec["rebalance_cooldown_seconds"]
+
+        cost_buf_name = batch_names.get("cost_buffer", "")
+        cost_buf_exps = _get_experiments_by_batch(ft_rows, cost_buf_name) if cost_buf_name else []
+        cost_buf_rec = _recommend_cost_buffers(cost_buf_exps)
+        rec["expected_slippage_buffer_bps"] = cost_buf_rec["expected_slippage_buffer_bps"]
+        rec["expected_execution_buffer_bps"] = cost_buf_rec["expected_execution_buffer_bps"]
 
     return rec
 

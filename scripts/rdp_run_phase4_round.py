@@ -106,6 +106,14 @@ def _run_single_execution_realism(
     log.info("  CMD: %s", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True)
 
+    # 始终记录 stderr 以便调试
+    if proc.stderr:
+        stderr_text = proc.stderr.decode("utf-8", errors="replace").strip()
+        if proc.returncode != 0 and stderr_text:
+            log.error("  subprocess stderr (last 1000 chars):\n%s", stderr_text[-1000:])
+        elif stderr_text:
+            log.debug("  subprocess stderr (last 500 chars):\n%s", stderr_text[-500:])
+
     # 发现新目录
     new_dirs = _list_subdirs(artifact_root) - existing
     if not new_dirs:
@@ -209,7 +217,7 @@ def main() -> None:
 
     started_at = datetime.now(timezone.utc).isoformat()
     round_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
-    artifact_root = pathlib.Path(args.artifact_root)
+    artifact_root = pathlib.Path(args.artifact_root).resolve()
     round_dir = artifact_root / round_id
     per_combo_root = round_dir / "per_combo"
 
@@ -312,6 +320,11 @@ def main() -> None:
         output_path=round_dir / "phase4_execution_realism_conclusion.md",
     )
 
+    # ---- 统计 ----
+    n_ok = sum(1 for r in results if r["status"] == "succeeded")
+    n_partial = sum(1 for r in results if r["status"] == "partial_success")
+    n_fail = sum(1 for r in results if r["status"] == "failed")
+
     # ---- Manifest ----
     finished_at = datetime.now(timezone.utc).isoformat()
     manifest = {
@@ -322,6 +335,11 @@ def main() -> None:
         "window": {"start": args.start, "end": args.end},
         "taker_fee_bps": args.taker_fee_bps,
         "model_version": "v1_bar_proxy",
+        "overall_status": (
+            "succeeded" if n_fail == 0
+            else "failed" if (n_ok + n_partial) == 0
+            else "partial_success"
+        ),
         "combos": [
             {
                 "key": r["key"],
@@ -341,9 +359,6 @@ def main() -> None:
     log.info("Wrote manifest -> %s", manifest_path)
 
     # ---- 最终汇总 ----
-    n_ok = sum(1 for r in results if r["status"] == "succeeded")
-    n_partial = sum(1 for r in results if r["status"] == "partial_success")
-    n_fail = sum(1 for r in results if r["status"] == "failed")
 
     log.info("")
     log.info("=" * 60)

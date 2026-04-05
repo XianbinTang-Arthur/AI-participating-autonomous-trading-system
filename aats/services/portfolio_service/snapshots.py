@@ -167,6 +167,4 @@ class PortfolioSnapshotBuilder:
         if "-" not in symbol:
             return symbol or None, None
         parts = symbol.split("-")
-        if len(parts) >= 2:
-            return parts[0] or None, parts[1] or None
-        return None, None
+        return parts[0] or None, parts[1] or None

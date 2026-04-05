@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Literal
+
+log = logging.getLogger(__name__)
 
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.base import EventBus
@@ -86,6 +89,10 @@ class ExecutionPlanner:
         normalized_delta_qty = to_decimal(delta_qty)
         resolved_position_mode = position_mode if position_mode in {"net_mode", "long_short_mode"} else None
         if product_type == "derivatives" and resolved_position_mode == "long_short_mode":
+            log.debug(
+                "build_plan skip: derivatives long_short_mode 应走 build_leg_plan 路径 | symbol=%s decision=%s",
+                symbol, decision_id,
+            )
             return None
         normalized_approved_target_position_qty, normalized_delta_qty = self._normalize_delta_to_instrument_rule(
             symbol=symbol,
@@ -95,6 +102,10 @@ class ExecutionPlanner:
             instrument_rule=instrument_rule,
         )
         if abs(normalized_delta_qty) < EPSILON_DECIMAL_12:
+            log.warning(
+                "build_plan skip: delta_qty 量化后为零 | symbol=%s decision=%s raw_delta=%s normalized=%s",
+                symbol, decision_id, delta_qty, normalized_delta_qty,
+            )
             return None
 
         normalized_urgency = urgency if urgency in {"low", "medium", "high"} else "medium"
@@ -237,15 +248,31 @@ class ExecutionPlanner:
             instrument=instrument_rule,
         )
         if abs(normalized_delta_qty) < EPSILON_DECIMAL_12:
+            log.warning(
+                "normalize_delta skip: 量化后 delta 为零 | symbol=%s raw_delta=%s normalized=%s",
+                symbol, delta_qty, normalized_delta_qty,
+            )
             return current_position_qty, Decimal("0")
         if minimum_delta_qty > EPSILON_DECIMAL_12 and abs(normalized_delta_qty) + EPSILON_DECIMAL_12 < minimum_delta_qty:
+            log.warning(
+                "normalize_delta skip: delta 低于交易所最小量 | symbol=%s normalized=%s minimum=%s",
+                symbol, normalized_delta_qty, minimum_delta_qty,
+            )
             return current_position_qty, Decimal("0")
         return current_position_qty + normalized_delta_qty, normalized_delta_qty
 
     def build_intent(self, *, plan: ExecutionPlan) -> OrderIntent | None:
         if abs(plan.delta_qty) < EPSILON_DECIMAL_12:
+            log.warning(
+                "build_intent skip: delta_qty 低于 epsilon | symbol=%s decision=%s delta=%s",
+                plan.symbol, plan.decision_id, plan.delta_qty,
+            )
             return None
         if plan.product_type == "derivatives" and plan.position_mode == "long_short_mode":
+            log.debug(
+                "build_intent skip: derivatives long_short_mode 应走 build_leg_intent 路径 | symbol=%s decision=%s",
+                plan.symbol, plan.decision_id,
+            )
             return None
 
         quantity = abs(plan.delta_qty)
@@ -353,9 +380,17 @@ class ExecutionPlanner:
     ) -> LegExecutionPlan | None:
         normalized_quantity = to_decimal(quantity)
         if normalized_quantity <= EPSILON_DECIMAL_12:
+            log.warning(
+                "build_leg_plan skip: quantity 低于 epsilon | symbol=%s side=%s pos_side=%s qty=%s",
+                symbol, side, pos_side, quantity,
+            )
             return None
         resolved_position_mode = position_mode if position_mode in {"net_mode", "long_short_mode"} else None
         if product_type != "derivatives" or resolved_position_mode != "long_short_mode":
+            log.debug(
+                "build_leg_plan skip: 非 derivatives long_short_mode | symbol=%s product=%s mode=%s",
+                symbol, product_type, position_mode,
+            )
             return None
         normalized_quantity = self._normalize_leg_quantity_to_instrument_rule(
             symbol=symbol,
@@ -363,6 +398,10 @@ class ExecutionPlanner:
             instrument_rule=instrument_rule,
         )
         if normalized_quantity <= EPSILON_DECIMAL_12:
+            log.warning(
+                "build_leg_plan skip: 合约规格量化后 quantity 为零 | symbol=%s side=%s pos_side=%s raw_qty=%s",
+                symbol, side, pos_side, quantity,
+            )
             return None
         resolved_position_intent = position_intent or position_intent_from_leg_intent(
             side=side,
@@ -539,6 +578,10 @@ class ExecutionPlanner:
 
     def build_leg_intent(self, *, plan: LegExecutionPlan) -> LegOrderIntent | None:
         if plan.quantity <= EPSILON_DECIMAL_12:
+            log.warning(
+                "build_leg_intent skip: quantity 低于 epsilon | symbol=%s decision=%s side=%s pos_side=%s action=%s qty=%s",
+                plan.symbol, plan.decision_id, plan.side, plan.pos_side, plan.action, plan.quantity,
+            )
             return None
         return LegOrderIntent(
             leg_intent_id=plan.leg_intent_id,

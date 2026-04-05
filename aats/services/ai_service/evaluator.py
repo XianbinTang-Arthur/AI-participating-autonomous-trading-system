@@ -9,6 +9,9 @@ from aats.schemas.reconciliation import ReconciliationReport
 
 
 class AIEvaluationTracker:
+    _MAX_TRACKED_DECISIONS: int = 500
+    _MAX_TRACKED_SHADOW_ITEMS: int = 200
+
     def __init__(self) -> None:
         self._evaluations: dict[str, AIDecisionEvaluation] = {}
         self._assessments: dict[str, AIMarketAssessment] = {}
@@ -19,6 +22,7 @@ class AIEvaluationTracker:
 
     def record_brief(self, brief: AIDecisionBrief) -> None:
         self._decision_briefs[brief.decision_id] = brief
+        self._evict_oldest(self._decision_briefs, self._MAX_TRACKED_DECISIONS)
 
     def latest_brief(self, decision_id: str) -> AIDecisionBrief | None:
         return self._decision_briefs.get(decision_id)
@@ -35,6 +39,8 @@ class AIEvaluationTracker:
             fallback_reason=assessment.fallback_reason,
             degraded=assessment.degraded,
         )
+        self._evict_oldest(self._assessments, self._MAX_TRACKED_DECISIONS)
+        self._evict_oldest(self._evaluations, self._MAX_TRACKED_DECISIONS)
 
     def latest_assessment(self, decision_id: str) -> AIMarketAssessment | None:
         return self._assessments.get(decision_id)
@@ -47,12 +53,15 @@ class AIEvaluationTracker:
 
     def record_shadow_assessment(self, assessment: AIMarketAssessment) -> None:
         self._shadow_assessments[assessment.decision_id] = assessment
+        self._evict_oldest(self._shadow_assessments, self._MAX_TRACKED_DECISIONS)
 
     def latest_shadow_assessment(self, decision_id: str) -> AIMarketAssessment | None:
         return self._shadow_assessments.get(decision_id)
 
     def record_shadow_decision(self, shadow: AIShadowDecision) -> None:
         self._shadow_decisions.append(shadow)
+        if len(self._shadow_decisions) > self._MAX_TRACKED_SHADOW_ITEMS:
+            self._shadow_decisions = self._shadow_decisions[-self._MAX_TRACKED_SHADOW_ITEMS:]
 
     def shadow_decisions_recent(self, *, limit: int) -> list[AIShadowDecision]:
         if limit <= 0:
@@ -66,6 +75,8 @@ class AIEvaluationTracker:
 
     def record_shadow_evaluation(self, evaluation: AIShadowEvaluation) -> None:
         self._shadow_evaluations.append(evaluation)
+        if len(self._shadow_evaluations) > self._MAX_TRACKED_SHADOW_ITEMS:
+            del self._shadow_evaluations[:len(self._shadow_evaluations) - self._MAX_TRACKED_SHADOW_ITEMS]
 
     def latest_shadow_evaluation(self) -> AIShadowEvaluation | None:
         if not self._shadow_evaluations:
@@ -118,3 +129,8 @@ class AIEvaluationTracker:
                 "reconciliation_severity": report.severity,
             }
         )
+
+    @staticmethod
+    def _evict_oldest(d: dict, max_size: int) -> None:
+        while len(d) > max_size:
+            d.pop(next(iter(d)))

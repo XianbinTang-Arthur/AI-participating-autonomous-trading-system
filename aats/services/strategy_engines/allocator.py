@@ -681,17 +681,21 @@ class PortfolioAllocatorV2Phase2:
         return intent.route_action == "hold_current" and abs(to_decimal(intent.target_position_qty)) > EPSILON_DECIMAL_12
 
     @staticmethod
-    def _intent_has_explicit_leg_inventory(
-        intent: StrategySleeveIntent,
-        *,
-        include_active_inventory: bool,
-    ) -> bool:
-        explicit_legs = [
+    def _explicit_legs(intent: StrategySleeveIntent) -> list[StrategyLegIntent]:
+        return [
             leg
             for leg in intent.legs
             if str(getattr(leg, "pos_side", "") or "").lower() in {"long", "short"}
             and str(getattr(leg, "action", "") or "").lower() in {"open", "reduce", "close"}
         ]
+
+    @staticmethod
+    def _intent_has_explicit_leg_inventory(
+        intent: StrategySleeveIntent,
+        *,
+        include_active_inventory: bool,
+    ) -> bool:
+        explicit_legs = PortfolioAllocatorV2Phase2._explicit_legs(intent)
         if not explicit_legs:
             return False
         if any(abs(to_decimal(leg.delta_position_qty or Decimal("0"))) > EPSILON_DECIMAL_12 for leg in explicit_legs):
@@ -713,28 +717,7 @@ class PortfolioAllocatorV2Phase2:
     ) -> list[StrategyLegIntent]:
         legs: list[StrategyLegIntent] = []
         for intent in approved:
-            explicit_leg_intent = any(
-                str(getattr(leg, "pos_side", "") or "").lower() in {"long", "short"}
-                and str(getattr(leg, "action", "") or "").lower() in {"open", "reduce", "close"}
-                for leg in intent.legs
-            )
-            if explicit_leg_intent:
-                for leg in intent.legs:
-                    delta_qty = to_decimal(leg.delta_position_qty or Decimal("0"))
-                    if abs(delta_qty) <= EPSILON_DECIMAL_12:
-                        continue
-                    legs.append(
-                        leg.model_copy(
-                            deep=True,
-                            update={
-                                "family": intent.family,
-                                "strategy_sleeve_id": leg.strategy_sleeve_id or intent.strategy_sleeve_id,
-                                "allocation_id": intent.allocation_id,
-                            },
-                        )
-                    )
-                continue
-            if intent.family == "smart_arbitrage":
+            if self._explicit_legs(intent) or intent.family == "smart_arbitrage":
                 for leg in intent.legs:
                     delta_qty = to_decimal(leg.delta_position_qty or Decimal("0"))
                     if abs(delta_qty) <= EPSILON_DECIMAL_12:

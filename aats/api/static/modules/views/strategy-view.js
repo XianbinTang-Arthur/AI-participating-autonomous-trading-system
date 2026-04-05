@@ -516,7 +516,7 @@ export function renderStrategySections(data) {
         decisionTableHeaders(decisionScene),
         recentDecisions.map((item) => [
           `<div><strong>${formatRelativeAge(item.decision_time)}</strong><div class="table-meta">${formatMaybeTimestamp(item.decision_time)}</div></div>`,
-          `<div><strong>${item.symbol || "标的待确认"}</strong><div class="table-meta">${item.timeframe || "周期待确认"}</div></div>`,
+          `<div><strong>${escapeHtml(item.symbol || "标的待确认")}</strong><div class="table-meta">${escapeHtml(item.timeframe || "周期待确认")}</div></div>`,
           `<div><strong>${readableRecentIntent(item)}</strong><div class="table-meta">${recentDecisionNarrative(item, decisionScene)}</div></div>`,
           `<div class="inline-pills">${pill(item.policy_result ? "策略允许" : "策略拦截", item.policy_result ? "positive" : "danger")}${pill(item.risk_result ? "风控允许" : "风控拦截", item.risk_result ? "positive" : "danger")}</div>`,
           item.decision_id ? actionButton("查看详情", "inspect-decision", item.decision_id) : "",
@@ -1473,8 +1473,8 @@ function directionalIndependentOverlayBooks(target = {}, overlay = {}) {
     return item?.overlay_mode === "independent" || executionMode.startsWith("independent_");
   });
   const long = filtered.find((item) => item?.pos_side === "long") || {
-    current_position_qty: overlay?.main_leg_signal === "long" ? overlay?.main_leg_current_qty : 0,
-    target_position_qty: overlay?.main_leg_signal === "long" ? overlay?.main_leg_target_qty : 0,
+    current_position_qty: overlay?.main_leg_signal === "long" ? Number(overlay?.main_leg_current_qty || 0) : 0,
+    target_position_qty: overlay?.main_leg_signal === "long" ? Number(overlay?.main_leg_target_qty || 0) : 0,
   };
   const short = filtered.find((item) => item?.pos_side === "short") || {
     current_position_qty: overlay?.hedge_leg_signal === "short" ? -Number(overlay?.hedge_leg_current_qty || 0) : 0,

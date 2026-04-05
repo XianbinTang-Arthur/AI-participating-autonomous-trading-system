@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Literal, Protocol
 
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, PositionTarget
@@ -193,3 +194,27 @@ class StrategyFamilyEngine(Protocol):
         context: StrategyEvaluationContext,
     ) -> list[StrategyCandidate]:
         ...
+
+
+def sleeve_quantity_for_family(
+    sleeve_inventory_loader: object | None,
+    engine_input: StrategyEngineInput,
+    family: str,
+    margin_mode: str,
+) -> Decimal:
+    from aats.services.portfolio_service.decimals import to_decimal
+
+    if sleeve_inventory_loader is None:
+        return to_decimal(engine_input.context.current_position_qty)
+    return to_decimal(
+        sleeve_inventory_loader.quantity_for_strategy(
+            family=family,
+            primary_symbol=engine_input.context.symbol,
+            product_scope=engine_input.context.product_type,
+            margin_scope=margin_mode,
+            symbol_scope=(engine_input.context.symbol,),
+            symbol=engine_input.context.symbol,
+            product_type=engine_input.context.product_type,
+            margin_mode=margin_mode,
+        )
+    )

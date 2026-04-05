@@ -274,6 +274,7 @@ class TestOperatorPositionStates(unittest.TestCase):
         query.runtime = SimpleNamespace(event_store=InMemoryEventStore())
         query._cache = {}
         query._ttl_cache = {}
+        query._cache_lock = __import__("threading").RLock()
         query.runtime.event_store.append(
             build_envelope(
                 topic=topics.OVERLAY_PARENT_EXPOSURES,
@@ -335,6 +336,7 @@ class TestOperatorPositionStates(unittest.TestCase):
         query.runtime = SimpleNamespace(event_store=InMemoryEventStore())
         query._cache = {}
         query._ttl_cache = {}
+        query._cache_lock = __import__("threading").RLock()
         payload = {"decision_id": "decision_overlay_record_refresh", "symbol": "BTC-USDT-SWAP"}
         query.runtime.event_store.append(
             build_envelope(

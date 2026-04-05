@@ -68,8 +68,8 @@ class OpenAIProvider:
             detail = ""
             if exc.response is not None:
                 try:
-                    payload = exc.response.json()
-                    detail = payload.get("error", {}).get("message") or exc.response.text
+                    error_body = exc.response.json()
+                    detail = error_body.get("error", {}).get("message") or exc.response.text
                 except Exception:
                     detail = exc.response.text
             suffix = f":{detail}" if detail else ""

@@ -137,8 +137,12 @@ class OperatorQueryService:
         if not hasattr(self, "_cache"):
             self._cache = {}
         with self._cache_lock:
+            if key in self._cache:
+                return self._cache[key]
+        value = loader()
+        with self._cache_lock:
             if key not in self._cache:
-                self._cache[key] = loader()
+                self._cache[key] = value
             return self._cache[key]
 
     def _cached_ttl(self, key: str, ttl_seconds: int, loader):
@@ -151,7 +155,14 @@ class OperatorQueryService:
                 expires_at, value = cached
                 if expires_at > now:
                     return value
-            value = loader()
+        value = loader()
+        with self._cache_lock:
+            now = utc_now()
+            cached = self._ttl_cache.get(key)
+            if cached is not None:
+                expires_at, existing_value = cached
+                if expires_at > now:
+                    return existing_value
             self._ttl_cache[key] = (now + timedelta(seconds=max(int(ttl_seconds), 1)), value)
             return value
 
@@ -913,7 +924,7 @@ class OperatorQueryService:
         cache_key = f"refresh_sleeve_pnl_projection:{self._scope_cache_fragment()}"
         return self._cached_ttl(
             cache_key,
-            5,
+            30,
             lambda: service.rebuild_scope(scope=self.state_scope),
         )
 
@@ -7054,7 +7065,7 @@ class OperatorQueryService:
         )
         return self._cached_ttl(
             cache_key,
-            10,
+            20,
             lambda: self._build_recent_decisions(limit=normalized_limit, offset=normalized_offset),
         )
 

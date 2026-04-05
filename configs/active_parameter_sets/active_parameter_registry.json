@@ -1,15 +1,100 @@
 {
-  "generated_at": "2026-04-04T17:30:44.640047+00:00",
+  "generated_at": "2026-04-05T22:08:53.814174+00:00",
   "active_sets": {
+    "directional_15m": {
+      "parameter_set_id": "ps_20260405_220713_48c70f",
+      "family": "directional",
+      "timeframe": "15m",
+      "values": {
+        "min_confirm_ticks": 2,
+        "score_stability_threshold": 5.0,
+        "taker_fee_bps": 5.0,
+        "close_threshold": 0.15,
+        "short_close_threshold": 0.15,
+        "rebalance_cooldown_seconds": 120.0,
+        "de_risk_net_edge_bps": 2.0,
+        "expected_execution_buffer_bps": 0.5,
+        "expected_slippage_buffer_bps": 0.5,
+        "failed_thesis_net_edge_bps": -1.0,
+        "signal_edge_scale_bps": 20,
+        "slippage_bps": 2.0,
+        "min_safe_net_edge_bps": 0.0,
+        "scale_in_threshold": 0.6,
+        "entry_threshold": 0.4,
+        "short_entry_threshold": 0.4,
+        "min_hold_seconds": 300.0
+      }
+    },
+    "directional_1h": {
+      "parameter_set_id": "ps_20260405_220713_e68ea9",
+      "family": "directional",
+      "timeframe": "1h",
+      "values": {
+        "min_confirm_ticks": 2,
+        "score_stability_threshold": 5.0,
+        "taker_fee_bps": 5.0,
+        "close_threshold": 0.15,
+        "short_close_threshold": 0.15,
+        "rebalance_cooldown_seconds": 120.0,
+        "de_risk_net_edge_bps": 2.0,
+        "expected_execution_buffer_bps": 0.5,
+        "expected_slippage_buffer_bps": 0.5,
+        "failed_thesis_net_edge_bps": -1.0,
+        "signal_edge_scale_bps": 20,
+        "slippage_bps": 2.0,
+        "min_safe_net_edge_bps": 0.0,
+        "scale_in_threshold": 0.6,
+        "entry_threshold": 0.4,
+        "short_entry_threshold": 0.4,
+        "min_hold_seconds": 300.0
+      }
+    },
     "independent_15m": {
-      "parameter_set_id": "ps_20260404_072612_a5cc10",
+      "parameter_set_id": "ps_20260405_220713_b8e159",
       "family": "independent",
       "timeframe": "15m",
       "values": {
-        "signal_edge_scale_bps": 12.0,
         "min_confirm_ticks": 2,
+        "score_stability_threshold": 5.0,
+        "taker_fee_bps": 5.0,
+        "close_threshold": 0.1,
+        "short_close_threshold": 0.1,
+        "rebalance_cooldown_seconds": 60,
+        "de_risk_net_edge_bps": 2.0,
+        "expected_execution_buffer_bps": 0.5,
+        "expected_slippage_buffer_bps": 0.5,
+        "failed_thesis_net_edge_bps": -1.0,
+        "signal_edge_scale_bps": 12.0,
+        "slippage_bps": 2.0,
         "min_safe_net_edge_bps": 0.0,
-        "score_stability_threshold": 2.0
+        "scale_in_threshold": 0.6,
+        "entry_threshold": 0.25,
+        "short_entry_threshold": 0.25,
+        "min_hold_seconds": 120
+      }
+    },
+    "independent_1h": {
+      "parameter_set_id": "ps_20260405_220713_01d103",
+      "family": "independent",
+      "timeframe": "1h",
+      "values": {
+        "min_confirm_ticks": 2,
+        "score_stability_threshold": 5.0,
+        "taker_fee_bps": 5.0,
+        "close_threshold": 0.1,
+        "short_close_threshold": 0.1,
+        "rebalance_cooldown_seconds": 120,
+        "de_risk_net_edge_bps": 2.0,
+        "expected_execution_buffer_bps": 0.5,
+        "expected_slippage_buffer_bps": 0.5,
+        "failed_thesis_net_edge_bps": -1.0,
+        "signal_edge_scale_bps": 20,
+        "slippage_bps": 2.0,
+        "min_safe_net_edge_bps": 0.0,
+        "scale_in_threshold": 0.6,
+        "entry_threshold": 0.25,
+        "short_entry_threshold": 0.25,
+        "min_hold_seconds": 300
       }
     }
   }

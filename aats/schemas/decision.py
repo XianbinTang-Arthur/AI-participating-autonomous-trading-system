@@ -9,6 +9,7 @@ from pydantic import BaseModel
 
 from aats.schemas.common import SchemaBase, new_id, utc_now
 from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope
+from aats.schemas.features import RegimeIndicator, VolatilityState
 from aats.schemas.portfolio import InstrumentPositionState, PositionLegState
 from aats.schemas.strategy_runtime import (
     StrategyFamily,
@@ -109,10 +110,10 @@ class DecisionContext(SchemaBase):
 class BaselineAssessment(SchemaBase):
     decision_id: str
     symbol: str
-    regime: str
+    regime: RegimeIndicator
     direction_bias: Literal["long", "short", "flat"]
     trend_strength: float
-    volatility_state: str
+    volatility_state: VolatilityState
     confidence: float
     composite_alpha_score: float = 0.0
     suggested_position_scale: float = 0.0
@@ -128,8 +129,8 @@ class BaselineReference(SchemaBase):
     decision_id: str
     symbol: str
     timeframe: Literal["15m", "1h"] | None = None
-    regime: str | None = None
-    volatility_state: str | None = None
+    regime: RegimeIndicator | None = None
+    volatility_state: VolatilityState | None = None
     direction_bias: Literal["long", "short", "flat"]
     confidence: float | None = None
     composite_alpha_score: float | None = None

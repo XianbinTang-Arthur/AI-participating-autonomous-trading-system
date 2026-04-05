@@ -123,7 +123,7 @@ class OKXPublicWebSocketClient:
                     open_timeout=self.settings.okx_ws_open_timeout_seconds,
                     close_timeout=5,
                 ) as websocket:
-                    await self._subscribe(websocket, subscribe_args)
+                    await self._subscribe(websocket, connection_name, subscribe_args)
                     self._connected[connection_name] = True
                     reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
                     log_event(
@@ -139,7 +139,7 @@ class OKXPublicWebSocketClient:
                         if not isinstance(message, dict):
                             continue
                         self._last_message_ts[connection_name] = utc_now()
-                        if self._is_subscription_ack(message):
+                        if self._is_control_message(message):
                             continue
                         await on_message(message)
             except asyncio.CancelledError:
@@ -166,11 +166,32 @@ class OKXPublicWebSocketClient:
     async def _subscribe(
         self,
         websocket: ClientConnection,
+        connection_name: str,
         subscribe_args: list[dict[str, str]],
     ) -> None:
         await websocket.send(_json_dumps({"op": "subscribe", "args": subscribe_args}))
 
-    @staticmethod
-    def _is_subscription_ack(message: dict[str, Any]) -> bool:
+    def _is_control_message(self, message: dict[str, Any]) -> bool:
+        """Return True for OKX control-plane messages (subscribe ack, error, notice).
+
+        Subscription errors are logged so callers can simply skip control messages.
+        """
         event = message.get("event")
-        return isinstance(event, str) and event in {"subscribe", "notice"}
+        if not isinstance(event, str):
+            return False
+        if event in {"subscribe", "notice"}:
+            return True
+        if event == "error":
+            code = message.get("code", "")
+            msg = message.get("msg", "")
+            log_event(
+                self.logger,
+                "okx_ws_subscription_error",
+                level="error",
+                code=code,
+                msg=msg,
+                connId=message.get("connId", ""),
+            )
+            self._last_error = f"subscription_error:{code}:{msg}"
+            return True
+        return False

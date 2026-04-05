@@ -9,6 +9,7 @@ from .models import (
     IndependentExecutionHealthState,
     IndependentLeg,
     ScoreStabilityMetrics,
+    clamp as _clamp,
 )
 
 
@@ -232,7 +233,7 @@ def trial_guard_active(
     closed_trade_count = int(_leg_health_value(context, leg, "recent_closed_trade_count") or 0)
     if closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
         return False
-    recent_net_realized_pnl = _leg_health_value(context, leg, "recent_net_realized_pnl") or 0
+    recent_net_realized_pnl = float(_leg_health_value(context, leg, "recent_net_realized_pnl") or 0.0)
     recent_win_rate = float(_leg_health_value(context, leg, "recent_win_rate") or 0.0)
     return recent_net_realized_pnl < 0 and recent_win_rate < 0.5
 
@@ -247,7 +248,3 @@ def _leg_health_value(context: DecisionContext, leg: IndependentLeg, key: str) -
 def _leg_health_datetime(context: DecisionContext, leg: IndependentLeg, key: str):
     value = _leg_health_value(context, leg, key)
     return value if hasattr(value, "isoformat") else None
-
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(value, upper))

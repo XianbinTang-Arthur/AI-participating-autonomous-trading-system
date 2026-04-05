@@ -467,6 +467,12 @@ async function refreshDashboard({ manual = false } = {}) {
         refreshGeneration,
       });
     }
+  } catch (error) {
+    if (state.refreshGeneration !== refreshGeneration) return;
+    if (error && typeof error === "object" && "name" in error && error.name === "AbortError") return;
+    if (manual) {
+      state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    }
   } finally {
     if (!deferredRefreshStarted && state.refreshGeneration === refreshGeneration) {
       setPendingPanels(refreshPlan.deferredPanels, false);
@@ -1983,13 +1989,13 @@ function loadingList(count) {
   `;
 }
 
+const VIEW_ROUTE_ALIASES = { "/ui/ai": "aiAnalysis" };
+
 function resolveViewFromLocation() {
   const pathname = window.location.pathname.replace(/\/+$/, "") || "/ui";
   if (pathname === "/" || pathname === "/ui" || pathname === "/ui/home") return "home";
-  if (pathname === "/ui/ai") return "aiAnalysis";
-  if (pathname === "/ui/exit-execution") return "exitExecution";
   const match = Object.entries(VIEW_ROUTES).find(([, route]) => route === pathname);
-  return match?.[0] || "home";
+  return match?.[0] || VIEW_ROUTE_ALIASES[pathname] || "home";
 }
 
 function shouldRedirectToLogin() {

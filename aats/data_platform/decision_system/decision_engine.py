@@ -27,7 +27,7 @@ RULE_MIN_EXPERIMENTS_WITH_OPENINGS = 1
 RULE_MIN_POSITIVE_EDGE_RATIO = 0.15
 
 # Phase 3 阈值
-RULE_MAX_FAILURE_RATIO = 0.7          # failure 比例 > 70% 则考虑 pause
+RULE_MAX_FAILURE_RATIO = 0.85         # failure 比例 > 85% 则考虑 pause（选择性策略允许较高 failure）
 RULE_STRATEGY_BLOCKED_RATIO = 0.5     # strategy blocked > 50% 则降权
 
 # Phase 4 阈值

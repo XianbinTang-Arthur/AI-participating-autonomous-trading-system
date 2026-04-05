@@ -10,12 +10,17 @@ from aats.services.runtime_scope import RuntimeStateScope, filter_fills, filter_
 
 
 class InMemoryExecutionRepository:
+    _TERMINAL_STATUSES = frozenset({"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"})
+
     def __init__(self) -> None:
         self._order_states_by_client_order_id: dict[str, OrderState] = {}
         self._order_states_by_intent_id: dict[str, OrderState] = {}
         self._fills_by_fill_id: dict[str, FillEvent] = {}
         self._state_machine = OrderStateMachine()
         self._logger = get_logger("aats.execution_repo")
+        # Secondary indexes for hot-path queries.
+        self._bundle_index: dict[str, set[str]] = {}  # bundle_id → {client_order_id}
+        self._non_terminal_ids: set[str] = set()       # client_order_ids in non-terminal state
 
     def save_order_state(self, state: OrderState) -> OrderState:
         current = self._order_states_by_client_order_id.get(state.client_order_id)
@@ -46,6 +51,14 @@ class InMemoryExecutionRepository:
             self._order_states_by_client_order_id.pop(current.client_order_id, None)
         self._order_states_by_client_order_id[merged.client_order_id] = merged
         self._order_states_by_intent_id[merged.intent_id] = merged
+        # Maintain secondary indexes.
+        bundle_id = str(merged.strategy_bundle_id or "").strip()
+        if bundle_id:
+            self._bundle_index.setdefault(bundle_id, set()).add(merged.client_order_id)
+        if merged.status.upper() in self._TERMINAL_STATUSES:
+            self._non_terminal_ids.discard(merged.client_order_id)
+        else:
+            self._non_terminal_ids.add(merged.client_order_id)
         return merged
 
     def has_intent(self, intent_id: str) -> bool:
@@ -62,6 +75,23 @@ class InMemoryExecutionRepository:
 
     def get_order_state(self, client_order_id: str) -> OrderState | None:
         return self._order_states_by_client_order_id.get(client_order_id)
+
+    def order_states_by_bundle_id(self, bundle_id: str) -> list[OrderState]:
+        """O(K) lookup via bundle secondary index (K = orders in the bundle)."""
+        client_order_ids = self._bundle_index.get(bundle_id, set())
+        return [
+            state
+            for cid in client_order_ids
+            if (state := self._order_states_by_client_order_id.get(cid)) is not None
+        ]
+
+    def non_terminal_order_states(self) -> list[OrderState]:
+        """O(K) lookup via non-terminal secondary index (K = non-terminal orders)."""
+        return [
+            state
+            for cid in self._non_terminal_ids
+            if (state := self._order_states_by_client_order_id.get(cid)) is not None
+        ]
 
     def recent_order_states(
         self,

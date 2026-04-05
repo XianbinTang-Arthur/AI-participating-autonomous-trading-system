@@ -1065,6 +1065,7 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
             "strategy_hedge_independent_long_scale_in_threshold": 0.30,
             "strategy_hedge_independent_short_scale_in_threshold": 0.30,
             "strategy_hedge_independent_min_safe_net_edge_bps": 3.0,
+            "strategy_hedge_independent_min_confirm_ticks": 1,
             "strategy_family_protective_enabled": mode == "protective",
             "strategy_family_protective_live_execution_enabled": mode == "protective",
             "strategy_family_opportunistic_enabled": mode == "opportunistic",
@@ -1081,6 +1082,7 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
             "max_abs_position_qty": 1.0,
             "default_order_qty": 0.01,
             "max_notional_per_symbol": 100_000.0,
+            "max_gross_notional_per_symbol": 100_000.0,
             "max_pending_notional_per_symbol": 5_000.0,
             "max_target_leverage": 2.0,
         }
@@ -1103,6 +1105,7 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
             kline_1h={"open": 79_700.0, "high": 80_200.0, "low": 79_600.0, "close": 80_000.5},
         )
         runtime.market_gateway._latest_snapshots[runtime.settings.default_symbol] = market_snapshot
+        runtime.market_gateway._latest_received_at[runtime.settings.default_symbol] = datetime.now(timezone.utc)
         runtime.event_store.append(
             build_envelope(
                 topic=topics.MARKET_SNAPSHOTS,

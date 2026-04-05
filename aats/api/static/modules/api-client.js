@@ -1,29 +1,39 @@
 ﻿import { localizeError } from "./terms.js";
 
+const DEFAULT_TIMEOUT_MS = 30_000;
+
 export async function requestJson(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body !== undefined) {
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(path, {
-    method: options.method || "GET",
-    headers,
-    body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
-    credentials: "same-origin",
-    signal: options.signal,
-  });
+  const timeoutMs = options.timeout ?? DEFAULT_TIMEOUT_MS;
+  const controller = !options.signal && timeoutMs > 0 ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
 
-  const text = await response.text();
-  const payload = text ? safeJsonParse(text) : null;
-  if (!response.ok) {
-    const detail =
-      typeof payload === "object" && payload !== null && "detail" in payload
-        ? payload.detail
-        : text || response.statusText;
-    throw new Error(localizeError(typeof detail === "string" ? detail : JSON.stringify(detail)));
+  try {
+    const response = await fetch(path, {
+      method: options.method || "GET",
+      headers,
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+      credentials: "same-origin",
+      signal: controller?.signal || options.signal,
+    });
+
+    const text = await response.text();
+    const payload = text ? safeJsonParse(text) : null;
+    if (!response.ok) {
+      const detail =
+        typeof payload === "object" && payload !== null && "detail" in payload
+          ? payload.detail
+          : text || response.statusText;
+      throw new Error(localizeError(typeof detail === "string" ? detail : JSON.stringify(detail)));
+    }
+    return payload;
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId);
   }
-  return payload;
 }
 
 export async function fetchPanels(specs, options = {}) {

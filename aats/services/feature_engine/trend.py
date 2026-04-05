@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from aats.schemas.market import MarketSnapshot
+from aats.schemas.market import KlineBar, MarketSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -17,11 +17,11 @@ class TrendCalculator:
         metrics = self.analyze_kline(snapshot.kline_15m)
         return metrics.trend_strength, metrics.momentum_score
 
-    def analyze_kline(self, kline: dict[str, object]) -> TrendMetrics:
-        open_price = self._value(kline, "open")
-        close_price = self._value(kline, "close")
-        high_price = self._value(kline, "high")
-        low_price = self._value(kline, "low")
+    def analyze_kline(self, kline: KlineBar) -> TrendMetrics:
+        open_price = float(kline.open)
+        close_price = float(kline.close)
+        high_price = float(kline.high)
+        low_price = float(kline.low)
 
         momentum = (close_price - open_price) / open_price if open_price else 0.0
         candle_range = max(high_price - low_price, 0.0)
@@ -33,7 +33,3 @@ class TrendCalculator:
             trend_strength=trend_strength,
             candle_body_ratio=candle_body_ratio,
         )
-
-    @staticmethod
-    def _value(kline: dict[str, object], key: str) -> float:
-        return float(kline[key])

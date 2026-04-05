@@ -1,0 +1,47 @@
+{
+  "batch_name": "independent_cost_buffer_15m",
+  "description": "Sweep expected_slippage/execution_buffer for independent/15m",
+  "family": "independent",
+  "symbol": "BTC-USDT-SWAP",
+  "timeframe": "15m",
+  "dataset_version": "v1.0",
+  "start": "2025-12-07",
+  "end": "2026-04-04",
+  "experiments": [
+    {
+      "label": "buf_0_0",
+      "params": {
+        "expected_slippage_buffer_bps": 0.0,
+        "expected_execution_buffer_bps": 0.0
+      }
+    },
+    {
+      "label": "buf_0.5_0.5",
+      "params": {
+        "expected_slippage_buffer_bps": 0.5,
+        "expected_execution_buffer_bps": 0.5
+      }
+    },
+    {
+      "label": "buf_1.0_0.5",
+      "params": {
+        "expected_slippage_buffer_bps": 1.0,
+        "expected_execution_buffer_bps": 0.5
+      }
+    },
+    {
+      "label": "buf_0.5_1.0",
+      "params": {
+        "expected_slippage_buffer_bps": 0.5,
+        "expected_execution_buffer_bps": 1.0
+      }
+    },
+    {
+      "label": "buf_1.0_1.0",
+      "params": {
+        "expected_slippage_buffer_bps": 1.0,
+        "expected_execution_buffer_bps": 1.0
+      }
+    }
+  ]
+}

@@ -34,8 +34,10 @@ from aats.data_platform.replay.core.replay_context import (
 
 _FAST_PERIOD = 5
 _SLOW_PERIOD = 20
-_ENTRY_THRESHOLD = 0.45
-_CLOSE_THRESHOLD = 0.20
+# 默认阈值已迁移到 ReplayParameterOverrides 中，不再在此硬编码。
+# 以下常量仅保留为文档参考：
+#   entry_threshold  = 0.45  → params.entry_threshold
+#   close_threshold  = 0.20  → params.close_threshold
 
 
 class DirectionalReplayAdapter(BaseReplayAdapter):
@@ -75,7 +77,11 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
         self._score_history.append(dominant_score)
 
         # 稳定性检查
-        score_stable = self._check_stability(params.min_confirm_ticks, params.score_stability_threshold)
+        entry_thresh_for_stability = params.get_entry_threshold(dominant_leg)
+        score_stable = self._check_stability(
+            params.min_confirm_ticks, params.score_stability_threshold,
+            entry_thresh_for_stability, params.min_score_drawdown_bps,
+        )
 
         # 预期边际（统一 edge contract: signal + funding - cost）
         edge = self._compute_edge_breakdown(bar, dominant_leg, dominant_score, params)
@@ -84,22 +90,34 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
         cost_bps = edge["cost"]
         expected_net_edge_bps = edge["net"]
 
-        # 资格评估
+        # 资格评估（阈值从 params 读取）
+        entry_thresh = params.get_entry_threshold(dominant_leg)
         blocking_reasons: list[str] = []
-        if dominant_score < _ENTRY_THRESHOLD:
+        if dominant_score < entry_thresh:
             blocking_reasons.append("score_below_entry_threshold")
         if not score_stable:
             blocking_reasons.append("score_not_stable")
         if expected_net_edge_bps < params.min_safe_net_edge_bps:
             blocking_reasons.append("net_edge_below_safe_minimum")
+        if edge["cost"] > params.max_acceptable_cost_bps:
+            blocking_reasons.append("cost_exceeds_max_acceptable")
 
-        selectable = dominant_score >= _ENTRY_THRESHOLD
+        selectable = dominant_score >= entry_thresh
         execution_compatible = selectable and score_stable and (
             expected_net_edge_bps >= params.min_safe_net_edge_bps
-        )
+        ) and edge["cost"] <= params.max_acceptable_cost_bps
 
-        # 状态机
-        action, new_state = self._advance_state(state, bar, dominant_leg, dominant_score, execution_compatible)
+        # 状态机（注意: _advance_state 可能 append blocking_reasons — 副作用传参）
+        action, new_state, close_reason = self._advance_state(
+            state=state,
+            bar=bar,
+            params=params,
+            dominant_leg=dominant_leg,
+            dominant_score=dominant_score,
+            execution_compatible=execution_compatible,
+            blocking_reasons=blocking_reasons,
+            expected_net_edge_bps=expected_net_edge_bps,
+        )
 
         target_qty = state.position_qty
         delta_qty = Decimal("0")
@@ -128,8 +146,9 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             target_position_qty=target_qty,
             delta_position_qty=delta_qty,
             action=action,
+            close_reason=close_reason,
             score_stable=score_stable,
-            funding_rate=float(bar.aligned_funding_rate) if bar.aligned_funding_rate else None,
+            funding_rate=float(bar.aligned_funding_rate) if bar.aligned_funding_rate is not None else None,
             close_price=float(bar.close),
             bar_index=ctx.bar_index,
         )
@@ -154,17 +173,24 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
         else:
             return 1.0 - signal_strength, signal_strength
 
-    def _check_stability(self, min_ticks: int, threshold_bps: float) -> bool:
+    def _check_stability(
+        self, min_ticks: int, threshold_bps: float,
+        entry_threshold: float, min_score_drawdown_bps: float | None = None,
+    ) -> bool:
         history = list(self._score_history)
         if len(history) < min_ticks:
             return False
         recent = history[-min_ticks:]
-        if not all(s >= _ENTRY_THRESHOLD for s in recent):
+        if not all(s >= entry_threshold for s in recent):
             return False
         peak = max(recent)
         current = recent[-1]
         drawdown_bps = (peak - current) * 10000
-        return drawdown_bps <= threshold_bps
+        if drawdown_bps > threshold_bps:
+            return False
+        if min_score_drawdown_bps is not None and drawdown_bps > min_score_drawdown_bps:
+            return False
+        return True
 
     def _compute_edge_breakdown(
         self,
@@ -220,8 +246,12 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             else:
                 funding_adjustment_bps = -funding_bps
 
-        # --- 3) cost ---
-        cost_bps = cost.total_cost_bps
+        # --- 3) cost: 基础成本 + 缓冲 ---
+        cost_bps = (
+            cost.total_cost_bps
+            + params.expected_slippage_buffer_bps
+            + params.expected_execution_buffer_bps
+        )
 
         # --- 4) net ---
         net_edge = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
@@ -233,33 +263,86 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             "net": net_edge,
         }
 
-    def _advance_state(self, state: ReplayState, bar: ReplayBar,
-                       dominant_leg: str, score: float, exec_ok: bool) -> tuple[str, str]:
-        if state.position_side in ("long", "short"):
-            if score < _CLOSE_THRESHOLD:
-                state.position_qty = Decimal("0")
-                state.position_side = "flat"
-                state.entry_price = None
-                state.last_close_ts = bar.ts
-                return "close", "flat"
-            if state.position_side != dominant_leg and score > _ENTRY_THRESHOLD:
-                state.position_qty = Decimal("0")
-                state.position_side = "flat"
-                state.entry_price = None
-                state.last_close_ts = bar.ts
-                return "close", "flat"
-            return "hold", "holding"
+    def _advance_state(
+        self,
+        *,
+        state: ReplayState,
+        bar: ReplayBar,
+        params: ReplayParameterOverrides,
+        dominant_leg: str,
+        dominant_score: float,
+        execution_compatible: bool,
+        blocking_reasons: list[str],
+        expected_net_edge_bps: float = 0.0,
+    ) -> tuple[str, str, str]:
+        """推进简化状态机，返回 (action, state_label, close_reason)。
 
-        if exec_ok:
+        注意: 本方法会直接 append blocking_reasons 列表（副作用传参）。
+
+        close_reason 值域:
+          thesis_failed / de_risk / score_below_close /
+          direction_reversal / thesis_stale / ""（非 close 时）
+        """
+        close_thresh = params.get_close_threshold(state.position_side)
+        entry_thresh = params.get_entry_threshold(dominant_leg)
+
+        if state.position_side in ("long", "short"):
+            # min_hold_seconds 保护
+            held_seconds = 0.0
+            if state.entry_ts is not None:
+                held_seconds = (bar.ts - state.entry_ts).total_seconds()
+            if held_seconds < params.min_hold_seconds:
+                return "hold", "holding", ""
+
+            should_close = False
+            close_reason = ""
+
+            # thesis 失效（最紧急 — 净边际大幅为负）
+            if expected_net_edge_bps < params.failed_thesis_net_edge_bps:
+                should_close = True
+                close_reason = "thesis_failed"
+            # 降风险（净边际变薄但未到失效）
+            elif expected_net_edge_bps < params.de_risk_net_edge_bps:
+                should_close = True
+                close_reason = "de_risk"
+            elif dominant_score < close_thresh:
+                should_close = True
+                close_reason = "score_below_close"
+            elif state.position_side != dominant_leg and dominant_score > entry_thresh:
+                should_close = True
+                close_reason = "direction_reversal"
+            elif held_seconds >= params.max_thesis_age_seconds:
+                should_close = True
+                close_reason = "thesis_stale"
+
+            if should_close:
+                state.position_qty = Decimal("0")
+                state.position_side = "flat"
+                state.entry_price = None
+                state.entry_ts = None
+                state.last_close_ts = bar.ts
+                return "close", "flat", close_reason
+            return "hold", "holding", ""
+
+        # rebalance_cooldown 保护
+        if state.last_close_ts is not None:
+            cooldown_elapsed = (bar.ts - state.last_close_ts).total_seconds()
+            if cooldown_elapsed < params.rebalance_cooldown_seconds:
+                if dominant_score >= entry_thresh:
+                    blocking_reasons.append("rebalance_cooldown")
+                    return "blocked", "probing", ""
+                return "hold", "flat", ""
+
+        if execution_compatible:
             state.position_side = dominant_leg  # type: ignore[assignment]
             state.position_qty = Decimal("1")
             state.entry_price = bar.close
             state.entry_ts = bar.ts
-            return "open", "probing"
+            return "open", "probing", ""
 
-        if score >= _ENTRY_THRESHOLD:
-            return "blocked", "probing"
-        return "hold", "flat"
+        if dominant_score >= entry_thresh:
+            return "blocked", "probing", ""
+        return "hold", "flat", ""
 
 
 def _sigmoid(x: float) -> float:

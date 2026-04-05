@@ -17,6 +17,7 @@ PortfolioSnapshotOrigin = Literal[
     "local_repair",
     "runtime_bootstrap",
     "recovery_rebuild",
+    "recovery_auto_healed",
     "manual_rebuild",
 ]
 
@@ -26,6 +27,7 @@ BASELINE_SNAPSHOT_ORIGINS = {
     "operator_rebaseline",
     "runtime_bootstrap",
     "recovery_rebuild",
+    "recovery_auto_healed",
     "manual_rebuild",
 }
 

@@ -13,6 +13,7 @@ from .adaptive import threshold_snapshot
 from .diagnostics import legacy_runtime_state_snapshot
 from .execution_policy import resolve_execution_policy
 from .gates import (
+    _leg_health_value,
     evaluate_entry_quality_gate,
     evaluate_open_eligibility,
     required_safe_net_edge_bps,
@@ -35,6 +36,7 @@ from .models import (
     IndependentEligibilityOutcome,
     IndependentFamilyEvaluation,
     IndependentLeg,
+    clamp as _clamp,
 )
 from .replay import replay_snapshot_from_decision
 from .sizing import (
@@ -839,17 +841,6 @@ def _trial_guard_active(
     recent_net_realized_pnl = to_decimal(_leg_health_value(context, leg, "recent_net_realized_pnl") or Decimal("0"))
     recent_win_rate = float(_leg_health_value(context, leg, "recent_win_rate") or 0.0)
     return recent_net_realized_pnl < -EPSILON_DECIMAL_12 and recent_win_rate < 0.5
-
-
-def _leg_health_value(context: DecisionContext, leg: IndependentLeg, key: str) -> object | None:
-    payload = context.leg_strategy_health.get(leg)
-    if not isinstance(payload, dict):
-        return None
-    return payload.get(key)
-
-
-def _clamp(value: float, lower: float, upper: float) -> float:
-    return max(lower, min(value, upper))
 
 
 def _replay_prior_book_state(*, decision: IndependentBookDecision) -> str | None:

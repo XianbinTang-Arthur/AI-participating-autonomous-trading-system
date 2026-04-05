@@ -260,10 +260,37 @@ class ExecutionLedgerRecoveryService:
     reconciliation_classifier: RecoveryReconciliationClassifier
     execution_order_repo: object | None = None
     execution_command_repo: object | None = None
+    exchange_order_client: object | None = None
     runtime_scope: object = field(init=False)
+    _exchange_reconciled_count: int = field(init=False, default=0)
+    _exchange_reconcile_notes: list[str] = field(init=False, default_factory=list)
 
     def __post_init__(self) -> None:
         self.runtime_scope = runtime_state_scope(self.settings)
+
+    async def pre_recover_exchange_reconciliation(self) -> list[str]:
+        """Query exchange for stuck orders BEFORE the main (sync) recovery.
+
+        Must be awaited from the async bootstrap context.  The results are
+        stored internally and consumed by ``_phase4_status()`` so that
+        resolved orders no longer trigger a halt.
+        """
+        from aats.services.recovery_control.exchange_order_reconciler import reconcile_stuck_orders
+
+        if self.execution_order_repo is None:
+            return []
+        open_orders_fn = getattr(self.execution_order_repo, "open_orders", None)
+        if not callable(open_orders_fn):
+            return []
+        scoped_open_orders = list(open_orders_fn())
+        resolved, _unreachable, notes = await reconcile_stuck_orders(
+            open_orders=scoped_open_orders,
+            exchange_client=self.exchange_order_client,
+            order_repo=self.execution_order_repo,
+        )
+        self._exchange_reconciled_count = resolved
+        self._exchange_reconcile_notes = notes
+        return notes
 
     def recover(
         self,
@@ -335,23 +362,19 @@ class ExecutionLedgerRecoveryService:
                     commands = pending_commands(limit=1000, sent_stale_before=sent_stale_before)
                     pending_rows = [row for row in commands if str(row.get("state") or "").upper() == "PENDING"]
                     stale_sent_rows = [row for row in commands if str(row.get("state") or "").upper() == "SENT"]
+                    def _count_cmd(rows, cmd_type):
+                        return sum(1 for r in rows if str(r.get("command_type") or "").strip().lower() == cmd_type)
+
                     pending_command_count = len(pending_rows)
-                    pending_submit_command_count = sum(
-                        1 for row in pending_rows if str(row.get("command_type") or "").strip().lower() == "submit"
-                    )
-                    pending_cancel_command_count = sum(
-                        1 for row in pending_rows if str(row.get("command_type") or "").strip().lower() == "cancel"
-                    )
+                    pending_submit_command_count = _count_cmd(pending_rows, "submit")
+                    pending_cancel_command_count = _count_cmd(pending_rows, "cancel")
                     sent_stale_command_count = len(stale_sent_rows)
-                    sent_stale_submit_command_count = sum(
-                        1 for row in stale_sent_rows if str(row.get("command_type") or "").strip().lower() == "submit"
-                    )
-                    sent_stale_cancel_command_count = sum(
-                        1 for row in stale_sent_rows if str(row.get("command_type") or "").strip().lower() == "cancel"
-                    )
+                    sent_stale_submit_command_count = _count_cmd(stale_sent_rows, "submit")
+                    sent_stale_cancel_command_count = _count_cmd(stale_sent_rows, "cancel")
 
         notes = list(base_status.notes)
         notes.append("phase4_execution_ledger_recovery_enabled")
+        notes.extend(self._exchange_reconcile_notes)
         independent_recovery_snapshots = list(base_status.independent_recovery_snapshots)
         if independent_recovery_snapshots:
             notes.append(f"independent_recovery_snapshots:{len(independent_recovery_snapshots)}")
@@ -405,17 +428,25 @@ class ExecutionLedgerRecoveryService:
                 elif "operator_rebaseline_required" not in resume_blocked_reasons:
                     resume_blocked_reasons.append("operator_rebaseline_required")
 
-        if stuck_sent_submit_order_count:
-            self.kill_switch.halt(reason="phase4_stuck_sent_submit_commands")
+        def _halt_and_block(halt_reason: str, blocked_reason: str) -> None:
+            nonlocal safe_startup, safe_to_trade, resume_eligible, rebaseline_available, recovery_state
+            self.kill_switch.halt(reason=halt_reason)
             safe_startup = False
             safe_to_trade = False
             resume_eligible = False
             rebaseline_available = True
             recovery_state = "resume_blocked"
-            recovery_action = "halted_stuck_sent_submit_commands"
-            if "stuck_sent_submit_commands" not in resume_blocked_reasons:
-                resume_blocked_reasons.append("stuck_sent_submit_commands")
-            notes.append(f"stuck_sent_submit_commands:{stuck_sent_submit_order_count}")
+            if blocked_reason not in resume_blocked_reasons:
+                resume_blocked_reasons.append(blocked_reason)
+
+        if stuck_sent_submit_order_count:
+            remaining = stuck_sent_submit_order_count - self._exchange_reconciled_count
+            if remaining > 0:
+                _halt_and_block("phase4_stuck_sent_submit_commands", "stuck_sent_submit_commands")
+                recovery_action = "halted_stuck_sent_submit_commands"
+                notes.append(f"stuck_sent_submit_commands:{remaining}")
+            else:
+                notes.append(f"stuck_sent_submit_commands_auto_resolved:{stuck_sent_submit_order_count}")
 
         if sent_stale_command_count:
             notes.append(f"sent_stale_execution_commands:{sent_stale_command_count}")
@@ -425,29 +456,19 @@ class ExecutionLedgerRecoveryService:
             notes.append(f"sent_stale_cancel_commands:{sent_stale_cancel_command_count}")
 
         if pending_command_count:
-            self.kill_switch.halt(reason="phase4_pending_execution_commands")
-            safe_startup = False
-            safe_to_trade = False
-            resume_eligible = False
-            rebaseline_available = True
-            recovery_state = "resume_blocked"
+            _halt_and_block("phase4_pending_execution_commands", "pending_execution_commands")
             if recovery_action != "halted_stuck_sent_submit_commands":
                 recovery_action = "halted_pending_execution_commands"
-            if "pending_execution_commands" not in resume_blocked_reasons:
-                resume_blocked_reasons.append("pending_execution_commands")
             notes.append(f"pending_execution_commands:{pending_command_count}")
 
         if stranded_submit_order_count:
-            self.kill_switch.halt(reason="phase4_created_orders_missing_submit_commands")
-            safe_startup = False
-            safe_to_trade = False
-            resume_eligible = False
-            rebaseline_available = True
-            recovery_state = "resume_blocked"
-            recovery_action = recovery_action or "halted_created_orders_missing_submit_commands"
-            if "created_orders_missing_submit_commands" not in resume_blocked_reasons:
-                resume_blocked_reasons.append("created_orders_missing_submit_commands")
-            notes.append(f"created_orders_missing_submit_commands:{stranded_submit_order_count}")
+            remaining = stranded_submit_order_count - self._exchange_reconciled_count
+            if remaining > 0:
+                _halt_and_block("phase4_created_orders_missing_submit_commands", "created_orders_missing_submit_commands")
+                recovery_action = recovery_action or "halted_created_orders_missing_submit_commands"
+                notes.append(f"created_orders_missing_submit_commands:{remaining}")
+            else:
+                notes.append(f"created_orders_missing_submit_commands_auto_resolved:{stranded_submit_order_count}")
 
         latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
         return base_status.model_copy(
