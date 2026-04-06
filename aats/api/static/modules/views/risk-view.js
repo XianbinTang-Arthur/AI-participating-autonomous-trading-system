@@ -199,6 +199,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
     riskExitExecutionWorkspace: surfaceCard({
       title: "退出任务工作区",
       kicker: "parent exit operator workspace",
+      panelKey: "exitExecutionActionHistoryPage",
       copy: "这里承接 parent-exit 的长历史查询、分页和人工动作回看。先在这里收敛筛选条件，再决定是否继续 refresh、重试上限查询或安全取消。",
       actions: `<div class="stack-actions table-actions--compact">${actionButton("进入独立工作台", "navigate-view", "exitExecution", "ghost")}</div>`,
       content: exitExecutionHistoryPending
@@ -350,6 +351,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
     riskPreflight: surfaceCard({
       title: "启盘前自检",
       kicker: "guarded_live 预检",
+      panelKey: "guardedLivePreflight",
       copy: guardedLivePreflight.summary || "这里收口合约 guarded_live 启盘前必须人工确认的结构化检查项。",
       content: summaryStrip([
         {
@@ -381,6 +383,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
     riskRunPacket: surfaceCard({
       title: "小资金运行包",
       kicker: "运行摘要",
+      panelKey: "guardedLiveRunPacket",
       copy: guardedLiveRunPacket.summary || "这里把试盘守护、保证金风险、恢复状态和当前敞口收成一张运行包。",
       content: summaryStrip([
         {
@@ -447,6 +450,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
     riskTrialGuard: surfaceCard({
       title: "试盘守护",
       kicker: "小资金前向验证",
+      panelKey: "trialGuard",
       copy: "这里专门看小资金试盘的自动停机阈值，避免在还没证明策略有效前先放大亏损。",
       content: summaryStrip([
         {

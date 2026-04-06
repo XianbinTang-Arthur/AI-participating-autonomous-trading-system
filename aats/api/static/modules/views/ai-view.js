@@ -334,6 +334,7 @@ export function renderAIAnalysisSectionCards(data) {
     aiHistory: surfaceCard({
       title: "AI 记录",
       kicker: "历史记录",
+      panelKey: "aiShadowEvaluations",
       copy: "这里集中看策略层 shadow 的动作记录和收益评估。",
       content: hasHistoryRecords
         ? `

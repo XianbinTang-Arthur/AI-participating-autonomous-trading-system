@@ -351,6 +351,7 @@ export function renderStrategySections(data) {
     strategyAttribution: surfaceCard({
       title: "策略归因",
       kicker: "组合报表",
+      panelKey: "strategyAttribution",
       copy: "这里只保留最能解释“谁在赚钱、谁还占库存”的摘要，避免归因卡片本身反过来挤占工作区。",
       classes: "strategy-compact-card",
       content: `
@@ -416,6 +417,7 @@ export function renderStrategySections(data) {
     strategyTrialVerdict: surfaceCard({
       title: "系统自动试盘结论",
       kicker: "试盘审查",
+      panelKey: "trialReviewSummary",
       copy: "试盘工作台只保留本轮是否该继续、是否硬停机、现在该按哪个按钮处理；历史和周期明细默认折叠。",
       classes: "strategy-compact-card",
       actions: renderTrialVerdictActions(trialReviewActions, {

@@ -168,6 +168,7 @@ function profileEvidenceCard(data) {
   return surfaceCard({
     title: "档位控制证据",
     kicker: "为什么切档或不切档",
+    panelKey: "profileControlSummary",
     copy: "这里集中解释当前档位、冷启动锁、候选档位和阻断原因，避免把样本不足误读成策略应该更保守。",
     content: `
       ${profileEvidenceCallout(

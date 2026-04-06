@@ -75,6 +75,7 @@ export function renderHomeView(data) {
         ${surfaceCard({
           title: "最新动作",
           kicker: "动作摘要",
+          panelKey: ["latestDecision", "executionLatest", "reconciliationLatest"],
           copy: "把最新决策、委托、成交和对账压缩成一条值班视角摘要。",
           classes: "hero-card",
           content: deferredLoading
@@ -98,6 +99,7 @@ export function renderHomeView(data) {
         ${surfaceCard({
           title: "次级提醒",
           kicker: "提醒信息",
+          panelKey: ["latestDecision", "executionLatest", "reconciliationLatest"],
           copy: "这些提示不会替代首页主判断，但适合切页前快速扫一遍。",
           content: deferredLoading
             ? `<p class="text-muted">正在加载提醒信息…</p>`

@@ -552,6 +552,19 @@ h3 {
   transform: none;
 }
 
+.primary-button.is-refresh-locked,
+.secondary-button.is-refresh-locked,
+.warning-button.is-refresh-locked,
+.danger-button.is-refresh-locked,
+.ghost-button.is-refresh-locked,
+.table-button.is-refresh-locked,
+.inline-button.is-refresh-locked {
+  cursor: wait;
+  opacity: 0.38;
+  filter: grayscale(1);
+  transform: none;
+}
+
 .workspace-tab,
 .workspace-link {
   display: inline-flex;
@@ -872,7 +885,9 @@ h3 {
 .view-layout.is-refreshing .primary-status-panel,
 .view-layout.is-refreshing .status-card,
 .status-ribbon.is-refreshing .primary-status-panel,
-.status-ribbon.is-refreshing .status-card {
+.status-ribbon.is-refreshing .status-card,
+.surface-card.is-refreshing,
+.primary-status-panel.is-refreshing {
   position: relative;
   overflow: hidden;
 }
@@ -881,7 +896,9 @@ h3 {
 .view-layout.is-refreshing .primary-status-panel::before,
 .view-layout.is-refreshing .status-card::before,
 .status-ribbon.is-refreshing .primary-status-panel::before,
-.status-ribbon.is-refreshing .status-card::before {
+.status-ribbon.is-refreshing .status-card::before,
+.surface-card.is-refreshing::before,
+.primary-status-panel.is-refreshing::before {
   content: "";
   position: absolute;
   inset: 0;

@@ -321,7 +321,9 @@ export function createDashboardShellRenderer({
     syncRefreshDisabledButtons({
       roots: currentRefreshInteractivityRoots(),
       refreshing: state.refreshing,
+      pendingPanels: state.pendingPanels,
       reason: "当前区域正在刷新，请等待刷新完成后再操作。",
+      panelReason: "该卡片数据还在补充加载，请稍候再操作。",
     });
   }
 

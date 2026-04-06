@@ -39,6 +39,7 @@ export function renderOverviewView(data) {
       <div class="span-12">
         ${primaryStatusPanel({
           eyebrow: "交易总览",
+          panelKey: ["latestDecision", "executionLatest"],
           headline: overviewHeadline({ latestDecision, latestOrder, recovery }),
           summary: overviewSummary({ latestDecision, latestOrder, latestFill, blockers, reconciliation, recovery }),
           tone: overviewTone({ health, recovery, blockers, latestOrder }),
@@ -75,6 +76,7 @@ export function renderOverviewView(data) {
         ${surfaceCard({
           title: "执行概览",
           kicker: "执行状态",
+          panelKey: ["executionLatest", "reconciliationLatest"],
           copy: "用一组摘要判断当前动作是否已经真正进入执行链路。",
           content: summaryStrip([
             { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
@@ -89,6 +91,7 @@ export function renderOverviewView(data) {
         ${surfaceCard({
           title: "关注事项",
           kicker: "风险提示",
+          panelKey: "reconciliationLatest",
           copy: blockers.length ? "这里专门提醒当前最需要关注的风险和限制。" : "当前暂无新的硬阻断，但仍保留恢复和对账上下文。",
           classes: blockers.length || !recovery.safe_to_trade ? "" : "is-muted",
           content: timeline(overviewFocusItems({ blockers, recovery, reconciliation, uiHints }), "当前暂无新的高优先级关注项。"),
@@ -112,6 +115,7 @@ export function renderOverviewView(data) {
         ${surfaceCard({
           title: "运行时间线",
           kicker: "关键链路",
+          panelKey: ["latestDecision", "executionLatest", "reconciliationLatest"],
           copy: "按时间把最近一次关键节点串起来，方便快速定位问题卡在哪一段链路。",
           content: timeline(buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation }), "当前暂无新的运行活动。"),
         })}

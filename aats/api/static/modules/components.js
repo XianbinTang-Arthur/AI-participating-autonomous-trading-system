@@ -35,9 +35,9 @@ export function actorTags(...actors) {
     .join("");
 }
 
-export function surfaceCard({ title, kicker = "", copy = "", actions = "", content = "", classes = "" }) {
+export function surfaceCard({ title, kicker = "", copy = "", actions = "", content = "", classes = "", panelKey = "" }) {
   return `
-    <section class="surface-card ${escapeHtml(classes)}">
+    <section class="surface-card ${escapeHtml(classes)}"${panelKeyAttribute(panelKey)}>
       <div class="panel-head">
         <div>
           ${kicker ? `<p class="panel-kicker">${escapeHtml(kicker)}</p>` : ""}
@@ -51,9 +51,9 @@ export function surfaceCard({ title, kicker = "", copy = "", actions = "", conte
   `;
 }
 
-export function primaryStatusPanel({ eyebrow = "", title = "", headline = "", summary = "", pills = [], metrics = [], actions = "", tone = "neutral" }) {
+export function primaryStatusPanel({ eyebrow = "", title = "", headline = "", summary = "", pills = [], metrics = [], actions = "", tone = "neutral", panelKey = "" }) {
   return `
-    <section class="primary-status-panel tone-${escapeHtml(tone)}">
+    <section class="primary-status-panel tone-${escapeHtml(tone)}"${panelKeyAttribute(panelKey)}>
       <div class="panel-head">
         <div>
           ${eyebrow ? `<p class="panel-kicker">${escapeHtml(eyebrow)}</p>` : ""}
@@ -67,6 +67,16 @@ export function primaryStatusPanel({ eyebrow = "", title = "", headline = "", su
       ${metrics.length ? summaryStrip(metrics) : ""}
     </section>
   `;
+}
+
+function panelKeyAttribute(panelKey) {
+  const keys = Array.isArray(panelKey)
+    ? panelKey.filter(Boolean).map(String)
+    : panelKey
+      ? [String(panelKey)]
+      : [];
+  if (!keys.length) return "";
+  return ` data-panel-key="${escapeHtml(keys.join(" "))}"`;
 }
 
 export function summaryStrip(items) {
