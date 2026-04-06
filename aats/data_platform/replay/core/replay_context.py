@@ -123,12 +123,12 @@ class ReplayParameterOverrides:
     """
     min_confirm_ticks: int = 2
     score_stability_threshold: float = 5.0
-    min_safe_net_edge_bps: float = 0.0
+    min_safe_net_edge_bps: float = 2.0
 
     # Signal edge 校准参数（收口在这里，不锁死在 adapter 内部常量）
-    signal_edge_scale_bps: float = 10.0
-    """score -> bps 的缩放系数。score=0.6 * 10 = 6 bps 信号代理。
-    两个 family 共用同一缩放基准，后续可做 scale calibration run。"""
+    signal_edge_scale_bps: float = 12.0
+    """score -> bps 的缩放系数。score=0.6 * 12 = 7.2 bps 信号代理。
+    与 _PARAM_DEFAULTS (rdp_run_step3_research.py) 对齐，两端唯一真相源。"""
 
     directional_trend_weight: float = 0.7
     """directional adapter 里 趋势强度 vs bar return 的混合权重。
@@ -175,6 +175,14 @@ class ReplayParameterOverrides:
     约束: 必须 <= de_risk_net_edge_bps。
     生产端映射: strategy_hedge_independent_failed_thesis_net_edge_bps"""
 
+    catastrophic_failed_thesis_buffer_bps: float = 3.0
+    """灾难性 failed_thesis 缓冲（bps），whipsaw 防护阈值。
+    仅当 expected_net_edge_bps <= failed_thesis_net_edge_bps - 此缓冲 时，
+    判定为灾难性 thesis 失效，允许豁免 min_hold 立即出场。
+    默认 3.0 bps：覆盖 BTC-USDT-SWAP 正常噪声带（~1-2 bps），
+    确保只有真实深度亏损才触发紧急止损。
+    生产端映射: strategy_hedge_independent_catastrophic_failed_thesis_buffer_bps"""
+
     # ── Phase 1 扩展：成本缓冲 ────────────────────────────────────
     expected_slippage_buffer_bps: float = 0.5
     """开仓预期滑点缓冲（bps）。叠加到 cost 计算中。
@@ -217,6 +225,11 @@ class ReplayParameterOverrides:
                 f"约束违反: failed_thesis_net_edge_bps ({self.failed_thesis_net_edge_bps}) "
                 f"必须 <= de_risk_net_edge_bps ({self.de_risk_net_edge_bps})"
             )
+        if self.catastrophic_failed_thesis_buffer_bps < 0.0:
+            raise ValueError(
+                f"约束违反: catastrophic_failed_thesis_buffer_bps "
+                f"({self.catastrophic_failed_thesis_buffer_bps}) 必须 >= 0"
+            )
         if self.close_threshold > self.entry_threshold:
             raise ValueError(
                 f"约束违反: close_threshold ({self.close_threshold}) "
@@ -233,6 +246,28 @@ class ReplayParameterOverrides:
                     f"约束违反: short_close_threshold ({self.short_close_threshold}) "
                     f"应当 <= short_entry_threshold ({self.short_entry_threshold})"
                 )
+        safe_edge = (
+            self.min_safe_net_edge_bps
+            + self.expected_slippage_buffer_bps
+            + self.expected_execution_buffer_bps
+        )
+        # 要求 safe_edge >= de_risk + 1.0 bps 最小间距
+        # 目的: 持仓区间 [safe_edge, ∞) 与 de_risk 区间 (-∞, de_risk] 之间
+        # 至少有 1 bps hysteresis 带，避免边际信号反复翻转 entry/de_risk
+        if safe_edge < self.de_risk_net_edge_bps + 1.0:
+            raise ValueError(
+                f"约束违反: safe_edge ({self.min_safe_net_edge_bps} + "
+                f"{self.expected_slippage_buffer_bps} + "
+                f"{self.expected_execution_buffer_bps} = {safe_edge}) "
+                f"必须 >= de_risk_net_edge_bps ({self.de_risk_net_edge_bps}) + 1.0 bps，"
+                f"否则持仓 hysteresis 带过窄会导致边际信号反复翻转"
+            )
+        if self.min_hold_seconds > self.max_thesis_age_seconds:
+            raise ValueError(
+                f"约束违反: min_hold_seconds ({self.min_hold_seconds}) "
+                f"必须 <= max_thesis_age_seconds ({self.max_thesis_age_seconds})，"
+                f"否则 min_hold 锁定期间 stale_thesis 无法触发正常退出"
+            )
 
     # ── 工厂方法：按 family 获取合理默认参数 ─────────────────────
     @classmethod
@@ -283,6 +318,7 @@ class ReplayParameterOverrides:
             "max_thesis_age_seconds": self.max_thesis_age_seconds,
             "de_risk_net_edge_bps": self.de_risk_net_edge_bps,
             "failed_thesis_net_edge_bps": self.failed_thesis_net_edge_bps,
+            "catastrophic_failed_thesis_buffer_bps": self.catastrophic_failed_thesis_buffer_bps,
             "expected_slippage_buffer_bps": self.expected_slippage_buffer_bps,
             "expected_execution_buffer_bps": self.expected_execution_buffer_bps,
             "max_acceptable_cost_bps": self.max_acceptable_cost_bps,
@@ -317,6 +353,7 @@ class ReplayParameterOverrides:
             "min_hold_seconds", "rebalance_cooldown_seconds",
             "max_thesis_age_seconds",
             "de_risk_net_edge_bps", "failed_thesis_net_edge_bps",
+            "catastrophic_failed_thesis_buffer_bps",
             "expected_slippage_buffer_bps", "expected_execution_buffer_bps",
             "max_acceptable_cost_bps",
             "min_score_drawdown_bps", "min_liquidity_quality",
@@ -350,8 +387,8 @@ class ReplayParameterOverrides:
         return cls(
             min_confirm_ticks=confirm,
             score_stability_threshold=_v("score_stability_threshold", 5.0),
-            min_safe_net_edge_bps=_v("min_safe_net_edge_bps", 0.0),
-            signal_edge_scale_bps=_v("signal_edge_scale_bps", 10.0),
+            min_safe_net_edge_bps=_v("min_safe_net_edge_bps", 2.0),
+            signal_edge_scale_bps=_v("signal_edge_scale_bps", 12.0),
             directional_trend_weight=_v("directional_trend_weight", 0.7),
             directional_return_clamp_bps=_v("directional_return_clamp_bps", 20.0),
             # Phase 1 扩展
@@ -365,6 +402,7 @@ class ReplayParameterOverrides:
             max_thesis_age_seconds=_v("max_thesis_age_seconds", 1800.0),
             de_risk_net_edge_bps=_v("de_risk_net_edge_bps", 2.0),
             failed_thesis_net_edge_bps=_v("failed_thesis_net_edge_bps", -1.0),
+            catastrophic_failed_thesis_buffer_bps=_v("catastrophic_failed_thesis_buffer_bps", 3.0),
             expected_slippage_buffer_bps=_v("expected_slippage_buffer_bps", 0.5),
             expected_execution_buffer_bps=_v("expected_execution_buffer_bps", 0.5),
             max_acceptable_cost_bps=_v("max_acceptable_cost_bps", 7.5),

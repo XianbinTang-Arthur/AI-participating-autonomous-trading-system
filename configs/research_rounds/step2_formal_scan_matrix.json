@@ -20,7 +20,7 @@
           15
         ],
         "min_safe_net_edge_bps": [
-          0,
+          2,
           5,
           10
         ]
@@ -41,7 +41,7 @@
           15
         ],
         "min_safe_net_edge_bps": [
-          0,
+          2,
           5,
           10
         ]

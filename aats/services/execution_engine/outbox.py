@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -229,13 +230,18 @@ class PostgresExecutionOutboxPublisher:
         return True
 
     async def flush_pending(self, *, limit: int = 100) -> None:
-        pending = self.outbox_repo.pending(limit=limit)
+        pending = await asyncio.to_thread(self.outbox_repo.pending, limit=limit)
+        published_ids: list[str] = []
         for envelope in pending:
             try:
                 await self.bus.publish_envelope(envelope, persist=False)
-                self.outbox_repo.mark_published(envelope.event_id)
+                published_ids.append(envelope.event_id)
             except Exception as exc:
-                status = self.outbox_repo.record_failure_with_threshold(
+                if published_ids:
+                    await asyncio.to_thread(self.outbox_repo.mark_published_batch, published_ids)
+                    published_ids = []
+                status = await asyncio.to_thread(
+                    self.outbox_repo.record_failure_with_threshold,
                     envelope.event_id,
                     str(exc),
                     max_attempts=self._MAX_PUBLISH_ATTEMPTS,
@@ -253,6 +259,8 @@ class PostgresExecutionOutboxPublisher:
                 )
                 if status != "FAILED":
                     break  # FIFO: retriable failure blocks subsequent messages until resolved
+        if published_ids:
+            await asyncio.to_thread(self.outbox_repo.mark_published_batch, published_ids)
 
     @staticmethod
     def _seed_intent_from_command_payload(

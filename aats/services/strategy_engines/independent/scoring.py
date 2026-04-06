@@ -73,15 +73,21 @@ def compute_signal_edge_bps(
 
     # ── RDP score-based 信号边际路径 ──────────────────────────────────
     # 当 strategy_signal_edge_scale_bps 由 active_parameters 注入时，
-    # 额外计算 score_based_edge = composite_score × scale。
+    # 切换到 score_based_edge = composite_score × scale 的单路径。
     #
-    # 注意：RDP replay 仅使用 score*scale 单路径；生产端取 max(component, score*scale)，
-    # 因此生产端 signal_edge >= RDP 回测值，entry 行为可能与回测有差异。
-    # RDP Phase 2 验证 (120 天 BTC-USDT-SWAP): scale=20 → pos_ratio 97-98%。
+    # P2-8 修复:
+    #   RDP replay 独立家族在 independent_adapter._compute_edge_layers 中
+    #   采用单一公式 `signal_edge_proxy_bps = dominant_score * signal_edge_scale_bps`。
+    #   旧实现在生产端取 max(component_edge, score_based_edge)，导致生产端
+    #   signal_edge >= 回测值，entry 行为系统性地偏离 replay 验证结论
+    #   (120 天 BTC-USDT-SWAP 回测 scale=20 → pos_ratio 97-98%，但生产端
+    #   component_edge 经常在 score_based_edge 之上，形成不可归因的行为差)。
     #
-    # 取 max 确保:
-    #   1. 向后兼容 — 不降低已有信号强度估计
-    #   2. 当 composite score 整体较强时，score-based 路径可能提供更高估计
+    # 新策略:
+    #   - rdp_scale > 0 (已被 RDP calibration 钉住)    → 使用 score_based_edge
+    #   - rdp_scale is None / 0 (legacy / 未校准)      → 保留 component_edge 旧路径
+    #   这样生产与 replay 的 entry 决策基于同一 signal_edge 公式，
+    #   RDP 推荐的 scale 才真正可跨环境复现。
     rdp_scale = settings.strategy_signal_edge_scale_bps
     if rdp_scale is not None and float(rdp_scale) > 0:
         composite_score = compute_raw_book_score(
@@ -91,7 +97,7 @@ def compute_signal_edge_bps(
             ai_assessment=ai_assessment,
         )
         score_based_edge = composite_score * float(rdp_scale)
-        return max(component_edge, score_based_edge)
+        return score_based_edge
 
     return component_edge
 

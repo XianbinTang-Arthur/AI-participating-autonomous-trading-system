@@ -1,6 +1,6 @@
 ﻿import { localizeError } from "./terms.js";
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 60_000;
 
 export async function requestJson(path, options = {}) {
   const headers = new Headers(options.headers || {});

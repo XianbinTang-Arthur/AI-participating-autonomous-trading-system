@@ -442,6 +442,11 @@ class AATSSettings(BaseSettings):
     strategy_hedge_independent_max_thesis_age_seconds: int = 1_800
     strategy_hedge_independent_de_risk_net_edge_bps: float = 2.0
     strategy_hedge_independent_failed_thesis_net_edge_bps: float = -1.0
+    # 当 expected_net_edge_bps 跌至 failed_thesis 阈值之下 >= 此缓冲 bps 时，
+    # 视为 "灾难性 failed_thesis"，允许豁免 min_hold 立即出场。
+    # 默认 3.0 bps：保护正常行情抖动不会触发 whipsaw（BTC-USDT-SWAP 正常波动带约 1-2 bps），
+    # 同时确保真实深度亏损能够及时止损。
+    strategy_hedge_independent_catastrophic_failed_thesis_buffer_bps: float = 3.0
     strategy_hedge_independent_execution_health_de_risk_enabled: bool = True
     strategy_hedge_independent_liquidity_de_risk_enabled: bool = True
     strategy_hedge_independent_entry_execution_mode: IndependentExecutionPolicyMode = "adaptive"
@@ -677,6 +682,10 @@ class AATSSettings(BaseSettings):
         ):
             raise ValueError(
                 "strategy_hedge_independent_failed_thesis_net_edge_bps_must_not_exceed_de_risk_threshold"
+            )
+        if float(self.strategy_hedge_independent_catastrophic_failed_thesis_buffer_bps) < 0.0:
+            raise ValueError(
+                "strategy_hedge_independent_catastrophic_failed_thesis_buffer_bps_must_be_non_negative"
             )
         if float(self.strategy_hedge_independent_limit_offset_bps_entry) < 0.0:
             raise ValueError("strategy_hedge_independent_limit_offset_bps_entry_must_be_non_negative")

@@ -51,6 +51,21 @@ class PostgresOutboxRepository:
             row.last_error = None
             session.commit()
 
+    def mark_published_batch(self, event_ids: list[str]) -> None:
+        if not event_ids:
+            return
+        now = utc_now()
+        with self.session_factory() as session:
+            for event_id in event_ids:
+                row = session.get(OutboxEventModel, event_id)
+                if row is None:
+                    continue
+                row.status = "PUBLISHED"
+                row.attempt_count += 1
+                row.published_at = now
+                row.last_error = None
+            session.commit()
+
     def record_failure(self, event_id: str, error: str) -> None:
         self.record_failure_with_threshold(event_id, error)
 

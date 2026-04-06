@@ -166,6 +166,12 @@ PARAMETER_MAPPING_INDEPENDENT: dict[str, str] = {
     # 约束: 必须 <= de_risk_net_edge_bps
     "failed_thesis_net_edge_bps": "strategy_hedge_independent_failed_thesis_net_edge_bps",
 
+    # [DIRECT] 灾难性 failed_thesis 缓冲（whipsaw 防护）
+    # 单位一致: bps; 语义: 仅当 net_edge <= failed_thesis_threshold - 此缓冲 时
+    # 判定为灾难性失效，允许豁免 min_hold 立即出场。
+    # 默认 3.0 bps 以吸收正常行情抖动，避免标准 failed_thesis 引发 whipsaw。
+    "catastrophic_failed_thesis_buffer_bps": "strategy_hedge_independent_catastrophic_failed_thesis_buffer_bps",
+
     # ════════════════════════════════════════════════════════════════
     # Phase 1 扩展：成本缓冲
     # ════════════════════════════════════════════════════════════════
@@ -228,6 +234,53 @@ FAMILY_PARAMETER_MAPPINGS: dict[str, dict[str, str]] = {
     "independent": PARAMETER_MAPPING_INDEPENDENT,
     "directional": PARAMETER_MAPPING_DIRECTIONAL,
 }
+
+# ── RDP 研究参数的 "规范 key 集合"，用于检测映射缺失 ──────────────
+#
+# 这些 key 是 RDP Step 3 研究层输出的核心参数名，理论上每个家族都应
+# 提供完整映射。当 build_settings_overrides 发现 JSON 中存在这些 key
+# 但 family 映射缺失时，会记录 WARNING 级日志并统计被丢弃的参数数，
+# 以帮助快速发现 "研究输出了参数但生产端没接上" 的映射漏洞。
+#
+# 非此集合中的参数（如 cost_config 子字段）不会触发警告。
+_RDP_CORE_RESEARCH_PARAMS: frozenset[str] = frozenset({
+    "entry_threshold",
+    "close_threshold",
+    "scale_in_threshold",
+    "short_entry_threshold",
+    "short_close_threshold",
+    "min_hold_seconds",
+    "rebalance_cooldown_seconds",
+    "max_thesis_age_seconds",
+    "de_risk_net_edge_bps",
+    "failed_thesis_net_edge_bps",
+    "catastrophic_failed_thesis_buffer_bps",
+    "expected_slippage_buffer_bps",
+    "expected_execution_buffer_bps",
+    "max_acceptable_cost_bps",
+    "min_score_drawdown_bps",
+    "min_liquidity_quality",
+    "limit_offset_bps_entry",
+    "signal_edge_scale_bps",
+    "score_stability_threshold",
+    "min_confirm_ticks",
+    "min_safe_net_edge_bps",
+})
+
+# ── 参数白名单: 即使映射缺失，这些 key 也不会触发 WARNING ─────────
+#
+# 某些 key 不属于 "RDP 层需要注入生产端" 的范畴，例如:
+#   - cost_config / taker_fee_bps / slippage_bps: 仅供 replay 成本模型
+#   - directional_trend_weight / directional_return_clamp_bps: 仅供 replay adapter
+#
+# 这些参数由 ReplayParameterOverrides 消费，无需透传到 AATSSettings。
+_RDP_REPLAY_ONLY_PARAMS: frozenset[str] = frozenset({
+    "cost_config",
+    "taker_fee_bps",
+    "slippage_bps",
+    "directional_trend_weight",
+    "directional_return_clamp_bps",
+})
 
 # ── 默认路径 ───────────────────────────────────────────────────────
 
@@ -499,6 +552,8 @@ def build_settings_overrides(
 
     overrides: dict[str, Any] = {}
     applied_combos: list[str] = []
+    # combo_key -> 被丢弃的参数集合（用于诊断映射缺失）
+    dropped_by_combo: dict[str, list[str]] = {}
 
     for combo_key, data in all_sets.items():
         parts = combo_key.rsplit("_", 1)
@@ -518,6 +573,20 @@ def build_settings_overrides(
             if rdp_param in values:
                 overrides[settings_field] = values[rdp_param]
 
+        # 诊断: 收集 JSON 里存在但映射未覆盖的核心研究参数
+        # 目的: 当 directional 家族被激活但 PARAMETER_MAPPING_DIRECTIONAL 不完整时,
+        #       能第一时间发现 "JSON 里配了参数但没透传到生产端" 的问题。
+        dropped: list[str] = []
+        for rdp_param in values.keys():
+            if rdp_param in mapping:
+                continue  # 已被映射
+            if rdp_param in _RDP_REPLAY_ONLY_PARAMS:
+                continue  # 属于 replay-only, 不应映射
+            if rdp_param in _RDP_CORE_RESEARCH_PARAMS:
+                dropped.append(rdp_param)
+        if dropped:
+            dropped_by_combo[combo_key] = sorted(dropped)
+
         applied_combos.append(combo_key)
 
     if applied_combos:
@@ -525,6 +594,20 @@ def build_settings_overrides(
             "Active parameter overrides: %d fields from %s",
             len(overrides),
             ", ".join(applied_combos),
+        )
+
+    # 映射缺失 WARNING: 帮助运维/开发者快速定位 "研究输出 → 生产注入" 断链
+    for combo_key, dropped in dropped_by_combo.items():
+        family, _, _timeframe = combo_key.partition("_")
+        log.warning(
+            "Active parameter mapping gap [%s]: %d research params present in JSON "
+            "but not mapped to AATSSettings (family=%s). Dropped keys: %s. "
+            "Check FAMILY_PARAMETER_MAPPINGS['%s'] to add missing entries.",
+            combo_key,
+            len(dropped),
+            family,
+            ", ".join(dropped),
+            family,
         )
 
     return overrides
@@ -580,7 +663,39 @@ def apply_active_parameters_to_settings(
             log.info("Active parameter override: %s = %s (was %s)", key, val, merged[key])
         merged[key] = val
 
+    # ── 结构性不变量校验 ──────────────────────────────────────────
+    _validate_safe_edge_invariant(merged)
+
     return merged
+
+
+def _validate_safe_edge_invariant(settings: dict[str, Any]) -> None:
+    """校验 safe_edge > de_risk_net_edge_bps 不变量。
+
+    若违反则记录 ERROR 级日志，不中断启动（fail-soft），但确保
+    运维人员能第一时间发现配置倒挂。
+    """
+    min_safe = max(float(settings.get(
+        "strategy_hedge_independent_min_safe_net_edge_bps", 2.0,
+    )), 0.0)
+    slippage_buf = max(float(settings.get(
+        "strategy_hedge_independent_expected_slippage_buffer_bps", 0.5,
+    )), 0.0)
+    exec_buf = max(float(settings.get(
+        "strategy_hedge_independent_expected_execution_buffer_bps", 0.5,
+    )), 0.0)
+    de_risk = float(settings.get(
+        "strategy_hedge_independent_de_risk_net_edge_bps", 2.0,
+    ))
+    safe_edge = min_safe + slippage_buf + exec_buf
+    # 要求 safe_edge >= de_risk + 1.0 bps 最小 hysteresis 带
+    if safe_edge < de_risk + 1.0:
+        log.error(
+            "⚠️ 配置倒挂: safe_edge(%.1f = %.1f + %.1f + %.1f) "
+            "< de_risk_net_edge_bps(%.1f) + 1.0 bps，持仓 hysteresis 带过窄。"
+            "请提高 min_safe_net_edge_bps 或降低 de_risk_net_edge_bps",
+            safe_edge, min_safe, slippage_buf, exec_buf, de_risk,
+        )
 
 
 # ══════════════════════════════════════════════════════════════════

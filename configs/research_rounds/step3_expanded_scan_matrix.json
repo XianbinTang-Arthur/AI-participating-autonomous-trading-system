@@ -69,7 +69,7 @@
           0.0
         ],
         "min_safe_net_edge_bps": [
-          0,
+          2,
           3,
           5
         ]
@@ -91,7 +91,7 @@
           0.0
         ],
         "min_safe_net_edge_bps": [
-          0,
+          2,
           3,
           5
         ]
@@ -144,17 +144,17 @@
     "group_d_cost_independent_15m": {
       "family": "independent",
       "timeframe": "15m",
-      "description": "Group D: Cost sensitivity (extended with buffers)",
+      "description": "Group D: Cost sensitivity (extended with buffers). Minimum 0.5 ensures safe_edge > de_risk invariant.",
       "grid": {
         "expected_slippage_buffer_bps": [
-          0.0,
           0.5,
-          1.0
+          1.0,
+          1.5
         ],
         "expected_execution_buffer_bps": [
-          0.0,
           0.5,
-          1.0
+          1.0,
+          1.5
         ],
         "max_acceptable_cost_bps": [
           5.0,
@@ -166,17 +166,17 @@
     "group_d_cost_independent_1h": {
       "family": "independent",
       "timeframe": "1H",
-      "description": "Group D: Cost sensitivity (extended with buffers)",
+      "description": "Group D: Cost sensitivity (extended with buffers). Minimum 0.5 ensures safe_edge > de_risk invariant.",
       "grid": {
         "expected_slippage_buffer_bps": [
-          0.0,
           0.5,
-          1.0
+          1.0,
+          1.5
         ],
         "expected_execution_buffer_bps": [
-          0.0,
           0.5,
-          1.0
+          1.0,
+          1.5
         ],
         "max_acceptable_cost_bps": [
           5.0,

@@ -183,8 +183,8 @@ from aats.bootstrap.active_parameters import (
     PARAMETER_MAPPING_INDEPENDENT,
 )
 
-check("PARAMETER_MAPPING_INDEPENDENT 有 20 个映射",
-      len(PARAMETER_MAPPING_INDEPENDENT) == 20)
+check("PARAMETER_MAPPING_INDEPENDENT 有 21 个映射",
+      len(PARAMETER_MAPPING_INDEPENDENT) == 21)
 check("PARAMETER_MAPPING_DIRECTIONAL 有 3 个映射",
       len(PARAMETER_MAPPING_DIRECTIONAL) == 3)
 check("FAMILY_PARAMETER_MAPPINGS 有 independent + directional",

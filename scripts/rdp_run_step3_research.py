@@ -72,41 +72,195 @@ _DEFAULT_ARTIFACT_ROOT = pathlib.Path("artifacts/research/step3_rounds")
 # Step 3 只运行 independent 家族的扩展校准
 _EXPANDED_ROUND_KEYS = ["independent_15m_expanded", "independent_1h_expanded"]
 
-# 参数约束规则（与 ReplayParameterOverrides.__post_init__ 一致）
-_CONSTRAINT_RULES: list[dict[str, Any]] = [
-    {
-        "name": "failed_thesis <= de_risk",
-        "check": lambda c: c.get("failed_thesis_net_edge_bps", -1.0)
-                           <= c.get("de_risk_net_edge_bps", 2.0),
-        "params": ["failed_thesis_net_edge_bps", "de_risk_net_edge_bps"],
-        "description": "failed_thesis_net_edge_bps 必须 <= de_risk_net_edge_bps",
-    },
-    {
-        "name": "close <= entry",
-        "check": lambda c: c.get("close_threshold", 0.15)
-                           <= c.get("entry_threshold", 0.40),
-        "params": ["close_threshold", "entry_threshold"],
-        "description": "close_threshold 必须 <= entry_threshold",
-    },
-    {
-        "name": "scale_in >= entry",
-        "check": lambda c: c.get("scale_in_threshold", 0.60)
-                           >= c.get("entry_threshold", 0.40),
-        "params": ["scale_in_threshold", "entry_threshold"],
-        "description": "scale_in_threshold 必须 >= entry_threshold",
-    },
-    {
-        "name": "short_close <= short_entry",
-        "check": lambda c: (
-            # 仅当两者均存在时校验 (directional 家族专用)
-            c.get("short_close_threshold") is None
-            or c.get("short_entry_threshold") is None
-            or c["short_close_threshold"] <= c["short_entry_threshold"]
-        ),
-        "params": ["short_close_threshold", "short_entry_threshold"],
-        "description": "short_close_threshold 必须 <= short_entry_threshold (仅当二者均存在)",
-    },
-]
+
+# =========================================================================
+# Family-aware 参数默认值与约束规则 (P1-4 + P1-5)
+# =========================================================================
+#
+# 背景:
+#   ReplayParameterOverrides.for_family("directional") 使用与 independent 不同
+#   的默认阈值 (entry=0.45/close=0.20 vs independent 的 0.40/0.15)。Step 3
+#   merge + constraint 逻辑原本硬编码 independent 默认值，导致:
+#     - directional 家族缺失参数时回填了 independent 默认值
+#     - 约束校验/自动修复使用错误 fallback（如 entry_threshold=0.40），
+#       在 directional 上下文中产生不合理的自动调整
+#
+# 解决方案:
+#   将 _PARAM_DEFAULTS 和 _CONSTRAINT_RULES 从模块级常量重构为 family-aware
+#   工厂函数 _get_param_defaults(family) / _get_constraint_rules(family)。
+#   所有调用点从 ft_key 提取 family 后传入。
+#
+# 真相源:
+#   _DEFAULTS_BY_FAMILY 必须与 ReplayParameterOverrides.for_family() 保持一致，
+#   修改任何一侧都需要同步更新。
+
+# independent 家族默认值（与 ReplayParameterOverrides() 空构造对齐）
+_INDEPENDENT_DEFAULTS: dict[str, float | int | None] = {
+    "signal_edge_scale_bps": 12.0,
+    "taker_fee_bps": 5.0,
+    "slippage_bps": 2.0,
+    "min_confirm_ticks": 2,
+    "min_safe_net_edge_bps": 2.0,
+    "score_stability_threshold": 5.0,
+    "entry_threshold": 0.40,
+    "close_threshold": 0.15,
+    "scale_in_threshold": 0.60,
+    "de_risk_net_edge_bps": 2.0,
+    "failed_thesis_net_edge_bps": -1.0,
+    "catastrophic_failed_thesis_buffer_bps": 3.0,
+    "min_hold_seconds": 300.0,
+    "rebalance_cooldown_seconds": 120.0,
+    "expected_slippage_buffer_bps": 0.5,
+    "expected_execution_buffer_bps": 0.5,
+    "max_thesis_age_seconds": 1800.0,
+    "max_acceptable_cost_bps": 7.5,
+    "min_liquidity_quality": 0.55,
+    "limit_offset_bps_entry": 1.5,
+    "directional_trend_weight": 0.7,
+    "directional_return_clamp_bps": 20.0,
+    # short 阈值默认 None，仅 directional 家族使用
+    "short_entry_threshold": None,
+    "short_close_threshold": None,
+}
+
+# directional 家族默认值（与 ReplayParameterOverrides.for_family("directional") 对齐）
+# 差异: entry_threshold 0.40→0.45, close_threshold 0.15→0.20
+_DIRECTIONAL_DEFAULTS: dict[str, float | int | None] = {
+    **_INDEPENDENT_DEFAULTS,
+    "entry_threshold": 0.45,
+    "close_threshold": 0.20,
+}
+
+_DEFAULTS_BY_FAMILY: dict[str, dict[str, float | int | None]] = {
+    "independent": _INDEPENDENT_DEFAULTS,
+    "directional": _DIRECTIONAL_DEFAULTS,
+}
+
+
+def _family_from_ft_key(ft_key: str) -> str:
+    """从 ft_key (如 'independent_15m' / 'directional_1h_expanded') 提取 family。
+
+    支持:
+      - 'independent_15m' -> 'independent'
+      - 'directional_1h_expanded' -> 'directional'
+      - 无已知前缀时默认 'independent' 以保持向后兼容
+    """
+    lowered = ft_key.lower()
+    if lowered.startswith("directional"):
+        return "directional"
+    if lowered.startswith("independent"):
+        return "independent"
+    return "independent"
+
+
+def _get_param_defaults(family: str = "independent") -> dict[str, float | int | None]:
+    """获取指定 family 的默认参数字典。
+
+    与 ReplayParameterOverrides.for_family(family) 一一对应，修改任何一侧
+    需要同步更新另一侧，否则 Step 3 merge 与 replay 的默认值会出现静默偏差。
+    """
+    return _DEFAULTS_BY_FAMILY.get(family, _INDEPENDENT_DEFAULTS)
+
+
+def _get_constraint_rules(family: str = "independent") -> list[dict[str, Any]]:
+    """返回 family-aware 约束规则列表。
+
+    所有约束默认 fallback 使用对应 family 的默认值，例如:
+      - independent: close_threshold fallback = 0.15, entry_threshold = 0.40
+      - directional: close_threshold fallback = 0.20, entry_threshold = 0.45
+
+    这样在部分参数缺失时，约束检查不会因为错误的 fallback 而误判。
+    """
+    d = _get_param_defaults(family)
+
+    rules: list[dict[str, Any]] = [
+        {
+            "name": "failed_thesis <= de_risk",
+            "check": lambda c, _d=d: (
+                c.get("failed_thesis_net_edge_bps", _d["failed_thesis_net_edge_bps"])
+                <= c.get("de_risk_net_edge_bps", _d["de_risk_net_edge_bps"])
+            ),
+            "params": ["failed_thesis_net_edge_bps", "de_risk_net_edge_bps"],
+            "description": "failed_thesis_net_edge_bps 必须 <= de_risk_net_edge_bps",
+        },
+        {
+            "name": "close <= entry",
+            "check": lambda c, _d=d: (
+                c.get("close_threshold", _d["close_threshold"])
+                <= c.get("entry_threshold", _d["entry_threshold"])
+            ),
+            "params": ["close_threshold", "entry_threshold"],
+            "description": "close_threshold 必须 <= entry_threshold",
+        },
+        {
+            "name": "scale_in >= entry",
+            "check": lambda c, _d=d: (
+                c.get("scale_in_threshold", _d["scale_in_threshold"])
+                >= c.get("entry_threshold", _d["entry_threshold"])
+            ),
+            "params": ["scale_in_threshold", "entry_threshold"],
+            "description": "scale_in_threshold 必须 >= entry_threshold",
+        },
+        {
+            "name": "short_close <= short_entry",
+            "check": lambda c: (
+                # 仅当两者均存在时校验 (directional 家族专用)
+                c.get("short_close_threshold") is None
+                or c.get("short_entry_threshold") is None
+                or c["short_close_threshold"] <= c["short_entry_threshold"]
+            ),
+            "params": ["short_close_threshold", "short_entry_threshold"],
+            "description": "short_close_threshold 必须 <= short_entry_threshold (仅当二者均存在)",
+        },
+        {
+            "name": "safe_edge > de_risk",
+            # 要求 safe_edge >= de_risk + 1.0 bps 最小间距
+            # 目的: 持仓区间 [safe_edge, ∞) 与 de_risk 区间 (-∞, de_risk] 之间至少
+            # 有 1.0 bps 的 hysteresis 带，避免边际信号反复触发 entry/de_risk 翻转
+            "check": lambda c, _d=d: (
+                c.get("min_safe_net_edge_bps", _d["min_safe_net_edge_bps"])
+                + c.get("expected_slippage_buffer_bps", _d["expected_slippage_buffer_bps"])
+                + c.get("expected_execution_buffer_bps", _d["expected_execution_buffer_bps"])
+            ) >= c.get("de_risk_net_edge_bps", _d["de_risk_net_edge_bps"]) + 1.0,
+            "params": [
+                "min_safe_net_edge_bps",
+                "expected_slippage_buffer_bps",
+                "expected_execution_buffer_bps",
+                "de_risk_net_edge_bps",
+            ],
+            "description": (
+                "safe_edge (min_safe + slippage_buffer + exec_buffer) "
+                "必须 >= de_risk_net_edge_bps + 1.0 (至少 1 bps hysteresis 带)"
+            ),
+        },
+        {
+            "name": "min_hold <= max_thesis_age",
+            "check": lambda c, _d=d: (
+                c.get("min_hold_seconds", _d["min_hold_seconds"])
+                <= c.get("max_thesis_age_seconds", _d["max_thesis_age_seconds"])
+            ),
+            "params": ["min_hold_seconds", "max_thesis_age_seconds"],
+            "description": (
+                "min_hold_seconds 必须 <= max_thesis_age_seconds，"
+                "否则 min_hold 锁定期间 stale_thesis 无法触发正常退出"
+            ),
+        },
+        {
+            "name": "catastrophic_buffer >= 0",
+            "check": lambda c, _d=d: (
+                c.get(
+                    "catastrophic_failed_thesis_buffer_bps",
+                    _d["catastrophic_failed_thesis_buffer_bps"],
+                ) >= 0.0
+            ),
+            "params": ["catastrophic_failed_thesis_buffer_bps"],
+            "description": (
+                "catastrophic_failed_thesis_buffer_bps 必须 >= 0，"
+                "用于 whipsaw 防护：只有跨越此缓冲才豁免 min_hold 紧急止损"
+            ),
+        },
+    ]
+    return rules
 
 
 # =========================================================================
@@ -246,30 +400,26 @@ _STEP3_EXPANDED_PARAMS = frozenset({
     "scale_in_threshold",
     "de_risk_net_edge_bps",
     "failed_thesis_net_edge_bps",
+    "catastrophic_failed_thesis_buffer_bps",
     "min_hold_seconds",
     "rebalance_cooldown_seconds",
     "expected_slippage_buffer_bps",
     "expected_execution_buffer_bps",
+    # 以下参数虽未做 Step 3 专项扫描，但需纳入合并输出和约束校验
+    "max_thesis_age_seconds",
+    "max_acceptable_cost_bps",
+    "min_liquidity_quality",
+    "limit_offset_bps_entry",
+    "directional_trend_weight",
+    "directional_return_clamp_bps",
+    "short_entry_threshold",
+    "short_close_threshold",
 })
 
-# ReplayParameterOverrides 默认值
-_PARAM_DEFAULTS: dict[str, float | int] = {
-    "signal_edge_scale_bps": 12.0,
-    "taker_fee_bps": 5.0,
-    "slippage_bps": 2.0,
-    "min_confirm_ticks": 2,
-    "min_safe_net_edge_bps": 0.0,
-    "score_stability_threshold": 5.0,
-    "entry_threshold": 0.40,
-    "close_threshold": 0.15,
-    "scale_in_threshold": 0.60,
-    "de_risk_net_edge_bps": 2.0,
-    "failed_thesis_net_edge_bps": -1.0,
-    "min_hold_seconds": 300.0,
-    "rebalance_cooldown_seconds": 120.0,
-    "expected_slippage_buffer_bps": 0.5,
-    "expected_execution_buffer_bps": 0.5,
-}
+# 向后兼容别名（如有外部测试或脚本仍 import _PARAM_DEFAULTS / _CONSTRAINT_RULES）
+# 新代码应使用 _get_param_defaults(family) / _get_constraint_rules(family)
+_PARAM_DEFAULTS: dict[str, float | int | None] = _INDEPENDENT_DEFAULTS
+_CONSTRAINT_RULES: list[dict[str, Any]] = _get_constraint_rules("independent")
 
 _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 
@@ -292,7 +442,8 @@ def _merge_recommendations(
     - Step 2 基础参数直接采用 (scale, cost, ticks)
     - Step 3 扩展参数直接采用 (entry/close/risk/timing/buffer)
     - 两步都有推荐时, Step 3 扩展参数优先; 基础参数取 confidence 更高者
-    - 缺失参数使用 ReplayParameterOverrides 默认值
+    - 缺失参数使用 family-aware ReplayParameterOverrides 默认值
+      (independent: entry=0.40/close=0.15; directional: entry=0.45/close=0.20)
 
     Returns:
         {ft_key: {param_name: {value, confidence, reason, source}}}
@@ -309,6 +460,8 @@ def _merge_recommendations(
 
     for ft_key in sorted(all_ft_keys):
         m: dict[str, Any] = {}
+        family = _family_from_ft_key(ft_key)
+        family_defaults = _get_param_defaults(family)
 
         # (a) 先填充 Step 2 基线值
         s2 = s2_cands.get(ft_key, {})
@@ -320,11 +473,14 @@ def _merge_recommendations(
                     "reason": "来自 Step 2 baseline",
                     "source": "step2",
                 }
-            elif pname in _PARAM_DEFAULTS:
+            elif pname in family_defaults:
                 m[pname] = {
-                    "value": _PARAM_DEFAULTS[pname],
+                    "value": family_defaults[pname],
                     "confidence": "low",
-                    "reason": "使用 ReplayParameterOverrides 默认值",
+                    "reason": (
+                        f"使用 ReplayParameterOverrides.for_family("
+                        f"{family!r}) 默认值"
+                    ),
                     "source": "default",
                 }
 
@@ -378,6 +534,8 @@ def _validate_constraints(
 ) -> dict[str, Any]:
     """验证合并后的参数是否满足 ReplayParameterOverrides 的约束。
 
+    每个 ft_key 使用其 family 对应的 constraint rules 和默认 fallback
+    (避免 directional 家族上下文中使用 independent 的 entry=0.40 兜底)。
     若检测到违反, 尝试自动修复 (最小幅度调整)。
 
     Returns:
@@ -387,17 +545,22 @@ def _validate_constraints(
     auto_fixes: list[dict[str, Any]] = []
 
     for ft_key, params_dict in merged.items():
-        for rule in _CONSTRAINT_RULES:
+        family = _family_from_ft_key(ft_key)
+        rules = _get_constraint_rules(family)
+
+        for rule in rules:
             # 每次检查前重新提取值, 确保使用前一个 auto-fix 的结果
             values = {
                 k: v["value"]
                 for k, v in params_dict.items()
                 if isinstance(v, dict) and "value" in v
+                and v["value"] is not None
             }
 
             if not rule["check"](values):
                 violation = {
                     "ft_key": ft_key,
+                    "family": family,
                     "rule": rule["name"],
                     "description": rule["description"],
                     "values": {p: values.get(p) for p in rule["params"]},
@@ -406,6 +569,7 @@ def _validate_constraints(
 
                 fix = _auto_fix_constraint(
                     ft_key, rule["name"], values, params_dict,
+                    family=family,
                 )
                 if fix:
                     auto_fixes.append(fix)
@@ -422,6 +586,8 @@ def _auto_fix_constraint(
     rule_name: str,
     values: dict[str, Any],
     params_dict: dict[str, Any],
+    *,
+    family: str = "independent",
 ) -> dict[str, Any] | None:
     """尝试自动修复约束违反。
 
@@ -429,9 +595,16 @@ def _auto_fix_constraint(
     - failed_thesis <= de_risk: 上调 de_risk 至 failed_thesis + 3.0
     - close <= entry: 下调 close 至 entry - 0.05
     - scale_in >= entry: 上调 scale_in 至 entry + 0.10
+    - safe_edge > de_risk: 上调 min_safe 使 safe_edge = de_risk + 1.0
+    - min_hold <= max_thesis_age: 下调 min_hold 至 max_thesis_age
+
+    所有 fallback 值均取自 family-aware 默认字典，避免 directional 家族
+    回退到 independent 的错误基线。
     """
+    d = _get_param_defaults(family)
+
     if rule_name == "failed_thesis <= de_risk":
-        ft = values.get("failed_thesis_net_edge_bps", -1.0)
+        ft = values.get("failed_thesis_net_edge_bps", d["failed_thesis_net_edge_bps"])
         new_dr = round(ft + 3.0, 4)
         old_dr = values.get("de_risk_net_edge_bps")
         params_dict["de_risk_net_edge_bps"] = {
@@ -441,13 +614,13 @@ def _auto_fix_constraint(
             "source": "auto_fix",
         }
         return {
-            "ft_key": ft_key, "rule": rule_name,
+            "ft_key": ft_key, "family": family, "rule": rule_name,
             "param": "de_risk_net_edge_bps",
             "old": old_dr, "new": new_dr,
         }
 
     if rule_name == "close <= entry":
-        entry = values.get("entry_threshold", 0.40)
+        entry = values.get("entry_threshold", d["entry_threshold"])
         new_close = max(0.0, round(entry - 0.05, 4))
         old_close = values.get("close_threshold")
         params_dict["close_threshold"] = {
@@ -457,13 +630,13 @@ def _auto_fix_constraint(
             "source": "auto_fix",
         }
         return {
-            "ft_key": ft_key, "rule": rule_name,
+            "ft_key": ft_key, "family": family, "rule": rule_name,
             "param": "close_threshold",
             "old": old_close, "new": new_close,
         }
 
     if rule_name == "scale_in >= entry":
-        entry = values.get("entry_threshold", 0.40)
+        entry = values.get("entry_threshold", d["entry_threshold"])
         new_si = round(entry + 0.10, 4)
         old_si = values.get("scale_in_threshold")
         params_dict["scale_in_threshold"] = {
@@ -473,9 +646,77 @@ def _auto_fix_constraint(
             "source": "auto_fix",
         }
         return {
-            "ft_key": ft_key, "rule": rule_name,
+            "ft_key": ft_key, "family": family, "rule": rule_name,
             "param": "scale_in_threshold",
             "old": old_si, "new": new_si,
+        }
+
+    if rule_name == "safe_edge > de_risk":
+        de_risk = values.get("de_risk_net_edge_bps", d["de_risk_net_edge_bps"])
+        slip = values.get(
+            "expected_slippage_buffer_bps", d["expected_slippage_buffer_bps"],
+        )
+        exe = values.get(
+            "expected_execution_buffer_bps", d["expected_execution_buffer_bps"],
+        )
+        # 上调 min_safe 使 safe_edge = de_risk + 1.0
+        new_min_safe = round(de_risk + 1.0 - slip - exe, 4)
+        new_min_safe = max(new_min_safe, 0.0)
+        old_min_safe = values.get("min_safe_net_edge_bps")
+        params_dict["min_safe_net_edge_bps"] = {
+            **params_dict.get("min_safe_net_edge_bps", {}),
+            "value": new_min_safe,
+            "reason": (
+                f"Auto-fixed: min_safe 上调至 {new_min_safe} "
+                f"使 safe_edge={new_min_safe}+{slip}+{exe}"
+                f"={round(new_min_safe + slip + exe, 4)} > de_risk={de_risk}"
+            ),
+            "source": "auto_fix",
+        }
+        return {
+            "ft_key": ft_key, "family": family, "rule": rule_name,
+            "param": "min_safe_net_edge_bps",
+            "old": old_min_safe, "new": new_min_safe,
+        }
+
+    if rule_name == "min_hold <= max_thesis_age":
+        max_age = values.get("max_thesis_age_seconds", d["max_thesis_age_seconds"])
+        old_hold = values.get("min_hold_seconds")
+        new_hold = max_age
+        params_dict["min_hold_seconds"] = {
+            **params_dict.get("min_hold_seconds", {}),
+            "value": new_hold,
+            "reason": (
+                f"Auto-fixed: min_hold 下调至 {new_hold} "
+                f"(= max_thesis_age_seconds)"
+            ),
+            "source": "auto_fix",
+        }
+        return {
+            "ft_key": ft_key, "family": family, "rule": rule_name,
+            "param": "min_hold_seconds",
+            "old": old_hold, "new": new_hold,
+        }
+
+    if rule_name == "short_close <= short_entry":
+        s_entry = values.get("short_entry_threshold")
+        if s_entry is None:
+            return None
+        new_s_close = max(0.0, round(s_entry - 0.05, 4))
+        old_s_close = values.get("short_close_threshold")
+        params_dict["short_close_threshold"] = {
+            **params_dict.get("short_close_threshold", {}),
+            "value": new_s_close,
+            "reason": (
+                f"Auto-fixed: short_close 下调至 {new_s_close} "
+                f"(short_entry={s_entry} - 0.05)"
+            ),
+            "source": "auto_fix",
+        }
+        return {
+            "ft_key": ft_key, "family": family, "rule": rule_name,
+            "param": "short_close_threshold",
+            "old": old_s_close, "new": new_s_close,
         }
 
     return None

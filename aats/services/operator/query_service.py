@@ -3512,6 +3512,7 @@ class OperatorQueryService:
             "hedge_independent_max_thesis_age_seconds": self.runtime.settings.strategy_hedge_independent_max_thesis_age_seconds,
             "hedge_independent_de_risk_net_edge_bps": self.runtime.settings.strategy_hedge_independent_de_risk_net_edge_bps,
             "hedge_independent_failed_thesis_net_edge_bps": self.runtime.settings.strategy_hedge_independent_failed_thesis_net_edge_bps,
+            "hedge_independent_catastrophic_failed_thesis_buffer_bps": self.runtime.settings.strategy_hedge_independent_catastrophic_failed_thesis_buffer_bps,
             "hedge_independent_execution_health_de_risk_enabled": self.runtime.settings.strategy_hedge_independent_execution_health_de_risk_enabled,
             "hedge_independent_liquidity_de_risk_enabled": self.runtime.settings.strategy_hedge_independent_liquidity_de_risk_enabled,
             "hedge_independent_entry_execution_mode": self.runtime.settings.strategy_hedge_independent_entry_execution_mode,
@@ -10365,7 +10366,10 @@ class OperatorQueryService:
                 await sync_funding()
             evaluate_guard = getattr(self.runtime, "_evaluate_derivatives_live_guard_after_refresh", None)
             if callable(evaluate_guard):
-                evaluate_guard()
+                # 修复: `_evaluate_derivatives_live_guard_after_refresh` 是 async def,
+                # 之前未加 await 导致 guard 重新评估从未实际运行,
+                # refresh 后阻塞状态永远无法解除 (test_operator_api 相关测试因此失败)。
+                await evaluate_guard()
         return snapshot
 
     def _stuck_submission_resolution(

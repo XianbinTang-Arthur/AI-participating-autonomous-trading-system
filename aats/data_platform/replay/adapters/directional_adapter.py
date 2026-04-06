@@ -280,7 +280,7 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
         注意: 本方法会直接 append blocking_reasons 列表（副作用传参）。
 
         close_reason 值域:
-          thesis_failed / de_risk / score_below_close /
+          thesis_failed / catastrophic_thesis_failed / de_risk / score_below_close /
           direction_reversal / thesis_stale / ""（非 close 时）
         """
         close_thresh = params.get_close_threshold(state.position_side)
@@ -291,14 +291,28 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             held_seconds = 0.0
             if state.entry_ts is not None:
                 held_seconds = (bar.ts - state.entry_ts).total_seconds()
-            if held_seconds < params.min_hold_seconds:
+
+            # 灾难性 failed_thesis 判定（whipsaw 防护）
+            # 只有当 net_edge 深度跌破 failed_thesis 阈值（跨越 catastrophic buffer）
+            # 才豁免 min_hold 立即止损；否则遵守 min_hold 冷却。
+            catastrophic_threshold = (
+                params.failed_thesis_net_edge_bps
+                - max(params.catastrophic_failed_thesis_buffer_bps, 0.0)
+            )
+            is_catastrophic = expected_net_edge_bps <= catastrophic_threshold + 1e-9
+
+            if held_seconds < params.min_hold_seconds and not is_catastrophic:
                 return "hold", "holding", ""
 
             should_close = False
             close_reason = ""
 
-            # thesis 失效（最紧急 — 净边际大幅为负）
-            if expected_net_edge_bps < params.failed_thesis_net_edge_bps:
+            # 灾难性 thesis 失效（最紧急 — 深度亏损，豁免 min_hold）
+            if is_catastrophic:
+                should_close = True
+                close_reason = "catastrophic_thesis_failed"
+            # 标准 thesis 失效（净边际小幅为负）
+            elif expected_net_edge_bps < params.failed_thesis_net_edge_bps:
                 should_close = True
                 close_reason = "thesis_failed"
             # 降风险（净边际变薄但未到失效）

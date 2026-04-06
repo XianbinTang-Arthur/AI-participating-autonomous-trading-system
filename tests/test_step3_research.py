@@ -483,13 +483,24 @@ print("9. P0 修复: auto-fix 级联不使用过期 values")
 print("=" * 60)
 
 # 构造级联场景: close > entry 且 scale_in < entry
+# 注意: 需要给足 min_safe/slip/exe/max_thesis_age 以避免触发不相关的
+# safe_edge > de_risk 与 min_hold <= max_thesis_age 约束
 cascade = {
     "test_ft": {
         "entry_threshold": {"value": 0.30, "confidence": "high"},
         "close_threshold": {"value": 0.40, "confidence": "medium"},  # 违反 close <= entry
         "scale_in_threshold": {"value": 0.20, "confidence": "medium"},  # 违反 scale_in >= entry
-        "de_risk_net_edge_bps": {"value": 5.0, "confidence": "medium"},
+        "de_risk_net_edge_bps": {"value": 2.0, "confidence": "medium"},
         "failed_thesis_net_edge_bps": {"value": -1.0, "confidence": "low"},
+        # 避免 safe_edge > de_risk 被触发: safe_edge = 4.0+0.5+0.5 = 5.0 >= 2.0+1.0
+        "min_safe_net_edge_bps": {"value": 4.0, "confidence": "medium"},
+        "expected_slippage_buffer_bps": {"value": 0.5, "confidence": "low"},
+        "expected_execution_buffer_bps": {"value": 0.5, "confidence": "low"},
+        # 避免 min_hold <= max_thesis_age 被触发
+        "min_hold_seconds": {"value": 300.0, "confidence": "low"},
+        "max_thesis_age_seconds": {"value": 1800.0, "confidence": "low"},
+        # 避免 catastrophic_buffer >= 0 被触发
+        "catastrophic_failed_thesis_buffer_bps": {"value": 3.0, "confidence": "low"},
     },
 }
 cr_cascade = _s3._validate_constraints(cascade)
@@ -542,9 +553,26 @@ print("=" * 60)
 print("11. P1 修复: short_close <= short_entry 约束")
 print("=" * 60)
 
-check("约束规则数量 = 4", len(_s3._CONSTRAINT_RULES) == 4)
+# 约束规则总数 (独立 + 方向 + 短仓): failed_thesis<=de_risk, close<=entry,
+# scale_in>=entry, short_close<=short_entry, safe_edge>de_risk,
+# min_hold<=max_thesis_age, catastrophic_buffer>=0 → 共 7 条
+check(
+    "约束规则数量 = 7",
+    len(_s3._CONSTRAINT_RULES) == 7,
+    f"got {len(_s3._CONSTRAINT_RULES)}",
+)
+# P1-4+P1-5: 同样数量的 family-aware 规则
+check(
+    "independent 家族约束规则数量 = 7",
+    len(_s3._get_constraint_rules("independent")) == 7,
+)
+check(
+    "directional 家族约束规则数量 = 7",
+    len(_s3._get_constraint_rules("directional")) == 7,
+)
 
 # 11a: 两者均为 None 时不报错
+# 给足所有必要字段，避免 safe_edge/min_hold/catastrophic_buffer 触发
 no_short = {
     "test_ft": {
         "entry_threshold": {"value": 0.40, "confidence": "high"},
@@ -552,10 +580,17 @@ no_short = {
         "scale_in_threshold": {"value": 0.60, "confidence": "medium"},
         "de_risk_net_edge_bps": {"value": 2.0, "confidence": "medium"},
         "failed_thesis_net_edge_bps": {"value": -1.0, "confidence": "low"},
+        "min_safe_net_edge_bps": {"value": 2.0, "confidence": "low"},
+        "expected_slippage_buffer_bps": {"value": 0.5, "confidence": "low"},
+        "expected_execution_buffer_bps": {"value": 0.5, "confidence": "low"},
+        "min_hold_seconds": {"value": 300.0, "confidence": "low"},
+        "max_thesis_age_seconds": {"value": 1800.0, "confidence": "low"},
+        "catastrophic_failed_thesis_buffer_bps": {"value": 3.0, "confidence": "low"},
     },
 }
 cr_no_short = _s3._validate_constraints(no_short)
-check("无 short 参数: 全部通过", cr_no_short["all_passed"])
+check("无 short 参数: 全部通过", cr_no_short["all_passed"],
+      f"violations: {[v['rule'] for v in cr_no_short['violations']]}")
 
 # 11b: 两者存在且合法
 with_short_ok = {
@@ -643,6 +678,184 @@ m_no_override = _s3._merge_recommendations(s2_for_override, s3_low)
 check(
     "low conf step3 不覆盖 step2 base: value=10.0",
     m_no_override["independent_15m"]["signal_edge_scale_bps"]["value"] == 10.0,
+)
+
+print()
+
+# ══════════════════════════════════════════════════════════════
+# 14. P1-4+P1-5 修复: _PARAM_DEFAULTS 和 _CONSTRAINT_RULES family-aware
+# ══════════════════════════════════════════════════════════════
+print("=" * 60)
+print("14. P1-4+P1-5: family-aware 默认值与约束规则")
+print("=" * 60)
+
+# 14a: _family_from_ft_key 正确解析
+check(
+    "independent_15m -> independent",
+    _s3._family_from_ft_key("independent_15m") == "independent",
+)
+check(
+    "directional_1h -> directional",
+    _s3._family_from_ft_key("directional_1h") == "directional",
+)
+check(
+    "directional_15m_expanded -> directional",
+    _s3._family_from_ft_key("directional_15m_expanded") == "directional",
+)
+# 未知前缀回退到 independent
+check(
+    "unknown prefix -> independent (backward compat)",
+    _s3._family_from_ft_key("mystery_5m") == "independent",
+)
+
+# 14b: _get_param_defaults 返回正确的 family-specific 默认
+ind_defaults = _s3._get_param_defaults("independent")
+dir_defaults = _s3._get_param_defaults("directional")
+check(
+    "independent entry_threshold = 0.40",
+    ind_defaults["entry_threshold"] == 0.40,
+)
+check(
+    "independent close_threshold = 0.15",
+    ind_defaults["close_threshold"] == 0.15,
+)
+check(
+    "directional entry_threshold = 0.45",
+    dir_defaults["entry_threshold"] == 0.45,
+)
+check(
+    "directional close_threshold = 0.20",
+    dir_defaults["close_threshold"] == 0.20,
+)
+# 两者非 entry/close 字段应一致（仅 entry/close 差异）
+check(
+    "independent/directional 共享 de_risk=2.0",
+    ind_defaults["de_risk_net_edge_bps"] == dir_defaults["de_risk_net_edge_bps"],
+)
+check(
+    "independent/directional 共享 catastrophic_buffer=3.0",
+    ind_defaults["catastrophic_failed_thesis_buffer_bps"]
+    == dir_defaults["catastrophic_failed_thesis_buffer_bps"]
+    == 3.0,
+)
+
+# 14c: _merge_recommendations 为 directional ft_key 回填 directional 默认值
+s2_dir = {
+    "candidates": {
+        "directional_15m": {},  # 完全空，强制走默认值
+    },
+}
+s3_empty: dict[str, dict] = {}
+m_dir = _s3._merge_recommendations(s2_dir, s3_empty)
+check(
+    "directional 合并后 entry_threshold = 0.45 (directional 默认)",
+    m_dir["directional_15m"]["entry_threshold"]["value"] == 0.45,
+    f"got {m_dir['directional_15m']['entry_threshold']['value']}",
+)
+check(
+    "directional 合并后 close_threshold = 0.20 (directional 默认)",
+    m_dir["directional_15m"]["close_threshold"]["value"] == 0.20,
+    f"got {m_dir['directional_15m']['close_threshold']['value']}",
+)
+# independent 对照
+s2_ind = {
+    "candidates": {
+        "independent_15m": {},
+    },
+}
+m_ind = _s3._merge_recommendations(s2_ind, s3_empty)
+check(
+    "independent 合并后 entry_threshold = 0.40 (independent 默认)",
+    m_ind["independent_15m"]["entry_threshold"]["value"] == 0.40,
+)
+check(
+    "independent 合并后 close_threshold = 0.15 (independent 默认)",
+    m_ind["independent_15m"]["close_threshold"]["value"] == 0.15,
+)
+
+# 14d: _validate_constraints 为 directional 使用 directional fallback
+# 如果只提供 close=0.99 而不提供 entry，auto-fix 应使用 directional
+# 的 entry=0.45 作为 fallback → close = 0.45 - 0.05 = 0.40
+dir_violation = {
+    "directional_15m": {
+        "close_threshold": {"value": 0.99, "confidence": "low"},
+        # 其他字段充足以避免触发额外约束
+        "min_safe_net_edge_bps": {"value": 2.0, "confidence": "low"},
+        "expected_slippage_buffer_bps": {"value": 0.5, "confidence": "low"},
+        "expected_execution_buffer_bps": {"value": 0.5, "confidence": "low"},
+        "de_risk_net_edge_bps": {"value": 2.0, "confidence": "low"},
+        "failed_thesis_net_edge_bps": {"value": -1.0, "confidence": "low"},
+        "min_hold_seconds": {"value": 300.0, "confidence": "low"},
+        "max_thesis_age_seconds": {"value": 1800.0, "confidence": "low"},
+        "catastrophic_failed_thesis_buffer_bps": {"value": 3.0, "confidence": "low"},
+    },
+}
+cr_dir = _s3._validate_constraints(dir_violation)
+# 应检测到 close <= entry 违反 (entry fallback = 0.45, close = 0.99 > 0.45)
+dir_close_rule_violated = any(
+    v["rule"] == "close <= entry" for v in cr_dir["violations"]
+)
+check("directional: close > entry 违反被检测", dir_close_rule_violated)
+# 违反记录应包含 family 字段
+dir_violations_with_family = [
+    v for v in cr_dir["violations"] if v.get("family") == "directional"
+]
+check(
+    "directional: 违反记录带 family=directional",
+    len(dir_violations_with_family) >= 1,
+)
+# auto-fix 应使用 directional 默认: new_close = 0.45 - 0.05 = 0.40
+fixed_dir_close = dir_violation["directional_15m"]["close_threshold"]["value"]
+check(
+    f"directional auto-fix: close={fixed_dir_close} == 0.40 (directional entry=0.45 - 0.05)",
+    abs(fixed_dir_close - 0.40) < 1e-9,
+    f"got {fixed_dir_close}",
+)
+
+# 对照: independent 同样场景 auto-fix 应使用 independent 的 0.40
+ind_violation = {
+    "independent_15m": {
+        "close_threshold": {"value": 0.99, "confidence": "low"},
+        "min_safe_net_edge_bps": {"value": 2.0, "confidence": "low"},
+        "expected_slippage_buffer_bps": {"value": 0.5, "confidence": "low"},
+        "expected_execution_buffer_bps": {"value": 0.5, "confidence": "low"},
+        "de_risk_net_edge_bps": {"value": 2.0, "confidence": "low"},
+        "failed_thesis_net_edge_bps": {"value": -1.0, "confidence": "low"},
+        "min_hold_seconds": {"value": 300.0, "confidence": "low"},
+        "max_thesis_age_seconds": {"value": 1800.0, "confidence": "low"},
+        "catastrophic_failed_thesis_buffer_bps": {"value": 3.0, "confidence": "low"},
+    },
+}
+cr_ind = _s3._validate_constraints(ind_violation)
+fixed_ind_close = ind_violation["independent_15m"]["close_threshold"]["value"]
+check(
+    f"independent auto-fix: close={fixed_ind_close} == 0.35 (independent entry=0.40 - 0.05)",
+    abs(fixed_ind_close - 0.35) < 1e-9,
+    f"got {fixed_ind_close}",
+)
+
+# 14e: directional 家族的 close_threshold 默认满足 close <= entry
+# 即使完全空的 values, directional 的 0.20 <= 0.45 仍应通过
+rules_dir = _s3._get_constraint_rules("directional")
+close_rule = next(r for r in rules_dir if r["name"] == "close <= entry")
+check("directional 空 values: close<=entry 默认通过", close_rule["check"]({}))
+
+rules_ind = _s3._get_constraint_rules("independent")
+close_rule_ind = next(r for r in rules_ind if r["name"] == "close <= entry")
+check("independent 空 values: close<=entry 默认通过", close_rule_ind["check"]({}))
+
+# 14f: 向后兼容别名 _PARAM_DEFAULTS 仍存在（内部值为 independent 默认）
+check(
+    "_PARAM_DEFAULTS 别名存在",
+    hasattr(_s3, "_PARAM_DEFAULTS"),
+)
+check(
+    "_PARAM_DEFAULTS 内容 = independent 默认",
+    _s3._PARAM_DEFAULTS["entry_threshold"] == 0.40,
+)
+check(
+    "_CONSTRAINT_RULES 别名存在",
+    hasattr(_s3, "_CONSTRAINT_RULES") and len(_s3._CONSTRAINT_RULES) == 7,
 )
 
 print()

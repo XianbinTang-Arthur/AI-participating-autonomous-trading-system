@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from threading import Lock
@@ -42,7 +43,11 @@ class ExecutionCommandProcessor:
 
     async def process_pending(self, *, limit: int = 20) -> int:
         sent_stale_before = utc_now() - timedelta(seconds=self.sent_retry_after_seconds)
-        commands = self.execution_command_repo.pending_commands(limit=limit, sent_stale_before=sent_stale_before)
+        commands = await asyncio.to_thread(
+            self.execution_command_repo.pending_commands,
+            limit=limit,
+            sent_stale_before=sent_stale_before,
+        )
         processed = 0
         for command in commands:
             command_type = str(command.get("command_type") or "")
@@ -54,12 +59,14 @@ class ExecutionCommandProcessor:
             if not self.can_execute_command(command):
                 continue
             claimed_at = utc_now()
-            if not self.execution_command_repo.claim_command(
+            claimed = await asyncio.to_thread(
+                self.execution_command_repo.claim_command,
                 command_id=str(command["command_id"]),
                 expected_state=command_state,
                 expected_updated_at=command["updated_at"],
                 updated_at=claimed_at,
-            ):
+            )
+            if not claimed:
                 continue
             claimed = dict(command)
             claimed["state"] = "SENT"

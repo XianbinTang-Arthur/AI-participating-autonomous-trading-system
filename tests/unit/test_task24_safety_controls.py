@@ -252,7 +252,7 @@ class TestTask24SafetyControls(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        runtime._record_background_failure(subsystem="unit_test_loop", exc=RuntimeError("boom"))
+        await runtime._record_background_failure(subsystem="unit_test_loop", exc=RuntimeError("boom"))
 
         error_summary = runtime.event_store.latest(topics.EXECUTION_ERROR_SUMMARIES, key="unit_test_loop")
         processing_failure = runtime.event_store.latest(topics.PROCESSING_FAILURES, key="unit_test_loop")

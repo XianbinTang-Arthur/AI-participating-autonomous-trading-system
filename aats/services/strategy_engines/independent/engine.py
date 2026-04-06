@@ -24,6 +24,7 @@ from .lifecycle import (
     close_reason_code,
     compute_de_risk_target_qty,
     compute_thesis_age_seconds,
+    is_catastrophic_failed_thesis,
     min_hold_remaining_seconds,
     rebalance_remaining_seconds,
     determine_close_reason,
@@ -336,11 +337,51 @@ def _evaluate_book_core(
                 context=context,
                 leg=leg,
             )
-            if min_hold_seconds > 0:
+            # failed_thesis 的 min_hold 豁免策略（whipsaw 防护）：
+            # ------------------------------------------------------------------
+            # failed_thesis 触发条件为 net_edge <= failed_thesis_threshold（默认 -1.0 bps）。
+            # 该阈值可能被正常行情抖动短暂击穿（如 5 秒内瞬时跌至 -1.5 bps 后立即恢复）。
+            # 若无条件豁免 min_hold 立即出场，会在抖动结束后重新开仓，
+            # 承担双向手续费 + 滑点，形成 whipsaw 亏损。
+            #
+            # 因此我们将 failed_thesis 细分为两级：
+            #   (a) 标准 failed_thesis: failed_thesis_threshold <= net_edge < -catastrophic_buffer 缓冲
+            #       → 仍需遵守 min_hold 冷却，由抖动保护窗口吸收瞬时噪声；
+            #         min_hold 满足后才允许立即收口。
+            #   (b) 灾难性 failed_thesis: net_edge <= failed_thesis_threshold - catastrophic_buffer
+            #       → 深度亏损，thesis 真实失效，必须立即止损（豁免 min_hold）。
+            #
+            # catastrophic_buffer 默认 3.0 bps：基于 BTC-USDT-SWAP 正常波动带约 1-2 bps 推导，
+            # 跨越 buffer 意味着跌幅超出常规噪声范围，判定为真实的灾难性移动。
+            expected_net_edge_for_close = (
+                None if expectancy is None else _expectancy_net_edge_bps(expectancy)
+            )
+            catastrophic_failed_thesis = (
+                close_reason == "failed_thesis"
+                and is_catastrophic_failed_thesis(
+                    settings=settings,
+                    expected_net_edge_bps=expected_net_edge_for_close,
+                )
+            )
+            if catastrophic_failed_thesis:
+                target_qty = Decimal("0")
+                state = "closing"
+                book_action = "close_failed_thesis"
+                reason_codes.append(
+                    f"independent_{leg}_book_close_catastrophic_failed_thesis"
+                )
+                if min_hold_seconds > 0:
+                    reason_codes.append(
+                        f"independent_{leg}_book_min_hold_bypassed_for_catastrophic_failed_thesis"
+                    )
+            elif min_hold_seconds > 0:
                 blocked_reasons.append(f"independent_{leg}_book_min_hold_active")
                 state = "blocked"
                 book_action = "blocked"
             elif close_reason == "failed_thesis":
+                # 标准 failed_thesis (非灾难性)：min_hold 已满足，立即收口。
+                # 与历史行为一致 —— whipsaw 由 min_hold 窗口吸收，
+                # 到达 min_hold 之后任何 failed_thesis 都视为已确认的论点失效。
                 target_qty = Decimal("0")
                 state = "closing"
                 book_action = "close_failed_thesis"

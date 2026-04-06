@@ -859,7 +859,8 @@ class OrderManager:
         return self.exit_execution_repo.get_exit_execution_intent_by_execution_chain(execution_chain_id)
 
     async def sync_exchange_state(self) -> None:
-        order_states, fills = await self.adapter.sync(self._sync_candidates())
+        candidates = await asyncio.to_thread(self._sync_candidates)
+        order_states, fills = await self.adapter.sync(candidates)
         persisted_states: list[OrderState] = []
         for order_state in order_states:
             persisted_states.append(

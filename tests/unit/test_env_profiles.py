@@ -354,7 +354,8 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_family_independent_live_execution_enabled"] is expected_independent_family_enabled
         expected_independent_entry = 0.30 if profile == "derivatives_live" else 0.66
         expected_independent_long_scale_in = 0.40 if profile == "derivatives_live" else 0.70
-        expected_independent_short_scale_in = 0.36 if profile == "derivatives_live" else 0.70
+        # P2-6: short_scale_in_threshold 已对齐至 long=0.40 (原 0.36 与注释声明的"钉住值：0.40"不一致)
+        expected_independent_short_scale_in = 0.40 if profile == "derivatives_live" else 0.70
         assert values["strategy_hedge_independent_long_entry_threshold"] == expected_independent_entry
         assert values["strategy_hedge_independent_short_entry_threshold"] == expected_independent_entry
         assert values["strategy_hedge_independent_long_scale_in_threshold"] == expected_independent_long_scale_in
@@ -388,7 +389,7 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         if profile == "derivatives_live":
             assert values["strategy_hedge_independent_long_close_threshold"] == 0.15
             assert values["strategy_hedge_independent_short_close_threshold"] == 0.15
-            assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 0.0
+            assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 2.0
             assert values["strategy_hedge_independent_expected_slippage_buffer_bps"] == 0.5
             assert values["strategy_hedge_independent_expected_execution_buffer_bps"] == 0.5
             assert values["strategy_hedge_independent_weak_edge_execution_mode"] == "block"
@@ -443,7 +444,7 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_hedge_independent_long_short_asymmetry_enabled"] is False
     assert values["strategy_hedge_independent_short_asymmetry_penalty_multiplier"] == 0.85
     assert values["strategy_hedge_independent_entry_size_down_floor"] == 0.50
-    assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 0.0
+    assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 2.0
     assert values["strategy_hedge_independent_expected_slippage_buffer_bps"] == 0.5
     assert values["strategy_hedge_independent_expected_execution_buffer_bps"] == 0.5
     assert values["strategy_hedge_independent_weak_edge_execution_mode"] == "block"

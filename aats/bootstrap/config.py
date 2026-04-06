@@ -495,20 +495,21 @@ class ApplicationRuntime:
             try:
                 await self.account_service.refresh()
                 await self._sync_funding_fees_after_refresh()
-                self._evaluate_derivatives_live_guard_after_refresh()
+                await self._evaluate_derivatives_live_guard_after_refresh()
             except Exception as exc:
-                self._record_background_failure(subsystem="account_refresh", exc=exc)
+                await self._record_background_failure(subsystem="account_refresh", exc=exc)
             await asyncio.sleep(self.settings.okx_account_refresh_interval_seconds)
 
-    def _evaluate_derivatives_live_guard_after_refresh(self) -> None:
+    async def _evaluate_derivatives_live_guard_after_refresh(self) -> None:
         if self.derivatives_live_guard_service is None:
             return
-        self.derivatives_live_guard_service.evaluate_now()
+        await asyncio.to_thread(self.derivatives_live_guard_service.evaluate_now)
 
     async def _sync_funding_fees_after_refresh(self) -> None:
         if self.funding_fee_sync_service is None:
             return
-        result = self.funding_fee_sync_service.sync_recent_bills(
+        result = await asyncio.to_thread(
+            self.funding_fee_sync_service.sync_recent_bills,
             rows=self.account_service.latest_recent_bills(),
             product_type=self.settings.trading_product_type,
             margin_mode=self.settings.margin_mode,
@@ -516,7 +517,10 @@ class ApplicationRuntime:
         if result.posted_count <= 0:
             return
         if self.sleeve_pnl_projection_service is not None:
-            self.sleeve_pnl_projection_service.rebuild_scope(scope=runtime_state_scope(self.settings))
+            await asyncio.to_thread(
+                self.sleeve_pnl_projection_service.rebuild_scope,
+                scope=runtime_state_scope(self.settings),
+            )
         if hasattr(self.portfolio_service, "bootstrap_snapshot"):
             await self.portfolio_service.bootstrap_snapshot(snapshot_origin="local_repair")
 
@@ -525,7 +529,7 @@ class ApplicationRuntime:
             try:
                 await self.order_manager.sync_exchange_state()
             except Exception as exc:
-                self._record_background_failure(subsystem="execution_sync", exc=exc)
+                await self._record_background_failure(subsystem="execution_sync", exc=exc)
             await asyncio.sleep(self.settings.okx_execution_sync_interval_seconds)
 
     async def _refresh_reconciliation_loop(self) -> None:
@@ -538,7 +542,7 @@ class ApplicationRuntime:
                 await self.reconciliation_service.repair_missing_portfolio_snapshot(reason="background_refresh")
                 await self.reconciliation_service.validate_now(reason="background_refresh")
             except Exception as exc:
-                self._record_background_failure(subsystem="reconciliation_refresh", exc=exc)
+                await self._record_background_failure(subsystem="reconciliation_refresh", exc=exc)
             await asyncio.sleep(interval_seconds)
 
     async def _flush_execution_outbox_loop(self) -> None:
@@ -549,7 +553,7 @@ class ApplicationRuntime:
                     await self.execution_outbox_publisher.flush_pending()
                 backoff = 1.0
             except Exception as exc:
-                self._record_background_failure(subsystem="execution_outbox_flush", exc=exc)
+                await self._record_background_failure(subsystem="execution_outbox_flush", exc=exc)
                 backoff = min(backoff * 2, 30.0)
             await asyncio.sleep(backoff)
 
@@ -560,7 +564,7 @@ class ApplicationRuntime:
                 if self.execution_command_processor is not None:
                     await self.execution_command_processor.process_pending()
             except Exception as exc:
-                self._record_background_failure(subsystem="execution_command_flow", exc=exc)
+                await self._record_background_failure(subsystem="execution_command_flow", exc=exc)
             await asyncio.sleep(interval_seconds)
 
     async def _monitor_phase1_shadow_loop(self) -> None:
@@ -570,9 +574,9 @@ class ApplicationRuntime:
         )
         while True:
             try:
-                self._record_phase1_shadow_state()
+                await asyncio.to_thread(self._record_phase1_shadow_state)
             except Exception as exc:
-                self._record_background_failure(subsystem="phase1_shadow_monitor", exc=exc)
+                await self._record_background_failure(subsystem="phase1_shadow_monitor", exc=exc)
             await asyncio.sleep(interval_seconds)
 
     async def _monitor_trial_guard_loop(self) -> None:
@@ -580,12 +584,12 @@ class ApplicationRuntime:
         while True:
             try:
                 if self.trial_guard_service is not None:
-                    self.trial_guard_service.evaluate_now()
+                    await asyncio.to_thread(self.trial_guard_service.evaluate_now)
             except Exception as exc:
-                self._record_background_failure(subsystem="trial_guard_monitor", exc=exc)
+                await self._record_background_failure(subsystem="trial_guard_monitor", exc=exc)
             await asyncio.sleep(interval_seconds)
 
-    def _record_background_failure(self, *, subsystem: str, exc: Exception) -> None:
+    async def _record_background_failure(self, *, subsystem: str, exc: Exception) -> None:
         message = f"{subsystem}_failed: {exc}"
         log_event(
             self.logger,
@@ -595,6 +599,10 @@ class ApplicationRuntime:
             error_type=type(exc).__name__,
             error=str(exc),
         )
+        error_type = type(exc).__name__
+        await asyncio.to_thread(self._record_background_failure_sync, subsystem=subsystem, message=message, error_type=error_type)
+
+    def _record_background_failure_sync(self, *, subsystem: str, message: str, error_type: str) -> None:
         latest = self.event_store.latest(topics.EXECUTION_ERROR_SUMMARIES)
         if latest is not None:
             payload = latest.payload
@@ -629,7 +637,7 @@ class ApplicationRuntime:
                     message=message,
                     retriable=True,
                     observed_at=utc_now(),
-                    details={"error_type": type(exc).__name__},
+                    details={"error_type": error_type},
                 ),
                 source_component="runtime",
             )

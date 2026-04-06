@@ -82,8 +82,20 @@ export const CORE_SPECS = [
   ["blockerControl", "/system/blocker-control"],
 ];
 
+const EXCLUDED_CORE_PANELS = {
+  risk: new Set(["mode", "runtime"]),
+};
+
 const DEFERRED_VIEW_PANELS = {
-  risk: new Set(["replayStatus", "exitExecutionActionHistoryPage"]),
+  home: new Set(["latestDecision", "executionLatest", "reconciliationLatest"]),
+  overview: new Set(["latestDecision", "executionLatest", "reconciliationLatest"]),
+  risk: new Set([
+    "replayStatus",
+    "exitExecutionActionHistoryPage",
+    "trialGuard",
+    "guardedLivePreflight",
+    "guardedLiveRunPacket",
+  ]),
   strategy: new Set(["trialReviewSummary", "strategyAttribution"]),
   aiAnalysis: new Set(["aiShadowEvaluations", "profileControlSummary"]),
 };
@@ -137,6 +149,9 @@ export function viewSpecs(view, state = null) {
       ["positions", "/positions"],
       ["accountState", "/account/state"],
       ["reconciliationLatest", "/reconciliation/latest"],
+      ["trialGuard", "/system/trial-guard"],
+      ["guardedLivePreflight", "/system/guarded-live/preflight"],
+      ["guardedLiveRunPacket", "/system/guarded-live/run-packet"],
       ["replayStatus", "/replay/status"],
       ["exitExecutionActionHistoryPage", riskExitExecutionHistoryPath],
     ],
@@ -201,8 +216,12 @@ export function dashboardBundlePanelKeys(view, state = null, options = {}) {
   const includeDeferred = options.includeDeferred !== false;
   const deferredOnly = options.deferredOnly === true;
   const deferredPanels = deferredPanelSetForView(view);
+  const excludedCorePanels = EXCLUDED_CORE_PANELS[view] || null;
   const seen = new Set();
-  const specs = [...CORE_SPECS, ...viewSpecs(view, state)];
+  const specs = [
+    ...CORE_SPECS.filter(([key]) => !excludedCorePanels?.has(key)),
+    ...viewSpecs(view, state),
+  ];
   return specs
     .filter(([key]) => {
       if (seen.has(key)) return false;

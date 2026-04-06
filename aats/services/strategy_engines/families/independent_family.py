@@ -144,6 +144,7 @@ def independent_candidate_from_directional_target(
         "max_thesis_age_seconds": settings.strategy_hedge_independent_max_thesis_age_seconds,
         "de_risk_net_edge_bps": settings.strategy_hedge_independent_de_risk_net_edge_bps,
         "failed_thesis_net_edge_bps": settings.strategy_hedge_independent_failed_thesis_net_edge_bps,
+        "catastrophic_failed_thesis_buffer_bps": settings.strategy_hedge_independent_catastrophic_failed_thesis_buffer_bps,
         "execution_health_de_risk_enabled": settings.strategy_hedge_independent_execution_health_de_risk_enabled,
         "liquidity_de_risk_enabled": settings.strategy_hedge_independent_liquidity_de_risk_enabled,
         "entry_execution_mode": settings.strategy_hedge_independent_entry_execution_mode,

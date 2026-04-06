@@ -382,6 +382,142 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertEqual(result.legs[0].execution_policy_urgency, "high")
         self.assertEqual(result.legs[0].order_type_preference, "market")
 
+    def test_evaluate_independent_books_transient_failed_thesis_respects_min_hold_whipsaw_guard(self) -> None:
+        """whipsaw 防护：min_hold 窗口内触发标准 failed_thesis（未跨 catastrophic 缓冲）应被阻塞。
+
+        场景：net_edge 瞬时跌至 -2.0 bps（> catastrophic 阈值 -4.0 bps），
+        持仓仅 60 秒（< min_hold 300 秒）。
+        期望：阻塞，state=blocked；不触发 close_failed_thesis 以防 whipsaw。
+        """
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_long_entry_threshold=0.60,
+            strategy_hedge_independent_long_close_threshold=0.50,
+            strategy_hedge_independent_failed_thesis_net_edge_bps=-1.0,
+            strategy_hedge_independent_catastrophic_failed_thesis_buffer_bps=3.0,
+            strategy_hedge_independent_long_min_hold_seconds=300,
+        )
+        context = make_context(
+            current_position_qty=0.02,
+            current_long_position_qty=0.02,
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_long_leg_opened_seconds_ago=60,  # 远小于 min_hold 300
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.22,
+                "trend_alpha": 0.18,
+                "microstructure_alpha": 0.06,
+                "liquidity_scale": 0.90,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.18})
+
+        result = evaluate_independent_books(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.08, confidence=0.70),
+            directional_target_qty=Decimal("0.01"),
+            target_leverage=1.0,
+            signal_edge_bps=4.0,
+            expected_cost_bps=6.0,
+            expected_net_edge_bps=-2.0,
+            execution_leg_family="independent",
+            scorer=lambda *, leg, baseline, ai_assessment: 0.42 if leg == "long" else 0.10,
+            expectancy_resolver=lambda *, leg, **kwargs: IndependentBookExpectancy(
+                leg=leg,
+                expected_signal_edge_bps=4.0,
+                expected_slippage_bps=1.0,
+                expected_cost_bps=6.0,
+                # net_edge=-2.0 触及 failed_thesis (-1.0) 但未跨 catastrophic (-4.0)
+                expected_net_edge_bps=-2.0 if leg == "long" else -3.0,
+            ),
+        )
+
+        # min_hold 尚未满足 + 非灾难性 → 阻塞，不出场（whipsaw 防护）
+        self.assertEqual(result.long_book.state, "blocked")
+        self.assertEqual(result.long_book.book_action, "blocked")
+        self.assertIn(
+            "independent_long_book_min_hold_active",
+            result.long_book.blocked_reasons,
+        )
+
+    def test_evaluate_independent_books_catastrophic_failed_thesis_bypasses_min_hold(self) -> None:
+        """灾难性 failed_thesis：min_hold 窗口内也立即出场。
+
+        场景：net_edge 深度跌至 -5.0 bps（<= catastrophic 阈值 -4.0 bps），
+        持仓仅 30 秒（<< min_hold 300 秒）。
+        期望：立即 close_failed_thesis 止损，不被 min_hold 阻塞。
+        """
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_long_entry_threshold=0.60,
+            strategy_hedge_independent_long_close_threshold=0.50,
+            strategy_hedge_independent_failed_thesis_net_edge_bps=-1.0,
+            strategy_hedge_independent_catastrophic_failed_thesis_buffer_bps=3.0,
+            strategy_hedge_independent_long_min_hold_seconds=300,
+        )
+        context = make_context(
+            current_position_qty=0.02,
+            current_long_position_qty=0.02,
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_long_leg_opened_seconds_ago=30,  # 仅 30 秒
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.22,
+                "trend_alpha": 0.18,
+                "microstructure_alpha": 0.06,
+                "liquidity_scale": 0.90,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.18})
+
+        result = evaluate_independent_books(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.08, confidence=0.70),
+            directional_target_qty=Decimal("0.01"),
+            target_leverage=1.0,
+            signal_edge_bps=4.0,
+            expected_cost_bps=6.0,
+            expected_net_edge_bps=-5.0,
+            execution_leg_family="independent",
+            scorer=lambda *, leg, baseline, ai_assessment: 0.42 if leg == "long" else 0.10,
+            expectancy_resolver=lambda *, leg, **kwargs: IndependentBookExpectancy(
+                leg=leg,
+                expected_signal_edge_bps=4.0,
+                expected_slippage_bps=1.0,
+                expected_cost_bps=6.0,
+                # net_edge=-5.0 超越 catastrophic 阈值 -4.0
+                expected_net_edge_bps=-5.0 if leg == "long" else -6.0,
+            ),
+        )
+
+        self.assertEqual(result.long_book.book_action, "close_failed_thesis")
+        self.assertEqual(result.long_book.close_reason, "failed_thesis")
+        self.assertEqual(result.long_book.target_qty, Decimal("0"))
+        self.assertIn(
+            "independent_long_book_close_catastrophic_failed_thesis",
+            result.long_book.reason_codes,
+        )
+        self.assertIn(
+            "independent_long_book_min_hold_bypassed_for_catastrophic_failed_thesis",
+            result.long_book.reason_codes,
+        )
+
     def test_evaluate_independent_books_close_stale_thesis_when_position_ages_out(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_overlay_mode="independent",

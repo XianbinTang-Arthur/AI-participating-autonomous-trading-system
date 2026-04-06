@@ -34,6 +34,10 @@ def evaluate_open_eligibility(
     expected_cost_bps = 0.0 if expectancy is None else expectancy.expected_cost_bps
     expected_net_edge_bps = 0.0 if expectancy is None else expectancy.expected_net_edge_bps
     safe_edge_bps = required_safe_net_edge_bps(settings=settings)
+    # 边界语义（严格 <）: net_edge == safe_edge 时允许入场。
+    # 与 lifecycle.py determine_close_reason 的 `net_edge <= de_risk` 形成一致的持仓区间：
+    #   持仓区间 = [safe_edge, +∞) ∩ (de_risk, +∞) = [safe_edge, +∞)
+    # 这依赖约束 safe_edge > de_risk (由 ReplayParameterOverrides.__post_init__ 保证)。
     if expected_net_edge_bps < safe_edge_bps:
         if settings.strategy_hedge_independent_weak_edge_execution_mode == "block":
             reasons.append(f"independent_{leg}_book_expected_net_edge_below_safe_threshold")

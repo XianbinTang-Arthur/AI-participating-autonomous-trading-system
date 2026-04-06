@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import subprocess
@@ -109,8 +109,15 @@ class TestDashboardUI(unittest.TestCase):
                 "ai_config": client.get("/ui/ai-config"),
                 "css": client.get("/ui/app.css"),
                 "js": client.get("/ui/app.js"),
+                "dashboard_refresh_js": client.get("/ui/modules/dashboard-refresh.js"),
+                "navigation_state_js": client.get("/ui/modules/navigation-state.js"),
+                "shell_renderer_js": client.get("/ui/modules/shell-renderer.js"),
                 "store_js": client.get("/ui/modules/store.js"),
                 "refresh_interactivity_js": client.get("/ui/modules/refresh-interactivity.js"),
+                "view_router_js": client.get("/ui/modules/view-router.js"),
+                "risk_actions_js": client.get("/ui/modules/actions/risk-actions.js"),
+                "execution_actions_js": client.get("/ui/modules/actions/execution-actions.js"),
+                "admin_actions_js": client.get("/ui/modules/actions/admin-actions.js"),
                 "ai_view_js": client.get("/ui/modules/views/ai-view.js"),
                 "ai_analysis_js": client.get("/ui/modules/views/ai-analysis-view.js"),
                 "ai_config_js": client.get("/ui/modules/views/ai-config-view.js"),
@@ -138,22 +145,42 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn('data-view="aiAnalysis"', root_text)
         self.assertIn('data-view="exitExecution"', root_text)
 
-        js_text = responses["js"].text
+        app_js_text = responses["js"].text
+        view_router_text = responses["view_router_js"].text
+        navigation_state_text = responses["navigation_state_js"].text
+        dashboard_refresh_text = responses["dashboard_refresh_js"].text
+        shell_renderer_text = responses["shell_renderer_js"].text
+        risk_actions_text = responses["risk_actions_js"].text
+        execution_actions_text = responses["execution_actions_js"].text
+        admin_actions_text = responses["admin_actions_js"].text
+        js_text = "\n".join(
+            [
+                app_js_text,
+                view_router_text,
+                navigation_state_text,
+                dashboard_refresh_text,
+                shell_renderer_text,
+                risk_actions_text,
+                execution_actions_text,
+                admin_actions_text,
+            ]
+        )
         self.assertIn("renderAIAnalysisView", js_text)
         self.assertIn("renderExitExecutionView", js_text)
-        self.assertIn('aiAnalysis: "/ui/ai-analysis"', js_text)
-        self.assertIn('exitExecution: "/ui/exit-execution"', js_text)
         self.assertIn("fetchDashboardBundle", js_text)
         self.assertIn("readableFamilyExecutionSummary", js_text)
-        self.assertIn("buildDashboardBundleRequestPlan", js_text)
+        self.assertIn("createDashboardRefreshController", js_text)
+        self.assertIn("createDashboardShellRenderer", js_text)
+        self.assertIn("createNavigationStateController", js_text)
+        self.assertIn("createRiskActionHandlers", js_text)
+        self.assertIn("createExecutionActionHandlers", js_text)
+        self.assertIn("createAdminActions", js_text)
         self.assertIn("hydrateViewStateFromLocation", js_text)
-        self.assertIn("buildExitExecutionViewPath", js_text)
         self.assertIn("syncActiveViewLocationState", js_text)
         self.assertIn("syncRefreshDisabledButtons", js_text)
         self.assertIn("currentRefreshInteractivityRoots", js_text)
-        self.assertIn("const refreshPlan = buildDashboardBundleRequestPlan(refreshingView, state);", js_text)
-        self.assertIn("void refreshDeferredPanels({", js_text)
-        self.assertIn("setPendingPanels(refreshPlan.deferredPanels, Boolean(refreshPlan.deferredPath));", js_text)
+        self.assertIn("const navigationState = createNavigationStateController({ state, viewLinks });", js_text)
+        self.assertIn("refreshController = createDashboardRefreshController({", js_text)
         self.assertIn("当前正在刷新，已排队一次新的刷新请求。", js_text)
         self.assertIn("当前已在${VIEW_LABELS[nextView] || \"当前页面\"}，已刷新当前状态。", js_text)
         self.assertNotIn("refreshBackgroundPanels", js_text)
@@ -163,6 +190,70 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn('document.addEventListener("visibilitychange", handleVisibilityChange);', js_text)
         self.assertIn('if (document.visibilityState !== "visible") return;', js_text)
         self.assertNotIn('ai: "/ui/ai"', js_text)
+
+        self.assertIn("createDashboardRefreshController", app_js_text)
+        self.assertIn("createDashboardShellRenderer", app_js_text)
+        self.assertIn("createNavigationStateController", app_js_text)
+        self.assertIn("createRiskActionHandlers", app_js_text)
+        self.assertIn("createExecutionActionHandlers", app_js_text)
+        self.assertIn("createAdminActions", app_js_text)
+        self.assertIn("const navigationState = createNavigationStateController({ state, viewLinks });", app_js_text)
+        self.assertIn("const shellRenderer = createDashboardShellRenderer({", app_js_text)
+        self.assertIn("refreshController = createDashboardRefreshController({", app_js_text)
+        self.assertIn("const riskActionHandlers = createRiskActionHandlers({", app_js_text)
+        self.assertIn("const executionActionHandlers = createExecutionActionHandlers({", app_js_text)
+        self.assertIn("const adminActions = createAdminActions({", app_js_text)
+        self.assertIn("const domainHandler = riskActionHandlers[action] || executionActionHandlers[action] || adminActionHandlers[action];", app_js_text)
+        self.assertNotIn("const VIEW_ROUTES = {", app_js_text)
+        self.assertNotIn("const VIEW_META = {", app_js_text)
+        self.assertNotIn("function scheduleRefresh() {", app_js_text)
+        self.assertNotIn("function resolveViewFromLocation()", app_js_text)
+        self.assertNotIn("function renderPageChrome()", app_js_text)
+        self.assertNotIn("function renderStatusRibbon()", app_js_text)
+        self.assertNotIn("async function triggerResume(target = null)", app_js_text)
+        self.assertNotIn("async function inspectOrder(orderId)", app_js_text)
+        self.assertNotIn("async function createOperatorUser()", app_js_text)
+
+        self.assertIn('aiAnalysis: "/ui/ai-analysis"', view_router_text)
+        self.assertIn('exitExecution: "/ui/exit-execution"', view_router_text)
+        self.assertIn("VIEW_META", view_router_text)
+        self.assertIn("VIEW_LABELS", view_router_text)
+        self.assertIn("resolveKnownView", view_router_text)
+        self.assertIn("resolveViewFromLocation", view_router_text)
+
+        self.assertIn("EXIT_EXECUTION_HISTORY_ACTION_FILTERS", navigation_state_text)
+        self.assertIn("EXIT_EXECUTION_HISTORY_WINDOW_FILTERS", navigation_state_text)
+        self.assertIn("buildExitExecutionViewPath", navigation_state_text)
+        self.assertIn("syncExitExecutionNavigationLinks", navigation_state_text)
+        self.assertIn("coerceReplayParentFilter", navigation_state_text)
+        self.assertIn("normalizeExitExecutionHistoryFilterValue", navigation_state_text)
+
+        self.assertIn("buildDashboardBundleRequestPlan", dashboard_refresh_text)
+        self.assertIn("const refreshPlan = buildDashboardBundleRequestPlan(refreshingView, state);", dashboard_refresh_text)
+        self.assertIn("void refreshDeferredPanels({", dashboard_refresh_text)
+        self.assertIn("setPendingPanels(refreshPlan.deferredPanels, Boolean(refreshPlan.deferredPath));", dashboard_refresh_text)
+
+        self.assertIn("export function createDashboardShellRenderer", shell_renderer_text)
+        self.assertIn("function renderShell()", shell_renderer_text)
+        self.assertIn("function renderStatusRibbon()", shell_renderer_text)
+        self.assertIn("function renderLoadingView()", shell_renderer_text)
+        self.assertIn("function renderBanners()", shell_renderer_text)
+        self.assertIn("function patchRenderedSections(", shell_renderer_text)
+
+        self.assertIn("export function createRiskActionHandlers", risk_actions_text)
+        self.assertIn('"trigger-blocker-action": (value, target) => triggerBlockerAction(value, target)', risk_actions_text)
+        self.assertIn('"trigger-resume": (_value, target) => triggerResume(target)', risk_actions_text)
+        self.assertIn('"apply-exit-execution-history-workspace": (_value, target) => applyExitExecutionHistoryWorkspaceFilters(target)', risk_actions_text)
+
+        self.assertIn("export function createExecutionActionHandlers", execution_actions_text)
+        self.assertIn("pageLoadStep = 12", execution_actions_text)
+        self.assertIn('"load-more-orders": () => adjustPageLimit("recentOrders", pageLoadStep)', execution_actions_text)
+        self.assertIn('"load-more-fills": () => adjustPageLimit("recentFills", pageLoadStep)', execution_actions_text)
+
+        self.assertIn("export function createAdminActions", admin_actions_text)
+        self.assertIn('"toggle-user": (value) => toggleOperatorUser(value)', admin_actions_text)
+        self.assertIn('"delete-user": (value) => deleteOperatorUser(value)', admin_actions_text)
+        self.assertIn("createOperatorUser", admin_actions_text)
 
         store_text = responses["store_js"].text
         self.assertIn('["profileControlSummary", "/reports/profile-control-summary"]', store_text)
@@ -275,27 +366,36 @@ class TestDashboardUI(unittest.TestCase):
 
         with TestClient(app) as client:
             app_js = client.get("/ui/app.js")
+            navigation_state_js = client.get("/ui/modules/navigation-state.js")
+            risk_actions_js = client.get("/ui/modules/actions/risk-actions.js")
             risk_js = client.get("/ui/modules/views/risk-view.js")
             exit_execution_js = client.get("/ui/modules/views/exit-execution-view.js")
 
         self.assertEqual(app_js.status_code, 200)
+        self.assertEqual(navigation_state_js.status_code, 200)
+        self.assertEqual(risk_actions_js.status_code, 200)
         self.assertEqual(risk_js.status_code, 200)
         self.assertEqual(exit_execution_js.status_code, 200)
 
         app_js_text = app_js.text
-        self.assertIn("trigger-exit-execution-refresh", app_js_text)
-        self.assertIn("trigger-exit-execution-retry-limit-lookup", app_js_text)
-        self.assertIn("trigger-exit-execution-safe-cancel", app_js_text)
-        self.assertIn("/system/exit-execution/refresh", app_js_text)
-        self.assertIn("/system/exit-execution/retry-limit-lookup", app_js_text)
-        self.assertIn("/system/exit-execution/safe-cancel", app_js_text)
+        navigation_state_text = navigation_state_js.text
+        risk_actions_text = risk_actions_js.text
+        self.assertIn("createRiskActionHandlers", app_js_text)
         self.assertIn("handleExitExecutionHistoryFilterEvent", app_js_text)
         self.assertIn("applyExitExecutionHistoryFilters", app_js_text)
-        self.assertIn("apply-exit-execution-history-workspace", app_js_text)
-        self.assertIn("paginate-exit-execution-history", app_js_text)
-        self.assertIn("buildExitExecutionViewPath", app_js_text)
         self.assertIn("hydrateViewStateFromLocation", app_js_text)
         self.assertIn("syncActiveViewLocationState", app_js_text)
+        self.assertIn("createNavigationStateController", app_js_text)
+        self.assertIn("buildExitExecutionViewPath", navigation_state_text)
+        self.assertIn("syncActiveViewLocationState", navigation_state_text)
+        self.assertIn("trigger-exit-execution-refresh", risk_actions_text)
+        self.assertIn("trigger-exit-execution-retry-limit-lookup", risk_actions_text)
+        self.assertIn("trigger-exit-execution-safe-cancel", risk_actions_text)
+        self.assertIn("/system/exit-execution/refresh", risk_actions_text)
+        self.assertIn("/system/exit-execution/retry-limit-lookup", risk_actions_text)
+        self.assertIn("/system/exit-execution/safe-cancel", risk_actions_text)
+        self.assertIn("apply-exit-execution-history-workspace", risk_actions_text)
+        self.assertIn("paginate-exit-execution-history", risk_actions_text)
 
         risk_js_text = risk_js.text
         self.assertIn("退出任务人工处理", risk_js_text)
@@ -1274,14 +1374,37 @@ console.log(JSON.stringify({
         payload = json.loads(result.stdout)
         self.assertIn("replayStatus", payload["fullPanels"])
         self.assertIn("exitExecutionActionHistoryPage", payload["fullPanels"])
+        self.assertIn("trialGuard", payload["fullPanels"])
+        self.assertIn("guardedLivePreflight", payload["fullPanels"])
+        self.assertIn("guardedLiveRunPacket", payload["fullPanels"])
+        self.assertNotIn("mode", payload["fullPanels"])
+        self.assertNotIn("runtime", payload["fullPanels"])
         self.assertNotIn("replayStatus", payload["primaryPanels"])
         self.assertNotIn("exitExecutionActionHistoryPage", payload["primaryPanels"])
-        self.assertNotIn("trialGuard", payload["fullPanels"])
-        self.assertNotIn("guardedLivePreflight", payload["fullPanels"])
-        self.assertNotIn("guardedLiveRunPacket", payload["fullPanels"])
+        self.assertNotIn("trialGuard", payload["primaryPanels"])
+        self.assertNotIn("guardedLivePreflight", payload["primaryPanels"])
+        self.assertNotIn("guardedLiveRunPacket", payload["primaryPanels"])
         self.assertNotIn("phase1Shadow", payload["fullPanels"])
-        self.assertEqual(payload["deferredPanels"], ["replayStatus", "exitExecutionActionHistoryPage"])
-        self.assertEqual(payload["deferredPlanPanels"], ["replayStatus", "exitExecutionActionHistoryPage"])
+        self.assertEqual(
+            payload["deferredPanels"],
+            [
+                "trialGuard",
+                "guardedLivePreflight",
+                "guardedLiveRunPacket",
+                "replayStatus",
+                "exitExecutionActionHistoryPage",
+            ],
+        )
+        self.assertEqual(
+            payload["deferredPlanPanels"],
+            [
+                "trialGuard",
+                "guardedLivePreflight",
+                "guardedLiveRunPacket",
+                "replayStatus",
+                "exitExecutionActionHistoryPage",
+            ],
+        )
 
     def test_risk_view_shows_deferred_loading_notice_before_replay_and_exit_history_arrive(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -7279,3 +7402,4 @@ console.log(JSON.stringify({
 
 if __name__ == "__main__":
     unittest.main()
+

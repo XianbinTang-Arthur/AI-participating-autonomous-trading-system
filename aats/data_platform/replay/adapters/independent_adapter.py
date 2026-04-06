@@ -395,14 +395,16 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         * -> blocked (有阻断原因)
 
         Phase 1 扩展：
-        - 持仓未达 min_hold_seconds 前不平仓
+        - 持仓未达 min_hold_seconds 前不平仓（灾难性 failed_thesis 除外）
+        - 灾难性 failed_thesis: net_edge <= failed_thesis_threshold - catastrophic_buffer
+          可豁免 min_hold 立即止损（whipsaw 防护：普通 failed_thesis 仍受 min_hold 约束）
         - 上次平仓后 rebalance_cooldown_seconds 内不开新仓
         - thesis 超龄（max_thesis_age_seconds）触发 stale 退出
         - 净边际 < failed_thesis_net_edge_bps → thesis 失效退出
         - 净边际 < de_risk_net_edge_bps → 降风险退出
 
         close_reason 值域:
-          thesis_failed / de_risk / score_below_close /
+          thesis_failed / catastrophic_thesis_failed / de_risk / score_below_close /
           direction_reversal / thesis_stale / ""（非 close 时）
         """
         current_state = state.position_side
@@ -416,16 +418,29 @@ class IndependentReplayAdapter(BaseReplayAdapter):
             if state.entry_ts is not None:
                 held_seconds = (bar.ts - state.entry_ts).total_seconds()
 
+            # 灾难性 failed_thesis 判定（可豁免 min_hold 的唯一原因）
+            # 触发条件: expected_net_edge_bps <= failed_thesis_threshold - catastrophic_buffer
+            catastrophic_threshold = (
+                params.failed_thesis_net_edge_bps
+                - max(params.catastrophic_failed_thesis_buffer_bps, 0.0)
+            )
+            is_catastrophic = expected_net_edge_bps <= catastrophic_threshold + 1e-9
+
             # min_hold_seconds 保护：持仓不够久则继续持有
-            if held_seconds < params.min_hold_seconds:
+            # 例外：灾难性 failed_thesis 豁免 min_hold（深度亏损必须立即止损）
+            if held_seconds < params.min_hold_seconds and not is_catastrophic:
                 return "hold", "holding", ""
 
             # 平仓条件（按优先级从高到低排列）
             should_close = False
             close_reason = ""
 
-            # thesis 失效（最紧急 — 净边际大幅为负）
-            if expected_net_edge_bps < params.failed_thesis_net_edge_bps:
+            # 灾难性 thesis 失效（最紧急 — 跨越 whipsaw 缓冲）
+            if is_catastrophic:
+                should_close = True
+                close_reason = "catastrophic_thesis_failed"
+            # 标准 thesis 失效（净边际小幅为负）
+            elif expected_net_edge_bps < params.failed_thesis_net_edge_bps:
                 should_close = True
                 close_reason = "thesis_failed"
             # 降风险（净边际变薄但未到失效）

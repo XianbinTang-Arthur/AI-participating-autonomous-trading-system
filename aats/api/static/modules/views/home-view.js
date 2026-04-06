@@ -21,6 +21,8 @@ export function renderHomeView(data) {
   const recovery = data.systemRecovery?.recovery || {};
   const blockers = data.blockers?.blockers || [];
   const portfolio = data.portfolio?.portfolio || {};
+  const pendingPanels = data.uiHints?.pendingPanels || {};
+  const deferredLoading = pendingPanels.latestDecision || pendingPanels.executionLatest || pendingPanels.reconciliationLatest;
   const latestDecision = data.latestDecision || {};
   const latestOrder = data.executionLatest?.latest_order || null;
   const latestFill = data.executionLatest?.latest_fill || null;
@@ -75,7 +77,9 @@ export function renderHomeView(data) {
           kicker: "动作摘要",
           copy: "把最新决策、委托、成交和对账压缩成一条值班视角摘要。",
           classes: "hero-card",
-          content: `
+          content: deferredLoading
+            ? `<div class="callout"><p class="text-muted">正在加载动作摘要…</p></div>`
+            : `
             <div class="callout">
               <div class="panel-head">
                 <h3>${latestDecision.decision_id ? "最新动作已生成" : "当前暂无新的交易动作"}</h3>
@@ -95,7 +99,9 @@ export function renderHomeView(data) {
           title: "次级提醒",
           kicker: "提醒信息",
           copy: "这些提示不会替代首页主判断，但适合切页前快速扫一遍。",
-          content: alertQueue(secondaryAlerts({ recovery, blockers, reconciliation, account, uiHints }), "当前暂无新的次级提醒。"),
+          content: deferredLoading
+            ? `<p class="text-muted">正在加载提醒信息…</p>`
+            : alertQueue(secondaryAlerts({ recovery, blockers, reconciliation, account, uiHints }), "当前暂无新的次级提醒。"),
         })}
       </div>
     </div>

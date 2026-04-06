@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from decimal import Decimal
 from typing import Callable
@@ -201,12 +202,12 @@ class ReconciliationService:
         *,
         reason: str = "background_refresh",
     ) -> PortfolioSnapshot | None:
-        fills = fills_for_scope(self.execution_repo, self.runtime_scope)
+        fills = await asyncio.to_thread(fills_for_scope, self.execution_repo, self.runtime_scope)
         if not fills:
             return None
 
         latest_fill = max(fills, key=fill_processing_sort_key)
-        latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
+        latest_snapshot = await asyncio.to_thread(latest_snapshot_for_scope, self.portfolio_repo, self.runtime_scope)
         if latest_snapshot is not None:
             if (
                 latest_snapshot.source_fill_id == latest_fill.fill_id
@@ -235,7 +236,7 @@ class ReconciliationService:
             }
         )
         try:
-            self.portfolio_repo.save_snapshot(repaired_snapshot)
+            await asyncio.to_thread(self.portfolio_repo.save_snapshot, repaired_snapshot)
             if self.metrics is not None:
                 self.metrics.increment("portfolio_snapshot_repairs")
             await publish_model(
@@ -255,16 +256,17 @@ class ReconciliationService:
         return repaired_snapshot
 
     async def validate_now(self, *, reason: str = "operator_validate") -> ReconciliationReport:
-        latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
-        latest_snapshot_event = latest_topic_event_for_scope(
+        latest_snapshot = await asyncio.to_thread(latest_snapshot_for_scope, self.portfolio_repo, self.runtime_scope)
+        latest_snapshot_event = await asyncio.to_thread(
+            latest_topic_event_for_scope,
             self.event_store,
             topics.PORTFOLIO_SNAPSHOTS,
             self.runtime_scope,
         )
-        scoped_order_states = order_states_for_scope(self.execution_repo, self.runtime_scope)
+        scoped_order_states = await asyncio.to_thread(order_states_for_scope, self.execution_repo, self.runtime_scope)
         if latest_snapshot is None:
             latest_snapshot = self.reconstruction_service.rebuild_snapshot(
-                fills=fills_for_scope(self.execution_repo, self.runtime_scope),
+                fills=await asyncio.to_thread(fills_for_scope, self.execution_repo, self.runtime_scope),
                 price_provider=self.price_provider,
             ).model_copy(
                 update={

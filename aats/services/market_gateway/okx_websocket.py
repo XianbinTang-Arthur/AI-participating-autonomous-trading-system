@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 import json
@@ -132,16 +133,27 @@ class OKXPublicWebSocketClient:
                         connection=connection_name,
                         url=url,
                     )
-                    async for raw_message in websocket:
-                        if self._stop_event.is_set():
-                            break
-                        message = _json_loads(raw_message)
-                        if not isinstance(message, dict):
-                            continue
-                        self._last_message_ts[connection_name] = utc_now()
-                        if self._is_control_message(message):
-                            continue
-                        await on_message(message)
+                    keepalive_task = asyncio.create_task(
+                        self._keepalive_loop(websocket, connection_name)
+                    )
+                    try:
+                        async for raw_message in websocket:
+                            if self._stop_event.is_set():
+                                break
+                            text = raw_message if isinstance(raw_message, str) else raw_message.decode("utf-8", errors="replace")
+                            if text.strip().lower() == "pong":
+                                continue
+                            message = _json_loads(raw_message)
+                            if not isinstance(message, dict):
+                                continue
+                            self._last_message_ts[connection_name] = utc_now()
+                            if self._is_control_message(message):
+                                continue
+                            await on_message(message)
+                    finally:
+                        keepalive_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await keepalive_task
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -162,6 +174,17 @@ class OKXPublicWebSocketClient:
                 )
             finally:
                 self._connected[connection_name] = False
+
+    async def _keepalive_loop(self, websocket: ClientConnection, connection_name: str) -> None:
+        interval = max(5.0, float(self.settings.okx_private_ws_idle_ping_interval_seconds))
+        while not self._stop_event.is_set():
+            await asyncio.sleep(interval)
+            if self._stop_event.is_set():
+                return
+            try:
+                await websocket.send("ping")
+            except Exception:
+                return
 
     async def _subscribe(
         self,
