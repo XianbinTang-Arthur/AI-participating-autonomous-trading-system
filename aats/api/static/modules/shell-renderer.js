@@ -387,19 +387,32 @@ export function createDashboardShellRenderer({
   }
 
   function syncRefreshInteractivity() {
-    // Only lock the entire view during initial bootstrap / explicit loading
-    // transitions. Background auto-refreshes (30s polling) must keep buttons
-    // interactive — the data is already on screen, and the shimmer applied by
-    // renderRefreshIndicators already communicates "refresh in progress".
-    // Using raw state.refreshing here would lock the UI for the duration of
-    // every 30s fetch, making the dashboard feel perpetually unusable.
+    // Two layers of "this UI is mid-refresh, lock the action buttons":
+    //
+    //   1. viewIsLoading — true ONLY during the bootstrap / explicit loading
+    //      transitions where the entire active view is rendering its skeleton.
+    //      In that case the whole view is locked, because clicking through a
+    //      skeleton would just dispatch actions against undefined data.
+    //
+    //   2. pendingPanels — keyed per-panel.  refreshDashboard marks BOTH the
+    //      primary and deferred panels as pending while their fetches are in
+    //      flight, so the per-card / per-drawer button lock follows the actual
+    //      shimmer state of each individual card.  This is what restores the
+    //      "卡片/抽屉刷新时按钮锁定" behaviour: every action button inside a
+    //      [data-panel-key] card whose key is currently in pendingPanels gets
+    //      a `is-refresh-locked` class + disabled flag.  The lock is released
+    //      the instant the fetch resolves and the panel is cleared from
+    //      pendingPanels — so a 30s background auto-refresh visibly locks the
+    //      relevant cards for the duration of the fetch (typically <1s) and
+    //      unlocks them again, instead of leaving the dashboard "perpetually
+    //      unusable" the way an always-on global lock would.
     const viewIsLoading = shouldRenderLoadingState(state.activeView);
     syncRefreshDisabledButtons({
       roots: currentRefreshInteractivityRoots(),
       refreshing: viewIsLoading,
       pendingPanels: state.pendingPanels,
       reason: "当前区域正在刷新，请等待刷新完成后再操作。",
-      panelReason: "该卡片数据还在补充加载，请稍候再操作。",
+      panelReason: "该卡片数据还在刷新，请稍候再操作。",
     });
   }
 

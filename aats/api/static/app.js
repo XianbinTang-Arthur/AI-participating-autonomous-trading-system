@@ -21,6 +21,7 @@ import {
 } from "./modules/store.js";
 import {
   localizeError,
+  operationalStatusCopy,
   readableState,
 } from "./modules/terms.js";
 import {
@@ -882,9 +883,10 @@ function operatorCanWrite() {
 //   - readyViews[view]            → "primary bundle for this view has landed
 //                                    at least once; stale-while-revalidate
 //                                    can show cached content on re-entry"
-//   - pendingPanels[key]          → "a deferred fetch for this panel is in
-//                                    flight; display shimmer and lock
-//                                    panel-scoped buttons"
+//   - pendingPanels[key]          → "a primary or deferred fetch for this
+//                                    panel is in flight; display shimmer and
+//                                    lock panel-scoped buttons until the
+//                                    fetch resolves and the entry is cleared"
 //
 // Do NOT collapse these into a single concept — panel-level and view-level
 // resolution are both needed and serve different renderers.

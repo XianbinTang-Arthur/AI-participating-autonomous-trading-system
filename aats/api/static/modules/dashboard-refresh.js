@@ -86,9 +86,17 @@ export function createDashboardRefreshController({
   // lets the clear path do ownership checking: a stale Gen N "clear" cannot
   // clobber entries that Gen N+1 has already taken ownership of.
   //
+  // The map covers BOTH primary-fetch panels (cleared in the primary fetch's
+  // finally block) and deferred-fetch panels (cleared in refreshDeferredPanels'
+  // finally). Both flows use this same map so refresh-interactivity.js can do
+  // a single uniform "is this card refreshing?" check on every render.
+  //
   // Downstream consumers (refresh-interactivity.js, home-view.js, risk-view.js)
   // only do truthy checks on these values, so storing numbers >= 1 is
-  // backwards-compatible with the existing Boolean coercion.
+  // backwards-compatible with the existing Boolean coercion. Note that the
+  // home/risk view consumers ONLY check specific deferred-panel keys
+  // (latestDecision, executionLatest, replayStatus, ...), so adding primary
+  // panels to the map doesn't affect their loading-skeleton heuristics.
   function setPendingPanels(panelKeys, generation, { pending = true } = {}) {
     if (!Array.isArray(panelKeys) || panelKeys.length === 0) return;
     if (!Number.isFinite(generation) || generation <= 0) return;
@@ -230,6 +238,23 @@ export function createDashboardRefreshController({
       currentDeferredAbort = null;
     }
 
+    // Mark BOTH primary AND deferred panels as pending while the primary
+    // fetch is in flight. The pendingPanels mechanism is what
+    // refresh-interactivity.js uses to lock the action buttons inside any
+    // [data-panel-key] card whose key appears in pendingPanels — including
+    // open detail drawers, which the dashboard's currentRefreshInteractivityRoots
+    // also passes to syncRefreshDisabledButtons. Without marking the primary
+    // panels here, manual / background refreshes leave their action buttons
+    // clickable while the underlying card is visibly shimmering, which lets
+    // the user fire actions against pre-refresh stale data and confuses the
+    // intent of the loading affordance.
+    //
+    // Primary panels get cleared from pendingPanels in the finally block
+    // below the moment the primary fetch resolves; the deferred panels stay
+    // pending until refreshDeferredPanels finishes (or this generation gets
+    // superseded). The two-phase clear is what keeps deferred-only background
+    // fill-ins from re-locking the whole view every 30s.
+    setPendingPanels(refreshPlan.primaryPanels, refreshGeneration);
     setPendingPanels(refreshPlan.deferredPanels, refreshGeneration);
     cancelScheduledRefresh();
     state.refreshPhase = REFRESH_PHASE_PRIMARY;
@@ -331,6 +356,13 @@ export function createDashboardRefreshController({
       if (!isCurrentGeneration) {
         return;
       }
+      // Always release the primary panels from pending: we're either past the
+      // primary fetch (success) or abandoning it (error/abort). Either way,
+      // the lock that primary-pending applied to action buttons inside those
+      // cards must come off so users can interact with the (now-stable) data.
+      // setPendingPanels is ownership-checked, so a newer generation that
+      // already took these keys over is unaffected.
+      setPendingPanels(refreshPlan.primaryPanels, refreshGeneration, { pending: false });
       if (!deferredRefreshStarted) {
         setPendingPanels(refreshPlan.deferredPanels, refreshGeneration, { pending: false });
       }

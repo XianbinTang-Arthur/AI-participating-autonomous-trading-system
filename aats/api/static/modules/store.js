@@ -272,10 +272,12 @@ export function buildDashboardBundlePath(view, state = null, options = {}) {
 }
 
 export function buildDashboardBundleRequestPlan(view, state = null) {
+  const primaryPanels = dashboardBundlePanelKeys(view, state, { includeDeferred: false });
   const deferredPanels = dashboardBundlePanelKeys(view, state, { deferredOnly: true });
   return {
     primaryPath: buildDashboardBundlePath(view, state, { includeDeferred: false }),
     deferredPath: deferredPanels.length ? buildDashboardBundlePath(view, state, { deferredOnly: true }) : null,
+    primaryPanels,
     deferredPanels,
   };
 }
