@@ -1,5 +1,9 @@
 export const AUTO_REFRESH_MS = 30000;
-export const VIEW_FRESHNESS_MS = 30000;
+// View freshness is intentionally tied to AUTO_REFRESH_MS: if the auto-refresh
+// cadence changes, the stale-while-revalidate window should move with it,
+// otherwise switching views can hit a "fresh" cache entry that is actually
+// staler than what an auto-refresh would have already rewritten.
+export const VIEW_FRESHNESS_MS = AUTO_REFRESH_MS;
 
 export const DEFAULT_PAGE_LIMITS = {
   recentDecisions: 8,
@@ -31,12 +35,27 @@ export const DEFAULT_EXIT_EXECUTION_HISTORY_PAGING = Object.freeze({
   },
 });
 
+// refreshPhase state machine:
+//   "idle"     — no fetch in flight
+//   "primary"  — the primary bundle fetch is in flight; data on screen may be stale
+//   "deferred" — primary bundle has already landed, an optional deferred bundle
+//                (slow or secondary panels) is still fetching in the background
+// Only "primary" should gate bootstrap skeletons and the global refresh button.
+// "deferred" is a background fill-in and must not lock any UI.
+export const REFRESH_PHASE_IDLE = "idle";
+export const REFRESH_PHASE_PRIMARY = "primary";
+export const REFRESH_PHASE_DEFERRED = "deferred";
+
 export function createState() {
   return {
     activeView: "home",
     actionInFlight: false,
-    refreshing: false,
-    pendingRefresh: false,
+    refreshPhase: REFRESH_PHASE_IDLE,
+    // pendingRefresh: null | { manual: boolean }
+    // When set, the currently running refresh should drain this request after
+    // it finishes. Carrying the manual flag ensures a manual refresh that got
+    // queued still shows the "已刷新" flash when it finally runs.
+    pendingRefresh: null,
     loadingView: null,
     readyViews: {},
     viewRefreshedAt: {},
@@ -259,4 +278,62 @@ export function buildDashboardBundleRequestPlan(view, state = null) {
     deferredPath: deferredPanels.length ? buildDashboardBundlePath(view, state, { deferredOnly: true }) : null,
     deferredPanels,
   };
+}
+
+// Scope maps: which views participate in each URL-affecting piece of state.
+// Used by callers of invalidateCachedViews to invalidate ONLY the views whose
+// bundle URL actually changes, rather than blanket-invalidating every view.
+// Keep these in sync with the bundle request plan in viewSpecs().
+export const PAGE_LIMIT_AFFECTED_VIEWS = Object.freeze({
+  recentDecisions: Object.freeze(["strategy"]),
+  recentOrders: Object.freeze(["execution"]),
+  recentFills: Object.freeze(["execution"]),
+  recentReplayValidations: Object.freeze(["replay"]),
+  recentAIAssessments: Object.freeze(["aiAnalysis"]),
+  recentAIShadowDecisions: Object.freeze(["aiAnalysis"]),
+  recentAIShadowEvaluations: Object.freeze(["aiAnalysis"]),
+});
+
+// The exit-execution action-history filters are embedded in the bundle URL
+// for both the risk view and the dedicated exitExecution workspace, which
+// share the same backing panel key.
+export const EXIT_EXECUTION_FILTER_AFFECTED_VIEWS = Object.freeze(["risk", "exitExecution"]);
+
+// Drop cached "ready" markers for every view except `exceptView`. Call this
+// whenever a piece of state that participates in the bundle URL (pageLimits,
+// exit-execution-history filters, …) is mutated outside of the active view's
+// refresh path — otherwise switching back into those views would hit a fresh
+// cache entry that was built with the old URL parameters.
+//
+// `affectedViews` (optional): if provided, only these views are invalidated
+// (intersected with "not exceptView"). Omit to invalidate every non-active
+// view — the safer default for state changes whose scope is hard to pin down.
+export function invalidateCachedViews(state, exceptView = null, affectedViews = null) {
+  if (!state) return;
+  const scopeSet = Array.isArray(affectedViews) && affectedViews.length > 0 ? new Set(affectedViews) : null;
+  const shouldInvalidate = (key) => {
+    if (key === exceptView) return false;
+    if (scopeSet && !scopeSet.has(key)) return false;
+    return true;
+  };
+  if (state.readyViews && typeof state.readyViews === "object") {
+    for (const key of Object.keys(state.readyViews)) {
+      if (shouldInvalidate(key)) delete state.readyViews[key];
+    }
+  }
+  if (state.viewRefreshedAt && typeof state.viewRefreshedAt === "object") {
+    for (const key of Object.keys(state.viewRefreshedAt)) {
+      if (shouldInvalidate(key)) delete state.viewRefreshedAt[key];
+    }
+  }
+}
+
+// Derived helpers for refreshPhase. Prefer these over raw string comparisons
+// so a future phase value rename stays local to this module.
+export function isRefreshInFlight(state) {
+  return Boolean(state) && state.refreshPhase !== REFRESH_PHASE_IDLE;
+}
+
+export function isPrimaryRefreshInFlight(state) {
+  return Boolean(state) && state.refreshPhase === REFRESH_PHASE_PRIMARY;
 }

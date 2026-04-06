@@ -2309,7 +2309,11 @@ def _build_position_target_handler(
 
         plan = _plan_for_target(target=target, risk_decision=risk_decision)
         if plan is None:
-            _log.warning(
+            # build_plan() already logs at the appropriate level (debug for legitimate
+            # no-op like "hold current position", warning for suspicious cases like
+            # lot-size quantization issues). Keep this caller-side message at debug
+            # so a normal no-op decision does not emit two warnings.
+            _log.debug(
                 "position_target skip: plan 为 None | decision=%s symbol=%s product=%s target_qty=%s current_qty=%s",
                 target.decision_id, target.symbol, target.product_type,
                 target.target_position_qty, target.current_position_qty,

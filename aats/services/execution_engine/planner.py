@@ -102,10 +102,21 @@ class ExecutionPlanner:
             instrument_rule=instrument_rule,
         )
         if abs(normalized_delta_qty) < EPSILON_DECIMAL_12:
-            log.warning(
-                "build_plan skip: delta_qty 量化后为零 | symbol=%s decision=%s raw_delta=%s normalized=%s",
-                symbol, decision_id, delta_qty, normalized_delta_qty,
-            )
+            raw_delta_is_zero = abs(to_decimal(delta_qty)) < EPSILON_DECIMAL_12
+            if raw_delta_is_zero:
+                # Legitimate no-op: strategy asked to stay flat / hold position.
+                log.debug(
+                    "build_plan skip: delta_qty 为零（保持当前仓位）| symbol=%s decision=%s",
+                    symbol, decision_id,
+                )
+            else:
+                # Raw delta was non-zero but instrument-rule quantization rounded it
+                # to zero — this may indicate a lot-size / min-size mismatch worth
+                # investigating, so keep this at warning level.
+                log.warning(
+                    "build_plan skip: delta_qty 量化后为零 | symbol=%s decision=%s raw_delta=%s normalized=%s",
+                    symbol, decision_id, delta_qty, normalized_delta_qty,
+                )
             return None
 
         normalized_urgency = urgency if urgency in {"low", "medium", "high"} else "medium"

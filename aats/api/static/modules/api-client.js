@@ -1,6 +1,12 @@
 ﻿import { localizeError } from "./terms.js";
 
 const DEFAULT_TIMEOUT_MS = 60_000;
+// Deferred bundles aggregate slow reports (trial review, guarded-live
+// preflight, strategy attribution, shadow evaluations, …). The primary
+// bundle keeps the stricter 60s deadline; deferred requests are allowed
+// more headroom because they are background fill-ins and failing them
+// wastes all the panels inside the bundle.
+export const DEFERRED_BUNDLE_TIMEOUT_MS = 120_000;
 
 export async function requestJson(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -8,9 +14,24 @@ export async function requestJson(path, options = {}) {
     headers.set("Content-Type", "application/json");
   }
 
+  // We always own the AbortController so the timeout can fire. If the caller
+  // also supplied a signal (e.g. refreshDashboard's supersede controller),
+  // chain it into ours so either source can trigger abort. The previous
+  // implementation silently dropped the timeout when options.signal was
+  // provided, which defeated the purpose of having a deadline.
   const timeoutMs = options.timeout ?? DEFAULT_TIMEOUT_MS;
-  const controller = !options.signal && timeoutMs > 0 ? new AbortController() : null;
-  const timeoutId = controller ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+  const controller = new AbortController();
+  const timeoutId = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+
+  let externalAbortForwarder = null;
+  if (options.signal) {
+    if (options.signal.aborted) {
+      controller.abort();
+    } else {
+      externalAbortForwarder = () => controller.abort();
+      options.signal.addEventListener("abort", externalAbortForwarder);
+    }
+  }
 
   try {
     const response = await fetch(path, {
@@ -18,7 +39,7 @@ export async function requestJson(path, options = {}) {
       headers,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
       credentials: "same-origin",
-      signal: controller?.signal || options.signal,
+      signal: controller.signal,
     });
 
     const text = await response.text();
@@ -33,6 +54,9 @@ export async function requestJson(path, options = {}) {
     return payload;
   } finally {
     if (timeoutId !== undefined) clearTimeout(timeoutId);
+    if (externalAbortForwarder && options.signal) {
+      options.signal.removeEventListener("abort", externalAbortForwarder);
+    }
   }
 }
 

@@ -4,6 +4,7 @@ import { fetchDashboardBundle } from "./modules/api-client.js";
 import { createExecutionActionHandlers } from "./modules/actions/execution-actions.js";
 import { createRiskActionHandlers } from "./modules/actions/risk-actions.js";
 import { createDashboardRefreshController } from "./modules/dashboard-refresh.js";
+import { ensureNotBusy, setFlash } from "./modules/flash.js";
 import {
   listOrDash,
 } from "./modules/formatters.js";
@@ -12,8 +13,11 @@ import { createDashboardShellRenderer } from "./modules/shell-renderer.js";
 import {
   DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS,
   DEFAULT_PAGE_LIMITS,
+  EXIT_EXECUTION_FILTER_AFFECTED_VIEWS,
+  PAGE_LIMIT_AFFECTED_VIEWS,
   PAGE_LOAD_STEP,
   createState,
+  invalidateCachedViews,
 } from "./modules/store.js";
 import {
   localizeError,
@@ -126,6 +130,8 @@ const {
   renderBanners,
   renderLoadingView,
   renderShell,
+  tickFlashExpiry,
+  updateLastRefreshRelativeTime,
 } = shellRenderer;
 
 state.activeView = resolveViewFromLocation();
@@ -137,7 +143,6 @@ refreshController = createDashboardRefreshController({
   nodes,
   fetchDashboardBundle,
   renderShell,
-  renderBanners,
   applyPanelResults,
   shouldRedirectToLogin,
 });
@@ -146,6 +151,7 @@ const {
   handleVisibilityChange,
   isBackgroundRefreshingView,
   isBootstrapping,
+  isRefreshInFlight,
   isViewFresh,
   refreshDashboard,
   scheduleRefresh,
@@ -156,6 +162,7 @@ const riskActionHandlers = createRiskActionHandlers({
   activeExitExecutionHistoryState,
   activeExitExecutionHistoryView,
   activePhase1ShadowBlocker,
+  beginAction,
   controlPermissionMessage,
   ensureExitExecutionHistoryState,
   localizedRecoveryReasons,
@@ -166,7 +173,6 @@ const riskActionHandlers = createRiskActionHandlers({
   runAction,
   runDangerousAction,
   scrollExitExecutionWorkspaceIntoView,
-  setActionPending,
   state,
   syncActiveViewLocationState,
   syncExitExecutionHistoryFilterRoots,
@@ -183,6 +189,7 @@ const executionActionHandlers = createExecutionActionHandlers({
   resetPageLimit,
 });
 const adminActions = createAdminActions({
+  beginAction,
   renderBanners,
   refreshDashboard,
   requestJson,
@@ -196,6 +203,17 @@ function init() {
   bindEvents();
   renderShell();
   void refreshDashboard();
+  // Tick the "最近刷新" relative-age label once a second so users see "5 秒
+  // 前" roll forward without waiting for the next renderShell() call (which
+  // only fires on state transitions). The tick bails out during the PRIMARY
+  // phase so it does not clobber "正在刷新最新状态…" mid-fetch.
+  // The same tick also expires sticky flash banners (state.flash) so an
+  // 8-second-old success notice actually disappears from the DOM instead of
+  // waiting for the next state-driven render.
+  window.setInterval(() => {
+    updateLastRefreshRelativeTime();
+    tickFlashExpiry();
+  }, 1000);
 }
 
 function bindEvents() {
@@ -210,6 +228,22 @@ function bindEvents() {
   window.addEventListener("popstate", () => {
     const nextView = resolveViewFromLocation();
     hydrateViewStateFromLocation(nextView);
+    // hydrateViewStateFromLocation only mutates filter state when nextView
+    // is "exitExecution" (it short-circuits otherwise — see
+    // navigation-state.js). However the mutation it performs propagates the
+    // URL filters into BOTH the exitExecution view state AND the risk view
+    // state (via syncExitExecutionHistoryFiltersAcrossViews), because the
+    // two views share the exit-execution history panel. So:
+    //
+    //   * Going back/forward INTO exitExecution rewrites both views' filter
+    //     state from the URL → both cached bundles can be stale.
+    //   * Going back/forward INTO any other view rewrites nothing → invalidating
+    //     here is a defensive no-op that costs us essentially nothing.
+    //
+    // Either way, invalidating EXIT_EXECUTION_FILTER_AFFECTED_VIEWS (the
+    // {exitExecution, risk} pair) covers the only views whose bundle URLs
+    // actually embed those filters, so unrelated views keep their fast path.
+    invalidateCachedViews(state, nextView, EXIT_EXECUTION_FILTER_AFFECTED_VIEWS);
     setActiveView(nextView, { refresh: true });
   });
 
@@ -217,6 +251,13 @@ function bindEvents() {
     if (!event.persisted) return;
     const nextView = resolveViewFromLocation();
     hydrateViewStateFromLocation(nextView);
+    // Same reasoning as the popstate handler above. bfcache restore can
+    // bring back a page whose in-memory exitExecution filter state diverged
+    // from the URL during the previous visit; the hydrate call rewrites it
+    // back from the URL when re-entering exitExecution, and the invalidate
+    // ensures the next bundle fetch reflects the freshly hydrated filters
+    // rather than serving the stale cached bundle.
+    invalidateCachedViews(state, nextView, EXIT_EXECUTION_FILTER_AFFECTED_VIEWS);
     setActiveView(nextView, { refresh: true });
   });
   document.addEventListener("visibilitychange", handleVisibilityChange);
@@ -374,6 +415,9 @@ function setActiveView(view, { pushHistory = false, refresh = true } = {}) {
   const changed = state.activeView !== nextView;
   if (changed) {
     state.activeView = nextView;
+    // loadingView drives the skeleton: show it for a fresh transition into
+    // a view whose bundle has never landed, hide it when the target view is
+    // already in the readyViews cache (renderShell will paint cached data).
     state.loadingView = state.readyViews[nextView] ? null : nextView;
   }
   if (pushHistory) {
@@ -388,19 +432,14 @@ function setActiveView(view, { pushHistory = false, refresh = true } = {}) {
   viewLinks.forEach((link) => link.classList.toggle("is-active", link.dataset.view === nextView));
   viewSections.forEach((section) => section.classList.toggle("is-active", section.dataset.view === nextView));
   renderShell();
-  if (refresh) {
-    if (changed && isViewFresh(nextView) && state.readyViews[nextView]) {
-      // Data is very fresh — skip network request entirely
-      state.loadingView = null;
-      renderActiveView();
-    } else {
-      // Stale-while-revalidate: render cached data immediately, then refresh
-      if (changed && state.readyViews[nextView]) {
-        state.loadingView = null;
-      }
-      void refreshDashboard();
-    }
+  if (!refresh) return;
+  // Stale-while-revalidate fast path: cached bundle for this view is still
+  // within its freshness window, skip the network round-trip entirely.
+  // renderShell above already painted the cached data.
+  if (changed && isViewFresh(nextView) && state.readyViews[nextView]) {
+    return;
   }
+  void refreshDashboard();
 }
 
 function beginAction(target, pendingLabel) {
@@ -412,9 +451,13 @@ function beginAction(target, pendingLabel) {
     clearPending();
     state.actionInFlight = false;
     renderShell();
-    if (state.pendingRefresh && !state.refreshing) {
-      state.pendingRefresh = false;
-      void refreshDashboard();
+    // Drain a queued refresh request if any was stashed during the action.
+    // Carry the manual flag through so a queued manual refresh still shows
+    // its "已刷新" flash on the drained run.
+    if (state.pendingRefresh && !isRefreshInFlight()) {
+      const drained = state.pendingRefresh;
+      state.pendingRefresh = null;
+      void refreshDashboard(drained);
       return;
     }
     scheduleRefresh();
@@ -422,14 +465,17 @@ function beginAction(target, pendingLabel) {
 }
 
 async function runAction(path, body, successMessage, { target = null, pendingLabel = "正在提交请求…" } = {}) {
-  if (state.actionInFlight) return;
+  // ensureNotBusy surfaces an explicit "请等待上一次完成" flash instead of
+  // silently dropping the click. Without this guard the user has no way to
+  // tell the request was ignored.
+  if (!ensureNotBusy(state, renderBanners)) return;
   const finishAction = beginAction(target, pendingLabel);
   try {
     const result = await requestJson(path, { method: "POST", body });
-    state.flash = { tone: "info", message: result?.message || successMessage };
+    setFlash(state, "info", result?.message || successMessage);
     await refreshDashboard({ manual: true });
   } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
   } finally {
     finishAction();
@@ -442,13 +488,29 @@ async function runDangerousAction({ path, body, successMessage, confirmMessage, 
 }
 
 
+// Local in-flight latch instead of going through ensureNotBusy(): logout does
+// NOT call beginAction (it never wants to flip the global actionInFlight
+// because it's about to navigate away), so the shared actionInFlight guard
+// would never see it and a fast double-click would happily fire two POST
+// /auth/logout requests. The logoutButton is also intentionally kept
+// clickable in shell-renderer.js even while another action is in flight, so
+// we have to defend at this layer. The success path leaves logoutInFlight at
+// true on purpose — the page is about to be replaced by /login anyway and
+// we don't want a slow location.assign to allow another click in the gap.
+let logoutInFlight = false;
+
 async function logoutOperator() {
+  if (logoutInFlight) return;
+  logoutInFlight = true;
   try {
     await requestJson("/auth/logout", { method: "POST" });
     window.location.assign("/login");
   } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
+    // Failure path: clear the latch so the user can retry. Success path
+    // intentionally leaves it at true (see comment above).
+    logoutInFlight = false;
   }
 }
 
@@ -457,8 +519,22 @@ async function dispatchAction(action, value, target = null) {
   if (action === "navigate-view") {
     const nextView = resolveKnownView(value);
     if (state.activeView === nextView) {
-      state.flash = { tone: "info", message: `当前已在${VIEW_LABELS[nextView] || "当前页面"}，已刷新当前状态。` };
-      renderBanners();
+      // NB: this flash path is intentionally DIFFERENT from the top nav link
+      // click handler (which silently calls setActiveView on same-view). Nav
+      // links are visually obvious as navigation controls, so users don't
+      // need feedback when clicking them. This dispatchAction path, on the
+      // other hand, is triggered from in-card "jump to X" buttons where the
+      // user expects a visible navigation; when the target happens to be the
+      // current view we owe them an explicit "why did nothing visually move"
+      // explanation. Keep the flash + scroll + manual refresh combo.
+      //
+      // Tense note: this flash now lives across the entire ~8s sticky-flash
+      // TTL (see shell-renderer.js renderBanners), so the message must still
+      // make sense AFTER refreshDashboard finishes. Past-tense / completed
+      // phrasing is the safest choice. The `&& !state.flash` guard inside
+      // refreshDashboard prevents the generic "页面数据已刷新" notice from
+      // clobbering this more specific message at end of refresh.
+      setFlash(state, "info", `当前已在${VIEW_LABELS[nextView] || "当前页面"}，已为你重新拉取最新数据。`);
       window.scrollTo({ top: 0, behavior: "smooth" });
       return refreshDashboard({ manual: true });
     }
@@ -493,19 +569,30 @@ async function inspectDecision(decisionId) {
     const detail = await requestJson(`/decision/${encodeURIComponent(decisionId)}`);
     openDrawer(buildDecisionDrawer(detail));
   } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
   }
 }
 
 async function adjustPageLimit(key, delta) {
   const current = Number(state.pageLimits?.[key] || DEFAULT_PAGE_LIMITS[key] || 0);
-  state.pageLimits[key] = current + delta;
+  const nextValue = current + delta;
+  // Guard against non-positive limits. A negative or zero limit would be
+  // serialized into the bundle URL and rejected by the backend, wasting a
+  // round-trip and leaving the UI in a confusing state.
+  if (!Number.isFinite(nextValue) || nextValue < 1) return;
+  state.pageLimits[key] = nextValue;
+  // pageLimits is embedded in the bundle URL only for the views that render
+  // the affected panel. PAGE_LIMIT_AFFECTED_VIEWS narrows the invalidation
+  // to that subset so unrelated views retain their stale-while-revalidate
+  // cache entries.
+  invalidateCachedViews(state, state.activeView, PAGE_LIMIT_AFFECTED_VIEWS[key] || null);
   await refreshDashboard();
 }
 
 async function resetPageLimit(key) {
   state.pageLimits[key] = DEFAULT_PAGE_LIMITS[key] || state.pageLimits[key];
+  invalidateCachedViews(state, state.activeView, PAGE_LIMIT_AFFECTED_VIEWS[key] || null);
   await refreshDashboard();
 }
 
@@ -539,6 +626,17 @@ function handleExitExecutionHistoryFilterEvent(event) {
     syncActiveViewLocationState({ pushHistory: false });
   }
   syncExitExecutionHistoryFilterRoots();
+  // The filter mutation above ALSO mutates the OTHER (non-active) exit-execution
+  // view's filter state via syncExitExecutionHistoryFiltersAcrossViews. Both
+  // views' bundle URLs depend on these filters, so the cached "ready" marker
+  // for the non-active view (built with the previous filters AND the previous
+  // offset, which we just reset to 0) is now stale. Invalidate it so the next
+  // view switch refetches with the new filters instead of hitting the
+  // fast-path with mismatched data. The active view is exempted because the
+  // applyExitExecutionHistoryFilters() invocation inside
+  // syncExitExecutionHistoryFilterRoots() already re-applies the filter
+  // visually on the cached DOM.
+  invalidateCachedViews(state, state.activeView, EXIT_EXECUTION_FILTER_AFFECTED_VIEWS);
 }
 
 function applyExitExecutionHistoryFilters(root) {
@@ -605,50 +703,6 @@ function syncExitExecutionHistoryFilterRoots() {
   });
 }
 
-async function applyExitExecutionHistoryWorkspaceFilters(target = null) {
-  const historyState = activeExitExecutionHistoryState();
-  historyState.offset = 0;
-  syncExitExecutionHistoryFiltersAcrossViews(activeExitExecutionHistoryView());
-  if (state.activeView === "exitExecution") {
-    syncActiveViewLocationState({ pushHistory: false });
-  }
-  await refreshDashboard({ manual: true });
-  scrollExitExecutionWorkspaceIntoView(target);
-}
-
-async function resetExitExecutionHistoryWorkspaceFilters(target = null) {
-  const riskHistoryState = ensureExitExecutionHistoryState("risk");
-  const exitExecutionHistoryState = ensureExitExecutionHistoryState("exitExecution");
-  Object.assign(riskHistoryState, DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS, { offset: 0 });
-  Object.assign(exitExecutionHistoryState, DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS, { offset: 0 });
-  if (state.activeView === "exitExecution") {
-    syncActiveViewLocationState({ pushHistory: false });
-  }
-  syncExitExecutionHistoryFilterRoots();
-  await refreshDashboard({ manual: true });
-  scrollExitExecutionWorkspaceIntoView(target);
-}
-
-async function paginateExitExecutionHistory(direction, target = null) {
-  const historyState = activeExitExecutionHistoryState();
-  const limit = Math.max(Number(historyState.limit) || 20, 1);
-  const currentOffset = Math.max(Number(historyState.offset) || 0, 0);
-  let nextOffset = currentOffset;
-  if (direction === "next") {
-    nextOffset = currentOffset + limit;
-  } else if (direction === "prev") {
-    nextOffset = Math.max(currentOffset - limit, 0);
-  } else {
-    nextOffset = 0;
-  }
-  historyState.offset = nextOffset;
-  if (state.activeView === "exitExecution") {
-    syncActiveViewLocationState({ pushHistory: false });
-  }
-  await refreshDashboard({ manual: true });
-  scrollExitExecutionWorkspaceIntoView(target);
-}
-
 function scrollExitExecutionWorkspaceIntoView(target = null) {
   const workspace = document.getElementById(state.activeView === "exitExecution" ? "exit-execution-workspace" : "risk-exit-workspace");
   if (workspace instanceof HTMLElement) {
@@ -682,95 +736,114 @@ function setActionPending(target, pendingLabel) {
 async function activateStrategyProfile(profileId, target = null) {
   if (!profileId) return;
   const profileLabel = target instanceof HTMLElement ? (target.textContent || "").trim() : profileId;
-  const clearPending = setActionPending(target, "正在切换策略档位…");
+  // Order: confirm → ensureNotBusy → beginAction. Confirming first means
+  //   1. Cancel exits without leaving a redundant "busy" flash on screen.
+  //   2. ensureNotBusy is re-checked AFTER the (potentially slow) confirm
+  //      dialog, which catches the race where another action lands while
+  //      the user was pondering at the dialog.
+  //   3. Cancelling never flips actionInFlight / cancels the scheduled
+  //      refresh / triggers the pending-style indicator just to undo it.
+  // This matches the order used by admin-actions.js handlers.
+  if (!window.confirm(`确认立即切换到“${profileLabel}”这个已注册策略档位吗？`)) return;
+  if (!ensureNotBusy(state, renderBanners)) return;
+  const finishAction = beginAction(target, "正在切换策略档位…");
   try {
-    if (!window.confirm(`确认立即切换到“${profileLabel}”这个已注册策略档位吗？`)) return;
     const result = await requestJson(`/strategy-profiles/profiles/${encodeURIComponent(profileId)}/activate`, {
       method: "POST",
       body: { reason: "ui_manual_activate_strategy_profile" },
     });
-    state.flash = {
-      tone: "info",
-      message: `当前策略档位已手动切换为 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
-    };
+    setFlash(
+      state,
+      "info",
+      `当前策略档位已手动切换为 ${readableProfileName(result?.active_revision?.profile_label || result?.active_revision?.profile_id)}。`,
+    );
     await refreshDashboard({ manual: true });
   } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
   } finally {
-    clearPending();
+    finishAction();
   }
 }
 
 async function restoreStrategyProfileAutomaticControl(target = null) {
-  const clearPending = setActionPending(target, "正在恢复自动切档…");
+  // confirm → ensureNotBusy → beginAction; see activateStrategyProfile.
+  if (!window.confirm("确认开启自动切档吗？开启后下面 6 个档位按钮会锁定，由系统自动决定是否换档。")) return;
+  if (!ensureNotBusy(state, renderBanners)) return;
+  const finishAction = beginAction(target, "正在恢复自动切档…");
   try {
-    if (!window.confirm("确认开启自动切档吗？开启后下面 6 个档位按钮会锁定，由系统自动决定是否换档。")) return;
     const result = await requestJson("/strategy-profiles/restore-auto", {
       method: "POST",
       body: { reason: "ui_restore_auto_strategy_profile_control" },
     });
     const activation = result?.activation || {};
-    state.flash = {
-      tone: "info",
-      message: activation?.active_profile_id
+    setFlash(
+      state,
+      "info",
+      activation?.active_profile_id
         ? `策略档位已恢复自动切档逻辑，当前仍保持 ${readableProfileName(result?.active_revision?.profile_label || activation.active_profile_id)}。`
         : "策略档位已恢复自动切档逻辑。",
-    };
+    );
     await refreshDashboard({ manual: true });
   } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
   } finally {
-    clearPending();
+    finishAction();
   }
 }
 
 async function pauseStrategyProfileAutomaticControl(target = null) {
-  const clearPending = setActionPending(target, "正在切到手动切档…");
+  // confirm → ensureNotBusy → beginAction; see activateStrategyProfile.
+  if (!window.confirm("确认关闭自动切档吗？关闭后下面 6 个档位按钮会解锁，由你手动切换。")) return;
+  if (!ensureNotBusy(state, renderBanners)) return;
+  const finishAction = beginAction(target, "正在切到手动切档…");
   try {
-    if (!window.confirm("确认关闭自动切档吗？关闭后下面 6 个档位按钮会解锁，由你手动切换。")) return;
     const result = await requestJson("/strategy-profiles/pause-auto", {
       method: "POST",
       body: { reason: "ui_pause_auto_strategy_profile_control" },
     });
     const activation = result?.activation || {};
-    state.flash = {
-      tone: "info",
-      message: activation?.active_profile_id
+    setFlash(
+      state,
+      "info",
+      activation?.active_profile_id
         ? `当前已切到手动切档，系统会保持 ${readableProfileName(result?.active_revision?.profile_label || activation.active_profile_id)}。`
         : "当前已切到手动切档。",
-    };
+    );
     await refreshDashboard({ manual: true });
   } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
   } finally {
-    clearPending();
+    finishAction();
   }
 }
 
 async function selectAIOperatingMode(mode, target = null) {
   if (!mode) return;
   const modeLabel = target instanceof HTMLElement ? (target.textContent || "").trim() : mode;
-  const clearPending = setActionPending(target, "正在切换运行模式…");
+  // confirm → ensureNotBusy → beginAction; see activateStrategyProfile.
+  if (!window.confirm(`确认立即把 AI 当前运行模式切换为“${modeLabel}”吗？`)) return;
+  if (!ensureNotBusy(state, renderBanners)) return;
+  const finishAction = beginAction(target, "正在切换运行模式…");
   try {
-    if (!window.confirm(`确认立即把 AI 当前运行模式切换为“${modeLabel}”吗？`)) return;
     const result = await requestJson("/ai/operating-mode/select", {
       method: "POST",
       body: { mode, reason: "ui_select_ai_operating_mode" },
     });
     const runtime = result?.ai_runtime || {};
-    state.flash = {
-      tone: "info",
-      message: `AI 当前运行模式已切换为 ${readableState(runtime.effective_operating_mode || mode, "目标模式")}。`,
-    };
+    setFlash(
+      state,
+      "info",
+      `AI 当前运行模式已切换为 ${readableState(runtime.effective_operating_mode || mode, "目标模式")}。`,
+    );
     await refreshDashboard({ manual: true });
   } catch (error) {
-    state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+    setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
   } finally {
-    clearPending();
+    finishAction();
   }
 }
 
@@ -797,6 +870,24 @@ function operatorCanWrite() {
   return session.role === "operator" || session.role === "admin" || session.identity === "api_key_write";
 }
 
+// hasResolvedAuthContext / hasResolvedPanel are PANEL-level "has any response
+// ever landed?" predicates — they operate on state.data / state.errors which
+// are keyed by bundle panel key. They are intentionally distinct from
+// readyViews (VIEW-level) and pendingPanels (deferred fill-in). Rough usage:
+//
+//   - hasResolvedPanel(key)       → "this specific panel has ever produced
+//                                    data or an error; safe to render it"
+//   - hasResolvedAuthContext()    → specialized two-key check used by banner
+//                                    and auth-gated buttons
+//   - readyViews[view]            → "primary bundle for this view has landed
+//                                    at least once; stale-while-revalidate
+//                                    can show cached content on re-entry"
+//   - pendingPanels[key]          → "a deferred fetch for this panel is in
+//                                    flight; display shimmer and lock
+//                                    panel-scoped buttons"
+//
+// Do NOT collapse these into a single concept — panel-level and view-level
+// resolution are both needed and serve different renderers.
 function hasResolvedAuthContext() {
   return Object.prototype.hasOwnProperty.call(state.data, "authProviders") && Object.prototype.hasOwnProperty.call(state.data, "session");
 }
@@ -874,59 +965,6 @@ function activePhase1ShadowBlocker() {
   if (Array.isArray(blockerControl.secondary_blockers)) candidates.push(...blockerControl.secondary_blockers);
   if (Array.isArray(blockerControl.blockers)) candidates.push(...blockerControl.blockers);
   return candidates.find((item) => String(item?.blocker || "").startsWith("phase1_shadow")) || null;
-}
-
-function defaultBlockerActionReason(actionId) {
-  const map = {
-    "reconcile-now": "operator_validate_from_blocker_panel",
-    "accept-rebaseline": "operator_rebaseline_from_blocker_panel",
-    "resume-system": "operator_resume_from_blocker_panel",
-    "halt-system": "operator_keep_halted_from_blocker_panel",
-    "refresh-exchange-state": "operator_refresh_exchange_state_from_blocker_panel",
-    "acknowledge-phase1-shadow": "operator_review_phase1_shadow_from_blocker_panel",
-    "ai-review-restore": "operator_restore_ai_from_blocker_panel",
-    "ai-review-degrade-to-baseline": "operator_degrade_to_baseline_from_blocker_panel",
-  };
-  return map[actionId] || `operator_${actionId}`;
-}
-
-function blockerActionPendingLabel(actionId) {
-  const map = {
-    "reconcile-now": "正在重新对账…",
-    "accept-rebaseline": "正在确认新基线…",
-    "resume-system": "正在恢复自动运行…",
-    "halt-system": "正在保持暂停状态…",
-    "refresh-exchange-state": "正在刷新交易所状态…",
-    "acknowledge-phase1-shadow": "正在记录影子核查结果…",
-    "ai-review-restore": "正在恢复 AI 决策…",
-    "ai-review-degrade-to-baseline": "正在切到仅基础策略运行…",
-  };
-  return map[actionId] || "正在执行阻断处理动作…";
-}
-
-function blockerActionSuccessMessage(actionId) {
-  const map = {
-    "reconcile-now": "对账已刷新。",
-    "accept-rebaseline": "新基线已确认。",
-    "resume-system": "恢复自动运行请求已提交。",
-    "halt-system": "系统会继续保持暂停状态。",
-    "refresh-exchange-state": "交易所状态已刷新。",
-    "acknowledge-phase1-shadow": "已记录影子兼容层人工核查结果。",
-    "ai-review-restore": "AI 复核已处理，已恢复 AI 决策资格。",
-    "ai-review-degrade-to-baseline": "AI 复核已处理，系统将以仅基础策略继续运行。",
-  };
-  return map[actionId] || "阻断处理动作已完成。";
-}
-
-function blockerActionConfirmMessage(actionId) {
-  const map = {
-    "accept-rebaseline": "确认把当前状态接受为新基线吗？这会覆盖旧的恢复参照。",
-    "halt-system": "确认继续保持暂停状态吗？这会阻止系统继续自动交易。",
-    "acknowledge-phase1-shadow": "确认已完成人工核查吗？这会留下当前影子兼容层状态记录，但不会解除阻断。",
-    "ai-review-restore": "确认恢复 AI 决策链路吗？这会清除当前 AI 结果复核阻断。",
-    "ai-review-degrade-to-baseline": "确认改为仅基础策略继续运行吗？这会解除当前 AI 复核阻断，并把 AI 决策权降为仅基础策略。",
-  };
-  return map[actionId] || "";
 }
 
 function openDrawer({ eyebrow, title, summary, body }) {

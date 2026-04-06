@@ -1,5 +1,6 @@
 import { textOrFallback } from "../copy.js";
 import { buildReconciliationDrawer } from "../detail-drawers.js";
+import { ensureNotBusy, setFlash } from "../flash.js";
 import { buildPhase1ShadowDrawer } from "../shadow-drawer.js";
 import { DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS } from "../store.js";
 import { localizeError } from "../terms.js";
@@ -8,6 +9,7 @@ export function createRiskActionHandlers({
   activeExitExecutionHistoryState,
   activeExitExecutionHistoryView,
   activePhase1ShadowBlocker,
+  beginAction,
   controlPermissionMessage,
   ensureExitExecutionHistoryState,
   localizedRecoveryReasons,
@@ -18,7 +20,6 @@ export function createRiskActionHandlers({
   runAction,
   runDangerousAction,
   scrollExitExecutionWorkspaceIntoView,
-  setActionPending,
   state,
   syncActiveViewLocationState,
   syncExitExecutionHistoryFilterRoots,
@@ -255,20 +256,28 @@ export function createRiskActionHandlers({
     pendingLabel = "正在提交请求…",
     confirmMessage = "",
   } = {}) {
-    const clearPending = setActionPending(target, pendingLabel);
+    // Order: confirm → ensureNotBusy → beginAction. Confirming first means
+    //   1. Cancel exits without leaving a redundant "busy" flash on screen.
+    //   2. ensureNotBusy is re-checked AFTER the (potentially slow) confirm
+    //      dialog, which catches the race where another action lands while
+    //      the user was pondering at the dialog.
+    //   3. Cancelling never flips actionInFlight / cancels the scheduled
+    //      refresh / triggers the pending-style indicator just to undo it.
+    // The same ordering is used by activateStrategyProfile in app.js and by
+    // every confirm-first handler in admin-actions.js — see the canonical
+    // walkthrough above activateStrategyProfile in app.js for the long form.
+    if (confirmMessage && !window.confirm(confirmMessage)) return;
+    if (!ensureNotBusy(state, renderBanners)) return;
+    const finishAction = beginAction(target, pendingLabel);
     try {
-      if (confirmMessage && !window.confirm(confirmMessage)) return;
       const result = await requestJson(path, { method: "POST", body });
-      state.flash = {
-        tone: "info",
-        message: exitExecutionActionFlashMessage(result, successMessage),
-      };
+      setFlash(state, "info", exitExecutionActionFlashMessage(result, successMessage));
       await refreshDashboard({ manual: true });
     } catch (error) {
-      state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
     } finally {
-      clearPending();
+      finishAction();
     }
   }
 
@@ -374,7 +383,7 @@ export function createRiskActionHandlers({
         }),
       );
     } catch (error) {
-      state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
     }
   }
@@ -395,7 +404,7 @@ export function createRiskActionHandlers({
         }),
       );
     } catch (error) {
-      state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
     }
   }

@@ -58,6 +58,21 @@ def compute_signal_edge_bps(
     ai_assessment: AIMarketAssessment | None,
     leg: IndependentLeg,
 ) -> float:
+    """计算 independent 家族的 signal_edge_proxy_bps。
+
+    优先走 RDP score-based 路径 (与 replay 对齐)，仅在 RDP 未启用时
+    退回到 legacy component_edge 路径。
+
+    生产 vs replay 已知差异 (P2-8 修复后仍存在):
+        生产 `compute_raw_book_score` 在 leg=="short" 且 short_bias_enabled=False
+        时直接返回 0，导致 short leg signal_edge=0。
+        replay `independent_adapter._compute_edge_layers` 不区分 short_bias，
+        而是 dominant_leg = max(long_score, short_score)。
+        当 short_bias_enabled=False 但 short_score > long_score 时，
+        生产会跳过 short leg，replay 可能会进。
+        当前仅 P2-8 修复 component vs score_based 公式偏差，short_bias gating
+        差异属于另一个独立 issue (待 P2-9 跟进)。
+    """
     side_sign = 1.0 if leg == "long" else -1.0
     directional_alpha = max(0.0, side_sign * float(baseline.composite_alpha_score))
     directional_microstructure = max(0.0, side_sign * float(baseline.factor_scores.get("microstructure_alpha", 0.0)))
@@ -71,7 +86,8 @@ def compute_signal_edge_bps(
     ai_bonus = max(directional_ai - 0.1, 0.0) * 20.0
     component_edge = alpha_edge + microstructure_bonus + momentum_bonus + trend_bonus + ai_bonus
 
-    # ── RDP score-based 信号边际路径 ──────────────────────────────────
+    # ── RDP score-based 信号边际路径 (P2-8: 单路径与 replay 对齐) ──────
+    #
     # 当 strategy_signal_edge_scale_bps 由 active_parameters 注入时，
     # 切换到 score_based_edge = composite_score × scale 的单路径。
     #
@@ -99,6 +115,23 @@ def compute_signal_edge_bps(
         score_based_edge = composite_score * float(rdp_scale)
         return score_based_edge
 
+    # ── Legacy component_edge fallback (DEPRECATED, FALLBACK ONLY) ─────
+    #
+    # 此分支仅在以下场景触发:
+    #   1. RDP coverage 失效 (active_parameter_sets 缺 signal_edge_scale_bps)
+    #   2. 纯本地 sandbox / 单元测试无 RDP 推荐注入
+    #   3. derivatives_live 之外的 profile 未启用 RDP pipeline
+    #
+    # 当前 production deployment (configs/active_parameter_sets/) 已全量
+    # 钉住 signal_edge_scale_bps=20，意味着生产环境**永远不走此分支**。
+    # 此处保留是为了:
+    #   - sandbox / unit test 兼容
+    #   - 如果 RDP pipeline 临时失效，仍有可工作的 fallback
+    #
+    # 后续 cleanup PR 可考虑:
+    #   - 在 `__post_init__` 等启动校验中检查 strategy_signal_edge_scale_bps
+    #     必须 > 0，缺失时直接 raise，并彻底删除此分支
+    #   - 删除前需确认所有 sandbox / replay-disabled profile 都已迁移
     return component_edge
 
 

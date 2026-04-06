@@ -858,6 +858,80 @@ check(
     hasattr(_s3, "_CONSTRAINT_RULES") and len(_s3._CONSTRAINT_RULES) == 7,
 )
 
+# 14g + 14h: 真相源一致性 — _DEFAULTS_BY_FAMILY 必须与
+# ReplayParameterOverrides.for_family() / dataclass 默认完全一致。
+# 如果 replay 端日后修改默认，本测试会立刻报错避免静默偏差。
+try:
+    from aats.data_platform.replay.core.replay_context import ReplayParameterOverrides
+
+    _replay_independent = ReplayParameterOverrides()  # 默认 = independent
+    _replay_directional = ReplayParameterOverrides.for_family("directional")
+
+    # 关键阈值字段必须逐一对齐（其他字段通过 14h 整体校验）
+    _critical_fields = [
+        ("entry_threshold", 0.40, 0.45),
+        ("close_threshold", 0.15, 0.20),
+        ("scale_in_threshold", 0.60, 0.60),
+        ("min_safe_net_edge_bps", 2.0, 2.0),
+        ("de_risk_net_edge_bps", 2.0, 2.0),
+        ("failed_thesis_net_edge_bps", -1.0, -1.0),
+        ("catastrophic_failed_thesis_buffer_bps", 3.0, 3.0),
+        ("min_hold_seconds", 300.0, 300.0),
+        ("max_thesis_age_seconds", 1800.0, 1800.0),
+        ("expected_slippage_buffer_bps", 0.5, 0.5),
+        ("expected_execution_buffer_bps", 0.5, 0.5),
+        ("signal_edge_scale_bps", 12.0, 12.0),
+    ]
+
+    _ind_d = _s3._get_param_defaults("independent")
+    _dir_d = _s3._get_param_defaults("directional")
+
+    for _field, _expected_ind, _expected_dir in _critical_fields:
+        # Step 3 默认 = 期望值
+        check(
+            f"14g: _INDEPENDENT_DEFAULTS[{_field}] == {_expected_ind}",
+            _ind_d.get(_field) == _expected_ind,
+            f"got {_ind_d.get(_field)}",
+        )
+        check(
+            f"14g: _DIRECTIONAL_DEFAULTS[{_field}] == {_expected_dir}",
+            _dir_d.get(_field) == _expected_dir,
+            f"got {_dir_d.get(_field)}",
+        )
+        # ReplayParameterOverrides 真相源 = 期望值（防止 replay 端漂移）
+        check(
+            f"14g: ReplayParameterOverrides().{_field} == {_expected_ind}",
+            getattr(_replay_independent, _field) == _expected_ind,
+            f"got {getattr(_replay_independent, _field)}",
+        )
+        check(
+            f"14g: for_family('directional').{_field} == {_expected_dir}",
+            getattr(_replay_directional, _field) == _expected_dir,
+            f"got {getattr(_replay_directional, _field)}",
+        )
+
+    # 14h: directional 与 independent 的差异点仅限 entry_threshold / close_threshold
+    # 如果未来 for_family 增加新差异字段，此断言会报错并提醒同步更新
+    # _DIRECTIONAL_DEFAULTS。
+    _replay_diff_fields = {
+        f
+        for f in _critical_fields
+        if getattr(_replay_independent, f[0]) != getattr(_replay_directional, f[0])
+    }
+    _expected_diff = {("entry_threshold", 0.40, 0.45), ("close_threshold", 0.15, 0.20)}
+    check(
+        "14h: ReplayParameterOverrides directional vs independent 差异 = {entry, close}",
+        _replay_diff_fields == _expected_diff,
+        f"got diff fields = {_replay_diff_fields}",
+    )
+
+except ImportError as _e:
+    check(
+        "14g/14h: ReplayParameterOverrides 可导入",
+        False,
+        f"ImportError: {_e}",
+    )
+
 print()
 
 # ══════════════════════════════════════════════════════════════

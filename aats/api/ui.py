@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 
 from aats.api.auth import session_principal
@@ -105,6 +105,11 @@ async def login_index(request: Request):
     if _dashboard_allowed(request):
         return RedirectResponse(url="/ui", status_code=303)
     return FileResponse(UI_DIR / "login.html", media_type="text/html; charset=utf-8", headers=PAGE_NO_STORE_HEADERS)
+
+
+@ui_router.get("/favicon.ico")
+async def favicon() -> Response:
+    return Response(status_code=204, headers=STATIC_ASSET_HEADERS)
 
 
 @ui_router.get("/ui/app.css")

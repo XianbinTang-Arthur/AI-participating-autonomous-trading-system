@@ -58,38 +58,52 @@ class OKXPrivateWebSocketClient:
         subscribe_args = self._subscription_args()
         reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
         while not self._stop_event.is_set():
+            keepalive_task: asyncio.Task[None] | None = None
             try:
+                # Disable the websockets library's protocol-level PING frames. OKX
+                # documents application-level text "ping"/"pong" as the supported
+                # keepalive, and the library's PING has been observed to interact badly
+                # with OKX (producing 1011 false timeouts on the public WS and failing
+                # to prevent OKX's own 4004 "no data in 30s" timeout on the private WS).
+                # We use an idle-triggered text ping with response-timeout watchdog below.
                 async with connect(
                     self._resolved_private_ws_url(),
-                    ping_interval=self.settings.okx_ws_ping_interval_seconds,
-                    ping_timeout=self.settings.okx_ws_ping_timeout_seconds,
+                    ping_interval=None,
+                    ping_timeout=None,
                     open_timeout=self.settings.okx_ws_open_timeout_seconds,
                     close_timeout=5,
                 ) as websocket:
-                    keepalive_task = asyncio.create_task(self._keepalive_loop(websocket))
                     try:
                         await self._login(websocket)
                         await self._subscribe(websocket, subscribe_args)
                         self._connected = True
+                        # Reset liveness timestamp so the keepalive does not fire based
+                        # on a stale value from the previous connection.
+                        self._last_message_ts = utc_now()
                         reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
                         log_event(self.logger, "okx_private_ws_connected", url=self._resolved_private_ws_url())
+                        # Start the keepalive task only after login + subscribe so it does
+                        # not race with the login handshake.
+                        keepalive_task = asyncio.create_task(self._keepalive_loop(websocket))
                         async for raw_message in websocket:
                             if self._stop_event.is_set():
                                 break
+                            # Any inbound frame (pong, control, or payload) counts as
+                            # channel liveness for the keepalive loop.
+                            self._last_message_ts = utc_now()
                             if self._is_pong_message(raw_message):
-                                self._last_message_ts = utc_now()
                                 continue
                             message = _json_loads(raw_message)
                             if not isinstance(message, dict):
                                 continue
-                            self._last_message_ts = utc_now()
                             if self._is_control_message(message):
                                 continue
                             await on_message(message)
                     finally:
-                        keepalive_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError):
-                            await keepalive_task
+                        if keepalive_task is not None:
+                            keepalive_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await keepalive_task
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -227,9 +241,45 @@ class OKXPrivateWebSocketClient:
         return str(raw_message).strip().lower() == "pong"
 
     async def _keepalive_loop(self, websocket: ClientConnection) -> None:
-        interval = max(5.0, float(self.settings.okx_private_ws_idle_ping_interval_seconds))
+        # Idle-triggered keepalive per OKX spec. OKX enforces a 30s no-data close
+        # (code 4004) on the private channel, so the steady-state gap between our
+        # outbound frames must stay well below 30s. We cap idle_threshold at 15s
+        # (so even a user misconfiguration cannot push it into the danger zone) and
+        # use a 1s poll interval to minimize jitter from event-loop stalls. The
+        # worst-case gap between pings is roughly idle_threshold + poll_interval
+        # (~16s), leaving ~14s of safety margin against OKX's 30s deadline.
+        configured_idle = float(self.settings.okx_private_ws_idle_ping_interval_seconds)
+        idle_threshold = min(max(5.0, configured_idle), 15.0)
+        pong_timeout = 10.0
+        poll_interval = 1.0
         while not self._stop_event.is_set():
-            await asyncio.sleep(interval)
+            await asyncio.sleep(poll_interval)
             if self._stop_event.is_set():
                 return
-            await websocket.send("ping")
+            last_ts = self._last_message_ts
+            if last_ts is not None:
+                idle = (utc_now() - last_ts).total_seconds()
+                if idle < idle_threshold:
+                    continue
+            ping_sent_at = utc_now()
+            try:
+                await websocket.send("ping")
+            except Exception:
+                return
+            # Wait up to pong_timeout for any inbound traffic (pong or push data).
+            while not self._stop_event.is_set():
+                await asyncio.sleep(0.5)
+                latest = self._last_message_ts
+                if latest is not None and latest > ping_sent_at:
+                    break
+                if (utc_now() - ping_sent_at).total_seconds() >= pong_timeout:
+                    log_event(
+                        self.logger,
+                        "okx_private_ws_pong_timeout",
+                        level="warning",
+                        idle_threshold=idle_threshold,
+                        pong_timeout=pong_timeout,
+                    )
+                    with contextlib.suppress(Exception):
+                        await websocket.close(code=1011, reason="application_ping_timeout")
+                    return

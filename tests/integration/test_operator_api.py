@@ -4720,6 +4720,93 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(refresh_action["details"]["errors"]), 1)
         self.assertEqual(refresh_action["details"]["errors"][0]["scope"], "market_data")
 
+    async def test_refresh_account_state_for_operator_resolution_awaits_evaluate_derivatives_live_guard(self) -> None:
+        """回归测试: `_refresh_account_state_for_operator_resolution` 必须 await
+        `_evaluate_derivatives_live_guard_after_refresh`，否则 guard 重新评估
+        永远不会运行 (test_refresh_exchange_state_action_retries_until_... 曾
+        因此 12 天未通过)。
+
+        ApplicationRuntime 是 frozen，无法直接 patch 其方法。
+        本测试通过 spy 间接依赖 `derivatives_live_guard_service.evaluate_now`
+        来验证 await 链路完整性:
+          - production 调用链:
+              query_service._refresh_account_state_for_operator_resolution
+              -> await runtime._evaluate_derivatives_live_guard_after_refresh()
+              -> await asyncio.to_thread(derivatives_live_guard_service.evaluate_now)
+          - 如果上层 query_service 漏 await，最深层的 evaluate_now 不会被调用,
+            因为 coroutine 从未运行 (Python 还会发出 RuntimeWarning)。
+          - 启用 -W error::RuntimeWarning 后，漏 await 会直接导致测试失败。
+        """
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "enabled_decision_timeframes": ("15m",),
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        runtime = await build_runtime(settings)
+
+        # Mock 仅 refresh 链路相关的依赖
+        mock_account_service = Mock()
+        mock_account_service.refresh = AsyncMock(return_value=Mock())
+        mock_account_service.latest_recent_bills = Mock(return_value=[])
+        runtime.account_service = mock_account_service
+
+        # 注入一个 sync spy 作为 guard service
+        # _evaluate_derivatives_live_guard_after_refresh 内部会
+        # `await asyncio.to_thread(self.derivatives_live_guard_service.evaluate_now)`
+        guard_spy = Mock()
+        guard_spy.evaluate_now = Mock(return_value={"blockers": []})
+        runtime.derivatives_live_guard_service = guard_spy
+
+        # 同样为 funding fee sync 注入一个 spy (避免依赖真实 service)
+        funding_spy = Mock()
+        funding_spy.sync_recent_bills = Mock(return_value=Mock(posted_count=0))
+        runtime.funding_fee_sync_service = funding_spy
+
+        # 直接调用受测函数，绕过 HTTP 路由
+        service = OperatorQueryService(runtime=runtime)
+
+        # ── 正常路径 ──
+        await service._refresh_account_state_for_operator_resolution()
+
+        # 关键断言: guard.evaluate_now 必须被调用一次
+        # 修复前 query_service.py 缺 await -> coroutine 创建但未运行 ->
+        # to_thread 永不调度 -> evaluate_now.call_count == 0
+        # 修复后 -> evaluate_now.call_count == 1
+        self.assertEqual(
+            guard_spy.evaluate_now.call_count,
+            1,
+            "derivatives_live_guard_service.evaluate_now 必须被调用一次。"
+            "若 call_count == 0 表示 query_service.py 漏 await，"
+            "_evaluate_derivatives_live_guard_after_refresh 的 coroutine "
+            "从未真正运行，guard 重新评估永远不会执行。",
+        )
+        self.assertEqual(funding_spy.sync_recent_bills.call_count, 1)
+
+        # ── 异常路径: account_service.refresh 抛错时, finally 仍必须 await ──
+        mock_account_service.refresh = AsyncMock(side_effect=RuntimeError("simulated"))
+        guard_spy.evaluate_now.reset_mock()
+        funding_spy.sync_recent_bills.reset_mock()
+
+        with self.assertRaises(RuntimeError):
+            await service._refresh_account_state_for_operator_resolution()
+
+        self.assertEqual(
+            guard_spy.evaluate_now.call_count,
+            1,
+            "derivatives_live_guard_service.evaluate_now 在 refresh 抛错的 "
+            "finally 分支中也必须被调用一次 (try/finally 一致性保证)。",
+        )
+        self.assertEqual(funding_spy.sync_recent_bills.call_count, 1)
+
     async def test_provider_degraded_blocker_does_not_offer_manual_review_resolution_buttons(self) -> None:
         runtime = await self._runtime(
             ai_operating_mode="ai_primary",

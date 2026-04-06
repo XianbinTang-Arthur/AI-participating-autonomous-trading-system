@@ -1,10 +1,40 @@
 ﻿from __future__ import annotations
 
 import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+
+
+def _assert_imports_helper(testcase: unittest.TestCase, text: str, helpers: list[str], src_suffix: str) -> None:
+    """Assert that ``text`` contains an ``import { ... } from "<src>"`` statement
+    that pulls in all of ``helpers`` (in any order, possibly with extra names,
+    possibly with ``as`` aliasing).
+
+    This is intentionally looser than ``assertIn("import { foo, bar } from ...")``
+    so that re-ordering, adding new helpers, or aliasing one of them does not
+    break the test. The real intent is just "this consumer imports these
+    symbols from this module", not "the import statement is character-perfect".
+    """
+    pattern = re.compile(
+        r'import\s*\{([^}]*)\}\s*from\s*"([^"]*)"',
+        re.MULTILINE,
+    )
+    for match in pattern.finditer(text):
+        body, src = match.group(1), match.group(2)
+        if not src.endswith(src_suffix):
+            continue
+        # Each named import looks like "name" or "name as alias" — we only
+        # care about the imported (left-hand) name.
+        imported = {part.split(" as ")[0].strip() for part in body.split(",") if part.strip()}
+        if all(helper in imported for helper in helpers):
+            return
+    testcase.fail(
+        f"expected an import of {helpers!r} from a module ending in {src_suffix!r}, "
+        f"but found none. text head:\n{text[:200]}"
+    )
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -110,6 +140,7 @@ class TestDashboardUI(unittest.TestCase):
                 "css": client.get("/ui/app.css"),
                 "js": client.get("/ui/app.js"),
                 "dashboard_refresh_js": client.get("/ui/modules/dashboard-refresh.js"),
+                "flash_js": client.get("/ui/modules/flash.js"),
                 "navigation_state_js": client.get("/ui/modules/navigation-state.js"),
                 "shell_renderer_js": client.get("/ui/modules/shell-renderer.js"),
                 "store_js": client.get("/ui/modules/store.js"),
@@ -149,6 +180,7 @@ class TestDashboardUI(unittest.TestCase):
         view_router_text = responses["view_router_js"].text
         navigation_state_text = responses["navigation_state_js"].text
         dashboard_refresh_text = responses["dashboard_refresh_js"].text
+        flash_text = responses["flash_js"].text
         shell_renderer_text = responses["shell_renderer_js"].text
         risk_actions_text = responses["risk_actions_js"].text
         execution_actions_text = responses["execution_actions_js"].text
@@ -159,6 +191,7 @@ class TestDashboardUI(unittest.TestCase):
                 view_router_text,
                 navigation_state_text,
                 dashboard_refresh_text,
+                flash_text,
                 shell_renderer_text,
                 risk_actions_text,
                 execution_actions_text,
@@ -181,8 +214,51 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("currentRefreshInteractivityRoots", js_text)
         self.assertIn("const navigationState = createNavigationStateController({ state, viewLinks });", js_text)
         self.assertIn("refreshController = createDashboardRefreshController({", js_text)
-        self.assertIn("当前正在刷新，已排队一次新的刷新请求。", js_text)
-        self.assertIn("当前已在${VIEW_LABELS[nextView] || \"当前页面\"}，已刷新当前状态。", js_text)
+        # The "已排队一次新的刷新请求" notice was removed in C6 of the round-4
+        # dashboard UI review: with the sticky-flash design (8s lazy TTL), the
+        # notice would clobber an action's outcome flash for the entire window
+        # the user is staring at the just-finished refresh, even though the
+        # drain happens within the same finally{} block in <1s. The shimmer
+        # already communicates "refresh in progress" and the refresh button
+        # is intentionally NOT locked during a normal background refresh, so
+        # the queued-drain is fully transparent to the user. See the comment
+        # in dashboard-refresh.js's isPrimaryInFlight branch.
+        self.assertNotIn("已排队一次新的刷新请求", js_text)
+        self.assertIn("当前已在${VIEW_LABELS[nextView] || \"当前页面\"}，已为你重新拉取最新数据。", js_text)
+        # flash.js helper module: producers go through setFlash / ensureNotBusy
+        # so the sticky-flash _expiresAt mutation never accidentally carries
+        # across producer calls (see C6 of round-4 dashboard UI review and the
+        # docstring of modules/flash.js).
+        #
+        # The export-signature assertions are deliberately string-matched: we
+        # _do_ want a regression to fire if someone changes setFlash's
+        # parameter shape, since every consumer in the codebase relies on it.
+        self.assertIn("export function setFlash(state, tone, message)", flash_text)
+        self.assertIn("export function clearFlash(state)", flash_text)
+        self.assertIn("export function isFlashLive(state)", flash_text)
+        self.assertIn("export function ensureNotBusy(state, renderBanners)", flash_text)
+        # The consumer-side import assertions, on the other hand, are kept
+        # loose via _assert_imports_helper: we only care that the helpers are
+        # imported from flash.js by name, NOT that the import statement is
+        # character-perfect. Re-ordering, adding more helpers, or aliasing
+        # should not break the test — see the helper docstring above.
+        _assert_imports_helper(self, dashboard_refresh_text, ["setFlash", "isFlashLive"], "flash.js")
+        _assert_imports_helper(self, shell_renderer_text, ["clearFlash", "FLASH_DEFAULT_TTL_MS"], "flash.js")
+        _assert_imports_helper(self, app_js_text, ["ensureNotBusy", "setFlash"], "flash.js")
+        _assert_imports_helper(self, risk_actions_text, ["ensureNotBusy", "setFlash"], "flash.js")
+        _assert_imports_helper(self, execution_actions_text, ["setFlash"], "flash.js")
+        _assert_imports_helper(self, admin_actions_text, ["ensureNotBusy", "setFlash"], "flash.js")
+        # Round 5 cleanup: app.js used to carry duplicate copies of 7 helper
+        # functions that already lived (and were actually used) inside
+        # risk-actions.js. Guard against the same dead-code drift in the
+        # future. See round-5 review C1 for the original finding.
+        self.assertNotIn("function defaultBlockerActionReason(actionId)", app_js_text)
+        self.assertNotIn("function blockerActionPendingLabel(actionId)", app_js_text)
+        self.assertNotIn("function blockerActionSuccessMessage(actionId)", app_js_text)
+        self.assertNotIn("function blockerActionConfirmMessage(actionId)", app_js_text)
+        self.assertNotIn("async function applyExitExecutionHistoryWorkspaceFilters", app_js_text)
+        self.assertNotIn("async function resetExitExecutionHistoryWorkspaceFilters", app_js_text)
+        self.assertNotIn("async function paginateExitExecutionHistory", app_js_text)
         self.assertNotIn("refreshBackgroundPanels", js_text)
         self.assertNotIn("backgroundGenerations", js_text)
         self.assertNotIn("backgroundControllers", js_text)
@@ -231,7 +307,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("buildDashboardBundleRequestPlan", dashboard_refresh_text)
         self.assertIn("const refreshPlan = buildDashboardBundleRequestPlan(refreshingView, state);", dashboard_refresh_text)
         self.assertIn("void refreshDeferredPanels({", dashboard_refresh_text)
-        self.assertIn("setPendingPanels(refreshPlan.deferredPanels, Boolean(refreshPlan.deferredPath));", dashboard_refresh_text)
+        self.assertIn("setPendingPanels(refreshPlan.deferredPanels, refreshGeneration);", dashboard_refresh_text)
 
         self.assertIn("export function createDashboardShellRenderer", shell_renderer_text)
         self.assertIn("function renderShell()", shell_renderer_text)

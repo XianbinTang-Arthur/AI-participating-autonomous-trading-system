@@ -117,15 +117,23 @@ class OKXPublicWebSocketClient:
         reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
         while not self._stop_event.is_set():
             try:
+                # Disable the websockets library's protocol-level PING frames. OKX documents
+                # application-level text "ping"/"pong" as the supported keepalive; the
+                # protocol-level PING has been observed to false-positive with a 1011
+                # "keepalive ping timeout" despite a healthy channel. We rely on our own
+                # idle-triggered keepalive below instead.
                 async with connect(
                     url,
-                    ping_interval=self.settings.okx_ws_ping_interval_seconds,
-                    ping_timeout=self.settings.okx_ws_ping_timeout_seconds,
+                    ping_interval=None,
+                    ping_timeout=None,
                     open_timeout=self.settings.okx_ws_open_timeout_seconds,
                     close_timeout=5,
                 ) as websocket:
                     await self._subscribe(websocket, connection_name, subscribe_args)
                     self._connected[connection_name] = True
+                    # Reset the liveness timestamp so the keepalive loop does not fire
+                    # immediately based on a stale value from the previous connection.
+                    self._last_message_ts[connection_name] = utc_now()
                     reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
                     log_event(
                         self.logger,
@@ -141,12 +149,14 @@ class OKXPublicWebSocketClient:
                             if self._stop_event.is_set():
                                 break
                             text = raw_message if isinstance(raw_message, str) else raw_message.decode("utf-8", errors="replace")
+                            # Any inbound frame (including "pong" and control messages)
+                            # counts as channel liveness for the keepalive loop.
+                            self._last_message_ts[connection_name] = utc_now()
                             if text.strip().lower() == "pong":
                                 continue
                             message = _json_loads(raw_message)
                             if not isinstance(message, dict):
                                 continue
-                            self._last_message_ts[connection_name] = utc_now()
                             if self._is_control_message(message):
                                 continue
                             await on_message(message)
@@ -176,15 +186,47 @@ class OKXPublicWebSocketClient:
                 self._connected[connection_name] = False
 
     async def _keepalive_loop(self, websocket: ClientConnection, connection_name: str) -> None:
-        interval = max(5.0, float(self.settings.okx_private_ws_idle_ping_interval_seconds))
+        # Idle-triggered keepalive per OKX spec. OKX enforces a 30s no-data close on
+        # idle channels, so idle_threshold is capped at 15s and poll_interval is
+        # fixed at 1s to guarantee a comfortable safety margin regardless of how the
+        # user has tuned the idle-ping setting. See the private WS client for the
+        # full rationale; both connections share the same hard constraint.
+        configured_idle = float(self.settings.okx_private_ws_idle_ping_interval_seconds)
+        idle_threshold = min(max(5.0, configured_idle), 15.0)
+        pong_timeout = 10.0
+        poll_interval = 1.0
         while not self._stop_event.is_set():
-            await asyncio.sleep(interval)
+            await asyncio.sleep(poll_interval)
             if self._stop_event.is_set():
                 return
+            last_ts = self._last_message_ts.get(connection_name)
+            if last_ts is not None:
+                idle = (utc_now() - last_ts).total_seconds()
+                if idle < idle_threshold:
+                    continue
+            ping_sent_at = utc_now()
             try:
                 await websocket.send("ping")
             except Exception:
                 return
+            # Wait up to pong_timeout for any inbound traffic (pong or market data).
+            while not self._stop_event.is_set():
+                await asyncio.sleep(0.5)
+                latest = self._last_message_ts.get(connection_name)
+                if latest is not None and latest > ping_sent_at:
+                    break
+                if (utc_now() - ping_sent_at).total_seconds() >= pong_timeout:
+                    log_event(
+                        self.logger,
+                        "okx_ws_pong_timeout",
+                        level="warning",
+                        connection=connection_name,
+                        idle_threshold=idle_threshold,
+                        pong_timeout=pong_timeout,
+                    )
+                    with contextlib.suppress(Exception):
+                        await websocket.close(code=1011, reason="application_ping_timeout")
+                    return
 
     async def _subscribe(
         self,

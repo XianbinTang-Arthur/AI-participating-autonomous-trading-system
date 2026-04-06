@@ -424,11 +424,22 @@ _CONSTRAINT_RULES: list[dict[str, Any]] = _get_constraint_rules("independent")
 _CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
 
 # expanded round key -> 输出用 ft_key 的映射
-# 扩展点: 添加 directional 家族时, 需在此添加映射条目, 如:
-#   "directional_15m_expanded": "directional_15m"
+#
+# 当前 Step 3 只对 independent 家族跑扩展校准 (见 _EXPANDED_ROUND_KEYS),
+# directional 条目预填以确保:
+#   1. 当 _CALIBRATION_DEFS 引入 directional_*_expanded round 时,
+#      _merge_recommendations 能直接将其映射到正确 ft_key
+#   2. 单元测试 14c 已验证 _merge_recommendations 对 directional ft_key
+#      使用 directional family-aware 默认 (entry=0.45/close=0.20)
+#   3. 任何引入 directional expanded round 的 PR 只需扩展 _EXPANDED_ROUND_KEYS,
+#      无需同时修改本映射 (避免遗漏)
 _FT_KEY_MAP = {
     "independent_15m_expanded": "independent_15m",
     "independent_1h_expanded": "independent_1h",
+    # TODO(directional-expansion): 当 directional family 引入 expanded
+    # 校准时 (Phase 3+), 将下列条目纳入 _EXPANDED_ROUND_KEYS。
+    "directional_15m_expanded": "directional_15m",
+    "directional_1h_expanded": "directional_1h",
 }
 
 

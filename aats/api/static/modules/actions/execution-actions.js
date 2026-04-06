@@ -1,4 +1,5 @@
 import { buildFillDrawer, buildOrderDrawer } from "../detail-drawers.js";
+import { setFlash } from "../flash.js";
 
 export function createExecutionActionHandlers({
   pageLoadStep = 12,
@@ -16,7 +17,7 @@ export function createExecutionActionHandlers({
       const detail = await requestJson(`/orders/${encodeURIComponent(orderId)}`);
       openDrawer(buildOrderDrawer(detail));
     } catch (error) {
-      state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
     }
   }
@@ -27,7 +28,7 @@ export function createExecutionActionHandlers({
       const detail = await requestJson(`/fills/${encodeURIComponent(fillId)}`);
       openDrawer(buildFillDrawer(detail));
     } catch (error) {
-      state.flash = { tone: "danger", message: error instanceof Error ? error.message : String(error) };
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();
     }
   }

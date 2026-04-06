@@ -10369,6 +10369,7 @@ class OperatorQueryService:
                 # 修复: `_evaluate_derivatives_live_guard_after_refresh` 是 async def,
                 # 之前未加 await 导致 guard 重新评估从未实际运行,
                 # refresh 后阻塞状态永远无法解除 (test_operator_api 相关测试因此失败)。
+                # 回归测试见 test_refresh_account_state_for_operator_resolution_awaits_evaluate_derivatives_live_guard
                 await evaluate_guard()
         return snapshot
 

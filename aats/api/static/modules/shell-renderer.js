@@ -1,4 +1,5 @@
 import { notice, pill, primaryStatusPanel } from "./components.js";
+import { FLASH_DEFAULT_TTL_MS, clearFlash } from "./flash.js";
 import {
   emptyState,
   formatMaybeTimestamp,
@@ -7,6 +8,7 @@ import {
   middleEllipsis,
 } from "./formatters.js";
 import { syncRefreshDisabledButtons } from "./refresh-interactivity.js";
+import { REFRESH_PHASE_PRIMARY } from "./store.js";
 import {
   readableFamilyExecutionSummary,
   localizeError,
@@ -41,6 +43,11 @@ export function createDashboardShellRenderer({
   isPausedAwaitingResume,
 }) {
   const renderCache = new WeakMap();
+
+  // Sticky-flash TTL constant (FLASH_DEFAULT_TTL_MS) is now defined in
+  // modules/flash.js so the helper module owns the entire sticky-flash
+  // protocol (set / clear / live-check / TTL). See flash.js docstring for
+  // the design rationale and the lazy _expiresAt stamping contract.
 
   function renderShell() {
     syncExitExecutionNavigationLinks();
@@ -223,11 +230,36 @@ export function createDashboardShellRenderer({
     if (controlsMessage) {
       banners.push(notice(controlsMessage, "info"));
     }
+    // Sticky flash with lazy TTL: stamp on first render, expire lazily on
+    // subsequent renders. Multiple back-to-back renderBanners() calls in the
+    // same sync tick re-emit the same banner DOM (instead of consuming the
+    // flash on the first call and writing empty banner DOM on the second).
+    // Auto-dismissal happens via the per-second tick in app.js, which calls
+    // tickFlashExpiry() and re-renders banners when the TTL elapses.
     if (state.flash) {
-      banners.push(notice(state.flash.message, state.flash.tone));
-      state.flash = null;
+      const now = Date.now();
+      if (!state.flash._expiresAt) {
+        state.flash._expiresAt = now + FLASH_DEFAULT_TTL_MS;
+      }
+      if (now >= state.flash._expiresAt) {
+        clearFlash(state);
+      } else {
+        banners.push(notice(state.flash.message, state.flash.tone));
+      }
     }
     patchHtml(nodes.bannerContainer, banners.join(""));
+  }
+
+  // Per-second tick from app.js: clear an expired flash and re-render banners
+  // so the DOM actually drops the stale banner. renderBanners() lazily expires
+  // on render, but without an explicit re-render the user would keep staring
+  // at an expired banner until the next state-driven render fired.
+  function tickFlashExpiry() {
+    if (!state.flash) return;
+    if (!state.flash._expiresAt) return;
+    if (Date.now() < state.flash._expiresAt) return;
+    clearFlash(state);
+    renderBanners();
   }
 
   function updateActionAccess() {
@@ -282,16 +314,29 @@ export function createDashboardShellRenderer({
   }
 
   function updateRefreshLabel() {
-    if (state.refreshing) {
+    // Only the "primary" phase gates the global refresh button and shows the
+    // "刷新中" spinner. The "deferred" phase is a background fill-in and must
+    // NOT disable the refresh button — the user should be able to kick off a
+    // brand-new refresh cycle even while deferred panels are still catching up.
+    if (state.refreshPhase === REFRESH_PHASE_PRIMARY) {
+      // Bootstrap (no data has landed yet) shows "正在加载" — nothing is
+      // being "re-"freshed, and the "刷新" wording would be misleading.
+      const isBootstrap = !state.lastRefreshAt;
       patchClassName(nodes.refreshStateChip, "status-pill tone-info refresh-state-chip is-loading");
-      patchText(nodes.refreshStateChip, "刷新中");
+      patchText(nodes.refreshStateChip, isBootstrap ? "加载中" : "刷新中");
       if (nodes.refreshStateChip) {
-        nodes.refreshStateChip.setAttribute("aria-label", "正在刷新页面数据");
+        nodes.refreshStateChip.setAttribute(
+          "aria-label",
+          isBootstrap ? "正在首次加载页面数据" : "正在刷新页面数据",
+        );
       }
       if (nodes.refreshButton) {
         nodes.refreshButton.disabled = true;
       }
-      patchText(nodes.lastRefreshLabel, "正在刷新最新状态…");
+      patchText(
+        nodes.lastRefreshLabel,
+        isBootstrap ? "正在加载最新状态…" : "正在刷新最新状态…",
+      );
       return;
     }
     if (!state.lastRefreshAt) {
@@ -300,7 +345,12 @@ export function createDashboardShellRenderer({
       if (nodes.refreshStateChip) {
         nodes.refreshStateChip.setAttribute("aria-label", "页面尚未完成首次刷新");
       }
-      if (nodes.refreshButton) {
+      // Skip re-enabling refreshButton when a manual action is mid-flight.
+      // updateActionAccess() disabled it a few lines up in renderShell(), and
+      // overwriting it here would make the button look clickable while the
+      // runAction guard silently rejects any click. The bootstrap state (no
+      // data yet) must not lose that disabled flag either.
+      if (nodes.refreshButton && !state.actionInFlight) {
         nodes.refreshButton.disabled = false;
       }
       patchText(nodes.lastRefreshLabel, "尚未刷新");
@@ -311,16 +361,42 @@ export function createDashboardShellRenderer({
     if (nodes.refreshStateChip) {
       nodes.refreshStateChip.setAttribute("aria-label", "页面数据已同步");
     }
-    if (nodes.refreshButton) {
+    // Same rationale as above: updateActionAccess() owns the disabled state
+    // during actionInFlight. See the comment in the !state.lastRefreshAt branch.
+    if (nodes.refreshButton && !state.actionInFlight) {
       nodes.refreshButton.disabled = false;
     }
     patchText(nodes.lastRefreshLabel, `最近刷新：${formatMaybeTimestamp(state.lastRefreshAt)}（${formatRelativeAge(state.lastRefreshAt)}）`);
   }
 
+  function updateLastRefreshRelativeTime() {
+    // Drives the 1s tick that keeps "5 秒前" / "1 分钟前" style relative
+    // ages fresh between full renders. renderShell() is only called on state
+    // transitions, so without this tick the age string would freeze until
+    // the next refresh/action. Only touch the label in steady-state phases:
+    //   - PRIMARY phase: updateRefreshLabel is already showing "正在刷新最新
+    //     状态…" / "正在加载最新状态…" and a tick here would clobber it.
+    //   - No lastRefreshAt yet: the "尚未刷新" text is correct as-is.
+    if (state.refreshPhase === REFRESH_PHASE_PRIMARY) return;
+    if (!state.lastRefreshAt) return;
+    if (!nodes.lastRefreshLabel) return;
+    patchText(
+      nodes.lastRefreshLabel,
+      `最近刷新：${formatMaybeTimestamp(state.lastRefreshAt)}（${formatRelativeAge(state.lastRefreshAt)}）`,
+    );
+  }
+
   function syncRefreshInteractivity() {
+    // Only lock the entire view during initial bootstrap / explicit loading
+    // transitions. Background auto-refreshes (30s polling) must keep buttons
+    // interactive — the data is already on screen, and the shimmer applied by
+    // renderRefreshIndicators already communicates "refresh in progress".
+    // Using raw state.refreshing here would lock the UI for the duration of
+    // every 30s fetch, making the dashboard feel perpetually unusable.
+    const viewIsLoading = shouldRenderLoadingState(state.activeView);
     syncRefreshDisabledButtons({
       roots: currentRefreshInteractivityRoots(),
-      refreshing: state.refreshing,
+      refreshing: viewIsLoading,
       pendingPanels: state.pendingPanels,
       reason: "当前区域正在刷新，请等待刷新完成后再操作。",
       panelReason: "该卡片数据还在补充加载，请稍候再操作。",
@@ -524,5 +600,7 @@ export function createDashboardShellRenderer({
     renderBanners,
     renderLoadingView,
     renderShell,
+    tickFlashExpiry,
+    updateLastRefreshRelativeTime,
   };
 }

@@ -7,7 +7,13 @@
     "source_round_id": "20260405_201039_3486e846",
     "applied_at": "2026-04-05T21:38:25.276355+00:00",
     "applied_by": "parameter_pipeline_fix",
-    "approval_recommendation_id": null
+    "approval_recommendation_id": null,
+    "override_reason": {
+      "entry_threshold": "RDP \u6821\u51c6\u63a8\u8350 0.40\uff0c\u504f\u79bb ReplayParameterOverrides.for_family('directional') \u9ed8\u8ba4 0.45\u3002BTC-USDT-SWAP 120 \u5929\u56de\u6d4b\u663e\u793a 0.40 \u4e0b pos_ratio \u4e0e net_PnL \u4f18\u4e8e 0.45\uff0c\u8be6\u89c1 source_round_id \u5bf9\u5e94\u7684 step3 conclusion\u3002",
+      "close_threshold": "RDP \u6821\u51c6\u63a8\u8350 0.15\uff0c\u504f\u79bb ReplayParameterOverrides.for_family('directional') \u9ed8\u8ba4 0.20\u3002\u4e0e entry_threshold \u4fdd\u6301 0.25 \u7684 hysteresis \u95f4\u8ddd\uff0c\u9650\u5236\u9707\u8361\u5e02\u4e0b\u7684\u8fc7\u9891\u5f00\u5e73\u4ed3\u3002",
+      "short_entry_threshold": "P3-10 \u4fee\u590d\uff1adirectional \u5bb6\u65cf short \u9608\u503c\u660e\u786e\u5316\uff0c\u4e0e long \u5bf9\u79f0\uff080.40\uff09\u3002",
+      "short_close_threshold": "P3-10 \u4fee\u590d\uff1adirectional \u5bb6\u65cf short close \u9608\u503c\u660e\u786e\u5316\uff0c\u4e0e long \u5bf9\u79f0\uff080.15\uff09\u3002"
+    }
   },
   "values": {
     "taker_fee_bps": 5.0,
