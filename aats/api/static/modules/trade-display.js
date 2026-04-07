@@ -1,6 +1,23 @@
 ﻿import { formatNumber, formatSigned, listOrDash } from "./formatters.js";
 import { readableState } from "./terms.js";
 
+// #32 修复：原本 detail-drawers.js 和 ai-view.js 各定义了一份同名 EXECUTION_SUGGESTION_LABELS
+// 和 executionSuggestionLabel，一改要改两处（strategy-view 之前也有一份，已在更早的重构里
+// 删掉）。统一搬到 trade-display.js（执行相关展示 helper 的自然归属），两边改为 import。
+const EXECUTION_SUGGESTION_LABELS = {
+  passive_bias: "被动倾向",
+  maker_taker_bias: "主被动偏向",
+  slice_count: "拆单数",
+  max_participation_rate: "最大参与率",
+  max_cross_spread_bps: "最大跨价差",
+  cancel_replace_patience_ms: "撤改单等待",
+};
+
+export function executionSuggestionLabel(key) {
+  const normalized = String(key || "").trim();
+  return EXECUTION_SUGGESTION_LABELS[normalized] || normalized;
+}
+
 export function inferTradeScene(record = {}) {
   const productType = String(record.product_type || record.productType || "").toLowerCase();
   if (productType === "derivatives") return "derivatives";
@@ -24,22 +41,28 @@ export function splitByTradeScene(records = []) {
   ].filter((group) => group.records.length > 0);
 }
 
-export function orderTableHeaders(scene) {
-  return scene === "derivatives"
-    ? ["标的 / 场景", "动作摘要", "委托状态", "记录时间", "操作"]
-    : ["标的 / 场景", "动作摘要", "委托状态", "记录时间", "操作"];
+// #23 修复：原本 orderTableHeaders / fillTableHeaders / decisionTableHeaders
+// 都根据 scene === "derivatives" 走两个分支，但两个分支返回的列表完全一样，
+// 等于 scene 是 dead parameter。
+//
+// 之所以一直留着这个分支结构，是因为最早的产品计划里"现货 vs 合约"会展示
+// 不同的列（例如合约要多一列开仓方向 long/short）。后来我们改成把方向信息
+// 塞进"动作摘要"那一列里，于是分支就退化了。
+//
+// 这里直接合成单一返回值，但保留 scene 形参（execution-view 调用点已经传
+// 进来，删形参会让 view 那边的 group 循环代码看起来"丢了 scene 信息"）。
+// 形参标注为下划线前缀以提示静态扫描工具它故意未使用，但仍是 API 的一部分：
+// 如果未来再次出现"现货/合约要分列"的需求，把分支还原回来即可。
+export function orderTableHeaders(_scene) {
+  return ["标的 / 场景", "动作摘要", "委托状态", "记录时间", "操作"];
 }
 
-export function fillTableHeaders(scene) {
-  return scene === "derivatives"
-    ? ["标的 / 场景", "成交摘要", "影响摘要", "记录时间", "操作"]
-    : ["标的 / 场景", "成交摘要", "影响摘要", "记录时间", "操作"];
+export function fillTableHeaders(_scene) {
+  return ["标的 / 场景", "成交摘要", "影响摘要", "记录时间", "操作"];
 }
 
-export function decisionTableHeaders(scene) {
-  return scene === "derivatives"
-    ? ["记录时间", "标的 / 周期", "结论摘要", "门禁状态", "操作"]
-    : ["记录时间", "标的 / 周期", "结论摘要", "门禁状态", "操作"];
+export function decisionTableHeaders(_scene) {
+  return ["记录时间", "标的 / 周期", "结论摘要", "门禁状态", "操作"];
 }
 
 export function orderSceneSummary(order = {}) {

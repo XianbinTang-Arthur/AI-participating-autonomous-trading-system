@@ -4,8 +4,34 @@
 } from "./store.js";
 import { VIEW_ROUTES, resolveKnownView } from "./view-router.js";
 
-export const EXIT_EXECUTION_HISTORY_ACTION_FILTERS = new Set(["all", "refresh_exchange_state", "retry_limit_lookup", "safe_cancel"]);
-export const EXIT_EXECUTION_HISTORY_WINDOW_FILTERS = new Set(["all", "1", "6", "24", "168", "720"]);
+// #19/#37/#38 修复：原本"合法集合"和"渲染下拉的 [value, label] 列表"分散在三处：
+//   1. navigation-state.js 的 EXIT_EXECUTION_HISTORY_*_FILTERS（Set，用来校验 URL 参数）
+//   2. exit-execution-helpers.js::normalizedExitExecutionHistoryFilters 的 inline 数组（再写一次允许值）
+//   3. exit-execution-helpers.js::renderExitExecutionAction*Options 的 [value, label] 数组（下拉显示）
+// 想加个新窗口（例如 12 小时）就得三处同步改，必然漂移。
+//
+// 这里把"value+label"列表作为唯一来源，校验集合直接 derive 出来。两个 helper
+// 渲染函数和 normalize 函数都改成 import 这一份配置。
+export const EXIT_EXECUTION_HISTORY_ACTION_OPTIONS = [
+  ["all", "全部动作"],
+  ["refresh_exchange_state", "刷新交易所状态"],
+  ["retry_limit_lookup", "重试拆单上限查询"],
+  ["safe_cancel", "安全取消退出任务"],
+];
+export const EXIT_EXECUTION_HISTORY_WINDOW_OPTIONS = [
+  ["all", "全部时间"],
+  ["1", "最近 1 小时"],
+  ["6", "最近 6 小时"],
+  ["24", "最近 24 小时"],
+  ["168", "最近 7 天"],
+  ["720", "最近 30 天"],
+];
+export const EXIT_EXECUTION_HISTORY_ACTION_FILTERS = new Set(
+  EXIT_EXECUTION_HISTORY_ACTION_OPTIONS.map(([value]) => value)
+);
+export const EXIT_EXECUTION_HISTORY_WINDOW_FILTERS = new Set(
+  EXIT_EXECUTION_HISTORY_WINDOW_OPTIONS.map(([value]) => value)
+);
 
 const VIEW_REPLAY_FILTERS = new Set(["all", "inventory_only", "target_only", "target_and_inventory"]);
 
@@ -56,6 +82,26 @@ export function createNavigationStateController({ state, viewLinks = [] }) {
     target.windowHours = String(source?.windowHours || "all");
   }
 
+  // #24 修复说明：offset 重置看起来"非对称"，但其实是有意设计，下面把规则
+  // 写清楚——避免有人来想"统一一下"反而把分页位置搞丢。
+  //
+  // 调用场景：用户在风险页（risk）或独立工作台页（exitExecution）改了任何
+  // 一个筛选条件（动作、父任务、操作人、时间窗口）。这两个 view 共用一份
+  // 筛选语义但各自维护一份独立的 offset/limit 分页位置：
+  //
+  //   - 风险页是"概览中嵌入的小列表"，offset 通常停在第 0 页。
+  //   - 独立工作台是"长历史排查"，offset 可能停在很深的页码。
+  //
+  // 同步规则：
+  //   1. 把 source view 的 4 个筛选字段拷贝到另一边（始终）。
+  //   2. 只把"非 source view 那一侧"的 offset 重置成 0；source view 自己
+  //      的 offset 保留不变。
+  //
+  // 这样做的目的是"用户在 A 侧改了筛选，B 侧的旧分页位置已经无效，应该回到
+  // 第一页；但 A 侧本来就在主动操作，offset 由 A 侧自己的回调（应用筛选 /
+  // 翻页）独立管理，不应该被 sync 函数重置覆盖"。如果两边都重置，A 侧从
+  // 第 5 页改个筛选会弹回第 0 页；如果都不重置，B 侧再次进入时会停在
+  // 一个对新筛选完全不合理的旧 offset 上，可能直接拿到空数据。
   function syncExitExecutionHistoryFiltersAcrossViews(sourceView = "risk") {
     const sourceState = ensureExitExecutionHistoryState(sourceView);
     const riskState = ensureExitExecutionHistoryState("risk");

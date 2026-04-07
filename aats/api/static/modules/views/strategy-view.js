@@ -1,4 +1,4 @@
-﻿import { actionButton, callout, kvList, pill, responsiveTable, statGrid, summaryStrip, surfaceCard } from "../components.js";
+﻿import { actionButton, callout, kvList, pill, renderPaginationFooter, responsiveTable, statGrid, summaryStrip, surfaceCard } from "../components.js";
 import { localizeList, summarizeLocalizedList } from "../copy.js";
 import { escapeHtml, formatDuration, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import {
@@ -82,7 +82,9 @@ export function renderStrategySections(data) {
   const trialGuardHardStop = scalingReadiness.trial_guard_hard_stop || trialReviewSections.trial_guard_hard_stop || {};
   const runtimeConstraints = scalingReadiness.runtime_constraints || trialReviewSections.runtime_constraints || {};
   const latestForwardPeriod = forwardPeriods[0] || {};
-  const trialVerdict = chooseTrialVerdict(scalingReadiness.readiness, forwardSummary.verdict, trialReviewSummary.readiness);
+  // #17 修复：原 chooseTrialVerdict(...values) 是 trivial "找第一个 truthy"，
+  // 等价于一个 || 链。只有这一个调用点，直接 inline 掉。
+  const trialVerdict = scalingReadiness.readiness || forwardSummary.verdict || trialReviewSummary.readiness || "unknown";
   const trialHeadline =
     scalingReadiness.summary
     || forwardSummary.summary
@@ -174,20 +176,20 @@ export function renderStrategySections(data) {
           {
             label: "策略门禁",
             value: policy.execution_allowed ? "允许进入执行" : "仍在阻断",
-            meta: listText(policy.execution_allowed ? policy.allow_reasons : policy.blocker_reasons, "当前没有额外门禁说明"),
+            meta: localizeList(policy.execution_allowed ? policy.allow_reasons : policy.blocker_reasons, "当前没有额外门禁说明"),
             tone: policy.execution_allowed ? "positive" : "danger",
           },
           {
             label: "风控结论",
             value: risk.approved ? "风控放行" : "风控拦截",
-            meta: listText(risk.approved ? risk.approval_reasons : risk.rejection_reasons, "当前没有额外风控说明"),
+            meta: localizeList(risk.approved ? risk.approval_reasons : risk.rejection_reasons, "当前没有额外风控说明"),
             tone: risk.approved ? "positive" : "danger",
           },
         ])}
         ${kvList([
           ["本轮结论", strategyNarrative(latestDecision), `${readableState(target.strategy_family || latestDecision.decision_outcome?.selected_strategy_family || "directional")} | ${regimeLabel}`],
-          ["执行约束", listText(target.guardrail_flags, "当前没有额外执行限制"), targetExpectancySummary(targetExpectancy)],
-          ["当前保护规则", listText(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
+          ["执行约束", localizeList(target.guardrail_flags, "当前没有额外执行限制"), targetExpectancySummary(targetExpectancy)],
+          ["当前保护规则", localizeList(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
           ["最近执行质量", `${formatNumber(strategyHealth.recent_closed_trade_count, 0)} 笔闭合样本 | 胜率 ${formatRatio(strategyHealth.recent_win_rate)}`, `费用拖累 ${formatRatio(strategyHealth.recent_fee_drag_ratio)} | 来回交易占比 ${formatRatio(strategyHealth.recent_churn_ratio)}`],
         ])}
       `,
@@ -485,7 +487,9 @@ export function renderStrategySections(data) {
           ],
           [
             "最近一周复盘参考",
-            plainListText(trialReviewRecommendation.action_items, "当前没有新的周度动作建议"),
+            // #16 修复：原 plainListText(action_items, fallback) 等价于"split → 用；连接，
+            // 空时回退 fallback"。只有这一个调用点，直接 inline 掉，避免多养一个 helper。
+            splitStrategyReasons(trialReviewRecommendation.action_items).join("；") || "当前没有新的周度动作建议",
             trialReviewSummary.headline || reasonListText(trialReviewRecommendation.reasons, "当前没有额外复盘说明"),
           ],
           [
@@ -543,8 +547,12 @@ export function renderStrategySections(data) {
           detailLabel: "展开本次决策详情",
           action: item.decision_id ? actionButton("查看详情", "inspect-decision", item.decision_id) : "",
         }))
-      )}${renderPaginationFooter(recentPayload, {
-        singular: "策略记录",
+      )}${renderPaginationFooter({
+        shown: Number(recentPayload?.decisions?.length || 0),
+        total: recentPayload?.total_available,
+        hasMore: recentPayload?.has_more,
+        limit: recentPayload?.limit,
+        label: "策略记录",
         loadAction: "load-more-decisions",
         collapseAction: "collapse-decisions",
       })}`,
@@ -1575,7 +1583,7 @@ function smartArbitragePairConfigIssues(pairDefinitions = []) {
 
 function tradeCostCommonConfigRows(config = {}) {
   return [
-    tradeCostConfigRow(
+    smartArbitrageConfigRow(
       "trade_cost_spot_maker_fee_bps / trade_cost_spot_taker_fee_bps",
       "现货 maker / taker",
       `${formatBps(config?.spot_maker_fee_bps, "待确认")} / ${formatBps(config?.spot_taker_fee_bps, "待确认")}`,
@@ -1584,7 +1592,7 @@ function tradeCostCommonConfigRows(config = {}) {
         ? "taker 费率不应低于 maker；请检查配置是否填反。"
         : "现货单腿大多更适合保守按 taker 估算。"
     ),
-    tradeCostConfigRow(
+    smartArbitrageConfigRow(
       "trade_cost_margin_maker_fee_bps / trade_cost_margin_taker_fee_bps",
       "保证金现货 maker / taker",
       `${formatBps(config?.margin_maker_fee_bps, "待确认")} / ${formatBps(config?.margin_taker_fee_bps, "待确认")}`,
@@ -1593,7 +1601,7 @@ function tradeCostCommonConfigRows(config = {}) {
         ? "taker 费率不应低于 maker；请检查配置是否填反。"
         : "保证金现货腿和现金现货腿分开配置后，反套成本解释会更准确。"
     ),
-    tradeCostConfigRow(
+    smartArbitrageConfigRow(
       "trade_cost_derivatives_maker_fee_bps / trade_cost_derivatives_taker_fee_bps",
       "合约 maker / taker",
       `${formatBps(config?.derivatives_maker_fee_bps, "待确认")} / ${formatBps(config?.derivatives_taker_fee_bps, "待确认")}`,
@@ -1602,7 +1610,7 @@ function tradeCostCommonConfigRows(config = {}) {
         ? "taker 费率不应低于 maker；请检查配置是否填反。"
         : "合约腿更依赖这一组费率，不再走策略私有的磨损配置。"
     ),
-    tradeCostConfigRow(
+    smartArbitrageConfigRow(
       "trade_cost_spot_spread_bps / trade_cost_spot_slippage_bps",
       "现货 spread / slippage",
       `${formatBps(config?.spot_spread_bps, "待确认")} / ${formatBps(config?.spot_slippage_bps, "待确认")}`,
@@ -1611,7 +1619,7 @@ function tradeCostCommonConfigRows(config = {}) {
         ? "当前现货执行磨损为 0，理论收益和可执行收益会更接近，通常偏乐观。"
         : "spread 与 slippage 已分开计量，更方便回头校准。"
     ),
-    tradeCostConfigRow(
+    smartArbitrageConfigRow(
       "trade_cost_margin_spread_bps / trade_cost_margin_slippage_bps",
       "保证金现货 spread / slippage",
       `${formatBps(config?.margin_spread_bps, "待确认")} / ${formatBps(config?.margin_slippage_bps, "待确认")}`,
@@ -1620,7 +1628,7 @@ function tradeCostCommonConfigRows(config = {}) {
         ? "当前保证金现货执行磨损为 0，负基差反套的可执行成本会被低估。"
         : "保证金现货单独建模后，不再和现金现货共用一组执行磨损。"
     ),
-    tradeCostConfigRow(
+    smartArbitrageConfigRow(
       "trade_cost_derivatives_spread_bps / trade_cost_derivatives_slippage_bps",
       "合约 spread / slippage",
       `${formatBps(config?.derivatives_spread_bps, "待确认")} / ${formatBps(config?.derivatives_slippage_bps, "待确认")}`,
@@ -1634,7 +1642,7 @@ function tradeCostCommonConfigRows(config = {}) {
 
 function tradeCostAdvancedConfigRows(config = {}) {
   return [
-    tradeCostConfigRow(
+    smartArbitrageConfigRow(
       "trade_cost_delivery_settlement_fee_bps",
       "交割合约结算费",
       formatBps(config?.delivery_settlement_fee_bps, "待确认"),
@@ -1643,7 +1651,7 @@ function tradeCostAdvancedConfigRows(config = {}) {
         ? "如果后续引入交割合约策略，这个值会直接进入到期结算磨损。"
         : "当前保持 0 代表没有额外结算成本兜底。"
     ),
-    tradeCostConfigRow(
+    smartArbitrageConfigRow(
       "trade_cost_*",
       "费率口径 / 实盘来源",
       `${String(config?.rate_unit || "bps").toUpperCase()} | ${config?.rate_example || "8 = 0.08%"}`,
@@ -1951,9 +1959,8 @@ function smartArbitrageConfigRow(parameter, alias, value, linkage, risk) {
   ];
 }
 
-function tradeCostConfigRow(parameter, alias, value, linkage, risk) {
-  return smartArbitrageConfigRow(parameter, alias, value, linkage, risk);
-}
+// #14 修复：原本这里有 tradeCostConfigRow，纯 delegator 调下面的 smartArbitrageConfigRow，
+// 没有自己的逻辑。所有调用点已经直接改成 smartArbitrageConfigRow。
 
 function renderConfigTableCell(primary, meta = "") {
   return `<div><strong>${escapeHtml(primary)}</strong>${meta ? `<div class="table-meta">${escapeHtml(meta)}</div>` : ""}</div>`;
@@ -2362,22 +2369,7 @@ function renderExpandableSection(title, body, options = {}) {
   `;
 }
 
-function renderPaginationFooter(payload, { singular, loadAction, collapseAction }) {
-  const shown = Number(payload?.decisions?.length || 0);
-  const total = Number(payload?.total_available || shown);
-  const hasMore = Boolean(payload?.has_more);
-  const limit = Number(payload?.limit || shown);
-  if (!shown) return "";
-  return `
-    <div class="history-footer">
-      <p class="meta-copy">当前显示 ${shown} / ${total} 条${singular}。</p>
-      <div class="stack-actions">
-        ${hasMore ? actionButton(`加载更多${singular}`, loadAction, "", "secondary") : ""}
-        ${limit > 8 ? actionButton("收起到最新 8 条", collapseAction, "", "ghost") : ""}
-      </div>
-    </div>
-  `;
-}
+// #11 修复：renderPaginationFooter 的本地定义已删除，统一到 components.js。
 
 function strategyNarrative(detail) {
   if (!detail.decision_id) {
@@ -2403,7 +2395,7 @@ function strategyNarrative(detail) {
           : `这轮决策给出了 ${intentLabel} 的交易结论。`;
   return `当前市场状态为 ${regimeLabel}，本轮由 ${strategyFamily} 接管。${actionSentence}`
     + `${policy.execution_allowed ? "策略层允许执行，" : "策略层仍未允许执行，"}`
-    + `${risk.approved ? "风控层当前没有继续阻断。" : `风控仍在拦截：${listText(risk.rejection_reasons, "当前没有额外风控说明")}。`}`;
+    + `${risk.approved ? "风控层当前没有继续阻断。" : `风控仍在拦截：${localizeList(risk.rejection_reasons, "当前没有额外风控说明")}。`}`;
 }
 
 function recentDecisionNarrative(item, scene) {
@@ -2850,10 +2842,11 @@ function smartArbitrageBlockingSummary(candidate) {
   return "当前存在阻断条件，因此暂不生成自动执行量。";
 }
 
-function escapeFallbackReadableState(value, fallback) {
-  return readableState(value || fallback || "unknown");
-}
-
+// #15 修复：原本这里有 escapeFallbackReadableState(value, fallback)，是
+//   readableState(value || fallback || "unknown")
+// 的轻包装，全文件搜不到任何调用点（README 说"使用率极低"已经过保守了，
+// 实际上是 dead code）。直接删掉，保留这个注释作为占位说明，避免有人凭旧
+// 文档/旧 grep 结果重新加回来。
 function renderTrialVerdictActions(workbenchActions, fallback) {
   if (Array.isArray(workbenchActions) && workbenchActions.length) {
     return `<div class="stack-actions table-actions--compact">${workbenchActions.map(renderWorkbenchActionButton).join("")}</div>`;
@@ -2987,22 +2980,16 @@ function splitStrategyReasons(value) {
   return items.map((item) => String(item ?? "").trim()).filter(Boolean);
 }
 
-function plainListText(value, fallback) {
-  const rows = splitStrategyReasons(value);
-  return rows.length ? rows.join("；") : fallback;
-}
-
+// #16 修复：原本这里的 plainListText(value, fallback) 只有一个调用点
+// （renderStrategyView 周度复盘行），已经直接 inline 成
+// `splitStrategyReasons(value).join("；") || fallback`，删除原函数。
 function mergeReasonLists(...values) {
   return values.flatMap((value) => splitStrategyReasons(value));
 }
 
-function chooseTrialVerdict(...values) {
-  for (const value of values) {
-    if (value) return value;
-  }
-  return "unknown";
-}
-
+// #17 修复：原本这里有 chooseTrialVerdict(...values)，逻辑是返回第一个 truthy
+// 值，否则返回 "unknown"。已经在 renderStrategyView 调用点直接展开成 ||
+// 链，删除原函数。
 function strategyReasonText(value) {
   const map = {
     no_forward_validation_rows: "当前还没有足够的已完成成交，暂时无法做前向验证。",
@@ -3054,9 +3041,7 @@ function humanCooldownLabel(key) {
   return labels[normalized] || normalized;
 }
 
-function listText(value, fallback) {
-  return localizeList(value, fallback);
-}
+// #6 修复：原本此处的 listText 是 copy.localizeList 的纯 delegator，已删除。
 
 function optionalState(value, fallback) {
   return value ? readableState(value) : fallback;

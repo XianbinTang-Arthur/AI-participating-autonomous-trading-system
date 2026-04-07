@@ -103,7 +103,11 @@
   advisory_only: "仅参考，不直接执行",
   protective_fallback: "保护性回退",
   hold_family: "保持当前家族状态",
-  blocked: "当前家族被拦住",
+  // #13 修复：此处原本是 `blocked: "当前家族被拦住"`，但 TERM_MAP 顶部（行 14）已经
+  // 为通用语境定义过 `blocked: "阻断中"`。JS 对象字面量后者覆盖前者，导致
+  // trade-display.js / strategy-view.js 中的 `readableState("blocked")` 在"策略门禁
+  // 阻断"/"风控阻断"场景里被错显成"当前家族被拦住"，这是一个真实的文案 bug。
+  // 删除此处的重复定义让顶部通用文案生效；"家族被拦住"的含义可以在调用方显式拼接。
   protect: "建立保护腿",
   rebalance_protection: "调整保护腿",
   close_protection_leg: "收回保护腿",
@@ -137,7 +141,9 @@
   inventory: "真实库存",
   mixed: "目标与库存混合",
   trend: "趋势",
-  regime_range: "市场处于震荡区间",
+  // #13 修复：原本这里是 `regime_range: "市场处于震荡区间"`，但下方（靠近 regime_trend /
+  // regime_uncertain）又有一份 `regime_range: "市场处于震荡阶段"`。两处含义相同，保留
+  // 下方与 regime_* 兄弟 key 格式一致的那份，删除此处重复定义。
   trend_aggressive: "趋势激进",
   "trend aggressive": "趋势激进",
   trend_normal: "趋势标准",
@@ -474,6 +480,18 @@
   independent_failed_thesis_force_exit: "交易 thesis 失效，立即退出",
   independent_stale_thesis_guarded_exit: "交易 thesis 变陈旧，守纪律退出",
   not_requested: "未请求",
+  // #30 修复：以下 8 条是 ai-view.js 本地 AI_STATE_MAP 独有的 key，原本靠 ai-view 的
+  // 本地 map + readableState fallback 两段式处理，删除本地 map 后需要 TERM_MAP 自己提供。
+  // "advisory"/"underperforming"/"env_default" 是 AI 运行态/管理员面板语境，其余是
+  // "AI 相对基础策略的动作差异" 的枚举。
+  same_as_baseline: "与基础策略一致",
+  hold_instead: "改为继续观望/持有",
+  entry_override: "改为开仓",
+  exit_override: "改为退出",
+  reverse_override: "改为反手",
+  env_default: "沿用启动默认档位",
+  advisory: "AI 辅助建议",
+  underperforming: "表现落后",
 };
 
 const ERROR_MAP = {
@@ -1511,6 +1529,77 @@ export function statusHeadline(label, fallback = "待确认") {
   return `当前状态：${value}`;
 }
 
+// #45 修复：原本 operationalStatusLabel 和 operationalStatusCopy 各自维护一串
+// if-return 链：
+//   1) 条件判断完全一样，但两处 return 的顺序略有差异（label 里 "已暂停" 在
+//      "轻度差异" 前面，copy 里顺序反过来），新增一条分支要同时改两处；
+//   2) 当 health.halted && recovery.recovery_state === "degraded_continue"
+//      同时成立时，label 会说 "已暂停" 而 copy 会说 "当前只有轻度动态漂移"，
+//      这其实是前任作者粘贴顺序不一致导致的隐性不一致。
+// 这里合并到一张规则表，label 的排序被视为权威（halted 优先于 degraded_continue
+// 更符合实际运维直觉：系统一旦被暂停，先告知暂停本身），copy 按同一顺序复用。
+// 新增分支时只改一处。
+const OPERATIONAL_STATUS_RULES = [
+  {
+    match: ({ recovery }) => Boolean(recovery.halted && recovery.resume_eligible && !recovery.safe_to_trade),
+    label: "待恢复",
+    copy: () => "当前处于手动暂停状态。确认最新对账和账户快照无误后，可直接恢复自动运行。",
+  },
+  {
+    match: ({ health, recovery }) => Boolean(health.halted || (recovery.halted && !recovery.resume_eligible)),
+    label: "已暂停",
+    copy: () => "当前处于暂停状态。请先确认暂停原因和系统状态，再决定后续操作。",
+  },
+  {
+    match: ({ blockers }) => (blockers || []).length > 0,
+    label: "已阻断",
+    copy: ({ blockers }) => `当前处于阻断状态。请先处理：${localizeError(blockers[0]?.blocker)}。`,
+  },
+  {
+    match: ({ reconciliation }) => Boolean(reconciliation?.halt_required),
+    label: "需先完成对账",
+    copy: () => "当前需先完成对账。确认没有高风险差异后，再决定是否恢复自动运行。",
+  },
+  {
+    match: ({ recovery }) => recovery.recovery_state === "degraded_continue" && Boolean(recovery.safe_to_trade),
+    label: "轻度差异，继续运行",
+    copy: () => "当前只有轻度动态漂移，系统仍可继续运行。建议持续观察保证金和仓位快照，不需要立即人工确认。",
+  },
+  {
+    match: ({ recovery }) => Boolean(recovery.review_required),
+    label: "待人工确认",
+    copy: () => "当前仍需人工确认。请先核对交易所状态与本地记录，再决定是否接受为新基线。",
+  },
+  {
+    match: ({ recovery }) => recovery.recovery_state === "only_reduce" || Boolean(recovery.only_reduce_required),
+    label: "仅允许减仓",
+    copy: ({ recoveryReasonText }) => (recoveryReasonText
+      ? `当前只允许减仓或平仓。${recoveryReasonText}`
+      : "当前只允许减仓或平仓，系统不会继续新增暴露。"),
+  },
+  {
+    match: ({ recovery }) => recovery.safe_to_trade === false,
+    label: "恢复受限",
+    copy: ({ recoveryReasonText }) => (recoveryReasonText
+      ? `当前处于恢复受限状态。${recoveryReasonText}`
+      : "当前处于恢复受限状态。请先满足恢复条件后再恢复自动运行。"),
+  },
+];
+
+function matchOperationalStatus({
+  health = {},
+  recovery = {},
+  blockers = [],
+  reconciliation = null,
+  recoveryReasonText = "",
+} = {}) {
+  const ctx = { health, recovery, blockers, reconciliation, recoveryReasonText };
+  for (const rule of OPERATIONAL_STATUS_RULES) {
+    if (rule.match(ctx)) return { rule, ctx };
+  }
+  return { rule: null, ctx };
+}
+
 export function operationalStatusLabel({
   health = {},
   recovery = {},
@@ -1518,15 +1607,8 @@ export function operationalStatusLabel({
   reconciliation = null,
   readyLabel = "可交易",
 } = {}) {
-  if (recovery.halted && recovery.resume_eligible && !recovery.safe_to_trade) return "待恢复";
-  if (health.halted || (recovery.halted && !recovery.resume_eligible)) return "已暂停";
-  if ((blockers || []).length > 0) return "已阻断";
-  if (reconciliation?.halt_required) return "需先完成对账";
-  if (recovery.recovery_state === "degraded_continue" && recovery.safe_to_trade) return "轻度差异，继续运行";
-  if (recovery.review_required) return "待人工确认";
-  if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) return "仅允许减仓";
-  if (recovery.safe_to_trade === false) return "恢复受限";
-  return readyLabel;
+  const { rule } = matchOperationalStatus({ health, recovery, blockers, reconciliation });
+  return rule ? rule.label : readyLabel;
 }
 
 export function operationalStatusHeadline(options = {}) {
@@ -1541,35 +1623,8 @@ export function operationalStatusCopy({
   recoveryReasonText = "",
   readyCopy = "当前运行正常，可继续关注账户、对账和下一轮策略判断。",
 } = {}) {
-  if (recovery.halted && recovery.resume_eligible && !recovery.safe_to_trade) {
-    return "当前处于手动暂停状态。确认最新对账和账户快照无误后，可直接恢复自动运行。";
-  }
-  if (recovery.recovery_state === "degraded_continue" && recovery.safe_to_trade) {
-    return "当前只有轻度动态漂移，系统仍可继续运行。建议持续观察保证金和仓位快照，不需要立即人工确认。";
-  }
-  if (health.halted || (recovery.halted && !recovery.resume_eligible)) {
-    return "当前处于暂停状态。请先确认暂停原因和系统状态，再决定后续操作。";
-  }
-  if ((blockers || []).length > 0) {
-    return `当前处于阻断状态。请先处理：${localizeError(blockers[0]?.blocker)}。`;
-  }
-  if (reconciliation?.halt_required) {
-    return "当前需先完成对账。确认没有高风险差异后，再决定是否恢复自动运行。";
-  }
-  if (recovery.review_required) {
-    return "当前仍需人工确认。请先核对交易所状态与本地记录，再决定是否接受为新基线。";
-  }
-  if (recovery.recovery_state === "only_reduce" || recovery.only_reduce_required) {
-    return recoveryReasonText
-      ? `当前只允许减仓或平仓。${recoveryReasonText}`
-      : "当前只允许减仓或平仓，系统不会继续新增暴露。";
-  }
-  if (recovery.safe_to_trade === false) {
-    return recoveryReasonText
-      ? `当前处于恢复受限状态。${recoveryReasonText}`
-      : "当前处于恢复受限状态。请先满足恢复条件后再恢复自动运行。";
-  }
-  return readyCopy;
+  const { rule, ctx } = matchOperationalStatus({ health, recovery, blockers, reconciliation, recoveryReasonText });
+  return rule ? rule.copy(ctx) : readyCopy;
 }
 
 export function toneForOrderStatus(status) {

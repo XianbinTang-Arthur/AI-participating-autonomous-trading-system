@@ -14,6 +14,18 @@ import {
 
 const DEFAULT_REPLAY_PARENT_FILTER = "all";
 
+// #43 修复：把 filter 列表和它依赖的后端字段约定写清楚，避免后端 lifecycle 命名
+// 改了之后这里默默漏过滤。
+//
+// 这里的 value 不是任意的下拉枚举，它会直接被
+//   filterReplayValidations(validations, replayFilter)
+// 用作 `validation.overlay_parent_exposure_summary.lifecycle_state` 的等值匹配。
+// 也就是说每个 value 都必须是后端 normalizedOverlayDecision 真正会写出的 lifecycle 字符串
+// （目前是 inventory_only / target_only / target_and_inventory）。
+//
+// 如果将来 normalizedOverlayDecision 增加新的 lifecycle 值（例如 target_with_overlay），
+// 必须同时在这里加一行；如果改名（例如 target_only → only_target），也必须同步改这里，
+// 否则筛选会变成"全部漏掉"或"看不到目标项"。
 const REPLAY_PARENT_FILTERS = [
   { value: "all", label: "全部阶段" },
   { value: "inventory_only", label: "仅库存活跃" },
@@ -168,14 +180,45 @@ export function renderReplaySections(data, uiState = {}, paging = {}) {
   };
 }
 
+// #42 修复：原本三个 postmortem 行的 span class 全部用嵌套三元写在模板里，
+// 跨三处 ternary 读起来非常难一眼判断"哪种组合走哪个 span"。提取成 helper：
+//   只看"当前块要不要画"以及"三块里一共要画几块"，规则就明确了：
+//     - 这个块本身不画 → 返回空字符串
+//     - 一共要画 3 块 → span-4 / span-4 / span-4 = 12
+//     - 一共要画 2 块 → span-6 / span-6 = 12（均分，视觉对称）
+//     - 一共要画 1 块（只剩自己）→ span-12
+//
+// 历史记录：之前的早期草稿尝试过"一块 span-4 + 一块 span-8"的不对称布局
+// （视觉上想把"内容更长的那块"拉宽），但这会让 helper 必须知道"自己是不是
+// 排在前面的那一个"才能挑 span-4 还是 span-8——也就是要带一个 isLeading
+// 参数。问题是 helper 被三个调用点对称调用，没法单凭 (self, others) 反推出
+// isLeading；早期实现 *没有* 加 isLeading 但仍然返回 span-8，结果两块都拿
+// span-8（8+8=16 > 12 列），栅格直接 wrap 到下一行，反而比对称 span-6 更难看。
+//
+// 现在统一收敛到对称 span-6 方案：实现简单、调用方不需要传 isLeading、栅格
+// 不会溢出，唯一代价是放弃了"长块更宽"那一点视觉偏好。如果未来确实需要那种
+// 不对称偏好，再加 isLeading 参数并把所有调用点改成显式声明 leading 角色。
+function postmortemSpanClass(self, others) {
+  if (!self) return "";
+  const otherCount = others.filter(Boolean).length;
+  if (otherCount === 0) return "span-12";
+  if (otherCount === 1) return "span-6";
+  return "span-4";
+}
+
 export function renderReplayView(data, uiState = {}, paging = {}) {
   const sections = renderReplaySections(data, uiState, paging);
+  // postmortem 三块互相之间的 span 由 postmortemSpanClass 统一推导，
+  // 参数顺序固定为"自己, [其它两块]"。
+  const latestSpan = postmortemSpanClass(sections.replayLatestPostmortem, [sections.replayAdaptivePostmortem, sections.replayTransitionPostmortem]);
+  const adaptiveSpan = postmortemSpanClass(sections.replayAdaptivePostmortem, [sections.replayLatestPostmortem, sections.replayTransitionPostmortem]);
+  const transitionSpan = postmortemSpanClass(sections.replayTransitionPostmortem, [sections.replayLatestPostmortem, sections.replayAdaptivePostmortem]);
   return `
     <div class="panel-grid">
       <div class="span-12">${sections.replayHero}</div>
-      ${sections.replayLatestPostmortem ? `<div class="${sections.replayAdaptivePostmortem || sections.replayTransitionPostmortem ? "span-4" : "span-12"}">${sections.replayLatestPostmortem}</div>` : ""}
-      ${sections.replayAdaptivePostmortem ? `<div class="${sections.replayLatestPostmortem && sections.replayTransitionPostmortem ? "span-4" : sections.replayLatestPostmortem || sections.replayTransitionPostmortem ? "span-8" : "span-12"}">${sections.replayAdaptivePostmortem}</div>` : ""}
-      ${sections.replayTransitionPostmortem ? `<div class="${sections.replayLatestPostmortem && sections.replayAdaptivePostmortem ? "span-4" : sections.replayLatestPostmortem || sections.replayAdaptivePostmortem ? "span-8" : "span-12"}">${sections.replayTransitionPostmortem}</div>` : ""}
+      ${sections.replayLatestPostmortem ? `<div class="${latestSpan}">${sections.replayLatestPostmortem}</div>` : ""}
+      ${sections.replayAdaptivePostmortem ? `<div class="${adaptiveSpan}">${sections.replayAdaptivePostmortem}</div>` : ""}
+      ${sections.replayTransitionPostmortem ? `<div class="${transitionSpan}">${sections.replayTransitionPostmortem}</div>` : ""}
       ${sections.replayIndependentVersions ? `<div class="span-12">${sections.replayIndependentVersions}</div>` : ""}
       <div class="span-12">${sections.replayLinkedRead}</div>
       <div class="span-12">${sections.replayHistory}</div>
@@ -203,11 +246,16 @@ function renderReplayHistoryActions({ replayFilter, hasMore, canCollapse }) {
   return `<div class="stack-actions table-actions--compact">${filterButtons}${pagingButtons}</div>`;
 }
 
+// #43 修复：filterReplayValidations 把 UI 下拉的 value 当成后端 lifecycle 等值匹配，
+// 这里把约定显式写下来，避免 REPLAY_PARENT_FILTERS（看顶部注释）和后端 normalize
+// 之间默默漂移。
 function filterReplayValidations(validations, replayFilter) {
   if (!Array.isArray(validations) || replayFilter === DEFAULT_REPLAY_PARENT_FILTER) {
     return Array.isArray(validations) ? validations : [];
   }
   return validations.filter((validation) => {
+    // lifecycle_state 来自后端 normalizedOverlayDecision；REPLAY_PARENT_FILTERS
+    // 中除 "all" 之外的每个 value 都应当能在这里命中至少一类 validation。
     const lifecycleState = String(validation?.overlay_parent_exposure_summary?.lifecycle_state || "").trim().toLowerCase();
     return lifecycleState === replayFilter;
   });

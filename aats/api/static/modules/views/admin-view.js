@@ -91,6 +91,8 @@ export function renderAdminView(data) {
           content: `
             ${operatorUsersError ? notice(operatorUsersError, "warning") : ""}
             ${renderCreateForm(canAdmin)}
+            ${renderChangeRoleForm(canAdmin)}
+            ${renderResetPasswordForm(canAdmin)}
             ${responsiveTable(
               ["用户名", "角色", "账号状态", "最近登录", "最近更新", "操作"],
               users.map((user) => [
@@ -128,9 +130,18 @@ export function renderAdminView(data) {
   `;
 }
 
+// #41 修复：原本 <form id="operatorCreateForm"> 是整个前端里唯一通过 DOM id
+// 绑定事件的表单（app.js init() 用 form.id === "operatorCreateForm" 拦 submit），
+// 其它按钮 / 表单全部走 data-action 分发。改成走相同的 data-action 名字，让事
+// 件分发只读 dataset，不再依赖 DOM id 字符串匹配。
+//
+// 这里仍然用 form 的 submit 事件（而非 click + data-action），是为了保留浏览
+// 器原生的"按 Enter 提交 / 浏览器密码管理器自动填充"行为；只是把"我是哪个
+// action"的判定从 form.id 改成 form.dataset.action，和其它 dispatchAction 分发
+// 路径在概念上对齐。
 function renderCreateForm(canAdmin) {
   return `
-    <form id="operatorCreateForm" class="field-grid">
+    <form data-action="submit-create-operator" class="field-grid">
       <div class="panel-head">
         <div>
           <h3>创建新账号</h3>
@@ -165,6 +176,68 @@ function renderCreateForm(canAdmin) {
       </div>
       <div class="stack-actions">
         <button id="operatorCreateButton" class="primary-button" type="submit" ${canAdmin ? "" : "disabled"}>创建账号</button>
+      </div>
+    </form>
+  `;
+}
+
+function renderChangeRoleForm(canAdmin) {
+  // #29 同系列修复：原本这里用 windowRef.prompt() 采集新角色，改为统一的下拉表单。
+  // 每行“改角色”按钮会把目标用户名预填到 #changeRoleUsername，再由此表单发起 PATCH。
+  return `
+    <form id="changeRoleForm" class="field-grid">
+      <div class="panel-head">
+        <div>
+          <h3>修改账号角色</h3>
+          <p class="meta-copy">先在下方账号列表点击“改角色”预填用户名，再在这里选择新角色后确认。</p>
+        </div>
+        ${canAdmin ? pill("可操作", "positive") : pill("仅管理员可操作", "warning")}
+      </div>
+      <div class="panel-grid">
+        <div class="span-4">
+          <label class="field-label" for="changeRoleUsername">目标用户名</label>
+          <input id="changeRoleUsername" type="text" placeholder="点击账号行“改角色”后自动填充" ${canAdmin ? "" : "disabled"} readonly>
+        </div>
+        <div class="span-4">
+          <label class="field-label" for="changeRoleValue">新角色</label>
+          <select id="changeRoleValue" ${canAdmin ? "" : "disabled"}>
+            <option value="viewer">只读用户</option>
+            <option value="operator">操作员</option>
+            <option value="admin">管理员</option>
+          </select>
+        </div>
+        <div class="span-4 stack-actions">
+          <button id="changeRoleConfirmButton" class="primary-button" type="button" data-action="confirm-change-user-role" ${canAdmin ? "" : "disabled"}>确认修改角色</button>
+        </div>
+      </div>
+    </form>
+  `;
+}
+
+function renderResetPasswordForm(canAdmin) {
+  // #29 核心修复：原本 resetOperatorPassword 通过 windowRef.prompt() 弹窗采集明文密码，
+  // 密码在 prompt 输入框里不会被掩码，对审计/敏感部署不合适。改为专用 <input type="password">。
+  return `
+    <form id="resetPasswordForm" class="field-grid">
+      <div class="panel-head">
+        <div>
+          <h3>重置账号密码</h3>
+          <p class="meta-copy">先在下方账号列表点击“重置密码”预填用户名，再在这里输入新密码后确认。</p>
+        </div>
+        ${canAdmin ? pill("可操作", "positive") : pill("仅管理员可操作", "warning")}
+      </div>
+      <div class="panel-grid">
+        <div class="span-4">
+          <label class="field-label" for="resetPasswordUsername">目标用户名</label>
+          <input id="resetPasswordUsername" type="text" placeholder="点击账号行“重置密码”后自动填充" ${canAdmin ? "" : "disabled"} readonly>
+        </div>
+        <div class="span-4">
+          <label class="field-label" for="resetPasswordValue">新密码</label>
+          <input id="resetPasswordValue" type="password" autocomplete="new-password" placeholder="请输入新密码" ${canAdmin ? "" : "disabled"}>
+        </div>
+        <div class="span-4 stack-actions">
+          <button id="resetPasswordConfirmButton" class="primary-button" type="button" data-action="confirm-reset-user-password" ${canAdmin ? "" : "disabled"}>确认重置密码</button>
+        </div>
       </div>
     </form>
   `;

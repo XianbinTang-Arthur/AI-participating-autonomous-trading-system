@@ -1,5 +1,7 @@
 import { actorTags, actionButton, callout, kvList, summaryStrip, surfaceCard } from "../components.js";
-import { summarizeLocalizedList } from "../copy.js";
+// #6 / #7 / #8 修复：此前本文件复制了三份 copy.js 的 helper（listText、textOrFallback、
+// summarizeList），直接 import 统一版本，删除本地重复定义。
+import { localizeList, summarizeLocalizedList, textOrFallback } from "../copy.js";
 import { formatNumber } from "../formatters.js";
 import { readableState } from "../terms.js";
 
@@ -281,7 +283,9 @@ function renderCurrentConfigurationCard({ runtimeProfiles = {}, runtime = {}, ai
         [
           "主交易标的",
           textOrFallback(runtimePayload.default_symbol, "待配置"),
-          listText(runtimePayload.allowed_symbols, "当前没有额外允许交易的标的"),
+          // #6：改用 copy.localizeList；原本的本地 listText 只 join 不 localize，
+          // 现在享受 localizeError 词条化的好处。
+          localizeList(runtimePayload.allowed_symbols, "当前没有额外允许交易的标的"),
         ],
         [
           "产品与保证金",
@@ -365,7 +369,12 @@ function autoControlSummary(runtime = {}, latestProfileControl = {}, latestSelec
   if (candidate) {
     return {
       title: `正在观察${readableProfile(candidate)}`,
-      copy: summarizeList(latestSelectionDecision.blocked_reasons, "系统还在比较证据"),
+      // #8：改用 copy.summarizeLocalizedList；原本的本地 summarizeList 只看 slice(0,2)
+      // 且不 localizeError。统一走 copy.js 的 limit=2 版本。
+      copy: summarizeLocalizedList(latestSelectionDecision.blocked_reasons, {
+        fallback: "系统还在比较证据",
+        limit: 2,
+      }),
       tone: "info",
       actors: ["system", "ai"],
     };
@@ -416,6 +425,16 @@ function executionShadowState(mode) {
   };
 }
 
+// #12 修复：把"故意把 ai_decision_maker_with_profile_control 折叠成
+// ai_decision_maker"这件事写清楚——后端真实存了带 _with_profile_control
+// 后缀的 enum，但是顶部"运行模式"按钮组只有 baseline_only / ai_advisor /
+// ai_decision_maker 三个 radio。如果不在这里折叠，按钮组会出现"高亮没有任何
+// 一个按钮"的尴尬状态，用户会以为运行模式坏了。
+//
+// 折叠仅作用于"按钮组高亮 / 当前模式标签"的展示层；底层的真实 enum 仍由
+// runtime.effective_operating_mode 等字段保留，对外暴露的 readableMode（下方）
+// 单独识别这个值并显示成"AI 决策者"，二者并不冲突。如果未来按钮组扩成 4 项，
+// 把这一行删掉即可。
 function currentOperatingMode(runtime = {}) {
   const normalized = String(
     runtime.manual_override_mode
@@ -445,17 +464,6 @@ function readableMode(value, fallback = "待确认") {
   return readableState(normalized, fallback);
 }
 
-function textOrFallback(value, fallback = "待确认") {
-  if (value === null || value === undefined || value === "") return fallback;
-  return String(value);
-}
-
-function listText(value, fallback = "暂无") {
-  if (!Array.isArray(value) || !value.length) return fallback;
-  return value.join("、");
-}
-
-function summarizeList(items, fallback = "当前没有额外说明") {
-  if (!Array.isArray(items) || !items.length) return fallback;
-  return items.slice(0, 2).map((item) => readableState(String(item), String(item))).join("；");
-}
+// #6 / #7 / #8 修复：原本这里定义了三个和 copy.js 重复的 helper
+// (textOrFallback / listText / summarizeList)。全部删除，改为 top-of-file 直接
+// import copy.js 的统一版本，避免 triple source of truth。

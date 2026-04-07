@@ -1,6 +1,11 @@
 ﻿import { alertQueue, pill, summaryStrip, surfaceCard } from "../components.js";
 import { localizeList } from "../copy.js";
 import { booleanWord, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned } from "../formatters.js";
+// #27 修复：原本这里在文件内部重复列出 home-view 关心的 deferred panel key
+// （latestDecision/executionLatest/reconciliationLatest），现在改用 store.js
+// 提供的 hasAnyDeferredPanelPending(view, pendingPanels) 集中判断，避免和
+// DEFERRED_VIEW_PANELS.home 漂移。
+import { hasAnyDeferredPanelPending } from "../store.js";
 import {
   localizeError,
   operationalStatusCopy,
@@ -22,7 +27,9 @@ export function renderHomeView(data) {
   const blockers = data.blockers?.blockers || [];
   const portfolio = data.portfolio?.portfolio || {};
   const pendingPanels = data.uiHints?.pendingPanels || {};
-  const deferredLoading = pendingPanels.latestDecision || pendingPanels.executionLatest || pendingPanels.reconciliationLatest;
+  // #27 修复：调用 store 的 helper，让"home 关心的延迟 panel 列表"只在
+  // store.js 维护一次。
+  const deferredLoading = hasAnyDeferredPanelPending("home", pendingPanels);
   const latestDecision = data.latestDecision || {};
   const latestOrder = data.executionLatest?.latest_order || null;
   const latestFill = data.executionLatest?.latest_fill || null;

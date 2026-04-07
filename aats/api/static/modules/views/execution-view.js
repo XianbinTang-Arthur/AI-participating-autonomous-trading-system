@@ -1,4 +1,4 @@
-﻿import { actionButton, alertQueue, pill, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
+﻿import { actionButton, alertQueue, pill, primaryStatusPanel, renderPaginationFooter, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
 import { escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import { localizeError, readableState, toneForOrderStatus } from "../terms.js";
 import {
@@ -73,9 +73,11 @@ export function renderExecutionSections(data) {
       kicker: "委托状态",
       copy: "按现货和合约分别查看，判断哪类委托在排队、卡住或反复失败。",
       content: `${renderOrderGroups(recentOrders)}${renderPaginationFooter({
-        payload: ordersPayload,
-        key: "orders",
-        singular: "委托",
+        shown: Number(ordersPayload?.orders?.length || 0),
+        total: ordersPayload?.total_available,
+        hasMore: ordersPayload?.has_more,
+        limit: ordersPayload?.limit,
+        label: "委托记录",
         loadAction: "load-more-orders",
         collapseAction: "collapse-orders",
       })}`,
@@ -85,9 +87,11 @@ export function renderExecutionSections(data) {
       kicker: "成交状态",
       copy: "确认最近成交是否已经稳定落库，并补充对盈亏和手续费的上下文判断。",
       content: `${renderFillGroups(recentFills)}${renderPaginationFooter({
-        payload: fillsPayload,
-        key: "fills",
-        singular: "成交",
+        shown: Number(fillsPayload?.fills?.length || 0),
+        total: fillsPayload?.total_available,
+        hasMore: fillsPayload?.has_more,
+        limit: fillsPayload?.limit,
+        label: "成交记录",
         loadAction: "load-more-fills",
         collapseAction: "collapse-fills",
       })}`,
@@ -217,22 +221,7 @@ function renderFillGroups(recentFills) {
     .join("");
 }
 
-function renderPaginationFooter({ payload, key, singular, loadAction, collapseAction }) {
-  const shown = Number(payload?.[key]?.length || 0);
-  const total = Number(payload?.total_available || shown);
-  const hasMore = Boolean(payload?.has_more);
-  const limit = Number(payload?.limit || shown);
-  if (!shown) return "";
-  return `
-    <div class="history-footer">
-      <p class="meta-copy">当前显示 ${shown} / ${total} 条${singular}记录。</p>
-      <div class="stack-actions">
-        ${hasMore ? actionButton(`加载更多${singular}`, loadAction, "", "secondary") : ""}
-        ${limit > 8 ? actionButton("收起到最新 8 条", collapseAction, "", "ghost") : ""}
-      </div>
-    </div>
-  `;
-}
+// #11 修复：renderPaginationFooter 的本地定义已删除，统一到 components.js。
 
 function executionHeadline({ latestOrder, latestFill, errors }) {
   if (errors.length > 0) return "执行链路存在异常";

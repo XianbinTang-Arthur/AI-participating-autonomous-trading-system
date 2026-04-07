@@ -66,11 +66,47 @@ export function createAdminActions({
     }
   }
 
-  async function updateOperatorUserRole(username) {
+  // #29 修复后：原本这里用 windowRef.prompt() 采集 role 字符串，现在改为预填到 admin-view
+  // 的 #changeRoleForm，由用户显式点击“确认修改角色”触发 confirmUpdateOperatorUserRole。
+  function prefillChangeUserRole(username) {
     const user = findOperatorUser(username);
     if (!user) return;
-    const nextRole = windowRef.prompt("请输入新的角色：viewer / operator / admin", user.role || "viewer");
-    if (!nextRole || nextRole === user.role) return;
+    const usernameInput = documentRef.getElementById("changeRoleUsername");
+    const roleSelect = documentRef.getElementById("changeRoleValue");
+    if (usernameInput) usernameInput.value = username;
+    if (roleSelect) {
+      roleSelect.value = user.role || "viewer";
+      try {
+        roleSelect.focus();
+      } catch (error) {
+        // 聚焦失败不是致命错误（例如元素暂未挂载），记录但继续。
+        // eslint-disable-next-line no-console
+        console.warn("[admin-actions] 聚焦 changeRoleValue 失败", error);
+      }
+    }
+    setFlash(state, "info", `已把 ${username} 填入“修改账号角色”表单，请选择新角色后点击确认。`);
+    renderBanners();
+  }
+
+  async function confirmUpdateOperatorUserRole() {
+    const username = documentRef.getElementById("changeRoleUsername")?.value.trim();
+    const nextRole = documentRef.getElementById("changeRoleValue")?.value;
+    if (!username) {
+      setFlash(state, "warning", "请先在账号列表点击“改角色”选中用户。");
+      renderBanners();
+      return;
+    }
+    const user = findOperatorUser(username);
+    if (!user) {
+      setFlash(state, "warning", `未找到账号 ${username}，请刷新后重试。`);
+      renderBanners();
+      return;
+    }
+    if (!nextRole || nextRole === user.role) {
+      setFlash(state, "warning", "请选择与当前角色不同的新角色。");
+      renderBanners();
+      return;
+    }
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, `正在更新 ${username} 的角色…`);
     try {
@@ -88,9 +124,41 @@ export function createAdminActions({
     }
   }
 
-  async function resetOperatorPassword(username) {
-    const password = windowRef.prompt(`请输入 ${username} 的新密码`);
-    if (!password) return;
+  // #29 核心修复：原本这里用 windowRef.prompt(`请输入 ${username} 的新密码`) 直接采集明文
+  // 密码；prompt 不是 password 类型、不掩码、可被浏览器历史/截屏记录，对审计/敏感部署不合适。
+  // 改为预填到 admin-view 的 #resetPasswordForm，由用户在 <input type="password"> 输入后确认。
+  function prefillResetOperatorPassword(username) {
+    const user = findOperatorUser(username);
+    if (!user) return;
+    const usernameInput = documentRef.getElementById("resetPasswordUsername");
+    const passwordInput = documentRef.getElementById("resetPasswordValue");
+    if (usernameInput) usernameInput.value = username;
+    if (passwordInput) {
+      passwordInput.value = "";
+      try {
+        passwordInput.focus();
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.warn("[admin-actions] 聚焦 resetPasswordValue 失败", error);
+      }
+    }
+    setFlash(state, "info", `已把 ${username} 填入“重置账号密码”表单，请输入新密码后点击确认。`);
+    renderBanners();
+  }
+
+  async function confirmResetOperatorPassword() {
+    const username = documentRef.getElementById("resetPasswordUsername")?.value.trim();
+    const password = documentRef.getElementById("resetPasswordValue")?.value;
+    if (!username) {
+      setFlash(state, "warning", "请先在账号列表点击“重置密码”选中用户。");
+      renderBanners();
+      return;
+    }
+    if (!password) {
+      setFlash(state, "warning", "请输入新密码后再确认重置。");
+      renderBanners();
+      return;
+    }
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, `正在重置 ${username} 的密码…`);
     try {
@@ -98,6 +166,9 @@ export function createAdminActions({
         method: "PATCH",
         body: { password },
       });
+      // 成功后立即清空 password input，避免新密码残留在 DOM。
+      const passwordInput = documentRef.getElementById("resetPasswordValue");
+      if (passwordInput) passwordInput.value = "";
       setFlash(state, "info", `${username} 的密码已重置。`);
       await refreshDashboard({ manual: true });
     } catch (error) {
@@ -129,8 +200,12 @@ export function createAdminActions({
   return {
     actionHandlers: {
       "toggle-user": (value) => toggleOperatorUser(value),
-      "change-user-role": (value) => updateOperatorUserRole(value),
-      "reset-user-password": (value) => resetOperatorPassword(value),
+      // #29：下面这两个“点击账号行”按钮不再立即发 PATCH，而是把 username 预填到专用表单。
+      "change-user-role": (value) => prefillChangeUserRole(value),
+      "reset-user-password": (value) => prefillResetOperatorPassword(value),
+      // 表单里的“确认”按钮才真正发起 PATCH。
+      "confirm-change-user-role": () => confirmUpdateOperatorUserRole(),
+      "confirm-reset-user-password": () => confirmResetOperatorPassword(),
       "delete-user": (value) => deleteOperatorUser(value),
     },
     createOperatorUser,

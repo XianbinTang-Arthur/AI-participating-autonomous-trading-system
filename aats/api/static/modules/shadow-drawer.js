@@ -1,4 +1,4 @@
-import { actionButton, summaryStrip, surfaceCard, timeline } from "./components.js";
+import { actionButton, kvList, summaryStrip, surfaceCard, timeline } from "./components.js";
 import { escapeHtml, formatMaybeTimestamp, formatRelativeAge, listOrDash, rawJson } from "./formatters.js";
 
 export function buildPhase1ShadowDrawer(detail, { shadowBlocker = null, uiHints = {}, history = [] } = {}) {
@@ -70,14 +70,15 @@ export function buildPhase1ShadowDrawer(detail, { shadowBlocker = null, uiHints 
         title: "最近异常",
         kicker: "告警与失败",
         copy: "这里保留最近一次影子兼容层告警、处理失败和同步错误，方便人工核查时快速定位。",
-        content: `
-          <div class="kv-list">
-            ${kvRow("最近告警", latestAlert?.message || "当前没有影子兼容层告警", formatMaybeTimestamp(latestAlert?.observed_at))}
-            ${kvRow("最近处理失败", latestFailure?.message || "当前没有影子兼容层处理失败记录", formatMaybeTimestamp(latestFailure?.observed_at))}
-            ${kvRow("执行影子最近错误", executionShadow?.last_error || "当前没有执行影子错误", formatMaybeTimestamp(executionShadow?.last_failure_ts))}
-            ${kvRow("账本影子最近错误", ledgerShadow?.last_error || "当前没有账本影子错误", formatMaybeTimestamp(ledgerShadow?.last_failure_ts))}
-          </div>
-        `,
+        // #35 修复：原本这里本地自拼 `<div class="kv-list">` + 四个 kvRow，重复了
+        // components.kvList 的 row markup。一旦 kv-list / kv-row 的 class 名或
+        // DOM 结构改动，shadow-drawer 不会自动跟上。改为直接调用 kvList。
+        content: kvList([
+          ["最近告警", latestAlert?.message || "当前没有影子兼容层告警", formatMaybeTimestamp(latestAlert?.observed_at)],
+          ["最近处理失败", latestFailure?.message || "当前没有影子兼容层处理失败记录", formatMaybeTimestamp(latestFailure?.observed_at)],
+          ["执行影子最近错误", executionShadow?.last_error || "当前没有执行影子错误", formatMaybeTimestamp(executionShadow?.last_failure_ts)],
+          ["账本影子最近错误", ledgerShadow?.last_error || "当前没有账本影子错误", formatMaybeTimestamp(ledgerShadow?.last_failure_ts)],
+        ]),
       }),
       surfaceCard({
         title: "人工核查记录",
@@ -196,16 +197,6 @@ function syncMeta(timestamp, objectId) {
     parts.push(`最近对象 ${objectId}`);
   }
   return parts.join("，") || "当前还没有同步记录";
-}
-
-function kvRow(label, value, meta = "") {
-  return `
-    <div class="kv-row">
-      <span class="kv-row__label">${escapeHtml(label)}</span>
-      <strong class="kv-row__value">${escapeHtml(String(value || "待确认"))}</strong>
-      ${meta ? `<span class="meta-copy">${escapeHtml(meta)}</span>` : ""}
-    </div>
-  `;
 }
 
 function renderHistory(rows) {

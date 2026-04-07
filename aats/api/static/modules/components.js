@@ -230,6 +230,38 @@ export function actionButton(label, action, value = "", tone = "ghost", options 
   return `<button class="${escapeHtml(buttonClass(tone))}${extraClass}" data-action="${escapeHtml(action)}" data-value="${escapeHtml(value)}"${title}${disabled}>${escapeHtml(label)}</button>`;
 }
 
+// #11 / #33 修复：原本 strategy-view / execution-view / ai-view 三处各自定义了
+// renderPaginationFooter，签名与 payload 提取方式都不同，一旦 history-footer 的样式
+// 或结构变化就要改三处。#33 的 `limit > 8` 硬编码阈值也同时固定在三个文件里。
+//
+// 这里把“历史列表翻页页脚”的 HTML 结构统一到 components，调用方只负责把
+// shown/total/hasMore/limit 从自家 payload 里抽出来。collapseThreshold 默认 8，
+// 调用方可以显式覆盖（比如未来想让策略历史保留 12 条再折叠）。
+export function renderPaginationFooter({
+  shown,
+  total,
+  hasMore,
+  limit,
+  label,
+  loadAction,
+  collapseAction,
+  collapseThreshold = 8,
+} = {}) {
+  const safeShown = Number(shown || 0);
+  if (!safeShown) return "";
+  const safeTotal = Number(total || safeShown);
+  const safeLimit = Number(limit || safeShown);
+  return `
+    <div class="history-footer">
+      <p class="meta-copy">当前显示 ${safeShown} / ${safeTotal} 条${label}。</p>
+      <div class="stack-actions">
+        ${hasMore ? actionButton(`加载更多${label}`, loadAction, "", "secondary") : ""}
+        ${safeLimit > collapseThreshold ? actionButton(`收起到最新 ${collapseThreshold} 条`, collapseAction, "", "ghost") : ""}
+      </div>
+    </div>
+  `;
+}
+
 function buttonClass(tone) {
   if (tone === "primary") return "primary-button";
   if (tone === "secondary") return "secondary-button";

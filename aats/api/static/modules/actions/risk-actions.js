@@ -248,6 +248,40 @@ export function createRiskActionHandlers({
     return `${base} 当前仍卡在：${summary}`;
   }
 
+  // #28 修复说明：原本这里只写了"和 app.js 的 activateStrategyProfile 一样"的
+  // 一句指针，要看完整规范必须切到 app.js。这给阅读 risk-actions 的人增加了
+  // 不必要的跳转成本（尤其是新人），所以把规范完整版搬过来。activateStrategyProfile
+  // 那边的注释已经反过来引用本块即可。
+  //
+  // ── confirm → ensureNotBusy → beginAction 顺序契约 ──
+  //
+  // 所有"会改变运行态、且可能弹 confirm 对话框"的人工动作都必须遵守这一顺序。
+  // 这套约束不是审美问题，是为了避免下面这些可观测的 UI 错乱：
+  //
+  //   1. **先 confirm 再 ensureNotBusy** —— 用户在 confirm 上犹豫时（典型场景：
+  //      值班同事打电话过来确认），系统其它通道可能已经改了 actionInFlight / 启动
+  //      新的刷新。confirm 后再检查一次 busy 状态，能挡住"用户按了确定，但其实
+  //      此时已经有别的 action 占线"的竞态。
+  //
+  //   2. **先 confirm 再 beginAction** —— beginAction 会立刻把按钮变灰、写一行
+  //      "正在处理…"的 flash、把 actionInFlight 翻成 true。如果先 begin 后 confirm，
+  //      用户在对话框上点取消，UI 会闪现一次"忙碌"再立即恢复，看起来像 bug。
+  //      此外，beginAction 还会取消已经排队的 scheduled refresh，被取消的 confirm
+  //      会让自动刷新静默丢一拍。
+  //
+  //   3. **ensureNotBusy 必须在 beginAction 之前** —— ensureNotBusy 只读不写
+  //      （它检查 actionInFlight 等字段）。一旦 begin，actionInFlight 自身就被翻
+  //      成 true，再调 ensureNotBusy 就会看到自己的 latch 并误报。
+  //
+  // 所以正确的写法永远是：
+  //
+  //     if (confirmMessage && !window.confirm(confirmMessage)) return;
+  //     if (!ensureNotBusy(state, renderBanners)) return;
+  //     const finishAction = beginAction(target, pendingLabel);
+  //     try { ... } finally { finishAction(); }
+  //
+  // 同样的顺序也是 app.js::activateStrategyProfile 和 admin-actions.js 里
+  // 所有 confirm-first handler 的实现，改任何一个时记得同步检查另外两处。
   async function runExitExecutionAction({
     path,
     body,
@@ -256,16 +290,6 @@ export function createRiskActionHandlers({
     pendingLabel = "正在提交请求…",
     confirmMessage = "",
   } = {}) {
-    // Order: confirm → ensureNotBusy → beginAction. Confirming first means
-    //   1. Cancel exits without leaving a redundant "busy" flash on screen.
-    //   2. ensureNotBusy is re-checked AFTER the (potentially slow) confirm
-    //      dialog, which catches the race where another action lands while
-    //      the user was pondering at the dialog.
-    //   3. Cancelling never flips actionInFlight / cancels the scheduled
-    //      refresh / triggers the pending-style indicator just to undo it.
-    // The same ordering is used by activateStrategyProfile in app.js and by
-    // every confirm-first handler in admin-actions.js — see the canonical
-    // walkthrough above activateStrategyProfile in app.js for the long form.
     if (confirmMessage && !window.confirm(confirmMessage)) return;
     if (!ensureNotBusy(state, renderBanners)) return;
     const finishAction = beginAction(target, pendingLabel);

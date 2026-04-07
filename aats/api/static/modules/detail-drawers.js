@@ -29,22 +29,21 @@ import {
 } from "./terms.js";
 import {
   decisionDrawerRows,
+  executionSuggestionLabel,
   fillFeeText,
   fillDrawerRows,
   fillSceneSummary,
   orderDrawerRows,
   orderSceneSummary,
 } from "./trade-display.js";
-import { reconciliationActionCopy, renderReconciliationControls } from "./views/risk-view.js";
+// #5 修复：reconciliationActionCopy / renderReconciliationControls 原本定义在
+// modules/views/risk-view.js 里，detail-drawers 反向 import 过来导致依赖方向
+// 倒挂（drawer 是底层 helper，反而依赖 view 模块）。已抽到
+// modules/reconciliation-controls.js，risk-view 和这里都从该模块 import。
+import { reconciliationActionCopy, renderReconciliationControls } from "./reconciliation-controls.js";
 
-const EXECUTION_SUGGESTION_LABELS = {
-  passive_bias: "被动倾向",
-  maker_taker_bias: "主被动偏向",
-  slice_count: "拆单数",
-  max_participation_rate: "最大参与率",
-  max_cross_spread_bps: "最大跨价差",
-  cancel_replace_patience_ms: "撤改单等待",
-};
+// #32 修复：本地 EXECUTION_SUGGESTION_LABELS 已删除，改为从 trade-display.js import
+// 统一的 executionSuggestionLabel()。
 
 export function buildDecisionDrawer(detail) {
   const aiEconomic = detail.ai_economic_actionability || null;
@@ -368,6 +367,11 @@ function decisionHedgeModeRows(hedgeModeAudit) {
   ];
 }
 
+// #39 修复：drawer 一格 kv 横向预算大约能塞 2 条"长行"或 3 条"短行"。
+// 短行 = "侧别+模式+动作"，长行 = "目标 X / Δ Y / 原因 Z"。
+const OVERLAY_AUDIT_PREVIEW_SHORT = 3;
+const OVERLAY_AUDIT_PREVIEW_LONG = 2;
+
 function decisionOverlayAuditRows(overlay) {
   const items = Array.isArray(overlay?.items) ? overlay.items : [];
   const parentSignalSummary = readableOverlayParentSignalSummary(overlay, "");
@@ -392,17 +396,22 @@ function decisionOverlayAuditRows(overlay) {
       parentSignalSummary || "当前没有额外父腿信号说明",
       drawerText(localizeError(overlay?.signal_source), "当前没有额外来源说明"),
     ],
+    // #39 修复：原本两行 slice 一行写 (0, 3)、一行写 (0, 2)，没有解释。两个
+    // 字段渲染的是同一组 overlay 腿，截断到不同长度只有一个原因——第二行的
+    // "目标 X / Δ Y / 原因 Z"明显比第一行的"侧别+模式+动作"长，drawer kvList
+    // 一格的横向预算大概只够塞 2 条这种长行，第一行更紧凑可以多塞 1 条。
+    // 这里把这个 trade-off 写成共享常量，避免读者以为是手抖打错。
     [
       "腿来源与动作",
       items.length
         ? items
-          .slice(0, 3)
+          .slice(0, OVERLAY_AUDIT_PREVIEW_SHORT)
           .map((item) => `${drawerText(item.pos_side)} ${drawerText(localizeError(item.execution_mode), drawerText(item.execution_mode))} ${drawerText(item.action)}`)
           .join(" / ")
         : "当前没有 overlay 腿明细",
       items.length
         ? items
-          .slice(0, 2)
+          .slice(0, OVERLAY_AUDIT_PREVIEW_LONG)
           .map((item) => `目标 ${drawerText(item.target_position_qty, "0")} / Δ ${drawerText(item.delta_position_qty, "0")} / 原因 ${drawerListText((item.trigger_reason_codes || []).map(localizeError), "当前没有触发原因")}`)
           .join(" / ")
         : "当前没有额外腿级触发说明",
@@ -585,10 +594,7 @@ function suggestionSummaryText(value) {
     .join(" / ");
 }
 
-function executionSuggestionLabel(key) {
-  const normalized = String(key || "").trim();
-  return EXECUTION_SUGGESTION_LABELS[normalized] || normalized;
-}
+// #32 修复：本地 executionSuggestionLabel 已删除，改为 import 自 trade-display.js。
 
 function translationPreviewSummaryText(value) {
   const orderType = value?.order_type;
@@ -602,8 +608,21 @@ function translationPreviewSummaryText(value) {
   return `${styleText} / ${typeText} / ${offsetText}`;
 }
 
+// #40 修复：原本 hasLiveField 写成
+//   value?.live_order_type || value?.live_time_in_force
+//     || value?.live_limit_price !== null && value?.live_limit_price !== undefined
+// 这条表达式语义上正确（!== 优先级高于 && 高于 ||），但读到第三段时人脑很容
+// 易把它误解析成 (... || (live_limit_price !== null)) && (live_limit_price !== undefined)，
+// 实际上 JS 真正执行的是 ... || ((live_limit_price !== null) && (live_limit_price !== undefined))。
+// 这里把限价的"!== null && !== undefined"显式括起来，并把整条断成多行，每段
+// 含义独立可读。
 function liveExecutionSummaryText(value) {
-  const hasLiveField = value?.live_order_type || value?.live_time_in_force || value?.live_limit_price !== null && value?.live_limit_price !== undefined;
+  const hasLiveLimitPrice = value?.live_limit_price !== null && value?.live_limit_price !== undefined;
+  const hasLiveField = Boolean(
+    value?.live_order_type
+    || value?.live_time_in_force
+    || hasLiveLimitPrice
+  );
   if (!hasLiveField) return "当前没有新的实盘下探字段";
   return `订单类型 ${drawerText(value.live_order_type, "待确认")} / 时效 ${drawerText(value.live_time_in_force, "待确认")} / 限价 ${formatNumber(value.live_limit_price ?? 0, 2)}`;
 }

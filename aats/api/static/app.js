@@ -1,14 +1,39 @@
-﻿import { fetchPanels, requestJson } from "./modules/api-client.js";
+﻿// #1 修复：api-client.js 原本被 import 了两次（fetchPanels/requestJson 一行，
+// fetchDashboardBundle 另一行），中间还夹着 admin-actions，显然是陆续加新功能时
+// 在头部追加的，没有人回头合并。这里按"同模块合并 + 分组注释"整理一次：
+// 1) 底层传输层（api-client / formatters / terms）
+// 2) 领域操作（actions/*、dashboard-refresh）
+// 3) 应用层（flash、store、navigation-state、shell-renderer）
+// 4) 视图模块（views/*）
+// 后续要加 import 时按分组追加，不要再像以前那样散着放。
+
+// --- 底层传输 / 通用 helper ---
+import { fetchDashboardBundle, fetchPanels, requestJson } from "./modules/api-client.js";
+import { listOrDash } from "./modules/formatters.js";
+import {
+  localizeError,
+  operationalStatusCopy,
+  readableState,
+} from "./modules/terms.js";
+
+// --- 领域 action handler ---
 import { createAdminActions } from "./modules/actions/admin-actions.js";
-import { fetchDashboardBundle } from "./modules/api-client.js";
 import { createExecutionActionHandlers } from "./modules/actions/execution-actions.js";
 import { createRiskActionHandlers } from "./modules/actions/risk-actions.js";
+
+// --- 应用层（流程 / 状态 / 渲染壳） ---
 import { createDashboardRefreshController } from "./modules/dashboard-refresh.js";
+import { buildDecisionDrawer } from "./modules/detail-drawers.js";
+import { runDevSelfChecks } from "./modules/dev-self-check.js";
 import { ensureNotBusy, setFlash } from "./modules/flash.js";
 import {
-  listOrDash,
-} from "./modules/formatters.js";
-import { buildDecisionDrawer } from "./modules/detail-drawers.js";
+  EXIT_EXECUTION_HISTORY_ACTION_FILTERS,
+  EXIT_EXECUTION_HISTORY_WINDOW_FILTERS,
+  coerceReplayParentFilter,
+  createNavigationStateController,
+  exitExecutionHistoryWindowThresholdMs,
+  normalizeExitExecutionHistoryFilterValue,
+} from "./modules/navigation-state.js";
 import { createDashboardShellRenderer } from "./modules/shell-renderer.js";
 import {
   DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS,
@@ -20,23 +45,12 @@ import {
   invalidateCachedViews,
 } from "./modules/store.js";
 import {
-  localizeError,
-  operationalStatusCopy,
-  readableState,
-} from "./modules/terms.js";
-import {
-  EXIT_EXECUTION_HISTORY_ACTION_FILTERS,
-  EXIT_EXECUTION_HISTORY_WINDOW_FILTERS,
-  coerceReplayParentFilter,
-  createNavigationStateController,
-  exitExecutionHistoryWindowThresholdMs,
-  normalizeExitExecutionHistoryFilterValue,
-} from "./modules/navigation-state.js";
-import {
   VIEW_LABELS,
   resolveKnownView,
   resolveViewFromLocation,
 } from "./modules/view-router.js";
+
+// --- 视图模块 ---
 import { renderAIAnalysisView } from "./modules/views/ai-analysis-view.js";
 import { renderAIConfigView } from "./modules/views/ai-config-view.js";
 import { renderAdminView } from "./modules/views/admin-view.js";
@@ -286,10 +300,16 @@ function bindEvents() {
     void dispatchAction(action, value, target);
   });
 
+  // #41 修复：原本这里写 form.id === "operatorCreateForm"，是整个前端唯一一处
+  // 用 DOM id 做事件路由的入口。改成读 form.dataset.action（管理表单已经在
+  // admin-view.js 里写成 <form data-action="submit-create-operator">），和其它
+  // 按钮 / 表单的分发约定保持一致；未来再加一个 admin 表单，只要新增一个
+  // case 即可，不再需要 DOM id 字符串匹配。
   document.addEventListener("submit", (event) => {
     const form = event.target;
     if (!(form instanceof HTMLFormElement)) return;
-    if (form.id === "operatorCreateForm") {
+    const formAction = form.dataset?.action || "";
+    if (formAction === "submit-create-operator") {
       event.preventDefault();
       void adminActions.createOperatorUser();
     }
@@ -489,15 +509,29 @@ async function runDangerousAction({ path, body, successMessage, confirmMessage, 
 }
 
 
-// Local in-flight latch instead of going through ensureNotBusy(): logout does
-// NOT call beginAction (it never wants to flip the global actionInFlight
-// because it's about to navigate away), so the shared actionInFlight guard
-// would never see it and a fast double-click would happily fire two POST
-// /auth/logout requests. The logoutButton is also intentionally kept
-// clickable in shell-renderer.js even while another action is in flight, so
-// we have to defend at this layer. The success path leaves logoutInFlight at
-// true on purpose — the page is about to be replaced by /login anyway and
-// we don't want a slow location.assign to allow another click in the gap.
+// #4 修复：原本这里用一个本地的 logoutInFlight 作为互斥锁，旁边配了一大段
+// 英文注释，但没讲清楚：
+//   1) 为什么不走常规的 ensureNotBusy() / beginAction() 路线；
+//   2) 成功路径为什么故意把锁留在 true 而不是放开；
+//   3) 为什么 shell-renderer 要刻意让 logoutButton 在其他动作忙时也可点。
+// 现在把这三点补齐（并翻译成项目约定的中文）。未来再有人动这段要很确信：
+// 这是一个"有意设计的单向锁"，不是 ensureNotBusy 的漏写。
+//
+// ── 为什么不走 ensureNotBusy/beginAction：
+// beginAction 会置位全局 state.actionInFlight，阻止其他按钮点击直到 finishAction。
+// 但登出就是要立刻跳走页面，没有 finishAction 这一步：如果成功路径不调 finishAction，
+// 全局锁就永远挂住；如果调，又破坏了我们想要的"锁死按钮到跳页为止"语义。
+// 所以用一个完全本地的 latch 替代。
+//
+// ── 为什么 logoutButton 在忙时还要可点：
+// shell-renderer.js 的 refreshButtonStates 明确跳过了 logoutButton，让它永远启用。
+// 理由：用户若在一个长轮询/慢请求里点错了按钮想登出，不能因为上一个动作还没回来
+// 就锁死登出入口——登出本身就是一种"放弃当前 pending 动作"的兜底。
+//
+// ── 为什么成功路径不重置 latch：
+// location.assign("/login") 并不是立刻跳转，浏览器可能慢上数百毫秒。如果在此期间
+// 把 latch 清零，用户连点两次就能发两次 POST /auth/logout，第二次会带着已经失效
+// 的 session cookie 命中 401 处理分支。故意留 true 直到页面被替换为止。
 let logoutInFlight = false;
 
 async function logoutOperator() {
@@ -509,59 +543,86 @@ async function logoutOperator() {
   } catch (error) {
     setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
-    // Failure path: clear the latch so the user can retry. Success path
-    // intentionally leaves it at true (see comment above).
+    // 失败路径必须放开 latch，否则用户点一次失败以后就再也登不出了。只有成功
+    // 路径才刻意保留 latch（见上方说明）。
     logoutInFlight = false;
   }
 }
 
-async function dispatchAction(action, value, target = null) {
-  if (action === "refresh-dashboard") return refreshDashboard({ manual: true });
-  if (action === "navigate-view") {
-    const nextView = resolveKnownView(value);
-    if (state.activeView === nextView) {
-      // NB: this flash path is intentionally DIFFERENT from the top nav link
-      // click handler (which silently calls setActiveView on same-view). Nav
-      // links are visually obvious as navigation controls, so users don't
-      // need feedback when clicking them. This dispatchAction path, on the
-      // other hand, is triggered from in-card "jump to X" buttons where the
-      // user expects a visible navigation; when the target happens to be the
-      // current view we owe them an explicit "why did nothing visually move"
-      // explanation. Keep the flash + scroll + manual refresh combo.
-      //
-      // Tense note: this flash now lives across the entire ~8s sticky-flash
-      // TTL (see shell-renderer.js renderBanners), so the message must still
-      // make sense AFTER refreshDashboard finishes. Past-tense / completed
-      // phrasing is the safest choice. The `&& !state.flash` guard inside
-      // refreshDashboard prevents the generic "页面数据已刷新" notice from
-      // clobbering this more specific message at end of refresh.
-      setFlash(state, "info", `当前已在${VIEW_LABELS[nextView] || "当前页面"}，已为你重新拉取最新数据。`);
-      window.scrollTo({ top: 0, behavior: "smooth" });
-      return refreshDashboard({ manual: true });
-    }
-    return setActiveView(nextView, { pushHistory: true });
+// #3 修复：原本 dispatchAction 是一长串 if-return，末尾 domainHandler 找不到时
+// 直接 fallthrough 到函数末尾，默认 return undefined，没有任何提示。一旦某个
+// view 模板里的 data-action 拼错（例如 "collapse-ai-shadwo-decisions"），按钮
+// 点了不会报错也不会动，只能靠盲测发现。这里做两件事：
+//   1) 把本地 action 映射集中到一个 dispatch table，末尾再 fallback 到
+//      risk/execution/admin 三个领域 handler 表；
+//   2) 所有表都查不到时打一条 console.warn，把 action 名、value、target 一起
+//      记下来，方便在 devtools 里直接定位是哪个按钮拼错了。
+const LOCAL_DISPATCH_ACTIONS = {
+  "refresh-dashboard": () => refreshDashboard({ manual: true }),
+  "navigate-view": (value) => navigateToView(value),
+  "inspect-decision": (value) => inspectDecision(value),
+  "select-ai-operating-mode": (value, target) => selectAIOperatingMode(value, target),
+  "manual-activate-strategy-profile": (value, target) => activateStrategyProfile(value, target),
+  "restore-strategy-profile-auto": (_value, target) => restoreStrategyProfileAutomaticControl(target),
+  "pause-strategy-profile-auto": (_value, target) => pauseStrategyProfileAutomaticControl(target),
+  "set-profile-control-mode": (value, target) => setStrategyProfileControlMode(value, target),
+  "load-more-decisions": () => adjustPageLimit("recentDecisions", PAGE_LOAD_STEP),
+  "collapse-decisions": () => resetPageLimit("recentDecisions"),
+  "load-more-ai-assessments": () => adjustPageLimit("recentAIAssessments", PAGE_LOAD_STEP),
+  "collapse-ai-assessments": () => resetPageLimit("recentAIAssessments"),
+  "load-more-ai-shadow-decisions": () => adjustPageLimit("recentAIShadowDecisions", PAGE_LOAD_STEP),
+  "collapse-ai-shadow-decisions": () => resetPageLimit("recentAIShadowDecisions"),
+  "load-more-ai-shadow-evaluations": () => adjustPageLimit("recentAIShadowEvaluations", PAGE_LOAD_STEP),
+  "collapse-ai-shadow-evaluations": () => resetPageLimit("recentAIShadowEvaluations"),
+  "load-more-replay-validations": () => adjustPageLimit("recentReplayValidations", PAGE_LOAD_STEP),
+  "collapse-replay-validations": () => resetPageLimit("recentReplayValidations"),
+  "set-replay-parent-filter": (value) => setReplayParentFilter(value),
+};
+
+function navigateToView(value) {
+  const nextView = resolveKnownView(value);
+  if (state.activeView === nextView) {
+    // NB: this flash path is intentionally DIFFERENT from the top nav link
+    // click handler (which silently calls setActiveView on same-view). Nav
+    // links are visually obvious as navigation controls, so users don't
+    // need feedback when clicking them. This dispatchAction path, on the
+    // other hand, is triggered from in-card "jump to X" buttons where the
+    // user expects a visible navigation; when the target happens to be the
+    // current view we owe them an explicit "why did nothing visually move"
+    // explanation. Keep the flash + scroll + manual refresh combo.
+    //
+    // Tense note: this flash now lives across the entire ~8s sticky-flash
+    // TTL (see shell-renderer.js renderBanners), so the message must still
+    // make sense AFTER refreshDashboard finishes. Past-tense / completed
+    // phrasing is the safest choice. The `&& !state.flash` guard inside
+    // refreshDashboard prevents the generic "页面数据已刷新" notice from
+    // clobbering this more specific message at end of refresh.
+    setFlash(state, "info", `当前已在${VIEW_LABELS[nextView] || "当前页面"}，已为你重新拉取最新数据。`);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    return refreshDashboard({ manual: true });
   }
-  if (action === "inspect-decision") return inspectDecision(value);
-  if (action === "select-ai-operating-mode") return selectAIOperatingMode(value, target);
-  if (action === "manual-activate-strategy-profile") return activateStrategyProfile(value, target);
-  if (action === "restore-strategy-profile-auto") return restoreStrategyProfileAutomaticControl(target);
-  if (action === "pause-strategy-profile-auto") return pauseStrategyProfileAutomaticControl(target);
-  if (action === "set-profile-control-mode") return setStrategyProfileControlMode(value, target);
-  if (action === "load-more-decisions") return adjustPageLimit("recentDecisions", PAGE_LOAD_STEP);
-  if (action === "collapse-decisions") return resetPageLimit("recentDecisions");
-  if (action === "load-more-ai-assessments") return adjustPageLimit("recentAIAssessments", PAGE_LOAD_STEP);
-  if (action === "collapse-ai-assessments") return resetPageLimit("recentAIAssessments");
-  if (action === "load-more-ai-shadow-decisions") return adjustPageLimit("recentAIShadowDecisions", PAGE_LOAD_STEP);
-  if (action === "collapse-ai-shadow-decisions") return resetPageLimit("recentAIShadowDecisions");
-  if (action === "load-more-ai-shadow-evaluations") return adjustPageLimit("recentAIShadowEvaluations", PAGE_LOAD_STEP);
-  if (action === "collapse-ai-shadow-evaluations") return resetPageLimit("recentAIShadowEvaluations");
-  if (action === "load-more-replay-validations") return adjustPageLimit("recentReplayValidations", PAGE_LOAD_STEP);
-  if (action === "collapse-replay-validations") return resetPageLimit("recentReplayValidations");
-  if (action === "set-replay-parent-filter") return setReplayParentFilter(value);
+  return setActiveView(nextView, { pushHistory: true });
+}
+
+async function dispatchAction(action, value, target = null) {
+  const localHandler = LOCAL_DISPATCH_ACTIONS[action];
+  if (localHandler) {
+    return localHandler(value, target);
+  }
   const domainHandler = riskActionHandlers[action] || executionActionHandlers[action] || adminActionHandlers[action];
   if (domainHandler) {
     return domainHandler(value, target);
   }
+  // 查不到任何 handler = data-action 很可能是拼错了或者新模板忘记注册。
+  // 与其静默返回，不如明确打一条警告方便排查。生产环境只打 console（避免给
+  // 终端用户看到调试信号），dev 环境下额外触发一条可视 banner，让开发者第
+  // 一时间注意到 typo 而不是要去翻 devtools。dev mode 判定见 isDebugMode()。
+  console.warn("[dispatchAction] unknown action", { action, value, target });
+  if (isDebugMode()) {
+    setFlash(state, "warning", `[dev] 未注册的 data-action：${action}（请检查模板拼写或 dispatch 表注册）。`);
+    renderBanners();
+  }
+  return undefined;
 }
 
 async function inspectDecision(decisionId) {
@@ -745,6 +806,11 @@ async function activateStrategyProfile(profileId, target = null) {
   //   3. Cancelling never flips actionInFlight / cancels the scheduled
   //      refresh / triggers the pending-style indicator just to undo it.
   // This matches the order used by admin-actions.js handlers.
+  //
+  // 完整的契约规范（含三种竞态场景的可观测后果）见
+  // modules/actions/risk-actions.js::confirmResume 的 #28 修复注释。本处的
+  // 三行 bullet 是它的精简引用——任何实现细节有疑问时请去那边读完整版，
+  // 不要在两边各写一份，避免漂移。
   if (!window.confirm(`确认立即切换到“${profileLabel}”这个已注册策略档位吗？`)) return;
   if (!ensureNotBusy(state, renderBanners)) return;
   const finishAction = beginAction(target, "正在切换策略档位…");
@@ -987,5 +1053,66 @@ function closeDrawer() {
   nodes.drawerBackdrop.hidden = true;
 }
 
-window.refreshDashboard = refreshDashboard;
+// #2 修复：原本无条件挂 `window.refreshDashboard = refreshDashboard`，相当于一个全局调试
+// 后门——任意脚本、第三方注入、甚至用户在 DevTools 里敲一行都能绕过刷新节流。生产环境
+// 应该只在显式开启调试标志时才暴露这个入口。这里用三重条件：
+//   1. URL 含 `?debug=1` —— 开发/排障时临时启用；
+//   2. localStorage 里手动写 `aats-debug=1` —— 开发者的持久化偏好；
+//   3. 宿主域名是本地/回环 —— 开发环境缺省开启。
+// 任一条件成立才挂载；生产部署下默认不暴露，也可以通过切换 localStorage flag 临时启用。
+//
+// 抽出 isDebugMode() 是因为同一组判定也被 dispatchAction 的"unknown action"分支
+// 复用：dev 环境下不仅打 console.warn，还会触发一条 banner 提示，让 typo 的
+// data-action 名第一时间被开发者注意到（生产环境保持静默以免泄露调试信号）。
+function isDebugMode() {
+  try {
+    const params = new URLSearchParams(window.location.search || "");
+    if (params.get("debug") === "1") return true;
+    try {
+      if (window.localStorage?.getItem("aats-debug") === "1") return true;
+    } catch (storageError) {
+      // localStorage 在某些隐私模式下会抛，不能视为致命。
+      // eslint-disable-next-line no-console
+      console.warn("[app] 读取 aats-debug localStorage 失败", storageError);
+    }
+    const host = window.location.hostname || "";
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host.endsWith(".local");
+  } catch (error) {
+    // 任何意外都按"非 debug"处理，避免 dev-only 路径误开。
+    // eslint-disable-next-line no-console
+    console.warn("[app] isDebugMode 判定失败", error);
+    return false;
+  }
+}
+
+(function installDebugHandle() {
+  try {
+    if (isDebugMode()) {
+      window.refreshDashboard = refreshDashboard;
+      // eslint-disable-next-line no-console
+      console.info("[app] 调试入口 window.refreshDashboard 已挂载（仅在 debug 模式下可用）。");
+      // dev mode 下顺便跑一次"production-safe 断言"，锁住 #21 / #22 这种
+      // "看起来像 dead code 但其实是有意保留的 kludge"。生产环境完全跳过。
+      // 任何失败既会进 console.error，也会触发一条 banner（不会阻塞渲染）。
+      try {
+        const result = runDevSelfChecks();
+        if (result.failed > 0 && result.firstFailureMessage) {
+          setFlash(state, "warning", `[dev] self-check 有 ${result.failed} 条断言失败：${result.firstFailureMessage}`);
+          // 这个 IIFE 在 init() 之前求值，state 可能还没渲染过 banner——
+          // 但 banner 是 sticky-flash 协议的一部分，下一次 renderBanners()
+          // 会自然带上这条警告，无需在这里强行同步触发渲染。
+        }
+      } catch (selfCheckError) {
+        // self-check 自身的 bug 不能阻塞 app 启动。
+        // eslint-disable-next-line no-console
+        console.warn("[app] dev self-check 跑炸了", selfCheckError);
+      }
+    }
+  } catch (error) {
+    // 挂调试入口失败不应阻塞主流程。
+    // eslint-disable-next-line no-console
+    console.warn("[app] 安装调试入口失败", error);
+  }
+})();
+
 

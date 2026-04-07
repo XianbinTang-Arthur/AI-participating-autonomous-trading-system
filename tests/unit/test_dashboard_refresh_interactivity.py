@@ -10,11 +10,16 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _run_node_module_script(script: str) -> subprocess.CompletedProcess[str]:
+    # Explicit encoding="utf-8" is REQUIRED — Node.js writes UTF-8 to stdout
+    # but text=True alone defaults to the system locale (GBK on Chinese
+    # Windows), which crashes on UTF-8 Chinese bytes the moment a test
+    # script echoes any localized string.
     return subprocess.run(
         ["node", "--input-type=module", "-e", script],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 
@@ -279,6 +284,273 @@ console.log(JSON.stringify(snapshots));
             labelled["after-deferred-resolves"]["refreshPhase"],
             "idle",
         )
+
+    def test_render_shell_locks_buttons_outside_data_panel_key_during_primary_phase(self) -> None:
+        """Regression: buttons in cards WITHOUT data-panel-key must also lock
+        during the PRIMARY refresh phase.
+
+        The user-visible bug was: only ~14 of ~86 surface cards across the
+        workspace views set a panelKey, and the open detail drawer never sets
+        one at all. The first-attempt fix (mark primary panels pending in
+        pendingPanels) therefore only locked buttons inside those ~14 cards,
+        leaving the other ~72 cards + the drawer clickable during refresh —
+        exactly what the user reported when they said 卡片在刷新 但是按钮还是
+        可以点击.
+
+        The final fix is at the shell-renderer level: syncRefreshInteractivity
+        passes refreshing = (viewIsLoading || isPrimaryRefreshing), which
+        locks EVERY button inside the active view section + open drawer
+        whenever state.refreshPhase === REFRESH_PHASE_PRIMARY — regardless of
+        whether the button's enclosing card has a data-panel-key attribute.
+
+        This test drives a real createDashboardShellRenderer with a minimal
+        DOM shim and verifies:
+          1. At rest (refreshPhase = idle): the button is NOT locked.
+          2. Primary phase (refreshPhase = primary): the button IS locked
+             even though it has NO data-panel-key ancestor.
+          3. Deferred phase (refreshPhase = deferred): the button is NOT
+             locked — deferred is a background fill-in and must not block
+             the view-wide interaction.
+          4. Back to idle: the button is restored.
+        """
+        script = r"""
+import { createDashboardShellRenderer } from './aats/api/static/modules/shell-renderer.js';
+import {
+  createState,
+  REFRESH_PHASE_DEFERRED,
+  REFRESH_PHASE_IDLE,
+  REFRESH_PHASE_PRIMARY,
+} from './aats/api/static/modules/store.js';
+
+globalThis.document = {
+  title: '',
+  visibilityState: 'visible',
+};
+globalThis.window = {
+  setTimeout: () => null,
+  clearTimeout: () => null,
+};
+globalThis.Date = Date;
+
+// --- Minimal DOM shims -------------------------------------------------
+function createClassList(initial = '') {
+  const classes = new Set(
+    String(initial).split(/\s+/).filter(Boolean),
+  );
+  return {
+    _classes: classes,
+    add(name) { classes.add(name); },
+    remove(name) { classes.delete(name); },
+    toggle(name, force) {
+      const should = force === undefined ? !classes.has(name) : Boolean(force);
+      if (should) classes.add(name);
+      else classes.delete(name);
+    },
+    contains(name) { return classes.has(name); },
+    toString() { return Array.from(classes).join(' '); },
+  };
+}
+
+// Button that is NOT wrapped in a [data-panel-key] card. closest() returns
+// null for [data-panel-key] but returns the button itself for 'button'.
+function createBareButton(label) {
+  const attrs = new Map();
+  return {
+    _label: label,
+    disabled: false,
+    dataset: {},
+    classList: createClassList(),
+    getAttribute(name) { return attrs.has(name) ? attrs.get(name) : null; },
+    setAttribute(name, value) { attrs.set(name, String(value)); },
+    removeAttribute(name) { attrs.delete(name); },
+    hasAttribute(name) { return attrs.has(name); },
+    closest(selector) {
+      // The critical property: this button is NOT inside any
+      // [data-panel-key] card. That's the whole point of the regression.
+      if (selector === '[data-panel-key]') return null;
+      return null;
+    },
+  };
+}
+
+const loneButton = createBareButton('查看影子详情');
+
+// Fake view section. querySelectorAll('button') → [loneButton];
+// querySelectorAll('[data-panel-key]') → [] (no panel-key cards at all).
+function createViewSection(viewName, buttons) {
+  return {
+    dataset: { view: viewName },
+    classList: createClassList(),
+    querySelectorAll(selector) {
+      if (selector === 'button') return buttons;
+      if (selector === '[data-panel-key]') return [];
+      return [];
+    },
+  };
+}
+
+const homeSection = createViewSection('home', [loneButton]);
+const viewSections = [homeSection];
+const viewLinks = [
+  { dataset: { view: 'home' }, classList: createClassList() },
+];
+
+// Minimal nodes map. Most shell-renderer helpers are null-safe, so nulls
+// are fine for things we don't care about in this test.
+const nodes = {
+  pageEyebrow: null,
+  pageHeading: null,
+  pageCopy: null,
+  pageHead: null,
+  sessionIdentityValue: null,
+  sessionRoleValue: null,
+  authStateChip: null,
+  statusRibbon: null,
+  bannerContainer: null,
+  homeContent: null,
+  overviewContent: null,
+  strategyContent: null,
+  executionContent: null,
+  riskContent: null,
+  exitExecutionContent: null,
+  replayContent: null,
+  aiAnalysisContent: null,
+  aiConfigContent: null,
+  adminContent: null,
+  resumeButton: null,
+  haltButton: null,
+  refreshButton: null,
+  logoutButton: null,
+  actionPermissionHint: null,
+  refreshStateChip: null,
+  lastRefreshLabel: null,
+  detailDrawer: null,
+};
+
+const state = createState();
+state.activeView = 'home';
+
+const renderer = createDashboardShellRenderer({
+  state,
+  nodes,
+  viewLinks,
+  viewSections,
+  renderActiveView: () => {},
+  shouldRenderLoadingState: () => false,
+  isBackgroundRefreshingView: () => false,
+  isBootstrapping: () => false,
+  hasResolvedPanel: () => true,
+  hasResolvedAuthContext: () => true,
+  operatorCanWrite: () => true,
+  controlPermissionMessage: () => '',
+  resumeActionAvailable: () => false,
+  resumeActionHintText: () => '',
+  syncExitExecutionNavigationLinks: () => {},
+  localizedRecoveryReasons: () => '',
+  isPausedAwaitingResume: () => false,
+});
+
+function snapshot(label) {
+  return {
+    label,
+    disabled: loneButton.disabled === true,
+    hasLockedClass: loneButton.classList.contains('is-refresh-locked'),
+    title: loneButton.getAttribute('title'),
+  };
+}
+
+const snapshots = [];
+
+// 1. At rest: refreshPhase = idle → button NOT locked.
+state.refreshPhase = REFRESH_PHASE_IDLE;
+renderer.renderShell();
+snapshots.push(snapshot('idle-initial'));
+
+// 2. Primary phase: refreshPhase = primary → button IS locked, even
+//    though it has no [data-panel-key] ancestor.
+state.refreshPhase = REFRESH_PHASE_PRIMARY;
+renderer.renderShell();
+snapshots.push(snapshot('primary-phase'));
+
+// 3. Deferred phase: refreshPhase = deferred → button NOT locked (deferred
+//    is a background fill-in, the user must be able to interact with cards
+//    whose primary data already landed).
+state.refreshPhase = REFRESH_PHASE_DEFERRED;
+renderer.renderShell();
+snapshots.push(snapshot('deferred-phase'));
+
+// 4. Back to idle: button fully restored.
+state.refreshPhase = REFRESH_PHASE_IDLE;
+renderer.renderShell();
+snapshots.push(snapshot('idle-final'));
+
+console.log(JSON.stringify(snapshots));
+"""
+        result = _run_node_module_script(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        snapshots = json.loads(result.stdout.strip().splitlines()[-1])
+        labelled = {snap["label"]: snap for snap in snapshots}
+
+        # 1. Idle: button is interactive.
+        self.assertFalse(
+            labelled["idle-initial"]["disabled"],
+            msg="button should be interactive before any refresh starts",
+        )
+        self.assertFalse(
+            labelled["idle-initial"]["hasLockedClass"],
+            msg="is-refresh-locked class should not be present at rest",
+        )
+
+        # 2. PRIMARY phase: button MUST be locked even though it has no
+        #    [data-panel-key] ancestor. This is the regression that the
+        #    user reported: 卡片在刷新 但是按钮还是可以点击. The view-level
+        #    lock in syncRefreshInteractivity is what prevents that.
+        self.assertTrue(
+            labelled["primary-phase"]["disabled"],
+            msg=(
+                "button OUTSIDE [data-panel-key] must be locked while "
+                "refreshPhase === REFRESH_PHASE_PRIMARY. If this fails, the "
+                "view-wide lock in shell-renderer.syncRefreshInteractivity "
+                "has regressed and buttons in the ~72 cards without "
+                "panelKey + the open drawer will stay clickable during "
+                "refresh."
+            ),
+        )
+        self.assertTrue(
+            labelled["primary-phase"]["hasLockedClass"],
+            msg="is-refresh-locked class must be applied during PRIMARY phase",
+        )
+        self.assertEqual(
+            labelled["primary-phase"]["title"],
+            "当前区域正在刷新，请等待刷新完成后再操作。",
+            msg=(
+                "PRIMARY-phase lock reason should be the view-level reason, "
+                "not the per-panel reason, because the button isn't inside "
+                "a [data-panel-key] card."
+            ),
+        )
+
+        # 3. DEFERRED phase: the view-wide lock must NOT apply. Deferred is a
+        #    background fill-in; locking the whole view for it would mean
+        #    every 30s auto-refresh tick leaves the user unable to interact
+        #    with cards whose data already landed during the primary phase.
+        self.assertFalse(
+            labelled["deferred-phase"]["disabled"],
+            msg=(
+                "button must NOT be locked during DEFERRED phase — that "
+                "phase is a background fill-in for late-landing panels and "
+                "locking the whole view would break the interactive"
+                "contract for the cards whose primary data already landed."
+            ),
+        )
+        self.assertFalse(
+            labelled["deferred-phase"]["hasLockedClass"],
+            msg="is-refresh-locked class should not linger in DEFERRED phase",
+        )
+
+        # 4. Back to idle: button restored and locked class cleared.
+        self.assertFalse(labelled["idle-final"]["disabled"])
+        self.assertFalse(labelled["idle-final"]["hasLockedClass"])
 
 
 if __name__ == "__main__":

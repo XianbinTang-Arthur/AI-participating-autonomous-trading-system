@@ -1,8 +1,37 @@
-﻿import { actionButton, pill, primaryStatusPanel, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
-import { kvList } from "../components.js";
+﻿// #10 / #44 修复：原本 ../components.js 被 import 了两行——一行包含
+// actionButton/pill/primaryStatusPanel/responsiveTable/summaryStrip/surfaceCard，
+// 另一行孤零零地单独 import kvList。这是陆续加新组件时没有回头合并留下的。
+// 合到同一个 import 里；新增 components 依赖时请直接加到这一行。
+import {
+  actionButton,
+  kvList,
+  pill,
+  primaryStatusPanel,
+  responsiveTable,
+  summaryStrip,
+  surfaceCard,
+} from "../components.js";
 import { localizeList, textOrFallback } from "../copy.js";
+// #36 修复：exit-execution 工作台 helper 已集中到 ../exit-execution-helpers.js，
+// 本文件保留的 review-only 函数（renderExitExecutionReviewList 等）会向它借
+// exitExecutionLatestActionLabel/Status 和 mergedExitExecutionReviewItems。
+import {
+  exitExecutionLatestActionLabel,
+  exitExecutionLatestActionStatus,
+  mergedExitExecutionReviewItems,
+  normalizedExitExecutionHistoryFilters,
+  renderExitExecutionActionHistoryList,
+  renderExitExecutionWorkspace,
+} from "../exit-execution-helpers.js";
 import { booleanWord, escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import { overlayParentPostmortemRows, renderOverlayParentHistoryTable } from "../overlay-parent-renderers.js";
+// #5 修复：下列 helper 原本直接写在本文件里，detail-drawers.js 反向 import 过来
+// 造成依赖倒挂。已提到 ../reconciliation-controls.js，两边共享。
+import {
+  reconciliationActionCopy,
+  renderReconciliationControls,
+  shouldShowInspectReconciliation,
+} from "../reconciliation-controls.js";
 import {
   localizeError,
   operationalStatusCopy,
@@ -106,7 +135,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
           value: recoveryStatusLabel(recovery),
           meta: recovery.halted && recovery.resume_eligible
             ? "系统已手动暂停，确认无误后可直接恢复自动运行。"
-            : primaryTask?.summary || blockerControl.next_step_summary || uiHints.recoveryReasonsText || listText(recovery.resume_blocked_reasons, "当前没有额外恢复说明"),
+            : primaryTask?.summary || blockerControl.next_step_summary || uiHints.recoveryReasonsText || localizeList(recovery.resume_blocked_reasons, "当前没有额外恢复说明"),
           tone: recovery.safe_to_trade ? "positive" : recovery.resume_eligible ? "warning" : recovery.review_required ? "warning" : "danger",
         },
         {
@@ -143,7 +172,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
         {
           label: "恢复资格",
           value: booleanWord(recovery.resume_eligible),
-          meta: uiHints.recoveryReasonsText || listText(recovery.resume_blocked_reasons, "当前没有额外恢复限制说明"),
+          meta: uiHints.recoveryReasonsText || localizeList(recovery.resume_blocked_reasons, "当前没有额外恢复限制说明"),
           tone: recovery.resume_eligible ? "positive" : "warning",
         },
       ]),
@@ -494,7 +523,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
         { label: "拒单数", value: formatNumber(metrics.rejection_count, 0), meta: "偏高时要检查门禁和执行条件", tone: Number(metrics.rejection_count || 0) > 0 ? "warning" : "positive" },
         { label: "活动委托数", value: formatNumber(metrics.current_open_order_count, 0), meta: "需要和阻断项、保留额度一起看", tone: Number(metrics.current_open_order_count || 0) > 0 ? "warning" : "positive" },
         { label: "累计异常对账", value: formatNumber(metrics.reconciliation_mismatch_count, 0), meta: "累计出现过的非一致对账次数，不等于当前待处理数量", tone: Number(metrics.reconciliation_mismatch_count || 0) > 0 ? "warning" : "positive" },
-        { label: "账户快照", value: booleanWord(account.ready), meta: listText(account.blockers, "当前没有额外账户阻断说明"), tone: account.ready ? "positive" : "warning" },
+        { label: "账户快照", value: booleanWord(account.ready), meta: localizeList(account.blockers, "当前没有额外账户阻断说明"), tone: account.ready ? "positive" : "warning" },
       ]),
     }),
     riskReconciliation: surfaceCard({
@@ -521,7 +550,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
           meta: legMismatchSummaryMeta(legMismatchSummary),
           tone: legMismatchTone(legMismatchSummary),
         },
-        { label: "建议动作", value: mismatchSummary.recommended_operator_action ? localizeError(mismatchSummary.recommended_operator_action) : "当前没有额外建议动作", meta: listText(mismatchSummary.safety_impacts, "当前没有额外安全影响说明"), tone: mismatchSummary.recommended_operator_action ? "info" : "neutral" },
+        { label: "建议动作", value: mismatchSummary.recommended_operator_action ? localizeError(mismatchSummary.recommended_operator_action) : "当前没有额外建议动作", meta: localizeList(mismatchSummary.safety_impacts, "当前没有额外安全影响说明"), tone: mismatchSummary.recommended_operator_action ? "info" : "neutral" },
       ]),
     }),
     riskBills: surfaceCard({
@@ -532,7 +561,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
       content: summaryStrip([
         { label: "账单数量", value: formatNumber(billsSummary.count || 0, 0), meta: textOrFallback(billsSummary.latest_bill_id, "当前暂无最新账单编号"), tone: Number(billsSummary.count || 0) > 0 ? "info" : "neutral" },
         { label: "最新账单时间", value: formatMaybeTimestamp(billsSummary.latest_bill_ts), meta: formatRelativeAge(billsSummary.latest_bill_ts), tone: billsSummary.latest_bill_ts ? "info" : "neutral" },
-        { label: "涉及币种", value: listText(billsSummary.currencies, "当前没有账单币种摘要"), meta: "最近交易所侧账务变动范围", tone: (billsSummary.currencies || []).length ? "warning" : "neutral" },
+        { label: "涉及币种", value: localizeList(billsSummary.currencies, "当前没有账单币种摘要"), meta: "最近交易所侧账务变动范围", tone: (billsSummary.currencies || []).length ? "warning" : "neutral" },
         { label: "高频账单类别", value: renderBillCategories(billsSummary.top_categories), meta: billsSummary.last_error || "已按类型、子类型和币种聚合", tone: billsSummary.last_error ? "warning" : "positive" },
       ]),
     }),
@@ -668,48 +697,8 @@ function renderDeferredPanelNotice(title, detail) {
   ]);
 }
 
-export function mergedExitExecutionReviewItems(recovery = {}) {
-  const merged = [];
-  const mergedByKey = new Map();
-  const append = (items, source) => {
-    if (!Array.isArray(items)) return;
-    items.forEach((item) => {
-      if (!item || typeof item !== "object") return;
-      const parentIntentId = String(item.parent_intent_id || "").trim();
-      if (!parentIntentId) return;
-      const normalized = {
-        ...item,
-        review_source: source,
-        startup_snapshot_backed: source === "startup_snapshot",
-      };
-      const existingIndex = mergedByKey.get(parentIntentId);
-      if (existingIndex === undefined) {
-        mergedByKey.set(parentIntentId, merged.length);
-        merged.push(normalized);
-        return;
-      }
-      const existing = merged[existingIndex];
-      if (existing.review_source === "runtime" && source !== "runtime") {
-        merged[existingIndex] = {
-          ...existing,
-          startup_snapshot_backed: true,
-        };
-        return;
-      }
-      merged[existingIndex] = {
-        ...normalized,
-        startup_snapshot_backed: Boolean(existing.startup_snapshot_backed) || source === "startup_snapshot",
-      };
-    });
-  };
-  append(recovery.exit_execution_review_items, "runtime");
-  const latestStateSnapshot = recovery.latest_state_snapshot;
-  const snapshotDetails = latestStateSnapshot?.details_json;
-  if (snapshotDetails && snapshotDetails.source === "startup_exit_execution_review") {
-    append(snapshotDetails.review_items, "startup_snapshot");
-  }
-  return merged;
-}
+// #36 修复：mergedExitExecutionReviewItems 已搬到 ../exit-execution-helpers.js，
+// 从那里 import（见文件顶部）。
 
 function renderExitExecutionReviewList({ recovery = {}, actionContext = {} } = {}) {
   const items = mergedExitExecutionReviewItems(recovery);
@@ -783,243 +772,15 @@ function renderExitExecutionReviewActions(item, actionContext = {}) {
   return `<div class="stack-actions">${buttons.join("")}</div>`;
 }
 
-export function renderExitExecutionActionHistoryList(items = [], filters = {}) {
-  const normalizedFilters = normalizedExitExecutionHistoryFilters(filters);
-  const filteredCount = filterExitExecutionActionHistory(items, normalizedFilters).length;
-  return `
-    <div data-exit-history-root>
-      ${renderExitExecutionActionHistoryFilters(normalizedFilters, { mode: "card" })}
-      ${items.length ? `
-        <div class="alert-list">
-          ${items.map((item) => renderExitExecutionActionHistoryItem(item, normalizedFilters)).join("")}
-        </div>
-      ` : ""}
-      <p class="meta-copy" data-exit-history-empty ${filteredCount > 0 ? "hidden" : ""}>当前筛选条件下没有退出任务处理记录。</p>
-    </div>
-  `;
-}
-
-export function renderExitExecutionWorkspace({ page = {}, filters = {} } = {}) {
-  const normalizedFilters = normalizedExitExecutionHistoryFilters(filters);
-  const items = Array.isArray(page.actions)
-    ? page.actions.filter((item) => item && typeof item === "object")
-    : [];
-  const limit = Number(page.limit || normalizedFilters.limit || 20);
-  const offset = Number(page.offset || normalizedFilters.offset || 0);
-  const totalAvailable = Number(page.total_available || 0);
-  const pageStart = totalAvailable > 0 ? offset + 1 : 0;
-  const pageEnd = totalAvailable > 0 ? offset + items.length : 0;
-  const hasMore = Boolean(page.has_more);
-  const hasPrev = offset > 0;
-  const filteredCount = filterExitExecutionActionHistory(items, normalizedFilters).length;
-  return `
-    <div data-exit-history-root data-exit-history-workspace>
-      ${renderExitExecutionActionHistoryFilters(normalizedFilters, { mode: "workspace" })}
-      <div class="panel-head">
-        <div>
-          <strong>完整时间线</strong>
-          <p class="meta-copy">当前显示 ${formatNumber(pageStart, 0)} - ${formatNumber(pageEnd, 0)} / ${formatNumber(totalAvailable, 0)} 条。</p>
-        </div>
-        <div class="stack-actions table-actions--compact">
-          ${actionButton("上一页", "paginate-exit-execution-history", "prev", "ghost", {
-            disabled: !hasPrev,
-            title: hasPrev ? "查看更早一页退出任务处理记录。" : "当前已经是第一页。",
-          })}
-          ${actionButton("下一页", "paginate-exit-execution-history", "next", "ghost", {
-            disabled: !hasMore,
-            title: hasMore ? "查看更晚一页退出任务处理记录。" : "当前没有更多记录。",
-          })}
-        </div>
-      </div>
-      ${items.length ? `
-        <div class="alert-list">
-          ${items.map((item) => renderExitExecutionActionHistoryItem(item, normalizedFilters)).join("")}
-        </div>
-      ` : ""}
-      <p class="meta-copy" data-exit-history-empty ${filteredCount > 0 ? "hidden" : ""}>当前筛选条件下没有退出任务处理记录。</p>
-      ${!items.length ? `<p class="meta-copy">当前工作区还没有命中的退出任务处理记录。你可以放宽筛选条件，或翻页查看更多历史。</p>` : ""}
-      <p class="meta-copy">这里展示的是独立 operator 工作区列表；卡片上的筛选条件会同步到这里，点击“应用到完整列表”后会按当前条件重新拉取长历史。</p>
-    </div>
-  `;
-}
-
-function renderExitExecutionActionHistoryItem(item, filters = {}) {
-  const title = `退出任务 ${textOrFallback(item.symbol, "未知标的")}`;
-  const statusSuffix = item.aggregate_status ? ` / 父任务 ${readableState(item.aggregate_status)}` : "";
-  const subtitle = `${textOrFallback(item.parent_intent_id, "未知父任务")} / ${exitExecutionLatestActionLabel(item.action)} / ${exitExecutionLatestActionStatus(item.status)}${statusSuffix}`;
-  const metaParts = [];
-  if (item.created_at) {
-    metaParts.push(`时间 ${formatMaybeTimestamp(item.created_at)}`);
-  }
-  if (item.actor_identity || item.actor_role) {
-    metaParts.push(`操作人 ${textOrFallback(item.actor_identity, textOrFallback(item.actor_role, "未知"))}`);
-  }
-  const blocker = item && typeof item === "object" ? item.remaining_blocker : null;
-  const blockerSummary = blocker && typeof blocker === "object"
-    ? textOrFallback(blocker.summary, localizeError(blocker.code, "当前还有未解除的退出任务阻断。"))
-    : "";
-  const visible = filterExitExecutionActionHistory([item], filters).length > 0;
-  return `
-    <article
-      class="timeline-item"
-      data-exit-history-entry
-      data-parent-intent-id="${escapeHtml(textOrFallback(item.parent_intent_id, ""))}"
-      data-actor-search="${escapeHtml(exitExecutionActionActorSearch(item))}"
-      data-action-kind="${escapeHtml(textOrFallback(item.action, ""))}"
-      data-created-at-ms="${escapeHtml(String(exitExecutionActionCreatedAtMs(item)))}"
-      ${visible ? "" : "hidden"}
-    >
-      <div class="panel-head">
-        <div>
-          <strong>${escapeHtml(title)}</strong>
-          <p class="meta-copy">${escapeHtml(subtitle)}</p>
-        </div>
-      </div>
-      ${item.summary ? `<p>${escapeHtml(String(item.summary))}</p>` : ""}
-      ${metaParts.length ? `<p class="meta-copy">${escapeHtml(metaParts.join("；"))}</p>` : ""}
-      ${blockerSummary ? `<p class="meta-copy"><strong>动作后仍卡在：</strong>${escapeHtml(blockerSummary)}</p>` : ""}
-    </article>
-  `;
-}
-
-function renderExitExecutionActionHistoryFilters(filters = {}, { mode = "card" } = {}) {
-  const normalizedFilters = normalizedExitExecutionHistoryFilters(filters);
-  const applyButton = actionButton(
-    mode === "workspace" ? "应用筛选" : "应用到完整列表",
-    "apply-exit-execution-history-workspace",
-    "",
-    "secondary",
-    {
-      title: mode === "workspace"
-        ? "按当前筛选条件重新拉取 parent-exit 长历史。"
-        : "把当前筛选条件同步到下方工作区列表，并按这些条件重新拉取完整历史。",
-    },
-  );
-  const resetButton = actionButton(
-    "重置筛选",
-    "reset-exit-execution-history-workspace",
-    "",
-    "ghost",
-    {
-      title: "清空 parent-exit 时间线筛选条件并回到第一页。",
-    },
-  );
-  return `
-    <div class="stack-actions table-actions--compact">
-      <label>
-        <span class="meta-copy">动作</span>
-        <select data-exit-history-filter="action">
-          ${renderExitExecutionActionFilterOptions(normalizedFilters.action)}
-        </select>
-      </label>
-      <label>
-        <span class="meta-copy">父任务</span>
-        <input
-          type="text"
-          data-exit-history-filter="parent"
-          value="${escapeHtml(normalizedFilters.parent)}"
-          placeholder="例如 exit_parent:btc_close"
-        />
-      </label>
-      <label>
-        <span class="meta-copy">操作人</span>
-        <input
-          type="text"
-          data-exit-history-filter="actor"
-          value="${escapeHtml(normalizedFilters.actor)}"
-          placeholder="例如 risk-admin"
-        />
-      </label>
-      <label>
-        <span class="meta-copy">时间窗口</span>
-        <select data-exit-history-filter="windowHours">
-          ${renderExitExecutionActionWindowOptions(normalizedFilters.windowHours)}
-        </select>
-      </label>
-      ${applyButton}
-      ${resetButton}
-    </div>
-  `;
-}
-
-function renderExitExecutionActionFilterOptions(selectedAction = "all") {
-  return [
-    ["all", "全部动作"],
-    ["refresh_exchange_state", "刷新交易所状态"],
-    ["retry_limit_lookup", "重试拆单上限查询"],
-    ["safe_cancel", "安全取消退出任务"],
-  ].map(([value, label]) => (
-    `<option value="${escapeHtml(value)}"${value === selectedAction ? " selected" : ""}>${escapeHtml(label)}</option>`
-  )).join("");
-}
-
-function renderExitExecutionActionWindowOptions(selectedWindow = "all") {
-  return [
-    ["all", "全部时间"],
-    ["1", "最近 1 小时"],
-    ["6", "最近 6 小时"],
-    ["24", "最近 24 小时"],
-    ["168", "最近 7 天"],
-    ["720", "最近 30 天"],
-  ].map(([value, label]) => (
-    `<option value="${escapeHtml(value)}"${value === selectedWindow ? " selected" : ""}>${escapeHtml(label)}</option>`
-  )).join("");
-}
-
-export function normalizedExitExecutionHistoryFilters(filters = {}) {
-  const action = String(filters?.action || "all").trim();
-  const normalizedAction = ["all", "refresh_exchange_state", "retry_limit_lookup", "safe_cancel"].includes(action)
-    ? action
-    : "all";
-  const windowHours = String(filters?.windowHours || "all").trim();
-  const normalizedWindowHours = ["all", "1", "6", "24", "168", "720"].includes(windowHours)
-    ? windowHours
-    : "all";
-  return {
-    action: normalizedAction,
-    parent: String(filters?.parent || "").trim(),
-    actor: String(filters?.actor || "").trim(),
-    windowHours: normalizedWindowHours,
-    offset: Math.max(Number(filters?.offset || 0), 0),
-    limit: Math.max(Number(filters?.limit || 20), 1),
-  };
-}
-
-function filterExitExecutionActionHistory(items = [], filters = {}) {
-  const normalized = normalizedExitExecutionHistoryFilters(filters);
-  const thresholdMs = exitExecutionHistoryWindowThresholdMs(normalized.windowHours);
-  return items.filter((item) => {
-    const actionMatches = normalized.action === "all" || String(item?.action || "").trim() === normalized.action;
-    const parentMatches = !normalized.parent
-      || String(item?.parent_intent_id || "").toLowerCase().includes(normalized.parent.toLowerCase());
-    const actorMatches = !normalized.actor
-      || exitExecutionActionActorSearch(item).includes(normalized.actor.toLowerCase());
-    const createdAtMs = exitExecutionActionCreatedAtMs(item);
-    const windowMatches = thresholdMs === null || createdAtMs >= thresholdMs;
-    return actionMatches && parentMatches && actorMatches && windowMatches;
-  });
-}
-
-function exitExecutionActionActorSearch(item) {
-  return `${String(item?.actor_identity || "").trim()} ${String(item?.actor_role || "").trim()}`.trim().toLowerCase();
-}
-
-function exitExecutionActionCreatedAtMs(item) {
-  const parsed = Date.parse(String(item?.created_at || ""));
-  return Number.isFinite(parsed) ? parsed : 0;
-}
-
-function exitExecutionHistoryWindowThresholdMs(windowHours) {
-  const normalized = String(windowHours || "all").trim();
-  if (!normalized || normalized === "all") {
-    return null;
-  }
-  const hours = Number(normalized);
-  if (!Number.isFinite(hours) || hours <= 0) {
-    return null;
-  }
-  return Date.now() - (hours * 60 * 60 * 1000);
-}
+// #36 修复：renderExitExecutionActionHistoryList / renderExitExecutionWorkspace
+// 以及它们的全部私有 helper（renderExitExecutionActionHistoryItem /
+// renderExitExecutionActionHistoryFilters / renderExitExecutionActionFilterOptions /
+// renderExitExecutionActionWindowOptions / normalizedExitExecutionHistoryFilters /
+// filterExitExecutionActionHistory / exitExecutionActionActorSearch /
+// exitExecutionActionCreatedAtMs / exitExecutionLatestActionLabel /
+// exitExecutionLatestActionStatus）已整体搬到 ../exit-execution-helpers.js。
+// #27 关联修复：本地重复实现的 exitExecutionHistoryWindowThresholdMs 同时删除，
+// navigation-state.js 已经导出权威版本。
 
 function exitExecutionActionDisabledReason(actionKind, actionContext = {}) {
   const permissionMessage = textOrFallback(actionContext.uiHints?.controlPermissionMessage, "");
@@ -1232,19 +993,9 @@ function exitExecutionCurrentBlocker(item) {
   return renderBlockerLine("当前仍卡在：", normalizedCurrentBlocker || normalizedActionBlocker);
 }
 
-function exitExecutionLatestActionLabel(action) {
-  if (action === "refresh_exchange_state") return "刷新交易所状态";
-  if (action === "retry_limit_lookup") return "重试拆单上限查询";
-  if (action === "safe_cancel") return "安全取消退出任务";
-  return textOrFallback(action, "未知动作");
-}
-
-function exitExecutionLatestActionStatus(status) {
-  if (status === "completed") return "已完成";
-  if (status === "failed") return "失败";
-  if (status === "rejected") return "已拒绝";
-  return textOrFallback(status, "状态待确认");
-}
+// #36 修复：exitExecutionLatestActionLabel / exitExecutionLatestActionStatus 已
+// 搬到 ../exit-execution-helpers.js。它们被本文件的 review 列表和工作台列表
+// 同时用到，所以放在共享 helper 模块里。
 
 function trialGuardStatusLabel(status) {
   if (status === "disabled" || status === "not_configured") return "未启用";
@@ -1294,68 +1045,9 @@ function trialRatioText(value) {
   return `${formatNumber(numeric * 100, 2)}%`;
 }
 
-export function renderReconciliationControls({
-  reconciliation = null,
-  recovery = {},
-  uiHints = {},
-  includeInspect = false,
-  compact = false,
-} = {}) {
-  const permissionMessage = textOrFallback(uiHints.controlPermissionMessage, "");
-  const canWrite = !permissionMessage;
-  const buttons = [];
-  if (includeInspect && shouldShowInspectReconciliation({ reconciliation, recovery })) {
-    buttons.push(actionButton("查看对账", "inspect-reconciliation", reconciliation.reconciliation_id, "ghost"));
-  }
-  if (shouldShowValidateAction({ reconciliation, recovery })) {
-    buttons.push(
-      actionButton("重新对账（刷新交易所状态）", "trigger-reconciliation-validate", "", "secondary", {
-        disabled: !canWrite,
-        title: permissionMessage,
-      })
-    );
-  }
-  if (shouldShowRebaselineAction({ reconciliation, recovery })) {
-    buttons.push(
-      actionButton("接受当前状态为新基线", "trigger-rebaseline", "", "warning", {
-        disabled: !canWrite,
-        title: permissionMessage,
-      })
-    );
-  }
-  if (shouldShowResumeAction({ recovery })) {
-    buttons.push(
-      actionButton("恢复自动运行", "trigger-resume", "", "warning", {
-        disabled: !canWrite || !recovery.resume_eligible,
-        title: !canWrite ? permissionMessage : resumeActionHint({ recovery, uiHints }),
-      })
-    );
-  }
-  if (!buttons.length) return `<p class="meta-copy">${reconciliationActionCopy({ reconciliation, recovery })}</p>`;
-  return `<div class="stack-actions ${compact ? "table-actions--compact" : ""}">${buttons.join("")}</div>`;
-}
-
-export function reconciliationActionCopy({ reconciliation = null, recovery = {}, isHistorical = false } = {}) {
-  if (isHistorical) {
-    return "这是历史对账记录。下面的操作会作用于当前运行态，请先确认最新对账结论是否仍然一致。";
-  }
-  if (reconciliation?.halt_required) {
-    return "当前需先完成对账。请先核对差异原因；确认交易所当前状态才是正确状态后，再接受为新基线。";
-  }
-  if (reconciliation?.observational_only && !recovery.review_required) {
-    return "当前只有轻度动态漂移，例如保证金或浮盈随行情波动。系统可继续运行，建议持续观察，不需要立即重设基线。";
-  }
-  if (reconciliation?.review_required || shouldShowRebaselineAction({ reconciliation, recovery })) {
-    return "当前处于待人工确认状态。请先重新对账或核对交易所账单，确认状态符合预期后再接受为新基线。";
-  }
-  if (recovery.halted && recovery.resume_eligible) {
-    return operationalStatusCopy({ recovery });
-  }
-  if (!recovery.safe_to_trade) {
-    return operationalStatusCopy({ recovery });
-  }
-  return "当前状态稳定。如果想再次确认状态，可以手动重新对账（刷新交易所状态）。";
-}
+// #5 修复：renderReconciliationControls / reconciliationActionCopy 原本定义在
+// 本文件，detail-drawers.js 反向 import 过来造成依赖倒挂。已搬到
+// ../reconciliation-controls.js，本文件改为从那里 import（见文件顶部）。
 
 function renderPrimaryTaskPanel({ primaryTask = null, recovery = {}, reconciliation = null, uiHints = {} } = {}) {
   if (!primaryTask) {
@@ -1507,13 +1199,14 @@ function noPrimaryBlockerSummary({ recovery = {}, reconciliation = null } = {}) 
       copy: "当前没有新的第一优先级阻断，但系统仍未满足恢复条件。请先查看恢复状态中的限制原因，再判断是否可以继续运行。",
     };
   }
+  // #9 修复：对齐成 2 空格缩进，原本这块跟函数其他分支错位（4 空格 + 缩进的闭合括号）。
   return {
-      value: "当前可继续自动运行",
-      meta: "系统当前没有硬阻断。",
-      tone: "positive",
-      copy: "当前没有新的第一优先级阻断。若仍需再次确认状态，可手动重新对账（刷新交易所状态）。",
-    };
-  }
+    value: "当前可继续自动运行",
+    meta: "系统当前没有硬阻断。",
+    tone: "positive",
+    copy: "当前没有新的第一优先级阻断。若仍需再次确认状态，可手动重新对账（刷新交易所状态）。",
+  };
+}
 
 function riskHeadline({ primaryBlocker, blockers, reconciliation, recovery }) {
   return operationalStatusHeadline({
@@ -1533,32 +1226,10 @@ function riskTone({ primaryBlocker, blockers, reconciliation, recovery, health }
   return "positive";
 }
 
-function shouldShowValidateAction({ reconciliation, recovery }) {
-  return Boolean(
-    reconciliationNeedsAttention(reconciliation)
-    || reconciliation?.observational_only
-    || recovery.review_required
-  );
-}
-
-function shouldShowRebaselineAction({ reconciliation, recovery }) {
-  return Boolean(
-    recovery.rebaseline_available
-    || reconciliation?.review_required
-    || actionSuggestsRebaseline(reconciliation?.recommended_operator_action)
-  );
-}
-
-function shouldShowResumeAction({ recovery }) {
-  return Boolean(recovery.halted || recovery.resume_eligible);
-}
-
-function shouldShowInspectReconciliation({ reconciliation, recovery }) {
-  return Boolean(
-    reconciliation?.reconciliation_id
-    && (reconciliationNeedsAttention(reconciliation) || recovery.review_required)
-  );
-}
+// #5 修复：should*Action / shouldShowInspectReconciliation 已经和
+// renderReconciliationControls 一起搬到 ../reconciliation-controls.js，
+// 本文件只保留需要显式 import 的 shouldShowInspectReconciliation（给 hero
+// 面板的 actions 字段用）。
 
 function legMismatchTone(summary = {}) {
   if (Number(summary.missing_execution_chain_count || 0) > 0) return "danger";
@@ -1613,31 +1284,10 @@ function localInstrumentLegMeta(rows = []) {
     .join("；");
 }
 
-function actionSuggestsRebaseline(value) {
-  return String(value || "").toLowerCase().includes("rebaseline");
-}
-
-function reconciliationNeedsAttention(reconciliation) {
-  const severity = String(reconciliation?.severity || "").toUpperCase();
-  return Boolean(
-    reconciliation?.halt_required
-    || reconciliation?.review_required
-    || (severity && severity !== "CLEAN")
-  );
-}
-
-function resumeActionHint({ recovery, uiHints }) {
-  if (recovery.resume_eligible) {
-    return recovery.halted ? operationalStatusCopy({ recovery }) : "";
-  }
-  return operationalStatusCopy({
-    recovery,
-    recoveryReasonText: textOrFallback(
-      uiHints.recoveryReasonsText,
-      listText(recovery.resume_blocked_reasons, "当前没有额外恢复说明")
-    ),
-  });
-}
+// #5 修复：actionSuggestsRebaseline / reconciliationNeedsAttention /
+// resumeActionHint 已随同 reconciliation 控件 helper 一起搬到
+// ../reconciliation-controls.js。本文件只有 renderReconciliationControls
+// 依赖它们，而 renderReconciliationControls 也在那边，不再需要本地副本。
 
 function isPausedAwaitingResume({ blockers = [], recovery = {} } = {}) {
   return Boolean(
@@ -1648,9 +1298,9 @@ function isPausedAwaitingResume({ blockers = [], recovery = {} } = {}) {
   );
 }
 
-function listText(value, fallback = "当前没有额外说明") {
-  return Array.isArray(value) ? localizeList(value, fallback) : textOrFallback(value, fallback);
-}
+// #6 修复：原本这里定义了本地 listText(value, fallback)，只是 copy.localizeList 的
+// wrapper（Array 判定其实 copy.splitCodeList 已经处理）。函数已删除，调用方直接
+// import copy.localizeList。消除 triple source of truth。
 
 function phase1ShadowLabel(status) {
   const map = {

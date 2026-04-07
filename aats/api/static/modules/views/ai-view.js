@@ -1,111 +1,29 @@
-﻿import { actionButton, actorTags, callout, kvList, pill, responsiveTable, statGrid, summaryStrip, surfaceCard } from "../components.js";
+﻿import { actionButton, actorTags, callout, kvList, pill, renderPaginationFooter, responsiveTable, statGrid, summaryStrip, surfaceCard } from "../components.js";
 import { hasMeaningfulValue, localizeList, meaningfulEntries, splitCodeList, summarizeLocalizedList, textOrFallback } from "../copy.js";
 import { formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned } from "../formatters.js";
 import { localizeError, readableState } from "../terms.js";
+// #32 修复：executionSuggestionLabel 从 trade-display.js 统一 import。
+import { executionSuggestionLabel } from "../trade-display.js";
 
-const AI_STATE_MAP = {
-  baseline_only: "仅按基础策略运行",
-  ai_assisted: "AI 辅助决策",
-  ai_decision_maker: "AI 决策者",
-  ai_decision_maker_with_profile_control: "AI 决策者并控制策略档位",
-  disabled: "已关闭",
-  diagnostic_only: "仅诊断",
-  shadow_translation: "执行层 shadow",
-  enabled_live: "可进入实盘执行",
-  enabled: "已进入受限实盘翻译",
-  healthy: "健康",
-  degraded: "已降级",
-  review_required: "需要复核",
-  underperforming: "表现落后",
-  mixed: "表现分化",
-  insufficient_data: "样本不足",
-  trend: "趋势",
-  breakout: "突破",
-  range: "震荡",
-  uncertain: "不确定",
-  same_as_baseline: "与基础策略一致",
-  hold_instead: "改为继续观望/持有",
-  entry_override: "改为开仓",
-  exit_override: "改为退出",
-  reverse_override: "改为反手",
-  hold: "保持仓位",
-  flat: "继续观望",
-  long: "偏多",
-  short: "偏空",
-  ai: "AI 决策",
-  baseline: "基础策略决策",
-  baseline_fallback: "本轮回退为基础策略",
-  admin_override: "管理员覆盖",
-  env_default: "沿用启动默认档位",
-  admin: "管理员手动覆盖",
-  system: "系统自动决定保持当前档位",
-  reference_only: "基础策略主导",
-  advisory: "AI 辅助建议",
-  final_decision: "AI 最终决策",
-  final_decision_with_profile_control: "AI 最终决策并可联动切档",
-  normal: "正常",
-  maker_bias: "偏被动",
-  taker_bias: "偏主动",
-  bounded_limit_ioc: "受限限价成交",
-  bounded_taker_cap: "受限主动成交",
-  not_requested: "未请求",
-};
+// #30 / #31 修复：原本这里定义了两个本地 map —— AI_STATE_MAP / AI_ERROR_MAP ——
+// 它们分别复制了 terms.js 的 TERM_MAP / ERROR_MAP 的几乎全部 key。这 100% 是
+// "triple source of truth" 陷阱：文案改一处要同步三处（terms.js、ai-view、可能还有
+// ai-config-view）。现在已经把 AI_STATE_MAP 独有的 8 条 key 合并到 TERM_MAP，
+// AI_ERROR_MAP 的 key 本来就完全重复在 ERROR_MAP 里，两份本地 map 都删除，
+// humanState/humanError 直接走 readableState/localizeError（见下）。
 
-const AI_ERROR_MAP = {
-  ai_degraded_requires_manual_review: "AI 已降级且未开启自动回退，需要人工确认后再恢复 AI 决策链路。",
-  ai_auto_downgraded: "AI 已自动降级，当前只保留基础策略决策链路。",
-  operator_manual_ai_mode_override: "管理员已手动覆盖当前 AI 运行模式。",
-  operator_manual_ai_mode_override_expired: "人工覆盖冻结时间已结束，系统恢复为自动运行模式逻辑。",
-  operator_manual_ai_mode_override_cleared: "管理员已提前结束人工覆盖，系统恢复为自动运行模式逻辑。",
-  output_rejected: "AI 输出结构有效，但没有通过交易语义校验。",
-  ai_fallback_used: "本轮使用了回退结果，不能让 AI 直接改写基础策略。",
-  ai_output_invalid: "AI 输出没有通过校验。",
-  ai_confidence_below_threshold: "校准置信度低于 AI 决策链路最低门槛。",
-  ai_uncertainty_above_threshold: "不确定性高于 AI 决策链路允许阈值。",
-  ai_directional_edge_too_small: "方向边际不足，不能让 AI 直接改写基础策略。",
-  ai_override_not_recommended: "AI 自己都不建议覆盖基础策略。",
-  ai_not_economically_actionable: "预期净边际覆盖不了成本和噪声。",
-  ai_regime_not_allowed: "当前市场状态不允许 AI 直接改写基础策略。",
-  ai_open_orders_present: "当前还有活动委托，不允许 AI 改写方向。",
-  ai_flat_context_requires_stronger_edge: "空仓场景下需要更强的方向边际才能开仓。",
-  execution_parameter_suggestions_disabled: "执行建议功能当前关闭。",
-  diagnostic_only_no_live_execution: "当前只记录建议，不允许进入真实执行。",
-  shadow_translation_preview_only: "当前只生成执行层 shadow 预演，不改写真委托。",
-  planner_boundary_disabled: "执行器边界关闭了 AI 建议下探。",
-  planner_recorded_suggestion_only: "执行器只保留建议供诊断使用。",
-  planner_translated_execution_preview: "执行器已生成执行层 shadow 预演。",
-  bounded_live_translation_applied: "执行器已经把建议限制性地转成真实下单字段。",
-  live_translation_not_enabled: "当前没有启用实盘授权。",
-  live_translation_requires_limit_cap: "只有能转成价格保护型限价保护的建议才允许进入实盘授权。",
-  live_translation_requires_reference_price: "缺少参考价格，不能安全生成实盘价格保护。",
-  live_translation_requires_limit_offset: "缺少有效价格偏移，不能生成实盘限价保护。",
-  live_translation_requires_slippage_guard: "缺少滑点保护，不能启用受限实盘翻译。",
-};
-
-const EXECUTION_SUGGESTION_LABELS = {
-  passive_bias: "被动倾向",
-  maker_taker_bias: "主被动偏向",
-  slice_count: "拆单数",
-  max_participation_rate: "最大参与率",
-  max_cross_spread_bps: "最大跨价差",
-  cancel_replace_patience_ms: "撤改单等待",
-};
-
+// #30 / #31 / #32 修复后：
+//   - AI_STATE_MAP / AI_ERROR_MAP / EXECUTION_SUGGESTION_LABELS 三份本地 map 全部删除
+//   - humanState / humanError 变成 readableState / localizeError 的 pass-through
+//   - executionSuggestionLabel 从 trade-display.js import
+// 保留 humanState / humanError wrapper 名称只是为了兼容本文件大量调用点。
 function humanState(value) {
-  if (value === null || value === undefined || value === "") return "待确认";
-  const key = String(value).trim().toLowerCase();
-  return AI_STATE_MAP[key] || readableState(value);
+  return readableState(value);
 }
 
 function humanError(value) {
   if (!value) return "当前没有额外说明";
-  const key = String(value).trim();
-  return AI_ERROR_MAP[key] || localizeError(key);
-}
-
-function executionSuggestionLabel(key) {
-  const normalized = String(key || "").trim();
-  return EXECUTION_SUGGESTION_LABELS[normalized] || normalized;
+  return localizeError(String(value).trim());
 }
 
 function activeDegradationReasons(downgradeState = {}) {
@@ -411,8 +329,12 @@ export function renderAIAnalysisSectionCards(data) {
                   "当前还没有可复盘的 AI 判断记录。",
                   assessmentCards(recentAssessments)
                 )}
-                ${renderPaginationFooter(recentPayload, {
-                  key: "AI 判断记录",
+                ${renderPaginationFooter({
+                  shown: Array.isArray(recentPayload?.assessments) ? recentPayload.assessments.length : 0,
+                  total: recentPayload?.total_available,
+                  hasMore: recentPayload?.has_more,
+                  limit: recentPayload?.limit,
+                  label: "AI 判断记录",
                   loadAction: "load-more-ai-assessments",
                   collapseAction: "collapse-ai-assessments",
                 })}
@@ -430,8 +352,12 @@ export function renderAIAnalysisSectionCards(data) {
                   "当前还没有可复盘的影子动作记录。",
                   shadowDecisionCards(shadowRecent)
                 )}
-                ${renderPaginationFooter(shadowRecentPayload, {
-                  key: "影子动作",
+                ${renderPaginationFooter({
+                  shown: Array.isArray(shadowRecentPayload?.shadow_decisions) ? shadowRecentPayload.shadow_decisions.length : 0,
+                  total: shadowRecentPayload?.total_available,
+                  hasMore: shadowRecentPayload?.has_more,
+                  limit: shadowRecentPayload?.limit,
+                  label: "影子动作",
                   loadAction: "load-more-ai-shadow-decisions",
                   collapseAction: "collapse-ai-shadow-decisions",
                 })}
@@ -461,8 +387,12 @@ export function renderAIAnalysisSectionCards(data) {
                   "当前还没有影子收益对比结果。",
                   shadowEvaluationCards(evaluations)
                 )}
-                ${renderPaginationFooter(evaluationsPayload, {
-                  key: "影子收益评估",
+                ${renderPaginationFooter({
+                  shown: Array.isArray(evaluationsPayload?.evaluations) ? evaluationsPayload.evaluations.length : 0,
+                  total: evaluationsPayload?.total_available,
+                  hasMore: evaluationsPayload?.has_more,
+                  limit: evaluationsPayload?.limit,
+                  label: "影子收益评估",
                   loadAction: "load-more-ai-shadow-evaluations",
                   collapseAction: "collapse-ai-shadow-evaluations",
                 })}
@@ -669,32 +599,13 @@ function executionSuggestionRows(summary = {}) {
   ];
 }
 
-function renderPaginationFooter(payload, { key, loadAction, collapseAction }) {
-  const shown = Array.isArray(payload?.assessments)
-    ? payload.assessments.length
-    : Array.isArray(payload?.shadow_decisions)
-        ? payload.shadow_decisions.length
-        : Array.isArray(payload?.evaluations)
-          ? payload.evaluations.length
-          : 0;
-  const total = Number(payload?.total_available || shown);
-  const hasMore = Boolean(payload?.has_more);
-  const limit = Number(payload?.limit || shown);
-  if (!shown) return "";
-  return `
-    <div class="history-footer">
-      <p class="meta-copy">当前显示 ${shown} / ${total} 条${key}。</p>
-      <div class="stack-actions">
-        ${hasMore ? actionButton(`加载更多${key}`, loadAction, "", "secondary") : ""}
-        ${limit > 8 ? actionButton("收起到最新 8 条", collapseAction, "", "ghost") : ""}
-      </div>
-    </div>
-  `;
-}
+// #11 / #33 修复：原本这里定义了本地 renderPaginationFooter，签名与 execution-view /
+// strategy-view 的同名函数还不一致（签名顺序 + payload 字段耦合都不同）。现已统一到
+// components.renderPaginationFooter，调用方只负责把 shown/total/hasMore/limit 从自家
+// payload 里抽出来。#33 的 `limit > 8` 阈值同时上移到 components 的 collapseThreshold。
 
-function readableList(items, fallback = "暂无说明") {
-  return localizeList(items, fallback);
-}
+// #34 修复：原本这里的 readableList 就是 copy.localizeList 的纯 delegator，已删除。
+// 本文件剩余的 3 处调用直接改用 localizeList，默认 fallback 语境由每个调用点自带。
 
 export function hasExecutionSuggestionContent(summary = {}) {
   const latest = summary.latest_translation || {};
@@ -746,8 +657,8 @@ function assessmentCards(assessments) {
       { label: "最终怎么处理", value: item.fallback_used ? "最终走回退结果" : "最终采用模型结果" },
     ],
     details: [
-      { label: "建议这样处理的原因", value: readableList(item.override_reason_codes, "当前没有额外改写理由") },
-      { label: "没有采用的补充说明", value: readableList((item.rejection_flags || item.validation_flags || []).map(humanError), "当前没有额外处理说明") },
+      { label: "建议这样处理的原因", value: localizeList(item.override_reason_codes, "当前没有额外改写理由") },
+      { label: "没有采用的补充说明", value: localizeList((item.rejection_flags || item.validation_flags || []).map(humanError), "当前没有额外处理说明") },
     ],
     detailLabel: "展开这轮判断说明",
   }));
@@ -766,7 +677,7 @@ function shadowDecisionCards(items) {
       { label: "主要差异", value: humanState(item.shadow_action_type || "unknown") },
     ],
     details: [
-      { label: "为什么会不同", value: readableList(item.reason_codes, "当前没有额外差异说明") },
+      { label: "为什么会不同", value: localizeList(item.reason_codes, "当前没有额外差异说明") },
     ],
     detailLabel: "展开这轮策略层 shadow 对比",
   }));

@@ -207,6 +207,24 @@ function deferredPanelSetForView(view) {
   return DEFERRED_VIEW_PANELS[view] || null;
 }
 
+// #27 修复：原本 home-view.js 在自己内部又写了一遍 ["latestDecision",
+// "executionLatest", "reconciliationLatest"] 来判断"延迟 bundle 是不是还
+// 在加载"，这串 key 同时存在于：
+//   1. store.js::DEFERRED_VIEW_PANELS.home（决定 deferred bundle 拉哪些 panel）
+//   2. dashboard-refresh.js → buildDashboardBundleRequestPlan → 间接读 1
+//   3. home-view.js::deferredLoading 的 ad-hoc 判断
+// 三处一旦漂移，加载占位文字就和真正延迟拉的 panel 对不上。这里把第 3 处
+// 的判断收成一个 helper：调用方只传 view 名和 pendingPanels，本模块内部
+// 直接读 DEFERRED_VIEW_PANELS 的真实集合。
+export function hasAnyDeferredPanelPending(view, pendingPanels = {}) {
+  const set = deferredPanelSetForView(view);
+  if (!set || !pendingPanels) return false;
+  for (const key of set) {
+    if (pendingPanels[key]) return true;
+  }
+  return false;
+}
+
 export function buildExitExecutionActionHistoryPath(state = {}) {
   const params = new URLSearchParams({
     limit: String(Math.max(Number(state.limit) || 20, 1)),

@@ -42,6 +42,21 @@ export function createDashboardShellRenderer({
   localizedRecoveryReasons,
   isPausedAwaitingResume,
 }) {
+  // #20 修复说明：renderCache 用 WeakMap 而不是普通 Map，是有意为之但容易踩坑。
+  //
+  // 缓存的 key 是 view <section> DOM 节点。WeakMap 的好处是：如果某个 view
+  // section 在 DOM 重建时被丢弃，这条缓存条目会自动被 GC 掉，不需要我们
+  // 手动清理。坏处是：如果应用层代码 *重新* 创建一个新的 section 节点
+  // （比如热重载、整页 re-render），即使新节点的 cacheKey 文本完全一样，
+  // 也不会命中缓存——因为 WeakMap 的等价语义是"同一个对象引用"而不是
+  // "同一个 cacheKey"。在当前架构里，view section 节点是 index.html 一开始
+  // 就静态写好的，整个会话期内不变（renderActiveView 只会改 innerHTML），
+  // 所以这个 trade-off 是可接受的：节点稳定、缓存命中率高、不需要手动清理。
+  //
+  // 如果未来引入了"切走某 view 时把它的 section 整个 detach 再重新挂回"
+  // 的优化（比如 lazy view loading），缓存命中率会下降——这是可观察的：
+  // 视觉会出现一次"全量 patch"的瞬间，但不会出错。要想恢复命中率，可以
+  // 切回普通 Map<viewName, cacheKey> 并自行做生命周期管理。
   const renderCache = new WeakMap();
 
   // Sticky-flash TTL constant (FLASH_DEFAULT_TTL_MS) is now defined in
@@ -387,29 +402,39 @@ export function createDashboardShellRenderer({
   }
 
   function syncRefreshInteractivity() {
-    // Two layers of "this UI is mid-refresh, lock the action buttons":
+    // Three layers of "this UI is mid-refresh, lock the action buttons":
     //
-    //   1. viewIsLoading — true ONLY during the bootstrap / explicit loading
+    //   1. viewIsLoading — true during the bootstrap / explicit loading
     //      transitions where the entire active view is rendering its skeleton.
     //      In that case the whole view is locked, because clicking through a
     //      skeleton would just dispatch actions against undefined data.
     //
-    //   2. pendingPanels — keyed per-panel.  refreshDashboard marks BOTH the
+    //   2. isPrimaryRefreshing — true while the primary bundle fetch for the
+    //      active view is in flight (manual refresh button click, view switch
+    //      to a stale view, 30s background auto-refresh tick). The whole
+    //      active view + open drawer get locked for the duration of the
+    //      primary fetch (typically <1s). This is what restores the
+    //      "卡片/抽屉刷新时按钮锁定" behaviour for every action button —
+    //      including buttons inside cards that don't bother to expose a
+    //      data-panel-key, of which there are MANY: only ~14 of ~86 surface
+    //      cards across the workspace views set panelKey, and the open
+    //      drawer never sets one. Without this view-wide lock, the user can
+    //      fire actions against pre-refresh stale data while the cards
+    //      visibly shimmer.
+    //
+    //   3. pendingPanels — keyed per-panel. refreshDashboard marks BOTH the
     //      primary and deferred panels as pending while their fetches are in
-    //      flight, so the per-card / per-drawer button lock follows the actual
-    //      shimmer state of each individual card.  This is what restores the
-    //      "卡片/抽屉刷新时按钮锁定" behaviour: every action button inside a
-    //      [data-panel-key] card whose key is currently in pendingPanels gets
-    //      a `is-refresh-locked` class + disabled flag.  The lock is released
-    //      the instant the fetch resolves and the panel is cleared from
-    //      pendingPanels — so a 30s background auto-refresh visibly locks the
-    //      relevant cards for the duration of the fetch (typically <1s) and
-    //      unlocks them again, instead of leaving the dashboard "perpetually
-    //      unusable" the way an always-on global lock would.
+    //      flight, so the per-card lock follows the shimmer state of each
+    //      [data-panel-key] card. After the primary fetch resolves, the
+    //      view-wide lock comes off and only the deferred panels stay locked
+    //      via pendingPanels until the deferred fetch completes — that's how
+    //      the deferred-fill-in phase keeps the rest of the view interactive
+    //      while specific cards are still catching up.
     const viewIsLoading = shouldRenderLoadingState(state.activeView);
+    const isPrimaryRefreshing = state.refreshPhase === REFRESH_PHASE_PRIMARY;
     syncRefreshDisabledButtons({
       roots: currentRefreshInteractivityRoots(),
-      refreshing: viewIsLoading,
+      refreshing: viewIsLoading || isPrimaryRefreshing,
       pendingPanels: state.pendingPanels,
       reason: "当前区域正在刷新，请等待刷新完成后再操作。",
       panelReason: "该卡片数据还在刷新，请稍候再操作。",

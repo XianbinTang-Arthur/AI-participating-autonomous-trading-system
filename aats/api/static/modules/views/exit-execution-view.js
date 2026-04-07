@@ -1,11 +1,15 @@
 import { actionButton, summaryStrip, surfaceCard } from "../components.js";
 import { textOrFallback } from "../copy.js";
-import { escapeHtml, formatNumber } from "../formatters.js";
+// #36 修复：原本这里从 ./risk-view.js 反向 import 以下三个 helper，导致
+// views/exit-execution-view.js ↔ views/risk-view.js 之间出现水平依赖。
+// 已把 exit-execution 工作台相关 helper（~13 个）提到
+// ../exit-execution-helpers.js，两个 view 模块都从该独立模块 import。
 import {
   mergedExitExecutionReviewItems,
   normalizedExitExecutionHistoryFilters,
   renderExitExecutionWorkspace,
-} from "./risk-view.js";
+} from "../exit-execution-helpers.js";
+import { escapeHtml, formatNumber } from "../formatters.js";
 
 export function renderExitExecutionView(data, uiState = {}) {
   const recovery = data.systemRecovery?.recovery || {};
