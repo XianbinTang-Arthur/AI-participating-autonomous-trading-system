@@ -399,6 +399,12 @@ class OrderStateModel(Base):
     margin_mode: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     position_intent: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # Stage 5：乐观并发版本号。SQLAlchemy 在 UPDATE 时自动加 WHERE row_version = N
+    # 并 SET row_version = N+1。版本不匹配抛 StaleDataError，调用方应捕获后
+    # 重读 row、merge 自己的修改、再重试。多进程下保护"老 snapshot 不要覆盖
+    # 新 fill 派生的状态"。
+    row_version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
+    __mapper_args__ = {"version_id_col": row_version}
 
 
 class FillEventModel(Base):

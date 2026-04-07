@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm.exc import StaleDataError
 
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bus.base import EventBus
@@ -30,6 +31,11 @@ from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 @dataclass(slots=True)
 class PostgresExecutionOutboxPublisher:
     _MAX_PUBLISH_ATTEMPTS = 3
+    # Stage 5：OrderStateModel 的 row_version OCC 在 commit 时如果检测到
+    # 别的 worker 已经推进了 row_version，会抛 StaleDataError。我们重读
+    # 最新行后让 OrderStateMachine.merge 重新合并自己的 incoming state，
+    # 再 commit 一次。3 次仍然失败说明竞争异常激烈，让 caller 看到错误。
+    _MAX_PERSIST_ATTEMPTS = 3
     session_factory: sessionmaker[Session]
     event_store: PostgresEventStore
     execution_repo: ExecutionRepository
@@ -58,13 +64,53 @@ class PostgresExecutionOutboxPublisher:
         # 全部丢到 asyncio.to_thread，让 await 成为真正的 yield 点。flush_pending
         # 留在主协程里——它内部已经走 to_thread + 异步 publish_envelope。
         persisted = await asyncio.to_thread(
-            self._persist_order_state_sync,
+            self._persist_order_state_with_retry,
             order_state=order_state,
             key=key,
             obligation=obligation,
         )
         await self.flush_pending()
         return persisted
+
+    def _persist_order_state_with_retry(
+        self,
+        *,
+        order_state: OrderState,
+        key: str,
+        obligation: OrderObligation | None,
+    ) -> OrderState:
+        # Stage 5：OCC retry 包装。每次失败重新打开 session，让
+        # _persist_order_state_sync 内部重新 SELECT 最新 row，
+        # 让 OrderStateMachine.merge 重新合并 incoming state，再 commit。
+        last_exc: StaleDataError | None = None
+        for attempt in range(self._MAX_PERSIST_ATTEMPTS):
+            try:
+                return self._persist_order_state_sync(
+                    order_state=order_state,
+                    key=key,
+                    obligation=obligation,
+                )
+            except StaleDataError as exc:
+                last_exc = exc
+                log_event(
+                    self.logger,
+                    "execution_outbox_order_state_stale_retry",
+                    level="warning",
+                    client_order_id=order_state.client_order_id,
+                    intent_id=order_state.intent_id,
+                    attempt=attempt + 1,
+                    max_attempts=self._MAX_PERSIST_ATTEMPTS,
+                )
+        assert last_exc is not None
+        log_event(
+            self.logger,
+            "execution_outbox_order_state_stale_exhausted",
+            level="error",
+            client_order_id=order_state.client_order_id,
+            intent_id=order_state.intent_id,
+            max_attempts=self._MAX_PERSIST_ATTEMPTS,
+        )
+        raise last_exc
 
     def _persist_order_state_sync(
         self,
@@ -105,7 +151,7 @@ class PostgresExecutionOutboxPublisher:
         # 同 persist_order_state，丢线程池；此版本额外写一条 execution_command
         # 行，所以下面 helper 需要独立的参数签名。
         persisted = await asyncio.to_thread(
-            self._persist_order_state_and_command_sync,
+            self._persist_order_state_and_command_with_retry,
             order_state=order_state,
             key=key,
             command_id=command_id,
@@ -117,6 +163,60 @@ class PostgresExecutionOutboxPublisher:
         )
         await self.flush_pending()
         return persisted
+
+    def _persist_order_state_and_command_with_retry(
+        self,
+        *,
+        order_state: OrderState,
+        key: str,
+        command_id: str,
+        command_type: str,
+        command_idempotency_key: str,
+        command_payload: dict[str, Any],
+        command_created_at,
+        obligation: OrderObligation | None,
+    ) -> OrderState:
+        # Stage 5：与 _persist_order_state_with_retry 相同的 OCC retry 模式，
+        # 包住带 command 写的版本。每次重试都会重新 SELECT order_states
+        # 最新行 + 重新 merge incoming state，然后整事务一次 commit。
+        # 注意 execution_command 行用 idempotency_key 唯一性约束保证幂等，
+        # 重试时同 command_id 会被 enqueue_command_in_session 内部识别为重复。
+        last_exc: StaleDataError | None = None
+        for attempt in range(self._MAX_PERSIST_ATTEMPTS):
+            try:
+                return self._persist_order_state_and_command_sync(
+                    order_state=order_state,
+                    key=key,
+                    command_id=command_id,
+                    command_type=command_type,
+                    command_idempotency_key=command_idempotency_key,
+                    command_payload=command_payload,
+                    command_created_at=command_created_at,
+                    obligation=obligation,
+                )
+            except StaleDataError as exc:
+                last_exc = exc
+                log_event(
+                    self.logger,
+                    "execution_outbox_order_state_command_stale_retry",
+                    level="warning",
+                    client_order_id=order_state.client_order_id,
+                    intent_id=order_state.intent_id,
+                    command_id=command_id,
+                    attempt=attempt + 1,
+                    max_attempts=self._MAX_PERSIST_ATTEMPTS,
+                )
+        assert last_exc is not None
+        log_event(
+            self.logger,
+            "execution_outbox_order_state_command_stale_exhausted",
+            level="error",
+            client_order_id=order_state.client_order_id,
+            intent_id=order_state.intent_id,
+            command_id=command_id,
+            max_attempts=self._MAX_PERSIST_ATTEMPTS,
+        )
+        raise last_exc
 
     def _persist_order_state_and_command_sync(
         self,

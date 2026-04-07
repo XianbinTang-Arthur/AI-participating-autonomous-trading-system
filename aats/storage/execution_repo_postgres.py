@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import and_, desc, or_, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.bootstrap.logging import get_logger, log_event
@@ -149,12 +150,18 @@ class PostgresExecutionRepository:
         *,
         scope: dict[str, str | None] | None = None,
     ) -> bool:
+        # Stage 5：原子幂等插入。
+        # 旧版用 SELECT-then-INSERT 检查重复——同进程内 reconciliation 重放 +
+        # 实时 fill outbox 重投递可能两个 worker 都通过 SELECT 然后都 INSERT，
+        # 第二个会抛 IntegrityError 而不是 silently return False。
+        # 改用 Postgres 原生 INSERT ... ON CONFLICT (fill_id) DO NOTHING：
+        #   - rowcount == 1：插入成功，return True
+        #   - rowcount == 0：fill_id 已存在，return False（幂等）
+        # 这样把"check 然后 insert"两步合并成一条原子 SQL，消除 TOCTOU race。
         resolved_scope = scope or fill_scope_metadata(fill)
-        if session.get(FillEventModel, fill.fill_id) is not None:
-            return False
-
-        session.add(
-            FillEventModel(
+        stmt = (
+            pg_insert(FillEventModel)
+            .values(
                 fill_id=fill.fill_id,
                 decision_id=fill.decision_id,
                 intent_id=fill.intent_id,
@@ -187,8 +194,11 @@ class PostgresExecutionRepository:
                 created_at=fill.created_at,
                 payload=dump_payload_exact(fill),
             )
+            .on_conflict_do_nothing(index_elements=["fill_id"])
+            .returning(FillEventModel.fill_id)
         )
-        return True
+        inserted = session.scalar(stmt)
+        return inserted is not None
 
     def order_states(self) -> list[OrderState]:
         with self.session_factory() as session:
