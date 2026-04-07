@@ -86,6 +86,14 @@ COPY --chown=aats:aats migrations/ ./migrations/
 COPY --chown=aats:aats scripts/ ./scripts/
 COPY --chown=aats:aats pyproject.toml README.md ./
 
+# Stage 7 修复：WORKDIR /app 是 Docker 自动以 root:root 创建的，COPY --chown
+# 只能影响被复制的子目录。运行时 aats 用户要在 /app 下新建 logs/runtime、
+# logs/info、logs/warning、logs/error、logs/debug、state/active_parameters 等
+# 目录（aats/bootstrap/logging.py + active_parameters.py 的 mkdir 调用）。
+# 不预 chown /app 的话第一次 mkdir 就 PermissionError 13 让容器起不来。
+# 把 /app 整体 chown 给 aats，覆盖现在与未来所有 runtime-created 子目录。
+RUN chown aats:aats /app
+
 USER aats
 
 # tini 作为 PID 1，确保 SIGTERM 能传到 python 进程触发 process_lifecycle 的
