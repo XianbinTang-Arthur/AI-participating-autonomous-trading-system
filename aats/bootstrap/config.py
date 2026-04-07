@@ -25,7 +25,7 @@ from aats.bootstrap.settings import (
     PROCESS_ROLE_MARKET,
     PROCESS_ROLE_MONOLITH,
 )
-from aats.bus.base import EventBus
+from aats.bus.base import EventBus, MessageHandler
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.bus.nats_bus import (
     DEFAULT_CRITICAL_TOPICS,
@@ -2389,6 +2389,72 @@ def _build_position_target_handler(
     return handle_position_target
 
 
+# =============================================================================
+# _CollectingBus: 订阅去重适配器（Stage 7 NATS duplicate-binding 修复）
+#
+# 背景：
+#   - HybridEventBus.subscribe(topic, handler) 按 topic 路由：critical-topic
+#     直接进 NATS critical bus，observer-topic 进 InMemoryBus。
+#   - NATS 的 durable_name 来自 (consumer_role, topic)，每 (role, topic)
+#     只允许一个 binding，第二次 subscribe 同一 topic 会抛
+#     "consumer is already bound to a subscription"。
+#   - 但 _subscribe_critical_handlers + _subscribe_observer_handlers 历史
+#     实现里有些 critical-routed topic 被重复订阅（不同 handler 各订一次）：
+#       * POSITION_TARGETS (critical)：position_target_handler + audit.handle_position_target
+#       * PORTFOLIO_SNAPSHOTS (critical)：audit.handle_portfolio_snapshot + reconciliation.handle_portfolio_snapshot
+#       * RECONCILIATION_REPORTS (critical)：ai.handle_reconciliation_report + audit.handle_reconciliation_report
+#   - InMemoryEventBus 容忍每 topic 多 handler（内部 list），所以 monolith
+#     模式从未撞到这个问题；4 进程 hybrid 切到 NATS 后立即 restart-loop。
+#
+# 设计：
+#   _CollectingBus 是 EventBus 的薄壳：所有 subscribe 调用先 buffer 进
+#   topic→[handler] dict，调用 flush() 时再按 topic 聚合：
+#     - 单 handler：直接 await real_bus.subscribe(topic, handler)
+#     - 多 handler：包成顺序 fan_out 函数，再 await real_bus.subscribe 一次
+#
+# 顺序：critical 先 collect，observer 后 collect。fan_out 按 collect 顺序
+# 调用各 handler。critical handler 通常裸调（失败抛→NATS NAK 重投），
+# observer handler 已被 resilient_subscription_handler(raise_on_error=False)
+# 包过，永不抛、幂等。所以 critical 失败重投时 observer 跑多次也安全。
+#
+# 为什么不把去重逻辑放进 NatsEventBus 里？
+#   - bus 层本身没有"哪些是同一进程发起的多次订阅"概念；它只看到一次次
+#     subscribe call。把多 handler 聚合是 caller 侧的语义决定。
+#   - 改 caller（_wire_event_subscriptions）一处比改 bus 层透明、安全。
+#   - InMemoryEventBus 也不需要这个逻辑，但放壳里它免费支持。
+# =============================================================================
+class _CollectingBus(EventBus):
+    """Buffer subscribe() calls; on flush() de-duplicate by topic via fan-out."""
+
+    def __init__(self, bus: EventBus) -> None:
+        self._bus = bus
+        self._pending: dict[str, list[MessageHandler]] = {}
+
+    async def publish(self, topic: str, key: str, payload: dict) -> None:
+        # _CollectingBus 只在订阅装配阶段使用，理论上不会被 publish。
+        # 留个直通实现以满足 EventBus 抽象，避免误用时静默丢消息。
+        await self._bus.publish(topic, key, payload)
+
+    async def subscribe(self, topic: str, handler: MessageHandler) -> None:
+        self._pending.setdefault(topic, []).append(handler)
+
+    async def flush(self) -> None:
+        for topic, handlers in self._pending.items():
+            if len(handlers) == 1:
+                await self._bus.subscribe(topic, handlers[0])
+                continue
+            # 多 handler：包 fan_out。注意 default-arg capture 防止 closure
+            # 共享同一个 list 引用（topic-by-topic 循环里 handlers 会被复用）。
+            ordered = tuple(handlers)
+
+            async def _fan_out(message: dict, _hs: tuple[MessageHandler, ...] = ordered) -> None:
+                for h in _hs:
+                    await h(message)
+
+            await self._bus.subscribe(topic, _fan_out)
+        self._pending.clear()
+
+
 async def _subscribe_critical_handlers(
     *,
     bus: EventBus,
@@ -3374,9 +3440,17 @@ async def _wire_event_subscriptions(
 
     Stage 4 引入 NATS 之后，本函数会改成根据 process_role 选择性订阅
     各 process 自己关心的 topic（gateway 不会订阅 fill 事件等）。
+
+    Stage 7 修复（NATS duplicate-binding）：把 critical + observer 的 subscribe
+    调用都灌进 _CollectingBus，flush 时按 topic 聚合 fan-out。原因见
+    _CollectingBus docstring：NATS 同 (role, topic) 只允许一个 durable binding，
+    历史代码里有 critical 与 observer 同时订阅同一 critical-routed topic 的情况
+    （POSITION_TARGETS / PORTFOLIO_SNAPSHOTS / RECONCILIATION_REPORTS），decision
+    进程在 hybrid 模式下会因此 restart-loop。
     """
+    collector = _CollectingBus(slices.bus)
     await _subscribe_critical_handlers(
-        bus=slices.bus,
+        bus=collector,
         feature_engine=slices.feature_engine,
         decision_trigger=slices.decision_trigger,
         order_manager=slices.order_manager,
@@ -3386,13 +3460,14 @@ async def _wire_event_subscriptions(
         position_target_handler=slices.position_target_handler,
     )
     await _subscribe_observer_handlers(
-        bus=slices.bus,
+        bus=collector,
         specs=_observer_subscription_specs(
             audit_service=slices.audit_service,
             ai_service=slices.ai_service,
             reconciliation_service=slices.reconciliation_service,
         ),
     )
+    await collector.flush()
 
 
 def _apply_post_init_guards(

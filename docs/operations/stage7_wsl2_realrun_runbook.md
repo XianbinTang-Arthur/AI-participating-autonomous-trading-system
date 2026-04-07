@@ -244,16 +244,64 @@ git status
 
 ## 6. 实战记录（每次真跑后追加）
 
-### 6.1 第 1 次真跑（待补，由 1.6 步骤填入）
+### 6.1 第 1 次真跑（2026-04-07/08）
 
-- 时间：
-- 环境：
-- 命令实际输出：
-- 是否 healthcheck 全绿：
-- 修复了哪些遗漏：
+- **时间**：2026-04-07 → 2026-04-08（跨 UTC 0 点完成）
+- **环境**：WSL2 Ubuntu，docker 28.2.2，docker compose v2.40.3 binary，AATS image `aats-base:dev`
+- **基础设施 6/6 healthy**：postgres / redis / nats / loki / grafana / jaeger
+- **AATS 4/4 healthy**：gateway / market / decision / execution
+
+- **真跑过程修了 5 个新 gap**（runbook 起步时未预见到）：
+
+  1. **NATS duplicate-subscription bug**（最大 blocker）
+     - 症状：`aats-decision` restart-loop，logs `nats.js.errors.Error: nats: JetStream.Error consumer is already bound to a subscription`
+     - 根因：`aats/bootstrap/config.py` 里 `_subscribe_critical_handlers` 与 `_subscribe_observer_handlers` 同时给 critical-routed topic 各订一个 handler。HybridEventBus 路由这俩都进同一 NATS critical bus；NATS durable_name 由 `(consumer_role, topic)` 派生，第二次 subscribe 同一 (role, topic) 触发 binding 冲突。
+     - 受影响 topic：`POSITION_TARGETS`、`PORTFOLIO_SNAPSHOTS`、`RECONCILIATION_REPORTS`
+     - 为何 monolith 没暴露：InMemoryEventBus 容忍多 handler / topic（内部 list），路径完全不进 NATS。
+     - 修复：在 `_wire_event_subscriptions` 里加 `_CollectingBus` 适配器——所有 subscribe 调用 buffer 进 dict，flush 时按 topic 聚合：单 handler 直通、多 handler 包成 fan-out 后只 subscribe 一次。`_subscribe_critical_handlers` / `_subscribe_observer_handlers` 零改动。
+     - 单测：`tests/unit/test_collecting_bus.py` 6 个 case，覆盖单/多 handler、多 topic closure capture、flush 幂等、publish 直通、异常向上传播。
+
+  2. **Dockerfile `WORKDIR /app` 默认 root:root**
+     - 症状：aats-* 容器启动 `PermissionError: [Errno 13] Permission denied: 'logs'`
+     - 根因：`aats/bootstrap/logging.py:_ensure_log_directories` 在 `/app` 下 mkdir `logs/runtime|debug|info|warning|error`，但 Dockerfile WORKDIR `/app` 是 docker 自动创建的 root:root 目录，aats user (UID 1000) 没写权限。
+     - 修复：Dockerfile runtime 段 `USER aats` 之前加 `RUN chown aats:aats /app`，覆盖未来所有 runtime-created 子目录。
+
+  3. **Jaeger badger volume 权限**
+     - 症状：jaeger 启动 `Failed to init storage factory: Error Creating Dir: "/badger/key" error: mkdir /badger/key: permission denied`
+     - 根因：bind mount `./jaeger/badger:/badger`，host 目录是 root:root，但 jaeger 镜像 runs as UID 10001。
+     - 修复：`scripts/wsl_sudo.sh chown -R 10001:10001 deploy/wsl2-dev/jaeger/badger`
+
+  4. **Grafana provisioning 配置冲突**
+     - 症状：grafana restart-loop，`'folder' and 'folderUID' should be empty using 'foldersFromFilesStructure' option`
+     - 根因：`grafana/provisioning/dashboards/dashboards.yml` 同时设了 `folder: AATS` + `folderUid` + `foldersFromFilesStructure: true`，Grafana 10.4.4 拒绝。
+     - 修复：删掉 `folder` / `folderUid`，保留 `foldersFromFilesStructure: true`，按 files 子目录组织 folder。
+
+  5. **docker compose plugin 缺失**
+     - 症状：WSL2 docker 没装 compose plugin，`docker compose` 命令未找到。
+     - 修复：下载 v2.40.3 binary 到 `~/.docker/cli-plugins/docker-compose`（user-local，无需 sudo）。
+     - 副产物：创建 `scripts/wsl_sudo.sh` 把"从凭证文件读密码 → 注入 sudo stdin"封装成可复用脚本，避免密码在 bash 命令文本里出现。
+
+- **healthcheck 全绿验证**（10/10）：
+  ```text
+  NAME             STATUS                    HEALTH
+  aats-decision    Up 21 seconds             healthy
+  aats-execution   Up 21 seconds             healthy
+  aats-gateway     Up 21 seconds             healthy
+  aats-grafana     Up 23 minutes             healthy
+  aats-jaeger      Up 29 minutes             healthy
+  aats-loki        Up 30 minutes             healthy
+  aats-market      Up 21 seconds             healthy
+  aats-nats        Up 16 minutes             healthy
+  aats-postgres    Up 30 minutes             healthy
+  aats-redis       Up 30 minutes             healthy
+  ```
+- **`curl http://localhost:8000/healthz`**：`{"status":"ok","process_role":"gateway"}` (200)
+- **subscription 健康度**：market 1 sub、decision 22 subs、execution 4 subs、gateway 0 subs（全部 `nats_subscription_registered`，每 (role, topic) 各一次，无重复 binding 错误）。所有 4 进程都到 `process_lifecycle_ready` + `process_lifecycle_heartbeat_started`。
+- **结论**：#1 完成判定 §4 第 1、2、4 项达标。第 3 项（`/system/health` runtime_state）+ 第 5 项（1206 单测全过）留给 1.7 / 1.8 步骤。
 
 ---
 
 ## 7. Changelog
 
 - 2026-04-07：首版。基于 5d 装配 review 发现 3 个 gap（Dockerfile 缺 curl、`/system/health` gateway role NPE、3 daemon 无 healthcheck），列出修复清单 + 真跑命令序列 + 完成判定 + 回滚步骤。等用户审批 §1-§2 修复方案后实施 + 真跑。
+- 2026-04-08：第 1 次真跑完成。10/10 容器 healthy。真跑里又额外修了 5 个 runbook 起步时未预见的 gap：NATS duplicate-subscription（_CollectingBus fan-out）、Dockerfile `/app` ownership、jaeger badger 权限、grafana provisioning 配置冲突、docker compose plugin 缺失。详见 §6.1。
