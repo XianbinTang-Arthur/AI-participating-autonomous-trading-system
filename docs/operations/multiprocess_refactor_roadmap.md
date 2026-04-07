@@ -41,8 +41,8 @@ AATS 当前以单进程 monolith 形态运行：一个 Python 进程同时跑 ga
 |---|---|---|---|
 | 阶段 1 | 基础设施（docker-compose / backup / restore / RUNBOOK） | 完整 | — |
 | 阶段 2 | `build_runtime` 切片化（拆出 4 个 slice builder） | 完整 | — |
-| 阶段 3 | `process_role` 门控 | 半成品 | settings 字段、env 解析、`_resolve_effective_process_role` 都有，但 4 个 slice builder 内部没有按 `process_role` 跳过任何组件——目前不管什么 role 都构造完整 runtime |
-| 阶段 4 | NATS bus 骨架 | 半成品 | `NatsEventBus` / `HybridEventBus` / `ConsumerConfigSpec` 都已实现并有单元测试，但 `build_runtime` 里根本没 import 它，没人真的在用 |
+| 阶段 3 | `process_role` 门控 | 完整 | 6 个 slice builder + `_SLICE_REQUIRED_ROLES` 矩阵已就位，每个 role 只构造本职 service。配套单测：`test_process_role_settings.py`、`test_scoped_runtime_lock_key.py` |
+| 阶段 4 | NATS bus 接入 build_runtime | 完整 | 单元路径 ✅ 26 个 nats_bus 单测 + 6 个 bus shutdown 单测全过；集成路径 ✅ 4 个 testcontainers + multiprocessing 跨进程测试在 WSL2 Ubuntu + Docker 28.2.2 + nats:2.10-alpine + nats-py 2.14 环境下全过 (14.27s)。回归保护：`test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds` 防止 max_age 双重换算 bug 复发 |
 | 加餐 A | row_version 乐观锁（OCC） | 完整 | `save_execution_bundle_versioned` 完整接口 + InMemory 实现 + Postgres CAS（含 `INSERT ... ON CONFLICT DO NOTHING` 修复）+ 单元测试覆盖 |
 | 加餐 B | `scoped_runtime_lock_key`（按 role 派生 advisory lock key） | 完整 | 单元测试覆盖；前置条件：阶段 3 真门控起来后才能让每个 role 跑自己的 scheduler 不打架 |
 | 阶段 5 | NATS 全量 + 跨进程消息流 | 未动 | 决策↔执行、风控→决策、reconciliation→决策等所有跨 role 的 fan-out 仍走 in-memory bus |
@@ -51,7 +51,7 @@ AATS 当前以单进程 monolith 形态运行：一个 Python 进程同时跑 ga
 | 阶段 8 | OTel telemetry 骨架 | 半成品 | no-op fallback + config，没真的接 collector，没在任何 hot path 埋 span |
 | 阶段 9 | 长周期验证（30 天 dryrun） | 未动 | 依赖前面全部到位 |
 
-**统计**：完整 4 项（阶段 1、2 + 加餐 A、B），半成品 4 项（阶段 3、4、6、8），未动 3 项（阶段 5、7、9）。
+**统计**：完整 6 项（阶段 1、2、3、4 + 加餐 A、B），半成品 2 项（阶段 6、8），未动 3 项（阶段 5、7、9）。
 
 ---
 
@@ -116,6 +116,47 @@ assert runtime.execution_service is not None
 - `NatsEventBus.connect()` 失败时 build_runtime 必须 fail-fast，不能静默 fallback 到 in-memory（否则跨进程消息会神秘消失）
 
 **验收**：单个 slice 在 docker-compose 起 NATS 容器后能 publish 一条 envelope，再用另一个 NATS 客户端 subscribe 收到。
+
+**进度（2026-04-07）**：
+
+| Step | 内容 | 状态 |
+|---|---|---|
+| Step 1 | `pyproject.toml` 加 `[project.optional-dependencies] nats = ["nats-py>=2.7"]` | ✅ |
+| Step 2 | `AATSSettings` 加 `event_bus_backend / nats_url / nats_stream_name / nats_stream_max_age_seconds` + validator + 41 单测 | ✅ |
+| Step 3 | `aats/bootstrap/config.py` 加 `_construct_event_bus` 工厂 + `_start_event_bus` 生命周期，`_build_shared_runtime_slice` 调它；`HybridEventBus` 加 `start/close`；`NatsEventBus` 加 `start(topics=)` 便利方法 + 23 单测 | ✅ |
+| Step 4 | `ApplicationRuntime.stop_background_tasks` best-effort `await bus.close()`，顺序在 db dispose 之前 + 6 单测 | ✅ |
+| Step 5 | testcontainers 集成测试：单 bus + HybridEventBus 路由 round-trip — 见 `tests/integration/test_nats_event_bus_roundtrip.py` | ✅ 写好 + WSL2 实跑全过 |
+| Step 6 | 跨进程 round-trip：`multiprocessing.Process` (spawn) 起独立 publisher 子进程 — 同上文件 `TestCrossProcessNatsRoundTrip` | ✅ 写好 + WSL2 实跑全过 |
+| Step 7 | 更新本 roadmap（即本节修改） | ✅ |
+
+**集成测试发现 + 修复的真实 bug**（2026-04-07）：
+
+1. **`max_age` 双重换算 bug**（`aats/bus/nats_bus.py:269`）：原代码把秒预乘 1e9 后传给 `StreamConfig.max_age`，但 nats-py 2.14 的 `max_age` 字段以**秒**为单位（`# in seconds`），内部 `_to_nanoseconds()` 自行换算 → 双重换算后值变成 6×10^19，NATS server JSON parser 直接 reject `code=400 err_code=10025 description='invalid JSON'`。修复：直接传秒。回归测试：`test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds`。
+2. **集成测试 EventEnvelope schema 写错**：原测试用 `EventEnvelope(topic=..., key=..., ts=..., payload=...)` 缺少 `event_type` 和 `source_component` 必填字段。已修。
+3. **同 NATS server 上多个 stream 想 claim 同一 subject**：JetStream 不允许两个不同 stream 拥有相同 subject。在 `asyncTearDown` 加 `_purge_all_streams` 做隔离；observer verifier 用独立 stream 名 `AATS_RT_OBSERVER_VERIFIER`。
+
+**集成测试运行方式**：
+
+```bash
+# 1. 安装可选依赖
+pip install -e .[nats-integration]
+
+# 2. 确保本地 docker 可用（Windows 上启动 Docker Desktop 或 WSL2 内的 docker）
+docker info
+
+# 3. 设置环境变量并运行
+AATS_RUN_NATS_INTEGRATION=1 python -m pytest tests/integration/test_nats_event_bus_roundtrip.py -v
+```
+
+**默认行为**：环境变量未设置或依赖未装时，整组测试 `unittest.skipUnless(...)` 跳过，不影响 CI / 单元套件。
+
+**实跑环境**（已验证 2026-04-07）：
+- WSL2 Ubuntu 22.04 LTS（用户 WSL 在 `F:\WSL\Ubuntu\ext4.vhdx`）
+- Python 3.12.3（venv `~/aats-venv`）
+- Docker 28.2.2（WSL 内置 systemd dockerd）
+- nats-py 2.14.0、testcontainers 4.14.2、nats:2.10-alpine
+
+跑出来 `Ran 4 tests in 14.270s OK`，且发现并修复了 1 个生产代码 bug。
 
 ---
 
@@ -256,3 +297,5 @@ assert runtime.execution_service is not None
 ## Changelog
 
 - 2026-04-07：首版。基于 review 完阶段 1-4 + 加餐 OCC 后的真实状态盘点，确认阶段编号与原 9 阶段计划对齐。
+- 2026-04-07：阶段 3 真门控合并完成（半成品 → 完整）；阶段 4 NATS 接入 build_runtime 的 Step 1-4 完成，1176 单测全过；Step 5-6 的 testcontainers + multiprocessing 跨进程集成测试已写在 `tests/integration/test_nats_event_bus_roundtrip.py`，通过 `AATS_RUN_NATS_INTEGRATION=1` + `pip install -e .[nats-integration]` 双重 gating，默认 skip 不影响主套件。Step 7（本 roadmap 更新）随之完成。节点 1.2 仍保留"基本完整"状态，待集成测试在 Docker 环境真跑过一次绿才能升级为"完整"。
+- 2026-04-07（同日续）：在 WSL2 Ubuntu 22.04 + Docker 28.2.2 + Python 3.12 venv 真跑 Step 5-6 集成测试 `Ran 4 tests in 14.270s OK`。过程中发现并修复 1 个生产代码 bug：`aats/bus/nats_bus.py` 把 `stream_max_age_seconds` 预乘 1e9 后传给 `StreamConfig.max_age`，但 nats-py 2.14 的字段以秒为单位、内部自行换算 → 双重换算后值变成 6×10^19，NATS server 直接 reject `invalid JSON`。修复方式：直接传秒；并补回归单测 `test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds`。集成测试还修了 `EventEnvelope` 必填字段缺失（`event_type` / `source_component`）和同 server 多 stream subject overlap 隔离问题。**节点 1.2 升级为"完整"**，阶段 4 整体升级为"完整"。

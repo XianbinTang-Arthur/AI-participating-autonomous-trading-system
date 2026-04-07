@@ -25,7 +25,16 @@ from aats.bootstrap.settings import (
     PROCESS_ROLE_MARKET,
     PROCESS_ROLE_MONOLITH,
 )
+from aats.bus.base import EventBus
 from aats.bus.memory_bus import InMemoryEventBus
+from aats.bus.nats_bus import (
+    DEFAULT_CRITICAL_TOPICS,
+    DEFAULT_OBSERVER_TOPICS,
+    HybridBusRouting,
+    HybridEventBus,
+    NatsBusConfig,
+    NatsEventBus,
+)
 from aats.events import topics
 from aats.events.envelopes import build_envelope, parse_payload, publish_model
 from aats.schemas.decision import DecisionOutcome, PositionTarget
@@ -375,7 +384,7 @@ class ApplicationRuntime:
     environment_capabilities: EnvironmentCapabilities
     policy_profile: PolicyProfile
     recovery_policy: RecoveryPolicy
-    bus: InMemoryEventBus
+    bus: EventBus
     event_store: EventStore
     market_gateway: MarketDataGateway
     # Stage 3 多进程切片化：以下 slice 字段在 process_role 不需要时为 None。
@@ -502,6 +511,23 @@ class ApplicationRuntime:
         close_rest_client = getattr(self.account_service.client, "aclose", None)
         if callable(close_rest_client):
             await close_rest_client()
+        # Stage 4: 关闭 EventBus（drain 任何 in-flight NATS publish + unsubscribe
+        # 所有 JetStream consumer）。InMemoryEventBus 没有 close 方法，跳过；
+        # HybridEventBus / NatsEventBus 有 close，会做优雅 drain。
+        # 必须在 database_runtime.dispose() 之前完成，因为 publish_envelope 的
+        # 双写路径需要 event_store / DB 仍然可用。
+        bus_close = getattr(self.bus, "close", None)
+        if bus_close is not None:
+            try:
+                await bus_close()
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "event_bus_shutdown_close_failed",
+                    level="warning",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
         if self.database_runtime is not None:
             self.database_runtime.dispose()
 
@@ -1096,7 +1122,7 @@ def _build_position_target_handler(
     market_gateway: MarketDataGateway,
     kill_switch: KillSwitch,
     metrics: MetricsRegistry,
-    bus: InMemoryEventBus,
+    bus: EventBus,
     event_store: EventStore,
     execution_repo: ExecutionRepository,
     strategy_runtime_repo: StrategyRuntimeRepository | None = None,
@@ -2365,7 +2391,7 @@ def _build_position_target_handler(
 
 async def _subscribe_critical_handlers(
     *,
-    bus: InMemoryEventBus,
+    bus: EventBus,
     feature_engine: FeatureEngine | None,
     decision_trigger: DecisionCycleTrigger | None,
     order_manager: OrderManager | None,
@@ -2477,7 +2503,7 @@ def _observer_subscription_specs(
 
 async def _subscribe_observer_handlers(
     *,
-    bus: InMemoryEventBus,
+    bus: EventBus,
     specs: tuple[ObserverSubscriptionSpec, ...],
 ) -> None:
     for spec in specs:
@@ -2636,6 +2662,88 @@ class _RuntimeSlices:
     recovery_service: Any = None
 
 
+def _construct_event_bus(
+    *,
+    runtime_settings: AATSSettings,
+    event_store: Any,
+    process_role: str | None,
+) -> EventBus:
+    """Stage 4 工厂：按 settings.event_bus_backend 选择 EventBus 实现。
+
+    返回值：
+        - "in_memory" → InMemoryEventBus（向后兼容默认，monolith 唯一选择）
+        - "hybrid"    → HybridEventBus(critical=NatsEventBus, observer=InMemoryBus)
+        - "nats"      → NatsEventBus（全部 topic 都走 NATS，Stage 5+）
+
+    本函数 **不做任何 I/O**：返回的 bus 实例尚未 connect/ensure_stream。
+    生命周期启动统一在 build_runtime 调用 ``await bus.start()``，避免让
+    `_build_shared_runtime_slice` 变成 async 而破坏 6 个 slice builder 的对称性。
+
+    Why fail-fast: 4 进程拓扑必须显式选 hybrid/nats；如果环境配错误地把
+    backend 设为 in_memory，跨进程的 fill / decision 事件会因为 InMemoryBus
+    没有跨进程能力而静默丢失。设计上不会自动从 hybrid 退化到 in_memory。
+    """
+    backend = runtime_settings.event_bus_backend
+    persistence_mode = runtime_settings.event_persistence_mode
+    consumer_role = process_role or "monolith"
+
+    if backend == "in_memory":
+        return InMemoryEventBus(
+            event_store=event_store,
+            persistence_mode=persistence_mode,
+        )
+
+    nats_config = NatsBusConfig(
+        servers=(runtime_settings.nats_url,),
+        stream_name=runtime_settings.nats_stream_name,
+        stream_max_age_seconds=float(runtime_settings.nats_stream_max_age_seconds),
+    )
+
+    if backend == "nats":
+        # Stage 5+：全部 topic 都走 NATS。critical + observer 都进 stream。
+        return NatsEventBus(
+            config=nats_config,
+            event_store=event_store,
+            persistence_mode=persistence_mode,
+            consumer_role=consumer_role,
+        )
+
+    if backend == "hybrid":
+        # Stage 4 主路径：critical → NATS file storage 跨进程；observer → memory
+        critical_bus = NatsEventBus(
+            config=nats_config,
+            event_store=event_store,
+            persistence_mode=persistence_mode,
+            consumer_role=consumer_role,
+        )
+        observer_bus = InMemoryEventBus(
+            event_store=None,  # 双写已由 critical_bus 接管，observer 不重复落盘
+            persistence_mode="permissive",
+        )
+        return HybridEventBus(
+            critical_bus=critical_bus,
+            observer_bus=observer_bus,
+            routing=HybridBusRouting(),
+        )
+
+    raise ValueError(
+        f"unsupported event_bus_backend: {backend!r} "
+        f"(this should have been rejected by AATSSettings validator)"
+    )
+
+
+async def _start_event_bus(bus: EventBus) -> None:
+    """生命周期启动钩子：对支持 ``start()`` 的 bus 实现调用一次。
+
+    InMemoryEventBus 没有 start，跳过；HybridEventBus / NatsEventBus 有 start，
+    会触发 NATS connect + JetStream ensure_stream。
+    """
+    start_method = getattr(bus, "start", None)
+    if start_method is None:
+        return
+    await start_method()
+
+
 def _build_shared_runtime_slice(
     *,
     runtime_settings: AATSSettings,
@@ -2656,9 +2764,13 @@ def _build_shared_runtime_slice(
     if not _slice_active("shared", effective_process_role=effective_process_role):
         return
     slices.metrics = MetricsRegistry()
-    slices.bus = InMemoryEventBus(
+    # Stage 4: bus 实现按 settings.event_bus_backend 选择。
+    # 注意 _construct_event_bus 不做 I/O；NATS 连接和 stream 创建在
+    # build_runtime 调用 await _start_event_bus(slices.bus) 时才发生。
+    slices.bus = _construct_event_bus(
+        runtime_settings=runtime_settings,
         event_store=storage.event_store,
-        persistence_mode=runtime_settings.event_persistence_mode,
+        process_role=effective_process_role,
     )
     _backfill_fill_outcomes_from_event_store(
         event_store=storage.event_store,
@@ -3455,6 +3567,11 @@ async def build_runtime(
         slices=slices,
         effective_process_role=effective_process_role,
     )
+    # Stage 4: bus 生命周期启动必须在任何 subscriber 注册（_build_*_slice
+    # 内部 subscribe / _wire_event_subscriptions）之前完成；否则 NatsEventBus
+    # 的 .subscribe() 会因为 _js 未初始化而抛 RuntimeError。
+    if slices.bus is not None:
+        await _start_event_bus(slices.bus)
     _build_market_slice(slices=slices, effective_process_role=effective_process_role)
     _build_decision_slice(
         runtime_settings=runtime_settings,

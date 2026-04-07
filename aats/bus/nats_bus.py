@@ -197,6 +197,17 @@ class NatsEventBus(EventBus):
         self.logger = get_logger("aats.event_bus.nats")
 
     # ── 生命周期 ────────────────────────────────────────────────
+    async def start(self, *, topics: list[str] | None = None) -> None:
+        """便利方法：connect + ensure_stream 一次完成。
+
+        Stage 4 集成时 build_runtime 会调用本方法启动 NATS bus；
+        在 _construct_event_bus 之后单独调用，避免让 _build_shared_runtime_slice
+        变成 async 函数（其他 slice builder 都是 sync，保持对称）。
+        """
+        await self.connect()
+        if topics:
+            await self.ensure_stream(topics=topics)
+
     async def connect(self) -> None:
         """惰性连接 NATS server。"""
         if self._connected:
@@ -256,16 +267,17 @@ class NatsEventBus(EventBus):
             raise RuntimeError("nats-py JetStream API unavailable") from exc
 
         subjects = [self._config.subject_for(topic) for topic in topics]
-        # JetStream max_age 单位是纳秒；NatsBusConfig 用秒表达更直观，
-        # 在这里统一转换。
-        max_age_ns = int(self._config.stream_max_age_seconds * 1_000_000_000)
+        # nats-py StreamConfig.max_age 字段以**秒**为单位（见
+        # nats/js/api.py: ``max_age: Optional[float] = None  # in seconds``），
+        # 内部 _to_nanoseconds() 自行换算。这里**直接传秒**，不要预先乘 1e9，
+        # 否则会被双重换算成超大整数，触发 NATS server "invalid JSON" 拒绝。
         config = StreamConfig(
             name=self._config.stream_name,
             subjects=subjects,
             retention=RetentionPolicy.LIMITS,
             storage=StorageType.FILE,
             discard=DiscardPolicy.OLD,
-            max_age=max_age_ns,
+            max_age=self._config.stream_max_age_seconds,
         )
         await self._js.add_stream(config=config)
         log_event(
@@ -478,6 +490,52 @@ class HybridEventBus(EventBus):
         self._observer = observer_bus
         self._routing = routing or HybridBusRouting()
         self.logger = get_logger("aats.event_bus.hybrid")
+
+    @property
+    def critical_bus(self) -> EventBus:
+        """暴露 critical bus 供 build_runtime / shutdown 路径访问其生命周期方法。"""
+        return self._critical
+
+    @property
+    def observer_bus(self) -> EventBus:
+        return self._observer
+
+    @property
+    def routing(self) -> HybridBusRouting:
+        return self._routing
+
+    async def start(self) -> None:
+        """启动两条底层总线：将 critical_topics 透传给关键总线。
+
+        这一层是为了让 build_runtime 调用方只需要 ``await bus.start()``
+        即可，不必关心底层是 InMemoryEventBus（无 start）还是 NatsEventBus
+        （需要 connect + ensure_stream）。
+        """
+        critical_topics = sorted(self._routing.critical_topics)
+        critical_start = getattr(self._critical, "start", None)
+        if critical_start is not None:
+            await critical_start(topics=critical_topics)
+        observer_start = getattr(self._observer, "start", None)
+        if observer_start is not None:
+            await observer_start()
+
+    async def close(self) -> None:
+        """优雅关闭两条底层总线（best-effort，单条失败不影响另一条）。"""
+        for bus_name, bus in (("critical", self._critical), ("observer", self._observer)):
+            close_method = getattr(bus, "close", None)
+            if close_method is None:
+                continue
+            try:
+                await close_method()
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "hybrid_bus_close_failed",
+                    level="warning",
+                    bus=bus_name,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
 
     def _select(self, topic: str) -> EventBus:
         return self._critical if self._routing.route_for(topic) == "critical" else self._observer

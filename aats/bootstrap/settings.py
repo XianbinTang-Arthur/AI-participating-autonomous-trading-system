@@ -87,6 +87,24 @@ ALLOWED_PROCESS_ROLES: frozenset[str] = frozenset(
     }
 )
 
+# ── 多进程切片化（Stage 4）EventBus 后端选择 ─────────────────────
+# in_memory = 进程内 InMemoryEventBus（向后兼容默认，无外部依赖）
+# hybrid    = HybridEventBus(critical=NatsEventBus, observer=InMemoryBus)
+#             critical topic 走 NATS JetStream file storage 跨进程，
+#             observer topic 仍走进程内内存以避免广播开销
+# nats      = 全部 topic 都走 NatsEventBus（Stage 5+ 全量切换用）
+EVENT_BUS_BACKEND_IN_MEMORY = "in_memory"
+EVENT_BUS_BACKEND_HYBRID = "hybrid"
+EVENT_BUS_BACKEND_NATS = "nats"
+ALLOWED_EVENT_BUS_BACKENDS: frozenset[str] = frozenset(
+    {
+        EVENT_BUS_BACKEND_IN_MEMORY,
+        EVENT_BUS_BACKEND_HYBRID,
+        EVENT_BUS_BACKEND_NATS,
+    }
+)
+EventBusBackend = Literal["in_memory", "hybrid", "nats"]
+
 _PLACEHOLDER_TOKENS = (
     "REPLACE_WITH_",
     "CHANGE_ME",
@@ -155,6 +173,25 @@ class AATSSettings(BaseSettings):
     process_role: str | None = Field(
         default=None,
         description="Multi-process role for slice-aware boot. None = monolith.",
+    )
+    # ── 多进程切片化（Stage 4）EventBus backend ─────────────────────
+    # 默认 in_memory 保持单进程拓扑零外部依赖；4 进程拓扑下应设为 hybrid，
+    # 让 critical topic 走 NATS JetStream file storage 跨进程广播。
+    event_bus_backend: EventBusBackend = Field(
+        default="in_memory",
+        description="EventBus implementation: in_memory (single-proc) | hybrid | nats.",
+    )
+    nats_url: str = Field(
+        default="nats://127.0.0.1:4222",
+        description="NATS server URL. Used when event_bus_backend in (hybrid, nats).",
+    )
+    nats_stream_name: str = Field(
+        default="AATS_EVENTS",
+        description="NATS JetStream stream name for AATS critical events.",
+    )
+    nats_stream_max_age_seconds: int = Field(
+        default=7 * 24 * 60 * 60,
+        description="JetStream retention max age (seconds). Default 7 days.",
     )
     max_abs_position_qty: float = 0.01
     max_notional_per_symbol: float = 1_000.0
@@ -583,6 +620,34 @@ class AATSSettings(BaseSettings):
             )
         return normalized
 
+    @field_validator("event_bus_backend", mode="before")
+    @classmethod
+    def normalize_event_bus_backend(cls, value: Any) -> Any:
+        """规范化 AATS_EVENT_BUS_BACKEND 输入，校验合法集合。
+
+        - None / 空字符串 / 空白 → "in_memory"（向后兼容默认）
+        - 字符串 → 去空白、转小写
+        - 不在合法集合内 → ValueError
+
+        默认 in_memory 是为了让无 NATS 的本地开发/CI/单进程拓扑保持零依赖；
+        4 进程拓扑必须显式设为 hybrid 或 nats，避免静默退化为单进程。
+        """
+        if value is None:
+            return "in_memory"
+        if not isinstance(value, str):
+            raise ValueError(
+                f"event_bus_backend must be string, got {type(value).__name__}"
+            )
+        normalized = value.strip().lower()
+        if not normalized:
+            return "in_memory"
+        if normalized not in ALLOWED_EVENT_BUS_BACKENDS:
+            raise ValueError(
+                f"event_bus_backend={normalized!r} is not in allowed set "
+                f"{sorted(ALLOWED_EVENT_BUS_BACKENDS)}"
+            )
+        return normalized
+
     @field_validator("strategy_entry_allowed_regimes", "strategy_short_entry_allowed_regimes", mode="before")
     @classmethod
     def normalize_allowed_regimes(cls, value: Any) -> Any:
@@ -750,6 +815,22 @@ class AATSSettings(BaseSettings):
         if self.trading_product_type == "spot" and self.margin_mode == "cash":
             if float(self.max_target_leverage) != 1.0 or float(self.default_target_leverage) != 1.0:
                 raise ValueError("spot_cash_runtime_requires_unit_leverage")
+        # Stage 4: 当 event_bus_backend 选择 NATS 后端时，nats_url / stream / max_age
+        # 必须可用。这里只做格式 sanity check（不实际连服务器），让 build_runtime
+        # 之前就能在 settings 层 fail-fast，避免到了 _build_shared_runtime_slice 才崩。
+        if self.event_bus_backend != "in_memory":
+            url = (self.nats_url or "").strip()
+            if not url:
+                raise ValueError("event_bus_backend_requires_non_empty_nats_url")
+            if not (url.startswith("nats://") or url.startswith("tls://")):
+                raise ValueError(
+                    "nats_url_must_start_with_nats_or_tls_scheme"
+                )
+            stream_name = (self.nats_stream_name or "").strip()
+            if not stream_name:
+                raise ValueError("event_bus_backend_requires_non_empty_nats_stream_name")
+            if int(self.nats_stream_max_age_seconds) < 1:
+                raise ValueError("nats_stream_max_age_seconds_must_be_positive")
         return self
 
     @classmethod

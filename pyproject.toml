@@ -23,5 +23,19 @@ dependencies = [
   "websockets>=13.0",
 ]
 
+[project.optional-dependencies]
+# Stage 4 多进程切片化重构使用：HybridEventBus 的关键 topic 走 NATS JetStream。
+# 仅在 AATS_EVENT_BUS_BACKEND=hybrid|nats 时需要安装；in_memory backend 不依赖。
+nats = [
+  "nats-py>=2.7",
+]
+# Stage 4 集成测试可选依赖：用 testcontainers 拉真 NATS 容器跑跨进程 round-trip。
+# 仅 tests/integration/test_nats_event_bus_roundtrip.py 在 AATS_RUN_NATS_INTEGRATION=1
+# 时使用，运行时进程不依赖。安装：pip install -e .[nats-integration]
+nats-integration = [
+  "nats-py>=2.7",
+  "testcontainers>=4.0",
+]
+
 [tool.setuptools.packages.find]
 include = ["aats*"]

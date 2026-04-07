@@ -331,9 +331,45 @@ def test_consumer_config_spec_is_frozen() -> None:
 
 
 def test_stream_max_age_default_is_seven_days() -> None:
-    """默认 max_age = 7 天（秒数表示，纳秒转换在 ensure_stream 里）。"""
+    """默认 max_age = 7 天（NatsBusConfig 持秒；nats-py StreamConfig.max_age 也以秒为单位，
+    内部 _to_nanoseconds() 自行换算，调用方不要再预乘 1e9 —— 否则会被双重换算成超大整数，
+    触发 NATS server "invalid JSON" 拒绝。"""
     config = NatsBusConfig()
     assert config.stream_max_age_seconds == 7 * 24 * 60 * 60
+
+
+def test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds() -> None:
+    """回归测试：ensure_stream 必须把 stream_max_age_seconds 原样（秒）
+    传给 nats-py StreamConfig.max_age，**不能**预先乘 1e9。
+
+    Why: nats-py 2.14 文档明确 max_age 字段以秒为单位
+    （nats/js/api.py: ``max_age: Optional[float] = None  # in seconds``），
+    内部 _to_nanoseconds() 自行换算。早期实现错把秒预乘 1e9 后再传，
+    导致 nats-py 又乘一次 1e9，最终发出 60_000_000_000_000_000_000 这种
+    超大值，NATS server JSON parser 直接 reject 'invalid JSON'。
+    集成测试发现这个 bug 后补的回归保护。
+    """
+    import asyncio as _asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(stream_max_age_seconds=3600),
+        consumer_role="test",
+    )
+    # 绕过真 connect()：直接装一个 fake JetStream context
+    fake_js = MagicMock()
+    fake_js.add_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    _asyncio.run(bus.ensure_stream(topics=["decisions"]))
+
+    fake_js.add_stream.assert_awaited_once()
+    cfg = fake_js.add_stream.await_args.kwargs["config"]
+    # 关键断言：是 3600（秒），不是 3600 * 1e9（纳秒）
+    assert cfg.max_age == 3600, (
+        f"ensure_stream 把 max_age 传成了 {cfg.max_age}，期望 3600 秒。"
+        " 看起来又把秒预乘了 1e9 —— 见 docstring 的 Why。"
+    )
 
 
 def test_stream_max_age_can_be_overridden() -> None:
