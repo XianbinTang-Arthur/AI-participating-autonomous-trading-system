@@ -25,7 +25,6 @@
 | `merge/merge_pipeline.py` | 端到端编排：validate -> bronze -> silver + 质量门控 |
 | `gold/funding_aligner.py` | as-of join：funding rate 对齐到 candle bar |
 | `gold/replay_bar_builder.py` | Gold replay bar 构建 + upsert |
-| `jobs/scheduler.py` | 滚动采集调度器 (cadence boundary + bucket 防重) |
 | `jobs/checkpoint_manager.py` | checkpoint 水位线管理 (get/upsert/advance) |
 | `jobs/run_registry.py` | ingest_run / run_item 生命周期管理 |
 | `jobs/gap_repair.py` | Silver 层 gap 检测 + repair run 创建 |

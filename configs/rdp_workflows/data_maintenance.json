@@ -1,6 +1,6 @@
 {
   "workflow": "data_maintenance",
-  "description": "数据层维护: 日批 OKX 增量采集、gap detection、gold build、数据完整性检查",
+  "description": "数据层维护: 日批 OKX 增量采集 (含内置 Gold 构建 + Gap 检测) + artifact 索引重建",
   "schedule_hint": "daily 04:00 UTC",
   "tasks": [
     {
@@ -10,22 +10,6 @@
       "timeout_seconds": 900,
       "enabled": true,
       "allow_failure": false
-    },
-    {
-      "name": "gap_detection",
-      "description": "检测 Bronze 层数据缺口 (额外检查, daily_ingest 内部已经做过)",
-      "command": "python -m aats.data_platform.validate.gap_detector --check",
-      "timeout_seconds": 120,
-      "enabled": true,
-      "allow_failure": true
-    },
-    {
-      "name": "gold_build",
-      "description": "构建 Gold 层聚合数据 (额外检查, daily_ingest 内部已经做过)",
-      "command": "python -m aats.data_platform.gold.builder --incremental",
-      "timeout_seconds": 300,
-      "enabled": true,
-      "allow_failure": true
     },
     {
       "name": "artifact_index_rebuild",

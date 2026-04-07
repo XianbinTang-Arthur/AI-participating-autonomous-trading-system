@@ -843,8 +843,10 @@ docs/
 scripts/                  # 61 个 Python 脚本
   # ── 主系统 ──
   start_api.py / generate_managed_config_artifacts.py / archive_event_store.py
-  # ── RDP Phase 1: 数据 ──
-  rdp_start.py / rdp_historical_daemon.py / rdp_realtime_daemon.py
+  # ── RDP Phase 1: 数据 (2026-04-07 起 daemon 模式已退役, 改为日批) ──
+  rdp_run_daily_ingest.py                       # ★ 新日批入口 (替代 realtime daemon)
+  rdp_historical_daemon.py                      # 仅 --once 模式 (拖完 ZIP 后调用)
+  rdp_start.py / rdp_realtime_daemon.py         # 兼容薄壳 (转发到 daily_ingest)
   rdp_build_gold.py / rdp_build_gold_all.py / rdp_detect_gaps.py
   # ── RDP Phase 2: 研究 ──
   rdp_run_replay.py / rdp_run_parameter_scan.py / rdp_run_calibration_batch.py
@@ -963,10 +965,15 @@ cp configs/templates/.env.research.example .env.research
 python scripts/rdp_init_db.py
 
 # 3. 放入历史数据（按目录约定放入 ZIP）
-# data/historical/incoming/candles_swap/1m/BTC-USDT-SWAP-candlesticks-*.zip
+# data/historical/incoming/candles_swap/15m/BTC-USDT-SWAP-candlesticks-*.zip
 
-# 4. 一键启动（历史消费 + 实时采集同时运行）
-python scripts/rdp_start.py
+# 4a. 消费 incoming/ 中的 ZIP 文件 (只在拖完 ZIP 后跑一次)
+python scripts/rdp_historical_daemon.py --once
+
+# 4b. 日批增量采集 (替代废弃的 realtime daemon, 推荐 cron 每天调用一次)
+python scripts/rdp_run_daily_ingest.py
+# 或纳入 data_maintenance workflow:
+python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance
 
 # 5. 如果 Silver 有数据但 Gold 为空，手动触发 Gold 构建
 python scripts/rdp_build_gold_all.py --dry-run   # 预览

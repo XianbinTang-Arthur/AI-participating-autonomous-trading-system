@@ -1,60 +1,52 @@
 #!/usr/bin/env python3
-"""Research Data Platform — unified launcher.
+"""Research Data Platform - thin compatibility shim.
 
-⚠️ DEPRECATION NOTICE (2026-04-07)
-─────────────────────────────────────────────────────────────────────
-本启动器的 daemon 常驻模式已被废弃。原因:
-  - RDP 所有消费方都是 daily/weekly cadence (data_maintenance / governance_cycle
-    / research_cycle / decision_cycle), 不需要 intra-minute 新鲜度。
-  - 实盘交易引擎自有 OKX websocket 直连, 不消费 RDP 数据。
-  - 60s tick 每天产生 ~7800 次 OKX REST 调用 (4 symbol × 5 tf), 99% 浪费。
+HISTORY (2026-04-07)
+-----------------------------------------------------------------
+This script was originally a unified launcher that ran the
+historical and realtime daemons concurrently in two threads in
+the same process. The daemon mode has been retired and cleaned up:
+  - multi-threaded daemon orchestration removed
+  - importlib-based dynamic daemon loading removed
+  - signal handling / Ctrl+C graceful shutdown removed
 
-✅ 推荐用法 (Step 1+3 迁移路径):
-  改用 cron / Task Scheduler 每天调用一次 data_maintenance workflow:
+This shim is kept only to preserve operator muscle memory. All
+invocations are forwarded via subprocess to:
+  1. scripts/rdp_run_daily_ingest.py        (replaces realtime daemon)
+  2. scripts/rdp_historical_daemon.py --once (scans incoming/ once)
+-----------------------------------------------------------------
 
-  # Linux crontab
-  0 4 * * * python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance
+Recommended usage (call replacements directly):
+    python scripts/rdp_run_daily_ingest.py
+    python scripts/rdp_historical_daemon.py --once   # after dropping ZIPs
 
-  # Windows Task Scheduler
-  schtasks /create /tn "RDP_DataMaintenance" \\
-      /tr "python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance" \\
-      /sc daily /st 04:00
+Or via cron / Task Scheduler:
+    0 4 * * * python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance
 
-historical daemon 同样推荐改为手工拖完 ZIP 后调用 --once:
-  python scripts/rdp_historical_daemon.py --once
+Compatible usage (this shim runs both replacements in sequence):
+    python scripts/rdp_start.py                  # daily_ingest + historical --once
+    python scripts/rdp_start.py --realtime-only  # only daily_ingest
+    python scripts/rdp_start.py --historical-only # only historical --once
 
-详见: docs/operations/rdp_scheduling_strategy.md
-─────────────────────────────────────────────────────────────────────
-
-历史功能 (保留以兼容旧代码路径):
-  1. 历史数据聚合 daemon  (扫描 incoming/, 消费 ZIP)
-  2. 实时数据聚合 daemon  (滚动采集 + Gold + Gap)
-
-两个 daemon 各跑在独立线程中，共享同一进程。
-Ctrl+C 优雅退出。
-
-Usage (legacy, deprecated):
-    # ⚠️ 不再推荐: 启动全部 (会打印 deprecation 警告)
-    python scripts/rdp_start.py
-
-    # 只启动历史 daemon
-    python scripts/rdp_start.py --historical-only
-
-    # 只启动实时 daemon
-    python scripts/rdp_start.py --realtime-only
-
-    # 自定义间隔
-    python scripts/rdp_start.py --historical-interval 60 --realtime-interval 30
+See docs/operations/rdp_scheduling_strategy.md
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
-import signal
+import os
+import subprocess
 import sys
-import threading
-import time
+from pathlib import Path
+
+# Force UTF-8 stdout/stderr on Windows so Chinese log messages render
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 logging.basicConfig(
     level=logging.INFO,
@@ -62,183 +54,92 @@ logging.basicConfig(
 )
 log = logging.getLogger("rdp_start")
 
-# 全局停止信号
-_stop_event = threading.Event()
+_SCRIPT_DIR = Path(__file__).resolve().parent
 
 
-def _signal_handler(signum: int, frame: object) -> None:
-    log.info("Received signal %d, shutting down...", signum)
-    _stop_event.set()
+def _utf8_subprocess_env() -> dict[str, str]:
+    """Return an env dict that forces UTF-8 stdout/stderr in child Python.
+
+    Required because each subprocess starts its own Python interpreter
+    and rechecks the locale; without this, Windows children fall back
+    to GBK and mangle Chinese paths/log messages.
+    """
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    return env
 
 
-def _run_historical_thread(interval: int) -> None:
-    """历史 daemon 线程入口。"""
-    from pathlib import Path
-
-    from aats.data_platform.config import get_settings
-
-    settings = get_settings()
-    incoming = Path(settings.historical_incoming_dir)
-    completed = Path(settings.historical_completed_dir)
-    failed = Path(settings.historical_failed_dir)
-
-    for d in (incoming, completed, failed):
-        d.mkdir(parents=True, exist_ok=True)
-
-    log.info("[Historical] Thread started, scanning %s every %ds", incoming, interval)
-
-    # 导入 scan_and_consume_once — 通过 importlib 加载脚本模块
-    import importlib.util
-    _spec = importlib.util.spec_from_file_location(
-        "rdp_historical_daemon",
-        str(Path(__file__).resolve().parent / "rdp_historical_daemon.py"),
-    )
-    _mod = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
-    _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
-    scan_and_consume_once = _mod.scan_and_consume_once
-
-    while not _stop_event.is_set():
-        try:
-            stats = scan_and_consume_once(incoming, completed, failed)
-            if stats["discovered"] > 0:
-                log.info(
-                    "[Historical] discovered=%d, ok=%d, fail=%d, skip=%d",
-                    stats["discovered"], stats["succeeded"],
-                    stats["failed"], stats["skipped"],
-                )
-        except Exception:
-            log.exception("[Historical] Scan cycle error")
-
-        _stop_event.wait(timeout=interval)
-
-    log.info("[Historical] Thread stopped.")
+def _run_subprocess(cmd: list[str], label: str) -> int:
+    log.info("[%s] running: %s", label, " ".join(cmd))
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=str(_SCRIPT_DIR.parent),
+            env=_utf8_subprocess_env(),
+        )
+        return result.returncode
+    except Exception as exc:
+        log.exception("[%s] FAILED: %s", label, exc)
+        return 1
 
 
-def _run_realtime_thread(interval: int) -> None:
-    """实时 daemon 线程入口。"""
-    import importlib.util
-    from pathlib import Path
-
-    from aats.data_platform.config import get_settings
-
-    # 导入 run_one_cycle �� 通过 importlib 加载脚本模块
-    _spec = importlib.util.spec_from_file_location(
-        "rdp_realtime_daemon",
-        str(Path(__file__).resolve().parent / "rdp_realtime_daemon.py"),
-    )
-    _mod = importlib.util.module_from_spec(_spec)  # type: ignore[arg-type]
-    _spec.loader.exec_module(_mod)  # type: ignore[union-attr]
-    run_one_cycle = _mod.run_one_cycle
-
-    settings = get_settings()
-    cycle_count = 0
-
-    log.info("[Realtime] Thread started, interval=%ds", interval)
-
-    while not _stop_event.is_set():
-        try:
-            run_one_cycle(settings, cycle_count=cycle_count)
-        except Exception:
-            log.exception("[Realtime] Cycle error")
-
-        cycle_count += 1
-        _stop_event.wait(timeout=interval)
-
-    log.info("[Realtime] Thread stopped after %d cycles.", cycle_count)
-
-
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Research Data Platform — unified launcher",
+        description="RDP shim - forwards to daily_ingest + historical --once",
     )
-    parser.add_argument("--historical-only", action="store_true",
-                        help="Only start the historical daemon")
-    parser.add_argument("--realtime-only", action="store_true",
-                        help="Only start the realtime daemon")
+    parser.add_argument(
+        "--historical-only", action="store_true",
+        help="only run historical_daemon --once (scans incoming/)",
+    )
+    parser.add_argument(
+        "--realtime-only", action="store_true",
+        help="only run daily_ingest (replaces realtime daemon)",
+    )
+    # legacy flags - accepted but ignored, prevents old callers from failing
     parser.add_argument("--historical-interval", type=int, default=None,
-                        help="Historical scan interval (seconds)")
-    parser.add_argument("--realtime-interval", type=int, default=60,
-                        help="Realtime cycle interval (seconds)")
+                        help="(legacy, ignored)")
+    parser.add_argument("--realtime-interval", type=int, default=None,
+                        help="(legacy, ignored)")
     args = parser.parse_args()
 
-    # 初始化
-    from aats.data_platform.config import get_settings
-    from aats.data_platform.db import run_migrations
+    log.warning("=" * 60)
+    log.warning("  RDP shim - forwards to replacement scripts")
+    log.warning("=" * 60)
+    log.warning("  DEPRECATION: rdp_start.py 已退役为薄壳。")
+    log.warning("  推荐改为直接调用替代品或 cron:")
+    log.warning("    python scripts/rdp_run_daily_ingest.py")
+    log.warning("    0 4 * * * python scripts/rdp_run_scheduled_workflow.py \\")
+    log.warning("              --workflow data_maintenance")
+    log.warning("=" * 60)
 
-    settings = get_settings()
-    run_migrations(settings)
+    run_realtime = not args.historical_only
+    run_historical = not args.realtime_only
 
-    hist_interval = args.historical_interval or settings.historical_scan_interval_seconds
-    rt_interval = args.realtime_interval
+    overall_rc = 0
 
-    # 注册信号
-    signal.signal(signal.SIGINT, _signal_handler)
-    signal.signal(signal.SIGTERM, _signal_handler)
-
-    run_hist = not args.realtime_only
-    run_rt = not args.historical_only
-
-    threads: list[threading.Thread] = []
-
-    print("=" * 60)
-    print("  Research Data Platform — Unified Launcher")
-    print("=" * 60)
-    print()
-    print("  ⚠️  DEPRECATION WARNING")
-    print("  ─────────────────────────────────────────────────────")
-    print("  daemon 常驻 60s tick 模式已废弃 (2026-04-07)。")
-    print("  推荐改为 cron 每天一次:")
-    print("    0 4 * * * python scripts/rdp_run_scheduled_workflow.py \\")
-    print("              --workflow data_maintenance")
-    print("  详见: docs/operations/rdp_scheduling_strategy.md")
-    print("  ─────────────────────────────────────────────────────")
-    print()
-
-    if run_hist:
-        print(f"  [Historical] incoming scan every {hist_interval}s")
-        t = threading.Thread(
-            target=_run_historical_thread,
-            args=(hist_interval,),
-            name="historical-daemon",
-            daemon=True,
+    if run_realtime:
+        rc = _run_subprocess(
+            [sys.executable, str(_SCRIPT_DIR / "rdp_run_daily_ingest.py")],
+            "daily_ingest (replaces realtime daemon)",
         )
-        threads.append(t)
+        # first-error-wins: keep the first nonzero exit code so operators
+        # see a meaningful value instead of a bitwise-OR collision.
+        if rc != 0 and overall_rc == 0:
+            overall_rc = rc
 
-    if run_rt:
-        print(f"  [Realtime]   rolling cycle every {rt_interval}s")
-        t = threading.Thread(
-            target=_run_realtime_thread,
-            args=(rt_interval,),
-            name="realtime-daemon",
-            daemon=True,
+    if run_historical:
+        rc = _run_subprocess(
+            [sys.executable, str(_SCRIPT_DIR / "rdp_historical_daemon.py"), "--once"],
+            "historical_daemon --once",
         )
-        threads.append(t)
+        if rc != 0 and overall_rc == 0:
+            overall_rc = rc
 
-    if not threads:
-        print("  Nothing to start (both --historical-only and --realtime-only?)")
-        return
-
-    print("=" * 60)
-    print("  Press Ctrl+C to stop")
-    print("=" * 60)
-
-    for t in threads:
-        t.start()
-
-    # 主线程等待停止信号
-    try:
-        while not _stop_event.is_set():
-            _stop_event.wait(timeout=1.0)
-    except KeyboardInterrupt:
-        log.info("KeyboardInterrupt received")
-        _stop_event.set()
-
-    # 等待线程退出
-    for t in threads:
-        t.join(timeout=10)
-
-    print("\nResearch Data Platform stopped.")
+    log.warning("=" * 60)
+    log.warning("  RDP shim done | exit=%d", overall_rc)
+    log.warning("=" * 60)
+    return overall_rc
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

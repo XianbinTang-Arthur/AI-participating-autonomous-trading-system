@@ -148,8 +148,9 @@ AIParticipatingAutonomousTradingSystem/
 ├── scripts/                       # 启动和运维脚本
 │   ├── start_api.py               # ★ API 服务启动脚本
 │   ├── run_local.py               # 本地 paper 循环
-│   ├── rdp_start.py               # RDP 数据守护进程
-│   ├── rdp_run_full_pipeline.py   # RDP 全流程编排
+│   ├── rdp_run_daily_ingest.py    # ★ RDP 日批数据采集 (cron 每天 1 次)
+│   ├── rdp_run_full_pipeline.py   # RDP 研究管线全流程编排
+│   ├── rdp_start.py               # 兼容薄壳 (转发 daily_ingest, 已退役)
 │   └── ...                        # 其他 RDP 脚本
 │
 ├── configs/                       # 配置文件

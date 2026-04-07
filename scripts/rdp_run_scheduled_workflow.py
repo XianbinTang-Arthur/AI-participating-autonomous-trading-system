@@ -28,6 +28,16 @@ import argparse
 import sys
 from pathlib import Path
 
+# Force UTF-8 stdout/stderr on Windows so Chinese workflow descriptions
+# (loaded from configs/rdp_workflows/*.json) render correctly instead
+# of being mangled by the GBK console codec.
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
