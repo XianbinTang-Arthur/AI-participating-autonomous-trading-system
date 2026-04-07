@@ -14,8 +14,11 @@ apiVersion: 1
 providers:
   - name: aats-dev
     orgId: 1
-    folder: AATS
-    folderUid: aats-dev-folder
+    # Stage 7 修复：Grafana 10.4.4 不允许 folder/folderUid 与
+    # foldersFromFilesStructure: true 共存（会报 "should be empty using
+    # foldersFromFilesStructure option" 然后整个 grafana 容器 restart-loop）。
+    # 我们用 files 目录结构作为 folder 划分依据，所以删掉 folder/folderUid。
+    # 后续放仪表盘时按目录组织：files/AATS/overview.json → folder = "AATS"。
     type: file
     disableDeletion: false
     updateIntervalSeconds: 30
