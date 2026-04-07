@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bus.base import EventBus, MessageHandler
+from aats.events import topics as _topics
 from aats.schemas.common import EventEnvelope
 from aats.storage.base import EventStore
 
@@ -41,37 +42,95 @@ if TYPE_CHECKING:  # pragma: no cover - 仅用于类型检查
 
 # ─────────────────────────────────────────────────────────────────────
 # Topic 路由策略
+#
+# ⚠️ 5c 修复说明：之前这两个 frozenset 用的是手写字面量名（如 "execution_intents"），
+# 与 aats/events/topics.py 实际使用的 dotted name（如 "execution.order_intents"）
+# 完全不匹配。Stage 4 集成测试通过的唯一原因：HybridBusRouting.default_route 是
+# "critical"，所有未匹配的 topic 都 fallback 到 NATS。一旦未来某个 topic 被错配
+# 到 observer 集合，就会立刻丢消息。
+#
+# 修复策略：
+#   1) 全部 topic 名改为引用 `aats.events.topics` 模块的常量，编译期保证正确
+#   2) 把 HybridBusRouting 的默认 default_route 改为 None，未知 topic 抛
+#      UnroutedTopicError，强制开发者显式归类
+#   3) test_all_topics_module_constants_are_routed 单测枚举 topics.py 全部常量
+#      验证每条都被归类（防止未来加新 topic 漏配）
+#
+# 归类标准：
+#   critical = 丢失会导致状态不一致 / 资金安全 / 决策饿死 / 合规追溯断链
+#   observer = 纯监控、分析报告、可视化指标，丢失只影响可观测性
 # ─────────────────────────────────────────────────────────────────────
 
 # 关键 topic：决策/执行/风险/对账事件，必须持久化到 JetStream，跨进程消费
 DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
     {
-        "decisions",
-        "execution_intents",
-        "execution_orders",
-        "execution_fills",
-        "execution_command",
-        "execution_command_result",
-        "risk_events",
-        "kill_switch_events",
-        "obligations",
-        "portfolio_snapshots",
-        "reconciliation_results",
-        "position_targets",
-        "ai_decisions",
-        "strategy_profile_changes",
+        # ── 行情 / 特征（决策饿死保护）─────────────────────
+        _topics.MARKET_SNAPSHOTS,         # 决策直接依赖；订阅丢失会饿死决策
+        _topics.FEATURE_SNAPSHOTS,        # 特征派生层；同上
+        _topics.ACCOUNT_BASELINES,        # 资金/仓位基线；决策依赖
+        # ── 决策路径中间产物 / 决策结果 ─────────────────────
+        _topics.DECISION_CONTEXTS,        # 决策上下文；决策路径核心
+        _topics.BASELINE_ASSESSMENTS,     # 基线评估；决策路径
+        _topics.AI_ASSESSMENTS,           # AI 评估；决策路径
+        _topics.AI_DECISION_BRIEFS,       # AI 决策简报；决策核心载体
+        _topics.AI_SHADOW_DECISIONS,      # 影子决策；shadow→real 切换依据
+        _topics.AI_SHADOW_EVALUATIONS,    # 影子评估；同上
+        _topics.AI_DEGRADATION_EVENTS,    # AI 降级事件；触发 risk 自动降级
+        _topics.STRATEGY_COORDINATOR_SNAPSHOTS,  # 协调器状态；重启恢复依赖
+        _topics.STRATEGY_SLEEVE_INTENTS,  # sleeve 意图；决策→执行
+        _topics.PORTFOLIO_ALLOCATION_DECISIONS,  # 组合分配决策
+        _topics.STRATEGY_EXECUTION_BUNDLES,      # 策略执行 bundle；决策→执行核心
+        _topics.POSITION_TARGETS,         # 仓位目标；决策→执行
+        _topics.OVERLAY_PARENT_EXPOSURES, # overlay 父级暴露
+        _topics.DECISION_OUTCOMES,        # 决策结果；审计 + 下游
+        _topics.POLICY_DECISIONS,         # policy 决策
+        # ── 风险 / 执行 / 资金 ──────────────────────────────
+        _topics.RISK_DECISIONS,           # 风险决策；决定执行/不执行
+        _topics.EXECUTION_PLANS,          # 执行计划
+        _topics.ORDER_INTENTS,            # 订单意图；执行核心
+        _topics.ORDER_UPDATES,            # 订单状态机
+        _topics.FILL_EVENTS,              # 成交；资金变动核心
+        _topics.PORTFOLIO_BALANCE_DELTAS, # 余额变动镜像
+        _topics.PORTFOLIO_SNAPSHOTS,      # 组合快照
+        _topics.RECONCILIATION_REPORTS,   # 对账报告
+        _topics.RECONCILIATION_VALIDATIONS,  # 对账验证
+        _topics.REPLAY_VALIDATIONS,       # 回放验证；合规追溯
+        # ── 审计 / operator / 错误流 ────────────────────────
+        _topics.AUDIT_RECORDS,            # 审计记录；合规不能丢
+        _topics.OPERATOR_ACTIONS,         # operator 人工动作驱动状态变化
+        _topics.EXECUTION_ERROR_SUMMARIES,    # 执行错误汇总；驱动 risk 降级
+        _topics.PROCESSING_FAILURES,      # 处理失败；同上
+        # ── strategy profile 切换路径 ─────────────────────
+        _topics.STRATEGY_PROFILE_RECOMMENDATIONS,    # profile 推荐
+        _topics.STRATEGY_PROFILE_ACTIVATIONS,        # profile 激活；影响实盘
+        _topics.STRATEGY_PROFILE_REJECTIONS,         # profile 拒绝；状态记录
+        _topics.STRATEGY_PROFILE_SELECTION_DECISIONS,    # profile 选择决策
+        _topics.STRATEGY_PROFILE_AUTO_ROLLBACK_POLICIES, # 自动回滚规则配置
+        _topics.STRATEGY_PROFILE_ACTIVATION_POLICIES,    # 激活规则配置
     }
 )
 
 # 观察者 topic：仪表盘/指标流/调试事件，量大、丢失无关键影响，留在内存
 DEFAULT_OBSERVER_TOPICS: frozenset[str] = frozenset(
     {
-        "dashboard_refresh_hints",
-        "metrics_samples",
-        "debug_traces",
-        "ui_event_pings",
+        _topics.HEALTH_SNAPSHOTS,         # 系统健康指标；纯监控
+        _topics.BLOCKER_SNAPSHOTS,        # operator dashboard 阻塞展示
+        _topics.AI_PERFORMANCE_REPORTS,   # AI 表现报告；纯报告
+        _topics.STRATEGY_PROFILE_EVALUATIONS,         # profile 评估输入；分析层
+        _topics.STRATEGY_PROFILE_COMPARISON_REPORTS,  # profile 比较报告
+        _topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS,# profile 优化报告
     }
 )
+
+
+class UnroutedTopicError(KeyError):
+    """未在 critical / observer 任一集合中归类的 topic 被请求路由时抛出。
+
+    Why: HybridBusRouting 默认 default_route=None 时，未知 topic 必须抛错而不是
+    silent fallback。这避免了 Stage 4 那种 "路由表错位 + fallback 蒙混过关" 的
+    隐患——一旦有人加新 topic 但忘记归类，系统会立刻在 publish/subscribe 第一次
+    调用时炸响而不是默默走错路径。
+    """
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -455,16 +514,26 @@ class NatsEventBus(EventBus):
 class HybridBusRouting:
     critical_topics: frozenset[str] = field(default_factory=lambda: DEFAULT_CRITICAL_TOPICS)
     observer_topics: frozenset[str] = field(default_factory=lambda: DEFAULT_OBSERVER_TOPICS)
-    # 未在白名单内的 topic 默认走哪个？
-    # "critical" = 默认走 NATS（保守，事件不丢）
-    # "observer" = 默认走 memory（性能优先）
-    default_route: str = "critical"
+    # 未在白名单内的 topic 路由策略：
+    #   None       = 严格模式，未知 topic 抛 UnroutedTopicError（5c 后默认）
+    #   "critical" = 默认走 NATS（保守，事件不丢；老语义，仅显式构造时可用）
+    #   "observer" = 默认走 memory（性能优先；同上）
+    # 默认 None 是 Stage 5c 引入的，目的：消除 Stage 4 路由表错位却被 fallback
+    # 蒙混过关的隐患。强制开发者在加新 topic 时显式归类。
+    default_route: str | None = None
 
     def route_for(self, topic: str) -> str:
         if topic in self.critical_topics:
             return "critical"
         if topic in self.observer_topics:
             return "observer"
+        if self.default_route is None:
+            raise UnroutedTopicError(
+                f"topic {topic!r} 未在 critical / observer 任一集合中归类。"
+                f" 请在 aats/bus/nats_bus.py 的 DEFAULT_CRITICAL_TOPICS 或"
+                f" DEFAULT_OBSERVER_TOPICS 中显式加入；或在构造 HybridBusRouting"
+                f" 时传入 default_route='critical'/'observer' 显式选择 fallback。"
+            )
         return self.default_route
 
 

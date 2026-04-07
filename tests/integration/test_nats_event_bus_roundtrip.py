@@ -1,4 +1,4 @@
-"""Stage 4 集成测试：NATS JetStream 真实容器 round-trip。
+"""Stage 4/5 集成测试：NATS JetStream 真实容器 round-trip。
 
 覆盖：
 
@@ -8,9 +8,12 @@
    - 验证 JetStream stream / durable consumer 创建路径 + AckPolicy 真正落地
 
 2. **Step 5 — HybridEventBus 路由验证**
-   - HybridEventBus.publish 在 critical topic（"decisions"）上真的把消息送到 NATS
-   - HybridEventBus.publish 在 observer topic（"dashboard_refresh_hints"）上
+   - HybridEventBus.publish 在真实 critical topic（_topics.AI_DECISION_BRIEFS）上
+     真的把消息送到 NATS
+   - HybridEventBus.publish 在真实 observer topic（_topics.HEALTH_SNAPSHOTS）上
      不走 NATS，停留在内存（通过 NATS subscribe 不到来验证）
+   - **5c 修复后**：所有测试都使用 aats.events.topics 模块的真实常量，确保
+     路由表归类正确性也被端到端验证
 
 3. **Step 6 — 真跨进程 round-trip**
    - 用 multiprocessing.Process spawn 一个 publisher 子进程
@@ -38,6 +41,8 @@ import os
 import time
 import unittest
 from typing import Any
+
+from aats.events import topics as _topics
 
 # 软依赖检查：testcontainers + nats-py 可能没装（属于 nats-integration extra）
 try:
@@ -93,9 +98,9 @@ async def _purge_all_streams(nats_url: str) -> None:
     """工具函数：清空一个 NATS server 上的所有 JetStream stream。
 
     用途：每个测试用例之间隔离。同一容器内多个测试都会注册 critical topic
-    （比如 'decisions'），不同 stream name 想 claim 同一个 subject 会被 NATS
-    拒为 'subjects overlap with an existing stream'。在 asyncTearDown 调用本
-    函数 + 重新启动 fresh stream 状态。
+    （比如 _topics.AI_DECISION_BRIEFS），不同 stream name 想 claim 同一个
+    subject 会被 NATS 拒为 'subjects overlap with an existing stream'。在
+    asyncTearDown 调用本函数 + 重新启动 fresh stream 状态。
     """
     nc = await nats.connect(nats_url)
     try:
@@ -154,21 +159,21 @@ class TestNatsEventBusRoundTrip(unittest.IsolatedAsyncioTestCase):
             consumer_role="test",
         )
         try:
-            await bus.start(topics=["decisions"])
+            await bus.start(topics=[_topics.AI_DECISION_BRIEFS])
 
             received: list[dict[str, Any]] = []
 
             async def handler(message: dict) -> None:
                 received.append(message)
 
-            await bus.subscribe("decisions", handler)
+            await bus.subscribe(_topics.AI_DECISION_BRIEFS, handler)
             # 给 durable consumer 一点时间 attach 上 stream
             await asyncio.sleep(0.5)
 
             envelope = EventEnvelope(
-                event_type="decision",
+                event_type="ai_decision_brief",
                 source_component="test_single_round_trip",
-                topic="decisions",
+                topic=_topics.AI_DECISION_BRIEFS,
                 key="symbol-BTC",
                 payload={"decision_id": "rt-1", "side": "buy"},
             )
@@ -182,7 +187,7 @@ class TestNatsEventBusRoundTrip(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(len(received), 1)
             msg = received[0]
-            self.assertEqual(msg["topic"], "decisions")
+            self.assertEqual(msg["topic"], _topics.AI_DECISION_BRIEFS)
             self.assertEqual(msg["key"], "symbol-BTC")
             self.assertEqual(msg["payload"]["payload"]["decision_id"], "rt-1")
         finally:
@@ -263,13 +268,13 @@ class TestHybridEventBusRouting(unittest.IsolatedAsyncioTestCase):
             async def handler(message: dict) -> None:
                 received.append(message)
 
-            await verifier.subscribe("decisions", handler)
+            await verifier.subscribe(_topics.AI_DECISION_BRIEFS, handler)
             await asyncio.sleep(0.5)
 
             envelope = EventEnvelope(
-                event_type="decision",
+                event_type="ai_decision_brief",
                 source_component="test_hybrid_critical",
-                topic="decisions",
+                topic=_topics.AI_DECISION_BRIEFS,
                 key="symbol-ETH",
                 payload={"decision_id": "hybrid-rt-1"},
             )
@@ -332,20 +337,20 @@ class TestHybridEventBusRouting(unittest.IsolatedAsyncioTestCase):
         try:
             await hybrid.start()
             # 把 observer topic 也声明到独立 stream，这样 subscribe 不会报 stream-not-found
-            await verifier.start(topics=["dashboard_refresh_hints"])
+            await verifier.start(topics=[_topics.HEALTH_SNAPSHOTS])
 
             received: list[dict[str, Any]] = []
 
             async def handler(message: dict) -> None:
                 received.append(message)
 
-            await verifier.subscribe("dashboard_refresh_hints", handler)
+            await verifier.subscribe(_topics.HEALTH_SNAPSHOTS, handler)
             await asyncio.sleep(0.3)
 
             envelope = EventEnvelope(
-                event_type="dashboard_refresh_hint",
+                event_type="health_snapshot",
                 source_component="test_hybrid_observer",
-                topic="dashboard_refresh_hints",
+                topic=_topics.HEALTH_SNAPSHOTS,
                 key="hint-1",
                 payload={"hint": "noise"},
             )
@@ -374,6 +379,7 @@ def _publisher_subprocess_entry(nats_url: str, stream_name: str, payload_marker:
 
     async def _main() -> None:
         from aats.bus.nats_bus import NatsBusConfig, NatsEventBus
+        from aats.events import topics as _topics_inner
         from aats.schemas.common import EventEnvelope
 
         bus = NatsEventBus(
@@ -387,11 +393,11 @@ def _publisher_subprocess_entry(nats_url: str, stream_name: str, payload_marker:
             consumer_role="subprocess_publisher",
         )
         try:
-            await bus.start(topics=["decisions"])
+            await bus.start(topics=[_topics_inner.AI_DECISION_BRIEFS])
             envelope = EventEnvelope(
-                event_type="decision",
+                event_type="ai_decision_brief",
                 source_component="subprocess_publisher",
-                topic="decisions",
+                topic=_topics_inner.AI_DECISION_BRIEFS,
                 key="cross-proc",
                 payload={"marker": payload_marker},
             )
@@ -453,14 +459,14 @@ class TestCrossProcessNatsRoundTrip(unittest.IsolatedAsyncioTestCase):
             consumer_role="main_subscriber",
         )
         try:
-            await subscriber.start(topics=["decisions"])
+            await subscriber.start(topics=[_topics.AI_DECISION_BRIEFS])
 
             received: list[dict[str, Any]] = []
 
             async def handler(message: dict) -> None:
                 received.append(message)
 
-            await subscriber.subscribe("decisions", handler)
+            await subscriber.subscribe(_topics.AI_DECISION_BRIEFS, handler)
             await asyncio.sleep(0.5)
 
             # spawn 子进程做 publish

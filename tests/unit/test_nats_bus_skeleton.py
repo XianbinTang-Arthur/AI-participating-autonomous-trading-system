@@ -26,8 +26,10 @@ from aats.bus.nats_bus import (
     HybridEventBus,
     NatsBusConfig,
     NatsEventBus,
+    UnroutedTopicError,
     build_consumer_config_spec,
 )
+from aats.events import topics as _topics
 from aats.schemas.common import EventEnvelope
 
 
@@ -105,9 +107,45 @@ def test_critical_observer_disjoint() -> None:
 
 
 def test_critical_topics_cover_core_event_flow() -> None:
-    """关键事件流（决策、执行、风控、对账）必须在 critical 集合中。"""
-    must_have = {"decisions", "execution_intents", "risk_events", "reconciliation_results"}
-    assert must_have.issubset(DEFAULT_CRITICAL_TOPICS)
+    """关键事件流（AI 决策、订单、成交、风控、对账）必须在 critical 集合中。
+
+    用 aats.events.topics 模块的真实常量（dotted name），不是 5c 之前的字面量。
+    这是 Stage 4 隐患修复的核心断言：路由表必须用真实 topic 名才能生效。
+    """
+    must_have = {
+        _topics.AI_DECISION_BRIEFS,
+        _topics.ORDER_INTENTS,
+        _topics.ORDER_UPDATES,
+        _topics.FILL_EVENTS,
+        _topics.RISK_DECISIONS,
+        _topics.RECONCILIATION_REPORTS,
+    }
+    assert must_have.issubset(DEFAULT_CRITICAL_TOPICS), (
+        f"以下核心 topic 缺失: {must_have - DEFAULT_CRITICAL_TOPICS}"
+    )
+
+
+def test_all_topics_module_constants_are_routed() -> None:
+    """枚举 aats.events.topics 模块全部 module-level 常量，每条都必须被归类。
+
+    Why: 这是 5c 路由表 bug 的根本预防——只要将来有人加新 topic 到 topics.py
+    但忘记加到 critical / observer 集合里，本测试会立刻失败，迫使他们补上。
+    """
+    declared = {
+        value
+        for name, value in vars(_topics).items()
+        if isinstance(value, str)
+        and not name.startswith("_")
+        and name.isupper()
+    }
+    routed = DEFAULT_CRITICAL_TOPICS | DEFAULT_OBSERVER_TOPICS
+    missing = declared - routed
+    assert not missing, (
+        f"以下 topic 在 aats/events/topics.py 中声明但未被归类:"
+        f" {sorted(missing)}\n"
+        f" 请加到 aats/bus/nats_bus.py 的 DEFAULT_CRITICAL_TOPICS 或"
+        f" DEFAULT_OBSERVER_TOPICS 中（每条加一句 inline 注释说明归类理由）。"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -116,24 +154,41 @@ def test_critical_topics_cover_core_event_flow() -> None:
 
 
 def test_routing_critical_topic() -> None:
+    """真实 topic 常量必须路由到 critical。"""
     routing = HybridBusRouting()
-    assert routing.route_for("decisions") == "critical"
-    assert routing.route_for("execution_intents") == "critical"
+    assert routing.route_for(_topics.ORDER_INTENTS) == "critical"
+    assert routing.route_for(_topics.FILL_EVENTS) == "critical"
+    assert routing.route_for(_topics.RISK_DECISIONS) == "critical"
+    assert routing.route_for(_topics.AI_DECISION_BRIEFS) == "critical"
 
 
 def test_routing_observer_topic() -> None:
+    """真实 observer topic 常量必须路由到 observer。"""
     routing = HybridBusRouting()
-    assert routing.route_for("metrics_samples") == "observer"
-    assert routing.route_for("dashboard_refresh_hints") == "observer"
+    assert routing.route_for(_topics.HEALTH_SNAPSHOTS) == "observer"
+    assert routing.route_for(_topics.BLOCKER_SNAPSHOTS) == "observer"
+    assert routing.route_for(_topics.AI_PERFORMANCE_REPORTS) == "observer"
 
 
-def test_routing_unknown_defaults_to_critical() -> None:
-    """未分类 topic 默认走 critical（保守，事件不丢）。"""
+def test_routing_unknown_raises_unrouted_topic_error() -> None:
+    """5c 严格模式：未分类 topic 默认抛 UnroutedTopicError，不再 silent fallback。
+
+    Why: Stage 4 时代默认 default_route='critical'，路由表错位被 fallback
+    蒙混过关。5c 修复后默认 None，强制开发者显式归类。
+    """
     routing = HybridBusRouting()
+    with pytest.raises(UnroutedTopicError, match="brand_new_topic"):
+        routing.route_for("brand_new_topic")
+
+
+def test_routing_unknown_explicit_critical_default_falls_back_to_critical() -> None:
+    """API 兼容：显式构造 default_route='critical' 时仍可 fallback（老语义）。"""
+    routing = HybridBusRouting(default_route="critical")
     assert routing.route_for("brand_new_topic") == "critical"
 
 
-def test_routing_unknown_defaults_to_observer_when_configured() -> None:
+def test_routing_unknown_explicit_observer_default_falls_back_to_observer() -> None:
+    """API 兼容：显式构造 default_route='observer' 时 fallback 到内存。"""
     routing = HybridBusRouting(default_route="observer")
     assert routing.route_for("brand_new_topic") == "observer"
 
@@ -149,12 +204,12 @@ def test_hybrid_publish_critical_routes_to_critical_bus() -> None:
     bus = HybridEventBus(critical_bus=critical, observer_bus=observer)
     asyncio.run(
         bus.publish(
-            "decisions",
+            _topics.ORDER_INTENTS,
             "k1",
             {
                 "event_type": "x",
                 "source_component": "t",
-                "topic": "decisions",
+                "topic": _topics.ORDER_INTENTS,
                 "key": "k1",
                 "payload": {},
             },
@@ -170,12 +225,12 @@ def test_hybrid_publish_observer_routes_to_observer_bus() -> None:
     bus = HybridEventBus(critical_bus=critical, observer_bus=observer)
     asyncio.run(
         bus.publish(
-            "metrics_samples",
+            _topics.HEALTH_SNAPSHOTS,
             "k1",
             {
                 "event_type": "x",
                 "source_component": "t",
-                "topic": "metrics_samples",
+                "topic": _topics.HEALTH_SNAPSHOTS,
                 "key": "k1",
                 "payload": {},
             },
@@ -193,9 +248,9 @@ def test_hybrid_subscribe_critical_routes_to_critical_bus() -> None:
     async def _h(_: dict) -> None:
         pass
 
-    asyncio.run(bus.subscribe("decisions", _h))
-    assert "decisions" in critical.subscriptions
-    assert "decisions" not in observer.subscriptions
+    asyncio.run(bus.subscribe(_topics.ORDER_INTENTS, _h))
+    assert _topics.ORDER_INTENTS in critical.subscriptions
+    assert _topics.ORDER_INTENTS not in observer.subscriptions
 
 
 def test_hybrid_subscribe_observer_routes_to_observer_bus() -> None:
@@ -206,9 +261,9 @@ def test_hybrid_subscribe_observer_routes_to_observer_bus() -> None:
     async def _h(_: dict) -> None:
         pass
 
-    asyncio.run(bus.subscribe("metrics_samples", _h))
-    assert "metrics_samples" not in critical.subscriptions
-    assert "metrics_samples" in observer.subscriptions
+    asyncio.run(bus.subscribe(_topics.HEALTH_SNAPSHOTS, _h))
+    assert _topics.HEALTH_SNAPSHOTS not in critical.subscriptions
+    assert _topics.HEALTH_SNAPSHOTS in observer.subscriptions
 
 
 def test_hybrid_publish_envelope_uses_envelope_method_when_available() -> None:
@@ -216,7 +271,7 @@ def test_hybrid_publish_envelope_uses_envelope_method_when_available() -> None:
     observer = FakeBus("observer")
     bus = HybridEventBus(critical_bus=critical, observer_bus=observer)
 
-    env = _make_envelope("decisions")
+    env = _make_envelope(_topics.ORDER_INTENTS)
     asyncio.run(bus.publish_envelope(env))
     assert critical.envelope_published == [env]
 
@@ -236,10 +291,10 @@ def test_hybrid_publish_envelope_falls_back_to_plain_publish() -> None:
 
     minimal = MinimalBus()
     bus = HybridEventBus(critical_bus=minimal, observer_bus=FakeBus("observer"))
-    env = _make_envelope("decisions", key="abc")
+    env = _make_envelope(_topics.ORDER_INTENTS, key="abc")
     asyncio.run(bus.publish_envelope(env))
     assert len(minimal.published) == 1
-    assert minimal.published[0][0] == "decisions"
+    assert minimal.published[0][0] == _topics.ORDER_INTENTS
     assert minimal.published[0][1] == "abc"
 
 
