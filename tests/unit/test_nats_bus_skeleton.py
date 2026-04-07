@@ -344,11 +344,13 @@ def test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds() -> None:
 
     Why: nats-py 2.14 文档明确 max_age 字段以秒为单位
     （nats/js/api.py: ``max_age: Optional[float] = None  # in seconds``），
-    内部 _to_nanoseconds() 自行换算。早期实现错把秒预乘 1e9 后再传，
+    内部 _to_nanoseconds() 自行换算。早期实现错把秒预乘 1e9 后再传,
     导致 nats-py 又乘一次 1e9，最终发出 60_000_000_000_000_000_000 这种
     超大值，NATS server JSON parser 直接 reject 'invalid JSON'。
     集成测试发现这个 bug 后补的回归保护。
     """
+    pytest.importorskip("nats", reason="nats-py 未安装；本回归只在装了 nats-integration extras 的环境下跑")
+
     import asyncio as _asyncio
     from unittest.mock import AsyncMock, MagicMock
 

@@ -8,7 +8,7 @@ from typing import Any
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.bootstrap.logging import get_logger, log_event
-from aats.bus.memory_bus import InMemoryEventBus
+from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import EventEnvelope
@@ -25,7 +25,7 @@ class PostgresPortfolioOutboxPublisher:
     session_factory: sessionmaker[Session]
     event_store: PostgresEventStore
     outbox_repo: PostgresOutboxRepository
-    bus: InMemoryEventBus
+    bus: EventBus
     portfolio_repo: PostgresPortfolioRepository
     fill_outcome_repo: PostgresFillOutcomeRepository
     logger: Any = field(init=False)

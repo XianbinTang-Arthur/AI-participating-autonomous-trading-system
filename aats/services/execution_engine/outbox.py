@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy.orm import sessionmaker, Session
 
 from aats.bootstrap.logging import get_logger, log_event
-from aats.bus.memory_bus import InMemoryEventBus
+from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import EventEnvelope
@@ -35,7 +35,7 @@ class PostgresExecutionOutboxPublisher:
     execution_repo: ExecutionRepository
     obligation_repo: PostgresExecutionObligationRepository
     outbox_repo: PostgresOutboxRepository
-    bus: InMemoryEventBus
+    bus: EventBus
     execution_command_repo: PostgresExecutionCommandRepository | None = None
     execution_order_repo: PostgresExecutionOrderRepository | None = None
     execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
