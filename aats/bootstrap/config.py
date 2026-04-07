@@ -19,6 +19,11 @@ from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import (
     AATSSettings,
     DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY,
+    PROCESS_ROLE_DECISION,
+    PROCESS_ROLE_EXECUTION,
+    PROCESS_ROLE_GATEWAY,
+    PROCESS_ROLE_MARKET,
+    PROCESS_ROLE_MONOLITH,
 )
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
@@ -373,20 +378,24 @@ class ApplicationRuntime:
     bus: InMemoryEventBus
     event_store: EventStore
     market_gateway: MarketDataGateway
-    feature_engine: FeatureEngine
-    ai_service: AIInferenceService
-    decision_engine: DecisionOrchestrator
+    # Stage 3 多进程切片化：以下 slice 字段在 process_role 不需要时为 None。
+    # 例如 gateway role 会让 feature_engine / ai_service / decision_engine / ...
+    # 全部为 None；execution role 会让 feature_engine / decision 相关字段为 None。
+    # monolith / None role 下所有字段都非 None（向后兼容现状）。
+    feature_engine: FeatureEngine | None
+    ai_service: AIInferenceService | None
+    decision_engine: DecisionOrchestrator | None
     strategy_coordinator: Any | None
-    decision_trigger: DecisionCycleTrigger
-    decision_trigger_policy: DecisionTriggerPolicy
-    execution_planner: ExecutionPlanner
+    decision_trigger: DecisionCycleTrigger | None
+    decision_trigger_policy: DecisionTriggerPolicy | None
+    execution_planner: ExecutionPlanner | None
     execution_adapter: ExchangeAdapter
-    order_manager: OrderManager
-    portfolio_service: PortfolioService
-    reconciliation_service: ReconciliationService
+    order_manager: OrderManager | None
+    portfolio_service: PortfolioService | None
+    reconciliation_service: ReconciliationService | None
     fee_resolver: EffectiveFeeResolver
-    policy_engine: PolicyEngine
-    risk_engine: RiskEngine
+    policy_engine: PolicyEngine | None
+    risk_engine: RiskEngine | None
     kill_switch: KillSwitch
     mode_controller: RuntimeModeController
     health_service: SystemHealthService
@@ -445,14 +454,20 @@ class ApplicationRuntime:
             self.background_tasks.append(
                 asyncio.create_task(self.account_service.run_private_ws_forever(), name="aats_okx_private_account_ws")
             )
-        self.background_tasks.append(
-            asyncio.create_task(self._refresh_reconciliation_loop(), name="aats_reconciliation_refresh")
-        )
+        # Stage 3 多进程切片化：reconciliation/order_manager 在 gateway/market/decision
+        # role 下不存在，对应 background loop 必须按字段是否非 None 来决定是否启动。
+        if self.reconciliation_service is not None:
+            self.background_tasks.append(
+                asyncio.create_task(self._refresh_reconciliation_loop(), name="aats_reconciliation_refresh")
+            )
         if self.environment_capabilities.account_state_source_kind == "exchange":
             self.background_tasks.append(
                 asyncio.create_task(self._refresh_account_loop(), name="aats_okx_account_refresh")
             )
-        if self.environment_capabilities.execution_adapter_kind == "okx":
+        if (
+            self.environment_capabilities.execution_adapter_kind == "okx"
+            and self.order_manager is not None
+        ):
             self.background_tasks.append(
                 asyncio.create_task(self._sync_execution_loop(), name="aats_okx_execution_sync")
             )
@@ -521,10 +536,15 @@ class ApplicationRuntime:
                 self.sleeve_pnl_projection_service.rebuild_scope,
                 scope=runtime_state_scope(self.settings),
             )
-        if hasattr(self.portfolio_service, "bootstrap_snapshot"):
+        # Stage 3：portfolio_service 仅在 execution/monolith role 下存在。
+        if self.portfolio_service is not None and hasattr(self.portfolio_service, "bootstrap_snapshot"):
             await self.portfolio_service.bootstrap_snapshot(snapshot_origin="local_repair")
 
     async def _sync_execution_loop(self) -> None:
+        # Stage 3：order_manager 在非 execution/monolith role 下为 None；
+        # start_background_tasks 已按 None 跳过本 loop，这里再加一道保险。
+        if self.order_manager is None:
+            return
         while True:
             try:
                 await self.order_manager.sync_exchange_state()
@@ -533,6 +553,10 @@ class ApplicationRuntime:
             await asyncio.sleep(self.settings.okx_execution_sync_interval_seconds)
 
     async def _refresh_reconciliation_loop(self) -> None:
+        # Stage 3：reconciliation_service 在非 execution/monolith role 下为 None；
+        # start_background_tasks 已按 None 跳过本 loop，这里再加一道保险。
+        if self.reconciliation_service is None:
+            return
         interval_seconds = max(
             0.5,
             min(self.settings.reconciliation_stale_after_seconds / 2.0, 60.0),
@@ -885,7 +909,11 @@ def _backfill_fill_outcomes_from_event_store(
         fill_outcome_repo.save_outcome(outcome)
 
 
-def build_storage_backends(settings: AATSSettings) -> StorageBackends:
+def build_storage_backends(
+    settings: AATSSettings,
+    *,
+    process_role: str | None = None,
+) -> StorageBackends:
     if settings.storage_mode == "memory":
         return StorageBackends(
             event_store=InMemoryEventStore(),
@@ -919,6 +947,7 @@ def build_storage_backends(settings: AATSSettings) -> StorageBackends:
             scoped_runtime_lock_key(
                 database_url=settings.database_url,
                 base_lock_key=settings.database_runtime_lock_key,
+                process_role=process_role,
             )
         )
 
@@ -2337,78 +2366,113 @@ def _build_position_target_handler(
 async def _subscribe_critical_handlers(
     *,
     bus: InMemoryEventBus,
-    feature_engine: FeatureEngine,
-    decision_trigger: DecisionCycleTrigger,
-    order_manager: OrderManager,
-    portfolio_service: PortfolioService,
-    reconciliation_service: ReconciliationService,
-    audit_service: DecisionAuditService,
+    feature_engine: FeatureEngine | None,
+    decision_trigger: DecisionCycleTrigger | None,
+    order_manager: OrderManager | None,
+    portfolio_service: PortfolioService | None,
+    reconciliation_service: ReconciliationService | None,
+    audit_service: DecisionAuditService | None,
     position_target_handler,
 ) -> None:
-    await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
-    await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
-    await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
-    await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
-    await bus.subscribe(
-        topics.PORTFOLIO_SNAPSHOTS,
-        resilient_subscription_handler(
-            topic=topics.PORTFOLIO_SNAPSHOTS,
-            name="audit.handle_portfolio_snapshot",
-            handler=audit_service.handle_portfolio_snapshot,
-            subscription_class="pre_reconciliation_observer",
-            raise_on_error=False,
-        ),
-    )
-    await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
-    await bus.subscribe(topics.POSITION_TARGETS, position_target_handler)
+    """订阅 critical handler。
+
+    Stage 3 process_role 门控之后，被跳过的 slice 对应的 handler 入参为 None，
+    本函数按 None 跳过相应订阅。Stage 4 引入 NATS 后，每个 process 自己只
+    订阅自己关心的 topic，本函数会被进一步按 role 拆分。
+    """
+    if feature_engine is not None:
+        await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
+    if decision_trigger is not None:
+        await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
+    if order_manager is not None:
+        await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
+    if portfolio_service is not None:
+        await bus.subscribe(topics.FILL_EVENTS, portfolio_service.handle_fill_event)
+    if audit_service is not None:
+        await bus.subscribe(
+            topics.PORTFOLIO_SNAPSHOTS,
+            resilient_subscription_handler(
+                topic=topics.PORTFOLIO_SNAPSHOTS,
+                name="audit.handle_portfolio_snapshot",
+                handler=audit_service.handle_portfolio_snapshot,
+                subscription_class="pre_reconciliation_observer",
+                raise_on_error=False,
+            ),
+        )
+    if reconciliation_service is not None:
+        await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, reconciliation_service.handle_portfolio_snapshot)
+    if position_target_handler is not None:
+        await bus.subscribe(topics.POSITION_TARGETS, position_target_handler)
 
 
 def _observer_subscription_specs(
     *,
-    audit_service: DecisionAuditService,
-    ai_service: AIInferenceService,
-    reconciliation_service: ReconciliationService,
+    audit_service: DecisionAuditService | None,
+    ai_service: AIInferenceService | None,
+    reconciliation_service: ReconciliationService | None,
 ) -> tuple[ObserverSubscriptionSpec, ...]:
-    return (
-        ObserverSubscriptionSpec(topics.DECISION_CONTEXTS, "audit.handle_decision_context", audit_service.handle_decision_context),
-        ObserverSubscriptionSpec(topics.BASELINE_ASSESSMENTS, "audit.handle_baseline_assessment", audit_service.handle_baseline_assessment),
-        ObserverSubscriptionSpec(topics.AI_DECISION_BRIEFS, "audit.handle_ai_decision_brief", audit_service.handle_ai_decision_brief),
-        ObserverSubscriptionSpec(topics.AI_ASSESSMENTS, "audit.handle_ai_assessment", audit_service.handle_ai_assessment),
-        ObserverSubscriptionSpec(topics.AI_SHADOW_DECISIONS, "audit.handle_ai_shadow_decision", audit_service.handle_ai_shadow_decision),
-        ObserverSubscriptionSpec(topics.AI_SHADOW_EVALUATIONS, "audit.handle_ai_shadow_evaluation", audit_service.handle_ai_shadow_evaluation),
-        ObserverSubscriptionSpec(
-            topics.STRATEGY_COORDINATOR_SNAPSHOTS,
-            "audit.handle_strategy_coordinator_snapshot",
-            audit_service.handle_strategy_coordinator_snapshot,
-        ),
-        ObserverSubscriptionSpec(
-            topics.STRATEGY_SLEEVE_INTENTS,
-            "audit.handle_strategy_sleeve_intent",
-            audit_service.handle_strategy_sleeve_intent,
-        ),
-        ObserverSubscriptionSpec(
-            topics.PORTFOLIO_ALLOCATION_DECISIONS,
-            "audit.handle_portfolio_allocation_decision",
-            audit_service.handle_portfolio_allocation_decision,
-        ),
-        ObserverSubscriptionSpec(topics.POSITION_TARGETS, "audit.handle_position_target", audit_service.handle_position_target),
-        ObserverSubscriptionSpec(topics.DECISION_OUTCOMES, "audit.handle_decision_outcome", audit_service.handle_decision_outcome),
-        ObserverSubscriptionSpec(topics.POLICY_DECISIONS, "audit.handle_policy_decision", audit_service.handle_policy_decision),
-        ObserverSubscriptionSpec(topics.RISK_DECISIONS, "audit.handle_risk_decision", audit_service.handle_risk_decision),
-        ObserverSubscriptionSpec(topics.EXECUTION_PLANS, "audit.handle_execution_plan", audit_service.handle_execution_plan),
-        ObserverSubscriptionSpec(
-            topics.STRATEGY_EXECUTION_BUNDLES,
-            "audit.handle_strategy_execution_bundle",
-            audit_service.handle_strategy_execution_bundle,
-        ),
-        ObserverSubscriptionSpec(topics.ORDER_INTENTS, "audit.handle_order_intent", audit_service.handle_order_intent),
-        ObserverSubscriptionSpec(topics.ORDER_UPDATES, "audit.handle_order_update", audit_service.handle_order_update),
-        ObserverSubscriptionSpec(topics.FILL_EVENTS, "audit.handle_fill_event", audit_service.handle_fill_event),
-        ObserverSubscriptionSpec(topics.PORTFOLIO_SNAPSHOTS, "ai.handle_portfolio_snapshot", ai_service.handle_portfolio_snapshot),
-        ObserverSubscriptionSpec(topics.RECONCILIATION_REPORTS, "ai.handle_reconciliation_report", ai_service.handle_reconciliation_report),
-        ObserverSubscriptionSpec(topics.RECONCILIATION_REPORTS, "audit.handle_reconciliation_report", audit_service.handle_reconciliation_report),
-        ObserverSubscriptionSpec(topics.PROCESSING_FAILURES, "reconciliation.handle_processing_failure", reconciliation_service.handle_processing_failure),
-    )
+    """生成 observer 订阅清单。
+
+    Stage 3 process_role 门控之后，被跳过的 slice 对应的 service 入参为 None，
+    本函数会跳过对应的 spec。monolith 模式下三个 service 都不为 None，输出
+    与原版本完全相同的 22 条 spec。
+    """
+    specs: list[ObserverSubscriptionSpec] = []
+    if audit_service is not None:
+        specs.extend(
+            [
+                ObserverSubscriptionSpec(topics.DECISION_CONTEXTS, "audit.handle_decision_context", audit_service.handle_decision_context),
+                ObserverSubscriptionSpec(topics.BASELINE_ASSESSMENTS, "audit.handle_baseline_assessment", audit_service.handle_baseline_assessment),
+                ObserverSubscriptionSpec(topics.AI_DECISION_BRIEFS, "audit.handle_ai_decision_brief", audit_service.handle_ai_decision_brief),
+                ObserverSubscriptionSpec(topics.AI_ASSESSMENTS, "audit.handle_ai_assessment", audit_service.handle_ai_assessment),
+                ObserverSubscriptionSpec(topics.AI_SHADOW_DECISIONS, "audit.handle_ai_shadow_decision", audit_service.handle_ai_shadow_decision),
+                ObserverSubscriptionSpec(topics.AI_SHADOW_EVALUATIONS, "audit.handle_ai_shadow_evaluation", audit_service.handle_ai_shadow_evaluation),
+                ObserverSubscriptionSpec(
+                    topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+                    "audit.handle_strategy_coordinator_snapshot",
+                    audit_service.handle_strategy_coordinator_snapshot,
+                ),
+                ObserverSubscriptionSpec(
+                    topics.STRATEGY_SLEEVE_INTENTS,
+                    "audit.handle_strategy_sleeve_intent",
+                    audit_service.handle_strategy_sleeve_intent,
+                ),
+                ObserverSubscriptionSpec(
+                    topics.PORTFOLIO_ALLOCATION_DECISIONS,
+                    "audit.handle_portfolio_allocation_decision",
+                    audit_service.handle_portfolio_allocation_decision,
+                ),
+                ObserverSubscriptionSpec(topics.POSITION_TARGETS, "audit.handle_position_target", audit_service.handle_position_target),
+                ObserverSubscriptionSpec(topics.DECISION_OUTCOMES, "audit.handle_decision_outcome", audit_service.handle_decision_outcome),
+                ObserverSubscriptionSpec(topics.POLICY_DECISIONS, "audit.handle_policy_decision", audit_service.handle_policy_decision),
+                ObserverSubscriptionSpec(topics.RISK_DECISIONS, "audit.handle_risk_decision", audit_service.handle_risk_decision),
+                ObserverSubscriptionSpec(topics.EXECUTION_PLANS, "audit.handle_execution_plan", audit_service.handle_execution_plan),
+                ObserverSubscriptionSpec(
+                    topics.STRATEGY_EXECUTION_BUNDLES,
+                    "audit.handle_strategy_execution_bundle",
+                    audit_service.handle_strategy_execution_bundle,
+                ),
+                ObserverSubscriptionSpec(topics.ORDER_INTENTS, "audit.handle_order_intent", audit_service.handle_order_intent),
+                ObserverSubscriptionSpec(topics.ORDER_UPDATES, "audit.handle_order_update", audit_service.handle_order_update),
+                ObserverSubscriptionSpec(topics.FILL_EVENTS, "audit.handle_fill_event", audit_service.handle_fill_event),
+            ]
+        )
+    if ai_service is not None:
+        specs.extend(
+            [
+                ObserverSubscriptionSpec(topics.PORTFOLIO_SNAPSHOTS, "ai.handle_portfolio_snapshot", ai_service.handle_portfolio_snapshot),
+                ObserverSubscriptionSpec(topics.RECONCILIATION_REPORTS, "ai.handle_reconciliation_report", ai_service.handle_reconciliation_report),
+            ]
+        )
+    if audit_service is not None:
+        specs.append(
+            ObserverSubscriptionSpec(topics.RECONCILIATION_REPORTS, "audit.handle_reconciliation_report", audit_service.handle_reconciliation_report),
+        )
+    if reconciliation_service is not None:
+        specs.append(
+            ObserverSubscriptionSpec(topics.PROCESSING_FAILURES, "reconciliation.handle_processing_failure", reconciliation_service.handle_processing_failure),
+        )
+    return tuple(specs)
 
 
 async def _subscribe_observer_handlers(
@@ -2429,15 +2493,884 @@ async def _subscribe_observer_handlers(
         )
 
 
+# =============================================================================
+# Slice 化分解（多进程切片化重构 — Stage 2）
+#
+# build_runtime() 历史上是一个 778 行的单体函数。为了支持 Stage 3 的
+# AATS_PROCESS_ROLE 多进程门控，我们把它拆分为 8 个 slice builder：
+#
+#   1. _build_shared_runtime_slice  — 全部进程都需要的基础设施
+#                                     (metrics/bus/kill_switch/market_gateway/account/health…)
+#   2. _build_market_slice          — feature_engine（market_proc）
+#   3. _build_decision_slice        — ai/decision/policy/risk/strategy_coordinator/position_target_handler
+#   4. _build_execution_slice       — order_manager/obligation/outbox/command_processor
+#   5. _build_portfolio_slice       — portfolio_service/sleeve_pnl_projection/funding_fee_sync
+#   6. _build_reconciliation_slice  — reconciliation_service/recovery_service
+#   7. _wire_event_subscriptions    — critical + observer 订阅装配（async）
+#   8. _apply_post_init_guards      — derivatives/trial guard + strategy profile control
+#
+# Stage 2 仅做结构化重排，不改变行为；所有 slice 在 monolith 模式下都会被调用。
+# Stage 3 将在每个 slice 顶部加 `if process_role and process_role not in {...}: return`
+# 实现按进程角色挑选 slice。
+#
+# ── 跨 slice 依赖图（Stage 3 process_role 门控时必须遵守的顺序）─────────────
+#
+#   shared ┬─→ market
+#          ├─→ decision ──┐
+#          ├─→ execution ←┘  (execution 读 decision.risk_engine 作 leg evaluator)
+#          ├─→ portfolio ←──── execution.portfolio_outbox_publisher
+#          └─→ reconciliation
+#
+# 装配顺序必须为 shared → market → decision → execution → portfolio → reconciliation；
+# 任何 slice 在跳过上游依赖的情况下被启用，都会读取到 None 字段并触发 Stage 3
+# 计划好的 assertion 失败。每个 _build_*_slice 函数 docstring 顶部都列出了
+# 自己的"跨 slice 依赖"清单，作为单一权威来源。
+#
+# Stage 3 引入 process_role 门控后的 slice → role 矩阵：
+#
+#   slice           | gateway | market | decision | execution | monolith |
+#   ----------------|---------|--------|----------|-----------|----------|
+#   shared          |  装     |  装    |  装      |  装       |  装      |
+#   market          |  跳     |  装    |  跳      |  跳       |  装      |
+#   decision        |  跳     |  跳    |  装      |  跳       |  装      |
+#   execution       |  跳     |  跳    |  跳      |  装       |  装      |
+#   portfolio       |  跳     |  跳    |  跳      |  装       |  装      |
+#   reconciliation  |  跳     |  跳    |  跳      |  装       |  装      |
+#   startup recovery|  跳     |  跳    |  跳      |  装       |  装      |
+#
+# `gateway` 在 Stage 3 仅持有 shared slice（FastAPI/UI 静态资源等 gateway 专属
+# 装配尚未实装，会在后续 stage 引入；目前 gateway role 等价于"只装基础设施"）。
+# =============================================================================
+
+
+# Stage 3：每个 slice 在哪些 role 下需要装。
+# None / "monolith" 视为单进程模式 → 全部 slice 都装。
+_SLICE_REQUIRED_ROLES: dict[str, frozenset[str | None]] = {
+    "shared": frozenset(
+        {None, PROCESS_ROLE_MONOLITH, PROCESS_ROLE_GATEWAY, PROCESS_ROLE_MARKET, PROCESS_ROLE_DECISION, PROCESS_ROLE_EXECUTION}
+    ),
+    "market": frozenset({None, PROCESS_ROLE_MONOLITH, PROCESS_ROLE_MARKET}),
+    "decision": frozenset({None, PROCESS_ROLE_MONOLITH, PROCESS_ROLE_DECISION}),
+    "execution": frozenset({None, PROCESS_ROLE_MONOLITH, PROCESS_ROLE_EXECUTION}),
+    "portfolio": frozenset({None, PROCESS_ROLE_MONOLITH, PROCESS_ROLE_EXECUTION}),
+    "reconciliation": frozenset({None, PROCESS_ROLE_MONOLITH, PROCESS_ROLE_EXECUTION}),
+    "startup_recovery": frozenset({None, PROCESS_ROLE_MONOLITH, PROCESS_ROLE_EXECUTION}),
+}
+
+
+def _slice_active(slice_name: str, *, effective_process_role: str | None) -> bool:
+    """判断给定 slice 是否在当前 process_role 下需要装。
+
+    None / "monolith" 都视为单进程模式：所有 slice 都装。
+    其他 role：按 _SLICE_REQUIRED_ROLES 表过滤。
+
+    slice_name 必须是 _SLICE_REQUIRED_ROLES 已定义的键，否则 KeyError —
+    这是故意的，避免新增 slice 时漏配门控。
+    """
+    return effective_process_role in _SLICE_REQUIRED_ROLES[slice_name]
+
+
+@dataclass(slots=True)
+class _RuntimeSlices:
+    """临时容器：build_runtime 内部各 slice 之间共享的中间对象。
+
+    所有字段默认为 None；slice builder 按顺序填入。
+    Stage 3 引入 process_role 之后，未启用的 slice 将留为 None，
+    后续的 slice 必须 None-check 自己依赖的上游字段。
+    """
+
+    # ---- shared / 基础 ----
+    metrics: Any = None
+    bus: Any = None
+    kill_switch: Any = None
+    mode_controller: Any = None
+    normalizer: Any = None
+    market_publisher: Any = None
+    okx_client: Any = None
+    okx_ws_client: Any = None
+    market_gateway: Any = None
+    private_account_ws_client: Any = None
+    account_service: Any = None
+    fee_resolver: Any = None
+    baseline_import_service: Any = None
+    bootstrap_from_exchange: bool = False
+    execution_adapter: Any = None
+    health_service: Any = None
+    snapshot_builder: Any = None
+    reconciliation_classifier: Any = None
+    phase1_shadow_monitor: Any = None
+    phase1_shadow: Any = None
+
+    # ---- market ----
+    feature_engine: Any = None
+
+    # ---- decision ----
+    ai_service: Any = None
+    strategy_coordinator: Any = None
+    decision_trigger_policy: Any = None
+    decision_engine: Any = None
+    decision_trigger: Any = None
+    audit_service: Any = None
+    policy_engine: Any = None
+    risk_engine: Any = None
+    execution_planner: Any = None
+    position_target_handler: Any = None
+
+    # ---- execution ----
+    obligation_service: Any = None
+    execution_outbox_publisher: Any = None
+    portfolio_outbox_publisher: Any = None
+    execution_order_service: Any = None
+    order_manager: Any = None
+    execution_command_processor: Any = None
+
+    # ---- portfolio ----
+    portfolio_state: Any = None
+    sleeve_pnl_projection_service: Any = None
+    portfolio_service: Any = None
+    funding_fee_sync_service: Any = None
+
+    # ---- reconciliation ----
+    reconciliation_service: Any = None
+    base_recovery_service: Any = None
+    recovery_service: Any = None
+
+
+def _build_shared_runtime_slice(
+    *,
+    runtime_settings: AATSSettings,
+    runtime_layering: RuntimeLayering,
+    storage: StorageBackends,
+    slices: _RuntimeSlices,
+    effective_process_role: str | None,
+) -> None:
+    """构造全部进程都需要的基础设施。
+
+    包含：metrics、bus、kill_switch、mode_controller、市场网关链路、
+    账户服务、费率求解、execution_adapter、health_service、phase1_shadow。
+    这些都是"读多写少"或纯共享，未来 4 进程都需要其中一部分。
+
+    Stage 3 process_role 门控：本 slice 在所有 role 下都装。effective_process_role
+    参数仅作为接口对称（与其他 slice builder 一致），不会在内部短路。
+    """
+    if not _slice_active("shared", effective_process_role=effective_process_role):
+        return
+    slices.metrics = MetricsRegistry()
+    slices.bus = InMemoryEventBus(
+        event_store=storage.event_store,
+        persistence_mode=runtime_settings.event_persistence_mode,
+    )
+    _backfill_fill_outcomes_from_event_store(
+        event_store=storage.event_store,
+        fill_outcome_repo=storage.fill_outcome_repo,
+        execution_repo=storage.execution_repo,
+    )
+
+    slices.kill_switch = KillSwitch()
+    slices.mode_controller = RuntimeModeController(
+        settings=runtime_settings,
+        kill_switch=slices.kill_switch,
+        runtime_layering=runtime_layering,
+    )
+
+    slices.normalizer = MarketSnapshotNormalizer(exchange_name=runtime_settings.exchange_name)
+    slices.market_publisher = MarketSnapshotPublisher(bus=slices.bus)
+    slices.okx_client = OKXRESTClient(settings=runtime_settings)
+    slices.okx_ws_client = (
+        OKXPublicWebSocketClient(settings=runtime_settings)
+        if runtime_settings.market_data_backend == "okx"
+        else None
+    )
+    slices.market_gateway = MarketDataGateway(
+        settings=runtime_settings,
+        normalizer=slices.normalizer,
+        publisher=slices.market_publisher,
+        okx_ws_client=slices.okx_ws_client,
+        okx_rest_client=slices.okx_client if runtime_settings.market_data_backend == "okx" else None,
+    )
+    slices.private_account_ws_client = (
+        OKXPrivateWebSocketClient(settings=runtime_settings)
+        if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled
+        else None
+    )
+    slices.account_service = OKXAccountService(
+        settings=runtime_settings,
+        client=slices.okx_client,
+        private_ws_client=slices.private_account_ws_client,
+    )
+    slices.fee_resolver = EffectiveFeeResolver(
+        settings=runtime_settings,
+        account_service=slices.account_service,
+    )
+    slices.baseline_import_service = AccountBaselineImportService(
+        event_store=storage.event_store,
+        reconciliation_repo=storage.reconciliation_repo,
+    )
+    slices.bootstrap_from_exchange = runtime_layering.recovery_policy.startup_baseline_import_supported
+    slices.execution_adapter = _build_execution_adapter(
+        settings=runtime_settings,
+        market_gateway=slices.market_gateway,
+        account_service=slices.account_service,
+        obligation_repo=storage.obligation_repo,
+        mode_controller=slices.mode_controller,
+        environment_capabilities=runtime_layering.environment_capabilities,
+        policy_profile=runtime_layering.policy_profile,
+    )
+    slices.health_service = SystemHealthService(
+        settings=runtime_settings,
+        mode_controller=slices.mode_controller,
+        kill_switch=slices.kill_switch,
+        market_provider=slices.market_gateway,
+        account_provider=slices.account_service,
+        execution_provider=slices.execution_adapter,
+        reconciliation_repo=storage.reconciliation_repo,
+        recovery_policy=runtime_layering.recovery_policy,
+    )
+    if isinstance(slices.execution_adapter, OKXExecutionAdapter):
+        slices.execution_adapter.health_service = slices.health_service
+
+    slices.snapshot_builder = PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator())
+    slices.phase1_shadow_monitor = Phase1ShadowMonitor(
+        execution_repo=storage.execution_repo,
+        obligation_repo=storage.obligation_repo,
+        state_scope=runtime_state_scope(runtime_settings),
+        execution_shadow_service=storage.phase1_execution_shadow_service,
+        ledger_mirror_service=storage.phase1_ledger_mirror_service,
+        execution_order_repo=storage.execution_order_repo,
+        execution_fill_repo=storage.execution_fill_repo_v2,
+        reservation_repo=storage.reservation_repo_v2,
+    )
+    slices.phase1_shadow = storage.phase1_shadow or Phase1ShadowSubsystem(
+        execution_order_repo=storage.execution_order_repo,
+        execution_order_history_repo=storage.execution_order_history_repo,
+        execution_command_repo=storage.execution_command_repo,
+        execution_fill_repo=storage.execution_fill_repo_v2,
+        reservation_repo=storage.reservation_repo_v2,
+        ledger_account_repo=storage.ledger_account_repo,
+        ledger_journal_repo=storage.ledger_journal_repo,
+        ledger_entry_repo=storage.ledger_entry_repo,
+        settlement_repo=storage.settlement_repo,
+        position_lot_repo=storage.position_lot_repo,
+        lot_event_repo=storage.lot_event_repo,
+        external_inbox_repo=storage.external_inbox_repo,
+        command_outbox_repo=storage.command_outbox_repo_v2,
+        execution_shadow_service=storage.phase1_execution_shadow_service,
+        ledger_mirror_service=storage.phase1_ledger_mirror_service,
+    )
+    slices.phase1_shadow.monitor = slices.phase1_shadow_monitor
+    slices.health_service.phase1_shadow_provider = slices.phase1_shadow_monitor
+    slices.reconciliation_classifier = (
+        RecoveryReconciliationClassifier()
+        if runtime_settings.recovery_reconciliation_execution_ledger_enabled
+        else None
+    )
+
+
+def _build_market_slice(
+    *,
+    slices: _RuntimeSlices,
+    effective_process_role: str | None,
+) -> None:
+    """构造 market 进程独占资源：feature_engine。
+
+    feature_engine 当前是同步 Python 实现，未来在 Stage 7 会改为
+    multiprocessing.Pool 旁挂以绕过 GIL。
+
+    Stage 3 process_role 门控：仅 None / monolith / market 时构造，
+    其他 role 跳过，slices.feature_engine 保留为 None。
+    """
+    if not _slice_active("market", effective_process_role=effective_process_role):
+        return
+    slices.feature_engine = FeatureEngine(bus=slices.bus, calculator=FeatureCalculator())
+
+
+def _build_decision_slice(
+    *,
+    runtime_settings: AATSSettings,
+    storage: StorageBackends,
+    runtime_layering: RuntimeLayering,
+    slices: _RuntimeSlices,
+    effective_process_role: str | None,
+) -> None:
+    """构造 decision 进程独占资源。
+
+    包含：ai_service、strategy_coordinator、decision_engine、policy/risk、
+    execution_planner（属于 decision 计划阶段）和 position_target_handler。
+    全部对 storage 的写入均集中在 decision_proc 内，避免跨进程冲突。
+
+    跨 slice 依赖（Stage 3 process_role 门控时必须保证已构造）：
+      - shared slice: bus、market_gateway、health_service、account_service、
+        kill_switch、mode_controller、fee_resolver、metrics
+    本 slice 不依赖 market/execution/portfolio/reconciliation slice，但
+    risk_engine 与 execution_planner 会被 _build_execution_slice 反向引用。
+
+    Stage 3 process_role 门控：仅 None / monolith / decision 时构造。
+    其他 role 跳过，相关 slices.* 字段保留为 None。
+    """
+    if not _slice_active("decision", effective_process_role=effective_process_role):
+        return
+    slices.ai_service = AIInferenceService(
+        settings=runtime_settings,
+        event_store=storage.event_store,
+        bus=slices.bus,
+        execution_repo=storage.execution_repo,
+        prompt_builder=PromptBuilder(),
+        validator=AssessmentValidator(),
+        fee_resolver=slices.fee_resolver,
+    )
+    slices.strategy_coordinator = StrategyCoordinatorService(
+        settings=runtime_settings,
+        event_store=storage.event_store,
+        market_gateway=slices.market_gateway,
+        portfolio_repo=storage.portfolio_repo,
+        execution_repo=storage.execution_repo,
+        position_lot_repo=storage.position_lot_repo,
+        account_service=slices.account_service,
+        strategy_sleeve_repo=storage.strategy_sleeve_repo,
+        strategy_runtime_repo=storage.strategy_runtime_repo,
+        reconciliation_repo=storage.reconciliation_repo,
+        sleeve_pnl_repo=storage.sleeve_pnl_repo,
+    )
+    slices.decision_trigger_policy = DecisionTriggerPolicy(settings=runtime_settings)
+    slices.decision_engine = DecisionOrchestrator(
+        bus=slices.bus,
+        context_builder=DecisionContextBuilder(
+            settings=runtime_settings,
+            event_store=storage.event_store,
+            portfolio_repo=storage.portfolio_repo,
+            execution_repo=storage.execution_repo,
+            mode_controller=slices.mode_controller,
+            health_service=slices.health_service,
+        ),
+        baseline_strategy=BaselineStrategy(event_store=storage.event_store),
+        ai_service=slices.ai_service,
+        target_engine=TargetPositionEngine(settings=runtime_settings, fee_resolver=slices.fee_resolver),
+        strategy_coordinator=slices.strategy_coordinator,
+        metrics=slices.metrics,
+    )
+    _kill_switch = slices.kill_switch
+    slices.decision_trigger = DecisionCycleTrigger(
+        orchestrator=slices.decision_engine,
+        market_gateway=slices.market_gateway,
+        policy=slices.decision_trigger_policy,
+        can_trigger=lambda *, symbol: (
+            False,
+            "kill_switch_active",
+        )
+        if _kill_switch.halted
+        else (
+            True,
+            "ready",
+        )
+        if runtime_settings.symbol_allowed_for_decision_cycle(symbol)
+        else (
+            False,
+            "symbol_not_enabled_for_decision_cycle",
+        ),
+    )
+    slices.audit_service = DecisionAuditService(bus=slices.bus, audit_repo=storage.audit_repo)
+    slices.policy_engine = PolicyEngine(
+        settings=runtime_settings,
+        kill_switch=slices.kill_switch,
+        mode_controller=slices.mode_controller,
+        health_service=slices.health_service,
+        environment_capabilities=runtime_layering.environment_capabilities,
+        policy_profile=runtime_layering.policy_profile,
+    )
+    slices.risk_engine = RiskEngine(
+        settings=runtime_settings,
+        account_service=slices.account_service,
+        health_service=slices.health_service,
+        trigger_policy=slices.decision_trigger_policy,
+        price_provider=slices.market_gateway.latest_price,
+        mode_controller=slices.mode_controller,
+        obligation_repo=storage.obligation_repo,
+        environment_capabilities=runtime_layering.environment_capabilities,
+        policy_profile=runtime_layering.policy_profile,
+        fee_resolver=slices.fee_resolver,
+        reconciliation_repo=storage.reconciliation_repo,
+    )
+    slices.execution_planner = ExecutionPlanner(settings=runtime_settings)
+    slices.position_target_handler = _build_position_target_handler(
+        settings=runtime_settings,
+        mode_controller=slices.mode_controller,
+        runtime_layering=runtime_layering,
+        account_service=slices.account_service,
+        policy_engine=slices.policy_engine,
+        risk_engine=slices.risk_engine,
+        execution_planner=slices.execution_planner,
+        market_gateway=slices.market_gateway,
+        kill_switch=slices.kill_switch,
+        metrics=slices.metrics,
+        bus=slices.bus,
+        event_store=storage.event_store,
+        execution_repo=storage.execution_repo,
+        strategy_runtime_repo=storage.strategy_runtime_repo,
+    )
+
+
+def _build_execution_slice(
+    *,
+    runtime_settings: AATSSettings,
+    storage: StorageBackends,
+    slices: _RuntimeSlices,
+    effective_process_role: str | None,
+) -> None:
+    """构造 execution 进程独占资源：order_manager 及上下游 outbox/obligation。
+
+    跨 slice 依赖（Stage 3 process_role 门控时必须保证已构造）：
+      - shared slice: bus、market_gateway、account_service、fee_resolver、
+        execution_adapter、kill_switch、metrics
+      - decision slice: risk_engine（仅在 derivatives + hedge 模式下作为
+        leg_risk_evaluator 用；其他模式可为 None）
+
+    因此必须在 Stage 3 4-进程拓扑里：
+      gateway/market 进程跳过本 slice；
+      decision 进程跳过本 slice；
+      execution 进程在 derivatives+hedge 模式下需要 decision slice 的 risk_engine
+      作为 leg_risk_evaluator —— Stage 3 阶段不允许 execution 单独运行
+      derivatives+hedge，会在下方做 fail-fast。Stage 4 通过 NATS 广播 risk 决策
+      解耦后，本 slice 才能在 execution-only 进程中独立运行 derivatives+hedge。
+
+    Stage 3 process_role 门控：仅 None / monolith / execution 时构造。
+    """
+    if not _slice_active("execution", effective_process_role=effective_process_role):
+        return
+    # Stage 3 fail-fast：derivatives+hedge 在 execution-only 进程下，
+    # decision slice 被跳过，slices.risk_engine is None。这会让
+    # leg_risk_evaluator 静默退化为 None，破坏 hedge 模式的 leg 校验。
+    # Stage 4 引入 NATS 跨进程 risk 广播之后才允许放开。
+    if (
+        runtime_settings.trading_product_type == "derivatives"
+        and runtime_settings.derivatives_position_mode == "hedge"
+        and slices.risk_engine is None
+    ):
+        raise RuntimeError(
+            "execution_slice_requires_decision_slice_for_derivatives_hedge_mode: "
+            "在 derivatives + hedge 模式下，execution slice 需要 decision slice "
+            "提供 risk_engine.evaluate_leg_order 作为 leg_risk_evaluator。"
+            "Stage 4 (NATS) 引入跨进程 risk 决策广播之前，请把 decision 与 "
+            "execution 运行在同一个进程内（process_role=monolith）。"
+        )
+    slices.obligation_service = ExecutionObligationService(
+        settings=runtime_settings,
+        obligation_repo=storage.obligation_repo,
+        account_snapshot_loader=lambda: slices.account_service.refresh(),
+        price_provider=slices.market_gateway.latest_price,
+        fee_resolver=slices.fee_resolver,
+    )
+    slices.execution_outbox_publisher = None
+    slices.portfolio_outbox_publisher = None
+    if (
+        storage.database_runtime is not None
+        and isinstance(storage.obligation_repo, PostgresExecutionObligationRepository)
+        and isinstance(storage.event_store, PostgresEventStore)
+        and storage.outbox_repo is not None
+        and hasattr(storage.execution_repo, "save_order_state_in_session")
+        and hasattr(storage.execution_repo, "save_fill_in_session")
+    ):
+        slices.execution_outbox_publisher = PostgresExecutionOutboxPublisher(
+            session_factory=storage.database_runtime.session_factory,
+            event_store=storage.event_store,
+            execution_repo=storage.execution_repo,
+            obligation_repo=storage.obligation_repo,
+            outbox_repo=storage.outbox_repo,
+            bus=slices.bus,
+            execution_command_repo=(
+                storage.execution_command_repo
+                if isinstance(storage.execution_command_repo, PostgresExecutionCommandRepository)
+                else None
+            ),
+            execution_order_repo=storage.execution_order_repo,
+            execution_order_history_repo=storage.execution_order_history_repo,
+            execution_fill_repo=storage.execution_fill_repo_v2,
+        )
+    if (
+        storage.database_runtime is not None
+        and isinstance(storage.event_store, PostgresEventStore)
+        and storage.outbox_repo is not None
+        and isinstance(storage.portfolio_repo, PostgresPortfolioRepository)
+        and isinstance(storage.fill_outcome_repo, PostgresFillOutcomeRepository)
+    ):
+        slices.portfolio_outbox_publisher = PostgresPortfolioOutboxPublisher(
+            session_factory=storage.database_runtime.session_factory,
+            event_store=storage.event_store,
+            outbox_repo=storage.outbox_repo,
+            bus=slices.bus,
+            portfolio_repo=storage.portfolio_repo,
+            fill_outcome_repo=storage.fill_outcome_repo,
+        )
+    slices.execution_order_service = None
+    slices.execution_command_processor = None
+    if runtime_settings.execution_command_flow_enabled and storage.execution_command_repo is not None:
+        slices.execution_order_service = ExecutionOrderService(
+            execution_command_repo=storage.execution_command_repo,
+            execution_order_repo=storage.execution_order_repo,
+            execution_order_history_repo=storage.execution_order_history_repo,
+        )
+    slices.order_manager = OrderManager(
+        settings=runtime_settings,
+        bus=slices.bus,
+        adapter=slices.execution_adapter,
+        execution_repo=storage.execution_repo,
+        exit_execution_repo=storage.exit_execution_repo,
+        obligation_service=slices.obligation_service,
+        execution_outbox_publisher=slices.execution_outbox_publisher,
+        persistent_order_service=slices.execution_order_service,
+        shadow_execution_service=storage.phase1_execution_shadow_service,
+        shadow_execution_order_repo=storage.execution_order_repo,
+        shadow_execution_order_history_repo=storage.execution_order_history_repo,
+        shadow_execution_fill_repo=storage.execution_fill_repo_v2,
+        shadow_ledger_mirror_service=storage.phase1_ledger_mirror_service,
+        leg_risk_evaluator=(
+            slices.risk_engine.evaluate_leg_order
+            if (
+                slices.risk_engine is not None
+                and runtime_settings.trading_product_type == "derivatives"
+                and runtime_settings.derivatives_position_mode == "hedge"
+            )
+            else None
+        ),
+        strategy_runtime_repo=storage.strategy_runtime_repo,
+        kill_switch=slices.kill_switch,
+    )
+    if slices.execution_order_service is not None and storage.execution_command_repo is not None:
+        _kill_switch = slices.kill_switch
+        _order_manager = slices.order_manager
+        slices.execution_command_processor = ExecutionCommandProcessor(
+            execution_command_repo=storage.execution_command_repo,
+            submit_executor=lambda intent, client_order_id=None: _order_manager.process_submit_command(
+                intent=intent,
+                client_order_id=client_order_id,
+            ),
+            cancel_executor=lambda client_order_id: _order_manager.process_cancel_command(
+                client_order_id=client_order_id,
+            ),
+            can_execute_command=lambda command: (
+                str(command.get("command_type") or "").lower() != "submit"
+                or not _kill_switch.halted
+            ),
+            sent_retry_after_seconds=runtime_settings.execution_command_sent_retry_after_seconds,
+        )
+
+
+def _build_portfolio_slice(
+    *,
+    runtime_settings: AATSSettings,
+    state_scope: Any,
+    storage: StorageBackends,
+    slices: _RuntimeSlices,
+    effective_process_role: str | None,
+) -> None:
+    """构造 portfolio_service / sleeve_pnl_projection / funding_fee_sync。
+
+    portfolio 在多进程拓扑里属于 execution_proc（与 order_manager 绑定，
+    避免 fill → portfolio 更新跨进程往返）。
+
+    跨 slice 依赖（Stage 3 process_role 门控时必须保证已构造）：
+      - shared slice: bus、market_gateway、metrics、snapshot_builder
+      - execution slice: portfolio_outbox_publisher（可为 None，仅在 Postgres
+        存储 + 完整 outbox 链路时才会被 _build_execution_slice 实例化）
+
+    因此 build_runtime 内 slice 装配顺序必须为
+    shared → execution → portfolio，禁止颠倒。
+
+    Stage 3 process_role 门控：与 execution 一起，仅 None / monolith / execution
+    时构造。
+    """
+    if not _slice_active("portfolio", effective_process_role=effective_process_role):
+        return
+    slices.portfolio_state = PortfolioState(
+        initial_usdt_balance=runtime_settings.initial_usdt_balance,
+        default_product_type=runtime_settings.trading_product_type,
+        default_margin_mode=runtime_settings.margin_mode,
+    )
+    slices.sleeve_pnl_projection_service = SleevePnLProjectionService(
+        fill_outcome_repo=storage.fill_outcome_repo,
+        funding_fee_repo=storage.funding_fee_repo,
+        sleeve_pnl_repo=storage.sleeve_pnl_repo,
+        execution_repo=storage.execution_repo,
+        strategy_sleeve_repo=storage.strategy_sleeve_repo,
+    )
+    if (
+        runtime_settings.portfolio_ledger_truth_enabled
+        and storage.ledger_account_repo is not None
+        and storage.ledger_journal_repo is not None
+        and storage.ledger_entry_repo is not None
+    ):
+        slices.portfolio_service = LedgerBackedPortfolioService(
+            bus=slices.bus,
+            state=slices.portfolio_state,
+            snapshot_builder=slices.snapshot_builder,
+            portfolio_repo=storage.portfolio_repo,
+            fill_outcome_repo=storage.fill_outcome_repo,
+            price_provider=slices.market_gateway.latest_price,
+            execution_repo=storage.execution_repo,
+            settlement_posting_service=LedgerSettlementPostingService(
+                ledger_account_repo=storage.ledger_account_repo,
+                ledger_journal_repo=storage.ledger_journal_repo,
+                ledger_entry_repo=storage.ledger_entry_repo,
+                reservation_repo=storage.reservation_repo_v2,
+            ),
+            persistent_lot_book_service=(
+                PersistentLotBookService(
+                    position_lot_repo=storage.position_lot_repo,
+                    lot_event_repo=storage.lot_event_repo,
+                    projection_builder=LotBasedProjectionBuilder(),
+                )
+                if storage.position_lot_repo is not None and storage.lot_event_repo is not None
+                else None
+            ),
+            sleeve_pnl_projection_service=slices.sleeve_pnl_projection_service,
+            portfolio_outbox_publisher=slices.portfolio_outbox_publisher,
+            state_scope=state_scope,
+            initial_usdt_balance=runtime_settings.initial_usdt_balance,
+            metrics=slices.metrics,
+        )
+    else:
+        slices.portfolio_service = PortfolioService(
+            bus=slices.bus,
+            state=slices.portfolio_state,
+            snapshot_builder=slices.snapshot_builder,
+            portfolio_repo=storage.portfolio_repo,
+            fill_outcome_repo=storage.fill_outcome_repo,
+            price_provider=slices.market_gateway.latest_price,
+            execution_repo=storage.execution_repo,
+            persistent_lot_book_service=(
+                PersistentLotBookService(
+                    position_lot_repo=storage.position_lot_repo,
+                    lot_event_repo=storage.lot_event_repo,
+                    projection_builder=LotBasedProjectionBuilder(),
+                )
+                if storage.position_lot_repo is not None and storage.lot_event_repo is not None
+                else None
+            ),
+            sleeve_pnl_projection_service=slices.sleeve_pnl_projection_service,
+            portfolio_outbox_publisher=slices.portfolio_outbox_publisher,
+            state_scope=state_scope,
+            metrics=slices.metrics,
+        )
+    slices.funding_fee_sync_service = (
+        LedgerFundingFeeSyncService(
+            funding_fee_repo=storage.funding_fee_repo,
+            ledger_account_repo=storage.ledger_account_repo,
+            ledger_journal_repo=storage.ledger_journal_repo,
+            ledger_entry_repo=storage.ledger_entry_repo,
+        )
+        if (
+            storage.funding_fee_repo is not None
+            and storage.ledger_account_repo is not None
+            and storage.ledger_journal_repo is not None
+            and storage.ledger_entry_repo is not None
+        )
+        else None
+    )
+
+
+def _build_reconciliation_slice(
+    *,
+    runtime_settings: AATSSettings,
+    runtime_layering: RuntimeLayering,
+    storage: StorageBackends,
+    slices: _RuntimeSlices,
+    effective_process_role: str | None,
+) -> None:
+    """构造 reconciliation_service 与 recovery_service。
+
+    与 portfolio 一起属于 execution_proc — 都需要写 reconciliation_repo
+    并直接联动 portfolio_state。
+
+    跨 slice 依赖（Stage 3 process_role 门控时必须保证已构造）：
+      - shared slice: bus、market_gateway、account_service、snapshot_builder、
+        execution_adapter（OKXExecutionAdapter 实例提供 exchange_order_client）、
+        kill_switch、metrics、bootstrap_from_exchange、reconciliation_classifier
+    本 slice 不依赖 decision/execution/portfolio slice 的产物。
+
+    Stage 3 process_role 门控：与 execution/portfolio 一起，仅 None / monolith /
+    execution 时构造。
+    """
+    if not _slice_active("reconciliation", effective_process_role=effective_process_role):
+        return
+    slices.reconciliation_service = ReconciliationService(
+        settings=runtime_settings,
+        bus=slices.bus,
+        fetcher=ExchangeStateFetcher(account_service=slices.account_service),
+        comparator=StateComparator(),
+        repair_service=ReconciliationRepairService(),
+        reconciliation_repo=storage.reconciliation_repo,
+        execution_repo=storage.execution_repo,
+        portfolio_repo=storage.portfolio_repo,
+        event_store=storage.event_store,
+        reconstruction_service=PortfolioReconstructionService(
+            initial_usdt_balance=runtime_settings.initial_usdt_balance,
+            snapshot_builder=slices.snapshot_builder,
+        ),
+        price_provider=slices.market_gateway.latest_price,
+        exit_execution_repo=storage.exit_execution_repo,
+        bootstrap_portfolio_from_exchange=slices.bootstrap_from_exchange,
+        recovery_policy=runtime_layering.recovery_policy,
+        metrics=slices.metrics,
+        reconciliation_classifier=slices.reconciliation_classifier,
+    )
+    slices.base_recovery_service = ExecutionRecoveryService(
+        settings=runtime_settings,
+        execution_repo=storage.execution_repo,
+        obligation_repo=storage.obligation_repo,
+        portfolio_repo=storage.portfolio_repo,
+        reconciliation_repo=storage.reconciliation_repo,
+        strategy_runtime_repo=storage.strategy_runtime_repo,
+        reconstruction_service=PortfolioReconstructionService(
+            initial_usdt_balance=runtime_settings.initial_usdt_balance,
+            snapshot_builder=slices.snapshot_builder,
+        ),
+        price_provider=slices.market_gateway.latest_price,
+        kill_switch=slices.kill_switch,
+        bootstrap_portfolio_from_exchange=slices.bootstrap_from_exchange,
+        reconciliation_stale_after_seconds=runtime_settings.reconciliation_stale_after_seconds,
+        recovery_policy=runtime_layering.recovery_policy,
+        fill_outcome_repo=storage.fill_outcome_repo,
+        event_store=storage.event_store,
+    )
+    # OKXExecutionAdapter.client satisfies ExchangeOrderQuerier protocol.
+    _exchange_order_client = (
+        getattr(slices.execution_adapter, "client", None)
+        if isinstance(slices.execution_adapter, OKXExecutionAdapter)
+        else None
+    )
+    slices.recovery_service = (
+        ExecutionLedgerRecoveryService(
+            settings=runtime_settings,
+            base_recovery_service=slices.base_recovery_service,
+            reconciliation_repo=storage.reconciliation_repo,
+            portfolio_repo=storage.portfolio_repo,
+            kill_switch=slices.kill_switch,
+            reconciliation_classifier=slices.reconciliation_classifier or RecoveryReconciliationClassifier(),
+            execution_order_repo=storage.execution_order_repo,
+            execution_command_repo=storage.execution_command_repo,
+            exchange_order_client=_exchange_order_client,
+        )
+        if runtime_settings.recovery_reconciliation_execution_ledger_enabled
+        else slices.base_recovery_service
+    )
+
+
+async def _wire_event_subscriptions(
+    *,
+    slices: _RuntimeSlices,
+) -> None:
+    """把 critical 与 observer handler 注册到 bus 上。
+
+    Stage 4 引入 NATS 之后，本函数会改成根据 process_role 选择性订阅
+    各 process 自己关心的 topic（gateway 不会订阅 fill 事件等）。
+    """
+    await _subscribe_critical_handlers(
+        bus=slices.bus,
+        feature_engine=slices.feature_engine,
+        decision_trigger=slices.decision_trigger,
+        order_manager=slices.order_manager,
+        portfolio_service=slices.portfolio_service,
+        reconciliation_service=slices.reconciliation_service,
+        audit_service=slices.audit_service,
+        position_target_handler=slices.position_target_handler,
+    )
+    await _subscribe_observer_handlers(
+        bus=slices.bus,
+        specs=_observer_subscription_specs(
+            audit_service=slices.audit_service,
+            ai_service=slices.ai_service,
+            reconciliation_service=slices.reconciliation_service,
+        ),
+    )
+
+
+def _apply_post_init_guards(
+    *,
+    runtime: ApplicationRuntime,
+    effective_process_role: str | None,
+) -> None:
+    """ApplicationRuntime 构造完成后的最终装配步骤。
+
+    - derivatives_live_guard / trial_guard 创建并注入 risk_engine
+    - StrategyProfileControlService 注入 decision_engine
+
+    Stage 3：trial_guard.evaluate_now() 内部会通过 OperatorQueryService 访问
+    runtime.decision_engine 等字段，gateway/market 等 role 下这些字段为 None
+    会触发 AttributeError。derivatives_live_guard 需要 health_service 与
+    risk_engine 都同时存在；这些 guard 的语义本身就是"执行链上的安全网"，
+    对非 execution/monolith role 没有意义，因此整段直接跳过。
+    """
+    if not _slice_active("startup_recovery", effective_process_role=effective_process_role):
+        return
+    # 局部 import 是为了打破循环依赖：OperatorQueryService 与
+    # RecoveryPostureEvaluator 内部都依赖 ApplicationRuntime 的字段，把它们
+    # 提到模块顶部会让 aats.bootstrap.config ↔ aats.services.* 形成 import 环。
+    from aats.services.operator.query_service import OperatorQueryService
+    from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
+
+    runtime.derivatives_live_guard_service = DerivativesLiveGuardService(
+        settings=runtime.settings,
+        kill_switch=runtime.kill_switch,
+        account_service=runtime.account_service,
+        event_store=runtime.event_store,
+        metrics=runtime.metrics,
+    )
+    runtime.derivatives_live_guard_service.evaluate_now()
+    runtime.health_service.runtime_guard_provider = runtime.derivatives_live_guard_service
+    if runtime.risk_engine is not None:
+        runtime.risk_engine.live_runtime_guard_provider = runtime.derivatives_live_guard_service
+    runtime.trial_guard_service = ForwardTrialGuardService(
+        settings=runtime.settings,
+        kill_switch=runtime.kill_switch,
+        event_store=runtime.event_store,
+        metrics=runtime.metrics,
+        profitability_provider=lambda limit: OperatorQueryService(runtime).profitability_overview(limit=limit),
+        anomaly_provider=lambda limit: OperatorQueryService(runtime).execution_anomaly_report(limit=limit),
+    )
+    runtime.trial_guard_service.evaluate_now()
+    if runtime.risk_engine is not None:
+        runtime.risk_engine.trial_guard_provider = runtime.trial_guard_service
+        runtime.risk_engine.recovery_status_provider = lambda: RecoveryPostureEvaluator(runtime).finalize_status(
+            base_status=runtime.recovery_status
+        )
+    if runtime.decision_engine is not None:
+        runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
+
+
+def _resolve_effective_process_role(
+    *,
+    kwarg_role: str | None,
+    settings: AATSSettings,
+) -> str | None:
+    """决定本次 build_runtime 实际启用的 process_role。
+
+    解析优先级：
+      1) 显式传入的 kwarg_role（脚本/测试可强制指定，绕过环境变量）
+      2) settings.process_role（来自 AATS_PROCESS_ROLE 环境变量或 yaml）
+      3) None = monolith 模式（向后兼容）
+
+    settings.process_role 已被 AATSSettings.normalize_process_role validator
+    归一化为 None 或 ALLOWED_PROCESS_ROLES 中的小写 token，本函数不需要再处理
+    空白/大小写。kwarg_role 由调用方负责，通常来自代码常量或测试 fixture。
+    """
+    if kwarg_role is not None:
+        return kwarg_role
+    return settings.process_role
+
+
 async def build_runtime(
     settings: AATSSettings | None = None,
     *,
     bootstrap_portfolio_snapshot: bool = True,
+    process_role: str | None = None,
 ) -> ApplicationRuntime:
     base_settings = settings or load_settings()
     base_runtime_layering = resolve_runtime_layering(base_settings)
     _validate_runtime_settings(base_settings, base_runtime_layering)
-    storage = build_storage_backends(base_settings)
+    effective_process_role = _resolve_effective_process_role(
+        kwarg_role=process_role,
+        settings=base_settings,
+    )
+    storage = build_storage_backends(base_settings, process_role=effective_process_role)
     try:
         # ── Settings Provenance 追踪 ─────────────────────────────
         from aats.bootstrap.settings_provenance import SettingsProvenanceTracker
@@ -2510,603 +3443,221 @@ async def build_runtime(
         if storage.database_runtime is not None:
             storage.database_runtime.dispose()
         raise
-    metrics = MetricsRegistry()
-    bus = InMemoryEventBus(
-        event_store=storage.event_store,
-        persistence_mode=runtime_settings.event_persistence_mode,
-    )
-    _backfill_fill_outcomes_from_event_store(
-        event_store=storage.event_store,
-        fill_outcome_repo=storage.fill_outcome_repo,
-        execution_repo=storage.execution_repo,
-    )
-
-    kill_switch = KillSwitch()
-    mode_controller = RuntimeModeController(
-        settings=runtime_settings,
-        kill_switch=kill_switch,
+    # ── Slice 化构造（Stage 2 / Stage 3）────────────────────────────
+    # build_runtime 内部按 6 个 slice builder + wire + post_init_guards 顺序装配
+    # runtime；Stage 3 已在每个 builder 顶部按 process_role 门控以支持 4 进程拓扑。
+    # effective_process_role 在最早期已经从 settings/kwarg 解析出来。
+    slices = _RuntimeSlices()
+    _build_shared_runtime_slice(
+        runtime_settings=runtime_settings,
         runtime_layering=runtime_layering,
+        storage=storage,
+        slices=slices,
+        effective_process_role=effective_process_role,
     )
-
-    normalizer = MarketSnapshotNormalizer(exchange_name=runtime_settings.exchange_name)
-    market_publisher = MarketSnapshotPublisher(bus=bus)
-    okx_client = OKXRESTClient(settings=runtime_settings)
-    okx_ws_client = (
-        OKXPublicWebSocketClient(settings=runtime_settings)
-        if runtime_settings.market_data_backend == "okx"
-        else None
+    _build_market_slice(slices=slices, effective_process_role=effective_process_role)
+    _build_decision_slice(
+        runtime_settings=runtime_settings,
+        storage=storage,
+        runtime_layering=runtime_layering,
+        slices=slices,
+        effective_process_role=effective_process_role,
     )
-    market_gateway = MarketDataGateway(
-        settings=runtime_settings,
-        normalizer=normalizer,
-        publisher=market_publisher,
-        okx_ws_client=okx_ws_client,
-        okx_rest_client=okx_client if runtime_settings.market_data_backend == "okx" else None,
+    _build_execution_slice(
+        runtime_settings=runtime_settings,
+        storage=storage,
+        slices=slices,
+        effective_process_role=effective_process_role,
     )
-    private_account_ws_client = (
-        OKXPrivateWebSocketClient(settings=runtime_settings)
-        if runtime_settings.account_backend == "okx" and runtime_settings.account_read_enabled
-        else None
-    )
-    account_service = OKXAccountService(
-        settings=runtime_settings,
-        client=okx_client,
-        private_ws_client=private_account_ws_client,
-    )
-    fee_resolver = EffectiveFeeResolver(
-        settings=runtime_settings,
-        account_service=account_service,
-    )
-    baseline_import_service = AccountBaselineImportService(
-        event_store=storage.event_store,
-        reconciliation_repo=storage.reconciliation_repo,
-    )
-    bootstrap_from_exchange = runtime_layering.recovery_policy.startup_baseline_import_supported
-    execution_adapter = _build_execution_adapter(
-        settings=runtime_settings,
-        market_gateway=market_gateway,
-        account_service=account_service,
-        obligation_repo=storage.obligation_repo,
-        mode_controller=mode_controller,
-        environment_capabilities=runtime_layering.environment_capabilities,
-        policy_profile=runtime_layering.policy_profile,
-    )
-    health_service = SystemHealthService(
-        settings=runtime_settings,
-        mode_controller=mode_controller,
-        kill_switch=kill_switch,
-        market_provider=market_gateway,
-        account_provider=account_service,
-        execution_provider=execution_adapter,
-        reconciliation_repo=storage.reconciliation_repo,
-        recovery_policy=runtime_layering.recovery_policy,
-    )
-    if isinstance(execution_adapter, OKXExecutionAdapter):
-        execution_adapter.health_service = health_service
-
-    snapshot_builder = PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator())
-    feature_engine = FeatureEngine(bus=bus, calculator=FeatureCalculator())
-    phase1_shadow_monitor = Phase1ShadowMonitor(
-        execution_repo=storage.execution_repo,
-        obligation_repo=storage.obligation_repo,
+    _build_portfolio_slice(
+        runtime_settings=runtime_settings,
         state_scope=state_scope,
-        execution_shadow_service=storage.phase1_execution_shadow_service,
-        ledger_mirror_service=storage.phase1_ledger_mirror_service,
-        execution_order_repo=storage.execution_order_repo,
-        execution_fill_repo=storage.execution_fill_repo_v2,
-        reservation_repo=storage.reservation_repo_v2,
+        storage=storage,
+        slices=slices,
+        effective_process_role=effective_process_role,
     )
-    phase1_shadow = storage.phase1_shadow or Phase1ShadowSubsystem(
-        execution_order_repo=storage.execution_order_repo,
-        execution_order_history_repo=storage.execution_order_history_repo,
-        execution_command_repo=storage.execution_command_repo,
-        execution_fill_repo=storage.execution_fill_repo_v2,
-        reservation_repo=storage.reservation_repo_v2,
-        ledger_account_repo=storage.ledger_account_repo,
-        ledger_journal_repo=storage.ledger_journal_repo,
-        ledger_entry_repo=storage.ledger_entry_repo,
-        settlement_repo=storage.settlement_repo,
-        position_lot_repo=storage.position_lot_repo,
-        lot_event_repo=storage.lot_event_repo,
-        external_inbox_repo=storage.external_inbox_repo,
-        command_outbox_repo=storage.command_outbox_repo_v2,
-        execution_shadow_service=storage.phase1_execution_shadow_service,
-        ledger_mirror_service=storage.phase1_ledger_mirror_service,
-    )
-    phase1_shadow.monitor = phase1_shadow_monitor
-    health_service.phase1_shadow_provider = phase1_shadow_monitor
-    reconciliation_classifier = (
-        RecoveryReconciliationClassifier()
-        if runtime_settings.recovery_reconciliation_execution_ledger_enabled
-        else None
-    )
-    ai_service = AIInferenceService(
-        settings=runtime_settings,
-        event_store=storage.event_store,
-        bus=bus,
-        execution_repo=storage.execution_repo,
-        prompt_builder=PromptBuilder(),
-        validator=AssessmentValidator(),
-        fee_resolver=fee_resolver,
-    )
-    strategy_coordinator = StrategyCoordinatorService(
-        settings=runtime_settings,
-        event_store=storage.event_store,
-        market_gateway=market_gateway,
-        portfolio_repo=storage.portfolio_repo,
-        execution_repo=storage.execution_repo,
-        position_lot_repo=storage.position_lot_repo,
-        account_service=account_service,
-        strategy_sleeve_repo=storage.strategy_sleeve_repo,
-        strategy_runtime_repo=storage.strategy_runtime_repo,
-        reconciliation_repo=storage.reconciliation_repo,
-        sleeve_pnl_repo=storage.sleeve_pnl_repo,
-    )
-    decision_trigger_policy = DecisionTriggerPolicy(settings=runtime_settings)
-    decision_engine = DecisionOrchestrator(
-        bus=bus,
-        context_builder=DecisionContextBuilder(
-            settings=runtime_settings,
-            event_store=storage.event_store,
-            portfolio_repo=storage.portfolio_repo,
-            execution_repo=storage.execution_repo,
-            mode_controller=mode_controller,
-            health_service=health_service,
-        ),
-        baseline_strategy=BaselineStrategy(event_store=storage.event_store),
-        ai_service=ai_service,
-        target_engine=TargetPositionEngine(settings=runtime_settings, fee_resolver=fee_resolver),
-        strategy_coordinator=strategy_coordinator,
-        metrics=metrics,
-    )
-    decision_trigger = DecisionCycleTrigger(
-        orchestrator=decision_engine,
-        market_gateway=market_gateway,
-        policy=decision_trigger_policy,
-        can_trigger=lambda *, symbol: (
-            False,
-            "kill_switch_active",
-        )
-        if kill_switch.halted
-        else (
-            True,
-            "ready",
-        )
-        if runtime_settings.symbol_allowed_for_decision_cycle(symbol)
-        else (
-            False,
-            "symbol_not_enabled_for_decision_cycle",
-        ),
-    )
-    audit_service = DecisionAuditService(bus=bus, audit_repo=storage.audit_repo)
-
-    policy_engine = PolicyEngine(
-        settings=runtime_settings,
-        kill_switch=kill_switch,
-        mode_controller=mode_controller,
-        health_service=health_service,
-        environment_capabilities=runtime_layering.environment_capabilities,
-        policy_profile=runtime_layering.policy_profile,
-    )
-    risk_engine = RiskEngine(
-        settings=runtime_settings,
-        account_service=account_service,
-        health_service=health_service,
-        trigger_policy=decision_trigger_policy,
-        price_provider=market_gateway.latest_price,
-        mode_controller=mode_controller,
-        obligation_repo=storage.obligation_repo,
-        environment_capabilities=runtime_layering.environment_capabilities,
-        policy_profile=runtime_layering.policy_profile,
-        fee_resolver=fee_resolver,
-        reconciliation_repo=storage.reconciliation_repo,
-    )
-    execution_planner = ExecutionPlanner(settings=runtime_settings)
-    obligation_service = ExecutionObligationService(
-        settings=runtime_settings,
-        obligation_repo=storage.obligation_repo,
-        account_snapshot_loader=lambda: account_service.refresh(),
-        price_provider=market_gateway.latest_price,
-        fee_resolver=fee_resolver,
-    )
-    execution_outbox_publisher = None
-    portfolio_outbox_publisher = None
-    if (
-        storage.database_runtime is not None
-        and isinstance(storage.obligation_repo, PostgresExecutionObligationRepository)
-        and isinstance(storage.event_store, PostgresEventStore)
-        and storage.outbox_repo is not None
-        and hasattr(storage.execution_repo, "save_order_state_in_session")
-        and hasattr(storage.execution_repo, "save_fill_in_session")
-    ):
-        execution_outbox_publisher = PostgresExecutionOutboxPublisher(
-            session_factory=storage.database_runtime.session_factory,
-            event_store=storage.event_store,
-            execution_repo=storage.execution_repo,
-            obligation_repo=storage.obligation_repo,
-            outbox_repo=storage.outbox_repo,
-            bus=bus,
-            execution_command_repo=(
-                storage.execution_command_repo
-                if isinstance(storage.execution_command_repo, PostgresExecutionCommandRepository)
-                else None
-            ),
-            execution_order_repo=storage.execution_order_repo,
-            execution_order_history_repo=storage.execution_order_history_repo,
-            execution_fill_repo=storage.execution_fill_repo_v2,
-        )
-    if (
-        storage.database_runtime is not None
-        and isinstance(storage.event_store, PostgresEventStore)
-        and storage.outbox_repo is not None
-        and isinstance(storage.portfolio_repo, PostgresPortfolioRepository)
-        and isinstance(storage.fill_outcome_repo, PostgresFillOutcomeRepository)
-    ):
-        portfolio_outbox_publisher = PostgresPortfolioOutboxPublisher(
-            session_factory=storage.database_runtime.session_factory,
-            event_store=storage.event_store,
-            outbox_repo=storage.outbox_repo,
-            bus=bus,
-            portfolio_repo=storage.portfolio_repo,
-            fill_outcome_repo=storage.fill_outcome_repo,
-        )
-    execution_order_service = None
-    execution_command_processor = None
-    if runtime_settings.execution_command_flow_enabled and storage.execution_command_repo is not None:
-        execution_order_service = ExecutionOrderService(
-            execution_command_repo=storage.execution_command_repo,
-            execution_order_repo=storage.execution_order_repo,
-            execution_order_history_repo=storage.execution_order_history_repo,
-        )
-    order_manager = OrderManager(
-        settings=runtime_settings,
-        bus=bus,
-        adapter=execution_adapter,
-        execution_repo=storage.execution_repo,
-        exit_execution_repo=storage.exit_execution_repo,
-        obligation_service=obligation_service,
-        execution_outbox_publisher=execution_outbox_publisher,
-        persistent_order_service=execution_order_service,
-        shadow_execution_service=storage.phase1_execution_shadow_service,
-        shadow_execution_order_repo=storage.execution_order_repo,
-        shadow_execution_order_history_repo=storage.execution_order_history_repo,
-        shadow_execution_fill_repo=storage.execution_fill_repo_v2,
-        shadow_ledger_mirror_service=storage.phase1_ledger_mirror_service,
-        leg_risk_evaluator=(
-            risk_engine.evaluate_leg_order
-            if runtime_settings.trading_product_type == "derivatives"
-            and runtime_settings.derivatives_position_mode == "hedge"
-            else None
-        ),
-        strategy_runtime_repo=storage.strategy_runtime_repo,
-        kill_switch=kill_switch,
-    )
-    if execution_order_service is not None and storage.execution_command_repo is not None:
-        execution_command_processor = ExecutionCommandProcessor(
-            execution_command_repo=storage.execution_command_repo,
-            submit_executor=lambda intent, client_order_id=None: order_manager.process_submit_command(
-                intent=intent,
-                client_order_id=client_order_id,
-            ),
-            cancel_executor=lambda client_order_id: order_manager.process_cancel_command(
-                client_order_id=client_order_id,
-            ),
-            can_execute_command=lambda command: (
-                str(command.get("command_type") or "").lower() != "submit"
-                or not kill_switch.halted
-            ),
-            sent_retry_after_seconds=runtime_settings.execution_command_sent_retry_after_seconds,
-        )
-
-    portfolio_state = PortfolioState(
-        initial_usdt_balance=runtime_settings.initial_usdt_balance,
-        default_product_type=runtime_settings.trading_product_type,
-        default_margin_mode=runtime_settings.margin_mode,
-    )
-    sleeve_pnl_projection_service = SleevePnLProjectionService(
-        fill_outcome_repo=storage.fill_outcome_repo,
-        funding_fee_repo=storage.funding_fee_repo,
-        sleeve_pnl_repo=storage.sleeve_pnl_repo,
-        execution_repo=storage.execution_repo,
-        strategy_sleeve_repo=storage.strategy_sleeve_repo,
-    )
-    if (
-        runtime_settings.portfolio_ledger_truth_enabled
-        and storage.ledger_account_repo is not None
-        and storage.ledger_journal_repo is not None
-        and storage.ledger_entry_repo is not None
-    ):
-        portfolio_service = LedgerBackedPortfolioService(
-            bus=bus,
-            state=portfolio_state,
-            snapshot_builder=snapshot_builder,
-            portfolio_repo=storage.portfolio_repo,
-            fill_outcome_repo=storage.fill_outcome_repo,
-            price_provider=market_gateway.latest_price,
-            execution_repo=storage.execution_repo,
-            settlement_posting_service=LedgerSettlementPostingService(
-                ledger_account_repo=storage.ledger_account_repo,
-                ledger_journal_repo=storage.ledger_journal_repo,
-                ledger_entry_repo=storage.ledger_entry_repo,
-                reservation_repo=storage.reservation_repo_v2,
-            ),
-            persistent_lot_book_service=(
-                PersistentLotBookService(
-                    position_lot_repo=storage.position_lot_repo,
-                    lot_event_repo=storage.lot_event_repo,
-                    projection_builder=LotBasedProjectionBuilder(),
-                )
-                if storage.position_lot_repo is not None and storage.lot_event_repo is not None
-                else None
-            ),
-            sleeve_pnl_projection_service=sleeve_pnl_projection_service,
-            portfolio_outbox_publisher=portfolio_outbox_publisher,
-            state_scope=state_scope,
-            initial_usdt_balance=runtime_settings.initial_usdt_balance,
-            metrics=metrics,
-        )
-    else:
-        portfolio_service = PortfolioService(
-            bus=bus,
-            state=portfolio_state,
-            snapshot_builder=snapshot_builder,
-            portfolio_repo=storage.portfolio_repo,
-            fill_outcome_repo=storage.fill_outcome_repo,
-            price_provider=market_gateway.latest_price,
-            execution_repo=storage.execution_repo,
-            persistent_lot_book_service=(
-                PersistentLotBookService(
-                    position_lot_repo=storage.position_lot_repo,
-                    lot_event_repo=storage.lot_event_repo,
-                    projection_builder=LotBasedProjectionBuilder(),
-                )
-                if storage.position_lot_repo is not None and storage.lot_event_repo is not None
-                else None
-            ),
-            sleeve_pnl_projection_service=sleeve_pnl_projection_service,
-            portfolio_outbox_publisher=portfolio_outbox_publisher,
-            state_scope=state_scope,
-            metrics=metrics,
-        )
-    funding_fee_sync_service = (
-        LedgerFundingFeeSyncService(
-            funding_fee_repo=storage.funding_fee_repo,
-            ledger_account_repo=storage.ledger_account_repo,
-            ledger_journal_repo=storage.ledger_journal_repo,
-            ledger_entry_repo=storage.ledger_entry_repo,
-        )
-        if (
-            storage.funding_fee_repo is not None
-            and storage.ledger_account_repo is not None
-            and storage.ledger_journal_repo is not None
-            and storage.ledger_entry_repo is not None
-        )
-        else None
-    )
-
-    reconciliation_service = ReconciliationService(
-        settings=runtime_settings,
-        bus=bus,
-        fetcher=ExchangeStateFetcher(account_service=account_service),
-        comparator=StateComparator(),
-        repair_service=ReconciliationRepairService(),
-        reconciliation_repo=storage.reconciliation_repo,
-        execution_repo=storage.execution_repo,
-        portfolio_repo=storage.portfolio_repo,
-        event_store=storage.event_store,
-        reconstruction_service=PortfolioReconstructionService(
-            initial_usdt_balance=runtime_settings.initial_usdt_balance,
-            snapshot_builder=snapshot_builder,
-        ),
-        price_provider=market_gateway.latest_price,
-        exit_execution_repo=storage.exit_execution_repo,
-        bootstrap_portfolio_from_exchange=bootstrap_from_exchange,
-        recovery_policy=runtime_layering.recovery_policy,
-        metrics=metrics,
-        reconciliation_classifier=reconciliation_classifier,
-    )
-    base_recovery_service = ExecutionRecoveryService(
-        settings=runtime_settings,
-        execution_repo=storage.execution_repo,
-        obligation_repo=storage.obligation_repo,
-        portfolio_repo=storage.portfolio_repo,
-        reconciliation_repo=storage.reconciliation_repo,
-        strategy_runtime_repo=storage.strategy_runtime_repo,
-        reconstruction_service=PortfolioReconstructionService(
-            initial_usdt_balance=runtime_settings.initial_usdt_balance,
-            snapshot_builder=snapshot_builder,
-        ),
-        price_provider=market_gateway.latest_price,
-        kill_switch=kill_switch,
-        bootstrap_portfolio_from_exchange=bootstrap_from_exchange,
-        reconciliation_stale_after_seconds=runtime_settings.reconciliation_stale_after_seconds,
-        recovery_policy=runtime_layering.recovery_policy,
-        fill_outcome_repo=storage.fill_outcome_repo,
-        event_store=storage.event_store,
-    )
-    # OKXExecutionAdapter.client satisfies ExchangeOrderQuerier protocol.
-    _exchange_order_client = (
-        getattr(execution_adapter, "client", None)
-        if isinstance(execution_adapter, OKXExecutionAdapter)
-        else None
-    )
-    recovery_service = (
-        ExecutionLedgerRecoveryService(
-            settings=runtime_settings,
-            base_recovery_service=base_recovery_service,
-            reconciliation_repo=storage.reconciliation_repo,
-            portfolio_repo=storage.portfolio_repo,
-            kill_switch=kill_switch,
-            reconciliation_classifier=reconciliation_classifier or RecoveryReconciliationClassifier(),
-            execution_order_repo=storage.execution_order_repo,
-            execution_command_repo=storage.execution_command_repo,
-            exchange_order_client=_exchange_order_client,
-        )
-        if runtime_settings.recovery_reconciliation_execution_ledger_enabled
-        else base_recovery_service
-    )
-    position_target_handler = _build_position_target_handler(
-        settings=runtime_settings,
-        mode_controller=mode_controller,
+    _build_reconciliation_slice(
+        runtime_settings=runtime_settings,
         runtime_layering=runtime_layering,
-        account_service=account_service,
-        policy_engine=policy_engine,
-        risk_engine=risk_engine,
-        execution_planner=execution_planner,
-        market_gateway=market_gateway,
-        kill_switch=kill_switch,
-        metrics=metrics,
-        bus=bus,
-        event_store=storage.event_store,
-        execution_repo=storage.execution_repo,
-        strategy_runtime_repo=storage.strategy_runtime_repo,
+        storage=storage,
+        slices=slices,
+        effective_process_role=effective_process_role,
     )
-    await _subscribe_critical_handlers(
-        bus=bus,
-        feature_engine=feature_engine,
-        decision_trigger=decision_trigger,
-        order_manager=order_manager,
-        portfolio_service=portfolio_service,
-        reconciliation_service=reconciliation_service,
-        audit_service=audit_service,
-        position_target_handler=position_target_handler,
-    )
-    await _subscribe_observer_handlers(
-        bus=bus,
-        specs=_observer_subscription_specs(
-            audit_service=audit_service,
-            ai_service=ai_service,
-            reconciliation_service=reconciliation_service,
-        ),
-    )
+    await _wire_event_subscriptions(slices=slices)
 
-    if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
-        account_snapshot = await account_service.refresh(force=True)
-        if runtime_settings.trading_product_type == "derivatives":
-            _validate_exchange_position_mode_contract(
-                settings=runtime_settings,
-                snapshot=account_snapshot,
+    # ── Bootstrap recovery / startup snapshot 装配 ──────────────────
+    # 这部分是 slice 装配完成后的“启动序列编排”，依赖多个 slice 的产物，
+    # 因此保留在 build_runtime 内作为 orchestration glue。
+    bus = slices.bus
+    market_gateway = slices.market_gateway
+    account_service = slices.account_service
+    fee_resolver = slices.fee_resolver
+    feature_engine = slices.feature_engine
+    ai_service = slices.ai_service
+    strategy_coordinator = slices.strategy_coordinator
+    decision_engine = slices.decision_engine
+    decision_trigger = slices.decision_trigger
+    decision_trigger_policy = slices.decision_trigger_policy
+    execution_planner = slices.execution_planner
+    execution_adapter = slices.execution_adapter
+    order_manager = slices.order_manager
+    portfolio_service = slices.portfolio_service
+    reconciliation_service = slices.reconciliation_service
+    policy_engine = slices.policy_engine
+    risk_engine = slices.risk_engine
+    kill_switch = slices.kill_switch
+    mode_controller = slices.mode_controller
+    health_service = slices.health_service
+    metrics = slices.metrics
+    bootstrap_from_exchange = slices.bootstrap_from_exchange
+    baseline_import_service = slices.baseline_import_service
+    funding_fee_sync_service = slices.funding_fee_sync_service
+    sleeve_pnl_projection_service = slices.sleeve_pnl_projection_service
+    recovery_service = slices.recovery_service
+    phase1_shadow_monitor = slices.phase1_shadow_monitor
+    phase1_shadow = slices.phase1_shadow
+    execution_outbox_publisher = slices.execution_outbox_publisher
+    execution_order_service = slices.execution_order_service
+    execution_command_processor = slices.execution_command_processor
+
+    # Stage 3：startup recovery 段只在 execution / monolith role 下运行。
+    # gateway / market / decision role 没有 portfolio_service 与 recovery_service，
+    # 整个恢复流程跳过；recovery_status 用极简默认值占位（仅 status 字段必填）。
+    if _slice_active("startup_recovery", effective_process_role=effective_process_role):
+        if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
+            account_snapshot = await account_service.refresh(force=True)
+            if runtime_settings.trading_product_type == "derivatives":
+                _validate_exchange_position_mode_contract(
+                    settings=runtime_settings,
+                    snapshot=account_snapshot,
+                )
+            recent_bills_summary_getter = getattr(account_service, "recent_bills_summary", None)
+            latest_recent_bills_getter = getattr(account_service, "latest_recent_bills", None)
+            exchange_bills_summary = (
+                recent_bills_summary_getter()
+                if callable(recent_bills_summary_getter)
+                else {}
             )
-        recent_bills_summary_getter = getattr(account_service, "recent_bills_summary", None)
-        latest_recent_bills_getter = getattr(account_service, "latest_recent_bills", None)
-        exchange_bills_summary = (
-            recent_bills_summary_getter()
-            if callable(recent_bills_summary_getter)
-            else {}
-        )
-        recent_bills_rows = (
-            latest_recent_bills_getter()
-            if callable(latest_recent_bills_getter)
-            else []
-        )
-        funding_fee_sync_posted_count = 0
-        if funding_fee_sync_service is not None:
-            funding_result = funding_fee_sync_service.sync_recent_bills(
-                rows=recent_bills_rows,
-                product_type=state_scope.product_type,
-                margin_mode=state_scope.margin_mode,
+            recent_bills_rows = (
+                latest_recent_bills_getter()
+                if callable(latest_recent_bills_getter)
+                else []
             )
-            funding_fee_sync_posted_count = funding_result.posted_count
-        imported_baseline = None
-        imported_baseline_event_id = None
-        latest_scoped_snapshot = latest_matching_snapshot(storage.portfolio_repo.history(), state_scope)
+            funding_fee_sync_posted_count = 0
+            if funding_fee_sync_service is not None:
+                funding_result = funding_fee_sync_service.sync_recent_bills(
+                    rows=recent_bills_rows,
+                    product_type=state_scope.product_type,
+                    margin_mode=state_scope.margin_mode,
+                )
+                funding_fee_sync_posted_count = funding_result.posted_count
+            imported_baseline = None
+            imported_baseline_event_id = None
+            latest_scoped_snapshot = latest_matching_snapshot(storage.portfolio_repo.history(), state_scope)
+            if (
+                bootstrap_from_exchange
+                and account_snapshot is not None
+                and latest_scoped_snapshot is None
+            ):
+                imported = baseline_import_service.import_snapshot(
+                    exchange_snapshot=account_snapshot,
+                    portfolio_state=portfolio_service.state,
+                    product_type=state_scope.product_type,
+                    margin_mode=state_scope.margin_mode,
+                    allowed_symbols=state_scope.allowed_symbols,
+                    exchange_bills_summary=exchange_bills_summary,
+                )
+                imported_baseline = imported.snapshot
+                imported_baseline_event_id = imported.event_id
+        else:
+            imported_baseline = None
+            imported_baseline_event_id = None
+            funding_fee_sync_posted_count = 0
+        # Pre-recovery: query exchange for stuck CREATED/SUBMITTING orders
+        # so that downstream recovery sees clean state and avoids unnecessary halts.
+        if hasattr(recovery_service, "pre_recover_exchange_reconciliation"):
+            await recovery_service.pre_recover_exchange_reconciliation()
+
+        recovery_artifacts = recovery_service.recover(
+            portfolio_state=portfolio_service.state,
+            account_baseline=imported_baseline,
+            account_baseline_event_id=imported_baseline_event_id,
+        )
+        if recovery_artifacts.rebuilt_snapshot is not None:
+            await publish_model(
+                bus=bus,
+                topic=topics.PORTFOLIO_SNAPSHOTS,
+                key="portfolio",
+                payload_model=recovery_artifacts.rebuilt_snapshot,
+                source_component="recovery_service",
+            )
         if (
-            bootstrap_from_exchange
-            and account_snapshot is not None
-            and latest_scoped_snapshot is None
+            bootstrap_portfolio_snapshot
+            and latest_matching_snapshot(storage.portfolio_repo.history(), state_scope) is None
+            and not recovery_artifacts.rebuilt_snapshot_saved
         ):
-            imported = baseline_import_service.import_snapshot(
-                exchange_snapshot=account_snapshot,
-                portfolio_state=portfolio_service.state,
-                product_type=state_scope.product_type,
-                margin_mode=state_scope.margin_mode,
-                allowed_symbols=state_scope.allowed_symbols,
-                exchange_bills_summary=exchange_bills_summary,
+            await portfolio_service.bootstrap_snapshot(
+                snapshot_origin="exchange_import" if imported_baseline is not None else "runtime_bootstrap"
             )
-            imported_baseline = imported.snapshot
-            imported_baseline_event_id = imported.event_id
+            recovery_status = recovery_artifacts.status.model_copy(
+                update={"recovered_snapshot_available": True}
+            )
+        else:
+            recovery_status = recovery_artifacts.status
+
+        if storage.database_runtime is not None and storage.exit_execution_repo is not None:
+            refreshed_exit_execution, startup_refresh_notes = startup_refresh_exit_execution_truth(
+                settings=runtime_settings,
+                execution_repo=storage.execution_repo,
+                exit_execution_repo=storage.exit_execution_repo,
+                scope=state_scope,
+            )
+            recovery_status = apply_startup_exit_execution_review_overlay(
+                base_status=recovery_status,
+                parent_intents=refreshed_exit_execution,
+                refresh_notes=startup_refresh_notes,
+            )
+            if startup_refresh_notes:
+                recovery_status = recovery_status.model_copy(
+                    update={"notes": list(dict.fromkeys([*recovery_status.notes, *startup_refresh_notes]))}
+                )
+            startup_snapshot_notes = persist_startup_exit_execution_state_snapshot(
+                reconciliation_repo=storage.reconciliation_repo,
+                scope=state_scope,
+                status=recovery_status,
+                parent_intents=refreshed_exit_execution,
+                refresh_notes=startup_refresh_notes,
+            )
+            if startup_snapshot_notes:
+                recovery_status = recovery_status.model_copy(
+                    update={"notes": list(dict.fromkeys([*recovery_status.notes, *startup_snapshot_notes]))}
+                )
+
+        if (
+            funding_fee_sync_posted_count > 0
+            and hasattr(portfolio_service, "bootstrap_snapshot")
+            and latest_matching_snapshot(storage.portfolio_repo.history(), state_scope) is not None
+        ):
+            await portfolio_service.bootstrap_snapshot(snapshot_origin="local_repair")
+
+        latest_scoped_portfolio_snapshot = latest_matching_snapshot(storage.portfolio_repo.history(), state_scope)
+        if (
+            latest_scoped_portfolio_snapshot is not None
+            and scoped_portfolio_event(storage.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS), state_scope) is None
+        ):
+            await publish_model(
+                bus=bus,
+                topic=topics.PORTFOLIO_SNAPSHOTS,
+                key="portfolio",
+                payload_model=latest_scoped_portfolio_snapshot,
+                source_component="runtime",
+            )
     else:
-        imported_baseline = None
-        imported_baseline_event_id = None
-        funding_fee_sync_posted_count = 0
-    # Pre-recovery: query exchange for stuck CREATED/SUBMITTING orders
-    # so that downstream recovery sees clean state and avoids unnecessary halts.
-    if hasattr(recovery_service, "pre_recover_exchange_reconciliation"):
-        await recovery_service.pre_recover_exchange_reconciliation()
-
-    recovery_artifacts = recovery_service.recover(
-        portfolio_state=portfolio_service.state,
-        account_baseline=imported_baseline,
-        account_baseline_event_id=imported_baseline_event_id,
-    )
-    if recovery_artifacts.rebuilt_snapshot is not None:
-        await publish_model(
-            bus=bus,
-            topic=topics.PORTFOLIO_SNAPSHOTS,
-            key="portfolio",
-            payload_model=recovery_artifacts.rebuilt_snapshot,
-            source_component="recovery_service",
-        )
-    if (
-        bootstrap_portfolio_snapshot
-        and latest_matching_snapshot(storage.portfolio_repo.history(), state_scope) is None
-        and not recovery_artifacts.rebuilt_snapshot_saved
-    ):
-        await portfolio_service.bootstrap_snapshot(
-            snapshot_origin="exchange_import" if imported_baseline is not None else "runtime_bootstrap"
-        )
-        recovery_status = recovery_artifacts.status.model_copy(
-            update={"recovered_snapshot_available": True}
-        )
-    else:
-        recovery_status = recovery_artifacts.status
-
-    if storage.database_runtime is not None and storage.exit_execution_repo is not None:
-        refreshed_exit_execution, startup_refresh_notes = startup_refresh_exit_execution_truth(
-            settings=runtime_settings,
-            execution_repo=storage.execution_repo,
-            exit_execution_repo=storage.exit_execution_repo,
-            scope=state_scope,
-        )
-        recovery_status = apply_startup_exit_execution_review_overlay(
-            base_status=recovery_status,
-            parent_intents=refreshed_exit_execution,
-            refresh_notes=startup_refresh_notes,
-        )
-        if startup_refresh_notes:
-            recovery_status = recovery_status.model_copy(
-                update={"notes": list(dict.fromkeys([*recovery_status.notes, *startup_refresh_notes]))}
-            )
-        startup_snapshot_notes = persist_startup_exit_execution_state_snapshot(
-            reconciliation_repo=storage.reconciliation_repo,
-            scope=state_scope,
-            status=recovery_status,
-            parent_intents=refreshed_exit_execution,
-            refresh_notes=startup_refresh_notes,
-        )
-        if startup_snapshot_notes:
-            recovery_status = recovery_status.model_copy(
-                update={"notes": list(dict.fromkeys([*recovery_status.notes, *startup_snapshot_notes]))}
-            )
-
-    if (
-        funding_fee_sync_posted_count > 0
-        and hasattr(portfolio_service, "bootstrap_snapshot")
-        and latest_matching_snapshot(storage.portfolio_repo.history(), state_scope) is not None
-    ):
-        await portfolio_service.bootstrap_snapshot(snapshot_origin="local_repair")
-
-    latest_scoped_portfolio_snapshot = latest_matching_snapshot(storage.portfolio_repo.history(), state_scope)
-    if (
-        latest_scoped_portfolio_snapshot is not None
-        and scoped_portfolio_event(storage.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS), state_scope) is None
-    ):
-        await publish_model(
-            bus=bus,
-            topic=topics.PORTFOLIO_SNAPSHOTS,
-            key="portfolio",
-            payload_model=latest_scoped_portfolio_snapshot,
-            source_component="runtime",
+        # gateway / market / decision role：跳过启动恢复，给个最小占位 RecoveryStatus。
+        # 这些 role 不持有 portfolio/recovery slice，恢复语义不适用。
+        recovery_status = RecoveryStatus(
+            status="multi_process_role_skip",
+            recovery_state="multi_process_role_skip",
         )
 
     runtime = ApplicationRuntime(
@@ -3180,31 +3731,6 @@ async def build_runtime(
     )
     if runtime.sleeve_pnl_projection_service is not None:
         runtime.sleeve_pnl_projection_service.rebuild_scope(scope=state_scope)
-    from aats.services.operator.query_service import OperatorQueryService
-    from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 
-    runtime.derivatives_live_guard_service = DerivativesLiveGuardService(
-        settings=runtime.settings,
-        kill_switch=runtime.kill_switch,
-        account_service=runtime.account_service,
-        event_store=runtime.event_store,
-        metrics=runtime.metrics,
-    )
-    runtime.derivatives_live_guard_service.evaluate_now()
-    runtime.health_service.runtime_guard_provider = runtime.derivatives_live_guard_service
-    runtime.risk_engine.live_runtime_guard_provider = runtime.derivatives_live_guard_service
-    runtime.trial_guard_service = ForwardTrialGuardService(
-        settings=runtime.settings,
-        kill_switch=runtime.kill_switch,
-        event_store=runtime.event_store,
-        metrics=runtime.metrics,
-        profitability_provider=lambda limit: OperatorQueryService(runtime).profitability_overview(limit=limit),
-        anomaly_provider=lambda limit: OperatorQueryService(runtime).execution_anomaly_report(limit=limit),
-    )
-    runtime.trial_guard_service.evaluate_now()
-    runtime.risk_engine.trial_guard_provider = runtime.trial_guard_service
-    runtime.risk_engine.recovery_status_provider = lambda: RecoveryPostureEvaluator(runtime).finalize_status(
-        base_status=runtime.recovery_status
-    )
-    runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
+    _apply_post_init_guards(runtime=runtime, effective_process_role=effective_process_role)
     return runtime

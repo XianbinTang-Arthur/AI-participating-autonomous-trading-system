@@ -66,6 +66,27 @@ SmartArbitrageBorrowSourceMode = Literal["configured", "apr_window_model"]
 PRIMARY_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY = "strategy_sleeve_auto_execution_enabled"
 DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY = "strategy_sleeve_auto_parallel_enabled"
 
+# ── 多进程切片化（Stage 3）合法 process_role 集合 ──────────────────
+# monolith = 单进程模式（向后兼容默认值）
+# gateway = 行情/账户/订单 WebSocket 网关
+# market = 市场特征/技术指标计算
+# decision = AI/策略协调/风控/计划生成
+# execution = 订单提交/对账/资金结算
+PROCESS_ROLE_MONOLITH = "monolith"
+PROCESS_ROLE_GATEWAY = "gateway"
+PROCESS_ROLE_MARKET = "market"
+PROCESS_ROLE_DECISION = "decision"
+PROCESS_ROLE_EXECUTION = "execution"
+ALLOWED_PROCESS_ROLES: frozenset[str] = frozenset(
+    {
+        PROCESS_ROLE_MONOLITH,
+        PROCESS_ROLE_GATEWAY,
+        PROCESS_ROLE_MARKET,
+        PROCESS_ROLE_DECISION,
+        PROCESS_ROLE_EXECUTION,
+    }
+)
+
 _PLACEHOLDER_TOKENS = (
     "REPLACE_WITH_",
     "CHANGE_ME",
@@ -126,6 +147,15 @@ class AATSSettings(BaseSettings):
     )
     database_single_runtime_guard_enabled: bool = True
     database_runtime_lock_key: int = 42_420_001
+    # ── 多进程切片化（Stage 3）─────────────────────────────────────
+    # process_role 决定本进程承担哪个切片。默认 None = 单进程 monolith（向后兼容）。
+    # 合法取值：None / "monolith" / "gateway" / "market" / "decision" / "execution"。
+    # 通过环境变量 AATS_PROCESS_ROLE 注入；database_single_runtime_guard 会按 role
+    # 派生独立的 advisory lock_key，使 4 进程能各自持锁互不冲突。
+    process_role: str | None = Field(
+        default=None,
+        description="Multi-process role for slice-aware boot. None = monolith.",
+    )
     max_abs_position_qty: float = 0.01
     max_notional_per_symbol: float = 1_000.0
     max_open_orders: int = 5
@@ -528,6 +558,30 @@ class AATSSettings(BaseSettings):
     log_backup_count: int = 7
     exchange_name: str = "PAPER"
     allowed_symbols: tuple[str, ...] = Field(default=("BTC-USDT",))
+
+    @field_validator("process_role", mode="before")
+    @classmethod
+    def normalize_process_role(cls, value: Any) -> Any:
+        """规范化 AATS_PROCESS_ROLE 输入，校验合法集合。
+
+        - 空字符串 / None / 空白 → None（视为 monolith 默认）
+        - 字符串 → 去空白、转小写
+        - 不在合法集合内 → ValueError
+        """
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(
+                f"process_role must be string or None, got {type(value).__name__}"
+            )
+        normalized = value.strip().lower()
+        if not normalized:
+            return None
+        if normalized not in ALLOWED_PROCESS_ROLES:
+            raise ValueError(
+                f"process_role={normalized!r} is not in allowed set {sorted(ALLOWED_PROCESS_ROLES)}"
+            )
+        return normalized
 
     @field_validator("strategy_entry_allowed_regimes", "strategy_short_entry_allowed_regimes", mode="before")
     @classmethod
