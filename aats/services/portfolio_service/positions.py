@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field, replace as _dc_replace
 from decimal import Decimal
 from typing import Any, Callable
@@ -451,6 +452,10 @@ class PortfolioService:
         self.logger = get_logger("aats.portfolio_service")
 
     async def bootstrap_snapshot(self, *, snapshot_origin: PortfolioSnapshotOrigin = "runtime_bootstrap") -> None:
+        # snapshot_builder.build 只是读 self.state 做 decimal 计算，纯 CPU，
+        # 跑在 event loop 里不是瓶颈。真正的瓶颈是下面 portfolio_repo.save_snapshot
+        # 的同步 DB 写入——bootstrap 只跑一次，但 fill-derived 快照会在热路径
+        # 上被反复触发，走到 save_snapshot fallback 时必须让出 event loop。
         snapshot = self.snapshot_builder.build(
             state=self.state,
             price_provider=self.price_provider,
@@ -462,7 +467,7 @@ class PortfolioService:
                 source_component="portfolio_service",
             )
             return
-        self.portfolio_repo.save_snapshot(snapshot)
+        await asyncio.to_thread(self.portfolio_repo.save_snapshot, snapshot)
         await publish_model(
             bus=self.bus,
             topic=topics.PORTFOLIO_SNAPSHOTS,
@@ -475,7 +480,11 @@ class PortfolioService:
         fill = parse_payload(message, FillEvent)
         if self.state.has_applied_fill(fill.fill_id):
             return
-        if self.fill_outcome_repo.get_outcome(fill.fill_id) is not None:
+        # fill_outcome_repo.get_outcome 是同步 DB SELECT。成交热路径每笔都会
+        # 过这条幂等检查；不丢线程池的话整个 portfolio service 的 fill 处理
+        # 会把 event loop 钉死在 DB round-trip 上。
+        existing_outcome = await asyncio.to_thread(self.fill_outcome_repo.get_outcome, fill.fill_id)
+        if existing_outcome is not None:
             self.state.mark_fill_applied(fill.fill_id)
             return
         checkpoint = self.state.checkpoint()
@@ -498,6 +507,11 @@ class PortfolioService:
         if not result.applied:
             return
         try:
+            # snapshot_builder.build 仍然在 event loop 里同步跑——它只读 self.state
+            # 和 price_provider 做 decimal 计算，没有 DB I/O。如果把它丢线程池会
+            # 引入 state 的跨线程读（见 handle_fill_event 开头的 checkpoint/restore
+            # 协议依赖单线程顺序），反而带来竞态。真正需要让出的是
+            # portfolio_repo.save_snapshot 的同步 DB 写入。
             snapshot = self.snapshot_builder.build(
                 state=self.state,
                 price_provider=self.price_provider,
@@ -507,7 +521,7 @@ class PortfolioService:
                 snapshot_origin="fill_derived",
             )
             if self.portfolio_outbox_publisher is None:
-                self.portfolio_repo.save_snapshot(snapshot)
+                await asyncio.to_thread(self.portfolio_repo.save_snapshot, snapshot)
         except Exception as exc:
             self.state.restore(checkpoint)
             await self._emit_processing_failure(
@@ -560,7 +574,10 @@ class PortfolioService:
                     pre_commit_actions=tuple(pre_commit_actions),
                 )
             else:
-                self.fill_outcome_repo.save_outcome(outcome)
+                # 同 save_snapshot fallback：fill_outcome_repo.save_outcome 是
+                # 同步 INSERT，非 outbox 路径下走 to_thread 让 event loop 有空
+                # 调度 HTTP handler。
+                await asyncio.to_thread(self.fill_outcome_repo.save_outcome, outcome)
         except Exception as exc:
             self.state.restore(checkpoint)
             log_event(

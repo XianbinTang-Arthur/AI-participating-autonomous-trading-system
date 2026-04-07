@@ -142,6 +142,87 @@ def _normalize_dashboard_panel_keys(panel_keys: list[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(filtered))
 
 
+# -----------------------------------------------------------------------------
+# Dashboard bundle in-memory cache (Plan E)
+# -----------------------------------------------------------------------------
+# 场景：dashboard 首屏会在 1-2 秒内爆发多次 /dashboard/bundle 请求：
+#   - refreshDashboard() 同时请求 primary + deferred bundle（2 次）
+#   - 多个 tab 同时打开同一控制台（每个 tab × 2 次）
+#   - 背景 AUTO_REFRESH_MS 窗口内和手动刷新并发（2 次）
+# 每次 bundle 都会在线程池里跑几十个 OperatorQueryService 同步 DB 查询，
+# 大部分 panel 的源数据在 2 秒内根本不会变（决策周期本身 ~15s 跑一次）。
+# 短 TTL 内存缓存 + 同 key in-flight 去重能把这类重复请求直接收敛成一次
+# 后端计算，明显缓解 event loop 的 DB I/O 压力。
+#
+# 安全性注意事项：
+#   1. 缓存 KEY 必须包含 (role, identity)，否则 admin 的 operatorUsers panel
+#      可能被匿名用户的缓存命中而返回空数据或越权数据。
+#   2. TTL 必须远小于用户"感知实时"的阈值。2 秒足够让同帧内并发请求命中，
+#      又小于 AUTO_REFRESH_MS=30s 的一个数量级，用户无法察觉陈旧。
+#   3. 只缓存成功响应。失败路径 (raise) 不写缓存；inflight 的 future 异常
+#      也会从 dict 里清理，下次请求重新跑。
+#   4. 缓存 dict 是 module-level，单进程单 event loop 下天然线程安全
+#      （asyncio 协程之间没有抢占，只有 await 点才让出控制权，而 cache
+#      check / inflight set 这段路径里没有 await）。
+_BUNDLE_CACHE_TTL_SECONDS = 2.0
+_bundle_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
+_bundle_cache_inflight: dict[tuple[Any, ...], "asyncio.Future[dict[str, Any]]"] = {}
+
+
+def invalidate_bundle_cache() -> None:
+    """Drop the entire dashboard bundle cache.
+
+    Called from the FastAPI app-level middleware after any successful
+    mutating request (POST/PATCH/PUT/DELETE). Without this, a user who
+    just ran an action (switch mode, activate profile, kill-switch toggle,
+    …) would still see a cached pre-action snapshot for up to
+    ``_BUNDLE_CACHE_TTL_SECONDS`` before the next fetch reflects their
+    mutation. This function is cheap (dict.clear) and safe to call from
+    any coroutine — it does NOT abort in-flight computes, it just ensures
+    the *next* fetch will recompute from scratch.
+
+    Note: we deliberately do NOT touch ``_bundle_cache_inflight``. Any
+    compute already running was scheduled BEFORE the mutation landed and
+    will eventually resolve; its result is valid for callers that happened
+    to dedupe into the same future. Those callers will then see the
+    newly-empty cache on their NEXT fetch, which picks up post-mutation
+    state.
+    """
+    _bundle_cache.clear()
+
+
+def _bundle_cache_key(
+    *,
+    principal: OperatorPrincipal | None,
+    panel_keys: tuple[str, ...],
+    view: str | None,
+    recent_decisions: int,
+    recent_orders: int,
+    recent_fills: int,
+    recent_replay_validations: int,
+    recent_ai_assessments: int,
+    recent_ai_shadow_decisions: int,
+    recent_ai_shadow_evaluations: int,
+) -> tuple[Any, ...]:
+    identity = principal.identity if principal is not None else None
+    role = principal.role if principal is not None else "anonymous"
+    return (
+        identity or "anonymous",
+        role,
+        # 把 panel_keys 排序后再入 key，否则 `panel=foo&panel=bar` 和
+        # `panel=bar&panel=foo` 会被当成两个 key 重复 compute。
+        tuple(sorted(panel_keys)),
+        view or "",
+        recent_decisions,
+        recent_orders,
+        recent_fills,
+        recent_replay_validations,
+        recent_ai_assessments,
+        recent_ai_shadow_decisions,
+        recent_ai_shadow_evaluations,
+    )
+
+
 def _protected_dashboard_panel_payload(
     *,
     request: Request,
@@ -362,6 +443,35 @@ async def auth_providers(request: Request) -> dict[str, Any]:
     return _auth_providers_payload(request)
 
 
+def _bundle_response_with_cache_info(
+    *,
+    base_payload: dict[str, Any],
+    request_started_at: float,
+    cache_hit: bool,
+    cache_age_ms: float,
+    deduped: bool,
+) -> dict[str, Any]:
+    """Return a shallow copy of `base_payload` with this request's timing.
+
+    Always hands back a NEW outer dict so the cached entry is never mutated by
+    FastAPI's serializer or any upstream middleware. The `panels` mapping is
+    shared by reference on purpose — it's treated as read-only downstream.
+    """
+    total_ms = round((perf_counter() - request_started_at) * 1000.0, 3)
+    base_timing = base_payload.get("timing") if isinstance(base_payload.get("timing"), dict) else {}
+    return {
+        "view": base_payload.get("view"),
+        "panels": base_payload.get("panels", {}),
+        "timing": {
+            **base_timing,
+            "total_ms": total_ms,
+            "cache_hit": cache_hit,
+            "cache_age_ms": cache_age_ms,
+            "deduped": deduped,
+        },
+    }
+
+
 @auth_router.get("/dashboard/bundle")
 async def dashboard_bundle(
     request: Request,
@@ -381,60 +491,136 @@ async def dashboard_bundle(
     panel_keys = _normalize_dashboard_panel_keys(panel)
     if not panel_keys:
         raise HTTPException(status_code=400, detail="dashboard_bundle_panel_required")
-    try:
-        require_read_access(request, api_key)
-        read_error: HTTPException | None = None
-    except HTTPException as exc:
-        read_error = exc
 
-    def _load_panel_sync(panel_key: str) -> tuple[str, dict[str, Any], float]:
-        panel_started_at = perf_counter()
-        try:
-            if panel_key == "session":
-                payload = _session_payload(request)
-            elif panel_key == "authProviders":
-                payload = _auth_providers_payload(request)
-            elif panel_key == "operatorUsers":
-                principal = require_admin_access(request, api_key)
-                payload = query.operator_users(actor_identity=principal.identity)
-            else:
-                if read_error is not None:
-                    raise read_error
-                payload = _protected_dashboard_panel_payload(
-                    request=request,
-                    query=query,
-                    panel_key=panel_key,
-                    recent_decisions_limit=recent_decisions,
-                    recent_orders_limit=recent_orders,
-                    recent_fills_limit=recent_fills,
-                    recent_replay_validations_limit=recent_replay_validations,
-                    recent_ai_assessments_limit=recent_ai_assessments,
-                    recent_ai_shadow_decisions_limit=recent_ai_shadow_decisions,
-                    recent_ai_shadow_evaluations_limit=recent_ai_shadow_evaluations,
-                )
-                if panel_key == "strategyRuntime" and view == "strategy" and isinstance(payload, dict):
-                    payload = _strategy_view_strategy_runtime_payload(payload)
-            return panel_key, {"data": payload, "error": None}, round((perf_counter() - panel_started_at) * 1000.0, 3)
-        except Exception as exc:
-            return panel_key, {"data": None, "error": _dashboard_panel_error(exc)}, round((perf_counter() - panel_started_at) * 1000.0, 3)
-
-    results = await asyncio.gather(
-        *[asyncio.to_thread(_load_panel_sync, key) for key in panel_keys]
+    # Plan E 缓存查找 + 同 key 并发去重。必须在 require_read_access 之前构建
+    # cache key，否则会多跑一次授权；session_principal 自己不抛异常，匿名用户
+    # 只是返回 None 并以 "anonymous" 参与 key，与登录用户严格隔离。
+    principal_for_key = session_principal(request)
+    cache_key = _bundle_cache_key(
+        principal=principal_for_key,
+        panel_keys=panel_keys,
+        view=view,
+        recent_decisions=recent_decisions,
+        recent_orders=recent_orders,
+        recent_fills=recent_fills,
+        recent_replay_validations=recent_replay_validations,
+        recent_ai_assessments=recent_ai_assessments,
+        recent_ai_shadow_decisions=recent_ai_shadow_decisions,
+        recent_ai_shadow_evaluations=recent_ai_shadow_evaluations,
     )
-    panels: dict[str, dict[str, Any]] = {}
-    panel_timings: dict[str, dict[str, float]] = {}
-    for panel_key, panel_result, duration_ms in results:
-        panels[panel_key] = panel_result
-        panel_timings[panel_key] = {"duration_ms": duration_ms}
+    loop = asyncio.get_running_loop()
+    monotonic_now = loop.time()
 
-    return {
-        "view": view,
-        "panels": panels,
-        "timing": {
-            "total_ms": round((perf_counter() - request_started_at) * 1000.0, 3),
-            "panels": panel_timings,
-        },
-    }
+    cached_entry = _bundle_cache.get(cache_key)
+    if cached_entry is not None:
+        cached_at, cached_payload = cached_entry
+        age = monotonic_now - cached_at
+        if age < _BUNDLE_CACHE_TTL_SECONDS:
+            return _bundle_response_with_cache_info(
+                base_payload=cached_payload,
+                request_started_at=request_started_at,
+                cache_hit=True,
+                cache_age_ms=round(age * 1000.0, 3),
+                deduped=False,
+            )
+        # TTL 过期：顺手清掉陈旧条目，让重算路径拿到干净的 cache dict。
+        _bundle_cache.pop(cache_key, None)
+
+    # In-flight dedup：已经有同 key 请求在算，直接 await 它的 future。注意
+    # 这个分支本身会 await，后面拿回的 payload 要走同一份 timing-overlay
+    # helper 让前端能区分 "命中 cache" 还是 "等 peer 算完"。
+    inflight_future = _bundle_cache_inflight.get(cache_key)
+    if inflight_future is not None:
+        try:
+            shared_payload = await inflight_future
+        except Exception:
+            # Peer 的 compute 失败 = 这次请求也应该返回相同的错误。让上层
+            # HTTPException/KeyError 顺着原路径抛出，不要在这里吞掉。
+            raise
+        return _bundle_response_with_cache_info(
+            base_payload=shared_payload,
+            request_started_at=request_started_at,
+            cache_hit=True,
+            cache_age_ms=0.0,
+            deduped=True,
+        )
+
+    future: "asyncio.Future[dict[str, Any]]" = loop.create_future()
+    _bundle_cache_inflight[cache_key] = future
+    try:
+        try:
+            require_read_access(request, api_key)
+            read_error: HTTPException | None = None
+        except HTTPException as exc:
+            read_error = exc
+
+        def _load_panel_sync(panel_key: str) -> tuple[str, dict[str, Any], float]:
+            panel_started_at = perf_counter()
+            try:
+                if panel_key == "session":
+                    payload = _session_payload(request)
+                elif panel_key == "authProviders":
+                    payload = _auth_providers_payload(request)
+                elif panel_key == "operatorUsers":
+                    principal = require_admin_access(request, api_key)
+                    payload = query.operator_users(actor_identity=principal.identity)
+                else:
+                    if read_error is not None:
+                        raise read_error
+                    payload = _protected_dashboard_panel_payload(
+                        request=request,
+                        query=query,
+                        panel_key=panel_key,
+                        recent_decisions_limit=recent_decisions,
+                        recent_orders_limit=recent_orders,
+                        recent_fills_limit=recent_fills,
+                        recent_replay_validations_limit=recent_replay_validations,
+                        recent_ai_assessments_limit=recent_ai_assessments,
+                        recent_ai_shadow_decisions_limit=recent_ai_shadow_decisions,
+                        recent_ai_shadow_evaluations_limit=recent_ai_shadow_evaluations,
+                    )
+                    if panel_key == "strategyRuntime" and view == "strategy" and isinstance(payload, dict):
+                        payload = _strategy_view_strategy_runtime_payload(payload)
+                return panel_key, {"data": payload, "error": None}, round((perf_counter() - panel_started_at) * 1000.0, 3)
+            except Exception as exc:
+                return panel_key, {"data": None, "error": _dashboard_panel_error(exc)}, round((perf_counter() - panel_started_at) * 1000.0, 3)
+
+        results = await asyncio.gather(
+            *[asyncio.to_thread(_load_panel_sync, key) for key in panel_keys]
+        )
+        panels: dict[str, dict[str, Any]] = {}
+        panel_timings: dict[str, dict[str, float]] = {}
+        for panel_key, panel_result, duration_ms in results:
+            panels[panel_key] = panel_result
+            panel_timings[panel_key] = {"duration_ms": duration_ms}
+
+        payload_total_ms = round((perf_counter() - request_started_at) * 1000.0, 3)
+        payload = {
+            "view": view,
+            "panels": panels,
+            "timing": {
+                "total_ms": payload_total_ms,
+                "panels": panel_timings,
+                "cache_hit": False,
+                "cache_age_ms": 0.0,
+                "deduped": False,
+            },
+        }
+        # 只缓存成功响应（含各 panel 内部的 error 条目——panel-level error 是
+        # OperatorQueryService 预期的 best-effort 输出，不是端点失败）。
+        _bundle_cache[cache_key] = (loop.time(), payload)
+        if not future.done():
+            future.set_result(payload)
+        return payload
+    except Exception as exc:
+        if not future.done():
+            future.set_exception(exc)
+        raise
+    finally:
+        # Inflight 登记必须在任何路径下都清理掉，否则下次同 key 会永远等一个
+        # 不会有结果的 future。cache 本身没写时保持为空是正确行为——失败不应
+        # 污染缓存。
+        _bundle_cache_inflight.pop(cache_key, None)
 
 
 @auth_router.get("/auth/users")

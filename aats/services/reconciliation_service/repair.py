@@ -177,10 +177,19 @@ class ReconciliationService:
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
         envelope = parse_envelope(message)
-        if self._report_exists_for_portfolio_snapshot_ref(envelope.event_id):
+        # _report_exists_for_portfolio_snapshot_ref 会扫 reconciliation_repo
+        # history。_build_report 更重：里面会做 fetcher.fetch_snapshot（同步
+        # 网络调用）、多次 DB 读以及重算 snapshot。两处都在 event loop 线程
+        # 上跑显然不合理，全部丢线程池。
+        exists = await asyncio.to_thread(
+            self._report_exists_for_portfolio_snapshot_ref,
+            envelope.event_id,
+        )
+        if exists:
             return
         snapshot = PortfolioSnapshot.model_validate(envelope.payload)
-        report = self._build_report(
+        report = await asyncio.to_thread(
+            self._build_report,
             decision_id=snapshot.decision_id,
             portfolio_snapshot_ref=envelope.event_id,
             stored_snapshot=snapshot,
@@ -281,7 +290,11 @@ class ReconciliationService:
                     "margin_mode": self.runtime_scope.margin_mode,
                 }
             )
-        report = self._build_report(
+        # validate_now 来自 HTTP handler / operator 命令，_build_report 内部
+        # 会打一次 fetcher.fetch_snapshot（同步网络）+ 多次 DB 读。不丢线程
+        # 池的话 operator 点击 "立即校验" 会直接卡住 event loop。
+        report = await asyncio.to_thread(
+            self._build_report,
             decision_id=latest_snapshot.decision_id,
             portfolio_snapshot_ref=(
                 latest_snapshot_event.event_id
@@ -558,22 +571,14 @@ class ReconciliationService:
 
     async def _persist_report(self, report: ReconciliationReport) -> ReconciliationReport:
         try:
-            refresh_exit_execution_truth = getattr(self.repair_service, "refresh_exit_execution_truth", None)
-            refreshed_exit_execution: list[ExitExecutionIntent] = []
-            if callable(refresh_exit_execution_truth):
-                refreshed_exit_execution = list(refresh_exit_execution_truth())
-            report_to_save = augment_reconciliation_report_with_exit_execution(
-                report=report,
-                parent_intents=refreshed_exit_execution,
+            # 原实现把 refresh_exit_execution_truth / save_report / repair 三个
+            # 同步 DB 阶段全压在 event loop 线程里——重度失配时 repair 还要
+            # 重建整个 snapshot，明显阻塞主协程。拆成 sync helper 后整块丢到
+            # 线程池，publish_model 留在协程里异步走。
+            report_to_save, repaired_snapshot = await asyncio.to_thread(
+                self._persist_report_sync,
+                report,
             )
-            if self.reconciliation_classifier is not None:
-                report_to_save = self.reconciliation_classifier.annotate(report_to_save)
-            self.reconciliation_repo.save_report(report_to_save)
-            repaired_snapshot: PortfolioSnapshot | None = None
-            if report_to_save.severity != "CLEAN":
-                if self.metrics is not None:
-                    self.metrics.increment("reconciliation_mismatches")
-                repaired_snapshot = self.repair_service.repair(report_to_save)
             await publish_model(
                 bus=self.bus,
                 topic=topics.RECONCILIATION_REPORTS,
@@ -593,6 +598,28 @@ class ReconciliationService:
         except Exception as exc:
             await self._emit_processing_failure(report=report, stage="reconciliation_persist", message=str(exc))
             raise
+
+    def _persist_report_sync(
+        self,
+        report: ReconciliationReport,
+    ) -> tuple[ReconciliationReport, PortfolioSnapshot | None]:
+        refresh_exit_execution_truth = getattr(self.repair_service, "refresh_exit_execution_truth", None)
+        refreshed_exit_execution: list[ExitExecutionIntent] = []
+        if callable(refresh_exit_execution_truth):
+            refreshed_exit_execution = list(refresh_exit_execution_truth())
+        report_to_save = augment_reconciliation_report_with_exit_execution(
+            report=report,
+            parent_intents=refreshed_exit_execution,
+        )
+        if self.reconciliation_classifier is not None:
+            report_to_save = self.reconciliation_classifier.annotate(report_to_save)
+        self.reconciliation_repo.save_report(report_to_save)
+        repaired_snapshot: PortfolioSnapshot | None = None
+        if report_to_save.severity != "CLEAN":
+            if self.metrics is not None:
+                self.metrics.increment("reconciliation_mismatches")
+            repaired_snapshot = self.repair_service.repair(report_to_save)
+        return report_to_save, repaired_snapshot
 
     async def _emit_processing_failure(
         self,

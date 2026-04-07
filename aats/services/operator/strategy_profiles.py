@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -141,6 +142,38 @@ class StrategyProfileControlService:
         return build_strategy_profile_ai_config_snapshot(self)
 
     async def evaluate_now(self, *, allow_auto_activation: bool = True) -> dict[str, Any]:
+        # 原本 evaluate_now 在 event loop 主线程上顺序跑：
+        #   1) ensure_seed_profiles + repo.list_revisions
+        #   2) N 次 repo.save_evaluation + event_store.append（N = revisions 数）
+        #   3) 3 次 event_store.append（comparison / optimization / selection）
+        #   4) 1 次 repo.save_recommendation
+        #   5) await _generate_recommendation (async, OK)
+        #   6) 再次 _activation_state() / _write_back_selection_outcome
+        # 2)~4) 是 N+5 次同步 DB 写入（每次 SELECT + INSERT + COMMIT）。策略
+        # profile 自动评估在 decision cycle 外也会被触发（manual + scheduled），
+        # 单次 evaluate_now 在 event loop 里跑需要数百毫秒到秒级。全部丢线程池
+        # 让 HTTP handler 可以在此期间被调度。
+        #
+        # 结构：拆成 phase1 (pre-AI sync DB) + AI 异步调用 + phase3 (post-AI sync DB)。
+        # 两段 sync 各自包装一次 asyncio.to_thread。trigger.py 的
+        # `_timeframe_locks` / operator 触发锁已经保证不会有同服务对同 key 并发
+        # 跑 evaluate_now，所以这两段 thread 不会交叉，不存在 state 竞态。
+        phase1 = await asyncio.to_thread(self._evaluate_now_phase1_sync)
+        ai_recommendation = await self._generate_recommendation(context=phase1["context"])
+        result = await asyncio.to_thread(
+            self._evaluate_now_phase3_sync,
+            phase1=phase1,
+            ai_recommendation=ai_recommendation,
+            allow_auto_activation=allow_auto_activation,
+        )
+        return result
+
+    def _evaluate_now_phase1_sync(self) -> dict[str, Any]:
+        """同步跑的 Phase 1：seed + context + evaluation pipeline + 3 份 report 入库。
+
+        返回的 dict 把所有后续 phase 3 需要的对象一并带出来，避免跨线程再次读取
+        self 里可能被改动的状态。
+        """
         self.ensure_seed_profiles()
         context_snapshot = self._tuning_context()
         context = self._context_payload(context_snapshot)
@@ -199,7 +232,33 @@ class StrategyProfileControlService:
                 source_component="strategy_profile_service",
             )
         )
-        ai_recommendation = await self._generate_recommendation(context=context)
+        return {
+            "context_snapshot": context_snapshot,
+            "context": context,
+            "state": state,
+            "evaluations": evaluations,
+            "current_evaluation": current_evaluation,
+            "comparison_report": comparison_report,
+            "optimization_report": optimization_report,
+        }
+
+    def _evaluate_now_phase3_sync(
+        self,
+        *,
+        phase1: dict[str, Any],
+        ai_recommendation: StrategyProfileRecommendation,
+        allow_auto_activation: bool,
+    ) -> dict[str, Any]:
+        """同步跑的 Phase 3：归一化 recommendation + save + 自动激活 + 写回。
+
+        所有 state 对象都由 phase1 的返回值传入，避免 thread 里再去读 self。
+        """
+        context_snapshot = phase1["context_snapshot"]
+        state: StrategyProfileActivationState = phase1["state"]
+        evaluations: list[StrategyProfileEvaluationRecord] = phase1["evaluations"]
+        comparison_report: StrategyProfileComparisonReport = phase1["comparison_report"]
+        optimization_report: StrategyProfileOptimizationReport = phase1["optimization_report"]
+        current_evaluation = phase1["current_evaluation"]
         recommendation = self._build_normalized_recommendation(
             context_snapshot=context_snapshot,
             optimization_report=optimization_report,

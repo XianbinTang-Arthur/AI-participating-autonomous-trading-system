@@ -134,25 +134,22 @@ export function createDashboardRefreshController({
     state.refreshTimer = window.setTimeout(() => void refreshDashboard(), AUTO_REFRESH_MS);
   }
 
+  // #25 修复：原本这里"action 在跑"和"primary fetch 在跑"两个分支用了两块
+  // 几乎一样的代码（都设 pendingRefresh 然后 return），合并成一块共享 if，
+  // 方便后续读者一眼看出"只要现在不能立刻刷新，就排队等 finishAction /
+  // refresh 完成时的 drain 路径来处理"。
   function handleVisibilityChange() {
     if (document.visibilityState !== "visible") {
       cancelScheduledRefresh();
       return;
     }
     if (nodes.autoRefreshToggle && !nodes.autoRefreshToggle.checked) return;
-    // An action is mid-flight. The previous implementation silently dropped
-    // the visible-again nudge, which could leave the user staring at up to
-    // 30s of stale data after a failing action (the success path immediately
-    // fires a manual refresh anyway, but the failure path only re-arms a
-    // 30s scheduleRefresh, losing the visibility signal entirely). Queue a
-    // pendingRefresh so finishAction()'s drain path handles it.
-    if (state.actionInFlight) {
-      state.pendingRefresh = state.pendingRefresh || { manual: false };
-      return;
-    }
-    if (isPrimaryInFlight()) {
-      // A primary fetch is already running — queue a non-manual drain so the
-      // visible-again nudge still produces a refresh after the current one.
+    // 现在不能立刻刷：要么有 action 在跑（成功路径会立即补一次手动刷新，
+    // 失败路径只 re-arm 30s scheduleRefresh，会把"切回可见"信号吞掉），要么
+    // 有 primary fetch 在跑（再发一次会走 generation guard 兜底但没必要）。
+    // 两种情况都用 pendingRefresh 排队，让 finishAction() / 刷新完成时的
+    // drain 路径接力。
+    if (state.actionInFlight || isPrimaryInFlight()) {
       state.pendingRefresh = state.pendingRefresh || { manual: false };
       return;
     }
@@ -230,11 +227,24 @@ export function createDashboardRefreshController({
     // this (microtask ordering means the aborted fetch's finally still runs
     // after we've set up new pendingPanels).
     if (currentPrimaryAbort) {
-      try { currentPrimaryAbort.abort(); } catch { /* ignore */ }
+      // #26：原来这里是 `catch { /* ignore */ }` —— 吞掉一切异常，连诊断信息都没有。
+      // 改为记 debug 级别的日志：supersede abort 本身是预期路径，但如果 abort() 自己抛了
+      // 意料之外的错（极罕见），至少有痕迹可追。
+      try {
+        currentPrimaryAbort.abort();
+      } catch (abortError) {
+        // eslint-disable-next-line no-console
+        console.debug("[dashboard-refresh] supersede primary abort 抛出异常", abortError);
+      }
       currentPrimaryAbort = null;
     }
     if (currentDeferredAbort) {
-      try { currentDeferredAbort.abort(); } catch { /* ignore */ }
+      try {
+        currentDeferredAbort.abort();
+      } catch (abortError) {
+        // eslint-disable-next-line no-console
+        console.debug("[dashboard-refresh] supersede deferred abort 抛出异常", abortError);
+      }
       currentDeferredAbort = null;
     }
 
@@ -261,6 +271,38 @@ export function createDashboardRefreshController({
 
     const abortController = new AbortController();
     currentPrimaryAbort = abortController;
+
+    // 分级超时提示：首屏加载时（!state.lastRefreshAt）如果后端慢于 5s / 15s，
+    // 分别给 info / warning 两条 flash。没有它，用户在 30s 的 DEFAULT_TIMEOUT_MS
+    // 窗口里只能盯着骨架屏转圈，完全不知道到底是网络断了、后端死锁了还是正常
+    // 在算——真实场景里决策周期被 event loop 堵 10 秒以上的情况确实会发生。
+    // 这两个 timer 只在首屏 bootstrap 阶段启动；背景自动刷新已经有 shimmer
+    // 提示，不需要再用 banner 打扰用户。
+    const isBootstrapFetch = !state.lastRefreshAt;
+    let hintFlashSet = false;
+    let infoHintTimer = null;
+    let warningHintTimer = null;
+    if (isBootstrapFetch) {
+      infoHintTimer = window.setTimeout(() => {
+        if (state.refreshGeneration !== refreshGeneration) return;
+        if (isFlashLive(state)) return;
+        setFlash(state, "info", "正在等待后端准备首屏数据，通常 1–3 秒内完成…");
+        hintFlashSet = true;
+        renderShell();
+      }, 5_000);
+      warningHintTimer = window.setTimeout(() => {
+        if (state.refreshGeneration !== refreshGeneration) return;
+        // 15s 这条 warning 无条件覆盖前面的 info：此时后端已经明显慢，
+        // 用户需要更清晰的提示，不应被 isFlashLive 沉默。
+        setFlash(
+          state,
+          "warning",
+          "后端响应较慢（超过 15 秒），可能正在处理决策周期或重建缓存，请再稍等。",
+        );
+        hintFlashSet = true;
+        renderShell();
+      }, 15_000);
+    }
 
     renderShell();
     try {
@@ -289,7 +331,12 @@ export function createDashboardRefreshController({
       // _expiresAt has already passed and tickFlashExpiry has not yet
       // cleared it. In that window the flash is dead from the user's POV,
       // so the manual "页面数据已刷新" notice should still take over.
-      if (manual && !isFlashLive(state)) {
+      if (hintFlashSet) {
+        // 进度提示已经被上面两个 timer 铺到 state.flash 上，这里必须显式覆盖
+        // 成成功态，否则 "正在等待后端..." / "后端响应较慢..." 会一直挂着，
+        // 用户看不出到底是成功了还是超时了。
+        setFlash(state, "info", "首屏数据已加载。");
+      } else if (manual && !isFlashLive(state)) {
         setFlash(state, "info", "页面数据已刷新。");
       }
       if (refreshPlan.deferredPath) {
@@ -305,7 +352,12 @@ export function createDashboardRefreshController({
       // (via supersede abort or plain enqueue drain). Silently bail; the
       // winner owns all shared state from here on.
       if (state.refreshGeneration !== refreshGeneration) return;
+      // #26：原来这里对原始 error 既不 console.warn 也不 console.error —— banner 只看到
+      // `error.message`，stack/name/cause 都被吞了。下面两类错误都先把完整 error 写到
+      // console，再根据 manual/bootstrap 决定是否 flash 给用户。
       if (error && typeof error === "object" && "name" in error && error.name === "AbortError") {
+        // eslint-disable-next-line no-console
+        console.warn("[dashboard-refresh] 主 bundle 请求被中止/超时", error);
         const canBackgroundRetry = hasReadyView(refreshingView);
         // The previous implementation lied about "重试" by setting
         // pendingRefresh — but the drain path would just re-hit the same
@@ -333,6 +385,11 @@ export function createDashboardRefreshController({
         // if this generation is still current, which re-renders banners.
         return;
       }
+      // #26：非 AbortError 分支之前只 setFlash 了 error.message，原始 Error 对象（含
+      // stack/cause）被吞。即便 flash 只在 manual/bootstrap 时显示，原始诊断信息也应
+      // 无条件落到 console 方便排障。
+      // eslint-disable-next-line no-console
+      console.error("[dashboard-refresh] 主 bundle 请求失败", error);
       // Surface non-abort network/server errors when:
       //   1. Manual refresh — the user clicked and expects feedback.
       //   2. Bootstrap failure (no data on screen yet) — the user is staring
@@ -345,6 +402,16 @@ export function createDashboardRefreshController({
         setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       }
     } finally {
+      // 清理分级超时提示计时器：无论成功/失败/supersede，都必须 clearTimeout，
+      // 否则 generation 已经超前、fetch 已经结束，这两个 timer 还在后台等着
+      // 改一个早就不相关的 flash。注意 setTimeout(id=null) 不抛异常但 lint 会
+      // 吵，所以用 != null 判空。
+      if (infoHintTimer !== null) {
+        window.clearTimeout(infoHintTimer);
+      }
+      if (warningHintTimer !== null) {
+        window.clearTimeout(warningHintTimer);
+      }
       // Release our controller reference if it's still ours. If it has been
       // replaced by a newer generation, leave the new owner alone.
       if (currentPrimaryAbort === abortController) {
@@ -417,6 +484,9 @@ export function createDashboardRefreshController({
       // stale data on screen with no indication anything went wrong.
       const isTimeoutAbort =
         error && typeof error === "object" && "name" in error && error.name === "AbortError";
+      // #26：deferred 分支同样要把原始 error 落到 console，方便区分“超时”还是“后端 500”。
+      // eslint-disable-next-line no-console
+      console.warn("[dashboard-refresh] deferred bundle 请求失败", { isTimeoutAbort, error });
       const message = isTimeoutAbort
         ? "请求超时，请稍后重试。"
         : error instanceof Error ? error.message : String(error);

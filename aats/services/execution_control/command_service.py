@@ -114,7 +114,15 @@ class ExecutionCommandProcessor:
             else:
                 raise ValueError(f"unsupported_execution_command_type:{command_type}")
             acked_at = utc_now()
-            self.execution_command_repo.mark_acked(command_id, updated_at=acked_at)
+            # execution_command_repo.mark_acked / mark_failed 都是同步 UPDATE
+            # + COMMIT。原实现直接在 async 里调，每个命令至少堵 event loop 一次
+            # DB 往返。命令处理器会在 background task 里被高频轮询
+            # (process_pending)，不丢线程池的话 HTTP handler 会明显慢。
+            await asyncio.to_thread(
+                self.execution_command_repo.mark_acked,
+                command_id,
+                updated_at=acked_at,
+            )
             with self._lock:
                 self._success_count += 1
                 self._last_processed_command_id = command_id
@@ -132,7 +140,12 @@ class ExecutionCommandProcessor:
             )
         except Exception as exc:
             failed_at = utc_now()
-            self.execution_command_repo.mark_failed(command_id, error=str(exc), updated_at=failed_at)
+            await asyncio.to_thread(
+                self.execution_command_repo.mark_failed,
+                command_id,
+                error=str(exc),
+                updated_at=failed_at,
+            )
             with self._lock:
                 self._failure_count += 1
                 self._last_processed_command_id = command_id

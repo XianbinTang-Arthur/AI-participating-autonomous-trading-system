@@ -39,13 +39,29 @@ class PostgresPortfolioOutboxPublisher:
         snapshot: PortfolioSnapshot,
         source_component: str,
     ) -> None:
+        # bootstrap 在进程启动期跑一次，但 persist_fill_projection 是热路径
+        # 每笔成交一次，两条路径都包含完整的 SQLAlchemy sync session 事务
+        # （save_snapshot_in_session / append_in_session / enqueue_in_session
+        # / commit）。全部丢到 asyncio.to_thread 让 event loop 专心调度协程。
+        await asyncio.to_thread(
+            self._persist_bootstrap_snapshot_sync,
+            snapshot=snapshot,
+            source_component=source_component,
+        )
+        await self.flush_pending()
+
+    def _persist_bootstrap_snapshot_sync(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        source_component: str,
+    ) -> None:
         with self.session_factory() as session:
             self.portfolio_repo.save_snapshot_in_session(session, snapshot)
             envelope = self._portfolio_snapshot_envelope(snapshot=snapshot, source_component=source_component)
             self.event_store.append_in_session(session, envelope)
             self.outbox_repo.enqueue_in_session(session, envelope)
             session.commit()
-        await self.flush_pending()
 
     async def persist_fill_projection(
         self,
@@ -55,6 +71,25 @@ class PostgresPortfolioOutboxPublisher:
         outcome: FillOutcomeRecord,
         source_component: str,
         pre_commit_actions: Sequence[Callable[[Session], None]] = (),
+    ) -> None:
+        await asyncio.to_thread(
+            self._persist_fill_projection_sync,
+            snapshot=snapshot,
+            balance_delta=balance_delta,
+            outcome=outcome,
+            source_component=source_component,
+            pre_commit_actions=pre_commit_actions,
+        )
+        await self.flush_pending()
+
+    def _persist_fill_projection_sync(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        balance_delta: PortfolioBalanceDelta,
+        outcome: FillOutcomeRecord,
+        source_component: str,
+        pre_commit_actions: Sequence[Callable[[Session], None]],
     ) -> None:
         with self.session_factory() as session:
             self.persist_fill_projection_in_session(
@@ -66,7 +101,6 @@ class PostgresPortfolioOutboxPublisher:
                 pre_commit_actions=pre_commit_actions,
             )
             session.commit()
-        await self.flush_pending()
 
     def persist_fill_projection_in_session(
         self,

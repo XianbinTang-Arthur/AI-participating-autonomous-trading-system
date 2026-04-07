@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import defaultdict
 
 from aats.bootstrap.logging import get_logger, log_event
@@ -26,7 +27,14 @@ class InMemoryEventBus(EventBus):
     async def publish_envelope(self, envelope: EventEnvelope, *, persist: bool = True) -> None:
         if persist and self._event_store is not None:
             try:
-                self._event_store.append(envelope)
+                # 把同步 DB 写入丢进 thread pool，避免在事件循环主线程上做
+                # 阻塞 I/O。decision_engine.run_cycle 在一个周期里会调 5+ 次
+                # publish_model，每次都会触发 event_store.append 的 SELECT+INSERT+
+                # COMMIT。如果直接在 event loop 里跑，单个周期会把 HTTP 请求
+                # （包括 dashboard bundle / 静态资源）卡住数秒到数十秒。
+                # 用 asyncio.to_thread 后，每次 publish 都会让出 event loop，
+                # API handler 有机会被调度。
+                await asyncio.to_thread(self._event_store.append, envelope)
             except Exception as exc:
                 log_event(
                     self.logger,

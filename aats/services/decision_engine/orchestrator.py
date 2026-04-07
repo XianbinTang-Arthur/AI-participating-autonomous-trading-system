@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
@@ -44,8 +45,26 @@ class DecisionOrchestrator:
         self.logger = get_logger("aats.decision_engine")
 
     async def run_cycle(self, symbol: str, timeframe: str) -> PositionTarget:
+        # 关键背景：本函数原本几乎所有的工作都跑在 event loop 主线程上 ——
+        # context_builder.build / baseline_strategy.evaluate /
+        # target_engine.build* / strategy_coordinator.evaluate 都是纯 sync
+        # 的 CPU + 同步 DB 读，把它们直接 await 进来（其实只是同步执行）会
+        # 让 event loop 在每个 decision 周期里阻塞 15-30s，直接结果是同进程
+        # 的 FastAPI handler（dashboard bundle、UI 静态资源、favicon）全部
+        # 拿不到调度，前端骨架卡死、人工排障时观察到 favicon 都要等 8 秒以上。
+        #
+        # 这里把每个明显是"纯输入→纯输出 + 没有 async 依赖"的 sync 调用都
+        # 丢到 asyncio.to_thread。这些方法本来就是同步 Python，原地放进
+        # thread pool 不改变算法行为；同时由于 trigger.py 的
+        # `_timeframe_locks` 已经把同 (symbol, timeframe) 串行化，单个周期内
+        # 只会有一个线程在跑这些方法，避免了潜在的多线程竞态。
+        # 收益：每次 to_thread 都是一次 yield 点，event loop 可以在线程跑
+        # 计算的同时调度 HTTP handler，dashboard 不再被决策周期卡死。
         decision_id = new_id("decision")
-        health_snapshot = self.context_builder.build_health_snapshot(decision_id=decision_id)
+        health_snapshot = await asyncio.to_thread(
+            self.context_builder.build_health_snapshot,
+            decision_id=decision_id,
+        )
         health_envelope = await publish_model(
             bus=self.bus,
             topic=topics.HEALTH_SNAPSHOTS,
@@ -53,7 +72,8 @@ class DecisionOrchestrator:
             payload_model=health_snapshot,
             source_component="governance_engine",
         )
-        context = self.context_builder.build(
+        context = await asyncio.to_thread(
+            self.context_builder.build,
             symbol=symbol,
             timeframe=timeframe,
             decision_id=decision_id,
@@ -68,7 +88,7 @@ class DecisionOrchestrator:
                 timeframe=timeframe,
             ),
         )
-        baseline = self.baseline_strategy.evaluate(context)
+        baseline = await asyncio.to_thread(self.baseline_strategy.evaluate, context)
         await publish_model(
             bus=self.bus,
             topic=topics.DECISION_CONTEXTS,
@@ -97,7 +117,8 @@ class DecisionOrchestrator:
             profile_control_decision = await self.strategy_profile_service.evaluate_mainline_profile_control(
                 decision_id=context.decision_id,
             )
-        ai_decision_intent = self.target_engine.build_ai_decision_intent(
+        ai_decision_intent = await asyncio.to_thread(
+            self.target_engine.build_ai_decision_intent,
             context=context,
             baseline=baseline,
             ai_assessment=ai_assessment,
@@ -110,7 +131,8 @@ class DecisionOrchestrator:
                     "requested_profile_reason_codes": list(profile_control_decision.decision_reason_codes),
                 }
             )
-        target = self.target_engine.build(
+        target = await asyncio.to_thread(
+            self.target_engine.build,
             context,
             baseline,
             ai_assessment,
@@ -119,7 +141,8 @@ class DecisionOrchestrator:
             operating_mode=operating_mode,
         )
         if self.strategy_coordinator is not None:
-            strategy_snapshot = self.strategy_coordinator.evaluate(
+            strategy_snapshot = await asyncio.to_thread(
+                self.strategy_coordinator.evaluate,
                 context=context,
                 baseline=baseline,
                 directional_target=target,
@@ -172,7 +195,8 @@ class DecisionOrchestrator:
                 source_component="ai_service",
             )
         if shadow_assessment is not None:
-            shadow_decision = self.target_engine.build_shadow(
+            shadow_decision = await asyncio.to_thread(
+                self.target_engine.build_shadow,
                 context=context,
                 baseline=baseline,
                 ai_assessment=shadow_assessment,

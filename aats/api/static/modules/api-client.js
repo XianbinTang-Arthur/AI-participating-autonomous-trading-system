@@ -1,12 +1,18 @@
 ﻿import { localizeError } from "./terms.js";
 
-const DEFAULT_TIMEOUT_MS = 60_000;
-// Deferred bundles aggregate slow reports (trial review, guarded-live
-// preflight, strategy attribution, shadow evaluations, …). The primary
-// bundle keeps the stricter 60s deadline; deferred requests are allowed
-// more headroom because they are background fill-ins and failing them
-// wastes all the panels inside the bundle.
-export const DEFERRED_BUNDLE_TIMEOUT_MS = 120_000;
+// 超时阈值收紧历史：原本 DEFAULT_TIMEOUT_MS=60s / DEFERRED=120s 是在
+// decision_engine.run_cycle 还会堵塞 event loop 15–30s 的时代定的容错窗口。
+// 现在 memory_bus.publish_envelope 和 orchestrator.run_cycle 里的 sync
+// 部分都已经 `asyncio.to_thread` 化，正常主 bundle 的后端处理时间已经收敛到
+// 秒级（冷启动 < 3s、稳定态 < 1s），保留 60s 只会让"真出问题"的情况晚 30s 才被
+// 用户感知。收紧到：
+//   - 主 bundle 30s：覆盖 p99 + event loop 轻微卡顿，仍然给故障留足诊断窗口。
+//   - deferred 45s：覆盖 trial review / shadow eval / guarded-live preflight
+//     这几类"背景慢报告"，它们是 best-effort 填充，超时不影响主页面交互。
+// 注意：任何"允许 loading 转圈 1 分钟再失败"的需求要走 options.timeout 显式覆盖，
+// 不要回退这里的默认值。
+const DEFAULT_TIMEOUT_MS = 30_000;
+export const DEFERRED_BUNDLE_TIMEOUT_MS = 45_000;
 
 export async function requestJson(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -26,11 +32,16 @@ export async function requestJson(path, options = {}) {
   let externalAbortForwarder = null;
   if (options.signal) {
     if (options.signal.aborted) {
-      controller.abort();
-    } else {
-      externalAbortForwarder = () => controller.abort();
-      options.signal.addEventListener("abort", externalAbortForwarder);
+      // #18 修复：原本这里只调 controller.abort() 就继续往下走 fetch()。虽然
+      // fetch(signal=aborted) 会立即拒绝，但这条路径和下面 try 块的正常分支风格
+      // 不对称、还要走一轮异步 reject。现在直接 throw AbortError，调用方立即感知。
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      const abortError = new Error("请求在发起前已被外部信号取消。");
+      abortError.name = "AbortError";
+      throw abortError;
     }
+    externalAbortForwarder = () => controller.abort();
+    options.signal.addEventListener("abort", externalAbortForwarder);
   }
 
   try {
@@ -88,7 +99,11 @@ export async function fetchDashboardBundle(path, options = {}) {
 function safeJsonParse(text) {
   try {
     return JSON.parse(text);
-  } catch {
+  } catch (parseError) {
+    // 解析失败 fallback 到原始文本是有意为之：后端部分 endpoint 在 4xx/5xx 时会返回纯
+    // 文本错误信息而不是 JSON。把异常落到 debug 级别，既保留诊断痕迹又不干扰正常流程。
+    // eslint-disable-next-line no-console
+    console.debug("[api-client] safeJsonParse 回退到原始文本", parseError);
     return text;
   }
 }

@@ -52,6 +52,27 @@ class PostgresExecutionOutboxPublisher:
         key: str,
         obligation: OrderObligation | None = None,
     ) -> OrderState:
+        # 原来 with self.session_factory() as session: 开启的是 SQLAlchemy 同步
+        # session——BEGIN / UPDATE / INSERT / COMMIT 全跑在 event loop 主线程上。
+        # 每次下单 / 撤单 / 状态转移都至少走一次，直接影响 HTTP handler 响应速度。
+        # 全部丢到 asyncio.to_thread，让 await 成为真正的 yield 点。flush_pending
+        # 留在主协程里——它内部已经走 to_thread + 异步 publish_envelope。
+        persisted = await asyncio.to_thread(
+            self._persist_order_state_sync,
+            order_state=order_state,
+            key=key,
+            obligation=obligation,
+        )
+        await self.flush_pending()
+        return persisted
+
+    def _persist_order_state_sync(
+        self,
+        *,
+        order_state: OrderState,
+        key: str,
+        obligation: OrderObligation | None,
+    ) -> OrderState:
         with self.session_factory() as session:
             persisted, previous = self.execution_repo.save_order_state_in_session(session, order_state)  # type: ignore[attr-defined]
             self._ensure_execution_order_row(session, order_state=persisted)
@@ -65,7 +86,6 @@ class PostgresExecutionOutboxPublisher:
                 self.event_store.append_in_session(session, envelope)
                 self.outbox_repo.enqueue_in_session(session, envelope)
             session.commit()
-        await self.flush_pending()
         return persisted
 
     async def persist_order_state_and_command(
@@ -82,6 +102,34 @@ class PostgresExecutionOutboxPublisher:
     ) -> OrderState:
         if self.execution_command_repo is None:
             return await self.persist_order_state(order_state=order_state, key=key, obligation=obligation)
+        # 同 persist_order_state，丢线程池；此版本额外写一条 execution_command
+        # 行，所以下面 helper 需要独立的参数签名。
+        persisted = await asyncio.to_thread(
+            self._persist_order_state_and_command_sync,
+            order_state=order_state,
+            key=key,
+            command_id=command_id,
+            command_type=command_type,
+            command_idempotency_key=command_idempotency_key,
+            command_payload=command_payload,
+            command_created_at=command_created_at,
+            obligation=obligation,
+        )
+        await self.flush_pending()
+        return persisted
+
+    def _persist_order_state_and_command_sync(
+        self,
+        *,
+        order_state: OrderState,
+        key: str,
+        command_id: str,
+        command_type: str,
+        command_idempotency_key: str,
+        command_payload: dict[str, Any],
+        command_created_at,
+        obligation: OrderObligation | None,
+    ) -> OrderState:
         with self.session_factory() as session:
             persisted, previous = self.execution_repo.save_order_state_in_session(session, order_state)  # type: ignore[attr-defined]
             self._ensure_execution_order_row(
@@ -99,6 +147,7 @@ class PostgresExecutionOutboxPublisher:
             for envelope in envelopes:
                 self.event_store.append_in_session(session, envelope)
                 self.outbox_repo.enqueue_in_session(session, envelope)
+            assert self.execution_command_repo is not None  # 上游已判空
             self.execution_command_repo.enqueue_command_in_session(
                 session,
                 command_id=command_id,
@@ -109,7 +158,6 @@ class PostgresExecutionOutboxPublisher:
                 created_at=command_created_at,
             )
             session.commit()
-        await self.flush_pending()
         return persisted
 
     def _ensure_execution_order_row(
@@ -209,6 +257,25 @@ class PostgresExecutionOutboxPublisher:
         fill: FillEvent,
         obligation: OrderObligation | None = None,
     ) -> bool:
+        # 同 persist_order_state 的改造路径：把整个 sync session 块扔到线程池。
+        # 成交写入是热路径里更频繁的那条——每笔交易至少一次，不释放 event loop
+        # 的话 UI 仪表盘在忙时会看到明显的卡顿。
+        saved = await asyncio.to_thread(
+            self._persist_fill_sync,
+            fill=fill,
+            obligation=obligation,
+        )
+        if not saved:
+            return False
+        await self.flush_pending()
+        return True
+
+    def _persist_fill_sync(
+        self,
+        *,
+        fill: FillEvent,
+        obligation: OrderObligation | None,
+    ) -> bool:
         with self.session_factory() as session:
             saved = self.execution_repo.save_fill_in_session(session, fill)  # type: ignore[attr-defined]
             if not saved:
@@ -226,7 +293,6 @@ class PostgresExecutionOutboxPublisher:
             self.event_store.append_in_session(session, envelope)
             self.outbox_repo.enqueue_in_session(session, envelope)
             session.commit()
-        await self.flush_pending()
         return True
 
     async def flush_pending(self, *, limit: int = 100) -> None:
