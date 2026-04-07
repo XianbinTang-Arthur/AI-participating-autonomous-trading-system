@@ -28,6 +28,9 @@ import pytest
 
 from aats.bootstrap import process_lifecycle
 from aats.bootstrap.process_lifecycle import (
+    HEARTBEAT_DIR_ENV,
+    _heartbeat_loop,
+    _heartbeat_path,
     _resolve_process_role,
     run_process,
 )
@@ -325,3 +328,143 @@ def test_aats_compose_defines_four_slice_services_with_distinct_process_roles() 
     assert "AATS_EVENT_BUS_BACKEND: hybrid" in text
     # 必须复用基础设施 compose 的 aats network
     assert "external: true" in text
+    # Stage 7 修复：gateway 必须用 /healthz（不是 /system/health）
+    # 精确匹配 healthcheck test 行 URL，避免误伤注释
+    assert "http://localhost:8000/healthz" in text
+    assert "http://localhost:8000/system/health" not in text, (
+        "gateway healthcheck 应当用 /healthz 而非 /system/health (后者在 gateway role 下会 NPE)"
+    )
+    # Stage 7 修复：3 个 daemon 必须有 heartbeat 文件 healthcheck
+    for role in ("market", "decision", "execution"):
+        assert f"/tmp/aats_{role}_heartbeat" in text, (
+            f"daemon {role} 缺少心跳文件 healthcheck"
+        )
+
+
+def test_dockerfile_runtime_installs_curl_for_gateway_healthcheck() -> None:
+    """Stage 7 回归：runtime 段必须装 curl，否则 gateway 容器 healthcheck 找不到 curl 永远 unhealthy。"""
+    dockerfile = REPO_ROOT / "deploy" / "wsl2-dev" / "Dockerfile"
+    text = dockerfile.read_text(encoding="utf-8")
+
+    # 找到 runtime stage 之后的 RUN apt-get install 段
+    runtime_marker = "FROM python:3.12-slim AS runtime"
+    runtime_idx = text.find(runtime_marker)
+    assert runtime_idx >= 0, "Dockerfile 必须有 runtime stage"
+    runtime_section = text[runtime_idx:]
+    # runtime 段的第一个 apt-get install 必须包含 curl
+    install_idx = runtime_section.find("apt-get install")
+    assert install_idx >= 0, "runtime stage 必须有 apt-get install"
+    # 找到这条 install 命令的结束（rm -rf 之前）
+    install_end = runtime_section.find("rm -rf", install_idx)
+    install_block = runtime_section[install_idx:install_end]
+    assert "curl" in install_block, (
+        "Dockerfile runtime 段必须装 curl，否则 gateway healthcheck 命令找不到 curl"
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 5) Stage 7 心跳：daemon 进程的 docker healthcheck 信号源
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_heartbeat_path_uses_role_in_filename(tmp_path) -> None:
+    """每个 role 的心跳文件名必须包含 role，避免 4 个进程互相覆盖。"""
+    for role in ("market", "decision", "execution", "gateway"):
+        path = _heartbeat_path(role, base_dir=tmp_path)
+        assert path.name == f"aats_{role}_heartbeat"
+        assert path.parent == tmp_path
+
+
+def test_heartbeat_path_respects_env_dir_override(monkeypatch, tmp_path) -> None:
+    """AATS_HEARTBEAT_DIR 必须能覆盖默认 /tmp，便于单测和某些受限容器环境。"""
+    monkeypatch.setenv(HEARTBEAT_DIR_ENV, str(tmp_path))
+    path = _heartbeat_path("market")
+    assert path.parent == tmp_path
+    assert path.name == "aats_market_heartbeat"
+
+
+def test_heartbeat_loop_touches_file_then_stops_on_event(tmp_path) -> None:
+    """心跳 loop 必须周期性 touch 文件，stop_event set 后立即退出。"""
+
+    async def _run() -> None:
+        stop_event = asyncio.Event()
+        path = _heartbeat_path("market", base_dir=tmp_path)
+        # 用 0.05s 间隔加快测试
+        loop_task = asyncio.create_task(
+            _heartbeat_loop(
+                "market",
+                stop_event=stop_event,
+                logger=_DummyLogger(),
+                interval=0.05,
+                base_dir=tmp_path,
+            )
+        )
+        # 等几个心跳周期
+        await asyncio.sleep(0.2)
+        assert path.exists(), "心跳文件应当被创建"
+        first_mtime = path.stat().st_mtime
+        await asyncio.sleep(0.15)
+        second_mtime = path.stat().st_mtime
+        assert second_mtime >= first_mtime, "心跳 loop 应当周期性更新 mtime"
+
+        # 触发停止
+        stop_event.set()
+        await asyncio.wait_for(loop_task, timeout=1.0)
+        # 文件不被删除（保留最后 mtime 给 docker stop 兜底）
+        assert path.exists(), "stop 后心跳文件应保留，不主动删除"
+
+    asyncio.run(_run())
+
+
+def test_run_process_starts_and_stops_heartbeat_alongside_runtime(tmp_path, monkeypatch) -> None:
+    """run_process 必须在 build_runtime 后启动心跳，且 stop 期间心跳要保持到 stop_background_tasks 之后。"""
+    monkeypatch.setenv(HEARTBEAT_DIR_ENV, str(tmp_path))
+    fake_runtime = _FakeRuntime()
+
+    async def _fake_build(settings, *, process_role):
+        fake_runtime.calls.append(f"build:{process_role}")
+        return fake_runtime
+
+    async def _run() -> int:
+        stop_event = asyncio.Event()
+
+        async def _set_stop_after_first_heartbeat() -> None:
+            # 等心跳文件出现
+            heartbeat_file = _heartbeat_path("market", base_dir=tmp_path)
+            for _ in range(50):
+                if heartbeat_file.exists():
+                    break
+                await asyncio.sleep(0.02)
+            assert heartbeat_file.exists(), "run_process 启动后心跳文件必须先生成"
+            stop_event.set()
+
+        with patch.object(process_lifecycle, "build_runtime", side_effect=_fake_build), patch.object(
+            process_lifecycle, "configure_logging_for_settings"
+        ):
+            asyncio.create_task(_set_stop_after_first_heartbeat())
+            return await run_process(
+                process_role=PROCESS_ROLE_MARKET,
+                app_name="test.market",
+                settings=SimpleNamespace(),
+                stop_event=stop_event,
+            )
+
+    rc = asyncio.run(_run())
+    assert rc == 0
+    # build / start / stop 顺序仍然正确
+    assert fake_runtime.calls == [f"build:{PROCESS_ROLE_MARKET}", "start", "stop"]
+    # 心跳文件应当存在（不主动删）
+    assert _heartbeat_path("market", base_dir=tmp_path).exists()
+
+
+class _DummyLogger:
+    """最小 logger stub：吃掉所有 info/warning/exception 调用。"""
+
+    def info(self, *args, **kwargs) -> None:
+        pass
+
+    def warning(self, *args, **kwargs) -> None:
+        pass
+
+    def exception(self, *args, **kwargs) -> None:
+        pass

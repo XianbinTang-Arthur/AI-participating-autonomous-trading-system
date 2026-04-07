@@ -75,8 +75,11 @@ services:
       - "127.0.0.1:8000:8000"
     networks:
       - aats
+    # Stage 7 修复：原版用 /system/health，但该 endpoint 在 gateway-only role
+    # 下会调到 runtime.market_gateway / execution_adapter (都是 None)，NPE 500。
+    # 改用 /healthz —— lightweight liveness，无 auth 无 service 依赖。
     healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:8000/system/health"]
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/healthz"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -95,6 +98,16 @@ services:
     command: ["python", "-m", "apps.market_gateway.main"]
     networks:
       - aats
+    # Stage 7 修复：3 个 daemon 没有 HTTP listener，靠 process_lifecycle 内的
+    # heartbeat task 周期 touch /tmp/aats_<role>_heartbeat。healthcheck 用
+    # mtime 与当前时间差 < 30s 来判断进程是否在干活（能区分进程死了 vs 进程
+    # hang 住没退出）。30s 阈值给 GIL 阻塞 / 慢 GC / 5s 心跳间隔 + jitter 留 buffer。
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/aats_market_heartbeat && test $$(($$(date +%s) - $$(stat -c %Y /tmp/aats_market_heartbeat))) -lt 30"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # ---------------------------------------------------------------------------
   # decision — 订阅市场快照，跑 AI 决策 + 风控，发出 order intents
@@ -109,6 +122,12 @@ services:
     command: ["python", "-m", "apps.decision_engine.main"]
     networks:
       - aats
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/aats_decision_heartbeat && test $$(($$(date +%s) - $$(stat -c %Y /tmp/aats_decision_heartbeat))) -lt 30"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
   # ---------------------------------------------------------------------------
   # execution — 订阅 order intents，与 OKX 交互下单，维护 portfolio + reconciliation
@@ -129,3 +148,9 @@ services:
       resources:
         limits:
           memory: 1536M
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/aats_execution_heartbeat && test $$(($$(date +%s) - $$(stat -c %Y /tmp/aats_execution_heartbeat))) -lt 30"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s

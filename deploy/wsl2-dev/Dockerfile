@@ -61,10 +61,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/aats-venv/bin:$PATH" \
     PYTHONPATH="/app"
 
-# 运行时仅需 ca-certificates + tini（PID 1 reaper，避免 zombie 进程）
+# 运行时需 ca-certificates + tini（PID 1 reaper）+ curl（gateway healthcheck 用）
+# Stage 7 修复：原版只装了 ca-certificates + tini，但 docker-compose.aats.yml
+# 的 gateway healthcheck 是 `["CMD", "curl", "-fs", ...]`。curl 只在 builder 段
+# 装了，没复制到 runtime，会导致 healthcheck 直接 fail (curl: not found)。
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         tini \
     && rm -rf /var/lib/apt/lists/*
 

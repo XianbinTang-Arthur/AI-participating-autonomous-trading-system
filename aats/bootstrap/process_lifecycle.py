@@ -19,8 +19,11 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
+import tempfile
+from pathlib import Path
 from typing import Awaitable, Callable
 
 from aats.bootstrap.config import ApplicationRuntime, build_runtime, load_settings
@@ -30,6 +33,93 @@ from aats.bootstrap.settings import ALLOWED_PROCESS_ROLES, AATSSettings
 
 # 跨进程 entry 共享的 logger 命名空间。每个 entry 自己再 get 一个细分 logger。
 _LIFECYCLE_LOGGER = "aats.bootstrap.process_lifecycle"
+
+
+# Stage 7 修复：心跳文件目录。3 个 daemon 进程 (market/decision/execution)
+# 没有 HTTP listener，docker compose 无法直接探活。process_lifecycle 启动一个
+# background task 周期性更新 mtime，docker healthcheck 用 stat 检查 mtime
+# 与当前时间差是否 < HEARTBEAT_STALE_AFTER_SECONDS。
+# 默认目录用 /tmp（容器内非 root user 也能写），允许通过环境变量覆盖以便单测。
+HEARTBEAT_INTERVAL_SECONDS = 5.0
+HEARTBEAT_STALE_AFTER_SECONDS = 30
+HEARTBEAT_DIR_ENV = "AATS_HEARTBEAT_DIR"
+
+
+def _heartbeat_path(role: str, *, base_dir: Path | None = None) -> Path:
+    """返回给定 role 的心跳文件路径。
+
+    `base_dir` 显式传入用于单测；生产路径走环境变量 AATS_HEARTBEAT_DIR
+    或默认 tempfile.gettempdir()（在容器里就是 /tmp）。
+    """
+    if base_dir is None:
+        env_dir = os.environ.get(HEARTBEAT_DIR_ENV)
+        base_dir = Path(env_dir) if env_dir else Path(tempfile.gettempdir())
+    return base_dir / f"aats_{role}_heartbeat"
+
+
+async def _heartbeat_loop(
+    role: str,
+    *,
+    stop_event: asyncio.Event,
+    logger,
+    interval: float = HEARTBEAT_INTERVAL_SECONDS,
+    base_dir: Path | None = None,
+) -> None:
+    """周期性 touch 心跳文件，直到 stop_event 被 set。
+
+    设计要点：
+    * 第一次 touch 在 loop 开头立即做，避免 healthcheck 在 start_period 内
+      探到旧文件 / 不存在。
+    * 用 mtime 而非内容：docker healthcheck 用 stat 比较 mtime，最小开销。
+    * stop_event set 后 loop 退出，文件**不**主动删除——保留最后一次 mtime
+      让 docker stop 期间的最后一两次探活仍能拿到 healthy；docker rm 时容器
+      被销毁，/tmp 自然清掉。
+    * 任何 IO 异常都 swallow 并日志告警，不让心跳故障打死 daemon 进程。
+    """
+    path = _heartbeat_path(role, base_dir=base_dir)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except Exception as exc:  # pragma: no cover - 目录权限异常 logging 路径
+        logger.warning(
+            "process_lifecycle_heartbeat_mkdir_failed",
+            extra={
+                "event": "process_lifecycle_heartbeat_mkdir_failed",
+                "process_role": role,
+                "path": str(path),
+                "error": str(exc),
+            },
+        )
+        return
+
+    logger.info(
+        "process_lifecycle_heartbeat_started",
+        extra={
+            "event": "process_lifecycle_heartbeat_started",
+            "process_role": role,
+            "path": str(path),
+            "interval_seconds": interval,
+        },
+    )
+
+    while not stop_event.is_set():
+        try:
+            path.touch(exist_ok=True)
+            # touch 在某些 fs 上不会更新 mtime，显式 utime 兜底
+            os.utime(path, None)
+        except Exception as exc:  # pragma: no cover - 心跳写失败 logging 路径
+            logger.warning(
+                "process_lifecycle_heartbeat_touch_failed",
+                extra={
+                    "event": "process_lifecycle_heartbeat_touch_failed",
+                    "process_role": role,
+                    "path": str(path),
+                    "error": str(exc),
+                },
+            )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=interval)
+        except asyncio.TimeoutError:
+            continue
 
 
 def _resolve_process_role(*, requested: str | None) -> str:
@@ -132,6 +222,10 @@ async def run_process(
     )
 
     runtime: ApplicationRuntime | None = None
+    heartbeat_task: asyncio.Task | None = None
+    # 心跳 stop_event 与 run_process stop_event 分开：心跳必须在
+    # stop_background_tasks 期间继续打，让 docker 看到容器仍在干净退出而非挂死。
+    heartbeat_stop = asyncio.Event()
     try:
         runtime = await build_runtime(effective_settings, process_role=role)
         await runtime.start_background_tasks()
@@ -142,6 +236,14 @@ async def run_process(
         local_stop = stop_event if stop_event is not None else asyncio.Event()
         if stop_event is None:
             _install_shutdown_signals(stop_event=local_stop, logger=logger)
+
+        # Stage 7 修复：启动心跳 background task 给 docker compose healthcheck。
+        # 与 runtime.background_tasks 解耦——心跳必须独立于业务任务存活，
+        # 否则 stop_background_tasks 一调心跳就停了 docker 立刻把容器标 unhealthy。
+        heartbeat_task = asyncio.create_task(
+            _heartbeat_loop(role, stop_event=heartbeat_stop, logger=logger),
+            name=f"aats-heartbeat-{role}",
+        )
 
         logger.info(
             "process_lifecycle_ready",
@@ -183,6 +285,16 @@ async def run_process(
                         "error": str(stop_exc),
                     },
                 )
+        # 心跳 task 最后停 —— 确保 stop_background_tasks 整个期间 docker 仍能
+        # 探到 healthy。心跳文件不主动删，留最后一次 mtime 给 docker stop 兜底。
+        if heartbeat_task is not None:
+            heartbeat_stop.set()
+            try:
+                await asyncio.wait_for(heartbeat_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                heartbeat_task.cancel()
+            except Exception:  # pragma: no cover - 心跳收尾异常
+                pass
 
 
 def run_process_sync(

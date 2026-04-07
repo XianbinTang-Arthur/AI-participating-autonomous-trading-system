@@ -64,6 +64,21 @@ async def _invalidate_bundle_cache_on_mutation(request: Request, call_next):
     return response
 
 
+# Stage 7 修复：lightweight liveness probe 给 docker compose healthcheck 专用。
+# 与 /system/health 的区别：
+#   * /system/health 是 operator/UI 用的诊断 endpoint，需要全量 portfolio /
+#     reconciliation / market 状态，依赖 runtime 上多个 slice service。
+#     在 gateway-only role 下 runtime.market_gateway / runtime.execution_adapter
+#     都是 None（被 _SLICE_REQUIRED_ROLES 门控），调用会 NPE。
+#   * /healthz 只需要返回"FastAPI lifespan 已就绪"这一个事实，不依赖任何 slice
+#     service，所以在任何 process_role 下都能 200。
+# 直接挂在 `app` 上而不是挂到 routes.py 的 router 上，是为了绕过 router 级
+# require_read_access dependency —— docker healthcheck curl 不带 Bearer token。
+@app.get("/healthz")
+async def healthz() -> dict[str, str]:
+    return {"status": "ok", "process_role": _resolved_process_role()}
+
+
 app.include_router(auth_router)
 app.include_router(ui_router)
 app.include_router(router)
