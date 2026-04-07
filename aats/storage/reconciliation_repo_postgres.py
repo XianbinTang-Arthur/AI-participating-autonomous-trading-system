@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from sqlalchemy import desc, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.reconciliation import (
@@ -73,9 +74,15 @@ class PostgresReconciliationRepository:
         return [self._to_finding(row) for row in rows]
 
     def save_state_snapshot(self, snapshot: ReconciliationStateSnapshot) -> None:
+        # Stage 5 (5a-2)：reconciliation_state_snapshots 是 append-only，但 PK 是
+        # snapshot_id (string)，多进程崩溃恢复期间可能因为 retry 把同一份 snapshot
+        # 重复 enqueue。session.add + commit 会撞 PK 唯一约束抛 IntegrityError，
+        # 导致整个 reconciliation pipeline 失败重启。改成 ON CONFLICT DO NOTHING
+        # 后，重复插入静默成功（行已存在视为同一份历史快照），符合幂等语义。
         with self.session_factory() as session:
-            session.add(
-                ReconciliationStateSnapshotModel(
+            stmt = (
+                pg_insert(ReconciliationStateSnapshotModel)
+                .values(
                     snapshot_id=snapshot.snapshot_id,
                     reconciliation_id=snapshot.reconciliation_id,
                     product_type=snapshot.product_type,
@@ -94,7 +101,9 @@ class PostgresReconciliationRepository:
                     details_json=self._json_ready(snapshot.details_json),
                     created_at=snapshot.created_at,
                 )
+                .on_conflict_do_nothing(index_elements=["snapshot_id"])
             )
+            session.execute(stmt)
             session.commit()
 
     def latest_state_snapshot_for_scope(

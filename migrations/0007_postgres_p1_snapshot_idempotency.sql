@@ -1,0 +1,31 @@
+-- Stage 5 (5a-2)：P1 快照表的并发保护审查（无 schema 变更）
+--
+-- 设计文档原文是：P1 OCC 范围 = "portfolio_snapshots + reconciliation_state_snapshots"，
+-- 给两张表加 row_version 列。
+--
+-- 审查代码后发现两张表都是 append-only：
+-- 1) portfolio_snapshots
+--    PK = sequence_id (Integer, autoincrement)，每次 save_snapshot 都新建一行，
+--    没有 UPDATE 路径。SQLAlchemy version_id_col 在 INSERT 不会触发，纯 INSERT
+--    场景下 row_version 是死代码。
+--
+-- 2) reconciliation_state_snapshots
+--    PK = snapshot_id (String)，每次 reconciliation 生成新的 snapshot_id 然后
+--    INSERT。同样没有 UPDATE 路径。
+--
+-- 所以"加 row_version"对这两张表没有意义。真正需要的是 INSERT 幂等性：
+-- 多进程崩溃恢复期间如果同一份 snapshot 被重复 enqueue 然后两个 worker 同时
+-- 调 save_state_snapshot，第二次会撞 PK 唯一约束抛 IntegrityError。改造成
+-- INSERT ... ON CONFLICT (snapshot_id) DO NOTHING 后，幂等返回，不抛错。
+--
+-- 本 migration 的作用：
+--   1) 在 schema_migrations 表留下一条记录，证明 5a-2 已经审查并应用
+--   2) 为未来的 P1 改造保留 0007 版本号
+--   3) 文档化"为什么 P1 表跳过 row_version"的决策，让审计/code review 能看到
+--
+-- 配套代码改造：
+--   - aats/storage/reconciliation_repo_postgres.py:save_state_snapshot
+--     从 session.add(...) 改成 INSERT ... ON CONFLICT DO NOTHING
+--   - portfolio_snapshots 不变（autoincrement PK 天然不会冲突）
+
+SELECT 1; -- 占位语句，让 cursor.execute 有可执行的 SQL，注释本身不算
