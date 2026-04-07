@@ -1,20 +1,40 @@
 #!/usr/bin/env python3
 """Realtime data aggregation daemon.
 
-单一入口统一驱动：
+⚠️ DEPRECATION NOTICE (2026-04-07)
+─────────────────────────────────────────────────────────────────────
+本 daemon 的"常驻 60s tick"模式已被废弃。原因:
+  - RDP 所有消费方都是 daily/weekly cadence (data_maintenance / governance_cycle
+    / research_cycle / decision_cycle), 没有任何环节需要 intra-minute 新鲜度。
+  - 实盘交易引擎自有 OKX websocket 直连, 从不读 RDP 的 Bronze/Silver/Gold。
+  - 60s tick 每天产生 ~7800 次 OKX REST 调用 (4 symbol × 5 tf), 99% 浪费。
+
+✅ 推荐用法 (Step 1 迁移路径):
+  改用 cron / Task Scheduler 每天调用 scripts/rdp_run_daily_ingest.py 一次。
+
+  # Linux crontab (UTC 04:00 拉取昨日全部数据)
+  0 4 * * * cd /path/to/aats && python scripts/rdp_run_daily_ingest.py
+
+  # 或纳入 data_maintenance workflow (Step 3 推荐):
+  0 4 * * * python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance
+
+详见: docs/operations/rdp_scheduling_strategy.md "数据采集迁移到日批" 章节。
+─────────────────────────────────────────────────────────────────────
+
+历史功能 (保留以兼容旧代码路径):
   1. 滚动 candles 采集 （所有 symbol × 所有 timeframe）
   2. 滚动 funding 采集  （所有 swap symbol）
   3. 定期 Gold 层构建   （每 N 个周期）
   4. 定期 Gap 检测+修复  （每 M 个周期）
 
-Usage:
-    # 持续运行（默认每 60 秒一个周期）
+Usage (legacy, deprecated):
+    # ⚠️ 不再推荐: 持续运行 60s tick (会打印 deprecation 警告)
     python scripts/rdp_realtime_daemon.py
 
-    # 只跑一个周期
+    # ✅ 兼容用法: 只跑一个周期 (cron 友好)
     python scripts/rdp_realtime_daemon.py --once
 
-    # 自定义间隔
+    # 自定义间隔 (legacy)
     python scripts/rdp_realtime_daemon.py --interval 30
 """
 
@@ -161,9 +181,23 @@ def run_realtime_daemon(
     interval: int = 60,
     max_iterations: int | None = None,
 ) -> None:
-    """启动实时数据聚合 daemon。"""
+    """启动实时数据聚合 daemon。
+
+    ⚠️ 当 once=False 时打印 deprecation 警告。常驻 60s tick 模式已被废弃,
+    推荐改用 cron + scripts/rdp_run_daily_ingest.py 每天一次。
+    """
     from aats.data_platform.config import get_settings
     from aats.data_platform.db import run_migrations
+
+    if not once:
+        log.warning("=" * 70)
+        log.warning("DEPRECATION: realtime daemon 60s tick 模式已废弃。")
+        log.warning("推荐改用 cron 每天调用一次:")
+        log.warning("  0 4 * * * python scripts/rdp_run_daily_ingest.py")
+        log.warning("或纳入 data_maintenance workflow:")
+        log.warning("  0 4 * * * python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance")
+        log.warning("详见 docs/operations/rdp_scheduling_strategy.md")
+        log.warning("=" * 70)
 
     settings = get_settings()
     run_migrations(settings)

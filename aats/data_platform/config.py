@@ -71,7 +71,14 @@ class ResearchPlatformSettings(BaseSettings):
     rolling_candles_symbols: list[str] = Field(
         default=["BTC-USDT", "ETH-USDT", "BTC-USDT-SWAP", "ETH-USDT-SWAP"],
     )
-    rolling_candles_timeframes: list[str] = Field(default=["1m", "5m", "15m", "1H"])
+    # NOTE (2026-04-07): 默认值仅保留 15m 和 1h, 因为:
+    #   1. configs/active_parameter_sets/ 全部是 15m/1h, 没有 1m/5m 参数集
+    #   2. decision_system/evidence_bundle 只评估 15m 与 1h family/timeframe
+    #   3. 1m 在 daily 拉取下每天 1440 bar/symbol, 占 95% API 流量但无人消费
+    # 如需重新启用 1m/5m, 设置 RDP_ROLLING_CANDLES_TIMEFRAMES 环境变量,
+    # 或在 .env.research 中显式覆盖。schema 表 (staging/silver/gold *_1m, *_5m)
+    # 仍然存在, 历史数据可继续读取, 只是默认不再增量采集。
+    rolling_candles_timeframes: list[str] = Field(default=["15m", "1H"])
 
     # Funding rolling
     rolling_funding_enabled: bool = True

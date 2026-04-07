@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-"""Historical data aggregation daemon.
+"""Historical data aggregation — manual ZIP consumer.
+
+⚠️ DEPRECATION NOTICE (2026-04-07)
+─────────────────────────────────────────────────────────────────────
+本脚本的"常驻 daemon 30s 扫描"模式已被废弃。原因:
+  - historical 数据是人工拖放的 OKX 历史 ZIP, 不会自己产生新文件
+  - 30s 轮询空目录纯属 CPU 浪费, 增加运维负担
+  - 没有任何"实时"需求 — 拖完文件后手动跑一次即可
+
+✅ 推荐用法 (Step 4 迁移路径):
+    # 操作员拖完 ZIP 后, 手动执行一次:
+    python scripts/rdp_historical_daemon.py --once
+
+如果担心忘记手动触发, 可以加 cron 兜底 (低频):
+    # 每 4 小时扫描一次, 静默处理
+    0 */4 * * * python scripts/rdp_historical_daemon.py --once
+
+详见 docs/operations/rdp_scheduling_strategy.md "数据采集迁移到日批" 章节。
+─────────────────────────────────────────────────────────────────────
 
 定时扫描 incoming 目录，发现新 ZIP 文件后自动消费：
   incoming/ → 解析 → staging → bronze → silver → Gold
@@ -16,13 +34,13 @@
   └── ...
 
 Usage:
-    # 持续运行（每 30 秒扫描一次）
-    python scripts/rdp_historical_daemon.py
-
-    # 只扫描一次
+    # ✅ 推荐: 单次扫描 (cron 友好)
     python scripts/rdp_historical_daemon.py --once
 
-    # 自定义扫描间隔
+    # ⚠️ deprecated: 持续运行 (会打印 deprecation 警告)
+    python scripts/rdp_historical_daemon.py
+
+    # ⚠️ deprecated: 自定义扫描间隔
     python scripts/rdp_historical_daemon.py --interval 60
 """
 
@@ -327,9 +345,23 @@ def run_historical_daemon(
     once: bool = False,
     interval: int | None = None,
 ) -> None:
-    """启动历史数据聚合 daemon。"""
+    """启动历史数据聚合 daemon。
+
+    ⚠️ 当 once=False 时打印 deprecation 警告。常驻轮询模式已被废弃,
+    推荐操作员拖完 ZIP 后手动执行 --once 一次, 或 cron 低频兜底。
+    """
     from aats.data_platform.config import get_settings
     from aats.data_platform.db import run_migrations
+
+    if not once:
+        log.warning("=" * 70)
+        log.warning("DEPRECATION: historical daemon 常驻轮询模式已废弃。")
+        log.warning("推荐用法 (拖完 ZIP 后手动一次):")
+        log.warning("  python scripts/rdp_historical_daemon.py --once")
+        log.warning("或 cron 低频兜底:")
+        log.warning("  0 */4 * * * python scripts/rdp_historical_daemon.py --once")
+        log.warning("详见 docs/operations/rdp_scheduling_strategy.md")
+        log.warning("=" * 70)
 
     settings = get_settings()
     run_migrations(settings)

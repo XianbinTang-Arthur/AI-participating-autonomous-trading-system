@@ -1,15 +1,40 @@
 #!/usr/bin/env python3
 """Research Data Platform — unified launcher.
 
-一键启动两个 daemon 进程：
+⚠️ DEPRECATION NOTICE (2026-04-07)
+─────────────────────────────────────────────────────────────────────
+本启动器的 daemon 常驻模式已被废弃。原因:
+  - RDP 所有消费方都是 daily/weekly cadence (data_maintenance / governance_cycle
+    / research_cycle / decision_cycle), 不需要 intra-minute 新鲜度。
+  - 实盘交易引擎自有 OKX websocket 直连, 不消费 RDP 数据。
+  - 60s tick 每天产生 ~7800 次 OKX REST 调用 (4 symbol × 5 tf), 99% 浪费。
+
+✅ 推荐用法 (Step 1+3 迁移路径):
+  改用 cron / Task Scheduler 每天调用一次 data_maintenance workflow:
+
+  # Linux crontab
+  0 4 * * * python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance
+
+  # Windows Task Scheduler
+  schtasks /create /tn "RDP_DataMaintenance" \\
+      /tr "python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance" \\
+      /sc daily /st 04:00
+
+historical daemon 同样推荐改为手工拖完 ZIP 后调用 --once:
+  python scripts/rdp_historical_daemon.py --once
+
+详见: docs/operations/rdp_scheduling_strategy.md
+─────────────────────────────────────────────────────────────────────
+
+历史功能 (保留以兼容旧代码路径):
   1. 历史数据聚合 daemon  (扫描 incoming/, 消费 ZIP)
   2. 实时数据聚合 daemon  (滚动采集 + Gold + Gap)
 
 两个 daemon 各跑在独立线程中，共享同一进程。
 Ctrl+C 优雅退出。
 
-Usage:
-    # 启动全部
+Usage (legacy, deprecated):
+    # ⚠️ 不再推荐: 启动全部 (会打印 deprecation 警告)
     python scripts/rdp_start.py
 
     # 只启动历史 daemon
@@ -158,6 +183,16 @@ def main() -> None:
     print("=" * 60)
     print("  Research Data Platform — Unified Launcher")
     print("=" * 60)
+    print()
+    print("  ⚠️  DEPRECATION WARNING")
+    print("  ─────────────────────────────────────────────────────")
+    print("  daemon 常驻 60s tick 模式已废弃 (2026-04-07)。")
+    print("  推荐改为 cron 每天一次:")
+    print("    0 4 * * * python scripts/rdp_run_scheduled_workflow.py \\")
+    print("              --workflow data_maintenance")
+    print("  详见: docs/operations/rdp_scheduling_strategy.md")
+    print("  ─────────────────────────────────────────────────────")
+    print()
 
     if run_hist:
         print(f"  [Historical] incoming scan every {hist_interval}s")

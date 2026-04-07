@@ -1,20 +1,28 @@
-"""Minimal rolling scheduler for Phase 1.
+"""Rolling ingestion driver — daily-batch friendly.
 
-Drives periodic candle and funding ingestion and merge cycles.
+⚠️ HISTORY (2026-04-07)
+─────────────────────────────────────────────────────────────────
+本模块原本包含一套基于"分钟级 cadence bucket"的调度机制 (~150 行),
+用于支撑 rdp_realtime_daemon.py 的 60s tick 模式。该 daemon 模式已废弃
+(详见 docs/operations/rdp_scheduling_strategy.md "数据采集迁移到日批"),
+对应的 cadence/bucket 状态机也一并删除:
 
-Cadence rules (from Phase 1 design freeze):
-- 1m  candles: every 1 minute
-- 5m  candles: every 5 minutes
-- 15m candles: every 15 minutes
-- 1H  candles: every 1 hour
-- funding:     every 15 minutes
+  - _TF_SECONDS / _FUNDING_CADENCE_SECONDS  (cadence 表)
+  - _last_candle_bucket / _last_funding_bucket  (in-memory dedup state)
+  - _bucket_for_timeframe / _bucket_for_funding  (bucket 计算)
+  - _is_on_cadence_boundary  (60s 边界检测)
+  - _should_fire_candle / _should_fire_funding  (gating 函数)
+  - run_scheduler_loop  (循环驱动入口)
+
+新的"日批模式"由 scripts/rdp_run_daily_ingest.py 直接调用本模块的
+run_one_rolling_cycle, 它会无条件对每个 (symbol, timeframe) 增量采集
+(基于 checkpoint, max_pages 控制回拉范围)。
+─────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime, timedelta, timezone
 
 from aats.data_platform.collectors.rolling.candles_api_collector import collect_candles_incremental
 from aats.data_platform.collectors.rolling.funding_api_collector import collect_funding_incremental
@@ -25,128 +33,60 @@ from aats.data_platform.merge.merge_pipeline import (
     run_candle_merge_pipeline,
     run_funding_merge_pipeline,
 )
-from aats.data_platform.models import SUPPORTED_SYMBOLS, FUNDING_SYMBOLS
 
 log = logging.getLogger(__name__)
 
-_TF_SECONDS = {
-    "1m": 60,
-    "5m": 300,
-    "15m": 900,
-    "1H": 3600,
-}
 
-_FUNDING_CADENCE_SECONDS = 900  # 15 minutes
-
-# ---------------------------------------------------------------------------
-# Bucket-based cadence dedup (single-process, in-memory)
-# ---------------------------------------------------------------------------
-# NOTE: This is a best-effort, single-process dedup mechanism.  The bucket
-# state lives in process memory only.  Known limitations:
-#   - After a process restart, the first tick may re-fire a bucket that
-#     already ran before the restart.  This is acceptable because the
-#     downstream merge pipeline is idempotent (upsert on PK).
-#   - Multiple worker processes would each maintain independent state,
-#     potentially causing duplicate fires.  Phase 1 runs a single
-#     scheduler process, so this is not a current concern.
-# If persistent dedup is needed later, store the last-fired bucket in
-# meta.ingest_checkpoints.notes or a dedicated meta.scheduler_state table.
-_last_candle_bucket: dict[tuple[str, str], int] = {}
-_last_funding_bucket: dict[str, int] = {}
-
-
-def _bucket_for_timeframe(now_utc: datetime, timeframe: str) -> int:
-    """Compute the cadence bucket index for a given timeframe.
-
-    Each bucket represents one cadence period.  E.g. for 5m, bucket 0 covers
-    epoch [0, 300), bucket 1 covers [300, 600), etc.
-    """
-    seconds = _TF_SECONDS[timeframe]
-    return int(now_utc.timestamp()) // seconds
-
-
-def _bucket_for_funding(now_utc: datetime) -> int:
-    """Compute the 15-minute cadence bucket for funding collection."""
-    return int(now_utc.timestamp()) // _FUNDING_CADENCE_SECONDS
-
-
-def _is_on_cadence_boundary(now_utc: datetime, cadence_seconds: int) -> bool:
-    """Return True if *now_utc* falls within the first 60 seconds of a cadence window."""
-    return (int(now_utc.timestamp()) % cadence_seconds) < 60
-
-
-def _should_fire_candle(now_utc: datetime, symbol: str, timeframe: str) -> bool:
-    """Return True if this (symbol, timeframe) should fire now.
-
-    Checks two conditions:
-      1. Current time is within 60s of a cadence boundary for *timeframe*.
-      2. This cadence bucket has not already been fired (in-memory dedup).
-    """
-    seconds = _TF_SECONDS.get(timeframe)
-    if seconds is None:
-        return True  # unknown timeframe — always eligible
-    if not _is_on_cadence_boundary(now_utc, seconds):
-        return False
-    bucket = _bucket_for_timeframe(now_utc, timeframe)
-    key = (symbol, timeframe)
-    if _last_candle_bucket.get(key) == bucket:
-        return False
-    _last_candle_bucket[key] = bucket
-    return True
-
-
-def _should_fire_funding(now_utc: datetime, symbol: str) -> bool:
-    """Return True if this symbol's funding should fire now.
-
-    Checks 15-min cadence boundary AND ensures the same bucket is not
-    fired twice (in-memory dedup — see module-level note on limitations).
-    """
-    if not _is_on_cadence_boundary(now_utc, _FUNDING_CADENCE_SECONDS):
-        return False
-    bucket = _bucket_for_funding(now_utc)
-    if _last_funding_bucket.get(symbol) == bucket:
-        return False
-    _last_funding_bucket[symbol] = bucket
-    return True
-
-
-def run_one_rolling_cycle(settings: ResearchPlatformSettings | None = None) -> None:
+def run_one_rolling_cycle(
+    settings: ResearchPlatformSettings | None = None,
+    *,
+    max_pages: int = 30,
+) -> None:
     """Execute a single rolling ingestion + merge cycle.
 
-    Only runs each timeframe if the current UTC time is on its cadence boundary.
+    本函数无条件对所有 (symbol, timeframe) 增量采集——增量边界由各 collector
+    内部的 checkpoint 控制, 不再受任何"分钟边界 / cadence bucket"约束。
+
+    日批模式下推荐 max_pages>=30 (默认), 足够覆盖 24h+ 数据。
+    灾后恢复或追历史时可显式传入更大的 max_pages。
+
+    Args:
+        settings: 可选的 settings 实例 (默认从 get_settings 加载)
+        max_pages: 单次 collect 的最大分页数, 透传给 collector
     """
     settings = settings or get_settings()
-    now_utc = datetime.now(timezone.utc)
 
-    # Candles — only fire timeframes on cadence, with bucket dedup
+    # ── Candles ──
     if settings.rolling_candles_enabled:
         for symbol in settings.rolling_candles_symbols:
             for tf in settings.rolling_candles_timeframes:
-                if not _should_fire_candle(now_utc, symbol, tf):
-                    continue
                 try:
                     with get_session(settings) as session:
                         run_id = collect_candles_incremental(
-                            session, settings, symbol=symbol, timeframe=tf,
+                            session, settings,
+                            symbol=symbol, timeframe=tf,
+                            max_pages=max_pages,
                         )
                     with get_session(settings) as session:
                         run_candle_merge_pipeline(
                             session, symbol=symbol, timeframe=tf, ingest_run_id=run_id,
                         )
                 except ValidationBlockedError:
-                    log.warning("Candle merge blocked by quality gate: %s %s", symbol, tf)
+                    log.warning(
+                        "Candle merge blocked by quality gate: %s %s", symbol, tf,
+                    )
                 except Exception:
                     log.exception("Rolling candle failed: %s %s", symbol, tf)
 
-    # Funding — every 15 minutes, with bucket dedup
+    # ── Funding ──
     if settings.rolling_funding_enabled:
         for symbol in settings.rolling_funding_symbols:
-            if not _should_fire_funding(now_utc, symbol):
-                continue
             try:
                 with get_session(settings) as session:
                     run_id = collect_funding_incremental(
-                        session, settings, symbol=symbol,
+                        session, settings,
+                        symbol=symbol,
+                        max_pages=max_pages,
                     )
                 with get_session(settings) as session:
                     run_funding_merge_pipeline(
@@ -156,36 +96,3 @@ def run_one_rolling_cycle(settings: ResearchPlatformSettings | None = None) -> N
                 log.warning("Funding merge blocked by quality gate: %s", symbol)
             except Exception:
                 log.exception("Rolling funding failed: %s", symbol)
-
-
-def run_scheduler_loop(
-    settings: ResearchPlatformSettings | None = None,
-    interval_seconds: int = 60,
-    max_iterations: int | None = None,
-) -> None:
-    """Run the rolling scheduler as a long-lived loop.
-
-    The loop ticks every *interval_seconds* (default 60s).  Each tick,
-    ``run_one_rolling_cycle`` checks cadence boundaries and only fires
-    the timeframes that are due.
-
-    Args:
-        interval_seconds: Sleep between cycles.
-        max_iterations: If set, exit after N iterations (for testing).
-    """
-    settings = settings or get_settings()
-    iteration = 0
-    log.info("Scheduler starting, interval=%ds", interval_seconds)
-
-    while True:
-        try:
-            run_one_rolling_cycle(settings)
-        except Exception:
-            log.exception("Scheduler cycle error")
-
-        iteration += 1
-        if max_iterations is not None and iteration >= max_iterations:
-            log.info("Scheduler reached max iterations (%d), exiting", max_iterations)
-            break
-
-        time.sleep(interval_seconds)
