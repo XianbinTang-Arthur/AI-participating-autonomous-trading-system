@@ -10,6 +10,10 @@ from aats.schemas.strategy_runtime import (
     StrategyExecutionBundle,
     StrategySleeveIntent,
 )
+from aats.storage.base import (
+    OptimisticLockError,
+    StrategyExecutionBundleSaveResult,
+)
 
 
 class InMemoryStrategyRuntimeRepository:
@@ -19,6 +23,8 @@ class InMemoryStrategyRuntimeRepository:
         self._sleeve_intents: dict[str, StrategySleeveIntent] = {}
         self._allocations: dict[str, PortfolioAllocationDecision] = {}
         self._bundles: dict[str, StrategyExecutionBundle] = {}
+        # Stage 5: 每个 bundle 的当前 row_version，与 _bundles 平行维护
+        self._bundle_versions: dict[str, int] = {}
         self._budget_snapshots: dict[str, AllocatorBudgetSnapshot] = {}
         self._conflict_resolutions: dict[str, AllocatorConflictResolution] = {}
         self._netting_decisions: dict[str, AllocatorNettingDecision] = {}
@@ -119,11 +125,72 @@ class InMemoryStrategyRuntimeRepository:
         return self._allocations.get(allocation_id)
 
     def save_execution_bundle(self, bundle: StrategyExecutionBundle) -> StrategyExecutionBundle:
+        """无版本检查的写入。
+
+        ⚠️ 历史接口；多进程下并发写会丢失更新。新代码应优先使用
+        save_execution_bundle_versioned。这里仍然 bump row_version，
+        以保证两个接口对版本号的视图一致。
+        """
         self._bundles[bundle.bundle_id] = bundle
+        self._bundle_versions[bundle.bundle_id] = self._bundle_versions.get(bundle.bundle_id, 0) + 1
         return bundle
+
+    def save_execution_bundle_versioned(
+        self,
+        bundle: StrategyExecutionBundle,
+        *,
+        expected_row_version: int | None,
+    ) -> StrategyExecutionBundleSaveResult:
+        """带 CAS 的写入（Stage 5）。
+
+        语义和 Postgres 实现完全一致：
+        - expected_row_version=None：要求库内不存在同 ID 的 bundle，否则抛错
+        - expected_row_version=N：库内必须有同 ID 的 bundle 且 row_version==N
+          才允许更新；写入完成后 row_version 升级为 N+1
+        """
+        actual_version = self._bundle_versions.get(bundle.bundle_id)
+        if expected_row_version is None:
+            if actual_version is not None:
+                # 首次插入路径冲突：caller 期望 row 不存在，但库内已经有了。
+                # expected=None 与 base.py OptimisticLockError 协议一致，
+                # 表示"期望首次插入"语义，而不是"期望版本号 0"。
+                raise OptimisticLockError(
+                    bundle.bundle_id,
+                    expected=None,
+                    actual=actual_version,
+                )
+            new_version = 1
+            created = True
+        else:
+            if actual_version != expected_row_version:
+                raise OptimisticLockError(
+                    bundle.bundle_id,
+                    expected=expected_row_version,
+                    actual=actual_version,
+                )
+            new_version = expected_row_version + 1
+            created = False
+
+        self._bundles[bundle.bundle_id] = bundle
+        self._bundle_versions[bundle.bundle_id] = new_version
+        return StrategyExecutionBundleSaveResult(
+            bundle=bundle,
+            row_version=new_version,
+            created=created,
+        )
 
     def get_execution_bundle(self, bundle_id: str) -> StrategyExecutionBundle | None:
         return self._bundles.get(bundle_id)
+
+    def get_execution_bundle_with_version(
+        self,
+        bundle_id: str,
+    ) -> tuple[StrategyExecutionBundle, int] | None:
+        bundle = self._bundles.get(bundle_id)
+        version = self._bundle_versions.get(bundle_id)
+        if bundle is None or version is None:
+            return None
+        return bundle, version
 
     def recent_execution_bundles(
         self,

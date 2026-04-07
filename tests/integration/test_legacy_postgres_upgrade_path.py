@@ -137,6 +137,7 @@ class TestLegacyPostgresUpgradePath(unittest.IsolatedAsyncioTestCase):
                     "0002_postgres_legacy_upgrade.sql",
                     "0003_postgres_execution_attempt_id_columns.sql",
                     "0004_postgres_exit_execution_repository.sql",
+                    "0005_postgres_strategy_execution_bundle_row_version.sql",
                 ],
             )
             self.assertEqual(second_applied, [])
@@ -147,6 +148,7 @@ class TestLegacyPostgresUpgradePath(unittest.IsolatedAsyncioTestCase):
                     "0002_postgres_legacy_upgrade.sql",
                     "0003_postgres_execution_attempt_id_columns.sql",
                     "0004_postgres_exit_execution_repository.sql",
+                    "0005_postgres_strategy_execution_bundle_row_version.sql",
                 ],
             )
         finally:

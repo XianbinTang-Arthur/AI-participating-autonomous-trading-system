@@ -1,0 +1,25 @@
+# =============================================================================
+# Grafana 仪表盘 provider
+#
+# 把 ./dashboards 目录下的 *.json 自动加载为仪表盘
+# 当前是空目录占位，后续阶段会陆续填充：
+#   - aats_overview.json     四进程总览
+#   - aats_execution.json    执行链时延 / 滑点
+#   - aats_decision.json     决策频率 / 拒单率
+#   - aats_market.json       行情延迟 / feature 计算耗时
+# =============================================================================
+
+apiVersion: 1
+
+providers:
+  - name: aats-dev
+    orgId: 1
+    folder: AATS
+    folderUid: aats-dev-folder
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /etc/grafana/provisioning/dashboards/files
+      foldersFromFilesStructure: true

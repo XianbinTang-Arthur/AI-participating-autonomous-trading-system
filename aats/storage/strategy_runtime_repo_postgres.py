@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from sqlalchemy import asc, desc, select
+from sqlalchemy import asc, desc, select, update
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
@@ -13,6 +14,10 @@ from aats.schemas.strategy_runtime import (
     SleeveBudgetProfile,
     StrategyExecutionBundle,
     StrategySleeveIntent,
+)
+from aats.storage.base import (
+    OptimisticLockError,
+    StrategyExecutionBundleSaveResult,
 )
 from aats.storage.sqlalchemy_models import (
     AllocatorBudgetSnapshotModel,
@@ -301,6 +306,19 @@ class PostgresStrategyRuntimeRepository:
         return None if row is None else PortfolioAllocationDecision.model_validate(row.payload)
 
     def save_execution_bundle(self, bundle: StrategyExecutionBundle) -> StrategyExecutionBundle:
+        """无版本检查的写入（兼容历史调用方）。
+
+        ⚠️ 多进程下并发写会丢失更新。新代码应优先使用
+        save_execution_bundle_versioned。本方法的语义是：插入或覆盖，
+        每次调用都会把 row_version 加 1。
+
+        ⚠️ 进一步的隐患：本方法是 SELECT-then-INSERT 模式，两个 worker
+        几乎同时调用同一个未存在的 bundle_id 时，第二个 INSERT 会被
+        Postgres 主键约束拒绝并抛 sqlalchemy.exc.IntegrityError。本方法
+        不捕获这个异常，会原样冒泡到 caller。这是历史 API 的固有限制；
+        要避免这个 race，请改用 save_execution_bundle_versioned，它在
+        首次插入路径上用 ON CONFLICT DO NOTHING 提供原子语义。
+        """
         payload = dump_payload_exact(bundle)
         with self.session_factory() as session:
             row = session.get(StrategyExecutionBundleModel, bundle.bundle_id)
@@ -325,6 +343,7 @@ class PostgresStrategyRuntimeRepository:
                     portfolio_risk_budget_state=bundle.portfolio_risk_budget_state,
                     created_at=bundle.created_at,
                     payload=payload,
+                    row_version=1,
                 )
                 session.add(row)
             else:
@@ -346,13 +365,150 @@ class PostgresStrategyRuntimeRepository:
                 row.portfolio_risk_budget_state = bundle.portfolio_risk_budget_state
                 row.created_at = bundle.created_at
                 row.payload = payload
+                # 保留旧语义：覆盖写也 bump 版本，避免与 versioned API 视图割裂
+                row.row_version = (row.row_version or 0) + 1
             session.commit()
         return bundle
+
+    def save_execution_bundle_versioned(
+        self,
+        bundle: StrategyExecutionBundle,
+        *,
+        expected_row_version: int | None,
+    ) -> StrategyExecutionBundleSaveResult:
+        """带乐观并发控制的写入（Stage 5）。
+
+        实现要点：
+        - expected_row_version=None：使用 `INSERT ... ON CONFLICT (bundle_id)
+          DO NOTHING` 让数据库以单条原子语句决定本次写入是首次插入还是冲突。
+          这样避免了"先 SELECT 再 INSERT"两步式检查在多进程下的 race：
+          两个 worker 都通过 SELECT 看到 row 不存在，然后第二个 INSERT
+          抛 IntegrityError 而不是 OptimisticLockError，破坏 caller 契约。
+          冲突时 ON CONFLICT DO NOTHING 让 rowcount==0，再用 SELECT 读
+          当前 row_version 抛 OptimisticLockError。
+        - expected_row_version=N：用 `UPDATE ... WHERE row_version=N` 做 CAS。
+          rowcount==1 表示更新成功；==0 表示别的进程已经写过了，重新 SELECT
+          拿当前版本然后抛 OptimisticLockError。
+        """
+        payload = dump_payload_exact(bundle)
+        with self.session_factory() as session:
+            if expected_row_version is None:
+                # 原子 INSERT：若 bundle_id 已存在则什么都不做（rowcount=0）。
+                # 这一句把"检查不存在"和"插入"合并为单条 SQL，消除了
+                # SELECT-then-INSERT 之间的 race window。
+                insert_stmt = (
+                    pg_insert(StrategyExecutionBundleModel)
+                    .values(
+                        bundle_id=bundle.bundle_id,
+                        decision_id=bundle.decision_id,
+                        family=bundle.family,
+                        strategy_sleeve_id=bundle.strategy_sleeve_id,
+                        allocation_id=bundle.allocation_id,
+                        product_type=bundle.product_type,
+                        margin_mode=bundle.margin_mode,
+                        route_action=bundle.route_action,
+                        bundle_type=bundle.bundle_type,
+                        bundle_priority=bundle.bundle_priority,
+                        status=bundle.status,
+                        selected_symbol=bundle.selected_symbol,
+                        gross_requested_exposure=bundle.gross_requested_exposure,
+                        net_approved_exposure=bundle.net_approved_exposure,
+                        expected_cost_bps=bundle.expected_cost_bps,
+                        expected_edge_bps=bundle.expected_edge_bps,
+                        portfolio_risk_budget_state=bundle.portfolio_risk_budget_state,
+                        created_at=bundle.created_at,
+                        payload=payload,
+                        row_version=1,
+                    )
+                    .on_conflict_do_nothing(index_elements=["bundle_id"])
+                )
+                result = session.execute(insert_stmt)
+                if result.rowcount == 1:
+                    session.commit()
+                    return StrategyExecutionBundleSaveResult(
+                        bundle=bundle,
+                        row_version=1,
+                        created=True,
+                    )
+
+                # 插入被 ON CONFLICT 拦截：另一个 worker 已经写过这个 bundle。
+                # 重新读出当前 row_version 报给 caller 用于 merge-and-retry。
+                actual_row = session.get(StrategyExecutionBundleModel, bundle.bundle_id)
+                actual_version = (
+                    int(actual_row.row_version or 0) if actual_row is not None else None
+                )
+                session.rollback()
+                raise OptimisticLockError(
+                    bundle.bundle_id,
+                    expected=None,
+                    actual=actual_version,
+                )
+
+            # CAS 路径：UPDATE ... WHERE bundle_id AND row_version
+            new_version = expected_row_version + 1
+            stmt = (
+                update(StrategyExecutionBundleModel)
+                .where(StrategyExecutionBundleModel.bundle_id == bundle.bundle_id)
+                .where(StrategyExecutionBundleModel.row_version == expected_row_version)
+                .values(
+                    decision_id=bundle.decision_id,
+                    family=bundle.family,
+                    strategy_sleeve_id=bundle.strategy_sleeve_id,
+                    allocation_id=bundle.allocation_id,
+                    product_type=bundle.product_type,
+                    margin_mode=bundle.margin_mode,
+                    route_action=bundle.route_action,
+                    bundle_type=bundle.bundle_type,
+                    bundle_priority=bundle.bundle_priority,
+                    status=bundle.status,
+                    selected_symbol=bundle.selected_symbol,
+                    gross_requested_exposure=bundle.gross_requested_exposure,
+                    net_approved_exposure=bundle.net_approved_exposure,
+                    expected_cost_bps=bundle.expected_cost_bps,
+                    expected_edge_bps=bundle.expected_edge_bps,
+                    portfolio_risk_budget_state=bundle.portfolio_risk_budget_state,
+                    created_at=bundle.created_at,
+                    payload=payload,
+                    row_version=new_version,
+                )
+            )
+            result = session.execute(stmt)
+            if result.rowcount != 1:
+                # CAS 失败：重读当前 row_version 给 caller 用于 merge-and-retry
+                actual_row = session.get(StrategyExecutionBundleModel, bundle.bundle_id)
+                actual_version = (
+                    int(actual_row.row_version or 0) if actual_row is not None else None
+                )
+                session.rollback()
+                raise OptimisticLockError(
+                    bundle.bundle_id,
+                    expected=expected_row_version,
+                    actual=actual_version,
+                )
+            session.commit()
+            return StrategyExecutionBundleSaveResult(
+                bundle=bundle,
+                row_version=new_version,
+                created=False,
+            )
 
     def get_execution_bundle(self, bundle_id: str) -> StrategyExecutionBundle | None:
         with self.session_factory() as session:
             row = session.get(StrategyExecutionBundleModel, bundle_id)
         return None if row is None else StrategyExecutionBundle.model_validate(row.payload)
+
+    def get_execution_bundle_with_version(
+        self,
+        bundle_id: str,
+    ) -> tuple[StrategyExecutionBundle, int] | None:
+        with self.session_factory() as session:
+            row = session.get(StrategyExecutionBundleModel, bundle_id)
+        if row is None:
+            return None
+        return (
+            StrategyExecutionBundle.model_validate(row.payload),
+            int(row.row_version or 0),
+        )
 
     def recent_execution_bundles(
         self,

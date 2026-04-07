@@ -1,7 +1,61 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Stage 5: 乐观并发控制（Optimistic Concurrency Control）
+# ─────────────────────────────────────────────────────────────────────
+
+
+@dataclass(slots=True)
+class StrategyExecutionBundleSaveResult:
+    """save_execution_bundle 的返回结果。
+
+    bundle: 写入后的 bundle（content 与传入相同）。
+    row_version: 该 bundle 持久化后的最新版本号。下一次基于此 bundle 做
+        增量修改的写入应当传入这个 row_version 作为 expected_row_version。
+    created: True 表示这是一次插入，False 表示更新。
+    """
+
+    bundle: "StrategyExecutionBundle"
+    row_version: int
+    created: bool
+
+
+class OptimisticLockError(Exception):
+    """save_execution_bundle 检测到 row_version 不匹配时抛出。
+
+    多进程下两个写者同时尝试更新同一 bundle，先到的成功并把 row_version
+    从 N 升到 N+1，后到的写者带的 expected_row_version 仍是 N，CAS 失败。
+    捕获方应当：
+        1) 重新 get_execution_bundle(bundle_id) 拿到最新 bundle 与 row_version
+        2) 把自己的修改 merge 到最新 bundle
+        3) 用最新的 row_version 重试 save_execution_bundle
+
+    expected_row_version 语义：
+        - int N (≥ 1)：caller 期望库内已经存在 row_version=N 的 bundle，
+          CAS UPDATE 应当成功
+        - None：caller 期望库内**不**存在该 bundle（首次插入路径），
+          但实际上已经存在
+    """
+
+    def __init__(
+        self,
+        bundle_id: str,
+        *,
+        expected: int | None,
+        actual: int | None,
+    ) -> None:
+        self.bundle_id = bundle_id
+        self.expected_row_version = expected
+        self.actual_row_version = actual
+        super().__init__(
+            f"optimistic_lock_conflict bundle_id={bundle_id} "
+            f"expected_row_version={expected} actual_row_version={actual}"
+        )
 
 from aats.schemas.common import EventEnvelope
 from aats.schemas.audit import DecisionAuditRecord
@@ -564,6 +618,39 @@ class StrategyRuntimeRepository(Protocol):
         ...
 
     def save_execution_bundle(self, bundle: StrategyExecutionBundle) -> StrategyExecutionBundle:
+        """无版本检查的写入。
+
+        ⚠️ 历史接口；多进程下写竞争会导致丢失更新。新代码应优先调用
+        save_execution_bundle_versioned。本方法在底层会做"读 → 写"且不做 CAS，
+        所以如果两个进程并发调它，最后写的会覆盖前一个。
+        """
+        ...
+
+    def save_execution_bundle_versioned(
+        self,
+        bundle: StrategyExecutionBundle,
+        *,
+        expected_row_version: int | None,
+    ) -> "StrategyExecutionBundleSaveResult":
+        """带乐观并发控制的写入（Stage 5）。
+
+        - expected_row_version=None：表示这是该 bundle 的首次插入。如果库内
+          已经存在同 ID 的 bundle，会抛 OptimisticLockError。
+        - expected_row_version=N：UPDATE 时附加 WHERE row_version=N，rowcount
+          必须为 1，否则抛 OptimisticLockError。
+        - 成功后返回的 row_version 是写入完成后的新值（旧值+1，或首次插入的 1）。
+        """
+        ...
+
+    def get_execution_bundle_with_version(
+        self,
+        bundle_id: str,
+    ) -> tuple["StrategyExecutionBundle", int] | None:
+        """读取 bundle 同时返回当前 row_version。
+
+        多进程下做"读 → 修改 → 写"循环时，必须用这个方法拿到 row_version，
+        否则就退化成 last-writer-wins。
+        """
         ...
 
     def get_execution_bundle(self, bundle_id: str) -> StrategyExecutionBundle | None:

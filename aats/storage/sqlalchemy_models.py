@@ -3,7 +3,7 @@ from __future__ import annotations
 from decimal import Decimal
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -229,6 +229,9 @@ class StrategyExecutionBundleModel(Base):
     portfolio_risk_budget_state: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    # Stage 5：乐观并发控制版本号。每次 save_execution_bundle 后 +1。
+    # 多进程同时写同一 bundle 时，CAS 会拒绝过期请求，调用方需要重读后重试。
+    row_version: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
 
 
 class SleeveBudgetProfileModel(Base):

@@ -154,7 +154,21 @@ class DatabaseRuntime:
         self.engine.dispose()
 
 
-def scoped_runtime_lock_key(*, database_url: str, base_lock_key: int) -> int:
+def scoped_runtime_lock_key(
+    *,
+    database_url: str,
+    base_lock_key: int,
+    process_role: str | None = None,
+) -> int:
+    """派生数据库 advisory lock key。
+
+    多进程切片化之后，单一全局锁会让 4 个进程互相阻塞。引入 process_role 之后，
+    每个 role（gateway/market/decision/execution/monolith）派生独立的 lock_key，
+    确保：
+      - 每个 role 仍然只能有一份运行（防止重复启动同一进程）
+      - 4 个 role 之间互不阻塞
+    process_role=None 等价于 monolith，保持向后兼容（与重构前行为一致）。
+    """
     parsed = make_url(database_url)
     query = dict(parsed.query)
     options = str(query.get("options") or "")
@@ -166,9 +180,10 @@ def scoped_runtime_lock_key(*, database_url: str, base_lock_key: int) -> int:
         if candidate:
             search_path = candidate
         break
+    role_token = (process_role or "monolith").strip().lower() or "monolith"
     seed = (
         f"{int(base_lock_key)}|{parsed.drivername}|{parsed.host or ''}|{parsed.port or ''}|"
-        f"{parsed.database or ''}|{search_path}"
+        f"{parsed.database or ''}|{search_path}|{role_token}"
     )
     digest = hashlib.sha256(seed.encode("utf-8")).digest()
     derived = int.from_bytes(digest[:8], byteorder="big", signed=False) & ((1 << 63) - 1)

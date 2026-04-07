@@ -1,0 +1,243 @@
+# =============================================================================
+# AATS WSL2 本地基础设施 — 多进程切片化重构 Stage 1
+#
+# 目标：在 WSL2 (Ubuntu) 上一键拉起 AATS 4 进程架构所需的全部依赖
+#       Postgres / Redis / NATS JetStream / Loki / Jaeger / Grafana
+#
+# 设计原则：
+#   - 全部本地、零云费用
+#   - 仅监听 127.0.0.1，避免局域网/外网泄露
+#   - 持久化卷使用 docker named volume，便于 docker volume ls 管理
+#   - 资源限制保守，适合开发机
+#
+# 启动：cd deploy/wsl2-dev && docker compose --env-file .env.wsl2 up -d
+# 停止：docker compose down            （保留数据）
+# 清理：docker compose down -v         （删除全部数据，慎用）
+# =============================================================================
+
+name: aats-dev
+
+networks:
+  aats:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  nats_data:
+  loki_data:
+  grafana_data:
+
+services:
+  # ---------------------------------------------------------------------------
+  # Postgres 16 — AATS 主存储
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: aats-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aats}
+      POSTGRES_USER: ${POSTGRES_USER:-aats}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aats}
+      # 设置时区与服务器一致，方便排查
+      TZ: Asia/Shanghai
+      PGTZ: Asia/Shanghai
+    command:
+      - "postgres"
+      - "-c"
+      - "max_connections=200"          # 4 进程 × pool_size 10 + 余量
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=16MB"
+      - "-c"
+      - "maintenance_work_mem=128MB"
+      - "-c"
+      - "wal_level=replica"
+      - "-c"
+      - "max_wal_size=1GB"
+      - "-c"
+      - "checkpoint_timeout=10min"
+      - "-c"
+      - "log_min_duration_statement=500"  # 慢查询 >500ms 入日志
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aats} -d ${POSTGRES_DB:-aats}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+
+  # ---------------------------------------------------------------------------
+  # Redis 7 — 跨进程热状态缓存（仓位/订单视图）
+  # AOF 持久化，避免 crash 后状态丢失
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: aats-redis
+    restart: unless-stopped
+    command:
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+      - "--maxmemory"
+      - "256mb"
+      - "--maxmemory-policy"
+      - "allkeys-lru"
+    ports:
+      - "127.0.0.1:6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+
+  # ---------------------------------------------------------------------------
+  # NATS JetStream — 跨进程事件总线
+  # critical topic 用 file storage（持久化、宕机不丢）
+  # observer topic 用 memory storage（流量大、可丢、不阻塞主路径）
+  # 这里 server 同时支持两种 storage，由 stream 配置决定
+  # ---------------------------------------------------------------------------
+  nats:
+    image: nats:2.10-alpine
+    container_name: aats-nats
+    restart: unless-stopped
+    command:
+      - "-c"
+      - "/etc/nats/nats-server.conf"
+    ports:
+      - "127.0.0.1:4222:4222"   # client
+      - "127.0.0.1:8222:8222"   # http monitoring
+    volumes:
+      - ./nats/nats-server.conf:/etc/nats/nats-server.conf:ro
+      - nats_data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ---------------------------------------------------------------------------
+  # Loki — 集中日志存储
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: aats-loki
+    restart: unless-stopped
+    command:
+      - "-config.file=/etc/loki/loki-config.yml"
+    ports:
+      - "127.0.0.1:3100:3100"
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki_data:/loki
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3100/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ---------------------------------------------------------------------------
+  # Jaeger All-in-One — 分布式 trace 收集与查询
+  # 使用 Badger 内嵌存储，开发足够
+  # ---------------------------------------------------------------------------
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: aats-jaeger
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      SPAN_STORAGE_TYPE: "badger"
+      BADGER_EPHEMERAL: "false"
+      BADGER_DIRECTORY_VALUE: "/badger/data"
+      BADGER_DIRECTORY_KEY: "/badger/key"
+    ports:
+      - "127.0.0.1:16686:16686"   # Jaeger UI
+      - "127.0.0.1:4317:4317"     # OTLP gRPC（AATS 4 进程都打到这里）
+      - "127.0.0.1:4318:4318"     # OTLP HTTP
+    volumes:
+      - ./jaeger/badger:/badger
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:14269/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+  # ---------------------------------------------------------------------------
+  # Grafana — 一站式 Loki + Jaeger + Postgres 仪表盘
+  # 数据源已在 ./grafana/provisioning 里自动配置
+  # ---------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:10.4.4
+    container_name: aats-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: ""
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      loki:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          memory: 384M

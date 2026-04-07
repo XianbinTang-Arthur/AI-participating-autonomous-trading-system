@@ -1,0 +1,55 @@
+# =============================================================================
+# Grafana 数据源 — 自动 provision
+#
+# Loki / Jaeger / Postgres 三个数据源开箱可用
+# Postgres 数据源使用 Grafana 内置 driver，可直接 SQL 查询 AATS 表
+# =============================================================================
+
+apiVersion: 1
+
+datasources:
+  - name: Loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    isDefault: true
+    editable: true
+    jsonData:
+      maxLines: 1000
+      derivedFields:
+        - datasourceUid: jaeger
+          matcherRegex: "trace_id=([a-f0-9]+)"
+          name: TraceID
+          url: "$${__value.raw}"
+
+  - name: Jaeger
+    uid: jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    editable: true
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-1m"
+        spanEndTimeShift: "1m"
+        tags:
+          - key: service.name
+            value: service
+        filterByTraceID: true
+
+  - name: Postgres
+    type: postgres
+    url: postgres:5432
+    user: aats
+    secureJsonData:
+      password: aats_dev_change_me
+    jsonData:
+      database: aats
+      sslmode: disable
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+      postgresVersion: 1600
+      timescaledb: false
+    editable: true
