@@ -1,0 +1,131 @@
+# =============================================================================
+# AATS 4 进程拓扑 — Stage 5d
+#
+# 这份 compose 只装 AATS 应用层 4 个服务；基础设施（Postgres/Redis/NATS/Loki/
+# Jaeger/Grafana）仍由 deploy/wsl2-dev/docker-compose.yml 提供。两份 compose
+# 通过 `name: aats-dev` 共用同一个 project，且都连到 `aats` 网络上。
+#
+# 启动顺序：
+#   1) cd deploy/wsl2-dev
+#   2) docker compose --env-file .env.wsl2 up -d                  # 基础设施
+#   3) docker compose -f docker-compose.aats.yml --env-file .env.wsl2 build
+#   4) docker compose -f docker-compose.aats.yml --env-file .env.wsl2 up -d
+#
+# 设计要点：
+#   - 单一镜像 (aats-base) + 不同 command + AATS_PROCESS_ROLE 环境变量
+#   - depends_on 走 healthcheck，不靠 sleep；基础设施未就绪不会启动 AATS 进程
+#   - 4 个服务都连到 aats 网络（来自 docker-compose.yml 的 networks 段）
+#   - 端口仅 gateway 暴露 127.0.0.1:8000，其余 3 个内网通信不绑端口
+#   - 资源限制保守，单机 16GB 内存够 4 进程 + 6 个基础设施
+# =============================================================================
+
+name: aats-dev
+
+# 复用 docker-compose.yml 创建的网络。external: true 让本文件不会去重复创建。
+networks:
+  aats:
+    name: aats-dev_aats
+    external: true
+
+# 4 个服务共享的环境变量片段
+x-aats-common-env: &aats-common-env
+  AATS_DB_DSN: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/${POSTGRES_DB:-aats}
+  AATS_EVENT_BUS_BACKEND: hybrid
+  AATS_NATS_URL: nats://nats:4222
+  AATS_NATS_STREAM_NAME: AATS_EVENTS
+  AATS_LOG_FORMAT: json
+  AATS_LOG_LEVEL: INFO
+  TZ: Asia/Shanghai
+
+# 4 个服务共享的资源限制
+x-aats-common-resources: &aats-common-resources
+  deploy:
+    resources:
+      limits:
+        memory: 1024M
+
+# 4 个服务共享的镜像构建定义（image: 让其他服务复用同一份本地镜像）
+x-aats-build: &aats-build
+  build:
+    context: ../..
+    dockerfile: deploy/wsl2-dev/Dockerfile
+  image: aats-base:dev
+
+
+services:
+  # ---------------------------------------------------------------------------
+  # gateway — FastAPI + UI + REST + 后台 health/admin 任务
+  # 是 4 进程拓扑里唯一对外暴露端口的进程；其余 3 个仅内网。
+  # ---------------------------------------------------------------------------
+  aats-gateway:
+    <<: [*aats-build, *aats-common-resources]
+    container_name: aats-gateway
+    restart: unless-stopped
+    environment:
+      <<: *aats-common-env
+      AATS_PROCESS_ROLE: gateway
+    command:
+      - "uvicorn"
+      - "apps.api_gateway.main:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+    ports:
+      - "127.0.0.1:8000:8000"
+    networks:
+      - aats
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/system/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # market — 行情拉取 + 特征构造，输出到 NATS hot topics
+  # ---------------------------------------------------------------------------
+  aats-market:
+    <<: [*aats-build, *aats-common-resources]
+    container_name: aats-market
+    restart: unless-stopped
+    environment:
+      <<: *aats-common-env
+      AATS_PROCESS_ROLE: market
+    command: ["python", "-m", "apps.market_gateway.main"]
+    networks:
+      - aats
+
+  # ---------------------------------------------------------------------------
+  # decision — 订阅市场快照，跑 AI 决策 + 风控，发出 order intents
+  # ---------------------------------------------------------------------------
+  aats-decision:
+    <<: [*aats-build, *aats-common-resources]
+    container_name: aats-decision
+    restart: unless-stopped
+    environment:
+      <<: *aats-common-env
+      AATS_PROCESS_ROLE: decision
+    command: ["python", "-m", "apps.decision_engine.main"]
+    networks:
+      - aats
+
+  # ---------------------------------------------------------------------------
+  # execution — 订阅 order intents，与 OKX 交互下单，维护 portfolio + reconciliation
+  # 资源拨高一档：execution 进程要跑 outbox flush + reconciliation refresh +
+  # OKX private WS，是 4 个里最重的。
+  # ---------------------------------------------------------------------------
+  aats-execution:
+    <<: *aats-build
+    container_name: aats-execution
+    restart: unless-stopped
+    environment:
+      <<: *aats-common-env
+      AATS_PROCESS_ROLE: execution
+    command: ["python", "-m", "apps.execution_engine.main"]
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          memory: 1536M

@@ -1,15 +1,22 @@
+"""Stage 5d：market 进程入口。
+
+只装 shared + market slice，不持有 decision/execution/portfolio/reconciliation。
+通过 process_role="market" 让 build_runtime 内部按 _slice_active 跳过其余 slice。
+"""
 from __future__ import annotations
 
-from aats.bootstrap.logging import configure_logging_for_settings, get_logger
-from aats.bootstrap.settings import AATSSettings
+import sys
+
+from aats.bootstrap.process_lifecycle import run_process_sync
+from aats.bootstrap.settings import PROCESS_ROLE_MARKET
 
 
-def main() -> None:
-    settings = AATSSettings()
-    configure_logging_for_settings(settings)
-    logger = get_logger("apps.market_gateway")
-    logger.info("Market gateway app placeholder. Use scripts/seed_demo_data.py for local snapshot seeding.")
+def main() -> int:
+    return run_process_sync(
+        process_role=PROCESS_ROLE_MARKET,
+        app_name="apps.market_gateway",
+    )
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

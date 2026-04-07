@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -10,6 +11,11 @@ from aats.api.routes import router
 from aats.api.ui import ui_router
 from aats.bootstrap.config import build_runtime, load_settings
 from aats.bootstrap.logging import configure_logging_for_settings
+from aats.bootstrap.settings import (
+    ALLOWED_PROCESS_ROLES,
+    PROCESS_ROLE_GATEWAY,
+    PROCESS_ROLE_MONOLITH,
+)
 
 # 任何 mutation 请求（POST/PATCH/PUT/DELETE）成功后都要把 dashboard bundle
 # 缓存清空一次。否则用户切 mode / 触发 halt / 激活 profile 后，紧接着的
@@ -19,11 +25,26 @@ from aats.bootstrap.logging import configure_logging_for_settings
 _MUTATING_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
 
 
+def _resolved_process_role() -> str:
+    """Stage 5d：FastAPI gateway 进程默认 role=gateway，但允许 monolith 兼容旧路径。
+
+    通过 AATS_PROCESS_ROLE=monolith 让 api_gateway 同时承担 4 个 slice（开发机
+    与单机部署的零依赖路径）。生产 4 进程拓扑下应当置 AATS_PROCESS_ROLE=gateway。
+    """
+    raw = os.environ.get("AATS_PROCESS_ROLE", PROCESS_ROLE_GATEWAY).strip().lower()
+    if raw not in ALLOWED_PROCESS_ROLES:
+        raw = PROCESS_ROLE_GATEWAY
+    # gateway / monolith 之外的 role 不应该跑 FastAPI gateway
+    if raw not in {PROCESS_ROLE_GATEWAY, PROCESS_ROLE_MONOLITH}:
+        raw = PROCESS_ROLE_GATEWAY
+    return raw
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = load_settings()
     configure_logging_for_settings(settings)
-    runtime = await build_runtime(settings)
+    runtime = await build_runtime(settings, process_role=_resolved_process_role())
     await runtime.start_background_tasks()
     app.state.runtime = runtime
     try:

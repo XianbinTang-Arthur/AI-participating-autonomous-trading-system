@@ -1,15 +1,23 @@
+"""Stage 5d：execution 进程入口。
+
+装 shared + execution + portfolio + reconciliation slice。订阅 decision 发出的
+order intents 并通过 OKX adapter 下单。
+通过 process_role="execution" 让 build_runtime 跳过 market/decision/UI gateway。
+"""
 from __future__ import annotations
 
-from aats.bootstrap.logging import configure_logging_for_settings, get_logger
-from aats.bootstrap.settings import AATSSettings
+import sys
+
+from aats.bootstrap.process_lifecycle import run_process_sync
+from aats.bootstrap.settings import PROCESS_ROLE_EXECUTION
 
 
-def main() -> None:
-    settings = AATSSettings()
-    configure_logging_for_settings(settings)
-    logger = get_logger("apps.execution_engine")
-    logger.info("Execution engine app placeholder. Paper execution runs inside the integrated local runtime.")
+def main() -> int:
+    return run_process_sync(
+        process_role=PROCESS_ROLE_EXECUTION,
+        app_name="apps.execution_engine",
+    )
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
