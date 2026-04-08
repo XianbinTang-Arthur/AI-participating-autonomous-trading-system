@@ -262,11 +262,11 @@ from aats.services.audit_service.reconciliation import ReconciliationService
 
 本文档只规定了"检查什么、怎么响应"。Stage 9 checklist-2 要补的：
 - `scripts/compute_drift_score.py`：自动算 §4.4 的 drift score
-- Grafana alert rules：把 §5 的 SEV1/SEV2 告警自动化
-- `aats/governance/abort_hooks.py`：监测 §4.3 的系统健康指标，触发条件
-  达成时自动 halt（不再依赖人工抽检）
+- `aats/services/governance_engine/abort_hooks.py`：监测 §4.3 的系统健康指标
+  以及 drift score，触发条件达成时自动 halt（不再依赖人工抽检）
+- Grafana alert rules / Loki saved search：把 §5 的 SEV1/SEV2 告警自动化
 
-checklist-2 设计文档见 `docs/task/stage_9_abort_hooks_design.md`（待写）。
+checklist-2 设计文档见 `docs/task/stage_9_abort_hooks_design.md`。
 
 ## 9. 阶梯升级决策日志模板
 
