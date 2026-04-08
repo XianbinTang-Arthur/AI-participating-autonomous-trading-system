@@ -1,0 +1,86 @@
+# =============================================================================
+# AATS Docker build context exclusions
+#
+# Docker build context = 项目根目录 (deploy/wsl2-dev/docker-compose.aats.yml
+# 里 build.context 是 "../..")。Docker 在 build 时会把整个 context 打包成 tar
+# 发给 daemon，即使 Dockerfile 不 COPY 这些目录，它们也会进 tar 拖慢 build 并
+# 可能撞到 build cache 失效。
+#
+# 实测：未配 .dockerignore 时 context 体积 ~1.3GB（artifacts 959M + logs 87M
+# + .venv 184M + .git 58M 等）；启用后 < 100MB。
+# =============================================================================
+
+# === Git ===
+.git
+.gitignore
+.gitattributes
+
+# === Python build/cache ===
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+.venv
+venv/
+env/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+*.cover
+
+# === AATS runtime artifacts (本地真跑产物，build 不需要) ===
+artifacts/
+logs/
+
+# === IDE / editor ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# === Local secrets / env (绝对不能进 build context) ===
+.env
+.env.*
+!deploy/wsl2-dev/.env.wsl2.template
+
+# === Docker compose 持久化数据 (jaeger badger 是容器进程写的，host 权限混乱) ===
+deploy/wsl2-dev/jaeger/badger/data
+deploy/wsl2-dev/jaeger/badger/key
+
+# === Tests context (build 不需要测试代码本身) ===
+tests/
+
+# === Docs (build 不需要) ===
+docs/
+
+# === Backup / temp files ===
+*.bak
+*.tmp
+*.orig
+*.rej
+
+# === Node (UI 工具链如有) ===
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# === OS / Misc ===
+*.log
+.cache/
