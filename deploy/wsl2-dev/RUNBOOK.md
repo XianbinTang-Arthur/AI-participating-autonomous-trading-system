@@ -317,3 +317,102 @@ docker compose --env-file .env.wsl2 down  # 注意：不带 -v，数据卷保留
 pkill -f "python.*aats.api.main"
 ```
 然后等 30 秒后检查 `pg_locks` 确认 advisory lock 已释放。
+
+---
+
+## 9. 4 进程拓扑验证（每次大版本升级后跑一次）
+
+> 这一节记录 Slice 6.1/6.2/6.3/6.4 合入后真跑 4 进程拓扑（gateway/market/
+> decision/execution）的标准验收步骤。用来防止 bootstrap wiring 回归。
+>
+> 依赖：§1 基础设施已 up；`docker compose --env-file .env.wsl2 -f
+> docker-compose.yml -f docker-compose.aats.yml up -d` 已启动 4 个 AATS 容器。
+
+### 9.1 bootstrap log 冒烟
+
+每次 rebuild 镜像后，4 个容器都应该打印下面这组 bootstrap 事件。缺一个都
+需要回到 build_runtime 排查 wiring：
+
+```bash
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  echo "=== $c ==="
+  docker logs "$c" 2>&1 | grep -E \
+    "kill_switch_initialized|portfolio_snapshot_cache_initialized|portfolio_repo_cache_listener_attached" \
+    | head -5
+done
+```
+
+期望每个容器都有三条：
+- `kill_switch_initialized bootstrap_state={... subscribed: true ...} process_role=<role>`
+  （Slice 6.4：合并后的 KillSwitch sidecar 边车订阅成功）
+- `portfolio_snapshot_cache_initialized bootstrap_state={... bootstrapped: true ...}`
+  （Slice 6.3：snapshot_cache 从 Redis hydrate 完成）
+- `portfolio_repo_cache_listener_attached process_role=<role>`
+  （Slice 6.3 Cache Fix：save_snapshot → cache listener hook 已接线）
+
+### 9.2 kill_switch 跨进程 halt/resume 真跑 drill
+
+用 `probe_kill_switch.py` 作为"第 5 个临时进程"注入 halt/resume，然后读 4 个
+运行时容器的日志，验证 ``kill_switch_remote_applied`` 被所有 4 个容器收到。
+
+```bash
+# 把 probe 脚本扔进 gateway 容器（任一容器都行）
+docker cp deploy/wsl2-dev/probe_kill_switch.py aats-gateway:/tmp/probe_kill_switch.py
+
+# 查当前 Redis 状态（基准）
+docker exec aats-gateway python /tmp/probe_kill_switch.py status
+
+# 注入 halt
+docker exec aats-gateway python /tmp/probe_kill_switch.py halt "runbook-drill"
+
+# 验证 4 个容器都收到 halt=true 广播
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  echo "=== $c ==="
+  docker logs "$c" 2>&1 | grep "kill_switch_remote_applied" | tail -2
+done
+
+# 注入 resume
+docker exec aats-gateway python /tmp/probe_kill_switch.py resume
+
+# 再次验证 4 个容器都收到 halted=false 广播
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  echo "=== $c ==="
+  docker logs "$c" 2>&1 | grep "kill_switch_remote_applied" | tail -2
+done
+```
+
+每个容器都应该看到两条 `kill_switch_remote_applied`——一条 `halted=True`，
+一条 `halted=False`，`source_role=drill_probe`，时间戳相差数十毫秒内（都是
+同一次 NATS 广播）。
+
+### 9.3 portfolio_repo → cache listener 真跑验证
+
+用 `probe_repo_cache_listener.py` 在容器内独立构造 repo+cache，验证 Slice 6.3
+Cache Fix 的 listener hook 在运行时 env 下能正常工作：
+
+```bash
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  echo "=== $c ==="
+  docker cp deploy/wsl2-dev/probe_repo_cache_listener.py "$c":/tmp/probe_repo_cache_listener.py
+  docker exec "$c" python /tmp/probe_repo_cache_listener.py | tail -5
+done
+```
+
+每个容器都应该打印 `[probe] OK: cache hit decision_id=probe-cache-fix-<ts>`。
+任何一个失败都说明 build_runtime 注入 listener 的 wiring 被改坏了，回到
+`aats/bootstrap/config.py` 的 `portfolio_repo_cache_listener_attached` 日志行
+附近排查。
+
+### 9.4 清理 drill 痕迹
+
+`probe_kill_switch.py` 的 bootstrap 会在 NATS JetStream 里创建
+`aats-drill_probe-system_kill_switch_state` 这个 durable consumer；多次跑
+drill 会越攒越多。定期清一下：
+
+```bash
+docker exec aats-nats nats consumer ls AATS_EVENTS | grep drill_probe | \
+  awk '{print $1}' | xargs -I{} docker exec aats-nats nats consumer rm AATS_EVENTS {}
+```
+
+Redis 里的 `aats:hot:system:kill_switch` 在 resume 后会回到 `halted=false`，
+不需要专门清。
