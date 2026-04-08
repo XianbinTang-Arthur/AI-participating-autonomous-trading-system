@@ -3908,7 +3908,10 @@ class OperatorQueryService:
         payloads = [self.payload(item) for item in self._recent_ai_shadow_evaluation_events(limit=limit)]
         payloads = [item for item in payloads if item is not None]
         latest = payloads[0] if payloads else None
-        ai_runtime = self.runtime.ai_service.status()
+        # Stage 7 修复（gateway-only role /ai/overview /ai/config-summary 500）：
+        # gateway/market/execution role 下 runtime.ai_service 为 None；
+        # 走 self.ai_runtime() → RuntimeQueryFacade.ai_runtime() 拿 stub。
+        ai_runtime = self.ai_runtime()
         outperformed_count = sum(1 for item in payloads if item.get("shadow_outperformed") is True)
         underperformed_count = sum(1 for item in payloads if item.get("shadow_outperformed") is False)
         if latest is None:
@@ -10036,6 +10039,9 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # Stage 7：gateway-only role 下 ai_service 为 None，POST 仅在 decision role 可执行。
+        if self.runtime.ai_service is None:
+            raise ValueError("ai_service_not_loaded_in_this_process_role")
         recovery_before = self.recovery_view()["recovery_state"]
         ai_before = dict(self.runtime.ai_service.status())
         ai_after = self.runtime.ai_service.resolve_outcome_review_restore_ai()
@@ -10082,6 +10088,9 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # Stage 7：gateway-only role 下 ai_service 为 None，POST 仅在 decision role 可执行。
+        if self.runtime.ai_service is None:
+            raise ValueError("ai_service_not_loaded_in_this_process_role")
         recovery_before = self.recovery_view()["recovery_state"]
         ai_before = dict(self.runtime.ai_service.status())
         configured_mode = normalize_ai_operating_mode(self.runtime.settings.ai_operating_mode)
@@ -10150,6 +10159,9 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # Stage 7：gateway-only role 下 ai_service 为 None，POST 仅在 decision role 可执行。
+        if self.runtime.ai_service is None:
+            raise ValueError("ai_service_not_loaded_in_this_process_role")
         recovery_before = self.recovery_view()["recovery_state"]
         ai_before = dict(self.runtime.ai_service.status())
         ai_after = self.runtime.ai_service.resolve_outcome_review_degrade_to_baseline()

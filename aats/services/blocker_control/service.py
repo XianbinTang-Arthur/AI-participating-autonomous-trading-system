@@ -80,7 +80,11 @@ class BlockerControlService:
     def _build_items(self, *, recovery: dict[str, Any]) -> list[BlockerControlItem]:
         health_snapshot = self.owner.runtime.health_service.snapshot()
         system_mode = self.owner.system_mode()
-        ai_runtime = self.owner.runtime.ai_service.status()
+        # Stage 7 修复（gateway-only role /system/blocker-control 500）：
+        # gateway/market/execution role 下 runtime.ai_service 为 None；
+        # 走 OperatorQueryService.ai_runtime() → RuntimeQueryFacade.ai_runtime()
+        # 拿到 stub dict（key 齐全、value falsy），下游 .get() / bool() 安全。
+        ai_runtime = self.owner.ai_runtime()
         latest_reconciliation = self.owner._latest_scoped_reconciliation()
         blockers: list[tuple[str, str, bool]] = []
         for code in health_snapshot.blockers:

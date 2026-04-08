@@ -38,19 +38,38 @@ execution = self.owner.runtime.execution_adapter.readiness()  # L206
 
 但 `aats/bootstrap/config.py:2574 _SLICE_REQUIRED_ROLES` 里 `market` slice 只在 `monolith / market` role 下装、`execution` slice 只在 `monolith / execution` role 下装。**gateway role 下 `runtime.market_gateway` 和 `runtime.execution_adapter` 都是 None**，调用会 AttributeError。
 
-**后果**：即便 Gap A 修了，gateway healthcheck 也会跑出 500，状态仍然 unhealthy。
+> 2026-04-08 真跑修正：上面的根因分析只对了一半。实际跑通后看到 `market_gateway` /
+> `execution_adapter` / `health_service` 这三个其实都在 **shared slice**（`_build_shared_slice`）
+> 里装，所有 role 都有；`build_system_health` 真正会 NPE 的地方是在
+> `recovery_view → ai_runtime → runtime.ai_service.status()` 链路上 ——
+> `ai_service` 才是 gateway role 下 None 的那个（属于 decision slice）。
+> 这导致 /system/health、/system/recovery、/system/mode 三个 CORE_SPECS endpoint 在
+> gateway role 下全部 500，UI 完全打不开。详细处理见 §6.1 第 6 个 gap。
 
-**修复方案 B**：**新增** lightweight `/healthz` endpoint 给 docker healthcheck 专用，**不动现有** `/system/health`。
+**修复方案 B**（runbook 起步时）：**新增** lightweight `/healthz` endpoint 给 docker healthcheck 专用，**不动现有** `/system/health`。
 - `/healthz` 只返回 `{"status":"ok","process_role":"<role>"}`
 - 不依赖任何 service，只读 `_resolved_process_role()` 这种纯环境量
 - 200 = 进程活着、FastAPI lifespan 已就绪
 - compose healthcheck 改成 curl `/healthz`
 
-**为什么不修 `/system/health`**：那个 endpoint 是给 UI / operator 看的，需要全量诊断信息。给它加 None 守卫会让它在 gateway role 下显示一堆 "n/a"，但 docker healthcheck 真正需要的只是"liveness"——两个目标分两个 endpoint 是 12-factor 标准做法。
+**为什么这样做**：
+- docker healthcheck 真正需要的是 "liveness"，与 UI 看的全量诊断信息是两个目标 ——
+  两个目标分两个 endpoint 是 12-factor 标准做法。这一点没变。
+- 不让 docker healthcheck 依赖 `/system/health` 也避免了 UI 数据壳坏掉直接拖垮容器
+  健康状态的二次故障耦合。
+
+**真跑后追加修复**（2026-04-08，详见 §6.1.6）：
+- 把 `aats/services/operator/runtime_queries.py:36 ai_runtime()` 加 None-guard，
+  当 `runtime.ai_service is None` 时返回稳定 stub（`provider="not_loaded"`、
+  `ai_service_loaded=False`、所有计数 0、所有嵌套结构存在），让 recovery_view /
+  system_mode / system_health 三个调用链能在 gateway role 下完整跑通。
+- UI 消费者用 `?? 0` / `|| "unknown"` / `?.foo` 安全访问 stub，整个 UI 加载链路恢复。
 
 **修复点**：
-1. `apps/api_gateway/main.py` 加一个 FastAPI 路由（或者塞进 `aats/api/routes.py` 顶层 `@router.get("/healthz")`）
-2. `deploy/wsl2-dev/docker-compose.aats.yml` aats-gateway healthcheck `test` 改成 `["CMD", "curl", "-fs", "http://localhost:8000/healthz"]`
+1. `apps/api_gateway/main.py` 加一个 FastAPI 路由（已落地）
+2. `deploy/wsl2-dev/docker-compose.aats.yml` aats-gateway healthcheck `test` 改成 `["CMD", "curl", "-fs", "http://localhost:8000/healthz"]`（已落地）
+3. `aats/services/operator/runtime_queries.py:ai_runtime()` 加 None-guard stub（**真跑后追加**）
+4. 配套单测 `tests/unit/test_runtime_queries.py::TestAiRuntimeStubWhenServiceMissing` 3 个 case
 
 ---
 
@@ -281,6 +300,72 @@ git status
      - 修复：下载 v2.40.3 binary 到 `~/.docker/cli-plugins/docker-compose`（user-local，无需 sudo）。
      - 副产物：创建 `scripts/wsl_sudo.sh` 把"从凭证文件读密码 → 注入 sudo stdin"封装成可复用脚本，避免密码在 bash 命令文本里出现。
 
+  6. **`/system/health` 在 gateway-only role 下 500（runbook §1.2 修正）**
+     - 症状：10 容器 healthy 之后 `curl http://localhost:8000/system/health` 返回
+       500，traceback 顶到 `runtime_queries.py:37 ai_runtime → runtime.ai_service.status() → AttributeError 'NoneType'`。
+     - 受牵连 endpoint：`/system/health`、`/system/recovery`、`/system/mode`（都通过
+       `recovery_view → ai_runtime` 链路触发同一行）。这三个都在 UI `CORE_SPECS`
+       （`aats/api/static/modules/store.js:97`），UI 在 gateway role 下整体加载失败。
+     - 根因修正：runbook §1.2 起步时把根因写成 `market_gateway` / `execution_adapter`
+       为 None，但实际跑通后看到这两个都在 shared slice 里装，所有 role 都有。真正
+       为 None 的是 `ai_service`（属于 decision slice，在 gateway/market/execution role 下不装）。
+     - 为何 monolith 没暴露：monolith 把所有 slice 都装，`ai_service` 永远不为 None。
+     - 修复（最小改动）：`aats/services/operator/runtime_queries.py:36 ai_runtime()`
+       开头加 None-guard。`runtime.ai_service is None` 时返回稳定 stub（`provider="not_loaded"`、
+       `ai_service_loaded=False`、所有计数 0、嵌套 `failure_budget` / `outcome_policy` /
+       `legacy_modes` 结构齐备）。下游 `recovery_view` 内嵌 + UI ai-view 全部用
+       `.get()` / `?? 0` / `|| "unknown"` 安全访问 stub 字段，调用链路无 KeyError、
+       无 NPE。
+     - 同时给 loaded 路径也加 `ai_service_loaded=True` + `process_role` 字段，对称
+       命名让 UI/审计能统一判断"AI 子系统是否在本进程"。
+     - 单测：`tests/unit/test_runtime_queries.py::TestAiRuntimeStubWhenServiceMissing`
+       3 个 case：stub 字段完整性、process_role 标签透传、settings 字段缺失兜底。
+     - 防退化：跑了 `tests/integration/test_operator_api.py` 里 3 个直接 `client.get("/ai/runtime")`
+       的 integration test（blocker_action_degrade_to_baseline、blocker_action_restore_ai、
+       admin_can_select_ai_operating_mode），新增字段 `ai_service_loaded` / `process_role`
+       不破任何已有契约。
+     - **为什么不在 routes.py 路由层短路 limited 模式**：拦截点更高一层意味着每个 4 个
+       slice-dependent endpoint（`/system/health` / `/system/recovery` / `/system/mode` /
+       `/ai/runtime`）都要各自加 process_role 检测，而且要凭空发明一个 "limited" 数据
+       壳。在根因 ai_runtime() 里加 stub 是单一改动点，覆盖全部 4 个 endpoint，stub
+       字段语义诚实（"not_loaded" 而不是假装的 "limited"）。
+
+  7. **`/system/blocker-control` 在 gateway-only role 下 500（gap 6 之后的二次发现）**
+     - 症状：gap 6 修了 `runtime_queries.py:ai_runtime` 之后第 2 次跑容器，`curl /system/blocker-control`
+       仍然 500，traceback 顶到 `blocker_control/service.py:83 _build_items →
+       runtime.ai_service.status() → AttributeError 'NoneType'`。
+     - 根因：直接读 `runtime.ai_service.status()` 的代码站点不止 `ai_runtime()` 一处。
+       全仓 grep 拿到 6 个：
+       - `aats/services/blocker_control/service.py:83`（GET 链，/system/blocker-control 直接受牵连）
+       - `aats/services/governance_engine/recovery_posture.py:59` `_ai_requires_manual_review`（GET 链，
+         `recovery_view` → `recovery_posture.assess()` → `_ai_requires_manual_review` → `.status()`）
+       - `aats/services/operator/query_service.py:3911` `_ai_shadow_summary`（`/ai/overview` /
+         `/ai/config-summary` 链）
+       - `aats/services/operator/query_service.py:10046` `ai_review_restore`（POST mutate）
+       - `aats/services/operator/query_service.py:10095` `set_ai_operating_mode`（POST mutate）
+       - `aats/services/operator/query_service.py:10166` `ai_review_degrade_to_baseline`（POST mutate）
+     - 修复策略：
+       - **GET 链 3 处**（blocker_control / _ai_shadow_summary）：从 `runtime.ai_service.status()`
+         切换到 `self.owner.ai_runtime()` / `self.ai_runtime()`，走已修过的 `RuntimeQueryFacade.ai_runtime()`
+         拿 stub，所有 `.get()` / `bool(...)` 安全。`recovery_posture._ai_requires_manual_review`
+         没有 facade 入口，加 `getattr(runtime, 'ai_service', None) is None → return False` 直接
+         保证 gateway 进程对 AI 状态没有可见性时不报告 `ai_degraded_requires_manual_review`。
+       - **POST mutate 3 处**：在方法顶加 `if self.runtime.ai_service is None: raise
+         ValueError("ai_service_not_loaded_in_this_process_role")`。这些是 operator 主动操作
+         endpoint，gateway role 下被调到本身就是误用，不应静默 stub，而应清晰拒绝。
+     - 单测：
+       - `tests/unit/test_recovery_posture.py::TestAiRequiresManualReviewNoneGuard` 4 个 case
+         （None 短路、baseline_only fast-path、degraded 真路径、auto_downgraded 真路径）。
+       - `tests/unit/test_blocker_control.py::test_build_items_does_not_crash_when_ai_service_is_missing`
+         1 个 case（fake owner 模拟 gateway role）。
+       - 既有 3 个 blocker_control 测试同步加 `ai_runtime=lambda: {}` 字段保持兼容。
+     - 真跑验证：第 3 次 `docker compose up -d --force-recreate` 后 4 容器全 healthy，
+       `curl http://127.0.0.1:8000/system/health` / `/system/mode` / `/system/recovery` /
+       `/system/blocker-control` 全部 200，gateway 日志里没有任何 traceback / AttributeError。
+     - 教训：第一次只看到 `runtime_queries.py` 那一行就动手修，没全仓 grep `runtime\.ai_service\.`。
+       往后这种"调下游 status() 的 None 安全"修复必须全仓 grep + 逐个处理，不能局部修了
+       就以为全链路都通了。
+
 - **healthcheck 全绿验证**（10/10）：
   ```text
   NAME             STATUS                    HEALTH
@@ -297,7 +382,8 @@ git status
   ```
 - **`curl http://localhost:8000/healthz`**：`{"status":"ok","process_role":"gateway"}` (200)
 - **subscription 健康度**：market 1 sub、decision 22 subs、execution 4 subs、gateway 0 subs（全部 `nats_subscription_registered`，每 (role, topic) 各一次，无重复 binding 错误）。所有 4 进程都到 `process_lifecycle_ready` + `process_lifecycle_heartbeat_started`。
-- **结论**：#1 完成判定 §4 第 1、2、4 项达标。第 3 项（`/system/health` runtime_state）+ 第 5 项（1206 单测全过）留给 1.7 / 1.8 步骤。
+- **`curl http://localhost:8000/system/health`**（gap 6 修复后）：200，`runtime_state="degraded"`（不是 `halted`/`blocked`），`subsystems.market_data` / `subsystems.execution_adapter` / `subsystems.account_state` 都是真实状态而非 stub。
+- **结论**：#1 完成判定 §4 第 1、2、3、4 项全部达标。第 5 项（单测全套无退化）留给 1.7d 验证。
 
 ---
 
@@ -305,3 +391,5 @@ git status
 
 - 2026-04-07：首版。基于 5d 装配 review 发现 3 个 gap（Dockerfile 缺 curl、`/system/health` gateway role NPE、3 daemon 无 healthcheck），列出修复清单 + 真跑命令序列 + 完成判定 + 回滚步骤。等用户审批 §1-§2 修复方案后实施 + 真跑。
 - 2026-04-08：第 1 次真跑完成。10/10 容器 healthy。真跑里又额外修了 5 个 runbook 起步时未预见的 gap：NATS duplicate-subscription（_CollectingBus fan-out）、Dockerfile `/app` ownership、jaeger badger 权限、grafana provisioning 配置冲突、docker compose plugin 缺失。详见 §6.1。
+- 2026-04-08（追加）：第 1 次真跑后又发现 §1.2 根因分析有偏差。`/system/health`、`/system/recovery`、`/system/mode` 三个 CORE_SPECS endpoint 在 gateway role 下 500 的真因是 `runtime_queries.py:ai_runtime` 直接 `.status()` 一个 None 的 `ai_service`，与 `market_gateway` / `execution_adapter` 无关（这俩在 shared slice）。在 `ai_runtime()` 加 None-guard 返回稳定 stub（`provider="not_loaded"`），下游 `recovery_view → system_mode → system_health` 全链路恢复 200。配套 3 个 unit test。同步修订 §1.2 与 §6.1.6 记录。
+- 2026-04-08（再追加）：gap 6 修完之后第 2 次跑容器，`/system/blocker-control` 仍然 500。全仓 grep `runtime.ai_service.status()` 又找出 6 处直读站点，其中 GET 链 3 处（blocker_control、recovery_posture、_ai_shadow_summary）会被 `/system/health` 和 `/system/blocker-control` 链路触发，POST mutate 3 处（ai_review_restore / set_ai_operating_mode / ai_review_degrade_to_baseline）会被 operator 误调时 500。GET 链 2 处切换到 `self.owner.ai_runtime()` 走 facade stub，1 处（recovery_posture）加 None-guard 短路返回 False；POST mutate 3 处加方法顶 `raise ValueError("ai_service_not_loaded_in_this_process_role")` 显式拒绝。配套 5 个新 unit test，全仓 1232 unit + 26 ai-integration 全绿。第 3 次真跑 4 容器 healthy，CORE_SPECS 4 个 endpoint 全部 200。详见 §6.1.7。

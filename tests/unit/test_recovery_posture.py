@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
@@ -509,6 +510,68 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(final.bundle_summaries), 1)
         self.assertEqual(final.bundle_summaries[0].recovery_state, "review_required")
         self.assertIn("strategy_bundle_recovery_requires_review", final.resume_blocked_reasons)
+
+
+class TestAiRequiresManualReviewNoneGuard(unittest.TestCase):
+    """Stage 7 修复：gateway/market/execution role 下 runtime.ai_service is None。
+
+    原版 _ai_requires_manual_review() 直接 self.runtime.ai_service.status() 触发
+    AttributeError，向上传播到 finalize_status → recovery_view → build_system_health，
+    让 /system/health 在 gateway 进程返回 500，整个 UI dashboard 无法加载。
+
+    修复后：ai_service is None 时直接 return False（此进程对 AI 状态没有可见性，
+    不应在 recovery 链里报告 ai_degraded_requires_manual_review）。
+    """
+
+    def test_returns_false_when_ai_service_is_none(self) -> None:
+        evaluator = RecoveryPostureEvaluator.__new__(RecoveryPostureEvaluator)
+        evaluator.runtime = SimpleNamespace(
+            settings=SimpleNamespace(ai_operating_mode="ai_decision_maker"),
+            ai_service=None,
+        )
+
+        self.assertFalse(evaluator._ai_requires_manual_review())
+
+    def test_baseline_only_short_circuits_before_ai_service_check(self) -> None:
+        """baseline_only 模式下哪怕 ai_service 不为 None 也不应触发 AI 复核检查。
+        这条 fast-path 在我们的修复前后都应该保持。"""
+        evaluator = RecoveryPostureEvaluator.__new__(RecoveryPostureEvaluator)
+        evaluator.runtime = SimpleNamespace(
+            settings=SimpleNamespace(ai_operating_mode="baseline_only"),
+            ai_service=SimpleNamespace(status=lambda: {"degraded": True}),
+        )
+
+        self.assertFalse(evaluator._ai_requires_manual_review())
+
+    def test_returns_true_when_ai_service_present_and_degraded(self) -> None:
+        evaluator = RecoveryPostureEvaluator.__new__(RecoveryPostureEvaluator)
+        evaluator.runtime = SimpleNamespace(
+            settings=SimpleNamespace(ai_operating_mode="ai_decision_maker"),
+            ai_service=SimpleNamespace(
+                status=lambda: {
+                    "degraded": True,
+                    "auto_downgrade_active": False,
+                    "manual_override_mode": None,
+                }
+            ),
+        )
+
+        self.assertTrue(evaluator._ai_requires_manual_review())
+
+    def test_returns_false_when_ai_service_present_but_auto_downgraded(self) -> None:
+        evaluator = RecoveryPostureEvaluator.__new__(RecoveryPostureEvaluator)
+        evaluator.runtime = SimpleNamespace(
+            settings=SimpleNamespace(ai_operating_mode="ai_decision_maker"),
+            ai_service=SimpleNamespace(
+                status=lambda: {
+                    "degraded": True,
+                    "auto_downgrade_active": True,
+                    "manual_override_mode": None,
+                }
+            ),
+        )
+
+        self.assertFalse(evaluator._ai_requires_manual_review())
 
 
 if __name__ == "__main__":

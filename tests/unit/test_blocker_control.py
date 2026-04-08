@@ -25,6 +25,9 @@ class TestBlockerControlSummary(unittest.TestCase):
             },
             _latest_scoped_reconciliation=lambda: None,
             system_mode=lambda: {"submit_blocked_reasons": []},
+            # Stage 7：blocker_control 现在走 owner.ai_runtime() 拿 stub-aware 字典，
+            # 不再直读 runtime.ai_service.status()。fake owner 也要暴露这个方法。
+            ai_runtime=lambda: {},
         )
         service = BlockerControlService(owner)
 
@@ -32,6 +35,49 @@ class TestBlockerControlSummary(unittest.TestCase):
         second = service.snapshot()
 
         self.assertEqual(first.panel_version, second.panel_version)
+
+    def test_build_items_does_not_crash_when_ai_service_is_missing(self) -> None:
+        """Stage 7 修复：gateway/market/execution role 下 runtime.ai_service is None。
+
+        blocker_control 此前直接调 self.owner.runtime.ai_service.status() 触发 NPE，
+        让 /system/blocker-control 在 gateway 进程返回 500，进而拖崩 dashboard。
+
+        修复后走 self.owner.ai_runtime()，由 RuntimeQueryFacade 在 ai_service is None
+        时返回 stub dict（key 齐全、value falsy），blocker_control 链路不再依赖
+        ai_service 是否被装载。
+        """
+        owner = SimpleNamespace(
+            runtime=SimpleNamespace(
+                kill_switch=SimpleNamespace(halted=False),
+                health_service=SimpleNamespace(snapshot=lambda: SimpleNamespace(blockers=[])),
+                ai_service=None,  # 关键：模拟 gateway role
+            ),
+            recovery_view=lambda: {
+                "safe_to_trade": True,
+                "review_required": False,
+                "resume_eligible": True,
+                "halted": False,
+                "rebaseline_available": False,
+                "resume_blocked_reasons": [],
+            },
+            _latest_scoped_reconciliation=lambda: None,
+            system_mode=lambda: {"submit_blocked_reasons": []},
+            # facade stub 模拟：所有 .get() 都返回 None / falsy
+            ai_runtime=lambda: {
+                "outcome_review_required": False,
+                "ai_service_loaded": False,
+                "process_role": "gateway",
+            },
+        )
+        service = BlockerControlService(owner)
+
+        snapshot = service.snapshot()
+
+        # 没有任何 blocker（health_snapshot 空 + 不 halted + 没 reasons），
+        # snapshot 应当顺利返回，且 blockers 列表为空
+        self.assertEqual(list(snapshot.blockers), [])
+        self.assertFalse(snapshot.halted)
+        self.assertTrue(snapshot.safe_to_trade)
 
     def test_next_step_summary_explains_review_without_primary_blocker(self) -> None:
         summary = BlockerControlService._next_step_summary(  # type: ignore[attr-defined]
@@ -138,6 +184,7 @@ class TestBlockerControlSummary(unittest.TestCase):
             },
             _latest_scoped_reconciliation=lambda: None,
             system_mode=lambda: {"submit_blocked_reasons": []},
+            ai_runtime=lambda: {},
         )
         service = BlockerControlService(owner)
 
@@ -174,6 +221,7 @@ class TestBlockerControlSummary(unittest.TestCase):
             },
             _latest_scoped_reconciliation=lambda: None,
             system_mode=lambda: {"submit_blocked_reasons": []},
+            ai_runtime=lambda: {},
         )
         service = BlockerControlService(owner)
 

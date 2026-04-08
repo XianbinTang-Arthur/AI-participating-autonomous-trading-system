@@ -56,7 +56,15 @@ class RecoveryPostureEvaluator:
     def _ai_requires_manual_review(self) -> bool:
         if self.runtime.settings.ai_operating_mode == "baseline_only":
             return False
-        ai_runtime = self.runtime.ai_service.status()
+        # Stage 7 修复（gateway-only role /system/health 500）：
+        # gateway/market/execution role 下 runtime.ai_service 为 None；
+        # 此进程对 AI 状态没有可见性，不应在 recovery 链里报告
+        # ai_degraded_requires_manual_review；只有 decision role 才能权威判断
+        # AI 是否需要人工复核。
+        ai_service = getattr(self.runtime, "ai_service", None)
+        if ai_service is None:
+            return False
+        ai_runtime = ai_service.status()
         if ai_runtime.get("manual_override_mode") == "baseline_only":
             return False
         return bool(ai_runtime.get("degraded")) and not bool(ai_runtime.get("auto_downgrade_active"))

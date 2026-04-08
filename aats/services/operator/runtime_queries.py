@@ -34,7 +34,90 @@ class RuntimeQueryFacade:
         }
 
     def ai_runtime(self) -> dict[str, Any]:
-        status = dict(self.owner.runtime.ai_service.status())
+        # Stage 7 修复（gateway-only role /system/health 500）：
+        # ai_service 在 process_role=gateway/market/execution 下未装配（见
+        # aats/bootstrap/config.py:_SLICE_REQUIRED_ROLES）。原本直接 .status()
+        # 触发 AttributeError，向上传播到 build_recovery_view → build_system_mode
+        # → build_system_health，让 /system/health /system/recovery /system/mode
+        # 三个 CORE_SPECS endpoint 全部 500，UI 整体崩。
+        #
+        # 这里返回一个稳定的 "not_loaded" stub：本进程没有 AI 推理切片，所以
+        # 没有 provider/degraded/recovery_probe 等真实状态。下游 (recovery_view
+        # 内嵌 + UI ai-view) 都用 .get() / `||` 安全访问，stub 字段保持原 dict
+        # 形态即可被透明消费。完整诊断由后续 cross-process query aggregator 提供
+        # （Stage 7 之后的 task #3）。
+        ai_service = getattr(self.owner.runtime, "ai_service", None)
+        if ai_service is None:
+            settings = self.owner.runtime.settings
+            return {
+                "configured_operating_mode": None,
+                "canonical_configured_operating_mode": None,
+                "effective_operating_mode": None,
+                "canonical_effective_operating_mode": None,
+                "manual_override_mode": None,
+                "manual_override_active": False,
+                "manual_override_freeze_until": None,
+                "manual_override_default_freeze_seconds": getattr(
+                    settings, "ai_manual_operating_mode_override_freeze_seconds", None
+                ),
+                "review_resolution": None,
+                "provider": "not_loaded",
+                "configured": False,
+                "provider_ready": False,
+                "degraded": False,
+                "provider_degraded": False,
+                "outcome_review_required": False,
+                "auto_downgrade_active": False,
+                "outcome_auto_downgrade_active": False,
+                "degradation_reason": None,
+                "outcome_degradation_reason": None,
+                "recovery_probe_after": None,
+                "recovery_probe_ready": False,
+                "consecutive_failures": 0,
+                "consecutive_successes": 0,
+                "outcome_bad_window_streak": 0,
+                "provider_state": "not_loaded",
+                "outcome_state": "not_loaded",
+                "last_provider_degraded_at": None,
+                "last_provider_recovered_at": None,
+                "last_outcome_degraded_at": None,
+                "last_outcome_recovered_at": None,
+                "shadow_mode_enabled": False,
+                "execution_suggestion_mode": None,
+                "failure_budget": {
+                    "degrade_after_failures": 0,
+                    "recover_after_successes": 0,
+                    "remaining_failures_until_degrade": 0,
+                    "remaining_successes_until_recover": 0,
+                },
+                "outcome_policy": {
+                    "bad_window_threshold": 0,
+                    "warmup_evaluations": 0,
+                    "min_trade_count": 0,
+                    "remaining_bad_windows_until_review": 0,
+                    "max_fee_ratio_delta": None,
+                    "max_churn_ratio_delta": None,
+                },
+                "recent_assessment_count": 0,
+                "recent_shadow_evaluation_count": 0,
+                "recent_execution_suggestion_count": 0,
+                "recent_fallback_ratio": 0.0,
+                "recent_timeout_count": 0,
+                "recent_invalid_output_count": 0,
+                "legacy_modes": {
+                    "configured_operating_mode": None,
+                    "effective_operating_mode": None,
+                },
+                "strategy_profile_auto_control_configured": False,
+                "strategy_profile_auto_control_effective": False,
+                "strategy_profile_control_configured_mode": "manual",
+                "strategy_profile_control_effective_mode": "manual",
+                "strategy_profile_auto_control_reason": "ai_service_not_loaded",
+                "operating_mode_source": "ai_service_not_loaded",
+                "ai_service_loaded": False,
+                "process_role": getattr(settings, "process_role", None),
+            }
+        status = dict(ai_service.status())
         legacy_modes = {
             "configured_operating_mode": status.get("configured_operating_mode"),
             "effective_operating_mode": status.get("effective_operating_mode"),
@@ -70,6 +153,9 @@ class RuntimeQueryFacade:
             else "configured"
         )
         status["legacy_modes"] = legacy_modes
+        # Stage 7：与 stub 路径对称的 loaded 标记，UI/审计可统一判断 ai 子系统是否在本进程
+        status["ai_service_loaded"] = True
+        status["process_role"] = getattr(settings, "process_role", None)
         return status
 
     def ai_performance_overview(self) -> dict[str, Any]:
