@@ -387,9 +387,228 @@ git status
 
 ---
 
-## 7. Changelog
+## 7. 故障演练 #1（2026-04-08）：4 进程容器死亡 → Docker restart manager + NATS durable consumer 重连
+
+### 7.1 演练目的
+
+Stage 7 完成判定要求 "进程崩溃可自愈"。具体来说要回答 3 个问题：
+
+1. **Docker `restart: unless-stopped` 是否能在容器崩溃后自动拉起？**
+2. **NATS JetStream durable consumer（`aats-{role}-{topic}`）能否在订阅者死亡再起来后自动重连，不丢消息？**
+3. **HybridEventBus 在 critical 路径上的 fan-out 在订阅者短暂离线期间能否恢复？**
+
+不演练 = 不知道答案；上 prod 之后才发现 = 只能事后看日志，损失已经发生。
+
+### 7.2 演练方法学说明（重要陷阱）
+
+**陷阱**：原计划用 `docker kill <container>` 模拟崩溃。实际跑下来发现这条路在 WSL2 / Docker 28.2.2 这套环境上**不会触发 restart manager**：
+
+- 步骤：`docker kill aats-execution`
+- 结果：`docker inspect` 显示 `State.Status=exited`、`State.ExitCode=137`、`RestartPolicy.Name=unless-stopped`，但 `RestartCount=0`，容器**永久停在 exited**，不会自动拉起。
+- 复现：用 alpine 跑一个最小化容器 `--restart=always sh -c 'while true; do sleep 1; done'`，再 `docker kill`，同样不重启。
+- 区别测试：用 `--restart=always sh -c 'sleep 5; exit 1'`（让容器**内部**退出），restart manager 工作正常，`RestartCount` 增长。
+
+**结论**：Docker 的 restart manager 把 "外部 SIGKILL（来自 docker API）" 当成 operator 主动停服，**故意不重启**；只有 "进程内部异常退出 / OOM / panic" 才会被自动接管。这是 Docker 的设计意图，不是 bug，但容易踩。
+
+**正确演练方式**：
+- 找到 host 上的实际 Python PID：`docker top aats-{role}` 拿到 wchan 行里的 python 进程 PID
+- 从 host 直接 `kill -9 <pid>` 模拟 OOM-kill / segfault：tini 看到 PID 1 的子进程异常退出，自身 exit，容器内部退出 → restart manager 启动 → 容器拉起 → tini 重新 exec python → 全链路重连
+
+### 7.3 演练 #2.2：execution 进程崩溃
+
+**操作**：
+```bash
+# 拿 host PID
+docker top aats-execution    # → tini=PID_T, python=PID_P
+# 从 host 杀 python 子进程
+kill -9 <PID_P>
+```
+
+**观察**：
+- tini PID 1 接收 SIGCHLD，按预期 exit → 容器 State=exited，ExitCode 非 0
+- Docker restart manager 触发，几秒后容器重新启动
+- `docker inspect aats-execution --format '{{.RestartCount}}'` → 1
+- `curl http://localhost:8222/jsz?consumers=true`：4 个 `aats-execution-*` consumer 全部 `push_bound: true`，`num_redelivered=0`（NATS 把订阅断开期间的消息缓存到 stream 里，重连后从 ack_floor 接着推）
+- 总恢复时间：约 8 秒（含 healthcheck `start_period=30s` 但 grace 内自然就 healthy）
+
+### 7.4 演练 #2.3：decision + market 同时崩溃
+
+**操作**：
+```bash
+docker top aats-decision   # → python PID 118360
+docker top aats-market     # → python PID 118397
+kill -9 118360 118397      # 同时杀两个
+```
+
+**观察**：
+- 两个容器同时进入 exited，restart manager 几乎同时重启
+- `docker ps -a`：两者都 `Up 2 minutes (healthy)`
+- `docker inspect aats-{decision,market} --format '{{.RestartCount}}'` → 都是 1
+- gateway 没受影响，`RestartCount=0`，仍然在跑（演练 #2.2 阶段它就没动过）
+- `curl /jsz?consumers=true` 累计统计：
+  ```
+  Stream AATS_EVENTS messages=148 consumers=26
+    push_bound: 26/26
+      decision  bound=21 unbound=0
+      execution bound=4  unbound=0
+      market    bound=1  unbound=0
+  ```
+- 26 个 durable consumer 全部正确重新绑定到对应订阅者；没有一个 dangling/orphan consumer，没有 duplicate binding 错误，没有 NATS 报 `consumer already bound`。
+
+### 7.5 演练 #2 结论
+
+| 关注点 | 验证结果 |
+|---|---|
+| Docker restart manager 工作 | ✅（前提是用 host kill -9 / 内部 exit 触发，**不能用 `docker kill`**） |
+| NATS durable consumer 重连 | ✅ 26/26 push_bound，无 redeliver，无 orphan |
+| HybridEventBus critical 路径恢复 | ✅ 各 role 的 NATS subscription 数量正确（decision 21 / execution 4 / market 1 / gateway 0），与基线一致 |
+| 进程间隔离 | ✅ kill execution 不影响 decision/market/gateway；kill decision+market 不影响 gateway+execution |
+| 自愈耗时 | execution 单杀约 8 秒；decision+market 双杀约 8 秒；都在 healthcheck `start_period` 之内 |
+
+### 7.6 必须写进 prod runbook 的注意事项
+
+1. **`docker kill` ≠ 模拟崩溃**。如果以后写 chaos test 或 oncall drill，要么从 host `kill -9` python 进程，要么往进程里发可触发 abort 的信号；不要用 `docker kill`，否则 restart manager 不接手，容器永久 exited，看上去像"自愈失败"实际是测试方法错。
+2. **真正的 OOM / segfault / panic 都会触发自愈**。这是好事，但也意味着无声崩溃会被 restart manager 立刻覆盖；必须靠 `RestartCount`、`docker events`、Loki 日志追溯，否则一次崩溃在 dashboard 上几乎看不见。后续 Stage 8 OTel 接 collector 时要把 `docker events restart` 推送成告警，避免 silent recover。
+3. **`start_period=30s` 给的 grace 完全够用**。当前 healthcheck 设的 30s 是合理值；但如果未来加重 init（例如 schema migrate / replay outbox），要重新评估。
+4. **NATS durable consumer 命名 `aats-{role}-{topic}` 是关键**。订阅者重连时按这个名字 attach，所以**绝不能在不同 role 之间复用同一个 consumer name**，否则会出现 `consumer already bound to a different client` 错误，订阅彻底失败。当前 4 进程拓扑里这点已经天然成立（topic-role 一对一），但跨 role 共享 topic 时要小心。
+5. **gateway 在演练里完全没受影响是预期行为**。它没有 NATS subscription（HTTP-only role），所以杀其他 3 个 daemon 对它的 readiness 完全无副作用。这反过来证明 4 进程拓扑的故障域隔离是真实的，不是只在测试代码里成立。
+
+### 7.7 后续 chaos drill 待办
+
+- [ ] 演练 #3：杀 NATS 容器本身（NATS restart 后所有 26 个 consumer 是否能重建？stream 数据是否丢失？）→ Stage 7 收尾前必做
+- [ ] 演练 #4：杀 postgres 容器（execution outbox flush 是否会卡死、是否 backpressure 到 NATS）→ Stage 7 收尾前必做
+- [ ] 演练 #5：网络分区模拟（`tc qdisc` 给 NATS 加 packet loss）→ Stage 8 OTel collector 上线后再做，观察 metrics 端能否反映
+- [ ] 演练 #6：磁盘写满（`fallocate` 把 jetstream 数据盘填满）→ Stage 9 dryrun 期间真跑
+
+---
+
+## 8. Stage 5 跨进程 critical fan-out 端到端验证（2026-04-08）
+
+### 8.1 验证目的
+
+Stage 5 引入 HybridEventBus（critical → NATS、observer → InMemory）之后，单测和 testcontainers 集成测试都验证过单 NATS bus 的 round-trip。但**真正的 4 进程拓扑下，"A 进程 publish → B 进程 subscribe handler → ack"** 这条端到端路径，从 §6 真跑之前其实没有在 host 侧被肉眼复现过（只看过启动日志里的 `nats_subscription_registered`）。本节用主动注入的方法填上这个洞。
+
+### 8.2 验证方法
+
+**进程拓扑**：4 进程 compose（`gateway` / `market` / `decision` / `execution`），所有 4 个进程共享同一份 NATS server (`aats-nats:4222`)、同一个 stream `AATS_EVENTS`。
+
+**注入策略**：
+- **Topic**：`system.processing_failures` (`aats.system.processing_failures` subject)。这是 critical-routed topic，consumer 只在 execution role 注册（`aats-execution-system_processing_failures`），跨进程边界清晰。
+- **发送方**：从 **gateway 容器** 内 Python 进程通过 nats-py 直连 `nats://nats:4222`，绕过 ApplicationRuntime 的 publish 路径。这是为了**完全独立于业务代码**地证明 NATS 路由。
+- **payload**：手工构造一个最小可验证的 `EventEnvelope` JSON，内嵌 `ProcessingFailureRecord`（`subsystem=stage5_fanout_drill`、`stage=verification`、`severity=warning`、`observed_at=now`）。
+- **观察方**：execution 容器内的 `aats-execution-system_processing_failures` 消费者。验证 NATS API 上 `ack_floor.consumer_seq` 是否随注入消息推进，并检查 execution 日志确认无 handler 错误。
+
+**注入命令**（已记录在 §8.4 用于后续 chaos 演练复用）：
+```bash
+docker exec aats-gateway python -c "
+import asyncio, json, uuid
+from datetime import datetime, timezone
+import nats
+
+async def main():
+    nc = await nats.connect('nats://nats:4222')
+    js = nc.jetstream()
+    envelope = {
+        'event_id': str(uuid.uuid4()),
+        'event_type': 'ProcessingFailureRecord',
+        'source_component': 'stage5_fanout_drill',
+        'event_schema_version': '1.0.0',
+        'topic': 'system.processing_failures',
+        'key': 'drill-key-' + uuid.uuid4().hex[:8],
+        'published_at': datetime.now(timezone.utc).isoformat(),
+        'payload': {
+            'failure_id': 'procfail_drill_' + uuid.uuid4().hex[:8],
+            'subsystem': 'stage5_fanout_drill',
+            'stage': 'verification',
+            'severity': 'warning',
+            'message': 'synthetic stage5 fanout drill',
+            'observed_at': datetime.now(timezone.utc).isoformat(),
+            'retriable': False,
+            'details': {'injected_by': 'runbook'},
+        },
+    }
+    ack = await js.publish('aats.system.processing_failures', json.dumps(envelope).encode('utf-8'))
+    print('published', ack.stream, 'seq=' + str(ack.seq))
+    await nc.close()
+
+asyncio.run(main())
+"
+```
+
+### 8.3 观察结果
+
+**注入前 baseline**：
+```
+aats-execution-system_processing_failures
+  delivered: consumer_seq=0  stream_seq=0
+  ack_floor: consumer_seq=0  stream_seq=0
+  num_pending=0  num_redelivered=0  push_bound=True
+```
+
+**第 1 次注入（payload 形状有 bug：包了一层 `{topic, key, payload}` outer wrapper）**：
+- `js.publish()` 返回 `ack stream=AATS_EVENTS seq=158` ✅（说明 publish 路径通到 NATS）
+- 2 秒后看 consumer 状态：`delivered consumer_seq=5 stream_seq=158`（**stream_seq 精确等于注入消息的 seq**），`ack_floor=0/0`，`num_redelivered=1`
+- 解读：消息**成功被 execution 进程的 consumer 接收**，但 handler 在 `EventEnvelope.model_validate(payload_dict)` 这一步抛 `ValidationError(missing event_type, source_component)`，handler 不 ack → JetStream 按 `ack_wait=30s` 重投 → 超过 `max_deliver=5` 后丢弃。
+- execution container 日志同步打出 5 条 `nats_handler_error durable=aats-execution-system_processing_failures error=2 validation errors for EventEnvelope`，确认错误路径完整可观测。
+
+**第 2 次注入（payload 形状正确：直接发 envelope，不再 wrap）**：
+- `js.publish()` 返回 `ack seq=160`
+- 2 秒后看 consumer 状态：`delivered consumer_seq=6 stream_seq=160`，**`ack_floor consumer_seq=6 stream_seq=160`**（与 delivered 完全对齐），`num_pending=0`，`num_ack_pending=0`
+- 解读：handler 成功 deserialize、调用、ack。**端到端 publish→subscribe→handler→ack roundtrip 完成**。
+- execution 日志没有任何新的 `nats_handler_error`，证明 v2 envelope 走的是成功路径而非错误路径。
+
+### 8.4 验证结论矩阵
+
+| 验证维度 | 结果 | 证据 |
+|---|---|---|
+| **subject 命名规范** | ✅ `aats.{topic}` | stream config `subjects` 列出全部 38 条 `aats.*` subject |
+| **跨进程 publish→subscribe** | ✅ | gateway 进程 publish 到 NATS，execution 进程的 durable consumer 收到 |
+| **EventEnvelope 序列化兼容** | ✅ | 第 2 次注入用手工构造的 envelope dict，被 execution 端 `EventEnvelope.model_validate` 接受 |
+| **handler ack 路径** | ✅ | `ack_floor` 从 0 推进到 stream_seq=160 |
+| **handler 错误路径** | ✅ | 第 1 次注入触发 `nats_handler_error` 日志 5 次，符合 `max_deliver=5` 配置 |
+| **error → redeliver 语义** | ✅ | `num_redelivered=1`、`max_deliver=5` 限制生效，超过后停止重投 |
+| **durable consumer 跨重启幸存** | ✅ | 故障演练 #2.2/#2.3 之前的 `delivered=6/141` 在 kill+restart 之后**精确保留**，没有从 0 重新开始 |
+| **进程间隔离** | ✅ | 注入到 `system.processing_failures` 只被 execution 接收，**不会**意外触达 decision/market/gateway 的 consumer 列表 |
+
+### 8.5 与既有 testcontainers 测试的关系
+
+`tests/integration/test_nats_event_bus_roundtrip.py::test_subprocess_publishes_main_subscribes` 已经在 CI 里验证了 subprocess publish + main process subscribe 的 round-trip（line 443-492）。本节是**对那条 CI 测试的真实部署等价物**：
+
+| 维度 | CI 测试 | 本次真跑 |
+|---|---|---|
+| 进程数 | 2（pytest main + 一个 subprocess） | 4（gateway + market + decision + execution） |
+| NATS server | testcontainers 临时启的 | docker compose 长跑的 `aats-nats` |
+| ApplicationRuntime | 不装载（直接构造 NatsEventBus） | 完整装载（4 个 build_runtime） |
+| Handler 路径 | 测试自定义 receiver function | 真实的 `_subscribe_observer_handlers` → `_CollectingBus.flush()` → NatsEventBus.subscribe |
+| 端到端覆盖 | 单 topic、单 subscriber | 现场有 26 个 durable consumer 同时存在 |
+
+CI 证明了**契约**正确，本次真跑证明了**部署**真的按契约工作。两者一起锁住了 Stage 5 的关键不变量。
+
+### 8.6 留待后续验证的次级路径
+
+本次只验证了 `system.processing_failures` 一条 topic 的 cross-process fan-out。其它 critical topic 的端到端通路依赖被动观察和 startup 日志：
+
+| Topic | 发布方角色 | 订阅方角色 | 当前证据 |
+|---|---|---|---|
+| `market.snapshots` | market | market（feature_engine 在 market slice 内） | startup `nats_subscription_registered`，无消息流量 |
+| `features.snapshots` | market（feature_engine） | decision（decision_trigger） | startup 日志，无消息流量 |
+| `execution.order_intents` | decision | execution（order_manager） + decision（audit） | startup 日志，无消息流量 |
+| `execution.fill_events` | execution（OKX adapter） | execution（portfolio_service） + decision（audit） | startup 日志，无消息流量 |
+| `portfolio.snapshots` | execution | execution（reconciliation） + decision（audit） | **`delivered=6/141`** — Stage 5 真跑前期已经流过 6 条 |
+| `reconciliation.reports` | execution | decision（audit） | **`delivered=147/153`** — 真跑期间持续在流 |
+| `system.processing_failures` | 任何 role | execution（reconciliation_service.handle_processing_failure） | **本次主动注入验证 ✅** |
+
+`portfolio.snapshots` 和 `reconciliation.reports` 的 delivered 计数 > 0 是 Stage 5 cross-process fan-out 在真跑环境中**自然发生**过的间接证据，因为 4 进程拓扑下这两个 topic 的发布方 (`execution`) 与订阅方 (`decision`) 处于不同容器，消息**必定**经过 NATS server 中转。
+
+剩下的几条 dormant topic（market.snapshots / features.snapshots / order_intents / fill_events）等到**真接 OKX 数据源**之后会自然被驱动起来，届时直接看 consumer `delivered` 统计就能验证。如果 #4/#5/#6 完成后这些 topic 仍然 `delivered=0`，需要倒查 publisher 路径。
+
+---
+
+## 9. Changelog
 
 - 2026-04-07：首版。基于 5d 装配 review 发现 3 个 gap（Dockerfile 缺 curl、`/system/health` gateway role NPE、3 daemon 无 healthcheck），列出修复清单 + 真跑命令序列 + 完成判定 + 回滚步骤。等用户审批 §1-§2 修复方案后实施 + 真跑。
 - 2026-04-08：第 1 次真跑完成。10/10 容器 healthy。真跑里又额外修了 5 个 runbook 起步时未预见的 gap：NATS duplicate-subscription（_CollectingBus fan-out）、Dockerfile `/app` ownership、jaeger badger 权限、grafana provisioning 配置冲突、docker compose plugin 缺失。详见 §6.1。
 - 2026-04-08（追加）：第 1 次真跑后又发现 §1.2 根因分析有偏差。`/system/health`、`/system/recovery`、`/system/mode` 三个 CORE_SPECS endpoint 在 gateway role 下 500 的真因是 `runtime_queries.py:ai_runtime` 直接 `.status()` 一个 None 的 `ai_service`，与 `market_gateway` / `execution_adapter` 无关（这俩在 shared slice）。在 `ai_runtime()` 加 None-guard 返回稳定 stub（`provider="not_loaded"`），下游 `recovery_view → system_mode → system_health` 全链路恢复 200。配套 3 个 unit test。同步修订 §1.2 与 §6.1.6 记录。
 - 2026-04-08（再追加）：gap 6 修完之后第 2 次跑容器，`/system/blocker-control` 仍然 500。全仓 grep `runtime.ai_service.status()` 又找出 6 处直读站点，其中 GET 链 3 处（blocker_control、recovery_posture、_ai_shadow_summary）会被 `/system/health` 和 `/system/blocker-control` 链路触发，POST mutate 3 处（ai_review_restore / set_ai_operating_mode / ai_review_degrade_to_baseline）会被 operator 误调时 500。GET 链 2 处切换到 `self.owner.ai_runtime()` 走 facade stub，1 处（recovery_posture）加 None-guard 短路返回 False；POST mutate 3 处加方法顶 `raise ValueError("ai_service_not_loaded_in_this_process_role")` 显式拒绝。配套 5 个新 unit test，全仓 1232 unit + 26 ai-integration 全绿。第 3 次真跑 4 容器 healthy，CORE_SPECS 4 个 endpoint 全部 200。详见 §6.1.7。
+- 2026-04-08（故障演练 #1 完成）：新增 §7 故障演练章节。演练 #2.2（杀 execution）+ #2.3（同时杀 decision + market）：3 个 daemon 全部按 RestartCount=1 自愈，NATS 26 个 durable consumer 全部 push_bound 重连，gateway 完全未受影响。**重大方法学发现**：`docker kill` 不会触发 Docker restart manager（被 daemon 当成 operator 主动停服），必须从 host `kill -9 <python_pid>` 才能让 tini exit → 容器内部退出 → restart manager 接管。后续所有 chaos drill 都要遵循这个方法。详见 §7.2 / §7.6。
+- 2026-04-08（Stage 5 端到端 fan-out 验证完成）：新增 §8 Stage 5 章节。从 gateway 容器内 nats-py 直发 envelope 到 `aats.system.processing_failures`，execution 容器的 `aats-execution-system_processing_failures` durable consumer 收到、deserialize 成功、ack_floor 推进到 stream_seq=160。中途意外验证了 handler 错误路径：第 1 次注入 envelope 形状写错（多包了一层），handler 抛 ValidationError → max_deliver=5 次重投后丢弃，错误日志完整可观测。两次注入合在一起锁住了"成功路径 + 错误路径 + 重投语义"三个关键不变量。被动证据补充：`portfolio.snapshots` / `reconciliation.reports` 在真跑期间的 delivered 计数 > 0，证明 execution → decision 这条主跨进程通路在自然流量下也能跑通。详见 §8.4 矩阵。
