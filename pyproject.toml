@@ -36,6 +36,19 @@ nats-integration = [
   "nats-py>=2.7",
   "testcontainers>=4.0",
 ]
+# Stage 6 Redis hot state store：跨进程共享 KV 缓存（kill_switch、portfolio 等）。
+# 仅在 AATS_HOT_STATE_BACKEND=redis 时需要安装；默认 memory backend 不依赖。
+# 设计文档：docs/task/stage_6_redis_hot_state_design.md
+redis = [
+  "redis>=5,<6",
+]
+# Stage 6 集成测试：用 testcontainers 拉真 Redis 容器验证 connect/get/set/expire 端到端。
+# 仅 tests/integration/test_hot_state_redis_roundtrip.py 在 AATS_RUN_REDIS_INTEGRATION=1
+# 时使用，运行时进程不依赖。安装：pip install -e .[redis-integration]
+redis-integration = [
+  "redis>=5,<6",
+  "testcontainers>=4.0",
+]
 
 [tool.setuptools.packages.find]
 include = ["aats*"]

@@ -185,6 +185,11 @@ from aats.storage.strategy_sleeve_repo import InMemoryStrategySleeveRepository
 from aats.storage.strategy_sleeve_repo_postgres import PostgresStrategySleeveRepository
 from aats.storage.strategy_runtime_repo import InMemoryStrategyRuntimeRepository
 from aats.storage.strategy_runtime_repo_postgres import PostgresStrategyRuntimeRepository
+from aats.storage.hot_state_store import (
+    HotStateStore,
+    RedisHotStateConfig,
+    build_hot_state_store,
+)
 from aats.storage.session import (
     DatabaseRuntime,
     apply_current_migrations,
@@ -386,6 +391,11 @@ class ApplicationRuntime:
     recovery_policy: RecoveryPolicy
     bus: EventBus
     event_store: EventStore
+    # Stage 6 Slice 6.1：跨进程共享的热状态 KV 存储。memory backend 是
+    # monolith 默认值（零外部依赖）；4 进程拓扑下设 redis backend 让
+    # gateway 能同步问询 execution/decision 的最新状态。
+    # 设计文档：docs/task/stage_6_redis_hot_state_design.md
+    hot_state_store: HotStateStore
     market_gateway: MarketDataGateway
     # Stage 3 多进程切片化：以下 slice 字段在 process_role 不需要时为 None。
     # 例如 gateway role 会让 feature_engine / ai_service / decision_engine / ...
@@ -528,6 +538,19 @@ class ApplicationRuntime:
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
+        # Stage 6 Slice 6.1：关闭 HotStateStore（Redis 客户端 aclose / 内存
+        # dict.clear）。在 database_runtime.dispose 之前，与 bus.close 同样
+        # 走 best-effort 路径——hot_state 是缓存，关闭失败不能阻塞整体停机。
+        try:
+            await self.hot_state_store.close()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "hot_state_store_shutdown_close_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         if self.database_runtime is not None:
             self.database_runtime.dispose()
 
@@ -3523,6 +3546,35 @@ def _apply_post_init_guards(
         runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
 
 
+async def _build_and_connect_hot_state_store(
+    *,
+    runtime_settings: AATSSettings,
+) -> HotStateStore:
+    """Stage 6 Slice 6.1：根据 settings 构造 HotStateStore 并 fail-fast 连接。
+
+    返回的 store 在 backend=redis 模式下已经 ping 通；调用方拿到的实例
+    可以直接 await store.get/set，不需要再额外 connect。
+
+    设计要点：
+    * memory backend：纯进程内 dict，不需要 connect，立刻可用。
+    * redis backend：在 build_runtime 内同步 await store.connect()。失败
+      抛 RuntimeError，让 4 进程 entry 在启动期就崩，而不是延迟到第一次
+      读写时才发现 Redis 不可用——避免 gateway/decision/execution 在
+      "看上去 healthy 但状态不一致" 的状态下跑业务流。
+    * connect() 失败时不会让 store 半初始化：异常会从 build_runtime 抛出，
+      调用方的 try/except 会清理 storage.database_runtime。
+    """
+    if runtime_settings.hot_state_backend == "redis":
+        redis_config = RedisHotStateConfig(
+            url=runtime_settings.hot_state_redis_url,
+            global_prefix=runtime_settings.hot_state_global_prefix,
+        )
+        store = build_hot_state_store(backend="redis", redis_config=redis_config)
+        await store.connect()  # type: ignore[attr-defined]
+        return store
+    return build_hot_state_store(backend="memory")
+
+
 def _resolve_effective_process_role(
     *,
     kwarg_role: str | None,
@@ -3626,6 +3678,18 @@ async def build_runtime(
                 summary=entry_execution_guard.get("summary"),
                 operator_summary=entry_execution_guard.get("operator_summary"),
             )
+        # Stage 6 Slice 6.1：构造 HotStateStore。memory backend 立刻可用；
+        # redis backend 在此处 ping 通 Redis，失败则抛 RuntimeError 走下面
+        # 的 except 清理路径。
+        hot_state_store = await _build_and_connect_hot_state_store(
+            runtime_settings=runtime_settings,
+        )
+        log_event(
+            get_logger("aats.bootstrap"),
+            "hot_state_store_initialized",
+            backend=runtime_settings.hot_state_backend,
+            global_prefix=runtime_settings.hot_state_global_prefix,
+        )
     except Exception:
         if storage.database_runtime is not None:
             storage.database_runtime.dispose()
@@ -3865,6 +3929,7 @@ async def build_runtime(
         recovery_policy=runtime_layering.recovery_policy,
         bus=bus,
         event_store=storage.event_store,
+        hot_state_store=hot_state_store,
         market_gateway=market_gateway,
         feature_engine=feature_engine,
         ai_service=ai_service,

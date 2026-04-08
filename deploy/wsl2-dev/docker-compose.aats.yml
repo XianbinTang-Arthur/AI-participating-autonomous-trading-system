@@ -33,6 +33,13 @@ x-aats-common-env: &aats-common-env
   AATS_EVENT_BUS_BACKEND: hybrid
   AATS_NATS_URL: nats://nats:4222
   AATS_NATS_STREAM_NAME: AATS_EVENTS
+  # Stage 6 Slice 6.1：4 进程拓扑统一走 redis backend 的 hot state store。
+  # gateway/market/decision/execution 在 build_runtime 启动期就 ping 真 Redis，
+  # 失败立刻抛错（而不是延迟到第一次跨进程读写）。Slice 6.1 范围内尚没有 caller
+  # 使用 hot_state_store；本配置先把连接路径打通，给 Slice 6.2/6.3 把 kill_switch
+  # 与 portfolio_snapshot 接进 Redis 时铺垫。
+  AATS_HOT_STATE_BACKEND: redis
+  AATS_HOT_STATE_REDIS_URL: redis://redis:6379/0
   AATS_LOG_FORMAT: json
   AATS_LOG_LEVEL: INFO
   TZ: Asia/Shanghai

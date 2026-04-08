@@ -193,6 +193,24 @@ class AATSSettings(BaseSettings):
         default=7 * 24 * 60 * 60,
         description="JetStream retention max age (seconds). Default 7 days.",
     )
+    # ── Stage 6：HotStateStore backend ─────────────────────────────────
+    # 跨进程共享 KV 缓存（kill_switch / portfolio / 等高频读状态）。
+    # memory = 进程内 dict（monolith 默认，零外部依赖）
+    # redis  = 共享 Redis（4 进程拓扑必须，让 gateway 能在不依赖 NATS 事件
+    #          重建本地缓存的情况下同步问询 execution/decision 的最新状态）
+    # 设计文档：docs/task/stage_6_redis_hot_state_design.md
+    hot_state_backend: Literal["memory", "redis"] = Field(
+        default="memory",
+        description="HotStateStore backend: memory (single-proc) | redis (multi-proc).",
+    )
+    hot_state_redis_url: str = Field(
+        default="redis://127.0.0.1:6379/0",
+        description="Redis URL. Only used when hot_state_backend=redis.",
+    )
+    hot_state_global_prefix: str = Field(
+        default="",
+        description="Global key prefix for multi-env Redis sharing (e.g. 'dev:' / 'prod:').",
+    )
     max_abs_position_qty: float = 0.01
     max_notional_per_symbol: float = 1_000.0
     max_open_orders: int = 5
@@ -831,6 +849,19 @@ class AATSSettings(BaseSettings):
                 raise ValueError("event_bus_backend_requires_non_empty_nats_stream_name")
             if int(self.nats_stream_max_age_seconds) < 1:
                 raise ValueError("nats_stream_max_age_seconds_must_be_positive")
+        # Stage 6：hot_state_backend=redis 时校验 URL 非空 + scheme 合法。
+        # 让多进程拓扑在 settings 层就能 fail-fast，避免到 build_runtime
+        # 真正去 connect Redis 时才发现 URL 配错。
+        if self.hot_state_backend == "redis":
+            redis_url = (self.hot_state_redis_url or "").strip()
+            if not redis_url:
+                raise ValueError("hot_state_backend_requires_non_empty_redis_url")
+            if not (
+                redis_url.startswith("redis://") or redis_url.startswith("rediss://")
+            ):
+                raise ValueError(
+                    "hot_state_redis_url_must_start_with_redis_or_rediss_scheme"
+                )
         return self
 
     @classmethod
