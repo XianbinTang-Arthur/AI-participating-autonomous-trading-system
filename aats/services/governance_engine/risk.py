@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.base import EventBus
@@ -21,6 +21,9 @@ from aats.schemas.governance import (
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.okx_account import OKXAccountService
 from aats.services.fee_resolver import EffectiveFeeResolver
+
+if TYPE_CHECKING:
+    from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
 from aats.services.governance_engine.adaptive_controls import (
     reconciliation_clean_from_safety_state,
     resolve_execution_aggressiveness_state,
@@ -57,6 +60,7 @@ class RiskEngine:
         live_runtime_guard_provider: Any | None = None,
         trial_guard_provider: Any | None = None,
         recovery_status_provider: Callable[[], Any] | None = None,
+        obligation_cache: "ObligationHotStateCache | None" = None,
     ) -> None:
         self.settings = settings
         self.account_service = account_service
@@ -76,6 +80,12 @@ class RiskEngine:
         self.trial_guard_provider = trial_guard_provider
         self.recovery_status_provider = recovery_status_provider
         self.runtime_scope = runtime_state_scope(settings)
+        # Stage 6 Slice 6.5：跨进程 obligation 缓存。_active_local_obligations
+        # 读路径优先 cache.active_sync() → fallback obligation_repo.active_obligations()。
+        # cache 为 None（未接线）或 cache.active_sync() 返回 None（未 bootstrap）
+        # 时完全退化到 repo 原路径。
+        # 设计文档：docs/task/stage_6_slice_6_5_obligation_hot_state_design.md
+        self._obligation_cache = obligation_cache
 
     def evaluate(self, target: PositionTarget) -> RiskDecision:
         adaptive_state = self._adaptive_control_states(target=target)
@@ -1688,9 +1698,21 @@ class RiskEngine:
             for order in (snapshot.open_orders if snapshot is not None else [])
             if order.client_order_id
         }
+        # Stage 6 Slice 6.5：cache 优先 + obligation_repo fallback。I5 规定 cache
+        # miss 不破坏读路径：
+        #   - cache is None（未接线）→ active is None → 走 repo
+        #   - cache.active_sync() 返回 None（未 bootstrap）→ 走 repo
+        #   - cache.active_sync() 返回 list（即使是 [] 也是合法结果）→ 用 cache
+        # cache 返回的 list 是当前 4 进程共享的最新 ACTIVE+PARTIALLY_CONSUMED
+        # 子集，不是打 Postgres 就是看 Redis+NATS 实时广播，QPS 大幅下降。
+        source: list[OrderObligation] | None = None
+        if self._obligation_cache is not None:
+            source = self._obligation_cache.active_sync()
+        if source is None:
+            source = list(self.obligation_repo.active_obligations())
         return [
             obligation
-            for obligation in self.obligation_repo.active_obligations()
+            for obligation in source
             if obligation.client_order_id not in visible_client_order_ids
         ]
 

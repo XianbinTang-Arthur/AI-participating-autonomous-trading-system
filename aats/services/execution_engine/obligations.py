@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from decimal import Decimal
 from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
@@ -20,6 +21,9 @@ from aats.services.accounting import (
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.decimals import to_decimal
 
+if TYPE_CHECKING:
+    from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
+
 
 class ExecutionReservationError(RuntimeError):
     pass
@@ -36,6 +40,7 @@ class ExecutionObligationService:
         account_snapshot_loader: Callable[[], Awaitable[ExchangeAccountSnapshot | None]] | None = None,
         price_provider: Callable[[str], Decimal] | None = None,
         fee_resolver: EffectiveFeeResolver | None = None,
+        obligation_cache: "ObligationHotStateCache | None" = None,
     ) -> None:
         self.settings = settings
         self.obligation_repo = obligation_repo
@@ -43,6 +48,12 @@ class ExecutionObligationService:
         self.price_provider = price_provider
         self.fee_resolver = fee_resolver or EffectiveFeeResolver(settings=settings)
         self._reservation_lock = asyncio.Lock()
+        # Stage 6 Slice 6.5：跨进程 obligation 缓存。每次 save_obligation 返回后
+        # best-effort publish 到 cache，让 decision/gateway 进程的 active_obligations
+        # 读路径不用打 Postgres。None = cache 未接线（单测 / recovery-only path），
+        # 此时本 service 的行为和 6.5 之前完全一样。
+        # 设计文档：docs/task/stage_6_slice_6_5_obligation_hot_state_design.md
+        self._obligation_cache = obligation_cache
 
     async def reserve_for_intent(
         self,
@@ -57,12 +68,23 @@ class ExecutionObligationService:
             )
             if obligation is None:
                 return None
-            return self.obligation_repo.save_obligation(obligation)
+            saved = self.obligation_repo.save_obligation(obligation)
+            # Stage 6 Slice 6.5：async path 直接 await publish（保证跨进程同步
+            # 在返回调用方前至少进入 event loop scheduler）；cache 内部 best-effort
+            # 失败不抛，publish 本身有 D9 idempotent 保护。
+            if saved is not None and self._obligation_cache is not None:
+                await self._obligation_cache.publish(saved)
+            return saved
 
     def persist_previewed_obligation(self, obligation: OrderObligation | None) -> OrderObligation | None:
         if obligation is None:
             return None
-        return self.obligation_repo.save_obligation(obligation)
+        saved = self.obligation_repo.save_obligation(obligation)
+        # Stage 6 Slice 6.5：sync path 用 fire_and_forget_publish。eager local apply
+        # 保证同 stack 内 read-after-write 立即可见，Redis+NATS 走 schedule task。
+        if saved is not None and self._obligation_cache is not None:
+            self._obligation_cache.fire_and_forget_publish(saved)
+        return saved
 
     async def preview_reservation_for_intent(
         self,
@@ -132,7 +154,11 @@ class ExecutionObligationService:
         updated = self.preview_obligation_for_fill(fill)
         if updated is None:
             return None
-        return self.obligation_repo.save_obligation(updated)
+        saved = self.obligation_repo.save_obligation(updated)
+        # Stage 6 Slice 6.5：同 persist_previewed_obligation 模板。
+        if saved is not None and self._obligation_cache is not None:
+            self._obligation_cache.fire_and_forget_publish(saved)
+        return saved
 
     def preview_obligation_for_fill(self, fill: FillEvent) -> OrderObligation | None:
         obligation = self.obligation_repo.get_obligation(fill.client_order_id)
@@ -174,7 +200,11 @@ class ExecutionObligationService:
         updated = self.preview_obligation_for_order_state(order_state)
         if updated is None:
             return None
-        return self.obligation_repo.save_obligation(updated)
+        saved = self.obligation_repo.save_obligation(updated)
+        # Stage 6 Slice 6.5：同 persist_previewed_obligation 模板。
+        if saved is not None and self._obligation_cache is not None:
+            self._obligation_cache.fire_and_forget_publish(saved)
+        return saved
 
     def preview_obligation_for_order_state(self, order_state: OrderState) -> OrderObligation | None:
         if order_state.status not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}:

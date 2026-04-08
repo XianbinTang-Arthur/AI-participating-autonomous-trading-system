@@ -7470,10 +7470,23 @@ class OperatorQueryService:
                 if self.runtime.execution_fill_repo_v2 is None
                 else max(len(self._scoped_fills()) - self.runtime.execution_fill_repo_v2.count_fills(), 0)
             )
+            # Stage 6 Slice 6.5：cache 优先 + obligation_repo fallback。dashboard
+            # 路径，读 hit 越多越省 PG QPS；cache 未接线 / 未 bootstrap 时退化
+            # 到原 repo.all_obligations() 走 PG。
+            # 设计文档：docs/task/stage_6_slice_6_5_obligation_hot_state_design.md
+            _obligation_cache = getattr(self.runtime, "obligation_hot_state_cache", None)
+            _cached_obligations = (
+                _obligation_cache.all_sync() if _obligation_cache is not None else None
+            )
+            _obligation_count = (
+                len(_cached_obligations)
+                if _cached_obligations is not None
+                else len(self.runtime.obligation_repo.all_obligations())
+            )
             obligation_backlog = (
                 None
                 if self.runtime.reservation_repo_v2 is None
-                else max(len(self.runtime.obligation_repo.all_obligations()) - self.runtime.reservation_repo_v2.count_reservations(), 0)
+                else max(_obligation_count - self.runtime.reservation_repo_v2.count_reservations(), 0)
             )
             lag = {
                 "order_backlog": order_backlog,

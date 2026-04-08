@@ -71,6 +71,7 @@ from aats.services.execution_control.monitor import Phase1ShadowMonitor
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
 from aats.services.execution_control.subsystem import Phase1ShadowSubsystem
+from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
@@ -433,6 +434,14 @@ class ApplicationRuntime:
     # cache 优先 + portfolio_repo fallback。设计文档：
     # docs/task/stage_6_slice_6_3_portfolio_snapshot_design.md
     portfolio_snapshot_cache: PortfolioSnapshotCache
+    # Stage 6 Slice 6.5：跨进程 obligation 缓存边车。同 6.3 sidecar 模板：bootstrap
+    # 时从 Redis 读 index key + get_many hydrate 本地 dict；订阅
+    # NATS execution.obligation_updates topic 让 4 个进程的 obligation 视图保持
+    # 同步。execution 在每次 save_obligation 之后 best-effort publish(obligation)
+    # 广播；decision 的 risk.py active_obligations() 读路径优先 cache → fallback
+    # obligation_repo Postgres SELECT。设计文档：
+    # docs/task/stage_6_slice_6_5_obligation_hot_state_design.md
+    obligation_hot_state_cache: ObligationHotStateCache
     mode_controller: RuntimeModeController
     health_service: SystemHealthService
     account_service: OKXAccountService
@@ -594,6 +603,25 @@ class ApplicationRuntime:
             log_event(
                 self.logger,
                 "portfolio_snapshot_cache_shutdown_close_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        # Stage 6 Slice 6.5：关闭 obligation_hot_state_cache。与 6.3 同模板：必
+        # 须在 bus.close 之前；stop() 不写/清 Redis（cache 状态不失效，下次启动
+        # 会 hydrate）。用 getattr 兜底是因为单测里某些 minimal runtime 走
+        # __new__ 绕过 dataclass __init__，直接 self.obligation_hot_state_cache
+        # 会抛 AttributeError；与 abort_hook_service 同处理方式。
+        try:
+            obligation_hot_state_cache = getattr(
+                self, "obligation_hot_state_cache", None
+            )
+            if obligation_hot_state_cache is not None:
+                await obligation_hot_state_cache.stop()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "obligation_hot_state_cache_shutdown_close_failed",
                 level="warning",
                 error_type=type(exc).__name__,
                 error=str(exc),
@@ -2782,6 +2810,11 @@ class _RuntimeSlices:
     # 完成后由 build_runtime 构造 + bootstrap，订阅 portfolio.snapshots 让 4 进
     # 程的 latest snapshot 视图保持收敛。
     portfolio_snapshot_cache: Any = None
+    # Stage 6 Slice 6.5：跨进程 obligation 缓存边车。在 _start_event_bus 完成后
+    # 由 build_runtime 构造 + bootstrap，订阅 execution.obligation_updates 让 4
+    # 进程的 obligation 视图保持收敛。slice builder 从本字段取 cache 引用注入
+    # ObligationService / RiskEngine / query_service 等读写路径。
+    obligation_hot_state_cache: Any = None
     mode_controller: Any = None
     normalizer: Any = None
     market_publisher: Any = None
@@ -3174,6 +3207,11 @@ def _build_decision_slice(
         policy_profile=runtime_layering.policy_profile,
         fee_resolver=slices.fee_resolver,
         reconciliation_repo=storage.reconciliation_repo,
+        # Stage 6 Slice 6.5：注入跨进程 obligation 缓存。risk.py
+        # _active_local_obligations 的读路径优先走 cache.active_sync() 替代
+        # obligation_repo Postgres SELECT。cache 未接线 / 未 bootstrap 时完全
+        # 退化到 repo 原路径（I5 miss 不破坏读）。
+        obligation_cache=slices.obligation_hot_state_cache,
     )
     slices.execution_planner = ExecutionPlanner(settings=runtime_settings)
     slices.position_target_handler = _build_position_target_handler(
@@ -3243,6 +3281,10 @@ def _build_execution_slice(
         account_snapshot_loader=lambda: slices.account_service.refresh(),
         price_provider=slices.market_gateway.latest_price,
         fee_resolver=slices.fee_resolver,
+        # Stage 6 Slice 6.5：注入跨进程 obligation 缓存。construction 顺序保证：
+        # ObligationHotStateCache 在 _start_event_bus 后立即构造 + bootstrap，
+        # _build_execution_slice 才跑，所以这里拿到的一定是已 hydrate 的实例。
+        obligation_cache=slices.obligation_hot_state_cache,
     )
     slices.execution_outbox_publisher = None
     slices.portfolio_outbox_publisher = None
@@ -3269,6 +3311,11 @@ def _build_execution_slice(
             execution_order_repo=storage.execution_order_repo,
             execution_order_history_repo=storage.execution_order_history_repo,
             execution_fill_repo=storage.execution_fill_repo_v2,
+            # Stage 6 Slice 6.5：注入跨进程 obligation 缓存。commit hook（见 outbox
+            # publisher 的 _publish_obligation_to_cache）会在事务成功后 best-effort
+            # 调 cache.fire_and_forget_publish(obligation) 同步本地 dict + Redis
+            # + NATS 广播；cache 未接线时为 None，行为退化为 6.5 之前。
+            obligation_cache=slices.obligation_hot_state_cache,
         )
     if (
         storage.database_runtime is not None
@@ -3518,6 +3565,9 @@ def _build_reconciliation_slice(
         recovery_policy=runtime_layering.recovery_policy,
         fill_outcome_repo=storage.fill_outcome_repo,
         event_store=storage.event_store,
+        # Stage 6 Slice 6.5：注入 obligation cache，让 _cleanup_orphan_obligations
+        # 的释放结果广播到跨进程 cache。
+        obligation_cache=slices.obligation_hot_state_cache,
     )
     # OKXExecutionAdapter.client satisfies ExchangeOrderQuerier protocol.
     _exchange_order_client = (
@@ -3582,6 +3632,13 @@ async def _wire_event_subscriptions(
     # 不走 cache.bootstrap 内部的 subscribe，避免重复 durable binding。
     if slices.portfolio_snapshot_cache is not None:
         await slices.portfolio_snapshot_cache.register_remote_subscription(collector)
+    # Stage 6 Slice 6.5：同 6.3 处理，把 obligation 缓存的 _handle_remote_event
+    # 也接进 collector。execution.obligation_updates 是 slice 6.5 新增 topic，
+    # 初始只被 cache 自己订阅，但为了与 6.3 模板一致 + 避免未来其它 service 也
+    # 订阅时踩 durable binding 冲突，这里仍然统一走 collector 聚合。设计文档：
+    # docs/task/stage_6_slice_6_5_obligation_hot_state_design.md §10
+    if slices.obligation_hot_state_cache is not None:
+        await slices.obligation_hot_state_cache.register_remote_subscription(collector)
     await collector.flush()
 
 
@@ -3991,6 +4048,40 @@ async def build_runtime(
             reason="repo_has_no_attach_snapshot_listener",
         )
 
+    # Stage 6 Slice 6.5：跨进程 obligation 缓存边车。和 6.3 PortfolioSnapshotCache
+    # 同模板：bus.start 完成后立即构造 + Redis hydrate，让所有 slice builder
+    # （decision 的 risk_engine、execution 的 obligation_service、gateway 的
+    # query_service）能在构造时拿到一个已 hydrate 的 cache 实例。
+    #
+    # ⚠️ NATS subscribe 步骤推迟到 _wire_event_subscriptions 经 _CollectingBus
+    # 聚合：execution.obligation_updates 是 slice 6.5 新增 topic，初始只被 cache
+    # 自己订阅，理论上不会撞 durable binding，但为了与 6.3 模板一致 + 避免未来
+    # 其它 service 也订阅本 topic 时踩坑，这里仍然 defer subscribe。
+    # bootstrap 内部即使 Redis 故障也走 best-effort 路径不抛（I1 fail-soft）。
+    # 设计文档：docs/task/stage_6_slice_6_5_obligation_hot_state_design.md §10
+    slices.obligation_hot_state_cache = ObligationHotStateCache(
+        logger=get_logger("aats.execution.obligation_cache"),
+    )
+    await slices.obligation_hot_state_cache.bootstrap(
+        hot_state_store=hot_state_store,
+        bus=slices.bus,
+        process_role=effective_process_role or "monolith",
+        subscribe=False,  # 推迟到 _wire_event_subscriptions 走 _CollectingBus
+    )
+    log_event(
+        get_logger("aats.bootstrap"),
+        "obligation_hot_state_cache_initialized",
+        process_role=effective_process_role or "monolith",
+        bootstrap_state=slices.obligation_hot_state_cache.snapshot(),
+    )
+    # Stage 6 Slice 6.5：Phase1ShadowMonitor 在 _build_shared_runtime_slice 早
+    # 期构造，那时 obligation_hot_state_cache 还不存在；这里用 setter 注入把
+    # cache 交给 monitor。dashboard snapshot() 读路径就会优先用 cache。
+    if slices.phase1_shadow_monitor is not None:
+        slices.phase1_shadow_monitor.attach_obligation_cache(
+            slices.obligation_hot_state_cache
+        )
+
     _build_market_slice(slices=slices, effective_process_role=effective_process_role)
     _build_decision_slice(
         runtime_settings=runtime_settings,
@@ -4060,6 +4151,10 @@ async def build_runtime(
     # Stage 6 Slice 6.3：portfolio_snapshot 跨进程缓存（同样已在 bus.start 后立
     # 即构造 + bootstrap），稍后注入到 outbox publisher 与 query_service。
     portfolio_snapshot_cache = slices.portfolio_snapshot_cache
+    # Stage 6 Slice 6.5：obligation 跨进程缓存（同样已在 bus.start 后立即构造 +
+    # bootstrap），稍后注入到 obligation_service 写路径与 risk_engine /
+    # query_service 读路径。
+    obligation_hot_state_cache = slices.obligation_hot_state_cache
 
     # Stage 3：startup recovery 段只在 execution / monolith role 下运行。
     # gateway / market / decision role 没有 portfolio_service 与 recovery_service，
@@ -4232,6 +4327,7 @@ async def build_runtime(
         risk_engine=risk_engine,
         kill_switch=kill_switch,
         portfolio_snapshot_cache=portfolio_snapshot_cache,
+        obligation_hot_state_cache=obligation_hot_state_cache,
         mode_controller=mode_controller,
         health_service=health_service,
         account_service=account_service,

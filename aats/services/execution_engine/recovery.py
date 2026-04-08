@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from decimal import Decimal
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 
 from aats.bootstrap.settings import AATSSettings
+
+if TYPE_CHECKING:
+    from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot, is_trusted_baseline_snapshot
@@ -66,6 +69,7 @@ class ExecutionRecoveryService:
         recovery_policy: RecoveryPolicy | None = None,
         fill_outcome_repo: FillOutcomeRepository | None = None,
         event_store: object | None = None,
+        obligation_cache: "ObligationHotStateCache | None" = None,
     ) -> None:
         self.settings = settings
         self.execution_repo = execution_repo
@@ -80,6 +84,11 @@ class ExecutionRecoveryService:
         self.reconciliation_stale_after_seconds = reconciliation_stale_after_seconds
         self.fill_outcome_repo = fill_outcome_repo
         self.event_store = event_store
+        # Stage 6 Slice 6.5：跨进程 obligation 缓存。_cleanup_orphan_obligations
+        # 修复遗留 obligation 后会 best-effort 广播到 cache，让后续进程读路径
+        # 拿到的是 release 后的状态。None = 未接线（legacy path），行为退化。
+        # 设计文档：docs/task/stage_6_slice_6_5_obligation_hot_state_design.md
+        self._obligation_cache = obligation_cache
         self.logger = get_logger("aats.recovery")
         self.recovery_policy = recovery_policy or RecoveryPolicy(
             name="default_recovery",
@@ -467,7 +476,14 @@ class ExecutionRecoveryService:
             updated = self._resolved_obligation(obligation=obligation, order_state=order_state)
             if updated is None:
                 continue
-            self.obligation_repo.save_obligation(updated)
+            saved = self.obligation_repo.save_obligation(updated)
+            # Stage 6 Slice 6.5：startup recovery 过程中清理遗留 obligation 后，
+            # best-effort 把 released 状态广播到跨进程 cache。其它已经起来的
+            # 进程（如果有的话）立即看到清理结果。cache 未接线时 noop。
+            # recovery 是 sync 路径，但整个 build_runtime 在 async context 中
+            # 跑，fire_and_forget_publish 能 schedule 到 running loop。
+            if saved is not None and self._obligation_cache is not None:
+                self._obligation_cache.fire_and_forget_publish(saved)
             released += 1
         return released
 

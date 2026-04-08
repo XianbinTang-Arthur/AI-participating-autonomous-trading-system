@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.orm.exc import StaleDataError
@@ -27,6 +27,9 @@ from aats.storage.execution_order_repo_postgres import (
 from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
 from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 
+if TYPE_CHECKING:
+    from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
+
 
 @dataclass(slots=True)
 class PostgresExecutionOutboxPublisher:
@@ -46,6 +49,13 @@ class PostgresExecutionOutboxPublisher:
     execution_order_repo: PostgresExecutionOrderRepository | None = None
     execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
     execution_fill_repo: PostgresExecutionFillRepositoryV2 | None = None
+    # Stage 6 Slice 6.5：跨进程 obligation 缓存。persist_order_state /
+    # persist_order_state_and_command / persist_fill 这三个 async entry 在
+    # 事务 commit 成功之后会调 cache.fire_and_forget_publish(obligation)，把
+    # 最新的 obligation 快照推到 cache 本地 dict + Redis + NATS 广播。None =
+    # 未接线（legacy test / recovery-only path），行为与 6.5 之前完全一样。
+    # 设计文档：docs/task/stage_6_slice_6_5_obligation_hot_state_design.md §10
+    obligation_cache: "ObligationHotStateCache | None" = None
     logger: Any = field(init=False)
 
     def __post_init__(self) -> None:
@@ -70,6 +80,11 @@ class PostgresExecutionOutboxPublisher:
             obligation=obligation,
         )
         await self.flush_pending()
+        # Stage 6 Slice 6.5：事务已 commit，obligation 广播到 cache。必须放在
+        # flush_pending 之后，这样 order_update envelope 已经通过 NATS 出去了；
+        # cache 的 OBLIGATION_UPDATES 广播独立一条 topic，不受 flush_pending
+        # 影响。
+        self._publish_obligation_to_cache(obligation)
         return persisted
 
     def _persist_order_state_with_retry(
@@ -162,6 +177,8 @@ class PostgresExecutionOutboxPublisher:
             obligation=obligation,
         )
         await self.flush_pending()
+        # Stage 6 Slice 6.5：事务已 commit，obligation 广播到 cache。
+        self._publish_obligation_to_cache(obligation)
         return persisted
 
     def _persist_order_state_and_command_with_retry(
@@ -368,6 +385,11 @@ class PostgresExecutionOutboxPublisher:
         if not saved:
             return False
         await self.flush_pending()
+        # Stage 6 Slice 6.5：事务已 commit，obligation 广播到 cache。仅在
+        # saved=True 时调：saved=False 说明 fill 被 dedup 了（重复 fill_id），
+        # obligation 本身未被 persist，此时广播会把一份可能未写入 PG 的版本
+        # 推到 cache，破坏 cache ↔ PG 最终一致性。
+        self._publish_obligation_to_cache(obligation)
         return True
 
     def _persist_fill_sync(
@@ -394,6 +416,31 @@ class PostgresExecutionOutboxPublisher:
             self.outbox_repo.enqueue_in_session(session, envelope)
             session.commit()
         return True
+
+    def _publish_obligation_to_cache(self, obligation: OrderObligation | None) -> None:
+        """Stage 6 Slice 6.5：事务 commit 成功后广播 obligation 到跨进程 cache。
+
+        - ``obligation is None`` → noop（caller 本次没有 obligation 要写）
+        - ``self.obligation_cache is None`` → noop（未接线，legacy path）
+        - 异常 → log warning 不抛（I1 fail-soft）
+
+        调用时机：**必须**在 session.commit() 成功之后。flush_pending() 之后 /
+        之前都可以，只是 flush_pending 本身走 outbox NATS 广播的 order_update /
+        fill envelope，与 OBLIGATION_UPDATES 是两条不同 topic，互不干扰。
+        """
+        if obligation is None or self.obligation_cache is None:
+            return
+        try:
+            self.obligation_cache.fire_and_forget_publish(obligation)
+        except Exception as exc:  # pragma: no cover
+            log_event(
+                self.logger,
+                "execution_outbox_obligation_cache_publish_failed",
+                level="warning",
+                client_order_id=obligation.client_order_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     async def flush_pending(self, *, limit: int = 100) -> None:
         pending = await asyncio.to_thread(self.outbox_repo.pending, limit=limit)

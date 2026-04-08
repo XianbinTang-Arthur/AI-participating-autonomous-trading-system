@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
 from aats.services.ledger.posting import Phase1LedgerMirrorService
@@ -9,6 +9,9 @@ from aats.storage.execution_fill_repo_v2 import ExecutionFillRepositoryV2
 from aats.storage.execution_order_repo import ExecutionOrderRepository
 from aats.storage.reservation_repo import ReservationRepositoryV2
 from aats.services.runtime_scope import RuntimeStateScope, fills_for_scope, order_states_for_scope
+
+if TYPE_CHECKING:
+    from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
 
 
 class Phase1ShadowMonitor:
@@ -32,6 +35,24 @@ class Phase1ShadowMonitor:
         self.execution_order_repo = execution_order_repo
         self.execution_fill_repo = execution_fill_repo
         self.reservation_repo = reservation_repo
+        # Stage 6 Slice 6.5：跨进程 obligation 缓存。Phase1ShadowMonitor 在
+        # _build_shared_runtime_slice 早期构造，此时 obligation_hot_state_cache
+        # 还没 bootstrap；所以采用**setter 注入**模式：build_runtime 在 cache
+        # bootstrap 后调 attach_obligation_cache(cache)。snapshot() 里的
+        # backlog 计算会优先用 cache.all_sync() + repo fallback（I5 miss 不
+        # 破坏读）。
+        self._obligation_cache: "ObligationHotStateCache | None" = None
+
+    def attach_obligation_cache(
+        self, obligation_cache: "ObligationHotStateCache | None"
+    ) -> None:
+        """Stage 6 Slice 6.5：延迟注入 obligation cache。
+
+        build_runtime 在完成 ``ObligationHotStateCache.bootstrap(...)`` 之后调
+        本方法，把 cache 交给 monitor 用于 dashboard backlog 统计。重复调用
+        幂等（只是替换引用）。
+        """
+        self._obligation_cache = obligation_cache
 
     def snapshot(self) -> dict[str, Any]:
         execution_shadow = (
@@ -85,10 +106,20 @@ class Phase1ShadowMonitor:
             if self.execution_fill_repo is None
             else max(len(fills_for_scope(self.execution_repo, self.state_scope)) - self.execution_fill_repo.count_fills(), 0)
         )
+        # Stage 6 Slice 6.5：cache 优先 + repo fallback。cache.all_sync() 返回
+        # None 说明未 bootstrap，退化到 obligation_repo.all_obligations()（打 PG）。
+        cached_obligations: list | None = None
+        if self._obligation_cache is not None:
+            cached_obligations = self._obligation_cache.all_sync()
+        obligation_count = (
+            len(cached_obligations)
+            if cached_obligations is not None
+            else len(self.obligation_repo.all_obligations())
+        )
         obligation_backlog = (
             None
             if self.reservation_repo is None
-            else max(len(self.obligation_repo.all_obligations()) - self.reservation_repo.count_reservations(), 0)
+            else max(obligation_count - self.reservation_repo.count_reservations(), 0)
         )
         lag = {
             "order_backlog": order_backlog,
