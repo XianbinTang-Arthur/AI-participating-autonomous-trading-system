@@ -322,7 +322,7 @@ pkill -f "python.*aats.api.main"
 
 ## 9. 4 进程拓扑验证（每次大版本升级后跑一次）
 
-> 这一节记录 Slice 6.1/6.2/6.3/6.4 合入后真跑 4 进程拓扑（gateway/market/
+> 这一节记录 Slice 6.1/6.2/6.3/6.4/6.5 合入后真跑 4 进程拓扑（gateway/market/
 > decision/execution）的标准验收步骤。用来防止 bootstrap wiring 回归。
 >
 > 依赖：§1 基础设施已 up；`docker compose --env-file .env.wsl2 -f
@@ -337,18 +337,22 @@ pkill -f "python.*aats.api.main"
 for c in aats-gateway aats-market aats-decision aats-execution; do
   echo "=== $c ==="
   docker logs "$c" 2>&1 | grep -E \
-    "kill_switch_initialized|portfolio_snapshot_cache_initialized|portfolio_repo_cache_listener_attached" \
+    "kill_switch_initialized|portfolio_snapshot_cache_initialized|portfolio_repo_cache_listener_attached|obligation_hot_state_cache_initialized" \
     | head -5
 done
 ```
 
-期望每个容器都有三条：
+期望每个容器都有四条：
 - `kill_switch_initialized bootstrap_state={... subscribed: true ...} process_role=<role>`
   （Slice 6.4：合并后的 KillSwitch sidecar 边车订阅成功）
 - `portfolio_snapshot_cache_initialized bootstrap_state={... bootstrapped: true ...}`
   （Slice 6.3：snapshot_cache 从 Redis hydrate 完成）
 - `portfolio_repo_cache_listener_attached process_role=<role>`
   （Slice 6.3 Cache Fix：save_snapshot → cache listener hook 已接线）
+- `obligation_hot_state_cache_initialized bootstrap_state={... bootstrapped: true ...}`
+  （Slice 6.5：obligation_cache 从 Redis hydrate 完成；随后 `_wire_event_subscriptions`
+  会经 `_CollectingBus` 调 `register_remote_subscription`，成功后再打一条
+  `obligation_cache_subscribed topic=execution.obligation_updates`）
 
 ### 9.2 kill_switch 跨进程 halt/resume 真跑 drill
 
@@ -762,3 +766,178 @@ done
 - 如果看到 halting → 立刻人工复盘：要么 inputs_collector 拿到了"假阳性"
   数据（去看 trial_guard 那几个字段的 raw），要么 checklist-5 的真
   inputs collector 接进来之后被 drift score threshold 当场打中
+
+### 9.8 Stage 6 Slice 6.5 ObligationHotStateCache 跨进程真跑验证
+
+Slice 6.5 给 obligation 读写路径插了一层跨进程 cache（本地 dict + Redis
+per-coid + NATS `execution.obligation_updates`）。本节验证 4 个容器全部
+bootstrap 成功、writer→reader 跨进程广播在 1 秒内可见、`active_sync()`
+读路径收敛。设计文档见
+`docs/task/stage_6_slice_6_5_obligation_hot_state_design.md`。
+
+> 本节不真动 obligation 数据，只读 Redis / NATS 状态和 `/__internal/runtime`
+> dashboard，跑完不需要清理。如果想手动 publish 一条假 obligation 进去测
+> 广播，可以跑 §9.8.3 里的 `probe_obligation_cache.py`（如果还没写就走
+> §9.8.2 的"等一次真 fill"被动验证路径）。
+
+#### 9.8.1 bootstrap log 冒烟（与 §9.1 配合）
+
+```bash
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  echo "=== $c ==="
+  docker logs "$c" 2>&1 | grep -E \
+    "obligation_hot_state_cache_initialized|obligation_cache_subscribed" \
+    | head -3
+done
+```
+
+期望每个容器各打印两条：
+- `obligation_hot_state_cache_initialized bootstrap_state={... bootstrapped: true,
+  subscribed: false ...}` ——cache 构造完成并从 Redis hydrate 了 index
+  （第一次启动 / Redis 清空 → cached_count=0 正常）
+- `obligation_cache_subscribed topic=execution.obligation_updates
+  process_role=<role>` ——`_wire_event_subscriptions` 经 `_CollectingBus`
+  聚合后成功把 `_handle_remote_event` 挂到 NATS JetStream durable consumer
+  上。**缺任何一条**说明 bootstrap wiring 被改坏了或 NATS stream 没
+  创建对应 subject，先看 `obligation_cache_subscribe_failed` 的 warning
+  行有没有带 error。
+
+I3 restart-safe 快速验证：重启任何一个容器后这两行都应再次出现，且
+`obligation_hot_state_cache_initialized` 的 `bootstrap_state.cached_count`
+在 Redis 有数据的情况下会是 ≥1（从 `aats:hot:obligation:index` 的
+`all_coids` 列表 + get_many 一次性拉回）。
+
+#### 9.8.2 Redis 侧状态巡检
+
+Slice 6.5 的 Redis 布局与 6.3 snapshot_cache 独立，两套 namespace 互不
+干扰：
+
+```bash
+# Redis 里的 obligation namespace 内容
+docker exec aats-redis redis-cli --no-raw KEYS 'aats:hot:obligation:*' | head
+
+# index key 里的 all_coids / active_coids / version
+docker exec aats-redis redis-cli GET 'aats:hot:obligation:index'
+```
+
+期望：
+- 4 个容器都起来之后，`KEYS` 应该能看到 `aats:hot:obligation:index` 和
+  若干 `aats:hot:obligation:by_coid:<client_order_id>` per-coid key
+  （第一次全新启动时可能只有 index 一个空表）
+- `GET aats:hot:obligation:index` 返回 JSON 结构 `{"all_coids": [...],
+  "active_coids": [...], "version": N}`。version 单调递增即正常；
+  4 个容器读到的是同一份（Redis 是 source of truth），不同容器同时跑
+  读不会看到回退
+
+**⚠️ 禁止手动 DEL 这些 key**：cache bootstrap 会重新 hydrate，但
+obligation_repo（Postgres）才是 source of truth，误删 index 会让
+`_handle_remote_event` 启动瞬间短暂"miss→fallback PG"。如果真要清，
+先在业务闲时、确认 4 个容器都停了再干。
+
+#### 9.8.3 跨进程广播被动验证（等一次 fill）
+
+4 个容器都 up、paper/live 数据在跑之后，随便下一单成交走完 obligation
+reserve → consume → finalize 全链路：
+
+```bash
+# 1. 先记录 execution 容器当前的 obligation publish 计数
+docker exec aats-execution python - <<'PY'
+import json
+from aats.bootstrap.logging import get_logger
+# dashboard 走 OperatorQueryService → runtime.obligation_hot_state_cache
+# 这里直接读 runtime 内存结构是不可能的（runtime 在 PID 1 里跑），所以
+# 改成拉 operator /__internal/runtime 的 JSON 输出
+import urllib.request, urllib.error
+try:
+    with urllib.request.urlopen("http://localhost:8080/__internal/runtime/summary", timeout=2) as r:
+        j = json.load(r)
+    print(json.dumps(j.get("obligation_hot_state_cache"), ensure_ascii=False))
+except urllib.error.URLError as e:
+    print("operator HTTP not up:", e)
+PY
+
+# 2. 触发一次 paper fill（或者等真单成交），下面以 sample_intent 脚本为例
+docker exec aats-decision python /app/scripts/sample_intent.py --symbol BTC-USDT --amount 0.0001
+
+# 3. 4 个容器应该在 ≤1s 内都看到同一个 client_order_id 的
+#    obligation_cache_handle_remote_event 日志
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  echo "=== $c ==="
+  docker logs "$c" --since 30s 2>&1 | grep \
+    "obligation_cache_handle_remote_event" | tail -3
+done
+```
+
+期望：
+- execution 容器自己是 writer，会在 fill commit 后打
+  `obligation_cache_publish_ok client_order_id=<coid>` 或
+  `obligation_cache_local_apply_skip reason=stale_or_equal_ts`
+  （D9 idempotent：同一条事件 apply 第二次 noop）
+- 另外 3 个容器（gateway / market / decision）都会在 ≤1 秒内看到
+  `obligation_cache_handle_remote_event client_order_id=<coid>
+  result=applied`。**任何一个容器收不到** → NATS stream 缺 subject
+  或 consumer binding 没起：先去 §9.2 的 `kill_switch_remote_applied`
+  对照检查 NATS 链路本身是否健康；如果 kill_switch 跨进程链路正常但
+  obligation 跨不过去 → 检查 9.1 步里 `obligation_cache_subscribed`
+  是否缺某个容器、再去看 `obligation_cache_subscribe_failed` warning。
+
+#### 9.8.4 risk_engine / dashboard 读路径走 cache 验证
+
+Slice 6.5 的主要收益点是 decision 的 `risk._active_local_obligations()`
+从每次打 Postgres `obligation_repo.active_obligations()` 改成先
+`cache.active_sync()` → fallback PG。验证 cache 确实被走到：
+
+```bash
+# decision 容器里 probe 一下 cache 的 snapshot
+docker exec aats-decision python - <<'PY'
+import json, urllib.request, urllib.error
+try:
+    with urllib.request.urlopen("http://localhost:8080/__internal/runtime/summary", timeout=2) as r:
+        j = json.load(r)
+    obl = j.get("obligation_hot_state_cache") or {}
+    print("process_role:", obl.get("process_role"))
+    print("bootstrapped:", obl.get("bootstrapped"))
+    print("subscribed:", obl.get("subscribed"))
+    print("cached_count:", obl.get("cached_count"))
+    print("active_count:", obl.get("active_count"))
+    print("index_version:", obl.get("index_version"))
+except urllib.error.URLError as e:
+    print("operator HTTP not up:", e)
+PY
+```
+
+期望：
+- `bootstrapped=True` / `subscribed=True`
+- 业务跑一段时间之后 `cached_count` 与 `active_count` 非 0（与
+  obligation_repo 的 count_obligations / count_active 对齐就行，
+  可能差 ±1 因为异步广播有 lag）
+- `index_version` 单调递增，4 个容器读到的 version 不必相等（每个进
+  程本地记录自己接收到的 bump 次数）
+
+I5 miss-不破坏读的快速验证：临时 stop Redis，decision 容器的 risk
+pre-check 应当继续跑（日志里会出现 `obligation_cache_active_sync_miss
+fallback=obligation_repo` 这条 warning，然后正常走 `active_obligations()`
+PG 查询），**不能**看到 RiskEngine 自己 500 或 trigger halt。恢复
+Redis 之后下一次 publish 就会重新 hydrate cache。
+
+> ⚠️ stop Redis 的 drill 会让 portfolio_snapshot_cache 同时走 fallback
+> 路径；同时 kill_switch sidecar 订阅的 Redis `kill_switch` key 也会
+> short-term 读不到。跑之前先用 §9.2 确认手动 halt/resume 路径可用，
+> 并且 §9.7.5 把 drill 痕迹清干净，不要和 Stage 9 probe 同时跑。
+
+#### 9.8.5 D9 idempotent + I4 乱序事件验证（可选）
+
+实在要手动注一条 obligation 广播事件验证 D9 的乱序 noop，可以走：
+
+```bash
+# 用 python -m aats.scripts.probe_obligation_cache（如果脚本还没写，
+# 先跳过这一步；cache 单测 tests/unit/test_obligation_hot_state_cache.py
+# 已经覆盖了 D9 + I4 的所有乱序场景，真跑主要是防 NATS wiring 回归）
+docker exec aats-decision python -m aats.scripts.probe_obligation_cache --help 2>&1 | head -5 || true
+```
+
+如果 `probe_obligation_cache` 尚未实装，本条占位；Slice 6.5 的 D9/I4
+回归已经由 `tests/unit/test_obligation_hot_state_cache.py` 的
+`TestObligationHotStateCacheIdempotent` / `TestObligationHotStateCacheRemoteEvent`
+32 条单测覆盖，真跑不必重复验证幂等语义，只需关注 §9.8.3 的广播可见性
+与 §9.8.4 的 fallback 路径。
