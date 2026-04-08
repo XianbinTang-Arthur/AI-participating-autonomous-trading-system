@@ -30,6 +30,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import get_logger, log_event
+from aats.bootstrap.telemetry import (
+    extract_trace_context,
+    inject_trace_context,
+    start_span,
+)
 from aats.bus.base import EventBus, MessageHandler
 from aats.events import topics as _topics
 from aats.schemas.common import EventEnvelope
@@ -379,6 +384,31 @@ class NatsEventBus(EventBus):
         *,
         persist: bool = True,
     ) -> None:
+        # Stage 8：把当前活动 span 的 W3C trace context 注入 envelope。
+        # inject_trace_context 在没装 OTel 或没有 active span 时是 no-op，
+        # 空 carrier 保留，下面一行 `if carrier` 才会写进 envelope。
+        # 这样做的好处：
+        #   1) 没装 OTel 时 envelope.trace_context 仍然是 None，向后兼容旧 consumer
+        #   2) 装了 OTel 但没有 parent span（例如顶层 cron 任务）时，
+        #      inject 依然 no-op，不会污染 envelope
+        #   3) 测试不启用 OTel 时断言 trace_context is None 简单直观
+        # 设计文档：docs/task/stage_8_otel_integration_design.md §D3/§D4
+        carrier: dict[str, str] = {}
+        try:
+            inject_trace_context(carrier)
+        except Exception as exc:  # pragma: no cover - 防御性兜底
+            log_event(
+                self.logger,
+                "trace_context_inject_failed",
+                level="warning",
+                topic=envelope.topic,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            carrier = {}
+        if carrier:
+            envelope = envelope.model_copy(update={"trace_context": dict(carrier)})
+
         # 同步落盘到本地 event_store（双写：JetStream + Postgres）
         # 之所以保留 Postgres 落盘，是为了：
         #   1) 跨进程查询历史事件时复用现有 SQL 索引和 dashboard 视图
@@ -405,9 +435,22 @@ class NatsEventBus(EventBus):
 
         subject = self._config.subject_for(envelope.topic)
         body = envelope.model_dump_json().encode("utf-8")
-        # JetStream publish 返回 ack，包含 stream/sequence；同步等待是为了
-        # 在 strict 模式下 publish 失败立即向 caller 抛错。
-        await self._js.publish(subject=subject, payload=body)
+        # Stage 8：publish 动作本身也开一个 span，便于 Jaeger 里看到
+        # "decision.publish_envelope → nats_send" 的耗时；name 统一前缀方便过滤。
+        with start_span(
+            f"nats.publish.{envelope.topic}",
+            attributes={
+                "aats.topic": envelope.topic,
+                "aats.event_type": envelope.event_type,
+                "aats.event_id": envelope.event_id,
+                "aats.source_component": envelope.source_component,
+                "messaging.system": "nats",
+                "messaging.destination": subject,
+            },
+        ):
+            # JetStream publish 返回 ack，包含 stream/sequence；同步等待是为了
+            # 在 strict 模式下 publish 失败立即向 caller 抛错。
+            await self._js.publish(subject=subject, payload=body)
 
     async def subscribe(self, topic: str, handler: MessageHandler) -> None:
         """订阅 topic：注册一个 durable JetStream consumer。
@@ -436,12 +479,68 @@ class NatsEventBus(EventBus):
             try:
                 payload_dict = json.loads(msg.data.decode("utf-8"))
                 envelope = EventEnvelope.model_validate(payload_dict)
+                # Stage 8：提取 W3C trace context 作为本次 handler 的父 span。
+                # extract_trace_context 在没装 OTel 或 carrier 为空时返回 None；
+                # 返回 None 时 use_context 等 OTel API 就会按"无 parent"处理，
+                # 下面创建的 span 成为新 trace root，整条链路仍然可追。
+                # 设计文档：docs/task/stage_8_otel_integration_design.md §D4
+                parent_ctx: Any = None
+                if envelope.trace_context:
+                    try:
+                        parent_ctx = extract_trace_context(envelope.trace_context)
+                    except Exception as exc:
+                        log_event(
+                            self.logger,
+                            "trace_context_extract_failed",
+                            level="warning",
+                            topic=topic,
+                            durable=durable,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                        )
+                        parent_ctx = None
                 message = {
                     "topic": envelope.topic,
                     "key": envelope.key,
                     "payload": envelope.model_dump(mode="json"),
                 }
-                await handler(message)
+                # 用 OTel 原生 API 绑定 parent context，再用 start_span 开子 span。
+                # OTel 未装时 attach 会抛 ImportError / NameError，走 except 分支
+                # 直接调用 handler（保持 monolith 无 OTel 时的现状）。
+                token: Any = None
+                if parent_ctx is not None:
+                    try:
+                        from opentelemetry.context import (  # type: ignore[import-not-found]
+                            attach,
+                            detach,
+                        )
+                        token = attach(parent_ctx)
+                    except Exception:
+                        token = None
+                try:
+                    with start_span(
+                        f"nats.receive.{topic}",
+                        attributes={
+                            "aats.topic": envelope.topic,
+                            "aats.event_type": envelope.event_type,
+                            "aats.event_id": envelope.event_id,
+                            "aats.source_component": envelope.source_component,
+                            "aats.consumer_role": self._consumer_role,
+                            "aats.durable": durable,
+                            "messaging.system": "nats",
+                            "messaging.operation": "receive",
+                        },
+                    ):
+                        await handler(message)
+                finally:
+                    if token is not None:
+                        try:
+                            from opentelemetry.context import (  # type: ignore[import-not-found]
+                                detach,
+                            )
+                            detach(token)
+                        except Exception:
+                            pass
                 await msg.ack()
             except Exception as exc:
                 log_event(

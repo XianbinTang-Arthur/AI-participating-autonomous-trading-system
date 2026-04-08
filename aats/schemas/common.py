@@ -46,6 +46,14 @@ class EventEnvelope(SchemaBase):
     topic: str
     key: str
     payload: dict[str, Any]
+    # Stage 8：W3C TraceContext 透传载体。publish 端由 NatsEventBus 调用
+    # aats.bootstrap.telemetry.inject_trace_context 填入 {"traceparent": ...,
+    # "tracestate": ...}；consumer 端 NatsEventBus.subscribe 再用
+    # extract_trace_context 还原父 span。未启用 OTel 时字段保持 None，整条链路
+    # 无额外成本。不用 Field(default_factory=dict) 是因为 model_dump_json() 在
+    # 空 dict 和 None 之间的语义差异会让旧版本 consumer 解析失败（更稳妥的做法
+    # 是不写字段）；默认 None 让旧 envelope 字节流完全向后兼容。
+    trace_context: dict[str, str] | None = None
 
 
 class SymbolTimeframe(BaseModel):
