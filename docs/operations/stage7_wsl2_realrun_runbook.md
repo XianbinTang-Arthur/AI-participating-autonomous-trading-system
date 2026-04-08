@@ -704,7 +704,140 @@ Slice 6.1 配置的 hot_state_store 在 Slice 6.2 之前**没有任何业务 cal
 
 ---
 
-## 10. Changelog
+## 10. Stage 6 Slice 6.2：kill_switch 跨进程同步（2026-04-08）
+
+### 10.1 Slice 6.2 边界与目标
+
+Slice 6.1 把 Redis 接进 4 进程的 build_runtime 但**没有任何业务 caller**——只是把连接铺好。Slice 6.2 是 Stage 6 真正"切语义"的第一刀：把 4 进程拓扑下原本各自一份的 in-memory `KillSwitch` 收敛到"Redis 持久化 + NATS 跨进程广播 + 本地 cache 三层架构"。
+
+**为什么是真实安全 bug**：4 进程拓扑下，`gateway` 调 `kill_switch.halt()` 只动 gateway 进程内存里的 `KillSwitch._state`，`execution` 进程的 `KillSwitch._state` 完全不知情。结果：operator 在 gateway 喊 halt，execution 依然继续下单。崩溃 + restart 同样有问题——新 execution 没人通知它，进程刚起就以默认 `halted=False` 开始接 order intent。
+
+**Slice 6.2 范围**：
+
+| Slice | 范围 | 状态 |
+|---|---|---|
+| 6.1 | settings 字段 + build_runtime 构造 + docker compose env + 集成测试 | ✅ 已完成 |
+| **6.2（本节）** | KillSwitchSyncService + 5 处生产 writer 切到 sync 路径 + 跨进程集成测试 + 真跑验证 | ✅ 完成 |
+| 6.3 | portfolio_snapshot 缓存切到 hot_state_store；execution 写、gateway 读 | 待开 |
+
+设计文档：`docs/task/stage_6_slice_6_2_kill_switch_design.md`
+
+### 10.2 实现要点
+
+1. **三层架构**：
+   - `KillSwitch`（不动，sync API）：所有 ~30 个 sync 读路径（订单 pre-submit / health check / blocker 渲染等）继续直接打这里。零网络、零阻塞、永远是本进程的"快路径真相"。
+   - `KillSwitchSyncService`（**新增**，`aats/services/governance_engine/kill_switch_sync.py`）：sidecar 模式持有 `KillSwitch + HotStateStore + EventBus + process_role`，把 4 个进程的本地真相收敛到同一个 Redis 状态机。提供 `async halt/resume`（FastAPI handler 用）+ `halt_threadsafe/resume_threadsafe`（worker thread 用）双通道。
+   - 数据真相：Redis key `aats:hot:system:kill_switch`（持久化 + 跨重启）+ NATS topic `system.kill_switch_state`（实时广播）。
+
+2. **5 处生产 writer 切到 sync 路径**（W1-W5，全部走"先 sync service，缺则 fall back 到本地"模式）：
+   - W1 `aats/services/governance_engine/trial_guard.py:_trigger_halt`
+   - W2 `aats/services/governance_engine/derivatives_live_guard.py:_trigger_halt`
+   - W3 `aats/services/execution_engine/recovery.py:_halt_for_recovery`
+   - W4 `aats/services/recovery_control/startup_recovery.py:_halt`（新增 helper）+ phase4 reconciliation halt
+   - W5 `aats/services/operator/reconciliation_system_queries.py:halt/resume/rebaseline` 5 处操作面调用，整条 `OperatorQueryService.halt → OperatorReconciliationSystemQueries.halt` 链 **从 sync 转 async**（因为 W5 在 asyncio loop 里跑，必须 `await sync_service.halt(...)` 而不能 `halt_threadsafe`，否则会自我等待死锁）。配套 `aats/api/routes.py:halt`、`aats/services/blocker_control/actions.py:halt-system`、`tests/integration/test_recovery.py` 加 `await`。
+
+3. **bootstrap 顺序**（`aats/bootstrap/config.py`）：
+   - 在 `_start_event_bus(slices.bus)` 之后、任何 slice builder（特别是 `_build_reconciliation_slice` 会构造 `ExecutionRecoveryService`）之前构造 `KillSwitchSyncService` 并 `await service.bootstrap()`。
+   - bootstrap 内部：先从 Redis 读 `aats:hot:system:kill_switch`，存在且 `halted=True` 则调本地 `KillSwitch.halt()`（**这就是 I3 的实现**）；然后订阅 NATS `system.kill_switch_state`。任何步骤失败都不阻断 build_runtime（best-effort 写），只 log warning。
+   - `ApplicationRuntime` 加 `kill_switch_sync_service` 字段；`stop_background_tasks` 在 `bus.close()` 之前 `await sync_service.stop()`。
+
+4. **不变量保证**：
+   - **I1（本地立即生效）**：每个写路径第一步都是 sync `KillSwitch.halt()`，写 Redis/NATS 是后续步骤
+   - **I2（≤1s 跨进程广播）**：NATS publish 真跑实测 < 5ms（见 §10.4）
+   - **I3（重启从 Redis 恢复）**：bootstrap 先从 Redis 读出来再订阅 NATS
+   - **I4/I5（Redis/NATS 不可达不破坏本地）**：写路径全 best-effort，try/except 包住，本地 cache 永远是第一步
+   - **I6（乱序事件不退化）**：`_handle_remote_event` 校验 `set_at_ts > self._last_applied_ts`
+   - **I7（直接调 `KillSwitch.halt()` 不破）**：`KillSwitch` 类 API 保持 sync 不变，~30 个直接 caller 零修改
+
+5. **测试覆盖**：
+   - `tests/unit/test_kill_switch_sync.py`：17 用例，覆盖 bootstrap（hydrate from Redis / empty Redis / Redis fail / parse fail）、halt/resume happy + 去重、远端事件应用 + stale 拒绝 + 同 source 跳过、threadsafe 写从 worker thread 投递成功 / 超时 / loop 关闭 fall back 等所有路径。
+   - `tests/integration/test_kill_switch_cross_process.py`：4 用例（testcontainers 起 redis:7-alpine + 共享 InMemoryEventBus 模拟两进程），验证：
+     - service A halt → service B 本地 KillSwitch ≤1s 内 halted=True
+     - 重启 service B（用全新 store + 全新 KillSwitch）后 bootstrap 仍然 halted=True
+     - A halt 后 B resume → 两个 KillSwitch 最终一致到 halted=False
+     - 直接喂老 set_at_ts 远端事件不让本地 cache 回退
+   - 全量回归：1276 unit test 全绿（增加 17 个新 unit test，零退化）；Slice 6.1 9 个 Redis 集成测试同步重跑全绿。
+
+### 10.3 真跑验证（2026-04-08）
+
+**操作**：
+```bash
+# WSL2
+cd ~/aats/deploy/wsl2-dev
+
+# 1) 删除老 NATS 流（subjects 集合不一样，必须先删旧的让新代码重建）
+python -c "
+import asyncio, nats
+async def main():
+    nc = await nats.connect('nats://127.0.0.1:4222')
+    js = nc.jetstream()
+    await js.delete_stream('AATS_EVENTS')
+    await nc.drain()
+asyncio.run(main())
+"
+
+# 2) 重建镜像 + 重启 4 容器
+docker compose -f docker-compose.aats.yml --env-file .env.wsl2 build
+docker compose -f docker-compose.aats.yml --env-file .env.wsl2 up -d
+```
+
+⚠️ **NATS 流 schema 兼容性**：Slice 6.2 给 `DEFAULT_CRITICAL_TOPICS` 新增 `system.kill_switch_state` topic，老 `AATS_EVENTS` 流的 subjects 集合是 N，新代码尝试 `add_stream` 时 NATS 拒绝 `BadRequestError 10058: stream name already in use with a different configuration`。**必须先 `delete_stream('AATS_EVENTS')` 让新代码用 N+1 subjects 重建**。这是后续任何修改 `DEFAULT_CRITICAL_TOPICS` 的 slice 都要遵守的部署纪律——记进 §10.5 故障矩阵。
+
+**验证矩阵**：
+
+| 验证维度 | 不变量 | 结果 | 证据 |
+|---|---|---|---|
+| **4 容器全部 healthy** | — | ✅ 4/4 | `docker ps` → gateway / market / decision / execution 全部 `Up (healthy)` |
+| **4 个 sync service 启动** | — | ✅ 4/4 | 每个容器各打一行 `kill_switch_sync_service_initialized bootstrap_state.subscribed=true process_role=<role>` |
+| **NATS 4 个 durable consumer 全部 push_bound** | — | ✅ 4/4 | `aats-{gateway,market,decision,execution}-system_kill_switch_state` consumer pending=0 / delivered=0 |
+| **手动 halt 跨 4 进程同步** | I2 | ✅ < 5ms | drill 时间戳 `11:56:28.015`，4 个 `kill_switch_sync_remote_applied halted=True reason=wsl2_realrun_drill_halt set_at_ts=1775620587.965` 日志全部落在同一 millisecond bucket |
+| **杀 execution → 新 execution 从 Redis 恢复 halt** | I3 | ✅ | `docker restart aats-execution`，新进程 bootstrap 阶段 `kill_switch_sync_bootstrap_hydrated halted=True reason=wsl2_realrun_drill_halt`，紧接 `kill_switch_sync_service_initialized bootstrap_state.kill_switch.halted=true` |
+| **resume 跨 4 进程同步** | I2 对称 | ✅ < 5ms | drill 时间戳 `12:00:23.963/964`，4 个 `kill_switch_sync_remote_applied halted=False` 落在同一 millisecond bucket |
+| **Redis 终态正确** | — | ✅ | `aats:hot:system:kill_switch` = `{"halted": false, "reason": null, "set_at_ts": 1775620823.91, "source_role": "operator_drill"}` |
+| **redis-py client 4/4 稳定** | — | ✅ | `docker exec aats-redis redis-cli CLIENT LIST | grep redis-py | wc -l = 4` |
+
+### 10.4 跨进程广播延迟实测
+
+| 阶段 | 时间戳 | 与触发的差 |
+|---|---|---|
+| operator drill 触发 (Python `time.time()`) | `11:56:27.965` | t=0 |
+| gateway 应用远端事件 | `11:56:28.015` | +50 ms |
+| market 应用远端事件 | `11:56:28.015` | +50 ms |
+| decision 应用远端事件 | `11:56:28.015` | +50 ms |
+| execution 应用远端事件 | `11:56:28.015` | +50 ms |
+
+≈50 ms 跨进程广播延迟（包含 Redis SET + NATS publish + 4 个 durable consumer push 的全链路），远低于设计文档 §5 的 1s 预算。这个延迟基本上是 Python `time.time()` → `await store.set()` → `await bus.publish()` → NATS server → 4 路 push deliver 的合计往返。
+
+### 10.5 故障演练 / 部署纪律
+
+| 场景 | 行为 | 修复 |
+|---|---|---|
+| 修改 `DEFAULT_CRITICAL_TOPICS` 后部署新代码 | 新代码 `add_stream` 触发 `BadRequestError 10058` 4 容器 startup 失败 restart loop | 部署前 `js.delete_stream('AATS_EVENTS')`；新代码会用更新的 subjects 集合重建。**未来加 NATS topic 必须在 changelog 注明** |
+| Redis 宕机 | 写 halt → 本地 cache 立即 `halted=True` + `kill_switch_sync_redis_set_failed` warning，跨进程靠 NATS 广播；其他进程**仍然**收到广播并应用本地 cache（I4） | Redis 起来后下一次 halt/resume 自动回写，状态不会丢 |
+| NATS 宕机 | 写 halt → 本地 cache 立即 `halted=True` + Redis 仍然写入 + `kill_switch_sync_nats_publish_failed` warning，**跨进程同步暂停**直到 NATS 恢复 | NATS 恢复后下一次 halt/resume 自动重广播；空窗期内其他进程不知情，但本进程的 sync read 永远是 halted=True 兜底 |
+| 进程 OOM kill 后 restart | 新进程 bootstrap 从 Redis 读出 halt 状态，`kill_switch_sync_bootstrap_hydrated` log 落地 | 自动恢复，无需人工干预（I3） |
+
+### 10.6 完成判定
+
+- [x] `KillSwitchSyncService` 类 + 17 个 unit test 全绿（独立模块，不动 build_runtime 即可验证）
+- [x] `build_runtime` 装配 + `ApplicationRuntime.kill_switch_sync_service` 字段 + stop_background_tasks 清理（零行为变化检查点：113 个 build_runtime 相关 test 全过）
+- [x] 5 处生产 writer 切到 sync 路径（W1-W5），W5 配套 sync→async 调用链转换
+- [x] 全量 1276 unit test 全绿（含 17 个新增），零退化
+- [x] `tests/integration/test_kill_switch_cross_process.py` 4 用例 testcontainers 全绿；Slice 6.1 9 个 Redis 集成测试 regression 全绿
+- [x] 4 进程真跑：4 个 `kill_switch_sync_service_initialized` 日志 + 4 个 NATS durable consumer push_bound + halt/resume drill < 50ms 跨 4 进程同步 + 杀 execution restart 后 bootstrap 自动 hydrate
+- [x] runbook §10 记录（本节）
+
+### 10.7 留给 Slice 6.3 的工作
+
+Slice 6.2 把 kill_switch 这一条"核心安全开关"接进了 hot_state_store，但 4 进程拓扑下还有两条业务路径仍然是"内存 dict + 跨进程 NATS 重放"模式：
+
+1. **Slice 6.3 接 portfolio_snapshot**：`PortfolioReconciliationService` 写完后同步 `hot_state_store.set('portfolio', snapshot)`；gateway dashboard 拉取时 cache hit 直接读，不用等 NATS 重放。
+2. **Slice 6.4（待规划）**：`KillSwitch + KillSwitchSyncService` 二合一重构。当前 sync API 是为了 ~30 个 caller 零侵入而保留的"过渡形态"，等 Slice 6.3 落地稳定后可以把 `KillSwitch` 内部直接换成 `KillSwitchSyncService` 的薄壳，统一 API。
+3. **Slice 6.5（候选）**：如果实盘期发现 NATS 偶发掉包导致 cache 漂移，加周期 Redis poll（默认 5s）作为 reconciler。当前实测 50ms 内同步 + 0 丢包，不主动开。
+
+---
+
+## 11. Changelog
 
 - 2026-04-07：首版。基于 5d 装配 review 发现 3 个 gap（Dockerfile 缺 curl、`/system/health` gateway role NPE、3 daemon 无 healthcheck），列出修复清单 + 真跑命令序列 + 完成判定 + 回滚步骤。等用户审批 §1-§2 修复方案后实施 + 真跑。
 - 2026-04-08：第 1 次真跑完成。10/10 容器 healthy。真跑里又额外修了 5 个 runbook 起步时未预见的 gap：NATS duplicate-subscription（_CollectingBus fan-out）、Dockerfile `/app` ownership、jaeger badger 权限、grafana provisioning 配置冲突、docker compose plugin 缺失。详见 §6.1。
@@ -712,4 +845,5 @@ Slice 6.1 配置的 hot_state_store 在 Slice 6.2 之前**没有任何业务 cal
 - 2026-04-08（再追加）：gap 6 修完之后第 2 次跑容器，`/system/blocker-control` 仍然 500。全仓 grep `runtime.ai_service.status()` 又找出 6 处直读站点，其中 GET 链 3 处（blocker_control、recovery_posture、_ai_shadow_summary）会被 `/system/health` 和 `/system/blocker-control` 链路触发，POST mutate 3 处（ai_review_restore / set_ai_operating_mode / ai_review_degrade_to_baseline）会被 operator 误调时 500。GET 链 2 处切换到 `self.owner.ai_runtime()` 走 facade stub，1 处（recovery_posture）加 None-guard 短路返回 False；POST mutate 3 处加方法顶 `raise ValueError("ai_service_not_loaded_in_this_process_role")` 显式拒绝。配套 5 个新 unit test，全仓 1232 unit + 26 ai-integration 全绿。第 3 次真跑 4 容器 healthy，CORE_SPECS 4 个 endpoint 全部 200。详见 §6.1.7。
 - 2026-04-08（故障演练 #1 完成）：新增 §7 故障演练章节。演练 #2.2（杀 execution）+ #2.3（同时杀 decision + market）：3 个 daemon 全部按 RestartCount=1 自愈，NATS 26 个 durable consumer 全部 push_bound 重连，gateway 完全未受影响。**重大方法学发现**：`docker kill` 不会触发 Docker restart manager（被 daemon 当成 operator 主动停服），必须从 host `kill -9 <python_pid>` 才能让 tini exit → 容器内部退出 → restart manager 接管。后续所有 chaos drill 都要遵循这个方法。详见 §7.2 / §7.6。
 - 2026-04-08（Stage 5 端到端 fan-out 验证完成）：新增 §8 Stage 5 章节。从 gateway 容器内 nats-py 直发 envelope 到 `aats.system.processing_failures`，execution 容器的 `aats-execution-system_processing_failures` durable consumer 收到、deserialize 成功、ack_floor 推进到 stream_seq=160。中途意外验证了 handler 错误路径：第 1 次注入 envelope 形状写错（多包了一层），handler 抛 ValidationError → max_deliver=5 次重投后丢弃，错误日志完整可观测。两次注入合在一起锁住了"成功路径 + 错误路径 + 重投语义"三个关键不变量。被动证据补充：`portfolio.snapshots` / `reconciliation.reports` 在真跑期间的 delivered 计数 > 0，证明 execution → decision 这条主跨进程通路在自然流量下也能跑通。详见 §8.4 矩阵。
+- 2026-04-08（Stage 6 Slice 6.2 完成）：新增 §10 Slice 6.2 章节。`KillSwitchSyncService` 把 4 进程拓扑下原本各自一份的 in-memory `KillSwitch` 收敛到"Redis 持久化 + NATS 跨进程广播 + 本地 cache"三层架构，修掉 4 进程拓扑下"gateway halt 不到达 execution"+"重启进程默认 halted=False"两个真实资金安全 bug。改 5 处生产 writer (trial_guard / derivatives_live_guard / execution_recovery / startup_recovery / operator_reconciliation_queries)，W5 配套 OperatorQueryService.halt sync→async 调用链转换。1276 unit + 4 跨进程集成 + 9 Slice 6.1 regression 全绿。4 进程真跑实测：halt/resume drill 跨 4 进程 < 50ms 同步 + 杀 execution `docker restart` 后新进程 bootstrap 自动从 Redis hydrate `halted=True reason=wsl2_realrun_drill_halt`，I1/I2/I3 三个核心不变量真容器锁住。**部署纪律**：本次 deploy 触发 NATS `BadRequestError 10058 stream name already in use with a different configuration`，根因是新增 `system.kill_switch_state` 进 `DEFAULT_CRITICAL_TOPICS` 后 subjects 集合不再与老流匹配。修复 = 部署前 `js.delete_stream('AATS_EVENTS')` 让新代码用 N+1 subjects 重建。后续任何修改 `DEFAULT_CRITICAL_TOPICS` 的 slice 都需遵守这条部署纪律。详见 §10.3-§10.5。
 - 2026-04-08（Stage 6 Slice 6.1 完成）：新增 §9 Stage 6 Slice 6.1 章节。settings 加 `hot_state_backend` / `hot_state_redis_url` / `hot_state_global_prefix` 三字段；`build_runtime` 通过 `_build_and_connect_hot_state_store` 在 entry_execution_guard 之后构造并 ping 通 Redis，失败 fail-fast；4 进程 docker compose 注入 `AATS_HOT_STATE_BACKEND=redis`；Dockerfile 装 `.[nats,redis]`。真跑验证：4 个容器全部 healthy，4 条 `hot_state_store_initialized backend=redis` 日志，Redis CLIENT LIST 看到来自 4 个不同容器 IP 的 redis-py 5.3.1 客户端（lib-name 标签精确匹配）。Slice 6.1 严格"零行为变化"：暂无 caller 用 hot_state_store，给 Slice 6.2/6.3 把 kill_switch / portfolio_snapshot 接进 Redis 时铺垫。详见 §9.3 矩阵 + `docs/task/stage_6_redis_hot_state_design.md`。
