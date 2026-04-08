@@ -837,7 +837,153 @@ Slice 6.2 把 kill_switch 这一条"核心安全开关"接进了 hot_state_store
 
 ---
 
-## 11. Changelog
+## 11. Stage 6 Slice 6.3：portfolio_snapshot 接 hot_state_store（2026-04-08）
+
+### 11.1 Slice 6.3 边界与目标
+
+Slice 6.2 把 `KillSwitch` 这一条核心安全开关接进了 hot_state_store，证明了"sidecar + Redis 持久化 + NATS 广播 + 本地 cache"四件套在 4 进程拓扑里是稳定可用的范式。Slice 6.3 把同一套范式套到第二条业务通路：**latest portfolio snapshot**。
+
+**为什么是真实业务 bug**：4 进程拓扑下 `gateway` 的 dashboard / operator API 反复调 `OperatorQueryService._latest_scoped_snapshot`，funnel 到 `portfolio_repo.latest_for_scope(...)` 直接打 PG。symbols 扩张后这一路 QPS 会线性增长。Slice 6.3 在 query 路径插一层共享缓存，把 latest snapshot 在 4 个进程间用 NATS 实时同步、用 Redis 持久化兜底重启 hydrate。
+
+| Slice | 范围 | 状态 |
+|---|---|---|
+| 6.1 | settings 字段 + build_runtime 构造 + docker compose env + 集成测试 | ✅ 已完成 |
+| 6.2 | KillSwitchSyncService + 5 处生产 writer 切到 sync 路径 + 跨进程集成测试 + 真跑验证 | ✅ 已完成 |
+| **6.3（本节）** | PortfolioSnapshotCache + outbox publisher commit hook + query_service cache 优先 + 4 进程真跑 | ✅ 完成 |
+| 6.4 | KillSwitch + KillSwitchSyncService 二合一重构（候选） | 待开 |
+
+设计文档：`docs/task/stage_6_slice_6_3_portfolio_snapshot_design.md`
+
+### 11.2 实现要点
+
+1. **三层架构**（与 Slice 6.2 同 sidecar 模板）：
+   - `OperatorQueryService._latest_scoped_snapshot`（`aats/services/operator/query_service.py:957`，已存在 10 处 caller）：sync 路径，dashboard / operator API 子树。本 slice 只在这一处加 cache 优先 + portfolio_repo fallback，sync 签名保持不变。
+   - `PortfolioSnapshotCache`（**新增**，`aats/services/portfolio_service/snapshot_cache.py`）：sidecar 持有 `HotStateStore + EventBus + process_role`。把 4 个进程的 dashboard 视图收敛到同一份"最新 snapshot 视图"。
+   - 数据真相：Redis key `aats:hot:portfolio:latest:<scope_fingerprint>`（持久化 + 跨重启）+ NATS topic `portfolio.snapshots`（已存在的实时广播，由 outbox publisher 现有 `flush_pending` 驱动，**cache 自己不广播 NATS**）。
+
+2. **关键设计决策**（设计文档 §4.2）：
+   - **D5**：`cache.publish(snapshot)` = 同步本地 dict + best-effort 写 Redis；**不广播 NATS**，避免和 outbox publisher 双发。
+   - **D6**：`_handle_remote_event` 用 `snapshot.snapshot_ts <= 本地` idempotent noop 规则，同时承担"自回环跳过"+"防退化"+"同毫秒 corner case"三个职责。
+   - **D8**：4 个 process_role 都装 cache，统一行为，cache 类没有 process_role 分支。
+   - **D9**：cache 注入点严格限定在 `query_service._latest_scoped_snapshot`，**不 wrap PortfolioRepository、不修改 latest_snapshot_for_scope helper**。所有 production 路径（context_builder / coordinator / recovery / reconciliation / startup_recovery）直接打 PG，**完全绕过 cache**，避免 cache 偏差污染 critical 路径。
+
+3. **bootstrap 顺序与 NATS subscribe**（`aats/bootstrap/config.py`）：
+   - 在 `_start_event_bus(slices.bus)` + `KillSwitchSyncService.bootstrap()` 之后立即构造 `PortfolioSnapshotCache`。
+   - **关键陷阱**：cache 的 NATS 订阅**必须**走 `_wire_event_subscriptions` 阶段的 `_CollectingBus`，**不能**在 `bootstrap()` 内部直接订阅。原因：`portfolio.snapshots` 已经被 `audit_service` / `reconciliation_service` 订阅，NATS 同 (role, topic) 只允许**一个 durable binding**，cache 如果在 bootstrap 期间提前 subscribe 会触发 `nats: JetStream.Error consumer is already bound to a subscription`。
+   - 解决：`bootstrap()` 加 `subscribe: bool = True` 默认参数，production caller 传 `subscribe=False` 把订阅推迟；新增公开方法 `register_remote_subscription(bus)`，在 `_wire_event_subscriptions` 内部经 `_CollectingBus.flush` 路径和 audit/reconciliation 共用同一个 fan-out handler。默认 `subscribe=True` 保留单元测试 + InMemoryEventBus 模拟下的"一次到位"语义。
+   - `ApplicationRuntime` 加 `portfolio_snapshot_cache` 字段；`stop_background_tasks` 在 kill_switch_sync_service.stop() 之后 `await cache.stop()`。
+
+4. **outbox publisher commit hook**（`aats/services/portfolio_service/outbox.py`）：
+   - `PostgresPortfolioOutboxPublisher` dataclass 加 `snapshot_cache: PortfolioSnapshotCache | None = None` 字段。
+   - 在 `persist_bootstrap_snapshot` 与 `persist_fill_projection` 的 commit 之后、`flush_pending` 之前调 `await self._publish_to_cache(snapshot)`，把最新 snapshot 注入 cache（同步本地 dict + best-effort Redis，不抛）。
+   - 调用顺序：DB commit → cache publish → flush_pending（NATS 广播）。execution 进程的 query 路径不必等 NATS roundtrip 就能命中 cache，远端 3 个进程通过 NATS 接收。
+
+5. **不变量保证**（设计文档 §4.3）：
+   - **I1（writer self-visibility）**：execution 写完 outbox 后立即调 cache.publish，自己的 query 路径下一拍命中本地 dict
+   - **I2（≤1s 跨进程同步）**：NATS publish 真跑实测 < 5ms（与 §10.4 同链路）
+   - **I3（重启 hydrate）**：bootstrap 先从 Redis 读 `aats:hot:portfolio:latest:<scope>`，存在且能 parse → 写本地 dict
+   - **I4/I5（Redis/NATS 不可达不破坏本地）**：cache 写路径全 best-effort，try/except 包住，本地 dict 永远是第一步
+   - **I6（cache miss 不破坏读）**：sync caller `_latest_scoped_snapshot` 在 cache.get_sync 返回 None 时 fallback 到 portfolio_repo
+   - **I7（10 处 sync caller API 不变）**：cache 注入是 OperatorQueryService 私有字段，sync 签名不动
+   - **I8（乱序事件 noop）**：D6 的 `snapshot_ts <= 本地` 规则
+   - **I9（scope 隔离）**：`scope_fingerprint = f"{product_type}:{margin_mode}"` 自然隔离
+
+6. **测试覆盖**：
+   - `tests/unit/test_portfolio_snapshot_cache.py`：15 用例，覆盖 bootstrap (Redis hydrate / empty / parse fail / Redis fail) + publish happy / stale noop + remote event apply / stale skip / parse fail + scope 隔离 + get_sync miss + diagnostic snapshot()。
+   - `tests/integration/test_portfolio_snapshot_cache_cross_process.py`：4 用例，testcontainers 起 redis:7-alpine + 共享 InMemoryEventBus 模拟两进程，验证：
+     - I2 service A publish → service B 本地 dict ≤1s 内拿到
+     - I3 重启 cache B 后 bootstrap 仍然 hydrate 出 A publish 的 snapshot
+     - I9 两个 scope 互不污染
+     - I8 stale 远端事件不让 B 本地 cache 退化
+   - 全量回归：1291 unit test 全绿（增加 15 个新 unit test，零退化）；Slice 6.1 / 6.2 集成测试同步重跑全绿。
+
+### 11.3 真跑验证（2026-04-08）
+
+**操作**：
+```bash
+# WSL2，从 /mnt/d 直接跑（避免 sync_to_wsl2.sh pull 覆盖 /home/arthur 的 6.2 work-in-progress）
+cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem/deploy/wsl2-dev
+
+# 1) 重建镜像 + 重启 4 容器（NATS stream subjects 集合无变化，无需 delete_stream）
+docker compose -f docker-compose.aats.yml --env-file .env.wsl2.template build
+docker compose -f docker-compose.aats.yml --env-file .env.wsl2.template up -d
+
+# 2) 用 deploy/wsl2-dev/probe_snapshot_cache.py 注入一份 sample snapshot 进 Redis
+docker run --rm --network aats-dev_aats \
+  -v /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem/deploy/wsl2-dev/probe_snapshot_cache.py:/probe.py:ro \
+  -e PYTHONPATH=/app -e AATS_HOT_STATE_REDIS_URL=redis://redis:6379/0 \
+  aats-base:dev python /probe.py
+
+# 3) 验证 Redis key
+docker exec aats-redis redis-cli KEYS 'aats:hot:portfolio:*'
+docker exec aats-redis redis-cli GET 'aats:hot:portfolio:latest:spot:cash'
+
+# 4) restart 一个进程验证 hydrate
+docker restart aats-gateway
+
+# 5) 验证 operator API 直接命中 cache
+curl -s http://localhost:8000/portfolio/latest | python -m json.tool
+```
+
+**验证矩阵**（设计文档 §6 Step 7 的 7 维度）：
+
+| 验证维度 | 不变量 | 结果 | 证据 |
+|---|---|---|---|
+| **D1 4 个 cache 实例全部 initialized** | — | ✅ 4/4 | 每个容器各打一行 `portfolio_snapshot_cache_initialized bootstrap_state.bootstrapped=true process_role=<role>` |
+| **subscribe via _CollectingBus 没有 NATS duplicate-binding** | — | ✅ | `docker logs <c> | grep -iE 'consumer is already|nats.*error'` 4 容器全部 0 命中；4 个 `nats_subscription_registered durable=aats-<role>-portfolio_snapshots` 各 1 条 |
+| **D2/I2 跨进程实时同步** | I2 | ✅ | execution 在 13:33:29.462 触发 JetStream 历史 replay，4 个进程的 `portfolio_snapshot_cache_remote_applied snapshot_ts=2026-04-08T05:33:29.462407+00:00` 时间戳分别落在 13:33:29.467 / 13:33:29.467 / 13:33:29.678 / 13:33:30.728，跨 4 进程 < 1s |
+| **D5 cache.publish 写 Redis** | — | ✅ | `probe_snapshot_cache.py` 跑完后 `redis-cli KEYS 'aats:hot:portfolio:*'` → `aats:hot:portfolio:latest:spot:cash`；GET 出来的 JSON 含 `decision_id="probe-decision-1"` |
+| **I3 重启 hydrate from Redis** | I3 | ✅ | `docker restart aats-gateway`，新 gateway 进程日志 `portfolio_snapshot_cache_bootstrap_hydrated decision_id=probe-decision-1 snapshot_ts=2026-04-08T05:39:03.696085+00:00`，紧接 `cached_scopes=["spot:cash"]` |
+| **D4 query_service 命中 cache** | — | ✅ | `curl http://localhost:8000/portfolio/latest` 返回的 JSON `decision_id` = `probe-decision-1`、`snapshot_ts` = `2026-04-08T05:39:03.696085Z`、`balances.USDT` = `100000` ← 全部来自 probe 注入的 snapshot；gateway 本身没有 portfolio_service 写路径，唯一来源就是 cache |
+| **kill_switch_sync 回归（D7）** | — | ✅ 4/4 | 4 个容器都打了 `kill_switch_sync_subscribed process_role=<role> topic=system.kill_switch_state` + `kill_switch_sync_service_initialized`，Slice 6.2 完全无退化 |
+
+### 11.4 NATS duplicate-binding 修复（实战发现的真陷阱）
+
+第一次跑的时候 4 容器全部 restart loop，stack：
+
+```
+nats.js.errors.Error: nats: JetStream.Error consumer is already bound to a subscription
+  File ".../aats/bus/nats_bus.py:470", in subscribe
+    sub = await self._js.subscribe(...)
+  File ".../aats/bootstrap/config.py:2515", in flush  (_CollectingBus)
+    await self._bus.subscribe(topic, _fan_out)
+  File ".../aats/bootstrap/config.py:3549", in _wire_event_subscriptions
+    await collector.flush()
+```
+
+**根因**：第一版实现里 `PortfolioSnapshotCache.bootstrap()` 直接 `await self._bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, ...)`。bootstrap 在 `_start_event_bus` 之后、`_wire_event_subscriptions` 之前跑，所以 cache 的 subscribe 比 collector.flush 先到 NATS，先创建了一个 durable consumer `aats-execution-portfolio_snapshots`（execution role 同时是 audit_service / reconciliation_service 的订阅 role）。然后 `_wire_event_subscriptions` 阶段 collector 把 audit_service + reconciliation_service 的 subscribe 聚合成一个 fan-out 再发到同一个 (role, topic)，nats-py 拒绝。
+
+Stage 7 修 _CollectingBus 的时候已经处理过 POSITION_TARGETS / PORTFOLIO_SNAPSHOTS / RECONCILIATION_REPORTS 三个 topic 在 critical + observer 双订阅的 case，cache 加进来后必须**走同一个 collector**否则就还原回去了。
+
+**修复**：
+- `PortfolioSnapshotCache.bootstrap` 加 `subscribe: bool = True` 默认参数（保持单元测试 + in-memory 模拟一次到位）。
+- 新增公开方法 `register_remote_subscription(bus: EventBus)`，bus 既可以是 `_CollectingBus` 也可以是真实 EventBus。
+- production caller `build_runtime` 传 `subscribe=False` 让 bootstrap 只做 Redis hydrate，订阅推迟到 `_wire_event_subscriptions` 调 `collector.register_remote_subscription(...)`，最终 `collector.flush()` 把 audit / reconciliation / cache 三者收束成同一个 fan-out handler，落在同一个 NATS durable consumer 上。
+- 32 个 cache + kill_switch_sync 单元测试 + 3 个 4-process smoke 测试在 fix 后全部继续过。
+- 部署纪律 update：**任何接 hot_state_store 的新 sidecar，如果想订阅 NATS topic 都必须走 `_wire_event_subscriptions` 内的 collector，绝不能在 bootstrap() 内部直接 subscribe**。Slice 6.4 KillSwitchSyncService 的 NATS 订阅之前没踩到这个坑，是因为 `system.kill_switch_state` 这个 topic 只有 sync_service 一个订阅者，没有 fan-out。
+
+### 11.5 完成判定
+
+- [x] `PortfolioSnapshotCache` 类 + 15 个 unit test 全绿（独立模块，不动 build_runtime 即可验证）
+- [x] `build_runtime` 装配 + `ApplicationRuntime.portfolio_snapshot_cache` 字段 + stop_background_tasks 清理（零行为变化检查点：113 个 build_runtime 相关 test 全过）
+- [x] outbox publisher commit hook 注入 cache（`persist_bootstrap_snapshot` + `persist_fill_projection` 两个写路径）
+- [x] `OperatorQueryService._latest_scoped_snapshot_uncached` cache 优先 + portfolio_repo fallback
+- [x] 全量 1291 unit test 全绿（含 15 个新增），零退化
+- [x] `tests/integration/test_portfolio_snapshot_cache_cross_process.py` 4 用例 testcontainers 全绿；Slice 6.1 / 6.2 集成测试 regression 全绿
+- [x] 4 进程真跑：4 个 `portfolio_snapshot_cache_initialized` 日志 + 4 个 `nats_subscription_registered` durable consumer 各 1 条 + 0 个 `consumer is already bound` 错误 + probe 注入 snapshot → Redis 写入成功 → restart gateway 后 `bootstrap_hydrated` 日志 + curl `/portfolio/latest` 返回 probe 注入的内容
+- [x] runbook §11 记录（本节）
+
+### 11.6 留给 Slice 6.4+ 的工作
+
+Slice 6.3 把 `portfolio_snapshot` 这条主业务通路接进了 hot_state_store，证明了 sidecar 范式可以从"安全开关"扩展到"业务热数据"。下一步候选：
+
+1. **Slice 6.4 KillSwitch 二合一重构**：当前 `KillSwitch` 是 sync API、`KillSwitchSyncService` 是 async sidecar，30+ 个 sync caller 零侵入。Slice 6.3 验证完毕后可以把 `KillSwitch` 内部直接换成 `KillSwitchSyncService` 的薄壳，统一 API 减一层间接。
+2. **Slice 6.5 portfolio_snapshot reconciler**：如果实盘期发现 NATS 偶发掉包导致 cache 漂移，加周期 Redis poll（默认 5s）作为 reconciler。当前实测跨 4 进程 < 1s 同步、0 丢包，不主动开。
+3. **Slice 6.6 其他热数据**：`market_snapshot` / `feature_snapshot` / `decision_outcome` 这三类 4 进程都要读的"准实时视图"是下一个候选。优先级排序按"PG 直查 QPS × 数据 staleness 容忍度"算分。
+
+---
+
+## 12. Changelog
 
 - 2026-04-07：首版。基于 5d 装配 review 发现 3 个 gap（Dockerfile 缺 curl、`/system/health` gateway role NPE、3 daemon 无 healthcheck），列出修复清单 + 真跑命令序列 + 完成判定 + 回滚步骤。等用户审批 §1-§2 修复方案后实施 + 真跑。
 - 2026-04-08：第 1 次真跑完成。10/10 容器 healthy。真跑里又额外修了 5 个 runbook 起步时未预见的 gap：NATS duplicate-subscription（_CollectingBus fan-out）、Dockerfile `/app` ownership、jaeger badger 权限、grafana provisioning 配置冲突、docker compose plugin 缺失。详见 §6.1。
@@ -847,3 +993,4 @@ Slice 6.2 把 kill_switch 这一条"核心安全开关"接进了 hot_state_store
 - 2026-04-08（Stage 5 端到端 fan-out 验证完成）：新增 §8 Stage 5 章节。从 gateway 容器内 nats-py 直发 envelope 到 `aats.system.processing_failures`，execution 容器的 `aats-execution-system_processing_failures` durable consumer 收到、deserialize 成功、ack_floor 推进到 stream_seq=160。中途意外验证了 handler 错误路径：第 1 次注入 envelope 形状写错（多包了一层），handler 抛 ValidationError → max_deliver=5 次重投后丢弃，错误日志完整可观测。两次注入合在一起锁住了"成功路径 + 错误路径 + 重投语义"三个关键不变量。被动证据补充：`portfolio.snapshots` / `reconciliation.reports` 在真跑期间的 delivered 计数 > 0，证明 execution → decision 这条主跨进程通路在自然流量下也能跑通。详见 §8.4 矩阵。
 - 2026-04-08（Stage 6 Slice 6.2 完成）：新增 §10 Slice 6.2 章节。`KillSwitchSyncService` 把 4 进程拓扑下原本各自一份的 in-memory `KillSwitch` 收敛到"Redis 持久化 + NATS 跨进程广播 + 本地 cache"三层架构，修掉 4 进程拓扑下"gateway halt 不到达 execution"+"重启进程默认 halted=False"两个真实资金安全 bug。改 5 处生产 writer (trial_guard / derivatives_live_guard / execution_recovery / startup_recovery / operator_reconciliation_queries)，W5 配套 OperatorQueryService.halt sync→async 调用链转换。1276 unit + 4 跨进程集成 + 9 Slice 6.1 regression 全绿。4 进程真跑实测：halt/resume drill 跨 4 进程 < 50ms 同步 + 杀 execution `docker restart` 后新进程 bootstrap 自动从 Redis hydrate `halted=True reason=wsl2_realrun_drill_halt`，I1/I2/I3 三个核心不变量真容器锁住。**部署纪律**：本次 deploy 触发 NATS `BadRequestError 10058 stream name already in use with a different configuration`，根因是新增 `system.kill_switch_state` 进 `DEFAULT_CRITICAL_TOPICS` 后 subjects 集合不再与老流匹配。修复 = 部署前 `js.delete_stream('AATS_EVENTS')` 让新代码用 N+1 subjects 重建。后续任何修改 `DEFAULT_CRITICAL_TOPICS` 的 slice 都需遵守这条部署纪律。详见 §10.3-§10.5。
 - 2026-04-08（Stage 6 Slice 6.1 完成）：新增 §9 Stage 6 Slice 6.1 章节。settings 加 `hot_state_backend` / `hot_state_redis_url` / `hot_state_global_prefix` 三字段；`build_runtime` 通过 `_build_and_connect_hot_state_store` 在 entry_execution_guard 之后构造并 ping 通 Redis，失败 fail-fast；4 进程 docker compose 注入 `AATS_HOT_STATE_BACKEND=redis`；Dockerfile 装 `.[nats,redis]`。真跑验证：4 个容器全部 healthy，4 条 `hot_state_store_initialized backend=redis` 日志，Redis CLIENT LIST 看到来自 4 个不同容器 IP 的 redis-py 5.3.1 客户端（lib-name 标签精确匹配）。Slice 6.1 严格"零行为变化"：暂无 caller 用 hot_state_store，给 Slice 6.2/6.3 把 kill_switch / portfolio_snapshot 接进 Redis 时铺垫。详见 §9.3 矩阵 + `docs/task/stage_6_redis_hot_state_design.md`。
+- 2026-04-08（Stage 6 Slice 6.3 完成）：新增 §11 Stage 6 Slice 6.3 章节。`PortfolioSnapshotCache` 把 latest portfolio snapshot 接进 hot_state_store + NATS sidecar 模板，4 进程拓扑下 dashboard / operator API 不再每次都打 PG。改 outbox publisher（commit hook 注入 cache）+ query_service（cache 优先 + portfolio_repo fallback）+ build_runtime 装配（cache 字段 + stop hook + register_remote_subscription via collector）。15 unit + 4 跨进程集成 testcontainers + 1291 全量 unit 全绿。4 进程真跑实测：4 个 cache initialized + 0 个 NATS duplicate-binding + probe 注入 → Redis 写入 → restart gateway → bootstrap_hydrated → curl `/portfolio/latest` 返回 probe 内容，I1/I2/I3/D4/D5 五个核心不变量真容器锁住。**部署纪律新增**：任何接 hot_state_store 的新 sidecar 想订阅已有 NATS topic 都必须走 `_wire_event_subscriptions` 内的 `_CollectingBus`，不能在 bootstrap() 内部直接 subscribe，否则会因为 NATS 同 (role, topic) 只允许一个 durable binding 触发 `consumer is already bound to a subscription` 错误。第一版实现踩到这个坑，修复方法是给 `bootstrap` 加 `subscribe: bool = True` 默认参数 + 新增 `register_remote_subscription(bus)` 公开方法，让 production 路径 deferred subscribe 走 collector。详见 §11.3-§11.4。
