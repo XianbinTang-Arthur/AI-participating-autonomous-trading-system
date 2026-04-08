@@ -125,12 +125,30 @@ class PortfolioSnapshotCache:
     # 启动 / 关闭
     # ──────────────────────────────────────────────────────────────────
 
-    async def bootstrap(self, *, scope_fingerprint: str) -> None:
+    async def bootstrap(
+        self,
+        *,
+        scope_fingerprint: str,
+        subscribe: bool = True,
+    ) -> None:
         """启动期 hydration：
 
         1. 从 Redis 读 ``aats:hot:portfolio:latest:<scope_fingerprint>``
         2. 如果存在且能 parse → 写本地 dict
-        3. 订阅 NATS PORTFOLIO_SNAPSHOTS topic
+        3. （可选）订阅 NATS PORTFOLIO_SNAPSHOTS topic
+
+        ``subscribe`` 参数允许 caller 把订阅步骤推迟到外层 wiring。**production
+        路径**（``build_runtime`` → ``_wire_event_subscriptions``）必须传
+        ``subscribe=False``，让 cache 的远端订阅通过同一个 ``_CollectingBus``
+        被聚合到 audit / reconciliation 等已有的 portfolio.snapshots 订阅上，
+        共用一个 NATS JetStream durable consumer，避开 "consumer is already
+        bound to a subscription" 错误。Stage 7 修复 ``_CollectingBus`` 时
+        已经踩过同样的坑（POSITION_TARGETS / PORTFOLIO_SNAPSHOTS /
+        RECONCILIATION_REPORTS），见 ``_wire_event_subscriptions`` docstring。
+        deferred subscribe 之后必须 explicit 调用 ``register_remote_subscription``。
+
+        默认 ``subscribe=True`` 保留单元测试与 in-memory 模拟下的"一次到位"
+        语义；InMemoryEventBus 没有 durable name 冲突，所以走默认路径无害。
 
         ⚠️ 任何步骤的失败都不能阻止 build_runtime 完成（与 6.2 同语义）。
         """
@@ -180,11 +198,30 @@ class PortfolioSnapshotCache:
                 scope_fingerprint=scope_fingerprint,
             )
 
-        # Step 2: NATS subscribe（订阅失败也不抛）
+        self._bootstrapped = True
+        if scope_fingerprint not in self._bootstrapped_scopes:
+            self._bootstrapped_scopes.append(scope_fingerprint)
+
+        # Step 2: NATS subscribe（订阅失败也不抛）。
+        # subscribe=False 时由 _wire_event_subscriptions 经 _CollectingBus 路径
+        # 调 register_remote_subscription 完成。
+        if subscribe:
+            await self.register_remote_subscription(self._bus)
+
+    async def register_remote_subscription(self, bus: EventBus) -> None:
+        """订阅 ``portfolio.snapshots`` 远端事件。
+
+        production 路径的入口：``_wire_event_subscriptions`` 在 ``_CollectingBus``
+        上调本方法，把 cache 的 ``_handle_remote_event`` 与 audit /
+        reconciliation 等其它 portfolio.snapshots 订阅者共聚合到同一个 fan-out
+        handler，最终落在同一个 NATS JetStream durable consumer 上（每个
+        process_role + topic 在 NATS 里只能有一个 durable binding）。
+
+        允许 ``bus`` 是 ``_CollectingBus`` 或真实的 ``EventBus``。两种情况
+        下行为都是 best-effort：失败 log warning 不抛。
+        """
         try:
-            await self._bus.subscribe(
-                topics.PORTFOLIO_SNAPSHOTS, self._handle_remote_event
-            )
+            await bus.subscribe(topics.PORTFOLIO_SNAPSHOTS, self._handle_remote_event)
             self._subscribed = True
             log_event(
                 self._logger,
@@ -201,10 +238,6 @@ class PortfolioSnapshotCache:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
-
-        self._bootstrapped = True
-        if scope_fingerprint not in self._bootstrapped_scopes:
-            self._bootstrapped_scopes.append(scope_fingerprint)
 
     async def stop(self) -> None:
         """关闭期清理。EventBus 抽象不支持 unsubscribe，仅做日志记录。

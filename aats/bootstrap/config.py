@@ -3541,6 +3541,11 @@ async def _wire_event_subscriptions(
             reconciliation_service=slices.reconciliation_service,
         ),
     )
+    # Stage 6 Slice 6.3：把 portfolio_snapshot 缓存的 _handle_remote_event 接进
+    # 同一个 collector，让 audit / reconciliation / cache 三者共享 fan-out。
+    # 不走 cache.bootstrap 内部的 subscribe，避免重复 durable binding。
+    if slices.portfolio_snapshot_cache is not None:
+        await slices.portfolio_snapshot_cache.register_remote_subscription(collector)
     await collector.flush()
 
 
@@ -3788,10 +3793,17 @@ async def build_runtime(
     )
 
     # Stage 6 Slice 6.3：跨进程 portfolio_snapshot 缓存边车。和 kill_switch_sync
-    # 同模板：bus.start 完成后立即构造 + bootstrap，让所有 slice builder（特别是
-    # _build_portfolio_slice 的 outbox publisher 与 _wire_event_subscriptions 内
-    # 部 query_service）能拿到一个已 hydrate + 已订阅 NATS 的 cache 实例。
-    # bootstrap 内部即使 Redis / NATS 故障也走 best-effort 路径不抛。
+    # 同模板：bus.start 完成后立即构造 + Redis hydrate，让所有 slice builder（特
+    # 别是 _build_portfolio_slice 的 outbox publisher 与 query_service 路径）能
+    # 拿到一个已 hydrate 的 cache 实例。
+    #
+    # ⚠️ NATS subscribe 步骤推迟到 _wire_event_subscriptions 经 _CollectingBus
+    # 聚合：portfolio.snapshots 在 production 路径上已经被 audit_service /
+    # reconciliation_service 订阅，NATS 同 (role, topic) 只允许一个 durable
+    # binding，cache 的订阅必须和它们共用 _CollectingBus 的 fan-out 否则会触发
+    # "consumer is already bound to a subscription"。Stage 7 修复 _CollectingBus
+    # 时已经踩过同类问题（POSITION_TARGETS / PORTFOLIO_SNAPSHOTS / RECONCILIATION_REPORTS）。
+    # bootstrap 内部即使 Redis 故障也走 best-effort 路径不抛。
     # 设计文档：docs/task/stage_6_slice_6_3_portfolio_snapshot_design.md §4
     slices.portfolio_snapshot_cache = PortfolioSnapshotCache(
         hot_state_store=hot_state_store,
@@ -3801,6 +3813,7 @@ async def build_runtime(
     )
     await slices.portfolio_snapshot_cache.bootstrap(
         scope_fingerprint=f"{state_scope.product_type}:{state_scope.margin_mode}",
+        subscribe=False,  # 推迟到 _wire_event_subscriptions 走 _CollectingBus
     )
     log_event(
         get_logger("aats.bootstrap"),
