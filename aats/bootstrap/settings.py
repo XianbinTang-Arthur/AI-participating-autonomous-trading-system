@@ -577,6 +577,23 @@ class AATSSettings(BaseSettings):
     trial_guard_max_fee_to_notional_ratio: float = 0.0012
     trial_guard_max_high_slippage_ratio: float = 0.35
     trial_guard_max_slow_submit_to_fill_ratio: float = 0.35
+    # ── Stage 9 abort hook（drift score sidecar）──────────────────
+    # 与 trial_guard 互补：trial_guard 盯财务硬阈值，abort_hook 盯 drift
+    # score (§4 of docs/task/stage_9_abort_hooks_design.md)，涵盖财务 +
+    # 执行 + 决策 + 数据链路 4 类共 10 个指标。默认 disabled —— Stage 9
+    # T0 DRY 浸泡期开启一次验证，T1 上线时正式打开。
+    stage9_abort_hook_enabled: bool = False
+    stage9_abort_hook_evaluate_interval_seconds: float = 60.0
+    # 当前所处的阶梯（T0/T1/T2/T3/T4），abort hook 用这个决定 drift score
+    # 的 nominal_scale_usdt。dryrun 升阶梯时 operator 必须手动改 env 并
+    # 重启 4 进程（防止运行中被意外改动）。
+    stage9_current_stage: str = "T0"
+    # 连续多少次 warning 之后才 halt（防抖）。MVP = 2：一次 transient 不
+    # 足以触发 halt，连续 2 次才说明问题真实存在。
+    stage9_abort_hook_consecutive_warnings: int = 2
+    # halt → resume 之后的 cooldown 窗口。期间即使再命中也只记录不 halt，
+    # 避免一次性 OKX 故障把系统反复 halt/resume 打脏 event store。
+    stage9_abort_hook_cooldown_seconds: float = 1800.0
     max_gross_notional_per_symbol: float = 2_500.0
     max_pending_notional_per_symbol: float = 1_250.0
     max_total_open_notional: float = 5_000.0

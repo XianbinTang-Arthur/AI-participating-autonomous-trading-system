@@ -93,6 +93,11 @@ from aats.services.governance_engine.runtime_layers import (
     RuntimeProfile,
     resolve_runtime_layering,
 )
+from aats.services.governance_engine.abort_hooks import (
+    AbortHookConfig,
+    AbortHookService,
+)
+from aats.services.governance_engine.drift_score import DriftInputs
 from aats.services.governance_engine.trial_guard import ForwardTrialGuardService
 from aats.services.market_gateway.gateway import MarketDataGateway
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
@@ -468,6 +473,7 @@ class ApplicationRuntime:
     execution_command_processor: ExecutionCommandProcessor | None = None
     phase1_shadow_alert_state: str | None = None
     trial_guard_service: ForwardTrialGuardService | None = None
+    abort_hook_service: AbortHookService | None = None
     derivatives_live_guard_service: DerivativesLiveGuardService | None = None
     replay_validation_history: list[dict[str, Any]] = field(default_factory=list)
     database_runtime: DatabaseRuntime | None = None
@@ -518,6 +524,23 @@ class ApplicationRuntime:
             self.background_tasks.append(
                 asyncio.create_task(self._monitor_trial_guard_loop(), name="aats_trial_guard_monitor")
             )
+        # Stage 9 checklist-4：AbortHookService 后台 loop。service.start() 自己
+        # 管 asyncio.Task 生命周期（不会 append 到 background_tasks），我们只
+        # 调 start()；stop() 在 stop_background_tasks 里镜像处理。
+        # getattr 兜底：某些单测用 __new__ 绕过 dataclass __init__ 生成 minimal
+        # runtime，此时字段默认值没被应用，直接访问会抛 AttributeError。
+        try:
+            abort_hook_service = getattr(self, "abort_hook_service", None)
+            if abort_hook_service is not None:
+                await abort_hook_service.start()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "abort_hook_service_start_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     async def stop_background_tasks(self) -> None:
         await self.account_service.stop_private_ws()
@@ -529,6 +552,23 @@ class ApplicationRuntime:
             except asyncio.CancelledError:
                 pass
         self.background_tasks.clear()
+        # Stage 9 checklist-4：停 AbortHookService，必须放在 kill_switch.stop
+        # 之前。service.stop() 只取消自己的 _loop task，不动 kill_switch 状态。
+        # 用 getattr 兜底是因为单测里某些 minimal runtime 走 __new__ 绕过 dataclass
+        # __init__，字段默认值不会被写进对象，直接 self.abort_hook_service 会抛
+        # AttributeError；与下面 kill_switch / portfolio_snapshot_cache 的 try 块一致。
+        try:
+            abort_hook_service = getattr(self, "abort_hook_service", None)
+            if abort_hook_service is not None:
+                await abort_hook_service.stop()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "abort_hook_service_shutdown_close_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         await self.market_gateway.stop()
         close_rest_client = getattr(self.account_service.client, "aclose", None)
         if callable(close_rest_client):
@@ -3545,6 +3585,82 @@ async def _wire_event_subscriptions(
     await collector.flush()
 
 
+def _collect_drift_inputs_for_abort_hook(runtime: "ApplicationRuntime") -> DriftInputs:
+    """给 Stage 9 AbortHookService 用的 inputs 收集器（best-effort）。
+
+    checklist-4 scope：能从已有 service 摘到的指标尽量摘；拿不到的留 None，
+    drift_score 的归一化会自动把 missing 视为 0 + 标记 missing。
+
+    目前摘取的字段
+    ------------
+    - ``fee_to_pnl_ratio`` ← trial_guard_service.snapshot()["fee_to_notional_ratio"]
+    - ``adverse_slippage_ratio`` ← trial_guard_service.snapshot()["high_slippage_ratio"]
+    - ``balance_drift_ratio`` / ``max_drawdown_ratio`` ← 暂缺（留给 checklist-5
+      从 ledger_portfolio.snapshot() 收集）
+    - ``fill_success_ratio`` ← 暂缺
+    - ``decision_*`` / ``data link *`` ← 暂缺
+
+    为什么不直接 raise 而是 fail-soft
+    ----------------------------------
+    I1 (fail-soft) 要求 provider 抛异常也不能让 abort_hook loop 挂掉。这里
+    额外兜一层 try/except 是为了让单次取数失败（比如 trial_guard snapshot 格式变了）
+    不污染上层 evaluate_once。
+    """
+    import decimal
+    from datetime import datetime, timezone
+
+    notes: list[str] = [
+        "abort_hook_inputs_collector: checklist-4 stub；fee + slippage 已接，"
+        "其余指标 checklist-5 会从 ledger/health/quality_monitor 继续补",
+    ]
+
+    fee_to_pnl_ratio: decimal.Decimal | None = None
+    adverse_slippage_ratio: decimal.Decimal | None = None
+
+    trial_guard = runtime.trial_guard_service
+    if trial_guard is not None:
+        try:
+            snap = trial_guard.snapshot() or {}
+            raw_fee = snap.get("fee_to_notional_ratio")
+            if raw_fee is not None:
+                try:
+                    fee_to_pnl_ratio = decimal.Decimal(str(raw_fee))
+                except (decimal.InvalidOperation, ValueError):
+                    notes.append(
+                        f"abort_hook: fee_to_notional_ratio parse failed (raw={raw_fee!r})"
+                    )
+            raw_slip = snap.get("high_slippage_ratio")
+            if raw_slip is not None:
+                try:
+                    adverse_slippage_ratio = decimal.Decimal(str(raw_slip))
+                except (decimal.InvalidOperation, ValueError):
+                    notes.append(
+                        f"abort_hook: high_slippage_ratio parse failed (raw={raw_slip!r})"
+                    )
+        except Exception as exc:  # pragma: no cover - defensive
+            notes.append(
+                f"abort_hook: trial_guard snapshot read failed error={type(exc).__name__}"
+            )
+
+    stage_value = getattr(runtime.settings, "stage9_current_stage", "T0") or "T0"
+    return DriftInputs(
+        stage=stage_value,  # type: ignore[arg-type]
+        window_hours=24,
+        evaluated_at=datetime.now(timezone.utc),
+        balance_drift_ratio=None,
+        max_drawdown_ratio=None,
+        fee_to_pnl_ratio=fee_to_pnl_ratio,
+        fill_success_ratio=None,
+        adverse_slippage_ratio=adverse_slippage_ratio,
+        decision_cycle_cadence_ratio=None,
+        decision_error_ratio=None,
+        reconciliation_mismatch_count=None,
+        nats_handler_error_ratio=None,
+        okx_rate_limit_count=None,
+        notes=notes,
+    )
+
+
 def _apply_post_init_guards(
     *,
     runtime: ApplicationRuntime,
@@ -3553,6 +3669,7 @@ def _apply_post_init_guards(
     """ApplicationRuntime 构造完成后的最终装配步骤。
 
     - derivatives_live_guard / trial_guard 创建并注入 risk_engine
+    - abort_hook_service 创建（Stage 9 checklist-4）
     - StrategyProfileControlService 注入 decision_engine
 
     Stage 3：trial_guard.evaluate_now() 内部会通过 OperatorQueryService 访问
@@ -3596,6 +3713,18 @@ def _apply_post_init_guards(
         )
     if runtime.decision_engine is not None:
         runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
+
+    # Stage 9 checklist-4：AbortHookService sidecar。
+    # 与 trial_guard 一样只在 decision+execution+monolith role 下实例化（都走
+    # _slice_active("startup_recovery") 门禁）。设计文档：
+    # docs/task/stage_9_abort_hooks_design.md §5。
+    abort_hook_cfg = AbortHookConfig.from_settings(runtime.settings)
+    runtime.abort_hook_service = AbortHookService(
+        config=abort_hook_cfg,
+        kill_switch=runtime.kill_switch,
+        inputs_provider=lambda: _collect_drift_inputs_for_abort_hook(runtime),
+        logger=runtime.logger,
+    )
 
 
 async def _build_and_connect_hot_state_store(
