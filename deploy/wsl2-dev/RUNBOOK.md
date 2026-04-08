@@ -539,3 +539,226 @@ AATS_OTEL_SAMPLE_RATIO: "0.1"
 
 修改后 `docker compose -f docker-compose.aats.yml --env-file .env.wsl2 up -d`
 重建即可，不用 rebuild 镜像。
+
+### 9.6 Stage 9 drift score CLI 真跑验证
+
+Stage 9 checklist-3 落地的 `scripts/compute_drift_score.py` 是 dryrun
+升阶梯 gate 的自动化入口（见 `docs/task/stage_9_dryrun_checklist.md` §4.4）。
+本节是大版本升级后必须跑一遍的冒烟：CLI 能正确读 artifact → 算分 →
+退出码符合设计 §6.2。
+
+#### 9.6.1 mock 源冒烟（不依赖 artifacts）
+
+```bash
+python scripts/compute_drift_score.py --stage T1 --source mock
+echo $?
+```
+
+期望：
+- 人类可读报告里能看到 `Stage 9 Drift Score — T1 (nominal 1 USDT)`
+- TOTAL SCORE 行显示 0 或接近 0
+- `Ladder upgrade: ALLOWED`
+- 退出码 0
+
+`--source mock` 只用于 CLI 管道自检，**不要**在升阶梯决策时使用。
+
+#### 9.6.2 offline 源（真 artifact 目录）
+
+```bash
+# 生成或更新 quality_monitor_summary / trial_guard_snapshot / portfolio
+# snapshot 之后再跑
+python scripts/compute_drift_score.py --stage T2 --source offline --verbose
+echo $?
+```
+
+期望：
+- 报告里显示每个子类的 subscore + 每个 indicator 的 raw / normalized
+- 找不到的指标标 `*`（missing）
+- 如果有 missing → `Ladder upgrade: BLOCKED`
+- 退出码 0（clean）/ 2（noticeable or missing-data 阻断）/ 3（significant）
+  / 4（critical）/ 1（运行错误）
+
+> 具体 exit code 映射见 `docs/task/stage_9_abort_hooks_design.md` §6.2
+> 与 `tests/unit/test_stage9_drift_score_cli.py::test_exit_code_*`。
+
+#### 9.6.3 JSON 输出落盘
+
+```bash
+python scripts/compute_drift_score.py --stage T1 --source offline \
+  --output artifacts/governance/drift_score_$(date +%Y%m%d_%H%M).json --json
+```
+
+落盘的 JSON 可以 diff 上次同阶梯的报告，快速看"哪个 subscore 变坏了"。
+可以塞进 cron，每小时跑一次，落盘到 `artifacts/governance/drift_history/`
+然后 grafana 面板读。
+
+#### 9.6.4 单元测试回归（每次改了 CLI 或 drift_score 必跑）
+
+```bash
+pytest tests/unit/test_stage9_drift_score.py \
+       tests/unit/test_stage9_drift_score_cli.py -q
+```
+
+期望：60 个测试全绿（41 + 19）。如果挂，回到对应测试函数看是哪个不变
+量被破坏了，禁止在不修测试的情况下改实现代码。
+
+### 9.7 Stage 9 AbortHookService sidecar halt 真跑 drill
+
+Stage 9 checklist-4 的 `AbortHookService` 是定期评估 drift score 并在
+命中时自动 `kill_switch.halt(reason=stage9_abort_hook:<code>)` 的后台
+sidecar。验证它与 Redis + NATS 跨进程广播链路的 end-to-end：和
+`probe_kill_switch.py` 完全同构，但 halt 触发源从"手动 probe"换成
+"critical DriftInputs 驱动的 AbortHookService"。
+
+> 本节要真动 kill_switch 状态，跑完**必须**执行 §9.7.5 resume 收尾，
+> 否则 4 个运行时容器会一直 halted=true。
+
+#### 9.7.1 前置：把 probe 脚本放进容器
+
+```bash
+docker cp deploy/wsl2-dev/probe_abort_hook.py aats-gateway:/tmp/probe_abort_hook.py
+```
+
+#### 9.7.2 self-check（纯 in-memory 冒烟，不动 Redis/NATS）
+
+```bash
+docker exec aats-gateway python /tmp/probe_abort_hook.py self-check
+```
+
+期望：
+```
+[probe] self-check: total_score=8 state=critical_drift action=halt_immediate
+[probe] self-check: state=halting halts=1
+[probe] self-check: kill_switch reason='stage9_abort_hook:score_ge_5'
+[probe] OK: self-check passed
+```
+
+这一步失败说明 `AbortHookService` + `compute_drift_score` + `KillSwitch`
+的 **本地配线** 坏了（import 路径、状态机、halt reason 生成之一），
+看日志里 `abort_hook_state_transition` 有没有出现即可定位。
+
+#### 9.7.3 halt drill（score_ge_5 critical 路径）
+
+```bash
+# 执行前确认当前 kill_switch 没有 halt（从之前 drill 残留的话先跑 resume）
+docker exec aats-gateway python /tmp/probe_abort_hook.py status
+
+# 触发 halt：probe 构造一个独立 AbortHookService + 真 Redis/NATS
+# KillSwitch，喂进 total_score=8 的 critical inputs
+docker exec aats-gateway python /tmp/probe_abort_hook.py halt-critical
+
+# 验证 4 个运行时容器都收到 halt 广播
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  echo "=== $c ==="
+  docker logs "$c" 2>&1 | grep "kill_switch_remote_applied" | tail -2
+done
+```
+
+期望每个容器都打印一条 `kill_switch_remote_applied halted=True
+reason=stage9_abort_hook:score_ge_5 source_role=stage9_probe`。
+
+如果某个容器**没看到**这条日志 → 4 进程 NATS 广播链路坏了（或该容器
+没起来），回去看 §9.2 kill_switch drill 能不能过。两个 drill 都挂说
+明是广播层问题，只有 §9.7 挂说明 `_trigger_halt` 路径坏了。
+
+#### 9.7.4 halt drill（subscore_financial_2 与连续 warning 路径）
+
+score_ge_5 覆盖主路径，再跑两条支路验证 halt reason 编码：
+
+```bash
+# 先 resume 清掉上一次的 halt
+docker exec aats-gateway python /tmp/probe_abort_hook.py resume
+
+# 支路 A：仅 financial 子类全 critical（subscore=2），total=3
+docker exec aats-gateway python /tmp/probe_abort_hook.py halt-subscore-financial
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  docker logs "$c" 2>&1 | grep "subscore_financial_2" | tail -1
+done
+
+docker exec aats-gateway python /tmp/probe_abort_hook.py resume
+
+# 支路 B：连续 2 次 warning（score=4 两次）
+docker exec aats-gateway python /tmp/probe_abort_hook.py halt-consecutive
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  docker logs "$c" 2>&1 | grep "score_3_4_consecutive_2" | tail -1
+done
+```
+
+期望：支路 A 的 reason 含 `stage9_abort_hook:subscore_financial_2`，
+支路 B 的 reason 含 `stage9_abort_hook:score_3_4_consecutive_2`。
+
+#### 9.7.5 drill 收尾：resume + 清理 probe durable consumer
+
+```bash
+# 把 kill_switch 从 halted 状态解出来
+docker exec aats-gateway python /tmp/probe_abort_hook.py resume
+
+# 确认 4 进程都收到 halted=false
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  docker logs "$c" 2>&1 | grep "kill_switch_remote_applied" | tail -1
+done
+
+# 清掉 probe 在 NATS JetStream 里留下的 stage9_probe durable consumer
+docker exec aats-nats nats consumer ls AATS_EVENTS 2>/dev/null | \
+  grep stage9_probe | awk '{print $1}' | \
+  xargs -I{} docker exec aats-nats nats consumer rm AATS_EVENTS {} -f || true
+
+# Redis 里 kill_switch 回到 halted=false 不用专门清
+docker exec aats-gateway python /tmp/probe_abort_hook.py status
+```
+
+期望：最后一次 `status` 打印 `halted=False`。
+
+#### 9.7.6 打开运行时 sidecar 的环境变量（T0 DRY 浸泡前）
+
+T0 DRY 24h 浸泡期间开启 abort_hook sidecar 跑一次，**不**关 kill_switch
+（让它只记 log 不真 halt），回到 dryrun 清单 §1.6 之前必须确认：
+
+在 `.env.wsl2` 里加：
+
+```bash
+# Stage 9 AbortHookService 配置
+AATS_STAGE9_ABORT_HOOK_ENABLED=true
+AATS_STAGE9_ABORT_HOOK_EVALUATE_INTERVAL_SECONDS=60.0
+AATS_STAGE9_CURRENT_STAGE=T0
+AATS_STAGE9_ABORT_HOOK_CONSECUTIVE_WARNINGS=2
+AATS_STAGE9_ABORT_HOOK_COOLDOWN_SECONDS=1800.0
+```
+
+重启后：
+
+```bash
+cd ~/aats/deploy/wsl2-dev
+docker compose -f docker-compose.aats.yml --env-file .env.wsl2 up -d --force-recreate
+
+# 每个进程都应该打印一条 abort_hook_service_started
+for c in aats-decision aats-execution; do
+  echo "=== $c ==="
+  docker logs "$c" 2>&1 | grep -E "abort_hook_service_(started|disabled)" | tail -2
+done
+```
+
+checklist-4 的配线是 `_slice_active("startup_recovery")`，所以只有
+decision + execution + monolith role 下会启动 AbortHookService；gateway
+与 market 容器应该**没有** `abort_hook_service_started` 日志（也没有
+`abort_hook_service_disabled` —— sidecar 根本不会构造）。
+
+24h 浸泡后：
+
+```bash
+# 确认 T0 DRY 期间没有意外 halt
+for c in aats-decision aats-execution; do
+  echo "=== $c ==="
+  docker logs "$c" 2>&1 | grep -E "abort_hook_state_transition" | wc -l
+  docker logs "$c" 2>&1 | grep -E "abort_hook_state_transition.*new_state=halting" | tail -5
+done
+```
+
+- 第一行是 state transition 总次数 —— 开头应该只有 1 次（disabled →
+  monitoring 或 monitoring 初始化），然后稳定
+- 第二行应该为空 —— `new_state=halting` 即 sidecar 决定 halt。checklist-4
+  收集的 inputs 几乎全 missing，baseline 跑出来 score=0 action=none，
+  理论上 24h 内不应有任何 halting transition
+- 如果看到 halting → 立刻人工复盘：要么 inputs_collector 拿到了"假阳性"
+  数据（去看 trial_guard 那几个字段的 raw），要么 checklist-5 的真
+  inputs collector 接进来之后被 drift score threshold 当场打中

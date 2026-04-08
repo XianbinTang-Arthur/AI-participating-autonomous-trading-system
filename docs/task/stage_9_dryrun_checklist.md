@@ -258,15 +258,40 @@ from aats.services.audit_service.reconciliation import ReconciliationService
   trusted repair 把差异抹掉
 - 手动 diff 两边的订单列表，人工判断谁对谁错，写复盘
 
-## 8. 与 checklist-2 的衔接
+## 8. 与 checklist-2/3/4/5 的衔接
 
-本文档只规定了"检查什么、怎么响应"。Stage 9 checklist-2 要补的：
-- `scripts/compute_drift_score.py`：自动算 §4.4 的 drift score
-- `aats/services/governance_engine/abort_hooks.py`：监测 §4.3 的系统健康指标
-  以及 drift score，触发条件达成时自动 halt（不再依赖人工抽检）
-- Grafana alert rules / Loki saved search：把 §5 的 SEV1/SEV2 告警自动化
+本文档只规定了"检查什么、怎么响应"。自动化工具由后续 checklist 补齐：
 
-checklist-2 设计文档见 `docs/task/stage_9_abort_hooks_design.md`。
+- ✅ **checklist-2（设计）**：`docs/task/stage_9_abort_hooks_design.md`
+  —— drift score 10 个指标的阈值表、abort hook 状态机、CLI 退出码。
+- ✅ **checklist-3（drift score 纯函数 + CLI）**：
+  - `aats/services/governance_engine/drift_score.py` —— `compute_drift_score`
+    纯函数，给 §4.4 的 drift score ≤ 1 gate 用
+  - `scripts/compute_drift_score.py` —— offline / live / mock 三种数据源
+    + JSON/表格/verbose 输出 + exit code 0/2/3/4 映射
+  - `tests/unit/test_stage9_drift_score.py` + `test_stage9_drift_score_cli.py`
+    —— 60 个单测覆盖阈值、归一化、missing-data 规则、CLI exit code
+- ✅ **checklist-4（abort hook sidecar）**：
+  - `aats/services/governance_engine/abort_hooks.py` —— `AbortHookService`
+    后台 sidecar，定期跑 drift score 并在命中时自动
+    `kill_switch.halt(reason=stage9_abort_hook:<code>)`
+  - `aats/bootstrap/settings.py` 5 个 `stage9_abort_hook_*` 字段（默认关）
+  - `aats/bootstrap/config.py` `ApplicationRuntime.abort_hook_service` +
+    `_apply_post_init_guards` 里与 trial_guard 一起创建
+  - `tests/unit/test_stage9_abort_hooks.py` —— 26 个单测覆盖状态机、
+    cooldown、回调、halt reason 编码
+  - 实战开启：设置 env `AATS_STAGE9_ABORT_HOOK_ENABLED=true`（见
+    `deploy/wsl2-dev/RUNBOOK.md` §9.7.6）
+- ✅ **checklist-5（runbook 验证步骤 + WSL2 drill）**：
+  - `deploy/wsl2-dev/RUNBOOK.md` §9.6 drift score CLI 真跑冒烟
+  - `deploy/wsl2-dev/RUNBOOK.md` §9.7 AbortHookService halt drill（self-check
+    + score_ge_5 / subscore_financial_2 / consecutive 三条 halt 路径）
+  - `deploy/wsl2-dev/probe_abort_hook.py` 驱动脚本（对齐 probe_kill_switch.py）
+- **待办（不阻塞 dryrun，checklist-4 收尾 slice 或后续专项做）**：
+  - AbortHookService 的 `inputs_provider` 从 trial_guard 扩展到 portfolio /
+    ledger / health_service / quality_monitor 全量采集（目前只接了
+    `fee_to_notional_ratio` + `high_slippage_ratio` 两个字段）
+  - Grafana alert rules / Loki saved search：把 §5 的 SEV1/SEV2 告警自动化
 
 ## 9. 阶梯升级决策日志模板
 
