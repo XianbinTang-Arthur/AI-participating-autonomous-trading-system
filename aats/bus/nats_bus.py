@@ -384,59 +384,16 @@ class NatsEventBus(EventBus):
         *,
         persist: bool = True,
     ) -> None:
-        # Stage 8：把当前活动 span 的 W3C trace context 注入 envelope。
-        # inject_trace_context 在没装 OTel 或没有 active span 时是 no-op，
-        # 空 carrier 保留，下面一行 `if carrier` 才会写进 envelope。
-        # 这样做的好处：
-        #   1) 没装 OTel 时 envelope.trace_context 仍然是 None，向后兼容旧 consumer
-        #   2) 装了 OTel 但没有 parent span（例如顶层 cron 任务）时，
-        #      inject 依然 no-op，不会污染 envelope
-        #   3) 测试不启用 OTel 时断言 trace_context is None 简单直观
-        # 设计文档：docs/task/stage_8_otel_integration_design.md §D3/§D4
-        carrier: dict[str, str] = {}
-        try:
-            inject_trace_context(carrier)
-        except Exception as exc:  # pragma: no cover - 防御性兜底
-            log_event(
-                self.logger,
-                "trace_context_inject_failed",
-                level="warning",
-                topic=envelope.topic,
-                error_type=type(exc).__name__,
-                error=str(exc),
-            )
-            carrier = {}
-        if carrier:
-            envelope = envelope.model_copy(update={"trace_context": dict(carrier)})
-
-        # 同步落盘到本地 event_store（双写：JetStream + Postgres）
-        # 之所以保留 Postgres 落盘，是为了：
-        #   1) 跨进程查询历史事件时复用现有 SQL 索引和 dashboard 视图
-        #   2) JetStream 7 天 max_age 之外的长期可追溯性
-        if persist and self._event_store is not None:
-            try:
-                await asyncio.to_thread(self._event_store.append, envelope)
-            except Exception as exc:
-                log_event(
-                    self.logger,
-                    "event_persistence_failed",
-                    level="error",
-                    topic=envelope.topic,
-                    key=envelope.key,
-                    persistence_mode=self._persistence_mode,
-                    error_type=type(exc).__name__,
-                    error=str(exc),
-                )
-                if self._persistence_mode == "strict":
-                    raise
-
         if self._js is None:
             raise RuntimeError("NatsEventBus.publish called before connect()")
 
         subject = self._config.subject_for(envelope.topic)
-        body = envelope.model_dump_json().encode("utf-8")
-        # Stage 8：publish 动作本身也开一个 span，便于 Jaeger 里看到
-        # "decision.publish_envelope → nats_send" 的耗时；name 统一前缀方便过滤。
+        # Stage 8：publish 动作本身开一个 span；inject_trace_context 在本 span
+        # 内调用，这样 OTel 捕获到的 carrier 会把 nats.publish.<topic> 作为
+        # parent，而不是再往上一层的 handler span。结果是下游 consumer 的
+        # nats.receive.<topic> 直接挂在 producer 的 nats.publish.<topic> 下面，
+        # Jaeger 里可以清晰看到 publish→receive 的一对一因果链。
+        # 设计文档：docs/task/stage_8_otel_integration_design.md §D3/§D4
         with start_span(
             f"nats.publish.{envelope.topic}",
             attributes={
@@ -448,6 +405,49 @@ class NatsEventBus(EventBus):
                 "messaging.destination": subject,
             },
         ):
+            # 在 nats.publish.<topic> span 内部 inject —— 下游 consumer 的
+            # parent 指向本 span。inject 在没装 OTel 或没 active span 时是
+            # no-op，空 carrier 保留，envelope.trace_context 继续是 None
+            # （向后兼容）。
+            carrier: dict[str, str] = {}
+            try:
+                inject_trace_context(carrier)
+            except Exception as exc:  # pragma: no cover - 防御性兜底
+                log_event(
+                    self.logger,
+                    "trace_context_inject_failed",
+                    level="warning",
+                    topic=envelope.topic,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                carrier = {}
+            if carrier:
+                envelope = envelope.model_copy(update={"trace_context": dict(carrier)})
+
+            # 同步落盘到本地 event_store（双写：JetStream + Postgres）
+            # 之所以保留 Postgres 落盘，是为了：
+            #   1) 跨进程查询历史事件时复用现有 SQL 索引和 dashboard 视图
+            #   2) JetStream 7 天 max_age 之外的长期可追溯性
+            # 落盘的 envelope 已带 trace_context，后续 replay 也能挂对 parent。
+            if persist and self._event_store is not None:
+                try:
+                    await asyncio.to_thread(self._event_store.append, envelope)
+                except Exception as exc:
+                    log_event(
+                        self.logger,
+                        "event_persistence_failed",
+                        level="error",
+                        topic=envelope.topic,
+                        key=envelope.key,
+                        persistence_mode=self._persistence_mode,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    if self._persistence_mode == "strict":
+                        raise
+
+            body = envelope.model_dump_json().encode("utf-8")
             # JetStream publish 返回 ack，包含 stream/sequence；同步等待是为了
             # 在 strict 模式下 publish 失败立即向 caller 抛错。
             await self._js.publish(subject=subject, payload=body)
