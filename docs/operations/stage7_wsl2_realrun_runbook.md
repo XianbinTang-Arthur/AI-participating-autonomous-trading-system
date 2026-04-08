@@ -604,7 +604,107 @@ CI 证明了**契约**正确，本次真跑证明了**部署**真的按契约工
 
 ---
 
-## 9. Changelog
+## 9. Stage 6 Slice 6.1：HotStateStore Redis backend 配线（2026-04-08）
+
+### 9.1 Slice 6.1 边界与目标
+
+Stage 6 的总目标是把 4 进程拓扑下的"高频读热状态"（kill_switch、portfolio_snapshot、gateway heartbeat 等）从"每个进程内的本地 dict"迁到"共享 Redis"，让 gateway 能在不依赖 NATS 事件重放的情况下同步问询 execution / decision 的最新状态。
+
+**Slice 6.1 严格限定在"配线 + 校验"，不动任何业务调用方**。具体来说：
+
+| Slice | 范围 | 状态 |
+|---|---|---|
+| **6.1（本节）** | settings 字段 + build_runtime 构造 + 4 进程 docker compose env + 集成测试 + 设计文档 | ✅ 完成 |
+| 6.2 | kill_switch 写入路径切到 hot_state_store；execution 写、gateway/decision 读 | 待开 |
+| 6.3 | portfolio_snapshot 缓存切到 hot_state_store；execution 写、gateway 读 | 待开 |
+
+切片化的好处：Slice 6.1 是"零行为变化、纯添加"——任何业务调用方都不知道 hot_state_store 的存在，回滚成本 = 0；而 6.2/6.3 才是真正切换语义的地方，可以独立 review、独立验证、独立回滚。
+
+设计文档：`docs/task/stage_6_redis_hot_state_design.md`
+
+### 9.2 实现要点
+
+1. **3 个新 settings 字段**（`aats/bootstrap/settings.py`）：
+   - `hot_state_backend: Literal["memory", "redis"] = "memory"`
+   - `hot_state_redis_url: str = "redis://127.0.0.1:6379/0"`
+   - `hot_state_global_prefix: str = ""`（多环境共用 Redis 时的命名空间前缀）
+   - 校验：`backend=redis` 时 URL 非空 + `redis://` / `rediss://` scheme，否则 settings 层就 fail-fast。
+
+2. **build_runtime 构造 + ping**（`aats/bootstrap/config.py`）：
+   - 新增 `_build_and_connect_hot_state_store()` helper，根据 settings 构造 store。
+   - `backend=redis` 时同步 `await store.connect()`，失败抛 `RuntimeError` 让 4 进程 entry 在启动期就崩（**不是**延迟到第一次读写时才发现 Redis 不可用）。
+   - `ApplicationRuntime` 加 `hot_state_store: HotStateStore` 字段。
+   - `stop_background_tasks()` 走 best-effort `close()`，与 `bus.close` 同样的语义——hot_state 是缓存，关闭失败不阻塞整体停机。
+
+3. **4 进程 docker compose 注入 env**（`deploy/wsl2-dev/docker-compose.aats.yml`）：
+   ```yaml
+   x-aats-common-env:
+     AATS_HOT_STATE_BACKEND: redis
+     AATS_HOT_STATE_REDIS_URL: redis://redis:6379/0
+   ```
+   gateway / market / decision / execution 4 个服务全部继承这两个变量。
+
+4. **Dockerfile editable 安装加 redis extra**（`deploy/wsl2-dev/Dockerfile`）：
+   - `pip install -e ".[nats]"` → `pip install -e ".[nats,redis]"`
+   - `pyproject.toml` 新增 `redis = ["redis>=5,<6"]` 与 `redis-integration = ["redis>=5,<6", "testcontainers>=4.0"]` 两组可选依赖。
+
+5. **测试覆盖**：
+   - `tests/unit/test_settings_hot_state.py`：27 用例，覆盖默认值 / env 加载 / 显式 dict 加载 / 校验失败路径。
+   - `tests/integration/test_hot_state_redis_roundtrip.py`：9 用例（testcontainers 起 redis:7-alpine），含 `RedisHotStateStore` 端到端 round-trip、TTL、`global_prefix` 隔离、跨实例可见性、`build_runtime(backend=redis)` 端到端 + 不可达 Redis fail-fast。需 `AATS_RUN_REDIS_INTEGRATION=1` 才会运行。
+
+### 9.3 真跑验证（2026-04-08）
+
+**操作**：
+```bash
+# WSL2
+cd ~/aats/deploy/wsl2-dev
+docker compose -f docker-compose.aats.yml --env-file .env.wsl2 build aats-gateway
+docker compose -f docker-compose.aats.yml --env-file .env.wsl2 up -d
+```
+
+**验证矩阵**：
+
+| 验证维度 | 结果 | 证据 |
+|---|---|---|
+| **redis-py 装进镜像** | ✅ 5.3.1 | `docker run --rm aats-base:dev python -c 'import redis; print(redis.__version__)'` |
+| **4 进程容器全部 healthy** | ✅ 4/4 | `docker compose ps` → gateway / market / decision / execution 全部 `Up (healthy)` |
+| **build_runtime 构造 hot_state_store** | ✅ 4/4 | 4 个容器各打印一次 `hot_state_store_initialized backend=redis global_prefix=` 日志 |
+| **Redis 真的看到 4 个 client 连接** | ✅ 4 client | `docker exec aats-redis redis-cli CLIENT LIST` 显示 4 个 `lib-name=redis-py lib-ver=5.3.1` 客户端，分别来自容器 IP 172.18.0.8 / .9 / .10 / .11 |
+| **connect() 真的 ping 通了** | ✅ | 每个 client 列表里都有 `cmd=ping` 标记，证明 `connect → ping → keep-alive` 完整路径走通 |
+| **gateway HTTP 不受影响** | ✅ | `curl http://localhost:8000/healthz` → `{"status":"ok","process_role":"gateway"}` |
+| **`/system/health` 不受影响** | ✅ | 返回完整 JSON，`overall_status=blocked`（无真 OKX feed 时的预期状态），无 NPE |
+| **集成测试 fail-fast 路径** | ✅ | `tests/integration/test_hot_state_redis_roundtrip.py::TestBuildRuntimeWithRedisHotStateBackend::test_build_runtime_redis_backend_unreachable_fails_fast` 已经在 testcontainers 环境锁住"Redis 不可达 → build_runtime 抛错"语义 |
+
+**Redis CLIENT LIST 关键摘录**（脱敏）：
+```
+id=1301 addr=172.18.0.10:46342  cmd=ping  lib-name=redis-py lib-ver=5.3.1
+id=1302 addr=172.18.0.8:51420   cmd=ping  lib-name=redis-py lib-ver=5.3.1
+id=1303 addr=172.18.0.11:53940  cmd=ping  lib-name=redis-py lib-ver=5.3.1
+id=1304 addr=172.18.0.9:33758   cmd=ping  lib-name=redis-py lib-ver=5.3.1
+```
+4 个 client 来自 4 个不同的容器 IP，证明 4 个 AATS 进程**真的**各自连了一份独立的 Redis 客户端，而不是同一个进程多开几个连接。
+
+### 9.4 完成判定
+
+- [x] settings 三字段 + 校验（27 unit test 全绿）
+- [x] build_runtime 构造 + ping + close 配线
+- [x] 4 进程 docker compose env 注入
+- [x] Dockerfile / pyproject.toml 装 redis-py
+- [x] 集成测试 9 用例（testcontainers / build_runtime fail-fast）
+- [x] 4 进程真跑：4 个 `hot_state_store_initialized backend=redis` 日志 + 4 个 redis-py client 连接 + 容器全 healthy
+- [x] runbook §9 记录
+
+### 9.5 留给 Slice 6.2 的工作
+
+Slice 6.1 配置的 hot_state_store 在 Slice 6.2 之前**没有任何业务 caller**——它的存在只是给 build_runtime 多一个可注入的对象。这是有意为之：
+
+1. **第一刀只动配线，不动语义**。如果 Slice 6.1 真跑出 bug，回滚成本 = 1 个 commit revert，业务行为零变化。
+2. **Slice 6.2 才接 kill_switch**：`KillSwitchService` 写入路径从"内存 dict + 跨进程 NATS 广播"切到"先 hot_state_store.set，再 NATS 广播"；gateway / decision 读时直接 `await hot_state_store.get(make_key("system", "kill_switch"))`，无需重放事件。
+3. **Slice 6.3 才接 portfolio_snapshot**：`PortfolioReconciliationService` 写入快照后同步 `hot_state_store.set("portfolio", snapshot)`，gateway 在 dashboard 拉取时 cache hit 直接拿。
+
+---
+
+## 10. Changelog
 
 - 2026-04-07：首版。基于 5d 装配 review 发现 3 个 gap（Dockerfile 缺 curl、`/system/health` gateway role NPE、3 daemon 无 healthcheck），列出修复清单 + 真跑命令序列 + 完成判定 + 回滚步骤。等用户审批 §1-§2 修复方案后实施 + 真跑。
 - 2026-04-08：第 1 次真跑完成。10/10 容器 healthy。真跑里又额外修了 5 个 runbook 起步时未预见的 gap：NATS duplicate-subscription（_CollectingBus fan-out）、Dockerfile `/app` ownership、jaeger badger 权限、grafana provisioning 配置冲突、docker compose plugin 缺失。详见 §6.1。
@@ -612,3 +712,4 @@ CI 证明了**契约**正确，本次真跑证明了**部署**真的按契约工
 - 2026-04-08（再追加）：gap 6 修完之后第 2 次跑容器，`/system/blocker-control` 仍然 500。全仓 grep `runtime.ai_service.status()` 又找出 6 处直读站点，其中 GET 链 3 处（blocker_control、recovery_posture、_ai_shadow_summary）会被 `/system/health` 和 `/system/blocker-control` 链路触发，POST mutate 3 处（ai_review_restore / set_ai_operating_mode / ai_review_degrade_to_baseline）会被 operator 误调时 500。GET 链 2 处切换到 `self.owner.ai_runtime()` 走 facade stub，1 处（recovery_posture）加 None-guard 短路返回 False；POST mutate 3 处加方法顶 `raise ValueError("ai_service_not_loaded_in_this_process_role")` 显式拒绝。配套 5 个新 unit test，全仓 1232 unit + 26 ai-integration 全绿。第 3 次真跑 4 容器 healthy，CORE_SPECS 4 个 endpoint 全部 200。详见 §6.1.7。
 - 2026-04-08（故障演练 #1 完成）：新增 §7 故障演练章节。演练 #2.2（杀 execution）+ #2.3（同时杀 decision + market）：3 个 daemon 全部按 RestartCount=1 自愈，NATS 26 个 durable consumer 全部 push_bound 重连，gateway 完全未受影响。**重大方法学发现**：`docker kill` 不会触发 Docker restart manager（被 daemon 当成 operator 主动停服），必须从 host `kill -9 <python_pid>` 才能让 tini exit → 容器内部退出 → restart manager 接管。后续所有 chaos drill 都要遵循这个方法。详见 §7.2 / §7.6。
 - 2026-04-08（Stage 5 端到端 fan-out 验证完成）：新增 §8 Stage 5 章节。从 gateway 容器内 nats-py 直发 envelope 到 `aats.system.processing_failures`，execution 容器的 `aats-execution-system_processing_failures` durable consumer 收到、deserialize 成功、ack_floor 推进到 stream_seq=160。中途意外验证了 handler 错误路径：第 1 次注入 envelope 形状写错（多包了一层），handler 抛 ValidationError → max_deliver=5 次重投后丢弃，错误日志完整可观测。两次注入合在一起锁住了"成功路径 + 错误路径 + 重投语义"三个关键不变量。被动证据补充：`portfolio.snapshots` / `reconciliation.reports` 在真跑期间的 delivered 计数 > 0，证明 execution → decision 这条主跨进程通路在自然流量下也能跑通。详见 §8.4 矩阵。
+- 2026-04-08（Stage 6 Slice 6.1 完成）：新增 §9 Stage 6 Slice 6.1 章节。settings 加 `hot_state_backend` / `hot_state_redis_url` / `hot_state_global_prefix` 三字段；`build_runtime` 通过 `_build_and_connect_hot_state_store` 在 entry_execution_guard 之后构造并 ping 通 Redis，失败 fail-fast；4 进程 docker compose 注入 `AATS_HOT_STATE_BACKEND=redis`；Dockerfile 装 `.[nats,redis]`。真跑验证：4 个容器全部 healthy，4 条 `hot_state_store_initialized backend=redis` 日志，Redis CLIENT LIST 看到来自 4 个不同容器 IP 的 redis-py 5.3.1 客户端（lib-name 标签精确匹配）。Slice 6.1 严格"零行为变化"：暂无 caller 用 hot_state_store，给 Slice 6.2/6.3 把 kill_switch / portfolio_snapshot 接进 Redis 时铺垫。详见 §9.3 矩阵 + `docs/task/stage_6_redis_hot_state_design.md`。
