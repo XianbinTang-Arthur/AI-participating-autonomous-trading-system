@@ -227,6 +227,9 @@ class TestTask72A1DerivativesStartupGuards(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_derivatives_exchange_runtime_requires_secure_operator_session_cookie(self) -> None:
+        # environment=prod + okx_simulated_trading=False 走严格路径：
+        # dev+simulated 的放行分支是 slice docker-compose-hardening fix slice 加的，
+        # 对应放行 case 在 tests/unit/test_bootstrap_config_dev_simulated_hardening.py 覆盖。
         with self.assertRaisesRegex(
             ValueError,
             "derivatives_exchange_runtime_requires_secure_operator_session_cookie",
@@ -234,6 +237,7 @@ class TestTask72A1DerivativesStartupGuards(unittest.IsolatedAsyncioTestCase):
             await build_runtime(
                 AATSSettings.model_validate(
                     {
+                        "environment": "prod",
                         "startup_profile": "derivatives",
                         "config_profile": "guarded_derivatives_enabled",
                         "mode": "guarded_live",
@@ -241,7 +245,7 @@ class TestTask72A1DerivativesStartupGuards(unittest.IsolatedAsyncioTestCase):
                         "execution_backend": "okx",
                         "account_backend": "okx",
                         "account_read_enabled": True,
-                        "okx_simulated_trading": True,
+                        "okx_simulated_trading": False,
                         "trading_product_type": "derivatives",
                         "margin_mode": "cross",
                         "storage_mode": "postgres",

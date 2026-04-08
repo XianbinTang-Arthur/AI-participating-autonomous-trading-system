@@ -987,7 +987,39 @@ def _validate_startup_profile_settings(settings: AATSSettings, runtime_layering:
     if settings.operator_unsafe_write_without_auth:
         raise ValueError(f"{error_prefix}_disallows_unsafe_operator_write_without_auth")
     if settings.operator_session_configured and not settings.operator_session_cookie_secure:
-        raise ValueError(f"{error_prefix}_requires_secure_operator_session_cookie")
+        if _is_dev_simulated_exchange_runtime(settings):
+            _log.warning(
+                "dev_simulated_exchange_runtime_allows_insecure_cookie "
+                "error_prefix=%s "
+                "(HTTP dev setup; NOT suitable for prod/live, never run guarded_live here)",
+                error_prefix,
+            )
+        else:
+            raise ValueError(f"{error_prefix}_requires_secure_operator_session_cookie")
+
+
+def _is_dev_simulated_exchange_runtime(settings: AATSSettings) -> bool:
+    """dev 环境 + 模拟盘的组合标记，用于 exchange runtime hardening gate 放行。
+
+    这条组合特指：
+    - WSL2 docker-compose 4 进程真跑（observation / drill）
+    - 本地 scripts/start_api.py --profile spot/derivatives（dev 迭代）
+
+    两条都满足的时候，hardening gate 里"必须启用 secure cookie"和
+    "必须有 enabled admin user"两条校验放行，改成 WARNING 日志。
+
+    prod/live 环境一律不放行 —— managed profile 的 spot_live/derivatives_live
+    variant 把 environment 硬编码成 "prod"，走不到这个分支；同时
+    okx_simulated_trading 默认 False，双保险。
+
+    note: 本 helper 只影响 validator 行为，不改变 managed profile defaults，
+    也不对外部 caller 暴露。根因修复 slice
+    (docs/task/slice_docker_compose_hardening_fix_design.md) 的工作包 A。
+    """
+    return (
+        settings.environment == "dev"
+        and getattr(settings, "okx_simulated_trading", False) is True
+    )
 
 
 def _exchange_runtime_hardening_kind(
@@ -1019,6 +1051,13 @@ def _validate_operator_auth_settings(settings: AATSSettings, storage: StorageBac
     if settings.operator_write_api_key:
         return
     if enabled_admin_count(storage.operator_repo) > 0:
+        return
+    if _is_dev_simulated_exchange_runtime(settings):
+        _log.warning(
+            "dev_simulated_exchange_runtime_allows_empty_admin_user "
+            "(operator console login unavailable; "
+            "run scripts/seed_operator_admin.py to enable)"
+        )
         return
     raise ValueError("operator_session_auth_requires_enabled_admin_user")
 
