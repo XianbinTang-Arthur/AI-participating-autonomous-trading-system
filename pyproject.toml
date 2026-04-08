@@ -49,6 +49,16 @@ redis-integration = [
   "redis>=5,<6",
   "testcontainers>=4.0",
 ]
+# Stage 8 OpenTelemetry + Jaeger：4 进程分布式追踪。aats/bootstrap/telemetry.py
+# 在未安装时会自动 fallback 到 _NoopTracer，所以只有需要在 docker compose + 4
+# 进程真跑里看 trace tree 时才需要装。docker 镜像的 Dockerfile 已经默认装。
+# 设计文档：docs/task/stage_8_otel_integration_design.md
+otel = [
+  "opentelemetry-api>=1.27",
+  "opentelemetry-sdk>=1.27",
+  "opentelemetry-exporter-otlp-proto-grpc>=1.27",
+  "opentelemetry-semantic-conventions>=0.48b0",
+]
 
 [tool.setuptools.packages.find]
 include = ["aats*"]

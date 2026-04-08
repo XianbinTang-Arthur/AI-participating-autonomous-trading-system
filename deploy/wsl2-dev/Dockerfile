@@ -11,9 +11,10 @@
 #   - Python 3.12 slim：与 WSL2 集成测试环境一致，避开 3.13/3.14 周边轮子缺口
 #   - 多阶段构建：builder 装编译依赖（gcc/libpq）做 wheel cache，runtime 只留 venv
 #   - 非 root 运行：UID 1000 与 docker desktop 默认 user 一致，避免 volume 权限
-#   - 包含 .[nats,redis] 可选依赖：
+#   - 包含 .[nats,redis,otel] 可选依赖：
 #     * nats  → 4 进程拓扑必须走 hybrid event bus
 #     * redis → Stage 6 Slice 6.1 hot state store；4 进程必须共享 KV 缓存
+#     * otel  → Stage 8 OpenTelemetry + Jaeger 分布式追踪
 #
 # 构建：cd deploy/wsl2-dev && docker compose --profile aats build aats-base
 # 上下文：项目根 (..)，由 docker-compose.aats.yml 通过 build.context 指定
@@ -46,12 +47,14 @@ COPY pyproject.toml README.md ./
 COPY aats/ ./aats/
 COPY apps/ ./apps/
 
-# editable 安装 + nats + redis extras
+# editable 安装 + nats + redis + otel extras
 # - nats：4 进程拓扑必须走 hybrid event bus
 # - redis：Stage 6 Slice 6.1 跨进程 hot state store
+# - otel：Stage 8 OpenTelemetry + Jaeger，aats/bootstrap/telemetry.py 在装了之后
+#         自动走 OTLP gRPC exporter 到 docker-compose 里的 jaeger:4317
 RUN python -m venv /opt/aats-venv \
     && /opt/aats-venv/bin/pip install --upgrade pip \
-    && /opt/aats-venv/bin/pip install -e ".[nats,redis]"
+    && /opt/aats-venv/bin/pip install -e ".[nats,redis,otel]"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

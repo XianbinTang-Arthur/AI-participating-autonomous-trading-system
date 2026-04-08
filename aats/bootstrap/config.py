@@ -16,6 +16,7 @@ from aats.bootstrap.logging import get_logger, log_event
 _log = logging.getLogger(__name__)
 from aats.bootstrap.managed_profiles import MANAGED_PROFILE_DERIVED_ENV_KEYS, load_managed_profile_values
 from aats.bootstrap.metrics import MetricsRegistry
+from aats.bootstrap.telemetry import TelemetryConfig, configure_telemetry
 from aats.bootstrap.settings import (
     AATSSettings,
     DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY,
@@ -3660,6 +3661,24 @@ async def build_runtime(
         kwarg_role=process_role,
         settings=base_settings,
     )
+    # Stage 8：OpenTelemetry 初始化。必须在 settings_provenance / storage / bus
+    # 之前完成，这样后续所有 log_event / span 都能关联到正确的
+    # service.name = aats-<process_role>。
+    # fail-soft：OTel 相关异常永远不阻断主系统启动——未装 opentelemetry 包时
+    # configure_telemetry 自身会 fallback 到 _NoopTracer 并返回 False；这里的
+    # try/except 再兜一层保险，避免 OTLP endpoint 不通之类的异常传播出去。
+    # 设计文档：docs/task/stage_8_otel_integration_design.md §D2
+    try:
+        _telemetry_cfg = TelemetryConfig.from_env(process_role=effective_process_role)
+        configure_telemetry(_telemetry_cfg)
+    except Exception as _telemetry_exc:  # pragma: no cover - 防御性兜底
+        log_event(
+            get_logger("aats.bootstrap"),
+            "telemetry_bootstrap_failed",
+            level="warning",
+            error_type=type(_telemetry_exc).__name__,
+            error=str(_telemetry_exc),
+        )
     storage = build_storage_backends(base_settings, process_role=effective_process_role)
     try:
         # ── Settings Provenance 追踪 ─────────────────────────────

@@ -40,6 +40,16 @@ x-aats-common-env: &aats-common-env
   # 与 portfolio_snapshot 接进 Redis 时铺垫。
   AATS_HOT_STATE_BACKEND: redis
   AATS_HOT_STATE_REDIS_URL: redis://redis:6379/0
+  # Stage 8：OpenTelemetry + Jaeger。4 进程共用同一个 OTLP gRPC endpoint，
+  # service.name 由 configure_telemetry 根据 AATS_PROCESS_ROLE 自动派生成
+  # aats-gateway / aats-market / aats-decision / aats-execution，不需要
+  # 在这里逐一复制。sample ratio 保留 1.0 适合 drill/dryrun 阶段；
+  # 正式灰度时可降到 0.1。
+  # 设计文档：docs/task/stage_8_otel_integration_design.md §D2
+  AATS_OTEL_ENDPOINT: http://jaeger:4317
+  AATS_OTEL_PROTOCOL: grpc
+  AATS_OTEL_DEPLOYMENT_ENV: wsl2-dev
+  AATS_OTEL_SAMPLE_RATIO: "1.0"
   AATS_LOG_FORMAT: json
   AATS_LOG_LEVEL: INFO
   TZ: Asia/Shanghai
