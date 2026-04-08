@@ -416,3 +416,126 @@ docker exec aats-nats nats consumer ls AATS_EVENTS | grep drill_probe | \
 
 Redis 里的 `aats:hot:system:kill_switch` 在 resume 后会回到 `halted=false`，
 不需要专门清。
+
+### 9.5 Stage 8 OpenTelemetry + Jaeger 4 进程 trace 链路验证
+
+Stage 8 的落地验收：4 个 AATS 进程全部开启 OTel，一条跨进程事件的 trace
+能够在 Jaeger UI 里展开成"producer 的 `nats.publish.<topic>` → 多个
+consumer 的 `nats.receive.<topic>`"的树状结构。本节只跑验证，不改数据。
+
+#### 9.5.1 前置：镜像已带 `.[otel]` extras
+
+```bash
+docker run --rm aats-base:dev python -c \
+  "import opentelemetry; import opentelemetry.sdk; \
+   import opentelemetry.exporter.otlp.proto.grpc; print('OK')"
+```
+
+期望输出：`OK`。
+镜像若没有 opentelemetry，回到 `docker compose -f docker-compose.aats.yml
+--env-file .env.wsl2 build` 重打一次 —— Dockerfile 里已经改成 `pip install
+-e ".[nats,redis,otel]"`。
+
+#### 9.5.2 每个 AATS 容器启动时都要打出 `telemetry_configured`
+
+```bash
+for c in aats-gateway aats-market aats-decision aats-execution; do
+  echo "=== $c ==="
+  docker logs "$c" 2>&1 | grep -E 'telemetry_configured|telemetry_otel_not_installed|telemetry_bootstrap_failed' | head -2
+done
+```
+
+期望每个容器都有一行 `telemetry_configured endpoint=http://jaeger:4317
+process_role=<role> service_name=aats-<role>`。没有 `otel_not_installed`
+或 `bootstrap_failed`。
+
+#### 9.5.3 Jaeger 里 4 个 service 都已注册
+
+```bash
+curl -s 'http://127.0.0.1:16686/api/services'
+```
+
+期望 data 字段包含 `["aats-decision","aats-execution","aats-gateway",
+"aats-market"]` 四个条目。
+
+#### 9.5.4 生成 gateway HTTP ingress span
+
+```bash
+for i in 1 2 3 4 5; do curl -sf http://127.0.0.1:8000/ > /dev/null; done
+sleep 8
+curl -s 'http://127.0.0.1:16686/api/traces?service=aats-gateway&lookback=2m&limit=5' | \
+  python3 -c 'import sys, json; d = json.load(sys.stdin); \
+  print([t["spans"][0]["operationName"] for t in d["data"][:5]])'
+```
+
+期望输出里至少包含 `gateway.http.GET /`。
+
+#### 9.5.5 跨进程 trace 树（核心验证）
+
+让 execution → portfolio snapshot 自然触发一次 fan-out（等 1-2 分钟即可,
+execution 的 reconciliation 后台周期会做）：
+
+```bash
+sleep 90
+curl -s 'http://127.0.0.1:16686/api/traces?service=aats-decision&lookback=3m&limit=20' | \
+  python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+multi = [t for t in d["data"] if len(t["spans"]) > 2]
+for t in multi[:3]:
+    print("trace", t["traceID"][:16], "processes",
+          sorted({p["serviceName"] for p in t["processes"].values()}))
+    for s in sorted(t["spans"], key=lambda x: x["startTime"]):
+        svc = t["processes"][s["processID"]]["serviceName"]
+        pref = [r for r in s["references"] if r["refType"] == "CHILD_OF"]
+        parent = pref[0]["spanID"][:8] if pref else "(root)"
+        print("  ", svc, s["operationName"], "parent=" + parent)
+'
+```
+
+期望看到类似这样的树结构（Stage 8-4b 之后修好）：
+
+```
+trace e264c950cae0d2aa  processes ['aats-decision','aats-execution','aats-gateway','aats-market']
+   aats-execution  nats.publish.portfolio.snapshots        (root)
+   aats-decision   nats.receive.portfolio.snapshots        parent=<publish>
+   aats-market     nats.receive.portfolio.snapshots        parent=<publish>
+   aats-execution  nats.receive.portfolio.snapshots        parent=<publish>
+   aats-gateway    nats.receive.portfolio.snapshots        parent=<publish>
+   aats-execution  nats.publish.reconciliation.reports     parent=<execution receive>
+   aats-decision   nats.receive.reconciliation.reports     parent=<execution publish>
+```
+
+核心断言：
+- **同一个 trace_id 跨至少 3 个 service**（4 个最理想）
+- `nats.receive.<topic>` span 的 parent 是 `nats.publish.<topic>`（不是再
+  往上的 handler span；如果是 handler span 说明 inject 被放在了 publish
+  span 外面，Stage 8-4b 之前就是这样的 bug，看到就回退到 8-4b 的 commit
+  hash 重新部署）
+- 所有 `nats.publish.*` 与 `nats.receive.*` span 都带
+  `messaging.system="nats"` / `aats.topic=<topic>` / `aats.event_id=<uuid>`
+  attrs（用 Jaeger UI 点开 span 详情能看到）
+
+#### 9.5.6 Jaeger UI 人工验证（可选）
+
+```
+打开浏览器：http://localhost:16686/
+Service 选 aats-execution
+Operation 选 nats.publish.portfolio.snapshots
+点 Find Traces，在 trace 列表里挑 1 条 span 数 ≥ 4 的
+点开看 timeline，确认 receive span 紧贴 publish span，不是跨 handler 错位
+```
+
+#### 9.5.7 生产灰度前降采样率
+
+docker-compose.aats.yml 默认 `AATS_OTEL_SAMPLE_RATIO=1.0`（全采样适合
+drill/dryrun），实盘 1U/10U 阶段保持 1.0 便于排障，到 100U/1000U 再降到
+0.1 或 0.05：
+
+```yaml
+# deploy/wsl2-dev/docker-compose.aats.yml 的 x-aats-common-env 里改
+AATS_OTEL_SAMPLE_RATIO: "0.1"
+```
+
+修改后 `docker compose -f docker-compose.aats.yml --env-file .env.wsl2 up -d`
+重建即可，不用 rebuild 镜像。
