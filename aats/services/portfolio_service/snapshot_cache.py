@@ -290,6 +290,45 @@ class PortfolioSnapshotCache:
             decision_id=snapshot.decision_id,
         )
 
+    def apply_sync(self, snapshot: PortfolioSnapshot) -> None:
+        """Stage 6 Slice 6.3 hot-fix：sync 版本的 publish，只同步本地 dict。
+
+        用作 ``portfolio_repo.save_snapshot`` 的 listener 钩子。所有绕过
+        outbox publisher 直接写 repo 的路径（recovery / repair / projections
+        / positions / tests）通过这个钩子把 snapshot 同步到 cache 本地 dict，
+        修复 operator UI 读到 stale bootstrap snapshot 的 bug。
+
+        - 不写 Redis（sync 路径不能 await；Redis 端由 outbox publisher 路径
+          覆盖）
+        - 不发 NATS（跨进程传播由 outbox publisher 现有路径负责）
+        - 复用 ``_apply_locally`` 的 ``snapshot_ts <= existing`` idempotent
+          规则：outbox publisher 路径会再次调 ``publish()``，那次会被 noop
+
+        详见 docs/task/stage_6_slice_6_3_cache_listener_fix_design.md。
+        """
+        try:
+            scope_fingerprint = self._scope_fingerprint_from_snapshot(snapshot)
+        except Exception as exc:
+            log_event(
+                self._logger,
+                "portfolio_snapshot_cache_apply_sync_parse_failed",
+                level="warning",
+                process_role=self._process_role,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return
+        applied = self._apply_locally(scope_fingerprint, snapshot)
+        if applied:
+            log_event(
+                self._logger,
+                "portfolio_snapshot_cache_apply_sync_applied",
+                process_role=self._process_role,
+                scope_fingerprint=scope_fingerprint,
+                snapshot_ts=snapshot.snapshot_ts.isoformat(),
+                decision_id=snapshot.decision_id,
+            )
+
     # ──────────────────────────────────────────────────────────────────
     # 读路径（query_service._latest_scoped_snapshot 调）
     # ──────────────────────────────────────────────────────────────────

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from collections.abc import Callable
+
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -9,15 +12,47 @@ from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import portfolio_scope_metadata
 from aats.storage.sqlalchemy_models import PortfolioSnapshotModel
 
+_logger = logging.getLogger("aats.storage.portfolio_repo_postgres")
+
 
 class PostgresPortfolioRepository:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self.session_factory = session_factory
+        # Stage 6 Slice 6.3 hot-fix：portfolio_repo → snapshot_cache 同进程 listener。
+        # 详见 docs/task/stage_6_slice_6_3_cache_listener_fix_design.md。
+        # listener 只在 save_snapshot (非 in_session 版本) commit 成功后触发。
+        # outbox publisher 走 save_snapshot_in_session + 外部 _publish_to_cache，
+        # 不经过 listener 钩子，行为不变。
+        self._snapshot_listener: Callable[[PortfolioSnapshot], None] | None = None
+
+    def attach_snapshot_listener(
+        self, listener: Callable[[PortfolioSnapshot], None]
+    ) -> None:
+        """注入 snapshot listener，每次 save_snapshot(commit) 后同步调用。
+
+        listener 抛异常会被捕获并 log warning，不会拖垮 save_snapshot 的主路径。
+        """
+        self._snapshot_listener = listener
 
     def save_snapshot(self, snapshot: PortfolioSnapshot) -> None:
         with self.session_factory() as session:
             self.save_snapshot_in_session(session, snapshot)
             session.commit()
+        # commit 成功后才通知 listener，避免 listener 看到未 commit 数据
+        self._notify_listener(snapshot)
+
+    def _notify_listener(self, snapshot: PortfolioSnapshot) -> None:
+        listener = self._snapshot_listener
+        if listener is None:
+            return
+        try:
+            listener(snapshot)
+        except Exception as exc:  # pragma: no cover - best-effort
+            _logger.warning(
+                "portfolio_repo_snapshot_listener_failed error_type=%s error=%s",
+                type(exc).__name__,
+                exc,
+            )
 
     def save_snapshot_in_session(self, session: Session, snapshot: PortfolioSnapshot) -> None:
         scope = portfolio_scope_metadata(snapshot)

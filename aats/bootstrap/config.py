@@ -3812,6 +3812,37 @@ async def build_runtime(
         bootstrap_state=slices.portfolio_snapshot_cache.snapshot(),
     )
 
+    # Stage 6 Slice 6.3 hot-fix：把 portfolio_snapshot_cache.apply_sync 注入为
+    # portfolio_repo 的 snapshot listener。所有绕过 outbox publisher 直接
+    # save_snapshot 的路径（recovery / repair / projections / positions / tests）
+    # commit 成功后会立即通知 cache，修复 operator UI 读到 stale bootstrap
+    # snapshot 的资金安全 bug。
+    # 设计文档：docs/task/stage_6_slice_6_3_cache_listener_fix_design.md §D4
+    # 时机要求：必须在 portfolio_snapshot_cache.bootstrap(...) 之后（上面几行），
+    # 这样 cache._latest 已 hydrate，listener 触发时 _apply_locally 的
+    # snapshot_ts <= existing 去重规则才有正确的基准。
+    # D1 决策：attach_snapshot_listener 只在两个具体 repo 实现类里声明，
+    # Protocol 不变；所以这里用 hasattr 做 duck-typing 守卫，未来 mock /
+    # 第三方 Protocol 实现不会因为缺失方法而炸。
+    _attach_snapshot_listener = getattr(
+        storage.portfolio_repo, "attach_snapshot_listener", None
+    )
+    if callable(_attach_snapshot_listener):
+        _attach_snapshot_listener(slices.portfolio_snapshot_cache.apply_sync)
+        log_event(
+            get_logger("aats.bootstrap"),
+            "portfolio_repo_cache_listener_attached",
+            process_role=effective_process_role or "monolith",
+        )
+    else:
+        log_event(
+            get_logger("aats.bootstrap"),
+            "portfolio_repo_cache_listener_skipped",
+            level="warning",
+            process_role=effective_process_role or "monolith",
+            reason="repo_has_no_attach_snapshot_listener",
+        )
+
     _build_market_slice(slices=slices, effective_process_role=effective_process_role)
     _build_decision_slice(
         runtime_settings=runtime_settings,
