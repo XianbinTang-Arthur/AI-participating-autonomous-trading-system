@@ -81,7 +81,6 @@ from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEn
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.derivatives_live_guard import DerivativesLiveGuardService
 from aats.services.governance_engine.kill_switch import KillSwitch
-from aats.services.governance_engine.kill_switch_sync import KillSwitchSyncService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.policy import PolicyEngine
 from aats.services.governance_engine.risk import RiskEngine
@@ -417,12 +416,11 @@ class ApplicationRuntime:
     fee_resolver: EffectiveFeeResolver
     policy_engine: PolicyEngine | None
     risk_engine: RiskEngine | None
+    # Stage 6 Slice 6.4：合并的 KillSwitch 类同时承担本地 sync read/write 与
+    # 跨进程同步边车（hot_state_store + bus 由 bootstrap 注入）。slice 6.2 引入的
+    # KillSwitchSyncService 已被合并到本类，5 个写入点 (W1-W5) 不再需要 if/else
+    # fallback。详见 docs/task/stage_6_slice_6_4_kill_switch_unification_design.md。
     kill_switch: KillSwitch
-    # Stage 6 Slice 6.2：跨进程 kill_switch 同步服务。bootstrap 时从 Redis 读
-    # 已有 halt 状态写入本地 KillSwitch；运行时 NATS 广播 halt/resume 事件让另外
-    # 3 个进程的本地 KillSwitch 自动跟进。详见
-    # docs/task/stage_6_slice_6_2_kill_switch_design.md。
-    kill_switch_sync_service: KillSwitchSyncService
     # Stage 6 Slice 6.2：跨进程 portfolio_snapshot 缓存边车。bootstrap 时从 Redis
     # hydrate 最近一份 snapshot；订阅 NATS portfolio.snapshots topic 让 4 个进程
     # 的 latest snapshot 视图保持同步。query_service._latest_scoped_snapshot 用
@@ -534,15 +532,15 @@ class ApplicationRuntime:
         close_rest_client = getattr(self.account_service.client, "aclose", None)
         if callable(close_rest_client):
             await close_rest_client()
-        # Stage 6 Slice 6.2：关闭 kill_switch 同步服务。必须在 bus.close 之前，
-        # 因为 stop() 内部会撤销 NATS 订阅；本地 KillSwitch 状态保持不变（关闭
-        # 不代表 resume，下次启动从 Redis 读到的仍然是上一次 halt 状态）。
+        # Stage 6 Slice 6.4：关闭合并后的 KillSwitch sidecar。必须在 bus.close
+        # 之前，因为 stop() 内部会撤销 NATS 订阅；本地 KillSwitch 状态保持不变
+        # （关闭不代表 resume，下次启动从 Redis 读到的仍然是上一次 halt 状态）。
         try:
-            await self.kill_switch_sync_service.stop()
+            await self.kill_switch.stop()
         except Exception as exc:
             log_event(
                 self.logger,
-                "kill_switch_sync_service_shutdown_close_failed",
+                "kill_switch_shutdown_close_failed",
                 level="warning",
                 error_type=type(exc).__name__,
                 error=str(exc),
@@ -2735,11 +2733,10 @@ class _RuntimeSlices:
     # ---- shared / 基础 ----
     metrics: Any = None
     bus: Any = None
+    # Stage 6 Slice 6.4：合并的 KillSwitch 类同时承担本地 sync read/write 与
+    # 跨进程同步边车。在 _start_event_bus 完成后由 build_runtime 调用
+    # await slices.kill_switch.bootstrap(...) 注入 hot_state_store + bus。
     kill_switch: Any = None
-    # Stage 6 Slice 6.2：跨进程 kill_switch 同步边车。在 _start_event_bus 完成后
-    # 由 build_runtime 构造 + bootstrap，把 4 进程的本地 KillSwitch 收敛到同一个
-    # Redis 状态机。
-    kill_switch_sync_service: Any = None
     # Stage 6 Slice 6.3：跨进程 portfolio_snapshot 缓存边车。在 _start_event_bus
     # 完成后由 build_runtime 构造 + bootstrap，订阅 portfolio.snapshots 让 4 进
     # 程的 latest snapshot 视图保持收敛。
@@ -3480,7 +3477,6 @@ def _build_reconciliation_slice(
         recovery_policy=runtime_layering.recovery_policy,
         fill_outcome_repo=storage.fill_outcome_repo,
         event_store=storage.event_store,
-        kill_switch_sync=slices.kill_switch_sync_service,
     )
     # OKXExecutionAdapter.client satisfies ExchangeOrderQuerier protocol.
     _exchange_order_client = (
@@ -3499,7 +3495,6 @@ def _build_reconciliation_slice(
             execution_order_repo=storage.execution_order_repo,
             execution_command_repo=storage.execution_command_repo,
             exchange_order_client=_exchange_order_client,
-            kill_switch_sync=slices.kill_switch_sync_service,
         )
         if runtime_settings.recovery_reconciliation_execution_ledger_enabled
         else slices.base_recovery_service
@@ -3579,7 +3574,6 @@ def _apply_post_init_guards(
         account_service=runtime.account_service,
         event_store=runtime.event_store,
         metrics=runtime.metrics,
-        kill_switch_sync=runtime.kill_switch_sync_service,
     )
     runtime.derivatives_live_guard_service.evaluate_now()
     runtime.health_service.runtime_guard_provider = runtime.derivatives_live_guard_service
@@ -3592,7 +3586,6 @@ def _apply_post_init_guards(
         metrics=runtime.metrics,
         profitability_provider=lambda limit: OperatorQueryService(runtime).profitability_overview(limit=limit),
         anomaly_provider=lambda limit: OperatorQueryService(runtime).execution_anomaly_report(limit=limit),
-        kill_switch_sync=runtime.kill_switch_sync_service,
     )
     runtime.trial_guard_service.evaluate_now()
     if runtime.risk_engine is not None:
@@ -3770,30 +3763,27 @@ async def build_runtime(
     if slices.bus is not None:
         await _start_event_bus(slices.bus)
 
-    # Stage 6 Slice 6.2：跨进程 kill_switch 同步服务。必须在 _start_event_bus 完成
-    # 后立即构造 + bootstrap，因为：
-    # 1) 其他 slice builder（如 _build_reconciliation_slice）需要把 sync service
-    #    注入 ExecutionRecoveryService / ExecutionLedgerRecoveryService
-    # 2) bootstrap 内部要 await bus.subscribe(...)，bus 必须已经 connect
-    # 3) startup_recovery 阶段（位于所有 slice builder 之后）也需要 sync service
-    # 设计文档：docs/task/stage_6_slice_6_2_kill_switch_design.md §4.6
-    slices.kill_switch_sync_service = KillSwitchSyncService(
-        kill_switch=slices.kill_switch,
+    # Stage 6 Slice 6.4：把合并后的 KillSwitch 升级为跨进程 sidecar 模式。
+    # 必须在 _start_event_bus 完成后立即调用 bootstrap，因为：
+    # 1) bootstrap 内部要 await bus.subscribe(...)，bus 必须已经 connect
+    # 2) 其他 slice builder 与 _apply_post_init_guards 都直接持有 slices.kill_switch
+    #    引用，bootstrap 是 in-place 升级，引用不变，无需再额外注入
+    # 设计文档：docs/task/stage_6_slice_6_4_kill_switch_unification_design.md §3-§5
+    await slices.kill_switch.bootstrap(
         hot_state_store=hot_state_store,
         bus=slices.bus,
         process_role=effective_process_role or "monolith",
-        logger=get_logger("aats.governance.kill_switch_sync"),
+        logger=get_logger("aats.governance.kill_switch"),
     )
-    await slices.kill_switch_sync_service.bootstrap()
     log_event(
         get_logger("aats.bootstrap"),
-        "kill_switch_sync_service_initialized",
+        "kill_switch_initialized",
         process_role=effective_process_role or "monolith",
-        bootstrap_state=slices.kill_switch_sync_service.snapshot(),
+        bootstrap_state=slices.kill_switch.snapshot(),
     )
 
-    # Stage 6 Slice 6.3：跨进程 portfolio_snapshot 缓存边车。和 kill_switch_sync
-    # 同模板：bus.start 完成后立即构造 + Redis hydrate，让所有 slice builder（特
+    # Stage 6 Slice 6.3：跨进程 portfolio_snapshot 缓存边车。和 kill_switch
+    # bootstrap 同模板：bus.start 完成后立即构造 + Redis hydrate，让所有 slice builder（特
     # 别是 _build_portfolio_slice 的 outbox publisher 与 query_service 路径）能
     # 拿到一个已 hydrate 的 cache 实例。
     #
@@ -3886,9 +3876,8 @@ async def build_runtime(
     execution_outbox_publisher = slices.execution_outbox_publisher
     execution_order_service = slices.execution_order_service
     execution_command_processor = slices.execution_command_processor
-    # Stage 6 Slice 6.2：从 slices 提取 kill_switch_sync_service（已在 bus.start
-    # 之后立即构造 + bootstrap）
-    kill_switch_sync_service = slices.kill_switch_sync_service
+    # Stage 6 Slice 6.4：合并的 KillSwitch 已经在 bus.start 后被 bootstrap 升级为
+    # sidecar 模式，slices.kill_switch 引用即是。
     # Stage 6 Slice 6.3：portfolio_snapshot 跨进程缓存（同样已在 bus.start 后立
     # 即构造 + bootstrap），稍后注入到 outbox publisher 与 query_service。
     portfolio_snapshot_cache = slices.portfolio_snapshot_cache
@@ -4063,7 +4052,6 @@ async def build_runtime(
         policy_engine=policy_engine,
         risk_engine=risk_engine,
         kill_switch=kill_switch,
-        kill_switch_sync_service=kill_switch_sync_service,
         portfolio_snapshot_cache=portfolio_snapshot_cache,
         mode_controller=mode_controller,
         health_service=health_service,

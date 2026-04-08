@@ -10,7 +10,6 @@ from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
 from aats.services.governance_engine.kill_switch import KillSwitch
-from aats.services.governance_engine.kill_switch_sync import KillSwitchSyncService
 from aats.services.portfolio_service.decimals import to_decimal_or_none as _to_decimal
 
 
@@ -26,9 +25,6 @@ class DerivativesLiveGuardService:
     last_risk_snapshot_seen_at: Any = None
     risk_snapshot_missing_started_at: Any = None
     risk_snapshot_missing_count: int = 0
-    # Stage 6 Slice 6.2：跨进程 kill_switch 同步服务。生产 build_runtime 路径会
-    # 注入 runtime.kill_switch_sync_service；单元测试不关心跨进程同步可留 None。
-    kill_switch_sync: KillSwitchSyncService | None = None
 
     _EPSILON: Decimal = field(default=Decimal("1e-12"), init=False, repr=False)
 
@@ -368,11 +364,8 @@ class DerivativesLiveGuardService:
         reason = "derivatives_live_risk_auto_halt"
         if self.kill_switch.halted and self.kill_switch.status().get("reason") == reason:
             return
-        # Stage 6 Slice 6.2：优先走跨进程同步路径
-        if self.kill_switch_sync is not None:
-            self.kill_switch_sync.halt_threadsafe(reason)
-        else:
-            self.kill_switch.halt(reason=reason)
+        # Stage 6 Slice 6.4：合并的 KillSwitch 自动跨进程广播
+        self.kill_switch.halt(reason=reason)
         self.last_auto_halt_at = utc_now()
         self.metrics.increment("derivatives_live_guard_auto_halts")
         breach_codes = ",".join(snapshot.get("auto_halt_reasons") or [])

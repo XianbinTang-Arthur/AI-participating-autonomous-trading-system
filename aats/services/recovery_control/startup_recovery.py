@@ -15,7 +15,6 @@ from aats.services.execution_engine.exit_intent_aggregator import (
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService, RecoveryArtifacts
 from aats.services.governance_engine.kill_switch import KillSwitch
-from aats.services.governance_engine.kill_switch_sync import KillSwitchSyncService
 from aats.services.recovery_control.reconciliation_classifier import RecoveryReconciliationClassifier
 from aats.services.runtime_scope import latest_reconciliation_for_scope, latest_snapshot_for_scope, runtime_state_scope
 
@@ -262,18 +261,13 @@ class ExecutionLedgerRecoveryService:
     execution_order_repo: object | None = None
     execution_command_repo: object | None = None
     exchange_order_client: object | None = None
-    # Stage 6 Slice 6.2：跨进程 kill_switch 同步服务，None 时回退到本地路径
-    kill_switch_sync: KillSwitchSyncService | None = None
     runtime_scope: object = field(init=False)
     _exchange_reconciled_count: int = field(init=False, default=0)
     _exchange_reconcile_notes: list[str] = field(init=False, default_factory=list)
 
     def _halt(self, reason: str) -> None:
-        """Stage 6 Slice 6.2：halt helper，优先走跨进程同步路径。"""
-        if self.kill_switch_sync is not None:
-            self.kill_switch_sync.halt_threadsafe(reason)
-        else:
-            self.kill_switch.halt(reason=reason)
+        """Stage 6 Slice 6.4：合并的 KillSwitch 自动跨进程广播，无需 if/else fallback。"""
+        self.kill_switch.halt(reason=reason)
 
     def __post_init__(self) -> None:
         self.runtime_scope = runtime_state_scope(self.settings)

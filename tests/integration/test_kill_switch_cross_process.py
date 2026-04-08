@@ -1,6 +1,10 @@
-"""Stage 6 Slice 6.2 集成测试：跨进程 kill_switch 同步真容器 round-trip。
+"""Stage 6 Slice 6.4 集成测试：跨进程 kill_switch 同步真容器 round-trip。
 
-覆盖（对应 design doc §8.2 四条验收标准）：
+设计文档
+========
+docs/task/stage_6_slice_6_4_kill_switch_unification_design.md §8.2
+
+覆盖（对应 design doc 四条验收标准）：
 
 1. **跨进程实时广播**（不变量 I2）
    - service A halt → service B 的本地 KillSwitch 在 ≤1s 内变 halted=True
@@ -24,11 +28,18 @@
 - 默认情况下整个文件被 ``unittest.skipUnless`` 跳过，不会拖慢 CI / 单测
 
 ⚠️ **scope 注意**：本文件用 InMemoryEventBus 共享实例 + 真实 Redis 容器
-组合模拟"两个进程"——这是 Slice 6.2 设计文档 §8.2 钦定的轻量集成路径，
-真正的 4 进程 docker compose 真跑由 §8.3 + runbook §10 验证。两者各管
-一段：本文件保证 KillSwitchSyncService 两实例之间的同步语义在 Redis 真
-容器上 round-trip 正确，4 进程真跑保证 NATS 真总线 + entry script 串起
-来的 wire 不掉链。
+组合模拟"两个进程"——这是 Slice 6.4 设计文档钦定的轻量集成路径，真正的
+4 进程 docker compose 真跑由 runbook 验证。两者各管一段：本文件保证
+合并后的 KillSwitch 两实例之间的同步语义在 Redis 真容器上 round-trip 正确，
+4 进程真跑保证 NATS 真总线 + entry script 串起来的 wire 不掉链。
+
+Slice 6.4 vs 6.2 差异
+=====================
+- 6.2：``KillSwitch()`` + ``KillSwitchSyncService(kill_switch=...).bootstrap()``
+  双对象，5 个写入点用 if/else fallback
+- 6.4：``KillSwitch()`` 单对象 + ``await ks.bootstrap(hot_state_store=..., bus=...,
+  process_role=..., logger=...)``。写入点直接 ``ks.halt(reason)`` /
+  ``await ks.halt_async(reason)``，sidecar 未配线时自动退化本地模式
 """
 from __future__ import annotations
 
@@ -87,7 +98,7 @@ def _client_url(container: "DockerContainer") -> str:
     f"Set {_INTEGRATION_ENV_FLAG}=1 and install .[redis-integration] to run Redis integration tests",
 )
 class TestKillSwitchCrossProcessSync(unittest.IsolatedAsyncioTestCase):
-    """跨进程 kill_switch 同步：2 个 KillSwitchSyncService 共享 Redis + bus。"""
+    """跨进程 kill_switch 同步：2 个 KillSwitch（已 bootstrap）共享 Redis + bus。"""
 
     container: "DockerContainer"  # type: ignore[assignment]
     redis_url: str
@@ -114,48 +125,48 @@ class TestKillSwitchCrossProcessSync(unittest.IsolatedAsyncioTestCase):
         finally:
             await client.aclose()
 
-    async def _make_service(
+    async def _make_kill_switch(
         self,
         *,
         process_role: str,
         bus,
     ):
-        """构造一个 (service, kill_switch, store) 组合，模拟一个进程的同步层。"""
+        """构造一个 (kill_switch, store) 组合，模拟一个进程的同步层。
+
+        Slice 6.4：单对象 KillSwitch + bootstrap 一次性挂上 sidecar deps。
+        """
         from aats.services.governance_engine.kill_switch import KillSwitch
-        from aats.services.governance_engine.kill_switch_sync import KillSwitchSyncService
         from aats.storage.hot_state_store import RedisHotStateConfig, RedisHotStateStore
 
         store = RedisHotStateStore(config=RedisHotStateConfig(url=self.redis_url))
         await store.connect()
         ks = KillSwitch()
-        service = KillSwitchSyncService(
-            kill_switch=ks,
+        await ks.bootstrap(
             hot_state_store=store,
             bus=bus,
             process_role=process_role,
-            logger=logging.getLogger(f"test.kill_switch_sync.{process_role}"),
+            logger=logging.getLogger(f"test.kill_switch.{process_role}"),
         )
-        await service.bootstrap()
-        return service, ks, store
+        return ks, store
 
     async def test_halt_on_a_propagates_to_b_within_one_second(self) -> None:
         """I2：service A halt → service B 的本地 KillSwitch ≤1s 内被同步到 halted=True。
 
-        共享一条 InMemoryEventBus 实例模拟"同一根 NATS 总线"。两个 service
+        共享一条 InMemoryEventBus 实例模拟"同一根 NATS 总线"。两个 KillSwitch
         bootstrap 时各自 subscribe 到 ``system.kill_switch_state``，A 的 halt
         会通过 bus 广播给 B 的 _handle_remote_event。
         """
         from aats.bus.memory_bus import InMemoryEventBus
 
         bus = InMemoryEventBus(event_store=None, persistence_mode="permissive")
-        service_a, ks_a, store_a = await self._make_service(process_role="gateway", bus=bus)
-        service_b, ks_b, store_b = await self._make_service(process_role="execution", bus=bus)
+        ks_a, store_a = await self._make_kill_switch(process_role="gateway", bus=bus)
+        ks_b, store_b = await self._make_kill_switch(process_role="execution", bus=bus)
         try:
             self.assertFalse(ks_a.halted)
             self.assertFalse(ks_b.halted)
 
             t0 = time.monotonic()
-            await service_a.halt(reason="cross_process_test_halt")
+            await ks_a.halt_async(reason="cross_process_test_halt")
             elapsed = time.monotonic() - t0
 
             # I1：本地立即生效
@@ -165,8 +176,8 @@ class TestKillSwitchCrossProcessSync(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ks_b.status()["reason"], "cross_process_test_halt")
             self.assertLess(elapsed, 1.0)
         finally:
-            await service_a.stop()
-            await service_b.stop()
+            await ks_a.stop()
+            await ks_b.stop()
             await store_a.close()
             await store_b.close()
 
@@ -174,26 +185,25 @@ class TestKillSwitchCrossProcessSync(unittest.IsolatedAsyncioTestCase):
         """I3：service A halt → 重启 service B → 新 service B bootstrap 后 halted=True。
 
         模拟"execution 进程崩溃 + restart"：旧 B 关掉，新 B 用全新的 store +
-        全新的 KillSwitch + 全新的 service 跑 bootstrap，必须从 Redis 读到上
-        一次 halt 状态。
+        全新的 KillSwitch 跑 bootstrap，必须从 Redis 读到上一次 halt 状态。
         """
         from aats.bus.memory_bus import InMemoryEventBus
 
         bus = InMemoryEventBus(event_store=None, persistence_mode="permissive")
-        service_a, ks_a, store_a = await self._make_service(process_role="gateway", bus=bus)
-        service_b, ks_b, store_b = await self._make_service(process_role="execution", bus=bus)
+        ks_a, store_a = await self._make_kill_switch(process_role="gateway", bus=bus)
+        ks_b, store_b = await self._make_kill_switch(process_role="execution", bus=bus)
         try:
-            await service_a.halt(reason="restart_recovery_test_halt")
+            await ks_a.halt_async(reason="restart_recovery_test_halt")
             self.assertTrue(ks_b.halted)
 
             # 模拟 service B 进程崩溃 + 关闭
-            await service_b.stop()
+            await ks_b.stop()
             await store_b.close()
 
             # 新进程 service B 启动：全新 KillSwitch（默认 halted=False），
             # bootstrap 后必须从 Redis 读出 halted=True
             bus_b_new = InMemoryEventBus(event_store=None, persistence_mode="permissive")
-            service_b_new, ks_b_new, store_b_new = await self._make_service(
+            ks_b_new, store_b_new = await self._make_kill_switch(
                 process_role="execution",
                 bus=bus_b_new,
             )
@@ -205,10 +215,10 @@ class TestKillSwitchCrossProcessSync(unittest.IsolatedAsyncioTestCase):
                     "restart_recovery_test_halt",
                 )
             finally:
-                await service_b_new.stop()
+                await ks_b_new.stop()
                 await store_b_new.close()
         finally:
-            await service_a.stop()
+            await ks_a.stop()
             await store_a.close()
 
     async def test_a_halts_then_b_resumes_converges_to_running(self) -> None:
@@ -216,10 +226,10 @@ class TestKillSwitchCrossProcessSync(unittest.IsolatedAsyncioTestCase):
         from aats.bus.memory_bus import InMemoryEventBus
 
         bus = InMemoryEventBus(event_store=None, persistence_mode="permissive")
-        service_a, ks_a, store_a = await self._make_service(process_role="gateway", bus=bus)
-        service_b, ks_b, store_b = await self._make_service(process_role="execution", bus=bus)
+        ks_a, store_a = await self._make_kill_switch(process_role="gateway", bus=bus)
+        ks_b, store_b = await self._make_kill_switch(process_role="execution", bus=bus)
         try:
-            await service_a.halt(reason="converge_test_halt")
+            await ks_a.halt_async(reason="converge_test_halt")
             self.assertTrue(ks_a.halted)
             self.assertTrue(ks_b.halted)
 
@@ -231,13 +241,13 @@ class TestKillSwitchCrossProcessSync(unittest.IsolatedAsyncioTestCase):
             import asyncio
             await asyncio.sleep(0.01)
 
-            await service_b.resume()
+            await ks_b.resume_async()
             self.assertFalse(ks_b.halted)
             self.assertFalse(ks_a.halted)
             self.assertEqual(ks_a.status()["reason"], None)
         finally:
-            await service_a.stop()
-            await service_b.stop()
+            await ks_a.stop()
+            await ks_b.stop()
             await store_a.close()
             await store_b.close()
 
@@ -252,14 +262,18 @@ class TestKillSwitchCrossProcessSync(unittest.IsolatedAsyncioTestCase):
         from aats.bus.memory_bus import InMemoryEventBus
         from aats.events import topics
         from aats.schemas.common import EventEnvelope
+        from aats.services.governance_engine.kill_switch import (
+            KILL_SWITCH_EVENT_TYPE,
+            KILL_SWITCH_SOURCE_COMPONENT,
+        )
 
         bus = InMemoryEventBus(event_store=None, persistence_mode="permissive")
-        service, ks, store = await self._make_service(process_role="gateway", bus=bus)
+        ks, store = await self._make_kill_switch(process_role="gateway", bus=bus)
         try:
             # 先正常 halt 一次，把 _last_applied_ts 推进到一个较新的时间戳
-            await service.halt(reason="newer_state")
+            await ks.halt_async(reason="newer_state")
             self.assertTrue(ks.halted)
-            newer_ts = service.snapshot()["last_applied_ts"]
+            newer_ts = ks.snapshot()["last_applied_ts"]
             self.assertGreater(newer_ts, 0.0)
 
             # 构造一个比 newer_ts 还老的"远端 resume"事件，模拟另一进程
@@ -271,8 +285,8 @@ class TestKillSwitchCrossProcessSync(unittest.IsolatedAsyncioTestCase):
                 "source_role": "execution",  # 不是 self，不会被 source_role loop 跳过
             }
             stale_envelope = EventEnvelope(
-                event_type="KillSwitchStateChanged",
-                source_component="aats.governance.kill_switch_sync",
+                event_type=KILL_SWITCH_EVENT_TYPE,
+                source_component=KILL_SWITCH_SOURCE_COMPONENT,
                 topic=topics.KILL_SWITCH_STATE,
                 key="execution",
                 payload=stale_payload,
@@ -282,15 +296,15 @@ class TestKillSwitchCrossProcessSync(unittest.IsolatedAsyncioTestCase):
                 "key": "execution",
                 "payload": stale_envelope.model_dump(mode="json"),
             }
-            await service._handle_remote_event(stale_message)
+            await ks._handle_remote_event(stale_message)
 
             # 本地 cache 不应该回退：halt 状态保持
             self.assertTrue(ks.halted)
             self.assertEqual(ks.status()["reason"], "newer_state")
             # last_applied_ts 也不应该回退
-            self.assertEqual(service.snapshot()["last_applied_ts"], newer_ts)
+            self.assertEqual(ks.snapshot()["last_applied_ts"], newer_ts)
         finally:
-            await service.stop()
+            await ks.stop()
             await store.close()
 
 

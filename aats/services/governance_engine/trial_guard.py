@@ -13,7 +13,6 @@ from aats.schemas.common import utc_now
 from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
 from aats.services.accounting import try_fill_fee_cost_in_quote
 from aats.services.governance_engine.kill_switch import KillSwitch
-from aats.services.governance_engine.kill_switch_sync import KillSwitchSyncService
 from aats.services.portfolio_service.decimals import to_decimal_or_none as _to_decimal
 from aats.services.runtime_scope import event_matches_scope, runtime_state_scope
 
@@ -45,10 +44,6 @@ class ForwardTrialGuardService:
     anomaly_provider: Callable[[int], dict[str, Any]]
     last_snapshot: dict[str, Any] = field(default_factory=dict)
     manual_reset_after: datetime | None = None
-    # Stage 6 Slice 6.2：跨进程 kill_switch 同步服务。生产 build_runtime 路径会
-    # 注入 runtime.kill_switch_sync_service；单元测试如果不关心跨进程同步可以
-    # 留 None，_trigger_halt 会 fall back 到 self.kill_switch.halt()。
-    kill_switch_sync: KillSwitchSyncService | None = None
 
     def snapshot(self) -> dict[str, Any]:
         if not self.last_snapshot:
@@ -368,12 +363,10 @@ class ForwardTrialGuardService:
     def _trigger_halt(self, snapshot: dict[str, Any]) -> None:
         reason = "trial_guard_threshold_breached"
         if not self.kill_switch.halted:
-            # Stage 6 Slice 6.2：优先走跨进程同步路径；sync service 不存在
-            # （单元测试 / 启动期早于 build_runtime 装配）则 fall back 到本地。
-            if self.kill_switch_sync is not None:
-                self.kill_switch_sync.halt_threadsafe(reason)
-            else:
-                self.kill_switch.halt(reason=reason)
+            # Stage 6 Slice 6.4：合并的 KillSwitch 内部自动处理本地 cache + 跨进程
+            # 广播。worker thread 路径走 run_coroutine_threadsafe；测试 / 启动期早期
+            # 未 bootstrap 时退到 local-only。无需 if/else fallback。
+            self.kill_switch.halt(reason=reason)
             self.metrics.increment("trial_guard_halts")
             self.event_store.append(
                 build_envelope(
