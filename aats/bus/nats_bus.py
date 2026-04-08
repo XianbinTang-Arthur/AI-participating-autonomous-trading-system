@@ -94,6 +94,9 @@ DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
         _topics.EXECUTION_PLANS,          # 执行计划
         _topics.ORDER_INTENTS,            # 订单意图；执行核心
         _topics.ORDER_UPDATES,            # 订单状态机
+        _topics.OBLIGATION_UPDATES,       # Stage 6 Slice 6.5：obligation 广播；
+                                          # decision risk / gateway dashboard 读路径依赖，
+                                          # 决定跨进程 obligation 视图收敛不能丢
         _topics.FILL_EVENTS,              # 成交；资金变动核心
         _topics.PORTFOLIO_BALANCE_DELTAS, # 余额变动镜像
         _topics.PORTFOLIO_SNAPSHOTS,      # 组合快照

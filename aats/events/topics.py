@@ -22,6 +22,12 @@ RISK_DECISIONS = "risk.decisions"
 EXECUTION_PLANS = "execution.plans"
 ORDER_INTENTS = "execution.order_intents"
 ORDER_UPDATES = "execution.order_updates"
+# Stage 6 Slice 6.5：跨进程 obligation 缓存广播。execution 在每次 save_obligation
+# 之后 best-effort 广播 OrderObligation payload，decision/gateway/market 进程的
+# ObligationHotStateCache 订阅本 topic 更新本地缓存。丢一条不致命（读路径会 fall
+# back 到 obligation_repo Postgres SELECT），但会让 cache 短暂 stale。详见
+# docs/task/stage_6_slice_6_5_obligation_hot_state_design.md。
+OBLIGATION_UPDATES = "execution.obligation_updates"
 FILL_EVENTS = "execution.fill_events"
 PORTFOLIO_BALANCE_DELTAS = "portfolio.balance_deltas"
 PORTFOLIO_SNAPSHOTS = "portfolio.snapshots"
