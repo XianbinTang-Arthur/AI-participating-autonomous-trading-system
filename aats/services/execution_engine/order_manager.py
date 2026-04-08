@@ -7,6 +7,7 @@ from typing import Callable
 
 from aats.bootstrap.settings import AATSSettings
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
+from aats.bootstrap.telemetry import start_span
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_payload, publish_model
@@ -112,14 +113,35 @@ class OrderManager:
 
     async def handle_order_intent(self, message: dict) -> None:
         intent = parse_payload(message, OrderIntent)
-        await self._handle_normalized_order_intent(
-            intent=intent,
-            leg_intent=leg_intent_from_order_intent(intent),
-        )
+        # Stage 8：execution engine 的入口 span。父 span 由 NatsEventBus._on_msg
+        # 通过 envelope.trace_context 提取的 decision_engine.run_cycle 提供；
+        # Jaeger 里会看到 decision → execution 的跨进程 trace chain。
+        # 设计文档：docs/task/stage_8_otel_integration_design.md §D5
+        with start_span(
+            "execution_engine.handle_order_intent",
+            attributes={
+                "aats.intent_id": intent.intent_id,
+                "aats.decision_id": intent.decision_id,
+                "aats.symbol": intent.symbol,
+                "aats.side": str(intent.side),
+                "aats.quantity": str(intent.quantity),
+            },
+        ):
+            await self._handle_normalized_order_intent(
+                intent=intent,
+                leg_intent=leg_intent_from_order_intent(intent),
+            )
 
     async def handle_leg_order_intent(self, message: dict) -> None:
         leg_intent = parse_payload(message, LegOrderIntent)
-        await self.submit_leg_order(leg_intent=leg_intent)
+        with start_span(
+            "execution_engine.handle_leg_order_intent",
+            attributes={
+                "aats.leg_intent_id": getattr(leg_intent, "leg_intent_id", ""),
+                "aats.symbol": getattr(leg_intent, "symbol", ""),
+            },
+        ):
+            await self.submit_leg_order(leg_intent=leg_intent)
 
     async def submit_leg_order(self, *, leg_intent: LegOrderIntent) -> None:
         await self._handle_normalized_order_intent(

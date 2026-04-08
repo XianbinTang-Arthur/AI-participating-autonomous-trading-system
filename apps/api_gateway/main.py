@@ -16,6 +16,7 @@ from aats.bootstrap.settings import (
     PROCESS_ROLE_GATEWAY,
     PROCESS_ROLE_MONOLITH,
 )
+from aats.bootstrap.telemetry import start_span
 
 # 任何 mutation 请求（POST/PATCH/PUT/DELETE）成功后都要把 dashboard bundle
 # 缓存清空一次。否则用户切 mode / 触发 halt / 激活 profile 后，紧接着的
@@ -62,6 +63,46 @@ async def _invalidate_bundle_cache_on_mutation(request: Request, call_next):
     if request.method in _MUTATING_METHODS and 200 <= response.status_code < 400:
         invalidate_bundle_cache()
     return response
+
+
+# Stage 8：把每一条 HTTP 请求作为 trace 的 root span。所有在 handler 内部
+# 发起的 NatsEventBus.publish 都会自动挂在这条 span 下面（通过 OTel 的
+# current context）。span name 用 "gateway.http.<METHOD> <url_path>"，
+# Jaeger UI 默认按 service + span name 聚合统计 P50/P99。
+# 不用 opentelemetry-instrumentation-fastapi 是为了：
+#   1) 避免再引一个 optional extra
+#   2) 保持 span 命名与 docs/task/stage_8_otel_integration_design.md §D5
+#      的 "process_role.module.action" 规范完全对齐
+#   3) /healthz / /metrics / /favicon.ico 这类 noise 路径可以在这里显式过滤
+# 设计文档：docs/task/stage_8_otel_integration_design.md §D5
+_TELEMETRY_IGNORED_PATHS = frozenset({
+    "/healthz",
+    "/metrics",
+    "/favicon.ico",
+})
+
+
+@app.middleware("http")
+async def _gateway_trace_root_span(request: Request, call_next):
+    path = request.url.path
+    if path in _TELEMETRY_IGNORED_PATHS:
+        return await call_next(request)
+    with start_span(
+        f"gateway.http.{request.method} {path}",
+        attributes={
+            "http.method": request.method,
+            "http.route": path,
+            "http.scheme": request.url.scheme,
+            "http.host": request.url.hostname or "",
+            "aats.process_role": _resolved_process_role(),
+        },
+    ) as span:
+        response = await call_next(request)
+        try:
+            span.set_attribute("http.status_code", response.status_code)
+        except Exception:
+            pass
+        return response
 
 
 # Stage 7 修复：lightweight liveness probe 给 docker compose healthcheck 专用。

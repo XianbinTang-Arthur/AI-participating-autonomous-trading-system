@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
+from aats.bootstrap.telemetry import start_span
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import publish_model
@@ -61,6 +62,32 @@ class DecisionOrchestrator:
         # 收益：每次 to_thread 都是一次 yield 点，event loop 可以在线程跑
         # 计算的同时调度 HTTP handler，dashboard 不再被决策周期卡死。
         decision_id = new_id("decision")
+        # Stage 8：整个 decision cycle 作为一个顶层 span，内部所有 publish_model
+        # → NatsEventBus.publish_envelope 发出的 NATS 事件会自动作为子 span
+        # 挂在它下面，形成 Jaeger 里的 "decision_engine.run_cycle →
+        # nats.publish.decision_contexts / baseline_assessments / ..." 链路。
+        # 设计文档：docs/task/stage_8_otel_integration_design.md §D5
+        with start_span(
+            "decision_engine.run_cycle",
+            attributes={
+                "aats.decision_id": decision_id,
+                "aats.symbol": symbol,
+                "aats.timeframe": timeframe,
+            },
+        ):
+            return await self._run_cycle_body(
+                symbol=symbol,
+                timeframe=timeframe,
+                decision_id=decision_id,
+            )
+
+    async def _run_cycle_body(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        decision_id: str,
+    ) -> PositionTarget:
         health_snapshot = await asyncio.to_thread(
             self.context_builder.build_health_snapshot,
             decision_id=decision_id,
