@@ -955,10 +955,24 @@ class OperatorQueryService:
         )
 
     def _latest_scoped_snapshot(self):
+        # Stage 6 Slice 6.3：dashboard / operator API 入口的 cache 优先 +
+        # portfolio_repo fallback。整个 query path 仍然 sync（cache.get_sync 是
+        # 本地 dict 读取，没有 I/O），所有 8+ 个 caller 的签名 / 调用语义不变。
+        # 详见 docs/task/stage_6_slice_6_3_portfolio_snapshot_design.md §4.2 D9。
         return self._cached(
             "latest_scoped_snapshot",
-            lambda: latest_snapshot_for_scope(self.runtime.portfolio_repo, self.state_scope),
+            self._latest_scoped_snapshot_uncached,
         )
+
+    def _latest_scoped_snapshot_uncached(self):
+        # cache 优先：getattr 兼容旧的 ApplicationRuntime / 测试 stub 没有该字段
+        # 的情况；hot path 命中 → 返回；miss → 立即 fallback portfolio_repo。
+        cache = getattr(self.runtime, "portfolio_snapshot_cache", None)
+        if cache is not None:
+            cached = cache.get_sync(self.state_scope)
+            if cached is not None:
+                return cached
+        return latest_snapshot_for_scope(self.runtime.portfolio_repo, self.state_scope)
 
     def _phase5_control_plane_enabled(self) -> bool:
         return bool(

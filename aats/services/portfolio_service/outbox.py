@@ -13,6 +13,7 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import EventEnvelope
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshot
+from aats.services.portfolio_service.snapshot_cache import PortfolioSnapshotCache
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 from aats.storage.fill_outcome_repo_postgres import PostgresFillOutcomeRepository
@@ -28,6 +29,12 @@ class PostgresPortfolioOutboxPublisher:
     bus: EventBus
     portfolio_repo: PostgresPortfolioRepository
     fill_outcome_repo: PostgresFillOutcomeRepository
+    # Stage 6 Slice 6.3：可选 portfolio_snapshot 跨进程 cache。在 build_runtime
+    # 由 PortfolioSnapshotCache 实例注入。本地 execution 进程 commit 之后立刻
+    # 把 snapshot 写入 cache（同步本地 dict + best-effort Redis），让 4 进程拓
+    # 扑里的 dashboard / query 路径无须等 NATS 路径就能看到最新值。设计文档：
+    # docs/task/stage_6_slice_6_3_portfolio_snapshot_design.md §4.2 D5
+    snapshot_cache: PortfolioSnapshotCache | None = None
     logger: Any = field(init=False)
 
     def __post_init__(self) -> None:
@@ -48,6 +55,9 @@ class PostgresPortfolioOutboxPublisher:
             snapshot=snapshot,
             source_component=source_component,
         )
+        # Stage 6 Slice 6.3：commit 成功后把最新 snapshot 注入跨进程 cache。
+        # publish 内部 best-effort Redis + 同步本地 dict，不抛。
+        await self._publish_to_cache(snapshot)
         await self.flush_pending()
 
     def _persist_bootstrap_snapshot_sync(
@@ -80,6 +90,11 @@ class PostgresPortfolioOutboxPublisher:
             source_component=source_component,
             pre_commit_actions=pre_commit_actions,
         )
+        # Stage 6 Slice 6.3：commit 成功后把最新 snapshot 注入跨进程 cache。
+        # 调用顺序：DB commit → cache publish (本地 dict + Redis) → flush_pending
+        # (NATS 广播)。这样本地 execution 进程的 query 路径不必等 NATS roundtrip
+        # 就能命中 cache，远端 3 个进程通过 NATS 接收。
+        await self._publish_to_cache(snapshot)
         await self.flush_pending()
 
     def _persist_fill_projection_sync(
@@ -156,6 +171,26 @@ class PostgresPortfolioOutboxPublisher:
                     break
         if published_ids:
             await asyncio.to_thread(self.outbox_repo.mark_published_batch, published_ids)
+
+    async def _publish_to_cache(self, snapshot: PortfolioSnapshot) -> None:
+        """Stage 6 Slice 6.3：commit hook，把最新 snapshot 注入跨进程 cache。
+
+        - 当 ``snapshot_cache`` 为 None（构造时未注入），整个调用 noop。
+        - cache.publish 内部 best-effort，理论不抛；但仍然 try/except 兜底，
+          保护 outbox 主路径不受 cache 子系统拖累。
+        """
+        if self.snapshot_cache is None:
+            return
+        try:
+            await self.snapshot_cache.publish(snapshot)
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "portfolio_outbox_cache_publish_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     @staticmethod
     def _portfolio_snapshot_envelope(

@@ -73,6 +73,7 @@ from aats.services.execution_control.subsystem import Phase1ShadowSubsystem
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
+from aats.services.portfolio_service.snapshot_cache import PortfolioSnapshotCache
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
 from aats.services.execution_engine.planner import ExecutionPlanner
 from aats.services.fee_resolver import EffectiveFeeResolver
@@ -422,6 +423,12 @@ class ApplicationRuntime:
     # 3 个进程的本地 KillSwitch 自动跟进。详见
     # docs/task/stage_6_slice_6_2_kill_switch_design.md。
     kill_switch_sync_service: KillSwitchSyncService
+    # Stage 6 Slice 6.2：跨进程 portfolio_snapshot 缓存边车。bootstrap 时从 Redis
+    # hydrate 最近一份 snapshot；订阅 NATS portfolio.snapshots topic 让 4 个进程
+    # 的 latest snapshot 视图保持同步。query_service._latest_scoped_snapshot 用
+    # cache 优先 + portfolio_repo fallback。设计文档：
+    # docs/task/stage_6_slice_6_3_portfolio_snapshot_design.md
+    portfolio_snapshot_cache: PortfolioSnapshotCache
     mode_controller: RuntimeModeController
     health_service: SystemHealthService
     account_service: OKXAccountService
@@ -536,6 +543,18 @@ class ApplicationRuntime:
             log_event(
                 self.logger,
                 "kill_switch_sync_service_shutdown_close_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        # Stage 6 Slice 6.3：关闭 portfolio_snapshot_cache。同 6.2 模板：必须在
+        # bus.close 之前。stop() 不写 Redis（cache 状态不失效，下次启动会 hydrate）。
+        try:
+            await self.portfolio_snapshot_cache.stop()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "portfolio_snapshot_cache_shutdown_close_failed",
                 level="warning",
                 error_type=type(exc).__name__,
                 error=str(exc),
@@ -2721,6 +2740,10 @@ class _RuntimeSlices:
     # 由 build_runtime 构造 + bootstrap，把 4 进程的本地 KillSwitch 收敛到同一个
     # Redis 状态机。
     kill_switch_sync_service: Any = None
+    # Stage 6 Slice 6.3：跨进程 portfolio_snapshot 缓存边车。在 _start_event_bus
+    # 完成后由 build_runtime 构造 + bootstrap，订阅 portfolio.snapshots 让 4 进
+    # 程的 latest snapshot 视图保持收敛。
+    portfolio_snapshot_cache: Any = None
     mode_controller: Any = None
     normalizer: Any = None
     market_publisher: Any = None
@@ -3223,6 +3246,9 @@ def _build_execution_slice(
             bus=slices.bus,
             portfolio_repo=storage.portfolio_repo,
             fill_outcome_repo=storage.fill_outcome_repo,
+            # Stage 6 Slice 6.3：commit hook 注入 cache（construct 顺序保证：
+            # cache 在 _start_event_bus 后立即构造，slice builders 之后才跑）
+            snapshot_cache=slices.portfolio_snapshot_cache,
         )
     slices.execution_order_service = None
     slices.execution_command_processor = None
@@ -3761,6 +3787,28 @@ async def build_runtime(
         bootstrap_state=slices.kill_switch_sync_service.snapshot(),
     )
 
+    # Stage 6 Slice 6.3：跨进程 portfolio_snapshot 缓存边车。和 kill_switch_sync
+    # 同模板：bus.start 完成后立即构造 + bootstrap，让所有 slice builder（特别是
+    # _build_portfolio_slice 的 outbox publisher 与 _wire_event_subscriptions 内
+    # 部 query_service）能拿到一个已 hydrate + 已订阅 NATS 的 cache 实例。
+    # bootstrap 内部即使 Redis / NATS 故障也走 best-effort 路径不抛。
+    # 设计文档：docs/task/stage_6_slice_6_3_portfolio_snapshot_design.md §4
+    slices.portfolio_snapshot_cache = PortfolioSnapshotCache(
+        hot_state_store=hot_state_store,
+        bus=slices.bus,
+        process_role=effective_process_role or "monolith",
+        logger=get_logger("aats.portfolio.snapshot_cache"),
+    )
+    await slices.portfolio_snapshot_cache.bootstrap(
+        scope_fingerprint=f"{state_scope.product_type}:{state_scope.margin_mode}",
+    )
+    log_event(
+        get_logger("aats.bootstrap"),
+        "portfolio_snapshot_cache_initialized",
+        process_role=effective_process_role or "monolith",
+        bootstrap_state=slices.portfolio_snapshot_cache.snapshot(),
+    )
+
     _build_market_slice(slices=slices, effective_process_role=effective_process_role)
     _build_decision_slice(
         runtime_settings=runtime_settings,
@@ -3828,6 +3876,9 @@ async def build_runtime(
     # Stage 6 Slice 6.2：从 slices 提取 kill_switch_sync_service（已在 bus.start
     # 之后立即构造 + bootstrap）
     kill_switch_sync_service = slices.kill_switch_sync_service
+    # Stage 6 Slice 6.3：portfolio_snapshot 跨进程缓存（同样已在 bus.start 后立
+    # 即构造 + bootstrap），稍后注入到 outbox publisher 与 query_service。
+    portfolio_snapshot_cache = slices.portfolio_snapshot_cache
 
     # Stage 3：startup recovery 段只在 execution / monolith role 下运行。
     # gateway / market / decision role 没有 portfolio_service 与 recovery_service，
@@ -4000,6 +4051,7 @@ async def build_runtime(
         risk_engine=risk_engine,
         kill_switch=kill_switch,
         kill_switch_sync_service=kill_switch_sync_service,
+        portfolio_snapshot_cache=portfolio_snapshot_cache,
         mode_controller=mode_controller,
         health_service=health_service,
         account_service=account_service,
