@@ -195,7 +195,7 @@ async def halt(
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     halt_reason = reason or (payload.reason if payload is not None else "manual_halt")
-    result = _query(request).halt(
+    result = await _query(request).halt(
         reason=halt_reason,
         actor_role=principal.role,
         actor_identity=principal.identity,

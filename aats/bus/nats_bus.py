@@ -100,6 +100,7 @@ DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
         _topics.OPERATOR_ACTIONS,         # operator 人工动作驱动状态变化
         _topics.EXECUTION_ERROR_SUMMARIES,    # 执行错误汇总；驱动 risk 降级
         _topics.PROCESSING_FAILURES,      # 处理失败；同上
+        _topics.KILL_SWITCH_STATE,        # Stage 6 Slice 6.2：kill_switch 跨进程同步
         # ── strategy profile 切换路径 ─────────────────────
         _topics.STRATEGY_PROFILE_RECOMMENDATIONS,    # profile 推荐
         _topics.STRATEGY_PROFILE_ACTIVATIONS,        # profile 激活；影响实盘

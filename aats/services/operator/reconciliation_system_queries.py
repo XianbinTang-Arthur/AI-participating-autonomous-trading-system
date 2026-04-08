@@ -282,7 +282,12 @@ class ReconciliationSystemQueryFacade:
         if exchange_snapshot is None:
             raise ValueError("rebaseline_requires_account_snapshot")
 
-        self.owner.runtime.kill_switch.halt(reason="operator_rebaseline_pending")
+        # Stage 6 Slice 6.2：跨进程同步路径优先
+        sync_service_rebaseline = getattr(self.owner.runtime, "kill_switch_sync_service", None)
+        if sync_service_rebaseline is not None:
+            await sync_service_rebaseline.halt(reason="operator_rebaseline_pending")
+        else:
+            self.owner.runtime.kill_switch.halt(reason="operator_rebaseline_pending")
         pending_status = self.owner.runtime.recovery_status.model_copy(
             update={"recovery_state": "rebaseline_pending", "recovery_action": "operator_rebaseline_pending"}
         )
@@ -419,7 +424,7 @@ class ReconciliationSystemQueryFacade:
             "auto_resume": auto_resume,
         }
 
-    def halt(
+    async def halt(
         self,
         *,
         reason: str,
@@ -429,7 +434,12 @@ class ReconciliationSystemQueryFacade:
     ) -> dict[str, Any]:
         was_halted = self.owner.runtime.kill_switch.halted
         recovery_before = self.owner.recovery_view()["recovery_state"]
-        self.owner.runtime.kill_switch.halt(reason=reason)
+        # Stage 6 Slice 6.2：跨进程同步路径优先；sync service 不存在时退到本地
+        sync_service = getattr(self.owner.runtime, "kill_switch_sync_service", None)
+        if sync_service is not None:
+            await sync_service.halt(reason=reason)
+        else:
+            self.owner.runtime.kill_switch.halt(reason=reason)
         log_event(self.owner.logger, "operator_halt", level="warning", reason=reason, already_halted=was_halted)
         status = "already_halted" if was_halted else "halted"
         updated_status = self.owner.runtime.recovery_status.model_copy(
@@ -492,8 +502,13 @@ class ReconciliationSystemQueryFacade:
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
+        # Stage 6 Slice 6.2：跨进程同步路径
+        sync_service_resume = getattr(self.owner.runtime, "kill_switch_sync_service", None)
         if refresh_error is not None:
-            self.owner.runtime.kill_switch.halt(reason="resume_blocked")
+            if sync_service_resume is not None:
+                await sync_service_resume.halt(reason="resume_blocked")
+            else:
+                self.owner.runtime.kill_switch.halt(reason="resume_blocked")
             status = "resume_blocked"
             runnable = False
             recovery_after = "resume_blocked"
@@ -519,7 +534,10 @@ class ReconciliationSystemQueryFacade:
             runnable = resume_check.runnable
             resume_check_blockers = tuple(resume_check.blockers)
             if runnable:
-                self.owner.runtime.kill_switch.resume()
+                if sync_service_resume is not None:
+                    await sync_service_resume.resume()
+                else:
+                    self.owner.runtime.kill_switch.resume()
                 status = "already_resumed" if not was_halted else "resumed"
                 recovery_after = "normal_operation"
                 updated_status = self.owner.runtime.recovery_status.model_copy(
@@ -536,7 +554,10 @@ class ReconciliationSystemQueryFacade:
                     latest_reconciliation=report,
                 )
             else:
-                self.owner.runtime.kill_switch.halt(reason="resume_blocked")
+                if sync_service_resume is not None:
+                    await sync_service_resume.halt(reason="resume_blocked")
+                else:
+                    self.owner.runtime.kill_switch.halt(reason="resume_blocked")
                 status = "resume_blocked"
                 recovery_after = (
                     "review_required"

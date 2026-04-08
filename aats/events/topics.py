@@ -31,6 +31,9 @@ BLOCKER_SNAPSHOTS = "system.blocker_snapshots"
 OPERATOR_ACTIONS = "system.operator_actions"
 EXECUTION_ERROR_SUMMARIES = "execution.error_summaries"
 PROCESSING_FAILURES = "system.processing_failures"
+# Stage 6 Slice 6.2：跨进程 kill_switch 状态广播。critical 路径，丢一条会让某个
+# 进程错过 halt → 资金风险。详见 docs/task/stage_6_slice_6_2_kill_switch_design.md。
+KILL_SWITCH_STATE = "system.kill_switch_state"
 RECONCILIATION_VALIDATIONS = "reconciliation.validations"
 REPLAY_VALIDATIONS = "replay.validations"
 STRATEGY_PROFILE_RECOMMENDATIONS = "strategy.profile_recommendations"

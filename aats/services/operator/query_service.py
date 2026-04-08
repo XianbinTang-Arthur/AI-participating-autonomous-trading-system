@@ -9645,7 +9645,7 @@ class OperatorQueryService:
             auth_source=auth_source,
         )
 
-    def halt(
+    async def halt(
         self,
         *,
         reason: str,
@@ -9653,7 +9653,9 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
-        return self.reconciliation_system_queries.halt(
+        # Stage 6 Slice 6.2：halt 转 async，下游 ReconciliationSystemQueries.halt
+        # 也是 async（要 await kill_switch_sync_service.halt 走跨进程同步路径）
+        return await self.reconciliation_system_queries.halt(
             reason=reason,
             actor_role=actor_role,
             actor_identity=actor_identity,

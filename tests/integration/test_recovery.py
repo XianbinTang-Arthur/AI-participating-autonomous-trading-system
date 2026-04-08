@@ -1667,7 +1667,7 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(recovery_before["safe_to_trade"])
         self.assertFalse(recovery_before["resume_eligible"])
 
-        query.halt(reason="prepare_only_reduce_resume", actor_role="admin")
+        await query.halt(reason="prepare_only_reduce_resume", actor_role="admin")
         resumed = await query.resume(reason="resume_with_only_reduce_active", actor_role="admin")
 
         self.assertEqual(resumed["status"], "resume_blocked")
@@ -2082,7 +2082,7 @@ class TestRecovery(unittest.IsolatedAsyncioTestCase):
             update={"snapshot_ts": utc_now() - timedelta(seconds=120)}
         )
         query = OperatorQueryService(runtime)
-        query.halt(reason="prepare_resume_block", actor_role="admin")
+        await query.halt(reason="prepare_resume_block", actor_role="admin")
 
         resumed = await query.resume(reason="resume_with_stale_market", actor_role="admin")
 

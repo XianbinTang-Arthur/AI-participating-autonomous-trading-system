@@ -57,7 +57,7 @@ class BlockerActionService:
             )
             message = "已执行恢复自动运行请求。"
         elif action_id == "halt-system":
-            self.owner.halt(
+            await self.owner.halt(
                 reason=reason,
                 actor_role=actor_role,
                 actor_identity=actor_identity,

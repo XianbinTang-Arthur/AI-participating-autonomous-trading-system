@@ -80,6 +80,7 @@ from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEn
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.derivatives_live_guard import DerivativesLiveGuardService
 from aats.services.governance_engine.kill_switch import KillSwitch
+from aats.services.governance_engine.kill_switch_sync import KillSwitchSyncService
 from aats.services.governance_engine.mode import RuntimeModeController
 from aats.services.governance_engine.policy import PolicyEngine
 from aats.services.governance_engine.risk import RiskEngine
@@ -416,6 +417,11 @@ class ApplicationRuntime:
     policy_engine: PolicyEngine | None
     risk_engine: RiskEngine | None
     kill_switch: KillSwitch
+    # Stage 6 Slice 6.2：跨进程 kill_switch 同步服务。bootstrap 时从 Redis 读
+    # 已有 halt 状态写入本地 KillSwitch；运行时 NATS 广播 halt/resume 事件让另外
+    # 3 个进程的本地 KillSwitch 自动跟进。详见
+    # docs/task/stage_6_slice_6_2_kill_switch_design.md。
+    kill_switch_sync_service: KillSwitchSyncService
     mode_controller: RuntimeModeController
     health_service: SystemHealthService
     account_service: OKXAccountService
@@ -521,6 +527,19 @@ class ApplicationRuntime:
         close_rest_client = getattr(self.account_service.client, "aclose", None)
         if callable(close_rest_client):
             await close_rest_client()
+        # Stage 6 Slice 6.2：关闭 kill_switch 同步服务。必须在 bus.close 之前，
+        # 因为 stop() 内部会撤销 NATS 订阅；本地 KillSwitch 状态保持不变（关闭
+        # 不代表 resume，下次启动从 Redis 读到的仍然是上一次 halt 状态）。
+        try:
+            await self.kill_switch_sync_service.stop()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "kill_switch_sync_service_shutdown_close_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         # Stage 4: 关闭 EventBus（drain 任何 in-flight NATS publish + unsubscribe
         # 所有 JetStream consumer）。InMemoryEventBus 没有 close 方法，跳过；
         # HybridEventBus / NatsEventBus 有 close，会做优雅 drain。
@@ -2698,6 +2717,10 @@ class _RuntimeSlices:
     metrics: Any = None
     bus: Any = None
     kill_switch: Any = None
+    # Stage 6 Slice 6.2：跨进程 kill_switch 同步边车。在 _start_event_bus 完成后
+    # 由 build_runtime 构造 + bootstrap，把 4 进程的本地 KillSwitch 收敛到同一个
+    # Redis 状态机。
+    kill_switch_sync_service: Any = None
     mode_controller: Any = None
     normalizer: Any = None
     market_publisher: Any = None
@@ -3431,6 +3454,7 @@ def _build_reconciliation_slice(
         recovery_policy=runtime_layering.recovery_policy,
         fill_outcome_repo=storage.fill_outcome_repo,
         event_store=storage.event_store,
+        kill_switch_sync=slices.kill_switch_sync_service,
     )
     # OKXExecutionAdapter.client satisfies ExchangeOrderQuerier protocol.
     _exchange_order_client = (
@@ -3449,6 +3473,7 @@ def _build_reconciliation_slice(
             execution_order_repo=storage.execution_order_repo,
             execution_command_repo=storage.execution_command_repo,
             exchange_order_client=_exchange_order_client,
+            kill_switch_sync=slices.kill_switch_sync_service,
         )
         if runtime_settings.recovery_reconciliation_execution_ledger_enabled
         else slices.base_recovery_service
@@ -3523,6 +3548,7 @@ def _apply_post_init_guards(
         account_service=runtime.account_service,
         event_store=runtime.event_store,
         metrics=runtime.metrics,
+        kill_switch_sync=runtime.kill_switch_sync_service,
     )
     runtime.derivatives_live_guard_service.evaluate_now()
     runtime.health_service.runtime_guard_provider = runtime.derivatives_live_guard_service
@@ -3535,6 +3561,7 @@ def _apply_post_init_guards(
         metrics=runtime.metrics,
         profitability_provider=lambda limit: OperatorQueryService(runtime).profitability_overview(limit=limit),
         anomaly_provider=lambda limit: OperatorQueryService(runtime).execution_anomaly_report(limit=limit),
+        kill_switch_sync=runtime.kill_switch_sync_service,
     )
     runtime.trial_guard_service.evaluate_now()
     if runtime.risk_engine is not None:
@@ -3711,6 +3738,29 @@ async def build_runtime(
     # 的 .subscribe() 会因为 _js 未初始化而抛 RuntimeError。
     if slices.bus is not None:
         await _start_event_bus(slices.bus)
+
+    # Stage 6 Slice 6.2：跨进程 kill_switch 同步服务。必须在 _start_event_bus 完成
+    # 后立即构造 + bootstrap，因为：
+    # 1) 其他 slice builder（如 _build_reconciliation_slice）需要把 sync service
+    #    注入 ExecutionRecoveryService / ExecutionLedgerRecoveryService
+    # 2) bootstrap 内部要 await bus.subscribe(...)，bus 必须已经 connect
+    # 3) startup_recovery 阶段（位于所有 slice builder 之后）也需要 sync service
+    # 设计文档：docs/task/stage_6_slice_6_2_kill_switch_design.md §4.6
+    slices.kill_switch_sync_service = KillSwitchSyncService(
+        kill_switch=slices.kill_switch,
+        hot_state_store=hot_state_store,
+        bus=slices.bus,
+        process_role=effective_process_role or "monolith",
+        logger=get_logger("aats.governance.kill_switch_sync"),
+    )
+    await slices.kill_switch_sync_service.bootstrap()
+    log_event(
+        get_logger("aats.bootstrap"),
+        "kill_switch_sync_service_initialized",
+        process_role=effective_process_role or "monolith",
+        bootstrap_state=slices.kill_switch_sync_service.snapshot(),
+    )
+
     _build_market_slice(slices=slices, effective_process_role=effective_process_role)
     _build_decision_slice(
         runtime_settings=runtime_settings,
@@ -3775,6 +3825,9 @@ async def build_runtime(
     execution_outbox_publisher = slices.execution_outbox_publisher
     execution_order_service = slices.execution_order_service
     execution_command_processor = slices.execution_command_processor
+    # Stage 6 Slice 6.2：从 slices 提取 kill_switch_sync_service（已在 bus.start
+    # 之后立即构造 + bootstrap）
+    kill_switch_sync_service = slices.kill_switch_sync_service
 
     # Stage 3：startup recovery 段只在 execution / monolith role 下运行。
     # gateway / market / decision role 没有 portfolio_service 与 recovery_service，
@@ -3946,6 +3999,7 @@ async def build_runtime(
         policy_engine=policy_engine,
         risk_engine=risk_engine,
         kill_switch=kill_switch,
+        kill_switch_sync_service=kill_switch_sync_service,
         mode_controller=mode_controller,
         health_service=health_service,
         account_service=account_service,

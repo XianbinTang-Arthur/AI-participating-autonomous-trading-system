@@ -16,6 +16,7 @@ from aats.services.execution_engine.bundle_recovery import obligation_matches_sc
 from aats.services.execution_engine.state_machine import TERMINAL_ORDER_STATES as _TERMINAL_ORDER_STATES
 from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.kill_switch import KillSwitch
+from aats.services.governance_engine.kill_switch_sync import KillSwitchSyncService
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
 from aats.services.portfolio_service.positions import PortfolioState
@@ -66,6 +67,7 @@ class ExecutionRecoveryService:
         recovery_policy: RecoveryPolicy | None = None,
         fill_outcome_repo: FillOutcomeRepository | None = None,
         event_store: object | None = None,
+        kill_switch_sync: KillSwitchSyncService | None = None,
     ) -> None:
         self.settings = settings
         self.execution_repo = execution_repo
@@ -76,6 +78,8 @@ class ExecutionRecoveryService:
         self.reconstruction_service = reconstruction_service
         self.price_provider = price_provider
         self.kill_switch = kill_switch
+        # Stage 6 Slice 6.2：跨进程 kill_switch 同步服务，None 时回退到本地路径
+        self.kill_switch_sync = kill_switch_sync
         self.bootstrap_portfolio_from_exchange = bootstrap_portfolio_from_exchange
         self.reconciliation_stale_after_seconds = reconciliation_stale_after_seconds
         self.fill_outcome_repo = fill_outcome_repo
@@ -655,7 +659,11 @@ class ExecutionRecoveryService:
         return safe_startup, recovery_action
 
     def _halt_for_recovery(self, *, reason: str, action: str, notes: list[str]) -> None:
-        self.kill_switch.halt(reason=reason)
+        # Stage 6 Slice 6.2：优先走跨进程同步路径
+        if self.kill_switch_sync is not None:
+            self.kill_switch_sync.halt_threadsafe(reason)
+        else:
+            self.kill_switch.halt(reason=reason)
         notes.append(action)
 
     @staticmethod
