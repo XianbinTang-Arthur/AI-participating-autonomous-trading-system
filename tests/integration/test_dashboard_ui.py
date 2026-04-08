@@ -155,6 +155,11 @@ class TestDashboardUI(unittest.TestCase):
                 "exit_execution_js": client.get("/ui/modules/views/exit-execution-view.js"),
                 "strategy_js": client.get("/ui/modules/views/strategy-view.js"),
                 "risk_js": client.get("/ui/modules/views/risk-view.js"),
+                # Slice #5 refactor：reconciliationActionCopy / renderReconciliationControls
+                # 已从 risk-view.js 搬到共享模块 reconciliation-controls.js
+                "reconciliation_controls_js": client.get(
+                    "/ui/modules/reconciliation-controls.js"
+                ),
             }
             login = client.get("/login", follow_redirects=False)
 
@@ -416,13 +421,19 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("当前主任务", risk_text)
         self.assertIn("为什么先做这一步", risk_text)
         self.assertIn("做完后会怎样", risk_text)
-        self.assertIn("重新对账（刷新交易所状态）", risk_text)
-        self.assertIn("接受当前状态为新基线", risk_text)
         self.assertIn("轻度差异，建议观察", risk_text)
         self.assertIn("系统仍处于人工确认流程", risk_text)
         self.assertIn('action.client_action === "navigate-view" && action.value === "risk"', risk_text)
         self.assertIn("进入独立工作台", risk_text)
         self.assertNotIn("继续保持暂停", risk_text)
+
+        # Slice #5 refactor：rebaseline / validate 动作按钮已从 risk-view.js
+        # 搬到 reconciliation-controls.js 共享模块。下面两条断言跟随搬迁，
+        # 其余 "轻度差异，建议观察" / "系统仍处于人工确认流程" 这类 risk-view
+        # 自己的叙述文案仍留在 risk-view.js 里。
+        reconciliation_controls_text = responses["reconciliation_controls_js"].text
+        self.assertIn("重新对账（刷新交易所状态）", reconciliation_controls_text)
+        self.assertIn("接受当前状态为新基线", reconciliation_controls_text)
 
         exit_execution_text = responses["exit_execution_js"].text
         self.assertIn("renderExitExecutionView", exit_execution_text)
@@ -446,12 +457,18 @@ class TestDashboardUI(unittest.TestCase):
             risk_actions_js = client.get("/ui/modules/actions/risk-actions.js")
             risk_js = client.get("/ui/modules/views/risk-view.js")
             exit_execution_js = client.get("/ui/modules/views/exit-execution-view.js")
+            # Slice #36 refactor：exit-execution review helper 已从 risk-view.js 搬到
+            # 共享模块 exit-execution-helpers.js
+            exit_execution_helpers_js = client.get(
+                "/ui/modules/exit-execution-helpers.js"
+            )
 
         self.assertEqual(app_js.status_code, 200)
         self.assertEqual(navigation_state_js.status_code, 200)
         self.assertEqual(risk_actions_js.status_code, 200)
         self.assertEqual(risk_js.status_code, 200)
         self.assertEqual(exit_execution_js.status_code, 200)
+        self.assertEqual(exit_execution_helpers_js.status_code, 200)
 
         app_js_text = app_js.text
         navigation_state_text = navigation_state_js.text
@@ -479,11 +496,15 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("trigger-exit-execution-refresh", risk_js_text)
         self.assertIn("trigger-exit-execution-retry-limit-lookup", risk_js_text)
         self.assertIn("trigger-exit-execution-safe-cancel", risk_js_text)
-        self.assertIn('data-exit-history-filter="action"', risk_js_text)
-        self.assertIn("renderExitExecutionActionFilterOptions", risk_js_text)
         self.assertIn("risk-exit-workspace", risk_js_text)
         self.assertIn("renderExitExecutionWorkspace", risk_js_text)
         self.assertIn("进入独立工作台", risk_js_text)
+
+        # Slice #36 refactor：renderExitExecutionActionFilterOptions 及
+        # data-exit-history-filter 已整体搬到 exit-execution-helpers.js
+        exit_execution_helpers_text = exit_execution_helpers_js.text
+        self.assertIn('data-exit-history-filter="action"', exit_execution_helpers_text)
+        self.assertIn("renderExitExecutionActionFilterOptions", exit_execution_helpers_text)
 
         exit_execution_js_text = exit_execution_js.text
         self.assertIn("renderExitExecutionView", exit_execution_js_text)
