@@ -311,12 +311,34 @@ class NatsEventBus(EventBus):
         )
 
     async def ensure_stream(self, topics: list[str]) -> None:
-        """声明 JetStream stream（幂等）。
+        """声明 JetStream stream（幂等 upsert）。
 
         Args:
             topics: EventBus topic 名列表（不带 ``aats.`` 前缀）。内部会用
                 ``NatsBusConfig.subject_for`` 自动加前缀，调用方完全不需要
                 关心 NATS subject 命名约定。
+
+        升级语义（Slice 6.5 修复）
+        ============================
+        原实现直接 ``add_stream(config=...)`` 是 **非幂等** 的：stream 已存在
+        但 subjects 不同（譬如 Slice 6.5 新增 ``execution.obligation_updates``
+        topic 把 subject 数从 N 变成 N+1）会抛
+        ``BadRequestError code=400 err_code=10058 "stream name already in
+        use with a different configuration"``，让整个进程启动失败回滚。
+
+        修复后的分支（D14）：
+
+        1. ``stream_info`` 成功：
+           - 已有 subjects 与新 subjects **完全相同** → noop，log
+             ``nats_jetstream_stream_unchanged``
+           - 已有 subjects 与新 subjects **不同** → ``update_stream(config)``
+             upsert，log ``nats_jetstream_stream_updated`` 并在日志里打出
+             added/removed 两个集合，方便运维确认本次 deploy 的 schema 变更
+        2. ``stream_info`` 抛 ``NotFoundError``（首次启动，stream 尚不存在）：
+           - ``add_stream(config)`` 创建 stream，log
+             ``nats_jetstream_stream_created``
+        3. 任何路径成功后都会最终 emit 同一个 ``nats_jetstream_stream_ensured``
+           事件（向后兼容 Slice 6.1 / 6.3 的 runbook 冷烟断言）
 
         Stage 4 集成时会在启动阶段被调用一次，确保 critical topic 都有持久化。
         ``stream_max_age_seconds`` 控制消息保留时长（默认 7 天），来自
@@ -330,6 +352,9 @@ class NatsEventBus(EventBus):
                 RetentionPolicy,
                 StorageType,
                 StreamConfig,
+            )
+            from nats.js.errors import (  # type: ignore[import-not-found]
+                NotFoundError,
             )
         except ImportError as exc:
             raise RuntimeError("nats-py JetStream API unavailable") from exc
@@ -347,7 +372,53 @@ class NatsEventBus(EventBus):
             discard=DiscardPolicy.OLD,
             max_age=self._config.stream_max_age_seconds,
         )
-        await self._js.add_stream(config=config)
+
+        # ── Step 1: stream_info 探测现状 ──────────────────────
+        existing_subjects: list[str] | None = None
+        try:
+            info = await self._js.stream_info(self._config.stream_name)
+            existing_subjects = list(info.config.subjects or [])
+        except NotFoundError:
+            # 首次启动：stream 不存在 → 走创建路径
+            existing_subjects = None
+
+        if existing_subjects is None:
+            # ── Step 2a: 不存在 → 创建 ────────────────────────
+            await self._js.add_stream(config=config)
+            log_event(
+                self.logger,
+                "nats_jetstream_stream_created",
+                stream=self._config.stream_name,
+                subject_count=len(subjects),
+                max_age_seconds=self._config.stream_max_age_seconds,
+            )
+        else:
+            # ── Step 2b: 已存在 → 比较 subjects ──────────────
+            existing_set = set(existing_subjects)
+            new_set = set(subjects)
+            if existing_set == new_set:
+                log_event(
+                    self.logger,
+                    "nats_jetstream_stream_unchanged",
+                    stream=self._config.stream_name,
+                    subject_count=len(subjects),
+                )
+            else:
+                added = sorted(new_set - existing_set)
+                removed = sorted(existing_set - new_set)
+                await self._js.update_stream(config=config)
+                log_event(
+                    self.logger,
+                    "nats_jetstream_stream_updated",
+                    stream=self._config.stream_name,
+                    subject_count_before=len(existing_set),
+                    subject_count_after=len(new_set),
+                    subjects_added=added,
+                    subjects_removed=removed,
+                    max_age_seconds=self._config.stream_max_age_seconds,
+                )
+
+        # ── Step 3: 统一 "ensured" 收尾日志（向后兼容） ──
         log_event(
             self.logger,
             "nats_jetstream_stream_ensured",

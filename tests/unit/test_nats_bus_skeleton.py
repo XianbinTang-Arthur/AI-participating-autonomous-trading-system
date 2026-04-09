@@ -403,11 +403,19 @@ def test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds() -> None:
     导致 nats-py 又乘一次 1e9，最终发出 60_000_000_000_000_000_000 这种
     超大值，NATS server JSON parser 直接 reject 'invalid JSON'。
     集成测试发现这个 bug 后补的回归保护。
+
+    Slice 6.5 说明
+    ==============
+    ensure_stream 现在是 idempotent upsert：先 stream_info，再按分支决定
+    add_stream / update_stream / 什么都不做。本测试 stub stream_info 抛
+    NotFoundError，强制走 add_stream 分支，保留原断言语义。
     """
     pytest.importorskip("nats", reason="nats-py 未安装；本回归只在装了 nats-integration extras 的环境下跑")
 
     import asyncio as _asyncio
     from unittest.mock import AsyncMock, MagicMock
+
+    from nats.js.errors import NotFoundError  # type: ignore[import-not-found]
 
     bus = NatsEventBus(
         config=NatsBusConfig(stream_max_age_seconds=3600),
@@ -415,18 +423,200 @@ def test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds() -> None:
     )
     # 绕过真 connect()：直接装一个 fake JetStream context
     fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(side_effect=NotFoundError())
     fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
     bus._js = fake_js  # type: ignore[attr-defined]
 
     _asyncio.run(bus.ensure_stream(topics=["decisions"]))
 
     fake_js.add_stream.assert_awaited_once()
+    fake_js.update_stream.assert_not_awaited()
     cfg = fake_js.add_stream.await_args.kwargs["config"]
     # 关键断言：是 3600（秒），不是 3600 * 1e9（纳秒）
     assert cfg.max_age == 3600, (
         f"ensure_stream 把 max_age 传成了 {cfg.max_age}，期望 3600 秒。"
         " 看起来又把秒预乘了 1e9 —— 见 docstring 的 Why。"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Slice 6.5 fix: ensure_stream idempotent upsert
+#
+# Why: 原实现直接 add_stream 非幂等 —— stream 已存在且 subjects 不同时
+# 抛 BadRequestError 10058 "stream name already in use with a different
+# configuration"。Slice 6.5 新增 OBLIGATION_UPDATES topic 把 subject 数
+# 从 N 变成 N+1，直接让所有跑旧 stream 的容器启动失败。
+#
+# 修复后的三分支矩阵：
+#   1. stream 不存在  → add_stream      → "created" 日志
+#   2. 已有 = 新      → 什么都不做      → "unchanged" 日志
+#   3. 已有 ≠ 新      → update_stream   → "updated" 日志 + diff
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_ensure_stream_creates_when_stream_missing() -> None:
+    """NotFoundError → add_stream 路径。"""
+    pytest.importorskip(
+        "nats",
+        reason="nats-py 未安装；本回归只在装了 nats-integration extras 的环境下跑",
+    )
+
+    import asyncio as _asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nats.js.errors import NotFoundError  # type: ignore[import-not-found]
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(stream_name="AATS_EVENTS_TEST"),
+        consumer_role="test",
+    )
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(side_effect=NotFoundError())
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    _asyncio.run(bus.ensure_stream(topics=["decisions", "execution.order_intents"]))
+
+    fake_js.stream_info.assert_awaited_once_with("AATS_EVENTS_TEST")
+    fake_js.add_stream.assert_awaited_once()
+    fake_js.update_stream.assert_not_awaited()
+
+    cfg = fake_js.add_stream.await_args.kwargs["config"]
+    assert set(cfg.subjects) == {"aats.decisions", "aats.execution.order_intents"}
+
+
+def test_ensure_stream_unchanged_when_subjects_match() -> None:
+    """已有 subjects == 新 subjects → 不应该 add_stream 也不应该 update_stream。
+
+    这是 dev 环境常见的 hot restart 场景：进程重启但 stream 没变，应该
+    一次 stream_info 就 return，避免浪费 server round-trip。
+    """
+    pytest.importorskip(
+        "nats",
+        reason="nats-py 未安装；本回归只在装了 nats-integration extras 的环境下跑",
+    )
+
+    import asyncio as _asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(stream_name="AATS_EVENTS_TEST"),
+        consumer_role="test",
+    )
+    # fake StreamInfo：.config.subjects 返回和本次调用完全一样的集合
+    fake_info = MagicMock()
+    fake_info.config.subjects = [
+        "aats.execution.order_intents",
+        "aats.decisions",
+    ]
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(return_value=fake_info)
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    # 传进去的 topics 顺序和 existing_subjects 不一样，但 set 相等
+    _asyncio.run(bus.ensure_stream(topics=["decisions", "execution.order_intents"]))
+
+    fake_js.stream_info.assert_awaited_once_with("AATS_EVENTS_TEST")
+    fake_js.add_stream.assert_not_awaited()
+    fake_js.update_stream.assert_not_awaited()
+
+
+def test_ensure_stream_updates_when_subjects_differ() -> None:
+    """已有 subjects ≠ 新 subjects → update_stream 被调用，而不是 add_stream。
+
+    这是 Slice 6.5 升级场景：OBLIGATION_UPDATES 新增到 DEFAULT_CRITICAL_TOPICS,
+    全部容器第一次启动新镜像时，本来已经 persist 在 JetStream 的 AATS_EVENTS
+    只缺这一个 subject，应该原地 upsert，而不是把进程烧死。
+    """
+    pytest.importorskip(
+        "nats",
+        reason="nats-py 未安装；本回归只在装了 nats-integration extras 的环境下跑",
+    )
+
+    import asyncio as _asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(stream_name="AATS_EVENTS_TEST"),
+        consumer_role="test",
+    )
+    # fake existing stream：subjects 比新的少一个
+    fake_info = MagicMock()
+    fake_info.config.subjects = [
+        "aats.decisions",
+        "aats.execution.order_intents",
+    ]
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(return_value=fake_info)
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    _asyncio.run(
+        bus.ensure_stream(
+            topics=[
+                "decisions",
+                "execution.order_intents",
+                "execution.obligation_updates",  # 新增 topic
+            ]
+        )
+    )
+
+    fake_js.stream_info.assert_awaited_once_with("AATS_EVENTS_TEST")
+    fake_js.add_stream.assert_not_awaited()
+    fake_js.update_stream.assert_awaited_once()
+
+    cfg = fake_js.update_stream.await_args.kwargs["config"]
+    # update_stream 必须传完整的新 subjects 列表（nats-py update_stream 语义
+    # 是 REPLACE，不是 patch —— subjects 少一个等于下线那个 subject）
+    assert set(cfg.subjects) == {
+        "aats.decisions",
+        "aats.execution.order_intents",
+        "aats.execution.obligation_updates",
+    }
+
+
+def test_ensure_stream_updates_when_subject_removed() -> None:
+    """对称 case：已有 subjects 比新的多一个 → 也必须 update_stream。
+
+    Why: set(existing) != set(new) 在两个方向上都必须触发 update，否则
+    退役 topic 时遗留 subject 会一直留在 stream config 里（不致命，
+    但会造成配置漂移）。
+    """
+    pytest.importorskip(
+        "nats",
+        reason="nats-py 未安装；本回归只在装了 nats-integration extras 的环境下跑",
+    )
+
+    import asyncio as _asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(stream_name="AATS_EVENTS_TEST"),
+        consumer_role="test",
+    )
+    fake_info = MagicMock()
+    fake_info.config.subjects = [
+        "aats.decisions",
+        "aats.execution.order_intents",
+        "aats.retired_topic",  # 待下线
+    ]
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(return_value=fake_info)
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    _asyncio.run(bus.ensure_stream(topics=["decisions", "execution.order_intents"]))
+
+    fake_js.add_stream.assert_not_awaited()
+    fake_js.update_stream.assert_awaited_once()
+    cfg = fake_js.update_stream.await_args.kwargs["config"]
+    assert "aats.retired_topic" not in set(cfg.subjects)
 
 
 def test_stream_max_age_can_be_overridden() -> None:
