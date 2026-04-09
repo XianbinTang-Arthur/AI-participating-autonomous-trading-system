@@ -1,0 +1,58 @@
+# =============================================================================
+# AATS 4 进程 — OKX 现货模拟盘 override
+#
+# 用途：在 docker-compose.aats.yml 基础上叠加 .env.spot 凭证文件 + 设置
+#       AATS_PROFILE=spot，让 base compose 里的 scripts/compose_entrypoint.py
+#       shim 在每个进程启动前调 load_profiled_dotenv_into_process() 注入
+#       AATS_STARTUP_PROFILE / AATS_ENV_TEMPLATE_PROFILE 两个派生变量，
+#       走 managed profile spot runtime_defaults 分支。
+#
+# 启动方式（在 deploy/wsl2-dev/ 目录下）：
+#   docker compose \
+#     -f docker-compose.aats.yml \
+#     -f docker-compose.aats.spot.yml \
+#     --env-file .env.wsl2 \
+#     up -d
+#
+# 说明：
+#   - 本文件和 docker-compose.aats.derivatives.yml 结构完全对齐（spot ↔ derivatives 镜像对称）
+#   - .env.wsl2 继续负责 POSTGRES_USER/PASSWORD 等 compose 模板插值
+#   - .env.spot 只被容器进程读到，不参与 compose 模板插值
+#   - 凭证文件放在项目根 (../../.env.spot)，已被 .gitignore 屏蔽
+#   - 本 override 文件 **不含任何** API key / secret，只声明文件路径引用
+#   - 不再需要 volumes mount 补 strategy_profiles yaml（Plan E 的临时 hack 补丁
+#     已经被 slice docker-compose-hardening 工作包 A 的 validator 放行替代）
+# =============================================================================
+
+name: aats-dev
+
+# spot managed profile hint —— 让 base compose 里的 entrypoint shim
+# 在启动前调 load_profiled_dotenv_into_process(profile='spot')，
+# 把 AATS_STARTUP_PROFILE 和 AATS_ENV_TEMPLATE_PROFILE 注入 os.environ。
+x-aats-spot-env: &aats-spot-env
+  AATS_PROFILE: spot
+
+services:
+  aats-gateway:
+    env_file:
+      - ../../.env.spot
+    environment:
+      <<: *aats-spot-env
+
+  aats-market:
+    env_file:
+      - ../../.env.spot
+    environment:
+      <<: *aats-spot-env
+
+  aats-decision:
+    env_file:
+      - ../../.env.spot
+    environment:
+      <<: *aats-spot-env
+
+  aats-execution:
+    env_file:
+      - ../../.env.spot
+    environment:
+      <<: *aats-spot-env
