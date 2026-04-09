@@ -1,26 +1,86 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 from datetime import datetime
 
-from sqlalchemy import Select, and_, desc, func, or_, select
+from sqlalchemy import Select, and_, delete, desc, func, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from aats.events import topics as _topics
 from aats.schemas.common import EventEnvelope
 from aats.schemas.reconciliation import ReplayProjectionOffset
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import envelope_scope_metadata
 from aats.storage.sqlalchemy_models import EventEnvelopeArchiveModel, EventEnvelopeModel, ReplayProjectionOffsetModel
 
+# 高频 topic 自动轮转配置：每个 topic 最多保留 _ROTATE_KEEP 行，
+# 每 _ROTATE_INTERVAL 次写入触发一次清理检查。
+_HIGH_FREQ_TOPICS: frozenset[str] = frozenset({
+    _topics.MARKET_SNAPSHOTS,
+    _topics.FEATURE_SNAPSHOTS,
+})
+_ROTATE_KEEP = 200          # 每个高频 topic 保留最新 200 条
+_ROTATE_INTERVAL = 500      # 每写入 500 条后检查一次
+_ROTATE_THRESHOLD = 1000    # 超过此数量才触发删除
+
 
 class PostgresEventStore:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self.session_factory = session_factory
+        self._high_freq_write_count = 0
+        self._rotate_lock = threading.Lock()
 
     def append(self, envelope: EventEnvelope) -> None:
         with self.session_factory() as session:
             self.append_in_session(session, envelope)
             session.commit()
+        # 高频 topic 自动轮转
+        if envelope.topic in _HIGH_FREQ_TOPICS:
+            self._maybe_rotate_high_freq()
+
+    def _maybe_rotate_high_freq(self) -> None:
+        """每 _ROTATE_INTERVAL 次高频写入后，清理超出 _ROTATE_KEEP 的旧行。
+
+        仅清理 hot 表（EventEnvelopeModel）中的高频 topic 行，不涉及 archive。
+        失败不影响正常写入——轮转是 best-effort 优化。
+        """
+        with self._rotate_lock:
+            self._high_freq_write_count += 1
+            if self._high_freq_write_count % _ROTATE_INTERVAL != 0:
+                return
+
+        # 到达检查点，逐 topic 清理（锁外执行 DB 操作，避免长时间持锁）
+        for topic in _HIGH_FREQ_TOPICS:
+            try:
+                with self.session_factory() as session:
+                    row_count = session.scalar(
+                        select(func.count())
+                        .select_from(EventEnvelopeModel)
+                        .where(EventEnvelopeModel.topic == topic)
+                    ) or 0
+                    if row_count <= _ROTATE_THRESHOLD:
+                        continue
+                    # 找到第 _ROTATE_KEEP 新的 sequence_id 作为截断点
+                    cutoff_id = session.scalar(
+                        select(EventEnvelopeModel.sequence_id)
+                        .where(EventEnvelopeModel.topic == topic)
+                        .order_by(desc(EventEnvelopeModel.sequence_id))
+                        .offset(_ROTATE_KEEP)
+                        .limit(1)
+                    )
+                    if cutoff_id is None:
+                        continue
+                    session.execute(
+                        delete(EventEnvelopeModel).where(
+                            EventEnvelopeModel.topic == topic,
+                            EventEnvelopeModel.sequence_id <= cutoff_id,
+                        )
+                    )
+                    session.commit()
+            except Exception:
+                # 轮转失败不影响正常写入流程
+                pass
 
     def append_in_session(self, session: Session, envelope: EventEnvelope) -> None:
         existing = session.scalar(
