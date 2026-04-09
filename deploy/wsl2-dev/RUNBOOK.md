@@ -941,3 +941,138 @@ docker exec aats-decision python -m aats.scripts.probe_obligation_cache --help 2
 `TestObligationHotStateCacheIdempotent` / `TestObligationHotStateCacheRemoteEvent`
 32 条单测覆盖，真跑不必重复验证幂等语义，只需关注 §9.8.3 的广播可见性
 与 §9.8.4 的 fallback 路径。
+
+---
+
+### 9.10 slice nats-capacity：NATS JetStream 分层 stream + 容量监控
+
+> **病根**：4 进程拓扑 aats-market 稳定喷 `err_code=10023 "insufficient resources"` 阻断下单链路。
+>
+> **根因链条**（设计文档 §2.1）：
+> 1. `nats-server.conf max_file_store = 1 GB` 太小
+> 2. StreamConfig 只设 `max_age=7d`，缺 `max_bytes / max_msgs` 软刹车
+> 3. `DEFAULT_CRITICAL_TOPICS` 包含 `market.snapshots` / `feature.snapshots` 两个高频 topic
+> 4. 遗留 stream 已累积 45 万条 / ~1 GB 直接撞 server 限额
+> 5. `err_code=10023` publish 永久失败 → event bus 停摆 → 决策饿死
+>
+> **修复**：分层 2 stream 拓扑 + 容量感知 ensure_streams + server max_file_store 升到 8 GB。
+> 设计文档：`docs/task/slice_nats_jetstream_capacity_fix_design.md`
+
+#### 9.10.1 容量预算对账（只读检查）
+
+```bash
+# 从容器内读 nats-server 配置
+docker exec aats-nats cat /etc/nats/nats-server.conf | grep -E 'max_file_store|max_memory_store|max_payload'
+# 期望:
+#   max_file_store: 8GB      # 4 GB EVENTS + 2 GB MARKET + 2 GB headroom
+#   max_memory_store: 256MB
+#   max_payload: 4MB
+```
+
+容量预算对账公式：
+
+| 项 | 值 | 备注 |
+|---|---|---|
+| AATS_EVENTS_MARKET.max_bytes | 2 GB | 1 天短保留 / 高频 snapshots |
+| AATS_EVENTS.max_bytes | 4 GB | 7 天长保留 / critical events |
+| 两条 stream 合计 | **6 GB** | StreamSpec 软刹车上限 |
+| server max_file_store | **8 GB** | 本 runbook 锁死 |
+| headroom | **2 GB** (25%) | index / consumer state / meta |
+
+**严禁在生产上把 `max_file_store` 再次调小到两条 stream max_bytes 合计之下**。单元测试
+`tests/unit/test_nats_bus_skeleton.py::test_total_stream_capacity_within_server_budget`
+锁死 stream 容量合计不超过 6 GB 的 budget。
+
+#### 9.10.2 实时查 stream 容量水位（日常巡检）
+
+```bash
+# 方式 A: docker exec nats CLI（如果镜像自带）
+docker exec aats-nats nats --server=nats://127.0.0.1:4222 stream ls
+docker exec aats-nats nats --server=nats://127.0.0.1:4222 stream info AATS_EVENTS
+docker exec aats-nats nats --server=nats://127.0.0.1:4222 stream info AATS_EVENTS_MARKET
+
+# 方式 B: HTTP monitoring endpoint（8222 已启用）
+curl -s http://127.0.0.1:8222/jsz?streams=true | python3 -m json.tool | head -80
+```
+
+关键字段（两条 stream 都要看）：
+- `state.messages`：当前消息数 vs `config.max_msgs`（5_000_000）
+- `state.bytes`：当前字节数 vs `config.max_bytes`（2/4 GB）
+- `state.first_seq / last_seq`：序列号范围，观察增长速率
+- `state.consumer_count`：consumer 数量
+
+**报警阈值建议**（WP5 后续补 dashboard）：
+- stream bytes 达 `max_bytes * 0.70` → 开始观察
+- stream bytes 达 `max_bytes * 0.85` → 告警并 review consumer 是否卡住
+- stream bytes 达 `max_bytes * 0.95` → 紧急，检查 DiscardPolicy.OLD 是否按预期丢老消息
+
+#### 9.10.3 容量参数运行时覆盖（env override）
+
+本 slice 支持通过环境变量动态覆盖默认 StreamSpec，适用于生产调大 stream 或 dev 调小：
+
+```bash
+# 支持的 env var (slice_nats_jetstream_capacity_fix_design.md §7.6)
+export AATS_NATS_MARKET_MAX_BYTES=4294967296      # MARKET 调到 4 GB
+export AATS_NATS_MARKET_MAX_MSGS=10000000
+export AATS_NATS_MARKET_MAX_MSG_SIZE=4194304
+export AATS_NATS_MARKET_MAX_AGE_SECONDS=172800    # 2 天
+
+export AATS_NATS_EVENTS_MAX_BYTES=8589934592      # EVENTS 调到 8 GB
+export AATS_NATS_EVENTS_MAX_MSGS=10000000
+export AATS_NATS_EVENTS_MAX_MSG_SIZE=4194304
+export AATS_NATS_EVENTS_MAX_AGE_SECONDS=2592000   # 30 天
+```
+
+**调大 stream max_bytes 前的强制检查清单**：
+
+1. 两条 stream max_bytes 合计 ≤ `max_file_store * 0.75`（保留 25% headroom）
+2. 同步更新 `nats-server.conf max_file_store` 如果需要
+3. 同步更新单元测试 `test_total_stream_capacity_within_server_budget` 的 budget 上限
+4. docker-compose 重启时 `NatsEventBus.ensure_streams()` 会自动触发 `update_stream`
+   （三分支里的 "updated" 分支），日志里可以看到 `drift_fields=["max_bytes"]`
+
+#### 9.10.4 灾难恢复：NATS 撞硬限报 10023 时的 3 步人工恢复
+
+如果运气很差又撞上 `err_code=10023`（理论上本 slice 修完不该再发生），急救步骤：
+
+```bash
+# Step 1: 确认是不是 server 硬限而不是 stream 软限
+curl -s http://127.0.0.1:8222/jsz | python3 -c 'import sys, json; d=json.load(sys.stdin); print("reserved_store:", d.get("reserved_store"), "max_store:", d.get("config",{}).get("max_store"))'
+# 如果 reserved_store 接近 max_store → server 硬限
+
+# Step 2: 找出哪条 stream 在膨胀
+docker exec aats-nats nats --server=nats://127.0.0.1:4222 stream report
+
+# Step 3a: 如果是 MARKET stream（高频 snapshots） - purge 老消息（可接受丢数据）
+docker exec aats-nats nats --server=nats://127.0.0.1:4222 stream purge AATS_EVENTS_MARKET --force
+
+# Step 3b: 如果是 EVENTS stream（critical events） - 检查是不是 consumer 卡住导致 ack 堆积
+docker exec aats-nats nats --server=nats://127.0.0.1:4222 consumer report AATS_EVENTS
+# 看 Pending / Unprocessed 列；如果有 consumer 几十万条 pending，
+# 说明那个进程 handler 挂了或进入死循环 —— 先 kill 那个进程再考虑 stream 操作
+```
+
+**严禁在未搞清楚 stream 膨胀根因前直接 purge AATS_EVENTS**。它承载决策/执行审计事件，
+purge 意味着丢失合规追溯数据。建议先定位哪个 topic 在暴涨（`stream info` 会列 subjects
+的分布），把那个 topic 的 producer 停下来再处理 stream。
+
+#### 9.10.5 slice 落地冷烟断言
+
+每次 4 进程拓扑重新 deploy 后，docker logs 应该能看到：
+
+```bash
+# aats-gateway / aats-market / aats-decision / aats-execution 都应该打出
+docker logs aats-market 2>&1 | grep nats_jetstream_streams_ensured | head -1
+# 期望一条记录，含 stream_count=2 + stream_names=["AATS_EVENTS_MARKET","AATS_EVENTS"]
+
+# 每条 stream 都应该有一条 _ensured 日志
+docker logs aats-market 2>&1 | grep nats_jetstream_stream_ensured
+# 期望 2 行：一行 stream="AATS_EVENTS_MARKET"，一行 stream="AATS_EVENTS"
+
+# 第一次启动应该是 created，hot restart 应该是 unchanged
+docker logs aats-market 2>&1 | grep -E 'nats_jetstream_stream_(created|unchanged|updated)'
+```
+
+如果看到 `nats_jetstream_stream_updated drift_fields=["max_bytes",...]` → 说明某次
+deploy 改了 StreamSpec 容量参数，`ensure_streams` 自动走 update_stream 分支。这是
+正常的升级路径，不需要人工干预。
