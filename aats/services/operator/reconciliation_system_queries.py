@@ -473,12 +473,17 @@ class ReconciliationSystemQueryFacade:
         await self.owner.runtime.kill_switch.halt_async(reason=reason)
         log_event(self.owner.logger, "operator_halt", level="warning", reason=reason, already_halted=was_halted)
         status = "already_halted" if was_halted else "halted"
+        # Stage 5d hardening: halt 操作必须将 recovery_state 设为 resume_blocked。
+        # normal_operation → resume_blocked 是原始逻辑；multi_process_role_skip
+        # 是非 execution 进程的占位符，halt 后同样应变为 resume_blocked，否则
+        # 占位符会透传到 finalize_status 并污染后续状态评估。
+        current_state = self.owner.runtime.recovery_status.recovery_state
         updated_status = self.owner.runtime.recovery_status.model_copy(
             update={
                 "recovery_state": (
                     "resume_blocked"
-                    if self.owner.runtime.recovery_status.recovery_state == "normal_operation"
-                    else self.owner.runtime.recovery_status.recovery_state
+                    if current_state in ("normal_operation", "multi_process_role_skip")
+                    else current_state
                 ),
                 "last_resume_status": None,
                 "last_resume_reason": None,

@@ -183,6 +183,31 @@ class StrategyProfileContextFacade:
             base_status=self.owner.runtime.recovery_status,
             latest_reconciliation=latest_reconciliation,
         )
+
+        # Stage 5d hardening: 非 execution 进程的 recovery_state 是占位符
+        # multi_process_role_skip，不反映真实状态。从 Postgres 快照读取
+        # execution 进程写入的真实值，避免策略切换上下文基于错误状态做判断。
+        safe_to_trade = recovery.safe_to_trade
+        review_required = recovery.review_required
+        recovery_state = recovery.recovery_state
+        resume_blocked_reasons = list(recovery.resume_blocked_reasons)
+        if recovery_state == "multi_process_role_skip":
+            snapshot_getter = getattr(
+                self.owner.runtime.reconciliation_repo,
+                "latest_state_snapshot_for_scope",
+                None,
+            )
+            snapshot = (
+                snapshot_getter(scope=scope)
+                if callable(snapshot_getter)
+                else None
+            )
+            if snapshot is not None:
+                safe_to_trade = snapshot.safe_to_trade
+                review_required = snapshot.review_required
+                recovery_state = snapshot.recovery_state
+                resume_blocked_reasons = list(snapshot.resume_blocked_reasons_json)
+
         activation = self.owner._activation_state()
         live_guard_service = getattr(self.owner.runtime, "derivatives_live_guard_service", None)
         trial_guard_service = getattr(self.owner.runtime, "trial_guard_service", None)
@@ -198,11 +223,11 @@ class StrategyProfileContextFacade:
         )
         now = utc_now()
         return {
-            "safe_to_trade": recovery.safe_to_trade,
-            "review_required": recovery.review_required,
+            "safe_to_trade": safe_to_trade,
+            "review_required": review_required,
             "halted": recovery.halted,
-            "recovery_state": recovery.recovery_state,
-            "resume_blocked_reasons": list(recovery.resume_blocked_reasons),
+            "recovery_state": recovery_state,
+            "resume_blocked_reasons": resume_blocked_reasons,
             "market_snapshot_fresh": bool(market_status.get("fresh")),
             "account_snapshot_fresh": bool(account_status.get("fresh")),
             "market_status": _json_safe(market_status),
