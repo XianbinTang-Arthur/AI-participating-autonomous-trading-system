@@ -2,6 +2,14 @@
 
 > 面向加密资产交易的事件驱动、可审计、可恢复、受保护的自动交易系统原型。
 
+> **当前工程进度（2026-04 快照）**：
+> - Stage 5 — **4 进程拓扑**（gateway / market / decision / execution）装配完成，`docker compose` 一键可拉起，NATS JetStream 承载跨进程事件总线
+> - Stage 6 — **Redis HotStateStore** 真接入（Slice 6.1 backend 配线 · Slice 6.2 KillSwitch 跨进程同步 · Slice 6.3 PortfolioSnapshot 缓存 · Slice 6.4 KillSwitch 二合一 + W1-W5 fallback 移除）
+> - Stage 7 — 故障演练 + 4 容器 healthcheck 全绿 + gateway role 下 `ai_service is None` 链路修复
+> - 关键表 OCC 完成：`order_states` / `execution_fills` / `strategy_execution_bundles` 均带 `row_version`；reconciliation snapshot 与 fill_events 改为幂等写入
+> - RDP 数据采集已从分钟级 daemon **退役**为日批 `rdp_run_daily_ingest.py`（历史 ZIP 仍走 `rdp_historical_daemon.py --once`）
+> - 仓库仍保留 monolith 单进程模式作为回退路径（`AATS_EVENT_BUS_BACKEND=in_memory`，零依赖 NATS/Redis）
+
 ---
 
 ## 目录
@@ -20,6 +28,7 @@
 - [12. PostgreSQL 与迁移](#12-postgresql-与迁移)
 - [13. 启动 API / UI](#13-启动-api--ui)
 - [14. 常见运行模式](#14-常见运行模式)
+- [14A. 4 进程拓扑与基础设施栈（Stage 5-7）](#14a-4-进程拓扑与基础设施栈stage-5-7)
 - [15. 重要配置项说明](#15-重要配置项说明)
 - [16. Operator 认证与权限模型](#16-operator-认证与权限模型)
 - [17. 可观测性与排障入口](#17-可观测性与排障入口)
@@ -174,7 +183,24 @@ AIParticipatingAutonomousTradingSystem（AATS）是一个以**事件驱动**为�
       -> portfolio snapshot -> reconciliation / recovery -> operator / audit / UI
 ```
 
-系统由多个服务模块组成，但在开发态通常通过 API gateway 统一呈现。
+系统由多个服务模块组成，可以以两种拓扑运行：
+
+- **Monolith 单进程模式**（默认、向后兼容）
+  - 全部模块在同一个 Python 进程内运行
+  - `AATS_EVENT_BUS_BACKEND=in_memory`、`AATS_HOT_STATE_BACKEND=memory`
+  - 零外部依赖（除 PostgreSQL 持久化之外不依赖 NATS / Redis）
+  - 适合开发调试、单机本地运行、shadow run
+
+- **4 进程拓扑**（Stage 5 起）
+  - `gateway / market / decision / execution` 4 个进程，共享 PostgreSQL + NATS JetStream + Redis
+  - `apps/api_gateway/main.py`、`apps/market_gateway/main.py`、`apps/decision_engine/main.py`、`apps/execution_engine/main.py`
+  - 事件总线：`AATS_EVENT_BUS_BACKEND=hybrid`（critical topic 走 NATS JetStream 跨进程，observer topic 仍走进程内内存）
+  - 跨进程热状态：`AATS_HOT_STATE_BACKEND=redis`（kill_switch、portfolio_snapshot 等）
+  - 数据库 advisory lock：`AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED=true` 按 `AATS_PROCESS_ROLE` 派生独立 lock，4 个进程互不阻塞
+  - 配套基础设施栈（WSL2 docker-compose）：Postgres / Redis / NATS / Loki / Jaeger / Grafana
+  - 详见 [14A. 4 进程拓扑与基础设施栈](#14a-4-进程拓扑与基础设施栈stage-5-7)
+
+在开发态，两种模式通过同一份主业务代码 + 不同的 `AATS_PROCESS_ROLE` + `AATS_EVENT_BUS_BACKEND` 组合切换；monolith 作为功能联调与回退路径始终保留。
 
 ---
 
@@ -252,6 +278,25 @@ AIParticipatingAutonomousTradingSystem（AATS）是一个以**事件驱动**为�
 
 ### 6.14 `aats/services/recovery_control`
 职责：启动恢复（startup recovery）、对账异常分类与修复策略
+
+### 6.15 `apps/*`（Stage 5 新增，4 进程入口）
+职责：4 进程拓扑的独立 entry point，每个 entry 通过 `AATS_PROCESS_ROLE` 区分自己承担的切片
+
+- `apps/api_gateway/main.py`：gateway 进程（FastAPI + UI + REST + 后台 health/admin 任务）
+- `apps/market_gateway/main.py`：market 进程（行情拉取 + 特征计算）
+- `apps/decision_engine/main.py`：decision 进程（AI / 策略协调 / 风控 / 计划生成）
+- `apps/execution_engine/main.py`：execution 进程（订单提交 / 对账 / 资金结算）
+- `apps/feature_engine/`、`apps/governance_engine/`、`apps/portfolio_service/`、`apps/reconciliation_service/`、`apps/ai_service/`：供上述 4 个 role 在 build_runtime 阶段组合装配使用的子入口
+- 全部 entry 最终通过 `aats/bootstrap/` 里的 `build_runtime` 装配服务依赖，**同一份业务代码在 monolith 与 4 进程下都工作**
+
+### 6.16 `aats/storage/hot_state_store.py`（Stage 6 新增，Redis 跨进程热状态）
+职责：提供 `HotStateStore` Protocol + `InMemoryHotStateStore`（monolith 默认）+ `RedisHotStateStore`（4 进程默认）
+
+使用者（Stage 6 范围）：
+
+- `KillSwitchSyncService`（Slice 6.2）：execution / decision write-through，gateway 优先 Redis 读、miss 回退本地状态机
+- `PortfolioSnapshotCache`（Slice 6.3）：execution 写 Postgres outbox 后 mirror 到 Redis，decision / gateway 读路径优先 Redis（附 as_of_ts 校验），miss 或 stale 时优雅回退 Postgres
+- `KillSwitch` 二合一（Slice 6.4）：两套 W1-W5 fallback 去除，统一通过 Redis 驱动
 
 ---
 
@@ -436,15 +481,27 @@ python -m venv .venv
 
 ### 11.3 执行迁移
 
+当前主系统迁移（2026-04 快照）：
+
 ```powershell
-psql postgresql://aats:aats@localhost:5432/aats -f migrations/0001_postgres_storage.sql
-psql postgresql://aats:aats@localhost:5432/aats -f migrations/0002_execution_and_audit_correlation.sql
-psql postgresql://aats:aats@localhost:5432/aats -f migrations/0003_audit_execution_plan_refs.sql
-psql postgresql://aats:aats@localhost:5432/aats -f migrations/0004_operator_users.sql
-psql postgresql://aats:aats@localhost:5432/aats -f migrations/0005_storage_scope_columns.sql
-psql postgresql://aats:aats@localhost:5432/aats -f migrations/0006_order_obligations.sql
-psql postgresql://aats:aats@localhost:5432/aats -f migrations/0007_execution_outbox.sql
+psql postgresql://aats:aats@localhost:5432/aats -f migrations/0001_postgres_latest_schema.sql
+psql postgresql://aats:aats@localhost:5432/aats -f migrations/0002_postgres_legacy_upgrade.sql
+psql postgresql://aats:aats@localhost:5432/aats -f migrations/0003_postgres_execution_attempt_id_columns.sql
+psql postgresql://aats:aats@localhost:5432/aats -f migrations/0004_postgres_exit_execution_repository.sql
+psql postgresql://aats:aats@localhost:5432/aats -f migrations/0005_postgres_strategy_execution_bundle_row_version.sql
+psql postgresql://aats:aats@localhost:5432/aats -f migrations/0006_postgres_order_states_row_version.sql
+psql postgresql://aats:aats@localhost:5432/aats -f migrations/0007_postgres_p1_snapshot_idempotency.sql
 ```
+
+说明：
+
+- `0001_postgres_latest_schema.sql` 是合并后的最新主 schema
+- `0002_postgres_legacy_upgrade.sql` 用于从旧版数据库在位升级
+- `0005` / `0006` 为 Stage 5a OCC 改造：在 `strategy_execution_bundles` / `order_states` 上引入 `row_version` 乐观并发字段
+- `0007` 为 Stage 5a P1 改造：将 reconciliation snapshot 与 fill events 改为幂等插入
+- RDP 研究库的迁移在 `migrations/research/0001-0012`，由 `scripts/rdp_init_db.py` 自动 apply，不需要手动 psql
+
+**首次启动时，`AATS_DATABASE_AUTO_CREATE_SCHEMA=true` 也会自动走 SQLAlchemy 建表路径，但审计 / 恢复 / OCC 相关能力仍建议走上述显式迁移以保持和生产环境一致。**
 
 ### 11.4 选择 profile
 使用脚本：
@@ -535,6 +592,101 @@ psql postgresql://aats:aats@localhost:5432/aats -f migrations/0007_execution_out
 
 ---
 
+## 14A. 4 进程拓扑与基础设施栈（Stage 5-7）
+
+### 14A.1 为什么有 4 进程拓扑
+
+单进程 monolith 在 WebSocket / OKX private stream / feature 计算 / AI inference 并发时逐渐出现：
+
+- GIL 争用导致订单链延迟被特征计算阻塞
+- 某条链路崩溃拖垮全进程
+- 无法按 role 独立扩缩
+
+Stage 3-5 把业务按职责切成 4 个进程：
+
+| role      | 职责                                                          | 是否对外暴露端口 |
+|-----------|---------------------------------------------------------------|------------------|
+| gateway   | FastAPI + UI + REST + operator / query / health / admin       | 是（`:8000`）    |
+| market    | 行情拉取 + 特征计算 + 技术指标输出                              | 否               |
+| decision  | 订阅市场快照 → AI 决策 + 风控 + 策略 → 发出 order intents       | 否               |
+| execution | 订阅 order intents → OKX 交互下单 + portfolio + reconciliation | 否               |
+
+4 个进程共享同一份业务代码与 `build_runtime`，通过 `AATS_PROCESS_ROLE` 环境变量决定本进程实际装配哪些 service。
+
+### 14A.2 配套基础设施（WSL2 开发栈）
+
+`deploy/wsl2-dev/` 提供一键拉起的本地基础设施栈（零云费用，全部本地运行）：
+
+| 组件     | 端口          | 用途                                 |
+|----------|---------------|--------------------------------------|
+| Postgres | 5432          | 主存储（账务、订单、策略状态）       |
+| Redis    | 6379          | 跨进程热状态缓存（kill_switch、portfolio snapshot） |
+| NATS     | 4222 / 8222   | JetStream 跨进程事件总线             |
+| Loki     | 3100          | 日志聚合                             |
+| Jaeger   | 16686 / 4317  | 分布式 trace（OTLP collector）       |
+| Grafana  | 3000          | Loki + Jaeger + Postgres 仪表盘      |
+
+### 14A.3 一键拉起 4 进程
+
+```bash
+# 在 WSL2 Ubuntu shell 内：
+cd deploy/wsl2-dev
+
+# 1. 基础设施（Postgres / Redis / NATS / Loki / Jaeger / Grafana）
+cp .env.wsl2.template .env.wsl2   # 修改其中的默认密码
+docker compose --env-file .env.wsl2 up -d
+
+# 2. AATS 4 个应用容器（共享同一镜像 aats-base:dev）
+docker compose -f docker-compose.aats.yml --env-file .env.wsl2 build
+docker compose -f docker-compose.aats.yml --env-file .env.wsl2 up -d
+
+# 3. 检查 4 容器 healthcheck
+docker compose -f docker-compose.aats.yml ps
+```
+
+详细步骤见 `deploy/wsl2-dev/RUNBOOK.md`。
+
+### 14A.4 多进程下的关键环境变量
+
+4 个进程共享下列配置（通常放 `.env.wsl2`）：
+
+```bash
+# 进程角色（由 docker-compose 或 entry script 注入）
+AATS_PROCESS_ROLE=gateway|market|decision|execution
+
+# Postgres + per-role advisory lock
+AATS_STORAGE_MODE=postgres
+AATS_DATABASE_URL=postgresql+psycopg://aats:***@postgres:5432/aats
+AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED=true   # 按 role 派生 lock
+
+# 事件总线
+AATS_EVENT_BUS_BACKEND=hybrid                     # in_memory / hybrid / nats
+AATS_NATS_URL=nats://nats:4222
+AATS_NATS_STREAM_NAME=AATS_EVENTS
+
+# 热状态存储（Stage 6）
+AATS_HOT_STATE_BACKEND=redis                      # memory / redis
+AATS_HOT_STATE_REDIS_URL=redis://redis:6379/0
+
+# 可观测性（Stage 7）
+OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317
+OTEL_SERVICE_NAME=aats
+AATS_LOG_FORMAT=json
+```
+
+### 14A.5 monolith vs 4 进程选型
+
+| 场景                              | 推荐拓扑 |
+|-----------------------------------|----------|
+| 开发、UI 联调、单元 / 场景 / replay 测试 | monolith（无 NATS / Redis 依赖） |
+| 模拟盘长期 shadow run             | 均可 |
+| guarded submit 压测、故障演练     | 4 进程 |
+| guarded live                       | 4 进程（推荐） |
+
+注意：即使使用 4 进程拓扑，guarded live 仍受 operator / recovery / reconciliation / health / risk 全套门禁约束，不存在“用多进程绕过风控”的通路。
+
+---
+
 ## 15. 重要配置项说明
 
 ### 15.1 数据库
@@ -586,6 +738,17 @@ psql postgresql://aats:aats@localhost:5432/aats -f migrations/0007_execution_out
 
 - `AATS_EXECUTION_UNKNOWN_SUBMIT_REVIEW_AFTER_SECONDS`
 - `AATS_EXECUTION_UNKNOWN_CANCEL_REVIEW_AFTER_SECONDS`
+
+### 15.7 多进程拓扑（Stage 3-6）相关
+单进程 monolith 可留空这几项（默认值即向后兼容），运行 4 进程拓扑时必填：
+
+- `AATS_PROCESS_ROLE` — `monolith` / `gateway` / `market` / `decision` / `execution`
+- `AATS_EVENT_BUS_BACKEND` — `in_memory` / `hybrid` / `nats`
+- `AATS_NATS_URL` — NATS server URL（hybrid / nats 模式必填，必须 `nats://` 或 `tls://` 开头）
+- `AATS_NATS_STREAM_NAME` — JetStream 流名称（默认 `AATS_EVENTS`）
+- `AATS_HOT_STATE_BACKEND` — `memory` / `redis`
+- `AATS_HOT_STATE_REDIS_URL` — Redis URL（redis backend 必填）
+- `AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED` — 4 进程下建议 `true`，会按 role 派生 advisory lock 防止同 role 重复启动
 
 ---
 
@@ -645,6 +808,16 @@ psql postgresql://aats:aats@localhost:5432/aats -f migrations/0007_execution_out
 - 审计日志
 - 关键错误日志
 - 启动恢复日志
+
+4 进程拓扑下，推荐把 `AATS_LOG_FORMAT=json` 打开，统一由 Loki 收集；Grafana 面板（Loki + Jaeger + Postgres 数据源）随 `deploy/wsl2-dev` 自动注入。
+
+### 17.2.1 Stage 6 跨进程状态探针
+Stage 6 真跑验证阶段新增了 3 个 probe 脚本（`deploy/wsl2-dev/`），便于在 4 进程环境下逐层定位 Redis 热状态问题：
+
+- `probe_kill_switch.py` — 检查 kill_switch 在 Redis / 本地状态机的一致性
+- `probe_snapshot_cache.py` — 检查 portfolio_snapshot 缓存的 as_of_ts 新鲜度
+- `probe_repo_cache_listener.py` — 检查 portfolio_repo cache listener 是否正确订阅
+
 
 ### 17.3 现在应该优先看的 runtime 字段
 在这次重构后，排 sleeve 自动执行时建议优先看：
@@ -749,12 +922,36 @@ allocator 通常不会继续生成 execution plan。
 ## 20. 仓库目录结构
 
 ```text
+apps/                     # Stage 5 新增：4 进程拓扑 entry points
+  api_gateway/            #   gateway 进程入口（FastAPI + UI + REST）
+  market_gateway/         #   market 进程入口（行情 + 特征）
+  decision_engine/        #   decision 进程入口（AI + 策略 + 风控）
+  execution_engine/       #   execution 进程入口（OKX + portfolio + reconciliation）
+  feature_engine/         #   子入口 — 供 market / monolith 装配
+  governance_engine/      #   子入口 — 供 decision / monolith 装配
+  portfolio_service/      #   子入口 — 供 execution / monolith 装配
+  reconciliation_service/ #   子入口 — 供 execution / monolith 装配
+  ai_service/             #   子入口 — 供 decision / monolith 装配
+
+deploy/
+  wsl2-dev/               # Stage 1 起的本地基础设施栈（零云费用）
+    docker-compose.yml            # Postgres + Redis + NATS + Loki + Jaeger + Grafana
+    docker-compose.aats.yml       # AATS 4 个应用容器（Stage 5 新增）
+    Dockerfile                    # AATS 单一共享镜像 aats-base
+    RUNBOOK.md                    # 从零到全套部署 runbook
+    README.md                     # WSL2 栈架构说明
+    grafana/ jaeger/ loki/ nats/  # 各组件配置
+    probe_kill_switch.py          # Stage 6 真跑探针
+    probe_snapshot_cache.py       # Stage 6 真跑探针
+    probe_repo_cache_listener.py  # Stage 6 真跑探针
+    scripts/                      # 基础设施运维脚本（backup 等）
+
 aats/
   api/                    # API 层与前端静态资源
-  bootstrap/              # settings / profile / env / config / active_parameters
-  bus/                    # 事件总线与消息模型
+  bootstrap/              # settings / profile / env / config / active_parameters / process_lifecycle / telemetry
+  bus/                    # 事件总线与消息模型（含 HybridEventBus / NatsEventBus / InMemoryEventBus）
   events/                 # 事件定义
-  schemas/                # 运行时 schema / DTO（24 文件）
+  schemas/                # 运行时 schema / DTO
   services/
     market_gateway/       # 行情接入
     feature_engine/       # 特征计算（波动率/趋势/流动性/regime）
@@ -773,7 +970,7 @@ aats/
     ai_service/           # AI 评估器 / prompt / inference
     blocker_control/      # 策略级执行拦截
     ledger/               # 交易分录 / lot / settlement / funding fee
-  storage/                # PostgreSQL / SQLAlchemy 持久化实现（46 文件）
+  storage/                # PostgreSQL / SQLAlchemy 持久化实现 + hot_state_store（Stage 6 Redis 接入）
   data_platform/          # 研究数据平台（数仓，详见第 21 章）
     config.py             #   Pydantic 配置，从 .env.research 读取
     db.py                 #   数据库连接池 + migration runner
@@ -805,10 +1002,13 @@ configs/
   templates/               # .env 示例模板
 
 migrations/
-  0001_postgres_latest_schema.sql       # 主系统 schema（最新版合并）
-  0002_postgres_legacy_upgrade.sql      # 旧版升级迁移
+  0001_postgres_latest_schema.sql                        # 主系统 schema（最新版合并）
+  0002_postgres_legacy_upgrade.sql                       # 旧版在位升级
   0003_postgres_execution_attempt_id_columns.sql
   0004_postgres_exit_execution_repository.sql
+  0005_postgres_strategy_execution_bundle_row_version.sql # Stage 5a OCC
+  0006_postgres_order_states_row_version.sql              # Stage 5a OCC
+  0007_postgres_p1_snapshot_idempotency.sql               # Stage 5a 幂等插入
   research/               # 研究数据平台迁移 SQL（0001-0012）
 
 data/historical/          # 历史数据目录
