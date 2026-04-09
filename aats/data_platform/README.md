@@ -122,7 +122,8 @@ research  研究     实验元数据、诊断摘要、扫描批次
 | `scripts/rdp_init_db.py` | 初始化 schema (运行 migration 0001-0012) | 首次部署 1 次 |
 | `scripts/rdp_build_gold_all.py` | 全量重建 Gold replay bars | 灾后恢复或 schema 变更后 |
 | `scripts/rdp_detect_gaps.py` | Silver 层 gap 巡检 | 排查数据缺口时 |
-| `scripts/rdp_deep_backfill_api.py` | 深度回拉(REST,跨多月) | 灾后恢复 |
+| `scripts/rdp_deep_backfill_api.py` | 指定时间区间深度回填 candles (REST API) | 初始建仓 / 灾后恢复 |
+| `scripts/rdp_deep_backfill_funding.py` | 指定时间区间深度回填 funding rate (REST API) | 初始建仓 / 灾后恢复 |
 
 **已退役为薄壳**(仍可调用,会打印 deprecation 警告并转发到 daily_ingest):
 
@@ -177,7 +178,40 @@ python scripts/rdp_init_db.py
 python scripts/rdp_historical_daemon.py --once
 ```
 
-**方式 B — 增量日批(推荐生产)**:
+**方式 B — 指定时间区间回填(API 深度拉取)**:
+
+```bash
+# ── Candles ──
+
+# 回填到 90 天前 (所有默认 symbol × timeframe)
+python scripts/rdp_deep_backfill_api.py --days 90
+
+# 指定目标起始日期
+python scripts/rdp_deep_backfill_api.py --target-start 2025-12-01
+
+# 只回填 15m, 完成后自动重建 Gold
+python scripts/rdp_deep_backfill_api.py --timeframes 15m --days 120 --build-gold
+
+# 试运行 (不写入数据库, 只显示将拉取多少数据)
+python scripts/rdp_deep_backfill_api.py --days 90 --dry-run
+
+# ── Funding Rate ──
+
+# 回填 funding 到 365 天前
+python scripts/rdp_deep_backfill_funding.py --days 365
+
+# 回填到指定日期, 多个交易对
+python scripts/rdp_deep_backfill_funding.py --target-start 2025-04-01 \
+    --symbols BTC-USDT-SWAP ETH-USDT-SWAP
+
+# Funding 试运行
+python scripts/rdp_deep_backfill_funding.py --days 365 --dry-run
+```
+
+> 回填完成后如需重建 Gold: `python scripts/rdp_build_gold_all.py`
+> 或对单个 symbol/tf: `python scripts/rdp_build_gold.py --symbol BTC-USDT-SWAP --timeframe 15m --start 2025-12-01 --end 2026-04-01`
+
+**方式 C — 增量日批(推荐生产)**:
 
 ```bash
 # 直接调用 (单次)
