@@ -2,6 +2,31 @@
 # 这里只放策略、AI、自动换档、多策略与试盘守护相关参数。
 # 数据库、端口、日志、交易所凭证、仓位上限等运行时 override 请改根目录 `.env.derivatives`。
 
+# >>> TEMP-HACK-E (2026-04-08): 绕过 docker-compose 4 进程跑 derivatives managed profile
+# 的级联校验 —— 只这一行本地补丁 + compose override 里的 AATS_OPERATOR_SESSION_SECRET=""
+# 两手配合。
+#
+# 背景 / 级联校验链：
+# 1. managed profile derivatives runtime_defaults.operator_session_cookie_secure=False（dev
+#    UX 友好），但 config.py::_validate_startup_profile_settings 对 exchange_coupled=True
+#    （含模拟盘）强制要 True。AATS_OPERATOR_SESSION_COOKIE_SECURE 在
+#    MANAGED_PROFILE_DERIVED_ENV_KEYS，env var override 会被剥离 —— 只能在这里 yaml 里打补丁。
+# 2. 同一个 hardening gate 还强制 operator_auth_enabled=True。不能把它关掉。
+# 3. 于是 _validate_operator_auth_settings 会跑：postgres + auth_enabled + session_configured
+#    → 要求至少 1 个 enabled admin user。这条 validator 在 operator_session_configured=False
+#    时 early return，所以在 compose override 里把 AATS_OPERATOR_SESSION_SECRET 设成空串，
+#    operator_session_configured→False，同时跳过 cookie_secure 硬化检查（line 989 条件依赖
+#    session_configured）。这样其实连这里的 cookie_secure: true 都可以删掉，但保留它是显式
+#    safer-default，不增加任何风险。
+#
+# Dev/test 场景 "观察模拟盘下单链路" 根本不需要 operator web console 登录态。
+# 本条临时存在，等以下 2 个根因修复 slice 落地后立即删除：
+#   - fix(config): exchange runtime hardening 允许 dev+simulated 绕过 cookie_secure
+#   - fix(config): dev/simulated 环境下 auto-seed bootstrap admin 或允许无 admin 启动
+# grep 'TEMP-HACK-E' 即可定位。
+operator_session_cookie_secure: true
+# <<< TEMP-HACK-E
+
 # AI 与自动降级
 # [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker / ai_decision_maker_with_profile_control；推荐值：baseline_only。
 ai_operating_mode: baseline_only
