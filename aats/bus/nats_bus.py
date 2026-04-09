@@ -108,6 +108,11 @@ DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
         # ── 审计 / operator / 错误流 ────────────────────────
         _topics.AUDIT_RECORDS,            # 审计记录；合规不能丢
         _topics.OPERATOR_ACTIONS,         # operator 人工动作驱动状态变化
+        _topics.OPERATOR_COMMAND_REQUESTS,  # Slice 4-proc operator command proxy:
+                                            # gateway→execution 请求 topic（rebaseline/resume
+                                            # 依赖 execution-only service，走代理）
+        _topics.OPERATOR_COMMAND_RESPONSES, # 同上，execution→gateway 响应 topic；
+                                            # 两条都归 critical 防丢包卡 HTTP handler
         _topics.EXECUTION_ERROR_SUMMARIES,    # 执行错误汇总；驱动 risk 降级
         _topics.PROCESSING_FAILURES,      # 处理失败；同上
         _topics.KILL_SWITCH_STATE,        # Stage 6 Slice 6.2：kill_switch 跨进程同步

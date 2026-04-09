@@ -35,6 +35,14 @@ RECONCILIATION_REPORTS = "reconciliation.reports"
 AUDIT_RECORDS = "system.audit_records"
 BLOCKER_SNAPSHOTS = "system.blocker_snapshots"
 OPERATOR_ACTIONS = "system.operator_actions"
+# Slice 4-proc operator command proxy: gateway→execution 请求-响应代理。
+# 设计文档：docs/task/slice_4proc_operator_command_proxy_fix_design.md
+# rebaseline / resume 这类依赖 portfolio_service / reconciliation_service 的
+# operator 命令在 4 进程 gateway role 下无法本地执行（slice 门控导致这两个
+# service 在 gateway 为 None），必须通过 NATS 代理到 execution 进程上跑。
+# 两条 topic 都归 critical（丢包会让 HTTP 超时、系统卡在 blocker）。
+OPERATOR_COMMAND_REQUESTS = "system.operator_command_requests"
+OPERATOR_COMMAND_RESPONSES = "system.operator_command_responses"
 EXECUTION_ERROR_SUMMARIES = "execution.error_summaries"
 PROCESSING_FAILURES = "system.processing_failures"
 # Stage 6 Slice 6.2：跨进程 kill_switch 状态广播。critical 路径，丢一条会让某个

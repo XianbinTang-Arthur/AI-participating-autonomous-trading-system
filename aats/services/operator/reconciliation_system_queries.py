@@ -91,6 +91,13 @@ class ReconciliationSystemQueryFacade:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # 4 进程 gateway role 下 reconciliation_service 为 None，
+        # 本操作目前不走代理（极低频调试命令），直接报错引导用户走 execution 节点。
+        if self.owner.runtime.reconciliation_service is None:
+            raise ValueError(
+                "validate_reconciliation_requires_execution_role: "
+                "this operation is not available on gateway process"
+            )
         report = await self.owner.runtime.reconciliation_service.validate_now(reason=reason)
         summary = ReconciliationValidationSummary(
             trigger=reason,
@@ -151,6 +158,13 @@ class ReconciliationSystemQueryFacade:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # 4 进程 gateway role 下 reconciliation_service 为 None，
+        # 本操作目前不走代理（极低频调试命令），直接报错引导用户走 execution 节点。
+        if self.owner.runtime.reconciliation_service is None:
+            raise ValueError(
+                "resolve_stuck_submission_requires_execution_role: "
+                "this operation is not available on gateway process"
+            )
         order = self.owner._control_plane_order_state(client_order_id)
         if order is None:
             raise KeyError(f"order_not_found:{client_order_id}")
@@ -269,6 +283,31 @@ class ReconciliationSystemQueryFacade:
             raise ValueError("rebaseline_requires_okx_account_read")
         if not self.owner.runtime.recovery_policy.operator_rebaseline_supported:
             raise ValueError("rebaseline_not_supported_for_runtime_profile")
+
+        # 4 进程 gateway role 走代理：portfolio_service / reconciliation_service
+        # 在本进程为 None（_SLICE_REQUIRED_ROLES 门控），业务逻辑必须在 execution
+        # 进程执行。OperatorCommandClient 用 NATS 把命令代理过去，correlation_id
+        # 匹配响应后返回与 monolith 路径完全一致的 dict。
+        # 设计文档：docs/task/slice_4proc_operator_command_proxy_fix_design.md §4.6
+        if (
+            self.owner.runtime.portfolio_service is None
+            or self.owner.runtime.reconciliation_service is None
+        ):
+            client = getattr(self.owner.runtime, "operator_command_client", None)
+            if client is None:
+                raise RuntimeError(
+                    "rebaseline_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                )
+            return await client.invoke(
+                command="rebaseline",
+                payload={
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
 
         recovery_before = self.owner.recovery_view()["recovery_state"]
         previous_baseline_event = latest_topic_event_for_scope(
@@ -477,6 +516,26 @@ class ReconciliationSystemQueryFacade:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # 4 进程 gateway role 走代理：resume 的 resume_check 需要
+        # reconciliation_service.validate_now()，在 gateway 为 None。
+        # 设计文档：docs/task/slice_4proc_operator_command_proxy_fix_design.md §4.6
+        if self.owner.runtime.reconciliation_service is None:
+            client = getattr(self.owner.runtime, "operator_command_client", None)
+            if client is None:
+                raise RuntimeError(
+                    "resume_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                )
+            return await client.invoke(
+                command="resume",
+                payload={
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
+
         was_halted = self.owner.runtime.kill_switch.halted
         recovery_before = self.owner.recovery_view()["recovery_state"]
         report = None

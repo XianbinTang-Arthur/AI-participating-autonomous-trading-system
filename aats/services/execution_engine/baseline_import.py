@@ -32,7 +32,7 @@ class AccountBaselineImportService:
         self,
         *,
         exchange_snapshot: ExchangeAccountSnapshot,
-        portfolio_state: PortfolioState,
+        portfolio_state: PortfolioState | None,
         product_type: str,
         margin_mode: str,
         allowed_symbols: Sequence[str],
@@ -84,7 +84,7 @@ class AccountBaselineImportService:
         self,
         *,
         exchange_snapshot: ExchangeAccountSnapshot,
-        portfolio_state: PortfolioState,
+        portfolio_state: PortfolioState | None,
         product_type: str,
         margin_mode: str,
         allowed_symbols: Sequence[str],
@@ -136,7 +136,7 @@ class AccountBaselineImportService:
         *,
         baseline: AccountBaselineSnapshot,
         exchange_snapshot: ExchangeAccountSnapshot,
-        portfolio_state: PortfolioState,
+        portfolio_state: PortfolioState | None,
         source_component: str,
         baseline_generation: BaselineGenerationRecord | None,
         watermark: ExchangeAckWatermark | None,
@@ -163,7 +163,12 @@ class AccountBaselineImportService:
             if persisted_generation is not None:
                 self.reconciliation_repo.save_baseline_generation(persisted_generation)
         self.event_store.append(envelope)
-        portfolio_state.load_exchange_snapshot(exchange_snapshot)
+        # Slice 4-proc operator command proxy：gateway role 下 portfolio_service
+        # 为 None，本方法被 gateway 直接调用时跳过 in-memory 更新（gateway 无
+        # portfolio state）。代理到 execution 走 worker 路径时 portfolio_state
+        # 非 None，走正常更新。monolith / execution role 行为与本改动前完全一致。
+        if portfolio_state is not None:
+            portfolio_state.load_exchange_snapshot(exchange_snapshot)
         return ImportedAccountBaseline(snapshot=baseline, event_id=envelope.event_id)
 
     @staticmethod

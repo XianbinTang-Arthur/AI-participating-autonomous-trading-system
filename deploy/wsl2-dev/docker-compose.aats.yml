@@ -55,7 +55,9 @@ x-aats-common-env: &aats-common-env
   AATS_OTEL_ENDPOINT: http://jaeger:4317
   AATS_OTEL_PROTOCOL: grpc
   AATS_OTEL_DEPLOYMENT_ENV: wsl2-dev
-  AATS_OTEL_SAMPLE_RATIO: "1.0"
+  # 开发阶段 10% 采样足够 drill/debug；全采样会灌满 Jaeger Badger
+  # 导致 compaction OOM → restart loop。正式灰度可进一步降到 0.01。
+  AATS_OTEL_SAMPLE_RATIO: "0.1"
   AATS_LOG_FORMAT: json
   AATS_LOG_LEVEL: INFO
   TZ: Asia/Shanghai

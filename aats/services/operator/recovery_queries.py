@@ -81,6 +81,26 @@ class RecoveryQueryFacade:
                     latest_state_snapshot_payload["details_json"] = details_json
 
         base_payload = base.model_dump(mode="json")
+
+        # Stage 5d fix: gateway 进程的 recovery_posture 只有占位符
+        # multi_process_role_skip，不反映 execution 进程写入 Postgres 的真实
+        # recovery 状态。当检测到占位符状态且 Postgres 中有 execution 写入的
+        # ReconciliationStateSnapshot 时，用快照的真实字段覆盖 base_payload。
+        if (
+            base_payload.get("recovery_state") == "multi_process_role_skip"
+            and latest_state_snapshot is not None
+        ):
+            base_payload["recovery_state"] = latest_state_snapshot.recovery_state
+            base_payload["safe_to_trade"] = latest_state_snapshot.safe_to_trade
+            base_payload["resume_eligible"] = latest_state_snapshot.resume_eligible
+            base_payload["review_required"] = latest_state_snapshot.review_required
+            base_payload["halt_required"] = latest_state_snapshot.halt_required
+            base_payload["bundle_recovery_required"] = latest_state_snapshot.bundle_recovery_required
+            base_payload["only_reduce_required"] = latest_state_snapshot.only_reduce_required
+            base_payload["resume_blocked_reasons"] = list(
+                latest_state_snapshot.resume_blocked_reasons_json
+            )
+
         base_payload["independent_recovery_snapshots"] = self.owner._independent_recovery_snapshots_view(
             base_payload.get("independent_recovery_snapshots") or []
         )

@@ -184,6 +184,9 @@ services:
       BADGER_EPHEMERAL: "false"
       BADGER_DIRECTORY_VALUE: "/badger/data"
       BADGER_DIRECTORY_KEY: "/badger/key"
+      # span 保留 72 小时，超时自动淘汰；防止 Badger 无限堆积导致
+      # compaction 吃满 CPU/内存 → OOM → restart loop
+      BADGER_SPAN_STORE_TTL: "72h"
     ports:
       - "127.0.0.1:16686:16686"   # Jaeger UI
       - "127.0.0.1:4317:4317"     # OTLP gRPC（AATS 4 进程都打到这里）

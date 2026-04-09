@@ -107,6 +107,10 @@ from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
 from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
 from aats.services.operator.accounts import enabled_admin_count
+from aats.services.operator.command_bridge import (
+    OperatorCommandClient,
+    OperatorCommandWorker,
+)
 from aats.services.ledger.posting import Phase1LedgerMirrorService
 from aats.services.ledger.funding_fee_sync import LedgerFundingFeeSyncService
 from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
@@ -493,6 +497,12 @@ class ApplicationRuntime:
     funding_fee_repo: FundingFeeRepository | None = None
     sleeve_pnl_projection_service: SleevePnLProjectionService | None = None
     funding_fee_sync_service: LedgerFundingFeeSyncService | None = None
+    # Slice 4-proc operator command proxy：gateway 端 client 与 execution 端
+    # worker 的 sidecar 装配字段。monolith / market / decision role 下均为
+    # None。gateway 在 build_runtime 末尾装 client；execution 装 worker；
+    # 详见 docs/task/slice_4proc_operator_command_proxy_fix_design.md §4/§5。
+    operator_command_client: OperatorCommandClient | None = None
+    operator_command_worker: OperatorCommandWorker | None = None
     logger: Any = field(default_factory=lambda: get_logger("aats.runtime"))
 
     async def start_background_tasks(self) -> None:
@@ -624,6 +634,35 @@ class ApplicationRuntime:
             log_event(
                 self.logger,
                 "obligation_hot_state_cache_shutdown_close_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        # Slice 4-proc operator command proxy：关闭 client / worker。必须在
+        # bus.close 之前，让未完成的 invoke() 先抛 OperatorCommandError 出
+        # 去，避免 bus 关了之后 pending future 永远不 resolve 导致 HTTP
+        # handler 挂死。getattr 兜底：某些单测用 __new__ 构 minimal runtime，
+        # 字段默认值不会被写入对象。
+        try:
+            operator_command_client = getattr(self, "operator_command_client", None)
+            if operator_command_client is not None:
+                await operator_command_client.stop()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "operator_command_client_shutdown_close_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+        try:
+            operator_command_worker = getattr(self, "operator_command_worker", None)
+            if operator_command_worker is not None:
+                await operator_command_worker.stop()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "operator_command_worker_shutdown_close_failed",
                 level="warning",
                 error_type=type(exc).__name__,
                 error=str(exc),
@@ -4421,6 +4460,59 @@ async def build_runtime(
     )
     if runtime.sleeve_pnl_projection_service is not None:
         runtime.sleeve_pnl_projection_service.rebuild_scope(scope=state_scope)
+
+    # Slice 4-proc operator command proxy：gateway 进程的 /system/rebaseline
+    # 与 /system/resume HTTP endpoint 需要访问 portfolio_service /
+    # reconciliation_service，但这两个 service 只在 execution role 装配
+    # （_SLICE_REQUIRED_ROLES 门控）。本段在 gateway role 下装 client、
+    # execution role 下装 worker，monolith / market / decision role 下留
+    # 空字段——monolith 走本地直接调用、market/decision 根本没有 operator
+    # endpoint。bootstrap() 必须在 runtime 对外暴露前完成，确保后续
+    # reconciliation_system_queries.rebaseline() 的 client.invoke 前订阅已就位。
+    # 设计文档：docs/task/slice_4proc_operator_command_proxy_fix_design.md §4.4/§4.5
+    if effective_process_role == PROCESS_ROLE_GATEWAY:
+        runtime.operator_command_client = OperatorCommandClient(
+            bus=bus,
+            process_role=PROCESS_ROLE_GATEWAY,
+            logger=runtime.logger,
+        )
+        await runtime.operator_command_client.bootstrap()
+    elif effective_process_role == PROCESS_ROLE_EXECUTION:
+        # 局部 import 是为了打破循环依赖：OperatorQueryService 间接依赖
+        # ApplicationRuntime 的大量字段，模块顶层 import 会让 bootstrap.config
+        # ↔ services.operator.query_service 形成 import 环。execution role 下
+        # runtime.portfolio_service / reconciliation_service 等字段都非 None，
+        # dispatch 时直接复用 monolith 路径的业务逻辑。
+        from aats.services.operator.query_service import OperatorQueryService
+
+        async def _handle_rebaseline(payload: dict[str, Any]) -> dict[str, Any]:
+            service = OperatorQueryService(runtime)
+            return await service.rebaseline(
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
+        async def _handle_resume(payload: dict[str, Any]) -> dict[str, Any]:
+            service = OperatorQueryService(runtime)
+            return await service.resume(
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
+        runtime.operator_command_worker = OperatorCommandWorker(
+            bus=bus,
+            process_role=PROCESS_ROLE_EXECUTION,
+            logger=runtime.logger,
+            command_handlers={
+                "rebaseline": _handle_rebaseline,
+                "resume": _handle_resume,
+            },
+        )
+        await runtime.operator_command_worker.bootstrap()
 
     _apply_post_init_guards(runtime=runtime, effective_process_role=effective_process_role)
     return runtime

@@ -8,6 +8,11 @@ from pydantic import BaseModel
 from aats.api.auth import OperatorPrincipal, require_admin_access, require_read_access, require_write_access
 from aats.bootstrap.config import ApplicationRuntime
 from aats.schemas.system import RuntimeModeState
+from aats.services.operator.command_bridge import (
+    OperatorCommandError,
+    OperatorCommandRemoteError,
+    OperatorCommandTimeoutError,
+)
 from aats.services.operator.query_service import OperatorQueryService
 
 router = APIRouter(dependencies=[Depends(require_read_access)])
@@ -195,14 +200,18 @@ async def halt(
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     halt_reason = reason or (payload.reason if payload is not None else "manual_halt")
-    result = await _query(request).halt(
-        reason=halt_reason,
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-    )
-    result["mode"] = RuntimeModeState(**_query(request).system_mode()).model_dump(mode="json")
-    result["blockers"] = _query(request).blockers()
+    query = _query(request)
+    try:
+        result = await query.halt(
+            reason=halt_reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    result["mode"] = RuntimeModeState(**query.system_mode()).model_dump(mode="json")
+    result["blockers"] = query.blockers()
     return result
 
 
@@ -214,13 +223,21 @@ async def resume(
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     resume_reason = payload.reason if payload is not None else "manual_resume"
-    result = await _query(request).resume(
-        reason=resume_reason,
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-    )
-    result["mode"] = RuntimeModeState(**_query(request).system_mode()).model_dump(mode="json")
+    query = _query(request)
+    try:
+        result = await query.resume(
+            reason=resume_reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except OperatorCommandTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (ValueError, OperatorCommandRemoteError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OperatorCommandError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    result["mode"] = RuntimeModeState(**query.system_mode()).model_dump(mode="json")
     return result
 
 
@@ -243,8 +260,12 @@ async def system_rebaseline(
             actor_identity=principal.identity,
             auth_source=principal.auth_source,
         )
-    except ValueError as exc:
+    except OperatorCommandTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (ValueError, OperatorCommandRemoteError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OperatorCommandError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/system/ai-review/restore")
@@ -254,12 +275,15 @@ async def system_ai_review_restore(
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     reason = payload.reason if payload is not None else "operator_restore_ai_review"
-    return _query(request).ai_review_restore(
-        reason=reason,
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-    )
+    try:
+        return _query(request).ai_review_restore(
+            reason=reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/system/ai-review/degrade-to-baseline")
@@ -269,12 +293,15 @@ async def system_ai_review_degrade_to_baseline(
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
     reason = payload.reason if payload is not None else "operator_degrade_ai_review_to_baseline"
-    return _query(request).ai_review_degrade_to_baseline(
-        reason=reason,
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-    )
+    try:
+        return _query(request).ai_review_degrade_to_baseline(
+            reason=reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/system/blocker-actions/{action_id}")
@@ -306,10 +333,16 @@ async def system_blocker_action(
             actor_identity=principal.identity,
             auth_source=principal.auth_source,
         )
+    except OperatorCommandTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except OperatorCommandRemoteError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         detail = str(exc)
         status = 409 if detail in {"blocker_control_state_changed"} or detail.startswith("blocker_not_active:") else 400
         raise HTTPException(status_code=status, detail=detail) from exc
+    except OperatorCommandError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/system/exit-execution/retry-limit-lookup")
@@ -331,6 +364,8 @@ async def retry_exit_execution_limit_lookup(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"exchange_operation_failed: {exc}") from exc
 
 
 @router.post("/system/exit-execution/refresh")
@@ -351,6 +386,8 @@ async def refresh_exit_execution_state(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"exchange_operation_failed: {exc}") from exc
 
 
 @router.post("/system/exit-execution/safe-cancel")
@@ -372,6 +409,8 @@ async def safe_cancel_exit_execution(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"exchange_operation_failed: {exc}") from exc
 
 
 @router.get("/system/exit-execution/action-history")
@@ -653,6 +692,10 @@ async def cancel_order(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"exchange_operation_failed: {exc}") from exc
 
 
 @router.post("/orders/{client_order_id}/resolve-stuck-submission")
@@ -674,6 +717,8 @@ async def resolve_stuck_submission(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"exchange_operation_failed: {exc}") from exc
 
 
 @router.get("/fills/latest")
@@ -887,12 +932,15 @@ async def system_trial_review_record(
     payload: TrialReviewRecordRequest | None = None,
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
-    return _query(request).record_trial_review_snapshot(
-        reason=payload.reason if payload is not None else "ui_trial_review_snapshot",
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-    )
+    try:
+        return _query(request).record_trial_review_snapshot(
+            reason=payload.reason if payload is not None else "ui_trial_review_snapshot",
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/system/trial-review/action")
@@ -947,12 +995,15 @@ async def reconciliation_validate(
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     reason = payload.reason if payload is not None else "operator_validate"
-    return await _query(request).validate_reconciliation(
-        reason=reason,
-        actor_role=principal.role,
-        actor_identity=principal.identity,
-        auth_source=principal.auth_source,
-    )
+    try:
+        return await _query(request).validate_reconciliation(
+            reason=reason,
+            actor_role=principal.role,
+            actor_identity=principal.identity,
+            auth_source=principal.auth_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.get("/audit/latest")
@@ -988,4 +1039,7 @@ async def replay_validate(
     decision_id: str,
     _: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
-    return _query(request).replay_validate(decision_id=decision_id)
+    try:
+        return _query(request).replay_validate(decision_id=decision_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
