@@ -1076,3 +1076,103 @@ docker logs aats-market 2>&1 | grep -E 'nats_jetstream_stream_(created|unchanged
 如果看到 `nats_jetstream_stream_updated drift_fields=["max_bytes",...]` → 说明某次
 deploy 改了 StreamSpec 容量参数，`ensure_streams` 自动走 update_stream 分支。这是
 正常的升级路径，不需要人工干预。
+
+#### §9.10.6 Stream 迁移脚本（`scripts/nats_stream_migrate.py`）
+
+**用途**：把老的单 `AATS_EVENTS` stream（含所有 critical topic）迁移到 slice
+nats-capacity 的分层架构（`AATS_EVENTS` + `AATS_EVENTS_MARKET` 两条 stream），
+同时同步容量策略到最新 StreamSpec。支持 6 种起始状态（T1-T6，见设计文档 §9.2）。
+
+**迁移矩阵**：
+
+| 状态 | 说明 | 脚本动作 |
+|---|---|---|
+| T1 | 老单 stream 存在 + MARKET 不存在 | update EVENTS（剥离 market subjects + 写容量）+ add MARKET |
+| T2 | 两个 stream 都已对齐 | 两个都 noop |
+| T3 | EVENTS 对齐 + MARKET 容量漂移 | 只 update MARKET |
+| T4 | 两个 stream 都不存在（clean slate） | 两次 add_stream |
+| T5 | 老 EVENTS 不完整（缺 Slice 6.5 topic） | update + add 混合 |
+| **T6** | **MARKET 存在但 EVENTS 不存在（诡异状态）** | **raise RuntimeError**（不自动恢复） |
+
+**T6 为什么不自动恢复**：用户决策 D8 — partial upgrade / partial rollback 状态
+可能源于人为干预或数据损坏，强制暴露给人类判断是更安全的设计。`--recreate` 作为
+逃生口允许显式清库重建。
+
+**使用步骤**：
+
+```bash
+# 1. 先 dry-run 看计划（不改 state）
+docker exec aats-gateway python scripts/nats_stream_migrate.py --dry-run
+
+# 输出示例（T1 状态）:
+#   [AATS_EVENTS_MARKET] NOT FOUND
+#   [AATS_EVENTS] exists: subjects=40, max_bytes=-1, ...
+#   [update] AATS_EVENTS: drift in [max_bytes, max_msg_size, max_msgs, subjects]
+#   [add] AATS_EVENTS_MARKET: create stream (subjects=2, max_bytes=2147483648, ...)
+
+# 2. 同步容量策略 + 拆分 stream（保留历史数据）
+docker exec aats-gateway python scripts/nats_stream_migrate.py --sync-config
+
+# 3. 同步 + purge（dev 推荐，丢弃历史累积噪音数据；生产慎用）
+docker exec aats-gateway python scripts/nats_stream_migrate.py --sync-config --purge
+
+# 4. 全重建（最激进：delete + recreate；会丢两条 stream 的所有数据）
+docker exec aats-gateway python scripts/nats_stream_migrate.py --recreate
+```
+
+**幂等性保证**：跑 N 次等价于跑 1 次（第二次全 noop）。单元测试
+`test_nats_stream_migrate.py::test_sync_config_noop_when_already_new` 锁定这一行为。
+
+**subject overlap 陷阱（§11.4）**：T1 / T5 场景下脚本会按固定顺序执行：
+1. 先 `update_stream AATS_EVENTS`（让 EVENTS 剥离 `market.snapshots` / `features.snapshots`）
+2. 再 `add_stream AATS_EVENTS_MARKET`（安全声明已被释放的 subjects）
+
+**顺序颠倒会被 nats-py 拒绝**（`BadRequestError code=10065 subjects overlap`）。
+`apply_migration_plan` 用两遍遍历（phase 2a 只跑 update，phase 2b 只跑 add）
+保证这个顺序永远不会被破坏。单测
+`test_sync_config_splits_old_into_two_streams::call_order == ["update:AATS_EVENTS","add:AATS_EVENTS_MARKET"]`
+防御性锁定。
+
+**跑完后验证**：
+
+```bash
+# 查两条 stream 的新配置
+docker exec aats-nats wget -qO- 'http://localhost:8222/jsz?streams=1&config=1' \
+  | python3 -c 'import sys,json; d=json.load(sys.stdin);
+for s in d["account_details"][0]["stream_detail"]:
+    print(s["name"], "max_bytes=", s["config"]["max_bytes"]/(1024**3), "GB",
+          "max_age_hours=", s["config"]["max_age"]/1e9/3600,
+          "subject_count=", len(s["config"]["subjects"]))'
+
+# 期望输出:
+#   AATS_EVENTS_MARKET max_bytes= 2.0 GB max_age_hours= 24.0 subject_count= 2
+#   AATS_EVENTS max_bytes= 4.0 GB max_age_hours= 168.0 subject_count= 38
+```
+
+**灾难恢复场景**：
+
+| 现象 | 迁移脚本建议 |
+|---|---|
+| 10023 + 老单 stream 1 GB 撞硬限 | 先升 nats-server.conf 到 8 GB → 重启 nats → 跑 `--sync-config --purge` |
+| 部分 migration 中途失败（T6） | `--recreate`（接受丢数据）或人工 `nats stream info` 排查后决定 |
+| Deploy 后发现 StreamSpec 被改但没跑 migration | 不需要跑脚本——`ensure_streams()` 会在下次 process start 自动走 update_stream 分支（见 §9.10.5）|
+| 测试 env 想清零 | `--recreate` 一把梭 |
+
+**触发链条对应的病根修复**（本 slice 的起因）：
+
+```
+4 进程 docker-compose 起来
+  → 老 aats-market 高频写 market.snapshots 到单 stream AATS_EVENTS
+  → stream 只设 max_age=7d 不设 max_bytes，一晚攒到 ~1 GB
+  → 撞 server max_file_store=1GB 硬限
+  → nats 喷 err_code=10023 "insufficient resources"
+  → publish 永久失败 → decision 收不到 market 数据 → 饿死
+  → execution engine 没有 decision outcome 可下单
+  → 老板看到 "为什么不下单"
+
+slice nats-capacity 修复：
+  1. nats-server.conf: 1 GB → 8 GB                 （本 §9.10）
+  2. 分层 2 stream + 显式 max_bytes（6 GB 合计）    （§9.10.1 预算对账）
+  3. `scripts/nats_stream_migrate.py` 迁移老环境   （本节）
+  4. runtime `ensure_streams()` 幂等 upsert 兜底   （§9.10.5）
+```
