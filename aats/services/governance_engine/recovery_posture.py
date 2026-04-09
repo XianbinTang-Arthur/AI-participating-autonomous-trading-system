@@ -400,6 +400,10 @@ class RecoveryPostureEvaluator:
     ) -> None:
         if latest_reconciliation is None:
             return
+        # Stage 5d fix: gateway/market/decision 进程的 recovery_state 是占位符
+        # multi_process_role_skip，不能覆盖 execution 写入的真实快照。
+        if finalized.recovery_state == "multi_process_role_skip":
+            return
         latest_snapshot_getter = getattr(
             self.runtime.reconciliation_repo,
             "latest_state_snapshot_for_scope",
