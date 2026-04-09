@@ -31,10 +31,12 @@ from aats.bus.memory_bus import InMemoryEventBus
 from aats.bus.nats_bus import (
     DEFAULT_CRITICAL_TOPICS,
     DEFAULT_OBSERVER_TOPICS,
+    DEFAULT_STREAM_SPECS,
     HybridBusRouting,
     HybridEventBus,
     NatsBusConfig,
     NatsEventBus,
+    build_nats_streams_from_env,
 )
 from aats.events import topics
 from aats.events.envelopes import build_envelope, parse_payload, publish_model
@@ -2938,8 +2940,18 @@ def _construct_event_bus(
             persistence_mode=persistence_mode,
         )
 
+    # slice nats-capacity（§7.5a R1）：runtime 路径使用分层 stream 拓扑。
+    # streams 字段通过 build_nats_streams_from_env(DEFAULT_STREAM_SPECS) 构造，
+    # 支持通过 AATS_NATS_MARKET_MAX_* / AATS_NATS_EVENTS_MAX_* 环境变量覆盖
+    # 单条 stream 的容量参数（max_bytes / max_msgs / max_msg_size /
+    # max_age_seconds）。默认两条 stream：
+    #   - AATS_EVENTS_MARKET  : 1 天 / 2 GB  承载 MARKET_SNAPSHOTS / FEATURE_SNAPSHOTS
+    #   - AATS_EVENTS         : 7 天 / 4 GB  承载其他 critical 事件
+    # legacy 字段 stream_name / stream_max_age_seconds 不再被 runtime 路径
+    # 读取，只有 ensure_stream(topics=...) legacy shim 会读（给单元测试用）。
     nats_config = NatsBusConfig(
         servers=(runtime_settings.nats_url,),
+        streams=build_nats_streams_from_env(DEFAULT_STREAM_SPECS),
         stream_name=runtime_settings.nats_stream_name,
         stream_max_age_seconds=float(runtime_settings.nats_stream_max_age_seconds),
     )

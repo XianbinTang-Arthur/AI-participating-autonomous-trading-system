@@ -309,9 +309,17 @@ class TestStartEventBusLifecycle(unittest.IsolatedAsyncioTestCase):
         await _start_event_bus(bus)
         bus.start.assert_awaited_once()
 
-    async def test_start_hybrid_bus_delegates_to_critical_with_topics(self) -> None:
-        """HybridEventBus.start 必须把 critical_topics 透传给 critical_bus.start。
-        这是确保 JetStream 创建 stream 时 subjects 列表完整的关键路径。"""
+    async def test_start_hybrid_bus_delegates_to_critical_without_topics(self) -> None:
+        """HybridEventBus.start 必须调用 critical_bus.start **不传 topics** 参数。
+
+        slice nats-capacity 变更（§7.5a R2）：之前 HybridEventBus.start 会把
+        sorted(critical_topics) 作为 topics= 透传 → 走 legacy shim 路径 → 把所有
+        critical topic 塞进单条 stream，正是 MARKET 高频挤爆 stream 的直接原因。
+
+        新语义：runtime 路径走 NatsBusConfig.streams，通过 ensure_streams() 做
+        多 stream upsert。HybridEventBus.start 不再传 topics —— 本测试锁死这个
+        行为，防止未来误改回去。
+        """
         settings = _paper_settings(
             event_bus_backend="hybrid",
             nats_url="nats://127.0.0.1:4222",
@@ -327,10 +335,17 @@ class TestStartEventBusLifecycle(unittest.IsolatedAsyncioTestCase):
         bus.critical_bus.start = critical_start  # type: ignore[method-assign,union-attr]
         await _start_event_bus(bus)
         critical_start.assert_awaited_once()
-        # 必须用 topics= 关键字传 critical_topics 列表
+        # slice nats-capacity: 必须**不传** topics（走新的 ensure_streams 路径）
         call_kwargs = critical_start.call_args.kwargs
-        assert "topics" in call_kwargs
-        assert set(call_kwargs["topics"]) == set(DEFAULT_CRITICAL_TOPICS)
+        call_args = critical_start.call_args.args
+        assert "topics" not in call_kwargs, (
+            f"HybridEventBus.start 不应该再给 critical_start 传 topics, "
+            f"但是收到 kwargs={call_kwargs}。slice nats-capacity §7.5a R2。"
+        )
+        assert call_args == (), (
+            f"HybridEventBus.start 不应该给 critical_start 传位置参数, "
+            f"但是收到 args={call_args}"
+        )
 
     async def test_hybrid_close_delegates_to_both_buses(self) -> None:
         """HybridEventBus.close 必须 best-effort 关闭 critical 和 observer。"""

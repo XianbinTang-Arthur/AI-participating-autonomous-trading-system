@@ -19,15 +19,23 @@ import pytest
 
 from aats.bus.base import EventBus, MessageHandler
 from aats.bus.nats_bus import (
+    DEFAULT_AATS_EVENTS_MARKET_SPEC,
+    DEFAULT_AATS_EVENTS_SPEC,
+    DEFAULT_CRITICAL_EVENTS_TOPICS,
     DEFAULT_CRITICAL_TOPICS,
+    DEFAULT_MARKET_STREAM_TOPICS,
     DEFAULT_OBSERVER_TOPICS,
+    DEFAULT_STREAM_SPECS,
     ConsumerConfigSpec,
     HybridBusRouting,
     HybridEventBus,
     NatsBusConfig,
     NatsEventBus,
+    StreamSpec,
     UnroutedTopicError,
+    _compute_stream_config_drift,
     build_consumer_config_spec,
+    build_nats_streams_from_env,
 )
 from aats.events import topics as _topics
 from aats.schemas.common import EventEnvelope
@@ -428,7 +436,9 @@ def test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds() -> None:
     fake_js.update_stream = AsyncMock()
     bus._js = fake_js  # type: ignore[attr-defined]
 
-    _asyncio.run(bus.ensure_stream(topics=["decisions"]))
+    # slice nats-capacity: ensure_stream 现在是 legacy shim，会发 DeprecationWarning
+    with pytest.warns(DeprecationWarning, match="ensure_streams"):
+        _asyncio.run(bus.ensure_stream(topics=["decisions"]))
 
     fake_js.add_stream.assert_awaited_once()
     fake_js.update_stream.assert_not_awaited()
@@ -477,7 +487,9 @@ def test_ensure_stream_creates_when_stream_missing() -> None:
     fake_js.update_stream = AsyncMock()
     bus._js = fake_js  # type: ignore[attr-defined]
 
-    _asyncio.run(bus.ensure_stream(topics=["decisions", "execution.order_intents"]))
+    # slice nats-capacity: ensure_stream 现在是 legacy shim
+    with pytest.warns(DeprecationWarning, match="ensure_streams"):
+        _asyncio.run(bus.ensure_stream(topics=["decisions", "execution.order_intents"]))
 
     fake_js.stream_info.assert_awaited_once_with("AATS_EVENTS_TEST")
     fake_js.add_stream.assert_awaited_once()
@@ -505,12 +517,28 @@ def test_ensure_stream_unchanged_when_subjects_match() -> None:
         config=NatsBusConfig(stream_name="AATS_EVENTS_TEST"),
         consumer_role="test",
     )
-    # fake StreamInfo：.config.subjects 返回和本次调用完全一样的集合
+    # fake StreamInfo：.config 所有字段都必须和 legacy shim 默认容量完全相等，
+    # 否则 _compute_stream_config_drift 会报 drift → 走 update_stream 分支。
+    # legacy shim 容量默认（见 NatsEventBus.ensure_stream docstring）：
+    #   max_age = config.stream_max_age_seconds = 7 * 24 * 3600
+    #   max_bytes = 128 MB
+    #   max_msgs = 10_000
+    #   max_msg_size = 4 MB
+    #   num_replicas = 1 (StreamSpec 默认)
+    #   duplicate_window = 120.0 (StreamSpec 默认)
+    #   deny_purge = False (StreamSpec 默认)
     fake_info = MagicMock()
     fake_info.config.subjects = [
         "aats.execution.order_intents",
         "aats.decisions",
     ]
+    fake_info.config.max_age = 7 * 24 * 60 * 60
+    fake_info.config.max_bytes = 128 * 1024 * 1024
+    fake_info.config.max_msgs = 10_000
+    fake_info.config.max_msg_size = 4 * 1024 * 1024
+    fake_info.config.num_replicas = 1
+    fake_info.config.duplicate_window = 120.0
+    fake_info.config.deny_purge = False
     fake_js = MagicMock()
     fake_js.stream_info = AsyncMock(return_value=fake_info)
     fake_js.add_stream = AsyncMock()
@@ -518,7 +546,9 @@ def test_ensure_stream_unchanged_when_subjects_match() -> None:
     bus._js = fake_js  # type: ignore[attr-defined]
 
     # 传进去的 topics 顺序和 existing_subjects 不一样，但 set 相等
-    _asyncio.run(bus.ensure_stream(topics=["decisions", "execution.order_intents"]))
+    # slice nats-capacity: ensure_stream 现在是 legacy shim
+    with pytest.warns(DeprecationWarning, match="ensure_streams"):
+        _asyncio.run(bus.ensure_stream(topics=["decisions", "execution.order_intents"]))
 
     fake_js.stream_info.assert_awaited_once_with("AATS_EVENTS_TEST")
     fake_js.add_stream.assert_not_awaited()
@@ -544,27 +574,38 @@ def test_ensure_stream_updates_when_subjects_differ() -> None:
         config=NatsBusConfig(stream_name="AATS_EVENTS_TEST"),
         consumer_role="test",
     )
-    # fake existing stream：subjects 比新的少一个
+    # fake existing stream：subjects 比新的少一个；其他容量字段补齐 legacy
+    # shim 默认，隔离这个测试只断言 subjects drift（避免 max_bytes 等巧合
+    # 触发 update 让断言含义变模糊）
     fake_info = MagicMock()
     fake_info.config.subjects = [
         "aats.decisions",
         "aats.execution.order_intents",
     ]
+    fake_info.config.max_age = 7 * 24 * 60 * 60
+    fake_info.config.max_bytes = 128 * 1024 * 1024
+    fake_info.config.max_msgs = 10_000
+    fake_info.config.max_msg_size = 4 * 1024 * 1024
+    fake_info.config.num_replicas = 1
+    fake_info.config.duplicate_window = 120.0
+    fake_info.config.deny_purge = False
     fake_js = MagicMock()
     fake_js.stream_info = AsyncMock(return_value=fake_info)
     fake_js.add_stream = AsyncMock()
     fake_js.update_stream = AsyncMock()
     bus._js = fake_js  # type: ignore[attr-defined]
 
-    _asyncio.run(
-        bus.ensure_stream(
-            topics=[
-                "decisions",
-                "execution.order_intents",
-                "execution.obligation_updates",  # 新增 topic
-            ]
+    # slice nats-capacity: ensure_stream 现在是 legacy shim
+    with pytest.warns(DeprecationWarning, match="ensure_streams"):
+        _asyncio.run(
+            bus.ensure_stream(
+                topics=[
+                    "decisions",
+                    "execution.order_intents",
+                    "execution.obligation_updates",  # 新增 topic
+                ]
+            )
         )
-    )
 
     fake_js.stream_info.assert_awaited_once_with("AATS_EVENTS_TEST")
     fake_js.add_stream.assert_not_awaited()
@@ -605,13 +646,22 @@ def test_ensure_stream_updates_when_subject_removed() -> None:
         "aats.execution.order_intents",
         "aats.retired_topic",  # 待下线
     ]
+    fake_info.config.max_age = 7 * 24 * 60 * 60
+    fake_info.config.max_bytes = 128 * 1024 * 1024
+    fake_info.config.max_msgs = 10_000
+    fake_info.config.max_msg_size = 4 * 1024 * 1024
+    fake_info.config.num_replicas = 1
+    fake_info.config.duplicate_window = 120.0
+    fake_info.config.deny_purge = False
     fake_js = MagicMock()
     fake_js.stream_info = AsyncMock(return_value=fake_info)
     fake_js.add_stream = AsyncMock()
     fake_js.update_stream = AsyncMock()
     bus._js = fake_js  # type: ignore[attr-defined]
 
-    _asyncio.run(bus.ensure_stream(topics=["decisions", "execution.order_intents"]))
+    # slice nats-capacity: ensure_stream 现在是 legacy shim
+    with pytest.warns(DeprecationWarning, match="ensure_streams"):
+        _asyncio.run(bus.ensure_stream(topics=["decisions", "execution.order_intents"]))
 
     fake_js.add_stream.assert_not_awaited()
     fake_js.update_stream.assert_awaited_once()
@@ -645,3 +695,581 @@ def test_ensure_stream_signature_takes_topics_keyword() -> None:
     # self + topics
     assert "topics" in params
     assert "subjects" not in params
+
+
+# ═════════════════════════════════════════════════════════════════════
+# slice nats-capacity: StreamSpec 校验 + 分层 stream + ensure_streams
+#
+# 设计文档：docs/task/slice_nats_jetstream_capacity_fix_design.md
+# 不变量 I-1 ~ I-11
+# ═════════════════════════════════════════════════════════════════════
+
+
+# ── Group A: StreamSpec 校验（8 tests） ──────────────────────────────
+
+
+def _make_valid_stream_spec_kwargs() -> dict[str, Any]:
+    """生成一个能构造成功的 StreamSpec 关键字参数，便于各测试按需 override。"""
+    return {
+        "name": "TEST_STREAM",
+        "topics": frozenset({"decisions", "execution.order_intents"}),
+        "max_age_seconds": 86_400,
+        "max_bytes": 1_000_000,
+        "max_msgs": 1_000,
+        "max_msg_size": 1_024,
+    }
+
+
+def test_stream_spec_requires_screaming_snake_case_name() -> None:
+    """name 必须是 SCREAMING_SNAKE_CASE（大写字母 + 下划线 + 数字）。"""
+    for bad_name in ("lower_case", "Mixed_Case", "with-dash", "", "with space"):
+        kwargs = _make_valid_stream_spec_kwargs()
+        kwargs["name"] = bad_name
+        with pytest.raises(ValueError, match="SCREAMING_SNAKE_CASE"):
+            StreamSpec(**kwargs)
+    # 合法 case 不应该抛
+    StreamSpec(**{**_make_valid_stream_spec_kwargs(), "name": "AATS_EVENTS_2"})
+
+
+def test_stream_spec_rejects_empty_topics() -> None:
+    """topics 必须非空 —— 否则 stream 没有任何 subject，nats-py add_stream 会炸。"""
+    kwargs = _make_valid_stream_spec_kwargs()
+    kwargs["topics"] = frozenset()
+    with pytest.raises(ValueError, match="must have at least one topic"):
+        StreamSpec(**kwargs)
+
+
+def test_stream_spec_rejects_non_positive_max_age() -> None:
+    """max_age_seconds 必须 > 0。"""
+    for bad_age in (0, -1, -3600.0):
+        kwargs = _make_valid_stream_spec_kwargs()
+        kwargs["max_age_seconds"] = bad_age
+        with pytest.raises(ValueError, match="max_age_seconds must be positive"):
+            StreamSpec(**kwargs)
+
+
+def test_stream_spec_rejects_non_positive_max_bytes() -> None:
+    """max_bytes 必须 > 0 —— 禁止传 -1 让服务器硬限裸奔（slice 核心病根）。"""
+    for bad_bytes in (0, -1):
+        kwargs = _make_valid_stream_spec_kwargs()
+        kwargs["max_bytes"] = bad_bytes
+        with pytest.raises(ValueError, match="max_bytes must be positive"):
+            StreamSpec(**kwargs)
+
+
+def test_stream_spec_rejects_non_positive_max_msgs() -> None:
+    """max_msgs 必须 > 0 —— 同 max_bytes 原因，保险丝不能缺。"""
+    for bad_msgs in (0, -1):
+        kwargs = _make_valid_stream_spec_kwargs()
+        kwargs["max_msgs"] = bad_msgs
+        with pytest.raises(ValueError, match="max_msgs must be positive"):
+            StreamSpec(**kwargs)
+
+
+def test_stream_spec_rejects_non_positive_max_msg_size() -> None:
+    """max_msg_size 必须 > 0。"""
+    for bad_size in (0, -1):
+        kwargs = _make_valid_stream_spec_kwargs()
+        kwargs["max_msg_size"] = bad_size
+        with pytest.raises(ValueError, match="max_msg_size must be positive"):
+            StreamSpec(**kwargs)
+
+
+def test_stream_spec_rejects_invalid_storage() -> None:
+    """storage 只接受 'file' 或 'memory'。"""
+    kwargs = _make_valid_stream_spec_kwargs()
+    kwargs["storage"] = "s3"
+    with pytest.raises(ValueError, match="storage must be 'file' or 'memory'"):
+        StreamSpec(**kwargs)
+    # 合法值不抛
+    StreamSpec(**{**_make_valid_stream_spec_kwargs(), "storage": "file"})
+    StreamSpec(**{**_make_valid_stream_spec_kwargs(), "storage": "memory"})
+
+
+def test_stream_spec_rejects_num_replicas_less_than_one() -> None:
+    """num_replicas >= 1（单节点 dev 下 = 1；集群可升）。"""
+    kwargs = _make_valid_stream_spec_kwargs()
+    kwargs["num_replicas"] = 0
+    with pytest.raises(ValueError, match="num_replicas must be >= 1"):
+        StreamSpec(**kwargs)
+
+
+# ── Group B: 默认 spec 不变量（I-1, I-8, I-11）（4 tests） ──────────
+
+
+def test_stream_specs_cover_all_critical_topics_exactly_once() -> None:
+    """I-8：DEFAULT_STREAM_SPECS 的所有 topics 并集 == DEFAULT_CRITICAL_TOPICS。
+
+    每个 critical topic 必须恰好被一个 stream claim（不遗漏 / 不重复），否则
+    publish 时会路由歧义（两条 stream 都匹配）或干脆没有 stream 承载（silent drop）。
+
+    加新 critical topic 时：要么加到 DEFAULT_MARKET_STREAM_TOPICS 高频类，
+    要么默认归 DEFAULT_CRITICAL_EVENTS_TOPICS。本测试强制把这个检查前置到
+    unit test 阶段。
+    """
+    all_spec_topics: set[str] = set()
+    for spec in DEFAULT_STREAM_SPECS:
+        # 检查 topic 不重复
+        assert all_spec_topics.isdisjoint(spec.topics), (
+            f"topic(s) {all_spec_topics & spec.topics} claimed by multiple streams"
+        )
+        all_spec_topics.update(spec.topics)
+
+    # 并集必须 == DEFAULT_CRITICAL_TOPICS
+    missing = DEFAULT_CRITICAL_TOPICS - all_spec_topics
+    extra = all_spec_topics - DEFAULT_CRITICAL_TOPICS
+    assert not missing, f"critical topics not covered by any stream: {missing}"
+    assert not extra, f"stream claims non-critical topics: {extra}"
+
+
+def test_stream_specs_market_and_events_have_symmetric_max_msg_size() -> None:
+    """I-11 对称 max_msg_size：MARKET 和 EVENTS 两条 stream 单条消息上限
+    必须相同，且等于 4 MB（对齐 server max_payload）。
+
+    Why 对称：publish 一个 4 MB envelope 到 MARKET 应该成功，publish 同一个
+    envelope 到 EVENTS 也应该成功；非对称会导致"只有某一条路径能传大 envelope"
+    的奇怪语义 —— 调用方没法事先知道某个 topic 会到哪条 stream。
+    """
+    assert DEFAULT_AATS_EVENTS_MARKET_SPEC.max_msg_size == 4 * 1024 * 1024
+    assert DEFAULT_AATS_EVENTS_SPEC.max_msg_size == 4 * 1024 * 1024
+
+
+def test_total_stream_capacity_within_server_budget() -> None:
+    """I-1 容量预算：两条 stream max_bytes 之和 <= 6 GB（留 2 GB headroom，
+    server max_file_store = 8 GB）。
+
+    加大 stream 容量时必须同步考虑 server 配置，否则一次过大的写入突袭会直接
+    撞 server 硬限触发 10023（本 slice 修复的原病根）。
+    """
+    total = sum(spec.max_bytes for spec in DEFAULT_STREAM_SPECS)
+    # 6 GB 上限（4 GB EVENTS + 2 GB MARKET）
+    assert total <= 6 * 1024**3, (
+        f"total stream capacity {total} bytes exceeds 6 GB budget"
+    )
+
+
+def test_default_stream_specs_match_design_doc_capacities() -> None:
+    """锁死设计文档 §4.3 的容量参数（任何后续调整都会让本测试红灯 → 迫使同步更新文档）。"""
+    assert DEFAULT_AATS_EVENTS_MARKET_SPEC.name == "AATS_EVENTS_MARKET"
+    assert DEFAULT_AATS_EVENTS_MARKET_SPEC.max_age_seconds == 86_400  # 1 天
+    assert DEFAULT_AATS_EVENTS_MARKET_SPEC.max_bytes == 2 * 1024**3   # 2 GB
+
+    assert DEFAULT_AATS_EVENTS_SPEC.name == "AATS_EVENTS"
+    assert DEFAULT_AATS_EVENTS_SPEC.max_age_seconds == 7 * 24 * 60 * 60  # 7 天
+    assert DEFAULT_AATS_EVENTS_SPEC.max_bytes == 4 * 1024**3   # 4 GB
+
+    # MARKET 只承载 MARKET_SNAPSHOTS + FEATURE_SNAPSHOTS
+    assert DEFAULT_MARKET_STREAM_TOPICS == frozenset(
+        {_topics.MARKET_SNAPSHOTS, _topics.FEATURE_SNAPSHOTS}
+    )
+
+    # EVENTS 承载其他所有 critical topic
+    assert DEFAULT_AATS_EVENTS_SPEC.topics == DEFAULT_CRITICAL_EVENTS_TOPICS
+
+
+# ── Group C: NatsBusConfig 拓扑校验（2 tests） ──────────────────────
+
+
+def test_nats_bus_config_rejects_empty_streams() -> None:
+    """streams 非空校验。"""
+    with pytest.raises(ValueError, match="streams must be non-empty"):
+        NatsBusConfig(streams=())
+
+
+def test_nats_bus_config_rejects_topic_claimed_by_multiple_streams() -> None:
+    """I-8 拓扑互斥：同一个 topic 不能被多条 stream 同时 claim。
+
+    Why：两条 stream 都匹配同一个 subject，nats-py add_stream 会抛
+    "subjects overlap" 运行时错；我们在 config 构造时就 fail-fast，
+    让错误定位清晰到"两条 stream 定义冲突"而不是模糊的 nats error。
+    """
+    spec_a = StreamSpec(
+        name="STREAM_A",
+        topics=frozenset({"shared_topic", "only_a"}),
+        max_age_seconds=3600,
+        max_bytes=1_000_000,
+        max_msgs=1_000,
+        max_msg_size=1_024,
+    )
+    spec_b = StreamSpec(
+        name="STREAM_B",
+        topics=frozenset({"shared_topic", "only_b"}),  # shared_topic 同时在 A 和 B
+        max_age_seconds=3600,
+        max_bytes=1_000_000,
+        max_msgs=1_000,
+        max_msg_size=1_024,
+    )
+    with pytest.raises(ValueError, match="shared_topic.*claimed by both"):
+        NatsBusConfig(streams=(spec_a, spec_b))
+
+
+# ── Group D: build_nats_streams_from_env（4 tests） ─────────────────
+
+
+def test_build_nats_streams_from_env_no_overrides_returns_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有 env var 时返回 DEFAULT_STREAM_SPECS 不变。"""
+    for var in (
+        "AATS_NATS_MARKET_MAX_BYTES",
+        "AATS_NATS_MARKET_MAX_MSGS",
+        "AATS_NATS_MARKET_MAX_MSG_SIZE",
+        "AATS_NATS_MARKET_MAX_AGE_SECONDS",
+        "AATS_NATS_EVENTS_MAX_BYTES",
+        "AATS_NATS_EVENTS_MAX_MSGS",
+        "AATS_NATS_EVENTS_MAX_MSG_SIZE",
+        "AATS_NATS_EVENTS_MAX_AGE_SECONDS",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+    result = build_nats_streams_from_env(DEFAULT_STREAM_SPECS)
+    assert result == DEFAULT_STREAM_SPECS
+
+
+def test_build_nats_streams_from_env_applies_market_max_bytes_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """覆盖 MARKET max_bytes 生效，其他字段/其他 stream 不变。"""
+    monkeypatch.setenv("AATS_NATS_MARKET_MAX_BYTES", "999999999")
+    result = build_nats_streams_from_env(DEFAULT_STREAM_SPECS)
+    market = next(s for s in result if s.name == "AATS_EVENTS_MARKET")
+    events = next(s for s in result if s.name == "AATS_EVENTS")
+    assert market.max_bytes == 999_999_999
+    assert market.max_msgs == DEFAULT_AATS_EVENTS_MARKET_SPEC.max_msgs  # 未改
+    assert events.max_bytes == DEFAULT_AATS_EVENTS_SPEC.max_bytes       # 未改
+
+
+def test_build_nats_streams_from_env_applies_events_multi_field_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """覆盖 EVENTS 多个字段 + MARKET age 同时生效。"""
+    monkeypatch.setenv("AATS_NATS_EVENTS_MAX_BYTES", "8589934592")    # 8 GB
+    monkeypatch.setenv("AATS_NATS_EVENTS_MAX_MSGS", "10000000")       # 10M
+    monkeypatch.setenv("AATS_NATS_EVENTS_MAX_MSG_SIZE", "8388608")    # 8 MB
+    monkeypatch.setenv("AATS_NATS_MARKET_MAX_AGE_SECONDS", "172800")  # 2 天
+
+    result = build_nats_streams_from_env(DEFAULT_STREAM_SPECS)
+    market = next(s for s in result if s.name == "AATS_EVENTS_MARKET")
+    events = next(s for s in result if s.name == "AATS_EVENTS")
+
+    assert events.max_bytes == 8_589_934_592
+    assert events.max_msgs == 10_000_000
+    assert events.max_msg_size == 8_388_608
+    assert market.max_age_seconds == 172_800
+
+
+def test_build_nats_streams_from_env_rejects_invalid_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """env override 如果让 spec 校验不过（比如负数），应该原地 raise
+    —— 不能 silently fall back 到 default（那样就失去了 override 的审计价值）。
+    """
+    monkeypatch.setenv("AATS_NATS_MARKET_MAX_BYTES", "-1")
+    with pytest.raises(ValueError, match="max_bytes must be positive"):
+        build_nats_streams_from_env(DEFAULT_STREAM_SPECS)
+
+
+# ── Group E: ensure_streams 多 stream 三分支（8 tests） ─────────────
+
+
+def _make_fake_stream_info_from_spec(spec: StreamSpec, subject_prefix: str = "aats.") -> Any:
+    """根据 StreamSpec 构造一个 FakeStreamInfo，字段全部匹配（走 unchanged 分支）。"""
+    from unittest.mock import MagicMock
+    info = MagicMock()
+    info.config.subjects = [f"{subject_prefix}{t}" for t in sorted(spec.topics)]
+    info.config.max_age = spec.max_age_seconds
+    info.config.max_bytes = spec.max_bytes
+    info.config.max_msgs = spec.max_msgs
+    info.config.max_msg_size = spec.max_msg_size
+    info.config.num_replicas = spec.num_replicas
+    info.config.duplicate_window = spec.duplicate_window_seconds
+    info.config.deny_purge = spec.deny_purge
+    return info
+
+
+def test_ensure_streams_before_connect_raises() -> None:
+    """未 connect 之前调 ensure_streams 应该抛 RuntimeError（对称 ensure_stream legacy 行为）。"""
+    bus = NatsEventBus(config=NatsBusConfig(), consumer_role="test")
+    with pytest.raises(RuntimeError, match="before connect"):
+        asyncio.run(bus.ensure_streams())
+
+
+def test_ensure_streams_creates_all_missing_streams() -> None:
+    """I-2：两条 stream 都不存在 → 分别走 add_stream，顺序无关但都被调一次。"""
+    pytest.importorskip("nats")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nats.js.errors import NotFoundError  # type: ignore[import-not-found]
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(streams=DEFAULT_STREAM_SPECS),
+        consumer_role="test",
+    )
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(side_effect=NotFoundError())
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    asyncio.run(bus.ensure_streams())
+
+    assert fake_js.add_stream.await_count == len(DEFAULT_STREAM_SPECS)
+    fake_js.update_stream.assert_not_awaited()
+
+
+def test_ensure_streams_noop_when_both_streams_match() -> None:
+    """I-2：两条 stream 都已存在且 config 完全匹配 → unchanged，
+    既不 add_stream 也不 update_stream。"""
+    pytest.importorskip("nats")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(streams=DEFAULT_STREAM_SPECS),
+        consumer_role="test",
+    )
+
+    # 每条 stream 的 stream_info 返回匹配的 FakeStreamInfo
+    name_to_info = {
+        spec.name: _make_fake_stream_info_from_spec(spec)
+        for spec in DEFAULT_STREAM_SPECS
+    }
+
+    async def fake_stream_info(name: str) -> Any:
+        return name_to_info[name]
+
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(side_effect=fake_stream_info)
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    asyncio.run(bus.ensure_streams())
+
+    fake_js.add_stream.assert_not_awaited()
+    fake_js.update_stream.assert_not_awaited()
+    assert fake_js.stream_info.await_count == len(DEFAULT_STREAM_SPECS)
+
+
+def test_ensure_streams_updates_when_max_bytes_drifts() -> None:
+    """容量感知对比：max_bytes 漂移 → update_stream。"""
+    pytest.importorskip("nats")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(streams=(DEFAULT_AATS_EVENTS_SPEC,)),
+        consumer_role="test",
+    )
+
+    drifted_info = _make_fake_stream_info_from_spec(DEFAULT_AATS_EVENTS_SPEC)
+    drifted_info.config.max_bytes = 1_000_000  # 比 spec 小得多 → drift
+
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(return_value=drifted_info)
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    asyncio.run(bus.ensure_streams())
+
+    fake_js.add_stream.assert_not_awaited()
+    fake_js.update_stream.assert_awaited_once()
+    # update_stream 带的 config 应该是 spec 的目标值
+    cfg = fake_js.update_stream.await_args.kwargs["config"]
+    assert cfg.max_bytes == DEFAULT_AATS_EVENTS_SPEC.max_bytes
+
+
+def test_ensure_streams_updates_when_max_msgs_drifts() -> None:
+    """容量感知对比：max_msgs 漂移 → update_stream。"""
+    pytest.importorskip("nats")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(streams=(DEFAULT_AATS_EVENTS_MARKET_SPEC,)),
+        consumer_role="test",
+    )
+
+    drifted_info = _make_fake_stream_info_from_spec(DEFAULT_AATS_EVENTS_MARKET_SPEC)
+    drifted_info.config.max_msgs = 100  # 差一大截
+
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(return_value=drifted_info)
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    asyncio.run(bus.ensure_streams())
+
+    fake_js.update_stream.assert_awaited_once()
+
+
+def test_ensure_streams_updates_when_max_msg_size_drifts() -> None:
+    """容量感知对比：max_msg_size 漂移 → update_stream。"""
+    pytest.importorskip("nats")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(streams=(DEFAULT_AATS_EVENTS_MARKET_SPEC,)),
+        consumer_role="test",
+    )
+
+    drifted_info = _make_fake_stream_info_from_spec(DEFAULT_AATS_EVENTS_MARKET_SPEC)
+    drifted_info.config.max_msg_size = 1024  # 远低于 4 MB
+
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(return_value=drifted_info)
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    asyncio.run(bus.ensure_streams())
+
+    fake_js.update_stream.assert_awaited_once()
+
+
+def test_ensure_streams_updates_one_noop_another() -> None:
+    """I-2 混合场景：MARKET 有漂移（update）+ EVENTS 完全匹配（noop）。
+
+    验证 ensure_streams 确实对每条 stream 独立判断，不会把一个 drift 的判断
+    牵连到另一条 stream。
+    """
+    pytest.importorskip("nats")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(streams=DEFAULT_STREAM_SPECS),
+        consumer_role="test",
+    )
+
+    market_info = _make_fake_stream_info_from_spec(DEFAULT_AATS_EVENTS_MARKET_SPEC)
+    market_info.config.max_bytes = 1_000  # drift
+    events_info = _make_fake_stream_info_from_spec(DEFAULT_AATS_EVENTS_SPEC)  # 精确匹配
+
+    name_to_info = {
+        "AATS_EVENTS_MARKET": market_info,
+        "AATS_EVENTS": events_info,
+    }
+
+    async def fake_stream_info(name: str) -> Any:
+        return name_to_info[name]
+
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(side_effect=fake_stream_info)
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    asyncio.run(bus.ensure_streams())
+
+    fake_js.add_stream.assert_not_awaited()
+    # 只有 MARKET 触发 update
+    assert fake_js.update_stream.await_count == 1
+    updated_cfg = fake_js.update_stream.await_args.kwargs["config"]
+    assert updated_cfg.name == "AATS_EVENTS_MARKET"
+
+
+def test_ensure_stream_legacy_shim_emits_deprecation_warning() -> None:
+    """I-10 legacy shim 隔离：ensure_stream(topics=...) 必须发
+    DeprecationWarning，提醒未来用 ensure_streams()。"""
+    pytest.importorskip("nats")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nats.js.errors import NotFoundError  # type: ignore[import-not-found]
+
+    bus = NatsEventBus(config=NatsBusConfig(), consumer_role="test")
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(side_effect=NotFoundError())
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+
+    with pytest.warns(DeprecationWarning, match="ensure_streams"):
+        asyncio.run(bus.ensure_stream(topics=["decisions"]))
+
+
+# ── Group F: NatsEventBus.start() 双路径（2 tests） ─────────────────
+
+
+def test_nats_event_bus_start_no_topics_calls_ensure_streams() -> None:
+    """runtime 新路径：start() 无 topics → 走 ensure_streams()（多 stream）。"""
+    pytest.importorskip("nats")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nats.js.errors import NotFoundError  # type: ignore[import-not-found]
+
+    bus = NatsEventBus(
+        config=NatsBusConfig(streams=DEFAULT_STREAM_SPECS),
+        consumer_role="test",
+    )
+    # 直接 stub connect + js，跳过 nats 客户端
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(side_effect=NotFoundError())
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+    bus._connected = True  # type: ignore[attr-defined]
+
+    # 不传 topics → 走新路径 → 应该对 DEFAULT_STREAM_SPECS 里每条 stream 调一次 add_stream
+    asyncio.run(bus.start(topics=None))
+
+    assert fake_js.add_stream.await_count == len(DEFAULT_STREAM_SPECS)
+
+
+def test_nats_event_bus_start_with_topics_calls_legacy_shim() -> None:
+    """legacy 测试路径：start(topics=[...]) → 走 ensure_stream 老 shim
+    → 应该发 DeprecationWarning + 单次 add_stream（一条临时 stream）。"""
+    pytest.importorskip("nats")
+
+    from unittest.mock import AsyncMock, MagicMock
+
+    from nats.js.errors import NotFoundError  # type: ignore[import-not-found]
+
+    bus = NatsEventBus(config=NatsBusConfig(), consumer_role="test")
+    fake_js = MagicMock()
+    fake_js.stream_info = AsyncMock(side_effect=NotFoundError())
+    fake_js.add_stream = AsyncMock()
+    fake_js.update_stream = AsyncMock()
+    bus._js = fake_js  # type: ignore[attr-defined]
+    bus._connected = True  # type: ignore[attr-defined]
+
+    with pytest.warns(DeprecationWarning):
+        asyncio.run(bus.start(topics=["decisions"]))
+
+    fake_js.add_stream.assert_awaited_once()
+
+
+# ── Group G: _compute_stream_config_drift 单元测试（2 tests） ───────
+
+
+def test_compute_stream_config_drift_empty_when_exact_match() -> None:
+    """所有字段匹配 → 返回空 dict。"""
+    spec = DEFAULT_AATS_EVENTS_SPEC
+    info = _make_fake_stream_info_from_spec(spec)
+    subjects = [f"aats.{t}" for t in sorted(spec.topics)]
+
+    drift = _compute_stream_config_drift(info.config, spec, desired_subjects=subjects)
+    assert drift == {}
+
+
+def test_compute_stream_config_drift_handles_nanosecond_max_age() -> None:
+    """nats-py 某些版本 stream_info 返回的 max_age 可能是纳秒整数。
+    drift 函数必须能识别并归一化到秒做比较，否则会把完全匹配的 stream
+    误判成 drift 触发多余 update_stream。
+    """
+    spec = DEFAULT_AATS_EVENTS_SPEC
+    info = _make_fake_stream_info_from_spec(spec)
+    # 模拟纳秒整数：604_800 秒 * 1e9 = 6.048e14 纳秒
+    info.config.max_age = int(spec.max_age_seconds * 1e9)
+    subjects = [f"aats.{t}" for t in sorted(spec.topics)]
+
+    drift = _compute_stream_config_drift(info.config, spec, desired_subjects=subjects)
+    assert "max_age_seconds" not in drift, (
+        f"drift 函数没有把纳秒归一化到秒，误报 drift: {drift}"
+    )

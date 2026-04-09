@@ -25,8 +25,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import warnings
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import get_logger, log_event
@@ -143,17 +145,338 @@ class UnroutedTopicError(KeyError):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# StreamSpec（分层 stream 抽象，slice nats-capacity 引入）
+#
+# 设计依据：docs/task/slice_nats_jetstream_capacity_fix_design.md §4 + §7
+#
+# 核心动机：pre-slice 单 stream AATS_EVENTS 只设 max_age=7d，不设 max_bytes/
+# max_msgs，结果 market.snapshots/feature.snapshots 高频写入把 stream 写到
+# server max_file_store=1GB 硬上限，NATS 抛 err_code=10023 "insufficient
+# resources" publish 永久失败，决策链路饿死无法下单。
+#
+# 修复方向：分层 2 stream
+#   - AATS_EVENTS_MARKET: 1 day / 2 GB 承载 market.snapshots + feature.snapshots
+#   - AATS_EVENTS      : 7 day / 4 GB 承载其他 critical events（合规保留窗口）
+#   - server max_file_store 升 8 GB 留 25% headroom
+# ─────────────────────────────────────────────────────────────────────
+
+
+@dataclass(slots=True, frozen=True)
+class StreamSpec:
+    """NATS JetStream stream 的完整声明式定义。
+
+    一个 StreamSpec 对应一个 ``js.add_stream`` / ``update_stream`` 调用的配置。
+    本类是 nats-py ``StreamConfig`` 的薄封装 + 本项目的归属/容量约束，同时是
+    ``NatsBusConfig.streams`` 字段的元素类型。
+
+    设计依据：slice_nats_jetstream_capacity_fix_design.md §7.1
+    """
+
+    # ── 标识 ────────────────────────────────────────────────────
+    name: str                     # JetStream stream 名（SCREAMING_SNAKE_CASE，如 "AATS_EVENTS"）
+    topics: frozenset[str]        # 该 stream 承载的 EventBus topic 名（不带 aats. 前缀）
+
+    # ── 容量策略（全部必填，没有默认值逼迫 caller 显式决策） ──
+    max_age_seconds: float        # 消息保留时间上限（秒）
+    max_bytes: int                # 总字节上限
+    max_msgs: int                 # 总消息数上限
+    max_msg_size: int             # 单条消息字节上限
+
+    # ── 行为策略（有默认值，稳定字段） ─────────────────────────
+    storage: str = "file"         # "file" / "memory"；传给 nats-py 时再转 StorageType
+    retention: str = "limits"     # 固定 "limits"（本项目不用 workqueue/interest）
+    discard: str = "old"          # 固定 "old"
+
+    # ── 副本 / dedup / 运维（slice nats-capacity 新增，带安全默认） ──
+    num_replicas: int = 1                     # dev 单节点；生产升级另起 slice
+    duplicate_window_seconds: float = 120.0   # nats 默认；抗 publish 重试 + 进程重启 dedup
+    deny_purge: bool = False                  # dev 允许 migration 脚本 purge；生产可 True
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.name.isupper() or not self.name.replace("_", "").isalnum():
+            raise ValueError(
+                f"stream name must be SCREAMING_SNAKE_CASE, got {self.name!r}"
+            )
+        if not self.topics:
+            raise ValueError(f"stream {self.name} must have at least one topic")
+        if self.max_age_seconds <= 0:
+            raise ValueError(
+                f"stream {self.name} max_age_seconds must be positive, "
+                f"got {self.max_age_seconds}"
+            )
+        if self.max_bytes <= 0:
+            raise ValueError(
+                f"stream {self.name} max_bytes must be positive, got {self.max_bytes}"
+            )
+        if self.max_msgs <= 0:
+            raise ValueError(
+                f"stream {self.name} max_msgs must be positive, got {self.max_msgs}"
+            )
+        if self.max_msg_size <= 0:
+            raise ValueError(
+                f"stream {self.name} max_msg_size must be positive, got {self.max_msg_size}"
+            )
+        if self.storage not in ("file", "memory"):
+            raise ValueError(
+                f"stream {self.name} storage must be 'file' or 'memory', "
+                f"got {self.storage!r}"
+            )
+        if self.num_replicas < 1:
+            raise ValueError(
+                f"stream {self.name} num_replicas must be >= 1, got {self.num_replicas}"
+            )
+        if self.duplicate_window_seconds < 0:
+            raise ValueError(
+                f"stream {self.name} duplicate_window_seconds must be >= 0, "
+                f"got {self.duplicate_window_seconds}"
+            )
+
+    def to_nats_stream_config(self, subject_prefix: str) -> Any:
+        """转成 nats-py StreamConfig 对象，调用 ensure_streams 时用。
+
+        subject_prefix 由 caller 提供（通常是 ``NatsBusConfig.subject_prefix``
+        也就是 "aats."），拼在 topic 前得到完整的 NATS subject 名。
+
+        Returns: ``nats.js.api.StreamConfig`` 实例（nats-py import 延迟到
+            本方法内部避免 monolith 不装 nats-py 的模块级导入失败）。
+        """
+        from nats.js.api import (  # type: ignore[import-not-found]
+            DiscardPolicy,
+            RetentionPolicy,
+            StorageType,
+            StreamConfig,
+        )
+
+        subjects = [f"{subject_prefix}{topic}" for topic in sorted(self.topics)]
+        return StreamConfig(
+            name=self.name,
+            subjects=subjects,
+            retention=RetentionPolicy.LIMITS,
+            storage=StorageType.FILE if self.storage == "file" else StorageType.MEMORY,
+            discard=DiscardPolicy.OLD,
+            max_age=self.max_age_seconds,
+            max_bytes=self.max_bytes,
+            max_msgs=self.max_msgs,
+            max_msg_size=self.max_msg_size,
+            num_replicas=self.num_replicas,
+            duplicate_window=self.duplicate_window_seconds,
+            deny_purge=self.deny_purge,
+        )
+
+
+def _compute_stream_config_drift(
+    existing: Any,
+    spec: StreamSpec,
+    desired_subjects: list[str],
+) -> dict[str, dict[str, Any]]:
+    """比较一个已经存在的 ``nats.js.api.StreamConfig`` 与 StreamSpec 的差异。
+
+    Args:
+        existing: ``nats.js.api.StreamConfig``（从 ``stream_info().config`` 拿）
+        spec: 目标 StreamSpec
+        desired_subjects: caller 已经算好的完整 NATS subject 列表（带前缀），
+            由 ``spec.to_nats_stream_config(subject_prefix).subjects`` 派生。
+
+    Returns:
+        空 dict 表示完全匹配（走 unchanged 分支）；
+        非空 dict 的 key 是 drift 字段名，value 是
+        ``{"existing": ..., "desired": ...}`` 的 diff 快照，用于日志 + update 判断。
+
+    比较维度（设计文档 §7.4 - 超过 Slice 6.5 的 subjects-only 对比）：
+        subjects / max_age / max_bytes / max_msgs / max_msg_size /
+        num_replicas / duplicate_window / deny_purge
+
+    注意：
+    - ``subjects`` 比较用 set（顺序无关）
+    - ``max_age`` / ``duplicate_window`` 的 nats-py 类型可能是 float 秒，也
+      可能是 int 纳秒 —— 我们用 spec 的秒值和 existing 的 float 对比，
+      如果 existing 明显大于 10^10 (10 秒 × 10^9 纳秒 = 阈值)，则当成纳秒除回秒。
+    """
+    drift: dict[str, dict[str, Any]] = {}
+
+    # ── subjects（set 比较，顺序无关）──
+    existing_set = set(getattr(existing, "subjects", None) or [])
+    desired_set = set(desired_subjects)
+    if existing_set != desired_set:
+        drift["subjects"] = {
+            "existing": sorted(existing_set),
+            "desired": sorted(desired_set),
+        }
+
+    # ── max_age：秒/纳秒兼容 ──
+    existing_max_age = getattr(existing, "max_age", None)
+    if existing_max_age is not None:
+        # 阈值：10^10 = 10 秒 * 10^9 纳秒；超过就当纳秒除回秒
+        if isinstance(existing_max_age, (int, float)) and existing_max_age > 1e10:
+            existing_max_age = existing_max_age / 1e9
+    if existing_max_age != spec.max_age_seconds:
+        drift["max_age_seconds"] = {
+            "existing": existing_max_age,
+            "desired": spec.max_age_seconds,
+        }
+
+    # ── 容量字段（直接比较）──
+    for attr, spec_field in (
+        ("max_bytes", "max_bytes"),
+        ("max_msgs", "max_msgs"),
+        ("max_msg_size", "max_msg_size"),
+        ("num_replicas", "num_replicas"),
+    ):
+        existing_val = getattr(existing, attr, None)
+        desired_val = getattr(spec, spec_field)
+        if existing_val != desired_val:
+            drift[attr] = {"existing": existing_val, "desired": desired_val}
+
+    # ── duplicate_window：同 max_age 秒/纳秒兼容 ──
+    existing_dup = getattr(existing, "duplicate_window", None)
+    if existing_dup is not None:
+        if isinstance(existing_dup, (int, float)) and existing_dup > 1e10:
+            existing_dup = existing_dup / 1e9
+    if existing_dup != spec.duplicate_window_seconds:
+        drift["duplicate_window_seconds"] = {
+            "existing": existing_dup,
+            "desired": spec.duplicate_window_seconds,
+        }
+
+    # ── deny_purge ──
+    existing_deny = getattr(existing, "deny_purge", None)
+    # nats-py 旧版可能没这个字段，None == False 视为默认值
+    if (existing_deny or False) != spec.deny_purge:
+        drift["deny_purge"] = {
+            "existing": existing_deny,
+            "desired": spec.deny_purge,
+        }
+
+    return drift
+
+
+# 高频观察/派生 topic → 独立短保留 stream AATS_EVENTS_MARKET
+#
+# 注意：加新 topic 到 DEFAULT_CRITICAL_TOPICS 时必须同步判断归属：
+#   - 高频（≥ 1 Hz 写入）且纯观察/派生 → 加到这里
+#   - 低频决策/执行/审计/资金状态 → 留在 DEFAULT_CRITICAL_EVENTS_TOPICS
+# 单元测试 test_stream_specs_cover_all_critical_topics_exactly_once 会强制
+# 每个新 topic 都必须归属到某一个 StreamSpec，漏了会红灯。
+DEFAULT_MARKET_STREAM_TOPICS: frozenset[str] = frozenset(
+    {
+        _topics.MARKET_SNAPSHOTS,   # 最高频（OKX tick 推送）
+        _topics.FEATURE_SNAPSHOTS,  # 次高频（market 派生）
+    }
+)
+
+# 其他 critical topic → 长保留 stream AATS_EVENTS
+# 派生自 DEFAULT_CRITICAL_TOPICS 减掉 DEFAULT_MARKET_STREAM_TOPICS，保证
+# 两者并集 == DEFAULT_CRITICAL_TOPICS（I-8 不变量）。
+DEFAULT_CRITICAL_EVENTS_TOPICS: frozenset[str] = (
+    DEFAULT_CRITICAL_TOPICS - DEFAULT_MARKET_STREAM_TOPICS
+)
+
+
+# 默认的两个 stream spec（两者对称设计，见设计文档 §4.4）
+#
+# 容量预算对账（设计文档 §4.1）：
+#   AATS_EVENTS_MARKET.max_bytes = 2 GB
+#   AATS_EVENTS.max_bytes        = 4 GB
+#   合计                         = 6 GB
+#   server max_file_store        = 8 GB (nats-server.conf)
+#   headroom                     = 2 GB (25%，留给 index + consumer state)
+# 单元测试 test_total_stream_capacity_within_server_budget 锁死这个对齐。
+DEFAULT_AATS_EVENTS_MARKET_SPEC = StreamSpec(
+    name="AATS_EVENTS_MARKET",
+    topics=DEFAULT_MARKET_STREAM_TOPICS,
+    max_age_seconds=86_400,              # 1 天
+    max_bytes=2_147_483_648,             # 2 GB
+    max_msgs=5_000_000,                  # 500 万条保险丝
+    max_msg_size=4_194_304,              # 4 MB（与 EVENTS 对称，对齐 server max_payload）
+    # num_replicas / duplicate_window_seconds / deny_purge 走默认值
+)
+
+DEFAULT_AATS_EVENTS_SPEC = StreamSpec(
+    name="AATS_EVENTS",
+    topics=DEFAULT_CRITICAL_EVENTS_TOPICS,
+    max_age_seconds=604_800,             # 7 天（合规 / 回放窗口）
+    max_bytes=4_294_967_296,             # 4 GB
+    max_msgs=5_000_000,                  # 500 万条
+    max_msg_size=4_194_304,              # 4 MB（与 MARKET 对称）
+)
+
+DEFAULT_STREAM_SPECS: tuple[StreamSpec, ...] = (
+    DEFAULT_AATS_EVENTS_MARKET_SPEC,
+    DEFAULT_AATS_EVENTS_SPEC,
+)
+
+
+def build_nats_streams_from_env(
+    default_specs: tuple[StreamSpec, ...] = DEFAULT_STREAM_SPECS,
+) -> tuple[StreamSpec, ...]:
+    """把 env var override 应用到默认 StreamSpec list。
+
+    支持的 env var（slice nats-capacity §7.6）：
+    - AATS_NATS_MARKET_MAX_BYTES / MAX_MSGS / MAX_MSG_SIZE / MAX_AGE_SECONDS
+    - AATS_NATS_EVENTS_MAX_BYTES / MAX_MSGS / MAX_MSG_SIZE / MAX_AGE_SECONDS
+
+    Args:
+        default_specs: 默认 spec tuple，通常传 DEFAULT_STREAM_SPECS。
+
+    Returns:
+        新 tuple；如果没有 env override 则直接返回 default_specs 原样。
+    """
+    result: list[StreamSpec] = []
+    for spec in default_specs:
+        if spec.name == "AATS_EVENTS_MARKET":
+            prefix = "AATS_NATS_MARKET_"
+        elif spec.name == "AATS_EVENTS":
+            prefix = "AATS_NATS_EVENTS_"
+        else:
+            prefix = None
+
+        overrides: dict[str, int | float] = {}
+        if prefix:
+            if v := os.environ.get(f"{prefix}MAX_BYTES"):
+                overrides["max_bytes"] = int(v)
+            if v := os.environ.get(f"{prefix}MAX_MSGS"):
+                overrides["max_msgs"] = int(v)
+            if v := os.environ.get(f"{prefix}MAX_MSG_SIZE"):
+                overrides["max_msg_size"] = int(v)
+            if v := os.environ.get(f"{prefix}MAX_AGE_SECONDS"):
+                overrides["max_age_seconds"] = float(v)
+        result.append(replace(spec, **overrides) if overrides else spec)
+    return tuple(result)
+
+
+# ─────────────────────────────────────────────────────────────────────
 # NATS 配置
 # ─────────────────────────────────────────────────────────────────────
 
 
 @dataclass(slots=True)
 class NatsBusConfig:
-    """NatsEventBus 实例化所需的配置。"""
+    """NatsEventBus 实例化所需的配置。
+
+    slice nats-capacity 双路径说明：
+    - **runtime 路径**（生产 + 集成测试）：读 ``self.streams``，由
+      ``_construct_event_bus`` 传入 ``build_nats_streams_from_env(DEFAULT_STREAM_SPECS)``，
+      通过 ``NatsEventBus.ensure_streams()`` 无参方法完成多 stream upsert。
+    - **legacy 路径**（单元测试 ``ensure_stream(topics=...)`` shim）：读 legacy
+      字段 ``stream_name`` + ``stream_max_age_seconds``，构造一个临时 StreamSpec
+      做 backward compat，发 DeprecationWarning。runtime 不再读 legacy 字段。
+
+    设计依据：slice_nats_jetstream_capacity_fix_design.md §7.3
+    """
 
     servers: tuple[str, ...] = ("nats://127.0.0.1:4222",)
     name: str = "aats"
     subject_prefix: str = "aats."
+    # ── slice nats-capacity 新字段：runtime 分层 stream 拓扑 ──────────
+    # runtime 代码路径（_construct_event_bus + HybridEventBus.start）只读
+    # 这个字段，通过 ensure_streams() 无 topics 参数完成 upsert。
+    # 默认是两条 stream（MARKET + EVENTS），caller 可以传
+    # ``build_nats_streams_from_env(DEFAULT_STREAM_SPECS)`` 开启 env 覆盖。
+    streams: tuple[StreamSpec, ...] = DEFAULT_STREAM_SPECS
+    # ── Legacy 字段（只给 ensure_stream(topics=...) shim 用） ─────────
+    # ⚠️ runtime 不再读这两个字段，只有 ``NatsEventBus.ensure_stream(topics)``
+    # legacy shim 会临时构造一条 StreamSpec 时用作 name / max_age 默认。
+    # 新代码应直接用 ``streams`` 字段。
     stream_name: str = "AATS_EVENTS"
     # JetStream stream 内消息最大保留时间（秒），过期消息会被自动丢弃。
     # 默认 7 天足够 Stage 4 集成回放，生产可调长（30/90 天）。
@@ -171,6 +494,34 @@ class NatsBusConfig:
     # 消费者持久 name 前缀（每个进程角色独立）
     durable_name_prefix: str = "aats-"
 
+    def __post_init__(self) -> None:
+        """校验 streams 字段的不变量（I-8 拓扑互斥 + 非空）。
+
+        - streams 非空：至少有一条 stream
+        - 名称唯一：不允许两条 stream 用同一个 name
+        - topic 互斥：不允许同一个 topic 被多条 stream 同时 claim（否则
+          subject overlap，nats-py add_stream 会抛 "subjects overlap" 错误）
+        """
+        if not self.streams:
+            raise ValueError("NatsBusConfig.streams must be non-empty")
+
+        seen_names: set[str] = set()
+        seen_topics: dict[str, str] = {}  # topic -> stream_name
+        for spec in self.streams:
+            if spec.name in seen_names:
+                raise ValueError(
+                    f"NatsBusConfig.streams has duplicate stream name {spec.name!r}"
+                )
+            seen_names.add(spec.name)
+            for topic in spec.topics:
+                if topic in seen_topics:
+                    raise ValueError(
+                        f"NatsBusConfig.streams has topic {topic!r} claimed by both "
+                        f"{seen_topics[topic]!r} and {spec.name!r}; each topic must "
+                        f"belong to exactly one stream"
+                    )
+                seen_topics[topic] = spec.name
+
     def subject_for(self, topic: str) -> str:
         """把 EventBus 的 topic 名映射到 NATS subject 名。"""
         return f"{self.subject_prefix}{topic}"
@@ -179,6 +530,17 @@ class NatsBusConfig:
         """根据 process_role 和 topic 派生 JetStream durable consumer name。"""
         safe_topic = topic.replace(".", "_").replace(" ", "_")
         return f"{self.durable_name_prefix}{role}-{safe_topic}"
+
+    def stream_spec_for_topic(self, topic: str) -> StreamSpec | None:
+        """查询某个 topic 归属哪条 stream（用于 publish 路由 / 调试）。
+
+        Returns: 匹配的 StreamSpec，如果 topic 不在任何 stream 的 topics
+            集合中则返回 None（调用方判断是否归属 observer topic）。
+        """
+        for spec in self.streams:
+            if topic in spec.topics:
+                return spec
+        return None
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -266,14 +628,27 @@ class NatsEventBus(EventBus):
 
     # ── 生命周期 ────────────────────────────────────────────────
     async def start(self, *, topics: list[str] | None = None) -> None:
-        """便利方法：connect + ensure_stream 一次完成。
+        """便利方法：connect + ensure stream(s) 一次完成。
+
+        双路径（slice nats-capacity §7.5）：
+
+        - **runtime 路径**（topics 为 None，生产 + 集成测试）：调用
+          ``ensure_streams()`` 无参方法，遍历 ``self._config.streams`` 做多
+          stream upsert。这是 ``_construct_event_bus`` 传下来的正式路径。
+
+        - **legacy 路径**（topics 非 None，单元测试）：发 DeprecationWarning
+          + 走 ``ensure_stream(topics=topics)`` 老 shim，为了向后兼容
+          ``tests/unit/test_nats_bus_skeleton.py`` 里调 ``start(topics=[...])``
+          的测试。新代码不要传 topics 参数。
 
         Stage 4 集成时 build_runtime 会调用本方法启动 NATS bus；
         在 _construct_event_bus 之后单独调用，避免让 _build_shared_runtime_slice
         变成 async 函数（其他 slice builder 都是 sync，保持对称）。
         """
         await self.connect()
-        if topics:
+        if topics is None:
+            await self.ensure_streams()
+        else:
             await self.ensure_stream(topics=topics)
 
     async def connect(self) -> None:
@@ -310,122 +685,187 @@ class NatsEventBus(EventBus):
             consumer_role=self._consumer_role,
         )
 
-    async def ensure_stream(self, topics: list[str]) -> None:
-        """声明 JetStream stream（幂等 upsert）。
+    # ── Stream ensure（slice nats-capacity 双路径） ──────────────
+    #
+    # 两条独立路径：
+    #   runtime 新路径  : ensure_streams() 无参 → 遍历 self._config.streams
+    #                    → _ensure_single_stream(spec) 做容量感知三分支 upsert
+    #   legacy 老路径  : ensure_stream(topics=...) shim → 发 DeprecationWarning
+    #                    → 从 legacy 字段 + 测试默认容量构造一次性 StreamSpec
+    #                    → 同样走 _ensure_single_stream(spec)
+    # 两条路径最终都汇聚到 _ensure_single_stream，保证三分支逻辑只有一份实现。
+    #
+    # 设计文档：slice_nats_jetstream_capacity_fix_design.md §7.4
 
-        Args:
-            topics: EventBus topic 名列表（不带 ``aats.`` 前缀）。内部会用
-                ``NatsBusConfig.subject_for`` 自动加前缀，调用方完全不需要
-                关心 NATS subject 命名约定。
+    async def ensure_streams(self) -> None:
+        """runtime 路径：遍历 ``self._config.streams`` 做多 stream upsert。
 
-        升级语义（Slice 6.5 修复）
-        ============================
-        原实现直接 ``add_stream(config=...)`` 是 **非幂等** 的：stream 已存在
-        但 subjects 不同（譬如 Slice 6.5 新增 ``execution.obligation_updates``
-        topic 把 subject 数从 N 变成 N+1）会抛
-        ``BadRequestError code=400 err_code=10058 "stream name already in
-        use with a different configuration"``，让整个进程启动失败回滚。
+        这是新代码应该走的路径。``_construct_event_bus`` 构造 ``NatsBusConfig``
+        时把 ``streams=build_nats_streams_from_env(DEFAULT_STREAM_SPECS)`` 传入，
+        所以到这里 ``self._config.streams`` 已经是完整的分层 stream 拓扑。
 
-        修复后的分支（D14）：
+        每条 stream 的 upsert 委托给 ``_ensure_single_stream(spec)`` 处理
+        容量感知三分支逻辑（NotFoundError / unchanged / updated）。
 
-        1. ``stream_info`` 成功：
-           - 已有 subjects 与新 subjects **完全相同** → noop，log
-             ``nats_jetstream_stream_unchanged``
-           - 已有 subjects 与新 subjects **不同** → ``update_stream(config)``
-             upsert，log ``nats_jetstream_stream_updated`` 并在日志里打出
-             added/removed 两个集合，方便运维确认本次 deploy 的 schema 变更
-        2. ``stream_info`` 抛 ``NotFoundError``（首次启动，stream 尚不存在）：
-           - ``add_stream(config)`` 创建 stream，log
-             ``nats_jetstream_stream_created``
-        3. 任何路径成功后都会最终 emit 同一个 ``nats_jetstream_stream_ensured``
-           事件（向后兼容 Slice 6.1 / 6.3 的 runbook 冷烟断言）
-
-        Stage 4 集成时会在启动阶段被调用一次，确保 critical topic 都有持久化。
-        ``stream_max_age_seconds`` 控制消息保留时长（默认 7 天），来自
-        ``NatsBusConfig``，可在生产/dev/审计场景下分别配置。
+        全部成功后 emit 一个汇总事件 ``nats_jetstream_streams_ensured``
+        供 runbook / dashboard 做冷烟断言。
         """
         if self._js is None:
-            raise RuntimeError("NatsEventBus.ensure_stream called before connect()")
-        try:
-            from nats.js.api import (  # type: ignore[import-not-found]
-                DiscardPolicy,
-                RetentionPolicy,
-                StorageType,
-                StreamConfig,
+            raise RuntimeError(
+                "NatsEventBus.ensure_streams called before connect()"
             )
+
+        ensured_names: list[str] = []
+        for spec in self._config.streams:
+            await self._ensure_single_stream(spec)
+            ensured_names.append(spec.name)
+
+        log_event(
+            self.logger,
+            "nats_jetstream_streams_ensured",
+            stream_count=len(ensured_names),
+            stream_names=ensured_names,
+        )
+
+    async def ensure_stream(self, topics: list[str]) -> None:
+        """Legacy shim：从 legacy 字段构造一次性 StreamSpec 做 upsert。
+
+        .. deprecated::
+            用 ``ensure_streams()`` 无参方法代替。本方法只为了向后兼容
+            ``tests/unit/test_nats_bus_skeleton.py`` 里调
+            ``start(topics=[...])`` 的单元测试，runtime 代码路径
+            （_construct_event_bus + HybridEventBus.start）不再走本 shim。
+
+            在调用本方法时会发 ``DeprecationWarning``，shim 保留期至少 3 个月
+            （设计文档 §11.7），之后统一删除并把测试迁到 ``ensure_streams()``。
+
+        Args:
+            topics: EventBus topic 名列表（不带 ``aats.`` 前缀）。内部会构造
+                一条临时 StreamSpec（name 取 ``config.stream_name``，max_age
+                取 ``config.stream_max_age_seconds``，容量使用测试友好默认），
+                然后走 ``_ensure_single_stream()`` 三分支逻辑。
+
+        历史：Slice 6.5 把本方法改成幂等三分支（NotFoundError / unchanged /
+        updated），slice nats-capacity 把它降级为 legacy shim 同时保留三分支
+        语义 —— 区别只是现在容量字段也会参与比较（不只是 subjects）。
+        """
+        warnings.warn(
+            "NatsEventBus.ensure_stream(topics=...) is deprecated; "
+            "use ensure_streams() with NatsBusConfig.streams instead. "
+            "See slice_nats_jetstream_capacity_fix_design.md §7.4.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if self._js is None:
+            raise RuntimeError(
+                "NatsEventBus.ensure_stream called before connect()"
+            )
+
+        # 从 legacy 字段 + 测试友好默认容量构造一次性 StreamSpec
+        # 容量默认值的选取原则（设计文档 §7.4）：
+        #   - max_bytes=128 MB   够单元测试假 publish 用，远低于 server 硬限
+        #   - max_msgs=10_000    够单元测试假 publish 用
+        #   - max_msg_size=4 MB  与 runtime 两条 stream 对称
+        legacy_spec = StreamSpec(
+            name=self._config.stream_name,
+            topics=frozenset(topics),
+            max_age_seconds=self._config.stream_max_age_seconds,
+            max_bytes=128 * 1024 * 1024,   # 128 MB
+            max_msgs=10_000,
+            max_msg_size=4 * 1024 * 1024,  # 4 MB
+        )
+        await self._ensure_single_stream(legacy_spec)
+
+    async def _ensure_single_stream(self, spec: StreamSpec) -> None:
+        """对单条 StreamSpec 做容量感知幂等 upsert（三分支）。
+
+        分支矩阵：
+
+        1. ``stream_info`` 抛 ``NotFoundError``：首次创建 → ``add_stream``
+           log: ``nats_jetstream_stream_created``
+        2. ``stream_info`` 成功 + 当前 config 与 spec **完全匹配** → noop
+           log: ``nats_jetstream_stream_unchanged``
+        3. ``stream_info`` 成功 + 当前 config 与 spec **有差异** →
+           ``update_stream`` 并在日志里打出 drift 字段列表
+           log: ``nats_jetstream_stream_updated``
+
+        匹配维度（超过 Slice 6.5 的 subjects-only 比较）：
+            subjects / max_age / max_bytes / max_msgs / max_msg_size /
+            num_replicas / duplicate_window / deny_purge
+
+        任一路径成功后都会 emit 统一的 ``nats_jetstream_stream_ensured``
+        收尾事件（向后兼容 Slice 6.1 / 6.3 的 runbook 冷烟断言）。
+        """
+        if self._js is None:
+            raise RuntimeError(
+                "NatsEventBus._ensure_single_stream called before connect()"
+            )
+        try:
             from nats.js.errors import (  # type: ignore[import-not-found]
                 NotFoundError,
             )
         except ImportError as exc:
             raise RuntimeError("nats-py JetStream API unavailable") from exc
 
-        subjects = [self._config.subject_for(topic) for topic in topics]
-        # nats-py StreamConfig.max_age 字段以**秒**为单位（见
-        # nats/js/api.py: ``max_age: Optional[float] = None  # in seconds``），
-        # 内部 _to_nanoseconds() 自行换算。这里**直接传秒**，不要预先乘 1e9，
-        # 否则会被双重换算成超大整数，触发 NATS server "invalid JSON" 拒绝。
-        config = StreamConfig(
-            name=self._config.stream_name,
-            subjects=subjects,
-            retention=RetentionPolicy.LIMITS,
-            storage=StorageType.FILE,
-            discard=DiscardPolicy.OLD,
-            max_age=self._config.stream_max_age_seconds,
-        )
+        config = spec.to_nats_stream_config(self._config.subject_prefix)
+        subjects = list(config.subjects or [])
 
         # ── Step 1: stream_info 探测现状 ──────────────────────
-        existing_subjects: list[str] | None = None
+        existing_info: Any | None = None
         try:
-            info = await self._js.stream_info(self._config.stream_name)
-            existing_subjects = list(info.config.subjects or [])
+            existing_info = await self._js.stream_info(spec.name)
         except NotFoundError:
-            # 首次启动：stream 不存在 → 走创建路径
-            existing_subjects = None
+            existing_info = None
 
-        if existing_subjects is None:
+        if existing_info is None:
             # ── Step 2a: 不存在 → 创建 ────────────────────────
             await self._js.add_stream(config=config)
             log_event(
                 self.logger,
                 "nats_jetstream_stream_created",
-                stream=self._config.stream_name,
+                stream=spec.name,
                 subject_count=len(subjects),
-                max_age_seconds=self._config.stream_max_age_seconds,
+                max_age_seconds=spec.max_age_seconds,
+                max_bytes=spec.max_bytes,
+                max_msgs=spec.max_msgs,
+                max_msg_size=spec.max_msg_size,
             )
         else:
-            # ── Step 2b: 已存在 → 比较 subjects ──────────────
-            existing_set = set(existing_subjects)
-            new_set = set(subjects)
-            if existing_set == new_set:
+            # ── Step 2b: 已存在 → 容量感知比较 ───────────────
+            drift = _compute_stream_config_drift(
+                existing_info.config,
+                spec,
+                desired_subjects=subjects,
+            )
+            if not drift:
                 log_event(
                     self.logger,
                     "nats_jetstream_stream_unchanged",
-                    stream=self._config.stream_name,
+                    stream=spec.name,
                     subject_count=len(subjects),
                 )
             else:
-                added = sorted(new_set - existing_set)
-                removed = sorted(existing_set - new_set)
                 await self._js.update_stream(config=config)
                 log_event(
                     self.logger,
                     "nats_jetstream_stream_updated",
-                    stream=self._config.stream_name,
-                    subject_count_before=len(existing_set),
-                    subject_count_after=len(new_set),
-                    subjects_added=added,
-                    subjects_removed=removed,
-                    max_age_seconds=self._config.stream_max_age_seconds,
+                    stream=spec.name,
+                    subject_count_after=len(subjects),
+                    drift_fields=sorted(drift.keys()),
+                    drift=drift,
                 )
 
-        # ── Step 3: 统一 "ensured" 收尾日志（向后兼容） ──
+        # ── Step 3: 统一 "ensured" 收尾日志（向后兼容 Slice 6.1/6.3） ──
         log_event(
             self.logger,
             "nats_jetstream_stream_ensured",
-            stream=self._config.stream_name,
-            topics=topics,
+            stream=spec.name,
+            topics=sorted(spec.topics),
             subjects=subjects,
-            max_age_seconds=self._config.stream_max_age_seconds,
+            max_age_seconds=spec.max_age_seconds,
+            max_bytes=spec.max_bytes,
+            max_msgs=spec.max_msgs,
+            max_msg_size=spec.max_msg_size,
         )
 
     async def close(self) -> None:
@@ -748,16 +1188,32 @@ class HybridEventBus(EventBus):
         return self._routing
 
     async def start(self) -> None:
-        """启动两条底层总线：将 critical_topics 透传给关键总线。
+        """启动两条底层总线。
+
+        slice nats-capacity 变更：
+        -----------------------------
+        之前实现会把 ``sorted(self._routing.critical_topics)`` 作为 topics
+        参数传给 ``NatsEventBus.start(topics=...)``，走的是 legacy shim 路径，
+        强制把所有 critical topic 挤进单条 ``AATS_EVENTS`` stream。这正是
+        MARKET 高频流量能把整条 stream 撑爆 ``err_code=10023`` 的直接原因。
+
+        现在 ``critical_start()`` **不再传 topics**，走的是 ``ensure_streams()``
+        新路径，从 ``NatsBusConfig.streams``（由 ``_construct_event_bus``
+        传入 ``build_nats_streams_from_env(DEFAULT_STREAM_SPECS)``）遍历完成
+        多条 stream 的 upsert。分层后 MARKET 走独立短保留 stream，EVENTS 保留
+        7 天长保留，互不挤占。
 
         这一层是为了让 build_runtime 调用方只需要 ``await bus.start()``
         即可，不必关心底层是 InMemoryEventBus（无 start）还是 NatsEventBus
-        （需要 connect + ensure_stream）。
+        （需要 connect + ensure_streams）。
+
+        设计文档：slice_nats_jetstream_capacity_fix_design.md §7.5a R2
         """
-        critical_topics = sorted(self._routing.critical_topics)
         critical_start = getattr(self._critical, "start", None)
         if critical_start is not None:
-            await critical_start(topics=critical_topics)
+            # runtime 新路径：不传 topics，让 NatsEventBus.start() 走
+            # ensure_streams() 遍历 self._config.streams
+            await critical_start()
         observer_start = getattr(self._observer, "start", None)
         if observer_start is not None:
             await observer_start()

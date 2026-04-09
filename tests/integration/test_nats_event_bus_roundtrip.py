@@ -261,7 +261,12 @@ class TestHybridEventBusRouting(unittest.IsolatedAsyncioTestCase):
         )
         try:
             await hybrid.start()
-            await verifier.start(topics=None)  # stream 已经被 hybrid 创建了
+            # slice nats-capacity T2 例外（§7.5a.3）：verifier 只需要连接
+            # NATS，不要再 ensure_streams()（stream 已经被 hybrid 创建了）。
+            # 之前用 ``start(topics=None)`` 在旧语义下等价于"仅 connect"；
+            # 新语义下 topics=None 会走 ensure_streams() 导致重复 upsert —— 不是
+            # bug 但是浪费 round-trip。直接用 connect() 表达意图更清晰。
+            await verifier.connect()
 
             received: list[dict[str, Any]] = []
 
