@@ -156,6 +156,7 @@ from aats.storage.base import (
     StrategyRuntimeRepository,
 )
 from aats.storage.event_store import InMemoryEventStore
+from aats.storage.stream_snapshot_cache import StreamSnapshotCache
 from aats.storage.exit_execution_repo import InMemoryExitExecutionRepository
 from aats.storage.exit_execution_repo_postgres import PostgresExitExecutionRepository
 from aats.storage.event_store_postgres import PostgresEventStore
@@ -466,6 +467,10 @@ class ApplicationRuntime:
     recovery_status: RecoveryStatus
     sleeve_auto_execution_config_source: str = "strategy_sleeve_auto_execution_enabled"
     sleeve_auto_execution_uses_deprecated_key: bool = False
+    # 高频流式快照（market.snapshots / features.snapshots）的进程内缓存。
+    # 替代 Postgres event_store 为这两个 topic 提供 latest/recent 查询，
+    # 避免 event_store 表膨胀。由 bus 的 publish/receive 路径更新。
+    stream_snapshot_cache: StreamSnapshotCache | None = None
     exit_execution_repo: ExitExecutionRepository | None = None
     execution_order_repo: PostgresExecutionOrderRepository | None = None
     execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None = None
@@ -2881,6 +2886,7 @@ class _RuntimeSlices:
 
     # ---- shared / 基础 ----
     metrics: Any = None
+    stream_snapshot_cache: Any = None
     bus: Any = None
     # Stage 6 Slice 6.4：合并的 KillSwitch 类同时承担本地 sync read/write 与
     # 跨进程同步边车。在 _start_event_bus 完成后由 build_runtime 调用
@@ -2953,6 +2959,7 @@ def _construct_event_bus(
     runtime_settings: AATSSettings,
     event_store: Any,
     process_role: str | None,
+    stream_snapshot_cache: StreamSnapshotCache | None = None,
 ) -> EventBus:
     """Stage 4 工厂：按 settings.event_bus_backend 选择 EventBus 实现。
 
@@ -2977,6 +2984,7 @@ def _construct_event_bus(
         return InMemoryEventBus(
             event_store=event_store,
             persistence_mode=persistence_mode,
+            stream_snapshot_cache=stream_snapshot_cache,
         )
 
     # slice nats-capacity（§7.5a R1）：runtime 路径使用分层 stream 拓扑。
@@ -3002,6 +3010,7 @@ def _construct_event_bus(
             event_store=event_store,
             persistence_mode=persistence_mode,
             consumer_role=consumer_role,
+            stream_snapshot_cache=stream_snapshot_cache,
         )
 
     if backend == "hybrid":
@@ -3011,6 +3020,7 @@ def _construct_event_bus(
             event_store=event_store,
             persistence_mode=persistence_mode,
             consumer_role=consumer_role,
+            stream_snapshot_cache=stream_snapshot_cache,
         )
         observer_bus = InMemoryEventBus(
             event_store=None,  # 双写已由 critical_bus 接管，observer 不重复落盘
@@ -3060,6 +3070,8 @@ def _build_shared_runtime_slice(
     if not _slice_active("shared", effective_process_role=effective_process_role):
         return
     slices.metrics = MetricsRegistry()
+    # 高频流式快照缓存：替代 Postgres 为 market/features snapshots 提供查询。
+    slices.stream_snapshot_cache = StreamSnapshotCache()
     # Stage 4: bus 实现按 settings.event_bus_backend 选择。
     # 注意 _construct_event_bus 不做 I/O；NATS 连接和 stream 创建在
     # build_runtime 调用 await _start_event_bus(slices.bus) 时才发生。
@@ -3067,6 +3079,7 @@ def _build_shared_runtime_slice(
         runtime_settings=runtime_settings,
         event_store=storage.event_store,
         process_role=effective_process_role,
+        stream_snapshot_cache=slices.stream_snapshot_cache,
     )
     _backfill_fill_outcomes_from_event_store(
         event_store=storage.event_store,
@@ -3238,6 +3251,7 @@ def _build_decision_slice(
         strategy_runtime_repo=storage.strategy_runtime_repo,
         reconciliation_repo=storage.reconciliation_repo,
         sleeve_pnl_repo=storage.sleeve_pnl_repo,
+        stream_snapshot_cache=slices.stream_snapshot_cache,
     )
     slices.decision_trigger_policy = DecisionTriggerPolicy(settings=runtime_settings)
     slices.decision_engine = DecisionOrchestrator(
@@ -3249,6 +3263,7 @@ def _build_decision_slice(
             execution_repo=storage.execution_repo,
             mode_controller=slices.mode_controller,
             health_service=slices.health_service,
+            stream_snapshot_cache=slices.stream_snapshot_cache,
         ),
         baseline_strategy=BaselineStrategy(event_store=storage.event_store),
         ai_service=slices.ai_service,

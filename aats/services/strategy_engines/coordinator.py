@@ -104,11 +104,13 @@ class StrategyCoordinatorService:
         strategy_runtime_repo=None,
         reconciliation_repo=None,
         sleeve_pnl_repo=None,
+        stream_snapshot_cache=None,
     ) -> None:
         self.settings = settings
         self.event_store = event_store
         self.market_gateway = market_gateway
         self.portfolio_repo = portfolio_repo
+        self._stream_cache = stream_snapshot_cache
         self.execution_repo = execution_repo
         self.position_lot_repo = position_lot_repo
         self.account_service = account_service
@@ -841,7 +843,11 @@ class StrategyCoordinatorService:
         snapshot = self.market_gateway.latest_snapshot(symbol)
         if snapshot is not None:
             return snapshot
-        latest_event = self.event_store.latest(topics.MARKET_SNAPSHOTS, key=symbol)
+        latest_event = (
+            self._stream_cache.latest(topics.MARKET_SNAPSHOTS, key=symbol)
+            if self._stream_cache is not None
+            else self.event_store.latest(topics.MARKET_SNAPSHOTS, key=symbol)
+        )
         if latest_event is None:
             return None
         return MarketSnapshot.model_validate(latest_event.payload)
@@ -1013,13 +1019,18 @@ class StrategyCoordinatorService:
             return rows
         limit = max((max(int(request.lookback_snapshots), 1) for request in event_store_requests), default=1)
         for symbol in symbols:
-            rows[symbol] = [
-                MarketSnapshot.model_validate(item.payload)
-                for item in self.event_store.recent_by_topic_and_key(
+            items = (
+                self._stream_cache.recent_by_key(topics.MARKET_SNAPSHOTS, key=symbol, limit=limit)
+                if self._stream_cache is not None
+                else self.event_store.recent_by_topic_and_key(
                     topics.MARKET_SNAPSHOTS,
                     key=symbol,
                     limit=limit,
                 )
+            )
+            rows[symbol] = [
+                MarketSnapshot.model_validate(item.payload)
+                for item in items
             ]
         return rows
 

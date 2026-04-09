@@ -37,7 +37,12 @@ class StrategyProfileContextFacade:
 
     def tuning_context(self) -> StrategyProfileEvaluationContextSnapshot:
         baseline_event = self.owner.event_store.latest(topics.BASELINE_ASSESSMENTS)
-        feature_event = self.owner.event_store.latest(topics.FEATURE_SNAPSHOTS)
+        stream_cache = getattr(self.owner.runtime, "stream_snapshot_cache", None)
+        feature_event = (
+            stream_cache.latest(topics.FEATURE_SNAPSHOTS)
+            if stream_cache is not None
+            else self.owner.event_store.latest(topics.FEATURE_SNAPSHOTS)
+        )
         latest_portfolio = self.owner.runtime.portfolio_repo.latest()
         activation = self.owner._activation_state()
         safety_state = self.safety_state()

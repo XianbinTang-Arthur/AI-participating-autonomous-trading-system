@@ -41,6 +41,7 @@ from aats.bus.base import EventBus, MessageHandler
 from aats.events import topics as _topics
 from aats.schemas.common import EventEnvelope
 from aats.storage.base import EventStore
+from aats.storage.stream_snapshot_cache import STREAM_CACHE_TOPICS as _STREAM_CACHE_TOPICS, StreamSnapshotCache
 
 if TYPE_CHECKING:  # pragma: no cover - 仅用于类型检查
     from nats.aio.client import Client as NATSClient
@@ -620,11 +621,13 @@ class NatsEventBus(EventBus):
         event_store: EventStore | None = None,
         persistence_mode: str = "strict",
         consumer_role: str = "monolith",
+        stream_snapshot_cache: StreamSnapshotCache | None = None,
     ) -> None:
         self._config = config
         self._event_store = event_store
         self._persistence_mode = persistence_mode
         self._consumer_role = consumer_role
+        self._stream_cache = stream_snapshot_cache
         self._client: NATSClient | None = None
         self._js: JetStreamContext | None = None
         self._subscriptions: list[Any] = []
@@ -944,12 +947,14 @@ class NatsEventBus(EventBus):
             if carrier:
                 envelope = envelope.model_copy(update={"trace_context": dict(carrier)})
 
-            # 同步落盘到本地 event_store（双写：JetStream + Postgres）
-            # 之所以保留 Postgres 落盘，是为了：
-            #   1) 跨进程查询历史事件时复用现有 SQL 索引和 dashboard 视图
-            #   2) JetStream 7 天 max_age 之外的长期可追溯性
-            # 落盘的 envelope 已带 trace_context，后续 replay 也能挂对 parent。
-            if persist and self._event_store is not None:
+            # ── 持久化 / 缓存分流 ────────────────────────────
+            # 高频流式 topic（market.snapshots / features.snapshots）写入
+            # 进程内 StreamSnapshotCache，不落 Postgres——避免 event_store
+            # 表每 30 分钟膨胀到 400K 行导致 dashboard 查询超时。
+            # 其余 topic 仍然双写 JetStream + Postgres。
+            if self._stream_cache is not None and envelope.topic in _STREAM_CACHE_TOPICS:
+                self._stream_cache.update(envelope)
+            elif persist and self._event_store is not None:
                 try:
                     await asyncio.to_thread(self._event_store.append, envelope)
                 except Exception as exc:
@@ -998,6 +1003,9 @@ class NatsEventBus(EventBus):
             try:
                 payload_dict = json.loads(msg.data.decode("utf-8"))
                 envelope = EventEnvelope.model_validate(payload_dict)
+                # 高频 topic 写入进程内缓存，供 latest() / recent() 查询
+                if self._stream_cache is not None and envelope.topic in _STREAM_CACHE_TOPICS:
+                    self._stream_cache.update(envelope)
                 # Stage 8：提取 W3C trace context 作为本次 handler 的父 span。
                 # extract_trace_context 在没装 OTel 或 carrier 为空时返回 None；
                 # 返回 None 时 use_context 等 OTel API 就会按"无 parent"处理，

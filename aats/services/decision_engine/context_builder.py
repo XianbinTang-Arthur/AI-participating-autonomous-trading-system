@@ -32,6 +32,7 @@ from aats.services.strategy_execution_health import (
     compute_strategy_execution_health,
 )
 from aats.storage.base import EventStore, ExecutionRepository, PortfolioRepository
+from aats.storage.stream_snapshot_cache import StreamSnapshotCache
 
 
 @dataclass(slots=True)
@@ -54,6 +55,7 @@ class DecisionContextBuilder:
         execution_repo: ExecutionRepository,
         mode_controller: RuntimeModeController,
         health_service: SystemHealthService,
+        stream_snapshot_cache: StreamSnapshotCache | None = None,
     ) -> None:
         self.settings = settings
         self.event_store = event_store
@@ -61,6 +63,7 @@ class DecisionContextBuilder:
         self.execution_repo = execution_repo
         self.mode_controller = mode_controller
         self.health_service = health_service
+        self._stream_cache = stream_snapshot_cache
         self.state_scope = runtime_state_scope(settings)
 
     def build_health_snapshot(self, *, decision_id: str) -> HealthSnapshot:
@@ -88,8 +91,16 @@ class DecisionContextBuilder:
         if not self.settings.symbol_allowed_for_decision_cycle(symbol):
             raise ValueError(f"symbol_not_enabled_for_decision_cycle:{symbol}")
 
-        market_event = self.event_store.latest(topics.MARKET_SNAPSHOTS, key=symbol)
-        feature_event = self.event_store.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
+        market_event = (
+            self._stream_cache.latest(topics.MARKET_SNAPSHOTS, key=symbol)
+            if self._stream_cache is not None
+            else self.event_store.latest(topics.MARKET_SNAPSHOTS, key=symbol)
+        )
+        feature_event = (
+            self._stream_cache.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
+            if self._stream_cache is not None
+            else self.event_store.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
+        )
         portfolio_event = scoped_portfolio_event(
             self.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS),
             self.state_scope,
