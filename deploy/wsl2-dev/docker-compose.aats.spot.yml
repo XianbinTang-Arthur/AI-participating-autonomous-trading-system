@@ -12,6 +12,7 @@
 #     -f docker-compose.aats.yml \
 #     -f docker-compose.aats.spot.yml \
 #     --env-file .env.wsl2 \
+#     --env-file ../../.env.spot \
 #     up -d
 #
 # 说明：

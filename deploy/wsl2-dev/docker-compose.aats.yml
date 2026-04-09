@@ -5,17 +5,25 @@
 # Jaeger/Grafana）仍由 deploy/wsl2-dev/docker-compose.yml 提供。两份 compose
 # 通过 `name: aats-dev` 共用同一个 project，且都连到 `aats` 网络上。
 #
-# 启动顺序：
+# 启动顺序（以 derivatives 为例）：
 #   1) cd deploy/wsl2-dev
-#   2) docker compose --env-file .env.wsl2 up -d                  # 基础设施
-#   3) docker compose -f docker-compose.aats.yml --env-file .env.wsl2 build
-#   4) docker compose -f docker-compose.aats.yml --env-file .env.wsl2 up -d
+#   2) docker compose --env-file .env.wsl2 up -d                          # 基础设施
+#   3) docker compose -f docker-compose.aats.yml \
+#        -f docker-compose.aats.derivatives.yml \
+#        --env-file .env.wsl2 --env-file ../../.env.derivatives build     # 构建
+#   4) docker compose -f docker-compose.aats.yml \
+#        -f docker-compose.aats.derivatives.yml \
+#        --env-file .env.wsl2 --env-file ../../.env.derivatives up -d     # 启动
+#
+# 关键：--env-file ../../.env.<profile> 让 compose 模板层能读到 AATS_API_PORT
+#       等配置项，用于端口映射、uvicorn 命令行参数等。.env.<profile> 是所有
+#       运行参数的唯一真相来源，compose 文件不硬编码任何 profile 特定的值。
 #
 # 设计要点：
 #   - 单一镜像 (aats-base) + 不同 command + AATS_PROCESS_ROLE 环境变量
 #   - depends_on 走 healthcheck，不靠 sleep；基础设施未就绪不会启动 AATS 进程
 #   - 4 个服务都连到 aats 网络（来自 docker-compose.yml 的 networks 段）
-#   - 端口仅 gateway 暴露 127.0.0.1:8000，其余 3 个内网通信不绑端口
+#   - 端口、凭证等 profile 特定值全部来自 .env.<profile>，不在 compose 中重复
 #   - 资源限制保守，单机 16GB 内存够 4 进程 + 6 个基础设施
 # =============================================================================
 
@@ -102,16 +110,19 @@ services:
       - "--host"
       - "0.0.0.0"
       - "--port"
-      - "8000"
+      - "${AATS_API_PORT:-8000}"
+    # 端口值来自 .env.<profile> 的 AATS_API_PORT，通过启动命令的
+    # --env-file ../../.env.<profile> 注入到 compose 模板插值层。
+    # 如果没传 --env-file 则 fallback 到 8000。
     ports:
-      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"
     networks:
       - aats
     # Stage 7 修复：原版用 /system/health，但该 endpoint 在 gateway-only role
     # 下会调到 runtime.market_gateway / execution_adapter (都是 None)，NPE 500。
     # 改用 /healthz —— lightweight liveness，无 auth 无 service 依赖。
     healthcheck:
-      test: ["CMD", "curl", "-fs", "http://localhost:8000/healthz"]
+      test: ["CMD-SHELL", "curl -fs http://localhost:${AATS_API_PORT:-8000}/healthz"]
       interval: 15s
       timeout: 5s
       retries: 5

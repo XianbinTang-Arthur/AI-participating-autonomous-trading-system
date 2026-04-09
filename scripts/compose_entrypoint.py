@@ -106,6 +106,8 @@ def main() -> None:
 
     # 用 execvp 把当前进程替换成真正的业务命令，子进程继承修改后的 os.environ。
     # 不用 subprocess + wait，避免多一层进程树 + 信号转发复杂度。
+    # 端口等参数由 docker-compose 模板层通过 --env-file 读取 .env.<profile>
+    # 的 AATS_API_PORT 直接插值到 command 和 ports 中，shim 不需要干预。
     os.execvp(sys.argv[1], sys.argv[1:])
 
 
