@@ -943,13 +943,14 @@ research  — 参数研究层，实验元数据、诊断摘要、扫描批次记
 #### 数据流全景
 
 ```text
-+-- 历史数据 daemon --------+    +-- 实时数据 daemon --------+
-|  incoming/ ZIP            |    |  OKX REST API             |
-|  → file discovery         |    |  → candles/funding 采集    |
-|  → staging → 质量门控     |    |  → staging → 质量门控      |
-|  → bronze → silver        |    |  → bronze → silver         |
-|  → 移到 completed/failed  |    |  → 定期 Gold 构建 + Gap 修复|
-+---------------------------+    +----------------------------+
++-- historical_daemon --once -+    +-- daily_ingest (cron) -----+
+|  incoming/ ZIP              |    |  OKX REST API              |
+|  → file discovery           |    |  → collect_candles_increm. |
+|  → staging → 质量门控       |    |  → collect_funding_increm. |
+|  → bronze → silver → Gold   |    |  → staging → 质量门控      |
+|  → 移到 completed/failed    |    |  → bronze → silver → Gold  |
++-----------------------------+    |  → silver gap detect       |
+                                   +----------------------------+
               ↓                                ↓
         Silver 标准化层  ──→  Gold 回放层  ──→  Phase 2-6 研究管线
 ```
@@ -1001,7 +1002,7 @@ python scripts/rdp_run_full_pipeline.py --stop-after phase4  \
 | `RDP_LIVE_DATABASE_URL` | Production DB 只读连接（Phase 3+ 需要） | — |
 | `RDP_HISTORICAL_INCOMING_DIR` | 历史 ZIP 输入目录 | `./data/historical/incoming` |
 | `RDP_ROLLING_CANDLES_SYMBOLS` | 采集 symbol 列表 | `BTC-USDT,ETH-USDT,BTC-USDT-SWAP,ETH-USDT-SWAP` |
-| `RDP_ROLLING_CANDLES_TIMEFRAMES` | 采集 timeframe 列表 | `1m,5m,15m,1H` |
+| `RDP_ROLLING_CANDLES_TIMEFRAMES` | 采集 timeframe 列表 | `15m,1H`（1m/5m 默认禁用，schema 仍存在） |
 | `RDP_ENV` | 环境标识（dev/staging/prod） | `dev` |
 
 完整配置模板：`configs/templates/.env.research.example`
@@ -1010,20 +1011,23 @@ python scripts/rdp_run_full_pipeline.py --stop-after phase4  \
 
 Phase 1 负责从 OKX 采集市场数据，经清洗、去重、标准化后存入分层数据仓库，最终生成可直接用于回测的 Gold replay bars。
 
-**覆盖范围**：OKX · BTC-USDT / ETH-USDT / BTC-USDT-SWAP / ETH-USDT-SWAP · 1m / 5m / 15m / 1H · candles + funding rates
+**覆盖范围**：OKX · BTC-USDT / ETH-USDT / BTC-USDT-SWAP / ETH-USDT-SWAP · 默认采集 15m / 1H · candles + funding rates（1m / 5m schema 仍保留，仅默认不再增量采集）
 
-**数据采集**：
+**数据采集**（2026-04-07 起 daemon 模式已退役）：
 
-| daemon | 职责 | 默认间隔 |
-|--------|------|----------|
-| Historical | 定时扫描 `incoming/` 目录，发现新 ZIP 自动消费 → staging → silver → Gold | 30 秒 |
-| Realtime | 滚动采集 candles/funding + 定期构建 Gold + 定期检测 gap | 60 秒 |
+| 入口 | 职责 | 调用方式 |
+|------|------|----------|
+| `rdp_run_daily_ingest.py` | 日批增量：candles + funding + Gold + Gap 一次跑完 | cron 每天 04:00 UTC 1 次 |
+| `rdp_historical_daemon.py --once` | 扫描 `incoming/` 目录消费新 ZIP → staging → silver → Gold | 拖完 ZIP 后手动 1 次 |
+| `rdp_start.py` / `rdp_realtime_daemon.py` | 兼容薄壳，会打印 deprecation 警告并转发到上面两个入口 | 不推荐 |
+
+> **为什么不再用常驻 daemon**：所有 RDP 消费方都是 daily/weekly cadence，没有任何环节需要 intra-minute 数据；实盘交易引擎自有 OKX websocket 直连，不读 RDP。原 60s tick daemon 每天 ~7800 次 OKX 调用 99% 是浪费。详见 [数据采集迁移到日批](docs/operations/rdp_scheduling_strategy.md#数据采集迁移到日批)。
 
 **目录约定**：将 ZIP 放入 `data/historical/incoming/{candles_spot,candles_swap,funding_swap}/{1m,5m,15m,1h}/`，timeframe 由子目录名自动推断。消费成功移入 `completed/`，失败移入 `failed/`（附 `.error` 日志）。
 
 **质量门控**：candle 检查重复/OHLC 非法/时间乱序（fail 级）+ 缺失间隔/volume 负值（warn 级）；funding 检查重复/乱序/null rate。质量报告写入 `meta.quality_reports`。
 
-**Gold 层**：通过 as-of join 将 funding rate 对齐到 candle bar。daemon 在消费新 swap ZIP 时自动构建；也可手动 `python scripts/rdp_build_gold_all.py`。Spot Gold 表按设计为空（spot 无 funding rate）。
+**Gold 层**：通过 as-of join 将 funding rate 对齐到 candle bar。`daily_ingest` 自动重建处理过的 swap (symbol, tf) 组合；也可手动 `python scripts/rdp_build_gold_all.py`。Spot Gold 表按设计为空（spot 无 funding rate）。
 
 ### 21.5 Phase 2 — 参数研究
 
@@ -1161,7 +1165,6 @@ RDP 通过以下机制支持长期可靠运行：
 
 | 项目 | 说明 |
 |------|------|
-| Scheduler 防重 | 进程内 in-memory bucket dedup，重启后可能重跑一次（下游 upsert 幂等） |
 | Symbol 白名单 | 硬编码 4 个 instrument，后续需改为数据库驱动 |
 | Gold volume 语义 | spot vol = 基础币量，swap vol = 合约张数，未做跨类型统一 |
 | 单进程 | scheduler 设计为单进程，不支持多 worker 并行 |
