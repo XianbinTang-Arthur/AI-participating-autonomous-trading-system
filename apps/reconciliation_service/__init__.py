@@ -1,2 +1,0 @@
-"""Reconciliation service application package."""
-

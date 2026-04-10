@@ -1,2 +1,0 @@
-"""Portfolio service application package."""
-

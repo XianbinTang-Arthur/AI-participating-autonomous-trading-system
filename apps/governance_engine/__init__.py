@@ -1,2 +1,0 @@
-"""Governance engine application package."""
-

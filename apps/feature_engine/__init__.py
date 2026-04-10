@@ -1,2 +1,0 @@
-"""Feature engine application package."""
-
