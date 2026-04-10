@@ -65,6 +65,8 @@ services:
       - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      # 首次初始化时自动创建 4 个环境隔离数据库 + 1 个 RDP 研究库
+      - ./initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aats} -d ${POSTGRES_DB:-aats}"]
       interval: 10s

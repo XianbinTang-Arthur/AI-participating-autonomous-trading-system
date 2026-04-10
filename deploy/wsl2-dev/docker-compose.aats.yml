@@ -37,13 +37,11 @@ networks:
 
 # 4 个服务共享的环境变量片段
 x-aats-common-env: &aats-common-env
-  # pydantic 字段真名是 database_url，env_prefix=AATS_ 对应 AATS_DATABASE_URL。
-  # 历史上这里写的是 AATS_DB_DSN（dead variable，pydantic 不认识），在 managed
-  # profile 前的 monolith 时代靠 .env 里的 AATS_DATABASE_URL 顶上。4 进程 override
-  # 补 AATS_DATABASE_URL 时也要顶在 env_file 上面。slice docker-compose hardening
-  # 工作包 B 统一改名到真名，4 进程拓扑直接通过 service 名指向 postgres:5432，
-  # profile override 不再需要补 AATS_DATABASE_URL。
-  AATS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/${POSTGRES_DB:-aats}
+  # 数据库名 AATS_DB_NAME 来自 .env.<profile>，通过启动命令的
+  # --env-file ../../.env.<profile> 注入到 compose 模板层。
+  # 4 个环境各自独立：aats_spot / aats_derivatives / aats_live_spot / aats_live_derivatives。
+  # 用户名和密码来自 .env.wsl2 的 POSTGRES_USER / POSTGRES_PASSWORD。
+  AATS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/${AATS_DB_NAME:-aats}
   AATS_EVENT_BUS_BACKEND: hybrid
   AATS_NATS_URL: nats://nats:4222
   AATS_NATS_STREAM_NAME: AATS_EVENTS
