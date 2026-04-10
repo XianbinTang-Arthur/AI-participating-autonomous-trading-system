@@ -36,3 +36,8 @@ PATH=/home/arthur/aats-venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 
 # 5) 每 30 分钟备份一次 (保留 14 天)
 */30 * * * * cd /home/arthur/aats && ./deploy/wsl2-dev/scripts/backup_postgres.sh >> logs/rdp/backup.log 2>&1
+
+# ── 健康检查 ──────────────────────────────────────────────────────────
+
+# 6) 每小时巡检一次, 所有任务状态汇总到 healthcheck.log
+0 * * * * cd /home/arthur/aats && ./deploy/wsl2-dev/scripts/cron_healthcheck.sh >> logs/rdp/healthcheck.log 2>&1
