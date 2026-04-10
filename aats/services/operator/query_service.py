@@ -136,10 +136,30 @@ class OperatorQueryService:
     def _cached(self, key: str, loader):
         if not hasattr(self, "_cache"):
             self._cache = {}
+        if not hasattr(self, "_inflight"):
+            self._inflight: dict[str, __import__("threading").Event] = {}
         with self._cache_lock:
             if key in self._cache:
                 return self._cache[key]
-        value = loader()
+            existing_event = self._inflight.get(key)
+            if existing_event is not None:
+                wait_for = existing_event
+            else:
+                event = __import__("threading").Event()
+                self._inflight[key] = event
+                wait_for = None
+        if wait_for is not None:
+            wait_for.wait(timeout=60)
+            with self._cache_lock:
+                if key in self._cache:
+                    return self._cache[key]
+            return loader()
+        try:
+            value = loader()
+        finally:
+            with self._cache_lock:
+                self._inflight.pop(key, None)
+                event.set()
         with self._cache_lock:
             if key not in self._cache:
                 self._cache[key] = value
@@ -148,6 +168,13 @@ class OperatorQueryService:
     def _cached_ttl(self, key: str, ttl_seconds: int, loader):
         if not hasattr(self, "_ttl_cache"):
             self._ttl_cache = {}
+        # Singleflight: 冷启动时 dashboard bundle 会在多个线程里同时调用
+        # 同一个 cache key（比如 systemRecovery 和 mode 都触发 recovery_view）。
+        # 没有 singleflight 的话，每个线程各自执行 loader()，嵌套的
+        # parallel_fetch 再各开 10 个子线程——惊群效应让冷启动从 ~3s 膨胀到 >30s。
+        # 用 per-key Event 让第一个线程执行 loader，其他线程等待结果。
+        if not hasattr(self, "_inflight"):
+            self._inflight: dict[str, __import__("threading").Event] = {}
         with self._cache_lock:
             now = utc_now()
             cached = self._ttl_cache.get(key)
@@ -155,7 +182,33 @@ class OperatorQueryService:
                 expires_at, value = cached
                 if expires_at > now:
                     return value
-        value = loader()
+            # 检查是否已有线程在计算这个 key
+            existing_event = self._inflight.get(key)
+            if existing_event is not None:
+                # 另一个线程正在执行 loader，等它完成
+                wait_for = existing_event
+            else:
+                # 我们是第一个：注册 event，自己执行 loader
+                event = __import__("threading").Event()
+                self._inflight[key] = event
+                wait_for = None
+        if wait_for is not None:
+            # 等待 leader 线程完成（最多 60s 防死锁）
+            wait_for.wait(timeout=60)
+            with self._cache_lock:
+                cached = self._ttl_cache.get(key)
+                if cached is not None:
+                    expires_at, value = cached
+                    if expires_at > now:
+                        return value
+            # leader 失败了或超时，自己兜底执行
+            return loader()
+        try:
+            value = loader()
+        finally:
+            with self._cache_lock:
+                self._inflight.pop(key, None)
+                event.set()
         with self._cache_lock:
             now = utc_now()
             cached = self._ttl_cache.get(key)
