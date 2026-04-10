@@ -21,19 +21,31 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--username",
-        required=True,
-        help="必填。管理员用户名。",
+        default=None,
+        help="管理员用户名。未传则读 AATS_OPERATOR_ADMIN_USERNAME 环境变量。",
     )
     parser.add_argument(
         "--password",
-        help="可选。管理员密码；不传则交互输入。",
+        default=None,
+        help="管理员密码。未传则读 AATS_OPERATOR_ADMIN_PASSWORD 环境变量，仍无则交互输入。",
     )
     return parser.parse_args()
 
 
-def _read_password(explicit_password: str | None) -> str:
-    if explicit_password:
-        return explicit_password
+def _resolve_username(explicit: str | None) -> str:
+    value = explicit or os.environ.get("AATS_OPERATOR_ADMIN_USERNAME")
+    if not value:
+        raise SystemExit(
+            "请通过 --username 或 AATS_OPERATOR_ADMIN_USERNAME 环境变量指定管理员用户名。"
+        )
+    return value.strip()
+
+
+def _resolve_password(explicit: str | None) -> str:
+    value = explicit or os.environ.get("AATS_OPERATOR_ADMIN_PASSWORD")
+    if value:
+        return value
+    # 环境变量未设置，交互输入
     first = getpass.getpass("Admin password: ")
     second = getpass.getpass("Repeat password: ")
     if not first:
@@ -79,7 +91,8 @@ def main() -> None:
     if not settings.database_url:
         raise SystemExit("database_url_required")
 
-    password = _read_password(args.password)
+    username = _resolve_username(args.username)
+    password = _resolve_password(args.password)
     runtime = create_database_runtime(settings.database_url)
     try:
         if settings.database_auto_create_schema:
@@ -88,7 +101,7 @@ def main() -> None:
         repo = PostgresOperatorUserRepository(runtime.session_factory)
         created = create_operator_user(
             repo,
-            username=args.username,
+            username=username,
             password=password,
             role="admin",
             enabled=True,
