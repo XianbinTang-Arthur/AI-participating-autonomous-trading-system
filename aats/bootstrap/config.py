@@ -108,7 +108,7 @@ from aats.services.market_gateway.gateway import MarketDataGateway
 from aats.services.market_gateway.normalizer import MarketSnapshotNormalizer
 from aats.services.market_gateway.okx_websocket import OKXPublicWebSocketClient
 from aats.services.market_gateway.publisher import MarketSnapshotPublisher
-from aats.services.operator.accounts import enabled_admin_count
+from aats.services.operator.accounts import create_operator_user, enabled_admin_count
 from aats.services.operator.command_bridge import (
     OperatorCommandClient,
     OperatorCommandWorker,
@@ -1164,6 +1164,35 @@ def _exchange_runtime_hardening_kind(
     return None
 
 
+def _auto_seed_operator_admin_if_configured(storage: StorageBackends) -> bool:
+    """当环境变量 AATS_OPERATOR_ADMIN_USERNAME / PASSWORD 存在且数据库无 admin 时自动创建。
+
+    返回 True 表示成功创建了 admin 用户，False 表示未执行（缺少环境变量）。
+    """
+    username = os.environ.get("AATS_OPERATOR_ADMIN_USERNAME", "").strip()
+    password = os.environ.get("AATS_OPERATOR_ADMIN_PASSWORD", "")
+    if not username or not password:
+        return False
+    try:
+        created = create_operator_user(
+            storage.operator_repo,
+            username=username,
+            password=password,
+            role="admin",
+            enabled=True,
+        )
+        _log.info(
+            "auto_seeded_operator_admin",
+            username=created.username,
+            role=created.role,
+        )
+        return True
+    except ValueError as exc:
+        # username_conflict → 用户已存在，说明之前建过但可能被 disabled
+        _log.warning("auto_seed_operator_admin_skipped", reason=str(exc))
+        return False
+
+
 def _validate_operator_auth_settings(settings: AATSSettings, storage: StorageBackends) -> None:
     if settings.storage_mode != "postgres":
         return
@@ -1174,6 +1203,9 @@ def _validate_operator_auth_settings(settings: AATSSettings, storage: StorageBac
     if settings.operator_write_api_key:
         return
     if enabled_admin_count(storage.operator_repo) > 0:
+        return
+    # 数据库无 admin → 尝试从环境变量自动创建
+    if _auto_seed_operator_admin_if_configured(storage):
         return
     if _is_dev_simulated_exchange_runtime(settings):
         _log.warning(
