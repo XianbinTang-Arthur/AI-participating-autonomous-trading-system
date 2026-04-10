@@ -56,6 +56,7 @@ def main() -> None:
         "apps.api_gateway.main:app",
         host=host,
         port=port,
+        timeout_keep_alive=120,
     )
 
 

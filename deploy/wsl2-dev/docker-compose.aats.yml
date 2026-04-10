@@ -109,6 +109,8 @@ services:
       - "0.0.0.0"
       - "--port"
       - "${AATS_API_PORT:-8000}"
+      - "--timeout-keep-alive"
+      - "120"
     # 端口值来自 .env.<profile> 的 AATS_API_PORT，通过启动命令的
     # --env-file ../../.env.<profile> 注入到 compose 模板插值层。
     # 如果没传 --env-file 则 fallback 到 8000。

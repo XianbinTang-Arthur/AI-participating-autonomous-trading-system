@@ -2,22 +2,6 @@
 # 这里只放策略、AI、自动换档、多策略与试盘守护相关参数。
 # 数据库、端口、日志、交易所凭证、仓位上限等运行时 override 请改根目录 `.env.spot`。
 
-# >>> TEMP-HACK-E (2026-04-08): 和 derivatives.yaml 对齐的同源补丁
-# 4 套 managed profile 里 spot/derivatives 两个模拟盘 profile（environment=dev）都把
-# operator_session_cookie_secure 默认成 False（dev UX 友好），但 config.py 的 exchange
-# runtime hardening gate 对 exchange_coupled=True（含模拟盘）强制要 True —— 直接冲突。
-# 而 AATS_OPERATOR_SESSION_COOKIE_SECURE 又在 MANAGED_PROFILE_DERIVED_ENV_KEYS，env var
-# override 会被剥离，只能在 strategy yaml 里打补丁。
-#
-# 对应的 admin user 校验通过 compose override 把 AATS_OPERATOR_SESSION_SECRET 置空
-# （operator_session_configured→False）来绕过。两手配合同 derivatives。
-#
-# 本条只在 spot 模拟盘 + docker-compose 4 进程 / 官方 scripts/start_api.py 场景下触发
-# （spot_live 和 derivatives_live 的 runtime_defaults 已经是 cookie_secure=True，不需要补丁）。
-# 根因修复 slice 落地后和 derivatives.yaml 同步移除。grep 'TEMP-HACK-E' 即可定位。
-operator_session_cookie_secure: true
-# <<< TEMP-HACK-E
-
 # AI 与自动降级
 # [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker / ai_decision_maker_with_profile_control；推荐值：baseline_only。
 ai_operating_mode: baseline_only

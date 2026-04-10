@@ -45,13 +45,35 @@ export async function requestJson(path, options = {}) {
   }
 
   try {
-    const response = await fetch(path, {
-      method: options.method || "GET",
+    // 网络层自动重试：当浏览器在已被服务端关闭的 keep-alive 连接上发请求时，
+    // 会立即得到 TypeError("Failed to fetch")。这类错误可以安全地在新连接上
+    // 重试一次。只对 GET 请求做重试（幂等），且仅重试 TypeError（网络层故障），
+    // 不重试 AbortError（超时/取消）或 HTTP 4xx/5xx（服务端明确拒绝）。
+    const method = options.method || "GET";
+    const fetchOpts = {
+      method,
       headers,
       body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
       credentials: "same-origin",
       signal: controller.signal,
-    });
+    };
+    let response;
+    try {
+      response = await fetch(path, fetchOpts);
+    } catch (fetchError) {
+      if (
+        method === "GET" &&
+        fetchError instanceof TypeError &&
+        !(fetchError.name === "AbortError") &&
+        !controller.signal.aborted
+      ) {
+        // eslint-disable-next-line no-console
+        console.warn("[api-client] 网络层错误，自动重试一次", fetchError.message);
+        response = await fetch(path, fetchOpts);
+      } else {
+        throw fetchError;
+      }
+    }
 
     const text = await response.text();
     const payload = text ? safeJsonParse(text) : null;

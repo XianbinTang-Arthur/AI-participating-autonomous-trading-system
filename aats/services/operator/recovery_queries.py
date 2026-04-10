@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from aats.events import topics
+from aats.services.operator._parallel import parallel_fetch
 from aats.services.runtime_scope import latest_topic_event_for_scope
 
 if TYPE_CHECKING:
@@ -14,53 +15,60 @@ class RecoveryQueryFacade:
         self.owner = owner
 
     def recovery_view(self) -> dict[str, Any]:
-        return self.owner._cached("recovery_view", self.build_recovery_view)
+        cache_key = f"recovery_view:{self.owner._scope_cache_fragment()}"
+        return self.owner._cached_ttl(cache_key, 35, self.build_recovery_view)
 
     def build_recovery_view(self) -> dict[str, Any]:
-        latest_reconciliation = self.owner._latest_scoped_reconciliation()
         latest_state_snapshot_getter = getattr(
             self.owner.runtime.reconciliation_repo,
             "latest_state_snapshot_for_scope",
             None,
-        )
-        latest_state_snapshot = (
-            latest_state_snapshot_getter(scope=self.owner.state_scope)
-            if callable(latest_state_snapshot_getter)
-            else None
         )
         latest_generation_getter = getattr(
             self.owner.runtime.reconciliation_repo,
             "latest_baseline_generation_for_scope",
             None,
         )
-        latest_baseline_generation = (
-            latest_generation_getter(scope=self.owner.state_scope)
-            if callable(latest_generation_getter)
-            else None
-        )
         latest_ack_getter = getattr(
             self.owner.runtime.reconciliation_repo,
             "latest_exchange_ack_watermark_for_scope",
             None,
         )
-        latest_exchange_ack_watermark = (
-            latest_ack_getter(scope=self.owner.state_scope)
-            if callable(latest_ack_getter)
-            else None
-        )
-        latest_baseline = self.owner.latest_account_baseline()
-        latest_rebaseline_action = self.owner.latest_operator_action("rebaseline")
-        latest_resume_action = self.owner.latest_operator_action("resume")
-        latest_ai_degradation = latest_topic_event_for_scope(
-            self.owner.runtime.event_store,
-            topics.AI_DEGRADATION_EVENTS,
-            self.owner.state_scope,
-        )
-        latest_ai_shadow_evaluation = latest_topic_event_for_scope(
-            self.owner.runtime.event_store,
-            topics.AI_SHADOW_EVALUATIONS,
-            self.owner.state_scope,
-        )
+        queries: dict[str, Any] = {
+            "latest_reconciliation": self.owner._latest_scoped_reconciliation,
+            "latest_baseline": self.owner.latest_account_baseline,
+            "latest_rebaseline_action": lambda: self.owner.latest_operator_action("rebaseline"),
+            "latest_resume_action": lambda: self.owner.latest_operator_action("resume"),
+            "latest_ai_degradation": lambda: latest_topic_event_for_scope(
+                self.owner.runtime.event_store,
+                topics.AI_DEGRADATION_EVENTS,
+                self.owner.state_scope,
+            ),
+            "latest_ai_shadow_evaluation": lambda: latest_topic_event_for_scope(
+                self.owner.runtime.event_store,
+                topics.AI_SHADOW_EVALUATIONS,
+                self.owner.state_scope,
+            ),
+        }
+        if callable(latest_state_snapshot_getter):
+            queries["latest_state_snapshot"] = lambda: latest_state_snapshot_getter(scope=self.owner.state_scope)
+        if callable(latest_generation_getter):
+            queries["latest_baseline_generation"] = lambda: latest_generation_getter(scope=self.owner.state_scope)
+        if callable(latest_ack_getter):
+            queries["latest_exchange_ack_watermark"] = lambda: latest_ack_getter(scope=self.owner.state_scope)
+
+        r = parallel_fetch(queries)
+
+        latest_reconciliation = r["latest_reconciliation"]
+        latest_state_snapshot = r.get("latest_state_snapshot")
+        latest_baseline_generation = r.get("latest_baseline_generation")
+        latest_exchange_ack_watermark = r.get("latest_exchange_ack_watermark")
+        latest_baseline = r["latest_baseline"]
+        latest_rebaseline_action = r["latest_rebaseline_action"]
+        latest_resume_action = r["latest_resume_action"]
+        latest_ai_degradation = r["latest_ai_degradation"]
+        latest_ai_shadow_evaluation = r["latest_ai_shadow_evaluation"]
+
         base = self.owner.recovery_posture.finalize_status(latest_reconciliation=latest_reconciliation)
         if not self.owner._ai_history_visible():
             latest_ai_degradation = None
@@ -144,19 +152,27 @@ class RecoveryQueryFacade:
         }
 
     def system_mode(self) -> dict[str, Any]:
-        return self.owner._cached("system_mode", self.build_system_mode)
+        cache_key = f"system_mode:{self.owner._scope_cache_fragment()}"
+        return self.owner._cached_ttl(cache_key, 35, self.build_system_mode)
 
     def build_system_mode(self) -> dict[str, Any]:
-        snapshot = dict(self.owner.runtime.mode_controller.snapshot())
-        readiness = self.owner.runtime.execution_adapter.readiness()
-        recovery = self.recovery_view()
+        r = parallel_fetch({
+            "snapshot": lambda: dict(self.owner.runtime.mode_controller.snapshot()),
+            "readiness": self.owner.runtime.execution_adapter.readiness,
+            "recovery": self.recovery_view,
+            "health_blockers": lambda: list(dict.fromkeys(self.owner.runtime.health_service.execution_blockers())),
+            "trial_guard": self.owner.trial_guard,
+        })
+        snapshot = r["snapshot"]
+        readiness = r["readiness"]
+        recovery = r["recovery"]
         submit_blocked_reasons = list(
             dict.fromkeys(
                 list(snapshot.get("submit_blocked_reasons", []))
                 + list(readiness.get("submit_blocked_reasons", []))
             )
         )
-        health_blockers = list(dict.fromkeys(self.owner.runtime.health_service.execution_blockers()))
+        health_blockers = r["health_blockers"]
         recovery_blockers = list(dict.fromkeys(recovery["resume_blocked_reasons"]))
         exchange_submit_allowed = bool(
             readiness.get("exchange_submit_allowed", snapshot.get("exchange_submit_allowed", False))
@@ -179,5 +195,5 @@ class RecoveryQueryFacade:
         snapshot["active_profile_revision_id"] = None
         snapshot["pending_profile_revision_id"] = None
         snapshot["restart_required"] = False
-        snapshot["trial_guard"] = self.owner.trial_guard()
+        snapshot["trial_guard"] = r["trial_guard"]
         return snapshot

@@ -1382,7 +1382,7 @@ class OperatorQueryService:
 
     def margin_buffer_risk(self) -> dict[str, Any]:
         cache_key = f"margin_buffer_risk:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 10, self._build_margin_buffer_risk)
+        return self._cached_ttl(cache_key, 35, self._build_margin_buffer_risk)
 
     def _build_margin_buffer_risk(self) -> dict[str, Any]:
         snapshot = self.runtime.account_service.latest_snapshot()
@@ -1534,7 +1534,7 @@ class OperatorQueryService:
 
     def guarded_live_preflight(self) -> dict[str, Any]:
         cache_key = f"guarded_live_preflight:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 10, self._build_guarded_live_preflight)
+        return self._cached_ttl(cache_key, 35, self._build_guarded_live_preflight)
 
     def _build_guarded_live_preflight(self) -> dict[str, Any]:
         if not (
@@ -1893,7 +1893,7 @@ class OperatorQueryService:
 
     def guarded_live_run_packet(self) -> dict[str, Any]:
         cache_key = f"guarded_live_run_packet:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 15, self._build_guarded_live_run_packet)
+        return self._cached_ttl(cache_key, 35, self._build_guarded_live_run_packet)
 
     def _build_guarded_live_run_packet(self) -> dict[str, Any]:
         preflight = self.guarded_live_preflight()
@@ -2552,10 +2552,12 @@ class OperatorQueryService:
         return latest.payload if latest is not None else None
 
     def account_service_status(self) -> dict[str, Any]:
-        return self._cached("account_service_status", self.runtime.account_service.status)
+        cache_key = f"account_service_status:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.runtime.account_service.status)
 
     def latest_exchange_snapshot(self):
-        return self._cached("latest_exchange_snapshot", self.runtime.account_service.latest_snapshot)
+        cache_key = f"latest_exchange_snapshot:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.runtime.account_service.latest_snapshot)
 
     def _latest_strategy_snapshot_event(self):
         return self._cached(
@@ -4565,22 +4567,27 @@ class OperatorQueryService:
         return self.recovery_queries.build_recovery_view()
 
     def system_recovery(self) -> dict[str, Any]:
-        return self.recovery_queries.system_recovery()
+        cache_key = f"system_recovery:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.recovery_queries.system_recovery)
 
     def system_mode(self) -> dict[str, Any]:
         return self.recovery_queries.system_mode()
 
     def system_health(self) -> dict[str, Any]:
-        return self._cached("system_health", self.runtime_queries.system_health)
+        cache_key = f"system_health:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.runtime_queries.system_health)
 
     def system_runtime(self) -> dict[str, Any]:
-        return self._cached("system_runtime", self.runtime_queries.system_runtime)
+        cache_key = f"system_runtime:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.runtime_queries.system_runtime)
 
     def blockers(self) -> list[dict[str, Any]]:
-        return self.blocker_queries.blockers()
+        cache_key = f"blockers:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.blocker_queries.blockers)
 
     def blocker_control(self) -> dict[str, Any]:
-        return self.blocker_queries.blocker_control()
+        cache_key = f"blocker_control:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.blocker_queries.blocker_control)
 
     async def perform_blocker_action(
         self,
@@ -4612,11 +4619,11 @@ class OperatorQueryService:
 
     def metrics(self) -> dict[str, Any]:
         cache_key = f"metrics:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 15, self.runtime_queries.metrics)
+        return self._cached_ttl(cache_key, 35, self.runtime_queries.metrics)
 
     def phase1_shadow(self) -> dict[str, Any]:
         cache_key = f"phase1_shadow:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 10, self._build_phase1_shadow)
+        return self._cached_ttl(cache_key, 35, self._build_phase1_shadow)
 
     def phase1_shadow_history(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         return self.runtime_queries.phase1_shadow_history(limit=limit, offset=offset)
@@ -4645,7 +4652,7 @@ class OperatorQueryService:
                 },
             }
         cache_key = f"trial_guard:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 15, service.snapshot)
+        return self._cached_ttl(cache_key, 35, service.snapshot)
 
     def _build_system_mode(self) -> dict[str, Any]:
         return self.recovery_queries.build_system_mode()
@@ -7165,6 +7172,10 @@ class OperatorQueryService:
         }
 
     def latest_decision(self) -> dict[str, Any]:
+        cache_key = f"latest_decision:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self._build_latest_decision)
+
+    def _build_latest_decision(self) -> dict[str, Any]:
         decision_id = self.latest_decision_id()
         if decision_id is None:
             return {
@@ -7625,7 +7636,8 @@ class OperatorQueryService:
         return self.account_queries.positions()
 
     def account_state(self) -> dict[str, Any]:
-        return self.account_queries.account_state()
+        cache_key = f"account_state:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.account_queries.account_state)
 
     def _build_account_state(self) -> dict[str, Any]:
         return self.account_queries.build_account_state()
@@ -7718,7 +7730,8 @@ class OperatorQueryService:
         return self.account_queries.fill_detail(fill_id)
 
     def execution_latest(self) -> dict[str, Any]:
-        return self.account_queries.execution_latest()
+        cache_key = f"execution_latest:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.account_queries.execution_latest)
 
     def _build_execution_latest(self) -> dict[str, Any]:
         return self.account_queries.build_execution_latest()
@@ -9567,7 +9580,7 @@ class OperatorQueryService:
 
     def reconciliation_latest(self) -> dict[str, Any]:
         cache_key = f"reconciliation_latest:{self._scope_cache_fragment()}"
-        return self._cached_ttl(cache_key, 15, self.reconciliation_system_queries.reconciliation_latest)
+        return self._cached_ttl(cache_key, 35, self.reconciliation_system_queries.reconciliation_latest)
 
     def reconciliation_recent(self, *, limit: int = 20, offset: int = 0) -> dict[str, Any]:
         return self.reconciliation_system_queries.reconciliation_recent(limit=limit, offset=offset)

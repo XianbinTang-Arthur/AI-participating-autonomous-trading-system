@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import threading
 from typing import TYPE_CHECKING, Any
 
 from aats.events import topics
 from aats.schemas.common import utc_now
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
+from aats.services.operator._parallel import parallel_fetch
 from aats.services.runtime_scope import latest_topic_event_for_scope
 
 if TYPE_CHECKING:
@@ -284,18 +286,32 @@ class RuntimeQueryFacade:
         return self.build_system_health()
 
     def build_system_health(self) -> dict[str, Any]:
-        snapshot = self.owner.runtime.health_service.snapshot()
-        mode_snapshot = self.owner.system_mode()
-        recovery = self.owner.recovery_view()
-        market = self.owner.runtime.market_gateway.status()
-        account = self.owner.account_service_status()
-        execution = self.owner.runtime.execution_adapter.readiness()
-        phase1_shadow = self.owner.phase1_shadow()
-        derivatives_live_guard = self.owner.derivatives_live_guard()
-        latest_reconciliation = self.owner._latest_scoped_reconciliation()
-        latest_portfolio = self.owner._latest_scoped_snapshot()
-        blockers = self.owner.blockers()
-        account_baseline = self.owner.latest_account_baseline()
+        r = parallel_fetch({
+            "snapshot": self.owner.runtime.health_service.snapshot,
+            "mode_snapshot": self.owner.system_mode,
+            "recovery": self.owner.recovery_view,
+            "market": self.owner.runtime.market_gateway.status,
+            "account": self.owner.account_service_status,
+            "execution": self.owner.runtime.execution_adapter.readiness,
+            "phase1_shadow": self.owner.phase1_shadow,
+            "derivatives_live_guard": self.owner.derivatives_live_guard,
+            "latest_reconciliation": self.owner._latest_scoped_reconciliation,
+            "latest_portfolio": self.owner._latest_scoped_snapshot,
+            "blockers": self.owner.blockers,
+            "account_baseline": self.owner.latest_account_baseline,
+        })
+        snapshot = r["snapshot"]
+        mode_snapshot = r["mode_snapshot"]
+        recovery = r["recovery"]
+        market = r["market"]
+        account = r["account"]
+        execution = r["execution"]
+        phase1_shadow = r["phase1_shadow"]
+        derivatives_live_guard = r["derivatives_live_guard"]
+        latest_reconciliation = r["latest_reconciliation"]
+        latest_portfolio = r["latest_portfolio"]
+        blockers = r["blockers"]
+        account_baseline = r["account_baseline"]
         reconciliation_component = next(
             (component for component in snapshot.components if component.component == "reconciliation"),
             None,
@@ -325,12 +341,16 @@ class RuntimeQueryFacade:
             runtime_state = "degraded"
         else:
             runtime_state = "healthy"
-        self.owner._persist_blocker_snapshot(
-            source="system_health",
-            runtime_state=runtime_state,
-            mode_snapshot=mode_snapshot,
-            blockers=blockers,
-        )
+        threading.Thread(
+            target=self.owner._persist_blocker_snapshot,
+            kwargs=dict(
+                source="system_health",
+                runtime_state=runtime_state,
+                mode_snapshot=mode_snapshot,
+                blockers=blockers,
+            ),
+            daemon=True,
+        ).start()
         return {
             "overall_status": snapshot.status,
             "runtime_state": runtime_state,
@@ -410,26 +430,48 @@ class RuntimeQueryFacade:
         return self.build_system_runtime()
 
     def build_system_runtime(self) -> dict[str, Any]:
-        latest_decision = self.owner.runtime.event_store.latest(topics.DECISION_CONTEXTS)
-        latest_fill = self.owner.latest_fill()
-        latest_reconciliation = self.owner._latest_scoped_reconciliation()
-        account_baseline = self.owner.latest_account_baseline()
-        account_snapshot = self.owner.latest_exchange_snapshot()
-        recovery = self.owner.recovery_view()
-        guarded_live_preflight = self.owner.guarded_live_preflight()
-        guarded_live_run_packet = self.owner.guarded_live_run_packet()
-        event_store_archive = self.owner.runtime.event_store.archive_summary()
-        latest_replay_offset = self.owner.runtime.event_store.latest_replay_offset(
-            projection_key="portfolio_replay",
-            scope=self.owner.state_scope,
-        )
-        control_plane_consistency = self._control_plane_consistency()
-        account_status = self.owner.account_service_status()
+        # ── 阶段 1：并行获取所有独立子查询 ──────────────────────
+        r = parallel_fetch({
+            "latest_decision": lambda: self.owner.runtime.event_store.latest(topics.DECISION_CONTEXTS),
+            "latest_fill": self.owner.latest_fill,
+            "latest_reconciliation": self.owner._latest_scoped_reconciliation,
+            "account_baseline": self.owner.latest_account_baseline,
+            "account_snapshot": self.owner.latest_exchange_snapshot,
+            "recovery": self.owner.recovery_view,
+            "guarded_live_preflight": self.owner.guarded_live_preflight,
+            "guarded_live_run_packet": self.owner.guarded_live_run_packet,
+            "event_store_archive": self.owner.runtime.event_store.archive_summary,
+            "latest_replay_offset": lambda: self.owner.runtime.event_store.latest_replay_offset(
+                projection_key="portfolio_replay",
+                scope=self.owner.state_scope,
+            ),
+            "control_plane_consistency": self._control_plane_consistency,
+            "account_status": self.owner.account_service_status,
+            "runtime_profile_control": self.owner.runtime_profile_snapshot,
+            "strategy_runtime_summary": lambda: self.owner.strategy_runtime(limit=5).get("summary"),
+            "trial_guard": self.owner.trial_guard,
+            "margin_buffer_overview": self.owner.margin_buffer_risk,
+            "derivatives_live_guard": self.owner.derivatives_live_guard,
+        })
+
+        # ── 阶段 2：依赖性计算（需要上面的结果） ─────────────────
+        latest_decision = r["latest_decision"]
+        latest_fill = r["latest_fill"]
+        latest_reconciliation = r["latest_reconciliation"]
+        account_baseline = r["account_baseline"]
+        account_snapshot = r["account_snapshot"]
+        recovery = r["recovery"]
+        guarded_live_preflight = r["guarded_live_preflight"]
+        guarded_live_run_packet = r["guarded_live_run_packet"]
+        control_plane_consistency = r["control_plane_consistency"]
+        account_status = r["account_status"]
         position_mode_contract = account_status.get("position_mode_contract") or derivatives_position_mode_contract(
             settings=self.owner.runtime.settings,
             snapshot=account_snapshot,
         )
         now = utc_now()
+
+        # ── 阶段 3：组装返回 ──────────────────────────────────
         return {
             "runtime_profile": self.owner.runtime.runtime_profile.to_dict(),
             "environment_capabilities": self.owner.runtime.environment_capabilities.to_dict(),
@@ -462,8 +504,8 @@ class RuntimeQueryFacade:
                 if account_snapshot is not None
                 else None
             ),
-            "runtime_profile_control": self.owner.runtime_profile_snapshot(),
-            "strategy_runtime_summary": self.owner.strategy_runtime(limit=5).get("summary"),
+            "runtime_profile_control": r["runtime_profile_control"],
+            "strategy_runtime_summary": r["strategy_runtime_summary"],
             "symbols": [self.owner.runtime.settings.default_symbol],
             "enabled_timeframes": list(self.owner.runtime.settings.enabled_decision_timeframes),
             "decision_cadence": {
@@ -529,9 +571,9 @@ class RuntimeQueryFacade:
                 "truth_consistency_status": control_plane_consistency["status"],
                 "consistency_warning_codes": control_plane_consistency["warning_codes"],
             },
-            "trial_guard": self.owner.trial_guard(),
-            "margin_buffer_overview": self.owner.margin_buffer_risk(),
-            "derivatives_live_guard": self.owner.derivatives_live_guard(),
+            "trial_guard": r["trial_guard"],
+            "margin_buffer_overview": r["margin_buffer_overview"],
+            "derivatives_live_guard": r["derivatives_live_guard"],
             "guarded_live_preflight": guarded_live_preflight,
             "guarded_live_run_packet_summary": {
                 "status": guarded_live_run_packet.get("status"),
@@ -539,9 +581,9 @@ class RuntimeQueryFacade:
                 "summary_metrics": guarded_live_run_packet.get("summary_metrics"),
                 "operator_actions": guarded_live_run_packet.get("operator_actions"),
             },
-            "event_store_archive": event_store_archive,
+            "event_store_archive": r["event_store_archive"],
             "replay_offsets": {
-                "portfolio_replay": None if latest_replay_offset is None else latest_replay_offset.model_dump(mode="json"),
+                "portfolio_replay": None if r["latest_replay_offset"] is None else r["latest_replay_offset"].model_dump(mode="json"),
             },
         }
 
