@@ -16,8 +16,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--profile",
         choices=("spot", "derivatives", "spot_live", "derivatives_live"),
-        required=True,
-        help="必填。选择要写入管理员用户的环境模板。",
+        default=None,
+        help="环境模板。Docker 容器内已注入环境变量时可省略。",
     )
     parser.add_argument(
         "--username",
@@ -51,7 +51,18 @@ def main() -> None:
     from aats.storage.session import create_database_runtime, create_schema, validate_runtime_schema
 
     args = parse_args()
-    load_profiled_dotenv_into_process(ROOT, args.profile)
+
+    # Docker 容器内 env_file 已把 AATS_* 注入 os.environ，不需要读 .env 文件；
+    # 外部（WSL2 / 本机）运行时需要 --profile 指定 .env.<profile> 路径。
+    if args.profile:
+        load_profiled_dotenv_into_process(ROOT, args.profile)
+    elif not os.environ.get("AATS_DATABASE_URL"):
+        raise SystemExit(
+            "请指定 --profile，或确保 AATS_DATABASE_URL 已在环境变量中设置。\n"
+            "  容器外: python -m scripts.seed_operator_admin --profile derivatives --username admin\n"
+            "  容器内: python -m scripts.seed_operator_admin --username admin"
+        )
+
     os.chdir(ROOT)
     settings = load_settings()
 
