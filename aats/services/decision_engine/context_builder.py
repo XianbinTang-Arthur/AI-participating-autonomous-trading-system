@@ -94,13 +94,17 @@ class DecisionContextBuilder:
         market_event = (
             self._stream_cache.latest(topics.MARKET_SNAPSHOTS, key=symbol)
             if self._stream_cache is not None
-            else self.event_store.latest(topics.MARKET_SNAPSHOTS, key=symbol)
+            else None
         )
+        if market_event is None:
+            market_event = self.event_store.latest(topics.MARKET_SNAPSHOTS, key=symbol)
         feature_event = (
             self._stream_cache.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
             if self._stream_cache is not None
-            else self.event_store.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
+            else None
         )
+        if feature_event is None:
+            feature_event = self.event_store.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
         portfolio_event = scoped_portfolio_event(
             self.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS),
             self.state_scope,

@@ -166,28 +166,23 @@ def _normalize_dashboard_panel_keys(panel_keys: list[str]) -> tuple[str, ...]:
 #      check / inflight set 这段路径里没有 await）。
 _BUNDLE_CACHE_TTL_SECONDS = 2.0
 _bundle_cache: dict[tuple[Any, ...], tuple[float, dict[str, Any]]] = {}
-_bundle_cache_inflight: dict[tuple[Any, ...], "asyncio.Future[dict[str, Any]]"] = {}
+_bundle_cache_inflight: dict[tuple[Any, ...], tuple[int, "asyncio.Future[dict[str, Any]]"]] = {}
+# 代际计数器：每次 invalidate 递增。inflight compute 完成后只有代际一致
+# 才写缓存，防止 mutation 之前启动的计算把旧结果写回已清空的缓存。
+_bundle_cache_generation: int = 0
 
 
 def invalidate_bundle_cache() -> None:
-    """Drop the entire dashboard bundle cache.
+    """Drop the entire dashboard bundle cache and bump the generation.
 
     Called from the FastAPI app-level middleware after any successful
-    mutating request (POST/PATCH/PUT/DELETE). Without this, a user who
-    just ran an action (switch mode, activate profile, kill-switch toggle,
-    …) would still see a cached pre-action snapshot for up to
-    ``_BUNDLE_CACHE_TTL_SECONDS`` before the next fetch reflects their
-    mutation. This function is cheap (dict.clear) and safe to call from
-    any coroutine — it does NOT abort in-flight computes, it just ensures
-    the *next* fetch will recompute from scratch.
-
-    Note: we deliberately do NOT touch ``_bundle_cache_inflight``. Any
-    compute already running was scheduled BEFORE the mutation landed and
-    will eventually resolve; its result is valid for callers that happened
-    to dedupe into the same future. Those callers will then see the
-    newly-empty cache on their NEXT fetch, which picks up post-mutation
-    state.
+    mutating request (POST/PATCH/PUT/DELETE). Bumping the generation
+    ensures that any in-flight compute that started BEFORE this
+    invalidation will NOT write its (now-stale) result back into the
+    cache when it finishes.
     """
+    global _bundle_cache_generation
+    _bundle_cache_generation += 1
     _bundle_cache.clear()
 
 
@@ -510,6 +505,7 @@ async def dashboard_bundle(
     )
     loop = asyncio.get_running_loop()
     monotonic_now = loop.time()
+    compute_generation = _bundle_cache_generation
 
     cached_entry = _bundle_cache.get(cache_key)
     if cached_entry is not None:
@@ -529,24 +525,29 @@ async def dashboard_bundle(
     # In-flight dedup：已经有同 key 请求在算，直接 await 它的 future。注意
     # 这个分支本身会 await，后面拿回的 payload 要走同一份 timing-overlay
     # helper 让前端能区分 "命中 cache" 还是 "等 peer 算完"。
-    inflight_future = _bundle_cache_inflight.get(cache_key)
-    if inflight_future is not None:
-        try:
-            shared_payload = await inflight_future
-        except Exception:
-            # Peer 的 compute 失败 = 这次请求也应该返回相同的错误。让上层
-            # HTTPException/KeyError 顺着原路径抛出，不要在这里吞掉。
-            raise
-        return _bundle_response_with_cache_info(
-            base_payload=shared_payload,
-            request_started_at=request_started_at,
-            cache_hit=True,
-            cache_age_ms=0.0,
-            deduped=True,
-        )
+    # 代际守卫：invalidate 后创建的 inflight 属于旧代际，新请求不能复用，
+    # 否则 mutation 后的首次拉取仍会拿到旧 payload。
+    inflight_entry = _bundle_cache_inflight.get(cache_key)
+    if inflight_entry is not None:
+        inflight_gen, inflight_future = inflight_entry
+        if inflight_gen == compute_generation:
+            try:
+                shared_payload = await inflight_future
+            except Exception:
+                # Peer 的 compute 失败 = 这次请求也应该返回相同的错误。让上层
+                # HTTPException/KeyError 顺着原路径抛出，不要在这里吞掉。
+                raise
+            return _bundle_response_with_cache_info(
+                base_payload=shared_payload,
+                request_started_at=request_started_at,
+                cache_hit=True,
+                cache_age_ms=0.0,
+                deduped=True,
+            )
+        # 代际不匹配 → 旧 inflight 不可复用，fall through 重新计算。
 
     future: "asyncio.Future[dict[str, Any]]" = loop.create_future()
-    _bundle_cache_inflight[cache_key] = future
+    _bundle_cache_inflight[cache_key] = (compute_generation, future)
     try:
         try:
             require_read_access(request, api_key)
@@ -608,7 +609,9 @@ async def dashboard_bundle(
         }
         # 只缓存成功响应（含各 panel 内部的 error 条目——panel-level error 是
         # OperatorQueryService 预期的 best-effort 输出，不是端点失败）。
-        _bundle_cache[cache_key] = (loop.time(), payload)
+        # 代际守卫：如果计算期间发生过 invalidate，不写缓存，防止旧数据污染。
+        if _bundle_cache_generation == compute_generation:
+            _bundle_cache[cache_key] = (loop.time(), payload)
         if not future.done():
             future.set_result(payload)
         return payload
@@ -618,9 +621,11 @@ async def dashboard_bundle(
         raise
     finally:
         # Inflight 登记必须在任何路径下都清理掉，否则下次同 key 会永远等一个
-        # 不会有结果的 future。cache 本身没写时保持为空是正确行为——失败不应
-        # 污染缓存。
-        _bundle_cache_inflight.pop(cache_key, None)
+        # 不会有结果的 future。只清理自己的 entry——invalidate 后新请求可能
+        # 已经用新代际覆盖了同 key 的 inflight，不能误删新 entry。
+        stored = _bundle_cache_inflight.get(cache_key)
+        if stored is not None and stored[1] is future:
+            _bundle_cache_inflight.pop(cache_key, None)
 
 
 @auth_router.get("/auth/users")

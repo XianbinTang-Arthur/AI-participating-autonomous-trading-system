@@ -509,11 +509,26 @@ class ApplicationRuntime:
     operator_command_client: OperatorCommandClient | None = None
     operator_command_worker: OperatorCommandWorker | None = None
     logger: Any = field(default_factory=lambda: get_logger("aats.runtime"))
+    # build_runtime 解析后的 effective_process_role。settings.process_role 可能
+    # 与 kwarg 传入值不一致（kwarg 优先），运行时门禁必须读此字段。
+    process_role: str | None = None
 
     async def start_background_tasks(self) -> None:
-        if self.settings.market_data_backend == "okx":
+        # Stage 3 多进程切片化：market_gateway.start() 会开启 OKX WebSocket
+        # 和 REST fallback 后台任务。仅 market / monolith 角色需要，否则 4 个
+        # 进程各自连一次 OKX，造成 4× 连接和下游 feature / decision 重复计算。
+        if self.settings.market_data_backend == "okx" and _slice_active(
+            "market", effective_process_role=self.process_role
+        ):
             await self.market_gateway.start()
-        if self.environment_capabilities.account_state_source_kind == "exchange":
+        # Stage 3 多进程切片化：OKX 私有 WS 和账户刷新循环仅在 execution /
+        # monolith 角色启动。execution 是账户状态的权威来源；其余角色不需要
+        # 实时账户快照，让它们各自连 OKX 只会 4× 放大连接和 REST 配额，且
+        # 各进程形成的本地快照会互相漂移。未来 Stage 7 可通过 hot-state / bus
+        # 将 exchange account snapshot 共享给 gateway 等只读角色。
+        if self.environment_capabilities.account_state_source_kind == "exchange" and _slice_active(
+            "execution", effective_process_role=self.process_role
+        ):
             self.background_tasks.append(
                 asyncio.create_task(self.account_service.run_private_ws_forever(), name="aats_okx_private_account_ws")
             )
@@ -523,7 +538,9 @@ class ApplicationRuntime:
             self.background_tasks.append(
                 asyncio.create_task(self._refresh_reconciliation_loop(), name="aats_reconciliation_refresh")
             )
-        if self.environment_capabilities.account_state_source_kind == "exchange":
+        if self.environment_capabilities.account_state_source_kind == "exchange" and _slice_active(
+            "execution", effective_process_role=self.process_role
+        ):
             self.background_tasks.append(
                 asyncio.create_task(self._refresh_account_loop(), name="aats_okx_account_refresh")
             )
@@ -549,6 +566,17 @@ class ApplicationRuntime:
         if self.trial_guard_service is not None:
             self.background_tasks.append(
                 asyncio.create_task(self._monitor_trial_guard_loop(), name="aats_trial_guard_monitor")
+            )
+        # StreamSnapshotCache 定期 flush：将 latest + recent 快照 best-effort
+        # 写入 Redis，供下次 bootstrap 恢复。高频 topic 不落 Postgres。
+        # 仅 market / monolith 角色运行 flush——这两个角色是 MARKET_SNAPSHOTS
+        # 和 FEATURE_SNAPSHOTS 的 producer，持有最新数据；其他角色是 consumer，
+        # 若也 flush 会用落后于 producer 的旧快照覆盖 Redis 中的新值。
+        if self.stream_snapshot_cache is not None and _slice_active(
+            "market", effective_process_role=self.process_role
+        ):
+            self.background_tasks.append(
+                asyncio.create_task(self._flush_stream_cache_loop(), name="aats_stream_cache_flush")
             )
         # Stage 9 checklist-4：AbortHookService 后台 loop。service.start() 自己
         # 管 asyncio.Task 生命周期（不会 append 到 background_tasks），我们只
@@ -704,6 +732,15 @@ class ApplicationRuntime:
             )
         if self.database_runtime is not None:
             self.database_runtime.dispose()
+
+    async def _flush_stream_cache_loop(self) -> None:
+        """定期将 StreamSnapshotCache 的 latest 快照 best-effort 写入 Redis。"""
+        while True:
+            await asyncio.sleep(5.0)
+            try:
+                await self.stream_snapshot_cache.flush_to_hot_state()
+            except Exception as exc:
+                await self._record_background_failure(subsystem="stream_cache_flush", exc=exc)
 
     async def _refresh_account_loop(self) -> None:
         while True:
@@ -3071,7 +3108,13 @@ def _build_shared_runtime_slice(
         return
     slices.metrics = MetricsRegistry()
     # 高频流式快照缓存：替代 Postgres 为 market/features snapshots 提供查询。
-    slices.stream_snapshot_cache = StreamSnapshotCache()
+    # 容量必须 ≥ 策略引擎可配的最大回看窗口（spot_grid_anchor_lookback_snapshots
+    # 可达 500），否则 deque(maxlen) 会静默丢弃旧条目导致策略看到截断数据。
+    cache_max_recent = max(
+        getattr(runtime_settings, "spot_grid_anchor_lookback_snapshots", 50),
+        50,
+    )
+    slices.stream_snapshot_cache = StreamSnapshotCache(max_recent=cache_max_recent)
     # Stage 4: bus 实现按 settings.event_bus_backend 选择。
     # 注意 _construct_event_bus 不做 I/O；NATS 连接和 stream 创建在
     # build_runtime 调用 await _start_event_bus(slices.bus) 时才发生。
@@ -3732,6 +3775,14 @@ async def _wire_event_subscriptions(
             reconciliation_service=slices.reconciliation_service,
         ),
     )
+    # StreamSnapshotCache 远端订阅：让非 producer role（gateway / decision /
+    # execution）也能通过 NATS 持续收到 MARKET_SNAPSHOTS / FEATURE_SNAPSHOTS，
+    # bus receive 路径会自动调 cache.update() 保持缓存新鲜。producer role
+    # （market / monolith）已经通过 feature_engine / decision_trigger 建立了
+    # 对这些 topic 的订阅，这里的 noop handler 会被 _CollectingBus fan-out
+    # 到同一个 durable consumer。
+    if slices.stream_snapshot_cache is not None:
+        await slices.stream_snapshot_cache.register_remote_subscription(collector)
     # Stage 6 Slice 6.3：把 portfolio_snapshot 缓存的 _handle_remote_event 接进
     # 同一个 collector，让 audit / reconciliation / cache 三者共享 fan-out。
     # 不走 cache.bootstrap 内部的 subscribe，避免重复 durable binding。
@@ -4091,6 +4142,18 @@ async def build_runtime(
         process_role=effective_process_role or "monolith",
         bootstrap_state=slices.kill_switch.snapshot(),
     )
+
+    # StreamSnapshotCache bootstrap：高频 MARKET_SNAPSHOTS / FEATURE_SNAPSHOTS
+    # 不落 Postgres，NATS durable consumer 重启后只从上次 ack 续收。从 Redis
+    # 恢复 latest + recent 条目，消除重启空窗。bootstrap 内部 best-effort 不抛。
+    # 必须用 expanded_allowed_symbols 覆盖 swap / hedge / arbitrage 派生的
+    # symbol，否则这些扩展标的重启后不会恢复快照。
+    if slices.stream_snapshot_cache is not None:
+        await slices.stream_snapshot_cache.bootstrap(
+            hot_state_store=hot_state_store,
+            symbols=list(runtime_settings.expanded_allowed_symbols()),
+            logger=get_logger("aats.stream_snapshot_cache"),
+        )
 
     # Stage 6 Slice 6.3：跨进程 portfolio_snapshot 缓存边车。和 kill_switch
     # bootstrap 同模板：bus.start 完成后立即构造 + Redis hydrate，让所有 slice builder（特
@@ -4472,6 +4535,7 @@ async def build_runtime(
         funding_fee_repo=storage.funding_fee_repo,
         sleeve_pnl_projection_service=sleeve_pnl_projection_service,
         funding_fee_sync_service=funding_fee_sync_service,
+        process_role=effective_process_role,
     )
     if runtime.sleeve_pnl_projection_service is not None:
         runtime.sleeve_pnl_projection_service.rebuild_scope(scope=state_scope)

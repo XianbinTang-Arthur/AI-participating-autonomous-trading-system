@@ -111,7 +111,7 @@ MANAGED_PROFILE_DEFINITIONS: dict[ManagedEnvProfile, ManagedProfileDefinition] =
             "bootstrap_portfolio_from_exchange": True,
             "trading_product_type": "derivatives",
             "margin_mode": "cross",
-            "derivatives_position_mode": "hedge",
+            "derivatives_position_mode": "net",
             "derivatives_hedge_transition_mode": "close_then_open",
             "derivatives_require_exchange_pos_mode_match": True,
             "okx_simulated_trading": False,

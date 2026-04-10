@@ -1,0 +1,45 @@
+# =============================================================================
+# AATS 4 进程 — OKX 衍生品实盘 override
+#
+# 和 docker-compose.aats.derivatives.yml 结构完全对齐，区别：
+#   - env_file 指向 .env.derivatives.live（实盘凭证 + 风控参数）
+#   - AATS_PROFILE 设为 derivatives_live
+#
+# 启动方式（在 deploy/wsl2-dev/ 目录下）：
+#   docker compose \
+#     -f docker-compose.aats.yml \
+#     -f docker-compose.aats.derivatives-live.yml \
+#     --env-file .env.wsl2 \
+#     --env-file ../../.env.derivatives.live \
+#     up -d
+# =============================================================================
+
+name: aats-dev
+
+x-aats-derivatives-live-env: &aats-derivatives-live-env
+  AATS_PROFILE: derivatives_live
+
+services:
+  aats-gateway:
+    env_file:
+      - ../../.env.derivatives.live
+    environment:
+      <<: *aats-derivatives-live-env
+
+  aats-market:
+    env_file:
+      - ../../.env.derivatives.live
+    environment:
+      <<: *aats-derivatives-live-env
+
+  aats-decision:
+    env_file:
+      - ../../.env.derivatives.live
+    environment:
+      <<: *aats-derivatives-live-env
+
+  aats-execution:
+    env_file:
+      - ../../.env.derivatives.live
+    environment:
+      <<: *aats-derivatives-live-env

@@ -13,7 +13,7 @@ from aats.schemas.strategy_profiles import (
 from aats.services.accounting import try_fill_fee_cost_in_quote
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12
-from aats.services.runtime_scope import fills_for_scope, latest_reconciliation_for_scope, runtime_state_scope, snapshots_for_scope
+from aats.services.runtime_scope import fills_for_scope, latest_reconciliation_for_scope, latest_snapshot_for_scope, runtime_state_scope, snapshots_for_scope
 
 if TYPE_CHECKING:
     from aats.services.operator.strategy_profiles import StrategyProfileControlService
@@ -36,14 +36,22 @@ class StrategyProfileContextFacade:
         self.owner = owner
 
     def tuning_context(self) -> StrategyProfileEvaluationContextSnapshot:
-        baseline_event = self.owner.event_store.latest(topics.BASELINE_ASSESSMENTS)
+        # baseline / feature 事件按 symbol 发布（orchestrator key=symbol），
+        # 必须用 default_symbol 作为 key 过滤，否则多 symbol 部署时会混入
+        # 其他标的的数据。
+        symbol = self.owner.settings.default_symbol
+        baseline_event = self.owner.event_store.latest(topics.BASELINE_ASSESSMENTS, key=symbol)
         stream_cache = getattr(self.owner.runtime, "stream_snapshot_cache", None)
         feature_event = (
-            stream_cache.latest(topics.FEATURE_SNAPSHOTS)
+            stream_cache.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
             if stream_cache is not None
-            else self.owner.event_store.latest(topics.FEATURE_SNAPSHOTS)
+            else None
         )
-        latest_portfolio = self.owner.runtime.portfolio_repo.latest()
+        if feature_event is None:
+            feature_event = self.owner.event_store.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
+        latest_portfolio = latest_snapshot_for_scope(
+            self.owner.runtime.portfolio_repo, self.owner.runtime_state_scope
+        )
         activation = self.owner._activation_state()
         safety_state = self.safety_state()
         performance = self.performance_summary()
