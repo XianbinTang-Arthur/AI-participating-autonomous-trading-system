@@ -83,7 +83,6 @@ check_latest_report() {
     local name="$1"
 
     if [ ! -d "$REPORT_DIR" ]; then
-        warn "workflow_runs 目录不存在"
         return
     fi
 
