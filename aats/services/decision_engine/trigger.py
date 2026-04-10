@@ -14,6 +14,10 @@ CanTriggerCheck = Callable[..., tuple[bool, str]]
 
 
 class DecisionCycleTrigger:
+    # 连续失败后退避，避免堵死 asyncio 事件循环（冷启动时 feature store 为空）
+    _BACKOFF_INITIAL_S = 2.0
+    _BACKOFF_MAX_S = 30.0
+
     def __init__(
         self,
         *,
@@ -28,6 +32,7 @@ class DecisionCycleTrigger:
         self.can_trigger = can_trigger
         self.logger = get_logger("aats.decision_trigger")
         self._timeframe_locks: dict[tuple[str, str], asyncio.Lock] = {}
+        self._consecutive_failures: dict[tuple[str, str], int] = {}
 
     async def handle_feature_snapshot(self, message: dict) -> None:
         snapshot = parse_payload(message, FeatureSnapshot)
@@ -50,19 +55,28 @@ class DecisionCycleTrigger:
                 )
                 if not should_trigger or current_market_snapshot is None:
                     continue
+                fail_key = (snapshot.symbol, timeframe)
                 try:
                     await self.orchestrator.run_cycle(symbol=snapshot.symbol, timeframe=timeframe)
                 except Exception as exc:
+                    n = self._consecutive_failures.get(fail_key, 0) + 1
+                    self._consecutive_failures[fail_key] = n
+                    backoff = min(self._BACKOFF_INITIAL_S * n, self._BACKOFF_MAX_S)
                     log_event(
                         self.logger,
                         "decision_cycle_failed",
-                        level="error",
+                        level="warning" if n > 1 else "error",
                         symbol=snapshot.symbol,
                         timeframe=timeframe,
                         error_type=type(exc).__name__,
                         error=str(exc),
+                        consecutive_failures=n,
+                        backoff_s=backoff,
                     )
+                    await asyncio.sleep(backoff)
                     continue
+                # 成功后重置退避计数
+                self._consecutive_failures.pop(fail_key, None)
                 self.policy.record_trigger(
                     feature_snapshot=snapshot,
                     market_snapshot=current_market_snapshot,
