@@ -56,6 +56,14 @@ def main() -> None:
     # 外部（WSL2 / 本机）运行时需要 --profile 指定 .env.<profile> 路径。
     if args.profile:
         load_profiled_dotenv_into_process(ROOT, args.profile)
+    elif os.environ.get("AATS_PROFILE"):
+        # 容器内：AATS_PROFILE 由 compose environment 注入，env_file 已提供
+        # 全部 AATS_* 变量。但 `docker compose run` 绕过 compose_entrypoint.py
+        # shim，两个派生变量未被注入，需手动补齐。
+        from aats.bootstrap.env_profiles import PROFILE_STARTUP_PROFILES
+        _profile = os.environ["AATS_PROFILE"]
+        os.environ.setdefault("AATS_STARTUP_PROFILE", PROFILE_STARTUP_PROFILES[_profile])
+        os.environ.setdefault("AATS_ENV_TEMPLATE_PROFILE", _profile)
     elif not os.environ.get("AATS_DATABASE_URL"):
         raise SystemExit(
             "请指定 --profile，或确保 AATS_DATABASE_URL 已在环境变量中设置。\n"
