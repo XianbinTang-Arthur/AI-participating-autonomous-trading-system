@@ -27,6 +27,7 @@ ORDER_UPDATES = "execution.order_updates"
 # ObligationHotStateCache 订阅本 topic 更新本地缓存。丢一条不致命（读路径会 fall
 # back 到 obligation_repo Postgres SELECT），但会让 cache 短暂 stale。详见
 # docs/task/stage_6_slice_6_5_obligation_hot_state_design.md。
+ACCOUNT_SNAPSHOTS = "account.snapshots"
 OBLIGATION_UPDATES = "execution.obligation_updates"
 FILL_EVENTS = "execution.fill_events"
 PORTFOLIO_BALANCE_DELTAS = "portfolio.balance_deltas"

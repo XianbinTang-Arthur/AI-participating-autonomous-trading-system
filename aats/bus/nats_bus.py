@@ -102,6 +102,7 @@ DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
                                           # 决定跨进程 obligation 视图收敛不能丢
         _topics.FILL_EVENTS,              # 成交；资金变动核心
         _topics.PORTFOLIO_BALANCE_DELTAS, # 余额变动镜像
+        _topics.ACCOUNT_SNAPSHOTS,        # 账户快照；非 execution 角色读取
         _topics.PORTFOLIO_SNAPSHOTS,      # 组合快照
         _topics.RECONCILIATION_REPORTS,   # 对账报告
         _topics.RECONCILIATION_VALIDATIONS,  # 对账验证

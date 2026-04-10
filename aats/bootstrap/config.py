@@ -41,6 +41,7 @@ from aats.bus.nats_bus import (
 from aats.events import topics
 from aats.events.envelopes import build_envelope, parse_payload, publish_model
 from aats.schemas.decision import DecisionOutcome, PositionTarget
+from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.execution import LegOrderIntent, order_intent_from_leg_order_intent
 from aats.schemas.governance import PolicyDecision, RiskDecision
 from aats.services.ai_service.inference import AIInferenceService
@@ -73,6 +74,7 @@ from aats.services.execution_control.monitor import Phase1ShadowMonitor
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
 from aats.services.execution_control.subsystem import Phase1ShadowSubsystem
+from aats.services.execution_engine.account_snapshot_cache import AccountSnapshotCache
 from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
@@ -449,6 +451,7 @@ class ApplicationRuntime:
     # obligation_repo Postgres SELECT。设计文档：
     # docs/task/stage_6_slice_6_5_obligation_hot_state_design.md
     obligation_hot_state_cache: ObligationHotStateCache
+    account_snapshot_cache: AccountSnapshotCache
     mode_controller: RuntimeModeController
     health_service: SystemHealthService
     account_service: OKXAccountService
@@ -671,6 +674,22 @@ class ApplicationRuntime:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
+        # 跨进程 account snapshot 缓存：关闭。与 6.5 同模板：必须在 bus.close
+        # 之前；stop() 不写/清 Redis。getattr 兜底同上。
+        try:
+            _account_snapshot_cache = getattr(
+                self, "account_snapshot_cache", None
+            )
+            if _account_snapshot_cache is not None:
+                await _account_snapshot_cache.stop()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "account_snapshot_cache_shutdown_close_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         # Slice 4-proc operator command proxy：关闭 client / worker。必须在
         # bus.close 之前，让未完成的 invoke() 先抛 OperatorCommandError 出
         # 去，避免 bus 关了之后 pending future 永远不 resolve 导致 HTTP
@@ -746,11 +765,32 @@ class ApplicationRuntime:
         while True:
             try:
                 await self.account_service.refresh()
+                await self._publish_account_snapshot_to_cache()
                 await self._sync_funding_fees_after_refresh()
                 await self._evaluate_derivatives_live_guard_after_refresh()
             except Exception as exc:
                 await self._record_background_failure(subsystem="account_refresh", exc=exc)
             await asyncio.sleep(self.settings.okx_account_refresh_interval_seconds)
+
+    async def _publish_account_snapshot_to_cache(self) -> None:
+        """refresh 成功后把 snapshot 广播到 account_snapshot_cache。
+
+        best-effort：cache.publish 内部 Redis/NATS 写失败会 log warning 不抛。
+        执行路径上的 account_service._latest_snapshot 已经由 refresh() 直接更新，
+        这里只负责通知跨进程 cache。
+        """
+        snapshot = self.account_service.latest_snapshot()
+        if snapshot is None:
+            return
+        try:
+            await self.account_snapshot_cache.publish(
+                snapshot,
+                recent_bills=self.account_service.latest_recent_bills(),
+            )
+        except Exception as exc:
+            await self._record_background_failure(
+                subsystem="account_snapshot_cache_publish", exc=exc
+            )
 
     async def _evaluate_derivatives_live_guard_after_refresh(self) -> None:
         if self.derivatives_live_guard_service is None:
@@ -3019,6 +3059,10 @@ class _RuntimeSlices:
     # 进程的 obligation 视图保持收敛。slice builder 从本字段取 cache 引用注入
     # ObligationService / RiskEngine / query_service 等读写路径。
     obligation_hot_state_cache: Any = None
+    # 跨进程 account snapshot 缓存边车。execution role 在每次 refresh 后 publish，
+    # 非 execution role 订阅 NATS + Redis hydrate，让 account_service._latest_snapshot
+    # 保持跨进程同步。设计文档见 account_snapshot_cache.py 模块 docstring。
+    account_snapshot_cache: Any = None
     mode_controller: Any = None
     normalizer: Any = None
     market_publisher: Any = None
@@ -3865,6 +3909,12 @@ async def _wire_event_subscriptions(
     # docs/task/stage_6_slice_6_5_obligation_hot_state_design.md §10
     if slices.obligation_hot_state_cache is not None:
         await slices.obligation_hot_state_cache.register_remote_subscription(collector)
+    # 跨进程 account snapshot 缓存：把 cache 的 _handle_remote_event 接进
+    # collector，让 account.snapshots 订阅通过 _CollectingBus fan-out 聚合。
+    # 非 execution 角色通过此订阅接收 execution role 广播的 account snapshot，
+    # handler 内部会 idempotent 更新 cache._latest 并回调 account_service._latest_snapshot。
+    if slices.account_snapshot_cache is not None:
+        await slices.account_snapshot_cache.register_remote_subscription(collector)
     await collector.flush()
 
 
@@ -4324,6 +4374,67 @@ async def build_runtime(
             slices.obligation_hot_state_cache
         )
 
+    # 跨进程 account snapshot 缓存边车。和 6.3 PortfolioSnapshotCache / 6.5
+    # ObligationHotStateCache 同 sidecar 模板：bus.start 完成后立即构造 + Redis
+    # hydrate，让 health_service / query_service / dashboard 在非 execution 角色
+    # 下也能读到由 execution role 广播的最新 account snapshot。
+    #
+    # ⚠️ NATS subscribe 步骤推迟到 _wire_event_subscriptions 经 _CollectingBus
+    # 聚合，避免 NATS durable binding 冲突。
+    # bootstrap 内部即使 Redis 故障也走 best-effort 路径不抛（I1 fail-soft）。
+    slices.account_snapshot_cache = AccountSnapshotCache(
+        logger=get_logger("aats.execution.account_snapshot_cache"),
+    )
+    await slices.account_snapshot_cache.bootstrap(
+        hot_state_store=hot_state_store,
+        bus=slices.bus,
+        process_role=effective_process_role or "monolith",
+        subscribe=False,  # 推迟到 _wire_event_subscriptions 走 _CollectingBus
+    )
+    log_event(
+        get_logger("aats.bootstrap"),
+        "account_snapshot_cache_initialized",
+        process_role=effective_process_role or "monolith",
+        bootstrap_state=slices.account_snapshot_cache.snapshot(),
+    )
+    # 非 execution 角色：把 cache 的状态更新回调注册到 account_service，
+    # 让 cache 收到远端 NATS 事件后自动写回 account_service._latest_snapshot
+    # 和 account_service._latest_recent_bills，保证 dashboard 的
+    # recent_funding_fee_summary / recent_bills_summary 也能跨进程同步。
+    # execution 角色本身由 _refresh_account_loop 驱动写入，但注册 listener
+    # 也无害（idempotent 规则会 noop 掉 self-loop）。
+    if slices.account_service is not None:
+        _acct_svc = slices.account_service
+
+        def _sync_to_account_service(
+            snap: ExchangeAccountSnapshot,
+            recent_bills: list[dict],
+        ) -> None:
+            # 只在 account_service._latest_snapshot 为 None 或比远端旧时更新
+            existing = _acct_svc._latest_snapshot
+            if existing is not None and snap.fetched_at <= existing.fetched_at:
+                return
+            _acct_svc._latest_snapshot = snap
+            _acct_svc._latest_recent_bills = [
+                dict(row) for row in recent_bills if isinstance(row, dict)
+            ]
+
+        slices.account_snapshot_cache.set_on_state_updated(_sync_to_account_service)
+        # bootstrap hydrate 之后立即同步一次
+        bootstrapped_snap = slices.account_snapshot_cache.get_sync()
+        if bootstrapped_snap is not None:
+            _sync_to_account_service(
+                bootstrapped_snap,
+                slices.account_snapshot_cache.recent_bills,
+            )
+            log_event(
+                get_logger("aats.bootstrap"),
+                "account_service_hydrated_from_cache",
+                process_role=effective_process_role or "monolith",
+                fetched_at=bootstrapped_snap.fetched_at.isoformat(),
+                recent_bills_count=len(slices.account_snapshot_cache.recent_bills),
+            )
+
     _build_market_slice(slices=slices, effective_process_role=effective_process_role)
     _build_decision_slice(
         runtime_settings=runtime_settings,
@@ -4397,6 +4508,7 @@ async def build_runtime(
     # bootstrap），稍后注入到 obligation_service 写路径与 risk_engine /
     # query_service 读路径。
     obligation_hot_state_cache = slices.obligation_hot_state_cache
+    account_snapshot_cache = slices.account_snapshot_cache
 
     # Stage 3：startup recovery 段只在 execution / monolith role 下运行。
     # gateway / market / decision role 没有 portfolio_service 与 recovery_service，
@@ -4570,6 +4682,7 @@ async def build_runtime(
         kill_switch=kill_switch,
         portfolio_snapshot_cache=portfolio_snapshot_cache,
         obligation_hot_state_cache=obligation_hot_state_cache,
+        account_snapshot_cache=account_snapshot_cache,
         mode_controller=mode_controller,
         health_service=health_service,
         account_service=account_service,

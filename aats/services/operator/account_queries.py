@@ -178,10 +178,23 @@ class AccountQueryFacade:
         }
 
     async def account_recent_bills(self, *, limit: int = 50) -> dict[str, Any]:
-        rows = await self.owner.runtime.account_service.recent_bills(
-            symbol=self.owner.runtime.settings.default_symbol,
-            limit=limit,
-        )
+        # 非 execution 角色不应直接打 OKX REST 拉账单——WS/refresh 已收敛到
+        # execution，本地 account_service._latest_recent_bills 由
+        # AccountSnapshotCache 跨进程同步填充。只在 execution / monolith 角色
+        # 下走 REST 拉取最新账单。
+        _role = getattr(self.owner.runtime, "process_role", None)
+        _is_execution_role = _role in {None, "monolith", "execution"}
+        if _is_execution_role:
+            rows = await self.owner.runtime.account_service.recent_bills(
+                symbol=self.owner.runtime.settings.default_symbol,
+                limit=limit,
+            )
+        else:
+            _default_symbol = self.owner.runtime.settings.default_symbol
+            rows = [
+                row for row in self.owner.runtime.account_service.latest_recent_bills()
+                if _default_symbol is None or str(row.get("instId") or "") == _default_symbol
+            ]
         return {
             "bills": rows[:limit],
             "total_available": len(rows),
