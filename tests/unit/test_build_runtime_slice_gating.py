@@ -343,21 +343,20 @@ class TestBuildRuntimeSliceGating(unittest.IsolatedAsyncioTestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 第 3 层：fail-fast 边界 — derivatives+hedge 在 execution-only role 下
+# 第 3 层：topology capability matrix — profile 语义 × 部署拓扑校验
 # ─────────────────────────────────────────────────────────────────────
 
 
-class TestBuildRuntimeFailFastEdgeCases(unittest.IsolatedAsyncioTestCase):
-    """edge case：execution slice 在 derivatives+hedge 模式下反向依赖
-    decision slice 的 risk_engine.evaluate_leg_order 作为 leg_risk_evaluator。
-    Stage 3 只走 in-process bus，没有 NATS 跨进程广播，所以 execution-only
-    role 启动 derivatives+hedge 必须明确报错而不是静默退化。
+class TestTopologyCapabilityMatrix(unittest.IsolatedAsyncioTestCase):
+    """_validate_topology_capability 在 build_runtime 启动早期拦截
+    不兼容的 profile 语义 × 拓扑组合。derivatives+hedge 在
+    execution-only / 4proc 下必须明确报错，monolith 下正常通过。
     """
 
     async def test_execution_role_with_derivatives_hedge_raises(self) -> None:
         with self.assertRaisesRegex(
             RuntimeError,
-            "execution_slice_requires_decision_slice_for_derivatives_hedge_mode",
+            "topology_blocked_hedge_requires_monolith",
         ):
             await build_runtime(
                 _paper_settings(

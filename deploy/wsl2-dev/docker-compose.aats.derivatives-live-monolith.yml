@@ -1,0 +1,62 @@
+# =============================================================================
+# AATS Monolith — OKX 衍生品实盘 override
+#
+# 单进程 monolith 模式：将 gateway/market/decision/execution 四个 slice
+# 合并到同一个进程内运行。适用于 derivatives_live + hedge 语义——
+# hedge 模式需要 decision slice 的 risk_engine.evaluate_leg_order
+# 与 execution slice 共处同进程，4 进程拓扑尚不支持。
+#
+# 启动方式（在 deploy/wsl2-dev/ 目录下）：
+#   docker compose \
+#     -f docker-compose.aats.yml \
+#     -f docker-compose.aats.derivatives-live-monolith.yml \
+#     --env-file .env.wsl2 \
+#     --env-file ../../.env.derivatives.live \
+#     up -d
+# =============================================================================
+
+name: aats-dev
+
+x-aats-derivatives-live-env: &aats-derivatives-live-env
+  AATS_PROFILE: derivatives_live
+  AATS_PROCESS_ROLE: monolith
+
+services:
+  # monolith 模式：只需要一个容器，替代 4 个独立进程。
+  # 使用 api_gateway 入口 + PROCESS_ROLE=monolith，让 build_runtime
+  # 装配全部 slice（shared + market + decision + execution + portfolio
+  # + reconciliation + startup_recovery）。
+  aats-gateway:
+    env_file:
+      - ../../.env.derivatives.live
+    environment:
+      <<: *aats-derivatives-live-env
+    deploy:
+      resources:
+        limits:
+          memory: 2048M
+
+  # 以下 3 个服务在 monolith 模式下不需要，scale=0 阻止启动。
+  aats-market:
+    env_file:
+      - ../../.env.derivatives.live
+    environment:
+      <<: *aats-derivatives-live-env
+    deploy:
+      replicas: 0
+
+  aats-decision:
+    env_file:
+      - ../../.env.derivatives.live
+    environment:
+      <<: *aats-derivatives-live-env
+    deploy:
+      replicas: 0
+
+  aats-execution:
+    env_file:
+      - ../../.env.derivatives.live
+    environment:
+      <<: *aats-derivatives-live-env
+    deploy:
+      replicas: 0

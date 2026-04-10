@@ -5,7 +5,7 @@ import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import yaml
 
@@ -2900,6 +2900,87 @@ _SLICE_REQUIRED_ROLES: dict[str, frozenset[str | None]] = {
 }
 
 
+# =============================================================================
+# Profile 语义 × Topology 能力矩阵
+#
+# profile 定义业务语义（position_mode、strategy family 等），部署拓扑定义进程
+# 角色组合。并非所有语义都能在所有拓扑下运行。
+#
+# 拓扑分类：
+#   "monolith"  — 单进程，所有 slice 同进程（None / "monolith" role）
+#   "split_de"  — decision + execution 共享进程（未来 Stage 5 / 6）
+#   "4proc"     — gateway / market / decision / execution 各自独立
+#
+# 当前阻断关系：
+#   derivatives + hedge + 4proc-execution —— leg_risk_evaluator 需要
+#   decision slice 的 risk_engine.evaluate_leg_order，4 进程下 execution
+#   拿不到。Stage 4 跨进程 risk 广播完成后移除此限制。
+# =============================================================================
+
+# 拓扑类型标识（用于能力矩阵查询）
+_TOPOLOGY_MONOLITH = "monolith"
+_TOPOLOGY_4PROC = "4proc"
+
+
+def _infer_topology_kind(effective_process_role: str | None) -> str:
+    """从 effective_process_role 推导当前拓扑类型。"""
+    if effective_process_role in {None, PROCESS_ROLE_MONOLITH}:
+        return _TOPOLOGY_MONOLITH
+    return _TOPOLOGY_4PROC
+
+
+# 矩阵条目：(条件描述, 是否阻断的判断函数, 错误码, 人可读消息)
+# 新增 profile 语义 × 拓扑约束只需在此表追加条目，不必散落在各 slice builder。
+_TOPOLOGY_CAPABILITY_RULES: list[
+    tuple[
+        str,                                           # rule_id
+        Callable[[AATSSettings, str], bool],           # predicate(settings, topology_kind) → blocked?
+        str,                                           # error_code
+        str,                                           # human_message
+    ]
+] = [
+    (
+        "hedge_requires_colocated_decision_execution",
+        lambda settings, topo: (
+            settings.trading_product_type == "derivatives"
+            and getattr(settings, "derivatives_position_mode", "net") == "hedge"
+            and topo == _TOPOLOGY_4PROC
+        ),
+        "topology_blocked_hedge_requires_monolith",
+        "derivatives + hedge 模式需要 decision 与 execution 共处同一进程。"
+        "当前 4 进程拓扑下 execution 无法获取 decision slice 的 "
+        "risk_engine.evaluate_leg_order 作为 leg_risk_evaluator。"
+        "请使用 monolith 单进程模式，或等待 Stage 4 跨进程 risk 广播。",
+    ),
+]
+
+
+def _validate_topology_capability(
+    settings: AATSSettings,
+    *,
+    effective_process_role: str | None,
+) -> None:
+    """校验 profile 语义与当前部署拓扑是否兼容。
+
+    在 build_runtime() 的 settings 解析完成、slice 构建之前调用。
+    不兼容时抛出 RuntimeError 并给出明确的错误码和修复建议。
+    """
+    topology_kind = _infer_topology_kind(effective_process_role)
+    for rule_id, predicate, error_code, message in _TOPOLOGY_CAPABILITY_RULES:
+        try:
+            blocked = predicate(settings, topology_kind)
+        except Exception:
+            # 防御性：predicate 内部异常不阻断启动，仅 warning
+            _log.warning("topology_capability_rule_predicate_error rule=%s", rule_id)
+            continue
+        if blocked:
+            raise RuntimeError(
+                f"{error_code}: {message} "
+                f"[rule={rule_id} topology={topology_kind} "
+                f"process_role={effective_process_role}]"
+            )
+
+
 def _slice_active(slice_name: str, *, effective_process_role: str | None) -> bool:
     """判断给定 slice 是否在当前 process_role 下需要装。
 
@@ -3108,13 +3189,18 @@ def _build_shared_runtime_slice(
         return
     slices.metrics = MetricsRegistry()
     # 高频流式快照缓存：替代 Postgres 为 market/features snapshots 提供查询。
-    # 容量必须 ≥ 策略引擎可配的最大回看窗口（spot_grid_anchor_lookback_snapshots
-    # 可达 500），否则 deque(maxlen) 会静默丢弃旧条目导致策略看到截断数据。
-    cache_max_recent = max(
+    # recent 深度按 topic 独立配置，策略 lookback 需求驱动 MARKET_SNAPSHOTS
+    # 深度，FEATURE_SNAPSHOTS 保持默认值减少内存开销。
+    _market_recent_depth = max(
         getattr(runtime_settings, "spot_grid_anchor_lookback_snapshots", 50),
         50,
     )
-    slices.stream_snapshot_cache = StreamSnapshotCache(max_recent=cache_max_recent)
+    slices.stream_snapshot_cache = StreamSnapshotCache(
+        default_max_recent=50,
+        max_recent_by_topic={
+            topics.MARKET_SNAPSHOTS: _market_recent_depth,
+        },
+    )
     # Stage 4: bus 实现按 settings.event_bus_backend 选择。
     # 注意 _construct_event_bus 不做 I/O；NATS 连接和 stream 创建在
     # build_runtime 调用 await _start_event_bus(slices.bus) 时才发生。
@@ -3399,30 +3485,14 @@ def _build_execution_slice(
       gateway/market 进程跳过本 slice；
       decision 进程跳过本 slice；
       execution 进程在 derivatives+hedge 模式下需要 decision slice 的 risk_engine
-      作为 leg_risk_evaluator —— Stage 3 阶段不允许 execution 单独运行
-      derivatives+hedge，会在下方做 fail-fast。Stage 4 通过 NATS 广播 risk 决策
-      解耦后，本 slice 才能在 execution-only 进程中独立运行 derivatives+hedge。
+      作为 leg_risk_evaluator。此约束已由 _validate_topology_capability() 的
+      ``hedge_requires_colocated_decision_execution`` 规则统一校验，不再在 slice
+      builder 内重复 fail-fast。
 
     Stage 3 process_role 门控：仅 None / monolith / execution 时构造。
     """
     if not _slice_active("execution", effective_process_role=effective_process_role):
         return
-    # Stage 3 fail-fast：derivatives+hedge 在 execution-only 进程下，
-    # decision slice 被跳过，slices.risk_engine is None。这会让
-    # leg_risk_evaluator 静默退化为 None，破坏 hedge 模式的 leg 校验。
-    # Stage 4 引入 NATS 跨进程 risk 广播之后才允许放开。
-    if (
-        runtime_settings.trading_product_type == "derivatives"
-        and runtime_settings.derivatives_position_mode == "hedge"
-        and slices.risk_engine is None
-    ):
-        raise RuntimeError(
-            "execution_slice_requires_decision_slice_for_derivatives_hedge_mode: "
-            "在 derivatives + hedge 模式下，execution slice 需要 decision slice "
-            "提供 risk_engine.evaluate_leg_order 作为 leg_risk_evaluator。"
-            "Stage 4 (NATS) 引入跨进程 risk 决策广播之前，请把 decision 与 "
-            "execution 运行在同一个进程内（process_role=monolith）。"
-        )
     slices.obligation_service = ExecutionObligationService(
         settings=runtime_settings,
         obligation_repo=storage.obligation_repo,
@@ -4077,6 +4147,10 @@ async def build_runtime(
         runtime_layering = resolve_runtime_layering(runtime_settings)
         state_scope = runtime_state_scope(runtime_settings)
         _validate_runtime_settings(runtime_settings, runtime_layering)
+        _validate_topology_capability(
+            runtime_settings,
+            effective_process_role=effective_process_role,
+        )
         _validate_operator_auth_settings(runtime_settings, storage)
         seed_strategy_profiles(settings=runtime_settings, repo=storage.strategy_profile_repo)
         entry_execution_guard = non_protective_entry_execution_guard(runtime_settings)

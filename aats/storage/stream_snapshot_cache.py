@@ -52,20 +52,44 @@ def _redis_key_recent(topic: str, key: str) -> str:
 
 
 class StreamSnapshotCache:
-    """进程内高频快照缓存，提供与 EventStore 兼容的同步读接口。"""
+    """进程内高频快照缓存，提供与 EventStore 兼容的同步读接口。
 
-    def __init__(self, max_recent: int = _DEFAULT_MAX_RECENT) -> None:
-        self._max_recent = max_recent
+    recent 深度按 topic 独立配置（``max_recent_by_topic``），未列出的
+    topic 使用 ``default_max_recent``。这样 MARKET_SNAPSHOTS 的深度可以
+    覆盖策略的最大 lookback_snapshots 需求，而 FEATURE_SNAPSHOTS 保持
+    较浅的默认值，减少内存和 Redis flush 开销。
+    """
+
+    def __init__(
+        self,
+        *,
+        default_max_recent: int = _DEFAULT_MAX_RECENT,
+        max_recent_by_topic: dict[str, int] | None = None,
+    ) -> None:
+        self._default_max_recent = default_max_recent
+        self._max_recent_by_topic: dict[str, int] = dict(max_recent_by_topic or {})
         # latest 值：(topic, key) → envelope，(topic, None) → 该 topic 全局最新
         self._latest: dict[tuple[str, str | None], EventEnvelope] = {}
         # 近期历史：(topic, key) → deque[envelope]
-        self._recent: dict[tuple[str, str], deque[EventEnvelope]] = defaultdict(
-            lambda: deque(maxlen=self._max_recent)
-        )
+        # _new_deque 根据 topic 选择 maxlen
+        self._recent: dict[tuple[str, str], deque[EventEnvelope]] = {}
         # bootstrap / flush 支持
         self._hot_state_store: HotStateStore | None = None
         self._logger: logging.Logger | None = None
         self._dirty_keys: set[tuple[str, str]] = set()
+
+    def _max_recent_for(self, topic: str) -> int:
+        """返回指定 topic 的 recent deque 最大深度。"""
+        return self._max_recent_by_topic.get(topic, self._default_max_recent)
+
+    def _get_or_create_deque(self, topic: str, key: str) -> deque[EventEnvelope]:
+        """获取或按 topic 深度创建 deque。"""
+        pair = (topic, key)
+        dq = self._recent.get(pair)
+        if dq is None:
+            dq = deque(maxlen=self._max_recent_for(topic))
+            self._recent[pair] = dq
+        return dq
 
     # ------------------------------------------------------------------
     # Bootstrap（启动期 Redis hydration）
@@ -134,7 +158,7 @@ class StreamSnapshotCache:
                         )
                     stored_list = None
                 if isinstance(stored_list, list):
-                    dq = self._recent[(topic, symbol)]
+                    dq = self._get_or_create_deque(topic, symbol)
                     restored = 0
                     for item in stored_list:
                         if not isinstance(item, dict):
@@ -176,7 +200,7 @@ class StreamSnapshotCache:
         self._latest[(topic, key)] = envelope
         self._latest[(topic, None)] = envelope  # 全局最新（无 key 过滤）
         if key is not None:
-            self._recent[(topic, key)].append(envelope)
+            self._get_or_create_deque(topic, key).append(envelope)
             self._dirty_keys.add((topic, key))
 
     # ------------------------------------------------------------------
