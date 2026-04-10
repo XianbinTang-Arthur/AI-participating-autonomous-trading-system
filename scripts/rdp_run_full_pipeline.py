@@ -37,7 +37,7 @@ import subprocess
 import sys
 import time as _time
 import traceback as _tb
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -91,6 +91,12 @@ def parse_args() -> argparse.Namespace:
     # 通用
     p.add_argument("--start", help="起始日期 YYYY-MM-DD (UTC), Phase 3/4 需要")
     p.add_argument("--end", help="结束日期 YYYY-MM-DD (UTC), Phase 3/4 需要")
+    p.add_argument(
+        "--lookback-days", type=int, default=None,
+        help="自动从今天往回推 N 天作为 --start，--end 设为今天 (UTC)。"
+             "优先级低于显式 --start/--end。"
+             "示例: --lookback-days 90 等价于 --start <90天前> --end <今天>",
+    )
     p.add_argument("--dry-run", action="store_true",
                    help="仅显示将执行的命令, 不实际运行")
     p.add_argument("--ensure-schema", action="store_true",
@@ -391,10 +397,20 @@ def main() -> int:
         print("没有需要运行的阶段。请检查 --start-from / --stop-after / --skip-* 参数。")
         return 2
 
+    # --lookback-days 自动计算 --start / --end（显式值优先）
+    if args.lookback_days is not None and args.lookback_days > 0:
+        today_utc = datetime.now(timezone.utc).date()
+        if not args.start:
+            args.start = (today_utc - timedelta(days=args.lookback_days)).isoformat()
+            log.info("--lookback-days %d → --start %s", args.lookback_days, args.start)
+        if not args.end:
+            args.end = today_utc.isoformat()
+            log.info("--lookback-days %d → --end %s", args.lookback_days, args.end)
+
     # Phase 3/4 需要 --start 和 --end
     needs_dates = any(p in phases for p in ("phase3", "phase4"))
     if needs_dates and (not args.start or not args.end):
-        print("错误: Phase 3/4 需要 --start 和 --end 参数。")
+        print("错误: Phase 3/4 需要 --start 和 --end 参数（或使用 --lookback-days）。")
         return 2
 
     pipeline_id = (

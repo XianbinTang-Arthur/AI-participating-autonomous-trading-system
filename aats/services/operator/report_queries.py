@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from aats.services.operator._parallel import parallel_fetch
+
 if TYPE_CHECKING:
     from aats.services.operator.query_service import OperatorQueryService
 
@@ -14,12 +16,16 @@ class ReportQueryFacade:
 
     def profitability_overview(self, *, limit: int = 100) -> dict[str, Any]:
         normalized_limit = max(int(limit), 1)
-        outcomes = list(self.owner._scoped_closed_fill_outcomes())
+        r = parallel_fetch({
+            "outcomes": lambda: list(self.owner._scoped_closed_fill_outcomes()),
+            "funding_records": lambda: list(self.owner._scoped_funding_fee_records()),
+        })
+        outcomes = r["outcomes"]
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
         closed_rows = [self.owner._profitability_fill_row(item) for item in outcomes[:normalized_limit]]
         execution_quality_summary = self.owner._execution_quality_summary(closed_rows)
 
-        funding_records = list(self.owner._scoped_funding_fee_records())
+        funding_records = r["funding_records"]
         funding_records.sort(
             key=lambda item: self.owner._funding_fee_event_timestamp(item) or datetime.min.replace(tzinfo=timezone.utc),
             reverse=True,

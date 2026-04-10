@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
@@ -105,6 +106,30 @@ class DecisionContextBuilder:
         )
         if feature_event is None:
             feature_event = self.event_store.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
+
+        # P1 fix: persist decision-referenced snapshots so replay / audit can
+        # resolve market_snapshot_ref / feature_snapshot_ref.
+        # High-frequency topics normally bypass Postgres (stream_cache only).
+        # Here we persist ONLY the specific envelopes selected for this decision
+        # cycle — max 2 appends per cycle, well below tick rate.
+        # Both EventStore implementations handle duplicate event_ids idempotently.
+        if self._stream_cache is not None:
+            _persist_log = logging.getLogger("aats.decision_engine.context_builder")
+            for _ref_envelope in (market_event, feature_event):
+                if _ref_envelope is not None:
+                    try:
+                        self.event_store.append(_ref_envelope)
+                    except Exception:
+                        _persist_log.warning(
+                            "audit_snapshot_persist_degraded "
+                            "topic=%s event_id=%s symbol=%s decision_id=%s",
+                            _ref_envelope.topic,
+                            _ref_envelope.event_id,
+                            symbol,
+                            decision_id,
+                            exc_info=True,
+                        )
+
         portfolio_event = scoped_portfolio_event(
             self.event_store.by_topic(topics.PORTFOLIO_SNAPSHOTS),
             self.state_scope,

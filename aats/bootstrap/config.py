@@ -49,6 +49,7 @@ from aats.services.ai_service.prompt_builder import PromptBuilder
 from aats.services.ai_service.validator import AssessmentValidator
 from aats.services.decision_engine.audit import DecisionAuditService
 from aats.services.decision_engine.baseline import BaselineStrategy
+from aats.services.decision_engine.feature_resolver import FeatureSnapshotResolver
 from aats.services.decision_engine.context_builder import DecisionContextBuilder
 from aats.services.decision_engine.orchestrator import DecisionOrchestrator
 from aats.services.decision_engine.target_position import TargetPositionEngine
@@ -3435,6 +3436,10 @@ def _build_decision_slice(
     """
     if not _slice_active("decision", effective_process_role=effective_process_role):
         return
+    _feature_resolver = FeatureSnapshotResolver(
+        event_store=storage.event_store,
+        stream_snapshot_cache=slices.stream_snapshot_cache,
+    )
     slices.ai_service = AIInferenceService(
         settings=runtime_settings,
         event_store=storage.event_store,
@@ -3443,6 +3448,7 @@ def _build_decision_slice(
         prompt_builder=PromptBuilder(),
         validator=AssessmentValidator(),
         fee_resolver=slices.fee_resolver,
+        feature_resolver=_feature_resolver,
     )
     slices.strategy_coordinator = StrategyCoordinatorService(
         settings=runtime_settings,
@@ -3470,7 +3476,7 @@ def _build_decision_slice(
             health_service=slices.health_service,
             stream_snapshot_cache=slices.stream_snapshot_cache,
         ),
-        baseline_strategy=BaselineStrategy(event_store=storage.event_store),
+        baseline_strategy=BaselineStrategy(event_store=storage.event_store, feature_resolver=_feature_resolver),
         ai_service=slices.ai_service,
         target_engine=TargetPositionEngine(settings=runtime_settings, fee_resolver=slices.fee_resolver),
         strategy_coordinator=slices.strategy_coordinator,
@@ -4416,6 +4422,7 @@ async def build_runtime(
     # bootstrap 内部即使 Redis 故障也走 best-effort 路径不抛（I1 fail-soft）。
     slices.account_snapshot_cache = AccountSnapshotCache(
         logger=get_logger("aats.execution.account_snapshot_cache"),
+        redis_ttl_seconds=max(1800, int(base_settings.account_state_stale_after_seconds * 3)),
     )
     await slices.account_snapshot_cache.bootstrap(
         hot_state_store=hot_state_store,

@@ -5,6 +5,45 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AATS 自动交易监控台</title>
   <link rel="stylesheet" href="/ui/app.css">
+
+  <!-- modulepreload: 并行预取全部 ES module，消除 WSL2 网桥逐层发现的瀑布延迟 -->
+  <!-- 底层传输 / 通用 helper -->
+  <link rel="modulepreload" href="/ui/modules/api-client.js">
+  <link rel="modulepreload" href="/ui/modules/formatters.js">
+  <link rel="modulepreload" href="/ui/modules/terms.js">
+  <link rel="modulepreload" href="/ui/modules/components.js">
+  <link rel="modulepreload" href="/ui/modules/copy.js">
+  <!-- 领域 action handler -->
+  <link rel="modulepreload" href="/ui/modules/actions/admin-actions.js">
+  <link rel="modulepreload" href="/ui/modules/actions/execution-actions.js">
+  <link rel="modulepreload" href="/ui/modules/actions/risk-actions.js">
+  <!-- 应用层（流程 / 状态 / 渲染壳） -->
+  <link rel="modulepreload" href="/ui/modules/dashboard-refresh.js">
+  <link rel="modulepreload" href="/ui/modules/detail-drawers.js">
+  <link rel="modulepreload" href="/ui/modules/dev-self-check.js">
+  <link rel="modulepreload" href="/ui/modules/flash.js">
+  <link rel="modulepreload" href="/ui/modules/navigation-state.js">
+  <link rel="modulepreload" href="/ui/modules/shell-renderer.js">
+  <link rel="modulepreload" href="/ui/modules/store.js">
+  <link rel="modulepreload" href="/ui/modules/view-router.js">
+  <link rel="modulepreload" href="/ui/modules/overlay-parent-renderers.js">
+  <link rel="modulepreload" href="/ui/modules/refresh-interactivity.js">
+  <link rel="modulepreload" href="/ui/modules/shadow-drawer.js">
+  <link rel="modulepreload" href="/ui/modules/trade-display.js">
+  <link rel="modulepreload" href="/ui/modules/reconciliation-controls.js">
+  <link rel="modulepreload" href="/ui/modules/exit-execution-helpers.js">
+  <!-- 视图模块 -->
+  <link rel="modulepreload" href="/ui/modules/views/ai-analysis-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/ai-config-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/ai-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/admin-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/execution-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/exit-execution-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/home-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/overview-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/replay-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/risk-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/strategy-view.js">
 </head>
 <body data-view="home">
   <div class="console-shell console-shell--compact">

@@ -45,6 +45,7 @@ from aats.services.execution_engine.okx_account import derivatives_position_mode
 from aats.services.execution_engine.exit_intent_aggregator import exit_execution_review_items
 from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
+from aats.services.operator._parallel import parallel_fetch
 from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.audit_replay_queries import AuditReplayQueryFacade
 from aats.services.operator.blocker_queries import BlockerQueryFacade
@@ -165,9 +166,32 @@ class OperatorQueryService:
                 self._cache[key] = value
             return self._cache[key]
 
+    # threading.local 用于检测同线程内的 _cached_ttl 重入。
+    # 场景：query_service.method_A() → _cached_ttl(key_X) → loader → facade.method()
+    #   → _cached_ttl(key_X)。内层看到 key_X 已注册 inflight Event，会 wait(25s)
+    #   等外层完成——但外层在等内层返回——自死锁。
+    # 用 thread-local 记录当前线程正在执行 loader 的 key 集合，重入时直接执行
+    # loader 跳过 singleflight，避免死锁。
+    _reentrant_guard: __import__("threading").local = __import__("threading").local()
+
+    # Singleflight follower 最长等待时间。必须 < 前端 DEFAULT_TIMEOUT_MS(30s)，
+    # 否则前端先超时用户看到错误，后端线程还在空等浪费线程池。设为 25s：给
+    # 前端留 5s 的网络往返余量。
+    _SINGLEFLIGHT_WAIT_SECONDS = 25
+
     def _cached_ttl(self, key: str, ttl_seconds: int, loader):
         if not hasattr(self, "_ttl_cache"):
             self._ttl_cache = {}
+        # ── 重入检测 ──
+        # 同线程内如果已经在执行同 key 的 loader，直接调 loader() 跳过
+        # singleflight，避免内层等外层的 Event 导致自死锁。
+        active_keys = getattr(self._reentrant_guard, "active_keys", None)
+        if active_keys is None:
+            active_keys = set()
+            self._reentrant_guard.active_keys = active_keys
+        if key in active_keys:
+            return loader()
+
         # Singleflight: 冷启动时 dashboard bundle 会在多个线程里同时调用
         # 同一个 cache key（比如 systemRecovery 和 mode 都触发 recovery_view）。
         # 没有 singleflight 的话，每个线程各自执行 loader()，嵌套的
@@ -193,19 +217,22 @@ class OperatorQueryService:
                 self._inflight[key] = event
                 wait_for = None
         if wait_for is not None:
-            # 等待 leader 线程完成（最多 60s 防死锁）
-            wait_for.wait(timeout=60)
+            wait_for.wait(timeout=self._SINGLEFLIGHT_WAIT_SECONDS)
             with self._cache_lock:
+                # 修复：wait 之后重新取时间戳，防止用等待前的旧 now 误判缓存过期。
+                fresh_now = utc_now()
                 cached = self._ttl_cache.get(key)
                 if cached is not None:
                     expires_at, value = cached
-                    if expires_at > now:
+                    if expires_at > fresh_now:
                         return value
             # leader 失败了或超时，自己兜底执行
             return loader()
+        active_keys.add(key)
         try:
             value = loader()
         finally:
+            active_keys.discard(key)
             with self._cache_lock:
                 self._inflight.pop(key, None)
                 event.set()
@@ -7404,54 +7431,69 @@ class OperatorQueryService:
         return self.blocker_control_service.snapshot()
 
     def _build_metrics(self) -> dict[str, Any]:
-        snapshot = self._latest_scoped_snapshot()
-        metrics = self.runtime.metrics.snapshot()
-        fills = self._scoped_fills()
-        phase1_shadow = self.phase1_shadow()
-        order_intent_events = list(
-            self.runtime.event_store.by_topic_scoped(
-                topics.ORDER_INTENTS,
-                scope=self.state_scope,
-            )
-        )
-        decision_context_events = list(
-            self.runtime.event_store.by_topic_scoped(
-                topics.DECISION_CONTEXTS,
-                scope=self.state_scope,
-            )
-        )
-        snapshot_events = [
-            event
-            for event in self.runtime.event_store.by_topic_scoped(
-                topics.PORTFOLIO_SNAPSHOTS,
-                scope=self.state_scope,
-            )
-        ]
+        # ── Phase 1：并行获取所有互相独立的子查询 ──
+        phase1_queries = {
+            "snapshot": self._latest_scoped_snapshot,
+            "metrics": self.runtime.metrics.snapshot,
+            "fills": self._scoped_fills,
+            "phase1_shadow": self.phase1_shadow,
+            "order_intent_events": lambda: list(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.ORDER_INTENTS,
+                    scope=self.state_scope,
+                )
+            ),
+            "decision_context_events": lambda: list(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.DECISION_CONTEXTS,
+                    scope=self.state_scope,
+                )
+            ),
+            "snapshot_events": lambda: list(
+                self.runtime.event_store.by_topic_scoped(
+                    topics.PORTFOLIO_SNAPSHOTS,
+                    scope=self.state_scope,
+                )
+            ),
+            "reconciliation_refs": lambda: {
+                report.portfolio_snapshot_ref
+                for report in self.runtime.reconciliation_repo.history_for_scope(scope=self.state_scope)
+            },
+            "rejections": lambda: order_states_for_scope(
+                self.runtime.execution_repo,
+                self.state_scope,
+                statuses=("FAILED", "REJECTED", "BLOCKED"),
+                limit=200,
+            ),
+            "open_orders": self._scoped_open_order_states,
+            "execution_errors": self.execution_errors,
+            "strategy_execution_health": self.strategy_execution_health,
+        }
+        r = parallel_fetch(phase1_queries)
+
+        snapshot = r["snapshot"]
+        metrics = r["metrics"]
+        fills = r["fills"]
+        phase1_shadow = r["phase1_shadow"]
+        order_intent_events = r["order_intent_events"]
+        decision_context_events = r["decision_context_events"]
+        snapshot_events = r["snapshot_events"]
+        reconciliation_refs = r["reconciliation_refs"]
+
         snapshot_fill_ids = {
             event.payload.get("source_fill_id")
             for event in snapshot_events
             if isinstance(event.payload, dict) and event.payload.get("source_fill_id")
         }
-        reconciliation_refs = {
-            report.portfolio_snapshot_ref
-            for report in self.runtime.reconciliation_repo.history_for_scope(scope=self.state_scope)
-        }
         return {
             "decision_cycle_count": len(decision_context_events),
             "order_intent_count": len(order_intent_events),
             "fill_count": len(fills),
-            "rejection_count": len(
-                order_states_for_scope(
-                    self.runtime.execution_repo,
-                    self.state_scope,
-                    statuses=("FAILED", "REJECTED", "BLOCKED"),
-                    limit=200,
-                )
-            ),
+            "rejection_count": len(r["rejections"]),
             "reconciliation_mismatch_count": metrics.get("reconciliation_mismatches", 0),
             "processing_failure_count": metrics.get("processing_failures", 0),
             "portfolio_snapshot_repair_count": metrics.get("portfolio_snapshot_repairs", 0),
-            "current_open_order_count": len(self._scoped_open_order_states()),
+            "current_open_order_count": len(r["open_orders"]),
             "portfolio_snapshot_count": len(snapshot_events),
             "fill_without_snapshot_count": sum(1 for fill in fills if fill.fill_id not in snapshot_fill_ids),
             "snapshot_without_reconciliation_count": sum(
@@ -7468,13 +7510,13 @@ class OperatorQueryService:
             ),
             "phase1_shadow_alert_count": metrics.get("phase1_shadow_alerts", 0),
             "phase1_shadow_recovery_count": metrics.get("phase1_shadow_recoveries", 0),
-            "recent_execution_errors": self.execution_errors()["errors"][:10],
+            "recent_execution_errors": r["execution_errors"]["errors"][:10],
             "exposure_summary": None if snapshot is None else {
                 "gross_exposure": snapshot.gross_exposure,
                 "net_exposure": snapshot.net_exposure,
                 "total_equity": snapshot.total_equity,
             },
-            "strategy_execution_health": self.strategy_execution_health(),
+            "strategy_execution_health": r["strategy_execution_health"],
         }
 
     def _build_phase1_shadow(self) -> dict[str, Any]:

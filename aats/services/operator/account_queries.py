@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
+from aats.services.operator._parallel import parallel_fetch
 from aats.services.runtime_scope import (
     funding_fee_records_for_scope,
     order_states_for_scope,
@@ -67,26 +68,43 @@ class AccountQueryFacade:
         }
 
     def account_state(self) -> dict[str, Any]:
-        cache_key = f"account_state:{self.owner._scope_cache_fragment()}"
-        return self.owner._cached_ttl(cache_key, 10, self.build_account_state)
+        # 外层 query_service.account_state() 已经用同 key 做了 _cached_ttl(35s)，
+        # 这里不能再用同 key 做 _cached_ttl，否则 singleflight 的 inflight Event
+        # 会自死锁（内层等外层完成，外层等内层返回 → 60s 超时）。
+        return self.build_account_state()
 
     def build_account_state(self) -> dict[str, Any]:
-        status = self.owner.account_service_status()
-        snapshot = self.owner.latest_exchange_snapshot()
-        local_snapshot = self.owner._latest_scoped_snapshot()
-        recovery = self.owner.recovery_view()
-        reconciliation = self.owner._latest_scoped_reconciliation()
+        # ── Phase 1：并行获取所有互相独立的子查询 ──
+        phase1_queries: dict[str, Any] = {
+            "status": self.owner.account_service_status,
+            "snapshot": self.owner.latest_exchange_snapshot,
+            "local_snapshot": self.owner._latest_scoped_snapshot,
+            "recovery": self.owner.recovery_view,
+            "reconciliation": self.owner._latest_scoped_reconciliation,
+            "derivatives_live_guard": self.owner.derivatives_live_guard,
+            "persisted_funding_fee_summary": lambda: self._recent_persisted_funding_fee_summary(limit=200),
+            "margin_buffer_risk": self.owner.margin_buffer_risk,
+        }
+        if hasattr(self.owner.runtime.account_service, "recent_funding_fee_summary"):
+            phase1_queries["exchange_funding_fee_summary"] = (
+                lambda: self.owner.runtime.account_service.recent_funding_fee_summary(
+                    symbol=self.owner.runtime.settings.default_symbol
+                )
+            )
+        r = parallel_fetch(phase1_queries)
+
+        status = r["status"]
+        snapshot = r["snapshot"]
+        local_snapshot = r["local_snapshot"]
+        recovery = r["recovery"]
+        reconciliation = r["reconciliation"]
         tracked_symbols = set(self.owner.runtime.settings.allowed_symbols) | {self.owner.runtime.settings.default_symbol}
-        exchange_funding_fee_summary = (
-            self.owner.runtime.account_service.recent_funding_fee_summary(symbol=self.owner.runtime.settings.default_symbol)
-            if hasattr(self.owner.runtime.account_service, "recent_funding_fee_summary")
-            else None
-        )
+        exchange_funding_fee_summary = r.get("exchange_funding_fee_summary")
         position_mode_contract = status.get("position_mode_contract") or derivatives_position_mode_contract(
             settings=self.owner.runtime.settings,
             snapshot=snapshot,
         )
-        derivatives_live_guard = self.owner.derivatives_live_guard()
+        derivatives_live_guard = r["derivatives_live_guard"]
         return {
             "backend": self.owner.runtime.settings.account_backend,
             "read_enabled": self.owner.runtime.settings.account_read_enabled,
@@ -139,11 +157,11 @@ class AccountQueryFacade:
             "recent_bills_count": status.get("recent_bills_count", 0),
             "last_bills_error": status.get("last_bills_error"),
             "exchange_funding_fee_summary": exchange_funding_fee_summary,
-            "persisted_funding_fee_summary": self._recent_persisted_funding_fee_summary(limit=200),
+            "persisted_funding_fee_summary": r["persisted_funding_fee_summary"],
             "local_position_margin_summary": self.owner._local_position_margin_summary(local_snapshot),
             "exchange_position_margin_summary": self.owner._exchange_position_margin_summary(snapshot),
             "margin_reconciliation": self.owner._margin_reconciliation_summary(reconciliation),
-            "margin_buffer_overview": self.owner.margin_buffer_risk(),
+            "margin_buffer_overview": r["margin_buffer_risk"],
             "derivatives_live_guard": derivatives_live_guard,
             "blockers": status.get("blockers", []),
             "current_blocking_reason": next(iter(status.get("blockers", [])), None),
@@ -397,8 +415,10 @@ class AccountQueryFacade:
         }
 
     def execution_latest(self) -> dict[str, Any]:
-        cache_key = f"execution_latest:{self.owner._scope_cache_fragment()}"
-        return self.owner._cached_ttl(cache_key, 10, self.build_execution_latest)
+        # 外层 query_service.execution_latest() 已经用同 key 做了 _cached_ttl(35s)，
+        # 这里不能再用同 key 做 _cached_ttl，否则 singleflight 的 inflight Event
+        # 会自死锁（内层等外层完成，外层等内层返回 → 60s 超时）。
+        return self.build_execution_latest()
 
     def build_execution_latest(self) -> dict[str, Any]:
         latest_order = self.owner.latest_order()

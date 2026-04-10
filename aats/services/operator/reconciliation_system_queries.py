@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import log_event
 from aats.events import topics
+from aats.services.operator._parallel import parallel_fetch
 from aats.events.envelopes import publish_model
 from aats.schemas.common import utc_now
 from aats.schemas.operator import (
@@ -25,9 +26,14 @@ class ReconciliationSystemQueryFacade:
         self.owner = owner
 
     def reconciliation_latest(self) -> dict[str, Any]:
-        report = self.owner._latest_scoped_reconciliation()
-        latest_validation = self.owner.runtime.event_store.latest(topics.RECONCILIATION_VALIDATIONS)
-        recovery = self.owner.recovery_view()
+        r = parallel_fetch({
+            "report": self.owner._latest_scoped_reconciliation,
+            "latest_validation": lambda: self.owner.runtime.event_store.latest(topics.RECONCILIATION_VALIDATIONS),
+            "recovery": self.owner.recovery_view,
+        })
+        report = r["report"]
+        latest_validation = r["latest_validation"]
+        recovery = r["recovery"]
         return {
             "reconciliation": report.model_dump(mode="json") if report is not None else None,
             "mismatch_summary": self.owner._reconciliation_mismatch_summary(report),

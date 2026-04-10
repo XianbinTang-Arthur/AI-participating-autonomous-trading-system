@@ -15,7 +15,7 @@ latest() 和 recent_by_key() 查询。每个进程维护自己的内存副本，
 from __future__ import annotations
 
 import logging
-from collections import defaultdict, deque
+from collections import OrderedDict, deque
 from typing import TYPE_CHECKING, Any, Sequence
 
 from aats.events import topics as _topics
@@ -33,6 +33,7 @@ STREAM_CACHE_TOPICS: frozenset[str] = frozenset({
 })
 
 _DEFAULT_MAX_RECENT = 50
+_DEFAULT_BY_ID_CAPACITY = 2000
 
 _NS_STREAM_CACHE = "stream_cache"
 _KEY_LATEST = "latest"
@@ -65,6 +66,7 @@ class StreamSnapshotCache:
         *,
         default_max_recent: int = _DEFAULT_MAX_RECENT,
         max_recent_by_topic: dict[str, int] | None = None,
+        by_id_capacity: int = _DEFAULT_BY_ID_CAPACITY,
     ) -> None:
         self._default_max_recent = default_max_recent
         self._max_recent_by_topic: dict[str, int] = dict(max_recent_by_topic or {})
@@ -73,6 +75,10 @@ class StreamSnapshotCache:
         # 近期历史：(topic, key) → deque[envelope]
         # _new_deque 根据 topic 选择 maxlen
         self._recent: dict[tuple[str, str], deque[EventEnvelope]] = {}
+        # event_id → envelope 精确索引，保证 decision context 内一致性。
+        # 使用 OrderedDict FIFO 淘汰，容量由 by_id_capacity 限制。
+        self._by_id: OrderedDict[str, EventEnvelope] = OrderedDict()
+        self._by_id_capacity = by_id_capacity
         # bootstrap / flush 支持
         self._hot_state_store: HotStateStore | None = None
         self._logger: logging.Logger | None = None
@@ -90,6 +96,18 @@ class StreamSnapshotCache:
             dq = deque(maxlen=self._max_recent_for(topic))
             self._recent[pair] = dq
         return dq
+
+    def _index_by_id(self, envelope: EventEnvelope) -> None:
+        """按 event_id 索引并在超容量时 FIFO 淘汰。
+
+        bootstrap() 和 update() 共用此方法，确保 _by_id_capacity
+        在所有写入路径一致执行。
+        """
+        eid = envelope.event_id
+        if eid:
+            self._by_id[eid] = envelope
+            if len(self._by_id) > self._by_id_capacity:
+                self._by_id.popitem(last=False)
 
     # ------------------------------------------------------------------
     # Bootstrap（启动期 Redis hydration）
@@ -136,6 +154,7 @@ class StreamSnapshotCache:
                         envelope = EventEnvelope.model_validate(stored)
                         self._latest[(topic, symbol)] = envelope
                         self._latest[(topic, None)] = envelope
+                        self._index_by_id(envelope)
                         hydrated_latest += 1
                     except Exception as exc:
                         if logger:
@@ -166,6 +185,7 @@ class StreamSnapshotCache:
                         try:
                             env = EventEnvelope.model_validate(item)
                             dq.append(env)
+                            self._index_by_id(env)
                             restored += 1
                         except Exception:
                             continue
@@ -199,6 +219,8 @@ class StreamSnapshotCache:
         key = envelope.key
         self._latest[(topic, key)] = envelope
         self._latest[(topic, None)] = envelope  # 全局最新（无 key 过滤）
+        # event_id 精确索引维护
+        self._index_by_id(envelope)  # FIFO 淘汰最旧条目
         if key is not None:
             self._get_or_create_deque(topic, key).append(envelope)
             self._dirty_keys.add((topic, key))
@@ -210,6 +232,15 @@ class StreamSnapshotCache:
     def latest(self, topic: str, key: str | None = None) -> EventEnvelope | None:
         """返回指定 topic（可选 key）的最新快照。"""
         return self._latest.get((topic, key))
+
+    def get(self, event_id: str) -> EventEnvelope | None:
+        """按 event_id 精确查找。
+
+        用于 decision context 内一致性：context_builder 记录的
+        feature_snapshot_ref 必须能精确取回同一条 envelope，避免
+        latest() 在高频下返回更新的 tick 导致行情基准分裂。
+        """
+        return self._by_id.get(event_id)
 
     def recent_by_key(self, topic: str, key: str, limit: int) -> list[EventEnvelope]:
         """返回指定 topic+key 的最近 *limit* 条快照，按时间升序。"""

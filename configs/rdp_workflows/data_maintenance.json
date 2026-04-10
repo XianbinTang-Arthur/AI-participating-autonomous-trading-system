@@ -14,7 +14,7 @@
     {
       "name": "artifact_index_rebuild",
       "description": "重建 artifact 索引",
-      "command": "python -m aats.data_platform.governance.artifact_indexer --rebuild",
+      "command": "python -m aats.data_platform.governance.artifact_indexer --validate",
       "timeout_seconds": 60,
       "enabled": true,
       "allow_failure": true

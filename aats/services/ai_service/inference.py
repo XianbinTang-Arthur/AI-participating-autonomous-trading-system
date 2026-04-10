@@ -32,6 +32,7 @@ from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 from aats.services.portfolio_service.positions import PortfolioState
+from aats.services.decision_engine.feature_resolver import FeatureSnapshotResolver
 from aats.storage.base import EventStore, ExecutionRepository
 
 
@@ -48,6 +49,7 @@ class AIInferenceService:
         provider: AIProvider | None = None,
         evaluator: AIEvaluationTracker | None = None,
         fee_resolver: EffectiveFeeResolver | None = None,
+        feature_resolver: FeatureSnapshotResolver | None = None,
     ) -> None:
         self.settings = settings
         self.event_store = event_store
@@ -58,6 +60,7 @@ class AIInferenceService:
         self.provider = provider or self._default_provider()
         self.evaluator = evaluator or AIEvaluationTracker()
         self.fee_resolver = fee_resolver or EffectiveFeeResolver(settings=settings)
+        self._feature_resolver = feature_resolver
         self.logger = get_logger("aats.ai_service")
         self._consecutive_failures = 0
         self._consecutive_successes = 0
@@ -554,7 +557,10 @@ class AIInferenceService:
             self.evaluator.record_shadow_assessment(shadow_assessment)
 
     def _feature_snapshot(self, context: DecisionContext) -> FeatureSnapshot | None:
-        event = self.event_store.get(context.feature_snapshot_ref)
+        if self._feature_resolver is not None:
+            event = self._feature_resolver.resolve(context.feature_snapshot_ref)
+        else:
+            event = self.event_store.get(context.feature_snapshot_ref)
         if event is None:
             return None
         return FeatureSnapshot.model_validate(event.payload)

@@ -3,6 +3,8 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
+from aats.services.operator._parallel import parallel_fetch
+
 if TYPE_CHECKING:
     from aats.services.operator.query_service import OperatorQueryService
 
@@ -149,10 +151,15 @@ class StrategyQueryFacade:
         )
 
     def _build_strategy_attribution_report(self, *, limit: int) -> dict[str, Any]:
-        sleeve_records = list(self.owner._scoped_sleeve_pnl_records())
+        r = parallel_fetch({
+            "sleeve_records": lambda: list(self.owner._scoped_sleeve_pnl_records()),
+            "outcomes": lambda: list(self.owner._scoped_fill_outcomes()),
+            "inventory_summary": self.owner._strategy_sleeve_inventory_summary,
+        })
+        sleeve_records = r["sleeve_records"]
         sleeve_records.sort(key=lambda item: item.event_timestamp or item.created_at, reverse=True)
         sleeve_rows = sleeve_records[:limit]
-        outcomes = list(self.owner._scoped_fill_outcomes())
+        outcomes = r["outcomes"]
         outcomes.sort(key=lambda item: item.ingestion_timestamp or item.created_at, reverse=True)
         rows = [self.owner._execution_quality_row(item) for item in outcomes[:limit]]
 
@@ -203,7 +210,7 @@ class StrategyQueryFacade:
             for code in row.get("risk_rejection_reasons") or []:
                 rejection_counts[str(code)] = rejection_counts.get(str(code), 0) + 1
 
-        inventory_summary = self.owner._strategy_sleeve_inventory_summary()
+        inventory_summary = r["inventory_summary"]
         top_inventory_sleeve = inventory_summary[0] if inventory_summary else None
 
         return {

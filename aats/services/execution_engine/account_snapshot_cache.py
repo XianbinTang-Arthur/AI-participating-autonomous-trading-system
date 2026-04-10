@@ -31,7 +31,10 @@ D3  publish 由 config._refresh_account_loop 触发（不改 account_service 内
 D4  复用已有 topic ``account.snapshots``
 D5  publish 三步：local set -> best-effort Redis set -> best-effort NATS publish
 D6  idempotent：``fetched_at <= local`` noop（与 PortfolioSnapshotCache 相同）
-D7  broadcast payload 剥离 ``raw`` 字段以控制 NATS payload 大小
+D7  broadcast payload 白名单裁剪 ``raw`` 字段：仅保留
+    ``funding_rate_by_symbol``（非 execution 角色的
+    ``OKXAccountService.funding_schedule()`` 依赖），其余大体积
+    原始响应（``balance`` 等）剥离，以控制 NATS/Redis payload 大小
 D8  所有 process_role 对称装载，cache 类内部无 role 分支
 
 不变量
@@ -46,13 +49,12 @@ I5  miss 不破坏读：cache miss -> _latest_snapshot 保持 None/stale ->
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any
 
 from aats.bootstrap.logging import log_event
 from aats.bus.base import EventBus
 from aats.events import topics
-from aats.schemas.common import EventEnvelope, dump_payload_exact
+from aats.schemas.common import EventEnvelope
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.storage.hot_state_store import HotStateStore, make_key
 
@@ -88,7 +90,14 @@ class AccountSnapshotCache:
     Readers access ``get_sync()`` or ``latest`` property.
     """
 
-    def __init__(self, *, logger: logging.Logger) -> None:
+    _DEFAULT_REDIS_TTL_SECONDS: int = 1800
+
+    def __init__(
+        self,
+        *,
+        logger: logging.Logger,
+        redis_ttl_seconds: int | None = None,
+    ) -> None:
         self._logger = logger
         self._hot_state_store: HotStateStore | None = None
         self._bus: EventBus | None = None
@@ -97,6 +106,11 @@ class AccountSnapshotCache:
         self._latest_recent_bills: list[dict[str, Any]] = []
         self._bootstrapped: bool = False
         self._subscribed: bool = False
+        self._redis_ttl_seconds: int = (
+            redis_ttl_seconds
+            if redis_ttl_seconds is not None
+            else self._DEFAULT_REDIS_TTL_SECONDS
+        )
 
     # ──────────────────────────────────────────────────────────────────
     # 启动 / 关闭
@@ -228,8 +242,8 @@ class AccountSnapshotCache:
 
         步骤 (D5):
         1. 同步更新本地 ``_latest`` + ``_latest_recent_bills``
-        2. best-effort 写 Redis（剥离 raw 字段节省空间）
-        3. best-effort 广播 NATS（同样剥离 raw 字段控制 payload 大小）
+        2. best-effort 写 Redis（raw 白名单裁剪，见 D7）
+        3. best-effort 广播 NATS（同上）
 
         idempotent (D6): ``fetched_at <= local`` 则 noop。
 
@@ -296,24 +310,33 @@ class AccountSnapshotCache:
         格式::
 
             {
-                "snapshot": { ... },   # ExchangeAccountSnapshot dump, raw 已剥离
+                "snapshot": { ... },   # ExchangeAccountSnapshot dump, raw 白名单裁剪
                 "recent_bills": [ ... ],  # list[dict]
             }
         """
         snapshot_data = snapshot.model_dump(mode="json")
-        snapshot_data.pop("raw", None)
+        # P2 fix: 不再整体剥离 raw，而是白名单保留 funding_rate_by_symbol，
+        # 因为非 execution 角色的 OKXAccountService.funding_schedule() 依赖此字段。
+        raw = snapshot_data.pop("raw", None)
+        if isinstance(raw, dict):
+            whitelisted_raw: dict[str, Any] = {}
+            funding_rate = raw.get("funding_rate_by_symbol")
+            if funding_rate is not None:
+                whitelisted_raw["funding_rate_by_symbol"] = funding_rate
+            if whitelisted_raw:
+                snapshot_data["raw"] = whitelisted_raw
         return {
             "snapshot": snapshot_data,
             "recent_bills": list(self._latest_recent_bills),
         }
 
     async def _best_effort_redis_set(self, snapshot: ExchangeAccountSnapshot) -> None:
-        """best-effort 写 Redis。剥离 raw 字段以控制存储大小 (D7)。"""
+        """best-effort 写 Redis。raw 白名单裁剪 (D7)。"""
         if self._hot_state_store is None:
             return
         try:
             payload = self._build_broadcast_payload(snapshot)
-            await self._hot_state_store.set(_redis_key(), payload, ttl_seconds=300)
+            await self._hot_state_store.set(_redis_key(), payload, ttl_seconds=self._redis_ttl_seconds)
         except Exception as exc:
             log_event(
                 self._logger,

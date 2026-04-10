@@ -86,6 +86,11 @@ def _run_task(
         result["error"] = "no command specified"
         return result
 
+    # 将 command 中的 "python " 替换为当前解释器绝对路径，
+    # 避免 cron 等无 PATH 环境找不到 python。
+    if command.startswith("python "):
+        command = f"{sys.executable} {command[7:]}"
+
     if dry_run:
         result["status"] = "dry_run"
         return result

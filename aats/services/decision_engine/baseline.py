@@ -1,16 +1,32 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from aats.schemas.decision import BaselineAssessment, DecisionContext
 from aats.schemas.features import AnalysisContext, DirectionalBias, FeatureSnapshot, RegimeIndicator
 from aats.storage.base import EventStore
 
+if TYPE_CHECKING:
+    from aats.services.decision_engine.feature_resolver import FeatureSnapshotResolver
+
 
 class BaselineStrategy:
-    def __init__(self, *, event_store: EventStore) -> None:
+    def __init__(
+        self,
+        *,
+        event_store: EventStore,
+        feature_resolver: "FeatureSnapshotResolver | None" = None,
+    ) -> None:
         self.event_store = event_store
+        self._feature_resolver = feature_resolver
 
     def evaluate(self, context: DecisionContext) -> BaselineAssessment:
-        feature_event = self.event_store.get(context.feature_snapshot_ref)
+        # 按 feature_snapshot_ref（event_id）精确读取，保证与 context 行情基准一致。
+        # resolver 路径: stream_cache.get(ref) → event_store.get(ref)
+        if self._feature_resolver is not None:
+            feature_event = self._feature_resolver.resolve(context.feature_snapshot_ref)
+        else:
+            feature_event = self.event_store.get(context.feature_snapshot_ref)
         if feature_event is None:
             raise RuntimeError("Feature snapshot reference is missing from the event store")
 

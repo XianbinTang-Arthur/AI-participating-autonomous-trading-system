@@ -17,10 +17,9 @@
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from aats.bus.memory_bus import InMemoryEventBus
@@ -99,7 +98,10 @@ def _make_snapshot(
         open_orders=[],
         fills=[],
         instruments=[],
-        raw={"balance": {"code": "0", "data": [{"totalEq": "10000"}]}},
+        raw={
+            "balance": {"code": "0", "data": [{"totalEq": "10000"}]},
+            "funding_rate_by_symbol": {"BTC-USDT-SWAP": {"fundingRate": "0.0001"}},
+        },
     )
 
 
@@ -132,9 +134,20 @@ def _make_remote_message(
     *,
     recent_bills: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """构造模拟 NATS 收到的 message payload（新格式包含 bills）。"""
+    """构造模拟 NATS 收到的 message payload（新格式包含 bills）。
+
+    与 ``_build_broadcast_payload`` 保持一致：白名单裁剪 raw，
+    仅保留 ``funding_rate_by_symbol``。
+    """
     snapshot_data = snapshot.model_dump(mode="json")
-    snapshot_data.pop("raw", None)
+    raw = snapshot_data.pop("raw", None)
+    if isinstance(raw, dict):
+        whitelisted_raw: dict[str, Any] = {}
+        funding_rate = raw.get("funding_rate_by_symbol")
+        if funding_rate is not None:
+            whitelisted_raw["funding_rate_by_symbol"] = funding_rate
+        if whitelisted_raw:
+            snapshot_data["raw"] = whitelisted_raw
     payload_data = {
         "snapshot": snapshot_data,
         "recent_bills": recent_bills or [],
@@ -177,9 +190,13 @@ class TestBootstrapHydrate(unittest.IsolatedAsyncioTestCase):
     async def test_redis_hydrate(self) -> None:
         snapshot = _make_snapshot()
         store = InMemoryHotStateStore()
-        # 预先写入 Redis（新格式：包含 snapshot + recent_bills）
+        # 预先写入 Redis（新格式：白名单裁剪后的 snapshot + recent_bills）
         snapshot_data = snapshot.model_dump(mode="json")
-        snapshot_data.pop("raw", None)
+        raw = snapshot_data.pop("raw", None)
+        if isinstance(raw, dict):
+            funding = raw.get("funding_rate_by_symbol")
+            if funding is not None:
+                snapshot_data["raw"] = {"funding_rate_by_symbol": funding}
         bills = [{"billId": "1001", "type": "8", "instId": "BTC-USDT-SWAP"}]
         await store.set(_redis_key(), {"snapshot": snapshot_data, "recent_bills": bills})
 
@@ -194,11 +211,11 @@ class TestBootstrapHydrate(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cache.recent_bills[0]["billId"], "1001")
 
     async def test_redis_hydrate_backward_compat_old_format(self) -> None:
-        """兼容旧格式：Redis 中只有 bare snapshot dict（无 wrapper）。"""
+        """兼容旧格式：Redis 中只有 bare snapshot dict（无 wrapper / 完整剥离 raw）。"""
         snapshot = _make_snapshot()
         store = InMemoryHotStateStore()
         payload = snapshot.model_dump(mode="json")
-        payload.pop("raw", None)
+        payload.pop("raw", None)  # 旧版完整剥离
         await store.set(_redis_key(), payload)
 
         cache = _make_cache()
@@ -232,11 +249,13 @@ class TestPublish(unittest.IsolatedAsyncioTestCase):
         # 本地更新
         self.assertIs(cache.get_sync(), snapshot)
         self.assertEqual(len(cache.recent_bills), 1)
-        # Redis 写入（wrapper 格式）
+        # Redis 写入（wrapper 格式，raw 白名单裁剪）
         stored = await store.get(_redis_key())
         self.assertIsNotNone(stored)
         self.assertIn("snapshot", stored)
-        self.assertNotIn("raw", stored["snapshot"])
+        self.assertIn("raw", stored["snapshot"])
+        self.assertIn("funding_rate_by_symbol", stored["snapshot"]["raw"])
+        self.assertNotIn("balance", stored["snapshot"]["raw"])
         self.assertEqual(stored["snapshot"]["account_source"], "okx")
         self.assertEqual(len(stored["recent_bills"]), 1)
 
@@ -321,8 +340,9 @@ class TestRemoteEvent(unittest.IsolatedAsyncioTestCase):
         result = cache.get_sync()
         self.assertIsNotNone(result)
         self.assertEqual(result.fetched_at, snapshot.fetched_at)
-        # raw 字段在广播时被剥离
-        self.assertEqual(result.raw, {})
+        # raw 白名单裁剪：仅保留 funding_rate_by_symbol，balance 等被剥离
+        self.assertIn("funding_rate_by_symbol", result.raw)
+        self.assertNotIn("balance", result.raw)
         # bills 也同步了
         self.assertEqual(len(cache.recent_bills), 1)
         self.assertEqual(cache.recent_bills[0]["billId"], "3001")
@@ -504,22 +524,37 @@ class TestSnapshot(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(snap["fetched_at"])
 
 
-class TestPublishStripsRaw(unittest.IsolatedAsyncioTestCase):
-    async def test_redis_payload_has_no_raw_in_snapshot(self) -> None:
+class TestPublishRawWhitelist(unittest.IsolatedAsyncioTestCase):
+    """验证 broadcast payload 的 raw 白名单裁剪行为 (D7)。
+
+    - funding_rate_by_symbol 保留（非 execution 角色的 funding_schedule() 依赖）
+    - balance 等大体积原始响应剥离
+    """
+
+    async def test_redis_payload_whitelists_funding_rate(self) -> None:
         cache = _make_cache()
         store, bus = await _boot(cache, process_role="execution")
 
         snapshot = _make_snapshot()
-        self.assertIn("balance", snapshot.raw)  # 确认原始有 raw
+        self.assertIn("balance", snapshot.raw)
+        self.assertIn("funding_rate_by_symbol", snapshot.raw)
 
         await cache.publish(snapshot)
 
         stored = await store.get(_redis_key())
-        # Redis 存储的 snapshot 子字段不包含 raw
         self.assertIn("snapshot", stored)
-        self.assertNotIn("raw", stored["snapshot"])
+        snap_data = stored["snapshot"]
+        # 白名单保留 funding_rate_by_symbol
+        self.assertIn("raw", snap_data)
+        self.assertIn("funding_rate_by_symbol", snap_data["raw"])
+        self.assertEqual(
+            snap_data["raw"]["funding_rate_by_symbol"],
+            {"BTC-USDT-SWAP": {"fundingRate": "0.0001"}},
+        )
+        # 非白名单 key 被剥离
+        self.assertNotIn("balance", snap_data["raw"])
 
-    async def test_nats_broadcast_has_no_raw_in_snapshot(self) -> None:
+    async def test_nats_broadcast_whitelists_funding_rate(self) -> None:
         cache = _make_cache()
         store, bus = await _boot(cache, process_role="execution")
 
@@ -534,10 +569,62 @@ class TestPublishStripsRaw(unittest.IsolatedAsyncioTestCase):
         await cache.publish(snapshot)
 
         self.assertEqual(len(received), 1)
-        # 解析 envelope 里的 payload，确认 snapshot 子字段无 raw
         envelope_payload = received[0]["payload"]
-        snapshot_data = envelope_payload["payload"]["snapshot"]
-        self.assertNotIn("raw", snapshot_data)
+        snap_data = envelope_payload["payload"]["snapshot"]
+        # 白名单保留
+        self.assertIn("raw", snap_data)
+        self.assertIn("funding_rate_by_symbol", snap_data["raw"])
+        # 非白名单剥离
+        self.assertNotIn("balance", snap_data["raw"])
+
+    async def test_broadcast_no_funding_rate_strips_raw_entirely(self) -> None:
+        """raw 中没有 funding_rate_by_symbol 时整个 raw 被剥离。"""
+        snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=datetime(2026, 4, 10, 12, 0, 0, tzinfo=timezone.utc),
+            balances=[],
+            positions=[],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            raw={"balance": {"code": "0"}},
+        )
+        cache = _make_cache()
+        store, bus = await _boot(cache, process_role="execution")
+
+        await cache.publish(snapshot)
+
+        stored = await store.get(_redis_key())
+        self.assertNotIn("raw", stored["snapshot"])
+
+    async def test_end_to_end_funding_rate_preserved_cross_process(self) -> None:
+        """publish -> NATS -> gateway hydrate，funding_rate_by_symbol 存活。"""
+        store = InMemoryHotStateStore()
+        bus = InMemoryEventBus()
+
+        exec_cache = _make_cache()
+        await exec_cache.bootstrap(
+            hot_state_store=store, bus=bus, process_role="execution",
+        )
+
+        gw_cache = _make_cache()
+        await gw_cache.bootstrap(
+            hot_state_store=store, bus=bus, process_role="gateway",
+        )
+
+        snapshot = _make_snapshot()
+        await exec_cache.publish(snapshot)
+
+        result = gw_cache.get_sync()
+        self.assertIsNotNone(result)
+        # funding_rate_by_symbol 跨进程保留
+        self.assertIn("funding_rate_by_symbol", result.raw)
+        self.assertEqual(
+            result.raw["funding_rate_by_symbol"],
+            {"BTC-USDT-SWAP": {"fundingRate": "0.0001"}},
+        )
+        # balance 被剥离
+        self.assertNotIn("balance", result.raw)
 
 
 if __name__ == "__main__":
