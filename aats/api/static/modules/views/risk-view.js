@@ -212,7 +212,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
     riskExitExecutionReview: exitExecutionItems.length
       ? surfaceCard({
           title: "退出任务人工处理",
-          kicker: "parent exit / child order",
+          kicker: "退出任务与子委托",
           copy: "这些退出任务在启动恢复或后续收敛后仍未完全闭环。先按这里的动作继续确认真相或安全收尾，不要直接重复下同方向新单。",
           content: renderExitExecutionReviewList({ recovery, actionContext: exitExecutionActionContext }),
         })
@@ -220,14 +220,14 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
     riskExitExecutionTimeline: exitExecutionActionHistory.length
       ? surfaceCard({
           title: "退出任务处理时间线",
-          kicker: "operator action timeline",
+          kicker: "操作员动作时间线",
           copy: "这里按时间顺序收口最近几次退出任务人工动作，方便直接回看每次处理后系统还卡在哪。",
           content: renderExitExecutionActionHistoryList(exitExecutionActionHistory, exitExecutionHistoryFilters),
         })
       : "",
     riskExitExecutionWorkspace: surfaceCard({
       title: "退出任务工作区",
-      kicker: "parent exit operator workspace",
+      kicker: "退出任务工作区",
       panelKey: "exitExecutionActionHistoryPage",
       copy: "这里承接 parent-exit 的长历史查询、分页和人工动作回看。先在这里收敛筛选条件，再决定是否继续 refresh、重试上限查询或安全取消。",
       actions: `<div class="stack-actions table-actions--compact">${actionButton("进入独立工作台", "navigate-view", "exitExecution", "ghost")}</div>`,

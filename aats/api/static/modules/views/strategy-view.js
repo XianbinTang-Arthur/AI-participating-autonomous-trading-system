@@ -231,7 +231,7 @@ export function renderStrategySections(data) {
     strategyAutomation: surfaceCard({
       title: "自动预算与启停",
       kicker: "自动执行与预算控制",
-      copy: "这里保留当前最关键的自动控制结果，更多预算细节已经收进调度卡的展开区。",
+      copy: "这里保留当前最关键的自动控制结果和预算细节。",
       classes: "strategy-compact-card",
       content: `
         ${summaryStrip([
@@ -338,10 +338,11 @@ export function renderStrategySections(data) {
           ],
         ])}
         ${responsiveTable(
-          ["子策略", "执行 / 控制状态", "预算倍率", "权重", "最近净收益"],
+          ["子策略", "执行状态", "控制模式", "预算", "权重", "净收益"],
           displayedAutomationDecisions.map((item) => [
-            `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
-            `<div><strong>${escapeHtml(readableExecutionBehavior(item.execution_behavior || item.metrics?.auto_execution_behavior))}</strong><div class="table-meta">${escapeHtml(readableExecutionControlMode(item.execution_control_mode || item.metrics?.auto_execution_control_mode))} | ${escapeHtml(item.operator_summary || "当前没有额外说明")}</div></div>`,
+            `<div><strong>${middleEllipsis(item.strategy_sleeve_id, 8, 6, "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
+            escapeHtml(readableExecutionBehavior(item.execution_behavior || item.metrics?.auto_execution_behavior)),
+            escapeHtml(readableExecutionControlMode(item.execution_control_mode || item.metrics?.auto_execution_control_mode)),
             formatNumber(item.budget_multiplier, 2, "0"),
             formatNumber(item.allocator_weight, 2, "0"),
             formatSigned(item.recent_net_pnl),
@@ -405,7 +406,7 @@ export function renderStrategySections(data) {
           displayedSleeveProfitability.map((item) => {
             const inventory = sleeveInventorySummary.find((row) => row.strategy_sleeve_id === item.strategy_sleeve_id) || {};
             return [
-              `<div><strong>${escapeHtml(item.strategy_sleeve_id || "未归属")}</strong><div class="table-meta">${escapeHtml((item.families || []).join(" / ") || "当前没有家族标签")}</div></div>`,
+              `<div><strong>${middleEllipsis(item.strategy_sleeve_id, 8, 6, "未归属")}</strong><div class="table-meta">${escapeHtml((item.families || []).join(" / ") || "当前没有家族标签")}</div></div>`,
               `<div><strong>${formatSigned(item.combined_net_realized_pnl)}</strong><div class="table-meta">实现 ${formatSigned(item.realized_pnl)}</div></div>`,
               `<div><strong>${formatSigned(item.funding_fee_amount)}</strong><div class="table-meta">费用 ${formatRawFeeImpact(item.fee_amount)}</div></div>`,
               `<div><strong>${formatSigned(item.inventory_move_qty)}</strong><div class="table-meta">${formatNumber(item.record_count, 0, "0")} 条记录</div></div>`,
@@ -420,7 +421,7 @@ export function renderStrategySections(data) {
       title: "系统自动试盘结论",
       kicker: "试盘审查",
       panelKey: "trialReviewSummary",
-      copy: "试盘工作台只保留本轮是否该继续、是否硬停机、现在该按哪个按钮处理；历史和周期明细默认折叠。",
+      copy: "试盘工作台只保留本轮是否该继续、是否硬停机、现在该按哪个按钮处理；历史和周期明细直接展示在下方。",
       classes: "strategy-compact-card",
       actions: renderTrialVerdictActions(trialReviewActions, {
         trialGuardStatus: scalingRequirements.trial_guard_status,
@@ -574,11 +575,12 @@ export function renderStrategyView(data) {
         "strategy-overview",
         "当前结论",
         "本轮策略到底想做什么",
-        "先看当前决策、门禁和目标变化。这里回答的是“这轮会不会动手”，不是配置细节。 ",
+        "先看当前决策、门禁和目标变化。这里回答的是”这轮会不会动手”，不是配置细节。 ",
         `
           <div class="panel-grid strategy-page-grid">
             <div class="span-7">${sections.strategyHero}</div>
             <div class="span-5">${sections.strategyDecisionWorkbench}</div>
+            <div class="span-12">${sections.strategyHistory}</div>
           </div>
         `
       )}
@@ -586,7 +588,7 @@ export function renderStrategyView(data) {
         "strategy-opportunities",
         "当前机会",
         "当前候选与自动调度",
-        "这里只保留这轮真的会影响下单的候选、路由和 sleeve 状态；预算明细已经在卡片内部折叠。",
+        "这里只保留这轮真的会影响下单的候选、路由和 sleeve 状态。",
         `
           <div class="panel-grid strategy-page-grid">
             <div class="span-12">${sections.strategyCoordinator}</div>
@@ -600,8 +602,8 @@ export function renderStrategyView(data) {
         "这部分只回答一个问题：这条运行线现在适不适合继续放量，还是应该先缩容、暂停或复盘。",
         `
           <div class="panel-grid strategy-page-grid">
-            <div class="span-7">${sections.strategyTrialVerdict}</div>
-            <div class="span-5">${sections.strategyAutomation}</div>
+            <div class="span-12">${sections.strategyTrialVerdict}</div>
+            <div class="span-12">${sections.strategyAutomation}</div>
           </div>
         `
       )}
@@ -609,17 +611,12 @@ export function renderStrategyView(data) {
         "strategy-history",
         "历史归因",
         "归因与历史记录",
-        "默认折叠。只有在复盘最近为什么赚钱/亏钱、或者核对历史策略输出时，再展开这一层。",
-        renderExpandableSection(
-          "展开归因与历史记录",
-          `
-            <div class="panel-grid strategy-page-grid">
-              <div class="span-12">${sections.strategyAttribution}</div>
-              <div class="span-12">${sections.strategyHistory}</div>
-            </div>
-          `,
-          { meta: "默认折叠，保留复盘能力但不抢主视线" }
-        )
+        "复盘最近为什么赚钱/亏钱、或者核对历史策略输出，直接在这里查看。",
+        `
+          <div class="panel-grid strategy-page-grid">
+            <div class="span-12">${sections.strategyAttribution}</div>
+          </div>
+        `
       )}
     </div>
   `;
@@ -2355,17 +2352,17 @@ function smartArbitrageLinkageMeta(config = {}) {
 }
 
 function renderExpandableSection(title, body, options = {}) {
-  const { meta = "", open = false } = options;
+  const { meta = "" } = options;
   return `
-    <details class="strategy-details"${open ? " open" : ""}>
-      <summary>
+    <div class="strategy-subsection">
+      <div class="strategy-subsection__head">
         <span>${escapeHtml(title)}</span>
-        ${meta ? `<span class="strategy-details__meta">${escapeHtml(meta)}</span>` : ""}
-      </summary>
-      <div class="strategy-details__body">
+        ${meta ? `<span class="strategy-subsection__meta">${escapeHtml(meta)}</span>` : ""}
+      </div>
+      <div class="strategy-subsection__body">
         ${body}
       </div>
-    </details>
+    </div>
   `;
 }
 

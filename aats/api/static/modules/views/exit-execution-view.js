@@ -30,7 +30,7 @@ export function renderExitExecutionView(data, uiState = {}) {
       <section class="span-12">
         ${surfaceCard({
           title: "退出任务独立工作台",
-          kicker: "parent exit operator workspace",
+          kicker: "退出任务工作台",
           copy: "这里专门承接 parent-exit 的长历史排查、分页回看和人工动作追踪。当前筛选会写入地址栏，刷新页面或复制链接后仍能恢复同一组条件。",
           actions: `<div class="stack-actions table-actions--compact">${actionButton("返回风险页", "navigate-view", "risk", "ghost")}</div>`,
           content: summaryStrip([
@@ -68,7 +68,7 @@ export function renderExitExecutionView(data, uiState = {}) {
       <section class="span-12" id="exit-execution-workspace">
         ${surfaceCard({
           title: "完整处理列表",
-          kicker: "history and paging",
+          kicker: "历史记录与分页",
           copy: "筛选条件和分页位置会同步进 URL，可直接分享给值班同事，或在刷新后继续查看同一页。",
           content: renderExitExecutionWorkspace({
             page,
@@ -80,7 +80,7 @@ export function renderExitExecutionView(data, uiState = {}) {
       <section class="span-12">
         ${surfaceCard({
           title: "当前 review 提示",
-          kicker: "review snapshot",
+          kicker: "复核快照",
           copy: pendingReviewCount > 0
             ? "这些提示来自运行时 recovery 视图和启动快照回补，用来说明为什么某些 parent-exit 还不能继续自动续派。"
             : "当前没有额外的 parent-exit review 提示。",
