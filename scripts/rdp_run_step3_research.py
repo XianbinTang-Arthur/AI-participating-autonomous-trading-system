@@ -98,13 +98,13 @@ _EXPANDED_ROUND_KEYS = ["independent_15m_expanded", "independent_1h_expanded"]
 _INDEPENDENT_DEFAULTS: dict[str, float | int | None] = {
     "signal_edge_scale_bps": 12.0,
     "taker_fee_bps": 5.0,
-    "slippage_bps": 2.0,
+    "slippage_bps": 1.0,
     "min_confirm_ticks": 2,
     "min_safe_net_edge_bps": 2.0,
     "score_stability_threshold": 5.0,
-    "entry_threshold": 0.40,
+    "entry_threshold": 0.30,
     "close_threshold": 0.15,
-    "scale_in_threshold": 0.60,
+    "scale_in_threshold": 0.40,
     "de_risk_net_edge_bps": 2.0,
     "failed_thesis_net_edge_bps": -1.0,
     "catastrophic_failed_thesis_buffer_bps": 3.0,
@@ -114,6 +114,7 @@ _INDEPENDENT_DEFAULTS: dict[str, float | int | None] = {
     "expected_execution_buffer_bps": 0.5,
     "max_thesis_age_seconds": 1800.0,
     "max_acceptable_cost_bps": 7.5,
+    "min_score_drawdown_bps": 6.0,
     "min_liquidity_quality": 0.55,
     "limit_offset_bps_entry": 1.5,
     "noise_buffer_bps": 2.0,
@@ -128,7 +129,7 @@ _INDEPENDENT_DEFAULTS: dict[str, float | int | None] = {
 }
 
 # directional 家族默认值（与 ReplayParameterOverrides.for_family("directional") 对齐）
-# 差异: entry_threshold 0.40→0.45, close_threshold 0.15→0.20
+# 差异: entry_threshold 0.30→0.45, close_threshold 0.15→0.20
 _DIRECTIONAL_DEFAULTS: dict[str, float | int | None] = {
     **_INDEPENDENT_DEFAULTS,
     "entry_threshold": 0.45,

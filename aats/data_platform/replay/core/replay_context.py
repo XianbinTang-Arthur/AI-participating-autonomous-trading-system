@@ -56,7 +56,7 @@ class ReplayCostConfig:
     OKX 费率参考（2024/2025）：
     - Swap taker fee:  0.05% = 5 bps（普通用户），VIP 可低至 2-3 bps
     - Swap maker fee:  0.02% = 2 bps（普通用户）
-    - 滑点:           因 symbol/流动性/仓位 而异，保守估计 2-3 bps
+    - 滑点:           OKX BTC-USDT-SWAP 实际 <1 bps（derivatives_live.yaml 注释）
 
     费率混合公式（完整对齐 fee_resolver.py:175-182）：
     当 execution_style 为 limit 类型时，
@@ -70,7 +70,7 @@ class ReplayCostConfig:
     - taker 类: taker / bounded_taker_cap / exchange / market → 不混合
     """
     taker_fee_bps: float = 5.0       # OKX swap taker 0.05% = 5 bps
-    slippage_bps: float = 2.0        # 保守滑点估计
+    slippage_bps: float = 1.0        # 对齐生产 configured_slippage ≈ max_tolerance(20)×fraction(0.05)=1.0
     maker_fee_bps: float = 2.0       # OKX swap maker 0.02% = 2 bps
     execution_style: str = "passive_first"   # 对齐 strategy_hedge_independent_entry_execution_mode
     passive_bias: float = 0.7        # passive_first 默认 0.7，bounded_limit 默认 0.5
@@ -118,7 +118,7 @@ class ReplayCostConfig:
     def from_dict(cls, d: dict[str, Any]) -> ReplayCostConfig:
         return cls(
             taker_fee_bps=float(d.get("taker_fee_bps", 5.0)),
-            slippage_bps=float(d.get("slippage_bps", 2.0)),
+            slippage_bps=float(d.get("slippage_bps", 1.0)),
             maker_fee_bps=float(d.get("maker_fee_bps", 2.0)),
             execution_style=str(d.get("execution_style", "passive_first")),
             passive_bias=float(d.get("passive_bias", 0.7)),
@@ -184,15 +184,17 @@ class ReplayParameterOverrides:
     """directional adapter 里 bar return 的限幅（bps）。防止单根极端 bar 主导 signal。"""
 
     # ── Phase 1 扩展：进出场阈值 ──────────────────────────────────
-    # 默认值对齐 adapter 内原有硬编码常量，确保向后兼容
-    entry_threshold: float = 0.40
-    """long book 开仓评分门槛。生产端映射: strategy_hedge_independent_long_entry_threshold"""
+    # 默认值对齐 derivatives_live.yaml 实盘钉住值
+    entry_threshold: float = 0.30
+    """long book 开仓评分门槛。生产端映射: strategy_hedge_independent_long_entry_threshold
+    对齐 derivatives_live.yaml:342 实盘钉住值 0.30。"""
 
     close_threshold: float = 0.15
     """long book 平仓评分门槛。生产端映射: strategy_hedge_independent_long_close_threshold"""
 
-    scale_in_threshold: float = 0.60
+    scale_in_threshold: float = 0.40
     """long book 加仓评分门槛。生产端映射: strategy_hedge_independent_long_scale_in_threshold
+    对齐 derivatives_live.yaml:353 实盘钉住值 0.40。
     ⚠️ REPLAY 未模拟: 当前 replay 只有 open/hold/close 三态，没有 scale-in（加仓）逻辑。
     该参数仅做透传映射到生产端，replay 回测不验证其效果。"""
 
@@ -243,8 +245,9 @@ class ReplayParameterOverrides:
     生产端映射: strategy_hedge_independent_max_acceptable_cost_bps"""
 
     # ── Phase 1 扩展：评分质量 ────────────────────────────────────
-    min_score_drawdown_bps: float | None = None
+    min_score_drawdown_bps: float | None = 6.0
     """评分最大回撤容忍度（bps）。None 时仅使用 score_stability_threshold。
+    对齐 derivatives_live.yaml:389 实盘值 6.0。
     生产端映射: strategy_hedge_independent_min_score_drawdown_bps"""
 
     min_liquidity_quality: float = 0.55
@@ -452,9 +455,9 @@ class ReplayParameterOverrides:
             directional_trend_weight=_v("directional_trend_weight", 0.7),
             directional_return_clamp_bps=_v("directional_return_clamp_bps", 20.0),
             # Phase 1 扩展
-            entry_threshold=_v("entry_threshold", 0.40),
+            entry_threshold=_v("entry_threshold", 0.30),
             close_threshold=_v("close_threshold", 0.15),
-            scale_in_threshold=_v("scale_in_threshold", 0.60),
+            scale_in_threshold=_v("scale_in_threshold", 0.40),
             short_entry_threshold=_v_opt("short_entry_threshold"),
             short_close_threshold=_v_opt("short_close_threshold"),
             min_hold_seconds=_v("min_hold_seconds", 300.0),
@@ -466,7 +469,11 @@ class ReplayParameterOverrides:
             expected_slippage_buffer_bps=_v("expected_slippage_buffer_bps", 0.5),
             expected_execution_buffer_bps=_v("expected_execution_buffer_bps", 0.5),
             max_acceptable_cost_bps=_v("max_acceptable_cost_bps", 7.5),
-            min_score_drawdown_bps=_v_opt("min_score_drawdown_bps"),
+            # min_score_drawdown_bps: key 缺失→6.0（新默认）; 显式 null→None（禁用 drawdown 检查）
+            min_score_drawdown_bps=(
+                float(d["min_score_drawdown_bps"]) if d.get("min_score_drawdown_bps") is not None
+                else (None if "min_score_drawdown_bps" in d else 6.0)
+            ),
             min_liquidity_quality=_v("min_liquidity_quality", 0.55),
             limit_offset_bps_entry=_v("limit_offset_bps_entry", 1.5),
             noise_buffer_bps=_v("noise_buffer_bps", 2.0),

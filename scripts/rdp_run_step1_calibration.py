@@ -328,8 +328,8 @@ def _extract_cost_parts(params: dict[str, Any]) -> tuple[float, float]:
     """返回 (taker_fee_bps, slippage_bps)。"""
     cc = params.get("cost_config", {})
     if isinstance(cc, dict):
-        return float(cc.get("taker_fee_bps", 5.0)), float(cc.get("slippage_bps", 2.0))
-    return float(params.get("taker_fee_bps", 5.0)), float(params.get("slippage_bps", 2.0))
+        return float(cc.get("taker_fee_bps", 5.0)), float(cc.get("slippage_bps", 1.0))
+    return float(params.get("taker_fee_bps", 5.0)), float(params.get("slippage_bps", 1.0))
 
 
 def _recommend_cost_model(experiments: list[dict[str, Any]]) -> dict[str, Any]:
@@ -337,7 +337,7 @@ def _recommend_cost_model(experiments: list[dict[str, Any]]) -> dict[str, Any]:
 
     规则：
     1. 按 total_cost 升序排列
-    2. 检查默认值（blended fee≈3.6 + slippage=2 ≈ 5.6bps）是否在测试范围内
+    2. 检查默认值（blended fee≈3.6 + slippage=1 ≈ 4.6bps）是否在测试范围内
     3. 若默认值的 edge 为正 → 保持，medium confidence
     4. 若默认值的 edge 为负但低 cost 为正 → edge fragile，仍推荐默认但标记脆弱性
     5. 观察 opening_count 对 cost 的敏感度
@@ -346,7 +346,7 @@ def _recommend_cost_model(experiments: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "taker_fee_bps": {"value": 5.0, "confidence": "low",
                               "reason": "Cost batch 未运行或无数据, 保留默认值"},
-            "slippage_bps": {"value": 2.0, "confidence": "low",
+            "slippage_bps": {"value": 1.0, "confidence": "low",
                              "reason": "Cost batch 未运行或无数据, 保留默认值"},
             "overall_confidence": "low",
             "overall_reason": "Cost sensitivity batch 无数据",
