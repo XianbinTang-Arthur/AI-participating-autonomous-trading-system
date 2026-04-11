@@ -6,6 +6,7 @@ from typing import Any
 
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
+from aats.events.envelopes import parse_envelope
 from aats.schemas.common import utc_now
 from aats.schemas.market import MarketSnapshot
 from aats.services.market_gateway.demo_provider import DemoMarketDataProvider
@@ -190,6 +191,14 @@ class MarketDataGateway:
                 await asyncio.sleep(interval_seconds)
         return snapshots
 
+    @property
+    def is_producer(self) -> bool:
+        """本进程是否是行情数据的 producer（拥有 OKX WebSocket）。
+
+        True = market / monolith 角色，False = gateway / decision / execution 角色。
+        """
+        return self._is_producer
+
     def apply_remote_snapshot(self, snapshot: MarketSnapshot) -> None:
         """NATS 远端推送：非 producer 进程收到 market 进程广播的快照后调用。
 
@@ -197,9 +206,9 @@ class MarketDataGateway:
         到的最新市场状态。producer 进程（market / monolith）自己通过
         _publish_snapshot() 写入相同字段，不需要走这条路径。
         """
-        self._latest_snapshots[snapshot.symbol] = snapshot
-        self._latest_received_at[snapshot.symbol] = utc_now()
         now = utc_now()
+        self._latest_snapshots[snapshot.symbol] = snapshot
+        self._latest_received_at[snapshot.symbol] = now
         if self._last_publish_ts is None or now > self._last_publish_ts:
             self._last_publish_ts = now
 
@@ -209,11 +218,23 @@ class MarketDataGateway:
         仅 non-producer 角色（gateway / decision / execution）使用。
         handler 签名遵循 EventBus.subscribe() 的 MessageHandler 协议：
         接收已解码的 dict envelope，内部 parse → validate → apply。
+
+        异常一律 swallow + 日志：单条消息解析失败不应中断 durable consumer
+        的整个消费循环——下一条消息大概率能成功，行情流不会因为偶发的
+        envelope 格式异常而全面中断。
         """
-        from aats.events.envelopes import parse_envelope
-        envelope = parse_envelope(message)
-        snapshot = MarketSnapshot.model_validate(envelope.payload)
-        self.apply_remote_snapshot(snapshot)
+        try:
+            envelope = parse_envelope(message)
+            snapshot = MarketSnapshot.model_validate(envelope.payload)
+            self.apply_remote_snapshot(snapshot)
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "market_remote_snapshot_handler_error",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     def latest_snapshot(self, symbol: str) -> MarketSnapshot | None:
         return self._latest_snapshots.get(symbol)

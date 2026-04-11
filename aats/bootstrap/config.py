@@ -2877,7 +2877,7 @@ async def _subscribe_critical_handlers(
     # MarketDataGateway._latest_received_at / _latest_snapshots，使
     # is_fresh() / latest_price() / status() 反映远端实际行情状态。
     # producer 角色由 _publish_snapshot() 直接写入，不需要此订阅。
-    if market_gateway is not None and not market_gateway._is_producer:
+    if market_gateway is not None and not market_gateway.is_producer:
         await bus.subscribe(topics.MARKET_SNAPSHOTS, market_gateway.handle_remote_market_snapshot)
     if decision_trigger is not None:
         await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
@@ -3390,12 +3390,15 @@ def _build_shared_runtime_slice(
     slices.normalizer = MarketSnapshotNormalizer(exchange_name=runtime_settings.exchange_name)
     slices.market_publisher = MarketSnapshotPublisher(bus=slices.bus)
     slices.okx_client = OKXRESTClient(settings=runtime_settings)
+    _market_is_producer = _slice_active("market", effective_process_role=effective_process_role)
+    # OKX 公共 WebSocket 客户端仅 producer 角色（market / monolith）需要。
+    # consumer 角色（gateway / decision / execution）通过 NATS 订阅接收快照，
+    # 不直连 OKX WS——无谓创建实例既浪费资源又容易在 status() 中产生误导。
     slices.okx_ws_client = (
         OKXPublicWebSocketClient(settings=runtime_settings)
-        if runtime_settings.market_data_backend == "okx"
+        if runtime_settings.market_data_backend == "okx" and _market_is_producer
         else None
     )
-    _market_is_producer = _slice_active("market", effective_process_role=effective_process_role)
     slices.market_gateway = MarketDataGateway(
         settings=runtime_settings,
         normalizer=slices.normalizer,
