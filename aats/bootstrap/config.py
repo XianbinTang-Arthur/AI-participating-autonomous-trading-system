@@ -2862,6 +2862,7 @@ async def _subscribe_critical_handlers(
     reconciliation_service: ReconciliationService | None,
     audit_service: DecisionAuditService | None,
     position_target_handler,
+    market_gateway: MarketDataGateway | None = None,
 ) -> None:
     """订阅 critical handler。
 
@@ -2871,6 +2872,13 @@ async def _subscribe_critical_handlers(
     """
     if feature_engine is not None:
         await bus.subscribe(topics.MARKET_SNAPSHOTS, feature_engine.handle_market_snapshot)
+    # 4 进程架构 consumer 模式：非 producer 角色（gateway / decision / execution）
+    # 通过 NATS 接收 market 进程广播的 MARKET_SNAPSHOTS，更新本地
+    # MarketDataGateway._latest_received_at / _latest_snapshots，使
+    # is_fresh() / latest_price() / status() 反映远端实际行情状态。
+    # producer 角色由 _publish_snapshot() 直接写入，不需要此订阅。
+    if market_gateway is not None and not market_gateway._is_producer:
+        await bus.subscribe(topics.MARKET_SNAPSHOTS, market_gateway.handle_remote_market_snapshot)
     if decision_trigger is not None:
         await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
     if order_manager is not None:
@@ -3387,12 +3395,14 @@ def _build_shared_runtime_slice(
         if runtime_settings.market_data_backend == "okx"
         else None
     )
+    _market_is_producer = _slice_active("market", effective_process_role=effective_process_role)
     slices.market_gateway = MarketDataGateway(
         settings=runtime_settings,
         normalizer=slices.normalizer,
         publisher=slices.market_publisher,
         okx_ws_client=slices.okx_ws_client,
         okx_rest_client=slices.okx_client if runtime_settings.market_data_backend == "okx" else None,
+        is_producer=_market_is_producer,
     )
     slices.private_account_ws_client = (
         OKXPrivateWebSocketClient(settings=runtime_settings)
@@ -4037,6 +4047,7 @@ async def _wire_event_subscriptions(
         reconciliation_service=slices.reconciliation_service,
         audit_service=slices.audit_service,
         position_target_handler=slices.position_target_handler,
+        market_gateway=slices.market_gateway,
     )
     await _subscribe_observer_handlers(
         bus=collector,

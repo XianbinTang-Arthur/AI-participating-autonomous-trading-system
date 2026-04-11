@@ -31,6 +31,7 @@ class MarketDataGateway:
         okx_normalizer: OKXMarketSnapshotNormalizer | None = None,
         okx_ws_client: OKXPublicWebSocketClient | None = None,
         okx_rest_client: OKXRESTClient | None = None,
+        is_producer: bool = True,
     ) -> None:
         self.settings = settings
         self.normalizer = normalizer
@@ -38,6 +39,11 @@ class MarketDataGateway:
         self.okx_normalizer = okx_normalizer or OKXMarketSnapshotNormalizer(exchange_name="OKX")
         self.okx_ws_client = okx_ws_client
         self.okx_rest_client = okx_rest_client
+        # is_producer 标记：True = 本进程拥有 OKX WebSocket（market / monolith 角色），
+        # False = 本进程通过 NATS 从远端 producer 接收快照（gateway / decision / execution 角色）。
+        # 影响 status() 对 transport_connected 的计算逻辑：consumer 模式下不检查
+        # 本地 okx_ws_client，而是从 NATS 快照新鲜度推导连接状态。
+        self._is_producer = is_producer
         self.logger = get_logger("aats.market_gateway")
         self._demo_provider = DemoMarketDataProvider(exchange_name=settings.exchange_name)
         self._latest_snapshots: dict[str, MarketSnapshot] = {}
@@ -184,6 +190,31 @@ class MarketDataGateway:
                 await asyncio.sleep(interval_seconds)
         return snapshots
 
+    def apply_remote_snapshot(self, snapshot: MarketSnapshot) -> None:
+        """NATS 远端推送：非 producer 进程收到 market 进程广播的快照后调用。
+
+        更新本地缓存使 is_fresh() / latest_price() / status() 反映跨进程同步
+        到的最新市场状态。producer 进程（market / monolith）自己通过
+        _publish_snapshot() 写入相同字段，不需要走这条路径。
+        """
+        self._latest_snapshots[snapshot.symbol] = snapshot
+        self._latest_received_at[snapshot.symbol] = utc_now()
+        now = utc_now()
+        if self._last_publish_ts is None or now > self._last_publish_ts:
+            self._last_publish_ts = now
+
+    async def handle_remote_market_snapshot(self, message: dict) -> None:
+        """NATS bus handler：接收 market.snapshots topic 的远端快照。
+
+        仅 non-producer 角色（gateway / decision / execution）使用。
+        handler 签名遵循 EventBus.subscribe() 的 MessageHandler 协议：
+        接收已解码的 dict envelope，内部 parse → validate → apply。
+        """
+        from aats.events.envelopes import parse_envelope
+        envelope = parse_envelope(message)
+        snapshot = MarketSnapshot.model_validate(envelope.payload)
+        self.apply_remote_snapshot(snapshot)
+
     def latest_snapshot(self, symbol: str) -> MarketSnapshot | None:
         return self._latest_snapshots.get(symbol)
 
@@ -219,7 +250,11 @@ class MarketDataGateway:
         transport_connected = True
         transport_connected_public: bool | None = None
         transport_connected_business: bool | None = None
-        if self.settings.market_data_backend == "okx" and self.okx_ws_client is not None:
+        receipt_fresh = self.receipt_is_fresh(self.settings.default_symbol)
+        snapshot_fresh = self.snapshot_is_fresh(self.settings.default_symbol)
+        fresh = receipt_fresh and snapshot_fresh
+        if self.settings.market_data_backend == "okx" and self._is_producer and self.okx_ws_client is not None:
+            # Producer 模式（market / monolith 角色）：直接查询本地 WS 客户端状态。
             okx_status = self.okx_ws_client.status()
             transport_connected = bool(okx_status["connected"])
             transport_connected_public = bool(okx_status.get("connected_public", False))
@@ -227,9 +262,13 @@ class MarketDataGateway:
             last_update_ts = okx_status.get("last_message_ts") or last_update_ts
             detail = "okx_public_ws"
             self._last_error = okx_status.get("last_error")
-        receipt_fresh = self.receipt_is_fresh(self.settings.default_symbol)
-        snapshot_fresh = self.snapshot_is_fresh(self.settings.default_symbol)
-        fresh = receipt_fresh and snapshot_fresh
+        elif self.settings.market_data_backend == "okx" and not self._is_producer:
+            # Consumer 模式（gateway / decision / execution 角色）：本进程不拥有
+            # OKX WebSocket，而是通过 NATS 订阅从 market 进程接收快照。
+            # transport_connected 根据 NATS 快照新鲜度推导：只要本进程持续收到
+            # 新鲜的 NATS 快照，就说明远端 producer 的 WS 通道是活的。
+            transport_connected = receipt_fresh
+            detail = "okx_nats_consumer"
         if self.settings.market_data_backend == "okx":
             connected = transport_connected or receipt_fresh
         blockers: list[str] = []
