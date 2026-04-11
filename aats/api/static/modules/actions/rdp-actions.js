@@ -12,6 +12,11 @@ export function createRdpActionHandlers({
     return ensureNotBusyHelper(state, renderBanners);
   }
 
+  function truncateForConfirm(id) {
+    if (!id || id.length <= 24) return id || "";
+    return id.slice(0, 10) + "…" + id.slice(-10);
+  }
+
   // ── 触发 workflow（数据采集 / 研究管线）──────────────────────────
 
   async function triggerWorkflow(workflow) {
@@ -47,7 +52,7 @@ export function createRdpActionHandlers({
 
   async function approveAndApply(recommendationId) {
     if (!recommendationId) return;
-    if (!windowRef.confirm(`确认审批并应用 ${recommendationId} 吗？`)) return;
+    if (!windowRef.confirm(`确认审批并应用 ${truncateForConfirm(recommendationId)} 吗？`)) return;
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, "正在审批并应用参数…");
     try {
@@ -66,10 +71,36 @@ export function createRdpActionHandlers({
         method: "POST",
         body: { recommendation_id: recommendationId, actor: "operator", notes: "UI 一键审批并应用" },
       });
-      if (applyResult.ok !== false) {
+      if (applyResult.ok) {
         setFlash(state, "info", `${recommendationId} 已审批并应用到 active parameters。`);
       } else {
         setFlash(state, "warning", applyResult.message || "参数应用失败（审批已完成）。");
+      }
+      await refreshDashboard({ manual: true });
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      finishAction();
+    }
+  }
+
+  // ── 仅应用已审批的 recommendation ─────────────────────────────
+
+  async function applyOnly(recommendationId) {
+    if (!recommendationId) return;
+    if (!windowRef.confirm(`确认应用已审批的 ${truncateForConfirm(recommendationId)} 吗？`)) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在应用参数…");
+    try {
+      const result = await requestJson("/rdp/parameters/apply", {
+        method: "POST",
+        body: { recommendation_id: recommendationId, actor: "operator", notes: "UI 应用已审批参数" },
+      });
+      if (result.ok) {
+        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已应用到 active parameters。`);
+      } else {
+        setFlash(state, "warning", result.message || "参数应用失败。");
       }
       await refreshDashboard({ manual: true });
     } catch (error) {
@@ -84,7 +115,7 @@ export function createRdpActionHandlers({
 
   async function rejectRecommendation(recommendationId) {
     if (!recommendationId) return;
-    if (!windowRef.confirm(`确认拒绝 ${recommendationId} 吗？`)) return;
+    if (!windowRef.confirm(`确认拒绝 ${truncateForConfirm(recommendationId)} 吗？`)) return;
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, "正在拒绝建议…");
     try {
@@ -121,7 +152,7 @@ export function createRdpActionHandlers({
         method: "POST",
         body: { family, timeframe, actor: "operator", notes: "UI 回滚" },
       });
-      if (result.ok !== false) {
+      if (result.ok) {
         setFlash(state, "info", `${family}/${timeframe} 参数已回滚。`);
       } else {
         setFlash(state, "warning", result.message || "回滚失败。");
@@ -138,6 +169,7 @@ export function createRdpActionHandlers({
   return {
     "rdp-trigger-workflow": (workflow) => triggerWorkflow(workflow),
     "rdp-approve-and-apply": (recId) => approveAndApply(recId),
+    "rdp-apply-only": (recId) => applyOnly(recId),
     "rdp-reject-recommendation": (recId) => rejectRecommendation(recId),
     "rdp-rollback-parameters": (combo) => rollbackParameters(combo),
   };

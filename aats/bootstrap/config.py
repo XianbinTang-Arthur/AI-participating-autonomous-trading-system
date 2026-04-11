@@ -506,6 +506,11 @@ class ApplicationRuntime:
     funding_fee_repo: FundingFeeRepository | None = None
     sleeve_pnl_projection_service: SleevePnLProjectionService | None = None
     funding_fee_sync_service: LedgerFundingFeeSyncService | None = None
+    # P2-1：审计批量写服务引用。stop_background_tasks 需要调 stop_batch_writer
+    # 刷入所有缓冲 records。monolith / decision role 下非 None。
+    audit_service: DecisionAuditService | None = None
+    # P3-1 / P3-2：数据库定期清理。清理已发布 outbox 行 + 归档表老化行。
+    housekeeping: "DatabaseHousekeeping | None" = None
     # Slice 4-proc operator command proxy：gateway 端 client 与 execution 端
     # worker 的 sidecar 装配字段。monolith / market / decision role 下均为
     # None。gateway 在 build_runtime 末尾装 client；execution 装 worker；
@@ -582,6 +587,17 @@ class ApplicationRuntime:
             self.background_tasks.append(
                 asyncio.create_task(self._flush_stream_cache_loop(), name="aats_stream_cache_flush")
             )
+        # P3-1 / P3-2：数据库定期清理后台任务。仅在 execution / monolith 角色下
+        # 运行——这两个角色是 outbox 写入的主要来源。
+        _housekeeping = getattr(self, "housekeeping", None)
+        if _housekeeping is not None and _slice_active(
+            "execution", effective_process_role=self.process_role
+        ):
+            self.background_tasks.append(
+                asyncio.create_task(
+                    self._housekeeping_loop(), name="aats_db_housekeeping"
+                )
+            )
         # Stage 9 checklist-4：AbortHookService 后台 loop。service.start() 自己
         # 管 asyncio.Task 生命周期（不会 append 到 background_tasks），我们只
         # 调 start()；stop() 在 stop_background_tasks 里镜像处理。
@@ -610,6 +626,20 @@ class ApplicationRuntime:
             except asyncio.CancelledError:
                 pass
         self.background_tasks.clear()
+        # P2-1：关停审计批量写。必须在 bus.close 和 DB dispose 之前执行，
+        # 确保所有缓冲中的 audit records 刷入 DB。getattr 兜底同下方各 cache。
+        try:
+            _audit_service = getattr(self, "audit_service", None)
+            if _audit_service is not None and hasattr(_audit_service, "stop_batch_writer"):
+                await _audit_service.stop_batch_writer()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "audit_batch_writer_shutdown_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         # Stage 9 checklist-4：停 AbortHookService，必须放在 kill_switch.stop
         # 之前。service.stop() 只取消自己的 _loop task，不动 kill_switch 状态。
         # 用 getattr 兜底是因为单测里某些 minimal runtime 走 __new__ 绕过 dataclass
@@ -890,6 +920,28 @@ class ApplicationRuntime:
             except Exception as exc:
                 await self._record_background_failure(subsystem="trial_guard_monitor", exc=exc)
             await asyncio.sleep(interval_seconds)
+
+    async def _housekeeping_loop(self) -> None:
+        """P3-1 / P3-2：每 6 小时执行一次数据库清理。"""
+        _INTERVAL_SECONDS = 6 * 3600  # 6h
+        # 首次延迟 60s，避免启动热路径上叠加 DELETE 查询
+        await asyncio.sleep(60)
+        while True:
+            try:
+                housekeeping = getattr(self, "housekeeping", None)
+                if housekeeping is not None:
+                    result = await asyncio.to_thread(housekeeping.run_all)
+                    log_event(
+                        self.logger,
+                        "db_housekeeping_completed",
+                        outbox_purged=result.get("outbox_purged", 0),
+                        archive_purged=result.get("archive_purged", 0),
+                    )
+            except Exception as exc:
+                await self._record_background_failure(
+                    subsystem="db_housekeeping", exc=exc
+                )
+            await asyncio.sleep(_INTERVAL_SECONDS)
 
     async def _record_background_failure(self, *, subsystem: str, exc: Exception) -> None:
         message = f"{subsystem}_failed: {exc}"
@@ -3108,6 +3160,10 @@ class _RuntimeSlices:
     # 进程的 obligation 视图保持收敛。slice builder 从本字段取 cache 引用注入
     # ObligationService / RiskEngine / query_service 等读写路径。
     obligation_hot_state_cache: Any = None
+    # P1-1 热路径优化：OrderState 跨进程缓存边车。
+    order_state_hot_cache: Any = None
+    # P1-2 热路径优化：FillEvent 跨进程缓存边车。
+    fill_event_hot_cache: Any = None
     # 跨进程 account snapshot 缓存边车。execution role 在每次 refresh 后 publish，
     # 非 execution role 订阅 NATS + Redis hydrate，让 account_service._latest_snapshot
     # 保持跨进程同步。设计文档见 account_snapshot_cache.py 模块 docstring。
@@ -3144,6 +3200,9 @@ class _RuntimeSlices:
     risk_engine: Any = None
     execution_planner: Any = None
     position_target_handler: Any = None
+
+    # ---- housekeeping ----
+    housekeeping: Any = None
 
     # ---- execution ----
     obligation_service: Any = None
@@ -3491,6 +3550,9 @@ def _build_decision_slice(
             mode_controller=slices.mode_controller,
             health_service=slices.health_service,
             stream_snapshot_cache=slices.stream_snapshot_cache,
+            portfolio_snapshot_cache=slices.portfolio_snapshot_cache,
+            order_state_cache=slices.order_state_hot_cache,
+            fill_event_cache=slices.fill_event_hot_cache,
         ),
         baseline_strategy=BaselineStrategy(event_store=storage.event_store, feature_resolver=_feature_resolver),
         ai_service=slices.ai_service,
@@ -3632,6 +3694,9 @@ def _build_execution_slice(
             # 调 cache.fire_and_forget_publish(obligation) 同步本地 dict + Redis
             # + NATS 广播；cache 未接线时为 None，行为退化为 6.5 之前。
             obligation_cache=slices.obligation_hot_state_cache,
+            # P1-1 + P1-2：注入 order_state / fill 跨进程缓存。
+            order_state_cache=slices.order_state_hot_cache,
+            fill_event_cache=slices.fill_event_hot_cache,
         )
     if (
         storage.database_runtime is not None
@@ -3650,6 +3715,12 @@ def _build_execution_slice(
             # Stage 6 Slice 6.3：commit hook 注入 cache（construct 顺序保证：
             # cache 在 _start_event_bus 后立即构造，slice builders 之后才跑）
             snapshot_cache=slices.portfolio_snapshot_cache,
+        )
+    # P3-1 / P3-2：数据库定期清理工具——仅在有 PG session_factory 时构造。
+    if storage.database_runtime is not None:
+        from aats.storage.housekeeping import DatabaseHousekeeping
+        slices.housekeeping = DatabaseHousekeeping(
+            session_factory=storage.database_runtime.session_factory,
         )
     slices.execution_order_service = None
     slices.execution_command_processor = None
@@ -3969,6 +4040,14 @@ async def _wire_event_subscriptions(
     # handler 内部会 idempotent 更新 cache._latest 并回调 account_service._latest_snapshot。
     if slices.account_snapshot_cache is not None:
         await slices.account_snapshot_cache.register_remote_subscription(collector)
+    # P1-1：OrderState 跨进程缓存。execution.order_updates 已由 outbox publisher
+    # 广播（flush_pending），order_state_cache 通过此订阅保持各进程缓存新鲜。
+    if slices.order_state_hot_cache is not None:
+        await slices.order_state_hot_cache.register_remote_subscription(collector)
+    # P1-2：FillEvent 跨进程缓存。execution.fill_events 已由 outbox publisher
+    # 广播，fill_event_cache 通过此订阅保持各进程缓存新鲜。
+    if slices.fill_event_hot_cache is not None:
+        await slices.fill_event_hot_cache.register_remote_subscription(collector)
     await collector.flush()
 
 
@@ -4428,6 +4507,42 @@ async def build_runtime(
             slices.obligation_hot_state_cache
         )
 
+    # P1-1 热路径优化：OrderState 跨进程缓存边车。
+    from aats.services.execution_engine.order_state_cache import OrderStateHotCache
+    slices.order_state_hot_cache = OrderStateHotCache(
+        logger=get_logger("aats.execution.order_state_cache"),
+    )
+    await slices.order_state_hot_cache.bootstrap(
+        hot_state_store=hot_state_store,
+        bus=slices.bus,
+        process_role=effective_process_role or "monolith",
+        subscribe=False,
+    )
+    log_event(
+        get_logger("aats.bootstrap"),
+        "order_state_hot_cache_initialized",
+        process_role=effective_process_role or "monolith",
+        bootstrap_state=slices.order_state_hot_cache.snapshot(),
+    )
+
+    # P1-2 热路径优化：FillEvent 跨进程缓存边车。
+    from aats.services.execution_engine.fill_event_cache import FillEventHotCache
+    slices.fill_event_hot_cache = FillEventHotCache(
+        logger=get_logger("aats.execution.fill_event_cache"),
+    )
+    await slices.fill_event_hot_cache.bootstrap(
+        hot_state_store=hot_state_store,
+        bus=slices.bus,
+        process_role=effective_process_role or "monolith",
+        subscribe=False,
+    )
+    log_event(
+        get_logger("aats.bootstrap"),
+        "fill_event_hot_cache_initialized",
+        process_role=effective_process_role or "monolith",
+        bootstrap_state=slices.fill_event_hot_cache.snapshot(),
+    )
+
     # 跨进程 account snapshot 缓存边车。和 6.3 PortfolioSnapshotCache / 6.5
     # ObligationHotStateCache 同 sidecar 模板：bus.start 完成后立即构造 + Redis
     # hydrate，让 health_service / query_service / dashboard 在非 execution 角色
@@ -4519,6 +4634,10 @@ async def build_runtime(
         effective_process_role=effective_process_role,
     )
     await _wire_event_subscriptions(slices=slices)
+
+    # P2-1：启动审计批量写任务。订阅已全部装配完毕，开始积攒写缓冲。
+    if slices.audit_service is not None:
+        await slices.audit_service.start_batch_writer()
 
     # ── Bootstrap recovery / startup snapshot 装配 ──────────────────
     # 这部分是 slice 装配完成后的“启动序列编排”，依赖多个 slice 的产物，
@@ -4777,6 +4896,8 @@ async def build_runtime(
         funding_fee_repo=storage.funding_fee_repo,
         sleeve_pnl_projection_service=sleeve_pnl_projection_service,
         funding_fee_sync_service=funding_fee_sync_service,
+        audit_service=slices.audit_service,
+        housekeeping=slices.housekeeping,
         process_role=effective_process_role,
     )
     if runtime.sleeve_pnl_projection_service is not None:

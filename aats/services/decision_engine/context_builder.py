@@ -32,6 +32,9 @@ from aats.services.strategy_execution_health import (
     compute_leg_strategy_execution_health,
     compute_strategy_execution_health,
 )
+from aats.services.execution_engine.fill_event_cache import FillEventHotCache
+from aats.services.execution_engine.order_state_cache import OrderStateHotCache
+from aats.services.portfolio_service.snapshot_cache import PortfolioSnapshotCache
 from aats.storage.base import EventStore, ExecutionRepository, PortfolioRepository
 from aats.storage.stream_snapshot_cache import StreamSnapshotCache
 
@@ -57,6 +60,9 @@ class DecisionContextBuilder:
         mode_controller: RuntimeModeController,
         health_service: SystemHealthService,
         stream_snapshot_cache: StreamSnapshotCache | None = None,
+        portfolio_snapshot_cache: PortfolioSnapshotCache | None = None,
+        order_state_cache: OrderStateHotCache | None = None,
+        fill_event_cache: FillEventHotCache | None = None,
     ) -> None:
         self.settings = settings
         self.event_store = event_store
@@ -65,6 +71,9 @@ class DecisionContextBuilder:
         self.mode_controller = mode_controller
         self.health_service = health_service
         self._stream_cache = stream_snapshot_cache
+        self._portfolio_snapshot_cache = portfolio_snapshot_cache
+        self._order_state_cache = order_state_cache
+        self._fill_event_cache = fill_event_cache
         self.state_scope = runtime_state_scope(settings)
 
     def build_health_snapshot(self, *, decision_id: str) -> HealthSnapshot:
@@ -135,7 +144,19 @@ class DecisionContextBuilder:
             self.state_scope,
         )
         portfolio_snapshots = snapshots_for_scope(self.portfolio_repo, self.state_scope)
-        portfolio_snapshot = latest_matching_snapshot(portfolio_snapshots, self.state_scope)
+        # P1-3 优化：latest snapshot 优先走 PortfolioSnapshotCache（内存），
+        # 仅在 cache miss 时 fallback 到 PG 查询。
+        # portfolio_snapshots（history）仍走 PG，供 strategy_health / leg_lifecycle 使用。
+        _cached_portfolio_snapshot = (
+            self._portfolio_snapshot_cache.get_sync(self.state_scope)
+            if self._portfolio_snapshot_cache is not None
+            else None
+        )
+        portfolio_snapshot = (
+            _cached_portfolio_snapshot
+            if _cached_portfolio_snapshot is not None
+            else latest_matching_snapshot(portfolio_snapshots, self.state_scope)
+        )
 
         if market_event is None:
             raise RuntimeError("Market snapshot is required before building decision context")
@@ -158,17 +179,41 @@ class DecisionContextBuilder:
         current_short_notional = _ZERO if _ps is None else _ps.short_position_notional
         current_legs = [] if _ps is None else list(_ps.legs)
         current_exposure_side = self._exposure_side(current_position_qty)
-        open_orders = [
-            order.client_order_id
-            for order in self.execution_repo.order_states_for_scope(
-                scope=self.state_scope,
-                open_only=True,
-            )
-            if order.symbol == symbol
-        ]
+        # P1-1 优化：open orders 优先走 OrderStateHotCache（内存），
+        # 仅在 cache miss 时 fallback 到 PG 查询。
+        _cached_open_orders = (
+            self._order_state_cache.open_orders_for_scope_sync(self.state_scope)
+            if self._order_state_cache is not None
+            else None
+        )
+        if _cached_open_orders is not None:
+            open_orders = [
+                o.client_order_id for o in _cached_open_orders
+                if o.symbol == symbol
+            ]
+        else:
+            open_orders = [
+                order.client_order_id
+                for order in self.execution_repo.order_states_for_scope(
+                    scope=self.state_scope,
+                    open_only=True,
+                )
+                if order.symbol == symbol
+            ]
+        # P1-2 优化：fills 优先走 FillEventHotCache（内存），
+        # 仅在 cache miss 时 fallback 到 PG 查询。
         # Cache fills once to avoid repeated queries and ensure data consistency
         # across strategy_health, leg_strategy_health, and leg_lifecycle.
-        scoped_fills = self.execution_repo.fills_for_scope(scope=self.state_scope)
+        _cached_fills = (
+            self._fill_event_cache.fills_for_scope_sync(self.state_scope)
+            if self._fill_event_cache is not None
+            else None
+        )
+        scoped_fills = (
+            _cached_fills
+            if _cached_fills is not None
+            else self.execution_repo.fills_for_scope(scope=self.state_scope)
+        )
         strategy_health = compute_strategy_execution_health(
             settings=self.settings,
             symbol=symbol,

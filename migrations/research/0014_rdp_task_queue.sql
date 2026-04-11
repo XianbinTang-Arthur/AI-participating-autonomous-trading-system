@@ -18,4 +18,4 @@ CREATE TABLE IF NOT EXISTS governance.rdp_task_queue (
 );
 
 CREATE INDEX IF NOT EXISTS ix_rdp_task_queue_status
-    ON governance.rdp_task_queue (status, created_at DESC);
+    ON governance.rdp_task_queue (status, created_at ASC);

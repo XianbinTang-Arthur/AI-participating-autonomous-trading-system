@@ -98,8 +98,6 @@ def execute_workflow(workflow: str) -> tuple[int, str, str]:
         return proc.returncode, tail_lines(combined, LOG_TAIL_LINES), ""
     except subprocess.TimeoutExpired as exc:
         combined = ((exc.stdout or "") + (exc.stderr or "")) if exc.stdout or exc.stderr else ""
-        if isinstance(combined, bytes):
-            combined = combined.decode("utf-8", errors="replace")
         return -1, tail_lines(combined, LOG_TAIL_LINES), f"Timeout after {timeout}s"
     except Exception as exc:
         return -2, "", str(exc)

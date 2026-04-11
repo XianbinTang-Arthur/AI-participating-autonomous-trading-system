@@ -29,6 +29,8 @@ from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 
 if TYPE_CHECKING:
     from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
+    from aats.services.execution_engine.order_state_cache import OrderStateHotCache
+    from aats.services.execution_engine.fill_event_cache import FillEventHotCache
 
 
 @dataclass(slots=True)
@@ -56,6 +58,13 @@ class PostgresExecutionOutboxPublisher:
     # 未接线（legacy test / recovery-only path），行为与 6.5 之前完全一样。
     # 设计文档：docs/task/stage_6_slice_6_5_obligation_hot_state_design.md §10
     obligation_cache: "ObligationHotStateCache | None" = None
+    # P1-1：跨进程 OrderState 缓存。事务 commit 成功后 best-effort 推送
+    # 最新 order_state 到 cache 本地 dict + Redis。NATS 广播已由 flush_pending
+    # 完成（通过 outbox → ORDER_UPDATES topic），cache 通过订阅接收。
+    order_state_cache: "OrderStateHotCache | None" = None
+    # P1-2：跨进程 FillEvent 缓存。事务 commit 成功后 best-effort 推送
+    # fill 到 cache。append-only，dedup by fill_id。
+    fill_event_cache: "FillEventHotCache | None" = None
     logger: Any = field(init=False)
 
     def __post_init__(self) -> None:
@@ -85,6 +94,8 @@ class PostgresExecutionOutboxPublisher:
         # cache 的 OBLIGATION_UPDATES 广播独立一条 topic，不受 flush_pending
         # 影响。
         self._publish_obligation_to_cache(obligation)
+        # P1-1：事务已 commit，order_state 推到跨进程 cache。
+        self._publish_order_state_to_cache(persisted)
         return persisted
 
     def _persist_order_state_with_retry(
@@ -179,6 +190,8 @@ class PostgresExecutionOutboxPublisher:
         await self.flush_pending()
         # Stage 6 Slice 6.5：事务已 commit，obligation 广播到 cache。
         self._publish_obligation_to_cache(obligation)
+        # P1-1：事务已 commit，order_state 推到跨进程 cache。
+        self._publish_order_state_to_cache(persisted)
         return persisted
 
     def _persist_order_state_and_command_with_retry(
@@ -390,6 +403,9 @@ class PostgresExecutionOutboxPublisher:
         # obligation 本身未被 persist，此时广播会把一份可能未写入 PG 的版本
         # 推到 cache，破坏 cache ↔ PG 最终一致性。
         self._publish_obligation_to_cache(obligation)
+        # P1-2：事务已 commit，fill 推到跨进程 cache。同 obligation，仅 saved=True
+        # 时调：dedup 的 fill 不应该再推一遍。
+        self._publish_fill_to_cache(fill)
         return True
 
     def _persist_fill_sync(
@@ -438,6 +454,44 @@ class PostgresExecutionOutboxPublisher:
                 "execution_outbox_obligation_cache_publish_failed",
                 level="warning",
                 client_order_id=obligation.client_order_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    def _publish_order_state_to_cache(self, order: OrderState) -> None:
+        """P1-1：事务 commit 成功后推 order_state 到跨进程 cache。
+
+        模板同 ``_publish_obligation_to_cache``：I1 fail-soft，异常只 warning。
+        """
+        if self.order_state_cache is None:
+            return
+        try:
+            self.order_state_cache.fire_and_forget_publish(order)
+        except Exception as exc:  # pragma: no cover
+            log_event(
+                self.logger,
+                "execution_outbox_order_state_cache_publish_failed",
+                level="warning",
+                client_order_id=order.client_order_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    def _publish_fill_to_cache(self, fill: FillEvent) -> None:
+        """P1-2：事务 commit 成功后推 fill 到跨进程 cache。
+
+        模板同 ``_publish_obligation_to_cache``：I1 fail-soft，异常只 warning。
+        """
+        if self.fill_event_cache is None:
+            return
+        try:
+            self.fill_event_cache.fire_and_forget_publish(fill)
+        except Exception as exc:  # pragma: no cover
+            log_event(
+                self.logger,
+                "execution_outbox_fill_cache_publish_failed",
+                level="warning",
+                fill_id=fill.fill_id,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )

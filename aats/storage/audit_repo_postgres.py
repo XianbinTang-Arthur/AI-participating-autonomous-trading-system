@@ -47,6 +47,46 @@ class PostgresAuditRepository:
             )
             session.commit()
 
+    def upsert_batch(self, records: list[DecisionAuditRecord]) -> None:
+        """P2-1：批量写入多条 audit records，单 session / 单 commit。"""
+        if not records:
+            return
+        now = utc_now()
+        with self.session_factory() as session:
+            for record in records:
+                session.add(
+                    DecisionAuditRecordModel(
+                        decision_id=record.decision_id,
+                        updated_at=now,
+                        selected_strategy_sleeve_id=record.selected_strategy_sleeve_id,
+                        allocation_id=record.allocation_id,
+                        decision_context_ref=record.decision_context_ref,
+                        strategy_coordinator_snapshot_ref=record.strategy_coordinator_snapshot_ref,
+                        strategy_sleeve_intent_refs=list(record.strategy_sleeve_intent_refs),
+                        portfolio_allocation_decision_ref=record.portfolio_allocation_decision_ref,
+                        baseline_assessment_ref=record.baseline_assessment_ref,
+                        ai_decision_brief_ref=record.ai_decision_brief_ref,
+                        ai_market_assessment_ref=record.ai_market_assessment_ref,
+                        ai_action_proposal_ref=record.ai_action_proposal_ref,
+                        ai_shadow_decision_refs=list(record.ai_shadow_decision_refs),
+                        ai_shadow_evaluation_refs=list(record.ai_shadow_evaluation_refs),
+                        position_target_ref=record.position_target_ref,
+                        decision_outcome_ref=record.decision_outcome_ref,
+                        policy_decision_ref=record.policy_decision_ref,
+                        risk_decision_ref=record.risk_decision_ref,
+                        execution_plan_ref=record.execution_plan_ref,
+                        execution_plan_refs=list(record.execution_plan_refs),
+                        strategy_execution_bundle_ref=record.strategy_execution_bundle_ref,
+                        order_intent_refs=list(record.order_intent_refs),
+                        order_state_refs=list(record.order_state_refs),
+                        fill_event_refs=list(record.fill_event_refs),
+                        portfolio_delta_ref=record.portfolio_delta_ref,
+                        reconciliation_refs=list(record.reconciliation_refs),
+                        payload=record.model_dump(mode="json"),
+                    )
+                )
+            session.commit()
+
     def get(self, decision_id: str) -> DecisionAuditRecord | None:
         with self.session_factory() as session:
             row = session.scalar(

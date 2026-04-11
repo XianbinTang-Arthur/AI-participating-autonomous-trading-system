@@ -12,6 +12,10 @@ class InMemoryAuditRepository:
         self._latest_by_decision[record.decision_id] = record
         self._history_by_decision.setdefault(record.decision_id, []).append(record)
 
+    def upsert_batch(self, records: list[DecisionAuditRecord]) -> None:
+        for record in records:
+            self.upsert(record)
+
     def get(self, decision_id: str) -> DecisionAuditRecord | None:
         return self._latest_by_decision.get(decision_id)
 

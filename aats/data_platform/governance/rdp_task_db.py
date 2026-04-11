@@ -38,6 +38,8 @@ def db_create_task(
     调用前应校验 workflow 合法性。如果同类 workflow 已有 pending/running
     任务，调用方应拒绝创建（防止重复提交）。
     """
+    if workflow not in VALID_WORKFLOWS:
+        raise ValueError(f"Invalid workflow: {workflow!r}, expected one of {VALID_WORKFLOWS}")
     task_id = f"task_{uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     session.execute(
@@ -101,6 +103,9 @@ def db_claim_next_task(session: Session) -> dict[str, Any] | None:
 
 # ── 更新任务状态（daemon 完成/失败时调用）──────────────────────────
 
+_TERMINAL_STATUSES = {"done", "failed"}
+
+
 def db_update_task_status(
     session: Session,
     task_id: str,
@@ -111,6 +116,8 @@ def db_update_task_status(
     log_tail: str | None = None,
 ) -> None:
     """更新任务状态（done / failed）."""
+    if status not in _TERMINAL_STATUSES:
+        raise ValueError(f"Invalid terminal status: {status!r}, expected one of {_TERMINAL_STATUSES}")
     now = datetime.now(timezone.utc)
     session.execute(
         text("""

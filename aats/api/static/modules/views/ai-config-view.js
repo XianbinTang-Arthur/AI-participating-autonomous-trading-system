@@ -2,7 +2,7 @@ import { actorTags, actionButton, callout, kvList, summaryStrip, surfaceCard } f
 // #6 / #7 / #8 修复：此前本文件复制了三份 copy.js 的 helper（listText、textOrFallback、
 // summarizeList），直接 import 统一版本，删除本地重复定义。
 import { localizeList, summarizeLocalizedList, textOrFallback } from "../copy.js";
-import { formatNumber } from "../formatters.js";
+import { escapeHtml, formatNumber } from "../formatters.js";
 import { readableState } from "../terms.js";
 
 const PROFILE_OPTIONS = [
@@ -278,7 +278,8 @@ function relativeTime(isoString) {
     if (hours < 24) return `${hours} 小时前`;
     const days = Math.floor(hours / 24);
     return `${days} 天前`;
-  } catch {
+  } catch (err) {
+    console.warn("[relativeTime] parse error:", err);
     return "";
   }
 }
@@ -290,6 +291,7 @@ function isWorkflowBusy(taskInfo) {
 
 function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
   const tasks = rdpControl.tasks || {};
+  const tasksError = rdpControl.tasks_error || null;
   const pendingRecs = rdpControl.pending_recommendations || [];
   const activeParams = rdpControl.active_parameters || {};
 
@@ -338,34 +340,46 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
   const recsSection = pendingRecs.length > 0
     ? `
       <div class="rdp-section">
-        <p class="meta-copy" style="margin: 0.75rem 0 0.5rem"><strong>待审批建议</strong></p>
+        <p class="meta-copy" style="margin: 0.75rem 0 0.5rem"><strong>待处理建议</strong></p>
         <table class="mini-table">
           <thead><tr>
-            <th>建议 ID</th><th>策略/周期</th><th>动作</th><th>操作</th>
+            <th>建议 ID</th><th>策略/周期</th><th>状态</th><th>操作</th>
           </tr></thead>
           <tbody>
-            ${pendingRecs.map((rec) => `
-              <tr>
-                <td class="mono-cell">${escapeForTable(truncateId(rec.recommendation_id))}</td>
-                <td>${escapeForTable(rec.family || "")}/${escapeForTable(rec.timeframe || "")}</td>
-                <td>${escapeForTable(rec.action || "promote")}</td>
-                <td class="table-actions table-actions--compact">
-                  ${actionButton("审批并应用", "rdp-approve-and-apply", rec.recommendation_id, "primary", {
-                    disabled: !canAdmin,
-                    title: !canAdmin ? "当前账号只有查看权限" : "审批此建议并立即应用参数",
-                  })}
-                  ${actionButton("拒绝", "rdp-reject-recommendation", rec.recommendation_id, "ghost", {
-                    disabled: !canAdmin,
-                    title: !canAdmin ? "当前账号只有查看权限" : "拒绝此建议",
-                  })}
-                </td>
-              </tr>
-            `).join("")}
+            ${pendingRecs.map((rec) => {
+              const isApproved = rec.status === "approved";
+              return `
+                <tr>
+                  <td class="mono-cell">${escapeHtml(truncateId(rec.recommendation_id))}</td>
+                  <td>${escapeHtml(rec.family || "")}/${escapeHtml(rec.timeframe || "")}</td>
+                  <td>${isApproved ? "已审批" : escapeHtml(rec.action || "promote")}</td>
+                  <td class="table-actions table-actions--compact">
+                    ${isApproved
+                      ? actionButton("应用参数", "rdp-apply-only", rec.recommendation_id, "primary", {
+                          disabled: !canAdmin,
+                          title: !canAdmin ? "当前账号只有查看权限" : "应用已审批的参数",
+                        })
+                      : actionButton("审批并应用", "rdp-approve-and-apply", rec.recommendation_id, "primary", {
+                          disabled: !canAdmin,
+                          title: !canAdmin ? "当前账号只有查看权限" : "审批此建议并立即应用参数",
+                        })
+                    }
+                    ${!isApproved
+                      ? actionButton("拒绝", "rdp-reject-recommendation", rec.recommendation_id, "ghost", {
+                          disabled: !canAdmin,
+                          title: !canAdmin ? "当前账号只有查看权限" : "拒绝此建议",
+                        })
+                      : ""
+                    }
+                  </td>
+                </tr>
+              `;
+            }).join("")}
           </tbody>
         </table>
       </div>
     `
-    : `<p class="meta-copy" style="margin: 0.75rem 0 0.25rem">当前没有待审批的参数变更建议。</p>`;
+    : `<p class="meta-copy" style="margin: 0.75rem 0 0.25rem">当前没有待处理的参数变更建议。</p>`;
 
   // ── active parameters table ──
   const activeEntries = Object.entries(activeParams);
@@ -383,8 +397,8 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
               const timeframe = info.timeframe || combo.split("_").slice(1).join("_") || "";
               return `
                 <tr>
-                  <td>${escapeForTable(combo)}</td>
-                  <td class="mono-cell">${escapeForTable(truncateId(info.parameter_set_id))}</td>
+                  <td>${escapeHtml(combo)}</td>
+                  <td class="mono-cell">${escapeHtml(truncateId(info.parameter_set_id))}</td>
                   <td>${info.applied_at ? relativeTime(info.applied_at) : "—"}</td>
                   <td class="table-actions table-actions--compact">
                     ${actionButton("回滚", "rdp-rollback-parameters", `${family}/${timeframe}`, "ghost", {
@@ -406,6 +420,14 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
     kicker: "数据 + 研究 + 参数审批",
     copy: "从这里触发数据采集和参数研究流程，审批并应用研究结果。数据采集和研究任务由宿主机 daemon 异步执行。",
     content: `
+      ${tasksError
+        ? callout({
+            title: "任务状态查询失败",
+            copy: "无法连接任务队列数据库，下方的任务状态可能不准确。",
+            pills: [actorTags("system")],
+          })
+        : ""
+      }
       ${summaryStrip([
         {
           label: "数据采集",
@@ -440,11 +462,6 @@ function truncateId(id) {
   if (!id) return "—";
   if (id.length <= 20) return id;
   return id.slice(0, 8) + "…" + id.slice(-8);
-}
-
-function escapeForTable(str) {
-  if (!str) return "";
-  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
 // ── 运行参数概览 ──────────────────────────────────────────────────

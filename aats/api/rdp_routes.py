@@ -89,21 +89,36 @@ def _governance_db_url() -> str | None:
         return None
 
 
+_governance_engine_cache: dict[str, Any] = {}   # url → Engine singleton
+
+
+def _get_governance_engine(url: str) -> Any:
+    """返回 URL 对应的缓存 Engine，避免每次请求重建连接池."""
+    from sqlalchemy import create_engine
+
+    cached = _governance_engine_cache.get(url)
+    if cached is not None:
+        return cached
+    engine = create_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=1)
+    _governance_engine_cache[url] = engine
+    return engine
+
+
 @contextlib.contextmanager
 def _governance_session() -> Iterator[Any]:
     """创建一个连接 governance schema 的轻量 session.
 
     gateway 容器通过 AATS_ACTIVE_PARAMETER_DB_URL 连接 aats_research，
     本地开发通过 RDP_DATABASE_URL (.env.research) 连接。
+    Engine 按 URL 缓存，避免每次请求创建/销毁连接池。
     """
     url = _governance_db_url()
     if not url:
         raise RuntimeError("No governance DB URL available "
                            "(AATS_ACTIVE_PARAMETER_DB_URL / RDP_DATABASE_URL)")
-    from sqlalchemy import create_engine
     from sqlalchemy.orm import Session, sessionmaker
 
-    engine = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+    engine = _get_governance_engine(url)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     session = factory()
     try:
@@ -114,7 +129,6 @@ def _governance_session() -> Iterator[Any]:
         raise
     finally:
         session.close()
-        engine.dispose()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -722,6 +736,7 @@ def _rdp_control_summary(request: Request) -> dict[str, Any]:
 
     # 1) 最近任务（按 workflow 分组，取每类最新一条）
     tasks_by_workflow: dict[str, Any] = {}
+    tasks_error: str | None = None
     try:
         from aats.data_platform.governance.rdp_task_db import db_get_recent_tasks
 
@@ -733,21 +748,26 @@ def _rdp_control_summary(request: Request) -> dict[str, Any]:
                 tasks_by_workflow[wf] = t
     except Exception as exc:
         logger.warning("control-summary: task query failed: %s", exc)
+        tasks_error = str(exc)
 
-    # 2) 待审批 recommendations（status=draft 的视为待审批）
+    # 2) 待处理 recommendations（draft 待审批 + approved 待应用）
     pending_recommendations: list[dict[str, Any]] = []
     try:
-        recs_data = query_latest_recommendations(root, limit=50, status_filter="draft")
-        for rec in recs_data.get("recommendations", []):
-            pending_recommendations.append({
-                "recommendation_id": rec.get("recommendation_id"),
-                "family": rec.get("family"),
-                "timeframe": rec.get("timeframe"),
-                "action": rec.get("action"),
-                "target_parameter_set_id": rec.get("target_parameter_set_id"),
-                "source_round_id": rec.get("source_round_id"),
-                "created_at": rec.get("created_at"),
-            })
+        for status_filter in ("draft", "approved"):
+            recs_data = query_latest_recommendations(
+                root, limit=50, status_filter=status_filter,
+            )
+            for rec in recs_data.get("recommendations", []):
+                pending_recommendations.append({
+                    "recommendation_id": rec.get("recommendation_id"),
+                    "family": rec.get("family"),
+                    "timeframe": rec.get("timeframe"),
+                    "action": rec.get("action"),
+                    "status": rec.get("status", status_filter),
+                    "target_parameter_set_id": rec.get("target_parameter_set_id"),
+                    "source_round_id": rec.get("source_round_id"),
+                    "created_at": rec.get("created_at"),
+                })
     except Exception as exc:
         logger.warning("control-summary: recommendations query failed: %s", exc)
 
@@ -772,6 +792,7 @@ def _rdp_control_summary(request: Request) -> dict[str, Any]:
 
     return {
         "tasks": tasks_by_workflow,
+        "tasks_error": tasks_error,
         "pending_recommendations": pending_recommendations,
         "active_parameters": active_parameters,
     }
