@@ -457,7 +457,7 @@ class PortfolioAllocatorV2Phase2:
             approved_delta_qty = quantize_decimal(requested_delta_qty * ratio)
             clamped = True
             reason_codes.append("allocator_budget_notional_capped")
-            scaled_intent = self._scale_intent(intent=intent, scaled_delta_qty=approved_delta_qty)
+            scaled_intent = self._scale_intent(intent=intent, scaled_delta_qty=approved_delta_qty, budget_ratio=ratio)
         snapshot = AllocatorBudgetSnapshot(
             allocation_id=allocation_id,
             strategy_sleeve_id=intent.strategy_sleeve_id,
@@ -528,7 +528,7 @@ class PortfolioAllocatorV2Phase2:
             ):
                 ratio = max(Decimal("0"), min(Decimal("1"), approved_notional / original_approved_notional))
                 approved_delta_qty = quantize_decimal(snapshot.approved_delta_qty * ratio)
-                redistributed_intent = self._scale_intent(intent=intent, scaled_delta_qty=approved_delta_qty)
+                redistributed_intent = self._scale_intent(intent=intent, scaled_delta_qty=approved_delta_qty, budget_ratio=ratio)
             snapshot_reason_codes = list(snapshot.reason_codes)
             if approved_notional + EPSILON_DECIMAL_12 < original_approved_notional:
                 snapshot_reason_codes.append("allocator_portfolio_budget_redistributed")
@@ -560,15 +560,34 @@ class PortfolioAllocatorV2Phase2:
         return redistributed_intents, redistributed_snapshots, budget_cut_reason_codes
 
     @staticmethod
-    def _scale_intent(*, intent: StrategySleeveIntent, scaled_delta_qty: Decimal) -> StrategySleeveIntent:
+    def _scale_intent(
+        *,
+        intent: StrategySleeveIntent,
+        scaled_delta_qty: Decimal,
+        budget_ratio: Decimal | None = None,
+    ) -> StrategySleeveIntent:
         current_qty = to_decimal(intent.current_position_qty)
         account_current_qty = (
             None if intent.account_current_position_qty is None else to_decimal(intent.account_current_position_qty)
         )
         scaled_legs: list[StrategyLegIntent] = []
         if intent.legs:
-            original_delta = to_decimal(intent.delta_position_qty)
-            multiplier = Decimal("0") if abs(original_delta) <= EPSILON_DECIMAL_12 else (scaled_delta_qty / original_delta)
+            # Use budget_ratio directly when available; otherwise fall back
+            # to gross leg delta as divisor (not net delta) to handle
+            # reversals where net delta ≈ 0 but individual legs have
+            # significant deltas.
+            if budget_ratio is not None:
+                multiplier = budget_ratio
+            else:
+                original_gross_delta = sum(
+                    abs(to_decimal(leg.delta_position_qty or Decimal("0")))
+                    for leg in intent.legs
+                )
+                multiplier = (
+                    Decimal("0")
+                    if abs(original_gross_delta) <= EPSILON_DECIMAL_12
+                    else abs(scaled_delta_qty) / original_gross_delta
+                )
             for leg in intent.legs:
                 leg_current_qty = to_decimal(leg.current_position_qty or Decimal("0"))
                 leg_delta = quantize_decimal(to_decimal(leg.delta_position_qty or Decimal("0")) * multiplier)
@@ -881,8 +900,19 @@ class PortfolioAllocatorV2Phase2:
         base_target: PositionTarget,
         assignment: SleeveBudgetAssignment | None,
     ) -> Decimal:
-        if intent.target_notional is not None and abs(to_decimal(intent.target_notional)) > EPSILON_DECIMAL_12:
-            return abs(to_decimal(intent.target_notional))
+        # For independent family with dual-leg intents, compute gross from
+        # legs FIRST.  target_notional is NET (long − short) which under-
+        # estimates the budget needed for reversals.  Other families (e.g.,
+        # smart_arbitrage) set target_notional to a family-specific value
+        # that should be respected, so the bypass only applies to
+        # independent.
+        _independent_legs_first = (
+            bool(intent.legs)
+            and str(getattr(intent, "family", "") or "") == "independent"
+        )
+        if not _independent_legs_first:
+            if intent.target_notional is not None and abs(to_decimal(intent.target_notional)) > EPSILON_DECIMAL_12:
+                return abs(to_decimal(intent.target_notional))
         if intent.legs:
             if intent.family == "smart_arbitrage":
                 grouped_total = self._smart_arbitrage_requested_notional(intent=intent, base_target=base_target)
@@ -895,7 +925,12 @@ class PortfolioAllocatorV2Phase2:
                 if reference_price <= EPSILON_DECIMAL_12:
                     reference_price = self._reference_price(intent) or self._base_target_reference_price(base_target)
                 total += delta_qty * reference_price
-            return total
+            if total > EPSILON_DECIMAL_12:
+                return total
+        # Fallback to target_notional (independent reaches here only if
+        # leg computation yielded zero).
+        if intent.target_notional is not None and abs(to_decimal(intent.target_notional)) > EPSILON_DECIMAL_12:
+            return abs(to_decimal(intent.target_notional))
         reference_price = self._reference_price(intent) or self._base_target_reference_price(base_target)
         if reference_price <= EPSILON_DECIMAL_12 and assignment is not None and assignment.effective_max_symbol_notional is not None:
             return abs(to_decimal(assignment.effective_max_symbol_notional))

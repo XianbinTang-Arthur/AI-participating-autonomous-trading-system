@@ -195,6 +195,7 @@ export function viewSpecs(view, state = null) {
     aiConfig: [
       ["aiConfigModel", "/ai-config/summary"],
       ["aiRuntime", "/ai/runtime"],
+      ["rdpControl", "/rdp/control-summary"],
     ],
     admin: [
       ["operatorUsers", "/auth/users"],

@@ -50,6 +50,9 @@ x-aats-common-env: &aats-common-env
   # 失败立刻抛错（而不是延迟到第一次跨进程读写）。Slice 6.1 范围内尚没有 caller
   # 使用 hot_state_store；本配置先把连接路径打通，给 Slice 6.2/6.3 把 kill_switch
   # 与 portfolio_snapshot 接进 Redis 时铺垫。
+  # Active Parameters 从 governance schema 加载，固定指向 aats_research 库。
+  # 与 AATS_DATABASE_URL (按 profile 区分) 不同，这条连接只在启动时做一次只读查询。
+  AATS_ACTIVE_PARAMETER_DB_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
   AATS_HOT_STATE_BACKEND: redis
   AATS_HOT_STATE_REDIS_URL: redis://redis:6379/0
   # Stage 8：OpenTelemetry + Jaeger。4 进程共用同一个 OTLP gRPC endpoint，

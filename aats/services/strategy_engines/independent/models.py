@@ -14,8 +14,6 @@ from .versioning import (
     INDEPENDENT_STATE_MACHINE_VERSION,
 )
 
-from aats.services.portfolio_service.decimals import clamp_float as clamp
-
 if TYPE_CHECKING:
     from aats.services.strategy_engines.families.independent_models import IndependentBookRuntimeState
     from .adaptive import IndependentAdaptiveSnapshot

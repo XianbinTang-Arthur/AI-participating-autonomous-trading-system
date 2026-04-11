@@ -32,6 +32,7 @@ export function renderAIConfigView(data) {
   const latestSelectionDecision = strategyProfiles.latest_selection_decision || {};
   const latestOptimizationReport = strategyProfiles.latest_optimization_report || {};
   const latestProfileControl = aiState.latest_profile_control_decision || {};
+  const rdpControl = data.rdpControl || {};
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
   const summaryError = data.error || null;
 
@@ -63,6 +64,9 @@ export function renderAIConfigView(data) {
           latestOptimizationReport,
           canAdmin,
         })}
+      </div>
+      <div class="span-12 workspace-stack">
+        ${renderRdpControlPanel({ rdpControl, canAdmin })}
       </div>
       <div class="span-12 workspace-stack">
         ${renderCurrentConfigurationCard({ runtimeProfiles, runtime, aiState, activeRevision, activation })}
@@ -233,6 +237,217 @@ function renderProfileControlModeActions({
     </div>
   `;
 }
+
+// ── RDP 控制卡片 ──────────────────────────────────────────────────
+
+const WORKFLOW_LABELS = {
+  data_maintenance: "数据采���",
+  research_cycle: "研究管线",
+};
+
+function taskStatusSummary(taskInfo) {
+  if (!taskInfo) return { value: "未运行", meta: "还没有运行记录", tone: "outline" };
+  const status = taskInfo.status || "unknown";
+  if (status === "running") {
+    const since = taskInfo.started_at ? relativeTime(taskInfo.started_at) : "";
+    return { value: "运行中", meta: since ? `开始于 ${since}` : "正在执行", tone: "info" };
+  }
+  if (status === "done") {
+    const ago = taskInfo.finished_at ? relativeTime(taskInfo.finished_at) : "";
+    return { value: "已完成", meta: ago ? `完成于 ${ago}` : "上次成功", tone: "positive" };
+  }
+  if (status === "failed") {
+    const msg = taskInfo.error_message || "执行失败";
+    return { value: "失败", meta: msg, tone: "danger" };
+  }
+  if (status === "pending") {
+    return { value: "排队中", meta: "等待 daemon 执行", tone: "warning" };
+  }
+  return { value: status, meta: "", tone: "outline" };
+}
+
+function relativeTime(isoString) {
+  if (!isoString) return "";
+  try {
+    const diff = Date.now() - new Date(isoString).getTime();
+    if (diff < 0) return "刚刚";
+    const minutes = Math.floor(diff / 60000);
+    if (minutes < 1) return "刚刚";
+    if (minutes < 60) return `${minutes} 分钟前`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 24) return `${hours} 小时前`;
+    const days = Math.floor(hours / 24);
+    return `${days} 天前`;
+  } catch {
+    return "";
+  }
+}
+
+function isWorkflowBusy(taskInfo) {
+  if (!taskInfo) return false;
+  return taskInfo.status === "pending" || taskInfo.status === "running";
+}
+
+function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
+  const tasks = rdpControl.tasks || {};
+  const pendingRecs = rdpControl.pending_recommendations || [];
+  const activeParams = rdpControl.active_parameters || {};
+
+  const dataMaint = tasks.data_maintenance || null;
+  const research = tasks.research_cycle || null;
+  const dataMaintStatus = taskStatusSummary(dataMaint);
+  const researchStatus = taskStatusSummary(research);
+  const dataMaintBusy = isWorkflowBusy(dataMaint);
+  const researchBusy = isWorkflowBusy(research);
+
+  // ── workflow trigger buttons ──
+  const workflowButtons = `
+    <div class="table-actions table-actions--compact manual-profile-switch-actions manual-profile-switch-actions--centered">
+      ${actionButton(
+        dataMaintBusy ? "数据采集中…" : "拉取近期数据",
+        "rdp-trigger-workflow",
+        "data_maintenance",
+        "secondary",
+        {
+          disabled: !canAdmin || dataMaintBusy,
+          title: !canAdmin
+            ? "当前账号只有查看权限"
+            : dataMaintBusy
+              ? "数据采集任务正在进行"
+              : "触发 data_maintenance workflow：拉取 OKX 近期数据",
+        },
+      )}
+      ${actionButton(
+        researchBusy ? "研究进行中…" : "运行研究管线",
+        "rdp-trigger-workflow",
+        "research_cycle",
+        "secondary",
+        {
+          disabled: !canAdmin || researchBusy,
+          title: !canAdmin
+            ? "当前账号只有查看权限"
+            : researchBusy
+              ? "研究管线任务正在进行"
+              : "触发 research_cycle workflow：全管线 Phase 2→Decision",
+        },
+      )}
+    </div>
+  `;
+
+  // ── pending recommendations table ──
+  const recsSection = pendingRecs.length > 0
+    ? `
+      <div class="rdp-section">
+        <p class="meta-copy" style="margin: 0.75rem 0 0.5rem"><strong>待审批建议</strong></p>
+        <table class="mini-table">
+          <thead><tr>
+            <th>建议 ID</th><th>策略/周期</th><th>动作</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            ${pendingRecs.map((rec) => `
+              <tr>
+                <td class="mono-cell">${escapeForTable(truncateId(rec.recommendation_id))}</td>
+                <td>${escapeForTable(rec.family || "")}/${escapeForTable(rec.timeframe || "")}</td>
+                <td>${escapeForTable(rec.action || "promote")}</td>
+                <td class="table-actions table-actions--compact">
+                  ${actionButton("审批并应用", "rdp-approve-and-apply", rec.recommendation_id, "primary", {
+                    disabled: !canAdmin,
+                    title: !canAdmin ? "当前账号只有查看权限" : "审批此建议并立即应用参数",
+                  })}
+                  ${actionButton("拒绝", "rdp-reject-recommendation", rec.recommendation_id, "ghost", {
+                    disabled: !canAdmin,
+                    title: !canAdmin ? "当前账号只有查看权限" : "拒绝此建议",
+                  })}
+                </td>
+              </tr>
+            `).join("")}
+          </tbody>
+        </table>
+      </div>
+    `
+    : `<p class="meta-copy" style="margin: 0.75rem 0 0.25rem">当前没有待审批的参数变更建议。</p>`;
+
+  // ── active parameters table ──
+  const activeEntries = Object.entries(activeParams);
+  const activeSection = activeEntries.length > 0
+    ? `
+      <div class="rdp-section">
+        <p class="meta-copy" style="margin: 0.75rem 0 0.5rem"><strong>当前生效参数</strong></p>
+        <table class="mini-table">
+          <thead><tr>
+            <th>组合</th><th>参数集 ID</th><th>应用时间</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            ${activeEntries.map(([combo, info]) => {
+              const family = info.family || combo.split("_")[0] || "";
+              const timeframe = info.timeframe || combo.split("_").slice(1).join("_") || "";
+              return `
+                <tr>
+                  <td>${escapeForTable(combo)}</td>
+                  <td class="mono-cell">${escapeForTable(truncateId(info.parameter_set_id))}</td>
+                  <td>${info.applied_at ? relativeTime(info.applied_at) : "—"}</td>
+                  <td class="table-actions table-actions--compact">
+                    ${actionButton("回滚", "rdp-rollback-parameters", `${family}/${timeframe}`, "ghost", {
+                      disabled: !canAdmin,
+                      title: !canAdmin ? "当前账号只有查看权限" : "回滚到上一版参数",
+                    })}
+                  </td>
+                </tr>
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    `
+    : `<p class="meta-copy" style="margin: 0.75rem 0 0.25rem">当前没有生效的 active 参数。</p>`;
+
+  return surfaceCard({
+    title: "RDP 研究管线控制",
+    kicker: "数据 + 研究 + 参数审批",
+    copy: "从这里触发数据采集和参数研究流程，审批并应用研究结果。数据采集和研究任务由宿主机 daemon 异步执行。",
+    content: `
+      ${summaryStrip([
+        {
+          label: "数据采集",
+          value: dataMaintStatus.value,
+          meta: dataMaintStatus.meta,
+          tone: dataMaintStatus.tone,
+          badge: actorTags("system"),
+        },
+        {
+          label: "研究管线",
+          value: researchStatus.value,
+          meta: researchStatus.meta,
+          tone: researchStatus.tone,
+          badge: actorTags("ai", "system"),
+        },
+        {
+          label: "待审批",
+          value: pendingRecs.length > 0 ? `${pendingRecs.length} 条建议` : "无",
+          meta: pendingRecs.length > 0 ? "有待审批的参数变更建议" : "当前没有待审批的建议",
+          tone: pendingRecs.length > 0 ? "warning" : "outline",
+          badge: actorTags("operator"),
+        },
+      ])}
+      ${workflowButtons}
+      ${recsSection}
+      ${activeSection}
+    `,
+  });
+}
+
+function truncateId(id) {
+  if (!id) return "—";
+  if (id.length <= 20) return id;
+  return id.slice(0, 8) + "…" + id.slice(-8);
+}
+
+function escapeForTable(str) {
+  if (!str) return "";
+  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// ── 运行参数概览 ──────────────────────────────────────────────────
 
 function renderCurrentConfigurationCard({ runtimeProfiles = {}, runtime = {}, aiState = {}, activeRevision = {}, activation = {} }) {
   const runtimePayload = runtimeProfiles.current_runtime_payload || {};

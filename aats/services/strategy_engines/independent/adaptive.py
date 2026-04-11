@@ -6,7 +6,8 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext
 
 from .health import IndependentLegHealthSnapshot
-from .models import IndependentBookDecision, IndependentLeg, clamp as _clamp
+from aats.services.portfolio_service.decimals import clamp_float as _clamp
+from .models import IndependentBookDecision, IndependentLeg
 from .scoring import effective_score_drawdown_threshold_bps
 
 

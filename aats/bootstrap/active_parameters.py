@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -298,12 +299,63 @@ def _default_registry_path(project_root: Path | str | None = None) -> Path:
     return root / DEFAULT_ACTIVE_DIR / DEFAULT_REGISTRY_FILENAME
 
 
+def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
+    """尝试从数据库加载 active parameter registry.
+
+    Returns
+    -------
+    dict | None  成功时返回 registry dict，失败或不可用时返回 None。
+    """
+    # 确定 DB URL: 显式传入 > 环境变量 > None
+    url = db_url or os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+    if not url:
+        return None
+
+    try:
+        from sqlalchemy import create_engine, text as sa_text
+
+        engine = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+        try:
+            with engine.connect() as conn:
+                rows = conn.execute(sa_text(
+                    "SELECT family, timeframe, parameter_set_id, "
+                    "values AS param_values, "
+                    "source_round_id, approval_recommendation_id, applied_by, applied_at "
+                    "FROM governance.active_parameter_sets ORDER BY family, timeframe"
+                )).fetchall()
+        finally:
+            engine.dispose()
+
+        active_sets: dict[str, Any] = {}
+        for row in rows:
+            combo_key = f"{row.family}_{row.timeframe}"
+            active_sets[combo_key] = {
+                "parameter_set_id": row.parameter_set_id,
+                "family": row.family,
+                "timeframe": row.timeframe,
+                "values": row.param_values,
+            }
+
+        log.info("从数据库加载 active parameter registry (%d active sets)", len(active_sets))
+        return {"generated_at": None, "active_sets": active_sets}
+
+    except Exception as exc:
+        log.warning("数据库加载 active parameters 失败（fallback 文件模式）: %s", exc)
+        return None
+
+
 def load_active_parameter_registry(
     path: Path | str | None = None,
     *,
     project_root: Path | str | None = None,
+    db_url: str | None = None,
 ) -> dict[str, Any]:
-    """加载 active_parameter_registry.json.
+    """加载 active parameter registry.
+
+    优先级:
+      1. 数据库 (AATS_ACTIVE_PARAMETER_DB_URL 或 db_url 参数)
+      2. JSON 文件 (configs/active_parameter_sets/active_parameter_registry.json)
+      3. 空 registry (fail-soft，不中断主系统)
 
     格式::
 
@@ -319,9 +371,13 @@ def load_active_parameter_registry(
             ...
           }
         }
-
-    如果文件不存在，返回空 registry（不中断主系统）。
     """
+    # 1. 尝试数据库
+    db_result = _try_load_from_db(db_url)
+    if db_result is not None:
+        return db_result
+
+    # 2. Fallback 到文件
     if path is None:
         path = _default_registry_path(project_root)
     else:
@@ -343,7 +399,7 @@ def load_active_parameter_registry(
         return {"generated_at": data.get("generated_at"), "active_sets": {}}
 
     loaded_count = len(data["active_sets"])
-    log.info("已加载 active parameter registry: %s (%d active sets)", path, loaded_count)
+    log.info("已加载 active parameter registry (文件): %s (%d active sets)", path, loaded_count)
     return data
 
 
@@ -526,6 +582,7 @@ def build_settings_overrides(
     *,
     project_root: Path | str | None = None,
     registry_path: Path | str | None = None,
+    db_url: str | None = None,
     families: list[str] | None = None,
     timeframes: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -536,15 +593,37 @@ def build_settings_overrides(
 
     这是 active parameter → settings 注入的核心函数。
     在 build_runtime() 中被调用。
+
+    加载优先级: DB (db_url / AATS_ACTIVE_PARAMETER_DB_URL) → registry 文件 → per-file。
     """
-    if registry_path:
-        registry = load_active_parameter_registry(registry_path)
-        all_sets_raw = registry.get("active_sets", {})
-        # 转换
+    # 统一走 load_active_parameter_registry（内含 DB→文件 fallback）
+    registry = load_active_parameter_registry(
+        registry_path, project_root=project_root, db_url=db_url,
+    )
+    all_sets_raw = registry.get("active_sets", {})
+
+    if all_sets_raw:
         all_sets: dict[str, dict[str, Any]] = {}
         for k, v in all_sets_raw.items():
             all_sets[k] = {"values": v.get("values", {})}
+    elif db_url or os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL"):
+        # DB was configured and queried but returned zero active sets.
+        # Fall back to the file registry so that a missing DB seed or
+        # partial migration does not silently revert independent
+        # strategy behaviour to code defaults.
+        log.warning(
+            "active_parameter_db_empty: DB 已配置但返回零条 active sets，"
+            "回退到文件 registry 避免策略参数静默退化"
+        )
+        all_sets = load_all_active_parameter_sets(project_root=project_root)
+        if not all_sets:
+            log.error(
+                "active_parameter_fallback_also_empty: DB 和文件 registry 均无 "
+                "active sets，independent 策略将使用代码默认参数。"
+                "如果这是实盘环境，请尽快补充 seed 数据。"
+            )
     else:
+        # 无 DB 配置时，尝试 per-file fallback
         all_sets = load_all_active_parameter_sets(project_root=project_root)
 
     if not all_sets:
@@ -640,11 +719,13 @@ def apply_active_parameters_to_settings(
         return resolved_settings
 
     registry_path = resolved_settings.get("active_parameter_registry_path")
+    db_url = resolved_settings.get("active_parameter_db_url")
 
     try:
         overrides = build_settings_overrides(
             project_root=project_root,
             registry_path=registry_path,
+            db_url=db_url,
         )
     except Exception as exc:
         log.warning(

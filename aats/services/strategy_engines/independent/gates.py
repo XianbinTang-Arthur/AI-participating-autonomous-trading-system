@@ -3,13 +3,13 @@ from __future__ import annotations
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import DecisionContext
 
+from aats.services.portfolio_service.decimals import clamp_float as _clamp
 from .models import (
     IndependentBookExpectancy,
     IndependentEligibilityOutcome,
     IndependentExecutionHealthState,
     IndependentLeg,
     ScoreStabilityMetrics,
-    clamp as _clamp,
 )
 
 

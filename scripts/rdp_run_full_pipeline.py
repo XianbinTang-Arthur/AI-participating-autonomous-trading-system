@@ -31,7 +31,6 @@ Exit codes:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import subprocess
 import sys
@@ -582,7 +581,6 @@ def main() -> int:
             not args.no_stop_on_failure
             and last["status"] in ("failed", "timeout", "error")
         ):
-            curr_idx = PHASE_ORDER.index(phase)
             log.warning("")
             log.warning(
                 "%s 失败, 管线中止。后续阶段跳过。", PHASE_LABELS[phase],

@@ -1187,14 +1187,15 @@ class StrategyCoordinatorService:
             "opportunistic": [],
             "independent": [],
         }
-        for event in reversed(
-            self.event_store.recent_by_topic(
-                topics.POSITION_TARGETS,
-                limit=self._RECENT_TARGET_LOOKBACK,
-            )
+        # Use per-key query to avoid global-window starvation: in a
+        # multi-symbol setup, high-frequency symbols would push low-
+        # frequency symbols out of a global recent_by_topic() window.
+        # recent_by_topic_and_key returns ascending order (oldest→newest).
+        for event in self.event_store.recent_by_topic_and_key(
+            topics.POSITION_TARGETS,
+            key=symbol,
+            limit=self._RECENT_TARGET_LOOKBACK,
         ):
-            if event.key != symbol:
-                continue
             target = PositionTarget.model_validate(event.payload)
             families = {
                 str(getattr(target, "strategy_family", "directional") or "directional"),
@@ -1205,9 +1206,12 @@ class StrategyCoordinatorService:
                 ),
             }
             for family in families:
-                if family not in rows or len(rows[family]) >= 10:
+                if family not in rows:
                     continue
                 rows[family].append(StrategyTargetHistory(created_at=event.event_timestamp, target=target))
+        # Keep only the most recent 10 per family (ascending order preserved).
+        for family in rows:
+            rows[family] = rows[family][-10:]
         return rows
 
     def _select_candidate(

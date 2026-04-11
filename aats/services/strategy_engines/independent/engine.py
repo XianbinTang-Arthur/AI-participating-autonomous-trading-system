@@ -29,6 +29,7 @@ from .lifecycle import (
     rebalance_remaining_seconds,
     determine_close_reason,
 )
+from aats.services.portfolio_service.decimals import clamp_float as _clamp
 from .models import (
     IndependentBookAction,
     IndependentBookDecision,
@@ -37,7 +38,6 @@ from .models import (
     IndependentEligibilityOutcome,
     IndependentFamilyEvaluation,
     IndependentLeg,
-    clamp as _clamp,
 )
 from .replay import replay_snapshot_from_decision
 from .sizing import (

@@ -13,6 +13,8 @@
   GET /rdp/recommendations/history      — recommendations 完整历史（含审批记录）
   GET /rdp/decision-round/latest        — 最近 decision round 完整结论
   GET /rdp/readiness                    — Promotion readiness 评估
+  GET /rdp/tasks/status                 — 最近任务状态
+  GET /rdp/control-summary              — RDP 控制卡片聚合数据
 
 写入端点（POST，require_write_access）:
   POST /rdp/recommendations/{id}/approve    — 审批 recommendation
@@ -20,11 +22,15 @@
   POST /rdp/recommendations/{id}/supersede  — 替代 recommendation
   POST /rdp/parameters/apply                — 应用已批准 recommendation 的参数
   POST /rdp/parameters/rollback             — 回滚 active parameter set
+  POST /rdp/tasks/trigger                   — 触发 RDP workflow 任务
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +72,49 @@ def _project_root(request: Request) -> Path:
             logger.warning("Failed to resolve project root from RDP settings: %s", exc)
     # 默认 cwd
     return Path(".").resolve()
+
+
+def _governance_db_url() -> str | None:
+    """获取 governance schema 所在数据库的连接串.
+
+    优先 AATS_ACTIVE_PARAMETER_DB_URL，其次 RDP_DATABASE_URL。
+    """
+    url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+    if url:
+        return url
+    try:
+        from aats.data_platform.config import get_settings as get_rdp_settings
+        return get_rdp_settings().database_url
+    except Exception:
+        return None
+
+
+@contextlib.contextmanager
+def _governance_session() -> Iterator[Any]:
+    """创建一个连接 governance schema 的轻量 session.
+
+    gateway 容器通过 AATS_ACTIVE_PARAMETER_DB_URL 连接 aats_research，
+    本地开发通过 RDP_DATABASE_URL (.env.research) 连接。
+    """
+    url = _governance_db_url()
+    if not url:
+        raise RuntimeError("No governance DB URL available "
+                           "(AATS_ACTIVE_PARAMETER_DB_URL / RDP_DATABASE_URL)")
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session, sessionmaker
+
+    engine = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    session = factory()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+        engine.dispose()
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -193,6 +242,11 @@ async def promotion_readiness(request: Request) -> dict[str, Any]:
 
 
 # ── 请求体模型 ─────────────────────────────────────────────────────
+
+
+class TriggerTaskRequest(BaseModel):
+    workflow: str = Field(..., description="workflow 名称: data_maintenance / research_cycle")
+    actor: str = Field(default="operator", description="操作人")
 
 
 class ApprovalRequest(BaseModel):
@@ -584,3 +638,140 @@ async def evaluate_rollback_api(
         family=family,
         timeframe=timeframe,
     )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  RDP Task Queue 端点（UI 触发 workflow + 状态查询）
+# ═══════════════════════════════════════════��══════════════════════
+
+
+@rdp_router.post(
+    "/tasks/trigger",
+    dependencies=[Depends(require_write_access)],
+)
+async def trigger_task_api(
+    request: Request,
+    body: TriggerTaskRequest,
+) -> dict[str, Any]:
+    """触发 RDP workflow 任务（写入 pending 到任务队列）."""
+    from aats.data_platform.governance.rdp_task_db import (
+        VALID_WORKFLOWS,
+        db_create_task,
+        db_has_active_task,
+    )
+
+    if body.workflow not in VALID_WORKFLOWS:
+        return {
+            "ok": False,
+            "message": f"未知的 workflow: {body.workflow}，"
+                       f"可选: {', '.join(sorted(VALID_WORKFLOWS))}",
+        }
+
+    try:
+        with _governance_session() as session:
+            active = db_has_active_task(session, body.workflow)
+            if active:
+                return {
+                    "ok": False,
+                    "message": f"{body.workflow} 已有 {active['status']} 任务"
+                               f"（{active['task_id']}），请等待完成后再触发。",
+                    "existing_task": active,
+                }
+            task_id = db_create_task(
+                session,
+                workflow=body.workflow,
+                requested_by=body.actor,
+            )
+    except Exception as exc:
+        logger.exception("Failed to create task: %s", exc)
+        return {"ok": False, "message": f"创建任务失败: {exc}"}
+
+    return {"ok": True, "task_id": task_id, "workflow": body.workflow}
+
+
+@rdp_router.get("/tasks/status", dependencies=[Depends(require_read_access)])
+async def task_status_api(
+    request: Request,
+    limit: int = Query(default=10, ge=1, le=50),
+) -> dict[str, Any]:
+    """查询最近 RDP 任务状态."""
+    from aats.data_platform.governance.rdp_task_db import db_get_recent_tasks
+
+    try:
+        with _governance_session() as session:
+            tasks = db_get_recent_tasks(session, limit=limit)
+    except Exception as exc:
+        logger.warning("Failed to query task status: %s", exc)
+        return {"ok": False, "tasks": [], "message": str(exc)}
+
+    return {"ok": True, "tasks": tasks}
+
+
+# ── RDP Control Summary（前端卡片聚合数据）──────────────────────────
+
+
+@rdp_router.get("/control-summary", dependencies=[Depends(require_read_access)])
+async def control_summary_api(request: Request) -> dict[str, Any]:
+    """聚合 RDP 控制卡片需要的数据: 任务状态 + 待审批 + active 参数."""
+    return _rdp_control_summary(request)
+
+
+def _rdp_control_summary(request: Request) -> dict[str, Any]:
+    """内部实现，同时供 dashboard bundle handler 调用."""
+    root = _project_root(request)
+
+    # 1) 最近任务（按 workflow 分组，取每类最新一条）
+    tasks_by_workflow: dict[str, Any] = {}
+    try:
+        from aats.data_platform.governance.rdp_task_db import db_get_recent_tasks
+
+        with _governance_session() as session:
+            recent = db_get_recent_tasks(session, limit=20)
+        for t in recent:
+            wf = t["workflow"]
+            if wf not in tasks_by_workflow:
+                tasks_by_workflow[wf] = t
+    except Exception as exc:
+        logger.warning("control-summary: task query failed: %s", exc)
+
+    # 2) 待审批 recommendations（status=draft 的视为待审批）
+    pending_recommendations: list[dict[str, Any]] = []
+    try:
+        recs_data = query_latest_recommendations(root, limit=50, status_filter="draft")
+        for rec in recs_data.get("recommendations", []):
+            pending_recommendations.append({
+                "recommendation_id": rec.get("recommendation_id"),
+                "family": rec.get("family"),
+                "timeframe": rec.get("timeframe"),
+                "action": rec.get("action"),
+                "target_parameter_set_id": rec.get("target_parameter_set_id"),
+                "source_round_id": rec.get("source_round_id"),
+                "created_at": rec.get("created_at"),
+            })
+    except Exception as exc:
+        logger.warning("control-summary: recommendations query failed: %s", exc)
+
+    # 3) 当前 active 参数
+    active_parameters: dict[str, Any] = {}
+    try:
+        from aats.data_platform.governance.active_params_db import (
+            db_load_active_registry,
+        )
+
+        with _governance_session() as session:
+            registry = db_load_active_registry(session)
+        active_parameters = registry.get("active_sets", {})
+    except Exception as exc:
+        logger.warning("control-summary: active params query failed: %s", exc)
+        # fallback 到文件
+        try:
+            params_data = query_active_parameter_sets(root)
+            active_parameters = params_data.get("active_sets", {})
+        except Exception:
+            pass
+
+    return {
+        "tasks": tasks_by_workflow,
+        "pending_recommendations": pending_recommendations,
+        "active_parameters": active_parameters,
+    }

@@ -163,6 +163,11 @@ class AATSSettings(BaseSettings):
         description="Master switch for loading active parameter set from RDP governance. "
                     "When True, active parameters override strategy profile defaults.",
     )
+    active_parameter_db_url: str | None = Field(
+        default=None,
+        description="Active parameters 数据库连接串 (指向 aats_research governance schema)。"
+                    "为 None 时 fallback 到文件模式。容器侧通过 AATS_ACTIVE_PARAMETER_DB_URL 注入。",
+    )
     database_single_runtime_guard_enabled: bool = True
     database_runtime_lock_key: int = 42_420_001
     # ── 多进程切片化（Stage 3）─────────────────────────────────────

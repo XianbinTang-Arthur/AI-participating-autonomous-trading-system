@@ -309,6 +309,9 @@ def _protected_dashboard_panel_payload(
         return query.ai_shadow_recent(limit=recent_ai_shadow_decisions_limit, offset=0)
     if panel_key == "aiShadowEvaluations":
         return query.ai_shadow_evaluations(limit=recent_ai_shadow_evaluations_limit, offset=0)
+    if panel_key == "rdpControl":
+        from aats.api.rdp_routes import _rdp_control_summary
+        return _rdp_control_summary(request)
     raise KeyError(f"dashboard_bundle_panel_not_found:{panel_key}")
 
 

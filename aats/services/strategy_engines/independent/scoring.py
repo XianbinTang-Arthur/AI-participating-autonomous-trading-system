@@ -5,7 +5,8 @@ from collections.abc import Sequence
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment
 
-from .models import IndependentLeg, ScoreStabilityMetrics, clamp as _clamp
+from aats.services.portfolio_service.decimals import clamp_float as _clamp
+from .models import IndependentLeg, ScoreStabilityMetrics
 
 
 def effective_score_drawdown_threshold_bps(*, settings: AATSSettings) -> float:

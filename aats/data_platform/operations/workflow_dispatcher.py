@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -88,8 +89,9 @@ def _run_task(
 
     # 将 command 中的 "python " 替换为当前解释器绝对路径，
     # 避免 cron 等无 PATH 环境找不到 python。
+    # 使用 shlex.quote 处理路径中可能含空格的虚拟环境/安装路径。
     if command.startswith("python "):
-        command = f"{sys.executable} {command[7:]}"
+        command = f"{shlex.quote(sys.executable)} {command[7:]}"
 
     if dry_run:
         result["status"] = "dry_run"

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace as _dc_replace
 from decimal import Decimal
 from typing import Literal
 
@@ -788,6 +788,15 @@ def evaluate_independent_books(
     directional_long_target_qty = max(to_decimal(directional_target_qty), Decimal("0"))
     directional_short_target_qty = max(-to_decimal(directional_target_qty), Decimal("0"))
     cost_service = trade_cost_service or TradeCostService(settings=settings)
+    long_current_qty = to_decimal(context.current_long_position_qty)
+    short_current_qty = to_decimal(context.current_short_position_qty)
+
+    # ── Phase 1: provisional expectancy with ENTRY side ──────────
+    # The book state machine may later decide to close/de-risk for
+    # reasons unknown at this point (stale thesis, failed thesis,
+    # weak edge, etc.).  Using the entry side here gives a
+    # conservative cost estimate; the actual execution side is
+    # corrected in Phase 3 after the action is known.
     long_expectancy = _resolve_independent_book_expectancy(
         settings=settings,
         context=context,
@@ -799,15 +808,16 @@ def evaluate_independent_books(
         expectancy_resolver=expectancy_resolver,
         latest_market_snapshot=latest_market_snapshot,
         planned_delta_qty=_planned_leg_delta_qty(
-            current_qty=to_decimal(context.current_long_position_qty),
+            current_qty=long_current_qty,
             target_qty=directional_long_target_qty,
         ),
         projected_notional=_planned_leg_notional(
-            current_qty=to_decimal(context.current_long_position_qty),
+            current_qty=long_current_qty,
             current_notional=to_decimal(context.current_long_position_notional),
             target_qty=directional_long_target_qty,
             latest_market_snapshot=latest_market_snapshot,
         ),
+        execution_side="buy",
     )
     short_expectancy = _resolve_independent_book_expectancy(
         settings=settings,
@@ -820,16 +830,19 @@ def evaluate_independent_books(
         expectancy_resolver=expectancy_resolver,
         latest_market_snapshot=latest_market_snapshot,
         planned_delta_qty=_planned_leg_delta_qty(
-            current_qty=to_decimal(context.current_short_position_qty),
+            current_qty=short_current_qty,
             target_qty=directional_short_target_qty,
         ),
         projected_notional=_planned_leg_notional(
-            current_qty=to_decimal(context.current_short_position_qty),
+            current_qty=short_current_qty,
             current_notional=to_decimal(context.current_short_position_notional),
             target_qty=directional_short_target_qty,
             latest_market_snapshot=latest_market_snapshot,
         ),
+        execution_side="sell",
     )
+
+    # ── Phase 2: book state-machine evaluation ───────────────────
     long_book = _evaluate_independent_book(
         settings=settings,
         context=context,
@@ -870,6 +883,57 @@ def evaluate_independent_books(
             else recent_score_history_by_leg.get("short", ())
         ),
     )
+
+    # ── Phase 3: recompute expectancy for exit/reduce actions ────
+    # When the book state machine decided to close or de-risk, the
+    # actual execution trades the EXIT side (sell to close long, buy
+    # to close short).  Recompute cost estimates with the correct
+    # side so that downstream execution planning and net-edge
+    # reporting reflect reality.
+    _EXIT_BOOK_ACTIONS = {"de_risk", "close_failed_thesis", "close_stale_thesis"}
+    for leg_label, book, current_qty, exit_side in (
+        ("long", long_book, long_current_qty, "sell"),
+        ("short", short_book, short_current_qty, "buy"),
+    ):
+        if book.book_action not in _EXIT_BOOK_ACTIONS:
+            continue
+        if current_qty <= EPSILON_DECIMAL_12:
+            continue
+        exit_delta_qty = _planned_leg_delta_qty(
+            current_qty=current_qty, target_qty=book.target_qty,
+        )
+        if exit_delta_qty <= EPSILON_DECIMAL_12:
+            continue
+        exit_notional = _planned_leg_notional(
+            current_qty=current_qty,
+            current_notional=to_decimal(
+                context.current_long_position_notional
+                if leg_label == "long"
+                else context.current_short_position_notional
+            ),
+            target_qty=book.target_qty,
+            latest_market_snapshot=latest_market_snapshot,
+        )
+        exit_expectancy = _resolve_independent_book_expectancy(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            runtime_margin_mode=resolved_margin_mode,
+            leg=leg_label,
+            trade_cost_service=cost_service,
+            expectancy_resolver=expectancy_resolver,
+            latest_market_snapshot=latest_market_snapshot,
+            planned_delta_qty=exit_delta_qty,
+            projected_notional=exit_notional,
+            execution_side=exit_side,
+        )
+        if exit_expectancy is not None:
+            updated = _dc_replace(book, expectancy=exit_expectancy)
+            if leg_label == "long":
+                long_book = updated
+            else:
+                short_book = updated
     long_target_qty = long_book.target_qty
     short_target_qty = short_book.target_qty
     final_target_qty = long_target_qty - short_target_qty
@@ -1440,6 +1504,7 @@ def _resolve_independent_book_expectancy(
     latest_market_snapshot: MarketSnapshot | None = None,
     planned_delta_qty: Decimal = Decimal("0"),
     projected_notional: Decimal | None = None,
+    execution_side: str = "",
 ) -> IndependentBookExpectancy | None:
     if expectancy_resolver is not None:
         try:
@@ -1475,6 +1540,7 @@ def _resolve_independent_book_expectancy(
             latest_market_snapshot=latest_market_snapshot,
             planned_delta_qty=planned_delta_qty,
             projected_notional=projected_notional,
+            execution_side=execution_side,
         )
     except Exception:
         return None
@@ -1487,6 +1553,7 @@ def _compute_independent_book_expectancy(
     baseline: BaselineAssessment,
     ai_assessment: AIMarketAssessment | None,
     runtime_margin_mode: str,
+    execution_side: str = "",
     leg: IndependentLeg,
     trade_cost_service: TradeCostService,
     latest_market_snapshot: MarketSnapshot | None,
@@ -1501,6 +1568,10 @@ def _compute_independent_book_expectancy(
     )
     configured_slippage_bps = _independent_expected_slippage_bps(settings=settings)
     reference_price = _market_reference_price(latest_market_snapshot=latest_market_snapshot)
+    # Use action-aware execution_side when provided; fall back to the
+    # entry-side default.  Close/reduce legs trade the opposite side of
+    # the book (e.g., selling to close a long, buying to close a short).
+    resolved_side = execution_side if execution_side else ("buy" if leg == "long" else "sell")
     estimate = trade_cost_service.estimate_single_leg_entry(
         model_name=f"independent_{leg}_book",
         symbol=context.symbol,
@@ -1508,7 +1579,7 @@ def _compute_independent_book_expectancy(
         margin_mode=runtime_margin_mode,
         execution_style="taker",
         order_type="market",
-        side="buy" if leg == "long" else "sell",
+        side=resolved_side,
         quantity=planned_delta_qty,
         projected_notional=projected_notional,
         reference_price=reference_price,

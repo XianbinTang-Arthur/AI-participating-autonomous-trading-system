@@ -2450,6 +2450,22 @@ def _build_position_target_handler(
             bundle_status = "blocked"
             if bundle_execution_allowed:
                 execution_leg_results = executable_leg_results if partial_execution_allowed else leg_results
+                # Sort close/reduce legs before open legs so that de-risk
+                # actions publish (and therefore execute) first.  Critical
+                # for short→long reversals where the close-leg must free
+                # margin before the open-leg consumes it.
+                if len(execution_leg_results) > 1:
+                    execution_leg_results = [
+                        item
+                        for _, item in sorted(
+                            enumerate(execution_leg_results),
+                            key=lambda pair: _independent_leg_priority(
+                                target=target,
+                                item=pair[1],
+                                original_index=pair[0],
+                            ),
+                        )
+                    ]
                 for item in execution_leg_results:
                     risk_decision = item["risk"]
                     if risk_decision is None:

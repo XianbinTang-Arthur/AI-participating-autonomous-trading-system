@@ -263,8 +263,17 @@ def test_managed_profile_local_env_templates_are_minimal_utf8_overrides() -> Non
             assert key not in values, key
         for key in deprecated_strategy_keys:
             assert key not in values, key
+        # Keys consumed by Docker compose / bootstrap scripts, not
+        # AATSSettings runtime fields:
+        # - AATS_DB_NAME: compose interpolation for DATABASE_URL
+        # - AATS_OPERATOR_ADMIN_*: seed_operator_admin bootstrap script
+        infrastructure_only_keys = {
+            "AATS_DB_NAME",
+            "AATS_OPERATOR_ADMIN_USERNAME",
+            "AATS_OPERATOR_ADMIN_PASSWORD",
+        }
         for key in values:
-            assert key in supported_keys, key
+            assert key in supported_keys or key in infrastructure_only_keys, key
         if env_name.startswith(".env.spot"):
             for key in spot_only_forbidden:
                 assert key not in values, key

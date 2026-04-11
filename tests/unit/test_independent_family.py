@@ -1795,6 +1795,141 @@ class TestIndependentFamily(unittest.TestCase):
 
         self.assertEqual(_independent_family_action(result=result), "rebalance_independent_books")
 
+    # ── Phase-3 exit expectancy recompute regression tests ────────
+
+    def test_stale_long_close_recomputes_expectancy_with_exit_delta(self) -> None:
+        """When a stale long is closed, Phase 3 should recompute the
+        expectancy with planned_delta_qty reflecting the full close
+        (current_qty → 0), not the directional-signal delta."""
+        calls: list[dict] = []
+
+        def tracking_resolver(*, leg: str, planned_delta_qty: Decimal, **_: object) -> IndependentBookExpectancy:
+            calls.append({"leg": leg, "planned_delta_qty": planned_delta_qty})
+            return IndependentBookExpectancy(
+                leg=leg,
+                expected_signal_edge_bps=8.0,
+                expected_slippage_bps=1.0,
+                expected_cost_bps=4.0,
+                expected_net_edge_bps=4.0 if leg == "long" else -3.0,
+            )
+
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_long_entry_threshold=0.60,
+            strategy_hedge_independent_long_close_threshold=0.50,
+            strategy_hedge_independent_max_thesis_age_seconds=1800,
+        )
+        context = make_context(
+            current_position_qty=0.01,
+            current_long_position_qty=0.01,
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_long_leg_opened_seconds_ago=3600,
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.30,
+                "trend_alpha": 0.24,
+                "microstructure_alpha": 0.10,
+                "liquidity_scale": 0.92,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.22})
+
+        result = evaluate_independent_books(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.15, confidence=0.76),
+            directional_target_qty=Decimal("0.01"),
+            target_leverage=1.0,
+            signal_edge_bps=8.0,
+            expected_cost_bps=4.0,
+            expected_net_edge_bps=4.0,
+            execution_leg_family="independent",
+            scorer=lambda *, leg, baseline, ai_assessment: 0.58 if leg == "long" else 0.08,
+            expectancy_resolver=tracking_resolver,
+        )
+
+        self.assertEqual(result.long_book.book_action, "close_stale_thesis")
+        # Phase 3 should recompute: the resolver must have been called
+        # a second time for the long leg with the full close delta.
+        long_calls = [c for c in calls if c["leg"] == "long"]
+        self.assertGreaterEqual(len(long_calls), 2, "Phase 3 recompute missing for stale long")
+        # Phase 1: delta = abs(0.01 − 0.01) = 0 (directional target == current)
+        self.assertEqual(long_calls[0]["planned_delta_qty"], Decimal("0"))
+        # Phase 3: delta = abs(0.01 − 0) = 0.01 (close entire position)
+        self.assertEqual(long_calls[-1]["planned_delta_qty"], Decimal("0.01"))
+
+    def test_stale_short_close_recomputes_expectancy_with_exit_delta(self) -> None:
+        """When a stale short is closed, Phase 3 should recompute the
+        expectancy with the exit delta (buy to cover)."""
+        calls: list[dict] = []
+
+        def tracking_resolver(*, leg: str, planned_delta_qty: Decimal, **_: object) -> IndependentBookExpectancy:
+            calls.append({"leg": leg, "planned_delta_qty": planned_delta_qty})
+            return IndependentBookExpectancy(
+                leg=leg,
+                expected_signal_edge_bps=8.0,
+                expected_slippage_bps=1.0,
+                expected_cost_bps=4.0,
+                expected_net_edge_bps=4.0 if leg == "short" else -3.0,
+            )
+
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_short_entry_threshold=0.60,
+            strategy_hedge_independent_short_close_threshold=0.50,
+            strategy_hedge_independent_max_thesis_age_seconds=1800,
+        )
+        context = make_context(
+            current_position_qty=-0.01,
+            current_short_position_qty=0.01,
+            product_type="derivatives",
+            current_exposure_side="short",
+            current_short_leg_opened_seconds_ago=3600,
+        )
+        baseline = make_baseline(
+            direction_bias="short",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.30,
+                "trend_alpha": 0.24,
+                "microstructure_alpha": 0.10,
+                "liquidity_scale": 0.92,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.22})
+
+        result = evaluate_independent_books(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=-0.15, confidence=0.76),
+            directional_target_qty=Decimal("-0.01"),
+            target_leverage=1.0,
+            signal_edge_bps=8.0,
+            expected_cost_bps=4.0,
+            expected_net_edge_bps=4.0,
+            execution_leg_family="independent",
+            scorer=lambda *, leg, baseline, ai_assessment: 0.58 if leg == "short" else 0.08,
+            expectancy_resolver=tracking_resolver,
+        )
+
+        self.assertEqual(result.short_book.book_action, "close_stale_thesis")
+        short_calls = [c for c in calls if c["leg"] == "short"]
+        self.assertGreaterEqual(len(short_calls), 2, "Phase 3 recompute missing for stale short")
+        # Phase 1: delta = abs(0.01 − 0.01) = 0 (directional target == current)
+        self.assertEqual(short_calls[0]["planned_delta_qty"], Decimal("0"))
+        # Phase 3: delta = abs(0.01 − 0) = 0.01 (close entire position)
+        self.assertEqual(short_calls[-1]["planned_delta_qty"], Decimal("0.01"))
+
 
 if __name__ == "__main__":
     unittest.main()

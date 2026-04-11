@@ -13,6 +13,9 @@ parallel_fetch；如果每次调用创建 10 worker 的新池，7 个 panel 同�
 
 嵌套检测：parallel_fetch 的 worker 线程内再次调用 parallel_fetch 时，
 降级为串行执行，避免共享池内自身排队导致的吞吐倒退或饥饿。
+
+异常安全：某个 future.result() 抛异常时，cancel 尚未启动的 pending
+futures、等待已在运行的 futures 收敛，确保不会有残留任务占用共享池。
 """
 from __future__ import annotations
 
@@ -31,6 +34,9 @@ _executor_lock = threading.Lock()
 
 # ── 嵌套检测 ────────────────────────────────────────────────────
 _nesting_guard: threading.local = threading.local()
+
+# ── 异常路径 drain 超时 ─────────────────────────────────────────
+_DRAIN_TIMEOUT_SECONDS = 30
 
 
 def _get_shared_executor() -> ThreadPoolExecutor:
@@ -60,6 +66,9 @@ def parallel_fetch(callables: dict[str, Callable[[], Any]], *, max_workers: int 
     嵌套检测：如果当前线程已在 parallel_fetch worker 内（例如某个
     panel 的 build_* 方法内又调了 parallel_fetch），自动降级为串行，
     防止共享池饥饿。
+
+    异常安全：某个 future 失败时 cancel 同批 pending futures、drain
+    运行中 futures 再重抛，避免残留任务占满共享池。
     """
     if not callables:
         return {}
@@ -92,9 +101,23 @@ def parallel_fetch(callables: dict[str, Callable[[], Any]], *, max_workers: int 
     executor = _get_shared_executor()
     results: dict[str, Any] = {}
     futures = {executor.submit(_timed, name, fn): name for name, fn in callables.items()}
-    for future in futures:
-        name = futures[future]
-        results[name] = future.result()
+    try:
+        for future in futures:
+            name = futures[future]
+            results[name] = future.result()
+    except BaseException:
+        # Cancel pending futures to free shared pool capacity.
+        for f in futures:
+            f.cancel()
+        # Drain running tasks so they release their worker slot
+        # before the exception propagates to the caller.
+        for f in futures:
+            if not f.cancelled():
+                try:
+                    f.result(timeout=_DRAIN_TIMEOUT_SECONDS)
+                except Exception:
+                    pass
+        raise
 
     wall_elapsed = _time.monotonic() - wall_start
     if wall_elapsed > 2.0:

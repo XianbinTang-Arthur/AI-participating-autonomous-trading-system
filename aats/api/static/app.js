@@ -19,6 +19,7 @@ import {
 // --- 领域 action handler ---
 import { createAdminActions } from "./modules/actions/admin-actions.js";
 import { createExecutionActionHandlers } from "./modules/actions/execution-actions.js";
+import { createRdpActionHandlers } from "./modules/actions/rdp-actions.js";
 import { createRiskActionHandlers } from "./modules/actions/risk-actions.js";
 
 // --- 应用层（流程 / 状态 / 渲染壳） ---
@@ -211,6 +212,13 @@ const adminActions = createAdminActions({
   state,
 });
 const adminActionHandlers = adminActions.actionHandlers;
+const rdpActionHandlers = createRdpActionHandlers({
+  beginAction,
+  renderBanners,
+  refreshDashboard,
+  requestJson,
+  state,
+});
 
 init();
 
@@ -419,6 +427,7 @@ function renderActiveView() {
         session: state.data.session || {},
         aiRuntime: state.data.aiRuntime || {},
         summary: state.data.aiConfigModel || {},
+        rdpControl: state.data.rdpControl || {},
         error: state.errors.aiConfigModel || null,
         uiState: state.ui.aiConfig,
       }),
@@ -609,7 +618,7 @@ async function dispatchAction(action, value, target = null) {
   if (localHandler) {
     return localHandler(value, target);
   }
-  const domainHandler = riskActionHandlers[action] || executionActionHandlers[action] || adminActionHandlers[action];
+  const domainHandler = riskActionHandlers[action] || executionActionHandlers[action] || adminActionHandlers[action] || rdpActionHandlers[action];
   if (domainHandler) {
     return domainHandler(value, target);
   }
