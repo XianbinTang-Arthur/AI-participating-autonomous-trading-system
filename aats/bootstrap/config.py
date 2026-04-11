@@ -1234,15 +1234,15 @@ def _auto_seed_operator_admin_if_configured(storage: StorageBackends) -> bool:
             role="admin",
             enabled=True,
         )
-        _log.info(
-            "auto_seeded_operator_admin",
+        log_event(
+            _log, "auto_seeded_operator_admin",
             username=created.username,
             role=created.role,
         )
         return True
     except ValueError as exc:
         # username_conflict → 用户已存在，说明之前建过但可能被 disabled
-        _log.warning("auto_seed_operator_admin_skipped", reason=str(exc))
+        log_event(_log, "auto_seed_operator_admin_skipped", level="warning", reason=str(exc))
         return False
 
 
