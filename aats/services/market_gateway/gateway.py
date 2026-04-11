@@ -450,10 +450,16 @@ class MarketDataGateway:
 
     async def _publish_snapshot(self, snapshot: MarketSnapshot) -> None:
         received_at = utc_now()
+        # 先更新本地快照缓存，确保 latest_price() 等本地查询立即可用。
         self._latest_snapshots[snapshot.symbol] = snapshot
+        # NATS 发布：可能抛 TimeoutError / ConnectionError。
+        await self.publisher.publish(snapshot)
+        # ── 仅在发布成功后才标记"已收到"──
+        # _latest_received_at 驱动 is_fresh() → 驱动 REST fallback 的触发条件。
+        # 如果在 publish 之前就更新，NATS 不可用时 REST fallback 也不会启动，
+        # 形成静默数据中断：WebSocket 在收、NATS 在丢、REST 以为没问题。
         self._latest_received_at[snapshot.symbol] = received_at
         self._last_publish_ts = received_at
-        await self.publisher.publish(snapshot)
 
     def _tracked_symbols(self) -> tuple[str, ...]:
         symbols = tuple(dict.fromkeys(symbol for symbol in self.settings.expanded_allowed_symbols() if symbol))

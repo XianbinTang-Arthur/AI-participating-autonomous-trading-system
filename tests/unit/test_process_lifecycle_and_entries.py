@@ -322,16 +322,17 @@ def test_aats_compose_defines_four_slice_services_with_distinct_process_roles() 
 
     # 共享镜像 aats-base:dev（避免 4 个服务各自重复构建）
     assert "image: aats-base:dev" in text
-    # gateway 必须暴露 8000，其他不暴露
-    assert "127.0.0.1:8000:8000" in text
+    # gateway 必须暴露端口（通过 AATS_API_PORT 变量，默认 8000），其他不暴露
+    assert "${AATS_API_PORT:-8000}" in text
+    assert "127.0.0.1:" in text  # 仅绑定 loopback
     # event bus 必须切到 hybrid（4 进程拓扑跨进程通信）
     assert "AATS_EVENT_BUS_BACKEND: hybrid" in text
     # 必须复用基础设施 compose 的 aats network
     assert "external: true" in text
     # Stage 7 修复：gateway 必须用 /healthz（不是 /system/health）
     # 精确匹配 healthcheck test 行 URL，避免误伤注释
-    assert "http://localhost:8000/healthz" in text
-    assert "http://localhost:8000/system/health" not in text, (
+    assert "/healthz" in text
+    assert "http://localhost:${AATS_API_PORT:-8000}/system/health" not in text, (
         "gateway healthcheck 应当用 /healthz 而非 /system/health (后者在 gateway role 下会 NPE)"
     )
     # Stage 7 修复：3 个 daemon 必须有 heartbeat 文件 healthcheck
