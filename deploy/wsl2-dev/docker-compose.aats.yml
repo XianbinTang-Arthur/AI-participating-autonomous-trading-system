@@ -200,3 +200,33 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # rdp-daemon — RDP 任务队列轮询执行器
+  # 桥接 gateway UI 的按钮操作和实际的 data_maintenance / research_cycle 执行。
+  # gateway 把 pending 任务写入 governance.rdp_task_queue 表，daemon 轮询领取
+  # 并在容器内执行 workflow（DB 操作 + OKX API 调用，不需要宿主机访问）。
+  # 随 docker compose up/down 自动启停，无需手动维护。
+  # ---------------------------------------------------------------------------
+  aats-rdp-daemon:
+    <<: [*aats-build, *aats-common-resources]
+    container_name: aats-rdp-daemon
+    restart: unless-stopped
+    environment:
+      <<: *aats-common-env
+      AATS_PROCESS_ROLE: rdp-daemon
+      # daemon 通过 AATS_ACTIVE_PARAMETER_DB_URL 连接 governance schema
+      # （已在 x-aats-common-env 中定义，指向 aats_research）
+      RDP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
+    command: ["python", "scripts/rdp_task_daemon.py", "--poll-interval", "10"]
+    networks:
+      - aats
+    depends_on:
+      aats-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import os,sys; sys.exit(0 if os.path.exists(\"/tmp/rdp_daemon_alive\") else 1)'"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

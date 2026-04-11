@@ -156,12 +156,20 @@ def main() -> int:
             log.info("No pending tasks.")
         return 0
 
+    heartbeat_path = Path("/tmp/rdp_daemon_alive")
+
     while not _shutdown:
         try:
             processed = process_one_task()
         except Exception:
             log.exception("Error processing task")
             processed = False
+
+        # touch heartbeat 供 Docker healthcheck 使用
+        try:
+            heartbeat_path.touch()
+        except OSError:
+            pass
 
         if not processed and not _shutdown:
             time.sleep(args.poll_interval)
