@@ -6,7 +6,7 @@ import contextlib
 from collections.abc import AsyncIterator, Iterator
 from typing import Any
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -52,18 +52,15 @@ def get_session(settings: ResearchPlatformSettings | None = None) -> Iterator[Se
 
 
 def run_migrations(settings: ResearchPlatformSettings | None = None) -> None:
-    """Execute all research migration SQL files in order."""
-    import pathlib
+    """使用 ORM create_all() 初始化研究数据库全部 schema 和表。
 
-    migration_dir = pathlib.Path(__file__).resolve().parent.parent.parent / "migrations" / "research"
+    替代旧的 migrations/research/*.sql 逐文件执行方式。
+    幂等——已存在的 schema/表不会被破坏。
+    """
+    from aats.data_platform.rdp_models import create_rdp_schema
+
     engine = get_engine(settings)
-
-    sql_files = sorted(migration_dir.glob("*.sql"))
-    with engine.connect() as conn:
-        for sql_file in sql_files:
-            sql = sql_file.read_text(encoding="utf-8")
-            conn.execute(text(sql))
-        conn.commit()
+    create_rdp_schema(engine)
 
 
 def reset_engine() -> None:
