@@ -3,6 +3,8 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+from sqlalchemy.exc import OperationalError as SAOperationalError
+
 from aats.bootstrap.config import build_runtime
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
@@ -299,6 +301,8 @@ class TestTask72A1DerivativesStartupGuards(unittest.IsolatedAsyncioTestCase):
                 with patch("aats.bootstrap.config.OKXAccountService", _FakePositionModeAccountService):
                     with self.assertRaisesRegex(ValueError, "derivatives_exchange_runtime_position_mode_mismatch"):
                         await build_runtime(settings)
+        except SAOperationalError:
+            self.skipTest("Postgres 不可达")
         finally:
             _FakePositionModeAccountService.SNAPSHOT = None
 
@@ -341,6 +345,8 @@ class TestTask72A1DerivativesStartupGuards(unittest.IsolatedAsyncioTestCase):
                 with patch("aats.bootstrap.config.OKXAccountService", _FakePositionModeAccountService):
                     with self.assertRaisesRegex(ValueError, "derivatives_exchange_runtime_requires_exchange_position_mode"):
                         await build_runtime(settings)
+        except SAOperationalError:
+            self.skipTest("Postgres 不可达")
         finally:
             _FakePositionModeAccountService.SNAPSHOT = None
 

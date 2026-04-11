@@ -1,10 +1,13 @@
 # =============================================================================
-# AATS Monolith — OKX 衍生品实盘 override
+# AATS Monolith — OKX 衍生品实盘 override（备用模式）
 #
 # 单进程 monolith 模式：将 gateway/market/decision/execution 四个 slice
-# 合并到同一个进程内运行。适用于 derivatives_live + hedge 语义——
-# hedge 模式需要 decision slice 的 risk_engine.evaluate_leg_order
-# 与 execution slice 共处同进程，4 进程拓扑尚不支持。
+# 合并到同一个进程内运行。
+#
+# 注意：Stage 4 完成后，4 进程模式已支持 derivatives + hedge。
+# 推荐使用 docker-compose.aats.derivatives-live.yml（4 进程模式），
+# 本文件仅作为回退备选。4 进程模式下 execution slice 本地构造
+# RiskEngine 实例提供 leg_risk_evaluator，无跨进程依赖。
 #
 # 启动方式（在 deploy/wsl2-dev/ 目录下）：
 #   docker compose \

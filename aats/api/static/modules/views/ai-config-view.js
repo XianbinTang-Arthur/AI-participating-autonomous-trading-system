@@ -241,7 +241,7 @@ function renderProfileControlModeActions({
 // ── RDP 控制卡片 ──────────────────────────────────────────────────
 
 const WORKFLOW_LABELS = {
-  data_maintenance: "数据采���",
+  data_maintenance: "数据采集",
   research_cycle: "研究管线",
 };
 

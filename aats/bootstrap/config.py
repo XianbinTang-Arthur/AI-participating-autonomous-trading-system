@@ -511,6 +511,12 @@ class ApplicationRuntime:
     audit_service: DecisionAuditService | None = None
     # P3-1 / P3-2：数据库定期清理。清理已发布 outbox 行 + 归档表老化行。
     housekeeping: "DatabaseHousekeeping | None" = None
+    # Stage 4：4 进程 execution role 下本地构造的 RiskEngine，仅用于
+    # OrderManager.leg_risk_evaluator。monolith 下为 None（复用 decision
+    # slice 的 risk_engine）。_bootstrap_derivatives_live_runtime_guards
+    # 会向此实例注入 live_runtime_guard_provider / trial_guard_provider /
+    # recovery_status_provider 三个安全信号 provider。
+    execution_leg_risk_engine: RiskEngine | None = None
     # Slice 4-proc operator command proxy：gateway 端 client 与 execution 端
     # worker 的 sidecar 装配字段。monolith / market / decision role 下均为
     # None。gateway 在 build_runtime 末尾装 client；execution 装 worker；
@@ -3052,10 +3058,10 @@ _SLICE_REQUIRED_ROLES: dict[str, frozenset[str | None]] = {
 #   "split_de"  — decision + execution 共享进程（未来 Stage 5 / 6）
 #   "4proc"     — gateway / market / decision / execution 各自独立
 #
-# 当前阻断关系：
-#   derivatives + hedge + 4proc-execution —— leg_risk_evaluator 需要
-#   decision slice 的 risk_engine.evaluate_leg_order，4 进程下 execution
-#   拿不到。Stage 4 跨进程 risk 广播完成后移除此限制。
+# 已解除的阻断关系（Stage 4 完成）：
+#   derivatives + hedge + 4proc-execution —— execution slice 现在本地构造
+#   RiskEngine 实例（slices.execution_leg_risk_engine），所有依赖来自
+#   shared slice / storage 层，无需 decision 共处同进程。
 # =============================================================================
 
 # 拓扑类型标识（用于能力矩阵查询）
@@ -3080,19 +3086,11 @@ _TOPOLOGY_CAPABILITY_RULES: list[
         str,                                           # human_message
     ]
 ] = [
-    (
-        "hedge_requires_colocated_decision_execution",
-        lambda settings, topo: (
-            settings.trading_product_type == "derivatives"
-            and getattr(settings, "derivatives_position_mode", "net") == "hedge"
-            and topo == _TOPOLOGY_4PROC
-        ),
-        "topology_blocked_hedge_requires_monolith",
-        "derivatives + hedge 模式需要 decision 与 execution 共处同一进程。"
-        "当前 4 进程拓扑下 execution 无法获取 decision slice 的 "
-        "risk_engine.evaluate_leg_order 作为 leg_risk_evaluator。"
-        "请使用 monolith 单进程模式，或等待 Stage 4 跨进程 risk 广播。",
-    ),
+    # hedge_requires_colocated_decision_execution 规则已移除（Stage 4 完成）：
+    # execution slice 现在在 4 进程模式下本地构造 RiskEngine 实例，
+    # 所有依赖（account_service、health_service、price_provider 等）均来自
+    # shared slice / storage 层，无需 decision slice 共处同进程。
+    # 详见 _build_execution_slice 的 _execution_local_risk_engine 构造逻辑。
 ]
 
 
@@ -3211,6 +3209,12 @@ class _RuntimeSlices:
     execution_order_service: Any = None
     order_manager: Any = None
     execution_command_processor: Any = None
+    # Stage 4：4 进程 execution role 下本地构造的 RiskEngine，仅用于
+    # OrderManager.leg_risk_evaluator。monolith / decision role 下为 None
+    # （monolith 复用 decision slice 的 risk_engine）。
+    # _bootstrap_derivatives_live_runtime_guards 需要访问此实例以注入
+    # live_runtime_guard_provider / trial_guard_provider / recovery_status_provider。
+    execution_leg_risk_engine: Any = None
 
     # ---- portfolio ----
     portfolio_state: Any = None
@@ -3630,6 +3634,7 @@ def _build_execution_slice(
     *,
     runtime_settings: AATSSettings,
     storage: StorageBackends,
+    runtime_layering: RuntimeLayering,
     slices: _RuntimeSlices,
     effective_process_role: str | None,
 ) -> None:
@@ -3637,17 +3642,15 @@ def _build_execution_slice(
 
     跨 slice 依赖（Stage 3 process_role 门控时必须保证已构造）：
       - shared slice: bus、market_gateway、account_service、fee_resolver、
-        execution_adapter、kill_switch、metrics
-      - decision slice: risk_engine（仅在 derivatives + hedge 模式下作为
-        leg_risk_evaluator 用；其他模式可为 None）
+        execution_adapter、kill_switch、health_service、mode_controller、metrics
 
-    因此必须在 Stage 3 4-进程拓扑里：
-      gateway/market 进程跳过本 slice；
-      decision 进程跳过本 slice；
-      execution 进程在 derivatives+hedge 模式下需要 decision slice 的 risk_engine
-      作为 leg_risk_evaluator。此约束已由 _validate_topology_capability() 的
-      ``hedge_requires_colocated_decision_execution`` 规则统一校验，不再在 slice
-      builder 内重复 fail-fast。
+    derivatives + hedge 模式下的 leg_risk_evaluator：
+      - monolith: 直接复用 decision slice 构造的 slices.risk_engine
+      - 4 进程 execution role: 本地构造一个 RiskEngine 实例，所有依赖
+        （account_service、health_service、price_provider、obligation_repo 等）
+        均来自 shared slice / storage 层，无跨进程调用。本地实例使用
+        execution 进程自身的 account_service，数据比 decision 进程更新鲜
+        （已反映最近的成交 / 保证金变化），风控评估更准确。
 
     Stage 3 process_role 门控：仅 None / monolith / execution 时构造。
     """
@@ -3730,6 +3733,43 @@ def _build_execution_slice(
             execution_order_repo=storage.execution_order_repo,
             execution_order_history_repo=storage.execution_order_history_repo,
         )
+    # ── leg_risk_evaluator 解析 ────────────────────────────────────────
+    # derivatives + hedge 模式下 OrderManager 需要 risk_engine.evaluate_leg_order
+    # 作为下单前最后风控关卡。
+    #   - monolith / None: decision slice 已构造 slices.risk_engine，直接复用。
+    #   - 4 进程 execution role: decision slice 未构造（门控跳过），在此本地构造
+    #     一个 RiskEngine 实例。所有依赖均来自 shared slice / storage 层，
+    #     无跨进程调用。evaluate_leg_order 不累积内部 mutable state，
+    #     给定相同依赖注入，两个实例行为一致。
+    _leg_risk_evaluator = None
+    if (
+        runtime_settings.trading_product_type == "derivatives"
+        and runtime_settings.derivatives_position_mode == "hedge"
+    ):
+        if slices.risk_engine is not None:
+            # monolith 路径：直接复用 decision slice 的 risk_engine
+            _leg_risk_evaluator = slices.risk_engine.evaluate_leg_order
+        else:
+            # 4 进程 execution 路径：本地构造 RiskEngine，存入 slices 以便
+            # _bootstrap_derivatives_live_runtime_guards 后置注入
+            # live_runtime_guard_provider / trial_guard_provider /
+            # recovery_status_provider 三个安全信号 provider。
+            slices.execution_leg_risk_engine = RiskEngine(
+                settings=runtime_settings,
+                account_service=slices.account_service,
+                health_service=slices.health_service,
+                trigger_policy=DecisionTriggerPolicy(settings=runtime_settings),
+                price_provider=slices.market_gateway.latest_price,
+                mode_controller=slices.mode_controller,
+                obligation_repo=storage.obligation_repo,
+                environment_capabilities=runtime_layering.environment_capabilities,
+                policy_profile=runtime_layering.policy_profile,
+                fee_resolver=slices.fee_resolver,
+                reconciliation_repo=storage.reconciliation_repo,
+                obligation_cache=slices.obligation_hot_state_cache,
+            )
+            _leg_risk_evaluator = slices.execution_leg_risk_engine.evaluate_leg_order
+
     slices.order_manager = OrderManager(
         settings=runtime_settings,
         bus=slices.bus,
@@ -3744,15 +3784,7 @@ def _build_execution_slice(
         shadow_execution_order_history_repo=storage.execution_order_history_repo,
         shadow_execution_fill_repo=storage.execution_fill_repo_v2,
         shadow_ledger_mirror_service=storage.phase1_ledger_mirror_service,
-        leg_risk_evaluator=(
-            slices.risk_engine.evaluate_leg_order
-            if (
-                slices.risk_engine is not None
-                and runtime_settings.trading_product_type == "derivatives"
-                and runtime_settings.derivatives_position_mode == "hedge"
-            )
-            else None
-        ),
+        leg_risk_evaluator=_leg_risk_evaluator,
         strategy_runtime_repo=storage.strategy_runtime_repo,
         kill_switch=slices.kill_switch,
     )
@@ -4161,8 +4193,13 @@ def _apply_post_init_guards(
     )
     runtime.derivatives_live_guard_service.evaluate_now()
     runtime.health_service.runtime_guard_provider = runtime.derivatives_live_guard_service
-    if runtime.risk_engine is not None:
-        runtime.risk_engine.live_runtime_guard_provider = runtime.derivatives_live_guard_service
+    # 为 decision slice 的 risk_engine 和/或 execution slice 的本地 risk_engine
+    # 注入实盘安全信号 provider。monolith 下两者是同一个实例（risk_engine）；
+    # 4 进程下 risk_engine 可能为 None（decision role 不在本进程），
+    # 但 execution_leg_risk_engine 可能非 None（execution role 本地构造）。
+    for _re in (runtime.risk_engine, getattr(runtime, "execution_leg_risk_engine", None)):
+        if _re is not None:
+            _re.live_runtime_guard_provider = runtime.derivatives_live_guard_service
     runtime.trial_guard_service = ForwardTrialGuardService(
         settings=runtime.settings,
         kill_switch=runtime.kill_switch,
@@ -4172,11 +4209,12 @@ def _apply_post_init_guards(
         anomaly_provider=lambda limit: OperatorQueryService(runtime).execution_anomaly_report(limit=limit),
     )
     runtime.trial_guard_service.evaluate_now()
-    if runtime.risk_engine is not None:
-        runtime.risk_engine.trial_guard_provider = runtime.trial_guard_service
-        runtime.risk_engine.recovery_status_provider = lambda: RecoveryPostureEvaluator(runtime).finalize_status(
-            base_status=runtime.recovery_status
-        )
+    for _re in (runtime.risk_engine, getattr(runtime, "execution_leg_risk_engine", None)):
+        if _re is not None:
+            _re.trial_guard_provider = runtime.trial_guard_service
+            _re.recovery_status_provider = lambda: RecoveryPostureEvaluator(runtime).finalize_status(
+                base_status=runtime.recovery_status
+            )
     if runtime.decision_engine is not None:
         runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
 
@@ -4616,6 +4654,7 @@ async def build_runtime(
     _build_execution_slice(
         runtime_settings=runtime_settings,
         storage=storage,
+        runtime_layering=runtime_layering,
         slices=slices,
         effective_process_role=effective_process_role,
     )
@@ -4898,6 +4937,7 @@ async def build_runtime(
         funding_fee_sync_service=funding_fee_sync_service,
         audit_service=slices.audit_service,
         housekeeping=slices.housekeeping,
+        execution_leg_risk_engine=slices.execution_leg_risk_engine,
         process_role=effective_process_role,
     )
     if runtime.sleeve_pnl_projection_service is not None:

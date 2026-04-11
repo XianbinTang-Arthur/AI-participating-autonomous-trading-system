@@ -11,7 +11,7 @@
 #   4. 幂等：重复执行不会产生副作用
 #
 # 用法：
-#   ./scripts/deploy.sh                                          # 默认 derivatives-live-monolith
+#   ./scripts/deploy.sh                                          # 默认 derivatives-live（4 进程）
 #   ./scripts/deploy.sh --profile spot-live                      # 指定 profile
 #   ./scripts/deploy.sh --commit "修复策略页布局"                  # 先提交再部署
 #   ./scripts/deploy.sh --no-cache                               # 不走 docker 缓存
@@ -24,7 +24,8 @@
 #   spot-live                  现货实盘（4 进程）
 #   derivatives                衍生品模拟盘（4 进程）
 #   derivatives-live           衍生品实盘（4 进程）
-#   derivatives-live-monolith  衍生品实盘（单进程，hedge 模式）  ← 默认
+#   derivatives-live           衍生品实盘（4 进程）              ← 默认
+#   derivatives-live-monolith  衍生品实盘（单进程，备用回退）
 #
 # 退出码：
 #   0 = 部署成功
@@ -56,7 +57,7 @@ DISTRO="${AATS_WSL2_DISTRO:-Ubuntu}"
 WSL_PROJECT="${AATS_WSL2_PROJECT:-\$HOME/aats}"
 
 # ─── 参数解析 ───────────────────────────────────────────────────────────
-PROFILE="derivatives-live-monolith"
+PROFILE="derivatives-live"
 COMMIT_MSG=""
 NO_CACHE=""
 SKIP_SYNC=false

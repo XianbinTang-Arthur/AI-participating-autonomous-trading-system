@@ -348,31 +348,35 @@ class TestBuildRuntimeSliceGating(unittest.IsolatedAsyncioTestCase):
 
 
 class TestTopologyCapabilityMatrix(unittest.IsolatedAsyncioTestCase):
-    """_validate_topology_capability 在 build_runtime 启动早期拦截
-    不兼容的 profile 语义 × 拓扑组合。derivatives+hedge 在
-    execution-only / 4proc 下必须明确报错，monolith 下正常通过。
+    """Stage 4 完成后，derivatives+hedge 在 4 进程 execution role 下
+    已支持本地构造 RiskEngine，不再需要 monolith。
+    验证两种拓扑都能正常装配且 leg_risk_evaluator 正确接线。
     """
 
-    async def test_execution_role_with_derivatives_hedge_raises(self) -> None:
-        with self.assertRaisesRegex(
-            RuntimeError,
-            "topology_blocked_hedge_requires_monolith",
-        ):
-            await build_runtime(
-                _paper_settings(
-                    trading_product_type="derivatives",
-                    margin_mode="cross",
-                    derivatives_position_mode="hedge",
-                    default_symbol="BTC-USDT-SWAP",
-                    allowed_symbols=("BTC-USDT-SWAP",),
-                ),
-                process_role=PROCESS_ROLE_EXECUTION,
-            )
+    async def test_execution_role_with_derivatives_hedge_works(self) -> None:
+        """Stage 4：4 进程 execution role 下 derivatives+hedge 应当
+        正常装配——execution slice 本地构造 RiskEngine，
+        leg_risk_evaluator 不为 None。"""
+        runtime = await build_runtime(
+            _paper_settings(
+                trading_product_type="derivatives",
+                margin_mode="cross",
+                derivatives_position_mode="hedge",
+                default_symbol="BTC-USDT-SWAP",
+                allowed_symbols=("BTC-USDT-SWAP",),
+            ),
+            process_role=PROCESS_ROLE_EXECUTION,
+        )
+        assert runtime.order_manager is not None
+        # execution role 下 decision slice 未构造，slices.risk_engine 为 None
+        assert runtime.risk_engine is None
+        # 但 leg_risk_evaluator 应当由本地构造的 RiskEngine 提供，不为 None
+        assert runtime.order_manager.leg_risk_evaluator is not None
 
     async def test_monolith_with_derivatives_hedge_works(self) -> None:
-        """同样的 derivatives+hedge 配置在 monolith 下应当正常装配 ——
-        因为 decision slice 和 execution slice 在同一个进程里，
-        risk_engine 在内存中可见。"""
+        """monolith 下 derivatives+hedge 应当正常装配——
+        decision slice 和 execution slice 在同一个进程里，
+        risk_engine 在内存中可见，leg_risk_evaluator 复用 decision 的实例。"""
         runtime = await build_runtime(
             _paper_settings(
                 trading_product_type="derivatives",
@@ -385,6 +389,8 @@ class TestTopologyCapabilityMatrix(unittest.IsolatedAsyncioTestCase):
         )
         assert runtime.risk_engine is not None
         assert runtime.order_manager is not None
+        # monolith 路径应复用 decision slice 的 risk_engine
+        assert runtime.order_manager.leg_risk_evaluator is not None
 
 
 if __name__ == "__main__":
