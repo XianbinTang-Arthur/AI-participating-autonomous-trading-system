@@ -891,6 +891,15 @@ def evaluate_independent_books(
     # side so that downstream execution planning and net-edge
     # reporting reflect reality.
     _EXIT_BOOK_ACTIONS = {"de_risk", "close_failed_thesis", "close_stale_thesis"}
+    # P2 fix: book_action → execution_mode 映射。退出/降风险使用各自的
+    # execution_mode 估算成本，而非 entry mode。例如 derivatives_live 中
+    # entry=passive_first 但 close_failed=aggressive_bounded_taker，
+    # 用 entry mode 会低估退出成本约 3-5 bps。
+    _EXIT_ACTION_MODE_FIELDS: dict[str, str] = {
+        "de_risk": "strategy_hedge_independent_de_risk_execution_mode",
+        "close_failed_thesis": "strategy_hedge_independent_close_failed_thesis_execution_mode",
+        "close_stale_thesis": "strategy_hedge_independent_close_stale_execution_mode",
+    }
     for leg_label, book, current_qty, exit_side in (
         ("long", long_book, long_current_qty, "sell"),
         ("short", short_book, short_current_qty, "buy"),
@@ -914,6 +923,9 @@ def evaluate_independent_books(
             target_qty=book.target_qty,
             latest_market_snapshot=latest_market_snapshot,
         )
+        # 根据退出动作获取对应的 execution_mode settings 字段
+        _exit_mode_field = _EXIT_ACTION_MODE_FIELDS.get(book.book_action)
+        _exit_mode = str(getattr(settings, _exit_mode_field)) if _exit_mode_field else None
         exit_expectancy = _resolve_independent_book_expectancy(
             settings=settings,
             context=context,
@@ -927,6 +939,7 @@ def evaluate_independent_books(
             planned_delta_qty=exit_delta_qty,
             projected_notional=exit_notional,
             execution_side=exit_side,
+            execution_mode_override=_exit_mode,
         )
         if exit_expectancy is not None:
             updated = _dc_replace(book, expectancy=exit_expectancy)
@@ -949,6 +962,71 @@ def evaluate_independent_books(
                 long_book = updated
             else:
                 short_book = updated
+
+    # ── Phase 3b: recompute expectancy for scale_in actions ─────
+    # scale_in uses the same execution side as entry (buy for long,
+    # sell for short) but a different execution_mode.  Phase 1 used
+    # entry mode; if scale_in mode differs we need to recompute so
+    # that cost estimates match the actual execution strategy.
+    for leg_label, book, current_qty, scale_side in (
+        ("long", long_book, long_current_qty, "buy"),
+        ("short", short_book, short_current_qty, "sell"),
+    ):
+        if book.book_action != "scale_in":
+            continue
+        if current_qty <= EPSILON_DECIMAL_12:
+            continue
+        scale_in_mode = str(settings.strategy_hedge_independent_scale_in_execution_mode)
+        entry_mode = str(settings.strategy_hedge_independent_entry_execution_mode)
+        if scale_in_mode == entry_mode:
+            # mode 相同则 Phase 1 的 entry-side 估算已正确，跳过
+            continue
+        scale_delta_qty = _planned_leg_delta_qty(
+            current_qty=current_qty, target_qty=book.target_qty,
+        )
+        if scale_delta_qty <= EPSILON_DECIMAL_12:
+            continue
+        scale_notional = _planned_leg_notional(
+            current_qty=current_qty,
+            current_notional=to_decimal(
+                context.current_long_position_notional
+                if leg_label == "long"
+                else context.current_short_position_notional
+            ),
+            target_qty=book.target_qty,
+            latest_market_snapshot=latest_market_snapshot,
+        )
+        scale_expectancy = _resolve_independent_book_expectancy(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            runtime_margin_mode=resolved_margin_mode,
+            leg=leg_label,
+            trade_cost_service=cost_service,
+            expectancy_resolver=expectancy_resolver,
+            latest_market_snapshot=latest_market_snapshot,
+            planned_delta_qty=scale_delta_qty,
+            projected_notional=scale_notional,
+            execution_side=scale_side,
+            execution_mode_override=scale_in_mode,
+        )
+        if scale_expectancy is not None:
+            updated = _dc_replace(book, expectancy=scale_expectancy)
+            scale_policy = _independent_execution_policy(
+                settings=settings, book=updated,
+            )
+            if scale_policy is not None:
+                updated = _dc_replace(
+                    updated,
+                    execution_policy=scale_policy,
+                    policy_reason=scale_policy.policy_reason,
+                )
+            if leg_label == "long":
+                long_book = updated
+            else:
+                short_book = updated
+
     long_target_qty = long_book.target_qty
     short_target_qty = short_book.target_qty
     final_target_qty = long_target_qty - short_target_qty
@@ -1520,9 +1598,14 @@ def _resolve_independent_book_expectancy(
     planned_delta_qty: Decimal = Decimal("0"),
     projected_notional: Decimal | None = None,
     execution_side: str = "",
+    execution_mode_override: str | None = None,
 ) -> IndependentBookExpectancy | None:
     if expectancy_resolver is not None:
         try:
+            # P3 fix: 将 execution_side 和 execution_mode_override 作为
+            # kwargs 传入自定义 resolver，确保外部 resolver 也能感知
+            # action-aware 的执行方向与模式。现有 resolver 多数接受 **kwargs，
+            # 不会因多出的参数而中断。
             expectancy = expectancy_resolver(
                 settings=settings,
                 context=context,
@@ -1533,6 +1616,8 @@ def _resolve_independent_book_expectancy(
                 latest_market_snapshot=latest_market_snapshot,
                 planned_delta_qty=planned_delta_qty,
                 projected_notional=projected_notional,
+                execution_side=execution_side,
+                execution_mode_override=execution_mode_override,
             )
             if expectancy is None:
                 return None
@@ -1556,6 +1641,7 @@ def _resolve_independent_book_expectancy(
             planned_delta_qty=planned_delta_qty,
             projected_notional=projected_notional,
             execution_side=execution_side,
+            execution_mode_override=execution_mode_override,
         )
     except Exception:
         return None
@@ -1574,6 +1660,7 @@ def _compute_independent_book_expectancy(
     latest_market_snapshot: MarketSnapshot | None,
     planned_delta_qty: Decimal,
     projected_notional: Decimal | None,
+    execution_mode_override: str | None = None,
 ) -> IndependentBookExpectancy:
     expected_signal_edge_bps = _independent_signal_edge_bps(
         settings=settings,
@@ -1591,11 +1678,18 @@ def _compute_independent_book_expectancy(
     # 当 passive_first/bounded_limit 启用时，实际执行走 limit IOC，
     # 费率主要是 maker fee；硬编码 taker 会多估 ~3 bps，导致
     # 安全门控（safe_net_edge）误判本可盈利的入场信号。
-    _entry_mode = str(settings.strategy_hedge_independent_entry_execution_mode)
-    if _entry_mode in ("passive_first", "bounded_limit"):
+    # P2 fix: execution_mode_override 由 Phase 3 exit-side 调用方传入，
+    # 确保 de_risk/close_failed/close_stale 使用各自的 execution_mode
+    # 而非 entry mode（它们的执行策略可能截然不同，如 taker vs passive_first）。
+    _effective_mode = str(
+        execution_mode_override
+        if execution_mode_override is not None
+        else settings.strategy_hedge_independent_entry_execution_mode
+    )
+    if _effective_mode in ("passive_first", "bounded_limit"):
         _estimate_style = "bounded_limit_ioc"
         _estimate_order_type = "limit"
-        _estimate_passive_bias = Decimal("0.7") if _entry_mode == "passive_first" else Decimal("0.5")
+        _estimate_passive_bias = Decimal("0.7") if _effective_mode == "passive_first" else Decimal("0.5")
     else:
         _estimate_style = "taker"
         _estimate_order_type = "market"

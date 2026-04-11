@@ -4,11 +4,12 @@ Phase 2 replay 以 Gold replay bars 为输入，逐 bar 构建上下文供策略
 本模块定义 replay 流程中所有共享的数据结构。
 
 Edge Contract（P0-3 统一语义）：
-    所有 family adapter 必须按以下 4 层分解输出 edge：
+    所有 family adapter 必须按以下 5 层分解输出 edge：
     - signal_edge_proxy_bps:   来自策略信号（score / momentum / trend / alpha）的机会代理
     - funding_adjustment_bps:  来自 funding rate 的附加调整
-    - cost_bps:               成本总计（taker_fee + slippage）
-    - expected_net_edge_bps:  = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+    - cost_bps:               成本总计（blended fee + slippage，费率按执行策略混合 maker/taker）
+    - noise_buffer_bps:       信号噪声缓冲（对齐生产端 strategy_edge_noise_buffer_bps）
+    - expected_net_edge_bps:  = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps - noise_buffer_bps
 
     内部估算方式可以不同，但输出语义必须统一。
 """
@@ -18,7 +19,7 @@ from __future__ import annotations
 import dataclasses as dc
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 
 # ---------------------------------------------------------------------------
@@ -49,26 +50,67 @@ class ReplayBar:
 class ReplayCostConfig:
     """可配置的交易成本模型。
 
-    默认值使用保守估计（OKX swap taker + 合理滑点），不再硬编码在 adapter 里。
+    默认值对齐生产 derivatives_live 配置（maker/taker 混合费率 + 合理滑点）。
     所有值单位为 bps（1 bps = 0.01%）。
 
     OKX 费率参考（2024/2025）：
     - Swap taker fee:  0.05% = 5 bps（普通用户），VIP 可低至 2-3 bps
-    - Spot taker fee:  0.10% = 10 bps（普通用户）
+    - Swap maker fee:  0.02% = 2 bps（普通用户）
     - 滑点:           因 symbol/流动性/仓位 而异，保守估计 2-3 bps
+
+    费率混合公式（完整对齐 fee_resolver.py:175-182）：
+    当 execution_style 为 limit 类型时，
+    maker_bias  = clamp(-maker_taker_bias, 0, 1)
+    maker_weight = clamp(0.15 + passive_bias * 0.45 + maker_bias * 0.20, 0, 0.80)
+    blended_fee  = taker * (1 - maker_weight) + maker * maker_weight
+
+    execution_style 名称映射：
+    - 生产 fee_resolver 原生识别: bounded_limit_ioc / maker / passive
+    - 策略层别名（执行层映射后走同一路径）: passive_first / bounded_limit
+    - taker 类: taker / bounded_taker_cap / exchange / market → 不混合
     """
     taker_fee_bps: float = 5.0       # OKX swap taker 0.05% = 5 bps
     slippage_bps: float = 2.0        # 保守滑点估计
+    maker_fee_bps: float = 2.0       # OKX swap maker 0.02% = 2 bps
+    execution_style: str = "passive_first"   # 对齐 strategy_hedge_independent_entry_execution_mode
+    passive_bias: float = 0.7        # passive_first 默认 0.7，bounded_limit 默认 0.5
+    maker_taker_bias: float = 0.0    # 生产默认 0；非零时偏移 maker_weight（fee_resolver.py:177）
+
+    # fee_resolver.py:175 原生识别的 limit 类 style + 策略层别名
+    _BLENDED_STYLES: ClassVar[frozenset[str]] = frozenset({
+        "bounded_limit_ioc", "maker", "passive",   # fee_resolver 原生
+        "passive_first", "bounded_limit",           # 策略层别名
+    })
+
+    @property
+    def blended_fee_bps(self) -> float:
+        """按执行策略计算的混合费率（bps）。
+
+        完整对齐 fee_resolver.py:175-182，包含 maker_taker_bias 项。
+        """
+        style = self.execution_style.lower()
+        if style in self._BLENDED_STYLES:
+            passive = min(max(self.passive_bias, 0.0), 1.0)
+            maker_bias = min(max(-self.maker_taker_bias, 0.0), 1.0)
+            maker_weight = min(max(0.15 + passive * 0.45 + maker_bias * 0.20, 0.0), 0.80)
+            return self.taker_fee_bps * (1.0 - maker_weight) + self.maker_fee_bps * maker_weight
+        return self.taker_fee_bps
 
     @property
     def total_cost_bps(self) -> float:
-        """单次开平仓的单边成本（bps）。"""
-        return self.taker_fee_bps + self.slippage_bps
+        """单次开平仓的单边成本（bps）= blended_fee + slippage。"""
+        return self.blended_fee_bps + self.slippage_bps
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "taker_fee_bps": self.taker_fee_bps,
             "slippage_bps": self.slippage_bps,
+            "maker_fee_bps": self.maker_fee_bps,
+            "execution_style": self.execution_style,
+            "passive_bias": self.passive_bias,
+            "maker_taker_bias": self.maker_taker_bias,
+            # 以下为只读计算属性（from_dict 不消费，仅供可观测性）
+            "blended_fee_bps": self.blended_fee_bps,
             "total_cost_bps": self.total_cost_bps,
         }
 
@@ -77,6 +119,10 @@ class ReplayCostConfig:
         return cls(
             taker_fee_bps=float(d.get("taker_fee_bps", 5.0)),
             slippage_bps=float(d.get("slippage_bps", 2.0)),
+            maker_fee_bps=float(d.get("maker_fee_bps", 2.0)),
+            execution_style=str(d.get("execution_style", "passive_first")),
+            passive_bias=float(d.get("passive_bias", 0.7)),
+            maker_taker_bias=float(d.get("maker_taker_bias", 0.0)),
         )
 
 
@@ -212,6 +258,13 @@ class ReplayParameterOverrides:
     ⚠️ REPLAY 未模拟: replay 假设 bar close 即时成交，不模拟 limit order 匹配。
     该参数仅做透传映射到生产端，replay 回测不验证其效果。"""
 
+    # ── 信号噪声缓冲 ─────────────────────────────────────────
+    noise_buffer_bps: float = 2.0
+    """信号噪声缓冲（bps），从 net_edge 中扣除。
+    对齐生产端 strategy_edge_noise_buffer_bps（derivatives_live.yaml = 2.0）。
+    ⚠️ 此参数为 YAML-only，不在 RDP active_parameters 映射中，
+    但校准时必须纳入以匹配生产门控行为。"""
+
     # 成本配置
     cost_config: ReplayCostConfig = dc.field(default_factory=ReplayCostConfig)
 
@@ -325,6 +378,7 @@ class ReplayParameterOverrides:
             "min_score_drawdown_bps": self.min_score_drawdown_bps,
             "min_liquidity_quality": self.min_liquidity_quality,
             "limit_offset_bps_entry": self.limit_offset_bps_entry,
+            "noise_buffer_bps": self.noise_buffer_bps,
             "cost_config": self.cost_config.to_dict(),
         }
         if self.extra:
@@ -347,6 +401,7 @@ class ReplayParameterOverrides:
             "cost_config",
             # 平铺 cost keys（from_dict 时消费，不进 extra）
             "taker_fee_bps", "slippage_bps",
+            "maker_fee_bps", "execution_style", "passive_bias", "maker_taker_bias",
             # Phase 1 扩展参数
             "entry_threshold", "close_threshold", "scale_in_threshold",
             "short_entry_threshold", "short_close_threshold",
@@ -358,6 +413,7 @@ class ReplayParameterOverrides:
             "max_acceptable_cost_bps",
             "min_score_drawdown_bps", "min_liquidity_quality",
             "limit_offset_bps_entry",
+            "noise_buffer_bps",
         }
 
         # null-safe 取值：JSON null → 用默认值
@@ -371,11 +427,15 @@ class ReplayParameterOverrides:
             return float(val) if val is not None else None
 
         # 成本配置：优先从平铺 keys 组装，其次从嵌套 cost_config
-        has_flat_cost = "taker_fee_bps" in d or "slippage_bps" in d
+        has_flat_cost = "taker_fee_bps" in d or "slippage_bps" in d or "maker_fee_bps" in d
         if has_flat_cost:
             cost = ReplayCostConfig(
                 taker_fee_bps=_v("taker_fee_bps", 5.0),
                 slippage_bps=_v("slippage_bps", 2.0),
+                maker_fee_bps=_v("maker_fee_bps", 2.0),
+                execution_style=str(d.get("execution_style", "passive_first")),
+                passive_bias=_v("passive_bias", 0.7),
+                maker_taker_bias=_v("maker_taker_bias", 0.0),
             )
         else:
             cost_raw = d.get("cost_config")
@@ -409,6 +469,7 @@ class ReplayParameterOverrides:
             min_score_drawdown_bps=_v_opt("min_score_drawdown_bps"),
             min_liquidity_quality=_v("min_liquidity_quality", 0.55),
             limit_offset_bps_entry=_v("limit_offset_bps_entry", 1.5),
+            noise_buffer_bps=_v("noise_buffer_bps", 2.0),
             cost_config=cost,
             extra={k: v for k, v in d.items() if k not in known},
         )
@@ -464,8 +525,9 @@ class ReplayDecision:
     Edge 分解（所有 family 统一语义）：
     - signal_edge_proxy_bps:   策略信号派生的机会代理值
     - funding_adjustment_bps:  funding rate 附加调整
-    - cost_bps:               交易成本（taker_fee + slippage）
-    - expected_net_edge_bps:  = signal + funding - cost（最终净 edge）
+    - cost_bps:               交易成本（blended fee + slippage）
+    - noise_buffer_bps:       信号噪声缓冲
+    - expected_net_edge_bps:  = signal + funding - cost - noise_buffer（最终净 edge）
     """
     ts: datetime
     family: str
@@ -485,6 +547,7 @@ class ReplayDecision:
     signal_edge_proxy_bps: float = 0.0      # 来自策略信号的机会代理
     funding_adjustment_bps: float = 0.0     # 来自 funding rate 的附加调整
     cost_bps: float = 0.0                   # 交易成本
+    noise_buffer_bps: float = 0.0           # 信号噪声缓冲
 
     # 扩展字段
     action: str = "hold"                    # open / hold / close / blocked
@@ -510,6 +573,7 @@ class ReplayDecision:
             "signal_edge_proxy_bps": self.signal_edge_proxy_bps,
             "funding_adjustment_bps": self.funding_adjustment_bps,
             "cost_bps": self.cost_bps,
+            "noise_buffer_bps": self.noise_buffer_bps,
             "expected_net_edge_bps": self.expected_net_edge_bps,
             "target_position_qty": str(self.target_position_qty),
             "delta_position_qty": str(self.delta_position_qty),

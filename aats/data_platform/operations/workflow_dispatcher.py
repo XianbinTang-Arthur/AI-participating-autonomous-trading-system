@@ -87,22 +87,26 @@ def _run_task(
         result["error"] = "no command specified"
         return result
 
-    # 将 command 中的 "python " 替换为当前解释器绝对路径，
+    # 将 command 拆成 argv list 并替换 python 为当前解释器绝对路径，
     # 避免 cron 等无 PATH 环境找不到 python。
-    # 使用 shlex.quote 处理路径中可能含空格的虚拟环境/安装路径。
+    # 使用 shell=False + argv 代替 shell=True + shlex.quote，
+    # 确保 Windows / POSIX 均能正确处理路径含空格的 venv。
     if command.startswith("python "):
-        command = f"{shlex.quote(sys.executable)} {command[7:]}"
+        argv = [sys.executable, *shlex.split(command[7:])]
+    else:
+        argv = shlex.split(command)
 
     if dry_run:
         result["status"] = "dry_run"
+        result["command"] = argv  # dry_run 时暴露实际 argv 便于诊断
         return result
 
     result["started_at"] = datetime.now(timezone.utc).isoformat()
 
     try:
         proc = subprocess.run(
-            command,
-            shell=True,
+            argv,
+            shell=False,
             cwd=str(project_root),
             capture_output=True,
             text=True,

@@ -14,11 +14,12 @@ Phase 2 首批优先打通的 adapter。从 Gold replay bars 构建简化的评�
   > Replay Core 在 Phase 2 不负责完整撮合仿真、PnL accounting、滑点模型、orderbook realism。
 
 Edge Contract（P0-3）：
-  expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+  expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps - noise_buffer_bps
 
   signal_edge_proxy_bps:   从 score/momentum/trend/alpha 等因子派生
   funding_adjustment_bps:  funding rate 作为附加项（不是全部）
-  cost_bps:               由 ReplayCostConfig 控制（默认 taker 5 bps + slippage 2 bps）
+  cost_bps:               由 ReplayCostConfig 控制（blended maker/taker fee + slippage）
+  noise_buffer_bps:       信号噪声缓冲（对齐生产端 strategy_edge_noise_buffer_bps）
 """
 
 from __future__ import annotations
@@ -176,6 +177,7 @@ class IndependentReplayAdapter(BaseReplayAdapter):
             signal_edge_proxy_bps=round(signal_edge_proxy_bps, 4),
             funding_adjustment_bps=round(funding_adjustment_bps, 4),
             cost_bps=round(cost_bps, 4),
+            noise_buffer_bps=round(edge["noise_buffer"], 4),
             expected_net_edge_bps=round(expected_net_edge_bps, 4),
             target_position_qty=target_qty,
             delta_position_qty=delta_qty,
@@ -313,26 +315,26 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         dominant_score: float,
         params: ReplayParameterOverrides,
     ) -> dict[str, float]:
-        """计算 edge 的 4 层分解（bps）。
+        """计算 edge 的 5 层分解（bps）。
 
         统一 Edge Contract:
-          expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+          expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps - noise_buffer_bps
 
         1) signal_edge_proxy_bps:
            从评分因子派生。independent 的信号价值来自 score/momentum/trend/alpha
            的综合评估，不应被简化为只看 funding。
            公式: dominant_score * params.signal_edge_scale_bps
-           说明: score=0.6 * 10 = 6 bps 信号代理; score=0.4 * 10 = 4 bps
-           缩放系数 signal_edge_scale_bps 可通过参数覆盖（默认 10.0），支持 calibration run。
 
         2) funding_adjustment_bps:
            funding rate 作为附加项。对 short leg 正 funding 有利，对 long leg 负 funding 有利。
-           这是 independent 特有的 funding 附加收益，但不再是 edge 的全部。
 
         3) cost_bps:
-           来自 ReplayCostConfig（默认 taker 5 bps + slippage 2 bps = 7 bps）
+           来自 ReplayCostConfig（blended maker/taker fee + slippage + buffers）
 
-        4) net = signal + funding - cost
+        4) noise_buffer_bps:
+           信号噪声缓冲，对齐生产端 strategy_edge_noise_buffer_bps
+
+        5) net = signal + funding - cost - noise_buffer
         """
         cost = params.cost_config
 
@@ -359,13 +361,17 @@ class IndependentReplayAdapter(BaseReplayAdapter):
             + params.expected_execution_buffer_bps
         )
 
-        # --- 4) net ---
-        net_edge = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+        # --- 4) noise buffer（对齐生产端 strategy_edge_noise_buffer_bps）---
+        noise_buffer = max(params.noise_buffer_bps, 0.0)
+
+        # --- 5) net ---
+        net_edge = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps - noise_buffer
 
         return {
             "signal": signal_edge_proxy_bps,
             "funding": funding_adjustment_bps,
             "cost": cost_bps,
+            "noise_buffer": noise_buffer,
             "net": net_edge,
         }
 

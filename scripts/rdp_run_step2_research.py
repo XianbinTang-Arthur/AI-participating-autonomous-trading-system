@@ -47,6 +47,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from aats.data_platform.replay.core.replay_context import ReplayCostConfig
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -688,10 +690,11 @@ def _recommend_signal_edge_scale(experiments: list[dict[str, Any]]) -> dict[str,
 
 
 def _extract_total_cost(params: dict[str, Any]) -> float:
-    cc = params.get("cost_config", {})
+    """从实验 params 中提取总成本 bps（使用混合费率模型）。"""
+    cc = params.get("cost_config")
     if isinstance(cc, dict):
-        return float(cc.get("taker_fee_bps", 5.0)) + float(cc.get("slippage_bps", 2.0))
-    return float(params.get("taker_fee_bps", 5.0)) + float(params.get("slippage_bps", 2.0))
+        return ReplayCostConfig.from_dict(cc).total_cost_bps
+    return ReplayCostConfig.from_dict(params).total_cost_bps
 
 
 def _extract_cost_parts(params: dict[str, Any]) -> tuple[float, float]:
@@ -718,10 +721,13 @@ def _recommend_cost_model(experiments: list[dict[str, Any]]) -> dict[str, Any]:
         key=lambda e: _extract_total_cost(e.get("params", {})),
     )
 
-    # 找默认值 (5,2)
+    # 找默认值实验
+    # 容差 0.5 bps：混合费率默认值 ≈5.605 为浮点数，
+    # 实验参数经 JSON 序列化往返后可能有微小精度偏移，0.01 不够稳健。
+    default_total_cost = ReplayCostConfig().total_cost_bps
     default_exp = None
     for e in sorted_exps:
-        if abs(_extract_total_cost(e.get("params", {})) - 7.0) < 0.01:
+        if abs(_extract_total_cost(e.get("params", {})) - default_total_cost) < 0.5:
             default_exp = e
             break
 
@@ -761,7 +767,7 @@ def _recommend_cost_model(experiments: list[dict[str, Any]]) -> dict[str, Any]:
         else:
             lower_positive = [
                 e for e in sorted_exps
-                if _extract_total_cost(e.get("params", {})) < 7.0
+                if _extract_total_cost(e.get("params", {})) < default_total_cost
                 and (e.get("mean_expected_edge_bps") or 0) > 0
             ]
             if lower_positive:
@@ -1687,7 +1693,7 @@ def _build_timeframe_comparison_section(
     sb = _summarize(rows_b)
 
     lines.append(f"| Metric | {tf_a} | {tf_b} |")
-    lines.append(f"|--------|------|------|")
+    lines.append("|--------|------|------|")
     lines.append(f"| Experiments | {sa.get('total', 0)} | {sb.get('total', 0)} |")
     lines.append(f"| Avg opening_count | {sa.get('avg_opens', 0):.1f} | {sb.get('avg_opens', 0):.1f} |")
     lines.append(f"| Avg net_edge_bps | {sa.get('avg_edge', 0):.2f} | {sb.get('avg_edge', 0):.2f} |")

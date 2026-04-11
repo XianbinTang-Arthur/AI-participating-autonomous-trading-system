@@ -15,8 +15,6 @@ from tempfile import TemporaryDirectory
 from aats.bootstrap.active_parameters import (
     _RDP_CORE_RESEARCH_PARAMS,
     _RDP_REPLAY_ONLY_PARAMS,
-    FAMILY_PARAMETER_MAPPINGS,
-    PARAMETER_MAPPING_DIRECTIONAL,
     PARAMETER_MAPPING_INDEPENDENT,
     build_settings_overrides,
 )
@@ -347,9 +345,13 @@ class TestDbPartialFallbackRegression(unittest.TestCase):
             with self.assertLogs(
                 "aats.bootstrap.active_parameters", level=logging.INFO,
             ) as cm:
-                overrides = build_settings_overrides(
+                result = build_settings_overrides(
                     registry_path=registry_path,
                 )
+
+            # overrides 应包含 15m 的参数（基本健全性）
+            target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
+            self.assertIn(target_field, result)
 
             # 不应有 "db_partial" 的 WARNING
             warning_records = [
@@ -362,6 +364,110 @@ class TestDbPartialFallbackRegression(unittest.TestCase):
             self.assertFalse(
                 partial_warnings,
                 "非 DB 路径不应触发 active_parameter_db_partial WARNING",
+            )
+
+
+class TestDbEnvVarFallbackRegression(unittest.TestCase):
+    """P1 回归: AATS_ACTIVE_PARAMETER_DB_URL 环境变量已设置时，
+    DB partial fallback 必须走文件路径补齐，不能再读回同一份 DB。
+
+    此前的 bug: build_settings_overrides 中的 fallback 调用
+    load_all_active_parameter_sets() → load_active_parameter_registry()
+    → _try_load_from_db(None) → 读到 env var → 再次拿到相同 partial DB。
+    修复: skip_db=True 旁路 DB 读取。
+    """
+
+    def test_env_var_db_partial_still_merges_file(self) -> None:
+        """设置 AATS_ACTIVE_PARAMETER_DB_URL 后，DB 只返回 1h，
+        文件有 15m，build_settings_overrides(timeframes=['15m']) 必须
+        返回 15m 的参数（而非空 dict）。"""
+        import os
+        from unittest.mock import patch
+        from aats.bootstrap.active_parameters import (
+            DEFAULT_ACTIVE_DIR,
+            DEFAULT_REGISTRY_FILENAME,
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            # 构造文件 registry 包含 15m
+            registry_dir = tmp / DEFAULT_ACTIVE_DIR
+            registry_dir.mkdir(parents=True)
+            file_registry_path = registry_dir / DEFAULT_REGISTRY_FILENAME
+            file_registry_path.write_text(
+                json.dumps({
+                    "generated_at": "2026-04-11T00:00:00Z",
+                    "active_sets": {
+                        "independent_15m": {
+                            "parameter_set_id": "ps_file_15m",
+                            "family": "independent",
+                            "timeframe": "15m",
+                            "values": {"entry_threshold": 0.30},
+                        },
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            # DB 只返回 independent_1h（模拟 partial seed）
+            db_partial = {
+                "generated_at": None,
+                "active_sets": {
+                    "independent_1h": {
+                        "parameter_set_id": "ps_db_1h",
+                        "family": "independent",
+                        "timeframe": "1h",
+                        "values": {"entry_threshold": 0.90},
+                    },
+                },
+            }
+
+            # 关键：设置环境变量模拟生产环境，同时 mock DB 返回 partial 结果。
+            # _try_load_from_db 在首次调用（build_settings_overrides 主路径）
+            # 返回 partial；在 fallback 路径因 skip_db=True 应被跳过。
+            call_count = 0
+            original_env = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+
+            def _mock_try_load(db_url=None):
+                nonlocal call_count
+                call_count += 1
+                # 首次调用返回 partial DB；后续调用如果仍被触发说明 skip_db 没生效
+                return db_partial
+
+            try:
+                os.environ["AATS_ACTIVE_PARAMETER_DB_URL"] = "postgresql://mock:5432/test"
+                with patch(
+                    "aats.bootstrap.active_parameters._try_load_from_db",
+                    side_effect=_mock_try_load,
+                ):
+                    overrides = build_settings_overrides(
+                        project_root=tmp,
+                        timeframes=["15m"],
+                    )
+            finally:
+                if original_env is None:
+                    os.environ.pop("AATS_ACTIVE_PARAMETER_DB_URL", None)
+                else:
+                    os.environ["AATS_ACTIVE_PARAMETER_DB_URL"] = original_env
+
+            # _try_load_from_db 应只被调用 1 次（主路径），
+            # fallback 路径因 skip_db=True 不再调用。
+            self.assertEqual(
+                call_count, 1,
+                f"_try_load_from_db 应只被调用 1 次，实际 {call_count} 次"
+                "（fallback 路径 skip_db=True 未生效？）",
+            )
+
+            target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
+            # timeframes=['15m'] 过滤后只剩 15m combo（来自文件 fallback）
+            self.assertIn(
+                target_field, overrides,
+                "设置 AATS_ACTIVE_PARAMETER_DB_URL 后 DB partial fallback "
+                "应从文件补齐 15m 参数",
+            )
+            self.assertEqual(
+                overrides[target_field], 0.30,
+                "entry_threshold 应来自文件 registry 的 15m (0.30)",
             )
 
 

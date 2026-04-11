@@ -34,6 +34,8 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from aats.data_platform.replay.core.replay_context import ReplayCostConfig
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -315,11 +317,11 @@ def _recommend_signal_edge_scale(experiments: list[dict[str, Any]]) -> dict[str,
 
 
 def _extract_total_cost(params: dict[str, Any]) -> float:
-    """从实验 params 中提取总成本 bps。"""
-    cc = params.get("cost_config", {})
+    """从实验 params 中提取总成本 bps（使用混合费率模型）。"""
+    cc = params.get("cost_config")
     if isinstance(cc, dict):
-        return float(cc.get("taker_fee_bps", 5.0)) + float(cc.get("slippage_bps", 2.0))
-    return float(params.get("taker_fee_bps", 5.0)) + float(params.get("slippage_bps", 2.0))
+        return ReplayCostConfig.from_dict(cc).total_cost_bps
+    return ReplayCostConfig.from_dict(params).total_cost_bps
 
 
 def _extract_cost_parts(params: dict[str, Any]) -> tuple[float, float]:
@@ -331,11 +333,11 @@ def _extract_cost_parts(params: dict[str, Any]) -> tuple[float, float]:
 
 
 def _recommend_cost_model(experiments: list[dict[str, Any]]) -> dict[str, Any]:
-    """规则化推荐 cost model (taker_fee_bps + slippage_bps)。
+    """规则化推荐 cost model (blended fee + slippage)。
 
     规则：
     1. 按 total_cost 升序排列
-    2. 检查 (5,2)=7bps 默认值是否在测试范围内
+    2. 检查默认值（blended fee≈3.6 + slippage=2 ≈ 5.6bps）是否在测试范围内
     3. 若默认值的 edge 为正 → 保持，medium confidence
     4. 若默认值的 edge 为负但低 cost 为正 → edge fragile，仍推荐默认但标记脆弱性
     5. 观察 opening_count 对 cost 的敏感度
@@ -356,10 +358,13 @@ def _recommend_cost_model(experiments: list[dict[str, Any]]) -> dict[str, Any]:
     )
 
     # 找默认值实验
+    # 容差 0.5 bps：混合费率默认值 ≈5.605 为浮点数，
+    # 实验参数经 JSON 序列化往返后可能有微小精度偏移，0.01 不够稳健。
+    default_total_cost = ReplayCostConfig().total_cost_bps
     default_exp = None
     for e in sorted_exps:
         tc = _extract_total_cost(e.get("params", {}))
-        if abs(tc - 7.0) < 0.01:
+        if abs(tc - default_total_cost) < 0.5:
             default_exp = e
             break
 
@@ -398,7 +403,7 @@ def _recommend_cost_model(experiments: list[dict[str, Any]]) -> dict[str, Any]:
             # 检查是否有更低 cost 能达到 positive edge
             lower_positive = [
                 e for e in sorted_exps
-                if _extract_total_cost(e.get("params", {})) < 7.0
+                if _extract_total_cost(e.get("params", {})) < default_total_cost
                 and (e.get("mean_expected_edge_bps") or 0) > 0
             ]
             if lower_positive:
@@ -777,7 +782,7 @@ def _generate_observations(
     scale_rec = recommendations.get("signal_edge_scale_bps", {})
     scale_val = scale_rec.get("value")
     if scale_val is not None:
-        obs.append(f"### 4.1 Signal Edge Scale")
+        obs.append("### 4.1 Signal Edge Scale")
         obs.append("")
         obs.append(f"- 推荐 scale = **{scale_val}** (confidence: {scale_rec.get('confidence', '?')})")
         # 找默认 scale=10 的 edge

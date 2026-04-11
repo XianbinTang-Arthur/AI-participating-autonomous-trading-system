@@ -116,6 +116,10 @@ _INDEPENDENT_DEFAULTS: dict[str, float | int | None] = {
     "max_acceptable_cost_bps": 7.5,
     "min_liquidity_quality": 0.55,
     "limit_offset_bps_entry": 1.5,
+    "noise_buffer_bps": 2.0,
+    "maker_fee_bps": 2.0,
+    "execution_style": "passive_first",
+    "passive_bias": 0.7,
     "directional_trend_weight": 0.7,
     "directional_return_clamp_bps": 20.0,
     # short 阈值默认 None，仅 directional 家族使用

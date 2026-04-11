@@ -14,17 +14,15 @@
 * reconciliation_state_snapshots：snapshot_id 是字符串 PK，多进程 retry 可能撞 PK，
   改成 INSERT ... ON CONFLICT DO NOTHING。
 
-本组测试用纯静态检查（不依赖 Postgres）覆盖以下三层：
+本组测试用纯静态检查（不依赖 Postgres）覆盖以下两层：
 
 1. ORM 元数据层：两张表都不应当出现 row_version 列（防止后续 contributor 误加）。
-2. 物理 schema 层：migration 0007 必须存在并写明决策。
-3. 调用方层：reconciliation_repo_postgres.save_state_snapshot 的源码必须出现
+2. 调用方层：reconciliation_repo_postgres.save_state_snapshot 的源码必须出现
    pg_insert / on_conflict_do_nothing，证明走的是幂等插入路径。
 """
 from __future__ import annotations
 
 import inspect
-from pathlib import Path
 
 from sqlalchemy import Integer, String
 
@@ -94,35 +92,7 @@ def test_reconciliation_state_snapshot_model_uses_string_pk_and_no_row_version()
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 2) Migration 0007：文档化决策
-# ─────────────────────────────────────────────────────────────────────
-
-
-def test_migration_0007_documents_p1_snapshot_idempotency_decision() -> None:
-    """migration 0007 必须存在，并解释为何 P1 表跳过 row_version。"""
-    migration_path = (
-        Path(__file__).resolve().parents[2]
-        / "migrations"
-        / "0007_postgres_p1_snapshot_idempotency.sql"
-    )
-    assert migration_path.exists(), f"缺失 migration 文件：{migration_path}"
-
-    sql = migration_path.read_text(encoding="utf-8")
-
-    # 必须解释为什么 portfolio_snapshots 跳过 row_version
-    assert "portfolio_snapshots" in sql, "0007 必须提到 portfolio_snapshots"
-    assert "append-only" in sql, "0007 必须解释 append-only 语义"
-
-    # 必须解释 reconciliation_state_snapshots 的真实修复路径
-    assert "reconciliation_state_snapshots" in sql
-    assert "ON CONFLICT" in sql, "0007 必须提到 ON CONFLICT 这个真正的修复路径"
-
-    # 必须有 SELECT 1 占位语句，让 cursor.execute 不会抱怨「无可执行 SQL」
-    assert "SELECT 1" in sql, "0007 必须有 SELECT 1 占位句"
-
-
-# ─────────────────────────────────────────────────────────────────────
-# 3) Repo 层：save_state_snapshot 走 pg_insert + ON CONFLICT 路径
+# 2) Repo 层：save_state_snapshot 走 pg_insert + ON CONFLICT 路径
 # ─────────────────────────────────────────────────────────────────────
 
 

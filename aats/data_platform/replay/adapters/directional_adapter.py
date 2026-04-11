@@ -10,11 +10,12 @@ Phase 2 设计决策 §9.4：
 - 同样受 min_confirm_ticks / min_safe_net_edge_bps 约束
 
 Edge Contract（P0-3）：
-  expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+  expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps - noise_buffer_bps
 
   signal_edge_proxy_bps:   directional 使用 bar return + trend strength 派生
   funding_adjustment_bps:  funding rate 作为附加项
-  cost_bps:               由 ReplayCostConfig 控制
+  cost_bps:               由 ReplayCostConfig 控制（blended maker/taker fee + slippage）
+  noise_buffer_bps:       信号噪声缓冲（对齐生产端 strategy_edge_noise_buffer_bps）
 """
 
 from __future__ import annotations
@@ -142,6 +143,7 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             signal_edge_proxy_bps=round(signal_edge_proxy_bps, 4),
             funding_adjustment_bps=round(funding_adjustment_bps, 4),
             cost_bps=round(cost_bps, 4),
+            noise_buffer_bps=round(edge["noise_buffer"], 4),
             expected_net_edge_bps=round(expected_net_edge_bps, 4),
             target_position_qty=target_qty,
             delta_position_qty=delta_qty,
@@ -199,22 +201,27 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
         dominant_score: float,
         params: ReplayParameterOverrides,
     ) -> dict[str, float]:
-        """计算 edge 的 4 层分解（bps）。
+        """计算 edge 的 5 层分解（bps）。
 
         统一 Edge Contract:
-          expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+          expected_net_edge_bps = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps - noise_buffer_bps
 
         1) signal_edge_proxy_bps:
            directional 的信号代理包含两部分：
            - 趋势强度：dominant_score * params.signal_edge_scale_bps
            - bar return 修正：最近一根 bar 的方向收益提供短期确认
-           二者加权合成（权重、限幅均来自 params，可校准），使信号代理不只依赖单一来源。
+           二者加权合成（权重、限幅均来自 params，可校准）。
 
         2) funding_adjustment_bps:
            与 independent 相同语义，funding rate 作为附加项。
 
         3) cost_bps:
-           来自 ReplayCostConfig
+           来自 ReplayCostConfig（blended maker/taker fee + slippage + buffers）
+
+        4) noise_buffer_bps:
+           信号噪声缓冲，对齐生产端 strategy_edge_noise_buffer_bps
+
+        5) net = signal + funding - cost - noise_buffer
         """
         cost = params.cost_config
         scale = params.signal_edge_scale_bps
@@ -253,13 +260,17 @@ class DirectionalReplayAdapter(BaseReplayAdapter):
             + params.expected_execution_buffer_bps
         )
 
-        # --- 4) net ---
-        net_edge = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps
+        # --- 4) noise buffer（对齐生产端 strategy_edge_noise_buffer_bps）---
+        noise_buffer = max(params.noise_buffer_bps, 0.0)
+
+        # --- 5) net ---
+        net_edge = signal_edge_proxy_bps + funding_adjustment_bps - cost_bps - noise_buffer
 
         return {
             "signal": signal_edge_proxy_bps,
             "funding": funding_adjustment_bps,
             "cost": cost_bps,
+            "noise_buffer": noise_buffer,
             "net": net_edge,
         }
 

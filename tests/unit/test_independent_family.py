@@ -1930,6 +1930,114 @@ class TestIndependentFamily(unittest.TestCase):
         # Phase 3: delta = abs(0.01 − 0) = 0.01 (close entire position)
         self.assertEqual(short_calls[-1]["planned_delta_qty"], Decimal("0.01"))
 
+    def test_scale_in_cost_estimation_uses_scale_in_mode_not_entry_mode(self) -> None:
+        """Phase 3b regression: when entry=passive_first and
+        scale_in=aggressive_bounded_taker, the resolver/cost-service must
+        receive execution_mode_override=aggressive_bounded_taker for a
+        scale_in action — NOT the passive_first entry mode."""
+        calls: list[dict] = []
+
+        def tracking_resolver(
+            *,
+            leg: str,
+            planned_delta_qty: Decimal,
+            execution_side: str = "",
+            execution_mode_override: str | None = None,
+            **_: object,
+        ) -> IndependentBookExpectancy:
+            calls.append({
+                "leg": leg,
+                "planned_delta_qty": planned_delta_qty,
+                "execution_side": execution_side,
+                "execution_mode_override": execution_mode_override,
+            })
+            return IndependentBookExpectancy(
+                leg=leg,
+                expected_signal_edge_bps=18.0,
+                expected_slippage_bps=1.5,
+                expected_cost_bps=6.0,
+                expected_net_edge_bps=12.0 if leg == "long" else -2.0,
+            )
+
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_long_entry_threshold=0.60,
+            strategy_hedge_independent_long_close_threshold=0.50,
+            strategy_hedge_independent_long_scale_in_threshold=0.72,
+            strategy_hedge_independent_entry_execution_mode="passive_first",
+            strategy_hedge_independent_scale_in_execution_mode="aggressive_bounded_taker",
+        )
+        # Existing long position at 0.01; directional target 0.02 ⇒ scale_in
+        context = make_context(
+            current_position_qty=0.01,
+            current_long_position_qty=0.01,
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_long_leg_opened_seconds_ago=900,
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.86,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.36,
+                "trend_alpha": 0.30,
+                "microstructure_alpha": 0.14,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.26})
+
+        result = evaluate_independent_books(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.22, confidence=0.82),
+            directional_target_qty=Decimal("0.02"),
+            target_leverage=1.0,
+            signal_edge_bps=18.0,
+            expected_cost_bps=6.0,
+            expected_net_edge_bps=12.0,
+            execution_leg_family="independent",
+            # Score above scale_in threshold (0.72)
+            scorer=lambda *, leg, baseline, ai_assessment: 0.78 if leg == "long" else 0.08,
+            expectancy_resolver=tracking_resolver,
+        )
+
+        # The book must be identified as scale_in
+        self.assertEqual(result.long_book.book_action, "scale_in")
+
+        long_calls = [c for c in calls if c["leg"] == "long"]
+        self.assertGreaterEqual(
+            len(long_calls), 2,
+            "Phase 3b must recompute expectancy for scale_in when modes differ",
+        )
+
+        # Phase 1 call: entry-side defaults — no execution_mode_override
+        phase1 = long_calls[0]
+        self.assertIsNone(
+            phase1["execution_mode_override"],
+            "Phase 1 should use default entry mode (no override)",
+        )
+        self.assertEqual(phase1["execution_side"], "buy")
+
+        # Phase 3b call: must carry scale_in mode override
+        phase3b = long_calls[-1]
+        self.assertEqual(
+            phase3b["execution_mode_override"],
+            "aggressive_bounded_taker",
+            "Phase 3b must pass scale_in execution mode, not entry mode",
+        )
+        # scale_in buys more on the same side as entry (buy for long)
+        self.assertEqual(phase3b["execution_side"], "buy")
+
+        # The final execution policy should reflect the taker mode
+        self.assertTrue(result.legs, "scale_in should produce at least one execution leg")
+        leg = result.legs[0]
+        self.assertEqual(leg.order_type_preference, "market")
+        self.assertIn("aggressive_bounded_taker", leg.execution_style_preference)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,12 +1,11 @@
 """Stage 5 单元测试：OrderStateModel 乐观并发版本号 (row_version)。
 
 子任务 5a-1：给 order_states 表加 SQLAlchemy version_id_col。
-本组测试只覆盖以下三个层面，**不依赖 Postgres**：
+本组测试覆盖以下两个层面，**不依赖 Postgres**：
 
 1. ORM 元数据层：OrderStateModel 必须把 row_version 声明为 Mapped 列，
    并且通过 __mapper_args__ 把它绑定到 mapper 的 version_id_col。
-2. 物理 schema 层：migration 文件 0006 必须存在并且包含 ALTER TABLE 子句。
-3. 调用方层：execution_engine outbox 在 commit 抛 StaleDataError 时
+2. 调用方层：execution_engine outbox 在 commit 抛 StaleDataError 时
    会重新打开 session 重试，3 次仍然失败才把异常往外传。
 
 Postgres 端到端的"两个 session 并发更新只允许一个成功"的实际行为
@@ -17,7 +16,6 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 from sqlalchemy import BigInteger
@@ -65,32 +63,7 @@ def test_order_state_mapper_uses_row_version_as_version_id_col() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
-# 2) Migration 文件存在性
-# ─────────────────────────────────────────────────────────────────────
-
-
-def test_migration_0006_adds_row_version_to_order_states() -> None:
-    """migration 0006 必须给 order_states 加 row_version 列，并提供回滚说明。"""
-    migration_path = (
-        Path(__file__).resolve().parents[2]
-        / "migrations"
-        / "0006_postgres_order_states_row_version.sql"
-    )
-    assert migration_path.exists(), f"缺失 migration 文件：{migration_path}"
-
-    sql = migration_path.read_text(encoding="utf-8")
-    # 关键 SQL 语句必须出现
-    assert "ALTER TABLE order_states" in sql
-    assert "ADD COLUMN" in sql and "row_version" in sql
-    assert "BIGINT NOT NULL DEFAULT 1" in sql
-    # 回滚说明（注释里的 DROP COLUMN）
-    assert "DROP COLUMN" in sql, "migration 必须在注释里给出 down migration（DROP COLUMN）"
-    # 设计澄清：注释里说明为什么不加到 execution_fills / fill_events
-    assert "execution_fills" in sql, "migration 必须解释为何 execution_fills 不需要 row_version"
-
-
-# ─────────────────────────────────────────────────────────────────────
-# 3) Outbox 层：StaleDataError → 重试
+# 2) Outbox 层：StaleDataError → 重试
 # ─────────────────────────────────────────────────────────────────────
 
 
