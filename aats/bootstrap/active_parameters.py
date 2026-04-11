@@ -349,6 +349,7 @@ def load_active_parameter_registry(
     *,
     project_root: Path | str | None = None,
     db_url: str | None = None,
+    skip_db: bool = False,
 ) -> dict[str, Any]:
     """加载 active parameter registry.
 
@@ -356,6 +357,12 @@ def load_active_parameter_registry(
       1. 数据库 (AATS_ACTIVE_PARAMETER_DB_URL 或 db_url 参数)
       2. JSON 文件 (configs/active_parameter_sets/active_parameter_registry.json)
       3. 空 registry (fail-soft，不中断主系统)
+
+    Parameters
+    ----------
+    skip_db : bool
+        为 True 时跳过 DB 路径直接读文件。用于 DB partial fallback
+        场景——已知 DB 结果不完整，需要强制走文件路径补齐缺失 combo。
 
     格式::
 
@@ -372,10 +379,11 @@ def load_active_parameter_registry(
           }
         }
     """
-    # 1. 尝试数据库
-    db_result = _try_load_from_db(db_url)
-    if db_result is not None:
-        return db_result
+    # 1. 尝试数据库（skip_db=True 时跳过，避免 fallback 路径再次读到同一份 partial DB）
+    if not skip_db:
+        db_result = _try_load_from_db(db_url)
+        if db_result is not None:
+            return db_result
 
     # 2. Fallback 到文件
     if path is None:
@@ -492,12 +500,21 @@ def load_active_parameter_set(
 def load_all_active_parameter_sets(
     *,
     project_root: Path | str | None = None,
+    skip_db: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """加载所有 active parameter sets（registry 优先，per-file fallback）."""
+    """加载所有 active parameter sets（registry 优先，per-file fallback）.
+
+    Parameters
+    ----------
+    skip_db : bool
+        传递给 ``load_active_parameter_registry``。为 True 时强制走文件
+        路径，避免在 AATS_ACTIVE_PARAMETER_DB_URL 已设置的生产环境中
+        再次读到同一份 partial DB 结果。
+    """
     # 优先尝试 registry
     reg_path = _default_registry_path(project_root)
     if reg_path.exists():
-        registry = load_active_parameter_registry(reg_path)
+        registry = load_active_parameter_registry(reg_path, skip_db=skip_db)
         active_sets = registry.get("active_sets", {})
         if active_sets:
             # 转换为与 per-file 兼容的格式
@@ -602,11 +619,38 @@ def build_settings_overrides(
     )
     all_sets_raw = registry.get("active_sets", {})
 
+    db_configured = bool(db_url or os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL"))
+
     if all_sets_raw:
         all_sets: dict[str, dict[str, Any]] = {}
         for k, v in all_sets_raw.items():
             all_sets[k] = {"values": v.get("values", {})}
-    elif db_url or os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL"):
+        # P2-1 fix: DB 部分缺失时，用文件 registry 补齐缺失的 combo。
+        # 场景：DB 只 seed 了 independent_1h 但缺少 independent_15m，
+        # 原代码因 all_sets_raw 非空而跳过文件 fallback，导致 15m 无参数。
+        # 注意：仅当 DB 是数据源时才做 merge。非 DB 路径下 registry 文件本身
+        # 就是权威来源，不需要额外合并。
+        if db_configured:
+            # P1 fix: skip_db=True 强制走文件路径。否则在
+            # AATS_ACTIVE_PARAMETER_DB_URL 已设置的生产环境中，
+            # load_all_active_parameter_sets 内部会再次读到同一份
+            # partial DB 结果，永远补不出缺失的 combo。
+            file_sets = load_all_active_parameter_sets(
+                project_root=project_root, skip_db=True,
+            )
+            merged_from_file: list[str] = []
+            for file_combo, file_data in file_sets.items():
+                if file_combo not in all_sets:
+                    all_sets[file_combo] = file_data
+                    merged_from_file.append(file_combo)
+            if merged_from_file:
+                log.warning(
+                    "active_parameter_db_partial: DB 缺少 %d 个 combo (%s)，"
+                    "已从文件 registry 补齐。请检查 DB seed 是否完整。",
+                    len(merged_from_file),
+                    ", ".join(sorted(merged_from_file)),
+                )
+    elif db_configured:
         # DB was configured and queried but returned zero active sets.
         # Fall back to the file registry so that a missing DB seed or
         # partial migration does not silently revert independent
@@ -615,7 +659,9 @@ def build_settings_overrides(
             "active_parameter_db_empty: DB 已配置但返回零条 active sets，"
             "回退到文件 registry 避免策略参数静默退化"
         )
-        all_sets = load_all_active_parameter_sets(project_root=project_root)
+        all_sets = load_all_active_parameter_sets(
+            project_root=project_root, skip_db=True,
+        )
         if not all_sets:
             log.error(
                 "active_parameter_fallback_also_empty: DB 和文件 registry 均无 "
@@ -722,10 +768,18 @@ def apply_active_parameters_to_settings(
     db_url = resolved_settings.get("active_parameter_db_url")
 
     try:
+        # P1-2 fix: 传入 enabled_decision_timeframes 以过滤非活跃时间框架。
+        # 否则当 DB / 文件中同时包含 15m 和 1h 参数集时，后加载的 1h 参数
+        # 会覆盖当前实盘使用的 15m 参数（因为映射目标字段相同）。
+        active_timeframes = resolved_settings.get("enabled_decision_timeframes")
+        # settings 里该字段是 tuple[str,...], 转为 list 供 filter
+        if active_timeframes is not None and not isinstance(active_timeframes, list):
+            active_timeframes = list(active_timeframes)
         overrides = build_settings_overrides(
             project_root=project_root,
             registry_path=registry_path,
             db_url=db_url,
+            timeframes=active_timeframes,
         )
     except Exception as exc:
         log.warning(

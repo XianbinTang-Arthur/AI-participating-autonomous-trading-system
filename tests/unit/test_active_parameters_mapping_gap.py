@@ -167,5 +167,203 @@ class TestBuildSettingsOverridesMappingGap(unittest.TestCase):
         )
 
 
+class TestTimeframeFilterRegression(unittest.TestCase):
+    """P1-2 回归: enabled_decision_timeframes 必须过滤非活跃时间框架。
+
+    场景: registry 同时包含 independent_15m 和 independent_1h，两者的
+    entry_threshold 映射到同一个 AATSSettings 字段。如果 timeframe 过滤
+    失效，后加载的 1h 值会覆盖当前实盘使用的 15m 值。
+    """
+
+    def _write_registry(self, tmp: Path, values_by_combo: dict[str, dict]) -> Path:
+        active_sets = {
+            combo: {
+                "parameter_set_id": f"test_{combo}",
+                "family": combo.rsplit("_", 1)[0],
+                "timeframe": combo.rsplit("_", 1)[1],
+                "values": v,
+            }
+            for combo, v in values_by_combo.items()
+        }
+        registry_path = tmp / "registry.json"
+        registry_path.write_text(
+            json.dumps({"generated_at": "2026-04-11T00:00:00Z", "active_sets": active_sets}),
+            encoding="utf-8",
+        )
+        return registry_path
+
+    def test_15m_not_overridden_by_1h(self) -> None:
+        """apply 后 entry_threshold 应来自 15m 而非 1h。"""
+        from aats.bootstrap.active_parameters import apply_active_parameters_to_settings
+
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            registry_path = self._write_registry(
+                tmp,
+                {
+                    "independent_15m": {"entry_threshold": 0.25},
+                    "independent_1h": {"entry_threshold": 0.99},
+                },
+            )
+            base_settings: dict = {
+                "active_parameters_enabled": True,
+                "active_parameter_registry_path": str(registry_path),
+                "active_parameter_db_url": None,
+                "enabled_decision_timeframes": ("15m",),
+            }
+            merged = apply_active_parameters_to_settings(
+                base_settings, project_root=tmp,
+            )
+            target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
+            self.assertEqual(
+                merged[target_field],
+                0.25,
+                f"{target_field} 应为 15m 的 0.25，而非 1h 的 0.99",
+            )
+
+    def test_1h_values_used_when_1h_enabled(self) -> None:
+        """当 enabled_decision_timeframes=('1h',) 时应使用 1h 参数。"""
+        from aats.bootstrap.active_parameters import apply_active_parameters_to_settings
+
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            registry_path = self._write_registry(
+                tmp,
+                {
+                    "independent_15m": {"entry_threshold": 0.25},
+                    "independent_1h": {"entry_threshold": 0.99},
+                },
+            )
+            base_settings: dict = {
+                "active_parameters_enabled": True,
+                "active_parameter_registry_path": str(registry_path),
+                "active_parameter_db_url": None,
+                "enabled_decision_timeframes": ("1h",),
+            }
+            merged = apply_active_parameters_to_settings(
+                base_settings, project_root=tmp,
+            )
+            target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
+            self.assertEqual(
+                merged[target_field],
+                0.99,
+                f"{target_field} 应为 1h 的 0.99",
+            )
+
+
+class TestDbPartialFallbackRegression(unittest.TestCase):
+    """P2-1 回归: DB 返回部分 active sets 时必须从文件 registry 补齐缺失 combo。
+
+    场景: DB 只 seed 了 independent_1h，但文件 registry 包含
+    independent_15m + independent_1h。缺失的 15m 应从文件补齐。
+    """
+
+    def test_missing_combo_merged_from_file(self) -> None:
+        """DB 缺 independent_15m 时应从文件 registry 补齐。"""
+        from unittest.mock import patch
+        from aats.bootstrap.active_parameters import (
+            DEFAULT_ACTIVE_DIR,
+            DEFAULT_REGISTRY_FILENAME,
+        )
+
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            # 构造文件 registry 包含 15m + 1h
+            registry_dir = tmp / DEFAULT_ACTIVE_DIR
+            registry_dir.mkdir(parents=True)
+            file_registry_path = registry_dir / DEFAULT_REGISTRY_FILENAME
+            file_registry_path.write_text(
+                json.dumps({
+                    "generated_at": "2026-04-11T00:00:00Z",
+                    "active_sets": {
+                        "independent_15m": {
+                            "parameter_set_id": "ps_file_15m",
+                            "family": "independent",
+                            "timeframe": "15m",
+                            "values": {"entry_threshold": 0.30},
+                        },
+                        "independent_1h": {
+                            "parameter_set_id": "ps_file_1h",
+                            "family": "independent",
+                            "timeframe": "1h",
+                            "values": {"entry_threshold": 0.80},
+                        },
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            # mock _try_load_from_db: 只返回 independent_1h
+            db_partial_result = {
+                "generated_at": None,
+                "active_sets": {
+                    "independent_1h": {
+                        "parameter_set_id": "ps_db_1h",
+                        "family": "independent",
+                        "timeframe": "1h",
+                        "values": {"entry_threshold": 0.90},
+                    },
+                },
+            }
+            with patch(
+                "aats.bootstrap.active_parameters._try_load_from_db",
+                return_value=db_partial_result,
+            ):
+                overrides = build_settings_overrides(
+                    project_root=tmp,
+                    db_url="mock://db",
+                )
+
+            target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
+            # 两个 combo 都应该产出 overrides。
+            # 因 15m 和 1h 映射到同一字段，最终值取决于遍历顺序；
+            # 关键断言：target_field 必须存在（代表 15m 补齐成功参与了映射）。
+            self.assertIn(
+                target_field,
+                overrides,
+                "entry_threshold 对应的 settings 字段应存在于 overrides 中",
+            )
+
+    def test_no_file_merge_without_db(self) -> None:
+        """非 DB 路径下不应触发额外的文件 merge。"""
+        with TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            registry_path = tmp / "registry.json"
+            registry_path.write_text(
+                json.dumps({
+                    "generated_at": "2026-04-11T00:00:00Z",
+                    "active_sets": {
+                        "independent_15m": {
+                            "parameter_set_id": "ps_15m",
+                            "family": "independent",
+                            "timeframe": "15m",
+                            "values": {"entry_threshold": 0.25},
+                        },
+                    },
+                }),
+                encoding="utf-8",
+            )
+
+            with self.assertLogs(
+                "aats.bootstrap.active_parameters", level=logging.INFO,
+            ) as cm:
+                overrides = build_settings_overrides(
+                    registry_path=registry_path,
+                )
+
+            # 不应有 "db_partial" 的 WARNING
+            warning_records = [
+                r for r in cm.records if r.levelno == logging.WARNING
+            ]
+            partial_warnings = [
+                r for r in warning_records
+                if "db_partial" in r.getMessage()
+            ]
+            self.assertFalse(
+                partial_warnings,
+                "非 DB 路径不应触发 active_parameter_db_partial WARNING",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -216,6 +216,7 @@ pip install -e .[otel]
 
 ## 关键文档索引
 
+- 生产发布全流程：[DEPLOYMENT.md](DEPLOYMENT.md)
 - 架构总览：[ARCHITECTURE.md](ARCHITECTURE.md)
 - 配置参考：[docs/configuration/managed-config-reference.md](docs/configuration/managed-config-reference.md)
 - 平台运行手册：[docs/operations/platform_runbook.md](docs/operations/platform_runbook.md)

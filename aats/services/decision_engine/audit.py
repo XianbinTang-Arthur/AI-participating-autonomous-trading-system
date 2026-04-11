@@ -245,7 +245,7 @@ class DecisionAuditService:
                 "allocation_id": envelope.payload.get("allocation_id") or record.allocation_id,
             }
         )
-        await self._publish_record(updated)
+        await self._publish_record(updated, flush_immediate=True)
 
     async def handle_policy_decision(self, message: dict) -> None:
         await self._update_decision_record(
@@ -279,7 +279,7 @@ class DecisionAuditService:
                 "allocation_id": envelope.payload.get("allocation_id") or record.allocation_id,
             }
         )
-        await self._publish_record(updated)
+        await self._publish_record(updated, flush_immediate=True)
 
     async def handle_order_intent(self, message: dict) -> None:
         envelope = parse_envelope(message)
@@ -289,7 +289,7 @@ class DecisionAuditService:
             record = record.model_copy(
                 update={"order_intent_refs": [*record.order_intent_refs, envelope.event_id]},
             )
-            await self._publish_record(record)
+            await self._publish_record(record, flush_immediate=True)
 
     async def handle_order_update(self, message: dict) -> None:
         envelope = parse_envelope(message)
@@ -398,13 +398,18 @@ class DecisionAuditService:
         updated = record.model_copy(update={ref_field: envelope.event_id})
         await self._publish_record(updated)
 
-    async def _publish_record(self, record: DecisionAuditRecord) -> None:
+    async def _publish_record(
+        self, record: DecisionAuditRecord, *, flush_immediate: bool = False,
+    ) -> None:
         # P2-1: 更新本地读缓存
         self._cache_record(record)
         if self._flush_task is not None:
             # 批量模式：入队缓冲，到达上限时立即 flush
             self._write_buffer.append(record)
-            if len(self._write_buffer) >= self._batch_max_size:
+            # P2-2 fix: 关键决策边界事件（execution bundle / decision outcome /
+            # order intent）设 flush_immediate=True，立即将整个 buffer flush 落盘，
+            # 消除 operator 查询在 0.5s flush 窗口内读到 stale 数据的风险。
+            if flush_immediate or len(self._write_buffer) >= self._batch_max_size:
                 await self._flush_once()
         else:
             # 非批量模式（测试 / 未调 start_batch_writer）：立即写，兼容原行为

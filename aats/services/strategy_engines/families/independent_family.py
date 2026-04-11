@@ -930,6 +930,21 @@ def evaluate_independent_books(
         )
         if exit_expectancy is not None:
             updated = _dc_replace(book, expectancy=exit_expectancy)
+            # P1-1 fix: 退出腿重算 expectancy 后必须同步重算 execution_policy。
+            # 否则 downstream build_independent_leg() 会拿到 entry-side 的旧 policy
+            # （order_type / limit_offset / urgency 与实际退出成本不匹配）。
+            exit_policy = _independent_execution_policy(
+                settings=settings, book=updated,
+            )
+            if exit_policy is not None:
+                updated = _dc_replace(
+                    updated,
+                    execution_policy=exit_policy,
+                    # P2 fix: book.policy_reason 必须与 execution_policy.policy_reason
+                    # 保持一致——diagnostics / replay / runtime_state 直接读
+                    # decision.policy_reason，硬编码会导致审计展示与真实下单策略不符。
+                    policy_reason=exit_policy.policy_reason,
+                )
             if leg_label == "long":
                 long_book = updated
             else:
@@ -1572,13 +1587,27 @@ def _compute_independent_book_expectancy(
     # entry-side default.  Close/reduce legs trade the opposite side of
     # the book (e.g., selling to close a long, buying to close a short).
     resolved_side = execution_side if execution_side else ("buy" if leg == "long" else "sell")
+    # FIX: 成本估算应反映实际执行策略，而非硬编码 taker。
+    # 当 passive_first/bounded_limit 启用时，实际执行走 limit IOC，
+    # 费率主要是 maker fee；硬编码 taker 会多估 ~3 bps，导致
+    # 安全门控（safe_net_edge）误判本可盈利的入场信号。
+    _entry_mode = str(settings.strategy_hedge_independent_entry_execution_mode)
+    if _entry_mode in ("passive_first", "bounded_limit"):
+        _estimate_style = "bounded_limit_ioc"
+        _estimate_order_type = "limit"
+        _estimate_passive_bias = Decimal("0.7") if _entry_mode == "passive_first" else Decimal("0.5")
+    else:
+        _estimate_style = "taker"
+        _estimate_order_type = "market"
+        _estimate_passive_bias = None
     estimate = trade_cost_service.estimate_single_leg_entry(
         model_name=f"independent_{leg}_book",
         symbol=context.symbol,
         product_type=context.product_type,
         margin_mode=runtime_margin_mode,
-        execution_style="taker",
-        order_type="market",
+        execution_style=_estimate_style,
+        order_type=_estimate_order_type,
+        passive_bias=_estimate_passive_bias,
         side=resolved_side,
         quantity=planned_delta_qty,
         projected_notional=projected_notional,
