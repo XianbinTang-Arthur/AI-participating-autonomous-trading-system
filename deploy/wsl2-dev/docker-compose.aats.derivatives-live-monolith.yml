@@ -60,3 +60,11 @@ services:
       <<: *aats-derivatives-live-env
     deploy:
       replicas: 0
+
+  # rdp-daemon：monolith 模式下同样需要运行，负责执行 data_maintenance / research_cycle。
+  aats-rdp-daemon:
+    env_file:
+      - ../../.env.derivatives.live
+    environment:
+      <<: *aats-derivatives-live-env
+      AATS_PROCESS_ROLE: rdp-daemon

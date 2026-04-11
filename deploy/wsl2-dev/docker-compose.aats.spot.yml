@@ -57,3 +57,10 @@ services:
       - ../../.env.spot
     environment:
       <<: *aats-spot-env
+
+  aats-rdp-daemon:
+    env_file:
+      - ../../.env.spot
+    environment:
+      <<: *aats-spot-env
+      AATS_PROCESS_ROLE: rdp-daemon

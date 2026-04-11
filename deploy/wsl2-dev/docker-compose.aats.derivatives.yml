@@ -57,3 +57,10 @@ services:
       - ../../.env.derivatives
     environment:
       <<: *aats-derivatives-env
+
+  aats-rdp-daemon:
+    env_file:
+      - ../../.env.derivatives
+    environment:
+      <<: *aats-derivatives-env
+      AATS_PROCESS_ROLE: rdp-daemon

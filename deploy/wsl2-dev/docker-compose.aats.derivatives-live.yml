@@ -43,3 +43,10 @@ services:
       - ../../.env.derivatives.live
     environment:
       <<: *aats-derivatives-live-env
+
+  aats-rdp-daemon:
+    env_file:
+      - ../../.env.derivatives.live
+    environment:
+      <<: *aats-derivatives-live-env
+      AATS_PROCESS_ROLE: rdp-daemon
