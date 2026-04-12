@@ -35,12 +35,13 @@ log = logging.getLogger(__name__)
 
 BATCH_SIZE = 2000
 
-# Timeframe -> timedelta mapping
+# Timeframe -> timedelta mapping (大小写兼容)
 _TF_DELTA = {
     "1m": timedelta(minutes=1),
     "5m": timedelta(minutes=5),
     "15m": timedelta(minutes=15),
     "1H": timedelta(hours=1),
+    "1h": timedelta(hours=1),
 }
 
 # Max bars per single API request
@@ -181,7 +182,9 @@ def collect_candles_incremental(
     """Fetch recent candles from API and write to staging. Returns ingest_run_id."""
     inst_type = instrument_type_for_symbol(symbol)
     table = candle_table_name("staging", symbol, timeframe)
-    delta = _TF_DELTA[timeframe]
+    delta = _TF_DELTA.get(timeframe)
+    if delta is None:
+        raise ValueError(f"Unsupported timeframe '{timeframe}'. Valid: {sorted(_TF_DELTA)}")
 
     # Load checkpoint
     cp = get_checkpoint(

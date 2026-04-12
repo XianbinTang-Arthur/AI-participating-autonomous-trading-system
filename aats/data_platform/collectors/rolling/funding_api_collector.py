@@ -262,10 +262,31 @@ def collect_funding_incremental(
 def _migrate_null_funding_checkpoint(session: Session, symbol: str) -> None:
     """将旧 timeframe=NULL 的 funding checkpoint 迁移为 sentinel.
 
-    幂等：如果 sentinel 行已存在则跳过，如果 NULL 行不存在也跳过。
+    历史上 NULL unique 约束缺陷可能导致同一 symbol 存在多条 NULL 行。
+    本函数：
+      1. sentinel 行已存在 → 仅删除残留 NULL 行
+      2. sentinel 行不存在 → 取最新 NULL 行升级为 sentinel，删除其余
+    幂等：无 NULL 行时直接返回。
     """
-    # 检查是否存在 sentinel 行
-    existing = session.execute(
+    # 查找所有 NULL 行，按 last_successful_ts 降序
+    null_rows = session.execute(
+        text("""
+            SELECT checkpoint_id
+            FROM meta.ingest_checkpoints
+            WHERE dataset_domain = 'funding'
+              AND instrument_type = 'swap'
+              AND symbol = :sym
+              AND timeframe IS NULL
+            ORDER BY COALESCE(last_successful_ts, updated_at, created_at) DESC
+        """),
+        dict(sym=symbol),
+    ).fetchall()
+
+    if not null_rows:
+        return  # 无需迁移
+
+    # sentinel 行是否已存在
+    sentinel_exists = session.execute(
         text("""
             SELECT 1 FROM meta.ingest_checkpoints
             WHERE dataset_domain = 'funding'
@@ -276,21 +297,35 @@ def _migrate_null_funding_checkpoint(session: Session, symbol: str) -> None:
         """),
         dict(sym=symbol, tf=_FUNDING_TIMEFRAME_SENTINEL),
     ).scalar()
-    if existing:
-        return  # 已迁移
 
-    # 将 NULL 行更新为 sentinel
-    result = session.execute(
-        text("""
-            UPDATE meta.ingest_checkpoints
-            SET timeframe = :tf
-            WHERE dataset_domain = 'funding'
-              AND instrument_type = 'swap'
-              AND symbol = :sym
-              AND timeframe IS NULL
-        """),
-        dict(sym=symbol, tf=_FUNDING_TIMEFRAME_SENTINEL),
-    )
-    if result.rowcount:  # type: ignore[union-attr]
-        log.info("Migrated funding checkpoint NULL→'%s' for %s (%d rows)",
-                 _FUNDING_TIMEFRAME_SENTINEL, symbol, result.rowcount)
+    null_ids = [row[0] for row in null_rows]
+
+    if sentinel_exists:
+        # sentinel 已存在，所有 NULL 行都是残留，直接删除
+        ids_to_delete = null_ids
+    else:
+        # 将最新 NULL 行升级为 sentinel
+        best_id = null_ids[0]
+        session.execute(
+            text("""
+                UPDATE meta.ingest_checkpoints
+                SET timeframe = :tf
+                WHERE checkpoint_id = :cp_id
+            """),
+            dict(tf=_FUNDING_TIMEFRAME_SENTINEL, cp_id=best_id),
+        )
+        ids_to_delete = null_ids[1:]  # 其余 NULL 行待删除
+        log.info("Migrated funding checkpoint NULL→'%s' for %s (id=%s)",
+                 _FUNDING_TIMEFRAME_SENTINEL, symbol, best_id)
+
+    # 删除多余 NULL 行
+    if ids_to_delete:
+        session.execute(
+            text("""
+                DELETE FROM meta.ingest_checkpoints
+                WHERE checkpoint_id = ANY(:ids)
+            """),
+            dict(ids=ids_to_delete),
+        )
+        log.info("Deleted %d orphan NULL funding checkpoint(s) for %s",
+                 len(ids_to_delete), symbol)
