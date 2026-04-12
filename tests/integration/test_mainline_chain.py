@@ -915,13 +915,6 @@ class TestMainlineTradingChain(unittest.IsolatedAsyncioTestCase):
             interval_seconds=0.0,
         )
 
-        # Flush audit batch writer buffer before asserting — the last
-        # iteration's position_target_ref may still be buffered (no
-        # flush_immediate) when interval_seconds=0.0 causes all iterations
-        # to complete within a single batch flush window.
-        if hasattr(runtime, "audit_service") and runtime.audit_service is not None:
-            await runtime.audit_service.stop_batch_writer()
-
         self.assertEqual(runtime.event_store.count(topic=topics.MARKET_SNAPSHOTS), iterations)
         self.assertEqual(runtime.event_store.count(topic=topics.FEATURE_SNAPSHOTS), iterations)
 

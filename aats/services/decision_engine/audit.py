@@ -232,7 +232,7 @@ class DecisionAuditService:
                 "allocation_id": envelope.payload.get("allocation_id") or record.allocation_id,
             }
         )
-        await self._publish_record(updated)
+        await self._publish_record(updated, flush_immediate=True)
 
     async def handle_decision_outcome(self, message: dict) -> None:
         envelope = parse_envelope(message)
