@@ -171,7 +171,7 @@ def _get_constraint_rules(family: str = "independent") -> list[dict[str, Any]]:
     """返回 family-aware 约束规则列表。
 
     所有约束默认 fallback 使用对应 family 的默认值，例如:
-      - independent: close_threshold fallback = 0.15, entry_threshold = 0.40
+      - independent: close_threshold fallback = 0.10, entry_threshold = 0.30
       - directional: close_threshold fallback = 0.20, entry_threshold = 0.45
 
     这样在部分参数缺失时，约束检查不会因为错误的 fallback 而误判。

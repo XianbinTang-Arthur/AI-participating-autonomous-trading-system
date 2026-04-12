@@ -1,37 +1,38 @@
 {
   "meta": {
-    "parameter_set_id": "ps_20260405_213757_189612",
+    "parameter_set_id": "ps_20260411_234712_e39691",
     "family": "directional",
     "timeframe": "1h",
     "status": "active",
-    "source_round_id": "20260405_201039_3486e846",
-    "applied_at": "2026-04-05T21:38:25.276355+00:00",
-    "applied_by": "parameter_pipeline_fix",
-    "approval_recommendation_id": null,
-    "override_reason": {
-      "entry_threshold": "RDP \u6821\u51c6\u63a8\u8350 0.40\uff0c\u504f\u79bb ReplayParameterOverrides.for_family('directional') \u9ed8\u8ba4 0.45\u3002BTC-USDT-SWAP 120 \u5929\u56de\u6d4b\u663e\u793a 0.40 \u4e0b pos_ratio \u4e0e net_PnL \u4f18\u4e8e 0.45\uff0c\u8be6\u89c1 source_round_id \u5bf9\u5e94\u7684 step3 conclusion\u3002",
-      "close_threshold": "RDP \u6821\u51c6\u63a8\u8350 0.15\uff0c\u504f\u79bb ReplayParameterOverrides.for_family('directional') \u9ed8\u8ba4 0.20\u3002\u4e0e entry_threshold \u4fdd\u6301 0.25 \u7684 hysteresis \u95f4\u8ddd\uff0c\u9650\u5236\u9707\u8361\u5e02\u4e0b\u7684\u8fc7\u9891\u5f00\u5e73\u4ed3\u3002",
-      "short_entry_threshold": "P3-10 \u4fee\u590d\uff1adirectional \u5bb6\u65cf short \u9608\u503c\u660e\u786e\u5316\uff0c\u4e0e long \u5bf9\u79f0\uff080.40\uff09\u3002",
-      "short_close_threshold": "P3-10 \u4fee\u590d\uff1adirectional \u5bb6\u65cf short close \u9608\u503c\u660e\u786e\u5316\uff0c\u4e0e long \u5bf9\u79f0\uff080.15\uff09\u3002"
-    }
+    "source_round_id": "20260411_234336_4fb26482",
+    "applied_at": "2026-04-11T23:48:03.037510+00:00",
+    "applied_by": "apply_active_parameter_set.py",
+    "approval_recommendation_id": null
   },
   "values": {
+    "directional_trend_weight": 1.0,
+    "short_close_threshold": 0.2,
+    "entry_threshold": 0.45,
+    "min_liquidity_quality": 0.55,
     "taker_fee_bps": 5.0,
-    "de_risk_net_edge_bps": 2.0,
-    "rebalance_cooldown_seconds": 120.0,
-    "expected_slippage_buffer_bps": 0.5,
-    "signal_edge_scale_bps": 20,
-    "scale_in_threshold": 0.6,
-    "min_confirm_ticks": 2,
-    "close_threshold": 0.15,
-    "short_close_threshold": 0.15,
+    "min_hold_seconds": 300.0,
     "slippage_bps": 2.0,
-    "expected_execution_buffer_bps": 0.5,
-    "failed_thesis_net_edge_bps": -1.0,
-    "catastrophic_failed_thesis_buffer_bps": 3.0,
-    "entry_threshold": 0.4,
-    "short_entry_threshold": 0.4,
+    "max_acceptable_cost_bps": 7.5,
+    "signal_edge_scale_bps": 20,
     "min_safe_net_edge_bps": 2.0,
-    "min_hold_seconds": 300.0
+    "failed_thesis_net_edge_bps": -1.0,
+    "rebalance_cooldown_seconds": 120.0,
+    "limit_offset_bps_entry": 1.5,
+    "score_stability_threshold": 5.0,
+    "de_risk_net_edge_bps": 2.0,
+    "catastrophic_failed_thesis_buffer_bps": 3.0,
+    "expected_slippage_buffer_bps": 0.5,
+    "directional_return_clamp_bps": 10,
+    "scale_in_threshold": 0.55,
+    "expected_execution_buffer_bps": 0.5,
+    "short_entry_threshold": 0.45,
+    "min_confirm_ticks": 5,
+    "close_threshold": 0.2,
+    "max_thesis_age_seconds": 1800.0
   }
 }

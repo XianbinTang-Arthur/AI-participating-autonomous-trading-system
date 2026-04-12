@@ -748,7 +748,7 @@ def _recommend_cost_model(experiments: list[dict[str, Any]]) -> dict[str, Any]:
     else:
         sensitivity_note = "Only 1 cost point tested."
 
-    taker, slip = 5.0, 2.0
+    taker, slip = 5.0, 1.0
     confidence = "low"
     reason = sensitivity_note
 
@@ -1017,8 +1017,8 @@ def _recommend_entry_threshold(experiments: list[dict[str, Any]]) -> dict[str, A
     阈值过低会产生噪声交易，过高会错过机会。
     """
     if not experiments:
-        return {"value": 0.40, "confidence": "low",
-                "reason": "Entry threshold batch 未运行或无数据, 保留默认值 0.40"}
+        return {"value": 0.30, "confidence": "low",
+                "reason": "Entry threshold batch 未运行或无数据, 保留默认值 0.30"}
 
     sorted_exps = sorted(
         experiments,
