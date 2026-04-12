@@ -35,13 +35,22 @@ log = logging.getLogger(__name__)
 
 BATCH_SIZE = 2000
 
-# Timeframe -> timedelta mapping (大小写兼容)
+# Timeframe -> timedelta mapping (canonical lowercase keys only).
+# Entry normalisation in collect_candles_incremental() guarantees callers
+# always land on one of these keys.
 _TF_DELTA = {
     "1m": timedelta(minutes=1),
     "5m": timedelta(minutes=5),
     "15m": timedelta(minutes=15),
-    "1H": timedelta(hours=1),
     "1h": timedelta(hours=1),
+}
+
+# Canonical lowercase → OKX-native bar string.
+# OKX REST API uses uppercase letters for ≥1 hour units (1H, 4H, 1D …).
+# This mapping is also reused by the one-time checkpoint migration to
+# locate legacy uppercase rows.
+_OKX_BAR: dict[str, str] = {
+    "1h": "1H",
 }
 
 # Max bars per single API request
@@ -87,10 +96,16 @@ def _fetch_candles(
     after_ms: int | None = None,
     before_ms: int | None = None,
 ) -> list[list[str]]:
-    """Call OKX history-candles API once."""
+    """Call OKX history-candles API once.
+
+    ``timeframe`` is the internal canonical (lowercase) value;
+    it is translated to the OKX-native bar string (e.g. ``1h`` → ``1H``)
+    before sending the request.
+    """
+    api_bar = _OKX_BAR.get(timeframe, timeframe)
     params: dict[str, Any] = {
         "instId": symbol,
-        "bar": timeframe,
+        "bar": api_bar,
         "limit": str(_API_LIMIT),
     }
     if after_ms is not None:
@@ -180,7 +195,18 @@ def collect_candles_incremental(
     max_pages: int = 10,
 ) -> str:
     """Fetch recent candles from API and write to staging. Returns ingest_run_id."""
+    # ── Canonical normalisation ──────────────────────────────────────
+    # Lowercase is the single source-of-truth for checkpoint keys,
+    # run metadata, and table names (candle_table_name already lowercases
+    # via _validate_timeframe).  This prevents split checkpoint tracks
+    # when callers pass "1H" (OKX-native / legacy config) vs "1h".
+    timeframe = timeframe.lower()
+
     inst_type = instrument_type_for_symbol(symbol)
+
+    # One-time migration: rename legacy uppercase checkpoint (e.g. "1H" → "1h")
+    _migrate_uppercase_candle_checkpoint(session, symbol.upper(), inst_type, timeframe)
+
     table = candle_table_name("staging", symbol, timeframe)
     delta = _TF_DELTA.get(timeframe)
     if delta is None:
@@ -282,3 +308,81 @@ def collect_candles_incremental(
         raise
 
     return run_id
+
+
+# ── 一次性迁移: uppercase timeframe → lowercase ──────────────────
+
+
+def _migrate_uppercase_candle_checkpoint(
+    session: Session,
+    symbol: str,
+    inst_type: str,
+    canonical_tf: str,
+) -> None:
+    """将旧 uppercase timeframe 的 checkpoint 迁移为 lowercase.
+
+    例如 ``timeframe='1H'`` → ``'1h'``。幂等：无 uppercase 行时直接返回。
+
+    逻辑与 funding_api_collector._migrate_null_funding_checkpoint 相同:
+      1. canonical 行已存在 → 仅删除残留 uppercase 行
+      2. canonical 行不存在 → 将 uppercase 行更名为 canonical
+    """
+    old_tf = _OKX_BAR.get(canonical_tf)
+    if not old_tf:
+        return  # "1m", "5m", "15m" 没有 uppercase 变体
+
+    old_row = session.execute(
+        text("""
+            SELECT checkpoint_id
+            FROM meta.ingest_checkpoints
+            WHERE dataset_domain = 'candles'
+              AND instrument_type = :inst
+              AND symbol = :sym
+              AND timeframe = :old_tf
+        """),
+        dict(inst=inst_type, sym=symbol, old_tf=old_tf),
+    ).fetchone()
+
+    if not old_row:
+        return  # 无需迁移
+
+    # canonical (lowercase) 行是否已存在
+    canonical_exists = session.execute(
+        text("""
+            SELECT 1 FROM meta.ingest_checkpoints
+            WHERE dataset_domain = 'candles'
+              AND instrument_type = :inst
+              AND symbol = :sym
+              AND timeframe = :new_tf
+            LIMIT 1
+        """),
+        dict(inst=inst_type, sym=symbol, new_tf=canonical_tf),
+    ).scalar()
+
+    if canonical_exists:
+        # 两行都在 → lowercase 权威，删除旧 uppercase
+        session.execute(
+            text("""
+                DELETE FROM meta.ingest_checkpoints
+                WHERE checkpoint_id = :cp_id
+            """),
+            dict(cp_id=old_row.checkpoint_id),
+        )
+        log.info(
+            "Deleted orphan uppercase checkpoint '%s' for %s (lowercase '%s' exists)",
+            old_tf, symbol, canonical_tf,
+        )
+    else:
+        # 仅 uppercase 存在 → 更名为 lowercase
+        session.execute(
+            text("""
+                UPDATE meta.ingest_checkpoints
+                SET timeframe = :new_tf
+                WHERE checkpoint_id = :cp_id
+            """),
+            dict(new_tf=canonical_tf, cp_id=old_row.checkpoint_id),
+        )
+        log.info(
+            "Migrated candle checkpoint '%s'→'%s' for %s (id=%s)",
+            old_tf, canonical_tf, symbol, old_row.checkpoint_id,
+        )

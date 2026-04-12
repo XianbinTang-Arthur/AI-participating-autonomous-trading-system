@@ -78,7 +78,7 @@ class ResearchPlatformSettings(BaseSettings):
     # 如需重新启用 1m/5m, 设置 RDP_ROLLING_CANDLES_TIMEFRAMES 环境变量,
     # 或在 .env.research 中显式覆盖。schema 表 (staging/silver/gold *_1m, *_5m)
     # 仍然存在, 历史数据可继续读取, 只是默认不再增量采集。
-    rolling_candles_timeframes: list[str] = Field(default=["15m", "1H"])
+    rolling_candles_timeframes: list[str] = Field(default=["15m", "1h"])
 
     # Funding rolling
     rolling_funding_enabled: bool = True

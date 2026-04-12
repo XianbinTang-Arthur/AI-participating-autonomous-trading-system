@@ -19,8 +19,7 @@ _TF_DELTA = {
     "1m": timedelta(minutes=1),
     "5m": timedelta(minutes=5),
     "15m": timedelta(minutes=15),
-    "1H": timedelta(hours=1),
-    "1h": timedelta(hours=1),  # 大小写兼容
+    "1h": timedelta(hours=1),
 }
 
 
@@ -33,6 +32,7 @@ def detect_candle_gaps(
     window_end: datetime,
 ) -> list[dict[str, Any]]:
     """Scan silver candles for missing intervals. Returns list of gap dicts."""
+    timeframe = timeframe.lower()  # canonical — 与 candle_table_name 一致
     table = candle_table_name("silver", symbol, timeframe)
     delta = _TF_DELTA.get(timeframe)
     if delta is None:
@@ -72,6 +72,8 @@ def create_gap_repair_runs(
     gaps: list[dict[str, Any]],
 ) -> list[str]:
     """Create gap_repair ingest_run entries for each detected gap. Returns run_ids."""
+    if timeframe is not None:
+        timeframe = timeframe.lower()  # canonical — 与 checkpoint / table name 一致
     inst_type = instrument_type_for_symbol(symbol)
     run_ids: list[str] = []
     for gap in gaps:
