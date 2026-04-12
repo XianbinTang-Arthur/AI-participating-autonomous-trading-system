@@ -430,6 +430,13 @@ class RuntimeQueryFacade:
         return self.build_system_runtime()
 
     def build_system_runtime(self) -> dict[str, Any]:
+        # ── 阶段 0：预热 strategy_runtime 的 30s TTL 缓存 ──────────
+        # strategy_runtime 内部用 ThreadPoolExecutor(5) 并行发 8 个 DB 查询。
+        # 如果放进下面的 parallel_fetch（17 路并发），会与其他 16 个查询同时
+        # 竞争 DB 连接池（pool_size=10），导致冷启动从 ~5s 膨胀到 30s+。
+        # 先单独计算并填充缓存，parallel_fetch 中的 lambda 直接命中热缓存。
+        self.owner.strategy_runtime(limit=5)
+
         # ── 阶段 1：并行获取所有独立子查询 ──────────────────────
         r = parallel_fetch({
             "latest_decision": lambda: self.owner.runtime.event_store.latest(topics.DECISION_CONTEXTS),
