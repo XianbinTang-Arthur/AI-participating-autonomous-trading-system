@@ -15,37 +15,21 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import pathlib
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
+
+from aats.data_platform.governance._db_util import try_governance_db
 
 log = logging.getLogger(__name__)
 
 
 # ── DB 辅助 ──────────────────────────────────────────────────────────
 
-def _try_governance_db():
-    """尝试获取 DB 连接。返回 (engine, True) 或 (None, False)."""
-    url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
-    if not url:
-        return None, False
-    try:
-        from sqlalchemy import create_engine, text as sa_text
-
-        engine = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
-        with engine.connect() as conn:
-            conn.execute(sa_text("SELECT 1 FROM governance.recommendations LIMIT 0"))
-        return engine, True
-    except Exception as exc:
-        log.debug("recommendation_registry: DB 不可用 (%s)，使用文件模式", exc)
-        return None, False
-
-
 def _db_sync_recommendation(rec: dict[str, Any]) -> None:
     """将单个 recommendation dict 同步到 DB（best-effort）."""
-    engine, ok = _try_governance_db()
+    engine, ok = try_governance_db()
     if not ok:
         return
     try:
@@ -68,9 +52,10 @@ def _db_sync_recommendation(rec: dict[str, Any]) -> None:
                 status=rec.get("status", "draft"),
                 approved_by=rec.get("approved_by"),
                 approved_at=rec.get("approved_at"),
-                approval_notes=rec.get("approval_notes"),
+                review_notes=rec.get("review_notes"),
                 rejected_by=rec.get("rejected_by"),
                 rejected_at=rec.get("rejected_at"),
+                superseded_by=rec.get("superseded_by"),
                 superseded_at=rec.get("superseded_at"),
                 superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
                 created_at=rec.get("created_at"),
@@ -84,7 +69,7 @@ def _db_sync_recommendation(rec: dict[str, Any]) -> None:
 
 def _db_update_rec_status(rec: dict[str, Any]) -> None:
     """将 recommendation 状态变更同步到 DB（best-effort）."""
-    engine, ok = _try_governance_db()
+    engine, ok = try_governance_db()
     if not ok:
         return
     try:
@@ -99,9 +84,10 @@ def _db_update_rec_status(rec: dict[str, Any]) -> None:
                 status=rec["status"],
                 approved_by=rec.get("approved_by"),
                 approved_at=rec.get("approved_at"),
-                approval_notes=rec.get("approval_notes"),
+                review_notes=rec.get("review_notes"),
                 rejected_by=rec.get("rejected_by"),
                 rejected_at=rec.get("rejected_at"),
+                superseded_by=rec.get("superseded_by"),
                 superseded_at=rec.get("superseded_at"),
                 superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
             )
@@ -119,7 +105,7 @@ def _db_sync_active_decision(
     notes: str | None = None,
 ) -> None:
     """将 active decision UPSERT 同步到 DB（best-effort）."""
-    engine, ok = _try_governance_db()
+    engine, ok = try_governance_db()
     if not ok:
         return
     try:
@@ -171,7 +157,7 @@ def load_recommendation_registry(path: pathlib.Path, *, skip_db: bool = False) -
     优先级: DB → 文件 → 空 registry。skip_db=True 跳过 DB 直接读文件。
     """
     if not skip_db:
-        engine, ok = _try_governance_db()
+        engine, ok = try_governance_db()
         if ok:
             try:
                 from sqlalchemy.orm import Session
@@ -285,7 +271,7 @@ def approve_recommendation(
     rec["approved_by"] = approved_by
     rec["approved_at"] = datetime.now(timezone.utc).isoformat()
     if notes:
-        rec["approval_notes"] = notes
+        rec["review_notes"] = notes
     _db_update_rec_status(rec)
     return rec
 
@@ -314,7 +300,7 @@ def reject_recommendation(
     rec["rejected_by"] = rejected_by
     rec["rejected_at"] = datetime.now(timezone.utc).isoformat()
     if notes:
-        rec["approval_notes"] = notes
+        rec["review_notes"] = notes
     _db_update_rec_status(rec)
     return rec
 
@@ -342,7 +328,7 @@ def supersede_recommendation(
     if superseded_by_id:
         rec["superseded_by_recommendation_id"] = superseded_by_id
     if notes:
-        rec["approval_notes"] = notes
+        rec["review_notes"] = notes
     _db_update_rec_status(rec)
     return rec
 
@@ -356,7 +342,7 @@ def load_active_decision_registry(path: pathlib.Path, *, skip_db: bool = False) 
     优先级: DB → 文件 → 空 registry。skip_db=True 跳过 DB 直接读文件。
     """
     if not skip_db:
-        engine, ok = _try_governance_db()
+        engine, ok = try_governance_db()
         if ok:
             try:
                 from sqlalchemy.orm import Session

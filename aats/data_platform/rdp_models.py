@@ -587,7 +587,7 @@ class ParameterSetModel(RdpBase):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    parameter_set_id = Column(String(128), nullable=False, unique=True)
+    parameter_set_id = Column(String(128), nullable=False)
     family = Column(String(64), nullable=False)
     symbol = Column(String(32), nullable=False, server_default=text("'BTC-USDT-SWAP'"))
     timeframe = Column(String(16), nullable=False)
@@ -618,7 +618,7 @@ class RecommendationModel(RdpBase):
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    recommendation_id = Column(String(128), nullable=False, unique=True)
+    recommendation_id = Column(String(128), nullable=False)
     family = Column(String(64), nullable=False)
     symbol = Column(String(32), nullable=False, server_default=text("'BTC-USDT-SWAP'"))
     timeframe = Column(String(16), nullable=False)
@@ -630,9 +630,10 @@ class RecommendationModel(RdpBase):
     status = Column(String(32), nullable=False, server_default=text("'draft'"))
     approved_by = Column(String(128))
     approved_at = Column(DateTime(timezone=True))
-    approval_notes = Column(Text)
+    review_notes = Column(Text)
     rejected_by = Column(String(128))
     rejected_at = Column(DateTime(timezone=True))
+    superseded_by = Column(String(128))
     superseded_at = Column(DateTime(timezone=True))
     superseded_by_recommendation_id = Column(String(128))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
@@ -701,6 +702,9 @@ def create_rdp_schema(engine: object) -> None:
 
     替代 migrations/research/*.sql 迁移文件。幂等——已存在的 schema/表不会
     被破坏（CREATE SCHEMA IF NOT EXISTS + create_all 的 checkfirst=True）。
+
+    同时执行 governance 表结构迁移（列重命名 / 新增列），确保旧表升级到
+    当前 ORM 定义。
     """
     from sqlalchemy import text as _text
 
@@ -709,3 +713,46 @@ def create_rdp_schema(engine: object) -> None:
             conn.execute(_text(f"CREATE SCHEMA IF NOT EXISTS {schema}"))
 
     RdpBase.metadata.create_all(engine)  # type: ignore[arg-type]
+    _migrate_governance_recommendations(engine)
+
+
+def _migrate_governance_recommendations(engine: object) -> None:
+    """governance.recommendations 表结构迁移（幂等）.
+
+    处理以下变更:
+    1. approval_notes → review_notes（语义修正）
+    2. 新增 superseded_by 列（记录 supersede 操作人）
+    """
+    from sqlalchemy import text as _text
+
+    with engine.begin() as conn:  # type: ignore[union-attr]
+        # 检查 recommendations 表是否存在
+        tbl_exists = conn.execute(_text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'governance' AND table_name = 'recommendations'"
+        )).fetchone()
+        if not tbl_exists:
+            return
+
+        # 1. approval_notes → review_notes
+        old_col = conn.execute(_text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'governance' AND table_name = 'recommendations' "
+            "AND column_name = 'approval_notes'"
+        )).fetchone()
+        new_col = conn.execute(_text(
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = 'governance' AND table_name = 'recommendations' "
+            "AND column_name = 'review_notes'"
+        )).fetchone()
+        if old_col and not new_col:
+            conn.execute(_text(
+                "ALTER TABLE governance.recommendations "
+                "RENAME COLUMN approval_notes TO review_notes"
+            ))
+
+        # 2. 新增 superseded_by 列
+        conn.execute(_text(
+            "ALTER TABLE governance.recommendations "
+            "ADD COLUMN IF NOT EXISTS superseded_by VARCHAR(128)"
+        ))

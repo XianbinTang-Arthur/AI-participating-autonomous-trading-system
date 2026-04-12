@@ -72,19 +72,12 @@ def parse_args() -> argparse.Namespace:
 
 def _get_db_engine():
     """尝试创建 DB engine，返回 (engine, True) 或 (None, False)."""
-    db_url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
-    if not db_url:
-        return None, False
-    try:
-        from sqlalchemy import create_engine, text as sa_text
+    from aats.data_platform.governance._db_util import try_governance_db
 
-        engine = create_engine(db_url, pool_pre_ping=True, pool_size=1, max_overflow=0)
-        with engine.connect() as conn:
-            conn.execute(sa_text("SELECT 1 FROM governance.active_parameter_sets LIMIT 0"))
-        return engine, True
-    except Exception as exc:
-        print(f"[WARN] DB 不可用: {exc}")
-        return None, False
+    engine, ok = try_governance_db()
+    if not ok:
+        print("[WARN] DB 不可用")
+    return engine, ok
 
 
 def _try_db_write_active(
@@ -380,13 +373,29 @@ def action_clear(project_root: Path, args: argparse.Namespace) -> int:
     file_path.unlink()
     print(f"[OK] 已清除: {file_path}")
 
+    # 更新 active_parameter_registry.json（移除条目）
+    try:
+        from aats.bootstrap.active_parameters import (
+            load_active_parameter_registry,
+            save_active_parameter_registry,
+        )
+
+        reg = load_active_parameter_registry(project_root=project_root, skip_db=True)
+        active_sets = reg.get("active_sets", {})
+        if args.combo in active_sets:
+            del active_sets[args.combo]
+            save_active_parameter_registry(reg, project_root=project_root)
+            print(f"[OK] 已从 active_parameter_registry.json 移除 {args.combo}")
+    except Exception as exc:
+        print(f"[WARN] 更新 registry 文件失败: {exc}")
+
     # DB 清除
-    engine, ok = _get_db_engine()
-    if ok:
-        try:
-            parts = args.combo.rsplit("_", 1)
-            if len(parts) == 2:
-                family, timeframe = parts[0], parts[1]
+    parts = args.combo.rsplit("_", 1)
+    if len(parts) == 2:
+        family, timeframe = parts[0], parts[1]
+        engine, ok = _get_db_engine()
+        if ok:
+            try:
                 from sqlalchemy.orm import Session
 
                 from aats.data_platform.governance.active_params_db import db_clear_active_set
@@ -394,11 +403,11 @@ def action_clear(project_root: Path, args: argparse.Namespace) -> int:
                 with Session(engine) as session, session.begin():
                     db_clear_active_set(session, family, timeframe)
                 print("[OK] 已从数据库清除")
-        except Exception as exc:
-            print(f"[WARN] DB 清除失败: {exc}")
-        finally:
-            if engine is not None:
-                engine.dispose()
+            except Exception as exc:
+                print(f"[WARN] DB 清除失败: {exc}")
+            finally:
+                if engine is not None:
+                    engine.dispose()
 
     _write_application_log(
         project_root,
@@ -505,6 +514,8 @@ def action_seed_db(project_root: Path, args: argparse.Namespace) -> int:
         if rec_path.exists():
             rec_reg = load_recommendation_registry(rec_path, skip_db=True)
             for rec in rec_reg.get("recommendations", []):
+                # 兼容旧 JSON 文件: approval_notes → review_notes
+                review_notes = rec.get("review_notes") or rec.get("approval_notes")
                 db_upsert_recommendation(
                     session,
                     recommendation_id=rec["recommendation_id"],
@@ -519,9 +530,10 @@ def action_seed_db(project_root: Path, args: argparse.Namespace) -> int:
                     status=rec.get("status", "draft"),
                     approved_by=rec.get("approved_by"),
                     approved_at=rec.get("approved_at"),
-                    approval_notes=rec.get("approval_notes"),
+                    review_notes=review_notes,
                     rejected_by=rec.get("rejected_by"),
                     rejected_at=rec.get("rejected_at"),
+                    superseded_by=rec.get("superseded_by"),
                     superseded_at=rec.get("superseded_at"),
                     superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
                     created_at=rec.get("created_at"),
@@ -557,10 +569,12 @@ def action_seed_db(project_root: Path, args: argparse.Namespace) -> int:
 
         # ── 4. active_parameter_registry.json → governance.active_parameter_sets ──
         from aats.bootstrap.active_parameters import load_active_parameter_registry
-        from aats.data_platform.governance.active_params_db import (
-            db_append_history,
-            db_upsert_active_set,
-        )
+        from aats.data_platform.governance.active_params_db import db_upsert_active_set
+
+        # 清除旧 seed 历史记录（确保幂等）
+        session.execute(sa_text(
+            "DELETE FROM governance.parameter_apply_history WHERE operation_type = 'seed'"
+        ))
 
         active_reg = load_active_parameter_registry(project_root=project_root, skip_db=True)
         for combo_key, entry in active_reg.get("active_sets", {}).items():
@@ -578,7 +592,10 @@ def action_seed_db(project_root: Path, args: argparse.Namespace) -> int:
                 applied_by=entry.get("applied_by", "seed-db"),
             )
 
-            op_id = f"op_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+            # 确定性 operation_id 保证幂等
+            from aats.data_platform.governance.active_params_db import db_append_history
+
+            op_id = f"seed_{family}_{timeframe}"
             db_append_history(
                 session,
                 operation_id=op_id, operation_type="seed",

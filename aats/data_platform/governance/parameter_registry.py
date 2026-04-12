@@ -13,37 +13,19 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import pathlib
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from ._db_util import try_governance_db
+
 log = logging.getLogger(__name__)
-
-
-# ── DB 辅助 ──────────────────────────────────────────────────────────
-
-def _try_governance_db():
-    """尝试获取 DB 连接。返回 (engine, True) 或 (None, False)."""
-    url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
-    if not url:
-        return None, False
-    try:
-        from sqlalchemy import create_engine, text as sa_text
-
-        engine = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
-        with engine.connect() as conn:
-            conn.execute(sa_text("SELECT 1 FROM governance.parameter_sets LIMIT 0"))
-        return engine, True
-    except Exception as exc:
-        log.debug("parameter_registry: DB 不可用 (%s)，使用文件模式", exc)
-        return None, False
 
 
 def _db_sync_single(ps: dict[str, Any]) -> None:
     """将单个 parameter_set dict 同步到 DB（best-effort）."""
-    engine, ok = _try_governance_db()
+    engine, ok = try_governance_db()
     if not ok:
         return
     try:
@@ -78,7 +60,7 @@ def _db_sync_single(ps: dict[str, Any]) -> None:
 
 def _db_update_status(ps_id: str, status: str, frozen_at: str | None, deprecated_at: str | None, notes: str | None) -> None:
     """更新 DB 中的 parameter_set 状态（best-effort）."""
-    engine, ok = _try_governance_db()
+    engine, ok = try_governance_db()
     if not ok:
         return
     try:
@@ -156,7 +138,7 @@ def load_registry(path: pathlib.Path, *, skip_db: bool = False) -> dict[str, Any
     skip_db=True 时跳过 DB 直接读文件（用于 seed-db 等需要文件数据的场景）。
     """
     if not skip_db:
-        engine, ok = _try_governance_db()
+        engine, ok = try_governance_db()
         if ok:
             try:
                 from sqlalchemy.orm import Session

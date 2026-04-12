@@ -134,8 +134,8 @@ def _show_recommendation(rec: dict) -> None:
         print(f"  Rejected:   {rec['rejected_at']} by {rec.get('rejected_by')}")
     if rec.get("superseded_at"):
         print(f"  Superseded: {rec['superseded_at']} by {rec.get('superseded_by')}")
-    if rec.get("approval_notes"):
-        print(f"  Notes:      {rec['approval_notes']}")
+    if rec.get("review_notes") or rec.get("approval_notes"):
+        print(f"  Notes:      {rec.get('review_notes') or rec.get('approval_notes')}")
     print()
 
 

@@ -10,13 +10,14 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+from ._db_util import VALID_PS_STATUSES, json_dumps, parse_dt
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +47,9 @@ def db_upsert_parameter_set(
     INSERT ... ON CONFLICT (parameter_set_id) DO UPDATE
     保证幂等。调用方应在同一个事务中使用。
     """
+    if status not in VALID_PS_STATUSES:
+        raise ValueError(f"非法 parameter_set status: {status!r}，合法值: {sorted(VALID_PS_STATUSES)}")
+
     session.execute(
         text("""
             INSERT INTO governance.parameter_sets
@@ -80,12 +84,12 @@ def db_upsert_parameter_set(
             "src_round": source_round_id,
             "src_phase": source_phase,
             "ds_ver": dataset_version,
-            "vals": _json_dumps(values),
+            "vals": json_dumps(values),
             "confidence": confidence,
             "status": status,
-            "created_at": _parse_dt(created_at) or datetime.now(timezone.utc),
-            "frozen_at": _parse_dt(frozen_at),
-            "deprecated_at": _parse_dt(deprecated_at),
+            "created_at": parse_dt(created_at) or datetime.now(timezone.utc),
+            "frozen_at": parse_dt(frozen_at),
+            "deprecated_at": parse_dt(deprecated_at),
             "notes": notes,
         },
     )
@@ -114,10 +118,10 @@ def db_update_parameter_set_status(
 
     if frozen_at is not None:
         set_parts.append("frozen_at = :frozen_at")
-        params["frozen_at"] = _parse_dt(frozen_at) or datetime.now(timezone.utc)
+        params["frozen_at"] = parse_dt(frozen_at) or datetime.now(timezone.utc)
     if deprecated_at is not None:
         set_parts.append("deprecated_at = :deprecated_at")
-        params["deprecated_at"] = _parse_dt(deprecated_at) or datetime.now(timezone.utc)
+        params["deprecated_at"] = parse_dt(deprecated_at) or datetime.now(timezone.utc)
     if notes is not None:
         set_parts.append("notes = :notes")
         params["notes"] = notes
@@ -225,20 +229,6 @@ def db_load_full_registry(session: Session) -> dict[str, Any]:
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────
-
-def _json_dumps(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, default=str)
-
-
-def _parse_dt(val: str | None) -> datetime | None:
-    """将 ISO 字符串解析为 datetime，None 原样返回."""
-    if val is None:
-        return None
-    try:
-        return datetime.fromisoformat(val)
-    except (ValueError, TypeError):
-        return None
-
 
 def _row_to_dict(row: Any) -> dict[str, Any]:
     """将 SQL 结果行转换为与文件 registry 兼容的 dict."""
