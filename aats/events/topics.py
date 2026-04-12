@@ -44,6 +44,12 @@ OPERATOR_ACTIONS = "system.operator_actions"
 # 两条 topic 都归 critical（丢包会让 HTTP 超时、系统卡在 blocker）。
 OPERATOR_COMMAND_REQUESTS = "system.operator_command_requests"
 OPERATOR_COMMAND_RESPONSES = "system.operator_command_responses"
+# Finding 3: decision 侧 guard signal 跨进程缓存。execution 进程周期性地把
+# DerivativesLiveGuardService / ForwardTrialGuardService / RecoveryPostureEvaluator
+# 的快照 publish 到本 topic，decision 进程的 GuardSignalHotStateCache 订阅并
+# 更新本地 dict，供 RiskEngine 同步读取。丢一条不致命（stale check 会让
+# RiskEngine fall-closed 到保守模式），但会导致短暂信号延迟。
+GUARD_SIGNAL_UPDATES = "system.guard_signal_updates"
 EXECUTION_ERROR_SUMMARIES = "execution.error_summaries"
 PROCESSING_FAILURES = "system.processing_failures"
 # Stage 6 Slice 6.2：跨进程 kill_switch 状态广播。critical 路径，丢一条会让某个

@@ -20,6 +20,7 @@ from aats.bootstrap.telemetry import TelemetryConfig, configure_telemetry
 from aats.bootstrap.settings import (
     AATSSettings,
     DEPRECATED_STRATEGY_SLEEVE_AUTO_EXECUTION_KEY,
+    EVENT_BUS_BACKEND_IN_MEMORY,
     PROCESS_ROLE_DECISION,
     PROCESS_ROLE_EXECUTION,
     PROCESS_ROLE_GATEWAY,
@@ -523,6 +524,10 @@ class ApplicationRuntime:
     # 详见 docs/task/slice_4proc_operator_command_proxy_fix_design.md §4/§5。
     operator_command_client: OperatorCommandClient | None = None
     operator_command_worker: OperatorCommandWorker | None = None
+    # Finding 3: guard signal 跨进程缓存。execution 侧 publish，decision 侧 read。
+    # monolith 下为 None（guard service 直接注入 risk_engine）。
+    guard_signal_caches: dict[str, Any] | None = None
+    _guard_signal_publish_task: Any | None = None
     logger: Any = field(default_factory=lambda: get_logger("aats.runtime"))
     # build_runtime 解析后的 effective_process_role。settings.process_role 可能
     # 与 kwarg 传入值不一致（kwarg 优先），运行时门禁必须读此字段。
@@ -3094,11 +3099,40 @@ _TOPOLOGY_CAPABILITY_RULES: list[
         str,                                           # human_message
     ]
 ] = [
-    # hedge_requires_colocated_decision_execution 规则已移除（Stage 4 完成）：
-    # execution slice 现在在 4 进程模式下本地构造 RiskEngine 实例，
-    # 所有依赖（account_service、health_service、price_provider 等）均来自
-    # shared slice / storage 层，无需 decision slice 共处同进程。
-    # 详见 _build_execution_slice 的 _execution_local_risk_engine 构造逻辑。
+    # ── 四进程拓扑必须使用跨进程事件总线 ─────────────────────────────
+    # 限定条件：仅在实盘/交易所耦合场景下校验（live_submit_enabled 或
+    # account_backend=okx），避免阻断本地 smoke 测试和纯模拟 profile。
+    (
+        "4proc_requires_cross_process_event_bus",
+        lambda s, topo: (
+            topo == _TOPOLOGY_4PROC
+            and s.event_bus_backend == EVENT_BUS_BACKEND_IN_MEMORY
+            and (
+                s.live_submit_enabled
+                or s.mode == "guarded_live"
+                or (s.account_backend == "okx" and s.execution_backend == "okx")
+            )
+        ),
+        "4proc_requires_cross_process_event_bus",
+        "四进程模式下不能使用 in_memory 事件总线——跨进程事件无法送达。"
+        " 请设置 AATS_EVENT_BUS_BACKEND=hybrid（推荐）或 nats。",
+    ),
+    # ── 四进程拓扑必须使用 Redis 热状态 ──────────────────────────────
+    (
+        "4proc_requires_redis_hot_state",
+        lambda s, topo: (
+            topo == _TOPOLOGY_4PROC
+            and s.hot_state_backend == "memory"
+            and (
+                s.live_submit_enabled
+                or s.mode == "guarded_live"
+                or (s.account_backend == "okx" and s.execution_backend == "okx")
+            )
+        ),
+        "4proc_requires_redis_hot_state",
+        "四进程模式下不能使用 memory 热状态——跨进程状态无法共享。"
+        " 请设置 AATS_HOT_STATE_BACKEND=redis 并配置 AATS_HOT_STATE_REDIS_URL。",
+    ),
 ]
 
 
@@ -4999,6 +5033,66 @@ async def build_runtime(
                 auth_source=payload.get("auth_source", "anonymous"),
             )
 
+        async def _handle_validate_reconciliation(payload: dict[str, Any]) -> dict[str, Any]:
+            service = OperatorQueryService(runtime)
+            return await service.validate_reconciliation(
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
+        async def _handle_cancel_order(payload: dict[str, Any]) -> dict[str, Any]:
+            service = OperatorQueryService(runtime)
+            return await service.cancel_order(
+                client_order_id=payload["client_order_id"],
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
+        async def _handle_resolve_stuck_submission(payload: dict[str, Any]) -> dict[str, Any]:
+            service = OperatorQueryService(runtime)
+            return await service.resolve_stuck_submission(
+                client_order_id=payload["client_order_id"],
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
+        async def _handle_refresh_exchange_state(payload: dict[str, Any]) -> dict[str, Any]:
+            service = OperatorQueryService(runtime)
+            return await service.refresh_exchange_state(
+                blocker=payload.get("blocker"),
+                parent_intent_id=payload.get("parent_intent_id"),
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
+        async def _handle_retry_limit_lookup(payload: dict[str, Any]) -> dict[str, Any]:
+            service = OperatorQueryService(runtime)
+            return await service.retry_limit_lookup(
+                parent_intent_id=payload.get("parent_intent_id"),
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
+        async def _handle_safe_cancel_exit_execution(payload: dict[str, Any]) -> dict[str, Any]:
+            service = OperatorQueryService(runtime)
+            return await service.safe_cancel_exit_execution(
+                parent_intent_id=payload.get("parent_intent_id"),
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
         runtime.operator_command_worker = OperatorCommandWorker(
             bus=bus,
             process_role=PROCESS_ROLE_EXECUTION,
@@ -5006,9 +5100,134 @@ async def build_runtime(
             command_handlers={
                 "rebaseline": _handle_rebaseline,
                 "resume": _handle_resume,
+                "validate_reconciliation": _handle_validate_reconciliation,
+                "cancel_order": _handle_cancel_order,
+                "resolve_stuck_submission": _handle_resolve_stuck_submission,
+                "refresh_exchange_state": _handle_refresh_exchange_state,
+                "retry_limit_lookup": _handle_retry_limit_lookup,
+                "safe_cancel_exit_execution": _handle_safe_cancel_exit_execution,
             },
         )
         await runtime.operator_command_worker.bootstrap()
 
     _apply_post_init_guards(runtime=runtime, effective_process_role=effective_process_role)
+
+    # ── Finding 3: Guard signal 跨进程缓存 ──────────────────────────
+    # execution 侧：创建 3 个 GuardSignalHotStateCache，发布初始快照，
+    #   启动后台任务每 10 秒重新发布（guard 评估周期约 5-15 秒）
+    # decision 侧：创建 3 个 reader 缓存，从 Redis 恢复 + 订阅 NATS，
+    #   注入 risk_engine 作为 provider（取代本地缺失的 guard service）
+    # monolith：guard service 直接注入 risk_engine，不需要缓存层
+    from aats.services.governance_engine.guard_signal_cache import (
+        GuardSignalHotStateCache,
+    )
+
+    if effective_process_role == PROCESS_ROLE_EXECUTION:
+        _guard_caches: dict[str, GuardSignalHotStateCache] = {}
+        for _sig_name in ("derivatives_live", "trial", "recovery"):
+            _cache = GuardSignalHotStateCache(
+                signal_name=_sig_name,
+                logger=runtime.logger,
+            )
+            await _cache.bootstrap(
+                hot_state_store=hot_state_store,
+                bus=bus,
+                process_role=PROCESS_ROLE_EXECUTION,
+            )
+            _guard_caches[_sig_name] = _cache
+
+        # 发布初始快照（guard service 已在 _apply_post_init_guards 中 evaluate_now）
+        if runtime.derivatives_live_guard_service is not None:
+            await _guard_caches["derivatives_live"].publish(
+                runtime.derivatives_live_guard_service.snapshot()
+            )
+        if runtime.trial_guard_service is not None:
+            await _guard_caches["trial"].publish(
+                runtime.trial_guard_service.snapshot()
+            )
+        _recovery_provider = getattr(runtime, "_recovery_posture_for_guard_cache", None)
+        if _recovery_provider is None:
+            from aats.services.governance_engine.recovery_posture import (
+                RecoveryPostureEvaluator as _RPE,
+            )
+
+            def _recovery_provider() -> dict[str, Any]:
+                return _RPE(runtime).finalize_status(
+                    base_status=runtime.recovery_status
+                )
+        _initial_recovery = _recovery_provider()
+        if isinstance(_initial_recovery, dict) and _initial_recovery:
+            await _guard_caches["recovery"].publish(_initial_recovery)
+
+        runtime.guard_signal_caches = _guard_caches
+
+        # 后台发布任务：每 10 秒把 guard 快照刷到 Redis + NATS
+        async def _guard_signal_publish_loop() -> None:
+            import asyncio as _aio
+
+            while True:
+                await _aio.sleep(10.0)
+                try:
+                    if runtime.derivatives_live_guard_service is not None:
+                        await _guard_caches["derivatives_live"].publish(
+                            runtime.derivatives_live_guard_service.snapshot()
+                        )
+                    if runtime.trial_guard_service is not None:
+                        await _guard_caches["trial"].publish(
+                            runtime.trial_guard_service.snapshot()
+                        )
+                    _rec = _recovery_provider()
+                    if isinstance(_rec, dict) and _rec:
+                        await _guard_caches["recovery"].publish(_rec)
+                except Exception:
+                    pass  # best-effort，不让后台任务崩溃
+
+        runtime._guard_signal_publish_task = asyncio.create_task(
+            _guard_signal_publish_loop()
+        )
+
+    elif effective_process_role == PROCESS_ROLE_DECISION and runtime.risk_engine is not None:
+        # Decision 侧：从 Redis 恢复 + 订阅 NATS，注入 risk_engine 作为 provider
+        _live_guard_cache = GuardSignalHotStateCache(
+            signal_name="derivatives_live",
+            logger=runtime.logger,
+        )
+        await _live_guard_cache.bootstrap(
+            hot_state_store=hot_state_store,
+            bus=bus,
+            process_role=PROCESS_ROLE_DECISION,
+            subscribe=True,
+        )
+        runtime.risk_engine.live_runtime_guard_provider = _live_guard_cache
+
+        _trial_guard_cache = GuardSignalHotStateCache(
+            signal_name="trial",
+            logger=runtime.logger,
+        )
+        await _trial_guard_cache.bootstrap(
+            hot_state_store=hot_state_store,
+            bus=bus,
+            process_role=PROCESS_ROLE_DECISION,
+            subscribe=True,
+        )
+        runtime.risk_engine.trial_guard_provider = _trial_guard_cache
+
+        _recovery_cache = GuardSignalHotStateCache(
+            signal_name="recovery",
+            logger=runtime.logger,
+        )
+        await _recovery_cache.bootstrap(
+            hot_state_store=hot_state_store,
+            bus=bus,
+            process_role=PROCESS_ROLE_DECISION,
+            subscribe=True,
+        )
+        runtime.risk_engine.recovery_status_provider = _recovery_cache
+
+        runtime.guard_signal_caches = {
+            "derivatives_live": _live_guard_cache,
+            "trial": _trial_guard_cache,
+            "recovery": _recovery_cache,
+        }
+
     return runtime

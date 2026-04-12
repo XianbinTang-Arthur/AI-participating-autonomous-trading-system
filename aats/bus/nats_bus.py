@@ -137,6 +137,7 @@ DEFAULT_OBSERVER_TOPICS: frozenset[str] = frozenset(
         _topics.STRATEGY_PROFILE_EVALUATIONS,         # profile 评估输入；分析层
         _topics.STRATEGY_PROFILE_COMPARISON_REPORTS,  # profile 比较报告
         _topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS,# profile 优化报告
+        _topics.GUARD_SIGNAL_UPDATES,                # guard signal 跨进程缓存；丢一条 decision 侧 stale 降级
     }
 )
 

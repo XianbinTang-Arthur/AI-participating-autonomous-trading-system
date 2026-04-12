@@ -9702,6 +9702,23 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # 4-proc gateway proxy: reconciliation_service 仅在 execution 进程装配
+        if self.runtime.reconciliation_service is None:
+            client = getattr(self.runtime, "operator_command_client", None)
+            if client is None:
+                raise RuntimeError(
+                    "validate_reconciliation_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                )
+            return await client.invoke(
+                command="validate_reconciliation",
+                payload={
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
         return await self.reconciliation_system_queries.validate_reconciliation(
             reason=reason,
             actor_role=actor_role,
@@ -9718,6 +9735,24 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # 4-proc gateway proxy: order_manager 仅在 execution 进程装配
+        if self.runtime.order_manager is None:
+            client = getattr(self.runtime, "operator_command_client", None)
+            if client is None:
+                raise RuntimeError(
+                    "cancel_order_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                )
+            return await client.invoke(
+                command="cancel_order",
+                payload={
+                    "client_order_id": client_order_id,
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
         recovery_before = self.recovery_view()["recovery_state"]
         state = await self.runtime.order_manager.cancel_order(client_order_id)
         self._invalidate_cache()
@@ -9749,6 +9784,24 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # 4-proc gateway proxy: reconciliation_service 仅在 execution 进程装配
+        if self.runtime.reconciliation_service is None:
+            client = getattr(self.runtime, "operator_command_client", None)
+            if client is None:
+                raise RuntimeError(
+                    "resolve_stuck_submission_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                )
+            return await client.invoke(
+                command="resolve_stuck_submission",
+                payload={
+                    "client_order_id": client_order_id,
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
         return await self.reconciliation_system_queries.resolve_stuck_submission(
             client_order_id=client_order_id,
             reason=reason,
@@ -9814,6 +9867,26 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # 4-proc gateway proxy: market_gateway / account_service / order_manager
+        # 仅在 execution 进程装配，refresh 操作必须在 execution 侧执行
+        if self.runtime.order_manager is None:
+            client = getattr(self.runtime, "operator_command_client", None)
+            if client is None:
+                raise RuntimeError(
+                    "refresh_exchange_state_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                )
+            return await client.invoke(
+                command="refresh_exchange_state",
+                payload={
+                    "blocker": blocker,
+                    "parent_intent_id": parent_intent_id,
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
         recovery_before = self.recovery_view()["recovery_state"]
         startup_snapshot_context_before = self._startup_exit_execution_snapshot_context(parent_intent_id=parent_intent_id)
         normalized_parent_intent_id = str(parent_intent_id or "").strip()
@@ -10022,6 +10095,24 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # 4-proc gateway proxy: order_manager 仅在 execution 进程装配
+        if self.runtime.order_manager is None:
+            client = getattr(self.runtime, "operator_command_client", None)
+            if client is None:
+                raise RuntimeError(
+                    "retry_limit_lookup_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                )
+            return await client.invoke(
+                command="retry_limit_lookup",
+                payload={
+                    "parent_intent_id": parent_intent_id,
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
         recovery_before = self.recovery_view()["recovery_state"]
         parent_before, startup_snapshot_context = self._resolve_exit_execution_parent_for_operator_action(
             parent_intent_id=parent_intent_id,
@@ -10101,6 +10192,24 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
+        # 4-proc gateway proxy: order_manager 仅在 execution 进程装配
+        if self.runtime.order_manager is None:
+            client = getattr(self.runtime, "operator_command_client", None)
+            if client is None:
+                raise RuntimeError(
+                    "safe_cancel_exit_execution_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                )
+            return await client.invoke(
+                command="safe_cancel_exit_execution",
+                payload={
+                    "parent_intent_id": parent_intent_id,
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
         recovery_before = self.recovery_view()["recovery_state"]
         parent_before, startup_snapshot_context = self._resolve_exit_execution_parent_for_operator_action(
             parent_intent_id=parent_intent_id,

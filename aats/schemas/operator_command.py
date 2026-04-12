@@ -47,7 +47,16 @@ from aats.schemas.common import SchemaBase, new_id, utc_now
 #   3) 在 ``reconciliation_system_queries`` 对应方法的 gateway 分支里
 #      改 client.invoke 的 command 参数
 #   4) 在 test_operator_command_bridge 加 unit test 覆盖新命令
-OperatorCommandName = Literal["rebaseline", "resume"]
+OperatorCommandName = Literal[
+    "rebaseline",
+    "resume",
+    "validate_reconciliation",
+    "cancel_order",
+    "resolve_stuck_submission",
+    "refresh_exchange_state",
+    "retry_limit_lookup",
+    "safe_cancel_exit_execution",
+]
 
 
 class OperatorCommandRequest(SchemaBase):
