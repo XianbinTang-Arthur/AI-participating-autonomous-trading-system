@@ -186,9 +186,10 @@ services:
       BADGER_EPHEMERAL: "false"
       BADGER_DIRECTORY_VALUE: "/badger/data"
       BADGER_DIRECTORY_KEY: "/badger/key"
-      # span 保留 72 小时，超时自动淘汰；防止 Badger 无限堆积导致
-      # compaction 吃满 CPU/内存 → OOM → restart loop
-      BADGER_SPAN_STORE_TTL: "72h"
+      # span 保留 48 小时；Badger SST 表过多会在启动时撑爆内存
+      BADGER_SPAN_STORE_TTL: "48h"
+      # 限制 Go runtime 线程数，减少内存占用（宿主 16 核 → 容器只需 2）
+      GOMAXPROCS: "2"
     ports:
       - "127.0.0.1:16686:16686"   # Jaeger UI
       - "127.0.0.1:4317:4317"     # OTLP gRPC（AATS 4 进程都打到这里）
@@ -200,13 +201,13 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 30s
     networks:
       - aats
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 1G
 
   # ---------------------------------------------------------------------------
   # Grafana — 一站式 Loki + Jaeger + Postgres 仪表盘
