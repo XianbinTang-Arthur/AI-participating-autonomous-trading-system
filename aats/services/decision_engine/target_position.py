@@ -23,6 +23,33 @@ from aats.services.trade_costs import TradeCostService
 from aats.schemas.strategy_runtime import StrategyLegIntent
 
 
+def resolve_target_leverage(
+    *,
+    settings: AATSSettings,
+    product_type: str,
+    target_qty: Decimal,
+    leverage_bias: float = 1.0,
+) -> float:
+    """共享 leverage 解析器。
+
+    独立于 TargetPositionBuilder 实例，以便 independent family
+    等调用方在不依赖 directional target 的情况下计算正确的杠杆。
+
+    规则：
+    - 非 derivatives 或目标仓位为 0 → 1.0
+    - derivatives 非零仓位 + dynamic 未启用 → clamp(default_target_leverage, 1, max)
+    - derivatives 非零仓位 + dynamic 启用 → clamp(default * leverage_bias, 1, max)
+    """
+    if abs(target_qty) < EPSILON_DECIMAL_12:
+        return 1.0
+    if product_type != "derivatives":
+        return 1.0
+    if not settings.strategy_dynamic_leverage_enabled:
+        return min(max(float(settings.default_target_leverage), 1.0), float(settings.max_target_leverage))
+    raw = max(1.0, float(settings.default_target_leverage) * leverage_bias)
+    return min(max(raw, 1.0), float(settings.max_target_leverage))
+
+
 @dataclass(slots=True, frozen=True)
 class AdverseFactors:
     """Result of position-adverse factor analysis."""
@@ -1165,17 +1192,11 @@ class TargetPositionEngine:
         ai_assessment: AIMarketAssessment | None,
         target_qty: Decimal,
     ) -> float:
-        if abs(target_qty) < EPSILON_DECIMAL_12:
-            return 1.0
-        if context.product_type != "derivatives":
-            return 1.0
-        if not self.settings.strategy_dynamic_leverage_enabled:
-            return min(max(self.settings.default_target_leverage, 1.0), self.settings.max_target_leverage)
-        leverage_bias = self._leverage_bias(baseline=baseline, ai_assessment=ai_assessment)
-        return self._clamp(
-            max(1.0, self.settings.default_target_leverage * leverage_bias),
-            1.0,
-            self.settings.max_target_leverage,
+        return resolve_target_leverage(
+            settings=self.settings,
+            product_type=context.product_type,
+            target_qty=target_qty,
+            leverage_bias=self._leverage_bias(baseline=baseline, ai_assessment=ai_assessment),
         )
 
     def _leverage_bias(

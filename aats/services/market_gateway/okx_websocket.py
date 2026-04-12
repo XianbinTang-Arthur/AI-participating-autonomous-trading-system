@@ -13,9 +13,12 @@ except ModuleNotFoundError:  # pragma: no cover - exercised implicitly in enviro
     orjson = None
 try:
     from websockets.asyncio.client import ClientConnection, connect
+    from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 except ModuleNotFoundError:  # pragma: no cover - exercised implicitly in environments without websockets.
     ClientConnection = Any
     connect = None
+    ConnectionClosed = Exception
+    ConnectionClosedOK = Exception
 
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
@@ -46,6 +49,7 @@ class OKXPublicWebSocketClient:
         self._stop_event = asyncio.Event()
         self._connected: dict[str, bool] = {"public": False, "business": False}
         self._last_message_ts: dict[str, datetime | None] = {"public": None, "business": None}
+        self._last_market_data_ts: dict[str, datetime | None] = {"public": None, "business": None}
         self._last_error: str | None = None
 
     async def run_forever(self, *, on_message: RawMessageHandler) -> None:
@@ -81,11 +85,18 @@ class OKXPublicWebSocketClient:
             if item is not None
         ]
         freshest = max(last_message_ts) if last_message_ts else None
+        last_market = [
+            item
+            for item in self._last_market_data_ts.values()
+            if item is not None
+        ]
+        freshest_market = max(last_market) if last_market else None
         return {
             "connected_public": self._connected["public"],
             "connected_business": self._connected["business"],
             "connected": all(self._connected.values()),
             "last_message_ts": freshest,
+            "last_market_data_ts": freshest_market,
             "last_error": self._last_error,
             "subscribed_symbols": list(self._subscribed_symbols()),
         }
@@ -131,10 +142,13 @@ class OKXPublicWebSocketClient:
                 ) as websocket:
                     await self._subscribe(websocket, connection_name, subscribe_args)
                     self._connected[connection_name] = True
-                    # Reset the liveness timestamp so the keepalive loop does not fire
-                    # immediately based on a stale value from the previous connection.
-                    self._last_message_ts[connection_name] = utc_now()
+                    # Reset the liveness timestamps so the keepalive loop does not fire
+                    # immediately based on stale values from the previous connection.
+                    now = utc_now()
+                    self._last_message_ts[connection_name] = now
+                    self._last_market_data_ts[connection_name] = now
                     reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
+                    read_timeout = self.settings.okx_ws_read_timeout_seconds
                     log_event(
                         self.logger,
                         "okx_ws_connected",
@@ -145,8 +159,44 @@ class OKXPublicWebSocketClient:
                         self._keepalive_loop(websocket, connection_name)
                     )
                     try:
-                        async for raw_message in websocket:
-                            if self._stop_event.is_set():
+                        # 不使用 `async for raw_message in websocket`：当 TCP 半关闭时，
+                        # async for 会无限挂起。显式 wait_for(recv()) 加硬超时，保证
+                        # 即使底层连接死亡也能在 read_timeout 内退出并重连。
+                        while not self._stop_event.is_set():
+                            try:
+                                raw_message = await asyncio.wait_for(
+                                    websocket.recv(),
+                                    timeout=read_timeout,
+                                )
+                            except TimeoutError:
+                                log_event(
+                                    self.logger,
+                                    "okx_ws_read_timeout",
+                                    level="warning",
+                                    connection=connection_name,
+                                    timeout=read_timeout,
+                                )
+                                break
+                            except ConnectionClosedOK:
+                                # 服务端正常关闭（维护、idle 超时等），
+                                # 静默退出内循环，外层立即重连。
+                                log_event(
+                                    self.logger,
+                                    "okx_ws_closed_ok",
+                                    level="info",
+                                    connection=connection_name,
+                                )
+                                break
+                            except ConnectionClosed as exc:
+                                # 协议错误 / 网络故障 / keepalive 驱动的关闭。
+                                # 退出内循环走外层重连，但记一条 warning。
+                                log_event(
+                                    self.logger,
+                                    "okx_ws_closed_error",
+                                    level="warning",
+                                    connection=connection_name,
+                                    error=str(exc),
+                                )
                                 break
                             text = raw_message if isinstance(raw_message, str) else raw_message.decode("utf-8", errors="replace")
                             # Any inbound frame (including "pong" and control messages)
@@ -159,6 +209,9 @@ class OKXPublicWebSocketClient:
                                 continue
                             if self._is_control_message(message):
                                 continue
+                            # 只有真实行情数据才更新 market data 时间戳；
+                            # pong / control 不计入，否则"有 pong 无行情"不会触发重连。
+                            self._last_market_data_ts[connection_name] = utc_now()
                             await on_message(message)
                     finally:
                         keepalive_task.cancel()
@@ -195,10 +248,33 @@ class OKXPublicWebSocketClient:
         idle_threshold = min(max(5.0, configured_idle), 15.0)
         pong_timeout = 10.0
         poll_interval = 1.0
+        market_data_timeout = float(self.settings.okx_ws_market_data_timeout_seconds)
+        close_wait = 3.0
         while not self._stop_event.is_set():
             await asyncio.sleep(poll_interval)
             if self._stop_event.is_set():
                 return
+            # ── 行情数据过期检测 ──────────────────────────────────────
+            # 即使 pong 持续回来（channel 活着），如果没有真实行情数据也应重连：
+            # OKX 可能静默丢失订阅或 server-side 故障只保持 keepalive。
+            last_market = self._last_market_data_ts.get(connection_name)
+            if last_market is not None:
+                market_idle = (utc_now() - last_market).total_seconds()
+                if market_idle >= market_data_timeout:
+                    log_event(
+                        self.logger,
+                        "okx_ws_market_data_stale",
+                        level="warning",
+                        connection=connection_name,
+                        market_idle_seconds=market_idle,
+                        market_data_timeout=market_data_timeout,
+                    )
+                    with contextlib.suppress(Exception):
+                        await asyncio.wait_for(
+                            websocket.close(code=1011, reason="market_data_stale"),
+                            timeout=close_wait,
+                        )
+                    return
             last_ts = self._last_message_ts.get(connection_name)
             if last_ts is not None:
                 idle = (utc_now() - last_ts).total_seconds()
@@ -225,7 +301,10 @@ class OKXPublicWebSocketClient:
                         pong_timeout=pong_timeout,
                     )
                     with contextlib.suppress(Exception):
-                        await websocket.close(code=1011, reason="application_ping_timeout")
+                        await asyncio.wait_for(
+                            websocket.close(code=1011, reason="application_ping_timeout"),
+                            timeout=close_wait,
+                        )
                     return
 
     async def _subscribe(

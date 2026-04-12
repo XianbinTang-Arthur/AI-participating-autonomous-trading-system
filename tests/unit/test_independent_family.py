@@ -2039,5 +2039,78 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertIn("aggressive_bounded_taker", leg.execution_style_preference)
 
 
+    # ── Leverage resolution regression ──────────────────────────────
+    def test_open_long_leverage_resolves_from_bias_not_flat_parent(self) -> None:
+        """回归：derivatives_live + independent + parent target_qty=0 + leverage_bias>1
+        → open_long 时 leg.target_leverage 应按 default_target_leverage * leverage_bias
+          clamp(1, max) 生成，而非继承 directional parent 的 1.0。
+
+        Bug 复现场景：
+        directional parent target_qty=0 ⇒ parent target_leverage=1.0（flat 默认），
+        independent scorer 独立超阈值开仓 → 如果直接透传 parent leverage，leg 会带
+        target_leverage=1.0 → 保证金估算错误 → 风控 only-reduce 误拦。
+        """
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+            # 必须启用 dynamic leverage 才会走 default * bias 路径
+            strategy_dynamic_leverage_enabled=True,
+            default_target_leverage=3.0,
+            max_target_leverage=10.0,
+        )
+        context = make_context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.48,
+                "trend_alpha": 0.42,
+                "microstructure_alpha": 0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.32})
+
+        leverage_bias = 1.12
+        expected_leverage = min(max(3.0 * leverage_bias, 1.0), 10.0)  # 3.36
+
+        result = evaluate_independent_books(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=make_ai_assessment(direction=0.25, confidence=0.82),
+            # parent 不动作 → target_qty=0 → parent leverage 是 flat 默认 1.0
+            directional_target_qty=Decimal("0"),
+            target_leverage=1.0,  # directional parent 传过来的 flat 默认
+            leverage_bias=leverage_bias,
+            signal_edge_bps=12.0,
+            expected_cost_bps=4.0,
+            expected_net_edge_bps=8.0,
+            execution_leg_family="independent",
+            scorer=lambda *, leg, baseline, ai_assessment: 0.85 if leg == "long" else 0.10,
+            expectancy_resolver=_expectancy_resolver,
+        )
+
+        # 必须有 open_long 腿
+        open_legs = [leg for leg in result.legs if leg.action == "open" and leg.pos_side == "long"]
+        self.assertTrue(open_legs, "scorer 超阈值，应当生成 open_long leg")
+
+        for leg in open_legs:
+            self.assertAlmostEqual(
+                leg.target_leverage,
+                expected_leverage,
+                places=6,
+                msg=(
+                    f"open_long leg target_leverage 应为 "
+                    f"default({settings.default_target_leverage}) × bias({leverage_bias}) = "
+                    f"{expected_leverage}，而非 parent flat 默认 1.0"
+                ),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

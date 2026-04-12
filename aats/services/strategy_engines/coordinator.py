@@ -607,6 +607,16 @@ class StrategyCoordinatorService:
             "hedge_overlay_decision": hedge_overlay_decision,
             "decision_outcome": decision_outcome,
         }
+        # --- leverage sync: independent family 的 leg 可能通过 resolve_target_leverage
+        # 独立计算了 target_leverage（而非继承 directional parent 的 1.0）。
+        # 把 leg 层最大值回写 PositionTarget，使 target 层与 leg 层保持一致。
+        if strategy_execution_legs and snapshot.selected_family != "directional":
+            leg_max_leverage = max(
+                (leg.target_leverage for leg in strategy_execution_legs),
+                default=base_target.target_leverage,
+            )
+            if abs(leg_max_leverage - base_target.target_leverage) > 1e-9:
+                updates["target_leverage"] = leg_max_leverage
         if snapshot_ref is not None:
             updates["guardrail_flags"] = list(
                 dict.fromkeys([*base_target.guardrail_flags, f"strategy_snapshot_ref:{snapshot_ref}"])

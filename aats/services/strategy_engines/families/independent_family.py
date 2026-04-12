@@ -80,8 +80,14 @@ from aats.services.strategy_engines.independent.scoring import (
     compute_score_stability as _score_stability_metrics_v2,
     compute_signal_edge_bps as _independent_signal_edge_bps_v2,
 )
+from aats.services.decision_engine.target_position import resolve_target_leverage
 from aats.services.strategy_overlay_rollout import overlay_rollout_status
 from aats.services.trade_costs import TradeCostService
+
+# 需要独立计算 leverage（而非继承 directional parent）的 book_action 集合。
+# open / scale_in 是 IndependentBookAction 中新增暴露的动作。
+_OPENING_ACTIONS: frozenset[str] = frozenset({"open", "scale_in"})
+
 
 class IndependentFamilyEngine:
     family_name: StrategyFamily = "independent"
@@ -217,6 +223,7 @@ def independent_candidate_from_directional_target(
         runtime_margin_mode=str(directional_target.margin_mode or settings.margin_mode),
         directional_target_qty=to_decimal(directional_target.target_position_qty),
         target_leverage=float(directional_target.target_leverage),
+        leverage_bias=float(directional_target.leverage_bias),
         signal_edge_bps=float(directional_target.expected_signal_edge_bps),
         expected_cost_bps=float(directional_target.expected_cost_bps),
         expected_net_edge_bps=float(directional_target.expected_net_edge_bps),
@@ -729,6 +736,7 @@ def evaluate_independent_books(
     runtime_margin_mode: str | None = None,
     directional_target_qty: Decimal,
     target_leverage: float,
+    leverage_bias: float = 1.0,
     signal_edge_bps: float,
     expected_cost_bps: float,
     expected_net_edge_bps: float,
@@ -1056,6 +1064,25 @@ def evaluate_independent_books(
             ]
         )
     )
+    # ── Leverage resolution ────────────────────────────────────────
+    # independent 家族不能直接透传 directional parent 的 target_leverage：
+    # 当 directional target_qty=0（parent 认为不动作）但 independent
+    # scorer 超阈值独立开仓时，parent leverage 是 1.0（flat 默认），
+    # 会导致保证金估算错误 → 风控 only-reduce 误拦。
+    # 对 _OPENING_ACTIONS（open/scale_in）腿，用 resolve_target_leverage
+    # 根据 settings.default_target_leverage * leverage_bias 独立计算；
+    # 平仓/减仓腿保留 parent leverage（不影响保证金分配）。
+
+    def _leg_leverage(book: IndependentBookEvaluation) -> float:
+        if book.book_action in _OPENING_ACTIONS and book.target_qty > EPSILON_DECIMAL_12:
+            return resolve_target_leverage(
+                settings=settings,
+                product_type=context.product_type,
+                target_qty=book.target_qty,
+                leverage_bias=leverage_bias,
+            )
+        return target_leverage
+
     legs = [
         leg
         for leg in (
@@ -1064,7 +1091,7 @@ def evaluate_independent_books(
                 symbol=context.symbol,
                 book=long_book,
                 margin_mode=resolved_margin_mode,
-                target_leverage=target_leverage,
+                target_leverage=_leg_leverage(long_book),
                 reason_codes=list(long_book.reason_codes),
                 family=execution_leg_family,
             ),
@@ -1073,7 +1100,7 @@ def evaluate_independent_books(
                 symbol=context.symbol,
                 book=short_book,
                 margin_mode=resolved_margin_mode,
-                target_leverage=target_leverage,
+                target_leverage=_leg_leverage(short_book),
                 reason_codes=list(short_book.reason_codes),
                 family=execution_leg_family,
             ),
