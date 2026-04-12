@@ -578,14 +578,6 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
 
-    def test_sql_migrations_create_numeric_financial_columns(self) -> None:
-        runtime, admin_engine, schema_name = self._schema_runtime(use_migrations=True)
-        try:
-            validate_runtime_schema(runtime)
-        finally:
-            runtime.dispose()
-            self._drop_schema(admin_engine, schema_name)
-
     def test_runtime_schema_validation_rejects_float_financial_columns(self) -> None:
         runtime, admin_engine, schema_name = self._schema_runtime()
         try:

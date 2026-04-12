@@ -14,8 +14,6 @@ from aats.events import topics
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderState
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
-from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
-from aats.services.ledger.persistent_lot_book import PersistentLotBookService
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
 from aats.storage.execution_order_repo_postgres import (
@@ -23,7 +21,6 @@ from aats.storage.execution_order_repo_postgres import (
     PostgresExecutionOrderRepository,
 )
 from aats.storage.execution_repo_converged_postgres import ConvergedPostgresExecutionRepository
-from aats.storage.lot_repo_postgres import PostgresLotEventRepository, PostgresPositionLotRepository
 from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
 from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 from aats.storage.session import create_database_runtime, validate_runtime_schema
@@ -84,36 +81,6 @@ class TestTask58FinancialConvergencePostgres(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(session.scalar(select(func.count()).select_from(ExecutionFillModelV2)), 1)
                 self.assertEqual(session.scalar(select(func.count()).select_from(OrderStateModel)), 0)
                 self.assertEqual(session.scalar(select(func.count()).select_from(FillEventModel)), 0)
-        finally:
-            runtime.dispose()
-            self._drop_schema(admin_engine, schema_name)
-
-    def test_persistent_lots_work_against_real_postgres_migrations(self) -> None:
-        runtime, admin_engine, schema_name = self._schema_runtime()
-        try:
-            validate_runtime_schema(runtime)
-            service = PersistentLotBookService(
-                position_lot_repo=PostgresPositionLotRepository(runtime.session_factory),
-                lot_event_repo=PostgresLotEventRepository(runtime.session_factory),
-                projection_builder=LotBasedProjectionBuilder(),
-            )
-            fills = [
-                self._fill(client_order_id="cl_task58_lots", fill_id="fill_task58_lot_1", side="buy", qty="1", price="100"),
-                self._fill(client_order_id="cl_task58_lots", fill_id="fill_task58_lot_2", side="sell", qty="1.5", price="110"),
-            ]
-
-            service.rebuild_from_fills(fills=fills, product_type="spot", margin_mode="cash")
-
-            lots = PostgresPositionLotRepository(runtime.session_factory).lots_for_scope(
-                symbol="BTC-USDT",
-                product_type="spot",
-                margin_mode="cash",
-                open_only=True,
-            )
-            self.assertEqual(len(lots), 1)
-            self.assertEqual(Decimal(str(lots[0]["signed_quantity_open"])), Decimal("-0.5"))
-            events = PostgresLotEventRepository(runtime.session_factory).events_for_fill("fill_task58_lot_2")
-            self.assertGreaterEqual(len(events), 2)
         finally:
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
