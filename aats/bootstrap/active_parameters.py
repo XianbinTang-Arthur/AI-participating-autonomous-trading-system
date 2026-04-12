@@ -511,12 +511,12 @@ def load_all_active_parameter_sets(
         路径，避免在 AATS_ACTIVE_PARAMETER_DB_URL 已设置的生产环境中
         再次读到同一份 partial DB 结果。
     """
-    # 优先尝试 registry
+    # 优先尝试 registry（DB-first → 文件 → per-file fallback）
     reg_path = _default_registry_path(project_root)
-    if reg_path.exists():
-        registry = load_active_parameter_registry(reg_path, skip_db=skip_db)
-        active_sets = registry.get("active_sets", {})
-        if active_sets:
+    # 无论文件是否存在都尝试 registry loader（DB 可能有数据而文件不存在）
+    registry = load_active_parameter_registry(reg_path, skip_db=skip_db)
+    active_sets = registry.get("active_sets", {})
+    if active_sets:
             # 转换为与 per-file 兼容的格式
             result: dict[str, dict[str, Any]] = {}
             for combo_key, entry in active_sets.items():

@@ -28,6 +28,11 @@ from aats.data_platform.models import FundingRow, funding_table_name, utc_now
 
 log = logging.getLogger(__name__)
 
+# Sentinel timeframe for funding checkpoints.
+# funding 没有 candle 意义上的 timeframe，用 sentinel 避免 NULL 在
+# PostgreSQL 唯一约束中无法正确 ON CONFLICT 的问题。
+_FUNDING_TIMEFRAME_SENTINEL = "funding"
+
 BATCH_SIZE = 2000
 _API_LIMIT = 100
 
@@ -160,12 +165,15 @@ def collect_funding_incremental(
     """Fetch recent funding rates and write to staging. Returns ingest_run_id."""
     table = funding_table_name("staging")
 
+    # 一次性迁移: 如果存在 timeframe=NULL 的旧 checkpoint，更新为 sentinel
+    _migrate_null_funding_checkpoint(session, symbol.upper())
+
     cp = get_checkpoint(
         session,
         dataset_domain="funding",
         instrument_type="swap",
         symbol=symbol.upper(),
-        timeframe=None,
+        timeframe=_FUNDING_TIMEFRAME_SENTINEL,
     )
 
     run_id = create_ingest_run(
@@ -230,7 +238,7 @@ def collect_funding_incremental(
                 dataset_domain="funding",
                 instrument_type="swap",
                 symbol=symbol.upper(),
-                timeframe=None,
+                timeframe=_FUNDING_TIMEFRAME_SENTINEL,
                 last_successful_ts=newest_ts,
                 next_expected_ts=newest_ts + timedelta(hours=8),
                 last_ingest_run_id=run_id,
@@ -246,3 +254,43 @@ def collect_funding_incremental(
         raise
 
     return run_id
+
+
+# ── 一次性迁移: NULL timeframe → sentinel ─────────────────────────
+
+
+def _migrate_null_funding_checkpoint(session: Session, symbol: str) -> None:
+    """将旧 timeframe=NULL 的 funding checkpoint 迁移为 sentinel.
+
+    幂等：如果 sentinel 行已存在则跳过，如果 NULL 行不存在也跳过。
+    """
+    # 检查是否存在 sentinel 行
+    existing = session.execute(
+        text("""
+            SELECT 1 FROM meta.ingest_checkpoints
+            WHERE dataset_domain = 'funding'
+              AND instrument_type = 'swap'
+              AND symbol = :sym
+              AND timeframe = :tf
+            LIMIT 1
+        """),
+        dict(sym=symbol, tf=_FUNDING_TIMEFRAME_SENTINEL),
+    ).scalar()
+    if existing:
+        return  # 已迁移
+
+    # 将 NULL 行更新为 sentinel
+    result = session.execute(
+        text("""
+            UPDATE meta.ingest_checkpoints
+            SET timeframe = :tf
+            WHERE dataset_domain = 'funding'
+              AND instrument_type = 'swap'
+              AND symbol = :sym
+              AND timeframe IS NULL
+        """),
+        dict(sym=symbol, tf=_FUNDING_TIMEFRAME_SENTINEL),
+    )
+    if result.rowcount:  # type: ignore[union-attr]
+        log.info("Migrated funding checkpoint NULL→'%s' for %s (%d rows)",
+                 _FUNDING_TIMEFRAME_SENTINEL, symbol, result.rowcount)

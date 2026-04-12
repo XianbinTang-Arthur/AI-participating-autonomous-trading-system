@@ -28,6 +28,7 @@ RDP 读取主交易系统 production DB 的表结构契约文档。
 |------|------|------|
 | sleeve_intent_id | VARCHAR(64) PK | 意图 ID |
 | decision_id | VARCHAR(64) | 决策 ID |
+| family | VARCHAR(32) | 策略 family |
 | strategy_sleeve_id | VARCHAR(64) | 策略 sleeve ID |
 | allocation_id | VARCHAR(64) | 分配 ID |
 | state | VARCHAR(32) | 状态 |
@@ -41,9 +42,10 @@ RDP 读取主交易系统 production DB 的表结构契约文档。
 | payload | JSON | 完整载荷 |
 | created_at | TIMESTAMP TZ | 创建时间 |
 
-**索引**: (symbol, created_at), (decision_id, created_at)
+**索引**: (family, created_at), (symbol, created_at), (decision_id, created_at)
 **时间字段**: `created_at`
 **Symbol 字段**: `symbol`
+**Family 字段**: `family`
 
 ### 3.2 portfolio_allocation_decisions
 
@@ -244,3 +246,13 @@ GRANT USAGE ON SCHEMA public TO rdp_readonly;
 GRANT SELECT ON ALL TABLES IN SCHEMA public TO rdp_readonly;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT ON TABLES TO rdp_readonly;
 ```
+
+## 10. Contract 维护注意事项
+
+> **已知偏差（2026-04-12 审查发现）**: attribution 模块中的 live 查询
+> 目前直接使用 `attribution/alignment.py` 内的 raw SQL，绕过了
+> `live_query_adapter` 统一收口。建议后续将 attribution live 查询
+> 迁移到 adapter 层，确保所有 production DB 访问统一管理。
+>
+> 维护本文档时，应同步检查 `aats/storage/sqlalchemy_models.py` ORM
+> 定义，确保 contract 表格与实际字段一致。

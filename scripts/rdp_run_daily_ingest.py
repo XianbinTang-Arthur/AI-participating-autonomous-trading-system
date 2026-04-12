@@ -165,7 +165,6 @@ def _ingest_candles(
                         symbol=symbol, timeframe=tf,
                         max_pages=max_pages,
                     )
-                with get_session(settings) as session:
                     run_candle_merge_pipeline(
                         session, symbol=symbol, timeframe=tf, ingest_run_id=run_id,
                     )
@@ -214,7 +213,6 @@ def _ingest_funding(
                     session, settings,
                     symbol=symbol, max_pages=max_pages,
                 )
-            with get_session(settings) as session:
                 run_funding_merge_pipeline(
                     session, symbol=symbol, ingest_run_id=run_id,
                 )

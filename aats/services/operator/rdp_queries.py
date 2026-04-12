@@ -196,10 +196,18 @@ def query_latest_execution_realism(project_root: Path) -> dict[str, Any]:
 def query_latest_decisions(project_root: Path) -> dict[str, Any]:
     """查询当前 family/timeframe 决策状态.
 
-    读取 artifacts/decision_system/active_decision_registry.json
+    优先级: DB → 文件 fallback（复用 recommendation_registry 的 DB-first loader）。
     """
     dec_path = project_root / _DECISION_SYSTEM_DIR / "active_decision_registry.json"
-    registry = _safe_load_json(dec_path)
+
+    # 复用 DB-first loader
+    try:
+        from aats.data_platform.decision_system.recommendation_registry import (
+            load_active_decision_registry,
+        )
+        registry = load_active_decision_registry(dec_path)
+    except Exception:
+        registry = _safe_load_json(dec_path)
 
     result: dict[str, Any] = {
         "available": False,
@@ -238,10 +246,18 @@ def query_latest_recommendations(
 ) -> dict[str, Any]:
     """查询最近的 recommendations.
 
-    读取 artifacts/decision_system/recommendation_registry.json
+    优先级: DB → 文件 fallback（复用 recommendation_registry 的 DB-first loader）。
     """
     rec_path = project_root / _DECISION_SYSTEM_DIR / "recommendation_registry.json"
-    registry = _safe_load_json(rec_path)
+
+    # 复用 DB-first loader
+    try:
+        from aats.data_platform.decision_system.recommendation_registry import (
+            load_recommendation_registry,
+        )
+        registry = load_recommendation_registry(rec_path)
+    except Exception:
+        registry = _safe_load_json(rec_path)
 
     result: dict[str, Any] = {
         "available": False,

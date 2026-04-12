@@ -20,6 +20,7 @@ _TF_DELTA = {
     "5m": timedelta(minutes=5),
     "15m": timedelta(minutes=15),
     "1H": timedelta(hours=1),
+    "1h": timedelta(hours=1),  # 大小写兼容
 }
 
 
@@ -33,7 +34,7 @@ def detect_candle_gaps(
 ) -> list[dict[str, Any]]:
     """Scan silver candles for missing intervals. Returns list of gap dicts."""
     table = candle_table_name("silver", symbol, timeframe)
-    delta = _TF_DELTA.get(timeframe.lower())
+    delta = _TF_DELTA.get(timeframe)
     if delta is None:
         return []
 

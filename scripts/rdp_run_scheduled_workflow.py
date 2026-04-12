@@ -124,7 +124,7 @@ def main() -> int:
         if task.get("error"):
             print(f"         {task['error'][:120]}")
 
-    if report["overall_status"] == "failed":
+    if report["overall_status"] in ("failed", "partial"):
         return 1
     return 0
 

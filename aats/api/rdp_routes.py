@@ -259,7 +259,7 @@ async def promotion_readiness(request: Request) -> dict[str, Any]:
 
 
 class TriggerTaskRequest(BaseModel):
-    workflow: str = Field(..., description="workflow 名称: data_maintenance / research_cycle")
+    workflow: str = Field(..., description="workflow 名称: data_maintenance / governance_cycle / research_cycle / decision_cycle")
     actor: str = Field(default="operator", description="操作人")
 
 
@@ -486,7 +486,7 @@ async def rollback_parameter_api(
 
 @rdp_router.post(
     "/gates/run",
-    dependencies=[Depends(require_read_access)],
+    dependencies=[Depends(require_write_access)],
 )
 async def run_gate_api(
     request: Request,
@@ -574,7 +574,7 @@ async def releases_history(
 
 @rdp_router.post(
     "/observations/run",
-    dependencies=[Depends(require_read_access)],
+    dependencies=[Depends(require_write_access)],
 )
 async def run_observation_api(
     request: Request,
@@ -617,7 +617,7 @@ async def run_observation_api(
 
 @rdp_router.post(
     "/rollback-recommendation/evaluate",
-    dependencies=[Depends(require_read_access)],
+    dependencies=[Depends(require_write_access)],
 )
 async def evaluate_rollback_api(
     request: Request,
