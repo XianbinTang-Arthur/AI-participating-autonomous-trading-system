@@ -71,9 +71,9 @@ research   研究     实验元数据、诊断摘要、扫描批次
 governance 治理     参数注册表、建议审批、活跃决策、活跃参数集、应用历史（6 张表）
 ```
 
-共 44 张研究表 + 6 张治理表。研究表通过 `migrations/research/0001-0012` SQL 文件管理,治理表通过 `create_rdp_schema()` ORM 自动创建。
+共 42 张研究表 + 5 张治理表（合计 47 张，分布在 7 个 schema）。所有表通过 `rdp_models.py` ORM 定义，由 `create_rdp_schema()` 自动创建。
 
-### governance schema（6 张治理表）
+### governance schema（5 张治理表）
 
 ```
 governance.parameter_sets            参数集候选池（draft/candidate/frozen/deprecated）
@@ -81,7 +81,6 @@ governance.recommendations           参数变更审批建议（draft/approved/r
 governance.active_decisions           每个 family/timeframe 的当前决策状态
 governance.active_parameter_sets      已应用的生产参数快照
 governance.parameter_apply_history    参数应用/回滚审计日志
-governance.rdp_models 自动建表        create_rdp_schema() + RdpBase.metadata.create_all()
 ```
 
 治理表采用 **DB-first + 文件 fallback** 双写策略:
@@ -183,7 +182,7 @@ cp configs/templates/.env.research.example .env.research
 ### 4.2 初始化数据库
 
 ```bash
-# 自动建库 + 迁移 0001-0012 (44 张表)
+# 自动建库 + schema 初始化 (47 张表)
 python scripts/rdp_init_db.py
 ```
 

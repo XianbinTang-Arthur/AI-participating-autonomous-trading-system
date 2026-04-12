@@ -296,9 +296,9 @@ artifacts/research/calibration_rounds/<round_id>/
 
 ## 13. Step 2 正式研究闭环 (Step 2 Research Orchestrator)
 
-`rdp_run_step2_research.py` 将 Step 1 的单范围校准推进到覆盖 **independent + directional、15m + 1H** 的完整研究闭环。
+`rdp_run_step2_research.py` 将 Step 1 的单范围校准推进到覆盖 **independent + directional、15m + 1h** 的完整研究闭环。
 
-**固定范围（Step 2）**：`BTC-USDT-SWAP` / `{independent, directional}` / `{15m, 1H}`
+**固定范围（Step 2）**：`BTC-USDT-SWAP` / `{independent, directional}` / `{15m, 1h}`
 
 ```bash
 # 一键执行 Step 2 完整流程（4 phase）
@@ -318,8 +318,8 @@ python scripts/rdp_run_step2_research.py --skip-calibration
 
 | Phase | 内容 | 子任务数 |
 |-------|------|----------|
-| A: Calibration | independent/1H → directional/15m → directional/1H | 3 round × 3~5 batch = 13 batch |
-| B: Formal Scan | independent/15m, 1H + directional/15m, 1H | 4 scan (27+27+18+18 = 90 combo) |
+| A: Calibration | independent/1h → directional/15m → directional/1h | 3 round × 3~5 batch = 13 batch |
+| B: Formal Scan | independent/15m, 1h + directional/15m, 1h | 4 scan (27+27+18+18 = 90 combo) |
 | C: Aggregation | 汇总 + 推荐 + parameter_candidates | — |
 | D: Conclusion | 比较报告 + 结论文档 | — |
 
@@ -349,9 +349,9 @@ artifacts/research/step2_rounds/<round_id>/
 **结论文档包含的比较维度：**
 
 1. Independent vs Directional on 15m
-2. Independent vs Directional on 1H
-3. 15m vs 1H within Independent
-4. 15m vs 1H within Directional
+2. Independent vs Directional on 1h
+3. 15m vs 1h within Independent
+4. 15m vs 1h within Directional
 
 **推荐引擎扩展（Directional 特有）：**
 
@@ -365,6 +365,6 @@ artifacts/research/step2_rounds/<round_id>/
 | 组合 | 网格维度 | 组合数 |
 |------|----------|--------|
 | independent/15m | confirm_ticks × scale × net_edge | 27 |
-| independent/1H | confirm_ticks × scale × net_edge | 27 |
+| independent/1h | confirm_ticks × scale × net_edge | 27 |
 | directional/15m | confirm_ticks × trend_weight × clamp | 18 |
-| directional/1H | confirm_ticks × trend_weight × clamp | 18 |
+| directional/1h | confirm_ticks × trend_weight × clamp | 18 |

@@ -59,7 +59,7 @@ AATS（AIParticipatingAutonomousTradingSystem）是一个面向加密资产的**
 
 ```
 AIParticipatingAutonomousTradingSystem/
-├── aats/                          # 核心 Python 包 (376 个 .py 文件)
+├── aats/                          # 核心 Python 包 (404 个 .py 文件)
 │   ├── bootstrap/                 # 启动引导：配置、设置、运行时构建
 │   │   ├── config.py              # ★ 核心：build_runtime() 构建全部服务
 │   │   ├── settings.py            # AATSSettings Pydantic 模型 (300+ 字段)
@@ -70,21 +70,22 @@ AIParticipatingAutonomousTradingSystem/
 │   │   └── metrics.py             # 运行时指标收集
 │   │
 │   ├── api/                       # REST API 层
-│   │   ├── routes.py              # 主操作端点 (991 行, 50+ 端点)
-│   │   ├── auth_routes.py         # 认证与用户管理 (645 行)
-│   │   ├── rdp_routes.py          # RDP 治理端点 (584 行)
+│   │   ├── routes.py              # 主操作端点 (1045 行, 96 个端点)
+│   │   ├── auth_routes.py         # 认证与面板查询 (838 行)
+│   │   ├── rdp_routes.py          # RDP 治理端点 (798 行)
 │   │   ├── auth.py                # 认证逻辑 (session/API key/角色)
 │   │   ├── session_auth.py        # HMAC-SHA256 会话令牌
 │   │   └── ui.py                  # 前端静态资源服务
 │   │
 │   ├── bus/                       # 事件总线
 │   │   ├── base.py                # EventBus 抽象接口
-│   │   ├── memory_bus.py          # 内存总线实现（当前使用）
+│   │   ├── memory_bus.py          # 内存总线（monolith 模式）
+│   │   ├── nats_bus.py            # NATS JetStream 总线（多进程模式）
 │   │   └── kafka_bus.py           # Kafka 占位（未实现）
 │   │
 │   ├── events/                    # 事件基础设施
 │   │   ├── envelopes.py           # EventEnvelope 构建/解析
-│   │   └── topics.py              # 45 个事件主题常量
+│   │   └── topics.py              # 49 个事件主题常量
 │   │
 │   ├── schemas/                   # Pydantic 领域模型 (23 文件)
 │   │   ├── common.py              # EventEnvelope, SchemaBase
@@ -102,34 +103,43 @@ AIParticipatingAutonomousTradingSystem/
 │   │   ├── operator.py            # OperatorActionRecord, BlockerSnapshot
 │   │   └── system.py              # HealthSnapshot, RecoveryStatus
 │   │
-│   ├── services/                  # ★ 核心服务层 (15 个子模块)
+│   ├── services/                  # ★ 核心服务层 (15 个子模块 + 8 个顶级工具模块)
 │   │   ├── market_gateway/        # 行情接入（6 文件）
 │   │   ├── feature_engine/        # 特征计算（6 文件）
-│   │   ├── decision_engine/       # 决策引擎（8 文件）
+│   │   ├── decision_engine/       # 决策引擎（9 文件）
 │   │   ├── ai_service/            # AI 推理（7 文件）
-│   │   ├── governance_engine/     # 治理引擎（11 文件）
-│   │   ├── strategy_engines/      # 策略引擎（27+ 文件）
+│   │   ├── governance_engine/     # 治理引擎（13 文件）
+│   │   ├── strategy_engines/      # 策略引擎（49 文件）
 │   │   │   ├── families/          # 策略族注册表
-│   │   │   ├── independent/       # 独立对冲策略（16 文件）
-│   │   │   └── smart_arbitrage/   # 智能套利策略（10 文件）
-│   │   ├── execution_engine/      # 执行引擎（21 文件）
+│   │   │   ├── independent/       # 独立对冲策略
+│   │   │   └── smart_arbitrage/   # 智能套利策略
+│   │   ├── execution_engine/      # 执行引擎（24 文件）
 │   │   ├── execution_control/     # 执行控制（7 文件）
 │   │   ├── portfolio_service/     # 持仓服务（8 文件）
 │   │   ├── reconciliation_service/# 对账服务（4 文件）
 │   │   ├── recovery_control/      # 恢复控制（2 文件）
 │   │   ├── ledger/                # 账本（5 文件）
 │   │   ├── blocker_control/       # 阻断控制（3 文件）
-│   │   ├── operator/              # 操作员服务（23 文件）
-│   │   └── projections/           # 投影层（1 文件）
+│   │   ├── operator/              # 操作员服务（25 文件）
+│   │   ├── projections/           # 投影层（1 文件）
+│   │   ├── accounting.py          # 会计核心逻辑
+│   │   ├── fee_resolver.py        # 费率解析
+│   │   ├── fill_ordering.py       # 成交排序
+│   │   ├── runtime_scope.py       # 运行时作用域
+│   │   ├── strategy_execution_health.py  # 策略执行健康检查
+│   │   ├── strategy_overlay_rollout.py   # 策略覆盖展期
+│   │   ├── trade_costs.py         # 交易成本计算
+│   │   └── trade_drag.py          # 交易拖拽分析
 │   │
-│   ├── storage/                   # 持久化层 (51 文件)
+│   ├── storage/                   # 持久化层 (54 文件)
 │   │   ├── base.py                # 仓库接口 (Protocol)
 │   │   ├── *_repo.py              # 接口定义
 │   │   ├── *_repo_postgres.py     # PostgreSQL 实现
 │   │   └── sqlalchemy_models.py   # ORM 模型 (84KB)
 │   │
-│   └── data_platform/             # 研究数据平台 (100+ 文件)
+│   └── data_platform/             # 研究数据平台 (113 文件)
 │       ├── collectors/            # 数据采集（backfill + rolling）
+│       ├── normalize/             # 时间标准化、符号映射
 │       ├── merge/                 # Bronze/Silver 合并
 │       ├── gold/                  # Gold 层构建
 │       ├── validate/              # 数据质量检查
@@ -139,11 +149,16 @@ AIParticipatingAutonomousTradingSystem/
 │       ├── execution_realism/     # 执行可行性
 │       ├── decision_system/       # 决策引擎
 │       ├── governance/            # 参数治理
-│       └── production_workflow/   # 发布门禁
+│       ├── production_workflow/   # 发布门禁
+│       ├── live_facts/            # 实时事实表
+│       ├── jobs/                  # 后台作业管理
+│       └── operations/            # 运维操作
 │
-├── apps/                          # 应用入口
-│   ├── api_gateway/main.py        # ★ FastAPI 应用 (lifespan 管理)
-│   └── decision_engine/main.py    # 本地循环入口
+├── apps/                          # 应用入口（4 进程拓扑）
+│   ├── api_gateway/main.py        # ★ gateway 进程：FastAPI + lifespan 管理
+│   ├── market_gateway/main.py     # market 进程：行情接入 + 特征计算
+│   ├── decision_engine/main.py    # decision 进程：决策 + 治理 + 策略
+│   └── execution_engine/main.py   # execution 进程：执行 + 持仓 + 对账
 │
 ├── scripts/                       # 启动和运维脚本
 │   ├── start_api.py               # ★ API 服务启动脚本
@@ -155,7 +170,18 @@ AIParticipatingAutonomousTradingSystem/
 │
 ├── configs/                       # 配置文件
 │   ├── strategy_profiles/         # 策略 YAML 调参
-│   └── active_parameter_sets/     # RDP 活跃参数
+│   ├── active_parameter_sets/     # RDP 活跃参数
+│   ├── research_batches/          # 参数扫描批次定义
+│   ├── research_rounds/           # 研究轮次扫描矩阵
+│   ├── rdp_workflows/             # RDP 工作流定义
+│   ├── guarded_*.yaml             # 安全门禁配置
+│   └── templates/                 # .env 模板文件
+│
+├── deploy/wsl2-dev/               # Docker 部署（WSL2 本地）
+│   ├── docker-compose.yml         # 基础设施（Postgres/Redis/NATS/Loki/Jaeger/Grafana）
+│   ├── docker-compose.aats.yml    # 应用层（4 进程 + rdp-daemon）
+│   ├── docker-compose.aats.*.yml  # Profile 叠加层
+│   └── Dockerfile                 # 多阶段构建镜像
 │
 ├── migrations/                    # 数据库迁移
 │   ├── 0001~0007_*.sql            # 主系统迁移

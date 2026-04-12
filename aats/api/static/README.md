@@ -60,6 +60,9 @@ aats/api/static/
     ├── detail-drawers.js         决策/订单/成交/对账四类详情抽屉
     ├── shadow-drawer.js          Phase1 shadow 抽屉
     ├── overlay-parent-renderers.js  overlay parent 子渲染块
+    ├── reconciliation-controls.js 对账/恢复按钮渲染逻辑
+    ├── exit-execution-helpers.js  exit-execution 工作台纯计算 helper
+    ├── dev-self-check.js         运行时自检（验证 kludge 契约）
     ├── views/
     │   ├── home-view.js
     │   ├── overview-view.js
@@ -75,7 +78,8 @@ aats/api/static/
     └── actions/
         ├── admin-actions.js      账号 CRUD
         ├── execution-actions.js  订单/成交明细 + 卡单恢复
-        └── risk-actions.js       阻断处理 + 退出任务动作 + 对账/恢复
+        ├── risk-actions.js       阻断处理 + 退出任务动作 + 对账/恢复
+        └── rdp-actions.js        RDP workflow 动作处理器
 ```
 
 ---

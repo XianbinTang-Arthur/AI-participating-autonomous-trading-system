@@ -112,7 +112,7 @@ schtasks /create /tn "RDP_DecisionCycle" /tr "python scripts/rdp_run_scheduled_w
 **默认配置** (config.py):
 
 - `rolling_candles_symbols`: BTC-USDT, ETH-USDT, BTC-USDT-SWAP, ETH-USDT-SWAP
-- `rolling_candles_timeframes`: 15m, 1H (1m/5m 已废弃移除)
+- `rolling_candles_timeframes`: 15m, 1h (1m/5m 已废弃移除)
 - `rolling_funding_symbols`: BTC-USDT-SWAP, ETH-USDT-SWAP
 
 **手动调用**:

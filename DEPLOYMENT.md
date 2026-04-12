@@ -25,7 +25,7 @@ Windows 开发端                     WSL2 Docker 运行端
 
 ## 二、一键部署管线（`scripts/deploy.sh`）
 
-### 6 步自动化流水线
+### 7 步自动化流水线
 
 | 步骤 | 动作 | 说明 |
 |------|------|------|
@@ -34,7 +34,8 @@ Windows 开发端                     WSL2 Docker 运行端
 | 3 | 停旧服务 | `docker compose down` |
 | 4 | 构建镜像 | `docker compose build`（可选 `--no-cache`） |
 | 5 | 清理旧镜像 | `docker image prune -f` |
-| 6 | 启动 + 健康检查 | `docker compose up -d` + 轮询 `/healthz` 最长 90s |
+| 6 | 启动基础设施 | `docker-compose.yml` 单独启动 Postgres/Redis/NATS/Loki/Jaeger/Grafana |
+| 7 | 启动应用 + 健康检查 | 应用层 compose overlay 启动 4 进程 + rdp-daemon，轮询 `/healthz` 最长 90s |
 
 ### 支持的 Profile
 
@@ -108,16 +109,16 @@ Windows 开发端                     WSL2 Docker 运行端
 
 ### 基础设施层：`docker-compose.yml`
 
-| 服务 | 版本 | 角色 | 端口 | 持久化 |
-|------|------|------|------|--------|
-| **aats-postgres** | PG 16 | 关系数据库（5 个隔离库） | 127.0.0.1:5432 | postgres_data volume |
-| **aats-redis** | Redis 7 | 热状态 KV 缓存 | 127.0.0.1:6379 | redis_data volume |
-| **aats-nats** | NATS 2.10 | JetStream 事件总线 | 127.0.0.1:4222 / 8222 | nats_data volume |
-| **aats-loki** | Loki 3.0 | 集中式日志聚合 | 127.0.0.1:3100 | loki_data volume |
-| **aats-jaeger** | 1.57 | 分布式链路追踪 | 127.0.0.1:16686 / 4317 / 4318 | ./jaeger/badger 绑定挂载 |
-| **aats-grafana** | 10.4.4 | 统一看板 | 127.0.0.1:3000 | grafana_data volume |
+| 服务 | 版本 | 角色 | 端口 | 内存限制 | 持久化 |
+|------|------|------|------|---------|--------|
+| **aats-postgres** | PG 16 | 关系数据库（5 个隔离库） | 127.0.0.1:5432 | 1024M | postgres_data volume |
+| **aats-redis** | Redis 7 | 热状态 KV 缓存 | 127.0.0.1:6379 | 384M | redis_data volume |
+| **aats-nats** | NATS 2.10 | JetStream 事件总线 | 127.0.0.1:4222 / 8222 | 512M | nats_data volume |
+| **aats-loki** | Loki 3.0 | 集中式日志聚合 | 127.0.0.1:3100 | 512M | loki_data volume |
+| **aats-jaeger** | 1.57 | 分布式链路追踪 | 127.0.0.1:16686 / 4317 / 4318 | 1G | ./jaeger/badger 绑定挂载 |
+| **aats-grafana** | 10.4.4 | 统一看板 | 127.0.0.1:3000 | 384M | grafana_data volume |
 
-所有服务加入 `aats-dev` bridge 网络。
+基础设施合计约 **3.7 GB** 内存。所有服务加入 `aats` bridge 网络。
 
 ### 应用层：`docker-compose.aats.yml` + Profile 叠加
 

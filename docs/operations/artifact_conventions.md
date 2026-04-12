@@ -99,7 +99,7 @@ configs/active_parameter_sets/
   "scope": {
     "symbol": "BTC-USDT-SWAP",
     "families": ["independent", "directional"],
-    "timeframes": ["15m", "1H"],
+    "timeframes": ["15m", "1h"],
     "window": {"start": "2026-03-31", "end": "2026-04-02"}
   },
   "input_refs": {

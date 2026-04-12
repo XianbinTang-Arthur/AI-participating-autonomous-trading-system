@@ -18,7 +18,7 @@ AATS Research Data Platform (RDP) 是一个多阶段研究平台，用于评估�
 
 - **Symbol**: BTC-USDT-SWAP
 - **Families**: independent, directional
-- **Timeframes**: 15m, 1H
+- **Timeframes**: 15m, 1h
 - **Combos**: 4 (independent_15m, independent_1h, directional_15m, directional_1h)
 
 ### 1.3 关键目录与 DB 表

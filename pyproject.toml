@@ -17,8 +17,6 @@ dependencies = [
   "psycopg[binary]>=3.2",
   "pyyaml>=6.0",
   "sqlalchemy>=2.0",
-  "structlog>=24.4",
-  "tenacity>=9.0",
   "uvicorn>=0.30",
   "websockets>=13.0",
 ]

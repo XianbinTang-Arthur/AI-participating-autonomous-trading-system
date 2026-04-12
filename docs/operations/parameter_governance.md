@@ -67,7 +67,7 @@ draft -> candidate -> frozen
 | `parameter_set_id` | string | 唯一标识 `ps_YYYYMMDD_HHMMSS_hex6` |
 | `family` | string | 策略族: independent / directional |
 | `symbol` | string | 交易对 |
-| `timeframe` | string | 时间框架: 15m / 1H |
+| `timeframe` | string | 时间框架: 15m / 1h |
 | `source_round_id` | string? | 来源 round ID |
 | `source_phase` | string? | 来源 phase |
 | `dataset_version` | string | 数据版本 |

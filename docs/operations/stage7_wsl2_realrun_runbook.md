@@ -15,15 +15,13 @@
 
 ## 1. 5d 装配里发现的 3 个 gap
 
-### 1.1 Gap A：Dockerfile runtime 段缺 `curl`
+### 1.1 Gap A：Dockerfile runtime 段缺 `curl`（已修复）
 
-**症状**：`deploy/wsl2-dev/docker-compose.aats.yml` 第 79 行 gateway healthcheck 是 `["CMD", "curl", "-fs", "http://localhost:8000/system/health"]`，但 `deploy/wsl2-dev/Dockerfile` runtime 段（L57-89）只装了 `ca-certificates + tini`。`curl` 只在 builder 段（L37）装了，没复制到 runtime。
+> **状态：已修复。** Dockerfile runtime 段现已包含 `curl`（L78），gateway healthcheck 正常工作。
 
-**后果**：gateway 容器启动后 healthcheck 永远 fail（exec error: curl not found），状态停留在 `unhealthy`，docker compose status 永远不会绿。
+**原始症状**：gateway healthcheck 使用 `curl`，但 runtime 段未安装，导致 healthcheck 永远 fail。
 
-**修复方案 A**：在 runtime 段 apt-get 加 `curl`。代价：runtime 镜像增加约 3MB。
-
-**修复点**：`deploy/wsl2-dev/Dockerfile` L65-69 的 `apt-get install` 列表加一行 `curl \`。
+**修复**：在 runtime 段 `apt-get install` 列表加入了 `curl`。
 
 ---
 

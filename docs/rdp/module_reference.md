@@ -14,7 +14,7 @@
 | `collectors/backfill/file_parser.py` | OKX CSV/ZIP 解析、header 标准化 (BOM/引号/空格容错) |
 | `collectors/backfill/candles_backfill_collector.py` | candle 历史回填编排 + timeframe 路由决策 |
 | `collectors/backfill/funding_backfill_collector.py` | funding 历史回填编排 |
-| `collectors/rolling/candles_api_collector.py` | OKX REST API candle 增量采集 + 去重 + checkpoint |
+| `collectors/rolling/candles_api_collector.py` | OKX REST API candle 增量采集 + 去重 + checkpoint；入口 lowercase 归一化 + `_OKX_BAR` 映射确保 API 发送 OKX-native 格式 |
 | `collectors/rolling/funding_api_collector.py` | OKX REST API funding 增量采集 + 去重 + checkpoint |
 | `normalize/time_normalizer.py` | ms epoch -> UTC datetime 转换 |
 | `validate/candle_quality_checker.py` | candle 质量检查（重复/缺失/乱序/OHLC/volume） |

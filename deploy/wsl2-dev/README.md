@@ -1,7 +1,7 @@
 # AATS WSL2 本地基础设施
 
-> Stage 1 — 多进程切片化重构（pre-slice-refactor → slice-refactor）所需的全部本地依赖。
-> 全部组件运行在 WSL2 (Ubuntu) 的 docker-compose 内，**零云费用**。
+> 多进程切片化部署所需的全部本地基础设施。
+> 全部组件运行在 WSL2 (Ubuntu) 的 docker compose 内，**零云费用**。
 
 ---
 
@@ -30,14 +30,16 @@
                           └─────────────────────┘
 ```
 
-| 组件     | 端口          | 用途                                 | 持久化                  |
-|----------|---------------|--------------------------------------|-------------------------|
-| Postgres | 5432          | 主存储（账务、订单、策略状态）       | docker volume `postgres_data` |
-| Redis    | 6379          | 跨进程热状态缓存（仓位、订单视图）   | AOF, volume `redis_data` |
-| NATS     | 4222 / 8222   | JetStream 跨进程事件总线             | volume `nats_data`      |
-| Loki     | 3100          | 日志聚合                             | volume `loki_data`      |
-| Jaeger   | 16686 / 4317  | 分布式 trace（OTLP collector）       | bind mount `./jaeger/badger` |
-| Grafana  | 3000          | Loki + Jaeger + Postgres 仪表盘      | volume `grafana_data`   |
+| 组件     | 版本 | 端口          | 内存限制 | 用途                                 | 持久化                  |
+|----------|------|---------------|---------|--------------------------------------|-------------------------|
+| Postgres | 16   | 5432          | 1024M   | 主存储（账务、订单、策略状态）       | docker volume `postgres_data` |
+| Redis    | 7    | 6379          | 384M    | 跨进程热状态缓存（仓位、订单视图）   | AOF, volume `redis_data` |
+| NATS     | 2.10 | 4222 / 8222   | 512M    | JetStream 跨进程事件总线             | volume `nats_data`      |
+| Loki     | 3.0  | 3100          | 512M    | 日志聚合                             | volume `loki_data`      |
+| Jaeger   | 1.57 | 16686 / 4317 / 4318 | 1G | 分布式 trace（OTLP gRPC + HTTP）    | bind mount `./jaeger/badger` |
+| Grafana  | 10.4 | 3000          | 384M    | Loki + Jaeger + Postgres 仪表盘      | volume `grafana_data`   |
+
+基础设施合计约 **3.7 GB** 内存。
 
 ---
 
