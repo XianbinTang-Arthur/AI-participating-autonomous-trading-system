@@ -2720,64 +2720,39 @@ class OperatorQueryService:
         recent_snapshots = [self._strategy_snapshot_payload(event) for event in recent_events]
         strategy_runtime_repo = getattr(self.runtime, "strategy_runtime_repo", None)
         if strategy_runtime_repo is not None:
-            recent_sleeve_intents = [
-                item.model_dump(mode="json")
-                for item in strategy_runtime_repo.list_sleeve_intents(
-                    product_type=self.state_scope.product_type,
-                    margin_mode=self.state_scope.margin_mode,
-                    limit=limit * 4,
-                )
-            ]
-            latest_allocation = strategy_runtime_repo.latest_allocation_decision(
-                product_type=self.state_scope.product_type,
-                margin_mode=self.state_scope.margin_mode,
-            )
+            from concurrent.futures import ThreadPoolExecutor
+            pt = self.state_scope.product_type
+            mm = self.state_scope.margin_mode
+            alloc_limit = limit * 4
+            with ThreadPoolExecutor(max_workers=5, thread_name_prefix="strategy_rt") as pool:
+                # Phase 1: independent queries in parallel
+                f_intents = pool.submit(strategy_runtime_repo.list_sleeve_intents, product_type=pt, margin_mode=mm, limit=alloc_limit)
+                f_allocation = pool.submit(strategy_runtime_repo.latest_allocation_decision, product_type=pt, margin_mode=mm)
+                f_profiles = pool.submit(strategy_runtime_repo.list_budget_profiles, product_type=pt, margin_mode=mm, limit=limit)
+                f_assignments = pool.submit(strategy_runtime_repo.list_budget_assignments, product_type=pt, margin_mode=mm, limit=alloc_limit)
+                f_bundles = pool.submit(strategy_runtime_repo.recent_execution_bundles, product_type=pt, margin_mode=mm, limit=limit)
+                # Wait for allocation first (phase 2 depends on it)
+                latest_allocation = f_allocation.result()
+                # Phase 2: dependent queries in parallel
+                if latest_allocation is not None:
+                    aid = latest_allocation.allocation_id
+                    f_snapshots = pool.submit(strategy_runtime_repo.list_budget_snapshots, allocation_id=aid, limit=alloc_limit)
+                    f_conflicts = pool.submit(strategy_runtime_repo.list_conflict_resolutions, allocation_id=aid, limit=alloc_limit)
+                    f_netting = pool.submit(strategy_runtime_repo.list_netting_decisions, allocation_id=aid, limit=alloc_limit)
+                # Collect phase 1 results
+                recent_sleeve_intents = [item.model_dump(mode="json") for item in f_intents.result()]
+                recent_budget_profiles = [item.model_dump(mode="json") for item in f_profiles.result()]
+                recent_budget_assignments = [item.model_dump(mode="json") for item in f_assignments.result()]
+                recent_bundles = [item.model_dump(mode="json") for item in f_bundles.result()]
             latest_allocation_decision = None if latest_allocation is None else latest_allocation.model_dump(mode="json")
-            recent_budget_profiles = [
-                item.model_dump(mode="json")
-                for item in strategy_runtime_repo.list_budget_profiles(
-                    product_type=self.state_scope.product_type,
-                    margin_mode=self.state_scope.margin_mode,
-                )[:limit]
-            ]
-            recent_budget_assignments = [
-                item.model_dump(mode="json")
-                for item in strategy_runtime_repo.list_budget_assignments(
-                    product_type=self.state_scope.product_type,
-                    margin_mode=self.state_scope.margin_mode,
-                )[: limit * 4]
-            ]
             if latest_allocation is not None:
-                recent_budget_snapshots = [
-                    item.model_dump(mode="json")
-                    for item in strategy_runtime_repo.list_budget_snapshots(
-                        allocation_id=latest_allocation.allocation_id,
-                    )
-                ]
-                recent_conflict_resolutions = [
-                    item.model_dump(mode="json")
-                    for item in strategy_runtime_repo.list_conflict_resolutions(
-                        allocation_id=latest_allocation.allocation_id,
-                    )
-                ]
-                recent_netting_decisions = [
-                    item.model_dump(mode="json")
-                    for item in strategy_runtime_repo.list_netting_decisions(
-                        allocation_id=latest_allocation.allocation_id,
-                    )
-                ]
+                recent_budget_snapshots = [item.model_dump(mode="json") for item in f_snapshots.result()]
+                recent_conflict_resolutions = [item.model_dump(mode="json") for item in f_conflicts.result()]
+                recent_netting_decisions = [item.model_dump(mode="json") for item in f_netting.result()]
             else:
                 recent_budget_snapshots = []
                 recent_conflict_resolutions = []
                 recent_netting_decisions = []
-            recent_bundles = [
-                item.model_dump(mode="json")
-                for item in strategy_runtime_repo.recent_execution_bundles(
-                    product_type=self.state_scope.product_type,
-                    margin_mode=self.state_scope.margin_mode,
-                    limit=limit,
-                )
-            ]
         else:
             recent_intent_events = list(
                 reversed(

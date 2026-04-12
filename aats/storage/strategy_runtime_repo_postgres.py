@@ -82,6 +82,7 @@ class PostgresStrategyRuntimeRepository:
         product_type: str | None = None,
         margin_mode: str | None = None,
         family: str | None = None,
+        limit: int | None = None,
     ) -> list[SleeveBudgetProfile]:
         with self.session_factory() as session:
             stmt = select(SleeveBudgetProfileModel)
@@ -92,6 +93,8 @@ class PostgresStrategyRuntimeRepository:
             if family is not None:
                 stmt = stmt.where(SleeveBudgetProfileModel.family == family)
             stmt = stmt.order_by(desc(SleeveBudgetProfileModel.updated_at), desc(SleeveBudgetProfileModel.budget_profile_id))
+            if limit is not None:
+                stmt = stmt.limit(limit)
             rows = session.scalars(stmt).all()
         return [SleeveBudgetProfile.model_validate(row.payload) for row in rows]
 
@@ -147,6 +150,7 @@ class PostgresStrategyRuntimeRepository:
         margin_mode: str | None = None,
         symbol: str | None = None,
         strategy_sleeve_id: str | None = None,
+        limit: int | None = None,
     ) -> list[SleeveBudgetAssignment]:
         with self.session_factory() as session:
             stmt = select(SleeveBudgetAssignmentModel)
@@ -162,6 +166,8 @@ class PostgresStrategyRuntimeRepository:
                 desc(SleeveBudgetAssignmentModel.updated_at),
                 desc(SleeveBudgetAssignmentModel.assignment_id),
             )
+            if limit is not None:
+                stmt = stmt.limit(limit)
             rows = session.scalars(stmt).all()
         return [SleeveBudgetAssignment.model_validate(row.payload) for row in rows]
 
@@ -540,6 +546,7 @@ class PostgresStrategyRuntimeRepository:
         *,
         allocation_id: str | None = None,
         strategy_sleeve_id: str | None = None,
+        limit: int | None = None,
     ) -> list[AllocatorBudgetSnapshot]:
         with self.session_factory() as session:
             stmt = select(AllocatorBudgetSnapshotModel)
@@ -551,6 +558,8 @@ class PostgresStrategyRuntimeRepository:
                 desc(AllocatorBudgetSnapshotModel.created_at),
                 desc(AllocatorBudgetSnapshotModel.budget_snapshot_id),
             )
+            if limit is not None:
+                stmt = stmt.limit(limit)
             rows = session.scalars(stmt).all()
         return [AllocatorBudgetSnapshot.model_validate(row.payload) for row in rows]
 
@@ -559,6 +568,7 @@ class PostgresStrategyRuntimeRepository:
         *,
         allocation_id: str | None = None,
         symbol: str | None = None,
+        limit: int | None = None,
     ) -> list[AllocatorConflictResolution]:
         with self.session_factory() as session:
             stmt = select(AllocatorConflictResolutionModel)
@@ -570,6 +580,8 @@ class PostgresStrategyRuntimeRepository:
                 desc(AllocatorConflictResolutionModel.created_at),
                 desc(AllocatorConflictResolutionModel.conflict_resolution_id),
             )
+            if limit is not None:
+                stmt = stmt.limit(limit)
             rows = session.scalars(stmt).all()
         return [AllocatorConflictResolution.model_validate(row.payload) for row in rows]
 
@@ -578,6 +590,7 @@ class PostgresStrategyRuntimeRepository:
         *,
         allocation_id: str | None = None,
         symbol: str | None = None,
+        limit: int | None = None,
     ) -> list[AllocatorNettingDecision]:
         with self.session_factory() as session:
             stmt = select(AllocatorNettingDecisionModel)
@@ -589,6 +602,8 @@ class PostgresStrategyRuntimeRepository:
                 desc(AllocatorNettingDecisionModel.created_at),
                 desc(AllocatorNettingDecisionModel.netting_decision_id),
             )
+            if limit is not None:
+                stmt = stmt.limit(limit)
             rows = session.scalars(stmt).all()
         return [AllocatorNettingDecision.model_validate(row.payload) for row in rows]
 

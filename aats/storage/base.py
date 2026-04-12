@@ -573,6 +573,7 @@ class StrategyRuntimeRepository(Protocol):
         product_type: str | None = None,
         margin_mode: str | None = None,
         family: str | None = None,
+        limit: int | None = None,
     ) -> list[SleeveBudgetProfile]:
         ...
 
@@ -586,6 +587,7 @@ class StrategyRuntimeRepository(Protocol):
         margin_mode: str | None = None,
         symbol: str | None = None,
         strategy_sleeve_id: str | None = None,
+        limit: int | None = None,
     ) -> list[SleeveBudgetAssignment]:
         ...
 
@@ -671,6 +673,7 @@ class StrategyRuntimeRepository(Protocol):
         *,
         allocation_id: str | None = None,
         strategy_sleeve_id: str | None = None,
+        limit: int | None = None,
     ) -> list[AllocatorBudgetSnapshot]:
         ...
 
@@ -679,6 +682,7 @@ class StrategyRuntimeRepository(Protocol):
         *,
         allocation_id: str | None = None,
         symbol: str | None = None,
+        limit: int | None = None,
     ) -> list[AllocatorConflictResolution]:
         ...
 
@@ -687,5 +691,6 @@ class StrategyRuntimeRepository(Protocol):
         *,
         allocation_id: str | None = None,
         symbol: str | None = None,
+        limit: int | None = None,
     ) -> list[AllocatorNettingDecision]:
         ...

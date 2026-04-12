@@ -39,15 +39,17 @@ class InMemoryStrategyRuntimeRepository:
         product_type: str | None = None,
         margin_mode: str | None = None,
         family: str | None = None,
+        limit: int | None = None,
     ) -> list[SleeveBudgetProfile]:
         rows = sorted(self._budget_profiles.values(), key=lambda item: item.updated_at, reverse=True)
-        return [
+        result = [
             item
             for item in rows
             if (product_type is None or item.product_type == product_type)
             and (margin_mode is None or item.margin_mode == margin_mode)
             and (family is None or item.family == family)
         ]
+        return result if limit is None else result[:limit]
 
     def save_budget_assignment(self, assignment: SleeveBudgetAssignment) -> SleeveBudgetAssignment:
         self._budget_assignments[assignment.assignment_id] = assignment
@@ -60,9 +62,10 @@ class InMemoryStrategyRuntimeRepository:
         margin_mode: str | None = None,
         symbol: str | None = None,
         strategy_sleeve_id: str | None = None,
+        limit: int | None = None,
     ) -> list[SleeveBudgetAssignment]:
         rows = sorted(self._budget_assignments.values(), key=lambda item: item.updated_at, reverse=True)
-        return [
+        result = [
             item
             for item in rows
             if (product_type is None or item.product_type == product_type)
@@ -70,6 +73,7 @@ class InMemoryStrategyRuntimeRepository:
             and (symbol is None or item.symbol == symbol)
             and (strategy_sleeve_id is None or item.strategy_sleeve_id == strategy_sleeve_id)
         ]
+        return result if limit is None else result[:limit]
 
     def save_sleeve_intent(self, intent: StrategySleeveIntent) -> StrategySleeveIntent:
         self._sleeve_intents[intent.sleeve_intent_id] = intent
@@ -215,39 +219,45 @@ class InMemoryStrategyRuntimeRepository:
         *,
         allocation_id: str | None = None,
         strategy_sleeve_id: str | None = None,
+        limit: int | None = None,
     ) -> list[AllocatorBudgetSnapshot]:
         rows = sorted(self._budget_snapshots.values(), key=lambda item: item.created_at, reverse=True)
-        return [
+        result = [
             item
             for item in rows
             if (allocation_id is None or item.allocation_id == allocation_id)
             and (strategy_sleeve_id is None or item.strategy_sleeve_id == strategy_sleeve_id)
         ]
+        return result if limit is None else result[:limit]
 
     def list_conflict_resolutions(
         self,
         *,
         allocation_id: str | None = None,
         symbol: str | None = None,
+        limit: int | None = None,
     ) -> list[AllocatorConflictResolution]:
         rows = sorted(self._conflict_resolutions.values(), key=lambda item: item.created_at, reverse=True)
-        return [
+        result = [
             item
             for item in rows
             if (allocation_id is None or item.allocation_id == allocation_id)
             and (symbol is None or item.symbol == symbol)
         ]
+        return result if limit is None else result[:limit]
 
     def list_netting_decisions(
         self,
         *,
         allocation_id: str | None = None,
         symbol: str | None = None,
+        limit: int | None = None,
     ) -> list[AllocatorNettingDecision]:
         rows = sorted(self._netting_decisions.values(), key=lambda item: item.created_at, reverse=True)
-        return [
+        result = [
             item
             for item in rows
             if (allocation_id is None or item.allocation_id == allocation_id)
             and (symbol is None or item.symbol == symbol)
         ]
+        return result if limit is None else result[:limit]
