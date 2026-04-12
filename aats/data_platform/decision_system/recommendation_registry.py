@@ -225,6 +225,30 @@ def create_recommendation(
 def add_recommendation(
     registry: dict[str, Any], rec: dict[str, Any],
 ) -> None:
+    """将新 recommendation 加入 registry.
+
+    同一 ``(family, symbol, timeframe)`` 下已有的 **draft** 建议会被自动
+    标记为 ``superseded``，避免审批队列无限膨胀。已 approved / rejected 等
+    终态记录不受影响。
+    """
+    new_family = rec.get("family")
+    new_symbol = rec.get("symbol")
+    new_tf = rec.get("timeframe")
+    new_id = rec.get("recommendation_id")
+
+    for existing in registry.get("recommendations", []):
+        if (
+            existing.get("status") == "draft"
+            and existing.get("family") == new_family
+            and existing.get("symbol") == new_symbol
+            and existing.get("timeframe") == new_tf
+        ):
+            existing["status"] = "superseded"
+            existing["superseded_at"] = rec.get("created_at")
+            existing["superseded_by"] = "system"
+            existing["superseded_by_recommendation_id"] = new_id
+            _db_update_rec_status(existing)
+
     registry.setdefault("recommendations", []).append(rec)
     _db_sync_recommendation(rec)
 
