@@ -72,7 +72,10 @@
 |------|------|
 | `manifest_validation.py` | Round manifest 规范校验 + 旧版 manifest 自动补全（normalize_legacy_manifest） |
 | `artifact_index.py` | 全局 artifact 索引构建（experiments + rounds，含 diagnostics 摘要提取） |
-| `parameter_registry.py` | 参数版本治理 CRUD（draft/candidate/frozen/deprecated + 从 candidates/recommendations 导入） |
+| `parameter_registry.py` | 参数版本治理 CRUD（draft/candidate/frozen/deprecated + 从 candidates/recommendations 导入）。DB 双写：每次 add/freeze/deprecate 同时写 `governance.parameter_sets` 表；load 时 DB 优先、文件 fallback |
+| `parameter_sets_db.py` | `governance.parameter_sets` 表 CRUD（upsert/update_status/find/get/load_full_registry），Session-based 接口 |
+| `recommendations_db.py` | `governance.recommendations` + `governance.active_decisions` 表 CRUD（upsert/update_status/find/load），Session-based 接口 |
+| `_db_util.py` | 治理层 DB 共享工具（`try_governance_db()` 连接检测、`parse_dt()` 时间解析、`json_dumps()` 序列化、状态/类型校验常量） |
 | `round_status.py` | Active round 索引构建（按 phase 分组 + latest round 提取） |
 | `retry_logic.py` | 失败 round 重跑计划生成（自动构建 per-combo / 整轮重跑命令） |
 | `quality_monitor.py` | 四维质量巡检（artifact/结果/参数/治理层 × critical/warning/info） |
@@ -86,7 +89,7 @@
 | `candidate_selector.py` | 规则化参数评分：4 维度（研究/归因/执行/治理）→ promote/hold/reject |
 | `decision_engine.py` | Family/Timeframe 状态决策：keep_active/lower_priority/pause/require_review |
 | `readiness_evaluator.py` | 7 项 check 评估上线就绪度 |
-| `recommendation_registry.py` | Recommendation + Active Decision + Evidence Bundle 三个 registry 管理 |
+| `recommendation_registry.py` | Recommendation + Active Decision + Evidence Bundle 三个 registry 管理。DB 双写：每次 add/approve/reject/supersede/upsert_active_decision 同时写 `governance.recommendations` / `governance.active_decisions` 表；load 时 DB 优先、文件 fallback |
 | `report_builder.py` | 7 节结论文档生成 |
 
 ## Production Workflow（`aats/data_platform/production_workflow/`）
@@ -123,6 +126,6 @@
 | 文件 | 职责 |
 |------|------|
 | `aats/data_platform/live_query_adapter.py` | Live DB 只读查询适配器（7 张表统一收口、时间窗口查询、健康检查） |
-| `aats/bootstrap/active_parameters.py` | Active Parameter Set 加载器（启动时注入 family/tf 参数，参数映射，原子写入） |
+| `aats/bootstrap/active_parameters.py` | Active Parameter Set 加载器（启动时注入 family/tf 参数，参数映射，原子写入）。DB 优先读：设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后从 `governance.active_parameter_sets` 表加载 |
 | `aats/api/rdp_routes.py` | RDP 只读 API 路由（8 个 GET 端点） |
 | `aats/services/operator/rdp_queries.py` | RDP 查询服务（从治理/决策 artifact 读取结构化数据供 API 使用） |

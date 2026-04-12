@@ -7,7 +7,8 @@ RDP 是 AATS 的**离线参数研究子系统**,与实时交易主链路完全�
 - **数据库**: 独立的 `aats_research` PostgreSQL 库,6 schema 分层
 - **配置**: `.env.research`(`RDP_` 前缀),不与交易系统的 `.env.*` 混用
 - **不侵入主链**: 主交易引擎从 OKX websocket 直连市场数据,**从不读取 RDP 的 Bronze/Silver/Gold**
-- **回灌方式**: 仅通过人工审批的 `configs/active_parameter_sets/*.yaml`
+- **回灌方式**: 人工审批后写入 `governance.active_parameter_sets` DB 表（主路径）+ `configs/active_parameter_sets/*.json` 文件（备份）
+- **治理层存储**: DB-first + 文件 fallback 双写模式，环境变量 `AATS_ACTIVE_PARAMETER_DB_URL` 控制 DB 开关
 
 ---
 
@@ -40,7 +41,10 @@ aats/data_platform/
 │
 ├── attribution/               # ── Phase 3: Live Attribution ──
 ├── execution_realism/         # ── Phase 4: Execution Realism ──
-├── governance/                # ── Phase 5: 治理 (artifact / 参数 / 质量) ──
+├── governance/                # ── Phase 5: 治理 (artifact / 参数 / 质量 / DB CRUD) ──
+│   ├── _db_util.py            #   治理层 DB 共享工具 (连接检测/时间解析/校验常量)
+│   ├── parameter_sets_db.py   #   governance.parameter_sets 表 CRUD
+│   ├── recommendations_db.py  #   governance.recommendations + active_decisions 表 CRUD
 ├── decision_system/           # ── Phase 6: 闭环决策 ──
 │
 ├── production_workflow/       # workflow_dispatcher + pre_apply_gate
@@ -58,15 +62,32 @@ aats/data_platform/
 ### 6 schema 分层
 
 ```
-meta      元数据    运行记录、checkpoint、质量报告、文件注册
-staging   原始入库  保留 raw_symbol / raw_ts / source_file_id 全链路溯源
-bronze    去重     PK=(symbol, ts) upsert,保留原始字段
-silver    标准化   质量验证后的规范数据
-gold      回放     candle + funding rate as-of join 对齐后的 replay bars
-research  研究     实验元数据、诊断摘要、扫描批次
+meta       元数据    运行记录、checkpoint、质量报告、文件注册
+staging    原始入库  保留 raw_symbol / raw_ts / source_file_id 全链路溯源
+bronze     去重     PK=(symbol, ts) upsert,保留原始字段
+silver     标准化   质量验证后的规范数据
+gold       回放     candle + funding rate as-of join 对齐后的 replay bars
+research   研究     实验元数据、诊断摘要、扫描批次
+governance 治理     参数注册表、建议审批、活跃决策、活跃参数集、应用历史（6 张表）
 ```
 
-共 44 张表,通过 `migrations/research/0001-0012` SQL 文件管理。
+共 44 张研究表 + 6 张治理表。研究表通过 `migrations/research/0001-0012` SQL 文件管理,治理表通过 `create_rdp_schema()` ORM 自动创建。
+
+### governance schema（6 张治理表）
+
+```
+governance.parameter_sets            参数集候选池（draft/candidate/frozen/deprecated）
+governance.recommendations           参数变更审批建议（draft/approved/rejected/superseded）
+governance.active_decisions           每个 family/timeframe 的当前决策状态
+governance.active_parameter_sets      已应用的生产参数快照
+governance.parameter_apply_history    参数应用/回滚审计日志
+governance.rdp_models 自动建表        create_rdp_schema() + RdpBase.metadata.create_all()
+```
+
+治理表采用 **DB-first + 文件 fallback** 双写策略:
+- **写入**: 同时写 DB + JSON 文件（DB 失败不阻塞文件写入）
+- **读取**: DB 优先 → JSON 文件 fallback
+- **DB 开关**: 环境变量 `AATS_ACTIVE_PARAMETER_DB_URL`（未设置时纯文件模式）
 
 ### 数据流(2026-04-07 起)
 
@@ -268,6 +289,7 @@ python scripts/rdp_run_full_pipeline.py --start 2026-03-31 --end 2026-04-02 \
 | `RDP_ROLLING_FUNDING_SYMBOLS` | `BTC-USDT-SWAP,ETH-USDT-SWAP` | funding 采集 symbol |
 | `RDP_GAP_AUTO_DETECT_WINDOW_HOURS` | `24` | gap 检测回看窗口 |
 | `RDP_ENV` | `dev` | 环境标识 (dev/staging/prod) |
+| `AATS_ACTIVE_PARAMETER_DB_URL` | — | 治理层 DB 连接串（设置后启用 governance schema 双写） |
 
 > 1m / 5m timeframe 在 schema 中保留(`*_1m`/`*_5m` 表仍存在),只是默认不再增量采集。如需启用,设置 `RDP_ROLLING_CANDLES_TIMEFRAMES=1m,5m,15m,1H`。详见 `config.py` 的注释块。
 
@@ -307,8 +329,9 @@ python scripts/rdp_run_scheduled_workflow.py --workflow governance_cycle
 | 参数加载器 | `aats/bootstrap/active_parameters.py` | 启动时注入 family/tf 参数 |
 | 只读 API 路由 | `aats/api/rdp_routes.py` | `/rdp/` 前缀 8 个 GET 端点 |
 | 受控应用流程 | `scripts/approve_recommendation_and_apply.py` | Recommendation → Gate → Approval → Apply |
+| 治理层 DB 种子 | `scripts/apply_active_parameter_set.py --action seed-db` | JSON 注册表一次性全量写入 governance schema |
 
-整合原则: **不侵入实时主链 · 旁路分析 + 受控回灌 · 研究与生产分库 · 建议与应用分离 · 第一版不做自动 apply**
+整合原则: **不侵入实时主链 · 旁路分析 + 受控回灌 · 研究与生产分库 · 建议与应用分离 · 第一版不做自动 apply · 治理数据 DB-first + 文件 fallback**
 
 ---
 

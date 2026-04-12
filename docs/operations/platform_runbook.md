@@ -21,7 +21,7 @@ AATS Research Data Platform (RDP) 是一个多阶段研究平台，用于评估�
 - **Timeframes**: 15m, 1H
 - **Combos**: 4 (independent_15m, independent_1h, directional_15m, directional_1h)
 
-### 1.3 关键目录
+### 1.3 关键目录与 DB 表
 
 ```
 artifacts/
@@ -34,9 +34,21 @@ artifacts/
   governance/
     artifact_index.json              # 全局 artifact 索引
     active_round_index.json          # 当前 active round 索引
-    current_parameter_registry.json  # 参数注册表
+    current_parameter_registry.json  # 参数注册表（文件备份）
     quality_monitor_summary.json     # 最近巡检结果
 ```
+
+**governance schema DB 表**（DB-first + 文件 fallback 双写，`AATS_ACTIVE_PARAMETER_DB_URL` 控制）:
+
+| DB 表 | 对应 JSON 文件 | 说明 |
+|------|------|------|
+| `governance.parameter_sets` | `current_parameter_registry.json` | 参数集候选池 |
+| `governance.recommendations` | `recommendation_registry.json` | 建议审批记录 |
+| `governance.active_decisions` | `active_decision_registry.json` | combo 决策状态 |
+| `governance.active_parameter_sets` | `active_parameter_registry.json` | 当前生效参数 |
+| `governance.parameter_apply_history` | `parameter_apply_history.json` | 应用审计日志 |
+
+全量种子: `python scripts/apply_active_parameter_set.py --action seed-db`
 
 ---
 

@@ -28,16 +28,22 @@ approved recommendation
     ↓
 解析 target_parameter_set_id
     ↓
-从 parameter_registry 获取 values
+从 parameter_registry 获取 values（DB 优先 → 文件 fallback）
     ↓
-写入 configs/active_parameter_sets/active_parameter_registry.json
+写入 governance.active_parameter_sets (DB)          ← DB 双写
     ↓
-写入 configs/active_parameter_sets/<combo>.json (per-file)
+写入 configs/active_parameter_sets/active_parameter_registry.json (文件备份)
     ↓
-写入 artifacts/decision_system/parameter_apply_history.json
+写入 configs/active_parameter_sets/<combo>.json (per-file 备份)
+    ↓
+写入 governance.parameter_apply_history (DB)        ← DB 双写
+    ↓
+写入 artifacts/decision_system/parameter_apply_history.json (文件备份)
     ↓
 输出后续重启/reload 指令
 ```
+
+> **DB 开关**: 当 `AATS_ACTIVE_PARAMETER_DB_URL` 环境变量未设置时，跳过 DB 写入，仅走文件路径。
 
 ### 2.3 通过脚本 Apply
 
@@ -154,18 +160,24 @@ curl GET /rdp/parameters/apply-history
 
 # 脚本
 python scripts/apply_active_parameter_set.py --action show-active
+
+# 全量种子到 DB（从 JSON 文件同步到 DB，幂等可重复）
+python scripts/apply_active_parameter_set.py --action seed-db
 ```
 
 ---
 
 ## 5. Active Registry 更新逻辑
 
-apply 和 rollback 同时更新两种存储格式：
+apply 和 rollback 同时更新三层存储：
 
-1. **Registry 格式**（主）: `configs/active_parameter_sets/active_parameter_registry.json`
-2. **Per-file 格式**（兼容）: `configs/active_parameter_sets/<family>_<timeframe>.json`
+1. **DB 表**（主）: `governance.active_parameter_sets`（设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后启用）
+2. **Registry 格式**（文件备份）: `configs/active_parameter_sets/active_parameter_registry.json`
+3. **Per-file 格式**（兼容备份）: `configs/active_parameter_sets/<family>_<timeframe>.json`
 
-两种格式始终保持同步。主系统加载时优先读 registry 格式，fallback 到 per-file。
+三层始终保持同步。主系统加载时优先读 DB → registry 文件 → per-file fallback。
+
+> **历史记录同理**: `governance.parameter_apply_history` DB 表 + `parameter_apply_history.json` 文件始终双写。
 
 ---
 

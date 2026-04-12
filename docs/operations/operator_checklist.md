@@ -25,6 +25,14 @@
   - 确认是否有 frozen 参数
   - 确认当前有效参数版本
 
+- [ ] 检查治理层 DB 连通性（如已启用 DB 模式）
+  ```bash
+  # 确认 governance schema 表存在且 seed 数据一致
+  python scripts/apply_active_parameter_set.py --action seed-db --dry-run
+  ```
+  - 确认 DB 连接正常
+  - 确认 DB 与 JSON 文件数据一致
+
 ---
 
 ## 新 Round 运行前

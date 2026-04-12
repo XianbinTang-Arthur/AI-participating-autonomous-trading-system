@@ -107,13 +107,15 @@ diff = compare_snapshots(current_snapshot, baseline_snapshot)
 
 ## 数据来源
 
-| 层 | 数据源 |
-|----|--------|
-| Research | recommendation_registry.json, current_parameter_registry.json, decision_rounds/ |
-| Attribution | evidence_summary.json (phase3) |
-| Execution | evidence_summary.json (phase4) |
-| Operations | parameter_apply_history.json, parameter_release_history.json |
-| Reliability | workflow_runs/, workflow_failures.json, current_alerts.json |
+> 设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后，研究/运营层指标优先从 DB 读取。
+
+| 层 | DB 表（主存储） | JSON 文件（fallback） |
+|----|--------|--------|
+| Research | `governance.recommendations`, `governance.parameter_sets` | recommendation_registry.json, current_parameter_registry.json, decision_rounds/ |
+| Attribution | — | evidence_summary.json (phase3) |
+| Execution | — | evidence_summary.json (phase4) |
+| Operations | `governance.parameter_apply_history`, `governance.active_parameter_sets` | parameter_apply_history.json, parameter_release_history.json |
+| Reliability | — | workflow_runs/, workflow_failures.json, current_alerts.json |
 
 ## 扩展指标
 

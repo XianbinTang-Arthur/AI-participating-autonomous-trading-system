@@ -257,14 +257,25 @@ python scripts/rdp_rollback_active_parameter_set.py \
 
 ## 9. 与 Artifacts / Registry 的对应关系
 
-| 文件 | 用途 | 谁写 | 谁读 |
-|------|------|------|------|
-| `artifacts/decision_system/recommendation_registry.json` | 所有 recommendation | decision round / 审批脚本 | operator API |
-| `artifacts/decision_system/active_decision_registry.json` | family/tf 运营状态 | decision round | operator API |
-| `artifacts/decision_system/parameter_apply_history.json` | apply/rollback 操作记录 | apply/rollback 脚本 | operator API |
-| `artifacts/governance/current_parameter_registry.json` | 所有参数集版本 | research pipeline | apply 脚本 |
-| `artifacts/governance/approval_logs/*.jsonl` | 审批审计日志 | 审批脚本 | 审计 |
-| `configs/active_parameter_sets/active_parameter_registry.json` | 当前 active 参数 | apply/rollback | 主交易系统 |
+> 自 2026-04-11 起，全部注册表采用 **DB-first + 文件 fallback** 双写模式。
+> 设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后，API/脚本优先读 DB。
+
+| JSON 文件（文件备份） | DB 表（主存储） | 用途 | 谁写 | 谁读 |
+|------|------|------|------|------|
+| `artifacts/governance/current_parameter_registry.json` | `governance.parameter_sets` | 所有参数集版本 | research pipeline | apply 脚本 |
+| `artifacts/decision_system/recommendation_registry.json` | `governance.recommendations` | 所有 recommendation | decision round / 审批脚本 | operator API |
+| `artifacts/decision_system/active_decision_registry.json` | `governance.active_decisions` | family/tf 运营状态 | decision round | operator API |
+| `configs/active_parameter_sets/active_parameter_registry.json` | `governance.active_parameter_sets` | 当前 active 参数 | apply/rollback | 主交易系统 |
+| `artifacts/decision_system/parameter_apply_history.json` | `governance.parameter_apply_history` | apply/rollback 操作记录 | apply/rollback 脚本 | operator API |
+| `artifacts/governance/approval_logs/*.jsonl` | （无 DB 表） | 审批审计日志 | 审批脚本 | 审计 |
+
+### 全量种子
+
+首次启用 DB 或 DB 数据丢失后，可一键从 JSON 文件同步到 DB（幂等）:
+
+```bash
+python scripts/apply_active_parameter_set.py --action seed-db
+```
 
 ---
 

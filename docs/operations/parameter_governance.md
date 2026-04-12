@@ -145,15 +145,69 @@ python scripts/rdp_freeze_parameter_set.py --action deprecate \
 
 ---
 
-## 6. 参数传递链路
+## 6. 数据库存储（DB-first + 文件 fallback）
+
+自 2026-04-11 起，Parameter Registry 采用 **DB 双写** 策略。
+
+### 6.1 存储架构
+
+```
+┌─────────────────────────────────────┐     ┌──────────────────────────────────┐
+│  governance.parameter_sets (DB)     │     │  current_parameter_registry.json  │
+│  ── 主存储 ──                       │     │  ── 文件备份 ──                   │
+│  add/freeze/deprecate 同步写入      │     │  同时写入,作为 DB 不可用时 fallback │
+└─────────────────────────────────────┘     └──────────────────────────────────┘
+          ↑ 写入                                      ↑ 写入
+          │                                           │
+    parameter_registry.py (每次操作同时写 DB + 文件)
+          │
+          ↓ 读取（DB 优先 → 文件 fallback）
+```
+
+### 6.2 DB 表结构（governance.parameter_sets）
+
+| 列 | 类型 | 说明 |
+|-----|------|------|
+| `parameter_set_id` | VARCHAR(128) PK | 唯一标识 |
+| `family` | VARCHAR(64) | 策略族 |
+| `symbol` | VARCHAR(32) | 交易对 |
+| `timeframe` | VARCHAR(16) | 时间框架 |
+| `values` | JSONB | 参数键值对 |
+| `status` | VARCHAR(32) | draft/candidate/frozen/deprecated |
+| `confidence` | VARCHAR(32) | high/medium/low |
+| `source_round_id` | VARCHAR(128) | 来源 round |
+| `source_phase` | VARCHAR(64) | 来源 phase |
+| `created_at` | TIMESTAMP TZ | 创建时间 |
+| `frozen_at` | TIMESTAMP TZ | 冻结时间 |
+| `deprecated_at` | TIMESTAMP TZ | 废弃时间 |
+
+### 6.3 DB 开关
+
+通过环境变量 `AATS_ACTIVE_PARAMETER_DB_URL` 控制:
+- **已设置**: DB 双写 + DB 优先读
+- **未设置**: 纯文件模式（向后兼容）
+
+### 6.4 全量种子（seed-db）
+
+将现有 JSON 注册表一次性写入 DB（幂等，可重复执行）:
+
+```bash
+python scripts/apply_active_parameter_set.py --action seed-db
+```
+
+---
+
+## 7. 参数传递链路
 
 ```
 Step 2 研究
   -> parameter_candidates.json
-    -> 导入 Registry (draft)
+    -> 导入 Registry (draft)  ── 同时写 DB + JSON 文件
       -> 验证提升为 candidate
-        -> Phase 3/4 验证通过 -> frozen
+        -> Phase 3/4 验证通过 -> frozen  ── 同时写 DB + JSON 文件
           -> Phase 3/4 round 通过 --params-json 使用
+            -> approve recommendation -> apply
+              -> 写入 active_parameter_sets DB + JSON
 ```
 
 Phase 3/4 round runner 通过 `--params-json` 注入参数:

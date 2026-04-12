@@ -303,7 +303,9 @@ python scripts/rdp_rollback_active_parameter_set.py \
 
 ---
 
-## 9. 文件存储结构
+## 9. 存储结构
+
+### 9.1 文件存储
 
 ```
 artifacts/production_workflow/
@@ -318,3 +320,17 @@ artifacts/production_workflow/
     rollback_recommendation.json
     rollback_recommendation_report.md
 ```
+
+### 9.2 DB 存储（governance schema）
+
+> 设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后，apply/rollback 操作同时写入 DB。
+
+| DB 表 | 对应文件 | 说明 |
+|------|---------|------|
+| `governance.active_parameter_sets` | `configs/active_parameter_sets/*.json` | 当前生效参数 |
+| `governance.parameter_apply_history` | `parameter_apply_history.json` | 操作审计日志 |
+| `governance.recommendations` | `recommendation_registry.json` | 建议审批状态 |
+| `governance.active_decisions` | `active_decision_registry.json` | combo 决策状态 |
+| `governance.parameter_sets` | `current_parameter_registry.json` | 参数集候选池 |
+
+DB 与文件始终双写同步，DB 不可用时静默回退到纯文件模式。

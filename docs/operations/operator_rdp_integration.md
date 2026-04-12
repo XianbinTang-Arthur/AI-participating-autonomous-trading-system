@@ -209,17 +209,19 @@ Operator 不需要进入 artifacts 目录翻文件即可看到 RDP 的核心产�
 
 ## 5. 数据来源
 
-所有数据来自以下文件系统路径（API 层负责读取和格式化）:
+> 自 2026-04-11 起，治理层数据采用 **DB-first + 文件 fallback** 策略。
+> 设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后，API 优先从 `governance` schema 读取。
 
-| 数据 | 文件路径 |
-|------|---------|
-| Parameter Registry | `artifacts/governance/current_parameter_registry.json` |
-| Active Parameters | `configs/active_parameter_sets/*.json` |
-| Artifact Index | `artifacts/governance/artifact_index.json` |
-| Quality Monitor | `artifacts/governance/quality_monitor_summary.json` |
-| Recommendations | `artifacts/decision_system/recommendation_registry.json` |
-| Active Decisions | `artifacts/decision_system/active_decision_registry.json` |
-| Evidence Bundles | `artifacts/decision_system/evidence_bundle_index.json` |
-| Decision Rounds | `artifacts/decision_rounds/<round_id>/` |
-| Attribution Rounds | `artifacts/research/attribution_rounds/<round_id>/` |
-| Execution Rounds | `artifacts/research/execution_rounds/<round_id>/` |
+| 数据 | DB 表（主存储） | JSON 文件（fallback） |
+|------|------|---------|
+| Parameter Registry | `governance.parameter_sets` | `artifacts/governance/current_parameter_registry.json` |
+| Active Parameters | `governance.active_parameter_sets` | `configs/active_parameter_sets/*.json` |
+| Recommendations | `governance.recommendations` | `artifacts/decision_system/recommendation_registry.json` |
+| Active Decisions | `governance.active_decisions` | `artifacts/decision_system/active_decision_registry.json` |
+| Apply History | `governance.parameter_apply_history` | `artifacts/decision_system/parameter_apply_history.json` |
+| Artifact Index | （无 DB） | `artifacts/governance/artifact_index.json` |
+| Quality Monitor | （无 DB） | `artifacts/governance/quality_monitor_summary.json` |
+| Evidence Bundles | （无 DB） | `artifacts/decision_system/evidence_bundle_index.json` |
+| Decision Rounds | （无 DB） | `artifacts/decision_rounds/<round_id>/` |
+| Attribution Rounds | （无 DB） | `artifacts/research/attribution_rounds/<round_id>/` |
+| Execution Rounds | （无 DB） | `artifacts/research/execution_rounds/<round_id>/` |

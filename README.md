@@ -80,11 +80,14 @@ Market Gateway
 
 ### RDP
 
-RDP 负责历史数据与参数治理，核心流程是：
+RDP 负责历史数据与参数治理��核心流程是：
 
 ```text
 数据采集 -> Replay / 研究 -> 归因 / 执行可行性 -> 治理 -> 决策输出 -> 参数集落地
 ```
+
+治理层全链路采用 **DB-first + 文件 fallback** 双写（`governance` schema, 6 张表），
+设置 `AATS_ACTIVE_PARAMETER_DB_URL` 启用 DB 模式，未设置时纯 JSON 文件模式。
 
 ## 仓库结构
 

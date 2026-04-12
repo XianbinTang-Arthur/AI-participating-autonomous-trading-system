@@ -73,7 +73,33 @@
      --family <FAMILY> --timeframe <TF> --actor operator
 ```
 
-### Scenario 4: 长时间无 workflow 执行
+### Scenario 4: 治理层 DB 连接失败
+
+```
+日志中出现: "parameter_registry: DB 写入失败" 或 "DB 读取失败，fallback 到文件"
+```
+
+**影响**: 数据仍然写入 JSON 文件，系统正常运行，但 DB 数据会滞后。
+
+**处理**:
+```
+1. 检查 PostgreSQL 容器状态:
+   docker ps | grep aats-postgres
+2. 检查环境变量:
+   echo $AATS_ACTIVE_PARAMETER_DB_URL
+3. 测试 DB 连接:
+   psql $AATS_ACTIVE_PARAMETER_DB_URL -c "SELECT 1"
+4. 检查 governance schema 是否存在:
+   psql ... -c "\dt governance.*"
+5. 如果 schema 丢失，重新建表:
+   python -c "from aats.data_platform.rdp_models import create_rdp_schema; create_rdp_schema()"
+6. DB 恢复后，从 JSON 文件重新种子:
+   python scripts/apply_active_parameter_set.py --action seed-db
+7. 验证 DB 数据完整性:
+   psql ... -c "SELECT count(*) FROM governance.parameter_sets"
+```
+
+### Scenario 5: ��时间无 workflow 执行
 
 ```
 1. 检查调度器状态 (cron / Task Scheduler)

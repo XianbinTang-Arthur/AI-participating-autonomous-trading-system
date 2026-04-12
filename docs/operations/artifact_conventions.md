@@ -53,9 +53,22 @@ artifacts/
   governance/
     artifact_index.json
     active_round_index.json
-    current_parameter_registry.json
+    current_parameter_registry.json      # → DB: governance.parameter_sets
     quality_monitor_summary.json
+
+  decision_system/
+    recommendation_registry.json          # → DB: governance.recommendations
+    active_decision_registry.json         # → DB: governance.active_decisions
+    evidence_bundle_index.json
+    parameter_apply_history.json          # → DB: governance.parameter_apply_history
+
+configs/active_parameter_sets/
+    active_parameter_registry.json        # → DB: governance.active_parameter_sets
+    <family>_<timeframe>.json             # per-combo 文件备份
 ```
+
+> 标注 `→ DB:` 的文件同时有 governance schema DB 表作为主存储。
+> 设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后启用 DB 双写，读取 DB 优先。
 
 ---
 
