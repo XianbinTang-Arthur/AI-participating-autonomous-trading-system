@@ -5,7 +5,7 @@
 # 本脚本由 docker-entrypoint-initdb.d 在容器首次初始化时自动执行。
 # 如果 Postgres 数据卷已存在（非首次启动），此脚本不会重跑。
 # 手动补建：
-#   docker compose --env-file .env.wsl2 exec postgres \
+#   docker compose --env-file ../../.env.wsl2 exec postgres \
 #     psql -U aats -c "CREATE DATABASE aats_derivatives;"
 #
 # 4 个环境：

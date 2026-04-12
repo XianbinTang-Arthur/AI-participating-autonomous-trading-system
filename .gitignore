@@ -12,7 +12,6 @@ __pycache__/
 !.env.spot.example
 !.env.derivatives.example
 !configs/templates/.env.*.example
-!deploy/wsl2-dev/.env.wsl2.template
 
 # WSL2 dev infra runtime data
 deploy/wsl2-dev/jaeger/badger/

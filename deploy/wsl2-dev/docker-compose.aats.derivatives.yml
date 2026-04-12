@@ -11,7 +11,7 @@
 #   docker compose \
 #     -f docker-compose.aats.yml \
 #     -f docker-compose.aats.derivatives.yml \
-#     --env-file .env.wsl2 \
+#     --env-file ../../.env.wsl2 \
 #     --env-file ../../.env.derivatives \
 #     up -d
 #

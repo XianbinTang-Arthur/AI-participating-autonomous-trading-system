@@ -15,7 +15,7 @@
 #
 # 加入 cron 示例（每 30 分钟一次）：
 #   crontab -e
-#   */30 * * * * cd /home/<user>/aats && source deploy/wsl2-dev/.env.wsl2 && ./deploy/wsl2-dev/scripts/backup_postgres.sh >> logs/backup.log 2>&1
+#   */30 * * * * cd /home/<user>/aats && source .env.wsl2 && ./deploy/wsl2-dev/scripts/backup_postgres.sh >> logs/backup.log 2>&1
 # =============================================================================
 
 set -euo pipefail

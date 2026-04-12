@@ -7,13 +7,13 @@
 #
 # 启动顺序（以 derivatives 为例）：
 #   1) cd deploy/wsl2-dev
-#   2) docker compose --env-file .env.wsl2 up -d                          # 基础设施
+#   2) docker compose --env-file ../../.env.wsl2 up -d                          # 基础设施
 #   3) docker compose -f docker-compose.aats.yml \
 #        -f docker-compose.aats.derivatives.yml \
-#        --env-file .env.wsl2 --env-file ../../.env.derivatives build     # 构建
+#        --env-file ../../.env.wsl2 --env-file ../../.env.derivatives build     # 构建
 #   4) docker compose -f docker-compose.aats.yml \
 #        -f docker-compose.aats.derivatives.yml \
-#        --env-file .env.wsl2 --env-file ../../.env.derivatives up -d     # 启动
+#        --env-file ../../.env.wsl2 --env-file ../../.env.derivatives up -d     # 启动
 #
 # 关键：--env-file ../../.env.<profile> 让 compose 模板层能读到 AATS_API_PORT
 #       等配置项，用于端口映射、uvicorn 命令行参数等。.env.<profile> 是所有
@@ -37,10 +37,8 @@ networks:
 
 # 4 个服务共享的环境变量片段
 x-aats-common-env: &aats-common-env
-  # 数据库名 AATS_DB_NAME 来自 .env.<profile>，通过启动命令的
-  # --env-file ../../.env.<profile> 注入到 compose 模板层。
-  # 4 个环境各自独立：aats_spot / aats_derivatives / aats_live_spot / aats_live_derivatives。
-  # 用户名和密码来自 .env.wsl2 的 POSTGRES_USER / POSTGRES_PASSWORD。
+  # 数据库名 AATS_DB_NAME 来自 .env.<profile>，用户名/密码来自 .env.wsl2。
+  # 两份 env 文件都在项目根目录，通过 --env-file ../../.env.* 注入。
   AATS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/${AATS_DB_NAME:-aats}
   AATS_EVENT_BUS_BACKEND: hybrid
   AATS_NATS_URL: nats://nats:4222

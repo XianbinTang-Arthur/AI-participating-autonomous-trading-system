@@ -125,7 +125,7 @@ resolve_profile() {
             ;;
     esac
 
-    COMPOSE_CMD_ARGS="-f $base_compose -f $aats_compose -f $COMPOSE_OVERLAY --env-file .env.wsl2 --env-file $ENV_PROFILE"
+    COMPOSE_CMD_ARGS="-f $base_compose -f $aats_compose -f $COMPOSE_OVERLAY --env-file ../../.env.wsl2 --env-file $ENV_PROFILE"
 }
 
 # ─── WSL2 执行辅助 ─────────────────────────────────────────────────────
@@ -168,8 +168,8 @@ preflight() {
     fi
 
     # 检查 env 文件存在（在 WSL2 侧）
-    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && test -f .env.wsl2" || {
-        log_error "WSL2 侧缺失 $DEPLOY_DIR/.env.wsl2"
+    wsl_run "test -f $WSL_PROJECT/.env.wsl2" || {
+        log_error "WSL2 侧缺失 .env.wsl2（请先: cp configs/templates/.env.wsl2.example .env.wsl2 并修改密码）"
         exit 1
     }
     wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && test -f $ENV_PROFILE" || {

@@ -10,7 +10,7 @@
 #   - 持久化卷使用 docker named volume，便于 docker volume ls 管理
 #   - 资源限制保守，适合开发机
 #
-# 启动：cd deploy/wsl2-dev && docker compose --env-file .env.wsl2 up -d
+# 启动：cd deploy/wsl2-dev && docker compose --env-file ../../.env.wsl2 up -d
 # 停止：docker compose down            （保留数据）
 # 清理：docker compose down -v         （删除全部数据，慎用）
 # =============================================================================
