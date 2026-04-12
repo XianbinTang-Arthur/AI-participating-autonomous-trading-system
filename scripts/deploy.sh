@@ -273,7 +273,12 @@ step_infra_up() {
     done
 
     # 同步 Postgres 密码（scram-sha-256）— 幂等，每次部署确保数据卷密码与配置一致
-    wsl_run "cd $WSL_PROJECT && PW=\$(grep '^POSTGRES_PASSWORD=' .env.wsl2 | cut -d= -f2-) && USER=\$(grep '^POSTGRES_USER=' .env.wsl2 | cut -d= -f2-) && docker exec aats-postgres psql -U \$USER -d aats -c \"SET password_encryption = 'scram-sha-256'; ALTER USER \$USER PASSWORD '\$PW';\" >/dev/null 2>&1"
+    wsl -d "$DISTRO" bash << PWEOF
+cd $WSL_PROJECT
+PG_USER=\$(grep '^POSTGRES_USER=' .env.wsl2 | cut -d= -f2-)
+PG_PW=\$(grep '^POSTGRES_PASSWORD=' .env.wsl2 | cut -d= -f2-)
+docker exec aats-postgres psql -U "\$PG_USER" -d aats -c "SET password_encryption = 'scram-sha-256'; ALTER USER \$PG_USER PASSWORD '\$PG_PW';" >/dev/null 2>&1
+PWEOF
 
     log_ok "基础设施就绪，密码已同步"
 }
@@ -291,7 +296,7 @@ step_health() {
 
     # 从 env 文件读取 API 端口（不泄露其他内容）
     local port
-    port=$(wsl_run "cd $WSL_PROJECT && grep -h '^AATS_API_PORT=' $ENV_PROFILE 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\"'" || echo "")
+    port=$(wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && grep -h '^AATS_API_PORT=' $ENV_PROFILE 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\"'" || echo "")
     port="${port:-8000}"
 
     local elapsed=0
