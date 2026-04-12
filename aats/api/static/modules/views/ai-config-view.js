@@ -343,7 +343,7 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
         <p class="meta-copy" style="margin: 0.75rem 0 0.5rem"><strong>待处理建议</strong></p>
         <table class="mini-table">
           <thead><tr>
-            <th>建议 ID</th><th>策略/周期</th><th>状态</th><th>操作</th>
+            <th>建议 ID</th><th>交易对</th><th>策略/周期</th><th>状态</th><th>操作</th>
           </tr></thead>
           <tbody>
             ${pendingRecs.map((rec) => {
@@ -351,6 +351,7 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
               return `
                 <tr>
                   <td class="mono-cell">${escapeHtml(truncateId(rec.recommendation_id))}</td>
+                  <td>${escapeHtml(rec.symbol || "")}</td>
                   <td>${escapeHtml(rec.family || "")}/${escapeHtml(rec.timeframe || "")}</td>
                   <td>${isApproved ? "已审批" : escapeHtml(rec.action || "promote")}</td>
                   <td class="table-actions table-actions--compact">

@@ -760,6 +760,7 @@ def _rdp_control_summary(request: Request) -> dict[str, Any]:
             for rec in recs_data.get("recommendations", []):
                 pending_recommendations.append({
                     "recommendation_id": rec.get("recommendation_id"),
+                    "symbol": rec.get("symbol"),
                     "family": rec.get("family"),
                     "timeframe": rec.get("timeframe"),
                     "action": rec.get("action"),
