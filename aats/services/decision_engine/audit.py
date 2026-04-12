@@ -185,7 +185,7 @@ class DecisionAuditService:
             updated = record.model_copy(
                 update={"ai_shadow_evaluation_refs": [*record.ai_shadow_evaluation_refs, envelope.event_id]}
             )
-            await self._publish_record(updated)
+            await self._publish_record(updated, flush_immediate=True)
 
     async def handle_strategy_coordinator_snapshot(self, message: dict) -> None:
         envelope = parse_envelope(message)
@@ -300,7 +300,7 @@ class DecisionAuditService:
         record = record.model_copy(
             update={"order_state_refs": [*record.order_state_refs, envelope.event_id]},
         )
-        await self._publish_record(record)
+        await self._publish_record(record, flush_immediate=True)
 
     async def handle_fill_event(self, message: dict) -> None:
         envelope = parse_envelope(message)

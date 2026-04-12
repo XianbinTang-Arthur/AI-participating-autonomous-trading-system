@@ -45,6 +45,26 @@ class InMemoryReconciliationRepository:
         ]
         return rows[-1] if rows else None
 
+    def startup_state_snapshot_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+    ) -> ReconciliationStateSnapshot | None:
+        """Return the most recent startup exit-execution review snapshot.
+
+        Unlike ``latest_state_snapshot_for_scope`` (which returns the single
+        most-recent snapshot regardless of type), this searches backwards
+        through all snapshots to find the one with
+        ``source == "startup_exit_execution_review"`` in details_json.
+        """
+        for item in reversed(self._state_snapshots):
+            if item.product_type != scope.product_type or item.margin_mode != scope.margin_mode:
+                continue
+            details = dict(getattr(item, "details_json", {}) or {})
+            if str(details.get("source") or "").strip() == "startup_exit_execution_review":
+                return item
+        return None
+
     def save_baseline_generation(self, generation: BaselineGenerationRecord) -> None:
         self._baseline_generations.append(generation)
 

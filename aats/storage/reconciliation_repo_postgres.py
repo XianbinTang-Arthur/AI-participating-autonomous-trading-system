@@ -124,6 +124,26 @@ class PostgresReconciliationRepository:
             )
         return self._to_state_snapshot(row) if row is not None else None
 
+    def startup_state_snapshot_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+    ) -> ReconciliationStateSnapshot | None:
+        """Find the most recent startup exit-execution review snapshot."""
+        with self.session_factory() as session:
+            row = session.scalar(
+                select(ReconciliationStateSnapshotModel)
+                .where(ReconciliationStateSnapshotModel.product_type == scope.product_type)
+                .where(ReconciliationStateSnapshotModel.margin_mode == scope.margin_mode)
+                .where(ReconciliationStateSnapshotModel.details_json["source"].as_string() == "startup_exit_execution_review")
+                .order_by(
+                    desc(ReconciliationStateSnapshotModel.created_at),
+                    desc(ReconciliationStateSnapshotModel.snapshot_id),
+                )
+                .limit(1)
+            )
+        return self._to_state_snapshot(row) if row is not None else None
+
     def save_baseline_generation(self, generation: BaselineGenerationRecord) -> None:
         with self.session_factory() as session:
             session.add(

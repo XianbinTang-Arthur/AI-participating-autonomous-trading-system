@@ -872,14 +872,25 @@ class OperatorQueryService:
         )
 
     def _build_latest_startup_exit_execution_snapshot(self):
-        latest_state_snapshot_getter = getattr(
+        # Prefer the dedicated startup snapshot lookup which searches all
+        # snapshots (not just the most recent) for the boot-time snapshot.
+        startup_getter = getattr(
+            self.runtime.reconciliation_repo,
+            "startup_state_snapshot_for_scope",
+            None,
+        )
+        if callable(startup_getter):
+            return startup_getter(scope=self.state_scope)
+        # Fallback for repos that don't implement the dedicated method:
+        # check if the latest snapshot happens to be the startup one.
+        latest_getter = getattr(
             self.runtime.reconciliation_repo,
             "latest_state_snapshot_for_scope",
             None,
         )
         snapshot = (
-            latest_state_snapshot_getter(scope=self.state_scope)
-            if callable(latest_state_snapshot_getter)
+            latest_getter(scope=self.state_scope)
+            if callable(latest_getter)
             else None
         )
         if snapshot is None:
