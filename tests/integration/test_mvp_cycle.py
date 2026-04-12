@@ -34,6 +34,12 @@ class TestMVPCycle(unittest.IsolatedAsyncioTestCase):
             interval_seconds=0.0,
         )
 
+        # Flush audit batch buffer — all iterations complete within a single
+        # flush window when interval_seconds=0.0, so the last position_target_ref
+        # may still be buffered.
+        if hasattr(runtime, "audit_service") and runtime.audit_service is not None:
+            await runtime.audit_service.stop_batch_writer()
+
         self.assertEqual(len(snapshots), 4)
         self.assertGreaterEqual(len(runtime.execution_repo.order_states()), 1)
         self.assertGreaterEqual(len(runtime.execution_repo.fills()), 1)
