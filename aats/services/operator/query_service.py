@@ -7711,10 +7711,12 @@ class OperatorQueryService:
         return self.account_queries.portfolio_history(limit=limit)
 
     def balances(self) -> dict[str, Any]:
-        return self.account_queries.balances()
+        cache_key = f"balances:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.account_queries.balances)
 
     def positions(self) -> dict[str, Any]:
-        return self.account_queries.positions()
+        cache_key = f"positions:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self.account_queries.positions)
 
     def account_state(self) -> dict[str, Any]:
         cache_key = f"account_state:{self._scope_cache_fragment()}"
@@ -9630,6 +9632,10 @@ class OperatorQueryService:
         return self.report_queries.execution_anomaly_report(limit=limit)
 
     def execution_errors(self) -> dict[str, Any]:
+        cache_key = f"execution_errors:{self._scope_cache_fragment()}"
+        return self._cached_ttl(cache_key, 35, self._build_execution_errors)
+
+    def _build_execution_errors(self) -> dict[str, Any]:
         persisted = [
             item.payload
             for item in self.runtime.event_store.recent_by_topic(topics.EXECUTION_ERROR_SUMMARIES, limit=20)

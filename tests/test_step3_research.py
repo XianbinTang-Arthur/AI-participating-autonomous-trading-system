@@ -941,9 +941,10 @@ print("=" * 60)
 print(f"验证结果: {passed} passed, {failed} failed")
 print("=" * 60)
 
-if failed > 0:
-    print("\n[FAIL] 有验证项未通过!")
-    sys.exit(1)
-else:
-    print("\n[ALL PASS] Step 3 research 单元测试全部通过!")
-    sys.exit(0)
+if __name__ == "__main__":
+    if failed > 0:
+        print("\n[FAIL] 有验证项未通过!")
+        sys.exit(1)
+    else:
+        print("\n[ALL PASS] Step 3 research 单元测试全部通过!")
+        sys.exit(0)

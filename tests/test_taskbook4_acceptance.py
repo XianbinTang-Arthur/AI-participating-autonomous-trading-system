@@ -414,9 +414,10 @@ print("=" * 60)
 print(f"验收结果: {passed} passed, {failed} failed")
 print("=" * 60)
 
-if failed > 0:
-    print("\n[FAIL] 有验收项未通过!")
-    sys.exit(1)
-else:
-    print("\n[ALL PASS] Taskbook 4 所有验收标准通过!")
-    sys.exit(0)
+if __name__ == "__main__":
+    if failed > 0:
+        print("\n[FAIL] 有验收项未通过!")
+        sys.exit(1)
+    else:
+        print("\n[ALL PASS] Taskbook 4 所有验收标准通过!")
+        sys.exit(0)

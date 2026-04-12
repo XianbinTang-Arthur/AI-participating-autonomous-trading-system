@@ -339,6 +339,7 @@ class ReplayParameterOverrides:
             return cls(
                 entry_threshold=0.45,
                 close_threshold=0.20,
+                scale_in_threshold=0.55,
             )
         return cls()
 
