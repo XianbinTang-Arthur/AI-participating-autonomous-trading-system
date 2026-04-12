@@ -4,18 +4,143 @@
   - recommendation_registry.json: 所有历史建议
   - active_decision_registry.json: 当前 family/tf 运营状态
   - evidence_bundle_index.json: evidence bundle 引用索引
+
+数据存储策略（DB-first + 文件 fallback）:
+  - 写入: 同时写 DB + 文件（DB 失败不阻塞文件写入）
+  - 读取: DB 优先 → 文件 fallback
+  - DB 开关: 环境变量 AATS_ACTIVE_PARAMETER_DB_URL
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 log = logging.getLogger(__name__)
+
+
+# ── DB 辅助 ──────────────────────────────────────────────────────────
+
+def _try_governance_db():
+    """尝试获取 DB 连接。返回 (engine, True) 或 (None, False)."""
+    url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+    if not url:
+        return None, False
+    try:
+        from sqlalchemy import create_engine, text as sa_text
+
+        engine = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+        with engine.connect() as conn:
+            conn.execute(sa_text("SELECT 1 FROM governance.recommendations LIMIT 0"))
+        return engine, True
+    except Exception as exc:
+        log.debug("recommendation_registry: DB 不可用 (%s)，使用文件模式", exc)
+        return None, False
+
+
+def _db_sync_recommendation(rec: dict[str, Any]) -> None:
+    """将单个 recommendation dict 同步到 DB（best-effort）."""
+    engine, ok = _try_governance_db()
+    if not ok:
+        return
+    try:
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.recommendations_db import db_upsert_recommendation
+
+        with Session(engine) as session, session.begin():
+            db_upsert_recommendation(
+                session,
+                recommendation_id=rec["recommendation_id"],
+                family=rec["family"],
+                timeframe=rec["timeframe"],
+                recommendation_type=rec.get("recommendation_type", "require_review"),
+                confidence=rec.get("confidence", "low"),
+                reason=rec.get("reason", ""),
+                symbol=rec.get("symbol", "BTC-USDT-SWAP"),
+                target_parameter_set_id=rec.get("target_parameter_set_id"),
+                evidence_bundle_ref=rec.get("evidence_bundle_ref"),
+                status=rec.get("status", "draft"),
+                approved_by=rec.get("approved_by"),
+                approved_at=rec.get("approved_at"),
+                approval_notes=rec.get("approval_notes"),
+                rejected_by=rec.get("rejected_by"),
+                rejected_at=rec.get("rejected_at"),
+                superseded_at=rec.get("superseded_at"),
+                superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
+                created_at=rec.get("created_at"),
+            )
+    except Exception as exc:
+        log.warning("recommendation_registry: DB 写入失败 (%s)", exc)
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+def _db_update_rec_status(rec: dict[str, Any]) -> None:
+    """将 recommendation 状态变更同步到 DB（best-effort）."""
+    engine, ok = _try_governance_db()
+    if not ok:
+        return
+    try:
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.recommendations_db import db_update_recommendation_status
+
+        with Session(engine) as session, session.begin():
+            db_update_recommendation_status(
+                session,
+                rec["recommendation_id"],
+                status=rec["status"],
+                approved_by=rec.get("approved_by"),
+                approved_at=rec.get("approved_at"),
+                approval_notes=rec.get("approval_notes"),
+                rejected_by=rec.get("rejected_by"),
+                rejected_at=rec.get("rejected_at"),
+                superseded_at=rec.get("superseded_at"),
+                superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
+            )
+    except Exception as exc:
+        log.warning("recommendation_registry: DB 状态更新失败 (%s)", exc)
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+def _db_sync_active_decision(
+    family: str, timeframe: str, current_status: str,
+    active_parameter_set_id: str | None = None,
+    last_recommendation_id: str | None = None,
+    notes: str | None = None,
+) -> None:
+    """将 active decision UPSERT 同步到 DB（best-effort）."""
+    engine, ok = _try_governance_db()
+    if not ok:
+        return
+    try:
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.recommendations_db import db_upsert_active_decision
+
+        with Session(engine) as session, session.begin():
+            db_upsert_active_decision(
+                session,
+                family=family, timeframe=timeframe,
+                current_status=current_status,
+                active_parameter_set_id=active_parameter_set_id,
+                last_recommendation_id=last_recommendation_id,
+                notes=notes,
+            )
+    except Exception as exc:
+        log.warning("recommendation_registry: DB active_decision 写入失败 (%s)", exc)
+    finally:
+        if engine is not None:
+            engine.dispose()
 
 # ── Recommendation 状态 ──────────────────────────────────────────────
 
@@ -40,7 +165,32 @@ def _make_recommendation_id() -> str:
 # ── Recommendation Registry ──────────────────────────────────────────
 
 
-def load_recommendation_registry(path: pathlib.Path) -> dict[str, Any]:
+def load_recommendation_registry(path: pathlib.Path, *, skip_db: bool = False) -> dict[str, Any]:
+    """加载 recommendation registry.
+
+    优先级: DB → 文件 → 空 registry。skip_db=True 跳过 DB 直接读文件。
+    """
+    if not skip_db:
+        engine, ok = _try_governance_db()
+        if ok:
+            try:
+                from sqlalchemy.orm import Session
+
+                from aats.data_platform.governance.recommendations_db import db_load_recommendation_registry
+
+                with Session(engine) as session:
+                    registry = db_load_recommendation_registry(session)
+                if registry.get("recommendations"):
+                    log.info("从数据库加载 recommendation registry (%d recommendations)",
+                             len(registry["recommendations"]))
+                    return registry
+                log.debug("recommendation_registry: DB 为空，fallback 到文件")
+            except Exception as exc:
+                log.warning("recommendation_registry: DB 读取失败 (%s)，fallback 到文件", exc)
+            finally:
+                if engine is not None:
+                    engine.dispose()
+
     if not path.exists():
         return {"generated_at": None, "recommendations": []}
     with path.open(encoding="utf-8") as f:
@@ -90,6 +240,7 @@ def add_recommendation(
     registry: dict[str, Any], rec: dict[str, Any],
 ) -> None:
     registry.setdefault("recommendations", []).append(rec)
+    _db_sync_recommendation(rec)
 
 
 def find_recommendation(
@@ -135,6 +286,7 @@ def approve_recommendation(
     rec["approved_at"] = datetime.now(timezone.utc).isoformat()
     if notes:
         rec["approval_notes"] = notes
+    _db_update_rec_status(rec)
     return rec
 
 
@@ -163,6 +315,7 @@ def reject_recommendation(
     rec["rejected_at"] = datetime.now(timezone.utc).isoformat()
     if notes:
         rec["approval_notes"] = notes
+    _db_update_rec_status(rec)
     return rec
 
 
@@ -190,13 +343,39 @@ def supersede_recommendation(
         rec["superseded_by_recommendation_id"] = superseded_by_id
     if notes:
         rec["approval_notes"] = notes
+    _db_update_rec_status(rec)
     return rec
 
 
 # ── Active Decision Registry ────────────────────────────────────────
 
 
-def load_active_decision_registry(path: pathlib.Path) -> dict[str, Any]:
+def load_active_decision_registry(path: pathlib.Path, *, skip_db: bool = False) -> dict[str, Any]:
+    """加载 active decision registry.
+
+    优先级: DB → 文件 → 空 registry。skip_db=True 跳过 DB 直接读文件。
+    """
+    if not skip_db:
+        engine, ok = _try_governance_db()
+        if ok:
+            try:
+                from sqlalchemy.orm import Session
+
+                from aats.data_platform.governance.recommendations_db import db_load_active_decisions
+
+                with Session(engine) as session:
+                    registry = db_load_active_decisions(session)
+                if registry.get("decisions"):
+                    log.info("从数据库加载 active decision registry (%d decisions)",
+                             len(registry["decisions"]))
+                    return registry
+                log.debug("active_decision_registry: DB 为空，fallback 到文件")
+            except Exception as exc:
+                log.warning("active_decision_registry: DB 读取失败 (%s)，fallback 到文件", exc)
+            finally:
+                if engine is not None:
+                    engine.dispose()
+
     if not path.exists():
         return {"generated_at": None, "decisions": []}
     with path.open(encoding="utf-8") as f:
@@ -258,6 +437,13 @@ def upsert_active_decision(
             "last_updated_at": now,
             "notes": notes,
         })
+
+    _db_sync_active_decision(
+        family, timeframe, current_status,
+        active_parameter_set_id=active_parameter_set_id,
+        last_recommendation_id=last_recommendation_id,
+        notes=notes,
+    )
 
 
 # ── Evidence Bundle Index ────────────────────────────────────────────

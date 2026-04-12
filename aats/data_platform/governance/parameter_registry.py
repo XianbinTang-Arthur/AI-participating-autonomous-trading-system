@@ -2,18 +2,103 @@
 
 将分散在各 round 产物中的参数结论收口为受治理对象。
 每个 parameter set 有明确状态：draft / candidate / frozen / deprecated。
+
+数据存储策略（DB-first + 文件 fallback）:
+  - 写入: 同时写 DB + 文件（DB 失败不阻塞文件写入）
+  - 读取: DB 优先 → 文件 fallback
+  - DB 开关: 环境变量 AATS_ACTIVE_PARAMETER_DB_URL
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
 log = logging.getLogger(__name__)
+
+
+# ── DB 辅助 ──────────────────────────────────────────────────────────
+
+def _try_governance_db():
+    """尝试获取 DB 连接。返回 (engine, True) 或 (None, False)."""
+    url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+    if not url:
+        return None, False
+    try:
+        from sqlalchemy import create_engine, text as sa_text
+
+        engine = create_engine(url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+        with engine.connect() as conn:
+            conn.execute(sa_text("SELECT 1 FROM governance.parameter_sets LIMIT 0"))
+        return engine, True
+    except Exception as exc:
+        log.debug("parameter_registry: DB 不可用 (%s)，使用文件模式", exc)
+        return None, False
+
+
+def _db_sync_single(ps: dict[str, Any]) -> None:
+    """将单个 parameter_set dict 同步到 DB（best-effort）."""
+    engine, ok = _try_governance_db()
+    if not ok:
+        return
+    try:
+        from sqlalchemy.orm import Session
+
+        from .parameter_sets_db import db_upsert_parameter_set
+
+        with Session(engine) as session, session.begin():
+            db_upsert_parameter_set(
+                session,
+                parameter_set_id=ps["parameter_set_id"],
+                family=ps["family"],
+                timeframe=ps["timeframe"],
+                values=ps.get("values", {}),
+                status=ps.get("status", "draft"),
+                symbol=ps.get("symbol", "BTC-USDT-SWAP"),
+                source_round_id=ps.get("source_round_id"),
+                source_phase=ps.get("source_phase"),
+                dataset_version=ps.get("dataset_version", "v1.0"),
+                confidence=ps.get("confidence"),
+                created_at=ps.get("created_at"),
+                frozen_at=ps.get("frozen_at"),
+                deprecated_at=ps.get("deprecated_at"),
+                notes=ps.get("notes"),
+            )
+    except Exception as exc:
+        log.warning("parameter_registry: DB 写入失败 (%s)", exc)
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
+def _db_update_status(ps_id: str, status: str, frozen_at: str | None, deprecated_at: str | None, notes: str | None) -> None:
+    """更新 DB 中的 parameter_set 状态（best-effort）."""
+    engine, ok = _try_governance_db()
+    if not ok:
+        return
+    try:
+        from sqlalchemy.orm import Session
+
+        from .parameter_sets_db import db_update_parameter_set_status
+
+        with Session(engine) as session, session.begin():
+            db_update_parameter_set_status(
+                session, ps_id,
+                status=status,
+                frozen_at=frozen_at,
+                deprecated_at=deprecated_at,
+                notes=notes,
+            )
+    except Exception as exc:
+        log.warning("parameter_registry: DB 状态更新失败 (%s)", exc)
+    finally:
+        if engine is not None:
+            engine.dispose()
 
 # ── 状态定义 ─────────────────────────────────────────────────────────
 
@@ -64,8 +149,34 @@ def create_parameter_set(
 # ── Registry 操作 ───────────────────────────────────────────────────
 
 
-def load_registry(path: pathlib.Path) -> dict[str, Any]:
-    """加载 current_parameter_registry.json."""
+def load_registry(path: pathlib.Path, *, skip_db: bool = False) -> dict[str, Any]:
+    """加载 parameter registry.
+
+    优先级: DB (AATS_ACTIVE_PARAMETER_DB_URL) → JSON 文件 → 空 registry。
+    skip_db=True 时跳过 DB 直接读文件（用于 seed-db 等需要文件数据的场景）。
+    """
+    if not skip_db:
+        engine, ok = _try_governance_db()
+        if ok:
+            try:
+                from sqlalchemy.orm import Session
+
+                from .parameter_sets_db import db_load_full_registry
+
+                with Session(engine) as session:
+                    registry = db_load_full_registry(session)
+                if registry.get("parameter_sets"):
+                    log.info("从数据库加载 parameter registry (%d parameter sets)",
+                             len(registry["parameter_sets"]))
+                    return registry
+                # DB 为空，fallback 到文件
+                log.debug("parameter_registry: DB 为空，fallback 到文件")
+            except Exception as exc:
+                log.warning("parameter_registry: DB 读取失败 (%s)，fallback 到文件", exc)
+            finally:
+                if engine is not None:
+                    engine.dispose()
+
     if not path.exists():
         return {
             "generated_at": None,
@@ -90,6 +201,7 @@ def save_registry(registry: dict[str, Any], path: pathlib.Path) -> None:
 def add_parameter_set(registry: dict[str, Any], ps: dict[str, Any]) -> None:
     """向 registry 添加一个 parameter set."""
     registry.setdefault("parameter_sets", []).append(ps)
+    _db_sync_single(ps)
 
 
 def find_parameter_sets(
@@ -135,6 +247,7 @@ def freeze_parameter_set(
             if notes:
                 ps["notes"] = notes
             log.info("已冻结 parameter set: %s", parameter_set_id)
+            _db_update_status(parameter_set_id, "frozen", ps["frozen_at"], None, notes)
             return True
     log.error("未找到 parameter set: %s", parameter_set_id)
     return False
@@ -154,6 +267,7 @@ def deprecate_parameter_set(
             if notes:
                 ps["notes"] = notes
             log.info("已 deprecate parameter set: %s", parameter_set_id)
+            _db_update_status(parameter_set_id, "deprecated", None, ps["deprecated_at"], notes)
             return True
     log.error("未找到 parameter set: %s", parameter_set_id)
     return False

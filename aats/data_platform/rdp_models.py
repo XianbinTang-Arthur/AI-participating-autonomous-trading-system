@@ -528,7 +528,7 @@ class ExperimentSummaryModel(RdpBase):
 
 
 # =====================================================================
-# GOVERNANCE Schema — 3 张表
+# GOVERNANCE Schema — 6 张表
 # =====================================================================
 
 class ActiveParameterSetModel(RdpBase):
@@ -569,6 +569,98 @@ class ParameterApplyHistoryModel(RdpBase):
     actor = Column(String(128), nullable=False, server_default=text("'operator'"))
     notes = Column(Text)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ParameterSetModel(RdpBase):
+    """governance.parameter_sets — 参数集候选池（draft/candidate/frozen/deprecated）.
+
+    对应文件: artifacts/governance/current_parameter_registry.json 中的 parameter_sets 列表。
+    每条记录是一个版本化的参数集，经历 draft → candidate → frozen → deprecated 生命周期。
+    """
+
+    __tablename__ = "parameter_sets"
+    __table_args__ = (
+        UniqueConstraint("parameter_set_id", name="uq_ps_id"),
+        Index("ix_ps_family_tf_status", "family", "timeframe", "status"),
+        Index("ix_ps_source_round", "source_round_id"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    parameter_set_id = Column(String(128), nullable=False, unique=True)
+    family = Column(String(64), nullable=False)
+    symbol = Column(String(32), nullable=False, server_default=text("'BTC-USDT-SWAP'"))
+    timeframe = Column(String(16), nullable=False)
+    source_round_id = Column(String(128))
+    source_phase = Column(String(64))
+    dataset_version = Column(String(32), nullable=False, server_default=text("'v1.0'"))
+    values = Column(JSONB, nullable=False)
+    confidence = Column(String(32))
+    status = Column(String(32), nullable=False, server_default=text("'draft'"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    frozen_at = Column(DateTime(timezone=True))
+    deprecated_at = Column(DateTime(timezone=True))
+    notes = Column(Text)
+
+
+class RecommendationModel(RdpBase):
+    """governance.recommendations — 参数变更审批建议.
+
+    对应文件: artifacts/decision_system/recommendation_registry.json 中的 recommendations 列表。
+    状态流: draft → approved / rejected / superseded。
+    """
+
+    __tablename__ = "recommendations"
+    __table_args__ = (
+        UniqueConstraint("recommendation_id", name="uq_rec_id"),
+        Index("ix_rec_family_tf_status", "family", "timeframe", "status"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    recommendation_id = Column(String(128), nullable=False, unique=True)
+    family = Column(String(64), nullable=False)
+    symbol = Column(String(32), nullable=False, server_default=text("'BTC-USDT-SWAP'"))
+    timeframe = Column(String(16), nullable=False)
+    recommendation_type = Column(String(32), nullable=False)
+    target_parameter_set_id = Column(String(128))
+    confidence = Column(String(32), nullable=False)
+    reason = Column(Text, nullable=False)
+    evidence_bundle_ref = Column(String(128))
+    status = Column(String(32), nullable=False, server_default=text("'draft'"))
+    approved_by = Column(String(128))
+    approved_at = Column(DateTime(timezone=True))
+    approval_notes = Column(Text)
+    rejected_by = Column(String(128))
+    rejected_at = Column(DateTime(timezone=True))
+    superseded_at = Column(DateTime(timezone=True))
+    superseded_by_recommendation_id = Column(String(128))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ActiveDecisionModel(RdpBase):
+    """governance.active_decisions — 每个 family/timeframe 的当前决策状态.
+
+    对应文件: artifacts/decision_system/active_decision_registry.json 中的 decisions 列表。
+    每个 (family, timeframe) 只有一条记录（UPSERT 语义）。
+    """
+
+    __tablename__ = "active_decisions"
+    __table_args__ = (
+        UniqueConstraint("family", "timeframe", name="uq_active_decision_combo"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    family = Column(String(64), nullable=False)
+    symbol = Column(String(32), nullable=False, server_default=text("'BTC-USDT-SWAP'"))
+    timeframe = Column(String(16), nullable=False)
+    combo_key = Column(String(128), nullable=False)
+    current_status = Column(String(64), nullable=False)
+    active_parameter_set_id = Column(String(128))
+    last_recommendation_id = Column(String(128))
+    last_updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    notes = Column(Text)
 
 
 class RdpTaskQueueModel(RdpBase):

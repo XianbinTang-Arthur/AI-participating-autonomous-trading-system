@@ -29,9 +29,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -42,7 +44,7 @@ def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="管理 active parameter sets")
     p.add_argument(
         "--action",
-        choices=("show", "show-active", "apply", "apply-frozen", "clear"),
+        choices=("show", "show-active", "apply", "apply-frozen", "clear", "seed-db"),
         required=True,
     )
     p.add_argument(
@@ -66,6 +68,84 @@ def parse_args() -> argparse.Namespace:
         help="仅展示将要执行的操作，不实际写入",
     )
     return p.parse_args()
+
+
+def _get_db_engine():
+    """尝试创建 DB engine，返回 (engine, True) 或 (None, False)."""
+    db_url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+    if not db_url:
+        return None, False
+    try:
+        from sqlalchemy import create_engine, text as sa_text
+
+        engine = create_engine(db_url, pool_pre_ping=True, pool_size=1, max_overflow=0)
+        with engine.connect() as conn:
+            conn.execute(sa_text("SELECT 1 FROM governance.active_parameter_sets LIMIT 0"))
+        return engine, True
+    except Exception as exc:
+        print(f"[WARN] DB 不可用: {exc}")
+        return None, False
+
+
+def _try_db_write_active(
+    *,
+    family: str,
+    timeframe: str,
+    parameter_set_id: str,
+    values: dict,
+    source_round_id: str | None = None,
+    recommendation_id: str | None = None,
+    applied_by: str = "apply_active_parameter_set.py",
+) -> bool:
+    """尝试写入 governance.active_parameter_sets DB，成功返回 True."""
+    engine, ok = _get_db_engine()
+    if not ok:
+        return False
+    try:
+        from sqlalchemy import text as sa_text
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.active_params_db import (
+            db_append_history,
+            db_upsert_active_set,
+        )
+
+        with Session(engine) as session, session.begin():
+            existing = session.execute(
+                sa_text(
+                    "SELECT parameter_set_id FROM governance.active_parameter_sets "
+                    "WHERE family = :f AND timeframe = :t"
+                ),
+                {"f": family, "t": timeframe.lower()},
+            ).fetchone()
+            from_ps_id = existing.parameter_set_id if existing else None
+
+            db_upsert_active_set(
+                session,
+                family=family, timeframe=timeframe,
+                parameter_set_id=parameter_set_id, values=values,
+                source_round_id=source_round_id,
+                approval_recommendation_id=recommendation_id,
+                applied_by=applied_by,
+            )
+
+            op_id = f"op_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+            db_append_history(
+                session,
+                operation_id=op_id, operation_type="apply",
+                family=family, timeframe=timeframe,
+                from_parameter_set_id=from_ps_id,
+                to_parameter_set_id=parameter_set_id,
+                recommendation_id=recommendation_id,
+                actor=applied_by,
+            )
+        return True
+    except Exception as exc:
+        print(f"[WARN] DB 写入失败: {exc}")
+        return False
+    finally:
+        if engine is not None:
+            engine.dispose()
 
 
 def action_show(project_root: Path) -> int:
@@ -190,6 +270,18 @@ def action_apply(project_root: Path, args: argparse.Namespace) -> int:
     print(f"\n[OK] 已写入: {path}")
     print(f"[OK] 已更新 active_parameter_registry.json")
 
+    # DB 双写
+    db_ok = _try_db_write_active(
+        family=target["family"], timeframe=target["timeframe"],
+        parameter_set_id=target["parameter_set_id"],
+        values=target["values"],
+        source_round_id=target.get("source_round_id"),
+        recommendation_id=args.recommendation_id,
+        applied_by="apply_active_parameter_set.py (apply)",
+    )
+    if db_ok:
+        print("[OK] 已写入数据库 governance.active_parameter_sets")
+
     # 记录应用日志
     _write_application_log(
         project_root,
@@ -245,7 +337,16 @@ def action_apply_frozen(project_root: Path, args: argparse.Namespace) -> int:
             values=ps["values"],
             project_root=project_root,
         )
-        print(f"  [OK] {path}")
+        # DB 双写
+        db_ok = _try_db_write_active(
+            family=ps["family"], timeframe=ps["timeframe"],
+            parameter_set_id=ps["parameter_set_id"],
+            values=ps["values"],
+            source_round_id=ps.get("source_round_id"),
+            applied_by="apply_active_parameter_set.py (apply-frozen)",
+        )
+        db_label = " +DB" if db_ok else ""
+        print(f"  [OK] {path}{db_label}")
         applied += 1
 
         _write_application_log(
@@ -278,6 +379,26 @@ def action_clear(project_root: Path, args: argparse.Namespace) -> int:
 
     file_path.unlink()
     print(f"[OK] 已清除: {file_path}")
+
+    # DB 清除
+    engine, ok = _get_db_engine()
+    if ok:
+        try:
+            parts = args.combo.rsplit("_", 1)
+            if len(parts) == 2:
+                family, timeframe = parts[0], parts[1]
+                from sqlalchemy.orm import Session
+
+                from aats.data_platform.governance.active_params_db import db_clear_active_set
+
+                with Session(engine) as session, session.begin():
+                    db_clear_active_set(session, family, timeframe)
+                print("[OK] 已从数据库清除")
+        except Exception as exc:
+            print(f"[WARN] DB 清除失败: {exc}")
+        finally:
+            if engine is not None:
+                engine.dispose()
 
     _write_application_log(
         project_root,
@@ -312,6 +433,172 @@ def _write_application_log(
         f.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
 
 
+def action_seed_db(project_root: Path, args: argparse.Namespace) -> int:
+    """将所有治理层 JSON 注册表一次性种子到数据库.
+
+    种子 4 张表:
+      1. governance.parameter_sets       <- current_parameter_registry.json
+      2. governance.recommendations      <- recommendation_registry.json
+      3. governance.active_decisions     <- active_decision_registry.json
+      4. governance.active_parameter_sets <- active_parameter_registry.json
+    """
+    db_url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+    if not db_url:
+        print("[ERROR] 环境变量 AATS_ACTIVE_PARAMETER_DB_URL 未设置")
+        return 1
+
+    from sqlalchemy import create_engine, text as sa_text
+    from sqlalchemy.orm import Session
+
+    # 确保表存在
+    engine = create_engine(db_url, pool_pre_ping=True)
+    try:
+        from aats.data_platform.rdp_models import create_rdp_schema
+        create_rdp_schema(engine)
+        print("[OK] governance schema + 表已就绪")
+    except Exception as exc:
+        print(f"[WARN] create_rdp_schema 失败: {exc}（表可能已存在，继续）")
+
+    stats = {"parameter_sets": 0, "recommendations": 0, "active_decisions": 0, "active_parameter_sets": 0}
+
+    with Session(engine) as session, session.begin():
+        # ── 1. parameter_registry.json → governance.parameter_sets ──
+        from aats.data_platform.governance.parameter_registry import load_registry
+        from aats.data_platform.governance.parameter_sets_db import db_upsert_parameter_set
+
+        reg_path = project_root / "artifacts/governance/current_parameter_registry.json"
+        if reg_path.exists():
+            registry = load_registry(reg_path, skip_db=True)
+            for ps in registry.get("parameter_sets", []):
+                db_upsert_parameter_set(
+                    session,
+                    parameter_set_id=ps["parameter_set_id"],
+                    family=ps["family"],
+                    timeframe=ps["timeframe"],
+                    values=ps.get("values", {}),
+                    status=ps.get("status", "draft"),
+                    symbol=ps.get("symbol", "BTC-USDT-SWAP"),
+                    source_round_id=ps.get("source_round_id"),
+                    source_phase=ps.get("source_phase"),
+                    dataset_version=ps.get("dataset_version", "v1.0"),
+                    confidence=ps.get("confidence"),
+                    created_at=ps.get("created_at"),
+                    frozen_at=ps.get("frozen_at"),
+                    deprecated_at=ps.get("deprecated_at"),
+                    notes=ps.get("notes"),
+                )
+                stats["parameter_sets"] += 1
+            print(f"  [OK] parameter_sets: {stats['parameter_sets']} 条")
+        else:
+            print(f"  [SKIP] {reg_path} 不存在")
+
+        # ── 2. recommendation_registry.json → governance.recommendations ──
+        from aats.data_platform.decision_system.recommendation_registry import (
+            load_recommendation_registry,
+        )
+        from aats.data_platform.governance.recommendations_db import (
+            db_upsert_active_decision,
+            db_upsert_recommendation,
+        )
+
+        rec_path = project_root / "artifacts/decision_system/recommendation_registry.json"
+        if rec_path.exists():
+            rec_reg = load_recommendation_registry(rec_path, skip_db=True)
+            for rec in rec_reg.get("recommendations", []):
+                db_upsert_recommendation(
+                    session,
+                    recommendation_id=rec["recommendation_id"],
+                    family=rec["family"],
+                    timeframe=rec["timeframe"],
+                    recommendation_type=rec.get("recommendation_type", "require_review"),
+                    confidence=rec.get("confidence", "low"),
+                    reason=rec.get("reason", ""),
+                    symbol=rec.get("symbol", "BTC-USDT-SWAP"),
+                    target_parameter_set_id=rec.get("target_parameter_set_id"),
+                    evidence_bundle_ref=rec.get("evidence_bundle_ref"),
+                    status=rec.get("status", "draft"),
+                    approved_by=rec.get("approved_by"),
+                    approved_at=rec.get("approved_at"),
+                    approval_notes=rec.get("approval_notes"),
+                    rejected_by=rec.get("rejected_by"),
+                    rejected_at=rec.get("rejected_at"),
+                    superseded_at=rec.get("superseded_at"),
+                    superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
+                    created_at=rec.get("created_at"),
+                )
+                stats["recommendations"] += 1
+            print(f"  [OK] recommendations: {stats['recommendations']} 条")
+        else:
+            print(f"  [SKIP] {rec_path} 不存在")
+
+        # ── 3. active_decision_registry.json → governance.active_decisions ──
+        from aats.data_platform.decision_system.recommendation_registry import (
+            load_active_decision_registry,
+        )
+
+        dec_path = project_root / "artifacts/decision_system/active_decision_registry.json"
+        if dec_path.exists():
+            dec_reg = load_active_decision_registry(dec_path, skip_db=True)
+            for d in dec_reg.get("decisions", []):
+                db_upsert_active_decision(
+                    session,
+                    family=d["family"],
+                    timeframe=d["timeframe"],
+                    current_status=d.get("current_status", "require_review"),
+                    symbol=d.get("symbol", "BTC-USDT-SWAP"),
+                    active_parameter_set_id=d.get("active_parameter_set_id"),
+                    last_recommendation_id=d.get("last_recommendation_id"),
+                    notes=d.get("notes"),
+                )
+                stats["active_decisions"] += 1
+            print(f"  [OK] active_decisions: {stats['active_decisions']} 条")
+        else:
+            print(f"  [SKIP] {dec_path} 不存在")
+
+        # ── 4. active_parameter_registry.json → governance.active_parameter_sets ──
+        from aats.bootstrap.active_parameters import load_active_parameter_registry
+        from aats.data_platform.governance.active_params_db import (
+            db_append_history,
+            db_upsert_active_set,
+        )
+
+        active_reg = load_active_parameter_registry(project_root=project_root, skip_db=True)
+        for combo_key, entry in active_reg.get("active_sets", {}).items():
+            parts = combo_key.rsplit("_", 1)
+            family = parts[0] if len(parts) == 2 else combo_key
+            timeframe = parts[1] if len(parts) == 2 else "unknown"
+
+            db_upsert_active_set(
+                session,
+                family=family, timeframe=timeframe,
+                parameter_set_id=entry["parameter_set_id"],
+                values=entry.get("values", {}),
+                source_round_id=entry.get("source_round_id"),
+                approval_recommendation_id=entry.get("approval_recommendation_id"),
+                applied_by=entry.get("applied_by", "seed-db"),
+            )
+
+            op_id = f"op_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+            db_append_history(
+                session,
+                operation_id=op_id, operation_type="seed",
+                family=family, timeframe=timeframe,
+                to_parameter_set_id=entry["parameter_set_id"],
+                actor="seed-db",
+                notes="初始种子：从文件 registry 导入",
+            )
+            stats["active_parameter_sets"] += 1
+        print(f"  [OK] active_parameter_sets: {stats['active_parameter_sets']} 条")
+
+    engine.dispose()
+
+    print(f"\n=== seed-db 完成 ===")
+    for table, count in stats.items():
+        print(f"  governance.{table}: {count} 条")
+    print("全部使用 ON CONFLICT DO UPDATE，幂等操作。")
+    return 0
+
+
 def main() -> int:
     args = parse_args()
     project_root = ROOT
@@ -326,6 +613,8 @@ def main() -> int:
         return action_apply_frozen(project_root, args)
     elif args.action == "clear":
         return action_clear(project_root, args)
+    elif args.action == "seed-db":
+        return action_seed_db(project_root, args)
     else:
         print(f"[ERROR] 未知操作: {args.action}")
         return 1
