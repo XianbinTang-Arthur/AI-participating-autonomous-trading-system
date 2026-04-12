@@ -2,7 +2,7 @@
 # =============================================================================
 # AATS 标准化部署脚本
 #
-# 一条命令完成：代码提交 → WSL2 同步 → 镜像构建 → 旧镜像清理 → 服务启动 → 健康检查
+# 一条命令完成：代码提交 → WSL2 同步 → 镜像构建 → 旧镜像清理 → 基础设施+密码同步 → 应用启动 → 健康检查
 #
 # 设计原则：
 #   1. Profile 驱动：自动映射 compose 叠加层 + env 文件，杜绝手动拼错
@@ -187,7 +187,7 @@ preflight() {
 # ─── Step 1: 提交代码 ──────────────────────────────────────────────────
 step_commit() {
     if [[ -n "$COMMIT_MSG" ]]; then
-        log_info "Step 1/6: 提交代码..."
+        log_info "Step 1/7: 提交代码..."
         cd "$PROJECT_ROOT"
 
         # 检查是否有改动
@@ -213,25 +213,25 @@ step_commit() {
             fi
         fi
     else
-        log_info "Step 1/6: 跳过提交（--skip-commit）"
+        log_info "Step 1/7: 跳过提交（--skip-commit）"
     fi
 }
 
 # ─── Step 2: 同步到 WSL2 ───────────────────────────────────────────────
 step_sync() {
     if [[ "$SKIP_SYNC" == true ]]; then
-        log_info "Step 2/6: 跳过同步（--skip-sync）"
+        log_info "Step 2/7: 跳过同步（--skip-sync）"
         return
     fi
 
-    log_info "Step 2/6: 同步代码到 WSL2..."
+    log_info "Step 2/7: 同步代码到 WSL2..."
     "$SCRIPT_DIR/sync_to_wsl2.sh" pull
     log_ok "同步完成"
 }
 
 # ─── Step 3: 停止旧服务 ────────────────────────────────────────────────
 step_down() {
-    log_info "Step 3/6: 停止旧服务..."
+    log_info "Step 3/7: 停止旧服务..."
     wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose $COMPOSE_CMD_ARGS down --timeout 5" || {
         log_warn "docker compose down 返回非零（可能无正在运行的服务，继续）"
     }
@@ -240,14 +240,14 @@ step_down() {
 
 # ─── Step 4: 构建新镜像 ────────────────────────────────────────────────
 step_build() {
-    log_info "Step 4/6: 构建新镜像${NO_CACHE:+（无缓存）}..."
+    log_info "Step 4/7: 构建新镜像${NO_CACHE:+（无缓存）}..."
     wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose $COMPOSE_CMD_ARGS build $NO_CACHE"
     log_ok "镜像构建完成"
 }
 
 # ─── Step 5: 清理悬空镜像 ──────────────────────────────────────────────
 step_prune() {
-    log_info "Step 5/6: 清理悬空镜像..."
+    log_info "Step 5/7: 清理悬空镜像..."
     local pruned
     pruned=$(wsl_run "docker image prune -f 2>/dev/null" || true)
     if echo "$pruned" | grep -q "Total reclaimed space: 0B"; then
@@ -257,11 +257,32 @@ step_prune() {
     fi
 }
 
-# ─── Step 6: 启动新服务 ────────────────────────────────────────────────
-step_up() {
-    log_info "Step 6/6: 启动服务..."
+# ─── Step 6: 启动基础设施 ──────────────────────────────────────────────
+step_infra_up() {
+    log_info "Step 6/7: 启动基础设施（Postgres/Redis/NATS/...）..."
+    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose -f docker-compose.yml --env-file ../../.env.wsl2 up -d"
+
+    # 等待 Postgres 就绪
+    local elapsed=0
+    while [[ $elapsed -lt 30 ]]; do
+        if wsl_run "docker exec aats-postgres pg_isready -q 2>/dev/null"; then
+            break
+        fi
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    # 同步 Postgres 密码（scram-sha-256）— 幂等，每次部署确保数据卷密码与配置一致
+    wsl_run "cd $WSL_PROJECT && PW=\$(grep '^POSTGRES_PASSWORD=' .env.wsl2 | cut -d= -f2-) && USER=\$(grep '^POSTGRES_USER=' .env.wsl2 | cut -d= -f2-) && docker exec aats-postgres psql -U \$USER -d aats -c \"SET password_encryption = 'scram-sha-256'; ALTER USER \$USER PASSWORD '\$PW';\" >/dev/null 2>&1"
+
+    log_ok "基础设施就绪，密码已同步"
+}
+
+# ─── Step 7: 启动应用服务 ──────────────────────────────────────────────
+step_app_up() {
+    log_info "Step 7/7: 启动应用服务..."
     wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose $COMPOSE_CMD_ARGS up -d"
-    log_ok "服务已启动"
+    log_ok "应用服务已启动"
 }
 
 # ─── 健康检查 ───────────────────────────────────────────────────────────
@@ -270,7 +291,7 @@ step_health() {
 
     # 从 env 文件读取 API 端口（不泄露其他内容）
     local port
-    port=$(wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && grep -h '^AATS_API_PORT=' $ENV_PROFILE .env.wsl2 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\"'" || echo "")
+    port=$(wsl_run "cd $WSL_PROJECT && grep -h '^AATS_API_PORT=' $ENV_PROFILE 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\"'" || echo "")
     port="${port:-8000}"
 
     local elapsed=0
@@ -324,7 +345,8 @@ main() {
     step_down
     step_build
     step_prune
-    step_up
+    step_infra_up
+    step_app_up
     step_health
     report
 }
