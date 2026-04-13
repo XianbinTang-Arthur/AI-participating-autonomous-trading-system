@@ -48,7 +48,7 @@ export function createRdpActionHandlers({
     }
   }
 
-  // ── 审批并应用 recommendation ─────────────────────────────────
+  // ── 审批并应用 recommendation（仅限有 target_parameter_set_id 的）──
 
   async function approveAndApply(recommendationId) {
     if (!recommendationId) return;
@@ -75,6 +75,32 @@ export function createRdpActionHandlers({
         setFlash(state, "info", `${recommendationId} 已审批并应用到 active parameters。`);
       } else {
         setFlash(state, "warning", applyResult.message || "参数应用失败（审批已完成）。");
+      }
+      await refreshDashboard({ manual: true });
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      finishAction();
+    }
+  }
+
+  // ── 仅审批（策略指导类建议，没有 target_parameter_set_id）─────
+
+  async function approveOnly(recommendationId) {
+    if (!recommendationId) return;
+    if (!windowRef.confirm(`确认审批 ${truncateForConfirm(recommendationId)} 吗？`)) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在审批…");
+    try {
+      const result = await requestJson(
+        `/rdp/recommendations/${encodeURIComponent(recommendationId)}/approve`,
+        { method: "POST", body: { actor: "operator", notes: "UI 审批（策略指导，无参数应用）" } },
+      );
+      if (result.ok) {
+        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已审批。`);
+      } else {
+        setFlash(state, "warning", result.message || "审批失败。");
       }
       await refreshDashboard({ manual: true });
     } catch (error) {
@@ -169,6 +195,7 @@ export function createRdpActionHandlers({
   return {
     "rdp-trigger-workflow": (workflow) => triggerWorkflow(workflow),
     "rdp-approve-and-apply": (recId) => approveAndApply(recId),
+    "rdp-approve-only": (recId) => approveOnly(recId),
     "rdp-apply-only": (recId) => applyOnly(recId),
     "rdp-reject-recommendation": (recId) => rejectRecommendation(recId),
     "rdp-rollback-parameters": (combo) => rollbackParameters(combo),

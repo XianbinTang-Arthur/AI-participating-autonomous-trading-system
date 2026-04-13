@@ -348,6 +348,7 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
           <tbody>
             ${pendingRecs.map((rec) => {
               const isApproved = rec.status === "approved";
+              const hasParamSet = !!rec.target_parameter_set_id;
               return `
                 <tr>
                   <td class="mono-cell">${escapeHtml(truncateId(rec.recommendation_id))}</td>
@@ -355,15 +356,30 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
                   <td>${escapeHtml(rec.family || "")}/${escapeHtml(rec.timeframe || "")}</td>
                   <td>${isApproved ? "已审批" : escapeHtml(rec.action || "promote")}</td>
                   <td class="table-actions table-actions--compact">
-                    ${isApproved
+                    ${isApproved && hasParamSet
                       ? actionButton("应用参数", "rdp-apply-only", rec.recommendation_id, "primary", {
                           disabled: !canAdmin,
                           title: !canAdmin ? "当前账号只有查看权限" : "应用已审批的参数",
                         })
-                      : actionButton("审批并应用", "rdp-approve-and-apply", rec.recommendation_id, "primary", {
+                      : ""
+                    }
+                    ${!isApproved && hasParamSet
+                      ? actionButton("审批并应用", "rdp-approve-and-apply", rec.recommendation_id, "primary", {
                           disabled: !canAdmin,
                           title: !canAdmin ? "当前账号只有查看权限" : "审批此建议并立即应用参数",
                         })
+                      : ""
+                    }
+                    ${!isApproved && !hasParamSet
+                      ? actionButton("审批", "rdp-approve-only", rec.recommendation_id, "primary", {
+                          disabled: !canAdmin,
+                          title: !canAdmin ? "当前账号只有查看权限" : "审批此策略建议（无参数变更）",
+                        })
+                      : ""
+                    }
+                    ${isApproved && !hasParamSet
+                      ? `<span class="meta-copy">已完成</span>`
+                      : ""
                     }
                     ${!isApproved
                       ? actionButton("拒绝", "rdp-reject-recommendation", rec.recommendation_id, "ghost", {
