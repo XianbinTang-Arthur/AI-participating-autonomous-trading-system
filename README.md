@@ -32,18 +32,21 @@
 ### 当前支持
 
 - FastAPI API gateway + 内置前端控制台
-- 单进程 monolith 运行
-- 按 process role 切片的多进程运行（受限，见下方说明）
-- 内存事件总线、Hybrid/NATS 事件总线
-- memory / Redis hot state
+- **4 进程切片化部署**（gateway / market / decision / execution），Docker Compose 编排
+- monolith 单进程模式（回退路径，本地开发用）
+- Hybrid/NATS JetStream 跨进程事件总线（双流架构：MARKET 2GB + EVENTS 4GB）
+- Redis 跨进程热状态缓存（仓位、订单视图、KillSwitch 同步）
+- OTel 端到端分布式追踪（Jaeger）+ 结构化 JSON 日志（Loki）
+- Prometheus 指标采集 + Grafana 统一看板（4 数据源、2 仪表盘、5 告警规则）
 - OKX 行情、账户快照、模拟盘 / 受保护 live 运行
 - RDP 日常采集和多阶段研究编排
 
-> **多进程拓扑：** `derivatives_live` 已完整支持 4 进程拓扑
-> （gateway / market / decision / execution），推荐使用
+> **推荐拓扑：** `derivatives_live` 使用 4 进程拓扑
+> （gateway / market / decision / execution），由
 > `docker-compose.aats.derivatives-live.yml` 启动。
-> monolith 单进程模式保留作为回退（`docker-compose.aats.derivatives-live-monolith.yml`）。
-> 4 进程模式要求 Hybrid/NATS 事件总线 + Redis hot state store。
+> 基础设施 9 服务（Postgres / Redis / NATS / Loki / Promtail / Jaeger / Prometheus / Redis-Exporter / Grafana）
+> 由 `deploy/wsl2-dev/docker-compose.yml` 独立编排，合计约 7.2GB 内存。
+> monolith 单进程模式保留作回退（`docker-compose.aats.derivatives-live-monolith.yml`）。
 
 ### 当前不支持
 
@@ -93,25 +96,42 @@ RDP 负责历史数据与参数治理��核心流程是：
 ```text
 aats/
   api/                 FastAPI 路由、认证、前端静态资源服务
-  bootstrap/           配置装配、runtime 构建、profile/env 加载
-  bus/                 InMemory / Hybrid / NATS 事件总线
+  bootstrap/           配置装配、runtime 构建、profile/env 加载、日志/OTel 初始化
+  bus/                 InMemory / Hybrid / NATS JetStream 事件总线
   schemas/             领域模型
   services/            市场、特征、决策、治理、执行、对账、Operator、RDP 等核心服务
-  storage/             EventStore、Postgres 仓库、hot state、缓存
-  data_platform/       RDP 研究平台
+  storage/             EventStore、Postgres 仓库（35+ ORM 表）、Redis hot state、缓存
+  data_platform/       RDP 研究平台（6 schema / 47 张表）
 apps/
-  api_gateway/         FastAPI 入口
+  api_gateway/         FastAPI 入口（process_role=gateway）
+  market_gateway/      行情进程入口（process_role=market）
+  decision_engine/     决策进程入口（process_role=decision）
+  execution_engine/    执行进程入口（process_role=execution）
+deploy/
+  wsl2-dev/            WSL2 本地基础设施（9 服务 Docker Compose）
+    docker-compose.yml   Postgres/Redis/NATS/Loki/Promtail/Jaeger/Prometheus/Grafana/Redis-Exporter
+    Dockerfile           AATS 4 进程容器镜像（multi-stage, tini PID 1, 非 root）
+    docker-compose.aats.*.yml  4 进程 / monolith 编排
+    grafana/             数据源 + 仪表盘 + 告警规则自动注入
+    loki/                Loki TSDB v13 配置
+    promtail/            Docker SD 日志采集配置
+    prometheus/          指标抓取配置
+    nats/                JetStream 配置
+    RUNBOOK.md           基础设施运维手册
 scripts/
   start_api.py         API / UI 启动入口
   run_local.py         本地 in-memory paper loop
   rdp_*.py             RDP 采集、研究、治理脚本
+  sync_to_wsl2.sh      Windows → WSL2 代码同步
 configs/
   strategy_profiles/   策略 profile 配置
   active_parameter_sets/ RDP 活跃参数集
 docs/
+  audit/               基础设施组件审查报告
   operations/          运维 runbook
   rdp/                 RDP 说明文档
   configuration/       配置参考
+  task/                阶段设计与任务文档
 ```
 
 ## 快速开始
@@ -218,23 +238,60 @@ pip install -e .[otel]
 
 ## 关键文档索引
 
-- 生产发布全流程：[DEPLOYMENT.md](DEPLOYMENT.md)
+### 架构与部署
+
 - 架构总览：[ARCHITECTURE.md](ARCHITECTURE.md)
+- 生产发布全流程：[DEPLOYMENT.md](DEPLOYMENT.md)
+- 多进程改造路线：[docs/operations/multiprocess_refactor_roadmap.md](docs/operations/multiprocess_refactor_roadmap.md)
+
+### 基础设施
+
+- WSL2 基础设施说明：[deploy/wsl2-dev/README.md](deploy/wsl2-dev/README.md)
+- 基础设施运维手册：[deploy/wsl2-dev/RUNBOOK.md](deploy/wsl2-dev/RUNBOOK.md)
 - 配置参考：[docs/configuration/managed-config-reference.md](docs/configuration/managed-config-reference.md)
+
+### 运维
+
 - 平台运行手册：[docs/operations/platform_runbook.md](docs/operations/platform_runbook.md)
 - Operator 检查清单：[docs/operations/operator_checklist.md](docs/operations/operator_checklist.md)
+
+### RDP 研究平台
+
 - RDP 模块参考：[docs/rdp/module_reference.md](docs/rdp/module_reference.md)
 - RDP 可靠性与排班：
   - [docs/operations/rdp_reliability_runbook.md](docs/operations/rdp_reliability_runbook.md)
   - [docs/operations/rdp_workflow_calendar.md](docs/operations/rdp_workflow_calendar.md)
-- 多进程改造路线：[docs/operations/multiprocess_refactor_roadmap.md](docs/operations/multiprocess_refactor_roadmap.md)
+
+### 审查报告
+
+- Postgres 模块审查：[docs/audit/postgres_module_audit.md](docs/audit/postgres_module_audit.md)
+- Loki+Promtail 管线审查：[docs/audit/loki_promtail_module_audit.md](docs/audit/loki_promtail_module_audit.md)
+
+## 基础设施概览
+
+多进程部署依赖以下 9 个基础设施服务（全部运行在 WSL2 Docker Compose 内，零云费用）：
+
+| 组件 | 用途 | 端口 | 内存 |
+|------|------|------|------|
+| Postgres 16 | 主存储（账务、订单、策略状态） | 5432 | 2560M |
+| Redis 7 | 跨进程热状态缓存 | 6379 | 512M |
+| NATS 2.10 | JetStream 跨进程事件总线 | 4222/8222 | 1024M |
+| Loki 3.0 | 日志聚合（7 天保留） | 3100 | 512M |
+| Promtail 3.0 | Docker 容器日志采集 | — | 256M |
+| Jaeger 1.57 | 分布式 trace（OTLP gRPC+HTTP） | 16686/4317 | 1536M |
+| Prometheus 2.51 | 进程指标采集 | 9090 | 256M |
+| Redis-Exporter | Redis 指标 → Prometheus | 9121 | 64M |
+| Grafana 10.4.4 | 统一看板 + 告警 | 3000 | 512M |
+
+合计约 7.2GB 内存。详见 [deploy/wsl2-dev/README.md](deploy/wsl2-dev/README.md)。
 
 ## 安全与运行建议
 
 - 默认先用 `spot` / `derivatives` 做联调，不要直接从 live profile 起步。
 - live profile 只应在 Operator、恢复、对账、认证、数据库和日志链路都确认正常后使用。
-- 对于任何“能否下单”的问题，优先从 UI 的 `风险与恢复`、`退出任务工作台`、`账户与权限` 页面和 `/system/health`、`/system/recovery` 开始排查。
-- 若使用多进程部署，请同时确认 event bus、hot state、healthcheck 和各 process role 的配置一致性。
+- 对于任何”能否下单”的问题，优先从 UI 的 `风险与恢复`、`退出任务工作台`、`账户与权限` 页面和 `/system/health`、`/system/recovery` 开始排查。
+- 多进程部署前必须确认：event bus（hybrid/nats）、hot state（redis）、healthcheck、各 process role 配置一致。
+- 基础设施运维参见 [RUNBOOK.md](deploy/wsl2-dev/RUNBOOK.md)，含健康检查、故障排查、备份恢复。
 
 ## 状态说明
 

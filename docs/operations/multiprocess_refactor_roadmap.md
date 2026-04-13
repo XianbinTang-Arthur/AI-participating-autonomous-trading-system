@@ -4,7 +4,7 @@
 
 | 项目 | 内容 |
 |---|---|
-| 创建日期 | 2026-04-07 |
+| 创建日期 | 2026-04-07（最后修订 2026-04-13） |
 | 文档作用 | 把"已完成 / 半成品 / 未动"和"补齐顺序"放在一处，避免再次出现阶段编号错位 |
 | 与 `docs/task/` 的区别 | `task/` 下是按 task 编号组织的单个交付物设计；本文是跨 task 的全局视角和依赖图 |
 | 维护责任 | 每完成一组节点必须回来刷新本文的"真实状态盘点"和对应 commit hash |
@@ -33,25 +33,27 @@ AATS 当前以单进程 monolith 形态运行：一个 Python 进程同时跑 ga
 
 ---
 
-## 2. 真实状态盘点（截至 2026-04-07）
+## 2. 真实状态盘点（截至 2026-04-13）
 
 **注**：本表代表的是 review 过的代码事实，不是脑海中的计划。任何带"半成品"标记的项都意味着"代码存在但没人在用 / 没接通 / 没门控"。
 
 | 编号 | 项目 | 状态 | 关键缺口 |
 |---|---|---|---|
-| 阶段 1 | 基础设施（docker-compose / backup / restore / RUNBOOK） | 完整 | — |
-| 阶段 2 | `build_runtime` 切片化（拆出 4 个 slice builder） | 完整 | — |
-| 阶段 3 | `process_role` 门控 | 完整 | 6 个 slice builder + `_SLICE_REQUIRED_ROLES` 矩阵已就位，每个 role 只构造本职 service。配套单测：`test_process_role_settings.py`、`test_scoped_runtime_lock_key.py` |
-| 阶段 4 | NATS bus 接入 build_runtime | 完整 | 单元路径 ✅ 26 个 nats_bus 单测 + 6 个 bus shutdown 单测全过；集成路径 ✅ 4 个 testcontainers + multiprocessing 跨进程测试在 WSL2 Ubuntu + Docker 28.2.2 + nats:2.10-alpine + nats-py 2.14 环境下全过 (14.27s)。回归保护：`test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds` 防止 max_age 双重换算 bug 复发 |
-| 加餐 A | row_version 乐观锁（OCC） | 完整 | 覆盖 `StrategyExecutionBundle` + `OrderStateModel` + `FillEventModel` 原子幂等 + `P1 Snapshot` 决策 |
-| 加餐 B | `scoped_runtime_lock_key`（按 role 派生 advisory lock key） | 完整 | 单元测试覆盖 |
-| 阶段 5 | NATS 全量 + 跨进程消息流 | 完整 | 5b outbox 协议 + 5c 路由表真实常量 + 5d process_lifecycle + 4 entry script + Dockerfile + docker-compose + 5e smoke test。NATS Slow Consumer 防护（delivery 语义分类 + flow_control + idle_heartbeat）+ 双流架构（AATS_EVENTS_MARKET 2GB + AATS_EVENTS 4GB）+ 环境变量容量覆盖 + 迁移脚本 + Runbook §9.10 |
-| 阶段 6 | Redis hot_state_store | 完整 | Slice 6.1 配线 + 6.2 KillSwitch 跨进程同步 + 6.3 PortfolioSnapshotCache + 6.4 KillSwitch 二合一重构 + 6.5 ObligationHotStateCache。Redis 安全审计：requirepass + REDISCLI_AUTH + 全缓存 TTL + TLS 字段就绪 + fail-safe halt + 48h 陈旧性告警。Guard Signal Cache fail-closed 安全修复 |
-| 阶段 7 | multiprocessing（4 容器拆分） | 完整 | 4 容器拓扑通过 Slice 6.2 / 6.3 / 6.5 WSL2 真跑多次验证：healthcheck 全绿、KillSwitch 跨进程 <50ms 同步、PortfolioSnapshot/Obligation 缓存广播 0-3ms、容器重启 Redis rehydrate 正常 |
-| 阶段 8 | OTel + Jaeger 端到端追踪 | 完整 | pyproject.toml otel extra + Dockerfile + build_runtime configure_telemetry + EventEnvelope trace_context 字段 + NatsEventBus inject/extract hooks + 关键路径 start_span（gateway/decision/execution/portfolio）+ RUNBOOK §9.5 OTel drill |
-| 阶段 9 | 长周期验证（T0 DRY → T4） | 代码完成，待运行 | drift_score.py CLI（517 行 + 60 测试）+ abort_hooks.py 状态机（546 行 + 26 测试）+ RUNBOOK §9.6/§9.7 drill + dryrun_checklist.md 10 节检查清单。**待执行**：T0 DRY paper 模式 24h 首跑 |
+| 阶段 1 | 基础设施（docker-compose / backup / restore / RUNBOOK） | ✅ 完整 | 9 服务 Docker Compose（Postgres / Redis / NATS / Loki / Promtail / Jaeger / Prometheus / Redis-Exporter / Grafana），合计 7.2GB 内存。5 组件审查全部通过（2026-04-13） |
+| 阶段 2 | `build_runtime` 切片化（拆出 4 个 slice builder） | ✅ 完整 | — |
+| 阶段 3 | `process_role` 门控 | ✅ 完整 | 6 个 slice builder + `_SLICE_REQUIRED_ROLES` 矩阵已就位，每个 role 只构造本职 service。配套单测：`test_process_role_settings.py`、`test_scoped_runtime_lock_key.py` |
+| 阶段 4 | NATS bus 接入 build_runtime | ✅ 完整 | 单元路径 ✅ 26 个 nats_bus 单测 + 6 个 bus shutdown 单测全过；集成路径 ✅ 4 个 testcontainers + multiprocessing 跨进程测试在 WSL2 Ubuntu + Docker 28.2.2 + nats:2.10-alpine + nats-py 2.14 环境下全过 (14.27s)。回归保护：`test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds` 防止 max_age 双重换算 bug 复发 |
+| 加餐 A | row_version 乐观锁（OCC） | ✅ 完整 | 覆盖 `StrategyExecutionBundle` + `OrderStateModel` + `FillEventModel` 原子幂等 + `P1 Snapshot` 决策 |
+| 加餐 B | `scoped_runtime_lock_key`（按 role 派生 advisory lock key） | ✅ 完整 | 单元测试覆盖 |
+| 阶段 5 | NATS 全量 + 跨进程消息流 | ✅ 完整 | 5b outbox 协议 + 5c 路由表真实常量 + 5d process_lifecycle + 4 entry script + Dockerfile + docker-compose + 5e smoke test。NATS Slow Consumer 防护（delivery 语义分类 + flow_control + idle_heartbeat）+ 双流架构（AATS_EVENTS_MARKET 2GB + AATS_EVENTS 4GB）+ 环境变量容量覆盖 + 迁移脚本 + Runbook §9.10 |
+| 阶段 6 | Redis hot_state_store | ✅ 完整 | Slice 6.1 配线 + 6.2 KillSwitch 跨进程同步 + 6.3 PortfolioSnapshotCache + 6.4 KillSwitch 二合一重构 + 6.5 ObligationHotStateCache。Redis 安全审计：requirepass + REDISCLI_AUTH + 全缓存 TTL + TLS 字段就绪 + fail-safe halt + 48h 陈旧性告警。Guard Signal Cache fail-closed 安全修复 |
+| 阶段 7 | multiprocessing（4 容器拆分） | ✅ 完整 | 4 容器拓扑通过 Slice 6.2 / 6.3 / 6.5 WSL2 真跑多次验证：healthcheck 全绿、KillSwitch 跨进程 <50ms 同步、PortfolioSnapshot/Obligation 缓存广播 0-3ms、容器重启 Redis rehydrate 正常 |
+| 阶段 8 | OTel + Jaeger 端到端追踪 | ✅ 完整 | pyproject.toml otel extra + Dockerfile + build_runtime configure_telemetry + EventEnvelope trace_context 字段 + NatsEventBus inject/extract hooks + 关键路径 start_span（gateway/decision/execution/portfolio）+ RUNBOOK §9.5 OTel drill |
+| 阶段 9 | 长周期验证（T0 DRY → T4） | ⏳ 代码完成，待运行 | drift_score.py CLI（517 行 + 60 测试）+ abort_hooks.py 状态机（546 行 + 26 测试）+ RUNBOOK §9.6/§9.7 drill + dryrun_checklist.md 10 节检查清单。**待执行**：T0 DRY paper 模式 24h 首跑 |
+| 基础设施审查 | 5 组件安全/配置/可靠性审查 | ✅ 完整 | Grafana（G-1~G-4 已修复）+ NATS（N-1~N-2 已修复）+ Redis（R-1~R-3 已修复）+ Postgres（P-1~P-2 INFO）+ Loki+Promtail（L-1 已修复）。审查报告见 `docs/audit/` |
 
-**统计**：完整 8 项（阶段 1-8 + 加餐 A、B），代码完成待运行 1 项（阶段 9）。
+**统计**：完整 9 项（阶段 1-8 + 加餐 A、B + 基础设施审查），代码完成待运行 1 项（阶段 9）。
+**下一步**：启动 T0 DRY paper 模式 24h 首跑。
 
 ---
 
@@ -309,3 +311,9 @@ AATS_RUN_NATS_INTEGRATION=1 python -m pytest tests/integration/test_nats_event_b
   - 安全网：每个子任务都有自己的 `pre-stage-5{b,c,a-1,a-2,d,e}-v1` git tag，可独立回滚。
   - **状态变化**：加餐 A OCC 由"完整（仅 bundle）"扩展为"完整（bundle + order_state + fill + P1 snapshot 决策）"；阶段 5 由"未动"→"半成品"（5b/5c 完成，5d/5e 已装配，剩余真正端到端跨进程 fan-out 切到 NATS critical 流验证）；阶段 7 由"未动"→"装配完成（待 docker 真跑）"（4 entry + Dockerfile + compose 全部就位，差 WSL2 上 `docker compose up -d` 真跑 healthcheck 全绿这一个 gate）。
   - **下一关（不在本次 commit 范围内）**：在 WSL2 上拉真 docker compose 起 4 容器，跑 healthcheck + 任意容器 `docker kill` 后 NATS redeliver 收敛回归；通过后阶段 7 升级为"完整"，进入阶段 5 真正剩余的 NATS critical fan-out 验证。
+- 2026-04-13：**5 组件基础设施审查完成 + Stage 9 可观测性基础设施就绪**。
+  - **基础设施审查**：对全部 9 服务的 5 大组件（Grafana / NATS / Redis / Postgres / Loki+Promtail）执行安全、配置、可靠性审查。共发现并修复：G-1~G-4（Grafana 数据源引用/匿名访问/告警静默/Provisioning 路径）、N-1~N-2（NATS max_msgs_per_subject/max_consumers）、R-1~R-3（Redis requirepass/REDISCLI_AUTH/缓存 TTL）、P-1~P-2（Postgres 死迁移代码/告警覆盖）、L-1（Promtail positions 文件未持久化）。审查报告落地 `docs/audit/`（2 份 markdown，共 28KB）。
+  - **Stage 9 可观测性基础设施**：新增 Prometheus 2.51 + Redis-Exporter 1.58 + Promtail 3.0 至 docker-compose。Grafana 自动注入 4 数据源（Loki/Jaeger/Prometheus/Postgres）+ 2 仪表盘（AATS Operations / Logs Overview）+ 5 告警规则（SEV1 KillSwitch/Reconciliation、SEV2 Crash/Stall、SEV3 Error Rate）。基础设施从 6 服务 3.7GB 扩展到 9 服务 7.2GB。
+  - **文档同步**：更新 README.md / DEPLOYMENT.md / ARCHITECTURE.md / deploy/wsl2-dev/README.md / RUNBOOK.md 共 5 个文档，统一反映 9 服务实际拓扑。
+  - **生产验证**：14 个容器全部 `Up (healthy)`（9 基础设施 + 5 应用进程）。Loki 实时接收结构化日志（container/level/process_role 标签正确提取），Prometheus 抓取 Redis-Exporter 指标正常，Grafana 看板可访问。
+  - **状态变化**：新增"基础设施审查"行（✅ 完整）。阶段 9 保持"代码完成，待运行"——可观测性基础设施已就位，下一步是 T0 DRY 24h 首跑。
