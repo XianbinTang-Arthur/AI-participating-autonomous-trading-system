@@ -4082,6 +4082,7 @@ def _build_reconciliation_slice(
 async def _wire_event_subscriptions(
     *,
     slices: _RuntimeSlices,
+    effective_process_role: str | None = None,
 ) -> None:
     """把 critical 与 observer handler 注册到 bus 上。
 
@@ -4149,6 +4150,65 @@ async def _wire_event_subscriptions(
     # 广播，fill_event_cache 通过此订阅保持各进程缓存新鲜。
     if slices.fill_event_hot_cache is not None:
         await slices.fill_event_hot_cache.register_remote_subscription(collector)
+    # ── Gateway event store relay ────────────────────────────────────────
+    #
+    # 4 进程架构下，gateway 角色只装 shared slice，不运行 decision / execution
+    # 引擎。但 gateway 的 OperatorQueryService 需要通过 event_store 向 dashboard
+    # 展示跨进程产生的事件（如决策上下文、风险决策、AI 报告等）。
+    #
+    # 问题：NatsEventBus 的 event_store.append 同时发生在 publish（生产端）和
+    # receive（消费端）路径。但 receive 路径只在有 NATS subscription 时触发。
+    # Gateway 对这些 topic 没有业务 handler → 没有 NATS subscription → receive
+    # 路径不触发 → event_store 为空 → dashboard 查询全部返回 []。
+    #
+    # 修复：为 gateway 添加一个 no-op relay handler，sole purpose 是让 NATS
+    # durable consumer 被创建。实际 event_store 持久化由 NatsEventBus._on_msg
+    # 内置的 event_store.append 完成（本次同步添加）。
+    #
+    # 此列表覆盖 OperatorQueryService / RuntimeQueries 读取 event_store 的
+    # 全部跨进程 topic。新增 dashboard 查询需要的 topic 时，同步更新此列表。
+    if effective_process_role == PROCESS_ROLE_GATEWAY:
+        from aats.events import topics as _relay_topics
+
+        _GATEWAY_DASHBOARD_RELAY_TOPICS: tuple[str, ...] = (
+            # 决策路径事件：dashboard "最近决策" / "决策详情" 面板
+            _relay_topics.DECISION_CONTEXTS,
+            _relay_topics.BASELINE_ASSESSMENTS,
+            _relay_topics.AI_ASSESSMENTS,
+            _relay_topics.AI_DECISION_BRIEFS,
+            _relay_topics.AI_SHADOW_DECISIONS,
+            _relay_topics.AI_SHADOW_EVALUATIONS,
+            _relay_topics.AI_DEGRADATION_EVENTS,
+            _relay_topics.DECISION_OUTCOMES,
+            _relay_topics.EXECUTION_PLANS,
+            _relay_topics.ORDER_INTENTS,
+            # 风险/策略治理事件：dashboard "风控日志" 面板
+            _relay_topics.RISK_DECISIONS,
+            _relay_topics.POLICY_DECISIONS,
+            # 策略快照：dashboard "策略状态" 面板
+            _relay_topics.STRATEGY_COORDINATOR_SNAPSHOTS,
+            _relay_topics.POSITION_TARGETS,
+            # AI 报告：dashboard "AI 表现" / "优化报告" 面板
+            _relay_topics.AI_PERFORMANCE_REPORTS,
+            _relay_topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS,
+            # 策略 profile 管理事件：dashboard "策略 profile" 面板
+            _relay_topics.STRATEGY_PROFILE_RECOMMENDATIONS,
+            _relay_topics.STRATEGY_PROFILE_ACTIVATIONS,
+            _relay_topics.STRATEGY_PROFILE_REJECTIONS,
+            _relay_topics.STRATEGY_PROFILE_SELECTION_DECISIONS,
+        )
+
+        async def _gateway_event_store_noop(message: dict) -> None:
+            """No-op relay handler: event_store 持久化由 NatsEventBus._on_msg 处理。"""
+            pass
+
+        for _relay_t in _GATEWAY_DASHBOARD_RELAY_TOPICS:
+            await collector.subscribe(_relay_t, _gateway_event_store_noop)
+        log_event(
+            get_logger("aats.bootstrap"),
+            "gateway_event_store_relay_registered",
+            topic_count=len(_GATEWAY_DASHBOARD_RELAY_TOPICS),
+        )
     await collector.flush()
 
 
@@ -4741,7 +4801,7 @@ async def build_runtime(
         slices=slices,
         effective_process_role=effective_process_role,
     )
-    await _wire_event_subscriptions(slices=slices)
+    await _wire_event_subscriptions(slices=slices, effective_process_role=effective_process_role)
 
     # P2-1：启动审计批量写任务。订阅已全部装配完毕，开始积攒写缓冲。
     if slices.audit_service is not None:

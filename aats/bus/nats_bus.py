@@ -129,18 +129,27 @@ DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
         _topics.STRATEGY_PROFILE_SELECTION_DECISIONS,    # profile 选择决策
         _topics.STRATEGY_PROFILE_AUTO_ROLLBACK_POLICIES, # 自动回滚规则配置
         _topics.STRATEGY_PROFILE_ACTIVATION_POLICIES,    # 激活规则配置
+        # ── decision→gateway 跨进程报告 ────────────────────
+        _topics.AI_PERFORMANCE_REPORTS,   # AI 表现报告；decision 生产，gateway API
+                                          # GET /ai/performance/reports 消费。
+                                          # 之前误放在 OBSERVER_TOPICS（内存 bus only），
+                                          # 导致 gateway 永远收不到 AI 表现数据。
+        _topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS,  # 优化报告；decision 生产，
+                                          # gateway API GET /strategy-profiles/
+                                          # optimization/reports 消费。同上。
     }
 )
 
 # 观察者 topic：仪表盘/指标流/调试事件，量大、丢失无关键影响，留在内存
+# ⚠️ 放入此集合的 topic 只走进程内 InMemoryEventBus，**绝不**通过 NATS
+# 跨进程。如果一个 topic 的生产者和消费者在不同进程，它**必须**在
+# DEFAULT_CRITICAL_TOPICS 里。
 DEFAULT_OBSERVER_TOPICS: frozenset[str] = frozenset(
     {
-        _topics.HEALTH_SNAPSHOTS,         # 系统健康指标；纯监控
-        _topics.BLOCKER_SNAPSHOTS,        # operator dashboard 阻塞展示
-        _topics.AI_PERFORMANCE_REPORTS,   # AI 表现报告；纯报告
-        _topics.STRATEGY_PROFILE_EVALUATIONS,         # profile 评估输入；分析层
-        _topics.STRATEGY_PROFILE_COMPARISON_REPORTS,  # profile 比较报告
-        _topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS,# profile 优化报告
+        _topics.HEALTH_SNAPSHOTS,         # 系统健康指标；decision 内部，无消费者
+        _topics.BLOCKER_SNAPSHOTS,        # operator dashboard 阻塞展示；gateway 内部闭环
+        _topics.STRATEGY_PROFILE_EVALUATIONS,         # profile 评估输入；decision 内部
+        _topics.STRATEGY_PROFILE_COMPARISON_REPORTS,  # profile 比较报告；decision 内部
     }
 )
 
@@ -1124,6 +1133,23 @@ class NatsEventBus(EventBus):
             # 高频 topic 写入进程内缓存，供 latest() / recent() 查询
             if self._stream_cache is not None and envelope.topic in _STREAM_CACHE_TOPICS:
                 self._stream_cache.update(envelope)
+            # 非高频 topic: 写入 event_store，使**接收方**进程也持有跨进程
+            # 事件副本。publish 路径已有相同分流逻辑（见 publish() 方法），
+            # 此处补齐 receive 路径——否则非生产者进程（如 gateway）的
+            # event_store 对跨进程 topic 永远为空，导致 dashboard 查询缺数据。
+            # InMemoryEventStore.append 按 event_id 去重，不会重复写入。
+            elif self._event_store is not None:
+                try:
+                    await asyncio.to_thread(self._event_store.append, envelope)
+                except Exception as _recv_persist_exc:
+                    log_event(
+                        self.logger,
+                        "event_store_receive_persist_failed",
+                        level="warning",
+                        topic=topic,
+                        error_type=type(_recv_persist_exc).__name__,
+                        error=str(_recv_persist_exc),
+                    )
 
             # ── Phase 2: 提取 trace context + 在 span 内执行 handler ──
             # extract_trace_context 在没装 OTel 或 carrier 为空时返回 None；

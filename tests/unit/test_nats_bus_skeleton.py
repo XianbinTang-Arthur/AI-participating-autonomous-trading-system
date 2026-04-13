@@ -180,7 +180,18 @@ def test_routing_observer_topic() -> None:
     routing = HybridBusRouting()
     assert routing.route_for(_topics.HEALTH_SNAPSHOTS) == "observer"
     assert routing.route_for(_topics.BLOCKER_SNAPSHOTS) == "observer"
-    assert routing.route_for(_topics.AI_PERFORMANCE_REPORTS) == "observer"
+    assert routing.route_for(_topics.STRATEGY_PROFILE_EVALUATIONS) == "observer"
+
+
+def test_cross_process_topics_not_in_observer() -> None:
+    """跨进程消费的 topic 必须在 critical，不能在 observer（防止重犯 guard signal bug）。"""
+    routing = HybridBusRouting()
+    # AI_PERFORMANCE_REPORTS: decision→gateway，曾误放 observer
+    assert routing.route_for(_topics.AI_PERFORMANCE_REPORTS) == "critical"
+    # STRATEGY_PROFILE_OPTIMIZATION_REPORTS: decision→gateway，曾误放 observer
+    assert routing.route_for(_topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS) == "critical"
+    # GUARD_SIGNAL_UPDATES: execution→decision，最早发现的同类 bug
+    assert routing.route_for(_topics.GUARD_SIGNAL_UPDATES) == "critical"
 
 
 def test_routing_unknown_raises_unrouted_topic_error() -> None:
