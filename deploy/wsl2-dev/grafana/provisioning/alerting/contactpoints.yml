@@ -14,7 +14,8 @@ contactPoints:
       - uid: aats-log-receiver
         type: email
         settings:
-          # 不配置真实 SMTP——Grafana 会在 UI 中显示告警状态，
-          # 发送会失败但告警状态仍然被追踪。Stage 10 再配置真实 SMTP。
-          addresses: ""
+          # 占位地址——未配置 SMTP 所以不会真正发送。
+          # Grafana 10.4+ 要求 addresses 非空才能通过 provisioning 校验。
+          # 告警状态仍然在 UI 面板中追踪。Stage 10 再配置真实 SMTP + 真实收件人。
+          addresses: "noreply@aats.local"
         disableResolveMessage: true
