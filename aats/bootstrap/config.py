@@ -5198,10 +5198,19 @@ async def build_runtime(
                 await _aio.sleep(10.0)
                 try:
                     if runtime.derivatives_live_guard_service is not None:
+                        # 先 evaluate_now 确保 snapshot 是最新评估结果，
+                        # 而不是 bootstrap 时的旧快照。evaluate_now 是同步
+                        # CPU-bound 调用，走 to_thread 避免阻塞事件循环。
+                        await _aio.to_thread(
+                            runtime.derivatives_live_guard_service.evaluate_now
+                        )
                         await _guard_caches["derivatives_live"].publish(
                             runtime.derivatives_live_guard_service.snapshot()
                         )
                     if runtime.trial_guard_service is not None:
+                        await _aio.to_thread(
+                            runtime.trial_guard_service.evaluate_now
+                        )
                         await _guard_caches["trial"].publish(
                             runtime.trial_guard_service.snapshot()
                         )
@@ -5228,6 +5237,11 @@ async def build_runtime(
 
     elif effective_process_role == PROCESS_ROLE_DECISION and runtime.risk_engine is not None:
         # Decision 侧：从 Redis 恢复 + 订阅 NATS，注入 risk_engine 作为 provider
+        #
+        # 注意：三个 guard cache 共享同一个 NATS topic (GUARD_SIGNAL_UPDATES)，
+        # NatsBus 为同 topic 只创建一个 durable consumer，因此不能让每个 cache
+        # 各自 subscribe（第二/三个会失败 "consumer is already bound"）。
+        # 统一用 subscribe=False + 手动单次订阅 + 分发器模式。
         _live_guard_cache = GuardSignalHotStateCache(
             signal_name="derivatives_live",
             logger=runtime.logger,
@@ -5236,7 +5250,7 @@ async def build_runtime(
             hot_state_store=hot_state_store,
             bus=bus,
             process_role=PROCESS_ROLE_DECISION,
-            subscribe=True,
+            subscribe=False,
         )
         runtime.risk_engine.live_runtime_guard_provider = _live_guard_cache
 
@@ -5248,7 +5262,7 @@ async def build_runtime(
             hot_state_store=hot_state_store,
             bus=bus,
             process_role=PROCESS_ROLE_DECISION,
-            subscribe=True,
+            subscribe=False,
         )
         runtime.risk_engine.trial_guard_provider = _trial_guard_cache
 
@@ -5260,9 +5274,29 @@ async def build_runtime(
             hot_state_store=hot_state_store,
             bus=bus,
             process_role=PROCESS_ROLE_DECISION,
-            subscribe=True,
+            subscribe=False,
         )
         runtime.risk_engine.recovery_status_provider = _recovery_cache
+
+        # 单次订阅 GUARD_SIGNAL_UPDATES，分发到所有 cache。
+        # 每个 cache 的 _handle_remote_update 内部按 signal_name 过滤，
+        # 只更新匹配自己的快照。
+        _decision_guard_caches_by_name = {
+            "derivatives_live": _live_guard_cache,
+            "trial": _trial_guard_cache,
+            "recovery": _recovery_cache,
+        }
+
+        async def _guard_signal_dispatch(message: dict) -> None:
+            for _gc in _decision_guard_caches_by_name.values():
+                await _gc._handle_remote_update(message)
+
+        from aats.events import topics as _guard_topics
+
+        await bus.subscribe(_guard_topics.GUARD_SIGNAL_UPDATES, _guard_signal_dispatch)
+        _live_guard_cache._subscribed = True
+        _trial_guard_cache._subscribed = True
+        _recovery_cache._subscribed = True
 
         runtime.guard_signal_caches = {
             "derivatives_live": _live_guard_cache,

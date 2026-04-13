@@ -127,10 +127,8 @@ Ctrl+C 即可。lock 会自动释放。
 
 ## 3. 多进程切片化启动（Day 2）
 
-⚠️ 这一步只有在 Stage 4-6 的 NATS / Redis 接入代码完成后才有意义。
-当前（2026-04-07）4 个进程能同时启动且 advisory lock 互不冲突，但
-gateway → market → decision → execution 的事件流还是走 in-process 内存
-（HybridEventBus 的 NATS 通路尚未在 build_runtime 中接通）。
+⚠️ 多进程切片化已经是当前主要拓扑，但本地 WSL2 栈仍是开发/演练环境，不是生产 HA 模板。
+真实资金运行前必须按 `DEPLOYMENT.md` 和 `docs/operations/operator_checklist.md` 完成 trading-ready 检查。
 
 ### 3.1 一进程一终端
 开 4 个 WSL2 终端，分别 cd 到项目根目录，分别 export 环境变量：
@@ -209,6 +207,19 @@ cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem/deploy/wsl2-dev
 ---
 
 ## 5. 故障排查 Cheat Sheet
+
+### 5.0 live 前安全检查
+
+如果使用 `spot-live` 或 `derivatives-live` profile，启动后不要只看 Docker healthy。还必须确认：
+
+1. `/system/health` 无 critical blocker。
+2. account snapshot fresh。
+3. reconciliation 无 unresolved high/critical finding。
+4. execution command queue 无 `PENDING` submit/cancel 积压。
+5. 无 stale `SENT` submit。
+6. kill switch 状态明确。
+7. active parameter set 有 approval/gate/apply history。
+8. active parameter set 有完整 gate/apply history。
 
 ### 5.1 服务起不来
 ```bash

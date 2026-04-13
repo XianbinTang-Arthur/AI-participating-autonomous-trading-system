@@ -194,6 +194,12 @@ cat backup_2026-04-07.dump | docker exec -i aats-postgres pg_restore -U aats -d 
 - 全部端口仅监听 `127.0.0.1`，**不会**暴露到局域网或公网
 - `.env.wsl2` 已在 `.gitignore` 排除，密码不会泄露到 git
 - **永远不要**直接在生产环境复用这套 compose；这只是开发栈
+- NATS dev 配置未启用生产级认证/多节点 HA；只适合本机演练
+- live profile 即使能在本地跑起来，也必须按 `DEPLOYMENT.md` 和 Operator checklist 完成 trading-ready 检查。
+
+### 使用边界
+
+本 WSL2 栈默认只作为开发、模拟盘、演练和观测环境。若用于 live 演练，必须额外确认 profile、Operator auth、database、OKX account、kill switch、reconciliation、active parameter history 和 recovery status。
 
 ---
 

@@ -289,11 +289,48 @@ function isWorkflowBusy(taskInfo) {
   return taskInfo.status === "pending" || taskInfo.status === "running";
 }
 
+// ── Recommendation type helpers ──────────────────────────────────
+
+const REC_TYPE_LABELS = {
+  parameter_upgrade: "参数升级",
+  keep_active: "保持当前",
+  lower_priority: "降低优先级",
+  pause: "暂停",
+  require_review: "需要审查",
+};
+
+function readableRecType(type) {
+  return REC_TYPE_LABELS[type] || type || "未知";
+}
+
+function readableConfidence(confidence) {
+  const map = { high: "高", medium: "中", low: "低" };
+  return map[confidence] || confidence || "—";
+}
+
+function confidenceTone(confidence) {
+  if (confidence === "high") return "positive";
+  if (confidence === "medium") return "info";
+  if (confidence === "low") return "warning";
+  return "outline";
+}
+
 function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
   const tasks = rdpControl.tasks || {};
   const tasksError = rdpControl.tasks_error || null;
   const pendingRecs = rdpControl.pending_recommendations || [];
   const activeParams = rdpControl.active_parameters || {};
+
+  // ── 建议分类 + 交叉引用已应用的建议 ──
+  const activeEntries = Object.entries(activeParams);
+  const appliedRecIds = new Set();
+  for (const [, info] of activeEntries) {
+    if (info.approval_recommendation_id) {
+      appliedRecIds.add(info.approval_recommendation_id);
+    }
+  }
+  const paramUpgradeRecs = pendingRecs.filter((r) => r.recommendation_type === "parameter_upgrade");
+  const strategicRecs = pendingRecs.filter((r) => r.recommendation_type !== "parameter_upgrade");
 
   const dataMaint = tasks.data_maintenance || null;
   const research = tasks.research_cycle || null;
@@ -336,49 +373,49 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
     </div>
   `;
 
-  // ── pending recommendations table ──
-  const recsSection = pendingRecs.length > 0
+  // ── 参数变更建议（parameter_upgrade 类型）──
+  const paramUpgradeSection = paramUpgradeRecs.length > 0
     ? `
       <div class="rdp-section">
-        <p class="meta-copy" style="margin: 0.75rem 0 0.5rem"><strong>待处理建议</strong></p>
+        <p class="meta-copy" style="margin: 0.75rem 0 0.25rem">
+          <strong>参数变更建议</strong>
+          <span style="font-size: 0.8rem; color: var(--color-text-muted); margin-left: 0.5rem">
+            审批并应用后，新参数将立即写入下方「当前生效参数」
+          </span>
+        </p>
         <table class="mini-table">
           <thead><tr>
-            <th>建议 ID</th><th>交易对</th><th>策略/周期</th><th>状态</th><th>操作</th>
+            <th>交易对</th><th>策略/周期</th><th>置信度</th><th>状态</th><th>操作</th>
           </tr></thead>
           <tbody>
-            ${pendingRecs.map((rec) => {
+            ${paramUpgradeRecs.map((rec) => {
               const isApproved = rec.status === "approved";
-              const hasParamSet = !!rec.target_parameter_set_id;
+              const isAlreadyApplied = appliedRecIds.has(rec.recommendation_id);
+              const statusLabel = isAlreadyApplied ? "已应用" : isApproved ? "已审批" : "待审批";
+              const statusTone = isAlreadyApplied ? "positive" : isApproved ? "info" : "warning";
               return `
                 <tr>
-                  <td class="mono-cell">${escapeHtml(truncateId(rec.recommendation_id))}</td>
                   <td>${escapeHtml(rec.symbol || "")}</td>
                   <td>${escapeHtml(rec.family || "")}/${escapeHtml(rec.timeframe || "")}</td>
-                  <td>${isApproved ? "已审批" : escapeHtml(rec.action || "promote")}</td>
+                  <td><span class="signal-pill tone-${confidenceTone(rec.confidence)}">${escapeHtml(readableConfidence(rec.confidence))}</span></td>
+                  <td><span class="signal-pill tone-${statusTone}">${statusLabel}</span></td>
                   <td class="table-actions table-actions--compact">
-                    ${isApproved && hasParamSet
+                    ${isAlreadyApplied
+                      ? `<span class="meta-copy" title="${escapeHtml(rec.recommendation_id)}">已生效 ✓</span>`
+                      : ""
+                    }
+                    ${!isAlreadyApplied && isApproved
                       ? actionButton("应用参数", "rdp-apply-only", rec.recommendation_id, "primary", {
                           disabled: !canAdmin,
-                          title: !canAdmin ? "当前账号只有查看权限" : "应用已审批的参数",
+                          title: !canAdmin ? "当前账号只有查看权限" : "将已审批参数写入生效参数",
                         })
                       : ""
                     }
-                    ${!isApproved && hasParamSet
+                    ${!isApproved
                       ? actionButton("审批并应用", "rdp-approve-and-apply", rec.recommendation_id, "primary", {
                           disabled: !canAdmin,
                           title: !canAdmin ? "当前账号只有查看权限" : "审批此建议并立即应用参数",
                         })
-                      : ""
-                    }
-                    ${!isApproved && !hasParamSet
-                      ? actionButton("审批", "rdp-approve-only", rec.recommendation_id, "primary", {
-                          disabled: !canAdmin,
-                          title: !canAdmin ? "当前账号只有查看权限" : "审批此策略建议（无参数变更）",
-                        })
-                      : ""
-                    }
-                    ${isApproved && !hasParamSet
-                      ? `<span class="meta-copy">已完成</span>`
                       : ""
                     }
                     ${!isApproved
@@ -390,23 +427,78 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
                     }
                   </td>
                 </tr>
+                ${rec.reason
+                  ? `<tr class="rdp-reason-row"><td colspan="5" class="meta-copy" style="padding: 0.1rem 0.75rem 0.5rem; font-size: 0.8rem; border-top: none; color: var(--color-text-muted)">${escapeHtml(rec.reason)}</td></tr>`
+                  : ""
+                }
               `;
             }).join("")}
           </tbody>
         </table>
       </div>
     `
-    : `<p class="meta-copy" style="margin: 0.75rem 0 0.25rem">当前没有待处理的参数变更建议。</p>`;
+    : "";
 
-  // ── active parameters table ──
-  const activeEntries = Object.entries(activeParams);
+  // ── 策略指导建议（keep_active / pause / require_review / lower_priority）──
+  const strategicSection = strategicRecs.length > 0
+    ? `
+      <div class="rdp-section">
+        <p class="meta-copy" style="margin: 0.75rem 0 0.25rem">
+          <strong>策略指导建议</strong>
+          <span style="font-size: 0.8rem; color: var(--color-text-muted); margin-left: 0.5rem">
+            不涉及参数变更，确认后仅记录操作员意见
+          </span>
+        </p>
+        <table class="mini-table">
+          <thead><tr>
+            <th>交易对</th><th>策略/周期</th><th>建议类型</th><th>状态</th><th>操作</th>
+          </tr></thead>
+          <tbody>
+            ${strategicRecs.map((rec) => {
+              const isApproved = rec.status === "approved";
+              return `
+                <tr>
+                  <td>${escapeHtml(rec.symbol || "")}</td>
+                  <td>${escapeHtml(rec.family || "")}/${escapeHtml(rec.timeframe || "")}</td>
+                  <td>${escapeHtml(readableRecType(rec.recommendation_type))}</td>
+                  <td><span class="signal-pill tone-${isApproved ? "positive" : "warning"}">${isApproved ? "已确认" : "待确认"}</span></td>
+                  <td class="table-actions table-actions--compact">
+                    ${isApproved
+                      ? `<span class="meta-copy" title="${escapeHtml(rec.recommendation_id)}">✓</span>`
+                      : actionButton("确认", "rdp-approve-only", rec.recommendation_id, "secondary", {
+                          disabled: !canAdmin,
+                          title: !canAdmin ? "当前账号只有查看权限" : "确认此策略建议",
+                        })
+                    }
+                    ${!isApproved
+                      ? actionButton("拒绝", "rdp-reject-recommendation", rec.recommendation_id, "ghost", {
+                          disabled: !canAdmin,
+                          title: !canAdmin ? "当前账号只有查看权限" : "拒绝此建议",
+                        })
+                      : ""
+                    }
+                  </td>
+                </tr>
+                ${rec.reason
+                  ? `<tr class="rdp-reason-row"><td colspan="5" class="meta-copy" style="padding: 0.1rem 0.75rem 0.5rem; font-size: 0.8rem; border-top: none; color: var(--color-text-muted)">${escapeHtml(rec.reason)}</td></tr>`
+                  : ""
+                }
+              `;
+            }).join("")}
+          </tbody>
+        </table>
+      </div>
+    `
+    : "";
+
+  // ── 当前生效参数（带来源建议追溯）──
   const activeSection = activeEntries.length > 0
     ? `
       <div class="rdp-section">
         <p class="meta-copy" style="margin: 0.75rem 0 0.5rem"><strong>当前生效参数</strong></p>
         <table class="mini-table">
           <thead><tr>
-            <th>组合</th><th>参数集 ID</th><th>应用时间</th><th>操作</th>
+            <th>策略/周期</th><th>参数集 ID</th><th>来源建议</th><th>应用时间</th><th>操作</th>
           </tr></thead>
           <tbody>
             ${activeEntries.map(([combo, info]) => {
@@ -414,8 +506,12 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
               const timeframe = info.timeframe || combo.split("_").slice(1).join("_") || "";
               return `
                 <tr>
-                  <td>${escapeHtml(combo)}</td>
+                  <td>${escapeHtml(family)}/${escapeHtml(timeframe)}</td>
                   <td class="mono-cell">${escapeHtml(truncateId(info.parameter_set_id))}</td>
+                  <td class="mono-cell">${info.approval_recommendation_id
+                    ? escapeHtml(truncateId(info.approval_recommendation_id))
+                    : `<span style="color: var(--color-text-muted)">手动 / 初始</span>`
+                  }</td>
                   <td>${info.applied_at ? relativeTime(info.applied_at) : "—"}</td>
                   <td class="table-actions table-actions--compact">
                     ${actionButton("回滚", "rdp-rollback-parameters", `${family}/${timeframe}`, "ghost", {
@@ -461,15 +557,22 @@ function renderRdpControlPanel({ rdpControl = {}, canAdmin = false }) {
           badge: actorTags("ai", "system"),
         },
         {
-          label: "待审批",
-          value: pendingRecs.length > 0 ? `${pendingRecs.length} 条建议` : "无",
-          meta: pendingRecs.length > 0 ? "有待审批的参数变更建议" : "当前没有待审批的建议",
-          tone: pendingRecs.length > 0 ? "warning" : "outline",
+          label: "待处理",
+          value: pendingRecs.length > 0 ? `${pendingRecs.length} 条` : "无",
+          meta: pendingRecs.length > 0
+            ? `${paramUpgradeRecs.length} 条参数变更，${strategicRecs.length} 条策略指导`
+            : "当前没有待处理的建议",
+          tone: paramUpgradeRecs.some((r) => r.status === "draft") ? "warning" : pendingRecs.length > 0 ? "info" : "outline",
           badge: actorTags("operator"),
         },
       ])}
       ${workflowButtons}
-      ${recsSection}
+      ${paramUpgradeSection}
+      ${strategicSection}
+      ${paramUpgradeRecs.length === 0 && strategicRecs.length === 0
+        ? `<p class="meta-copy" style="margin: 0.75rem 0 0.25rem">当前没有待处理的建议。</p>`
+        : ""
+      }
       ${activeSection}
     `,
   });

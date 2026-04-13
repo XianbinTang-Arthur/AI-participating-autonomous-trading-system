@@ -99,7 +99,7 @@
    psql ... -c "SELECT count(*) FROM governance.parameter_sets"
 ```
 
-### Scenario 5: ��时间无 workflow 执行
+### Scenario 5: 长时间无 workflow 执行
 
 ```
 1. 检查调度器状态 (cron / Task Scheduler)

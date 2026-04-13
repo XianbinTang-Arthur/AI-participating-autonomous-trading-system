@@ -7,6 +7,8 @@
 3. `configs/strategy_profiles/<profile>.yaml` 策略调参
 4. 对应 `.env` 里的最小 override
 
+> live profile 还会受到 startup hardening 约束。即使配置文件能被解析，exchange-coupled runtime 也必须满足 Postgres、OKX account/execution、Operator auth、single runtime guard 等硬条件才允许启动。
+
 ## 四个托管 profile
 
 ### `spot`
@@ -47,6 +49,23 @@
 - 数据库、端口、日志目录
 - 交易所与 OpenAI 凭证
 - 账户级仓位/杠杆/风控上限
+
+## live profile 安全必填项
+
+| 字段 | 要求 |
+|------|------|
+| `AATS_STORAGE_MODE` | `postgres` |
+| `AATS_DATABASE_URL` | 指向对应 live DB |
+| `AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED` | `true` |
+| `AATS_EXECUTION_BACKEND` | `okx` |
+| `AATS_ACCOUNT_BACKEND` | `okx` |
+| `AATS_ACCOUNT_READ_ENABLED` | `true` |
+| `AATS_OPERATOR_AUTH_ENABLED` | `true` |
+| `AATS_OPERATOR_UNSAFE_WRITE_WITHOUT_AUTH` | `false` |
+| `AATS_OPERATOR_SESSION_SECRET` | 长随机 secret，不能提交 |
+| `AATS_OPERATOR_SESSION_COOKIE_SECURE` | live 环境为 `true` |
+
+live 环境还应确认 active parameter version、gate history、reconciliation 状态和 recovery status。
 
 ## 按字段分组的修改指南
 

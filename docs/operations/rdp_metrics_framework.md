@@ -44,7 +44,7 @@ RDP Metrics Framework 定义了一套统一指标体系，用于衡量 RDP integ
 | `rollback_count` | ↓ | count | 参数 rollback 次数 |
 | `rollback_recommendation_count` | ↓ | count | 触发 rollback recommendation 次数 |
 | `release_observation_completion_ratio` | ↑ | ratio | release observation 完成率 |
-| `release_without_gate_ratio` | ↓ | ratio | 跳过 gate 的 release 比率 |
+| `release_without_gate_ratio` | ↓ | ratio | 缺少 gate 记录的 release 比率；生产目标必须为 0 |
 
 ### 5. 可靠性层 (Reliability)
 
@@ -57,6 +57,8 @@ RDP Metrics Framework 定义了一套统一指标体系，用于衡量 RDP integ
 | `stale_round_count` | ↓ | count | 长期未完成的 round 数量 |
 
 > ↑ = higher_is_better, ↓ = lower_is_better
+
+> 生产安全说明：`release_without_gate_ratio > 0` 在 live 环境应视为流程违规，不只是普通运营指标退化。
 
 ## 使用方式
 

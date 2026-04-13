@@ -293,6 +293,10 @@ class BlockerControlService:
                     latest_reconciliation=latest_reconciliation,
                     include_inspect=True,
                     include_validate=True,
+                    # 全新环境首次启动时 Operator 需要能触发 resume 流程来推进
+                    # 状态机；后端 /system/resume 会做完整校验（刷新账户快照 →
+                    # 对账 → resume_check），不通过时返回具体 blockers。
+                    include_resume=True,
                 ),
             )
         return BlockerControlTask(
@@ -370,6 +374,15 @@ class BlockerControlService:
                 )
             )
         if include_resume and self._should_show_resume_action(recovery=recovery):
+            # resume_eligible=false 时仍允许点击：后端 /system/resume 会做
+            # 完整校验（刷新账户快照 → 对账 → resume_check），不通过时返回
+            # 具体 blockers，不会绕过安全检查。禁用按钮只在 halted 且已有
+            # 明确 resume_eligible 资格判定时才生效——全新环境下两者都是
+            # false，此时应允许 Operator 主动触发完整恢复流程。
+            can_attempt_resume = bool(
+                recovery.get("resume_eligible")
+                or not recovery.get("safe_to_trade")
+            )
             actions.append(
                 BlockerActionDefinition(
                     action_id="resume-system",
@@ -378,10 +391,10 @@ class BlockerControlService:
                     method="CLIENT",
                     client_action="trigger-resume",
                     tone="warning",
-                    enabled=bool(recovery.get("resume_eligible")),
+                    enabled=can_attempt_resume,
                     disabled_reason=(
                         "当前仍有恢复限制，需先处理上游条件后才能恢复自动运行。"
-                        if not recovery.get("resume_eligible")
+                        if not can_attempt_resume
                         else None
                     ),
                     expected_effect="在没有剩余阻断时解除暂停，恢复自动运行。",
@@ -398,6 +411,9 @@ class BlockerControlService:
         return bool(
             BlockerControlService._reconciliation_requires_attention(latest_reconciliation)
             or recovery.get("review_required")
+            # 全新环境首次启动时 safe_to_trade=false 但没有对账记录也没有
+            # review_required，仍需让 Operator 能触发对账来推进恢复状态机。
+            or not recovery.get("safe_to_trade")
         )
 
     @staticmethod
@@ -433,7 +449,15 @@ class BlockerControlService:
 
     @staticmethod
     def _should_show_resume_action(*, recovery: dict[str, Any]) -> bool:
-        return bool(recovery.get("halted") or recovery.get("resume_eligible"))
+        # 原条件仅 halted || resume_eligible，导致全新环境下
+        # safe_to_trade=false 但 halted=false、resume_eligible=false 时按钮消失。
+        # 补充 !safe_to_trade 条件，让 Operator 能主动触发 resume 流程
+        # （后端 /system/resume 会做完整校验，不会绕过安全检查）。
+        return bool(
+            recovery.get("halted")
+            or recovery.get("resume_eligible")
+            or not recovery.get("safe_to_trade")
+        )
 
     @staticmethod
     def _subsystem_for(code: str) -> str:

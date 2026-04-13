@@ -1,32 +1,109 @@
 # configs 目录职责
 
-## 当前推荐路径
+最后更新：2026-04-13
 
-- `spot / derivatives / spot_live / derivatives_live` 四个托管 profile：
-  - 运行时语义来自代码里的 managed profile 基线
-  - 最小 override 来自项目根目录四个 `.env.*` 文件
-  - 策略调参来自 `configs/strategy_profiles/*.yaml`
+本文档说明配置文件应该放在哪里、如何生效，以及哪些配置在 live 环境属于安全关键项。
 
-## legacy `configs/*.yaml` 的职责
+## 1. 配置生效顺序
 
-- 只保留给非托管/manual `config_profile` 路径与测试使用
-- 不再作为四个托管 profile 的主配置来源
-- `base.yaml` 主要是本地演示/开发默认值说明，不是当前实盘推荐配置
+从低到高：
 
-## 目录说明
+1. `AATSSettings` 默认值。
+2. managed profile 代码基线。
+3. `configs/strategy_profiles/<profile>.yaml` 策略调参。
+4. RDP active parameter set。
+5. 根目录 `.env.*` 环境变量 override。
+6. CLI 参数。
 
-- `strategy_profiles/`：托管 profile 使用的策略调参文件
-- `templates/`：自动生成的最小 `.env` 示例模板
-- 其余 YAML：legacy/manual `config_profile` 路径或测试兼容
+原则：运行身份、凭证、数据库、端口、资金规模和 live 安全开关放 `.env.*`；策略细节和可研究参数放 `strategy_profiles/*.yaml` 或 RDP active parameters。
 
-## 维护规则
+## 2. 托管 profile
 
-- 账户、数据库、端口、日志、凭证类 override 改根目录 `.env.*`
-- AI、自动换档、directional / smart_arbitrage / spot_grid / dca 调参改 `strategy_profiles/*.yaml`
-- 若新增设置字段，优先更新 `aats/bootstrap/settings.py`，再决定它应归属 `.env` 还是 `strategy_profiles/*.yaml`
+| Profile | 运行语义 | 策略文件 | 环境文件 |
+| --- | --- | --- | --- |
+| `spot` | 现货/cash/模拟盘 | `configs/strategy_profiles/spot.yaml` | `.env.spot` |
+| `spot_live` | 现货/cash/实盘 | `configs/strategy_profiles/spot_live.yaml` | `.env.spot.live` |
+| `derivatives` | 合约/cross/模拟盘 | `configs/strategy_profiles/derivatives.yaml` | `.env.derivatives` |
+| `derivatives_live` | 合约/cross/实盘 | `configs/strategy_profiles/derivatives_live.yaml` | `.env.derivatives.live` |
 
-## unknown write 复核阈值放哪
+根目录 `.env.*` 被 gitignore 管理，不能提交真实凭证。
 
-- `AATS_EXECUTION_UNKNOWN_SUBMIT_REVIEW_AFTER_SECONDS`
-- `AATS_EXECUTION_UNKNOWN_CANCEL_REVIEW_AFTER_SECONDS`
-- 这两个字段属于执行恢复参数，应该放根目录对应 profile 的 `.env.*`，不要写进 `strategy_profiles/*.yaml`
+## 3. 目录说明
+
+| 路径 | 用途 |
+| --- | --- |
+| `strategy_profiles/` | 托管 profile 使用的策略调参 YAML |
+| `active_parameter_sets/` | RDP active 参数文件备份；DB 模式下不是唯一真源 |
+| `rdp_workflows/` | RDP workflow 调度定义 |
+| `research_batches/` | RDP 参数扫描批次定义 |
+| `research_rounds/` | RDP 研究轮次矩阵 |
+| `templates/` | `.env.*.example` 示例模板 |
+| `base.yaml`、`dev.yaml`、`prod.yaml`、`guarded_*.yaml` | legacy/manual config_profile 或测试兼容路径，不是托管 profile 的主要配置来源 |
+
+## 4. 应该放在 `.env.*` 的字段
+
+| 类型 | 示例字段 | 原因 |
+| --- | --- | --- |
+| 数据库 | `AATS_DATABASE_URL`、`AATS_DB_NAME`、`AATS_DATABASE_RUNTIME_LOCK_KEY` | 环境隔离和凭证 |
+| API/日志 | `AATS_API_PORT`、`AATS_LOG_DIR` | 实例隔离 |
+| 交易所凭证 | `AATS_OKX_API_KEY`、`AATS_OKX_API_SECRET`、`AATS_OKX_API_PASSPHRASE` | secret |
+| Operator 会话 | `AATS_OPERATOR_SESSION_SECRET`、`AATS_OPERATOR_SESSION_COOKIE_NAME` | secret / 浏览器隔离 |
+| 资金规模 | `AATS_INITIAL_USDT_BALANCE`、`AATS_DEFAULT_ORDER_QTY` | 环境相关 |
+| live 安全 | `AATS_OPERATOR_AUTH_ENABLED`、`AATS_OPERATOR_UNSAFE_WRITE_WITHOUT_AUTH`、`AATS_LIVE_SUBMIT_ENABLED` | 生产安全 |
+| 合约风控 | `AATS_MAX_TARGET_LEVERAGE`、`AATS_MAX_MARGIN_USAGE_FRACTION`、`AATS_LIQUIDATION_BUFFER_FRACTION` | 账户级限制 |
+| recovery | `AATS_EXECUTION_UNKNOWN_SUBMIT_REVIEW_AFTER_SECONDS`、`AATS_EXECUTION_UNKNOWN_CANCEL_REVIEW_AFTER_SECONDS` | 运行恢复策略 |
+
+## 5. 应该放在 `strategy_profiles/*.yaml` 的字段
+
+| 类型 | 示例 |
+| --- | --- |
+| AI 行为 | `ai_operating_mode`、`ai_model_name`、`ai_decision_min_confidence` |
+| 策略族启用 | `strategy_family_active`、`smart_arbitrage_enabled`、`spot_grid_enabled`、`dca_enabled` |
+| directional 参数 | `strategy_entry_*`、`strategy_scale_in_*`、`strategy_reversal_*` |
+| independent 参数 | independent entry/exit/expectancy/guard 参数 |
+| sleeve 预算 | `strategy_sleeve_auto_*` |
+| 自动换档 | `strategy_profile_auto_control_enabled`、`strategy_profile_auto_rollback_enabled` |
+
+## 6. RDP active parameter set 边界
+
+RDP active parameters 会在 `build_runtime()` 时注入策略参数。它是生产行为变更，应按 release 管理：
+
+1. recommendation 必须 approved。
+2. pre-apply gate 必须运行。
+3. apply 必须记录 actor、gate status、release id。
+4. rollback 必须可执行。
+5. 生产环境不得跳过 gate。
+
+## 7. live 配置硬约束
+
+live exchange-coupled runtime 必须满足：
+
+| 字段 | 要求 |
+| --- | --- |
+| `AATS_STORAGE_MODE` | `postgres` |
+| `AATS_DATABASE_URL` | 已配置，且指向对应 live DB |
+| `AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED` | `true` |
+| `AATS_EXECUTION_BACKEND` | `okx` |
+| `AATS_ACCOUNT_BACKEND` | `okx` |
+| `AATS_ACCOUNT_READ_ENABLED` | `true` |
+| `AATS_OPERATOR_AUTH_ENABLED` | `true` |
+| `AATS_OPERATOR_UNSAFE_WRITE_WITHOUT_AUTH` | `false` |
+| `AATS_OPERATOR_SESSION_COOKIE_SECURE` | live 环境为 `true` |
+
+## 8. 新增配置字段维护规则
+
+新增字段时按以下顺序处理：
+
+1. 在 `aats/bootstrap/settings.py` 增加类型、默认值和说明。
+2. 判断归属：环境隔离/secret/资金安全放 `.env.*`，策略可调参数放 YAML/RDP。
+3. 更新 `docs/configuration/managed-config-reference.md`。
+4. 更新对应 `.env.*.example` 模板。
+5. 增加测试：settings parse、managed profile、live startup guard 或策略行为。
+
+## 9. 当前配置相关风险
+
+| 风险 | 状态 | 文档/修复方向 |
+| --- | --- | --- |
+| legacy YAML 与 managed profile 同时存在 | 可维护性风险 | 托管 profile 以 managed baseline + `.env.*` + strategy YAML 为准 |
+| live `.env.*` secret 本地存在 | 正常但敏感 | 保持 gitignored，不在日志/文档中扩散 |
+| derivatives auto halt 与 reduce-only close 语义不清 | 未定 | 在风险策略和 runbook 中明确 |

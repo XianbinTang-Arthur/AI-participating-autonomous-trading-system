@@ -9,6 +9,8 @@
 
 Phase 5 将这些分散结论收口到统一的 **Parameter Registry**。
 
+生产边界：Parameter Registry 本身只是候选池；参数只有在 approved recommendation + pre-apply gate + apply history 完成后，才允许成为 live active parameter。
+
 ---
 
 ## 2. Parameter Set 生命周期
@@ -142,6 +144,8 @@ python scripts/rdp_freeze_parameter_set.py --action deprecate \
 2. 按 `frozen_at` 时间降序，最近冻结的为当前有效版本
 3. 如果没有 frozen 的，查看 `status: "candidate"` 的
 4. 如果都没有，需要重新运行 Step 2 研究
+
+注意：`frozen` 不等于 live 已生效。live 当前生效参数以 `governance.active_parameter_sets` 和 `configs/active_parameter_sets/active_parameter_registry.json` 为准，并且必须能关联 apply history。
 
 ---
 

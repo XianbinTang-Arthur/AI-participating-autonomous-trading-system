@@ -137,3 +137,40 @@
 3. 运行质量巡检确认平台状态
 4. 查看参数注册表了解当前有效参数
 5. 查看 active round index 了解最近运行情况
+
+---
+
+## 主交易系统 live 前检查
+
+> 本节不是 RDP 日常巡检，而是任何 `spot_live` / `derivatives_live` 真实提交前的人工检查。
+
+### 必须确认的启动条件
+
+- [ ] 当前 profile 与账户一致：`spot_live` 只能跑现货账户语义，`derivatives_live` 只能跑合约/cross 语义。
+- [ ] `AATS_STORAGE_MODE=postgres`。
+- [ ] `AATS_DATABASE_URL` 指向对应 live 数据库，不与模拟盘/研究库混用。
+- [ ] `AATS_DATABASE_SINGLE_RUNTIME_GUARD_ENABLED=true`。
+- [ ] `AATS_EXECUTION_BACKEND=okx`。
+- [ ] `AATS_ACCOUNT_BACKEND=okx`。
+- [ ] `AATS_ACCOUNT_READ_ENABLED=true`。
+- [ ] `AATS_OPERATOR_AUTH_ENABLED=true`。
+- [ ] `AATS_OPERATOR_UNSAFE_WRITE_WITHOUT_AUTH=false`。
+- [ ] OKX 凭证、Operator session secret 只存在于 gitignored `.env.*`，没有出现在日志、commit 或文档中。
+
+### 必须确认的运行状态
+
+- [ ] `/healthz` 返回 200，但不要把它当作 trading-ready 信号。
+- [ ] `/system/health` 无 critical blocker。
+- [ ] Kill switch 状态明确；如果打开，必须有 operator 记录说明原因。
+- [ ] account snapshot fresh，且账户产品类型、保证金模式、币种与 profile 一致。
+- [ ] reconciliation 最近报告无 unresolved high/critical finding。
+- [ ] execution command queue 无 `PENDING` submit/cancel 积压。
+- [ ] 无 stale `SENT` submit；如果存在，先按 client order id 对交易所查询并进入人工恢复流程。
+- [ ] active parameter set 的 version、actor、gate status、apply history 可追踪。
+
+### 人工确认项
+
+- [ ] live submit 开关、kill switch、runtime mode 三者状态一致。
+- [ ] 当前 active parameter set 有清晰的审批、gate、apply history。
+- [ ] 本次启动前的代码版本、profile、数据库和 OKX 账户已记录。
+- [ ] 如有人工恢复、手动取消或参数回滚，已写入操作备注。

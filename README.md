@@ -1,149 +1,117 @@
 # AIParticipatingAutonomousTradingSystem
 
-> AATS 是一个面向加密资产交易的事件驱动、可审计、受保护、可恢复的自动交易系统原型。
+AATS 是一个面向加密资产交易的事件驱动系统，目标是把行情、决策、风控、订单执行、账户/余额、账本、对账、恢复和 Operator 控制面连接成可审计、可恢复、可治理的闭环。
 
-## 项目定位
+本文档是项目级入口，描述当前模块边界、运行方式和主要文档索引。具体交易链路见 [ARCHITECTURE.md](ARCHITECTURE.md)，部署流程见 [DEPLOYMENT.md](DEPLOYMENT.md)。
 
-这个仓库当前包含两条主线：
+## 1. 项目边界
 
-- **主交易系统**：行情接入、特征计算、决策、治理、执行、持仓、对账、恢复、Operator 控制面。
-- **研究数据平台 RDP**：历史数据采集、回放、参数研究、归因、治理与参数推送。
-
-它的目标不是“快速做出一个会下单的策略脚本”，而是优先解决下面这些工程问题：
-
-- 决策链和执行链可追踪、可审计。
-- 订单生命周期可恢复、可对账、可人工介入。
-- live 模式具备 fail-closed 风控和显式 Operator 控制。
-- 研究链路与运行链路可以通过配置和参数集对接。
-
-这不是一个可以直接放心托管真实资金的“免维护盈利框架”。当前仓库更强调保护性、可观测性和工程闭环。
-
-## 当前能力边界
-
-### 支持的启动 profile
-
-| profile | 环境文件 | 用途 |
+| 子系统 | 职责 | 主要目录 |
 | --- | --- | --- |
-| `spot` | `.env.spot` | 现货开发 / 模拟盘 |
-| `derivatives` | `.env.derivatives` | 合约开发 / 模拟盘 |
-| `spot_live` | `.env.spot.live` | 现货受保护 live |
-| `derivatives_live` | `.env.derivatives.live` | 合约受保护 live |
+| 主交易系统 | 行情、特征、决策、治理、风险、执行、持仓、账本、对账、恢复、Operator API/UI | `aats/`、`apps/`、`scripts/start_api.py` |
+| RDP 研究数据平台 | 历史数据采集、replay、参数研究、归因、执行可行性、参数治理 | `aats/data_platform/`、`scripts/rdp_*.py`、`docs/rdp/` |
+| 部署与运维 | WSL2 Docker Compose、本地基础设施、监控、日志、trace、runbook | `deploy/wsl2-dev/`、`docs/operations/` |
+| 配置治理 | managed profile、策略调参、active parameter sets、环境变量模板 | `configs/`、`configs/templates/` |
 
-### 当前支持
+## 2. 当前支持的运行 profile
 
-- FastAPI API gateway + 内置前端控制台
-- **4 进程切片化部署**（gateway / market / decision / execution），Docker Compose 编排
-- monolith 单进程模式（回退路径，本地开发用）
-- Hybrid/NATS JetStream 跨进程事件总线（双流架构：MARKET 2GB + EVENTS 4GB）
-- Redis 跨进程热状态缓存（仓位、订单视图、KillSwitch 同步）
-- OTel 端到端分布式追踪（Jaeger）+ 结构化 JSON 日志（Loki）
-- Prometheus 指标采集 + Grafana 统一看板（4 数据源、2 仪表盘、5 告警规则）
-- OKX 行情、账户快照、模拟盘 / 受保护 live 运行
-- RDP 日常采集和多阶段研究编排
+| Profile | 环境文件 | 产品类型 | 默认用途 |
+| --- | --- | --- | --- |
+| `spot` | `.env.spot` | spot/cash | 现货开发、联调、模拟盘 |
+| `derivatives` | `.env.derivatives` | derivatives/cross | 合约开发、联调、模拟盘 |
+| `spot_live` | `.env.spot.live` | spot/cash | 受保护现货 live |
+| `derivatives_live` | `.env.derivatives.live` | derivatives/cross | 受保护合约 live |
 
-> **推荐拓扑：** `derivatives_live` 使用 4 进程拓扑
-> （gateway / market / decision / execution），由
-> `docker-compose.aats.derivatives-live.yml` 启动。
-> 基础设施 9 服务（Postgres / Redis / NATS / Loki / Promtail / Jaeger / Prometheus / Redis-Exporter / Grafana）
-> 由 `deploy/wsl2-dev/docker-compose.yml` 独立编排，合计约 7.2GB 内存。
-> monolith 单进程模式保留作回退（`docker-compose.aats.derivatives-live-monolith.yml`）。
+live profile 的启动硬门槛包括：OKX execution/account backend、account read、Postgres storage、database URL、single runtime guard、OKX 凭证、Operator auth、禁止 unsafe write without auth，以及安全 cookie 配置。
 
-### 当前不支持
+## 3. 当前能力
 
-- 无保护的真实资金自动交易
-- 绕过治理 / 恢复 / Operator 的直接 live submit
-- 把 README 当成完整生产运维手册
+- FastAPI API gateway 和内置 Operator UI。
+- monolith 单进程模式，适合本地开发和最小依赖联调。
+- gateway / market / decision / execution 四进程切片部署。
+- InMemory / Hybrid / NATS JetStream 事件总线。
+- Postgres 持久化订单、成交、组合、账本、预留、outbox、operator 用户和 RDP 治理数据。
+- Redis 跨进程热状态缓存。
+- OKX 行情、账户快照、模拟盘和受保护 live submit。
+- kill switch、startup recovery、stale command 检测、reconciliation、Operator 控制面。
+- RDP 日批数据采集、replay、参数扫描、归因、执行 realism、治理和 active parameter 回灌。
+- OTel / Jaeger、Loki / Promtail、Prometheus / Grafana 本地可观测性栈。
 
-## 核心架构
+## 4. 当前不支持或不建议
 
-### 主交易链路
+- 不建议无人值守真实资金运行。
+- 不支持绕过治理、恢复、Operator 控制面的直接 live submit。
+- 不建议绕过治理、恢复、Operator 控制面的直接 live submit。
+- `deploy/wsl2-dev/` 是本地开发/演练栈，不是生产级 HA、安全或灾备模板。
+
+## 5. 核心事件流
 
 ```text
-Market Gateway
+OKX Market / Account
+  -> Market Gateway
   -> Feature Engine
-  -> Decision Engine / AI Service
-  -> Governance / Risk / Runtime Mode
-  -> Strategy Coordinator
-  -> Execution Planner / Order Manager
-  -> Portfolio / Reconciliation / Recovery
+  -> Decision / Strategy / AI
+  -> Policy / Risk / Runtime Mode
+  -> Execution Planner
+  -> Order Manager / Execution Command Flow / OKX Adapter
+  -> FillEvent
+  -> Portfolio Service
+  -> Ledger / Settlement
+  -> Reconciliation / Recovery
   -> Operator API / UI / Audit
 ```
 
-### 运行时形态
+关键说明：
 
-- **Monolith**：本地开发默认路径，依赖最少。
-- **Gateway + Slice**：通过 `AATS_PROCESS_ROLE` 把 gateway / decision / execution 等职责拆开。
-- **Event Bus**：
-  - 默认可用 `InMemoryEventBus`
-  - 可选 `HybridEventBus` / `NatsEventBus`
-- **Hot State**：
-  - 默认 memory backend
-  - 多进程下可切 Redis backend
+- `OrderIntent` 是策略到执行的主要边界。
+- `OrderState` 记录订单生命周期。
+- `FillEvent` 是组合、账本和对账的关键事实输入。
+- obligation/reservation 负责下单前资金占用和成交后的消耗/释放。
+- outbox 用于把状态写入和事件发布解耦，降低消息丢失风险。
 
-### RDP
-
-RDP 负责历史数据与参数治理��核心流程是：
-
-```text
-数据采集 -> Replay / 研究 -> 归因 / 执行可行性 -> 治理 -> 决策输出 -> 参数集落地
-```
-
-治理层全链路采用 **DB-first + 文件 fallback** 双写（`governance` schema, 6 张表），
-设置 `AATS_ACTIVE_PARAMETER_DB_URL` 启用 DB 模式，未设置时纯 JSON 文件模式。
-
-## 仓库结构
+## 6. 代码结构
 
 ```text
 aats/
-  api/                 FastAPI 路由、认证、前端静态资源服务
-  bootstrap/           配置装配、runtime 构建、profile/env 加载、日志/OTel 初始化
-  bus/                 InMemory / Hybrid / NATS JetStream 事件总线
-  schemas/             领域模型
-  services/            市场、特征、决策、治理、执行、对账、Operator、RDP 等核心服务
-  storage/             EventStore、Postgres 仓库（35+ ORM 表）、Redis hot state、缓存
-  data_platform/       RDP 研究平台（6 schema / 47 张表）
+  api/                  FastAPI routes、认证、Operator/RDP API、静态 UI
+  bootstrap/            settings、profile/env、runtime 构建、后台任务、事件订阅
+  bus/                  InMemory、Hybrid、NATS JetStream event bus
+  schemas/              订单、成交、组合、账户、治理、系统健康等 Pydantic 模型
+  services/
+    market_gateway/     OKX 行情接入和标准化
+    feature_engine/     特征计算
+    decision_engine/    决策触发和 orchestration
+    strategy_engines/   策略族
+    governance_engine/  policy、risk、kill switch、derivatives live guard
+    execution_engine/   planner、order manager、OKX adapter、obligation、outbox
+    execution_control/  持久化 execution command processor
+    portfolio_service/  fill 应用、持仓/余额、snapshot、outcome
+    ledger/             reservation mirror、settlement、复式账
+    reconciliation_service/ 对账、修复、报告
+    recovery_control/   startup recovery 和 stuck submission 检测
+    operator/           Operator 查询和控制服务
+  storage/              ORM models、Postgres repositories、event/outbox/ledger repos
+  data_platform/        RDP 研究数据平台
 apps/
-  api_gateway/         FastAPI 入口（process_role=gateway）
-  market_gateway/      行情进程入口（process_role=market）
-  decision_engine/     决策进程入口（process_role=decision）
-  execution_engine/    执行进程入口（process_role=execution）
-deploy/
-  wsl2-dev/            WSL2 本地基础设施（9 服务 Docker Compose）
-    docker-compose.yml   Postgres/Redis/NATS/Loki/Promtail/Jaeger/Prometheus/Grafana/Redis-Exporter
-    Dockerfile           AATS 4 进程容器镜像（multi-stage, tini PID 1, 非 root）
-    docker-compose.aats.*.yml  4 进程 / monolith 编排
-    grafana/             数据源 + 仪表盘 + 告警规则自动注入
-    loki/                Loki TSDB v13 配置
-    promtail/            Docker SD 日志采集配置
-    prometheus/          指标抓取配置
-    nats/                JetStream 配置
-    RUNBOOK.md           基础设施运维手册
-scripts/
-  start_api.py         API / UI 启动入口
-  run_local.py         本地 in-memory paper loop
-  rdp_*.py             RDP 采集、研究、治理脚本
-  sync_to_wsl2.sh      Windows → WSL2 代码同步
+  api_gateway/          gateway 进程入口
+  market_gateway/       market 进程入口
+  decision_engine/      decision 进程入口
+  execution_engine/     execution 进程入口
 configs/
-  strategy_profiles/   策略 profile 配置
-  active_parameter_sets/ RDP 活跃参数集
+  strategy_profiles/    managed profile 策略调参
+  active_parameter_sets/ RDP active 参数备份
+  rdp_workflows/        RDP workflow 配置
+deploy/wsl2-dev/        本地 Docker Compose 基础设施和应用 overlay
 docs/
-  audit/               基础设施组件审查报告
-  operations/          运维 runbook
-  rdp/                 RDP 说明文档
-  configuration/       配置参考
-  task/                阶段设计与任务文档
+  audit/                审计报告
+  operations/           运维 runbook
+  rdp/                  RDP 模块说明
+  configuration/        配置参考
 ```
 
-## 快速开始
+## 7. 快速开始
 
-### 1. 环境准备
-
-- Python `>= 3.11`
-- PostgreSQL
-- Windows PowerShell 或类 Unix Shell
-- 如需多进程 / JetStream / Redis / OTel，再安装对应 optional extras
-
-### 2. 安装依赖
+### 7.1 安装
 
 ```powershell
 python -m venv .venv
@@ -152,7 +120,7 @@ python -m pip install --upgrade pip
 pip install -e .
 ```
 
-如果需要额外能力：
+可选依赖：
 
 ```powershell
 pip install -e .[nats]
@@ -160,139 +128,74 @@ pip install -e .[redis]
 pip install -e .[otel]
 ```
 
-### 3. 选择 profile
-
-启动脚本会按 profile 读取对应的 `.env.*` 文件：
-
-- `.env.spot`
-- `.env.derivatives`
-- `.env.spot.live`
-- `.env.derivatives.live`
-
-建议先从非 live profile 开始联调。
-
-> **RDP 配置：** `.env.research` 供 Research Data Platform 子系统使用，
-> 通过独立的配置路径加载，不属于上述 `--profile` 机制。
-
-### 4. 启动 API 和前端
+### 7.2 启动本地 API/UI
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\start_api.py --profile derivatives
 ```
 
-常用可选参数：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\start_api.py --profile derivatives --host 127.0.0.1 --port 8011
-```
-
-启动后可访问：
+默认访问：
 
 - UI: `http://127.0.0.1:8011/ui`
-- API liveness: `http://127.0.0.1:8011/healthz`
+- liveness: `http://127.0.0.1:8011/healthz`
 
-### 5. 本地单进程 paper loop
+### 7.3 本地 paper loop
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\run_local.py --profile derivatives --iterations 100
 ```
 
-`run_local.py` 只支持 `spot` 和 `derivatives`，不用于 live profile。
+`run_local.py` 只用于非 live profile。
 
-## RDP 快速入口
-
-### 日批采集
+### 7.4 RDP 日批入口
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\rdp_run_daily_ingest.py --ensure-schema
 ```
 
-### 研究全流程编排
+完整研究管线：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\rdp_run_full_pipeline.py --start 2026-03-31 --end 2026-04-02 --ensure-schema
 ```
 
-如果只想先看执行计划：
-
-```powershell
-.\.venv\Scripts\python.exe scripts\rdp_run_full_pipeline.py --start 2026-03-31 --end 2026-04-02 --dry-run
-```
-
-## 测试与质量检查
+## 8. 测试与质量检查
 
 常用命令：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests\unit -q
-.\.venv\Scripts\python.exe -m pytest tests\integration\test_dashboard_ui.py -q
+.\.venv\Scripts\python.exe -m pytest tests\integration -q
 .\.venv\Scripts\python.exe -m ruff check .
 ```
 
-如果要针对某个脚本确认参数，直接用 `--help`：
+针对 2026-04-13 审计涉及的核心行为，最近一次执行：
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\start_api.py --help
-.\.venv\Scripts\python.exe scripts\rdp_run_full_pipeline.py --help
+.\.venv\Scripts\python.exe -m pytest tests\unit\test_task109_settlement_posting_rebate.py tests\unit\test_task52_execution_command_flow.py tests\unit\test_order_state_row_version.py tests\unit\test_auth.py -q
 ```
 
-## 关键文档索引
+结果：`23 passed, 3 skipped`。
 
-### 架构与部署
+## 9. 关键文档
 
-- 架构总览：[ARCHITECTURE.md](ARCHITECTURE.md)
-- 生产发布全流程：[DEPLOYMENT.md](DEPLOYMENT.md)
-- 多进程改造路线：[docs/operations/multiprocess_refactor_roadmap.md](docs/operations/multiprocess_refactor_roadmap.md)
+| 文档 | 用途 |
+| --- | --- |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 主交易系统架构、事件流、状态真源和模块边界 |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | WSL2/Docker 部署、profile、启动/停机、健康检查 |
+| [Postgres 模块审查](docs/audit/postgres_module_audit.md) | 数据库层审查 |
+| [Managed Profile 配置说明](docs/configuration/managed-config-reference.md) | profile、`.env`、策略 YAML 生效顺序 |
+| [configs 目录职责](configs/README.md) | 配置文件归属规则 |
+| [WSL2 基础设施说明](deploy/wsl2-dev/README.md) | 本地基础设施拓扑 |
+| [WSL2 部署 Runbook](deploy/wsl2-dev/RUNBOOK.md) | 从零启动和排障 |
+| [平台运行手册](docs/operations/platform_runbook.md) | RDP 日常运维 |
+| [Operator 检查清单](docs/operations/operator_checklist.md) | 人工巡检清单 |
+| [RDP 模块参考](docs/rdp/module_reference.md) | RDP 文件职责 |
 
-### 基础设施
+## 10. 文档维护原则
 
-- WSL2 基础设施说明：[deploy/wsl2-dev/README.md](deploy/wsl2-dev/README.md)
-- 基础设施运维手册：[deploy/wsl2-dev/RUNBOOK.md](deploy/wsl2-dev/RUNBOOK.md)
-- 配置参考：[docs/configuration/managed-config-reference.md](docs/configuration/managed-config-reference.md)
-
-### 运维
-
-- 平台运行手册：[docs/operations/platform_runbook.md](docs/operations/platform_runbook.md)
-- Operator 检查清单：[docs/operations/operator_checklist.md](docs/operations/operator_checklist.md)
-
-### RDP 研究平台
-
-- RDP 模块参考：[docs/rdp/module_reference.md](docs/rdp/module_reference.md)
-- RDP 可靠性与排班：
-  - [docs/operations/rdp_reliability_runbook.md](docs/operations/rdp_reliability_runbook.md)
-  - [docs/operations/rdp_workflow_calendar.md](docs/operations/rdp_workflow_calendar.md)
-
-### 审查报告
-
-- Postgres 模块审查：[docs/audit/postgres_module_audit.md](docs/audit/postgres_module_audit.md)
-- Loki+Promtail 管线审查：[docs/audit/loki_promtail_module_audit.md](docs/audit/loki_promtail_module_audit.md)
-
-## 基础设施概览
-
-多进程部署依赖以下 9 个基础设施服务（全部运行在 WSL2 Docker Compose 内，零云费用）：
-
-| 组件 | 用途 | 端口 | 内存 |
-|------|------|------|------|
-| Postgres 16 | 主存储（账务、订单、策略状态） | 5432 | 2560M |
-| Redis 7 | 跨进程热状态缓存 | 6379 | 512M |
-| NATS 2.10 | JetStream 跨进程事件总线 | 4222/8222 | 1024M |
-| Loki 3.0 | 日志聚合（7 天保留） | 3100 | 512M |
-| Promtail 3.0 | Docker 容器日志采集 | — | 256M |
-| Jaeger 1.57 | 分布式 trace（OTLP gRPC+HTTP） | 16686/4317 | 1536M |
-| Prometheus 2.51 | 进程指标采集 | 9090 | 256M |
-| Redis-Exporter | Redis 指标 → Prometheus | 9121 | 64M |
-| Grafana 10.4.4 | 统一看板 + 告警 | 3000 | 512M |
-
-合计约 7.2GB 内存。详见 [deploy/wsl2-dev/README.md](deploy/wsl2-dev/README.md)。
-
-## 安全与运行建议
-
-- 默认先用 `spot` / `derivatives` 做联调，不要直接从 live profile 起步。
-- live profile 只应在 Operator、恢复、对账、认证、数据库和日志链路都确认正常后使用。
-- 对于任何”能否下单”的问题，优先从 UI 的 `风险与恢复`、`退出任务工作台`、`账户与权限` 页面和 `/system/health`、`/system/recovery` 开始排查。
-- 多进程部署前必须确认：event bus（hybrid/nats）、hot state（redis）、healthcheck、各 process role 配置一致。
-- 基础设施运维参见 [RUNBOOK.md](deploy/wsl2-dev/RUNBOOK.md)，含健康检查、故障排查、备份恢复。
-
-## 状态说明
-
-这个仓库仍在快速演进，README 只提供当前入口、边界和文档索引。更细的设计推导、阶段性方案和历史任务说明，请查阅 `docs/task/`。
+1. 架构和流程说明写入 `README.md`、`ARCHITECTURE.md`、`DEPLOYMENT.md`。
+2. 配置归属和字段位置写入 `configs/README.md` 与 `docs/configuration/managed-config-reference.md`。
+3. RDP 模块职责写入 `aats/data_platform/README.md` 与 `docs/rdp/module_reference.md`。
+4. 运维步骤写入 `docs/operations/` 和 `deploy/wsl2-dev/RUNBOOK.md`。
+5. 历史任务、一次性设计和修复记录保留在 `docs/task/`，不要把它们当作当前运行事实。

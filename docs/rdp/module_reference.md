@@ -97,7 +97,8 @@
 | 文件 | 职责 |
 |------|------|
 | `workflow_dispatcher.py` | JSON 配置驱动的工作流调度器（4 种 workflow type） |
-| `pre_apply_gate.py` | 参数应用前置门控（block/warn/pass） |
+| `pre_apply_gate.py` | 参数应用前置门控（block/warn/pass）；生产 active parameter apply 必须引用 gate run id |
+| `environment_guard.py` | 环境隔离策略 |
 
 ## Operations（`aats/data_platform/operations/`）
 
@@ -129,3 +130,13 @@
 | `aats/bootstrap/active_parameters.py` | Active Parameter Set 加载器（启动时注入 family/tf 参数，参数映射，原子写入）。DB 优先读：设置 `AATS_ACTIVE_PARAMETER_DB_URL` 后从 `governance.active_parameter_sets` 表加载 |
 | `aats/api/rdp_routes.py` | RDP 只读 API 路由（8 个 GET 端点） |
 | `aats/services/operator/rdp_queries.py` | RDP 查询服务（从治理/决策 artifact 读取结构化数据供 API 使用） |
+
+## 与主交易系统的风险边界
+
+RDP 不参与实时撮合和订单执行，但 active parameter set 会改变主交易系统策略行为。当前必须遵守：
+
+- RDP Bronze/Silver/Gold 只服务离线研究，主交易行情仍来自 OKX live market gateway。
+- recommendation 不会自动生效；只有 apply active parameter 后才影响 runtime。
+- 生产 apply 必须具备 approval、pre-apply gate、release/apply history、actor 和 rollback 目标。
+- 生产 apply 不应缺少 gate 记录。
+- 参数变更后要同时观察 RDP observation 和主交易系统 `/system/health`、reconciliation、decision/order intent 变化。

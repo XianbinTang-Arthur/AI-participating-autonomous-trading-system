@@ -1,4 +1,4 @@
-# Parameter Apply & Rollback 操作��南
+# Parameter Apply & Rollback 操作指南
 
 > 本文档描述如何将已批准的 recommendation 受控地应用为 active parameter set，
 > 以及如何在出问题时回滚。
@@ -10,6 +10,7 @@
 - **apply 必须是显式动作** — recommendation 不会自动生效
 - **apply 必须可审计** — 每次操作记录在 `parameter_apply_history.json`
 - **apply 必须可回滚** — 任何 apply 都可以被回滚到上一版本
+- **生产 apply 必须经过 gate** — live 不提供跳过 gate 的标准流程
 
 ---
 
@@ -19,7 +20,7 @@
 
 1. recommendation 状态必须为 `approved`
 2. recommendation 必须有 `target_parameter_set_id`
-3. target parameter set 必须在 `artifacts/governance/current_parameter_registry.json` 中��在
+3. target parameter set 必须在 `artifacts/governance/current_parameter_registry.json` 中存在
 
 ### 2.2 Apply 行为
 
@@ -70,7 +71,7 @@ curl -X POST /rdp/parameters/apply \
 
 apply 只修改配置文件，不会自动重启系统。需要：
 
-- **方式 1**: 重启 API gateway（下次 `build_runtime()` 会加载新参��）
+- **方式 1**: 重启 API gateway（下次 `build_runtime()` 会加载新参数）
 - **方式 2**: 调用 `POST /system/rebaseline`（如果已实现热加载）
 
 ---
@@ -90,13 +91,13 @@ apply 只修改配置文件，不会自动重启系统。需要：
     ↓
 写入 rollback history
     ↓
-输出结���
+输出结果
 ```
 
 ### 3.2 通过脚本 Rollback
 
 ```bash
-# 自动回滚到上一��本
+# 自动回滚到上一版本
 python scripts/rdp_rollback_active_parameter_set.py \
     --family independent --timeframe 15m \
     --actor operator_wang
@@ -112,7 +113,7 @@ python scripts/rdp_rollback_active_parameter_set.py \
     --family independent --timeframe 15m --dry-run
 ```
 
-### 3.3 ���过 API Rollback
+### 3.3 通过 API Rollback
 
 ```bash
 curl -X POST /rdp/parameters/rollback \
@@ -200,5 +201,20 @@ apply 和 rollback 同时更新三层存储：
 1. **不要跳过 approval 直接 apply** — 必须先 approve recommendation
 2. **不要在交易活跃期 apply** — 建议在低波动时段操作
 3. **apply 后观察至少 1 个交易周期** — 确认参数效果
-4. **回���后也要重启** — rollback 同样需要重启/reload 使参数生效
+4. **回滚后也要重启** — rollback 同样需要重启/reload 使参数生效
 5. **保留 history** — 不要手动删除 `parameter_apply_history.json`
+6. **生产不要跳过 gate** — gate 记录缺失时，不应继续 apply
+
+---
+
+## 8. 交易系统安全关联
+
+active parameter set 会在主交易系统 `build_runtime()` 期间注入策略参数。参数 apply 成功不等于 live 安全，apply 后必须检查：
+
+- active parameter registry 中 family/timeframe 指向的新版本。
+- apply history 中 actor、recommendation、gate status、notes。
+- 主交易系统 `/system/health`。
+- 最近 decision frequency、order intent 数量、reconciliation 状态。
+- 如果 live 行为异常，先执行 rollback，再调查 RDP evidence。
+
+相关流程见 [`production_parameter_change_runbook.md`](production_parameter_change_runbook.md)。

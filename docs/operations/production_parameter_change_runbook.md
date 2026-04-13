@@ -33,7 +33,8 @@ Post-Apply Assessment
 ### 2.1 何时运行
 
 - recommendation 被 approved 后、apply 前
-- 每次 apply 必须通过 gate（除紧急情况可 --skip-gate）
+- 每次 apply 必须通过 gate
+- 生产环境不允许跳过 gate
 
 ### 2.2 检查项
 
@@ -106,9 +107,7 @@ artifacts/production_workflow/gates/<gate_run_id>/
 python scripts/rdp_create_parameter_release.py \
     --recommendation-id rec_xxx --actor operator_name
 
-# 跳过 gate（紧急）
-python scripts/rdp_create_parameter_release.py \
-    --recommendation-id rec_xxx --skip-gate
+# 生产不提供跳过 gate 的标准流程
 
 # API
 POST /rdp/releases/create {
@@ -129,6 +128,17 @@ artifacts/production_workflow/parameter_release_history.json
 ---
 
 ## 4. Observation Window
+
+### 4.0 生产硬约束
+
+active parameter apply 会改变 live 策略行为，必须按生产变更处理：
+
+- 必须有 approved recommendation。
+- 必须有 pre-apply gate run id。
+- 必须有 release id、actor、notes。
+- 必须写入 DB + 文件 apply history。
+- 必须具备 rollback 目标。
+- 禁止在生产环境跳过 gate。
 
 ### 4.1 何时运行
 
@@ -266,12 +276,14 @@ python scripts/rdp_rollback_active_parameter_set.py \
 
 ## 7. 紧急操作
 
-### 7.1 紧急跳过 Gate
+### 7.1 禁止紧急跳过 Gate
 
-```bash
-python scripts/rdp_create_parameter_release.py \
-    --recommendation-id rec_xxx --skip-gate --actor operator
-```
+生产环境没有“紧急跳过 Gate”的标准路径。紧急场景只能做两类操作：
+
+1. 不 apply 新参数，先保持当前 active parameter。
+2. 对已经生效且表现异常的参数执行 rollback。
+
+如果本地开发/测试需要演练 gate 异常，应在隔离环境执行，不得使用 `spot_live` / `derivatives_live`。
 
 ### 7.2 紧急回滚
 

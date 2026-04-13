@@ -52,6 +52,17 @@ artifacts/
 
 ---
 
+## 1.4 与主交易系统的边界
+
+RDP 是离线研究与参数治理平台，不是实时交易链路的一部分。主交易系统不会读取 RDP Bronze/Silver/Gold 行情表；RDP 对主交易系统的影响只发生在 active parameter set 被 apply 并由 runtime 加载之后。
+
+因此，RDP 运维需要遵守以下边界：
+
+- RDP workflow 失败不会自动停止主交易；需要通过 Operator/reliability 告警和人工流程处理。
+- active parameter apply 是生产行为变更，必须经过 recommendation approval、pre-apply gate、release 记录、apply history 和 rollback plan。
+- 生产环境不得跳过 pre-apply gate。
+- 如果 active parameter DB 写入失败而 fallback 到文件，必须在恢复 DB 后运行 `seed-db` 并验证 DB/JSON 一致性。
+
 ## 2. 日常操作
 
 ### 2.1 运行 Step 1 单实验

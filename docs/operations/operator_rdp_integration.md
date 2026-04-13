@@ -5,6 +5,8 @@
 RDP 通过只读 API 将研究/归因/治理/决策系统的关键结论暴露给 Operator。
 Operator 不需要进入 artifacts 目录翻文件即可看到 RDP 的核心产出。
 
+RDP 对主交易系统的影响边界：只有 active parameter apply 会改变 runtime 策略行为。Operator 在 live 环境看到新 active parameter 时，必须能追踪到 recommendation、pre-apply gate、release/apply history、actor 和 rollback 目标。
+
 ## 2. API 端点清单
 
 所有端点需要 read access 权限，均为 GET 方法。
@@ -177,6 +179,22 @@ Operator 不需要进入 artifacts 目录翻文件即可看到 RDP 的核心产�
 返回 promotion readiness 评估结果。
 
 ## 4. UI 建议
+
+### 4.0 live 安全展示要求
+
+Operator UI 展示 active parameters 时，建议同时展示：
+
+- `parameter_set_id`
+- family/timeframe/symbol
+- applied_at
+- actor
+- recommendation_id
+- gate_status
+- gate_run_id
+- release_id
+- rollback target
+
+如果 gate 信息缺失或 `release_without_gate_ratio > 0`，应显示为生产流程风险，而不是普通 warning。
 
 ### 4.1 Active Parameter Sets 卡片
 

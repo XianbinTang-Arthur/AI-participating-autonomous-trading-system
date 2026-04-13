@@ -150,3 +150,25 @@ GET /rdp/operations/failures          # 列出所有失败
 GET /rdp/operations/failures/open     # 列出 open 失败
 POST /rdp/operations/failures/retry   # 补跑失败任务
 ```
+
+---
+
+## 与交易系统安全相关的失败
+
+RDP workflow 失败通常只影响研究和参数治理，不应直接修改 live 交易状态。但以下失败需要按生产事件处理：
+
+| 失败 | 风险 | 处理 |
+|------|------|------|
+| pre-apply gate 失败或缺失 | 未验证参数进入 live | 阻止 apply，记录 failure，重新跑 gate |
+| apply history 写入失败 | 无法审计参数变更 | 停止后续 apply，修复 DB/文件双写后补录 |
+| active parameter DB 写入失败并 fallback 文件 | DB/JSON 可能漂移 | 恢复 DB 后运行 `seed-db` 并比对 active registry |
+| observation/rollback workflow 失败 | 异常参数可能继续生效 | 人工评估是否立即 rollback |
+| 生产 apply 缺少 gate 记录 | 绕过门控 | 视为流程违规，立即审计 active parameter 和 release history |
+
+如果上述失败发生在 `spot_live` 或 `derivatives_live` 期间，Operator 应同时检查主交易系统：
+
+1. `/system/health`
+2. kill switch 状态
+3. reconciliation 最新报告
+4. active parameter version
+5. 最近 decision / order intent 是否显著变化

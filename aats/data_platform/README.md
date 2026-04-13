@@ -10,6 +10,16 @@ RDP 是 AATS 的**离线参数研究子系统**,与实时交易主链路完全�
 - **回灌方式**: 人工审批后写入 `governance.active_parameter_sets` DB 表（主路径）+ `configs/active_parameter_sets/*.json` 文件（备份）
 - **治理层存储**: DB-first + 文件 fallback 双写模式，环境变量 `AATS_ACTIVE_PARAMETER_DB_URL` 控制 DB 开关
 
+## 安全边界（2026-04-13 更新）
+
+RDP 对主交易系统的唯一直接影响是 active parameter set。任何参数 apply 都应按生产变更处理：
+
+- 必须先有 approved recommendation。
+- 必须运行 pre-apply gate。
+- 必须记录 actor、gate run id、apply history 和 rollback 目标。
+- 生产环境不得跳过 gate。
+- apply 后必须检查主交易系统 `/system/health`、reconciliation、decision/order intent 变化。
+
 ---
 
 ## 1. 目录结构
