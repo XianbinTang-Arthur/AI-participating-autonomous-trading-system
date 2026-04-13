@@ -43,15 +43,15 @@ AATS 当前以单进程 monolith 形态运行：一个 Python 进程同时跑 ga
 | 阶段 2 | `build_runtime` 切片化（拆出 4 个 slice builder） | 完整 | — |
 | 阶段 3 | `process_role` 门控 | 完整 | 6 个 slice builder + `_SLICE_REQUIRED_ROLES` 矩阵已就位，每个 role 只构造本职 service。配套单测：`test_process_role_settings.py`、`test_scoped_runtime_lock_key.py` |
 | 阶段 4 | NATS bus 接入 build_runtime | 完整 | 单元路径 ✅ 26 个 nats_bus 单测 + 6 个 bus shutdown 单测全过；集成路径 ✅ 4 个 testcontainers + multiprocessing 跨进程测试在 WSL2 Ubuntu + Docker 28.2.2 + nats:2.10-alpine + nats-py 2.14 环境下全过 (14.27s)。回归保护：`test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds` 防止 max_age 双重换算 bug 复发 |
-| 加餐 A | row_version 乐观锁（OCC） | 完整 | 覆盖 `StrategyExecutionBundle` (`save_execution_bundle_versioned` 完整接口 + InMemory 实现 + Postgres CAS) + `OrderStateModel` (Stage 5a-1，BIGINT row_version + `__mapper_args__['version_id_col']` + outbox `_persist_order_state_with_retry` 三次重试控制流)。`FillEventModel` 由 SELECT-then-INSERT 改成原子 `INSERT ... ON CONFLICT DO NOTHING` 消除 TOCTOU 竞态。`PortfolioSnapshotModel` / `ReconciliationStateSnapshotModel` 经 5a-2 review 决策跳过 row_version（autoincrement PK + append-only 语义）；reconciliation 改成 `pg_insert(...).on_conflict_do_nothing(["snapshot_id"])` 满足幂等。配套单测：`test_strategy_bundle_optimistic_lock.py`、`test_order_state_row_version.py`、`test_p1_snapshot_idempotency.py` |
-| 加餐 B | `scoped_runtime_lock_key`（按 role 派生 advisory lock key） | 完整 | 单元测试覆盖；前置条件：阶段 3 真门控起来后才能让每个 role 跑自己的 scheduler 不打架 |
-| 阶段 5 | NATS 全量 + 跨进程消息流 | 半成品 | Stage 5b：outbox publisher 类型清理为 `EventBus` 协议；Stage 5c：HybridBusRouting 路由表用真实 topics 常量并加严格未知 topic 检查（修真 bug）。剩余：决策↔执行、风控→决策、reconciliation→决策的 fan-out 真正切到 NATS critical 流的端到端验证 |
-| 阶段 6 | Redis hot_state_store | 半成品 | 接口 + InMemory + Redis 未连接 stub。没有任何 service 在写/读 Redis |
-| 阶段 7 | multiprocessing（4 容器拆分） | 装配完成（待 docker 真跑） | Stage 5d 完成：`aats/bootstrap/process_lifecycle.py` 统一 `build → start → wait SIGTERM → stop` 编排；4 个 entry script (`apps/{api_gateway,market_gateway,decision_engine,execution_engine}/main.py`) 各自显式 `process_role`；`deploy/wsl2-dev/Dockerfile` (python:3.12-slim + tini PID 1 + .[nats]) 与 `docker-compose.aats.yml` (4 service 共享 `aats-base:dev` 镜像，AATS_PROCESS_ROLE 区分)；Stage 5e 完成 `tests/smoke/test_4proc_pipeline.py` 同进程 4 runtime 并发 boot/run/stop smoke。**待补**：在 WSL2 上 `docker compose -f docker-compose.aats.yml up -d` 真跑一次 4 容器 healthcheck 全绿验证；任意容器 `docker kill` 后 NATS redeliver 收敛回归 |
-| 阶段 8 | OTel telemetry 骨架 | 半成品 | no-op fallback + config，没真的接 collector，没在任何 hot path 埋 span |
-| 阶段 9 | 长周期验证（30 天 dryrun） | 未动 | 依赖前面全部到位 |
+| 加餐 A | row_version 乐观锁（OCC） | 完整 | 覆盖 `StrategyExecutionBundle` + `OrderStateModel` + `FillEventModel` 原子幂等 + `P1 Snapshot` 决策 |
+| 加餐 B | `scoped_runtime_lock_key`（按 role 派生 advisory lock key） | 完整 | 单元测试覆盖 |
+| 阶段 5 | NATS 全量 + 跨进程消息流 | 完整 | 5b outbox 协议 + 5c 路由表真实常量 + 5d process_lifecycle + 4 entry script + Dockerfile + docker-compose + 5e smoke test。NATS Slow Consumer 防护（delivery 语义分类 + flow_control + idle_heartbeat）+ 双流架构（AATS_EVENTS_MARKET 2GB + AATS_EVENTS 4GB）+ 环境变量容量覆盖 + 迁移脚本 + Runbook §9.10 |
+| 阶段 6 | Redis hot_state_store | 完整 | Slice 6.1 配线 + 6.2 KillSwitch 跨进程同步 + 6.3 PortfolioSnapshotCache + 6.4 KillSwitch 二合一重构 + 6.5 ObligationHotStateCache。Redis 安全审计：requirepass + REDISCLI_AUTH + 全缓存 TTL + TLS 字段就绪 + fail-safe halt + 48h 陈旧性告警。Guard Signal Cache fail-closed 安全修复 |
+| 阶段 7 | multiprocessing（4 容器拆分） | 完整 | 4 容器拓扑通过 Slice 6.2 / 6.3 / 6.5 WSL2 真跑多次验证：healthcheck 全绿、KillSwitch 跨进程 <50ms 同步、PortfolioSnapshot/Obligation 缓存广播 0-3ms、容器重启 Redis rehydrate 正常 |
+| 阶段 8 | OTel + Jaeger 端到端追踪 | 完整 | pyproject.toml otel extra + Dockerfile + build_runtime configure_telemetry + EventEnvelope trace_context 字段 + NatsEventBus inject/extract hooks + 关键路径 start_span（gateway/decision/execution/portfolio）+ RUNBOOK §9.5 OTel drill |
+| 阶段 9 | 长周期验证（T0 DRY → T4） | 代码完成，待运行 | drift_score.py CLI（517 行 + 60 测试）+ abort_hooks.py 状态机（546 行 + 26 测试）+ RUNBOOK §9.6/§9.7 drill + dryrun_checklist.md 10 节检查清单。**待执行**：T0 DRY paper 模式 24h 首跑 |
 
-**统计**：完整 6 项（阶段 1、2、3、4 + 加餐 A、B），装配完成待真跑 1 项（阶段 7），半成品 3 项（阶段 5、6、8），未动 1 项（阶段 9）。
+**统计**：完整 8 项（阶段 1-8 + 加餐 A、B），代码完成待运行 1 项（阶段 9）。
 
 ---
 
