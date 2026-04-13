@@ -46,6 +46,9 @@ export function shouldShowValidateAction({ reconciliation, recovery }) {
     reconciliationNeedsAttention(reconciliation)
     || reconciliation?.observational_only
     || recovery.review_required
+    // 全新环境首次启动时 safe_to_trade=false 但无 reconciliation/review，
+    // 仍需让 Operator 能触发对账来推进状态机。
+    || !recovery.safe_to_trade
   );
 }
 
@@ -58,7 +61,11 @@ export function shouldShowRebaselineAction({ reconciliation, recovery }) {
 }
 
 export function shouldShowResumeAction({ recovery }) {
-  return Boolean(recovery.halted || recovery.resume_eligible);
+  // 原条件仅 halted || resume_eligible，导致全新环境下
+  // safe_to_trade=false 但 halted=false、resume_eligible=false 时按钮消失。
+  // 补充 !safe_to_trade 条件，让 Operator 能主动触发 resume 流程
+  // （后端会做完整校验，不会绕过安全检查）。
+  return Boolean(recovery.halted || recovery.resume_eligible || !recovery.safe_to_trade);
 }
 
 export function shouldShowInspectReconciliation({ reconciliation, recovery }) {
@@ -133,9 +140,12 @@ export function renderReconciliationControls({
     );
   }
   if (shouldShowResumeAction({ recovery })) {
+    // resume_eligible=false 时仍允许点击：后端 /system/resume 会做完整校验
+    // （刷新账户快照 → 对账 → resume_check），不通过时返回具体 blockers，
+    // 不会绕过安全检查。禁用按钮只在无写权限时生效。
     buttons.push(
       actionButton("恢复自动运行", "trigger-resume", "", "warning", {
-        disabled: !canWrite || !recovery.resume_eligible,
+        disabled: !canWrite,
         title: !canWrite ? permissionMessage : resumeActionHint({ recovery, uiHints }),
       })
     );
