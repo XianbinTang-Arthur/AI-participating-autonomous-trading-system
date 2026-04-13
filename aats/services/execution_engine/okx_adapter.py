@@ -1062,7 +1062,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
 
     def _submission_gate_error(self, *, intent: OrderIntent) -> str | None:
         is_risk_reducing = self._is_risk_reducing_intent(intent)
-        if self.mode_controller.kill_switch.halted:
+        # Fix P2-9：halt 时仅阻止开仓/加仓，允许 reduce-only 订单通过以降低敞口
+        if self.mode_controller.kill_switch.halted and not is_risk_reducing:
             return "kill_switch_active"
         if self.environment_capabilities.execution_adapter_kind != "okx":
             return "mode_not_guarded_live"
@@ -1736,7 +1737,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
             product_type=intent.product_type,
         )
         remaining_qty = max(requested_qty - filled_qty, Decimal("0"))
-        fees = abs(to_decimal(order_row.get("fee", "0")))
+        # OKX 约定：负值=费用支出，正值=返佣。系统约定取反：正值=费用，负值=返佣。
+        fees = -to_decimal(order_row.get("fee", "0"))
         canceled_ts = last_update_ts if status in {"CANCELED", "EXPIRED"} else None
         execution_attempt_id = execution_attempt_id_from_components(
             execution_attempt_id=intent.execution_attempt_id,
@@ -1953,7 +1955,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                         product_type=infer_product_type_from_symbol(symbol),
                     ),
                     fill_price=to_decimal(row.get("fillPx", row.get("px", "0"))),
-                    fee_amount=abs(to_decimal(row.get("fee", "0"))),
+                    fee_amount=-to_decimal(row.get("fee", "0")),
                     fee_currency=str(row.get("feeCcy")) if row.get("feeCcy") else None,
                     fill_ts=self._row_timestamp(fill_ts),
                 )

@@ -118,6 +118,10 @@ DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
         _topics.EXECUTION_ERROR_SUMMARIES,    # 执行错误汇总；驱动 risk 降级
         _topics.PROCESSING_FAILURES,      # 处理失败；同上
         _topics.KILL_SWITCH_STATE,        # Stage 6 Slice 6.2：kill_switch 跨进程同步
+        _topics.GUARD_SIGNAL_UPDATES,     # guard signal 跨进程缓存；execution→decision，
+                                          # 丢失 = decision 侧 120s 后 fail-closed 锁死交易。
+                                          # 之前误放在 OBSERVER_TOPICS（内存 bus only），
+                                          # 导致 decision 进程永远收不到更新。
         # ── strategy profile 切换路径 ─────────────────────
         _topics.STRATEGY_PROFILE_RECOMMENDATIONS,    # profile 推荐
         _topics.STRATEGY_PROFILE_ACTIVATIONS,        # profile 激活；影响实盘
@@ -137,7 +141,6 @@ DEFAULT_OBSERVER_TOPICS: frozenset[str] = frozenset(
         _topics.STRATEGY_PROFILE_EVALUATIONS,         # profile 评估输入；分析层
         _topics.STRATEGY_PROFILE_COMPARISON_REPORTS,  # profile 比较报告
         _topics.STRATEGY_PROFILE_OPTIMIZATION_REPORTS,# profile 优化报告
-        _topics.GUARD_SIGNAL_UPDATES,                # guard signal 跨进程缓存；丢一条 decision 侧 stale 降级
     }
 )
 
@@ -160,6 +163,7 @@ SNAPSHOT_DELIVERY_TOPICS: frozenset[str] = frozenset(
         _topics.PORTFOLIO_SNAPSHOTS,           # 仓位快照，只需最新
         _topics.ACCOUNT_SNAPSHOTS,             # 账户快照，只需最新
         _topics.KILL_SWITCH_STATE,             # 熔断状态，Redis 兜底
+        _topics.GUARD_SIGNAL_UPDATES,          # guard signal 快照，只需最新值
         _topics.STRATEGY_COORDINATOR_SNAPSHOTS,# 无状态全量快照，只需最新
         # ⚠️ ACCOUNT_BASELINES 不在此列：低频但每条有状态意义（operator 可连续
         # rebaseline），用 DeliverAll 保证不丢中间状态变更。
@@ -543,6 +547,10 @@ class NatsBusConfig:
     ack_wait_seconds: float = 30.0
     # 单个消费者最多 in-flight ack 待确认数
     max_ack_pending: int = 256
+    # Fix P1-4：per-topic max_ack_pending 覆盖。key 为 topic 名（如
+    # "aats.fill_events"），value 为该 consumer 的 max_ack_pending。
+    # 未列出的 topic 使用上面的全局默认值。
+    per_topic_max_ack_pending: dict[str, int] | None = None
     # 单条消息最大重投递次数（超出后会被丢入死信主题）
     max_deliver: int = 5
     # ── Slow consumer 防护（flow control + heartbeat）──────────────
@@ -654,10 +662,15 @@ def build_consumer_config_spec(
     else:
         dp = "all"
 
+    # Fix P1-4：per-topic max_ack_pending 覆盖
+    effective_max_ack_pending = config.max_ack_pending
+    if config.per_topic_max_ack_pending and topic in config.per_topic_max_ack_pending:
+        effective_max_ack_pending = config.per_topic_max_ack_pending[topic]
+
     return ConsumerConfigSpec(
         durable_name=durable,
         ack_wait_seconds=config.ack_wait_seconds,
-        max_ack_pending=config.max_ack_pending,
+        max_ack_pending=effective_max_ack_pending,
         max_deliver=config.max_deliver,
         deliver_policy=dp,
         flow_control=config.flow_control,

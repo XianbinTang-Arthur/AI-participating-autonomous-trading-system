@@ -451,6 +451,8 @@ class PortfolioService:
         self.state_scope = state_scope
         self.metrics = metrics
         self.logger = get_logger("aats.portfolio_service")
+        # Fix P1-4：序列化 fill 处理，防止 NATS redelivery/并发回调竞争。
+        self._fill_lock = asyncio.Lock()
 
     async def bootstrap_snapshot(self, *, snapshot_origin: PortfolioSnapshotOrigin = "runtime_bootstrap") -> None:
         # snapshot_builder.build 只是读 self.state 做 decimal 计算，纯 CPU，
@@ -479,6 +481,10 @@ class PortfolioService:
 
     @traced("portfolio.handle_fill_event")
     async def handle_fill_event(self, message: dict) -> None:
+        async with self._fill_lock:
+            await self._handle_fill_event_inner(message)
+
+    async def _handle_fill_event_inner(self, message: dict) -> None:
         fill = parse_payload(message, FillEvent)
         if self.state.has_applied_fill(fill.fill_id):
             return

@@ -364,7 +364,8 @@ class ExecutionLedgerRecoveryService:
                 pending_commands = getattr(self.execution_command_repo, "pending_commands", None)
                 if callable(pending_commands):
                     commands = pending_commands(limit=1000, sent_stale_before=sent_stale_before)
-                    pending_rows = [row for row in commands if str(row.get("state") or "").upper() == "PENDING"]
+                    # Fix P1-5：CLAIMED 和 PENDING 一起统计
+                    pending_rows = [row for row in commands if str(row.get("state") or "").upper() in ("PENDING", "CLAIMED")]
                     stale_sent_rows = [row for row in commands if str(row.get("state") or "").upper() == "SENT"]
                     def _count_cmd(rows, cmd_type):
                         return sum(1 for r in rows if str(r.get("command_type") or "").strip().lower() == cmd_type)

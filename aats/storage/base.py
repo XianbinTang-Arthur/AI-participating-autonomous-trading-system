@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Protocol
 
 
@@ -239,6 +240,14 @@ class ExecutionObligationRepository(Protocol):
         ...
 
     def all_obligations(self) -> list[OrderObligation]:
+        ...
+
+    def reserve_obligation_transactional(
+        self,
+        obligation: OrderObligation,
+        snapshot_available_balance: Decimal,
+        epsilon: Decimal,
+    ) -> OrderObligation:
         ...
 
 

@@ -1,0 +1,4 @@
+-- Migration 001: Baseline guard
+-- 基线记录点。现有数据库 schema 由 SQLAlchemy create_all 管理。
+-- 本文件确保 migration 版本链从此开始，后续增量变更在此基础上叠加。
+-- 内容为空（仅标记版本），不执行任何 DDL。

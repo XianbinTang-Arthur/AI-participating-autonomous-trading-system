@@ -135,6 +135,12 @@ class _InMemoryExecutionCommandRepository:
         row["updated_at"] = updated_at
         row["last_error"] = None
 
+    def mark_sent_to_venue(self, command_id: str, updated_at: datetime) -> None:
+        row = self.rows[command_id]
+        row["state"] = "SENT"
+        row["updated_at"] = updated_at
+        row["last_error"] = None
+
     def mark_acked(self, command_id: str, updated_at: datetime) -> None:
         row = self.rows[command_id]
         row["state"] = "ACKED"

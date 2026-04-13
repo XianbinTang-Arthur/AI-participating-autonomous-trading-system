@@ -42,6 +42,10 @@ class ExecutionCommandRepository(Protocol):
     def mark_sent(self, command_id: str, updated_at: datetime) -> None:
         ...
 
+    def mark_sent_to_venue(self, command_id: str, updated_at: datetime) -> None:
+        """Fix P1-5：CLAIMED → SENT（已确认发送到交易所）。"""
+        ...
+
     def mark_acked(self, command_id: str, updated_at: datetime) -> None:
         ...
 

@@ -170,6 +170,18 @@ class _RecordingOutboxPublisher:
             self.obligation_repo.save_obligation(obligation)
         return True
 
+    async def persist_order_state_with_fills(
+        self, *, order_state, key, fills, obligations_per_fill, final_obligation,
+    ):
+        self.order_state_obligations.append(final_obligation)
+        for obl in obligations_per_fill:
+            self.fill_obligations.append(obl)
+            if obl is not None:
+                self.obligation_repo.save_obligation(obl)
+        if final_obligation is not None:
+            self.obligation_repo.save_obligation(final_obligation)
+        return order_state
+
 
 class _ExplodingOutboxPublisher:
     async def persist_order_state(self, *, order_state: OrderState, key: str, obligation=None) -> OrderState:
@@ -179,6 +191,11 @@ class _ExplodingOutboxPublisher:
     async def persist_fill(self, *, fill: FillEvent, obligation=None) -> bool:
         _ = (fill, obligation)
         return True
+
+    async def persist_order_state_with_fills(
+        self, *, order_state, key, fills, obligations_per_fill, final_obligation,
+    ):
+        raise RuntimeError("persist_order_state_with_fills_boom")
 
 
 class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
@@ -470,13 +487,20 @@ class TestExecutionObligations(unittest.IsolatedAsyncioTestCase):
 
         obligation = obligation_repo.get_obligation("clclient_outbox_filled")
         self.assertIsNotNone(obligation)
+        # 3 次 order_state persist：CREATED（带 reservation）+ SUBMITTING（无 obligation）
+        # + persist_order_state_with_fills（带 final_obligation）
         self.assertEqual(len(outbox.order_state_obligations), 3)
         self.assertIsNotNone(outbox.order_state_obligations[0])
         self.assertEqual(outbox.order_state_obligations[0].client_order_id, "clclient_outbox_filled")
-        self.assertEqual(outbox.order_state_obligations[1:], [None, None])
+        self.assertIsNone(outbox.order_state_obligations[1])  # SUBMITTING
+        # Fix P1-3：原子路径的 final_obligation 是 RELEASED 终态
+        self.assertIsNotNone(outbox.order_state_obligations[2])
+        self.assertEqual(outbox.order_state_obligations[2].status, "RELEASED")
+        # fill_obligations 记录 per-fill 链式 obligation（消耗但尚未 release）
         self.assertEqual(len(outbox.fill_obligations), 1)
         self.assertEqual(outbox.fill_obligations[0].consumed_amount, Decimal("60.0"))
         self.assertEqual(outbox.fill_obligations[0].released_amount, Decimal("0"))
+        # 最终 repo 中的 obligation 已被 finalize
         self.assertEqual(obligation.status, "RELEASED")
         self.assertEqual(obligation.consumed_amount, Decimal("60.0"))
         self.assertEqual(obligation.released_amount, Decimal("0.06"))

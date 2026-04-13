@@ -1463,7 +1463,7 @@ class OKXAccountService:
                         instrument_map=instrument_map,
                     ),
                     fill_price=to_decimal(fill_price_value),
-                    fee_amount=abs(to_decimal(row.get("fillFee", row.get("fee", "0")))),
+                    fee_amount=-to_decimal(row.get("fillFee", row.get("fee", "0"))),
                     fee_currency=str(row.get("fillFeeCcy") or row.get("feeCcy")) if (row.get("fillFeeCcy") or row.get("feeCcy")) else None,
                     fill_ts=datetime_from_ms(str(fill_ts)) if fill_ts not in {None, ""} else None,
                 )

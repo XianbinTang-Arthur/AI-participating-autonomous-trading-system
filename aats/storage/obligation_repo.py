@@ -23,3 +23,7 @@ class InMemoryExecutionObligationRepository:
 
     def all_obligations(self) -> list[OrderObligation]:
         return list(self._obligations_by_client_order_id.values())
+
+    def reserve_obligation_transactional(self, obligation, snapshot_available_balance, epsilon):
+        # InMemory: service 层 asyncio.Lock 已序列化单进程访问，直接保存。
+        return self.save_obligation(obligation)

@@ -155,19 +155,8 @@ class OrderManager:
         intent: OrderIntent,
         leg_intent: LegOrderIntent | None = None,
     ) -> None:
-        if self.kill_switch.halted:
-            log_event(
-                self.logger,
-                "order_intent_blocked",
-                level="warning",
-                **correlation_fields(
-                    decision_id=intent.decision_id,
-                    intent_id=intent.intent_id,
-                    symbol=intent.symbol,
-                    reason="kill_switch_active",
-                ),
-            )
-            return
+        # 去重检查优先于 kill_switch：已入库的 intent（无论之前是 BLOCKED/FILLED/…）
+        # 不需要再次写 DB，避免 halted 期间重复 upsert。
         if self.execution_repo.has_intent(intent.intent_id):
             log_event(
                 self.logger,
@@ -177,6 +166,29 @@ class OrderManager:
                     decision_id=intent.decision_id,
                     intent_id=intent.intent_id,
                     symbol=intent.symbol,
+                ),
+            )
+            return
+        if self.kill_switch.halted:
+            # Fix P2-6：持久化 BLOCKED 状态，保留审计记录和幂等保护。
+            blocked_state = self._blocked_order_state_from_intent(
+                intent=intent,
+                client_order_id=intent.idempotency_key or new_id("clord"),
+                submission_mode="kill_switch_blocked",
+                execution_error="kill_switch_active",
+            )
+            await self._persist_order_state(
+                order_state=blocked_state, key=intent.symbol, intent=intent,
+            )
+            log_event(
+                self.logger,
+                "order_intent_blocked",
+                level="warning",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    reason="kill_switch_active",
                 ),
             )
             return
@@ -663,6 +675,63 @@ class OrderManager:
                 ),
             )
 
+        # ── Fix P1-3：当有 fills 且有 outbox publisher 时，走单事务原子路径 ──
+        if fills and self.execution_outbox_publisher is not None and self.obligation_service is not None:
+            # 先规范化 fill client_order_id
+            normalized_fills = []
+            for fill in fills:
+                if fill.client_order_id != order_state.client_order_id:
+                    fill = fill.model_copy(
+                        update={
+                            "client_order_id": order_state.client_order_id,
+                            "execution_attempt_id": (
+                                order_state.execution_attempt_id
+                                or execution_attempt_id_from_components(
+                                    client_order_id=order_state.client_order_id,
+                                    execution_chain_id=order_state.execution_chain_id,
+                                    intent_id=order_state.intent_id,
+                                )
+                            ),
+                        }
+                    )
+                normalized_fills.append(fill)
+            # 链式计算所有 obligation 更新 + 终态 finalization
+            per_fill_obligations, final_obligation = (
+                self.obligation_service.preview_chained_fill_obligations_and_finalize(
+                    fills=normalized_fills,
+                    order_state=order_state,
+                )
+            )
+            persisted_order_state = await self.execution_outbox_publisher.persist_order_state_with_fills(
+                order_state=order_state,
+                key=intent.symbol,
+                fills=normalized_fills,
+                obligations_per_fill=per_fill_obligations,
+                final_obligation=final_obligation,
+            )
+            log_event(
+                self.logger,
+                "order_state_persisted",
+                **correlation_fields(
+                    decision_id=persisted_order_state.decision_id,
+                    intent_id=persisted_order_state.intent_id,
+                    order_id=persisted_order_state.client_order_id,
+                    status=persisted_order_state.status,
+                    venue=persisted_order_state.venue,
+                    submission_mode=persisted_order_state.submission_mode,
+                    fill_count=len(normalized_fills),
+                ),
+            )
+            self._shadow_write_order_state(order_state=persisted_order_state, intent=intent)
+            self._sync_strategy_bundle_status(order_state=persisted_order_state)
+            self._sync_exit_execution_intent(order_state=persisted_order_state, intent=intent)
+            for fill in normalized_fills:
+                self._shadow_write_fill(fill)
+            mirrored_obl = final_obligation or (per_fill_obligations[-1] if per_fill_obligations else None)
+            self._shadow_sync_obligation(mirrored_obl, reason="atomic_settlement", related_fill=normalized_fills[-1] if normalized_fills else None)
+            return persisted_order_state
+
+        # ── Legacy 路径：无 outbox 或无 fills ──
         persisted_order_state = await self._persist_order_state(
             order_state=order_state,
             key=intent.symbol,

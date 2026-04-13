@@ -62,13 +62,22 @@ class ExecutionObligationService:
         client_order_id: str,
     ) -> OrderObligation | None:
         async with self._reservation_lock:
-            obligation = await self.preview_reservation_for_intent(
+            obligation, snapshot_available = await self._build_reservation_for_intent(
                 intent=intent,
                 client_order_id=client_order_id,
             )
             if obligation is None:
                 return None
-            saved = self.obligation_repo.save_obligation(obligation)
+            # snapshot_available 为 None 表示 obligation 已存在（幂等返回），
+            # 此时跳过事务保存直接返回。
+            if snapshot_available is not None:
+                saved = self.obligation_repo.reserve_obligation_transactional(
+                    obligation=obligation,
+                    snapshot_available_balance=snapshot_available,
+                    epsilon=self._EPSILON,
+                )
+            else:
+                saved = obligation
             # Stage 6 Slice 6.5：async path 直接 await publish（保证跨进程同步
             # 在返回调用方前至少进入 event loop scheduler）；cache 内部 best-effort
             # 失败不抛，publish 本身有 D9 idempotent 保护。
@@ -92,22 +101,38 @@ class ExecutionObligationService:
         intent: OrderIntent,
         client_order_id: str,
     ) -> OrderObligation | None:
+        obligation, _ = await self._build_reservation_for_intent(
+            intent=intent,
+            client_order_id=client_order_id,
+        )
+        return obligation
+
+    async def _build_reservation_for_intent(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+    ) -> tuple[OrderObligation | None, Decimal | None]:
+        """构建 reservation obligation 并返回 (obligation, snapshot_available_balance)。
+
+        当 obligation 已存在（幂等）或不需要 reservation 时返回 (existing/None, None)。
+        """
         existing = self.obligation_repo.get_obligation(client_order_id)
         if existing is not None:
-            return existing
+            return existing, None
         if self.account_snapshot_loader is None:
             if self._account_snapshot_required():
                 raise ExecutionReservationError("local_obligation_account_snapshot_unavailable")
-            return None
+            return None, None
         snapshot = await self.account_snapshot_loader()
         if snapshot is None:
             if self._account_snapshot_required():
                 raise ExecutionReservationError("local_obligation_account_snapshot_unavailable")
-            return None
+            return None, None
 
         reserve_currency, reserved_amount, reference_price = self._reservation_spec(intent=intent)
         if reserve_currency is None or reserved_amount <= self._EPSILON:
-            return None
+            return None, None
 
         available_balance = self._snapshot_available_balance(snapshot=snapshot, currency=reserve_currency)
         reserved_elsewhere = sum(
@@ -145,7 +170,7 @@ class ExecutionObligationService:
             reference_price=reference_price,
             last_update_ts=utc_now(),
         )
-        return obligation
+        return obligation, available_balance
 
     def _account_snapshot_required(self) -> bool:
         return self.settings.account_backend == "okx" and self.settings.account_read_enabled
@@ -164,6 +189,10 @@ class ExecutionObligationService:
         obligation = self.obligation_repo.get_obligation(fill.client_order_id)
         if obligation is None:
             return None
+        return self._apply_fill_to_obligation(fill, obligation)
+
+    def _apply_fill_to_obligation(self, fill: FillEvent, obligation: OrderObligation) -> OrderObligation:
+        """对给定 obligation 应用单笔 fill，返回更新后的 obligation（不写 DB）。"""
         if fill.fill_id in obligation.consumed_fill_ids:
             return obligation
         if fill.fill_id in obligation.blocked_fill_ids:
@@ -196,20 +225,36 @@ class ExecutionObligationService:
             }
         )
 
-    def finalize_for_order_state(self, order_state: OrderState) -> OrderObligation | None:
-        updated = self.preview_obligation_for_order_state(order_state)
-        if updated is None:
-            return None
-        saved = self.obligation_repo.save_obligation(updated)
-        # Stage 6 Slice 6.5：同 persist_previewed_obligation 模板。
-        if saved is not None and self._obligation_cache is not None:
-            self._obligation_cache.fire_and_forget_publish(saved)
-        return saved
+    def preview_chained_fill_obligations_and_finalize(
+        self,
+        fills: list[FillEvent],
+        order_state: OrderState,
+    ) -> tuple[list[OrderObligation | None], OrderObligation | None]:
+        """一次性计算批量 fill 的 obligation 链式更新 + 终态 finalization。
 
-    def preview_obligation_for_order_state(self, order_state: OrderState) -> OrderObligation | None:
+        从 repo 只读一次 obligation，依次应用每笔 fill 的消耗（内存中链式
+        累积），最后计算终态释放。返回 (per_fill_obligations, final_obligation)。
+        """
+        if not fills:
+            return [], self.preview_obligation_for_order_state(order_state)
+        obligation = self.obligation_repo.get_obligation(fills[0].client_order_id)
+        per_fill: list[OrderObligation | None] = []
+        for fill in fills:
+            if obligation is None:
+                per_fill.append(None)
+                continue
+            updated = self._apply_fill_to_obligation(fill, obligation)
+            per_fill.append(updated)
+            obligation = updated
+        final = self._apply_finalization_to_obligation(order_state, obligation)
+        return per_fill, final
+
+    def _apply_finalization_to_obligation(
+        self, order_state: OrderState, obligation: OrderObligation | None,
+    ) -> OrderObligation | None:
+        """对给定 obligation 应用终态 finalization（不写 DB）。"""
         if order_state.status not in {"FILLED", "CANCELED", "REJECTED", "FAILED", "BLOCKED", "DRY_RUN", "EXPIRED"}:
             return None
-        obligation = self.obligation_repo.get_obligation(order_state.client_order_id)
         if obligation is None:
             return None
         remaining_amount = self.remaining_amount(obligation)
@@ -231,6 +276,20 @@ class ExecutionObligationService:
                 "last_update_ts": utc_now(),
             }
         )
+
+    def finalize_for_order_state(self, order_state: OrderState) -> OrderObligation | None:
+        updated = self.preview_obligation_for_order_state(order_state)
+        if updated is None:
+            return None
+        saved = self.obligation_repo.save_obligation(updated)
+        # Stage 6 Slice 6.5：同 persist_previewed_obligation 模板。
+        if saved is not None and self._obligation_cache is not None:
+            self._obligation_cache.fire_and_forget_publish(saved)
+        return saved
+
+    def preview_obligation_for_order_state(self, order_state: OrderState) -> OrderObligation | None:
+        obligation = self.obligation_repo.get_obligation(order_state.client_order_id)
+        return self._apply_finalization_to_obligation(order_state, obligation)
 
     @classmethod
     def remaining_amount(cls, obligation: OrderObligation) -> Decimal:
@@ -254,7 +313,10 @@ class ExecutionObligationService:
                 return None, Decimal("0"), reference_price
             if base_currency is None:
                 return None, Decimal("0"), reference_price
-            return base_currency, intent.quantity, reference_price
+            # Fix P2-7：spot sell 时 fee 可能以 base 币种计费，需预留最坏情况手续费。
+            taker_fee_bps = self.fee_resolver.taker_fee_bps_decimal(symbol=intent.symbol)
+            fee_multiplier = Decimal("1") + (taker_fee_bps / Decimal("10000"))
+            return base_currency, intent.quantity * fee_multiplier, reference_price
         reserved_amount = derivatives_initial_margin_requirement(
             quantity=intent.quantity,
             reference_price=reference_price,

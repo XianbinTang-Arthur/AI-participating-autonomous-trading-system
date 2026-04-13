@@ -232,6 +232,15 @@ def action_approve(
     gate_result = None
     if also_apply and target.get("target_parameter_set_id"):
         if args.skip_gate:
+            # Fix P2-10：--skip-gate 仅允许在 dev 环境使用，staging/prod 环境禁止
+            from aats.data_platform.operations.environment_guard import (
+                get_current_environment,
+                get_policy,
+            )
+            _env = get_current_environment()
+            if get_policy(_env).get("require_gate_pass", False):
+                print(f"[ERROR] --skip-gate 在 {_env} 环境被禁止（require_gate_pass=True）")
+                return 1
             print("[WARNING] --skip-gate: 跳过 pre-apply gate（仅限调试）")
             gate_result = {
                 "gate_run_id": "skipped",

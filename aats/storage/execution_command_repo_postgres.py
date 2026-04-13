@@ -89,12 +89,12 @@ class PostgresExecutionCommandRepository:
 
     def pending_commands(self, *, limit: int, sent_stale_before: datetime | None = None) -> list[dict]:
         with self.session_factory() as session:
-            sent_clause = ExecutionCommandModel.state == "PENDING"
+            # Fix P1-5：CLAIMED 始终包含（安全重试），SENT 仅在 stale 时包含。
             if sent_stale_before is None:
-                sent_clause = ExecutionCommandModel.state.in_(("PENDING", "SENT"))
+                sent_clause = ExecutionCommandModel.state.in_(("PENDING", "CLAIMED", "SENT"))
             else:
                 sent_clause = or_(
-                    ExecutionCommandModel.state == "PENDING",
+                    ExecutionCommandModel.state.in_(("PENDING", "CLAIMED")),
                     and_(
                         ExecutionCommandModel.state == "SENT",
                         ExecutionCommandModel.updated_at <= sent_stale_before,
@@ -110,7 +110,8 @@ class PostgresExecutionCommandRepository:
 
     def command_counts(self, *, sent_stale_before: datetime | None = None) -> dict[str, int]:
         with self.session_factory() as session:
-            filters = [ExecutionCommandModel.state == "PENDING"]
+            # Fix P1-5：CLAIMED 和 PENDING 一起统计（都可安全重试）
+            filters = [ExecutionCommandModel.state.in_(("PENDING", "CLAIMED"))]
             if sent_stale_before is not None:
                 filters.append(
                     and_(
@@ -138,7 +139,8 @@ class PostgresExecutionCommandRepository:
         for state, command_type, count in rows:
             normalized_state = str(state or "").upper()
             normalized_type = str(command_type or "").strip().lower()
-            if normalized_state == "PENDING":
+            # Fix P1-5：CLAIMED 和 PENDING 一起归入 pending 桶
+            if normalized_state in ("PENDING", "CLAIMED"):
                 counts["pending_total"] += int(count)
                 if normalized_type == "submit":
                     counts["pending_submit"] += int(count)
@@ -173,12 +175,22 @@ class PostgresExecutionCommandRepository:
                 return False
             if row.updated_at != expected_updated_at:
                 return False
-            row.state = "SENT"
+            # Fix P1-5：PENDING → CLAIMED（已从队列取出，尚未发送到交易所）
+            row.state = "CLAIMED"
             row.attempt_count += 1
             row.updated_at = updated_at
             row.last_error = None
             session.commit()
             return True
+
+    def mark_sent_to_venue(self, command_id: str, updated_at: datetime) -> None:
+        """Fix P1-5：CLAIMED → SENT（已确认发送到交易所）。"""
+        self._update_state(
+            command_id=command_id,
+            state="SENT",
+            updated_at=updated_at,
+            last_error=None,
+        )
 
     def mark_sent(self, command_id: str, updated_at: datetime) -> None:
         self._update_state(

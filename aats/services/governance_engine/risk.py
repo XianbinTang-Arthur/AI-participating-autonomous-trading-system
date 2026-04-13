@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Callable
@@ -86,6 +87,11 @@ class RiskEngine:
         # 时完全退化到 repo 原路径。
         # 设计文档：docs/task/stage_6_slice_6_5_obligation_hot_state_design.md
         self._obligation_cache = obligation_cache
+        # 单次评估周期内缓存 _active_local_obligations 结果，避免同一轮
+        # risk check 中对 cache/repo + open_orders 过滤的重复 IO。
+        # TTL 1 秒：远小于 snapshot poll 间隔，远大于单次评估耗时。
+        self._local_obligations_cache: list[OrderObligation] | None = None
+        self._local_obligations_cache_ts: float = 0.0
 
     def evaluate(self, target: PositionTarget) -> RiskDecision:
         adaptive_state = self._adaptive_control_states(target=target)
@@ -1689,9 +1695,18 @@ class RiskEngine:
             if obligation.symbol == symbol
         )
 
+    _LOCAL_OBLIGATIONS_CACHE_TTL = 1.0  # 秒
+
     def _active_local_obligations(self) -> list[OrderObligation]:
         if self.obligation_repo is None:
             return []
+        # 单次评估周期缓存：同一轮 risk check 的多个调用点共享结果
+        now = time.monotonic()
+        if (
+            self._local_obligations_cache is not None
+            and (now - self._local_obligations_cache_ts) < self._LOCAL_OBLIGATIONS_CACHE_TTL
+        ):
+            return self._local_obligations_cache
         snapshot = self._snapshot()
         visible_client_order_ids = {
             order.client_order_id
@@ -1710,11 +1725,14 @@ class RiskEngine:
             source = self._obligation_cache.active_sync()
         if source is None:
             source = list(self.obligation_repo.active_obligations())
-        return [
+        result = [
             obligation
             for obligation in source
             if obligation.client_order_id not in visible_client_order_ids
         ]
+        self._local_obligations_cache = result
+        self._local_obligations_cache_ts = now
+        return result
 
     def _symbol_currencies(self, symbol: str) -> tuple[str | None, str | None]:
         instrument_getter = getattr(self.account_service, "instrument_metadata", None)
@@ -1977,24 +1995,40 @@ class RiskEngine:
         snapshot: ExchangeAccountSnapshot | None,
         symbol: str,
     ) -> Decimal:
-        if snapshot is None:
-            return Decimal("0")
-        return sum(
+        exchange_notional = Decimal("0")
+        if snapshot is not None:
+            exchange_notional = sum(
+                (
+                    self._open_order_remaining_notional(order)
+                    for order in snapshot.open_orders
+                    if self._open_order_symbol(order) == symbol
+                ),
+                start=Decimal("0"),
+            )
+        # Fix P2-8：加入本地 obligation 敞口（尚未出现在交易所 open_orders 中的预留）
+        local_notional = sum(
             (
-                self._open_order_remaining_notional(order)
-                for order in snapshot.open_orders
-                if self._open_order_symbol(order) == symbol
+                self._obligation_remaining_notional(obl)
+                for obl in self._active_local_obligations()
+                if obl.symbol == symbol
             ),
             start=Decimal("0"),
         )
+        return exchange_notional + local_notional
 
     def _total_pending_notional(self, *, snapshot: ExchangeAccountSnapshot | None) -> Decimal:
-        if snapshot is None:
-            return Decimal("0")
-        return sum(
-            (self._open_order_remaining_notional(order) for order in snapshot.open_orders),
+        exchange_notional = Decimal("0")
+        if snapshot is not None:
+            exchange_notional = sum(
+                (self._open_order_remaining_notional(order) for order in snapshot.open_orders),
+                start=Decimal("0"),
+            )
+        # Fix P2-8：加入本地 obligation 敞口
+        local_notional = sum(
+            (self._obligation_remaining_notional(obl) for obl in self._active_local_obligations()),
             start=Decimal("0"),
         )
+        return exchange_notional + local_notional
 
     def _open_order_remaining_notional(self, order: ExchangeOpenOrder) -> Decimal:
         remaining_qty = max(to_decimal(order.quantity) - to_decimal(order.filled_quantity), Decimal("0"))
@@ -2006,6 +2040,26 @@ class RiskEngine:
             else self._safe_price(self._open_order_symbol(order))
         )
         return remaining_qty * max(reference_price, Decimal("0"))
+
+    def _obligation_remaining_notional(self, obl: OrderObligation) -> Decimal:
+        """Fix P2-8：计算单个 obligation 的剩余名义价值（quote 计价）。
+
+        - quote 币种预留（如 spot buy 用 USDT）→ remaining 本身就是名义价值
+        - base 币种预留（如 spot sell 用 BTC）→ remaining × reference_price
+        """
+        remaining = remaining_obligation_amount(obl)
+        if remaining <= EPSILON_DECIMAL_12:
+            return Decimal("0")
+        _, quote_currency = resolve_symbol_currencies(obl.symbol)
+        if obl.reserve_currency == quote_currency:
+            return remaining
+        # base 币种预留，需要价格转换
+        ref_price = (
+            to_decimal(obl.reference_price)
+            if obl.reference_price is not None and to_decimal(obl.reference_price) > Decimal("0")
+            else self._safe_price(obl.symbol)
+        )
+        return remaining * max(ref_price, Decimal("0"))
 
     @staticmethod
     def _open_order_symbol(order: ExchangeOpenOrder) -> str:

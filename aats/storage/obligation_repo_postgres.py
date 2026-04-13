@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-from sqlalchemy import select
+import zlib
+from decimal import Decimal
+
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.execution import OrderObligation
+from aats.services.accounting import remaining_obligation_amount
 from aats.storage.sqlalchemy_models import OrderObligationModel
+
+
+def _currency_advisory_lock_key(currency: str) -> int:
+    """crc32 → 正 int32，跨进程稳定。"""
+    return zlib.crc32(currency.encode("utf-8")) & 0x7FFFFFFF
 
 
 class PostgresExecutionObligationRepository:
@@ -84,3 +93,45 @@ class PostgresExecutionObligationRepository:
         with self.session_factory() as session:
             rows = session.scalars(select(OrderObligationModel)).all()
         return [OrderObligation.model_validate(row.payload) for row in rows]
+
+    def reserve_obligation_transactional(
+        self,
+        obligation: OrderObligation,
+        snapshot_available_balance: Decimal,
+        epsilon: Decimal,
+    ) -> OrderObligation:
+        """在单个事务内通过 advisory lock 序列化 reservation。
+
+        流程：获取 currency 级 advisory lock → 幂等检查 → 重新读取
+        active obligations → 验证可用余额 → 写入。commit 时自动释放锁。
+        """
+        from aats.services.execution_engine.obligations import ExecutionReservationError
+
+        lock_key = _currency_advisory_lock_key(obligation.reserve_currency)
+        with self.session_factory() as session:
+            session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+            existing = session.get(OrderObligationModel, obligation.client_order_id)
+            if existing is not None:
+                return OrderObligation.model_validate(existing.payload)
+            rows = session.scalars(
+                select(OrderObligationModel).where(
+                    OrderObligationModel.status.in_(("ACTIVE", "PARTIALLY_CONSUMED")),
+                    OrderObligationModel.reserve_currency == obligation.reserve_currency,
+                    OrderObligationModel.client_order_id != obligation.client_order_id,
+                )
+            ).all()
+            reserved_elsewhere = sum(
+                remaining_obligation_amount(OrderObligation.model_validate(r.payload))
+                for r in rows
+            )
+            available_after = snapshot_available_balance - reserved_elsewhere
+            if obligation.reserved_amount > available_after + epsilon:
+                raise ExecutionReservationError(
+                    "local_obligation_insufficient_available_balance:"
+                    f"{obligation.reserve_currency}:"
+                    f"{float(obligation.reserved_amount):.12f}>"
+                    f"{float(available_after):.12f}"
+                )
+            self.save_obligation_in_session(session, obligation)
+            session.commit()
+            return obligation

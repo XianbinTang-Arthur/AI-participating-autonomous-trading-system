@@ -612,7 +612,7 @@ class FillEvent(SchemaBase):
     side: Literal["buy", "sell"]
     fill_qty: Decimal
     fill_price: Decimal
-    fee_amount: Decimal
+    fee_amount: Decimal  # 正值=费用支出，负值=返佣。交易所原始值需按约定映射（OKX: 取反）。
     fee_currency: str | None = None
     reduce_only: bool = False
     close_only: bool = False

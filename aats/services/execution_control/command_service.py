@@ -52,9 +52,9 @@ class ExecutionCommandProcessor:
         for command in commands:
             command_type = str(command.get("command_type") or "")
             command_state = str(command.get("state") or "PENDING").upper()
-            # A submit command that was already marked SENT is ambiguous: the venue may have
-            # accepted it while the local runtime crashed before ack. Do not blindly replay it.
-            if command_type == "submit" and command_state != "PENDING":
+            # Fix P1-5：CLAIMED 命令是安全的（尚未发送到交易所），可以重试。
+            # SENT 命令对于 submit 类型是歧义的（交易所可能已接收），跳过。
+            if command_type == "submit" and command_state not in ("PENDING", "CLAIMED"):
                 continue
             if not self.can_execute_command(command):
                 continue
@@ -69,7 +69,7 @@ class ExecutionCommandProcessor:
             if not claimed:
                 continue
             claimed = dict(command)
-            claimed["state"] = "SENT"
+            claimed["state"] = "CLAIMED"
             claimed["updated_at"] = claimed_at
             await self._process_command(claimed)
             processed += 1
@@ -113,11 +113,17 @@ class ExecutionCommandProcessor:
                 result = await self.cancel_executor(client_order_id)
             else:
                 raise ValueError(f"unsupported_execution_command_type:{command_type}")
+            # Fix P1-5：executor 成功返回 → 先标记 SENT（交易所已确认接收），
+            # 再标记 ACKED。崩溃窗口：若 mark_sent_to_venue 后进程崩溃，
+            # 重启时 SENT 命令不会被盲目重试 submit（process_pending 已跳过
+            # 非 PENDING/CLAIMED 的 submit），由 stale 超时机制安全回收。
+            sent_at = utc_now()
+            await asyncio.to_thread(
+                self.execution_command_repo.mark_sent_to_venue,
+                command_id,
+                updated_at=sent_at,
+            )
             acked_at = utc_now()
-            # execution_command_repo.mark_acked / mark_failed 都是同步 UPDATE
-            # + COMMIT。原实现直接在 async 里调，每个命令至少堵 event loop 一次
-            # DB 往返。命令处理器会在 background task 里被高频轮询
-            # (process_pending)，不丢线程池的话 HTTP handler 会明显慢。
             await asyncio.to_thread(
                 self.execution_command_repo.mark_acked,
                 command_id,
