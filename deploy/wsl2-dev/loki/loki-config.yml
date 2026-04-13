@@ -58,6 +58,11 @@ limits_config:
   max_streams_per_user: 5000
   max_global_streams_per_user: 5000
   retention_period: 168h    # 保留 7 天，开发足够
+  # 禁用 Loki 3.0 自动标签注入：
+  #   - service_name 与 container 标签完全重复
+  #   - discover_log_levels 对非结构化日志误判（如 Postgres FATAL → info）
+  discover_service_name: []
+  discover_log_levels: false
 
 compactor:
   working_directory: /loki/compactor

@@ -1,0 +1,20 @@
+# =============================================================================
+# Grafana Alert Contact Points
+#
+# Stage 9 策略：只写 Grafana 内部日志 + UI 面板，不接外部通道。
+# Stage 10 再接 Slack / email / Telegram webhook。
+# =============================================================================
+
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: aats-log-only
+    receivers:
+      - uid: aats-log-receiver
+        type: email
+        settings:
+          # 不配置真实 SMTP——Grafana 会在 UI 中显示告警状态，
+          # 发送会失败但告警状态仍然被追踪。Stage 10 再配置真实 SMTP。
+          addresses: ""
+        disableResolveMessage: true

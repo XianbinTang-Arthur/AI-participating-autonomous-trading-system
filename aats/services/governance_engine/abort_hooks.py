@@ -41,6 +41,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Optional
 
+from aats.bootstrap.telemetry import start_span
 from aats.services.governance_engine.drift_score import (
     DriftInputs,
     DriftReport,
@@ -177,6 +178,9 @@ class AbortHookService:
         self._evaluations_total = 0
         self._halts_triggered = 0
 
+        # G-1C：缓存最后一次 DriftReport，供 /system/drift-report 端点查询
+        self._last_drift_report: DriftReport | None = None
+
         # 后台 task
         self._task: asyncio.Task[None] | None = None
         self._stop_event: asyncio.Event | None = None
@@ -262,6 +266,15 @@ class AbortHookService:
         if not self._config.enabled:
             return None
 
+        with start_span("governance.abort_hooks.evaluate_once"):
+            return await self._evaluate_once_body()
+
+    async def _evaluate_once_body(self) -> DriftReport | None:
+        """evaluate_once 的内部实现——在 OTel span 上下文中执行。
+
+        由 evaluate_once() 调用，拆分出来以避免给整个函数体增加缩进层级。
+        不要直接调用此方法，请使用 evaluate_once()。
+        """
         now = self._time()
 
         # 1. 收集 inputs（provider 抛错 → fail-soft 返 None）
@@ -294,6 +307,7 @@ class AbortHookService:
         self._last_evaluated_at = now
         self._last_total_score = report.total_score
         self._last_abort_hook_action = report.abort_hook_action
+        self._last_drift_report = report
 
         # 3. 状态机推进
         try:
@@ -502,6 +516,18 @@ class AbortHookService:
             evaluations_total=self._evaluations_total,
             halts_triggered=self._halts_triggered,
         )
+
+    def drift_report_dict(self) -> dict[str, Any] | None:
+        """返回最近一次 DriftReport 的 JSON-serializable dict，供 HTTP 端点使用。
+
+        如果还没有执行过评估则返回 None。
+        """
+        if self._last_drift_report is None:
+            return None
+        try:
+            return self._last_drift_report.to_dict()
+        except Exception:
+            return None
 
 
 # ─────────────────────────────────────────────────────────────────────

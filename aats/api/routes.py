@@ -158,6 +158,33 @@ async def system_metrics(request: Request) -> dict[str, Any]:
     return _query(request).metrics()
 
 
+@router.get("/system/drift-report")
+async def system_drift_report(request: Request) -> dict[str, Any]:
+    """返回最近一次 DriftReport + AbortHookService 状态快照。
+
+    G-1C 修复：将 AbortHookService 的内部 DriftReport 暴露为 HTTP endpoint，
+    供 Grafana、CLI 脚本、操作员查询。
+    """
+    runtime: ApplicationRuntime = request.app.state.runtime
+    service = getattr(runtime, "abort_hook_service", None)
+    if service is None:
+        return {"enabled": False, "state": "unavailable", "snapshot": None, "report": None}
+    snap = service.snapshot()
+    return {
+        "enabled": snap.enabled,
+        "state": snap.state,
+        "snapshot": {
+            "consecutive_warning_count": snap.consecutive_warning_count,
+            "evaluations_total": snap.evaluations_total,
+            "halts_triggered": snap.halts_triggered,
+            "last_total_score": snap.last_total_score,
+            "last_evaluated_at": snap.last_evaluated_at,
+            "last_abort_hook_action": snap.last_abort_hook_action,
+        },
+        "report": service.drift_report_dict(),
+    }
+
+
 @router.get("/system/shadow")
 async def system_shadow(request: Request) -> dict[str, Any]:
     return _query(request).phase1_shadow()

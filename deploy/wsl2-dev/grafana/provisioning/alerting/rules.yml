@@ -1,0 +1,159 @@
+# =============================================================================
+# Grafana Alert Rules — Stage 9 Minimum Viable Alerting
+#
+# 基于 Stage 9 dryrun checklist §5 的 SEV1-SEV3 定义。
+# 全部使用 Loki 数据源（不依赖 Prometheus 即可工作）。
+#
+# SEV1 = 资金安全，必须立即 halt + 人工干预
+# SEV2 = 进程/基础设施异常，15 分钟内处理
+# SEV3 = 单次错误，下次审计时 review
+#
+# 设计文档：docs/task/grafana_audit_fix_design.md §D3
+# =============================================================================
+
+apiVersion: 1
+
+groups:
+  - orgId: 1
+    name: AATS Alerts
+    folder: AATS
+    interval: 1m
+    rules:
+      # ── SEV1：Kill Switch 触发 ──────────────────────────────────────
+      # kill_switch_applied 事件表示系统已自动紧急 halt。
+      # 可能原因：reconciliation 不一致、drift score 超阈值、外部干预。
+      - uid: sev1-kill-switch
+        title: "SEV1: Kill Switch Triggered"
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "sum(count_over_time({job=\"aats\"} |= \"kill_switch_applied\" [5m]))"
+              queryType: range
+            relativeTimeRange:
+              from: 300
+              to: 0
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: sev1
+        annotations:
+          summary: "Kill switch has been triggered — system halted"
+          description: "A kill_switch_applied event was detected in the last 5 minutes. Immediate operator intervention required."
+
+      # ── SEV1：Reconciliation 不一致 ─────────────────────────────────
+      # 交易所持仓与本地账本不一致，可能存在资金风险。
+      - uid: sev1-reconciliation-mismatch
+        title: "SEV1: Reconciliation Mismatch"
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "sum(count_over_time({job=\"aats\"} |= \"reconciliation_mismatch\" [15m]))"
+              queryType: range
+            relativeTimeRange:
+              from: 900
+              to: 0
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: sev1
+        annotations:
+          summary: "Reconciliation mismatch detected — portfolio vs exchange discrepancy"
+          description: "One or more reconciliation_mismatch events found in the last 15 minutes."
+
+      # ── SEV2：进程崩溃 ─────────────────────────────────────────────
+      # Python Traceback 表示未捕获异常，进程可能已挂。
+      - uid: sev2-process-crash
+        title: "SEV2: Process Crash (Traceback)"
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "sum(count_over_time({job=\"aats\"} |= \"Traceback\" [5m]))"
+              queryType: range
+            relativeTimeRange:
+              from: 300
+              to: 0
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: sev2
+        annotations:
+          summary: "Python traceback detected — possible process crash"
+          description: "Unhandled exception traceback found in AATS logs."
+
+      # ── SEV2：决策周期停滞 ─────────────────────────────────────────
+      # 10 分钟内没有 decision_cycle_completed 日志 = 决策引擎卡死。
+      - uid: sev2-decision-stall
+        title: "SEV2: Decision Cycle Stall"
+        condition: A
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "sum(count_over_time({job=\"aats\"} |= \"decision_cycle_completed\" [10m]))"
+              queryType: range
+            relativeTimeRange:
+              from: 600
+              to: 0
+        noDataState: Alerting
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: sev2
+        annotations:
+          summary: "No decision cycles completed in the last 10 minutes"
+          description: "Decision engine may be stalled. Check decision process logs."
+
+      # ── SEV3：错误率过高 ────────────────────────────────────────────
+      # 15 分钟内超过 5 条 ERROR 级别日志。
+      # 使用 reduce → threshold 链：A(Loki count) → B(取末值) → C(>5 判定)
+      - uid: sev3-error-rate
+        title: "SEV3: High Error Rate"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "sum(count_over_time({job=\"aats\", level=\"ERROR\"} [15m]))"
+              queryType: range
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange:
+              from: 0
+              to: 0
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator:
+                    type: gt
+                    params:
+                      - 5
+            relativeTimeRange:
+              from: 0
+              to: 0
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: sev3
+        annotations:
+          summary: "More than 5 errors in 15 minutes"
+          description: "Elevated error rate detected. Review at next audit."

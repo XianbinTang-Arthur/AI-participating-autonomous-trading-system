@@ -35,6 +35,12 @@ STREAM_CACHE_TOPICS: frozenset[str] = frozenset({
 _DEFAULT_MAX_RECENT = 50
 _DEFAULT_BY_ID_CAPACITY = 2000
 
+# Redis key TTL（秒）。高频行情 / 特征快照每 tick 刷新，24 小时足够覆盖
+# 任何维护停机窗口。过期后 bootstrap 读到空 → NATS replay 补充，不影响
+# 正确性。设置 TTL 避免系统停运后 keys 永驻 Redis 造成内存泄漏，也防止
+# 配置中移除的 symbol 产生孤儿 key。与 PortfolioSnapshotCache TTL 对齐。
+_REDIS_TTL_SECONDS: int = 24 * 3600  # 24 hours
+
 _NS_STREAM_CACHE = "stream_cache"
 _KEY_LATEST = "latest"
 _KEY_RECENT = "recent"
@@ -306,6 +312,7 @@ class StreamSnapshotCache:
                     await self._hot_state_store.set(
                         _redis_key_latest(topic, key),
                         envelope.model_dump(mode="json"),
+                        ttl_seconds=_REDIS_TTL_SECONDS,
                     )
                 except Exception as exc:
                     failed = True
@@ -324,6 +331,7 @@ class StreamSnapshotCache:
                     await self._hot_state_store.set(
                         _redis_key_recent(topic, key),
                         serialized,
+                        ttl_seconds=_REDIS_TTL_SECONDS,
                     )
                 except Exception as exc:
                     failed = True

@@ -12,6 +12,7 @@ from __future__ import annotations
 from typing import Any, Protocol
 
 from aats.bootstrap.logging import get_logger, log_event
+from aats.bootstrap.telemetry import traced
 
 logger = get_logger("aats.recovery.exchange_reconciler")
 
@@ -36,6 +37,7 @@ class OrderStateUpdater(Protocol):
     ) -> bool: ...
 
 
+@traced("recovery.reconcile_stuck_orders")
 async def reconcile_stuck_orders(
     *,
     open_orders: list[dict[str, Any]],

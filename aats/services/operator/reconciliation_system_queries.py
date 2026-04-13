@@ -376,6 +376,69 @@ class ReconciliationSystemQueryFacade:
             live_guard_service.reset_transient_risk_snapshot_state(reason="operator_rebaseline")
             live_guard_service.evaluate_now()
 
+        # ── rebaseline 后清理历史 bundle 遗留 ──────────────────────
+        # operator 已确认接受当前交易所状态为新基线，此时所有仍处于
+        # review_required / partial_fill_recovery 的历史 bundle 应视为
+        # "已收敛"。保留 bundle 记录但把 status 转为 recovered，避免它
+        # 们继续阻断后续 resume。
+        try:
+            repo = self.owner.runtime.strategy_runtime_repo
+            if repo is not None:
+                scope = self.owner.state_scope
+                candidates = repo.recent_execution_bundles(
+                    product_type=scope.product_type,
+                    margin_mode=scope.margin_mode,
+                    limit=200,
+                )
+                resolved_count = 0
+                for bundle in candidates:
+                    if bundle.status not in ("review_required", "partial_fill_recovery"):
+                        continue
+                    updated = bundle.model_copy(
+                        update={
+                            "status": "recovered",
+                            "reason_codes": list(bundle.reason_codes)
+                            + ["operator_rebaseline_resolved"],
+                        }
+                    )
+                    repo.save_execution_bundle(updated)
+                    resolved_count += 1
+                if resolved_count:
+                    log_event(
+                        self.owner.logger,
+                        "operator.rebaseline.bundles_resolved",
+                        resolved_count=resolved_count,
+                        reason=reason,
+                    )
+        except Exception:
+            # 清理 bundle 是尽力而为；失败不影响 rebaseline 主流程
+            log_event(self.owner.logger, "operator.rebaseline.bundle_cleanup_failed", level="warning")
+        # ── end bundle cleanup ─────────────────────────────────────
+
+        # ── rebaseline 后同步 phase1 shadow obligation ─────────────
+        # obligation_backlog = obligation_count - reservation_count。
+        # rebaseline 表示 operator 已确认账实一致，此时把所有缺少
+        # reservation 的 obligation 补写一次，消除 phase1_shadow_lagging。
+        try:
+            ledger_svc = getattr(self.owner.runtime, "phase1_ledger_mirror_service", None)
+            obligation_repo = getattr(self.owner.runtime, "obligation_repo", None)
+            if ledger_svc is not None and obligation_repo is not None:
+                all_obligations = obligation_repo.all_obligations()
+                synced_count = 0
+                for obl in all_obligations:
+                    ledger_svc.sync_obligation(obl, reason="operator_rebaseline_shadow_sync", related_fill=None)
+                    synced_count += 1
+                if synced_count:
+                    log_event(
+                        self.owner.logger,
+                        "operator.rebaseline.shadow_obligations_synced",
+                        synced_count=synced_count,
+                        reason=reason,
+                    )
+        except Exception:
+            log_event(self.owner.logger, "operator.rebaseline.shadow_obligation_sync_failed", level="warning")
+        # ── end shadow obligation sync ─────────────────────────────
+
         recovery_state = (
             "resume_blocked"
             if imported.snapshot.requires_operator_review or report.halt_required

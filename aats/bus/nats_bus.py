@@ -1081,91 +1081,132 @@ class NatsEventBus(EventBus):
         )
 
         async def _on_msg(msg: Any) -> None:
+            # ── Phase 1: 反序列化（无 trace context，失败走早期 return）──
             try:
                 payload_dict = json.loads(msg.data.decode("utf-8"))
                 envelope = EventEnvelope.model_validate(payload_dict)
-                # 高频 topic 写入进程内缓存，供 latest() / recent() 查询
-                if self._stream_cache is not None and envelope.topic in _STREAM_CACHE_TOPICS:
-                    self._stream_cache.update(envelope)
-                # Stage 8：提取 W3C trace context 作为本次 handler 的父 span。
-                # extract_trace_context 在没装 OTel 或 carrier 为空时返回 None；
-                # 返回 None 时 use_context 等 OTel API 就会按"无 parent"处理，
-                # 下面创建的 span 成为新 trace root，整条链路仍然可追。
-                # 设计文档：docs/task/stage_8_otel_integration_design.md §D4
-                parent_ctx: Any = None
-                if envelope.trace_context:
-                    try:
-                        parent_ctx = extract_trace_context(envelope.trace_context)
-                    except Exception as exc:
-                        log_event(
-                            self.logger,
-                            "trace_context_extract_failed",
-                            level="warning",
-                            topic=topic,
-                            durable=durable,
-                            error_type=type(exc).__name__,
-                            error=str(exc),
-                        )
-                        parent_ctx = None
-                message = {
-                    "topic": envelope.topic,
-                    "key": envelope.key,
-                    "payload": envelope.model_dump(mode="json"),
-                }
-                # 用 OTel 原生 API 绑定 parent context，再用 start_span 开子 span。
-                # OTel 未装时 attach 会抛 ImportError / NameError，走 except 分支
-                # 直接调用 handler（保持 monolith 无 OTel 时的现状）。
-                token: Any = None
-                if parent_ctx is not None:
-                    try:
-                        from opentelemetry.context import (  # type: ignore[import-not-found]
-                            attach,
-                            detach,
-                        )
-                        token = attach(parent_ctx)
-                    except Exception:
-                        token = None
-                try:
-                    with start_span(
-                        f"nats.receive.{topic}",
-                        attributes={
-                            "aats.topic": envelope.topic,
-                            "aats.event_type": envelope.event_type,
-                            "aats.event_id": envelope.event_id,
-                            "aats.source_component": envelope.source_component,
-                            "aats.consumer_role": self._consumer_role,
-                            "aats.durable": durable,
-                            "messaging.system": "nats",
-                            "messaging.operation": "receive",
-                        },
-                    ):
-                        await handler(message)
-                finally:
-                    if token is not None:
-                        try:
-                            from opentelemetry.context import (  # type: ignore[import-not-found]
-                                detach,
-                            )
-                            detach(token)
-                        except Exception:
-                            pass
-                await msg.ack()
             except Exception as exc:
                 log_event(
                     self.logger,
-                    "nats_handler_error",
+                    "nats_message_parse_error",
                     level="error",
                     topic=topic,
                     durable=durable,
                     error_type=type(exc).__name__,
                     error=str(exc),
+                    permanent=True,
                 )
-                # 不 ack：JetStream 会按 ack_wait 重投
-                # 超过 max_deliver 后会被丢到死信主题
+                # 解析错误是确定性失败（坏 JSON / schema 不匹配），重投
+                # 也不会成功。优先 term()（JetStream 2.10+ 支持）直接终止
+                # 消息；如果 nats-py 版本不支持 term() 则回退到 nak()。
                 try:
-                    await msg.nak()
+                    if hasattr(msg, "term"):
+                        await msg.term()
+                    else:
+                        await msg.nak()
                 except Exception:
                     pass
+                return
+
+            # 高频 topic 写入进程内缓存，供 latest() / recent() 查询
+            if self._stream_cache is not None and envelope.topic in _STREAM_CACHE_TOPICS:
+                self._stream_cache.update(envelope)
+
+            # ── Phase 2: 提取 trace context + 在 span 内执行 handler ──
+            # extract_trace_context 在没装 OTel 或 carrier 为空时返回 None；
+            # 返回 None 时 start_span 创建新 trace root，链路仍然可追。
+            # 设计文档：docs/task/stage_8_otel_integration_design.md §D4
+            parent_ctx: Any = None
+            if envelope.trace_context:
+                try:
+                    parent_ctx = extract_trace_context(envelope.trace_context)
+                except Exception:
+                    parent_ctx = None
+
+            message = {
+                "topic": envelope.topic,
+                "key": envelope.key,
+                "payload": envelope.model_dump(mode="json"),
+            }
+
+            # 绑定 parent context，使 start_span 开出的 span 成为子 span。
+            token: Any = None
+            _otel_detach: Any = None
+            if parent_ctx is not None:
+                try:
+                    from opentelemetry.context import (  # type: ignore[import-not-found]
+                        attach,
+                        detach as _detach,
+                    )
+                    token = attach(parent_ctx)
+                    _otel_detach = _detach
+                except Exception:
+                    token = None
+
+            try:
+                with start_span(
+                    f"nats.receive.{topic}",
+                    attributes={
+                        "aats.topic": envelope.topic,
+                        "aats.event_type": envelope.event_type,
+                        "aats.event_id": envelope.event_id,
+                        "aats.source_component": envelope.source_component,
+                        "aats.consumer_role": self._consumer_role,
+                        "aats.durable": durable,
+                        "messaging.system": "nats",
+                        "messaging.operation": "receive",
+                    },
+                ):
+                    # handler 与 ack 分开捕获：区分 handler 业务错误和
+                    # ack 网络错误，避免 ack 失败误报为 nats_handler_error。
+                    # 两段都在 span 内确保 log_event 能拿到 trace_id。
+                    try:
+                        await handler(message)
+                    except Exception as exc:
+                        log_event(
+                            self.logger,
+                            "nats_handler_error",
+                            level="error",
+                            topic=topic,
+                            durable=durable,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                        )
+                        # handler 失败 → nak 带 5s 延迟触发重投，给瞬时
+                        # 故障留恢复窗口，避免立即耗尽 max_deliver。
+                        # max_deliver 耗尽后消息不再投递给该 consumer
+                        #（仍留在 stream 中直到 max_age / max_bytes 淘汰）。
+                        try:
+                            await msg.nak(delay=5)
+                        except Exception:
+                            # nats-py 旧版不支持 delay 参数时回退到无延迟
+                            # nak，此时 server 会立即重投。
+                            try:
+                                await msg.nak()
+                            except Exception:
+                                pass
+                    else:
+                        try:
+                            await msg.ack()
+                        except Exception as exc:
+                            log_event(
+                                self.logger,
+                                "nats_ack_failed",
+                                level="warning",
+                                topic=topic,
+                                durable=durable,
+                                error_type=type(exc).__name__,
+                                error=str(exc),
+                            )
+                            # ack 失败但 handler 已成功执行：消息会在
+                            # ack_wait 超时后被 server 重投。handler 的
+                            # 幂等性保证重处理不会产生副作用。
+            finally:
+                if token is not None and _otel_detach is not None:
+                    try:
+                        _otel_detach(token)
+                    except Exception:
+                        pass
 
         # ── Slow consumer 防护：deliver_policy + flow_control ──────
         _DP_MAP = {

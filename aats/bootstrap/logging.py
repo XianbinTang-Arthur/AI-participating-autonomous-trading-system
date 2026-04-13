@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from threading import Lock
@@ -25,6 +26,87 @@ PROPAGATING_LOGGERS = (
     "websockets",
 )
 _CONFIGURE_LOCK = Lock()
+
+# ── JSON 格式化 ─────────────────────────────────────────────────────
+# AATS_LOG_FORMAT=json 时启用；输出单行 JSON，字段对齐 Grafana Loki
+# pipeline 的 json stage 解析。字段清单：
+#   timestamp  — ISO 格式时间戳
+#   level      — 日志级别（大写）
+#   logger     — logger 名称
+#   message    — 日志正文
+#   trace_id   — OTel trace ID（32 位 hex，无 span 时为 "0"×32）
+#   span_id    — OTel span ID（16 位 hex，无 span 时为 "0"×16）
+#   process_role — AATS 进程角色（gateway/market/decision/execution）
+#   event_name — log_event() 输出时的事件名（嵌在 message 首段）
+# ────────────────────────────────────────────────────────────────────
+
+_ZERO_TRACE_ID = "0" * 32
+_ZERO_SPAN_ID = "0" * 16
+
+
+class _OTelTraceFilter(logging.Filter):
+    """给每条 LogRecord 注入 otelTraceID / otelSpanID。
+
+    从 opentelemetry.trace.get_current_span() 动态读取当前 trace context。
+    OTel 未安装时降级为全零（与 telemetry.py 的 _NoopTracer 策略一致）。
+    不引入额外依赖，不做 auto-instrumentation。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            from opentelemetry import trace
+
+            span = trace.get_current_span()
+            ctx = span.get_span_context()
+            if ctx and ctx.trace_id:
+                record.otelTraceID = format(ctx.trace_id, "032x")  # type: ignore[attr-defined]
+                record.otelSpanID = format(ctx.span_id, "016x")  # type: ignore[attr-defined]
+            else:
+                record.otelTraceID = _ZERO_TRACE_ID  # type: ignore[attr-defined]
+                record.otelSpanID = _ZERO_SPAN_ID  # type: ignore[attr-defined]
+        except Exception:
+            record.otelTraceID = _ZERO_TRACE_ID  # type: ignore[attr-defined]
+            record.otelSpanID = _ZERO_SPAN_ID  # type: ignore[attr-defined]
+        return True
+
+
+class _JSONFormatter(logging.Formatter):
+    """单行 JSON 日志格式化器。
+
+    输出字段与 Promtail 的 json pipeline stage 对齐：
+    Promtail 从 Docker json-file 日志中提取 AATS 的 JSON log line，
+    然后按 level / process_role 作为 Loki label 索引，
+    trace_id / event_name 走正文搜索或 Grafana derived field。
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._process_role = os.environ.get("AATS_PROCESS_ROLE", "monolith")
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry: dict[str, Any] = {
+            "timestamp": self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S.%f"),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "process_role": self._process_role,
+            "trace_id": getattr(record, "otelTraceID", _ZERO_TRACE_ID),
+            "span_id": getattr(record, "otelSpanID", _ZERO_SPAN_ID),
+        }
+        # event_name: 仅 log_event() 调用时存在，便于 Loki 用 | json 精确筛选
+        event_name = getattr(record, "event_name", None)
+        if event_name is not None:
+            entry["event_name"] = event_name
+        if record.exc_info and record.exc_info[1] is not None:
+            entry["exception"] = self.formatException(record.exc_info)
+        return json.dumps(entry, ensure_ascii=False, default=str)
+
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:  # noqa: N802
+        """ISO 8601 毫秒精度时间戳。"""
+        from datetime import datetime, timezone
+
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc)
+        return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{int(record.msecs):03d}Z"
 
 
 class ExactLevelFilter(logging.Filter):
@@ -55,9 +137,18 @@ def configure_logging(
     resolved_level = getattr(logging, level.upper(), logging.INFO)
     base_path = Path(log_dir)
 
+    # AATS_LOG_FORMAT: "json" → 结构化 JSON（Loki/Promtail 友好）
+    #                  "text" / 其它 → 传统纯文本
+    log_format = os.environ.get("AATS_LOG_FORMAT", "text").lower().strip()
+    use_json = log_format == "json"
+
     with _CONFIGURE_LOCK:
         _ensure_log_directories(base_path)
-        formatter = logging.Formatter(LOG_FORMAT)
+
+        if use_json:
+            formatter: logging.Formatter = _JSONFormatter()
+        else:
+            formatter = logging.Formatter(LOG_FORMAT)
 
         root_logger = logging.getLogger()
         for handler in list(root_logger.handlers):
@@ -65,6 +156,10 @@ def configure_logging(
             handler.close()
 
         root_logger.setLevel(resolved_level)
+
+        # trace_id / span_id 注入（JSON/text 都加，text 格式不显示但不影响）
+        root_logger.addFilter(_OTelTraceFilter())
+
         root_logger.addHandler(_build_console_handler(resolved_level, formatter))
         root_logger.addHandler(
             _build_rotating_handler(
@@ -102,9 +197,10 @@ def configure_logging(
         logging.captureWarnings(True)
         bootstrap_logger = get_logger("aats.bootstrap")
         bootstrap_logger.info(
-            "logging_configured level=%s log_dir=%s rotate_max_bytes=%s backup_count=%s",
+            "logging_configured level=%s log_dir=%s log_format=%s rotate_max_bytes=%s backup_count=%s",
             logging.getLevelName(resolved_level),
             str(base_path),
+            log_format,
             rotate_max_bytes,
             backup_count,
         )
@@ -161,7 +257,7 @@ def log_event(logger: logging.Logger, event_name: str, **fields: Any) -> None:
     )
     message = event_name if not rendered_fields else f"{event_name} {rendered_fields}"
     log_method = getattr(logger, level_name, logger.info)
-    log_method(message)
+    log_method(message, extra={"event_name": event_name})
 
 
 def _render_value(value: Any) -> str:

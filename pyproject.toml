@@ -55,7 +55,10 @@ otel = [
   "opentelemetry-api>=1.27",
   "opentelemetry-sdk>=1.27",
   "opentelemetry-exporter-otlp-proto-grpc>=1.27",
+  "opentelemetry-exporter-otlp-proto-http>=1.27",
   "opentelemetry-semantic-conventions>=0.48b0",
+  # J-4: Metrics 基础——Prometheus exporter 可被 Grafana 直接抓取
+  "opentelemetry-exporter-prometheus>=0.48b0",
 ]
 
 [tool.setuptools.packages.find]

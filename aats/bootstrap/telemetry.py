@@ -34,12 +34,23 @@ import 真正的 SDK；其他时候用 no-op tracer，使得 monolith 不必装 
 from __future__ import annotations
 
 import contextlib
+import functools
+import inspect
 import os
-from collections.abc import Iterator, Mapping, MutableMapping
+from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from aats.bootstrap.logging import get_logger, log_event
+
+
+def _detect_package_version() -> str:
+    """从 importlib.metadata 读取 pyproject.toml 声明的版本号，失败降级。"""
+    try:
+        from importlib.metadata import version
+        return version("aats")
+    except Exception:
+        return "0.0.0-dev"
 
 if TYPE_CHECKING:  # pragma: no cover
     from opentelemetry.trace import Span, Tracer  # type: ignore[import-not-found]
@@ -89,7 +100,7 @@ class TelemetryConfig:
         effective_role = (process_role or env_role).strip().lower() or "monolith"
         return cls(
             service_name=service_name or os.environ.get("AATS_OTEL_SERVICE_NAME", f"aats-{effective_role}"),
-            service_version=os.environ.get("AATS_OTEL_SERVICE_VERSION", "0.0.0-dev"),
+            service_version=os.environ.get("AATS_OTEL_SERVICE_VERSION", _detect_package_version()),
             deployment_environment=os.environ.get("AATS_OTEL_DEPLOYMENT_ENV", "dev"),
             otlp_endpoint=os.environ.get("AATS_OTEL_ENDPOINT", "http://127.0.0.1:4317"),
             otlp_protocol=os.environ.get("AATS_OTEL_PROTOCOL", "grpc"),
@@ -110,6 +121,8 @@ _telemetry_state: dict[str, Any] = {
     "configured": False,
     "tracer_provider": None,
     "tracer": None,
+    "meter": None,
+    "meter_provider": None,
     "config": None,
     "noop_tracer": None,
 }
@@ -256,9 +269,41 @@ def configure_telemetry(config: TelemetryConfig) -> bool:
 
     tracer = trace.get_tracer("aats", config.service_version)
 
+    # J-4: Metrics 初始化——与 trace 共享 resource，暴露 Prometheus endpoint。
+    # 失败不影响 tracing 主流程：ImportError（未安装）和 OSError（端口冲突，
+    # 4 进程同主机跑时第 2+ 个进程会遇到）都 graceful 降级。
+    meter: Any = None
+    meter_provider: Any = None
+    try:
+        from opentelemetry import metrics as metrics_api  # type: ignore[import-not-found]
+        from opentelemetry.sdk.metrics import MeterProvider  # type: ignore[import-not-found]
+        from opentelemetry.exporter.prometheus import PrometheusMetricReader  # type: ignore[import-not-found]
+
+        reader = PrometheusMetricReader()
+        meter_provider = MeterProvider(
+            resource=Resource.create(resource_attrs),
+            metric_readers=[reader],
+        )
+        metrics_api.set_meter_provider(meter_provider)
+        meter = metrics_api.get_meter("aats", config.service_version)
+    except ImportError:
+        pass  # opentelemetry-exporter-prometheus 未安装，跳过
+    except Exception as exc:
+        # OSError（端口冲突）等运行时错误——降级但不拖垮 tracing
+        log_event(
+            _telemetry_logger,
+            "telemetry_metrics_init_failed",
+            level="warning",
+            error_type=type(exc).__name__,
+            error=str(exc),
+            hint="Metrics disabled; tracing still active",
+        )
+
     _telemetry_state["configured"] = True
     _telemetry_state["tracer_provider"] = provider
     _telemetry_state["tracer"] = tracer
+    _telemetry_state["meter"] = meter
+    _telemetry_state["meter_provider"] = meter_provider
     _telemetry_state["config"] = config
 
     log_event(
@@ -274,22 +319,43 @@ def configure_telemetry(config: TelemetryConfig) -> bool:
 
 
 def shutdown_telemetry() -> None:
-    """退出时刷出未导出的 span 并关闭 provider。"""
+    """退出时刷出未导出的 span 并关闭 provider。
+
+    同时关闭 MeterProvider（释放 PrometheusMetricReader 的 HTTP 端口）。
+    """
     provider = _telemetry_state.get("tracer_provider")
-    if provider is None:
-        return
-    try:
-        provider.shutdown()
-    except Exception as exc:  # pragma: no cover
-        log_event(
-            _telemetry_logger,
-            "telemetry_shutdown_failed",
-            level="error",
-            error_type=type(exc).__name__,
-            error=str(exc),
-        )
+    meter_provider = _telemetry_state.get("meter_provider")
+
+    # 先关 MeterProvider（释放 Prometheus HTTP server 端口）
+    if meter_provider is not None:
+        try:
+            meter_provider.shutdown()
+        except Exception as exc:  # pragma: no cover
+            log_event(
+                _telemetry_logger,
+                "telemetry_meter_shutdown_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    # 再关 TracerProvider（flush pending spans）
+    if provider is not None:
+        try:
+            provider.shutdown()
+        except Exception as exc:  # pragma: no cover
+            log_event(
+                _telemetry_logger,
+                "telemetry_shutdown_failed",
+                level="error",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
     _telemetry_state["tracer_provider"] = None
     _telemetry_state["tracer"] = None
+    _telemetry_state["meter"] = None
+    _telemetry_state["meter_provider"] = None
     _telemetry_state["configured"] = False
 
 
@@ -304,6 +370,11 @@ def get_tracer() -> "Tracer | _NoopTracer":
     if tracer is None:
         return _get_noop_tracer()
     return tracer  # type: ignore[no-any-return]
+
+
+def get_meter() -> Any:
+    """取得当前 meter。未 configure 或未装 prometheus exporter 时返回 None。"""
+    return _telemetry_state.get("meter")
 
 
 @contextlib.contextmanager
@@ -330,6 +401,43 @@ def start_span(
                     # set_attribute 在某些 OTel 版本对 None / 复杂类型挑剔
                     pass
         yield span
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Decorator: async 函数自动包裹 span
+# ─────────────────────────────────────────────────────────────────────
+
+_F = TypeVar("_F", bound=Callable[..., Any])
+
+
+def traced(span_name: str, *, attributes: Mapping[str, str] | None = None) -> Callable[[_F], _F]:
+    """Decorator：给 async 函数自动包裹一个 OTel span。
+
+    用法::
+
+        @traced("reconciliation.validate_now")
+        async def validate_now(self, *, reason: str = "operator_validate"):
+            ...
+
+    比 ``with start_span(...)`` 不需要给整个函数体加缩进，适合对
+    已有大函数做非侵入式插桩。OTel 未安装时退化为直接调用（零开销）。
+    """
+
+    def decorator(fn: _F) -> _F:
+        if not inspect.iscoroutinefunction(fn):
+            raise TypeError(
+                f"@traced requires an async function, got {fn!r}. "
+                f"For sync functions use 'with start_span(...)' instead."
+            )
+
+        @functools.wraps(fn)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            with start_span(span_name, attributes=attributes):
+                return await fn(*args, **kwargs)
+
+        return wrapper  # type: ignore[return-value]
+
+    return decorator
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -381,6 +489,8 @@ def _reset_for_tests() -> None:
             "configured": False,
             "tracer_provider": None,
             "tracer": None,
+            "meter": None,
+            "meter_provider": None,
             "config": None,
             "noop_tracer": None,
         }

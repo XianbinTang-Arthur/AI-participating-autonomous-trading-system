@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
+from aats.bootstrap.telemetry import traced
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_payload, publish_model
@@ -476,6 +477,7 @@ class PortfolioService:
             source_component="portfolio_service",
         )
 
+    @traced("portfolio.handle_fill_event")
     async def handle_fill_event(self, message: dict) -> None:
         fill = parse_payload(message, FillEvent)
         if self.state.has_applied_fill(fill.fill_id):

@@ -16,6 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised implicitly in enviro
     orjson = None
 
 from aats.bootstrap.settings import AATSSettings
+from aats.bootstrap.telemetry import start_span
 from aats.services.runtime_scope import infer_product_type_from_symbol
 from aats.schemas.common import utc_now
 
@@ -161,27 +162,44 @@ class OKXRESTClient:
             if self.settings.okx_simulated_trading:
                 headers["x-simulated-trading"] = "1"
             try:
-                response = await client.request(
-                    method=normalized_method,
-                    url=request_path,
-                    headers=headers,
-                    content=body_text if body_text else None,
-                )
-                payload = self._parse_json_payload(response)
-                if response.status_code >= 400:
-                    raise self._http_response_error(
+                # J-2: OKX REST 出站请求追踪 — 用 start_span 包裹实际
+                # HTTP 调用，span name 对齐 "okx.http.<METHOD> <path>"。
+                # 不用 opentelemetry-instrumentation-httpx 以保持与项目
+                # 避免 auto-instrumentation 的设计一致。
+                with start_span(
+                    f"okx.http.{normalized_method} {path}",
+                    attributes={
+                        "http.method": normalized_method,
+                        "http.url": path,
+                        "aats.okx.require_auth": require_auth,
+                        "aats.okx.attempt": attempt,
+                    },
+                ) as span:
+                    response = await client.request(
                         method=normalized_method,
-                        path=path,
-                        response=response,
-                        payload=payload,
+                        url=request_path,
+                        headers=headers,
+                        content=body_text if body_text else None,
                     )
-                if str(payload.get("code")) != "0":
-                    raise self._business_response_error(
-                        path=path,
-                        response=response,
-                        payload=payload,
-                    )
-                return payload
+                    payload = self._parse_json_payload(response)
+                    try:
+                        span.set_attribute("http.status_code", response.status_code)
+                    except Exception:
+                        pass
+                    if response.status_code >= 400:
+                        raise self._http_response_error(
+                            method=normalized_method,
+                            path=path,
+                            response=response,
+                            payload=payload,
+                        )
+                    if str(payload.get("code")) != "0":
+                        raise self._business_response_error(
+                            path=path,
+                            response=response,
+                            payload=payload,
+                        )
+                    return payload
             except OKXRequestError as exc:
                 if not self._should_retry_request(method=normalized_method, attempt=attempt, error=exc):
                     raise

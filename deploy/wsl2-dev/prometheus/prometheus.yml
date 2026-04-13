@@ -1,0 +1,35 @@
+# =============================================================================
+# Prometheus — AATS 指标采集
+#
+# 采集 4 个 AATS 进程容器的 PrometheusMetricReader 端点 (:9464/metrics)。
+# metrics_bridge.py 定期把 MetricsRegistry 计数器同步到 OTel Counter，
+# PrometheusMetricReader 以 Prometheus exposition format 暴露。
+#
+# 设计文档：docs/task/grafana_audit_fix_design.md §D1
+# =============================================================================
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+
+scrape_configs:
+  # 4 个 AATS 进程各自运行 PrometheusMetricReader 在 :9464。
+  # Docker 容器名 = docker-compose service name（aats-gateway 等）。
+  # monolith 单进程模式下只有 aats-monolith 一个目标。
+  - job_name: aats
+    static_configs:
+      - targets:
+          - aats-gateway:9464
+          - aats-market:9464
+          - aats-decision:9464
+          - aats-execution:9464
+        labels:
+          env: dev
+
+  # Redis Exporter — redis_commands_duration_seconds_total 等指标
+  - job_name: redis
+    static_configs:
+      - targets:
+          - redis-exporter:9121
+        labels:
+          env: dev

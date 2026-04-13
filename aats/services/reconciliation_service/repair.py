@@ -20,6 +20,7 @@ from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
+from aats.bootstrap.telemetry import traced
 from aats.services.reconciliation_service.comparator import StateComparator
 from aats.services.reconciliation_service.fetcher import ExchangeStateFetcher
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
@@ -264,6 +265,7 @@ class ReconciliationService:
             raise
         return repaired_snapshot
 
+    @traced("reconciliation.validate_now")
     async def validate_now(self, *, reason: str = "operator_validate") -> ReconciliationReport:
         latest_snapshot = await asyncio.to_thread(latest_snapshot_for_scope, self.portfolio_repo, self.runtime_scope)
         latest_snapshot_event = await asyncio.to_thread(

@@ -626,6 +626,27 @@ class ApplicationRuntime:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
+        # G-1 修复：MetricsRegistry → OTel Counter 桥接。定期把进程内计数器
+        # 同步到 PrometheusMetricReader，供 Prometheus server 采集、Grafana 查询。
+        # OTel 未安装时 bridge 静默跳过（返回 None → task 直接退出）。
+        try:
+            _metrics = getattr(self, "metrics", None)
+            if _metrics is not None:
+                from aats.bootstrap.metrics_bridge import start_metrics_bridge_loop
+                self.background_tasks.append(
+                    asyncio.create_task(
+                        start_metrics_bridge_loop(_metrics),
+                        name="aats_metrics_bridge",
+                    )
+                )
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "metrics_bridge_start_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     async def stop_background_tasks(self) -> None:
         await self.account_service.stop_private_ws()

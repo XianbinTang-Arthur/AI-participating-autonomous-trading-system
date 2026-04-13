@@ -28,6 +28,8 @@ volumes:
   loki_data:
   grafana_data:
   jaeger_badger_data:
+  prometheus_data:
+  promtail_positions:
 
 services:
   # ---------------------------------------------------------------------------
@@ -128,6 +130,35 @@ services:
       resources:
         limits:
           memory: 512M
+
+  # ---------------------------------------------------------------------------
+  # Redis Exporter — Redis 指标采集 → Prometheus
+  # 暴露 redis_commands_duration_seconds_total 等指标供 Grafana 延迟面板使用
+  # Stage 9 §3.1 要求：Redis latency p99 < 10ms
+  # ---------------------------------------------------------------------------
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.58.0-alpine
+    container_name: aats-redis-exporter
+    restart: unless-stopped
+    environment:
+      REDIS_ADDR: redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-changeme}
+    ports:
+      - "127.0.0.1:9121:9121"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9121/metrics"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          memory: 64M
 
   # ---------------------------------------------------------------------------
   # NATS JetStream — 跨进程事件总线
@@ -248,7 +279,39 @@ services:
           memory: 1536M
 
   # ---------------------------------------------------------------------------
-  # Grafana — 一站式 Loki + Jaeger + Postgres 仪表盘
+  # Prometheus — AATS 进程指标采集
+  # 采集 4 个 AATS 容器的 PrometheusMetricReader (:9464) 端点
+  # Grafana Prometheus datasource 指向此处
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: aats-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=48h"
+      - "--web.listen-address=0.0.0.0:9090"
+      - "--web.enable-lifecycle"
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  # Grafana — 一站式 Loki + Jaeger + Postgres + Prometheus 仪表盘
   # 数据源已在 ./grafana/provisioning 里自动配置
   # ---------------------------------------------------------------------------
   grafana:
@@ -261,6 +324,10 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_INSTALL_PLUGINS: ""
+      # Postgres 数据源 provisioning 需要这些变量做环境变量展开
+      POSTGRES_DB: ${POSTGRES_DB:-aats}
+      POSTGRES_USER: ${POSTGRES_USER:-aats}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aats}
     ports:
       - "127.0.0.1:3000:3000"
     volumes:
@@ -272,6 +339,8 @@ services:
       jaeger:
         condition: service_healthy
       postgres:
+        condition: service_healthy
+      prometheus:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
@@ -285,3 +354,37 @@ services:
       resources:
         limits:
           memory: 512M
+
+  # ---------------------------------------------------------------------------
+  # Promtail — Docker 容器日志采集器 → Loki
+  # 从 /var/lib/docker/containers 读 json-file 日志，解析后推送 Loki
+  # ---------------------------------------------------------------------------
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: aats-promtail
+    restart: unless-stopped
+    command:
+      - "-config.file=/etc/promtail/promtail-config.yml"
+      - "-config.expand-env=true"
+    environment:
+      LOKI_URL: ${LOKI_URL:-http://loki:3100/loki/api/v1/push}
+    volumes:
+      - ./promtail/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail_positions:/positions
+    depends_on:
+      loki:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c ': < /dev/tcp/localhost/9080'"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          memory: 256M
