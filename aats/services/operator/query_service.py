@@ -4426,6 +4426,71 @@ class OperatorQueryService:
         payload["_topic"] = envelope.topic
         return payload
 
+    async def clear_obligation_cache(
+        self,
+        *,
+        reason: str,
+        actor_role: OperatorRole,
+        actor_identity: str | None = None,
+        auth_source: AuthSource = "anonymous",
+    ) -> dict[str, Any]:
+        """清除 Redis 中的 obligation 缓存并重建本地 in-memory 缓存。
+
+        解决 Redis 缓存包含 DB 已无的陈旧条目导致 shadow monitor 误报
+        obligation_backlog 的问题。
+        """
+        _obligation_cache = getattr(self.runtime, "obligation_hot_state_cache", None)
+        _hot_state_store = getattr(self.runtime, "hot_state_store", None)
+
+        cleared_redis = False
+        if _hot_state_store is not None:
+            from aats.services.execution_engine.obligation_cache import (
+                OBLIGATION_INDEX_KEY,
+            )
+            try:
+                # 读 index 获取所有 coid keys
+                index = await _hot_state_store.get(OBLIGATION_INDEX_KEY)
+                keys_to_delete = [OBLIGATION_INDEX_KEY]
+                if isinstance(index, dict):
+                    for coid in (index.get("all_coids") or []):
+                        keys_to_delete.append(f"aats:hot:obligation:by_coid:{coid}")
+                for key in keys_to_delete:
+                    await _hot_state_store.delete(key)
+                cleared_redis = True
+            except Exception:
+                cleared_redis = False
+
+        cleared_local = False
+        if _obligation_cache is not None and hasattr(_obligation_cache, "_latest"):
+            _obligation_cache._latest.clear()
+            cleared_local = True
+
+        recovery_before = self.recovery_view()["recovery_state"]
+        action = OperatorActionRecord(
+            action="clear_obligation_cache",
+            actor_role=actor_role,
+            actor_identity=actor_identity,
+            auth_source=auth_source,
+            reason=reason,
+            status="completed",
+            recovery_state_before=recovery_before,
+            recovery_state_after=recovery_before,
+            details={
+                "cleared_redis": cleared_redis,
+                "cleared_local": cleared_local,
+                "cleared_at": utc_now(),
+            },
+        )
+        envelope = self._append_event(
+            topic=topics.OPERATOR_ACTIONS,
+            key="clear_obligation_cache",
+            payload_model=action,
+        )
+        payload = action.model_dump(mode="json")
+        payload["_event_id"] = envelope.event_id
+        payload["_topic"] = envelope.topic
+        return payload
+
     def runtime_profile_ai_config_snapshot(self) -> dict[str, Any]:
         snapshot = self.runtime_profile_snapshot()
         return {

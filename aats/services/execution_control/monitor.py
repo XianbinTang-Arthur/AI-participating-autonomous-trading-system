@@ -106,16 +106,12 @@ class Phase1ShadowMonitor:
             if self.execution_fill_repo is None
             else max(len(fills_for_scope(self.execution_repo, self.state_scope)) - self.execution_fill_repo.count_fills(), 0)
         )
-        # Stage 6 Slice 6.5：cache 优先 + repo fallback。cache.all_sync() 返回
-        # None 说明未 bootstrap，退化到 obligation_repo.all_obligations()（打 PG）。
-        cached_obligations: list | None = None
-        if self._obligation_cache is not None:
-            cached_obligations = self._obligation_cache.all_sync()
-        obligation_count = (
-            len(cached_obligations)
-            if cached_obligations is not None
-            else len(self.obligation_repo.all_obligations())
-        )
+        # obligation backlog 比较必须与 reservation_repo（DB 来源）同源。
+        # 旧逻辑用 cache.all_sync()，但 cache 从 Redis hydrate，重启后
+        # 可能包含 DB 已无的陈旧条目（已 RELEASED 但 Redis 未清理），
+        # 造成 cache(1) vs DB(0) 的幻影 backlog → 永久阻断。
+        # 改为始终用 obligation_repo（DB）作为 backlog 计数的权威来源。
+        obligation_count = len(self.obligation_repo.all_obligations())
         obligation_backlog = (
             None
             if self.reservation_repo is None

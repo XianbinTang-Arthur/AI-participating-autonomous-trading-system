@@ -565,6 +565,16 @@ class BlockerControlService:
                     expected_effect="重新拉取健康状态、阻断面板和影子兼容层快照，确认异常是否仍然存在。",
                 ),
                 BlockerActionDefinition(
+                    action_id="clear-shadow-cache",
+                    label="清除陈旧缓存并解除",
+                    endpoint="/system/blocker-actions/clear-shadow-cache",
+                    tone="primary",
+                    requires_confirmation=True,
+                    confirmation_title="确认清除影子兼容层缓存",
+                    confirmation_copy="清除 Redis 中的 obligation 缓存并重启缓存。如果阻断是由重启后 Redis 陈旧数据引起的，清除后阻断会在下次刷新时自动解除。",
+                    expected_effect="清除 Redis obligation 缓存，消除 cache/DB 不一致造成的幻影 backlog。",
+                ),
+                BlockerActionDefinition(
                     action_id="acknowledge-phase1-shadow",
                     label="已核查，继续阻断",
                     endpoint="/system/blocker-actions/acknowledge-phase1-shadow",

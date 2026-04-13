@@ -346,6 +346,7 @@ async def system_blocker_action(
         "halt-system": "blocker_keep_halted",
         "refresh-exchange-state": "blocker_refresh_exchange_state",
         "acknowledge-phase1-shadow": "blocker_phase1_shadow_review",
+        "clear-shadow-cache": "blocker_clear_shadow_cache",
         "ai-review-restore": "blocker_ai_review_restore",
         "ai-review-degrade-to-baseline": "blocker_ai_review_degrade_to_baseline",
     }

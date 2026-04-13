@@ -64,6 +64,14 @@ class BlockerActionService:
                 auth_source=auth_source,
             )
             message = "系统会继续保持暂停状态。"
+        elif action_id == "clear-shadow-cache":
+            await self.owner.clear_obligation_cache(
+                reason=reason,
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+            )
+            message = "已清除 Redis obligation 缓存并重建本地缓存，幻影 backlog 应已消除。"
         elif action_id == "acknowledge-phase1-shadow":
             self.owner.record_phase1_shadow_review(
                 reason=reason,
