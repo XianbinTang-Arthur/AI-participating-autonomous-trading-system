@@ -178,14 +178,18 @@ AIParticipatingAutonomousTradingSystem/
 │   └── templates/                 # .env 模板文件
 │
 ├── deploy/wsl2-dev/               # Docker 部署（WSL2 本地）
-│   ├── docker-compose.yml         # 基础设施（Postgres/Redis/NATS/Loki/Jaeger/Grafana）
+│   ├── docker-compose.yml         # 基础设施（9 服务: Postgres/Redis/Redis-Exporter/
+│   │                              #   NATS/Loki/Promtail/Jaeger/Prometheus/Grafana）
 │   ├── docker-compose.aats.yml    # 应用层（4 进程 + rdp-daemon）
 │   ├── docker-compose.aats.*.yml  # Profile 叠加层
-│   └── Dockerfile                 # 多阶段构建镜像
+│   ├── Dockerfile                 # 多阶段构建镜像
+│   ├── loki/loki-config.yml       # Loki 存储/保留/限流配置
+│   ├── promtail/promtail-config.yml # Docker SD + JSON pipeline
+│   ├── prometheus/prometheus.yml  # Scrape targets (4 AATS 进程 + Redis-Exporter)
+│   └── grafana/provisioning/      # 数据源/仪表盘/告警规则自动注入
 │
-├── migrations/                    # 数据库迁移
-│   ├── 0001~0007_*.sql            # 主系统迁移
-│   └── research/                  # RDP 迁移
+├── migrations/                    # 数据库迁移（已迁移到 ORM create_all()）
+│   └── research/                  # RDP 迁移（已迁移到 rdp_models.py）
 │
 ├── .env.spot                      # 现货模拟盘环境变量
 ├── .env.spot.live                 # 现货实盘环境变量

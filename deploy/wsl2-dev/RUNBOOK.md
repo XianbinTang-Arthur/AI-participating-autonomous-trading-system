@@ -66,7 +66,7 @@ docker compose --env-file .env.wsl2 ps
 ```
 每个服务的 STATUS 应该是 `Up X seconds (healthy)` 或 `Up X seconds`。
 
-逐项 ping：
+逐项 ping（9 个基础设施服务）：
 ```bash
 # Postgres
 docker compose --env-file .env.wsl2 exec postgres pg_isready -U aats
@@ -76,12 +76,16 @@ docker compose --env-file .env.wsl2 exec redis redis-cli ping
 curl -s http://127.0.0.1:8222/healthz
 # Loki
 curl -s http://127.0.0.1:3100/ready
+# Prometheus
+curl -s http://127.0.0.1:9090/-/healthy
+# Redis-Exporter
+curl -s http://127.0.0.1:9121/metrics | head -1
 # Jaeger UI
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:16686/
 # Grafana
 curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/api/health
 ```
-全部返回 200 / PONG / OK 即可。
+全部返回 200 / PONG / OK 即可。Promtail 无外部端口，通过 `docker compose logs promtail` 确认无报错。
 
 ### 1.4 初始化 Postgres schema 和 migrations
 ```bash
@@ -238,13 +242,23 @@ docker compose --env-file .env.wsl2 exec nats nats stream add AATS_EVENTS \
   --subjects "aats.*" --storage file --retention limits --discard old --max-age 7d
 ```
 
-### 5.5 Grafana 看不到日志/trace
-- 检查 datasource：Configuration → Data sources，应当有 Loki / Jaeger / Postgres
+### 5.5 Grafana 看不到日志/trace/指标
+- 检查 datasource：Configuration → Data sources，应当有 **4 个**：Loki / Jaeger / Prometheus / Postgres
 - Loki 数据源 URL 应该是 `http://loki:3100`（容器内 DNS）
 - Jaeger 数据源 URL 应该是 `http://jaeger:16686`
+- Prometheus 数据源 URL 应该是 `http://prometheus:9090`
 - 都应该能 "Save & test" 通过
+- 检查仪表盘：Dashboards 里应当有 **AATS Operations** 和 **AATS Logs Overview**
+  - AATS Operations 需要 Prometheus + Loki + Postgres 三个数据源
+  - Logs Overview 需要 Loki 数据源
+- 检查告警：Alerting → Alert Rules 应当有 5 条规则（SEV1×2 + SEV2×2 + SEV3×1）
 
-### 5.6 备份脚本失败
+### 5.6 Prometheus scrape targets 全部 DOWN
+AATS 应用容器尚未启动时，Prometheus targets 会显示 DOWN，这是正常的。
+应用容器启动后，访问 `http://127.0.0.1:9090/targets` 确认各 target 状态变为 UP。
+如果持续 DOWN，检查 AATS 容器是否暴露了 `:9464` 端口（OTel Prometheus exporter）。
+
+### 5.7 备份脚本失败
 ```bash
 cd deploy/wsl2-dev
 bash -x ./scripts/backup_postgres.sh 2>&1 | tee /tmp/backup-debug.log

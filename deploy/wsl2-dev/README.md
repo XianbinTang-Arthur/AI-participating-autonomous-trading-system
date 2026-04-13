@@ -21,6 +21,11 @@
               │   │  :3100   │  │ :16686 │  │      :3000       │   │
               │   └──────────┘  └────────┘  └──────────────────┘   │
               │                                                    │
+              │   ┌──────────┐  ┌────────────────┐  ┌──────────┐  │
+              │   │Prometheus│  │ Redis-Exporter │  │ Promtail │  │
+              │   │  :9090   │  │     :9121      │  │  :9080   │  │
+              │   └──────────┘  └────────────────┘  └──────────┘  │
+              │                                                    │
               └──────────────────────┬─────────────────────────────┘
                                      │ 127.0.0.1 端口转发
                           ┌──────────┴──────────┐
@@ -32,14 +37,17 @@
 
 | 组件     | 版本 | 端口          | 内存限制 | 用途                                 | 持久化                  |
 |----------|------|---------------|---------|--------------------------------------|-------------------------|
-| Postgres | 16   | 5432          | 1024M   | 主存储（账务、订单、策略状态）       | docker volume `postgres_data` |
-| Redis    | 7    | 6379          | 384M    | 跨进程热状态缓存（仓位、订单视图）   | AOF, volume `redis_data` |
-| NATS     | 2.10 | 4222 / 8222   | 512M    | JetStream 跨进程事件总线             | volume `nats_data`      |
-| Loki     | 3.0  | 3100          | 512M    | 日志聚合                             | volume `loki_data`      |
-| Jaeger   | 1.57 | 16686 / 4317 / 4318 | 1G | 分布式 trace（OTLP gRPC + HTTP）    | bind mount `./jaeger/badger` |
-| Grafana  | 10.4 | 3000          | 384M    | Loki + Jaeger + Postgres 仪表盘      | volume `grafana_data`   |
+| Postgres | 16   | 5432          | 2560M   | 主存储（账务、订单、策略状态）       | docker volume `postgres_data` |
+| Redis    | 7    | 6379          | 512M    | 跨进程热状态缓存（仓位、订单视图）   | AOF, volume `redis_data` |
+| Redis-Exporter | 1.58.0 | 9121 | 64M    | Redis 指标采集 → Prometheus          | 无                       |
+| NATS     | 2.10 | 4222 / 8222   | 1024M   | JetStream 跨进程事件总线             | volume `nats_data`      |
+| Loki     | 3.0  | 3100          | 512M    | 日志聚合（7 天保留）                 | volume `loki_data`      |
+| Promtail | 3.0  | 9080          | 256M    | Docker 容器日志采集 → Loki           | volume `promtail_positions` |
+| Jaeger   | 1.57 | 16686 / 4317 / 4318 | 1536M | 分布式 trace（OTLP gRPC + HTTP） | volume `jaeger_badger_data` |
+| Prometheus | 2.51 | 9090         | 256M    | AATS 进程指标采集                    | volume `prometheus_data` |
+| Grafana  | 10.4.4 | 3000        | 512M    | 4 数据源统一看板 + 5 条告警规则       | volume `grafana_data`   |
 
-基础设施合计约 **3.7 GB** 内存。
+基础设施合计约 **7.2 GB** 内存（9 个服务）。
 
 ---
 
@@ -69,11 +77,13 @@ docker compose --env-file .env.wsl2 up -d
 docker compose ps
 
 # 5. 验证关键端口
-curl http://localhost:8222/varz   # NATS
-curl http://localhost:3100/ready  # Loki
-curl http://localhost:14269/      # Jaeger admin
-curl http://localhost:3000/api/health  # Grafana
-docker exec aats-postgres pg_isready -U aats
+docker exec aats-postgres pg_isready -U aats  # Postgres
+docker exec aats-redis redis-cli ping         # Redis
+curl http://localhost:8222/healthz             # NATS
+curl http://localhost:3100/ready               # Loki
+curl http://localhost:9090/-/healthy           # Prometheus
+curl http://localhost:3000/api/health          # Grafana
+curl -s http://localhost:16686/ | head -1      # Jaeger UI
 ```
 
 预期所有服务的 `STATUS` 应为 `Up (healthy)`。
@@ -135,9 +145,17 @@ OTEL_SERVICE_NAME=aats
 - URL: <http://localhost:3000>
 - 默认账号：`.env.wsl2` 里的 `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD`
 - 数据源（已自动注入）：
-  - Loki — 默认数据源
-  - Jaeger — 与 Loki 双向跳转
-  - Postgres — 直接 SQL 查 AATS 表
+  - Loki — 默认数据源，结构化 JSON 日志查询
+  - Jaeger — 与 Loki 双向 trace-log 跳转
+  - Prometheus — AATS 进程指标 + Redis 延迟
+  - Postgres — 直接 SQL 查 AATS 业务表
+- 仪表盘（已自动注入）：
+  - **AATS Operations** — 进程心跳、决策频率、Fill 成功率、Redis 延迟、对账异常
+  - **AATS Logs Overview** — 按级别/进程/容器聚合日志量 + 全日志搜索
+- 告警规则（已自动注入）：
+  - SEV1: Kill Switch 触发 / Reconciliation 不一致
+  - SEV2: 进程崩溃 (Traceback) / 决策周期停滞
+  - SEV3: 错误率过高 (15 分钟内 > 5 条 ERROR)
 
 ---
 
@@ -188,6 +206,7 @@ cat backup_2026-04-07.dump | docker exec -i aats-postgres pg_restore -U aats -d 
 | Stage 4 | NATS | 引入 HybridEventBus，逐步把 in_memory 事件迁过去 |
 | Stage 5 | NATS | 全量切到 file storage，关键 topic 持久化 |
 | Stage 6 | Redis | 跨进程热状态缓存 + WebSocket session |
-| Stage 8 | Loki + Jaeger + Grafana | 4 进程统一可观测性 |
+| Stage 8 | Loki + Jaeger + Grafana | 4 进程统一可观测性（OTel trace + 结构化日志）|
+| Stage 9 | Prometheus + Promtail + Redis-Exporter | 指标采集 + 5 条告警规则 + 2 仪表盘 |
 
-每个 stage 的具体改动见 `aats/CLAUDE.md`（待生成）和 git 提交记录。
+每个 stage 的具体改动见 `ARCHITECTURE.md` 和 git 提交记录。

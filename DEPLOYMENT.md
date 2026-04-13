@@ -111,14 +111,17 @@ Windows 开发端                     WSL2 Docker 运行端
 
 | 服务 | 版本 | 角色 | 端口 | 内存限制 | 持久化 |
 |------|------|------|------|---------|--------|
-| **aats-postgres** | PG 16 | 关系数据库（5 个隔离库） | 127.0.0.1:5432 | 1024M | postgres_data volume |
-| **aats-redis** | Redis 7 | 热状态 KV 缓存 | 127.0.0.1:6379 | 384M | redis_data volume |
-| **aats-nats** | NATS 2.10 | JetStream 事件总线 | 127.0.0.1:4222 / 8222 | 512M | nats_data volume |
-| **aats-loki** | Loki 3.0 | 集中式日志聚合 | 127.0.0.1:3100 | 512M | loki_data volume |
-| **aats-jaeger** | 1.57 | 分布式链路追踪 | 127.0.0.1:16686 / 4317 / 4318 | 1G | ./jaeger/badger 绑定挂载 |
-| **aats-grafana** | 10.4.4 | 统一看板 | 127.0.0.1:3000 | 384M | grafana_data volume |
+| **aats-postgres** | PG 16 | 关系数据库（5 个隔离库） | 127.0.0.1:5432 | 2560M | postgres_data volume |
+| **aats-redis** | Redis 7 | 热状态 KV 缓存 | 127.0.0.1:6379 | 512M | redis_data volume |
+| **aats-redis-exporter** | 1.58.0 | Redis 指标采集 → Prometheus | 127.0.0.1:9121 | 64M | 无 |
+| **aats-nats** | NATS 2.10 | JetStream 事件总线 | 127.0.0.1:4222 / 8222 | 1024M | nats_data volume |
+| **aats-loki** | Loki 3.0 | 集中式日志聚合（7 天保留） | 127.0.0.1:3100 | 512M | loki_data volume |
+| **aats-promtail** | 3.0.0 | Docker 容器日志采集 → Loki | 内部 9080 | 256M | promtail_positions volume |
+| **aats-jaeger** | 1.57 | 分布式链路追踪 | 127.0.0.1:16686 / 4317 / 4318 | 1536M | jaeger_badger_data volume |
+| **aats-prometheus** | 2.51.0 | AATS 进程指标存储 | 127.0.0.1:9090 | 256M | prometheus_data volume |
+| **aats-grafana** | 10.4.4 | 4 数据源统一看板 + 5 条告警 | 127.0.0.1:3000 | 512M | grafana_data volume |
 
-基础设施合计约 **3.7 GB** 内存。所有服务加入 `aats` bridge 网络。
+基础设施合计约 **7.2 GB** 内存（9 个服务）。所有服务加入 `aats` bridge 网络。
 
 ### 应用层：`docker-compose.aats.yml` + Profile 叠加
 
