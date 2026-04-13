@@ -143,7 +143,7 @@ execution = self.owner.runtime.execution_adapter.readiness()  # L206
 ```bash
 cd ~/aats/deploy/wsl2-dev
 
-# 1) 基础设施先就绪：postgres / nats / redis / loki / jaeger / grafana
+# 1) 基础设施先就绪（9 服务）：postgres / redis / nats / loki / promtail / jaeger / prometheus / redis-exporter / grafana
 docker compose --env-file .env.wsl2 up -d
 
 # 2) 等基础设施 healthy（最长 60s）

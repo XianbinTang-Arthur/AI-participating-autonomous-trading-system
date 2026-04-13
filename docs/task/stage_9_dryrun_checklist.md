@@ -35,7 +35,7 @@
 
 ### 1.2 环境健康
 - [ ] WSL2 4 进程拓扑全部 `healthy`（gateway/market/decision/execution）
-- [ ] 基础设施全部 `healthy`（postgres/redis/nats/loki/jaeger/grafana）
+- [ ] 基础设施 9/9 `healthy`（postgres/redis/nats/loki/promtail/jaeger/prometheus/redis-exporter/grafana）
 - [ ] 最近 1 小时无 `telemetry_bootstrap_failed` / `event_persistence_failed`
       / `nats_handler_error` / `hot_state_store_*_failed` 日志
 - [ ] Jaeger 里最近 10 分钟有 ≥ 5 条 multi-service trace（即 `nats.publish →
