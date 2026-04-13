@@ -74,6 +74,12 @@ from aats.storage.hot_state_store import HotStateStore, make_key
 # 本 slice 用的 hot_state_store namespace。与 hot_state_store.py 现有 NS_MARKET /
 # NS_ACCOUNT / NS_SYSTEM 同一级。留在本文件而不外提，因为只有 obligation cache
 # 自己用。
+# Redis key TTL（秒）。避免已终结的 obligation（FILLED / CANCELED 等）永驻
+# Redis 造成内存泄漏。7 天与 NATS JetStream 流保留期对齐。bootstrap 时
+# 如果 per-coid key 已过期，get_many 返回空，不影响正确性（只是少了历史
+# 数据，系统从 PG 重建）。
+_REDIS_TTL_SECONDS: int = 7 * 24 * 3600  # 7 days
+
 _NS_OBLIGATION = "obligation"
 
 OBLIGATION_INDEX_KEY = make_key(_NS_OBLIGATION, "index")
@@ -533,13 +539,14 @@ class ObligationHotStateCache:
         return True
 
     async def _best_effort_redis_set(self, obligation: OrderObligation) -> None:
-        """best-effort 写 per-coid key。失败 log warning 不抛。"""
+        """best-effort 写 per-coid key（带 TTL）。失败 log warning 不抛。"""
         if self._hot_state_store is None:
             return
         try:
             await self._hot_state_store.set(
                 _obligation_key(obligation.client_order_id),
                 obligation.model_dump(mode="json"),
+                ttl_seconds=_REDIS_TTL_SECONDS,
             )
         except Exception as exc:
             log_event(
@@ -574,7 +581,9 @@ class ObligationHotStateCache:
             "writer_role": self._process_role,
         }
         try:
-            await self._hot_state_store.set(OBLIGATION_INDEX_KEY, index_payload)
+            await self._hot_state_store.set(
+                OBLIGATION_INDEX_KEY, index_payload, ttl_seconds=_REDIS_TTL_SECONDS,
+            )
         except Exception as exc:
             log_event(
                 self._logger,

@@ -11,13 +11,13 @@
 from __future__ import annotations
 
 import asyncio
-import time
 import unittest
 from typing import Any
 
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.services.governance_engine.guard_signal_cache import (
     GuardSignalHotStateCache,
+    _FAIL_CLOSED_SENTINEL,
 )
 from aats.storage.hot_state_store import InMemoryHotStateStore
 
@@ -32,14 +32,17 @@ class TestBootstrap(unittest.IsolatedAsyncioTestCase):
     """bootstrap() 生命周期测试。"""
 
     async def test_bootstrap_without_store(self) -> None:
-        """无 hot_state_store 也不报错（退化为纯内存缓存）。"""
+        """无 hot_state_store 也不报错（退化为纯内存缓存）；快照返回 fail-closed。"""
         cache = GuardSignalHotStateCache(
             signal_name="derivatives_live",
             logger=_make_logger(),
         )
         await cache.bootstrap()
         self.assertTrue(cache.bootstrapped)
-        self.assertEqual(cache.snapshot(), {})
+        snapshot = cache.snapshot()
+        self.assertTrue(snapshot["only_reduce_required"])
+        self.assertFalse(snapshot["safe_to_trade"])
+        self.assertTrue(snapshot.get("_stale"))
 
     async def test_bootstrap_restores_from_redis(self) -> None:
         """bootstrap 从 Redis 恢复之前发布的快照。"""
@@ -62,7 +65,7 @@ class TestBootstrap(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["breaches"], 0)
 
     async def test_bootstrap_with_empty_redis(self) -> None:
-        """Redis 无数据时 bootstrap 成功，snapshot 返回空 dict。"""
+        """Redis 无数据时 bootstrap 成功，snapshot 返回 fail-closed sentinel。"""
         store = InMemoryHotStateStore()
         cache = GuardSignalHotStateCache(
             signal_name="recovery",
@@ -70,7 +73,9 @@ class TestBootstrap(unittest.IsolatedAsyncioTestCase):
         )
         await cache.bootstrap(hot_state_store=store, process_role="decision")
         self.assertTrue(cache.bootstrapped)
-        self.assertEqual(cache.snapshot(), {})
+        snapshot = cache.snapshot()
+        self.assertTrue(snapshot["only_reduce_required"])
+        self.assertFalse(snapshot["safe_to_trade"])
 
 
 class TestPublish(unittest.IsolatedAsyncioTestCase):
@@ -158,7 +163,7 @@ class TestSnapshot(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("_writer_role", snapshot)
 
     async def test_snapshot_fail_closed_on_stale(self) -> None:
-        """快照过期时返回空 dict（fail-closed）。"""
+        """快照过期时返回 fail-closed sentinel（only_reduce=True, safe_to_trade=False）。"""
         cache = GuardSignalHotStateCache(
             signal_name="trial",
             logger=_make_logger(),
@@ -170,18 +175,25 @@ class TestSnapshot(unittest.IsolatedAsyncioTestCase):
         # 立刻读 → 有数据
         self.assertEqual(cache.snapshot()["status"], "clean")
 
-        # 等超过 stale threshold
+        # 等超过 stale threshold → fail-closed
         await asyncio.sleep(0.1)
-        self.assertEqual(cache.snapshot(), {})
+        stale = cache.snapshot()
+        self.assertTrue(stale["only_reduce_required"])
+        self.assertFalse(stale["safe_to_trade"])
+        self.assertEqual(stale["status"], "stale")
+        self.assertTrue(stale.get("_stale"))
 
     async def test_snapshot_empty_before_any_publish(self) -> None:
-        """未 publish 过时 snapshot 返回空 dict。"""
+        """未 publish 过时 snapshot 返回 fail-closed sentinel。"""
         cache = GuardSignalHotStateCache(
             signal_name="recovery",
             logger=_make_logger(),
         )
         await cache.bootstrap()
-        self.assertEqual(cache.snapshot(), {})
+        snapshot = cache.snapshot()
+        self.assertTrue(snapshot["only_reduce_required"])
+        self.assertFalse(snapshot["safe_to_trade"])
+        self.assertTrue(snapshot.get("_stale"))
 
     async def test_callable_interface(self) -> None:
         """__call__ 与 snapshot 返回相同结果。"""
@@ -255,8 +267,10 @@ class TestNATSSubscription(unittest.IsolatedAsyncioTestCase):
 
         await trial_pub.publish({"status": "breached"})
 
-        # derivatives_live subscriber 不应收到 trial 的更新
-        self.assertEqual(live_sub.snapshot(), {})
+        # derivatives_live subscriber 不应收到 trial 的更新 → 仍是 fail-closed
+        stale = live_sub.snapshot()
+        self.assertTrue(stale["only_reduce_required"])
+        self.assertTrue(stale.get("_stale"))
 
     async def test_nats_idempotent_stale_message_dropped(self) -> None:
         """旧时间戳的 NATS 消息被丢弃（幂等）。"""
@@ -344,6 +358,124 @@ class TestE2EPublishSubscribe(unittest.IsolatedAsyncioTestCase):
 
         recovery = dec_caches["recovery"]()  # callable 接口
         self.assertTrue(recovery["safe_to_trade"])
+
+
+class TestFailClosedSentinel(unittest.IsolatedAsyncioTestCase):
+    """Fail-closed sentinel 回归测试。
+
+    验证 guard 快照缺失/过期时 RiskEngine 读取到的字段值都是保守的，
+    不会意外放行开仓。这是 P1 安全缺陷的回归防护。
+    """
+
+    def test_sentinel_has_conservative_fields(self) -> None:
+        """_FAIL_CLOSED_SENTINEL 的字段值必须让 RiskEngine 拒绝开仓。"""
+        s = _FAIL_CLOSED_SENTINEL
+        # ── 路径 B：_adaptive_control_states 软约束（multiplier 压缩）──
+        # bool(runtime_guard.get("only_reduce_required")) → True
+        self.assertTrue(bool(s.get("only_reduce_required")))
+        # bool(runtime_guard.get("auto_halt_required")) → False = 不暴力停车
+        self.assertFalse(bool(s.get("auto_halt_required")))
+
+        # ── 路径 A：_runtime_guard_only_reduce_reasons 硬拒绝 ──
+        # payload.get("only_reduce_reasons") 必须非空，否则
+        # _evaluate_derivatives_pretrade 的 if provider_only_reduce_reasons: 不成立
+        # → 开仓不会被 reject → fail-open。
+        reasons = [
+            str(item)
+            for item in (s.get("only_reduce_reasons") or [])
+            if str(item).strip()
+        ]
+        self.assertTrue(
+            len(reasons) > 0,
+            "CRITICAL: sentinel must have only_reduce_reasons to trigger "
+            "RiskEngine hard rejection path (_evaluate_derivatives_pretrade "
+            "line 1526). Without reasons, only soft multiplier compression "
+            "applies and opening intents can still be approved.",
+        )
+
+        # ── recovery provider 路径 ──
+        # recovery_status.get("safe_to_trade", True) → False
+        self.assertFalse(s.get("safe_to_trade", True))
+        # recovery_status.get("review_required", False) → True
+        self.assertTrue(s.get("review_required", False))
+
+        # trial: status != "breached"
+        self.assertNotEqual(str(s.get("status", "")).lower(), "breached")
+        # 标识这是 stale sentinel
+        self.assertTrue(s.get("_stale"))
+
+    async def test_stale_cache_blocks_opening_via_only_reduce(self) -> None:
+        """过期缓存 → sentinel 的 only_reduce_reasons 非空 → RiskEngine 硬拒绝开仓。"""
+        cache = GuardSignalHotStateCache(
+            signal_name="derivatives_live",
+            logger=_make_logger(),
+            stale_threshold_seconds=0.05,
+        )
+        await cache.bootstrap()
+        await cache.publish({"status": "active", "only_reduce_required": False})
+
+        # 正常时 → 允许开仓
+        fresh = cache.snapshot()
+        self.assertFalse(fresh.get("only_reduce_required"))
+
+        # 过期后 → 必须只减仓 + 有 reasons 触发硬拒绝
+        await asyncio.sleep(0.1)
+        stale = cache.snapshot()
+        self.assertTrue(stale["only_reduce_required"],
+                        "FAIL-OPEN BUG: stale guard must set only_reduce_required=True")
+        self.assertFalse(stale["safe_to_trade"],
+                         "FAIL-OPEN BUG: stale guard must set safe_to_trade=False")
+        stale_reasons = stale.get("only_reduce_reasons", [])
+        self.assertTrue(len(stale_reasons) > 0,
+                        "FAIL-OPEN BUG: stale guard must have only_reduce_reasons "
+                        "for RiskEngine hard rejection path")
+
+    async def test_missing_cache_blocks_opening(self) -> None:
+        """从未收到过数据 → sentinel → 开仓被硬拒绝。"""
+        cache = GuardSignalHotStateCache(
+            signal_name="trial",
+            logger=_make_logger(),
+        )
+        await cache.bootstrap()
+        # 从未 publish 任何数据
+        snapshot = cache.snapshot()
+        self.assertTrue(snapshot["only_reduce_required"],
+                        "FAIL-OPEN BUG: missing guard must set only_reduce_required=True")
+        reasons = snapshot.get("only_reduce_reasons", [])
+        self.assertTrue(len(reasons) > 0,
+                        "FAIL-OPEN BUG: missing guard must have only_reduce_reasons")
+
+
+    def test_sentinel_reasons_survive_risk_engine_filter(self) -> None:
+        """模拟 RiskEngine._runtime_guard_only_reduce_reasons 的完整过滤逻辑。
+
+        RiskEngine 第 1784-1786 行：
+            if not isinstance(payload, dict) or not bool(payload.get("only_reduce_required")):
+                return []
+            return [str(item) for item in (payload.get("only_reduce_reasons") or []) if str(item).strip()]
+
+        sentinel 必须在经过这套过滤后仍返回非空列表。
+        """
+        payload = dict(_FAIL_CLOSED_SENTINEL)
+
+        # 模拟 RiskEngine._runtime_guard_only_reduce_reasons
+        if not isinstance(payload, dict) or not bool(payload.get("only_reduce_required")):
+            reasons: list[str] = []
+        else:
+            reasons = [
+                str(item)
+                for item in (payload.get("only_reduce_reasons") or [])
+                if str(item).strip()
+            ]
+
+        self.assertTrue(
+            len(reasons) > 0,
+            f"Sentinel reasons must survive RiskEngine filter, got: {reasons}. "
+            f"Without non-empty reasons, _evaluate_derivatives_pretrade line 1526 "
+            f"'if provider_only_reduce_reasons:' evaluates to False → opening "
+            f"intents are NOT rejected → fail-open.",
+        )
+        self.assertIn("guard_signal_missing_or_stale", reasons)
 
 
 class TestDiagnostic(unittest.IsolatedAsyncioTestCase):

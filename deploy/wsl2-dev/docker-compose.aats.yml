@@ -24,7 +24,7 @@
 #   - depends_on 走 healthcheck，不靠 sleep；基础设施未就绪不会启动 AATS 进程
 #   - 4 个服务都连到 aats 网络（来自 docker-compose.yml 的 networks 段）
 #   - 端口、凭证等 profile 特定值全部来自 .env.<profile>，不在 compose 中重复
-#   - 资源限制保守，单机 16GB 内存够 4 进程 + 6 个基础设施
+#   - 资源限制根据 32GB 开发机实测 docker stats 调优（2025-04 优化）
 # =============================================================================
 
 name: aats-dev
@@ -52,7 +52,7 @@ x-aats-common-env: &aats-common-env
   # 与 AATS_DATABASE_URL (按 profile 区分) 不同，这条连接只在启动时做一次只读查询。
   AATS_ACTIVE_PARAMETER_DB_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
   AATS_HOT_STATE_BACKEND: redis
-  AATS_HOT_STATE_REDIS_URL: redis://redis:6379/0
+  AATS_HOT_STATE_REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
   # Stage 8：OpenTelemetry + Jaeger。4 进程共用同一个 OTLP gRPC endpoint，
   # service.name 由 configure_telemetry 根据 AATS_PROCESS_ROLE 自动派生成
   # aats-gateway / aats-market / aats-decision / aats-execution，不需要
@@ -74,7 +74,7 @@ x-aats-common-resources: &aats-common-resources
   deploy:
     resources:
       limits:
-        memory: 1024M
+        memory: 1536M
 
 # 4 个服务共享的镜像构建定义（image: 让其他服务复用同一份本地镜像）
 x-aats-build: &aats-build
@@ -90,7 +90,7 @@ services:
   # 是 4 进程拓扑里唯一对外暴露端口的进程；其余 3 个仅内网。
   # ---------------------------------------------------------------------------
   aats-gateway:
-    <<: [*aats-build, *aats-common-resources]
+    <<: *aats-build
     container_name: aats-gateway
     restart: unless-stopped
     environment:
@@ -119,6 +119,14 @@ services:
       - "127.0.0.1:${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"
     networks:
       - aats
+    # gateway 是 4 进程里最重的 API 层：跑所有 dashboard 查询 + ThreadPoolExecutor
+    # + Pydantic model_validate/model_dump 大 payload。实测 1024M 100% 触顶致 GC
+    # thrash → 页面 366 秒。2048M 给足 headroom，配合 by_topic_scoped SQL LIMIT
+    # 修复后实际用量应在 400-600M 区间。
+    deploy:
+      resources:
+        limits:
+          memory: 3072M
     # Stage 7 修复：原版用 /system/health，但该 endpoint 在 gateway-only role
     # 下会调到 runtime.market_gateway / execution_adapter (都是 None)，NPE 500。
     # 改用 /healthz —— lightweight liveness，无 auth 无 service 依赖。
@@ -175,8 +183,8 @@ services:
 
   # ---------------------------------------------------------------------------
   # execution — 订阅 order intents，与 OKX 交互下单，维护 portfolio + reconciliation
-  # 资源拨高一档：execution 进程要跑 outbox flush + reconciliation refresh +
-  # OKX private WS，是 4 个里最重的。
+  # 实测稳态 ~200M；outbox flush / reconciliation refresh / OKX private WS
+  # 峰值不超过 400M，1024M（与 common 齐平）留足余量。
   # ---------------------------------------------------------------------------
   aats-execution:
     <<: *aats-build

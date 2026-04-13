@@ -13,6 +13,18 @@ from aats.storage.scope_metadata import envelope_scope_metadata
 from aats.storage.sqlalchemy_models import EventEnvelopeArchiveModel, EventEnvelopeModel, ReplayProjectionOffsetModel
 
 
+def _row_sort_seq(row: EventEnvelopeModel | EventEnvelopeArchiveModel) -> int:
+    """Return a comparable sequence number for merged hot/archive row sorting.
+
+    EventEnvelopeModel 有 ``sequence_id``，EventEnvelopeArchiveModel 只有
+    ``source_sequence_id``（原表 PK 映射）。使用 ``hasattr`` 而非嵌套
+    ``getattr`` 避免 Python 即时求值默认参数导致 AttributeError。
+    """
+    if hasattr(row, "source_sequence_id"):
+        return row.source_sequence_id
+    return row.sequence_id
+
+
 class PostgresEventStore:
     def __init__(self, session_factory: sessionmaker[Session]) -> None:
         self.session_factory = session_factory
@@ -125,7 +137,7 @@ class PostgresEventStore:
                 .limit(limit)
             ).all()
         rows = [*archive_rows, *hot_rows]
-        rows.sort(key=lambda row: getattr(row, "source_sequence_id", getattr(row, "sequence_id")))
+        rows.sort(key=_row_sort_seq)
         return [self._to_schema(row) for row in rows[-limit:]]
 
     def recent_by_topic_and_key(self, topic: str, *, key: str, limit: int) -> list[EventEnvelope]:
@@ -147,7 +159,7 @@ class PostgresEventStore:
                 .limit(limit)
             ).all()
         rows = [*archive_rows, *hot_rows]
-        rows.sort(key=lambda row: getattr(row, "source_sequence_id", getattr(row, "sequence_id")))
+        rows.sort(key=_row_sort_seq)
         return [self._to_schema(row) for row in rows[-limit:]]
 
     def by_topic_scoped(
@@ -157,23 +169,55 @@ class PostgresEventStore:
         scope: RuntimeStateScope,
         limit: int | None = None,
     ) -> list[EventEnvelope]:
-        query = (
-            select(EventEnvelopeModel)
-            .where(EventEnvelopeModel.topic == topic)
-            .order_by(EventEnvelopeModel.sequence_id)
-        )
-        query = self._scope_query(query, scope, EventEnvelopeModel)
-        with self.session_factory() as session:
-            hot_rows = session.scalars(query).all()
-            archive_query = (
-                select(EventEnvelopeArchiveModel)
-                .where(EventEnvelopeArchiveModel.topic == topic)
-                .order_by(EventEnvelopeArchiveModel.source_sequence_id)
+        if limit is not None:
+            # SQL-level LIMIT: 只取最新 N 条，避免全表扫描撑爆内存。
+            # 修复前：SELECT * ORDER BY ASC (无 LIMIT) → 全量读入 Python →
+            # rows[-limit:] 切片。coordinator_snapshots 231 行 × 33KB = 7.7MB
+            # 全部拉进 gateway 内存，是 1024M 触顶的直接原因。
+            hot_query = select(EventEnvelopeModel).where(
+                EventEnvelopeModel.topic == topic,
             )
-            archive_query = self._scope_query(archive_query, scope, EventEnvelopeArchiveModel)
-            archive_rows = session.scalars(archive_query).all()
-        rows = [self._to_schema(row) for row in [*archive_rows, *hot_rows]]
-        return rows if limit is None else rows[-limit:]
+            hot_query = self._scope_query(hot_query, scope, EventEnvelopeModel)
+            hot_query = hot_query.order_by(
+                desc(EventEnvelopeModel.sequence_id),
+            ).limit(limit)
+
+            with self.session_factory() as session:
+                hot_rows = session.scalars(hot_query).all()
+                archive_query = select(EventEnvelopeArchiveModel).where(
+                    EventEnvelopeArchiveModel.topic == topic,
+                )
+                archive_query = self._scope_query(
+                    archive_query, scope, EventEnvelopeArchiveModel,
+                )
+                archive_query = archive_query.order_by(
+                    desc(EventEnvelopeArchiveModel.source_sequence_id),
+                ).limit(limit)
+                archive_rows = session.scalars(archive_query).all()
+
+            # 合并两表结果（各最多 limit 条），按时间正序排列，取最新 limit 条
+            rows = [*archive_rows, *hot_rows]
+            rows.sort(key=_row_sort_seq)
+            return [self._to_schema(r) for r in rows[-limit:]]
+        else:
+            query = (
+                select(EventEnvelopeModel)
+                .where(EventEnvelopeModel.topic == topic)
+                .order_by(EventEnvelopeModel.sequence_id)
+            )
+            query = self._scope_query(query, scope, EventEnvelopeModel)
+            with self.session_factory() as session:
+                hot_rows = session.scalars(query).all()
+                archive_query = (
+                    select(EventEnvelopeArchiveModel)
+                    .where(EventEnvelopeArchiveModel.topic == topic)
+                    .order_by(EventEnvelopeArchiveModel.source_sequence_id)
+                )
+                archive_query = self._scope_query(
+                    archive_query, scope, EventEnvelopeArchiveModel,
+                )
+                archive_rows = session.scalars(archive_query).all()
+            return [self._to_schema(row) for row in [*archive_rows, *hot_rows]]
 
     def latest_by_topic_scoped(
         self,

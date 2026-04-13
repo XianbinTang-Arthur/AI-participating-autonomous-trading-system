@@ -34,6 +34,10 @@ from aats.services.runtime_scope import (
 )
 from aats.storage.hot_state_store import HotStateStore, make_key
 
+# Redis key TTL（秒）。避免陈旧 fill 永驻 Redis 造成内存泄漏。
+# 7 天与 NATS JetStream 流保留期对齐。
+_REDIS_TTL_SECONDS: int = 7 * 24 * 3600  # 7 days
+
 _NS_FILL = "fill_event"
 
 FILL_INDEX_KEY = make_key(_NS_FILL, "index")
@@ -239,6 +243,7 @@ class FillEventHotCache:
             await self._hot_state_store.set(
                 _fill_key(fill.fill_id),
                 fill.model_dump(mode="json"),
+                ttl_seconds=_REDIS_TTL_SECONDS,
             )
         except Exception as exc:
             log_event(self._logger, "fill_event_cache_redis_set_failed",
@@ -258,7 +263,9 @@ class FillEventHotCache:
             "writer_role": self._process_role,
         }
         try:
-            await self._hot_state_store.set(FILL_INDEX_KEY, index_payload)
+            await self._hot_state_store.set(
+                FILL_INDEX_KEY, index_payload, ttl_seconds=_REDIS_TTL_SECONDS,
+            )
         except Exception as exc:
             log_event(self._logger, "fill_event_cache_redis_index_failed",
                       level="warning", process_role=self._process_role,

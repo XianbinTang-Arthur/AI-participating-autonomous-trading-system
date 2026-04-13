@@ -59,9 +59,10 @@ Thumbs.db
 .env.*
 !deploy/wsl2-dev/.env.wsl2.template
 
-# === Docker compose 持久化数据 (jaeger badger 是容器进程写的，host 权限混乱) ===
-deploy/wsl2-dev/jaeger/badger/data
-deploy/wsl2-dev/jaeger/badger/key
+# === Docker compose 持久化数据 ===
+# Jaeger badger 已迁移到 named volume（不再 bind mount 到项目树内），
+# 但保留排除规则以防旧目录残留。
+deploy/wsl2-dev/jaeger/badger
 
 # === Tests context (build 不需要测试代码本身) ===
 tests/

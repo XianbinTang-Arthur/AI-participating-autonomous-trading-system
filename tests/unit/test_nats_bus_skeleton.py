@@ -26,7 +26,11 @@ from aats.bus.nats_bus import (
     DEFAULT_MARKET_STREAM_TOPICS,
     DEFAULT_OBSERVER_TOPICS,
     DEFAULT_STREAM_SPECS,
+    SNAPSHOT_DELIVERY_TOPICS,
+    TRANSIENT_DELIVERY_TOPICS,
     ConsumerConfigSpec,
+    DeliverPolicyStr,
+    DeliverySemantics,
     HybridBusRouting,
     HybridEventBus,
     NatsBusConfig,
@@ -36,6 +40,7 @@ from aats.bus.nats_bus import (
     _compute_stream_config_drift,
     build_consumer_config_spec,
     build_nats_streams_from_env,
+    delivery_semantics_for,
 )
 from aats.events import topics as _topics
 from aats.schemas.common import EventEnvelope
@@ -1273,3 +1278,129 @@ def test_compute_stream_config_drift_handles_nanosecond_max_age() -> None:
     assert "max_age_seconds" not in drift, (
         f"drift 函数没有把纳秒归一化到秒，误报 drift: {drift}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Slow Consumer 防护：delivery semantics + flow control
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_delivery_semantics_for_snapshot_topics() -> None:
+    """所有 SNAPSHOT_DELIVERY_TOPICS 必须返回 "snapshot"。"""
+    for topic in SNAPSHOT_DELIVERY_TOPICS:
+        assert delivery_semantics_for(topic) == "snapshot", (
+            f"topic {topic!r} 应为 snapshot 语义"
+        )
+
+
+def test_delivery_semantics_for_transient_topics() -> None:
+    """所有 TRANSIENT_DELIVERY_TOPICS 必须返回 "transient"。"""
+    for topic in TRANSIENT_DELIVERY_TOPICS:
+        assert delivery_semantics_for(topic) == "transient", (
+            f"topic {topic!r} 应为 transient 语义"
+        )
+
+
+def test_delivery_semantics_for_event_topics_default() -> None:
+    """未被归类为 snapshot/transient 的 topic 一律返回 "event"（安全默认）。"""
+    event_topics = [
+        _topics.ORDER_UPDATES,
+        _topics.FILL_EVENTS,
+        _topics.OBLIGATION_UPDATES,
+        _topics.DECISION_CONTEXTS,
+        _topics.RISK_DECISIONS,
+    ]
+    for topic in event_topics:
+        assert delivery_semantics_for(topic) == "event", (
+            f"topic {topic!r} 应为 event 语义（默认）"
+        )
+
+
+def test_consumer_config_spec_snapshot_delivers_last() -> None:
+    """Snapshot topic 必须生成 deliver_policy="last" 的 ConsumerConfigSpec。"""
+    config = NatsBusConfig()
+    spec = build_consumer_config_spec(
+        config=config,
+        durable="aats-gateway-market_snapshots",
+        topic=_topics.MARKET_SNAPSHOTS,
+    )
+    assert spec.deliver_policy == "last"
+
+
+def test_consumer_config_spec_transient_delivers_new() -> None:
+    """Transient topic 必须生成 deliver_policy="new" 的 ConsumerConfigSpec。"""
+    config = NatsBusConfig()
+    spec = build_consumer_config_spec(
+        config=config,
+        durable="aats-gateway-operator_command_responses",
+        topic=_topics.OPERATOR_COMMAND_RESPONSES,
+    )
+    assert spec.deliver_policy == "new"
+
+
+def test_consumer_config_spec_event_delivers_all() -> None:
+    """Event topic 必须生成 deliver_policy="all" 的 ConsumerConfigSpec（保证不丢消息）。"""
+    config = NatsBusConfig()
+    spec = build_consumer_config_spec(
+        config=config,
+        durable="aats-execution-order_updates",
+        topic=_topics.ORDER_UPDATES,
+    )
+    assert spec.deliver_policy == "all"
+
+
+def test_consumer_config_spec_flow_control_defaults() -> None:
+    """默认 NatsBusConfig 必须启用 flow_control=True + idle_heartbeat=5.0。
+
+    这两个默认值是 Slow Consumer 防护的核心——新部署不需要任何额外配置就
+    自动获得 NATS 原生反压能力。
+    """
+    config = NatsBusConfig()
+    assert config.flow_control is True
+    assert config.idle_heartbeat_seconds == 5.0
+
+    # 确认 spec 传播了这些值
+    spec = build_consumer_config_spec(
+        config=config,
+        durable="aats-decision-decisions",
+        topic=_topics.DECISION_CONTEXTS,
+    )
+    assert spec.flow_control is True
+    assert spec.idle_heartbeat_seconds == 5.0
+
+
+def test_delivery_classified_topics_are_subset_of_critical() -> None:
+    """snapshot/transient 分类的 topic 必须在 critical 路由中。
+
+    只有 critical topic 才会经过 NatsEventBus.subscribe()，observer topic
+    走内存 bus 不经过 JetStream。如果某个 topic 被分类为 snapshot/transient
+    却不在 critical 路由中，deliver_policy 设置就不会生效——纯粹浪费配置。
+    """
+    classified = SNAPSHOT_DELIVERY_TOPICS | TRANSIENT_DELIVERY_TOPICS
+    non_critical = classified - DEFAULT_CRITICAL_TOPICS
+    assert not non_critical, (
+        f"以下 topic 被分类为 snapshot/transient 但不在 critical 路由中"
+        f"（deliver_policy 不会生效）: {sorted(non_critical)}"
+    )
+
+
+def test_account_baselines_not_in_snapshot_delivery() -> None:
+    """ACCOUNT_BASELINES 不应归为 snapshot（低频但每条有状态意义）。
+
+    回归防护：operator 可连续 rebaseline，DeliverLast 会丢失中间状态。
+    """
+    assert _topics.ACCOUNT_BASELINES not in SNAPSHOT_DELIVERY_TOPICS
+    assert delivery_semantics_for(_topics.ACCOUNT_BASELINES) == "event"
+
+
+def test_delivery_semantics_return_type_is_literal() -> None:
+    """delivery_semantics_for 返回值和 ConsumerConfigSpec.deliver_policy
+    必须是 Literal 类型，防止拼写错误在运行时才暴露。
+    """
+    from typing import get_type_hints
+
+    hints = get_type_hints(delivery_semantics_for)
+    assert hints["return"] is DeliverySemantics
+
+    hints_spec = get_type_hints(ConsumerConfigSpec)
+    assert hints_spec["deliver_policy"] is DeliverPolicyStr

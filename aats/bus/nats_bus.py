@@ -29,7 +29,7 @@ import os
 import warnings
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.telemetry import (
@@ -140,6 +140,56 @@ DEFAULT_OBSERVER_TOPICS: frozenset[str] = frozenset(
         _topics.GUARD_SIGNAL_UPDATES,                # guard signal 跨进程缓存；丢一条 decision 侧 stale 降级
     }
 )
+
+# ── Topic 投递语义分类（Slow Consumer 防护）─────────────────────────
+#
+# 分类决定 JetStream consumer 的 DeliverPolicy：
+# - snapshot: 只需最新状态，历史在重启后无意义 → DeliverPolicy.LAST
+# - transient: 请求-响应 / correlation-id 匹配，历史无用 → DeliverPolicy.NEW
+# - event: 必须逐条处理，保证正确性 → DeliverPolicy.ALL（默认不变）
+#
+# 所有 consumer 同时启用 flow_control + idle_heartbeat，确保 NATS server
+# 按 client ack 速率推送，从根本上避免 write_deadline 超时。
+#
+# 设计文档：plans/goofy-leaping-fox.md §第一步
+
+SNAPSHOT_DELIVERY_TOPICS: frozenset[str] = frozenset(
+    {
+        _topics.MARKET_SNAPSHOTS,              # 高频行情快照，几秒后到达下一条
+        _topics.FEATURE_SNAPSHOTS,             # 衍生特征快照，同上
+        _topics.PORTFOLIO_SNAPSHOTS,           # 仓位快照，只需最新
+        _topics.ACCOUNT_SNAPSHOTS,             # 账户快照，只需最新
+        _topics.KILL_SWITCH_STATE,             # 熔断状态，Redis 兜底
+        _topics.STRATEGY_COORDINATOR_SNAPSHOTS,# 无状态全量快照，只需最新
+        # ⚠️ ACCOUNT_BASELINES 不在此列：低频但每条有状态意义（operator 可连续
+        # rebaseline），用 DeliverAll 保证不丢中间状态变更。
+    }
+)
+
+TRANSIENT_DELIVERY_TOPICS: frozenset[str] = frozenset(
+    {
+        _topics.OPERATOR_COMMAND_REQUESTS,     # 操作员命令请求
+        _topics.OPERATOR_COMMAND_RESPONSES,    # 操作员命令响应
+    }
+)
+
+
+DeliverySemantics = Literal["snapshot", "transient", "event"]
+DeliverPolicyStr = Literal["all", "last", "new"]
+
+
+def delivery_semantics_for(topic: str) -> DeliverySemantics:
+    """返回 topic 的投递语义: ``"snapshot"`` | ``"transient"`` | ``"event"``.
+
+    - snapshot → ``DeliverPolicy.LAST``（只收最新一条）
+    - transient → ``DeliverPolicy.NEW``（只收订阅后的新消息）
+    - event → ``DeliverPolicy.ALL``（回放全部，但有 flow control 限速）
+    """
+    if topic in SNAPSHOT_DELIVERY_TOPICS:
+        return "snapshot"
+    if topic in TRANSIENT_DELIVERY_TOPICS:
+        return "transient"
+    return "event"
 
 
 class UnroutedTopicError(KeyError):
@@ -495,6 +545,12 @@ class NatsBusConfig:
     max_ack_pending: int = 256
     # 单条消息最大重投递次数（超出后会被丢入死信主题）
     max_deliver: int = 5
+    # ── Slow consumer 防护（flow control + heartbeat）──────────────
+    # 启用 per-consumer flow control：NATS server 在每批消息发送后
+    # 等待 client 的 flow control ack 才继续推送，避免写缓冲区溢出。
+    flow_control: bool = True
+    # 空闲心跳间隔（秒）：防止 flow control 开启后连接因无数据超时断开。
+    idle_heartbeat_seconds: float = 5.0
     # 连接超时
     connect_timeout_seconds: float = 5.0
     # 重连最大次数（-1 = 无限重连）
@@ -570,23 +626,42 @@ class ConsumerConfigSpec:
     ack_wait_seconds: float
     max_ack_pending: int
     max_deliver: int
+    # ── Slow consumer 防护字段 ──
+    deliver_policy: DeliverPolicyStr = "all"
+    flow_control: bool = False
+    idle_heartbeat_seconds: float = 0.0   # 0 = 不启用
 
 
 def build_consumer_config_spec(
     *,
     config: NatsBusConfig,
     durable: str,
+    topic: str = "",
 ) -> ConsumerConfigSpec:
     """从 NatsBusConfig 派生 ConsumerConfigSpec。
 
     这是一个纯函数，纯粹为了让单元测试能断言"配置项确实被正确读取并传递"，
     不依赖任何 NATS server 或 nats-py 类型。
+
+    ``topic`` 参数用于查询投递语义（snapshot/transient/event），
+    决定 ``deliver_policy``。空字符串时默认 "event" → ``DeliverAll``。
     """
+    semantics = delivery_semantics_for(topic) if topic else "event"
+    if semantics == "snapshot":
+        dp = "last"
+    elif semantics == "transient":
+        dp = "new"
+    else:
+        dp = "all"
+
     return ConsumerConfigSpec(
         durable_name=durable,
         ack_wait_seconds=config.ack_wait_seconds,
         max_ack_pending=config.max_ack_pending,
         max_deliver=config.max_deliver,
+        deliver_policy=dp,
+        flow_control=config.flow_control,
+        idle_heartbeat_seconds=config.idle_heartbeat_seconds,
     )
 
 
@@ -993,13 +1068,17 @@ class NatsEventBus(EventBus):
             from nats.js.api import (  # type: ignore[import-not-found]
                 AckPolicy,
                 ConsumerConfig,
+                DeliverPolicy,
             )
+            from nats.js.errors import BadRequestError  # type: ignore[import-not-found]
         except ImportError as exc:
             raise RuntimeError("nats-py JetStream API unavailable") from exc
 
         subject = self._config.subject_for(topic)
         durable = self._config.durable_name_for(self._consumer_role, topic)
-        spec = build_consumer_config_spec(config=self._config, durable=durable)
+        spec = build_consumer_config_spec(
+            config=self._config, durable=durable, topic=topic,
+        )
 
         async def _on_msg(msg: Any) -> None:
             try:
@@ -1088,20 +1167,112 @@ class NatsEventBus(EventBus):
                 except Exception:
                     pass
 
+        # ── Slow consumer 防护：deliver_policy + flow_control ──────
+        _DP_MAP = {
+            "all": DeliverPolicy.ALL,
+            "last": DeliverPolicy.LAST,
+            "new": DeliverPolicy.NEW,
+        }
+        dp = _DP_MAP.get(spec.deliver_policy)
+        if dp is None:
+            raise ValueError(
+                f"Unknown deliver_policy {spec.deliver_policy!r}; "
+                f"expected one of: all, last, new"
+            )
+
         consumer_config = ConsumerConfig(
             durable_name=spec.durable_name,
             ack_policy=AckPolicy.EXPLICIT,
             ack_wait=spec.ack_wait_seconds,
             max_ack_pending=spec.max_ack_pending,
             max_deliver=spec.max_deliver,
+            deliver_policy=dp,
+            flow_control=spec.flow_control if spec.flow_control else None,
+            idle_heartbeat=(
+                spec.idle_heartbeat_seconds
+                if spec.flow_control and spec.idle_heartbeat_seconds > 0
+                else None
+            ),
         )
-        sub = await self._js.subscribe(
-            subject=subject,
-            durable=durable,
-            cb=_on_msg,
-            manual_ack=True,
-            config=consumer_config,
-        )
+
+        # Consumer 迁移：已有 durable consumer 的 deliver_policy 不匹配时，
+        # NATS 返回 409 Conflict。捕获并删除旧 consumer 后重建。
+        # 安全性：event topic 保持 deliver_policy=ALL，与已有 consumer 一致，
+        # 不会触发迁移，不会丢失 ack 位置。
+        stream_spec = self._config.stream_spec_for_topic(topic)
+        stream_name = stream_spec.name if stream_spec else self._config.stream_name
+
+        try:
+            sub = await self._js.subscribe(
+                subject=subject,
+                durable=durable,
+                cb=_on_msg,
+                manual_ack=True,
+                config=consumer_config,
+            )
+        except Exception as sub_exc:
+            # 优先用 nats-py 结构化异常判断：err_code 10013 = consumer
+            # already exists with different configuration。
+            # fallback：字符串匹配兜底未来 nats-py 版本差异。
+            _is_config_mismatch = (
+                isinstance(sub_exc, BadRequestError)
+                and getattr(sub_exc, "err_code", 0) == 10013
+            )
+            if not _is_config_mismatch:
+                exc_str = str(sub_exc).lower()
+                _is_config_mismatch = "consumer" in exc_str and any(
+                    kw in exc_str
+                    for kw in ("configuration", "deliver", "mismatch")
+                )
+            if _is_config_mismatch:
+                log_event(
+                    self.logger,
+                    "nats_consumer_migration_needed",
+                    level="warning",
+                    topic=topic,
+                    durable=durable,
+                    stream=stream_name,
+                    new_deliver_policy=spec.deliver_policy,
+                    error=str(sub_exc),
+                )
+                try:
+                    await self._js.delete_consumer(stream_name, durable)
+                except Exception as del_exc:
+                    log_event(
+                        self.logger,
+                        "nats_consumer_delete_failed",
+                        level="error",
+                        topic=topic,
+                        durable=durable,
+                        stream=stream_name,
+                        error=str(del_exc),
+                    )
+                    raise del_exc from sub_exc
+                log_event(
+                    self.logger,
+                    "nats_consumer_deleted_for_migration",
+                    topic=topic,
+                    durable=durable,
+                    stream=stream_name,
+                )
+                sub = await self._js.subscribe(
+                    subject=subject,
+                    durable=durable,
+                    cb=_on_msg,
+                    manual_ack=True,
+                    config=consumer_config,
+                )
+                log_event(
+                    self.logger,
+                    "nats_consumer_migrated",
+                    topic=topic,
+                    durable=durable,
+                    stream=stream_name,
+                    new_deliver_policy=spec.deliver_policy,
+                )
+            else:
+                raise
+
         self._subscriptions.append(sub)
         log_event(
             self.logger,
@@ -1112,6 +1283,9 @@ class NatsEventBus(EventBus):
             ack_wait_seconds=spec.ack_wait_seconds,
             max_ack_pending=spec.max_ack_pending,
             max_deliver=spec.max_deliver,
+            deliver_policy=spec.deliver_policy,
+            flow_control=spec.flow_control,
+            idle_heartbeat_seconds=spec.idle_heartbeat_seconds,
         )
 
     # ── NATS 回调 ────────────────────────────────────────────────

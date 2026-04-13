@@ -63,10 +63,17 @@ RUN python -m venv /opt/aats-venv \
 # ─────────────────────────────────────────────────────────────────────────────
 FROM python:3.12-slim AS runtime
 
+# glibc malloc 调优：防止 Python 进程 peak 内存不归还 OS，反复触碰容器 limit。
+# MALLOC_TRIM_THRESHOLD_: 堆顶空闲超 64KB 就 trim（默认 ~128KB，太懒）
+# MALLOC_MMAP_THRESHOLD_: >128KB 分配走 mmap（free 后立即归还 OS）
+# MALLOC_ARENA_MAX: 限制 arena 数量（Python GIL 下多 arena 纯浪费）
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/aats-venv/bin:$PATH" \
-    PYTHONPATH="/app"
+    PYTHONPATH="/app" \
+    MALLOC_TRIM_THRESHOLD_=65536 \
+    MALLOC_MMAP_THRESHOLD_=131072 \
+    MALLOC_ARENA_MAX=2
 
 # 运行时需 ca-certificates + tini（PID 1 reaper）+ curl（gateway healthcheck 用）
 # Stage 7 修复：原版只装了 ca-certificates + tini，但 docker-compose.aats.yml

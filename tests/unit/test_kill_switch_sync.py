@@ -68,6 +68,27 @@ class _ExplodingHotStateStore(InMemoryHotStateStore):
         await super().set(key, value, ttl_seconds=ttl_seconds)
 
 
+class _TTLTrackingHotStateStore(InMemoryHotStateStore):
+    """记录每次 set() 传入的 ttl_seconds 值，用于验证 TTL 被正确传递。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_calls: list[dict[str, Any]] = []
+
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> None:
+        self.set_calls.append({
+            "key": key,
+            "ttl_seconds": ttl_seconds,
+        })
+        await super().set(key, value, ttl_seconds=ttl_seconds)
+
+
 class _ExplodingBus(InMemoryEventBus):
     """所有 publish 都抛异常的 EventBus，用于测试 best-effort NATS 写。"""
 
@@ -165,12 +186,55 @@ class TestKillSwitchBootstrap(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ks.status()["reason"], "previous_run_halt")
         self.assertEqual(ks.snapshot()["last_applied_ts"], 12345.6)
 
-    async def test_bootstrap_redis_get_failure_does_not_raise(self) -> None:
+    async def test_bootstrap_redis_get_failure_triggers_fail_safe_halt(self) -> None:
+        """多进程模式（decision）下 Redis 不可达 → fail-safe halt。"""
         store = _ExplodingHotStateStore(raise_on_set=False, raise_on_get=True)
-        ks, _, _bus = await _make_kill_switch(hot_state_store=store)
-        self.assertFalse(ks.halted)
-        # 仍然订阅成功
+        ks, _, _bus = await _make_kill_switch(
+            hot_state_store=store, process_role="decision",
+        )
+        # fail-safe halt 生效
+        self.assertTrue(ks.halted)
+        self.assertEqual(ks.status()["reason"], "redis_unavailable_fail_safe")
+        # 仍然订阅成功（NATS 可以后续修正 fail-safe 状态）
         self.assertTrue(ks.snapshot()["subscribed"])
+
+    async def test_bootstrap_redis_get_failure_no_halt_in_monolith(self) -> None:
+        """monolith 模式下 Redis 不可达 → 不触发 fail-safe halt。"""
+        store = _ExplodingHotStateStore(raise_on_set=False, raise_on_get=True)
+        ks, _, _bus = await _make_kill_switch(
+            hot_state_store=store, process_role="monolith",
+        )
+        self.assertFalse(ks.halted)
+        self.assertTrue(ks.snapshot()["bootstrapped"])
+
+    async def test_bootstrap_fail_safe_halt_can_be_overridden_by_nats_resume(self) -> None:
+        """fail-safe halt 后 NATS 推送 resume → 本地恢复。"""
+        store = _ExplodingHotStateStore(raise_on_set=False, raise_on_get=True)
+        ks, _, _bus = await _make_kill_switch(
+            hot_state_store=store, process_role="gateway",
+        )
+        self.assertTrue(ks.halted)  # fail-safe
+
+        # NATS 推送 resume 事件（模拟 DeliverLast 恢复最新状态）
+        resume_envelope = EventEnvelope(
+            event_type=KILL_SWITCH_EVENT_TYPE,
+            source_component=KILL_SWITCH_SOURCE_COMPONENT,
+            topic=topics.KILL_SWITCH_STATE,
+            key="execution",
+            payload={
+                "halted": False,
+                "reason": None,
+                "set_at_ts": 1000.0,
+                "source_role": "execution",
+            },
+        )
+        await ks._handle_remote_event({
+            "topic": topics.KILL_SWITCH_STATE,
+            "key": "execution",
+            "payload": resume_envelope.model_dump(mode="json"),
+        })
+        # fail-safe halt 被 NATS 事件修正
+        self.assertFalse(ks.halted)
 
     async def test_bootstrap_subscribes_to_kill_switch_topic(self) -> None:
         ks, _store, bus = await _make_kill_switch()
@@ -502,6 +566,75 @@ class TestKillSwitchSyncDispatch(unittest.IsolatedAsyncioTestCase):
         ks.halt(reason="seed")
         ks.resume()
         self.assertFalse(ks.halted)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Kill Switch Redis TTL + staleness
+# ──────────────────────────────────────────────────────────────��──────
+
+
+class TestKillSwitchRedisTTL(unittest.IsolatedAsyncioTestCase):
+    async def test_halt_async_passes_ttl_to_redis_set(self) -> None:
+        """验证 _best_effort_redis_set 把 TTL 传给了 hot_state_store.set()。"""
+        from aats.services.governance_engine.kill_switch import (
+            _KILL_SWITCH_REDIS_TTL_SECONDS,
+        )
+
+        store = _TTLTrackingHotStateStore()
+        ks, _, _ = await _make_kill_switch(hot_state_store=store)
+        await ks.halt_async(reason="ttl_test")
+
+        # 找到写 kill_switch key 的 set 调用
+        ks_calls = [c for c in store.set_calls if "kill_switch" in c["key"]]
+        self.assertGreaterEqual(len(ks_calls), 1)
+        self.assertEqual(ks_calls[0]["ttl_seconds"], _KILL_SWITCH_REDIS_TTL_SECONDS)
+
+    async def test_kill_switch_redis_ttl_is_30_days(self) -> None:
+        from aats.services.governance_engine.kill_switch import (
+            _KILL_SWITCH_REDIS_TTL_SECONDS,
+        )
+        self.assertEqual(_KILL_SWITCH_REDIS_TTL_SECONDS, 30 * 24 * 3600)
+
+
+class TestKillSwitchStaleness(unittest.IsolatedAsyncioTestCase):
+    async def test_bootstrap_stale_state_still_hydrates(self) -> None:
+        """超过 48 小时的 halt 状态仍被恢复（保守策略）。"""
+        import time as _time
+
+        store = InMemoryHotStateStore()
+        stale_ts = _time.time() - 72 * 3600  # 72 hours ago
+        await store.set(
+            KILL_SWITCH_REDIS_KEY,
+            {
+                "halted": True,
+                "reason": "old_halt",
+                "set_at_ts": stale_ts,
+                "source_role": "execution",
+            },
+        )
+        ks, _, _ = await _make_kill_switch(hot_state_store=store)
+        # 即使数据超过 48h，仍正确恢复 halt 状态
+        self.assertTrue(ks.halted)
+        self.assertEqual(ks.status()["reason"], "old_halt")
+
+    async def test_bootstrap_fresh_state_no_staleness_issue(self) -> None:
+        """新鲜的 halt 状态（< 48h）正常恢复，无问题。"""
+        import time as _time
+
+        store = InMemoryHotStateStore()
+        fresh_ts = _time.time() - 3600  # 1 hour ago
+        await store.set(
+            KILL_SWITCH_REDIS_KEY,
+            {
+                "halted": True,
+                "reason": "recent_halt",
+                "set_at_ts": fresh_ts,
+                "source_role": "gateway",
+            },
+        )
+        ks, _, _ = await _make_kill_switch(hot_state_store=store)
+        self.assertTrue(ks.halted)
+        self.assertEqual(ks.status()["reason"], "recent_halt")
 
 
 if __name__ == "__main__":

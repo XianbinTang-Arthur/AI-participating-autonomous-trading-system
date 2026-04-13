@@ -14,8 +14,9 @@ RecoveryPostureEvaluator 只在 execution 进程运行（_slice_active("startup_
   - Local dict 是同步读源（RiskEngine.evaluate 是同步调用）
   - Redis 用于持久化 + 跨进程共享
   - NATS 用于亚秒级实时广播
-  - **Fail-closed**：快照过期 → 返回空 dict → RiskEngine 视为无 provider
-    → 回退到保守模式（不开新仓、只允许减仓）
+  - **Fail-closed**：快照缺失或过期 → 返回 _FAIL_CLOSED_SENTINEL
+    （only_reduce_required=True, safe_to_trade=False）→ RiskEngine 落入
+    只减仓模式（不开新仓、不放行新 intent）
 
 Redis key 格式：``aats:hot:system:guard_signal:<signal_name>``
 NATS topic：``system.guard_signal_updates``，key 为 signal_name
@@ -46,6 +47,38 @@ _DEFAULT_STALE_THRESHOLD_SECONDS = 120.0
 # Redis TTL = stale_threshold * 3，确保 Redis 数据在 decision 侧
 # stale check 失败后仍可用于进程重启恢复。
 _REDIS_TTL_MULTIPLIER = 3.0
+
+# Fail-closed sentinel：guard 快照缺失或过期时返回此 dict，
+# 让 RiskEngine 落入保守模式（只减仓、不允许开新仓）。
+#
+# RiskEngine 有两条拒绝路径：
+#   A) 硬拒绝：_runtime_guard_only_reduce_reasons() / _recovery_status_only_reduce_reasons()
+#      返回非空 reasons → _evaluate_derivatives_pretrade 第 1526 行 if 成立 → 拒绝开仓
+#   B) 软约束：_adaptive_control_states() 读 only_reduce_required → 压缩 multiplier
+#
+# 必须同时覆盖两条路径。only_reduce_required=True 走路径 B，
+# only_reduce_reasons 非空走路径 A（硬拒绝）。
+#
+# 字段清单：
+#   - only_reduce_required=True     → 路径 B 软约束（multiplier 压缩）
+#   - only_reduce_reasons=[...]     → 路径 A 硬拒绝（开仓 intent 被 reject）
+#   - auto_halt_required=False      → 不触发自动停机（仅限制开仓，不暴力停车）
+#   - safe_to_trade=False           → recovery 层视为不安全
+#   - review_required=True          → 要求 operator 人工审核
+#   - status="stale"                → 不匹配 "breached"（trial guard）但语义明确
+#
+# 注意：之前返回空 dict {}，RiskEngine 对空 dict 的所有 .get() 默认值
+# 都是 permissive（only_reduce=False, safe_to_trade=True, breached=False），
+# 导致实际 fail-open。本 sentinel 修复了该安全缺陷。
+_FAIL_CLOSED_SENTINEL: dict[str, Any] = {
+    "only_reduce_required": True,
+    "only_reduce_reasons": ["guard_signal_missing_or_stale"],
+    "auto_halt_required": False,
+    "safe_to_trade": False,
+    "review_required": True,
+    "status": "stale",
+    "_stale": True,
+}
 
 
 class GuardSignalHotStateCache:
@@ -249,14 +282,32 @@ class GuardSignalHotStateCache:
         RiskEngine 的 ``_runtime_guard_state()`` / ``_trial_guard_state()``
         会调用 ``provider.snapshot()``，所以必须是同步方法。
 
-        **Fail-closed**：无数据或过期 → 返回空 dict →
-        RiskEngine 视为 provider=None 的等效行为（不开新仓、只允许减仓）。
+        **Fail-closed**：无数据或过期 → 返回 ``_FAIL_CLOSED_SENTINEL``
+        （only_reduce_required=True, safe_to_trade=False），确保 RiskEngine
+        在 execution 尚未发布、Redis/NATS 断链或缓存过期时落入只减仓模式，
+        而不是默认无约束放行开仓。
         """
         if not self._latest:
-            return {}
+            log_event(
+                self._logger,
+                "guard_signal_cache_fail_closed",
+                level="warning",
+                signal_name=self._signal_name,
+                reason="no_data",
+            )
+            return dict(_FAIL_CLOSED_SENTINEL)
         age = time.time() - self._last_updated_at
         if age > self._stale_threshold:
-            return {}
+            log_event(
+                self._logger,
+                "guard_signal_cache_fail_closed",
+                level="warning",
+                signal_name=self._signal_name,
+                reason="stale",
+                age_seconds=round(age, 1),
+                threshold_seconds=self._stale_threshold,
+            )
+            return dict(_FAIL_CLOSED_SENTINEL)
         # 剥离内部 metadata，只返回业务字段
         return {k: v for k, v in self._latest.items() if not k.startswith("_")}
 

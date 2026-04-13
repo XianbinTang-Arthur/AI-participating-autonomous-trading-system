@@ -39,12 +39,11 @@
 - OKX 行情、账户快照、模拟盘 / 受保护 live 运行
 - RDP 日常采集和多阶段研究编排
 
-> **多进程拓扑限制：** `derivatives_live` 默认使用 hedge 持仓模式，
-> 该模式要求 decision 与 execution slice 共处同一进程
-> （`risk_engine.evaluate_leg_order` 尚无跨进程传递链路）。
-> 因此 `derivatives_live` 当前仅支持 **monolith 单进程**部署；
-> 4 进程拓扑适用于 `derivatives`（模拟盘，net 模式）和 `spot` 系列。
-> 跨进程 leg risk 广播完成后（Stage 4）此限制解除。
+> **多进程拓扑：** `derivatives_live` 已完整支持 4 进程拓扑
+> （gateway / market / decision / execution），推荐使用
+> `docker-compose.aats.derivatives-live.yml` 启动。
+> monolith 单进程模式保留作为回退（`docker-compose.aats.derivatives-live-monolith.yml`）。
+> 4 进程模式要求 Hybrid/NATS 事件总线 + Redis hot state store。
 
 ### 当前不支持
 

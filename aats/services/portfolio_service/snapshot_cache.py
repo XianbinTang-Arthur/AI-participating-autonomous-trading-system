@@ -70,6 +70,10 @@ from aats.storage.hot_state_store import HotStateStore, make_key
 # NS_ACCOUNT 同一级，避免和其它子系统的 key 撞。命名留在本文件而不外提，因为只
 # 有 cache 自己用。如果未来其它 portfolio 相关的 hot state 也需要存 Redis，可以
 # 把这个常量提到 hot_state_store.py。
+# Redis key TTL（秒）。portfolio snapshot 每个决策周期刷新，24 小时足够
+# 覆盖任何维护停机窗口。过期后 bootstrap 读到空 → fallback 到 PG，不影响正确性。
+_REDIS_TTL_SECONDS: int = 24 * 3600  # 24 hours
+
 _NS_PORTFOLIO = "portfolio"
 
 PORTFOLIO_SNAPSHOT_KEY_LATEST = "latest"
@@ -416,11 +420,12 @@ class PortfolioSnapshotCache:
         scope_fingerprint: str,
         snapshot: PortfolioSnapshot,
     ) -> None:
-        """best-effort 写 Redis。失败 log warning 不抛。"""
+        """best-effort 写 Redis（带 TTL）。失败 log warning 不抛。"""
         try:
             await self._hot_state_store.set(
                 self._key_for(scope_fingerprint),
                 snapshot.model_dump(mode="json"),
+                ttl_seconds=_REDIS_TTL_SECONDS,
             )
         except Exception as exc:
             log_event(

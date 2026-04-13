@@ -8,7 +8,7 @@
 #   - 全部本地、零云费用
 #   - 仅监听 127.0.0.1，避免局域网/外网泄露
 #   - 持久化卷使用 docker named volume，便于 docker volume ls 管理
-#   - 资源限制保守，适合开发机
+#   - 资源限制按 32GB 开发机实测 docker stats 调优（2026-04 优化）
 #
 # 启动：cd deploy/wsl2-dev && docker compose --env-file ../../.env.wsl2 up -d
 # 停止：docker compose down            （保留数据）
@@ -27,6 +27,7 @@ volumes:
   nats_data:
   loki_data:
   grafana_data:
+  jaeger_badger_data:
 
 services:
   # ---------------------------------------------------------------------------
@@ -48,11 +49,13 @@ services:
       - "-c"
       - "max_connections=200"          # 4 进程 × pool_size 10 + 余量
       - "-c"
-      - "shared_buffers=256MB"
+      - "shared_buffers=768MB"
       - "-c"
-      - "work_mem=16MB"
+      - "work_mem=64MB"
       - "-c"
-      - "maintenance_work_mem=128MB"
+      - "maintenance_work_mem=512MB"
+      - "-c"
+      - "effective_cache_size=1536MB"
       - "-c"
       - "wal_level=replica"
       - "-c"
@@ -78,11 +81,17 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M
+          memory: 2560M
 
   # ---------------------------------------------------------------------------
   # Redis 7 — 跨进程热状态缓存（仓位/订单视图）
   # AOF 持久化，避免 crash 后状态丢失
+  #
+  # 安全加固（2026-04）：
+  #   - 启用 requirepass 认证，密码从 .env.wsl2 REDIS_PASSWORD 读取
+  #   - 仅监听 127.0.0.1，局域网不可达
+  #   - TLS：本地开发不启用；生产环境可用 stunnel 或 Redis 原生 TLS
+  #     （需额外 --tls-port / --tls-cert-file / --tls-key-file 参数）
   # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
@@ -95,9 +104,15 @@ services:
       - "--appendfsync"
       - "everysec"
       - "--maxmemory"
-      - "256mb"
+      - "384mb"
       - "--maxmemory-policy"
       - "allkeys-lru"
+      - "--requirepass"
+      - "${REDIS_PASSWORD:-changeme}"
+    # REDISCLI_AUTH 环境变量让 redis-cli 自动认证，避免 -a 参数把密码
+    # 泄漏到 healthcheck 命令行（docker inspect 可见）。
+    environment:
+      REDISCLI_AUTH: ${REDIS_PASSWORD:-changeme}
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -112,7 +127,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 384M
+          memory: 512M
 
   # ---------------------------------------------------------------------------
   # NATS JetStream — 跨进程事件总线
@@ -143,7 +158,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 1024M
 
   # ---------------------------------------------------------------------------
   # Loki — 集中日志存储
@@ -180,6 +195,25 @@ services:
     image: jaegertracing/all-in-one:1.57
     container_name: aats-jaeger
     restart: unless-stopped
+    # ── 权限处理 ──────────────────────────────────────────────────
+    # Jaeger 镜像默认以 uid 10001 运行（USER 10001），但 Docker named
+    # volume 首次创建时属 root:root，uid 10001 无法在其中建子目录。
+    #
+    # 方案：以 root 启动 → entrypoint 修权限 → su 降回 uid 10001 →
+    # exec 主进程。Badger 写出的文件全部属 10001:10001，将来去掉
+    # user: "0" 或升级 Jaeger 2.x 都不会因文件属主错位而 crash。
+    #
+    # 注意：Jaeger 镜像 /etc/passwd 中没有 uid 10001 对应的用户名，
+    # BusyBox su 需要用户名，所以 entrypoint 先 adduser 再 su。
+    user: "0"
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        adduser -D -u 10001 -H jaeger 2>/dev/null || true
+        mkdir -p /badger/data /badger/key
+        chown -R 10001:10001 /badger
+        exec su -s /bin/sh jaeger -c '/go/bin/all-in-one-linux'
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
       SPAN_STORAGE_TYPE: "badger"
@@ -195,7 +229,11 @@ services:
       - "127.0.0.1:4317:4317"     # OTLP gRPC（AATS 4 进程都打到这里）
       - "127.0.0.1:4318:4318"     # OTLP HTTP
     volumes:
-      - ./jaeger/badger:/badger
+      # 2026-04-12: bind mount (./jaeger/badger) → named volume。
+      # bind mount 会在项目源码树内创建宿主机无权读取的目录
+      #（drwx------ 10001:root），导致 Docker build context stat 失败。
+      # named volume 由 Docker 管理，数据不在源码树内。
+      - jaeger_badger_data:/badger
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:14269/"]
       interval: 15s
@@ -207,7 +245,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1G
+          memory: 1536M
 
   # ---------------------------------------------------------------------------
   # Grafana — 一站式 Loki + Jaeger + Postgres 仪表盘
@@ -246,4 +284,4 @@ services:
     deploy:
       resources:
         limits:
-          memory: 384M
+          memory: 512M

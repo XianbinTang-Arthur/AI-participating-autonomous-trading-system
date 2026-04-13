@@ -5155,13 +5155,21 @@ async def build_runtime(
                 return _RPE(runtime).finalize_status(
                     base_status=runtime.recovery_status
                 )
+        # Finding 2 修复：RecoveryPostureEvaluator.finalize_status() 返回的是
+        # RecoveryStatus (Pydantic BaseModel)，不是 dict。之前 isinstance(..., dict)
+        # 永远 False 导致 recovery 快照从未被 publish。统一 model_dump 后再检查。
         _initial_recovery = _recovery_provider()
+        if hasattr(_initial_recovery, "model_dump"):
+            _initial_recovery = _initial_recovery.model_dump(mode="json")
         if isinstance(_initial_recovery, dict) and _initial_recovery:
             await _guard_caches["recovery"].publish(_initial_recovery)
 
         runtime.guard_signal_caches = _guard_caches
 
         # 后台发布任务：每 10 秒把 guard 快照刷到 Redis + NATS
+        # Finding 3 修复：纳入 runtime.background_tasks 生命周期管理，
+        # stop_background_tasks() 会 cancel + await 它，不再在关停后继续写
+        # 已关闭的 bus/store。异常用 log_event 结构化记录，不再 silent pass。
         async def _guard_signal_publish_loop() -> None:
             import asyncio as _aio
 
@@ -5177,14 +5185,25 @@ async def build_runtime(
                             runtime.trial_guard_service.snapshot()
                         )
                     _rec = _recovery_provider()
+                    if hasattr(_rec, "model_dump"):
+                        _rec = _rec.model_dump(mode="json")
                     if isinstance(_rec, dict) and _rec:
                         await _guard_caches["recovery"].publish(_rec)
-                except Exception:
-                    pass  # best-effort，不让后台任务崩溃
+                except Exception as exc:
+                    log_event(
+                        runtime.logger,
+                        "guard_signal_publish_loop_error",
+                        level="warning",
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
 
-        runtime._guard_signal_publish_task = asyncio.create_task(
-            _guard_signal_publish_loop()
+        _publish_task = asyncio.create_task(
+            _guard_signal_publish_loop(),
+            name="aats_guard_signal_publish",
         )
+        runtime.background_tasks.append(_publish_task)
+        runtime._guard_signal_publish_task = _publish_task
 
     elif effective_process_role == PROCESS_ROLE_DECISION and runtime.risk_engine is not None:
         # Decision 侧：从 Redis 恢复 + 订阅 NATS，注入 risk_engine 作为 provider

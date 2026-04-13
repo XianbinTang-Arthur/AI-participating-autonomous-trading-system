@@ -75,6 +75,16 @@ from aats.storage.hot_state_store import HotStateStore, NS_SYSTEM, make_key
 KILL_SWITCH_REDIS_KEY = make_key(NS_SYSTEM, "kill_switch")
 """Redis key for the kill_switch state. ``aats:hot:system:kill_switch``."""
 
+# Redis TTL（秒）。kill_switch 状态需跨重启持久化（I3），但不应永驻 Redis：
+# 如果系统停止运行超过 30 天，旧 halt 状态应过期，重启时走 fail-safe halt
+# 路径（Redis 空 + 多进程模式 → 保守 halt → 等 NATS 或人工恢复）。
+# 30 天远长于任何正常维护窗口，足够安全。
+_KILL_SWITCH_REDIS_TTL_SECONDS: int = 30 * 24 * 3600  # 30 days
+
+# bootstrap 时 Redis 数据新鲜度阈值（秒）。超过此阈值的 halt 状态仍会被
+# 恢复（保守策略），但会 log warning 提醒运维检查。
+_KILL_SWITCH_STALENESS_THRESHOLD_SECONDS: float = 48 * 3600  # 48 hours
+
 KILL_SWITCH_EVENT_TYPE = "KillSwitchStateChanged"
 """Event envelope ``event_type`` field for kill_switch state broadcasts."""
 
@@ -210,6 +220,7 @@ class KillSwitch:
         self._loop = asyncio.get_running_loop()
 
         # Step 2：从 Redis 读
+        _redis_read_failed = False
         try:
             stored: Any = await hot_state_store.get(KILL_SWITCH_REDIS_KEY)
         except Exception as exc:
@@ -222,6 +233,25 @@ class KillSwitch:
                 error=str(exc),
             )
             stored = None
+            _redis_read_failed = True
+
+        # ── Fail-safe：Redis 不可用时在多进程模式下默认 halt ──────────
+        # 4 进程拓扑下 kill_switch 的跨进程同步依赖 Redis。如果 bootstrap
+        # 时 Redis 不可达，我们无法确定系统是否已被 halt——此时继续交易可能
+        # 造成资金损失。保守策略：默认 halt，等 NATS 订阅（step 4）收到
+        # 最新事件后自动修正（NATS DeliverLast 会推送最后一条状态变更）。
+        #
+        # monolith 模式无需跨进程同步，不受此影响。
+        if _redis_read_failed and process_role not in (None, "monolith"):
+            self._state = (True, "redis_unavailable_fail_safe")
+            log_event(
+                logger,
+                "kill_switch_bootstrap_fail_safe_halt",
+                level="error",
+                process_role=process_role,
+                reason="redis_unavailable_fail_safe",
+                hint="系统将保持 halt 直到 Redis 恢复或 NATS 推送最新状态",
+            )
 
         if isinstance(stored, dict):
             try:
@@ -232,6 +262,28 @@ class KillSwitch:
                 if halted:
                     self._state = (True, str(reason or "bootstrap_from_redis"))
                 self._last_applied_ts = set_at_ts
+
+                # 新鲜度检查：数据超过阈值时 log warning 提醒运维。
+                # 仍然正常 hydrate（保守：宁可被旧 halt 卡住也不漏放），
+                # 但运维应检查是否需要手动 resume。
+                if set_at_ts > 0:
+                    age_seconds = time.time() - set_at_ts
+                    if age_seconds > _KILL_SWITCH_STALENESS_THRESHOLD_SECONDS:
+                        log_event(
+                            logger,
+                            "kill_switch_bootstrap_stale_state",
+                            level="warning",
+                            process_role=process_role,
+                            halted=halted,
+                            reason=reason,
+                            set_at_ts=set_at_ts,
+                            age_hours=round(age_seconds / 3600, 1),
+                            threshold_hours=round(
+                                _KILL_SWITCH_STALENESS_THRESHOLD_SECONDS / 3600, 1,
+                            ),
+                            hint="Redis 中的 kill_switch 状态超过新鲜度阈值，请检查是否需要手动 resume",
+                        )
+
                 log_event(
                     logger,
                     "kill_switch_bootstrap_hydrated",
@@ -442,7 +494,11 @@ class KillSwitch:
         if self._hot_state_store is None:
             return
         try:
-            await self._hot_state_store.set(KILL_SWITCH_REDIS_KEY, payload)
+            await self._hot_state_store.set(
+                KILL_SWITCH_REDIS_KEY,
+                payload,
+                ttl_seconds=_KILL_SWITCH_REDIS_TTL_SECONDS,
+            )
         except Exception as exc:
             if self._logger is not None:
                 log_event(

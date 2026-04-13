@@ -39,6 +39,10 @@ from aats.services.runtime_scope import (
 )
 from aats.storage.hot_state_store import HotStateStore, make_key
 
+# Redis key TTL（秒）。避免已终结的 order（FILLED / CANCELED 等）永驻
+# Redis 造成内存泄漏。7 天与 NATS JetStream 流保留期对齐。
+_REDIS_TTL_SECONDS: int = 7 * 24 * 3600  # 7 days
+
 _NS_ORDER_STATE = "order_state"
 
 ORDER_STATE_INDEX_KEY = make_key(_NS_ORDER_STATE, "index")
@@ -247,6 +251,7 @@ class OrderStateHotCache:
             await self._hot_state_store.set(
                 _order_state_key(order.client_order_id),
                 order.model_dump(mode="json"),
+                ttl_seconds=_REDIS_TTL_SECONDS,
             )
         except Exception as exc:
             log_event(self._logger, "order_state_cache_redis_set_failed",
@@ -269,7 +274,9 @@ class OrderStateHotCache:
             "writer_role": self._process_role,
         }
         try:
-            await self._hot_state_store.set(ORDER_STATE_INDEX_KEY, index_payload)
+            await self._hot_state_store.set(
+                ORDER_STATE_INDEX_KEY, index_payload, ttl_seconds=_REDIS_TTL_SECONDS,
+            )
         except Exception as exc:
             log_event(self._logger, "order_state_cache_redis_index_failed",
                       level="warning", process_role=self._process_role,

@@ -205,6 +205,14 @@ class RedisHotStateConfig:
     # 全局 namespace 前缀：用于多环境（dev/staging/prod）共享同一台 Redis
     # 时避免冲突。例如 dev 环境用 "dev:"，prod 用 "prod:"。
     global_prefix: str = ""
+    # ── TLS 配置 ──────────────────────────────────────────────────────
+    # 仅当 URL 使用 rediss:// scheme 时生效。redis-py 的 from_url 在看到
+    # rediss:// 时自动启用 SSL；以下字段提供额外的证书校验选项。
+    # 本地开发（redis://）无需设置。
+    ssl_cert_reqs: str | None = None     # "required" | "optional" | "none"
+    ssl_ca_certs: str | None = None      # CA 证书文件路径
+    ssl_certfile: str | None = None      # 客户端证书文件路径（mTLS 用）
+    ssl_keyfile: str | None = None       # 客户端私钥文件路径（mTLS 用）
 
     def apply_prefix(self, key: str) -> str:
         if not self.global_prefix:
@@ -242,12 +250,26 @@ class RedisHotStateStore(HotStateStore):
                 "redis is required for RedisHotStateStore. "
                 "Install with: pip install 'redis>=5,<6'"
             ) from exc
+        # TLS kwargs：仅在 rediss:// scheme 时注入额外证书选项。
+        # redis-py from_url 在看到 rediss:// 时自动启用 ssl=True，
+        # 这里只补充用户指定的 CA / 客户端证书路径。
+        ssl_kwargs: dict[str, Any] = {}
+        if self._config.url.startswith("rediss://"):
+            if self._config.ssl_cert_reqs is not None:
+                ssl_kwargs["ssl_cert_reqs"] = self._config.ssl_cert_reqs
+            if self._config.ssl_ca_certs is not None:
+                ssl_kwargs["ssl_ca_certs"] = self._config.ssl_ca_certs
+            if self._config.ssl_certfile is not None:
+                ssl_kwargs["ssl_certfile"] = self._config.ssl_certfile
+            if self._config.ssl_keyfile is not None:
+                ssl_kwargs["ssl_keyfile"] = self._config.ssl_keyfile
         client = AsyncRedis.from_url(
             self._config.url,
             socket_connect_timeout=self._config.socket_connect_timeout_seconds,
             socket_timeout=self._config.socket_timeout_seconds,
             health_check_interval=self._config.health_check_interval_seconds,
             decode_responses=False,
+            **ssl_kwargs,
         )
         await client.ping()
         self._client = client

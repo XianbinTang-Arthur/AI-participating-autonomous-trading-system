@@ -184,7 +184,8 @@ def test_managed_profile_local_env_templates_are_minimal_utf8_overrides() -> Non
         "AATS_DEFAULT_SYMBOL",
         "AATS_ALLOWED_SYMBOLS",
         "AATS_INITIAL_USDT_BALANCE",
-        "AATS_DATABASE_URL",
+        # AATS_DATABASE_URL 已由 9918e48 移除，改为 AATS_DB_NAME +
+        # docker-compose 内部组装（参见 deploy/wsl2-dev/docker-compose.aats.yml）。
         "AATS_DATABASE_RUNTIME_LOCK_KEY",
         "AATS_API_PORT",
         "AATS_LOG_DIR",

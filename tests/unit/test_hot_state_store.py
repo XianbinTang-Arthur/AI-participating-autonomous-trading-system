@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
 import pytest
 
@@ -274,3 +275,216 @@ def test_serialize_pydantic_model_uses_model_dump() -> None:
 
     out = serialize_for_hot_state(Foo(x=1, y="abc"))  # type: ignore[arg-type]
     assert out == {"x": 1, "y": "abc"}
+
+
+# ─────────────────────────────────────────────────────────────────────
+# RedisHotStateConfig TLS fields
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_redis_config_tls_fields_default_to_none() -> None:
+    """TLS 字段默认全部为 None（本地开发不启用 TLS）。"""
+    cfg = RedisHotStateConfig()
+    assert cfg.ssl_cert_reqs is None
+    assert cfg.ssl_ca_certs is None
+    assert cfg.ssl_certfile is None
+    assert cfg.ssl_keyfile is None
+
+
+def test_redis_config_tls_fields_can_be_set() -> None:
+    cfg = RedisHotStateConfig(
+        url="rediss://127.0.0.1:6380/0",
+        ssl_cert_reqs="required",
+        ssl_ca_certs="/etc/ssl/ca.pem",
+        ssl_certfile="/etc/ssl/client.pem",
+        ssl_keyfile="/etc/ssl/client.key",
+    )
+    assert cfg.ssl_cert_reqs == "required"
+    assert cfg.ssl_ca_certs == "/etc/ssl/ca.pem"
+    assert cfg.ssl_certfile == "/etc/ssl/client.pem"
+    assert cfg.ssl_keyfile == "/etc/ssl/client.key"
+
+
+def test_redis_config_password_in_url() -> None:
+    """URL 中可以包含密码（redis://:password@host:port/db 格式）。"""
+    cfg = RedisHotStateConfig(url="redis://:mypassword@127.0.0.1:6379/0")
+    assert ":mypassword@" in cfg.url
+    assert cfg.apply_prefix("test_key") == "test_key"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Cache TTL constants + runtime TTL verification
+# ─────────────────────────────────────────────────────────────────────
+
+
+class _TTLTrackingStore(InMemoryHotStateStore):
+    """记录每次 set() 传入的 ttl_seconds，用于验证 TTL 被真正传递到 store。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ttl_log: list[tuple[str, float | None]] = []
+
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        *,
+        ttl_seconds: float | None = None,
+    ) -> None:
+        self.ttl_log.append((key, ttl_seconds))
+        await super().set(key, value, ttl_seconds=ttl_seconds)
+
+
+def test_obligation_cache_redis_ttl_is_7_days() -> None:
+    from aats.services.execution_engine.obligation_cache import _REDIS_TTL_SECONDS
+    assert _REDIS_TTL_SECONDS == 7 * 24 * 3600
+
+
+def test_order_state_cache_redis_ttl_is_7_days() -> None:
+    from aats.services.execution_engine.order_state_cache import _REDIS_TTL_SECONDS
+    assert _REDIS_TTL_SECONDS == 7 * 24 * 3600
+
+
+def test_fill_event_cache_redis_ttl_is_7_days() -> None:
+    from aats.services.execution_engine.fill_event_cache import _REDIS_TTL_SECONDS
+    assert _REDIS_TTL_SECONDS == 7 * 24 * 3600
+
+
+def test_portfolio_snapshot_cache_redis_ttl_is_24_hours() -> None:
+    from aats.services.portfolio_service.snapshot_cache import _REDIS_TTL_SECONDS
+    assert _REDIS_TTL_SECONDS == 24 * 3600
+
+
+def test_account_snapshot_cache_has_default_ttl_1800() -> None:
+    from aats.services.execution_engine.account_snapshot_cache import AccountSnapshotCache
+    assert AccountSnapshotCache._DEFAULT_REDIS_TTL_SECONDS == 1800
+
+
+def test_obligation_cache_set_passes_ttl() -> None:
+    """验证 ObligationHotStateCache._best_effort_redis_set 把 TTL 传给 store.set。"""
+    import logging
+    from unittest.mock import MagicMock
+
+    from aats.services.execution_engine.obligation_cache import (
+        ObligationHotStateCache,
+        _REDIS_TTL_SECONDS,
+    )
+
+    async def run() -> None:
+        store = _TTLTrackingStore()
+        cache = ObligationHotStateCache(logger=logging.getLogger("test"))
+        cache._hot_state_store = store
+        cache._bootstrapped = True
+        # 构造一个 minimal mock obligation 来触发 _best_effort_redis_set
+        mock_ob = MagicMock()
+        mock_ob.client_order_id = "test-coid-001"
+        mock_ob.status = "ACTIVE"
+        mock_ob.last_update_ts = None
+        mock_ob.model_dump.return_value = {"client_order_id": "test-coid-001"}
+        await cache._best_effort_redis_set(mock_ob)
+        # 验证 per-coid key 写入时带了 TTL
+        assert len(store.ttl_log) == 1
+        _key, ttl = store.ttl_log[0]
+        assert ttl == _REDIS_TTL_SECONDS
+
+    asyncio.run(run())
+
+
+def test_obligation_cache_index_passes_ttl() -> None:
+    """验证 ObligationHotStateCache._best_effort_redis_index_update 带 TTL。"""
+    import logging
+
+    from aats.services.execution_engine.obligation_cache import (
+        ObligationHotStateCache,
+        _REDIS_TTL_SECONDS,
+    )
+
+    async def run() -> None:
+        store = _TTLTrackingStore()
+        cache = ObligationHotStateCache(logger=logging.getLogger("test"))
+        cache._hot_state_store = store
+        cache._bootstrapped = True
+        await cache._best_effort_redis_index_update()
+        assert len(store.ttl_log) == 1
+        _key, ttl = store.ttl_log[0]
+        assert ttl == _REDIS_TTL_SECONDS
+
+    asyncio.run(run())
+
+
+def test_order_state_cache_set_passes_ttl() -> None:
+    """验证 OrderStateHotCache._best_effort_redis_set 带 TTL。"""
+    import logging
+    from unittest.mock import MagicMock
+
+    from aats.services.execution_engine.order_state_cache import (
+        OrderStateHotCache,
+        _REDIS_TTL_SECONDS,
+    )
+
+    async def run() -> None:
+        store = _TTLTrackingStore()
+        cache = OrderStateHotCache(logger=logging.getLogger("test"))
+        cache._hot_state_store = store
+        cache._bootstrapped = True
+        mock_order = MagicMock()
+        mock_order.client_order_id = "test-coid-002"
+        mock_order.model_dump.return_value = {"client_order_id": "test-coid-002"}
+        await cache._best_effort_redis_set(mock_order)
+        assert len(store.ttl_log) == 1
+        assert store.ttl_log[0][1] == _REDIS_TTL_SECONDS
+
+    asyncio.run(run())
+
+
+def test_fill_event_cache_set_passes_ttl() -> None:
+    """验证 FillEventHotCache._best_effort_redis_set 带 TTL。"""
+    import logging
+    from unittest.mock import MagicMock
+
+    from aats.services.execution_engine.fill_event_cache import (
+        FillEventHotCache,
+        _REDIS_TTL_SECONDS,
+    )
+
+    async def run() -> None:
+        store = _TTLTrackingStore()
+        cache = FillEventHotCache(logger=logging.getLogger("test"))
+        cache._hot_state_store = store
+        cache._bootstrapped = True
+        mock_fill = MagicMock()
+        mock_fill.fill_id = "fill-001"
+        mock_fill.model_dump.return_value = {"fill_id": "fill-001"}
+        await cache._best_effort_redis_set(mock_fill)
+        assert len(store.ttl_log) == 1
+        assert store.ttl_log[0][1] == _REDIS_TTL_SECONDS
+
+    asyncio.run(run())
+
+
+def test_portfolio_snapshot_cache_set_passes_ttl() -> None:
+    """验证 PortfolioSnapshotCache._best_effort_redis_set 带 TTL。"""
+    import logging
+    from unittest.mock import MagicMock
+
+    from aats.services.portfolio_service.snapshot_cache import (
+        PortfolioSnapshotCache,
+        _REDIS_TTL_SECONDS,
+    )
+
+    async def run() -> None:
+        store = _TTLTrackingStore()
+        bus = MagicMock()
+        cache = PortfolioSnapshotCache(
+            hot_state_store=store,
+            bus=bus,
+            process_role="test",
+            logger=logging.getLogger("test"),
+        )
+        mock_snapshot = MagicMock()
+        mock_snapshot.model_dump.return_value = {"snapshot_ts": "2026-04-12T00:00:00"}
+        await cache._best_effort_redis_set("SWAP:cross", mock_snapshot)
+        assert len(store.ttl_log) == 1
+        assert store.ttl_log[0][1] == _REDIS_TTL_SECONDS
+
+    asyncio.run(run())
