@@ -34,8 +34,6 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
@@ -50,6 +48,8 @@ from aats.services.operator.rdp_queries import (
     query_promotion_readiness,
     query_rdp_health,
 )
+
+logger = logging.getLogger(__name__)
 
 rdp_router = APIRouter(
     prefix="/rdp",
@@ -117,7 +117,7 @@ def _governance_session() -> Iterator[Any]:
     if not url:
         raise RuntimeError("No governance DB URL available "
                            "(AATS_ACTIVE_PARAMETER_DB_URL / RDP_DATABASE_URL)")
-    from sqlalchemy.orm import Session, sessionmaker
+    from sqlalchemy.orm import sessionmaker
 
     engine = _get_governance_engine(url)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
@@ -727,76 +727,7 @@ async def task_status_api(
 
 @rdp_router.get("/control-summary", dependencies=[Depends(require_read_access)])
 async def control_summary_api(request: Request) -> dict[str, Any]:
-    """聚合 RDP 控制卡片需要的数据: 任务状态 + 待审批 + active 参数."""
-    return _rdp_control_summary(request)
+    """聚合 RDP 控制卡片需要的数据。"""
+    from aats.api.rdp_control_summary import build_rdp_control_summary
 
-
-def _rdp_control_summary(request: Request) -> dict[str, Any]:
-    """内部实现，同时供 dashboard bundle handler 调用."""
-    root = _project_root(request)
-
-    # 1) 最近任务（按 workflow 分组，取每类最新一条）
-    tasks_by_workflow: dict[str, Any] = {}
-    tasks_error: str | None = None
-    try:
-        from aats.data_platform.governance.rdp_task_db import db_get_recent_tasks
-
-        with _governance_session() as session:
-            recent = db_get_recent_tasks(session, limit=20)
-        for t in recent:
-            wf = t["workflow"]
-            if wf not in tasks_by_workflow:
-                tasks_by_workflow[wf] = t
-    except Exception as exc:
-        logger.warning("control-summary: task query failed: %s", exc)
-        tasks_error = str(exc)
-
-    # 2) 待处理 recommendations（draft 待审批 + approved 待应用）
-    pending_recommendations: list[dict[str, Any]] = []
-    try:
-        for status_filter in ("draft", "approved"):
-            recs_data = query_latest_recommendations(
-                root, limit=50, status_filter=status_filter,
-            )
-            for rec in recs_data.get("recommendations", []):
-                pending_recommendations.append({
-                    "recommendation_id": rec.get("recommendation_id"),
-                    "symbol": rec.get("symbol"),
-                    "family": rec.get("family"),
-                    "timeframe": rec.get("timeframe"),
-                    "recommendation_type": rec.get("recommendation_type"),
-                    "confidence": rec.get("confidence"),
-                    "reason": rec.get("reason"),
-                    "status": rec.get("status", status_filter),
-                    "target_parameter_set_id": rec.get("target_parameter_set_id"),
-                    "source_round_id": rec.get("source_round_id"),
-                    "created_at": rec.get("created_at"),
-                })
-    except Exception as exc:
-        logger.warning("control-summary: recommendations query failed: %s", exc)
-
-    # 3) 当前 active 参数
-    active_parameters: dict[str, Any] = {}
-    try:
-        from aats.data_platform.governance.active_params_db import (
-            db_load_active_registry,
-        )
-
-        with _governance_session() as session:
-            registry = db_load_active_registry(session)
-        active_parameters = registry.get("active_sets", {})
-    except Exception as exc:
-        logger.warning("control-summary: active params query failed: %s", exc)
-        # fallback 到文件
-        try:
-            params_data = query_active_parameter_sets(root)
-            active_parameters = params_data.get("active_sets", {})
-        except Exception:
-            pass
-
-    return {
-        "tasks": tasks_by_workflow,
-        "tasks_error": tasks_error,
-        "pending_recommendations": pending_recommendations,
-        "active_parameters": active_parameters,
-    }
+    return build_rdp_control_summary(request)

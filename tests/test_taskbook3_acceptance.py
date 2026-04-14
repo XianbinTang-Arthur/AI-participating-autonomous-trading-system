@@ -9,8 +9,6 @@
 5. 长期运行 runbook 存在
 """
 
-import json
-import os
 import sys
 from pathlib import Path
 
@@ -93,7 +91,6 @@ print("=" * 60)
 from aats.data_platform.operations.failure_registry import (
     find_failure,
     list_open_failures,
-    load_failures,
     record_failure,
     update_failure_status,
 )
@@ -230,15 +227,11 @@ print("AC-4: dev/staging/prod 隔离明确")
 print("=" * 60)
 
 from aats.data_platform.operations.environment_guard import (
-    ENVIRONMENT_POLICIES,
     VALID_ENVIRONMENTS,
-    get_current_environment,
     get_environment_info,
-    get_observation_window_hours,
     get_policy,
     guard_direct_db_access,
     guard_parameter_apply,
-    guard_parameter_rollback,
     guard_workflow_execution,
 )
 

@@ -39,7 +39,7 @@ from typing import Any
 
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
-from aats.schemas.common import EventEnvelope, dump_payload_exact, new_id
+from aats.schemas.common import EventEnvelope, dump_payload_exact
 from aats.schemas.operator_command import (
     OperatorCommandRequest,
     OperatorCommandResponse,

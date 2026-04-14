@@ -106,7 +106,6 @@ def check_artifact_integrity(project_root: pathlib.Path) -> list[dict[str, Any]]
             continue
 
         missing_manifest = 0
-        empty_summary = 0
         for rd in round_dirs:
             if not (rd / "round_manifest.json").exists():
                 missing_manifest += 1

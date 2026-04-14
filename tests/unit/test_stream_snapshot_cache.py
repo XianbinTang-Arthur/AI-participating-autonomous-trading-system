@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import logging
 import unittest
-from collections import deque
 from datetime import datetime, timezone
 from typing import Any
 

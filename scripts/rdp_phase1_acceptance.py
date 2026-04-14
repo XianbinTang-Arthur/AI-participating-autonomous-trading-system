@@ -13,7 +13,7 @@ import json
 import logging
 import sys
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from pathlib import Path
 
 logging.basicConfig(
@@ -411,7 +411,7 @@ def main() -> int:
         log.info("Running: %s", fn.__name__)
         try:
             r = fn(settings)
-        except Exception as exc:
+        except Exception:
             r = Result(fn.__name__)
             r.error = traceback.format_exc()
         results.append(r)

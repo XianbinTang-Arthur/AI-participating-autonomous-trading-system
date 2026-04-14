@@ -39,7 +39,7 @@ def build_execution_realism_report(
     _add(f"> Family: `{family}` | Symbol: `{symbol}` | Timeframe: `{timeframe}`")
     _add(f"> Window: {start} ~ {end}")
     _add(f"> Generated: {now_str}")
-    _add(f"> Model: V1 Bar-Based Proxy (OHLCV only)")
+    _add("> Model: V1 Bar-Based Proxy (OHLCV only)")
     _add("")
 
     # ---- 1. Market Data Alignment ----
@@ -135,7 +135,7 @@ def build_execution_realism_report(
         _add(f"| Median | {tc.get('median', 0):.3f} |")
         _add(f"| P95 | {tc.get('p95', 0):.3f} |")
         _add("")
-        _add(f"> Total cost = estimated slippage + taker fee (5 bps)")
+        _add("> Total cost = estimated slippage + taker fee (5 bps)")
     else:
         _add("- 无有效成本数据")
     _add("")
@@ -203,7 +203,7 @@ def build_phase4_conclusion(
     _add("")
     _add(f"> Round ID: `{round_id}`")
     _add(f"> Generated: {now_str}")
-    _add(f"> Model: V1 Bar-Based Proxy (OHLCV only)")
+    _add("> Model: V1 Bar-Based Proxy (OHLCV only)")
     _add("")
 
     # ---- 1. Scope ----

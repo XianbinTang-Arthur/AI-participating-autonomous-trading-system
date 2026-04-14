@@ -20,7 +20,6 @@ import logging
 from typing import Any
 
 from aats.data_platform.attribution.taxonomy import (
-    ALIGNMENT_STATUS_ALIGNED,
     ALIGNMENT_STATUS_LIVE_ONLY,
     ALIGNMENT_STATUS_REPLAY_ONLY,
     ATTRIBUTION_NOT_APPLICABLE,

@@ -363,14 +363,14 @@ def _save_comparison(root: Path, release_id: str, data: dict) -> Path:
 def _generate_comparison_md(data: dict) -> str:
     """生成 markdown 比较报告."""
     lines = [
-        f"# Baseline Comparison Report",
-        f"",
+        "# Baseline Comparison Report",
+        "",
         f"**Release:** {data.get('release_id')}",
         f"**Family:** {data.get('family')} | **Timeframe:** {data.get('timeframe')}",
         f"**Generated:** {data.get('generated_at')}",
         f"**Baseline Type:** {data.get('baseline_type', 'N/A')}",
         f"**Conclusion:** `{data.get('conclusion', 'unknown')}`",
-        f"",
+        "",
     ]
 
     # 参数差异

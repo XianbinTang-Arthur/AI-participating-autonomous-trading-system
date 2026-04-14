@@ -48,7 +48,7 @@ def main() -> int:
 
     from aats.data_platform.config import get_settings
     from aats.data_platform.live_facts.contracts import ALL_TABLE_CONTRACTS, LIVE_TABLE_NAMES
-    from aats.data_platform.live_facts.db import get_live_engine, get_live_session, test_connection
+    from aats.data_platform.live_facts.db import get_live_session, test_connection
     from aats.data_platform.live_facts.query_adapter import (
         check_tables_health,
         fetch_latest_timestamps,

@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -33,7 +33,6 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.execution import OrderObligation
 from aats.services.execution_engine.obligation_cache import (
-    OBLIGATION_EVENT_TYPE,
     OBLIGATION_INDEX_KEY,
     ObligationHotStateCache,
     _obligation_key,

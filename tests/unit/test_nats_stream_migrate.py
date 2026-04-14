@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -32,7 +31,6 @@ from aats.bus.nats_bus import (
     StreamSpec,
 )
 from scripts.nats_stream_migrate import (
-    MigrationPlan,
     StreamSnapshot,
     _FakeConfigFromSnapshot,
     apply_migration_plan,

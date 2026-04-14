@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-from collections.abc import AsyncIterator, Iterator
-from typing import Any
+from collections.abc import Iterator
 
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine

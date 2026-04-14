@@ -3,7 +3,7 @@ from __future__ import annotations
 from threading import Lock
 
 from aats.schemas.common import utc_now
-from aats.schemas.execution import FillEvent, OrderIntent, OrderState, side_from_position_intent
+from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.storage.execution_fill_repo_v2 import ExecutionFillRepositoryV2
 from aats.storage.execution_order_repo import ExecutionOrderHistoryRepository, ExecutionOrderRepository

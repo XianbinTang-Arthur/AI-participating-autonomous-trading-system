@@ -97,7 +97,7 @@ def main() -> int:
         print(json.dumps(backlog, indent=2, ensure_ascii=False))
     else:
         stats = backlog.get("stats", {})
-        print(f"Improvement Backlog Generated")
+        print("Improvement Backlog Generated")
         print(f"  Total:     {stats.get('total', 0)}")
         print(f"  Open:      {stats.get('open', 0)}")
         print(f"  High Prio: {stats.get('high_priority', 0)}")
@@ -105,7 +105,7 @@ def main() -> int:
 
         open_items = [i for i in backlog.get("items", []) if i.get("status") == "open"]
         if open_items:
-            print(f"  Open Items:")
+            print("  Open Items:")
             for item in open_items:
                 prio = item.get("priority", "?").upper()
                 print(f"    [{prio}] {item.get('problem_statement', '')}")

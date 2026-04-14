@@ -7,7 +7,6 @@
   P1:   参数映射语义文档化
 """
 
-import ast
 import inspect
 import sys
 from pathlib import Path

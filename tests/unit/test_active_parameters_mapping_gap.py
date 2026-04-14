@@ -283,7 +283,7 @@ class TestDbOnlyRegression(unittest.TestCase):
                 "aats.bootstrap.active_parameters._try_load_from_db",
                 side_effect=_mock_try_load,
             ):
-                overrides = build_settings_overrides(
+                build_settings_overrides(
                     timeframes=["15m"],
                 )
         finally:

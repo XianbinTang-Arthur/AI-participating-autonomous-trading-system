@@ -46,7 +46,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        print(f"Baseline Comparison")
+        print("Baseline Comparison")
         print(f"  Release:    {result.get('release_id')}")
         print(f"  Family:     {result.get('family')}")
         print(f"  Timeframe:  {result.get('timeframe')}")

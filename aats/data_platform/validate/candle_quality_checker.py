@@ -67,7 +67,7 @@ def validate_candles(
     prev_ts_utc = None
 
     for row in rows:
-        ts, o, h, l, c, vol, vol_ccy, vol_quote, confirm = row
+        ts, o, h, low, c, vol, vol_ccy, vol_quote, confirm = row
 
         # 归一化为 UTC，避免 DST fold 误判
         ts_utc = _to_utc(ts)
@@ -92,9 +92,9 @@ def validate_candles(
         prev_ts_utc = ts_utc
 
         # OHLC validity
-        if h < l or o <= 0 or h <= 0 or l <= 0 or c <= 0:
+        if h < low or o <= 0 or h <= 0 or low <= 0 or c <= 0:
             invalid_price += 1
-        if h < o or h < c or l > o or l > c:
+        if h < o or h < c or low > o or low > c:
             suspect += 1
 
         # Volume non-negative

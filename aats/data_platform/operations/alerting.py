@@ -135,7 +135,7 @@ def acknowledge_alert(root: Path, alert_id: str) -> bool:
 def format_alert_summary_text(summary: dict) -> str:
     """将告警摘要格式化为文本输出."""
     lines = []
-    lines.append(f"RDP Reliability Alert Summary")
+    lines.append("RDP Reliability Alert Summary")
     lines.append(f"Generated: {summary['generated_at']}")
     lines.append(f"Overall:   {summary['overall_status'].upper()}")
     lines.append(

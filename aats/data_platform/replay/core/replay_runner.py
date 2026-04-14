@@ -27,7 +27,6 @@ from aats.data_platform.replay.core.replay_context import (
     ReplayBarContext,
     ReplayDecision,
     ReplayParameterOverrides,
-    ReplayState,
 )
 
 log = logging.getLogger(__name__)

@@ -23,9 +23,7 @@ if str(ROOT) not in sys.path:
 from aats.data_platform.replay.core.replay_context import (
     ReplayBar,
     ReplayBarContext,
-    ReplayDecision,
     ReplayParameterOverrides,
-    ReplayState,
 )
 from aats.data_platform.replay.adapters.independent_adapter import IndependentReplayAdapter
 from aats.data_platform.replay.adapters.directional_adapter import DirectionalReplayAdapter
@@ -305,11 +303,11 @@ check(
 # 与其他时间字段类型一致
 check(
     "min_hold_seconds 同为 float",
-    type(p_default.min_hold_seconds) == type(p_default.max_thesis_age_seconds),
+    type(p_default.min_hold_seconds) is type(p_default.max_thesis_age_seconds),
 )
 check(
     "rebalance_cooldown_seconds 同为 float",
-    type(p_default.rebalance_cooldown_seconds) == type(p_default.max_thesis_age_seconds),
+    type(p_default.rebalance_cooldown_seconds) is type(p_default.max_thesis_age_seconds),
 )
 
 print()

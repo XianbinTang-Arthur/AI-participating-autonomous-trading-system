@@ -92,6 +92,58 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertIsNotNone(runtime_state.threshold_snapshot.capital_multiplier)
         self.assertTrue(runtime_state.threshold_snapshot.reason_codes)
 
+    def test_evaluate_independent_book_uses_balance_aware_entry_size_when_directional_target_is_zero(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            default_order_qty=0.004,
+            default_target_leverage=5.0,
+            max_target_leverage=10.0,
+            max_margin_usage_fraction=0.75,
+            strategy_dynamic_leverage_enabled=False,
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_min_score_stability_bps=0.0,
+        )
+        context = make_context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            market_last_price=100000.0,
+            available_trading_equity=390.0,
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.48,
+                "trend_alpha": 0.42,
+                "microstructure_alpha": 0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.32})
+        expectancy = IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=18.0,
+            expected_slippage_bps=1.5,
+            expected_cost_bps=6.0,
+            expected_net_edge_bps=12.0,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="long",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0"),
+            scorer=lambda **_: 0.99,
+            recent_score_history=(0.99, 0.99, 0.99),
+        )
+
+        self.assertEqual(decision.target_qty, Decimal("0.014625"))
+        self.assertGreater(decision.target_qty, Decimal("0.004"))
+
     def test_evaluate_independent_book_inherits_prior_runtime_state_for_counts_and_transition(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_independent_enabled=True,

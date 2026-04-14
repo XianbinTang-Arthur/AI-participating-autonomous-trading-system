@@ -62,7 +62,6 @@ def _evaluate_attribution_regression(
         return {"trigger": "attribution_regression", "fired": False, "detail": "无法读取 summary"}
 
     # 分析 failure mode 变化
-    failure_modes = summary.get("failure_modes", summary.get("top_failure_modes", []))
     strategy_failure_pct = summary.get("strategy_failure_pct", 0)
     risk_failure_pct = summary.get("risk_failure_pct", 0)
     execution_failure_pct = summary.get("execution_failure_pct", 0)
@@ -171,7 +170,7 @@ def _evaluate_governance_regression(project_root: Path) -> dict[str, Any]:
             "trigger": "governance_regression",
             "fired": True,
             "severity": "medium",
-            "detail": f"health=degraded",
+            "detail": "health=degraded",
         }
 
     return {

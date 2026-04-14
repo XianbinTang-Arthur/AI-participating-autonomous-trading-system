@@ -106,12 +106,12 @@ def build_gold_replay_bars(
         now = utc_now()
         values: list[dict[str, Any]] = []
         for c in candles:
-            sym, ts, o, h, l, cl, vol, qvol, confirm = c
+            sym, ts, o, h, low, cl, vol, qvol, confirm = c
             aligned_rate, funding_ts = funding_map.get(ts, (None, None))
             # Gold is_closed derives from Silver confirm — explicit bool cast
             values.append(dict(
                 symbol=sym, ts=ts,
-                open=o, high=h, low=l, close=cl,
+                open=o, high=h, low=low, close=cl,
                 volume=vol, quote_volume=qvol,
                 is_closed=bool(confirm),
                 aligned_funding_rate=aligned_rate,

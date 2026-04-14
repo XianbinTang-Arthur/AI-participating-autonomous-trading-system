@@ -88,7 +88,7 @@ def main() -> None:
         round_dir = pathlib.Path(args.round_dir)
         plan = generate_retry_plan(round_dir, phase=args.phase)
 
-        print(f"\n=== Retry Plan ===")
+        print("\n=== Retry Plan ===")
         print(f"Round: {plan.get('original_round_id', '?')}")
         print(f"Phase: {plan['phase']}")
         print(f"Original status: {plan.get('original_status', '?')}")
@@ -99,11 +99,11 @@ def main() -> None:
             print(f"  [FAIL] {fc['combo_key']} ({fc['original_status']})")
 
         if plan.get("full_rerun_command"):
-            print(f"\nFull rerun command:")
+            print("\nFull rerun command:")
             print(f"  {plan['full_rerun_command']}")
 
         if plan.get("retry_commands"):
-            print(f"\nPer-combo retry commands:")
+            print("\nPer-combo retry commands:")
             for rc in plan["retry_commands"]:
                 print(f"  [{rc['combo_key']}] {rc['command']}")
 
@@ -123,7 +123,7 @@ def main() -> None:
             if args.dry_run:
                 print(f"\n[DRY-RUN] 将执行: {plan['full_rerun_command']}")
             else:
-                print(f"\n执行重跑...")
+                print("\n执行重跑...")
                 cmd = plan["full_rerun_command"]
                 log.info("CMD: %s", cmd)
                 result = subprocess.run(cmd, shell=True)

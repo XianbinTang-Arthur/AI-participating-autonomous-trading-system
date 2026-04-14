@@ -4,8 +4,6 @@ import logging
 from decimal import Decimal
 from typing import Literal
 
-log = logging.getLogger(__name__)
-
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.base import EventBus
 from aats.events import topics
@@ -35,6 +33,8 @@ from aats.schemas.execution import (
 )
 from aats.services.execution_engine.quantity_rules import minimum_internal_order_quantity, quantized_internal_quantity
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+
+log = logging.getLogger(__name__)
 
 
 class ExecutionPlanner:

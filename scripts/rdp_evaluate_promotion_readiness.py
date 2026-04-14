@@ -96,12 +96,12 @@ def main() -> None:
         print(f"  [{ci}] {c['check']}: {c['detail']}")
 
     if report.get("blockers"):
-        print(f"\nBlockers:")
+        print("\nBlockers:")
         for b in report["blockers"]:
             print(f"  - {b}")
 
     if report.get("promoted_candidates"):
-        print(f"\nPromoted candidates:")
+        print("\nPromoted candidates:")
         for p in report["promoted_candidates"]:
             print(f"  - {p['parameter_set_id']} (score={p['score_ratio']:.3f})")
 

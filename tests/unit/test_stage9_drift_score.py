@@ -55,7 +55,6 @@ import pytest
 
 from aats.services.governance_engine.drift_score import (
     DriftInputs,
-    DriftReport,
     SCHEMA_VERSION,
     STAGE_NOMINAL_USDT,
     compute_drift_score,

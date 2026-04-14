@@ -57,7 +57,6 @@ from typing import Any
 # 同 probe_kill_switch.py：确保能 import aats.*
 # runtime 容器里 /app 是 repo 根，PYTHONPATH=/app 已经设好。
 from aats.bus.nats_bus import NatsBusConfig, NatsEventBus
-from aats.events import topics
 from aats.services.governance_engine.abort_hooks import (
     AbortHookConfig,
     AbortHookService,

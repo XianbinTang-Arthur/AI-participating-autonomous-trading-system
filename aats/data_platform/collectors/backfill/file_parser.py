@@ -8,7 +8,6 @@ import zipfile
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
 
 from aats.data_platform.models import CandleRow, FundingRow
 

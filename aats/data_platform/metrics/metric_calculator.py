@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -275,7 +274,6 @@ def calc_reliability_metrics(root: Path, **_: Any) -> dict[str, Any]:
         root / "artifacts" / "operations" / "workflow_failures.json"
     )
     failures = fail_data.get("failures", []) if fail_data else []
-    open_failures = [f for f in failures if f.get("status") == "open"]
     retried = [f for f in failures if f.get("retry_count", 0) > 0]
     retry_success = [
         f for f in retried if f.get("last_retry_result") == "success"

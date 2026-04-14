@@ -63,7 +63,7 @@ def main() -> None:
 
     summary = index["summary"]
     print()
-    print(f"=== Artifact Index ===")
+    print("=== Artifact Index ===")
     print(f"Total: {summary['total_artifacts']}")
     print(f"  Rounds: {summary['rounds']}")
     print(f"  Experiments: {summary['experiments']}")

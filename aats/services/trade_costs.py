@@ -4,13 +4,13 @@ import logging
 from decimal import Decimal
 from math import sqrt
 
-logger = logging.getLogger(__name__)
-
-from aats.schemas.market import MarketSnapshot
 from aats.bootstrap.settings import AATSSettings
+from aats.schemas.market import MarketSnapshot
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.trade_drag import TradeDragCalculator, TradeDragEstimate, TradeDragProfile
+
+logger = logging.getLogger(__name__)
 
 
 class TradeCostService:

@@ -266,7 +266,7 @@ def action_apply(project_root: Path, args: argparse.Namespace) -> int:
     )
 
     print(f"\n[OK] 已写入: {path}")
-    print(f"[OK] 已更新 active_parameter_registry.json")
+    print("[OK] 已更新 active_parameter_registry.json")
 
     # DB 双写
     db_ok = _try_db_write_active(
@@ -695,7 +695,7 @@ def action_seed_db(project_root: Path, args: argparse.Namespace) -> int:
 
     engine.dispose()
 
-    print(f"\n=== seed-db 完成 ===")
+    print("\n=== seed-db 完成 ===")
     for table, count in stats.items():
         print(f"  governance.{table}: {count} 条")
     print("全部使用 ON CONFLICT DO UPDATE，幂等操作。")

@@ -31,11 +31,14 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    import httpx
+    from sqlalchemy.orm import Session
 
 logging.basicConfig(
     level=logging.INFO,

@@ -272,7 +272,6 @@ def _generate_findings(diagnostics: dict[str, Any], params: dict[str, Any]) -> s
     total = diagnostics.get("total_bars", 0)
     opening = diagnostics.get("opening_count", 0)
     blocked = diagnostics.get("blocked_count", 0)
-    sel_ratio = diagnostics.get("selectable_ratio", 0)
     edge_mean = diagnostics.get("mean_expected_edge_bps")
 
     # --- 开仓频率分析 ---

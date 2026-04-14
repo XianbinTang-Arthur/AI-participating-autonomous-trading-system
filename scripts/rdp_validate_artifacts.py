@@ -117,7 +117,7 @@ def main() -> None:
 
     # 输出汇总
     print()
-    print(f"=== Artifact Validation Summary ===")
+    print("=== Artifact Validation Summary ===")
     print(f"Total manifests: {len(results)}")
     print(f"Errors: {total_errors}")
     print(f"Warnings: {total_warnings}")

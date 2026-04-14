@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from aats.data_platform.jobs.checkpoint_manager import get_checkpoint, upsert_checkpoint
+from aats.data_platform.jobs.checkpoint_manager import upsert_checkpoint
 from aats.data_platform.jobs.run_registry import create_ingest_run
-from aats.data_platform.models import candle_table_name, instrument_type_for_symbol, utc_now
+from aats.data_platform.models import candle_table_name, instrument_type_for_symbol
 
 log = logging.getLogger(__name__)
 

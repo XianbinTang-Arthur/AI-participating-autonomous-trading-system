@@ -259,7 +259,7 @@ def main() -> None:
         deprecate_old=not args.no_deprecate_old,
     )
 
-    print(f"\n=== 自动导入结果 ===")
+    print("\n=== 自动导入结果 ===")
     print(f"  状态: {result['status']}")
     print(f"  来源: {result['source_file']}")
     print(f"  Round ID: {result['source_round_id']}")
@@ -267,7 +267,7 @@ def main() -> None:
     print(f"  废弃数量: {result['deprecated_count']}")
 
     if result["parameter_sets"]:
-        print(f"\n  新参数集:")
+        print("\n  新参数集:")
         for ps in result["parameter_sets"]:
             print(f"    [{ps['status'].upper()}] {ps['id']}")
             print(f"      {ps['family']}/{ps['timeframe']} — {ps['param_count']} 个参数")

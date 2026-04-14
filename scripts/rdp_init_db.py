@@ -10,7 +10,6 @@ Usage:
 from __future__ import annotations
 
 import logging
-import sys
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("rdp_init_db")

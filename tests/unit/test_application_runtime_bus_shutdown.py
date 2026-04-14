@@ -21,7 +21,6 @@ mock 出最小可调用的对象，定向验证 stop_background_tasks 内部逻�
 """
 from __future__ import annotations
 
-import asyncio
 import unittest
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock

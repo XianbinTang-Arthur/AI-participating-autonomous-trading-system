@@ -141,7 +141,6 @@ def scan_and_consume_once(
 
     返回: {"discovered": N, "succeeded": N, "failed": N, "skipped": N}
     """
-    from sqlalchemy import text
 
     from aats.data_platform.collectors.backfill.candles_backfill_collector import (
         collect_backfill_candle_file,
@@ -156,7 +155,6 @@ def scan_and_consume_once(
     )
     from aats.data_platform.config import get_settings
     from aats.data_platform.db import get_session
-    from aats.data_platform.gold.replay_bar_builder import build_gold_replay_bars
     from aats.data_platform.merge.merge_pipeline import (
         run_candle_merge_pipeline,
         run_funding_merge_pipeline,

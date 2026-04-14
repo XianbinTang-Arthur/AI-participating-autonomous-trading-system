@@ -7,10 +7,8 @@ registers them in meta.raw_source_files, and prevents duplicate ingestion.
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 

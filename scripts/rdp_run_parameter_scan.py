@@ -28,7 +28,6 @@ import argparse
 import json
 import logging
 import pathlib
-import sys
 from datetime import datetime, timezone
 
 logging.basicConfig(

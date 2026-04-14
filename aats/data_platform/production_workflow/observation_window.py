@@ -56,7 +56,7 @@ def _check_quality_monitor_regression(project_root: Path) -> dict[str, Any]:
         return {
             "name": "quality_monitor",
             "status": "warn",
-            "detail": f"health=degraded",
+            "detail": "health=degraded",
             "severity": "medium",
         }
     return {

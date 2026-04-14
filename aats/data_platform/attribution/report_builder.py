@@ -241,7 +241,6 @@ def _generate_findings(
         )
 
     # 检查各层失败占比
-    strategy_failed = layer_analysis.get("strategy", {}).get("failed", 0)
     risk_failed = layer_analysis.get("risk", {}).get("failed", 0)
     exec_failed = layer_analysis.get("execution", {}).get("failed", 0)
 

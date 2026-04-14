@@ -53,7 +53,7 @@ def _detect_package_version() -> str:
         return "0.0.0-dev"
 
 if TYPE_CHECKING:  # pragma: no cover
-    from opentelemetry.trace import Span, Tracer  # type: ignore[import-not-found]
+    from opentelemetry.trace import Tracer  # type: ignore[import-not-found]
 
 
 # ─────────────────────────────────────────────────────────────────────

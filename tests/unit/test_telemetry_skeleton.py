@@ -159,7 +159,6 @@ def test_configure_telemetry_without_otel_falls_back_to_noop(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """模拟没有 OTel 包：configure 不抛错，tracer 仍是 no-op。"""
-    import sys
 
     # 模拟 import 失败的方法：把 opentelemetry 模块设为 None
     # 但这会污染其它测试，因此只验证 configure 后调用 get_tracer 不抛错

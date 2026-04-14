@@ -68,6 +68,43 @@ def query_active_parameter_sets(project_root: Path) -> dict[str, Any]:
     return get_active_parameter_summary(project_root=project_root)
 
 
+def query_parameter_registry(project_root: Path) -> dict[str, Any]:
+    """查询 parameter registry，用于解释 candidate / active 参数状态。"""
+    registry_path = project_root / _GOVERNANCE_DIR / "current_parameter_registry.json"
+
+    try:
+        from aats.data_platform.governance.parameter_registry import load_registry
+
+        registry = load_registry(registry_path)
+    except Exception:
+        registry = _safe_load_json(registry_path)
+
+    result: dict[str, Any] = {
+        "available": False,
+        "registry_path": str(registry_path),
+        "generated_at": None,
+        "version": None,
+        "parameter_sets": [],
+        "status_distribution": {},
+    }
+
+    if registry is None:
+        return result
+
+    parameter_sets = registry.get("parameter_sets", [])
+    result["available"] = True
+    result["generated_at"] = registry.get("generated_at")
+    result["version"] = registry.get("version")
+    result["parameter_sets"] = parameter_sets
+
+    status_counts: dict[str, int] = {}
+    for item in parameter_sets:
+        status = item.get("status", "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+    result["status_distribution"] = status_counts
+    return result
+
+
 # ── 2. Latest Attribution ─────────────────────────────────────────
 
 

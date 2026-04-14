@@ -222,9 +222,9 @@ def action_approve(
 
     if args.dry_run:
         print("[DRY RUN] 将会:")
-        print(f"  1. 将 recommendation 状态改为 approved")
+        print("  1. 将 recommendation 状态改为 approved")
         if also_apply and target.get("target_parameter_set_id"):
-            print(f"  2. 运行 pre-apply gate")
+            print("  2. 运行 pre-apply gate")
             print(f"  3. gate 通过后应用 parameter set {target['target_parameter_set_id']} 为 active")
         return 0
 
@@ -384,7 +384,6 @@ def _apply_parameter_from_recommendation(
     gate_run_id = gate_result.get("gate_run_id") if gate_result else None
     gate_status = gate_result.get("gate_status") if gate_result else None
 
-    combo_key = f"{target_ps['family']}_{target_ps['timeframe'].lower()}"
     _write_approval_log(
         project_root,
         action="approve-and-apply",

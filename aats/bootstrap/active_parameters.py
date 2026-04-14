@@ -858,33 +858,38 @@ def get_active_parameter_summary(
     project_root: Path | str | None = None,
 ) -> dict[str, Any]:
     """获取所有 active parameter sets 的摘要."""
-    all_sets = load_all_active_parameter_sets(project_root=project_root)
+    registry = load_active_parameter_registry(project_root=project_root)
+    active_sets = registry.get("active_sets", {})
 
     summary_items: list[dict[str, Any]] = []
-    for combo_key, data in all_sets.items():
-        meta = data.get("meta", {})
-        values = data.get("values", {})
+    for combo_key, entry in active_sets.items():
+        values = entry.get("values", {})
         summary_items.append({
             "combo_key": combo_key,
-            "family": meta.get("family", ""),
-            "timeframe": meta.get("timeframe", ""),
-            "parameter_set_id": meta.get("parameter_set_id", ""),
-            "status": meta.get("status", ""),
-            "applied_at": meta.get("applied_at", ""),
-            "applied_by": meta.get("applied_by", ""),
-            "approval_recommendation_id": meta.get("approval_recommendation_id"),
-            "source_round_id": meta.get("source_round_id"),
+            "family": entry.get("family", ""),
+            "timeframe": entry.get("timeframe", ""),
+            "parameter_set_id": entry.get("parameter_set_id", ""),
+            "status": entry.get("status", "active") or "active",
+            "applied_at": entry.get("applied_at", ""),
+            "applied_by": entry.get("applied_by", ""),
+            "approval_recommendation_id": entry.get("approval_recommendation_id"),
+            "source_round_id": entry.get("source_round_id"),
             "parameter_count": len(values),
             "values": values,
         })
 
+    active_combo_set = {s["combo_key"] for s in summary_items}
     return {
+        "generated_at": registry.get("generated_at"),
+        "governance_managed": bool(registry.get("governance_managed", False)),
+        "paused_combos": sorted(registry.get("paused_combos", [])),
         "total_active_sets": len(summary_items),
         "known_combos": [c["key"] for c in KNOWN_COMBOS],
-        "active_combos": [s["combo_key"] for s in summary_items],
+        "active_combos": sorted(active_combo_set),
         "missing_combos": [
             c["key"] for c in KNOWN_COMBOS
-            if c["key"] not in {s["combo_key"] for s in summary_items}
+            if c["key"] not in active_combo_set
         ],
+        "active_sets": active_sets,
         "parameter_sets": summary_items,
     }

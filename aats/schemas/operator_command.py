@@ -37,7 +37,7 @@ from typing import Any, Literal
 
 from pydantic import Field
 
-from aats.schemas.common import SchemaBase, new_id, utc_now
+from aats.schemas.common import SchemaBase, utc_now
 
 # 支持的命令枚举。
 #

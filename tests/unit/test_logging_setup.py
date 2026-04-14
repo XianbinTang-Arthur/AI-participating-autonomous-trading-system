@@ -118,7 +118,6 @@ class TestJSONFormatter(unittest.TestCase):
 
     def test_timestamp_iso8601_utc(self) -> None:
         """时间戳应为 ISO 8601 毫秒精度 UTC 格式。"""
-        import re
 
         record = self._make_record()
         data = json.loads(self.formatter.format(record))

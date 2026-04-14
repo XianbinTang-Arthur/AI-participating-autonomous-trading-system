@@ -80,7 +80,7 @@ def main() -> None:
     # 显示
     summary = index["summary"]
     print()
-    print(f"=== Active Round Index ===")
+    print("=== Active Round Index ===")
     print(f"Total rounds: {summary['total_rounds']}")
     print(f"Status distribution: {json.dumps(summary['status_distribution'])}")
     print(f"Phases: {', '.join(summary['phases_with_rounds']) or 'none'}")

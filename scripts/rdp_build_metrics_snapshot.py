@@ -59,7 +59,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(snapshot, indent=2, ensure_ascii=False))
     else:
-        print(f"RDP Metrics Snapshot")
+        print("RDP Metrics Snapshot")
         print(f"  ID:        {snapshot['snapshot_id']}")
         print(f"  Generated: {snapshot['generated_at']}")
         filt = snapshot.get("filter", {})

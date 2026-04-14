@@ -372,46 +372,46 @@ def _generate_review_md(data: dict) -> str:
     s = data.get("summary", {})
     lines = [
         f"# {data.get('window', '').capitalize()} Review Report",
-        f"",
+        "",
         f"**Review ID:** {data.get('review_id')}",
         f"**Period:** {data.get('window_start', '?')} ~ {data.get('window_end', '?')}",
         f"**Generated:** {data.get('generated_at')}",
-        f"",
-        f"## Summary",
-        f"",
-        f"| Metric | Value |",
-        f"|--------|-------|",
+        "",
+        "## Summary",
+        "",
+        "| Metric | Value |",
+        "|--------|-------|",
         f"| Releases | {s.get('total_releases', 0)} (success: {s.get('successful_releases', 0)}) |",
         f"| Applies | {s.get('total_applies', 0)} |",
         f"| Rollbacks | {s.get('total_rollbacks', 0)} (ratio: {s.get('rollback_ratio', 0):.1%}) |",
         f"| Workflow Runs | {s.get('workflow_runs', 0)} (success: {s.get('workflow_success', 0)}) |",
         f"| Open Failures | {s.get('open_failures', 0)} |",
-        f"",
+        "",
     ]
 
     # Effectiveness
     eff = s.get("effectiveness", {})
     if eff.get("total_evaluated", 0) > 0:
         lines.extend([
-            f"## Release Effectiveness",
-            f"",
-            f"| Result | Count |",
-            f"|--------|-------|",
+            "## Release Effectiveness",
+            "",
+            "| Result | Count |",
+            "|--------|-------|",
             f"| Effective | {eff.get('effective', 0)} |",
             f"| Mixed | {eff.get('mixed', 0)} |",
             f"| Ineffective | {eff.get('ineffective', 0)} |",
             f"| Insufficient Evidence | {eff.get('insufficient_evidence', 0)} |",
-            f"",
+            "",
         ])
 
     # Combo ranking
     ranking = data.get("combo_ranking", [])
     if ranking:
         lines.extend([
-            f"## Family / Timeframe Ranking",
-            f"",
-            f"| Combo | Releases | Success | Effective | Ineffective |",
-            f"|-------|----------|---------|-----------|-------------|",
+            "## Family / Timeframe Ranking",
+            "",
+            "| Combo | Releases | Success | Effective | Ineffective |",
+            "|-------|----------|---------|-----------|-------------|",
         ])
         for c in ranking:
             lines.append(
@@ -427,8 +427,8 @@ def _generate_review_md(data: dict) -> str:
     suggestions = data.get("improvement_suggestions", [])
     if suggestions:
         lines.extend([
-            f"## Improvement Suggestions",
-            f"",
+            "## Improvement Suggestions",
+            "",
         ])
         for sg in suggestions:
             lines.append(

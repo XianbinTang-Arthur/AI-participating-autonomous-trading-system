@@ -13,7 +13,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from aats.data_platform.models import candle_table_name, funding_table_name
+from aats.data_platform.models import funding_table_name
 
 
 def load_silver_funding(

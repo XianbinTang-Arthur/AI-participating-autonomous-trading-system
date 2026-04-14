@@ -55,6 +55,8 @@ def make_context(
     recent_fee_drag_ratio: float = 0.0,
     recent_churn_ratio: float = 0.0,
     leg_strategy_health: dict[str, dict[str, object]] | None = None,
+    market_last_price: float = 0.0,
+    available_trading_equity: float = 0.0,
 ) -> DecisionContext:
     now = as_of_ts or utc_now()
     derived_long_qty = (
@@ -156,6 +158,8 @@ def make_context(
         leg_strategy_health=health_payload,
         strategy_guardrail_flags=[],
         strategy_cooldowns={},
+        market_last_price=Decimal(str(market_last_price)),
+        available_trading_equity=Decimal(str(available_trading_equity)),
     )
 
 

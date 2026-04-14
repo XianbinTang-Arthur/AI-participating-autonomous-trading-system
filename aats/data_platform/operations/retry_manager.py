@@ -6,14 +6,11 @@
 from __future__ import annotations
 
 import subprocess
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from aats.data_platform.operations.failure_registry import (
     find_failure,
-    load_failures,
     record_retry_attempt,
 )
 from aats.data_platform.operations.workflow_dispatcher import (

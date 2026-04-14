@@ -65,7 +65,7 @@ def main() -> int:
 
         eff = s.get("effectiveness", {})
         if eff.get("total_evaluated", 0) > 0:
-            print(f"  Effectiveness:")
+            print("  Effectiveness:")
             print(f"    Effective: {eff.get('effective', 0)}")
             print(f"    Mixed:     {eff.get('mixed', 0)}")
             print(f"    Ineffect:  {eff.get('ineffective', 0)}")
@@ -74,7 +74,7 @@ def main() -> int:
 
         ranking = review.get("combo_ranking", [])
         if ranking:
-            print(f"  Family/Timeframe Ranking:")
+            print("  Family/Timeframe Ranking:")
             for c in ranking:
                 print(
                     f"    {c.get('combo_key', '?')}: "

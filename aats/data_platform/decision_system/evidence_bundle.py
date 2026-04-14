@@ -294,8 +294,6 @@ def collect_phase3_evidence(
 
             evidence["round_count"] += 1
             # 跳过 deprecated
-            combos = manifest.get("combos", [])
-            statuses = {c.get("status") for c in combos}
             round_status = manifest.get("overall_status", manifest.get("status"))
             if round_status in _UNTRUSTED_STATUSES:
                 evidence["skipped_untrusted"] += 1

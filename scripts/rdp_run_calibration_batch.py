@@ -189,7 +189,6 @@ def _run_single_experiment(
     from aats.data_platform.replay.diagnostics.replay_diagnostics import compute_diagnostics
     from aats.data_platform.replay.registry.experiment_registry import (
         create_experiment,
-        mark_experiment_failed,
         mark_experiment_running,
         mark_experiment_succeeded,
         upsert_experiment_summary,

@@ -17,7 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from aats.data_platform.config import ResearchPlatformSettings
-from aats.data_platform.jobs.checkpoint_manager import advance_checkpoint, get_checkpoint, upsert_checkpoint
+from aats.data_platform.jobs.checkpoint_manager import get_checkpoint, upsert_checkpoint
 from aats.data_platform.jobs.run_registry import (
     create_ingest_run,
     create_run_item,

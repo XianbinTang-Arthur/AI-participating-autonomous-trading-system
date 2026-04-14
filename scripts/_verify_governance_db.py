@@ -20,7 +20,7 @@ pw = os.environ.get("POSTGRES_PASSWORD", "123456")
 db_url = f"postgresql+psycopg://{user}:{pw}@localhost:5432/aats_research"
 os.environ["AATS_ACTIVE_PARAMETER_DB_URL"] = db_url
 
-print(f"DB URL: ...@localhost:5432/aats_research")
+print("DB URL: ...@localhost:5432/aats_research")
 
 from sqlalchemy import create_engine, text
 from aats.data_platform.rdp_models import create_rdp_schema
@@ -53,7 +53,7 @@ if missing:
     engine.dispose()
     sys.exit(1)
 else:
-    print(f"\n[OK] 3 张新表全部存在")
+    print("\n[OK] 3 张新表全部存在")
 
 # Step 4: 检查当前数据量
 print("\n=== Step 3: current data ===")
