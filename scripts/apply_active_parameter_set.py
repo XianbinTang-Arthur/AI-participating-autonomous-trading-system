@@ -459,37 +459,11 @@ def action_clear(project_root: Path, args: argparse.Namespace) -> int:
         print("[ERROR] --combo 必须指定")
         return 1
 
-    active_dir = project_root / "configs" / "active_parameter_sets"
-    file_path = active_dir / f"{args.combo}.json"
-
-    if not file_path.exists():
-        print(f"[INFO] {args.combo} 没有 active parameter set")
-        return 0
-
     if args.dry_run:
-        print(f"[DRY RUN] 将删除: {file_path}")
+        print(f"[DRY RUN] 将清除: {args.combo}")
         return 0
 
-    file_path.unlink()
-    print(f"[OK] 已清除: {file_path}")
-
-    # 更新 active_parameter_registry.json（移除条目）
-    try:
-        from aats.bootstrap.active_parameters import (
-            load_active_parameter_registry,
-            save_active_parameter_registry,
-        )
-
-        reg = load_active_parameter_registry(project_root=project_root, skip_db=True)
-        active_sets = reg.get("active_sets", {})
-        if args.combo in active_sets:
-            del active_sets[args.combo]
-            save_active_parameter_registry(reg, project_root=project_root)
-            print(f"[OK] 已从 active_parameter_registry.json 移除 {args.combo}")
-    except Exception as exc:
-        print(f"[WARN] 更新 registry 文件失败: {exc}")
-
-    # DB 清除
+    # DB 清除（唯一数据来源）
     parts = args.combo.rsplit("_", 1)
     if len(parts) == 2:
         family, timeframe = parts[0], parts[1]
@@ -502,12 +476,19 @@ def action_clear(project_root: Path, args: argparse.Namespace) -> int:
 
                 with Session(engine) as session, session.begin():
                     db_clear_active_set(session, family, timeframe)
-                print("[OK] 已从数据库清除")
+                print(f"[OK] 已从数据库清除 {args.combo}")
             except Exception as exc:
-                print(f"[WARN] DB 清除失败: {exc}")
+                print(f"[ERROR] DB 清除失败: {exc}")
+                return 1
             finally:
                 if engine is not None:
                     engine.dispose()
+        else:
+            print("[ERROR] DB 不可用，无法清除")
+            return 1
+    else:
+        print(f"[ERROR] 无法解析 combo key: {args.combo}")
+        return 1
 
     _write_application_log(
         project_root,
@@ -668,7 +649,6 @@ def action_seed_db(project_root: Path, args: argparse.Namespace) -> int:
             print(f"  [SKIP] {dec_path} 不存在")
 
         # ── 4. active_parameter_registry.json → governance.active_parameter_sets ──
-        from aats.bootstrap.active_parameters import load_active_parameter_registry
         from aats.data_platform.governance.active_params_db import db_upsert_active_set
 
         # 清除旧 seed 历史记录（确保幂等）
@@ -676,7 +656,13 @@ def action_seed_db(project_root: Path, args: argparse.Namespace) -> int:
             "DELETE FROM governance.parameter_apply_history WHERE operation_type = 'seed'"
         ))
 
-        active_reg = load_active_parameter_registry(project_root=project_root, skip_db=True)
+        # 直接从文件读取（seed-db 的目的就是把文件数据导入 DB）
+        active_reg_path = project_root / "configs/active_parameter_sets/active_parameter_registry.json"
+        if active_reg_path.exists():
+            with active_reg_path.open(encoding="utf-8") as f:
+                active_reg = json.load(f)
+        else:
+            active_reg = {"active_sets": {}}
         for combo_key, entry in active_reg.get("active_sets", {}).items():
             parts = combo_key.rsplit("_", 1)
             family = parts[0] if len(parts) == 2 else combo_key

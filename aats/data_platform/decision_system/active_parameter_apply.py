@@ -9,17 +9,12 @@
   - apply 必须可回滚
   - recommendation 不能自动生效
 
-数据流 (DB 模式):
+数据流:
   approved recommendation
     → 解析 target_parameter_set_id
     → 从 parameter_registry 获取 values
     → DB 事务: UPSERT governance.active_parameter_sets + INSERT history
     → 一次提交，要么全成功要么全回滚
-
-数据流 (文件 fallback):
-  approved recommendation
-    → 写入 active_parameter_registry.json + per-file JSON
-    → 写入 apply history JSON
 
 回滚:
   → 从 history 查找上一个 active parameter set
@@ -39,23 +34,6 @@ from uuid import uuid4
 from sqlalchemy import text
 
 log = logging.getLogger(__name__)
-
-
-# ── DB 模式判断 ───────────────────────────────────────────────────
-
-def _use_db() -> bool:
-    """判断是否使用数据库模式（governance schema 存储 active parameters）.
-
-    当 RDP 数据库可用时优先走 DB；否则 fallback 到文件。
-    """
-    try:
-        from aats.data_platform.db import get_engine
-        engine = get_engine()
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1 FROM governance.active_parameter_sets LIMIT 0"))
-        return True
-    except Exception:
-        return False
 
 
 # ── 路径常量 ───────────────────────────────────────────────────────
@@ -227,58 +205,23 @@ def apply_approved_recommendation(
 
     op_id = _make_operation_id()
 
-    if _use_db():
-        # ── DB 模式：单事务原子写入 ──────────────────────────────
-        from aats.data_platform.db import get_session
-        from aats.data_platform.governance.active_params_db import (
-            db_append_history,
-            db_upsert_active_set,
-        )
+    # DB 单事务原子写入
+    from aats.data_platform.db import get_session
+    from aats.data_platform.governance.active_params_db import (
+        db_append_history,
+        db_upsert_active_set,
+    )
 
-        with get_session() as session:
-            # 查当前 active（用于 from_parameter_set_id）
-            existing = session.execute(
-                text("SELECT parameter_set_id FROM governance.active_parameter_sets WHERE family = :f AND timeframe = :t"),
-                {"f": family, "t": timeframe.lower()},
-            ).fetchone()
-            from_ps_id = existing.parameter_set_id if existing else None
+    with get_session() as session:
+        # 查当前 active（用于 from_parameter_set_id）
+        existing = session.execute(
+            text("SELECT parameter_set_id FROM governance.active_parameter_sets WHERE family = :f AND timeframe = :t"),
+            {"f": family, "t": timeframe.lower()},
+        ).fetchone()
+        from_ps_id = existing.parameter_set_id if existing else None
 
-            db_upsert_active_set(
-                session,
-                family=family,
-                timeframe=timeframe,
-                parameter_set_id=ps_id,
-                values=values,
-                source_round_id=target_ps.get("source_round_id"),
-                approval_recommendation_id=recommendation_id,
-                applied_by=f"rdp_apply ({actor})",
-            )
-            db_append_history(
-                session,
-                operation_id=op_id,
-                operation_type="apply",
-                family=family,
-                timeframe=timeframe,
-                from_parameter_set_id=from_ps_id,
-                to_parameter_set_id=ps_id,
-                recommendation_id=recommendation_id,
-                actor=actor,
-                notes=notes,
-            )
-            # session 退出 with 块时自动 commit
-    else:
-        # ── 文件 fallback ────────────────────────────────────────
-        from aats.bootstrap.active_parameters import (
-            load_active_parameter_registry,
-            upsert_active_registry,
-            write_active_parameter_set,
-        )
-
-        current_reg = load_active_parameter_registry(project_root=project_root)
-        current_entry = current_reg.get("active_sets", {}).get(combo_key, {})
-        from_ps_id = current_entry.get("parameter_set_id")
-
-        write_active_parameter_set(
+        db_upsert_active_set(
+            session,
             family=family,
             timeframe=timeframe,
             parameter_set_id=ps_id,
@@ -286,30 +229,20 @@ def apply_approved_recommendation(
             source_round_id=target_ps.get("source_round_id"),
             approval_recommendation_id=recommendation_id,
             applied_by=f"rdp_apply ({actor})",
-            project_root=project_root,
         )
-        upsert_active_registry(
+        db_append_history(
+            session,
+            operation_id=op_id,
+            operation_type="apply",
             family=family,
             timeframe=timeframe,
-            parameter_set_id=ps_id,
-            values=values,
-            project_root=project_root,
+            from_parameter_set_id=from_ps_id,
+            to_parameter_set_id=ps_id,
+            recommendation_id=recommendation_id,
+            actor=actor,
+            notes=notes,
         )
-
-        history = load_apply_history(project_root)
-        history.setdefault("operations", []).append({
-            "operation_id": op_id,
-            "operation_type": "apply",
-            "family": family,
-            "timeframe": timeframe,
-            "from_parameter_set_id": from_ps_id,
-            "to_parameter_set_id": ps_id,
-            "recommendation_id": recommendation_id,
-            "actor": actor,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "notes": notes,
-        })
-        save_apply_history(history, project_root)
+        # session 退出 with 块时自动 commit
 
     result["operation_id"] = op_id
     result["from_parameter_set_id"] = from_ps_id
@@ -343,40 +276,28 @@ def rollback_active_parameter_set(
 
     combo_key = f"{family}_{timeframe.lower()}"
 
+    from aats.data_platform.db import get_session
+    from aats.data_platform.governance.active_params_db import (
+        db_append_history,
+        db_get_previous_set_id,
+        db_upsert_active_set,
+    )
+
     # 1. 确定当前 active set
-    use_db = _use_db()
-    if use_db:
-        from aats.data_platform.db import get_session
-        from aats.data_platform.governance.active_params_db import (
-            db_append_history,
-            db_get_previous_set_id,
-            db_upsert_active_set,
-        )
-
-        with get_session() as session:
-            existing = session.execute(
-                text("SELECT parameter_set_id FROM governance.active_parameter_sets WHERE family = :f AND timeframe = :t"),
-                {"f": family, "t": timeframe.lower()},
-            ).fetchone()
-            from_ps_id = existing.parameter_set_id if existing else None
-    else:
-        from aats.bootstrap.active_parameters import load_active_parameter_registry
-
-        current_reg = load_active_parameter_registry(project_root=project_root)
-        current_entry = current_reg.get("active_sets", {}).get(combo_key, {})
-        from_ps_id = current_entry.get("parameter_set_id")
+    with get_session() as session:
+        existing = session.execute(
+            text("SELECT parameter_set_id FROM governance.active_parameter_sets WHERE family = :f AND timeframe = :t"),
+            {"f": family, "t": timeframe.lower()},
+        ).fetchone()
+        from_ps_id = existing.parameter_set_id if existing else None
 
     if not from_ps_id:
         return {"ok": False, "message": f"{combo_key} 没有当前 active parameter set"}
 
     # 2. 确定回滚目标
     if to_parameter_set_id is None:
-        if use_db:
-            with get_session() as session:
-                to_parameter_set_id = db_get_previous_set_id(session, family, timeframe)
-        else:
-            history = load_apply_history(project_root)
-            to_parameter_set_id = get_previous_parameter_set_id(history, family, timeframe)
+        with get_session() as session:
+            to_parameter_set_id = db_get_previous_set_id(session, family, timeframe)
         if to_parameter_set_id is None:
             return {
                 "ok": False,
@@ -418,65 +339,27 @@ def rollback_active_parameter_set(
 
     op_id = _make_operation_id()
 
-    if use_db:
-        with get_session() as session:
-            db_upsert_active_set(
-                session,
-                family=family,
-                timeframe=timeframe,
-                parameter_set_id=to_parameter_set_id,
-                values=values,
-                source_round_id=target_ps.get("source_round_id"),
-                applied_by=f"rdp_rollback ({actor})",
-            )
-            db_append_history(
-                session,
-                operation_id=op_id,
-                operation_type="rollback",
-                family=family,
-                timeframe=timeframe,
-                from_parameter_set_id=from_ps_id,
-                to_parameter_set_id=to_parameter_set_id,
-                actor=actor,
-                notes=notes or f"Rollback from {from_ps_id}",
-            )
-    else:
-        from aats.bootstrap.active_parameters import (
-            upsert_active_registry,
-            write_active_parameter_set,
-        )
-
-        write_active_parameter_set(
+    with get_session() as session:
+        db_upsert_active_set(
+            session,
             family=family,
             timeframe=timeframe,
             parameter_set_id=to_parameter_set_id,
             values=values,
             source_round_id=target_ps.get("source_round_id"),
             applied_by=f"rdp_rollback ({actor})",
-            project_root=project_root,
         )
-        upsert_active_registry(
+        db_append_history(
+            session,
+            operation_id=op_id,
+            operation_type="rollback",
             family=family,
             timeframe=timeframe,
-            parameter_set_id=to_parameter_set_id,
-            values=values,
-            project_root=project_root,
+            from_parameter_set_id=from_ps_id,
+            to_parameter_set_id=to_parameter_set_id,
+            actor=actor,
+            notes=notes or f"Rollback from {from_ps_id}",
         )
-
-        history = load_apply_history(project_root)
-        history.setdefault("operations", []).append({
-            "operation_id": op_id,
-            "operation_type": "rollback",
-            "family": family,
-            "timeframe": timeframe,
-            "from_parameter_set_id": from_ps_id,
-            "to_parameter_set_id": to_parameter_set_id,
-            "recommendation_id": None,
-            "actor": actor,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "notes": notes or f"Rollback from {from_ps_id}",
-        })
-        save_apply_history(history, project_root)
 
     result["operation_id"] = op_id
     result["message"] = f"已 rollback {combo_key}: {from_ps_id} → {to_parameter_set_id}"
@@ -498,69 +381,33 @@ def clear_active_parameter_set(
     combo_key = f"{family}_{timeframe.lower()}"
     op_id = None
 
-    if _use_db():
-        from aats.data_platform.db import get_session
-        from aats.data_platform.governance.active_params_db import (
-            db_append_history,
-            db_clear_active_set,
-        )
+    from aats.data_platform.db import get_session
+    from aats.data_platform.governance.active_params_db import (
+        db_append_history,
+        db_clear_active_set,
+    )
 
-        with get_session() as session:
-            existing = session.execute(
-                text("SELECT parameter_set_id FROM governance.active_parameter_sets WHERE family = :f AND timeframe = :t"),
-                {"f": family, "t": timeframe.lower()},
-            ).fetchone()
-            from_ps_id = existing.parameter_set_id if existing else None
+    with get_session() as session:
+        existing = session.execute(
+            text("SELECT parameter_set_id FROM governance.active_parameter_sets WHERE family = :f AND timeframe = :t"),
+            {"f": family, "t": timeframe.lower()},
+        ).fetchone()
+        from_ps_id = existing.parameter_set_id if existing else None
 
-            db_clear_active_set(session, family, timeframe)
-
-            if from_ps_id:
-                op_id = _make_operation_id()
-                db_append_history(
-                    session,
-                    operation_id=op_id,
-                    operation_type="clear",
-                    family=family,
-                    timeframe=timeframe,
-                    from_parameter_set_id=from_ps_id,
-                    actor=actor,
-                    notes=notes or f"Cleared {combo_key}",
-                )
-    else:
-        from aats.bootstrap.active_parameters import (
-            DEFAULT_ACTIVE_DIR,
-            load_active_parameter_registry,
-            save_active_parameter_registry,
-        )
-
-        reg = load_active_parameter_registry(project_root=project_root)
-        active_sets = reg.get("active_sets", {})
-        from_ps_id = active_sets.get(combo_key, {}).get("parameter_set_id")
-
-        if combo_key in active_sets:
-            del active_sets[combo_key]
-            save_active_parameter_registry(reg, project_root=project_root)
-
-        per_file = project_root / DEFAULT_ACTIVE_DIR / f"{combo_key}.json"
-        if per_file.exists():
-            per_file.unlink()
+        db_clear_active_set(session, family, timeframe)
 
         if from_ps_id:
             op_id = _make_operation_id()
-            history = load_apply_history(project_root)
-            history.setdefault("operations", []).append({
-                "operation_id": op_id,
-                "operation_type": "clear",
-                "family": family,
-                "timeframe": timeframe,
-                "from_parameter_set_id": from_ps_id,
-                "to_parameter_set_id": None,
-                "recommendation_id": None,
-                "actor": actor,
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "notes": notes or f"Cleared {combo_key}",
-            })
-            save_apply_history(history, project_root)
+            db_append_history(
+                session,
+                operation_id=op_id,
+                operation_type="clear",
+                family=family,
+                timeframe=timeframe,
+                from_parameter_set_id=from_ps_id,
+                actor=actor,
+                notes=notes or f"Cleared {combo_key}",
+            )
 
     result: dict[str, Any] = {"ok": True, "combo_key": combo_key, "message": f"已清除 {combo_key}"}
     if op_id:

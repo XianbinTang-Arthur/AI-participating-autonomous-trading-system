@@ -3,14 +3,14 @@
 P1-3 修复验证: 当 RDP JSON 中存在研究参数但 FAMILY_PARAMETER_MAPPINGS
 没有相应映射时 (如 DIRECTIONAL 映射不完整), 应记录 WARNING 并列出
 被丢弃的参数, 帮助快速定位 '研究输出但未注入生产' 的断链。
+
+数据来源已完全迁移到 PostgreSQL，所有测试通过 mock _try_load_from_db 注入数据。
 """
 from __future__ import annotations
 
-import json
 import logging
 import unittest
-from pathlib import Path
-from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from aats.bootstrap.active_parameters import (
     _RDP_CORE_RESEARCH_PARAMS,
@@ -20,115 +20,110 @@ from aats.bootstrap.active_parameters import (
 )
 
 
+def _make_db_result(values_by_combo: dict[str, dict]) -> dict:
+    """构造一个 _try_load_from_db 返回格式的 registry dict."""
+    active_sets = {
+        combo: {
+            "parameter_set_id": f"test_{combo}",
+            "family": combo.rsplit("_", 1)[0],
+            "timeframe": combo.rsplit("_", 1)[1],
+            "values": v,
+        }
+        for combo, v in values_by_combo.items()
+    }
+    return {"generated_at": None, "active_sets": active_sets}
+
+
 class TestBuildSettingsOverridesMappingGap(unittest.TestCase):
     """验证 DIRECTIONAL 家族映射不完整时的运行时诊断能力。"""
 
-    def _write_registry(self, tmp: Path, values_by_combo: dict[str, dict]) -> Path:
-        active_sets = {
-            combo: {
-                "parameter_set_id": f"test_{combo}",
-                "family": combo.split("_")[0],
-                "timeframe": combo.split("_")[1],
-                "values": v,
-            }
-            for combo, v in values_by_combo.items()
-        }
-        registry_path = tmp / "registry.json"
-        registry_path.write_text(
-            json.dumps({"generated_at": "2026-04-06T00:00:00Z", "active_sets": active_sets}),
-            encoding="utf-8",
-        )
-        return registry_path
-
     def test_warning_emitted_for_directional_mapping_gap(self) -> None:
-        """DIRECTIONAL 家族的 JSON 含核心研究参数但缺映射时应 WARN。"""
-        with TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            registry_path = self._write_registry(
-                tmp,
-                {
-                    # directional 家族 JSON 包含 entry_threshold 等核心参数,
-                    # 但 PARAMETER_MAPPING_DIRECTIONAL 只映射 3 项, 这 5 项都会被丢弃
-                    "directional_15m": {
-                        "entry_threshold": 0.45,
-                        "close_threshold": 0.20,
-                        "failed_thesis_net_edge_bps": -1.0,
-                        "de_risk_net_edge_bps": 2.0,
-                        "min_hold_seconds": 300.0,
-                        # 这一项应被映射（不出现在 dropped 中）
-                        "directional_trend_weight": 0.7,
-                    },
-                },
-            )
+        """DIRECTIONAL 家族的 DB 数据含核心研究参数但缺映射时应 WARN。"""
+        db_result = _make_db_result({
+            # directional 家族包含 entry_threshold 等核心参数,
+            # 但 PARAMETER_MAPPING_DIRECTIONAL 只映射 3 项, 这 5 项都会被丢弃
+            "directional_15m": {
+                "entry_threshold": 0.45,
+                "close_threshold": 0.20,
+                "failed_thesis_net_edge_bps": -1.0,
+                "de_risk_net_edge_bps": 2.0,
+                "min_hold_seconds": 300.0,
+                # 这一项应被映射（不出现在 dropped 中）
+                "directional_trend_weight": 0.7,
+            },
+        })
 
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=db_result,
+        ):
             with self.assertLogs(
                 "aats.bootstrap.active_parameters",
                 level=logging.WARNING,
             ) as cm:
                 overrides = build_settings_overrides(
-                    registry_path=registry_path,
+                    db_url="mock://db",
                 )
 
-            # 核心参数被丢弃，WARNING 必须被记录
-            warning_records = [
-                r for r in cm.records if r.levelno == logging.WARNING
-            ]
-            self.assertTrue(warning_records, "应至少触发一条 WARNING")
+        # 核心参数被丢弃，WARNING 必须被记录
+        warning_records = [
+            r for r in cm.records if r.levelno == logging.WARNING
+        ]
+        self.assertTrue(warning_records, "应至少触发一条 WARNING")
 
-            warning_text = " ".join(r.getMessage() for r in warning_records)
-            self.assertIn("directional_15m", warning_text)
-            # 核心参数必须在 dropped 列表中
-            self.assertIn("entry_threshold", warning_text)
-            self.assertIn("close_threshold", warning_text)
-            self.assertIn("failed_thesis_net_edge_bps", warning_text)
-            self.assertIn("de_risk_net_edge_bps", warning_text)
-            self.assertIn("min_hold_seconds", warning_text)
-            # replay-only 参数不应被列为缺失
-            self.assertNotIn("directional_trend_weight", warning_text)
+        warning_text = " ".join(r.getMessage() for r in warning_records)
+        self.assertIn("directional_15m", warning_text)
+        # 核心参数必须在 dropped 列表中
+        self.assertIn("entry_threshold", warning_text)
+        self.assertIn("close_threshold", warning_text)
+        self.assertIn("failed_thesis_net_edge_bps", warning_text)
+        self.assertIn("de_risk_net_edge_bps", warning_text)
+        self.assertIn("min_hold_seconds", warning_text)
+        # replay-only 参数不应被列为缺失
+        self.assertNotIn("directional_trend_weight", warning_text)
 
-            # overrides 应当包含 directional_trend_weight 的映射结果
-            self.assertIn("strategy_entry_alpha_min", overrides)
+        # overrides 应当包含 directional_trend_weight 的映射结果
+        self.assertIn("strategy_entry_alpha_min", overrides)
 
     def test_no_warning_for_independent_full_mapping(self) -> None:
         """INDEPENDENT 家族映射完整, 不应触发 WARNING。"""
-        with TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            registry_path = self._write_registry(
-                tmp,
-                {
-                    "independent_15m": {
-                        "entry_threshold": 0.25,
-                        "close_threshold": 0.10,
-                        "failed_thesis_net_edge_bps": -1.0,
-                        "catastrophic_failed_thesis_buffer_bps": 3.0,
-                        "de_risk_net_edge_bps": 2.0,
-                        "min_hold_seconds": 120,
-                        "expected_slippage_buffer_bps": 0.5,
-                        "expected_execution_buffer_bps": 0.5,
-                        "min_safe_net_edge_bps": 2.0,
-                        # cost_config 相关, 属 replay-only 白名单
-                        "taker_fee_bps": 5.0,
-                        "slippage_bps": 2.0,
-                    },
-                },
-            )
+        db_result = _make_db_result({
+            "independent_15m": {
+                "entry_threshold": 0.25,
+                "close_threshold": 0.10,
+                "failed_thesis_net_edge_bps": -1.0,
+                "catastrophic_failed_thesis_buffer_bps": 3.0,
+                "de_risk_net_edge_bps": 2.0,
+                "min_hold_seconds": 120,
+                "expected_slippage_buffer_bps": 0.5,
+                "expected_execution_buffer_bps": 0.5,
+                "min_safe_net_edge_bps": 2.0,
+                # cost_config 相关, 属 replay-only 白名单
+                "taker_fee_bps": 5.0,
+                "slippage_bps": 2.0,
+            },
+        })
 
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=db_result,
+        ):
             with self.assertLogs(
                 "aats.bootstrap.active_parameters",
                 level=logging.INFO,
             ) as cm:
                 _ = build_settings_overrides(
-                    registry_path=registry_path,
+                    db_url="mock://db",
                 )
 
-            warning_records = [
-                r for r in cm.records if r.levelno == logging.WARNING
-            ]
-            self.assertFalse(
-                warning_records,
-                f"INDEPENDENT 映射完整, 不应触发 WARNING, 实际触发: "
-                f"{[r.getMessage() for r in warning_records]}",
-            )
+        warning_records = [
+            r for r in cm.records if r.levelno == logging.WARNING
+        ]
+        self.assertFalse(
+            warning_records,
+            f"INDEPENDENT 映射完整, 不应触发 WARNING, 实际触发: "
+            f"{[r.getMessage() for r in warning_records]}",
+        )
 
     def test_core_research_params_cover_replay_override_fields(self) -> None:
         """核心研究参数白名单应覆盖 ReplayParameterOverrides 的主要字段。"""
@@ -168,307 +163,140 @@ class TestBuildSettingsOverridesMappingGap(unittest.TestCase):
 class TestTimeframeFilterRegression(unittest.TestCase):
     """P1-2 回归: enabled_decision_timeframes 必须过滤非活跃时间框架。
 
-    场景: registry 同时包含 independent_15m 和 independent_1h，两者的
+    场景: DB 同时包含 independent_15m 和 independent_1h，两者的
     entry_threshold 映射到同一个 AATSSettings 字段。如果 timeframe 过滤
     失效，后加载的 1h 值会覆盖当前实盘使用的 15m 值。
     """
-
-    def _write_registry(self, tmp: Path, values_by_combo: dict[str, dict]) -> Path:
-        active_sets = {
-            combo: {
-                "parameter_set_id": f"test_{combo}",
-                "family": combo.rsplit("_", 1)[0],
-                "timeframe": combo.rsplit("_", 1)[1],
-                "values": v,
-            }
-            for combo, v in values_by_combo.items()
-        }
-        registry_path = tmp / "registry.json"
-        registry_path.write_text(
-            json.dumps({"generated_at": "2026-04-11T00:00:00Z", "active_sets": active_sets}),
-            encoding="utf-8",
-        )
-        return registry_path
 
     def test_15m_not_overridden_by_1h(self) -> None:
         """apply 后 entry_threshold 应来自 15m 而非 1h。"""
         from aats.bootstrap.active_parameters import apply_active_parameters_to_settings
 
-        with TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            registry_path = self._write_registry(
-                tmp,
-                {
-                    "independent_15m": {"entry_threshold": 0.25},
-                    "independent_1h": {"entry_threshold": 0.99},
-                },
-            )
+        db_result = _make_db_result({
+            "independent_15m": {"entry_threshold": 0.25},
+            "independent_1h": {"entry_threshold": 0.99},
+        })
+
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=db_result,
+        ):
             base_settings: dict = {
                 "active_parameters_enabled": True,
-                "active_parameter_registry_path": str(registry_path),
-                "active_parameter_db_url": None,
+                "active_parameter_registry_path": None,
+                "active_parameter_db_url": "mock://db",
                 "enabled_decision_timeframes": ("15m",),
             }
-            merged = apply_active_parameters_to_settings(
-                base_settings, project_root=tmp,
-            )
-            target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
-            self.assertEqual(
-                merged[target_field],
-                0.25,
-                f"{target_field} 应为 15m 的 0.25，而非 1h 的 0.99",
-            )
+            merged = apply_active_parameters_to_settings(base_settings)
+
+        target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
+        self.assertEqual(
+            merged[target_field],
+            0.25,
+            f"{target_field} 应为 15m 的 0.25，而非 1h 的 0.99",
+        )
 
     def test_1h_values_used_when_1h_enabled(self) -> None:
         """当 enabled_decision_timeframes=('1h',) 时应使用 1h 参数。"""
         from aats.bootstrap.active_parameters import apply_active_parameters_to_settings
 
-        with TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            registry_path = self._write_registry(
-                tmp,
-                {
-                    "independent_15m": {"entry_threshold": 0.25},
-                    "independent_1h": {"entry_threshold": 0.99},
-                },
-            )
+        db_result = _make_db_result({
+            "independent_15m": {"entry_threshold": 0.25},
+            "independent_1h": {"entry_threshold": 0.99},
+        })
+
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=db_result,
+        ):
             base_settings: dict = {
                 "active_parameters_enabled": True,
-                "active_parameter_registry_path": str(registry_path),
-                "active_parameter_db_url": None,
+                "active_parameter_registry_path": None,
+                "active_parameter_db_url": "mock://db",
                 "enabled_decision_timeframes": ("1h",),
             }
-            merged = apply_active_parameters_to_settings(
-                base_settings, project_root=tmp,
-            )
-            target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
-            self.assertEqual(
-                merged[target_field],
-                0.99,
-                f"{target_field} 应为 1h 的 0.99",
-            )
+            merged = apply_active_parameters_to_settings(base_settings)
 
-
-class TestDbPartialFallbackRegression(unittest.TestCase):
-    """P2-1 回归: DB 返回部分 active sets 时必须从文件 registry 补齐缺失 combo。
-
-    场景: DB 只 seed 了 independent_1h，但文件 registry 包含
-    independent_15m + independent_1h。缺失的 15m 应从文件补齐。
-    """
-
-    def test_missing_combo_merged_from_file(self) -> None:
-        """DB 缺 independent_15m 时应从文件 registry 补齐。"""
-        from unittest.mock import patch
-        from aats.bootstrap.active_parameters import (
-            DEFAULT_ACTIVE_DIR,
-            DEFAULT_REGISTRY_FILENAME,
+        target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
+        self.assertEqual(
+            merged[target_field],
+            0.99,
+            f"{target_field} 应为 1h 的 0.99",
         )
 
-        with TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            # 构造文件 registry 包含 15m + 1h
-            registry_dir = tmp / DEFAULT_ACTIVE_DIR
-            registry_dir.mkdir(parents=True)
-            file_registry_path = registry_dir / DEFAULT_REGISTRY_FILENAME
-            file_registry_path.write_text(
-                json.dumps({
-                    "generated_at": "2026-04-11T00:00:00Z",
-                    "active_sets": {
-                        "independent_15m": {
-                            "parameter_set_id": "ps_file_15m",
-                            "family": "independent",
-                            "timeframe": "15m",
-                            "values": {"entry_threshold": 0.30},
-                        },
-                        "independent_1h": {
-                            "parameter_set_id": "ps_file_1h",
-                            "family": "independent",
-                            "timeframe": "1h",
-                            "values": {"entry_threshold": 0.80},
-                        },
-                    },
-                }),
-                encoding="utf-8",
-            )
 
-            # mock _try_load_from_db: 只返回 independent_1h
-            db_partial_result = {
-                "generated_at": None,
-                "active_sets": {
-                    "independent_1h": {
-                        "parameter_set_id": "ps_db_1h",
-                        "family": "independent",
-                        "timeframe": "1h",
-                        "values": {"entry_threshold": 0.90},
-                    },
-                },
-            }
+class TestDbOnlyRegression(unittest.TestCase):
+    """DB-only 模式回归测试。
+
+    文件 fallback 已移除，所有参数必须来自 DB。
+    DB 不可用时应 fail-soft 返回空 overrides。
+    """
+
+    def test_db_returns_data(self) -> None:
+        """DB 有数据时应正确产出 overrides。"""
+        db_result = _make_db_result({
+            "independent_15m": {
+                "parameter_set_id": "ps_db_15m",
+                "entry_threshold": 0.30,
+            },
+        })
+
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=db_result,
+        ):
+            overrides = build_settings_overrides(db_url="mock://db")
+
+        target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
+        self.assertIn(target_field, overrides)
+        self.assertEqual(overrides[target_field], 0.30)
+
+    def test_db_unavailable_returns_empty(self) -> None:
+        """DB 不可用时应返回空 overrides（fail-soft）。"""
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=None,
+        ):
+            overrides = build_settings_overrides()
+
+        self.assertEqual(overrides, {})
+
+    def test_try_load_called_only_once(self) -> None:
+        """_try_load_from_db 应只被调用 1 次，不再有文件 fallback 再次调用。"""
+        import os
+
+        db_result = _make_db_result({
+            "independent_1h": {"entry_threshold": 0.90},
+        })
+
+        call_count = 0
+        original_env = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+
+        def _mock_try_load(db_url=None):
+            nonlocal call_count
+            call_count += 1
+            return db_result
+
+        try:
+            os.environ["AATS_ACTIVE_PARAMETER_DB_URL"] = "postgresql://mock:5432/test"
             with patch(
                 "aats.bootstrap.active_parameters._try_load_from_db",
-                return_value=db_partial_result,
+                side_effect=_mock_try_load,
             ):
                 overrides = build_settings_overrides(
-                    project_root=tmp,
-                    db_url="mock://db",
+                    timeframes=["15m"],
                 )
+        finally:
+            if original_env is None:
+                os.environ.pop("AATS_ACTIVE_PARAMETER_DB_URL", None)
+            else:
+                os.environ["AATS_ACTIVE_PARAMETER_DB_URL"] = original_env
 
-            target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
-            # 两个 combo 都应该产出 overrides。
-            # 因 15m 和 1h 映射到同一字段，最终值取决于遍历顺序；
-            # 关键断言：target_field 必须存在（代表 15m 补齐成功参与了映射）。
-            self.assertIn(
-                target_field,
-                overrides,
-                "entry_threshold 对应的 settings 字段应存在于 overrides 中",
-            )
-
-    def test_no_file_merge_without_db(self) -> None:
-        """非 DB 路径下不应触发额外的文件 merge。"""
-        with TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            registry_path = tmp / "registry.json"
-            registry_path.write_text(
-                json.dumps({
-                    "generated_at": "2026-04-11T00:00:00Z",
-                    "active_sets": {
-                        "independent_15m": {
-                            "parameter_set_id": "ps_15m",
-                            "family": "independent",
-                            "timeframe": "15m",
-                            "values": {"entry_threshold": 0.25},
-                        },
-                    },
-                }),
-                encoding="utf-8",
-            )
-
-            with self.assertLogs(
-                "aats.bootstrap.active_parameters", level=logging.INFO,
-            ) as cm:
-                result = build_settings_overrides(
-                    registry_path=registry_path,
-                )
-
-            # overrides 应包含 15m 的参数（基本健全性）
-            target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
-            self.assertIn(target_field, result)
-
-            # 不应有 "db_partial" 的 WARNING
-            warning_records = [
-                r for r in cm.records if r.levelno == logging.WARNING
-            ]
-            partial_warnings = [
-                r for r in warning_records
-                if "db_partial" in r.getMessage()
-            ]
-            self.assertFalse(
-                partial_warnings,
-                "非 DB 路径不应触发 active_parameter_db_partial WARNING",
-            )
-
-
-class TestDbEnvVarFallbackRegression(unittest.TestCase):
-    """P1 回归: AATS_ACTIVE_PARAMETER_DB_URL 环境变量已设置时，
-    DB partial fallback 必须走文件路径补齐，不能再读回同一份 DB。
-
-    此前的 bug: build_settings_overrides 中的 fallback 调用
-    load_all_active_parameter_sets() → load_active_parameter_registry()
-    → _try_load_from_db(None) → 读到 env var → 再次拿到相同 partial DB。
-    修复: skip_db=True 旁路 DB 读取。
-    """
-
-    def test_env_var_db_partial_still_merges_file(self) -> None:
-        """设置 AATS_ACTIVE_PARAMETER_DB_URL 后，DB 只返回 1h，
-        文件有 15m，build_settings_overrides(timeframes=['15m']) 必须
-        返回 15m 的参数（而非空 dict）。"""
-        import os
-        from unittest.mock import patch
-        from aats.bootstrap.active_parameters import (
-            DEFAULT_ACTIVE_DIR,
-            DEFAULT_REGISTRY_FILENAME,
+        # _try_load_from_db 应只被调用 1 次
+        self.assertEqual(
+            call_count, 1,
+            f"_try_load_from_db 应只被调用 1 次，实际 {call_count} 次",
         )
-
-        with TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            # 构造文件 registry 包含 15m
-            registry_dir = tmp / DEFAULT_ACTIVE_DIR
-            registry_dir.mkdir(parents=True)
-            file_registry_path = registry_dir / DEFAULT_REGISTRY_FILENAME
-            file_registry_path.write_text(
-                json.dumps({
-                    "generated_at": "2026-04-11T00:00:00Z",
-                    "active_sets": {
-                        "independent_15m": {
-                            "parameter_set_id": "ps_file_15m",
-                            "family": "independent",
-                            "timeframe": "15m",
-                            "values": {"entry_threshold": 0.30},
-                        },
-                    },
-                }),
-                encoding="utf-8",
-            )
-
-            # DB 只返回 independent_1h（模拟 partial seed）
-            db_partial = {
-                "generated_at": None,
-                "active_sets": {
-                    "independent_1h": {
-                        "parameter_set_id": "ps_db_1h",
-                        "family": "independent",
-                        "timeframe": "1h",
-                        "values": {"entry_threshold": 0.90},
-                    },
-                },
-            }
-
-            # 关键：设置环境变量模拟生产环境，同时 mock DB 返回 partial 结果。
-            # _try_load_from_db 在首次调用（build_settings_overrides 主路径）
-            # 返回 partial；在 fallback 路径因 skip_db=True 应被跳过。
-            call_count = 0
-            original_env = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
-
-            def _mock_try_load(db_url=None):
-                nonlocal call_count
-                call_count += 1
-                # 首次调用返回 partial DB；后续调用如果仍被触发说明 skip_db 没生效
-                return db_partial
-
-            try:
-                os.environ["AATS_ACTIVE_PARAMETER_DB_URL"] = "postgresql://mock:5432/test"
-                with patch(
-                    "aats.bootstrap.active_parameters._try_load_from_db",
-                    side_effect=_mock_try_load,
-                ):
-                    overrides = build_settings_overrides(
-                        project_root=tmp,
-                        timeframes=["15m"],
-                    )
-            finally:
-                if original_env is None:
-                    os.environ.pop("AATS_ACTIVE_PARAMETER_DB_URL", None)
-                else:
-                    os.environ["AATS_ACTIVE_PARAMETER_DB_URL"] = original_env
-
-            # _try_load_from_db 应只被调用 1 次（主路径），
-            # fallback 路径因 skip_db=True 不再调用。
-            self.assertEqual(
-                call_count, 1,
-                f"_try_load_from_db 应只被调用 1 次，实际 {call_count} 次"
-                "（fallback 路径 skip_db=True 未生效？）",
-            )
-
-            target_field = PARAMETER_MAPPING_INDEPENDENT["entry_threshold"]
-            # timeframes=['15m'] 过滤后只剩 15m combo（来自文件 fallback）
-            self.assertIn(
-                target_field, overrides,
-                "设置 AATS_ACTIVE_PARAMETER_DB_URL 后 DB partial fallback "
-                "应从文件补齐 15m 参数",
-            )
-            self.assertEqual(
-                overrides[target_field], 0.30,
-                "entry_threshold 应来自文件 registry 的 15m (0.30)",
-            )
 
 
 if __name__ == "__main__":

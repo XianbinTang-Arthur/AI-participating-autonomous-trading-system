@@ -9,12 +9,11 @@
       < active parameter set          ← 本模块负责
       < runtime emergency override
 
-支持两种存储格式:
-  1. 单文件 registry:  configs/active_parameter_sets/active_parameter_registry.json
-  2. 多文件模式:       configs/active_parameter_sets/<family>_<timeframe>.json
+唯一数据来源: governance.active_parameter_sets (PostgreSQL)
+治理层 (governance.active_decisions) 控制参数启用/暂停。
 
 API:
-  load_active_parameter_registry(path) -> dict
+  load_active_parameter_registry(db_url) -> dict
   get_active_parameters(registry, family, timeframe) -> dict
   merge_active_parameters(base_params, active_params) -> dict
   build_settings_overrides(...) -> dict[str, Any]
@@ -22,7 +21,6 @@ API:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 from datetime import datetime, timezone
@@ -283,20 +281,15 @@ _RDP_REPLAY_ONLY_PARAMS: frozenset[str] = frozenset({
     "directional_return_clamp_bps",
 })
 
-# ── 默认路径 ───────────────────────────────────────────────────────
+# ── 默认路径（兼容常量，外部调用方仍引用） ─────────────────────────
 
 DEFAULT_ACTIVE_DIR = "configs/active_parameter_sets"
 DEFAULT_REGISTRY_FILENAME = "active_parameter_registry.json"
 
 
 # ══════════════════════════════════════════════════════════════════
-#  单文件 Registry 格式（MVP 推荐）
+#  DB 数据源
 # ══════════════════════════════════════════════════════════════════
-
-
-def _default_registry_path(project_root: Path | str | None = None) -> Path:
-    root = Path(project_root) if project_root else Path(".")
-    return root / DEFAULT_ACTIVE_DIR / DEFAULT_REGISTRY_FILENAME
 
 
 def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
@@ -388,7 +381,7 @@ def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
 
 
 def load_active_parameter_registry(
-    path: Path | str | None = None,
+    _path: Path | str | None = None,
     *,
     project_root: Path | str | None = None,
     db_url: str | None = None,
@@ -396,16 +389,17 @@ def load_active_parameter_registry(
 ) -> dict[str, Any]:
     """加载 active parameter registry.
 
-    优先级:
-      1. 数据库 (AATS_ACTIVE_PARAMETER_DB_URL 或 db_url 参数)
-      2. JSON 文件 (configs/active_parameter_sets/active_parameter_registry.json)
-      3. 空 registry (fail-soft，不中断主系统)
+    唯一数据来源: PostgreSQL governance.active_parameter_sets。
+    DB 不可用时 fail-soft 返回空 registry，不中断主系统。
 
     Parameters
     ----------
+    _path : deprecated, ignored
+        历史遗留参数，保留签名兼容性，不再使用。
     skip_db : bool
-        为 True 时跳过 DB 路径直接读文件。用于 DB partial fallback
-        场景——已知 DB 结果不完整，需要强制走文件路径补齐缺失 combo。
+        为 True 时跳过 DB 路径，返回空 registry。用于 DB partial
+        fallback 场景——避免在 AATS_ACTIVE_PARAMETER_DB_URL 已设置的
+        环境中再次读到同一份 partial DB 结果。
 
     格式::
 
@@ -422,36 +416,22 @@ def load_active_parameter_registry(
           }
         }
     """
-    # 1. 尝试数据库（skip_db=True 时跳过，避免 fallback 路径再次读到同一份 partial DB）
-    if not skip_db:
-        db_result = _try_load_from_db(db_url)
-        if db_result is not None:
-            return db_result
+    if _path is not None:
+        log.debug(
+            "load_active_parameter_registry: path 参数已弃用，忽略 (got %s)", _path,
+        )
 
-    # 2. Fallback 到文件
-    if path is None:
-        path = _default_registry_path(project_root)
-    else:
-        path = Path(path)
-
-    if not path.exists():
-        log.info("active parameter registry 不存在: %s（使用默认配置）", path)
+    # skip_db=True 时直接返回空（用于 partial fallback 的文件补齐场景）
+    if skip_db:
         return {"generated_at": None, "active_sets": {}}
 
-    try:
-        with path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("无法加载 active parameter registry %s: %s（fallback 默认配置）", path, exc)
-        return {"generated_at": None, "active_sets": {}}
+    db_result = _try_load_from_db(db_url)
+    if db_result is not None:
+        return db_result
 
-    if "active_sets" not in data:
-        log.warning("active parameter registry %s 缺少 active_sets 字段", path)
-        return {"generated_at": data.get("generated_at"), "active_sets": {}}
-
-    loaded_count = len(data["active_sets"])
-    log.info("已加载 active parameter registry (文件): %s (%d active sets)", path, loaded_count)
-    return data
+    # DB 不可用时 fail-soft
+    log.info("active parameter registry: DB 不可用，返回空 registry（使用默认配置）")
+    return {"generated_at": None, "active_sets": {}}
 
 
 def get_active_parameters(
@@ -491,11 +471,15 @@ def save_active_parameter_registry(
     *,
     project_root: Path | str | None = None,
 ) -> Path:
-    """保存 active_parameter_registry.json（原子写入）."""
+    """保存 active_parameter_registry.json（原子写入）.
+
+    .. deprecated:: JSON 文件已不再是数据来源，保留供外部调用方过渡期使用。
+    """
     from aats.data_platform.governance._atomic_io import atomic_json_write
 
     if path is None:
-        path = _default_registry_path(project_root)
+        root = Path(project_root) if project_root else Path(".")
+        path = root / DEFAULT_ACTIVE_DIR / DEFAULT_REGISTRY_FILENAME
     else:
         path = Path(path)
 
@@ -507,37 +491,76 @@ def save_active_parameter_registry(
 
 
 # ══════════════════════════════════════════════════════════════════
-#  多文件模式（兼容上一版实现）
+#  写入函数（保留供外部调用方过渡期使用）
 # ══════════════════════════════════════════════════════════════════
 
 
-def _resolve_active_dir(project_root: Path | str | None = None) -> Path:
-    root = Path(project_root) if project_root else Path(".")
-    return root / DEFAULT_ACTIVE_DIR
-
-
-def load_active_parameter_set(
+def write_active_parameter_set(
+    *,
     family: str,
     timeframe: str,
-    *,
+    parameter_set_id: str,
+    values: dict[str, Any],
+    source_round_id: str | None = None,
+    approval_recommendation_id: str | None = None,
+    applied_by: str = "manual",
     project_root: Path | str | None = None,
-) -> dict[str, Any] | None:
-    """加载单个 family/timeframe 的 per-file active parameter set."""
-    active_dir = _resolve_active_dir(project_root)
+) -> Path:
+    """写入一个 active parameter set（per-file 模式）.
+
+    .. deprecated:: JSON 文件已不再是数据来源，保留供外部调用方过渡期使用。
+    """
+    from aats.data_platform.governance._atomic_io import atomic_json_write
+
+    root = Path(project_root) if project_root else Path(".")
+    active_dir = root / DEFAULT_ACTIVE_DIR
+    active_dir.mkdir(parents=True, exist_ok=True)
+
     combo_key = f"{family}_{timeframe.lower()}"
     file_path = active_dir / f"{combo_key}.json"
-    if not file_path.exists():
-        return None
-    try:
-        with file_path.open(encoding="utf-8") as f:
-            data = json.load(f)
-    except (json.JSONDecodeError, OSError) as exc:
-        log.warning("无法加载 active parameter set %s: %s", file_path, exc)
-        return None
-    if "values" not in data:
-        log.warning("active parameter set %s 缺少 values 字段", file_path)
-        return None
-    return data
+
+    data = {
+        "meta": {
+            "parameter_set_id": parameter_set_id,
+            "family": family,
+            "timeframe": timeframe,
+            "status": "active",
+            "source_round_id": source_round_id,
+            "applied_at": datetime.now(timezone.utc).isoformat(),
+            "applied_by": applied_by,
+            "approval_recommendation_id": approval_recommendation_id,
+        },
+        "values": dict(values),
+    }
+
+    atomic_json_write(data, file_path)
+    log.info("已写入 active parameter set: %s -> %s", combo_key, file_path)
+    return file_path
+
+
+def upsert_active_registry(
+    *,
+    family: str,
+    timeframe: str,
+    parameter_set_id: str,
+    values: dict[str, Any],
+    project_root: Path | str | None = None,
+) -> Path:
+    """更新或插入 active_parameter_registry.json 中的一个 combo.
+
+    .. deprecated:: JSON 文件已不再是数据来源，保留供外部调用方过渡期使用。
+    """
+    registry = load_active_parameter_registry(project_root=project_root)
+
+    combo_key = f"{family}_{timeframe.lower()}"
+    registry.setdefault("active_sets", {})[combo_key] = {
+        "parameter_set_id": parameter_set_id,
+        "family": family,
+        "timeframe": timeframe,
+        "values": dict(values),
+    }
+
+    return save_active_parameter_registry(registry, project_root=project_root)
 
 
 def load_all_active_parameter_sets(
@@ -545,76 +568,47 @@ def load_all_active_parameter_sets(
     project_root: Path | str | None = None,
     skip_db: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """加载所有 active parameter sets（registry 优先，per-file fallback）.
+    """加载所有 active parameter sets（DB-only）.
 
     Parameters
     ----------
     skip_db : bool
-        传递给 ``load_active_parameter_registry``。为 True 时强制走文件
-        路径，避免在 AATS_ACTIVE_PARAMETER_DB_URL 已设置的生产环境中
-        再次读到同一份 partial DB 结果。
+        传递给 ``load_active_parameter_registry``。为 True 时返回空 dict，
+        避免在 AATS_ACTIVE_PARAMETER_DB_URL 已设置的环境中再次读到同一份
+        partial DB 结果。
     """
-    # 优先尝试 registry（DB-first → 文件 → per-file fallback）
-    reg_path = _default_registry_path(project_root)
-    # 无论文件是否存在都尝试 registry loader（DB 可能有数据而文件不存在）
-    registry = load_active_parameter_registry(reg_path, skip_db=skip_db)
+    registry = load_active_parameter_registry(
+        project_root=project_root, skip_db=skip_db,
+    )
     active_sets = registry.get("active_sets", {})
-    if active_sets:
-            # 转换为与 per-file 兼容的格式
-            result: dict[str, dict[str, Any]] = {}
-            for combo_key, entry in active_sets.items():
-                meta: dict[str, Any] = {
-                    "parameter_set_id": entry.get("parameter_set_id", ""),
-                    "family": entry.get("family", ""),
-                    "timeframe": entry.get("timeframe", ""),
-                    "status": "active",
-                }
-                # 传递 recalibration 标记（如存在）
-                if entry.get("recalibration_needed"):
-                    meta["recalibration_needed"] = True
-                    meta["recalibration_reason"] = entry.get(
-                        "recalibration_reason", "unknown"
-                    )
-                    log.warning(
-                        "active parameter set %s 标记为需要重新校准 (reason: %s)，"
-                        "请重新运行 RDP pipeline 以获取修正后的参数",
-                        combo_key,
-                        meta["recalibration_reason"],
-                    )
-                result[combo_key] = {
-                    "meta": meta,
-                    "values": entry.get("values", {}),
-                }
-            return result
-
-    # Fallback: per-file 模式
-    active_dir = _resolve_active_dir(project_root)
-    if not active_dir.exists():
+    if not active_sets:
         return {}
 
-    result = {}
-    for file_path in sorted(active_dir.glob("*.json")):
-        if file_path.name == DEFAULT_REGISTRY_FILENAME:
-            continue
-        combo_key = file_path.stem
-        try:
-            with file_path.open(encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError):
-            continue
-        if "values" not in data:
-            continue
-        result[combo_key] = data
-        meta = data.get("meta", {})
-        if meta.get("recalibration_needed"):
+    # 转换为与 per-file 兼容的格式
+    result: dict[str, dict[str, Any]] = {}
+    for combo_key, entry in active_sets.items():
+        meta: dict[str, Any] = {
+            "parameter_set_id": entry.get("parameter_set_id", ""),
+            "family": entry.get("family", ""),
+            "timeframe": entry.get("timeframe", ""),
+            "status": "active",
+        }
+        # 传递 recalibration 标记（如存在）
+        if entry.get("recalibration_needed"):
+            meta["recalibration_needed"] = True
+            meta["recalibration_reason"] = entry.get(
+                "recalibration_reason", "unknown"
+            )
             log.warning(
                 "active parameter set %s 标记为需要重新校准 (reason: %s)，"
                 "请重新运行 RDP pipeline 以获取修正后的参数",
                 combo_key,
-                meta.get("recalibration_reason", "unknown"),
+                meta["recalibration_reason"],
             )
-        log.info("已加载 per-file active parameter: %s", combo_key)
-
+        result[combo_key] = {
+            "meta": meta,
+            "values": entry.get("values", {}),
+        }
     return result
 
 
@@ -654,86 +648,44 @@ def build_settings_overrides(
     这是 active parameter → settings 注入的核心函数。
     在 build_runtime() 中被调用。
 
-    加载优先级: DB (db_url / AATS_ACTIVE_PARAMETER_DB_URL) → registry 文件 → per-file。
+    唯一数据来源: DB (db_url / AATS_ACTIVE_PARAMETER_DB_URL)。
+
+    Parameters
+    ----------
+    registry_path : deprecated, ignored
+        历史遗留参数，保留签名兼容性，不再使用。
     """
-    # 统一走 load_active_parameter_registry（内含 DB→文件 fallback）
+    if registry_path is not None:
+        log.debug(
+            "build_settings_overrides: registry_path 参数已弃用，忽略 (got %s)",
+            registry_path,
+        )
+
+    # 统一走 load_active_parameter_registry（DB-only）
     registry = load_active_parameter_registry(
-        registry_path, project_root=project_root, db_url=db_url,
+        project_root=project_root, db_url=db_url,
     )
     all_sets_raw = registry.get("active_sets", {})
 
-    db_configured = bool(db_url or os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL"))
-
     # 治理层是否已接管参数管理（DB 查询时同步获取）
     governance_managed = registry.get("governance_managed", False)
-    paused_combos: set[str] = set(registry.get("paused_combos", []))
 
     if all_sets_raw:
         all_sets: dict[str, dict[str, Any]] = {}
         for k, v in all_sets_raw.items():
             all_sets[k] = {"values": v.get("values", {})}
-        # P2-1 fix: DB 部分缺失时，用文件 registry 补齐缺失的 combo。
-        # 场景：DB 只 seed 了 independent_1h 但缺少 independent_15m，
-        # 原代码因 all_sets_raw 非空而跳过文件 fallback，导致 15m 无参数。
-        # 注意：仅当 DB 是数据源时才做 merge。非 DB 路径下 registry 文件本身
-        # 就是权威来源，不需要额外合并。
-        # ── 治理旁路修复：被 governance pause 的 combo 不从文件补齐 ──
-        if db_configured:
-            file_sets = load_all_active_parameter_sets(
-                project_root=project_root, skip_db=True,
-            )
-            merged_from_file: list[str] = []
-            skipped_paused_merge: list[str] = []
-            for file_combo, file_data in file_sets.items():
-                if file_combo not in all_sets:
-                    if file_combo in paused_combos:
-                        skipped_paused_merge.append(file_combo)
-                        continue
-                    all_sets[file_combo] = file_data
-                    merged_from_file.append(file_combo)
-            if skipped_paused_merge:
-                log.info(
-                    "active_parameter_merge_skip_paused: 治理层已暂停 %d 个 combo (%s)，"
-                    "不从文件补齐",
-                    len(skipped_paused_merge),
-                    ", ".join(sorted(skipped_paused_merge)),
-                )
-            if merged_from_file:
-                log.warning(
-                    "active_parameter_db_partial: DB 缺少 %d 个 combo (%s)，"
-                    "已从文件 registry 补齐。请检查 DB seed 是否完整。",
-                    len(merged_from_file),
-                    ", ".join(sorted(merged_from_file)),
-                )
-    elif db_configured:
-        if governance_managed:
-            # ── 治理层已接管且结果为空 → 所有 combo 均被暂停/未启用 ──
-            # 这是治理层的主动决策，不应 fallback 到文件 registry。
-            log.info(
-                "active_parameter_governance_all_paused: "
-                "治理层已接管参数管理，当前所有 combo 均被暂停 (%s)，"
-                "不回退到文件 registry。策略将使用代码默认参数。",
-                ", ".join(sorted(paused_combos)) if paused_combos else "无明确 pause 记录",
-            )
-            all_sets = {}
-        else:
-            # DB 已配置但无治理层管理 → 可能是未 seed，保留 fallback
-            log.warning(
-                "active_parameter_db_empty: DB 已配置但返回零条 active sets 且无治理决策，"
-                "回退到文件 registry 避免策略参数静默退化"
-            )
-            all_sets = load_all_active_parameter_sets(
-                project_root=project_root, skip_db=True,
-            )
-            if not all_sets:
-                log.error(
-                    "active_parameter_fallback_also_empty: DB 和文件 registry 均无 "
-                    "active sets，independent 策略将使用代码默认参数。"
-                    "如果这是实盘环境，请尽快补充 seed 数据。"
-                )
+    elif governance_managed:
+        # ── 治理层已接管且结果为空 → 所有 combo 均被暂停/未启用 ──
+        paused_combos: set[str] = set(registry.get("paused_combos", []))
+        log.info(
+            "active_parameter_governance_all_paused: "
+            "治理层已接管参数管理，当前所有 combo 均被暂停 (%s)，"
+            "策略将使用代码默认参数。",
+            ", ".join(sorted(paused_combos)) if paused_combos else "无明确 pause 记录",
+        )
+        all_sets = {}
     else:
-        # 无 DB 配置时，尝试 per-file fallback
-        all_sets = load_all_active_parameter_sets(project_root=project_root)
+        all_sets = {}
 
     if not all_sets:
         return {}
@@ -894,73 +846,6 @@ def _validate_safe_edge_invariant(settings: dict[str, Any]) -> None:
             "请提高 min_safe_net_edge_bps 或降低 de_risk_net_edge_bps",
             safe_edge, min_safe, slippage_buf, exec_buf, de_risk,
         )
-
-
-# ══════════════════════════════════════════════════════════════════
-#  写入
-# ══════════════════════════════════════════════════════════════════
-
-
-def write_active_parameter_set(
-    *,
-    family: str,
-    timeframe: str,
-    parameter_set_id: str,
-    values: dict[str, Any],
-    source_round_id: str | None = None,
-    approval_recommendation_id: str | None = None,
-    applied_by: str = "manual",
-    project_root: Path | str | None = None,
-) -> Path:
-    """写入一个 active parameter set（per-file 模式）."""
-    from aats.data_platform.governance._atomic_io import atomic_json_write
-
-    active_dir = _resolve_active_dir(project_root)
-    active_dir.mkdir(parents=True, exist_ok=True)
-
-    combo_key = f"{family}_{timeframe.lower()}"
-    file_path = active_dir / f"{combo_key}.json"
-
-    data = {
-        "meta": {
-            "parameter_set_id": parameter_set_id,
-            "family": family,
-            "timeframe": timeframe,
-            "status": "active",
-            "source_round_id": source_round_id,
-            "applied_at": datetime.now(timezone.utc).isoformat(),
-            "applied_by": applied_by,
-            "approval_recommendation_id": approval_recommendation_id,
-        },
-        "values": dict(values),
-    }
-
-    atomic_json_write(data, file_path)
-    log.info("已写入 active parameter set: %s -> %s", combo_key, file_path)
-    return file_path
-
-
-def upsert_active_registry(
-    *,
-    family: str,
-    timeframe: str,
-    parameter_set_id: str,
-    values: dict[str, Any],
-    project_root: Path | str | None = None,
-) -> Path:
-    """更新或插入 active_parameter_registry.json 中的一个 combo."""
-    reg_path = _default_registry_path(project_root)
-    registry = load_active_parameter_registry(reg_path)
-
-    combo_key = f"{family}_{timeframe.lower()}"
-    registry.setdefault("active_sets", {})[combo_key] = {
-        "parameter_set_id": parameter_set_id,
-        "family": family,
-        "timeframe": timeframe,
-        "values": dict(values),
-    }
-
-    return save_active_parameter_registry(registry, reg_path)
 
 
 # ══════════════════════════════════════════════════════════════════
