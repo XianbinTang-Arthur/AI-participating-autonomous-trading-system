@@ -106,6 +106,8 @@ class DecisionContext(SchemaBase):
     leg_strategy_health: dict[str, dict[str, object]] = Field(default_factory=dict)
     strategy_guardrail_flags: list[str] = Field(default_factory=list)
     strategy_cooldowns: dict[str, float] = Field(default_factory=dict)
+    market_last_price: Decimal = Decimal("0")
+    available_trading_equity: Decimal = Decimal("0")
 
 class BaselineAssessment(SchemaBase):
     decision_id: str
@@ -353,6 +355,23 @@ class DecisionOutcome(SchemaBase):
     profile_control_source: ProfileControlSource | None = None
     ai_fallback_used: bool = False
     ai_degraded: bool = False
+    sizing_breakdown: PositionSizingBreakdown | None = None
+
+
+class PositionSizingBreakdown(SchemaBase):
+    sizing_mode: Literal["fixed_order_qty", "balance_aware"] = "fixed_order_qty"
+    available_equity: Decimal = Decimal("0")
+    margin_usage_fraction: Decimal = Decimal("0")
+    target_leverage: float = 1.0
+    leverage_bias: float = 1.0
+    last_price: Decimal = Decimal("0")
+    default_order_qty: Decimal = Decimal("0")
+    position_scale: Decimal = Decimal("0")
+    legacy_reference_qty: Decimal = Decimal("0")
+    balance_reference_qty: Decimal = Decimal("0")
+    resolved_reference_qty: Decimal = Decimal("0")
+    resolved_target_qty: Decimal = Decimal("0")
+    budgeted_notional: Decimal = Decimal("0")
 
 
 HedgeOverlayMode = Literal["protective", "opportunistic", "independent"]
@@ -510,4 +529,5 @@ class PositionTarget(SchemaBase):
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
     ai_decision_intent: AIDecisionIntent | None = None
     profile_control_decision: ProfileControlDecision | None = None
+    sizing_breakdown: PositionSizingBreakdown | None = None
     decision_outcome: DecisionOutcome | None = None

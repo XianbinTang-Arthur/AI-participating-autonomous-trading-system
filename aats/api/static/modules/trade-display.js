@@ -168,6 +168,7 @@ export function decisionDrawerRows(detail = {}, describeDecisionIntent) {
   const target = detail.position_target || {};
   const productType = inferTradeScene(target.product_type ? target : detail.decision_context || {});
   const intent = typeof describeDecisionIntent === "function" ? describeDecisionIntent(detail) : readableState(target.position_intent || "hold");
+  const sizingBreakdown = target.sizing_breakdown || target.sizingBreakdown || null;
   const commonRows = [
     ["交易标的", detail.decision_context?.symbol || "标的待确认", detail.decision_context?.timeframe || "周期待确认"],
     [productType === "derivatives" ? "仓位动作" : "买卖动作", intent, readableState(target.target_exposure_side, "目标方向待确认")],
@@ -179,7 +180,16 @@ export function decisionDrawerRows(detail = {}, describeDecisionIntent) {
   ];
   const sceneRows =
     productType === "derivatives"
-      ? [["保证金模式", readableState(target.margin_mode || detail.decision_context?.margin_mode, "保证金模式待确认"), `目标杠杆 ${formatNumber(target.target_leverage)} 倍`]]
+      ? [
+        ["保证金模式", readableState(target.margin_mode || detail.decision_context?.margin_mode, "保证金模式待确认"), `目标杠杆 ${formatNumber(target.target_leverage)} 倍`],
+        ...(sizingBreakdown
+          ? [[
+            "下单规模分解",
+            sizingBreakdownSummary(sizingBreakdown),
+            sizingBreakdownMeta(sizingBreakdown),
+          ]]
+          : []),
+      ]
       : [["交易场景", "现货", "现金买卖，不使用杠杆"]];
   return [
     ...commonRows,
@@ -246,6 +256,25 @@ function formatQuoteNotional(symbol, qty, price) {
   const quote = quoteAsset(symbol);
   const formatted = formatNumber(qtyNumber * priceNumber);
   return quote ? `${formatted} ${quote}` : formatted;
+}
+
+function sizingBreakdownSummary(sizingBreakdown = {}) {
+  const mode = String(sizingBreakdown.sizing_mode || sizingBreakdown.sizingMode || "").trim().toLowerCase();
+  const modeText = mode === "balance_aware" ? "余额感知" : "固定下单量";
+  return [
+    modeText,
+    `可用权益 ${formatNumber(sizingBreakdown.available_equity ?? sizingBreakdown.availableEquity, 4, "待确认")}`,
+    `价格 ${formatNumber(sizingBreakdown.last_price ?? sizingBreakdown.lastPrice, 4, "待确认")}`,
+    `目标 ${formatSigned(sizingBreakdown.resolved_target_qty ?? sizingBreakdown.resolvedTargetQty, 6, "待确认")}`,
+  ].join(" | ");
+}
+
+function sizingBreakdownMeta(sizingBreakdown = {}) {
+  return [
+    `保证金占用比例 ${formatNumber(sizingBreakdown.margin_usage_fraction ?? sizingBreakdown.marginUsageFraction, 4, "待确认")}`,
+    `杠杆 ${formatNumber(sizingBreakdown.target_leverage ?? sizingBreakdown.targetLeverage, 2, "待确认")} 倍`,
+    `基准 ${formatSigned(sizingBreakdown.legacy_reference_qty ?? sizingBreakdown.legacyReferenceQty, 6, "待确认")} -> ${formatSigned(sizingBreakdown.resolved_reference_qty ?? sizingBreakdown.resolvedReferenceQty, 6, "待确认")}`,
+  ].join(" | ");
 }
 
 function baseAsset(symbol) {

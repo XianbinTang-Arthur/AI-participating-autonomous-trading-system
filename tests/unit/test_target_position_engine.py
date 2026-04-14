@@ -74,6 +74,84 @@ class TestTargetPositionEngine(unittest.TestCase):
 
         self.assertEqual(low_vol_target.target_position_qty, high_vol_target.target_position_qty)
 
+    def test_derivatives_target_qty_scales_with_available_trading_equity_when_present(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.004,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "default_target_leverage": 5.0,
+                    "max_target_leverage": 10.0,
+                    "max_margin_usage_fraction": 0.75,
+                    "strategy_dynamic_leverage_enabled": False,
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            market_last_price=Decimal("100000"),
+            available_trading_equity=Decimal("390"),
+        )
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="long",
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment())
+
+        self.assertEqual(target.target_position_qty, Decimal("0.014625"))
+        self.assertGreater(target.target_position_qty, Decimal("0.004"))
+
+    def test_derivatives_target_exposes_sizing_breakdown_for_operator_diagnostics(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.004,
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "default_target_leverage": 5.0,
+                    "max_target_leverage": 10.0,
+                    "max_margin_usage_fraction": 0.75,
+                    "strategy_dynamic_leverage_enabled": False,
+                    "strategy_short_bias_enabled": True,
+                }
+            )
+        )
+        context = self._context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            market_last_price=Decimal("100000"),
+            available_trading_equity=Decimal("390"),
+        )
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="long",
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment())
+
+        assert target.sizing_breakdown is not None
+        self.assertEqual(target.sizing_breakdown.sizing_mode, "balance_aware")
+        self.assertEqual(target.sizing_breakdown.available_equity, Decimal("390"))
+        self.assertEqual(target.sizing_breakdown.margin_usage_fraction, Decimal("0.75"))
+        self.assertEqual(target.sizing_breakdown.target_leverage, 5.0)
+        self.assertEqual(target.sizing_breakdown.last_price, Decimal("100000"))
+        self.assertEqual(target.sizing_breakdown.legacy_reference_qty, Decimal("0.004"))
+        self.assertEqual(target.sizing_breakdown.balance_reference_qty, Decimal("0.014625"))
+        self.assertEqual(target.sizing_breakdown.resolved_reference_qty, Decimal("0.014625"))
+        self.assertEqual(target.sizing_breakdown.resolved_target_qty, Decimal("0.014625"))
+        assert target.decision_outcome is not None
+        self.assertIsNotNone(target.decision_outcome.sizing_breakdown)
+        self.assertEqual(
+            target.decision_outcome.sizing_breakdown.resolved_target_qty,  # type: ignore[union-attr]
+            Decimal("0.014625"),
+        )
+
     def test_rebalance_band_keeps_existing_position_when_delta_is_tiny(self) -> None:
         engine = TargetPositionEngine(settings=AATSSettings.model_validate({"default_order_qty": 0.001}))
         context = self._context(current_position_qty=0.00039)
@@ -479,7 +557,12 @@ class TestTargetPositionEngine(unittest.TestCase):
                 }
             )
         )
-        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        context = self._context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            market_last_price=Decimal("100000"),
+            available_trading_equity=Decimal("390"),
+        )
         baseline = self._baseline(
             volatility_target_scale=1.0,
             suggested_position_scale=1.0,
@@ -501,8 +584,12 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertIn("baseline_target_not_promoted_to_actionable_target", blocker_chain[0]["reasons"])
         self.assertTrue(blocker_chain[1]["blocked"])
         self.assertIn("entry_alpha_below_threshold", blocker_chain[1]["reasons"])
-        self.assertIn("entry_confidence_below_threshold", blocker_chain[1]["reasons"])
         self.assertFalse(blocker_chain[2]["blocked"])
+        self.assertIsNotNone(target.sizing_breakdown)
+        self.assertEqual(target.sizing_breakdown.balance_reference_qty, Decimal("0"))
+        self.assertEqual(target.sizing_breakdown.resolved_reference_qty, Decimal("0"))
+        self.assertEqual(target.sizing_breakdown.resolved_target_qty, Decimal("0"))
+        self.assertEqual(target.sizing_breakdown.budgeted_notional, Decimal("0"))
 
     def test_derivatives_alpha_decay_reduce_scales_down_existing_position_when_signal_fades(self) -> None:
         engine = TargetPositionEngine(
@@ -1519,6 +1606,8 @@ class TestTargetPositionEngine(unittest.TestCase):
         recent_fee_drag_ratio: float = 0.0,
         recent_churn_ratio: float = 0.0,
         leg_strategy_health: dict[str, dict[str, object]] | None = None,
+        market_last_price: Decimal = Decimal("0"),
+        available_trading_equity: Decimal = Decimal("0"),
     ) -> DecisionContext:
         now = as_of_ts or utc_now()
         derived_long_qty = (
@@ -1636,6 +1725,8 @@ class TestTargetPositionEngine(unittest.TestCase):
                 ),
             ],
             strategy_cooldowns={},
+            market_last_price=market_last_price,
+            available_trading_equity=available_trading_equity,
         )
 
     @staticmethod

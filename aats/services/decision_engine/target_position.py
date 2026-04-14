@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from logging import Logger
+from typing import Literal
 
+from aats.bootstrap.logging import correlation_fields, log_event
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.ai_shadow import AIShadowDecision
 from aats.schemas.decision import (
@@ -13,6 +16,7 @@ from aats.schemas.decision import (
     CanonicalAIOperatingMode,
     DecisionContext,
     DecisionOutcome,
+    PositionSizingBreakdown,
     ProfileControlDecision,
     PositionTarget,
     normalize_ai_operating_mode,
@@ -48,6 +52,240 @@ def resolve_target_leverage(
         return min(max(float(settings.default_target_leverage), 1.0), float(settings.max_target_leverage))
     raw = max(1.0, float(settings.default_target_leverage) * leverage_bias)
     return min(max(raw, 1.0), float(settings.max_target_leverage))
+
+
+def resolve_balance_aware_reference_qty(
+    *,
+    settings: AATSSettings,
+    product_type: str,
+    direction_bias: str,
+    position_scale: Decimal,
+    market_last_price: Decimal,
+    available_trading_equity: Decimal,
+    leverage_bias: float = 1.0,
+) -> Decimal:
+    """Resolve a balance-aware base quantity for derivatives.
+
+    The legacy path uses ``default_order_qty`` as a fixed base size. For live
+    derivatives this can severely under-size trades once the account grows.
+    When account equity and a recent price are available, treat
+    ``default_order_qty`` as the minimum actionable size and derive a larger
+    base quantity from current usable equity.
+    """
+    if product_type != "derivatives":
+        return Decimal("0")
+    if direction_bias not in {"long", "short"}:
+        return Decimal("0")
+    position_scale = max(to_decimal(position_scale), Decimal("0"))
+    market_last_price = max(to_decimal(market_last_price), Decimal("0"))
+    available_trading_equity = max(to_decimal(available_trading_equity), Decimal("0"))
+    margin_usage_fraction = max(to_decimal(settings.max_margin_usage_fraction), Decimal("0"))
+    if (
+        position_scale <= EPSILON_DECIMAL_12
+        or market_last_price <= EPSILON_DECIMAL_12
+        or available_trading_equity <= EPSILON_DECIMAL_12
+        or margin_usage_fraction <= EPSILON_DECIMAL_12
+    ):
+        return Decimal("0")
+    target_leverage = to_decimal(
+        resolve_target_leverage(
+            settings=settings,
+            product_type=product_type,
+            target_qty=Decimal("1"),
+            leverage_bias=leverage_bias,
+        )
+    )
+    if target_leverage <= EPSILON_DECIMAL_12:
+        return Decimal("0")
+    budgeted_notional = available_trading_equity * margin_usage_fraction * target_leverage * position_scale
+    if budgeted_notional <= EPSILON_DECIMAL_12:
+        return Decimal("0")
+    signed_qty = budgeted_notional / market_last_price
+    return signed_qty if direction_bias == "long" else -signed_qty
+
+
+def build_position_sizing_breakdown(
+    *,
+    settings: AATSSettings,
+    product_type: str,
+    direction_bias: str,
+    position_scale: Decimal,
+    market_last_price: Decimal,
+    available_trading_equity: Decimal,
+    leverage_bias: float,
+    target_leverage: float,
+    resolved_target_qty: Decimal,
+) -> PositionSizingBreakdown:
+    normalized_scale = max(to_decimal(position_scale), Decimal("0"))
+    normalized_price = max(to_decimal(market_last_price), Decimal("0"))
+    normalized_equity = max(to_decimal(available_trading_equity), Decimal("0"))
+    margin_usage_fraction = (
+        max(to_decimal(settings.max_margin_usage_fraction), Decimal("0"))
+        if product_type == "derivatives"
+        else Decimal("0")
+    )
+    default_order_qty = max(to_decimal(settings.default_order_qty), Decimal("0"))
+    if direction_bias == "long":
+        signed_default_qty = default_order_qty
+    elif direction_bias == "short":
+        signed_default_qty = -default_order_qty
+    else:
+        signed_default_qty = Decimal("0")
+    legacy_reference_qty = signed_default_qty * normalized_scale
+    balance_reference_qty = resolve_balance_aware_reference_qty(
+        settings=settings,
+        product_type=product_type,
+        direction_bias=direction_bias,
+        position_scale=normalized_scale,
+        market_last_price=normalized_price,
+        available_trading_equity=normalized_equity,
+        leverage_bias=leverage_bias,
+    )
+    sizing_mode: Literal["fixed_order_qty", "balance_aware"] = "fixed_order_qty"
+    resolved_reference_qty = legacy_reference_qty
+    if abs(balance_reference_qty) > abs(legacy_reference_qty):
+        sizing_mode = "balance_aware"
+        resolved_reference_qty = balance_reference_qty
+    budgeted_notional = Decimal("0")
+    normalized_target_leverage = max(float(target_leverage), 0.0)
+    if (
+        product_type == "derivatives"
+        and normalized_scale > EPSILON_DECIMAL_12
+        and normalized_equity > EPSILON_DECIMAL_12
+        and margin_usage_fraction > EPSILON_DECIMAL_12
+        and normalized_target_leverage > 0.0
+    ):
+        budgeted_notional = (
+            normalized_equity
+            * margin_usage_fraction
+            * to_decimal(normalized_target_leverage)
+            * normalized_scale
+        )
+    breakdown = PositionSizingBreakdown(
+        sizing_mode=sizing_mode,
+        available_equity=normalized_equity,
+        margin_usage_fraction=margin_usage_fraction,
+        target_leverage=normalized_target_leverage,
+        leverage_bias=leverage_bias,
+        last_price=normalized_price,
+        default_order_qty=default_order_qty,
+        position_scale=normalized_scale,
+        legacy_reference_qty=legacy_reference_qty,
+        balance_reference_qty=balance_reference_qty,
+        resolved_reference_qty=resolved_reference_qty,
+        resolved_target_qty=to_decimal(resolved_target_qty),
+        budgeted_notional=budgeted_notional,
+    )
+    return finalize_position_sizing_breakdown(
+        sizing_breakdown=breakdown,
+        resolved_target_qty=resolved_target_qty,
+        target_leverage=normalized_target_leverage,
+    )
+
+
+def finalize_position_sizing_breakdown(
+    *,
+    sizing_breakdown: PositionSizingBreakdown | None,
+    resolved_target_qty: Decimal,
+    target_leverage: float | None = None,
+) -> PositionSizingBreakdown | None:
+    if sizing_breakdown is None:
+        return None
+    normalized_target_qty = to_decimal(resolved_target_qty)
+    normalized_target_leverage = max(
+        float(sizing_breakdown.target_leverage if target_leverage is None else target_leverage),
+        0.0,
+    )
+    normalized_price = max(to_decimal(sizing_breakdown.last_price), Decimal("0"))
+    normalized_legacy_reference_qty = to_decimal(sizing_breakdown.legacy_reference_qty)
+    normalized_balance_reference_qty = to_decimal(sizing_breakdown.balance_reference_qty)
+    if (
+        abs(normalized_target_qty) > EPSILON_DECIMAL_12
+        and abs(normalized_legacy_reference_qty) > EPSILON_DECIMAL_12
+        and normalized_legacy_reference_qty * normalized_target_qty < 0
+    ):
+        normalized_legacy_reference_qty = -normalized_legacy_reference_qty
+    if abs(normalized_target_qty) <= EPSILON_DECIMAL_12:
+        resolved_reference_qty = Decimal("0")
+        budgeted_notional = Decimal("0")
+        if (
+            abs(normalized_balance_reference_qty) > EPSILON_DECIMAL_12
+            or sizing_breakdown.sizing_mode == "balance_aware"
+        ):
+            normalized_balance_reference_qty = Decimal("0")
+    else:
+        resolved_reference_qty = normalized_target_qty
+        budgeted_notional = (
+            abs(normalized_target_qty) * normalized_price
+            if normalized_price > EPSILON_DECIMAL_12
+            else Decimal("0")
+        )
+        if (
+            abs(normalized_balance_reference_qty) > EPSILON_DECIMAL_12
+            or sizing_breakdown.sizing_mode == "balance_aware"
+        ):
+            normalized_balance_reference_qty = normalized_target_qty
+        elif normalized_balance_reference_qty * normalized_target_qty < 0:
+            normalized_balance_reference_qty = -normalized_balance_reference_qty
+    return sizing_breakdown.model_copy(
+        update={
+            "target_leverage": normalized_target_leverage,
+            "legacy_reference_qty": normalized_legacy_reference_qty,
+            "balance_reference_qty": normalized_balance_reference_qty,
+            "resolved_reference_qty": resolved_reference_qty,
+            "resolved_target_qty": normalized_target_qty,
+            "budgeted_notional": budgeted_notional,
+        },
+        deep=True,
+    )
+
+
+def log_position_sizing_breakdown(
+    *,
+    logger: Logger,
+    decision_id: str,
+    symbol: str,
+    sizing_breakdown: PositionSizingBreakdown | None,
+    event_name: str = "decision_target_sizing_resolved",
+    final_action: str | None = None,
+    final_direction: str | None = None,
+    final_target_qty: Decimal | None = None,
+    policy_blocked: bool | None = None,
+    risk_capped: bool | None = None,
+) -> None:
+    if sizing_breakdown is None:
+        return
+    extra_fields: dict[str, object] = {}
+    if final_action is not None:
+        extra_fields["final_action"] = final_action
+    if final_direction is not None:
+        extra_fields["final_direction"] = final_direction
+    if final_target_qty is not None:
+        extra_fields["final_target_qty"] = to_decimal(final_target_qty)
+    if policy_blocked is not None:
+        extra_fields["policy_blocked"] = policy_blocked
+    if risk_capped is not None:
+        extra_fields["risk_capped"] = risk_capped
+    log_event(
+        logger,
+        event_name,
+        **correlation_fields(
+            decision_id=decision_id,
+            symbol=symbol,
+            sizing_mode=sizing_breakdown.sizing_mode,
+            available_equity=sizing_breakdown.available_equity,
+            margin_usage_fraction=sizing_breakdown.margin_usage_fraction,
+            target_leverage=sizing_breakdown.target_leverage,
+            leverage_bias=sizing_breakdown.leverage_bias,
+            last_price=sizing_breakdown.last_price,
+            legacy_reference_qty=sizing_breakdown.legacy_reference_qty,
+            balance_reference_qty=sizing_breakdown.balance_reference_qty,
+            resolved_reference_qty=sizing_breakdown.resolved_reference_qty,
+            resolved_target_qty=sizing_breakdown.resolved_target_qty,
+            budgeted_notional=sizing_breakdown.budgeted_notional,
+            **extra_fields,
+        ),
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -159,7 +397,12 @@ class TargetPositionEngine:
         if canonical_mode == "baseline_only" or ai_assessment is None:
             return None
         direction = self._direction_from_assessment(ai_assessment)
-        baseline_qty = self._baseline_target_qty(baseline=baseline, product_type=context.product_type)
+        baseline_qty = self._baseline_target_qty(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            product_type=context.product_type,
+        )
         default_qty = to_decimal(self.settings.default_order_qty) * Decimal("0.35")
         desired_abs_qty = max(abs(baseline_qty), default_qty)
         current_side = self._exposure_side(context.current_position_qty)
@@ -217,6 +460,10 @@ class TargetPositionEngine:
         )
         expected_net_edge_bps = signal_edge_bps - expected_cost_bps - max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
         guardrail_flags = list(context.strategy_guardrail_flags)
+        leverage_bias = self._leverage_bias(
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+        )
         ai_decision_authorized, ai_decision_blockers = self._ai_decision_gate(
             context=context,
             baseline=baseline,
@@ -256,6 +503,17 @@ class TargetPositionEngine:
             baseline=baseline,
             ai_assessment=ai_assessment,
             target_qty=target_qty,
+        )
+        sizing_breakdown = build_position_sizing_breakdown(
+            settings=self.settings,
+            product_type=context.product_type,
+            direction_bias=baseline.direction_bias,
+            position_scale=to_decimal(self._clamp(baseline.suggested_position_scale, 0.0, 1.0)),
+            market_last_price=to_decimal(context.market_last_price),
+            available_trading_equity=to_decimal(context.available_trading_equity),
+            leverage_bias=leverage_bias,
+            target_leverage=target_leverage,
+            resolved_target_qty=target_qty,
         )
         strategy_execution_legs = (
             self._directional_hedge_strategy_legs(
@@ -297,6 +555,7 @@ class TargetPositionEngine:
             ai_decision_applied=ai_decision_applied,
             ai_decision_blockers=ai_decision_blockers,
             guardrail_flags=guardrail_flags,
+            sizing_breakdown=sizing_breakdown,
         )
 
         return PositionTarget(
@@ -321,10 +580,7 @@ class TargetPositionEngine:
             position_intent=position_intent,
             target_leverage=target_leverage,
             margin_mode=resolved_margin_mode,
-            leverage_bias=self._leverage_bias(
-                baseline=baseline,
-                ai_assessment=ai_assessment,
-            ),
+            leverage_bias=leverage_bias,
             expected_signal_edge_bps=signal_edge_bps,
             expected_cost_bps=expected_cost_bps,
             expected_net_edge_bps=expected_net_edge_bps,
@@ -338,6 +594,7 @@ class TargetPositionEngine:
             ),
             ai_decision_intent=ai_decision_intent,
             profile_control_decision=profile_control_decision,
+            sizing_breakdown=sizing_breakdown,
             decision_outcome=decision_outcome,
         )
 
@@ -356,7 +613,12 @@ class TargetPositionEngine:
     ) -> Decimal:
         legacy_mode = (operating_mode or "").strip()
         mode = normalize_ai_operating_mode(operating_mode)
-        baseline_qty_raw = self._baseline_target_qty(baseline=baseline, product_type=product_type)
+        baseline_qty_raw = self._baseline_target_qty(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            product_type=product_type,
+        )
         baseline_fallback_qty = self._apply_entry_edge_gate(
             context=context,
             desired_target_qty=baseline_qty_raw,
@@ -576,11 +838,30 @@ class TargetPositionEngine:
             return Decimal("0")
         return ai_decision_intent.target_qty
 
-    def _baseline_target_qty(self, *, baseline: BaselineAssessment, product_type: str) -> Decimal:
+    def _baseline_target_qty(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        product_type: str,
+    ) -> Decimal:
         scale = to_decimal(self._clamp(baseline.suggested_position_scale, 0.0, 1.0))
         # FeatureCalculator already applies volatility_target_scale when computing
         # suggested_position_scale. Reapplying it here would shrink exposure twice.
-        return self._qty_from_bias(baseline.direction_bias, product_type=product_type) * scale
+        legacy_qty = self._qty_from_bias(baseline.direction_bias, product_type=product_type) * scale
+        balance_aware_qty = resolve_balance_aware_reference_qty(
+            settings=self.settings,
+            product_type=product_type,
+            direction_bias=baseline.direction_bias,
+            position_scale=scale,
+            market_last_price=to_decimal(context.market_last_price),
+            available_trading_equity=to_decimal(context.available_trading_equity),
+            leverage_bias=self._leverage_bias(baseline=baseline, ai_assessment=ai_assessment),
+        )
+        if abs(balance_aware_qty) > abs(legacy_qty):
+            return balance_aware_qty
+        return legacy_qty
 
     def _volatility_target_multiplier(self, baseline: BaselineAssessment) -> Decimal:
         floor = to_decimal(self.settings.strategy_volatility_target_scale_floor)
@@ -1563,6 +1844,7 @@ class TargetPositionEngine:
         ai_decision_applied: bool,
         ai_decision_blockers: list[str],
         guardrail_flags: list[str],
+        sizing_breakdown: PositionSizingBreakdown | None,
     ) -> DecisionOutcome:
         authority_map = {
             "baseline_only": "reference_only",
@@ -1669,6 +1951,11 @@ class TargetPositionEngine:
             ai_degraded=False if ai_decision_intent is None else ai_decision_intent.degraded,
             position_management_reason_codes=position_management_reason_codes,
             exit_attribution=exit_attribution,
+            sizing_breakdown=(
+                None
+                if sizing_breakdown is None
+                else sizing_breakdown.model_copy(deep=True)
+            ),
         )
 
     def _decision_blocker_chain(

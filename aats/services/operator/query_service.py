@@ -11,7 +11,13 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import EventEnvelope, dump_payload_exact, utc_now
 from aats.schemas.blocker_control import BlockerControlSnapshot
-from aats.schemas.decision import AIDecisionIntent, BaselineReference, DecisionOutcome, normalize_ai_operating_mode
+from aats.schemas.decision import (
+    AIDecisionIntent,
+    BaselineReference,
+    DecisionOutcome,
+    PositionSizingBreakdown,
+    normalize_ai_operating_mode,
+)
 from aats.schemas.execution import (
     FillEvent,
     OrderState,
@@ -45,6 +51,7 @@ from aats.services.execution_engine.okx_account import derivatives_position_mode
 from aats.services.execution_engine.exit_intent_aggregator import exit_execution_review_items
 from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
+from aats.services.decision_engine.target_position import finalize_position_sizing_breakdown
 from aats.services.operator._parallel import parallel_fetch
 from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.audit_replay_queries import AuditReplayQueryFacade
@@ -2306,10 +2313,18 @@ class OperatorQueryService:
                 "execution_plan": None,
                 "decision_outcome": None,
             }
-        position_target = self._position_target_payload(self.payload_by_ref(audit.position_target_ref))
+        raw_position_target = self._position_target_payload(self.payload_by_ref(audit.position_target_ref))
+        policy_decision = self.payload_by_ref(audit.policy_decision_ref)
+        risk_decision = self._risk_decision_payload(self.payload_by_ref(audit.risk_decision_ref))
         decision_outcome = self.payload_by_ref(audit.decision_outcome_ref)
-        if decision_outcome is None and isinstance(position_target, dict):
-            native_outcome = position_target.get("decision_outcome")
+        position_target = self._resolved_position_target_payload(
+            finalized_decision_outcome=decision_outcome,
+            position_target=raw_position_target,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+        )
+        if decision_outcome is None and isinstance(raw_position_target, dict):
+            native_outcome = raw_position_target.get("decision_outcome")
             decision_outcome = native_outcome if isinstance(native_outcome, dict) else None
         return {
             "audit": audit,
@@ -2323,7 +2338,7 @@ class OperatorQueryService:
             "portfolio_allocation_decision": self.payload_by_ref(audit.portfolio_allocation_decision_ref),
             "baseline_assessment": self.payload_by_ref(audit.baseline_assessment_ref),
             "position_target": position_target,
-            "risk_decision": self._risk_decision_payload(self.payload_by_ref(audit.risk_decision_ref)),
+            "risk_decision": risk_decision,
             "execution_plan": self._execution_plan_payload(self.payload_by_ref(audit.execution_plan_ref)),
             "execution_plans": [
                 payload
@@ -2794,6 +2809,28 @@ class OperatorQueryService:
         latest_target_payload = None
         if latest_target_event is not None:
             target_payload = self._position_target_payload(dict(latest_target_event.payload)) or {}
+            latest_target_audit = self.runtime.audit_repo.get(str(target_payload.get("decision_id") or ""))
+            latest_policy_payload = (
+                None
+                if latest_target_audit is None
+                else self.payload_by_ref(latest_target_audit.policy_decision_ref)
+            )
+            latest_risk_payload = (
+                None
+                if latest_target_audit is None
+                else self._risk_decision_payload(self.payload_by_ref(latest_target_audit.risk_decision_ref))
+            )
+            latest_outcome_payload = (
+                None
+                if latest_target_audit is None
+                else self.payload_by_ref(latest_target_audit.decision_outcome_ref)
+            )
+            target_payload = self._resolved_position_target_payload(
+                finalized_decision_outcome=latest_outcome_payload,
+                position_target=target_payload,
+                policy_decision=latest_policy_payload,
+                risk_decision=latest_risk_payload,
+            ) or target_payload
             book_expectancy_summary = target_payload.get("book_expectancy_summary")
             book_runtime_states = list(target_payload.get("book_runtime_states") or [])
             independent_adaptive_summary = target_payload.get("independent_adaptive_summary")
@@ -2821,6 +2858,7 @@ class OperatorQueryService:
                 "independent_adaptive_summary": independent_adaptive_summary,
                 "independent_transition_exception_summary": independent_transition_exception_summary,
                 "diagnostic_metric_flags": diagnostic_metric_flags,
+                "sizing_breakdown": target_payload.get("sizing_breakdown"),
                 "overlay_parent_exposure": overlay_parent_exposure,
                 "overlay_parent_exposure_summary": self._resolved_overlay_parent_exposure_summary(target_payload),
                 "hedge_overlay_decision": target_payload.get("hedge_overlay_decision"),
@@ -6140,6 +6178,284 @@ class OperatorQueryService:
                     normalized[key] = value
         return normalized
 
+    def _exposure_side_for_target_qty(self, quantity: Decimal) -> str:
+        if quantity > self._DECIMAL_EPSILON:
+            return "long"
+        if quantity < -self._DECIMAL_EPSILON:
+            return "short"
+        return "flat"
+
+    def _position_intent_for_target_qtys(
+        self,
+        *,
+        current_position_qty: Decimal,
+        target_position_qty: Decimal,
+    ) -> str:
+        if abs(target_position_qty - current_position_qty) <= self._DECIMAL_EPSILON:
+            return "hold"
+        current_side = self._exposure_side_for_target_qty(current_position_qty)
+        target_side = self._exposure_side_for_target_qty(target_position_qty)
+        if current_side == "flat":
+            return "open_long" if target_side == "long" else "open_short"
+        if target_side == "flat":
+            return "close_long" if current_side == "long" else "close_short"
+        if current_side != target_side:
+            return "reverse_to_long" if target_side == "long" else "reverse_to_short"
+        if current_side == "long":
+            if abs(target_position_qty) > abs(current_position_qty) + self._DECIMAL_EPSILON:
+                return "scale_in_long"
+            return "reduce_long"
+        if abs(target_position_qty) > abs(current_position_qty) + self._DECIMAL_EPSILON:
+            return "scale_in_short"
+        return "reduce_short"
+
+    def _urgency_for_target_qtys(
+        self,
+        *,
+        current_position_qty: Decimal,
+        target_position_qty: Decimal,
+    ) -> str:
+        delta_qty = abs(target_position_qty - current_position_qty)
+        if delta_qty <= self._DECIMAL_EPSILON:
+            return "low"
+        if current_position_qty * target_position_qty < 0:
+            return "high"
+        default_order_qty = self._to_decimal(getattr(self.runtime.settings, "default_order_qty", None))
+        if default_order_qty is not None and default_order_qty > self._DECIMAL_EPSILON:
+            if delta_qty >= default_order_qty * Decimal("0.75"):
+                return "high"
+        return "medium"
+
+    def _resolved_final_target_qty_for_sizing(
+        self,
+        *,
+        finalized_decision_outcome: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        policy_decision: dict[str, Any] | None,
+        risk_decision: dict[str, Any] | None,
+    ) -> Decimal | None:
+        if isinstance(finalized_decision_outcome, dict):
+            finalized_target_qty = self._to_decimal(finalized_decision_outcome.get("final_target_qty"))
+            if finalized_target_qty is not None:
+                return finalized_target_qty
+        continued_target_qty = None
+        if isinstance(risk_decision, dict):
+            continued_target_qty = self._to_decimal(risk_decision.get("capped_target_position_qty"))
+        if continued_target_qty is None and isinstance(position_target, dict):
+            continued_target_qty = self._to_decimal(position_target.get("target_position_qty"))
+        current_position_qty = (
+            None
+            if not isinstance(position_target, dict)
+            else self._to_decimal(position_target.get("current_position_qty"))
+        )
+        execution_continues = True
+        if isinstance(policy_decision, dict) and policy_decision.get("execution_allowed") is False:
+            execution_continues = False
+        if isinstance(risk_decision, dict) and risk_decision.get("approved") is False:
+            execution_continues = False
+        if not execution_continues and current_position_qty is not None:
+            return current_position_qty
+        return continued_target_qty
+
+    def _signed_target_notional(
+        self,
+        *,
+        target_position_qty: Decimal,
+        notional: Decimal,
+    ) -> Decimal:
+        if abs(target_position_qty) <= self._DECIMAL_EPSILON:
+            return Decimal("0")
+        magnitude = abs(notional)
+        return magnitude if target_position_qty > 0 else -magnitude
+
+    def _reference_price_for_resolved_target(
+        self,
+        *,
+        position_target: dict[str, Any] | None,
+    ) -> Decimal | None:
+        if not isinstance(position_target, dict):
+            return None
+        target_position_qty = self._to_decimal(position_target.get("target_position_qty"))
+        target_notional = self._to_decimal(position_target.get("target_notional"))
+        if (
+            target_position_qty is not None
+            and target_notional is not None
+            and abs(target_position_qty) > self._DECIMAL_EPSILON
+            and abs(target_notional) > self._DECIMAL_EPSILON
+        ):
+            return abs(target_notional / target_position_qty)
+        current_position_qty = self._to_decimal(position_target.get("current_position_qty"))
+        current_notional = self._to_decimal(position_target.get("current_notional"))
+        if (
+            current_position_qty is not None
+            and current_notional is not None
+            and abs(current_position_qty) > self._DECIMAL_EPSILON
+            and abs(current_notional) > self._DECIMAL_EPSILON
+        ):
+            return abs(current_notional / current_position_qty)
+        sizing_breakdown = position_target.get("sizing_breakdown")
+        if not isinstance(sizing_breakdown, dict):
+            return None
+        last_price = self._to_decimal(sizing_breakdown.get("last_price"))
+        if last_price is None or last_price <= self._DECIMAL_EPSILON:
+            return None
+        return abs(last_price)
+
+    def _resolved_final_target_notional(
+        self,
+        *,
+        finalized_decision_outcome: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        policy_decision: dict[str, Any] | None,
+        risk_decision: dict[str, Any] | None,
+    ) -> Decimal | None:
+        resolved_target_qty = self._resolved_final_target_qty_for_sizing(
+            finalized_decision_outcome=finalized_decision_outcome,
+            position_target=position_target,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+        )
+        if resolved_target_qty is None:
+            return None
+        if abs(resolved_target_qty) <= self._DECIMAL_EPSILON:
+            return Decimal("0")
+        if isinstance(risk_decision, dict):
+            capped_target_qty = self._to_decimal(risk_decision.get("capped_target_position_qty"))
+            capped_target_notional = self._to_decimal(risk_decision.get("capped_target_notional"))
+            if (
+                capped_target_qty is not None
+                and capped_target_notional is not None
+                and abs(capped_target_qty - resolved_target_qty) <= self._DECIMAL_EPSILON
+            ):
+                return self._signed_target_notional(
+                    target_position_qty=resolved_target_qty,
+                    notional=capped_target_notional,
+                )
+        if isinstance(position_target, dict):
+            current_position_qty = self._to_decimal(position_target.get("current_position_qty"))
+            current_notional = self._to_decimal(position_target.get("current_notional"))
+            if (
+                current_position_qty is not None
+                and current_notional is not None
+                and abs(current_position_qty - resolved_target_qty) <= self._DECIMAL_EPSILON
+            ):
+                return self._signed_target_notional(
+                    target_position_qty=resolved_target_qty,
+                    notional=current_notional,
+                )
+        reference_price = self._reference_price_for_resolved_target(position_target=position_target)
+        if reference_price is not None and reference_price > self._DECIMAL_EPSILON:
+            return resolved_target_qty * reference_price
+        if not isinstance(position_target, dict):
+            return None
+        target_notional = self._to_decimal(position_target.get("target_notional"))
+        if target_notional is None:
+            return None
+        return self._signed_target_notional(
+            target_position_qty=resolved_target_qty,
+            notional=target_notional,
+        )
+
+    def _resolved_position_target_payload(
+        self,
+        *,
+        finalized_decision_outcome: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        policy_decision: dict[str, Any] | None,
+        risk_decision: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(position_target, dict):
+            return position_target
+        payload = dict(position_target)
+        resolved_target_qty = self._resolved_final_target_qty_for_sizing(
+            finalized_decision_outcome=finalized_decision_outcome,
+            position_target=payload,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+        )
+        resolved_target_notional = self._resolved_final_target_notional(
+            finalized_decision_outcome=finalized_decision_outcome,
+            position_target=payload,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+        )
+        current_position_qty = self._to_decimal(payload.get("current_position_qty"))
+        if resolved_target_qty is not None:
+            payload["target_position_qty"] = resolved_target_qty
+            payload["target_notional"] = resolved_target_notional
+            payload["target_exposure_side"] = self._exposure_side_for_target_qty(resolved_target_qty)
+            if current_position_qty is not None:
+                payload["delta_position_qty"] = resolved_target_qty - current_position_qty
+                payload["urgency"] = self._urgency_for_target_qtys(
+                    current_position_qty=current_position_qty,
+                    target_position_qty=resolved_target_qty,
+                )
+                payload["position_intent"] = self._position_intent_for_target_qtys(
+                    current_position_qty=current_position_qty,
+                    target_position_qty=resolved_target_qty,
+                )
+        payload["sizing_breakdown"] = self._resolved_sizing_breakdown_payload(
+            finalized_decision_outcome=finalized_decision_outcome,
+            position_target=payload,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+            sizing_breakdown=payload.get("sizing_breakdown"),
+        )
+        nested_decision_outcome = payload.get("decision_outcome")
+        if isinstance(finalized_decision_outcome, dict) or isinstance(nested_decision_outcome, dict):
+            payload["decision_outcome"] = self._decision_outcome_payload(
+                finalized_decision_outcome=(
+                    finalized_decision_outcome
+                    if isinstance(finalized_decision_outcome, dict)
+                    else nested_decision_outcome
+                ),
+                decision_context=None,
+                baseline_assessment=None,
+                ai_assessment=None,
+                position_target=payload,
+                policy_decision=policy_decision,
+                risk_decision=risk_decision,
+            )
+        return dump_payload_exact(payload)
+
+    def _resolved_sizing_breakdown_payload(
+        self,
+        *,
+        finalized_decision_outcome: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        policy_decision: dict[str, Any] | None,
+        risk_decision: dict[str, Any] | None,
+        sizing_breakdown: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not isinstance(sizing_breakdown, dict):
+            return None
+        try:
+            normalized_breakdown = PositionSizingBreakdown.model_validate(sizing_breakdown)
+        except Exception:
+            return sizing_breakdown
+        resolved_target_qty = self._resolved_final_target_qty_for_sizing(
+            finalized_decision_outcome=finalized_decision_outcome,
+            position_target=position_target,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+        )
+        if resolved_target_qty is None:
+            resolved_target_qty = normalized_breakdown.resolved_target_qty
+        target_leverage = None
+        if isinstance(position_target, dict) and position_target.get("target_leverage") is not None:
+            try:
+                target_leverage = float(position_target.get("target_leverage"))
+            except Exception:
+                target_leverage = None
+        finalized_breakdown = finalize_position_sizing_breakdown(
+            sizing_breakdown=normalized_breakdown,
+            resolved_target_qty=resolved_target_qty,
+            target_leverage=target_leverage,
+        )
+        if finalized_breakdown is None:
+            return None
+        return dump_payload_exact(finalized_breakdown.model_dump(mode="python"))
+
     def _action_from_execution_fields(self, *, execution_action: Any, position_intent: Any) -> str | None:
         directional_action = self._directional_action_from_position_intent(position_intent)
         if directional_action is not None:
@@ -6738,6 +7054,21 @@ class OperatorQueryService:
                 )
             if not payload.get("diagnostic_metric_flags"):
                 payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(payload, position_target)
+            payload["sizing_breakdown"] = self._resolved_sizing_breakdown_payload(
+                finalized_decision_outcome=payload,
+                position_target=position_target,
+                policy_decision=policy_decision,
+                risk_decision=risk_decision,
+                sizing_breakdown=(
+                    payload.get("sizing_breakdown")
+                    if payload.get("sizing_breakdown") is not None
+                    else (
+                        None
+                        if not isinstance(position_target, dict)
+                        else position_target.get("sizing_breakdown")
+                    )
+                ),
+            )
             overlay_parent_exposure = self._resolved_overlay_parent_exposure(payload) or self._resolved_overlay_parent_exposure(position_target)
             if overlay_parent_exposure is not None:
                 if payload.get("overlay_parent_exposure") is None:
@@ -6823,6 +7154,21 @@ class OperatorQueryService:
                 )
             if not payload.get("diagnostic_metric_flags"):
                 payload["diagnostic_metric_flags"] = self._effective_diagnostic_metric_flags(payload, position_target)
+            payload["sizing_breakdown"] = self._resolved_sizing_breakdown_payload(
+                finalized_decision_outcome=payload,
+                position_target=position_target,
+                policy_decision=policy_decision,
+                risk_decision=risk_decision,
+                sizing_breakdown=(
+                    payload.get("sizing_breakdown")
+                    if payload.get("sizing_breakdown") is not None
+                    else (
+                        None
+                        if not isinstance(position_target, dict)
+                        else position_target.get("sizing_breakdown")
+                    )
+                ),
+            )
             overlay_parent_exposure = self._resolved_overlay_parent_exposure(payload) or self._resolved_overlay_parent_exposure(position_target)
             if overlay_parent_exposure is not None:
                 if payload.get("overlay_parent_exposure") is None:
@@ -6970,6 +7316,19 @@ class OperatorQueryService:
             profile_control_source="system" if activation.get("active_profile_id") else "env_default",
             ai_fallback_used=bool((ai_assessment or {}).get("fallback_used")),
             ai_degraded=bool((ai_assessment or {}).get("degraded")),
+            sizing_breakdown=self._resolved_sizing_breakdown_payload(
+                finalized_decision_outcome=native_outcome,
+                position_target=position_target,
+                policy_decision=policy_decision,
+                risk_decision=risk_decision,
+                sizing_breakdown=(
+                    None
+                    if native_outcome is None
+                    else native_outcome.get("sizing_breakdown")
+                ) or (
+                    None if position_target is None else position_target.get("sizing_breakdown")
+                ),
+            ),
         )
         return dump_payload_exact(outcome.model_dump(mode="python"))
 
@@ -7047,6 +7406,19 @@ class OperatorQueryService:
             "independent_adaptive_summary": independent_adaptive_summary,
             "independent_transition_exception_summary": independent_transition_exception_summary,
             "independent_expected_vs_realized_summary": independent_expected_vs_realized_summary,
+            "sizing_breakdown": self._resolved_sizing_breakdown_payload(
+                finalized_decision_outcome=native_outcome,
+                position_target=position_target,
+                policy_decision=None,
+                risk_decision=None,
+                sizing_breakdown=(
+                    None
+                    if native_outcome is None
+                    else native_outcome.get("sizing_breakdown")
+                ) or (
+                    None if position_target is None else position_target.get("sizing_breakdown")
+                ),
+            ),
             **parent_signal_fields,
             "decision_source": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_source"),
             "decision_authority": None if not isinstance(native_outcome, dict) else native_outcome.get("decision_authority"),
@@ -7125,6 +7497,12 @@ class OperatorQueryService:
         policy_decision = self.payload_by_ref(audit.policy_decision_ref)
         risk_decision = self._risk_decision_payload(self.payload_by_ref(audit.risk_decision_ref))
         finalized_decision_outcome = self.payload_by_ref(audit.decision_outcome_ref)
+        position_target = self._resolved_position_target_payload(
+            finalized_decision_outcome=finalized_decision_outcome,
+            position_target=position_target,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+        )
         execution_plan = self._execution_plan_payload(self.payload_by_ref(audit.execution_plan_ref))
         strategy_execution_health = self.strategy_execution_health(
             decision_context.get("symbol") if decision_context is not None else None
@@ -7233,7 +7611,14 @@ class OperatorQueryService:
             context = self.payload_by_ref(record.decision_context_ref)
             target = self._position_target_payload(self.payload_by_ref(record.position_target_ref))
             policy = self.payload_by_ref(record.policy_decision_ref)
-            risk = self.payload_by_ref(record.risk_decision_ref)
+            risk = self._risk_decision_payload(self.payload_by_ref(record.risk_decision_ref))
+            finalized_outcome = self.payload_by_ref(record.decision_outcome_ref)
+            target = self._resolved_position_target_payload(
+                finalized_decision_outcome=finalized_outcome,
+                position_target=target,
+                policy_decision=policy,
+                risk_decision=risk,
+            )
             independent_expected_vs_realized_summary = None
             if isinstance(target, dict) and str(target.get("strategy_family") or "") == "independent":
                 independent_expected_vs_realized_summary = self._independent_expected_vs_realized_summary(
@@ -7277,6 +7662,7 @@ class OperatorQueryService:
                     "independent_adaptive_summary": self._independent_adaptive_summary_from_payload(target),
                     "independent_transition_exception_summary": self._independent_transition_exception_summary_from_payload(target),
                     "diagnostic_metric_flags": self._effective_diagnostic_metric_flags(target),
+                    "sizing_breakdown": None if target is None else target.get("sizing_breakdown"),
                     "overlay_parent_exposure": self._resolved_overlay_parent_exposure(target),
                     "overlay_parent_exposure_summary": self._resolved_overlay_parent_exposure_summary(target),
                     **(self._resolved_overlay_parent_signal_fields(target) or {}),

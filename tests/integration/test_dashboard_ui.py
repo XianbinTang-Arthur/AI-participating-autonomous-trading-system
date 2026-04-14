@@ -7,6 +7,13 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from aats.api.auth_routes import _strategy_view_strategy_runtime_payload, auth_router
+from aats.api.ui import ui_router
+from aats.bootstrap.settings import AATSSettings
+
 
 def _assert_imports_helper(testcase: unittest.TestCase, text: str, helpers: list[str], src_suffix: str) -> None:
     """Assert that ``text`` contains an ``import { ... } from "<src>"`` statement
@@ -26,8 +33,6 @@ def _assert_imports_helper(testcase: unittest.TestCase, text: str, helpers: list
         body, src = match.group(1), match.group(2)
         if not src.endswith(src_suffix):
             continue
-        # Each named import looks like "name" or "name as alias" — we only
-        # care about the imported (left-hand) name.
         imported = {part.split(" as ")[0].strip() for part in body.split(",") if part.strip()}
         if all(helper in imported for helper in helpers):
             return
@@ -35,13 +40,6 @@ def _assert_imports_helper(testcase: unittest.TestCase, text: str, helpers: list
         f"expected an import of {helpers!r} from a module ending in {src_suffix!r}, "
         f"but found none. text head:\n{text[:200]}"
     )
-
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
-
-from aats.api.auth_routes import _strategy_view_strategy_runtime_payload, auth_router
-from aats.api.ui import ui_router
-from aats.bootstrap.settings import AATSSettings
 
 
 def _run_node_module(script: str, *, encoding: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -1943,6 +1941,73 @@ const configHtml = renderAIConfigView({
       activation_history: [],
     },
   },
+  rdpControl: {
+    tasks: {
+      data_maintenance: { status: 'done', finished_at: '2026-03-21T12:10:00Z' },
+      research_cycle: { status: 'running', started_at: '2026-03-21T12:15:00Z' },
+    },
+    pending_recommendations: [
+      {
+        recommendation_id: 'rec-1',
+        symbol: 'BTC-USDT-SWAP',
+        family: 'independent',
+        timeframe: '15m',
+        recommendation_type: 'parameter_upgrade',
+        confidence: 'high',
+        reason: '净边际不足，需要保守降门槛',
+        status: 'draft',
+      },
+    ],
+    active_parameters: {},
+    runtime_parameter_source: {
+      mode: 'governance_pause',
+      active_count: 0,
+      governance_managed: true,
+      paused_combos: ['independent_15m'],
+      combo_count: 4,
+    },
+    latest_round_summary: {
+      available: true,
+      round_id: '20260321_121500_demo',
+      candidate_count: 4,
+      conclusion_count: 4,
+      has_conclusion_report: true,
+      readiness_status: 'blocked',
+    },
+    latest_research_conclusions: [
+      {
+        family: 'independent',
+        timeframe: '15m',
+        decision: 'pause',
+        confidence: 'high',
+        reasons: ['净边际低于安全下限', 'failure ratio 过高'],
+      },
+    ],
+    governance_state: {
+      available: true,
+      governance_managed: true,
+      paused_combos: ['independent_15m'],
+      parameter_source_mode: 'governance_pause',
+      status_distribution: { pause: 4 },
+      combo_states: [
+        {
+          combo_key: 'independent_15m',
+          family: 'independent',
+          timeframe: '15m',
+          runtime_source: 'governance_pause',
+          decision_status: 'pause',
+          latest_round_decision: 'pause',
+          candidate_parameter_set_id: 'ps_demo_1234567890',
+          candidate_parameter_status: 'candidate',
+          runtime_active_parameter_set_id: null,
+          pending_operator_action: true,
+          latest_recommendation_type: 'parameter_upgrade',
+          latest_recommendation_status: 'draft',
+          inconsistencies: [],
+        },
+      ],
+    },
+  },
 });
 
 const manualOnlyConfigHtml = renderAIConfigView({
@@ -2006,6 +2071,10 @@ console.log(JSON.stringify({
   analysisNoTopNavButtons: !analysisHtml.includes('前往 AI 工作台') && !analysisHtml.includes('前往 AI 配置'),
   configHasRuntimeModeCard: configHtml.includes('运行模式切换'),
   configHasAutoProfileControlCard: configHtml.includes('自动换档控制'),
+  configHasRdpSummaryCard: configHtml.includes('RDP 研究与应用'),
+  configHasResearchConclusionSection: configHtml.includes('最新研究结论'),
+  configHasGovernanceOverview: configHtml.includes('治理状态总览'),
+  configShowsLiveParameterSource: configHtml.includes('当前实盘参数') && configHtml.includes('治理暂停后回退默认参数'),
   configHasRuntimeParams: configHtml.includes('运行参数概览'),
   configOmitsAdaptiveControls: !configHtml.includes('风险预算乘数') && !configHtml.includes('执行侵略性乘数'),
   configHasTimingControls: configHtml.includes('持有与冷却') && configHtml.includes('低边际保护'),
@@ -2038,6 +2107,10 @@ console.log(JSON.stringify({
         self.assertIn('"analysisNoTopNavButtons":true', result.stdout)
         self.assertIn('"configHasRuntimeModeCard":true', result.stdout)
         self.assertIn('"configHasAutoProfileControlCard":true', result.stdout)
+        self.assertIn('"configHasRdpSummaryCard":true', result.stdout)
+        self.assertIn('"configHasResearchConclusionSection":true', result.stdout)
+        self.assertIn('"configHasGovernanceOverview":true', result.stdout)
+        self.assertIn('"configShowsLiveParameterSource":true', result.stdout)
         self.assertIn('"configHasRuntimeParams":true', result.stdout)
         self.assertIn('"configOmitsAdaptiveControls":true', result.stdout)
         self.assertIn('"configHasTimingControls":true', result.stdout)
@@ -5832,6 +5905,83 @@ console.log(JSON.stringify({
         stdout = result.stdout or ""
         self.assertIn('"hasEconomicDiscipline":true', stdout)
         self.assertIn('"hasAuditExpectancy":true', stdout)
+
+    def test_strategy_view_and_decision_drawer_surface_sizing_breakdown_summary(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const target = {
+  symbol: 'BTC-USDT-SWAP',
+  product_type: 'derivatives',
+  margin_mode: 'cross',
+  position_intent: 'open_long',
+  current_position_qty: '0',
+  target_position_qty: '0.014625',
+  delta_position_qty: '0.014625',
+  target_exposure_side: 'long',
+  target_leverage: 5.0,
+  sizing_breakdown: {
+    sizing_mode: 'balance_aware',
+    available_equity: '390',
+    margin_usage_fraction: '0.75',
+    target_leverage: 5.0,
+    last_price: '100000',
+    legacy_reference_qty: '0.004',
+    resolved_reference_qty: '0.014625',
+    resolved_target_qty: '0.014625',
+  },
+};
+
+const strategyHtml = renderStrategyView({
+  latestDecision: {
+    decision_id: 'dec-sizing-ui',
+    decision_context: { symbol: 'BTC-USDT-SWAP', timeframe: '15m', as_of_ts: '2026-04-14T12:00:00Z' },
+    baseline_assessment: { confidence: 0.82, composite_alpha_score: 0.31, direction_bias: 'long' },
+    ai_assessment: {},
+    position_target: target,
+    policy_decision: { execution_allowed: true, allow_reasons: [] },
+    risk_decision: { approved: true, approval_reasons: [] },
+  },
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyRuntime: { summary: {}, latest_applied_target: target },
+  strategyAttribution: { summary: {} },
+  metrics: {},
+});
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'dec-sizing-ui',
+  decision_context: { symbol: 'BTC-USDT-SWAP', timeframe: '15m' },
+  position_target: target,
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+});
+
+console.log(JSON.stringify({
+  strategyShowsSizing:
+    strategyHtml.includes('可用权益 390')
+    && strategyHtml.includes('价格 100000')
+    && strategyHtml.includes('目标 +0.014625'),
+  drawerShowsSizing:
+    drawer.body.includes('下单规模分解')
+    && drawer.body.includes('保证金占用比例 0.75')
+    && drawer.body.includes('基准 +0.004')
+    && drawer.body.includes('-&gt; +0.014625'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"strategyShowsSizing":true', result.stdout)
+        self.assertIn('"drawerShowsSizing":true', result.stdout)
 
     def test_decision_drawer_surfaces_book_runtime_state_summary(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

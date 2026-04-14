@@ -12,6 +12,63 @@ from tests.support.strategy_family import make_baseline, make_context, make_deri
 
 
 class TestIndependentEngineTransitionFlow(unittest.TestCase):
+    def test_balance_aware_entry_size_expands_opening_qty_from_available_equity(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            default_order_qty=0.004,
+            default_target_leverage=5.0,
+            max_target_leverage=10.0,
+            max_margin_usage_fraction=0.75,
+            strategy_dynamic_leverage_enabled=False,
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_long_entry_threshold=0.30,
+            strategy_hedge_independent_min_confirm_ticks=2,
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+            strategy_hedge_independent_rebalance_cooldown_seconds=0,
+        )
+        context = make_context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            market_last_price=100000.0,
+            available_trading_equity=390.0,
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.9,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.55,
+                "trend_alpha": 0.41,
+                "microstructure_alpha": 0.20,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.4})
+        expectancy = IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=18.0,
+            expected_slippage_bps=1.2,
+            expected_cost_bps=5.0,
+            expected_net_edge_bps=13.0,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="long",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0"),
+            scorer=lambda **_: 0.42,
+            recent_score_history=(0.34, 0.37),
+        )
+
+        self.assertEqual(decision.state, "opening")
+        self.assertEqual(decision.book_action, "open")
+        self.assertEqual(decision.target_qty, Decimal("0.014625"))
+        self.assertGreater(decision.target_qty, Decimal("0.004"))
+
     def test_strengthening_short_signal_is_not_treated_as_score_drawdown(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_independent_enabled=True,

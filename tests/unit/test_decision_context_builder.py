@@ -8,6 +8,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.execution import FillEvent
+from aats.schemas.exchange import ExchangeAccountRiskSnapshot, ExchangeAccountSnapshot
 from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot, Position
@@ -26,6 +27,66 @@ class _FakeHealthService:
 
 
 class TestDecisionContextBuilder(unittest.TestCase):
+    def test_available_trading_equity_prefers_exchange_available_equity(self) -> None:
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=datetime.now(timezone.utc),
+            risk_snapshot=ExchangeAccountRiskSnapshot(
+                available_equity=Decimal("390"),
+                total_equity=Decimal("420"),
+            ),
+        )
+        portfolio_snapshot = PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": Decimal("300")},
+            positions=[],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("300"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            risk_budget_usage={},
+        )
+
+        resolved = DecisionContextBuilder._available_trading_equity(
+            account_snapshot=account_snapshot,
+            portfolio_snapshot=portfolio_snapshot,
+        )
+
+        self.assertEqual(resolved, Decimal("390"))
+
+    def test_available_trading_equity_does_not_fallback_to_total_equity_when_available_missing(self) -> None:
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=datetime.now(timezone.utc),
+            risk_snapshot=ExchangeAccountRiskSnapshot(
+                adjusted_equity=Decimal("420"),
+                total_equity=Decimal("450"),
+            ),
+        )
+        portfolio_snapshot = PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": Decimal("390")},
+            positions=[],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("450"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            risk_budget_usage={},
+            cash_equity=Decimal("390"),
+            collateral_value=Decimal("420"),
+        )
+
+        resolved = DecisionContextBuilder._available_trading_equity(
+            account_snapshot=account_snapshot,
+            portfolio_snapshot=portfolio_snapshot,
+        )
+
+        self.assertEqual(resolved, Decimal("0"))
+
     def test_position_qty_falls_back_to_base_balance_for_spot_snapshots(self) -> None:
         snapshot = PortfolioSnapshot(
             snapshot_ts=datetime.now(timezone.utc),

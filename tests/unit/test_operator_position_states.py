@@ -220,6 +220,295 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(payload["book_expectancy_summary"]["books"][0]["expected_net_edge_bps"], 12.0)
         self.assertEqual(payload["book_runtime_states"], [])
 
+    def test_decision_outcome_payload_backfills_sizing_breakdown_from_position_target(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(settings=SimpleNamespace(ai_operating_mode="baseline_only"))
+        query.strategy_profile_snapshot = lambda: {"activation": {}}  # type: ignore[method-assign]
+
+        payload = query._decision_outcome_payload(
+            finalized_decision_outcome={
+                "decision_id": "dec-sizing",
+                "symbol": "BTC-USDT-SWAP",
+                "decision_source": "baseline",
+                "decision_authority": "reference_only",
+                "final_action": "enter",
+                "final_direction": "long",
+            },
+            decision_context=None,
+            baseline_assessment=None,
+            ai_assessment=None,
+            position_target={
+                "position_intent": "open_long",
+                "target_exposure_side": "long",
+                "sizing_breakdown": {
+                    "sizing_mode": "balance_aware",
+                    "available_equity": "390",
+                    "margin_usage_fraction": "0.75",
+                    "target_leverage": 5.0,
+                    "last_price": "100000",
+                    "resolved_target_qty": "0.014625",
+                },
+            },
+            policy_decision=None,
+            risk_decision=None,
+        )
+
+        assert payload is not None
+        self.assertIsNotNone(payload["sizing_breakdown"])
+        self.assertEqual(payload["sizing_breakdown"]["available_equity"], "390")
+        self.assertEqual(payload["sizing_breakdown"]["resolved_target_qty"], "0.014625")
+
+    def test_decision_outcome_payload_reconciles_sizing_breakdown_with_risk_capped_target(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(settings=SimpleNamespace(ai_operating_mode="baseline_only"))
+        query.strategy_profile_snapshot = lambda: {"activation": {}}  # type: ignore[method-assign]
+
+        payload = query._decision_outcome_payload(
+            finalized_decision_outcome={
+                "decision_id": "dec-sizing-risk",
+                "symbol": "BTC-USDT-SWAP",
+                "decision_source": "baseline",
+                "decision_authority": "reference_only",
+                "final_action": "enter",
+                "final_direction": "long",
+            },
+            decision_context=None,
+            baseline_assessment=None,
+            ai_assessment=None,
+            position_target={
+                "current_position_qty": "0",
+                "target_position_qty": "0.014625",
+                "target_leverage": 5.0,
+                "position_intent": "open_long",
+                "target_exposure_side": "long",
+                "sizing_breakdown": {
+                    "sizing_mode": "balance_aware",
+                    "available_equity": "390",
+                    "margin_usage_fraction": "0.75",
+                    "target_leverage": 5.0,
+                    "last_price": "100000",
+                    "legacy_reference_qty": "0.004",
+                    "balance_reference_qty": "0.014625",
+                    "resolved_reference_qty": "0.014625",
+                    "resolved_target_qty": "0.014625",
+                    "budgeted_notional": "1462.5",
+                },
+            },
+            policy_decision={"execution_allowed": True},
+            risk_decision={
+                "approved": True,
+                "modified": True,
+                "capped_target_position_qty": "0.004",
+                "constraints_applied": ["risk_budget_multiplier_applied"],
+                "rejection_reasons": [],
+            },
+        )
+
+        assert payload is not None
+        self.assertEqual(payload["sizing_breakdown"]["resolved_reference_qty"], "0.004")
+        self.assertEqual(payload["sizing_breakdown"]["resolved_target_qty"], "0.004")
+        self.assertEqual(payload["sizing_breakdown"]["balance_reference_qty"], "0.004")
+        self.assertEqual(payload["sizing_breakdown"]["budgeted_notional"], "400.000")
+
+    def test_resolved_position_target_payload_reconciles_target_fields_with_risk_cap(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(ai_operating_mode="baseline_only", default_order_qty="0.004")
+        )
+
+        payload = query._resolved_position_target_payload(
+            finalized_decision_outcome={
+                "decision_id": "dec-sizing-risk",
+                "symbol": "BTC-USDT-SWAP",
+                "decision_source": "baseline",
+                "decision_authority": "reference_only",
+                "final_action": "enter",
+                "final_direction": "long",
+                "final_target_qty": "0.004",
+            },
+            position_target={
+                "current_position_qty": "0",
+                "target_position_qty": "0.014625",
+                "delta_position_qty": "0.014625",
+                "current_notional": "0",
+                "target_notional": "1462.5",
+                "position_intent": "open_long",
+                "target_exposure_side": "long",
+                "decision_outcome": {
+                    "decision_id": "dec-sizing-risk",
+                    "symbol": "BTC-USDT-SWAP",
+                    "decision_source": "baseline",
+                    "decision_authority": "reference_only",
+                    "final_action": "enter",
+                    "final_direction": "long",
+                    "final_target_qty": "0.014625",
+                    "sizing_breakdown": {
+                        "sizing_mode": "balance_aware",
+                        "available_equity": "390",
+                        "margin_usage_fraction": "0.75",
+                        "target_leverage": 5.0,
+                        "last_price": "100000",
+                        "legacy_reference_qty": "0.004",
+                        "balance_reference_qty": "0.014625",
+                        "resolved_reference_qty": "0.014625",
+                        "resolved_target_qty": "0.014625",
+                        "budgeted_notional": "1462.5",
+                    },
+                },
+                "sizing_breakdown": {
+                    "sizing_mode": "balance_aware",
+                    "available_equity": "390",
+                    "margin_usage_fraction": "0.75",
+                    "target_leverage": 5.0,
+                    "last_price": "100000",
+                    "legacy_reference_qty": "0.004",
+                    "balance_reference_qty": "0.014625",
+                    "resolved_reference_qty": "0.014625",
+                    "resolved_target_qty": "0.014625",
+                    "budgeted_notional": "1462.5",
+                },
+            },
+            policy_decision={"execution_allowed": True},
+            risk_decision={
+                "approved": True,
+                "modified": True,
+                "capped_target_position_qty": "0.004",
+                "capped_target_notional": "400",
+                "constraints_applied": ["risk_budget_multiplier_applied"],
+                "rejection_reasons": [],
+            },
+        )
+
+        assert payload is not None
+        self.assertEqual(payload["target_position_qty"], "0.004")
+        self.assertEqual(payload["delta_position_qty"], "0.004")
+        self.assertEqual(payload["target_notional"], "400")
+        self.assertEqual(payload["urgency"], "high")
+        self.assertEqual(payload["position_intent"], "open_long")
+        self.assertEqual(payload["target_exposure_side"], "long")
+        self.assertEqual(payload["sizing_breakdown"]["resolved_target_qty"], "0.004")
+        self.assertEqual(payload["decision_outcome"]["final_target_qty"], "0.004")
+        self.assertEqual(payload["decision_outcome"]["sizing_breakdown"]["resolved_target_qty"], "0.004")
+
+    def test_decision_outcome_payload_reconciles_sizing_breakdown_to_current_position_when_policy_blocks(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(settings=SimpleNamespace(ai_operating_mode="baseline_only"))
+        query.strategy_profile_snapshot = lambda: {"activation": {}}  # type: ignore[method-assign]
+
+        payload = query._decision_outcome_payload(
+            finalized_decision_outcome={
+                "decision_id": "dec-sizing-policy",
+                "symbol": "BTC-USDT-SWAP",
+                "decision_source": "baseline",
+                "decision_authority": "reference_only",
+                "final_action": "enter",
+                "final_direction": "long",
+            },
+            decision_context=None,
+            baseline_assessment=None,
+            ai_assessment=None,
+            position_target={
+                "current_position_qty": "0.002",
+                "target_position_qty": "0.014625",
+                "target_leverage": 5.0,
+                "position_intent": "open_long",
+                "target_exposure_side": "long",
+                "sizing_breakdown": {
+                    "sizing_mode": "balance_aware",
+                    "available_equity": "390",
+                    "margin_usage_fraction": "0.75",
+                    "target_leverage": 5.0,
+                    "last_price": "100000",
+                    "legacy_reference_qty": "0.004",
+                    "balance_reference_qty": "0.014625",
+                    "resolved_reference_qty": "0.014625",
+                    "resolved_target_qty": "0.014625",
+                    "budgeted_notional": "1462.5",
+                },
+            },
+            policy_decision={"execution_allowed": False, "rejection_reasons": ["kill_switch_active"]},
+            risk_decision=None,
+        )
+
+        assert payload is not None
+        self.assertEqual(payload["sizing_breakdown"]["resolved_reference_qty"], "0.002")
+        self.assertEqual(payload["sizing_breakdown"]["resolved_target_qty"], "0.002")
+        self.assertEqual(payload["sizing_breakdown"]["balance_reference_qty"], "0.002")
+        self.assertEqual(payload["sizing_breakdown"]["budgeted_notional"], "200.000")
+
+    def test_resolved_position_target_payload_reconciles_target_fields_when_policy_blocks(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(ai_operating_mode="baseline_only", default_order_qty="0.004")
+        )
+
+        payload = query._resolved_position_target_payload(
+            finalized_decision_outcome={
+                "decision_id": "dec-sizing-policy",
+                "symbol": "BTC-USDT-SWAP",
+                "decision_source": "baseline",
+                "decision_authority": "reference_only",
+                "final_action": "hold",
+                "final_direction": "long",
+                "final_target_qty": "0.002",
+            },
+            position_target={
+                "current_position_qty": "0.002",
+                "target_position_qty": "0.014625",
+                "delta_position_qty": "0.012625",
+                "current_notional": "200",
+                "target_notional": "1462.5",
+                "position_intent": "open_long",
+                "target_exposure_side": "long",
+                "decision_outcome": {
+                    "decision_id": "dec-sizing-policy",
+                    "symbol": "BTC-USDT-SWAP",
+                    "decision_source": "baseline",
+                    "decision_authority": "reference_only",
+                    "final_action": "enter",
+                    "final_direction": "long",
+                    "final_target_qty": "0.014625",
+                    "sizing_breakdown": {
+                        "sizing_mode": "balance_aware",
+                        "available_equity": "390",
+                        "margin_usage_fraction": "0.75",
+                        "target_leverage": 5.0,
+                        "last_price": "100000",
+                        "legacy_reference_qty": "0.004",
+                        "balance_reference_qty": "0.014625",
+                        "resolved_reference_qty": "0.014625",
+                        "resolved_target_qty": "0.014625",
+                        "budgeted_notional": "1462.5",
+                    },
+                },
+                "sizing_breakdown": {
+                    "sizing_mode": "balance_aware",
+                    "available_equity": "390",
+                    "margin_usage_fraction": "0.75",
+                    "target_leverage": 5.0,
+                    "last_price": "100000",
+                    "legacy_reference_qty": "0.004",
+                    "balance_reference_qty": "0.014625",
+                    "resolved_reference_qty": "0.014625",
+                    "resolved_target_qty": "0.014625",
+                    "budgeted_notional": "1462.5",
+                },
+            },
+            policy_decision={"execution_allowed": False, "rejection_reasons": ["kill_switch_active"]},
+            risk_decision=None,
+        )
+
+        assert payload is not None
+        self.assertEqual(payload["target_position_qty"], "0.002")
+        self.assertEqual(payload["delta_position_qty"], "0.000")
+        self.assertEqual(payload["target_notional"], "200")
+        self.assertEqual(payload["urgency"], "low")
+        self.assertEqual(payload["position_intent"], "hold")
+        self.assertEqual(payload["target_exposure_side"], "long")
+        self.assertEqual(payload["sizing_breakdown"]["resolved_target_qty"], "0.002")
+        self.assertEqual(payload["decision_outcome"]["final_target_qty"], "0.002")
+        self.assertEqual(payload["decision_outcome"]["sizing_breakdown"]["resolved_target_qty"], "0.002")
+
     def test_independent_diagnostics_flags_prefer_persisted_payload_flags(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
         query.runtime = SimpleNamespace(

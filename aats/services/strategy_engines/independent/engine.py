@@ -8,6 +8,7 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, HedgeOverlayDecision
 from aats.schemas.strategy_runtime import StrategyBookRuntimeState, StrategyLegIntent
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
+from aats.services.decision_engine.target_position import resolve_balance_aware_reference_qty
 
 from .adaptive import threshold_snapshot
 from .diagnostics import legacy_runtime_state_snapshot
@@ -60,6 +61,7 @@ def evaluate_independent_book(
     leg: IndependentLeg,
     expectancy: IndependentBookExpectancy | None,
     directional_leg_target_qty: Decimal,
+    leverage_bias: float = 1.0,
     scorer: IndependentBookScorer | None,
     prior_runtime_state: StrategyBookRuntimeState | None = None,
     recent_score_history: Sequence[float] = (),
@@ -87,6 +89,7 @@ def evaluate_independent_book(
         leg=leg,
         expectancy=expectancy,
         directional_leg_target_qty=directional_leg_target_qty,
+        leverage_bias=leverage_bias,
         score=score,
         current_qty=current_qty,
         prior_runtime_state=prior_runtime_state,
@@ -130,6 +133,7 @@ def evaluate_independent_book(
         leg=leg,
         expectancy=expectancy,
         directional_leg_target_qty=directional_leg_target_qty,
+        leverage_bias=leverage_bias,
         score=score,
         current_qty=current_qty,
         prior_runtime_state=prior_runtime_state,
@@ -178,6 +182,7 @@ def _evaluate_book_core(
     leg: IndependentLeg,
     expectancy: IndependentBookExpectancy | None,
     directional_leg_target_qty: Decimal,
+    leverage_bias: float,
     score: float,
     current_qty: Decimal,
     prior_runtime_state: StrategyBookRuntimeState | None,
@@ -191,9 +196,19 @@ def _evaluate_book_core(
     entry_size_reason_codes: Sequence[str] = (),
 ) -> IndependentBookDecision:
     target_qty = current_qty
+    balance_reference_qty = resolve_balance_aware_reference_qty(
+        settings=settings,
+        product_type=context.product_type,
+        direction_bias=leg,
+        position_scale=to_decimal(_clamp(baseline.suggested_position_scale, 0.0, 1.0)),
+        market_last_price=to_decimal(context.market_last_price),
+        available_trading_equity=to_decimal(context.available_trading_equity),
+        leverage_bias=leverage_bias,
+    )
     raw_base_target_qty = compute_entry_target_qty(
         settings=settings,
         directional_leg_target_qty=directional_leg_target_qty,
+        balance_reference_qty=balance_reference_qty,
     )
     effective_base_target_qty = max(
         Decimal("0"),

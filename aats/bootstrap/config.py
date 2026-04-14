@@ -1,19 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 import yaml
 
-import logging
-
 from aats.bootstrap.logging import get_logger, log_event
 
-_log = logging.getLogger(__name__)
 from aats.bootstrap.managed_profiles import MANAGED_PROFILE_DERIVED_ENV_KEYS, load_managed_profile_values
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.telemetry import TelemetryConfig, configure_telemetry
@@ -30,8 +28,6 @@ from aats.bootstrap.settings import (
 from aats.bus.base import EventBus, MessageHandler
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.bus.nats_bus import (
-    DEFAULT_CRITICAL_TOPICS,
-    DEFAULT_OBSERVER_TOPICS,
     DEFAULT_STREAM_SPECS,
     HybridBusRouting,
     HybridEventBus,
@@ -53,7 +49,11 @@ from aats.services.decision_engine.baseline import BaselineStrategy
 from aats.services.decision_engine.feature_resolver import FeatureSnapshotResolver
 from aats.services.decision_engine.context_builder import DecisionContextBuilder
 from aats.services.decision_engine.orchestrator import DecisionOrchestrator
-from aats.services.decision_engine.target_position import TargetPositionEngine
+from aats.services.decision_engine.target_position import (
+    TargetPositionEngine,
+    finalize_position_sizing_breakdown,
+    log_position_sizing_breakdown,
+)
 from aats.services.decision_engine.trigger import DecisionCycleTrigger
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
@@ -223,6 +223,11 @@ from aats.schemas.operator import ExecutionErrorSummary, ProcessingFailureRecord
 from aats.schemas.runtime_profiles import RuntimeProfileResolution
 from aats.schemas.strategy_runtime import StrategyExecutionBundle
 from aats.storage.base import StrategyProfileRepository, StrategySleeveRepository
+
+if TYPE_CHECKING:
+    from aats.storage.housekeeping import DatabaseHousekeeping
+
+_log = logging.getLogger(__name__)
 
 
 SPOT_GUARDED_CONFIG_PROFILES = frozenset({"guarded_spot_dry_run", "guarded_spot_enabled"})
@@ -1596,6 +1601,11 @@ def _build_position_target_handler(
             blocked_reasons.extend(list(risk_decision.constraints_applied or []))
         blocked_reasons.extend(list(extra_blocked_reasons or []))
         policy_blocked = (not policy_decision.execution_allowed) or ("kill_switch_active" in blocked_reasons)
+        sizing_breakdown = finalize_position_sizing_breakdown(
+            sizing_breakdown=outcome.sizing_breakdown,
+            resolved_target_qty=final_target_qty,
+            target_leverage=target.target_leverage,
+        )
         return outcome.model_copy(
             update={
                 "finalized": True,
@@ -1623,6 +1633,7 @@ def _build_position_target_handler(
                 else list(risk_decision.rejection_reasons or [])
                 + list(risk_decision.constraints_applied or []),
                 "risk_capped_target_qty": None if risk_decision is None else risk_decision.capped_target_position_qty,
+                "sizing_breakdown": sizing_breakdown,
             }
         )
 
@@ -1643,6 +1654,17 @@ def _build_position_target_handler(
         )
         if finalized_outcome is None:
             return
+        log_position_sizing_breakdown(
+            logger=_log,
+            decision_id=finalized_outcome.decision_id,
+            symbol=target.symbol,
+            sizing_breakdown=finalized_outcome.sizing_breakdown,
+            final_action=finalized_outcome.final_action,
+            final_direction=finalized_outcome.final_direction,
+            final_target_qty=finalized_outcome.final_target_qty,
+            policy_blocked=finalized_outcome.policy_blocked,
+            risk_capped=finalized_outcome.risk_capped,
+        )
         outcome_envelope = await publish_model(
             bus=bus,
             topic=topics.DECISION_OUTCOMES,
@@ -3621,6 +3643,7 @@ def _build_decision_slice(
             execution_repo=storage.execution_repo,
             mode_controller=slices.mode_controller,
             health_service=slices.health_service,
+            account_service=slices.account_service,
             stream_snapshot_cache=slices.stream_snapshot_cache,
             portfolio_snapshot_cache=slices.portfolio_snapshot_cache,
             order_state_cache=slices.order_state_hot_cache,

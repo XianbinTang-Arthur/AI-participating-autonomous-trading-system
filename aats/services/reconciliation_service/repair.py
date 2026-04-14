@@ -543,16 +543,19 @@ class ReconciliationService:
     ) -> PortfolioSnapshot:
         if self.settings.portfolio_ledger_truth_enabled and stored_snapshot is not None:
             return stored_snapshot
-        full_replay_snapshot = lambda: self.reconstruction_service.rebuild_snapshot(
-            fills=fills,
-            price_provider=self.price_provider,
-        ).model_copy(
-            update={
-                "snapshot_origin": "manual_rebuild",
-                "product_type": self.runtime_scope.product_type,
-                "margin_mode": self.runtime_scope.margin_mode,
-            }
-        )
+
+        def full_replay_snapshot() -> PortfolioSnapshot:
+            return self.reconstruction_service.rebuild_snapshot(
+                fills=fills,
+                price_provider=self.price_provider,
+            ).model_copy(
+                update={
+                    "snapshot_origin": "manual_rebuild",
+                    "product_type": self.runtime_scope.product_type,
+                    "margin_mode": self.runtime_scope.margin_mode,
+                }
+            )
+
         if not self.bootstrap_portfolio_from_exchange:
             return full_replay_snapshot()
 

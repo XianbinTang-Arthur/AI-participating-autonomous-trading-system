@@ -26,6 +26,7 @@ from aats.schemas.decision import (
     DecisionOutcome,
     HedgeOverlayDecision,
     OverlayParentExposureRecord,
+    PositionSizingBreakdown,
     PositionTarget,
     ProfileControlDecision,
 )
@@ -1529,6 +1530,184 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recent_row["book_expectancy_summary"]["source"], "independent_book")
         self.assertEqual(recent_row["book_expectancy_summary"]["books"][1]["expected_net_edge_bps"], -2.0)
         self.assertTrue(recent_row["diagnostic_metric_flags"]["emit_expected_vs_realized_metrics"])
+
+    async def test_decision_and_strategy_runtime_expose_sizing_breakdown_for_operator_investigation(self) -> None:
+        runtime = await self._runtime(
+            trading_product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+            allowed_symbols=("BTC-USDT-SWAP",),
+        )
+        decision_id = "decision_sizing_breakdown_external_surface"
+        now = utc_now()
+        sizing_breakdown = PositionSizingBreakdown(
+            sizing_mode="balance_aware",
+            available_equity=Decimal("390"),
+            margin_usage_fraction=Decimal("0.75"),
+            target_leverage=5.0,
+            leverage_bias=1.0,
+            last_price=Decimal("100000"),
+            default_order_qty=Decimal("0.004"),
+            position_scale=Decimal("1"),
+            legacy_reference_qty=Decimal("0.004"),
+            balance_reference_qty=Decimal("0.014625"),
+            resolved_reference_qty=Decimal("0.014625"),
+            resolved_target_qty=Decimal("0.014625"),
+            budgeted_notional=Decimal("1462.5"),
+        )
+        decision_context = DecisionContext(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            as_of_ts=now,
+            market_snapshot_ref="evt_market_snapshot_sizing",
+            feature_snapshot_ref="evt_feature_snapshot_sizing",
+            portfolio_snapshot_ref="evt_portfolio_snapshot_sizing",
+            health_snapshot_ref="evt_health_snapshot_sizing",
+            mode="paper_live",
+            current_position_qty=Decimal("0"),
+            current_net_position_qty=Decimal("0"),
+            current_long_position_qty=Decimal("0"),
+            current_short_position_qty=Decimal("0"),
+            product_type="derivatives",
+            current_exposure_side="flat",
+            current_target_leverage=1.0,
+            market_last_price=Decimal("100000"),
+            available_trading_equity=Decimal("390"),
+        )
+        decision_outcome = DecisionOutcome(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            decision_source="baseline",
+            decision_authority="reference_only",
+            finalized=True,
+            final_direction="long",
+            final_action="enter",
+            final_target_qty=Decimal("0.004"),
+            sizing_breakdown=sizing_breakdown,
+        )
+        policy_decision = PolicyDecision(
+            decision_id=decision_id,
+            mode="paper_live",
+            allowed=True,
+            execution_allowed=True,
+            submission_allowed=False,
+            dry_run_only=True,
+            requires_human_approval=False,
+            allowed_symbols=["BTC-USDT-SWAP"],
+            allowed_execution_styles=["market", "limit"],
+            max_notional_override=None,
+            forced_degrade_mode=None,
+            rejection_reasons=[],
+        )
+        risk_decision = RiskDecision(
+            decision_id=decision_id,
+            approved=True,
+            modified=True,
+            capped_target_position_qty=Decimal("0.004"),
+            capped_target_notional=Decimal("400"),
+            current_open_order_count=0,
+            risk_budget_multiplier=Decimal("0.72"),
+            risk_budget_state={},
+            execution_aggressiveness_multiplier=Decimal("1"),
+            execution_aggressiveness_state={},
+            constraints_applied=["risk_budget_multiplier_applied"],
+            risk_score=0.42,
+            rejection_reasons=[],
+        )
+        position_target = PositionTarget(
+            decision_id=decision_id,
+            symbol="BTC-USDT-SWAP",
+            current_position_qty=Decimal("0"),
+            target_position_qty=Decimal("0.014625"),
+            delta_position_qty=Decimal("0.014625"),
+            current_notional=Decimal("0"),
+            target_notional=Decimal("1462.5"),
+            rebalance_reason="sizing_breakdown_external_surface",
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            source_mix={"baseline": 1.0},
+            decision_expiry_ts=now + timedelta(minutes=5),
+            product_type="derivatives",
+            current_exposure_side="flat",
+            target_exposure_side="long",
+            position_intent="open_long",
+            target_leverage=5.0,
+            margin_mode="cross",
+            sizing_breakdown=sizing_breakdown,
+            decision_outcome=decision_outcome,
+        )
+        context_event = build_envelope(
+            topic=topics.DECISION_CONTEXTS,
+            key="BTC-USDT-SWAP",
+            payload_model=decision_context,
+            source_component="test",
+        )
+        target_event = build_envelope(
+            topic=topics.POSITION_TARGETS,
+            key="BTC-USDT-SWAP",
+            payload_model=position_target,
+            source_component="test",
+        )
+        policy_event = build_envelope(
+            topic=topics.POLICY_DECISIONS,
+            key="BTC-USDT-SWAP",
+            payload_model=policy_decision,
+            source_component="test",
+        )
+        risk_event = build_envelope(
+            topic=topics.RISK_DECISIONS,
+            key="BTC-USDT-SWAP",
+            payload_model=risk_decision,
+            source_component="test",
+        )
+        outcome_event = build_envelope(
+            topic=topics.DECISION_OUTCOMES,
+            key="BTC-USDT-SWAP",
+            payload_model=decision_outcome,
+            source_component="test",
+        )
+        runtime.event_store.append(context_event)
+        runtime.event_store.append(target_event)
+        runtime.event_store.append(policy_event)
+        runtime.event_store.append(risk_event)
+        runtime.event_store.append(outcome_event)
+        runtime.audit_repo.upsert(
+            DecisionAuditRecord(
+                decision_id=decision_id,
+                decision_context_ref=context_event.event_id,
+                position_target_ref=target_event.event_id,
+                policy_decision_ref=policy_event.event_id,
+                risk_decision_ref=risk_event.event_id,
+                decision_outcome_ref=outcome_event.event_id,
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            detail = client.get(f"/decision/{decision_id}").json()
+            strategy_runtime = client.get("/strategy/runtime").json()
+
+        self.assertEqual(detail["position_target"]["sizing_breakdown"]["available_equity"], "390")
+        self.assertEqual(detail["position_target"]["sizing_breakdown"]["margin_usage_fraction"], "0.75")
+        self.assertEqual(detail["position_target"]["sizing_breakdown"]["last_price"], "100000")
+        self.assertEqual(detail["position_target"]["sizing_breakdown"]["resolved_target_qty"], "0.004")
+        self.assertEqual(detail["position_target"]["sizing_breakdown"]["budgeted_notional"], "400.000")
+        self.assertEqual(detail["position_target"]["target_position_qty"], "0.004")
+        self.assertEqual(detail["position_target"]["delta_position_qty"], "0.004")
+        self.assertEqual(detail["position_target"]["urgency"], "high")
+        self.assertEqual(detail["position_target"]["target_notional"], "400")
+        self.assertEqual(
+            detail["position_target"]["decision_outcome"]["sizing_breakdown"]["resolved_target_qty"],
+            "0.004",
+        )
+        self.assertEqual(detail["decision_outcome"]["sizing_breakdown"]["available_equity"], "390")
+        self.assertEqual(detail["decision_outcome"]["sizing_breakdown"]["resolved_target_qty"], "0.004")
+        self.assertEqual(strategy_runtime["latest_applied_target"]["target_position_qty"], "0.004")
+        self.assertEqual(
+            strategy_runtime["latest_applied_target"]["sizing_breakdown"]["resolved_target_qty"],
+            "0.004",
+        )
 
     async def test_decision_payloads_expose_independent_expected_vs_realized_summary_for_external_consumers(self) -> None:
         runtime = await self._runtime(
@@ -8313,6 +8492,29 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("transition_class", payload["latest_selection_decision"])
         self.assertIn("gating_state", payload["latest_selection_decision"])
         self.assertIn("operator_summary", payload["latest_selection_decision"])
+
+    async def test_dashboard_bundle_exposes_rdp_control_summary_fields(self) -> None:
+        runtime = await self._runtime()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get("/dashboard/bundle?panel=rdpControl")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()["panels"]["rdpControl"]["data"]
+        self.assertIn("tasks", payload)
+        self.assertIn("pending_recommendations", payload)
+        self.assertIn("active_parameters", payload)
+        self.assertIn("runtime_parameter_source", payload)
+        self.assertIn("latest_round_summary", payload)
+        self.assertIn("latest_research_conclusions", payload)
+        self.assertIn("governance_state", payload)
+        self.assertIn(
+            payload["runtime_parameter_source"]["mode"],
+            {"active_parameters", "governance_pause", "profile_defaults", "mixed"},
+        )
+        self.assertIsInstance(payload["latest_research_conclusions"], list)
+        self.assertIsInstance(payload["governance_state"], dict)
 
     async def test_execution_latest_uses_normalized_recovery_view(self) -> None:
         runtime = await self._runtime()

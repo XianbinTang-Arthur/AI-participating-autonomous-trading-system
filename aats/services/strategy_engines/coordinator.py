@@ -35,6 +35,7 @@ from aats.schemas.strategy_runtime import (
 from aats.schemas.execution import position_intent_from_leg_intent
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, quantize_decimal, to_decimal
 from aats.services.runtime_scope import latest_snapshot_for_scope, runtime_state_scope
+from aats.services.decision_engine.target_position import finalize_position_sizing_breakdown
 from aats.services.strategy_engines.allocator import PortfolioAllocatorV2Phase1
 from aats.services.strategy_engines.auto_parallel import StrategySleeveAutoController
 from aats.services.strategy_engines.base import (
@@ -617,6 +618,21 @@ class StrategyCoordinatorService:
             )
             if abs(leg_max_leverage - base_target.target_leverage) > 1e-9:
                 updates["target_leverage"] = leg_max_leverage
+        sizing_breakdown = base_target.sizing_breakdown
+        if sizing_breakdown is not None:
+            sizing_breakdown = finalize_position_sizing_breakdown(
+                sizing_breakdown=sizing_breakdown,
+                resolved_target_qty=target_qty,
+                target_leverage=updates.get("target_leverage", base_target.target_leverage),
+            )
+            updates["sizing_breakdown"] = sizing_breakdown
+            if decision_outcome is not None:
+                decision_outcome = decision_outcome.model_copy(
+                    update={
+                        "sizing_breakdown": sizing_breakdown.model_copy(deep=True),
+                    }
+                )
+                updates["decision_outcome"] = decision_outcome
         if snapshot_ref is not None:
             updates["guardrail_flags"] = list(
                 dict.fromkeys([*base_target.guardrail_flags, f"strategy_snapshot_ref:{snapshot_ref}"])

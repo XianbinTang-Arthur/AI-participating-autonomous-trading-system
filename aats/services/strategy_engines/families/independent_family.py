@@ -859,6 +859,7 @@ def evaluate_independent_books(
         leg="long",
         expectancy=long_expectancy,
         directional_leg_target_qty=directional_long_target_qty,
+        leverage_bias=leverage_bias,
         scorer=scorer,
         prior_runtime_state=(
             None
@@ -879,6 +880,7 @@ def evaluate_independent_books(
         leg="short",
         expectancy=short_expectancy,
         directional_leg_target_qty=directional_short_target_qty,
+        leverage_bias=leverage_bias,
         scorer=scorer,
         prior_runtime_state=(
             None
@@ -1349,6 +1351,7 @@ def _evaluate_independent_book(
     leg: IndependentLeg,
     expectancy: IndependentBookExpectancy | None,
     directional_leg_target_qty: Decimal,
+    leverage_bias: float = 1.0,
     scorer: IndependentBookScorer | None,
     prior_runtime_state: StrategyBookRuntimeState | None = None,
     recent_score_history: Sequence[float] = (),
@@ -1361,6 +1364,7 @@ def _evaluate_independent_book(
         leg=leg,
         expectancy=expectancy,
         directional_leg_target_qty=directional_leg_target_qty,
+        leverage_bias=leverage_bias,
         scorer=scorer,
         prior_runtime_state=prior_runtime_state,
         recent_score_history=recent_score_history,

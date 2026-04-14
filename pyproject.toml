@@ -22,6 +22,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# 常用测试依赖：补齐 pytest-asyncio 插件，以及 NATS 相关单测 import 所需模块。
+test = [
+  "pytest-asyncio>=0.23",
+  "nats-py>=2.7",
+]
 # Stage 4 多进程切片化重构使用：HybridEventBus 的关键 topic 走 NATS JetStream。
 # 仅在 AATS_EVENT_BUS_BACKEND=hybrid|nats 时需要安装；in_memory backend 不依赖。
 nats = [
@@ -63,3 +68,21 @@ otel = [
 
 [tool.setuptools.packages.find]
 include = ["aats*"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/_verify_governance_db.py" = ["E402"]
+"scripts/rdp_build_artifact_index.py" = ["E402"]
+"scripts/rdp_evaluate_promotion_readiness.py" = ["E402"]
+"scripts/rdp_freeze_parameter_set.py" = ["E402"]
+"scripts/rdp_list_active_rounds.py" = ["E402"]
+"scripts/rdp_retry_failed_round.py" = ["E402"]
+"scripts/rdp_run_decision_round.py" = ["E402"]
+"scripts/rdp_run_quality_monitor.py" = ["E402"]
+"scripts/rdp_select_parameter_upgrade.py" = ["E402"]
+"scripts/rdp_update_decision_registry.py" = ["E402"]
+"scripts/rdp_validate_artifacts.py" = ["E402"]
+"tests/test_review3_fixes.py" = ["E402"]
+"tests/test_review_fixes.py" = ["E402"]
+"tests/test_step3_research.py" = ["E402"]
+"tests/test_taskbook3_acceptance.py" = ["E402"]
+"tests/test_taskbook4_acceptance.py" = ["E402"]

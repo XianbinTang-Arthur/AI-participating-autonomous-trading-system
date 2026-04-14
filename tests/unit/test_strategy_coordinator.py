@@ -8,13 +8,20 @@ from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
-from aats.schemas.decision import BaselineAssessment, DecisionContext, DecisionOutcome, PositionTarget
+from aats.schemas.decision import (
+    BaselineAssessment,
+    DecisionContext,
+    DecisionOutcome,
+    PositionSizingBreakdown,
+    PositionTarget,
+)
 from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeBalance, ExchangePosition
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.strategy_runtime import (
+    PortfolioAllocationDecision,
     StrategyBookRuntimeState,
     StrategyCandidate,
     StrategyCoordinatorSnapshot,
@@ -155,6 +162,8 @@ def _position_target(
     target_qty: str,
     rebalance_reason: str = "directional_target",
     position_intent: str = "hold",
+    target_leverage: float | None = None,
+    sizing_breakdown: PositionSizingBreakdown | None = None,
 ) -> PositionTarget:
     now = utc_now()
     current_decimal = Decimal(current_qty)
@@ -176,10 +185,12 @@ def _position_target(
         current_exposure_side="flat" if current_decimal == 0 else "long",
         target_exposure_side="flat" if target_decimal == 0 else "long",
         position_intent=position_intent,
+        target_leverage=1.0 if target_leverage is None else target_leverage,
         margin_mode=margin_mode,
         expected_signal_edge_bps=12.0,
         expected_cost_bps=4.0,
         expected_net_edge_bps=8.0,
+        sizing_breakdown=sizing_breakdown,
         decision_outcome=_decision_outcome(symbol),
     )
 
@@ -1340,6 +1351,125 @@ class TestStrategyCoordinator(unittest.TestCase):
         self.assertEqual(applied.target_position_qty, Decimal("0"))
         self.assertEqual(applied.strategy_execution_legs, [])
         self.assertNotIn("directional_strategy_execution_legs_retained", applied.strategy_reason_codes)
+
+    def test_apply_selected_target_reconciles_sizing_breakdown_after_family_override(self) -> None:
+        coordinator = StrategyCoordinatorService(
+            settings=AATSSettings.model_validate(
+                {
+                    "trading_product_type": "derivatives",
+                    "margin_mode": "cross",
+                    "default_symbol": "BTC-USDT-SWAP",
+                    "allowed_symbols": ("BTC-USDT-SWAP",),
+                }
+            ),
+            event_store=InMemoryEventStore(),
+            market_gateway=_FakeMarketGateway({"BTC-USDT-SWAP": _market_snapshot("BTC-USDT-SWAP", "100000")}),
+            portfolio_repo=InMemoryPortfolioRepository(),
+            strategy_sleeve_repo=InMemoryStrategySleeveRepository(),
+        )
+        sizing_breakdown = PositionSizingBreakdown(
+            sizing_mode="balance_aware",
+            available_equity=Decimal("390"),
+            margin_usage_fraction=Decimal("0.75"),
+            target_leverage=5.0,
+            leverage_bias=1.0,
+            last_price=Decimal("100000"),
+            default_order_qty=Decimal("0.004"),
+            position_scale=Decimal("1"),
+            legacy_reference_qty=Decimal("0.004"),
+            balance_reference_qty=Decimal("0.014625"),
+            resolved_reference_qty=Decimal("0.014625"),
+            resolved_target_qty=Decimal("0.014625"),
+            budgeted_notional=Decimal("1462.5"),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0",
+            target_qty="0.014625",
+            position_intent="open_long",
+            target_leverage=5.0,
+            sizing_breakdown=sizing_breakdown,
+        )
+        allocation = PortfolioAllocationDecision(
+            decision_id=base_target.decision_id,
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            route_action="override_target",
+            primary_family="independent",
+            primary_strategy_sleeve_id="sleeve_independent_test",
+            active_families=["directional", "independent"],
+            approved_families=["independent"],
+            reason_codes=["allocator_primary_family_independent"],
+            current_position_qty=Decimal("0"),
+            target_position_qty=Decimal("0.01"),
+            delta_position_qty=Decimal("0.01"),
+            execution_legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    product_type="derivatives",
+                    side="buy",
+                    family="independent",
+                    role="primary",
+                    strategy_sleeve_id="sleeve_independent_test",
+                    allocation_id="alloc_independent_test",
+                    margin_mode="cross",
+                    target_leverage=2.0,
+                    current_position_qty=Decimal("0"),
+                    target_position_qty=Decimal("0.01"),
+                    delta_position_qty=Decimal("0.01"),
+                    reference_price=Decimal("100000"),
+                    execution_compatible=True,
+                )
+            ],
+        )
+        snapshot = StrategyCoordinatorSnapshot(
+            decision_id=base_target.decision_id,
+            symbol="BTC-USDT-SWAP",
+            timeframe="15m",
+            product_type="derivatives",
+            margin_mode="cross",
+            allowed_symbols=("BTC-USDT-SWAP",),
+            active_family="independent",
+            selected_family="independent",
+            selected_state="ready",
+            selected_route_action="override_target",
+            selected_family_action="open_independent_book",
+            selected_headline="independent selected",
+            selection_reason_codes=["allocator_primary_family_independent"],
+            active_families=["directional", "independent"],
+            approved_families=["independent"],
+            candidates=[
+                StrategyCandidate(
+                    family="independent",
+                    state="ready",
+                    enabled=True,
+                    selectable=True,
+                    execution_compatible=True,
+                    route_action="override_target",
+                    family_action="open_independent_book",
+                    headline="independent selected",
+                )
+            ],
+            allocation_decision=allocation,
+        )
+
+        applied = coordinator.apply_selected_target(base_target=base_target, snapshot=snapshot)
+
+        self.assertIsNotNone(applied.sizing_breakdown)
+        self.assertEqual(applied.target_position_qty, Decimal("0.01"))
+        self.assertEqual(applied.target_leverage, 2.0)
+        self.assertEqual(applied.sizing_breakdown.balance_reference_qty, Decimal("0.01"))
+        self.assertEqual(applied.sizing_breakdown.resolved_reference_qty, Decimal("0.01"))
+        self.assertEqual(applied.sizing_breakdown.resolved_target_qty, Decimal("0.01"))
+        self.assertEqual(applied.sizing_breakdown.budgeted_notional, Decimal("1000"))
+        self.assertIsNotNone(applied.decision_outcome)
+        self.assertEqual(
+            applied.decision_outcome.sizing_breakdown.resolved_target_qty,  # type: ignore[union-attr]
+            Decimal("0.01"),
+        )
 
     def test_dca_interval_uses_last_real_dca_target_instead_of_hold_cycles(self) -> None:
         settings = AATSSettings.model_validate(

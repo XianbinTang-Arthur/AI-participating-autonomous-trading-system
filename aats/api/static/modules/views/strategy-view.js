@@ -3100,11 +3100,29 @@ function targetPositionValue(target = {}, decisionScene) {
 }
 
 function targetPlanMeta(target = {}, decisionScene) {
-  return `${readableFamilyExecutionSummary(target, "保持当前仓位")} | ${
+  const defaultMeta =
     decisionScene === "derivatives"
       ? numberMeta("目标杠杆", target.target_leverage, "当前没有目标杠杆")
-      : readableFamilyExecutionMeta(target, "当前没有方向补充说明")
-  }`;
+      : readableFamilyExecutionMeta(target, "当前没有方向补充说明");
+  if (decisionScene !== "derivatives") {
+    return `${readableFamilyExecutionSummary(target, "保持当前仓位")} | ${defaultMeta}`;
+  }
+  const sizingBreakdown = target.sizing_breakdown || target.sizingBreakdown || null;
+  if (!sizingBreakdown) {
+    return `${readableFamilyExecutionSummary(target, "保持当前仓位")} | ${defaultMeta}`;
+  }
+  return `${readableFamilyExecutionSummary(target, "保持当前仓位")} | ${defaultMeta} | ${targetSizingMeta(sizingBreakdown)}`;
+}
+
+function targetSizingMeta(sizingBreakdown = {}) {
+  const mode = String(sizingBreakdown.sizing_mode || sizingBreakdown.sizingMode || "").trim().toLowerCase();
+  const modeText = mode === "balance_aware" ? "余额感知" : "固定下单量";
+  return [
+    modeText,
+    `可用权益 ${formatNumber(sizingBreakdown.available_equity ?? sizingBreakdown.availableEquity, 4, "待确认")}`,
+    `价格 ${formatNumber(sizingBreakdown.last_price ?? sizingBreakdown.lastPrice, 4, "待确认")}`,
+    `目标 ${formatSigned(sizingBreakdown.resolved_target_qty ?? sizingBreakdown.resolvedTargetQty, 6, "待确认")}`,
+  ].join(" / ");
 }
 
 function latestOrderStatusLabel(order = null) {

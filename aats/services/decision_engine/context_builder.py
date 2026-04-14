@@ -9,6 +9,8 @@ from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.schemas.common import utc_now
 from aats.schemas.decision import DecisionContext
+from aats.schemas.exchange import ExchangeAccountSnapshot
+from aats.schemas.market import MarketSnapshot
 from aats.schemas.execution import FillEvent
 from aats.schemas.portfolio import InstrumentPositionState, PortfolioSnapshot
 from aats.schemas.system import HealthSnapshot
@@ -59,6 +61,7 @@ class DecisionContextBuilder:
         execution_repo: ExecutionRepository,
         mode_controller: RuntimeModeController,
         health_service: SystemHealthService,
+        account_service: object | None = None,
         stream_snapshot_cache: StreamSnapshotCache | None = None,
         portfolio_snapshot_cache: PortfolioSnapshotCache | None = None,
         order_state_cache: OrderStateHotCache | None = None,
@@ -70,6 +73,7 @@ class DecisionContextBuilder:
         self.execution_repo = execution_repo
         self.mode_controller = mode_controller
         self.health_service = health_service
+        self.account_service = account_service
         self._stream_cache = stream_snapshot_cache
         self._portfolio_snapshot_cache = portfolio_snapshot_cache
         self._order_state_cache = order_state_cache
@@ -165,6 +169,8 @@ class DecisionContextBuilder:
         if portfolio_event is None and portfolio_snapshot is None:
             raise RuntimeError("Portfolio snapshot is required before building decision context")
 
+        market_snapshot = MarketSnapshot.model_validate(market_event.payload)
+        account_snapshot = self._account_snapshot()
         current_position_state = self._position_state(portfolio_snapshot, symbol, self.settings.trading_product_type)
         # Extract position fields once to eliminate repeated None-checks.
         _ZERO = Decimal("0")
@@ -303,7 +309,31 @@ class DecisionContextBuilder:
             },
             strategy_guardrail_flags=list(guardrails["flags"]),
             strategy_cooldowns=dict(guardrails["cooldowns"]),
+            market_last_price=to_decimal(market_snapshot.last_price),
+            available_trading_equity=self._available_trading_equity(
+                account_snapshot=account_snapshot,
+                portfolio_snapshot=portfolio_snapshot,
+            ),
         )
+
+    def _account_snapshot(self) -> ExchangeAccountSnapshot | None:
+        loader = getattr(self.account_service, "latest_snapshot", None)
+        if not callable(loader):
+            return None
+        snapshot = loader()
+        return snapshot if isinstance(snapshot, ExchangeAccountSnapshot) else None
+
+    @staticmethod
+    def _available_trading_equity(
+        *,
+        account_snapshot: ExchangeAccountSnapshot | None,
+        portfolio_snapshot: PortfolioSnapshot | None,
+    ) -> Decimal:
+        if account_snapshot is not None and account_snapshot.risk_snapshot is not None:
+            resolved = to_decimal(account_snapshot.risk_snapshot.available_equity or 0)
+            if resolved > EPSILON_DECIMAL_12:
+                return resolved
+        return Decimal("0")
 
     @staticmethod
     def _position_state(

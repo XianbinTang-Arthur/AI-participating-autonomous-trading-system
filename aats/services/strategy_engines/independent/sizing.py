@@ -14,8 +14,15 @@ def compute_entry_target_qty(
     *,
     settings: AATSSettings,
     directional_leg_target_qty: Decimal,
+    balance_reference_qty: Decimal | None = None,
 ) -> Decimal:
-    return max(to_decimal(settings.default_order_qty), to_decimal(directional_leg_target_qty))
+    candidates = [
+        to_decimal(settings.default_order_qty),
+        to_decimal(directional_leg_target_qty),
+    ]
+    if balance_reference_qty is not None:
+        candidates.append(abs(to_decimal(balance_reference_qty)))
+    return max(candidates)
 
 
 def compute_scale_in_target_qty(

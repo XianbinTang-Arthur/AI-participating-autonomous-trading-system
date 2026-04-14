@@ -123,6 +123,7 @@ pip install -e .
 可选依赖：
 
 ```powershell
+pip install -e .[test]
 pip install -e .[nats]
 pip install -e .[redis]
 pip install -e .[otel]
@@ -167,6 +168,19 @@ pip install -e .[otel]
 .\.venv\Scripts\python.exe -m pytest tests\unit -q
 .\.venv\Scripts\python.exe -m pytest tests\integration -q
 .\.venv\Scripts\python.exe -m ruff check .
+```
+
+建议先安装测试依赖：
+
+```powershell
+pip install -e .[test]
+```
+
+如果要跑容器类集成测试，再额外安装：
+
+```powershell
+pip install -e .[nats-integration]
+pip install -e .[redis-integration]
 ```
 
 针对 2026-04-13 审计涉及的核心行为，最近一次执行：
