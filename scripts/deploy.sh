@@ -151,11 +151,29 @@ resolve_wsl2_env_file() {
 }
 
 all_required_app_containers_healthy() {
-    wsl_run "for c in $APP_CONTAINERS; do state=\$(docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \"\$c\" 2>/dev/null || echo 'missing missing'); set -- \$state; if [[ \"\$1\" != 'running' || \"\$2\" != 'healthy' ]]; then exit 1; fi; done"
+    local c
+    local state
+
+    for c in $APP_CONTAINERS; do
+        state="$(wsl_run "docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \"$c\" 2>/dev/null" || true)"
+        [[ "$state" == "running healthy" ]] || return 1
+    done
+
+    return 0
 }
 
 print_required_app_container_states() {
-    wsl_run "for c in $APP_CONTAINERS; do docker inspect --format '$c {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \"\$c\" 2>/dev/null || echo '$c missing'; done"
+    local c
+    local state
+
+    for c in $APP_CONTAINERS; do
+        state="$(wsl_run "docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \"$c\" 2>/dev/null" || true)"
+        if [[ -n "$state" ]]; then
+            printf '%s %s\n' "$c" "$state"
+        else
+            printf '%s missing\n' "$c"
+        fi
+    done
 }
 
 preflight() {

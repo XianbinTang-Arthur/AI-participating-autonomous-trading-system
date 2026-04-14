@@ -31,6 +31,8 @@ After making code changes, run:
 4. The project runtime environment is: `.venv\Scripts\python.exe`（Windows）; `~/aats-venv`（WSL2）
 5. The database connection settings used by the project are located in the file: `.env.derivatives.live`, on line 19
 
+- In this repository's default PowerShell environment, do not chain commands with `&&`; run them as separate commands or use PowerShell-native syntax.
+
 If any command fails, explain the failure clearly. Do not claim success without running the command.
 
 ## Deployment

@@ -27,6 +27,15 @@ def test_deploy_script_health_check_covers_current_topology() -> None:
     assert "all_required_app_containers_healthy" in text
 
 
+def test_deploy_script_health_helpers_check_each_container_safely() -> None:
+    text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    assert 'state="$(wsl_run "docker inspect --format' in text
+    assert '[[ "$state" == "running healthy" ]] || return 1' in text
+    assert "printf '%s %s\\n' \"$c\" \"$state\"" in text
+    assert "printf '%s missing\\n' \"$c\"" in text
+
+
 def test_deploy_script_accepts_root_and_legacy_wsl2_env_file_locations() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 
