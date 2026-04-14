@@ -409,11 +409,32 @@ class ExecutionPlanner:
             instrument_rule=instrument_rule,
         )
         if normalized_quantity <= EPSILON_DECIMAL_12:
-            log.warning(
-                "build_leg_plan skip: 合约规格量化后 quantity 为零 | symbol=%s side=%s pos_side=%s raw_qty=%s",
-                symbol, side, pos_side, quantity,
-            )
-            return None
+            # 平仓 / 减仓时量化为零（持仓小于 1 张合约）：向上取整到最小合约量。
+            # 交易所 reduceOnly / closeOnly 标志确保实际成交不超过真实持仓，
+            # 所以多报 1 张不会开出反向头寸。
+            if action in ("close", "reduce") and instrument_rule is not None:
+                min_qty = minimum_internal_order_quantity(
+                    symbol=symbol, instrument=instrument_rule,
+                )
+                if min_qty > EPSILON_DECIMAL_12:
+                    normalized_quantity = min_qty
+                    log.info(
+                        "build_leg_plan: 平仓量化为零，向上取整到最小合约量 | "
+                        "symbol=%s side=%s pos_side=%s raw_qty=%s min_qty=%s",
+                        symbol, side, pos_side, quantity, min_qty,
+                    )
+                else:
+                    log.warning(
+                        "build_leg_plan skip: 合约规格量化后 quantity 为零 | symbol=%s side=%s pos_side=%s raw_qty=%s",
+                        symbol, side, pos_side, quantity,
+                    )
+                    return None
+            else:
+                log.warning(
+                    "build_leg_plan skip: 合约规格量化后 quantity 为零 | symbol=%s side=%s pos_side=%s raw_qty=%s",
+                    symbol, side, pos_side, quantity,
+                )
+                return None
         resolved_position_intent = position_intent or position_intent_from_leg_intent(
             side=side,
             pos_side=pos_side,
