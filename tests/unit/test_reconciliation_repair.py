@@ -680,5 +680,297 @@ class TestReconciliationRepair(unittest.IsolatedAsyncioTestCase):
         self.assertIn("exit_execution_missing_child_refs_for_parent", report.mismatch_categories)
 
 
+class TestRepairBaselineAware(unittest.IsolatedAsyncioTestCase):
+    """Regression: repair() must respect baseline when bootstrap_portfolio_from_exchange=True.
+
+    When a baseline snapshot exists, pre-baseline fills should NOT be
+    replayed.  Before the fix, repair() always did full fill replay,
+    causing the 'local_repair' snapshot to include stale pre-baseline
+    net positions, which then triggered a false position mismatch and
+    system halt.
+    """
+
+    async def test_repair_ignores_pre_baseline_fills(self) -> None:
+        """Pre-baseline fills must not influence the repaired snapshot."""
+        now = datetime.now(timezone.utc)
+        baseline_ts = now - timedelta(hours=1)
+        pre_baseline_ts = baseline_ts - timedelta(hours=2)
+
+        # Pre-baseline fill: 0.001 BTC buy — should be ignored by repair
+        pre_baseline_fill = FillEvent(
+            fill_id="fill_pre_baseline",
+            decision_id="decision_pre",
+            intent_id="intent_pre",
+            client_order_id="clord_pre",
+            exchange_order_id="ord_pre",
+            symbol="BTC-USDT-SWAP",
+            venue="OKX",
+            side="buy",
+            fill_qty=0.001,
+            fill_price=50000.0,
+            fee_amount=0.025,
+            fee_currency="USDT",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            position_intent="open_long",
+            liquidity_role="taker",
+            exchange_timestamp=pre_baseline_ts,
+            ingestion_timestamp=pre_baseline_ts,
+        )
+
+        # Post-baseline fill: 0.002 BTC sell — should be included
+        post_baseline_fill = FillEvent(
+            fill_id="fill_post_baseline",
+            decision_id="decision_post",
+            intent_id="intent_post",
+            client_order_id="clord_post",
+            exchange_order_id="ord_post",
+            symbol="BTC-USDT-SWAP",
+            venue="OKX",
+            side="sell",
+            fill_qty=0.002,
+            fill_price=51000.0,
+            fee_amount=0.051,
+            fee_currency="USDT",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="short",
+            position_intent="open_short",
+            liquidity_role="taker",
+            exchange_timestamp=now,
+            ingestion_timestamp=now,
+        )
+
+        execution_repo = InMemoryExecutionRepository()
+        for fill in [pre_baseline_fill, post_baseline_fill]:
+            execution_repo.save_fill(fill)
+            execution_repo.save_order_state(
+                OrderState(
+                    decision_id=fill.decision_id,
+                    intent_id=fill.intent_id,
+                    symbol=fill.symbol,
+                    client_order_id=fill.client_order_id,
+                    venue=fill.venue,
+                    exchange_order_id=fill.exchange_order_id,
+                    status="FILLED",
+                    submitted_ts=fill.exchange_timestamp,
+                    last_update_ts=fill.ingestion_timestamp,
+                    requested_qty=float(fill.fill_qty),
+                    filled_qty=float(fill.fill_qty),
+                    remaining_qty=0.0,
+                    average_fill_price=float(fill.fill_price),
+                    fees=float(fill.fee_amount),
+                    product_type="derivatives",
+                    margin_mode="cross",
+                )
+            )
+
+        portfolio_repo = InMemoryPortfolioRepository()
+
+        # Baseline snapshot: represents exchange state at baseline_ts
+        # (clean slate, no positions — the pre-baseline fill was already
+        #  accounted for in an earlier baseline cycle)
+        baseline_snapshot = PortfolioSnapshot(
+            snapshot_ts=baseline_ts,
+            decision_id="baseline_decision",
+            snapshot_origin="exchange_import",
+            product_type="derivatives",
+            margin_mode="cross",
+            balances={"USDT": Decimal("10000.0")},
+            positions=[],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("10000.0"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            risk_budget_usage={},
+        )
+        portfolio_repo.save_snapshot(baseline_snapshot)
+
+        # Current running snapshot: only post-baseline fill applied
+        # → position = -0.002 (short). This is CORRECT.
+        current_snapshot = PortfolioSnapshot(
+            snapshot_ts=now,
+            decision_id="decision_post",
+            snapshot_origin="fill_derived",
+            source_fill_id="fill_post_baseline",
+            product_type="derivatives",
+            margin_mode="cross",
+            balances={"USDT": Decimal("9999.949")},
+            positions=[
+                {
+                    "symbol": "BTC-USDT-SWAP",
+                    "position_qty": Decimal("-0.002"),
+                    "position_notional": Decimal("102.0"),
+                    "avg_entry_price": Decimal("51000.0"),
+                    "unrealized_pnl": Decimal("0"),
+                    "product_type": "derivatives",
+                    "margin_mode": "cross",
+                }
+            ],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("9999.949"),
+            gross_exposure=Decimal("102.0"),
+            net_exposure=Decimal("-102.0"),
+            risk_budget_usage={},
+        )
+        portfolio_repo.save_snapshot(current_snapshot)
+
+        event_store = InMemoryEventStore()
+        settings = AATSSettings.model_validate({
+            "trading_product_type": "derivatives",
+            "margin_mode": "cross",
+            "bootstrap_portfolio_from_exchange": True,
+        })
+
+        service = ReconciliationService(
+            settings=settings,
+            bus=InMemoryEventBus(event_store=event_store, persistence_mode="strict"),
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            execution_repo=execution_repo,
+            portfolio_repo=portfolio_repo,
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: Decimal("51000.0"),
+            bootstrap_portfolio_from_exchange=True,
+            metrics=None,
+        )
+
+        # The repair service should now be baseline-aware
+        repair_svc = service.repair_service
+        self.assertIsNotNone(repair_svc.settings)
+        self.assertTrue(repair_svc.settings.bootstrap_portfolio_from_exchange)
+
+        # Directly test the baseline-aware rebuild
+        scoped_fills = [pre_baseline_fill, post_baseline_fill]
+        rebuilt = repair_svc._rebuild_snapshot_baseline_aware(fills=scoped_fills)
+
+        # With baseline-aware rebuild: only post_baseline_fill (-0.002 sell) is applied
+        # on top of the clean baseline. The pre_baseline_fill (+0.001 buy) is ignored.
+        position_map = {p.symbol: p for p in rebuilt.positions}
+        btc_pos = position_map.get("BTC-USDT-SWAP")
+        self.assertIsNotNone(btc_pos, "BTC-USDT-SWAP position should exist")
+        # Position should be -0.002 (only post-baseline short), NOT -0.001 (net of both fills)
+        self.assertEqual(
+            btc_pos.position_qty,
+            Decimal("-0.002"),
+            f"Expected -0.002 (post-baseline only), got {btc_pos.position_qty}. "
+            "Pre-baseline fill was incorrectly included in repair."
+        )
+
+    async def test_repair_falls_back_to_full_replay_without_baseline(self) -> None:
+        """Without a baseline snapshot, repair should fall back to full fill replay."""
+        now = datetime.now(timezone.utc)
+        fill = FillEvent(
+            fill_id="fill_no_baseline",
+            decision_id="decision_no_baseline",
+            intent_id="intent_no_baseline",
+            client_order_id="clord_no_baseline",
+            exchange_order_id="ord_no_baseline",
+            symbol="BTC-USDT-SWAP",
+            venue="OKX",
+            side="buy",
+            fill_qty=0.003,
+            fill_price=50000.0,
+            fee_amount=0.075,
+            fee_currency="USDT",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            position_intent="open_long",
+            liquidity_role="taker",
+            exchange_timestamp=now,
+            ingestion_timestamp=now,
+        )
+
+        execution_repo = InMemoryExecutionRepository()
+        execution_repo.save_fill(fill)
+        execution_repo.save_order_state(
+            OrderState(
+                decision_id=fill.decision_id,
+                intent_id=fill.intent_id,
+                symbol=fill.symbol,
+                client_order_id=fill.client_order_id,
+                venue=fill.venue,
+                exchange_order_id=fill.exchange_order_id,
+                status="FILLED",
+                submitted_ts=fill.exchange_timestamp,
+                last_update_ts=fill.ingestion_timestamp,
+                requested_qty=float(fill.fill_qty),
+                filled_qty=float(fill.fill_qty),
+                remaining_qty=0.0,
+                average_fill_price=float(fill.fill_price),
+                fees=float(fill.fee_amount),
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+
+        portfolio_repo = InMemoryPortfolioRepository()
+        # No baseline snapshot — only a stale fill_derived
+        portfolio_repo.save_snapshot(
+            PortfolioSnapshot(
+                snapshot_ts=now - timedelta(hours=1),
+                decision_id="old_decision",
+                snapshot_origin="fill_derived",
+                product_type="derivatives",
+                margin_mode="cross",
+                balances={"USDT": Decimal("10000.0")},
+                positions=[],
+                cost_basis={},
+                realized_pnl=Decimal("0"),
+                unrealized_pnl=Decimal("0"),
+                total_equity=Decimal("10000.0"),
+                gross_exposure=Decimal("0"),
+                net_exposure=Decimal("0"),
+                risk_budget_usage={},
+            )
+        )
+
+        event_store = InMemoryEventStore()
+        settings = AATSSettings.model_validate({
+            "trading_product_type": "derivatives",
+            "margin_mode": "cross",
+            "bootstrap_portfolio_from_exchange": True,
+        })
+
+        service = ReconciliationService(
+            settings=settings,
+            bus=InMemoryEventBus(event_store=event_store, persistence_mode="strict"),
+            fetcher=ExchangeStateFetcher(account_service=None),
+            comparator=StateComparator(),
+            repair_service=ReconciliationRepairService(),
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            execution_repo=execution_repo,
+            portfolio_repo=portfolio_repo,
+            event_store=event_store,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=10_000.0,
+                snapshot_builder=PortfolioSnapshotBuilder(pnl_calculator=PortfolioPnLCalculator()),
+            ),
+            price_provider=lambda _symbol: Decimal("50000.0"),
+            bootstrap_portfolio_from_exchange=True,
+            metrics=None,
+        )
+
+        # No baseline → full replay should include the fill
+        repair_svc = service.repair_service
+        rebuilt = repair_svc._rebuild_snapshot_baseline_aware(fills=[fill])
+        position_map = {p.symbol: p for p in rebuilt.positions}
+        btc_pos = position_map.get("BTC-USDT-SWAP")
+        self.assertIsNotNone(btc_pos)
+        self.assertEqual(btc_pos.position_qty, Decimal("0.003"))
+
+
 if __name__ == "__main__":
     unittest.main()

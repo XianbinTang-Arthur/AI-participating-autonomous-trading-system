@@ -92,9 +92,8 @@ class ReconciliationRepairService:
         scoped_fills = fills_for_scope(self.execution_repo, self.runtime_scope)
         if not scoped_fills:
             return None
-        rebuilt_snapshot = self.reconstruction_service.rebuild_snapshot(
+        rebuilt_snapshot = self._rebuild_snapshot_baseline_aware(
             fills=scoped_fills,
-            price_provider=self.price_provider,
         ).model_copy(
             update={
                 "decision_id": report.decision_id,
@@ -108,6 +107,57 @@ class ReconciliationRepairService:
             return None
         self.portfolio_repo.save_snapshot(rebuilt_snapshot)
         return rebuilt_snapshot
+
+    def _rebuild_snapshot_baseline_aware(
+        self,
+        *,
+        fills: list[FillEvent],
+    ) -> PortfolioSnapshot:
+        """Rebuild portfolio snapshot, respecting baseline when available.
+
+        When bootstrap_portfolio_from_exchange is enabled and a baseline
+        snapshot exists, only fills ingested *after* the baseline timestamp
+        are replayed on top of the baseline state.  This prevents
+        pre-baseline fills (whose net may be non-zero) from corrupting
+        the reconstructed snapshot.
+        """
+        use_baseline = (
+            self.settings is not None
+            and getattr(self.settings, "bootstrap_portfolio_from_exchange", False)
+        )
+        if use_baseline:
+            baseline_snapshot = self._find_baseline_snapshot()
+            if baseline_snapshot is not None:
+                state = PortfolioState(
+                    initial_usdt_balance=self.reconstruction_service.initial_usdt_balance,
+                    default_product_type=self.runtime_scope.product_type,
+                    default_margin_mode=self.runtime_scope.margin_mode,
+                )
+                state.load_portfolio_snapshot(baseline_snapshot)
+                baseline_ts = baseline_snapshot.snapshot_ts
+                for fill in sorted(fills, key=fill_processing_sort_key):
+                    if fill.ingestion_timestamp >= baseline_ts:
+                        state.apply_fill(fill)
+                return self.reconstruction_service.snapshot_builder.build(
+                    state=state,
+                    price_provider=self.price_provider,
+                )
+        # Fallback: full fill replay (no baseline available or not enabled)
+        return self.reconstruction_service.rebuild_snapshot(
+            fills=fills,
+            price_provider=self.price_provider,
+        )
+
+    def _find_baseline_snapshot(self) -> PortfolioSnapshot | None:
+        """Find the latest baseline snapshot for the current runtime scope."""
+        candidates = [
+            snapshot
+            for snapshot in snapshots_for_scope(self.portfolio_repo, self.runtime_scope)
+            if is_baseline_snapshot(snapshot)
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: (item.snapshot_ts, item.created_at))
 
     def refresh_exit_execution_truth(self) -> list[ExitExecutionIntent]:
         if (
