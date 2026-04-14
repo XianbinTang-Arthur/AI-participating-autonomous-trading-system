@@ -50,10 +50,10 @@ ai_execution_suggestion_mode: diagnostic_only
 # 策略家族路由
 # [常用可调] strategy_family_active：默认主策略家族。当前这条实盘线显式固定为 independent，避免控制面继续显示 directional 兼容主语义。可选值：directional / smart_arbitrage / spot_grid / dca / protective / opportunistic / independent；推荐值：independent。
 strategy_family_active: independent
-# [常用可调] strategy_family_auto_selection_enabled：是否允许系统自动选择策略家族。可选值：true / false；推荐值：true。
-# 开启后 coordinator 按优先级自动选择：当 independent 无法产生 override_target 时，
-# directional（排在 independent 前面）可以接管。关闭则锁死 strategy_family_active 不回退。
-strategy_family_auto_selection_enabled: true
+# [常用可调] strategy_family_auto_selection_enabled：是否允许系统自动选择策略家族。可选值：true / false；推荐值：false。
+# 关闭时锁定 strategy_family_active 为主策略。开启时 strategy_family_active 被忽略，
+# coordinator 按 _SELECTION_PRIORITY_ORDER 竞争（directional 排在 independent 前，会抢占）。
+strategy_family_auto_selection_enabled: false
 # [常用可调] strategy_family_independent_enabled：是否启用 independent family。可选值：true / false；推荐值：true。
 strategy_family_independent_enabled: true
 # [进阶可调] strategy_family_independent_shadow_mode_enabled：是否仅让 independent family 以 shadow 方式评估。当前这条实盘线已直接接管执行主路径，需关闭 shadow-only。可选值：true / false；推荐值：false。
@@ -75,7 +75,7 @@ strategy_family_opportunistic_shadow_mode_enabled: false
 # [常用可调] strategy_family_opportunistic_live_execution_enabled：是否允许 opportunistic family 直接接管实盘 allocator / apply 主路径。当前实盘主模式不是 opportunistic，默认关闭。可选值：true / false；推荐值：false。
 strategy_family_opportunistic_live_execution_enabled: false
 
-# 自动档位与应急换档
+# ai自动档位与应急换档
 # [常用可调] strategy_profile_auto_control_enabled：是否启用策略档位自动换档。这是唯一主开关；true 时系统会自动评估并默认启用自动激活规则，false 时只允许手动切档。可选值：true / false；推荐值：false。
 strategy_profile_auto_control_enabled: false
 # [常用可调] strategy_profile_auto_rollback_enabled：自动换档后是否允许自动回滚。可选值：true / false；推荐值：true。
