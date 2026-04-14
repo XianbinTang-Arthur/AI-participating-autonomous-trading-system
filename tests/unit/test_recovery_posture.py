@@ -512,6 +512,111 @@ class TestRecoveryPostureEvaluator(unittest.IsolatedAsyncioTestCase):
         self.assertIn("strategy_bundle_recovery_requires_review", final.resume_blocked_reasons)
 
 
+class TestTrialGuardBreachedCrossProcessFallback(unittest.TestCase):
+    """P0 修复：gateway 进程 trial_guard_service 为 None 时通过 kill switch
+    reason 检测 execution 进程设置的 trial guard breach。
+
+    问题：execution 进程检测到 trial guard breach → halt kill switch with
+    reason="trial_guard_threshold_breached"。gateway 进程的 _trial_guard_breached()
+    只检查本地 trial_guard_service.snapshot()，而 gateway 的
+    trial_guard_enabled=False → service 为 None → 返回 False → blocker 不出现
+    → "人工重置试盘守护" 按钮不渲染。
+
+    修复后：_trial_guard_breached() 在本地 service 不可用时回退检查 kill switch
+    的 reason 字段。
+    """
+
+    def _make_evaluator(
+        self,
+        *,
+        trial_guard_service=None,
+        kill_switch_halted: bool = False,
+        kill_switch_reason: str | None = None,
+    ) -> RecoveryPostureEvaluator:
+        evaluator = RecoveryPostureEvaluator.__new__(RecoveryPostureEvaluator)
+        ks = SimpleNamespace(
+            halted=kill_switch_halted,
+            status=lambda: {"halted": kill_switch_halted, "reason": kill_switch_reason},
+        )
+        evaluator.runtime = SimpleNamespace(
+            trial_guard_service=trial_guard_service,
+            kill_switch=ks,
+        )
+        return evaluator
+
+    def test_returns_true_when_local_service_reports_breached(self) -> None:
+        """Primary path: trial_guard_service available and reports breached."""
+        service = SimpleNamespace(
+            snapshot=lambda: {"enabled": True, "status": "breached"},
+        )
+        evaluator = self._make_evaluator(
+            trial_guard_service=service,
+            kill_switch_halted=True,
+            kill_switch_reason="trial_guard_threshold_breached",
+        )
+        self.assertTrue(evaluator._trial_guard_breached())
+
+    def test_returns_true_via_kill_switch_fallback_when_service_is_none(self) -> None:
+        """Cross-process fallback: gateway has no trial_guard_service,
+        but kill switch was halted by trial guard on execution process."""
+        evaluator = self._make_evaluator(
+            trial_guard_service=None,
+            kill_switch_halted=True,
+            kill_switch_reason="trial_guard_threshold_breached",
+        )
+        self.assertTrue(evaluator._trial_guard_breached())
+
+    def test_returns_false_when_kill_switch_halted_with_different_reason(self) -> None:
+        """Kill switch halted for a different reason (e.g., operator manual halt)
+        should NOT be treated as trial guard breach."""
+        evaluator = self._make_evaluator(
+            trial_guard_service=None,
+            kill_switch_halted=True,
+            kill_switch_reason="operator_test_halt",
+        )
+        self.assertFalse(evaluator._trial_guard_breached())
+
+    def test_returns_false_when_kill_switch_not_halted(self) -> None:
+        """Neither local service nor kill switch indicates breach."""
+        evaluator = self._make_evaluator(
+            trial_guard_service=None,
+            kill_switch_halted=False,
+            kill_switch_reason=None,
+        )
+        self.assertFalse(evaluator._trial_guard_breached())
+
+    def test_returns_false_after_reset_even_though_ks_still_halted(self) -> None:
+        """关键场景：trial guard 已人工重置（status=warming_up），
+        但 kill switch 仍然 halted with reason=trial_guard_threshold_breached
+        （reset 不 resume kill switch，这是设计意图）。
+
+        此时 _trial_guard_breached() 必须返回 False，否则 blocker 永远不消失，
+        用户无法继续点"恢复自动运行"。路径 A（本地 service 可用）必须
+        是排他的，不能 fall-through 到路径 B。"""
+        service = SimpleNamespace(
+            snapshot=lambda: {"enabled": True, "status": "warming_up"},
+        )
+        evaluator = self._make_evaluator(
+            trial_guard_service=service,
+            kill_switch_halted=True,
+            kill_switch_reason="trial_guard_threshold_breached",
+        )
+        self.assertFalse(evaluator._trial_guard_breached())
+
+    def test_returns_false_when_service_monitoring_and_ks_not_halted(self) -> None:
+        """Local service exists but reports monitoring (not breached),
+        and kill switch is not halted."""
+        service = SimpleNamespace(
+            snapshot=lambda: {"enabled": True, "status": "monitoring"},
+        )
+        evaluator = self._make_evaluator(
+            trial_guard_service=service,
+            kill_switch_halted=False,
+            kill_switch_reason=None,
+        )
+        self.assertFalse(evaluator._trial_guard_breached())
+
+
 class TestAiRequiresManualReviewNoneGuard(unittest.TestCase):
     """Stage 7 修复：gateway/market/execution role 下 runtime.ai_service is None。
 

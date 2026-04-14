@@ -35,8 +35,17 @@ def try_governance_db():
     (engine, True) 或 (None, False)
 
     使用方需在 finally 中调用 engine.dispose() 释放资源。
+
+    DB URL 优先级:
+      1. AATS_ACTIVE_PARAMETER_DB_URL — 专用 governance DB URL
+      2. RDP_DATABASE_URL — RDP 统一 DB URL（与 aats.data_platform.db.get_engine 一致）
+    历史上两个 URL 分别被不同入口引用（脚本 vs 核心模块），导致 apply-frozen
+    通过 AATS_ACTIVE_PARAMETER_DB_URL 写入但 bootstrap 通过 RDP_DATABASE_URL
+    读取，active_parameter_sets 表始终为空。现在统一 fallback 链。
     """
     url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+    if not url:
+        url = os.environ.get("RDP_DATABASE_URL")
     if not url:
         return None, False
     try:

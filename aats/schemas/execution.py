@@ -757,6 +757,17 @@ def order_intent_from_leg_order_intent(leg_intent: LegOrderIntent) -> OrderInten
     )
     reduce_only = bool(leg_intent.reduce_only or reduce_only_from_leg_action(leg_intent.action))
     close_only = bool(leg_intent.close_only or close_only_from_leg_action(leg_intent.action))
+
+    # ── 一致性修正：close_only=True 时 position_intent 必须是 close_* ──
+    # 当 leg_action="close" 导致 close_only=True，但上游传入的
+    # position_intent 仍是 "reduce_long"/"reduce_short" 时，OKX adapter
+    # 的 long_short_mode 验证会认为 position_intent 与 leg_action 不匹配
+    # 而拒绝提交（okx_leg_action_mismatch_with_position_intent）。
+    # close 是 reduce 的严格超集，升级 reduce→close 语义正确。
+    if close_only and position_intent == "reduce_long":
+        position_intent = "close_long"
+    elif close_only and position_intent == "reduce_short":
+        position_intent = "close_short"
     return OrderIntent(
         intent_id=leg_intent.leg_intent_id,
         execution_chain_id=leg_intent.execution_chain_id or leg_intent.leg_intent_id,

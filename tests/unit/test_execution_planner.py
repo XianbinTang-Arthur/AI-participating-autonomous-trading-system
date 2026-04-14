@@ -613,5 +613,114 @@ class TestExecutionPlanner(unittest.TestCase):
         self.assertEqual(intent.quantity, Decimal("0.0002"))
 
 
+    # ── okx_submit_blocked 回归测试 ────────────────────────────────
+    # 修复：close_only=True 时 reduce_long 必须升级为 close_long，
+    # 否则 OKX adapter 在 long_short_mode 下会拒绝提交。
+
+    def test_leg_order_intent_close_action_upgrades_reduce_long_to_close_long(self) -> None:
+        """当 leg_action=close 且上游传入 position_intent=reduce_long 时，
+        close_only 被推导为 True → position_intent 必须一致地升级为 close_long。"""
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_leg_plan(
+            decision_id="decision_reduce_close_fix",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            pos_side="long",
+            action="close",
+            quantity=Decimal("0.001"),
+            urgency="high",
+            max_slippage_tolerance_bps=30,
+            product_type="derivatives",
+            target_leverage=5.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            position_intent="reduce_long",  # 上游传入 reduce_long
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+
+        leg_intent = planner.build_leg_intent(plan=plan)
+        self.assertIsNotNone(leg_intent)
+        assert leg_intent is not None
+        self.assertEqual(leg_intent.action, "close")
+
+        order_intent = order_intent_from_leg_order_intent(leg_intent)
+
+        # close_only 由 leg_action="close" 推导
+        self.assertTrue(order_intent.close_only)
+        # position_intent 应被升级为 close_long（不能是 reduce_long）
+        self.assertEqual(order_intent.position_intent, "close_long")
+
+    def test_leg_order_intent_reduce_action_preserves_reduce_long(self) -> None:
+        """当 leg_action=reduce 时，close_only=False，position_intent 保持 reduce_long。"""
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_leg_plan(
+            decision_id="decision_reduce_preserve",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            pos_side="long",
+            action="reduce",
+            quantity=Decimal("0.001"),
+            urgency="medium",
+            max_slippage_tolerance_bps=20,
+            product_type="derivatives",
+            target_leverage=5.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            position_intent="reduce_long",
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+
+        leg_intent = planner.build_leg_intent(plan=plan)
+        self.assertIsNotNone(leg_intent)
+        assert leg_intent is not None
+
+        order_intent = order_intent_from_leg_order_intent(leg_intent)
+
+        self.assertFalse(order_intent.close_only)
+        self.assertTrue(order_intent.reduce_only)
+        self.assertEqual(order_intent.position_intent, "reduce_long")
+
+    def test_leg_order_intent_close_action_upgrades_reduce_short_to_close_short(self) -> None:
+        """对称测试：short 方向的 reduce_short + close 也要升级为 close_short。"""
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_leg_plan(
+            decision_id="decision_short_close_fix",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            pos_side="short",
+            action="close",
+            quantity=Decimal("0.001"),
+            urgency="high",
+            max_slippage_tolerance_bps=30,
+            product_type="derivatives",
+            target_leverage=5.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            position_intent="reduce_short",
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+
+        leg_intent = planner.build_leg_intent(plan=plan)
+        self.assertIsNotNone(leg_intent)
+        assert leg_intent is not None
+
+        order_intent = order_intent_from_leg_order_intent(leg_intent)
+
+        self.assertTrue(order_intent.close_only)
+        self.assertEqual(order_intent.position_intent, "close_short")
+
+
 if __name__ == "__main__":
     unittest.main()

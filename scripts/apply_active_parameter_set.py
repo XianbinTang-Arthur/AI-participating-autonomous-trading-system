@@ -67,6 +67,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="仅展示将要执行的操作，不实际写入",
     )
+    p.add_argument(
+        "--force",
+        action="store_true",
+        help="强制 apply-frozen，即使存在未执行的 rollback_triggered 结论",
+    )
     return p.parse_args()
 
 
@@ -288,8 +293,18 @@ def action_apply(project_root: Path, args: argparse.Namespace) -> int:
 
 
 def action_apply_frozen(project_root: Path, args: argparse.Namespace) -> int:
-    """从所有 frozen 参数自动生成 active sets."""
-    from aats.bootstrap.active_parameters import upsert_active_registry, write_active_parameter_set
+    """从所有 frozen 参数自动生成 active sets.
+
+    P1 治理改进：
+      1. 检查 release_effectiveness_registry 中是否有未执行的
+         rollback_triggered 结论，有则 BLOCK（除非 --force）
+      2. 为每个应用的参数集创建 release record 用于审计追踪
+    """
+    from aats.bootstrap.active_parameters import (
+        load_active_parameter_registry,
+        upsert_active_registry,
+        write_active_parameter_set,
+    )
     from aats.data_platform.governance.parameter_registry import (
         find_parameter_sets,
         load_registry,
@@ -308,12 +323,76 @@ def action_apply_frozen(project_root: Path, args: argparse.Namespace) -> int:
         combo = f"{ps['family']}_{ps['timeframe'].lower()}"
         print(f"  {combo}: {ps['parameter_set_id']}")
 
+    # ── 治理安全检查：检查 rollback_triggered 结论 ──────────────────
+    from aats.data_platform.metrics.release_effectiveness import (
+        load_effectiveness_registry,
+    )
+
+    eff_reg = load_effectiveness_registry(project_root)
+    rollback_blocked: dict[str, str] = {}  # combo_key → release_id
+    for ev in eff_reg.get("evaluations", []):
+        if ev.get("conclusion") == "rollback_triggered" and not ev.get("rollback_enforced"):
+            combo = f"{ev.get('family')}_{ev.get('timeframe', '').lower()}"
+            rollback_blocked[combo] = ev.get("release_id", "?")
+
+    blocked_combos = set()
+    for ps in frozen_sets:
+        combo = f"{ps['family']}_{ps['timeframe'].lower()}"
+        if combo in rollback_blocked:
+            blocked_combos.add(combo)
+
+    if blocked_combos and not getattr(args, "force", False):
+        print()
+        for combo in sorted(blocked_combos):
+            print(
+                f"  [BLOCK] {combo}: 存在未执行的 rollback_triggered 结论"
+                f" (release={rollback_blocked[combo]})"
+            )
+        print(
+            "\n请先执行 rollback 或使用 --force 强制 apply-frozen"
+        )
+        return 1
+
+    if blocked_combos and getattr(args, "force", False):
+        print("\n[WARN] --force 模式：忽略 rollback_triggered 结论继续 apply")
+
     if args.dry_run:
         print("\n[DRY RUN] 未实际写入")
         return 0
 
+    # ── 审计：准备 release history ─────────────────────────────────
+    from aats.data_platform.production_workflow.release_registry import (
+        add_release,
+        create_release_record,
+        load_release_history,
+        save_release_history,
+    )
+
+    release_history = load_release_history(project_root)
+    active_reg = load_active_parameter_registry(project_root=project_root)
+
     applied = 0
+    db_ok_count = 0
     for ps in frozen_sets:
+        combo_key = f"{ps['family']}_{ps['timeframe'].lower()}"
+
+        # 查找当前 active 作为 previous（用于审计和回滚）
+        prev_ps_id = active_reg.get("active_sets", {}).get(
+            combo_key, {},
+        ).get("parameter_set_id")
+
+        # 创建 release record（gate_status 标记为 bypassed_frozen）
+        release = create_release_record(
+            family=ps["family"],
+            timeframe=ps["timeframe"],
+            recommendation_id="frozen_direct_apply",
+            parameter_set_id=ps["parameter_set_id"],
+            actor="apply_active_parameter_set.py (apply-frozen)",
+            gate_status="bypassed_frozen",
+            previous_parameter_set_id=prev_ps_id,
+            notes="apply-frozen: 直接从 frozen 参数应用，未经 pre_apply_gate",
+        )
+
         path = write_active_parameter_set(
             family=ps["family"],
             timeframe=ps["timeframe"],
@@ -338,6 +417,19 @@ def action_apply_frozen(project_root: Path, args: argparse.Namespace) -> int:
             source_round_id=ps.get("source_round_id"),
             applied_by="apply_active_parameter_set.py (apply-frozen)",
         )
+        if db_ok:
+            db_ok_count += 1
+
+        release["apply_result"] = "success"
+        release["observation_status"] = "observing"
+        add_release(release_history, release)
+
+        # 更新内存中的 active_reg，保证同 combo 多个 frozen set 时
+        # 后续迭代的 prev_ps_id 指向上一个刚写入的（而非原始 active）
+        active_reg.setdefault("active_sets", {})[combo_key] = {
+            "parameter_set_id": ps["parameter_set_id"],
+        }
+
         db_label = " +DB" if db_ok else ""
         print(f"  [OK] {path}{db_label}")
         applied += 1
@@ -345,11 +437,19 @@ def action_apply_frozen(project_root: Path, args: argparse.Namespace) -> int:
         _write_application_log(
             project_root,
             action="apply-frozen",
-            combo_key=f"{ps['family']}_{ps['timeframe'].lower()}",
+            combo_key=combo_key,
             parameter_set_id=ps["parameter_set_id"],
         )
 
+    save_release_history(release_history, project_root)
+
     print(f"\n共应用 {applied} 个 active parameter sets")
+    print(f"已记录 {applied} 条 release records (gate_status=bypassed_frozen)")
+    if db_ok_count < applied:
+        print(
+            f"[WARN] DB 写入: {db_ok_count}/{applied} 成功"
+            f"（{applied - db_ok_count} 个未写入数据库，仅写入 JSON）"
+        )
     return 0
 
 

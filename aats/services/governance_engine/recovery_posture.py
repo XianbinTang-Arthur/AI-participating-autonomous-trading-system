@@ -77,7 +77,31 @@ class RecoveryPostureEvaluator:
         return snapshot if isinstance(snapshot, dict) else {}
 
     def _trial_guard_breached(self) -> bool:
-        return str(self._trial_guard_snapshot().get("status") or "").lower() == "breached"
+        # ── 两条互斥路径，不能 cascading fall-through ──
+        #
+        # 路径 A — 本地 trial_guard_service 可用（execution / monolith 进程）
+        #   直接信任 service.snapshot() 的 status 字段。
+        #   reset 后 status 从 "breached" 变为 "warming_up"，此路径返回 False，
+        #   blocker 随之消失，用户才能继续点"恢复自动运行"。
+        #   如果 fall-through 到路径 B，会因为 kill switch reason 仍为
+        #   trial_guard_threshold_breached（reset 不 resume kill switch）
+        #   而错误返回 True，导致 blocker 永远不消失。
+        #
+        # 路径 B — 本地 service 不存在（gateway 进程，trial_guard_enabled=False）
+        #   无法获取 trial guard 的实时状态，退而检查 kill switch reason。
+        #   execution 进程 trigger_halt 时设置 reason="trial_guard_threshold_breached"
+        #   并通过 Redis+NATS 同步到所有进程（Stage 6 Slice 6.4）。
+        #   这条路径让 gateway 能显示 blocker 和 reset 按钮。
+        service = getattr(self.runtime, "trial_guard_service", None)
+        if service is not None and hasattr(service, "snapshot"):
+            snapshot = service.snapshot()
+            if isinstance(snapshot, dict):
+                return str(snapshot.get("status") or "").lower() == "breached"
+        # 路径 B：无本地 service，用 kill switch reason 做跨进程检测
+        ks = self.runtime.kill_switch
+        if ks.halted:
+            return str(ks.status().get("reason") or "") == "trial_guard_threshold_breached"
+        return False
 
     def _current_only_reduce_state(
         self,

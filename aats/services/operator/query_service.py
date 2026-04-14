@@ -9351,7 +9351,24 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         service = getattr(self.runtime, "trial_guard_service", None)
         if service is None or not hasattr(service, "manual_reset") or not hasattr(service, "snapshot"):
-            raise ValueError("trial_guard_not_configured")
+            # gateway 进程没有 trial_guard_service，走 command bridge
+            # 代理到 execution 进程（与 resume/rebaseline 同一模式）。
+            # 返回 coroutine，由 route handler 的 asyncio.iscoroutine 检测后 await。
+            client = getattr(self.runtime, "operator_command_client", None)
+            if client is None:
+                raise ValueError(
+                    "trial_guard_not_configured_and_no_command_client: "
+                    "gateway runtime missing operator_command_client wiring"
+                )
+            return client.invoke(
+                command="reset_trial_guard",
+                payload={
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
         before = service.snapshot()
         if str(before.get("status") or "").lower() != "breached":
             raise ValueError("trial_guard_reset_not_required")

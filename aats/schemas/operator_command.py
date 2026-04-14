@@ -56,6 +56,7 @@ OperatorCommandName = Literal[
     "refresh_exchange_state",
     "retry_limit_lookup",
     "safe_cancel_exit_execution",
+    "reset_trial_guard",
 ]
 
 

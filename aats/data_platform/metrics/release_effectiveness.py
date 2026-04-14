@@ -293,3 +293,127 @@ def find_effectiveness(root: Path, release_id: str) -> dict | None:
         if e.get("release_id") == release_id:
             return e
     return None
+
+
+# ── P2 自动回滚执行 ─────────────────────────────────────────────
+
+
+def pending_rollback_combos(root: Path) -> dict[str, str]:
+    """返回所有 rollback_triggered 但未执行回滚的 combo → release_id 映射.
+
+    供 apply-frozen 等入口做安全检查。
+    """
+    registry = load_effectiveness_registry(root)
+    result: dict[str, str] = {}
+    for ev in registry.get("evaluations", []):
+        if ev.get("conclusion") == "rollback_triggered" and not ev.get("rollback_enforced"):
+            combo = f"{ev.get('family')}_{ev.get('timeframe', '').lower()}"
+            result[combo] = ev.get("release_id", "?")
+    return result
+
+
+def enforce_pending_rollbacks(root: Path) -> list[dict]:
+    """检查并执行所有 pending 的 rollback_triggered 结论.
+
+    针对每个 rollback_triggered 且未标记 rollback_enforced 的评估：
+      1. 从 release history 查找对应 release 的 previous_parameter_set_id
+      2. 调用 rollback_active_parameter_set() 回滚到上一版本
+      3. 标记 evaluation 为 rollback_enforced
+
+    Returns
+    -------
+    list[dict]  每个回滚操作的结果
+    """
+    registry = load_effectiveness_registry(root)
+    results: list[dict] = []
+    modified = False
+
+    for ev in registry.get("evaluations", []):
+        if ev.get("conclusion") != "rollback_triggered":
+            continue
+        if ev.get("rollback_enforced"):
+            continue
+
+        release_id = ev.get("release_id")
+        family = ev.get("family")
+        timeframe = ev.get("timeframe")
+
+        if not family or not timeframe:
+            results.append({
+                "release_id": release_id,
+                "ok": False,
+                "error": "evaluation missing family/timeframe",
+            })
+            continue
+
+        # 从 release history 查找 release
+        rel_data = _load_json(
+            root / "artifacts" / "production_workflow" / "parameter_release_history.json"
+        )
+        release = None
+        for r in (rel_data.get("releases", []) if rel_data else []):
+            if r.get("release_id") == release_id:
+                release = r
+                break
+
+        if release is None:
+            results.append({
+                "release_id": release_id,
+                "ok": False,
+                "error": f"release {release_id} not found in history",
+            })
+            continue
+
+        prev_ps_id = release.get("previous_parameter_set_id")
+        if not prev_ps_id:
+            results.append({
+                "release_id": release_id,
+                "ok": False,
+                "error": "release has no previous_parameter_set_id to rollback to",
+            })
+            continue
+
+        # 执行回滚
+        from aats.data_platform.decision_system.active_parameter_apply import (
+            rollback_active_parameter_set,
+        )
+
+        rb_result = rollback_active_parameter_set(
+            root,
+            family=family,
+            timeframe=timeframe,
+            to_parameter_set_id=prev_ps_id,
+            actor="release_effectiveness_auto_rollback",
+            notes=(
+                f"自动回滚: release {release_id} 的 effectiveness 评估结论为"
+                f" rollback_triggered"
+            ),
+        )
+
+        rb_ok = rb_result.get("ok", False)
+        if rb_ok:
+            # 仅在回滚成功时标记为已执行；失败时保留 pending 状态，
+            # 下次调用 enforce_pending_rollbacks 会重试。
+            ev["rollback_enforced"] = True
+            ev["rollback_enforced_at"] = datetime.now(timezone.utc).isoformat()
+            ev["rollback_to_parameter_set_id"] = prev_ps_id
+            modified = True
+        else:
+            # 记录失败尝试但不标记 enforced，保证可重试
+            ev.setdefault("rollback_attempts", 0)
+            ev["rollback_attempts"] += 1
+            ev["last_rollback_error"] = rb_result.get("message", "unknown error")
+            modified = True
+
+        results.append({
+            "release_id": release_id,
+            "family": family,
+            "timeframe": timeframe,
+            "ok": rb_ok,
+            "rollback_result": rb_result,
+        })
+
+    if modified:
+        save_effectiveness_registry(root, registry)
+
+    return results

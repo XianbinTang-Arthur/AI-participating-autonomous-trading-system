@@ -5174,6 +5174,15 @@ async def build_runtime(
                 auth_source=payload.get("auth_source", "anonymous"),
             )
 
+        async def _handle_reset_trial_guard(payload: dict[str, Any]) -> dict[str, Any]:
+            service = OperatorQueryService(runtime)
+            return service.record_trial_guard_manual_reset(
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
         runtime.operator_command_worker = OperatorCommandWorker(
             bus=bus,
             process_role=PROCESS_ROLE_EXECUTION,
@@ -5187,6 +5196,7 @@ async def build_runtime(
                 "refresh_exchange_state": _handle_refresh_exchange_state,
                 "retry_limit_lookup": _handle_retry_limit_lookup,
                 "safe_cancel_exit_execution": _handle_safe_cancel_exit_execution,
+                "reset_trial_guard": _handle_reset_trial_guard,
             },
         )
         await runtime.operator_command_worker.bootstrap()

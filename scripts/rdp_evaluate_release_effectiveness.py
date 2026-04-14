@@ -67,6 +67,23 @@ def main() -> int:
             print(f"  {icon} {dim['dimension']}: {dim.get('detail', '')}")
 
     conclusion = result.get("conclusion", "")
+
+    # ── P2: rollback_triggered 时自动执行回滚 ──────────────────────
+    if conclusion == "rollback_triggered":
+        from aats.data_platform.metrics.release_effectiveness import (
+            enforce_pending_rollbacks,
+        )
+
+        print("\n[ACTION] 检测到 rollback_triggered，执行自动回滚...")
+        rb_results = enforce_pending_rollbacks(ROOT)
+        for rb in rb_results:
+            if rb.get("ok"):
+                rb_msg = rb.get("rollback_result", {}).get("message", "")
+                print(f"  [OK] {rb.get('release_id')}: {rb_msg}")
+            else:
+                rb_err = rb.get("error") or rb.get("rollback_result", {}).get("message", "")
+                print(f"  [FAIL] {rb.get('release_id')}: {rb_err}")
+
     if conclusion == "effective":
         return 0
     if conclusion in ("ineffective", "rollback_triggered"):

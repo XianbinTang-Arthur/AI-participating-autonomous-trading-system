@@ -977,14 +977,21 @@ async def system_trial_review_action(
     payload: TrialReviewActionRequest,
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
+    import asyncio
+
     try:
-        return _query(request).record_trial_review_action(
+        result = _query(request).record_trial_review_action(
             action_type=payload.action_type,
             reason=payload.reason,
             actor_role=principal.role,
             actor_identity=principal.identity,
             auth_source=principal.auth_source,
         )
+        # gateway 进程的 reset_trial_guard 走 command bridge 代理，
+        # record_trial_guard_manual_reset 返回 coroutine 而非 dict。
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
