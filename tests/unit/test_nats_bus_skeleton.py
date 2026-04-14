@@ -347,7 +347,7 @@ def test_nats_bus_subscribe_before_connect_raises() -> None:
 def test_nats_bus_ensure_stream_before_connect_raises() -> None:
     bus = NatsEventBus(config=NatsBusConfig(), consumer_role="decision")
     with pytest.raises(RuntimeError, match="before connect"):
-        asyncio.run(bus.ensure_stream(topics=["decisions"]))
+        asyncio.run(bus.ensure_streams())
 
 
 def test_nats_bus_construction_does_not_require_nats_py() -> None:
