@@ -276,6 +276,10 @@ class RecoveryPostureEvaluator:
             bundle_recovery=bundle_recovery,
         )
         bundle_resume_blocked_reasons = list(status.resume_blocked_reasons)
+        _BUNDLE_RECOVERY_BLOCKERS = {
+            "strategy_bundle_recovery_requires_review",
+            "strategy_bundle_recovery_in_progress",
+        }
         if bundle_recovery.bundle_recovery_required:
             blocker = (
                 "strategy_bundle_recovery_requires_review"
@@ -284,6 +288,15 @@ class RecoveryPostureEvaluator:
             )
             if blocker not in bundle_resume_blocked_reasons:
                 bundle_resume_blocked_reasons.append(blocker)
+        else:
+            # Bundle recovery 条件已消失（所有订单终态、无活跃 obligation、
+            # 无 review_required bundle），清除对应的持久 blocker。
+            # 不清除的话，瞬态 shadow backlog 触发的 recovery blocker
+            # 会在条件消失后永久残留，造成系统无限卡死。
+            bundle_resume_blocked_reasons = [
+                r for r in bundle_resume_blocked_reasons
+                if r not in _BUNDLE_RECOVERY_BLOCKERS
+            ]
 
         normalized = status.model_copy(
             update={

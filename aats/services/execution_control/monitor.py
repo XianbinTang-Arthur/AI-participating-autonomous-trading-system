@@ -15,6 +15,25 @@ if TYPE_CHECKING:
 
 
 class Phase1ShadowMonitor:
+    # ── Backlog 稳定性阈值 ───────────────────────────────────────────
+    #
+    # Phase 1 shadow 的 primary 写（obligation / order_state / fill_event）
+    # 和 shadow 写（reservation / execution_order / execution_fill）分属
+    # 不同 DB 事务。snapshot() 在两个 SELECT 之间运行时，会观测到瞬态
+    # 幻影 backlog（primary TX 已 commit，shadow TX 尚未执行）。
+    #
+    # 实际案例：
+    #   outbox TX commit → obligation_count=N+1
+    #   _shadow_sync_obligation 尚未执行 → reservation_count=N
+    #   snapshot() 此时运行 → obligation_backlog=1 → "lagging"
+    #   ~12 秒后 shadow sync 完成 → backlog 归零
+    #   但 "lagging" 已触发 reconciliation_halt → BLOCKED legs → bundle 停摆
+    #
+    # 修复策略：所有三类 backlog（order / fill / obligation）统一要求
+    # 连续 _BACKLOG_STABLE_TICKS 个 snapshot 周期都检测到 backlog > 0
+    # 才判定 "lagging"。瞬态 1-2 tick 幻影不会触发阻断。
+    _BACKLOG_STABLE_TICKS = 3
+
     def __init__(
         self,
         *,
@@ -42,6 +61,8 @@ class Phase1ShadowMonitor:
         # backlog 计算会优先用 cache.all_sync() + repo fallback（I5 miss 不
         # 破坏读）。
         self._obligation_cache: "ObligationHotStateCache | None" = None
+        # 连续检测到 backlog > 0 的 tick 计数（跨 snapshot 调用持久化）
+        self._consecutive_backlog_ticks: int = 0
 
     def attach_obligation_cache(
         self, obligation_cache: "ObligationHotStateCache | None"
@@ -122,7 +143,21 @@ class Phase1ShadowMonitor:
             "fill_backlog": fill_backlog,
             "obligation_backlog": obligation_backlog,
         }
-        backlog_present = any((value or 0) > 0 for value in lag.values() if value is not None)
+        raw_backlog_present = any((value or 0) > 0 for value in lag.values() if value is not None)
+
+        # ── Backlog 稳定性去抖 ──────────────────────────────────────
+        # primary→shadow 写分属不同 DB 事务。snapshot() 在两者之间运行
+        # 会看到瞬态 1-tick 幻影 backlog。仅当连续 N 个 tick 都检测到
+        # backlog > 0 才认定真正 "lagging"，防止瞬态竞态触发级联停摆。
+        if raw_backlog_present:
+            self._consecutive_backlog_ticks += 1
+        else:
+            self._consecutive_backlog_ticks = 0
+        backlog_present = (
+            raw_backlog_present
+            and self._consecutive_backlog_ticks >= self._BACKLOG_STABLE_TICKS
+        )
+
         if not execution_shadow["configured"] and not ledger_shadow["configured"]:
             status = "not_configured"
         elif execution_shadow["status"] == "degraded" or ledger_shadow["status"] == "degraded":
@@ -148,6 +183,12 @@ class Phase1ShadowMonitor:
             "blockers": blockers,
             "summary": summary_text,
             "lag": lag,
+            "backlog_stability": {
+                "consecutive_ticks": self._consecutive_backlog_ticks,
+                "threshold": self._BACKLOG_STABLE_TICKS,
+                "raw_backlog_present": raw_backlog_present,
+                "stable_backlog_present": backlog_present,
+            },
             "execution_shadow": execution_shadow,
             "ledger_shadow": ledger_shadow,
         }

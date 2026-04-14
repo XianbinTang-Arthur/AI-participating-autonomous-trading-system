@@ -466,6 +466,44 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(target.position_intent, "close_long")
         self.assertEqual(target.decision_outcome.exit_attribution, "alpha_decay_exit")
 
+    def test_decision_outcome_includes_blocker_chain_when_entry_is_blocked_after_non_flat_baseline(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_alpha_min": 0.30,
+                    "strategy_entry_confidence_min": 0.80,
+                }
+            )
+        )
+        context = self._context(product_type="derivatives", current_exposure_side="flat")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="long",
+            confidence=0.79,
+            composite_alpha_score=0.20,
+            direction_threshold=0.14,
+            direction_rule="baseline_regime_trend_threshold_crossed",
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.20, confidence=0.79))
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertIsNotNone(target.decision_outcome)
+        blocker_chain = target.decision_outcome.decision_blocker_chain
+        self.assertEqual([stage["stage"] for stage in blocker_chain], ["baseline", "target_gate", "ai_gate"])
+        self.assertTrue(blocker_chain[0]["blocked"])
+        self.assertIn("baseline_regime_trend_threshold_crossed", blocker_chain[0]["reasons"])
+        self.assertIn("baseline_target_not_promoted_to_actionable_target", blocker_chain[0]["reasons"])
+        self.assertTrue(blocker_chain[1]["blocked"])
+        self.assertIn("entry_alpha_below_threshold", blocker_chain[1]["reasons"])
+        self.assertIn("entry_confidence_below_threshold", blocker_chain[1]["reasons"])
+        self.assertFalse(blocker_chain[2]["blocked"])
+
     def test_derivatives_alpha_decay_reduce_scales_down_existing_position_when_signal_fades(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(
@@ -1609,16 +1647,21 @@ class TestTargetPositionEngine(unittest.TestCase):
         confidence: float = 0.8,
         volatility_state: str = "medium",
         factor_scores: dict[str, float] | None = None,
+        composite_alpha_score: float = 0.45,
+        direction_threshold: float | None = None,
+        direction_rule: str | None = None,
     ) -> BaselineAssessment:
         return BaselineAssessment(
             decision_id="decision_target_test",
             symbol="BTC-USDT",
             regime="trend",
             direction_bias=direction_bias,  # type: ignore[arg-type]
+            direction_threshold=direction_threshold,
+            direction_rule=direction_rule,
             trend_strength=0.7,
             volatility_state=volatility_state,
             confidence=confidence,
-            composite_alpha_score=0.45,
+            composite_alpha_score=composite_alpha_score,
             suggested_position_scale=suggested_position_scale,
             volatility_target_scale=volatility_target_scale,
             factor_scores=factor_scores or {"momentum_alpha": 0.4},

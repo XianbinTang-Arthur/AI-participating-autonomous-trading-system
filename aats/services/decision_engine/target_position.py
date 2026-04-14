@@ -1640,6 +1640,8 @@ class TargetPositionEngine:
                 "volatility_state": baseline.volatility_state,
                 "composite_alpha_score": baseline.composite_alpha_score,
                 "suggested_position_scale": baseline.suggested_position_scale,
+                "direction_threshold": baseline.direction_threshold,
+                "direction_rule": baseline.direction_rule,
                 "reason_codes": list(baseline.reason_codes),
             },
             baseline_disagreement=None if ai_direction is None else {
@@ -1648,6 +1650,13 @@ class TargetPositionEngine:
                 "ai_direction": ai_direction,
             },
             decision_blocked_reasons=blocked_reasons,
+            decision_blocker_chain=self._decision_blocker_chain(
+                context=context,
+                baseline=baseline,
+                ai_decision_blockers=ai_decision_blockers,
+                guardrail_flags=guardrail_flags,
+                target_qty=target_qty,
+            ),
             guardrail_flags=list(dict.fromkeys(guardrail_flags)),
             policy_blocked=False,
             policy_blocked_reasons=[],
@@ -1661,6 +1670,53 @@ class TargetPositionEngine:
             position_management_reason_codes=position_management_reason_codes,
             exit_attribution=exit_attribution,
         )
+
+    def _decision_blocker_chain(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_decision_blockers: list[str],
+        guardrail_flags: list[str],
+        target_qty: Decimal,
+    ) -> list[dict[str, object]]:
+        chain: list[dict[str, object]] = []
+        baseline_reasons: list[str] = []
+        if baseline.direction_bias == "flat":
+            baseline_reasons.append("baseline_direction_bias_flat")
+        if baseline.direction_rule:
+            baseline_reasons.append(baseline.direction_rule)
+        if (
+            baseline.direction_bias != "flat"
+            and abs(target_qty - context.current_position_qty) <= EPSILON_DECIMAL_12
+            and abs(context.current_position_qty) <= EPSILON_DECIMAL_12
+        ):
+            baseline_reasons.append("baseline_target_not_promoted_to_actionable_target")
+        chain.append(
+            {
+                "stage": "baseline",
+                "blocked": bool(baseline_reasons),
+                "direction_bias": baseline.direction_bias,
+                "direction_rule": baseline.direction_rule,
+                "direction_threshold": baseline.direction_threshold,
+                "reasons": baseline_reasons,
+            }
+        )
+        chain.append(
+            {
+                "stage": "target_gate",
+                "blocked": bool(guardrail_flags),
+                "reasons": list(dict.fromkeys(guardrail_flags)),
+            }
+        )
+        chain.append(
+            {
+                "stage": "ai_gate",
+                "blocked": bool(ai_decision_blockers),
+                "reasons": list(dict.fromkeys(ai_decision_blockers)),
+            }
+        )
+        return chain
 
     @staticmethod
     def _direction_from_assessment(ai_assessment: AIMarketAssessment) -> str:

@@ -3626,7 +3626,11 @@ def _build_decision_slice(
             order_state_cache=slices.order_state_hot_cache,
             fill_event_cache=slices.fill_event_hot_cache,
         ),
-        baseline_strategy=BaselineStrategy(event_store=storage.event_store, feature_resolver=_feature_resolver),
+        baseline_strategy=BaselineStrategy(
+            event_store=storage.event_store,
+            feature_resolver=_feature_resolver,
+            settings=runtime_settings,
+        ),
         ai_service=slices.ai_service,
         target_engine=TargetPositionEngine(settings=runtime_settings, fee_resolver=slices.fee_resolver),
         strategy_coordinator=slices.strategy_coordinator,

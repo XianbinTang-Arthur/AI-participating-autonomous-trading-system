@@ -4,6 +4,14 @@
   "schedule_hint": "weekly Sunday 08:00 UTC or on-demand",
   "tasks": [
     {
+      "name": "refresh_recent_data",
+      "description": "run data_maintenance first so research uses fresh data and rebuilt artifacts",
+      "command": "python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance",
+      "timeout_seconds": 1200,
+      "enabled": true,
+      "allow_failure": false
+    },
+    {
       "name": "full_pipeline",
       "description": "一键运行 Phase 2 → Step 3 → 导入 → Phase 3 → Phase 4 → 治理 → 决策",
       "command": "python scripts/rdp_run_full_pipeline.py --lookback-days 90 --replay-only --no-stop-on-failure",

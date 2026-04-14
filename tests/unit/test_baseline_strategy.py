@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
@@ -15,6 +16,93 @@ from aats.schemas.market import MarketSnapshot
 
 
 class TestBaselineStrategy(unittest.TestCase):
+    def test_range_signal_uses_configured_threshold_when_relaxed(self) -> None:
+        event_store = InMemoryEventStore()
+        settings = AATSSettings.model_validate({"strategy_baseline_range_alpha_threshold": 0.12})
+        strategy = BaselineStrategy(event_store=event_store, settings=settings)
+        seed = self._feature_snapshot()
+        feature_snapshot = seed.model_copy(
+            update={
+                "regime_indicator": "range",
+                "composite_alpha_score": 0.13,
+                "analysis_context": seed.analysis_context.model_copy(  # type: ignore[union-attr]
+                    update={
+                        "alpha_factors": seed.analysis_context.alpha_factors.model_copy(  # type: ignore[union-attr]
+                            update={"microstructure_alpha": 0.04}
+                        ),
+                    }
+                ),
+            }
+        )
+        event = build_envelope(
+            topic=topics.FEATURE_SNAPSHOTS,
+            key=feature_snapshot.symbol,
+            payload_model=feature_snapshot,
+            source_component="test",
+        )
+        event_store.append(event)
+
+        baseline = strategy.evaluate(self._context(feature_snapshot_ref=event.event_id))
+
+        self.assertEqual(baseline.direction_bias, "long")
+        self.assertEqual(baseline.direction_rule, "baseline_regime_range_threshold_crossed")
+        self.assertEqual(baseline.direction_threshold, 0.12)
+
+    def test_impulse_override_promotes_range_signal_to_long(self) -> None:
+        event_store = InMemoryEventStore()
+        settings = AATSSettings.model_validate(
+            {
+                "strategy_baseline_range_alpha_threshold": 0.20,
+                "strategy_baseline_impulse_override_enabled": True,
+                "strategy_baseline_impulse_alpha_min": 0.10,
+                "strategy_baseline_impulse_microstructure_min": 0.25,
+                "strategy_baseline_impulse_momentum_min": 0.00035,
+                "strategy_baseline_impulse_range_ratio_min": 0.003,
+                "strategy_baseline_impulse_body_ratio_min": 0.10,
+            }
+        )
+        strategy = BaselineStrategy(event_store=event_store, settings=settings)
+        seed = self._feature_snapshot()
+        feature_snapshot = seed.model_copy(
+            update={
+                "regime_indicator": "range",
+                "composite_alpha_score": 0.11,
+                "analysis_context": seed.analysis_context.model_copy(  # type: ignore[union-attr]
+                    update={
+                        "multi_timeframe": seed.analysis_context.multi_timeframe.model_copy(  # type: ignore[union-attr]
+                            update={"directional_alignment": "long"}
+                        ),
+                        "alpha_factors": seed.analysis_context.alpha_factors.model_copy(  # type: ignore[union-attr]
+                            update={"microstructure_alpha": 0.32}
+                        ),
+                        "timeframe_features": {
+                            **seed.analysis_context.timeframe_features,  # type: ignore[union-attr]
+                            "15m": seed.analysis_context.timeframe_features["15m"].model_copy(  # type: ignore[union-attr]
+                                update={
+                                    "momentum_score": 0.0006,
+                                    "range_ratio": 0.0045,
+                                    "candle_body_ratio": 0.22,
+                                }
+                            ),
+                        },
+                    }
+                ),
+            }
+        )
+        event = build_envelope(
+            topic=topics.FEATURE_SNAPSHOTS,
+            key=feature_snapshot.symbol,
+            payload_model=feature_snapshot,
+            source_component="test",
+        )
+        event_store.append(event)
+
+        baseline = strategy.evaluate(self._context(feature_snapshot_ref=event.event_id))
+
+        self.assertEqual(baseline.direction_bias, "long")
+        self.assertEqual(baseline.direction_rule, "baseline_impulse_override_long")
+        self.assertIsNone(baseline.direction_threshold)
+
     def test_trend_signal_uses_microstructure_confirmation_to_commit(self) -> None:
         event_store = InMemoryEventStore()
         strategy = BaselineStrategy(event_store=event_store)

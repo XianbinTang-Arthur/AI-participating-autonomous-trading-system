@@ -314,8 +314,12 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
     for profile in ("derivatives", "derivatives_live"):
         values = load_managed_profile_values(profile, project_root=repo_root)
 
-        assert values["strategy_entry_allowed_regimes"] == ["trend", "breakout", "uncertain"]
-        assert values["strategy_short_entry_allowed_regimes"] == ["trend", "breakout", "uncertain"]
+        assert values["strategy_entry_allowed_regimes"] == ["trend", "breakout", "range", "uncertain"]
+        assert values["strategy_short_entry_allowed_regimes"] == ["trend", "breakout", "range", "uncertain"]
+        expected_entry_alpha = 0.10 if profile == "derivatives_live" else 0.18
+        expected_entry_confidence = 0.55 if profile == "derivatives_live" else 0.66
+        assert values["strategy_entry_alpha_min"] == expected_entry_alpha
+        assert values["strategy_entry_confidence_min"] == expected_entry_confidence
         assert values["strategy_scale_in_min_signal_edge_bps"] == 16.0
         assert values["strategy_scale_in_alpha_min"] == 0.22
         assert values["strategy_scale_in_confidence_min"] == 0.68
@@ -362,19 +366,20 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_family_independent_enabled"] is expected_independent_family_enabled
         assert values["strategy_family_independent_shadow_mode_enabled"] is False
         assert values["strategy_family_independent_live_execution_enabled"] is expected_independent_family_enabled
-        expected_independent_entry = 0.30 if profile == "derivatives_live" else 0.66
-        expected_independent_long_scale_in = 0.40 if profile == "derivatives_live" else 0.70
+        expected_independent_long_entry = 0.22 if profile == "derivatives_live" else 0.66
+        expected_independent_short_entry = 0.30 if profile == "derivatives_live" else 0.66
+        expected_independent_long_scale_in = 0.34 if profile == "derivatives_live" else 0.70
         # P2-6: short_scale_in_threshold 已对齐至 long=0.40 (原 0.36 与注释声明的"钉住值：0.40"不一致)
         expected_independent_short_scale_in = 0.40 if profile == "derivatives_live" else 0.70
-        assert values["strategy_hedge_independent_long_entry_threshold"] == expected_independent_entry
-        assert values["strategy_hedge_independent_short_entry_threshold"] == expected_independent_entry
+        assert values["strategy_hedge_independent_long_entry_threshold"] == expected_independent_long_entry
+        assert values["strategy_hedge_independent_short_entry_threshold"] == expected_independent_short_entry
         assert values["strategy_hedge_independent_long_scale_in_threshold"] == expected_independent_long_scale_in
         assert values["strategy_hedge_independent_short_scale_in_threshold"] == expected_independent_short_scale_in
         assert values["strategy_hedge_independent_long_min_hold_seconds"] == 300.0
         assert values["strategy_hedge_independent_short_min_hold_seconds"] == 300.0
         assert values["strategy_hedge_independent_rebalance_cooldown_seconds"] == 120.0
         assert values["strategy_hedge_independent_trial_guard_enabled"] is True
-        assert values["strategy_hedge_independent_min_confirm_ticks"] == 2
+        assert values["strategy_hedge_independent_min_confirm_ticks"] == (1 if profile == "derivatives_live" else 2)
         expected_independent_score_drawdown = 6.0 if profile == "derivatives_live" else 2.0
         assert values["strategy_hedge_independent_min_score_drawdown_bps"] == expected_independent_score_drawdown
         assert values["strategy_hedge_independent_min_liquidity_quality"] == 0.55
@@ -397,6 +402,18 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_hedge_independent_emit_close_reason_metrics"] is True
         assert values["strategy_hedge_independent_emit_execution_policy_metrics"] is True
         if profile == "derivatives_live":
+            assert values["strategy_baseline_breakout_alpha_threshold"] == 0.08
+            assert values["strategy_baseline_trend_alpha_threshold"] == 0.14
+            assert values["strategy_baseline_range_alpha_threshold"] == 0.16
+            assert values["strategy_baseline_uncertain_alpha_threshold"] == 0.26
+            assert values["strategy_baseline_alignment_bonus"] == 0.03
+            assert values["strategy_baseline_impulse_override_enabled"] is True
+            assert values["strategy_baseline_impulse_alpha_min"] == 0.10
+            assert values["strategy_baseline_impulse_microstructure_min"] == 0.25
+            assert values["strategy_baseline_impulse_momentum_min"] == 0.00035
+            assert values["strategy_baseline_impulse_range_ratio_min"] == 0.003
+            assert values["strategy_baseline_impulse_body_ratio_min"] == 0.10
+            assert values["strategy_baseline_impulse_require_mtf_alignment"] is True
             assert values["strategy_hedge_independent_long_close_threshold"] == 0.15
             assert values["strategy_hedge_independent_short_close_threshold"] == 0.15
             assert values["strategy_hedge_independent_min_safe_net_edge_bps"] == 2.0
@@ -425,9 +442,27 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_family_opportunistic_live_execution_enabled"] is False
     assert values["smart_arbitrage_enabled"] is False
     assert values["strategy_hedge_overlay_mode"] == "independent"
+    assert values["strategy_entry_alpha_min"] == 0.10
+    assert values["strategy_entry_confidence_min"] == 0.55
+    assert values["strategy_baseline_breakout_alpha_threshold"] == 0.08
+    assert values["strategy_baseline_trend_alpha_threshold"] == 0.14
+    assert values["strategy_baseline_range_alpha_threshold"] == 0.16
+    assert values["strategy_baseline_uncertain_alpha_threshold"] == 0.26
+    assert values["strategy_baseline_alignment_bonus"] == 0.03
+    assert values["strategy_baseline_impulse_override_enabled"] is True
+    assert values["strategy_baseline_impulse_alpha_min"] == 0.10
+    assert values["strategy_baseline_impulse_microstructure_min"] == 0.25
+    assert values["strategy_baseline_impulse_momentum_min"] == 0.00035
+    assert values["strategy_baseline_impulse_range_ratio_min"] == 0.003
+    assert values["strategy_baseline_impulse_body_ratio_min"] == 0.10
+    assert values["strategy_baseline_impulse_require_mtf_alignment"] is True
+    assert values["strategy_hedge_independent_long_entry_threshold"] == 0.22
+    assert values["strategy_hedge_independent_short_entry_threshold"] == 0.30
+    assert values["strategy_hedge_independent_long_scale_in_threshold"] == 0.34
+    assert values["strategy_hedge_independent_short_scale_in_threshold"] == 0.40
     assert values["strategy_hedge_independent_long_close_threshold"] == 0.15
     assert values["strategy_hedge_independent_short_close_threshold"] == 0.15
-    assert values["strategy_hedge_independent_min_confirm_ticks"] == 2
+    assert values["strategy_hedge_independent_min_confirm_ticks"] == 1
     assert values["strategy_hedge_independent_min_score_drawdown_bps"] == 6.0
     assert values["strategy_hedge_independent_min_liquidity_quality"] == 0.55
     assert values["strategy_hedge_independent_require_execution_health_ok"] is True

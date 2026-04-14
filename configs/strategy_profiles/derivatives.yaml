@@ -206,15 +206,17 @@ strategy_expected_slippage_bps_fraction: 0.28
 strategy_edge_noise_buffer_bps: 4.5
 # [常用可调] strategy_min_net_edge_bps：最小净边际。可选值：0.0 ~ 50.0；推荐值：6.0。
 strategy_min_net_edge_bps: 5.0
-# [常用可调] strategy_entry_allowed_regimes：允许新开仓的市场状态。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, uncertain。
+# [常用可调] strategy_entry_allowed_regimes：允许新开仓的市场状态。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, range, uncertain。
 strategy_entry_allowed_regimes:
   - trend
   - breakout
+  - range
   - uncertain
-# [进阶可调] strategy_short_entry_allowed_regimes：允许新开空的市场状态。当前只在合约运行域生效。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, uncertain。
+# [进阶可调] strategy_short_entry_allowed_regimes：允许新开空的市场状态。当前只在合约运行域生效。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, range, uncertain。
 strategy_short_entry_allowed_regimes:
   - trend
   - breakout
+  - range
   - uncertain
 # [常用可调] strategy_entry_min_signal_edge_bps：开仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：14.0。
 strategy_entry_min_signal_edge_bps: 14.0

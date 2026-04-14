@@ -440,6 +440,24 @@ class AATSSettings(BaseSettings):
     default_target_leverage: float = 1.0
     strategy_short_bias_enabled: bool = False
     strategy_dynamic_leverage_enabled: bool = False
+    strategy_baseline_breakout_alpha_threshold: float = 0.10
+    strategy_baseline_trend_alpha_threshold: float = 0.16
+    strategy_baseline_range_alpha_threshold: float = 0.24
+    strategy_baseline_uncertain_alpha_threshold: float = 0.30
+    strategy_baseline_alignment_bonus: float = 0.02
+    strategy_baseline_microstructure_conflict_penalty: float = 0.04
+    strategy_baseline_min_threshold_floor: float = 0.06
+    strategy_baseline_significant_microstructure_threshold: float = 0.08
+    strategy_baseline_range_microstructure_floor: float = -0.02
+    strategy_baseline_uncertain_microstructure_threshold: float = 0.10
+    strategy_baseline_impulse_override_enabled: bool = False
+    strategy_baseline_impulse_allowed_regimes: tuple[str, ...] = Field(default=("breakout", "trend", "range"))
+    strategy_baseline_impulse_alpha_min: float = 0.10
+    strategy_baseline_impulse_microstructure_min: float = 0.25
+    strategy_baseline_impulse_momentum_min: float = 0.00035
+    strategy_baseline_impulse_range_ratio_min: float = 0.003
+    strategy_baseline_impulse_body_ratio_min: float = 0.10
+    strategy_baseline_impulse_require_mtf_alignment: bool = True
     strategy_flat_signal_hold_enabled: bool = False
     strategy_flat_exit_microstructure_threshold: float = 0.12
     strategy_flat_exit_factor_threshold: float = 0.18

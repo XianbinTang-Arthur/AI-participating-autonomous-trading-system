@@ -112,6 +112,8 @@ class BaselineAssessment(SchemaBase):
     symbol: str
     regime: RegimeIndicator
     direction_bias: Literal["long", "short", "flat"]
+    direction_threshold: float | None = None
+    direction_rule: str | None = None
     trend_strength: float
     volatility_state: VolatilityState
     confidence: float
@@ -315,6 +317,7 @@ class DecisionOutcome(SchemaBase):
     baseline_reference: dict[str, object] | None = None
     baseline_disagreement: dict[str, object] | None = None
     decision_blocked_reasons: list[str] = Field(default_factory=list)
+    decision_blocker_chain: list[dict[str, object]] = Field(default_factory=list)
     guardrail_flags: list[str] = Field(default_factory=list)
     policy_blocked: bool = False
     policy_blocked_reasons: list[str] = Field(default_factory=list)
