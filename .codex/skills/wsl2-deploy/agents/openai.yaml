@@ -1,0 +1,4 @@
+interface:
+  display_name: "AATS Deploy"
+  short_description: "Deploy the WSL2 compose stack safely"
+  default_prompt: "Deploy or troubleshoot the WSL2 Docker Compose stack for this AATS repository, using the current profile, env-file, sync, and health-check conventions."

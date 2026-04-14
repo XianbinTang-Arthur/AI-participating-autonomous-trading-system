@@ -5,6 +5,9 @@
 
 ---
 
+> 当前约定：`.env.wsl2` 的单一真相放在仓库根目录，例如 `~/aats/.env.wsl2`。
+> `scripts/deploy.sh` 仍兼容旧位置 `deploy/wsl2-dev/.env.wsl2`，但只建议作为迁移期兼容路径。
+
 ## 拓扑
 
 ```
@@ -64,17 +67,18 @@
 
 ```bash
 # 1. 进入目录（用 WSL2 路径，不要用 /mnt/d/...）
-cd ~/aats/deploy/wsl2-dev
+cd ~/aats
 
 # 2. 复制环境变量模板并修改密码
-cp .env.wsl2.template .env.wsl2
+cp configs/templates/.env.wsl2.example .env.wsl2
 $EDITOR .env.wsl2     # 把 *_change_me 改成你自己的值
 
 # 3. 拉起全部服务
-docker compose --env-file .env.wsl2 up -d
+cd deploy/wsl2-dev
+docker compose --env-file ../../.env.wsl2 up -d
 
 # 4. 看一下健康状况（首次启动 ~30s）
-docker compose ps
+docker compose --env-file ../../.env.wsl2 ps
 
 # 5. 验证关键端口
 docker exec aats-postgres pg_isready -U aats  # Postgres
@@ -94,7 +98,7 @@ curl -s http://localhost:16686/ | head -1      # Jaeger UI
 
 ```bash
 # 启动
-docker compose --env-file .env.wsl2 up -d
+docker compose --env-file ../../.env.wsl2 up -d
 
 # 查看日志（跟踪一个服务）
 docker compose logs -f postgres

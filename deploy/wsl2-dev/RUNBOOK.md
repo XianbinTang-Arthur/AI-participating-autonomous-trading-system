@@ -6,6 +6,9 @@
 
 ---
 
+> 当前约定：`.env.wsl2` 的单一真相放在仓库根目录，例如 `~/aats/.env.wsl2`。
+> `scripts/deploy.sh` 仍兼容旧位置 `deploy/wsl2-dev/.env.wsl2`，但只建议作为迁移期兼容路径。
+
 ## 0. 前置检查（Day 0）
 
 ### 0.1 WSL2 已启用
@@ -47,8 +50,8 @@ WSL2 内对应 `/mnt/d/文件/project/AIParticipatingAutonomousTradingSystem`。
 
 ### 1.1 准备 .env.wsl2
 ```bash
-cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem/deploy/wsl2-dev
-cp .env.wsl2.template .env.wsl2
+cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem
+cp configs/templates/.env.wsl2.example .env.wsl2
 # 用编辑器把 POSTGRES_PASSWORD / GRAFANA_ADMIN_PASSWORD 改成长随机串
 nano .env.wsl2
 ```
@@ -56,22 +59,23 @@ nano .env.wsl2
 
 ### 1.2 启动全部服务
 ```bash
-docker compose --env-file .env.wsl2 up -d
+cd deploy/wsl2-dev
+docker compose --env-file ../../.env.wsl2 up -d
 ```
 首次启动会拉镜像，可能 5~10 分钟。
 
 ### 1.3 验证服务健康
 ```bash
-docker compose --env-file .env.wsl2 ps
+docker compose --env-file ../../.env.wsl2 ps
 ```
 每个服务的 STATUS 应该是 `Up X seconds (healthy)` 或 `Up X seconds`。
 
 逐项 ping（9 个基础设施服务）：
 ```bash
 # Postgres
-docker compose --env-file .env.wsl2 exec postgres pg_isready -U aats
+docker compose --env-file ../../.env.wsl2 exec postgres pg_isready -U aats
 # Redis
-docker compose --env-file .env.wsl2 exec redis redis-cli ping
+docker compose --env-file ../../.env.wsl2 exec redis redis-cli ping
 # NATS
 curl -s http://127.0.0.1:8222/healthz
 # Loki
@@ -90,7 +94,7 @@ curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/api/health
 ### 1.4 初始化 Postgres schema 和 migrations
 ```bash
 cd /mnt/d/文件/project/AIParticipatingAutonomousTradingSystem
-export AATS_DATABASE_URL="postgresql+psycopg2://aats:$(grep POSTGRES_PASSWORD deploy/wsl2-dev/.env.wsl2 | cut -d= -f2)@127.0.0.1:5432/aats"
+export AATS_DATABASE_URL="postgresql+psycopg2://aats:$(grep POSTGRES_PASSWORD .env.wsl2 | cut -d= -f2)@127.0.0.1:5432/aats"
 python3 -m aats.scripts.bootstrap_database  # 假设有这个脚本；如果没有就走 build_runtime 启动一次
 ```
 （如果项目里没有 bootstrap_database 脚本，跳过这一步：第一次 build_runtime
@@ -115,7 +119,7 @@ python3 -m aats.api.main  # 或者项目的主入口
 
 ### 2.2 验证 advisory lock 拿到了 monolith 的 lock_key
 ```bash
-docker compose --env-file deploy/wsl2-dev/.env.wsl2 exec postgres \
+docker compose --env-file .env.wsl2 -f deploy/wsl2-dev/docker-compose.yml exec postgres \
   psql -U aats -d aats -c "SELECT * FROM pg_locks WHERE locktype='advisory';"
 ```
 应当能看到一条记录。

@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Claude_Preview__preview_start",
+      "Bash(python -m pytest tests/dashboard_ui/ -x --tb=short -q)",
+      "Bash(python -m pytest tests/integration/test_dashboard_ui.py tests/unit/test_dashboard_refresh_interactivity.py -x --tb=short -q)",
+      "Bash(python -m pytest tests/ -x --tb=short -q -k \"dashboard or ui or static or shell\")",
+      "Bash(python -m pytest tests/integration/test_dashboard_ui.py tests/unit/test_dashboard_refresh_interactivity.py tests/unit/test_dashboard_static.py -x --tb=short)",
+      "Bash(python -m pytest tests/integration/test_dashboard_ui.py tests/unit/test_dashboard_refresh_interactivity.py --tb=short)",
+      "Bash(python -c \"import pathlib; p = pathlib.Path\\(''tests/unit/test_dashboard_refresh_interactivity.py''\\); print\\(p.read_text\\(encoding=''utf-8''\\)[:3000]\\)\")",
+      "Bash(python -c \"import pathlib; p = pathlib.Path\\(''tests/unit/test_dashboard_refresh_interactivity.py''\\); content = p.read_text\\(encoding=''utf-8''\\); print\\(len\\(content\\), ''chars''\\); print\\(''classes:'', content.count\\(''class Test''\\)\\)\")",
+      "Bash(node -e \"import\\(''file://D:/%E6%96%87%E4%BB%B6/project/AIParticipatingAutonomousTradingSystem/aats/api/static/modules/terms.js''\\).then\\(m => console.log\\(JSON.stringify\\(Object.keys\\(m\\).sort\\(\\)\\)\\)\\)\")",
+      "Bash(python -m pytest tests/unit/test_dashboard_app_imports.py -v --tb=long)",
+      "Bash(python -m pytest tests/unit/test_dashboard_app_imports.py -v)",
+      "Bash(python -m pytest tests/unit/test_dashboard_app_imports.py::TestDashboardAppImports::test_terms_module_imports_are_complete -v)",
+      "Bash(python -m pytest tests/integration/test_dashboard_ui.py tests/unit/test_dashboard_refresh_interactivity.py tests/unit/test_dashboard_app_imports.py)",
+      "Bash(python -m pytest tests/unit/test_dashboard_refresh_interactivity.py -v)",
+      "Bash(python -m pytest tests/unit/test_dashboard_refresh_interactivity.py::TestDashboardRefreshInteractivity::test_refresh_dashboard_marks_primary_panels_pending_for_card_lock -v)",
+      "Bash(python -m pytest tests/integration/test_dashboard_ui.py tests/unit/test_dashboard_refresh_interactivity.py tests/unit/test_dashboard_app_imports.py -v)",
+      "Bash(python scripts/debug_ui_mock_server.py)",
+      "Bash(powershell -Command \"Get-NetTCPConnection -LocalPort 18765 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_OwningProcess -Force -ErrorAction SilentlyContinue }\")",
+      "Bash(powershell -Command \"Get-NetTCPConnection -LocalPort 18765 -ErrorAction SilentlyContinue | Select-Object OwningProcess | ForEach-Object { Stop-Process -Id \\([int]$_OwningProcess\\) -Force -ErrorAction SilentlyContinue }\")",
+      "Bash(wc -l aats/api/static/modules/views/*.js)",
+      "Bash(ls tests/unit/test_dashboard*.py)",
+      "Bash(ls tests/unit/test_*dashboard*.py tests/unit/test_*shell*.py tests/unit/test_*refresh*.py)",
+      "Bash(python -m pytest tests/unit/test_dashboard_refresh_interactivity.py::TestDashboardRefreshInteractivity::test_render_shell_locks_buttons_outside_data_panel_key_during_primary_phase -v)",
+      "Bash(python -m pytest tests/unit/test_dashboard_refresh_interactivity.py tests/unit/test_dashboard_app_imports.py -v)",
+      "Bash(python -m pytest tests/unit/ -k \"dashboard or refresh or shell or store or view or flash or app\" -v)",
+      "Bash(wc -l aats/api/static/modules/*.js aats/api/static/modules/views/*.js aats/api/static/modules/actions/*.js)"
+    ]
+  }
+}

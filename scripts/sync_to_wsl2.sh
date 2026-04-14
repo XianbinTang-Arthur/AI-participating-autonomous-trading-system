@@ -9,13 +9,13 @@
 # 设计原则：
 #   1. 单一脚本，多模式：init / pull / check / status / path / shell
 #   2. 在 Windows 上用 git bash 跑（也兼容 WSL2 内跑），底层走 `wsl -d <distro>`
-#   3. 首选 git fetch + ff-only merge（干净 + 可审计 + 不丢提交）；rsync 兜底
+#   3. pull 同步 Windows 源仓库“当前 HEAD”到 WSL2 native checkout，避免写死 main
 #   4. 默认配置写死合理值（distro=Ubuntu，目标=~/aats），允许环境变量覆盖
 #   5. 不主动 push 到任何远端，纯本地两端同步
 #
 # 用法：
 #   ./scripts/sync_to_wsl2.sh init     # 首次：在 WSL2 ~/aats clone 自 Windows
-#   ./scripts/sync_to_wsl2.sh pull     # 增量：fetch + ff-only merge
+#   ./scripts/sync_to_wsl2.sh pull     # 增量：同步 Windows 源仓库当前 HEAD
 #   ./scripts/sync_to_wsl2.sh check    # 对比双方 git HEAD
 #   ./scripts/sync_to_wsl2.sh status   # WSL2 端 git status + log
 #   ./scripts/sync_to_wsl2.sh path     # 显示 WSL2 端项目绝对路径（其他脚本可用）
@@ -126,9 +126,25 @@ cmd_pull() {
         echo "[ERROR] $WSL_PROJECT 还不是 git repo，先跑 'init'" >&2
         exit 2
     fi
-    echo "[sync pull] 从 $WIN_PROJECT_WSL 增量同步到 $WSL_PROJECT"
-    # fetch + ff-only：拒绝 non-fast-forward 避免 WSL2 端有未推送的本地修改被覆盖
-    wsl_run "cd $WSL_PROJECT && git fetch '$WIN_PROJECT_WSL' main && git merge --ff-only FETCH_HEAD"
+
+    if ! wsl_run "cd $WSL_PROJECT && git diff --quiet && git diff --cached --quiet && test -z \"\$(git ls-files --others --exclude-standard)\""; then
+        echo "[ERROR] $WSL_PROJECT 存在未提交改动；为避免覆盖或混入脏工作区，本次同步已终止" >&2
+        exit 2
+    fi
+
+    local source_branch=""
+    source_branch="$(cd "$WIN_PROJECT" && git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
+    local source_head=""
+    source_head="$(cd "$WIN_PROJECT" && git rev-parse HEAD)"
+
+    if [[ -n "$source_branch" ]]; then
+        echo "[sync pull] 从 $WIN_PROJECT_WSL 同步分支 $source_branch @ $source_head 到 $WSL_PROJECT"
+        wsl_run "cd $WSL_PROJECT && git fetch '$WIN_PROJECT_WSL' '$source_branch' && if git show-ref --verify --quiet refs/heads/'$source_branch'; then git checkout '$source_branch'; else git checkout -b '$source_branch' FETCH_HEAD; fi && git merge --ff-only FETCH_HEAD"
+    else
+        echo "[sync pull] 从 $WIN_PROJECT_WSL 同步 detached HEAD $source_head 到 $WSL_PROJECT"
+        wsl_run "cd $WSL_PROJECT && git fetch '$WIN_PROJECT_WSL' '$source_head' && git checkout --detach FETCH_HEAD"
+    fi
+
     echo
     echo "[sync pull] 同步后 HEAD："
     wsl_run "cd $WSL_PROJECT && git log --oneline -3"

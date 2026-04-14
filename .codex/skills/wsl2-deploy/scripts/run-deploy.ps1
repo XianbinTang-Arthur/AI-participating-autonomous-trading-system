@@ -1,0 +1,83 @@
+[CmdletBinding()]
+param(
+    [ValidateSet('spot', 'spot-live', 'derivatives', 'derivatives-live', 'derivatives-live-monolith')]
+    [string]$Profile = 'derivatives-live',
+    [string]$CommitMessage,
+    [switch]$SkipSync,
+    [switch]$SkipCommit,
+    [switch]$NoCache,
+    [int]$Timeout = 90,
+    [switch]$DryRun
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Get-RepoRoot {
+    return (Resolve-Path (Join-Path $PSScriptRoot '..\..\..\..')).Path
+}
+
+function Get-PreferredBashPath {
+    $cmd = Get-Command bash -ErrorAction SilentlyContinue
+    if ($cmd -and $cmd.Source -and $cmd.Source -notlike '*WindowsApps\bash.exe') {
+        return $cmd.Source
+    }
+
+    $candidates = @(
+        'D:\Git\Git\bin\bash.exe',
+        'D:\Git\Git\usr\bin\bash.exe',
+        'C:\Program Files\Git\bin\bash.exe',
+        'C:\Program Files\Git\usr\bin\bash.exe'
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path $candidate) {
+            return $candidate
+        }
+    }
+
+    throw 'No usable bash.exe was found. Install Git Bash or fix PATH.'
+}
+
+$repoRoot = Get-RepoRoot
+$deployScript = Join-Path $repoRoot 'scripts\deploy.sh'
+$bashPath = Get-PreferredBashPath
+
+if (-not (Test-Path $deployScript)) {
+    throw "Deploy script not found: $deployScript"
+}
+
+if ($CommitMessage -and $SkipCommit) {
+    throw 'Do not pass -CommitMessage and -SkipCommit together.'
+}
+
+$deployArgs = @(
+    $deployScript
+    '--profile', $Profile
+    '--timeout', $Timeout
+)
+
+if ($CommitMessage) {
+    $deployArgs += @('--commit', $CommitMessage)
+}
+if ($SkipSync) {
+    $deployArgs += '--skip-sync'
+}
+if ($SkipCommit) {
+    $deployArgs += '--skip-commit'
+}
+if ($NoCache) {
+    $deployArgs += '--no-cache'
+}
+
+Write-Host "[wsl2-deploy] repo root: $repoRoot"
+Write-Host "[wsl2-deploy] bash: $bashPath"
+Write-Host "[wsl2-deploy] profile: $Profile"
+Write-Host "[wsl2-deploy] command: $bashPath $($deployArgs -join ' ')"
+
+if ($DryRun) {
+    return
+}
+
+& $bashPath @deployArgs
+exit $LASTEXITCODE

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dashboard-mock",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["scripts/debug_ui_mock_server.py"],
+      "port": 18765
+    }
+  ]
+}

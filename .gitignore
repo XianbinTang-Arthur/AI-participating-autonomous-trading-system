@@ -4,7 +4,6 @@ __pycache__/
 *.pyo
 *.pyd
 
-.codex
 .env
 .env.local
 .env.*
@@ -18,8 +17,6 @@ deploy/wsl2-dev/jaeger/badger/
 
 .idea/
 .vscode/
-.claude/
-CLAUDE.md
 
 build/
 dist/
