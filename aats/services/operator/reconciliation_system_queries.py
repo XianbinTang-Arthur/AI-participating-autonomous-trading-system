@@ -672,7 +672,17 @@ class ReconciliationSystemQueryFacade:
                     latest_reconciliation=report,
                 )
             else:
-                await self.owner.runtime.kill_switch.halt_async(reason="resume_blocked")
+                # 保留跨进程信号：如果 kill_switch 已有更具体的原因（如
+                # trial_guard_threshold_breached）且该原因仍在当前阻断列表中，
+                # 不用通用 "resume_blocked" 覆盖。gateway 进程没有本地
+                # trial_guard_service，依赖 kill_switch reason 检测跨进程
+                # blocker 并在 UI 显示对应操作按钮。
+                current_reason = self.owner.runtime.kill_switch.status().get("reason", "")
+                if current_reason and current_reason != "resume_blocked" and current_reason in resume_check.blockers:
+                    halt_reason = current_reason
+                else:
+                    halt_reason = "resume_blocked"
+                await self.owner.runtime.kill_switch.halt_async(reason=halt_reason)
                 status = "resume_blocked"
                 recovery_after = (
                     "review_required"
