@@ -50,8 +50,10 @@ ai_execution_suggestion_mode: diagnostic_only
 # 策略家族路由
 # [常用可调] strategy_family_active：默认主策略家族。当前这条实盘线显式固定为 independent，避免控制面继续显示 directional 兼容主语义。可选值：directional / smart_arbitrage / spot_grid / dca / protective / opportunistic / independent；推荐值：independent。
 strategy_family_active: independent
-# [常用可调] strategy_family_auto_selection_enabled：是否允许系统自动选择策略家族。可选值：true / false；推荐值：false。
-strategy_family_auto_selection_enabled: false
+# [常用可调] strategy_family_auto_selection_enabled：是否允许系统自动选择策略家族。可选值：true / false；推荐值：true。
+# 开启后 coordinator 按优先级自动选择：当 independent 无法产生 override_target 时，
+# directional（排在 independent 前面）可以接管。关闭则锁死 strategy_family_active 不回退。
+strategy_family_auto_selection_enabled: true
 # [常用可调] strategy_family_independent_enabled：是否启用 independent family。可选值：true / false；推荐值：true。
 strategy_family_independent_enabled: true
 # [进阶可调] strategy_family_independent_shadow_mode_enabled：是否仅让 independent family 以 shadow 方式评估。当前这条实盘线已直接接管执行主路径，需关闭 shadow-only。可选值：true / false；推荐值：false。
@@ -227,15 +229,19 @@ strategy_edge_noise_buffer_bps: 2.0
 # 几乎无法满足。下调至 2.0，与 RDP Phase 2 研究结论 (net_edge ≈ 2-3 bps) 对齐。
 strategy_min_net_edge_bps: 2.0
 
-# [常用可调] strategy_entry_allowed_regimes：允许新开仓的市场状态。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, uncertain。
+# [常用可调] strategy_entry_allowed_regimes：允许新开仓的市场状态。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, range, uncertain。
+# range 震荡市也可能出现强动量突破（如 2%+ 阳线），不应一刀切禁止入场；
+# 真正的保护由 entry_threshold + signal_edge + net_edge 多层门控提供。
 strategy_entry_allowed_regimes:
   - trend
   - breakout
+  - range
   - uncertain
-# [进阶可调] strategy_short_entry_allowed_regimes：允许新开空的市场状态。当前只在合约运行域生效。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, uncertain。
+# [进阶可调] strategy_short_entry_allowed_regimes：允许新开空的市场状态。当前只在合约运行域生效。可选值：trend / breakout / range / uncertain / high_volatility；推荐值：trend, breakout, range, uncertain。
 strategy_short_entry_allowed_regimes:
   - trend
   - breakout
+  - range
   - uncertain
 # [常用可调] strategy_entry_min_signal_edge_bps：开仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：14.0。
 # RDP Phase 2 研究：signal_edge_scale_bps=15 时 score=0.6 → signal=9bps，
