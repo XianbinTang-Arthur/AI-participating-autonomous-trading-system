@@ -5,6 +5,41 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
+from aats.schemas.audit import DecisionAuditRecord
+from aats.schemas.common import EventEnvelope
+from aats.schemas.execution import FillEvent, OrderObligation, OrderState
+from aats.schemas.exit_execution import ChildExitOrderRef, ExitExecutionIntent
+from aats.schemas.operator import OperatorUserRecord
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord
+from aats.schemas.reconciliation import (
+    BaselineGenerationRecord,
+    ExchangeAckWatermark,
+    ReconciliationFinding,
+    ReconciliationReport,
+    ReconciliationStateSnapshot,
+    ReplayProjectionOffset,
+)
+from aats.schemas.strategy_profiles import (
+    StrategyProfileActivationRecord,
+    StrategyProfileActivationState,
+    StrategyProfileEvaluationRecord,
+    StrategyProfileRecommendation,
+    StrategyProfileRejectionRecord,
+    StrategyProfileRevision,
+)
+from aats.schemas.strategy_runtime import (
+    AllocatorBudgetSnapshot,
+    AllocatorConflictResolution,
+    AllocatorNettingDecision,
+    PortfolioAllocationDecision,
+    SleeveBudgetAssignment,
+    SleeveBudgetProfile,
+    StrategyExecutionBundle,
+    StrategySleeveIntent,
+    StrategySleeveRecord,
+)
+from aats.services.runtime_scope import RuntimeStateScope
+
 
 # ─────────────────────────────────────────────────────────────────────
 # Stage 5: 乐观并发控制（Optimistic Concurrency Control）
@@ -57,42 +92,6 @@ class OptimisticLockError(Exception):
             f"optimistic_lock_conflict bundle_id={bundle_id} "
             f"expected_row_version={expected} actual_row_version={actual}"
         )
-
-from aats.schemas.common import EventEnvelope
-from aats.schemas.audit import DecisionAuditRecord
-from aats.schemas.execution import FillEvent, OrderObligation, OrderState
-from aats.schemas.exit_execution import ChildExitOrderRef, ExitExecutionIntent
-from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord
-from aats.schemas.reconciliation import (
-    BaselineGenerationRecord,
-    ExchangeAckWatermark,
-    ReplayProjectionOffset,
-    ReconciliationFinding,
-    ReconciliationReport,
-    ReconciliationStateSnapshot,
-)
-from aats.schemas.operator import OperatorUserRecord
-from aats.schemas.strategy_runtime import (
-    AllocatorBudgetSnapshot,
-    AllocatorConflictResolution,
-    AllocatorNettingDecision,
-    PortfolioAllocationDecision,
-    SleeveBudgetAssignment,
-    SleeveBudgetProfile,
-    StrategyExecutionBundle,
-    StrategySleeveIntent,
-    StrategySleeveRecord,
-)
-from aats.schemas.strategy_profiles import (
-    StrategyProfileActivationRecord,
-    StrategyProfileActivationState,
-    StrategyProfileEvaluationRecord,
-    StrategyProfileRecommendation,
-    StrategyProfileRejectionRecord,
-    StrategyProfileRevision,
-)
-from aats.services.runtime_scope import RuntimeStateScope
-
 
 class EventStore(Protocol):
     def append(self, envelope: EventEnvelope) -> None:
@@ -273,6 +272,9 @@ class PortfolioRepository(Protocol):
         ...
 
     def latest_for_scope(self, *, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
+        ...
+
+    def latest_baseline_for_scope(self, *, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
         ...
 
 

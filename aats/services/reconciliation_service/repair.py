@@ -15,7 +15,7 @@ from aats.schemas.execution import FillEvent
 from aats.schemas.exchange import AccountBaselineSnapshot, ExchangeAccountSnapshot
 from aats.schemas.exit_execution import ExitExecutionIntent
 from aats.schemas.operator import ProcessingFailureRecord
-from aats.schemas.portfolio import PortfolioSnapshot, is_baseline_snapshot
+from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.positions import PortfolioState
@@ -34,13 +34,48 @@ from aats.services.execution_engine.exit_intent_aggregator import (
 )
 from aats.services.runtime_scope import (
     fills_for_scope,
+    latest_baseline_for_scope,
     latest_snapshot_for_scope,
     latest_topic_event_for_scope,
     order_states_for_scope,
-    snapshots_for_scope,
     runtime_state_scope,
 )
 from aats.storage.base import ExitExecutionRepository, PortfolioRepository
+
+
+# ---------------------------------------------------------------------------
+#  共用辅助函数：baseline-aware snapshot 重建
+# ---------------------------------------------------------------------------
+
+
+def rebuild_snapshot_from_baseline(
+    *,
+    reconstruction_service: PortfolioReconstructionService,
+    runtime_scope,
+    price_provider: Callable[[str], Decimal],
+    baseline_snapshot: PortfolioSnapshot,
+    fills: list[FillEvent],
+) -> PortfolioSnapshot:
+    """Replay only post-baseline fills on top of *baseline_snapshot*.
+
+    This is the single authoritative implementation of baseline-aware
+    snapshot reconstruction.  Both ``ReconciliationRepairService`` and
+    ``ReconciliationService`` delegate here to avoid logic duplication.
+    """
+    state = PortfolioState(
+        initial_usdt_balance=reconstruction_service.initial_usdt_balance,
+        default_product_type=runtime_scope.product_type,
+        default_margin_mode=runtime_scope.margin_mode,
+    )
+    state.load_portfolio_snapshot(baseline_snapshot)
+    baseline_ts = baseline_snapshot.snapshot_ts
+    for fill in sorted(fills, key=fill_processing_sort_key):
+        if fill.ingestion_timestamp >= baseline_ts:
+            state.apply_fill(fill)
+    return reconstruction_service.snapshot_builder.build(
+        state=state,
+        price_provider=price_provider,
+    )
 
 
 @dataclass(slots=True)
@@ -126,38 +161,22 @@ class ReconciliationRepairService:
             and getattr(self.settings, "bootstrap_portfolio_from_exchange", False)
         )
         if use_baseline:
-            baseline_snapshot = self._find_baseline_snapshot()
+            baseline_snapshot = latest_baseline_for_scope(
+                self.portfolio_repo, self.runtime_scope,
+            )
             if baseline_snapshot is not None:
-                state = PortfolioState(
-                    initial_usdt_balance=self.reconstruction_service.initial_usdt_balance,
-                    default_product_type=self.runtime_scope.product_type,
-                    default_margin_mode=self.runtime_scope.margin_mode,
-                )
-                state.load_portfolio_snapshot(baseline_snapshot)
-                baseline_ts = baseline_snapshot.snapshot_ts
-                for fill in sorted(fills, key=fill_processing_sort_key):
-                    if fill.ingestion_timestamp >= baseline_ts:
-                        state.apply_fill(fill)
-                return self.reconstruction_service.snapshot_builder.build(
-                    state=state,
+                return rebuild_snapshot_from_baseline(
+                    reconstruction_service=self.reconstruction_service,
+                    runtime_scope=self.runtime_scope,
                     price_provider=self.price_provider,
+                    baseline_snapshot=baseline_snapshot,
+                    fills=fills,
                 )
         # Fallback: full fill replay (no baseline available or not enabled)
         return self.reconstruction_service.rebuild_snapshot(
             fills=fills,
             price_provider=self.price_provider,
         )
-
-    def _find_baseline_snapshot(self) -> PortfolioSnapshot | None:
-        """Find the latest baseline snapshot for the current runtime scope."""
-        candidates = [
-            snapshot
-            for snapshot in snapshots_for_scope(self.portfolio_repo, self.runtime_scope)
-            if is_baseline_snapshot(snapshot)
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: (item.snapshot_ts, item.created_at))
 
     def refresh_exit_execution_truth(self) -> list[ExitExecutionIntent]:
         if (
@@ -368,7 +387,9 @@ class ReconciliationService:
         order_states = order_states_for_scope(self.execution_repo, self.runtime_scope)
         fills = fills_for_scope(self.execution_repo, self.runtime_scope)
         exchange_snapshot: ExchangeAccountSnapshot | None = self.fetcher.fetch_snapshot()
-        baseline_snapshot = self._bootstrap_baseline_snapshot()
+        baseline_snapshot = latest_baseline_for_scope(
+            self.portfolio_repo, self.runtime_scope,
+        )
         trusted_exchange_portfolio_baseline = (
             self.bootstrap_portfolio_from_exchange and baseline_snapshot is not None
         )
@@ -522,55 +543,32 @@ class ReconciliationService:
     ) -> PortfolioSnapshot:
         if self.settings.portfolio_ledger_truth_enabled and stored_snapshot is not None:
             return stored_snapshot
-        if not self.bootstrap_portfolio_from_exchange:
-            return self.reconstruction_service.rebuild_snapshot(
-                fills=fills,
-                price_provider=self.price_provider,
-            ).model_copy(
-                update={
-                    "snapshot_origin": "manual_rebuild",
-                    "product_type": self.runtime_scope.product_type,
-                    "margin_mode": self.runtime_scope.margin_mode,
-                }
-            )
-
-        baseline_snapshot = self._bootstrap_baseline_snapshot()
-        if baseline_snapshot is None:
-            return self.reconstruction_service.rebuild_snapshot(
-                fills=fills,
-                price_provider=self.price_provider,
-            ).model_copy(
-                update={
-                    "snapshot_origin": "manual_rebuild",
-                    "product_type": self.runtime_scope.product_type,
-                    "margin_mode": self.runtime_scope.margin_mode,
-                }
-            )
-
-        state = PortfolioState(
-            initial_usdt_balance=self.reconstruction_service.initial_usdt_balance,
-            default_product_type=self.runtime_scope.product_type,
-            default_margin_mode=self.runtime_scope.margin_mode,
-        )
-        state.load_portfolio_snapshot(baseline_snapshot)
-        baseline_ts = baseline_snapshot.snapshot_ts
-        for fill in sorted(fills, key=fill_processing_sort_key):
-            if fill.ingestion_timestamp >= baseline_ts:
-                state.apply_fill(fill)
-        return self.reconstruction_service.snapshot_builder.build(
-            state=state,
+        full_replay_snapshot = lambda: self.reconstruction_service.rebuild_snapshot(
+            fills=fills,
             price_provider=self.price_provider,
+        ).model_copy(
+            update={
+                "snapshot_origin": "manual_rebuild",
+                "product_type": self.runtime_scope.product_type,
+                "margin_mode": self.runtime_scope.margin_mode,
+            }
         )
+        if not self.bootstrap_portfolio_from_exchange:
+            return full_replay_snapshot()
 
-    def _bootstrap_baseline_snapshot(self) -> PortfolioSnapshot | None:
-        candidates = [
-            snapshot
-            for snapshot in snapshots_for_scope(self.portfolio_repo, self.runtime_scope)
-            if is_baseline_snapshot(snapshot)
-        ]
-        if not candidates:
-            return None
-        return max(candidates, key=lambda item: (item.snapshot_ts, item.created_at))
+        baseline_snapshot = latest_baseline_for_scope(
+            self.portfolio_repo, self.runtime_scope,
+        )
+        if baseline_snapshot is None:
+            return full_replay_snapshot()
+
+        return rebuild_snapshot_from_baseline(
+            reconstruction_service=self.reconstruction_service,
+            runtime_scope=self.runtime_scope,
+            price_provider=self.price_provider,
+            baseline_snapshot=baseline_snapshot,
+            fills=fills,
+        )
 
     def _accepted_exchange_fill_ids(
         self,

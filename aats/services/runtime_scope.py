@@ -5,7 +5,7 @@ from typing import Any
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.execution import FillEvent, OrderState
-from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord
+from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, SleevePnLRecord, is_baseline_snapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import MarginModelType, ProductType
 
@@ -87,6 +87,22 @@ def latest_snapshot_for_scope(repo, scope: RuntimeStateScope) -> PortfolioSnapsh
     if hasattr(repo, "latest_for_scope"):
         return repo.latest_for_scope(scope=scope)
     return latest_matching_snapshot(repo.history(), scope)
+
+
+def latest_baseline_for_scope(repo, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
+    """Return the most recent baseline snapshot matching *scope*.
+
+    If the repo implements ``latest_baseline_for_scope`` (e.g. Postgres with
+    a JSON-aware query), delegate to it.  Otherwise fall back to scanning all
+    scoped snapshots and filtering by ``is_baseline_snapshot``.
+    """
+    repo_method = getattr(repo, "latest_baseline_for_scope", None)
+    if callable(repo_method):
+        return repo_method(scope=scope)
+    candidates = [s for s in snapshots_for_scope(repo, scope) if is_baseline_snapshot(s)]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda s: (s.snapshot_ts, s.created_at))
 
 
 def filter_snapshots(

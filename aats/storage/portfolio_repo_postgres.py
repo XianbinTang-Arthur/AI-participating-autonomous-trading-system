@@ -3,11 +3,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from sqlalchemy import desc, select
+from sqlalchemy import desc, or_, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
-from aats.schemas.portfolio import PortfolioSnapshot
+from aats.schemas.portfolio import BASELINE_SNAPSHOT_ORIGINS, PortfolioSnapshot
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.scope_metadata import portfolio_scope_metadata
 from aats.storage.sqlalchemy_models import PortfolioSnapshotModel
@@ -118,6 +118,39 @@ class PostgresPortfolioRepository:
                 .where(PortfolioSnapshotModel.product_type == scope.product_type)
                 .where(PortfolioSnapshotModel.margin_mode == scope.margin_mode)
                 .order_by(desc(PortfolioSnapshotModel.sequence_id))
+                .limit(1)
+            )
+        return self._to_snapshot(row) if row is not None else None
+
+    def latest_baseline_for_scope(self, *, scope: RuntimeStateScope) -> PortfolioSnapshot | None:
+        """Find the latest baseline snapshot via a single DB query.
+
+        Matches snapshots whose ``snapshot_origin`` is a known baseline origin,
+        OR legacy baselines where both ``source_fill_id`` and
+        ``source_intent_id`` are null/absent (``is_legacy_baseline_snapshot``).
+        """
+        baseline_origins = list(BASELINE_SNAPSHOT_ORIGINS)
+        origin_col = PortfolioSnapshotModel.payload["snapshot_origin"].astext
+        # Legacy baseline: both source_fill_id and source_intent_id are
+        # JSON-null or absent.  PostgreSQL ``->>`` returns SQL NULL for both
+        # cases, so ``IS NULL`` covers them.
+        src_fill = PortfolioSnapshotModel.payload["source_fill_id"].astext
+        src_intent = PortfolioSnapshotModel.payload["source_intent_id"].astext
+        with self.session_factory() as session:
+            row = session.scalar(
+                select(PortfolioSnapshotModel)
+                .where(PortfolioSnapshotModel.product_type == scope.product_type)
+                .where(PortfolioSnapshotModel.margin_mode == scope.margin_mode)
+                .where(
+                    or_(
+                        origin_col.in_(baseline_origins),
+                        (src_fill.is_(None) & src_intent.is_(None)),
+                    )
+                )
+                .order_by(
+                    desc(PortfolioSnapshotModel.snapshot_ts),
+                    desc(PortfolioSnapshotModel.sequence_id),
+                )
                 .limit(1)
             )
         return self._to_snapshot(row) if row is not None else None
