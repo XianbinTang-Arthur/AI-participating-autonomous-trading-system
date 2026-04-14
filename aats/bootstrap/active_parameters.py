@@ -302,6 +302,12 @@ def _default_registry_path(project_root: Path | str | None = None) -> Path:
 def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
     """尝试从数据库加载 active parameter registry.
 
+    同时查询 ``governance.active_decisions`` 表：
+    - 如果治理层已接管（表存在且有行），返回结果中
+      ``governance_managed=True`` + ``paused_combos=[...]``。
+    - 调用方据此决定是否 fallback 到文件 registry。
+      治理层主动 pause �� combo 不应从文件补齐。
+
     Returns
     -------
     dict | None  成功时返回 registry dict，失败或不可用时返回 None。
@@ -323,12 +329,36 @@ def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
                     "source_round_id, approval_recommendation_id, applied_by, applied_at "
                     "FROM governance.active_parameter_sets ORDER BY family, timeframe"
                 )).fetchall()
+
+                # ── 查询治理决策状态 ──
+                # 如果 governance.active_decisions 存在且有行，说明治理层
+                # 已接管参数管理。DB 返回空 active sets 是治���层主动 pause
+                # 的结果，不应 fallback 到文件 registry。
+                governance_managed = False
+                paused_combos: set[str] = set()
+                try:
+                    decision_rows = conn.execute(sa_text(
+                        "SELECT combo_key, current_status "
+                        "FROM governance.active_decisions"
+                    )).fetchall()
+                    if decision_rows:
+                        governance_managed = True
+                        for dr in decision_rows:
+                            if str(dr.current_status).lower() == "pause":
+                                paused_combos.add(dr.combo_key)
+                except Exception:
+                    # governance 表尚未创建（首次部署等），忽略
+                    pass
         finally:
             engine.dispose()
 
         active_sets: dict[str, Any] = {}
+        skipped_paused: list[str] = []
         for row in rows:
             combo_key = f"{row.family}_{row.timeframe}"
+            if combo_key in paused_combos:
+                skipped_paused.append(combo_key)
+                continue
             active_sets[combo_key] = {
                 "parameter_set_id": row.parameter_set_id,
                 "family": row.family,
@@ -336,8 +366,21 @@ def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
                 "values": row.param_values,
             }
 
-        log.info("从数据库加载 active parameter registry (%d active sets)", len(active_sets))
-        return {"generated_at": None, "active_sets": active_sets}
+        if skipped_paused:
+            log.info(
+                "active_parameter_governance_paused: 跳过 %d 个被治理层暂停的 combo: %s",
+                len(skipped_paused), ", ".join(sorted(skipped_paused)),
+            )
+        log.info(
+            "从数据库加载 active parameter registry (%d active sets, governance_managed=%s, paused=%d)",
+            len(active_sets), governance_managed, len(paused_combos),
+        )
+        return {
+            "generated_at": None,
+            "active_sets": active_sets,
+            "governance_managed": governance_managed,
+            "paused_combos": sorted(paused_combos),
+        }
 
     except Exception as exc:
         log.warning("数据库加载 active parameters 失败（fallback 文件模式）: %s", exc)
@@ -621,6 +664,10 @@ def build_settings_overrides(
 
     db_configured = bool(db_url or os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL"))
 
+    # 治理层是否已接管参数管理（DB 查询时同步获取）
+    governance_managed = registry.get("governance_managed", False)
+    paused_combos: set[str] = set(registry.get("paused_combos", []))
+
     if all_sets_raw:
         all_sets: dict[str, dict[str, Any]] = {}
         for k, v in all_sets_raw.items():
@@ -630,19 +677,27 @@ def build_settings_overrides(
         # 原代码因 all_sets_raw 非空而跳过文件 fallback，导致 15m 无参数。
         # 注意：仅当 DB 是数据源时才做 merge。非 DB 路径下 registry 文件本身
         # 就是权威来源，不需要额外合并。
+        # ── 治理旁路修复：被 governance pause 的 combo 不从文件补齐 ──
         if db_configured:
-            # P1 fix: skip_db=True 强制走文件路径。否则在
-            # AATS_ACTIVE_PARAMETER_DB_URL 已设置的生产环境中，
-            # load_all_active_parameter_sets 内部会再次读到同一份
-            # partial DB 结果，永远补不出缺失的 combo。
             file_sets = load_all_active_parameter_sets(
                 project_root=project_root, skip_db=True,
             )
             merged_from_file: list[str] = []
+            skipped_paused_merge: list[str] = []
             for file_combo, file_data in file_sets.items():
                 if file_combo not in all_sets:
+                    if file_combo in paused_combos:
+                        skipped_paused_merge.append(file_combo)
+                        continue
                     all_sets[file_combo] = file_data
                     merged_from_file.append(file_combo)
+            if skipped_paused_merge:
+                log.info(
+                    "active_parameter_merge_skip_paused: 治理层已暂停 %d 个 combo (%s)，"
+                    "不从文件补齐",
+                    len(skipped_paused_merge),
+                    ", ".join(sorted(skipped_paused_merge)),
+                )
             if merged_from_file:
                 log.warning(
                     "active_parameter_db_partial: DB 缺少 %d 个 combo (%s)，"
@@ -651,23 +706,31 @@ def build_settings_overrides(
                     ", ".join(sorted(merged_from_file)),
                 )
     elif db_configured:
-        # DB was configured and queried but returned zero active sets.
-        # Fall back to the file registry so that a missing DB seed or
-        # partial migration does not silently revert independent
-        # strategy behaviour to code defaults.
-        log.warning(
-            "active_parameter_db_empty: DB 已配置但返回零条 active sets，"
-            "回退到文件 registry 避免策略参数静默退化"
-        )
-        all_sets = load_all_active_parameter_sets(
-            project_root=project_root, skip_db=True,
-        )
-        if not all_sets:
-            log.error(
-                "active_parameter_fallback_also_empty: DB 和文件 registry 均无 "
-                "active sets，independent 策略将使用代码默认参数。"
-                "如果这是实盘环境，请尽快补充 seed 数据。"
+        if governance_managed:
+            # ── 治理层已接管且结果为空 → 所有 combo 均被暂停/未启用 ──
+            # 这是治理层的主动决策，不应 fallback 到文件 registry。
+            log.info(
+                "active_parameter_governance_all_paused: "
+                "治理层已接管参数管理，当前所有 combo 均被暂停 (%s)，"
+                "不回退到文件 registry。策略将使用代码默认参数。",
+                ", ".join(sorted(paused_combos)) if paused_combos else "无明确 pause 记录",
             )
+            all_sets = {}
+        else:
+            # DB 已配置但无治理层管理 → 可能是未 seed，保留 fallback
+            log.warning(
+                "active_parameter_db_empty: DB 已配置但返回零条 active sets 且无治理决策，"
+                "回退到文件 registry 避免策略参数静默退化"
+            )
+            all_sets = load_all_active_parameter_sets(
+                project_root=project_root, skip_db=True,
+            )
+            if not all_sets:
+                log.error(
+                    "active_parameter_fallback_also_empty: DB 和文件 registry 均无 "
+                    "active sets，independent 策略将使用代码默认参数。"
+                    "如果这是实盘环境，请尽快补充 seed 数据。"
+                )
     else:
         # 无 DB 配置时，尝试 per-file fallback
         all_sets = load_all_active_parameter_sets(project_root=project_root)
