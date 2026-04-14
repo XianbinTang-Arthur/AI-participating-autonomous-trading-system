@@ -130,12 +130,12 @@ class PostgresPortfolioRepository:
         ``source_intent_id`` are null/absent (``is_legacy_baseline_snapshot``).
         """
         baseline_origins = list(BASELINE_SNAPSHOT_ORIGINS)
-        origin_col = PortfolioSnapshotModel.payload["snapshot_origin"].astext
+        origin_col = PortfolioSnapshotModel.payload["snapshot_origin"].as_string()
         # Legacy baseline: both source_fill_id and source_intent_id are
         # JSON-null or absent.  PostgreSQL ``->>`` returns SQL NULL for both
         # cases, so ``IS NULL`` covers them.
-        src_fill = PortfolioSnapshotModel.payload["source_fill_id"].astext
-        src_intent = PortfolioSnapshotModel.payload["source_intent_id"].astext
+        src_fill = PortfolioSnapshotModel.payload["source_fill_id"].as_string()
+        src_intent = PortfolioSnapshotModel.payload["source_intent_id"].as_string()
         with self.session_factory() as session:
             row = session.scalar(
                 select(PortfolioSnapshotModel)
