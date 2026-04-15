@@ -12,6 +12,7 @@ A template with documentation is provided at
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pydantic import Field
@@ -21,6 +22,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # (config.py lives at aats/data_platform/config.py → project root is 3 levels up)
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _ENV_FILE = _PROJECT_ROOT / ".env.research"
+_DEFAULT_RESEARCH_DATABASE_URL = "postgresql+psycopg://localhost:5432/aats_research"
 
 
 class ResearchPlatformSettings(BaseSettings):
@@ -33,7 +35,7 @@ class ResearchPlatformSettings(BaseSettings):
 
     # Database
     database_url: str = Field(
-        default="postgresql+psycopg://localhost:5432/aats_research",
+        default=_DEFAULT_RESEARCH_DATABASE_URL,
         description="PostgreSQL DSN for the research database. "
                     "Set via RDP_DATABASE_URL in .env.research.",
     )
@@ -141,6 +143,27 @@ class ResearchPlatformSettings(BaseSettings):
         default="configs/active_parameter_sets",
         description="Directory for active parameter set files.",
     )
+
+    def model_post_init(self, __context: object) -> None:
+        """统一 research/governance DB 的默认解析链路.
+
+        历史上 RDP 代码里同时存在两条治理库连接来源：
+          1. AATS_ACTIVE_PARAMETER_DB_URL（gateway/compose 中实际注入）
+          2. RDP_DATABASE_URL（.env.research / 本地脚本）
+
+        当容器里没有显式设置 RDP_DATABASE_URL 时，BaseSettings 会退回到
+        database_url 的默认值 ``localhost:5432/aats_research``，导致同一套
+        RDP 页面里一部分查询连 @postgres，一部分健康检查却打到 localhost。
+
+        这里约定：
+          - 显式设置了 RDP_DATABASE_URL（或直接传入 database_url）时，以显式值为准
+          - 否则，优先复用 AATS_ACTIVE_PARAMETER_DB_URL
+          - 再否则，才回退到本地开发默认值
+        """
+        if "database_url" not in self.__pydantic_fields_set__:
+            governance_url = str(os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL", "")).strip()
+            if governance_url:
+                object.__setattr__(self, "database_url", governance_url)
 
 
 def get_settings() -> ResearchPlatformSettings:
