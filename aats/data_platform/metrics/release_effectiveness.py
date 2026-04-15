@@ -335,6 +335,12 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
     results: list[dict] = []
     modified = False
 
+    # Fix P1: 将重复文件 I/O 移到循环外，避免每次评估都重新加载
+    rel_data = _load_json(
+        root / "artifacts" / "production_workflow" / "parameter_release_history.json"
+    )
+    all_releases = rel_data.get("releases", []) if rel_data else []
+
     for ev in registry.get("evaluations", []):
         if ev.get("conclusion") != "rollback_triggered":
             continue
@@ -355,12 +361,9 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
             })
             continue
 
-        # 从 release history 查找 release
-        rel_data = _load_json(
-            root / "artifacts" / "production_workflow" / "parameter_release_history.json"
-        )
+        # 从预加载的 release history 查找 release
         release = None
-        releases = rel_data.get("releases", []) if rel_data else []
+        releases = all_releases
         release_index = None
         for idx, r in enumerate(releases):
             if r.get("release_id") == release_id:
@@ -415,6 +418,8 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
 
         from aats.bootstrap.active_parameters import load_active_parameter_registry
 
+        # 注意：active_registry 必须在循环内重新加载，因为前面的
+        # rollback_active_parameter_set 调用会修改文件内容。
         active_registry = load_active_parameter_registry(project_root=root)
         active_entry = active_registry.get("active_sets", {}).get(combo_key) or {}
         current_ps_id = active_entry.get("parameter_set_id")

@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
-import os
-from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import Request
 
+from aats.api._governance_db import governance_session as _governance_session
 from aats.data_platform.operations.environment_guard import (
     get_current_environment,
     get_observation_window_hours,
@@ -28,7 +26,6 @@ from aats.services.operator.rdp_queries import (
 
 logger = logging.getLogger(__name__)
 
-_governance_engine_cache: dict[str, Any] = {}
 _PENDING_RECOMMENDATION_STATUSES = {"draft", "approved"}
 
 
@@ -44,53 +41,6 @@ def _project_root(request: Request) -> Path:
         except Exception as exc:
             logger.warning("control-summary: failed to resolve project root: %s", exc)
     return Path(".").resolve()
-
-
-def _governance_db_url() -> str | None:
-    url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
-    if url:
-        return url
-    try:
-        from aats.data_platform.config import get_settings as get_rdp_settings
-
-        return get_rdp_settings().database_url
-    except Exception:
-        return None
-
-
-def _get_governance_engine(url: str) -> Any:
-    from sqlalchemy import create_engine
-
-    cached = _governance_engine_cache.get(url)
-    if cached is not None:
-        return cached
-    engine = create_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=1)
-    _governance_engine_cache[url] = engine
-    return engine
-
-
-@contextlib.contextmanager
-def _governance_session() -> Iterator[Any]:
-    url = _governance_db_url()
-    if not url:
-        raise RuntimeError(
-            "No governance DB URL available "
-            "(AATS_ACTIVE_PARAMETER_DB_URL / RDP_DATABASE_URL)",
-        )
-
-    from sqlalchemy.orm import sessionmaker
-
-    engine = _get_governance_engine(url)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
-    session = factory()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 
 def _combo_key(family: str | None, timeframe: str | None) -> str:

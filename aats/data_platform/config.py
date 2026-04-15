@@ -156,11 +156,17 @@ class ResearchPlatformSettings(BaseSettings):
         RDP 页面里一部分查询连 @postgres，一部分健康检查却打到 localhost。
 
         这里约定：
-          - 显式设置了 RDP_DATABASE_URL（或直接传入 database_url）时，以显式值为准
+          - 显式设置了 RDP_DATABASE_URL（环境变量或构造参数）时，以显式值为准
           - 否则，优先复用 AATS_ACTIVE_PARAMETER_DB_URL
           - 再否则，才回退到本地开发默认值
+
+        注意：Pydantic v2 中通过 env_prefix 从环境变量加载的字段不会出现在
+        __pydantic_fields_set__ 中（只有构造函数显式传入的才算）。因此必须
+        直接检查 RDP_DATABASE_URL 环境变量是否存在。
         """
-        if "database_url" not in self.__pydantic_fields_set__:
+        rdp_url_from_env = os.environ.get("RDP_DATABASE_URL", "").strip()
+        explicitly_set = "database_url" in self.__pydantic_fields_set__
+        if not rdp_url_from_env and not explicitly_set:
             governance_url = str(os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL", "")).strip()
             if governance_url:
                 object.__setattr__(self, "database_url", governance_url)

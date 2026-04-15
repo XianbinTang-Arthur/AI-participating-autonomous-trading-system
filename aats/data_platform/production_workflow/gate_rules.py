@@ -106,9 +106,19 @@ def check_evidence_freshness(ctx: dict[str, Any]) -> GateCheckResult:
 
     try:
         created_at = datetime.fromisoformat(created_at_str)
+        # Fix P0: tz-naive timestamp 与 tz-aware now() 相减会抛 TypeError，
+        # 被 except 静默吞掉后 age_hours=-1 绕过所有新鲜度阈值。
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
         age_hours = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
     except (ValueError, TypeError):
-        age_hours = -1
+        return GateCheckResult(
+            name="evidence_freshness",
+            category="freshness",
+            passed=False,
+            severity="warn",
+            detail=f"无法解析 recommendation 创建时间: {created_at_str!r}",
+        )
 
     if age_hours > 168:  # > 7 days
         return GateCheckResult(

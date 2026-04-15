@@ -25,10 +25,10 @@ from uuid import uuid4
 from aats.data_platform.production_workflow.gate_rules import (
     DEFAULT_GATE_RULES,
     GateCheckResult,
-    _strict_gate_environment,
 )
 from aats.data_platform.production_workflow.gate_runtime_contract import (
     build_gate_runtime_contract,
+    runtime_strict_environment,
 )
 
 log = logging.getLogger(__name__)
@@ -162,7 +162,7 @@ def run_pre_apply_gate(
 
     gate_run_id = _make_gate_run_id()
     ctx = build_gate_context(project_root, recommendation_id)
-    strict_environment = _strict_gate_environment(ctx)
+    strict_environment = runtime_strict_environment(ctx)
 
     checks: list[dict[str, Any]] = []
     blocking_reasons: list[str] = []

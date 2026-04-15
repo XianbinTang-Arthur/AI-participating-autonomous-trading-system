@@ -27,16 +27,14 @@
 
 from __future__ import annotations
 
-import contextlib
 import logging
-import os
-from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
+from aats.api._governance_db import governance_session as _governance_session
 from aats.api.auth import require_read_access, require_write_access
 from aats.services.operator.rdp_queries import (
     query_active_parameter_sets,
@@ -73,63 +71,6 @@ def _project_root(request: Request) -> Path:
     # 默认 cwd
     return Path(".").resolve()
 
-
-def _governance_db_url() -> str | None:
-    """获取 governance schema 所在数据库的连接串.
-
-    优先 AATS_ACTIVE_PARAMETER_DB_URL，其次 RDP_DATABASE_URL。
-    """
-    url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
-    if url:
-        return url
-    try:
-        from aats.data_platform.config import get_settings as get_rdp_settings
-        return get_rdp_settings().database_url
-    except Exception:
-        return None
-
-
-_governance_engine_cache: dict[str, Any] = {}   # url → Engine singleton
-
-
-def _get_governance_engine(url: str) -> Any:
-    """返回 URL 对应的缓存 Engine，避免每次请求重建连接池."""
-    from sqlalchemy import create_engine
-
-    cached = _governance_engine_cache.get(url)
-    if cached is not None:
-        return cached
-    engine = create_engine(url, pool_pre_ping=True, pool_size=2, max_overflow=1)
-    _governance_engine_cache[url] = engine
-    return engine
-
-
-
-@contextlib.contextmanager
-def _governance_session() -> Iterator[Any]:
-    """创建一个连接 governance schema 的轻量 session.
-
-    gateway 容器通过 AATS_ACTIVE_PARAMETER_DB_URL 连接 aats_research，
-    本地开发通过 RDP_DATABASE_URL (.env.research) 连接。
-    Engine 按 URL 缓存，避免每次请求创建/销毁连接池。
-    """
-    url = _governance_db_url()
-    if not url:
-        raise RuntimeError("No governance DB URL available "
-                           "(AATS_ACTIVE_PARAMETER_DB_URL / RDP_DATABASE_URL)")
-    from sqlalchemy.orm import sessionmaker
-
-    engine = _get_governance_engine(url)
-    factory = sessionmaker(bind=engine, expire_on_commit=False)
-    session = factory()
-    try:
-        yield session
-        session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
 
 # ══════════════════════════════════════════════════════════════════

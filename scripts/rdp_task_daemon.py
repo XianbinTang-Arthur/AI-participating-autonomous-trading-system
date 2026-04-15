@@ -48,9 +48,12 @@ logging.basicConfig(
 log = logging.getLogger("rdp_task_daemon")
 
 # 每个 workflow 的超时时间（秒）
+# Fix P1: 显式列出所有 workflow 的超时，避免依赖 DEFAULT_TIMEOUT 掩盖遗漏
 WORKFLOW_TIMEOUTS = {
     "data_maintenance": 900,   # 15 分钟
     "research_cycle": 3600,    # 60 分钟
+    "decision_cycle": 1800,    # 30 分钟 — 包含参数评估和可能的实盘回滚
+    "governance_cycle": 1800,  # 30 分钟 — 治理决策评估
 }
 DEFAULT_TIMEOUT = 1800  # 30 分钟
 
