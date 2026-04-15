@@ -1883,6 +1883,254 @@ class TestReconciliationComparator(unittest.TestCase):
         self.assertEqual(report.exchange_bills_explanations[0]["semantic_group"], "funding_fee")
         self.assertIn("balance_divergence", report.exchange_bills_explanations[0]["likely_explains"])
 
+    def test_compare_does_not_treat_balance_only_funding_fee_drift_as_external_manual_activity(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_balance_only_bills",
+            portfolio_snapshot_ref="evt_portfolio_balance_only_bills",
+            order_states=[
+                OrderState(
+                    decision_id="decision_balance_only_bills",
+                    intent_id="intent_balance_only_bills",
+                    symbol="BTC-USDT-SWAP",
+                    client_order_id="clord_balance_only_bills",
+                    venue="OKX",
+                    exchange_order_id="ord_balance_only_bills",
+                    status="FILLED",
+                    exchange_status="filled",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    last_exchange_update_ts=now,
+                    requested_qty=0.0006,
+                    filled_qty=0.0006,
+                    remaining_qty=0.0,
+                    average_fill_price=73648.2,
+                    fees=0.02,
+                    product_type="derivatives",
+                    margin_mode="cross",
+                )
+            ],
+            fills=[
+                FillEvent(
+                    fill_id="local_fill_balance_only_1",
+                    decision_id="decision_balance_only_bills",
+                    intent_id="intent_balance_only_bills",
+                    client_order_id="clord_balance_only_bills",
+                    exchange_order_id="ord_balance_only_bills",
+                    symbol="BTC-USDT-SWAP",
+                    venue="OKX",
+                    side="sell",
+                    fill_qty=0.0006,
+                    fill_price=73648.2,
+                    fee_amount=0.02,
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                    product_type="derivatives",
+                    margin_mode="cross",
+                )
+            ],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 394.235366456642},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=394.235366456642,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 394.235366456642},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=394.235366456642,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[
+                    ExchangeBalance(
+                        currency="USDT",
+                        total=394.2361396350809,
+                        available=394.2361396350809,
+                        frozen=0.0,
+                    ),
+                ],
+                positions=[],
+                open_orders=[],
+                fills=[
+                    ExchangeFill(
+                        fill_id="local_fill_balance_only_1",
+                        exchange_order_id="ord_balance_only_bills",
+                        client_order_id="clord_balance_only_bills",
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        side="sell",
+                        fill_qty=0.0006,
+                        fill_price=73648.2,
+                        fee_amount=0.02,
+                        fill_ts=now,
+                    )
+                ],
+                instruments=[],
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+            exchange_bills_summary={
+                "available": True,
+                "count": 7,
+                "latest_bill_id": "bill_balance_only_7",
+                "currencies": ["USDT"],
+                "top_categories": [
+                    {"type": "2", "sub_type": "5", "currency": "USDT", "count": 5},
+                    {"type": "8", "sub_type": "174", "currency": "USDT", "count": 1},
+                ],
+            },
+        )
+
+        self.assertEqual(report.severity, "SOFT_MISMATCH")
+        self.assertFalse(report.review_required)
+        self.assertNotIn("external_manual_activity_detected", report.mismatch_categories)
+        self.assertIn("exchange_bills_activity_available", report.mismatch_categories)
+        self.assertIn("local_balance_differs_from_exchange_balance", report.mismatch_reasons)
+
+    def test_compare_keeps_balance_only_manual_transfer_as_external_manual_activity(self) -> None:
+        comparator = StateComparator()
+        now = utc_now()
+        report = comparator.compare(
+            decision_id="decision_balance_only_transfer",
+            portfolio_snapshot_ref="evt_portfolio_balance_only_transfer",
+            order_states=[
+                OrderState(
+                    decision_id="decision_balance_only_transfer",
+                    intent_id="intent_balance_only_transfer",
+                    symbol="BTC-USDT-SWAP",
+                    client_order_id="clord_balance_only_transfer",
+                    venue="OKX",
+                    exchange_order_id="ord_balance_only_transfer",
+                    status="FILLED",
+                    exchange_status="filled",
+                    submitted_ts=now,
+                    last_update_ts=now,
+                    last_exchange_update_ts=now,
+                    requested_qty=0.0006,
+                    filled_qty=0.0006,
+                    remaining_qty=0.0,
+                    average_fill_price=73648.2,
+                    fees=0.02,
+                    product_type="derivatives",
+                    margin_mode="cross",
+                )
+            ],
+            fills=[
+                FillEvent(
+                    fill_id="local_fill_balance_only_transfer_1",
+                    decision_id="decision_balance_only_transfer",
+                    intent_id="intent_balance_only_transfer",
+                    client_order_id="clord_balance_only_transfer",
+                    exchange_order_id="ord_balance_only_transfer",
+                    symbol="BTC-USDT-SWAP",
+                    venue="OKX",
+                    side="sell",
+                    fill_qty=0.0006,
+                    fill_price=73648.2,
+                    fee_amount=0.02,
+                    liquidity_role="taker",
+                    exchange_timestamp=now,
+                    ingestion_timestamp=now,
+                    product_type="derivatives",
+                    margin_mode="cross",
+                )
+            ],
+            stored_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 394.235366456642},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=394.235366456642,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            reconstructed_snapshot=PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 394.235366456642},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=394.235366456642,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            exchange_snapshot=ExchangeAccountSnapshot(
+                account_source="okx",
+                fetched_at=now,
+                balances=[
+                    ExchangeBalance(
+                        currency="USDT",
+                        total=414.235366456642,
+                        available=414.235366456642,
+                        frozen=0.0,
+                    ),
+                ],
+                positions=[],
+                open_orders=[],
+                fills=[
+                    ExchangeFill(
+                        fill_id="local_fill_balance_only_transfer_1",
+                        exchange_order_id="ord_balance_only_transfer",
+                        client_order_id="clord_balance_only_transfer",
+                        instrument_id="BTC-USDT-SWAP",
+                        symbol="BTC-USDT-SWAP",
+                        side="sell",
+                        fill_qty=0.0006,
+                        fill_price=73648.2,
+                        fee_amount=0.02,
+                        fill_ts=now,
+                    )
+                ],
+                instruments=[],
+            ),
+            exchange_comparison_enabled=True,
+            compare_exchange_portfolio=True,
+            exchange_bills_summary={
+                "available": True,
+                "count": 1,
+                "latest_bill_id": "bill_balance_only_transfer_1",
+                "currencies": ["USDT"],
+                "top_categories": [
+                    {"type": "1", "sub_type": "201", "currency": "USDT", "count": 1},
+                ],
+            },
+        )
+
+        self.assertEqual(report.severity, "REVIEW_REQUIRED")
+        self.assertTrue(report.review_required)
+        self.assertIn("external_manual_activity_detected", report.mismatch_categories)
+        self.assertEqual(report.recommended_operator_action, "review_exchange_bills_and_rebaseline_if_expected")
+
     def test_service_uses_exchange_bootstrap_snapshot_as_reconstruction_baseline(self) -> None:
         now = utc_now()
         baseline_snapshot = PortfolioSnapshot(

@@ -10,7 +10,10 @@ from aats.schemas.execution import FillEvent, OrderState
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangeOpenOrder
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationFinding, ReconciliationReport
-from aats.services.execution_engine.okx_bills import explain_okx_bills_for_reconciliation
+from aats.services.execution_engine.okx_bills import (
+    explain_okx_bills_for_reconciliation,
+    okx_bill_semantic_group,
+)
 from aats.services.execution_engine.order_truth import unknown_write_state
 from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, EPSILON_DECIMAL_9, to_decimal
@@ -254,6 +257,34 @@ class StateComparator:
             seen.add(value)
             ordered.append(value)
         return ordered
+
+    @staticmethod
+    def _exchange_bills_indicate_cash_side_manual_activity(
+        exchange_bills_summary: dict[str, object],
+    ) -> bool:
+        top_categories = exchange_bills_summary.get("top_categories")
+        if not isinstance(top_categories, list):
+            return False
+        for row in top_categories:
+            if not isinstance(row, dict):
+                continue
+            semantic_group = str(row.get("semantic_group") or "").strip()
+            if not semantic_group:
+                bill_type = str(row.get("type") or "")
+                sub_type = str(row.get("sub_type") or row.get("subType") or "")
+                if bill_type or sub_type:
+                    semantic_group = okx_bill_semantic_group(
+                        bill_type=bill_type,
+                        sub_type=sub_type,
+                    )
+            if semantic_group in {
+                "transfer_or_margin_movement",
+                "liquidation_or_adl",
+                "delivery_or_exercise",
+                "other",
+            }:
+                return True
+        return False
 
     @staticmethod
     def _derivatives_unknown_state_assessment(
@@ -787,8 +818,16 @@ class StateComparator:
         if (
             (
                 unexpected_exchange_fills
-                or exchange_balance_diff
                 or exchange_position_diff
+                or (
+                    exchange_balance_diff
+                    and (
+                        not exchange_bills_summary.get("available")
+                        or StateComparator._exchange_bills_indicate_cash_side_manual_activity(
+                            exchange_bills_summary
+                        )
+                    )
+                )
             )
             and not exchange_order_diff
             and not local_execution_diff
