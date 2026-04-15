@@ -18,6 +18,10 @@
 退出码:
     0 = 成功
     1 = 错误
+
+说明:
+    prod 环境默认拒绝 direct apply；请改用 scripts/rdp_create_parameter_release.py
+    并显式设置 RDP_PRODUCTION_APPLY_ENABLED=true。
 """
 
 from __future__ import annotations

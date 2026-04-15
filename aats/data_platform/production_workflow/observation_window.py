@@ -261,7 +261,7 @@ def run_observation(
         _save_observation(project_root, release_id, result)
 
     # 更新 release history
-    if release:
+    if release and save_result:
         from aats.data_platform.production_workflow.release_registry import (
             save_release_history,
             update_release_status,

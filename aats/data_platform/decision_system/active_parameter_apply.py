@@ -130,6 +130,8 @@ def apply_approved_recommendation(
     actor: str = "operator",
     notes: str | None = None,
     dry_run: bool = False,
+    release_id: str | None = None,
+    gate_result: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """从已批准的 recommendation 应用参数到 active parameter set.
 
@@ -148,6 +150,25 @@ def apply_approved_recommendation(
         load_recommendation_registry,
     )
     from aats.data_platform.governance.parameter_registry import load_registry
+    from aats.data_platform.operations.environment_guard import (
+        get_current_environment,
+        get_policy,
+        guard_parameter_apply,
+        production_parameter_apply_enabled,
+    )
+
+    env = get_current_environment()
+    apply_guard = guard_parameter_apply(env)
+    if not apply_guard.allowed:
+        return {"ok": False, "message": apply_guard.reason, "environment": env}
+
+    policy = get_policy(env)
+    if env == "prod" and not production_parameter_apply_enabled(env):
+        return {
+            "ok": False,
+            "message": "prod parameter apply is frozen; enable RDP_PRODUCTION_APPLY_ENABLED=true before applying",
+            "environment": env,
+        }
 
     # 1. 加载 recommendation
     rec_path = project_root / DECISION_SYSTEM_DIR / "recommendation_registry.json"
@@ -161,6 +182,40 @@ def apply_approved_recommendation(
         return {
             "ok": False,
             "message": f"recommendation 状态为 '{rec['status']}'，必须为 approved 才能 apply",
+        }
+
+    if policy["require_approval"] and not (
+        rec.get("approved_by") or rec.get("approved_at")
+    ):
+        return {
+            "ok": False,
+            "message": f"{env} environment requires recorded approval metadata before apply",
+            "environment": env,
+        }
+
+    if policy["require_gate_pass"]:
+        if gate_result is None:
+            return {
+                "ok": False,
+                "message": (
+                    f"{env} environment requires pre-apply gate; "
+                    "use create_parameter_release()/release flow instead of direct apply"
+                ),
+                "environment": env,
+            }
+        if not gate_result.get("allow_apply"):
+            return {
+                "ok": False,
+                "message": f"gate blocked apply: {gate_result.get('blocking_reasons')}",
+                "environment": env,
+                "gate_result": gate_result,
+            }
+
+    if env == "prod" and release_id is None:
+        return {
+            "ok": False,
+            "message": "prod direct apply is not allowed; create a parameter release instead",
+            "environment": env,
         }
 
     ps_id = rec.get("target_parameter_set_id")
@@ -197,6 +252,8 @@ def apply_approved_recommendation(
         "recommendation_id": recommendation_id,
         "parameter_set_id": ps_id,
         "values": values,
+        "environment": env,
+        "release_id": release_id,
     }
 
     if dry_run:
@@ -273,6 +330,15 @@ def rollback_active_parameter_set(
     dict  操作结果 {"ok": bool, "message": str, ...}
     """
     from aats.data_platform.governance.parameter_registry import load_registry
+    from aats.data_platform.operations.environment_guard import (
+        get_current_environment,
+        guard_parameter_rollback,
+    )
+
+    env = get_current_environment()
+    rollback_guard = guard_parameter_rollback(env)
+    if not rollback_guard.allowed:
+        return {"ok": False, "message": rollback_guard.reason, "environment": env}
 
     combo_key = f"{family}_{timeframe.lower()}"
 
@@ -331,6 +397,7 @@ def rollback_active_parameter_set(
         "from_parameter_set_id": from_ps_id,
         "to_parameter_set_id": to_parameter_set_id,
         "values": values,
+        "environment": env,
     }
 
     if dry_run:

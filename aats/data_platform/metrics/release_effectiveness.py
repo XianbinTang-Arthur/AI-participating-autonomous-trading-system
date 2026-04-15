@@ -188,6 +188,8 @@ def _evaluate_governance(root: Path, release: dict) -> dict:
 def evaluate_release_effectiveness(
     root: Path,
     release_id: str,
+    *,
+    save_result: bool = True,
 ) -> dict:
     """评估一次 release 的 effectiveness.
 
@@ -239,15 +241,16 @@ def evaluate_release_effectiveness(
         "detail": _effectiveness_detail(dimensions, conclusion),
     }
 
-    # 保存到 registry
-    registry = load_effectiveness_registry(root)
-    # 去重: 替换同 release_id 的旧评估
-    registry["evaluations"] = [
-        e for e in registry["evaluations"]
-        if e.get("release_id") != release_id
-    ]
-    registry["evaluations"].append(evaluation)
-    save_effectiveness_registry(root, registry)
+    if save_result:
+        # 保存到 registry
+        registry = load_effectiveness_registry(root)
+        # 去重: 替换同 release_id 的旧评估
+        registry["evaluations"] = [
+            e for e in registry["evaluations"]
+            if e.get("release_id") != release_id
+        ]
+        registry["evaluations"].append(evaluation)
+        save_effectiveness_registry(root, registry)
 
     return evaluation
 
@@ -306,7 +309,11 @@ def pending_rollback_combos(root: Path) -> dict[str, str]:
     registry = load_effectiveness_registry(root)
     result: dict[str, str] = {}
     for ev in registry.get("evaluations", []):
-        if ev.get("conclusion") == "rollback_triggered" and not ev.get("rollback_enforced"):
+        if (
+            ev.get("conclusion") == "rollback_triggered"
+            and not ev.get("rollback_enforced")
+            and not ev.get("rollback_cancelled")
+        ):
             combo = f"{ev.get('family')}_{ev.get('timeframe', '').lower()}"
             result[combo] = ev.get("release_id", "?")
     return result
@@ -333,6 +340,8 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
             continue
         if ev.get("rollback_enforced"):
             continue
+        if ev.get("rollback_cancelled"):
+            continue
 
         release_id = ev.get("release_id")
         family = ev.get("family")
@@ -351,9 +360,12 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
             root / "artifacts" / "production_workflow" / "parameter_release_history.json"
         )
         release = None
-        for r in (rel_data.get("releases", []) if rel_data else []):
+        releases = rel_data.get("releases", []) if rel_data else []
+        release_index = None
+        for idx, r in enumerate(releases):
             if r.get("release_id") == release_id:
                 release = r
+                release_index = idx
                 break
 
         if release is None:
@@ -361,6 +373,78 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
                 "release_id": release_id,
                 "ok": False,
                 "error": f"release {release_id} not found in history",
+            })
+            continue
+
+        combo_key = f"{family}_{timeframe.lower()}"
+        release_ps_id = release.get("parameter_set_id")
+        if not release_ps_id:
+            results.append({
+                "release_id": release_id,
+                "ok": False,
+                "error": "release has no parameter_set_id; cannot verify stale rollback safety",
+            })
+            continue
+
+        later_successful_release = None
+        if release_index is not None:
+            for newer in releases[release_index + 1:]:
+                if (
+                    newer.get("combo_key") == combo_key
+                    and newer.get("apply_result") == "success"
+                ):
+                    later_successful_release = newer
+                    break
+        if later_successful_release is not None:
+            ev["rollback_cancelled"] = True
+            ev["rollback_cancelled_at"] = datetime.now(timezone.utc).isoformat()
+            ev["rollback_cancelled_reason"] = (
+                "superseded by later successful release "
+                f"{later_successful_release.get('release_id')}"
+            )
+            modified = True
+            results.append({
+                "release_id": release_id,
+                "family": family,
+                "timeframe": timeframe,
+                "ok": False,
+                "skipped": True,
+                "error": ev["rollback_cancelled_reason"],
+            })
+            continue
+
+        from aats.bootstrap.active_parameters import load_active_parameter_registry
+
+        active_registry = load_active_parameter_registry(project_root=root)
+        active_entry = active_registry.get("active_sets", {}).get(combo_key) or {}
+        current_ps_id = active_entry.get("parameter_set_id")
+        if not current_ps_id:
+            results.append({
+                "release_id": release_id,
+                "family": family,
+                "timeframe": timeframe,
+                "ok": False,
+                "error": (
+                    "current active parameter set unavailable; "
+                    "cannot verify release still controls production"
+                ),
+            })
+            continue
+        if current_ps_id != release_ps_id:
+            ev["rollback_cancelled"] = True
+            ev["rollback_cancelled_at"] = datetime.now(timezone.utc).isoformat()
+            ev["rollback_cancelled_reason"] = (
+                f"release {release_id} is no longer active; "
+                f"current active parameter set is {current_ps_id}"
+            )
+            modified = True
+            results.append({
+                "release_id": release_id,
+                "family": family,
+                "timeframe": timeframe,
+                "ok": False,
+                "skipped": True,
+                "error": ev["rollback_cancelled_reason"],
             })
             continue
 

@@ -25,6 +25,10 @@ from uuid import uuid4
 from aats.data_platform.production_workflow.gate_rules import (
     DEFAULT_GATE_RULES,
     GateCheckResult,
+    _strict_gate_environment,
+)
+from aats.data_platform.production_workflow.gate_runtime_contract import (
+    build_gate_runtime_contract,
 )
 
 log = logging.getLogger(__name__)
@@ -75,8 +79,15 @@ def build_gate_context(
         load_recommendation_registry,
     )
     from aats.data_platform.governance.parameter_registry import load_registry
+    from aats.data_platform.operations.environment_guard import (
+        get_current_environment,
+        get_policy,
+    )
 
     ctx: dict[str, Any] = {"project_root": str(project_root)}
+    env = get_current_environment()
+    ctx["environment"] = env
+    ctx["environment_policy"] = get_policy(env)
 
     # recommendation
     rec_path = project_root / _DECISION_SYSTEM_DIR / "recommendation_registry.json"
@@ -109,6 +120,14 @@ def build_gate_context(
     # parameter sets
     gov_reg = load_registry(project_root / _GOVERNANCE_DIR / "current_parameter_registry.json")
     ctx["parameter_sets"] = gov_reg.get("parameter_sets", [])
+
+    runtime_contract = build_gate_runtime_contract(project_root, environment=env)
+    ctx["runtime_contract"] = runtime_contract
+
+    # backward-compatible aliases for existing callers/tests
+    ctx["current_alerts"] = runtime_contract.get("current_alerts")
+    ctx["latest_workflow_runs"] = runtime_contract.get("latest_workflow_runs", {})
+    ctx["live_db_health"] = runtime_contract.get("live_db_health", {})
 
     return ctx
 
@@ -143,6 +162,7 @@ def run_pre_apply_gate(
 
     gate_run_id = _make_gate_run_id()
     ctx = build_gate_context(project_root, recommendation_id)
+    strict_environment = _strict_gate_environment(ctx)
 
     checks: list[dict[str, Any]] = []
     blocking_reasons: list[str] = []
@@ -157,7 +177,7 @@ def run_pre_apply_gate(
                 name=rule_fn.__name__,
                 category="error",
                 passed=False,
-                severity="warn",
+                severity="block" if strict_environment else "warn",
                 detail=f"规则执行异常: {exc}",
             )
 

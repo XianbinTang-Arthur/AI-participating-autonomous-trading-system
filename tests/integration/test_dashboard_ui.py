@@ -1942,6 +1942,37 @@ const configHtml = renderAIConfigView({
     },
   },
   rdpControl: {
+    environment: {
+      name: 'staging',
+      strict_environment: true,
+      description: '预发布环境',
+      require_gate_pass: true,
+      require_approval: false,
+      allow_parameter_rollback: true,
+      direct_apply_allowed: true,
+      production_apply_enabled: true,
+      required_observation_window_hours: 24,
+    },
+    health: {
+      overall_health: 'blocked',
+      blocking_reasons: ['critical_reliability_alerts'],
+      warnings: ['workflow_runs_incomplete'],
+      checks: [
+        { category: 'runtime', name: 'rdp-daemon', status: 'ok', detail: 'state=running, age_seconds=12' },
+        { category: 'alerts', name: 'current_alerts', status: 'blocked', detail: 'overall=critical, critical=1, warning=0' },
+        { category: 'workflow_runs', name: 'freshness', status: 'warn', detail: 'decision_cycle=stale:200.0h' },
+      ],
+    },
+    operations_summary: {
+      approved_release_candidate_count: 1,
+      draft_parameter_recommendation_count: 1,
+      observing_release_count: 1,
+      rollback_recommended_count: 0,
+      latest_gate_status: 'warn',
+      latest_release_apply_result: 'success',
+      health_status: 'blocked',
+      health_blocked: true,
+    },
     tasks: {
       data_maintenance: { status: 'done', finished_at: '2026-03-21T12:10:00Z' },
       research_cycle: { status: 'running', started_at: '2026-03-21T12:15:00Z' },
@@ -1956,6 +1987,18 @@ const configHtml = renderAIConfigView({
         confidence: 'high',
         reason: '净边际不足，需要保守降门槛',
         status: 'draft',
+        target_parameter_set_id: 'ps_candidate_1',
+      },
+      {
+        recommendation_id: 'rec-2',
+        symbol: 'BTC-USDT-SWAP',
+        family: 'independent',
+        timeframe: '15m',
+        recommendation_type: 'parameter_upgrade',
+        confidence: 'medium',
+        reason: '已完成审批，准备创建 release',
+        status: 'approved',
+        target_parameter_set_id: 'ps_candidate_2',
       },
     ],
     active_parameters: {},
@@ -2007,6 +2050,62 @@ const configHtml = renderAIConfigView({
         },
       ],
     },
+    recent_gate_results: [
+      {
+        gate_run_id: 'gate-1',
+        recommendation_id: 'rec-2',
+        created_at: '2026-03-21T12:18:00Z',
+        gate_status: 'warn',
+        allow_apply: true,
+        blocking_reasons: [],
+        warnings: ['workflow stale'],
+        checks: [],
+      },
+    ],
+    recent_releases: [
+      {
+        release_id: 'rel-1',
+        created_at: '2026-03-21T12:00:00Z',
+        family: 'independent',
+        timeframe: '15m',
+        combo_key: 'independent_15m',
+        recommendation_id: 'rec-older',
+        parameter_set_id: 'ps_live_1',
+        previous_parameter_set_id: 'ps_base_1',
+        actor: 'operator',
+        gate_status: 'pass',
+        apply_result: 'success',
+        observation_status: 'observing',
+        observation_window_hours: 24,
+      },
+    ],
+    observation_queue: [
+      {
+        release_id: 'rel-1',
+        family: 'independent',
+        timeframe: '15m',
+        combo_key: 'independent_15m',
+        recommendation_id: 'rec-older',
+        parameter_set_id: 'ps_live_1',
+        previous_parameter_set_id: 'ps_base_1',
+        created_at: '2026-03-21T12:00:00Z',
+        gate_status: 'pass',
+        apply_result: 'success',
+        observation_status: 'observing',
+        observation_window_hours: 24,
+        observation: {
+          status: 'observing',
+          recommendation: 'keep',
+          evaluated_at: '2026-03-21T12:20:00Z',
+        },
+        effectiveness: {
+          conclusion: 'mixed',
+          detail: 'still observing',
+        },
+        current_active_parameter_set_id: 'ps_live_1',
+        is_current_active_release: true,
+      },
+    ],
   },
 });
 
@@ -2071,10 +2170,14 @@ console.log(JSON.stringify({
   analysisNoTopNavButtons: !analysisHtml.includes('前往 AI 工作台') && !analysisHtml.includes('前往 AI 配置'),
   configHasRuntimeModeCard: configHtml.includes('运行模式切换'),
   configHasAutoProfileControlCard: configHtml.includes('自动换档控制'),
-  configHasRdpSummaryCard: configHtml.includes('RDP 研究与应用'),
-  configHasResearchConclusionSection: configHtml.includes('最新研究结论'),
-  configHasGovernanceOverview: configHtml.includes('治理状态总览'),
-  configShowsLiveParameterSource: configHtml.includes('当前实盘参数') && configHtml.includes('治理暂停后回退默认参数'),
+  configHasRdpSummaryCard: configHtml.includes('RDP 发布指挥台'),
+  configHasCommandBar: configHtml.includes('先判断能不能动，再决定动哪条建议'),
+  configHasRecommendationStep: configHtml.includes('1. 候选建议'),
+  configHasPreflightStep: configHtml.includes('2. 发布前检查'),
+  configHasReleaseStep: configHtml.includes('3. 发布执行'),
+  configHasObservationStep: configHtml.includes('4. 观察与回滚'),
+  configUsesReleaseFirstLanguage: configHtml.includes('创建发布') && configHtml.includes('运行 Gate'),
+  configNoDirectApplyLanguage: !configHtml.includes('data-action="rdp-approve-and-apply"') && !configHtml.includes('data-action="rdp-apply-only"'),
   configHasRuntimeParams: configHtml.includes('运行参数概览'),
   configOmitsAdaptiveControls: !configHtml.includes('风险预算乘数') && !configHtml.includes('执行侵略性乘数'),
   configHasTimingControls: configHtml.includes('持有与冷却') && configHtml.includes('低边际保护'),
@@ -2108,9 +2211,13 @@ console.log(JSON.stringify({
         self.assertIn('"configHasRuntimeModeCard":true', result.stdout)
         self.assertIn('"configHasAutoProfileControlCard":true', result.stdout)
         self.assertIn('"configHasRdpSummaryCard":true', result.stdout)
-        self.assertIn('"configHasResearchConclusionSection":true', result.stdout)
-        self.assertIn('"configHasGovernanceOverview":true', result.stdout)
-        self.assertIn('"configShowsLiveParameterSource":true', result.stdout)
+        self.assertIn('"configHasCommandBar":true', result.stdout)
+        self.assertIn('"configHasRecommendationStep":true', result.stdout)
+        self.assertIn('"configHasPreflightStep":true', result.stdout)
+        self.assertIn('"configHasReleaseStep":true', result.stdout)
+        self.assertIn('"configHasObservationStep":true', result.stdout)
+        self.assertIn('"configUsesReleaseFirstLanguage":true', result.stdout)
+        self.assertIn('"configNoDirectApplyLanguage":true', result.stdout)
         self.assertIn('"configHasRuntimeParams":true', result.stdout)
         self.assertIn('"configOmitsAdaptiveControls":true', result.stdout)
         self.assertIn('"configHasTimingControls":true', result.stdout)

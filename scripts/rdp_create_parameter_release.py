@@ -8,7 +8,7 @@
     python scripts/rdp_create_parameter_release.py \
         --recommendation-id rec_xxx --actor operator_name
 
-    # 跳过 gate（紧急情况）
+    # 跳过 gate（仅 dev 调试；staging/prod 会被环境守卫拒绝）
     python scripts/rdp_create_parameter_release.py \
         --recommendation-id rec_xxx --skip-gate
 
@@ -16,7 +16,7 @@
     python scripts/rdp_create_parameter_release.py \
         --recommendation-id rec_xxx --skip-apply
 
-    # 指定观察窗口
+    # 指定观察窗口（prod 不得短于 72h，staging 不得短于 24h）
     python scripts/rdp_create_parameter_release.py \
         --recommendation-id rec_xxx --window-hours 48
 
@@ -43,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--actor", default="operator")
     p.add_argument("--window-hours", type=int, default=24, help="观察窗口时长（小时）")
     p.add_argument("--notes", default=None)
-    p.add_argument("--skip-gate", action="store_true", help="跳过 gate 检查")
+    p.add_argument("--skip-gate", action="store_true", help="跳过 gate 检查（prod/staging 会拒绝）")
     p.add_argument("--skip-apply", action="store_true", help="只创建 release 不 apply")
     return p.parse_args()
 

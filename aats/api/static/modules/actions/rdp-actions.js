@@ -14,16 +14,38 @@ export function createRdpActionHandlers({
 
   function truncateForConfirm(id) {
     if (!id || id.length <= 24) return id || "";
-    return id.slice(0, 10) + "…" + id.slice(-10);
+    return `${id.slice(0, 10)}…${id.slice(-10)}`;
   }
 
-  // ── 触发 workflow（数据采集 / 研究管线）──────────────────────────
+  function defaultObservationWindowHours() {
+    const hours = Number(
+      state?.data?.rdpControl?.environment?.required_observation_window_hours || 24,
+    );
+    return Number.isFinite(hours) && hours > 0 ? Math.floor(hours) : 24;
+  }
+
+  function promptObservationWindowHours(defaultHours) {
+    const raw = windowRef.prompt(
+      "请输入观察窗口时长（小时）",
+      String(defaultHours),
+    );
+    if (raw === null) return null;
+    const parsed = Number.parseInt(String(raw).trim(), 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      setFlash(state, "warning", "观察窗口时长必须是正整数。");
+      renderBanners();
+      return null;
+    }
+    return parsed;
+  }
 
   async function triggerWorkflow(workflow) {
     if (!workflow) return;
     const labels = {
-      data_maintenance: "数据采集",
-      research_cycle: "研究管线",
+      data_maintenance: "数据维护",
+      research_cycle: "研究流程",
+      governance_cycle: "治理流程",
+      decision_cycle: "决策流程",
     };
     const label = labels[workflow] || workflow;
 
@@ -35,7 +57,7 @@ export function createRdpActionHandlers({
         body: { workflow, actor: "operator" },
       });
       if (result.ok) {
-        setFlash(state, "info", `${label}任务已提交（${result.task_id}），daemon 将自动执行。`);
+        setFlash(state, "info", `${label}任务已提交（${result.task_id}），daemon 会继续处理。`);
       } else {
         setFlash(state, "warning", result.message || `${label}触发失败。`);
       }
@@ -48,57 +70,18 @@ export function createRdpActionHandlers({
     }
   }
 
-  // ── 审批并应用 recommendation（仅限有 target_parameter_set_id 的）──
-
-  async function approveAndApply(recommendationId) {
-    if (!recommendationId) return;
-    if (!windowRef.confirm(`确认审批并应用 ${truncateForConfirm(recommendationId)} 吗？`)) return;
-    if (!ensureNotBusy()) return;
-    const finishAction = beginAction(null, "正在审批并应用参数…");
-    try {
-      // Step 1: approve
-      const approveResult = await requestJson(
-        `/rdp/recommendations/${encodeURIComponent(recommendationId)}/approve`,
-        { method: "POST", body: { actor: "operator", notes: "UI 一键审批并应用" } },
-      );
-      if (!approveResult.ok) {
-        setFlash(state, "warning", approveResult.message || "审批失败。");
-        renderBanners();
-        return;
-      }
-      // Step 2: apply
-      const applyResult = await requestJson("/rdp/parameters/apply", {
-        method: "POST",
-        body: { recommendation_id: recommendationId, actor: "operator", notes: "UI 一键审批并应用" },
-      });
-      if (applyResult.ok) {
-        setFlash(state, "info", `${recommendationId} 已审批并应用到 active parameters。`);
-      } else {
-        setFlash(state, "warning", applyResult.message || "参数应用失败（审批已完成）。");
-      }
-      await refreshDashboard({ manual: true });
-    } catch (error) {
-      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
-      renderBanners();
-    } finally {
-      finishAction();
-    }
-  }
-
-  // ── 仅审批（策略指导类建议，没有 target_parameter_set_id）─────
-
   async function approveOnly(recommendationId) {
     if (!recommendationId) return;
     if (!windowRef.confirm(`确认审批 ${truncateForConfirm(recommendationId)} 吗？`)) return;
     if (!ensureNotBusy()) return;
-    const finishAction = beginAction(null, "正在审批…");
+    const finishAction = beginAction(null, "正在审批建议…");
     try {
       const result = await requestJson(
         `/rdp/recommendations/${encodeURIComponent(recommendationId)}/approve`,
-        { method: "POST", body: { actor: "operator", notes: "UI 审批（策略指导，无参数应用）" } },
+        { method: "POST", body: { actor: "operator", notes: "UI 审批" } },
       );
       if (result.ok) {
-        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已审批。`);
+        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已审批，下一步请走发布流程。`);
       } else {
         setFlash(state, "warning", result.message || "审批失败。");
       }
@@ -111,34 +94,6 @@ export function createRdpActionHandlers({
     }
   }
 
-  // ── 仅应用已审批的 recommendation ─────────────────────────────
-
-  async function applyOnly(recommendationId) {
-    if (!recommendationId) return;
-    if (!windowRef.confirm(`确认应用已审批的 ${truncateForConfirm(recommendationId)} 吗？`)) return;
-    if (!ensureNotBusy()) return;
-    const finishAction = beginAction(null, "正在应用参数…");
-    try {
-      const result = await requestJson("/rdp/parameters/apply", {
-        method: "POST",
-        body: { recommendation_id: recommendationId, actor: "operator", notes: "UI 应用已审批参数" },
-      });
-      if (result.ok) {
-        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已应用到 active parameters。`);
-      } else {
-        setFlash(state, "warning", result.message || "参数应用失败。");
-      }
-      await refreshDashboard({ manual: true });
-    } catch (error) {
-      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
-      renderBanners();
-    } finally {
-      finishAction();
-    }
-  }
-
-  // ── 拒绝 recommendation ───────────────────────────────────────
-
   async function rejectRecommendation(recommendationId) {
     if (!recommendationId) return;
     if (!windowRef.confirm(`确认拒绝 ${truncateForConfirm(recommendationId)} 吗？`)) return;
@@ -150,7 +105,7 @@ export function createRdpActionHandlers({
         { method: "POST", body: { actor: "operator", notes: "UI 拒绝" } },
       );
       if (result.ok) {
-        setFlash(state, "info", `${recommendationId} 已拒绝。`);
+        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已拒绝。`);
       } else {
         setFlash(state, "warning", result.message || "拒绝失败。");
       }
@@ -163,10 +118,139 @@ export function createRdpActionHandlers({
     }
   }
 
-  // ── 回滚 active parameters ────────────────────────────────────
+  async function runGate(recommendationId) {
+    if (!recommendationId) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在运行发布 Gate…");
+    try {
+      const result = await requestJson("/rdp/gates/run", {
+        method: "POST",
+        body: { recommendation_id: recommendationId, actor: "operator", notes: "UI 运行 Gate" },
+      });
+      if (result.gate_status === "block" || result.ok === false || result.allow_apply === false) {
+        setFlash(state, "warning", result.blocking_reasons?.[0] || result.message || "Gate 阻断了这次发布。");
+      } else if (result.gate_status === "warn") {
+        setFlash(state, "info", result.warnings?.[0] || "Gate 通过，但带有警告。");
+      } else {
+        setFlash(state, "info", "Gate 通过，可以进入发布步骤。");
+      }
+      await refreshDashboard({ manual: true });
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      finishAction();
+    }
+  }
+
+  async function createRelease(recommendationId, { skipConfirm = false } = {}) {
+    if (!recommendationId) return;
+    const windowHours = promptObservationWindowHours(defaultObservationWindowHours());
+    if (windowHours === null) return;
+    if (!skipConfirm && !windowRef.confirm(`确认基于 ${truncateForConfirm(recommendationId)} 创建发布吗？`)) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在创建发布…");
+    try {
+      const result = await requestJson("/rdp/releases/create", {
+        method: "POST",
+        body: {
+          recommendation_id: recommendationId,
+          actor: "operator",
+          observation_window_hours: windowHours,
+          notes: "UI 创建发布",
+        },
+      });
+      if (result.ok) {
+        const releaseId = result.release?.release_id || "release";
+        setFlash(state, "info", `${releaseId} 已创建，后续请继续跟踪观察状态。`);
+      } else {
+        setFlash(state, "warning", result.message || "创建发布失败。");
+      }
+      await refreshDashboard({ manual: true });
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      finishAction();
+    }
+  }
+
+  async function approveAndCreateRelease(recommendationId) {
+    if (!recommendationId) return;
+    if (!windowRef.confirm(`确认审批并推进 ${truncateForConfirm(recommendationId)} 到发布流程吗？`)) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在审批并创建发布…");
+    try {
+      const approveResult = await requestJson(
+        `/rdp/recommendations/${encodeURIComponent(recommendationId)}/approve`,
+        { method: "POST", body: { actor: "operator", notes: "UI 审批并创建发布" } },
+      );
+      if (!approveResult.ok) {
+        setFlash(state, "warning", approveResult.message || "审批失败。");
+        renderBanners();
+        return;
+      }
+      const windowHours = promptObservationWindowHours(defaultObservationWindowHours());
+      if (windowHours === null) return;
+      const releaseResult = await requestJson("/rdp/releases/create", {
+        method: "POST",
+        body: {
+          recommendation_id: recommendationId,
+          actor: "operator",
+          observation_window_hours: windowHours,
+          notes: "UI 审批并创建发布",
+        },
+      });
+      if (releaseResult.ok) {
+        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已审批，并创建了新的发布。`);
+      } else {
+        setFlash(state, "warning", releaseResult.message || "发布创建失败，审批已经完成。");
+      }
+      await refreshDashboard({ manual: true });
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      finishAction();
+    }
+  }
+
+  async function runObservation(value) {
+    if (!value) return;
+    const [releaseId, defaultHoursRaw] = String(value).split("|");
+    const defaultHours = Number.parseInt(defaultHoursRaw || "", 10);
+    const windowHours = promptObservationWindowHours(
+      Number.isFinite(defaultHours) && defaultHours > 0
+        ? defaultHours
+        : defaultObservationWindowHours(),
+    );
+    if (windowHours === null) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在运行观察…");
+    try {
+      const result = await requestJson("/rdp/observations/run", {
+        method: "POST",
+        body: { release_id: releaseId, window_hours: windowHours },
+      });
+      if (result.status === "rollback_recommended") {
+        setFlash(state, "warning", `${truncateForConfirm(releaseId)} 观察结果建议回滚。`);
+      } else if (result.status) {
+        setFlash(state, "info", `${truncateForConfirm(releaseId)} 观察状态：${result.status}。`);
+      } else if (result.ok === false) {
+        setFlash(state, "warning", result.message || "运行观察失败。");
+      } else {
+        setFlash(state, "info", `${truncateForConfirm(releaseId)} 观察任务已完成。`);
+      }
+      await refreshDashboard({ manual: true });
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      finishAction();
+    }
+  }
 
   async function rollbackParameters(comboKey) {
-    // comboKey format: "family/timeframe" e.g. "independent/15m"
     if (!comboKey) return;
     const [family, timeframe] = comboKey.split("/");
     if (!family || !timeframe) return;
@@ -179,7 +263,7 @@ export function createRdpActionHandlers({
         body: { family, timeframe, actor: "operator", notes: "UI 回滚" },
       });
       if (result.ok) {
-        setFlash(state, "info", `${family}/${timeframe} 参数已回滚。`);
+        setFlash(state, "info", `${family}/${timeframe} 已回滚。`);
       } else {
         setFlash(state, "warning", result.message || "回滚失败。");
       }
@@ -192,12 +276,19 @@ export function createRdpActionHandlers({
     }
   }
 
+  async function applyOnly(recommendationId) {
+    await createRelease(recommendationId);
+  }
+
   return {
     "rdp-trigger-workflow": (workflow) => triggerWorkflow(workflow),
-    "rdp-approve-and-apply": (recId) => approveAndApply(recId),
-    "rdp-approve-only": (recId) => approveOnly(recId),
-    "rdp-apply-only": (recId) => applyOnly(recId),
-    "rdp-reject-recommendation": (recId) => rejectRecommendation(recId),
+    "rdp-approve-and-apply": (recommendationId) => approveAndCreateRelease(recommendationId),
+    "rdp-approve-only": (recommendationId) => approveOnly(recommendationId),
+    "rdp-apply-only": (recommendationId) => applyOnly(recommendationId),
+    "rdp-reject-recommendation": (recommendationId) => rejectRecommendation(recommendationId),
     "rdp-rollback-parameters": (combo) => rollbackParameters(combo),
+    "rdp-run-gate": (recommendationId) => runGate(recommendationId),
+    "rdp-create-release": (recommendationId) => createRelease(recommendationId),
+    "rdp-run-observation": (value) => runObservation(value),
   };
 }

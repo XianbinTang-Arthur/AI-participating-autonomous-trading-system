@@ -1279,8 +1279,94 @@ h3 {
 
 /* ── RDP 控制卡片内嵌表格 ─────────────────────────── */
 
+.rdp-ops-shell {
+  display: grid;
+  gap: 16px;
+}
+
+.rdp-command-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
 .rdp-section {
   margin: 1.25rem 0 0.75rem;
+}
+
+.rdp-worklist,
+.rdp-checklist {
+  display: grid;
+  gap: 12px;
+}
+
+.rdp-workitem,
+.rdp-checkitem {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.rdp-workitem.tone-positive,
+.rdp-checkitem.tone-positive {
+  border-color: rgba(52, 211, 153, 0.28);
+  background: linear-gradient(180deg, rgba(7, 28, 21, 0.42), rgba(255, 255, 255, 0.02));
+}
+
+.rdp-workitem.tone-warning,
+.rdp-checkitem.tone-warning {
+  border-color: rgba(244, 180, 94, 0.28);
+  background: linear-gradient(180deg, rgba(49, 34, 10, 0.38), rgba(255, 255, 255, 0.02));
+}
+
+.rdp-workitem.tone-danger,
+.rdp-checkitem.tone-danger {
+  border-color: rgba(251, 113, 133, 0.28);
+  background: linear-gradient(180deg, rgba(53, 15, 24, 0.38), rgba(255, 255, 255, 0.02));
+}
+
+.rdp-workitem__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.rdp-workitem__header h4 {
+  margin: 4px 0 0;
+}
+
+.rdp-workitem__body {
+  display: grid;
+  gap: 8px;
+}
+
+.rdp-inline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 14px;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.rdp-workitem__actions {
+  justify-content: flex-start;
+}
+
+.rdp-inline-block {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.rdp-subtle-heading {
+  margin: 0;
+  font-weight: 700;
 }
 
 .mini-table {
@@ -2264,6 +2350,26 @@ input::placeholder {
   .mobile-record-list {
     display: grid;
     gap: 10px;
+  }
+
+  .rdp-command-actions {
+    justify-content: stretch;
+  }
+
+  .rdp-command-actions .primary-button,
+  .rdp-command-actions .secondary-button,
+  .rdp-command-actions .warning-button,
+  .rdp-command-actions .table-button {
+    width: 100%;
+  }
+
+  .rdp-workitem__header {
+    flex-direction: column;
+  }
+
+  .rdp-inline-meta {
+    flex-direction: column;
+    gap: 4px;
   }
 
   .mobile-record-card {

@@ -19,6 +19,9 @@ from typing import Any
 VALID_ENVIRONMENTS = ("dev", "staging", "prod")
 DEFAULT_ENVIRONMENT = "dev"
 ENV_VAR_NAME = "RDP_ENV"
+PRODUCTION_APPLY_ENABLE_VAR = "RDP_PRODUCTION_APPLY_ENABLED"
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSEY_ENV_VALUES = {"0", "false", "no", "off", ""}
 
 
 @dataclass(frozen=True)
@@ -106,6 +109,40 @@ class GuardResult:
     reason: str
 
 
+@dataclass(frozen=True)
+class ReleaseGuardResult:
+    """Release 创建守卫检查结果."""
+    allowed: bool
+    environment: str
+    operation: str
+    reason: str
+    requested_observation_window_hours: int
+    resolved_observation_window_hours: int
+    run_gate: bool
+    run_apply: bool
+
+
+def _parse_env_flag(name: str, *, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in _TRUTHY_ENV_VALUES:
+        return True
+    if value in _FALSEY_ENV_VALUES:
+        return False
+    return default
+
+
+def production_parameter_apply_enabled(env: str | None = None) -> bool:
+    """返回当前环境是否允许真正写入生产 active parameter set."""
+    if env is None:
+        env = get_current_environment()
+    if env != "prod":
+        return True
+    return _parse_env_flag(PRODUCTION_APPLY_ENABLE_VAR, default=False)
+
+
 def guard_parameter_apply(env: str | None = None) -> GuardResult:
     """检查当前环境是否允许参数 apply."""
     if env is None:
@@ -125,6 +162,10 @@ def guard_parameter_apply(env: str | None = None) -> GuardResult:
         warnings.append("gate pass required")
     if policy["require_approval"]:
         warnings.append("operator approval required")
+    if env == "prod" and not production_parameter_apply_enabled(env):
+        warnings.append(
+            f"set {PRODUCTION_APPLY_ENABLE_VAR}=true to unfreeze prod writes",
+        )
 
     reason = "allowed"
     if warnings:
@@ -213,6 +254,91 @@ def get_observation_window_hours(env: str | None = None) -> int:
         env = get_current_environment()
     policy = get_policy(env)
     return policy.get("observation_window_hours", 72)
+
+
+def guard_release_creation(
+    *,
+    env: str | None = None,
+    run_gate: bool,
+    run_apply: bool,
+    observation_window_hours: int | None = None,
+) -> ReleaseGuardResult:
+    """检查 release 创建是否满足当前环境策略."""
+    if env is None:
+        env = get_current_environment()
+
+    policy = get_policy(env)
+    required_window = get_observation_window_hours(env)
+    requested_window = (
+        required_window
+        if observation_window_hours is None
+        else int(observation_window_hours)
+    )
+
+    if requested_window < 0:
+        return ReleaseGuardResult(
+            allowed=False,
+            environment=env,
+            operation="parameter_release",
+            reason="observation_window_hours must be >= 0",
+            requested_observation_window_hours=requested_window,
+            resolved_observation_window_hours=required_window,
+            run_gate=run_gate,
+            run_apply=run_apply,
+        )
+
+    if policy["require_gate_pass"] and not run_gate:
+        return ReleaseGuardResult(
+            allowed=False,
+            environment=env,
+            operation="parameter_release",
+            reason=f"{env} environment requires gate pass; skip_gate is not allowed",
+            requested_observation_window_hours=requested_window,
+            resolved_observation_window_hours=required_window,
+            run_gate=run_gate,
+            run_apply=run_apply,
+        )
+
+    if run_apply and env == "prod" and not production_parameter_apply_enabled(env):
+        return ReleaseGuardResult(
+            allowed=False,
+            environment=env,
+            operation="parameter_release",
+            reason=(
+                "prod parameter apply is frozen; set "
+                f"{PRODUCTION_APPLY_ENABLE_VAR}=true to allow release apply"
+            ),
+            requested_observation_window_hours=requested_window,
+            resolved_observation_window_hours=required_window,
+            run_gate=run_gate,
+            run_apply=run_apply,
+        )
+
+    if requested_window < required_window:
+        return ReleaseGuardResult(
+            allowed=False,
+            environment=env,
+            operation="parameter_release",
+            reason=(
+                f"{env} environment requires observation_window_hours >= "
+                f"{required_window}"
+            ),
+            requested_observation_window_hours=requested_window,
+            resolved_observation_window_hours=required_window,
+            run_gate=run_gate,
+            run_apply=run_apply,
+        )
+
+    return ReleaseGuardResult(
+        allowed=True,
+        environment=env,
+        operation="parameter_release",
+        reason="allowed",
+        requested_observation_window_hours=requested_window,
+        resolved_observation_window_hours=max(requested_window, required_window),
+        run_gate=run_gate,
+        run_apply=run_apply,
+    )
 
 
 def print_environment_status(root: Path) -> None:

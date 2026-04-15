@@ -14,6 +14,13 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from aats.data_platform.production_workflow.gate_runtime_contract import (
+    runtime_current_alerts,
+    runtime_latest_workflow_runs,
+    runtime_live_db_health,
+    runtime_strict_environment,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -25,6 +32,19 @@ class GateCheckResult:
     passed: bool
     severity: str  # "block" | "warn" | "info"
     detail: str = ""
+
+
+def _strict_gate_environment(ctx: dict[str, Any]) -> bool:
+    return runtime_strict_environment(ctx)
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ── 1. Governance Health ──────────────────────────────────────────
@@ -300,12 +320,143 @@ def check_parameter_set_exists(ctx: dict[str, Any]) -> GateCheckResult:
     )
 
 
+def check_current_alerts(ctx: dict[str, Any]) -> GateCheckResult:
+    """当前 reliability alerts 是否允许 apply."""
+    alerts = runtime_current_alerts(ctx)
+    strict = _strict_gate_environment(ctx)
+
+    if alerts is None:
+        return GateCheckResult(
+            name="current_alerts",
+            category="operations",
+            passed=not strict,
+            severity="block" if strict else "warn",
+            detail="current_alerts.json 不存在，无法确认当前 reliability 状态",
+        )
+
+    overall = alerts.get("overall_status", "unknown")
+    critical_alerts = int(alerts.get("critical_alerts", 0) or 0)
+    warning_alerts = int(alerts.get("warning_alerts", 0) or 0)
+
+    if overall == "critical" or critical_alerts > 0:
+        return GateCheckResult(
+            name="current_alerts",
+            category="operations",
+            passed=False,
+            severity="block",
+            detail=f"存在 {critical_alerts} 条 critical alert，禁止 apply",
+        )
+    if overall == "warning" or warning_alerts > 0:
+        return GateCheckResult(
+            name="current_alerts",
+            category="operations",
+            passed=True,
+            severity="warn",
+            detail=f"存在 {warning_alerts} 条 warning alert，建议人工复核",
+        )
+
+    return GateCheckResult(
+        name="current_alerts",
+        category="operations",
+        passed=True,
+        severity="info",
+        detail=f"overall_status={overall}",
+    )
+
+
+def check_live_db_health(ctx: dict[str, Any]) -> GateCheckResult:
+    """live DB 只读链路是否健康."""
+    live_db_health = runtime_live_db_health(ctx)
+    strict = _strict_gate_environment(ctx)
+
+    if live_db_health.get("healthy"):
+        checked_tables = len(live_db_health.get("tables_checked", {}))
+        return GateCheckResult(
+            name="live_db_health",
+            category="production",
+            passed=True,
+            severity="info",
+            detail=f"live DB healthy, tables_checked={checked_tables}",
+        )
+
+    errors = live_db_health.get("errors") or []
+    detail = "; ".join(str(item) for item in errors) if errors else "live DB 不健康"
+    return GateCheckResult(
+        name="live_db_health",
+        category="production",
+        passed=not strict,
+        severity="block" if strict else "warn",
+        detail=detail,
+    )
+
+
+def check_workflow_freshness(ctx: dict[str, Any]) -> GateCheckResult:
+    """关键 workflow 最近一次运行是否成功且不过期."""
+    strict = _strict_gate_environment(ctx)
+    latest_runs = runtime_latest_workflow_runs(ctx)
+    thresholds = {
+        "data_maintenance": 36,
+        "governance_cycle": 36,
+        "decision_cycle": 168,
+    }
+    now = datetime.now(timezone.utc)
+    issues: list[str] = []
+    warnings: list[str] = []
+
+    for workflow, max_age_hours in thresholds.items():
+        latest = latest_runs.get(workflow)
+        if latest is None:
+            issues.append(f"{workflow}: missing latest run")
+            continue
+        status = str(latest.get("overall_status") or "unknown")
+        finished_at = _parse_iso_datetime(
+            str(latest.get("finished_at") or latest.get("started_at") or ""),
+        )
+        if status not in {"success", "partial"}:
+            issues.append(f"{workflow}: status={status}")
+            continue
+        if finished_at is None:
+            warnings.append(f"{workflow}: missing finished_at")
+            continue
+        age_hours = (now - finished_at).total_seconds() / 3600
+        if age_hours > max_age_hours:
+            issues.append(f"{workflow}: stale {age_hours:.1f}h>{max_age_hours}h")
+
+    if issues:
+        return GateCheckResult(
+            name="workflow_freshness",
+            category="operations",
+            passed=not strict,
+            severity="block" if strict else "warn",
+            detail="; ".join(issues),
+        )
+    if warnings:
+        return GateCheckResult(
+            name="workflow_freshness",
+            category="operations",
+            passed=True,
+            severity="warn",
+            detail="; ".join(warnings),
+        )
+
+    return GateCheckResult(
+        name="workflow_freshness",
+        category="operations",
+        passed=True,
+        severity="info",
+        detail="关键 workflow 新鲜度正常",
+    )
+
+
 # ── 默认规则集 ─────────────────────────────────────────────────────
 
 DEFAULT_GATE_RULES = [
     check_recommendation_status,
     check_parameter_set_exists,
     check_quality_monitor_health,
+    check_current_alerts,
+    check_live_db_health,
+    check_workflow_freshness,
     check_evidence_freshness,
     check_evidence_completeness,
     check_decision_consistency,

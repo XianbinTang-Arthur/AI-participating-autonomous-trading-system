@@ -1,7 +1,7 @@
 """RDP (Research Data Platform) SQLAlchemy ORM 模型。
 
 替代 migrations/research/*.sql，通过 RdpBase.metadata.create_all() 自动建表。
-47 张表分布在 7 个 PostgreSQL schema：meta / staging / bronze / silver /
+48 张表分布在 7 个 PostgreSQL schema：meta / staging / bronze / silver /
 gold / research / governance。
 
 设计决策：
@@ -693,12 +693,30 @@ class RdpTaskQueueModel(RdpBase):
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class RdpRuntimeStatusModel(RdpBase):
+    """governance.rdp_runtime_status — 跨容器共享的运行态心跳."""
+
+    __tablename__ = "rdp_runtime_status"
+    __table_args__ = (
+        UniqueConstraint("component", name="uq_rdp_runtime_status_component"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    component = Column(String(64), nullable=False, unique=True)
+    status = Column(String(32), nullable=False, server_default=text("'unknown'"))
+    heartbeat_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    details_json = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 # =====================================================================
 # Schema 创建入口
 # =====================================================================
 
 def create_rdp_schema(engine: object) -> None:
-    """创建 RDP 的全部 7 个 PostgreSQL schema + 47 张表。
+    """创建 RDP 的全部 7 个 PostgreSQL schema + 48 张表。
 
     替代 migrations/research/*.sql 迁移文件。幂等——已存在的 schema/表不会
     被破坏（CREATE SCHEMA IF NOT EXISTS + create_all 的 checkfirst=True）。

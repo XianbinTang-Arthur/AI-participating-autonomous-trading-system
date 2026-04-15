@@ -86,6 +86,7 @@ dev → staging → prod
 - [ ] `RDP_ENV=staging` 下运行所有 workflow (dry-run)
 - [ ] staging 可靠性检查通过
 - [ ] staging 中完整执行一次 decision_cycle
+- [ ] 按 `rdp_staging_rehearsal_checklist.md` 完成 recommendation → gate → release → observation → rollback 演练
 - [ ] 确认 `RDP_ENV=prod` 已设置
 - [ ] prod 可靠性检查通过
 - [ ] 通知运维人员

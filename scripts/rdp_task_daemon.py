@@ -23,11 +23,16 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
+from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -51,6 +56,9 @@ DEFAULT_TIMEOUT = 1800  # 30 分钟
 
 # 保留最后 N 行日志
 LOG_TAIL_LINES = 50
+HEARTBEAT_INTERVAL_SECONDS = 5
+LOCAL_HEARTBEAT_PATH = Path("/tmp/rdp_daemon_heartbeat.json")
+RUNTIME_COMPONENT = "rdp-daemon"
 
 _shutdown = False
 
@@ -76,7 +84,68 @@ def tail_lines(text: str, n: int) -> str:
     return "\n".join(lines[-n:]) if len(lines) > n else text
 
 
-def execute_workflow(workflow: str) -> tuple[int, str, str]:
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _write_local_heartbeat(payload: dict[str, object]) -> None:
+    try:
+        LOCAL_HEARTBEAT_PATH.write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
+
+
+def _publish_heartbeat(
+    *,
+    status: str,
+    poll_interval: int,
+    active_task: dict[str, object] | None = None,
+    last_task: dict[str, object] | None = None,
+    error_message: str | None = None,
+) -> None:
+    heartbeat_at = _utcnow()
+    payload: dict[str, object] = {
+        "component": RUNTIME_COMPONENT,
+        "status": status,
+        "heartbeat_at": heartbeat_at.isoformat(),
+        "pid": os.getpid(),
+        "poll_interval_seconds": poll_interval,
+    }
+    if active_task:
+        payload["active_task"] = active_task
+    if last_task:
+        payload["last_task"] = last_task
+    if error_message:
+        payload["error_message"] = error_message
+
+    _write_local_heartbeat(payload)
+
+    try:
+        from aats.data_platform.db import get_session
+        from aats.data_platform.governance.rdp_runtime_status_db import (
+            db_upsert_runtime_status,
+        )
+
+        with get_session() as session:
+            db_upsert_runtime_status(
+                session,
+                component=RUNTIME_COMPONENT,
+                status=status,
+                heartbeat_at=heartbeat_at,
+                details=payload,
+            )
+    except Exception:
+        log.exception("Failed to publish daemon heartbeat")
+
+
+def execute_workflow(
+    workflow: str,
+    *,
+    on_progress: Callable[[], None] | None = None,
+) -> tuple[int, str, str]:
     """执行一个 workflow，返回 (exit_code, stdout_tail, error_message)."""
     cmd = [
         sys.executable,
@@ -87,24 +156,42 @@ def execute_workflow(workflow: str) -> tuple[int, str, str]:
 
     log.info("Executing: %s (timeout=%ds)", " ".join(cmd), timeout)
     try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            cwd=str(_PROJECT_ROOT),
-        )
-        combined = (proc.stdout or "") + (proc.stderr or "")
-        return proc.returncode, tail_lines(combined, LOG_TAIL_LINES), ""
-    except subprocess.TimeoutExpired as exc:
-        combined = ((exc.stdout or "") + (exc.stderr or "")) if exc.stdout or exc.stderr else ""
-        return -1, tail_lines(combined, LOG_TAIL_LINES), f"Timeout after {timeout}s"
+        with tempfile.SpooledTemporaryFile(
+            mode="w+t",
+            encoding="utf-8",
+            max_size=1024 * 1024,
+        ) as output_file:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=output_file,
+                stderr=output_file,
+                text=True,
+                cwd=str(_PROJECT_ROOT),
+            )
+            start = time.monotonic()
+            while True:
+                exit_code = proc.poll()
+                if exit_code is not None:
+                    output_file.flush()
+                    output_file.seek(0)
+                    combined = output_file.read()
+                    return exit_code, tail_lines(combined, LOG_TAIL_LINES), ""
+                if time.monotonic() - start >= timeout:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    output_file.flush()
+                    output_file.seek(0)
+                    combined = output_file.read()
+                    return -1, tail_lines(combined, LOG_TAIL_LINES), f"Timeout after {timeout}s"
+                if on_progress is not None:
+                    on_progress()
+                time.sleep(HEARTBEAT_INTERVAL_SECONDS)
     except Exception as exc:
         return -2, "", str(exc)
 
 
-def process_one_task() -> bool:
-    """尝试领取并执行一个任务。返回是否处理了任务."""
+def process_one_task(*, poll_interval: int) -> dict[str, object]:
+    """尝试领取并执行一个任务."""
     from aats.data_platform.db import get_session
     from aats.data_platform.governance.rdp_task_db import (
         db_claim_next_task,
@@ -116,13 +203,34 @@ def process_one_task() -> bool:
         task = db_claim_next_task(session)
 
     if task is None:
-        return False
+        return {"processed": False, "status": "idle"}
 
     task_id = task["task_id"]
     workflow = task["workflow"]
     log.info("=== Processing task %s: workflow=%s ===", task_id, workflow)
 
-    exit_code, log_tail, error_message = execute_workflow(workflow)
+    active_task = {
+        "task_id": task_id,
+        "workflow": workflow,
+        "status": "running",
+        "started_at": _utcnow().isoformat(),
+    }
+    _publish_heartbeat(
+        status="busy",
+        poll_interval=poll_interval,
+        active_task=active_task,
+        last_task=active_task,
+    )
+
+    exit_code, log_tail, error_message = execute_workflow(
+        workflow,
+        on_progress=lambda: _publish_heartbeat(
+            status="busy",
+            poll_interval=poll_interval,
+            active_task=active_task,
+            last_task=active_task,
+        ),
+    )
 
     status = "done" if exit_code == 0 else "failed"
     if error_message == "" and exit_code != 0:
@@ -138,7 +246,15 @@ def process_one_task() -> bool:
         )
 
     log.info("=== Task %s finished: %s (exit=%s) ===", task_id, status, exit_code)
-    return True
+    return {
+        "processed": True,
+        "task_id": task_id,
+        "workflow": workflow,
+        "status": status,
+        "exit_code": exit_code,
+        "error_message": error_message or None,
+        "finished_at": _utcnow().isoformat(),
+    }
 
 
 def main() -> int:
@@ -147,33 +263,71 @@ def main() -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    from aats.data_platform.db import run_migrations
+
+    run_migrations()
+
     log.info("RDP Task Daemon started (poll_interval=%ds, once=%s)",
              args.poll_interval, args.once)
+    _publish_heartbeat(status="starting", poll_interval=args.poll_interval)
 
     if args.once:
-        processed = process_one_task()
-        if not processed:
+        processed = process_one_task(poll_interval=args.poll_interval)
+        _publish_heartbeat(
+            status="idle" if not processed.get("processed") else str(processed.get("status")),
+            poll_interval=args.poll_interval,
+            last_task=processed if processed.get("processed") else None,
+            error_message=(
+                str(processed.get("error_message"))
+                if processed.get("error_message")
+                else None
+            ),
+        )
+        if not processed.get("processed"):
             log.info("No pending tasks.")
         return 0
 
-    heartbeat_path = Path("/tmp/rdp_daemon_alive")
-
+    last_task: dict[str, object] | None = None
     while not _shutdown:
         try:
-            processed = process_one_task()
-        except Exception:
+            processed = process_one_task(poll_interval=args.poll_interval)
+            if processed.get("processed"):
+                last_task = processed
+            heartbeat_status = "idle"
+            if processed.get("processed"):
+                heartbeat_status = (
+                    "healthy"
+                    if processed.get("status") == "done"
+                    else "degraded"
+                )
+            _publish_heartbeat(
+                status=heartbeat_status,
+                poll_interval=args.poll_interval,
+                last_task=last_task,
+                error_message=(
+                    str(processed.get("error_message"))
+                    if processed.get("error_message")
+                    else None
+                ),
+            )
+        except Exception as exc:
             log.exception("Error processing task")
-            processed = False
+            _publish_heartbeat(
+                status="error",
+                poll_interval=args.poll_interval,
+                last_task=last_task,
+                error_message=str(exc),
+            )
+            processed = {"processed": False, "status": "error"}
 
-        # touch heartbeat 供 Docker healthcheck 使用
-        try:
-            heartbeat_path.touch()
-        except OSError:
-            pass
-
-        if not processed and not _shutdown:
+        if not processed.get("processed") and not _shutdown:
             time.sleep(args.poll_interval)
 
+    _publish_heartbeat(
+        status="stopped",
+        poll_interval=args.poll_interval,
+        last_task=last_task,
+    )
     log.info("RDP Task Daemon stopped.")
     return 0
 

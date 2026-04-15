@@ -14,6 +14,7 @@
 | 07:30 UTC | 确认 governance_cycle 完成 | 同上 | overall_status = success |
 | 08:00 UTC | 运行可靠性检查 | `python scripts/rdp_run_reliability_check.py` | 退出码 0 |
 | 08:05 UTC | 检查告警摘要 | `python scripts/rdp_build_alert_summary.py --current` | 无 critical |
+| 08:10 UTC | 检查 daemon 心跳 | 查看 `/rdp/health` 中 `rdp-daemon` 项 | `status=ok` 且 heartbeat < 45s |
 | 随时 | 检查 open 失败 | `python scripts/rdp_record_workflow_failure.py --list-open` | 无 open 失败 |
 
 ### 每周检查 (周一)
@@ -108,6 +109,19 @@
 3. 确认 dry-run 正常后实际执行:
    python scripts/rdp_run_scheduled_workflow.py --workflow governance_cycle
 4. 恢复调度器配置
+```
+
+### Scenario 6: `rdp-daemon` 心跳陈旧或丢失
+
+```
+1. 查看 /rdp/health，确认阻断项是否为 rdp_daemon_status_missing / rdp_daemon_unhealthy
+2. 检查 governance.rdp_runtime_status:
+   psql ... -c "SELECT component, status, heartbeat_at FROM governance.rdp_runtime_status"
+3. 检查 daemon 容器日志:
+   docker logs aats-rdp-daemon --tail 200
+4. 如 daemon 已停止或报错，重启容器并确认 heartbeat 恢复:
+   docker restart aats-rdp-daemon
+5. 再次确认 /rdp/health 中 heartbeat 已恢复 < 45s
 ```
 
 ## 周期性维护

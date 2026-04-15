@@ -47,6 +47,9 @@ Post-Apply Assessment
 | evidence_completeness | freshness | block/warn | <0.25=block, <0.5=warn |
 | decision_consistency | decision | block/warn | pause=block, require_review=warn |
 | latest_round_health | round | block/warn | failed=block, partial=warn |
+| current_alerts | operations | block/warn | critical=block, warning=warn |
+| live_db_health | production | block/warn | staging/prod 下 live DB 不健康直接 block |
+| workflow_freshness | operations | block/warn | 关键 workflow 缺失/过旧 |
 
 ### 2.3 Gate 输出
 
@@ -108,12 +111,14 @@ python scripts/rdp_create_parameter_release.py \
     --recommendation-id rec_xxx --actor operator_name
 
 # 生产不提供跳过 gate 的标准流程
+# 如需真正执行 prod apply，必须额外显式设置:
+#   export RDP_PRODUCTION_APPLY_ENABLED=true
 
 # API
 POST /rdp/releases/create {
     "recommendation_id": "rec_xxx",
     "actor": "operator_name",
-    "observation_window_hours": 24
+    "observation_window_hours": 72
 }
 ```
 
@@ -139,6 +144,7 @@ active parameter apply 会改变 live 策略行为，必须按生产变更处理
 - 必须写入 DB + 文件 apply history。
 - 必须具备 rollback 目标。
 - 禁止在生产环境跳过 gate。
+- `prod` 观察窗口不得短于 72h，`staging` 不得短于 24h。
 
 ### 4.1 何时运行
 

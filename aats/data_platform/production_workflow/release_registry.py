@@ -174,8 +174,33 @@ def create_parameter_release(
         load_recommendation_registry,
     )
     from aats.data_platform.governance.parameter_registry import load_registry
+    from aats.data_platform.operations.environment_guard import (
+        guard_release_creation,
+    )
 
     result: dict[str, Any] = {"ok": False}
+    release_guard = guard_release_creation(
+        run_gate=run_gate,
+        run_apply=run_apply,
+        observation_window_hours=observation_window_hours,
+    )
+    if not release_guard.allowed:
+        result["message"] = release_guard.reason
+        result["environment"] = release_guard.environment
+        result["release_guard"] = {
+            "environment": release_guard.environment,
+            "requested_observation_window_hours": (
+                release_guard.requested_observation_window_hours
+            ),
+            "resolved_observation_window_hours": (
+                release_guard.resolved_observation_window_hours
+            ),
+            "run_gate": release_guard.run_gate,
+            "run_apply": release_guard.run_apply,
+        }
+        return result
+
+    observation_window_hours = release_guard.resolved_observation_window_hours
 
     # 1. 加载 recommendation
     rec_path = project_root / "artifacts/decision_system/recommendation_registry.json"
@@ -277,6 +302,8 @@ def create_parameter_release(
             recommendation_id=recommendation_id,
             actor=actor,
             notes=f"Release {release['release_id']}",
+            release_id=release["release_id"],
+            gate_result=gate_result,
         )
         result["apply_result"] = apply_result_data
 

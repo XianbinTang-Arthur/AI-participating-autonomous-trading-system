@@ -209,3 +209,60 @@ def db_has_active_task(
         "requested_at": row.requested_at.isoformat() if row.requested_at else None,
         "started_at": row.started_at.isoformat() if row.started_at else None,
     }
+
+
+def db_get_task_queue_summary(session: Session) -> dict[str, Any]:
+    """聚合任务队列状态，供健康检查与 Operator 使用."""
+    counts_row = session.execute(
+        text("""
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'pending') AS pending_count,
+                COUNT(*) FILTER (WHERE status = 'running') AS running_count,
+                COUNT(*) FILTER (WHERE status = 'done') AS done_count,
+                COUNT(*) FILTER (WHERE status = 'failed') AS failed_count,
+                MAX(requested_at) FILTER (WHERE status = 'pending') AS latest_pending_at,
+                MAX(started_at) FILTER (WHERE status = 'running') AS latest_running_at,
+                MAX(finished_at) FILTER (WHERE status IN ('done', 'failed')) AS latest_finished_at
+            FROM governance.rdp_task_queue
+        """),
+    ).fetchone()
+
+    recent_rows = session.execute(
+        text("""
+            SELECT task_id, workflow, status, requested_at, started_at, finished_at, exit_code
+            FROM governance.rdp_task_queue
+            ORDER BY created_at DESC
+            LIMIT 5
+        """),
+    ).fetchall()
+
+    return {
+        "pending_count": int(counts_row.pending_count or 0),
+        "running_count": int(counts_row.running_count or 0),
+        "done_count": int(counts_row.done_count or 0),
+        "failed_count": int(counts_row.failed_count or 0),
+        "latest_pending_at": (
+            counts_row.latest_pending_at.isoformat()
+            if counts_row.latest_pending_at else None
+        ),
+        "latest_running_at": (
+            counts_row.latest_running_at.isoformat()
+            if counts_row.latest_running_at else None
+        ),
+        "latest_finished_at": (
+            counts_row.latest_finished_at.isoformat()
+            if counts_row.latest_finished_at else None
+        ),
+        "recent_tasks": [
+            {
+                "task_id": row.task_id,
+                "workflow": row.workflow,
+                "status": row.status,
+                "requested_at": row.requested_at.isoformat() if row.requested_at else None,
+                "started_at": row.started_at.isoformat() if row.started_at else None,
+                "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+                "exit_code": row.exit_code,
+            }
+            for row in recent_rows
+        ],
+    }

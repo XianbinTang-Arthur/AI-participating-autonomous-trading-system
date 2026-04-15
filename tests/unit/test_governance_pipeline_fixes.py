@@ -103,8 +103,13 @@ class TestEnforcePendingRollbacks(unittest.TestCase):
         "aats.data_platform.decision_system.active_parameter_apply"
         ".rollback_active_parameter_set"
     )
+    @patch(
+        "aats.bootstrap.active_parameters.load_active_parameter_registry"
+    )
     def test_enforce_executes_rollback_for_rollback_triggered(
-        self, mock_rollback,
+        self,
+        mock_load_active_registry,
+        mock_rollback,
     ) -> None:
         """rollback_triggered 评估 → 自动回滚到 previous_parameter_set_id."""
         from aats.data_platform.metrics.release_effectiveness import (
@@ -114,6 +119,13 @@ class TestEnforcePendingRollbacks(unittest.TestCase):
         )
 
         mock_rollback.return_value = {"ok": True, "message": "rollback success"}
+        mock_load_active_registry.return_value = {
+            "active_sets": {
+                "independent_15m": {
+                    "parameter_set_id": "ps_new",
+                }
+            }
+        }
 
         # 写入 effectiveness registry（rollback_triggered 结论）
         eff_data = {
@@ -157,8 +169,13 @@ class TestEnforcePendingRollbacks(unittest.TestCase):
         "aats.data_platform.decision_system.active_parameter_apply"
         ".rollback_active_parameter_set"
     )
+    @patch(
+        "aats.bootstrap.active_parameters.load_active_parameter_registry"
+    )
     def test_enforce_records_failure_without_marking_enforced(
-        self, mock_rollback,
+        self,
+        mock_load_active_registry,
+        mock_rollback,
     ) -> None:
         """回滚失败时不标记 enforced，记录 attempts 和 error，可重试."""
         from aats.data_platform.metrics.release_effectiveness import (
@@ -170,6 +187,13 @@ class TestEnforcePendingRollbacks(unittest.TestCase):
         mock_rollback.return_value = {
             "ok": False,
             "message": "target parameter set not found",
+        }
+        mock_load_active_registry.return_value = {
+            "active_sets": {
+                "independent_15m": {
+                    "parameter_set_id": "ps_new",
+                }
+            }
         }
 
         eff_data = {
@@ -257,12 +281,26 @@ class TestEnforcePendingRollbacks(unittest.TestCase):
         results = enforce_pending_rollbacks(self.root)
         self.assertEqual(results, [])
 
-    def test_enforce_handles_missing_previous_parameter_set_id(self) -> None:
+    @patch(
+        "aats.bootstrap.active_parameters.load_active_parameter_registry"
+    )
+    def test_enforce_handles_missing_previous_parameter_set_id(
+        self,
+        mock_load_active_registry,
+    ) -> None:
         """release 没有 previous_parameter_set_id 时报错而非崩溃."""
         from aats.data_platform.metrics.release_effectiveness import (
             enforce_pending_rollbacks,
             save_effectiveness_registry,
         )
+
+        mock_load_active_registry.return_value = {
+            "active_sets": {
+                "independent_15m": {
+                    "parameter_set_id": "ps_new",
+                }
+            }
+        }
 
         # 修改 release history — 移除 previous_parameter_set_id
         self._write_json(
@@ -300,6 +338,141 @@ class TestEnforcePendingRollbacks(unittest.TestCase):
         self.assertIn("no previous_parameter_set_id", results[0]["error"])
 
 
+    @patch(
+        "aats.data_platform.decision_system.active_parameter_apply"
+        ".rollback_active_parameter_set"
+    )
+    @patch(
+        "aats.bootstrap.active_parameters.load_active_parameter_registry"
+    )
+    def test_enforce_cancels_stale_rollback_when_later_release_exists(
+        self,
+        mock_load_active_registry,
+        mock_rollback,
+    ) -> None:
+        """旧 release 的 rollback_triggered 不应回滚后续已成功生效的新 release."""
+        from aats.data_platform.metrics.release_effectiveness import (
+            enforce_pending_rollbacks,
+            load_effectiveness_registry,
+            save_effectiveness_registry,
+        )
+
+        self._write_json(
+            self.root / "artifacts/production_workflow/parameter_release_history.json",
+            {
+                "releases": [
+                    {
+                        "release_id": "rel_test_001",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "combo_key": "independent_15m",
+                        "parameter_set_id": "ps_new",
+                        "previous_parameter_set_id": "ps_old",
+                        "apply_result": "success",
+                        "observation_status": "completed",
+                    },
+                    {
+                        "release_id": "rel_test_002",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "combo_key": "independent_15m",
+                        "parameter_set_id": "ps_latest",
+                        "previous_parameter_set_id": "ps_new",
+                        "apply_result": "success",
+                        "observation_status": "observing",
+                    },
+                ],
+            },
+        )
+        mock_load_active_registry.return_value = {
+            "active_sets": {
+                "independent_15m": {
+                    "parameter_set_id": "ps_latest",
+                }
+            }
+        }
+
+        save_effectiveness_registry(
+            self.root,
+            {
+                "evaluations": [
+                    {
+                        "evaluation_id": "eff_old_release",
+                        "release_id": "rel_test_001",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "conclusion": "rollback_triggered",
+                    },
+                ],
+            },
+        )
+
+        results = enforce_pending_rollbacks(self.root)
+
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["ok"])
+        self.assertTrue(results[0]["skipped"])
+        self.assertIn("rel_test_002", results[0]["error"])
+        mock_rollback.assert_not_called()
+
+        ev = load_effectiveness_registry(self.root)["evaluations"][0]
+        self.assertTrue(ev["rollback_cancelled"])
+        self.assertIn("rel_test_002", ev["rollback_cancelled_reason"])
+
+    @patch(
+        "aats.data_platform.decision_system.active_parameter_apply"
+        ".rollback_active_parameter_set"
+    )
+    @patch(
+        "aats.bootstrap.active_parameters.load_active_parameter_registry"
+    )
+    def test_enforce_cancels_rollback_when_release_no_longer_active(
+        self,
+        mock_load_active_registry,
+        mock_rollback,
+    ) -> None:
+        """release 已不再控制当前 active parameter set 时，不应继续自动 rollback."""
+        from aats.data_platform.metrics.release_effectiveness import (
+            enforce_pending_rollbacks,
+            load_effectiveness_registry,
+            save_effectiveness_registry,
+        )
+
+        mock_load_active_registry.return_value = {
+            "active_sets": {
+                "independent_15m": {
+                    "parameter_set_id": "ps_manual_override",
+                }
+            }
+        }
+        save_effectiveness_registry(
+            self.root,
+            {
+                "evaluations": [
+                    {
+                        "evaluation_id": "eff_inactive_release",
+                        "release_id": "rel_test_001",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "conclusion": "rollback_triggered",
+                    },
+                ],
+            },
+        )
+
+        results = enforce_pending_rollbacks(self.root)
+
+        self.assertEqual(len(results), 1)
+        self.assertFalse(results[0]["ok"])
+        self.assertTrue(results[0]["skipped"])
+        self.assertIn("ps_manual_override", results[0]["error"])
+        mock_rollback.assert_not_called()
+
+        ev = load_effectiveness_registry(self.root)["evaluations"][0]
+        self.assertTrue(ev["rollback_cancelled"])
+        self.assertIn("ps_manual_override", ev["rollback_cancelled_reason"])
+
+
 class TestPendingRollbackCombos(unittest.TestCase):
     """P1/P2 辅助：pending_rollback_combos() 返回待回滚的 combo 列表."""
 
@@ -332,6 +505,13 @@ class TestPendingRollbackCombos(unittest.TestCase):
                     "family": "directional",
                     "timeframe": "15m",
                     "conclusion": "effective",
+                },
+                {
+                    "release_id": "rel_4",
+                    "family": "independent",
+                    "timeframe": "1h",
+                    "conclusion": "rollback_triggered",
+                    "rollback_cancelled": True,
                 },
             ],
             "generated_at": "2026-04-13T00:00:00+00:00",

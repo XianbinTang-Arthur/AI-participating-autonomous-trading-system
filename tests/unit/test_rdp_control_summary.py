@@ -19,12 +19,159 @@ def _fake_request() -> SimpleNamespace:
 
 
 class TestRdpControlSummary(TestCase):
+    def test_control_summary_includes_release_workflow_context(self) -> None:
+        request = _fake_request()
+
+        with (
+            patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
+            patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={
+                "name": "staging",
+                "strict_environment": True,
+                "description": "预发布环境",
+                "require_gate_pass": True,
+                "require_approval": False,
+                "allow_parameter_rollback": True,
+                "direct_apply_allowed": True,
+                "production_apply_enabled": True,
+                "required_observation_window_hours": 24,
+            }),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+                "overall_health": "degraded",
+                "blocking_reasons": [],
+                "warnings": ["workflow_runs_incomplete"],
+                "checks": [
+                    {
+                        "category": "workflow_runs",
+                        "name": "freshness",
+                        "status": "warn",
+                        "detail": "decision_cycle stale",
+                    },
+                ],
+            }),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[
+                {
+                    "gate_run_id": "gate_1",
+                    "recommendation_id": "rec_release_1",
+                    "created_at": "2026-04-10T12:00:00Z",
+                    "gate_status": "warn",
+                    "allow_apply": True,
+                    "blocking_reasons": [],
+                    "warnings": ["workflow stale"],
+                    "checks": [],
+                },
+            ]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[
+                {
+                    "release_id": "rel_1",
+                    "created_at": "2026-04-10T12:10:00Z",
+                    "family": "independent",
+                    "timeframe": "15m",
+                    "combo_key": "independent_15m",
+                    "recommendation_id": "rec_release_1",
+                    "parameter_set_id": "ps_live_2",
+                    "previous_parameter_set_id": "ps_live_1",
+                    "actor": "operator",
+                    "gate_status": "warn",
+                    "apply_result": "success",
+                    "observation_status": "observing",
+                    "observation_window_hours": 24,
+                },
+            ]),
+            patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[
+                {
+                    "release_id": "rel_1",
+                    "family": "independent",
+                    "timeframe": "15m",
+                    "observation_status": "observing",
+                    "apply_result": "success",
+                },
+            ]),
+            patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={
+                "recommendations": [
+                    {
+                        "recommendation_id": "rec_release_1",
+                        "symbol": "BTC-USDT-SWAP",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "recommendation_type": "parameter_upgrade",
+                        "confidence": "high",
+                        "reason": "建议推进发布",
+                        "status": "approved",
+                        "target_parameter_set_id": "ps_live_2",
+                        "created_at": "2026-04-10T11:50:00Z",
+                    },
+                ],
+            }),
+            patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+                "generated_at": "2026-04-10T11:40:00Z",
+                "governance_managed": True,
+                "paused_combos": [],
+                "known_combos": ["independent_15m"],
+                "active_sets": {
+                    "independent_15m": {
+                        "parameter_set_id": "ps_live_1",
+                        "family": "independent",
+                        "timeframe": "15m",
+                    },
+                },
+                "parameter_sets": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+                "available": True,
+                "generated_at": "2026-04-10T11:55:00Z",
+                "status_distribution": {"keep_active": 1},
+                "decisions": [
+                    {
+                        "combo_key": "independent_15m",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "current_status": "keep_active",
+                        "active_parameter_set_id": "ps_live_1",
+                        "last_updated_at": "2026-04-10T11:55:00Z",
+                    },
+                ],
+            }),
+            patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+                "available": True,
+                "parameter_sets": [
+                    {
+                        "parameter_set_id": "ps_live_1",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "status": "active",
+                    },
+                    {
+                        "parameter_set_id": "ps_live_2",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "status": "candidate",
+                    },
+                ],
+            }),
+        ):
+            payload = build_rdp_control_summary(request)
+
+        self.assertEqual(payload["environment"]["name"], "staging")
+        self.assertEqual(payload["health"]["overall_health"], "degraded")
+        self.assertEqual(payload["operations_summary"]["approved_release_candidate_count"], 1)
+        self.assertEqual(payload["operations_summary"]["latest_gate_status"], "warn")
+        self.assertEqual(payload["recent_gate_results"][0]["gate_run_id"], "gate_1")
+        self.assertEqual(payload["recent_releases"][0]["release_id"], "rel_1")
+        self.assertEqual(payload["observation_queue"][0]["observation_status"], "observing")
+
     def test_runtime_source_distinguishes_governance_pause_from_profile_defaults(self) -> None:
         request = _fake_request()
 
         with (
             patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
             patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "dev"}),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={"overall_health": "healthy", "checks": [], "blocking_reasons": [], "warnings": []}),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+            patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
             patch(
                 "aats.api.rdp_control_summary.query_latest_recommendations",
                 return_value={
@@ -136,6 +283,11 @@ class TestRdpControlSummary(TestCase):
         with (
             patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
             patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "dev"}),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={"overall_health": "healthy", "checks": [], "blocking_reasons": [], "warnings": []}),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+            patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
             patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={"recommendations": []}),
             patch(
                 "aats.api.rdp_control_summary.query_active_parameter_sets",

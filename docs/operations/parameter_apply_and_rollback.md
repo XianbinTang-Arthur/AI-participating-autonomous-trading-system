@@ -11,6 +11,7 @@
 - **apply 必须可审计** — 每次操作记录在 `parameter_apply_history.json`
 - **apply 必须可回滚** — 任何 apply 都可以被回滚到上一版本
 - **生产 apply 必须经过 gate** — live 不提供跳过 gate 的标准流程
+- **生产 direct apply 默认冻结** — `RDP_ENV=prod` 下应通过 release 流程触发，且需显式设置 `RDP_PRODUCTION_APPLY_ENABLED=true`
 
 ---
 
@@ -48,6 +49,8 @@ approved recommendation
 
 ### 2.3 通过脚本 Apply
 
+> 仅适用于 `dev`，或已准备好完整 gate/release 上下文的非生产调试场景。`prod` 下 direct apply 会被拒绝，请改走 `scripts/rdp_create_parameter_release.py`。
+
 ```bash
 python scripts/rdp_apply_approved_recommendation.py \
     --recommendation-id rec_xxx \
@@ -56,6 +59,8 @@ python scripts/rdp_apply_approved_recommendation.py \
 ```
 
 ### 2.4 通过 API Apply
+
+> 仅适用于 `dev`，或内部受控调用。`prod` 下 `/rdp/parameters/apply` 会被拒绝。
 
 ```bash
 curl -X POST /rdp/parameters/apply \

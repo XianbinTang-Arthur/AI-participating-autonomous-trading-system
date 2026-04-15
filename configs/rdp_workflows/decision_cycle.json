@@ -21,9 +21,9 @@
     },
     {
       "name": "observation_check",
-      "description": "检查所有 observing 状态的 release",
-      "command": "python scripts/rdp_build_alert_summary.py",
-      "timeout_seconds": 60,
+      "description": "检查所有 observing 状态的 release，并自动评估 rollback/effectiveness",
+      "command": "python scripts/rdp_run_release_observation_cycle.py",
+      "timeout_seconds": 180,
       "enabled": true,
       "allow_failure": true
     }

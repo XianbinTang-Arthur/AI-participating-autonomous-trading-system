@@ -1,14 +1,23 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from fastapi import Request
 
+from aats.data_platform.operations.environment_guard import (
+    get_current_environment,
+    get_observation_window_hours,
+    get_policy,
+    production_parameter_apply_enabled,
+)
+from aats.services.operator.rdp_queries import query_rdp_health
 from aats.services.operator.rdp_queries import (
     query_active_parameter_sets,
     query_latest_decision_round,
@@ -92,6 +101,170 @@ def _combo_key(family: str | None, timeframe: str | None) -> str:
 
 def _iso_sort_key(value: str | None) -> str:
     return value or ""
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _safe_load_json(path: Path) -> dict[str, Any] | list[Any] | None:
+    if not path.exists():
+        return None
+    try:
+        with path.open(encoding="utf-8") as handle:
+            return json.load(handle)
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _load_recent_gate_results(project_root: Path, *, limit: int = 8) -> list[dict[str, Any]]:
+    gates_root = project_root / "artifacts" / "production_workflow" / "gates"
+    if not gates_root.exists():
+        return []
+
+    results: list[dict[str, Any]] = []
+    for path in gates_root.glob("*/pre_apply_gate_result.json"):
+        payload = _safe_load_json(path)
+        if not isinstance(payload, dict):
+            continue
+        results.append({
+            "gate_run_id": payload.get("gate_run_id"),
+            "recommendation_id": payload.get("recommendation_id"),
+            "created_at": payload.get("created_at"),
+            "gate_status": payload.get("gate_status"),
+            "allow_apply": bool(payload.get("allow_apply")),
+            "blocking_reasons": payload.get("blocking_reasons") or [],
+            "warnings": payload.get("warnings") or [],
+            "checks": payload.get("checks") or [],
+        })
+
+    results.sort(key=lambda item: _iso_sort_key(item.get("created_at")), reverse=True)
+    return results[:limit]
+
+
+def _load_recent_releases(project_root: Path, *, limit: int = 10) -> list[dict[str, Any]]:
+    from aats.data_platform.production_workflow.release_registry import load_release_history
+
+    history = load_release_history(project_root)
+    releases = [
+        item for item in (history.get("releases") or [])
+        if isinstance(item, dict)
+    ]
+    releases.sort(key=lambda item: _iso_sort_key(item.get("created_at")), reverse=True)
+    return releases[:limit]
+
+
+def _build_observation_queue(
+    project_root: Path,
+    *,
+    releases: list[dict[str, Any]],
+    active_parameters: dict[str, Any],
+) -> list[dict[str, Any]]:
+    queue: list[dict[str, Any]] = []
+
+    effectiveness_by_release: dict[str, dict[str, Any]] = {}
+    try:
+        from aats.data_platform.metrics.release_effectiveness import (
+            load_effectiveness_registry,
+        )
+
+        registry = load_effectiveness_registry(project_root)
+        effectiveness_by_release = {
+            item.get("release_id"): item
+            for item in (registry.get("evaluations") or [])
+            if isinstance(item, dict) and item.get("release_id")
+        }
+    except Exception:
+        effectiveness_by_release = {}
+
+    for release in releases:
+        release_id = str(release.get("release_id") or "").strip()
+        if not release_id:
+            continue
+        observation_status = str(release.get("observation_status") or "unknown")
+        if observation_status not in {"observing", "rollback_recommended", "completed", "not_started"}:
+            continue
+
+        observation_path = (
+            project_root
+            / "artifacts"
+            / "production_workflow"
+            / "observations"
+            / release_id
+            / "observation_summary.json"
+        )
+        observation = _safe_load_json(observation_path)
+        if not isinstance(observation, dict):
+            observation = {}
+
+        combo_key = str(release.get("combo_key") or "").strip()
+        active_entry = active_parameters.get(combo_key) if combo_key else None
+        current_active_parameter_set_id = None
+        if isinstance(active_entry, dict):
+            current_active_parameter_set_id = active_entry.get("parameter_set_id")
+
+        queue.append({
+            "release_id": release_id,
+            "family": release.get("family"),
+            "timeframe": release.get("timeframe"),
+            "combo_key": combo_key,
+            "recommendation_id": release.get("recommendation_id"),
+            "parameter_set_id": release.get("parameter_set_id"),
+            "previous_parameter_set_id": release.get("previous_parameter_set_id"),
+            "created_at": release.get("created_at"),
+            "actor": release.get("actor"),
+            "gate_status": release.get("gate_status"),
+            "apply_result": release.get("apply_result"),
+            "observation_status": observation_status,
+            "observation_window_hours": release.get("observation_window_hours"),
+            "notes": release.get("notes"),
+            "observation": observation,
+            "effectiveness": effectiveness_by_release.get(release_id),
+            "current_active_parameter_set_id": current_active_parameter_set_id,
+            "is_current_active_release": (
+                bool(current_active_parameter_set_id)
+                and current_active_parameter_set_id == release.get("parameter_set_id")
+            ),
+        })
+
+    queue.sort(
+        key=lambda item: (
+            {"rollback_recommended": 0, "observing": 1, "completed": 2, "not_started": 3}.get(
+                str(item.get("observation_status") or ""), 9,
+            ),
+            -(
+                _parse_iso_datetime(item.get("created_at")).timestamp()
+                if _parse_iso_datetime(item.get("created_at")) is not None
+                else 0
+            ),
+        ),
+        reverse=False,
+    )
+    return queue
+
+
+def _environment_summary() -> dict[str, Any]:
+    env = get_current_environment()
+    policy = get_policy(env)
+    return {
+        "name": env,
+        "strict_environment": env in {"staging", "prod"},
+        "description": policy.get("description"),
+        "require_gate_pass": bool(policy.get("require_gate_pass")),
+        "require_approval": bool(policy.get("require_approval")),
+        "allow_parameter_rollback": bool(policy.get("allow_parameter_rollback")),
+        "direct_apply_allowed": env != "prod",
+        "production_apply_enabled": production_parameter_apply_enabled(env),
+        "required_observation_window_hours": get_observation_window_hours(env),
+    }
 
 
 def _classify_runtime_source(
@@ -323,6 +496,7 @@ def _build_governance_state(
 
 def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     root = _project_root(request)
+    environment = _environment_summary()
 
     tasks_by_workflow: dict[str, Any] = {}
     tasks_error: str | None = None
@@ -489,8 +663,52 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "paused_combos": governance_state.get("paused_combos", []),
         "combo_count": len(governance_state.get("combo_states", [])),
     }
+    health = query_rdp_health(root)
+    recent_gate_results = _load_recent_gate_results(root)
+    recent_releases = _load_recent_releases(root)
+    observation_queue = _build_observation_queue(
+        root,
+        releases=recent_releases,
+        active_parameters=active_parameters,
+    )
+
+    approved_parameter_recommendations = [
+        rec
+        for rec in pending_recommendations
+        if rec.get("recommendation_type") == "parameter_upgrade"
+        and rec.get("status") == "approved"
+    ]
+    draft_parameter_recommendations = [
+        rec
+        for rec in pending_recommendations
+        if rec.get("recommendation_type") == "parameter_upgrade"
+        and rec.get("status") == "draft"
+    ]
+    latest_gate = recent_gate_results[0] if recent_gate_results else None
+    latest_release = recent_releases[0] if recent_releases else None
+    operations_summary = {
+        "approved_release_candidate_count": len(approved_parameter_recommendations),
+        "draft_parameter_recommendation_count": len(draft_parameter_recommendations),
+        "observing_release_count": sum(
+            1 for item in observation_queue
+            if item.get("observation_status") == "observing"
+        ),
+        "rollback_recommended_count": sum(
+            1 for item in observation_queue
+            if item.get("observation_status") == "rollback_recommended"
+        ),
+        "latest_gate_status": latest_gate.get("gate_status") if latest_gate else None,
+        "latest_release_apply_result": (
+            latest_release.get("apply_result") if latest_release else None
+        ),
+        "health_status": health.get("overall_health"),
+        "health_blocked": health.get("overall_health") == "blocked",
+    }
 
     return {
+        "environment": environment,
+        "health": health,
+        "operations_summary": operations_summary,
         "tasks": tasks_by_workflow,
         "tasks_error": tasks_error,
         "pending_recommendations": pending_recommendations,
@@ -500,4 +718,7 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "latest_research_conclusions": latest_research_conclusions,
         "latest_decision_state": latest_decision_state,
         "governance_state": governance_state,
+        "recent_gate_results": recent_gate_results,
+        "recent_releases": recent_releases,
+        "observation_queue": observation_queue,
     }
