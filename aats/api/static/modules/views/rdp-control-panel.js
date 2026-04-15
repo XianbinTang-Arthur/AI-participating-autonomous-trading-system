@@ -411,7 +411,7 @@ function translateCheckDetail(check = {}, environment = {}) {
         ? "当前还没有最新的可靠性告警快照。"
         : "可靠性告警存在未处理项目，先确认是否允许继续推进。",
       nextStep: raw.includes("not found")
-        ? "先运行一次"刷新数据"，让告警快照重新生成。"
+        ? "先运行一次“刷新数据”，让告警快照重新生成。"
         : "先打开告警详情确认阻断是否已经处理。",
       raw,
     };
@@ -424,7 +424,7 @@ function translateCheckDetail(check = {}, environment = {}) {
       summary: raw.includes("missing")
         ? "研究/治理/决策工作流还没有形成完整的新鲜快照。"
         : "工作流快照已经过期，当前结论不适合直接用于发布。",
-      nextStep: "先运行"刷新数据"和"运行研究"，确认最近一轮结果已更新。",
+      nextStep: "先运行“刷新数据”和“运行研究”，确认最近一轮结果已更新。",
       raw,
     };
   }
@@ -1042,7 +1042,7 @@ function renderReleaseStep({
   return surfaceCard({
     title: "3. 发布执行",
     kicker: "生产语义统一走 release",
-    copy: "这里才允许参数进入运行态。生产环境不再把"应用参数"当成主路径，而是统一通过 release 承载 gate、apply、observation 和审计。",
+    copy: "这里才允许参数进入运行态。生产环境不再把“应用参数”当成主路径，而是统一通过 release 承载 gate、apply、observation 和审计。",
     content: `
       ${cards.length ? `<div class="rdp-worklist">${cards.join("")}</div>` : releaseEmptyState}
       ${timelineItems.length ? `
