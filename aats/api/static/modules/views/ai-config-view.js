@@ -68,7 +68,12 @@ export function renderAIConfigView(data) {
         })}
       </div>
       <div class="span-12 workspace-stack">
-        ${renderRdpControlPanelV2({ rdpControl, canAdmin, uiState })}
+        ${Object.keys(rdpControl).length === 0
+          ? callout({
+              title: "RDP 数据暂未就绪",
+              copy: "控制面板数据正在加载中，或 /rdp/control-summary 请求未成功。请稍候刷新。",
+            })
+          : renderRdpControlPanelV2({ rdpControl, canAdmin, uiState })}
       </div>
       <div class="span-12 workspace-stack">
         ${renderCurrentConfigurationCard({ runtimeProfiles, runtime, aiState, activeRevision, activation })}

@@ -78,9 +78,9 @@ const CHECK_LABELS = {
 };
 
 function relativeTime(isoString) {
-  if (!isoString) return "待确认";
+  if (!isoString) return "暂无记录";
   const timestamp = new Date(isoString).getTime();
-  if (!Number.isFinite(timestamp)) return "待确认";
+  if (!Number.isFinite(timestamp)) return "时间格式异常";
   const diff = Date.now() - timestamp;
   if (diff < 60_000) return "刚刚";
   const minutes = Math.floor(diff / 60_000);
@@ -93,7 +93,7 @@ function relativeTime(isoString) {
 
 function shortId(value) {
   const text = String(value || "").trim();
-  if (!text) return "待确认";
+  if (!text) return "—";
   if (text.length <= 24) return text;
   return `${text.slice(0, 10)}…${text.slice(-8)}`;
 }
@@ -147,7 +147,7 @@ function labelForEnvironment(environment) {
 }
 
 function labelForHealth(status) {
-  return HEALTH_LABELS[status] || status || "待确认";
+  return HEALTH_LABELS[status] || status || "未知";
 }
 
 function labelForGate(status) {
@@ -155,19 +155,19 @@ function labelForGate(status) {
 }
 
 function labelForObservationStatus(status) {
-  return OBSERVATION_STATUS_LABELS[status] || status || "待确认";
+  return OBSERVATION_STATUS_LABELS[status] || status || "未开始";
 }
 
 function labelForApplyResult(status) {
-  return APPLY_RESULT_LABELS[status] || status || "待确认";
+  return APPLY_RESULT_LABELS[status] || status || "未执行";
 }
 
 function labelForConfidence(confidence) {
-  return CONFIDENCE_LABELS[confidence] || confidence || "待确认";
+  return CONFIDENCE_LABELS[confidence] || confidence || "未知";
 }
 
 function labelForRecommendationType(type) {
-  return RECOMMENDATION_TYPE_LABELS[type] || type || "待确认";
+  return RECOMMENDATION_TYPE_LABELS[type] || type || "未知类型";
 }
 
 function labelForRecommendationStatus(status) {
@@ -175,11 +175,11 @@ function labelForRecommendationStatus(status) {
   if (status === "approved") return "已批准";
   if (status === "rejected") return "已拒绝";
   if (status === "superseded") return "已替代";
-  return status || "待确认";
+  return status || "未知状态";
 }
 
 function labelForEffectiveness(conclusion) {
-  return EFFECTIVENESS_LABELS[conclusion] || conclusion || "待确认";
+  return EFFECTIVENESS_LABELS[conclusion] || conclusion || "未评估";
 }
 
 function checkLabel(check) {
@@ -201,7 +201,7 @@ function checkStatusText(check) {
   if (status === "warn") return "警告";
   if (status === "blocked") return "阻断";
   if (status === "missing") return "缺失";
-  return status || "待确认";
+  return status || "未知";
 }
 
 function workflowStatus(taskInfo) {
@@ -373,73 +373,111 @@ function buildParameterCandidateEntries({
 }
 
 function translateCheckDetail(check = {}, environment = {}) {
-  const raw = firstNonEmpty(check.detail, "当前没有额外说明");
+  const raw = firstNonEmpty(check.detail, “当前没有额外说明”);
   const strictEnvironment = Boolean(environment.strict_environment);
-  const key = `${check.category || ""}:${check.name || ""}`;
+  const key = `${check.category || “”}:${check.name || “”}`;
+  const isOk = check.status === “ok”;
 
-  if (key === "governance_db:connection") {
+  if (key === “governance_db:connection”) {
+    if (isOk) {
+      return { summary: “治理数据库连接正常，发布链路可用。”, nextStep: “”, raw };
+    }
     return {
       summary: strictEnvironment
-        ? "治理数据库还没有接通，发布链路现在不可用。"
-        : "治理数据库暂时不可达，当前只能查看已有产物，不能可靠地推进发布。",
-      nextStep: "检查容器内治理库连接配置是否指向 postgres 服务，而不是 127.0.0.1。",
+        ? “治理数据库还没有接通，发布链路现在不可用。”
+        : “治理数据库暂时不可达，当前只能查看已有产物，不能可靠地推进发布。”,
+      nextStep: “检查容器内治理库连接配置是否指向 postgres 服务，而不是 127.0.0.1。”,
       raw,
     };
   }
-  if (key === "runtime:rdp-daemon") {
+  if (key === “runtime:rdp-daemon”) {
+    if (isOk) {
+      return { summary: “RDP 守护进程运行正常，后台任务处理链路可信。”, nextStep: “”, raw };
+    }
     return {
-      summary: raw.includes("heartbeat not found")
-        ? "还没有看到 RDP 守护进程的有效心跳。"
-        : "RDP 守护进程状态不稳定，后台任务处理链路暂时不可信。",
-      nextStep: "先确认 rdp-daemon 容器已启动，并能写入 governance.rdp_runtime_status。",
+      summary: raw.includes(“heartbeat not found”)
+        ? “还没有看到 RDP 守护进程的有效心跳。”
+        : “RDP 守护进程状态不稳定，后台任务处理链路暂时不可信。”,
+      nextStep: “先确认 rdp-daemon 容器已启动，并能写入 governance.rdp_runtime_status。”,
       raw,
     };
   }
-  if (key === "alerts:current_alerts") {
+  if (key === “alerts:current_alerts”) {
+    if (isOk) {
+      return { summary: “当前没有可靠性告警，系统运行正常。”, nextStep: “”, raw };
+    }
     return {
-      summary: raw.includes("not found")
-        ? "当前还没有最新的可靠性告警快照。"
-        : "可靠性告警存在未处理项目，先确认是否允许继续推进。",
-      nextStep: raw.includes("not found")
-        ? "先运行一次“刷新数据”，让告警快照重新生成。"
-        : "先打开告警详情确认阻断是否已经处理。",
+      summary: raw.includes(“not found”)
+        ? “当前还没有最新的可靠性告警快照。”
+        : “可靠性告警存在未处理项目，先确认是否允许继续推进。”,
+      nextStep: raw.includes(“not found”)
+        ? “先运行一次”刷新数据”，让告警快照重新生成。”
+        : “先打开告警详情确认阻断是否已经处理。”,
       raw,
     };
   }
-  if (key === "workflow_runs:freshness") {
+  if (key === “workflow_runs:freshness”) {
+    if (isOk) {
+      return { summary: “工作流快照新鲜度正常，最近一轮结果可用于发布判断。”, nextStep: “”, raw };
+    }
     return {
-      summary: raw.includes("missing")
-        ? "研究/治理/决策工作流还没有形成完整的新鲜快照。"
-        : "工作流快照已经过期，当前结论不适合直接用于发布。",
-      nextStep: "先运行“刷新数据”和“运行研究”，确认最近一轮结果已更新。",
+      summary: raw.includes(“missing”)
+        ? “研究/治理/决策工作流还没有形成完整的新鲜快照。”
+        : “工作流快照已经过期，当前结论不适合直接用于发布。”,
+      nextStep: “先运行”刷新数据”和”运行研究”，确认最近一轮结果已更新。”,
       raw,
     };
   }
-  if (key === "live_db:readonly_access") {
+  if (key === “live_db:readonly_access”) {
+    if (isOk) {
+      return { summary: “生产库只读链路已连接，发布前校验可用。”, nextStep: “”, raw };
+    }
     return {
-      summary: raw.includes("RDP_LIVE_DATABASE_URL")
-        ? "还没有配置生产库只读连接，所以发布前无法核验生产事实数据。"
-        : "生产库只读链路不可用，发布前检查缺少关键校验。",
-      nextStep: raw.includes("RDP_LIVE_DATABASE_URL")
-        ? "在 RDP 环境配置中补上生产库只读连接。"
-        : "先检查只读数据库连接和权限配置。",
+      summary: raw.includes(“RDP_LIVE_DATABASE_URL”)
+        ? “还没有配置生产库只读连接，所以发布前无法核验生产事实数据。”
+        : “生产库只读链路不可用，发布前检查缺少关键校验。”,
+      nextStep: raw.includes(“RDP_LIVE_DATABASE_URL”)
+        ? “在 RDP 环境配置中补上生产库只读连接。”
+        : “先检查只读数据库连接和权限配置。”,
       raw,
     };
   }
-  if (key === "parameters:active_parameter_sets") {
+  if (key === “parameters:active_parameter_sets”) {
+    if (isOk) {
+      return { summary: “已读取到当前 active 参数集。”, nextStep: “”, raw };
+    }
     return {
-      summary: raw === "count=0"
-        ? "当前还没有 active 参数在运行。"
-        : "已读取到当前 active 参数集。",
-      nextStep: raw === "count=0"
-        ? "如果这是首次接入可以忽略；否则先确认参数发布链路是否已经跑通。"
-        : "",
+      summary: raw === “count=0”
+        ? “当前还没有 active 参数在运行。”
+        : “已读取到当前 active 参数集。”,
+      nextStep: raw === “count=0”
+        ? “如果这是首次接入可以忽略；否则先确认参数发布链路是否已经跑通。”
+        : “”,
       raw,
     };
+  }
+  // artifact 类检查
+  if (check.category === “artifacts”) {
+    if (isOk) {
+      return { summary: “数据已就绪。”, nextStep: “”, raw };
+    }
+    return {
+      summary: raw.includes(“容器环境”)
+        ? raw
+        : “对应数据文件缺失，相关功能可能不可用。”,
+      nextStep: “”,
+      raw,
+    };
+  }
+  if (key === “task_queue:queue_state”) {
+    if (isOk) {
+      return { summary: “任务队列正常，无积压或失败。”, nextStep: “”, raw };
+    }
+    return { summary: “任务队列有积压或失败任务。”, nextStep: “查看任务列表确认是否需要重试。”, raw };
   }
   return {
     summary: raw,
-    nextStep: "",
+    nextStep: “”,
     raw,
   };
 }

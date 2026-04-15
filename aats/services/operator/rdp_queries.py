@@ -104,6 +104,87 @@ def _collect_latest_workflow_runs(project_root: Path) -> dict[str, dict[str, Any
     return latest_by_workflow
 
 
+def _collect_latest_workflow_runs_from_db(
+    governance_runtime: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """从 governance DB 的 task_queue 表获取最近完成的 workflow 信息.
+
+    容器内无 artifacts/operations/workflow_runs/ 目录时的回退路径。
+    """
+    latest_by_workflow: dict[str, dict[str, Any]] = {}
+    try:
+        from aats.api._governance_db import governance_session
+
+        with governance_session() as session:
+            from sqlalchemy import text as sa_text
+
+            rows = session.execute(
+                sa_text(
+                    "SELECT DISTINCT ON (workflow) "
+                    "  workflow, status, requested_at, started_at, finished_at "
+                    "FROM governance.rdp_task_queue "
+                    "WHERE status = 'done' "
+                    "ORDER BY workflow, finished_at DESC NULLS LAST"
+                ),
+            ).fetchall()
+            for row in rows:
+                workflow = str(row[0])
+                latest_by_workflow[workflow] = {
+                    "workflow": workflow,
+                    "overall_status": "success" if row[1] == "done" else row[1],
+                    "started_at": row[3].isoformat() if row[3] else None,
+                    "finished_at": row[4].isoformat() if row[4] else None,
+                    "path": "governance.rdp_task_queue",
+                }
+    except Exception:
+        pass
+    return latest_by_workflow
+
+
+def _check_db_initialization(
+    governance_runtime: dict[str, Any],
+) -> tuple[bool, bool]:
+    """通过 governance DB 查询判断初始化状态.
+
+    容器内无 daemon 宿主侧的 artifact 文件，但 DB 中有对应数据。
+    检查 task_queue 中是否有完成的 workflow 记录来判断数据是否存在。
+
+    Returns
+    -------
+    (has_governance_data, has_recommendations)
+    """
+    has_governance_data = False
+    has_recommendations = False
+    try:
+        task_queue = governance_runtime.get("task_queue") or {}
+        # 有完成的任务 → governance/decision 数据已初始化
+        done_count = int(task_queue.get("done_count", 0) or 0)
+        if done_count > 0:
+            has_governance_data = True
+        # 尝试查 recommendation 表
+        try:
+            from aats.api._governance_db import governance_session
+
+            with governance_session() as session:
+                from sqlalchemy import text as sa_text
+
+                row = session.execute(
+                    sa_text(
+                        "SELECT COUNT(*) FROM governance.rdp_recommendations "
+                        "WHERE created_at > NOW() - INTERVAL '7 days'"
+                    ),
+                ).scalar()
+                if row and int(row) > 0:
+                    has_recommendations = True
+                    has_governance_data = True
+        except Exception:
+            # 表可能不存在（旧 schema），不影响其他判定
+            pass
+    except Exception:
+        pass
+    return has_governance_data, has_recommendations
+
+
 def _query_governance_runtime_state() -> dict[str, Any]:
     result: dict[str, Any] = {
         "connection_ok": False,
@@ -428,46 +509,79 @@ def query_rdp_health(project_root: Path) -> dict[str, Any]:
     environment = get_current_environment()
     strict_environment = environment in {"staging", "prod"}
 
+    # 0. 先检查 governance DB，后续根据 DB 可用性调整 artifact 检查策略
+    governance_runtime = _query_governance_runtime_state()
+    db_connected = governance_runtime.get("connection_ok", False)
+
+    # 当 DB 可用时，用 DB 数据判断初始化状态（容器内无本地 artifact 文件）
+    db_has_governance_data = False
+    db_has_recommendations = False
+    if db_connected:
+        db_has_governance_data, db_has_recommendations = _check_db_initialization(
+            governance_runtime,
+        )
+
     # 1. 核心 artifacts 初始化情况
+    #    当 DB 可达且有数据时，本地文件缺失仅作 info，不影响初始化判定。
     governance_files = {
         "artifact_index": project_root / _GOVERNANCE_DIR / "artifact_index.json",
         "active_round_index": project_root / _GOVERNANCE_DIR / "active_round_index.json",
         "parameter_registry": project_root / _GOVERNANCE_DIR / "current_parameter_registry.json",
         "quality_monitor": project_root / _GOVERNANCE_DIR / "quality_monitor_summary.json",
     }
-    governance_initialized = True
+    governance_files_ok = True
     for name, path in governance_files.items():
         data = _safe_load_json(path)
         exists = path.exists()
-        governance_initialized = governance_initialized and exists
+        governance_files_ok = governance_files_ok and exists
+        if exists:
+            status = "ok"
+            detail = str(path)
+        elif db_has_governance_data:
+            # DB 有数据，文件仅在 daemon 宿主侧存在 → 不阻断
+            status = "ok"
+            detail = "本地文件不可用（容器环境），治理数据库已连接且有数据"
+        else:
+            status = "missing"
+            detail = str(path)
         checks.append({
             "category": "artifacts",
             "name": f"governance:{name}",
-            "status": "ok" if exists else "missing",
+            "status": status,
             "generated_at": data.get("generated_at") if isinstance(data, dict) else None,
-            "detail": str(path),
+            "detail": detail,
         })
+    governance_initialized = governance_files_ok or db_has_governance_data
 
     decision_files = {
         "recommendation_registry": project_root / _DECISION_SYSTEM_DIR / "recommendation_registry.json",
         "active_decision_registry": project_root / _DECISION_SYSTEM_DIR / "active_decision_registry.json",
         "evidence_bundle_index": project_root / _DECISION_SYSTEM_DIR / "evidence_bundle_index.json",
     }
-    decision_initialized = True
+    decision_files_ok = True
     for name, path in decision_files.items():
         data = _safe_load_json(path)
         exists = path.exists()
-        decision_initialized = decision_initialized and exists
+        decision_files_ok = decision_files_ok and exists
+        if exists:
+            status = "ok"
+            detail = str(path)
+        elif db_has_recommendations:
+            status = "ok"
+            detail = "本地文件不可用（容器环境），治理数据库已连接且有建议数据"
+        else:
+            status = "missing"
+            detail = str(path)
         checks.append({
             "category": "artifacts",
             "name": f"decision:{name}",
-            "status": "ok" if exists else "missing",
+            "status": status,
             "generated_at": data.get("generated_at") if isinstance(data, dict) else None,
-            "detail": str(path),
+            "detail": detail,
         })
+    decision_initialized = decision_files_ok or db_has_recommendations
 
-    # 2. governance DB + task queue + runtime status
-    governance_runtime = _query_governance_runtime_state()
+    # 2. governance DB + task queue + runtime status (已提前查询)
     if not governance_runtime.get("connection_ok"):
         blocking_reasons.append("governance_db_unreachable")
         checks.append({
@@ -593,6 +707,9 @@ def query_rdp_health(project_root: Path) -> dict[str, Any]:
         "decision_cycle": 168,
     }
     latest_runs = _collect_latest_workflow_runs(project_root)
+    # 容器内无本地 workflow_runs 文件时，从 DB task_queue 回退
+    if not latest_runs and db_connected:
+        latest_runs = _collect_latest_workflow_runs_from_db(governance_runtime)
     workflow_status = "ok"
     workflow_details: list[str] = []
     now = datetime.now(timezone.utc)
@@ -664,6 +781,8 @@ def query_rdp_health(project_root: Path) -> dict[str, Any]:
     from aats.bootstrap.active_parameters import load_all_active_parameter_sets
 
     active_sets = load_all_active_parameter_sets(project_root=project_root)
+    if not active_sets:
+        warnings.append("no_active_parameter_sets")
     checks.append({
         "category": "parameters",
         "name": "active_parameter_sets",
