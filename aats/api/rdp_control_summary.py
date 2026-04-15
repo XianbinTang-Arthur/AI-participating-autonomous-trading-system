@@ -671,6 +671,11 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         releases=recent_releases,
         active_parameters=active_parameters,
     )
+    recommendations_sorted = sorted(
+        [item for item in recommendations if isinstance(item, dict)],
+        key=lambda item: _iso_sort_key(item.get("created_at")),
+        reverse=True,
+    )
 
     approved_parameter_recommendations = [
         rec
@@ -688,6 +693,9 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     latest_release = recent_releases[0] if recent_releases else None
     operations_summary = {
         "approved_release_candidate_count": len(approved_parameter_recommendations),
+        "draft_recommendation_count": sum(
+            1 for rec in pending_recommendations if rec.get("status") == "draft"
+        ),
         "draft_parameter_recommendation_count": len(draft_parameter_recommendations),
         "observing_release_count": sum(
             1 for item in observation_queue
@@ -712,6 +720,7 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "tasks": tasks_by_workflow,
         "tasks_error": tasks_error,
         "pending_recommendations": pending_recommendations,
+        "recommendation_history": recommendations_sorted[:48],
         "active_parameters": active_parameters,
         "runtime_parameter_source": runtime_parameter_source,
         "latest_round_summary": latest_round_summary,

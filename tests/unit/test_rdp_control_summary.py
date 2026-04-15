@@ -156,10 +156,12 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(payload["environment"]["name"], "staging")
         self.assertEqual(payload["health"]["overall_health"], "degraded")
         self.assertEqual(payload["operations_summary"]["approved_release_candidate_count"], 1)
+        self.assertEqual(payload["operations_summary"]["draft_recommendation_count"], 0)
         self.assertEqual(payload["operations_summary"]["latest_gate_status"], "warn")
         self.assertEqual(payload["recent_gate_results"][0]["gate_run_id"], "gate_1")
         self.assertEqual(payload["recent_releases"][0]["release_id"], "rel_1")
         self.assertEqual(payload["observation_queue"][0]["observation_status"], "observing")
+        self.assertEqual(payload["recommendation_history"][0]["recommendation_id"], "rec_release_1")
 
     def test_runtime_source_distinguishes_governance_pause_from_profile_defaults(self) -> None:
         request = _fake_request()
@@ -276,6 +278,7 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(combo_state["candidate_parameter_set_id"], "ps_candidate_1")
         self.assertEqual(combo_state["candidate_parameter_status"], "candidate")
         self.assertTrue(combo_state["pending_operator_action"])
+        self.assertEqual(payload["operations_summary"]["draft_recommendation_count"], 1)
 
     def test_runtime_source_reports_mixed_when_active_and_paused_combos_coexist(self) -> None:
         request = _fake_request()

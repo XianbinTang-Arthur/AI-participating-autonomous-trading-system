@@ -421,6 +421,36 @@ class TestRecommendationRegistryStateGuard:
         assert result is not None
         assert result["status"] == "superseded"
 
+    def test_add_recommendation_keeps_different_recommendation_types_side_by_side(self):
+        """不同 recommendation_type 不应互相 supersede。"""
+        from aats.data_platform.decision_system.recommendation_registry import (
+            add_recommendation,
+            create_recommendation,
+            load_recommendation_registry,
+        )
+
+        reg = load_recommendation_registry(pathlib.Path("/nonexistent"))
+        parameter_rec = create_recommendation(
+            family="independent",
+            timeframe="15m",
+            recommendation_type="parameter_upgrade",
+            confidence="high",
+            reason="candidate ready",
+        )
+        pause_rec = create_recommendation(
+            family="independent",
+            timeframe="15m",
+            recommendation_type="pause",
+            confidence="high",
+            reason="failure ratio too high",
+        )
+
+        add_recommendation(reg, parameter_rec)
+        add_recommendation(reg, pause_rec)
+
+        assert parameter_rec["status"] == "draft"
+        assert pause_rec["status"] == "draft"
+
 
 # =========================================================================
 # Section 5: readiness_evaluator — Check 2 从 combos 推导状态 (P0-4)

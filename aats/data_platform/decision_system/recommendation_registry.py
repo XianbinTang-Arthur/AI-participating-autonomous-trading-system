@@ -227,13 +227,20 @@ def add_recommendation(
 ) -> None:
     """将新 recommendation 加入 registry.
 
-    同一 ``(family, symbol, timeframe)`` 下已有的 **draft** 建议会被自动
-    标记为 ``superseded``，避免审批队列无限膨胀。已 approved / rejected 等
-    终态记录不受影响。
+    同一 ``(family, symbol, timeframe, recommendation_type)`` 下已有的
+    **draft** 建议会被自动标记为 ``superseded``，避免审批队列无限膨胀。
+
+    不同类型的 recommendation 需要并存。例如同一轮里既可能有
+    ``parameter_upgrade``，也可能有 ``pause`` / ``require_review``，
+    前者代表“本轮生成了候选参数”，后者代表“当前治理建议不要推进”。
+    这两类信息不能互相覆盖，否则 operator 会误以为系统没有产出参数候选。
+
+    已 approved / rejected 等终态记录不受影响。
     """
     new_family = rec.get("family")
     new_symbol = rec.get("symbol")
     new_tf = rec.get("timeframe")
+    new_type = rec.get("recommendation_type")
     new_id = rec.get("recommendation_id")
 
     for existing in registry.get("recommendations", []):
@@ -242,6 +249,7 @@ def add_recommendation(
             and existing.get("family") == new_family
             and existing.get("symbol") == new_symbol
             and existing.get("timeframe") == new_tf
+            and existing.get("recommendation_type") == new_type
         ):
             existing["status"] = "superseded"
             existing["superseded_at"] = rec.get("created_at")

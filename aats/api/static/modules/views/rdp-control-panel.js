@@ -289,6 +289,161 @@ function comboKey(family, timeframe) {
   return `${family}_${String(timeframe).toLowerCase()}`;
 }
 
+function sortRecommendationsByCreatedAt(recommendations = []) {
+  return [...(recommendations || [])]
+    .filter((item) => item && typeof item === "object")
+    .sort((left, right) => {
+      const leftAt = Date.parse(left.created_at || "") || 0;
+      const rightAt = Date.parse(right.created_at || "") || 0;
+      return rightAt - leftAt;
+    });
+}
+
+function latestRecommendationsByCombo(recommendations = []) {
+  const byCombo = new Map();
+  sortRecommendationsByCreatedAt(recommendations).forEach((item) => {
+    const key = comboKey(item.family, item.timeframe);
+    if (key && !byCombo.has(key)) {
+      byCombo.set(key, item);
+    }
+  });
+  return byCombo;
+}
+
+function buildParameterCandidateEntries({
+  pendingRecommendations = [],
+  recommendationHistory = [],
+  governanceState = {},
+}) {
+  const comboStates = governanceStateByCombo(governanceState);
+  const sortedHistory = sortRecommendationsByCreatedAt(recommendationHistory);
+  const parameterHistory = sortedHistory.filter((item) => item.recommendation_type === "parameter_upgrade");
+  const governanceHistoryByCombo = latestRecommendationsByCombo(
+    sortedHistory.filter((item) => item.recommendation_type !== "parameter_upgrade"),
+  );
+  const latestParameterByCombo = latestRecommendationsByCombo(parameterHistory);
+
+  const comboKeys = new Set();
+  comboStates.forEach((state, key) => {
+    if (state?.candidate_parameter_set_id) comboKeys.add(key);
+  });
+  latestParameterByCombo.forEach((_item, key) => comboKeys.add(key));
+
+  const entries = Array.from(comboKeys).map((key) => {
+    const comboState = comboStates.get(key) || {};
+    const parameterRecommendation = latestParameterByCombo.get(key) || null;
+    const governanceRecommendation = governanceHistoryByCombo.get(key) || null;
+    const createdAt = firstNonEmpty(
+      parameterRecommendation?.created_at,
+      comboState.latest_recommendation_created_at,
+    );
+    return {
+      combo_key: key,
+      family: comboState.family || parameterRecommendation?.family,
+      timeframe: comboState.timeframe || parameterRecommendation?.timeframe,
+      symbol: parameterRecommendation?.symbol || "BTC-USDT-SWAP",
+      created_at: createdAt,
+      candidate_parameter_set_id: firstNonEmpty(
+        parameterRecommendation?.target_parameter_set_id,
+        comboState.candidate_parameter_set_id,
+      ),
+      candidate_parameter_status: firstNonEmpty(
+        comboState.candidate_parameter_status,
+        parameterRecommendation?.status,
+      ),
+      parameter_recommendation: parameterRecommendation,
+      governance_recommendation: governanceRecommendation,
+      latest_round_reasons: comboState.latest_round_reasons || [],
+    };
+  });
+
+  entries.sort((left, right) => {
+    const leftAt = Date.parse(left.created_at || "") || 0;
+    const rightAt = Date.parse(right.created_at || "") || 0;
+    return rightAt - leftAt;
+  });
+
+  return {
+    currentEntries: entries,
+    historicalParameterRecommendations: parameterHistory.filter((item) => {
+      const latest = latestParameterByCombo.get(comboKey(item.family, item.timeframe));
+      return latest?.recommendation_id !== item.recommendation_id;
+    }),
+  };
+}
+
+function translateCheckDetail(check = {}, environment = {}) {
+  const raw = firstNonEmpty(check.detail, "当前没有额外说明");
+  const strictEnvironment = Boolean(environment.strict_environment);
+  const key = `${check.category || ""}:${check.name || ""}`;
+
+  if (key === "governance_db:connection") {
+    return {
+      summary: strictEnvironment
+        ? "治理数据库还没有接通，发布链路现在不可用。"
+        : "治理数据库暂时不可达，当前只能查看已有产物，不能可靠地推进发布。",
+      nextStep: "检查容器内治理库连接配置是否指向 postgres 服务，而不是 127.0.0.1。",
+      raw,
+    };
+  }
+  if (key === "runtime:rdp-daemon") {
+    return {
+      summary: raw.includes("heartbeat not found")
+        ? "还没有看到 RDP 守护进程的有效心跳。"
+        : "RDP 守护进程状态不稳定，后台任务处理链路暂时不可信。",
+      nextStep: "先确认 rdp-daemon 容器已启动，并能写入 governance.rdp_runtime_status。",
+      raw,
+    };
+  }
+  if (key === "alerts:current_alerts") {
+    return {
+      summary: raw.includes("not found")
+        ? "当前还没有最新的可靠性告警快照。"
+        : "可靠性告警存在未处理项目，先确认是否允许继续推进。",
+      nextStep: raw.includes("not found")
+        ? "先运行一次“刷新数据”，让告警快照重新生成。"
+        : "先打开告警详情确认阻断是否已经处理。",
+      raw,
+    };
+  }
+  if (key === "workflow_runs:freshness") {
+    return {
+      summary: raw.includes("missing")
+        ? "研究/治理/决策工作流还没有形成完整的新鲜快照。"
+        : "工作流快照已经过期，当前结论不适合直接用于发布。",
+      nextStep: "先运行“刷新数据”和“运行研究”，确认最近一轮结果已更新。",
+      raw,
+    };
+  }
+  if (key === "live_db:readonly_access") {
+    return {
+      summary: raw.includes("RDP_LIVE_DATABASE_URL")
+        ? "还没有配置生产库只读连接，所以发布前无法核验生产事实数据。"
+        : "生产库只读链路不可用，发布前检查缺少关键校验。",
+      nextStep: raw.includes("RDP_LIVE_DATABASE_URL")
+        ? "在 RDP 环境配置中补上生产库只读连接。"
+        : "先检查只读数据库连接和权限配置。",
+      raw,
+    };
+  }
+  if (key === "parameters:active_parameter_sets") {
+    return {
+      summary: raw === "count=0"
+        ? "当前还没有 active 参数在运行。"
+        : "已读取到当前 active 参数集。",
+      nextStep: raw === "count=0"
+        ? "如果这是首次接入可以忽略；否则先确认参数发布链路是否已经跑通。"
+        : "",
+      raw,
+    };
+  }
+  return {
+    summary: raw,
+    nextStep: "",
+    raw,
+  };
+}
+
 function renderWorkItem({
   tone = "outline",
   kicker = "",
@@ -322,7 +477,7 @@ function renderCommandBar({
   operationsSummary = {},
   tasks = {},
   releaseCandidates = [],
-  draftParameterRecommendations = [],
+  draftRecommendations = [],
   observationQueue = [],
   canAdmin = false,
 }) {
@@ -351,7 +506,7 @@ function renderCommandBar({
     headline = "当前已有已批准建议，可以进入发布。";
     summary = `优先处理 ${firstReleaseCandidate.family || "策略"}/${firstReleaseCandidate.timeframe || "周期"}，并至少保持 ${environment.required_observation_window_hours || 24} 小时观察窗口。`;
     tone = "positive";
-  } else if (draftParameterRecommendations.length > 0) {
+  } else if (draftRecommendations.length > 0) {
     headline = "当前有候选建议待审批，先做筛选再谈发布。";
     summary = "不要直接冲到参数生效。先确认建议是否成立，再把合格建议推到发布步骤。";
     tone = "warning";
@@ -435,10 +590,10 @@ function renderCommandBar({
         badge: actorTags("ai", "system"),
       },
       {
-        label: "待审批建议",
-        value: `${draftParameterRecommendations.length} 条`,
-        meta: draftParameterRecommendations.length ? "先审批，再进入发布步骤" : "当前没有待审批的参数建议",
-        tone: draftParameterRecommendations.length ? "warning" : "outline",
+        label: "待处理建议",
+        value: `${draftRecommendations.length} 条`,
+        meta: draftRecommendations.length ? "先看最新 4 组，再决定审批或拒绝" : "当前没有待处理的候选建议",
+        tone: draftRecommendations.length ? "warning" : "outline",
         badge: actorTags("operator"),
       },
       {
@@ -454,44 +609,123 @@ function renderCommandBar({
 
 function renderRecommendationStep({
   pendingRecommendations = [],
+  recommendationHistory = [],
   activeParameters = {},
   governanceState = {},
+  uiState = {},
   canAdmin = false,
 }) {
   const appliedRecommendationIds = buildAppliedRecommendationIds(activeParameters);
-  const comboStates = governanceStateByCombo(governanceState);
-  const draftRecommendations = pendingRecommendations.filter((item) => item.recommendation_type === "parameter_upgrade" && item.status === "draft");
-  const approvedRecommendations = pendingRecommendations.filter((item) => item.recommendation_type === "parameter_upgrade" && item.status === "approved");
-  const strategicRecommendations = pendingRecommendations.filter((item) => item.recommendation_type !== "parameter_upgrade");
+  const draftRecommendations = pendingRecommendations.filter((item) => item.status === "draft");
+  const approvedRecommendations = pendingRecommendations.filter((item) =>
+    item.recommendation_type === "parameter_upgrade" && item.status === "approved",
+  );
+  const draftGovernanceRecommendations = Array.from(
+    latestRecommendationsByCombo(
+      pendingRecommendations.filter((item) => item.recommendation_type !== "parameter_upgrade" && item.status === "draft"),
+    ).values(),
+  );
+  const {
+    currentEntries: parameterCandidateEntries,
+    historicalParameterRecommendations,
+  } = buildParameterCandidateEntries({
+    pendingRecommendations,
+    recommendationHistory,
+    governanceState,
+  });
+  const visibleCurrentCandidates = parameterCandidateEntries
+    .filter((item) => item.parameter_recommendation?.status !== "approved")
+    .slice(0, 4);
+  const historyExtraCount = Number(uiState.rdpRecommendationHistoryExtraCount || 0);
+  const historyVisibleCount = 4 + (
+    Number.isFinite(historyExtraCount) && historyExtraCount > 0 ? historyExtraCount : 0
+  );
+  const visibleHistory = historicalParameterRecommendations.slice(
+    0,
+    historyVisibleCount,
+  );
+  const remainingHistoryCount = Math.max(
+    0,
+    historicalParameterRecommendations.length - visibleHistory.length,
+  );
 
-  const draftCards = draftRecommendations.map((item) => {
-    const state = comboStates.get(comboKey(item.family, item.timeframe)) || {};
+  const draftCards = visibleCurrentCandidates.map((entry) => {
+    const parameterRecommendation = entry.parameter_recommendation || {};
+    const governanceRecommendation = entry.governance_recommendation || {};
+    const blockedByGovernanceDraft = (
+      governanceRecommendation.recommendation_id
+      && governanceRecommendation.status === "draft"
+      && governanceRecommendation.recommendation_type !== "parameter_upgrade"
+    );
+    const hasDraftParameterRecommendation = parameterRecommendation.status === "draft";
+    const candidateReason = firstNonEmpty(
+      parameterRecommendation.reason,
+      (entry.latest_round_reasons || []).join("；"),
+      "这组参数还没有补充说明。",
+    );
+    const governanceReason = firstNonEmpty(
+      governanceRecommendation.reason,
+      "",
+    );
+    const candidateSetId = firstNonEmpty(entry.candidate_parameter_set_id, parameterRecommendation.target_parameter_set_id);
     const body = `
-      <p class="meta-copy">${escapeHtml(firstNonEmpty(item.reason, (state.latest_round_reasons || []).join("；"), "这条建议还没有补充说明。"))}</p>
-      <p class="meta-copy">建议动作：${escapeHtml(labelForRecommendationType(item.recommendation_type))}。${state.candidate_parameter_set_id ? ` 候选参数集 ${escapeHtml(shortId(state.candidate_parameter_set_id))}。` : ""}</p>
+      <p class="meta-copy">${
+        candidateSetId
+          ? `本轮生成参数集 ${escapeHtml(shortId(candidateSetId))}，状态 ${escapeHtml(entry.candidate_parameter_status || "待确认")}。`
+          : "当前还没有可展示的候选参数集。"
+      }</p>
+      <p class="meta-copy">候选依据：${escapeHtml(candidateReason)}</p>
+      <p class="meta-copy">${
+        governanceRecommendation.recommendation_id
+          ? `当前治理建议：${escapeHtml(labelForRecommendationType(governanceRecommendation.recommendation_type))}（${escapeHtml(labelForRecommendationStatus(governanceRecommendation.status))}）。${governanceReason ? ` 原因：${escapeHtml(governanceReason)}` : ""}`
+          : hasDraftParameterRecommendation
+            ? "当前主路径仍是调参建议，可在这里完成审批。"
+            : "这组参数目前没有新的治理动作。"
+      }</p>
     `;
-    const actions = [
-      actionButton("审批", "rdp-approve-only", item.recommendation_id, "primary", {
-        disabled: !canAdmin,
-        title: !canAdmin ? "当前账号只有查看权限" : "只完成审批，不直接推动生产生效",
-      }),
-      actionButton("拒绝", "rdp-reject-recommendation", item.recommendation_id, "ghost", {
-        disabled: !canAdmin,
-        title: !canAdmin ? "当前账号只有查看权限" : "拒绝这条建议",
-      }),
-    ].join("");
+    const actions = hasDraftParameterRecommendation
+      ? [
+        actionButton("审批", "rdp-approve-only", parameterRecommendation.recommendation_id, "primary", {
+          disabled: !canAdmin || blockedByGovernanceDraft,
+          title: !canAdmin
+            ? "当前账号只有查看权限"
+            : blockedByGovernanceDraft
+              ? "同组合还有待处理的治理建议，先处理治理结论"
+              : "只完成审批，不直接推动生产生效",
+        }),
+        actionButton("拒绝", "rdp-reject-recommendation", parameterRecommendation.recommendation_id, "ghost", {
+          disabled: !canAdmin || blockedByGovernanceDraft,
+          title: !canAdmin
+            ? "当前账号只有查看权限"
+            : blockedByGovernanceDraft
+              ? "同组合还有待处理的治理建议，先处理治理结论"
+              : "拒绝这条调参建议",
+        }),
+      ].join("")
+      : "";
     return renderWorkItem({
-      tone: toneForRecommendationStatus(item.status),
-      kicker: `${item.symbol || "参数建议"} / ${item.family || "未知策略"} / ${item.timeframe || "未知周期"}`,
-      title: shortId(item.recommendation_id),
+      tone: blockedByGovernanceDraft ? "warning" : toneForRecommendationStatus(parameterRecommendation.status),
+      kicker: `${entry.symbol || "参数候选"} / ${entry.family || "未知策略"} / ${entry.timeframe || "未知周期"}`,
+      title: candidateSetId ? shortId(candidateSetId) : shortId(parameterRecommendation.recommendation_id),
       pills: [
-        `<span class="signal-pill tone-${escapeHtml(toneForConfidence(item.confidence))}">置信度 ${escapeHtml(labelForConfidence(item.confidence))}</span>`,
-        `<span class="signal-pill tone-warning">${escapeHtml(labelForRecommendationStatus(item.status))}</span>`,
-      ],
+        parameterRecommendation.confidence
+          ? `<span class="signal-pill tone-${escapeHtml(toneForConfidence(parameterRecommendation.confidence))}">置信度 ${escapeHtml(labelForConfidence(parameterRecommendation.confidence))}</span>`
+          : "",
+        `<span class="signal-pill tone-${escapeHtml(hasDraftParameterRecommendation ? "warning" : "outline")}">${
+          escapeHtml(hasDraftParameterRecommendation ? "待审批" : "候选已生成")
+        }</span>`,
+        governanceRecommendation.recommendation_id
+          ? `<span class="signal-pill tone-${escapeHtml(toneForRecommendationStatus(governanceRecommendation.status))}">治理建议 ${escapeHtml(labelForRecommendationType(governanceRecommendation.recommendation_type))}</span>`
+          : "",
+      ].filter(Boolean),
       body,
       meta: [
-        `创建于 ${relativeTime(item.created_at)}`,
-        "这里只做审批与拒绝，不直接让参数生效",
+        `生成于 ${relativeTime(entry.created_at)}`,
+        hasDraftParameterRecommendation
+          ? "这里只做审批与拒绝，不直接让参数生效"
+          : blockedByGovernanceDraft
+            ? "这组参数已经产出，但当前治理建议要求先暂停或复核"
+            : "这组参数当前没有新的审批动作",
       ],
       actions,
     });
@@ -510,7 +744,7 @@ function renderRecommendationStep({
       meta: [`创建于 ${relativeTime(item.created_at)}`],
     }));
 
-  const strategicCards = strategicRecommendations.map((item) => renderWorkItem({
+  const governanceCards = draftGovernanceRecommendations.map((item) => renderWorkItem({
     tone: toneForRecommendationStatus(item.status),
     kicker: `${item.symbol || "策略建议"} / ${item.family || "未知策略"} / ${item.timeframe || "未知周期"}`,
     title: labelForRecommendationType(item.recommendation_type),
@@ -533,22 +767,63 @@ function renderRecommendationStep({
       : "",
   }));
 
+  const historyCards = visibleHistory.map((item) => renderWorkItem({
+    tone: "outline",
+    kicker: `${item.symbol || "参数历史"} / ${item.family || "未知策略"} / ${item.timeframe || "未知周期"}`,
+    title: shortId(item.target_parameter_set_id || item.recommendation_id),
+    pills: [
+      `<span class="signal-pill tone-outline">${escapeHtml(labelForRecommendationStatus(item.status))}</span>`,
+      item.confidence
+        ? `<span class="signal-pill tone-${escapeHtml(toneForConfidence(item.confidence))}">置信度 ${escapeHtml(labelForConfidence(item.confidence))}</span>`
+        : "",
+    ].filter(Boolean),
+    body: `<p class="meta-copy">${escapeHtml(firstNonEmpty(item.reason, "这组历史参数没有额外说明。"))}</p>`,
+    meta: [`生成于 ${relativeTime(item.created_at)}`],
+  }));
+
   let content = "";
-  if (!draftCards.length && !approvedCards.length && !strategicCards.length) {
+  if (!draftCards.length && !approvedCards.length && !governanceCards.length && !historyCards.length) {
     content = notice("当前没有需要处理的建议。新的 recommendation 出来后，这里会先进入审批阶段。", "info");
   } else {
     content = `
-      ${draftCards.length ? `<div class="rdp-worklist">${draftCards.join("")}</div>` : notice("当前没有待审批的参数建议。", "outline")}
+      <div class="rdp-inline-block">
+        <p class="meta-copy rdp-subtle-heading">本轮最新参数候选</p>
+        ${draftCards.length
+          ? `<div class="rdp-worklist">${draftCards.join("")}</div>`
+          : notice("当前没有可展示的最新参数候选。", "outline")}
+      </div>
       ${approvedCards.length ? `
         <div class="rdp-inline-block">
           <p class="meta-copy rdp-subtle-heading">已批准，等待进入发布步骤</p>
           <div class="rdp-worklist">${approvedCards.join("")}</div>
         </div>
       ` : ""}
-      ${strategicCards.length ? `
+      ${governanceCards.length ? `
         <div class="rdp-inline-block">
           <p class="meta-copy rdp-subtle-heading">治理建议</p>
-          <div class="rdp-worklist">${strategicCards.join("")}</div>
+          <div class="rdp-worklist">${governanceCards.join("")}</div>
+        </div>
+      ` : ""}
+      ${(historyCards.length || remainingHistoryCount > 0) ? `
+        <div class="rdp-inline-block">
+          <p class="meta-copy rdp-subtle-heading">历史参数候选</p>
+          ${historyCards.length
+            ? `<div class="rdp-worklist">${historyCards.join("")}</div>`
+            : notice("当前仅展示本轮最新 4 组参数。点击下方按钮可继续展开更早的历史候选。", "outline")}
+          <div class="table-actions table-actions--compact">
+            ${remainingHistoryCount > 0 ? actionButton(
+              `加载更多历史建议（剩余 ${remainingHistoryCount} 条）`,
+              "load-more-rdp-recommendations",
+              "",
+              "secondary",
+            ) : ""}
+            ${historyCards.length ? actionButton(
+              "收起历史建议",
+              "collapse-rdp-recommendations",
+              "",
+              "ghost",
+            ) : ""}
+          </div>
         </div>
       ` : ""}
     `;
@@ -574,13 +849,20 @@ function renderPreflightStep({
 
   const checkCards = checks.length
     ? `<div class="rdp-checklist">${checks.map((check) => `
+        ${(() => {
+          const detail = translateCheckDetail(check, environment);
+          return `
         <article class="rdp-checkitem tone-${escapeHtml(checkTone(check))}">
           <div class="panel-head">
             <strong>${escapeHtml(checkLabel(check))}</strong>
             <span class="signal-pill tone-${escapeHtml(checkTone(check))}">${escapeHtml(checkStatusText(check))}</span>
           </div>
-          <p class="meta-copy">${escapeHtml(check.detail || "当前没有额外说明")}</p>
+          <p class="meta-copy">${escapeHtml(detail.summary)}</p>
+          ${detail.nextStep ? `<p class="meta-copy">${escapeHtml(`下一步：${detail.nextStep}`)}</p>` : ""}
+          ${detail.raw && detail.raw !== detail.summary ? `<details class="rdp-inline-block"><summary class="meta-copy">查看原始检查详情</summary><p class="meta-copy">${escapeHtml(detail.raw)}</p></details>` : ""}
         </article>
+      `;
+        })()}
       `).join("")}</div>`
     : notice("当前还没有可展示的发布前检查结果。", "outline");
 
@@ -597,7 +879,7 @@ function renderPreflightStep({
         `<span class="signal-pill tone-${escapeHtml(toneForGate(latestGate.gate_status))}">${escapeHtml(labelForGate(latestGate.gate_status))}</span>`,
       ],
     })
-    : notice("还没有针对具体 recommendation 运行 Gate。下面先展示系统级发布前检查。", "info");
+    : notice("还没有针对具体建议运行 Gate。这里先显示系统级发布前检查，帮助你判断现在能不能推进。", "info");
 
   return surfaceCard({
     title: "2. 发布前检查",
@@ -713,19 +995,24 @@ function renderReleaseStep({
     timestamp: item.created_at ? relativeTime(item.created_at) : "待确认",
     pill: `<span class="signal-pill tone-${escapeHtml(toneForApplyResult(item.apply_result))}">${escapeHtml(labelForApplyResult(item.apply_result))}</span>`,
   }));
+  const releaseEmptyState = !cards.length && !timelineItems.length
+    ? notice("当前既没有已批准待发布的建议，也还没有历史 release 记录。先回到第 1 步处理最新候选建议。", "info")
+    : !cards.length
+      ? notice("当前没有已批准且待发布的参数建议。下面保留最近的 release 记录供你参考。", "info")
+      : "";
 
   return surfaceCard({
     title: "3. 发布执行",
     kicker: "生产语义统一走 release",
     copy: "这里才允许参数进入运行态。生产环境不再把“应用参数”当成主路径，而是统一通过 release 承载 gate、apply、observation 和审计。",
     content: `
-      ${cards.length
-        ? `<div class="rdp-worklist">${cards.join("")}</div>`
-        : notice("当前没有已批准且待发布的参数建议。先回到第 1 步完成审批。", "info")}
-      <div class="rdp-inline-block">
-        <p class="meta-copy rdp-subtle-heading">最近发布记录</p>
-        ${timeline(timelineItems, "当前还没有 release 记录。")}
-      </div>
+      ${cards.length ? `<div class="rdp-worklist">${cards.join("")}</div>` : releaseEmptyState}
+      ${timelineItems.length ? `
+        <div class="rdp-inline-block">
+          <p class="meta-copy rdp-subtle-heading">最近发布记录</p>
+          ${timeline(timelineItems, "")}
+        </div>
+      ` : ""}
     `,
   });
 }
@@ -799,9 +1086,10 @@ function renderObservationStep({
   });
 }
 
-export function renderRdpControlPanelV2({ rdpControl = {}, canAdmin = false }) {
+export function renderRdpControlPanelV2({ rdpControl = {}, canAdmin = false, uiState = {} }) {
   const tasks = rdpControl.tasks || {};
   const pendingRecommendations = rdpControl.pending_recommendations || [];
+  const recommendationHistory = rdpControl.recommendation_history || [];
   const activeParameters = rdpControl.active_parameters || {};
   const governanceState = rdpControl.governance_state || {};
   const health = rdpControl.health || {};
@@ -816,8 +1104,8 @@ export function renderRdpControlPanelV2({ rdpControl = {}, canAdmin = false }) {
     && item.status === "approved"
     && !buildAppliedRecommendationIds(activeParameters).has(item.recommendation_id),
   );
-  const draftParameterRecommendations = pendingRecommendations.filter((item) =>
-    item.recommendation_type === "parameter_upgrade" && item.status === "draft",
+  const draftRecommendations = pendingRecommendations.filter((item) =>
+    item.status === "draft",
   );
 
   return `
@@ -828,14 +1116,16 @@ export function renderRdpControlPanelV2({ rdpControl = {}, canAdmin = false }) {
         operationsSummary,
         tasks,
         releaseCandidates,
-        draftParameterRecommendations,
+        draftRecommendations,
         observationQueue,
         canAdmin,
       })}
       ${renderRecommendationStep({
         pendingRecommendations,
+        recommendationHistory,
         activeParameters,
         governanceState,
+        uiState,
         canAdmin,
       })}
       ${renderPreflightStep({

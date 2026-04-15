@@ -34,6 +34,7 @@ export function renderAIConfigView(data) {
   const latestOptimizationReport = strategyProfiles.latest_optimization_report || {};
   const latestProfileControl = aiState.latest_profile_control_decision || {};
   const rdpControl = data.rdpControl || {};
+  const uiState = data.uiState?.aiConfig || {};
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
   const summaryError = data.error || null;
 
@@ -67,7 +68,7 @@ export function renderAIConfigView(data) {
         })}
       </div>
       <div class="span-12 workspace-stack">
-        ${renderRdpControlPanelV2({ rdpControl, canAdmin })}
+        ${renderRdpControlPanelV2({ rdpControl, canAdmin, uiState })}
       </div>
       <div class="span-12 workspace-stack">
         ${renderCurrentConfigurationCard({ runtimeProfiles, runtime, aiState, activeRevision, activation })}
