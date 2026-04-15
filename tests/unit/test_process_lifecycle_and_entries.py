@@ -324,7 +324,9 @@ def test_aats_compose_defines_four_slice_services_with_distinct_process_roles() 
     assert "image: aats-base:dev" in text
     # gateway 必须暴露端口（通过 AATS_API_PORT 变量，默认 8000），其他不暴露
     assert "${AATS_API_PORT:-8000}" in text
-    assert "127.0.0.1:" in text  # 仅绑定 loopback
+    assert '"${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"' in text, (
+        "gateway 端口映射必须显式暴露 AATS_API_PORT，便于 WSL 独立 dockerd 被 Windows 宿主机访问"
+    )
     # event bus 必须切到 hybrid（4 进程拓扑跨进程通信）
     assert "AATS_EVENT_BUS_BACKEND: hybrid" in text
     # 必须复用基础设施 compose 的 aats network

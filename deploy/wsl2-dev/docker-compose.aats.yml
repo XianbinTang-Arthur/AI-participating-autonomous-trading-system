@@ -116,7 +116,7 @@ services:
     # --env-file ../../.env.<profile> 注入到 compose 模板插值层。
     # 如果没传 --env-file 则 fallback 到 8000。
     ports:
-      - "127.0.0.1:${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"
+      - "${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"
     networks:
       - aats
     # gateway 是 4 进程里最重的 API 层：跑所有 dashboard 查询 + ThreadPoolExecutor
