@@ -24,14 +24,14 @@ async function renderProviders() {
     updateLoginAvailability(payload);
   } catch (error) {
     updateLoginAvailability({ auth_enabled: false, session_enabled: false });
-    setMessage(localizeLoginError(error.message || "登录能力检查失败。"), "danger");
+    setMessage(localizeLoginError(error?.message || "登录能力检查失败。"), "danger");
   }
 }
 
 async function login() {
   nodes.button.disabled = true;
   nodes.button.textContent = "登录中…";
-  setMessage("正在验证账号与权限…", "info");
+  setMessage("正在验证账号和权限，请稍候。", "info");
   try {
     await requestJson("/auth/login", {
       method: "POST",
@@ -42,7 +42,7 @@ async function login() {
     });
     window.location.assign("/ui");
   } catch (error) {
-    setMessage(localizeLoginError(error.message || "登录失败，请检查账号、密码和权限。"), "danger");
+    setMessage(localizeLoginError(error?.message || "登录失败，请检查账号、密码和权限。"), "danger");
     nodes.button.disabled = false;
     nodes.button.textContent = "登录";
   }
@@ -76,5 +76,8 @@ function localizeLoginError(message) {
   if (text === "operator_auth_required") return "当前操作需要先登录。";
   if (text === "operator_login_failed") return "用户名或密码错误。";
   if (text === "operator_session_auth_not_configured") return "当前没有启用浏览器会话登录。";
-  return text;
+  if (/failed to fetch|networkerror|network error|load failed/i.test(text)) {
+    return "登录接口不可达，请先确认服务已启动。";
+  }
+  return text || "登录失败，请稍后重试。";
 }
