@@ -329,10 +329,37 @@ class DecisionContextBuilder:
         account_snapshot: ExchangeAccountSnapshot | None,
         portfolio_snapshot: PortfolioSnapshot | None,
     ) -> Decimal:
-        if account_snapshot is not None and account_snapshot.risk_snapshot is not None:
-            resolved = to_decimal(account_snapshot.risk_snapshot.available_equity or 0)
-            if resolved > EPSILON_DECIMAL_12:
-                return resolved
+        """Resolve the best available equity for position sizing.
+
+        Fallback chain (first positive value wins):
+        1. ``risk_snapshot.available_equity`` — OKX ``availEq`` (ideal, but OKX
+           does not return it in the ``account-position-risk`` endpoint for all
+           account modes).
+        2. ``risk_snapshot.total_equity`` — OKX ``totalEq`` or summed stable-coin
+           balance equity from the same endpoint.
+        3. ``portfolio_snapshot.total_equity`` — locally-tracked equity from
+           the portfolio service.
+        """
+        risk = (
+            account_snapshot.risk_snapshot
+            if account_snapshot is not None
+            else None
+        )
+        # 1. Prefer exchange-reported available equity
+        if risk is not None:
+            avail = to_decimal(risk.available_equity or 0)
+            if avail > EPSILON_DECIMAL_12:
+                return avail
+        # 2. Fallback: exchange-reported total equity
+        if risk is not None:
+            total = to_decimal(risk.total_equity or 0)
+            if total > EPSILON_DECIMAL_12:
+                return total
+        # 3. Fallback: portfolio snapshot equity
+        if portfolio_snapshot is not None:
+            portfolio_eq = to_decimal(portfolio_snapshot.total_equity or 0)
+            if portfolio_eq > EPSILON_DECIMAL_12:
+                return portfolio_eq
         return Decimal("0")
 
     @staticmethod

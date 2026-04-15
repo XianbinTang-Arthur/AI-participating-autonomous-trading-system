@@ -56,7 +56,9 @@ class TestDecisionContextBuilder(unittest.TestCase):
 
         self.assertEqual(resolved, Decimal("390"))
 
-    def test_available_trading_equity_does_not_fallback_to_total_equity_when_available_missing(self) -> None:
+    def test_available_trading_equity_falls_back_to_total_equity_when_available_missing(self) -> None:
+        """When OKX does not return availEq (e.g. account-position-risk endpoint),
+        fall back to total_equity from the same risk snapshot."""
         account_snapshot = ExchangeAccountSnapshot(
             account_source="okx",
             fetched_at=datetime.now(timezone.utc),
@@ -83,6 +85,43 @@ class TestDecisionContextBuilder(unittest.TestCase):
         resolved = DecisionContextBuilder._available_trading_equity(
             account_snapshot=account_snapshot,
             portfolio_snapshot=portfolio_snapshot,
+        )
+
+        self.assertEqual(resolved, Decimal("450"))
+
+    def test_available_trading_equity_falls_back_to_portfolio_when_risk_snapshot_empty(self) -> None:
+        """When risk_snapshot has neither available nor total equity,
+        fall back to portfolio_snapshot.total_equity."""
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=datetime.now(timezone.utc),
+            risk_snapshot=ExchangeAccountRiskSnapshot(),
+        )
+        portfolio_snapshot = PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": Decimal("390")},
+            positions=[],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("390"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            risk_budget_usage={},
+        )
+
+        resolved = DecisionContextBuilder._available_trading_equity(
+            account_snapshot=account_snapshot,
+            portfolio_snapshot=portfolio_snapshot,
+        )
+
+        self.assertEqual(resolved, Decimal("390"))
+
+    def test_available_trading_equity_returns_zero_when_no_data(self) -> None:
+        """When both account and portfolio snapshots are None, return zero."""
+        resolved = DecisionContextBuilder._available_trading_equity(
+            account_snapshot=None,
+            portfolio_snapshot=None,
         )
 
         self.assertEqual(resolved, Decimal("0"))
