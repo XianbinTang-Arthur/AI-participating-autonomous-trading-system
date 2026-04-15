@@ -141,6 +141,131 @@ def _collect_latest_workflow_runs_from_db(
     return latest_by_workflow
 
 
+def _load_latest_decision_round_from_db() -> dict[str, Any] | None:
+    try:
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance._db_util import try_governance_db
+        from aats.data_platform.governance.decision_rounds_db import (
+            db_load_latest_decision_round_snapshot,
+        )
+
+        engine, ok = try_governance_db()
+        if not ok:
+            return None
+        try:
+            with Session(engine) as session:
+                snapshot = db_load_latest_decision_round_snapshot(session)
+            if not snapshot:
+                return None
+            return {
+                "available": True,
+                "data_source": "db",
+                "round_id": snapshot.get("round_id"),
+                "round_dir": None,
+                "started_at": snapshot.get("started_at"),
+                "finished_at": snapshot.get("finished_at"),
+                "evidence_bundle_summary": snapshot.get("evidence_bundle_summary"),
+                "parameter_upgrade_candidates": snapshot.get("parameter_upgrade_candidates"),
+                "family_timeframe_decisions": snapshot.get("family_timeframe_decisions"),
+                "promotion_readiness_assessment": snapshot.get("promotion_readiness_assessment"),
+                "manifest": snapshot.get("manifest"),
+                "has_conclusion_report": bool(snapshot.get("conclusion_markdown")),
+            }
+        finally:
+            if engine is not None:
+                engine.dispose()
+    except Exception as exc:
+        log.warning("decision round DB 读取失败: %s", exc)
+        return None
+
+
+def _query_latest_decision_round_from_files(project_root: Path) -> dict[str, Any]:
+    rounds_root = project_root / _DECISION_ROUNDS_DIR
+    latest_dir = _find_latest_round_dir(rounds_root)
+
+    result: dict[str, Any] = {
+        "available": False,
+        "data_source": "file",
+        "round_id": None,
+        "round_dir": None,
+        "started_at": None,
+        "finished_at": None,
+    }
+
+    if latest_dir is None:
+        return result
+
+    result["round_id"] = latest_dir.name
+    result["round_dir"] = str(latest_dir)
+    result["available"] = True
+
+    manifest = _safe_load_json(latest_dir / "round_manifest.json")
+    if isinstance(manifest, dict):
+        result["manifest"] = manifest
+        result["started_at"] = manifest.get("started_at")
+        result["finished_at"] = manifest.get("finished_at")
+
+    file_map = {
+        "evidence_bundle_summary": ["evidence_bundle_summary.json", "evidence_summary.json"],
+        "parameter_upgrade_candidates": ["parameter_upgrade_candidates.json"],
+        "family_timeframe_decisions": ["family_timeframe_decisions.json"],
+        "promotion_readiness_assessment": [
+            "promotion_readiness_assessment.json",
+            "promotion_readiness_report.json",
+        ],
+    }
+    for key, filenames in file_map.items():
+        data = None
+        for filename in filenames:
+            data = _safe_load_json(latest_dir / filename)
+            if data is not None:
+                break
+        result[key] = data
+
+    conclusion_md = latest_dir / "phase6_closed_loop_decision_conclusion.md"
+    result["has_conclusion_report"] = conclusion_md.exists()
+    return result
+
+
+def _augment_workflow_runs_with_decision_round(
+    latest_runs: dict[str, dict[str, Any]],
+    project_root: Path,
+) -> dict[str, dict[str, Any]]:
+    snapshot = _load_latest_decision_round_from_db()
+    if snapshot is None or not snapshot.get("available"):
+        snapshot = _query_latest_decision_round_from_files(project_root)
+    if not snapshot or not snapshot.get("available"):
+        return latest_runs
+
+    finished_at = snapshot.get("finished_at") or snapshot.get("started_at")
+    if not finished_at:
+        return latest_runs
+    snapshot_dt = _parse_iso_datetime(str(finished_at))
+    if snapshot_dt is None:
+        return latest_runs
+
+    augmented = dict(latest_runs)
+    data_source = str(snapshot.get("data_source") or "snapshot")
+    location = snapshot.get("round_dir") or f"decision_round:{snapshot.get('round_id')}"
+    for workflow in ("governance_cycle", "decision_cycle"):
+        current = augmented.get(workflow)
+        current_dt = _parse_iso_datetime(
+            str(current.get("finished_at") or current.get("started_at") or "")
+            if current else None,
+        )
+        if current is None or current_dt is None or snapshot_dt > current_dt:
+            augmented[workflow] = {
+                "workflow": workflow,
+                "overall_status": "success",
+                "started_at": snapshot.get("started_at"),
+                "finished_at": snapshot.get("finished_at"),
+                "path": location,
+                "synthetic_from": data_source,
+            }
+    return augmented
+
+
 def _check_db_initialization(
     governance_runtime: dict[str, Any],
 ) -> tuple[bool, bool]:
@@ -710,6 +835,7 @@ def query_rdp_health(project_root: Path) -> dict[str, Any]:
     # 容器内无本地 workflow_runs 文件时，从 DB task_queue 回退
     if not latest_runs and db_connected:
         latest_runs = _collect_latest_workflow_runs_from_db(governance_runtime)
+    latest_runs = _augment_workflow_runs_with_decision_round(latest_runs, project_root)
     workflow_status = "ok"
     workflow_details: list[str] = []
     now = datetime.now(timezone.utc)
@@ -824,40 +950,12 @@ def query_rdp_health(project_root: Path) -> dict[str, Any]:
 def query_latest_decision_round(project_root: Path) -> dict[str, Any]:
     """查询最近一次 decision round 结论.
 
-    读取 artifacts/decision_rounds/<latest>/ 下的结论文件。
+    优先走 governance DB snapshot，文件系统仅作为 fallback。
     """
-    rounds_root = project_root / _DECISION_ROUNDS_DIR
-    latest_dir = _find_latest_round_dir(rounds_root)
-
-    result: dict[str, Any] = {
-        "available": False,
-        "round_id": None,
-        "round_dir": None,
-    }
-
-    if latest_dir is None:
-        return result
-
-    result["round_id"] = latest_dir.name
-    result["round_dir"] = str(latest_dir)
-    result["available"] = True
-
-    # 加载各类结论文件
-    for filename in [
-        "evidence_bundle_summary.json",
-        "parameter_upgrade_candidates.json",
-        "family_timeframe_decisions.json",
-        "promotion_readiness_assessment.json",
-    ]:
-        data = _safe_load_json(latest_dir / filename)
-        key = filename.replace(".json", "")
-        result[key] = data
-
-    # 检查结论报告
-    conclusion_md = latest_dir / "phase6_closed_loop_decision_conclusion.md"
-    result["has_conclusion_report"] = conclusion_md.exists()
-
-    return result
+    snapshot = _load_latest_decision_round_from_db()
+    if snapshot is not None and snapshot.get("available"):
+        return snapshot
+    return _query_latest_decision_round_from_files(project_root)
 
 
 # ── 8. Promotion Readiness ────────────────────────────────────────

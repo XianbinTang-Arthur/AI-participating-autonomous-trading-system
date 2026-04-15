@@ -500,6 +500,68 @@ def register_evidence_bundle(
     })
 
 
+def _sync_registries_to_db_or_raise(
+    rec_reg: dict[str, Any],
+    dec_reg: dict[str, Any],
+) -> None:
+    """将最新 registry 状态批量同步到 DB。
+
+    这一步是 Phase 5/6 在 daemon 容器内可见性的兜底收口：
+    gateway/UI 读取 recommendation / active decision 时优先走 DB，
+    因此这里需要确保最新 registry 至少在 DB 中是可见的。
+    """
+    engine, ok = try_governance_db()
+    if not ok:
+        log.warning("recommendation_registry: governance DB 不可用，跳过强制 registry 同步")
+        return
+    try:
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.recommendations_db import (
+            db_upsert_active_decision,
+            db_upsert_recommendation,
+        )
+
+        with Session(engine) as session, session.begin():
+            for rec in rec_reg.get("recommendations", []):
+                db_upsert_recommendation(
+                    session,
+                    recommendation_id=rec["recommendation_id"],
+                    family=rec["family"],
+                    symbol=rec.get("symbol", "BTC-USDT-SWAP"),
+                    timeframe=rec["timeframe"],
+                    recommendation_type=rec.get("recommendation_type", "require_review"),
+                    target_parameter_set_id=rec.get("target_parameter_set_id"),
+                    confidence=rec.get("confidence", "low"),
+                    reason=rec.get("reason", ""),
+                    evidence_bundle_ref=rec.get("evidence_bundle_ref"),
+                    status=rec.get("status", "draft"),
+                    approved_by=rec.get("approved_by"),
+                    approved_at=rec.get("approved_at"),
+                    review_notes=rec.get("review_notes"),
+                    rejected_by=rec.get("rejected_by"),
+                    rejected_at=rec.get("rejected_at"),
+                    superseded_by=rec.get("superseded_by"),
+                    superseded_at=rec.get("superseded_at"),
+                    superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
+                    created_at=rec.get("created_at"),
+                )
+            for decision in dec_reg.get("decisions", []):
+                db_upsert_active_decision(
+                    session,
+                    family=decision["family"],
+                    symbol=decision.get("symbol", "BTC-USDT-SWAP"),
+                    timeframe=decision["timeframe"],
+                    current_status=decision.get("current_status", "require_review"),
+                    active_parameter_set_id=decision.get("active_parameter_set_id"),
+                    last_recommendation_id=decision.get("last_recommendation_id"),
+                    notes=decision.get("notes"),
+                )
+    finally:
+        if engine is not None:
+            engine.dispose()
+
+
 # ── 从 decision round 结果批量更新 ──────────────────────────────────
 
 
@@ -599,5 +661,6 @@ def update_registries_from_round(
     )
     save_evidence_bundle_index(bi, bundle_index_path)
     stats["bundles_registered"] += 1
+    _sync_registries_to_db_or_raise(rec_reg, dec_reg)
 
     return stats

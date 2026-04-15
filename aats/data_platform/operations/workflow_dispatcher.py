@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shlex
 import subprocess
 import sys
@@ -30,6 +31,14 @@ _WORKFLOW_CONFIG_DIR = "configs/rdp_workflows"
 
 def _make_run_id() -> str:
     return f"run_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
+
+
+def _tail_text(text: str, *, lines: int = 20, max_chars: int = 2400) -> str:
+    if not text:
+        return ""
+    text = text[-max_chars:]
+    tail = text.splitlines()[-lines:]
+    return "\n".join(tail).strip()
 
 
 # ── 配置加载 ──────────────────────────────────────────────────────
@@ -79,6 +88,9 @@ def _run_task(
         "started_at": None,
         "finished_at": None,
         "error": None,
+        "output_tail": None,
+        "stdout_tail": None,
+        "stderr_tail": None,
         "allow_failure": allow_failure,
     }
 
@@ -92,9 +104,9 @@ def _run_task(
     # 使用 shell=False + argv 代替 shell=True + shlex.quote，
     # 确保 Windows / POSIX 均能正确处理路径含空格的 venv。
     if command.startswith("python "):
-        argv = [sys.executable, *shlex.split(command[7:])]
+        argv = [sys.executable, *shlex.split(command[7:], posix=os.name != "nt")]
     else:
-        argv = shlex.split(command)
+        argv = shlex.split(command, posix=os.name != "nt")
 
     if dry_run:
         result["status"] = "dry_run"
@@ -114,6 +126,14 @@ def _run_task(
         )
         result["exit_code"] = proc.returncode
         result["status"] = "success" if proc.returncode == 0 else "failed"
+        stdout_tail = _tail_text(proc.stdout or "")
+        stderr_tail = _tail_text(proc.stderr or "")
+        combined_tail = _tail_text(
+            "\n".join(part for part in (proc.stdout or "", proc.stderr or "") if part),
+        )
+        result["stdout_tail"] = stdout_tail or None
+        result["stderr_tail"] = stderr_tail or None
+        result["output_tail"] = combined_tail or None
         if proc.returncode != 0:
             # 取最后 500 字符的 stderr
             result["error"] = (proc.stderr or "")[-500:].strip()

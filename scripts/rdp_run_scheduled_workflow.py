@@ -123,6 +123,10 @@ def main() -> int:
         print(f"  {icon} {name}")
         if task.get("error"):
             print(f"         {task['error'][:120]}")
+        output_tail = str(task.get("output_tail") or "").strip()
+        if output_tail:
+            for line in output_tail.splitlines():
+                print(f"         {line}")
 
     if report["overall_status"] in ("failed", "partial"):
         return 1

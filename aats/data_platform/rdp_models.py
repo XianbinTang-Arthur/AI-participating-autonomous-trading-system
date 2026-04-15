@@ -664,6 +664,30 @@ class ActiveDecisionModel(RdpBase):
     notes = Column(Text)
 
 
+class DecisionRoundSnapshotModel(RdpBase):
+    """governance.decision_round_snapshots — Phase 6 最新 round 的 DB-first 快照."""
+
+    __tablename__ = "decision_round_snapshots"
+    __table_args__ = (
+        UniqueConstraint("round_id", name="uq_decision_round_snapshot_round_id"),
+        Index("ix_decision_round_snapshot_finished", "finished_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    round_id = Column(String(128), nullable=False, unique=True)
+    started_at = Column(DateTime(timezone=True))
+    finished_at = Column(DateTime(timezone=True))
+    evidence_summary_json = Column(Text)
+    parameter_upgrade_candidates_json = Column(Text)
+    family_timeframe_decisions_json = Column(Text)
+    promotion_readiness_json = Column(Text)
+    manifest_json = Column(Text)
+    conclusion_markdown = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class RdpTaskQueueModel(RdpBase):
     __tablename__ = "rdp_task_queue"
     __table_args__ = (

@@ -51,6 +51,7 @@ from aats.data_platform.decision_system.recommendation_registry import (
 from aats.data_platform.decision_system.report_builder import (
     build_phase6_conclusion,
 )
+from aats.data_platform.governance._db_util import try_governance_db
 
 
 def main() -> None:
@@ -188,6 +189,7 @@ def main() -> None:
     log.info("")
     log.info("[6/6] Building conclusion document...")
 
+    conclusion_path = round_dir / "phase6_closed_loop_decision_conclusion.md"
     build_phase6_conclusion(
         round_id=round_id,
         evidence_bundle=evidence_bundle,
@@ -195,9 +197,9 @@ def main() -> None:
         ft_decisions=ft_decisions,
         readiness_report=readiness_report,
         registry_stats=registry_stats,
-        output_path=round_dir / "phase6_closed_loop_decision_conclusion.md",
+        output_path=conclusion_path,
     )
-    log.info("  -> %s", round_dir / "phase6_closed_loop_decision_conclusion.md")
+    log.info("  -> %s", conclusion_path)
 
     # ── Manifest ──
     finished_at = datetime.now(timezone.utc).isoformat()
@@ -236,6 +238,17 @@ def main() -> None:
     with manifest_path.open("w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
     log.info("  -> %s", manifest_path)
+    _persist_decision_round_snapshot_if_possible(
+        round_id=round_id,
+        started_at=started_at,
+        finished_at=finished_at,
+        evidence_bundle=evidence_bundle,
+        upgrade_candidates=upgrade_candidates,
+        ft_decisions=ft_decisions,
+        readiness_report=readiness_report,
+        manifest=manifest,
+        conclusion_markdown=conclusion_path.read_text(encoding="utf-8"),
+    )
 
     # ── Summary ──
     log.info("")
@@ -272,6 +285,47 @@ def main() -> None:
         print()
         print(f"Conclusion: {round_dir / 'phase6_closed_loop_decision_conclusion.md'}")
         print(f"Artifacts:  {round_dir}")
+
+
+def _persist_decision_round_snapshot_if_possible(
+    *,
+    round_id: str,
+    started_at: str,
+    finished_at: str,
+    evidence_bundle: dict,
+    upgrade_candidates: list[dict],
+    ft_decisions: list[dict],
+    readiness_report: dict,
+    manifest: dict,
+    conclusion_markdown: str,
+) -> None:
+    engine, ok = try_governance_db()
+    if not ok:
+        log.warning("Decision round snapshot: governance DB 不可用，跳过 DB snapshot 写入")
+        return
+    try:
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.decision_rounds_db import (
+            db_upsert_decision_round_snapshot,
+        )
+
+        with Session(engine) as session, session.begin():
+            db_upsert_decision_round_snapshot(
+                session,
+                round_id=round_id,
+                started_at=started_at,
+                finished_at=finished_at,
+                evidence_bundle_summary=evidence_bundle,
+                parameter_upgrade_candidates=upgrade_candidates,
+                family_timeframe_decisions=ft_decisions,
+                promotion_readiness_assessment=readiness_report,
+                manifest=manifest,
+                conclusion_markdown=conclusion_markdown,
+            )
+    finally:
+        if engine is not None:
+            engine.dispose()
 
 
 if __name__ == "__main__":

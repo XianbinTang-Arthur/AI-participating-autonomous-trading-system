@@ -31,7 +31,7 @@ def _collect_latest_workflow_runs(project_root: Path) -> dict[str, dict[str, Any
     runs_dir = project_root / "artifacts/operations/workflow_runs"
     latest_by_workflow: dict[str, dict[str, Any]] = {}
     if not runs_dir.exists():
-        return latest_by_workflow
+        return _augment_workflow_runs_with_decision_round(latest_by_workflow, project_root)
 
     for path in sorted(runs_dir.glob("*.json"), reverse=True):
         payload = _safe_load_json(path)
@@ -59,7 +59,86 @@ def _collect_latest_workflow_runs(project_root: Path) -> dict[str, dict[str, Any
             candidate_dt is not None and current_dt is not None and candidate_dt > current_dt
         ) or (current_dt is None and candidate_dt is not None):
             latest_by_workflow[workflow] = candidate
-    return latest_by_workflow
+    return _augment_workflow_runs_with_decision_round(latest_by_workflow, project_root)
+
+
+def _augment_workflow_runs_with_decision_round(
+    latest_by_workflow: dict[str, dict[str, Any]],
+    project_root: Path,
+) -> dict[str, dict[str, Any]]:
+    snapshot = _load_latest_decision_round_snapshot(project_root)
+    if snapshot is None:
+        return latest_by_workflow
+    finished_at = snapshot.get("finished_at") or snapshot.get("started_at")
+    candidate_dt = _parse_iso_datetime(str(finished_at) if finished_at else None)
+    if candidate_dt is None:
+        return latest_by_workflow
+
+    augmented = dict(latest_by_workflow)
+    for workflow in ("governance_cycle", "decision_cycle"):
+        current = augmented.get(workflow)
+        current_dt = _parse_iso_datetime(
+            str(current.get("finished_at") or current.get("started_at"))
+            if current else None,
+        )
+        if current is None or current_dt is None or candidate_dt > current_dt:
+            augmented[workflow] = {
+                "run_id": snapshot.get("round_id"),
+                "workflow": workflow,
+                "overall_status": "success",
+                "started_at": snapshot.get("started_at"),
+                "finished_at": snapshot.get("finished_at"),
+                "path": snapshot.get("path"),
+                "synthetic_from": snapshot.get("data_source"),
+            }
+    return augmented
+
+
+def _load_latest_decision_round_snapshot(project_root: Path) -> dict[str, Any] | None:
+    try:
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance._db_util import try_governance_db
+        from aats.data_platform.governance.decision_rounds_db import (
+            db_load_latest_decision_round_snapshot,
+        )
+
+        engine, ok = try_governance_db()
+        if ok:
+            try:
+                with Session(engine) as session:
+                    snapshot = db_load_latest_decision_round_snapshot(session)
+                if snapshot:
+                    return {
+                        "round_id": snapshot.get("round_id"),
+                        "started_at": snapshot.get("started_at"),
+                        "finished_at": snapshot.get("finished_at"),
+                        "path": f"decision_round:{snapshot.get('round_id')}",
+                        "data_source": "db",
+                    }
+            finally:
+                if engine is not None:
+                    engine.dispose()
+    except Exception:
+        pass
+
+    rounds_dir = project_root / "artifacts" / "decision_rounds"
+    if not rounds_dir.exists():
+        return None
+    latest_dirs = sorted((p for p in rounds_dir.iterdir() if p.is_dir()), reverse=True)
+    if not latest_dirs:
+        return None
+    latest_dir = latest_dirs[0]
+    manifest = _safe_load_json(latest_dir / "round_manifest.json")
+    if not isinstance(manifest, dict):
+        return None
+    return {
+        "round_id": manifest.get("round_id", latest_dir.name),
+        "started_at": manifest.get("started_at"),
+        "finished_at": manifest.get("finished_at"),
+        "path": str(latest_dir),
+        "data_source": "file",
+    }
 
 
 def build_gate_runtime_contract(
