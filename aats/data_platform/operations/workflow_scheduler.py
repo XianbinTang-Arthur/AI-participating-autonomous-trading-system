@@ -51,10 +51,13 @@ def load_scheduler_state(project_root: Path) -> dict[str, Any]:
 
             with Session(engine) as session:
                 state = db_load_scheduler_state(session)
-            if state.get("workflows"):
-                return state
+            # DB 是真源：空 state 也直接返回，避免把旧 slot 进度重新注入调度去重
+            return state
         except Exception as exc:
-            log.warning("从 DB 读取 workflow scheduler state 失败: %s", exc)
+            log.warning(
+                "从 DB 读取 workflow scheduler state 失败 (%s)，退化到文件（stale 风险）",
+                exc,
+            )
         finally:
             if engine is not None:
                 engine.dispose()
@@ -176,10 +179,7 @@ def enqueue_due_workflows(
     save_state: bool = True,
     initialize_if_missing: bool = True,
 ) -> dict[str, Any]:
-    from aats.data_platform.db import get_session
-
     now = now or _utcnow()
-    state = load_scheduler_state(project_root)
     report: dict[str, Any] = {
         "ok": True,
         "scheduler_at": now.isoformat(),
@@ -190,6 +190,75 @@ def enqueue_due_workflows(
         "skipped": [],
         "errors": [],
     }
+
+    # 跨进程互斥：同一时刻只允许一个 scheduler 运行，避免 load→compute→save 跨事务竞态
+    # 导致同一时间窗被重复 enqueue。DB 不可用时退化为单进程（文件 state），也是历史行为。
+    lock_engine = None
+    lock_session = None
+    if not dry_run:
+        try:
+            from sqlalchemy.orm import Session as SQLSession
+
+            from aats.data_platform.governance._db_util import try_governance_db
+            from aats.data_platform.governance.operational_state_db import (
+                try_acquire_scheduler_lock,
+            )
+
+            lock_engine, lock_ok = try_governance_db()
+            if lock_ok and lock_engine is not None:
+                lock_session = SQLSession(lock_engine)
+                if not try_acquire_scheduler_lock(lock_session):
+                    lock_session.close()
+                    if lock_engine is not None:
+                        lock_engine.dispose()
+                    report["skipped"].append(
+                        {
+                            "workflow": "*",
+                            "reason": "另一个 scheduler 正在运行（advisory lock 被持有）",
+                        },
+                    )
+                    return report
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("scheduler advisory lock 获取失败，继续运行但无并发保护: %s", exc)
+            lock_session = None
+
+    try:
+        return _enqueue_due_workflows_locked(
+            project_root,
+            now=now,
+            actor=actor,
+            dry_run=dry_run,
+            save_state=save_state,
+            initialize_if_missing=initialize_if_missing,
+            report=report,
+        )
+    finally:
+        if lock_session is not None:
+            try:
+                from aats.data_platform.governance.operational_state_db import (
+                    release_scheduler_lock,
+                )
+
+                release_scheduler_lock(lock_session)
+            finally:
+                lock_session.close()
+        if lock_engine is not None:
+            lock_engine.dispose()
+
+
+def _enqueue_due_workflows_locked(
+    project_root: Path,
+    *,
+    now: datetime,
+    actor: str,
+    dry_run: bool,
+    save_state: bool,
+    initialize_if_missing: bool,
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    from aats.data_platform.db import get_session
+
+    state = load_scheduler_state(project_root)
 
     scheduled_workflows = _load_scheduled_workflows(project_root)
     if initialize_if_missing and not state.get("initialized_at"):

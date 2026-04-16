@@ -20,6 +20,78 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# pg_advisory_lock key for serializing workflow scheduler runs across daemon
+# instances and 手动脚本。Key 取自 crc32 常量空间一个固定值，避免与其他模块冲突。
+# 修改这个值等于让旧 scheduler 不再互斥，必须慎重。
+_SCHEDULER_ADVISORY_LOCK_KEY = 0x4141_5353  # "AATS_RDP_SCHEDULER"
+_RELEASE_CYCLE_ADVISORY_LOCK_KEY = 0x4141_5243  # "AATS_RDP_RC"
+
+
+def try_acquire_scheduler_lock(session: Session) -> bool:
+    """尝试获取 scheduler 的 session 级 advisory lock。
+
+    返回 True 表示当前 Postgres session（连接）独占调度权；返回 False 表示
+    已有其他 scheduler 在运行，调用方应跳过本轮 enqueue。
+    使用 pg_try_advisory_lock（非 xact 版本）——锁绑定在连接上，跨事务有效，
+    必须显式调用 release_scheduler_lock 或关闭 session 才会释放。
+    因为 scheduler 的 load→compute→save 跨多个事务，必须用 session 级锁。
+    """
+    row = session.execute(
+        text("SELECT pg_try_advisory_lock(:key) AS acquired"),
+        {"key": _SCHEDULER_ADVISORY_LOCK_KEY},
+    ).fetchone()
+    acquired = bool(row and row.acquired)
+    if acquired:
+        # 必须在持锁 session 上显式 commit，否则锁的绑定关系
+        # 会在连接归还 pool 时失效。
+        session.commit()
+    return acquired
+
+
+def release_scheduler_lock(session: Session) -> None:
+    """释放由 try_acquire_scheduler_lock 获取的 session 级 advisory lock。
+
+    调用失败不抛异常——释放是 best-effort，session 关闭时 Postgres 也会自动释放。
+    """
+    try:
+        session.execute(
+            text("SELECT pg_advisory_unlock(:key)"),
+            {"key": _SCHEDULER_ADVISORY_LOCK_KEY},
+        )
+        session.commit()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
+def try_acquire_release_cycle_lock(session: Session) -> bool:
+    """尝试获取 release_cycle 的 session 级 advisory lock。
+
+    Release cycle 的 candidate 选取和 create_parameter_release 跨多个事务，
+    若两个 run_release_cycle 并发运行可能对同一条 approved recommendation
+    重复发布。锁定整个 release_cycle 调用是最简单且正确的防护方式。
+    """
+    row = session.execute(
+        text("SELECT pg_try_advisory_lock(:key) AS acquired"),
+        {"key": _RELEASE_CYCLE_ADVISORY_LOCK_KEY},
+    ).fetchone()
+    acquired = bool(row and row.acquired)
+    if acquired:
+        session.commit()
+    return acquired
+
+
+def release_release_cycle_lock(session: Session) -> None:
+    """释放 release_cycle advisory lock。"""
+    try:
+        session.execute(
+            text("SELECT pg_advisory_unlock(:key)"),
+            {"key": _RELEASE_CYCLE_ADVISORY_LOCK_KEY},
+        )
+        session.commit()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
 def _with_payload(payload: Any, **fields: Any) -> dict[str, Any]:
     result: dict[str, Any] = {}
     if isinstance(payload, dict):

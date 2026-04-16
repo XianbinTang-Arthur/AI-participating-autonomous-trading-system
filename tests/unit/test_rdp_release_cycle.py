@@ -64,6 +64,7 @@ def test_select_release_candidates_dedupes_by_combo_and_skips_existing_release()
             {
                 "release_id": "rel_1",
                 "recommendation_id": "rec_existing_release",
+                "apply_result": "success",
             }
         ]
     }
@@ -74,6 +75,54 @@ def test_select_release_candidates_dedupes_by_combo_and_skips_existing_release()
     assert [item["recommendation_id"] for item in result["eligible"]] == ["rec_new"]
     skipped_ids = {item["recommendation_id"] for item in result["skipped"]}
     assert skipped_ids == {"rec_old", "rec_keep", "rec_missing_ps", "rec_existing_release"}
+
+
+def test_select_release_candidates_retries_after_blocked_by_gate() -> None:
+    """被 gate 拦下或失败的 recommendation 必须可以重新进入下一轮 release cycle，
+    否则会出现 UI 显示为 pending 但 release_cycle 永远跳过的死锁。"""
+    registry = {
+        "recommendations": [
+            {
+                "recommendation_id": "rec_retry_after_gate",
+                "family": "independent",
+                "timeframe": "15m",
+                "recommendation_type": "parameter_upgrade",
+                "status": "approved",
+                "approved_at": "2026-04-16T09:00:00+00:00",
+                "target_parameter_set_id": "ps_retry",
+            },
+            {
+                "recommendation_id": "rec_retry_after_failure",
+                "family": "directional",
+                "timeframe": "1H",
+                "recommendation_type": "parameter_upgrade",
+                "status": "approved",
+                "approved_at": "2026-04-16T10:00:00+00:00",
+                "target_parameter_set_id": "ps_retry_fail",
+            },
+        ],
+    }
+    release_history = {
+        "releases": [
+            {
+                "release_id": "rel_gate_blocked",
+                "recommendation_id": "rec_retry_after_gate",
+                "apply_result": "blocked_by_gate",
+            },
+            {
+                "release_id": "rel_failed",
+                "recommendation_id": "rec_retry_after_failure",
+                "apply_result": "failed",
+            },
+        ],
+    }
+
+    result = _select_release_candidates(registry, release_history)
+
+    eligible_ids = {item["recommendation_id"] for item in result["eligible"]}
+    assert eligible_ids == {"rec_retry_after_gate", "rec_retry_after_failure"}
+    skipped_ids = {item["recommendation_id"] for item in result["skipped"]}
+    assert skipped_ids == set()
 
 
 def test_run_release_cycle_dry_run_has_no_release_side_effects(tmp_path: Path) -> None:

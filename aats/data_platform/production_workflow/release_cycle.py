@@ -97,10 +97,14 @@ def _select_release_candidates(
     registry: dict[str, Any],
     release_history: dict[str, Any],
 ) -> dict[str, Any]:
+    # 仅按"成功发布"索引：被 gate 拦住 / apply 失败的旧 release 不算"已处理"，
+    # 在 gate 条件恢复或失败原因修复后应允许重试。
+    # 语义必须与 rdp_control_summary.py 的 released_success_recommendation_ids
+    # 保持一致，否则会出现 "UI 说还能发，release_cycle 永远跳过" 的矛盾。
     existing_release_by_rec: dict[str, dict[str, Any]] = {}
     for release in release_history.get("releases", []):
         recommendation_id = release.get("recommendation_id")
-        if recommendation_id:
+        if recommendation_id and release.get("apply_result") == "success":
             existing_release_by_rec[recommendation_id] = release
 
     reviewed_count = 0
@@ -142,7 +146,7 @@ def _select_release_candidates(
                     "recommendation_id": recommendation_id,
                     "combo_key": combo_key,
                     "outcome": "skipped",
-                    "detail": "已存在 release 记录",
+                    "detail": "已存在成功 release 记录",
                     "release_id": existing_release_by_rec[recommendation_id].get("release_id"),
                 },
             )
@@ -199,6 +203,83 @@ def run_release_cycle(
     cycle_id = _make_cycle_id()
     environment = get_current_environment()
 
+    # 跨进程互斥：同一时刻只允许一个 release_cycle 在跑，避免两个进程对同一条
+    # approved recommendation 并发 create_parameter_release 导致重复发布。
+    # DB 不可用时退化为无锁运行（和 scheduler 一致）。
+    lock_engine = None
+    lock_session = None
+    if not dry_run:
+        try:
+            from sqlalchemy.orm import Session as SQLSession
+
+            from aats.data_platform.governance._db_util import try_governance_db
+            from aats.data_platform.governance.operational_state_db import (
+                try_acquire_release_cycle_lock,
+            )
+
+            lock_engine, lock_ok = try_governance_db()
+            if lock_ok and lock_engine is not None:
+                lock_session = SQLSession(lock_engine)
+                if not try_acquire_release_cycle_lock(lock_session):
+                    lock_session.close()
+                    if lock_engine is not None:
+                        lock_engine.dispose()
+                    finished_at = _utcnow()
+                    return {
+                        "ok": False,
+                        "cycle_id": cycle_id,
+                        "environment": environment,
+                        "dry_run": dry_run,
+                        "started_at": started_at.isoformat(),
+                        "finished_at": finished_at.isoformat(),
+                        "reviewed_count": 0,
+                        "eligible_count": 0,
+                        "selected_count": 0,
+                        "created_release_count": 0,
+                        "blocked_count": 0,
+                        "failed_count": 0,
+                        "skipped_count": 0,
+                        "results": [],
+                        "error": "另一个 release_cycle 正在运行（advisory lock 被持有）",
+                    }
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("release_cycle advisory lock 获取失败，继续运行但无并发保护: %s", exc)
+            lock_session = None
+
+    try:
+        return _run_release_cycle_locked(
+            project_root,
+            actor=actor,
+            dry_run=dry_run,
+            save_results=save_results,
+            started_at=started_at,
+            cycle_id=cycle_id,
+            environment=environment,
+        )
+    finally:
+        if lock_session is not None:
+            try:
+                from aats.data_platform.governance.operational_state_db import (
+                    release_release_cycle_lock,
+                )
+
+                release_release_cycle_lock(lock_session)
+            finally:
+                lock_session.close()
+        if lock_engine is not None:
+            lock_engine.dispose()
+
+
+def _run_release_cycle_locked(
+    project_root: Path,
+    *,
+    actor: str,
+    dry_run: bool,
+    save_results: bool,
+    started_at: datetime,
+    cycle_id: str,
+    environment: str,
+) -> dict[str, Any]:
     registry_path = project_root / "artifacts/decision_system/recommendation_registry.json"
     registry = load_recommendation_registry(registry_path)
     release_history = load_release_history(project_root)
