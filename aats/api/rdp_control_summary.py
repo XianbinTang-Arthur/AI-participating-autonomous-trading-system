@@ -490,11 +490,36 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         from aats.data_platform.governance.rdp_task_db import db_get_recent_tasks
 
         with _governance_session() as session:
-            recent = db_get_recent_tasks(session, limit=20)
+            recent = db_get_recent_tasks(session, limit=50)
         for task in recent:
-            workflow = task["workflow"]
-            if workflow not in tasks_by_workflow:
-                tasks_by_workflow[workflow] = task
+            workflow = str(task.get("workflow") or "").strip()
+            if not workflow:
+                continue
+            summary = tasks_by_workflow.setdefault(
+                workflow,
+                {
+                    "latest_task": None,
+                    "running_task": None,
+                    "pending_task": None,
+                },
+            )
+            if summary["latest_task"] is None:
+                summary["latest_task"] = task
+            if task.get("status") == "running" and summary["running_task"] is None:
+                summary["running_task"] = task
+            if task.get("status") == "pending" and summary["pending_task"] is None:
+                summary["pending_task"] = task
+
+        for workflow, summary in tasks_by_workflow.items():
+            display_task = (
+                summary.get("running_task")
+                or summary.get("pending_task")
+                or summary.get("latest_task")
+            )
+            summary["display_task"] = display_task
+            if isinstance(display_task, dict):
+                summary.update(display_task)
+            summary["workflow"] = workflow
     except Exception as exc:
         logger.warning("control-summary: task query failed: %s", exc)
 

@@ -185,6 +185,60 @@ def db_get_recent_tasks(
     ]
 
 
+def db_get_latest_task_for_workflow(
+    session: Session,
+    workflow: str,
+    *,
+    statuses: tuple[str, ...] | None = None,
+    requested_after: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Return the newest task for a workflow, optionally filtered by status/time."""
+    if workflow not in VALID_WORKFLOWS:
+        raise ValueError(f"Invalid workflow: {workflow!r}, expected one of {VALID_WORKFLOWS}")
+
+    clauses = ["workflow = :workflow"]
+    params: dict[str, Any] = {"workflow": workflow}
+
+    if statuses:
+        clauses.append("status = ANY(:statuses)")
+        params["statuses"] = list(statuses)
+    if requested_after is not None:
+        clauses.append("requested_at >= :requested_after")
+        params["requested_after"] = requested_after
+
+    row = session.execute(
+        text(
+            f"""
+            SELECT task_id, workflow, status,
+                   requested_by, requested_at,
+                   started_at, finished_at,
+                   exit_code, error_message, log_tail
+            FROM governance.rdp_task_queue
+            WHERE {' AND '.join(clauses)}
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        params,
+    ).fetchone()
+
+    if row is None:
+        return None
+
+    return {
+        "task_id": row.task_id,
+        "workflow": row.workflow,
+        "status": row.status,
+        "requested_by": row.requested_by,
+        "requested_at": row.requested_at.isoformat() if row.requested_at else None,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+        "exit_code": row.exit_code,
+        "error_message": row.error_message,
+        "log_tail": row.log_tail,
+    }
+
+
 # ── 查询是否有同类活跃任务（防重复提交）──────────────────────────
 
 def db_has_active_task(

@@ -12,7 +12,11 @@ from sqlalchemy.orm import Session
 
 from aats.data_platform.governance._atomic_io import atomic_json_write
 from aats.data_platform.governance._db_util import try_governance_db
-from aats.data_platform.governance.rdp_task_db import db_create_task, db_has_active_task
+from aats.data_platform.governance.rdp_task_db import (
+    db_create_task,
+    db_get_latest_task_for_workflow,
+    db_has_active_task,
+)
 from aats.data_platform.operations.environment_guard import guard_workflow_execution
 from aats.data_platform.operations.workflow_dispatcher import (
     list_available_workflows,
@@ -31,6 +35,7 @@ _WEEKDAY_MAP = {
     "SAT": 5,
     "SUN": 6,
 }
+_BOOTSTRAP_SEQUENCE = ("data_maintenance", "research_cycle")
 
 
 def _utcnow() -> datetime:
@@ -177,6 +182,259 @@ def _load_scheduled_workflows(project_root: Path) -> list[tuple[str, dict[str, A
     return scheduled
 
 
+def _parse_iso_dt(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _initialize_bootstrap_state(
+    state: dict[str, Any],
+    *,
+    now: datetime,
+    scheduled_workflows: list[tuple[str, dict[str, Any], dict[str, Any]]],
+) -> None:
+    workflows_state = state.setdefault("workflows", {})
+    for workflow_name, _, schedule in scheduled_workflows:
+        workflow_state = workflows_state.setdefault(workflow_name, {})
+        workflow_state["last_checked_at"] = now.isoformat()
+        workflow_state["schedule"] = format_schedule(schedule)
+        if workflow_name in _BOOTSTRAP_SEQUENCE:
+            workflow_state.setdefault("last_action", "bootstrap_pending")
+            continue
+        slot = _latest_slot_for_schedule(schedule, now=now)
+        workflow_state["last_processed_slot"] = slot.isoformat()
+        workflow_state["last_action"] = "initialized"
+    state["initialized_at"] = now.isoformat()
+    state["bootstrap_stage"] = _BOOTSTRAP_SEQUENCE[0]
+
+
+def _current_bootstrap_stage(
+    state: dict[str, Any],
+    *,
+    now: datetime,
+) -> str | None:
+    initialized_at = _parse_iso_dt(state.get("initialized_at"))
+    if initialized_at is None:
+        return None
+    if state.get("bootstrap_completed_at") and not state.get("bootstrap_stage"):
+        return None
+
+    workflows_state = state.setdefault("workflows", {})
+    stage = state.get("bootstrap_stage")
+    if stage in _BOOTSTRAP_SEQUENCE:
+        return str(stage)
+
+    from aats.data_platform.db import get_session
+
+    with get_session() as session:
+        data_done = db_get_latest_task_for_workflow(
+            session,
+            "data_maintenance",
+            statuses=("done",),
+            requested_after=initialized_at,
+        )
+        if not data_done:
+            state["bootstrap_stage"] = "data_maintenance"
+            workflows_state.setdefault("data_maintenance", {})["last_action"] = "bootstrap_pending"
+            return "data_maintenance"
+
+        research_done = db_get_latest_task_for_workflow(
+            session,
+            "research_cycle",
+            statuses=("done",),
+            requested_after=initialized_at,
+        )
+        if not research_done:
+            state["bootstrap_stage"] = "research_cycle"
+            workflows_state.setdefault("research_cycle", {})["last_action"] = "bootstrap_pending"
+            return "research_cycle"
+
+    state["bootstrap_stage"] = None
+    state["bootstrap_completed_at"] = now.isoformat()
+    return None
+
+
+def _enqueue_single_workflow(
+    *,
+    workflow_name: str,
+    schedule: dict[str, Any],
+    workflow_state: dict[str, Any],
+    slot_key: str,
+    actor: str,
+    dry_run: bool,
+    report: dict[str, Any],
+    action_label: str = "enqueued",
+    reason_label: str = "scheduled",
+) -> None:
+    from aats.data_platform.db import get_session
+
+    guard = guard_workflow_execution(workflow_name)
+    if not guard.allowed:
+        if not dry_run:
+            workflow_state["last_processed_slot"] = slot_key
+            workflow_state["last_action"] = "blocked_by_environment"
+            workflow_state["last_reason"] = guard.reason
+        report["skipped"].append(
+            {
+                "workflow": workflow_name,
+                "reason": guard.reason,
+                "slot": slot_key,
+            },
+        )
+        return
+
+    try:
+        with get_session() as session:
+            active_task = db_has_active_task(session, workflow_name)
+            if active_task:
+                if not dry_run:
+                    workflow_state["last_processed_slot"] = slot_key
+                    workflow_state["last_action"] = "active_task_present"
+                    workflow_state["last_reason"] = active_task["task_id"]
+                report["skipped"].append(
+                    {
+                        "workflow": workflow_name,
+                        "reason": "已有 active task",
+                        "slot": slot_key,
+                        "task_id": active_task["task_id"],
+                    },
+                )
+                return
+            task_id = None
+            if not dry_run:
+                task_id = db_create_task(
+                    session,
+                    workflow=workflow_name,
+                    requested_by=actor,
+                )
+    except Exception as exc:  # pragma: no cover - defensive
+        log.exception("scheduler failed to enqueue workflow %s", workflow_name)
+        report["ok"] = False
+        report["errors"].append(
+            {
+                "workflow": workflow_name,
+                "slot": slot_key,
+                "error": str(exc),
+            },
+        )
+        return
+
+    if not dry_run:
+        workflow_state["last_processed_slot"] = slot_key
+        workflow_state["last_action"] = action_label
+        workflow_state["last_task_id"] = task_id
+        workflow_state["last_reason"] = reason_label
+    report["enqueued"].append(
+        {
+            "workflow": workflow_name,
+            "slot": slot_key,
+            "task_id": task_id,
+        },
+    )
+
+
+def _run_bootstrap_sequence(
+    *,
+    state: dict[str, Any],
+    scheduled_workflows: list[tuple[str, dict[str, Any], dict[str, Any]]],
+    now: datetime,
+    actor: str,
+    dry_run: bool,
+    report: dict[str, Any],
+) -> bool:
+    stage = _current_bootstrap_stage(state, now=now)
+    if not stage:
+        return False
+
+    workflows_by_name = {name: schedule for name, _, schedule in scheduled_workflows}
+    schedule = workflows_by_name.get(stage)
+    if schedule is None:
+        report["skipped"].append(
+            {
+                "workflow": stage,
+                "reason": "bootstrap workflow 缺少 schedule 配置",
+            },
+        )
+        return True
+
+    workflow_state = state.setdefault("workflows", {}).setdefault(stage, {})
+    workflow_state["last_checked_at"] = now.isoformat()
+    workflow_state["schedule"] = format_schedule(schedule)
+    slot_key = _latest_slot_for_schedule(schedule, now=now).isoformat()
+
+    initialized_at = _parse_iso_dt(state.get("initialized_at"))
+    from aats.data_platform.db import get_session
+
+    with get_session() as session:
+        latest_success = db_get_latest_task_for_workflow(
+            session,
+            stage,
+            statuses=("done",),
+            requested_after=initialized_at,
+        )
+
+    if latest_success:
+        if stage == _BOOTSTRAP_SEQUENCE[0]:
+            state["bootstrap_stage"] = _BOOTSTRAP_SEQUENCE[1]
+            workflow_state["last_action"] = "bootstrap_completed"
+            report["skipped"].append(
+                {
+                    "workflow": stage,
+                    "reason": "bootstrap 已完成，切换到 research_cycle",
+                    "slot": slot_key,
+                },
+            )
+            return _run_bootstrap_sequence(
+                state=state,
+                scheduled_workflows=scheduled_workflows,
+                now=now,
+                actor=actor,
+                dry_run=dry_run,
+                report=report,
+            )
+
+        state["bootstrap_stage"] = None
+        state["bootstrap_completed_at"] = now.isoformat()
+        workflow_state["last_action"] = "bootstrap_completed"
+        report["skipped"].append(
+            {
+                "workflow": stage,
+                "reason": "bootstrap 全部完成，等待下一个调度周期",
+                "slot": slot_key,
+            },
+        )
+        return True
+
+    _enqueue_single_workflow(
+        workflow_name=stage,
+        schedule=schedule,
+        workflow_state=workflow_state,
+        slot_key=slot_key,
+        actor=actor,
+        dry_run=dry_run,
+        report=report,
+        action_label="bootstrap_enqueued",
+        reason_label="bootstrap",
+    )
+    report["skipped"].extend(
+        {
+            "workflow": workflow_name,
+            "reason": f"cold-start bootstrap 等待 {stage} 完成",
+            "slot": _latest_slot_for_schedule(schedule_cfg, now=now).isoformat(),
+        }
+        for workflow_name, _, schedule_cfg in scheduled_workflows
+        if workflow_name != stage
+    )
+    return True
+
+
 def enqueue_due_workflows(
     project_root: Path,
     *,
@@ -263,27 +521,34 @@ def _enqueue_due_workflows_locked(
     initialize_if_missing: bool,
     report: dict[str, Any],
 ) -> dict[str, Any]:
-    from aats.data_platform.db import get_session
-
     state = load_scheduler_state(project_root)
 
     scheduled_workflows = _load_scheduled_workflows(project_root)
     if initialize_if_missing and not state.get("initialized_at"):
-        for workflow_name, _, schedule in scheduled_workflows:
-            slot = _latest_slot_for_schedule(schedule, now=now)
-            state.setdefault("workflows", {})[workflow_name] = {
-                "last_processed_slot": slot.isoformat(),
-                "last_action": "initialized",
-                "last_checked_at": now.isoformat(),
-            }
-        state["initialized_at"] = now.isoformat()
+        _initialize_bootstrap_state(
+            state,
+            now=now,
+            scheduled_workflows=scheduled_workflows,
+        )
         report["initialized"] = True
         report["skipped"].append(
             {
                 "workflow": "*",
-                "reason": "首次启动，仅建立调度基线，不补跑历史窗口。",
+                "reason": "首次启动仅建立调度基线，并进入 cold-start bootstrap：先数据刷新，再研究流程。",
             },
         )
+        if save_state and not dry_run:
+            save_scheduler_state(project_root, state)
+        return report
+
+    if _run_bootstrap_sequence(
+        state=state,
+        scheduled_workflows=scheduled_workflows,
+        now=now,
+        actor=actor,
+        dry_run=dry_run,
+        report=report,
+    ):
         if save_state and not dry_run:
             save_scheduler_state(project_root, state)
         return report
@@ -305,68 +570,14 @@ def _enqueue_due_workflows_locked(
             )
             continue
 
-        guard = guard_workflow_execution(workflow_name)
-        if not guard.allowed:
-            if not dry_run:
-                workflow_state["last_processed_slot"] = slot_key
-                workflow_state["last_action"] = "blocked_by_environment"
-                workflow_state["last_reason"] = guard.reason
-            report["skipped"].append(
-                {
-                    "workflow": workflow_name,
-                    "reason": guard.reason,
-                    "slot": slot_key,
-                },
-            )
-            continue
-
-        try:
-            with get_session() as session:
-                active_task = db_has_active_task(session, workflow_name)
-                if active_task:
-                    if not dry_run:
-                        workflow_state["last_processed_slot"] = slot_key
-                        workflow_state["last_action"] = "active_task_present"
-                        workflow_state["last_reason"] = active_task["task_id"]
-                    report["skipped"].append(
-                        {
-                            "workflow": workflow_name,
-                            "reason": "已有 active task",
-                            "slot": slot_key,
-                            "task_id": active_task["task_id"],
-                        },
-                    )
-                    continue
-                task_id = None
-                if not dry_run:
-                    task_id = db_create_task(
-                        session,
-                        workflow=workflow_name,
-                        requested_by=actor,
-                    )
-        except Exception as exc:  # pragma: no cover - defensive
-            log.exception("scheduler failed to enqueue workflow %s", workflow_name)
-            report["ok"] = False
-            report["errors"].append(
-                {
-                    "workflow": workflow_name,
-                    "slot": slot_key,
-                    "error": str(exc),
-                },
-            )
-            continue
-
-        if not dry_run:
-            workflow_state["last_processed_slot"] = slot_key
-            workflow_state["last_action"] = "enqueued"
-            workflow_state["last_task_id"] = task_id
-            workflow_state["last_reason"] = "scheduled"
-        report["enqueued"].append(
-            {
-                "workflow": workflow_name,
-                "slot": slot_key,
-                "task_id": task_id,
-            },
+        _enqueue_single_workflow(
+            workflow_name=workflow_name,
+            schedule=schedule,
+            workflow_state=workflow_state,
+            slot_key=slot_key,
+            actor=actor,
+            dry_run=dry_run,
+            report=report,
         )
 
     if save_state and not dry_run:

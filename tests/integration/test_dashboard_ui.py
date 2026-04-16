@@ -1991,8 +1991,18 @@ const configHtml = renderAIConfigView({
       health_blocked: true,
     },
     tasks: {
-      data_maintenance: { status: 'done', finished_at: '2026-03-21T12:10:00Z' },
-      research_cycle: { status: 'running', started_at: '2026-03-21T12:15:00Z' },
+      data_maintenance: {
+        latest_task: { status: 'pending', requested_at: '2026-03-21T12:16:00Z' },
+        pending_task: { status: 'pending', requested_at: '2026-03-21T12:16:00Z' },
+        running_task: null,
+        display_task: { status: 'pending', requested_at: '2026-03-21T12:16:00Z' },
+      },
+      research_cycle: {
+        latest_task: { status: 'running', started_at: '2026-03-21T12:15:00Z' },
+        pending_task: null,
+        running_task: { status: 'running', started_at: '2026-03-21T12:15:00Z' },
+        display_task: { status: 'running', started_at: '2026-03-21T12:15:00Z' },
+      },
     },
     pending_recommendations: [
       {
@@ -2506,6 +2516,8 @@ console.log(JSON.stringify({
   configHasCommandBar: configHtml.includes('只保留当前能推进的工作'),
   configHasCoreQueue: configHtml.includes('当前待处理'),
   configHasBlockerCard: configHtml.includes('当前阻断'),
+  configSplitsTaskExecutionAndQueue: configHtml.includes('数据刷新执行') && configHtml.includes('数据刷新排队') && configHtml.includes('研究流程执行') && configHtml.includes('研究流程排队'),
+  configShowsResearchRunningAndDataPendingSeparately: configHtml.includes('研究流程执行') && configHtml.includes('运行中') && configHtml.includes('数据刷新排队') && configHtml.includes('排队中'),
   configUsesReleaseFirstLanguage: configHtml.includes('创建发布') && configHtml.includes('运行 Gate'),
   configNoDirectApplyLanguage: !configHtml.includes('data-action="rdp-approve-and-apply"') && !configHtml.includes('data-action="rdp-apply-only"'),
   configShowsCandidateAndGovernance: configHtml.includes('本轮生成参数集 ps_candidate_1') && configHtml.includes('当前治理建议：暂停（待审批）'),
@@ -2554,6 +2566,8 @@ console.log(JSON.stringify({
         self.assertIn('"configHasCommandBar":true', result.stdout)
         self.assertIn('"configHasCoreQueue":true', result.stdout)
         self.assertIn('"configHasBlockerCard":true', result.stdout)
+        self.assertIn('"configSplitsTaskExecutionAndQueue":true', result.stdout)
+        self.assertIn('"configShowsResearchRunningAndDataPendingSeparately":true', result.stdout)
         self.assertIn('"configUsesReleaseFirstLanguage":true', result.stdout)
         self.assertIn('"configNoDirectApplyLanguage":true', result.stdout)
         self.assertIn('"configShowsCandidateAndGovernance":true', result.stdout)

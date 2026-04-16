@@ -21,6 +21,97 @@ def _fake_request() -> SimpleNamespace:
 
 
 class TestRdpControlSummary(TestCase):
+    def test_control_summary_splits_running_and_pending_tasks_by_workflow(self) -> None:
+        request = _fake_request()
+
+        with (
+            patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
+            patch(
+                "aats.data_platform.governance.rdp_task_db.db_get_recent_tasks",
+                return_value=[
+                    {
+                        "task_id": "task_pending_data",
+                        "workflow": "data_maintenance",
+                        "status": "pending",
+                        "requested_by": "scheduler",
+                        "requested_at": "2026-04-10T12:05:00Z",
+                        "started_at": None,
+                        "finished_at": None,
+                        "exit_code": None,
+                        "error_message": None,
+                        "log_tail": None,
+                    },
+                    {
+                        "task_id": "task_running_research",
+                        "workflow": "research_cycle",
+                        "status": "running",
+                        "requested_by": "scheduler",
+                        "requested_at": "2026-04-10T12:00:00Z",
+                        "started_at": "2026-04-10T12:01:00Z",
+                        "finished_at": None,
+                        "exit_code": None,
+                        "error_message": None,
+                        "log_tail": None,
+                    },
+                    {
+                        "task_id": "task_done_data",
+                        "workflow": "data_maintenance",
+                        "status": "done",
+                        "requested_by": "scheduler",
+                        "requested_at": "2026-04-10T11:30:00Z",
+                        "started_at": "2026-04-10T11:31:00Z",
+                        "finished_at": "2026-04-10T11:40:00Z",
+                        "exit_code": 0,
+                        "error_message": None,
+                        "log_tail": None,
+                    },
+                ],
+            ),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "staging"}),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+                "overall_health": "healthy",
+                "blocking_reasons": [],
+                "warnings": [],
+                "checks": [],
+            }),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+            patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
+            patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={"recommendations": []}),
+            patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+                "generated_at": "2026-04-10T11:40:00Z",
+                "governance_managed": True,
+                "paused_combos": [],
+                "known_combos": [],
+                "active_sets": {},
+                "parameter_sets": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+                "available": False,
+                "generated_at": None,
+                "status_distribution": {},
+                "decisions": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+                "available": True,
+                "parameter_sets": [],
+            }),
+            patch(
+                "aats.data_platform.production_workflow.release_registry.load_release_history",
+                return_value={"releases": []},
+            ),
+        ):
+            payload = build_rdp_control_summary(request)
+
+        data_task = payload["tasks"]["data_maintenance"]
+        research_task = payload["tasks"]["research_cycle"]
+        self.assertEqual(data_task["pending_task"]["task_id"], "task_pending_data")
+        self.assertEqual(data_task["latest_task"]["task_id"], "task_pending_data")
+        self.assertIsNone(data_task["running_task"])
+        self.assertEqual(research_task["running_task"]["task_id"], "task_running_research")
+        self.assertEqual(research_task["display_task"]["task_id"], "task_running_research")
+
     def test_control_summary_excludes_already_applied_approved_recommendations(self) -> None:
         request = _fake_request()
 

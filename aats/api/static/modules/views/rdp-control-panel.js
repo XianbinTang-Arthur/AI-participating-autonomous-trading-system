@@ -164,28 +164,29 @@ function labelForApplyResult(status) {
 }
 
 function workflowStatus(taskInfo) {
-  if (!taskInfo) {
+  const displayTask = taskInfo?.display_task || taskInfo?.latest_task || taskInfo || null;
+  if (!displayTask) {
     return { value: "未运行", meta: "还没有相关执行记录", tone: "outline" };
   }
-  const status = taskInfo.status || "unknown";
+  const status = displayTask.status || "unknown";
   if (status === "running") {
     return {
       value: "运行中",
-      meta: taskInfo.started_at ? `开始于 ${relativeTime(taskInfo.started_at)}` : "正在执行",
+      meta: displayTask.started_at ? `开始于 ${relativeTime(displayTask.started_at)}` : "正在执行",
       tone: "info",
     };
   }
   if (status === "done") {
     return {
       value: "已完成",
-      meta: taskInfo.finished_at ? `完成于 ${relativeTime(taskInfo.finished_at)}` : "最近一次执行成功",
+      meta: displayTask.finished_at ? `完成于 ${relativeTime(displayTask.finished_at)}` : "最近一次执行成功",
       tone: "positive",
     };
   }
   if (status === "failed") {
     return {
       value: "失败",
-      meta: taskInfo.error_message || "任务执行失败",
+      meta: displayTask.error_message || "任务执行失败",
       tone: "danger",
     };
   }
@@ -196,7 +197,43 @@ function workflowStatus(taskInfo) {
 }
 
 function isBusy(taskInfo) {
-  return Boolean(taskInfo && ["pending", "running"].includes(taskInfo.status));
+  const runningTask = taskInfo?.running_task || null;
+  const pendingTask = taskInfo?.pending_task || null;
+  const displayTask = taskInfo?.display_task || taskInfo?.latest_task || taskInfo || null;
+  return Boolean(
+    runningTask
+    || pendingTask
+    || (displayTask && ["pending", "running"].includes(displayTask.status))
+  );
+}
+
+function taskLaneStatus(taskInfo, lane) {
+  const laneTask = lane === "running"
+    ? (taskInfo?.running_task || null)
+    : (taskInfo?.pending_task || null);
+  if (!laneTask) {
+    return {
+      value: lane === "running" ? "空闲" : "无排队",
+      meta: lane === "running" ? "当前没有正在执行的任务" : "当前没有新的排队任务",
+      tone: "outline",
+    };
+  }
+  const status = laneTask.status || "unknown";
+  if (status === "running") {
+    return {
+      value: "运行中",
+      meta: laneTask.started_at ? `开始于 ${relativeTime(laneTask.started_at)}` : "正在执行",
+      tone: "info",
+    };
+  }
+  if (status === "pending") {
+    return {
+      value: "排队中",
+      meta: laneTask.requested_at ? `入队于 ${relativeTime(laneTask.requested_at)}` : "等待 daemon 处理",
+      tone: "warning",
+    };
+  }
+  return workflowStatus(laneTask);
 }
 
 function firstNonEmpty(...values) {
@@ -465,6 +502,10 @@ function renderCommandBar({
 }) {
   const dataMaintenance = tasks.data_maintenance || null;
   const researchCycle = tasks.research_cycle || null;
+  const dataRunning = taskLaneStatus(dataMaintenance, "running");
+  const dataPending = taskLaneStatus(dataMaintenance, "pending");
+  const researchRunning = taskLaneStatus(researchCycle, "running");
+  const researchPending = taskLaneStatus(researchCycle, "pending");
   const maintenanceBusy = isBusy(dataMaintenance);
   const researchBusy = isBusy(researchCycle);
   const rollbackItem = observationQueue.find((item) => item?.observation_status === "rollback_recommended");
@@ -522,7 +563,7 @@ function renderCommandBar({
     <div class="rdp-command-actions">
       ${primaryAction}
       ${actionButton(
-        maintenanceBusy ? "数据刷新进行中" : "刷新数据",
+        dataRunning.value === "运行中" ? "数据刷新运行中" : dataPending.value === "排队中" ? "数据刷新排队中" : "刷新数据",
         "rdp-trigger-workflow",
         "data_maintenance",
         "secondary",
@@ -532,7 +573,7 @@ function renderCommandBar({
         },
       )}
       ${actionButton(
-        researchBusy ? "研究进行中" : "运行研究",
+        researchRunning.value === "运行中" ? "研究运行中" : researchPending.value === "排队中" ? "研究排队中" : "运行研究",
         "rdp-trigger-workflow",
         "research_cycle",
         "secondary",
@@ -559,17 +600,31 @@ function renderCommandBar({
     ],
     metrics: [
       {
-        label: "数据刷新",
-        value: workflowStatus(dataMaintenance).value,
-        meta: workflowStatus(dataMaintenance).meta,
-        tone: workflowStatus(dataMaintenance).tone,
+        label: "数据刷新执行",
+        value: dataRunning.value,
+        meta: dataRunning.meta,
+        tone: dataRunning.tone,
         badge: actorTags("system"),
       },
       {
-        label: "研究流程",
-        value: workflowStatus(researchCycle).value,
-        meta: workflowStatus(researchCycle).meta,
-        tone: workflowStatus(researchCycle).tone,
+        label: "数据刷新排队",
+        value: dataPending.value,
+        meta: dataPending.meta,
+        tone: dataPending.tone,
+        badge: actorTags("system"),
+      },
+      {
+        label: "研究流程执行",
+        value: researchRunning.value,
+        meta: researchRunning.meta,
+        tone: researchRunning.tone,
+        badge: actorTags("ai", "system"),
+      },
+      {
+        label: "研究流程排队",
+        value: researchPending.value,
+        meta: researchPending.meta,
+        tone: researchPending.tone,
         badge: actorTags("ai", "system"),
       },
       {
