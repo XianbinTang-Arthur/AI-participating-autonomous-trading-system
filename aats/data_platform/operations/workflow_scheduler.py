@@ -394,7 +394,12 @@ def _run_bootstrap_sequence(
 
     if latest_success:
         if stage == _BOOTSTRAP_SEQUENCE[0]:
-            state["bootstrap_stage"] = _BOOTSTRAP_SEQUENCE[1]
+            next_stage = _BOOTSTRAP_SEQUENCE[1]
+            log.info(
+                "scheduler bootstrap: %s 完成，推进到下一阶段 %s (latest_done_task=%s)",
+                stage, next_stage, latest_success.get("task_id"),
+            )
+            state["bootstrap_stage"] = next_stage
             workflow_state["last_action"] = "bootstrap_completed"
             report["skipped"].append(
                 {
@@ -412,6 +417,10 @@ def _run_bootstrap_sequence(
                 report=report,
             )
 
+        log.info(
+            "scheduler bootstrap: %s 完成，bootstrap 阶段全部结束 (latest_done_task=%s)",
+            stage, latest_success.get("task_id"),
+        )
         state["bootstrap_stage"] = None
         state["bootstrap_completed_at"] = now.isoformat()
         workflow_state["last_action"] = "bootstrap_completed"
@@ -424,6 +433,10 @@ def _run_bootstrap_sequence(
         )
         return True
 
+    log.info(
+        "scheduler bootstrap: 当前阶段 %s 等待完成，其它 workflow 全部被门控 (dry_run=%s)",
+        stage, dry_run,
+    )
     _enqueue_single_workflow(
         workflow_name=stage,
         schedule=schedule,

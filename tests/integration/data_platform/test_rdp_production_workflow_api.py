@@ -153,6 +153,218 @@ def test_tuning_review_routes_expose_and_review_pending_proposals(tmp_path) -> N
         assert listing_after["total"] == 0
 
 
+def _seed_tuning_registry(root, proposals: list[dict[str, object]]) -> None:
+    (root / "artifacts" / "governance").mkdir(parents=True, exist_ok=True)
+    (root / "artifacts" / "governance" / "strategy_tuning_proposals.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-16T12:00:00Z",
+                "version": 1,
+                "proposals": proposals,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "artifacts" / "governance" / "strategy_tuning_overrides.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-16T12:00:00Z",
+                "combo_overrides": {},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_tuning_approve_returns_not_found_for_unknown_proposal(tmp_path) -> None:
+    """审批不存在的 proposal_id 应返回 ok=False，消息包含“未找到”。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(
+        root,
+        proposals=[
+            {
+                "proposal_id": "tprop_exists_1",
+                "created_at": "2026-04-16T12:00:00Z",
+                "combo_key": "directional_1h",
+                "family": "directional",
+                "timeframe": "1h",
+                "parameter": "min_safe_net_edge_bps",
+                "current_value": 2.0,
+                "proposed_value": 1.5,
+                "status": "pending_review",
+                "rationale": "seed",
+            },
+        ],
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/tuning/proposals/tprop_does_not_exist/approve",
+            json={"actor": "operator", "notes": "ghost"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert "未找到" in payload["message"]
+    assert payload["proposal"] is None
+
+
+def test_tuning_reject_returns_not_found_for_unknown_proposal(tmp_path) -> None:
+    """拒绝不存在的 proposal_id 同样应返回 ok=False，消息包含“未找到”。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(root, proposals=[])
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/tuning/proposals/tprop_missing/reject",
+            json={"actor": "operator", "notes": "ghost"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert "未找到" in payload["message"]
+    assert payload["proposal"] is None
+
+
+def test_tuning_approve_twice_blocks_second_review(tmp_path) -> None:
+    """已批准的提案再次批准应返回 ok=False，消息包含“不能继续审核”。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(
+        root,
+        proposals=[
+            {
+                "proposal_id": "tprop_once_1",
+                "created_at": "2026-04-16T12:00:00Z",
+                "combo_key": "directional_1h",
+                "family": "directional",
+                "timeframe": "1h",
+                "parameter": "min_safe_net_edge_bps",
+                "current_value": 2.0,
+                "proposed_value": 1.5,
+                "status": "pending_review",
+                "rationale": "seed",
+            },
+        ],
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+    ):
+        client = TestClient(app)
+
+        first = client.post(
+            "/rdp/tuning/proposals/tprop_once_1/approve",
+            json={"actor": "operator", "notes": "first"},
+        ).json()
+        assert first["ok"] is True
+        assert first["proposal"]["status"] == "approved"
+
+        second = client.post(
+            "/rdp/tuning/proposals/tprop_once_1/approve",
+            json={"actor": "operator", "notes": "second"},
+        ).json()
+
+    assert second["ok"] is False
+    assert "不能继续审核" in second["message"]
+    # 提案状态保持 approved，不被二次写入
+    assert second["proposal"]["status"] == "approved"
+
+
+def test_tuning_reject_then_approve_is_blocked(tmp_path) -> None:
+    """先拒绝的提案再调用 approve 时应返回 ok=False，消息包含“不能继续审核”。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(
+        root,
+        proposals=[
+            {
+                "proposal_id": "tprop_reject_1",
+                "created_at": "2026-04-16T12:00:00Z",
+                "combo_key": "directional_1h",
+                "family": "directional",
+                "timeframe": "1h",
+                "parameter": "min_safe_net_edge_bps",
+                "current_value": 2.0,
+                "proposed_value": 1.5,
+                "status": "pending_review",
+                "rationale": "seed",
+            },
+        ],
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+    ):
+        client = TestClient(app)
+
+        rejected = client.post(
+            "/rdp/tuning/proposals/tprop_reject_1/reject",
+            json={"actor": "operator", "notes": "nope"},
+        ).json()
+        assert rejected["ok"] is True
+        assert rejected["proposal"]["status"] == "rejected"
+
+        retry_approve = client.post(
+            "/rdp/tuning/proposals/tprop_reject_1/approve",
+            json={"actor": "operator", "notes": "retry"},
+        ).json()
+
+    assert retry_approve["ok"] is False
+    assert "不能继续审核" in retry_approve["message"]
+    assert retry_approve["proposal"]["status"] == "rejected"
+
+
 def test_workbench_detail_routes_expose_evidence_and_integrity_block(tmp_path) -> None:
     app = FastAPI()
     app.include_router(rdp_router)

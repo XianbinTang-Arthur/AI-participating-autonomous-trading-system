@@ -1209,6 +1209,25 @@ def _build_tuning_overview_payload(root: Path) -> dict[str, Any]:
         registry = {"proposals": []}
         overrides = {"combo_overrides": {}}
 
+    # 与 proposals / alerts 两处保持一致：当前 Step2 快照不完整时不能让 overview
+    # 读起来像"可以放心点批准"。headline 显式告警，approvable_count 拉到 0。
+    step2_incomplete_reason: str | None = None
+    try:
+        from aats.data_platform.governance.snapshot_db import (
+            ROUND_PHASE_STEP2,
+            is_snapshot_incomplete,
+            load_latest_research_round_snapshot,
+        )
+
+        step2_snapshot = load_latest_research_round_snapshot(
+            phase=ROUND_PHASE_STEP2,
+            project_root=root,
+        )
+        if is_snapshot_incomplete(step2_snapshot):
+            step2_incomplete_reason = "manifest_missing_on_disk"
+    except Exception as exc:
+        logger.warning("tuning overview: failed to inspect step2 snapshot: %s", exc)
+
     proposals = [
         item for item in (registry.get("proposals") or [])
         if isinstance(item, dict)
@@ -1217,17 +1236,26 @@ def _build_tuning_overview_payload(root: Path) -> dict[str, Any]:
     approved = [item for item in proposals if item.get("status") == "approved"]
     active_overrides = overrides.get("combo_overrides") or {}
 
-    headline = "当前没有待审核调优提案。"
-    if pending_review:
+    if step2_incomplete_reason:
+        headline = (
+            f"当前 Step2 研究快照不完整，{len(pending_review)} 条调优提案暂不能批准。"
+            if pending_review
+            else "当前 Step2 研究快照不完整，暂不能处理调优提案。"
+        )
+    elif pending_review:
         headline = f"当前有 {len(pending_review)} 条自动调优提案待审核。"
     elif approved:
         headline = f"已有 {len(approved)} 条调优提案获批，正在影响后续 research 默认值。"
+    else:
+        headline = "当前没有待审核调优提案。"
 
     return {
         "pending_review_count": len(pending_review),
+        "approvable_count": 0 if step2_incomplete_reason else len(pending_review),
         "approved_count": len(approved),
         "active_override_count": len(active_overrides),
         "headline": headline,
+        "step2_incomplete_reason": step2_incomplete_reason,
     }
 
 
@@ -1242,6 +1270,39 @@ def _build_tuning_proposals_payload(root: Path) -> dict[str, Any]:
         logger.warning("tuning proposals: failed to load registry: %s", exc)
         registry = {"proposals": []}
 
+    # Step2 当前快照不完整时，不能让运营者按现有 proposal 继续走审批：哪怕提案
+    # 自身是历史完整数据产出的，当前数据链不健康也意味着"立即应用"的影响不可控。
+    # 与 _build_workbench_alerts_payload 共用同一判定，保持 UI 两处信号一致：
+    # alerts 板块会亮红告警，这里则把 proposal 的 actions 禁用、integrity_status 改
+    # 为 blocked，同时保留 proposal 可见，让运营者清楚知道"有历史调优提案在排队，
+    # 但当前数据不完整不能点批准"。
+    step2_incomplete_reason: str | None = None
+    step2_incomplete_alert: dict[str, Any] | None = None
+    try:
+        from aats.data_platform.governance.snapshot_db import (
+            ROUND_PHASE_STEP2,
+            is_snapshot_incomplete,
+            load_latest_research_round_snapshot,
+        )
+
+        step2_snapshot = load_latest_research_round_snapshot(
+            phase=ROUND_PHASE_STEP2,
+            project_root=root,
+        )
+        if is_snapshot_incomplete(step2_snapshot):
+            step2_incomplete_reason = "manifest_missing_on_disk"
+            step2_incomplete_alert = {
+                "code": "step2_manifest_missing",
+                "severity": "danger",
+                "scope": "round",
+                "phase": "phase2",
+                "title": "Step2 研究快照不完整",
+                "message": "最新 Step2 目录缺少 round_manifest，不能据此批准调优提案。",
+                "blocks_approval": True,
+            }
+    except Exception as exc:
+        logger.warning("tuning proposals: failed to inspect step2 snapshot: %s", exc)
+
     proposals = sorted(
         [
             item for item in (registry.get("proposals") or [])
@@ -1252,6 +1313,13 @@ def _build_tuning_proposals_payload(root: Path) -> dict[str, Any]:
     )
     items: list[dict[str, Any]] = []
     for item in proposals[:8]:
+        approval_enabled = step2_incomplete_reason is None
+        disabled_reason = (
+            "当前 Step2 研究快照不完整，暂不能批准调优提案。"
+            if not approval_enabled
+            else None
+        )
+        integrity_alerts = [step2_incomplete_alert] if step2_incomplete_alert else []
         items.append({
             "proposal_id": item.get("proposal_id"),
             "combo_key": item.get("combo_key"),
@@ -1271,7 +1339,10 @@ def _build_tuning_proposals_payload(root: Path) -> dict[str, Any]:
                 limit=3,
             ),
             "impact_scope": ["research", "replay", "scan", "step3"],
-            "integrity_status": "complete",
+            "integrity_status": "complete" if approval_enabled else "blocked",
+            "integrity_alerts": integrity_alerts,
+            "approval_enabled": approval_enabled,
+            "approval_blocked_reason": disabled_reason,
             "created_at": item.get("created_at"),
             "actions": [
                 _make_ui_action(
@@ -1279,6 +1350,8 @@ def _build_tuning_proposals_payload(root: Path) -> dict[str, Any]:
                     label="批准调优",
                     ui_action="rdp-approve-tuning-proposal",
                     value=str(item.get("proposal_id") or ""),
+                    enabled=approval_enabled,
+                    disabled_reason=disabled_reason,
                 ),
                 _make_ui_action(
                     key="reject_tuning",
@@ -1292,6 +1365,7 @@ def _build_tuning_proposals_payload(root: Path) -> dict[str, Any]:
     return {
         "total": len(proposals),
         "items": items,
+        "step2_incomplete_reason": step2_incomplete_reason,
     }
 
 

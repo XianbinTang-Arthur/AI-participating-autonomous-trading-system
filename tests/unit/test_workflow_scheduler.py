@@ -329,3 +329,152 @@ def test_scheduler_treats_equivalent_offset_slot_as_already_processed(tmp_path: 
     assert result["enqueued"] == []
     assert result["skipped"][0]["reason"] == "当前窗口已处理"
     create_task_mock.assert_not_called()
+
+
+def test_scheduler_bootstrap_blocks_when_data_maintenance_failed(tmp_path: Path) -> None:
+    """回归：data_maintenance 上一次 failed 时，bootstrap 不能推进到 research_cycle，
+    也不能误判"已完成"把 research_cycle 当成下一阶段入队；应继续在 data_maintenance
+    阶段重试（由 _enqueue_single_workflow + db_has_active_task 控制去重）。
+    """
+    _write_state(
+        tmp_path,
+        {
+            "initialized_at": "2026-04-16T12:00:00+00:00",
+            "bootstrap_stage": "data_maintenance",
+            "workflows": {
+                "data_maintenance": {"last_action": "bootstrap_enqueued"},
+                "research_cycle": {"last_action": "bootstrap_pending"},
+            },
+        },
+    )
+    now = datetime(2026, 4, 16, 12, 30, tzinfo=UTC)
+    schedules = {
+        "data_maintenance": {"enabled": True, "frequency": "daily", "hour_utc": 4, "minute_utc": 0},
+        "research_cycle": {
+            "enabled": True,
+            "frequency": "weekly",
+            "weekday_utc": "SUN",
+            "hour_utc": 8,
+            "minute_utc": 0,
+        },
+    }
+
+    def _latest_task(_session, workflow, **kwargs):
+        # 关键：latest_success 过滤 statuses=("done",) —— failed 任务不会被返回，
+        # 等同于"没完成"，所以 bootstrap_stage 必须继续卡在 data_maintenance。
+        requested_statuses = kwargs.get("statuses") or ()
+        if workflow == "data_maintenance" and "done" not in requested_statuses:
+            return {"task_id": "task_failed_data_1", "status": "failed"}
+        return None
+
+    with (
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.list_available_workflows",
+            return_value=list(schedules.keys()),
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.load_workflow_config",
+            side_effect=lambda _root, workflow: {"schedule": schedules[workflow]},
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.guard_workflow_execution",
+            return_value=type("Guard", (), {"allowed": True, "reason": None})(),
+        ),
+        patch("aats.data_platform.db.get_session", _fake_session),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_get_latest_task_for_workflow",
+            side_effect=_latest_task,
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_has_active_task",
+            return_value=None,
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_create_task",
+            return_value="task_bootstrap_data_retry",
+        ),
+    ):
+        result = enqueue_due_workflows(tmp_path, now=now, save_state=True, initialize_if_missing=False)
+
+    # 只允许 data_maintenance 继续重试，绝对不能放行 research_cycle 进队。
+    enqueued_workflows = [item["workflow"] for item in result["enqueued"]]
+    assert enqueued_workflows == ["data_maintenance"]
+    assert "research_cycle" not in enqueued_workflows
+    state = load_scheduler_state(tmp_path)
+    assert state["bootstrap_stage"] == "data_maintenance"
+    assert "bootstrap_completed_at" not in state or state.get("bootstrap_completed_at") is None
+
+
+def test_scheduler_bootstrap_blocks_when_research_cycle_failed(tmp_path: Path) -> None:
+    """回归：data_maintenance 已完成、research_cycle 上一次 failed 时，bootstrap 不能
+    误标"bootstrap_completed_at"，也不能放行非 bootstrap workflow。
+    """
+    _write_state(
+        tmp_path,
+        {
+            "initialized_at": "2026-04-16T12:00:00+00:00",
+            "bootstrap_stage": "research_cycle",
+            "workflows": {
+                "data_maintenance": {"last_action": "bootstrap_completed"},
+                "research_cycle": {"last_action": "bootstrap_enqueued"},
+                "governance_cycle": {"last_action": "initialized"},
+            },
+        },
+    )
+    now = datetime(2026, 4, 16, 13, 30, tzinfo=UTC)
+    schedules = {
+        "data_maintenance": {"enabled": True, "frequency": "daily", "hour_utc": 4, "minute_utc": 0},
+        "research_cycle": {
+            "enabled": True,
+            "frequency": "weekly",
+            "weekday_utc": "SUN",
+            "hour_utc": 8,
+            "minute_utc": 0,
+        },
+        "governance_cycle": {"enabled": True, "frequency": "daily", "hour_utc": 7, "minute_utc": 0},
+    }
+
+    def _latest_task(_session, workflow, **kwargs):
+        requested_statuses = kwargs.get("statuses") or ()
+        if workflow == "research_cycle" and "done" not in requested_statuses:
+            return {"task_id": "task_failed_research_1", "status": "failed"}
+        # 查 done 的时候都返回 None —— research_cycle 没完成过
+        return None
+
+    with (
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.list_available_workflows",
+            return_value=list(schedules.keys()),
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.load_workflow_config",
+            side_effect=lambda _root, workflow: {"schedule": schedules[workflow]},
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.guard_workflow_execution",
+            return_value=type("Guard", (), {"allowed": True, "reason": None})(),
+        ),
+        patch("aats.data_platform.db.get_session", _fake_session),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_get_latest_task_for_workflow",
+            side_effect=_latest_task,
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_has_active_task",
+            return_value=None,
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_create_task",
+            return_value="task_bootstrap_research_retry",
+        ),
+    ):
+        result = enqueue_due_workflows(tmp_path, now=now, save_state=True, initialize_if_missing=False)
+
+    enqueued_workflows = [item["workflow"] for item in result["enqueued"]]
+    # research_cycle 可以重试，但 governance_cycle 绝对不能被当作"bootstrap 之后的
+    # 正常 workflow"放行
+    assert "governance_cycle" not in enqueued_workflows
+    assert enqueued_workflows == ["research_cycle"]
+    state = load_scheduler_state(tmp_path)
+    assert state["bootstrap_stage"] == "research_cycle"
+    assert state.get("bootstrap_completed_at") is None

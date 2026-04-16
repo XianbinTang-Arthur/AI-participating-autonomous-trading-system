@@ -10,6 +10,7 @@ import aats.api.rdp_control_summary as rdp_control_summary
 from aats.api.rdp_control_summary import (
     build_rdp_control_summary,
     build_rdp_tuning_overview,
+    build_rdp_tuning_proposals,
     build_rdp_workbench_item_detail,
     build_rdp_workbench_item_evidence,
     build_rdp_workbench_items,
@@ -964,6 +965,134 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(payload["pending_review_count"], 1)
         self.assertEqual(payload["approved_count"], 1)
         self.assertEqual(payload["active_override_count"], 1)
+
+    def test_tuning_proposals_blocked_when_step2_snapshot_incomplete(self) -> None:
+        """回归：当 Step2 最新快照缺 round_manifest 时，tuning proposals 不得当成
+        可直接批准的 actionable 项返回；必须与 workbench_alerts 保持同一信号。
+        """
+        request = _fake_request()
+        with (
+            patch(
+                "aats.data_platform.operations.strategy_tuning_registry.load_strategy_tuning_registry",
+                return_value={
+                    "version": 3,
+                    "proposals": [
+                        {
+                            "proposal_id": "tp_1",
+                            "status": "pending_review",
+                            "combo_key": "independent_15m",
+                            "family": "independent",
+                            "timeframe": "15m",
+                            "parameter": "min_safe_net_edge_bps",
+                            "current_value": 2.5,
+                            "proposed_value": 2.0,
+                            "rationale": "安全边际占主导",
+                            "created_at": "2026-04-10T11:00:00Z",
+                        },
+                    ],
+                },
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+                return_value={"round_id": "step2_incomplete"},
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+                return_value=True,
+            ),
+        ):
+            payload = build_rdp_tuning_proposals(request)
+
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["step2_incomplete_reason"], "manifest_missing_on_disk")
+        self.assertEqual(len(payload["items"]), 1)
+        item = payload["items"][0]
+        self.assertEqual(item["integrity_status"], "blocked")
+        self.assertFalse(item["approval_enabled"])
+        self.assertIsNotNone(item["approval_blocked_reason"])
+        self.assertEqual(len(item["integrity_alerts"]), 1)
+        self.assertEqual(item["integrity_alerts"][0]["code"], "step2_manifest_missing")
+        # approve 按钮必须禁用（并带 disabled_reason），reject 按钮保持可用
+        approve_action = next(a for a in item["actions"] if a["key"] == "approve_tuning")
+        self.assertFalse(approve_action["enabled"])
+        self.assertIsNotNone(approve_action["disabled_reason"])
+        reject_action = next(a for a in item["actions"] if a["key"] == "reject_tuning")
+        self.assertTrue(reject_action["enabled"])
+
+    def test_tuning_proposals_actionable_when_step2_snapshot_complete(self) -> None:
+        """Sanity：Step2 快照完整时 proposals 仍是 actionable（未被过度收紧）。"""
+        request = _fake_request()
+        with (
+            patch(
+                "aats.data_platform.operations.strategy_tuning_registry.load_strategy_tuning_registry",
+                return_value={
+                    "version": 3,
+                    "proposals": [
+                        {
+                            "proposal_id": "tp_1",
+                            "status": "pending_review",
+                            "combo_key": "independent_15m",
+                            "parameter": "min_safe_net_edge_bps",
+                            "current_value": 2.5,
+                            "proposed_value": 2.0,
+                            "rationale": "安全边际占主导",
+                            "created_at": "2026-04-10T11:00:00Z",
+                        },
+                    ],
+                },
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+                return_value={"round_id": "step2_ok", "manifest_synthesized": False},
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+                return_value=False,
+            ),
+        ):
+            payload = build_rdp_tuning_proposals(request)
+
+        self.assertIsNone(payload["step2_incomplete_reason"])
+        item = payload["items"][0]
+        self.assertEqual(item["integrity_status"], "complete")
+        self.assertTrue(item["approval_enabled"])
+        self.assertEqual(item["integrity_alerts"], [])
+        approve_action = next(a for a in item["actions"] if a["key"] == "approve_tuning")
+        self.assertTrue(approve_action["enabled"])
+
+    def test_tuning_overview_downgrades_headline_when_step2_incomplete(self) -> None:
+        """回归：overview 的 approvable_count 与 headline 必须反映 Step2 不完整。"""
+        request = _fake_request()
+        with (
+            patch(
+                "aats.data_platform.operations.strategy_tuning_registry.load_strategy_tuning_registry",
+                return_value={
+                    "version": 3,
+                    "proposals": [
+                        {"proposal_id": "tp_1", "status": "pending_review"},
+                        {"proposal_id": "tp_2", "status": "approved"},
+                    ],
+                },
+            ),
+            patch(
+                "aats.data_platform.operations.strategy_tuning_registry.load_strategy_tuning_overrides",
+                return_value={"combo_overrides": {}},
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+                return_value={"round_id": "step2_incomplete"},
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+                return_value=True,
+            ),
+        ):
+            payload = build_rdp_tuning_overview(request)
+
+        self.assertEqual(payload["pending_review_count"], 1)
+        self.assertEqual(payload["approvable_count"], 0)
+        self.assertEqual(payload["step2_incomplete_reason"], "manifest_missing_on_disk")
+        self.assertIn("不完整", payload["headline"])
 
     def test_workbench_item_detail_and_evidence_include_drilldown_payload(self) -> None:
         request = _fake_request()
