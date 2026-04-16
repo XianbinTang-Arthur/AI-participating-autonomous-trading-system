@@ -36,6 +36,26 @@ _ROUND_PHASE_ROOTS: dict[str, str] = {
 }
 _ROUND_DIR_PATTERN = re.compile(r"^\d{8}_\d{6}_[0-9a-f]{8}$")
 
+# 表示 snapshot 磁盘目录缺 round_manifest.json 的 data_source 标记。
+# 所有下游 consumer（evidence_bundle / operator queries / rollback / observation / auto-tuning）
+# 必须识别此标记并按"无可信数据"处理，避免把半成品目录当作正式 round。
+SNAPSHOT_DATA_SOURCE_INCOMPLETE = "file_incomplete"
+
+
+def is_snapshot_incomplete(snapshot: dict[str, Any] | None) -> bool:
+    """True iff snapshot 是残留/半成品目录（缺 round_manifest.json）。
+
+    consumer 应把返回 True 的 snapshot 视同无证据，避免误把 ``overall_status=unknown``
+    的占位快照当成可信的 Phase2/3/4 round 输入下游决策链。
+    """
+    if not isinstance(snapshot, dict):
+        return False
+    if snapshot.get("data_source") == SNAPSHOT_DATA_SOURCE_INCOMPLETE:
+        return True
+    if snapshot.get("manifest_synthesized"):
+        return True
+    return False
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)

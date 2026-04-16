@@ -25,6 +25,7 @@ from aats.data_platform.governance.snapshot_db import (
     SNAPSHOT_ACTIVE_ROUND_INDEX,
     SNAPSHOT_ARTIFACT_INDEX,
     SNAPSHOT_QUALITY_MONITOR,
+    is_snapshot_incomplete,
     load_governance_snapshot,
     load_latest_research_round_snapshot,
 )
@@ -437,6 +438,22 @@ def query_latest_attribution(project_root: Path) -> dict[str, Any]:
         phase=ROUND_PHASE_PHASE3,
         project_root=project_root,
     )
+    # 磁盘目录缺 round_manifest.json 的不完整 phase3 快照：暴露 round_id 让运营者知道
+    # "磁盘上有目录但不完整"，但 available 必须保持 False —— 否则 UI 会把占位
+    # summary 当成"最新 attribution 已可用"。直接返回，避免回落到磁盘扫描时
+    # 再把同一个不完整目录翻出来当 available。
+    if is_snapshot_incomplete(snapshot):
+        result["round_id"] = snapshot.get("round_id")
+        result["round_dir"] = snapshot.get("round_path")
+        result["manifest"] = {
+            "round_id": snapshot.get("round_id"),
+            "status": "unknown",
+            "started_at": None,
+            "finished_at": None,
+            "scope": None,
+        }
+        result["incomplete_reason"] = "manifest_missing_on_disk"
+        return result
     if snapshot:
         manifest = snapshot.get("manifest") or {}
         result["manifest"] = {
@@ -480,6 +497,17 @@ def query_latest_attribution(project_root: Path) -> dict[str, Any]:
             "finished_at": manifest.get("finished_at"),
             "scope": manifest.get("scope"),
         }
+    else:
+        # 磁盘 fallback 路径同样要检查 manifest：缺就不能 available。
+        result["manifest"] = {
+            "round_id": latest_dir.name,
+            "status": "unknown",
+            "started_at": None,
+            "finished_at": None,
+            "scope": None,
+        }
+        result["incomplete_reason"] = "manifest_missing_on_disk"
+        return result
 
     summary = _safe_load_json(latest_dir / "attribution_summary.json")
     if summary:
@@ -525,6 +553,20 @@ def query_latest_execution_realism(project_root: Path) -> dict[str, Any]:
         phase=ROUND_PHASE_PHASE4,
         project_root=project_root,
     )
+    # 同 attribution：缺 round_manifest.json 的 phase4 snapshot 不能标 available，
+    # 否则 operator/UI 会误信"最新 execution realism 已就绪"。
+    if is_snapshot_incomplete(snapshot):
+        result["round_id"] = snapshot.get("round_id")
+        result["round_dir"] = snapshot.get("round_path")
+        result["manifest"] = {
+            "round_id": snapshot.get("round_id"),
+            "status": "unknown",
+            "started_at": None,
+            "finished_at": None,
+            "scope": None,
+        }
+        result["incomplete_reason"] = "manifest_missing_on_disk"
+        return result
     if snapshot:
         manifest = snapshot.get("manifest") or {}
         result["manifest"] = {
@@ -571,6 +613,16 @@ def query_latest_execution_realism(project_root: Path) -> dict[str, Any]:
             "finished_at": manifest.get("finished_at"),
             "scope": manifest.get("scope"),
         }
+    else:
+        result["manifest"] = {
+            "round_id": latest_dir.name,
+            "status": "unknown",
+            "started_at": None,
+            "finished_at": None,
+            "scope": None,
+        }
+        result["incomplete_reason"] = "manifest_missing_on_disk"
+        return result
 
     summary = _safe_load_json(latest_dir / "execution_summary.json")
     if summary:

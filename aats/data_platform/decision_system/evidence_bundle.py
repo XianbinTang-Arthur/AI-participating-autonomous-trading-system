@@ -14,6 +14,7 @@ from aats.data_platform.governance.snapshot_db import (
     SNAPSHOT_ACTIVE_ROUND_INDEX,
     SNAPSHOT_ARTIFACT_INDEX,
     SNAPSHOT_QUALITY_MONITOR,
+    is_snapshot_incomplete,
     load_governance_snapshot,
     load_research_round_snapshot,
     load_latest_research_round_snapshot,
@@ -211,6 +212,16 @@ def _collect_latest_step2_round_diags(project_root: pathlib.Path) -> list[dict[s
         phase=ROUND_PHASE_STEP2,
         project_root=project_root,
     )
+    # 缺 round_manifest.json 的 Step2 目录（残留/半成品）不能进入 Phase 2 证据链，
+    # 否则会让 collect_phase2_evidence / _aggregate_phase2_stats 把不完整目录
+    # 当成"experiments_with_openings>=1"的可交易证据，污染 promotion readiness。
+    if is_snapshot_incomplete(snapshot):
+        log.warning(
+            "Phase2 证据收集: Step2 最新 round snapshot 缺 round_manifest.json "
+            "(round_id=%s)，按无可信证据处理",
+            snapshot.get("round_id") if isinstance(snapshot, dict) else None,
+        )
+        return []
     if snapshot:
         diags: list[dict[str, Any]] = []
         summary = snapshot.get("summary", {}) or {}

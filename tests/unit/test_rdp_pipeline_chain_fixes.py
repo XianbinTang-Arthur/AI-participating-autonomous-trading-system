@@ -49,6 +49,17 @@ def test_extract_comparison_rows_supports_canonical_schema() -> None:
 
 def test_collect_phase2_evidence_reads_step2_round_combo_stats(tmp_path: Path) -> None:
     round_dir = tmp_path / "artifacts" / "research" / "step2_rounds" / "20260416_000000_demo"
+    # round_manifest.json 必须存在，否则 snapshot 会被标记为 file_incomplete，
+    # evidence_bundle 会按无可信证据处理（防止半成品目录污染 Phase2 证据链）。
+    _write_json(
+        round_dir / "round_manifest.json",
+        {
+            "round_id": "20260416_000000_demo",
+            "overall_status": "completed",
+            "started_at": "2026-04-16T00:00:00Z",
+            "finished_at": "2026-04-16T00:05:00Z",
+        },
+    )
     _write_json(
         round_dir / "family_timeframe_summary.json",
         {
@@ -93,6 +104,15 @@ def test_collect_phase2_evidence_reads_step2_round_combo_stats(tmp_path: Path) -
 def test_collect_phase2_evidence_ignores_non_round_debug_dirs(tmp_path: Path) -> None:
     rounds_root = tmp_path / "artifacts" / "research" / "step2_rounds"
     _write_json(
+        rounds_root / "20260416_000000_ab12cd34" / "round_manifest.json",
+        {
+            "round_id": "20260416_000000_ab12cd34",
+            "overall_status": "completed",
+            "started_at": "2026-04-16T00:00:00Z",
+            "finished_at": "2026-04-16T00:05:00Z",
+        },
+    )
+    _write_json(
         rounds_root / "20260416_000000_ab12cd34" / "scan_comparison_summary.json",
         {
             "comparison": [
@@ -119,6 +139,41 @@ def test_collect_phase2_evidence_ignores_non_round_debug_dirs(tmp_path: Path) ->
     assert combo["available"] is True
     assert combo["total_experiments"] == 1
     assert combo["max_opening_count"] == 15
+
+
+def test_collect_phase2_evidence_refuses_step2_round_without_manifest(tmp_path: Path) -> None:
+    """回归：缺 round_manifest.json 的 Step2 目录不能污染 Phase2 证据链。
+
+    曾经的 bug：scan_comparison_summary.json 存在就被当作 available=True 的 combo
+    证据，导致半成品/残留目录把 experiments_with_openings>=1 伪装成真可交易证据，
+    推动 readiness gate 进入 ready_for_next_live_test。
+    """
+    round_dir = tmp_path / "artifacts" / "research" / "step2_rounds" / "20260416_111111_nomanif"
+    # 故意不写 round_manifest.json
+    _write_json(
+        round_dir / "scan_comparison_summary.json",
+        {
+            "comparison": [
+                {
+                    "family": "independent",
+                    "timeframe": "15m",
+                    "label": "scan-incomplete",
+                    "opening_count": 999,
+                    "positive_edge_ratio": 0.9,
+                    "mean_expected_edge_bps": 9.9,
+                    "execution_compatible_ratio": 0.9,
+                },
+            ],
+        },
+    )
+
+    evidence = collect_phase2_evidence(tmp_path)
+    combo = evidence["combo_stats"]["independent_15m"]
+
+    assert combo["available"] is False, (
+        "缺 round_manifest.json 的 Step2 目录不能被 Phase2 证据链当作可用"
+    )
+    assert combo["experiments_with_openings"] == 0
 
 
 def test_import_from_parameter_candidates_skips_placeholder_and_none(tmp_path: Path) -> None:

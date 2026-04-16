@@ -20,8 +20,20 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def _seed_step2_round(root: Path, round_id: str, comparison: list[dict]) -> None:
+    round_dir = root / "artifacts/research/step2_rounds" / round_id
+    # round_manifest.json 必须存在，否则 snapshot 会被 is_snapshot_incomplete() 标记，
+    # build_strategy_tuning_review 会按无 step2 数据处理（防止半成品目录驱动自动调优）。
     _write_json(
-        root / "artifacts/research/step2_rounds" / round_id / "scan_comparison_summary.json",
+        round_dir / "round_manifest.json",
+        {
+            "round_id": round_id,
+            "overall_status": "completed",
+            "started_at": "2026-04-16T09:00:00Z",
+            "finished_at": "2026-04-16T09:05:00Z",
+        },
+    )
+    _write_json(
+        round_dir / "scan_comparison_summary.json",
         {
             "round_id": round_id,
             "experiment_count": len(comparison),

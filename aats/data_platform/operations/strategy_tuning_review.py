@@ -16,6 +16,7 @@ from aats.data_platform.decision_system.evidence_bundle import (
 )
 from aats.data_platform.governance.snapshot_db import (
     ROUND_PHASE_STEP2,
+    is_snapshot_incomplete,
     load_latest_research_round_snapshot,
 )
 from aats.data_platform.operations.strategy_tuning_registry import (
@@ -326,6 +327,11 @@ def build_strategy_tuning_review(
         phase=ROUND_PHASE_STEP2,
         project_root=project_root,
     )
+    # 缺 round_manifest.json 的 Step2 目录不能驱动自动调优：否则 review 会基于
+    # 半成品 scan_comparison_summary 产出 step2_round_id + global_recommendation，
+    # 让 operator 误以为"已基于最新 Step2 数据做了分析"。视同无 step2 数据。
+    if is_snapshot_incomplete(step2_snapshot):
+        step2_snapshot = None
     scan_summary = None
     if isinstance(step2_snapshot, dict):
         scan_summary = (step2_snapshot.get("summary") or {}).get("scan_comparison_summary")
