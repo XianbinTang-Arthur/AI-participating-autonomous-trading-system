@@ -101,6 +101,26 @@ def _parse_params(param_strs: list[str]) -> dict[str, object]:
     return result
 
 
+def _sanitize_loaded_params(
+    raw_params: dict[str, Any],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    if "_note" in raw_params:
+        log.warning("  %s is a placeholder candidate and will be ignored", source)
+        return {}
+
+    sanitized: dict[str, Any] = {}
+    for key, value in raw_params.items():
+        if key.startswith("_"):
+            continue
+        if value is None:
+            log.warning("  Ignore %s[%s]=None", source, key)
+            continue
+        sanitized[key] = value
+    return sanitized
+
+
 def _load_replay_params(
     params_json: str | None,
     parameter_set: str | None,
@@ -130,7 +150,10 @@ def _load_replay_params(
             # parameter_candidates.json 格式
             candidates = data["candidates"]
             if parameter_set in candidates:
-                param_dict = dict(candidates[parameter_set])
+                param_dict = _sanitize_loaded_params(
+                    dict(candidates[parameter_set]),
+                    source=f"candidate:{parameter_set}",
+                )
                 log.info("  Loaded parameter set '%s': %s", parameter_set, param_dict)
             else:
                 available = list(candidates.keys())
@@ -148,8 +171,13 @@ def _load_replay_params(
             log.info("  Loaded recommendations: %s", param_dict)
         else:
             # 平坦 params dict
-            param_dict = {k: v for k, v in data.items()
-                          if not k.startswith("_") and k not in ("round_id", "scope", "pending_validation")}
+            param_dict = _sanitize_loaded_params(
+                {
+                    k: v for k, v in data.items()
+                    if not k.startswith("_") and k not in ("round_id", "scope", "pending_validation")
+                },
+                source="flat-params",
+            )
             log.info("  Loaded flat params: %s", param_dict)
 
     # 2. 应用 CLI 覆盖（最高优先级）

@@ -164,6 +164,7 @@ def run_parameter_scan(
     start_ts: datetime,
     end_ts: datetime,
     parameter_grid: dict[str, list[Any]] | None = None,
+    base_params: dict[str, Any] | None = None,
     artifact_root: pathlib.Path | None = None,
 ) -> UUID:
     """执行一次完整参数扫描。
@@ -181,7 +182,7 @@ def run_parameter_scan(
         artifact_root = _ARTIFACT_ROOT
 
     grid = grid_to_json(parameter_grid)
-    combos = build_grid(parameter_grid)
+    combos = build_grid(parameter_grid, base_params=base_params)
 
     # 1. 创建 scan_run
     scan_run_id = create_scan_run(

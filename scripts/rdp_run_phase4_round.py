@@ -40,6 +40,11 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from aats.data_platform.governance.snapshot_db import (
+    ROUND_PHASE_PHASE4,
+    save_research_round_snapshot,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -309,6 +314,7 @@ def main() -> None:
     log.info("Building conclusion document...")
     from aats.data_platform.execution_realism.report_builder import build_phase4_conclusion
 
+    conclusion_path = round_dir / "phase4_execution_realism_conclusion.md"
     build_phase4_conclusion(
         symbol=_SYMBOL,
         start=args.start,
@@ -317,7 +323,7 @@ def main() -> None:
         comparison_rows=comparison_rows,
         cross_findings=cross_findings,
         round_id=round_id,
-        output_path=round_dir / "phase4_execution_realism_conclusion.md",
+        output_path=conclusion_path,
     )
 
     # ---- 统计 ----
@@ -357,6 +363,42 @@ def main() -> None:
     with manifest_path.open("w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
     log.info("Wrote manifest -> %s", manifest_path)
+    combo_payload: dict[str, Any] = {}
+    for r in results:
+        combo_payload[r["key"]] = {
+            "family": r["family"],
+            "timeframe": r["timeframe"],
+            "status": r["status"],
+            "run_dir": r.get("run_dir"),
+            "cost_summary": r.get("cost_summary"),
+            "alignment_stats": r.get("alignment_stats"),
+        }
+    if not save_research_round_snapshot(
+        round_id=round_id,
+        phase=ROUND_PHASE_PHASE4,
+        status=manifest["overall_status"],
+        round_path=str(round_dir),
+        started_at=started_at,
+        finished_at=finished_at,
+        replay_only=False,
+        manifest_payload=manifest,
+        summary_payload={
+            "all_cost_summaries": all_cost_summaries,
+            "comparison_rows": comparison_rows,
+            "cross_findings": cross_findings,
+            "combos": combo_payload,
+        },
+        conclusion_payload={
+            "report_markdown_path": str(conclusion_path),
+        },
+        artifacts_payload={
+            "round_dir": str(round_dir),
+            "manifest_path": str(manifest_path),
+            "conclusion_path": str(conclusion_path),
+            "comparison_csv_path": str(round_dir / "execution_realism_comparison.csv"),
+        },
+    ):
+        log.warning("Phase4 round snapshot DB upsert failed; file artifacts remain authoritative fallback")
 
     # ---- 最终汇总 ----
 

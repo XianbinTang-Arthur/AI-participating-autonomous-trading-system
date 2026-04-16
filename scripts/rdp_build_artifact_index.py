@@ -32,6 +32,10 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from aats.data_platform.governance.artifact_index import build_artifact_index
+from aats.data_platform.governance.snapshot_db import (
+    SNAPSHOT_ARTIFACT_INDEX,
+    save_governance_snapshot,
+)
 
 _DEFAULT_OUTPUT = "artifacts/governance/artifact_index.json"
 
@@ -60,6 +64,8 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(index, f, indent=2, ensure_ascii=False, default=str)
+    if not save_governance_snapshot(snapshot_type=SNAPSHOT_ARTIFACT_INDEX, payload=index):
+        log.warning("artifact_index DB upsert failed; file artifact kept as audit copy")
 
     summary = index["summary"]
     print()

@@ -44,6 +44,7 @@ VALID_STATUSES: set[str] = {
 KNOWN_PHASES: set[str] = {
     "phase2_step1",
     "phase2_step2",
+    "phase2_step3",
     "phase3",
     "phase4",
 }

@@ -118,6 +118,11 @@ _PRESETS: dict[str, dict[str, Any]] = {
 _REQUIRED_TOP_KEYS = {"batch_name", "family", "symbol", "timeframe", "start", "end", "experiments"}
 
 
+def _normalize_dataset_version(value: str | None) -> str:
+    normalized = (value or "v1.0").strip()
+    return "v1.0" if normalized == "v1" else normalized
+
+
 def _load_batch_spec(args: argparse.Namespace) -> dict[str, Any]:
     """从 --batch-file 或 --preset 加载 batch 规格。"""
     if args.batch_file:
@@ -154,6 +159,15 @@ def _load_batch_spec(args: argparse.Namespace) -> dict[str, Any]:
         if "params" not in exp:
             log.error("Experiment #%d (%s) missing 'params'", i, exp.get("label"))
             sys.exit(1)
+
+    spec = dict(spec)
+    if args.start:
+        spec["start"] = args.start
+    if args.end:
+        spec["end"] = args.end
+    spec["dataset_version"] = _normalize_dataset_version(
+        args.dataset_version or spec.get("dataset_version", "v1.0"),
+    )
 
     return spec
 
@@ -708,6 +722,9 @@ def main() -> None:
         "--no-print-summary", action="store_true",
         help="Suppress final summary print to stdout",
     )
+    parser.add_argument("--start", help="Override batch start date (YYYY-MM-DD, UTC)")
+    parser.add_argument("--end", help="Override batch end date (YYYY-MM-DD, UTC)")
+    parser.add_argument("--dataset-version", default="v1.0")
     args = parser.parse_args()
 
     # 1. 加载 batch 规格

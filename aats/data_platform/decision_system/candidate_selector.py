@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from .evidence_bundle import get_phase2_combo_stats, make_combo_key
+
 log = logging.getLogger(__name__)
 
 # ── 决策类型 ─────────────────────────────────────────────────────────
@@ -52,7 +54,12 @@ def _evaluate_phase2_score(
         "details": [],
     }
 
-    agg = evidence.get("aggregate_stats", {})
+    combo_key = make_combo_key(family, timeframe) or f"{family}_{timeframe}"
+    agg = get_phase2_combo_stats(evidence, family, timeframe)
+    if not agg.get("available"):
+        result["details"].append(f"{combo_key} 缺少 Phase 2 有效证据")
+        return result
+
     experiments_with_openings = agg.get("experiments_with_openings", 0)
     mean_edge_ratio = agg.get("mean_positive_edge_ratio", 0)
     max_opening = agg.get("max_opening_count", 0)
@@ -61,17 +68,17 @@ def _evaluate_phase2_score(
     if experiments_with_openings > 0:
         result["score"] += 1.0
         result["details"].append(
-            f"有 {experiments_with_openings} 个实验产生开仓信号"
+            f"{combo_key} 有 {experiments_with_openings} 个实验产生开仓信号"
         )
     else:
-        result["details"].append("没有实验产生开仓信号")
+        result["details"].append(f"{combo_key} 没有实验产生开仓信号")
 
     # 最大 opening count
     if max_opening >= P2_MIN_OPENING_COUNT:
         result["score"] += 1.0
-        result["details"].append(f"最大 opening_count={max_opening}")
+        result["details"].append(f"{combo_key} 最大 opening_count={max_opening}")
     else:
-        result["details"].append(f"opening_count 不足 (max={max_opening})")
+        result["details"].append(f"{combo_key} opening_count 不足 (max={max_opening})")
 
     # 正 edge 比例
     if mean_edge_ratio >= P2_MIN_POSITIVE_EDGE_RATIO:
@@ -81,7 +88,8 @@ def _evaluate_phase2_score(
         )
     else:
         result["details"].append(
-            f"positive_edge_ratio 不足 ({mean_edge_ratio:.3f} < {P2_MIN_POSITIVE_EDGE_RATIO})"
+            f"{combo_key} positive_edge_ratio 不足 "
+            f"({mean_edge_ratio:.3f} < {P2_MIN_POSITIVE_EDGE_RATIO})"
         )
 
     return result
@@ -315,5 +323,33 @@ def select_parameter_upgrade_candidates(
         evaluation = evaluate_parameter_set(ps, evidence_bundle)
         results.append(evaluation)
 
-    results.sort(key=lambda r: r["score_ratio"], reverse=True)
-    return results
+    decision_rank = {
+        "promote_candidate": 3,
+        "hold": 2,
+        "reject": 1,
+    }
+    best_by_combo: dict[str, dict[str, Any]] = {}
+    for result in results:
+        combo_key = make_combo_key(result.get("family"), result.get("timeframe")) or result[
+            "parameter_set_id"
+        ]
+        current = best_by_combo.get(combo_key)
+        if current is None:
+            best_by_combo[combo_key] = result
+            continue
+        current_key = (
+            current["score_ratio"],
+            current["total_score"],
+            decision_rank.get(current["decision"], 0),
+        )
+        candidate_key = (
+            result["score_ratio"],
+            result["total_score"],
+            decision_rank.get(result["decision"], 0),
+        )
+        if candidate_key > current_key:
+            best_by_combo[combo_key] = result
+
+    deduped = list(best_by_combo.values())
+    deduped.sort(key=lambda r: (r["score_ratio"], r["total_score"]), reverse=True)
+    return deduped

@@ -35,7 +35,17 @@ KNOWN_ARTIFACT_ROOTS: dict[str, dict[str, str]] = {
     "calibration_rounds": {
         "path": "artifacts/research/calibration_rounds",
         "phase": "phase2_step2",
+        "description": "Legacy Step round artifacts",
+    },
+    "step2_rounds": {
+        "path": "artifacts/research/step2_rounds",
+        "phase": "phase2_step2",
         "description": "Step 2 研究 round",
+    },
+    "step3_rounds": {
+        "path": "artifacts/research/step3_rounds",
+        "phase": "phase2_step3",
+        "description": "Step 3 研究 round",
     },
     "attribution_rounds": {
         "path": "artifacts/research/attribution_rounds",
@@ -237,7 +247,13 @@ def build_artifact_index(
             # 判断是 round 还是 experiment
             has_manifest = (subdir / "round_manifest.json").exists()
 
-            if has_manifest or root_key in ("attribution_rounds", "execution_rounds", "calibration_rounds"):
+            if has_manifest or root_key in (
+                "attribution_rounds",
+                "execution_rounds",
+                "calibration_rounds",
+                "step2_rounds",
+                "step3_rounds",
+            ):
                 entry = _scan_round_dir(subdir, phase=phase)
             else:
                 entry = _scan_experiment_dir(subdir, phase=phase)

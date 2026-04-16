@@ -37,6 +37,11 @@ logging.basicConfig(
 log = logging.getLogger("rdp_parameter_scan")
 
 
+def _normalize_dataset_version(value: str | None) -> str:
+    normalized = (value or "v1.0").strip()
+    return "v1.0" if normalized == "v1" else normalized
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run a parameter scan")
     parser.add_argument("--family", required=True, choices=["independent", "directional"])
@@ -44,14 +49,18 @@ def main() -> None:
     parser.add_argument("--timeframe", required=True)
     parser.add_argument("--start", required=True, help="YYYY-MM-DD (UTC)")
     parser.add_argument("--end", required=True, help="YYYY-MM-DD (UTC)")
-    parser.add_argument("--dataset-version", default="v1")
+    parser.add_argument("--dataset-version", default="v1.0")
     parser.add_argument("--grid", default=None, help="JSON parameter grid")
     parser.add_argument("--ensure-schema", action="store_true",
                         help="Run DB migrations before scan (default: assume schema ready)")
     args = parser.parse_args()
+    args.dataset_version = _normalize_dataset_version(args.dataset_version)
 
     from aats.data_platform.config import get_settings
     from aats.data_platform.db import get_session, run_migrations
+    from aats.data_platform.operations.strategy_tuning_registry import (
+        get_combo_tuning_overrides,
+    )
     from aats.data_platform.replay.adapters.directional_adapter import DirectionalReplayAdapter
     from aats.data_platform.replay.adapters.independent_adapter import IndependentReplayAdapter
     from aats.data_platform.replay.reports.markdown_report_builder import build_scan_comparison_report
@@ -68,6 +77,11 @@ def main() -> None:
         adapter = DirectionalReplayAdapter()
 
     grid = json.loads(args.grid) if args.grid else None
+    base_params = get_combo_tuning_overrides(
+        pathlib.Path(__file__).resolve().parent.parent,
+        args.family,
+        args.timeframe,
+    )
     start_ts = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     end_ts = datetime.strptime(args.end, "%Y-%m-%d").replace(tzinfo=timezone.utc)
 
@@ -81,6 +95,7 @@ def main() -> None:
             start_ts=start_ts,
             end_ts=end_ts,
             parameter_grid=grid,
+            base_params=base_params,
         )
 
         # 读取 comparison 并生成报告

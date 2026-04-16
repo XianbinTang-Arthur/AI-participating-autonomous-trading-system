@@ -48,6 +48,11 @@ log = logging.getLogger("rdp_run_replay")
 _ARTIFACT_ROOT = pathlib.Path("artifacts/research/experiments")
 
 
+def _normalize_dataset_version(value: str | None) -> str:
+    normalized = (value or "v1.0").strip()
+    return "v1.0" if normalized == "v1" else normalized
+
+
 def _parse_params(param_strs: list[str]) -> dict[str, object]:
     """解析 --param key=value 参数。"""
     result: dict[str, object] = {}
@@ -74,15 +79,19 @@ def main() -> None:
     parser.add_argument("--timeframe", required=True, help="e.g. 15m, 1H")
     parser.add_argument("--start", required=True, help="YYYY-MM-DD (UTC)")
     parser.add_argument("--end", required=True, help="YYYY-MM-DD (UTC)")
-    parser.add_argument("--dataset-version", default="v1")
+    parser.add_argument("--dataset-version", default="v1.0")
     parser.add_argument("--param", action="append", default=[], help="key=value parameter override")
     parser.add_argument("--ensure-schema", action="store_true",
                         help="Run DB migrations before replay (default: assume schema ready)")
     args = parser.parse_args()
+    args.dataset_version = _normalize_dataset_version(args.dataset_version)
 
     # 延迟导入
     from aats.data_platform.config import get_settings
     from aats.data_platform.db import get_session, run_migrations
+    from aats.data_platform.operations.strategy_tuning_registry import (
+        get_combo_tuning_overrides,
+    )
     from aats.data_platform.replay.adapters.directional_adapter import DirectionalReplayAdapter
     from aats.data_platform.replay.adapters.independent_adapter import IndependentReplayAdapter
     from aats.data_platform.replay.core.replay_context import ReplayParameterOverrides
@@ -113,7 +122,15 @@ def main() -> None:
         adapter = DirectionalReplayAdapter()
 
     # 参数
-    param_dict = _parse_params(args.param)
+    tuning_overrides = get_combo_tuning_overrides(
+        pathlib.Path(__file__).resolve().parent.parent,
+        args.family,
+        args.timeframe,
+    )
+    param_dict = {
+        **tuning_overrides,
+        **_parse_params(args.param),
+    }
     params = ReplayParameterOverrides.from_dict(param_dict)
 
     start_ts = datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=timezone.utc)

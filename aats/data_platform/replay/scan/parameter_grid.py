@@ -54,6 +54,8 @@ DEFAULT_PARAMETER_GRID: dict[str, list[Any]] = {
 
 def build_grid(
     grid: dict[str, list[Any]] | None = None,
+    *,
+    base_params: dict[str, Any] | None = None,
 ) -> list[ReplayParameterOverrides]:
     """从参数网格生成所有组合的 ReplayParameterOverrides 列表。
 
@@ -77,7 +79,10 @@ def build_grid(
     overrides: list[ReplayParameterOverrides] = []
     skipped = 0
     for combo in combos:
-        param_dict = dict(zip(keys, combo))
+        param_dict = {
+            **(base_params or {}),
+            **dict(zip(keys, combo)),
+        }
         try:
             overrides.append(ReplayParameterOverrides.from_dict(param_dict))
         except (ValueError, TypeError):

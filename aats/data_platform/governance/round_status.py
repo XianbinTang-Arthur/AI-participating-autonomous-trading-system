@@ -30,7 +30,8 @@ PHASE_ARTIFACT_ROOTS: dict[str, str] = {
     "phase3": "artifacts/research/attribution_rounds",
     "phase4": "artifacts/research/execution_rounds",
     "phase2_step1": "artifacts/research/calibration_batches",
-    "phase2_step2": "artifacts/research/calibration_rounds",
+    "phase2_step2": "artifacts/research/step2_rounds",
+    "phase2_step3": "artifacts/research/step3_rounds",
 }
 
 

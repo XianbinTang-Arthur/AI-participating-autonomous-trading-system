@@ -11,6 +11,8 @@ import pathlib
 from datetime import datetime, timezone
 from typing import Any
 
+from .parameter_registry import load_registry
+
 log = logging.getLogger(__name__)
 
 
@@ -48,6 +50,8 @@ def check_artifact_integrity(project_root: pathlib.Path) -> list[dict[str, Any]]
         "artifacts/research/experiments",
         "artifacts/research/calibration_batches",
         "artifacts/research/calibration_rounds",
+        "artifacts/research/step2_rounds",
+        "artifacts/research/step3_rounds",
         "artifacts/research/attribution_rounds",
         "artifacts/research/execution_rounds",
         "artifacts/governance",
@@ -215,14 +219,19 @@ def check_parameter_files(project_root: pathlib.Path) -> list[dict[str, Any]]:
     """检查参数文件可解析性."""
     checks: list[dict[str, Any]] = []
 
-    # 遍历 experiments 查找参数文件
-    exp_root = project_root / "artifacts/research/experiments"
-    if not exp_root.exists():
-        return checks
-
-    param_files = list(exp_root.rglob("parameter_recommendations.json"))
-    param_files.extend(exp_root.rglob("parameter_candidates.json"))
-    param_files.extend(exp_root.rglob("replay_params_used.json"))
+    search_roots = [
+        project_root / "artifacts/research/experiments",
+        project_root / "artifacts/research/step2_rounds",
+        project_root / "artifacts/research/step3_rounds",
+    ]
+    param_files: list[pathlib.Path] = []
+    for root in search_roots:
+        if not root.exists():
+            continue
+        param_files.extend(root.rglob("parameter_recommendations.json"))
+        param_files.extend(root.rglob("parameter_candidates.json"))
+        param_files.extend(root.rglob("parameter_candidates_merged.json"))
+        param_files.extend(root.rglob("replay_params_used.json"))
 
     unparseable = 0
     for pf in param_files:
@@ -242,8 +251,7 @@ def check_parameter_files(project_root: pathlib.Path) -> list[dict[str, Any]]:
     registry_path = project_root / "artifacts/governance/current_parameter_registry.json"
     if registry_path.exists():
         try:
-            with registry_path.open(encoding="utf-8") as f:
-                reg = json.load(f)
+            reg = load_registry(registry_path)
             ps_count = len(reg.get("parameter_sets", []))
             checks.append(_make_check(
                 "parameter", "parameter registry 可解析",

@@ -102,6 +102,11 @@ def parse_args() -> argparse.Namespace:
                    help="首个阶段运行前执行 DB migration")
     p.add_argument("--no-stop-on-failure", action="store_true",
                    help="某阶段失败后继续运行后续阶段")
+    p.add_argument(
+        "--dataset-version",
+        default="v1.0",
+        help="Phase 2/3/4 使用的 candle dataset version (default: v1.0)",
+    )
 
     # 阶段控制
     ctrl = p.add_argument_group("阶段控制")
@@ -154,7 +159,10 @@ def parse_args() -> argparse.Namespace:
              "(默认自动使用 Phase 2 产出或最新历史)",
     )
 
-    return p.parse_args()
+    args = p.parse_args()
+    if args.dataset_version == "v1":
+        args.dataset_version = "v1.0"
+    return args
 
 
 # =========================================================================
@@ -182,53 +190,33 @@ def _resolve_phases(args: argparse.Namespace) -> list[str]:
 def _find_latest_params_json() -> Path | None:
     """查找最新��参数文件。
 
-    在 step3_rounds 和 step2_rounds 中分别查找最新文件,
-    然后按 round_id 时间戳 (YYYYMMDD_HHMMSS) 比较, 返回最晚的那个。
-    Step 3 的 merged 文件更完整, 但如果 Step 2 重跑后更新,
-    应返回更新的 Step 2 文件。
+    优先使用 Step 3 merged 结果；仅当 Step 3 不存在时才回退到 Step 2。
     """
     research_root = _PROJECT_ROOT / "artifacts" / "research"
-    candidates: list[Path] = []
 
-    # Step 3 merged params
     s3_dir = research_root / "step3_rounds"
     if s3_dir.exists():
         s3_files = sorted(
-            s3_dir.glob("*/parameter_candidates_merged.json"), reverse=True,
+            s3_dir.glob("*/parameter_candidates_merged.json"),
+            reverse=True,
         )
         if s3_files:
-            candidates.append(s3_files[0])
+            return s3_files[0]
 
-    # Step 2 base params
     s2_dir = research_root / "step2_rounds"
     if s2_dir.exists():
         s2_files = sorted(
-            s2_dir.glob("*/parameter_candidates.json"), reverse=True,
+            s2_dir.glob("*/parameter_candidates.json"),
+            reverse=True,
         )
         if s2_files:
-            candidates.append(s2_files[0])
+            log.warning(
+                "未找到 Step 3 merged 参数，回退到 Step 2 参数文件: %s",
+                s2_files[0],
+            )
+            return s2_files[0]
 
-    if not candidates:
-        return None
-
-    if len(candidates) == 1:
-        return candidates[0]
-
-    # 比较 round_id 时间戳: parent.name 格式 YYYYMMDD_HHMMSS_hexsuffix
-    # 按 parent.name 倒排, 最新的在前
-    best = max(candidates, key=lambda p: p.parent.name)
-
-    # 如果 Step 2 更新但 Step 3 也存在, 给出提示
-    if best.parent.parent.name == "step2_rounds" and len(candidates) == 2:
-        other = [c for c in candidates if c != best][0]
-        log.info(
-            "Step 2 参数 (%s) 比 Step 3 (%s) 更新, 使用 Step 2 文件。"
-            "如需 Step 3 合并参数请重跑 Step 3。",
-            best.parent.name, other.parent.name,
-        )
-
-    return best
-
+    return None
 
 def _run_phase(
     name: str,
@@ -299,6 +287,12 @@ def _build_phase2_cmd(args: argparse.Namespace, *, ensure: bool) -> list[str]:
     cmd = [sys.executable, str(_SCRIPT_DIR / "rdp_run_step2_research.py")]
     if ensure:
         cmd.append("--ensure-schema")
+    if args.start:
+        cmd.extend(["--start", args.start])
+    if args.end:
+        cmd.extend(["--end", args.end])
+    if args.dataset_version:
+        cmd.extend(["--dataset-version", args.dataset_version])
     if args.skip_calibration:
         cmd.append("--skip-calibration")
     if args.skip_scan:
@@ -319,6 +313,12 @@ def _build_step3_cmd(
         cmd.append("--ensure-schema")
     if step2_round_dir:
         cmd.extend(["--step2-round-dir", step2_round_dir])
+    if args.start:
+        cmd.extend(["--start", args.start])
+    if args.end:
+        cmd.extend(["--end", args.end])
+    if args.dataset_version:
+        cmd.extend(["--dataset-version", args.dataset_version])
     cmd.append("--no-print-summary")
     return cmd
 
@@ -333,6 +333,7 @@ def _build_phase3_cmd(
         sys.executable, str(_SCRIPT_DIR / "rdp_run_phase3_round.py"),
         "--start", args.start,
         "--end", args.end,
+        "--dataset-version", args.dataset_version,
     ]
     if ensure:
         cmd.append("--ensure-schema")
@@ -358,6 +359,7 @@ def _build_phase4_cmd(
         sys.executable, str(_SCRIPT_DIR / "rdp_run_phase4_round.py"),
         "--start", args.start,
         "--end", args.end,
+        "--dataset-version", args.dataset_version,
         "--taker-fee-bps", str(args.taker_fee_bps),
     ]
     if ensure:
@@ -652,6 +654,7 @@ def main() -> int:
 
     print()
     if not args.dry_run and "decision" in ran_phases:
+        print("  当前状态: 研究与治理建议已生成, 尚未应用到 live 参数")
         print("  下一步: 查看 decision 报告, 如需应用参数:")
         print("    python scripts/approve_recommendation_and_apply.py --rec-id <ID>")
 

@@ -47,7 +47,14 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from aats.data_platform.governance.snapshot_db import (
+    ROUND_PHASE_STEP2,
+    save_research_round_snapshot,
+)
 from aats.data_platform.replay.core.replay_context import ReplayCostConfig
+from aats.data_platform.replay.diagnostics.replay_diagnostics import (
+    extract_comparison_rows,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -269,6 +276,11 @@ _DEFAULT_SCAN_DEFS: dict[str, dict[str, Any]] = {
 
 _DEFAULT_ARTIFACT_ROOT = pathlib.Path("artifacts/research/step2_rounds")
 
+
+def _normalize_dataset_version(value: str | None) -> str:
+    normalized = (value or "v1.0").strip()
+    return "v1.0" if normalized == "v1" else normalized
+
 # =========================================================================
 # 1. 子进程：Calibration Batch
 # =========================================================================
@@ -286,6 +298,9 @@ def _run_batch(
     *,
     ensure_schema: bool = False,
     stop_on_error: bool = False,
+    start: str | None = None,
+    end: str | None = None,
+    dataset_version: str | None = None,
 ) -> dict[str, Any]:
     """通过子进程调用 rdp_run_calibration_batch.py 运行单个 batch。"""
     existing = _list_subdirs(batch_artifact_root)
@@ -300,6 +315,12 @@ def _run_batch(
         cmd.append("--ensure-schema")
     if stop_on_error:
         cmd.append("--stop-on-error")
+    if start:
+        cmd.extend(["--start", start])
+    if end:
+        cmd.extend(["--end", end])
+    if dataset_version:
+        cmd.extend(["--dataset-version", _normalize_dataset_version(dataset_version)])
 
     log.info("  CMD: %s", " ".join(cmd))
     proc = subprocess.run(cmd, capture_output=True)
@@ -350,6 +371,9 @@ def _run_calibration_round(
     *,
     ensure_schema: bool = False,
     stop_on_error: bool = False,
+    start: str | None = None,
+    end: str | None = None,
+    dataset_version: str | None = None,
 ) -> dict[str, Any]:
     """运行一个 calibration round（一个 family/tf 组合的全部 batch）。"""
     family = cal_def["family"]
@@ -371,7 +395,11 @@ def _run_calibration_round(
         ensure = ensure_schema and (i == 0) and (round_key == "independent_1h")
         result = _run_batch(
             bdef["file"], batch_artifact_root,
-            ensure_schema=ensure, stop_on_error=stop_on_error,
+            ensure_schema=ensure,
+            stop_on_error=stop_on_error,
+            start=start,
+            end=end,
+            dataset_version=dataset_version,
         )
         result["_key"] = bdef["key"]
 
@@ -428,7 +456,7 @@ def _run_scan(
     # 从 scan matrix 配置读 start/end 或使用默认
     start = scan_def.get("start", "2026-03-31")
     end = scan_def.get("end", "2026-04-02")
-    dataset_version = scan_def.get("dataset_version", "v1.0")
+    dataset_version = _normalize_dataset_version(scan_def.get("dataset_version", "v1.0"))
 
     cmd = [
         sys.executable, "scripts/rdp_run_parameter_scan.py",
@@ -578,8 +606,7 @@ def _build_scan_comparison_summary(
         timeframe = sr["timeframe"]
         scan_key = sr["scan_key"]
 
-        # comparison_summary.json 有 experiments 或 rows
-        experiments = comp.get("experiments", comp.get("rows", []))
+        experiments = extract_comparison_rows(comp)
         for exp in experiments:
             row = dict(exp)
             row["family"] = family
@@ -645,17 +672,25 @@ def _recommend_signal_edge_scale(experiments: list[dict[str, Any]]) -> dict[str,
         experiments,
         key=lambda e: e.get("params", {}).get("signal_edge_scale_bps", 0),
     )
-    viable = [e for e in sorted_exps if (e.get("mean_expected_edge_bps") or 0) > 0]
+    viable = [
+        e for e in sorted_exps
+        if (e.get("mean_expected_edge_bps") or 0) > 0
+        and (e.get("opening_count") or 0) > 0
+        and (e.get("execution_compatible_ratio") or 0) > 0
+    ]
 
     if not viable:
         best = sorted_exps[-1]
         scale = best.get("params", {}).get("signal_edge_scale_bps")
         edge = best.get("mean_expected_edge_bps") or 0
+        opens = best.get("opening_count", 0)
+        exec_ratio = best.get("execution_compatible_ratio", 0) or 0
         return {
-            "value": scale, "confidence": "low",
+            "value": None, "confidence": "low",
             "reason": (
-                f"No scale achieves positive net edge. "
-                f"Highest tested scale ({scale}) has edge {edge:.2f} bps."
+                f"No scale is both positive-edge and tradable. "
+                f"Best tested scale ({scale}) has edge {edge:.2f} bps, "
+                f"opens={opens}, exec_ratio={exec_ratio:.1%}."
             ),
         }
 
@@ -800,18 +835,32 @@ def _recommend_cost_model(experiments: list[dict[str, Any]]) -> dict[str, Any]:
 def _recommend_confirm_ticks(experiments: list[dict[str, Any]]) -> dict[str, Any]:
     """规则化推荐 min_confirm_ticks（与 Step 1 相同逻辑）。"""
     if not experiments:
-        return {"value": 2, "confidence": "low",
-                "reason": "Confirm ticks batch 未运行或无数据, 保留默认值"}
+        return {
+            "value": None,
+            "confidence": "low",
+            "reason": "Confirm ticks batch 未运行或无数据，无法给出可交易推荐",
+        }
 
     sorted_exps = sorted(
         experiments,
         key=lambda e: e.get("params", {}).get("min_confirm_ticks", 0),
     )
+    tradable = [
+        e for e in sorted_exps
+        if (e.get("opening_count") or 0) > 0
+        and (e.get("execution_compatible_ratio") or 0) > 0
+    ]
+    if not tradable:
+        return {
+            "value": None,
+            "confidence": "low",
+            "reason": "All confirm-ticks candidates are non-tradable (opens=0 or exec_ratio=0).",
+        }
 
-    recommended = sorted_exps[0]
-    for i in range(1, len(sorted_exps)):
-        prev = sorted_exps[i - 1]
-        curr = sorted_exps[i]
+    recommended = tradable[0]
+    for i in range(1, len(tradable)):
+        prev = tradable[i - 1]
+        curr = tradable[i]
         prev_opens = max(prev.get("opening_count", 0), 1)
         curr_opens = curr.get("opening_count", 0)
         drop_ratio = (prev_opens - curr_opens) / prev_opens
@@ -825,8 +874,8 @@ def _recommend_confirm_ticks(experiments: list[dict[str, Any]]) -> dict[str, Any
 
     ticks = recommended.get("params", {}).get("min_confirm_ticks", 2)
     opens = recommended.get("opening_count", 0)
-    first_opens = sorted_exps[0].get("opening_count", 0)
-    last_opens = sorted_exps[-1].get("opening_count", 0)
+    first_opens = tradable[0].get("opening_count", 0)
+    last_opens = tradable[-1].get("opening_count", 0)
 
     if first_opens > 0 and last_opens > 0:
         confidence = "high"
@@ -838,13 +887,13 @@ def _recommend_confirm_ticks(experiments: list[dict[str, Any]]) -> dict[str, Any
     ticks_opens = [(
         e.get("params", {}).get("min_confirm_ticks"),
         e.get("opening_count", 0),
-    ) for e in sorted_exps]
+    ) for e in tradable]
 
     return {
         "value": ticks, "confidence": confidence,
         "reason": (
-            f"ticks={ticks} 是 opening 不显著下降前提下最保守的选择 "
-            f"(opens={opens}). 各 ticks: {ticks_opens}."
+            f"ticks={ticks} 是在保持可交易前提下最保守的选择 "
+            f"(opens={opens}). 候选 ticks: {ticks_opens}."
         ),
     }
 
@@ -1412,17 +1461,21 @@ def _build_parameter_candidates(
             if pname.startswith("_"):
                 continue
             if isinstance(prec, dict) and "value" in prec:
+                if prec["value"] is None:
+                    pending_validation.append(f"{pname} in {ft_key}")
+                    continue
                 c[pname] = prec["value"]
                 if prec.get("confidence") == "low":
                     pending_validation.append(f"{pname} in {ft_key}")
             # else: nested structure (e.g. _cost_overall), skip
-        candidates[ft_key] = c
-
-    # 补充 independent/15m（来自 Step 1，这里用 placeholder）
-    if "independent_15m" not in candidates:
-        candidates["independent_15m"] = {
-            "_note": "See Step 1 calibration results for independent/15m recommendations",
-        }
+        if c:
+            candidates[ft_key] = c
+        else:
+            pending_validation.append(f"candidate set missing in {ft_key}")
+            log.warning(
+                "Skip empty parameter candidate set for %s; downstream must treat it as unavailable",
+                ft_key,
+            )
 
     data = {
         "round_id": round_id,
@@ -1827,7 +1880,12 @@ def _write_manifest(
 # =========================================================================
 
 
-def _load_scan_defs() -> dict[str, dict[str, Any]]:
+def _load_scan_defs(
+    *,
+    start: str | None = None,
+    end: str | None = None,
+    dataset_version: str | None = None,
+) -> dict[str, dict[str, Any]]:
     """从配置文件加载 scan matrix，若不存在则使用内嵌默认值。"""
     matrix_path = pathlib.Path(_SCAN_MATRIX_FILE)
     if matrix_path.exists():
@@ -1838,7 +1896,16 @@ def _load_scan_defs() -> dict[str, dict[str, Any]]:
         for key, sdef in scans.items():
             sdef.setdefault("start", data.get("start", "2026-03-31"))
             sdef.setdefault("end", data.get("end", "2026-04-02"))
-            sdef.setdefault("dataset_version", data.get("dataset_version", "v1.0"))
+            sdef.setdefault(
+                "dataset_version",
+                _normalize_dataset_version(data.get("dataset_version", "v1.0")),
+            )
+            if start:
+                sdef["start"] = start
+            if end:
+                sdef["end"] = end
+            if dataset_version:
+                sdef["dataset_version"] = _normalize_dataset_version(dataset_version)
         log.info("Loaded scan matrix from %s (%d scans)", matrix_path, len(scans))
         return scans
 
@@ -1859,6 +1926,14 @@ def main() -> None:
     parser.add_argument(
         "--artifact-root", type=str, default=str(_DEFAULT_ARTIFACT_ROOT),
         help=f"Artifact output root (default: {_DEFAULT_ARTIFACT_ROOT})",
+    )
+    parser.add_argument("--start", type=str, default=None, help="Override research start date (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, default=None, help="Override research end date (YYYY-MM-DD)")
+    parser.add_argument(
+        "--dataset-version",
+        type=str,
+        default="v1.0",
+        help="Override candle dataset version for calibration + scan",
     )
     parser.add_argument(
         "--ensure-schema", action="store_true",
@@ -1881,6 +1956,7 @@ def main() -> None:
         help="Suppress final summary to stdout",
     )
     args = parser.parse_args()
+    args.dataset_version = _normalize_dataset_version(args.dataset_version)
 
     started_at = datetime.now(timezone.utc).isoformat()
     round_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid4().hex[:8]
@@ -1914,6 +1990,9 @@ def main() -> None:
                 round_key, cal_def, batch_artifact_root,
                 ensure_schema=args.ensure_schema,
                 stop_on_error=args.stop_on_error,
+                start=args.start,
+                end=args.end,
+                dataset_version=args.dataset_version,
             )
             calibration_results.append(result)
 
@@ -1934,7 +2013,11 @@ def main() -> None:
         log.info("Phase B: Formal Parameter Scans")
         log.info("=" * 66)
 
-        scan_defs = _load_scan_defs()
+        scan_defs = _load_scan_defs(
+            start=args.start,
+            end=args.end,
+            dataset_version=args.dataset_version,
+        )
 
         for scan_key in ["independent_15m", "independent_1h",
                          "directional_15m", "directional_1h"]:
@@ -1967,11 +2050,34 @@ def main() -> None:
     _write_family_timeframe_summary_csv(
         all_rows, round_dir / "family_timeframe_summary.csv",
     )
+    family_timeframe_summary_payload = {
+        "round_id": round_id,
+        "total_experiments": len(all_rows),
+        "experiments": all_rows,
+    }
     _write_family_timeframe_summary_json(
         all_rows, round_id, round_dir / "family_timeframe_summary.json",
     )
 
     # C.2 汇总 scan 结果
+    scan_comparison_rows: list[dict[str, Any]] = []
+    for sr in scan_results:
+        comp = sr.get("comparison")
+        if not comp:
+            continue
+        for exp in extract_comparison_rows(comp):
+            row = dict(exp)
+            row["family"] = sr["family"]
+            row["timeframe"] = sr["timeframe"]
+            row["scan_key"] = sr["scan_key"]
+            row["scan_run_id"] = sr.get("scan_run_id")
+            scan_comparison_rows.append(row)
+    scan_comparison_summary_payload = {
+        "total_scans": len(scan_results),
+        "succeeded_scans": sum(1 for s in scan_results if s["status"] == "succeeded"),
+        "total_experiments": len(scan_comparison_rows),
+        "experiments": scan_comparison_rows,
+    }
     _build_scan_comparison_summary(
         scan_results,
         round_dir / "scan_comparison_summary.csv",
@@ -1989,6 +2095,31 @@ def main() -> None:
         log.info("Generated recommendations for %s", ft_key)
 
     # C.4 输出 parameter_candidates
+    parameter_candidates_payload = {
+        "round_id": round_id,
+        "scope": {"symbol": _SYMBOL},
+        "candidates": {},
+        "pending_validation": [],
+    }
+    for ft_key, recs in all_recommendations.items():
+        candidate_values: dict[str, Any] = {}
+        for pname, prec in recs.items():
+            if pname.startswith("_"):
+                continue
+            if not isinstance(prec, dict) or "value" not in prec:
+                continue
+            if prec["value"] is None:
+                parameter_candidates_payload["pending_validation"].append(f"{pname} in {ft_key}")
+                continue
+            candidate_values[pname] = prec["value"]
+            if prec.get("confidence") == "low":
+                parameter_candidates_payload["pending_validation"].append(f"{pname} in {ft_key}")
+        if candidate_values:
+            parameter_candidates_payload["candidates"][ft_key] = candidate_values
+        else:
+            parameter_candidates_payload["pending_validation"].append(
+                f"candidate set missing in {ft_key}",
+            )
     _build_parameter_candidates(
         all_recommendations, round_id,
         round_dir / "parameter_candidates.json",
@@ -2002,19 +2133,90 @@ def main() -> None:
     log.info("Phase D: Conclusion Document")
     log.info("=" * 66)
 
+    conclusion_path = round_dir / "phase2_step2_research_conclusion.md"
     _build_conclusion_report(
         calibration_results, scan_results, all_rows,
         all_recommendations, round_id,
-        round_dir / "phase2_step2_research_conclusion.md",
+        conclusion_path,
     )
 
     # Manifest
     finished_at = datetime.now(timezone.utc).isoformat()
+    manifest_payload = {
+        "round_id": round_id,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "symbol": _SYMBOL,
+        "calibrations": [],
+        "scans": [],
+    }
+    for cr in calibration_results:
+        manifest_payload["calibrations"].append({
+            "round_key": cr["round_key"],
+            "family": cr["family"],
+            "timeframe": cr["timeframe"],
+            "status": cr["status"],
+            "batches": [
+                {
+                    "key": br.get("_key"),
+                    "batch_run_id": br.get("batch_run_id"),
+                    "batch_dir": br.get("batch_dir"),
+                    "status": br["status"],
+                }
+                for br in cr.get("batch_results", [])
+            ],
+        })
+    for sr in scan_results:
+        manifest_payload["scans"].append({
+            "scan_key": sr["scan_key"],
+            "family": sr["family"],
+            "timeframe": sr["timeframe"],
+            "status": sr["status"],
+            "scan_run_id": sr.get("scan_run_id"),
+            "scan_dir": sr.get("scan_dir"),
+        })
+    manifest_path = round_dir / "round_manifest.json"
     _write_manifest(
         calibration_results, scan_results,
         round_id, started_at, finished_at,
-        round_dir / "round_manifest.json",
+        manifest_path,
     )
+    if not save_research_round_snapshot(
+        round_id=round_id,
+        phase=ROUND_PHASE_STEP2,
+        status=(
+            "succeeded"
+            if not any(sr["status"] == "failed" for sr in scan_results)
+            and not any(cr["status"] == "failed" for cr in calibration_results)
+            else "failed"
+            if not any(
+                item["status"] in {"succeeded", "partial_success"}
+                for item in [*calibration_results, *scan_results]
+            )
+            else "partial_success"
+        ),
+        round_path=str(round_dir),
+        started_at=started_at,
+        finished_at=finished_at,
+        replay_only=False,
+        manifest_payload=manifest_payload,
+        summary_payload={
+            "family_timeframe_summary": family_timeframe_summary_payload,
+            "scan_comparison_summary": scan_comparison_summary_payload,
+            "parameter_candidates": parameter_candidates_payload,
+        },
+        conclusion_payload={
+            "report_markdown_path": str(conclusion_path),
+        },
+        artifacts_payload={
+            "round_dir": str(round_dir),
+            "family_timeframe_summary_json": str(round_dir / "family_timeframe_summary.json"),
+            "scan_comparison_summary_json": str(round_dir / "scan_comparison_summary.json"),
+            "parameter_candidates_json": str(round_dir / "parameter_candidates.json"),
+            "round_manifest_json": str(manifest_path),
+        },
+    ):
+        log.warning("Step2 round snapshot DB upsert failed; file artifacts remain authoritative fallback")
 
     # ================================================================
     # 最终汇总

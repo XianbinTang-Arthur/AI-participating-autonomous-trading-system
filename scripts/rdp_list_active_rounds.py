@@ -38,6 +38,10 @@ from aats.data_platform.governance.round_status import (
     list_rounds_by_status,
     scan_experiments,
 )
+from aats.data_platform.governance.snapshot_db import (
+    SNAPSHOT_ACTIVE_ROUND_INDEX,
+    save_governance_snapshot,
+)
 
 _DEFAULT_OUTPUT = "artifacts/governance/active_round_index.json"
 
@@ -76,6 +80,8 @@ def main() -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(index, f, indent=2, ensure_ascii=False, default=str)
+    if not save_governance_snapshot(snapshot_type=SNAPSHOT_ACTIVE_ROUND_INDEX, payload=index):
+        log.warning("active_round_index DB upsert failed; file artifact kept as audit copy")
 
     # 显示
     summary = index["summary"]

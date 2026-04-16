@@ -42,12 +42,16 @@ from aats.data_platform.governance.manifest_validation import (
 )
 
 
-# Phase -> artifact root 映射
-_PHASE_ROOTS: dict[str, str] = {
-    "phase2_step1": "artifacts/research/calibration_batches",
-    "phase2_step2": "artifacts/research/calibration_rounds",
-    "phase3": "artifacts/research/attribution_rounds",
-    "phase4": "artifacts/research/execution_rounds",
+# Phase -> artifact roots 映射
+_PHASE_ROOTS: dict[str, list[str]] = {
+    "phase2_step1": [
+        "artifacts/research/calibration_batches",
+        "artifacts/research/calibration_rounds",
+    ],
+    "phase2_step2": ["artifacts/research/step2_rounds"],
+    "phase2_step3": ["artifacts/research/step3_rounds"],
+    "phase3": ["artifacts/research/attribution_rounds"],
+    "phase4": ["artifacts/research/execution_rounds"],
 }
 
 
@@ -67,23 +71,25 @@ def main() -> None:
     total_errors = 0
     total_warnings = 0
 
-    for phase, rel_path in _PHASE_ROOTS.items():
+    for phase, rel_paths in _PHASE_ROOTS.items():
         if args.phase and phase != args.phase:
             continue
 
-        root = project_root / rel_path
-        if not root.exists():
-            log.info("跳过: %s (不存在)", root)
+        phase_manifests: list[pathlib.Path] = []
+        for rel_path in rel_paths:
+            root = project_root / rel_path
+            if not root.exists():
+                log.info("跳过: %s (不存在)", root)
+                continue
+            phase_manifests.extend(root.rglob("round_manifest.json"))
+
+        if not phase_manifests:
+            log.info("跳过 phase=%s (无 manifest)", phase)
             continue
 
-        manifests = list(root.rglob("round_manifest.json"))
-        if not manifests:
-            log.info("跳过: %s (无 manifest)", root)
-            continue
+        log.info("扫描 %s: %d 个 manifest", phase, len(phase_manifests))
 
-        log.info("扫描 %s: %d 个 manifest", phase, len(manifests))
-
-        for mf in sorted(manifests):
+        for mf in sorted(phase_manifests):
             vr = validate_manifest_file(mf)
             results.append(vr.to_dict())
             total_errors += vr.error_count

@@ -1,17 +1,13 @@
-"""Phase 6-C: Family/Timeframe 状态决策引擎.
-
-规则化、可解释的决策引擎，为每个 family/timeframe 组合
-输出 operational status 建议。
-"""
+"""Phase 6-C: family/timeframe 状态决策引擎。"""
 
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-log = logging.getLogger(__name__)
+from .evidence_bundle import COMBOS, get_phase2_combo_stats, make_combo_key
 
-# ── 状态定义 ─────────────────────────────────────────────────────────
+log = logging.getLogger(__name__)
 
 OPERATIONAL_STATUSES = (
     "keep_active",
@@ -20,25 +16,11 @@ OPERATIONAL_STATUSES = (
     "require_review",
 )
 
-# ── 决策规则配置 ─────────────────────────────────────────────────────
-
-# Phase 2 阈值
 RULE_MIN_EXPERIMENTS_WITH_OPENINGS = 1
 RULE_MIN_POSITIVE_EDGE_RATIO = 0.15
-
-# Phase 3 阈值
-RULE_MAX_FAILURE_RATIO = 0.85         # failure 比例 > 85% 则考虑 pause（选择性策略允许较高 failure）
-RULE_STRATEGY_BLOCKED_RATIO = 0.5     # strategy blocked > 50% 则降权
-
-# Phase 4 阈值
-RULE_SEVERE_EXECUTION_COST = -5.0     # cost-adjusted edge < -5 bps 则严重
-RULE_MIN_FILL_RATIO = 0.2             # fill ratio < 20% 则降权
-
-# Phase 5 阈值
-RULE_REQUIRE_HEALTHY_GOVERNANCE = True
-
-
-# ── 决策逻辑 ─────────────────────────────────────────────────────────
+RULE_MAX_FAILURE_RATIO = 0.85
+RULE_SEVERE_EXECUTION_COST = -5.0
+RULE_MIN_FILL_RATIO = 0.2
 
 
 def decide_family_timeframe_status(
@@ -48,119 +30,193 @@ def decide_family_timeframe_status(
     *,
     upgrade_evaluation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """为单个 family/timeframe 生成状态建议.
+    """为单个 family/timeframe 生成运行状态建议。"""
+    del upgrade_evaluation  # 当前决策只依赖 evidence bundle。
 
-    Parameters
-    ----------
-    family : str
-    timeframe : str
-    evidence_bundle : dict
-    upgrade_evaluation : dict | None
-        来自 candidate_selector 的评估结果（如有）
-
-    Returns
-    -------
-    dict  包含 decision / confidence / reasons / signals
-    """
-    combo_key = f"{family}_{timeframe.lower()}"
+    combo_key = make_combo_key(family, timeframe) or f"{family}_{timeframe.lower()}"
     signals: list[dict[str, Any]] = []
     reasons: list[str] = []
 
-    # ── Phase 2 信号 ──
     p2 = evidence_bundle.get("phase2_evidence", {})
-    p2_agg = p2.get("aggregate_stats", {})
+    p2_stats = get_phase2_combo_stats(p2, family, timeframe)
+    if p2_stats.get("available"):
+        exp_with_openings = p2_stats.get("experiments_with_openings", 0)
+        mean_edge_ratio = p2_stats.get("mean_positive_edge_ratio", 0)
+        if exp_with_openings >= RULE_MIN_EXPERIMENTS_WITH_OPENINGS:
+            signals.append({
+                "source": "phase2",
+                "signal": "positive",
+                "detail": f"{combo_key} 开仓实验数={exp_with_openings}",
+            })
+        else:
+            signals.append({
+                "source": "phase2",
+                "signal": "negative",
+                "detail": f"{combo_key} 没有实验产生开仓信号",
+            })
 
-    exp_with_openings = p2_agg.get("experiments_with_openings", 0)
-    mean_edge_ratio = p2_agg.get("mean_positive_edge_ratio", 0)
-
-    if exp_with_openings >= RULE_MIN_EXPERIMENTS_WITH_OPENINGS:
-        signals.append({"source": "phase2", "signal": "positive", "detail": f"有 {exp_with_openings} 个实验产生开仓"})
+        if mean_edge_ratio >= RULE_MIN_POSITIVE_EDGE_RATIO:
+            signals.append({
+                "source": "phase2",
+                "signal": "positive",
+                "detail": f"{combo_key} edge_ratio={mean_edge_ratio:.3f}",
+            })
+        else:
+            signals.append({
+                "source": "phase2",
+                "signal": "negative",
+                "detail": (
+                    f"{combo_key} edge_ratio 不足 "
+                    f"({mean_edge_ratio:.3f} < {RULE_MIN_POSITIVE_EDGE_RATIO})"
+                ),
+            })
     else:
-        signals.append({"source": "phase2", "signal": "negative", "detail": "无实验产生开仓信号"})
+        signals.append({
+            "source": "phase2",
+            "signal": "absent",
+            "detail": f"{combo_key} 缺少 Phase 2 证据",
+        })
 
-    if mean_edge_ratio >= RULE_MIN_POSITIVE_EDGE_RATIO:
-        signals.append({"source": "phase2", "signal": "positive", "detail": f"edge_ratio={mean_edge_ratio:.3f}"})
-    else:
-        signals.append({"source": "phase2", "signal": "negative", "detail": f"edge_ratio 不足 ({mean_edge_ratio:.3f})"})
-
-    # ── Phase 3 信号 ──
     p3 = evidence_bundle.get("phase3_evidence", {})
     p3_latest = p3.get("latest_round")
-
     if p3_latest:
+        replay_only_round = bool(p3_latest.get("replay_only", False))
         combo_data = p3_latest.get("combos", {}).get(combo_key, {})
         combo_status = combo_data.get("status", "unknown")
-
         if combo_status in ("succeeded", "partial_success"):
-            signals.append({"source": "phase3", "signal": "positive", "detail": f"归因 {combo_key}={combo_status}"})
+            signals.append({
+                "source": "phase3",
+                "signal": "positive",
+                "detail": f"归因 {combo_key}={combo_status}",
+            })
         elif combo_status == "failed":
-            signals.append({"source": "phase3", "signal": "negative", "detail": f"归因 {combo_key} 失败"})
+            signals.append({
+                "source": "phase3",
+                "signal": "negative",
+                "detail": f"归因 {combo_key} 失败",
+            })
             reasons.append("Phase 3 归因失败")
         else:
-            signals.append({"source": "phase3", "signal": "neutral", "detail": f"归因 {combo_key}={combo_status}"})
+            signals.append({
+                "source": "phase3",
+                "signal": "neutral",
+                "detail": f"归因 {combo_key}={combo_status}",
+            })
 
-        # failure modes 分析
         tfm = combo_data.get("top_failure_modes", {})
-        if tfm:
-            total_f = tfm.get("total_failures", 0)
-            total_s = tfm.get("total_success", 0)
-            total = total_f + total_s
+        if tfm and not replay_only_round:
+            total_failures = tfm.get("total_failures", 0)
+            total_success = tfm.get("total_success", 0)
+            total = total_failures + total_success
             if total > 0:
-                failure_ratio = total_f / total
+                failure_ratio = total_failures / total
                 if failure_ratio > RULE_MAX_FAILURE_RATIO:
-                    signals.append({"source": "phase3", "signal": "severe_negative", "detail": f"failure 比例 {failure_ratio:.0%} 极高"})
-                    reasons.append(f"归因 failure 比例 {failure_ratio:.0%} 超过 {RULE_MAX_FAILURE_RATIO:.0%}")
+                    signals.append({
+                        "source": "phase3",
+                        "signal": "severe_negative",
+                        "detail": f"failure_ratio={failure_ratio:.0%}",
+                    })
+                    reasons.append(
+                        f"归因 failure 比例 {failure_ratio:.0%} 超过 {RULE_MAX_FAILURE_RATIO:.0%}",
+                    )
+        elif tfm and replay_only_round:
+            signals.append({
+                "source": "phase3",
+                "signal": "neutral",
+                "detail": "replay_only attribution，跳过 failure_ratio 风险判定",
+            })
     else:
-        signals.append({"source": "phase3", "signal": "absent", "detail": "无 Phase 3 数据"})
+        signals.append({
+            "source": "phase3",
+            "signal": "absent",
+            "detail": "无 Phase 3 数据",
+        })
 
-    # ── Phase 4 信号 ──
     p4 = evidence_bundle.get("phase4_evidence", {})
     p4_latest = p4.get("latest_round")
-
     if p4_latest:
         combo_data = p4_latest.get("combos", {}).get(combo_key, {})
         cost = combo_data.get("cost_summary", {})
-
         if cost:
             adj_edge = cost.get("cost_adjusted_edge_mean", 0)
-            ffr = cost.get("full_fill_ratio", 0)
-
+            fill_ratio = cost.get("full_fill_ratio", 0)
             if adj_edge < RULE_SEVERE_EXECUTION_COST:
-                signals.append({"source": "phase4", "signal": "severe_negative", "detail": f"cost_adj_edge={adj_edge:.1f}bps 严重负面"})
+                signals.append({
+                    "source": "phase4",
+                    "signal": "severe_negative",
+                    "detail": f"cost_adj_edge={adj_edge:.1f}bps",
+                })
                 reasons.append(f"执行成本严重吞噬 edge ({adj_edge:.1f}bps)")
             elif adj_edge >= 0:
-                signals.append({"source": "phase4", "signal": "positive", "detail": f"cost_adj_edge={adj_edge:.1f}bps"})
+                signals.append({
+                    "source": "phase4",
+                    "signal": "positive",
+                    "detail": f"cost_adj_edge={adj_edge:.1f}bps",
+                })
             else:
-                signals.append({"source": "phase4", "signal": "negative", "detail": f"cost_adj_edge={adj_edge:.1f}bps 为负"})
+                signals.append({
+                    "source": "phase4",
+                    "signal": "negative",
+                    "detail": f"cost_adj_edge={adj_edge:.1f}bps",
+                })
 
-            if ffr < RULE_MIN_FILL_RATIO:
-                signals.append({"source": "phase4", "signal": "negative", "detail": f"fill_ratio={ffr:.1%} 不足"})
+            if fill_ratio < RULE_MIN_FILL_RATIO:
+                signals.append({
+                    "source": "phase4",
+                    "signal": "negative",
+                    "detail": f"fill_ratio={fill_ratio:.1%}",
+                })
             else:
-                signals.append({"source": "phase4", "signal": "positive", "detail": f"fill_ratio={ffr:.1%}"})
+                signals.append({
+                    "source": "phase4",
+                    "signal": "positive",
+                    "detail": f"fill_ratio={fill_ratio:.1%}",
+                })
         else:
-            signals.append({"source": "phase4", "signal": "absent", "detail": f"Phase 4 无 {combo_key} cost 数据"})
+            signals.append({
+                "source": "phase4",
+                "signal": "absent",
+                "detail": f"Phase 4 缺少 {combo_key} cost 数据",
+            })
     else:
-        signals.append({"source": "phase4", "signal": "absent", "detail": "无 Phase 4 数据"})
+        signals.append({
+            "source": "phase4",
+            "signal": "absent",
+            "detail": "无 Phase 4 数据",
+        })
 
-    # ── Phase 5 信号 ──
     p5 = evidence_bundle.get("phase5_governance_evidence", {})
     health = p5.get("quality_health")
-
     if health == "healthy":
-        signals.append({"source": "phase5", "signal": "positive", "detail": "治理层 healthy"})
+        signals.append({
+            "source": "phase5",
+            "signal": "positive",
+            "detail": "治理层 healthy",
+        })
     elif health == "degraded":
-        signals.append({"source": "phase5", "signal": "neutral", "detail": "治理层 degraded"})
+        signals.append({
+            "source": "phase5",
+            "signal": "neutral",
+            "detail": "治理层 degraded",
+        })
     elif health == "unhealthy":
-        signals.append({"source": "phase5", "signal": "negative", "detail": "治理层 unhealthy"})
+        signals.append({
+            "source": "phase5",
+            "signal": "negative",
+            "detail": "治理层 unhealthy",
+        })
         reasons.append("治理层 unhealthy")
     else:
-        signals.append({"source": "phase5", "signal": "absent", "detail": f"治理层状态 {health or 'unknown'}"})
+        signals.append({
+            "source": "phase5",
+            "signal": "absent",
+            "detail": f"治理层状态={health or 'unknown'}",
+        })
 
-    # ── 综合决策 ──
-    severe_count = sum(1 for s in signals if s["signal"] == "severe_negative")
-    negative_count = sum(1 for s in signals if s["signal"] == "negative")
-    positive_count = sum(1 for s in signals if s["signal"] == "positive")
-    absent_count = sum(1 for s in signals if s["signal"] == "absent")
+    severe_count = sum(1 for signal in signals if signal["signal"] == "severe_negative")
+    negative_count = sum(1 for signal in signals if signal["signal"] == "negative")
+    positive_count = sum(1 for signal in signals if signal["signal"] == "positive")
+    absent_count = sum(1 for signal in signals if signal["signal"] == "absent")
 
     if severe_count > 0:
         decision = "pause"
@@ -177,7 +233,7 @@ def decide_family_timeframe_status(
     elif positive_count >= 3 and negative_count == 0:
         decision = "keep_active"
         confidence = "high"
-        reasons.insert(0, "多维度正面信号且无负面")
+        reasons.insert(0, "多维度正面且无负面")
     elif positive_count > negative_count:
         decision = "keep_active"
         confidence = "medium"
@@ -185,7 +241,7 @@ def decide_family_timeframe_status(
     else:
         decision = "require_review"
         confidence = "low"
-        reasons.insert(0, "信号混合，需人工审查")
+        reasons.insert(0, "信号混合，需要人工审查")
 
     return {
         "family": family,
@@ -197,7 +253,7 @@ def decide_family_timeframe_status(
             "positive": positive_count,
             "negative": negative_count,
             "severe_negative": severe_count,
-            "neutral": sum(1 for s in signals if s["signal"] == "neutral"),
+            "neutral": sum(1 for signal in signals if signal["signal"] == "neutral"),
             "absent": absent_count,
         },
         "signals": signals,
@@ -210,19 +266,16 @@ def decide_all_family_timeframes(
     *,
     combos: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
-    """对所有 family/timeframe 组合做决策."""
-    from .evidence_bundle import COMBOS as DEFAULT_COMBOS
-
     if combos is None:
-        combos = DEFAULT_COMBOS
+        combos = COMBOS
 
     results = []
     for combo in combos:
-        result = decide_family_timeframe_status(
-            combo["family"],
-            combo["timeframe"],
-            evidence_bundle,
+        results.append(
+            decide_family_timeframe_status(
+                combo["family"],
+                combo["timeframe"],
+                evidence_bundle,
+            ),
         )
-        results.append(result)
-
     return results

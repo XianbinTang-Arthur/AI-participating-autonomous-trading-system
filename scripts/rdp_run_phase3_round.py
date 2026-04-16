@@ -41,6 +41,11 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
+from aats.data_platform.governance.snapshot_db import (
+    ROUND_PHASE_PHASE3,
+    save_research_round_snapshot,
+)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -335,6 +340,7 @@ def main() -> None:
     log.info("Building conclusion document...")
     from aats.data_platform.attribution.report_builder import build_phase3_conclusion
 
+    conclusion_path = round_dir / "phase3_live_attribution_conclusion.md"
     build_phase3_conclusion(
         symbol=_SYMBOL,
         start=args.start,
@@ -344,7 +350,7 @@ def main() -> None:
         all_layer_analyses=all_layer_analyses,
         all_alignment_stats=all_alignment_stats,
         round_id=round_id,
-        output_path=round_dir / "phase3_live_attribution_conclusion.md",
+        output_path=conclusion_path,
     )
 
     # ---- 统计 ----
@@ -382,6 +388,46 @@ def main() -> None:
     with manifest_path.open("w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2, ensure_ascii=False, default=str)
     log.info("Wrote manifest -> %s", manifest_path)
+    combo_payload: dict[str, Any] = {}
+    for r in results:
+        combo_payload[r["key"]] = {
+            "family": r["family"],
+            "timeframe": r["timeframe"],
+            "status": r["status"],
+            "run_dir": r.get("run_dir"),
+            "attribution_summary": r.get("attribution_summary"),
+            "top_failure_modes": r.get("top_failure_modes"),
+            "alignment_stats": r.get("alignment_stats"),
+            "layer_analysis": all_layer_analyses.get(r["key"]),
+        }
+    if not save_research_round_snapshot(
+        round_id=round_id,
+        phase=ROUND_PHASE_PHASE3,
+        status=manifest["overall_status"],
+        round_path=str(round_dir),
+        started_at=started_at,
+        finished_at=finished_at,
+        replay_only=replay_only,
+        manifest_payload=manifest,
+        summary_payload={
+            "summary_rows": all_summary_rows,
+            "all_summaries": all_summaries,
+            "all_failure_modes": all_failure_modes,
+            "all_alignment_stats": all_alignment_stats,
+            "all_layer_analyses": all_layer_analyses,
+            "combos": combo_payload,
+        },
+        conclusion_payload={
+            "report_markdown_path": str(conclusion_path),
+        },
+        artifacts_payload={
+            "round_dir": str(round_dir),
+            "manifest_path": str(manifest_path),
+            "conclusion_path": str(conclusion_path),
+            "summary_csv_path": str(round_dir / "family_timeframe_attribution_summary.csv"),
+        },
+    ):
+        log.warning("Phase3 round snapshot DB upsert failed; file artifacts remain authoritative fallback")
 
     # ---- 最终汇总 ----
 

@@ -61,6 +61,7 @@ _write_family_timeframe_summary_csv = _step2._write_family_timeframe_summary_csv
 _write_family_timeframe_summary_json = _step2._write_family_timeframe_summary_json
 _generate_single_ft_recommendations = _step2._generate_single_ft_recommendations
 _write_manifest = _step2._write_manifest
+_normalize_dataset_version = _step2._normalize_dataset_version
 _SYMBOL: str = _step2._SYMBOL
 
 # Step 3 校准定义（引用 Step 2 中已定义的 expanded groups）
@@ -140,6 +141,7 @@ _DEFAULTS_BY_FAMILY: dict[str, dict[str, float | int | None]] = {
     "independent": _INDEPENDENT_DEFAULTS,
     "directional": _DIRECTIONAL_DEFAULTS,
 }
+_PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _family_from_ft_key(ft_key: str) -> str:
@@ -165,6 +167,24 @@ def _get_param_defaults(family: str = "independent") -> dict[str, float | int | 
     需要同步更新另一侧，否则 Step 3 merge 与 replay 的默认值会出现静默偏差。
     """
     return _DEFAULTS_BY_FAMILY.get(family, _INDEPENDENT_DEFAULTS)
+
+
+def _get_effective_param_defaults(ft_key: str) -> dict[str, float | int | None]:
+    family = _family_from_ft_key(ft_key)
+    defaults = dict(_get_param_defaults(family))
+    try:
+        from aats.data_platform.operations.strategy_tuning_registry import (
+            get_combo_tuning_overrides,
+        )
+
+        timeframe = ft_key.split("_", 1)[1] if "_" in ft_key else ""
+        overrides = get_combo_tuning_overrides(_PROJECT_ROOT, family, timeframe)
+        for key, value in overrides.items():
+            if key in defaults and value is not None:
+                defaults[key] = value
+    except Exception:  # pragma: no cover - best effort only
+        pass
+    return defaults
 
 
 def _get_constraint_rules(family: str = "independent") -> list[dict[str, Any]]:
@@ -284,6 +304,9 @@ def _run_step3_calibration_round(
     *,
     ensure_schema: bool = False,
     stop_on_error: bool = False,
+    start: str | None = None,
+    end: str | None = None,
+    dataset_version: str | None = None,
 ) -> dict[str, Any]:
     """运行一个 expanded calibration round (一个 family/tf 组合的全部 batch)。"""
     family = cal_def["family"]
@@ -307,6 +330,7 @@ def _run_step3_calibration_round(
         result = _run_batch(
             bdef["file"], batch_artifact_root,
             ensure_schema=ensure, stop_on_error=stop_on_error,
+            start=start, end=end, dataset_version=dataset_version,
         )
         result["_key"] = bdef["key"]
 
@@ -477,7 +501,7 @@ def _merge_recommendations(
     for ft_key in sorted(all_ft_keys):
         m: dict[str, Any] = {}
         family = _family_from_ft_key(ft_key)
-        family_defaults = _get_param_defaults(family)
+        family_defaults = _get_effective_param_defaults(ft_key)
 
         # (a) 先填充 Step 2 基线值
         s2 = s2_cands.get(ft_key, {})
@@ -759,10 +783,20 @@ def _build_merged_parameter_candidates(
         c: dict[str, Any] = {}
         for pname, prec in params_dict.items():
             if isinstance(prec, dict) and "value" in prec:
+                if prec["value"] is None:
+                    pending_validation.append(f"{pname} in {ft_key}")
+                    continue
                 c[pname] = prec["value"]
                 if prec.get("confidence") == "low":
                     pending_validation.append(f"{pname} in {ft_key}")
-        candidates[ft_key] = c
+        if c:
+            candidates[ft_key] = c
+        else:
+            pending_validation.append(f"candidate set missing in {ft_key}")
+            log.warning(
+                "Skip empty merged parameter candidate set for %s; governance import must treat it as unavailable",
+                ft_key,
+            )
 
     data = {
         "round_id": round_id,
@@ -1031,7 +1065,11 @@ def main() -> int:
         "--no-print-summary", action="store_true",
         help="Suppress final summary to stdout",
     )
+    parser.add_argument("--start", help="Override calibration start date (YYYY-MM-DD, UTC)")
+    parser.add_argument("--end", help="Override calibration end date (YYYY-MM-DD, UTC)")
+    parser.add_argument("--dataset-version", default="v1.0")
     args = parser.parse_args()
+    args.dataset_version = _normalize_dataset_version(args.dataset_version)
 
     started_at = datetime.now(timezone.utc).isoformat()
     round_id = (
@@ -1069,6 +1107,9 @@ def main() -> int:
                 round_key, cal_def, batch_artifact_root,
                 ensure_schema=args.ensure_schema and first_round,
                 stop_on_error=args.stop_on_error,
+                start=args.start,
+                end=args.end,
+                dataset_version=args.dataset_version,
             )
             calibration_results.append(result)
             first_round = False

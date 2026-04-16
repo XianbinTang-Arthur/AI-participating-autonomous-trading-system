@@ -167,6 +167,30 @@ def compare_diagnostics(
     }
 
 
+def extract_comparison_rows(summary: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """兼容读取 parameter scan comparison schema。
+
+    历史产物曾使用 `rows` / `experiments`，当前 canonical schema 为 `comparison`。
+    这里统一做兼容，避免 Step2、Phase6、治理索引各自散落 schema 分支。
+    """
+    if not isinstance(summary, dict):
+        return []
+
+    rows = summary.get("comparison")
+    if isinstance(rows, list):
+        return rows
+
+    legacy_rows = summary.get("rows")
+    if isinstance(legacy_rows, list):
+        return legacy_rows
+
+    legacy_experiments = summary.get("experiments")
+    if isinstance(legacy_experiments, list):
+        return legacy_experiments
+
+    return []
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------

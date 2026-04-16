@@ -35,6 +35,10 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from aats.data_platform.governance.quality_monitor import run_quality_monitor
+from aats.data_platform.governance.snapshot_db import (
+    SNAPSHOT_QUALITY_MONITOR,
+    save_governance_snapshot,
+)
 
 _DEFAULT_OUTPUT = "artifacts/governance/quality_monitor_summary.json"
 
@@ -59,6 +63,8 @@ def main() -> None:
     with output_path.open("w", encoding="utf-8") as f:
         json.dump(result, f, indent=2, ensure_ascii=False, default=str)
     log.info("巡检结果: %s", output_path)
+    if not save_governance_snapshot(snapshot_type=SNAPSHOT_QUALITY_MONITOR, payload=result):
+        log.warning("quality_monitor_summary DB upsert failed; file artifact kept as audit copy")
 
     # 显示
     if not args.no_print:
