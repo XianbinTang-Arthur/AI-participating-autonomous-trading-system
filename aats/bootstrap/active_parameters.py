@@ -376,7 +376,14 @@ def _try_load_from_db(db_url: str | None = None) -> dict[str, Any] | None:
         }
 
     except Exception as exc:
-        log.warning("数据库加载 active parameters 失败（fallback 文件模式）: %s", exc)
+        # DB URL 已配置但连接/查询失败 —— 这是生产环境的实质性降级：
+        # 系统将回退到 profile 默认参数而非用户调优后的 active set。
+        # 提升日志级别到 error 确保运维能在日志聚合中立即看到。
+        log.error(
+            "active_parameter_db_load_failed: 数据库加载 active parameters 失败，"
+            "系统将退化为 profile 默认参数。DB URL 已配置但不可达。err=%s",
+            exc,
+        )
         return None
 
 
@@ -429,8 +436,20 @@ def load_active_parameter_registry(
     if db_result is not None:
         return db_result
 
-    # DB 不可用时 fail-soft
-    log.info("active parameter registry: DB 不可用，返回空 registry（使用默认配置）")
+    # DB 不可用时 fail-soft，但需区分 "没配置 DB"（开发/测试）和
+    # "配置了 DB 但连接失败"（生产实质性降级）。
+    effective_url = db_url or os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+    if effective_url:
+        log.error(
+            "active_parameter_registry_degraded: DB URL 已配置但加载失败，"
+            "返回空 registry。策略将运行在 profile 默认参数上，可能与期望不符。",
+        )
+        return {
+            "generated_at": None,
+            "active_sets": {},
+            "db_load_failed": True,
+        }
+    log.info("active parameter registry: DB 未配置，返回空 registry（使用默认配置）")
     return {"generated_at": None, "active_sets": {}}
 
 

@@ -178,14 +178,12 @@ def load_registry(path: pathlib.Path, *, skip_db: bool = False) -> dict[str, Any
 
                 with Session(engine) as session:
                     registry = db_load_full_registry(session)
-                if registry.get("parameter_sets"):
-                    log.info("从数据库加载 parameter registry (%d parameter sets)",
-                             len(registry["parameter_sets"]))
-                    return registry
-                # DB 为空，fallback 到文件
-                log.debug("parameter_registry: DB 为空，fallback 到文件")
+                # DB 是真源：空表也直接返回，避免把旧 JSON 参数集重新污染 replay/scan/Step3 默认值
+                log.info("从数据库加载 parameter registry (%d parameter sets)",
+                         len(registry.get("parameter_sets", [])))
+                return registry
             except Exception as exc:
-                log.warning("parameter_registry: DB 读取失败 (%s)，fallback 到文件", exc)
+                log.warning("parameter_registry: DB 读取失败 (%s)，fallback 到文件（stale 风险）", exc)
             finally:
                 if engine is not None:
                     engine.dispose()

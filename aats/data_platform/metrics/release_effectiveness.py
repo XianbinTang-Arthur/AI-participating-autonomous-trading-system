@@ -67,8 +67,8 @@ def load_effectiveness_registry(root: Path) -> dict:
 
             with Session(engine) as session:
                 registry = db_load_effectiveness_registry(session)
-            if registry.get("evaluations"):
-                return registry
+            # DB 是真源：空表也直接返回，避免把旧 effectiveness 结论重新注入评估链
+            return registry
         except Exception:
             pass
         finally:

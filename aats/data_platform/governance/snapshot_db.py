@@ -233,15 +233,20 @@ def load_governance_snapshot(
     snapshot_type: str,
 ) -> dict[str, Any] | None:
     engine, ok = try_governance_db()
+    db_reachable = False
     if ok:
+        db_reachable = True
         try:
             with Session(engine) as session:
                 payload = db_load_governance_snapshot(session, snapshot_type=snapshot_type)
+            # DB 是真源：即便返回 None 也要信任（表示"还未写入"），不要回落到
+            # 磁盘上遗留的旧 JSON，否则 UI / gate 可能把昨天的快照当作今天的现实。
             if payload is not None:
                 payload.setdefault("data_source", "db")
-                return payload
+            return payload
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("DB load governance snapshot failed (%s): %s", snapshot_type, exc)
+            db_reachable = False
         finally:
             if engine is not None:
                 engine.dispose()
@@ -251,7 +256,9 @@ def load_governance_snapshot(
         return None
     payload = _safe_load_json(project_root / rel_path)
     if isinstance(payload, dict):
-        payload.setdefault("data_source", "file")
+        # DB 未配置 / 挂了时退化到文件；明确标注为 file_fallback，下游可据此判断
+        # 是否应显示"快照来源降级，数据可能是陈旧的"提示。
+        payload.setdefault("data_source", "file_fallback" if db_reachable else "file")
         return payload
     return None
 
@@ -468,15 +475,20 @@ def load_research_round_snapshot(
     project_root: Path | None = None,
 ) -> dict[str, Any] | None:
     engine, ok = try_governance_db()
+    db_reachable = False
     if ok:
+        db_reachable = True
         try:
             with Session(engine) as session:
                 snapshot = db_load_research_round_snapshot(session, round_id=round_id)
+            # DB 是真源：DB 可达但没有该 round → 直接返回 None，不去扫磁盘。
+            # 否则磁盘上残留的历史 round 目录会被当作 DB 里不存在的 round 的"证据"。
             if snapshot is not None:
                 snapshot.setdefault("data_source", "db")
-                return snapshot
+            return snapshot
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("DB load research round snapshot failed (%s): %s", round_id, exc)
+            db_reachable = False
         finally:
             if engine is not None:
                 engine.dispose()
@@ -487,6 +499,9 @@ def load_research_round_snapshot(
         round_dir = project_root / rel_root / round_id
         snapshot = _build_round_snapshot_from_dir(round_dir=round_dir, phase=phase)
         if snapshot is not None:
+            snapshot.setdefault(
+                "data_source", "file_fallback" if db_reachable else "file",
+            )
             return snapshot
     return None
 
@@ -497,15 +512,20 @@ def load_latest_research_round_snapshot(
     project_root: Path | None = None,
 ) -> dict[str, Any] | None:
     engine, ok = try_governance_db()
+    db_reachable = False
     if ok:
+        db_reachable = True
         try:
             with Session(engine) as session:
                 snapshot = db_load_latest_research_round_snapshot(session, phase=phase)
+            # 同上：DB 可达但该 phase 没记录 → 返回 None，不要从磁盘扫出可能属于
+            # 别的 round 目录的 manifest 冒充"最新" round。
             if snapshot is not None:
                 snapshot.setdefault("data_source", "db")
-                return snapshot
+            return snapshot
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("DB load research round snapshot failed (%s): %s", phase, exc)
+            db_reachable = False
         finally:
             if engine is not None:
                 engine.dispose()
@@ -518,4 +538,9 @@ def load_latest_research_round_snapshot(
     round_dir = _find_latest_round_dir(project_root / rel_root)
     if round_dir is None:
         return None
-    return _build_round_snapshot_from_dir(round_dir=round_dir, phase=phase)
+    snapshot = _build_round_snapshot_from_dir(round_dir=round_dir, phase=phase)
+    if snapshot is not None:
+        snapshot.setdefault(
+            "data_source", "file_fallback" if db_reachable else "file",
+        )
+    return snapshot

@@ -50,10 +50,13 @@ def load_release_history(project_root: Path) -> dict[str, Any]:
 
             with Session(engine) as session:
                 history = db_load_release_history(session)
-            if history.get("releases"):
-                return history
+            # DB 是真源 —— 即使结果为空也要直接返回，不能回退到旧 JSON
+            # 否则会把已淘汰的历史 release 重新注入运行链
+            return history
         except Exception as exc:
-            log.warning("无法从 DB 加载 release history: %s", exc)
+            log.warning(
+                "release history: DB 读取失败 (%s)，退化到文件（stale 风险）", exc,
+            )
         finally:
             if engine is not None:
                 engine.dispose()

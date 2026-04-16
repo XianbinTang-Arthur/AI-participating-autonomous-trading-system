@@ -44,8 +44,10 @@ def load_strategy_tuning_registry(project_root: Path) -> dict[str, Any]:
 
             with Session(engine) as session:
                 payload = db_load_strategy_tuning_registry(session)
-            if payload.get("proposals"):
-                return payload
+            # DB 是真源：空 proposals 也直接返回，避免把旧 strategy_tuning_proposals.json 重新注入审核链
+            payload.setdefault("version", 0)
+            payload.setdefault("proposals", [])
+            return payload
         except Exception:
             pass
         finally:
@@ -104,8 +106,9 @@ def load_strategy_tuning_overrides(project_root: Path) -> dict[str, Any]:
 
             with Session(engine) as session:
                 payload = db_load_strategy_tuning_overrides(session)
-            if payload.get("combo_overrides"):
-                return payload
+            # DB 是真源：空 overrides 也直接返回，避免把旧 strategy_tuning_overrides.json 重新污染运行参数
+            payload.setdefault("combo_overrides", {})
+            return payload
         except Exception:
             pass
         finally:
