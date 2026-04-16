@@ -149,10 +149,13 @@ def _aggregate_phase2_stats(diags: list[dict[str, Any]]) -> dict[str, Any]:
         if value is not None
     ]
 
+    experiments_with_openings = sum(1 for opening in openings if opening > 0)
+    # available 必须依赖真实开仓实验数：Phase2 扫描跑完但所有组合 opening_count=0
+    # 属于"跑了但没证据"，不能让下游 selector / gate 把它当作"有证据可用"。
     return {
-        "available": True,
+        "available": experiments_with_openings > 0,
         "total_experiments": len(diags),
-        "experiments_with_openings": sum(1 for opening in openings if opening > 0),
+        "experiments_with_openings": experiments_with_openings,
         "max_opening_count": max(openings) if openings else 0,
         "mean_positive_edge_ratio": round(
             sum(edge_ratios) / len(edge_ratios), 6,
@@ -176,27 +179,15 @@ def get_phase2_combo_stats(
     if combo_key and combo_key in combo_stats:
         return combo_stats[combo_key]
 
-    aggregate = evidence.get("global_stats") or evidence.get("aggregate_stats") or {}
-    if aggregate:
-        fallback = dict(aggregate)
-        fallback.setdefault(
-            "available",
-            any(
-                aggregate.get(key) not in (None, 0, 0.0, "")
-                for key in (
-                    "total_experiments",
-                    "experiments_with_openings",
-                    "max_opening_count",
-                    "mean_positive_edge_ratio",
-                )
-            ),
-        )
-        fallback.setdefault("family", family)
-        fallback.setdefault("timeframe", timeframe)
-        fallback.setdefault("combo_key", combo_key)
-        return fallback
-
-    return _aggregate_phase2_stats([])
+    # 没有该 family/timeframe 的独立统计 → 必须返回 unavailable，而不是把全局
+    # 聚合伪装成这一 combo 的证据：这是曾经出现过"global_stats 把无关 combo 误判为
+    # 有证据可用"的故障根因。selector/gate 应基于 combo-specific 证据决策。
+    fallback = _aggregate_phase2_stats([])
+    fallback["family"] = family
+    fallback["timeframe"] = timeframe
+    fallback["combo_key"] = combo_key
+    fallback["fallback_reason"] = "combo_stats_missing"
+    return fallback
 
 
 def _find_latest_round_dir(root: pathlib.Path) -> pathlib.Path | None:

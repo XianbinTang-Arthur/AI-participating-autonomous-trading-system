@@ -24,7 +24,21 @@ def evaluate_promotion_readiness(
     upgrade_candidates: list[dict[str, Any]],
     ft_decisions: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """评估当前证据是否足以进入下一轮 live test。"""
+    """评估当前证据是否足以进入下一轮 live test。
+
+    会跑 7 个检查：research_stability / attribution_no_severe_issue /
+    execution_not_severe / governance_healthy / parameter_traceable /
+    has_promote_candidate / has_keep_active_ft。
+
+    readiness 按如下规则分类：
+    - 全部通过 → ``ready_for_next_live_test`` (confidence=high)
+    - 仅"关键"子集 {research_stability, governance_healthy,
+      has_promote_candidate} 全通过 → ``ready_for_next_live_test`` (confidence=medium)
+    - 否则按首个失败检查的位置归类到具体的 not_ready_* 状态；
+      此时 confidence 表达"对 not_ready 判定的确信度"：
+      blockers<=2 → medium（个别指标失败，可能是噪声），>2 → high（多指标
+      同时失败，确信现在不宜上线）。
+    """
     checks: list[dict[str, Any]] = []
     blockers: list[str] = []
 
