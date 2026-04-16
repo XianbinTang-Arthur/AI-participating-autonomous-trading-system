@@ -313,6 +313,26 @@ def _protected_dashboard_panel_payload(
         from aats.api.rdp_control_summary import build_rdp_control_summary
 
         return build_rdp_control_summary(request)
+    if panel_key == "rdpWorkbenchOverview":
+        from aats.api.rdp_control_summary import build_rdp_workbench_overview
+
+        return build_rdp_workbench_overview(request)
+    if panel_key == "rdpWorkbenchItems":
+        from aats.api.rdp_control_summary import build_rdp_workbench_items
+
+        return build_rdp_workbench_items(request)
+    if panel_key == "rdpWorkbenchAlerts":
+        from aats.api.rdp_control_summary import build_rdp_workbench_alerts
+
+        return build_rdp_workbench_alerts(request)
+    if panel_key == "rdpTuningOverview":
+        from aats.api.rdp_control_summary import build_rdp_tuning_overview
+
+        return build_rdp_tuning_overview(request)
+    if panel_key == "rdpTuningProposals":
+        from aats.api.rdp_control_summary import build_rdp_tuning_proposals
+
+        return build_rdp_tuning_proposals(request)
     raise KeyError(f"dashboard_bundle_panel_not_found:{panel_key}")
 
 

@@ -198,6 +198,11 @@ export function viewSpecs(view, state = null) {
       ["aiConfigModel", "/ai-config/summary"],
       ["aiRuntime", "/ai/runtime"],
       ["rdpControl", "/rdp/control-summary"],
+      ["rdpWorkbenchOverview", "/rdp/workbench/overview"],
+      ["rdpWorkbenchItems", "/rdp/workbench/items"],
+      ["rdpWorkbenchAlerts", "/rdp/workbench/alerts"],
+      ["rdpTuningOverview", "/rdp/tuning/overview"],
+      ["rdpTuningProposals", "/rdp/tuning/proposals"],
     ],
     admin: [
       ["operatorUsers", "/auth/users"],

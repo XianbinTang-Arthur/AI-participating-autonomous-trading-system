@@ -46,6 +46,15 @@ from aats.services.operator.rdp_queries import (
     query_promotion_readiness,
     query_rdp_health,
 )
+from aats.api.rdp_control_summary import (
+    build_rdp_workbench_item_detail,
+    build_rdp_workbench_item_evidence,
+    build_rdp_tuning_overview,
+    build_rdp_tuning_proposals,
+    build_rdp_workbench_alerts,
+    build_rdp_workbench_items,
+    build_rdp_workbench_overview,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -678,3 +687,93 @@ async def control_summary_api(request: Request) -> dict[str, Any]:
     from aats.api.rdp_control_summary import build_rdp_control_summary
 
     return build_rdp_control_summary(request)
+
+
+@rdp_router.get("/workbench/overview", dependencies=[Depends(require_read_access)])
+async def workbench_overview_api(request: Request) -> dict[str, Any]:
+    """RDP 工作台首页摘要。"""
+    return build_rdp_workbench_overview(request)
+
+
+@rdp_router.get("/workbench/items", dependencies=[Depends(require_read_access)])
+async def workbench_items_api(request: Request) -> dict[str, Any]:
+    """RDP 当前待处理事项。"""
+    return build_rdp_workbench_items(request)
+
+
+@rdp_router.get("/workbench/items/{combo_key}", dependencies=[Depends(require_read_access)])
+async def workbench_item_detail_api(request: Request, combo_key: str) -> dict[str, Any]:
+    """RDP 单个 combo 的当前处理详情。"""
+    return build_rdp_workbench_item_detail(request, combo_key)
+
+
+@rdp_router.get("/workbench/evidence/{combo_key}", dependencies=[Depends(require_read_access)])
+async def workbench_item_evidence_api(request: Request, combo_key: str) -> dict[str, Any]:
+    """RDP 单个 combo 的证据钻取摘要。"""
+    return build_rdp_workbench_item_evidence(request, combo_key)
+
+
+@rdp_router.get("/workbench/alerts", dependencies=[Depends(require_read_access)])
+async def workbench_alerts_api(request: Request) -> dict[str, Any]:
+    """RDP 数据完整性与系统阻断摘要。"""
+    return build_rdp_workbench_alerts(request)
+
+
+@rdp_router.get("/tuning/overview", dependencies=[Depends(require_read_access)])
+async def tuning_overview_api(request: Request) -> dict[str, Any]:
+    """自动调优摘要。"""
+    return build_rdp_tuning_overview(request)
+
+
+@rdp_router.get("/tuning/proposals", dependencies=[Depends(require_read_access)])
+async def tuning_proposals_api(request: Request) -> dict[str, Any]:
+    """待审核自动调优提案。"""
+    return build_rdp_tuning_proposals(request)
+
+
+@rdp_router.post(
+    "/tuning/proposals/{proposal_id}/approve",
+    dependencies=[Depends(require_write_access)],
+)
+async def approve_tuning_proposal_api(
+    request: Request,
+    proposal_id: str,
+    body: ApprovalRequest,
+) -> dict[str, Any]:
+    """批准自动调优提案。"""
+    from aats.data_platform.operations.strategy_tuning_registry import (
+        review_strategy_tuning_proposal,
+    )
+
+    root = _project_root(request)
+    return review_strategy_tuning_proposal(
+        root,
+        proposal_id=proposal_id,
+        action="approve",
+        reviewer=body.actor,
+        notes=body.notes,
+    )
+
+
+@rdp_router.post(
+    "/tuning/proposals/{proposal_id}/reject",
+    dependencies=[Depends(require_write_access)],
+)
+async def reject_tuning_proposal_api(
+    request: Request,
+    proposal_id: str,
+    body: ApprovalRequest,
+) -> dict[str, Any]:
+    """拒绝自动调优提案。"""
+    from aats.data_platform.operations.strategy_tuning_registry import (
+        review_strategy_tuning_proposal,
+    )
+
+    root = _project_root(request)
+    return review_strategy_tuning_proposal(
+        root,
+        proposal_id=proposal_id,
+        action="reject",
+        reviewer=body.actor,
+        notes=body.notes,
+    )

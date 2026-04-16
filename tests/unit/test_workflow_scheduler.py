@@ -278,3 +278,54 @@ def test_scheduler_marks_slot_processed_when_active_task_exists(tmp_path: Path) 
         state["workflows"]["decision_cycle"]["last_processed_slot"]
         == "2026-04-16T10:00:00+00:00"
     )
+
+
+def test_scheduler_treats_equivalent_offset_slot_as_already_processed(tmp_path: Path) -> None:
+    _write_state(
+        tmp_path,
+        {
+            "initialized_at": "2026-04-15T00:00:00+00:00",
+            "bootstrap_completed_at": "2026-04-15T02:00:00+00:00",
+            "workflows": {
+                "data_maintenance": {
+                    "last_processed_slot": "2026-04-16T12:00:00+08:00",
+                    "last_action": "done",
+                }
+            },
+        },
+    )
+    now = datetime(2026, 4, 16, 23, 10, tzinfo=UTC)
+    schedule = {
+        "enabled": True,
+        "frequency": "daily",
+        "hour_utc": 4,
+        "minute_utc": 0,
+    }
+
+    with (
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.list_available_workflows",
+            return_value=["data_maintenance"],
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.load_workflow_config",
+            return_value={"schedule": schedule},
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.guard_workflow_execution",
+            return_value=type("Guard", (), {"allowed": True, "reason": None})(),
+        ),
+        patch("aats.data_platform.db.get_session", _fake_session),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_has_active_task",
+            return_value=None,
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_create_task",
+        ) as create_task_mock,
+    ):
+        result = enqueue_due_workflows(tmp_path, now=now, save_state=True, initialize_if_missing=False)
+
+    assert result["enqueued"] == []
+    assert result["skipped"][0]["reason"] == "当前窗口已处理"
+    create_task_mock.assert_not_called()

@@ -85,6 +85,151 @@ def test_trigger_task_api_accepts_release_cycle() -> None:
     assert payload["task_id"] == "task_release_cycle_1"
 
 
+def test_tuning_review_routes_expose_and_review_pending_proposals(tmp_path) -> None:
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    (root / "artifacts" / "governance").mkdir(parents=True, exist_ok=True)
+    (root / "artifacts" / "governance" / "strategy_tuning_proposals.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-16T12:00:00Z",
+                "version": 1,
+                "proposals": [
+                    {
+                        "proposal_id": "tprop_demo_1",
+                        "created_at": "2026-04-16T12:00:00Z",
+                        "combo_key": "directional_1h",
+                        "family": "directional",
+                        "timeframe": "1h",
+                        "parameter": "min_safe_net_edge_bps",
+                        "current_value": 2.0,
+                        "proposed_value": 1.5,
+                        "status": "pending_review",
+                        "rationale": "Phase 4 边际为正，但安全边界阻断占主导",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "artifacts" / "governance" / "strategy_tuning_overrides.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-16T12:00:00Z",
+                "combo_overrides": {},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch("aats.data_platform.operations.strategy_tuning_registry.try_governance_db", lambda: (None, False)),
+    ):
+        client = TestClient(app)
+
+        overview = client.get("/rdp/tuning/overview").json()
+        assert overview["pending_review_count"] == 1
+
+        listing = client.get("/rdp/tuning/proposals").json()
+        assert listing["total"] == 1
+        assert listing["items"][0]["proposal_id"] == "tprop_demo_1"
+
+        approved = client.post(
+            "/rdp/tuning/proposals/tprop_demo_1/approve",
+            json={"actor": "operator", "notes": "approve"},
+        ).json()
+        assert approved["ok"] is True
+
+        listing_after = client.get("/rdp/tuning/proposals").json()
+        assert listing_after["total"] == 0
+
+
+def test_workbench_detail_routes_expose_evidence_and_integrity_block(tmp_path) -> None:
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._governance_session", _fake_governance_session),
+        patch("aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot", return_value={"round_id": "step2_missing"}),
+        patch("aats.data_platform.governance.snapshot_db.is_snapshot_incomplete", return_value=True),
+        patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+            "overall_health": "healthy",
+            "blocking_reasons": [],
+            "warnings": [],
+            "checks": [],
+        }),
+        patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+        patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+        patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
+        patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={
+            "recommendations": [
+                {
+                    "recommendation_id": "rec_combo_1",
+                    "symbol": "BTC-USDT-SWAP",
+                    "family": "directional",
+                    "timeframe": "1h",
+                    "recommendation_type": "keep_active",
+                    "confidence": "low",
+                    "reason": "研究结果尚不完整；先不要审批",
+                    "status": "draft",
+                    "target_parameter_set_id": "ps_candidate_1",
+                    "source_round_id": "round_step2_1",
+                    "created_at": "2026-04-16T12:00:00Z",
+                },
+            ],
+        }),
+        patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+            "generated_at": "2026-04-16T11:40:00Z",
+            "governance_managed": True,
+            "paused_combos": [],
+            "known_combos": ["directional_1h"],
+            "active_sets": {},
+            "parameter_sets": [],
+        }),
+        patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+        patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+            "available": True,
+            "generated_at": "2026-04-16T11:55:00Z",
+            "status_distribution": {"keep_active": 1},
+            "decisions": [],
+        }),
+        patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+            "available": True,
+            "parameter_sets": [],
+        }),
+        patch(
+            "aats.data_platform.production_workflow.release_registry.load_release_history",
+            return_value={"releases": []},
+        ),
+        patch("aats.api.rdp_control_summary.query_latest_attribution", return_value={"available": True, "round_id": "round_phase3_1", "combos": []}),
+        patch("aats.api.rdp_control_summary.query_latest_execution_realism", return_value={"available": True, "round_id": "round_phase4_1", "combos": []}),
+    ):
+        client = TestClient(app)
+        detail = client.get("/rdp/workbench/items/directional_1h").json()
+        evidence = client.get("/rdp/workbench/evidence/directional_1h").json()
+
+    assert detail["available"] is True
+    assert detail["item"]["approval_enabled"] is False
+    assert detail["detail_summary"]["integrity_status"] == "blocked"
+    assert evidence["available"] is True
+    assert evidence["integrity_status"] == "blocked"
+    assert evidence["phase2"]["status"] == "blocked"
+
+
 def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_path) -> None:
     app = FastAPI()
     app.include_router(rdp_router)

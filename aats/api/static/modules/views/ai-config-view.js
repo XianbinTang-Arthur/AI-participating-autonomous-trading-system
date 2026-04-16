@@ -34,6 +34,11 @@ export function renderAIConfigView(data) {
   const latestOptimizationReport = strategyProfiles.latest_optimization_report || {};
   const latestProfileControl = aiState.latest_profile_control_decision || {};
   const rdpControl = data.rdpControl || {};
+  const rdpWorkbenchOverview = data.rdpWorkbenchOverview || {};
+  const rdpWorkbenchItems = data.rdpWorkbenchItems || {};
+  const rdpWorkbenchAlerts = data.rdpWorkbenchAlerts || {};
+  const rdpTuningOverview = data.rdpTuningOverview || {};
+  const rdpTuningProposals = data.rdpTuningProposals || {};
   const uiState = data.uiState?.aiConfig || {};
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
   const summaryError = data.error || null;
@@ -68,12 +73,23 @@ export function renderAIConfigView(data) {
         })}
       </div>
       <div class="span-12 workspace-stack">
-        ${Object.keys(rdpControl).length === 0
+        ${(Object.keys(rdpWorkbenchOverview).length === 0
+          && Object.keys(rdpWorkbenchItems).length === 0
+          && Object.keys(rdpWorkbenchAlerts).length === 0)
           ? callout({
               title: "RDP 数据暂未就绪",
-              copy: "控制面板数据正在加载中，或 /rdp/control-summary 请求未成功。请稍候刷新。",
+              copy: "工作台数据正在加载中，或 RDP 读接口尚未成功返回。请稍候刷新。",
             })
-          : renderRdpControlPanelV2({ rdpControl, canAdmin, uiState })}
+          : renderRdpControlPanelV2({
+              rdpControl,
+              rdpWorkbenchOverview,
+              rdpWorkbenchItems,
+              rdpWorkbenchAlerts,
+              rdpTuningOverview,
+              rdpTuningProposals,
+              canAdmin,
+              uiState,
+            })}
       </div>
       <div class="span-12 workspace-stack">
         ${renderCurrentConfigurationCard({ runtimeProfiles, runtime, aiState, activeRevision, activation })}

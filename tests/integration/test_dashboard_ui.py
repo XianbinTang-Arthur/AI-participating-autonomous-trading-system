@@ -3,6 +3,7 @@
 import json
 import re
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,14 +45,26 @@ def _assert_imports_helper(testcase: unittest.TestCase, text: str, helpers: list
 
 def _run_node_module(script: str, *, encoding: str | None = None) -> subprocess.CompletedProcess[str]:
     repo_root = Path(__file__).resolve().parents[2]
-    return subprocess.run(
-        ["node", "--input-type=module", "-e", script],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        encoding=encoding,
-        check=False,
-    )
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        suffix=".mjs",
+        dir=repo_root,
+        delete=False,
+    ) as handle:
+        handle.write(script)
+        temp_script = Path(handle.name)
+    try:
+        return subprocess.run(
+            ["node", str(temp_script)],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding=encoding,
+            check=False,
+        )
+    finally:
+        temp_script.unlink(missing_ok=True)
 
 
 def _render_strategy_view_with_hidden_strings(strings: list[str]) -> subprocess.CompletedProcess[str]:
@@ -762,13 +775,7 @@ console.log(JSON.stringify({
     && !html.includes('strategy_hedge_opportunistic_weak_edge_execution_mode / strategy_hedge_opportunistic_max_acceptable_cost_bps / strategy_hedge_opportunistic_passive_first_enabled'),
 }));
 """
-        result = subprocess.run(
-            ["node", "--input-type=module", "-e", script],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = _run_node_module(script)
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hidesOpportunisticReference":true', result.stdout)
@@ -928,13 +935,7 @@ console.log(JSON.stringify({
   hasOpportunityAllocatorCopy: opportunityHtml.includes('当前 allocator v2 已批准收回机会腿的账户级执行目标。'),
 }));
 """
-        result = subprocess.run(
-            ["node", "--input-type=module", "-e", script],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = _run_node_module(script)
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hasProtectiveCloseCopy":true', result.stdout)
@@ -1204,13 +1205,7 @@ console.log(JSON.stringify({
     && !html.includes('strategy_hedge_independent_entry_execution_mode / strategy_hedge_independent_scale_in_execution_mode / strategy_hedge_independent_de_risk_execution_mode / strategy_hedge_independent_close_failed_thesis_execution_mode / strategy_hedge_independent_close_stale_execution_mode'),
 }));
 """
-        result = subprocess.run(
-            ["node", "--input-type=module", "-e", script],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = _run_node_module(script)
 
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hidesIndependentReference":true', result.stdout)
@@ -1335,13 +1330,7 @@ console.log(JSON.stringify({
     && !html.includes('独立双书当前只放开到 dry-run，这条实盘运行线不会启用'),
 }));
 """
-        result = subprocess.run(
-            ["node", "--input-type=module", "-e", script],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = _run_node_module(script)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hidesRolloutReference":true', result.stdout)
 
@@ -1878,6 +1867,196 @@ const analysisHtml = renderAIAnalysisView({
   },
 });
 
+const baseWorkbenchOverview = {
+  round_id: '20260321_121500_demo',
+  overall_status: 'needs_approval',
+  headline: '当前轮次有 1 个组合待审批',
+  subheadline: '先处理 independent / 15m 的治理结论，再决定是否发布。',
+  primary_action: {
+    key: 'open-current-round',
+    label: '处理当前轮次',
+    ui_action: 'noop',
+    value: 'current-round',
+    enabled: true,
+  },
+  secondary_actions: [
+    {
+      key: 'view-evidence',
+      label: '查看证据',
+      ui_action: 'noop',
+      value: 'independent_15m',
+      enabled: true,
+    },
+  ],
+  blockers: [
+    {
+      code: 'phase3_incomplete',
+      severity: 'danger',
+      title: '最新归因结果不完整',
+      message: 'Phase3 当前不可用于正式结论。',
+      blocks_approval: true,
+    },
+  ],
+  summary_counts: {
+    pending_items: 1,
+    integrity_blocked_items: 1,
+    observing_releases: 1,
+    tuning_pending: 1,
+  },
+  current_execution: {
+    workflow: 'research_cycle',
+    status: 'running',
+    started_at: '2026-03-21T12:15:00Z',
+  },
+  next_queue: {
+    workflow: 'governance_cycle',
+    status: 'pending',
+    requested_at: '2026-03-21T12:16:00Z',
+  },
+  health: {
+    daemon: 'healthy',
+    governance_db: 'blocked',
+    latest_gate: 'warn',
+  },
+};
+
+const baseWorkbenchItems = {
+  total: 1,
+  items: [
+    {
+      combo_key: 'independent_15m',
+      family: 'Independent',
+      timeframe: '15M',
+      recommendation_id: 'rec-1',
+      recommendation_type: 'parameter_upgrade',
+      confidence: 'high',
+      headline: '治理建议 需要复核',
+      decision_summary: '当前建议仍需人工复核，先确认是否暂停。',
+      reason_summary: [
+        '归因失败率过高',
+        '执行边际没有改善',
+        '当前组合仍处于治理暂停状态',
+      ],
+      missing_evidence: ['最新归因结果不完整'],
+      blocking_flags: ['governance degraded'],
+      integrity_status: 'blocked',
+      approval_enabled: false,
+      approval_blocked_reason: '证据不完整，当前不能审批。',
+      created_at: '2026-03-21T12:20:00Z',
+      source_rounds: {
+        phase2_round_id: 'round_step2_1',
+        phase3_round_id: 'round_phase3_1',
+        phase4_round_id: 'round_phase4_1',
+      },
+      detail_summary: {
+        risk_summary: ['归因失败率过高', 'governance degraded'],
+      },
+      evidence_digest: [
+        {
+          phase: 'phase2',
+          status: 'blocked',
+          headline: 'Step2 研究证据当前不可直接审批',
+          metrics: {
+            openings_with_signal: 39,
+            mean_positive_edge_ratio: 0.528,
+          },
+          round_id: 'round_step2_1',
+          incomplete_reason: 'phase3_incomplete',
+        },
+        {
+          phase: 'phase3',
+          status: 'incomplete',
+          headline: '最新归因结果不完整',
+          metrics: {
+            status: 'unknown',
+          },
+          round_id: 'round_phase3_1',
+          incomplete_reason: 'manifest_missing_on_disk',
+        },
+      ],
+      actions: [
+        {
+          key: 'approve',
+          label: '审批治理',
+          ui_action: 'rdp-approve-recommendation',
+          value: 'rec-1',
+          enabled: false,
+          disabled_reason: '证据不完整，当前不能审批',
+        },
+        {
+          key: 'reject',
+          label: '拒绝治理',
+          ui_action: 'rdp-reject-recommendation',
+          value: 'rec-1',
+          enabled: true,
+        },
+      ],
+    },
+  ],
+};
+
+const baseWorkbenchAlerts = {
+  integrity_alerts: [
+    {
+      code: 'phase3_incomplete',
+      severity: 'danger',
+      phase: 'phase3',
+      title: '最新归因结果不完整',
+      message: 'Phase3 当前不可用于正式结论。',
+      blocks_approval: true,
+    },
+  ],
+  operational_alerts: [
+    {
+      code: 'governance_db',
+      severity: 'danger',
+      title: '治理数据库还没有接通，发布链路现在不可用。',
+      message: 'governance_db_connection_failed: connection refused',
+    },
+  ],
+};
+
+const baseTuningOverview = {
+  pending_review_count: 1,
+  approved_not_applied_count: 0,
+  active_override_count: 2,
+  blocked_review_count: 0,
+  headline: '自动调优已生成 1 条待审核提案。',
+};
+
+const baseTuningProposals = {
+  total: 1,
+  items: [
+    {
+      proposal_id: 'tp-1',
+      family: 'Independent',
+      timeframe: '15M',
+      headline: '建议上调 min_safe_net_edge_bps',
+      proposed_changes: [
+        { key: 'min_safe_net_edge_bps', from: 2, to: 4 },
+      ],
+      reason_summary: ['最近四轮 execution 正向但安全边界偏松'],
+      created_at: '2026-03-21T12:19:00Z',
+      actions: [
+        {
+          key: 'approve',
+          label: '批准调优',
+          ui_action: 'rdp-approve-tuning-proposal',
+          value: 'tp-1',
+          enabled: true,
+        },
+        {
+          key: 'reject',
+          label: '拒绝调优',
+          ui_action: 'rdp-reject-tuning-proposal',
+          value: 'tp-1',
+          enabled: true,
+        },
+      ],
+    },
+  ],
+};
+
 const configHtml = renderAIConfigView({
   session: { role: 'admin' },
   aiRuntime: {
@@ -2231,6 +2410,11 @@ const configHtml = renderAIConfigView({
       },
     ],
   },
+  rdpWorkbenchOverview: baseWorkbenchOverview,
+  rdpWorkbenchItems: baseWorkbenchItems,
+  rdpWorkbenchAlerts: baseWorkbenchAlerts,
+  rdpTuningOverview: baseTuningOverview,
+  rdpTuningProposals: baseTuningProposals,
 });
 
 const manualOnlyConfigHtml = renderAIConfigView({
@@ -2371,6 +2555,78 @@ const releaseEmptyConfigHtml = renderAIConfigView({
     recent_releases: [],
     observation_queue: [],
   },
+  rdpWorkbenchOverview: {
+    round_id: '20260321_122000_empty',
+    overall_status: 'needs_approval',
+    headline: '当前轮次有 1 个组合等待审批',
+    subheadline: '先看 directional / 1h 的治理结论。',
+    primary_action: {
+      key: 'open-current-round',
+      label: '处理当前轮次',
+      ui_action: 'noop',
+      value: 'directional_1h',
+      enabled: true,
+    },
+    secondary_actions: [],
+    blockers: [],
+    summary_counts: {
+      pending_items: 1,
+      integrity_blocked_items: 0,
+      observing_releases: 0,
+      tuning_pending: 0,
+    },
+    current_execution: { workflow: null, status: 'idle' },
+    next_queue: { workflow: null, status: 'none' },
+    health: {
+      daemon: 'healthy',
+      governance_db: 'healthy',
+      latest_gate: 'not_run',
+    },
+  },
+  rdpWorkbenchItems: {
+    total: 1,
+    items: [
+      {
+        combo_key: 'directional_1h',
+        family: 'Directional',
+        timeframe: '1H',
+        recommendation_id: 'rec-empty-1',
+        recommendation_type: 'parameter_upgrade',
+        confidence: 'medium',
+        headline: '等待审批',
+        decision_summary: '候选参数已经生成，等待本轮审批。',
+        reason_summary: ['当前轮次只有 1 个 directional 组合需要审批'],
+        missing_evidence: [],
+        blocking_flags: [],
+        integrity_status: 'complete',
+        created_at: '2026-03-21T12:20:00Z',
+        actions: [
+          {
+            key: 'approve',
+            label: '审批治理',
+            ui_action: 'rdp-approve-recommendation',
+            value: 'rec-empty-1',
+            enabled: true,
+          },
+        ],
+      },
+    ],
+  },
+  rdpWorkbenchAlerts: {
+    integrity_alerts: [],
+    operational_alerts: [],
+  },
+  rdpTuningOverview: {
+    pending_review_count: 0,
+    approved_not_applied_count: 0,
+    active_override_count: 0,
+    blocked_review_count: 0,
+    headline: '当前没有新的自动调优提案。',
+  },
+  rdpTuningProposals: {
+    total: 0,
+    items: [],
+  },
   uiState: {
     modeManualEditing: false,
     profileManualEditing: false,
@@ -2483,6 +2739,61 @@ const rollbackConfigHtml = renderAIConfigView({
       },
     ],
   },
+  rdpWorkbenchOverview: {
+    round_id: '20260321_123000_rollback',
+    overall_status: 'rollback_required',
+    headline: '有发布进入回滚建议状态，先处理回滚。',
+    subheadline: '回滚优先级高于当前轮次里的新建议与新发布。',
+    primary_action: {
+      key: 'rollback',
+      label: '执行回滚',
+      ui_action: 'rdp-rollback-parameters',
+      value: 'independent/15m',
+      enabled: true,
+    },
+    secondary_actions: [],
+    blockers: [
+      {
+        code: 'rollback_pending',
+        severity: 'danger',
+        title: '当前有发布进入回滚建议状态',
+        message: '应先回滚，再处理新的发布与审批。',
+        blocks_approval: true,
+      },
+    ],
+    summary_counts: {
+      pending_items: 0,
+      integrity_blocked_items: 0,
+      observing_releases: 1,
+      tuning_pending: 0,
+    },
+    current_execution: { workflow: null, status: 'idle' },
+    next_queue: { workflow: null, status: 'none' },
+    health: {
+      daemon: 'healthy',
+      governance_db: 'healthy',
+      latest_gate: 'pass',
+    },
+  },
+  rdpWorkbenchItems: {
+    total: 0,
+    items: [],
+  },
+  rdpWorkbenchAlerts: {
+    integrity_alerts: [],
+    operational_alerts: [],
+  },
+  rdpTuningOverview: {
+    pending_review_count: 0,
+    approved_not_applied_count: 0,
+    active_override_count: 0,
+    blocked_review_count: 0,
+    headline: '当前没有新的自动调优提案。',
+  },
+  rdpTuningProposals: {
+    total: 0,
+    items: [],
+  },
 });
 
 const drawer = buildDecisionDrawer({
@@ -2512,24 +2823,26 @@ console.log(JSON.stringify({
   analysisNoTopNavButtons: !analysisHtml.includes('前往 AI 工作台') && !analysisHtml.includes('前往 AI 配置'),
   configHasRuntimeModeCard: configHtml.includes('运行模式切换'),
   configHasAutoProfileControlCard: configHtml.includes('自动换档控制'),
-  configHasRdpSummaryCard: configHtml.includes('RDP 核心面板'),
-  configHasCommandBar: configHtml.includes('只保留当前能推进的工作'),
+  configUsesWorkbenchIdentity: configHtml.includes('RDP 工作台') && !configHtml.includes('RDP 核心面板'),
+  configHasWorkbenchHero: configHtml.includes('先处理当前轮次，再决定发布与回滚'),
   configHasCoreQueue: configHtml.includes('当前待处理'),
-  configHasBlockerCard: configHtml.includes('当前阻断'),
-  configSplitsTaskExecutionAndQueue: configHtml.includes('数据刷新执行') && configHtml.includes('数据刷新排队') && configHtml.includes('研究流程执行') && configHtml.includes('研究流程排队'),
-  configShowsResearchRunningAndDataPendingSeparately: configHtml.includes('研究流程执行') && configHtml.includes('运行中') && configHtml.includes('数据刷新排队') && configHtml.includes('排队中'),
-  configUsesReleaseFirstLanguage: configHtml.includes('创建发布') && configHtml.includes('运行 Gate'),
+  configHasIntegrityPanel: configHtml.includes('数据完整性与阻断'),
+  configHasRuntimeRail: configHtml.includes('系统状态'),
+  configHasTuningCard: configHtml.includes('自动调优'),
+  configShowsTaskOrientedMetrics: configHtml.includes('当前待审批') && configHtml.includes('当前执行中') && configHtml.includes('下一待执行'),
+  configRemovesWorkflowGridNoise: !configHtml.includes('数据刷新执行') && !configHtml.includes('研究流程排队'),
   configNoDirectApplyLanguage: !configHtml.includes('data-action="rdp-approve-and-apply"') && !configHtml.includes('data-action="rdp-apply-only"'),
-  configShowsCandidateAndGovernance: configHtml.includes('本轮生成参数集 ps_candidate_1') && configHtml.includes('当前治理建议：暂停（待审批）'),
-  configDeduplicatesGovernanceCard: !configHtml.includes('<h4>治理建议 暂停</h4>'),
-  configHidesHistoryNoise: !configHtml.includes('加载更多历史建议') && !configHtml.includes('最近发布记录'),
-  configTranslatesBlockers: configHtml.includes('治理数据库还没有接通，发布链路现在不可用。') && !configHtml.includes('查看原始检查详情'),
-  configReleaseCardCollapsedIntoQueue: releaseEmptyConfigHtml.includes('本轮生成参数集 ps_empty_1') && !releaseEmptyConfigHtml.includes('最近发布记录'),
-  configShowsReleaseWindow: configHtml.includes('观察窗口 24 小时（按当前环境默认值）'),
-  rollbackCommandBarPrioritizesRollback:
+  configShowsDecisionSummaryNotRawEvidence: configHtml.includes('当前建议仍需人工复核，先确认是否暂停。') && !configHtml.includes('[phase2_research]') && !configHtml.includes('[phase3_attribution]'),
+  configShowsApprovalBlockedCallout: configHtml.includes('审批已阻断') && configHtml.includes('证据不完整，当前不能审批。'),
+  configShowsEvidenceDrilldown: configHtml.includes('查看证据详情') && configHtml.includes('来源轮次') && configHtml.includes('Step2 研究证据当前不可直接审批'),
+  configShowsIntegrityAlerts: configHtml.includes('最新归因结果不完整') && configHtml.includes('治理数据库还没有接通，发布链路现在不可用。'),
+  configShowsTuningProposalActions: configHtml.includes('批准调优') && configHtml.includes('拒绝调优'),
+  configKeepsObservationSeparate: configHtml.includes('观察与回滚') && configHtml.includes('仍需继续跟踪观察窗口'),
+  releaseEmptyUsesWorkbenchLayout: releaseEmptyConfigHtml.includes('Directional / 1H') && releaseEmptyConfigHtml.includes('等待审批') && releaseEmptyConfigHtml.includes('当前没有待审核的自动调优提案'),
+  rollbackHeroPrioritizesRollback:
     rollbackConfigHtml.split('当前待处理')[0].includes('data-action="rdp-rollback-parameters"')
     && !rollbackConfigHtml.split('当前待处理')[0].includes('data-action="rdp-create-release"'),
-  rollbackCommandBarExplainsPriority: rollbackConfigHtml.includes('有发布进入回滚建议状态，优先处理回滚。'),
+  rollbackHeroExplainsPriority: rollbackConfigHtml.includes('有发布进入回滚建议状态，先处理回滚。'),
   configHasRuntimeParams: configHtml.includes('运行参数概览'),
   configOmitsAdaptiveControls: !configHtml.includes('风险预算乘数') && !configHtml.includes('执行侵略性乘数'),
   configHasTimingControls: configHtml.includes('持有与冷却') && configHtml.includes('低边际保护'),
@@ -2547,13 +2860,7 @@ console.log(JSON.stringify({
   manualOnlyRuntimeAvoidsLegacyButtons: !manualOnlyConfigHtml.includes('跟随配置') && !manualOnlyConfigHtml.includes('手动接管'),
 }));
 """
-        result = subprocess.run(
-            ["node", "--input-type=module", "-e", script],
-            cwd=repo_root,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
+        result = _run_node_module(script)
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"analysisHasRuntimeSummary":true', result.stdout)
         self.assertIn('"analysisHasDecisionChain":true', result.stdout)
@@ -2562,22 +2869,24 @@ console.log(JSON.stringify({
         self.assertIn('"analysisNoTopNavButtons":true', result.stdout)
         self.assertIn('"configHasRuntimeModeCard":true', result.stdout)
         self.assertIn('"configHasAutoProfileControlCard":true', result.stdout)
-        self.assertIn('"configHasRdpSummaryCard":true', result.stdout)
-        self.assertIn('"configHasCommandBar":true', result.stdout)
+        self.assertIn('"configUsesWorkbenchIdentity":true', result.stdout)
+        self.assertIn('"configHasWorkbenchHero":true', result.stdout)
         self.assertIn('"configHasCoreQueue":true', result.stdout)
-        self.assertIn('"configHasBlockerCard":true', result.stdout)
-        self.assertIn('"configSplitsTaskExecutionAndQueue":true', result.stdout)
-        self.assertIn('"configShowsResearchRunningAndDataPendingSeparately":true', result.stdout)
-        self.assertIn('"configUsesReleaseFirstLanguage":true', result.stdout)
+        self.assertIn('"configHasIntegrityPanel":true', result.stdout)
+        self.assertIn('"configHasRuntimeRail":true', result.stdout)
+        self.assertIn('"configHasTuningCard":true', result.stdout)
+        self.assertIn('"configShowsTaskOrientedMetrics":true', result.stdout)
+        self.assertIn('"configRemovesWorkflowGridNoise":true', result.stdout)
         self.assertIn('"configNoDirectApplyLanguage":true', result.stdout)
-        self.assertIn('"configShowsCandidateAndGovernance":true', result.stdout)
-        self.assertIn('"configDeduplicatesGovernanceCard":true', result.stdout)
-        self.assertIn('"configHidesHistoryNoise":true', result.stdout)
-        self.assertIn('"configTranslatesBlockers":true', result.stdout)
-        self.assertIn('"configReleaseCardCollapsedIntoQueue":true', result.stdout)
-        self.assertIn('"configShowsReleaseWindow":true', result.stdout)
-        self.assertIn('"rollbackCommandBarPrioritizesRollback":true', result.stdout)
-        self.assertIn('"rollbackCommandBarExplainsPriority":true', result.stdout)
+        self.assertIn('"configShowsDecisionSummaryNotRawEvidence":true', result.stdout)
+        self.assertIn('"configShowsApprovalBlockedCallout":true', result.stdout)
+        self.assertIn('"configShowsEvidenceDrilldown":true', result.stdout)
+        self.assertIn('"configShowsIntegrityAlerts":true', result.stdout)
+        self.assertIn('"configShowsTuningProposalActions":true', result.stdout)
+        self.assertIn('"configKeepsObservationSeparate":true', result.stdout)
+        self.assertIn('"releaseEmptyUsesWorkbenchLayout":true', result.stdout)
+        self.assertIn('"rollbackHeroPrioritizesRollback":true', result.stdout)
+        self.assertIn('"rollbackHeroExplainsPriority":true', result.stdout)
         self.assertIn('"configHasRuntimeParams":true', result.stdout)
         self.assertIn('"configOmitsAdaptiveControls":true', result.stdout)
         self.assertIn('"configHasTimingControls":true', result.stdout)

@@ -194,6 +194,18 @@ def _parse_iso_dt(value: Any) -> datetime | None:
     return parsed.astimezone(UTC)
 
 
+def _canonical_slot_key(value: datetime | str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    else:
+        parsed = _parse_iso_dt(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(UTC).isoformat()
+
+
 def _initialize_bootstrap_state(
     state: dict[str, Any],
     *,
@@ -209,7 +221,7 @@ def _initialize_bootstrap_state(
             workflow_state.setdefault("last_action", "bootstrap_pending")
             continue
         slot = _latest_slot_for_schedule(schedule, now=now)
-        workflow_state["last_processed_slot"] = slot.isoformat()
+        workflow_state["last_processed_slot"] = _canonical_slot_key(slot)
         workflow_state["last_action"] = "initialized"
     state["initialized_at"] = now.isoformat()
     state["bootstrap_stage"] = _BOOTSTRAP_SEQUENCE[0]
@@ -367,7 +379,7 @@ def _run_bootstrap_sequence(
     workflow_state = state.setdefault("workflows", {}).setdefault(stage, {})
     workflow_state["last_checked_at"] = now.isoformat()
     workflow_state["schedule"] = format_schedule(schedule)
-    slot_key = _latest_slot_for_schedule(schedule, now=now).isoformat()
+    slot_key = _canonical_slot_key(_latest_slot_for_schedule(schedule, now=now)) or ""
 
     initialized_at = _parse_iso_dt(state.get("initialized_at"))
     from aats.data_platform.db import get_session
@@ -427,7 +439,7 @@ def _run_bootstrap_sequence(
         {
             "workflow": workflow_name,
             "reason": f"cold-start bootstrap 等待 {stage} 完成",
-            "slot": _latest_slot_for_schedule(schedule_cfg, now=now).isoformat(),
+            "slot": _canonical_slot_key(_latest_slot_for_schedule(schedule_cfg, now=now)) or "",
         }
         for workflow_name, _, schedule_cfg in scheduled_workflows
         if workflow_name != stage
@@ -555,12 +567,12 @@ def _enqueue_due_workflows_locked(
 
     for workflow_name, _, schedule in scheduled_workflows:
         slot = _latest_slot_for_schedule(schedule, now=now)
-        slot_key = slot.isoformat()
+        slot_key = _canonical_slot_key(slot) or ""
         workflow_state = state.setdefault("workflows", {}).setdefault(workflow_name, {})
         workflow_state["last_checked_at"] = now.isoformat()
         workflow_state["schedule"] = format_schedule(schedule)
 
-        if workflow_state.get("last_processed_slot") == slot_key:
+        if _canonical_slot_key(workflow_state.get("last_processed_slot")) == slot_key:
             report["skipped"].append(
                 {
                     "workflow": workflow_name,
