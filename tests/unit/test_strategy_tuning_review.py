@@ -194,6 +194,52 @@ def test_strategy_tuning_review_supersedes_old_pending_proposal(tmp_path: Path) 
     assert second["proposals"][0]["parameter"] == "score_stability_threshold"
 
 
+def test_strategy_tuning_review_refuses_incomplete_step2_snapshot(tmp_path: Path) -> None:
+    """回归：缺 round_manifest.json 的 Step2 目录不得驱动自动调优输出 recommendation。
+
+    曾经的 bug：scan_comparison_summary.json 存在就被当成最新 Step2 round 喂入
+    调优链，函数即使不生成 proposal，也会产出 step2_round_id 与一个基于空 rows
+    的占位 global_recommendation（"inspect_signal_generation"），误导 operator 以
+    为自动调优已经基于最新数据分析过。
+    """
+    round_dir = tmp_path / "artifacts/research/step2_rounds/20260416_090000_nomanif"
+    # 故意不写 round_manifest.json
+    _write_json(
+        round_dir / "scan_comparison_summary.json",
+        {
+            "comparison": [
+                {
+                    "family": "independent",
+                    "timeframe": "15m",
+                    "label": "combo_incomplete",
+                    "opening_count": 0,
+                    "mean_cost_bps": 5.6,
+                    "mean_expected_edge_bps": 1.2,
+                    "execution_compatible_ratio": 0.0,
+                    "positive_edge_ratio": 0.8,
+                    "top_blocking_reason": "net_edge_below_safe_minimum",
+                },
+            ],
+        },
+    )
+
+    with patch(
+        "aats.data_platform.operations.strategy_tuning_review.collect_phase4_evidence",
+        return_value={"latest_round": {"combos": {}}},
+    ):
+        result = build_strategy_tuning_review(tmp_path, save_results=False)
+
+    assert result["step2_round_id"] is None, (
+        "缺 round_manifest.json 的 Step2 目录不能作为最新轮次暴露给运营者"
+    )
+    assert result["step2_incomplete_reason"] == "manifest_missing_on_disk"
+    assert result["global_recommendation"] == "insufficient_data", (
+        "没有可信 Step2 rows 时必须降级为 insufficient_data，"
+        "不能用 combo 默认 focus 伪装出一个 recommendation"
+    )
+    assert result["proposal_count"] == 0
+
+
 def test_strategy_tuning_proposal_review_changes_status(tmp_path: Path) -> None:
     _seed_step2_round(
         tmp_path,

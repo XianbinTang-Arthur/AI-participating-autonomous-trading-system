@@ -330,7 +330,9 @@ def build_strategy_tuning_review(
     # 缺 round_manifest.json 的 Step2 目录不能驱动自动调优：否则 review 会基于
     # 半成品 scan_comparison_summary 产出 step2_round_id + global_recommendation，
     # 让 operator 误以为"已基于最新 Step2 数据做了分析"。视同无 step2 数据。
+    step2_incomplete_reason: str | None = None
     if is_snapshot_incomplete(step2_snapshot):
+        step2_incomplete_reason = "manifest_missing_on_disk"
         step2_snapshot = None
     scan_summary = None
     if isinstance(step2_snapshot, dict):
@@ -362,7 +364,14 @@ def build_strategy_tuning_review(
         combo_reviews.append(combo_review)
 
     focus_counter = Counter(combo["suggested_focus"] for combo in combo_reviews)
-    global_recommendation = focus_counter.most_common(1)[0][0] if focus_counter else "insufficient_data"
+    # 没有任何 step2 rows 时（目录不完整 / Step2 从未跑过），combo 的 suggested_focus
+    # 全是 _build_combo_review 的占位 "inspect_signal_generation"，依赖 focus_counter
+    # 得出的 global_recommendation 会把"无数据"伪装成"建议查信号生成"。此时显式降
+    # 级为 insufficient_data，避免 operator 误把空统计当成分析结论。
+    if not rows:
+        global_recommendation = "insufficient_data"
+    else:
+        global_recommendation = focus_counter.most_common(1)[0][0] if focus_counter else "insufficient_data"
     recommend_cost_gate_reassessment = any(
         combo["recommend_cost_gate_reassessment"] for combo in combo_reviews
     )
@@ -372,6 +381,7 @@ def build_strategy_tuning_review(
         "review_id": review_id,
         "generated_at": generated_at,
         "step2_round_id": step2_snapshot.get("round_id") if isinstance(step2_snapshot, dict) else None,
+        "step2_incomplete_reason": step2_incomplete_reason,
         "phase4_round_id": phase4_round.get("round_id") if isinstance(phase4_round, dict) else None,
         "current_cost_gate_bps": defaults.max_acceptable_cost_bps,
         "current_min_safe_net_edge_bps": defaults.min_safe_net_edge_bps,
