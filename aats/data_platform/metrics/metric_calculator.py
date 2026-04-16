@@ -35,10 +35,15 @@ def calc_research_metrics(
     timeframe: str | None = None,
 ) -> dict[str, Any]:
     """计算研究层指标."""
-    rec_data = _load_json(
+    from aats.data_platform.decision_system.recommendation_registry import (
+        load_recommendation_registry,
+    )
+    from aats.data_platform.governance.parameter_registry import load_registry
+
+    rec_data = load_recommendation_registry(
         root / "artifacts" / "decision_system" / "recommendation_registry.json"
     )
-    ps_data = _load_json(
+    ps_data = load_registry(
         root / "artifacts" / "governance" / "current_parameter_registry.json"
     )
 
@@ -196,9 +201,17 @@ def calc_operations_metrics(
 ) -> dict[str, Any]:
     """计算运营层指标."""
     # apply history
-    apply_data = _load_json(
-        root / "artifacts" / "decision_system" / "parameter_apply_history.json"
+    from aats.data_platform.decision_system.active_parameter_apply import (
+        load_apply_history,
     )
+    from aats.data_platform.production_workflow.release_registry import (
+        load_release_history,
+    )
+    from aats.data_platform.production_workflow.rollback_policy import (
+        load_rollback_recommendation,
+    )
+
+    apply_data = load_apply_history(root)
     ops = apply_data.get("operations", []) if apply_data else []
     if family:
         ops = [o for o in ops if o.get("family") == family]
@@ -209,9 +222,7 @@ def calc_operations_metrics(
     rollback_count = sum(1 for o in ops if o.get("operation_type") == "rollback")
 
     # release history
-    rel_data = _load_json(
-        root / "artifacts" / "production_workflow" / "parameter_release_history.json"
-    )
+    rel_data = load_release_history(root)
     releases = rel_data.get("releases", []) if rel_data else []
     if family:
         releases = [r for r in releases if r.get("family") == family]
@@ -228,18 +239,15 @@ def calc_operations_metrics(
     )
 
     # rollback recommendations
-    rb_dir = root / "artifacts" / "production_workflow" / "rollback_recommendations"
     rb_count = 0
-    if rb_dir.exists():
-        for d in rb_dir.iterdir():
-            if d.is_dir():
-                rb_rec = _load_json(d / "rollback_recommendation.json")
-                if rb_rec and rb_rec.get("rollback_recommended"):
-                    if family and rb_rec.get("family") != family:
-                        continue
-                    if timeframe and rb_rec.get("timeframe") != timeframe:
-                        continue
-                    rb_count += 1
+    for release in releases:
+        rb_rec = load_rollback_recommendation(root, str(release.get("release_id") or ""))
+        if rb_rec and rb_rec.get("rollback_recommended"):
+            if family and rb_rec.get("family") != family:
+                continue
+            if timeframe and rb_rec.get("timeframe") != timeframe:
+                continue
+            rb_count += 1
 
     return {
         "apply_success_count": apply_count,
@@ -257,17 +265,38 @@ def calc_operations_metrics(
 def calc_reliability_metrics(root: Path, **_: Any) -> dict[str, Any]:
     """计算可靠性层指标."""
     # workflow runs
-    runs_dir = root / "artifacts" / "operations" / "workflow_runs"
     total_runs = 0
     success_runs = 0
-    if runs_dir.exists():
-        for f in runs_dir.iterdir():
-            if f.suffix == ".json":
-                data = _load_json(f)
-                if data:
-                    total_runs += 1
-                    if data.get("overall_status") == "success":
-                        success_runs += 1
+    try:
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance._db_util import try_governance_db
+        from aats.data_platform.governance.operational_state_db import (
+            db_list_workflow_runs,
+        )
+
+        engine, ok = try_governance_db()
+        if ok:
+            try:
+                with Session(engine) as session:
+                    workflow_runs = db_list_workflow_runs(session)
+                total_runs = len(workflow_runs)
+                success_runs = sum(1 for data in workflow_runs if data.get("overall_status") == "success")
+            finally:
+                if engine is not None:
+                    engine.dispose()
+    except Exception:
+        pass
+    if total_runs == 0:
+        runs_dir = root / "artifacts" / "operations" / "workflow_runs"
+        if runs_dir.exists():
+            for f in runs_dir.iterdir():
+                if f.suffix == ".json":
+                    data = _load_json(f)
+                    if data:
+                        total_runs += 1
+                        if data.get("overall_status") == "success":
+                            success_runs += 1
 
     # failures
     fail_data = _load_json(

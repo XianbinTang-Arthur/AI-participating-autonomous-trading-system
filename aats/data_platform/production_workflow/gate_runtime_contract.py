@@ -7,6 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.orm import Session
+
 
 def _safe_load_json(path: Path) -> dict | list | None:
     if not path.exists():
@@ -28,6 +30,25 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 
 def _collect_latest_workflow_runs(project_root: Path) -> dict[str, dict[str, Any]]:
+    try:
+        from aats.data_platform.governance._db_util import try_governance_db
+        from aats.data_platform.governance.operational_state_db import (
+            db_load_latest_workflow_runs,
+        )
+
+        engine, ok = try_governance_db()
+        if ok:
+            try:
+                with Session(engine) as session:
+                    latest_by_workflow = db_load_latest_workflow_runs(session)
+                if latest_by_workflow:
+                    return _augment_workflow_runs_with_decision_round(latest_by_workflow, project_root)
+            finally:
+                if engine is not None:
+                    engine.dispose()
+    except Exception:
+        pass
+
     runs_dir = project_root / "artifacts/operations/workflow_runs"
     latest_by_workflow: dict[str, dict[str, Any]] = {}
     if not runs_dir.exists():

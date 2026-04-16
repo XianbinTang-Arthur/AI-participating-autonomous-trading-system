@@ -24,6 +24,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy.orm import Session
+
+from aats.data_platform.governance._db_util import try_governance_db
+
 log = logging.getLogger(__name__)
 
 _WORKFLOW_CONFIG_DIR = "configs/rdp_workflows"
@@ -39,6 +43,12 @@ def _tail_text(text: str, *, lines: int = 20, max_chars: int = 2400) -> str:
     text = text[-max_chars:]
     tail = text.splitlines()[-lines:]
     return "\n".join(tail).strip()
+
+
+def _missing_success_markers(text: str, markers: list[str]) -> list[str]:
+    if not markers:
+        return []
+    return [marker for marker in markers if marker not in text]
 
 
 # ── 配置加载 ──────────────────────────────────────────────────────
@@ -79,6 +89,10 @@ def _run_task(
     command = task.get("command", "")
     timeout = task.get("timeout_seconds", 300)
     allow_failure = task.get("allow_failure", False)
+    success_markers = [
+        str(marker) for marker in task.get("success_markers", [])
+        if str(marker).strip()
+    ]
 
     result = {
         "name": task_name,
@@ -92,6 +106,7 @@ def _run_task(
         "stdout_tail": None,
         "stderr_tail": None,
         "allow_failure": allow_failure,
+        "success_markers": success_markers,
     }
 
     if not command:
@@ -128,15 +143,22 @@ def _run_task(
         result["status"] = "success" if proc.returncode == 0 else "failed"
         stdout_tail = _tail_text(proc.stdout or "")
         stderr_tail = _tail_text(proc.stderr or "")
-        combined_tail = _tail_text(
-            "\n".join(part for part in (proc.stdout or "", proc.stderr or "") if part),
+        combined_output = "\n".join(
+            part for part in (proc.stdout or "", proc.stderr or "") if part
         )
+        combined_tail = _tail_text(combined_output)
         result["stdout_tail"] = stdout_tail or None
         result["stderr_tail"] = stderr_tail or None
         result["output_tail"] = combined_tail or None
         if proc.returncode != 0:
             # 取最后 500 字符的 stderr
             result["error"] = (proc.stderr or "")[-500:].strip()
+        elif success_markers:
+            missing_markers = _missing_success_markers(combined_output, success_markers)
+            if missing_markers:
+                result["status"] = "failed"
+                result["error"] = "missing success markers: " + ", ".join(missing_markers)
+                result["missing_success_markers"] = missing_markers
     except subprocess.TimeoutExpired:
         result["status"] = "timeout"
         result["error"] = f"超时 ({timeout}s)"
@@ -241,4 +263,18 @@ def _save_run_report(project_root: Path, report: dict[str, Any]) -> Path:
     path = log_dir / f"{report['run_id']}.json"
     with path.open("w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2, default=str)
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from aats.data_platform.governance.operational_state_db import (
+                db_upsert_workflow_run_report,
+            )
+
+            with Session(engine) as session, session.begin():
+                db_upsert_workflow_run_report(session, report)
+        except Exception as exc:
+            log.warning("workflow run report DB 同步失败: %s", exc)
+        finally:
+            if engine is not None:
+                engine.dispose()
     return path

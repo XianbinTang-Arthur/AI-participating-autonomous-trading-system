@@ -1,17 +1,4 @@
-"""Rollback Recommendation Policy.
-
-工作包 D: 把 rollback 从"人工临时决定"变成有规则支撑的推荐流程。
-
-系统给出:
-  - 是否建议 rollback
-  - 为什么建议 rollback
-  - rollback 到哪个 parameter set
-
-触发条件:
-  1. Attribution Regression — failure mode 明显恶化
-  2. Execution Regression — fill ratio / cost / edge 恶化
-  3. Governance Regression — quality monitor 退化
-"""
+"""Rollback recommendation policy."""
 
 from __future__ import annotations
 
@@ -21,138 +8,196 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.orm import Session
+
+from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance.snapshot_db import (
+    ROUND_PHASE_PHASE3,
+    ROUND_PHASE_PHASE4,
+    SNAPSHOT_QUALITY_MONITOR,
+    load_governance_snapshot,
+    load_latest_research_round_snapshot,
+)
+
 log = logging.getLogger(__name__)
 
 _ROLLBACK_DIR = "artifacts/production_workflow/rollback_recommendations"
 
 
-# ── 回滚条件评估 ──────────────────────────────────────────────────
+def _combo_key(family: str, timeframe: str) -> str:
+    return f"{family}_{timeframe.lower()}"
+
+
+def _load_combo_round_summary(
+    project_root: Path,
+    *,
+    phase: str,
+    combo_key: str,
+    summary_key: str,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None]:
+    snapshot = load_latest_research_round_snapshot(
+        phase=phase,
+        project_root=project_root,
+    )
+    if not isinstance(snapshot, dict):
+        return None, None, None
+    combos = (snapshot.get("summary") or {}).get("combos") or {}
+    combo = combos.get(combo_key)
+    if not isinstance(combo, dict):
+        return snapshot, None, None
+    summary = combo.get(summary_key)
+    if not isinstance(summary, dict):
+        return snapshot, combo, None
+    return snapshot, combo, summary
+
+
+def load_rollback_recommendation(project_root: Path, release_id: str) -> dict[str, Any] | None:
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from aats.data_platform.governance.operational_state_db import (
+                db_get_rollback_recommendation,
+            )
+
+            with Session(engine) as session:
+                result = db_get_rollback_recommendation(session, release_id)
+            if result:
+                return result
+        except Exception as exc:
+            log.warning("failed to load rollback recommendation from DB: %s", exc)
+        finally:
+            if engine is not None:
+                engine.dispose()
+
+    json_path = project_root / _ROLLBACK_DIR / release_id / "rollback_recommendation.json"
+    if not json_path.exists():
+        return None
+    try:
+        with json_path.open(encoding="utf-8") as f:
+            payload = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _evaluate_attribution_regression(
     project_root: Path, family: str, timeframe: str,
 ) -> dict[str, Any]:
-    """评估 attribution failure mode 是否恶化."""
-    rounds_dir = project_root / "artifacts/research/attribution_rounds"
-    if not rounds_dir.exists():
-        return {"trigger": "attribution_regression", "fired": False, "detail": "无 attribution 数据"}
-
-    dirs = sorted(
-        (d for d in rounds_dir.iterdir() if d.is_dir()),
-        key=lambda d: d.name, reverse=True,
+    combo_key = _combo_key(family, timeframe)
+    snapshot, combo, summary = _load_combo_round_summary(
+        project_root,
+        phase=ROUND_PHASE_PHASE3,
+        combo_key=combo_key,
+        summary_key="attribution_summary",
     )
-    if len(dirs) < 1:
-        return {"trigger": "attribution_regression", "fired": False, "detail": "数据不足"}
-
-    latest = dirs[0]
-    combo_key = f"{family}_{timeframe.lower()}"
-
-    # 尝试 combo 级 summary
-    combo_summary_path = latest / combo_key / "attribution_summary.json"
-    if not combo_summary_path.exists():
-        combo_summary_path = latest / "attribution_summary.json"
-
-    if not combo_summary_path.exists():
-        return {"trigger": "attribution_regression", "fired": False, "detail": "无 summary 文件"}
-
-    try:
-        with combo_summary_path.open(encoding="utf-8") as f:
-            summary = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {"trigger": "attribution_regression", "fired": False, "detail": "无法读取 summary"}
-
-    # 分析 failure mode 变化
-    strategy_failure_pct = summary.get("strategy_failure_pct", 0)
-    risk_failure_pct = summary.get("risk_failure_pct", 0)
-    execution_failure_pct = summary.get("execution_failure_pct", 0)
-
-    # 高失败率触发
-    total_failure = strategy_failure_pct + risk_failure_pct + execution_failure_pct
-    if total_failure > 80:
+    if snapshot is not None and summary is not None:
+        strategy_failure_pct = summary.get("strategy_failure_pct", 0)
+        risk_failure_pct = summary.get("risk_failure_pct", 0)
+        execution_failure_pct = summary.get("execution_failure_pct", 0)
+        total_failure = strategy_failure_pct + risk_failure_pct + execution_failure_pct
+        if total_failure > 80:
+            return {
+                "trigger": "attribution_regression",
+                "fired": True,
+                "severity": "high",
+                "detail": (
+                    f"{combo_key} total_failure={total_failure:.0f}% "
+                    f"(strategy={strategy_failure_pct:.0f}%, risk={risk_failure_pct:.0f}%, "
+                    f"execution={execution_failure_pct:.0f}%)"
+                ),
+            }
         return {
             "trigger": "attribution_regression",
-            "fired": True,
-            "severity": "high",
-            "detail": f"总失败率 {total_failure:.0f}% (strategy={strategy_failure_pct:.0f}%, "
-                     f"risk={risk_failure_pct:.0f}%, execution={execution_failure_pct:.0f}%)",
+            "fired": False,
+            "detail": f"{combo_key} total_failure={total_failure:.0f}% (within expected range)",
+        }
+
+    if snapshot is not None:
+        combo_status = combo.get("status") if isinstance(combo, dict) else None
+        detail = f"{combo_key} missing attribution summary in latest round {snapshot.get('round_id')}"
+        if combo_status:
+            detail = (
+                f"{combo_key} latest attribution summary unavailable in round "
+                f"{snapshot.get('round_id')} (status={combo_status})"
+            )
+        return {
+            "trigger": "attribution_regression",
+            "fired": False,
+            "detail": detail,
         }
 
     return {
         "trigger": "attribution_regression",
         "fired": False,
-        "detail": f"总失败率 {total_failure:.0f}% (正常范围)",
+        "detail": "missing attribution round snapshot",
     }
 
 
 def _evaluate_execution_regression(
     project_root: Path, family: str, timeframe: str,
 ) -> dict[str, Any]:
-    """评估 execution realism 是否恶化."""
-    rounds_dir = project_root / "artifacts/research/execution_rounds"
-    if not rounds_dir.exists():
-        return {"trigger": "execution_regression", "fired": False, "detail": "无 execution 数据"}
-
-    dirs = sorted(
-        (d for d in rounds_dir.iterdir() if d.is_dir()),
-        key=lambda d: d.name, reverse=True,
+    combo_key = _combo_key(family, timeframe)
+    snapshot, combo, summary = _load_combo_round_summary(
+        project_root,
+        phase=ROUND_PHASE_PHASE4,
+        combo_key=combo_key,
+        summary_key="cost_summary",
     )
-    if not dirs:
-        return {"trigger": "execution_regression", "fired": False, "detail": "数据不足"}
-
-    latest = dirs[0]
-    combo_key = f"{family}_{timeframe.lower()}"
-
-    combo_path = latest / combo_key / "execution_summary.json"
-    if not combo_path.exists():
-        combo_path = latest / "execution_summary.json"
-
-    if not combo_path.exists():
-        return {"trigger": "execution_regression", "fired": False, "detail": "无 summary"}
-
-    try:
-        with combo_path.open(encoding="utf-8") as f:
-            summary = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {"trigger": "execution_regression", "fired": False, "detail": "无法读取"}
-
-    full_fill = summary.get("full_fill_ratio", 1.0)
-    cost_bps = summary.get("mean_total_execution_cost_bps", 0)
-    positive_edge = summary.get("positive_adjusted_edge_ratio", 1.0)
-
-    reasons = []
-    if full_fill < 0.5:
-        reasons.append(f"full_fill_ratio={full_fill:.2f} (<0.5)")
-    if cost_bps > 10:
-        reasons.append(f"mean_execution_cost={cost_bps:.1f}bps (>10)")
-    if positive_edge < 0.3:
-        reasons.append(f"positive_edge_ratio={positive_edge:.2f} (<0.3)")
-
-    if reasons:
+    if snapshot is not None and summary is not None:
+        full_fill = summary.get("full_fill_ratio", 1.0)
+        cost_bps = summary.get(
+            "mean_total_execution_cost_bps",
+            summary.get("total_execution_cost", {}).get("mean", 0),
+        )
+        positive_edge = summary.get(
+            "positive_adjusted_edge_ratio",
+            summary.get("positive_edge_ratio", 1.0),
+        )
+        reasons = []
+        if full_fill < 0.5:
+            reasons.append(f"full_fill_ratio={full_fill:.2f} (<0.5)")
+        if cost_bps > 10:
+            reasons.append(f"mean_execution_cost={cost_bps:.1f}bps (>10)")
+        if positive_edge < 0.3:
+            reasons.append(f"positive_edge_ratio={positive_edge:.2f} (<0.3)")
+        if reasons:
+            return {
+                "trigger": "execution_regression",
+                "fired": True,
+                "severity": "high" if len(reasons) >= 2 else "medium",
+                "detail": "; ".join(reasons),
+            }
         return {
             "trigger": "execution_regression",
-            "fired": True,
-            "severity": "high" if len(reasons) >= 2 else "medium",
-            "detail": "; ".join(reasons),
+            "fired": False,
+            "detail": f"{combo_key} fill={full_fill:.2f}, cost={cost_bps:.1f}bps, edge={positive_edge:.2f}",
+        }
+
+    if snapshot is not None:
+        combo_status = combo.get("status") if isinstance(combo, dict) else None
+        detail = f"{combo_key} missing execution summary in latest round {snapshot.get('round_id')}"
+        if combo_status:
+            detail = (
+                f"{combo_key} latest execution summary unavailable in round "
+                f"{snapshot.get('round_id')} (status={combo_status})"
+            )
+        return {
+            "trigger": "execution_regression",
+            "fired": False,
+            "detail": detail,
         }
 
     return {
         "trigger": "execution_regression",
         "fired": False,
-        "detail": f"fill={full_fill:.2f}, cost={cost_bps:.1f}bps, edge={positive_edge:.2f}",
+        "detail": "missing execution round snapshot",
     }
 
 
 def _evaluate_governance_regression(project_root: Path) -> dict[str, Any]:
-    """评估 governance 层是否退化."""
-    qm_path = project_root / "artifacts/governance/quality_monitor_summary.json"
-    if not qm_path.exists():
-        return {"trigger": "governance_regression", "fired": False, "detail": "无 quality monitor"}
-
-    try:
-        with qm_path.open(encoding="utf-8") as f:
-            qm = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        return {"trigger": "governance_regression", "fired": False, "detail": "无法读取"}
+    qm = load_governance_snapshot(project_root, snapshot_type=SNAPSHOT_QUALITY_MONITOR)
+    if not isinstance(qm, dict):
+        return {"trigger": "governance_regression", "fired": False, "detail": "missing quality monitor"}
 
     summary = qm.get("summary", {})
     health = summary.get("health", "unknown")
@@ -180,9 +225,6 @@ def _evaluate_governance_regression(project_root: Path) -> dict[str, Any]:
     }
 
 
-# ── 综合评估 ──────────────────────────────────────────────────────
-
-
 def evaluate_rollback_recommendation(
     project_root: Path,
     *,
@@ -191,17 +233,6 @@ def evaluate_rollback_recommendation(
     timeframe: str,
     save_result: bool = True,
 ) -> dict[str, Any]:
-    """评估是否建议 rollback.
-
-    Returns
-    -------
-    dict  包含:
-      - rollback_recommended: bool
-      - severity: "none" / "medium" / "high"
-      - reasons: list[str]
-      - suggested_target_parameter_set_id: str | None
-      - triggers: list[dict]
-    """
     now = datetime.now(timezone.utc)
 
     triggers = [
@@ -210,12 +241,11 @@ def evaluate_rollback_recommendation(
         _evaluate_governance_regression(project_root),
     ]
 
-    fired = [t for t in triggers if t.get("fired")]
-    reasons = [t["detail"] for t in fired]
+    fired = [trigger for trigger in triggers if trigger.get("fired")]
+    reasons = [trigger["detail"] for trigger in fired]
 
-    # 判定 severity
-    high_count = sum(1 for t in fired if t.get("severity") == "high")
-    medium_count = sum(1 for t in fired if t.get("severity") == "medium")
+    high_count = sum(1 for trigger in fired if trigger.get("severity") == "high")
+    medium_count = sum(1 for trigger in fired if trigger.get("severity") == "medium")
 
     if high_count > 0:
         severity = "high"
@@ -230,13 +260,13 @@ def evaluate_rollback_recommendation(
         severity = "none"
         rollback_recommended = False
 
-    # 查找 rollback 目标
     suggested_target = None
     if rollback_recommended:
         from aats.data_platform.production_workflow.release_registry import (
             find_release,
             load_release_history,
         )
+
         history = load_release_history(project_root)
         release = find_release(history, release_id)
         if release:
@@ -246,7 +276,7 @@ def evaluate_rollback_recommendation(
         "release_id": release_id,
         "family": family,
         "timeframe": timeframe,
-        "combo_key": f"{family}_{timeframe.lower()}",
+        "combo_key": _combo_key(family, timeframe),
         "evaluated_at": now.isoformat(),
         "rollback_recommended": rollback_recommended,
         "severity": severity,
@@ -274,6 +304,21 @@ def _save_rollback_recommendation(
     with json_path.open("w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
 
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from aats.data_platform.governance.operational_state_db import (
+                db_upsert_rollback_recommendation,
+            )
+
+            with Session(engine) as session, session.begin():
+                db_upsert_rollback_recommendation(session, result)
+        except Exception as exc:
+            log.warning("rollback recommendation DB sync failed: %s", exc)
+        finally:
+            if engine is not None:
+                engine.dispose()
+
     report_path = rb_dir / "rollback_recommendation_report.md"
     _write_rollback_report(result, report_path)
 
@@ -282,14 +327,14 @@ def _save_rollback_recommendation(
 
 
 def _write_rollback_report(result: dict[str, Any], path: Path) -> None:
-    rec = "YES" if result["rollback_recommended"] else "NO"
+    recommended = "YES" if result["rollback_recommended"] else "NO"
     lines = [
         "# Rollback Recommendation Report",
         "",
         f"- Release ID: `{result['release_id']}`",
         f"- Combo: {result['combo_key']}",
         f"- Evaluated: {result['evaluated_at']}",
-        f"- **Rollback Recommended: {rec}**",
+        f"- **Rollback Recommended: {recommended}**",
         f"- Severity: {result['severity']}",
         "",
     ]
@@ -300,16 +345,16 @@ def _write_rollback_report(result: dict[str, Any], path: Path) -> None:
 
     lines.append("## Triggers")
     lines.append("")
-    for t in result["triggers"]:
-        icon = "FIRED" if t.get("fired") else "OK"
-        lines.append(f"- [{icon}] **{t['trigger']}**: {t.get('detail', '')}")
+    for trigger in result["triggers"]:
+        icon = "FIRED" if trigger.get("fired") else "OK"
+        lines.append(f"- [{icon}] **{trigger['trigger']}**: {trigger.get('detail', '')}")
     lines.append("")
 
     if result["reasons"]:
         lines.append("## Reasons")
         lines.append("")
-        for r in result["reasons"]:
-            lines.append(f"- {r}")
+        for reason in result["reasons"]:
+            lines.append(f"- {reason}")
         lines.append("")
 
     with path.open("w", encoding="utf-8") as f:

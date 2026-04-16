@@ -1,19 +1,29 @@
 {
   "workflow": "decision_cycle",
-  "description": "决策层周期: Phase 6 decision round, recommendation review, release observation check",
+  "description": "决策层周期任务，执行 Phase 6 decision round、可靠性检查、发布观察与自动调优审查。",
   "schedule_hint": "weekly after research_cycle or on-demand",
+  "schedule": {
+    "enabled": true,
+    "frequency": "weekly",
+    "weekday_utc": "SUN",
+    "hour_utc": 10,
+    "minute_utc": 0
+  },
   "tasks": [
     {
       "name": "decision_round",
-      "description": "Phase 6 decision round",
-      "command": "python -m aats.data_platform.decision_system.decision_engine --run",
+      "description": "运行 Phase 6 decision round。",
+      "command": "python scripts/rdp_run_decision_round.py --no-print-summary",
+      "success_markers": [
+        "Phase 6 Decision Round completed"
+      ],
       "timeout_seconds": 300,
       "enabled": true,
       "allow_failure": false
     },
     {
       "name": "reliability_check",
-      "description": "运行可靠性检查并生成 alert summary",
+      "description": "执行可靠性检查，并生成 alert summary。",
       "command": "python scripts/rdp_run_reliability_check.py",
       "timeout_seconds": 120,
       "enabled": true,
@@ -21,9 +31,20 @@
     },
     {
       "name": "observation_check",
-      "description": "检查所有 observing 状态的 release，并自动评估 rollback/effectiveness",
+      "description": "检查 observing 状态的 release，并自动评估 rollback/effectiveness。",
       "command": "python scripts/rdp_run_release_observation_cycle.py",
       "timeout_seconds": 180,
+      "enabled": true,
+      "allow_failure": true
+    },
+    {
+      "name": "strategy_tuning_review",
+      "description": "基于最新 Step2/Phase4 结果生成自动调优提案，默认待审核。",
+      "command": "python scripts/rdp_run_strategy_tuning_review.py",
+      "success_markers": [
+        "Strategy tuning review completed"
+      ],
+      "timeout_seconds": 120,
       "enabled": true,
       "allow_failure": true
     }

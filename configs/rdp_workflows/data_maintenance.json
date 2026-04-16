@@ -2,6 +2,12 @@
   "workflow": "data_maintenance",
   "description": "数据层维护: 日批 OKX 增量采集 (含内置 Gold 构建 + Gap 检测) + artifact 索引重建",
   "schedule_hint": "daily 04:00 UTC",
+  "schedule": {
+    "enabled": true,
+    "frequency": "daily",
+    "hour_utc": 4,
+    "minute_utc": 0
+  },
   "tasks": [
     {
       "name": "daily_ingest",

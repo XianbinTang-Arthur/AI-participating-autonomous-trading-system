@@ -22,7 +22,13 @@ from sqlalchemy.orm import Session
 
 log = logging.getLogger(__name__)
 
-VALID_WORKFLOWS = {"data_maintenance", "governance_cycle", "research_cycle", "decision_cycle"}
+VALID_WORKFLOWS = {
+    "data_maintenance",
+    "governance_cycle",
+    "research_cycle",
+    "decision_cycle",
+    "release_cycle",
+}
 
 
 # ── INSERT 新任务 ──────────────────────────────────────────────────

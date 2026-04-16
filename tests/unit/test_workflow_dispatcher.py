@@ -6,7 +6,6 @@ import runpy
 import sys
 from contextlib import redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
@@ -51,6 +50,34 @@ def test_workflow_dispatcher_captures_output_tail_for_successful_task(tmp_path: 
     assert task["status"] == "success"
     assert "decision ok" in (task.get("output_tail") or "")
     assert "phase2 ok" in (task.get("stdout_tail") or "")
+
+
+def test_workflow_dispatcher_fails_when_success_marker_missing(tmp_path: Path) -> None:
+    script = tmp_path / "emit.py"
+    script.write_text("print('phase ok')\n", encoding="utf-8")
+    _write_json(
+        tmp_path / "configs" / "rdp_workflows" / "demo.json",
+        {
+            "workflow": "demo",
+            "tasks": [
+                {
+                    "name": "decision_round",
+                    "command": f"python {script}",
+                    "enabled": True,
+                    "allow_failure": False,
+                    "timeout_seconds": 30,
+                    "success_markers": ["Phase 6 Decision Round completed"],
+                },
+            ],
+        },
+    )
+
+    report = run_workflow(tmp_path, "demo")
+
+    assert report["overall_status"] == "failed"
+    task = report["tasks"][0]
+    assert task["status"] == "failed"
+    assert task["missing_success_markers"] == ["Phase 6 Decision Round completed"]
 
 
 def test_rdp_run_scheduled_workflow_prints_task_output_tail(monkeypatch, tmp_path: Path) -> None:

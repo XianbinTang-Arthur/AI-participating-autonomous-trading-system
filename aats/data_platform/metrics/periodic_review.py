@@ -20,6 +20,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.orm import Session
+
+from aats.data_platform.governance._db_util import try_governance_db
+
 
 def _atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -73,9 +77,11 @@ def _collect_releases_in_window(
     root: Path, window_start: datetime,
     family: str | None = None, timeframe: str | None = None,
 ) -> list[dict]:
-    data = _load_json(
-        root / "artifacts" / "production_workflow" / "parameter_release_history.json"
+    from aats.data_platform.production_workflow.release_registry import (
+        load_release_history,
     )
+
+    data = load_release_history(root)
     releases = data.get("releases", []) if data else []
     result = []
     for r in releases:
@@ -93,9 +99,11 @@ def _collect_operations_in_window(
     root: Path, window_start: datetime,
     family: str | None = None, timeframe: str | None = None,
 ) -> list[dict]:
-    data = _load_json(
-        root / "artifacts" / "decision_system" / "parameter_apply_history.json"
+    from aats.data_platform.decision_system.active_parameter_apply import (
+        load_apply_history,
     )
+
+    data = load_apply_history(root)
     ops = data.get("operations", []) if data else []
     result = []
     for o in ops:
@@ -122,6 +130,24 @@ def _collect_failures_in_window(
 def _collect_workflow_runs_in_window(
     root: Path, window_start: datetime,
 ) -> list[dict]:
+    workflow_runs: list[dict] = []
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from aats.data_platform.governance.operational_state_db import (
+                db_list_workflow_runs,
+            )
+
+            with Session(engine) as session:
+                workflow_runs = db_list_workflow_runs(session, started_after=window_start)
+        except Exception:
+            workflow_runs = []
+        finally:
+            if engine is not None:
+                engine.dispose()
+    if workflow_runs:
+        return workflow_runs
+
     runs_dir = root / "artifacts" / "operations" / "workflow_runs"
     results = []
     if not runs_dir.exists():
@@ -139,9 +165,11 @@ def _collect_effectiveness_in_window(
     root: Path, window_start: datetime,
     family: str | None = None, timeframe: str | None = None,
 ) -> list[dict]:
-    data = _load_json(
-        root / "artifacts" / "metrics" / "release_effectiveness_registry.json"
+    from aats.data_platform.metrics.release_effectiveness import (
+        load_effectiveness_registry,
     )
+
+    data = load_effectiveness_registry(root)
     evals = data.get("evaluations", []) if data else []
     result = []
     for e in evals:

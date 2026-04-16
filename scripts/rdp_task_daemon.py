@@ -54,6 +54,7 @@ WORKFLOW_TIMEOUTS = {
     "research_cycle": 3600,    # 60 分钟
     "decision_cycle": 1800,    # 30 分钟 — 包含参数评估和可能的实盘回滚
     "governance_cycle": 1800,  # 30 分钟 — 治理决策评估
+    "release_cycle": 900,      # 15 分钟 — approved recommendation -> release/apply
 }
 DEFAULT_TIMEOUT = 1800  # 30 分钟
 
@@ -78,6 +79,11 @@ def parse_args() -> argparse.Namespace:
                    help="Seconds between polls when idle (default: 10)")
     p.add_argument("--once", action="store_true",
                    help="Process one task (if any) and exit")
+    p.add_argument(
+        "--enable-scheduler",
+        action="store_true",
+        help="Evaluate workflow schedules and enqueue due tasks before polling",
+    )
     return p.parse_args()
 
 
@@ -260,6 +266,14 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
     }
 
 
+def _run_scheduler_once() -> None:
+    from aats.data_platform.operations.workflow_scheduler import enqueue_due_workflows
+
+    report = enqueue_due_workflows(_PROJECT_ROOT, actor="scheduler")
+    if report.get("errors"):
+        log.warning("Scheduler reported errors: %s", report["errors"])
+
+
 def main() -> int:
     args = parse_args()
 
@@ -275,6 +289,8 @@ def main() -> int:
     _publish_heartbeat(status="starting", poll_interval=args.poll_interval)
 
     if args.once:
+        if args.enable_scheduler:
+            _run_scheduler_once()
         processed = process_one_task(poll_interval=args.poll_interval)
         _publish_heartbeat(
             status="idle" if not processed.get("processed") else str(processed.get("status")),
@@ -293,6 +309,8 @@ def main() -> int:
     last_task: dict[str, object] | None = None
     while not _shutdown:
         try:
+            if args.enable_scheduler:
+                _run_scheduler_once()
             processed = process_one_task(poll_interval=args.poll_interval)
             if processed.get("processed"):
                 last_task = processed

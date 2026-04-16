@@ -4,10 +4,12 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from aats.data_platform.decision_system.active_parameter_apply import (
     apply_approved_recommendation,
+    rollback_active_parameter_set,
 )
 from aats.data_platform.production_workflow.gate_rules import (
     check_current_alerts,
@@ -205,6 +207,111 @@ def test_create_parameter_release_passes_release_context_to_apply() -> None:
     kwargs = apply_mock.call_args.kwargs
     assert kwargs["gate_result"] == gate_result
     assert kwargs["release_id"].startswith("rel_")
+
+
+def test_rollback_marks_latest_successful_release_as_rolled_back(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "artifacts/governance/current_parameter_registry.json",
+        {
+            "generated_at": "2026-04-16T10:00:00Z",
+            "parameter_sets": [
+                {
+                    "parameter_set_id": "ps_live_0",
+                    "family": "independent",
+                    "timeframe": "15m",
+                    "status": "frozen",
+                    "source_round_id": "round_prev",
+                    "values": {"entry_threshold": 0.4},
+                },
+            ],
+        },
+    )
+    _write_json(
+        tmp_path / "artifacts/production_workflow/parameter_release_history.json",
+        {
+            "generated_at": "2026-04-16T10:05:00Z",
+            "releases": [
+                {
+                    "release_id": "rel_active_1",
+                    "created_at": "2026-04-16T10:01:00Z",
+                    "family": "independent",
+                    "timeframe": "15m",
+                    "combo_key": "independent_15m",
+                    "recommendation_id": "rec_active_1",
+                    "parameter_set_id": "ps_live_1",
+                    "previous_parameter_set_id": "ps_live_0",
+                    "actor": "operator",
+                    "apply_result": "success",
+                    "observation_status": "observing",
+                },
+            ],
+        },
+    )
+
+    class _Result:
+        def fetchone(self) -> SimpleNamespace:
+            return SimpleNamespace(parameter_set_id="ps_live_1")
+
+    class _Session:
+        def execute(self, *_args, **_kwargs) -> _Result:
+            return _Result()
+
+        def __enter__(self) -> "_Session":
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb) -> bool:
+            return False
+
+    rollback_guard = SimpleNamespace(allowed=True, reason="")
+
+    with (
+        patch.dict(os.environ, {"RDP_ENV": "dev"}, clear=False),
+        patch(
+            "aats.data_platform.operations.environment_guard.get_current_environment",
+            return_value="dev",
+        ),
+        patch(
+            "aats.data_platform.operations.environment_guard.guard_parameter_rollback",
+            return_value=rollback_guard,
+        ),
+        patch(
+            "aats.data_platform.db.get_session",
+            side_effect=lambda: _Session(),
+        ),
+        patch(
+            "aats.data_platform.governance.active_params_db.db_upsert_active_set",
+        ),
+        patch(
+            "aats.data_platform.governance.active_params_db.db_append_history",
+        ),
+        patch(
+            "aats.data_platform.governance.parameter_registry.try_governance_db",
+            return_value=(None, False),
+        ),
+        patch(
+            "aats.data_platform.production_workflow.release_registry.try_governance_db",
+            return_value=(None, False),
+        ),
+    ):
+        result = rollback_active_parameter_set(
+            tmp_path,
+            family="independent",
+            timeframe="15m",
+            to_parameter_set_id="ps_live_0",
+            actor="operator",
+        )
+
+    assert result["ok"] is True
+    assert result["release_id"] == "rel_active_1"
+
+    release_history = json.loads(
+        (tmp_path / "artifacts/production_workflow/parameter_release_history.json").read_text(encoding="utf-8"),
+    )
+    release = release_history["releases"][0]
+    assert release["observation_status"] == "rolled_back"
+    assert release["rollback_to_parameter_set_id"] == "ps_live_0"
+    assert release["rollback_operation_id"] == result["operation_id"]
+    assert release["rolled_back_at"]
 
 
 def test_gate_rules_block_prod_on_critical_alerts_and_warn_dev_on_live_db_failure() -> None:

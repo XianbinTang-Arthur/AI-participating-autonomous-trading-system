@@ -1,11 +1,18 @@
 {
   "workflow": "research_cycle",
-  "description": "研究层周期: 全管线 Phase 2→3→4→5→Decision (自动计算近 90 天窗口)",
+  "description": "研究层周期任务，串联数据刷新与完整 Phase 2/3/4/5/6 研究闭环。",
   "schedule_hint": "weekly Sunday 08:00 UTC or on-demand",
+  "schedule": {
+    "enabled": true,
+    "frequency": "weekly",
+    "weekday_utc": "SUN",
+    "hour_utc": 8,
+    "minute_utc": 0
+  },
   "tasks": [
     {
       "name": "refresh_recent_data",
-      "description": "run data_maintenance first so research uses fresh data and rebuilt artifacts",
+      "description": "先运行 data_maintenance，确保研究使用最新数据和最新重建产物。",
       "command": "python scripts/rdp_run_scheduled_workflow.py --workflow data_maintenance",
       "timeout_seconds": 1200,
       "enabled": true,
@@ -13,7 +20,7 @@
     },
     {
       "name": "full_pipeline",
-      "description": "一键运行 Phase 2 → Step 3 → 导入 → Phase 3 → Phase 4 → 治理 → 决策",
+      "description": "一键运行 Phase 2 -> Step 3 -> 导入 -> Phase 3 -> Phase 4 -> 治理 -> 决策。",
       "command": "python scripts/rdp_run_full_pipeline.py --lookback-days 90 --replay-only --no-stop-on-failure",
       "timeout_seconds": 1800,
       "enabled": true,

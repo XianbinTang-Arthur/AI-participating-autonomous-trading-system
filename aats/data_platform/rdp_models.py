@@ -688,6 +688,47 @@ class DecisionRoundSnapshotModel(RdpBase):
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
+class GovernanceSnapshotModel(RdpBase):
+    __tablename__ = "snapshots"
+    __table_args__ = (
+        UniqueConstraint("snapshot_type", name="uq_governance_snapshot_type"),
+        Index("ix_governance_snapshot_generated", "generated_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    snapshot_type = Column(String(64), nullable=False, unique=True)
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ResearchRoundSnapshotModel(RdpBase):
+    __tablename__ = "research_round_snapshots"
+    __table_args__ = (
+        UniqueConstraint("round_id", name="uq_research_round_snapshot_round_id"),
+        Index("ix_research_round_snapshot_phase_finished", "phase", "finished_at"),
+        Index("ix_research_round_snapshot_phase_started", "phase", "started_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    round_id = Column(String(128), nullable=False, unique=True)
+    phase = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False, server_default=text("'unknown'"))
+    round_path = Column(Text)
+    started_at = Column(DateTime(timezone=True))
+    finished_at = Column(DateTime(timezone=True))
+    replay_only = Column(Boolean, nullable=False, server_default=text("false"))
+    manifest_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    summary_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    conclusion_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    artifacts_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
 class RdpTaskQueueModel(RdpBase):
     __tablename__ = "rdp_task_queue"
     __table_args__ = (
@@ -731,6 +772,220 @@ class RdpRuntimeStatusModel(RdpBase):
     status = Column(String(32), nullable=False, server_default=text("'unknown'"))
     heartbeat_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     details_json = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class WorkflowRunReportModel(RdpBase):
+    __tablename__ = "workflow_run_reports"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_workflow_run_report_run_id"),
+        Index("ix_workflow_run_report_workflow_finished", "workflow", "finished_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String(128), nullable=False, unique=True)
+    workflow = Column(String(64), nullable=False)
+    overall_status = Column(String(32), nullable=False)
+    description = Column(Text)
+    report = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    started_at = Column(DateTime(timezone=True))
+    finished_at = Column(DateTime(timezone=True))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class WorkflowSchedulerStateModel(RdpBase):
+    __tablename__ = "workflow_scheduler_state"
+    __table_args__ = (
+        UniqueConstraint("workflow", name="uq_workflow_scheduler_state_workflow"),
+        Index("ix_workflow_scheduler_state_checked", "last_checked_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    workflow = Column(String(64), nullable=False, unique=True)
+    initialized_at = Column(DateTime(timezone=True))
+    last_processed_slot = Column(DateTime(timezone=True))
+    last_action = Column(String(64))
+    last_checked_at = Column(DateTime(timezone=True))
+    last_task_id = Column(String(128))
+    last_reason = Column(Text)
+    schedule = Column(String(128))
+    state_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class PreApplyGateResultModel(RdpBase):
+    __tablename__ = "pre_apply_gate_results"
+    __table_args__ = (
+        UniqueConstraint("gate_run_id", name="uq_pre_apply_gate_result_gate_run_id"),
+        Index("ix_pre_apply_gate_result_created", "created_at"),
+        Index("ix_pre_apply_gate_result_recommendation", "recommendation_id", "created_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    gate_run_id = Column(String(128), nullable=False, unique=True)
+    recommendation_id = Column(String(128), nullable=False)
+    allow_apply = Column(Boolean, nullable=False, server_default=text("false"))
+    gate_status = Column(String(32), nullable=False)
+    total_checks = Column(Integer, nullable=False, server_default=text("0"))
+    passed_checks = Column(Integer, nullable=False, server_default=text("0"))
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ParameterReleaseModel(RdpBase):
+    __tablename__ = "parameter_releases"
+    __table_args__ = (
+        UniqueConstraint("release_id", name="uq_parameter_release_release_id"),
+        Index("ix_parameter_release_combo_created", "combo_key", "created_at"),
+        Index("ix_parameter_release_recommendation", "recommendation_id"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    release_id = Column(String(128), nullable=False, unique=True)
+    family = Column(String(64), nullable=False)
+    timeframe = Column(String(16), nullable=False)
+    combo_key = Column(String(128), nullable=False)
+    recommendation_id = Column(String(128), nullable=False)
+    parameter_set_id = Column(String(128), nullable=False)
+    previous_parameter_set_id = Column(String(128))
+    actor = Column(String(128), nullable=False, server_default=text("'operator'"))
+    gate_result_ref = Column(String(128))
+    gate_status = Column(String(32))
+    apply_result = Column(String(32), nullable=False, server_default=text("'pending'"))
+    observation_status = Column(String(32), nullable=False, server_default=text("'pending'"))
+    observation_window_hours = Column(Integer, nullable=False, server_default=text("24"))
+    notes = Column(Text)
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ObservationResultModel(RdpBase):
+    __tablename__ = "observation_results"
+    __table_args__ = (
+        UniqueConstraint("release_id", name="uq_observation_result_release_id"),
+        Index("ix_observation_result_combo_eval", "combo_key", "evaluated_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    release_id = Column(String(128), nullable=False, unique=True)
+    family = Column(String(64), nullable=False)
+    timeframe = Column(String(16), nullable=False)
+    combo_key = Column(String(128), nullable=False)
+    status = Column(String(32), nullable=False)
+    recommendation = Column(String(32), nullable=False)
+    observation_window_hours = Column(Integer, nullable=False, server_default=text("24"))
+    window_active = Column(Boolean, nullable=False, server_default=text("true"))
+    started_at = Column(DateTime(timezone=True))
+    evaluated_at = Column(DateTime(timezone=True), nullable=False)
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class RollbackRecommendationModel(RdpBase):
+    __tablename__ = "rollback_recommendations"
+    __table_args__ = (
+        UniqueConstraint("release_id", name="uq_rollback_recommendation_release_id"),
+        Index("ix_rollback_recommendation_combo_eval", "combo_key", "evaluated_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    release_id = Column(String(128), nullable=False, unique=True)
+    family = Column(String(64), nullable=False)
+    timeframe = Column(String(16), nullable=False)
+    combo_key = Column(String(128), nullable=False)
+    rollback_recommended = Column(Boolean, nullable=False, server_default=text("false"))
+    severity = Column(String(32), nullable=False, server_default=text("'none'"))
+    suggested_target_parameter_set_id = Column(String(128))
+    evaluated_at = Column(DateTime(timezone=True), nullable=False)
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class ReleaseEffectivenessModel(RdpBase):
+    __tablename__ = "release_effectiveness"
+    __table_args__ = (
+        UniqueConstraint("release_id", name="uq_release_effectiveness_release_id"),
+        UniqueConstraint("evaluation_id", name="uq_release_effectiveness_evaluation_id"),
+        Index("ix_release_effectiveness_combo_eval", "family", "timeframe", "evaluated_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    evaluation_id = Column(String(128), nullable=False, unique=True)
+    release_id = Column(String(128), nullable=False, unique=True)
+    family = Column(String(64))
+    timeframe = Column(String(16))
+    conclusion = Column(String(64), nullable=False)
+    evaluated_at = Column(DateTime(timezone=True), nullable=False)
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class StrategyTuningProposalModel(RdpBase):
+    __tablename__ = "strategy_tuning_proposals"
+    __table_args__ = (
+        UniqueConstraint("proposal_id", name="uq_strategy_tuning_proposal_proposal_id"),
+        Index("ix_strategy_tuning_proposal_combo_status", "combo_key", "status"),
+        Index("ix_strategy_tuning_proposal_review", "review_id"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    proposal_id = Column(String(128), nullable=False, unique=True)
+    review_id = Column(String(128))
+    last_review_id = Column(String(128))
+    combo_key = Column(String(128), nullable=False)
+    family = Column(String(64), nullable=False)
+    timeframe = Column(String(16), nullable=False)
+    parameter = Column(String(128), nullable=False)
+    current_value = Column(JSONB)
+    proposed_value = Column(JSONB)
+    delta = Column(Double)
+    confidence = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False)
+    review_required = Column(Boolean, nullable=False, server_default=text("true"))
+    dominant_blocker = Column(String(128))
+    dominant_blocker_ratio = Column(Double)
+    rationale = Column(Text)
+    review_notes = Column(Text)
+    reviewed_at = Column(DateTime(timezone=True))
+    reviewed_by = Column(String(128))
+    superseded_at = Column(DateTime(timezone=True))
+    superseded_by_review_id = Column(String(128))
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    last_seen_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+class DecisionEvidenceBundleModel(RdpBase):
+    __tablename__ = "decision_evidence_bundles"
+    __table_args__ = (
+        UniqueConstraint("round_id", name="uq_decision_evidence_bundle_round_id"),
+        Index("ix_decision_evidence_bundle_created", "created_at"),
+        {"schema": "governance"},
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    round_id = Column(String(128), nullable=False, unique=True)
+    evidence_summary_path = Column(Text, nullable=False)
+    phases_with_data = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    completeness_ratio = Column(Double, nullable=False, server_default=text("0"))
+    payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 

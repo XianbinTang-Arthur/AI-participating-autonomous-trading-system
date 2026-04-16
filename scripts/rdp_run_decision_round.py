@@ -52,9 +52,10 @@ from aats.data_platform.decision_system.report_builder import (
     build_phase6_conclusion,
 )
 from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance.parameter_registry import load_registry
 
 
-def main() -> None:
+def main() -> int:
     parser = argparse.ArgumentParser(
         description="Phase 6: Closed-Loop Decision Round",
     )
@@ -107,8 +108,7 @@ def main() -> None:
     if args.include_draft:
         allowed_statuses.add("draft")
     if gov_registry_path.exists():
-        with gov_registry_path.open(encoding="utf-8") as f:
-            reg = json.load(f)
+        reg = load_registry(gov_registry_path)
         parameter_sets = [
             ps for ps in reg.get("parameter_sets", [])
             if ps.get("status") in allowed_statuses
@@ -256,6 +256,7 @@ def main() -> None:
     log.info("Phase 6 Decision Round completed")
     log.info("  Round ID   : %s", round_id)
     log.info("  Readiness  : %s", readiness_report["readiness"])
+    log.info("  State      : recommendations generated only; live parameters not applied")
     log.info("  Round dir  : %s", round_dir)
     log.info("=" * 60)
 
@@ -285,6 +286,9 @@ def main() -> None:
         print()
         print(f"Conclusion: {round_dir / 'phase6_closed_loop_decision_conclusion.md'}")
         print(f"Artifacts:  {round_dir}")
+        print("State: recommendations generated only; live parameters were not applied")
+
+    return 0
 
 
 def _persist_decision_round_snapshot_if_possible(
@@ -329,4 +333,4 @@ def _persist_decision_round_snapshot_if_possible(
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

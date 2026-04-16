@@ -21,6 +21,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.orm import Session
+
+from aats.data_platform.governance._db_util import try_governance_db
+
 
 def _atomic_write_json(path: Path, data: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -54,6 +58,23 @@ def _effectiveness_registry_path(root: Path) -> Path:
 
 
 def load_effectiveness_registry(root: Path) -> dict:
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from aats.data_platform.governance.operational_state_db import (
+                db_load_effectiveness_registry,
+            )
+
+            with Session(engine) as session:
+                registry = db_load_effectiveness_registry(session)
+            if registry.get("evaluations"):
+                return registry
+        except Exception:
+            pass
+        finally:
+            if engine is not None:
+                engine.dispose()
+
     fp = _effectiveness_registry_path(root)
     if not fp.exists():
         return {"evaluations": [], "generated_at": None}
@@ -64,6 +85,20 @@ def load_effectiveness_registry(root: Path) -> dict:
 def save_effectiveness_registry(root: Path, data: dict) -> None:
     data["generated_at"] = datetime.now(timezone.utc).isoformat()
     _atomic_write_json(_effectiveness_registry_path(root), data)
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from aats.data_platform.governance.operational_state_db import (
+                db_upsert_release_effectiveness,
+            )
+
+            with Session(engine) as session, session.begin():
+                for evaluation in data.get("evaluations", []):
+                    if isinstance(evaluation, dict):
+                        db_upsert_release_effectiveness(session, evaluation)
+        finally:
+            if engine is not None:
+                engine.dispose()
 
 
 # ── 维度评估函数 ──────────────────────────────────────────────
@@ -71,10 +106,11 @@ def save_effectiveness_registry(root: Path, data: dict) -> None:
 def _evaluate_behavior(root: Path, release: dict) -> dict:
     """行为层: 检查 observation 中的 attribution 和 decision status."""
     release_id = release.get("release_id", "")
-    obs = _load_json(
-        root / "artifacts" / "production_workflow" / "observations"
-        / release_id / "observation_summary.json"
+    from aats.data_platform.production_workflow.observation_window import (
+        load_observation_result,
     )
+
+    obs = load_observation_result(root, release_id)
     if not obs:
         return {
             "dimension": "behavior",
@@ -103,10 +139,11 @@ def _evaluate_behavior(root: Path, release: dict) -> dict:
 def _evaluate_execution(root: Path, release: dict) -> dict:
     """执行层: 检查 execution realism 是否恶化."""
     release_id = release.get("release_id", "")
-    obs = _load_json(
-        root / "artifacts" / "production_workflow" / "observations"
-        / release_id / "observation_summary.json"
+    from aats.data_platform.production_workflow.observation_window import (
+        load_observation_result,
     )
+
+    obs = load_observation_result(root, release_id)
     if not obs:
         return {
             "dimension": "execution",
@@ -133,10 +170,11 @@ def _evaluate_operations(root: Path, release: dict) -> dict:
     release_id = release.get("release_id", "")
 
     # rollback recommendation
-    rb = _load_json(
-        root / "artifacts" / "production_workflow" / "rollback_recommendations"
-        / release_id / "rollback_recommendation.json"
+    from aats.data_platform.production_workflow.rollback_policy import (
+        load_rollback_recommendation,
     )
+
+    rb = load_rollback_recommendation(root, release_id)
     rollback_recommended = rb.get("rollback_recommended", False) if rb else False
 
     if rollback_recommended:
@@ -144,9 +182,24 @@ def _evaluate_operations(root: Path, release: dict) -> dict:
             "dimension": "operations",
             "score": "negative",
             "detail": f"rollback recommended (severity={rb.get('severity', '?')})",
+            "rollback_related": True,
         }
 
     obs_status = release.get("observation_status", "unknown")
+    if obs_status == "rolled_back":
+        return {
+            "dimension": "operations",
+            "score": "negative",
+            "detail": "rollback executed after apply",
+            "rollback_related": True,
+        }
+    if obs_status == "rollback_recommended":
+        return {
+            "dimension": "operations",
+            "score": "negative",
+            "detail": "rollback recommended by observation status",
+            "rollback_related": True,
+        }
     if obs_status == "completed":
         return {"dimension": "operations", "score": "positive", "detail": "observation completed, no rollback"}
     if obs_status == "observing":
@@ -199,9 +252,11 @@ def evaluate_release_effectiveness(
     now = datetime.now(timezone.utc)
 
     # 找 release
-    rel_data = _load_json(
-        root / "artifacts" / "production_workflow" / "parameter_release_history.json"
+    from aats.data_platform.production_workflow.release_registry import (
+        load_release_history,
     )
+
+    rel_data = load_release_history(root)
     release = None
     for r in (rel_data.get("releases", []) if rel_data else []):
         if r.get("release_id") == release_id:
@@ -259,7 +314,15 @@ def _derive_effectiveness(dimensions: list[dict], release: dict) -> str:
     """从各维度分数推导 effectiveness."""
     # 如果有 rollback
     ops_dim = next((d for d in dimensions if d["dimension"] == "operations"), None)
-    if ops_dim and ops_dim["score"] == "negative" and "rollback" in ops_dim.get("detail", ""):
+    if (
+        ops_dim
+        and ops_dim["score"] == "negative"
+        and (
+            bool(ops_dim.get("rollback_related"))
+            or "rollback" in ops_dim.get("detail", "")
+            or "rolled back" in ops_dim.get("detail", "")
+        )
+    ):
         return "rollback_triggered"
 
     scores = [d["score"] for d in dimensions]
@@ -336,9 +399,11 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
     modified = False
 
     # Fix P1: 将重复文件 I/O 移到循环外，避免每次评估都重新加载
-    rel_data = _load_json(
-        root / "artifacts" / "production_workflow" / "parameter_release_history.json"
+    from aats.data_platform.production_workflow.release_registry import (
+        load_release_history,
     )
+
+    rel_data = load_release_history(root)
     all_releases = rel_data.get("releases", []) if rel_data else []
 
     for ev in registry.get("evaluations", []):

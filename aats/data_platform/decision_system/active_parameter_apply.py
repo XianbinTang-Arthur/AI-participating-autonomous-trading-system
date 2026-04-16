@@ -32,6 +32,9 @@ from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import text
+from sqlalchemy.orm import Session
+
+from aats.data_platform.governance._db_util import try_governance_db
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +59,37 @@ def _apply_history_path(project_root: Path) -> Path:
 
 def load_apply_history(project_root: Path) -> dict[str, Any]:
     """加载 parameter_apply_history.json."""
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            with Session(engine) as session:
+                rows = session.execute(
+                    text(
+                        """
+                        SELECT operation_id, operation_type, family, timeframe,
+                               from_parameter_set_id, to_parameter_set_id,
+                               recommendation_id, actor, notes, created_at
+                        FROM governance.parameter_apply_history
+                        ORDER BY created_at ASC
+                        """
+                    ),
+                ).mappings().fetchall()
+            return {
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                "operations": [
+                    {
+                        **dict(row),
+                        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                    }
+                    for row in rows
+                ],
+            }
+        except Exception as exc:
+            log.warning("无法从 DB 加载 apply history: %s", exc)
+        finally:
+            if engine is not None:
+                engine.dispose()
+
     path = _apply_history_path(project_root)
     if not path.exists():
         return {"generated_at": None, "operations": []}
@@ -75,6 +109,56 @@ def save_apply_history(history: dict[str, Any], project_root: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     history["generated_at"] = datetime.now(timezone.utc).isoformat()
     atomic_json_write(history, path)
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            with Session(engine) as session, session.begin():
+                for op in history.get("operations", []):
+                    if not isinstance(op, dict) or not op.get("operation_id"):
+                        continue
+                    session.execute(
+                        text(
+                            """
+                            INSERT INTO governance.parameter_apply_history
+                                (operation_id, operation_type, family, timeframe,
+                                 from_parameter_set_id, to_parameter_set_id,
+                                 recommendation_id, actor, notes, created_at)
+                            VALUES
+                                (:operation_id, :operation_type, :family, :timeframe,
+                                 :from_parameter_set_id, :to_parameter_set_id,
+                                 :recommendation_id, :actor, :notes, :created_at)
+                            ON CONFLICT (operation_id) DO UPDATE SET
+                                operation_type = EXCLUDED.operation_type,
+                                family = EXCLUDED.family,
+                                timeframe = EXCLUDED.timeframe,
+                                from_parameter_set_id = EXCLUDED.from_parameter_set_id,
+                                to_parameter_set_id = EXCLUDED.to_parameter_set_id,
+                                recommendation_id = EXCLUDED.recommendation_id,
+                                actor = EXCLUDED.actor,
+                                notes = EXCLUDED.notes,
+                                created_at = EXCLUDED.created_at
+                            """
+                        ),
+                        {
+                            "operation_id": op.get("operation_id"),
+                            "operation_type": op.get("operation_type"),
+                            "family": op.get("family"),
+                            "timeframe": str(op.get("timeframe") or "").lower(),
+                            "from_parameter_set_id": op.get("from_parameter_set_id"),
+                            "to_parameter_set_id": op.get("to_parameter_set_id"),
+                            "recommendation_id": op.get("recommendation_id"),
+                            "actor": op.get("actor"),
+                            "notes": op.get("notes"),
+                            "created_at": datetime.fromisoformat(str(op.get("created_at")))
+                            if op.get("created_at")
+                            else datetime.now(timezone.utc),
+                        },
+                    )
+        except Exception as exc:
+            log.warning("apply history DB 同步失败: %s", exc)
+        finally:
+            if engine is not None:
+                engine.dispose()
     log.info("已保存 apply history -> %s (%d operations)", path, len(history.get("operations", [])))
     return path
 
@@ -427,6 +511,37 @@ def rollback_active_parameter_set(
             actor=actor,
             notes=notes or f"Rollback from {from_ps_id}",
         )
+
+    try:
+        from aats.data_platform.production_workflow.release_registry import (
+            load_release_history,
+            mark_release_rolled_back,
+            save_release_history,
+        )
+
+        release_history = load_release_history(project_root)
+        rolled_back_release = None
+        for release in reversed(release_history.get("releases", [])):
+            if release.get("family") != family:
+                continue
+            if str(release.get("timeframe") or "").lower() != timeframe.lower():
+                continue
+            if release.get("parameter_set_id") != from_ps_id:
+                continue
+            if release.get("apply_result") != "success":
+                continue
+            rolled_back_release = mark_release_rolled_back(
+                release_history,
+                str(release.get("release_id")),
+                rollback_to_parameter_set_id=to_parameter_set_id,
+                rollback_operation_id=op_id,
+            )
+            break
+        if rolled_back_release is not None:
+            save_release_history(release_history, project_root)
+            result["release_id"] = rolled_back_release.get("release_id")
+    except Exception as exc:
+        log.warning("rollback 后同步 release history 失败: %s", exc)
 
     result["operation_id"] = op_id
     result["message"] = f"已 rollback {combo_key}: {from_ps_id} → {to_parameter_set_id}"

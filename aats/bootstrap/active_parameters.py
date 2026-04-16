@@ -709,13 +709,6 @@ def build_settings_overrides(
         mapping = FAMILY_PARAMETER_MAPPINGS.get(family, {})
         values = data.get("values", {})
 
-        for rdp_param, settings_field in mapping.items():
-            if rdp_param in values:
-                overrides[settings_field] = values[rdp_param]
-
-        # 诊断: 收集 JSON 里存在但映射未覆盖的核心研究参数
-        # 目的: 当 directional 家族被激活但 PARAMETER_MAPPING_DIRECTIONAL 不完整时,
-        #       能第一时间发现 "JSON 里配了参数但没透传到生产端" 的问题。
         dropped: list[str] = []
         for rdp_param in values.keys():
             if rdp_param in mapping:
@@ -726,6 +719,25 @@ def build_settings_overrides(
                 dropped.append(rdp_param)
         if dropped:
             dropped_by_combo[combo_key] = sorted(dropped)
+            log.error(
+                "Active parameter combo skipped [%s]: core research params are not "
+                "fully mapped to AATSSettings. Missing keys: %s",
+                combo_key,
+                ", ".join(sorted(dropped)),
+            )
+            continue
+
+        for rdp_param, settings_field in mapping.items():
+            if rdp_param not in values:
+                continue
+            if values[rdp_param] is None:
+                log.warning(
+                    "Active parameter skipped None value [%s]: %s",
+                    combo_key,
+                    rdp_param,
+                )
+                continue
+            overrides[settings_field] = values[rdp_param]
 
         applied_combos.append(combo_key)
 
@@ -751,6 +763,17 @@ def build_settings_overrides(
         )
 
     return overrides
+
+
+def _coerce_float_setting(
+    settings: dict[str, Any],
+    key: str,
+    default: float,
+) -> float:
+    value = settings.get(key, default)
+    if value is None:
+        return float(default)
+    return float(value)
 
 
 def apply_active_parameters_to_settings(
@@ -825,18 +848,26 @@ def _validate_safe_edge_invariant(settings: dict[str, Any]) -> None:
     若违反则记录 ERROR 级日志，不中断启动（fail-soft），但确保
     运维人员能第一时间发现配置倒挂。
     """
-    min_safe = max(float(settings.get(
-        "strategy_hedge_independent_min_safe_net_edge_bps", 2.0,
-    )), 0.0)
-    slippage_buf = max(float(settings.get(
-        "strategy_hedge_independent_expected_slippage_buffer_bps", 0.5,
-    )), 0.0)
-    exec_buf = max(float(settings.get(
-        "strategy_hedge_independent_expected_execution_buffer_bps", 0.5,
-    )), 0.0)
-    de_risk = float(settings.get(
-        "strategy_hedge_independent_de_risk_net_edge_bps", 2.0,
-    ))
+    min_safe = max(_coerce_float_setting(
+        settings,
+        "strategy_hedge_independent_min_safe_net_edge_bps",
+        2.0,
+    ), 0.0)
+    slippage_buf = max(_coerce_float_setting(
+        settings,
+        "strategy_hedge_independent_expected_slippage_buffer_bps",
+        0.5,
+    ), 0.0)
+    exec_buf = max(_coerce_float_setting(
+        settings,
+        "strategy_hedge_independent_expected_execution_buffer_bps",
+        0.5,
+    ), 0.0)
+    de_risk = _coerce_float_setting(
+        settings,
+        "strategy_hedge_independent_de_risk_net_edge_bps",
+        2.0,
+    )
     safe_edge = min_safe + slippage_buf + exec_buf
     # 要求 safe_edge >= de_risk + 1.0 bps 最小 hysteresis 带
     if safe_edge < de_risk + 1.0:

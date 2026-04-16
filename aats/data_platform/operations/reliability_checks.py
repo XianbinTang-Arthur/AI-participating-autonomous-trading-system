@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from aats.data_platform.governance.snapshot_db import (
+    SNAPSHOT_QUALITY_MONITOR,
+    load_governance_snapshot,
+)
+
 
 @dataclass(frozen=True)
 class ReliabilityCheckResult:
@@ -25,8 +30,9 @@ class ReliabilityCheckResult:
 
 def check_quality_monitor_exists(root: Path) -> ReliabilityCheckResult:
     """检查 quality_monitor_summary.json 是否存在且非空."""
+    payload = load_governance_snapshot(root, snapshot_type=SNAPSHOT_QUALITY_MONITOR)
     fp = root / "artifacts" / "governance" / "quality_monitor_summary.json"
-    if not fp.exists():
+    if payload is None and not fp.exists():
         return ReliabilityCheckResult(
             name="quality_monitor_exists",
             category="governance",
@@ -35,7 +41,7 @@ def check_quality_monitor_exists(root: Path) -> ReliabilityCheckResult:
             detail="quality_monitor_summary.json not found",
         )
     try:
-        data = json.loads(fp.read_text(encoding="utf-8"))
+        data = payload if payload is not None else json.loads(fp.read_text(encoding="utf-8"))
         if not data:
             return ReliabilityCheckResult(
                 name="quality_monitor_exists",

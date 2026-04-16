@@ -128,6 +128,37 @@ def create_parameter_set(
     }
 
 
+def _sanitize_candidate_values(
+    ft_key: str,
+    values: dict[str, Any],
+) -> tuple[dict[str, Any] | None, str | None]:
+    if "_note" in values:
+        return None, f"{ft_key}: placeholder candidate (_note) is not importable"
+
+    sanitized: dict[str, Any] = {}
+    for key, value in values.items():
+        if str(key).startswith("_"):
+            continue
+        if value is None:
+            return None, f"{ft_key}: contains None for '{key}'"
+        sanitized[key] = value
+
+    if not sanitized:
+        return None, f"{ft_key}: candidate is empty after sanitization"
+
+    return sanitized, None
+
+
+def _infer_candidate_confidence(
+    ft_key: str,
+    pending_validation: list[str],
+) -> str | None:
+    if not pending_validation:
+        return "medium"
+    suffix = f" in {ft_key}"
+    return "low" if any(item.endswith(suffix) for item in pending_validation) else "medium"
+
+
 # ── Registry 操作 ───────────────────────────────────────────────────
 
 
@@ -281,12 +312,21 @@ def import_from_parameter_candidates(
         data = json.load(f)
 
     candidates = data.get("candidates", data)
+    pending_validation = [
+        str(item) for item in data.get("pending_validation", [])
+        if str(item).strip()
+    ]
     if not isinstance(candidates, dict):
         raise ValueError(f"无法解析 candidates 结构: {candidates_path}")
 
     result = []
     for ft_key, values in candidates.items():
         if not isinstance(values, dict):
+            log.warning("Skip non-dict candidate %s from %s", ft_key, candidates_path)
+            continue
+        sanitized_values, skip_reason = _sanitize_candidate_values(ft_key, values)
+        if sanitized_values is None:
+            log.warning("Skip candidate %s from %s: %s", ft_key, candidates_path, skip_reason)
             continue
         # 解析 family_timeframe
         parts = ft_key.rsplit("_", 1)
@@ -302,7 +342,8 @@ def import_from_parameter_candidates(
             source_round_id=source_round_id,
             source_phase=source_phase,
             dataset_version=dataset_version,
-            values=values,
+            values=sanitized_values,
+            confidence=_infer_candidate_confidence(ft_key, pending_validation),
             status=initial_status,
             notes=f"从 {candidates_path.name} 导入",
         )

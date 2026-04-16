@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
 
+import aats.api.rdp_control_summary as rdp_control_summary
 from aats.api.rdp_control_summary import build_rdp_control_summary
 from aats.bootstrap.active_parameters import get_active_parameter_summary
 
@@ -19,6 +21,285 @@ def _fake_request() -> SimpleNamespace:
 
 
 class TestRdpControlSummary(TestCase):
+    def test_control_summary_excludes_already_applied_approved_recommendations(self) -> None:
+        request = _fake_request()
+
+        with (
+            patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
+            patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "staging"}),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+                "overall_health": "healthy",
+                "blocking_reasons": [],
+                "warnings": [],
+                "checks": [],
+            }),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+            patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
+            patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={
+                "recommendations": [
+                    {
+                        "recommendation_id": "rec_applied_1",
+                        "symbol": "BTC-USDT-SWAP",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "recommendation_type": "parameter_upgrade",
+                        "confidence": "high",
+                        "reason": "已发布并正在运行",
+                        "status": "approved",
+                        "target_parameter_set_id": "ps_live_2",
+                        "created_at": "2026-04-10T11:50:00Z",
+                    },
+                ],
+            }),
+            patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+                "generated_at": "2026-04-10T11:40:00Z",
+                "governance_managed": True,
+                "paused_combos": [],
+                "known_combos": ["independent_15m"],
+                "active_sets": {
+                    "independent_15m": {
+                        "parameter_set_id": "ps_live_2",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "approval_recommendation_id": "rec_applied_1",
+                    },
+                },
+                "parameter_sets": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+                "available": True,
+                "generated_at": "2026-04-10T11:55:00Z",
+                "status_distribution": {"keep_active": 1},
+                "decisions": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+                "available": True,
+                "parameter_sets": [],
+            }),
+            patch(
+                "aats.data_platform.production_workflow.release_registry.load_release_history",
+                return_value={"releases": []},
+            ),
+        ):
+            payload = build_rdp_control_summary(request)
+
+        self.assertEqual(payload["operations_summary"]["approved_release_candidate_count"], 0)
+        self.assertEqual(payload["pending_recommendations"], [])
+
+    def test_control_summary_excludes_recommendations_that_already_succeeded_once(self) -> None:
+        request = _fake_request()
+
+        with (
+            patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
+            patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "staging"}),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+                "overall_health": "healthy",
+                "blocking_reasons": [],
+                "warnings": [],
+                "checks": [],
+            }),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+            patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
+            patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={
+                "recommendations": [
+                    {
+                        "recommendation_id": "rec_released_1",
+                        "symbol": "BTC-USDT-SWAP",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "recommendation_type": "parameter_upgrade",
+                        "confidence": "high",
+                        "reason": "曾经成功发布，后续被回滚",
+                        "status": "approved",
+                        "target_parameter_set_id": "ps_candidate_1",
+                        "created_at": "2026-04-10T11:50:00Z",
+                    },
+                ],
+            }),
+            patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+                "generated_at": "2026-04-10T11:40:00Z",
+                "governance_managed": True,
+                "paused_combos": [],
+                "known_combos": ["independent_15m"],
+                "active_sets": {
+                    "independent_15m": {
+                        "parameter_set_id": "ps_live_0",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "approval_recommendation_id": "rec_prev",
+                    },
+                },
+                "parameter_sets": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+                "available": True,
+                "generated_at": "2026-04-10T11:55:00Z",
+                "status_distribution": {"keep_active": 1},
+                "decisions": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+                "available": True,
+                "parameter_sets": [],
+            }),
+            patch(
+                "aats.data_platform.production_workflow.release_registry.load_release_history",
+                return_value={
+                    "releases": [
+                        {
+                            "release_id": "rel_released_1",
+                            "recommendation_id": "rec_released_1",
+                            "apply_result": "success",
+                        },
+                    ],
+                },
+            ),
+        ):
+            payload = build_rdp_control_summary(request)
+
+        self.assertEqual(payload["operations_summary"]["approved_release_candidate_count"], 0)
+        self.assertEqual(payload["pending_recommendations"], [])
+
+    def test_observation_queue_skips_releases_that_are_no_longer_current_active(self) -> None:
+        with (
+            patch(
+                "aats.data_platform.metrics.release_effectiveness.load_effectiveness_registry",
+                return_value={"evaluations": []},
+            ),
+            patch(
+                "aats.data_platform.production_workflow.observation_window.load_observation_result",
+                return_value={},
+            ),
+        ):
+            queue = rdp_control_summary._build_observation_queue(
+                Path("."),
+                releases=[
+                    {
+                        "release_id": "rel_old_1",
+                        "family": "independent",
+                        "timeframe": "15m",
+                        "combo_key": "independent_15m",
+                        "parameter_set_id": "ps_candidate_1",
+                        "previous_parameter_set_id": "ps_live_0",
+                        "created_at": "2026-04-10T12:10:00Z",
+                        "apply_result": "success",
+                        "observation_status": "observing",
+                    },
+                ],
+                active_parameters={
+                    "independent_15m": {
+                        "parameter_set_id": "ps_live_0",
+                    },
+                },
+            )
+
+        self.assertEqual(queue, [])
+
+    def test_control_summary_builds_observation_queue_from_full_release_history(self) -> None:
+        request = _fake_request()
+        full_releases = [
+            {
+                "release_id": f"rel_new_{index}",
+                "created_at": f"2026-04-10T12:{59 - index:02d}:00Z",
+                "family": "independent",
+                "timeframe": "15m",
+                "combo_key": "independent_15m",
+                "recommendation_id": f"rec_new_{index}",
+                "parameter_set_id": f"ps_other_{index}",
+                "previous_parameter_set_id": "ps_prev",
+                "actor": "operator",
+                "gate_status": "pass",
+                "apply_result": "success",
+                "observation_status": "completed",
+                "observation_window_hours": 24,
+            }
+            for index in range(10)
+        ]
+        full_releases.append(
+            {
+                "release_id": "rel_active_old",
+                "created_at": "2026-04-10T11:00:00Z",
+                "family": "independent",
+                "timeframe": "15m",
+                "combo_key": "independent_15m",
+                "recommendation_id": "rec_active_old",
+                "parameter_set_id": "ps_active_old",
+                "previous_parameter_set_id": "ps_prev",
+                "actor": "operator",
+                "gate_status": "pass",
+                "apply_result": "success",
+                "observation_status": "observing",
+                "observation_window_hours": 24,
+            },
+        )
+
+        def _load_releases(_project_root: Path, *, limit: int | None = 10) -> list[dict[str, object]]:
+            if limit is None:
+                return list(full_releases)
+            return list(full_releases[:limit])
+
+        with (
+            patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
+            patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "staging"}),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+                "overall_health": "healthy",
+                "blocking_reasons": [],
+                "warnings": [],
+                "checks": [],
+            }),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", side_effect=_load_releases),
+            patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={"recommendations": []}),
+            patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+                "generated_at": "2026-04-10T11:40:00Z",
+                "governance_managed": True,
+                "paused_combos": [],
+                "known_combos": ["independent_15m"],
+                "active_sets": {
+                    "independent_15m": {
+                        "parameter_set_id": "ps_active_old",
+                        "family": "independent",
+                        "timeframe": "15m",
+                    },
+                },
+                "parameter_sets": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+                "available": True,
+                "generated_at": "2026-04-10T11:55:00Z",
+                "status_distribution": {"keep_active": 1},
+                "decisions": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+                "available": True,
+                "parameter_sets": [],
+            }),
+            patch(
+                "aats.data_platform.production_workflow.release_registry.load_release_history",
+                return_value={"releases": []},
+            ),
+            patch(
+                "aats.data_platform.metrics.release_effectiveness.load_effectiveness_registry",
+                return_value={"evaluations": []},
+            ),
+            patch(
+                "aats.data_platform.production_workflow.observation_window.load_observation_result",
+                return_value={},
+            ),
+        ):
+            payload = build_rdp_control_summary(request)
+
+        self.assertEqual(len(payload["observation_queue"]), 1)
+        self.assertEqual(payload["observation_queue"][0]["release_id"], "rel_active_old")
+        self.assertEqual(payload["operations_summary"]["observing_release_count"], 1)
+
     def test_control_summary_includes_release_workflow_context(self) -> None:
         request = _fake_request()
 
@@ -150,6 +431,10 @@ class TestRdpControlSummary(TestCase):
                     },
                 ],
             }),
+            patch(
+                "aats.data_platform.production_workflow.release_registry.load_release_history",
+                return_value={"releases": []},
+            ),
         ):
             payload = build_rdp_control_summary(request)
 
@@ -159,9 +444,8 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(payload["operations_summary"]["draft_recommendation_count"], 0)
         self.assertEqual(payload["operations_summary"]["latest_gate_status"], "warn")
         self.assertEqual(payload["recent_gate_results"][0]["gate_run_id"], "gate_1")
-        self.assertEqual(payload["recent_releases"][0]["release_id"], "rel_1")
         self.assertEqual(payload["observation_queue"][0]["observation_status"], "observing")
-        self.assertEqual(payload["recommendation_history"][0]["recommendation_id"], "rec_release_1")
+        self.assertEqual(payload["pending_recommendations"][0]["recommendation_id"], "rec_release_1")
 
     def test_runtime_source_distinguishes_governance_pause_from_profile_defaults(self) -> None:
         request = _fake_request()
@@ -268,7 +552,7 @@ class TestRdpControlSummary(TestCase):
         ):
             payload = build_rdp_control_summary(request)
 
-        self.assertEqual(payload["runtime_parameter_source"]["mode"], "governance_pause")
+        self.assertEqual(payload["governance_state"]["parameter_source_mode"], "governance_pause")
         combo_state = next(
             item for item in payload["governance_state"]["combo_states"]
             if item["combo_key"] == "independent_15m"
@@ -356,7 +640,7 @@ class TestRdpControlSummary(TestCase):
         ):
             payload = build_rdp_control_summary(request)
 
-        self.assertEqual(payload["runtime_parameter_source"]["mode"], "mixed")
+        self.assertEqual(payload["governance_state"]["parameter_source_mode"], "mixed")
         combo_states = {
             item["combo_key"]: item
             for item in payload["governance_state"]["combo_states"]

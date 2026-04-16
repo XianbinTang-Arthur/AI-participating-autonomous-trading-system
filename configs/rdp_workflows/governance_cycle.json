@@ -1,19 +1,25 @@
 {
   "workflow": "governance_cycle",
-  "description": "治理层周期: quality monitor, artifact validation, active rounds refresh",
+  "description": "治理层周期任务，执行质量监控、产物校验、active rounds 刷新与候选参数导入。",
   "schedule_hint": "daily 07:00 UTC",
+  "schedule": {
+    "enabled": true,
+    "frequency": "daily",
+    "hour_utc": 7,
+    "minute_utc": 0
+  },
   "tasks": [
     {
       "name": "quality_monitor",
-      "description": "运行质量监控，更新 quality_monitor_summary.json",
+      "description": "运行质量监控，并更新 quality_monitor_summary.json。",
       "command": "python -m aats.data_platform.governance.quality_monitor --run",
-      "timeout_seconds": 120,
+      "timeout_seconds": 600,
       "enabled": true,
       "allow_failure": false
     },
     {
       "name": "artifact_validation",
-      "description": "验证治理层产物完整性",
+      "description": "校验治理层关键产物完整性。",
       "command": "python -m aats.data_platform.governance.artifact_indexer --validate",
       "timeout_seconds": 60,
       "enabled": true,
@@ -21,7 +27,7 @@
     },
     {
       "name": "active_rounds_refresh",
-      "description": "刷新 active_round_index.json",
+      "description": "刷新 active_round_index.json。",
       "command": "python -m aats.data_platform.governance.round_manager --refresh-index",
       "timeout_seconds": 60,
       "enabled": true,
@@ -29,7 +35,7 @@
     },
     {
       "name": "auto_import_candidates",
-      "description": "自动导入最新 Step 3 参数候选到 registry（全量导入）。注: full pipeline 已在 Step 3 后自动执行此步骤，此处仅在独立运行 governance_cycle 时生效（幂等安全）",
+      "description": "自动导入最新 Step 3 参数候选到 registry；若 full pipeline 已执行，该步骤保持幂等。",
       "command": "python -m aats.data_platform.governance.auto_import_candidates --run",
       "timeout_seconds": 30,
       "enabled": true,

@@ -35,10 +35,10 @@ def _make_db_result(values_by_combo: dict[str, dict]) -> dict:
 
 
 class TestBuildSettingsOverridesMappingGap(unittest.TestCase):
-    """验证 DIRECTIONAL 家族映射不完整时的运行时诊断能力。"""
+    """验证映射缺失时 fail-close，而不是继续做部分注入。"""
 
-    def test_warning_emitted_for_directional_mapping_gap(self) -> None:
-        """DIRECTIONAL 家族的 DB 数据含核心研究参数但缺映射时应 WARN。"""
+    def test_directional_mapping_gap_skips_combo(self) -> None:
+        """DIRECTIONAL 家族缺映射时应跳过整个 combo，避免部分注入。"""
         db_result = _make_db_result({
             # directional 家族包含 entry_threshold 等核心参数,
             # 但 PARAMETER_MAPPING_DIRECTIONAL 只映射 3 项, 这 5 项都会被丢弃
@@ -82,8 +82,7 @@ class TestBuildSettingsOverridesMappingGap(unittest.TestCase):
         # replay-only 参数不应被列为缺失
         self.assertNotIn("directional_trend_weight", warning_text)
 
-        # overrides 应当包含 directional_trend_weight 的映射结果
-        self.assertIn("strategy_entry_alpha_min", overrides)
+        self.assertNotIn("strategy_entry_alpha_min", overrides)
 
     def test_no_warning_for_independent_full_mapping(self) -> None:
         """INDEPENDENT 家族映射完整, 不应触发 WARNING。"""
@@ -297,6 +296,43 @@ class TestDbOnlyRegression(unittest.TestCase):
             call_count, 1,
             f"_try_load_from_db 应只被调用 1 次，实际 {call_count} 次",
         )
+
+
+class TestActiveParameterNoneHandling(unittest.TestCase):
+    def test_none_values_are_skipped_in_overrides(self) -> None:
+        db_result = _make_db_result({
+            "independent_15m": {
+                "entry_threshold": None,
+                "close_threshold": 0.12,
+            },
+        })
+
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=db_result,
+        ):
+            overrides = build_settings_overrides(db_url="mock://db")
+
+        self.assertNotIn(
+            PARAMETER_MAPPING_INDEPENDENT["entry_threshold"],
+            overrides,
+        )
+        self.assertEqual(
+            overrides[PARAMETER_MAPPING_INDEPENDENT["close_threshold"]],
+            0.12,
+        )
+
+    def test_safe_edge_invariant_tolerates_none(self) -> None:
+        from aats.bootstrap.active_parameters import _validate_safe_edge_invariant
+
+        settings = {
+            "strategy_hedge_independent_min_safe_net_edge_bps": None,
+            "strategy_hedge_independent_expected_slippage_buffer_bps": None,
+            "strategy_hedge_independent_expected_execution_buffer_bps": None,
+            "strategy_hedge_independent_de_risk_net_edge_bps": None,
+        }
+
+        _validate_safe_edge_invariant(settings)
 
 
 if __name__ == "__main__":

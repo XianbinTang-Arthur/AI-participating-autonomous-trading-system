@@ -22,6 +22,13 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy.orm import Session
+
+from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance.snapshot_db import (
+    SNAPSHOT_QUALITY_MONITOR,
+    load_governance_snapshot,
+)
 from aats.data_platform.production_workflow.gate_rules import (
     DEFAULT_GATE_RULES,
     GateCheckResult,
@@ -76,7 +83,11 @@ def build_gate_context(
     """构建 gate 检查所需的上下文."""
     from aats.data_platform.decision_system.recommendation_registry import (
         find_recommendation,
+        load_active_decision_registry,
         load_recommendation_registry,
+    )
+    from aats.data_platform.governance.decision_rounds_db import (
+        db_load_latest_decision_round_snapshot,
     )
     from aats.data_platform.governance.parameter_registry import load_registry
     from aats.data_platform.operations.environment_guard import (
@@ -96,26 +107,47 @@ def build_gate_context(
     ctx["recommendation"] = rec or {}
 
     # quality monitor
-    qm = _safe_load_json(project_root / _GOVERNANCE_DIR / "quality_monitor_summary.json")
+    qm = load_governance_snapshot(
+        project_root,
+        snapshot_type=SNAPSHOT_QUALITY_MONITOR,
+    )
     ctx["quality_monitor"] = qm
 
     # active decisions
-    dec_reg = _safe_load_json(
+    dec_reg = load_active_decision_registry(
         project_root / _DECISION_SYSTEM_DIR / "active_decision_registry.json",
     )
     ctx["active_decisions"] = (dec_reg or {}).get("decisions", [])
 
     # latest decision round
-    rounds_root = project_root / _DECISION_ROUNDS_DIR
-    latest_dir = _find_latest_round_dir(rounds_root)
-    if latest_dir:
-        manifest = _safe_load_json(latest_dir / "round_manifest.json")
-        ctx["latest_decision_round"] = {
-            "round_id": latest_dir.name,
-            "round_manifest": manifest or {},
-        }
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            with Session(engine) as session:
+                snapshot = db_load_latest_decision_round_snapshot(session)
+            if snapshot:
+                ctx["latest_decision_round"] = {
+                    "round_id": snapshot.get("round_id"),
+                    "round_manifest": snapshot.get("manifest") or {},
+                }
+            else:
+                ctx["latest_decision_round"] = {}
+        except Exception:
+            ctx["latest_decision_round"] = {}
+        finally:
+            if engine is not None:
+                engine.dispose()
     else:
-        ctx["latest_decision_round"] = {}
+        rounds_root = project_root / _DECISION_ROUNDS_DIR
+        latest_dir = _find_latest_round_dir(rounds_root)
+        if latest_dir:
+            manifest = _safe_load_json(latest_dir / "round_manifest.json")
+            ctx["latest_decision_round"] = {
+                "round_id": latest_dir.name,
+                "round_manifest": manifest or {},
+            }
+        else:
+            ctx["latest_decision_round"] = {}
 
     # parameter sets
     gov_reg = load_registry(project_root / _GOVERNANCE_DIR / "current_parameter_registry.json")
@@ -240,6 +272,21 @@ def _save_gate_result(
     result_path = gate_dir / "pre_apply_gate_result.json"
     with result_path.open("w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
+
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from aats.data_platform.governance.operational_state_db import (
+                db_upsert_pre_apply_gate_result,
+            )
+
+            with Session(engine) as session, session.begin():
+                db_upsert_pre_apply_gate_result(session, result)
+        except Exception as exc:
+            log.warning("pre-apply gate DB 同步失败: %s", exc)
+        finally:
+            if engine is not None:
+                engine.dispose()
 
     # 生成人可读报告
     report_path = gate_dir / "pre_apply_gate_report.md"

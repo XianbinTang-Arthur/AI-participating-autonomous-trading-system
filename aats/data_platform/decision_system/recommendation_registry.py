@@ -468,6 +468,24 @@ def upsert_active_decision(
 
 
 def load_evidence_bundle_index(path: pathlib.Path) -> dict[str, Any]:
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from sqlalchemy.orm import Session
+
+            from aats.data_platform.governance.operational_state_db import (
+                db_load_decision_evidence_bundle_index,
+            )
+
+            with Session(engine) as session:
+                registry = db_load_decision_evidence_bundle_index(session)
+            if registry.get("bundles"):
+                return registry
+        except Exception as exc:
+            log.warning("evidence_bundle_index: DB read failed (%s), fallback to file", exc)
+        finally:
+            if engine is not None:
+                engine.dispose()
     if not path.exists():
         return {"generated_at": None, "bundles": []}
     with path.open(encoding="utf-8") as f:
@@ -481,6 +499,24 @@ def save_evidence_bundle_index(
 
     index["generated_at"] = datetime.now(timezone.utc).isoformat()
     atomic_json_write(index, path)
+    engine, ok = try_governance_db()
+    if not ok:
+        return
+    try:
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance.operational_state_db import (
+            db_upsert_decision_evidence_bundle,
+        )
+
+        with Session(engine) as session, session.begin():
+            for bundle in index.get("bundles", []):
+                db_upsert_decision_evidence_bundle(session, bundle)
+    except Exception as exc:
+        log.warning("evidence_bundle_index: DB sync failed (%s)", exc)
+    finally:
+        if engine is not None:
+            engine.dispose()
 
 
 def register_evidence_bundle(

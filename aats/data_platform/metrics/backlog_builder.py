@@ -95,15 +95,39 @@ def _make_item(
 def _check_workflow_failures(root: Path) -> list[dict]:
     """检测高失败率 workflow."""
     items = []
-    runs_dir = root / "artifacts" / "operations" / "workflow_runs"
-    if not runs_dir.exists():
-        return items
-
     wf_stats: dict[str, dict] = {}
-    for fp in runs_dir.iterdir():
-        if fp.suffix != ".json":
-            continue
-        data = _load_json(fp)
+    workflow_runs: list[dict] = []
+    try:
+        from sqlalchemy.orm import Session
+
+        from aats.data_platform.governance._db_util import try_governance_db
+        from aats.data_platform.governance.operational_state_db import (
+            db_list_workflow_runs,
+        )
+
+        engine, ok = try_governance_db()
+        if ok:
+            try:
+                with Session(engine) as session:
+                    workflow_runs = db_list_workflow_runs(session)
+            finally:
+                if engine is not None:
+                    engine.dispose()
+    except Exception:
+        workflow_runs = []
+
+    if not workflow_runs:
+        runs_dir = root / "artifacts" / "operations" / "workflow_runs"
+        if not runs_dir.exists():
+            return items
+        for fp in runs_dir.iterdir():
+            if fp.suffix != ".json":
+                continue
+            data = _load_json(fp)
+            if data:
+                workflow_runs.append(data)
+
+    for data in workflow_runs:
         if not data:
             continue
         wf_name = data.get("workflow", "unknown")
@@ -132,9 +156,11 @@ def _check_workflow_failures(root: Path) -> list[dict]:
 def _check_rollback_frequency(root: Path) -> list[dict]:
     """检测高频 rollback."""
     items = []
-    data = _load_json(
-        root / "artifacts" / "decision_system" / "parameter_apply_history.json"
+    from aats.data_platform.decision_system.active_parameter_apply import (
+        load_apply_history,
     )
+
+    data = load_apply_history(root)
     if not data:
         return items
 
@@ -175,7 +201,11 @@ def _check_rollback_frequency(root: Path) -> list[dict]:
 def _check_stale_recommendations(root: Path) -> list[dict]:
     """检测 stale (长期 draft) recommendations."""
     items = []
-    data = _load_json(
+    from aats.data_platform.decision_system.recommendation_registry import (
+        load_recommendation_registry,
+    )
+
+    data = load_recommendation_registry(
         root / "artifacts" / "decision_system" / "recommendation_registry.json"
     )
     if not data:
@@ -202,9 +232,11 @@ def _check_stale_recommendations(root: Path) -> list[dict]:
 def _check_ineffective_releases(root: Path) -> list[dict]:
     """检测 ineffective releases."""
     items = []
-    data = _load_json(
-        root / "artifacts" / "metrics" / "release_effectiveness_registry.json"
+    from aats.data_platform.metrics.release_effectiveness import (
+        load_effectiveness_registry,
     )
+
+    data = load_effectiveness_registry(root)
     if not data:
         return items
 

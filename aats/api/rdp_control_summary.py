@@ -7,8 +7,10 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import Request
+from sqlalchemy.orm import Session
 
 from aats.api._governance_db import governance_session as _governance_session
+from aats.data_platform.governance._db_util import try_governance_db
 from aats.data_platform.operations.environment_guard import (
     get_current_environment,
     get_observation_window_hours,
@@ -49,6 +51,17 @@ def _combo_key(family: str | None, timeframe: str | None) -> str:
     return f"{family}_{str(timeframe).lower()}"
 
 
+def _build_applied_recommendation_ids(active_parameters: dict[str, Any]) -> set[str]:
+    result: set[str] = set()
+    for item in (active_parameters or {}).values():
+        if not isinstance(item, dict):
+            continue
+        recommendation_id = str(item.get("approval_recommendation_id") or "").strip()
+        if recommendation_id:
+            result.add(recommendation_id)
+    return result
+
+
 def _iso_sort_key(value: str | None) -> str:
     return value or ""
 
@@ -65,24 +78,46 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
     return parsed
 
 
-def _safe_load_json(path: Path) -> dict[str, Any] | list[Any] | None:
-    if not path.exists():
-        return None
-    try:
-        with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
 def _load_recent_gate_results(project_root: Path, *, limit: int = 8) -> list[dict[str, Any]]:
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from aats.data_platform.governance.operational_state_db import (
+                db_list_pre_apply_gate_results,
+            )
+
+            with Session(engine) as session:
+                results = db_list_pre_apply_gate_results(session, limit=limit)
+            if results:
+                return [
+                    {
+                        "gate_run_id": payload.get("gate_run_id"),
+                        "recommendation_id": payload.get("recommendation_id"),
+                        "created_at": payload.get("created_at"),
+                        "gate_status": payload.get("gate_status"),
+                        "allow_apply": bool(payload.get("allow_apply")),
+                        "blocking_reasons": payload.get("blocking_reasons") or [],
+                        "warnings": payload.get("warnings") or [],
+                        "checks": payload.get("checks") or [],
+                    }
+                    for payload in results
+                    if isinstance(payload, dict)
+                ]
+        except Exception as exc:
+            logger.warning("control-summary: failed to load gate results from DB: %s", exc)
+        finally:
+            if engine is not None:
+                engine.dispose()
+
     gates_root = project_root / "artifacts" / "production_workflow" / "gates"
     if not gates_root.exists():
         return []
-
     results: list[dict[str, Any]] = []
     for path in gates_root.glob("*/pre_apply_gate_result.json"):
-        payload = _safe_load_json(path)
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
         if not isinstance(payload, dict):
             continue
         results.append({
@@ -95,12 +130,15 @@ def _load_recent_gate_results(project_root: Path, *, limit: int = 8) -> list[dic
             "warnings": payload.get("warnings") or [],
             "checks": payload.get("checks") or [],
         })
-
     results.sort(key=lambda item: _iso_sort_key(item.get("created_at")), reverse=True)
     return results[:limit]
 
 
-def _load_recent_releases(project_root: Path, *, limit: int = 10) -> list[dict[str, Any]]:
+def _load_recent_releases(
+    project_root: Path,
+    *,
+    limit: int | None = 10,
+) -> list[dict[str, Any]]:
     from aats.data_platform.production_workflow.release_registry import load_release_history
 
     history = load_release_history(project_root)
@@ -109,6 +147,8 @@ def _load_recent_releases(project_root: Path, *, limit: int = 10) -> list[dict[s
         if isinstance(item, dict)
     ]
     releases.sort(key=lambda item: _iso_sort_key(item.get("created_at")), reverse=True)
+    if limit is None:
+        return releases
     return releases[:limit]
 
 
@@ -143,23 +183,23 @@ def _build_observation_queue(
         if observation_status not in {"observing", "rollback_recommended", "completed", "not_started"}:
             continue
 
-        observation_path = (
-            project_root
-            / "artifacts"
-            / "production_workflow"
-            / "observations"
-            / release_id
-            / "observation_summary.json"
+        from aats.data_platform.production_workflow.observation_window import (
+            load_observation_result,
         )
-        observation = _safe_load_json(observation_path)
-        if not isinstance(observation, dict):
-            observation = {}
+
+        observation = load_observation_result(project_root, release_id) or {}
 
         combo_key = str(release.get("combo_key") or "").strip()
         active_entry = active_parameters.get(combo_key) if combo_key else None
         current_active_parameter_set_id = None
         if isinstance(active_entry, dict):
             current_active_parameter_set_id = active_entry.get("parameter_set_id")
+        is_current_active_release = (
+            bool(current_active_parameter_set_id)
+            and current_active_parameter_set_id == release.get("parameter_set_id")
+        )
+        if not is_current_active_release:
+            continue
 
         queue.append({
             "release_id": release_id,
@@ -179,10 +219,7 @@ def _build_observation_queue(
             "observation": observation,
             "effectiveness": effectiveness_by_release.get(release_id),
             "current_active_parameter_set_id": current_active_parameter_set_id,
-            "is_current_active_release": (
-                bool(current_active_parameter_set_id)
-                and current_active_parameter_set_id == release.get("parameter_set_id")
-            ),
+            "is_current_active_release": is_current_active_release,
         })
 
     queue.sort(
@@ -449,7 +486,6 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     environment = _environment_summary()
 
     tasks_by_workflow: dict[str, Any] = {}
-    tasks_error: str | None = None
     try:
         from aats.data_platform.governance.rdp_task_db import db_get_recent_tasks
 
@@ -461,7 +497,6 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
                 tasks_by_workflow[workflow] = task
     except Exception as exc:
         logger.warning("control-summary: task query failed: %s", exc)
-        tasks_error = str(exc)
 
     recommendations: list[dict[str, Any]] = []
     try:
@@ -488,11 +523,6 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         ]
     except Exception as exc:
         logger.warning("control-summary: recommendations query failed: %s", exc)
-    pending_recommendations = [
-        rec
-        for rec in recommendations
-        if rec.get("status") in _PENDING_RECOMMENDATION_STATUSES
-    ]
 
     active_params_data: dict[str, Any] = {
         "generated_at": None,
@@ -507,8 +537,37 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("control-summary: active params query failed: %s", exc)
     active_parameters = active_params_data.get("active_sets", {}) or {}
+    applied_recommendation_ids = _build_applied_recommendation_ids(active_parameters)
+    released_success_recommendation_ids: set[str] = set()
+    try:
+        from aats.data_platform.production_workflow.release_registry import (
+            load_release_history,
+        )
 
-    latest_round_summary: dict[str, Any] = {"available": False}
+        release_history = load_release_history(root)
+        released_success_recommendation_ids = {
+            str(item.get("recommendation_id") or "").strip()
+            for item in (release_history.get("releases") or [])
+            if isinstance(item, dict)
+            and item.get("apply_result") == "success"
+            and str(item.get("recommendation_id") or "").strip()
+        }
+    except Exception as exc:
+        logger.warning("control-summary: release history query failed: %s", exc)
+    pending_recommendations = [
+        rec
+        for rec in recommendations
+        if rec.get("status") in _PENDING_RECOMMENDATION_STATUSES
+        and not (
+            rec.get("recommendation_type") == "parameter_upgrade"
+            and rec.get("status") == "approved"
+            and (
+                rec.get("recommendation_id") in applied_recommendation_ids
+                or rec.get("recommendation_id") in released_success_recommendation_ids
+            )
+        )
+    ]
+
     latest_research_conclusions: list[dict[str, Any]] = []
     round_upgrade_candidates: list[dict[str, Any]] = []
     try:
@@ -545,17 +604,6 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
                 for item in (decision_round.get("parameter_upgrade_candidates") or [])
                 if isinstance(item, dict)
             ]
-            readiness = decision_round.get("promotion_readiness_assessment") or {}
-            latest_round_summary = {
-                "available": True,
-                "round_id": decision_round.get("round_id"),
-                "candidate_count": len(round_upgrade_candidates),
-                "conclusion_count": len(latest_research_conclusions),
-                "has_conclusion_report": bool(
-                    decision_round.get("has_conclusion_report"),
-                ),
-                "readiness_status": readiness.get("overall_status"),
-            }
     except Exception as exc:
         logger.warning("control-summary: decision round query failed: %s", exc)
 
@@ -606,27 +654,15 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         latest_decision_state=latest_decision_state,
         recommendations=recommendations,
     )
-    runtime_parameter_source = {
-        "mode": governance_state.get("parameter_source_mode", "profile_defaults"),
-        "active_count": len(active_parameters),
-        "governance_managed": governance_state.get("governance_managed", False),
-        "paused_combos": governance_state.get("paused_combos", []),
-        "combo_count": len(governance_state.get("combo_states", [])),
-    }
     health = query_rdp_health(root)
     recent_gate_results = _load_recent_gate_results(root)
-    recent_releases = _load_recent_releases(root)
+    recent_releases = _load_recent_releases(root, limit=10)
+    observation_source_releases = _load_recent_releases(root, limit=None)
     observation_queue = _build_observation_queue(
         root,
-        releases=recent_releases,
+        releases=observation_source_releases,
         active_parameters=active_parameters,
     )
-    recommendations_sorted = sorted(
-        [item for item in recommendations if isinstance(item, dict)],
-        key=lambda item: _iso_sort_key(item.get("created_at")),
-        reverse=True,
-    )
-
     approved_parameter_recommendations = [
         rec
         for rec in pending_recommendations
@@ -668,16 +704,9 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "health": health,
         "operations_summary": operations_summary,
         "tasks": tasks_by_workflow,
-        "tasks_error": tasks_error,
         "pending_recommendations": pending_recommendations,
-        "recommendation_history": recommendations_sorted[:48],
         "active_parameters": active_parameters,
-        "runtime_parameter_source": runtime_parameter_source,
-        "latest_round_summary": latest_round_summary,
-        "latest_research_conclusions": latest_research_conclusions,
-        "latest_decision_state": latest_decision_state,
         "governance_state": governance_state,
         "recent_gate_results": recent_gate_results,
-        "recent_releases": recent_releases,
         "observation_queue": observation_queue,
     }

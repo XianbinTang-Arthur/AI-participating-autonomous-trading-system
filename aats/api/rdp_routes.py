@@ -201,7 +201,13 @@ async def promotion_readiness(request: Request) -> dict[str, Any]:
 
 
 class TriggerTaskRequest(BaseModel):
-    workflow: str = Field(..., description="workflow 名称: data_maintenance / governance_cycle / research_cycle / decision_cycle")
+    workflow: str = Field(
+        ...,
+        description=(
+            "workflow 名称: data_maintenance / governance_cycle / "
+            "research_cycle / decision_cycle / release_cycle"
+        ),
+    )
     actor: str = Field(default="operator", description="操作人")
 
 

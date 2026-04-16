@@ -19,6 +19,16 @@ from typing import Any
 
 from sqlalchemy import text
 
+from aats.data_platform.governance.snapshot_db import (
+    ROUND_PHASE_PHASE3,
+    ROUND_PHASE_PHASE4,
+    SNAPSHOT_ACTIVE_ROUND_INDEX,
+    SNAPSHOT_ARTIFACT_INDEX,
+    SNAPSHOT_QUALITY_MONITOR,
+    load_governance_snapshot,
+    load_latest_research_round_snapshot,
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -69,6 +79,19 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 
 def _collect_latest_workflow_runs(project_root: Path) -> dict[str, dict[str, Any]]:
+    try:
+        from aats.api._governance_db import governance_session
+        from aats.data_platform.governance.operational_state_db import (
+            db_load_latest_workflow_runs,
+        )
+
+        with governance_session() as session:
+            latest_by_workflow = db_load_latest_workflow_runs(session)
+        if latest_by_workflow:
+            return latest_by_workflow
+    except Exception:
+        pass
+
     runs_dir = project_root / "artifacts/operations/workflow_runs"
     latest_by_workflow: dict[str, dict[str, Any]] = {}
     if not runs_dir.exists():
@@ -295,7 +318,7 @@ def _check_db_initialization(
 
                 row = session.execute(
                     sa_text(
-                        "SELECT COUNT(*) FROM governance.rdp_recommendations "
+                        "SELECT COUNT(*) FROM governance.recommendations "
                         "WHERE created_at > NOW() - INTERVAL '7 days'"
                     ),
                 ).scalar()
@@ -402,9 +425,6 @@ def query_latest_attribution(project_root: Path) -> dict[str, Any]:
       - artifacts/research/attribution_rounds/<latest>/attribution_report.md
       - artifacts/research/attribution_rounds/<latest>/attribution_summary.json
     """
-    rounds_root = project_root / _ATTRIBUTION_ROUNDS_DIR
-    latest_dir = _find_latest_round_dir(rounds_root)
-
     result: dict[str, Any] = {
         "available": False,
         "round_id": None,
@@ -413,13 +433,44 @@ def query_latest_attribution(project_root: Path) -> dict[str, Any]:
         "summary": None,
     }
 
+    snapshot = load_latest_research_round_snapshot(
+        phase=ROUND_PHASE_PHASE3,
+        project_root=project_root,
+    )
+    if snapshot:
+        manifest = snapshot.get("manifest") or {}
+        result["manifest"] = {
+            "round_id": manifest.get("round_id"),
+            "status": manifest.get("overall_status", manifest.get("status")),
+            "started_at": manifest.get("started_at"),
+            "finished_at": manifest.get("finished_at"),
+            "scope": manifest.get("scope", manifest.get("window")),
+        }
+        result["round_id"] = snapshot.get("round_id")
+        result["round_dir"] = snapshot.get("round_path")
+        summary = snapshot.get("summary", {}) or {}
+        if summary.get("summary_rows") is not None:
+            result["summary"] = {"experiments": summary.get("summary_rows", [])}
+            result["available"] = True
+        combos = []
+        for combo_key, combo in (summary.get("combos", {}) or {}).items():
+            combo_summary = combo.get("attribution_summary")
+            if combo_summary is not None:
+                combos.append({"combo_key": combo_key, "summary": combo_summary})
+        if combos:
+            result["combos"] = combos
+            result["available"] = True
+        if result["available"]:
+            return result
+
+    rounds_root = project_root / _ATTRIBUTION_ROUNDS_DIR
+    latest_dir = _find_latest_round_dir(rounds_root)
     if latest_dir is None:
         return result
 
     result["round_dir"] = str(latest_dir)
     result["round_id"] = latest_dir.name
 
-    # manifest
     manifest = _safe_load_json(latest_dir / "round_manifest.json")
     if manifest:
         result["manifest"] = {
@@ -430,13 +481,11 @@ def query_latest_attribution(project_root: Path) -> dict[str, Any]:
             "scope": manifest.get("scope"),
         }
 
-    # summary
     summary = _safe_load_json(latest_dir / "attribution_summary.json")
     if summary:
         result["summary"] = summary
         result["available"] = True
 
-    # 尝试读 combo 级结果
     combos: list[dict[str, Any]] = []
     for combo_dir in sorted(latest_dir.iterdir()):
         if not combo_dir.is_dir():
@@ -464,9 +513,6 @@ def query_latest_execution_realism(project_root: Path) -> dict[str, Any]:
       - artifacts/research/execution_rounds/<latest>/round_manifest.json
       - artifacts/research/execution_rounds/<latest>/execution_summary.json
     """
-    rounds_root = project_root / _EXECUTION_ROUNDS_DIR
-    latest_dir = _find_latest_round_dir(rounds_root)
-
     result: dict[str, Any] = {
         "available": False,
         "round_id": None,
@@ -475,6 +521,41 @@ def query_latest_execution_realism(project_root: Path) -> dict[str, Any]:
         "summary": None,
     }
 
+    snapshot = load_latest_research_round_snapshot(
+        phase=ROUND_PHASE_PHASE4,
+        project_root=project_root,
+    )
+    if snapshot:
+        manifest = snapshot.get("manifest") or {}
+        result["manifest"] = {
+            "round_id": manifest.get("round_id"),
+            "status": manifest.get("overall_status", manifest.get("status")),
+            "started_at": manifest.get("started_at"),
+            "finished_at": manifest.get("finished_at"),
+            "scope": manifest.get("scope", manifest.get("window")),
+        }
+        result["round_id"] = snapshot.get("round_id")
+        result["round_dir"] = snapshot.get("round_path")
+        summary = snapshot.get("summary", {}) or {}
+        if summary.get("comparison_rows") is not None:
+            result["summary"] = {
+                "comparison_rows": summary.get("comparison_rows", []),
+                "cross_findings": summary.get("cross_findings", []),
+            }
+            result["available"] = True
+        combos = []
+        for combo_key, combo in (summary.get("combos", {}) or {}).items():
+            combo_summary = combo.get("cost_summary")
+            if combo_summary is not None:
+                combos.append({"combo_key": combo_key, "summary": combo_summary})
+        if combos:
+            result["combos"] = combos
+            result["available"] = True
+        if result["available"]:
+            return result
+
+    rounds_root = project_root / _EXECUTION_ROUNDS_DIR
+    latest_dir = _find_latest_round_dir(rounds_root)
     if latest_dir is None:
         return result
 
@@ -649,19 +730,38 @@ def query_rdp_health(project_root: Path) -> dict[str, Any]:
     # 1. 核心 artifacts 初始化情况
     #    当 DB 可达且有数据时，本地文件缺失仅作 info，不影响初始化判定。
     governance_files = {
-        "artifact_index": project_root / _GOVERNANCE_DIR / "artifact_index.json",
-        "active_round_index": project_root / _GOVERNANCE_DIR / "active_round_index.json",
-        "parameter_registry": project_root / _GOVERNANCE_DIR / "current_parameter_registry.json",
-        "quality_monitor": project_root / _GOVERNANCE_DIR / "quality_monitor_summary.json",
+        "artifact_index": {
+            "path": project_root / _GOVERNANCE_DIR / "artifact_index.json",
+            "snapshot_type": SNAPSHOT_ARTIFACT_INDEX,
+        },
+        "active_round_index": {
+            "path": project_root / _GOVERNANCE_DIR / "active_round_index.json",
+            "snapshot_type": SNAPSHOT_ACTIVE_ROUND_INDEX,
+        },
+        "parameter_registry": {
+            "path": project_root / _GOVERNANCE_DIR / "current_parameter_registry.json",
+            "snapshot_type": None,
+        },
+        "quality_monitor": {
+            "path": project_root / _GOVERNANCE_DIR / "quality_monitor_summary.json",
+            "snapshot_type": SNAPSHOT_QUALITY_MONITOR,
+        },
     }
     governance_files_ok = True
-    for name, path in governance_files.items():
-        data = _safe_load_json(path)
+    for name, file_info in governance_files.items():
+        path = file_info["path"]
+        snapshot_type = file_info["snapshot_type"]
+        data = (
+            load_governance_snapshot(project_root, snapshot_type=snapshot_type)
+            if snapshot_type
+            else _safe_load_json(path)
+        )
         exists = path.exists()
-        governance_files_ok = governance_files_ok and exists
-        if exists:
+        snapshot_available = data is not None
+        governance_files_ok = governance_files_ok and (exists or snapshot_available)
+        if snapshot_available:
             status = "ok"
-            detail = str(path)
+            detail = str(path) if exists else "DB-first snapshot available"
         elif db_has_governance_data:
             # DB 有数据，文件仅在 daemon 宿主侧存在 → 不阻断
             status = "ok"

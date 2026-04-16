@@ -27,6 +27,32 @@ VALID_REC_TYPES = frozenset({
 })
 
 
+def resolve_governance_db_url() -> str | None:
+    """Resolve the governance DB URL using the same fallback chain as RDP.
+
+    Precedence:
+      1. ``AATS_ACTIVE_PARAMETER_DB_URL``
+      2. ``RDP_DATABASE_URL``
+      3. ``get_settings().database_url``
+    """
+    direct_url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+    if direct_url and direct_url.strip():
+        return direct_url.strip()
+
+    rdp_url = os.environ.get("RDP_DATABASE_URL")
+    if rdp_url and rdp_url.strip():
+        return rdp_url.strip()
+
+    try:
+        from aats.data_platform.config import get_settings
+
+        settings_url = str(get_settings().database_url).strip()
+        return settings_url or None
+    except Exception as exc:  # pragma: no cover - defensive
+        log.debug("failed to resolve governance DB URL from RDP settings: %s", exc)
+        return None
+
+
 def try_governance_db():
     """尝试获取 governance DB 连接。
 
@@ -43,9 +69,7 @@ def try_governance_db():
     通过 AATS_ACTIVE_PARAMETER_DB_URL 写入但 bootstrap 通过 RDP_DATABASE_URL
     读取，active_parameter_sets 表始终为空。现在统一 fallback 链。
     """
-    url = os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
-    if not url:
-        url = os.environ.get("RDP_DATABASE_URL")
+    url = resolve_governance_db_url()
     if not url:
         return None, False
     try:

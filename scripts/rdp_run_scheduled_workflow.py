@@ -60,6 +60,10 @@ def main() -> int:
         load_workflow_config,
         run_workflow,
     )
+    from aats.data_platform.operations.workflow_scheduler import (
+        format_schedule,
+        get_workflow_schedule,
+    )
 
     if args.list:
         workflows = list_available_workflows(ROOT)
@@ -68,12 +72,14 @@ def main() -> int:
             try:
                 config = load_workflow_config(ROOT, wf)
                 desc = config.get("description", "")
-                schedule = config.get("schedule_hint", "")
+                schedule_hint = config.get("schedule_hint", "")
+                schedule = format_schedule(get_workflow_schedule(config))
                 tasks = config.get("tasks", [])
                 enabled = sum(1 for t in tasks if t.get("enabled", True))
                 print(f"  {wf}")
                 print(f"    {desc}")
-                print(f"    Schedule: {schedule}")
+                print(f"    Schedule: {schedule_hint}")
+                print(f"    Structured Schedule: {schedule}")
                 print(f"    Tasks: {enabled}/{len(tasks)} enabled")
             except Exception as e:
                 print(f"  {wf} (error: {e})")

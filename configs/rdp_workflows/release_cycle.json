@@ -1,0 +1,24 @@
+{
+  "workflow": "release_cycle",
+  "description": "发布层周期任务，扫描已批准 recommendation，并通过既有 gate/release/apply 链推进。",
+  "schedule_hint": "hourly when approvals pending or on-demand",
+  "schedule": {
+    "enabled": true,
+    "frequency": "hourly",
+    "interval_hours": 1,
+    "minute_utc": 0
+  },
+  "tasks": [
+    {
+      "name": "release_apply",
+      "description": "处理已批准 recommendation，创建受控 release，并在 gate 通过后 apply。",
+      "command": "python scripts/rdp_run_release_cycle.py",
+      "success_markers": [
+        "Release cycle completed"
+      ],
+      "timeout_seconds": 300,
+      "enabled": true,
+      "allow_failure": false
+    }
+  ]
+}

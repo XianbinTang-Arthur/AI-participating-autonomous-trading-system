@@ -224,7 +224,7 @@ services:
       # daemon 通过 AATS_ACTIVE_PARAMETER_DB_URL 连接 governance schema
       # （已在 x-aats-common-env 中定义，指向 aats_research）
       RDP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
-    command: ["python", "scripts/rdp_task_daemon.py", "--poll-interval", "10"]
+    command: ["python", "scripts/rdp_task_daemon.py", "--poll-interval", "10", "--enable-scheduler"]
     networks:
       - aats
     depends_on:

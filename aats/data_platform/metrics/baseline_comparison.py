@@ -60,9 +60,11 @@ def find_baseline_for_release(
     timeframe = release.get("timeframe")
     prev_ps_id = release.get("previous_parameter_set_id")
 
-    rel_data = _load_json(
-        root / "artifacts" / "production_workflow" / "parameter_release_history.json"
+    from aats.data_platform.production_workflow.release_registry import (
+        load_release_history,
     )
+
+    rel_data = load_release_history(root)
     releases = rel_data.get("releases", []) if rel_data else []
 
     # 策略 1: 找 previous_parameter_set_id 对应的 release
@@ -93,9 +95,9 @@ def find_baseline_for_release(
             }
 
     # 策略 3: frozen parameter set
-    ps_data = _load_json(
-        root / "artifacts" / "governance" / "current_parameter_registry.json"
-    )
+    from aats.data_platform.governance.parameter_registry import load_registry
+
+    ps_data = load_registry(root / "artifacts" / "governance" / "current_parameter_registry.json")
     if ps_data:
         for ps in ps_data.get("parameter_sets", []):
             if (
@@ -116,25 +118,23 @@ def find_baseline_for_release(
 # ── Observation 对比 ──���───────────────────────────────────────
 
 def _load_observation(root: Path, release_id: str) -> dict | None:
-    fp = (
-        root / "artifacts" / "production_workflow" / "observations"
-        / release_id / "observation_summary.json"
+    from aats.data_platform.production_workflow.observation_window import (
+        load_observation_result,
     )
-    return _load_json(fp)
+    return load_observation_result(root, release_id)
 
 
 def _load_rollback_rec(root: Path, release_id: str) -> dict | None:
-    fp = (
-        root / "artifacts" / "production_workflow" / "rollback_recommendations"
-        / release_id / "rollback_recommendation.json"
+    from aats.data_platform.production_workflow.rollback_policy import (
+        load_rollback_recommendation,
     )
-    return _load_json(fp)
+    return load_rollback_recommendation(root, release_id)
 
 
 def _find_parameter_set(root: Path, ps_id: str) -> dict | None:
-    ps_data = _load_json(
-        root / "artifacts" / "governance" / "current_parameter_registry.json"
-    )
+    from aats.data_platform.governance.parameter_registry import load_registry
+
+    ps_data = load_registry(root / "artifacts" / "governance" / "current_parameter_registry.json")
     if not ps_data:
         return None
     for ps in ps_data.get("parameter_sets", []):
@@ -222,9 +222,11 @@ def compare_release_to_baseline(
     now = datetime.now(timezone.utc)
 
     # 找到 release
-    rel_data = _load_json(
-        root / "artifacts" / "production_workflow" / "parameter_release_history.json"
+    from aats.data_platform.production_workflow.release_registry import (
+        load_release_history,
     )
+
+    rel_data = load_release_history(root)
     release = None
     for r in (rel_data.get("releases", []) if rel_data else []):
         if r.get("release_id") == release_id:

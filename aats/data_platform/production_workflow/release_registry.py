@@ -24,6 +24,10 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sqlalchemy.orm import Session
+
+from aats.data_platform.governance._db_util import try_governance_db
+
 log = logging.getLogger(__name__)
 
 _RELEASE_HISTORY_PATH = "artifacts/production_workflow/parameter_release_history.json"
@@ -37,6 +41,22 @@ def _make_release_id() -> str:
 
 
 def load_release_history(project_root: Path) -> dict[str, Any]:
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from aats.data_platform.governance.operational_state_db import (
+                db_load_release_history,
+            )
+
+            with Session(engine) as session:
+                history = db_load_release_history(session)
+            if history.get("releases"):
+                return history
+        except Exception as exc:
+            log.warning("无法从 DB 加载 release history: %s", exc)
+        finally:
+            if engine is not None:
+                engine.dispose()
     path = project_root / _RELEASE_HISTORY_PATH
     if not path.exists():
         return {"generated_at": None, "releases": []}
@@ -57,6 +77,22 @@ def save_release_history(
     path.parent.mkdir(parents=True, exist_ok=True)
     history["generated_at"] = datetime.now(timezone.utc).isoformat()
     atomic_json_write(history, path)
+    engine, ok = try_governance_db()
+    if ok:
+        try:
+            from aats.data_platform.governance.operational_state_db import (
+                db_upsert_parameter_release,
+            )
+
+            with Session(engine) as session, session.begin():
+                for release in history.get("releases", []):
+                    if isinstance(release, dict):
+                        db_upsert_parameter_release(session, release)
+        except Exception as exc:
+            log.warning("release history DB 同步失败: %s", exc)
+        finally:
+            if engine is not None:
+                engine.dispose()
     log.info("已保存 release history: %d releases", len(history.get("releases", [])))
     return path
 
@@ -127,6 +163,26 @@ def update_release_status(
         rel["apply_result"] = apply_result
     if observation_status:
         rel["observation_status"] = observation_status
+    return rel
+
+
+def mark_release_rolled_back(
+    history: dict[str, Any],
+    release_id: str,
+    *,
+    rollback_to_parameter_set_id: str,
+    rollback_operation_id: str | None = None,
+    rolled_back_at: str | None = None,
+) -> dict[str, Any] | None:
+    """标记 release 已被回滚，避免后续仍被当成 observing release。"""
+    rel = find_release(history, release_id)
+    if rel is None:
+        return None
+    rel["observation_status"] = "rolled_back"
+    rel["rolled_back_at"] = rolled_back_at or datetime.now(timezone.utc).isoformat()
+    rel["rollback_to_parameter_set_id"] = rollback_to_parameter_set_id
+    if rollback_operation_id:
+        rel["rollback_operation_id"] = rollback_operation_id
     return rel
 
 
