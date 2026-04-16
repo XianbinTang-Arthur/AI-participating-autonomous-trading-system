@@ -2254,9 +2254,7 @@ const manualOnlyConfigHtml = renderAIConfigView({
   uiState: {
     modeManualEditing: false,
     profileManualEditing: false,
-    aiConfig: {
-      rdpRecommendationHistoryExtraCount: 0,
-    },
+    aiConfig: {},
   },
 });
 
@@ -2366,9 +2364,7 @@ const releaseEmptyConfigHtml = renderAIConfigView({
   uiState: {
     modeManualEditing: false,
     profileManualEditing: false,
-    aiConfig: {
-      rdpRecommendationHistoryExtraCount: 0,
-    },
+    aiConfig: {},
   },
 });
 

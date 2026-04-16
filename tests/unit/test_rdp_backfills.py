@@ -189,6 +189,23 @@ def test_backfill_independent_blocked_bundles_reclassifies_review_required() -> 
         assert refreshed.status == "blocked"
         assert "strategy_bundle_blocked" in list((refreshed.payload or {}).get("reason_codes", []))
 
+    # 第二次运行必须是 no-op：candidate query 只看 review_required 的 bundle，
+    # 第一次已经搬到 blocked，再跑不应扫到任何行、不应更新、也不应改变 row_version。
+    with Session(engine) as session:
+        row_version_before = session.get(
+            StrategyExecutionBundleModel, "bundle_backfill_1",
+        ).row_version
+
+    with Session(engine) as session, session.begin():
+        second_result = backfill_independent_blocked_bundles(session)
+
+    assert second_result["scanned"] == 0
+    assert second_result["updated"] == 0
+    with Session(engine) as session:
+        refreshed = session.get(StrategyExecutionBundleModel, "bundle_backfill_1")
+        assert refreshed.status == "blocked"
+        assert refreshed.row_version == row_version_before
+
 
 def test_backfill_independent_blocked_bundles_supports_converged_execution_orders() -> None:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
