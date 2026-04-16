@@ -99,10 +99,15 @@ class PostgresAuditRepository:
 
     def latest(self) -> DecisionAuditRecord | None:
         with self.session_factory() as session:
-            latest_revision = (
+            per_decision = (
                 select(
                     DecisionAuditRecordModel.decision_id,
                     func.max(DecisionAuditRecordModel.audit_revision_id).label("max_revision"),
+                    # 排序键用"该 decision 第一次被 upsert 的时刻"——这与
+                    # DecisionContext.as_of_ts 只差几十毫秒，和前端展示的
+                    # "记录时间"语义一致；不用 max(updated_at)，否则任何后续
+                    # handler/对账事件都会把旧决策顶到最前面。
+                    func.min(DecisionAuditRecordModel.updated_at).label("decision_created_at"),
                 )
                 .group_by(DecisionAuditRecordModel.decision_id)
                 .subquery()
@@ -110,11 +115,11 @@ class PostgresAuditRepository:
             row = session.scalar(
                 select(DecisionAuditRecordModel)
                 .join(
-                    latest_revision,
-                    DecisionAuditRecordModel.audit_revision_id == latest_revision.c.max_revision,
+                    per_decision,
+                    DecisionAuditRecordModel.audit_revision_id == per_decision.c.max_revision,
                 )
                 .order_by(
-                    desc(DecisionAuditRecordModel.updated_at),
+                    desc(per_decision.c.decision_created_at),
                     desc(DecisionAuditRecordModel.audit_revision_id),
                 )
                 .limit(1)
@@ -123,10 +128,13 @@ class PostgresAuditRepository:
 
     def recent(self, *, limit: int) -> list[DecisionAuditRecord]:
         with self.session_factory() as session:
-            latest_revision = (
+            per_decision = (
                 select(
                     DecisionAuditRecordModel.decision_id,
                     func.max(DecisionAuditRecordModel.audit_revision_id).label("max_revision"),
+                    # 同 latest()：按决策诞生时间排，而不是最新 revision 的
+                    # updated_at——否则对账等事后事件会把旧决策永远粘在顶部。
+                    func.min(DecisionAuditRecordModel.updated_at).label("decision_created_at"),
                 )
                 .group_by(DecisionAuditRecordModel.decision_id)
                 .subquery()
@@ -134,11 +142,11 @@ class PostgresAuditRepository:
             rows = session.scalars(
                 select(DecisionAuditRecordModel)
                 .join(
-                    latest_revision,
-                    DecisionAuditRecordModel.audit_revision_id == latest_revision.c.max_revision,
+                    per_decision,
+                    DecisionAuditRecordModel.audit_revision_id == per_decision.c.max_revision,
                 )
                 .order_by(
-                    desc(DecisionAuditRecordModel.updated_at),
+                    desc(per_decision.c.decision_created_at),
                     desc(DecisionAuditRecordModel.audit_revision_id),
                 )
                 .limit(limit)

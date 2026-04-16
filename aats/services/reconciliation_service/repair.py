@@ -364,9 +364,16 @@ class ReconciliationService:
         # validate_now 来自 HTTP handler / operator 命令，_build_report 内部
         # 会打一次 fetcher.fetch_snapshot（同步网络）+ 多次 DB 读。不丢线程
         # 池的话 operator 点击 "立即校验" 会直接卡住 event loop。
+        #
+        # 主动发起的对账（background_refresh、operator_validate、
+        # processing_failure_repair、operator_rebaseline、resume_check 等）
+        # 不归属任何具体决策。若挂 latest_snapshot.decision_id，会让"最近一条
+        # 成交所在的决策"的 decision_audit_records 每 60s 被 upsert 一次，
+        # audit revisions 无限膨胀，且在 recent_decisions 排序里永远冒泡到
+        # 顶端。事件驱动的对账（handle_portfolio_snapshot）仍保留归属。
         report = await asyncio.to_thread(
             self._build_report,
-            decision_id=latest_snapshot.decision_id,
+            decision_id=None,
             portfolio_snapshot_ref=(
                 latest_snapshot_event.event_id
                 if latest_snapshot_event is not None
