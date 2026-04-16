@@ -80,7 +80,9 @@ def save_scheduler_state(project_root: Path, state: dict[str, Any]) -> Path:
     path = _state_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     state["generated_at"] = _utcnow().isoformat()
-    atomic_json_write(state, path)
+
+    # 顺序：DB 先、文件后。DB 写失败则文件保持旧状态，避免留下"DB 未同步"的
+    # ghost slot 进度，被之后 DB 不可达时的 fallback 误当成真源。
     engine, ok = try_governance_db()
     if ok:
         try:
@@ -91,10 +93,15 @@ def save_scheduler_state(project_root: Path, state: dict[str, Any]) -> Path:
             with Session(engine) as session, session.begin():
                 db_save_scheduler_state(session, state)
         except Exception as exc:
-            log.warning("workflow scheduler state DB 同步失败: %s", exc)
+            log.exception("workflow scheduler state DB 同步失败，保存未完成")
+            raise RuntimeError(
+                f"workflow scheduler state DB 同步失败，状态未持久化到真源: {exc}"
+            ) from exc
         finally:
             if engine is not None:
                 engine.dispose()
+
+    atomic_json_write(state, path)
     return path
 
 

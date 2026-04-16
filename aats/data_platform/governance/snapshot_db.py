@@ -68,14 +68,18 @@ def _build_round_snapshot_from_dir(
     phase: str,
 ) -> dict[str, Any] | None:
     manifest = _safe_load_json(round_dir / "round_manifest.json")
+    manifest_synthesized = not isinstance(manifest, dict)
 
     if phase == ROUND_PHASE_STEP2:
-        if not isinstance(manifest, dict):
+        if manifest_synthesized:
+            # 合成一个占位 manifest 让 read-path fallback 可以展示，但 status
+            # 保留为 unknown —— 不能宣称 completed，否则调用方会把半成品目录
+            # 当作正式 round。lazy bootstrap 路径会据 manifest_synthesized 拒绝入库。
             manifest = {
                 "round_id": round_dir.name,
                 "started_at": None,
                 "finished_at": None,
-                "overall_status": "completed",
+                "overall_status": "unknown",
             }
         summary_payload = {
             "family_timeframe_summary": _safe_load_json(round_dir / "family_timeframe_summary.json") or {},
@@ -88,12 +92,12 @@ def _build_round_snapshot_from_dir(
             "parameter_candidates_json": str(round_dir / "parameter_candidates.json"),
         }
     elif phase == ROUND_PHASE_PHASE3:
-        if not isinstance(manifest, dict):
+        if manifest_synthesized:
             manifest = {
                 "round_id": round_dir.name,
                 "started_at": None,
                 "finished_at": None,
-                "overall_status": "completed",
+                "overall_status": "unknown",
             }
         combos: dict[str, Any] = {}
         for combo_dir in sorted((item for item in round_dir.iterdir() if item.is_dir()), key=lambda item: item.name):
@@ -111,12 +115,12 @@ def _build_round_snapshot_from_dir(
             "summary_json": str(round_dir / "attribution_summary.json"),
         }
     elif phase == ROUND_PHASE_PHASE4:
-        if not isinstance(manifest, dict):
+        if manifest_synthesized:
             manifest = {
                 "round_id": round_dir.name,
                 "started_at": None,
                 "finished_at": None,
-                "overall_status": "completed",
+                "overall_status": "unknown",
             }
         combos = {}
         for combo_dir in sorted((item for item in round_dir.iterdir() if item.is_dir()), key=lambda item: item.name):
@@ -140,12 +144,13 @@ def _build_round_snapshot_from_dir(
     return {
         "round_id": manifest.get("round_id", round_dir.name),
         "phase": phase,
-        "status": manifest.get("overall_status", manifest.get("status", "completed")),
+        "status": manifest.get("overall_status", manifest.get("status", "unknown" if manifest_synthesized else "completed")),
         "round_path": str(round_dir),
         "started_at": manifest.get("started_at"),
         "finished_at": manifest.get("finished_at"),
         "replay_only": bool(manifest.get("replay_only", False)),
         "manifest": manifest,
+        "manifest_synthesized": manifest_synthesized,
         "summary": summary_payload,
         "conclusion": {},
         "artifacts": artifacts_payload,
@@ -239,11 +244,40 @@ def load_governance_snapshot(
         try:
             with Session(engine) as session:
                 payload = db_load_governance_snapshot(session, snapshot_type=snapshot_type)
-            # DB 是真源：即便返回 None 也要信任（表示"还未写入"），不要回落到
-            # 磁盘上遗留的旧 JSON，否则 UI / gate 可能把昨天的快照当作今天的现实。
             if payload is not None:
                 payload.setdefault("data_source", "db")
-            return payload
+                return payload
+
+            # DB 可达但没有该 snapshot：可能是升级后 DB 表还没回填。
+            # 若磁盘上存在同名快照文件，执行 lazy bootstrap —— 把文件内容
+            # upsert 进 DB 再返回，这样下次 loader 直接从 DB 拿到最新值，
+            # 既保留"DB 为真源"的稳态语义，也避免首次启动历史数据消失的窗口。
+            rel_path = _SNAPSHOT_FILE_MAP.get(snapshot_type)
+            if rel_path:
+                file_payload = _safe_load_json(project_root / rel_path)
+                if isinstance(file_payload, dict):
+                    try:
+                        with Session(engine) as bootstrap_session:
+                            db_upsert_governance_snapshot(
+                                bootstrap_session,
+                                snapshot_type=snapshot_type,
+                                payload=file_payload,
+                            )
+                            bootstrap_session.commit()
+                        file_payload["data_source"] = "db_bootstrap"
+                        file_payload["bootstrap_reason"] = "db_empty_file_present"
+                        log.warning(
+                            "governance snapshot %s: DB 为空但磁盘有数据，已 lazy bootstrap 回灌 DB",
+                            snapshot_type,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        log.warning(
+                            "governance snapshot %s: lazy bootstrap 失败 (%s)，仅返回文件副本",
+                            snapshot_type, exc,
+                        )
+                        file_payload["data_source"] = "file_bootstrap_failed"
+                    return file_payload
+            return None
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("DB load governance snapshot failed (%s): %s", snapshot_type, exc)
             db_reachable = False
@@ -481,11 +515,64 @@ def load_research_round_snapshot(
         try:
             with Session(engine) as session:
                 snapshot = db_load_research_round_snapshot(session, round_id=round_id)
-            # DB 是真源：DB 可达但没有该 round → 直接返回 None，不去扫磁盘。
-            # 否则磁盘上残留的历史 round 目录会被当作 DB 里不存在的 round 的"证据"。
             if snapshot is not None:
                 snapshot.setdefault("data_source", "db")
-            return snapshot
+                return snapshot
+
+            # DB 可达但没有该 round：若磁盘有对应 round 目录，lazy bootstrap。
+            # 这让升级到一个已有 research 磁盘产物、但 DB 表空的环境时，
+            # 首次读取自动把历史 round 回灌进 DB，避免证据链出现"历史全空"窗口。
+            if project_root is not None:
+                for phase, rel_root in _ROUND_PHASE_ROOTS.items():
+                    round_dir = project_root / rel_root / round_id
+                    built = _build_round_snapshot_from_dir(
+                        round_dir=round_dir, phase=phase,
+                    )
+                    if built is None:
+                        continue
+                    # 缺 round_manifest.json 的目录（残留/半成品/历史不完整 round）
+                    # 绝不回灌进 DB。否则会把不完整 round 提升成"正式 completed 快照"，
+                    # 污染下游所有 DB-first 消费者。这类目录只在 read-path 作为降级副本。
+                    if built.get("manifest_synthesized"):
+                        built["data_source"] = "file_incomplete"
+                        built["bootstrap_reason"] = "manifest_missing_on_disk"
+                        log.warning(
+                            "research round %s (phase %s): 磁盘目录无 round_manifest.json，"
+                            "拒绝回灌 DB；返回文件副本仅供展示",
+                            round_id, phase,
+                        )
+                        return built
+                    try:
+                        with Session(engine) as bootstrap_session:
+                            db_upsert_research_round_snapshot(
+                                bootstrap_session,
+                                round_id=built["round_id"],
+                                phase=built["phase"],
+                                status=built["status"],
+                                round_path=built.get("round_path"),
+                                started_at=built.get("started_at"),
+                                finished_at=built.get("finished_at"),
+                                replay_only=bool(built.get("replay_only", False)),
+                                manifest_payload=built.get("manifest"),
+                                summary_payload=built.get("summary"),
+                                conclusion_payload=built.get("conclusion"),
+                                artifacts_payload=built.get("artifacts"),
+                            )
+                            bootstrap_session.commit()
+                        built["data_source"] = "db_bootstrap"
+                        built["bootstrap_reason"] = "db_empty_file_present"
+                        log.warning(
+                            "research round %s: DB 为空但磁盘有数据，已 lazy bootstrap 回灌 DB",
+                            round_id,
+                        )
+                    except Exception as exc:  # pragma: no cover - defensive
+                        log.warning(
+                            "research round %s: lazy bootstrap 失败 (%s)，仅返回文件副本",
+                            round_id, exc,
+                        )
+                        built["data_source"] = "file_bootstrap_failed"
+                    return built
+            return None
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("DB load research round snapshot failed (%s): %s", round_id, exc)
             db_reachable = False
@@ -518,11 +605,64 @@ def load_latest_research_round_snapshot(
         try:
             with Session(engine) as session:
                 snapshot = db_load_latest_research_round_snapshot(session, phase=phase)
-            # 同上：DB 可达但该 phase 没记录 → 返回 None，不要从磁盘扫出可能属于
-            # 别的 round 目录的 manifest 冒充"最新" round。
             if snapshot is not None:
                 snapshot.setdefault("data_source", "db")
-            return snapshot
+                return snapshot
+
+            # DB 可达但该 phase 尚无记录：如果磁盘上已有历史 round 目录
+            # （升级过渡期）lazy bootstrap 最新一轮，避免最新 round writer 重跑前
+            # dashboard 与下游证据链出现"最新轮次空缺"窗口。
+            if project_root is not None:
+                rel_root = _ROUND_PHASE_ROOTS.get(phase)
+                if rel_root:
+                    round_dir = _find_latest_round_dir(project_root / rel_root)
+                    if round_dir is not None:
+                        built = _build_round_snapshot_from_dir(
+                            round_dir=round_dir, phase=phase,
+                        )
+                        if built is not None:
+                            # 缺 manifest 的"最新"目录不回灌 DB：残留/半成品不能
+                            # 作为官方 latest round 被所有 DB-first 消费者信任。
+                            if built.get("manifest_synthesized"):
+                                built["data_source"] = "file_incomplete"
+                                built["bootstrap_reason"] = "manifest_missing_on_disk"
+                                log.warning(
+                                    "research phase %s 最新目录 %s 缺 round_manifest.json，"
+                                    "拒绝回灌 DB；返回文件副本仅供展示",
+                                    phase, built.get("round_id"),
+                                )
+                                return built
+                            try:
+                                with Session(engine) as bootstrap_session:
+                                    db_upsert_research_round_snapshot(
+                                        bootstrap_session,
+                                        round_id=built["round_id"],
+                                        phase=built["phase"],
+                                        status=built["status"],
+                                        round_path=built.get("round_path"),
+                                        started_at=built.get("started_at"),
+                                        finished_at=built.get("finished_at"),
+                                        replay_only=bool(built.get("replay_only", False)),
+                                        manifest_payload=built.get("manifest"),
+                                        summary_payload=built.get("summary"),
+                                        conclusion_payload=built.get("conclusion"),
+                                        artifacts_payload=built.get("artifacts"),
+                                    )
+                                    bootstrap_session.commit()
+                                built["data_source"] = "db_bootstrap"
+                                built["bootstrap_reason"] = "db_empty_file_present"
+                                log.warning(
+                                    "research phase %s: DB 为空但磁盘有 round %s，已 lazy bootstrap 回灌 DB",
+                                    phase, built.get("round_id"),
+                                )
+                            except Exception as exc:  # pragma: no cover - defensive
+                                log.warning(
+                                    "research phase %s: lazy bootstrap 失败 (%s)，仅返回文件副本",
+                                    phase, exc,
+                                )
+                                built["data_source"] = "file_bootstrap_failed"
+                            return built
+            return None
         except Exception as exc:  # pragma: no cover - defensive
             log.warning("DB load research round snapshot failed (%s): %s", phase, exc)
             db_reachable = False

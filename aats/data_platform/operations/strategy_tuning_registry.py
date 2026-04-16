@@ -76,7 +76,8 @@ def save_strategy_tuning_registry(project_root: Path, registry: dict[str, Any]) 
     path.parent.mkdir(parents=True, exist_ok=True)
     registry["generated_at"] = _utcnow().isoformat()
     registry["version"] = int(registry.get("version", 0)) + 1
-    atomic_json_write(registry, path)
+
+    # 顺序：DB 先、文件后。DB 写失败则文件保持旧状态，不留下未入库的 ghost 提案。
     engine, ok = try_governance_db()
     if ok:
         try:
@@ -88,11 +89,19 @@ def save_strategy_tuning_registry(project_root: Path, registry: dict[str, Any]) 
                 for proposal in registry.get("proposals", []):
                     if isinstance(proposal, dict):
                         db_upsert_strategy_tuning_proposal(session, proposal)
-        except Exception:
-            pass
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).exception(
+                "strategy tuning registry DB 同步失败，保存未完成",
+            )
+            raise RuntimeError(
+                f"strategy tuning registry DB 同步失败，状态未持久化到真源: {exc}"
+            ) from exc
         finally:
             if engine is not None:
                 engine.dispose()
+
+    atomic_json_write(registry, path)
     return path
 
 

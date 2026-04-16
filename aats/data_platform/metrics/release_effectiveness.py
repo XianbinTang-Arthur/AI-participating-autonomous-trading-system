@@ -84,7 +84,8 @@ def load_effectiveness_registry(root: Path) -> dict:
 
 def save_effectiveness_registry(root: Path, data: dict) -> None:
     data["generated_at"] = datetime.now(timezone.utc).isoformat()
-    _atomic_write_json(_effectiveness_registry_path(root), data)
+
+    # 顺序：DB 先、文件后。DB 写失败则文件保持旧状态，避免留下未 commit 的 ghost。
     engine, ok = try_governance_db()
     if ok:
         try:
@@ -96,9 +97,19 @@ def save_effectiveness_registry(root: Path, data: dict) -> None:
                 for evaluation in data.get("evaluations", []):
                     if isinstance(evaluation, dict):
                         db_upsert_release_effectiveness(session, evaluation)
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).exception(
+                "release effectiveness DB 同步失败，保存未完成",
+            )
+            raise RuntimeError(
+                f"release effectiveness DB 同步失败，状态未持久化到真源: {exc}"
+            ) from exc
         finally:
             if engine is not None:
                 engine.dispose()
+
+    _atomic_write_json(_effectiveness_registry_path(root), data)
 
 
 # ── 维度评估函数 ──────────────────────────────────────────────

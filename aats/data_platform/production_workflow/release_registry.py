@@ -79,7 +79,10 @@ def save_release_history(
     path = project_root / _RELEASE_HISTORY_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
     history["generated_at"] = datetime.now(timezone.utc).isoformat()
-    atomic_json_write(history, path)
+
+    # 顺序：DB 先、文件后。若 DB 写失败，文件保持旧状态，避免留下
+    # "DB 未 commit、但文件已更新"的 ghost —— 否则 DB 暂时不可达时 loader
+    # 会回落到这份从未成功入真源的文件，把失败写入重新注入系统。
     engine, ok = try_governance_db()
     if ok:
         try:
@@ -92,10 +95,16 @@ def save_release_history(
                     if isinstance(release, dict):
                         db_upsert_parameter_release(session, release)
         except Exception as exc:
-            log.warning("release history DB 同步失败: %s", exc)
+            log.exception("release history DB 同步失败，保存未完成")
+            raise RuntimeError(
+                f"release history DB 同步失败，状态未持久化到真源: {exc}"
+            ) from exc
         finally:
             if engine is not None:
                 engine.dispose()
+
+    # DB 写成功（或 DB 不可达的单机兼容模式）后才写文件副本
+    atomic_json_write(history, path)
     log.info("已保存 release history: %d releases", len(history.get("releases", [])))
     return path
 
