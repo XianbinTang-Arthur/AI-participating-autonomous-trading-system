@@ -572,6 +572,58 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertGreater(float(decision.eligibility.effective_max_cost_bps or 0.0), 10.6)
         self.assertLess(float(decision.eligibility.effective_max_cost_bps or 0.0), 15.0)
 
+    def test_evaluate_independent_book_blocks_short_when_lifecycle_net_edge_falls_below_safe_floor(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_short_entry_threshold=0.30,
+            strategy_hedge_independent_short_scale_in_threshold=0.55,
+            strategy_hedge_independent_min_confirm_ticks=2,
+            strategy_hedge_independent_min_score_stability_bps=2.0,
+            strategy_hedge_independent_max_acceptable_cost_bps=7.5,
+            strategy_hedge_independent_min_safe_net_edge_bps=3.0,
+            strategy_hedge_independent_expected_slippage_buffer_bps=1.0,
+            strategy_hedge_independent_expected_execution_buffer_bps=2.0,
+        )
+        context = make_context(product_type="derivatives", current_exposure_side="flat")
+        baseline = make_baseline(
+            direction_bias="short",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": -0.48,
+                "trend_alpha": -0.42,
+                "microstructure_alpha": -0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": -0.32})
+        expectancy = IndependentBookExpectancy(
+            leg="short",
+            expected_signal_edge_bps=38.0,
+            expected_slippage_bps=5.6,
+            expected_cost_bps=10.6,
+            expected_net_edge_bps=27.4,
+            expected_lifecycle_cost_bps=34.0,
+            expected_lifecycle_net_edge_bps=4.0,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="short",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0.01"),
+            scorer=lambda **_: 0.304,
+            recent_score_history=(0.286,),
+        )
+
+        self.assertEqual(decision.state, "blocked")
+        self.assertEqual(decision.book_action, "blocked")
+        self.assertIn("independent_short_book_expected_net_edge_below_safe_threshold", decision.blocked_reasons)
+
     def test_evaluate_independent_book_keeps_long_two_tick_confirmation_requirement(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_independent_enabled=True,
@@ -679,6 +731,238 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertAlmostEqual(decision.score_stability_metrics.upward_excursion_bps or 0.0, 8.0)
         self.assertAlmostEqual(decision.score_stability_metrics.downward_drawdown_bps or 0.0, 0.0)
         self.assertTrue(decision.score_stability_metrics.stable)
+
+    def test_evaluate_independent_book_promotes_small_health_derisk_residual_to_full_close(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_rebalance_cooldown_seconds=0,
+            strategy_hedge_independent_min_score_stability_bps=0.0,
+            strategy_performance_guard_min_closed_trades=4,
+            strategy_max_fee_drag_ratio=0.48,
+        )
+        context = make_context(
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_long_position_qty=Decimal("0.01"),
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 4,
+                    "recent_win_rate": 0.25,
+                    "recent_fee_drag_ratio": 0.7,
+                    "recent_churn_ratio": 0.1,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_net_realized_pnl": Decimal("-1"),
+                },
+                "short": {
+                    "recent_closed_trade_count": 0,
+                    "recent_win_rate": 0.0,
+                    "recent_fee_drag_ratio": 0.0,
+                    "recent_churn_ratio": 0.0,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_net_realized_pnl": Decimal("0"),
+                },
+            },
+        ).model_copy(update={"current_long_position_notional": Decimal("20")})
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.9,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.55,
+                "trend_alpha": 0.41,
+                "microstructure_alpha": 0.2,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.4})
+        expectancy = IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=18.0,
+            expected_slippage_bps=1.2,
+            expected_cost_bps=5.0,
+            expected_net_edge_bps=13.0,
+            expected_lifecycle_cost_bps=10.0,
+            expected_lifecycle_net_edge_bps=8.0,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="long",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0.01"),
+            scorer=lambda **_: 0.6,
+            recent_score_history=(0.6, 0.6),
+        )
+
+        self.assertEqual(decision.state, "closing")
+        self.assertEqual(decision.close_reason, "execution_health_degraded")
+        self.assertEqual(decision.target_qty, Decimal("0"))
+        self.assertIn("independent_long_book_de_risk_floor_promoted_to_close", decision.reason_codes)
+
+    def test_evaluate_independent_book_uses_guard_eligible_fee_drag_for_execution_health(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_rebalance_cooldown_seconds=0,
+            strategy_hedge_independent_min_score_stability_bps=0.0,
+            strategy_performance_guard_min_closed_trades=4,
+            strategy_max_fee_drag_ratio=0.48,
+            strategy_hedge_independent_long_entry_threshold=0.30,
+            strategy_hedge_independent_long_scale_in_threshold=0.55,
+        )
+        context = make_context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 6,
+                    "recent_guard_eligible_closed_trade_count": 4,
+                    "recent_win_rate": 0.25,
+                    "recent_guard_eligible_win_rate": 0.75,
+                    "recent_fee_drag_ratio": 0.7,
+                    "recent_guard_eligible_fee_drag_ratio": 0.2,
+                    "recent_churn_ratio": 0.1,
+                    "recent_guard_eligible_churn_ratio": 0.1,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_guard_eligible_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_guard_eligible_low_edge_trade_at": None,
+                    "recent_net_realized_pnl": Decimal("1"),
+                },
+                "short": {
+                    "recent_closed_trade_count": 0,
+                    "recent_win_rate": 0.0,
+                    "recent_fee_drag_ratio": 0.0,
+                    "recent_churn_ratio": 0.0,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_net_realized_pnl": Decimal("0"),
+                },
+            },
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.9,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.55,
+                "trend_alpha": 0.41,
+                "microstructure_alpha": 0.2,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.4})
+        expectancy = IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=18.0,
+            expected_slippage_bps=1.2,
+            expected_cost_bps=5.0,
+            expected_net_edge_bps=13.0,
+            expected_lifecycle_cost_bps=10.0,
+            expected_lifecycle_net_edge_bps=8.0,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="long",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0.01"),
+            scorer=lambda **_: 0.6,
+            recent_score_history=(0.6, 0.6),
+        )
+
+        self.assertEqual(decision.execution_health_state, "ok")
+        self.assertEqual(decision.state, "opening")
+        self.assertEqual(decision.book_action, "open")
+
+    def test_evaluate_independent_book_uses_guard_eligible_net_pnl_for_trial_guard(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_enabled=True,
+            strategy_hedge_independent_trial_guard_enabled=True,
+            strategy_hedge_independent_adaptive_rollout_enabled=False,
+            strategy_hedge_independent_rebalance_cooldown_seconds=0,
+            strategy_hedge_independent_min_score_stability_bps=0.0,
+            strategy_performance_guard_min_closed_trades=4,
+            strategy_hedge_independent_long_entry_threshold=0.30,
+            strategy_hedge_independent_long_scale_in_threshold=0.55,
+        )
+        context = make_context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 6,
+                    "recent_guard_eligible_closed_trade_count": 4,
+                    "recent_win_rate": 0.8,
+                    "recent_guard_eligible_win_rate": 0.25,
+                    "recent_fee_drag_ratio": 0.1,
+                    "recent_guard_eligible_fee_drag_ratio": 0.1,
+                    "recent_churn_ratio": 0.1,
+                    "recent_guard_eligible_churn_ratio": 0.1,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_guard_eligible_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_guard_eligible_low_edge_trade_at": None,
+                    "recent_net_realized_pnl": Decimal("-5"),
+                    "recent_guard_eligible_net_realized_pnl": Decimal("1"),
+                },
+                "short": {
+                    "recent_closed_trade_count": 0,
+                    "recent_win_rate": 0.0,
+                    "recent_fee_drag_ratio": 0.0,
+                    "recent_churn_ratio": 0.0,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_net_realized_pnl": Decimal("0"),
+                },
+            },
+        )
+        baseline = make_baseline(
+            direction_bias="long",
+            confidence=0.9,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.55,
+                "trend_alpha": 0.41,
+                "microstructure_alpha": 0.2,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": 0.4})
+        expectancy = IndependentBookExpectancy(
+            leg="long",
+            expected_signal_edge_bps=18.0,
+            expected_slippage_bps=1.2,
+            expected_cost_bps=5.0,
+            expected_net_edge_bps=13.0,
+            expected_lifecycle_cost_bps=10.0,
+            expected_lifecycle_net_edge_bps=8.0,
+        )
+
+        decision = evaluate_independent_book(
+            settings=settings,
+            context=context,
+            baseline=baseline,
+            ai_assessment=None,
+            leg="long",
+            expectancy=expectancy,
+            directional_leg_target_qty=Decimal("0.01"),
+            scorer=lambda **_: 0.6,
+            recent_score_history=(0.6, 0.6),
+        )
+
+        self.assertEqual(decision.execution_health_state, "ok")
+        self.assertEqual(decision.state, "opening")
+        self.assertEqual(decision.book_action, "open")
 
     def test_evaluate_independent_book_blocks_short_when_dynamic_cost_fuse_detects_anomaly(self) -> None:
         settings = make_derivatives_hedge_settings(

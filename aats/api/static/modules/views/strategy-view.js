@@ -51,9 +51,11 @@ export function renderStrategySections(data) {
   const strategyAppliedTarget = strategyRuntime.latest_applied_target || {};
   const automationDecisions = strategyRuntimeSnapshot.automation_decisions || [];
   const strategyAttribution = data.strategyAttribution || {};
+  const lifecycleAttribution = data.positionLifecycleAttribution || {};
   const attributionSummary = strategyAttribution.summary || {};
   const sleeveProfitability = strategyAttribution.profitability_by_strategy_sleeve || [];
   const sleeveInventorySummary = strategyAttribution.sleeve_inventory_summary || [];
+  const lifecycleRows = lifecycleAttribution.lifecycles || [];
   const strategyFamilyEnablement = strategyRuntime.family_enablement || {};
   const baseline = latestDecision.baseline_assessment || {};
   const targetExpectancy = resolvedTargetExpectancyMetrics(latestDecision.position_target || strategyAppliedTarget || {});
@@ -98,6 +100,7 @@ export function renderStrategySections(data) {
   );
   const displayedAutomationDecisions = automationDecisions.slice(0, 5);
   const displayedSleeveProfitability = sleeveProfitability.slice(0, 6);
+  const displayedLifecycleRows = lifecycleRows.slice(0, 4);
   const displayedForwardPeriods = forwardPeriods.slice(0, 4);
   const displayedTrialReviewActions = trialReviewRecentActions.slice(0, 5);
 
@@ -354,7 +357,7 @@ export function renderStrategySections(data) {
     strategyAttribution: surfaceCard({
       title: "策略归因",
       kicker: "组合报表",
-      panelKey: "strategyAttribution",
+      panelKey: ["strategyAttribution", "positionLifecycleAttribution"],
       copy: "这里只保留最能解释“谁在赚钱、谁还占库存”的摘要，避免归因卡片本身反过来挤占工作区。",
       classes: "strategy-compact-card",
       content: `
@@ -400,6 +403,13 @@ export function renderStrategySections(data) {
             formatNumber((strategyAttribution.profitability_by_strategy_bundle || []).length, 0, "0"),
             "按 allocation / 执行包 的收益归因已经进入组合报表，可用于排查多腿执行后的收益归属。",
           ],
+          [
+            "整笔仓位复盘",
+            lifecycleRows[0]?.lifecycle_id || "当前没有 lifecycle 诊断样本",
+            lifecycleRows[0]
+              ? `综合净收益 ${formatSigned(lifecycleRows[0].combined_net_realized_pnl)} | 持有 ${formatDuration(lifecycleRows[0].hold_seconds, "时长待确认")} | 整笔仓位口径`
+              : "这里按整笔仓位口径提供最近 lifecycle 下钻，不改变策略页默认主值口径。",
+          ],
         ])}
         ${responsiveTable(
           ["子策略", "净收益", "资金费", "库存变化", "库存名义金额"],
@@ -414,6 +424,39 @@ export function renderStrategySections(data) {
             ];
           }),
           "当前还没有可展示的 sleeve 归因记录。"
+        )}
+        ${responsiveTable(
+          ["仓位", "综合净收益", "费用 / funding", "退出链摘要", "操作"],
+          displayedLifecycleRows.map((item) => [
+            `<div><strong>${escapeHtml(item.symbol || "标的待确认")}</strong><div class="table-meta">${escapeHtml(strategyLifecycleHeadline(item))}</div></div>`,
+            `<div><strong>${formatSigned(item.combined_net_realized_pnl)}</strong><div class="table-meta">毛收益 ${formatSigned(item.gross_realized_pnl)}</div></div>`,
+            `<div><strong>${formatSigned(item.total_fee_quote)}</strong><div class="table-meta">开 ${formatSigned(item.entry_fee_quote)} / 平 ${formatSigned(item.exit_fee_quote)} / funding ${formatSigned(item.funding_fee_quote)}</div></div>`,
+            `<div><strong>${formatDuration(item.hold_seconds, "时长待确认")}</strong><div class="table-meta">${escapeHtml(strategyLifecycleExitReasonSummary(item.exit_reason_breakdown))}</div></div>`,
+            item.lifecycle_id ? actionButton("查看诊断", "inspect-lifecycle-attribution", item.lifecycle_id) : "",
+          ]),
+          "当前还没有可下钻的整笔仓位诊断样本。",
+          displayedLifecycleRows.map((item) => ({
+            kicker: "整笔仓位复盘",
+            title: `${item.symbol || "标的待确认"} | ${strategyLifecycleHeadline(item)}`,
+            meta: item.closed_at ? formatMaybeTimestamp(item.closed_at) : "当前仍未闭合",
+            tone: Number(item.combined_net_realized_pnl || 0) >= 0 ? "positive" : "warning",
+            badge: pill(
+              Number(item.combined_net_realized_pnl || 0) >= 0 ? "综合净收益为正" : "综合净收益为负",
+              Number(item.combined_net_realized_pnl || 0) >= 0 ? "positive" : "warning",
+            ),
+            fields: [
+              { label: "综合净收益", value: formatSigned(item.combined_net_realized_pnl), meta: "整笔仓位口径" },
+              { label: "总手续费", value: formatSigned(item.total_fee_quote), meta: `funding ${formatSigned(item.funding_fee_quote)}` },
+              { label: "持有时长", value: formatDuration(item.hold_seconds, "时长待确认"), meta: strategyLifecycleExitReasonSummary(item.exit_reason_breakdown) },
+            ],
+            details: [
+              { label: "Lifecycle", value: item.lifecycle_id || "当前没有编号" },
+              { label: "成交拆分", value: `${formatNumber(item.entry_fill_count, 0, "0")} 开 / ${formatNumber(item.exit_fill_count, 0, "0")} 平` },
+              { label: "Child Order", value: formatNumber(item.child_order_count, 0, "0") },
+            ],
+            detailLabel: "展开整笔仓位摘要",
+            action: item.lifecycle_id ? actionButton("查看诊断", "inspect-lifecycle-attribution", item.lifecycle_id) : "",
+          }))
         )}
       `,
     }),
@@ -437,10 +480,17 @@ export function renderStrategySections(data) {
             tone: scalingVerdictTone(trialVerdict),
           },
           {
-            label: "最近净收益",
-            value: formatSigned(latestForwardPeriod.net_realized_pnl ?? trialReviewSummary.net_realized_pnl),
+            label: "最近综合净收益",
+            value: formatSigned(
+              latestForwardPeriod.combined_net_realized_pnl ?? trialReviewSummary.combined_net_realized_pnl
+            ),
             meta: `${formatNumber(latestForwardPeriod.closed_fill_count ?? trialReviewSummary.closed_fill_count, 0, "0")} 笔已完成成交`,
-            tone: Number((latestForwardPeriod.net_realized_pnl ?? trialReviewSummary.net_realized_pnl) ?? 0) >= 0 ? "positive" : "warning",
+            tone:
+              Number(
+                (latestForwardPeriod.combined_net_realized_pnl ?? trialReviewSummary.combined_net_realized_pnl) ?? 0
+              ) >= 0
+                ? "positive"
+                : "warning",
           },
           {
             label: "费用拖累",
@@ -2539,11 +2589,11 @@ function renderForwardValidationPeriods(periods) {
     return `<p class="meta-copy">当前还没有可展示的前向验证周期。</p>`;
   }
   return responsiveTable(
-    ["周期", "状态", "净收益", "费用拖累", "异常比例"],
+    ["周期", "状态", "综合净收益", "费用拖累", "异常比例"],
     periods.map((item) => [
       `<div><strong>${formatMaybeTimestamp(item.period_start)}</strong><div class="table-meta">至 ${formatMaybeTimestamp(item.period_end)}</div></div>`,
       forwardPeriodStatusLabel(item.status),
-      formatSigned(item.net_realized_pnl),
+      formatSigned(item.combined_net_realized_pnl ?? item.net_realized_pnl),
       formatRatio(item.fee_to_notional_ratio),
       `${formatRatio(item.high_slippage_ratio)} / ${formatRatio(item.slow_submit_to_fill_ratio)}`,
     ]),
@@ -3123,6 +3173,32 @@ function targetSizingMeta(sizingBreakdown = {}) {
     `价格 ${formatNumber(sizingBreakdown.last_price ?? sizingBreakdown.lastPrice, 4, "待确认")}`,
     `目标 ${formatSigned(sizingBreakdown.resolved_target_qty ?? sizingBreakdown.resolvedTargetQty, 6, "待确认")}`,
   ].join(" / ");
+}
+
+function strategyLifecycleHeadline(item = {}) {
+  return [
+    readableState(item.direction || item.pos_side || "unknown", "方向待确认"),
+    item.timeframe || "周期待确认",
+    readableState(item.family || "unknown", item.family || "策略家族待确认"),
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function strategyLifecycleExitReasonSummary(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return "当前还没有退出链诊断";
+  return rows
+    .slice(0, 2)
+    .map((row) => `${localizeError(row.reason || "unknown")} / ${strategyLifecycleTransitionLabel(row.transition_category)}`)
+    .join(" | ");
+}
+
+function strategyLifecycleTransitionLabel(value) {
+  const key = String(value || "").trim().toLowerCase();
+  if (key === "strategy_exit") return "策略退出";
+  if (key === "protective_exit") return "保护退出";
+  if (key === "execution_guard_exit") return "执行守护退出";
+  return key ? key : "退出分类待确认";
 }
 
 function latestOrderStatusLabel(order = null) {

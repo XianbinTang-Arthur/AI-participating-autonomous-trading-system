@@ -56,6 +56,7 @@ from aats.services.operator._parallel import parallel_fetch
 from aats.services.operator.account_queries import AccountQueryFacade
 from aats.services.operator.audit_replay_queries import AuditReplayQueryFacade
 from aats.services.operator.blocker_queries import BlockerQueryFacade
+from aats.services.operator.lifecycle_attribution import LifecycleAttributionFacade
 from aats.services.operator.accounts import (
     create_operator_user as create_managed_operator_user,
     delete_operator_user as delete_managed_operator_user,
@@ -101,6 +102,10 @@ from aats.services.runtime_scope import (
     latest_topic_event_for_scope,
 )
 from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
+from aats.services.strategy_execution_guard_filters import (
+    decision_ids_for_guard_exclusions,
+    guard_excluded_fill_ids_for_independent_residual_exits,
+)
 from aats.services.strategy_execution_health import compute_strategy_execution_health
 
 if TYPE_CHECKING:
@@ -139,6 +144,7 @@ class OperatorQueryService:
         self.account_queries = AccountQueryFacade(self)
         self.strategy_queries = StrategyQueryFacade(self)
         self.report_queries = ReportQueryFacade(self)
+        self.lifecycle_attribution = LifecycleAttributionFacade(self)
         self.blocker_queries = BlockerQueryFacade(self)
 
     def _cached(self, key: str, loader):
@@ -2107,10 +2113,12 @@ class OperatorQueryService:
                 target_symbol,
             )
         )
+        scoped_fills = self._scoped_fills()
+        symbol_fills = [fill for fill in scoped_fills if fill.symbol == target_symbol]
         snapshot = compute_strategy_execution_health(
             settings=self.runtime.settings,
             symbol=target_symbol,
-            fills=self._scoped_fills(),
+            fills=scoped_fills,
             snapshots=snapshots_for_scope(self.runtime.portfolio_repo, self.state_scope),
             current_position_qty=self._current_symbol_position_qty(target_symbol),
             current_long_position_qty=(
@@ -2119,11 +2127,27 @@ class OperatorQueryService:
             current_short_position_qty=(
                 Decimal("0") if position_state is None else position_state.short_position_qty
             ),
+            guard_excluded_fill_ids=self._guard_excluded_fill_ids_for_symbol(symbol_fills),
         )
         return snapshot.as_payload(
             settings=self.runtime.settings,
             as_of=utc_now(),
             current_position_qty=self._current_symbol_position_qty(target_symbol),
+        )
+
+    def _guard_excluded_fill_ids_for_symbol(self, fills: list[FillEvent]) -> set[str]:
+        decision_ids = decision_ids_for_guard_exclusions(fills=fills)
+        if not decision_ids:
+            return set()
+        audits = [
+            audit
+            for decision_id in decision_ids
+            if (audit := self.runtime.audit_repo.get(decision_id)) is not None
+        ]
+        return guard_excluded_fill_ids_for_independent_residual_exits(
+            fills=fills,
+            audits=audits,
+            payload_by_ref=self.payload_by_ref,
         )
 
     def _current_runtime_started_at(self) -> datetime:
@@ -6903,9 +6927,23 @@ class OperatorQueryService:
             payload = leg_health.get(leg)
             if not isinstance(payload, dict):
                 continue
-            closed_trade_count = int(payload.get("recent_closed_trade_count") or 0)
-            recent_win_rate = float(payload.get("recent_win_rate") or 0.0)
-            recent_net_realized_pnl = self._to_decimal(payload.get("recent_net_realized_pnl")) or Decimal("0")
+            closed_trade_count = int(
+                payload.get("recent_guard_eligible_closed_trade_count")
+                if payload.get("recent_guard_eligible_closed_trade_count") is not None
+                else payload.get("recent_closed_trade_count")
+                or 0
+            )
+            recent_win_rate = float(
+                payload.get("recent_guard_eligible_win_rate")
+                if payload.get("recent_guard_eligible_win_rate") is not None
+                else payload.get("recent_win_rate")
+                or 0.0
+            )
+            recent_net_realized_pnl = (
+                self._to_decimal(payload.get("recent_guard_eligible_net_realized_pnl"))
+                if payload.get("recent_guard_eligible_net_realized_pnl") is not None
+                else self._to_decimal(payload.get("recent_net_realized_pnl"))
+            ) or Decimal("0")
             sample_ready = closed_trade_count >= min_closed_trades
             active = bool(
                 enabled
@@ -6932,9 +6970,24 @@ class OperatorQueryService:
                     "recent_closed_trade_count": closed_trade_count,
                     "recent_win_rate": recent_win_rate,
                     "recent_net_realized_pnl": recent_net_realized_pnl,
-                    "recent_fee_drag_ratio": float(payload.get("recent_fee_drag_ratio") or 0.0),
-                    "recent_churn_ratio": float(payload.get("recent_churn_ratio") or 0.0),
-                    "recent_low_edge_trade_streak": int(payload.get("recent_low_edge_trade_streak") or 0),
+                    "recent_fee_drag_ratio": float(
+                        payload.get("recent_guard_eligible_fee_drag_ratio")
+                        if payload.get("recent_guard_eligible_fee_drag_ratio") is not None
+                        else payload.get("recent_fee_drag_ratio")
+                        or 0.0
+                    ),
+                    "recent_churn_ratio": float(
+                        payload.get("recent_guard_eligible_churn_ratio")
+                        if payload.get("recent_guard_eligible_churn_ratio") is not None
+                        else payload.get("recent_churn_ratio")
+                        or 0.0
+                    ),
+                    "recent_low_edge_trade_streak": int(
+                        payload.get("recent_guard_eligible_low_edge_trade_streak")
+                        if payload.get("recent_guard_eligible_low_edge_trade_streak") is not None
+                        else payload.get("recent_low_edge_trade_streak")
+                        or 0
+                    ),
                     "guardrail_flags": list(payload.get("guardrail_flags") or []),
                     "cooldowns": dict(payload.get("cooldowns") or {}),
                     "reason_code": f"independent_{leg}_book_trial_guard_active" if active else None,
@@ -8793,52 +8846,13 @@ class OperatorQueryService:
         return lifecycles, unassigned_funding_fees
 
     def position_lifecycle_profitability(self, *, limit: int = 100) -> dict[str, Any]:
-        normalized_limit = max(int(limit), 1)
-        outcomes = list(self._scoped_fill_outcomes())
-        funding_records = list(self._scoped_funding_fee_records())
-        lifecycles, unassigned_funding_fees = self._build_position_lifecycle_rows(
-            outcomes=outcomes,
-            funding_records=funding_records,
-        )
-        lifecycles.sort(
-            key=lambda item: (
-                item.get("closed_at") or item.get("opened_at") or datetime.min.replace(tzinfo=timezone.utc),
-                str(item.get("lifecycle_id") or ""),
-            ),
-            reverse=True,
-        )
-        visible_rows = lifecycles[:normalized_limit]
-        closed_count = sum(1 for item in lifecycles if item.get("status") == "closed")
-        open_count = sum(1 for item in lifecycles if item.get("status") != "closed")
-        trading_net = sum(
-            (self._to_decimal(item.get("trading_net_realized_pnl")) or Decimal("0"))
-            for item in lifecycles
-        )
-        funding_net = sum(
-            (self._to_decimal(item.get("funding_fee_total")) or Decimal("0"))
-            for item in lifecycles
-        )
-        unassigned_funding_net = sum(
-            (self._to_decimal(item.get("funding_fee_delta")) or Decimal("0"))
-            for item in unassigned_funding_fees
-        )
-        return {
-            "summary": {
-                "lifecycle_count": len(lifecycles),
-                "closed_lifecycle_count": closed_count,
-                "open_lifecycle_count": open_count,
-                "assigned_funding_fee_count": sum(int(item.get("funding_fee_event_count") or 0) for item in lifecycles),
-                "unassigned_funding_fee_count": len(unassigned_funding_fees),
-                "trading_net_realized_pnl": trading_net,
-                "assigned_funding_fee_net_pnl": funding_net,
-                "unassigned_funding_fee_net_pnl": unassigned_funding_net,
-                "combined_net_realized_pnl": trading_net + funding_net + unassigned_funding_net,
-            },
-            "lifecycles": visible_rows,
-            "unassigned_funding_fees": unassigned_funding_fees[:normalized_limit],
-            "has_more": len(lifecycles) > normalized_limit,
-            "truth_source": "fill_outcomes_plus_funding_fee_records",
-        }
+        return self.lifecycle_attribution.position_lifecycle_profitability(limit=limit)
+
+    def position_lifecycle_attribution(self, *, limit: int = 100) -> dict[str, Any]:
+        return self.lifecycle_attribution.position_lifecycle_attribution(limit=limit)
+
+    def position_lifecycle_attribution_detail(self, *, lifecycle_id: str) -> dict[str, Any]:
+        return self.lifecycle_attribution.position_lifecycle_attribution_detail(lifecycle_id=lifecycle_id)
 
     def profitability_overview(self, *, limit: int = 100) -> dict[str, Any]:
         return self.report_queries.profitability_overview(limit=limit)

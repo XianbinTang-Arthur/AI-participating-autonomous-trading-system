@@ -27,6 +27,7 @@ class ClosedTradeOutcome:
     is_win: bool
     is_small_churn: bool
     is_low_edge: bool
+    is_residual_exit: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +45,13 @@ class StrategyExecutionHealthSnapshot:
     recent_gross_realized_pnl: Decimal
     recent_net_realized_pnl: Decimal
     recent_fee_total: Decimal
+    recent_guard_eligible_net_realized_pnl: Decimal | None = None
+    recent_guard_eligible_closed_trade_count: int | None = None
+    recent_guard_eligible_win_rate: float | None = None
+    recent_guard_eligible_fee_drag_ratio: float | None = None
+    recent_guard_eligible_churn_ratio: float | None = None
+    recent_guard_eligible_low_edge_trade_streak: int | None = None
+    recent_guard_eligible_low_edge_trade_at: datetime | None = None
 
     def active_guardrails(
         self,
@@ -73,21 +81,46 @@ class StrategyExecutionHealthSnapshot:
                 flags.append("post_close_cooldown_active")
                 cooldowns["post_close_cooldown_remaining_seconds"] = remaining
 
+        guard_eligible_low_edge_trade_streak = (
+            self.recent_guard_eligible_low_edge_trade_streak
+            if self.recent_guard_eligible_low_edge_trade_streak is not None
+            else self.recent_low_edge_trade_streak
+        )
+        guard_eligible_low_edge_trade_at = (
+            self.recent_guard_eligible_low_edge_trade_at
+            if self.recent_guard_eligible_low_edge_trade_at is not None
+            else self.recent_low_edge_trade_at
+        )
         if (
-            self.recent_low_edge_trade_streak >= settings.strategy_low_edge_streak_limit > 0
-            and self.recent_low_edge_trade_at is not None
+            guard_eligible_low_edge_trade_streak >= settings.strategy_low_edge_streak_limit > 0
+            and guard_eligible_low_edge_trade_at is not None
             and settings.strategy_low_edge_cooldown_seconds > 0
         ):
-            since_low_edge = max((as_of - self.recent_low_edge_trade_at).total_seconds(), 0.0)
+            since_low_edge = max((as_of - guard_eligible_low_edge_trade_at).total_seconds(), 0.0)
             remaining = max(settings.strategy_low_edge_cooldown_seconds - since_low_edge, 0.0)
             if remaining > 0:
                 flags.append("low_edge_cooldown_active")
                 cooldowns["low_edge_cooldown_remaining_seconds"] = remaining
 
-        if self.recent_closed_trade_count >= settings.strategy_performance_guard_min_closed_trades:
-            if self.recent_fee_drag_ratio > settings.strategy_max_fee_drag_ratio:
+        guard_eligible_closed_trade_count = (
+            self.recent_guard_eligible_closed_trade_count
+            if self.recent_guard_eligible_closed_trade_count is not None
+            else self.recent_closed_trade_count
+        )
+        guard_eligible_churn_ratio = (
+            self.recent_guard_eligible_churn_ratio
+            if self.recent_guard_eligible_churn_ratio is not None
+            else self.recent_churn_ratio
+        )
+        guard_eligible_fee_drag_ratio = (
+            self.recent_guard_eligible_fee_drag_ratio
+            if self.recent_guard_eligible_fee_drag_ratio is not None
+            else self.recent_fee_drag_ratio
+        )
+        if guard_eligible_closed_trade_count >= settings.strategy_performance_guard_min_closed_trades:
+            if guard_eligible_fee_drag_ratio > settings.strategy_max_fee_drag_ratio:
                 flags.append("fee_drag_elevated")
-            if self.recent_churn_ratio > settings.strategy_max_churn_ratio:
+            if guard_eligible_churn_ratio > settings.strategy_max_churn_ratio:
                 flags.append("churn_elevated")
 
         return {
@@ -121,6 +154,17 @@ class StrategyExecutionHealthSnapshot:
             "recent_gross_realized_pnl": float(self.recent_gross_realized_pnl),
             "recent_net_realized_pnl": float(self.recent_net_realized_pnl),
             "recent_fee_total": float(self.recent_fee_total),
+            "recent_guard_eligible_net_realized_pnl": (
+                None
+                if self.recent_guard_eligible_net_realized_pnl is None
+                else float(self.recent_guard_eligible_net_realized_pnl)
+            ),
+            "recent_guard_eligible_closed_trade_count": self.recent_guard_eligible_closed_trade_count,
+            "recent_guard_eligible_win_rate": self.recent_guard_eligible_win_rate,
+            "recent_guard_eligible_fee_drag_ratio": self.recent_guard_eligible_fee_drag_ratio,
+            "recent_guard_eligible_churn_ratio": self.recent_guard_eligible_churn_ratio,
+            "recent_guard_eligible_low_edge_trade_streak": self.recent_guard_eligible_low_edge_trade_streak,
+            "recent_guard_eligible_low_edge_trade_at": self.recent_guard_eligible_low_edge_trade_at,
             "guardrail_flags": guardrails["flags"],
             "cooldowns": guardrails["cooldowns"],
         }
@@ -141,6 +185,7 @@ def compute_strategy_execution_health(
     current_position_qty: Decimal,
     current_long_position_qty: Decimal | None = None,
     current_short_position_qty: Decimal | None = None,
+    guard_excluded_fill_ids: set[str] | None = None,
 ) -> StrategyExecutionHealthSnapshot:
     ordered_fills = sorted(
         [fill for fill in fills if fill.symbol == symbol],
@@ -150,6 +195,7 @@ def compute_strategy_execution_health(
     realized_delta_by_fill_id = _realized_delta_by_fill_id(ordered_snapshots)
     resolved_current_long_qty = to_decimal(current_long_position_qty or Decimal("0"))
     resolved_current_short_qty = to_decimal(current_short_position_qty or Decimal("0"))
+    excluded_fill_ids = set(guard_excluded_fill_ids or ())
 
     if _symbol_health_should_use_leg_lifecycle(
         fills=ordered_fills,
@@ -163,6 +209,7 @@ def compute_strategy_execution_health(
             realized_delta_by_fill_id=realized_delta_by_fill_id,
             current_long_position_qty=resolved_current_long_qty,
             current_short_position_qty=resolved_current_short_qty,
+            guard_excluded_fill_ids=excluded_fill_ids,
         )
 
     current_position_opened_at, last_position_closed_at, outcomes = _walk_symbol_fills(
@@ -170,49 +217,15 @@ def compute_strategy_execution_health(
         fills=ordered_fills,
         realized_delta_by_fill_id=realized_delta_by_fill_id,
         current_position_qty=current_position_qty,
+        guard_excluded_fill_ids=excluded_fill_ids,
     )
-
-    lookback = max(settings.strategy_health_lookback_trades, 1)
-    recent_outcomes = outcomes[-lookback:]
-    recent_fee_total = sum((item.fee_cost_quote for item in recent_outcomes), Decimal("0"))
-    recent_net_realized = sum((item.net_realized_pnl for item in recent_outcomes), Decimal("0"))
-    recent_gross_realized = sum((item.gross_realized_pnl for item in recent_outcomes), Decimal("0"))
-    recent_win_rate = (
-        float(sum(1 for item in recent_outcomes if item.is_win) / len(recent_outcomes))
-        if recent_outcomes
-        else 0.0
-    )
-    fee_drag_ratio = _fee_to_gross_ratio(
-        fee_total=recent_fee_total,
-        gross_realized=recent_gross_realized,
-    )
-    churn_ratio = (
-        float(sum(1 for item in recent_outcomes if item.is_small_churn) / len(recent_outcomes))
-        if recent_outcomes
-        else 0.0
-    )
-    low_edge_streak = 0
-    recent_low_edge_trade_at = None
-    for item in reversed(recent_outcomes):
-        if not item.is_low_edge:
-            break
-        low_edge_streak += 1
-        recent_low_edge_trade_at = item.timestamp
-
-    return StrategyExecutionHealthSnapshot(
+    return _strategy_health_snapshot_from_outcomes(
+        settings=settings,
         symbol=symbol,
         current_position_opened_at=current_position_opened_at,
         last_position_closed_at=last_position_closed_at,
         latest_fill_timestamp=ordered_fills[-1].ingestion_timestamp if ordered_fills else None,
-        recent_closed_trade_count=len(recent_outcomes),
-        recent_win_rate=recent_win_rate,
-        recent_fee_drag_ratio=fee_drag_ratio,
-        recent_churn_ratio=churn_ratio,
-        recent_low_edge_trade_streak=low_edge_streak,
-        recent_low_edge_trade_at=recent_low_edge_trade_at,
-        recent_gross_realized_pnl=recent_gross_realized,
-        recent_net_realized_pnl=recent_net_realized,
-        recent_fee_total=recent_fee_total,
+        outcomes=outcomes,
     )
 
 
@@ -235,6 +248,7 @@ def _compute_hedge_mode_strategy_execution_health(
     realized_delta_by_fill_id: dict[str, Decimal],
     current_long_position_qty: Decimal,
     current_short_position_qty: Decimal,
+    guard_excluded_fill_ids: set[str],
 ) -> StrategyExecutionHealthSnapshot:
     long_opened_at, long_last_closed_at, long_outcomes = _walk_leg_fills(
         settings=settings,
@@ -242,6 +256,7 @@ def _compute_hedge_mode_strategy_execution_health(
         realized_delta_by_fill_id=realized_delta_by_fill_id,
         current_position_qty=current_long_position_qty,
         leg="long",
+        guard_excluded_fill_ids=guard_excluded_fill_ids,
     )
     short_opened_at, short_last_closed_at, short_outcomes = _walk_leg_fills(
         settings=settings,
@@ -249,6 +264,7 @@ def _compute_hedge_mode_strategy_execution_health(
         realized_delta_by_fill_id=realized_delta_by_fill_id,
         current_position_qty=current_short_position_qty,
         leg="short",
+        guard_excluded_fill_ids=guard_excluded_fill_ids,
     )
     open_anchors = [
         anchor
@@ -294,6 +310,7 @@ def compute_leg_strategy_execution_health(
     snapshots: list[PortfolioSnapshot],
     current_long_position_qty: Decimal,
     current_short_position_qty: Decimal,
+    guard_excluded_fill_ids: set[str] | None = None,
 ) -> dict[str, StrategyExecutionHealthSnapshot]:
     ordered_fills = sorted(
         [fill for fill in fills if fill.symbol == symbol],
@@ -301,6 +318,7 @@ def compute_leg_strategy_execution_health(
     )
     ordered_snapshots = sorted(snapshots, key=lambda item: item.snapshot_ts)
     realized_delta_by_fill_id = _realized_delta_by_fill_id(ordered_snapshots)
+    excluded_fill_ids = set(guard_excluded_fill_ids or ())
     return {
         "long": _compute_leg_strategy_execution_health_snapshot(
             settings=settings,
@@ -309,6 +327,7 @@ def compute_leg_strategy_execution_health(
             realized_delta_by_fill_id=realized_delta_by_fill_id,
             current_position_qty=current_long_position_qty,
             leg="long",
+            guard_excluded_fill_ids=excluded_fill_ids,
         ),
         "short": _compute_leg_strategy_execution_health_snapshot(
             settings=settings,
@@ -317,6 +336,7 @@ def compute_leg_strategy_execution_health(
             realized_delta_by_fill_id=realized_delta_by_fill_id,
             current_position_qty=current_short_position_qty,
             leg="short",
+            guard_excluded_fill_ids=excluded_fill_ids,
         ),
     }
 
@@ -329,6 +349,7 @@ def _compute_leg_strategy_execution_health_snapshot(
     realized_delta_by_fill_id: dict[str, Decimal],
     current_position_qty: Decimal,
     leg: str,
+    guard_excluded_fill_ids: set[str],
 ) -> StrategyExecutionHealthSnapshot:
     current_position_opened_at, last_position_closed_at, outcomes = _walk_leg_fills(
         settings=settings,
@@ -336,6 +357,7 @@ def _compute_leg_strategy_execution_health_snapshot(
         realized_delta_by_fill_id=realized_delta_by_fill_id,
         current_position_qty=current_position_qty,
         leg=leg,
+        guard_excluded_fill_ids=guard_excluded_fill_ids,
     )
     return _strategy_health_snapshot_from_outcomes(
         settings=settings,
@@ -360,6 +382,7 @@ def _walk_symbol_fills(
     fills: list[FillEvent],
     realized_delta_by_fill_id: dict[str, Decimal],
     current_position_qty: Decimal,
+    guard_excluded_fill_ids: set[str],
 ) -> tuple[datetime | None, datetime | None, list[ClosedTradeOutcome]]:
     position_qty = Decimal("0")
     current_position_opened_at: datetime | None = None
@@ -417,6 +440,7 @@ def _walk_symbol_fills(
                 is_win=net_realized_pnl > 0,
                 is_small_churn=abs(net_realized_pnl) <= churn_cutoff if churn_cutoff > 0 else is_effectively_zero(net_realized_pnl),
                 is_low_edge=net_edge_bps <= Decimal(str(settings.strategy_low_edge_threshold_bps)),
+                is_residual_exit=str(fill.fill_id or "").strip() in guard_excluded_fill_ids,
             )
         )
 
@@ -434,6 +458,7 @@ def _walk_leg_fills(
     realized_delta_by_fill_id: dict[str, Decimal],
     current_position_qty: Decimal,
     leg: str,
+    guard_excluded_fill_ids: set[str],
 ) -> tuple[datetime | None, datetime | None, list[ClosedTradeOutcome]]:
     position_qty = Decimal("0")
     current_position_opened_at: datetime | None = None
@@ -494,6 +519,7 @@ def _walk_leg_fills(
                     else is_effectively_zero(net_realized_pnl)
                 ),
                 is_low_edge=net_edge_bps <= Decimal(str(settings.strategy_low_edge_threshold_bps)),
+                is_residual_exit=str(fill.fill_id or "").strip() in guard_excluded_fill_ids,
             )
         )
 
@@ -515,9 +541,13 @@ def _strategy_health_snapshot_from_outcomes(
 ) -> StrategyExecutionHealthSnapshot:
     lookback = max(settings.strategy_health_lookback_trades, 1)
     recent_outcomes = outcomes[-lookback:]
+    guard_eligible_outcomes = [item for item in recent_outcomes if not item.is_residual_exit]
     recent_fee_total = sum((item.fee_cost_quote for item in recent_outcomes), Decimal("0"))
     recent_net_realized = sum((item.net_realized_pnl for item in recent_outcomes), Decimal("0"))
     recent_gross_realized = sum((item.gross_realized_pnl for item in recent_outcomes), Decimal("0"))
+    guard_eligible_fee_total = sum((item.fee_cost_quote for item in guard_eligible_outcomes), Decimal("0"))
+    guard_eligible_net_realized = sum((item.net_realized_pnl for item in guard_eligible_outcomes), Decimal("0"))
+    guard_eligible_gross_realized = sum((item.gross_realized_pnl for item in guard_eligible_outcomes), Decimal("0"))
     recent_win_rate = (
         float(sum(1 for item in recent_outcomes if item.is_win) / len(recent_outcomes))
         if recent_outcomes
@@ -527,9 +557,23 @@ def _strategy_health_snapshot_from_outcomes(
         fee_total=recent_fee_total,
         gross_realized=recent_gross_realized,
     )
+    guard_eligible_fee_drag_ratio = _fee_to_gross_ratio(
+        fee_total=guard_eligible_fee_total,
+        gross_realized=guard_eligible_gross_realized,
+    )
     churn_ratio = (
         float(sum(1 for item in recent_outcomes if item.is_small_churn) / len(recent_outcomes))
         if recent_outcomes
+        else 0.0
+    )
+    guard_eligible_win_rate = (
+        float(sum(1 for item in guard_eligible_outcomes if item.is_win) / len(guard_eligible_outcomes))
+        if guard_eligible_outcomes
+        else 0.0
+    )
+    guard_eligible_churn_ratio = (
+        float(sum(1 for item in guard_eligible_outcomes if item.is_small_churn) / len(guard_eligible_outcomes))
+        if guard_eligible_outcomes
         else 0.0
     )
     low_edge_streak = 0
@@ -539,6 +583,13 @@ def _strategy_health_snapshot_from_outcomes(
             break
         low_edge_streak += 1
         recent_low_edge_trade_at = item.timestamp
+    guard_eligible_low_edge_streak = 0
+    recent_guard_eligible_low_edge_trade_at = None
+    for item in reversed(guard_eligible_outcomes):
+        if not item.is_low_edge:
+            break
+        guard_eligible_low_edge_streak += 1
+        recent_guard_eligible_low_edge_trade_at = item.timestamp
 
     return StrategyExecutionHealthSnapshot(
         symbol=symbol,
@@ -554,6 +605,13 @@ def _strategy_health_snapshot_from_outcomes(
         recent_gross_realized_pnl=recent_gross_realized,
         recent_net_realized_pnl=recent_net_realized,
         recent_fee_total=recent_fee_total,
+        recent_guard_eligible_net_realized_pnl=guard_eligible_net_realized,
+        recent_guard_eligible_closed_trade_count=len(guard_eligible_outcomes),
+        recent_guard_eligible_win_rate=guard_eligible_win_rate,
+        recent_guard_eligible_fee_drag_ratio=guard_eligible_fee_drag_ratio,
+        recent_guard_eligible_churn_ratio=guard_eligible_churn_ratio,
+        recent_guard_eligible_low_edge_trade_streak=guard_eligible_low_edge_streak,
+        recent_guard_eligible_low_edge_trade_at=recent_guard_eligible_low_edge_trade_at,
     )
 
 

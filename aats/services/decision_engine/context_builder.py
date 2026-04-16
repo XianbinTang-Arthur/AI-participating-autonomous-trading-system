@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
+from aats.schemas.audit import DecisionAuditRecord
 from aats.schemas.common import utc_now
 from aats.schemas.decision import DecisionContext
 from aats.schemas.exchange import ExchangeAccountSnapshot
@@ -29,6 +30,10 @@ from aats.services.runtime_scope import (
     runtime_state_scope,
     scoped_portfolio_event,
     snapshots_for_scope,
+)
+from aats.services.strategy_execution_guard_filters import (
+    decision_ids_for_guard_exclusions,
+    guard_excluded_fill_ids_for_independent_residual_exits,
 )
 from aats.services.strategy_execution_health import (
     compute_leg_strategy_execution_health,
@@ -220,6 +225,14 @@ class DecisionContextBuilder:
             if _cached_fills is not None
             else self.execution_repo.fills_for_scope(scope=self.state_scope)
         )
+        symbol_fills = [fill for fill in scoped_fills if fill.symbol == symbol]
+        guard_excluded_fill_ids = guard_excluded_fill_ids_for_independent_residual_exits(
+            fills=symbol_fills,
+            audits=self._audit_records_for_decision_ids(
+                decision_ids_for_guard_exclusions(fills=symbol_fills)
+            ),
+            payload_by_ref=self._payload_by_ref,
+        )
         strategy_health = compute_strategy_execution_health(
             settings=self.settings,
             symbol=symbol,
@@ -228,6 +241,7 @@ class DecisionContextBuilder:
             current_position_qty=current_position_qty,
             current_long_position_qty=current_long_qty,
             current_short_position_qty=current_short_qty,
+            guard_excluded_fill_ids=guard_excluded_fill_ids,
         )
         leg_strategy_health = compute_leg_strategy_execution_health(
             settings=self.settings,
@@ -236,6 +250,7 @@ class DecisionContextBuilder:
             snapshots=portfolio_snapshots,
             current_long_position_qty=current_long_qty,
             current_short_position_qty=current_short_qty,
+            guard_excluded_fill_ids=guard_excluded_fill_ids,
         )
         leg_lifecycle = self._leg_lifecycle(
             symbol=symbol,
@@ -315,6 +330,30 @@ class DecisionContextBuilder:
                 portfolio_snapshot=portfolio_snapshot,
             ),
         )
+
+    def _payload_by_ref(self, ref: str | None) -> dict[str, object] | None:
+        if ref is None:
+            return None
+        envelope = self.event_store.get(ref)
+        if envelope is None:
+            return None
+        payload = dict(envelope.payload)
+        payload["_event_id"] = envelope.event_id
+        payload["_topic"] = envelope.topic
+        return payload
+
+    def _audit_records_for_decision_ids(self, decision_ids: set[str]) -> list[DecisionAuditRecord]:
+        records: dict[str, DecisionAuditRecord] = {}
+        for decision_id in decision_ids:
+            for envelope in self.event_store.by_decision(decision_id):
+                if envelope.topic != topics.AUDIT_RECORDS:
+                    continue
+                try:
+                    record = DecisionAuditRecord.model_validate(envelope.payload)
+                except Exception:
+                    continue
+                records[record.decision_id] = record
+        return list(records.values())
 
     def _account_snapshot(self) -> ExchangeAccountSnapshot | None:
         loader = getattr(self.account_service, "latest_snapshot", None)

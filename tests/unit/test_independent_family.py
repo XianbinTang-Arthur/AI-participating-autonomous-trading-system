@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from aats.schemas.decision import PositionTarget
 from aats.schemas.market import MarketSnapshot
@@ -12,6 +13,7 @@ from aats.services.strategy_engines.families.independent_family import (
     IndependentBookExpectancy,
     IndependentFamilyEvaluation,
     IndependentBookEvaluation,
+    _estimate_independent_lifecycle_cost_bps,
     _independent_family_action,
     evaluate_independent_books,
     independent_candidate_from_directional_target,
@@ -1647,7 +1649,8 @@ class TestIndependentFamily(unittest.TestCase):
             trade_cost_service=trade_cost_service,  # type: ignore[arg-type]
         )
 
-        self.assertEqual(trade_cost_service.margin_modes, ["isolated", "isolated"])
+        self.assertGreaterEqual(len(trade_cost_service.margin_modes), 2)
+        self.assertTrue(all(mode == "isolated" for mode in trade_cost_service.margin_modes))
         result = evaluate_independent_books(
             settings=settings,
             context=context,
@@ -1748,16 +1751,62 @@ class TestIndependentFamily(unittest.TestCase):
             expectancy_resolver=None,
         )
 
-        self.assertEqual(len(trade_cost_service.calls), 2)
+        self.assertGreaterEqual(len(trade_cost_service.calls), 4)
         self.assertIs(trade_cost_service.calls[0]["market_snapshot"], market_snapshot)
+        self.assertEqual(trade_cost_service.calls[0]["model_name"], "independent_long_book")
         self.assertGreater(Decimal(str(trade_cost_service.calls[0]["quantity"])), Decimal("0"))
         self.assertGreater(Decimal(str(trade_cost_service.calls[0]["projected_notional"])), Decimal("0"))
+        self.assertTrue(
+            any(
+                str(call.get("model_name", "")).endswith("_floor")
+                for call in trade_cost_service.calls
+            )
+        )
         self.assertIsNotNone(result.long_book.expectancy)
         self.assertAlmostEqual(result.long_book.expectancy.expected_slippage_bps, 8.4, places=6)
         self.assertAlmostEqual(float(result.long_book.expectancy.depth_consumption_ratio or 0.0), 0.3, places=6)
         self.assertAlmostEqual(result.long_book.expectancy.size_impact_bps, 1.4, places=6)
         self.assertAlmostEqual(float(result.long_book.expectancy.cost_confidence or 0.0), 0.82, places=6)
         self.assertEqual(result.long_book.expectancy.reference_price, Decimal("100.5"))
+        self.assertAlmostEqual(float(result.long_book.expectancy.expected_lifecycle_cost_bps or 0.0), 17.2, places=6)
+        self.assertAlmostEqual(
+            float(result.long_book.expectancy.expected_lifecycle_net_edge_bps or 0.0),
+            float(result.long_book.expectancy.expected_signal_edge_bps) - 17.2,
+            places=6,
+        )
+
+    def test_estimate_independent_lifecycle_cost_does_not_double_count_entry_cost_when_exit_estimates_are_negative(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_overlay_mode="independent",
+            strategy_hedge_independent_enabled=True,
+        )
+
+        with patch(
+            "aats.services.strategy_engines.families.independent_family._estimate_independent_execution_drag"
+        ) as estimate_drag:
+            estimate_drag.side_effect = [
+                SimpleNamespace(executable_total_drag_bps=Decimal("-1.5")),
+                SimpleNamespace(executable_total_drag_bps=Decimal("-0.5")),
+                SimpleNamespace(executable_total_drag_bps=Decimal("-2.0")),
+            ]
+
+            lifecycle_cost = _estimate_independent_lifecycle_cost_bps(
+                settings=settings,
+                trade_cost_service=SimpleNamespace(),
+                symbol="BTC-USDT-SWAP",
+                product_type="derivatives",
+                runtime_margin_mode="isolated",
+                leg="long",
+                quantity=Decimal("0.01"),
+                projected_notional=Decimal("100"),
+                reference_price=Decimal("100"),
+                market_snapshot=None,
+                expected_slippage_bps=1.0,
+                entry_cost_bps=5.0,
+            )
+
+        self.assertEqual(estimate_drag.call_count, 3)
+        self.assertEqual(lifecycle_cost, 5.0)
 
     def test_independent_family_action_reports_mixed_rebalance_when_opening_and_closing_coexist(self) -> None:
         result = IndependentFamilyEvaluation(

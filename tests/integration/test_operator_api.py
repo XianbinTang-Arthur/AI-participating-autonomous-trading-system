@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from datetime import timedelta
 from decimal import Decimal
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi import FastAPI
@@ -3145,6 +3145,365 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(lifecycle_payload["unassigned_funding_fees"][0]["attribution_reason"], "no_matching_position_window")
         self.assertEqual(trial_review_details.status_code, 200)
         self.assertIn("position_lifecycle_profitability", trial_review_details.json()["sections"])
+
+    async def test_position_lifecycle_attribution_detail_exposes_exit_trace_and_fee_split(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "local_demo",
+                "mode": "paper_live",
+                "market_data_backend": "demo",
+                "execution_backend": "paper",
+                "account_backend": "disabled",
+                "account_read_enabled": False,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        runtime = await build_runtime(settings)
+        now = utc_now()
+
+        def _context(decision_id: str, as_of_ts, current_qty: Decimal, price: Decimal) -> DecisionContext:
+            return DecisionContext(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                timeframe="15m",
+                as_of_ts=as_of_ts,
+                market_snapshot_ref=f"market_{decision_id}",
+                feature_snapshot_ref=f"feature_{decision_id}",
+                portfolio_snapshot_ref=f"portfolio_{decision_id}",
+                health_snapshot_ref=f"health_{decision_id}",
+                mode="paper_live",
+                current_position_qty=current_qty,
+                current_net_position_qty=current_qty,
+                current_long_position_qty=current_qty,
+                current_short_position_qty=Decimal("0"),
+                product_type="derivatives",
+                margin_mode="cross",
+                current_exposure_side="flat" if current_qty == 0 else "long",
+                market_last_price=price,
+                leg_strategy_health={
+                    "long": {
+                        "recent_fee_drag_ratio": 0.9 if decision_id == "decision_health" else 0.25,
+                        "recent_guard_eligible_fee_drag_ratio": 0.7 if decision_id == "decision_health" else 0.18,
+                        "recent_churn_ratio": 0.8 if decision_id == "decision_health" else 0.35,
+                        "recent_guard_eligible_churn_ratio": 0.65 if decision_id == "decision_health" else 0.22,
+                        "recent_low_edge_trade_streak": 3 if decision_id == "decision_health" else 2,
+                        "recent_guard_eligible_low_edge_trade_streak": 2,
+                    }
+                },
+            )
+
+        def _target(
+            decision_id: str,
+            as_of_ts,
+            current_qty: Decimal,
+            target_qty: Decimal,
+            current_notional: Decimal,
+            target_notional: Decimal,
+            position_intent: str,
+            family_action: str,
+            book_action: str,
+            close_reason: str | None,
+            policy_reason: str | None,
+            execution_chain_id: str,
+            price: Decimal,
+            expected_net_edge_bps: float,
+        ) -> PositionTarget:
+            return PositionTarget(
+                decision_id=decision_id,
+                symbol="BTC-USDT-SWAP",
+                current_position_qty=current_qty,
+                target_position_qty=target_qty,
+                delta_position_qty=target_qty - current_qty,
+                current_notional=current_notional,
+                target_notional=target_notional,
+                rebalance_reason=f"attribution_{decision_id}",
+                urgency="medium",
+                max_slippage_tolerance_bps=20,
+                source_mix={"independent": 1.0},
+                decision_expiry_ts=as_of_ts + timedelta(minutes=5),
+                product_type="derivatives",
+                current_exposure_side="flat" if current_qty == 0 else "long",
+                target_exposure_side="flat" if target_qty == 0 else "long",
+                position_intent=position_intent,  # type: ignore[arg-type]
+                target_leverage=2.0,
+                margin_mode="cross",
+                strategy_family="independent",
+                strategy_family_action=family_action,  # type: ignore[arg-type]
+                strategy_route_action="override_target",
+                book_runtime_states=[
+                    {
+                        "leg": "long",
+                        "current_qty": current_qty,
+                        "target_qty": target_qty,
+                        "book_state": "opening" if book_action == "open" else "closing",
+                        "book_action": book_action,
+                        "close_reason": close_reason,
+                        "policy_reason": policy_reason,
+                        "execution_chain_id": execution_chain_id,
+                    }
+                ],
+                book_expectancy_summary={
+                    "source": "independent_book",
+                    "books": [
+                        {
+                            "leg": "long",
+                            "expected_signal_edge_bps": max(expected_net_edge_bps + 6.0, 0.0),
+                            "expected_cost_bps": 6.0,
+                            "expected_net_edge_bps": expected_net_edge_bps,
+                        }
+                    ],
+                },
+            )
+
+        seeded_decisions = [
+            (
+                "decision_open",
+                now - timedelta(minutes=21),
+                Decimal("0"),
+                Decimal("2"),
+                Decimal("0"),
+                Decimal("200"),
+                "open_long",
+                "open_independent_book",
+                "open",
+                None,
+                None,
+                "independent:decision_open:long:open",
+                Decimal("100"),
+                12.0,
+            ),
+            (
+                "decision_failed",
+                now - timedelta(minutes=11),
+                Decimal("2"),
+                Decimal("1"),
+                Decimal("204"),
+                Decimal("102"),
+                "reduce_long",
+                "close_failed_thesis_independent_book",
+                "close_failed_thesis",
+                "failed_thesis",
+                "independent_failed_thesis_force_exit",
+                "independent:decision_failed:long:close_failed_thesis",
+                Decimal("102"),
+                -1.0,
+            ),
+            (
+                "decision_health",
+                now - timedelta(minutes=5),
+                Decimal("1"),
+                Decimal("0"),
+                Decimal("101"),
+                Decimal("0"),
+                "close_long",
+                "de_risk_independent_book",
+                "de_risk",
+                "execution_health_degraded",
+                "independent_execution_health_urgent_exit",
+                "independent:decision_health:long:de_risk:execution_health_degraded",
+                Decimal("101"),
+                -2.5,
+            ),
+        ]
+        for (
+            decision_id,
+            as_of_ts,
+            current_qty,
+            target_qty,
+            current_notional,
+            target_notional,
+            position_intent,
+            family_action,
+            book_action,
+            close_reason,
+            policy_reason,
+            execution_chain_id,
+            price,
+            expected_net_edge_bps,
+        ) in seeded_decisions:
+            context = _context(decision_id, as_of_ts, current_qty, price)
+            target = _target(
+                decision_id,
+                as_of_ts,
+                current_qty,
+                target_qty,
+                current_notional,
+                target_notional,
+                position_intent,
+                family_action,
+                book_action,
+                close_reason,
+                policy_reason,
+                execution_chain_id,
+                price,
+                expected_net_edge_bps,
+            )
+            context_event = build_envelope(
+                topic=topics.DECISION_CONTEXTS,
+                key="BTC-USDT-SWAP",
+                payload_model=context,
+                source_component="test",
+            )
+            target_event = build_envelope(
+                topic=topics.POSITION_TARGETS,
+                key="BTC-USDT-SWAP",
+                payload_model=target,
+                source_component="test",
+            )
+            runtime.event_store.append(context_event)
+            runtime.event_store.append(target_event)
+            runtime.audit_repo.upsert(
+                DecisionAuditRecord(
+                    decision_id=decision_id,
+                    decision_context_ref=context_event.event_id,
+                    position_target_ref=target_event.event_id,
+                )
+            )
+
+        for outcome in [
+            FillOutcomeRecord(
+                fill_id="fill_open",
+                decision_id="decision_open",
+                execution_chain_id="independent:decision_open:long:open",
+                order_id="order_open",
+                symbol="BTC-USDT-SWAP",
+                position_key="BTC-USDT-SWAP:long",
+                side="buy",
+                fill_qty=Decimal("2"),
+                fill_price=Decimal("100"),
+                fill_notional=Decimal("200"),
+                fee_delta=Decimal("-0.10"),
+                position_intent="open_long",
+                execution_action="open_long",
+                position_mode="long_short_mode",
+                pos_side="long",
+                starting_position_qty=Decimal("0"),
+                ending_position_qty=Decimal("2"),
+                realized_pnl_delta=Decimal("0"),
+                strategy_family="independent",
+                ingestion_timestamp=now - timedelta(minutes=20),
+                created_at=now - timedelta(minutes=20),
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            FillOutcomeRecord(
+                fill_id="fill_reduce",
+                decision_id="decision_failed",
+                execution_chain_id="independent:decision_failed:long:close_failed_thesis",
+                order_id="order_reduce",
+                symbol="BTC-USDT-SWAP",
+                position_key="BTC-USDT-SWAP:long",
+                side="sell",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("102"),
+                fill_notional=Decimal("102"),
+                fee_delta=Decimal("-0.05"),
+                position_intent="reduce_long",
+                execution_action="reduce_long",
+                position_mode="long_short_mode",
+                pos_side="long",
+                starting_position_qty=Decimal("2"),
+                ending_position_qty=Decimal("1"),
+                realized_pnl_delta=Decimal("1.20"),
+                strategy_family="independent",
+                ingestion_timestamp=now - timedelta(minutes=10),
+                created_at=now - timedelta(minutes=10),
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+            FillOutcomeRecord(
+                fill_id="fill_close",
+                decision_id="decision_health",
+                execution_chain_id="independent:decision_health:long:de_risk:execution_health_degraded",
+                order_id="order_close",
+                symbol="BTC-USDT-SWAP",
+                position_key="BTC-USDT-SWAP:long",
+                side="sell",
+                fill_qty=Decimal("1"),
+                fill_price=Decimal("101"),
+                fill_notional=Decimal("101"),
+                fee_delta=Decimal("-0.07"),
+                position_intent="close_long",
+                execution_action="close_long",
+                position_mode="long_short_mode",
+                pos_side="long",
+                starting_position_qty=Decimal("1"),
+                ending_position_qty=Decimal("0"),
+                realized_pnl_delta=Decimal("0.80"),
+                strategy_family="independent",
+                ingestion_timestamp=now - timedelta(minutes=4),
+                created_at=now - timedelta(minutes=4),
+                product_type="derivatives",
+                margin_mode="cross",
+            ),
+        ]:
+            runtime.fill_outcome_repo.save_outcome(outcome)
+        runtime.funding_fee_repo.save_record(
+            FundingFeeRecord(
+                bill_id="funding_trace",
+                symbol="BTC-USDT-SWAP",
+                currency="USDT",
+                amount=Decimal("-0.02"),
+                bill_type="8",
+                sub_type="173",
+                type_label="funding_fee",
+                sub_type_label="funding_fee_expense",
+                funding_direction="expense",
+                bill_ts=now - timedelta(minutes=12),
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+
+        app = self._app(runtime)
+        with TestClient(app) as client:
+            attribution_list = client.get("/reports/position-lifecycle-attribution?limit=10")
+            profitability_list = client.get("/reports/position-lifecycle-profitability?limit=10")
+
+        self.assertEqual(attribution_list.status_code, 200)
+        self.assertEqual(profitability_list.status_code, 200)
+        lifecycle = attribution_list.json()["lifecycles"][0]
+        lifecycle_id = quote(str(lifecycle["lifecycle_id"]), safe="")
+
+        with TestClient(app) as client:
+            attribution_detail = client.get(f"/reports/position-lifecycle-attribution/{lifecycle_id}")
+
+        self.assertEqual(Decimal(str(lifecycle["entry_fee_quote"])), Decimal("0.10"))
+        self.assertEqual(Decimal(str(lifecycle["exit_fee_quote"])), Decimal("0.12"))
+        self.assertEqual(Decimal(str(lifecycle["total_fee_quote"])), Decimal("0.22"))
+        self.assertEqual(Decimal(str(lifecycle["gross_realized_pnl"])), Decimal("2.12"))
+        self.assertEqual(Decimal(str(lifecycle["combined_net_realized_pnl"])), Decimal("1.98"))
+        self.assertEqual(lifecycle["decision_trace_count"], 3)
+        self.assertEqual(lifecycle["trace_completeness"], "complete")
+        self.assertEqual(lifecycle["unmatched_actionable_decision_count"], 0)
+        self.assertEqual(lifecycle["missing_linked_reference_count"], 0)
+        self.assertEqual(lifecycle["exit_reason_breakdown"][0]["reason"], "failed_thesis")
+        self.assertEqual(lifecycle["exit_reason_breakdown"][1]["transition_category"], "execution_guard_exit")
+        self.assertEqual(lifecycle["exit_intent_breakdown"][0]["intent"], "reduce_long")
+
+        self.assertEqual(attribution_detail.status_code, 200)
+        detail_payload = attribution_detail.json()
+        trace = detail_payload["decision_trace"]
+        self.assertEqual([item["decision_id"] for item in trace], ["decision_open", "decision_failed", "decision_health"])
+        self.assertEqual(detail_payload["trace_completeness"], "complete")
+        self.assertEqual(detail_payload["unmatched_actionable_decision_count"], 0)
+        self.assertEqual(detail_payload["missing_linked_reference_count"], 0)
+        self.assertEqual(detail_payload["candidate_decisions"], [])
+        self.assertIsNone(trace[0]["transition_category"])
+        self.assertEqual(trace[1]["transition_category"], "strategy_exit")
+        self.assertEqual(trace[2]["transition_category"], "execution_guard_exit")
+        self.assertEqual(Decimal(str(trace[1]["close_notional_quote"])), Decimal("102"))
+        self.assertEqual(Decimal(str(trace[2]["residual_notional_quote"])), Decimal("0"))
+        self.assertEqual(len(detail_payload["child_fills"]), 3)
+        self.assertEqual(detail_payload["child_fills"][0]["fill_bucket"], "entry")
+        self.assertEqual(detail_payload["child_fills"][1]["fill_bucket"], "exit")
+        self.assertTrue(any(item["event_type"] == "funding_fee" for item in detail_payload["key_metrics_timeline"]))
 
     async def test_trial_guard_and_forward_validation_include_funding_fee_drag(self) -> None:
         settings = AATSSettings.model_validate(

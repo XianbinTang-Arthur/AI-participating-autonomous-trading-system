@@ -1,5 +1,5 @@
 ﻿import { actionButton, alertQueue, pill, primaryStatusPanel, renderPaginationFooter, responsiveTable, summaryStrip, surfaceCard } from "../components.js";
-import { escapeHtml, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
+import { escapeHtml, formatDuration, formatMaybeTimestamp, formatNumber, formatRelativeAge, formatSigned, middleEllipsis } from "../formatters.js";
 import { localizeError, readableState, toneForOrderStatus } from "../terms.js";
 import {
   fillFeeText,
@@ -26,6 +26,7 @@ export function renderExecutionSections(data) {
   const recentFills = fillsPayload.fills || [];
   const errors = data.executionErrors?.errors || [];
   const metrics = data.metrics || {};
+  const lifecycleAttribution = data.positionLifecycleAttribution || {};
 
   return {
     executionHero: primaryStatusPanel({
@@ -96,6 +97,13 @@ export function renderExecutionSections(data) {
         collapseAction: "collapse-fills",
       })}`,
     }),
+    executionLifecycleDiagnostics: surfaceCard({
+      title: "仓位生命周期诊断",
+      kicker: "整笔仓位复盘",
+      panelKey: "positionLifecycleAttribution",
+      copy: "这里按整笔仓位口径看综合净收益、费用拆分和退出链，不按单笔委托口径展示。",
+      content: renderLifecycleDiagnostics(lifecycleAttribution),
+    }),
   };
 }
 
@@ -107,6 +115,7 @@ export function renderExecutionView(data) {
       <div class="span-12">${sections.executionExceptions}</div>
       <div class="span-12">${sections.executionOrders}</div>
       <div class="span-12">${sections.executionFills}</div>
+      <div class="span-12">${sections.executionLifecycleDiagnostics}</div>
     </div>
   `;
 }
@@ -269,4 +278,96 @@ function fillImpactDisplay(fill, scene) {
     value: "逐笔盈亏未单独落库",
     meta: `${feeText} | 当前成交已落库，但这条成交记录没有单独保存已实现盈亏`,
   };
+}
+
+function renderLifecycleDiagnostics(payload = {}) {
+  const summary = payload.summary || {};
+  const lifecycles = Array.isArray(payload.lifecycles) ? payload.lifecycles : [];
+  return `
+    ${summaryStrip([
+      {
+        label: "Lifecycle 数",
+        value: formatNumber(summary.lifecycle_count, 0, "0"),
+        meta: `最近展示 ${formatNumber(lifecycles.length, 0, "0")} 笔`,
+        tone: "info",
+      },
+      {
+        label: "综合净收益",
+        value: formatSigned(summary.combined_net_realized_pnl),
+        meta: "整笔仓位口径",
+        tone: Number(summary.combined_net_realized_pnl || 0) >= 0 ? "positive" : "warning",
+      },
+      {
+        label: "总手续费",
+        value: formatSigned(summary.total_fee_quote),
+        meta: `funding ${formatSigned(summary.funding_fee_quote)}`,
+        tone: Number(summary.total_fee_quote || 0) > 0 ? "warning" : "info",
+      },
+      {
+        label: "未归属 funding",
+        value: formatNumber(summary.unassigned_funding_fee_count, 0, "0"),
+        meta: "用于暴露仍未归到 lifecycle 的账单事件",
+        tone: Number(summary.unassigned_funding_fee_count || 0) > 0 ? "warning" : "positive",
+      },
+    ])}
+    ${responsiveTable(
+      ["仓位", "综合净收益", "费用 / funding", "持有与退出", "操作"],
+      lifecycles.map((item) => [
+        `<div><strong>${escapeHtml(item.symbol || "标的待确认")}</strong><div class="table-meta">${escapeHtml(lifecycleHeadline(item))}</div></div>`,
+        `<div><strong>${formatSigned(item.combined_net_realized_pnl)}</strong><div class="table-meta">毛收益 ${formatSigned(item.gross_realized_pnl)}</div></div>`,
+        `<div><strong>${formatSigned(item.total_fee_quote)}</strong><div class="table-meta">开 ${formatSigned(item.entry_fee_quote)} / 平 ${formatSigned(item.exit_fee_quote)} / funding ${formatSigned(item.funding_fee_quote)}</div></div>`,
+        `<div><strong>${formatDuration(item.hold_seconds, "持有时长待确认")}</strong><div class="table-meta">${escapeHtml(lifecycleExitReasonSummary(item.exit_reason_breakdown))}</div></div>`,
+        item.lifecycle_id ? actionButton("查看诊断", "inspect-lifecycle-attribution", item.lifecycle_id) : "",
+      ]),
+      "当前还没有 lifecycle 级诊断样本。",
+      lifecycles.map((item) => ({
+        kicker: "仓位生命周期",
+        title: `${item.symbol || "标的待确认"} | ${lifecycleHeadline(item)}`,
+        meta: item.closed_at ? formatMaybeTimestamp(item.closed_at) : "当前仍未闭合",
+        tone: Number(item.combined_net_realized_pnl || 0) >= 0 ? "positive" : "warning",
+        badge: pill(
+          Number(item.combined_net_realized_pnl || 0) >= 0 ? "综合净收益为正" : "综合净收益为负",
+          Number(item.combined_net_realized_pnl || 0) >= 0 ? "positive" : "warning",
+        ),
+        fields: [
+          { label: "综合净收益", value: formatSigned(item.combined_net_realized_pnl), meta: `毛收益 ${formatSigned(item.gross_realized_pnl)}` },
+          { label: "总手续费", value: formatSigned(item.total_fee_quote), meta: `funding ${formatSigned(item.funding_fee_quote)}` },
+          { label: "持有时长", value: formatDuration(item.hold_seconds, "持有时长待确认"), meta: lifecycleExitReasonSummary(item.exit_reason_breakdown) },
+        ],
+        details: [
+          { label: "生命周期编号", value: item.lifecycle_id || "当前没有编号" },
+          { label: "成交拆分", value: `${formatNumber(item.entry_fill_count, 0, "0")} 开 / ${formatNumber(item.exit_fill_count, 0, "0")} 平` },
+          { label: "Child Order", value: formatNumber(item.child_order_count, 0, "0") },
+        ],
+        detailLabel: "展开 lifecycle 摘要",
+        action: item.lifecycle_id ? actionButton("查看诊断", "inspect-lifecycle-attribution", item.lifecycle_id) : "",
+      })),
+    )}
+  `;
+}
+
+function lifecycleHeadline(item = {}) {
+  return [
+    readableState(item.direction || item.pos_side || "unknown", "方向待确认"),
+    item.timeframe || "周期待确认",
+    readableState(item.family || "unknown", item.family || "策略家族待确认"),
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function lifecycleExitReasonSummary(rows = []) {
+  if (!Array.isArray(rows) || !rows.length) return "当前还没有退出链诊断";
+  return rows
+    .slice(0, 2)
+    .map((row) => `${localizeError(row.reason || "unknown")} / ${lifecycleTransitionLabel(row.transition_category)}`)
+    .join(" | ");
+}
+
+function lifecycleTransitionLabel(value) {
+  const key = String(value || "").trim().toLowerCase();
+  if (key === "strategy_exit") return "策略退出";
+  if (key === "protective_exit") return "保护退出";
+  if (key === "execution_guard_exit") return "执行守护退出";
+  return key ? key : "退出分类待确认";
 }

@@ -1,4 +1,5 @@
 import { buildFillDrawer, buildOrderDrawer } from "../detail-drawers.js";
+import { buildLifecycleAttributionDrawer } from "../lifecycle-drawer.js";
 import { setFlash } from "../flash.js";
 
 export function createExecutionActionHandlers({
@@ -33,6 +34,17 @@ export function createExecutionActionHandlers({
     }
   }
 
+  async function inspectLifecycleAttribution(lifecycleId) {
+    if (!lifecycleId) return;
+    try {
+      const detail = await requestJson(`/reports/position-lifecycle-attribution/${encodeURIComponent(lifecycleId)}`);
+      openDrawer(buildLifecycleAttributionDrawer(detail));
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    }
+  }
+
   async function resolveStuckOrder(orderId) {
     if (!orderId) return;
     await runDangerousAction({
@@ -46,6 +58,7 @@ export function createExecutionActionHandlers({
   return {
     "inspect-order": (value) => inspectOrder(value),
     "inspect-fill": (value) => inspectFill(value),
+    "inspect-lifecycle-attribution": (value) => inspectLifecycleAttribution(value),
     "resolve-stuck-order": (value) => resolveStuckOrder(value),
     "load-more-orders": () => adjustPageLimit("recentOrders", pageLoadStep),
     "collapse-orders": () => resetPageLimit("recentOrders"),

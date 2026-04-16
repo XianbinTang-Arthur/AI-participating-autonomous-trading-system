@@ -31,8 +31,11 @@ def evaluate_open_eligibility(
 ) -> IndependentEligibilityOutcome:
     reasons = list(blocked_reasons)
     warnings: list[str] = []
-    expected_cost_bps = 0.0 if expectancy is None else expectancy.expected_cost_bps
-    expected_net_edge_bps = 0.0 if expectancy is None else expectancy.expected_net_edge_bps
+    # Batch1 SoW contract:
+    # - safe-edge gate prefers lifecycle net edge
+    # - anomaly cost fuse must remain single-leg entry cost semantics
+    expected_cost_bps = _gate_expected_cost_bps(expectancy)
+    expected_net_edge_bps = _gate_expected_net_edge_bps(expectancy)
     safe_edge_bps = required_safe_net_edge_bps(settings=settings)
     # 边界语义（严格 <）: net_edge == safe_edge 时允许入场。
     # 与 lifecycle.py determine_close_reason 的 `net_edge <= de_risk` 形成一致的持仓区间：
@@ -54,8 +57,16 @@ def evaluate_open_eligibility(
     if low_edge_cooldown_active(settings=settings, context=context, leg=leg):
         reasons.append(f"independent_{leg}_book_low_edge_cooldown_active")
     if performance_degraded(settings=settings, context=context, leg=leg):
-        fee_drag_ratio = float(_leg_health_value(context, leg, "recent_fee_drag_ratio") or 0.0)
-        churn_ratio = float(_leg_health_value(context, leg, "recent_churn_ratio") or 0.0)
+        fee_drag_ratio = _guard_fee_drag_ratio(context=context, leg=leg)
+        churn_ratio = float(
+            _guard_health_value(
+                context,
+                leg,
+                guarded_key="recent_guard_eligible_churn_ratio",
+                fallback_key="recent_churn_ratio",
+            )
+            or 0.0
+        )
         if fee_drag_ratio > settings.strategy_max_fee_drag_ratio:
             reasons.append(f"independent_{leg}_book_fee_drag_guard_active")
         if churn_ratio > settings.strategy_max_churn_ratio:
@@ -85,7 +96,8 @@ def anomaly_cost_fuse_threshold_bps(
         return nominal_max_cost_bps + base_slack_bps
 
     expected_signal_edge_bps = max(float(expectancy.expected_signal_edge_bps), 0.0)
-    expected_net_edge_bps = max(float(expectancy.expected_net_edge_bps), 0.0)
+    # Keep the anomaly fuse aligned with the legacy single-leg entry budget.
+    expected_net_edge_bps = max(_fuse_expected_net_edge_bps(expectancy), 0.0)
     edge_headroom_bps = max(expected_net_edge_bps - safe_edge_bps, 0.0)
     depth_consumption_ratio = max(float(expectancy.depth_consumption_ratio or 0.0), 0.0)
     size_impact_bps = max(float(expectancy.size_impact_bps or 0.0), 0.0)
@@ -202,10 +214,23 @@ def low_edge_cooldown_active(
 ) -> bool:
     if settings.strategy_low_edge_cooldown_seconds <= 0:
         return False
-    streak = int(_leg_health_value(context, leg, "recent_low_edge_trade_streak") or 0)
+    streak = int(
+        _guard_health_value(
+            context,
+            leg,
+            guarded_key="recent_guard_eligible_low_edge_trade_streak",
+            fallback_key="recent_low_edge_trade_streak",
+        )
+        or 0
+    )
     if streak < settings.strategy_low_edge_streak_limit:
         return False
-    recent_at = _leg_health_datetime(context, leg, "recent_low_edge_trade_at")
+    recent_at = _guard_health_datetime(
+        context,
+        leg,
+        guarded_key="recent_guard_eligible_low_edge_trade_at",
+        fallback_key="recent_low_edge_trade_at",
+    )
     if recent_at is None:
         return False
     return max((context.as_of_ts - recent_at).total_seconds(), 0.0) < settings.strategy_low_edge_cooldown_seconds
@@ -217,12 +242,28 @@ def performance_degraded(
     context: DecisionContext,
     leg: IndependentLeg,
 ) -> bool:
-    closed_trade_count = int(_leg_health_value(context, leg, "recent_closed_trade_count") or 0)
+    closed_trade_count = int(
+        _guard_health_value(
+            context,
+            leg,
+            guarded_key="recent_guard_eligible_closed_trade_count",
+            fallback_key="recent_closed_trade_count",
+        )
+        or 0
+    )
     if closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
         return False
     return (
-        float(_leg_health_value(context, leg, "recent_fee_drag_ratio") or 0.0) > settings.strategy_max_fee_drag_ratio
-        or float(_leg_health_value(context, leg, "recent_churn_ratio") or 0.0) > settings.strategy_max_churn_ratio
+        _guard_fee_drag_ratio(context=context, leg=leg) > settings.strategy_max_fee_drag_ratio
+        or float(
+            _guard_health_value(
+                context,
+                leg,
+                guarded_key="recent_guard_eligible_churn_ratio",
+                fallback_key="recent_churn_ratio",
+            )
+            or 0.0
+        ) > settings.strategy_max_churn_ratio
     )
 
 
@@ -234,11 +275,35 @@ def trial_guard_active(
 ) -> bool:
     if not settings.strategy_hedge_independent_trial_guard_enabled:
         return False
-    closed_trade_count = int(_leg_health_value(context, leg, "recent_closed_trade_count") or 0)
+    closed_trade_count = int(
+        _guard_health_value(
+            context,
+            leg,
+            guarded_key="recent_guard_eligible_closed_trade_count",
+            fallback_key="recent_closed_trade_count",
+        )
+        or 0
+    )
     if closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
         return False
-    recent_net_realized_pnl = float(_leg_health_value(context, leg, "recent_net_realized_pnl") or 0.0)
-    recent_win_rate = float(_leg_health_value(context, leg, "recent_win_rate") or 0.0)
+    recent_net_realized_pnl = float(
+        _guard_health_value(
+            context,
+            leg,
+            guarded_key="recent_guard_eligible_net_realized_pnl",
+            fallback_key="recent_net_realized_pnl",
+        )
+        or 0.0
+    )
+    recent_win_rate = float(
+        _guard_health_value(
+            context,
+            leg,
+            guarded_key="recent_guard_eligible_win_rate",
+            fallback_key="recent_win_rate",
+        )
+        or 0.0
+    )
     return recent_net_realized_pnl < 0 and recent_win_rate < 0.5
 
 
@@ -252,3 +317,64 @@ def _leg_health_value(context: DecisionContext, leg: IndependentLeg, key: str) -
 def _leg_health_datetime(context: DecisionContext, leg: IndependentLeg, key: str):
     value = _leg_health_value(context, leg, key)
     return value if hasattr(value, "isoformat") else None
+
+
+def _guard_health_value(
+    context: DecisionContext,
+    leg: IndependentLeg,
+    *,
+    guarded_key: str,
+    fallback_key: str,
+) -> object | None:
+    guarded_value = _leg_health_value(context, leg, guarded_key)
+    if guarded_value is not None:
+        return guarded_value
+    return _leg_health_value(context, leg, fallback_key)
+
+
+def _guard_health_datetime(
+    context: DecisionContext,
+    leg: IndependentLeg,
+    *,
+    guarded_key: str,
+    fallback_key: str,
+):
+    value = _guard_health_value(
+        context,
+        leg,
+        guarded_key=guarded_key,
+        fallback_key=fallback_key,
+    )
+    return value if hasattr(value, "isoformat") else None
+
+
+def _gate_expected_net_edge_bps(expectancy: IndependentBookExpectancy | None) -> float:
+    if expectancy is None:
+        return 0.0
+    if expectancy.expected_lifecycle_net_edge_bps is not None:
+        return expectancy.expected_lifecycle_net_edge_bps
+    return expectancy.expected_net_edge_bps
+
+
+def _fuse_expected_net_edge_bps(expectancy: IndependentBookExpectancy | None) -> float:
+    if expectancy is None:
+        return 0.0
+    return expectancy.expected_net_edge_bps
+
+
+def _gate_expected_cost_bps(expectancy: IndependentBookExpectancy | None) -> float:
+    if expectancy is None:
+        return 0.0
+    return expectancy.expected_cost_bps
+
+
+def _guard_fee_drag_ratio(*, context: DecisionContext, leg: IndependentLeg) -> float:
+    return float(
+        _guard_health_value(
+            context,
+            leg,
+            guarded_key="recent_guard_eligible_fee_drag_ratio",
+            fallback_key="recent_fee_drag_ratio",
+        )
+        or 0.0
+    )

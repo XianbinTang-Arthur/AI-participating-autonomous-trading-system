@@ -12,6 +12,7 @@ from aats.services.decision_engine.target_position import resolve_balance_aware_
 
 from .adaptive import threshold_snapshot
 from .diagnostics import legacy_runtime_state_snapshot
+from .economics import INDEPENDENT_MIN_ECONOMIC_EXIT_NOTIONAL_QUOTE
 from .execution_policy import resolve_execution_policy
 from .gates import (
     _leg_health_value,
@@ -240,7 +241,7 @@ def _evaluate_book_core(
         score=score,
         entry_threshold=entry_threshold,
         scale_threshold=scale_threshold,
-        expected_net_edge_bps=(None if expectancy is None else expectancy.expected_net_edge_bps),
+        expected_net_edge_bps=(None if expectancy is None else _gate_expectancy_net_edge_bps(expectancy)),
     )
     score_stability_metrics = compute_score_stability(
         settings=settings,
@@ -332,6 +333,11 @@ def _evaluate_book_core(
         else:
             reason_codes.append(f"independent_{leg}_book_signal_below_entry_threshold")
     else:
+        current_notional = (
+            to_decimal(context.current_long_position_notional)
+            if leg == "long"
+            else to_decimal(context.current_short_position_notional)
+        )
         state = "holding"
         book_action = "hold"
         close_reason = determine_close_reason(
@@ -409,6 +415,15 @@ def _evaluate_book_core(
                     current_qty=current_qty,
                     directional_leg_target_qty=directional_leg_target_qty,
                 )
+                target_qty = _apply_minimum_economic_exit_floor(
+                    current_qty=current_qty,
+                    current_notional=current_notional,
+                    target_qty=target_qty,
+                )
+                if target_qty <= EPSILON_DECIMAL_12:
+                    reason_codes.append(
+                        f"independent_{leg}_book_de_risk_floor_promoted_to_close"
+                    )
                 if target_qty + EPSILON_DECIMAL_12 < current_qty:
                     state = "closing"
                     book_action = "de_risk"
@@ -549,13 +564,25 @@ def _apply_health_enforcement(
         book_action = "blocked"
         changed = True
     elif health_snapshot.only_reduce and current_qty > EPSILON_DECIMAL_12 and book_action == "hold":
+        current_notional = (
+            to_decimal(getattr(decision.context, "current_long_position_notional", Decimal("0")))
+            if leg == "long"
+            else to_decimal(getattr(decision.context, "current_short_position_notional", Decimal("0")))
+        )
         reduced_target = compute_de_risk_target_qty(
             current_qty=current_qty,
             directional_leg_target_qty=directional_leg_target_qty,
         )
+        reduced_target = _apply_minimum_economic_exit_floor(
+            current_qty=current_qty,
+            current_notional=current_notional,
+            target_qty=reduced_target,
+        )
         if reduced_target + EPSILON_DECIMAL_12 < current_qty:
             close_reason = "execution_health_degraded"
             reason_codes.append(close_reason_code(leg=leg, close_reason=close_reason))
+            if reduced_target <= EPSILON_DECIMAL_12:
+                reason_codes.append(f"independent_{leg}_book_de_risk_floor_promoted_to_close")
             target_qty = reduced_target
             state = "closing"
             book_action = "de_risk"
@@ -806,6 +833,35 @@ def _expectancy_net_edge_bps(expectancy: IndependentBookExpectancy | None) -> fl
     return 0.0 if expectancy is None else expectancy.expected_net_edge_bps
 
 
+def _gate_expectancy_net_edge_bps(expectancy: IndependentBookExpectancy | None) -> float:
+    if expectancy is None:
+        return 0.0
+    if expectancy.expected_lifecycle_net_edge_bps is not None:
+        return expectancy.expected_lifecycle_net_edge_bps
+    return expectancy.expected_net_edge_bps
+
+
+def _apply_minimum_economic_exit_floor(
+    *,
+    current_qty: Decimal,
+    current_notional: Decimal,
+    target_qty: Decimal,
+) -> Decimal:
+    if current_qty <= EPSILON_DECIMAL_12 or current_notional <= EPSILON_DECIMAL_12:
+        return target_qty
+    clamped_target_qty = max(to_decimal(target_qty), Decimal("0"))
+    if clamped_target_qty <= EPSILON_DECIMAL_12 or clamped_target_qty >= current_qty - EPSILON_DECIMAL_12:
+        return clamped_target_qty
+    residual_notional = current_notional * (clamped_target_qty / current_qty)
+    action_notional = current_notional - residual_notional
+    if (
+        residual_notional < INDEPENDENT_MIN_ECONOMIC_EXIT_NOTIONAL_QUOTE
+        or action_notional < INDEPENDENT_MIN_ECONOMIC_EXIT_NOTIONAL_QUOTE
+    ):
+        return Decimal("0")
+    return clamped_target_qty
+
+
 def _expected_slippage_bps(*, settings: AATSSettings) -> float:
     return max(float(settings.max_slippage_tolerance_bps), 0.0) * max(
         float(settings.strategy_expected_slippage_bps_fraction),
@@ -833,8 +889,16 @@ def _compute_liquidity_quality_score(
         0.0,
         1.0,
     )
-    fee_drag_ratio = float(_leg_health_value(context, leg, "recent_fee_drag_ratio") or 0.0)
-    churn_ratio = float(_leg_health_value(context, leg, "recent_churn_ratio") or 0.0)
+    fee_drag_ratio = _guard_fee_drag_ratio(context=context, leg=leg)
+    churn_ratio = float(
+        _guard_health_value(
+            context,
+            leg,
+            "recent_guard_eligible_churn_ratio",
+            "recent_churn_ratio",
+        )
+        or 0.0
+    )
     fee_drag_score = 1.0
     if settings.strategy_max_fee_drag_ratio > 0:
         fee_drag_score = _clamp(1.0 - (fee_drag_ratio / float(settings.strategy_max_fee_drag_ratio)), 0.0, 1.0)
@@ -863,9 +927,25 @@ def _execution_health_state(
 ) -> str:
     if _trial_guard_active(settings=settings, context=context, leg=leg):
         return "blocked"
-    closed_trade_count = int(_leg_health_value(context, leg, "recent_closed_trade_count") or 0)
-    fee_drag_ratio = float(_leg_health_value(context, leg, "recent_fee_drag_ratio") or 0.0)
-    churn_ratio = float(_leg_health_value(context, leg, "recent_churn_ratio") or 0.0)
+    closed_trade_count = int(
+        _guard_health_value(
+            context,
+            leg,
+            "recent_guard_eligible_closed_trade_count",
+            "recent_closed_trade_count",
+        )
+        or 0
+    )
+    fee_drag_ratio = _guard_fee_drag_ratio(context=context, leg=leg)
+    churn_ratio = float(
+        _guard_health_value(
+            context,
+            leg,
+            "recent_guard_eligible_churn_ratio",
+            "recent_churn_ratio",
+        )
+        or 0.0
+    )
     if closed_trade_count >= settings.strategy_performance_guard_min_closed_trades:
         if (
             fee_drag_ratio > float(settings.strategy_max_fee_drag_ratio)
@@ -877,7 +957,15 @@ def _execution_health_state(
             or churn_ratio >= float(settings.strategy_max_churn_ratio) * 0.75
         ):
             return "degraded"
-    low_edge_streak = int(_leg_health_value(context, leg, "recent_low_edge_trade_streak") or 0)
+    low_edge_streak = int(
+        _guard_health_value(
+            context,
+            leg,
+            "recent_guard_eligible_low_edge_trade_streak",
+            "recent_low_edge_trade_streak",
+        )
+        or 0
+    )
     if low_edge_streak >= max(int(settings.strategy_low_edge_streak_limit) - 1, 1):
         return "degraded"
     return "ok"
@@ -891,12 +979,60 @@ def _trial_guard_active(
 ) -> bool:
     if not settings.strategy_hedge_independent_trial_guard_enabled:
         return False
-    closed_trade_count = int(_leg_health_value(context, leg, "recent_closed_trade_count") or 0)
+    closed_trade_count = int(
+        _guard_health_value(
+            context,
+            leg,
+            "recent_guard_eligible_closed_trade_count",
+            "recent_closed_trade_count",
+        )
+        or 0
+    )
     if closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
         return False
-    recent_net_realized_pnl = to_decimal(_leg_health_value(context, leg, "recent_net_realized_pnl") or Decimal("0"))
-    recent_win_rate = float(_leg_health_value(context, leg, "recent_win_rate") or 0.0)
+    recent_net_realized_pnl = to_decimal(
+        _guard_health_value(
+            context,
+            leg,
+            "recent_guard_eligible_net_realized_pnl",
+            "recent_net_realized_pnl",
+        )
+        or Decimal("0")
+    )
+    recent_win_rate = float(
+        _guard_health_value(
+            context,
+            leg,
+            "recent_guard_eligible_win_rate",
+            "recent_win_rate",
+        )
+        or 0.0
+    )
     return recent_net_realized_pnl < -EPSILON_DECIMAL_12 and recent_win_rate < 0.5
+
+
+def _guard_health_value(
+    context: DecisionContext,
+    leg: IndependentLeg,
+    guarded_key: str,
+    fallback_key: str,
+) -> object | None:
+    guarded_value = _leg_health_value(context, leg, guarded_key)
+    if guarded_value is not None:
+        return guarded_value
+    return _leg_health_value(context, leg, fallback_key)
+
+
+def _guard_fee_drag_ratio(*, context: DecisionContext, leg: IndependentLeg) -> float:
+    return float(
+        _guard_health_value(
+            context,
+            leg,
+            "recent_guard_eligible_fee_drag_ratio",
+            "recent_fee_drag_ratio",
+        )
+        or 0.0
+    )
 
 
 def _replay_prior_book_state(*, decision: IndependentBookDecision) -> str | None:

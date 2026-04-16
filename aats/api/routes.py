@@ -823,6 +823,22 @@ async def position_lifecycle_profitability(
     return _query(request).position_lifecycle_profitability(limit=limit)
 
 
+@router.get("/reports/position-lifecycle-attribution")
+async def position_lifecycle_attribution(
+    request: Request,
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    return _query(request).position_lifecycle_attribution(limit=limit)
+
+
+@router.get("/reports/position-lifecycle-attribution/{lifecycle_id:path}")
+async def position_lifecycle_attribution_detail(request: Request, lifecycle_id: str) -> dict[str, Any]:
+    try:
+        return _query(request).position_lifecycle_attribution_detail(lifecycle_id=lifecycle_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @router.get("/reports/strategy-segments")
 async def strategy_segment_report(
     request: Request,

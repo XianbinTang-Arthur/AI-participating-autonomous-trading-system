@@ -43,6 +43,8 @@ class IndependentBookExpectancy:
     expected_slippage_bps: float
     expected_cost_bps: float
     expected_net_edge_bps: float
+    expected_lifecycle_cost_bps: float | None = None
+    expected_lifecycle_net_edge_bps: float | None = None
     expected_alpha_bps: float | None = None
     planned_delta_qty: Decimal | None = None
     projected_notional: Decimal | None = None

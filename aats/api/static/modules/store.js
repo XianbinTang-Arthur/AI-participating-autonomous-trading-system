@@ -116,7 +116,7 @@ const DEFERRED_VIEW_PANELS = {
     "guardedLivePreflight",
     "guardedLiveRunPacket",
   ]),
-  strategy: new Set(["trialReviewSummary", "strategyAttribution"]),
+  strategy: new Set(["trialReviewSummary", "strategyAttribution", "positionLifecycleAttribution"]),
   aiAnalysis: new Set(["aiShadowEvaluations", "profileControlSummary"]),
 };
 
@@ -149,6 +149,7 @@ export function viewSpecs(view, state = null) {
       strategy: [
         ["strategyRuntime", "/strategy/runtime"],
         ["strategyAttribution", "/reports/strategy-attribution?limit=200"],
+        ["positionLifecycleAttribution", "/reports/position-lifecycle-attribution?limit=6"],
         ["latestDecision", "/decision/latest"],
         ["recentDecisions", `/decision/recent?limit=${limits.recentDecisions}&offset=0`],
         ["executionLatest", "/execution/latest"],
@@ -161,6 +162,7 @@ export function viewSpecs(view, state = null) {
       ["executionLatest", "/execution/latest"],
       ["recentOrders", `/orders/recent?limit=${limits.recentOrders}&offset=0`],
       ["recentFills", `/fills/recent?limit=${limits.recentFills}&offset=0`],
+      ["positionLifecycleAttribution", "/reports/position-lifecycle-attribution?limit=8"],
       ["executionErrors", "/execution/errors"],
     ],
     risk: [

@@ -326,6 +326,7 @@ class TestDashboardUI(unittest.TestCase):
 
         self.assertIn("export function createExecutionActionHandlers", execution_actions_text)
         self.assertIn("pageLoadStep = 12", execution_actions_text)
+        self.assertIn('"inspect-lifecycle-attribution": (value) => inspectLifecycleAttribution(value)', execution_actions_text)
         self.assertIn('"load-more-orders": () => adjustPageLimit("recentOrders", pageLoadStep)', execution_actions_text)
         self.assertIn('"load-more-fills": () => adjustPageLimit("recentFills", pageLoadStep)', execution_actions_text)
 
@@ -346,12 +347,14 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn('["positions", "/positions"]', store_text)
         self.assertIn('["strategyRuntime", "/strategy/runtime"]', store_text)
         self.assertIn('["strategyAttribution", "/reports/strategy-attribution?limit=200"]', store_text)
+        self.assertIn('["positionLifecycleAttribution", "/reports/position-lifecycle-attribution?limit=6"]', store_text)
         self.assertIn('["exitExecutionActionHistoryPage", riskExitExecutionHistoryPath]', store_text)
         self.assertIn('["exitExecutionActionHistoryPage", exitExecutionWorkspaceHistoryPath]', store_text)
         self.assertIn("DEFAULT_EXIT_EXECUTION_HISTORY_PAGING", store_text)
         self.assertIn("DEFERRED_VIEW_PANELS", store_text)
         self.assertIn("dashboardBundlePanelKeys", store_text)
         self.assertIn("buildDashboardBundleRequestPlan", store_text)
+        self.assertIn('["positionLifecycleAttribution", "/reports/position-lifecycle-attribution?limit=8"]', store_text)
         self.assertIn('params.append("panel", key);', store_text)
         self.assertIn('recentAIAssessments: String(limits.recentAIAssessments)', store_text)
         self.assertIn('recentAIShadowDecisions: String(limits.recentAIShadowDecisions)', store_text)
@@ -402,6 +405,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertNotIn("renderAllocatorNettingDecisionTable", strategy_text)
         self.assertIn("strategyFamilyEnablement", strategy_text)
         self.assertIn("策略归因", strategy_text)
+        self.assertIn("整笔仓位复盘", strategy_text)
         self.assertIn("自动预算与启停", strategy_text)
         self.assertIn("strategyAttribution", strategy_text)
         self.assertNotIn('href="#strategy-reference"', strategy_text)
@@ -2672,6 +2676,87 @@ console.log(JSON.stringify({
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"hidesReferenceCards":true', result.stdout)
         self.assertIn('"showsEntryExecutionGuard":true', result.stdout)
+
+    def test_strategy_view_uses_combined_net_pnl_copy_in_trial_review_summary(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  latestDecision: {},
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: {},
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    latest_applied_target: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+  strategyAttribution: { summary: {}, profitability_by_strategy_sleeve: [], sleeve_inventory_summary: [] },
+  trialReviewSummary: {
+    summary: {
+      readiness: 'watch',
+      combined_net_realized_pnl: -1.23,
+      net_realized_pnl: 9.99,
+      closed_fill_count: 4,
+      fee_to_notional_ratio: 0.0012,
+      headline: '最近综合净收益已经转负，先不要继续放大试盘。',
+    },
+    recommendation: { action_items: [], reasons: [] },
+    scaling_readiness: {
+      readiness: 'watch',
+      safe_to_trade: true,
+      review_required: false,
+      active_blocker_count: 0,
+      trial_guard_status: 'normal',
+    },
+    sections: {
+      forward_validation: {
+        summary: { verdict: 'watch', reasons: [] },
+        periods: [
+          {
+            period_label: '最近观察周期',
+            verdict: 'watch',
+            combined_net_realized_pnl: -0.45,
+            net_realized_pnl: 8.88,
+            fee_to_notional_ratio: 0.001,
+            avg_adverse_slippage_bps: 1.2,
+            closed_fill_count: 2,
+            reasons: [],
+          },
+        ],
+      },
+    },
+  },
+});
+
+console.log(JSON.stringify({
+  usesCombinedSummaryLabel: html.includes('最近综合净收益') && !html.includes('最近净收益'),
+  usesCombinedTableHeader: html.includes('综合净收益'),
+  prefersCombinedSummaryValue: html.includes('<strong class=\"summary-tile__value\">-0.45</strong>') && !html.includes('8.88'),
+  prefersCombinedPeriodValue: html.includes('-0.45'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"usesCombinedSummaryLabel":true', result.stdout)
+        self.assertIn('"usesCombinedTableHeader":true', result.stdout)
+        self.assertIn('"prefersCombinedSummaryValue":true', result.stdout)
+        self.assertIn('"prefersCombinedPeriodValue":true', result.stdout)
 
     def test_strategy_view_surfaces_budget_zero_suppression_as_non_permission_block(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
@@ -5330,6 +5415,236 @@ console.log(JSON.stringify({
         self.assertIn('"showsNegativeFeeCost":true', stdout)
         self.assertIn('"showsPositiveFeeRebate":true', stdout)
 
+    def test_execution_view_surfaces_lifecycle_diagnostics_with_detail_action(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderExecutionSections } from './aats/api/static/modules/views/execution-view.js';
+
+const sections = renderExecutionSections({
+  executionLatest: {},
+  recentOrders: { orders: [] },
+  recentFills: { fills: [] },
+  positionLifecycleAttribution: {
+    summary: {
+      lifecycle_count: 1,
+      combined_net_realized_pnl: -0.33,
+      total_fee_quote: 0.22,
+      funding_fee_quote: -0.05,
+      unassigned_funding_fee_count: 1,
+    },
+    lifecycles: [
+      {
+        lifecycle_id: 'lifecycle:btc:1',
+        symbol: 'BTC-USDT-SWAP',
+        direction: 'long',
+        timeframe: '15m',
+        family: 'independent',
+        combined_net_realized_pnl: -0.33,
+        gross_realized_pnl: 0.12,
+        total_fee_quote: 0.22,
+        entry_fee_quote: 0.10,
+        exit_fee_quote: 0.12,
+        funding_fee_quote: -0.05,
+        hold_seconds: 960,
+        entry_fill_count: 1,
+        exit_fill_count: 2,
+        child_order_count: 3,
+        closed_at: '2026-04-15T11:56:00Z',
+        exit_reason_breakdown: [
+          { reason: 'execution_health_degraded', transition_category: 'execution_guard_exit' },
+        ],
+      },
+    ],
+  },
+  executionErrors: { errors: [] },
+  metrics: { current_open_order_count: 0 },
+});
+
+const html = sections.executionLifecycleDiagnostics;
+console.log(JSON.stringify({
+  showsLifecycleCard: html.includes('仓位生命周期诊断'),
+  showsWholePositionCopy: html.includes('整笔仓位口径'),
+  showsDetailAction: html.includes('data-action="inspect-lifecycle-attribution"') && html.includes('lifecycle:btc:1'),
+  showsExitReasonSummary: html.includes('执行健康度退化') && html.includes('执行守护退出'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"showsLifecycleCard":true', stdout)
+        self.assertIn('"showsWholePositionCopy":true', stdout)
+        self.assertIn('"showsDetailAction":true', stdout)
+        self.assertIn('"showsExitReasonSummary":true', stdout)
+
+    def test_lifecycle_attribution_drawer_consumes_detail_endpoint_payload(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { buildLifecycleAttributionDrawer } from './aats/api/static/modules/lifecycle-drawer.js';
+
+const drawer = buildLifecycleAttributionDrawer({
+  lifecycle_id: 'lifecycle:btc:1',
+  summary: {
+    lifecycle_id: 'lifecycle:btc:1',
+    symbol: 'BTC-USDT-SWAP',
+    position_key: 'BTC-USDT-SWAP:long',
+    direction: 'long',
+    timeframe: '15m',
+    family: 'independent',
+    status: 'closed',
+    opened_at: '2026-04-15T11:40:00Z',
+    closed_at: '2026-04-15T11:56:00Z',
+    hold_seconds: 960,
+    combined_net_realized_pnl: -0.33,
+    gross_realized_pnl: 0.12,
+    net_realized_pnl: -0.28,
+    total_fee_quote: 0.22,
+    entry_fee_quote: 0.10,
+    exit_fee_quote: 0.12,
+    funding_fee_quote: -0.05,
+    child_order_count: 3,
+    decision_trace_count: 2,
+    trace_completeness: 'partial',
+    unmatched_actionable_decision_count: 1,
+    missing_linked_reference_count: 1,
+    child_execution_count: 2,
+    gross_to_net_capture_ratio: -2.75,
+  },
+  trace_completeness: 'partial',
+  unmatched_actionable_decision_count: 1,
+  missing_linked_reference_count: 1,
+  exit_reason_breakdown: [
+    { reason: 'failed_thesis', transition_category: 'strategy_exit', decision_count: 1 },
+  ],
+  exit_intent_breakdown: [
+    { intent: 'close_long', fill_count: 2, exit_notional_quote: 203 },
+  ],
+  decision_trace: [
+    {
+      timestamp: '2026-04-15T11:50:00Z',
+      book_state: 'closing',
+      book_action: 'close_failed_thesis',
+      close_reason: 'failed_thesis',
+      transition_category: 'strategy_exit',
+      expected_lifecycle_cost_bps: 9.5,
+      expected_lifecycle_net_edge_bps: -1.2,
+      execution_health_state: 'degraded',
+      fee_drag_ratio: 0.8,
+      churn_ratio: 0.7,
+      position_qty_before: 2,
+      position_qty_after: 1,
+      close_notional_quote: 102,
+      residual_notional_quote: 101,
+      expectancy_scope: 'decision_fallback',
+    },
+  ],
+  candidate_decisions: [
+    {
+      decision_id: 'decision-shadow',
+      timestamp: '2026-04-15T11:49:00Z',
+      book_state: 'de_risking',
+      book_action: 'de_risk',
+      close_reason: 'weak_edge_de_risk',
+      transition_category: 'protective_exit',
+      expected_cost_bps: 6.0,
+      expected_lifecycle_cost_bps: 6.0,
+      expected_net_edge_bps: -0.5,
+      expected_lifecycle_net_edge_bps: -0.5,
+      execution_health_state: 'degraded',
+      fee_drag_ratio: 0.25,
+      position_qty_before: 1,
+      position_qty_after: 0.5,
+      timeframe: '15m',
+      execution_chain_id: 'independent:decision-shadow:long:de_risk',
+    },
+  ],
+  key_metrics_timeline: [
+    {
+      timestamp: '2026-04-15T11:50:00Z',
+      event_type: 'decision',
+      close_reason: 'failed_thesis',
+      book_action: 'close_failed_thesis',
+      transition_category: 'strategy_exit',
+      position_qty_before: 2,
+      position_qty_after: 1,
+      expected_net_edge_bps: -1.2,
+      execution_health_state: 'degraded',
+    },
+    {
+      timestamp: '2026-04-15T11:51:00Z',
+      event_type: 'fill',
+      fill_bucket: 'exit',
+      position_intent: 'close_long',
+      fill_notional_quote: 102,
+      fee_quote: 0.12,
+      realized_pnl_delta: -0.2,
+      gross_realized_pnl: -0.08,
+    },
+    {
+      timestamp: '2026-04-15T11:52:00Z',
+      event_type: 'funding_fee',
+      bill_id: 'bill-funding-1',
+      amount: -0.05,
+      direction: 'expense',
+    },
+  ],
+  child_fills: [
+    {
+      fill_id: 'fill-close-1',
+      timestamp: '2026-04-15T11:51:00Z',
+      fill_bucket: 'exit',
+      position_intent: 'close_long',
+      execution_action: 'close_long',
+      fill_qty: 1,
+      fill_price: 102,
+      fill_notional_quote: 102,
+      fee_quote: 0.12,
+      realized_pnl_delta: -0.2,
+      gross_realized_pnl: -0.08,
+      starting_position_qty: 2,
+      ending_position_qty: 1,
+    },
+  ],
+});
+
+console.log(JSON.stringify({
+  usesWholePositionCopy: drawer.summary.includes('整笔仓位口径'),
+  showsSummaryCard: drawer.body.includes('整笔仓位摘要') && drawer.body.includes('综合净收益'),
+  showsDecisionFallbackNote: drawer.body.includes('生命周期成本口径暂回退到决策级估计'),
+  showsExitTrace: drawer.body.includes('退出链诊断') && drawer.body.includes('thesis失效') && drawer.body.includes('策略性退出'),
+  showsTraceCompletenessWarning: drawer.body.includes('退出链证据不完整') && drawer.body.includes('弱关联候选决策'),
+  showsMissingLinkedWarning: drawer.body.includes('缺失强关联') && drawer.body.includes('未找到对应审计/运行态证据'),
+  showsCandidateDiagnostics: drawer.body.includes('预期净边际') && drawer.body.includes('生命周期成本') && drawer.body.includes('手续费拖累'),
+  usesChineseLifecycleLabels: drawer.body.includes('个子委托') && drawer.body.includes('子执行尝试') && drawer.body.includes('资金费'),
+  showsChildFillSection: drawer.body.includes('子成交明细') && drawer.body.includes('退出成交'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"usesWholePositionCopy":true', stdout)
+        self.assertIn('"showsSummaryCard":true', stdout)
+        self.assertIn('"showsDecisionFallbackNote":true', stdout)
+        self.assertIn('"showsExitTrace":true', stdout)
+        self.assertIn('"showsTraceCompletenessWarning":true', stdout)
+        self.assertIn('"showsMissingLinkedWarning":true', stdout)
+        self.assertIn('"showsCandidateDiagnostics":true', stdout)
+        self.assertIn('"usesChineseLifecycleLabels":true', stdout)
+        self.assertIn('"showsChildFillSection":true', stdout)
+
     def test_trade_display_and_order_drawer_show_fee_cost_as_negative_and_rebate_as_positive(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """
@@ -5539,6 +5854,100 @@ console.log(JSON.stringify({
         self.assertIn('"strategyKeepsFundingDirection":true', stdout)
         self.assertIn('"riskShowsSignedGuardedLiveNet":true', stdout)
         self.assertIn('"riskShowsSignedTrialGuardNet":true', stdout)
+
+    def test_strategy_view_surfaces_lifecycle_diagnostic_entry_in_attribution_area(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+
+const html = renderStrategyView({
+  latestDecision: {},
+  recentDecisions: { decisions: [] },
+  executionLatest: {},
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    latest_bundle: {},
+    recent_execution_bundles: [],
+    recent_sleeve_intents: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    latest_applied_target: {},
+    latest_allocation_decision: {},
+    configured_parameters: { directional: {}, smart_arbitrage: {} },
+    family_enablement: {},
+    smart_arbitrage_cost_summary: {},
+  },
+  strategyAttribution: {
+    summary: {
+      sleeve_pnl_record_count: 2,
+      combined_net_realized_pnl: 1.25,
+      funding_fee_net_pnl: -0.6,
+      protected_fill_count: 0,
+      unprotected_fill_count: 2,
+    },
+    profitability_by_strategy_sleeve: [],
+    sleeve_inventory_summary: [],
+    profitability_by_attribution_type: [],
+    profitability_by_strategy_bundle: [],
+  },
+  positionLifecycleAttribution: {
+    summary: {
+      lifecycle_count: 1,
+      combined_net_realized_pnl: -0.33,
+    },
+    lifecycles: [
+      {
+        lifecycle_id: 'lifecycle:btc:strategy',
+        symbol: 'BTC-USDT-SWAP',
+        direction: 'long',
+        timeframe: '15m',
+        family: 'independent',
+        combined_net_realized_pnl: -0.33,
+        gross_realized_pnl: 0.12,
+        total_fee_quote: 0.22,
+        entry_fee_quote: 0.10,
+        exit_fee_quote: 0.12,
+        funding_fee_quote: -0.05,
+        hold_seconds: 960,
+        entry_fill_count: 1,
+        exit_fill_count: 2,
+        child_order_count: 3,
+        closed_at: '2026-04-15T11:56:00Z',
+        exit_reason_breakdown: [
+          { reason: 'execution_health_degraded', transition_category: 'execution_guard_exit' },
+        ],
+      },
+    ],
+  },
+  trialReviewSummary: { summary: {}, recommendation: {}, sections: {} },
+  trialReviewHistory: {},
+  forwardValidation: {},
+  scalingReadiness: {},
+});
+
+console.log(JSON.stringify({
+  showsLifecycleArea: html.includes('整笔仓位复盘'),
+  showsWholePositionCopy: html.includes('整笔仓位口径'),
+  showsDetailAction: html.includes('data-action="inspect-lifecycle-attribution"') && html.includes('lifecycle:btc:strategy'),
+  showsExitReasonSummary: html.includes('执行健康度退化') && html.includes('执行守护退出'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"showsLifecycleArea":true', stdout)
+        self.assertIn('"showsWholePositionCopy":true', stdout)
+        self.assertIn('"showsDetailAction":true', stdout)
+        self.assertIn('"showsExitReasonSummary":true', stdout)
 
     def test_family_cutover_ui_prefers_family_execution_summary_over_net_position_fields(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

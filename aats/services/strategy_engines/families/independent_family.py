@@ -688,6 +688,14 @@ def _expectancy_net_edge_bps(expectancy: IndependentBookExpectancy | None) -> fl
     return 0.0 if expectancy is None else expectancy.expected_net_edge_bps
 
 
+def _expectancy_lifecycle_net_edge_bps(expectancy: IndependentBookExpectancy | None) -> float:
+    if expectancy is None:
+        return 0.0
+    if expectancy.expected_lifecycle_net_edge_bps is not None:
+        return expectancy.expected_lifecycle_net_edge_bps
+    return expectancy.expected_net_edge_bps
+
+
 def _independent_route_action(
     *,
     result: IndependentFamilyEvaluation,
@@ -1712,34 +1720,26 @@ def _compute_independent_book_expectancy(
     # P2 fix: execution_mode_override 由 Phase 3 exit-side 调用方传入，
     # 确保 de_risk/close_failed/close_stale 使用各自的 execution_mode
     # 而非 entry mode（它们的执行策略可能截然不同，如 taker vs passive_first）。
-    _effective_mode = str(
+    entry_mode = str(
         execution_mode_override
         if execution_mode_override is not None
         else settings.strategy_hedge_independent_entry_execution_mode
     )
-    if _effective_mode in ("passive_first", "bounded_limit"):
-        _estimate_style = "bounded_limit_ioc"
-        _estimate_order_type = "limit"
-        _estimate_passive_bias = Decimal("0.7") if _effective_mode == "passive_first" else Decimal("0.5")
-    else:
-        _estimate_style = "taker"
-        _estimate_order_type = "market"
-        _estimate_passive_bias = None
-    estimate = trade_cost_service.estimate_single_leg_entry(
+    estimate = _estimate_independent_execution_drag(
+        settings=settings,
+        trade_cost_service=trade_cost_service,
         model_name=f"independent_{leg}_book",
         symbol=context.symbol,
         product_type=context.product_type,
         margin_mode=runtime_margin_mode,
-        execution_style=_estimate_style,
-        order_type=_estimate_order_type,
-        passive_bias=_estimate_passive_bias,
+        execution_mode=entry_mode,
+        execution_action="entry",
         side=resolved_side,
         quantity=planned_delta_qty,
         projected_notional=projected_notional,
         reference_price=reference_price,
         market_snapshot=latest_market_snapshot,
         expected_slippage_bps=configured_slippage_bps,
-        include_spread=False,
         include_funding=context.product_type == "derivatives",
     )
     size_impact_bps = _estimate_component_float(
@@ -1758,9 +1758,28 @@ def _compute_independent_book_expectancy(
         component_name="reference_price",
     )
     expected_cost_bps = float(estimate.executable_total_drag_bps)
+    expected_lifecycle_cost_bps = _estimate_independent_lifecycle_cost_bps(
+        settings=settings,
+        trade_cost_service=trade_cost_service,
+        symbol=context.symbol,
+        product_type=context.product_type,
+        runtime_margin_mode=runtime_margin_mode,
+        leg=leg,
+        quantity=planned_delta_qty,
+        projected_notional=resolved_projected_notional or projected_notional,
+        reference_price=resolved_reference_price or reference_price,
+        market_snapshot=latest_market_snapshot,
+        expected_slippage_bps=configured_slippage_bps,
+        entry_cost_bps=expected_cost_bps,
+    )
     expected_net_edge_bps = (
         expected_signal_edge_bps
         - expected_cost_bps
+        - max(float(settings.strategy_edge_noise_buffer_bps), 0.0)
+    )
+    expected_lifecycle_net_edge_bps = (
+        expected_signal_edge_bps
+        - expected_lifecycle_cost_bps
         - max(float(settings.strategy_edge_noise_buffer_bps), 0.0)
     )
     return IndependentBookExpectancy(
@@ -1769,6 +1788,8 @@ def _compute_independent_book_expectancy(
         expected_slippage_bps=expected_slippage_bps,
         expected_cost_bps=expected_cost_bps,
         expected_net_edge_bps=expected_net_edge_bps,
+        expected_lifecycle_cost_bps=expected_lifecycle_cost_bps,
+        expected_lifecycle_net_edge_bps=expected_lifecycle_net_edge_bps,
         expected_alpha_bps=expected_signal_edge_bps,
         planned_delta_qty=planned_delta_qty,
         projected_notional=resolved_projected_notional or projected_notional,
@@ -1784,6 +1805,118 @@ def _compute_independent_book_expectancy(
         size_impact_bps=size_impact_bps,
         cost_confidence=float(getattr(estimate, "cost_confidence", 0.0) or 0.0),
     )
+
+
+def _estimate_independent_execution_drag(
+    *,
+    settings: AATSSettings,
+    trade_cost_service: TradeCostService,
+    model_name: str,
+    symbol: str,
+    product_type: str,
+    margin_mode: str,
+    execution_mode: str,
+    execution_action: Literal["entry", "de_risk", "close_failed_thesis", "close_stale_thesis"],
+    side: str,
+    quantity: Decimal,
+    projected_notional: Decimal | None,
+    reference_price: Decimal | None,
+    market_snapshot: MarketSnapshot | None,
+    expected_slippage_bps: float,
+    include_funding: bool,
+):
+    normalized_mode = _normalized_cost_estimate_mode(
+        execution_mode=execution_mode,
+        execution_action=execution_action,
+    )
+    if normalized_mode in {"passive_first", "bounded_limit"}:
+        estimate_style = "bounded_limit_ioc"
+        estimate_order_type = "limit"
+        estimate_passive_bias = Decimal("0.7") if normalized_mode == "passive_first" else Decimal("0.5")
+    else:
+        estimate_style = "taker"
+        estimate_order_type = "market"
+        estimate_passive_bias = None
+    return trade_cost_service.estimate_single_leg_entry(
+        model_name=model_name,
+        symbol=symbol,
+        product_type=product_type,
+        margin_mode=margin_mode,
+        execution_style=estimate_style,
+        order_type=estimate_order_type,
+        passive_bias=estimate_passive_bias,
+        side=side,
+        quantity=quantity,
+        projected_notional=projected_notional,
+        reference_price=reference_price,
+        market_snapshot=market_snapshot,
+        expected_slippage_bps=expected_slippage_bps,
+        include_spread=False,
+        include_funding=include_funding,
+    )
+
+
+def _normalized_cost_estimate_mode(
+    *,
+    execution_mode: str,
+    execution_action: Literal["entry", "de_risk", "close_failed_thesis", "close_stale_thesis"],
+) -> str:
+    normalized = str(execution_mode or "").strip().lower()
+    if normalized != "adaptive":
+        return normalized or "bounded_taker"
+    if execution_action == "close_failed_thesis":
+        return "aggressive_bounded_taker"
+    if execution_action in {"de_risk", "close_stale_thesis"}:
+        return "bounded_limit"
+    return "bounded_taker"
+
+
+def _estimate_independent_lifecycle_cost_bps(
+    *,
+    settings: AATSSettings,
+    trade_cost_service: TradeCostService,
+    symbol: str,
+    product_type: str,
+    runtime_margin_mode: str,
+    leg: IndependentLeg,
+    quantity: Decimal,
+    projected_notional: Decimal | None,
+    reference_price: Decimal | None,
+    market_snapshot: MarketSnapshot | None,
+    expected_slippage_bps: float,
+    entry_cost_bps: float,
+) -> float:
+    if quantity <= EPSILON_DECIMAL_12:
+        return max(entry_cost_bps, 0.0)
+    exit_side = "sell" if leg == "long" else "buy"
+    exit_modes = (
+        ("close_failed_thesis", str(settings.strategy_hedge_independent_close_failed_thesis_execution_mode)),
+        ("close_stale_thesis", str(settings.strategy_hedge_independent_close_stale_execution_mode)),
+        ("de_risk", str(settings.strategy_hedge_independent_de_risk_execution_mode)),
+    )
+    # Exit estimates can occasionally degrade to negative values in edge cases;
+    # clamp the exit-side fallback at zero so we do not double-count entry cost.
+    exit_cost_candidates = [0.0]
+    for action, mode in exit_modes:
+        estimate = _estimate_independent_execution_drag(
+            settings=settings,
+            trade_cost_service=trade_cost_service,
+            model_name=f"independent_{leg}_{action}_floor",
+            symbol=symbol,
+            product_type=product_type,
+            margin_mode=runtime_margin_mode,
+            execution_mode=mode,
+            execution_action=action,
+            side=exit_side,
+            quantity=quantity,
+            projected_notional=projected_notional,
+            reference_price=reference_price,
+            market_snapshot=market_snapshot,
+            expected_slippage_bps=expected_slippage_bps,
+            include_funding=False,
+        )
+        exit_cost_candidates.append(float(estimate.executable_total_drag_bps))
+    return max(entry_cost_bps, 0.0) + max(exit_cost_candidates)
 
 
 def _independent_signal_edge_bps(
