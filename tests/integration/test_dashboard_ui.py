@@ -2372,6 +2372,113 @@ const releaseEmptyConfigHtml = renderAIConfigView({
   },
 });
 
+const rollbackConfigHtml = renderAIConfigView({
+  session: { role: 'admin' },
+  aiRuntime: {
+    configured_operating_mode: 'baseline_only',
+    effective_operating_mode: 'baseline_only',
+    manual_override_active: false,
+    strategy_profile_auto_control_configured: false,
+    strategy_profile_auto_control_effective: false,
+    strategy_profile_auto_control_reason: 'explicit_setting_disabled',
+  },
+  summary: {
+    ai: {
+      configured_operating_mode: 'baseline_only',
+      effective_operating_mode: 'baseline_only',
+      strategy_profile_auto_control_configured: false,
+      strategy_profile_auto_control_effective: false,
+      strategy_profile_auto_control_reason: 'explicit_setting_disabled',
+    },
+    runtime_profile: { current_runtime_payload: {} },
+    strategy_profile: {
+      activation: { active_profile_id: 'trend_normal' },
+      active_revision: { profile_id: 'trend_normal' },
+      latest_selection_decision: {},
+      latest_optimization_report: {},
+    },
+  },
+  rdpControl: {
+    environment: {
+      name: 'prod',
+      strict_environment: true,
+      require_gate_pass: true,
+      required_observation_window_hours: 72,
+      production_apply_enabled: true,
+    },
+    health: {
+      overall_health: 'blocked',
+      blocking_reasons: ['rollback_pending'],
+      warnings: [],
+      checks: [],
+    },
+    operations_summary: {
+      approved_release_candidate_count: 1,
+      draft_recommendation_count: 0,
+      draft_parameter_recommendation_count: 0,
+      observing_release_count: 1,
+      rollback_recommended_count: 1,
+      latest_gate_status: 'pass',
+      latest_release_apply_result: 'success',
+      health_status: 'blocked',
+      health_blocked: true,
+    },
+    tasks: {},
+    pending_recommendations: [
+      {
+        recommendation_id: 'rec-release-1',
+        symbol: 'BTC-USDT-SWAP',
+        family: 'independent',
+        timeframe: '15m',
+        recommendation_type: 'parameter_upgrade',
+        confidence: 'high',
+        reason: '这条建议已经批准，但当前不应先发布新版本。',
+        status: 'approved',
+        target_parameter_set_id: 'ps_release_1',
+        created_at: '2026-03-21T12:22:00Z',
+      },
+    ],
+    active_parameters: {},
+    governance_state: {
+      available: true,
+      governance_managed: true,
+      paused_combos: [],
+      parameter_source_mode: 'governance_managed',
+      status_distribution: {},
+      combo_states: [],
+    },
+    recent_gate_results: [],
+    recent_releases: [],
+    observation_queue: [
+      {
+        release_id: 'rel-rollback-1',
+        family: 'independent',
+        timeframe: '15m',
+        combo_key: 'independent_15m',
+        recommendation_id: 'rec-old',
+        parameter_set_id: 'ps_live_rollback',
+        previous_parameter_set_id: 'ps_prev_rollback',
+        created_at: '2026-03-21T10:00:00Z',
+        gate_status: 'pass',
+        apply_result: 'success',
+        observation_status: 'rollback_recommended',
+        observation_window_hours: 72,
+        observation: {
+          status: 'rollback_recommended',
+          recommendation: 'rollback_recommended',
+          evaluated_at: '2026-03-21T12:30:00Z',
+        },
+        effectiveness: {
+          conclusion: 'negative',
+          detail: '实盘表现显著回撤',
+        },
+        current_active_parameter_set_id: 'ps_live_rollback',
+        is_current_active_release: true,
+      },
+    ],
+  },
+});
+
 const drawer = buildDecisionDrawer({
   decision_id: 'dec-1',
   decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
@@ -2399,19 +2506,22 @@ console.log(JSON.stringify({
   analysisNoTopNavButtons: !analysisHtml.includes('前往 AI 工作台') && !analysisHtml.includes('前往 AI 配置'),
   configHasRuntimeModeCard: configHtml.includes('运行模式切换'),
   configHasAutoProfileControlCard: configHtml.includes('自动换档控制'),
-  configHasRdpSummaryCard: configHtml.includes('RDP 发布指挥台'),
-  configHasCommandBar: configHtml.includes('先判断能不能动，再决定动哪条建议'),
-  configHasRecommendationStep: configHtml.includes('1. 候选建议'),
-  configHasPreflightStep: configHtml.includes('2. 发布前检查'),
-  configHasReleaseStep: configHtml.includes('3. 发布执行'),
-  configHasObservationStep: configHtml.includes('4. 观察与回滚'),
+  configHasRdpSummaryCard: configHtml.includes('RDP 核心面板'),
+  configHasCommandBar: configHtml.includes('只保留当前能推进的工作'),
+  configHasCoreQueue: configHtml.includes('当前待处理'),
+  configHasBlockerCard: configHtml.includes('当前阻断'),
   configUsesReleaseFirstLanguage: configHtml.includes('创建发布') && configHtml.includes('运行 Gate'),
   configNoDirectApplyLanguage: !configHtml.includes('data-action="rdp-approve-and-apply"') && !configHtml.includes('data-action="rdp-apply-only"'),
-  configShowsCandidateNotEmpty: !configHtml.includes('当前没有待审批的参数建议'),
-  configSeparatesCandidateAndGovernance: configHtml.includes('本轮生成参数集 ps_candidate_1') && configHtml.includes('当前治理建议：暂停（待审批）'),
-  configHasHistoryLoadMore: configHtml.includes('加载更多历史建议（剩余 1 条）') && !configHtml.includes('ps_hist_5'),
-  configTranslatesPreflightChecks: configHtml.includes('治理数据库还没有接通，发布链路现在不可用。') && configHtml.includes('查看原始检查详情'),
-  configReleaseEmptyStateMerged: releaseEmptyConfigHtml.includes('当前既没有已批准待发布的建议，也还没有历史 release 记录。') && !releaseEmptyConfigHtml.includes('当前还没有 release 记录。'),
+  configShowsCandidateAndGovernance: configHtml.includes('本轮生成参数集 ps_candidate_1') && configHtml.includes('当前治理建议：暂停（待审批）'),
+  configDeduplicatesGovernanceCard: !configHtml.includes('<h4>治理建议 暂停</h4>'),
+  configHidesHistoryNoise: !configHtml.includes('加载更多历史建议') && !configHtml.includes('最近发布记录'),
+  configTranslatesBlockers: configHtml.includes('治理数据库还没有接通，发布链路现在不可用。') && !configHtml.includes('查看原始检查详情'),
+  configReleaseCardCollapsedIntoQueue: releaseEmptyConfigHtml.includes('本轮生成参数集 ps_empty_1') && !releaseEmptyConfigHtml.includes('最近发布记录'),
+  configShowsReleaseWindow: configHtml.includes('观察窗口 24 小时（按当前环境默认值）'),
+  rollbackCommandBarPrioritizesRollback:
+    rollbackConfigHtml.split('当前待处理')[0].includes('data-action="rdp-rollback-parameters"')
+    && !rollbackConfigHtml.split('当前待处理')[0].includes('data-action="rdp-create-release"'),
+  rollbackCommandBarExplainsPriority: rollbackConfigHtml.includes('有发布进入回滚建议状态，优先处理回滚。'),
   configHasRuntimeParams: configHtml.includes('运行参数概览'),
   configOmitsAdaptiveControls: !configHtml.includes('风险预算乘数') && !configHtml.includes('执行侵略性乘数'),
   configHasTimingControls: configHtml.includes('持有与冷却') && configHtml.includes('低边际保护'),
@@ -2446,17 +2556,18 @@ console.log(JSON.stringify({
         self.assertIn('"configHasAutoProfileControlCard":true', result.stdout)
         self.assertIn('"configHasRdpSummaryCard":true', result.stdout)
         self.assertIn('"configHasCommandBar":true', result.stdout)
-        self.assertIn('"configHasRecommendationStep":true', result.stdout)
-        self.assertIn('"configHasPreflightStep":true', result.stdout)
-        self.assertIn('"configHasReleaseStep":true', result.stdout)
-        self.assertIn('"configHasObservationStep":true', result.stdout)
+        self.assertIn('"configHasCoreQueue":true', result.stdout)
+        self.assertIn('"configHasBlockerCard":true', result.stdout)
         self.assertIn('"configUsesReleaseFirstLanguage":true', result.stdout)
         self.assertIn('"configNoDirectApplyLanguage":true', result.stdout)
-        self.assertIn('"configShowsCandidateNotEmpty":true', result.stdout)
-        self.assertIn('"configSeparatesCandidateAndGovernance":true', result.stdout)
-        self.assertIn('"configHasHistoryLoadMore":true', result.stdout)
-        self.assertIn('"configTranslatesPreflightChecks":true', result.stdout)
-        self.assertIn('"configReleaseEmptyStateMerged":true', result.stdout)
+        self.assertIn('"configShowsCandidateAndGovernance":true', result.stdout)
+        self.assertIn('"configDeduplicatesGovernanceCard":true', result.stdout)
+        self.assertIn('"configHidesHistoryNoise":true', result.stdout)
+        self.assertIn('"configTranslatesBlockers":true', result.stdout)
+        self.assertIn('"configReleaseCardCollapsedIntoQueue":true', result.stdout)
+        self.assertIn('"configShowsReleaseWindow":true', result.stdout)
+        self.assertIn('"rollbackCommandBarPrioritizesRollback":true', result.stdout)
+        self.assertIn('"rollbackCommandBarExplainsPriority":true', result.stdout)
         self.assertIn('"configHasRuntimeParams":true', result.stdout)
         self.assertIn('"configOmitsAdaptiveControls":true', result.stdout)
         self.assertIn('"configHasTimingControls":true', result.stdout)
@@ -2472,6 +2583,88 @@ console.log(JSON.stringify({
         self.assertIn('"manualOnlyProfileButtonsUnlocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeCurrentModeLocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeAvoidsLegacyButtons":true', result.stdout)
+
+    def test_rdp_action_handlers_use_default_observation_windows_without_prompt(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { createRdpActionHandlers } from './aats/api/static/modules/actions/rdp-actions.js';
+
+const requests = [];
+let promptCount = 0;
+let refreshCount = 0;
+const state = {
+  actionInFlight: false,
+  flash: null,
+  data: {
+    rdpControl: {
+      environment: {
+        required_observation_window_hours: 72,
+      },
+    },
+  },
+};
+
+const handlers = createRdpActionHandlers({
+  beginAction: () => {
+    state.actionInFlight = true;
+    return () => {
+      state.actionInFlight = false;
+    };
+  },
+  renderBanners: () => {},
+  refreshDashboard: async () => {
+    refreshCount += 1;
+  },
+  requestJson: async (path, options = {}) => {
+    requests.push({ path, body: options.body || null });
+    if (path === '/rdp/releases/create') {
+      return { ok: true, release: { release_id: 'rel-created-1' } };
+    }
+    if (path === '/rdp/observations/run') {
+      return { ok: true, status: 'observing' };
+    }
+    return { ok: true };
+  },
+  state,
+  windowRef: {
+    confirm: () => true,
+    prompt: () => {
+      promptCount += 1;
+      return '999';
+    },
+  },
+});
+
+await handlers['rdp-create-release']('rec-1');
+await handlers['rdp-run-observation']('rel-1|48');
+
+console.log(JSON.stringify({
+  promptCount,
+  refreshCount,
+  createReleaseUsesEnvWindow: requests.some((item) =>
+    item.path === '/rdp/releases/create'
+    && item.body
+    && item.body.observation_window_hours === 72
+  ),
+  runObservationUsesReleaseWindow: requests.some((item) =>
+    item.path === '/rdp/observations/run'
+    && item.body
+    && item.body.window_hours === 48
+  ),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"promptCount":0', result.stdout)
+        self.assertIn('"refreshCount":2', result.stdout)
+        self.assertIn('"createReleaseUsesEnvWindow":true', result.stdout)
+        self.assertIn('"runObservationUsesReleaseWindow":true', result.stdout)
 
     def test_strategy_view_renders_smart_arbitrage_config_card_and_threshold_copy(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

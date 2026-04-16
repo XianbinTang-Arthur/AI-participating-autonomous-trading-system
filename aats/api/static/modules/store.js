@@ -71,7 +71,6 @@ export function createState() {
       aiConfig: {
         modeManualEditing: false,
         profileManualEditing: false,
-        rdpRecommendationHistoryExtraCount: 0,
       },
       risk: {
         exitExecutionHistory: {

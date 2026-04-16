@@ -219,7 +219,6 @@ const rdpActionHandlers = createRdpActionHandlers({
   requestJson,
   state,
 });
-const RDP_RECOMMENDATION_HISTORY_STEP = 4;
 
 init();
 
@@ -588,22 +587,7 @@ const LOCAL_DISPATCH_ACTIONS = {
   "load-more-replay-validations": () => adjustPageLimit("recentReplayValidations", PAGE_LOAD_STEP),
   "collapse-replay-validations": () => resetPageLimit("recentReplayValidations"),
   "set-replay-parent-filter": (value) => setReplayParentFilter(value),
-  "load-more-rdp-recommendations": () => loadMoreRdpRecommendationHistory(),
-  "collapse-rdp-recommendations": () => resetRdpRecommendationHistory(),
 };
-
-function loadMoreRdpRecommendationHistory() {
-  const current = Number(state.ui.aiConfig?.rdpRecommendationHistoryExtraCount || 0);
-  state.ui.aiConfig.rdpRecommendationHistoryExtraCount = (
-    Number.isFinite(current) && current > 0 ? current : 0
-  ) + RDP_RECOMMENDATION_HISTORY_STEP;
-  renderShell();
-}
-
-function resetRdpRecommendationHistory() {
-  state.ui.aiConfig.rdpRecommendationHistoryExtraCount = 0;
-  renderShell();
-}
 
 function navigateToView(value) {
   const nextView = resolveKnownView(value);

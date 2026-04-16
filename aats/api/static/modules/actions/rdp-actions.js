@@ -24,19 +24,10 @@ export function createRdpActionHandlers({
     return Number.isFinite(hours) && hours > 0 ? Math.floor(hours) : 24;
   }
 
-  function promptObservationWindowHours(defaultHours) {
-    const raw = windowRef.prompt(
-      "请输入观察窗口时长（小时）",
-      String(defaultHours),
-    );
-    if (raw === null) return null;
-    const parsed = Number.parseInt(String(raw).trim(), 10);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      setFlash(state, "warning", "观察窗口时长必须是正整数。");
-      renderBanners();
-      return null;
-    }
-    return parsed;
+  function resolveObservationWindowHours(rawValue) {
+    const parsed = Number.parseInt(String(rawValue || "").trim(), 10);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    return defaultObservationWindowHours();
   }
 
   async function triggerWorkflow(workflow) {
@@ -145,8 +136,7 @@ export function createRdpActionHandlers({
 
   async function createRelease(recommendationId, { skipConfirm = false } = {}) {
     if (!recommendationId) return;
-    const windowHours = promptObservationWindowHours(defaultObservationWindowHours());
-    if (windowHours === null) return;
+    const windowHours = defaultObservationWindowHours();
     if (!skipConfirm && !windowRef.confirm(`确认基于 ${truncateForConfirm(recommendationId)} 创建发布吗？`)) return;
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, "正在创建发布…");
@@ -162,7 +152,7 @@ export function createRdpActionHandlers({
       });
       if (result.ok) {
         const releaseId = result.release?.release_id || "release";
-        setFlash(state, "info", `${releaseId} 已创建，后续请继续跟踪观察状态。`);
+        setFlash(state, "info", `${releaseId} 已创建，已按默认 ${windowHours} 小时观察窗口推进。`);
       } else {
         setFlash(state, "warning", result.message || "创建发布失败。");
       }
@@ -190,8 +180,7 @@ export function createRdpActionHandlers({
         renderBanners();
         return;
       }
-      const windowHours = promptObservationWindowHours(defaultObservationWindowHours());
-      if (windowHours === null) return;
+      const windowHours = defaultObservationWindowHours();
       const releaseResult = await requestJson("/rdp/releases/create", {
         method: "POST",
         body: {
@@ -218,13 +207,7 @@ export function createRdpActionHandlers({
   async function runObservation(value) {
     if (!value) return;
     const [releaseId, defaultHoursRaw] = String(value).split("|");
-    const defaultHours = Number.parseInt(defaultHoursRaw || "", 10);
-    const windowHours = promptObservationWindowHours(
-      Number.isFinite(defaultHours) && defaultHours > 0
-        ? defaultHours
-        : defaultObservationWindowHours(),
-    );
-    if (windowHours === null) return;
+    const windowHours = resolveObservationWindowHours(defaultHoursRaw);
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, "正在运行观察…");
     try {
@@ -233,13 +216,13 @@ export function createRdpActionHandlers({
         body: { release_id: releaseId, window_hours: windowHours },
       });
       if (result.status === "rollback_recommended") {
-        setFlash(state, "warning", `${truncateForConfirm(releaseId)} 观察结果建议回滚。`);
+        setFlash(state, "warning", `${truncateForConfirm(releaseId)} 在 ${windowHours} 小时窗口下建议回滚。`);
       } else if (result.status) {
-        setFlash(state, "info", `${truncateForConfirm(releaseId)} 观察状态：${result.status}。`);
+        setFlash(state, "info", `${truncateForConfirm(releaseId)} 观察状态：${result.status}（窗口 ${windowHours} 小时）。`);
       } else if (result.ok === false) {
         setFlash(state, "warning", result.message || "运行观察失败。");
       } else {
-        setFlash(state, "info", `${truncateForConfirm(releaseId)} 观察任务已完成。`);
+        setFlash(state, "info", `${truncateForConfirm(releaseId)} 观察任务已完成（窗口 ${windowHours} 小时）。`);
       }
       await refreshDashboard({ manual: true });
     } catch (error) {
