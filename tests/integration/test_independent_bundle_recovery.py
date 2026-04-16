@@ -150,6 +150,125 @@ class TestIndependentBundleRecoveryIntegration(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(bundle["legs"][0]["execution_attempt_id"], "attempt_bundle_independent_1")
         self.assertEqual(bundle["legs"][0]["strategy_execution_mode"], "independent_short_book")
 
+    async def test_system_recovery_ignores_historical_all_blocked_independent_bundle(self) -> None:
+        runtime = await self._runtime()
+        now = datetime.now(timezone.utc)
+        runtime.portfolio_repo.save_snapshot(
+            PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": Decimal("9000")},
+                positions=[],
+                cost_basis={},
+                realized_pnl=Decimal("0"),
+                unrealized_pnl=Decimal("0"),
+                total_equity=Decimal("9000"),
+                gross_exposure=Decimal("0"),
+                net_exposure=Decimal("0"),
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_bundle_blocked_1",
+                execution_chain_id="independent:decision_bundle_blocked_1:short:open",
+                execution_attempt_id="attempt_bundle_blocked_1",
+                intent_id="intent_bundle_blocked_1",
+                symbol="BTC-USDT-SWAP",
+                client_order_id="cl_bundle_blocked_1",
+                venue="OKX",
+                exchange_order_id=None,
+                status="BLOCKED",
+                submission_mode="leg_overlay_rollout_blocked",
+                submitted_ts=now,
+                last_update_ts=now,
+                requested_qty=Decimal("0.01"),
+                filled_qty=Decimal("0"),
+                remaining_qty=Decimal("0.01"),
+                average_fill_price=None,
+                fees=Decimal("0"),
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="short",
+                strategy_family="independent",
+                strategy_sleeve_id="sleeve_bundle_blocked_short",
+                allocation_id="alloc_bundle_blocked_1",
+                strategy_bundle_id="bundle_independent_blocked_short",
+                strategy_leg_role="hedge",
+                strategy_execution_mode="independent_short_book",
+                submission_payload={},
+            )
+        )
+        runtime.strategy_runtime_repo.save_execution_bundle(
+            StrategyExecutionBundle(
+                bundle_id="bundle_independent_blocked_short",
+                decision_id="decision_bundle_blocked_1",
+                family="independent",
+                participating_families=["independent"],
+                strategy_sleeve_refs=["sleeve_bundle_blocked_short"],
+                allocation_id="alloc_bundle_blocked_1",
+                product_type="derivatives",
+                margin_mode="cross",
+                allowed_symbols=("BTC-USDT-SWAP",),
+                route_action="override_target",
+                bundle_type="single_sleeve",
+                status="blocked",
+                selected_symbol="BTC-USDT-SWAP",
+                reason_codes=["strategy_bundle_blocked"],
+                legs=[
+                    StrategyLegIntent(
+                        symbol="BTC-USDT-SWAP",
+                        execution_chain_id="independent:decision_bundle_blocked_1:short:open",
+                        execution_attempt_id="attempt_bundle_blocked_1",
+                        product_type="derivatives",
+                        side="sell",
+                        position_mode="long_short_mode",
+                        pos_side="short",
+                        action="open",
+                        family="independent",
+                        role="hedge",
+                        strategy_sleeve_id="sleeve_bundle_blocked_short",
+                        allocation_id="alloc_bundle_blocked_1",
+                        margin_mode="cross",
+                        current_position_qty=Decimal("0"),
+                        target_position_qty=Decimal("-0.01"),
+                        delta_position_qty=Decimal("-0.01"),
+                        execution_compatible=True,
+                        execution_mode="independent_short_book",
+                    )
+                ],
+            )
+        )
+
+        recovery_service = ExecutionRecoveryService(
+            settings=runtime.settings,
+            execution_repo=runtime.execution_repo,
+            obligation_repo=runtime.obligation_repo,
+            portfolio_repo=runtime.portfolio_repo,
+            reconciliation_repo=runtime.reconciliation_repo,
+            strategy_runtime_repo=runtime.strategy_runtime_repo,
+            reconstruction_service=PortfolioReconstructionService(
+                initial_usdt_balance=runtime.settings.initial_usdt_balance,
+                snapshot_builder=runtime.portfolio_service.snapshot_builder,
+            ),
+            price_provider=runtime.market_gateway.latest_price,
+            kill_switch=runtime.kill_switch,
+            bootstrap_portfolio_from_exchange=False,
+            reconciliation_stale_after_seconds=runtime.settings.reconciliation_stale_after_seconds,
+            recovery_policy=runtime.recovery_policy,
+        )
+        artifacts = recovery_service.recover(portfolio_state=runtime.portfolio_service.state)
+        runtime.recovery_status = artifacts.status
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            recovery = client.get("/system/recovery").json()
+
+        self.assertFalse(recovery["recovery"]["review_required"])
+        self.assertFalse(recovery["recovery"]["bundle_summaries"])
+
     async def _runtime(self):
         settings = AATSSettings.model_validate(
             {

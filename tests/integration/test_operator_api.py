@@ -8864,15 +8864,13 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tasks", payload)
         self.assertIn("pending_recommendations", payload)
         self.assertIn("active_parameters", payload)
-        self.assertIn("runtime_parameter_source", payload)
-        self.assertIn("latest_round_summary", payload)
-        self.assertIn("latest_research_conclusions", payload)
         self.assertIn("governance_state", payload)
+        self.assertIn("recent_gate_results", payload)
+        self.assertIn("observation_queue", payload)
         self.assertIn(
-            payload["runtime_parameter_source"]["mode"],
+            payload["governance_state"]["parameter_source_mode"],
             {"active_parameters", "governance_pause", "profile_defaults", "mixed"},
         )
-        self.assertIsInstance(payload["latest_research_conclusions"], list)
         self.assertIsInstance(payload["governance_state"], dict)
 
     async def test_execution_latest_uses_normalized_recovery_view(self) -> None:

@@ -6,6 +6,7 @@ from aats.services.execution_engine.bundle_recovery import _is_open_order
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, to_decimal
 _FAILURE_ORDER_STATES = {"REJECTED", "FAILED", "BLOCKED"}
 _BUNDLE_STATUS_REASON_CODES = {
+    "strategy_bundle_blocked",
     "strategy_bundle_partial_fill_recovery",
     "strategy_bundle_review_required",
     "strategy_bundle_recovered",
@@ -39,7 +40,9 @@ def derive_strategy_bundle_status(
         for order_state in order_states
     )
 
-    if has_failure and (has_open or has_terminal or has_filled_or_partially_filled):
+    if has_failure and not has_open and not has_filled_or_partially_filled:
+        return "blocked"
+    if has_failure and (has_open or has_filled_or_partially_filled):
         return "review_required"
     if has_open and has_terminal:
         return "partial_fill_recovery"
@@ -55,6 +58,7 @@ def apply_strategy_bundle_status_reason_codes(
 ) -> list[str]:
     filtered = [code for code in reason_codes if code not in _BUNDLE_STATUS_REASON_CODES]
     status_reason = {
+        "blocked": "strategy_bundle_blocked",
         "partial_fill_recovery": "strategy_bundle_partial_fill_recovery",
         "review_required": "strategy_bundle_review_required",
         "recovered": "strategy_bundle_recovered",

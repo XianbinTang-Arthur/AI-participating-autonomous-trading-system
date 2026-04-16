@@ -364,6 +364,7 @@
   independent_long_book: "独立多书",
   independent_short_book: "独立空书",
   independent_books: "独立双书路径",
+  strategy_bundle_blocked: "整组策略单在本地前置校验阶段已被阻断，没有进入需要人工恢复的部分成交状态",
   contracted: "已收缩",
   floor_contracted: "已收缩到下限",
   safe_mode: "安全模式",

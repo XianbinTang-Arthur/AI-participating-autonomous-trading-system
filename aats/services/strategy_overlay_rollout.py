@@ -52,7 +52,7 @@ def overlay_mode_from_execution_mode(execution_mode: str | None) -> StrategyHedg
         return "protective"
     if normalized == "opportunistic_overlay":
         return "opportunistic"
-    if normalized in {"independent_long_book", "independent_short_book"}:
+    if normalized in {"independent_books", "independent_long_book", "independent_short_book"}:
         return "independent"
     return None
 
