@@ -223,8 +223,6 @@ const rdpActionHandlers = createRdpActionHandlers({
   state,
 });
 
-init();
-
 function init() {
   bindEvents();
   renderShell();
@@ -1242,5 +1240,13 @@ function isDebugMode() {
     console.warn("[app] 安装调试入口失败", error);
   }
 })();
+
+// 这组 auth-blocked helper 依赖下面才初始化完成的 const：
+//   - PROTECTED_DASHBOARD_VIEWS
+//   - DASHBOARD_AUTH_ERROR_CODES
+// 之前 init() 放在文件前半段，renderShell()->renderActiveView() 会在模块求值过程中
+// 过早触发 isProtectedViewAuthBlocked()，命中 const 的 TDZ，导致 overview 等页面只剩
+// 外层壳子和标题，主体完全空白。把 init() 延到模块末尾，保证所有 const/helper 都已完成初始化。
+init();
 
 
