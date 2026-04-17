@@ -245,7 +245,6 @@ def apply_approved_recommendation(
         get_current_environment,
         get_policy,
         guard_parameter_apply,
-        production_parameter_apply_enabled,
     )
 
     env = get_current_environment()
@@ -254,12 +253,7 @@ def apply_approved_recommendation(
         return {"ok": False, "message": apply_guard.reason, "environment": env}
 
     policy = get_policy(env)
-    if env == "prod" and not production_parameter_apply_enabled(env):
-        return {
-            "ok": False,
-            "message": "prod parameter apply is frozen; enable RDP_PRODUCTION_APPLY_ENABLED=true before applying",
-            "environment": env,
-        }
+    # A-0.5: prod 写闸改由 API 层的 HMAC apply-token 强制，不再用 env flag。
 
     # 1. 加载 recommendation
     rec_path = project_root / DECISION_SYSTEM_DIR / "recommendation_registry.json"

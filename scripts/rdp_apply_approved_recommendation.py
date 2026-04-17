@@ -20,8 +20,10 @@
     1 = 错误
 
 说明:
-    prod 环境默认拒绝 direct apply；请改用 scripts/rdp_create_parameter_release.py
-    并显式设置 RDP_PRODUCTION_APPLY_ENABLED=true。
+    prod 环境默认拒绝 direct apply；请改用 scripts/rdp_create_parameter_release.py。
+    A-0.5 起 prod 写闸改由 API 层的 session-bound HMAC apply-token 强制，
+    通过 ``POST /rdp/operator-tokens`` 签发后，在 apply/rollback 请求头带
+    ``X-Rdp-Apply-Token`` 即可；旧 ``RDP_PRODUCTION_APPLY_ENABLED`` flag 已废弃。
 """
 
 from __future__ import annotations

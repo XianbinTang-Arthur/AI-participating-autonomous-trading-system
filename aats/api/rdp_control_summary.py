@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote as _url_quote
@@ -17,7 +17,6 @@ from aats.data_platform.operations.environment_guard import (
     get_current_environment,
     get_observation_window_hours,
     get_policy,
-    production_parameter_apply_enabled,
 )
 from aats.services.operator.rdp_queries import query_rdp_health
 from aats.services.operator.rdp_queries import (
@@ -258,7 +257,6 @@ def _environment_summary() -> dict[str, Any]:
         "require_approval": bool(policy.get("require_approval")),
         "allow_parameter_rollback": bool(policy.get("allow_parameter_rollback")),
         "direct_apply_allowed": env != "prod",
-        "production_apply_enabled": production_parameter_apply_enabled(env),
         "required_observation_window_hours": get_observation_window_hours(env),
     }
 

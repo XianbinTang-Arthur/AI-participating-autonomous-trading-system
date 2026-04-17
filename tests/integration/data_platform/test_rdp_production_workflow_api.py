@@ -40,7 +40,7 @@ def test_create_release_api_rejects_prod_skip_gate() -> None:
     # healthy，否则请求会被前置门闸拦下，根本走不到 skip_gate 校验。
     with patch.dict(
         os.environ,
-        {"RDP_ENV": "prod", "RDP_PRODUCTION_APPLY_ENABLED": "true"},
+        {"RDP_ENV": "prod"},
         clear=False,
     ), patch(
         "aats.api.rdp_routes._step2_integrity_blocking_reason",
@@ -630,7 +630,6 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             "require_approval": False,
             "allow_parameter_rollback": True,
             "direct_apply_allowed": True,
-            "production_apply_enabled": True,
             "required_observation_window_hours": 24,
         }),
         patch("aats.api.rdp_control_summary.query_rdp_health", return_value={

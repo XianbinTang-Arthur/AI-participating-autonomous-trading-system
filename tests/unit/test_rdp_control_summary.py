@@ -414,7 +414,6 @@ class TestRdpControlSummary(TestCase):
                 "require_approval": False,
                 "allow_parameter_rollback": True,
                 "direct_apply_allowed": True,
-                "production_apply_enabled": True,
                 "required_observation_window_hours": 24,
             }),
             patch("aats.api.rdp_control_summary.query_rdp_health", return_value={

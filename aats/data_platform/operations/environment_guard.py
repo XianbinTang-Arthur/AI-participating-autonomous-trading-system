@@ -19,9 +19,6 @@ from typing import Any
 VALID_ENVIRONMENTS = ("dev", "staging", "prod")
 DEFAULT_ENVIRONMENT = "dev"
 ENV_VAR_NAME = "RDP_ENV"
-PRODUCTION_APPLY_ENABLE_VAR = "RDP_PRODUCTION_APPLY_ENABLED"
-_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
-_FALSEY_ENV_VALUES = {"0", "false", "no", "off", ""}
 
 
 @dataclass(frozen=True)
@@ -122,27 +119,6 @@ class ReleaseGuardResult:
     run_apply: bool
 
 
-def _parse_env_flag(name: str, *, default: bool = False) -> bool:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    value = raw.strip().lower()
-    if value in _TRUTHY_ENV_VALUES:
-        return True
-    if value in _FALSEY_ENV_VALUES:
-        return False
-    return default
-
-
-def production_parameter_apply_enabled(env: str | None = None) -> bool:
-    """返回当前环境是否允许真正写入生产 active parameter set."""
-    if env is None:
-        env = get_current_environment()
-    if env != "prod":
-        return True
-    return _parse_env_flag(PRODUCTION_APPLY_ENABLE_VAR, default=False)
-
-
 def guard_parameter_apply(env: str | None = None) -> GuardResult:
     """检查当前环境是否允许参数 apply."""
     if env is None:
@@ -162,10 +138,10 @@ def guard_parameter_apply(env: str | None = None) -> GuardResult:
         warnings.append("gate pass required")
     if policy["require_approval"]:
         warnings.append("operator approval required")
-    if env == "prod" and not production_parameter_apply_enabled(env):
-        warnings.append(
-            f"set {PRODUCTION_APPLY_ENABLE_VAR}=true to unfreeze prod writes",
-        )
+    if env == "prod":
+        # A-0.5: 不再用 env flag 控制 prod 写开关，改由 HMAC apply-token
+        # 在 API 层强制（aats.api.rdp_apply_token / rdp_routes）。
+        warnings.append("valid X-Rdp-Apply-Token required at API layer")
 
     reason = "allowed"
     if warnings:
@@ -293,21 +269,6 @@ def guard_release_creation(
             environment=env,
             operation="parameter_release",
             reason=f"{env} environment requires gate pass; skip_gate is not allowed",
-            requested_observation_window_hours=requested_window,
-            resolved_observation_window_hours=required_window,
-            run_gate=run_gate,
-            run_apply=run_apply,
-        )
-
-    if run_apply and env == "prod" and not production_parameter_apply_enabled(env):
-        return ReleaseGuardResult(
-            allowed=False,
-            environment=env,
-            operation="parameter_release",
-            reason=(
-                "prod parameter apply is frozen; set "
-                f"{PRODUCTION_APPLY_ENABLE_VAR}=true to allow release apply"
-            ),
             requested_observation_window_hours=requested_window,
             resolved_observation_window_hours=required_window,
             run_gate=run_gate,

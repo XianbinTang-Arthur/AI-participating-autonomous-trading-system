@@ -2169,7 +2169,6 @@ const configHtml = renderAIConfigView({
       require_approval: false,
       allow_parameter_rollback: true,
       direct_apply_allowed: true,
-      production_apply_enabled: true,
       required_observation_window_hours: 24,
     },
     health: {
@@ -2723,7 +2722,6 @@ const rollbackConfigHtml = renderAIConfigView({
       strict_environment: true,
       require_gate_pass: true,
       required_observation_window_hours: 72,
-      production_apply_enabled: true,
     },
     health: {
       overall_health: 'blocked',

@@ -104,7 +104,7 @@ def test_prod_direct_apply_requires_release_context() -> None:
     with (
         patch.dict(
             os.environ,
-            {"RDP_ENV": "prod", "RDP_PRODUCTION_APPLY_ENABLED": "true"},
+            {"RDP_ENV": "prod"},
             clear=False,
         ),
         patch(
@@ -134,7 +134,7 @@ def test_prod_direct_apply_requires_release_context() -> None:
 def test_create_parameter_release_rejects_prod_skip_gate_and_short_window() -> None:
     with patch.dict(
         os.environ,
-        {"RDP_ENV": "prod", "RDP_PRODUCTION_APPLY_ENABLED": "true"},
+        {"RDP_ENV": "prod"},
         clear=False,
     ):
         skip_gate = create_parameter_release(

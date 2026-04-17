@@ -31,10 +31,16 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from aats.api._governance_db import governance_session as _governance_session
+from aats.api.rdp_apply_token import (
+    InvalidTokenError,
+    emit_token,
+    ttl_seconds,
+    verify_token,
+)
 from aats.api.rdp_control_summary import (
     build_rdp_tuning_overview,
     build_rdp_tuning_proposals,
@@ -98,6 +104,73 @@ rdp_router = APIRouter(
     prefix="/rdp",
     tags=["RDP"],
 )
+
+
+def _require_apply_token(required_action: str):
+    """生成 FastAPI 依赖：要求请求携带合法的 ``X-Rdp-Apply-Token``。
+
+    A-0.5 收口：apply/rollback/freeze 等写动作不再只靠 session cookie，
+    额外要求一枚 HMAC-bound token（签发端 ``/rdp/operator-tokens``）。
+    Token 编码了 ``actor``，路由会在业务逻辑里强制 token.actor 与
+    session.identity 一致，防止跨 operator 重放。
+    """
+
+    def _dep(
+        request: Request,
+        x_rdp_apply_token: str | None = Header(
+            default=None,
+            alias="X-Rdp-Apply-Token",
+            convert_underscores=False,
+        ),
+    ) -> str:
+        if not x_rdp_apply_token:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": "missing_apply_token", "action": required_action},
+            )
+        try:
+            actor, exp_ts = verify_token(x_rdp_apply_token, required_action)
+        except InvalidTokenError as exc:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "invalid_apply_token",
+                    "reason": str(exc),
+                    "action": required_action,
+                },
+            ) from None
+        request.state.apply_token_actor = actor
+        request.state.apply_token_exp_ts = exp_ts
+        return actor
+
+    return _dep
+
+
+def _enforce_token_actor_matches_session(
+    *,
+    principal: OperatorPrincipal,
+    token_actor: str,
+    action: str,
+) -> None:
+    """Session identity 必须等于 token actor——否则返回 403 ``actor_mismatch``。
+
+    仅当 ``auth_enabled=True`` 时强制；本地 dev（``operator_unsafe_write_without_auth``）
+    走宽松模式，但 token 仍然需要校验签名/TTL/action（由上游依赖保证）。
+    """
+    if not principal.auth_enabled:
+        return
+    session_id = (principal.identity or "").strip()
+    if session_id and session_id == token_actor:
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={
+            "code": "actor_mismatch",
+            "action": action,
+            "session_actor": session_id,
+            "token_actor": token_actor,
+        },
+    )
 
 
 def _project_root(request: Request) -> Path:
@@ -272,6 +345,13 @@ class SupersedeRequest(BaseModel):
         default=None, description="替代此 recommendation 的新 recommendation_id",
     )
     notes: str | None = Field(default=None, description="备注")
+
+
+class EmitTokenRequest(BaseModel):
+    action: str = Field(
+        ...,
+        description="token 绑定的动作：apply / rollback / freeze",
+    )
 
 
 class ApplyRequest(BaseModel):
@@ -558,6 +638,39 @@ async def supersede_recommendation_api(
     return {"ok": True, "recommendation": rec}
 
 
+# ── Operator Token 签发 ───────────────────────────────────────────
+
+
+@rdp_router.post("/operator-tokens")
+async def emit_operator_token_api(
+    body: EmitTokenRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
+) -> dict[str, Any]:
+    """签发一次性 apply/rollback/freeze 动作 token（TTL-bounded HMAC）。
+
+    A-0.5：废弃 ``RDP_PRODUCTION_APPLY_ENABLED``，改以 session-bound HMAC
+    token 作为写动作的第二把锁。``principal`` 身份写进 token 载荷，消费端
+    强制要求 ``session.identity == token.actor``。
+    """
+    if body.action not in {"apply", "rollback", "freeze"}:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_action",
+                "action": body.action,
+                "allowed": ["apply", "rollback", "freeze"],
+            },
+        )
+    actor = (principal.identity or "").strip() or "operator"
+    token = emit_token(actor=actor, action=body.action)
+    return {
+        "token": token,
+        "ttl_seconds": ttl_seconds(),
+        "action": body.action,
+        "actor": actor,
+    }
+
+
 # ── Parameter Apply ────────────────────────────────────────────────
 
 
@@ -568,10 +681,15 @@ async def apply_parameter_api(
     request: Request,
     body: ApplyRequest,
     principal: OperatorPrincipal = Depends(require_write_access),
+    token_actor: str = Depends(_require_apply_token("apply")),
 ) -> dict[str, Any]:
     """从已批准 recommendation 应用参数到 active parameter set."""
     from aats.data_platform.decision_system.active_parameter_apply import (
         apply_approved_recommendation,
+    )
+
+    _enforce_token_actor_matches_session(
+        principal=principal, token_actor=token_actor, action="apply"
     )
 
     root = _project_root(request)
@@ -607,6 +725,7 @@ async def rollback_parameter_api(
     request: Request,
     body: RollbackRequest,
     principal: OperatorPrincipal = Depends(require_write_access),
+    token_actor: str = Depends(_require_apply_token("rollback")),
 ) -> dict[str, Any]:
     """回滚 active parameter set 到上一版本.
 
@@ -616,9 +735,16 @@ async def rollback_parameter_api(
     - ``VALIDATION_FAILED`` / ``NO_PREVIOUS_TARGET`` / ``NO_ACTIVE_SET`` /
       ``ENVIRONMENT_BLOCKED`` → 422（客户端提供的回滚请求不合法）
     - 正常成功 → 200 + ok=True 载荷
+
+    A-0.5 收口：必须携带 ``X-Rdp-Apply-Token: <rollback-token>``，且 token 中
+    编码的 actor 必须与 session identity 一致（``auth_enabled=True`` 时）。
     """
     from aats.data_platform.decision_system.active_parameter_apply import (
         rollback_active_parameter_set,
+    )
+
+    _enforce_token_actor_matches_session(
+        principal=principal, token_actor=token_actor, action="rollback"
     )
 
     root = _project_root(request)

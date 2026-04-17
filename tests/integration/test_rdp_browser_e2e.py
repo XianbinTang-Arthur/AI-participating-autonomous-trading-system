@@ -404,7 +404,6 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
                     "require_approval": False,
                     "allow_parameter_rollback": True,
                     "direct_apply_allowed": True,
-                    "production_apply_enabled": True,
                     "required_observation_window_hours": 24,
                 },
             ),
