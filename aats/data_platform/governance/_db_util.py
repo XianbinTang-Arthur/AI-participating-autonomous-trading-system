@@ -9,10 +9,35 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sqlalchemy.engine import Engine
 
 log = logging.getLogger(__name__)
+
+# Advisory lock keys 集中注册表。PostgreSQL pg_try_advisory_lock 的 bigint key
+# 在多个调度器 / release_cycle 路径里复用；集中声明避免各模块硬编码 magic
+# number 后撞上同一把锁却不自知。新增锁时在这里加条目，并在 value 里写清楚
+# 谁持有、预期持锁时长、解锁条件。
+ADVISORY_LOCK_KEYS: dict[str, int] = {
+    # pg_try_advisory_lock/pg_advisory_unlock：整体 governance scheduler 单例锁，
+    # 保证同一时刻只有一个进程跑 release_cycle 推进，避免竞态双写 release_history。
+    "governance_scheduler_singleton": 0x41415353,  # "AASS"
+    # release_cycle 内部的 release-id 级锁，配合 pg_try_advisory_xact_lock 使用。
+    "release_cycle_per_release": 0x41415243,  # "AARC"
+}
+
+
+# 进程级共享 governance engine（仅供热点路径读用，禁止 dispose）。
+# 与 `try_governance_db` 的一次性 engine 并行存在：
+#   * try_governance_db → 每次 create+dispose，适合短路径 / 脚本 / 测试
+#   * get_cached_governance_engine → 全进程复用，适合 per-tick overrides / 决策
+#     循环里的高频读，避免 create_engine+SELECT 1+dispose 三件套的握手成本。
+_CACHED_GOVERNANCE_ENGINE: "Engine | None" = None
+_CACHED_GOVERNANCE_LOCK = threading.Lock()
 
 # 合法的 parameter_set 状态
 VALID_PS_STATUSES = frozenset({"draft", "candidate", "frozen", "deprecated"})
@@ -51,6 +76,58 @@ def resolve_governance_db_url() -> str | None:
     except Exception as exc:  # pragma: no cover - defensive
         log.debug("failed to resolve governance DB URL from RDP settings: %s", exc)
         return None
+
+
+def get_cached_governance_engine() -> "Engine | None":
+    """返回进程级共享的 governance engine；首次调用时惰性创建。
+
+    调用约定：
+      * 返回的 engine 生命周期归本模块所有，**caller 不得 dispose()**。
+      * 连接池开启 ``pool_pre_ping``；陈旧连接会被 SQLAlchemy 透明回收。
+      * 若 URL 解析失败 / create_engine 抛异常 → 返回 ``None``；caller 应当
+        走降级路径（比如 last-known cache）。
+
+    用途：hot path（每 tick 读 overrides 等）复用连接，避免重复握手。
+    对于一次性脚本、测试、手工工具链，继续用 :func:`try_governance_db`。
+    """
+    global _CACHED_GOVERNANCE_ENGINE
+    if _CACHED_GOVERNANCE_ENGINE is not None:
+        return _CACHED_GOVERNANCE_ENGINE
+    with _CACHED_GOVERNANCE_LOCK:
+        if _CACHED_GOVERNANCE_ENGINE is not None:
+            return _CACHED_GOVERNANCE_ENGINE
+        url = resolve_governance_db_url()
+        if not url:
+            return None
+        try:
+            from sqlalchemy import create_engine
+
+            _CACHED_GOVERNANCE_ENGINE = create_engine(
+                url,
+                pool_pre_ping=True,
+                pool_size=2,
+                max_overflow=3,
+            )
+            return _CACHED_GOVERNANCE_ENGINE
+        except Exception as exc:
+            log.debug("governance DB engine 初始化失败 (%s)", exc)
+            return None
+
+
+def reset_cached_governance_engine_for_tests() -> None:
+    """测试钩子：释放 cached engine，下一次 get_cached_governance_engine 会重建。
+
+    模块私有约定，生产路径不应调用。
+    """
+    global _CACHED_GOVERNANCE_ENGINE
+    with _CACHED_GOVERNANCE_LOCK:
+        engine = _CACHED_GOVERNANCE_ENGINE
+        _CACHED_GOVERNANCE_ENGINE = None
+    if engine is not None:
+        try:
+            engine.dispose()
+        except Exception:  # pragma: no cover - defensive
+            pass
 
 
 def try_governance_db():

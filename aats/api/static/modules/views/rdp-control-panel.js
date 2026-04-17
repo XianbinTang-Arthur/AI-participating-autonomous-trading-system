@@ -250,10 +250,10 @@ function renderWorkItem({
 }
 
 function buildObservationAction(item, canAdmin, tone = "secondary") {
-  const observationValue = `${item.release_id}|${item.observation_window_hours || 24}`;
-  return actionButton("运行观察", "rdp-run-observation", observationValue, tone, {
+  return actionButton("运行观察", "rdp-run-observation", item.release_id, tone, {
     disabled: !canAdmin,
     title: !canAdmin ? "当前账号只有查看权限" : "按当前观察窗口重新评估这次发布",
+    dataAttrs: { hours: item.observation_window_hours || 24 },
   });
 }
 
@@ -582,19 +582,38 @@ function renderRuntimeRailCard({
   });
 }
 
+function renderReleaseHistoryStaleNotice(releaseHistoryStatus = {}) {
+  // H-R1 + H2：后端 load_release_history 已经在 DB 不可达 / 数据为副本时打了
+  // source + stale + stale_reason。UI 必须把 stale=true 显式透给运营者，
+  // 否则 DB 抖动期间的副本会被当成实时真源，放大 H-R1 想解决的问题。
+  if (releaseHistoryStatus?.stale !== true) return "";
+  const reason = String(releaseHistoryStatus?.stale_reason || "").trim();
+  const copy = reason === "db_unreachable"
+    ? "当前治理 DB 暂不可达，显示的是上次保存的 JSON 副本；观察与回滚决策前请刷新确认真源。"
+    : "当前发布历史非实时真源，请谨慎操作。";
+  return callout({
+    title: "发布历史数据为副本",
+    copy,
+    tone: "warning",
+    pills: [actorTags("system")],
+  });
+}
+
 function renderObservationRailCard({
   rdpControl = {},
   canAdmin = false,
 }) {
   const observationQueue = rdpControl.observation_queue || [];
   const items = observationQueue.slice(0, 4);
+  const staleNotice = renderReleaseHistoryStaleNotice(rdpControl.release_history_status || {});
+  const queueBody = items.length
+    ? `<div class="rdp-worklist">${items.map((item) => buildObservationCard(item, canAdmin)).join("")}</div>`
+    : notice("当前没有观察中的发布或回滚建议。", "info");
   return surfaceCard({
     title: "观察与回滚",
     kicker: "发布后链路",
     copy: "这里只看观察中的发布和回滚建议。",
-    content: items.length
-      ? `<div class="rdp-worklist">${items.map((item) => buildObservationCard(item, canAdmin)).join("")}</div>`
-      : notice("当前没有观察中的发布或回滚建议。", "info"),
+    content: `${staleNotice}${queueBody}`,
   });
 }
 

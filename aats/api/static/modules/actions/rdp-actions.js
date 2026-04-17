@@ -217,9 +217,11 @@ export function createRdpActionHandlers({
     }
   }
 
-  async function runObservation(value) {
-    if (!value) return;
-    const [releaseId, defaultHoursRaw] = String(value).split("|");
+  async function runObservation(releaseId, target = null) {
+    if (!releaseId) return;
+    // release_id 走 data-value，观察窗口走 data-hours。之前两者被塞进同一个
+    // data-value 再用 "|" split，release_id 里一旦出现 "|" 就会把 hours 吃掉。
+    const defaultHoursRaw = target?.dataset?.hours;
     const windowHours = resolveObservationWindowHours(defaultHoursRaw);
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, "正在运行观察…");
@@ -333,7 +335,7 @@ export function createRdpActionHandlers({
     "rdp-rollback-parameters": (combo) => rollbackParameters(combo),
     "rdp-run-gate": (recommendationId) => runGate(recommendationId),
     "rdp-create-release": (recommendationId) => createRelease(recommendationId),
-    "rdp-run-observation": (value) => runObservation(value),
+    "rdp-run-observation": (releaseId, target) => runObservation(releaseId, target),
     "rdp-approve-tuning-proposal": (proposalId) => approveTuningProposal(proposalId),
     "rdp-reject-tuning-proposal": (proposalId) => rejectTuningProposal(proposalId),
   };

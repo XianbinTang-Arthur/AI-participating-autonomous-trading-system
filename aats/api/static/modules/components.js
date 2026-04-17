@@ -234,7 +234,17 @@ export function actionButton(label, action, value = "", tone = "ghost", options 
   const disabled = options.disabled ? " disabled" : "";
   const title = options.title ? ` title="${escapeHtml(options.title)}"` : "";
   const extraClass = options.className ? ` ${escapeHtml(options.className)}` : "";
-  return `<button class="${escapeHtml(buttonClass(tone))}${extraClass}" data-action="${escapeHtml(action)}" data-value="${escapeHtml(value)}"${title}${disabled}>${escapeHtml(label)}</button>`;
+  // dataAttrs: { hours: 24, xxx: "abc" } → ` data-hours="24" data-xxx="abc"`，供 handler
+  // 通过 target.dataset.* 读取，比把多字段塞进 data-value 再 split("|") 更稳。
+  let extraData = "";
+  if (options.dataAttrs && typeof options.dataAttrs === "object") {
+    for (const [rawKey, rawVal] of Object.entries(options.dataAttrs)) {
+      if (rawVal === undefined || rawVal === null) continue;
+      const key = String(rawKey).replace(/[A-Z]/g, (m) => `-${m.toLowerCase()}`);
+      extraData += ` data-${escapeHtml(key)}="${escapeHtml(String(rawVal))}"`;
+    }
+  }
+  return `<button class="${escapeHtml(buttonClass(tone))}${extraClass}" data-action="${escapeHtml(action)}" data-value="${escapeHtml(value)}"${extraData}${title}${disabled}>${escapeHtml(label)}</button>`;
 }
 
 // #11 / #33 修复：原本 strategy-view / execution-view / ai-view 三处各自定义了

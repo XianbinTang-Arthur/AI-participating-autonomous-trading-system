@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ._db_util import json_dumps, parse_dt
+from ._db_util import ADVISORY_LOCK_KEYS, json_dumps, parse_dt
 
 log = logging.getLogger(__name__)
 
@@ -23,11 +23,11 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-# pg_advisory_lock key for serializing workflow scheduler runs across daemon
-# instances and 手动脚本。Key 取自 crc32 常量空间一个固定值，避免与其他模块冲突。
-# 修改这个值等于让旧 scheduler 不再互斥，必须慎重。
-_SCHEDULER_ADVISORY_LOCK_KEY = 0x4141_5353  # "AATS_RDP_SCHEDULER"
-_RELEASE_CYCLE_ADVISORY_LOCK_KEY = 0x4141_5243  # "AATS_RDP_RC"
+# Advisory lock keys 统一走 _db_util.ADVISORY_LOCK_KEYS 注册表：历史上
+# magic number 散落在各模块，一旦出现第三条调度路径要加锁就可能撞上同一
+# key 却无感。现在新增 lock 请在 _db_util 里登记，本地只保留 alias。
+_SCHEDULER_ADVISORY_LOCK_KEY = ADVISORY_LOCK_KEYS["governance_scheduler_singleton"]
+_RELEASE_CYCLE_ADVISORY_LOCK_KEY = ADVISORY_LOCK_KEYS["release_cycle_per_release"]
 
 
 def try_acquire_scheduler_lock(session: Session) -> bool:
@@ -380,10 +380,32 @@ def db_set_gate_result_release_id(
 ) -> bool:
     """在 release 创建成功后，把 release_id 回填到对应 gate_run 行。
 
-    由 apply_active_parameter_set 在 release upsert 成功后调用。已经有 release_id
-    的行会被覆盖为新值（允许重放/回放场景），没有对应 gate_run_id 的返回 False。
+    由 apply_active_parameter_set 在 release upsert 成功后调用。返回值含义：
+      * True  = gate_run 行存在（无论是否真的发生写入）
+      * False = gate_run 行不存在，需要 caller 打 warning
+
+    行存在但 ``release_id`` 已经等于目标值时跳过 UPDATE（M4：避免 release 回填
+    每次 save_release_history 都触发 UPDATE + updated_at bump）。两条 SQL：先
+    SELECT 查现值，仅在需要变更时才 UPDATE；重放 / 手工改回旧值的场景仍然
+    会命中 UPDATE 分支。两条都在同一 Session/transaction 里，原子性由外层
+    session.begin() 保证。
     """
-    result = session.execute(
+    current = session.execute(
+        text(
+            """
+            SELECT release_id
+              FROM governance.pre_apply_gate_results
+             WHERE gate_run_id = :gate_run_id
+            """
+        ),
+        {"gate_run_id": gate_run_id},
+    ).fetchone()
+    if current is None:
+        return False
+    if current.release_id == release_id:
+        # 已经是目标值，避免无谓的 UPDATE / updated_at bump / WAL 追加
+        return True
+    session.execute(
         text(
             """
             UPDATE governance.pre_apply_gate_results
@@ -398,7 +420,7 @@ def db_set_gate_result_release_id(
             "updated_at": _utcnow(),
         },
     )
-    return result.rowcount > 0
+    return True
 
 
 def db_list_pre_apply_gate_results(session: Session, *, limit: int = 8) -> list[dict[str, Any]]:
@@ -525,19 +547,18 @@ def db_list_gate_results_for_release(
 ) -> list[dict[str, Any]]:
     """按 release 维度列出历次 gate 结果。
 
-    阶段 A 实现：通过 parameter_releases.gate_result_ref 反向 JOIN。
-    阶段 B 加 pre_apply_gate_results.release_id 列后，此查询会改为直接
-    走索引列，JOIN 会被删掉，但对外 API 语义不变。
+    阶段 B：直接走 pre_apply_gate_results.release_id 索引列。回填由
+    save_release_history 在 release upsert 同事务里通过 db_set_gate_result_release_id
+    完成；没有回填的 legacy gate 行在这里查不到，属于预期行为（调用方应
+    回落到 db_get_latest_gate_result(recommendation_id=...) 等维度）。
     """
     rows = session.execute(
         text(
             """
-            SELECT g.payload, g.created_at
-            FROM governance.pre_apply_gate_results AS g
-            JOIN governance.parameter_releases AS r
-              ON r.gate_result_ref = g.gate_run_id
-            WHERE r.release_id = :release_id
-            ORDER BY g.created_at DESC
+            SELECT payload, created_at
+            FROM governance.pre_apply_gate_results
+            WHERE release_id = :release_id
+            ORDER BY created_at DESC
             LIMIT :limit
             """
         ),
@@ -553,6 +574,22 @@ def db_list_gate_results_for_release(
 
 
 def db_upsert_parameter_release(session: Session, release: dict[str, Any]) -> None:
+    # M5：column 与 payload JSON 必须归一到同一份 timeframe / combo_key。
+    # 历史上 column 走 timeframe.lower()、payload 直接 json_dumps(release)，
+    # caller 传 "1H" 这种写法时 column 是 "1h"、payload.timeframe 仍然是 "1H"，
+    # 读者从 payload 反序列化就会碰到不一致。这里做一份就地归一再序列化。
+    timeframe_norm = str(release.get("timeframe") or "").lower()
+    family_norm = str(release.get("family") or "")
+    combo_key_norm = release.get("combo_key") or (
+        f"{family_norm}_{timeframe_norm}" if family_norm and timeframe_norm else ""
+    )
+    if isinstance(combo_key_norm, str):
+        combo_key_norm = combo_key_norm.lower()
+    release_for_payload = dict(release)
+    release_for_payload["timeframe"] = timeframe_norm
+    if combo_key_norm:
+        release_for_payload["combo_key"] = combo_key_norm
+
     session.execute(
         text(
             """
@@ -586,9 +623,9 @@ def db_upsert_parameter_release(session: Session, release: dict[str, Any]) -> No
         ),
         {
             "release_id": release.get("release_id"),
-            "family": release.get("family"),
-            "timeframe": str(release.get("timeframe") or "").lower(),
-            "combo_key": release.get("combo_key"),
+            "family": family_norm or release.get("family"),
+            "timeframe": timeframe_norm,
+            "combo_key": combo_key_norm or release.get("combo_key"),
             "recommendation_id": release.get("recommendation_id"),
             "parameter_set_id": release.get("parameter_set_id"),
             "previous_parameter_set_id": release.get("previous_parameter_set_id"),
@@ -599,7 +636,7 @@ def db_upsert_parameter_release(session: Session, release: dict[str, Any]) -> No
             "observation_status": release.get("observation_status", "pending"),
             "observation_window_hours": int(release.get("observation_window_hours") or 24),
             "notes": release.get("notes"),
-            "payload": json_dumps(release),
+            "payload": json_dumps(release_for_payload),
             "created_at": parse_dt(release.get("created_at")) or _utcnow(),
             "updated_at": _utcnow(),
         },
@@ -648,25 +685,61 @@ def db_update_parameter_release_status(
     apply_result: str | None = None,
     observation_status: str | None = None,
 ) -> bool:
+    """按 release_id 更新 apply_result / observation_status，并同步 payload JSON。
+
+    M6：历史上这里跑 SELECT → Python 拼 → 走 ``db_upsert_parameter_release``
+    的 INSERT ... ON CONFLICT，等于"读 + 整行重写 + 重算所有 EXCLUDED 字段"，
+    2 次往返 + 一次全列覆盖。现在改用单条 UPDATE ... RETURNING：
+      * 仅更新需要变的列 + payload JSON（用 jsonb_set 就地打 patch）
+      * RETURNING release_id 让我们直接拿到"行是否存在"的信号
+      * 一次往返，事务也更短
+    """
+    if apply_result is None and observation_status is None:
+        # caller 没给任何变更，不必打 DB
+        row = session.execute(
+            text(
+                """
+                SELECT 1 AS present
+                FROM governance.parameter_releases
+                WHERE release_id = :release_id
+                """
+            ),
+            {"release_id": release_id},
+        ).fetchone()
+        return row is not None
+
+    # jsonb_set 是原子 patch：即使 apply_result / observation_status 并发被其他
+    # 写路径覆盖，也不会整行回滚——我们只修两把 key，其余字段原样保留。
+    # 使用两层 jsonb_set（COALESCE 兼容旧行 payload 为 NULL 的边界情况）。
+    sql = """
+        UPDATE governance.parameter_releases
+           SET apply_result = COALESCE(:apply_result, apply_result),
+               observation_status = COALESCE(:observation_status, observation_status),
+               payload = jsonb_set(
+                   jsonb_set(
+                       COALESCE(payload, '{}'::jsonb),
+                       '{apply_result}',
+                       to_jsonb(COALESCE(:apply_result, payload->>'apply_result')),
+                       true
+                   ),
+                   '{observation_status}',
+                   to_jsonb(COALESCE(:observation_status, payload->>'observation_status')),
+                   true
+               ),
+               updated_at = :updated_at
+         WHERE release_id = :release_id
+         RETURNING release_id
+    """
     row = session.execute(
-        text(
-            """
-            SELECT payload
-            FROM governance.parameter_releases
-            WHERE release_id = :release_id
-            """
-        ),
-        {"release_id": release_id},
+        text(sql),
+        {
+            "release_id": release_id,
+            "apply_result": apply_result,
+            "observation_status": observation_status,
+            "updated_at": _utcnow(),
+        },
     ).fetchone()
-    if row is None:
-        return False
-    payload = dict(row.payload or {})
-    if apply_result is not None:
-        payload["apply_result"] = apply_result
-    if observation_status is not None:
-        payload["observation_status"] = observation_status
-    db_upsert_parameter_release(session, payload)
-    return True
+    return row is not None
 
 
 def db_get_latest_release_for_combo(

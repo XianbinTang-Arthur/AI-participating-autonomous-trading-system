@@ -13,7 +13,10 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from aats.data_platform.governance._atomic_io import atomic_json_write
-from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance._db_util import (
+    get_cached_governance_engine,
+    try_governance_db,
+)
 from aats.data_platform.governance.step2_integrity_guard import (
     step2_integrity_blocking_reason as _step2_snapshot_blocking_reason,
 )
@@ -95,8 +98,24 @@ def overrides_path(project_root: Path) -> Path:
 
 
 def load_strategy_tuning_registry(project_root: Path) -> dict[str, Any]:
+    """加载 strategy tuning registry，并附带三态 stale 透明字段。
+
+    与 ``load_strategy_tuning_overrides`` 对齐：
+      * 读 DB 成功 → ``source="db"`` + ``stale=False``
+      * DB 不可达 / 查询抛异常 → 回落 JSON 副本，``source="file"`` +
+        ``stale=True`` + ``stale_reason`` ∈ {"db_unreachable","db_read_failed"}
+      * JSON 副本缺失或损坏 → ``source="empty"`` + ``stale=True`` + 同上
+        stale_reason（让 UI 看到"既读不到 DB 也没副本"这种最差状态）
+
+    动机：过去 ``except Exception: pass`` 会把 DB 读异常当无事发生，悄悄
+    回落到旧 JSON。实盘下运营者无法区分"真没 proposals" / "DB 挂了用的
+    是昨天的副本"。三态字段让 UI / 日志 / 审计都能显式看到降级路径。
+    """
+    stale_reason: str | None = None
     engine, ok = try_governance_db()
-    if ok:
+    if not ok:
+        stale_reason = "db_unreachable"
+    else:
         try:
             from aats.data_platform.governance.strategy_tuning_db import (
                 db_load_strategy_tuning_registry,
@@ -107,27 +126,63 @@ def load_strategy_tuning_registry(project_root: Path) -> dict[str, Any]:
             # DB 是真源：空 proposals 也直接返回，避免把旧 strategy_tuning_proposals.json 重新注入审核链
             payload.setdefault("version", 0)
             payload.setdefault("proposals", [])
+            payload["source"] = "db"
+            payload["stale"] = False
             return payload
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning(
+                "strategy tuning registry: DB 读取失败 (%s)，回落 JSON 副本",
+                exc,
+            )
+            stale_reason = "db_read_failed"
         finally:
             if engine is not None:
                 engine.dispose()
 
+    # DB 不可达或查询失败：回落 JSON 副本，显式标记 stale
+    assert stale_reason is not None
     path = registry_path(project_root)
     if not path.exists():
-        return {"generated_at": None, "version": 0, "proposals": []}
+        return {
+            "generated_at": None,
+            "version": 0,
+            "proposals": [],
+            "source": "empty",
+            "stale": True,
+            "stale_reason": stale_reason,
+        }
     try:
         import json
 
         with path.open(encoding="utf-8") as handle:
             payload = json.load(handle)
-    except (OSError, ValueError):
-        return {"generated_at": None, "version": 0, "proposals": []}
+    except (OSError, ValueError) as exc:
+        log.warning(
+            "strategy tuning registry: JSON 副本读取失败 (%s)，返回空 registry",
+            exc,
+        )
+        return {
+            "generated_at": None,
+            "version": 0,
+            "proposals": [],
+            "source": "empty",
+            "stale": True,
+            "stale_reason": stale_reason,
+        }
     if not isinstance(payload, dict):
-        return {"generated_at": None, "version": 0, "proposals": []}
+        return {
+            "generated_at": None,
+            "version": 0,
+            "proposals": [],
+            "source": "empty",
+            "stale": True,
+            "stale_reason": stale_reason,
+        }
     payload.setdefault("version", 0)
     payload.setdefault("proposals", [])
+    payload["source"] = "file"
+    payload["stale"] = True
+    payload["stale_reason"] = stale_reason
     return payload
 
 
@@ -187,8 +242,12 @@ def load_strategy_tuning_overrides(project_root: Path) -> dict[str, Any]:
     """
     del project_root  # 已不再读文件副本
 
-    engine, ok = try_governance_db()
-    if ok:
+    # 热点路径（per-decision-tick 都会调到）复用进程级共享 engine，
+    # 避免 create_engine + SELECT 1 + dispose 三件套在每个决策周期都握手一遍。
+    # engine 生命周期归 _db_util 管理，本处**不得 dispose()**。
+    engine = get_cached_governance_engine()
+    payload: dict[str, Any] | None = None
+    if engine is not None:
         try:
             from aats.data_platform.governance.strategy_tuning_db import (
                 db_load_strategy_tuning_overrides,
@@ -199,16 +258,14 @@ def load_strategy_tuning_overrides(project_root: Path) -> dict[str, Any]:
         except Exception as exc:
             log.warning("strategy tuning overrides: DB 读取失败 (%s)", exc)
             payload = None
-        finally:
-            if engine is not None:
-                engine.dispose()
+        # 无 engine.dispose()：cached engine 的连接池需保活
 
-        if payload is not None:
-            if not isinstance(payload, dict):
-                payload = {"generated_at": None, "combo_overrides": {}}
-            payload.setdefault("combo_overrides", {})
-            _cache_overrides(payload)
-            return {**payload, "stale": False, "source": "db"}
+    if payload is not None:
+        if not isinstance(payload, dict):
+            payload = {"generated_at": None, "combo_overrides": {}}
+        payload.setdefault("combo_overrides", {})
+        _cache_overrides(payload)
+        return {**payload, "stale": False, "source": "db"}
 
     # 到这里：DB 不可达或读出异常
     if _is_tuning_fail_loud_enabled():

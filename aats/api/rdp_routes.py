@@ -321,13 +321,15 @@ def _precheck_recommendation_transitionable(
     recommendation_id: str,
     *,
     expected_current: tuple[str, ...],
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """approve / reject / supersede 的统一预检。
 
     - ``load_recommendation_registry`` 已经 DB-first、JSON fallback；
       对 UI / operator 来说真源是 DB，但 DB 不可达的单机 / 测试场景仍然
       能从 JSON 副本得到一致的 404/409 语义。
-    - 命中目标 recommendation 且状态合法 → 返回快照 dict。
+    - 命中目标 recommendation 且状态合法 → 返回 ``(registry, rec)`` 元组，
+      供 handler 直接复用、不必二次 load（L1：避免每个 approve/reject/supersede
+      都跑两遍 DB-first + JSON fallback）。
     - recommendation 不存在 → ``HTTPException(404)``。
     - 状态不在 ``expected_current`` 内 → ``HTTPException(409)``；响应体带上
       ``current_status`` / ``expected_status``，方便 UI / curl 客户端判断。
@@ -370,7 +372,7 @@ def _precheck_recommendation_transitionable(
                 "expected_status": list(expected_current),
             },
         )
-    return rec
+    return registry, rec
 
 
 # ── Recommendation Approve ─────────────────────────────────────────
@@ -394,7 +396,6 @@ async def approve_recommendation_api(
     """
     from aats.data_platform.decision_system.recommendation_registry import (
         approve_recommendation,
-        load_recommendation_registry,
         save_recommendation_registry,
     )
 
@@ -411,12 +412,10 @@ async def approve_recommendation_api(
             "integrity_blocked": True,
         }
 
-    _precheck_recommendation_transitionable(
+    registry, _snapshot_rec = _precheck_recommendation_transitionable(
         root, recommendation_id, expected_current=("draft",),
     )
-
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
-    registry = load_recommendation_registry(reg_path)
 
     rec = approve_recommendation(
         registry, recommendation_id,
@@ -462,19 +461,16 @@ async def reject_recommendation_api(
       - 409: 状态不是 draft，或 CAS 竞态
     """
     from aats.data_platform.decision_system.recommendation_registry import (
-        load_recommendation_registry,
         reject_recommendation,
         save_recommendation_registry,
     )
 
     root = _project_root(request)
 
-    _precheck_recommendation_transitionable(
+    registry, _snapshot_rec = _precheck_recommendation_transitionable(
         root, recommendation_id, expected_current=("draft",),
     )
-
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
-    registry = load_recommendation_registry(reg_path)
 
     rec = reject_recommendation(
         registry, recommendation_id,
@@ -518,7 +514,6 @@ async def supersede_recommendation_api(
         或 CAS 竞态
     """
     from aats.data_platform.decision_system.recommendation_registry import (
-        load_recommendation_registry,
         save_recommendation_registry,
         supersede_recommendation,
     )
@@ -536,12 +531,10 @@ async def supersede_recommendation_api(
             "integrity_blocked": True,
         }
 
-    _precheck_recommendation_transitionable(
+    registry, _snapshot_rec = _precheck_recommendation_transitionable(
         root, recommendation_id, expected_current=("draft", "approved"),
     )
-
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
-    registry = load_recommendation_registry(reg_path)
 
     rec = supersede_recommendation(
         registry, recommendation_id,

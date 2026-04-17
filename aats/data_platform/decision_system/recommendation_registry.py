@@ -211,10 +211,45 @@ def load_recommendation_registry(path: pathlib.Path, *, skip_db: bool = False) -
 def save_recommendation_registry(
     registry: dict[str, Any], path: pathlib.Path,
 ) -> None:
+    """原子写 JSON-only recommendation registry.
+
+    单机兼容（DB 不可达）路径下没有事务保护；两个脚本并发做
+    load → mutate → save 会让后写方静默吞掉前写方的变更。这里在落盘前读
+    磁盘当前 version，与内存 registry 的 base version 比对：
+      * 一致 → 正常 bump + 落盘
+      * 不一致（base=N，磁盘=N+k，k>0）→ 抛 RuntimeError，把并发冲突显式
+        抛给 caller，迫使它重跑 load → mutate 序列。
+
+    注意：这不是严格 CAS，因为 read+write 之间仍有 TOCTOU 窗口——要做到
+    强序列化需要 DB 事务或文件级锁。但该检查能捕获最常见的 human-sequential
+    竞态（operator 手动跑两遍脚本），相比原先的 silent clobber 是显著改善。
+    """
     from aats.data_platform.governance._atomic_io import atomic_json_write
 
+    expected_base_version = int(registry.get("version", 0))
+    if path.exists():
+        try:
+            with path.open(encoding="utf-8") as fh:
+                on_disk = json.load(fh)
+        except (OSError, ValueError) as exc:
+            log.warning(
+                "recommendation_registry: CAS 读磁盘 version 失败 (%s)，"
+                "跳过 CAS 按 base_version=%d 继续；磁盘可能被外部进程损坏",
+                exc, expected_base_version,
+            )
+        else:
+            disk_version = (
+                int(on_disk.get("version", 0)) if isinstance(on_disk, dict) else 0
+            )
+            if disk_version != expected_base_version:
+                raise RuntimeError(
+                    f"recommendation_registry CAS 冲突：磁盘 version={disk_version}，"
+                    f"内存 base_version={expected_base_version}；"
+                    "另一操作已抢先写入，请重新 load→mutate→save"
+                )
+
     registry["generated_at"] = datetime.now(timezone.utc).isoformat()
-    registry["version"] = registry.get("version", 0) + 1
+    registry["version"] = expected_base_version + 1
     atomic_json_write(registry, path)
     log.info("保存 recommendation registry -> %s (v%d, %d items)",
              path, registry["version"], len(registry.get("recommendations", [])))
