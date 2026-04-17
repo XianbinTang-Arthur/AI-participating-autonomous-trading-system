@@ -93,7 +93,8 @@ WHERE d.active_parameter_set_id IS NOT NULL
 
 \echo ''
 \echo '=== 7a. parameter_sets.status distribution ==='
-\echo '    Allowed after batch A: (draft, candidate, frozen, released, deprecated)'
+\echo '    Allowed after batch A: (draft, candidate, frozen, deprecated)'
+\echo '    Source of truth: VALID_PS_STATUSES in governance/_db_util.py'
 SELECT status, COUNT(*) AS rows
 FROM governance.parameter_sets
 GROUP BY status
@@ -101,7 +102,8 @@ ORDER BY status;
 
 \echo ''
 \echo '=== 7b. recommendations.status distribution ==='
-\echo '    Allowed after batch A: (draft, approved, rejected, superseded, applied, rolled_back)'
+\echo '    Allowed after batch A: (draft, approved, rejected, superseded)'
+\echo '    Source of truth: VALID_REC_STATUSES in governance/_db_util.py'
 SELECT status, COUNT(*) AS rows
 FROM governance.recommendations
 GROUP BY status
@@ -109,7 +111,8 @@ ORDER BY status;
 
 \echo ''
 \echo '=== 7c. parameter_apply_history.operation_type distribution ==='
-\echo '    Allowed after batch A: (apply, rollback)'
+\echo '    Allowed after batch A: (apply, rollback, clear)'
+\echo '    Writers: decision_system/active_parameter_apply.py'
 SELECT operation_type, COUNT(*) AS rows
 FROM governance.parameter_apply_history
 GROUP BY operation_type
@@ -117,7 +120,8 @@ ORDER BY operation_type;
 
 \echo ''
 \echo '=== 7d. parameter_releases.apply_result distribution ==='
-\echo '    Allowed after batch A: (pending, success, failed, rolled_back)'
+\echo '    Allowed after batch A: (pending, blocked_by_gate, success, failed)'
+\echo '    Writers: production_workflow/release_registry.py'
 SELECT apply_result, COUNT(*) AS rows
 FROM governance.parameter_releases
 GROUP BY apply_result
@@ -125,7 +129,8 @@ ORDER BY apply_result;
 
 \echo ''
 \echo '=== 7e. parameter_releases.observation_status distribution ==='
-\echo '    Allowed: (pending, observing, completed, rolled_back, rollback_recommended, blocked_at_gate)'
+\echo '    Allowed: (pending, observing, completed, rollback_recommended, rolled_back)'
+\echo '    Writers: release_registry.py + production_workflow/observation_window.py'
 SELECT observation_status, COUNT(*) AS rows
 FROM governance.parameter_releases
 GROUP BY observation_status
@@ -133,8 +138,9 @@ ORDER BY observation_status;
 
 \echo ''
 \echo '=== 7f. observation_results.status + recommendation distribution ==='
-\echo '    Allowed status: (pending, observing, completed, inconclusive)'
-\echo '    Allowed recommendation: (hold, rollback, continue_observing, inconclusive)'
+\echo '    Allowed status: (observing, completed, rollback_recommended)'
+\echo '    Allowed recommendation: (keep, review, rollback_recommended)'
+\echo '    Writers: production_workflow/observation_window.py'
 SELECT 'status' AS field, status AS value, COUNT(*) AS rows
 FROM governance.observation_results
 GROUP BY status
@@ -146,7 +152,8 @@ ORDER BY field, value;
 
 \echo ''
 \echo '=== 7g. rollback_recommendations.severity distribution ==='
-\echo '    Allowed after batch A: (none, warn, recommended, urgent, rejected)'
+\echo '    Allowed after batch A: (none, medium, high)'
+\echo '    Writers: production_workflow/rollback_policy.py (column default none)'
 SELECT severity, COUNT(*) AS rows
 FROM governance.rollback_recommendations
 GROUP BY severity
@@ -154,7 +161,8 @@ ORDER BY severity;
 
 \echo ''
 \echo '=== 7h. release_effectiveness.conclusion distribution ==='
-\echo '    Allowed after batch A: (pending, positive, neutral, negative, rolled_back)'
+\echo '    Allowed after batch A: (rollback_triggered, insufficient_evidence, ineffective, effective, mixed)'
+\echo '    Writers: metrics/release_effectiveness.py::_derive_effectiveness'
 SELECT conclusion, COUNT(*) AS rows
 FROM governance.release_effectiveness
 GROUP BY conclusion

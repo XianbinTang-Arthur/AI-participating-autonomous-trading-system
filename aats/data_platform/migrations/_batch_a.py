@@ -144,55 +144,64 @@ DISTRIBUTION_CHECKS: tuple[DistributionCheck, ...] = (
         check_id="7a",
         title="parameter_sets.status",
         sql="SELECT status, COUNT(*) AS rows FROM governance.parameter_sets GROUP BY status ORDER BY status",
-        allowlist=frozenset({"draft", "candidate", "frozen", "released", "deprecated"}),
+        # Mirrors VALID_PS_STATUSES in aats/data_platform/governance/_db_util.py.
+        allowlist=frozenset({"draft", "candidate", "frozen", "deprecated"}),
     ),
     DistributionCheck(
         check_id="7b",
         title="recommendations.status",
         sql="SELECT status, COUNT(*) AS rows FROM governance.recommendations GROUP BY status ORDER BY status",
-        allowlist=frozenset({"draft", "approved", "rejected", "superseded", "applied", "rolled_back"}),
+        # Mirrors VALID_REC_STATUSES in aats/data_platform/governance/_db_util.py.
+        allowlist=frozenset({"draft", "approved", "rejected", "superseded"}),
     ),
     DistributionCheck(
         check_id="7c",
         title="parameter_apply_history.operation_type",
         sql="SELECT operation_type, COUNT(*) AS rows FROM governance.parameter_apply_history GROUP BY operation_type ORDER BY operation_type",
-        allowlist=frozenset({"apply", "rollback"}),
+        # `clear` is emitted by active_parameter_apply.py when wiping a combo.
+        allowlist=frozenset({"apply", "rollback", "clear"}),
     ),
     DistributionCheck(
         check_id="7d",
         title="parameter_releases.apply_result",
         sql="SELECT apply_result, COUNT(*) AS rows FROM governance.parameter_releases GROUP BY apply_result ORDER BY apply_result",
-        allowlist=frozenset({"pending", "success", "failed", "rolled_back"}),
+        # Writers: release_registry.py — pending / blocked_by_gate / success / failed.
+        allowlist=frozenset({"pending", "blocked_by_gate", "success", "failed"}),
     ),
     DistributionCheck(
         check_id="7e",
         title="parameter_releases.observation_status",
         sql="SELECT observation_status, COUNT(*) AS rows FROM governance.parameter_releases GROUP BY observation_status ORDER BY observation_status",
-        allowlist=frozenset({"pending", "observing", "completed", "rolled_back", "rollback_recommended", "blocked_at_gate"}),
+        # Writers: release_registry.py + observation_window.py.
+        allowlist=frozenset({"pending", "observing", "completed", "rollback_recommended", "rolled_back"}),
     ),
     DistributionCheck(
         check_id="7f1",
         title="observation_results.status",
         sql="SELECT status, COUNT(*) AS rows FROM governance.observation_results GROUP BY status ORDER BY status",
-        allowlist=frozenset({"pending", "observing", "completed", "inconclusive"}),
+        # Writers: observation_window.py lines 323/327/330/334/337.
+        allowlist=frozenset({"observing", "completed", "rollback_recommended"}),
     ),
     DistributionCheck(
         check_id="7f2",
         title="observation_results.recommendation",
         sql="SELECT recommendation, COUNT(*) AS rows FROM governance.observation_results GROUP BY recommendation ORDER BY recommendation",
-        allowlist=frozenset({"hold", "rollback", "continue_observing", "inconclusive"}),
+        # Writers: observation_window.py — keep / review / rollback_recommended.
+        allowlist=frozenset({"keep", "review", "rollback_recommended"}),
     ),
     DistributionCheck(
         check_id="7g",
         title="rollback_recommendations.severity",
         sql="SELECT severity, COUNT(*) AS rows FROM governance.rollback_recommendations GROUP BY severity ORDER BY severity",
-        allowlist=frozenset({"none", "warn", "recommended", "urgent", "rejected"}),
+        # Writers: rollback_policy.py — none / medium / high. Column default 'none'.
+        allowlist=frozenset({"none", "medium", "high"}),
     ),
     DistributionCheck(
         check_id="7h",
         title="release_effectiveness.conclusion",
         sql="SELECT conclusion, COUNT(*) AS rows FROM governance.release_effectiveness GROUP BY conclusion ORDER BY conclusion",
-        allowlist=frozenset({"pending", "positive", "neutral", "negative", "rolled_back"}),
+        # Writers: _derive_effectiveness in metrics/release_effectiveness.py.
+        allowlist=frozenset({"rollback_triggered", "insufficient_evidence", "ineffective", "effective", "mixed"}),
     ),
 )
 

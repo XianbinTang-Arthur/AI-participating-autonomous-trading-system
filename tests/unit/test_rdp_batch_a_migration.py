@@ -76,17 +76,32 @@ class TestExpectedCheckCoverage(unittest.TestCase):
             self.assertIn(prefix, titles, f"missing orphan check {prefix}")
 
     def test_status_allowlist_for_parameter_sets_matches_check_constraint(self) -> None:
+        # Must mirror VALID_PS_STATUSES in aats/data_platform/governance/_db_util.py.
         target = next(c for c in DISTRIBUTION_CHECKS if c.check_id == "7a")
         self.assertEqual(
             target.allowlist,
-            frozenset({"draft", "candidate", "frozen", "released", "deprecated"}),
+            frozenset({"draft", "candidate", "frozen", "deprecated"}),
         )
 
     def test_status_allowlist_for_recommendations_matches_check_constraint(self) -> None:
+        # Must mirror VALID_REC_STATUSES in aats/data_platform/governance/_db_util.py.
         target = next(c for c in DISTRIBUTION_CHECKS if c.check_id == "7b")
         self.assertEqual(
             target.allowlist,
-            frozenset({"draft", "approved", "rejected", "superseded", "applied", "rolled_back"}),
+            frozenset({"draft", "approved", "rejected", "superseded"}),
+        )
+
+    def test_severity_allowlist_matches_rollback_policy_writes(self) -> None:
+        # Must mirror rollback_policy.py::evaluate_rollback_recommendation.
+        target = next(c for c in DISTRIBUTION_CHECKS if c.check_id == "7g")
+        self.assertEqual(target.allowlist, frozenset({"none", "medium", "high"}))
+
+    def test_conclusion_allowlist_matches_derive_effectiveness(self) -> None:
+        # Must mirror metrics/release_effectiveness.py::_derive_effectiveness.
+        target = next(c for c in DISTRIBUTION_CHECKS if c.check_id == "7h")
+        self.assertEqual(
+            target.allowlist,
+            frozenset({"rollback_triggered", "insufficient_evidence", "ineffective", "effective", "mixed"}),
         )
 
 

@@ -587,46 +587,82 @@ COMMIT;
 
 ### 4.8 阶段 4.4.4 — 加 CHECK
 
+> **2026-04-17 修订说明**：原初稿（见下面的 `~~删除线~~` 行）的 9 条 allowlist 是
+> 基于设计阶段对表语义的推测，而非实际代码 grep。D1 执行阶段 4.4.1 orphan 报告
+> 时暴露该脱节，一次性扫清所有 9 个受影响字段，以生产代码中的真实写入值（或常量
+> `VALID_PS_STATUSES` / `VALID_REC_STATUSES`）作为权威来源。下面的 CHECK 约束是
+> 修订后版本；原初稿保留为注释以便审计。
+
 **新文件**：`aats/data_platform/migrations/batch_a_04_add_checks.sql`
 
 ```sql
 BEGIN;
 
+-- parameter_sets.status: 对齐 governance/_db_util.py::VALID_PS_STATUSES
 ALTER TABLE governance.parameter_sets
   ADD CONSTRAINT ck_ps_status
-  CHECK (status IN ('draft', 'candidate', 'frozen', 'released', 'deprecated'));
+  CHECK (status IN ('draft', 'candidate', 'frozen', 'deprecated'));
+-- ~~原稿: ('draft', 'candidate', 'frozen', 'released', 'deprecated')~~
+-- released 无代码写入路径，删除。
 
+-- recommendations.status: 对齐 VALID_REC_STATUSES
 ALTER TABLE governance.recommendations
   ADD CONSTRAINT ck_rec_status
-  CHECK (status IN ('draft', 'approved', 'rejected', 'superseded', 'applied', 'rolled_back'));
+  CHECK (status IN ('draft', 'approved', 'rejected', 'superseded'));
+-- ~~原稿: (+ 'applied', 'rolled_back')~~
+-- applied/rolled_back 无代码写入路径（recommendations 表只有状态机的前四态）。
 
+-- parameter_apply_history.operation_type
 ALTER TABLE governance.parameter_apply_history
   ADD CONSTRAINT ck_apply_op_type
-  CHECK (operation_type IN ('apply', 'rollback'));
+  CHECK (operation_type IN ('apply', 'rollback', 'clear'));
+-- ~~原稿: ('apply', 'rollback')~~
+-- clear 由 active_parameter_apply.py 在清空某 combo 时写入，必须入 allowlist。
 
+-- parameter_releases.apply_result
 ALTER TABLE governance.parameter_releases
   ADD CONSTRAINT ck_release_apply_result
-  CHECK (apply_result IN ('pending', 'success', 'failed', 'rolled_back'));
+  CHECK (apply_result IN ('pending', 'blocked_by_gate', 'success', 'failed'));
+-- ~~原稿: ('pending', 'success', 'failed', 'rolled_back')~~
+-- rolled_back 实际落在 observation_status 列而非 apply_result；
+-- blocked_by_gate 由 release_registry.py 在 gate 失败路径写入。
 
+-- parameter_releases.observation_status
 ALTER TABLE governance.parameter_releases
   ADD CONSTRAINT ck_release_observation_status
-  CHECK (observation_status IN ('pending', 'observing', 'completed', 'rolled_back', 'rollback_recommended', 'blocked_at_gate'));
+  CHECK (observation_status IN ('pending', 'observing', 'completed', 'rollback_recommended', 'rolled_back'));
+-- ~~原稿: (+ 'blocked_at_gate')~~
+-- blocked_at_gate 属 apply_result 的状态名混淆，实际 observation_status 不会是此值。
 
+-- observation_results.status
 ALTER TABLE governance.observation_results
   ADD CONSTRAINT ck_obs_status
-  CHECK (status IN ('pending', 'observing', 'completed', 'inconclusive'));
+  CHECK (status IN ('observing', 'completed', 'rollback_recommended'));
+-- ~~原稿: ('pending', 'observing', 'completed', 'inconclusive')~~
+-- observation_results 只在 observation_window 触发后创建，没有 pending/inconclusive。
+-- 注：operational_state_db.py:829 的 "unknown" 兜底是 bug，将由 A-0.3 清除，不纳入白名单。
 
+-- observation_results.recommendation
 ALTER TABLE governance.observation_results
   ADD CONSTRAINT ck_obs_recommendation
-  CHECK (recommendation IN ('hold', 'rollback', 'continue_observing', 'inconclusive'));
+  CHECK (recommendation IN ('keep', 'review', 'rollback_recommended'));
+-- ~~原稿: ('hold', 'rollback', 'continue_observing', 'inconclusive')~~
+-- 原稿词汇表与实际代码（observation_window.py 写 keep/review/rollback_recommended）完全不匹配。
 
+-- rollback_recommendations.severity
 ALTER TABLE governance.rollback_recommendations
   ADD CONSTRAINT ck_rollback_severity
-  CHECK (severity IN ('none', 'warn', 'recommended', 'urgent', 'rejected'));
+  CHECK (severity IN ('none', 'medium', 'high'));
+-- ~~原稿: ('none', 'warn', 'recommended', 'urgent', 'rejected')~~
+-- 原稿沿用 gate_rules 的四级 severity（info/warn/block），
+-- 但 rollback_recommendations 表的 severity 由 rollback_policy.py 独立写入三级 (none/medium/high)。
 
+-- release_effectiveness.conclusion
 ALTER TABLE governance.release_effectiveness
   ADD CONSTRAINT ck_release_eff_conclusion
-  CHECK (conclusion IN ('pending', 'positive', 'neutral', 'negative', 'rolled_back'));
+  CHECK (conclusion IN ('rollback_triggered', 'insufficient_evidence', 'ineffective', 'effective', 'mixed'));
+-- ~~原稿: ('pending', 'positive', 'neutral', 'negative', 'rolled_back')~~
+-- 原稿属语义发明；实际 _derive_effectiveness 返回上述五值。
 
 COMMIT;
 ```
