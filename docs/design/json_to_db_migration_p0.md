@@ -136,44 +136,66 @@ Release apply 流程成功后调用 `db_set_gate_result_release_id(gate_run_id, 
 
 ### 2.2 目标
 
-- 运行时 `load_strategy_tuning_overrides` **只读 DB**。DB 不可达 → 抛异常，上游 fail loud。
-- JSON 落盘要么彻底退役，要么仅作为"人可读快照"在 `AATS_P0_TUNING_JSON_EXPORT=on` 时导出；默认关闭。
-- `save_strategy_tuning_overrides` 转为 deprecated；保留一个 shim 以防历史调用点遗漏，shim 只警告并跳过（或抛 `NotImplementedError`，待阶段 D 决定）。
+- 运行时 `load_strategy_tuning_overrides` **优先读 DB**；DB 抖动（偶发不可达 / 超时 / 异常）→ 降级用进程内 **上一份已知 cached overrides**，返回结果带 `stale=True` 标志让上游可见。
+- 只有两种情况真正 fail loud：
+  - **cold start**：进程内无 cache 且 DB 不可达 → `raise RuntimeError`
+  - **严格模式**：`AATS_P0_TUNING_FAIL_LOUD=on` 时强制关 cache 回退，任何 DB 失败直接抛
+- JSON 彻底退出读路径；仅作为"人可读快照"在 `AATS_P0_TUNING_JSON_EXPORT=on` 时由 `refresh_strategy_tuning_overrides` 导出；默认关闭。
+- `save_strategy_tuning_overrides` 转为 deprecated shim。
+- 设计取舍：短暂 DB 抖动（几秒～几十秒）里把整条 decision loop 打断代价过大；"用上一份 overrides + stale 标志"在实盘里是更合适的降级点。cache 不跨进程共享，每个进程独立持有自己的 last-known 副本——这是可接受的，因为各进程独立驱动自己的决策。
 
 ### 2.3 变更清单
 
-- `load_strategy_tuning_overrides`：
-  - DB 不可达 → `raise RuntimeError("governance DB 不可达，无法加载 strategy tuning overrides")`
+- `aats/data_platform/operations/strategy_tuning_registry.py` 加进程内 cache：
+  - module-level `_LAST_OVERRIDES_CACHE: dict | None = None`
+  - `_cache_overrides(payload: dict) -> None` 只在 DB 读成功后调
+  - cache payload 形状：`{"combo_overrides": {...}, "loaded_at": iso8601, "source": "db"}`
+- `load_strategy_tuning_overrides(project_root) -> dict`：
+  - DB 可达 + 读成功 → `_cache_overrides(result)` → 返回 `{**result, "stale": False}`
+  - DB 不可达 / 读失败 + 有 cache + `AATS_P0_TUNING_FAIL_LOUD` off → `log.warning("strategy tuning overrides: DB 抖动，回退到 %s 的 cached 副本", cached["loaded_at"])`，返回 `{**cached, "stale": True}`
+  - DB 不可达 / 读失败 + (无 cache 或 `AATS_P0_TUNING_FAIL_LOUD=on`) → `raise RuntimeError(...)`
   - 去掉 `path.exists()` / JSON 读分支
 - `refresh_strategy_tuning_overrides`：
-  - 计算出 `{"combo_overrides": {...}}` 后，统一走 `db_upsert_strategy_tuning_overrides`（如无则新增）
-  - flag `AATS_P0_TUNING_JSON_EXPORT=on` 时再调 `atomic_json_write` 导出
+  - 计算出 `{"combo_overrides": {...}}` 后，统一走 `db_upsert_strategy_tuning_overrides`（DB 必写）
+  - 写 DB 成功后同步刷新 `_LAST_OVERRIDES_CACHE`（refresh 的调用方通常是 gateway / CLI，能立即把"刚写的"作为运行时 cache 的起点）
+  - flag `AATS_P0_TUNING_JSON_EXPORT=on` 时再调 `atomic_json_write` 导出 JSON 副本
 - `save_strategy_tuning_overrides`：
   - 阶段 A：保留、只写 JSON、emit `DeprecationWarning`
   - 阶段 B：空实现，只在 flag `on` 时写 JSON；否则直接 `return None`
-- `rdp_control_summary.py` 那处调用：无需改签名，但得在 except 里区分"DB 不可达"与"数据不合法"
+- 消费方（`rdp_control_summary.py` 等）：保持签名不变；可选择把 `stale` 字段透出给前端做"使用 stale cache 中"的 badge 显示。
 
 ### 2.4 Feature flag
 
 | 变量 | 缺省 | 效果 |
 |------|------|------|
-| `AATS_P0_TUNING_JSON_EXPORT` | `off` | `on` = 继续导出 `strategy_tuning_overrides.json` |
+| `AATS_P0_TUNING_JSON_EXPORT` | `off` | `on` = `refresh_strategy_tuning_overrides` 继续导出 `strategy_tuning_overrides.json` 副本 |
+| `AATS_P0_TUNING_FAIL_LOUD` | `off` | `on` = 关掉 cache 回退；任何 DB 读失败都抛 `RuntimeError`（需要严格复现 / 故障演练时开） |
 
 ### 2.5 回归测试
 
-- `tests/unit/test_strategy_tuning_registry.py`（新建或扩展）：
-  - `test_load_strategy_tuning_overrides_db_only_hit`
-  - `test_load_strategy_tuning_overrides_db_unreachable_raises`
-  - `test_refresh_strategy_tuning_overrides_writes_db_and_skips_file_when_flag_off`
-  - `test_refresh_strategy_tuning_overrides_exports_json_when_flag_on`
-- 现有消费方（`rdp_control_summary.py`）的集成测试要能走 DB 成功路径；若已有就补一条 "DB 不可达 → API 报 503/显式错误"。
+`tests/unit/test_strategy_tuning_registry.py`（新建或扩展）：
+
+- `test_load_strategy_tuning_overrides_db_hit_populates_cache` — DB 读成功 → 返回结果带 `stale=False`；`_LAST_OVERRIDES_CACHE` 被刷新
+- `test_load_strategy_tuning_overrides_db_flicker_returns_cached_with_stale_flag` — 先一次成功填 cache，再模拟 DB 抛 → 返回 cache 内容 + `stale=True` + 带 warning 日志
+- `test_load_strategy_tuning_overrides_cold_start_db_unreachable_raises` — cache 为空 + DB 不可达 → `RuntimeError`
+- `test_load_strategy_tuning_overrides_fail_loud_flag_bypasses_cache` — 即使 cache 有，`AATS_P0_TUNING_FAIL_LOUD=on` 下 DB 失败仍抛
+- `test_refresh_strategy_tuning_overrides_writes_db_and_skips_file_when_flag_off`
+- `test_refresh_strategy_tuning_overrides_exports_json_when_flag_on`
+- `test_refresh_strategy_tuning_overrides_populates_cache_after_db_write`
+
+现有消费方的集成测试：
+- `rdp_control_summary.py`：补一条"DB 不可达 + cache 为空 → API 报 503"
+- 若已有测试覆盖成功路径，留下不动
 
 ### 2.6 风险
 
 | 风险 | 缓解 |
 |------|------|
-| 运行时 DB 抖动 → decision 拿不到 overrides → 撤回到上一份参数 | 这是期望行为；比"默默读回几小时前的旧 JSON"安全得多 |
+| stale cache 会延续一段错误配置（比如 operator 刚在 DB 里改过一轮 overrides，恰好 DB 抖动，旧 cache 又跑起来） | cache 由下一次 DB 成功自动覆盖；`stale=True` 让前端和日志都可见；需要"立刻生效"的变更可通过让 DB 恢复 + 下一轮 load 来刷新；实盘紧急场景可临时 `AATS_P0_TUNING_FAIL_LOUD=on` 强制 decision 停跑直到 DB 回来 |
+| 4 进程各自持 cache → 一个进程看到的 stale 时长可能不同 | 可接受：每个进程独立 DB 读，cache 对齐自己的读路径；decision 进程是主要消费方，其它只读消费 |
+| cold start 撞上 DB 挂 → 整条 decision loop 起不来 | 这是预期 fail-loud：没有任何 overrides 比默默跑空配置更安全；部署前的健康检查（`/healthz`）就会把这类场景挡在流量之外 |
 | 旧 JSON 被 operator 手改期待生效 | 文档 + 迁移备忘：`overrides.json` 已不再读取；真值在 `governance.strategy_tuning_overrides` 表 |
+| cache 被污染（比如一次 DB 返回了半成品数据） | 在 `_cache_overrides` 前做基本 shape 校验：必须有 `combo_overrides` 键、值为 dict；否则不进 cache |
 
 ---
 
@@ -276,5 +298,11 @@ approve / reject / supersede handler：
   - H2：`db_set_gate_result_release_id` 的 hit / miss 单测；`_FakeGateSession` 扩展 UPDATE 分支与 `rowcount` 语义
   - M2：`_FakeGateSession._store_gate` 模拟 `COALESCE(EXCLUDED.release_id, current)` 语义；新增"record 重放不能擦掉已回填 release_id"的回归单测
   - `test_operational_state_db.py` 15 passed（含原 10 + H2 两条 + M2 一条 + H1 两条）
-- [ ] P0-3 全流程
+- [x] P0-3 实施：`load_strategy_tuning_overrides` DB-主 + 进程 cache + fail-loud 开关
+  - `strategy_tuning_registry.py` 新增 `_LAST_OVERRIDES_CACHE` 与 `_cache_overrides` / `_reset_overrides_cache_for_tests`
+  - `load_strategy_tuning_overrides`：DB 读成功 → 刷 cache + stale=False；DB 失败 + cache → stale=True warning；cold start / `AATS_P0_TUNING_FAIL_LOUD=on` → RuntimeError
+  - `refresh_strategy_tuning_overrides`：派生 overrides → 刷 cache；JSON 只在 `AATS_P0_TUNING_JSON_EXPORT=on` 时写
+  - `save_strategy_tuning_overrides`：转 deprecated shim，`DeprecationWarning` + 仅在 flag on 时落盘
+  - `test_strategy_tuning_overrides.py` 9 条新单测锁住上述契约
+  - `test_strategy_tuning_review.py:293` 的"overrides_path 必须 truthy"断言放宽为"是 str"（JSON 默认关）
 - [ ] P0-1 全流程

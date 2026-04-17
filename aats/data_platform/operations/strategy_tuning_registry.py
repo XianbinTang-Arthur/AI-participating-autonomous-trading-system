@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -12,10 +15,64 @@ from sqlalchemy.orm import Session
 from aats.data_platform.governance._atomic_io import atomic_json_write
 from aats.data_platform.governance._db_util import try_governance_db
 
+log = logging.getLogger(__name__)
+
 _REGISTRY_PATH = Path("artifacts/governance/strategy_tuning_proposals.json")
 _OVERRIDES_PATH = Path("artifacts/governance/strategy_tuning_overrides.json")
 _OPEN_STATUSES = frozenset({"pending_review"})
 _FINAL_STATUSES = frozenset({"approved", "rejected", "superseded"})
+
+# P0-3：进程内 last-known-good overrides 缓存。
+# DB 读成功 → 刷新；DB 读失败且缓存存在 → 降级返回带 stale=True 标志的副本。
+# 4 进程里各自持有一份，不跨进程共享——每个进程独立对齐自己的 DB 读时序。
+# 不做磁盘持久化：重启即冷启动，避免"旧 JSON 又悄悄生效"的历史坑。
+_LAST_OVERRIDES_CACHE: dict[str, Any] | None = None
+
+
+def _env_flag_enabled(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "on", "true", "yes"}
+
+
+def _is_tuning_json_export_enabled() -> bool:
+    return _env_flag_enabled("AATS_P0_TUNING_JSON_EXPORT")
+
+
+def _is_tuning_fail_loud_enabled() -> bool:
+    return _env_flag_enabled("AATS_P0_TUNING_FAIL_LOUD")
+
+
+def _validate_overrides_shape(payload: Any) -> bool:
+    """写 cache 前做一次基本 shape 校验；防止半成品数据污染后续降级路径。
+
+    要求：payload 是 dict，且 combo_overrides 是 dict。其它字段允许缺失或异常，
+    因为 load 路径本身会兜底。
+    """
+    if not isinstance(payload, dict):
+        return False
+    combo = payload.get("combo_overrides")
+    return isinstance(combo, dict)
+
+
+def _cache_overrides(payload: dict[str, Any]) -> None:
+    global _LAST_OVERRIDES_CACHE
+    if not _validate_overrides_shape(payload):
+        log.warning("strategy tuning overrides cache: payload shape 不合法，跳过缓存刷新")
+        return
+    _LAST_OVERRIDES_CACHE = {
+        "combo_overrides": dict(payload.get("combo_overrides") or {}),
+        "generated_at": payload.get("generated_at"),
+        "loaded_at": _utcnow().isoformat(),
+        "source": "db",
+    }
+
+
+def _reset_overrides_cache_for_tests() -> None:
+    """测试钩子：在 fail-loud / cold-start 场景用例之间清理进程内 cache。
+
+    模块私有，生产代码不应调用。测试只需 `from ... import _reset_overrides_cache_for_tests`。
+    """
+    global _LAST_OVERRIDES_CACHE
+    _LAST_OVERRIDES_CACHE = None
 
 
 def _utcnow() -> datetime:
@@ -106,6 +163,20 @@ def save_strategy_tuning_registry(project_root: Path, registry: dict[str, Any]) 
 
 
 def load_strategy_tuning_overrides(project_root: Path) -> dict[str, Any]:
+    """运行时读取 strategy tuning overrides。
+
+    真源是 ``governance.strategy_tuning_proposals`` 表（按 approved 派生 combo_overrides）。
+    读路径：
+      1. DB 可达 + 读成功 → 刷 `_LAST_OVERRIDES_CACHE`，返回 `{..., "stale": False}`
+      2. DB 失败（不可达 / 超时 / 异常）+ cache 命中 + `AATS_P0_TUNING_FAIL_LOUD` off
+         → 打 warning，返回 `{**cached, "stale": True, "source": "cache"}`
+      3. DB 失败 + (cache 为空 或 `AATS_P0_TUNING_FAIL_LOUD=on`) → `RuntimeError`
+
+    旧的 `artifacts/governance/strategy_tuning_overrides.json` 已彻底退出读路径。
+    `project_root` 参数保留用于签名兼容（测试 / 消费方传入），内部不再访问文件。
+    """
+    del project_root  # 已不再读文件副本
+
     engine, ok = try_governance_db()
     if ok:
         try:
@@ -115,32 +186,60 @@ def load_strategy_tuning_overrides(project_root: Path) -> dict[str, Any]:
 
             with Session(engine) as session:
                 payload = db_load_strategy_tuning_overrides(session)
-            # DB 是真源：空 overrides 也直接返回，避免把旧 strategy_tuning_overrides.json 重新污染运行参数
-            payload.setdefault("combo_overrides", {})
-            return payload
-        except Exception:
-            pass
+        except Exception as exc:
+            log.warning("strategy tuning overrides: DB 读取失败 (%s)", exc)
+            payload = None
         finally:
             if engine is not None:
                 engine.dispose()
 
-    path = overrides_path(project_root)
-    if not path.exists():
-        return {"generated_at": None, "combo_overrides": {}}
-    try:
-        import json
+        if payload is not None:
+            if not isinstance(payload, dict):
+                payload = {"generated_at": None, "combo_overrides": {}}
+            payload.setdefault("combo_overrides", {})
+            _cache_overrides(payload)
+            return {**payload, "stale": False, "source": "db"}
 
-        with path.open(encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, ValueError):
-        return {"generated_at": None, "combo_overrides": {}}
-    if not isinstance(payload, dict):
-        return {"generated_at": None, "combo_overrides": {}}
-    payload.setdefault("combo_overrides", {})
-    return payload
+    # 到这里：DB 不可达或读出异常
+    if _is_tuning_fail_loud_enabled():
+        raise RuntimeError(
+            "governance DB 不可达或读取失败，AATS_P0_TUNING_FAIL_LOUD=on 强制中断"
+        )
+
+    cached = _LAST_OVERRIDES_CACHE
+    if cached is None:
+        raise RuntimeError(
+            "governance DB 不可达且进程内无 last-known overrides（cold start），无法加载"
+        )
+
+    log.warning(
+        "strategy tuning overrides: DB 抖动，回退到 %s 的 cached 副本",
+        cached.get("loaded_at"),
+    )
+    return {
+        "generated_at": cached.get("generated_at"),
+        "combo_overrides": dict(cached.get("combo_overrides") or {}),
+        "loaded_at": cached.get("loaded_at"),
+        "stale": True,
+        "source": "cache",
+    }
 
 
-def save_strategy_tuning_overrides(project_root: Path, payload: dict[str, Any]) -> Path:
+def save_strategy_tuning_overrides(project_root: Path, payload: dict[str, Any]) -> Path | None:
+    """Deprecated：历史 JSON 写盘入口。
+
+    真源已搬到 DB（`strategy_tuning_proposals` 表的 approved 行派生 combo_overrides），
+    `save_strategy_tuning_overrides` 不再需要。保留 shim 是为了旧代码路径不立刻炸；
+    仅在 `AATS_P0_TUNING_JSON_EXPORT=on` 时真的写出 JSON 副本。
+    """
+    warnings.warn(
+        "save_strategy_tuning_overrides 已废弃：overrides 真源在 DB，"
+        "JSON 副本仅在 AATS_P0_TUNING_JSON_EXPORT=on 时导出。",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    if not _is_tuning_json_export_enabled():
+        return None
     path = overrides_path(project_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload["generated_at"] = _utcnow().isoformat()
@@ -169,8 +268,22 @@ def _build_active_overrides(registry: dict[str, Any]) -> dict[str, Any]:
 
 
 def refresh_strategy_tuning_overrides(project_root: Path, registry: dict[str, Any]) -> str:
+    """从内存 registry 派生 overrides，刷新进程 cache，并按 flag 决定是否写 JSON。
+
+    调用方通常刚做完 `save_strategy_tuning_registry`（DB 写入了 proposals），
+    因此这里派生出的 overrides 就是下一次 DB 读应该得到的内容——可以直接作为
+    cache 的起点，保证 apply 后立刻有可降级的 last-known 副本。
+    """
     payload = _build_active_overrides(registry)
-    path = save_strategy_tuning_overrides(project_root, payload)
+    payload["generated_at"] = _utcnow().isoformat()
+    _cache_overrides(payload)
+
+    if not _is_tuning_json_export_enabled():
+        return ""
+
+    path = overrides_path(project_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_json_write(payload, path)
     return str(path)
 
 
