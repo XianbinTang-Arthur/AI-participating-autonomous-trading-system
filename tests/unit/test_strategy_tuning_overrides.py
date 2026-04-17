@@ -40,9 +40,10 @@ def _clear_cache() -> None:
 
 
 class _FakeEngine:
-    def __init__(self, *, fail_on_session: bool = False) -> None:
+    """cached engine 的轻替身；跟踪 dispose 以便断言"禁止在热点路径里 dispose"。"""
+
+    def __init__(self) -> None:
         self.disposed = False
-        self.fail_on_session = fail_on_session
 
     def dispose(self) -> None:
         self.disposed = True
@@ -65,22 +66,26 @@ def _patch_db(
     db_ok: bool,
     payload: dict[str, Any] | Exception | None = None,
 ) -> _FakeEngine | None:
-    """拼装 try_governance_db + db_load_strategy_tuning_overrides 的替身。
+    """拼装 get_cached_governance_engine + db_load_strategy_tuning_overrides 的替身。
 
-    db_ok=False：模拟 DB 不可达（try_governance_db 返回 None, False）
+    db_ok=False：模拟 DB 不可达（get_cached_governance_engine 返回 None）
     db_ok=True + payload=dict：正常读到 payload
     db_ok=True + payload=Exception：DB 可达但查询抛异常
+
+    注意：load_strategy_tuning_overrides 已经切到 cached engine 热点路径，
+    所以这里 patch 的是 ``mod.get_cached_governance_engine``，
+    ``mod.try_governance_db`` 只有写路径（save_strategy_tuning_registry）还在用。
     """
     if not db_ok:
         monkeypatch.setattr(
-            mod, "try_governance_db", lambda: (None, False),
+            mod, "get_cached_governance_engine", lambda: None,
         )
         return None
 
     engine = _FakeEngine()
 
     monkeypatch.setattr(
-        mod, "try_governance_db", lambda: (engine, True),
+        mod, "get_cached_governance_engine", lambda: engine,
     )
     monkeypatch.setattr(
         mod, "Session", lambda _engine: _SessionCtx(payload),
@@ -126,8 +131,10 @@ def test_load_db_hit_populates_cache_and_marks_stale_false(
     assert result["stale"] is False
     assert result["source"] == "db"
     assert result["combo_overrides"] == {"directional_1h": {"min_safe_net_edge_bps": 2.0}}
-    assert engine is not None and engine.disposed, \
-        "engine.dispose() 必须在 finally 里被调到"
+    assert engine is not None and not engine.disposed, (
+        "cached engine 生命周期归 _db_util 管理，热点路径严禁 dispose，"
+        "否则下一次 decision tick 就要重新握手一遍"
+    )
 
     # cache 被刷新：再调一次（即便 DB 失败）也能从 cache 拿到
     _patch_db(monkeypatch, db_ok=False)
@@ -388,3 +395,160 @@ def test_save_registry_raises_when_fail_loud_on(
     assert not (tmp_path / "artifacts/governance/strategy_tuning_proposals.json").exists(), (
         "fail-loud 模式下 DB 不可达不得写 JSON 副本"
     )
+
+
+# =====================================================================
+# M1：load_strategy_tuning_registry 三态 stale 语义
+# 与 load_strategy_tuning_overrides 对齐：
+#   DB 成功 → source="db"   / stale=False
+#   DB 不可达 → source=file|empty / stale=True / stale_reason="db_unreachable"
+#   DB 抛异常 → source=file|empty / stale=True / stale_reason="db_read_failed"
+# =====================================================================
+
+
+def _patch_registry_db(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    db_ok: bool,
+    payload: dict[str, Any] | Exception | None = None,
+) -> _FakeEngine | None:
+    """load_strategy_tuning_registry 用的是 ``try_governance_db``（非 cached engine），
+    所以这里 patch 与 overrides 的 helper 不共用一套。
+    """
+    if not db_ok:
+        monkeypatch.setattr(mod, "try_governance_db", lambda: (None, False))
+        return None
+
+    engine = _FakeEngine()
+    monkeypatch.setattr(mod, "try_governance_db", lambda: (engine, True))
+    monkeypatch.setattr(mod, "Session", lambda _engine: _SessionCtx(payload))
+
+    from aats.data_platform.governance import strategy_tuning_db
+
+    def _fake_db_load(_session: Any) -> dict[str, Any]:
+        if isinstance(payload, Exception):
+            raise payload
+        return payload  # type: ignore[return-value]
+
+    monkeypatch.setattr(
+        strategy_tuning_db, "db_load_strategy_tuning_registry", _fake_db_load,
+    )
+    return engine
+
+
+def test_load_registry_db_hit_marks_source_db_and_stale_false(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """DB 读成功 → source='db' + stale=False，不读 JSON 副本。"""
+    _patch_registry_db(
+        monkeypatch,
+        db_ok=True,
+        payload={
+            "version": 3,
+            "proposals": [{"proposal_id": "tprop_db_1", "status": "pending_review"}],
+            "generated_at": "2026-04-17T10:00:00+00:00",
+        },
+    )
+
+    result = mod.load_strategy_tuning_registry(tmp_path)
+
+    assert result["source"] == "db"
+    assert result["stale"] is False
+    assert "stale_reason" not in result
+    assert len(result["proposals"]) == 1
+    assert result["proposals"][0]["proposal_id"] == "tprop_db_1"
+
+
+def test_load_registry_db_unreachable_falls_back_to_file_with_stale_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """DB 不可达 + JSON 副本在 → source='file' + stale=True + stale_reason='db_unreachable'。"""
+    _patch_registry_db(monkeypatch, db_ok=False)
+
+    target = tmp_path / "artifacts/governance/strategy_tuning_proposals.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps({
+            "version": 2,
+            "proposals": [{"proposal_id": "tprop_file_1", "status": "pending_review"}],
+            "generated_at": "2026-04-16T10:00:00+00:00",
+        }),
+        encoding="utf-8",
+    )
+
+    result = mod.load_strategy_tuning_registry(tmp_path)
+
+    assert result["source"] == "file"
+    assert result["stale"] is True
+    assert result["stale_reason"] == "db_unreachable", (
+        "运营者必须能通过 stale_reason 区分 'DB 挂了' vs 'DB 查询抛了'"
+    )
+    assert result["proposals"][0]["proposal_id"] == "tprop_file_1"
+
+
+def test_load_registry_db_query_exception_marks_stale_reason_read_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DB 可达但查询抛 → stale_reason='db_read_failed'，区别于 'db_unreachable'。"""
+    _patch_registry_db(
+        monkeypatch,
+        db_ok=True,
+        payload=RuntimeError("governance DB timeout"),
+    )
+
+    target = tmp_path / "artifacts/governance/strategy_tuning_proposals.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        json.dumps({
+            "version": 2,
+            "proposals": [{"proposal_id": "tprop_file_2", "status": "pending_review"}],
+        }),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING, logger=mod.__name__):
+        result = mod.load_strategy_tuning_registry(tmp_path)
+
+    assert result["source"] == "file"
+    assert result["stale"] is True
+    assert result["stale_reason"] == "db_read_failed"
+    assert any("DB 读取失败" in rec.getMessage() for rec in caplog.records)
+
+
+def test_load_registry_db_unreachable_no_json_returns_empty_stale(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """DB 不可达 + JSON 副本也没有 → source='empty' + stale=True。
+
+    这是最差情况：既读不到 DB 也没有副本。必须让 UI 一眼看出来。
+    """
+    _patch_registry_db(monkeypatch, db_ok=False)
+
+    result = mod.load_strategy_tuning_registry(tmp_path)
+
+    assert result["source"] == "empty"
+    assert result["stale"] is True
+    assert result["stale_reason"] == "db_unreachable"
+    assert result["proposals"] == []
+
+
+def test_load_registry_corrupt_json_falls_back_to_empty_stale(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """DB 抛异常 + JSON 副本损坏 → 兜底空 registry，仍保留 stale_reason。"""
+    _patch_registry_db(
+        monkeypatch,
+        db_ok=True,
+        payload=RuntimeError("db read failed"),
+    )
+
+    target = tmp_path / "artifacts/governance/strategy_tuning_proposals.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("{this is not valid json", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING, logger=mod.__name__):
+        result = mod.load_strategy_tuning_registry(tmp_path)
+
+    assert result["source"] == "empty"
+    assert result["stale"] is True
+    assert result["stale_reason"] == "db_read_failed"

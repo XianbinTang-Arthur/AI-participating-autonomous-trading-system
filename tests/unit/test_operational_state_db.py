@@ -230,11 +230,9 @@ class _FakeGateSession:
 
     支持的 SQL 模式：
       - INSERT INTO governance.pre_apply_gate_results ... ON CONFLICT (gate_run_id)
-      - INSERT INTO governance.parameter_releases ...（仅用于测试 setup JOIN 数据）
+      - INSERT INTO governance.parameter_releases ...（仅用于测试 setup 数据）
       - SELECT payload, created_at FROM governance.pre_apply_gate_results ...
-        WHERE gate_run_id / recommendation_id / LIMIT
-      - SELECT g.payload, g.created_at FROM ... JOIN parameter_releases ...
-        WHERE r.release_id
+        WHERE gate_run_id / recommendation_id / release_id / LIMIT
 
     模拟策略：不做 SQL parsing，而是按 SQL 片段关键字路由；保留 gate_run_id
     的幂等写（覆盖 payload）以便测试 record 的 upsert 语义。
@@ -318,17 +316,17 @@ class _FakeGateSession:
             return _FakeResult([_FakeRow(row)] if row else [])
 
         if (
-            "JOIN governance.parameter_releases" in sql
-            and "WHERE r.release_id = :release_id" in sql
+            "FROM governance.pre_apply_gate_results" in sql
+            and "WHERE release_id = :release_id" in sql
+            and "JOIN" not in sql
         ):
+            # 阶段 B：按索引列 release_id 直接查，不再走 parameter_releases JOIN。
             assert params is not None
-            release = self.releases.get(params["release_id"])
-            matched: list[_FakeRow] = []
-            if release is not None:
-                ref = release.get("gate_result_ref")
-                for g in self.gates.values():
-                    if g["gate_run_id"] == ref:
-                        matched.append(_FakeRow(g))
+            matched: list[_FakeRow] = [
+                _FakeRow(g)
+                for g in self.gates.values()
+                if g.get("release_id") == params["release_id"]
+            ]
             matched.sort(
                 key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc),
                 reverse=True,
@@ -488,11 +486,11 @@ def test_list_gate_results_for_recommendation_orders_desc_and_limits() -> None:
         "list 必须按 created_at 降序，最新在前；limit 必须生效"
 
 
-def test_list_gate_results_for_release_joins_via_gate_result_ref() -> None:
-    """阶段 A 实现：通过 parameter_releases.gate_result_ref JOIN。
+def test_list_gate_results_for_release_uses_release_id_column() -> None:
+    """阶段 B：直接按 pre_apply_gate_results.release_id 索引列查询。
 
-    阶段 B 加 release_id 列后，这个 API 会换到直接索引，但语义不变——
-    这里锁住"按 release 能拉到它关联的那次 gate payload"。
+    回填由 save_release_history 在 release upsert 同事务里通过
+    db_set_gate_result_release_id 完成。没被回填的 gate 行不会混进结果。
     """
     session = _FakeGateSession()
     db_record_gate_result(
@@ -503,21 +501,29 @@ def test_list_gate_results_for_release_joins_via_gate_result_ref() -> None:
         session,
         _make_gate_result(gate_run_id="gate_unrelated", recommendation_id="rec_r"),
     )
-    session._store_release(release_id="rel_abc", gate_result_ref="gate_for_release")
+    # 模拟 save_release_history 的回填步骤
+    db_set_gate_result_release_id(
+        session, gate_run_id="gate_for_release", release_id="rel_abc",
+    )
 
     rows = db_list_gate_results_for_release(session, release_id="rel_abc", limit=10)
     assert len(rows) == 1
     assert rows[0]["gate_run_id"] == "gate_for_release", \
-        "JOIN 必须只返回 gate_result_ref 匹配的那条，不能带上 rec 其它 gate"
+        "只返回 release_id 匹配的 gate，不能把同 recommendation 的其它 gate 也带出来"
 
 
-def test_list_gate_results_for_release_empty_when_release_missing() -> None:
+def test_list_gate_results_for_release_skips_unbackfilled_rows() -> None:
+    """legacy gate 行没被回填 release_id → 不出现在结果里。
+
+    这是阶段 B 切换到索引列后的预期行为：调用方需要在 legacy 场景下
+    自行回落到 db_get_latest_gate_result(recommendation_id=...)。
+    """
     session = _FakeGateSession()
     db_record_gate_result(
         session,
         _make_gate_result(gate_run_id="gate_only", recommendation_id="rec_q"),
     )
-    # 没有 release 记录 → JOIN 返回空
+    # 从未回填 release_id → release 维度查不到
     assert db_list_gate_results_for_release(session, release_id="rel_missing") == []
 
 
