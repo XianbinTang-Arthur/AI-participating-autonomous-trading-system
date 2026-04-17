@@ -127,7 +127,12 @@ cmd_pull() {
         exit 2
     fi
 
-    if ! wsl_run "cd $WSL_PROJECT && git diff --quiet && git diff --cached --quiet && test -z \"\$(git ls-files --others --exclude-standard)\""; then
+    # 脏工作区预检：必须用 `git -C <path>` 而不是 `cd && git`。
+    # WSL interop 会让 `$(...)` 子 shell 重置回调用者的 Windows 工作目录
+    # （/mnt/d/...），导致 `cd $HOME/aats && ... $(git ls-files ...)` 中的子
+    # shell 在错误目录下运行 git，把 Windows 侧未跟踪文件误判为 WSL 侧脏状态。
+    # `git -C` 绕开 shell cwd，始终锁定在 WSL native checkout。
+    if ! wsl_run "git -C $WSL_PROJECT diff --quiet && git -C $WSL_PROJECT diff --cached --quiet && test -z \"\$(git -C $WSL_PROJECT ls-files --others --exclude-standard)\""; then
         echo "[ERROR] $WSL_PROJECT 存在未提交改动；为避免覆盖或混入脏工作区，本次同步已终止" >&2
         exit 2
     fi
