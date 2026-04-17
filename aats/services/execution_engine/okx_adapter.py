@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 from collections.abc import Callable
 from datetime import datetime, timezone
@@ -8,6 +9,12 @@ from typing import Any
 
 import httpx
 
+# P1-15：REST POST 超时后到 GET 确认之间的 grace sleep。OKX 端 order 入库
+# 存在短暂 eventual consistency 窗口（实测 ~500ms～2s），没有这段延迟会
+# 经常得到 51603 order-not-found 误报，让 order 误进入 unknown_write 冷冻
+# 态，后续新 intent 都被 block 直到 reconciliation 介入。
+_UNKNOWN_WRITE_RECOVERY_GRACE_SECONDS: float = 1.5
+
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import (
@@ -15,18 +22,16 @@ from aats.schemas.execution import (
     LegOrderIntent,
     OrderIntent,
     OrderState,
-    close_only_from_position_intent,
-    close_only_from_leg_action,
     default_close_only_reason,
     default_reduce_only_reason,
+    effective_close_only,
+    effective_reduce_only,
     execution_action_from_leg_action,
     execution_action_from_position_intent,
     execution_attempt_id_from_components,
     order_intent_from_leg_order_intent,
     pos_side_from_position_intent,
     position_intent_from_leg_intent,
-    reduce_only_from_position_intent,
-    reduce_only_from_leg_action,
 )
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangePosition, InstrumentMetadata
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
@@ -103,7 +108,14 @@ class OKXOrderPayloadBuilder:
         )
         if pos_side in {"long", "short"}:
             payload["posSide"] = pos_side
-        if intent.reduce_only:
+        # P1-13：必须用 effective_reduce_only —— 否则 obligation payload 侧判定
+        # reduce 但这里仅读 intent.reduce_only 会少发 reduceOnly，让交易所误放行
+        # 加仓，造成三重持久化不一致。
+        if effective_reduce_only(
+            reduce_only=intent.reduce_only,
+            leg_action=intent.leg_action,
+            position_intent=intent.position_intent,
+        ):
             payload["reduceOnly"] = "true"
         return payload
 
@@ -112,7 +124,11 @@ class OKXOrderPayloadBuilder:
         payload: dict[str, str] = {}
         if intent.order_type == "market" and intent.side == "buy":
             payload["tgtCcy"] = "base_ccy"
-        if intent.margin_mode in {"cross", "isolated"} and intent.reduce_only:
+        if intent.margin_mode in {"cross", "isolated"} and effective_reduce_only(
+            reduce_only=intent.reduce_only,
+            leg_action=intent.leg_action,
+            position_intent=intent.position_intent,
+        ):
             payload["reduceOnly"] = "true"
         return payload
 
@@ -771,15 +787,15 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 position_mode=position_mode,
             )
         td_mode = intent.td_mode or ("cash" if intent.product_type == "spot" else intent.margin_mode)
-        reduce_only = bool(
-            intent.reduce_only
-            or reduce_only_from_leg_action(intent.leg_action)
-            or reduce_only_from_position_intent(intent.position_intent)
+        reduce_only = effective_reduce_only(
+            reduce_only=intent.reduce_only,
+            leg_action=intent.leg_action,
+            position_intent=intent.position_intent,
         )
-        close_only = bool(
-            intent.close_only
-            or close_only_from_leg_action(intent.leg_action)
-            or close_only_from_position_intent(intent.position_intent)
+        close_only = effective_close_only(
+            close_only=intent.close_only,
+            leg_action=intent.leg_action,
+            position_intent=intent.position_intent,
         )
         if intent.only_reduce_required and position_mode in {"net_mode", "long_short_mode"}:
             reducible_qty = self._reducible_position_quantity(
@@ -885,16 +901,18 @@ class OKXExecutionAdapter(ExchangeAdapter):
             side=intent.side,
         )
         reduce_path = bool(
-            intent.reduce_only
+            effective_reduce_only(
+                reduce_only=intent.reduce_only,
+                leg_action=intent.leg_action,
+                position_intent=intent.position_intent,
+            )
             or intent.only_reduce_required
-            or reduce_only_from_leg_action(intent.leg_action)
-            or reduce_only_from_position_intent(intent.position_intent)
             or intent.execution_action in {"reduce", "exit"}
         )
-        close_path = bool(
-            intent.close_only
-            or close_only_from_leg_action(intent.leg_action)
-            or close_only_from_position_intent(intent.position_intent)
+        close_path = effective_close_only(
+            close_only=intent.close_only,
+            leg_action=intent.leg_action,
+            position_intent=intent.position_intent,
         )
         if close_path and not reduce_path:
             return "okx_close_only_requires_reduce_only"
@@ -932,16 +950,18 @@ class OKXExecutionAdapter(ExchangeAdapter):
         if account_level_code in {None, "", "1"}:
             return "okx_spot_margin_account_mode_incompatible"
         reduce_path = bool(
-            intent.reduce_only
+            effective_reduce_only(
+                reduce_only=intent.reduce_only,
+                leg_action=intent.leg_action,
+                position_intent=intent.position_intent,
+            )
             or intent.only_reduce_required
-            or reduce_only_from_leg_action(intent.leg_action)
-            or reduce_only_from_position_intent(intent.position_intent)
             or intent.execution_action in {"reduce", "exit"}
         )
-        close_path = bool(
-            intent.close_only
-            or close_only_from_leg_action(intent.leg_action)
-            or close_only_from_position_intent(intent.position_intent)
+        close_path = effective_close_only(
+            close_only=intent.close_only,
+            leg_action=intent.leg_action,
+            position_intent=intent.position_intent,
         )
         reducible_qty = self._reducible_position_quantity(
             snapshot=snapshot,
@@ -1032,16 +1052,18 @@ class OKXExecutionAdapter(ExchangeAdapter):
             if action not in {None, ""}
         }
         reduce_path = bool(
-            intent.reduce_only
-            or reduce_only_from_leg_action(intent.leg_action)
-            or reduce_only_from_position_intent(intent.position_intent)
+            effective_reduce_only(
+                reduce_only=intent.reduce_only,
+                leg_action=intent.leg_action,
+                position_intent=intent.position_intent,
+            )
             or "reduce" in normalized_actions
             or "exit" in normalized_actions
         )
-        close_path = bool(
-            intent.close_only
-            or close_only_from_leg_action(intent.leg_action)
-            or close_only_from_position_intent(intent.position_intent)
+        close_path = effective_close_only(
+            close_only=intent.close_only,
+            leg_action=intent.leg_action,
+            position_intent=intent.position_intent,
         )
         return reduce_path or close_path
 
@@ -1220,6 +1242,14 @@ class OKXExecutionAdapter(ExchangeAdapter):
             order_id=None,
         )
         error = self._write_unknown_error_label(operation="submission", exc=exc)
+        # P1-15：给 OKX 一点时间完成 order 入库再 GET 确认。没有这段延迟就可能
+        # 立即命中 51603 并误把实际下单成功的 order 标成 unknown_write 冷冻态。
+        try:
+            await asyncio.sleep(_UNKNOWN_WRITE_RECOVERY_GRACE_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
         try:
             order_detail = await self._load_order_detail(
                 symbol=intent.symbol,

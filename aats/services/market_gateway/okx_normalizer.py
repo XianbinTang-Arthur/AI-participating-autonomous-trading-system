@@ -97,13 +97,37 @@ class OKXMarketSnapshotNormalizer:
         self._detected_gaps = []
         return gaps
 
-    @staticmethod
-    def okx_inst_id(symbol: str) -> str:
-        return symbol.upper()
+    # P1-7：OKX 合约符号格式校验。OKX 的 instId 必须是 3 段连字符分隔：
+    #   - 现货: BASE-QUOTE         (e.g. BTC-USDT)
+    #   - 合约: BASE-QUOTE-SWAP    (e.g. BTC-USDT-SWAP)
+    #   - 交割: BASE-QUOTE-YYMMDD  (e.g. BTC-USDT-251226)
+    # 旧代码仅做 .upper()，不校验格式，"BTC-USDT" 当作现货被接受但订阅的是合约
+    # 会静默失败。这里加严格校验，非法符号立即抛 ValueError，上游立即可见。
+    _VALID_OKX_CONTRACT_SUFFIXES: frozenset[str] = frozenset({"SWAP"})
 
-    @staticmethod
-    def internal_symbol(inst_id: str) -> str:
-        return inst_id.upper()
+    @classmethod
+    def okx_inst_id(cls, symbol: str) -> str:
+        return cls._validate_inst_id(symbol.upper())
+
+    @classmethod
+    def internal_symbol(cls, inst_id: str) -> str:
+        return cls._validate_inst_id(inst_id.upper())
+
+    @classmethod
+    def _validate_inst_id(cls, inst_id: str) -> str:
+        parts = inst_id.split("-")
+        if len(parts) < 2 or len(parts) > 3:
+            raise ValueError(f"invalid_okx_inst_id: {inst_id!r} — expected BASE-QUOTE[-SUFFIX]")
+        if len(parts) == 3:
+            suffix = parts[2]
+            # 允许 SWAP 永续、YYMMDD 交割合约（6 位数字）
+            if suffix not in cls._VALID_OKX_CONTRACT_SUFFIXES and not (len(suffix) == 6 and suffix.isdigit()):
+                raise ValueError(
+                    f"invalid_okx_inst_id: {inst_id!r} — unsupported contract suffix {suffix!r}"
+                )
+        if not parts[0] or not parts[1]:
+            raise ValueError(f"invalid_okx_inst_id: {inst_id!r} — empty base/quote segment")
+        return inst_id
 
     def apply_message(
         self,

@@ -410,8 +410,15 @@ class ExecutionPlanner:
         )
         if normalized_quantity <= EPSILON_DECIMAL_12:
             # 平仓 / 减仓时量化为零（持仓小于 1 张合约）：向上取整到最小合约量。
-            # 交易所 reduceOnly / closeOnly 标志确保实际成交不超过真实持仓，
-            # 所以多报 1 张不会开出反向头寸。
+            # 安全不变量：action in ("close", "reduce") 意味着下方 line 444 的
+            # reduce_only_from_leg_action(action) 必定返回 True，因而 adapter 会
+            # 给 OKX 发 reduceOnly=true。交易所会把实际成交上限设为真实持仓大小，
+            # 同时 okx_adapter._validate_intent 会在 reducible_qty < quantity 时
+            # 提前拒绝（okx_close_only_exceeds_reducible_position），两层防护
+            # 保证多报 1 张不会开出反向头寸。
+            # P1-14：审计曾质疑此处应改为 round-down（返回 None 跳过），但是
+            # round-down 会让任何 sub-min-qty 的尾单永远无法平，且 reduceOnly
+            # 已经提供了等效安全保证，故保留 round-up 行为并补齐注释。
             if action in ("close", "reduce") and instrument_rule is not None:
                 min_qty = minimum_internal_order_quantity(
                     symbol=symbol, instrument=instrument_rule,
@@ -420,8 +427,8 @@ class ExecutionPlanner:
                     normalized_quantity = min_qty
                     log.info(
                         "build_leg_plan: 平仓量化为零，向上取整到最小合约量 | "
-                        "symbol=%s side=%s pos_side=%s raw_qty=%s min_qty=%s",
-                        symbol, side, pos_side, quantity, min_qty,
+                        "symbol=%s side=%s pos_side=%s raw_qty=%s min_qty=%s action=%s",
+                        symbol, side, pos_side, quantity, min_qty, action,
                     )
                 else:
                     log.warning(

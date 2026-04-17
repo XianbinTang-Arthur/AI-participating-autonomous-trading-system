@@ -558,14 +558,22 @@ class TargetPositionEngine:
             sizing_breakdown=sizing_breakdown,
         )
 
+        # P0-3：按 market_last_price 计算名义头寸。下游 execution 依赖 notional
+        # 做保证金/杠杆/名义头寸上限风控；之前硬编码为 0 会让所有 notional 风控
+        # 事实上失效。price 不可用（=0）时退化到 0，由上游 guardrail 拦截。
+        reference_price = to_decimal(context.market_last_price)
+        if reference_price < Decimal("0"):
+            reference_price = Decimal("0")
+        current_notional_value = (context.current_position_qty.copy_abs() * reference_price)
+        target_notional_value = (target_qty.copy_abs() * reference_price)
         return PositionTarget(
             decision_id=context.decision_id,
             symbol=context.symbol,
             current_position_qty=context.current_position_qty,
             target_position_qty=target_qty,
             delta_position_qty=target_qty - context.current_position_qty,
-            current_notional=Decimal("0"),
-            target_notional=Decimal("0"),
+            current_notional=current_notional_value,
+            target_notional=target_notional_value,
             rebalance_reason=rebalance_reason,
             urgency=self._urgency(
                 current_position_qty=context.current_position_qty,

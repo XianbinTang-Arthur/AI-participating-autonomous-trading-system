@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,7 +22,12 @@ from aats.storage.portfolio_repo_postgres import PostgresPortfolioRepository
 
 @dataclass(slots=True)
 class PostgresPortfolioOutboxPublisher:
-    _MAX_PUBLISH_ATTEMPTS = 3
+    _MAX_PUBLISH_ATTEMPTS: ClassVar[int] = 3
+    # P1-16：单条 envelope 发 NATS 的硬超时，与 execution_engine/outbox.py 同义。
+    # 声明为 ClassVar 是为了继续作为类级常量存在（与 _MAX_PUBLISH_ATTEMPTS 一致），
+    # 不进入 dataclass field 顺序，避免 Python 3.14 的 "non-default follows default"
+    # 校验把 session_factory 判为违法。
+    _PUBLISH_TIMEOUT_SECONDS: ClassVar[float] = 5.0
     session_factory: sessionmaker[Session]
     event_store: PostgresEventStore
     outbox_repo: PostgresOutboxRepository
@@ -144,28 +149,41 @@ class PostgresPortfolioOutboxPublisher:
         published_ids: list[str] = []
         for envelope in pending:
             try:
-                await self.bus.publish_envelope(envelope, persist=False)
+                await asyncio.wait_for(
+                    self.bus.publish_envelope(envelope, persist=False),
+                    timeout=self._PUBLISH_TIMEOUT_SECONDS,
+                )
                 published_ids.append(envelope.event_id)
             except Exception as exc:
                 if published_ids:
                     await asyncio.to_thread(self.outbox_repo.mark_published_batch, published_ids)
                     published_ids = []
+                is_timeout = isinstance(exc, asyncio.TimeoutError)
+                # R2-P2-E3：timeout 分支保留异常类型前缀，方便 grep/aggregation。
+                error_str = (
+                    f"TimeoutError: publish_timeout_seconds={self._PUBLISH_TIMEOUT_SECONDS}"
+                    if is_timeout
+                    else str(exc)
+                )
                 status = await asyncio.to_thread(
                     self.outbox_repo.record_failure_with_threshold,
                     envelope.event_id,
-                    str(exc),
+                    error_str,
                     max_attempts=self._MAX_PUBLISH_ATTEMPTS,
                 )
+                failed_level = "critical" if status == "FAILED" else "error"
                 log_event(
                     self.logger,
                     "portfolio_outbox_publish_failed",
-                    level="error",
+                    level=failed_level,
                     topic=envelope.topic,
                     key=envelope.key,
                     event_id=envelope.event_id,
                     outbox_status=status,
+                    is_timeout=is_timeout,
+                    max_attempts=self._MAX_PUBLISH_ATTEMPTS,
                     error_type=type(exc).__name__,
-                    error=str(exc),
+                    error=error_str,
                 )
                 if status != "FAILED":
                     break

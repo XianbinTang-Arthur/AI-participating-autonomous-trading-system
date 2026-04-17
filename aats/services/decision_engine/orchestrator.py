@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
@@ -11,6 +12,7 @@ from aats.events import topics
 from aats.events.envelopes import publish_model
 from aats.schemas.common import new_id
 from aats.schemas.decision import PositionTarget
+from aats.schemas.operator import ProcessingFailureRecord
 from aats.services.ai_service.inference import AIInferenceService
 from aats.services.decision_engine.baseline import BaselineStrategy
 from aats.services.decision_engine.context_builder import DecisionContextBuilder
@@ -75,11 +77,26 @@ class DecisionOrchestrator:
                 "aats.timeframe": timeframe,
             },
         ):
-            return await self._run_cycle_body(
-                symbol=symbol,
-                timeframe=timeframe,
-                decision_id=decision_id,
-            )
+            try:
+                return await self._run_cycle_body(
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    decision_id=decision_id,
+                )
+            except Exception as exc:
+                # P1-11：若 run_cycle 在 position_target 发出之前崩溃，之前已经发过的
+                # decision_context / baseline / ai_assessment / shadow 等事件会在
+                # event stream 上成为"孤儿"（不会有对应的 target / outcome）。下游
+                # 的 reconciliation_service.handle_processing_failure 订阅
+                # PROCESSING_FAILURES 并按 decision_id 关联，能够把这些孤儿标记为
+                # 未完成，避免重放 / 审计时把它们当作已决策结果。
+                await self._publish_failure_best_effort(
+                    decision_id=decision_id,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    exc=exc,
+                )
+                raise
 
     async def _run_cycle_body(
         self,
@@ -281,6 +298,70 @@ class DecisionOrchestrator:
             ),
         )
         return target
+
+    # R2-P0-D1：publish 硬超时。若 NATS 背压或 bus 内部死锁，publish_model 可能
+    # 永不返回。_publish_failure_best_effort 在 raise 原始业务异常之前 await 这个
+    # publish——没有超时等于让整个 run_cycle 永久挂起，trigger.py backoff/重试都
+    # 永远等不到协程 return。用 wait_for 明确上限，超时走 warning 分支，业务异常
+    # 仍按原样 raise 出去。
+    _FAILURE_PUBLISH_TIMEOUT_SECONDS: float = 5.0
+
+    async def _publish_failure_best_effort(
+        self,
+        *,
+        decision_id: str,
+        symbol: str,
+        timeframe: str,
+        exc: BaseException,
+    ) -> None:
+        """Best-effort publish a ProcessingFailureRecord when run_cycle raises.
+
+        任何在 publish_model 自身的异常只做 warning log，不再 raise，否则会
+        覆盖原始业务异常让 trigger.py 的 backoff 逻辑读到错误的 error_type。
+        """
+        try:
+            await asyncio.wait_for(
+                publish_model(
+                    bus=self.bus,
+                    topic=topics.PROCESSING_FAILURES,
+                    key="decision_engine",
+                    payload_model=ProcessingFailureRecord(
+                        subsystem="decision_engine",
+                        stage="run_cycle",
+                        severity="error",
+                        message=f"decision_cycle_failed: {type(exc).__name__}: {exc}",
+                        decision_id=decision_id,
+                        symbol=symbol,
+                        retriable=True,
+                        observed_at=datetime.now(timezone.utc),
+                        details={
+                            "timeframe": timeframe,
+                            "error_type": type(exc).__name__,
+                        },
+                    ),
+                    source_component="decision_engine",
+                ),
+                timeout=self._FAILURE_PUBLISH_TIMEOUT_SECONDS,
+            )
+        except Exception as publish_exc:
+            is_timeout = isinstance(publish_exc, asyncio.TimeoutError)
+            log_event(
+                self.logger,
+                "decision_cycle_failure_publish_failed",
+                level="warning",
+                **correlation_fields(
+                    decision_id=decision_id,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    error=(
+                        f"publish_timeout_seconds={self._FAILURE_PUBLISH_TIMEOUT_SECONDS}"
+                        if is_timeout
+                        else str(publish_exc)
+                    ),
+                    error_type=type(publish_exc).__name__,
+                    is_timeout=is_timeout,
+                ),
+            )
 
     async def _publish_shadow_evaluation_best_effort(
         self,

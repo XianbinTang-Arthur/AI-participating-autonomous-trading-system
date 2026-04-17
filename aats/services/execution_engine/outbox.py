@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.orm.exc import StaleDataError
@@ -35,12 +35,21 @@ if TYPE_CHECKING:
 
 @dataclass(slots=True)
 class PostgresExecutionOutboxPublisher:
-    _MAX_PUBLISH_ATTEMPTS = 3
+    _MAX_PUBLISH_ATTEMPTS: ClassVar[int] = 3
     # Stage 5：OrderStateModel 的 row_version OCC 在 commit 时如果检测到
     # 别的 worker 已经推进了 row_version，会抛 StaleDataError。我们重读
     # 最新行后让 OrderStateMachine.merge 重新合并自己的 incoming state，
     # 再 commit 一次。3 次仍然失败说明竞争异常激烈，让 caller 看到错误。
-    _MAX_PERSIST_ATTEMPTS = 3
+    _MAX_PERSIST_ATTEMPTS: ClassVar[int] = 3
+    # P1-16：单条 envelope 发 NATS 的硬超时。publish_envelope 底层的 NATS
+    # connection drain / ACK 链路若在网络分区时挂起，会把整条 flush_pending
+    # 协程一起拖住（下一周期的 execution loop 跟着卡住），订单队列堆积。
+    # 加 wait_for 上限让 flush 能快速失败并把事件推进到 record_failure，避免
+    # 一条坏事件拖垮整条 pipeline。
+    # 声明为 ClassVar 是为了继续作为类级常量存在（与 _MAX_PUBLISH_ATTEMPTS 一致），
+    # 不进入 dataclass field 顺序，避免 Python 3.14 的 "non-default follows default"
+    # 校验把后续无默认值的字段判为违法。
+    _PUBLISH_TIMEOUT_SECONDS: ClassVar[float] = 5.0
     session_factory: sessionmaker[Session]
     event_store: PostgresEventStore
     execution_repo: ExecutionRepository
@@ -398,11 +407,16 @@ class PostgresExecutionOutboxPublisher:
         if not saved:
             return False
         await self.flush_pending()
+        latest_order_state = await asyncio.to_thread(
+            self.execution_repo.get_order_state,
+            fill.client_order_id,
+        )
         # Stage 6 Slice 6.5：事务已 commit，obligation 广播到 cache。仅在
         # saved=True 时调：saved=False 说明 fill 被 dedup 了（重复 fill_id），
         # obligation 本身未被 persist，此时广播会把一份可能未写入 PG 的版本
         # 推到 cache，破坏 cache ↔ PG 最终一致性。
         self._publish_obligation_to_cache(obligation)
+        self._publish_order_state_to_cache(latest_order_state)
         # P1-2：事务已 commit，fill 推到跨进程 cache。同 obligation，仅 saved=True
         # 时调：dedup 的 fill 不应该再推一遍。
         self._publish_fill_to_cache(fill)
@@ -532,12 +546,12 @@ class PostgresExecutionOutboxPublisher:
                 error=str(exc),
             )
 
-    def _publish_order_state_to_cache(self, order: OrderState) -> None:
+    def _publish_order_state_to_cache(self, order: OrderState | None) -> None:
         """P1-1：事务 commit 成功后推 order_state 到跨进程 cache。
 
         模板同 ``_publish_obligation_to_cache``：I1 fail-soft，异常只 warning。
         """
-        if self.order_state_cache is None:
+        if order is None or self.order_state_cache is None:
             return
         try:
             self.order_state_cache.fire_and_forget_publish(order)
@@ -575,28 +589,47 @@ class PostgresExecutionOutboxPublisher:
         published_ids: list[str] = []
         for envelope in pending:
             try:
-                await self.bus.publish_envelope(envelope, persist=False)
+                # P1-16：硬超时保护。没有 wait_for 包裹时，NATS 连接 drain 挂起会把
+                # 整条 flush 协程一起卡住。超时视为 publish 失败，让 envelope 走
+                # record_failure_with_threshold，attempt_count 计满后进 FAILED(DLQ)。
+                await asyncio.wait_for(
+                    self.bus.publish_envelope(envelope, persist=False),
+                    timeout=self._PUBLISH_TIMEOUT_SECONDS,
+                )
                 published_ids.append(envelope.event_id)
             except Exception as exc:
                 if published_ids:
                     await asyncio.to_thread(self.outbox_repo.mark_published_batch, published_ids)
                     published_ids = []
+                is_timeout = isinstance(exc, asyncio.TimeoutError)
+                # R2-P2-E3：timeout 分支保留异常类型前缀，方便 grep/aggregation；
+                # 与非 timeout 的 str(exc) 行为一致（后者通常也包含类型信息）。
+                error_str = (
+                    f"TimeoutError: publish_timeout_seconds={self._PUBLISH_TIMEOUT_SECONDS}"
+                    if is_timeout
+                    else str(exc)
+                )
                 status = await asyncio.to_thread(
                     self.outbox_repo.record_failure_with_threshold,
                     envelope.event_id,
-                    str(exc),
+                    error_str,
                     max_attempts=self._MAX_PUBLISH_ATTEMPTS,
                 )
+                # P1-16：FAILED 状态是 DLQ 的入口（pending() 不再重放），必须以
+                # critical 级别告警让 ops 第一时间感知。非 FAILED 状态保持 error。
+                failed_level = "critical" if status == "FAILED" else "error"
                 log_event(
                     self.logger,
                     "execution_outbox_publish_failed",
-                    level="error",
+                    level=failed_level,
                     topic=envelope.topic,
                     key=envelope.key,
                     event_id=envelope.event_id,
                     outbox_status=status,
+                    is_timeout=is_timeout,
+                    max_attempts=self._MAX_PUBLISH_ATTEMPTS,
                     error_type=type(exc).__name__,
-                    error=str(exc),
+                    error=error_str,
                 )
                 if status != "FAILED":
                     break  # FIFO: retriable failure blocks subsequent messages until resolved

@@ -374,6 +374,9 @@ class TestDecisionContextBuilder(unittest.TestCase):
         execution_repo = InMemoryExecutionRepository()
         first_snapshot_ts = datetime.now(timezone.utc) - timedelta(minutes=20)
         latest_snapshot_ts = first_snapshot_ts + timedelta(minutes=10)
+        # P1-10：context_builder 对 market_snapshot 做了 45s 新鲜度检查，historical
+        # portfolio 快照测试不应该被行情新鲜度拖住，给 market/feature 用 now。
+        fresh_market_ts = datetime.now(timezone.utc)
         for snapshot_ts in (first_snapshot_ts, latest_snapshot_ts):
             portfolio_repo.save_snapshot(
                 PortfolioSnapshot(
@@ -411,7 +414,7 @@ class TestDecisionContextBuilder(unittest.TestCase):
                 payload_model=MarketSnapshot(
                     symbol="BTC-USDT-SWAP",
                     exchange="OKX",
-                    snapshot_ts=latest_snapshot_ts,
+                    snapshot_ts=fresh_market_ts,
                     best_bid=70_000.0,
                     best_ask=70_001.0,
                     last_price=70_000.5,
@@ -430,7 +433,7 @@ class TestDecisionContextBuilder(unittest.TestCase):
                 key="BTC-USDT-SWAP",
                 payload_model=FeatureSnapshot(
                     symbol="BTC-USDT-SWAP",
-                    snapshot_ts=latest_snapshot_ts,
+                    snapshot_ts=fresh_market_ts,
                     market_snapshot_ref="evt_market_derivatives_snapshot_anchor",
                     trend_strength=0.7,
                     volatility_state="medium",

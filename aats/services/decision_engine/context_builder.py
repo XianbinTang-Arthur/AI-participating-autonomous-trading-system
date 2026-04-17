@@ -176,6 +176,19 @@ class DecisionContextBuilder:
 
         decision_as_of = utc_now()
         market_snapshot = MarketSnapshot.model_validate(market_event.payload)
+        # P1-10：market_event 新鲜度检查。对齐行情 gateway 的 stale 阈值
+        # (market_data_stale_after_seconds, 默认 45s)。超阈值说明 NATS 背压
+        # 或上游断流，用陈旧价格做决策在极端行情下会方向错误 → 拒绝决策。
+        _snapshot_ts = market_snapshot.snapshot_ts
+        if _snapshot_ts is not None:
+            _stale_seconds = (decision_as_of - _snapshot_ts).total_seconds()
+            _stale_limit = float(self.settings.market_data_stale_after_seconds)
+            if _stale_seconds > _stale_limit:
+                raise RuntimeError(
+                    f"Market snapshot is stale: symbol={symbol} "
+                    f"age={_stale_seconds:.1f}s limit={_stale_limit:.1f}s "
+                    f"snapshot_ts={_snapshot_ts.isoformat()}"
+                )
         account_snapshot = self._account_snapshot()
         current_position_state = self._position_state(portfolio_snapshot, symbol, self.settings.trading_product_type)
         # Extract position fields once to eliminate repeated None-checks.

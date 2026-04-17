@@ -56,6 +56,11 @@ class MarketDataGateway:
         self._last_publish_ts = None
         self._last_error: str | None = None
         self._consecutive_message_errors: int = 0
+        # R2-P1-M8：schema 错误单独计数。P1-9 把 ValueError/KeyError 分离出系统
+        # 错误，但原代码完全不 counting → 若 OKX 改了推送格式，会静默冲刷日志
+        # 永远不 escalate。独立计数 + 阈值升级 critical，保证 schema 故障不被
+        # 系统错误路径漏掉。
+        self._consecutive_schema_errors: int = 0
         self._rest_fallback_last_success_ts = None
         self._rest_fallback_last_attempt_ts = None
         self._rest_fallback_last_error: str | None = None
@@ -65,6 +70,26 @@ class MarketDataGateway:
     async def start(self) -> None:
         if self.settings.market_data_backend != "okx":
             return
+        # R2-P1-M9：启动时预校验配置的 symbol。P1-7 给 okx_inst_id 加了格式校验，
+        # 但仅在消息路径（apply_message）里兜住；如果 expanded_allowed_symbols()
+        # 本身就有 typo（"BTC-USD" 少了 T），subscribe 消息会被 OKX 侧拒，P0-2
+        # 触发 ack timeout 死循环重连。这里提前按规则过一遍，明确告警非法 symbol
+        # 的同时仍然启动服务（其他合法 symbol 能正常消费），不 hard-fail。
+        raw_symbols = tuple(self.settings.expanded_allowed_symbols())
+        invalid_symbols: list[tuple[str, str]] = []
+        for symbol in raw_symbols:
+            try:
+                self.okx_normalizer.okx_inst_id(symbol)
+            except ValueError as exc:
+                invalid_symbols.append((symbol, str(exc)))
+        if invalid_symbols:
+            log_event(
+                self.logger,
+                "okx_invalid_symbol_config_detected",
+                level="error",
+                invalid_symbols=[{"symbol": s, "error": e} for s, e in invalid_symbols],
+                total_configured=len(raw_symbols),
+            )
         if self.okx_ws_client is not None:
             if self._background_task is None or self._background_task.done():
                 self._background_task = asyncio.create_task(self._run_okx_stream(), name="aats_okx_market_stream")
@@ -206,6 +231,27 @@ class MarketDataGateway:
         到的最新市场状态。producer 进程（market / monolith）自己通过
         _publish_snapshot() 写入相同字段，不需要走这条路径。
         """
+        # P0-1 幂等保护：NATS at-least-once 可能重投递同一快照，或因网络乱序
+        # 送达旧于本地的快照。两种情况都不能刷新 _latest_received_at（否则
+        # is_fresh() 会把"已陈旧的数据"判断为新鲜，REST fallback 永不触发）。
+        # 仅当新快照的 snapshot_ts 严格新于本地版本时才 apply。
+        # R2-P0-M1：existing.snapshot_ts None 防御——Pydantic schema 虽然把
+        # snapshot_ts 声明为 datetime 必填，但历史 event_store payload 如果
+        # 有 schema-migration 过的旧记录，可能走到这里时为 None。让 None 版本
+        # 被新快照覆盖（existing 视为"比新的都旧"）。
+        # R2-P1-M3：从 `<=` 改为 `<`，相同 ms 精度的 snapshot_ts 是 OKX 合法
+        # 场景（两笔 ticker 同 ms），用严格小于保证后到的最新 bid/ask 不被丢。
+        # new_snapshot_ts 本身 None 则拒收（上游 schema violation）。
+        new_ts = snapshot.snapshot_ts
+        if new_ts is None:
+            return
+        existing = self._latest_snapshots.get(snapshot.symbol)
+        if (
+            existing is not None
+            and existing.snapshot_ts is not None
+            and new_ts < existing.snapshot_ts
+        ):
+            return
         now = utc_now()
         self._latest_snapshots[snapshot.symbol] = snapshot
         self._latest_received_at[snapshot.symbol] = now
@@ -438,7 +484,16 @@ class MarketDataGateway:
         )
 
     async def _handle_okx_message(self, message: dict[str, Any]) -> None:
+        # P1-9：异常分级。
+        #   - ValueError / KeyError：单条消息 schema/字段问题，很可能是 OKX 偶发
+        #     畸形推送，记 warning 并跳过；不参与连续错误计数（避免噪声）。
+        #   - 其他异常：视为系统问题（normalizer 内部异常、publisher 失败等），
+        #     累计到 _consecutive_message_errors；超阈值升级 critical 主动告警。
+        # R2-P1-M8：schema 错误现在有独立计数器 _consecutive_schema_errors，阈值
+        # 比系统错误稍高（100 vs 20）——单条偶发畸形是正常，但持续 100 条意味
+        # OKX 可能动了 schema 或 normalizer 规则需要更新，必须 escalate critical。
         _CONSECUTIVE_ERROR_ESCALATION = 20
+        _CONSECUTIVE_SCHEMA_ERROR_ESCALATION = 100
         try:
             snapshots = self.okx_normalizer.apply_message(message=message, states=self._okx_states)
             for snapshot in snapshots:
@@ -452,6 +507,23 @@ class MarketDataGateway:
                 self._backfill_tasks.add(task)
                 task.add_done_callback(self._backfill_tasks.discard)
             self._consecutive_message_errors = 0
+            self._consecutive_schema_errors = 0
+        except (ValueError, KeyError) as exc:
+            self._consecutive_schema_errors += 1
+            self._last_error = str(exc)
+            schema_level = "warning"
+            if self._consecutive_schema_errors >= _CONSECUTIVE_SCHEMA_ERROR_ESCALATION:
+                schema_level = "critical"
+            log_event(
+                self.logger,
+                "okx_market_message_schema_error",
+                level=schema_level,
+                error_type=type(exc).__name__,
+                error=str(exc),
+                message_preview=str(message)[:200],
+                consecutive_schema_errors=self._consecutive_schema_errors,
+            )
+            return
         except Exception as exc:
             self._consecutive_message_errors += 1
             self._last_error = str(exc)

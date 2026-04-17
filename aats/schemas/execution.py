@@ -119,6 +119,69 @@ def close_only_from_leg_action(action: LegOrderAction | None) -> bool:
     return str(action).strip().lower() == "close"
 
 
+def effective_reduce_only(
+    *,
+    reduce_only: bool,
+    leg_action: LegOrderAction | None,
+    position_intent: str | None,
+) -> bool:
+    """Return the reduce_only flag that should actually be applied.
+
+    P1-13：原代码里 OKX 发送 reduceOnly 只看 ``intent.reduce_only``，但 obligation
+    payload 是 ``intent.reduce_only OR leg_action OR position_intent`` 三者求并。
+    两条路径的"真相"不同步时，交易所可能放行一笔本该 reduce 的单子加仓，
+    而 obligation repo 里却记为 reduce —— 三重持久化分叉、风险门禁误判。
+    统一用本函数计算，消除 adapter 各处重复的 OR 逻辑。
+    """
+    return bool(
+        reduce_only
+        or reduce_only_from_leg_action(leg_action)
+        or reduce_only_from_position_intent(position_intent)
+    )
+
+
+def effective_close_only(
+    *,
+    close_only: bool,
+    leg_action: LegOrderAction | None,
+    position_intent: str | None,
+) -> bool:
+    """Return the close_only flag that should actually be applied. See ``effective_reduce_only``."""
+    return bool(
+        close_only
+        or close_only_from_leg_action(leg_action)
+        or close_only_from_position_intent(position_intent)
+    )
+
+
+# R2-P1-E1: OrderState 持久化必须用 "effective" 语义。
+#   OKX adapter 通过 effective_reduce_only / effective_close_only 计算交易所
+#   实际生效的 reduceOnly / closeOnly；但 order_manager 在落库 OrderState 时
+#   直接用 intent.reduce_only / intent.close_only → 三重持久化（Postgres 列、
+#   JSON payload、Redis hot cache）都记录的是"用户原始意图"而非"交易所实际
+#   应用的值"。当 intent.reduce_only=False 但 leg_action="close" 时，交易所
+#   收到 reduceOnly=True、OrderState 记录 reduce_only=False——obligation 下游
+#   读取 reduce_only 时判断此单"允许开仓方向"，可在 recovery / replay 路径
+#   放行本该被 reduce 的订单。
+#
+#   统一用 effective_*_for_intent 包装，_for_intent 接受完整 OrderIntent 对象，
+#   避免每个持久化站点重复 3 行参数解包。
+def effective_reduce_only_for_intent(intent: OrderIntent) -> bool:
+    return effective_reduce_only(
+        reduce_only=intent.reduce_only,
+        leg_action=intent.leg_action,
+        position_intent=intent.position_intent,
+    )
+
+
+def effective_close_only_for_intent(intent: OrderIntent) -> bool:
+    return effective_close_only(
+        close_only=intent.close_only,
+        leg_action=intent.leg_action,
+        position_intent=intent.position_intent,
+    )
+
+
 def default_reduce_only_reason(
     *,
     position_intent: str | None,

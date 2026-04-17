@@ -18,6 +18,8 @@ from aats.schemas.execution import (
     OrderIntent,
     OrderObligation,
     OrderState,
+    effective_close_only_for_intent,
+    effective_reduce_only_for_intent,
     execution_attempt_id_from_components,
     leg_intent_from_order_intent,
     order_intent_from_leg_order_intent,
@@ -155,6 +157,30 @@ class OrderManager:
         intent: OrderIntent,
         leg_intent: LegOrderIntent | None = None,
     ) -> None:
+        # P0-4：真金白银幂等防线。idempotency_key 驱动 clOrdId 的 SHA256 摘要，
+        # 任何空值意味着"随机 clOrdId 会被生成",OKX 会把重试视为新订单 → 重复下单。
+        # 在唯一入口处拒单而非后续 fallback 到 new_id("clord")，让问题在源头暴露。
+        if not intent.idempotency_key or not str(intent.idempotency_key).strip():
+            log_event(
+                self.logger,
+                "order_intent_missing_idempotency_key",
+                level="critical",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                ),
+            )
+            blocked_state = self._blocked_order_state_from_intent(
+                intent=intent,
+                client_order_id=intent.intent_id or new_id("clord"),
+                submission_mode="blocked_missing_idempotency_key",
+                execution_error="missing_idempotency_key",
+            )
+            await self._persist_order_state(
+                order_state=blocked_state, key=intent.symbol, intent=intent,
+            )
+            return
         # 去重检查优先于 kill_switch：已入库的 intent（无论之前是 BLOCKED/FILLED/…）
         # 不需要再次写 DB，避免 halted 期间重复 upsert。
         if self.execution_repo.has_intent(intent.intent_id):
@@ -283,8 +309,8 @@ class OrderManager:
                     remaining_qty=intent.quantity,
                     average_fill_price=None,
                     fees=Decimal("0"),
-                    reduce_only=intent.reduce_only,
-                    close_only=intent.close_only,
+                    reduce_only=effective_reduce_only_for_intent(intent),
+                    close_only=effective_close_only_for_intent(intent),
                     td_mode=intent.td_mode,
                     position_mode=intent.position_mode,
                     pos_side=intent.pos_side,
@@ -332,8 +358,8 @@ class OrderManager:
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
                 fees=Decimal("0"),
-                reduce_only=intent.reduce_only,
-                close_only=intent.close_only,
+                reduce_only=effective_reduce_only_for_intent(intent),
+                close_only=effective_close_only_for_intent(intent),
                 td_mode=intent.td_mode,
                 position_mode=intent.position_mode,
                 pos_side=intent.pos_side,
@@ -427,6 +453,29 @@ class OrderManager:
         client_order_id: str | None = None,
         leg_intent: LegOrderIntent | None = None,
     ) -> OrderState:
+        # P0-4：命令流入口也需校验 idempotency_key，否则 recovery/retry 路径
+        # 可能绕过 _handle_normalized_order_intent 的校验直接走到 submit。
+        idempotency_key_missing = (
+            not intent.idempotency_key or not str(intent.idempotency_key).strip()
+        )
+        if client_order_id is None and idempotency_key_missing:
+            log_event(
+                self.logger,
+                "process_submit_command_missing_idempotency_key",
+                level="critical",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                ),
+            )
+            blocked_state = self._blocked_order_state_from_intent(
+                intent=intent,
+                client_order_id=intent.intent_id or new_id("clord"),
+                submission_mode="blocked_missing_idempotency_key",
+                execution_error="missing_idempotency_key",
+            )
+            return await self._persist_order_state(order_state=blocked_state, key=intent.symbol)
         if client_order_id is not None:
             current = self.execution_repo.get_order_state(client_order_id)
             if current is not None and current.status not in {"CREATED", "SUBMITTING"}:
@@ -527,8 +576,8 @@ class OrderManager:
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
                 fees=Decimal("0"),
-                reduce_only=intent.reduce_only,
-                close_only=intent.close_only,
+                reduce_only=effective_reduce_only_for_intent(intent),
+                close_only=effective_close_only_for_intent(intent),
                 td_mode=intent.td_mode,
                 position_mode=intent.position_mode,
                 pos_side=intent.pos_side,
@@ -567,8 +616,8 @@ class OrderManager:
                 "last_update_ts": utc_now(),
                 "requested_qty": intent.quantity,
                 "remaining_qty": intent.quantity,
-                "reduce_only": intent.reduce_only,
-                "close_only": intent.close_only,
+                "reduce_only": effective_reduce_only_for_intent(intent),
+                "close_only": effective_close_only_for_intent(intent),
                 "td_mode": intent.td_mode,
                 "position_mode": intent.position_mode,
                 "pos_side": intent.pos_side,
@@ -632,8 +681,8 @@ class OrderManager:
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
                 fees=Decimal("0"),
-                reduce_only=intent.reduce_only,
-                close_only=intent.close_only,
+                reduce_only=effective_reduce_only_for_intent(intent),
+                close_only=effective_close_only_for_intent(intent),
                 td_mode=intent.td_mode,
                 position_mode=intent.position_mode,
                 pos_side=intent.pos_side,
@@ -1582,8 +1631,8 @@ class OrderManager:
                 remaining_qty=intent.quantity,
                 average_fill_price=None,
                 fees=Decimal("0"),
-                reduce_only=intent.reduce_only,
-                close_only=intent.close_only,
+                reduce_only=effective_reduce_only_for_intent(intent),
+                close_only=effective_close_only_for_intent(intent),
                 td_mode=intent.td_mode,
                 position_mode=intent.position_mode,
                 pos_side=intent.pos_side,
@@ -1758,8 +1807,8 @@ class OrderManager:
             remaining_qty=intent.quantity,
             average_fill_price=None,
             fees=Decimal("0"),
-            reduce_only=intent.reduce_only,
-            close_only=intent.close_only,
+            reduce_only=effective_reduce_only_for_intent(intent),
+            close_only=effective_close_only_for_intent(intent),
             td_mode=intent.td_mode,
             position_mode=intent.position_mode,
             pos_side=intent.pos_side,

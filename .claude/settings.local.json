@@ -76,7 +76,8 @@
       "Bash(.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/ -k \"rdp\" -x -q --tb=short)",
       "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -k \"rdp\" -x -q --tb=short)",
       "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -k \"rdp or health or operator\" -x -q --tb=short)",
-      "Bash(wsl -d Ubuntu bash -c \"docker ps --format 'table {{.Names}}\\\\t{{.Status}}'\")"
+      "Bash(wsl -d Ubuntu bash -c \"docker ps --format 'table {{.Names}}\\\\t{{.Status}}'\")",
+      "Bash(.venv/Scripts/python.exe -c \"from aats.services.decision_engine.orchestrator import DecisionOrchestrator; from aats.services.execution_engine.okx_adapter import OKXOrderPayloadBuilder, OKXExecutionAdapter; from aats.services.execution_engine.planner import ExecutionPlanner; from aats.schemas.execution import effective_reduce_only, effective_close_only; from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher; from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher; print\\('all_imports_ok'\\)\")"
     ]
   }
 }

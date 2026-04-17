@@ -51,6 +51,15 @@ class OKXPublicWebSocketClient:
         self._last_message_ts: dict[str, datetime | None] = {"public": None, "business": None}
         self._last_market_data_ts: dict[str, datetime | None] = {"public": None, "business": None}
         self._last_error: str | None = None
+        # P0-2：订阅 ack 跟踪。_subscribe 发送后填充 pending_subscriptions[conn] =
+        # set of (channel, instId) 元组；收到 event="subscribe" ack 时从中移除；
+        # 收到 event="error" 时记录到 _subscription_errors[conn]。keepalive 循环
+        # 在 _SUBSCRIPTION_ACK_TIMEOUT 秒后若 pending 非空，主动断开重连。
+        self._pending_subscriptions: dict[str, set[tuple[str, str]]] = {"public": set(), "business": set()}
+        self._subscription_errors: dict[str, list[dict[str, Any]]] = {"public": [], "business": []}
+        self._subscription_sent_ts: dict[str, datetime | None] = {"public": None, "business": None}
+
+    _SUBSCRIPTION_ACK_TIMEOUT_SECONDS: float = 10.0
 
     async def run_forever(self, *, on_message: RawMessageHandler) -> None:
         if connect is None:
@@ -204,7 +213,22 @@ class OKXPublicWebSocketClient:
                             self._last_message_ts[connection_name] = utc_now()
                             if text.strip().lower() == "pong":
                                 continue
-                            message = _json_loads(raw_message)
+                            # P1-8：JSON 解析容错。畸形 payload 不应炸掉整个消费循环
+                            # 触发无意义重连；记录样本 + 日志，跳过本条。
+                            try:
+                                message = _json_loads(raw_message)
+                            except (ValueError, UnicodeDecodeError) as exc:
+                                log_event(
+                                    self.logger,
+                                    "okx_ws_malformed_message",
+                                    level="warning",
+                                    connection=connection_name,
+                                    error_type=type(exc).__name__,
+                                    error=str(exc),
+                                    raw_preview=text[:200],
+                                )
+                                self._last_error = f"json_parse_error:{type(exc).__name__}"
+                                continue
                             if not isinstance(message, dict):
                                 continue
                             if self._is_control_message(message):
@@ -212,6 +236,12 @@ class OKXPublicWebSocketClient:
                             # 只有真实行情数据才更新 market data 时间戳；
                             # pong / control 不计入，否则"有 pong 无行情"不会触发重连。
                             self._last_market_data_ts[connection_name] = utc_now()
+                            # R2-P1-M7：收到一条真实行情即视为已恢复，把 _last_error
+                            # 清掉。否则上一个偶发错误（json_parse_error / subscription_error）
+                            # 会永远 stick 在 status() 里，observability 读到"一直有错误"，
+                            # 但实际上服务早就恢复。清除只在成功消费时，保证错误与"最近
+                            # 一次处理结果"对齐。
+                            self._last_error = None
                             await on_message(message)
                     finally:
                         keepalive_task.cancel()
@@ -253,6 +283,48 @@ class OKXPublicWebSocketClient:
         while not self._stop_event.is_set():
             await asyncio.sleep(poll_interval)
             if self._stop_event.is_set():
+                return
+            # ── P0-2 订阅 ack 超时检测 ────────────────────────────────
+            # subscribe 发送后若在 _SUBSCRIPTION_ACK_TIMEOUT_SECONDS 内未收到
+            # 所有 channel 的 event="subscribe" ack，或收到任一 event="error"，
+            # 断开重连。静默订阅失败会导致 WS 连着但没行情，下游饿死。
+            sub_sent_at = self._subscription_sent_ts.get(connection_name)
+            pending = self._pending_subscriptions.get(connection_name, set())
+            errors = self._subscription_errors.get(connection_name, [])
+            if errors:
+                log_event(
+                    self.logger,
+                    "okx_ws_subscription_failed_reconnect",
+                    level="error",
+                    connection=connection_name,
+                    error_count=len(errors),
+                    errors=errors[:5],
+                )
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        websocket.close(code=1011, reason="subscription_failed"),
+                        timeout=close_wait,
+                    )
+                return
+            if (
+                sub_sent_at is not None
+                and pending
+                and (utc_now() - sub_sent_at).total_seconds() > self._SUBSCRIPTION_ACK_TIMEOUT_SECONDS
+            ):
+                log_event(
+                    self.logger,
+                    "okx_ws_subscription_ack_timeout",
+                    level="error",
+                    connection=connection_name,
+                    pending_count=len(pending),
+                    pending_sample=[f"{c}:{i}" for c, i in list(pending)[:5]],
+                    timeout_seconds=self._SUBSCRIPTION_ACK_TIMEOUT_SECONDS,
+                )
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        websocket.close(code=1011, reason="subscription_ack_timeout"),
+                        timeout=close_wait,
+                    )
                 return
             # ── 行情数据过期检测 ──────────────────────────────────────
             # 即使 pong 持续回来（channel 活着），如果没有真实行情数据也应重连：
@@ -313,6 +385,18 @@ class OKXPublicWebSocketClient:
         connection_name: str,
         subscribe_args: list[dict[str, str]],
     ) -> None:
+        # P0-2：记录期望订阅的 channel×instId 集合，等待 OKX 返回 event="subscribe" ack
+        # 逐个确认。未在 _SUBSCRIPTION_ACK_TIMEOUT_SECONDS 内确认完的视为静默失败，
+        # keepalive 循环会主动断线重连。
+        pending: set[tuple[str, str]] = set()
+        for arg in subscribe_args:
+            channel = str(arg.get("channel", ""))
+            inst_id = str(arg.get("instId", ""))
+            if channel and inst_id:
+                pending.add((channel, inst_id))
+        self._pending_subscriptions[connection_name] = pending
+        self._subscription_errors[connection_name] = []
+        self._subscription_sent_ts[connection_name] = utc_now()
         await websocket.send(_json_dumps({"op": "subscribe", "args": subscribe_args}))
 
     def _is_control_message(self, message: dict[str, Any]) -> bool:
@@ -323,11 +407,34 @@ class OKXPublicWebSocketClient:
         event = message.get("event")
         if not isinstance(event, str):
             return False
-        if event in {"subscribe", "notice"}:
+        if event == "subscribe":
+            # P0-2：订阅成功 ack。从 pending 集合中移除该 channel×instId 组合；
+            # 若 pending 清空，记录"全部订阅已确认"供 keepalive 检查。
+            arg = message.get("arg") or {}
+            if isinstance(arg, dict):
+                key = (str(arg.get("channel", "")), str(arg.get("instId", "")))
+                for conn_name, pending in self._pending_subscriptions.items():
+                    if key in pending:
+                        pending.discard(key)
+                        log_event(
+                            self.logger,
+                            "okx_ws_subscription_ack",
+                            level="debug",
+                            connection=conn_name,
+                            channel=key[0],
+                            instId=key[1],
+                            pending_count=len(pending),
+                        )
+                        break
+            return True
+        if event == "notice":
             return True
         if event == "error":
             code = message.get("code", "")
             msg = message.get("msg", "")
+            arg = message.get("arg") or {}
+            failed_channel = str(arg.get("channel", "")) if isinstance(arg, dict) else ""
+            failed_inst = str(arg.get("instId", "")) if isinstance(arg, dict) else ""
             log_event(
                 self.logger,
                 "okx_ws_subscription_error",
@@ -335,7 +442,34 @@ class OKXPublicWebSocketClient:
                 code=code,
                 msg=msg,
                 connId=message.get("connId", ""),
+                channel=failed_channel,
+                instId=failed_inst,
             )
             self._last_error = f"subscription_error:{code}:{msg}"
+            # R2-P0-M4 补丁：原代码把错误同时写入 public 和 business 两条连接的
+            # _subscription_errors 列表，导致 public 订阅失败连锁触发 business
+            # 重连（反之亦然）。改为按 pending 集合反查定位唯一来源连接。
+            # 找不到匹配时（理论不可能——只有我们自己订阅过的 channel 才会收到
+            # error 事件）回退到 debug 日志而不广播到全部连接。
+            key = (failed_channel, failed_inst)
+            matched_conn: str | None = None
+            for conn_name, pending in self._pending_subscriptions.items():
+                if key in pending:
+                    matched_conn = conn_name
+                    break
+            if matched_conn is not None:
+                self._subscription_errors[matched_conn].append(
+                    {"code": code, "msg": msg, "channel": failed_channel, "instId": failed_inst}
+                )
+            else:
+                log_event(
+                    self.logger,
+                    "okx_ws_subscription_error_unmatched",
+                    level="warning",
+                    code=code,
+                    msg=msg,
+                    channel=failed_channel,
+                    instId=failed_inst,
+                )
             return True
         return False
