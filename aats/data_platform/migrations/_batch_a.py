@@ -330,9 +330,9 @@ def format_report_text(report: OrphanReport) -> str:
 
     lines.append("-" * 72)
     if report.is_clean:
-        lines.append(f"RESULT: CLEAN — stage 4.4.2 (add FKs) may proceed.")
+        lines.append("RESULT: CLEAN — stage 4.4.2 (add FKs) may proceed.")
     else:
-        lines.append(f"RESULT: DIRTY — migration blocked until data is triaged.")
+        lines.append("RESULT: DIRTY — migration blocked until data is triaged.")
         lines.append(
             f"        orphan rows: {report.orphan_row_total}, "
             f"illegal distribution values: {report.illegal_value_total}"

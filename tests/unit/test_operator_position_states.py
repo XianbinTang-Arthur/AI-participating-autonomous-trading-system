@@ -2058,6 +2058,54 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(summary["items"][0]["reconciliation_id"], "recon_leg_1")
         self.assertEqual(summary["items"][0]["kind"], "missing_execution_chain")
 
+    def test_leg_trial_guard_audit_summary_falls_back_to_raw_metrics_when_guard_window_is_empty(self) -> None:
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_overlay_mode="independent",
+                strategy_hedge_independent_trial_guard_enabled=True,
+                strategy_performance_guard_min_closed_trades=4,
+            )
+        )
+        query._DECIMAL_EPSILON = Decimal("0.000000001")
+        query._overlay_audit_summary = lambda position_target: {  # type: ignore[method-assign]
+            "effective_mode": "independent",
+            "configured_mode": "independent",
+        }
+
+        summary = query._leg_trial_guard_audit_summary(
+            decision_context={
+                "leg_strategy_health": {
+                    "long": {
+                        "recent_closed_trade_count": 5,
+                        "recent_win_rate": 0.2,
+                        "recent_net_realized_pnl": -3.0,
+                        "recent_fee_drag_ratio": 0.7,
+                        "recent_churn_ratio": 0.8,
+                        "recent_low_edge_trade_streak": 3,
+                        "recent_guard_eligible_closed_trade_count": 0,
+                        "recent_guard_eligible_win_rate": 0.0,
+                        "recent_guard_eligible_net_realized_pnl": 0.0,
+                        "recent_guard_eligible_fee_drag_ratio": 0.0,
+                        "recent_guard_eligible_churn_ratio": 0.0,
+                        "recent_guard_eligible_low_edge_trade_streak": 0,
+                        "recent_guard_eligible_low_edge_trade_at": None,
+                    }
+                }
+            },
+            position_target={},
+        )
+
+        self.assertEqual(summary["total_count"], 1)
+        item = summary["items"][0]
+        self.assertTrue(item["sample_ready"])
+        self.assertTrue(item["active"])
+        self.assertEqual(item["status"], "blocked")
+        self.assertEqual(item["recent_closed_trade_count"], 5)
+        self.assertEqual(item["recent_fee_drag_ratio"], 0.7)
+        self.assertEqual(item["recent_churn_ratio"], 0.8)
+        self.assertEqual(item["recent_low_edge_trade_streak"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1100,6 +1100,7 @@ def evaluate_independent_books(
                 decision_id=context.decision_id,
                 symbol=context.symbol,
                 book=long_book,
+                current_leg_notional=to_decimal(context.current_long_position_notional),
                 margin_mode=resolved_margin_mode,
                 target_leverage=_leg_leverage(long_book),
                 reason_codes=list(long_book.reason_codes),
@@ -1109,6 +1110,7 @@ def evaluate_independent_books(
                 decision_id=context.decision_id,
                 symbol=context.symbol,
                 book=short_book,
+                current_leg_notional=to_decimal(context.current_short_position_notional),
                 margin_mode=resolved_margin_mode,
                 target_leverage=_leg_leverage(short_book),
                 reason_codes=list(short_book.reason_codes),
@@ -1224,6 +1226,7 @@ def build_independent_leg(
     decision_id: str,
     symbol: str,
     book: IndependentBookEvaluation,
+    current_leg_notional: Decimal,
     margin_mode: str,
     target_leverage: float,
     reason_codes: list[str],
@@ -1271,6 +1274,14 @@ def build_independent_leg(
             and planned_delta_qty > EPSILON_DECIMAL_12
         ):
             reference_price = to_decimal(projected_notional) / planned_delta_qty
+    resolved_current_leg_notional = abs(to_decimal(current_leg_notional))
+    if (
+        reference_price is None
+        and not opening
+        and current_leg_qty > EPSILON_DECIMAL_12
+        and resolved_current_leg_notional > EPSILON_DECIMAL_12
+    ):
+        reference_price = resolved_current_leg_notional / current_leg_qty
     return StrategyLegIntent(
         symbol=symbol,
         execution_chain_id=execution_chain_id,

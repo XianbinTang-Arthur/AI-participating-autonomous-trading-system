@@ -20,7 +20,12 @@ import os
 import time
 from typing import Tuple
 
-# 合法 action 列表——防止误用其他字符串导致 HMAC 被绕过
+# 合法 action 列表——防止误用其他字符串导致 HMAC 被绕过。
+#
+# 注：``freeze`` 为预留动作。批次 A 签发端（``POST /rdp/operator-tokens``）
+# 与 CLI 均接受 ``action=freeze``，但当前 API 层**没有**对应的消费端点；
+# freeze / 候选导入 / parameter 废弃 的 API 化排期在后续批次。签出的 freeze
+# token 在现有路由上无法落地，仅为不破坏已发文档契约而保留。
 _ALLOWED_ACTIONS: frozenset[str] = frozenset({"apply", "rollback", "freeze"})
 
 _TTL_ENV_VAR = "RDP_APPLY_TOKEN_TTL_SECONDS"

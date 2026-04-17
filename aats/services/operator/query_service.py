@@ -6930,21 +6930,29 @@ class OperatorQueryService:
             payload = leg_health.get(leg)
             if not isinstance(payload, dict):
                 continue
+            guard_eligible_closed_trade_count = int(
+                payload.get("recent_guard_eligible_closed_trade_count") or 0
+            )
+            use_guard_eligible_metrics = guard_eligible_closed_trade_count > 0
+            use_guard_eligible_low_edge = (
+                use_guard_eligible_metrics
+                or payload.get("recent_guard_eligible_low_edge_trade_at") is not None
+            )
             closed_trade_count = int(
                 payload.get("recent_guard_eligible_closed_trade_count")
-                if payload.get("recent_guard_eligible_closed_trade_count") is not None
+                if use_guard_eligible_metrics
                 else payload.get("recent_closed_trade_count")
                 or 0
             )
             recent_win_rate = float(
                 payload.get("recent_guard_eligible_win_rate")
-                if payload.get("recent_guard_eligible_win_rate") is not None
+                if use_guard_eligible_metrics
                 else payload.get("recent_win_rate")
                 or 0.0
             )
             recent_net_realized_pnl = (
                 self._to_decimal(payload.get("recent_guard_eligible_net_realized_pnl"))
-                if payload.get("recent_guard_eligible_net_realized_pnl") is not None
+                if use_guard_eligible_metrics
                 else self._to_decimal(payload.get("recent_net_realized_pnl"))
             ) or Decimal("0")
             sample_ready = closed_trade_count >= min_closed_trades
@@ -6975,19 +6983,19 @@ class OperatorQueryService:
                     "recent_net_realized_pnl": recent_net_realized_pnl,
                     "recent_fee_drag_ratio": float(
                         payload.get("recent_guard_eligible_fee_drag_ratio")
-                        if payload.get("recent_guard_eligible_fee_drag_ratio") is not None
+                        if use_guard_eligible_metrics
                         else payload.get("recent_fee_drag_ratio")
                         or 0.0
                     ),
                     "recent_churn_ratio": float(
                         payload.get("recent_guard_eligible_churn_ratio")
-                        if payload.get("recent_guard_eligible_churn_ratio") is not None
+                        if use_guard_eligible_metrics
                         else payload.get("recent_churn_ratio")
                         or 0.0
                     ),
                     "recent_low_edge_trade_streak": int(
                         payload.get("recent_guard_eligible_low_edge_trade_streak")
-                        if payload.get("recent_guard_eligible_low_edge_trade_streak") is not None
+                        if use_guard_eligible_low_edge
                         else payload.get("recent_low_edge_trade_streak")
                         or 0
                     ),

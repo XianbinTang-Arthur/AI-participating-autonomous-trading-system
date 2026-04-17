@@ -2198,6 +2198,7 @@ class TestIndependentFamily(unittest.TestCase):
                     policy_reason="failed_thesis_close",
                 ),
             ),
+            current_leg_notional=Decimal("1000"),
             margin_mode="cross",
             target_leverage=3.0,
             reason_codes=["failed_thesis"],
@@ -2244,6 +2245,7 @@ class TestIndependentFamily(unittest.TestCase):
                     policy_reason="stale_thesis_close",
                 ),
             ),
+            current_leg_notional=Decimal("1000"),
             margin_mode="cross",
             target_leverage=3.0,
             reason_codes=["stale_thesis"],
@@ -2290,6 +2292,7 @@ class TestIndependentFamily(unittest.TestCase):
                     policy_reason="execution_health_degraded",
                 ),
             ),
+            current_leg_notional=Decimal("1005"),
             margin_mode="cross",
             target_leverage=3.0,
             reason_codes=["execution_health_degraded"],
@@ -2299,6 +2302,45 @@ class TestIndependentFamily(unittest.TestCase):
         self.assertIsNotNone(leg)
         assert leg is not None
         self.assertEqual(leg.reference_price, Decimal("100500"))
+
+    def test_build_independent_leg_falls_back_to_current_notional_when_expectancy_missing(self) -> None:
+        leg = build_independent_leg(
+            decision_id="decision_stale_no_expectancy",
+            symbol="BTC-USDT-SWAP",
+            book=IndependentBookEvaluation(
+                leg="long",
+                expectancy=None,
+                score=0.12,
+                current_qty=Decimal("0.01"),
+                target_qty=Decimal("0"),
+                state="closing",
+                reason_codes=[],
+                blocked_reasons=[],
+                min_hold_remaining_seconds=0.0,
+                rebalance_cooldown_remaining_seconds=0.0,
+                book_action="close_stale_thesis",
+                close_reason="stale_thesis",
+                execution_policy=IndependentExecutionPolicy(
+                    edge_strength="weak",
+                    urgency="medium",
+                    execution_style_preference="bounded_limit",
+                    order_type_preference="limit",
+                    time_in_force_preference="ioc",
+                    limit_offset_bps_preference=Decimal("0.8"),
+                    max_acceptable_cost_bps=7.5,
+                    policy_reason="stale_thesis_close",
+                ),
+            ),
+            current_leg_notional=Decimal("1000"),
+            margin_mode="cross",
+            target_leverage=3.0,
+            reason_codes=["stale_thesis"],
+            family="independent",
+        )
+
+        self.assertIsNotNone(leg)
+        assert leg is not None
+        self.assertEqual(leg.reference_price, Decimal("100000"))
 
 
 if __name__ == "__main__":

@@ -14,7 +14,6 @@ from aats.data_platform.db import get_session
 from aats.data_platform.governance._atomic_io import atomic_json_write
 from aats.data_platform.governance._db_util import try_governance_db
 from aats.data_platform.governance.rdp_task_db import (
-    db_create_task,
     db_create_task_if_idle,
     db_get_latest_task_for_workflow,
     db_has_active_task,
