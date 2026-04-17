@@ -75,7 +75,8 @@
       "Bash(grep -n \"@rdp_router\\\\\\\\.get\\\\|@rdp_router\\\\\\\\.post\" /d/文件/project/AIParticipatingAutonomousTradingSystem/aats/api/rdp_routes.py)",
       "Bash(.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/ -k \"rdp\" -x -q --tb=short)",
       "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -k \"rdp\" -x -q --tb=short)",
-      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -k \"rdp or health or operator\" -x -q --tb=short)"
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -k \"rdp or health or operator\" -x -q --tb=short)",
+      "Bash(wsl -d Ubuntu bash -c \"docker ps --format 'table {{.Names}}\\\\t{{.Status}}'\")"
     ]
   }
 }
