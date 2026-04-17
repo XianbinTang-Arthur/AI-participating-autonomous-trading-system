@@ -498,6 +498,7 @@
 
 const ERROR_MAP = {
   operator_auth_required: "当前操作需要先登录。",
+  operator_https_required_for_secure_session: "当前入口使用 HTTP，受保护会话要求 HTTPS，请通过 HTTPS 访问控制台。",
   operator_write_auth_required: "当前账号只有查看权限，不能执行人工操作。",
   operator_write_access_required: "当前角色不允许执行这项操作。",
   operator_admin_access_required: "只有管理员才能执行这项操作。",

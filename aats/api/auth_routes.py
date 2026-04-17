@@ -71,6 +71,27 @@ def _query(request: Request) -> OperatorQueryService:
     return OperatorQueryService(_runtime(request))
 
 
+def _request_scheme(request: Request) -> str:
+    scheme = (request.url.scheme or "").strip().lower()
+    return scheme or "http"
+
+
+def _session_transport_payload(request: Request) -> dict[str, Any]:
+    settings = _runtime(request).settings
+    request_scheme = _request_scheme(request)
+    secure_cookie_required = bool(settings.operator_session_cookie_secure)
+    transport_compatible = (not secure_cookie_required) or request_scheme == "https"
+    required_transport = "https" if secure_cookie_required else "http_or_https"
+    auth_blocked_reason = None if transport_compatible else "operator_https_required_for_secure_session"
+    return {
+        "request_scheme": request_scheme,
+        "secure_cookie_required": secure_cookie_required,
+        "transport_compatible": transport_compatible,
+        "required_transport": required_transport,
+        "auth_blocked_reason": auth_blocked_reason,
+    }
+
+
 def _session_payload(request: Request) -> dict[str, Any]:
     runtime = _runtime(request)
     settings = runtime.settings
@@ -85,6 +106,7 @@ def _session_payload(request: Request) -> dict[str, Any]:
         "identity": principal.identity if principal is not None else None,
         "role": principal.role if principal is not None else "anonymous",
         "auth_source": principal.auth_source if principal is not None else "anonymous",
+        **_session_transport_payload(request),
     }
 
 
@@ -99,6 +121,67 @@ def _auth_providers_payload(request: Request) -> dict[str, Any]:
         "stored_user_count": stored_operator_user_count(runtime),
         "runtime_profile_control_enabled": False,
         "api_key_compatibility_enabled": bool(settings.operator_read_api_key or _write_api_key_compatibility_enabled(runtime)),
+        **_session_transport_payload(request),
+    }
+
+
+_DASHBOARD_AUTH_ERROR_CODES = {
+    "operator_auth_required",
+    "operator_write_auth_required",
+    "operator_write_access_required",
+    "operator_admin_access_required",
+    "operator_https_required_for_secure_session",
+}
+
+
+def _dashboard_bundle_auth_summary(
+    request: Request,
+    *,
+    panel_keys: tuple[str, ...],
+    panels: dict[str, dict[str, Any]],
+    read_error: HTTPException | None,
+) -> dict[str, Any]:
+    session_payload = _session_payload(request)
+    providers_payload = _auth_providers_payload(request)
+    protected_panel_keys = [key for key in panel_keys if key not in {"session", "authProviders"}]
+    blocked_panel_keys: list[str] = []
+    primary_error: str | None = providers_payload.get("auth_blocked_reason")
+
+    for panel_key in protected_panel_keys:
+        panel_error = panels.get(panel_key, {}).get("error")
+        if not isinstance(panel_error, str) or panel_error not in _DASHBOARD_AUTH_ERROR_CODES:
+            continue
+        blocked_panel_keys.append(panel_key)
+        if primary_error is None:
+            primary_error = panel_error
+
+    read_error_code = _dashboard_panel_error(read_error) if read_error is not None else None
+    if primary_error is None and read_error_code in _DASHBOARD_AUTH_ERROR_CODES:
+        primary_error = read_error_code
+
+    if not providers_payload["auth_enabled"]:
+        access_state = "disabled"
+    elif not providers_payload["transport_compatible"]:
+        access_state = "transport_blocked"
+    elif read_error_code in {"operator_auth_required", "operator_write_auth_required"}:
+        access_state = "auth_required"
+    elif blocked_panel_keys:
+        access_state = "granted"
+    else:
+        access_state = "granted" if read_error is None else "auth_required"
+
+    return {
+        "auth_enabled": providers_payload["auth_enabled"],
+        "authenticated": session_payload["authenticated"],
+        "request_scheme": providers_payload["request_scheme"],
+        "secure_cookie_required": providers_payload["secure_cookie_required"],
+        "transport_compatible": providers_payload["transport_compatible"],
+        "required_transport": providers_payload["required_transport"],
+        "auth_blocked_reason": providers_payload["auth_blocked_reason"],
+        "protected_panel_keys": protected_panel_keys,
+        "blocked_panel_keys": blocked_panel_keys,
+        "primary_error": primary_error,
+        "access_state": access_state,
     }
 
 
@@ -389,6 +472,9 @@ async def auth_login(request: Request, payload: LoginRequest, response: Response
         raise HTTPException(status_code=400, detail="operator_auth_disabled")
     if not settings.operator_session_configured:
         raise HTTPException(status_code=503, detail="operator_session_auth_not_configured")
+    transport = _session_transport_payload(request)
+    if not transport["transport_compatible"]:
+        raise HTTPException(status_code=400, detail=transport["auth_blocked_reason"])
     login_result = authenticate_operator_user(runtime, username=payload.username, password=payload.password)
     principal = login_result.principal
     if principal is None:
@@ -481,6 +567,7 @@ def _bundle_response_with_cache_info(
     return {
         "view": base_payload.get("view"),
         "panels": base_payload.get("panels", {}),
+        "auth": base_payload.get("auth"),
         "timing": {
             **base_timing,
             "total_ms": total_ms,
@@ -623,6 +710,12 @@ async def dashboard_bundle(
         payload = {
             "view": view,
             "panels": panels,
+            "auth": _dashboard_bundle_auth_summary(
+                request,
+                panel_keys=panel_keys,
+                panels=panels,
+                read_error=read_error,
+            ),
             "timing": {
                 "total_ms": payload_total_ms,
                 "panels": panel_timings,

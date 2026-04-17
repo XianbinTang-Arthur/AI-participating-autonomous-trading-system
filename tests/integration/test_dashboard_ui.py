@@ -2903,6 +2903,94 @@ console.log(JSON.stringify({
         self.assertIn('"manualOnlyRuntimeCurrentModeLocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeAvoidsLegacyButtons":true', result.stdout)
 
+    def test_ai_config_view_surfaces_auth_failures_instead_of_fake_rdp_loading(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderAIConfigView } from './aats/api/static/modules/views/ai-config-view.js';
+
+const html = renderAIConfigView({
+  session: {
+    authenticated: false,
+    role: 'anonymous',
+    auth_blocked_reason: 'operator_https_required_for_secure_session',
+  },
+  authProviders: {
+    auth_enabled: true,
+    session_enabled: true,
+    secure_cookie_required: true,
+    transport_compatible: false,
+    required_transport: 'https',
+    auth_blocked_reason: 'operator_https_required_for_secure_session',
+  },
+  summary: {
+    ai: {},
+    runtime_profile: {},
+    strategy_profile: {},
+  },
+  rdpWorkbenchOverview: {},
+  rdpWorkbenchItems: {},
+  rdpWorkbenchAlerts: {},
+  rdpTuningOverview: {},
+  rdpTuningProposals: {},
+  errors: {
+    rdpWorkbenchOverview: 'operator_https_required_for_secure_session',
+    rdpWorkbenchItems: 'operator_https_required_for_secure_session',
+    rdpWorkbenchAlerts: 'operator_https_required_for_secure_session',
+  },
+  uiState: { aiConfig: {} },
+});
+
+console.log(JSON.stringify({
+  showsAuthCallout: html.includes('RDP 访问需要先建立会话'),
+  showsHttpsHint: html.includes('当前入口使用 HTTP，受保护会话要求 HTTPS，请通过 HTTPS 访问控制台。'),
+  hidesFakeLoading: !html.includes('RDP 数据暂未就绪'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"showsAuthCallout":true', stdout)
+        self.assertIn('"showsHttpsHint":true', stdout)
+        self.assertIn('"hidesFakeLoading":true', stdout)
+
+    def test_protected_auth_blocked_view_distinguishes_transport_and_permission_errors(self) -> None:
+        script = """
+import { renderProtectedAuthBlockedView } from './aats/api/static/modules/views/protected-auth-view.js';
+
+const transportBlocked = renderProtectedAuthBlockedView({
+  viewLabel: 'AI 配置',
+  authSummary: {
+    access_state: 'transport_blocked',
+    primary_error: 'operator_https_required_for_secure_session',
+  },
+  authProviders: {
+    auth_blocked_reason: 'operator_https_required_for_secure_session',
+  },
+});
+
+const adminBlocked = renderProtectedAuthBlockedView({
+  viewLabel: '系统设置',
+  authSummary: {
+    access_state: 'auth_required',
+    primary_error: 'operator_admin_access_required',
+  },
+});
+
+console.log(JSON.stringify({
+  transportShowsHttps: transportBlocked.includes('当前入口无法建立安全会话')
+    && transportBlocked.includes('当前入口使用 HTTP，受保护会话要求 HTTPS，请通过 HTTPS 访问控制台。')
+    && transportBlocked.includes('前往登录页'),
+  adminShowsPermissionCopy: adminBlocked.includes('当前账号没有管理员权限')
+    && adminBlocked.includes('请切换到管理员账号后重试。')
+    && !adminBlocked.includes('前往登录页'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"transportShowsHttps":true', stdout)
+        self.assertIn('"adminShowsPermissionCopy":true', stdout)
+
     def test_rdp_action_handlers_use_default_observation_windows_without_prompt(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

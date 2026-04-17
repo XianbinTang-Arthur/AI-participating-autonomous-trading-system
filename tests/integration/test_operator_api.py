@@ -662,6 +662,61 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(payload["panels"]["session"]["error"])
         self.assertIsNone(payload["panels"]["authProviders"]["error"])
 
+    async def test_dashboard_bundle_reports_transport_blocked_auth_summary_for_secure_http_session(self) -> None:
+        runtime = await self._runtime(
+            operator_users=[("admin", "admin-pass")],
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_session_cookie_secure=True,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="aiConfig",
+                    panels=["session", "authProviders", "health", "rdpControl"],
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["auth"]["access_state"], "transport_blocked")
+        self.assertEqual(payload["auth"]["auth_blocked_reason"], "operator_https_required_for_secure_session")
+        self.assertFalse(payload["auth"]["authenticated"])
+        self.assertIn("health", payload["auth"]["blocked_panel_keys"])
+        self.assertIn("rdpControl", payload["auth"]["blocked_panel_keys"])
+        self.assertIn("health", payload["auth"]["protected_panel_keys"])
+        self.assertEqual(payload["auth"]["primary_error"], "operator_https_required_for_secure_session")
+
+    async def test_dashboard_bundle_reports_granted_auth_summary_for_https_session(self) -> None:
+        runtime = await self._runtime(
+            operator_users=[("admin", "admin-pass")],
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_session_cookie_secure=True,
+        )
+        app = self._app(runtime)
+
+        with TestClient(app, base_url="https://testserver") as client:
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            response = client.get(
+                self._dashboard_bundle_url(
+                    view="aiConfig",
+                    panels=["session", "authProviders", "health", "rdpControl"],
+                )
+            )
+
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["auth"]["access_state"], "granted")
+        self.assertTrue(payload["auth"]["authenticated"])
+        self.assertTrue(payload["auth"]["transport_compatible"])
+        self.assertIsNone(payload["auth"]["auth_blocked_reason"])
+        self.assertEqual(payload["auth"]["blocked_panel_keys"], [])
+        self.assertIsNone(payload["panels"]["health"]["error"])
+
     async def test_dashboard_bundle_preserves_admin_panel_permissions(self) -> None:
         runtime = await self._runtime(
             operator_users=[("operator", "secret-pass")],
@@ -8333,6 +8388,58 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["configured_roles"], [])
         self.assertFalse(payload["runtime_profile_control_enabled"])
         self.assertNotIn("bootstrap_pending", payload)
+
+    async def test_secure_session_over_http_is_rejected_with_transport_diagnostics(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_session_cookie_secure=True,
+            operator_users=[("admin", "admin-pass")],
+        )
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            providers = client.get("/auth/providers")
+            session = client.get("/auth/session")
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+
+        self.assertEqual(providers.status_code, 200)
+        self.assertEqual(session.status_code, 200)
+        self.assertEqual(login.status_code, 400)
+        self.assertEqual(login.json()["detail"], "operator_https_required_for_secure_session")
+        providers_payload = providers.json()
+        session_payload = session.json()
+        self.assertTrue(providers_payload["secure_cookie_required"])
+        self.assertFalse(providers_payload["transport_compatible"])
+        self.assertEqual(providers_payload["required_transport"], "https")
+        self.assertEqual(providers_payload["auth_blocked_reason"], "operator_https_required_for_secure_session")
+        self.assertFalse(session_payload["authenticated"])
+        self.assertTrue(session_payload["secure_cookie_required"])
+        self.assertFalse(session_payload["transport_compatible"])
+        self.assertEqual(session_payload["auth_blocked_reason"], "operator_https_required_for_secure_session")
+
+    async def test_secure_session_over_https_can_login_and_persist_session(self) -> None:
+        runtime = await self._runtime(
+            operator_auth_enabled=True,
+            operator_session_secret="session-secret",
+            operator_session_cookie_secure=True,
+            operator_users=[("admin", "admin-pass")],
+        )
+        app = self._app(runtime)
+
+        with TestClient(app, base_url="https://testserver") as client:
+            providers = client.get("/auth/providers")
+            login = client.post("/auth/login", json={"username": "admin", "password": "admin-pass"})
+            session = client.get("/auth/session")
+
+        self.assertEqual(providers.status_code, 200)
+        self.assertTrue(providers.json()["transport_compatible"])
+        self.assertIsNone(providers.json()["auth_blocked_reason"])
+        self.assertEqual(login.status_code, 200)
+        self.assertEqual(login.json()["identity"], "admin")
+        self.assertEqual(session.status_code, 200)
+        self.assertTrue(session.json()["authenticated"])
+        self.assertEqual(session.json()["identity"], "admin")
 
     async def test_unauthenticated_session_is_anonymous_without_stored_operator_users(self) -> None:
         runtime = await self._runtime(

@@ -65,6 +65,7 @@ export function createState() {
     flash: null,
     data: {},
     errors: {},
+    bundleAuth: null,
     pendingPanels: {},
     pageLimits: { ...DEFAULT_PAGE_LIMITS },
     ui: {

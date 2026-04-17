@@ -115,7 +115,17 @@ export async function fetchDashboardBundle(path, options = {}) {
     typeof payload === "object" && payload !== null && typeof payload.panels === "object" && payload.panels !== null
       ? payload.panels
       : {};
-  return localizePanelResults(panels);
+  return {
+    panels: localizePanelResults(panels),
+    auth:
+      typeof payload === "object" && payload !== null && typeof payload.auth === "object" && payload.auth !== null
+        ? payload.auth
+        : null,
+    timing:
+      typeof payload === "object" && payload !== null && typeof payload.timing === "object" && payload.timing !== null
+        ? payload.timing
+        : null,
+  };
 }
 
 function safeJsonParse(text) {

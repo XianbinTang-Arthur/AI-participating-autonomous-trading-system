@@ -36,6 +36,7 @@ export function createDashboardShellRenderer({
   hasResolvedAuthContext,
   operatorCanWrite,
   controlPermissionMessage,
+  isProtectedViewAuthBlocked = () => false,
   resumeActionAvailable,
   resumeActionHintText,
   syncExitExecutionNavigationLinks,
@@ -97,7 +98,7 @@ export function createDashboardShellRenderer({
   }
 
   function renderStatusRibbon() {
-    if (state.activeView !== "home") {
+    if (state.activeView !== "home" || isProtectedViewAuthBlocked()) {
       patchClassName(nodes.statusRibbon, "status-ribbon is-hidden");
       return;
     }
@@ -219,10 +220,29 @@ export function createDashboardShellRenderer({
     const blockers = blockerControl.blockers || state.data.blockers?.blockers || [];
     const primaryBlocker = blockerControl.primary_blocker || blockers[0] || null;
     const controlsMessage = controlPermissionMessage();
+    const authBlocked = isProtectedViewAuthBlocked();
 
     if (!nodes.bannerContainer) return;
     if (isBootstrapping()) {
       patchHtml(nodes.bannerContainer, "");
+      return;
+    }
+    if (authBlocked && controlsMessage) {
+      banners.push(notice(controlsMessage, "warning"));
+    }
+    if (authBlocked) {
+      if (state.flash) {
+        const now = Date.now();
+        if (!state.flash._expiresAt) {
+          state.flash._expiresAt = now + FLASH_DEFAULT_TTL_MS;
+        }
+        if (now >= state.flash._expiresAt) {
+          clearFlash(state);
+        } else {
+          banners.push(notice(state.flash.message, state.flash.tone));
+        }
+      }
+      patchHtml(nodes.bannerContainer, banners.join(""));
       return;
     }
     if (hasResolvedPanel("systemRecovery") && recovery.safe_to_trade === false) {

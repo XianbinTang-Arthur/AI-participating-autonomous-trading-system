@@ -3,7 +3,7 @@ import { actorTags, actionButton, callout, kvList, summaryStrip, surfaceCard } f
 // summarizeList），直接 import 统一版本，删除本地重复定义。
 import { localizeList, summarizeLocalizedList, textOrFallback } from "../copy.js";
 import { escapeHtml, formatNumber } from "../formatters.js";
-import { readableState } from "../terms.js";
+import { localizeError, readableState } from "../terms.js";
 import { renderRdpControlPanelV2 } from "./rdp-control-panel.js";
 
 const PROFILE_OPTIONS = [
@@ -20,6 +20,44 @@ const MANUAL_MODE_OPTIONS = [
   ["ai_assisted", "AI 辅助决策", "secondary"],
   ["ai_decision_maker", "AI 决策者", "primary"],
 ];
+
+const AUTH_PANEL_KEYS = [
+  "rdpControl",
+  "rdpWorkbenchOverview",
+  "rdpWorkbenchItems",
+  "rdpWorkbenchAlerts",
+  "rdpTuningOverview",
+  "rdpTuningProposals",
+];
+
+function isAuthRelatedError(message) {
+  const text = String(message || "").trim();
+  if (!text) return false;
+  return (
+    text === "operator_auth_required"
+    || text === "operator_https_required_for_secure_session"
+    || text === localizeError("operator_auth_required")
+    || text === localizeError("operator_https_required_for_secure_session")
+  );
+}
+
+function resolveRdpAuthError(data) {
+  const errors = data.errors || {};
+  const firstPanelError = AUTH_PANEL_KEYS
+    .map((key) => errors[key])
+    .find((message) => isAuthRelatedError(message));
+  if (firstPanelError) return localizeError(String(firstPanelError).trim());
+  const authProviders = data.authProviders || {};
+  const session = data.session || {};
+  const blockedReason = authProviders.auth_blocked_reason || session.auth_blocked_reason;
+  if (blockedReason) {
+    return localizeError(blockedReason);
+  }
+  if (authProviders.auth_enabled && session.authenticated === false) {
+    return localizeError("operator_auth_required");
+  }
+  return "";
+}
 
 export function renderAIConfigView(data) {
   const session = data.session || {};
@@ -42,6 +80,7 @@ export function renderAIConfigView(data) {
   const uiState = data.uiState?.aiConfig || {};
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
   const summaryError = data.error || null;
+  const rdpAuthError = resolveRdpAuthError(data);
 
   if (summaryError) {
     return surfaceCard({
@@ -73,7 +112,13 @@ export function renderAIConfigView(data) {
         })}
       </div>
       <div class="span-12 workspace-stack">
-        ${(Object.keys(rdpWorkbenchOverview).length === 0
+        ${rdpAuthError
+          ? callout({
+              title: "RDP 访问需要先建立会话",
+              copy: rdpAuthError,
+              pills: [actorTags("system")],
+            })
+          : ((Object.keys(rdpWorkbenchOverview).length === 0
           && Object.keys(rdpWorkbenchItems).length === 0
           && Object.keys(rdpWorkbenchAlerts).length === 0)
           ? callout({
@@ -89,7 +134,7 @@ export function renderAIConfigView(data) {
               rdpTuningProposals,
               canAdmin,
               uiState,
-            })}
+            }))}
       </div>
       <div class="span-12 workspace-stack">
         ${renderCurrentConfigurationCard({ runtimeProfiles, runtime, aiState, activeRevision, activation })}
