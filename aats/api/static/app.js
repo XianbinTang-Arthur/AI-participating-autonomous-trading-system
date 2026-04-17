@@ -422,15 +422,30 @@ function renderActiveView() {
     return;
   }
   if (state.activeView === "aiConfig" && nodes.aiConfigContent) {
+    // 历史回归修复：a5218fb 在 ai-config-view.js 里新增了 rdp*Workbench* /
+    // rdp*Tuning* / errors / authProviders 依赖（`resolveRdpAuthError` 要
+    // 看 errors + authProviders），并把 uiState 的契约改成 `data.uiState?.aiConfig`；
+    // 但当时忘了同步这里的调用方，所以无论后端返回什么，workbench/tuning
+    // 相关字段一律是 undefined→{}，Object.keys 长度永远 = 0，`renderAIConfigView`
+    // 就恒定走到“RDP 数据暂未就绪”callout。这里把 5 个 workbench/tuning panel、
+    // errors 和 authProviders 都透传过去，并用 state.ui 整体作为 uiState，
+    // 让视图内部的 `data.uiState?.aiConfig` 契约成立。
     patchHtml(
       nodes.aiConfigContent,
       renderAIConfigView({
         session: state.data.session || {},
+        authProviders: state.data.authProviders || {},
         aiRuntime: state.data.aiRuntime || {},
         summary: state.data.aiConfigModel || {},
         rdpControl: state.data.rdpControl || {},
+        rdpWorkbenchOverview: state.data.rdpWorkbenchOverview || {},
+        rdpWorkbenchItems: state.data.rdpWorkbenchItems || {},
+        rdpWorkbenchAlerts: state.data.rdpWorkbenchAlerts || {},
+        rdpTuningOverview: state.data.rdpTuningOverview || {},
+        rdpTuningProposals: state.data.rdpTuningProposals || {},
         error: state.errors.aiConfigModel || null,
-        uiState: state.ui.aiConfig,
+        errors: state.errors,
+        uiState: state.ui,
       }),
     );
     return;
