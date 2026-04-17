@@ -33,10 +33,10 @@ export function createRdpActionHandlers({
   async function triggerWorkflow(workflow) {
     if (!workflow) return;
     const labels = {
-      data_maintenance: "数据维护",
-      research_cycle: "研究流程",
-      governance_cycle: "治理流程",
-      decision_cycle: "决策流程",
+      data_maintenance: "刷新数据",
+      research_cycle: "运行完整 RDP",
+      governance_cycle: "治理检查",
+      decision_cycle: "决策链",
     };
     const label = labels[workflow] || workflow;
 
@@ -72,7 +72,20 @@ export function createRdpActionHandlers({
         { method: "POST", body: { actor: "operator", notes: "UI 审批" } },
       );
       if (result.ok) {
-        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已审批，下一步请走发布流程。`);
+        const recommendationType = String(result.recommendation?.recommendation_type || "");
+        let message = `${truncateForConfirm(recommendationId)} 已审批。`;
+        if (recommendationType === "parameter_upgrade") {
+          message = `${truncateForConfirm(recommendationId)} 已批准，请到“待发布候选”里运行 Gate 或创建发布。`;
+        } else if (recommendationType === "keep_active") {
+          message = `${truncateForConfirm(recommendationId)} 已确认保持当前，本轮到此结束，不会创建新发布。`;
+        } else if (recommendationType === "lower_priority") {
+          message = `${truncateForConfirm(recommendationId)} 已确认降优先级，本轮不会创建新发布。`;
+        } else if (recommendationType === "pause") {
+          message = `${truncateForConfirm(recommendationId)} 已确认暂停，本轮不会创建新发布。`;
+        } else if (recommendationType === "require_review") {
+          message = `${truncateForConfirm(recommendationId)} 已确认需人工复核，本轮不会创建新发布。`;
+        }
+        setFlash(state, "info", message);
       } else {
         setFlash(state, "warning", result.message || "审批失败。");
       }

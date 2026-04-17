@@ -1870,21 +1870,21 @@ const analysisHtml = renderAIAnalysisView({
 const baseWorkbenchOverview = {
   round_id: '20260321_121500_demo',
   overall_status: 'needs_approval',
-  headline: '当前轮次有 1 个组合待审批',
-  subheadline: '先处理 independent / 15m 的治理结论，再决定是否发布。',
+  headline: '当前有 1 个组合待处理。',
+  subheadline: '先看结论，再决定是否批准。',
   primary_action: {
-    key: 'open-current-round',
-    label: '处理当前轮次',
-    ui_action: 'noop',
-    value: 'current-round',
+    key: 'trigger_data_maintenance',
+    label: '刷新数据',
+    ui_action: 'rdp-trigger-workflow',
+    value: 'data_maintenance',
     enabled: true,
   },
   secondary_actions: [
     {
-      key: 'view-evidence',
-      label: '查看证据',
-      ui_action: 'noop',
-      value: 'independent_15m',
+      key: 'trigger_research_cycle',
+      label: '运行完整 RDP',
+      ui_action: 'rdp-trigger-workflow',
+      value: 'research_cycle',
       enabled: true,
     },
   ],
@@ -1899,6 +1899,7 @@ const baseWorkbenchOverview = {
   ],
   summary_counts: {
     pending_items: 1,
+    ready_release_items: 1,
     integrity_blocked_items: 1,
     observing_releases: 1,
     tuning_pending: 1,
@@ -1930,8 +1931,9 @@ const baseWorkbenchItems = {
       recommendation_id: 'rec-1',
       recommendation_type: 'parameter_upgrade',
       confidence: 'high',
-      headline: '治理建议 需要复核',
-      decision_summary: '当前建议仍需人工复核，先确认是否暂停。',
+      headline: '参数候选待审批',
+      decision_summary: '本轮生成了新参数候选，确认后可继续进入发布。',
+      approval_effect_summary: '批准后会进入待发布列表，下一步是运行 Gate 或创建发布。',
       reason_summary: [
         '归因失败率过高',
         '执行边际没有改善',
@@ -1977,15 +1979,15 @@ const baseWorkbenchItems = {
       actions: [
         {
           key: 'approve',
-          label: '审批治理',
-          ui_action: 'rdp-approve-recommendation',
+          label: '批准参数候选',
+          ui_action: 'rdp-approve-only',
           value: 'rec-1',
           enabled: false,
           disabled_reason: '证据不完整，当前不能审批',
         },
         {
           key: 'reject',
-          label: '拒绝治理',
+          label: '驳回候选',
           ui_action: 'rdp-reject-recommendation',
           value: 'rec-1',
           enabled: true,
@@ -1993,6 +1995,40 @@ const baseWorkbenchItems = {
       ],
     },
   ],
+  release_candidates: {
+    total: 1,
+    items: [
+      {
+        combo_key: 'independent_15m',
+        family: 'Independent',
+        timeframe: '15M',
+        recommendation_id: 'rec-2',
+        confidence: 'medium',
+        headline: '已批准，待发布',
+        decision_summary: '这组参数已经批准，下一步可以运行 Gate 或直接创建发布。',
+        gate_status: 'warn',
+        gate_note: '最近一次 Gate 有警告，请先复核。',
+        reason_summary: ['这组参数已经批准，下一步可以运行 Gate 或直接创建发布。'],
+        created_at: '2026-03-21T12:10:00Z',
+        actions: [
+          {
+            key: 'run_gate',
+            label: '运行 Gate',
+            ui_action: 'rdp-run-gate',
+            value: 'rec-2',
+            enabled: true,
+          },
+          {
+            key: 'create_release',
+            label: '创建发布',
+            ui_action: 'rdp-create-release',
+            value: 'rec-2',
+            enabled: true,
+          },
+        ],
+      },
+    ],
+  },
 };
 
 const baseWorkbenchAlerts = {
@@ -2558,19 +2594,28 @@ const releaseEmptyConfigHtml = renderAIConfigView({
   rdpWorkbenchOverview: {
     round_id: '20260321_122000_empty',
     overall_status: 'needs_approval',
-    headline: '当前轮次有 1 个组合等待审批',
-    subheadline: '先看 directional / 1h 的治理结论。',
+    headline: '当前有 1 个组合待处理。',
+    subheadline: '先看结论，再决定是否批准。',
     primary_action: {
-      key: 'open-current-round',
-      label: '处理当前轮次',
-      ui_action: 'noop',
-      value: 'directional_1h',
+      key: 'trigger_data_maintenance',
+      label: '刷新数据',
+      ui_action: 'rdp-trigger-workflow',
+      value: 'data_maintenance',
       enabled: true,
     },
-    secondary_actions: [],
+    secondary_actions: [
+      {
+        key: 'trigger_research_cycle',
+        label: '运行完整 RDP',
+        ui_action: 'rdp-trigger-workflow',
+        value: 'research_cycle',
+        enabled: true,
+      },
+    ],
     blockers: [],
     summary_counts: {
       pending_items: 1,
+      ready_release_items: 0,
       integrity_blocked_items: 0,
       observing_releases: 0,
       tuning_pending: 0,
@@ -2593,8 +2638,9 @@ const releaseEmptyConfigHtml = renderAIConfigView({
         recommendation_id: 'rec-empty-1',
         recommendation_type: 'parameter_upgrade',
         confidence: 'medium',
-        headline: '等待审批',
-        decision_summary: '候选参数已经生成，等待本轮审批。',
+        headline: '参数候选待审批',
+        decision_summary: '本轮生成了新参数候选，确认后可继续进入发布。',
+        approval_effect_summary: '批准后会进入待发布列表，下一步是运行 Gate 或创建发布。',
         reason_summary: ['当前轮次只有 1 个 directional 组合需要审批'],
         missing_evidence: [],
         blocking_flags: [],
@@ -2603,14 +2649,25 @@ const releaseEmptyConfigHtml = renderAIConfigView({
         actions: [
           {
             key: 'approve',
-            label: '审批治理',
-            ui_action: 'rdp-approve-recommendation',
+            label: '批准参数候选',
+            ui_action: 'rdp-approve-only',
+            value: 'rec-empty-1',
+            enabled: true,
+          },
+          {
+            key: 'reject',
+            label: '驳回候选',
+            ui_action: 'rdp-reject-recommendation',
             value: 'rec-empty-1',
             enabled: true,
           },
         ],
       },
     ],
+    release_candidates: {
+      total: 0,
+      items: [],
+    },
   },
   rdpWorkbenchAlerts: {
     integrity_alerts: [],
@@ -2824,24 +2881,27 @@ console.log(JSON.stringify({
   configHasRuntimeModeCard: configHtml.includes('运行模式切换'),
   configHasAutoProfileControlCard: configHtml.includes('自动换档控制'),
   configUsesWorkbenchIdentity: configHtml.includes('RDP 工作台') && !configHtml.includes('RDP 核心面板'),
-  configHasWorkbenchHero: configHtml.includes('先处理当前轮次，再决定发布与回滚'),
-  configHasCoreQueue: configHtml.includes('当前待处理'),
-  configHasIntegrityPanel: configHtml.includes('数据完整性与阻断'),
-  configHasRuntimeRail: configHtml.includes('系统状态'),
+  configHasWorkbenchHero: configHtml.includes('先看当前轮次，再选择动作'),
+  configHasCoreQueue: configHtml.includes('待处理组合'),
+  configHasIntegrityPanel: configHtml.includes('阻断与告警'),
+  configHasRuntimeRail: configHtml.includes('运行状态'),
   configHasTuningCard: configHtml.includes('自动调优'),
-  configShowsTaskOrientedMetrics: configHtml.includes('当前待审批') && configHtml.includes('当前执行中') && configHtml.includes('下一待执行'),
+  configShowsTaskOrientedMetrics: configHtml.includes('待审批') && configHtml.includes('执行中') && configHtml.includes('排队中'),
+  configShowsManualWorkflowActions: configHtml.includes('刷新数据') && configHtml.includes('运行完整 RDP') && !configHtml.includes('只跑治理检查') && !configHtml.includes('只跑决策链'),
   configRemovesWorkflowGridNoise: !configHtml.includes('数据刷新执行') && !configHtml.includes('研究流程排队'),
   configNoDirectApplyLanguage: !configHtml.includes('data-action="rdp-approve-and-apply"') && !configHtml.includes('data-action="rdp-apply-only"'),
-  configShowsDecisionSummaryNotRawEvidence: configHtml.includes('当前建议仍需人工复核，先确认是否暂停。') && !configHtml.includes('[phase2_research]') && !configHtml.includes('[phase3_attribution]'),
+  configShowsDecisionSummaryNotRawEvidence: configHtml.includes('本轮生成了新参数候选，确认后可继续进入发布。') && !configHtml.includes('[phase2_research]') && !configHtml.includes('[phase3_attribution]'),
+  configExplainsApprovalEffect: configHtml.includes('批准后：批准后会进入待发布列表，下一步是运行 Gate 或创建发布。'),
+  configShowsReleaseCandidates: configHtml.includes('待发布候选') && configHtml.includes('运行 Gate') && configHtml.includes('创建发布'),
   configShowsApprovalBlockedCallout: configHtml.includes('审批已阻断') && configHtml.includes('证据不完整，当前不能审批。'),
-  configShowsEvidenceDrilldown: configHtml.includes('查看证据详情') && configHtml.includes('来源轮次') && configHtml.includes('Step2 研究证据当前不可直接审批'),
+  configShowsEvidenceDrilldown: configHtml.includes('查看证据详情') && configHtml.includes('来源轮次') && configHtml.includes('Step2 研究证据当前不可直接审批') && configHtml.includes('Step2 轮次'),
   configShowsIntegrityAlerts: configHtml.includes('最新归因结果不完整') && configHtml.includes('治理数据库还没有接通，发布链路现在不可用。'),
   configShowsTuningProposalActions: configHtml.includes('批准调优') && configHtml.includes('拒绝调优'),
-  configKeepsObservationSeparate: configHtml.includes('观察与回滚') && configHtml.includes('仍需继续跟踪观察窗口'),
-  releaseEmptyUsesWorkbenchLayout: releaseEmptyConfigHtml.includes('Directional / 1H') && releaseEmptyConfigHtml.includes('等待审批') && releaseEmptyConfigHtml.includes('当前没有待审核的自动调优提案'),
+  configKeepsObservationSeparate: configHtml.includes('观察与回滚') && configHtml.includes('这些发布还在观察窗口内'),
+  releaseEmptyUsesWorkbenchLayout: releaseEmptyConfigHtml.includes('Directional / 1H') && releaseEmptyConfigHtml.includes('参数候选待审批') && releaseEmptyConfigHtml.includes('当前没有待审核的自动调优提案') && !releaseEmptyConfigHtml.includes('待发布候选'),
   rollbackHeroPrioritizesRollback:
-    rollbackConfigHtml.split('当前待处理')[0].includes('data-action="rdp-rollback-parameters"')
-    && !rollbackConfigHtml.split('当前待处理')[0].includes('data-action="rdp-create-release"'),
+    rollbackConfigHtml.split('待处理组合')[0].includes('data-action="rdp-rollback-parameters"')
+    && !rollbackConfigHtml.split('待处理组合')[0].includes('data-action="rdp-create-release"'),
   rollbackHeroExplainsPriority: rollbackConfigHtml.includes('有发布进入回滚建议状态，先处理回滚。'),
   configHasRuntimeParams: configHtml.includes('运行参数概览'),
   configOmitsAdaptiveControls: !configHtml.includes('风险预算乘数') && !configHtml.includes('执行侵略性乘数'),
@@ -2876,9 +2936,11 @@ console.log(JSON.stringify({
         self.assertIn('"configHasRuntimeRail":true', result.stdout)
         self.assertIn('"configHasTuningCard":true', result.stdout)
         self.assertIn('"configShowsTaskOrientedMetrics":true', result.stdout)
+        self.assertIn('"configShowsManualWorkflowActions":true', result.stdout)
         self.assertIn('"configRemovesWorkflowGridNoise":true', result.stdout)
         self.assertIn('"configNoDirectApplyLanguage":true', result.stdout)
         self.assertIn('"configShowsDecisionSummaryNotRawEvidence":true', result.stdout)
+        self.assertIn('"configExplainsApprovalEffect":true', result.stdout)
         self.assertIn('"configShowsApprovalBlockedCallout":true', result.stdout)
         self.assertIn('"configShowsEvidenceDrilldown":true', result.stdout)
         self.assertIn('"configShowsIntegrityAlerts":true', result.stdout)

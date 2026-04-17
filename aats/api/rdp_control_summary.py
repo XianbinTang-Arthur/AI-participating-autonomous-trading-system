@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -809,10 +810,23 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
 
 _WORKBENCH_RECOMMENDATION_LABELS = {
     "parameter_upgrade": "参数候选待审批",
-    "keep_active": "治理建议：保持当前",
-    "lower_priority": "治理建议：降低优先级",
-    "pause": "治理建议：暂停",
-    "require_review": "治理建议：需要复核",
+    "keep_active": "建议保持当前",
+    "lower_priority": "建议降低优先级",
+    "pause": "建议暂停该组合",
+    "require_review": "建议人工复核",
+}
+
+_WORKFLOW_ACTION_LABELS = {
+    "data_maintenance": "刷新数据",
+    "research_cycle": "运行完整 RDP",
+}
+
+_HEALTH_ALERT_TITLE_LABELS = {
+    "queue_state": "任务队列状态",
+    "current_alerts": "当前告警文件",
+    "readonly_access": "生产数据库连接",
+    "active_parameter_sets": "Active 参数状态",
+    "rdp_task_queue_backlog_or_failures": "任务队列积压",
 }
 
 
@@ -845,6 +859,285 @@ def _dedupe_texts(values: list[str], *, limit: int | None = None) -> list[str]:
         if limit is not None and len(result) >= limit:
             break
     return result
+
+
+def _humanize_reason_entry(value: str | None) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+
+    normalized = re.sub(r"\s+", " ", text)
+    compact = normalized.replace("[", " ").replace("]", " ").strip()
+
+    patterns: list[tuple[re.Pattern[str], str | None]] = [
+        (
+            re.compile(r".*有\s*(\d+)\s*个实验产生开仓信号.*", re.IGNORECASE),
+            "Step2 中共有 {0} 个实验出现开仓信号。",
+        ),
+        (
+            re.compile(r".*最大\s*opening_count\s*=\s*(\d+).*", re.IGNORECASE),
+            "本轮最高开仓次数为 {0}。",
+        ),
+        (
+            re.compile(r".*平均\s*positive_edge_ratio\s*=\s*([0-9.]+)\s*>=\s*([0-9.]+).*", re.IGNORECASE),
+            "正向收益占比为 {0}，已达到阈值 {1}。",
+        ),
+        (
+            re.compile(r".*Phase 3 .*status\s*=\s*succeeded.*", re.IGNORECASE),
+            "Phase3 归因任务已完成。",
+        ),
+        (
+            re.compile(r".*failure\s*占比过高\s*:\s*(\d+)\s*/\s*(\d+).*", re.IGNORECASE),
+            "Phase3 失败占比过高（{0}/{1}）。",
+        ),
+        (
+            re.compile(r".*cost_adjusted_edge\s*=\s*([-0-9.]+)\s*bps\s*>=\s*([-0-9.]+).*", re.IGNORECASE),
+            "Phase4 成本后边际为 {0} bps。",
+        ),
+        (
+            re.compile(r".*full_fill_ratio\s*=\s*([0-9.]+)%\s*>=\s*([0-9.]+)%.*", re.IGNORECASE),
+            "Phase4 完整成交率为 {0}%。",
+        ),
+        (
+            re.compile(r".*治理层\s+degraded.*", re.IGNORECASE),
+            "治理层当前处于降级状态。",
+        ),
+        (
+            re.compile(r".*参数状态\s*:\s*candidate.*", re.IGNORECASE),
+            "参数仍是候选状态，尚未正式生效。",
+        ),
+    ]
+    for pattern, template in patterns:
+        match = pattern.match(compact)
+        if not match:
+            continue
+        if template is None:
+            return None
+        return template.format(*match.groups())
+
+    direct_map = {
+        "多维度正面且无负面": "研究和执行面整体偏正，没有明显反向信号。",
+        "治理要求继续运行，但当前未加载 active 参数": "治理层要求继续运行，但当前还没有 active 参数。",
+        "治理目标参数与当前实盘 active 参数不一致": "治理目标参数与当前实盘参数不一致。",
+        "参数建议已审批但尚未应用到实盘": "参数建议已审批，但还没有应用到实盘。",
+        "已完成审批，准备创建 release": "这组参数已经批准，下一步可以运行 Gate 或创建发布。",
+        "等待审批": "这组参数已经生成，等待人工确认。",
+    }
+    if compact in direct_map:
+        return direct_map[compact]
+
+    replacements = {
+        "opening_count": "开仓次数",
+        "positive_edge_ratio": "正向收益占比",
+        "failure_ratio": "失败占比",
+        "full_fill_ratio": "完整成交率",
+        "cost_adjusted_edge_proxy_bps": "成本后边际",
+        "cost_adjusted_edge": "成本后边际",
+        "mean_cost_bps": "平均成本",
+        "candidate": "候选",
+        "succeeded": "已完成",
+        "degraded": "降级",
+        "status": "状态",
+    }
+    for raw, friendly in replacements.items():
+        compact = re.sub(rf"\b{re.escape(raw)}\b", friendly, compact, flags=re.IGNORECASE)
+
+    compact = re.sub(r"\bphase\d+_[a-z_]+\b", "", compact, flags=re.IGNORECASE).strip(" -:;，。")
+    if not compact:
+        return None
+    if compact.endswith("。"):
+        return compact
+    return f"{compact}。"
+
+
+def _build_reason_summary(rec: dict[str, Any], combo_state: dict[str, Any]) -> list[str]:
+    values = (
+        _split_reason_text(rec.get("reason"))
+        + [str(item) for item in (combo_state.get("latest_round_reasons") or [])]
+        + [str(item) for item in (combo_state.get("inconsistencies") or [])]
+    )
+    return _dedupe_texts(
+        [humanized for value in values if (humanized := _humanize_reason_entry(value))],
+        limit=3,
+    )
+
+
+def _approval_effect_summary(recommendation_type: str) -> str:
+    if recommendation_type == "parameter_upgrade":
+        return "批准后会进入待发布列表，下一步是运行 Gate 或创建发布。"
+    if recommendation_type == "keep_active":
+        return "批准后只记录“保持当前”，不会创建新发布。"
+    if recommendation_type == "lower_priority":
+        return "批准后只记录“降低优先级”，不会创建新发布。"
+    if recommendation_type == "pause":
+        return "批准后会把该组合标记为暂停，不会创建新发布。"
+    return "批准后只会记录本轮治理结论，不会创建新发布。"
+
+
+def _decision_summary(
+    recommendation_type: str,
+    *,
+    has_integrity_block: bool,
+    combo_state: dict[str, Any],
+) -> str:
+    if has_integrity_block:
+        return "证据还不完整，先补研究结果，再决定是否审批。"
+    if recommendation_type == "parameter_upgrade":
+        return "本轮生成了新参数候选，确认后可继续进入发布。"
+    if recommendation_type == "keep_active":
+        if combo_state.get("runtime_source") != "active_parameters":
+            return "本轮建议保持当前；当前还没有 active 参数，只记录治理结论。"
+        return "本轮建议保持当前，不创建新发布。"
+    if recommendation_type == "lower_priority":
+        return "本轮建议降低该组合优先级，不创建新发布。"
+    if recommendation_type == "pause":
+        return "本轮建议暂停该组合，不创建新发布。"
+    return "本轮证据存在冲突，需要人工复核后再定。"
+
+
+def _approval_action_label(recommendation_type: str) -> str:
+    if recommendation_type == "parameter_upgrade":
+        return "批准参数候选"
+    if recommendation_type == "keep_active":
+        return "确认保持当前"
+    if recommendation_type == "lower_priority":
+        return "确认降优先级"
+    if recommendation_type == "pause":
+        return "确认暂停"
+    return "确认需复核"
+
+
+def _reject_action_label(recommendation_type: str) -> str:
+    if recommendation_type == "parameter_upgrade":
+        return "驳回参数候选"
+    if recommendation_type == "keep_active":
+        return "不采纳保持当前"
+    if recommendation_type == "lower_priority":
+        return "不采纳降优先级"
+    if recommendation_type == "pause":
+        return "不采纳暂停"
+    return "驳回复核结论"
+
+
+def _humanize_operational_alert(title: str | None, message: str | None, code: str | None) -> tuple[str, str]:
+    normalized_title = str(title or "").strip()
+    normalized_code = str(code or "").strip()
+    normalized_message = str(message or "").strip()
+    title_key = normalized_title or normalized_code
+    friendly_title = _HEALTH_ALERT_TITLE_LABELS.get(title_key, normalized_title or "系统告警")
+
+    if title_key == "queue_state":
+        return friendly_title, f"任务队列存在积压或失败：{normalized_message}" if normalized_message else "任务队列存在积压或失败。"
+    if title_key == "current_alerts":
+        return friendly_title, "当前还没有生成最新告警文件，请先完成可靠性检查。"
+    if title_key == "readonly_access":
+        return friendly_title, "当前没有配置生产数据库连接，发布链只能停留在只读状态。"
+    if title_key == "active_parameter_sets":
+        return friendly_title, "当前没有 active 参数，继续运行前需要先确认治理结论。"
+    if title_key == "rdp_task_queue_backlog_or_failures":
+        return friendly_title, "RDP 任务队列存在积压或失败，请先清理再继续。"
+    return friendly_title, normalized_message or "当前存在需要处理的系统告警。"
+
+
+def _build_manual_workflow_actions(tasks: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    actions: list[dict[str, Any]] = []
+    for workflow in ("data_maintenance", "research_cycle"):
+        lane = (tasks or {}).get(workflow) or {}
+        disabled_reason = None
+        enabled = True
+        if lane.get("running_task"):
+            enabled = False
+            disabled_reason = "当前流程已在运行。"
+        elif lane.get("pending_task"):
+            enabled = False
+            disabled_reason = "当前流程已在排队。"
+        actions.append(_make_ui_action(
+            key=f"trigger_{workflow}",
+            label=_WORKFLOW_ACTION_LABELS[workflow],
+            ui_action="rdp-trigger-workflow",
+            value=workflow,
+            enabled=enabled,
+            disabled_reason=disabled_reason,
+        ))
+    primary = actions[0] if actions else None
+    secondary = actions[1:] if len(actions) > 1 else []
+    return primary, secondary
+
+
+def _build_release_candidates_payload(summary: dict[str, Any]) -> dict[str, Any]:
+    governance_state = summary.get("governance_state") or {}
+    combo_states = {
+        item.get("combo_key"): item
+        for item in (governance_state.get("combo_states") or [])
+        if isinstance(item, dict) and item.get("combo_key")
+    }
+    latest_gate_by_recommendation = {
+        str(item.get("recommendation_id") or ""): item
+        for item in (summary.get("recent_gate_results") or [])
+        if isinstance(item, dict) and str(item.get("recommendation_id") or "").strip()
+    }
+    approved_candidates = [
+        item
+        for item in (summary.get("pending_recommendations") or [])
+        if isinstance(item, dict)
+        and item.get("recommendation_type") == "parameter_upgrade"
+        and item.get("status") == "approved"
+    ]
+    by_combo: dict[str, dict[str, Any]] = {}
+    for rec in sorted(
+        approved_candidates,
+        key=lambda item: _iso_sort_key(item.get("created_at")),
+        reverse=True,
+    ):
+        combo_key = str(rec.get("combo_key") or _combo_key(rec.get("family"), rec.get("timeframe")))
+        if combo_key and combo_key not in by_combo:
+            by_combo[combo_key] = rec
+
+    items: list[dict[str, Any]] = []
+    for combo_key, rec in by_combo.items():
+        combo_state = combo_states.get(combo_key) or {}
+        gate_result = latest_gate_by_recommendation.get(str(rec.get("recommendation_id") or ""))
+        gate_status = str((gate_result or {}).get("gate_status") or "not_run")
+        gate_note = None
+        if gate_result:
+            gate_note = (
+                ((gate_result.get("blocking_reasons") or [None])[0])
+                or ("最近一次 Gate 有警告，请先复核。" if (gate_result.get("warnings") or []) else None)
+                or "最近一次 Gate 已执行。"
+            )
+        item = {
+            "combo_key": combo_key,
+            "family": rec.get("family") or combo_state.get("family"),
+            "timeframe": rec.get("timeframe") or combo_state.get("timeframe"),
+            "recommendation_id": rec.get("recommendation_id"),
+            "confidence": rec.get("confidence") or "unknown",
+            "headline": "已批准，待发布",
+            "decision_summary": "这组参数已经批准，下一步可以运行 Gate 或直接创建发布。",
+            "gate_status": gate_status,
+            "gate_note": _humanize_reason_entry(str(gate_note)) if gate_note else None,
+            "reason_summary": _build_reason_summary(rec, combo_state),
+            "created_at": rec.get("created_at"),
+            "actions": [
+                _make_ui_action(
+                    key="run_gate",
+                    label="运行 Gate",
+                    ui_action="rdp-run-gate",
+                    value=str(rec.get("recommendation_id") or ""),
+                ),
+                _make_ui_action(
+                    key="create_release",
+                    label="创建发布",
+                    ui_action="rdp-create-release",
+                    value=str(rec.get("recommendation_id") or ""),
+                ),
+            ],
+        }
+        items.append(item)
+
+    return {
+        "total": len(items),
+        "items": items,
+    }
 
 
 def _make_ui_action(
@@ -987,27 +1280,34 @@ def _build_workbench_alerts_payload(
         status = str(check.get("status") or "").lower()
         if status not in {"warn", "blocked"}:
             continue
+        title, message = _humanize_operational_alert(
+            str(check.get("name") or ""),
+            str(check.get("detail") or ""),
+            str(check.get("name") or ""),
+        )
         operational_alerts.append({
             "code": f"{check.get('category')}:{check.get('name')}",
             "severity": "danger" if status == "blocked" else "warning",
-            "title": str(check.get("name") or "系统检查"),
-            "message": str(check.get("detail") or "当前存在阻断或警告"),
+            "title": title,
+            "message": message,
         })
 
     for reason in health.get("blocking_reasons") or []:
+        title, message = _humanize_operational_alert(None, str(reason), str(reason))
         operational_alerts.append({
             "code": str(reason),
             "severity": "danger",
-            "title": "系统阻断",
-            "message": str(reason),
+            "title": title,
+            "message": message,
         })
 
     for reason in health.get("warnings") or []:
+        title, message = _humanize_operational_alert(None, str(reason), str(reason))
         operational_alerts.append({
             "code": str(reason),
             "severity": "warning",
-            "title": "系统警告",
-            "message": str(reason),
+            "title": title,
+            "message": message,
         })
 
     return {
@@ -1144,13 +1444,14 @@ def _build_combo_evidence_digest(
 
 
 def _build_item_detail_payload(item: dict[str, Any]) -> dict[str, Any]:
+    recommendation_type = str(item.get("recommendation_type") or "require_review")
     return {
         "current_recommendation_reason": item.get("decision_summary"),
         "risk_summary": _dedupe_texts(
             list(item.get("reason_summary") or []) + list(item.get("blocking_flags") or []),
             limit=4,
         ),
-        "next_state_if_approved": "写入治理审批结果，并进入后续发布或继续观察链路。",
+        "next_state_if_approved": _approval_effect_summary(recommendation_type),
         "next_state_if_rejected": "保留当前运行参数，并把这条建议标记为拒绝。",
         "source_rounds": item.get("source_rounds") or {},
         "integrity_status": item.get("integrity_status"),
@@ -1228,12 +1529,7 @@ def _build_workbench_items_payload(
             if not alert.get("combo_key") or alert.get("combo_key") == combo_key
         ]
         integrity_status = "blocked" if item_alerts else "complete"
-        reason_summary = _dedupe_texts(
-            _split_reason_text(rec.get("reason"))
-            + [str(item) for item in (combo_state.get("latest_round_reasons") or [])]
-            + [str(item) for item in (combo_state.get("inconsistencies") or [])],
-            limit=3,
-        )
+        reason_summary = _build_reason_summary(rec, combo_state)
         missing_evidence = _dedupe_texts(
             [str(alert.get("title") or "") for alert in item_alerts],
             limit=3,
@@ -1243,9 +1539,11 @@ def _build_workbench_items_payload(
             recommendation_type,
             "当前组合需要处理",
         )
-        decision_summary = str(rec.get("reason") or "").strip()
-        if not decision_summary:
-            decision_summary = "当前治理建议已生成，请先确认这一组组合的处理结论。"
+        decision_summary = _decision_summary(
+            recommendation_type,
+            has_integrity_block=bool(item_alerts),
+            combo_state=combo_state,
+        )
         disabled_reason = (
             "当前轮次存在不完整证据，需先补齐研究/归因/执行结论。"
             if item_alerts
@@ -1263,7 +1561,7 @@ def _build_workbench_items_payload(
         actions = [
             _make_ui_action(
                 key="approve",
-                label="审批",
+                label=_approval_action_label(recommendation_type),
                 ui_action="rdp-approve-only",
                 value=str(rec.get("recommendation_id") or ""),
                 enabled=not item_alerts,
@@ -1271,7 +1569,7 @@ def _build_workbench_items_payload(
             ),
             _make_ui_action(
                 key="reject",
-                label="拒绝",
+                label=_reject_action_label(recommendation_type),
                 ui_action="rdp-reject-recommendation",
                 value=str(rec.get("recommendation_id") or ""),
                 enabled=True,
@@ -1287,6 +1585,7 @@ def _build_workbench_items_payload(
             "status": rec.get("status") or "draft",
             "headline": headline,
             "decision_summary": decision_summary,
+            "approval_effect_summary": _approval_effect_summary(recommendation_type),
             "reason_summary": reason_summary,
             "missing_evidence": missing_evidence,
             "blocking_flags": [str(item) for item in (combo_state.get("inconsistencies") or [])],
@@ -1500,8 +1799,10 @@ def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
     summary = build_rdp_control_summary(request)
     alerts_payload = _build_workbench_alerts_payload(root, summary)
     items_payload = _build_workbench_items_payload(root, summary, alerts_payload)
+    release_candidates_payload = _build_release_candidates_payload(summary)
     tuning_payload = _build_tuning_overview_payload(root)
     current_execution, next_queue = _build_task_lane_summary(summary.get("tasks") or {})
+    primary_action, secondary_actions = _build_manual_workflow_actions(summary.get("tasks") or {})
     observation_queue = summary.get("observation_queue") or []
     operations_summary = summary.get("operations_summary") or {}
 
@@ -1517,34 +1818,35 @@ def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
     elif alerts_payload.get("integrity_alerts"):
         overall_status = "needs_more_research"
 
-    headline = "当前没有新的治理动作，系统处于待命状态。"
-    subheadline = "当前轮次没有新的待审批建议或发布动作。"
+    headline = "当前没有新的待处理项。"
+    subheadline = "需要时可以刷新数据，或重跑完整 RDP。"
     if overall_status == "rollback_required":
-        headline = "当前有发布进入回滚建议状态，优先处理风险收口。"
-        subheadline = "先处理回滚，再继续推进新的研究或审批。"
+        headline = "当前有发布进入回滚建议，先处理回滚。"
+        subheadline = "回滚完成后，再继续研究和审批。"
     elif overall_status == "needs_approval":
-        headline = f"当前轮次有 {items_payload['total']} 个组合需要治理审批。"
-        subheadline = "先看当前轮次结论，再决定审批还是拒绝。"
+        headline = f"当前有 {items_payload['total']} 个组合待处理。"
+        subheadline = "先看结论，再决定是否批准。"
     elif overall_status == "ready_to_release":
-        headline = "已有已批准参数可推进到发布流程。"
-        subheadline = "建议先运行 Gate，再创建 release。"
+        headline = f"已有 {release_candidates_payload['total']} 个参数候选待发布。"
+        subheadline = "先运行 Gate，再决定是否创建发布。"
     elif overall_status == "observing":
-        headline = "当前有 release 仍在观察窗口中。"
-        subheadline = "优先确认观察结果，再推进下一轮参数。"
+        headline = "当前有发布仍在观察窗口中。"
+        subheadline = "先确认观察结果，再推进下一轮。"
     elif overall_status == "needs_more_research":
-        headline = "当前轮次证据不完整，不能直接审批。"
-        subheadline = "需要先补研究、归因或执行评估，再进入治理。"
+        headline = "当前轮次证据不完整，暂时不能审批。"
+        subheadline = "先补研究、归因或执行评估，再继续治理。"
 
     return {
         "round_id": None,
         "overall_status": overall_status,
         "headline": headline,
         "subheadline": subheadline,
-        "primary_action": None,
-        "secondary_actions": [],
+        "primary_action": primary_action,
+        "secondary_actions": secondary_actions,
         "blockers": alerts_payload.get("integrity_alerts") or [],
         "summary_counts": {
             "pending_items": items_payload["total"],
+            "ready_release_items": release_candidates_payload["total"],
             "integrity_blocked_items": sum(
                 1 for item in items_payload["items"] if item.get("integrity_status") == "blocked"
             ),
@@ -1568,7 +1870,9 @@ def build_rdp_workbench_items(request: Request) -> dict[str, Any]:
     root = _project_root(request)
     summary = build_rdp_control_summary(request)
     alerts_payload = _build_workbench_alerts_payload(root, summary)
-    return _build_workbench_items_payload(root, summary, alerts_payload)
+    payload = _build_workbench_items_payload(root, summary, alerts_payload)
+    payload["release_candidates"] = _build_release_candidates_payload(summary)
+    return payload
 
 
 def build_rdp_workbench_alerts(request: Request) -> dict[str, Any]:

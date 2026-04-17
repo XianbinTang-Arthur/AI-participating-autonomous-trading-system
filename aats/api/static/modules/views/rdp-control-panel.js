@@ -44,6 +44,72 @@ const OBSERVATION_STATUS_LABELS = {
   rolled_back: "已回滚",
 };
 
+const WORKFLOW_LABELS = {
+  data_maintenance: "刷新数据",
+  research_cycle: "运行完整 RDP",
+  governance_cycle: "治理检查",
+  decision_cycle: "决策链",
+  release_cycle: "发布与观察",
+};
+
+const EVIDENCE_PHASE_LABELS = {
+  phase2: "Step2 研究",
+  phase3: "Phase3 归因",
+  phase4: "Phase4 执行",
+  readiness: "Readiness",
+};
+
+const EVIDENCE_STATUS_LABELS = {
+  available: "可用",
+  blocked: "阻断",
+  incomplete: "不完整",
+  missing: "缺失",
+};
+
+const EVIDENCE_METRIC_LABELS = {
+  experiments_with_openings: "有开仓信号的实验数",
+  max_opening_count: "最大开仓次数",
+  mean_positive_edge_ratio: "平均正向收益占比",
+  status: "状态",
+  failure_ratio: "失败占比",
+  failure_count: "失败数",
+  total_count: "总样本数",
+  full_fill_ratio: "完整成交率",
+  cost_adjusted_edge_proxy_bps: "成本后边际（bps）",
+  mean_cost_bps: "平均成本（bps）",
+  decision_status: "当前决策状态",
+  runtime_source: "当前实盘参数来源",
+};
+
+const SOURCE_ROUND_LABELS = {
+  phase2_round_id: "Step2 轮次",
+  phase3_round_id: "Phase3 轮次",
+  phase4_round_id: "Phase4 轮次",
+  decision_round_id: "决策轮次",
+};
+
+const DECISION_STATUS_LABELS = {
+  keep_active: "保持当前",
+  lower_priority: "降低优先级",
+  pause: "暂停",
+  require_review: "需复核",
+  parameter_upgrade: "参数升级",
+};
+
+const RUNTIME_SOURCE_LABELS = {
+  active_parameters: "active 参数",
+  governance_pause: "治理暂停状态",
+  governance_managed: "治理参数",
+  unknown: "未知",
+};
+
+const INCOMPLETE_REASON_LABELS = {
+  manifest_missing_on_disk: "缺少 round_manifest",
+  file_incomplete: "快照不完整",
+  insufficient_data: "数据不足",
+  query_failed: "查询失败",
+};
+
 function relativeTime(isoString) {
   if (!isoString) return "暂无记录";
   const timestamp = new Date(isoString).getTime();
@@ -124,6 +190,36 @@ function labelForObservationStatus(status) {
 
 function labelForApplyResult(status) {
   return APPLY_RESULT_LABELS[status] || status || "未执行";
+}
+
+function labelForWorkflow(workflow) {
+  return WORKFLOW_LABELS[workflow] || workflow || "无";
+}
+
+function labelForEvidencePhase(phase) {
+  return EVIDENCE_PHASE_LABELS[phase] || phase || "未知阶段";
+}
+
+function labelForEvidenceStatus(status) {
+  return EVIDENCE_STATUS_LABELS[status] || status || "未知";
+}
+
+function labelForEvidenceMetric(key) {
+  return EVIDENCE_METRIC_LABELS[key] || key || "指标";
+}
+
+function labelForSourceRound(key) {
+  return SOURCE_ROUND_LABELS[key] || key || "来源轮次";
+}
+
+function labelForIncompleteReason(reason) {
+  return INCOMPLETE_REASON_LABELS[reason] || reason || "未知";
+}
+
+function formatEvidenceMetricValue(key, value) {
+  if (key === "decision_status") return DECISION_STATUS_LABELS[value] || value;
+  if (key === "runtime_source") return RUNTIME_SOURCE_LABELS[value] || value;
+  return value;
 }
 
 function renderWorkItem({
@@ -247,9 +343,9 @@ function renderWorkbenchHero({
 
   return primaryStatusPanel({
     eyebrow: "RDP 工作台",
-    title: "先处理当前轮次，再决定发布与回滚",
+    title: "先看当前轮次，再选择动作",
     headline: overview.headline || "当前没有新的治理动作",
-    summary: overview.subheadline || "工作台只展示当前轮次真正需要处理的事项。",
+    summary: overview.subheadline || "需要时可以刷新数据，或重跑完整 RDP。",
     tone: blockers.length ? "warning" : "neutral",
     actions: heroActions,
     pills: [
@@ -263,30 +359,30 @@ function renderWorkbenchHero({
     ].filter(Boolean),
     metrics: [
       {
-        label: "当前待审批",
+        label: "待审批",
         value: `${counts.pending_items || 0} 条`,
-        meta: "按 combo 聚合，只看当前轮次",
+        meta: "只算当前轮次",
         tone: counts.pending_items ? "warning" : "outline",
         badge: actorTags("operator"),
       },
       {
-        label: "当前执行中",
-        value: runtime.workflow || "无",
+        label: "执行中",
+        value: labelForWorkflow(runtime.workflow),
         meta: runtime.started_at ? `开始于 ${relativeTime(runtime.started_at)}` : "当前没有运行中的流程",
         tone: runtime.workflow ? "info" : "outline",
         badge: actorTags("system"),
       },
       {
-        label: "下一待执行",
-        value: nextQueue.workflow || "无",
+        label: "排队中",
+        value: labelForWorkflow(nextQueue.workflow),
         meta: nextQueue.requested_at ? `排队于 ${relativeTime(nextQueue.requested_at)}` : "当前没有新的排队任务",
         tone: nextQueue.workflow ? "warning" : "outline",
         badge: actorTags("system"),
       },
       {
-        label: "观察中发布",
+        label: "观察中",
         value: `${counts.observing_releases || 0} 条`,
-        meta: counts.observing_releases ? "仍需继续跟踪观察窗口" : "当前没有观察中的发布",
+        meta: counts.observing_releases ? "这些发布还在观察窗口内" : "当前没有观察中的发布",
         tone: counts.observing_releases ? "info" : "outline",
         badge: actorTags("system"),
       },
@@ -313,6 +409,9 @@ function renderWorkbenchItemsCard({
     ].filter(Boolean),
     body: `
       <p class="meta-copy">${escapeHtml(item.decision_summary || "当前治理结论已生成，请先处理这一组组合。")}</p>
+      ${item.approval_effect_summary
+        ? `<p class="meta-copy">批准后：${escapeHtml(item.approval_effect_summary)}</p>`
+        : ""}
       ${item.approval_enabled === false && item.approval_blocked_reason
         ? callout({
           title: "审批已阻断",
@@ -339,12 +438,50 @@ function renderWorkbenchItemsCard({
   }));
 
   return surfaceCard({
-    title: "当前待处理",
+    title: "待处理组合",
     kicker: "只看当前轮次",
-    copy: "每个 combo 只保留一张主卡片：先结论，再原因，再决定审批还是拒绝。",
+    copy: "每个组合只保留一张卡片。",
     content: cards.length
       ? `<div class="rdp-worklist">${cards.join("")}</div>`
-      : notice("当前没有新的治理审批事项。", "info"),
+      : notice("当前没有新的待处理组合。", "info"),
+  });
+}
+
+function renderReleaseCandidatesCard({
+  payload = {},
+  canAdmin = false,
+}) {
+  const items = payload.items || [];
+  if (!items.length) return "";
+  const cards = items.map((item) => renderWorkItem({
+    tone: "info",
+    kicker: `${item.family || "未知策略"} / ${item.timeframe || "未知周期"}`,
+    title: item.headline || "已批准，待发布",
+    pills: [
+      `<span class="signal-pill tone-info">待发布</span>`,
+      item.gate_status && item.gate_status !== "not_run"
+        ? `<span class="signal-pill tone-${escapeHtml(toneForGate(item.gate_status))}">Gate ${escapeHtml(labelForGate(item.gate_status))}</span>`
+        : "",
+    ].filter(Boolean),
+    body: `
+      <p class="meta-copy">${escapeHtml(item.decision_summary || "这组参数已经批准，可以继续进入发布。")}</p>
+      ${item.gate_note ? `<p class="meta-copy">最近 Gate：${escapeHtml(item.gate_note)}</p>` : ""}
+      ${item.reason_summary?.length
+        ? `<ul class="rdp-bullet-list">${item.reason_summary.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>`
+        : ""}
+    `,
+    meta: [
+      item.created_at ? `批准于 ${relativeTime(item.created_at)}` : "",
+    ],
+    actions: (item.actions || [])
+      .map((action, index) => renderActionDescriptor(action, canAdmin, index === 1 ? "primary" : "ghost"))
+      .join(""),
+  }));
+  return surfaceCard({
+    title: "待发布候选",
+    kicker: "审批后的下一步",
+    copy: "先运行 Gate，再决定是否创建发布。创建发布时也会自动再跑一次 Gate。",
+    content: `<div class="rdp-worklist">${cards.join("")}</div>`,
   });
 }
 
@@ -352,9 +489,9 @@ function renderIntegrityAlertsCard(alerts = []) {
   const integrity = alerts.integrity_alerts || [];
   const operational = alerts.operational_alerts || [];
   return surfaceCard({
-    title: "数据完整性与阻断",
-    kicker: "审批前先看这里",
-    copy: "不完整证据会直接阻断治理审批，系统阻断和运行异常则影响后续发布链。",
+    title: "阻断与告警",
+    kicker: "审批前先看",
+    copy: "先处理阻断，再继续审批和发布。",
     content: `
       ${summaryStrip([
         {
@@ -394,13 +531,13 @@ function renderRuntimeRailCard({
   const health = overview.health || {};
   const environment = rdpControl.environment || {};
   return surfaceCard({
-    title: "系统状态",
-    kicker: "次级信息",
-    copy: "这里保留运行态信息，但不再让 workflow 状态抢占首页主视野。",
+    title: "运行状态",
+    kicker: "手动流程",
+    copy: "这里只看执行和排队。",
     content: summaryStrip([
       {
-        label: "当前执行中",
-        value: overview.current_execution?.workflow || "无",
+        label: "执行中",
+        value: labelForWorkflow(overview.current_execution?.workflow),
         meta: overview.current_execution?.started_at
           ? `开始于 ${relativeTime(overview.current_execution.started_at)}`
           : "当前没有运行中的任务",
@@ -408,8 +545,8 @@ function renderRuntimeRailCard({
         badge: actorTags("system"),
       },
       {
-        label: "下一待执行",
-        value: overview.next_queue?.workflow || "无",
+        label: "排队中",
+        value: labelForWorkflow(overview.next_queue?.workflow),
         meta: overview.next_queue?.requested_at
           ? `排队于 ${relativeTime(overview.next_queue.requested_at)}`
           : "当前没有新的排队任务",
@@ -443,7 +580,7 @@ function renderObservationRailCard({
   return surfaceCard({
     title: "观察与回滚",
     kicker: "发布后链路",
-    copy: "发布后的观察与回滚独立成一栏，不再与治理审批混成同一种工作项。",
+    copy: "这里只看观察中的发布和回滚建议。",
     content: items.length
       ? `<div class="rdp-worklist">${items.map((item) => buildObservationCard(item, canAdmin)).join("")}</div>`
       : notice("当前没有观察中的发布或回滚建议。", "info"),
@@ -459,7 +596,7 @@ function renderTuningCard({
   return surfaceCard({
     title: "自动调优",
     kicker: "strategy_tuning_review",
-    copy: tuningOverview.headline || "自动调优会生成提案，但只有审核通过后才会影响后续 research 默认值。",
+    copy: tuningOverview.headline || "这里只展示待审核的调优提案。",
     content: `
       ${summaryStrip([
         {
@@ -527,6 +664,12 @@ export function renderRdpControlPanelV2({
             items: rdpWorkbenchItems.items || [],
             canAdmin,
           })}
+          ${rdpWorkbenchOverview.overall_status === "rollback_required"
+            ? ""
+            : renderReleaseCandidatesCard({
+              payload: rdpWorkbenchItems.release_candidates || {},
+              canAdmin,
+            })}
           ${renderTuningCard({
             tuningOverview: rdpTuningOverview,
             tuningProposals: rdpTuningProposals,
@@ -555,7 +698,7 @@ function renderEvidenceMetricList(metrics = {}) {
   if (!entries.length) return "";
   return `
     <ul class="rdp-bullet-list">
-      ${entries.map(([key, value]) => `<li>${escapeHtml(String(key))}：${escapeHtml(String(value))}</li>`).join("")}
+      ${entries.map(([key, value]) => `<li>${escapeHtml(labelForEvidenceMetric(String(key)))}：${escapeHtml(String(formatEvidenceMetricValue(String(key), value)))}</li>`).join("")}
     </ul>
   `;
 }
@@ -575,12 +718,12 @@ function renderEvidenceDigest(item = {}) {
           <section class="rdp-inline-detail__section">
             <h5>${escapeHtml(String(entry.headline || entry.phase || "证据摘要"))}</h5>
             <p class="meta-copy">
-              阶段：${escapeHtml(String(entry.phase || "未知"))}
-              · 状态：${escapeHtml(String(entry.status || "unknown"))}
+              阶段：${escapeHtml(labelForEvidencePhase(String(entry.phase || "")))}
+              · 状态：${escapeHtml(labelForEvidenceStatus(String(entry.status || "")))}
               ${entry.round_id ? `· 轮次：${escapeHtml(String(entry.round_id))}` : ""}
             </p>
             ${entry.incomplete_reason
-              ? `<p class="meta-copy">不完整原因：${escapeHtml(String(entry.incomplete_reason))}</p>`
+              ? `<p class="meta-copy">不完整原因：${escapeHtml(labelForIncompleteReason(String(entry.incomplete_reason)))}</p>`
               : ""}
             ${renderEvidenceMetricList(entry.metrics || {})}
           </section>
@@ -602,7 +745,7 @@ function renderEvidenceDigest(item = {}) {
               <ul class="rdp-bullet-list">
                 ${Object.entries(sourceRounds)
                   .filter(([, value]) => value)
-                  .map(([key, value]) => `<li>${escapeHtml(String(key))}：${escapeHtml(String(value))}</li>`)
+                  .map(([key, value]) => `<li>${escapeHtml(labelForSourceRound(String(key)))}：${escapeHtml(String(value))}</li>`)
                   .join("")}
               </ul>
             </section>
