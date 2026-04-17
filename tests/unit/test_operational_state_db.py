@@ -735,3 +735,152 @@ def test_save_release_history_logs_warning_when_gate_row_missing(
     assert any(
         "gate_missing" in rec.getMessage() for rec in caplog.records
     ), "gate 行缺失时应当有 warning 可见"
+
+
+# H-R1 回归：save_release_history 在 DB 不可达时的两种模式。
+
+
+def test_save_release_history_json_only_when_fail_loud_off(
+    monkeypatch: Any, tmp_path: Any, caplog: Any
+) -> None:
+    """默认（AATS_P0_RELEASE_FAIL_LOUD 未设置）：DB 不可达时走单机兼容模式，
+    仅写 JSON 并打 warning，不抛异常。这条路径是历史测试契约，不能回归。
+    """
+    import logging
+
+    from aats.data_platform.production_workflow import release_registry as rr
+
+    monkeypatch.delenv("AATS_P0_RELEASE_FAIL_LOUD", raising=False)
+    monkeypatch.setattr(rr, "try_governance_db", lambda: (None, False))
+
+    history = {
+        "releases": [
+            {
+                "release_id": "rel_local",
+                "family": "fam",
+                "timeframe": "1h",
+                "combo_key": "fam_1h",
+                "recommendation_id": "rec_local",
+                "parameter_set_id": "ps_local",
+                "apply_result": "success",
+                "observation_status": "observing",
+                "observation_window_hours": 24,
+            },
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger=rr.__name__):
+        path = rr.save_release_history(history, tmp_path)
+
+    assert path.exists(), "fail-loud off 时必须写 JSON 副本"
+    assert any(
+        "单机兼容模式" in rec.getMessage() for rec in caplog.records
+    ), "DB 不可达走降级路径必须留 warning 痕迹"
+
+
+def test_save_release_history_raises_when_fail_loud_on(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """AATS_P0_RELEASE_FAIL_LOUD=on：DB 不可达必须立即抛，绝不能悄悄走 JSON。
+
+    动机：实盘部署开启此 flag 后，任何 DB 暂时不可达都会中断 release 流程，
+    运营者立刻能看到故障；否则 JSON 副本会变成"从未入库的 ghost release"，
+    下一次 loader 再读 DB 时那份 ghost 永远不会被清除。
+    """
+    from aats.data_platform.production_workflow import release_registry as rr
+
+    monkeypatch.setenv("AATS_P0_RELEASE_FAIL_LOUD", "on")
+    monkeypatch.setattr(rr, "try_governance_db", lambda: (None, False))
+
+    history = {
+        "releases": [
+            {
+                "release_id": "rel_fail_loud",
+                "family": "fam",
+                "timeframe": "1h",
+                "combo_key": "fam_1h",
+                "recommendation_id": "rec_fl",
+                "parameter_set_id": "ps_fl",
+                "apply_result": "success",
+                "observation_status": "observing",
+                "observation_window_hours": 24,
+            },
+        ],
+    }
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="AATS_P0_RELEASE_FAIL_LOUD"):
+        rr.save_release_history(history, tmp_path)
+
+    path = tmp_path / "artifacts/production_workflow/parameter_release_history.json"
+    assert not path.exists(), "fail-loud 模式下 DB 不可达不得写 JSON 副本"
+
+
+# M-R2 回归：load_release_history 必须在返回体上打 source / stale 标记。
+
+
+def test_load_release_history_marks_db_source_when_db_ok(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """DB 读成功时 source=db, stale=False。"""
+    from aats.data_platform.production_workflow import release_registry as rr
+
+    fake_history = {"generated_at": "t", "releases": [{"release_id": "r1"}]}
+
+    def _fake_db_load(_session: Any) -> dict[str, Any]:
+        return fake_history
+
+    import aats.data_platform.governance.operational_state_db as osd
+
+    monkeypatch.setattr(rr, "try_governance_db", lambda: (_FakeEngine(), True))
+    monkeypatch.setattr(
+        rr, "Session", lambda _engine: _SessionContextAdapter(_FakeGateSession()),
+    )
+    monkeypatch.setattr(osd, "db_load_release_history", _fake_db_load)
+
+    result = rr.load_release_history(tmp_path)
+    assert result["source"] == "db"
+    assert result["stale"] is False
+    assert result["releases"] == [{"release_id": "r1"}]
+
+
+def test_load_release_history_marks_json_source_when_db_unreachable(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """DB 不可达 + JSON 存在 → source=json, stale=True, 附 stale_reason。
+
+    M-R2 核心契约：消费方（rdp_control_summary / UI）必须能看出这次数据
+    来自副本文件，不能被当成实时真源处理。
+    """
+    from aats.data_platform.production_workflow import release_registry as rr
+
+    # 先写一个文件副本模拟"上次 DB 可达时保存的 JSON"
+    hist_path = tmp_path / "artifacts/production_workflow/parameter_release_history.json"
+    hist_path.parent.mkdir(parents=True, exist_ok=True)
+    hist_path.write_text(
+        json.dumps({"generated_at": "old", "releases": [{"release_id": "rel_old"}]}),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(rr, "try_governance_db", lambda: (None, False))
+
+    result = rr.load_release_history(tmp_path)
+    assert result["source"] == "json", "DB 不可达必须把 source 标成 json"
+    assert result["stale"] is True, "JSON 副本必须显式 stale=True"
+    assert result.get("stale_reason") == "db_unreachable"
+    assert result["releases"] == [{"release_id": "rel_old"}]
+
+
+def test_load_release_history_marks_empty_source_when_db_unreachable_and_no_json(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """DB 不可达 + 无 JSON 文件 → source=empty, stale=False（冷启动，没有 stale 数据可污染）。"""
+    from aats.data_platform.production_workflow import release_registry as rr
+
+    monkeypatch.setattr(rr, "try_governance_db", lambda: (None, False))
+
+    result = rr.load_release_history(tmp_path)
+    assert result["source"] == "empty"
+    assert result["stale"] is False
+    assert result["releases"] == []

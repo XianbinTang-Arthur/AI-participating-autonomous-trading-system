@@ -593,12 +593,27 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     active_parameters = active_params_data.get("active_sets", {}) or {}
     applied_recommendation_ids = _build_applied_recommendation_ids(active_parameters)
     released_success_recommendation_ids: set[str] = set()
+    # release_history_status 默认未知；若下面 load_release_history 成功，这里会被覆盖
+    # 成 {"source": "db"|"json"|"empty", "stale": bool, ...}。UI 需要把 stale=True
+    # 的状态向运营者显式透出（比如在"最近 release"模块旁挂个 stale 标签），否则
+    # DB 抖动时运营者会误把 JSON 副本当成真源。
+    release_history_status: dict[str, Any] = {
+        "source": "unknown",
+        "stale": False,
+    }
     try:
         from aats.data_platform.production_workflow.release_registry import (
             load_release_history,
         )
 
         release_history = load_release_history(root)
+        release_history_status = {
+            "source": str(release_history.get("source") or "unknown"),
+            "stale": bool(release_history.get("stale")),
+        }
+        stale_reason = release_history.get("stale_reason")
+        if stale_reason:
+            release_history_status["stale_reason"] = str(stale_reason)
         released_success_recommendation_ids = {
             str(item.get("recommendation_id") or "").strip()
             for item in (release_history.get("releases") or [])
@@ -775,6 +790,7 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "latest_decision_state": latest_decision_state,
         "recent_gate_results": recent_gate_results,
         "observation_queue": observation_queue,
+        "release_history_status": release_history_status,
     }
     try:
         # 存 deepcopy，这样后续调用方即便拿到本次返回值做了原地修改，下一个

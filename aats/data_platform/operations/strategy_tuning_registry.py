@@ -136,7 +136,17 @@ def save_strategy_tuning_registry(project_root: Path, registry: dict[str, Any]) 
 
     # 顺序：DB 先、文件后。DB 写失败则文件保持旧状态，不留下未入库的 ghost 提案。
     engine, ok = try_governance_db()
-    if ok:
+    if not ok:
+        if _is_tuning_fail_loud_enabled():
+            raise RuntimeError(
+                "governance DB 不可达，strategy tuning registry 无法持久化到真源 "
+                "（AATS_P0_TUNING_FAIL_LOUD=on 强制中断）"
+            )
+        log.warning(
+            "strategy tuning registry: DB 不可达，进入单机兼容模式仅写 JSON "
+            "（生产建议开启 AATS_P0_TUNING_FAIL_LOUD）"
+        )
+    else:
         try:
             from aats.data_platform.governance.strategy_tuning_db import (
                 db_upsert_strategy_tuning_proposal,
@@ -147,10 +157,7 @@ def save_strategy_tuning_registry(project_root: Path, registry: dict[str, Any]) 
                     if isinstance(proposal, dict):
                         db_upsert_strategy_tuning_proposal(session, proposal)
         except Exception as exc:
-            import logging as _logging
-            _logging.getLogger(__name__).exception(
-                "strategy tuning registry DB 同步失败，保存未完成",
-            )
+            log.exception("strategy tuning registry DB 同步失败，保存未完成")
             raise RuntimeError(
                 f"strategy tuning registry DB 同步失败，状态未持久化到真源: {exc}"
             ) from exc

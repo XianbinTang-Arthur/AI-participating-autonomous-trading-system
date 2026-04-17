@@ -322,3 +322,69 @@ def test_save_overrides_writes_when_flag_on(
 
     assert path is not None
     assert path.exists()
+
+
+# =====================================================================
+# M-R1：save_strategy_tuning_registry 在 DB 不可达时的 fail-loud 契约
+# =====================================================================
+
+
+def test_save_registry_json_only_when_fail_loud_off(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """默认 AATS_P0_TUNING_FAIL_LOUD 未设置：DB 不可达时走单机兼容模式，
+    仅写 JSON 并打 warning，不抛。
+    """
+    monkeypatch.delenv("AATS_P0_TUNING_FAIL_LOUD", raising=False)
+    monkeypatch.setattr(mod, "try_governance_db", lambda: (None, False))
+
+    registry: dict[str, Any] = {
+        "proposals": [
+            {
+                "proposal_id": "tprop_local",
+                "combo_key": "independent_15m",
+                "parameter": "min_safe_net_edge_bps",
+                "proposed_value": 1.5,
+                "status": "pending_review",
+            },
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger=mod.__name__):
+        path = mod.save_strategy_tuning_registry(tmp_path, registry)
+
+    assert path.exists(), "fail-loud off 时必须写 JSON 副本"
+    assert any(
+        "单机兼容模式" in rec.getMessage() for rec in caplog.records
+    ), "降级走 JSON 必须留 warning"
+
+
+def test_save_registry_raises_when_fail_loud_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """AATS_P0_TUNING_FAIL_LOUD=on：DB 不可达必须立即抛，绝不能悄悄写 JSON。
+
+    动机：tuning proposals 的真源是 governance DB；实盘开了 flag 后一切 DB
+    不可达都要让运营者立刻看到，否则 JSON 副本会变成"从未入库的 ghost 提案"。
+    """
+    monkeypatch.setenv("AATS_P0_TUNING_FAIL_LOUD", "on")
+    monkeypatch.setattr(mod, "try_governance_db", lambda: (None, False))
+
+    registry: dict[str, Any] = {
+        "proposals": [
+            {
+                "proposal_id": "tprop_fail_loud",
+                "combo_key": "independent_15m",
+                "parameter": "min_safe_net_edge_bps",
+                "proposed_value": 1.5,
+                "status": "pending_review",
+            },
+        ],
+    }
+
+    with pytest.raises(RuntimeError, match="AATS_P0_TUNING_FAIL_LOUD"):
+        mod.save_strategy_tuning_registry(tmp_path, registry)
+
+    assert not (tmp_path / "artifacts/governance/strategy_tuning_proposals.json").exists(), (
+        "fail-loud 模式下 DB 不可达不得写 JSON 副本"
+    )
