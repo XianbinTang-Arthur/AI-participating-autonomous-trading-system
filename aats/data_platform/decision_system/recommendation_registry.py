@@ -67,18 +67,41 @@ def _db_sync_recommendation(rec: dict[str, Any]) -> None:
             engine.dispose()
 
 
-def _db_update_rec_status(rec: dict[str, Any]) -> None:
-    """将 recommendation 状态变更同步到 DB（best-effort）."""
+def _db_update_rec_status(
+    rec: dict[str, Any],
+    *,
+    expected_current_status: str | tuple[str, ...] | None = None,
+) -> bool | None:
+    """将 recommendation 状态变更同步到 DB.
+
+    Returns
+    -------
+    None
+        governance DB 不可达 → 退化为文件模式，调用方当作"我尽力了"继续走。
+    True
+        DB 可达且 UPDATE 生效（rowcount > 0）。
+    False
+        DB 可达但 UPDATE 没命中预期前置状态（rowcount == 0）——并发竞态检测
+        （另一 operator 已经抢先把该 rec 推进到新状态），或者 expected_current_status
+        指定了约束但 rec 根本没匹配上。调用方应当把内存里的本次变更回滚，避免
+        JSON 与 DB 不一致。
+
+    Notes
+    -----
+    调用方若不传 ``expected_current_status`` 则退化为 best-effort（历史行为），
+    只能区分 None / True，不会返回 False。状态流转（approve/reject/supersede）
+    必须传这个参数以拿到并发竞态信号。
+    """
     engine, ok = try_governance_db()
     if not ok:
-        return
+        return None
     try:
         from sqlalchemy.orm import Session
 
         from aats.data_platform.governance.recommendations_db import db_update_recommendation_status
 
         with Session(engine) as session, session.begin():
-            db_update_recommendation_status(
+            return db_update_recommendation_status(
                 session,
                 rec["recommendation_id"],
                 status=rec["status"],
@@ -90,9 +113,11 @@ def _db_update_rec_status(rec: dict[str, Any]) -> None:
                 superseded_by=rec.get("superseded_by"),
                 superseded_at=rec.get("superseded_at"),
                 superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
+                expected_current_status=expected_current_status,
             )
     except Exception as exc:
         log.warning("recommendation_registry: DB 状态更新失败 (%s)", exc)
+        return None
     finally:
         if engine is not None:
             engine.dispose()
@@ -299,12 +324,30 @@ def approve_recommendation(
         )
         return None
 
+    # 保留 rollback 快照，DB 返回 False（竞态）时回滚内存状态，保证 JSON 与
+    # DB 在并发情况下仍然一致。
+    prev_snapshot = {
+        "status": rec["status"],
+        "approved_by": rec.get("approved_by"),
+        "approved_at": rec.get("approved_at"),
+        "review_notes": rec.get("review_notes"),
+    }
     rec["status"] = "approved"
     rec["approved_by"] = approved_by
     rec["approved_at"] = datetime.now(timezone.utc).isoformat()
     if notes:
         rec["review_notes"] = notes
-    _db_update_rec_status(rec)
+    db_result = _db_update_rec_status(rec, expected_current_status="draft")
+    if db_result is False:
+        # 并发：另一 operator 已经抢先转移了状态，回滚本次修改，让 JSON 保持
+        # 与 DB 一致；调用方收到 None 后应提示"状态已被他人改写"。
+        for key, value in prev_snapshot.items():
+            rec[key] = value
+        log.warning(
+            "approve: recommendation %s 状态被其他进程抢先改写，已回滚内存状态",
+            recommendation_id,
+        )
+        return None
     return rec
 
 
@@ -328,12 +371,26 @@ def reject_recommendation(
         )
         return None
 
+    prev_snapshot = {
+        "status": rec["status"],
+        "rejected_by": rec.get("rejected_by"),
+        "rejected_at": rec.get("rejected_at"),
+        "review_notes": rec.get("review_notes"),
+    }
     rec["status"] = "rejected"
     rec["rejected_by"] = rejected_by
     rec["rejected_at"] = datetime.now(timezone.utc).isoformat()
     if notes:
         rec["review_notes"] = notes
-    _db_update_rec_status(rec)
+    db_result = _db_update_rec_status(rec, expected_current_status="draft")
+    if db_result is False:
+        for key, value in prev_snapshot.items():
+            rec[key] = value
+        log.warning(
+            "reject: recommendation %s 状态被其他进程抢先改写，已回滚内存状态",
+            recommendation_id,
+        )
+        return None
     return rec
 
 
@@ -354,6 +411,26 @@ def supersede_recommendation(
         log.warning("supersede: recommendation %s 不存在", recommendation_id)
         return None
 
+    # 和 approve/reject 一致的幂等保护：已经 superseded / rejected 的记录再
+    # 被 supersede 会把 superseded_at / superseded_by 覆盖成第二个 actor，
+    # 审计链里第一次 supersede 的痕迹就丢了。拒绝二次推进。
+    # - "draft" / "approved" 可以被合法 supersede（前者自动收尾，后者被新
+    #   recommendation 替代）
+    # - "superseded" / "rejected" 是终态，拒绝
+    if rec["status"] not in {"draft", "approved"}:
+        log.warning(
+            "supersede: recommendation %s 状态为 %s（非 draft/approved），拒绝 supersede",
+            recommendation_id, rec["status"],
+        )
+        return None
+
+    prev_snapshot = {
+        "status": rec["status"],
+        "superseded_at": rec.get("superseded_at"),
+        "superseded_by": rec.get("superseded_by"),
+        "superseded_by_recommendation_id": rec.get("superseded_by_recommendation_id"),
+        "review_notes": rec.get("review_notes"),
+    }
     rec["status"] = "superseded"
     rec["superseded_at"] = datetime.now(timezone.utc).isoformat()
     rec["superseded_by"] = actor
@@ -361,7 +438,17 @@ def supersede_recommendation(
         rec["superseded_by_recommendation_id"] = superseded_by_id
     if notes:
         rec["review_notes"] = notes
-    _db_update_rec_status(rec)
+    db_result = _db_update_rec_status(
+        rec, expected_current_status=("draft", "approved"),
+    )
+    if db_result is False:
+        for key, value in prev_snapshot.items():
+            rec[key] = value
+        log.warning(
+            "supersede: recommendation %s 状态被其他进程抢先改写，已回滚内存状态",
+            recommendation_id,
+        )
+        return None
     return rec
 
 

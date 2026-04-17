@@ -44,14 +44,31 @@ from aats.data_platform.governance.step2_integrity_guard import (
 def _resolve_actor(principal: OperatorPrincipal | None, body_actor: str | None) -> str:
     """把审计追踪的 actor 绑到 session principal 而不是 request body。
 
-    L3 修复：原本写入端点直接用 ``body.actor``（默认 "operator" 字面量），任何
-    client 都能伪造 actor 字段，审计链形同虚设。现在优先用 session identity（只
-    有持有有效 cookie 的用户才能拿到），仅在匿名/无 auth 放行路径（比如 local
-    dev 的 operator_unsafe_write_without_auth）才落到 body.actor，两者都缺才
-    使用 "operator" 占位。
+    L3 修复 + 防御深度加强：原本写入端点直接用 ``body.actor``（默认 "operator"
+    字面量），任何 client 都能伪造 actor 字段，审计链形同虚设。现在优先用
+    session identity（只有持有有效 cookie 的用户才能拿到）。
+
+    M-A1-3 补强：只要 ``principal.auth_enabled`` 为真——哪怕 ``identity`` 为空
+    或空白字符——都禁止回退到 ``body_actor``，避免将来某个 auth 路径（API key
+    / JWT）忘记设置 identity 时，审计 actor 被 request body 静默劫持。这种情况
+    下返回 ``f"unknown-{auth_source}"``，让运维能从 actor 字段看出"auth 开着但
+    identity 没设"的代码路径 bug，并提醒尽快修复。
+
+    只有 ``auth_enabled=False``（比如 local dev 的 operator_unsafe_write_without_auth）
+    这一条路径允许从 body.actor 取值；两者都缺才使用 "operator" 占位。
     """
-    if principal is not None and principal.auth_enabled and principal.identity:
-        return str(principal.identity)
+    if principal is not None and principal.auth_enabled:
+        identity = (principal.identity or "").strip()
+        if identity:
+            return identity
+        # auth 启用但 identity 缺失：记录告警并返回 sentinel，严禁泄到 body
+        auth_source = getattr(principal, "auth_source", None) or "unknown"
+        logger.warning(
+            "operator principal auth_enabled=True but identity is empty; "
+            "refusing to fall back to body_actor. auth_source=%s",
+            auth_source,
+        )
+        return f"unknown-{auth_source}"
     if body_actor:
         return str(body_actor)
     return "operator"

@@ -33,6 +33,15 @@ _STEP2_INCOMPLETE_REASON = (
     "Step2 研究快照不完整，当前轮次不能据此做正式审批。"
 )
 
+# 当 governance 库和磁盘都没有任何 Step2 round 时（fresh deploy / 迁库丢数据 /
+# 研究目录被清），``load_latest_research_round_snapshot`` 返回 ``None``。这时
+# 必须显式阻塞：``is_snapshot_incomplete(None)`` 会返回 ``False``（因为它被
+# 其它消费者共用，保持该契约），所以这里不能把 None 交给它判断——否则 gate
+# 在最该锁死的时刻（完全没有证据）反而放行，破坏 fail-closed 语义。
+_STEP2_MISSING_REASON = (
+    "Step2 研究快照不存在，无可用证据，已按 fail-closed 策略阻止此次操作。"
+)
+
 
 def step2_integrity_blocking_reason(project_root: Path) -> str | None:
     """Return a blocking reason string, or ``None`` if Step2 is healthy.
@@ -71,6 +80,13 @@ def step2_integrity_blocking_reason(project_root: Path) -> str | None:
     except Exception:
         logger.exception("step2 integrity check failed to load snapshot")
         return _STEP2_LOOKUP_FAILURE_REASON
+
+    # 明确区分"无快照"和"快照不完整"：前者 fail-closed 的唯一出路就是阻塞，
+    # 不能走 is_snapshot_incomplete，因为那个 helper 对 None 返回 False（契约
+    # 被 evidence_bundle / rollback / observation 共用）。在 gate 侧先做 None
+    # 守卫就能同时满足两边语义。
+    if snapshot is None:
+        return _STEP2_MISSING_REASON
 
     if is_snapshot_incomplete(snapshot):
         return _STEP2_INCOMPLETE_REASON

@@ -138,10 +138,24 @@ def db_update_recommendation_status(
     superseded_by: str | None = None,
     superseded_at: str | None = None,
     superseded_by_recommendation_id: str | None = None,
+    expected_current_status: str | tuple[str, ...] | None = None,
 ) -> bool:
     """更新 recommendation 审批状态.
 
-    Returns True 如果确实更新了一行。
+    Parameters
+    ----------
+    expected_current_status:
+        若不为 None，则在 SQL 中加 ``WHERE status IN (...)`` 守卫，用于检测
+        并发审批竞态：两个 operator 同时点 approve 时，其中一个的 Python 端
+        ``rec["status"] == "draft"`` 检查通过，但 DB 已经被先到的请求改写为
+        ``approved``，此时 UPDATE 的 rowcount=0，本函数返回 False，API 层可以
+        把这种情况映射成"状态已被他人改写"。
+
+    Returns
+    -------
+    bool
+        True 当且仅当 rowcount > 0（确实更新了一行）。False 表示 recommendation
+        不存在，或 ``expected_current_status`` 过滤器不匹配。
     """
     set_parts = ["status = :status"]
     params: dict[str, Any] = {"rec_id": recommendation_id, "status": status}
@@ -171,11 +185,34 @@ def db_update_recommendation_status(
         set_parts.append("superseded_by_recommendation_id = :superseded_by_rec_id")
         params["superseded_by_rec_id"] = superseded_by_recommendation_id
 
-    sql = f"UPDATE governance.recommendations SET {', '.join(set_parts)} WHERE recommendation_id = :rec_id"
+    where_parts = ["recommendation_id = :rec_id"]
+    if expected_current_status is not None:
+        if isinstance(expected_current_status, str):
+            where_parts.append("status = :expected_status")
+            params["expected_status"] = expected_current_status
+        else:
+            # tuple/list → IN (:st0, :st1, ...) 按位置绑定参数，避免字面量拼接
+            placeholders: list[str] = []
+            for idx, st in enumerate(expected_current_status):
+                key = f"expected_status_{idx}"
+                placeholders.append(f":{key}")
+                params[key] = st
+            where_parts.append(f"status IN ({', '.join(placeholders)})")
+
+    sql = (
+        f"UPDATE governance.recommendations SET {', '.join(set_parts)} "
+        f"WHERE {' AND '.join(where_parts)}"
+    )
     result = session.execute(text(sql), params)
     updated = result.rowcount > 0
     if updated:
         log.info("DB update recommendation status: %s -> %s", recommendation_id, status)
+    elif expected_current_status is not None:
+        log.warning(
+            "DB update recommendation status skipped: %s expected=%s (row not updated, "
+            "probably raced with another operator)",
+            recommendation_id, expected_current_status,
+        )
     return updated
 
 

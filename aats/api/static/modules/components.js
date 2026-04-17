@@ -159,9 +159,16 @@ export function statGrid(items) {
   `;
 }
 
-export function callout({ title, copy, pills = [] }) {
+// tone 支持的值：'danger' / 'warning' / 'success' / 'info'（默认中性）。
+// M-A2-2 修复：历史调用方多处传入 { tone: 'danger' }（例如审批阻断 callout），
+// 但这里没把 tone 嵌进 class 里，结果紧急告警与普通信息 callout 视觉无差别，
+// 运营者难以第一眼识别"审批已阻断"。现在把 tone 输出为 `tone-${tone}` class，
+// 由 app.css 的 `.callout.tone-danger` 等选择器承接配色，与 notice() 一致。
+export function callout({ title, copy, pills = [], tone = "" }) {
+  const normalizedTone = typeof tone === "string" ? tone.trim().toLowerCase() : "";
+  const toneClass = normalizedTone ? ` tone-${escapeHtml(normalizedTone)}` : "";
   return `
-    <article class="callout">
+    <article class="callout${toneClass}">
       <div class="panel-head">
         <h3>${escapeHtml(title)}</h3>
         <div class="inline-pills">${pills.join("")}</div>

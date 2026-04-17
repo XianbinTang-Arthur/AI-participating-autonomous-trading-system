@@ -1208,3 +1208,136 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(evidence["phase3"]["round_id"], "round_phase3_1")
         self.assertEqual(evidence["phase4"]["round_id"], "round_phase4_1")
         self.assertEqual(evidence["integrity_status"], "complete")
+
+    def test_workbench_evidence_phase2_round_id_populated_from_decision_round(self) -> None:
+        """M7 回归：phase2 证据的 round_id 原本硬编码 None，此处验证它会从
+        query_latest_decision_round 的 round_id 补齐，即使每条结论自身没有
+        source_round_id。追溯链断一环会让 evidence_bundle 在审批时丢参考。"""
+        request = _fake_request()
+
+        with (
+            patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
+            patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "staging"}),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+                "overall_health": "healthy",
+                "blocking_reasons": [],
+                "warnings": [],
+                "checks": [],
+            }),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+            patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
+            patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={
+                "recommendations": [
+                    {
+                        "recommendation_id": "rec_m7_1",
+                        "symbol": "BTC-USDT-SWAP",
+                        "family": "directional",
+                        "timeframe": "1h",
+                        "recommendation_type": "keep_active",
+                        "confidence": "medium",
+                        "reason": "用于 phase2 round_id 回归",
+                        "status": "draft",
+                        "target_parameter_set_id": "ps_candidate_m7",
+                        # 故意不填 source_round_id，确保 phase2 round_id 不是从
+                        # recommendation 侧拿，而是靠 decision_round 补齐。
+                        "created_at": "2026-04-10T12:05:00Z",
+                    },
+                ],
+            }),
+            patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+                "generated_at": "2026-04-10T11:40:00Z",
+                "governance_managed": True,
+                "paused_combos": [],
+                "known_combos": ["directional_1h"],
+                "active_sets": {},
+                "parameter_sets": [],
+            }),
+            # 关键 mock：decision_round 整体带 round_id，但单条 family_timeframe_decisions
+            # 既没有 source_round_id 也没有 round_id，必须由 M7 修复的投影逻辑补齐。
+            patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={
+                "available": True,
+                "round_id": "round_step2_m7",
+                "family_timeframe_decisions": [
+                    {
+                        "combo_key": "directional_1h",
+                        "family": "directional",
+                        "timeframe": "1h",
+                        "decision": "keep_active",
+                        "confidence": "medium",
+                        "reasons": ["归因失败率偏高"],
+                        "signal_summary": {
+                            "experiments_with_openings": 3,
+                            "max_opening_count": 12,
+                            "mean_positive_edge_ratio": 0.41,
+                        },
+                        # 故意不填 source_round_id / round_id
+                    },
+                ],
+                "parameter_upgrade_candidates": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+                "available": True,
+                "generated_at": "2026-04-10T11:55:00Z",
+                "status_distribution": {"keep_active": 1},
+                "decisions": [
+                    {
+                        "combo_key": "directional_1h",
+                        "family": "directional",
+                        "timeframe": "1h",
+                        "current_status": "keep_active",
+                        "active_parameter_set_id": "ps_live_0",
+                        "last_recommendation_id": None,
+                        "last_updated_at": "2026-04-10T11:56:00Z",
+                    },
+                ],
+            }),
+            patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+                "available": True,
+                "parameter_sets": [],
+            }),
+            patch(
+                "aats.data_platform.production_workflow.release_registry.load_release_history",
+                return_value={"releases": []},
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+                return_value=None,
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+                return_value=False,
+            ),
+            patch("aats.api.rdp_control_summary.query_latest_attribution", return_value={
+                "available": True,
+                "round_id": "round_phase3_m7",
+                "combos": [
+                    {
+                        "combo_key": "directional_1h",
+                        "summary": {"status": "succeeded", "failure_ratio": 0.2, "failure_count": 40, "total_events": 200},
+                    },
+                ],
+            }),
+            patch("aats.api.rdp_control_summary.query_latest_execution_realism", return_value={
+                "available": True,
+                "round_id": "round_phase4_m7",
+                "combos": [
+                    {
+                        "combo_key": "directional_1h",
+                        "summary": {"full_fill_ratio": 1.0, "cost_adjusted_edge_proxy_bps": 0.0, "mean_cost_bps": 4.0},
+                    },
+                ],
+            }),
+        ):
+            evidence = build_rdp_workbench_item_evidence(request, "directional_1h")
+
+        self.assertTrue(evidence["available"])
+        phase2 = evidence["phase2"]
+        self.assertIsNotNone(phase2, "phase2 evidence digest must be present when research conclusion exists")
+        self.assertEqual(
+            phase2["round_id"],
+            "round_step2_m7",
+            "phase2 round_id must fall back to decision_round.round_id when item-level keys are absent",
+        )
+        self.assertEqual(phase2["status"], "available")

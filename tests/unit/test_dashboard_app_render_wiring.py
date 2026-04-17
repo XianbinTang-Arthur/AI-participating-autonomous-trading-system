@@ -314,6 +314,68 @@ class TestStep2IntegrityGuard(unittest.TestCase):
         self.assertNotIn("postgres://", reason)
         self.assertIn("fail-closed", reason)
 
+    def test_missing_snapshot_returns_blocking_reason(self) -> None:
+        """H-A1 回归：快照为 None（fresh deploy / 迁库丢数据）必须 fail-closed。
+
+        历史 bug：``is_snapshot_incomplete(None)`` 按契约返回 False（该 helper 被
+        evidence_bundle / rollback / observation 多处共用，None→False 是共享契约），
+        guard 的条件 ``if is_snapshot_incomplete(snapshot):`` 对 None 不触发，结果
+        approve/supersede/tuning_approve 在没有任何 Step2 证据的环境里直接放行——
+        这是门禁最该锁死的时刻。修复后 guard 在走 is_snapshot_incomplete 之前先
+        独立判断 None 并返回明确的阻塞原因。
+        """
+        from unittest.mock import patch
+
+        from aats.data_platform.governance import step2_integrity_guard
+
+        with patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value=None,
+        ):
+            reason = step2_integrity_guard.step2_integrity_blocking_reason(Path("."))
+        self.assertIsNotNone(reason, "Step2 快照不存在时 guard 必须返回阻塞原因")
+        assert reason is not None
+        self.assertIn("fail-closed", reason)
+        self.assertIn("不存在", reason)
+
+    def test_complete_snapshot_returns_none(self) -> None:
+        """健康路径：有完整快照（不是 file_incomplete 也没 manifest_synthesized）
+        guard 必须返回 None 允许写入操作继续。"""
+        from unittest.mock import patch
+
+        from aats.data_platform.governance import step2_integrity_guard
+
+        healthy_snapshot = {
+            "round_id": "20260416_120000_abcd1234",
+            "data_source": "round_manifest",
+            "overall_status": "ok",
+        }
+        with patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value=healthy_snapshot,
+        ):
+            reason = step2_integrity_guard.step2_integrity_blocking_reason(Path("."))
+        self.assertIsNone(reason, "健康快照不应触发 guard 阻塞")
+
+    def test_incomplete_snapshot_returns_reason(self) -> None:
+        """file_incomplete 快照（round 目录缺 round_manifest.json）应被 guard 拒掉。"""
+        from unittest.mock import patch
+
+        from aats.data_platform.governance import step2_integrity_guard
+
+        incomplete_snapshot = {
+            "round_id": "20260416_120000_beefdead",
+            "data_source": "file_incomplete",
+        }
+        with patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value=incomplete_snapshot,
+        ):
+            reason = step2_integrity_guard.step2_integrity_blocking_reason(Path("."))
+        self.assertIsNotNone(reason)
+        assert reason is not None
+        self.assertIn("不完整", reason)
+
 
 if __name__ == "__main__":
     unittest.main()

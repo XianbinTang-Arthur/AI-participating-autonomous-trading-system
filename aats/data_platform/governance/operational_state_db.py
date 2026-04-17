@@ -7,6 +7,7 @@ registry-like payload shapes; this module only persists and restores them.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +15,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ._db_util import json_dumps, parse_dt
+
+log = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -52,6 +55,11 @@ def release_scheduler_lock(session: Session) -> None:
     """释放由 try_acquire_scheduler_lock 获取的 session 级 advisory lock。
 
     调用失败不抛异常——释放是 best-effort，session 关闭时 Postgres 也会自动释放。
+    M-A3-3 修复：历史 ``except Exception: pass`` 静默吞异常，当 DB 抖动 /
+    transaction 已 abort / 连接被 reset 时释放失败的信号就彻底丢了，但这种
+    场景又恰是 scheduler 互斥状态最容易混乱的时候（多个 scheduler 同时去
+    抢同一把锁、锁被谁持有变得不可观测）。改为 warning 级别打印异常类型，
+    依然不向上抛，保持 best-effort 语义。
     """
     try:
         session.execute(
@@ -59,8 +67,8 @@ def release_scheduler_lock(session: Session) -> None:
             {"key": _SCHEDULER_ADVISORY_LOCK_KEY},
         )
         session.commit()
-    except Exception:  # pragma: no cover - defensive
-        pass
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("advisory lock release failed (scheduler): %s", exc)
 
 
 def try_acquire_release_cycle_lock(session: Session) -> bool:
@@ -81,15 +89,16 @@ def try_acquire_release_cycle_lock(session: Session) -> bool:
 
 
 def release_release_cycle_lock(session: Session) -> None:
-    """释放 release_cycle advisory lock。"""
+    """释放 release_cycle advisory lock。与 release_scheduler_lock 同理，
+    把静默吞异常改成 warning 级可观测。"""
     try:
         session.execute(
             text("SELECT pg_advisory_unlock(:key)"),
             {"key": _RELEASE_CYCLE_ADVISORY_LOCK_KEY},
         )
         session.commit()
-    except Exception:  # pragma: no cover - defensive
-        pass
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("advisory lock release failed (release_cycle): %s", exc)
 
 
 def _with_payload(payload: Any, **fields: Any) -> dict[str, Any]:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import logging
 from datetime import datetime, timezone
@@ -183,7 +184,18 @@ def _build_observation_queue(
         if not release_id:
             continue
         observation_status = str(release.get("observation_status") or "unknown")
-        if observation_status not in {"observing", "rollback_recommended", "completed", "not_started"}:
+        # M-A2-4 修复：白名单要覆盖前端 OBSERVATION_STATUS_LABELS 里的全部有效
+        # 状态，否则像 "rolled_back"（前端已经有展示标签"已回滚"）会被这里静
+        # 默丢弃，dashboard 的观察队列看不到已回滚发布，运营者就失去了"刚发
+        # 生了一次回滚"的可见信号。保留 "unknown" 跳过，避免脏数据污染 UI。
+        if observation_status not in {
+            "pending",
+            "observing",
+            "rollback_recommended",
+            "completed",
+            "not_started",
+            "rolled_back",
+        }:
             continue
 
         from aats.data_platform.production_workflow.observation_window import (
@@ -225,19 +237,28 @@ def _build_observation_queue(
             "is_current_active_release": is_current_active_release,
         })
 
-    queue.sort(
-        key=lambda item: (
-            {"rollback_recommended": 0, "observing": 1, "completed": 2, "not_started": 3}.get(
-                str(item.get("observation_status") or ""), 9,
-            ),
-            -(
-                _parse_iso_datetime(item.get("created_at")).timestamp()
-                if _parse_iso_datetime(item.get("created_at")) is not None
-                else 0
-            ),
-        ),
-        reverse=False,
-    )
+    def _observation_sort_key(item: dict[str, Any]) -> tuple[int, float]:
+        status = str(item.get("observation_status") or "")
+        status_priority = {
+            "rollback_recommended": 0,
+            "observing": 1,
+            "pending": 2,
+            "not_started": 3,
+            "completed": 4,
+            "rolled_back": 5,
+        }.get(status, 9)
+        parsed = _parse_iso_datetime(item.get("created_at"))
+        if parsed is None:
+            return (status_priority, 0.0)
+        # Windows 上 datetime.timestamp() 对 1970-01-01 之前的时间会抛 OSError。
+        # 实际业务数据里 created_at 都是发布当下的时间戳（近期），理论上不会撞
+        # 这条边界；但以防 mock / 回填数据越过阈值破坏排序，加一层 guard。
+        try:
+            return (status_priority, -parsed.timestamp())
+        except (OSError, ValueError, OverflowError):
+            return (status_priority, 0.0)
+
+    queue.sort(key=_observation_sort_key, reverse=False)
     return queue
 
 
@@ -492,13 +513,18 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     # 重复 DB/文件 IO，数据还完全一样。在 request.state 上做 per-request
     # memoize：key 用固定常量即可，因为 request 本身就是天然隔离边界。
     #
+    # M-A2-3 加强：返回的是深拷贝而不是引用。否则如果某个下游 builder（或
+    # 未来的维护者）不小心对返回的 dict 做 setitem / update，后续 builder
+    # 会读到被污染的 cache 值。deepcopy 一次 summary 约 1–10ms，远低于我们
+    # 省掉的多次 DB/文件 IO（50–500ms），划算。
+    #
     # 注意：单元测试常用 SimpleNamespace mock request，没有 ``state`` 属性。
     # getattr(request, "state", None) 先拿，再从里面取 cache，测试场景下拿不到
     # 就当 cache miss，继续走正常路径。
     request_state = getattr(request, "state", None)
     cached = getattr(request_state, "_rdp_control_summary_cache", None) if request_state is not None else None
     if cached is not None:
-        return cached
+        return copy.deepcopy(cached)
 
     root = _project_root(request)
     environment = _environment_summary()
@@ -620,6 +646,11 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     try:
         decision_round = query_latest_decision_round(root)
         if decision_round.get("available"):
+            # decision_round 的 round_id 是"本 round 的所有 phase2 结论"的共同
+            # 追溯锚。evidence_bundle / phase2 卡片需要显示这个 round_id 才能形
+            # 成完整的证据链；如果每条结论本身也带了 source_round_id（例如从
+            # 跨 round 汇总合成的视图），优先用条目级的细粒度值。
+            decision_round_id = decision_round.get("round_id")
             conclusions = [
                 item
                 for item in (decision_round.get("family_timeframe_decisions") or [])
@@ -634,6 +665,10 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
                     "confidence": item.get("confidence"),
                     "reasons": item.get("reasons", []),
                     "signal_summary": item.get("signal_summary", {}),
+                    # 把 round_id 随每条结论下发，下游 evidence digest 读到的
+                    # phase2 就能直接拿到 round 追溯锚，不用再回头 join。
+                    "source_round_id": item.get("source_round_id") or decision_round_id,
+                    "round_id": item.get("round_id") or decision_round_id,
                 }
                 for item in conclusions
             ]
@@ -761,7 +796,10 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "observation_queue": observation_queue,
     }
     try:
-        request.state._rdp_control_summary_cache = result
+        # 存 deepcopy，这样后续调用方即便拿到本次返回值做了原地修改，下一个
+        # cache 读者也是从干净的拷贝开始。代价是多一次 deepcopy，收益是把
+        # "cache 不可变" 写死成函数契约。
+        request.state._rdp_control_summary_cache = copy.deepcopy(result)
     except Exception:
         # Starlette Request.state 是 State()，setattr 总能成功；极少数 mock
         # request 不支持 setattr，吞掉并回退到 no-cache 语义。

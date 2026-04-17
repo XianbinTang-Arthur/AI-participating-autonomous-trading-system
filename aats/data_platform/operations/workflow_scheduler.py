@@ -252,7 +252,22 @@ def _current_bootstrap_stage(
     initialized_at = _parse_iso_dt(state.get("initialized_at"))
     if initialized_at is None:
         return None
-    if state.get("bootstrap_completed_at") and not state.get("bootstrap_stage"):
+
+    # M-A3-1 修复：``bootstrap_completed_at`` 和 ``bootstrap_stage`` 是互斥的两个
+    # 状态——要么 bootstrap 已完成（completed_at 有值，stage 为 None），要么正
+    # 在某一阶段（stage 有值，completed_at 为 None）。但如果因为旧代码 bug /
+    # 人工编辑 / 文件被 race 改过，两个字段同时有值，应该以 completed_at 为
+    # 权威信号：bootstrap 既然已经完成，绝不能再触发一次（否则 data_maintenance
+    # 会被重复入队）。这里强制清理 stage 并短路返回 None。
+    if state.get("bootstrap_completed_at"):
+        if state.get("bootstrap_stage"):
+            log.warning(
+                "scheduler state inconsistent: bootstrap_completed_at=%s 与 bootstrap_stage=%s "
+                "同时存在，以 completed_at 为权威，清空 stage",
+                state.get("bootstrap_completed_at"),
+                state.get("bootstrap_stage"),
+            )
+            state["bootstrap_stage"] = None
         return None
 
     workflows_state = state.setdefault("workflows", {})

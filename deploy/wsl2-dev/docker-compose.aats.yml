@@ -138,7 +138,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "if [ -n \"$AATS_OPERATOR_TLS_CERT_FILE\" ] && [ -n \"$AATS_OPERATOR_TLS_KEY_FILE\" ]; then curl -kfs https://localhost:${AATS_API_PORT:-8000}/healthz; else curl -fs http://localhost:${AATS_API_PORT:-8000}/healthz; fi",
+          "if [ -n \"$$AATS_OPERATOR_TLS_CERT_FILE\" ] && [ -n \"$$AATS_OPERATOR_TLS_KEY_FILE\" ]; then curl -kfs https://localhost:${AATS_API_PORT:-8000}/healthz; else curl -fs http://localhost:${AATS_API_PORT:-8000}/healthz; fi",
         ]
       interval: 15s
       timeout: 5s
