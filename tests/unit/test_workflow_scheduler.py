@@ -405,6 +405,93 @@ def test_scheduler_bootstrap_blocks_when_data_maintenance_failed(tmp_path: Path)
     assert "bootstrap_completed_at" not in state or state.get("bootstrap_completed_at") is None
 
 
+def test_scheduler_bootstrap_emits_warning_when_stage_failed(tmp_path: Path) -> None:
+    """M2 回归：bootstrap 阶段最近一次任务 failed 时，report.warnings 必须出现告警。
+
+    bootstrap 只认 status=done，failed 任务既不会推进阶段、也不会自动撤回。
+    必须让运营者通过 API report 的 warnings 字段看到"卡在失败任务"的信号，
+    否则系统会安静地永远停在该阶段。
+    """
+    _write_state(
+        tmp_path,
+        {
+            "initialized_at": "2026-04-16T12:00:00+00:00",
+            "bootstrap_stage": "data_maintenance",
+            "workflows": {
+                "data_maintenance": {"last_action": "bootstrap_enqueued"},
+                "research_cycle": {"last_action": "bootstrap_pending"},
+            },
+        },
+    )
+    now = datetime(2026, 4, 16, 12, 40, tzinfo=UTC)
+    schedules = {
+        "data_maintenance": {"enabled": True, "frequency": "daily", "hour_utc": 4, "minute_utc": 0},
+        "research_cycle": {
+            "enabled": True,
+            "frequency": "weekly",
+            "weekday_utc": "SUN",
+            "hour_utc": 8,
+            "minute_utc": 0,
+        },
+    }
+
+    def _latest_task(_session, workflow, **kwargs):
+        requested_statuses = kwargs.get("statuses") or ()
+        if workflow == "data_maintenance" and "done" not in requested_statuses:
+            # 查"任意状态"时返回 failed 任务 —— 触发 warning 路径
+            return {
+                "task_id": "task_failed_boot_42",
+                "status": "failed",
+                "error_message": "okx fetch timeout",
+                "finished_at": "2026-04-16T12:30:00+00:00",
+            }
+        # 查 done 过滤时返回 None（表示 bootstrap 尚未完成）
+        return None
+
+    with (
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.list_available_workflows",
+            return_value=list(schedules.keys()),
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.load_workflow_config",
+            side_effect=lambda _root, workflow: {"schedule": schedules[workflow]},
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.guard_workflow_execution",
+            return_value=type("Guard", (), {"allowed": True, "reason": None})(),
+        ),
+        patch("aats.data_platform.db.get_session", _fake_session),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_get_latest_task_for_workflow",
+            side_effect=_latest_task,
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_has_active_task",
+            return_value=None,
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_create_task",
+            return_value="task_bootstrap_data_retry",
+        ),
+    ):
+        result = enqueue_due_workflows(
+            tmp_path, now=now, save_state=True, initialize_if_missing=False
+        )
+
+    warnings = result.get("warnings") or []
+    failure_warnings = [w for w in warnings if w.get("workflow") == "data_maintenance"]
+    assert failure_warnings, "failed 任务必须在 report.warnings 中暴露为运营信号"
+    warning = failure_warnings[0]
+    assert "失败" in warning.get("reason", ""), "warning.reason 必须说明是失败原因"
+    assert warning.get("task_id") == "task_failed_boot_42"
+    assert warning.get("error_message") == "okx fetch timeout"
+    # 同时验证该阶段仍然被重新入队（warning 不能阻断重试，
+    # 否则运营者看到告警但 workflow 没有任何进一步尝试）
+    enqueued_workflows = [item["workflow"] for item in result["enqueued"]]
+    assert "data_maintenance" in enqueued_workflows
+
+
 def test_scheduler_bootstrap_blocks_when_research_cycle_failed(tmp_path: Path) -> None:
     """回归：data_maintenance 已完成、research_cycle 上一次 failed 时，bootstrap 不能
     误标"bootstrap_completed_at"，也不能放行非 bootstrap workflow。

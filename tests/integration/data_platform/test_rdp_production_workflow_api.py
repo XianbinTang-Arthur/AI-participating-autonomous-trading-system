@@ -714,3 +714,194 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             after_rollback["active_parameters"]["independent_15m"]["parameter_set_id"]
             == "ps_live_0"
         )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  H1 回归：Step2 快照不完整时 server-side 审批门闸（tuning / recommendation）
+# ══════════════════════════════════════════════════════════════════
+#
+# 回归原因：之前 UI 把 action.enabled 标为 False 只能阻止按钮点击，任何绕过 UI
+# 的调用（curl / 脚本 / 重放）都能把 blocked 提案批准下去。必须在 server 端
+# 重新做同样的 gate，且 reject 路径不应被门闸阻断，否则运营者无法清理脏提案。
+
+
+def test_tuning_approve_blocked_when_step2_snapshot_incomplete(tmp_path) -> None:
+    """Step2 快照不完整时，tuning 提案 approve 必须被 server 端直接拒绝。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(
+        root,
+        proposals=[
+            {
+                "proposal_id": "tprop_gated_1",
+                "created_at": "2026-04-16T12:00:00Z",
+                "combo_key": "directional_1h",
+                "family": "directional",
+                "timeframe": "1h",
+                "parameter": "min_safe_net_edge_bps",
+                "current_value": 2.0,
+                "proposed_value": 1.5,
+                "status": "pending_review",
+                "rationale": "seed",
+            },
+        ],
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+        # 让两条路径的 snapshot 查询都返回"不完整"
+        patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value={"round_id": "round_step2_dirty", "manifest_synthesized": True},
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+            return_value=True,
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/tuning/proposals/tprop_gated_1/approve",
+            json={"actor": "operator", "notes": "bypass attempt"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False, "Step2 不完整时 approve 必须被拒绝"
+    assert payload.get("integrity_blocked") is True, \
+        "必须通过 integrity_blocked=True 让调用方区分完整性阻断和其他失败"
+    assert "不完整" in payload["message"]
+    # 提案状态不能被偷偷改写
+    assert payload["proposal"]["status"] == "pending_review"
+
+
+def test_tuning_reject_still_allowed_when_step2_snapshot_incomplete(tmp_path) -> None:
+    """reject 永远不受 integrity gate 限制——运营者必须能清理队列里过期/脏的提案。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(
+        root,
+        proposals=[
+            {
+                "proposal_id": "tprop_reject_gated_1",
+                "created_at": "2026-04-16T12:00:00Z",
+                "combo_key": "directional_1h",
+                "family": "directional",
+                "timeframe": "1h",
+                "parameter": "min_safe_net_edge_bps",
+                "current_value": 2.0,
+                "proposed_value": 1.5,
+                "status": "pending_review",
+                "rationale": "seed",
+            },
+        ],
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value={"round_id": "round_step2_dirty", "manifest_synthesized": True},
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+            return_value=True,
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/tuning/proposals/tprop_reject_gated_1/reject",
+            json={"actor": "operator", "notes": "清理过期"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, "reject 不受 Step2 完整性门闸限制"
+    assert payload["proposal"]["status"] == "rejected"
+
+
+def test_recommendation_approve_blocked_when_step2_snapshot_incomplete(tmp_path) -> None:
+    """Step2 快照不完整时，recommendation approve 也必须被 server 端直接拒绝。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    (root / "artifacts" / "decision_system").mkdir(parents=True, exist_ok=True)
+    (root / "artifacts" / "decision_system" / "recommendation_registry.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-16T11:50:00Z",
+                "version": 1,
+                "recommendations": [
+                    {
+                        "recommendation_id": "rec_gated_1",
+                        "created_at": "2026-04-16T11:55:00Z",
+                        "family": "independent",
+                        "symbol": "BTC-USDT-SWAP",
+                        "timeframe": "15m",
+                        "recommendation_type": "parameter_upgrade",
+                        "target_parameter_set_id": "ps_candidate_1",
+                        "confidence": "high",
+                        "status": "draft",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value={"round_id": "round_step2_dirty", "manifest_synthesized": True},
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+            return_value=True,
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_gated_1/approve",
+            json={"actor": "operator", "notes": "bypass attempt"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload.get("integrity_blocked") is True
+    assert "不完整" in payload["message"]
+
+    # 验证 recommendation_registry.json 里状态仍然是 draft，没有被写为 approved
+    registry_contents = json.loads(
+        (root / "artifacts/decision_system/recommendation_registry.json").read_text(
+            encoding="utf-8",
+        )
+    )
+    recs = registry_contents.get("recommendations", [])
+    assert recs and recs[0]["status"] == "draft", \
+        "Integrity gate 必须阻止 registry 被 approve"

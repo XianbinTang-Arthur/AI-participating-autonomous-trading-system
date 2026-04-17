@@ -68,16 +68,25 @@ def load_scheduler_state(project_root: Path) -> dict[str, Any]:
                 engine.dispose()
 
     path = _state_path(project_root)
+    empty_state = {
+        "generated_at": None,
+        "initialized_at": None,
+        "bootstrap_stage": None,
+        "bootstrap_completed_at": None,
+        "workflows": {},
+    }
     if not path.exists():
-        return {"generated_at": None, "initialized_at": None, "workflows": {}}
+        return dict(empty_state)
     try:
         with path.open(encoding="utf-8") as handle:
             payload = json.load(handle)
     except (json.JSONDecodeError, OSError):
-        return {"generated_at": None, "initialized_at": None, "workflows": {}}
+        return dict(empty_state)
     if not isinstance(payload, dict):
-        return {"generated_at": None, "initialized_at": None, "workflows": {}}
+        return dict(empty_state)
     payload.setdefault("workflows", {})
+    payload.setdefault("bootstrap_stage", None)
+    payload.setdefault("bootstrap_completed_at", None)
     return payload
 
 
@@ -384,11 +393,19 @@ def _run_bootstrap_sequence(
     initialized_at = _parse_iso_dt(state.get("initialized_at"))
     from aats.data_platform.db import get_session
 
+    # 一次 session 内同时查"最近 done"和"最近任意状态"，前者驱动门控推进，
+    # 后者用于 bootstrap 卡 failed 时的告警——failed 任务不会满足 done 过滤器，
+    # 导致 bootstrap 永远停在该阶段（除非人工干预），必须让运营者能看到。
     with get_session() as session:
         latest_success = db_get_latest_task_for_workflow(
             session,
             stage,
             statuses=("done",),
+            requested_after=initialized_at,
+        )
+        latest_any = db_get_latest_task_for_workflow(
+            session,
+            stage,
             requested_after=initialized_at,
         )
 
@@ -433,10 +450,35 @@ def _run_bootstrap_sequence(
         )
         return True
 
-    log.info(
+    # 每次 tick 都会走到这里，INFO 会淹没日志 → 降级为 DEBUG。
+    # 阶段推进和 bootstrap 收尾的两条 INFO 保留，确保状态变化可观测。
+    log.debug(
         "scheduler bootstrap: 当前阶段 %s 等待完成，其它 workflow 全部被门控 (dry_run=%s)",
         stage, dry_run,
     )
+
+    # bootstrap 只认 status=done。若最近一条任务是 failed，阶段会被无限卡住，
+    # 必须让运营者通过 API report 看到并手工介入。这里只记录告警，不自动放行，
+    # 避免 failed 任务的坏数据污染下游 governance 链路。
+    if latest_any is not None and str(latest_any.get("status")) == "failed":
+        warnings = report.setdefault("warnings", [])
+        warning_entry = {
+            "workflow": stage,
+            "reason": "bootstrap 阶段最近一次任务失败，需人工介入",
+            "task_id": latest_any.get("task_id"),
+            "error_message": latest_any.get("error_message"),
+            "finished_at": latest_any.get("finished_at"),
+        }
+        warnings.append(warning_entry)
+        log.warning(
+            "scheduler bootstrap: 阶段 %s 最近一次任务失败 task_id=%s error=%s",
+            stage,
+            latest_any.get("task_id"),
+            latest_any.get("error_message"),
+        )
+        workflow_state["last_reason"] = (
+            f"bootstrap 阶段最近一次任务失败 task_id={latest_any.get('task_id')}"
+        )
     _enqueue_single_workflow(
         workflow_name=stage,
         schedule=schedule,

@@ -81,6 +81,34 @@ def _project_root(request: Request) -> Path:
     return Path(".").resolve()
 
 
+def _step2_integrity_blocking_reason(project_root: Path) -> str | None:
+    """Step2 快照不完整时返回阻断原因；完整返回 None。
+
+    server-side 的统一完整性门闸，与 _build_workbench_alerts_payload /
+    _build_tuning_proposals_payload 检测 step2_manifest_missing 的语义一致。
+    前端把 UI action enabled 标为 False 只是装饰，任何绕过 UI 的调用都必须在
+    server 端再做一次同样的 gate。查询失败时 fail-closed —— 此时 governance
+    DB 不可达，继续写入真源没有 safety 保证。
+    """
+    try:
+        from aats.data_platform.governance.snapshot_db import (
+            ROUND_PHASE_STEP2,
+            is_snapshot_incomplete,
+            load_latest_research_round_snapshot,
+        )
+
+        snapshot = load_latest_research_round_snapshot(
+            phase=ROUND_PHASE_STEP2,
+            project_root=project_root,
+        )
+    except Exception as exc:
+        return f"Step2 快照查询失败，无法校验完整性: {exc}"
+
+    if is_snapshot_incomplete(snapshot):
+        return "Step2 研究快照不完整，当前轮次不能据此做正式审批"
+    return None
+
+
 
 # ══════════════════════════════════════════════════════════════════
 #  只读端点（Operator 观察面）
@@ -292,6 +320,18 @@ async def approve_recommendation_api(
     )
 
     root = _project_root(request)
+
+    # Server-side integrity gate：Step2 快照不完整时拒绝审批，避免 UI-only
+    # 禁用按钮被 curl / 脚本 / 重放请求绕过。reject 不受此门闸影响，运营者
+    # 仍需要能清理掉 draft 里过期/脏的 recommendation。
+    blocking_reason = _step2_integrity_blocking_reason(root)
+    if blocking_reason is not None:
+        return {
+            "ok": False,
+            "message": blocking_reason,
+            "integrity_blocked": True,
+        }
+
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
     registry = load_recommendation_registry(reg_path)
 
@@ -703,13 +743,24 @@ async def workbench_items_api(request: Request) -> dict[str, Any]:
 
 @rdp_router.get("/workbench/items/{combo_key}", dependencies=[Depends(require_read_access)])
 async def workbench_item_detail_api(request: Request, combo_key: str) -> dict[str, Any]:
-    """RDP 单个 combo 的当前处理详情。"""
+    """RDP 单个 combo 的当前处理详情。
+
+    状态：a5218fb 预留的 detail drawer 接口，当前前端 store.js 未注册消费者，
+    仅可通过 curl 手动调试。前端接入 drawer 时把 ``/rdp/workbench/items/{combo_key}``
+    加入 viewSpecs 即可复用 payload-building 逻辑。集成测试
+    ``test_workbench_detail_routes_expose_evidence_and_integrity_block`` 仍对
+    integrity gate 做回归保护。
+    """
     return build_rdp_workbench_item_detail(request, combo_key)
 
 
 @rdp_router.get("/workbench/evidence/{combo_key}", dependencies=[Depends(require_read_access)])
 async def workbench_item_evidence_api(request: Request, combo_key: str) -> dict[str, Any]:
-    """RDP 单个 combo 的证据钻取摘要。"""
+    """RDP 单个 combo 的证据钻取摘要。
+
+    状态：与 ``/workbench/items/{combo_key}`` 同为 a5218fb 预留接口，前端尚未
+    接入。保留原因是 integrity gate 的回归测试依赖它，且前端接入成本低。
+    """
     return build_rdp_workbench_item_evidence(request, combo_key)
 
 

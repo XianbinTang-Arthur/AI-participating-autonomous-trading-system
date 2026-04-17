@@ -194,6 +194,12 @@ def db_list_workflow_runs(
     ]
 
 
+# sentinel workflow 名，用于在 workflow_scheduler_state 表里存放根级
+# scheduler meta（bootstrap_stage / bootstrap_completed_at）。
+# 选带双下划线前后缀的名字避免与真实 workflow 冲突。
+_SCHEDULER_META_WORKFLOW = "__scheduler_meta__"
+
+
 def db_load_scheduler_state(session: Session) -> dict[str, Any]:
     rows = session.execute(
         text(
@@ -207,8 +213,22 @@ def db_load_scheduler_state(session: Session) -> dict[str, Any]:
     ).fetchall()
     workflows: dict[str, Any] = {}
     initialized_at: str | None = None
+    bootstrap_stage: str | None = None
+    bootstrap_completed_at: str | None = None
     for row in rows:
-        workflows[str(row.workflow)] = _with_payload(
+        workflow_name = str(row.workflow)
+        if workflow_name == _SCHEDULER_META_WORKFLOW:
+            # meta 行：bootstrap 字段提到根级，不参与 workflows 归类，也不参与
+            # initialized_at 聚合。state_payload 里可能是 dict，容错成 {}。
+            payload = row.state_payload if isinstance(row.state_payload, dict) else {}
+            stage_value = payload.get("bootstrap_stage")
+            completed_value = payload.get("bootstrap_completed_at")
+            if isinstance(stage_value, str) and stage_value:
+                bootstrap_stage = stage_value
+            if isinstance(completed_value, str) and completed_value:
+                bootstrap_completed_at = completed_value
+            continue
+        workflows[workflow_name] = _with_payload(
             row.state_payload,
             last_processed_slot=(
                 row.last_processed_slot.isoformat() if row.last_processed_slot else None
@@ -226,6 +246,8 @@ def db_load_scheduler_state(session: Session) -> dict[str, Any]:
     return {
         "generated_at": _utcnow().isoformat(),
         "initialized_at": initialized_at,
+        "bootstrap_stage": bootstrap_stage,
+        "bootstrap_completed_at": bootstrap_completed_at,
         "workflows": workflows,
     }
 
@@ -270,6 +292,35 @@ def db_save_scheduler_state(session: Session, state: dict[str, Any]) -> None:
                 "updated_at": _utcnow(),
             },
         )
+
+    # 持久化根级 scheduler meta（bootstrap 状态）。即使两个字段都是 None 也要
+    # upsert，否则"已完成 bootstrap 后状态被清理"的语义无法表达。
+    meta_payload = {
+        "bootstrap_stage": state.get("bootstrap_stage"),
+        "bootstrap_completed_at": state.get("bootstrap_completed_at"),
+    }
+    session.execute(
+        text(
+            """
+            INSERT INTO governance.workflow_scheduler_state
+                (workflow, initialized_at, last_processed_slot, last_action,
+                 last_checked_at, last_task_id, last_reason, schedule,
+                 state_payload, updated_at)
+            VALUES
+                (:workflow, NULL, NULL, NULL,
+                 NULL, NULL, NULL, NULL,
+                 CAST(:state_payload AS jsonb), :updated_at)
+            ON CONFLICT (workflow) DO UPDATE SET
+                state_payload = EXCLUDED.state_payload,
+                updated_at = EXCLUDED.updated_at
+            """
+        ),
+        {
+            "workflow": _SCHEDULER_META_WORKFLOW,
+            "state_payload": json_dumps(meta_payload),
+            "updated_at": _utcnow(),
+        },
+    )
 
 
 def db_upsert_pre_apply_gate_result(session: Session, result: dict[str, Any]) -> None:
