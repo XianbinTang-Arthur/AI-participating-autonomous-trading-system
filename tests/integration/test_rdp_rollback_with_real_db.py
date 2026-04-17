@@ -347,14 +347,26 @@ class TestRollbackWithRealDb(unittest.TestCase):
         """Call rollback_active_parameter_set with get_session patched to the
         test container's engine and the env guard forced to allow.
         """
+        import contextlib
         from sqlalchemy.orm import Session
 
         from aats.data_platform.decision_system.active_parameter_apply import (
             rollback_active_parameter_set,
         )
 
-        def _make_session() -> Session:
-            return Session(self.engine)  # type: ignore[arg-type]
+        @contextlib.contextmanager
+        def _make_session():
+            # 镜像 aats.data_platform.db.get_session 的 commit/rollback/close 语义，
+            # 否则生产代码里的 with get_session() 退出时不会把变更落库。
+            session = Session(self.engine)  # type: ignore[arg-type]
+            try:
+                yield session
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
 
         guard_ok = SimpleNamespace(allowed=True, reason="")
         with (
