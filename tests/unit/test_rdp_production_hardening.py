@@ -476,3 +476,145 @@ def test_build_gate_context_includes_runtime_contract(tmp_path: Path) -> None:
     assert ctx["current_alerts"] == runtime_contract["current_alerts"]
     assert ctx["latest_workflow_runs"] == runtime_contract["latest_workflow_runs"]
     assert ctx["live_db_health"] == runtime_contract["live_db_health"]
+
+
+# ── P0-2 阶段 C：DB 为单一真源，写失败 → 拒绝 apply；JSON 导出由 flag 控制 ──
+
+
+def _ok_rule(_ctx: dict) -> object:
+    from aats.data_platform.production_workflow.gate_rules import GateCheckResult
+
+    return GateCheckResult(
+        name="ok_rule",
+        category="test",
+        passed=True,
+        severity="pass",
+        detail="ok",
+    )
+
+
+def test_run_pre_apply_gate_db_failure_blocks_apply(tmp_path: Path) -> None:
+    """DB 不可达时 gate 必须拒绝 apply，不得静默返回 pass."""
+
+    with (
+        patch.dict(os.environ, {"RDP_ENV": "dev"}, clear=False),
+        patch(
+            "aats.data_platform.production_workflow.pre_apply_gate.try_governance_db",
+            return_value=(None, False),
+        ),
+    ):
+        result = run_pre_apply_gate(
+            tmp_path,
+            "rec_db_down",
+            rules=[_ok_rule],
+            save_result=True,
+        )
+
+    assert result["allow_apply"] is False
+    assert result["gate_status"] == "error"
+    assert any(
+        "gate_persistence" in reason for reason in result["blocking_reasons"]
+    )
+
+
+def test_run_pre_apply_gate_db_exception_blocks_apply(tmp_path: Path) -> None:
+    """DB 可达但写入异常时同样拒绝 apply."""
+
+    class _BoomEngine:
+        def dispose(self) -> None:
+            return None
+
+    def _boom_record(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("db boom")
+
+    with (
+        patch.dict(os.environ, {"RDP_ENV": "dev"}, clear=False),
+        patch(
+            "aats.data_platform.production_workflow.pre_apply_gate.try_governance_db",
+            return_value=(_BoomEngine(), True),
+        ),
+        patch(
+            "aats.data_platform.governance.operational_state_db.db_record_gate_result",
+            side_effect=_boom_record,
+        ),
+    ):
+        result = run_pre_apply_gate(
+            tmp_path,
+            "rec_db_exc",
+            rules=[_ok_rule],
+            save_result=True,
+        )
+
+    assert result["allow_apply"] is False
+    assert result["gate_status"] == "error"
+    assert any("db boom" in reason for reason in result["blocking_reasons"])
+
+
+def test_run_pre_apply_gate_json_export_disabled_by_default(tmp_path: Path) -> None:
+    """默认不再写 JSON / Markdown 副本——artifacts/gates/ 必须保持空."""
+
+    class _OKEngine:
+        def dispose(self) -> None:
+            return None
+
+    env = {k: v for k, v in os.environ.items() if k != "AATS_P0_GATE_JSON_EXPORT"}
+    env["RDP_ENV"] = "dev"
+
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch(
+            "aats.data_platform.production_workflow.pre_apply_gate.try_governance_db",
+            return_value=(_OKEngine(), True),
+        ),
+        patch(
+            "aats.data_platform.governance.operational_state_db.db_record_gate_result",
+            return_value=None,
+        ),
+    ):
+        result = run_pre_apply_gate(
+            tmp_path,
+            "rec_no_export",
+            rules=[_ok_rule],
+            save_result=True,
+        )
+
+    assert result["allow_apply"] is True
+    assert result["gate_status"] == "pass"
+    gates_dir = tmp_path / "artifacts" / "production_workflow" / "gates"
+    assert not gates_dir.exists() or not list(gates_dir.iterdir())
+
+
+def test_run_pre_apply_gate_json_export_enabled_by_flag(tmp_path: Path) -> None:
+    """AATS_P0_GATE_JSON_EXPORT=on 时继续导出 JSON + Markdown 副本."""
+
+    class _OKEngine:
+        def dispose(self) -> None:
+            return None
+
+    env = {k: v for k, v in os.environ.items()}
+    env["RDP_ENV"] = "dev"
+    env["AATS_P0_GATE_JSON_EXPORT"] = "on"
+
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch(
+            "aats.data_platform.production_workflow.pre_apply_gate.try_governance_db",
+            return_value=(_OKEngine(), True),
+        ),
+        patch(
+            "aats.data_platform.governance.operational_state_db.db_record_gate_result",
+            return_value=None,
+        ),
+    ):
+        result = run_pre_apply_gate(
+            tmp_path,
+            "rec_export_on",
+            rules=[_ok_rule],
+            save_result=True,
+        )
+
+    assert result["allow_apply"] is True
+    gate_run_id = result["gate_run_id"]
+    gate_dir = tmp_path / "artifacts" / "production_workflow" / "gates" / gate_run_id
+    assert (gate_dir / "pre_apply_gate_result.json").exists()
+    assert (gate_dir / "pre_apply_gate_report.md").exists()

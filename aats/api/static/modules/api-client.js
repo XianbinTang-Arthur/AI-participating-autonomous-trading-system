@@ -82,7 +82,23 @@ export async function requestJson(path, options = {}) {
         typeof payload === "object" && payload !== null && "detail" in payload
           ? payload.detail
           : text || response.statusText;
-      throw new Error(localizeError(typeof detail === "string" ? detail : JSON.stringify(detail)));
+      // RDP 阶段 B：approve/reject/supersede 在 409/404 时返回
+      //   HTTPException(detail={"ok": false, "message": "...", "current_status": ...})
+      // 给 operator 看到的应当是中文 `message`，不是裸 JSON。
+      let errorText;
+      if (typeof detail === "string") {
+        errorText = detail;
+      } else if (
+        detail !== null &&
+        typeof detail === "object" &&
+        typeof detail.message === "string" &&
+        detail.message.length > 0
+      ) {
+        errorText = detail.message;
+      } else {
+        errorText = JSON.stringify(detail);
+      }
+      throw new Error(localizeError(errorText));
     }
     return payload;
   } finally {

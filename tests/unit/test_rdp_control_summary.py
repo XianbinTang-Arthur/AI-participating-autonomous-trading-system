@@ -1631,3 +1631,124 @@ class TestRdpControlSummary(TestCase):
         self.assertTrue(any("执行中 3 条" in message and "失败 315 条" in message for message in messages))
         self.assertFalse(any("current_alerts.json not found" in message for message in messages))
         self.assertIn("当前还没有已生效的实盘参数。先完成治理结论，再决定是否发布。", messages)
+
+
+# ── P0-2 阶段 D：_load_recent_gate_results 只读 DB，失败要喊出来 ────────
+
+
+class TestLoadRecentGateResultsDBOnly(TestCase):
+    def test_returns_rows_from_db(self) -> None:
+        class _OKEngine:
+            def dispose(self) -> None:
+                return None
+
+        payload = {
+            "gate_run_id": "gate_demo",
+            "recommendation_id": "rec_demo",
+            "created_at": "2026-04-10T10:00:00Z",
+            "gate_status": "pass",
+            "allow_apply": True,
+            "blocking_reasons": [],
+            "warnings": [],
+            "checks": [],
+        }
+
+        with (
+            patch(
+                "aats.api.rdp_control_summary.try_governance_db",
+                return_value=(_OKEngine(), True),
+            ),
+            patch(
+                "aats.data_platform.governance.operational_state_db."
+                "db_list_pre_apply_gate_results",
+                return_value=[payload],
+            ),
+        ):
+            result = rdp_control_summary._load_recent_gate_results(
+                Path("/tmp/nonexistent_project_root")
+            )
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["gate_run_id"], "gate_demo")
+        self.assertTrue(result[0]["allow_apply"])
+
+    def test_raises_when_db_unreachable(self) -> None:
+        with patch(
+            "aats.api.rdp_control_summary.try_governance_db",
+            return_value=(None, False),
+        ):
+            with self.assertRaises(RuntimeError) as cm:
+                rdp_control_summary._load_recent_gate_results(
+                    Path("/tmp/nonexistent_project_root")
+                )
+
+        self.assertIn("governance DB", str(cm.exception))
+
+    def test_raises_on_db_query_exception(self) -> None:
+        class _OKEngine:
+            def dispose(self) -> None:
+                return None
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("connection reset")
+
+        with (
+            patch(
+                "aats.api.rdp_control_summary.try_governance_db",
+                return_value=(_OKEngine(), True),
+            ),
+            patch(
+                "aats.data_platform.governance.operational_state_db."
+                "db_list_pre_apply_gate_results",
+                side_effect=_boom,
+            ),
+        ):
+            with self.assertRaises(RuntimeError) as cm:
+                rdp_control_summary._load_recent_gate_results(
+                    Path("/tmp/nonexistent_project_root")
+                )
+
+        self.assertIn("connection reset", str(cm.exception))
+
+    def test_does_not_scan_artifacts_directory(self, ) -> None:
+        # Even if artifacts/production_workflow/gates exists on disk with JSON
+        # files, they must not be surfaced — DB is the single source of truth.
+        import tempfile
+        import json as _json
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            gates_dir = root / "artifacts" / "production_workflow" / "gates" / "gate_old"
+            gates_dir.mkdir(parents=True)
+            (gates_dir / "pre_apply_gate_result.json").write_text(
+                _json.dumps(
+                    {
+                        "gate_run_id": "gate_old",
+                        "recommendation_id": "rec_old",
+                        "created_at": "2025-01-01T00:00:00Z",
+                        "gate_status": "pass",
+                        "allow_apply": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            class _OKEngine:
+                def dispose(self) -> None:
+                    return None
+
+            with (
+                patch(
+                    "aats.api.rdp_control_summary.try_governance_db",
+                    return_value=(_OKEngine(), True),
+                ),
+                patch(
+                    "aats.data_platform.governance.operational_state_db."
+                    "db_list_pre_apply_gate_results",
+                    return_value=[],
+                ),
+            ):
+                result = rdp_control_summary._load_recent_gate_results(root)
+
+        # DB returned empty; artifact JSON must NOT have been promoted in
+        self.assertEqual(result, [])

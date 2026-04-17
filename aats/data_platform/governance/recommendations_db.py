@@ -216,6 +216,115 @@ def db_update_recommendation_status(
     return updated
 
 
+def db_transition_recommendation_status(
+    session: Session,
+    *,
+    recommendation_id: str,
+    new_status: str,
+    expected_current_status: str | tuple[str, ...] | list[str],
+    actor: str,
+    at: str | datetime | None = None,
+    notes: str | None = None,
+    superseded_by_recommendation_id: str | None = None,
+) -> bool:
+    """状态转移 + CAS 的统一入口，供 approve / reject / supersede handler 使用。
+
+    与 ``db_update_recommendation_status`` 相比，这一版专门面向"状态流转"语义：
+
+    - 调用方不用手动挑 approved_by / rejected_by / superseded_by 字段；传 ``actor``
+      和 ``at``，函数根据 ``new_status`` 自动写入对应列：
+
+      * ``new_status="approved"``  → ``approved_by``、``approved_at``
+      * ``new_status="rejected"``  → ``rejected_by``、``rejected_at``
+      * ``new_status="superseded"``→ ``superseded_by``、``superseded_at``（可选
+        ``superseded_by_recommendation_id``）
+      * 其它 status（如退回 draft）仅更新 ``status``
+
+    - ``expected_current_status`` 是 CAS 守卫：当前状态必须在该集合内 UPDATE
+      才会命中。未命中返回 ``False``，调用方可以把这种情况映射为 HTTP 409。
+
+    Parameters
+    ----------
+    at:
+        操作时间戳；``None`` 时使用当前 UTC 时间。支持 ISO8601 字符串或
+        ``datetime``。
+    notes:
+        可选备注，写入 ``review_notes`` 列。
+
+    Returns
+    -------
+    bool
+        ``True`` 当且仅当 UPDATE ``rowcount > 0``；``False`` 表示 recommendation
+        不存在 或 当前状态不在 ``expected_current_status`` 里（并发竞态 / 非法转移）。
+    """
+    if new_status not in VALID_REC_STATUSES:
+        raise ValueError(
+            f"非法 recommendation status: {new_status!r}，"
+            f"合法值: {sorted(VALID_REC_STATUSES)}"
+        )
+
+    at_value = parse_dt(at) if at is not None else datetime.now(timezone.utc)
+
+    set_parts: list[str] = ["status = :status"]
+    params: dict[str, Any] = {
+        "rec_id": recommendation_id,
+        "status": new_status,
+    }
+
+    if new_status == "approved":
+        set_parts.append("approved_by = :actor")
+        set_parts.append("approved_at = :at")
+        params["actor"] = actor
+        params["at"] = at_value
+    elif new_status == "rejected":
+        set_parts.append("rejected_by = :actor")
+        set_parts.append("rejected_at = :at")
+        params["actor"] = actor
+        params["at"] = at_value
+    elif new_status == "superseded":
+        set_parts.append("superseded_by = :actor")
+        set_parts.append("superseded_at = :at")
+        params["actor"] = actor
+        params["at"] = at_value
+        if superseded_by_recommendation_id is not None:
+            set_parts.append("superseded_by_recommendation_id = :superseded_by_rec_id")
+            params["superseded_by_rec_id"] = superseded_by_recommendation_id
+
+    if notes is not None:
+        set_parts.append("review_notes = :review_notes")
+        params["review_notes"] = notes
+
+    if isinstance(expected_current_status, str):
+        where_status_clause = "status = :expected_status"
+        params["expected_status"] = expected_current_status
+    else:
+        placeholders: list[str] = []
+        for idx, st in enumerate(expected_current_status):
+            key = f"expected_status_{idx}"
+            placeholders.append(f":{key}")
+            params[key] = st
+        where_status_clause = f"status IN ({', '.join(placeholders)})"
+
+    sql = (
+        f"UPDATE governance.recommendations SET {', '.join(set_parts)} "
+        f"WHERE recommendation_id = :rec_id AND {where_status_clause}"
+    )
+    result = session.execute(text(sql), params)
+    updated = result.rowcount > 0
+    if updated:
+        log.info(
+            "DB transition recommendation: %s -> %s (actor=%s)",
+            recommendation_id, new_status, actor,
+        )
+    else:
+        log.warning(
+            "DB transition recommendation miss: %s expected=%s new=%s "
+            "(行不存在或状态已被其他进程抢先改写)",
+            recommendation_id, expected_current_status, new_status,
+        )
+    return updated
+
+
 _REC_SELECT_COLUMNS = """\
 recommendation_id, family, symbol, timeframe,
 recommendation_type, target_parameter_set_id,
@@ -243,6 +352,18 @@ def db_find_recommendation(
     if row is None:
         return None
     return _rec_row_to_dict(row)
+
+
+def db_get_recommendation(
+    session: Session,
+    recommendation_id: str,
+) -> dict[str, Any] | None:
+    """按 recommendation_id 查询单条（``db_find_recommendation`` 的语义别名）。
+
+    新代码（尤其是 rdp_routes.py 的 approve / reject / supersede handler）推荐
+    用这个更直白的名字；``db_find_recommendation`` 保留以兼容已有调用。
+    """
+    return db_find_recommendation(session, recommendation_id)
 
 
 def db_find_recommendations(
@@ -275,6 +396,91 @@ def db_find_recommendations(
     """
     rows = session.execute(text(sql), params).fetchall()
     return [_rec_row_to_dict(r) for r in rows]
+
+
+def _build_recommendations_filter(
+    *,
+    status: str | None,
+    family: str | None,
+    timeframe: str | None,
+    recommendation_type: str | None,
+) -> tuple[str, dict[str, Any]]:
+    """list / count 共用的 WHERE 子句构造。返回 ``(where_clause, params)``。"""
+    where_parts: list[str] = []
+    params: dict[str, Any] = {}
+    if status is not None:
+        where_parts.append("status = :status")
+        params["status"] = status
+    if family is not None:
+        where_parts.append("family = :family")
+        params["family"] = family
+    if timeframe is not None:
+        where_parts.append("timeframe = :timeframe")
+        params["timeframe"] = timeframe.lower()
+    if recommendation_type is not None:
+        where_parts.append("recommendation_type = :rec_type")
+        params["rec_type"] = recommendation_type
+    where_clause = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+    return where_clause, params
+
+
+def db_list_recommendations(
+    session: Session,
+    *,
+    status: str | None = None,
+    family: str | None = None,
+    timeframe: str | None = None,
+    recommendation_type: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """分页列出 recommendations，按 ``created_at DESC`` 排序。
+
+    ``db_find_recommendations`` 的增强版，主要区别：
+
+    - 额外支持 ``recommendation_type`` 过滤
+    - 支持 ``limit`` / ``offset`` 分页，避免把全部 recommendations 一次拉到内存
+    """
+    if limit < 0:
+        raise ValueError(f"limit 必须 >= 0: {limit}")
+    if offset < 0:
+        raise ValueError(f"offset 必须 >= 0: {offset}")
+
+    where_clause, params = _build_recommendations_filter(
+        status=status, family=family, timeframe=timeframe,
+        recommendation_type=recommendation_type,
+    )
+    params["limit"] = limit
+    params["offset"] = offset
+    sql = f"""
+        SELECT {_REC_SELECT_COLUMNS}
+        FROM governance.recommendations
+        {where_clause}
+        ORDER BY created_at DESC
+        LIMIT :limit OFFSET :offset
+    """
+    rows = session.execute(text(sql), params).fetchall()
+    return [_rec_row_to_dict(r) for r in rows]
+
+
+def db_count_recommendations(
+    session: Session,
+    *,
+    status: str | None = None,
+    family: str | None = None,
+    timeframe: str | None = None,
+    recommendation_type: str | None = None,
+) -> int:
+    """统计符合过滤条件的 recommendations 数量（供分页 total 使用）。"""
+    where_clause, params = _build_recommendations_filter(
+        status=status, family=family, timeframe=timeframe,
+        recommendation_type=recommendation_type,
+    )
+    sql = f"SELECT COUNT(*) AS cnt FROM governance.recommendations{where_clause}"
+    row = session.execute(text(sql), params).fetchone()
+    if row is None:
+        return 0
+    return int(row.cnt)
 
 
 def db_load_recommendation_registry(session: Session) -> dict[str, Any]:
