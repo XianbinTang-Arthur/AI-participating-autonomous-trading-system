@@ -269,7 +269,7 @@ approve / reject / supersede handler：
 - [x] P0-2 阶段 A：新增 `db_record_gate_result` / `db_get_latest_gate_result` / `db_list_gate_results_for_recommendation` / `db_list_gate_results_for_release` / `db_get_gate_result_by_run_id` / `db_set_gate_result_release_id`
 - [x] P0-2 阶段 A：单测 7 项，`tests/unit/test_operational_state_db.py` 全绿（10 passed）
 - [x] P0-2 阶段 B：`PreApplyGateResultModel` 加 `release_id` 列；`_migrate_pre_apply_gate_results` 幂等迁移；`db_upsert_pre_apply_gate_result` 带 `COALESCE` on conflict
-- [ ] P0-2 阶段 C：`_save_gate_result` 写顺序倒置 + `AATS_P0_GATE_JSON_EXPORT` flag
-- [ ] P0-2 阶段 D：`_load_recent_gate_results` 去掉 JSON 扫描
+- [x] P0-2 阶段 C：`_save_gate_result` 写顺序倒置；DB 必写、JSON + Markdown 仅在 `AATS_P0_GATE_JSON_EXPORT=on` 时导出；DB 异常 → `gate_status="error", allow_apply=False`（4 条新单测）
+- [x] P0-2 阶段 D：`_load_recent_gate_results` 只读 DB；DB 不可达 / 异常抛出 `RuntimeError`；artifacts JSON 目录彻底退出读路径（4 条新单测）
 - [ ] P0-3 全流程
 - [ ] P0-1 全流程
