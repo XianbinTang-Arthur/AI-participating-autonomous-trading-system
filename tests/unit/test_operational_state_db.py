@@ -30,8 +30,11 @@ class _FakeRow:
 
 
 class _FakeResult:
-    def __init__(self, rows: list[_FakeRow]) -> None:
+    def __init__(self, rows: list[_FakeRow], rowcount: int | None = None) -> None:
         self._rows = rows
+        # rowcount 仿 SQLAlchemy CursorResult：UPDATE / DELETE 返回受影响行数；
+        # SELECT / INSERT 默认不依赖 rowcount，保留 len(rows) 的老语义做兜底。
+        self.rowcount = len(rows) if rowcount is None else rowcount
 
     def fetchall(self) -> list[_FakeRow]:
         return list(self._rows)
@@ -218,6 +221,7 @@ from aats.data_platform.governance.operational_state_db import (
     db_list_gate_results_for_recommendation,
     db_list_gate_results_for_release,
     db_record_gate_result,
+    db_set_gate_result_release_id,
 )
 
 
@@ -250,14 +254,25 @@ class _FakeGateSession:
                 payload_decoded = {}
         else:
             payload_decoded = payload or {}
+
+        existing = self.gates.get(gate_run_id)
+        new_release_id = params.get("release_id")
+        # COALESCE(EXCLUDED.release_id, current) 语义：新参数里 release_id 为 None
+        # 时，保留已有回填值，避免 record 重放把 apply 流程回填的 release_id 清掉。
+        if new_release_id is None and existing is not None:
+            release_id = existing.get("release_id")
+        else:
+            release_id = new_release_id
+
         self.gates[gate_run_id] = {
             "gate_run_id": gate_run_id,
             "recommendation_id": params.get("recommendation_id"),
+            "release_id": release_id,
             "payload": payload_decoded,
             "created_at": params.get("created_at"),
         }
 
-    def _store_release(self, *, release_id: str, gate_result_ref: str) -> None:
+    def _store_release(self, *, release_id: str, gate_result_ref: str | None = None) -> None:
         self.releases[release_id] = {
             "release_id": release_id,
             "gate_result_ref": gate_result_ref,
@@ -269,6 +284,28 @@ class _FakeGateSession:
         if sql.startswith("INSERT INTO governance.pre_apply_gate_results"):
             assert params is not None
             self._store_gate(params)
+            return _FakeResult([])
+
+        if sql.startswith("UPDATE governance.pre_apply_gate_results"):
+            # db_set_gate_result_release_id 的回填 UPDATE —— 匹配上的行才改写，
+            # 没有对应 gate_run_id 时返回 rowcount=0，让上层按"未命中"处理。
+            assert params is not None
+            gate_run_id = params["gate_run_id"]
+            existing = self.gates.get(gate_run_id)
+            if existing is None:
+                return _FakeResult([], rowcount=0)
+            existing["release_id"] = params.get("release_id")
+            return _FakeResult([], rowcount=1)
+
+        if sql.startswith("INSERT INTO governance.parameter_releases"):
+            # 测试 H1 端到端时 save_release_history 会触发此路径；记录 release
+            # 行以便后续 JOIN 查询走真实数据而非 _store_release 手搭的测试桩。
+            assert params is not None
+            release_id = params["release_id"]
+            self.releases[release_id] = {
+                "release_id": release_id,
+                "gate_result_ref": params.get("gate_result_ref"),
+            }
             return _FakeResult([])
 
         if (
@@ -482,3 +519,219 @@ def test_list_gate_results_for_release_empty_when_release_missing() -> None:
     )
     # 没有 release 记录 → JOIN 返回空
     assert db_list_gate_results_for_release(session, release_id="rel_missing") == []
+
+
+# =====================================================================
+# P0-2 阶段 E：release_id 回填 + COALESCE 保护
+# =====================================================================
+# H2：db_set_gate_result_release_id 的直接合同（hit / miss）。
+# M2：db_upsert_pre_apply_gate_result 重放时必须用 COALESCE 保住已有 release_id。
+# H1：release_registry.save_release_history 必须在同一事务里触发回填。
+
+
+def test_set_gate_result_release_id_hit_returns_true() -> None:
+    """有对应 gate_run_id 时 UPDATE 生效，并把 release_id 写进去。"""
+    session = _FakeGateSession()
+    db_record_gate_result(
+        session,
+        _make_gate_result(gate_run_id="gate_hit", recommendation_id="rec_h"),
+    )
+    assert session.gates["gate_hit"]["release_id"] is None, \
+        "初次 record 的 gate 不应该带 release_id（apply 还没发生）"
+
+    updated = db_set_gate_result_release_id(
+        session, gate_run_id="gate_hit", release_id="rel_xyz",
+    )
+    assert updated is True, "命中必须返回 True"
+    assert session.gates["gate_hit"]["release_id"] == "rel_xyz"
+
+
+def test_set_gate_result_release_id_miss_returns_false() -> None:
+    """gate_run_id 不存在时返回 False，不创建孤立行。"""
+    session = _FakeGateSession()
+    db_record_gate_result(
+        session,
+        _make_gate_result(gate_run_id="gate_only", recommendation_id="rec_o"),
+    )
+
+    updated = db_set_gate_result_release_id(
+        session, gate_run_id="gate_absent", release_id="rel_abc",
+    )
+    assert updated is False, "未命中必须返回 False"
+    assert "gate_absent" not in session.gates, \
+        "UPDATE 不命中时绝不能副作用地创建新行"
+    assert session.gates["gate_only"]["release_id"] is None, \
+        "未命中的 UPDATE 不能溅到其它 gate 行"
+
+
+def test_record_gate_result_replay_preserves_backfilled_release_id() -> None:
+    """M2：record 重放时 payload 可以换（gate 重跑），但 release_id
+    一旦被 apply 流程回填过，就不能被一次不带 release_id 的 record 清掉。
+
+    COALESCE(EXCLUDED.release_id, current) 就是这条不变量的 SQL 化身。
+    """
+    session = _FakeGateSession()
+    # 第一次 record：apply 还没发生，release_id 为 None
+    db_record_gate_result(
+        session,
+        _make_gate_result(gate_run_id="gate_coalesce", recommendation_id="rec_c"),
+    )
+    # apply 成功后回填 release_id
+    db_set_gate_result_release_id(
+        session, gate_run_id="gate_coalesce", release_id="rel_locked",
+    )
+    assert session.gates["gate_coalesce"]["release_id"] == "rel_locked"
+
+    # gate 重跑 / payload 重放（常见于手动补跑或 schema 迁移后 backfill）——
+    # payload 会覆盖，但 release_id 必须仍然是 rel_locked
+    db_record_gate_result(
+        session,
+        _make_gate_result(
+            gate_run_id="gate_coalesce",
+            recommendation_id="rec_c",
+            gate_status="block",
+            allow_apply=False,
+        ),
+    )
+    assert session.gates["gate_coalesce"]["payload"]["gate_status"] == "block", \
+        "重放必须更新 payload 的 gate_status"
+    assert session.gates["gate_coalesce"]["release_id"] == "rel_locked", \
+        "COALESCE 保护：重放时 release_id 为 None，不能把已有回填清掉"
+
+
+class _SessionContextAdapter:
+    """把 _FakeGateSession 适配成 `with Session(engine) as s, s.begin():` 协议。"""
+
+    def __init__(self, inner: _FakeGateSession) -> None:
+        self._inner = inner
+
+    def __enter__(self) -> _FakeGateSession:
+        return self._inner
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+
+class _TxCtx:
+    def __enter__(self) -> _TxCtx:
+        return self
+
+    def __exit__(self, *exc: Any) -> bool:
+        return False
+
+
+class _FakeEngine:
+    def dispose(self) -> None:
+        return None
+
+
+def test_save_release_history_backfills_gate_release_id_in_same_transaction(
+    monkeypatch: Any, tmp_path: Any
+) -> None:
+    """H1：save_release_history 把 release upsert 到 DB 后，必须把 release_id
+    回填到对应 gate row。回填和 release upsert 共用同一事务：DB 失败时两者一起
+    回滚，不会留下"release 已 commit 但 gate row 未回填"的 half-state。
+    """
+    from aats.data_platform.production_workflow import release_registry as rr
+
+    session = _FakeGateSession()
+    # 场景：两条 gate 行
+    #   gate_live    — 有 release 配对，应被回填
+    #   gate_orphan  — 没有 release 配对，不应被污染
+    db_record_gate_result(
+        session,
+        _make_gate_result(gate_run_id="gate_live", recommendation_id="rec_live"),
+    )
+    db_record_gate_result(
+        session,
+        _make_gate_result(gate_run_id="gate_orphan", recommendation_id="rec_other"),
+    )
+    session.begin = lambda: _TxCtx()  # type: ignore[method-assign]
+
+    monkeypatch.setattr(rr, "try_governance_db", lambda: (_FakeEngine(), True))
+    monkeypatch.setattr(
+        rr, "Session", lambda _engine: _SessionContextAdapter(session),
+    )
+
+    history = {
+        "releases": [
+            {
+                "release_id": "rel_live",
+                "family": "fam",
+                "timeframe": "1h",
+                "combo_key": "fam_1h",
+                "recommendation_id": "rec_live",
+                "parameter_set_id": "ps_1",
+                "gate_result_ref": "gate_live",
+                "apply_result": "success",
+                "observation_status": "observing",
+                "observation_window_hours": 24,
+            },
+            {
+                # 手工 release（没跑 gate）：不应该触发回填
+                "release_id": "rel_no_gate",
+                "family": "fam",
+                "timeframe": "1h",
+                "combo_key": "fam_1h",
+                "recommendation_id": "rec_manual",
+                "parameter_set_id": "ps_2",
+                "apply_result": "success",
+                "observation_status": "observing",
+                "observation_window_hours": 24,
+            },
+        ],
+    }
+    rr.save_release_history(history, tmp_path)
+
+    assert session.gates["gate_live"]["release_id"] == "rel_live", \
+        "save_release_history 必须在同一事务里把 release_id 回填到 gate row"
+    assert session.gates["gate_orphan"]["release_id"] is None, \
+        "没有 release 配对的 gate 行不能被污染"
+    # parameter_releases INSERT 也确实落到 fake session 了（两条）
+    assert set(session.releases.keys()) == {"rel_live", "rel_no_gate"}
+
+
+def test_save_release_history_logs_warning_when_gate_row_missing(
+    monkeypatch: Any, tmp_path: Any, caplog: Any
+) -> None:
+    """gate_run_id 在 DB 里没命中时，save_release_history 不应炸，只打 warning。
+
+    动机：单机 / 历史 release 场景下 gate 表可能没写入；release 流程本身不能
+    因为"找不到 gate 行"就阻塞后续所有 release 落库。
+    """
+    import logging
+
+    from aats.data_platform.production_workflow import release_registry as rr
+
+    session = _FakeGateSession()
+    session.begin = lambda: _TxCtx()  # type: ignore[method-assign]
+
+    monkeypatch.setattr(rr, "try_governance_db", lambda: (_FakeEngine(), True))
+    monkeypatch.setattr(
+        rr, "Session", lambda _engine: _SessionContextAdapter(session),
+    )
+
+    history = {
+        "releases": [
+            {
+                "release_id": "rel_x",
+                "family": "fam",
+                "timeframe": "1h",
+                "combo_key": "fam_1h",
+                "recommendation_id": "rec_x",
+                "parameter_set_id": "ps_x",
+                "gate_result_ref": "gate_missing",  # 没 record 过 → UPDATE miss
+                "apply_result": "success",
+                "observation_status": "observing",
+                "observation_window_hours": 24,
+            },
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger=rr.__name__):
+        rr.save_release_history(history, tmp_path)
+
+    assert "rel_x" in session.releases, "release 本身必须 upsert 成功"
+    assert any(
+        "gate_missing" in rec.getMessage() for rec in caplog.records
+    ), "gate 行缺失时应当有 warning 可见"

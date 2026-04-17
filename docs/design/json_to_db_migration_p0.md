@@ -271,5 +271,10 @@ approve / reject / supersede handler：
 - [x] P0-2 阶段 B：`PreApplyGateResultModel` 加 `release_id` 列；`_migrate_pre_apply_gate_results` 幂等迁移；`db_upsert_pre_apply_gate_result` 带 `COALESCE` on conflict
 - [x] P0-2 阶段 C：`_save_gate_result` 写顺序倒置；DB 必写、JSON + Markdown 仅在 `AATS_P0_GATE_JSON_EXPORT=on` 时导出；DB 异常 → `gate_status="error", allow_apply=False`（4 条新单测）
 - [x] P0-2 阶段 D：`_load_recent_gate_results` 只读 DB；DB 不可达 / 异常抛出 `RuntimeError`；artifacts JSON 目录彻底退出读路径（4 条新单测）
+- [x] P0-2 阶段 E：补全代码评审发现的三项阻断
+  - H1：`save_release_history` 在 release upsert 的同一事务内调 `db_set_gate_result_release_id` 回填 `release_id`；未命中时打 warning 但不阻塞其它 release 落库
+  - H2：`db_set_gate_result_release_id` 的 hit / miss 单测；`_FakeGateSession` 扩展 UPDATE 分支与 `rowcount` 语义
+  - M2：`_FakeGateSession._store_gate` 模拟 `COALESCE(EXCLUDED.release_id, current)` 语义；新增"record 重放不能擦掉已回填 release_id"的回归单测
+  - `test_operational_state_db.py` 15 passed（含原 10 + H2 两条 + M2 一条 + H1 两条）
 - [ ] P0-3 全流程
 - [ ] P0-1 全流程

@@ -87,13 +87,34 @@ def save_release_history(
     if ok:
         try:
             from aats.data_platform.governance.operational_state_db import (
+                db_set_gate_result_release_id,
                 db_upsert_parameter_release,
             )
 
             with Session(engine) as session, session.begin():
                 for release in history.get("releases", []):
-                    if isinstance(release, dict):
-                        db_upsert_parameter_release(session, release)
+                    if not isinstance(release, dict):
+                        continue
+                    db_upsert_parameter_release(session, release)
+                    # 把 release_id 回填到 gate 行，让 db_list_gate_results_for_release
+                    # 能在 release_id 索引上直接命中，而不是回落到 parameter_releases JOIN。
+                    # 同事务内做，确保 release upsert 与 gate 回填一起 commit / 一起回滚。
+                    gate_ref = release.get("gate_result_ref")
+                    rel_id = release.get("release_id")
+                    if gate_ref and rel_id:
+                        matched = db_set_gate_result_release_id(
+                            session,
+                            gate_run_id=gate_ref,
+                            release_id=rel_id,
+                        )
+                        if not matched:
+                            # gate 行缺失不该阻塞 release 落库（历史 release、单机
+                            # 模式等场景下 gate 表可能没写入），只打 warning 让运维可见。
+                            log.warning(
+                                "release %s 回填 gate_run_id=%s 未命中任何行",
+                                rel_id,
+                                gate_ref,
+                            )
         except Exception as exc:
             log.exception("release history DB 同步失败，保存未完成")
             raise RuntimeError(
