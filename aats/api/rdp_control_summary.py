@@ -71,15 +71,18 @@ def _iso_sort_key(value: str | None) -> str:
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
+    """Summary-render timestamp parse; illegal → None to keep endpoint soft-failing.
+
+    The control-summary API should not 500 on a single bad artefact timestamp;
+    individual rows just get sorted last. Gate-critical callers must use
+    :func:`parse_iso_datetime_utc` directly.
+    """
+    from aats.data_platform.governance._time_util import parse_iso_datetime_utc
+
     try:
-        parsed = datetime.fromisoformat(str(value))
-    except (TypeError, ValueError):
+        return parse_iso_datetime_utc(value, context="rdp_control_summary")
+    except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed
 
 
 def _load_recent_gate_results(project_root: Path, *, limit: int = 8) -> list[dict[str, Any]]:

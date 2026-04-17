@@ -19,6 +19,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from aats.data_platform.attribution.taxonomy import TF_SECONDS
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 
 log = logging.getLogger(__name__)
 
@@ -245,9 +246,11 @@ def _try_match_bar(
 
 
 def _offset_ts(ts_str: str, seconds: int) -> str:
-    """将 ISO timestamp 字符串偏移指定秒数。"""
+    """将 ISO timestamp 字符串偏移指定秒数。非法格式原样返回。"""
     try:
-        dt = datetime.fromisoformat(ts_str)
-        return (dt + timedelta(seconds=seconds)).isoformat()
-    except (ValueError, TypeError):
+        dt = parse_iso_datetime_utc(ts_str, context="market_alignment._offset_ts")
+    except ValueError:
         return ts_str
+    if dt is None:
+        return ts_str
+    return (dt + timedelta(seconds=seconds)).isoformat()

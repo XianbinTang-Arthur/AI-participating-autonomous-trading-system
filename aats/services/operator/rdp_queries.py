@@ -71,11 +71,16 @@ def _find_latest_round_dir(rounds_root: Path) -> Path | None:
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
+    """Run-aggregation timestamp parse; illegal → None to avoid skipping siblings.
+
+    Governance-critical reads must use :func:`parse_iso_datetime_utc` directly
+    so illegal inputs raise rather than silently degrade.
+    """
+    from aats.data_platform.governance._time_util import parse_iso_datetime_utc
+
     try:
-        return datetime.fromisoformat(value)
-    except (TypeError, ValueError):
+        return parse_iso_datetime_utc(value, context="rdp_queries.run_timestamp")
+    except ValueError:
         return None
 
 

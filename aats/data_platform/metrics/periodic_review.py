@@ -53,11 +53,18 @@ def _load_json(fp: Path) -> dict | None:
 
 
 def _parse_iso(s: str | None) -> datetime | None:
-    if not s:
-        return None
+    """Thin illegal-as-None wrapper around parse_iso_datetime_utc.
+
+    Periodic review iterates historical artefacts where a single corrupt
+    timestamp should downgrade the row to "out of window", not abort the job.
+    Gate checks must use :func:`parse_iso_datetime_utc` directly so illegal
+    inputs raise.
+    """
+    from aats.data_platform.governance._time_util import parse_iso_datetime_utc
+
     try:
-        return datetime.fromisoformat(s)
-    except (ValueError, TypeError):
+        return parse_iso_datetime_utc(s, context="periodic_review")
+    except ValueError:
         return None
 
 

@@ -28,6 +28,8 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 from typing import Any
 from uuid import uuid4
 
@@ -149,9 +151,14 @@ def save_apply_history(history: dict[str, Any], project_root: Path) -> Path:
                             "recommendation_id": op.get("recommendation_id"),
                             "actor": op.get("actor"),
                             "notes": op.get("notes"),
-                            "created_at": datetime.fromisoformat(str(op.get("created_at")))
-                            if op.get("created_at")
-                            else datetime.now(timezone.utc),
+                            "created_at": (
+                                parse_iso_datetime_utc(
+                                    str(op.get("created_at")),
+                                    context="active_parameter_apply.history.created_at",
+                                )
+                                if op.get("created_at")
+                                else datetime.now(timezone.utc)
+                            ),
                         },
                     )
         except Exception as exc:

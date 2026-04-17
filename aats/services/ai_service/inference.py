@@ -7,6 +7,7 @@ from decimal import Decimal
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.base import EventBus
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.ai_brief import AIDecisionBrief
@@ -775,14 +776,12 @@ class AIInferenceService:
 
     @staticmethod
     def _parse_event_datetime(value: datetime | str | None) -> datetime | None:
-        if isinstance(value, datetime) or value is None:
-            return value
-        if isinstance(value, str):
-            try:
-                return datetime.fromisoformat(value.replace("Z", "+00:00"))
-            except ValueError:
-                return None
-        return None
+        if value is None:
+            return None
+        try:
+            return parse_iso_datetime_utc(value, context="ai_service.inference.event_datetime")
+        except ValueError:
+            return None
 
     def _record_shadow_outcome(self, evaluation: AIShadowEvaluation) -> None:
         fee_ratio_delta = float(evaluation.shadow_fee_ratio or 0.0) - float(evaluation.baseline_fee_ratio or 0.0)

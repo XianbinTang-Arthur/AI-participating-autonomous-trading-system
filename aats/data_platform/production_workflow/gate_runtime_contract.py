@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
+
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
+
+log = logging.getLogger(__name__)
 
 
 def _safe_load_json(path: Path) -> dict | list | None:
@@ -20,12 +25,17 @@ def _safe_load_json(path: Path) -> dict | list | None:
         return None
 
 
-def _parse_iso_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
+def _parse_for_sort(value: str | None, *, context: str) -> datetime | None:
+    """Timestamp parse for run-aggregation sort keys.
+
+    Wraps :func:`parse_iso_datetime_utc` with illegal-as-None policy so a single
+    corrupt artifact cannot prevent sibling runs from being compared. Must not
+    be used for gate checks — those should let :class:`ValueError` propagate.
+    """
     try:
-        return datetime.fromisoformat(value)
-    except (TypeError, ValueError):
+        return parse_iso_datetime_utc(value, context=context)
+    except ValueError as exc:
+        log.warning("gate_runtime_contract: ignoring illegal timestamp: %s", exc)
         return None
 
 
@@ -71,10 +81,13 @@ def _collect_latest_workflow_runs(project_root: Path) -> dict[str, dict[str, Any
             "path": str(path),
         }
         current = latest_by_workflow.get(workflow)
-        candidate_dt = _parse_iso_datetime(str(finished_at) if finished_at else None)
-        current_dt = _parse_iso_datetime(
-            str(current.get("finished_at") or current.get("started_at"))
-            if current else None
+        candidate_dt = _parse_for_sort(
+            str(finished_at) if finished_at else None,
+            context=f"workflow_runs.{workflow}.candidate",
+        )
+        current_dt = _parse_for_sort(
+            str(current.get("finished_at") or current.get("started_at")) if current else None,
+            context=f"workflow_runs.{workflow}.current",
         )
         if current is None or (
             candidate_dt is not None and current_dt is not None and candidate_dt > current_dt
@@ -91,16 +104,19 @@ def _augment_workflow_runs_with_decision_round(
     if snapshot is None:
         return latest_by_workflow
     finished_at = snapshot.get("finished_at") or snapshot.get("started_at")
-    candidate_dt = _parse_iso_datetime(str(finished_at) if finished_at else None)
+    candidate_dt = _parse_for_sort(
+        str(finished_at) if finished_at else None,
+        context="decision_round_snapshot.candidate",
+    )
     if candidate_dt is None:
         return latest_by_workflow
 
     augmented = dict(latest_by_workflow)
     for workflow in ("governance_cycle", "decision_cycle"):
         current = augmented.get(workflow)
-        current_dt = _parse_iso_datetime(
-            str(current.get("finished_at") or current.get("started_at"))
-            if current else None,
+        current_dt = _parse_for_sort(
+            str(current.get("finished_at") or current.get("started_at")) if current else None,
+            context=f"decision_round_snapshot.{workflow}.current",
         )
         if current is None or current_dt is None or candidate_dt > current_dt:
             augmented[workflow] = {

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import get_logger
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import EventEnvelope, dump_payload_exact, utc_now
@@ -723,12 +724,10 @@ class OperatorQueryService:
         candidate = value.strip()
         if not candidate:
             return None
-        normalized = candidate[:-1] + "+00:00" if candidate.endswith("Z") else candidate
         try:
-            parsed = datetime.fromisoformat(normalized)
+            return parse_iso_datetime_utc(candidate, context="query_service._coerce_datetime")
         except ValueError:
             return None
-        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
 
     def _exit_execution_action_context_in_scope(self, context: dict[str, Any]) -> bool:
         parent_intent_id = str(context.get("parent_intent_id") or "").strip()
@@ -2157,11 +2156,15 @@ class OperatorQueryService:
         if value is None:
             return False
         if isinstance(value, str):
-            normalized = value.replace("Z", "+00:00")
             try:
-                value = datetime.fromisoformat(normalized)
+                parsed = parse_iso_datetime_utc(
+                    value, context="query_service._is_current_runtime_timestamp"
+                )
             except ValueError:
                 return False
+            if parsed is None:
+                return False
+            value = parsed
         return value >= self._current_runtime_started_at()
 
     def _latest_scoped_reconciliation(self):
@@ -2215,15 +2218,14 @@ class OperatorQueryService:
 
     @staticmethod
     def _as_datetime(value: Any) -> datetime | None:
-        if isinstance(value, datetime):
-            return value
-        if isinstance(value, str):
-            normalized = value.replace("Z", "+00:00")
-            try:
-                return datetime.fromisoformat(normalized)
-            except ValueError:
-                return None
-        return None
+        if value is None:
+            return None
+        if not isinstance(value, (datetime, str)):
+            return None
+        try:
+            return parse_iso_datetime_utc(value, context="query_service._as_datetime")
+        except ValueError:
+            return None
 
     @staticmethod
     def _record_value(record: Any, field: str) -> Any:

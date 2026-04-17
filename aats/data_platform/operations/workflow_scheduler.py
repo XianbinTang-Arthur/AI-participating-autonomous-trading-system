@@ -201,15 +201,17 @@ def _load_scheduled_workflows(project_root: Path) -> list[tuple[str, dict[str, A
 
 
 def _parse_iso_dt(value: Any) -> datetime | None:
-    if not value:
-        return None
+    """Scheduler timestamp parse; illegal → None to keep the scheduler running.
+
+    A corrupt workflow_runs/*.json timestamp should skip that run from
+    scheduling, not abort the whole tick.
+    """
+    from aats.data_platform.governance._time_util import parse_iso_datetime_utc
+
     try:
-        parsed = datetime.fromisoformat(str(value))
+        return parse_iso_datetime_utc(value, context="workflow_scheduler")
     except ValueError:
         return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def _canonical_slot_key(value: datetime | str | None) -> str | None:

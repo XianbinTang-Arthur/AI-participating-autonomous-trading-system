@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 from aats.data_platform.production_workflow.gate_runtime_contract import (
     runtime_current_alerts,
     runtime_latest_workflow_runs,
@@ -36,15 +37,6 @@ class GateCheckResult:
 
 def _strict_gate_environment(ctx: dict[str, Any]) -> bool:
     return runtime_strict_environment(ctx)
-
-
-def _parse_iso_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
 
 
 # ── 1. Governance Health ──────────────────────────────────────────
@@ -105,11 +97,11 @@ def check_evidence_freshness(ctx: dict[str, Any]) -> GateCheckResult:
         )
 
     try:
-        created_at = datetime.fromisoformat(created_at_str)
-        # Fix P0: tz-naive timestamp 与 tz-aware now() 相减会抛 TypeError，
-        # 被 except 静默吞掉后 age_hours=-1 绕过所有新鲜度阈值。
-        if created_at.tzinfo is None:
-            created_at = created_at.replace(tzinfo=timezone.utc)
+        created_at = parse_iso_datetime_utc(
+            created_at_str, context="gate_rules.check_evidence_freshness.created_at"
+        )
+        if created_at is None:
+            raise ValueError("created_at parsed to None")
         age_hours = (datetime.now(timezone.utc) - created_at).total_seconds() / 3600
     except (ValueError, TypeError):
         return GateCheckResult(
@@ -419,9 +411,14 @@ def check_workflow_freshness(ctx: dict[str, Any]) -> GateCheckResult:
             issues.append(f"{workflow}: missing latest run")
             continue
         status = str(latest.get("overall_status") or "unknown")
-        finished_at = _parse_iso_datetime(
-            str(latest.get("finished_at") or latest.get("started_at") or ""),
-        )
+        raw_finished = str(latest.get("finished_at") or latest.get("started_at") or "")
+        try:
+            finished_at = parse_iso_datetime_utc(
+                raw_finished, context=f"gate_rules.check_workflow_freshness.{workflow}"
+            )
+        except ValueError as exc:
+            issues.append(f"{workflow}: illegal timestamp {raw_finished!r} ({exc})")
+            continue
         if status not in {"success", "partial"}:
             issues.append(f"{workflow}: status={status}")
             continue

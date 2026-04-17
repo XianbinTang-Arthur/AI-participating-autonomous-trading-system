@@ -162,12 +162,19 @@ def try_governance_db():
 
 
 def parse_dt(val: str | None) -> datetime | None:
-    """将 ISO 字符串解析为 datetime，None 原样返回."""
+    """将 ISO 字符串解析为 datetime，None 或非法格式返回 None.
+
+    DB 层通用工具：批量反序列化场景中单条非法记录不应导致整批失败，因此
+    此处维持 None-on-illegal 的软失败契约。底层统一委托给
+    :func:`parse_iso_datetime_utc` 保证时区处理一致。
+    """
+    from aats.data_platform.governance._time_util import parse_iso_datetime_utc
+
     if val is None:
         return None
     try:
-        return datetime.fromisoformat(val)
-    except (ValueError, TypeError):
+        return parse_iso_datetime_utc(val, context="governance._db_util.parse_dt")
+    except ValueError:
         return None
 
 

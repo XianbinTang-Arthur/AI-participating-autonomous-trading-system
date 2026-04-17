@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any, Mapping
 
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 from aats.schemas.market import MarketSnapshot
 
 
@@ -15,6 +15,8 @@ class MarketSnapshotNormalizer:
         payload.setdefault("exchange", self.exchange_name)
         snapshot_ts = payload.get("snapshot_ts")
         if isinstance(snapshot_ts, str):
-            payload["snapshot_ts"] = datetime.fromisoformat(snapshot_ts)
+            payload["snapshot_ts"] = parse_iso_datetime_utc(
+                snapshot_ts, context="market_gateway.normalizer.snapshot_ts"
+            )
         return MarketSnapshot.model_validate(payload)
 

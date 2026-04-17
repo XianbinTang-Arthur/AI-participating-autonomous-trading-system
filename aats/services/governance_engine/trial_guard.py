@@ -18,20 +18,19 @@ from aats.services.runtime_scope import event_matches_scope, runtime_state_scope
 
 
 def _coerce_datetime(value: Any) -> datetime | None:
-    if isinstance(value, datetime):
-        return value.astimezone(timezone.utc) if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
-    if isinstance(value, str):
-        normalized = value.strip()
-        if not normalized:
-            return None
-        if normalized.endswith("Z"):
-            normalized = normalized[:-1] + "+00:00"
-        try:
-            parsed = datetime.fromisoformat(normalized)
-        except ValueError:
-            return None
-        return parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
-    return None
+    """Trial-guard timestamp coerce; illegal → None for resilient evaluation.
+
+    Trial-guard iterates profitability samples; a single malformed timestamp
+    should be dropped from the sample, not crash the guard.
+    """
+    from aats.data_platform.governance._time_util import parse_iso_datetime_utc
+
+    if not isinstance(value, (str, datetime)):
+        return None
+    try:
+        return parse_iso_datetime_utc(value, context="trial_guard")
+    except ValueError:
+        return None
 
 
 @dataclass(slots=True)

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import datetime
 from decimal import Decimal
 import unittest
 
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 from aats.schemas.market import MarketSnapshot
 from aats.services.strategy_engines.independent.gates import (
     anomaly_cost_fuse_threshold_bps,
@@ -168,7 +168,7 @@ def _market_snapshot(case: _LiveReplayCase) -> MarketSnapshot:
     return MarketSnapshot(
         symbol=case.symbol,
         exchange=case.exchange,
-        snapshot_ts=datetime.fromisoformat(case.snapshot_ts),
+        snapshot_ts=parse_iso_datetime_utc(case.snapshot_ts, context="test_live_replay.snapshot_ts"),
         best_bid=case.best_bid,
         best_ask=case.best_ask,
         last_price=case.last_price,

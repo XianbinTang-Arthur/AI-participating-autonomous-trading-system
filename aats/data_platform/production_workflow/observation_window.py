@@ -295,17 +295,22 @@ def run_observation(
     history = load_release_history(project_root)
     release = find_release(history, release_id)
 
+    from aats.data_platform.governance._time_util import parse_iso_datetime_utc
+
     window_active = True
     started_at = now.isoformat()
     if release:
         created_str = release.get("created_at")
         if created_str:
             try:
-                created_at = datetime.fromisoformat(created_str)
-                elapsed_hours = (now - created_at).total_seconds() / 3600
-                started_at = created_str
-                if elapsed_hours >= window_hours:
-                    window_active = False
+                created_at = parse_iso_datetime_utc(
+                    created_str, context="observation_window.release.created_at"
+                )
+                if created_at is not None:
+                    elapsed_hours = (now - created_at).total_seconds() / 3600
+                    started_at = created_str
+                    if elapsed_hours >= window_hours:
+                        window_active = False
             except (ValueError, TypeError):
                 pass
 

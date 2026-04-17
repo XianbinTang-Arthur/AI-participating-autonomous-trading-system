@@ -8,6 +8,7 @@ from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.logging import get_logger
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
@@ -684,8 +685,12 @@ class StrategyProfileControlService:
             product_type=self.settings.trading_product_type,
             margin_mode=self.settings.margin_mode,
             allowed_symbols=self.settings.allowed_symbols,
-            window_start=utc_now() if performance["window_start"] is None else datetime.fromisoformat(performance["window_start"]),
-            window_end=utc_now() if performance["window_end"] is None else datetime.fromisoformat(performance["window_end"]),
+            window_start=utc_now() if performance["window_start"] is None else parse_iso_datetime_utc(
+                performance["window_start"], context="strategy_profiles.performance.window_start"
+            ),
+            window_end=utc_now() if performance["window_end"] is None else parse_iso_datetime_utc(
+                performance["window_end"], context="strategy_profiles.performance.window_end"
+            ),
             trade_count=int(performance["trade_count"]),
             win_rate=float(performance["win_rate"]),
             gross_realized_pnl=float(performance["gross_realized_pnl"]),

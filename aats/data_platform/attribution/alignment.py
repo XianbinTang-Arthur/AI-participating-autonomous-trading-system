@@ -20,6 +20,7 @@ from aats.data_platform.attribution.taxonomy import (
     ALIGNMENT_STATUS_REPLAY_ONLY,
     TF_SECONDS,
 )
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 
 log = logging.getLogger(__name__)
 
@@ -236,18 +237,12 @@ def query_reconciliation_snapshots(
 
 def _parse_ts(ts: Any) -> datetime:
     """将各种 ts 格式统一为 timezone-aware datetime。"""
-    if isinstance(ts, datetime):
-        if ts.tzinfo is None:
-            return ts.replace(tzinfo=timezone.utc)
-        return ts
-    if isinstance(ts, str):
-        # 尝试 ISO 格式
-        ts_str = ts.replace("Z", "+00:00")
-        dt = datetime.fromisoformat(ts_str)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        return dt
-    raise ValueError(f"Cannot parse timestamp: {ts!r}")
+    if not isinstance(ts, (str, datetime)):
+        raise ValueError(f"Cannot parse timestamp: {ts!r}")
+    parsed = parse_iso_datetime_utc(ts, context="attribution.alignment._parse_ts")
+    if parsed is None:
+        raise ValueError(f"Cannot parse timestamp: {ts!r}")
+    return parsed
 
 
 def align_replay_with_live(

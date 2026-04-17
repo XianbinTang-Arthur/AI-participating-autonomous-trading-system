@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from aats.data_platform.governance._time_util import parse_iso_datetime_utc
+
+log = logging.getLogger(__name__)
 
 DEFAULT_HEARTBEAT_PATH = Path("/tmp/rdp_daemon_heartbeat.json")
 DEFAULT_COMPONENT = "rdp-daemon"
@@ -13,12 +18,17 @@ DEFAULT_MAX_HEARTBEAT_AGE_SECONDS = 45
 _UNHEALTHY_STATES = {"error", "stopped"}
 
 
-def _parse_iso_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
+def _parse_heartbeat_ts(value: str | None) -> datetime | None:
+    """Heartbeat timestamp parse; illegal → None + WARN log.
+
+    A corrupt heartbeat_at should fail the freshness check ("heartbeat_at
+    missing or invalid") rather than crash the probe, so this wrapper swallows
+    :class:`ValueError` after logging.
+    """
     try:
-        return datetime.fromisoformat(value)
-    except (TypeError, ValueError):
+        return parse_iso_datetime_utc(value, context="rdp_daemon_heartbeat_at")
+    except ValueError as exc:
+        log.warning("rdp_daemon_health: illegal heartbeat_at: %s", exc)
         return None
 
 
@@ -39,7 +49,7 @@ def _heartbeat_ok(
     if not isinstance(payload, dict):
         return False, "heartbeat payload missing"
 
-    heartbeat_at = _parse_iso_datetime(str(payload.get("heartbeat_at") or ""))
+    heartbeat_at = _parse_heartbeat_ts(str(payload.get("heartbeat_at") or ""))
     if heartbeat_at is None:
         return False, "heartbeat_at missing or invalid"
 
