@@ -462,10 +462,10 @@ def test_rdp_browser_e2e_click_chain_updates_page_and_requests(tmp_path: Path) -
             patch("aats.data_platform.decision_system.active_parameter_apply.rollback_active_parameter_set", _fake_rollback),
         )
         stack.enter_context(
-            patch("aats.data_platform.governance.rdp_task_db.db_has_active_task", return_value=None),
-        )
-        stack.enter_context(
-            patch("aats.data_platform.governance.rdp_task_db.db_create_task", return_value="task_demo_1"),
+            patch(
+                "aats.data_platform.governance.rdp_task_db.db_create_task_if_idle",
+                return_value=("task_demo_1", None),
+            ),
         )
         stack.enter_context(
             patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),

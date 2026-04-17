@@ -15,6 +15,7 @@ from aats.data_platform.governance._atomic_io import atomic_json_write
 from aats.data_platform.governance._db_util import try_governance_db
 from aats.data_platform.governance.rdp_task_db import (
     db_create_task,
+    db_create_task_if_idle,
     db_get_latest_task_for_workflow,
     db_has_active_task,
 )
@@ -332,28 +333,43 @@ def _enqueue_single_workflow(
 
     try:
         with get_session() as session:
-            active_task = db_has_active_task(session, workflow_name)
-            if active_task:
-                if not dry_run:
-                    workflow_state["last_processed_slot"] = slot_key
-                    workflow_state["last_action"] = "active_task_present"
-                    workflow_state["last_reason"] = active_task["task_id"]
-                report["skipped"].append(
-                    {
-                        "workflow": workflow_name,
-                        "reason": "已有 active task",
-                        "slot": slot_key,
-                        "task_id": active_task["task_id"],
-                    },
-                )
-                return
-            task_id = None
-            if not dry_run:
-                task_id = db_create_task(
+            # dry_run 只读：用 has_active_task 照查看有没有活跃任务即可，不插入。
+            if dry_run:
+                active_task = db_has_active_task(session, workflow_name)
+                if active_task:
+                    report["skipped"].append(
+                        {
+                            "workflow": workflow_name,
+                            "reason": "已有 active task",
+                            "slot": slot_key,
+                            "task_id": active_task["task_id"],
+                        },
+                    )
+                    return
+                task_id = None
+            else:
+                # 真插入：原子创建，如已有活跃任务则由 ON CONFLICT 分支返回
+                # existing，避免 scheduler-vs-operator 并发打到 IntegrityError。
+                task_id, active_task = db_create_task_if_idle(
                     session,
                     workflow=workflow_name,
                     requested_by=actor,
                 )
+                if task_id is None:
+                    workflow_state["last_processed_slot"] = slot_key
+                    workflow_state["last_action"] = "active_task_present"
+                    workflow_state["last_reason"] = (
+                        active_task["task_id"] if active_task else "unknown_active_task"
+                    )
+                    report["skipped"].append(
+                        {
+                            "workflow": workflow_name,
+                            "reason": "已有 active task",
+                            "slot": slot_key,
+                            "task_id": (active_task or {}).get("task_id"),
+                        },
+                    )
+                    return
     except Exception as exc:  # pragma: no cover - defensive
         log.exception("scheduler failed to enqueue workflow %s", workflow_name)
         report["ok"] = False

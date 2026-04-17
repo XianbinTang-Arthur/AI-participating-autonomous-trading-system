@@ -115,8 +115,8 @@ def test_scheduler_cold_start_bootstrap_only_enqueues_data_maintenance(tmp_path:
             return_value=None,
         ),
         patch(
-            "aats.data_platform.operations.workflow_scheduler.db_create_task",
-            return_value="task_bootstrap_data_1",
+            "aats.data_platform.operations.workflow_scheduler.db_create_task_if_idle",
+            return_value=("task_bootstrap_data_1", None),
         ) as create_task_mock,
     ):
         result = enqueue_due_workflows(tmp_path, now=now, save_state=True, initialize_if_missing=False)
@@ -179,8 +179,8 @@ def test_scheduler_cold_start_bootstrap_advances_to_research_after_data_refresh(
             return_value=None,
         ),
         patch(
-            "aats.data_platform.operations.workflow_scheduler.db_create_task",
-            return_value="task_bootstrap_research_1",
+            "aats.data_platform.operations.workflow_scheduler.db_create_task_if_idle",
+            return_value=("task_bootstrap_research_1", None),
         ),
     ):
         result = enqueue_due_workflows(tmp_path, now=now, save_state=True, initialize_if_missing=False)
@@ -214,7 +214,7 @@ def test_scheduler_dry_run_does_not_create_task_or_write_state(tmp_path: Path) -
             return_value=None,
         ),
         patch(
-            "aats.data_platform.operations.workflow_scheduler.db_create_task",
+            "aats.data_platform.operations.workflow_scheduler.db_create_task_if_idle",
         ) as create_task_mock,
     ):
         result = enqueue_due_workflows(
@@ -265,9 +265,11 @@ def test_scheduler_marks_slot_processed_when_active_task_exists(tmp_path: Path) 
             return_value=type("Guard", (), {"allowed": True, "reason": None})(),
         ),
         patch("aats.data_platform.db.get_session", _fake_session),
+        # db_create_task_if_idle 返回 (None, existing_dict) —— atomic insert
+        # 在并发 / 已有活跃任务时走 ON CONFLICT DO NOTHING 分支。
         patch(
-            "aats.data_platform.operations.workflow_scheduler.db_has_active_task",
-            return_value={"task_id": "task_existing"},
+            "aats.data_platform.operations.workflow_scheduler.db_create_task_if_idle",
+            return_value=(None, {"task_id": "task_existing"}),
         ),
     ):
         result = enqueue_due_workflows(tmp_path, now=now, save_state=True, initialize_if_missing=False)
@@ -321,7 +323,7 @@ def test_scheduler_treats_equivalent_offset_slot_as_already_processed(tmp_path: 
             return_value=None,
         ),
         patch(
-            "aats.data_platform.operations.workflow_scheduler.db_create_task",
+            "aats.data_platform.operations.workflow_scheduler.db_create_task_if_idle",
         ) as create_task_mock,
     ):
         result = enqueue_due_workflows(tmp_path, now=now, save_state=True, initialize_if_missing=False)
@@ -390,8 +392,8 @@ def test_scheduler_bootstrap_blocks_when_data_maintenance_failed(tmp_path: Path)
             return_value=None,
         ),
         patch(
-            "aats.data_platform.operations.workflow_scheduler.db_create_task",
-            return_value="task_bootstrap_data_retry",
+            "aats.data_platform.operations.workflow_scheduler.db_create_task_if_idle",
+            return_value=("task_bootstrap_data_retry", None),
         ),
     ):
         result = enqueue_due_workflows(tmp_path, now=now, save_state=True, initialize_if_missing=False)
@@ -471,8 +473,8 @@ def test_scheduler_bootstrap_emits_warning_when_stage_failed(tmp_path: Path) -> 
             return_value=None,
         ),
         patch(
-            "aats.data_platform.operations.workflow_scheduler.db_create_task",
-            return_value="task_bootstrap_data_retry",
+            "aats.data_platform.operations.workflow_scheduler.db_create_task_if_idle",
+            return_value=("task_bootstrap_data_retry", None),
         ),
     ):
         result = enqueue_due_workflows(
@@ -551,8 +553,8 @@ def test_scheduler_bootstrap_blocks_when_research_cycle_failed(tmp_path: Path) -
             return_value=None,
         ),
         patch(
-            "aats.data_platform.operations.workflow_scheduler.db_create_task",
-            return_value="task_bootstrap_research_retry",
+            "aats.data_platform.operations.workflow_scheduler.db_create_task_if_idle",
+            return_value=("task_bootstrap_research_retry", None),
         ),
     ):
         result = enqueue_due_workflows(tmp_path, now=now, save_state=True, initialize_if_missing=False)

@@ -311,11 +311,33 @@ def add_recommendation(
             and existing.get("timeframe") == new_tf
             and existing.get("recommendation_type") == new_type
         ):
+            # CAS 语义：只有 DB 里此 rec 仍处于 draft 时才推进成 superseded。
+            # 如果另一个 operator 已经 approve/reject 掉了它，我们绝不能把
+            # 已批准的 rec 覆盖成 superseded——保留 rollback 快照，在 DB
+            # 返回 False（并发抢先）时回滚内存，让 JSON 与 DB 保持一致。
+            prev_snapshot = {
+                "status": existing["status"],
+                "superseded_at": existing.get("superseded_at"),
+                "superseded_by": existing.get("superseded_by"),
+                "superseded_by_recommendation_id": existing.get(
+                    "superseded_by_recommendation_id",
+                ),
+            }
             existing["status"] = "superseded"
             existing["superseded_at"] = rec.get("created_at")
             existing["superseded_by"] = "system"
             existing["superseded_by_recommendation_id"] = new_id
-            _db_update_rec_status(existing)
+            db_result = _db_update_rec_status(
+                existing, expected_current_status="draft",
+            )
+            if db_result is False:
+                for key, value in prev_snapshot.items():
+                    existing[key] = value
+                log.warning(
+                    "add_recommendation: existing rec %s 状态已被其他进程抢先"
+                    "改写（非 draft），跳过自动 supersede 以避免覆盖 approved/rejected",
+                    existing.get("recommendation_id"),
+                )
 
     registry.setdefault("recommendations", []).append(rec)
     _db_sync_recommendation(rec)
@@ -547,12 +569,19 @@ def upsert_active_decision(
 ) -> None:
     """更新或插入 family/timeframe 的 active decision."""
     decisions = registry.setdefault("decisions", [])
-    combo_key = f"{family}_{timeframe.lower()}"
+    # timeframe 归一到小写一次，所有查找/写入/下游 DB 同步都走同一份，
+    # 否则 "1H" / "1h" 会在 existing-match 阶段错位：combo_key 走小写但
+    # `d.get("timeframe") == timeframe` 用原始大小写，命不中就会新建一行
+    # 造成同一 (family, timeframe) 下多条 active_decisions 并存。
+    timeframe_norm = timeframe.lower()
+    combo_key = f"{family}_{timeframe_norm}"
 
-    # 查找已有
     existing = None
     for d in decisions:
-        if d.get("family") == family and d.get("timeframe") == timeframe:
+        if (
+            d.get("family") == family
+            and str(d.get("timeframe") or "").lower() == timeframe_norm
+        ):
             existing = d
             break
 
@@ -563,13 +592,15 @@ def upsert_active_decision(
         existing["active_parameter_set_id"] = active_parameter_set_id
         existing["last_recommendation_id"] = last_recommendation_id
         existing["last_updated_at"] = now
+        existing["timeframe"] = timeframe_norm
+        existing["combo_key"] = combo_key
         if notes:
             existing["notes"] = notes
     else:
         decisions.append({
             "family": family,
             "symbol": symbol,
-            "timeframe": timeframe,
+            "timeframe": timeframe_norm,
             "combo_key": combo_key,
             "current_status": current_status,
             "active_parameter_set_id": active_parameter_set_id,
@@ -579,7 +610,7 @@ def upsert_active_decision(
         })
 
     _db_sync_active_decision(
-        family, timeframe, current_status,
+        family, timeframe_norm, current_status,
         active_parameter_set_id=active_parameter_set_id,
         last_recommendation_id=last_recommendation_id,
         notes=notes,
@@ -658,7 +689,7 @@ def register_evidence_bundle(
     })
 
 
-def _sync_registries_to_db_or_raise(
+def _sync_registries_to_db_best_effort(
     rec_reg: dict[str, Any],
     dec_reg: dict[str, Any],
 ) -> None:
@@ -667,6 +698,15 @@ def _sync_registries_to_db_or_raise(
     这一步是 Phase 5/6 在 daemon 容器内可见性的兜底收口：
     gateway/UI 读取 recommendation / active decision 时优先走 DB，
     因此这里需要确保最新 registry 至少在 DB 中是可见的。
+
+    失败语义（函数名 ``_best_effort`` 的含义）：
+      * governance DB 不可达（``try_governance_db`` 返回 not ok）——记 warning 后
+        静默返回，不抛异常；JSON 已经 append 好，caller 按文件模式继续跑。
+      * DB 可达但某条 upsert 抛 SQLAlchemy 错误——异常向上传播，caller 负责
+        回滚 / 告警（通常是 daemon 里被捕获并标记这一轮 cycle 为 failed）。
+
+    原函数名是 ``_or_raise`` 但只对第二种路径真正 raise，容易让人误以为 DB
+    不可达也会炸，所以改成 ``_best_effort`` 以避免误导。
     """
     engine, ok = try_governance_db()
     if not ok:
@@ -819,6 +859,6 @@ def update_registries_from_round(
     )
     save_evidence_bundle_index(bi, bundle_index_path)
     stats["bundles_registered"] += 1
-    _sync_registries_to_db_or_raise(rec_reg, dec_reg)
+    _sync_registries_to_db_best_effort(rec_reg, dec_reg)
 
     return stats

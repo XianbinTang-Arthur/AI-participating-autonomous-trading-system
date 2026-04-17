@@ -23,6 +23,43 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _normalize_combo_fields(
+    data: dict[str, Any],
+) -> tuple[str, str | None, dict[str, Any]]:
+    """归一化 timeframe / combo_key，并返回同步后的 payload 数据。
+
+    M5 修复统一版：历史上 parameter_releases 做了 column + payload 同归一，
+    但 observation_results / rollback_recommendations / release_effectiveness
+    三张表只把 column lower()、payload JSON 原封 json_dumps(result)，于是 caller
+    传 "1H" 时列是 "1h"、payload.timeframe 仍是 "1H"，读者从 payload 反序列化
+    会读到与列不一致的值。把 4 个 upsert 路径收敛到同一个 helper，避免以后
+    新增表又漏修。
+
+    Returns
+    -------
+    (timeframe_norm, combo_key_norm_or_None, data_for_payload)
+      * ``timeframe_norm`` 永远是 str；caller 没传时为 ``""``.
+      * ``combo_key_norm`` 为 ``None`` 表示 caller 未传且 family+timeframe 不足以
+        合成；caller 可以直接把它绑到 column（列允许 NULL）.
+      * ``data_for_payload`` 是浅拷贝；timeframe / combo_key 已就地归一，其余字段原样保留.
+    """
+    timeframe_norm = str(data.get("timeframe") or "").lower()
+    family_norm = str(data.get("family") or "")
+    combo_key_raw = data.get("combo_key")
+    if combo_key_raw:
+        combo_key_norm: str | None = str(combo_key_raw).lower()
+    elif family_norm and timeframe_norm:
+        combo_key_norm = f"{family_norm}_{timeframe_norm}".lower()
+    else:
+        combo_key_norm = None
+
+    data_for_payload = dict(data)
+    data_for_payload["timeframe"] = timeframe_norm
+    if combo_key_norm is not None:
+        data_for_payload["combo_key"] = combo_key_norm
+    return timeframe_norm, combo_key_norm, data_for_payload
+
+
 # Advisory lock keys 统一走 _db_util.ADVISORY_LOCK_KEYS 注册表：历史上
 # magic number 散落在各模块，一旦出现第三条调度路径要加锁就可能撞上同一
 # key 却无感。现在新增 lock 请在 _db_util 里登记，本地只保留 alias。
@@ -575,20 +612,10 @@ def db_list_gate_results_for_release(
 
 def db_upsert_parameter_release(session: Session, release: dict[str, Any]) -> None:
     # M5：column 与 payload JSON 必须归一到同一份 timeframe / combo_key。
-    # 历史上 column 走 timeframe.lower()、payload 直接 json_dumps(release)，
-    # caller 传 "1H" 这种写法时 column 是 "1h"、payload.timeframe 仍然是 "1H"，
-    # 读者从 payload 反序列化就会碰到不一致。这里做一份就地归一再序列化。
-    timeframe_norm = str(release.get("timeframe") or "").lower()
+    # 统一走 ``_normalize_combo_fields`` 与 observation_results /
+    # rollback_recommendations / release_effectiveness 三张表共享同一份归一化路径。
+    timeframe_norm, combo_key_norm, release_for_payload = _normalize_combo_fields(release)
     family_norm = str(release.get("family") or "")
-    combo_key_norm = release.get("combo_key") or (
-        f"{family_norm}_{timeframe_norm}" if family_norm and timeframe_norm else ""
-    )
-    if isinstance(combo_key_norm, str):
-        combo_key_norm = combo_key_norm.lower()
-    release_for_payload = dict(release)
-    release_for_payload["timeframe"] = timeframe_norm
-    if combo_key_norm:
-        release_for_payload["combo_key"] = combo_key_norm
 
     session.execute(
         text(
@@ -766,6 +793,9 @@ def db_get_latest_release_for_combo(
 
 
 def db_upsert_observation_result(session: Session, result: dict[str, Any]) -> None:
+    # M5 归一：历史上只 lower() 了 column，payload 仍 json_dumps(result) 原封保留
+    # 大小写 timeframe / combo_key，读者从 payload 反序列化时与列值不一致。
+    timeframe_norm, combo_key_norm, result_for_payload = _normalize_combo_fields(result)
     session.execute(
         text(
             """
@@ -794,15 +824,15 @@ def db_upsert_observation_result(session: Session, result: dict[str, Any]) -> No
         {
             "release_id": result.get("release_id"),
             "family": result.get("family"),
-            "timeframe": str(result.get("timeframe") or "").lower(),
-            "combo_key": result.get("combo_key"),
+            "timeframe": timeframe_norm,
+            "combo_key": combo_key_norm or result.get("combo_key"),
             "status": result.get("status", "unknown"),
             "recommendation": result.get("recommendation", "review"),
             "observation_window_hours": int(result.get("observation_window_hours") or 24),
             "window_active": bool(result.get("window_active")),
             "started_at": parse_dt(result.get("started_at")),
             "evaluated_at": parse_dt(result.get("evaluated_at")) or _utcnow(),
-            "payload": json_dumps(result),
+            "payload": json_dumps(result_for_payload),
             "updated_at": _utcnow(),
         },
     )
@@ -841,6 +871,9 @@ def db_list_observation_results(session: Session) -> list[dict[str, Any]]:
 
 
 def db_upsert_rollback_recommendation(session: Session, result: dict[str, Any]) -> None:
+    # M5 归一：同 observation_results 的修复动机，避免 column 与 payload 的
+    # timeframe / combo_key 大小写不一致。
+    timeframe_norm, combo_key_norm, result_for_payload = _normalize_combo_fields(result)
     session.execute(
         text(
             """
@@ -867,13 +900,13 @@ def db_upsert_rollback_recommendation(session: Session, result: dict[str, Any]) 
         {
             "release_id": result.get("release_id"),
             "family": result.get("family"),
-            "timeframe": str(result.get("timeframe") or "").lower(),
-            "combo_key": result.get("combo_key"),
+            "timeframe": timeframe_norm,
+            "combo_key": combo_key_norm or result.get("combo_key"),
             "rollback_recommended": bool(result.get("rollback_recommended")),
             "severity": result.get("severity", "none"),
             "suggested_target_parameter_set_id": result.get("suggested_target_parameter_set_id"),
             "evaluated_at": parse_dt(result.get("evaluated_at")) or _utcnow(),
-            "payload": json_dumps(result),
+            "payload": json_dumps(result_for_payload),
             "updated_at": _utcnow(),
         },
     )
@@ -896,6 +929,10 @@ def db_get_rollback_recommendation(session: Session, release_id: str) -> dict[st
 
 
 def db_upsert_release_effectiveness(session: Session, evaluation: dict[str, Any]) -> None:
+    # M5 归一：该表列里没有 combo_key，但 payload 归一仍有价值——下游读 JSON
+    # 时会拿到一致的 timeframe。_normalize_combo_fields 会同时计算 combo_key，
+    # 这里只使用 timeframe 部分。
+    timeframe_norm, _combo_key_norm, eval_for_payload = _normalize_combo_fields(evaluation)
     session.execute(
         text(
             """
@@ -919,10 +956,10 @@ def db_upsert_release_effectiveness(session: Session, evaluation: dict[str, Any]
             "evaluation_id": evaluation.get("evaluation_id"),
             "release_id": evaluation.get("release_id"),
             "family": evaluation.get("family"),
-            "timeframe": str(evaluation.get("timeframe") or "").lower() or None,
+            "timeframe": timeframe_norm or None,
             "conclusion": evaluation.get("conclusion", "unknown"),
             "evaluated_at": parse_dt(evaluation.get("evaluated_at")) or _utcnow(),
-            "payload": json_dumps(evaluation),
+            "payload": json_dumps(eval_for_payload),
             "updated_at": _utcnow(),
         },
     )

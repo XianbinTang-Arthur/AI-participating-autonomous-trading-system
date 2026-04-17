@@ -34,10 +34,17 @@ def test_create_release_api_rejects_prod_skip_gate() -> None:
     app.include_router(rdp_router)
     app.state.runtime = _build_runtime()
 
+    # /releases/create 入口装了 Step2 integrity gate（见
+    # test_create_release_blocked_when_step2_snapshot_incomplete）。本测试关心的
+    # 是 "prod + skip_gate = 拒绝" 的业务语义，需要先让 integrity gate 判定为
+    # healthy，否则请求会被前置门闸拦下，根本走不到 skip_gate 校验。
     with patch.dict(
         os.environ,
         {"RDP_ENV": "prod", "RDP_PRODUCTION_APPLY_ENABLED": "true"},
         clear=False,
+    ), patch(
+        "aats.api.rdp_routes._step2_integrity_blocking_reason",
+        return_value=None,
     ):
         client = TestClient(app)
         response = client.post(
@@ -53,6 +60,9 @@ def test_create_release_api_rejects_prod_skip_gate() -> None:
     assert response.status_code == 200
     payload = response.json()
     assert payload["ok"] is False
+    assert payload.get("integrity_blocked") is not True, (
+        "本测试不应走到 integrity_blocked 分支；若走到说明 patch 失效"
+    )
     assert "requires gate pass" in payload["message"]
 
 
@@ -64,12 +74,8 @@ def test_trigger_task_api_accepts_release_cycle() -> None:
     with (
         patch("aats.api.rdp_routes._governance_session", _fake_governance_session),
         patch(
-            "aats.data_platform.governance.rdp_task_db.db_has_active_task",
-            return_value=None,
-        ),
-        patch(
-            "aats.data_platform.governance.rdp_task_db.db_create_task",
-            return_value="task_release_cycle_1",
+            "aats.data_platform.governance.rdp_task_db.db_create_task_if_idle",
+            return_value=("task_release_cycle_1", None),
         ),
     ):
         client = TestClient(app)
@@ -648,8 +654,10 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
         patch("aats.data_platform.production_workflow.pre_apply_gate.run_pre_apply_gate", _fake_gate),
         patch("aats.data_platform.decision_system.active_parameter_apply.apply_approved_recommendation", _fake_apply),
         patch("aats.data_platform.decision_system.active_parameter_apply.rollback_active_parameter_set", _fake_rollback),
-        patch("aats.data_platform.governance.rdp_task_db.db_has_active_task", return_value=None),
-        patch("aats.data_platform.governance.rdp_task_db.db_create_task", return_value="task_demo_1"),
+        patch(
+            "aats.data_platform.governance.rdp_task_db.db_create_task_if_idle",
+            return_value=("task_demo_1", None),
+        ),
         patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
     ):
         client = TestClient(app)
@@ -905,6 +913,157 @@ def test_recommendation_approve_blocked_when_step2_snapshot_incomplete(tmp_path)
     recs = registry_contents.get("recommendations", [])
     assert recs and recs[0]["status"] == "draft", \
         "Integrity gate 必须阻止 registry 被 approve"
+
+
+def test_apply_parameter_blocked_when_step2_snapshot_incomplete(tmp_path) -> None:
+    """Step2 快照不完整时，/parameters/apply 必须被 server 端直接拒绝。
+
+    approve 时已有门闸，但 approve → apply 之间 Step2 仍可能 degrade；UI 会
+    同步禁用按钮，但 curl / 脚本 / 回放请求能绕过。apply 会把已批准的参数推
+    到 active_parameter_sets，影响面大于 approve 本身，server 必须再校验。
+    """
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+
+    # 不需要写任何 recommendation_registry：gate 在调用 apply 前就应返回
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value={"round_id": "round_step2_dirty", "manifest_synthesized": True},
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+            return_value=True,
+        ),
+        # 如果 gate 未触发、走进真实 apply 实现，必须直接炸开而不是静默走掉
+        patch(
+            "aats.data_platform.decision_system.active_parameter_apply."
+            "apply_approved_recommendation",
+            side_effect=AssertionError(
+                "apply_approved_recommendation 不能在 integrity gate 命中时被调用"
+            ),
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/parameters/apply",
+            json={
+                "recommendation_id": "rec_apply_bypass_attempt",
+                "actor": "operator",
+                "notes": "bypass attempt via curl",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload.get("integrity_blocked") is True, (
+        "apply 必须带 integrity_blocked=True，否则前端无法区分"
+        " Step2 降级 vs 业务失败"
+    )
+    assert "不完整" in payload["message"]
+
+
+def test_create_release_blocked_when_step2_snapshot_incomplete(tmp_path) -> None:
+    """Step2 快照不完整时，/releases/create 必须被 server 端直接拒绝。
+
+    /releases/create 触发 gate + apply 完整链路，影响面比单独 apply 更大
+    （会生成 parameter_release 行并进入 observation 阶段），必须有门闸。
+    """
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value={"round_id": "round_step2_dirty", "manifest_synthesized": True},
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+            return_value=True,
+        ),
+        patch(
+            "aats.data_platform.production_workflow.release_registry."
+            "create_parameter_release",
+            side_effect=AssertionError(
+                "create_parameter_release 不能在 integrity gate 命中时被调用"
+            ),
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/releases/create",
+            json={
+                "recommendation_id": "rec_release_bypass_attempt",
+                "actor": "operator",
+                "observation_window_hours": 24,
+                "skip_gate": False,
+                "skip_apply": False,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload.get("integrity_blocked") is True, (
+        "release/create 必须带 integrity_blocked=True"
+    )
+    assert "不完整" in payload["message"]
+
+
+def test_rollback_parameter_not_blocked_when_step2_snapshot_incomplete(tmp_path) -> None:
+    """反契约：rollback 是安全回滚动作，Step2 降级时仍必须可用。
+
+    如果哪天有人"顺手"给 /parameters/rollback 加了 integrity gate，这个测试会失败。
+    防止把"应急止血"路径一起锁死。
+    """
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value={"round_id": "round_step2_dirty", "manifest_synthesized": True},
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+            return_value=True,
+        ),
+        patch(
+            "aats.data_platform.decision_system.active_parameter_apply."
+            "rollback_active_parameter_set",
+            return_value={"ok": True, "rolled_back_to": "ps_prev"},
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/parameters/rollback",
+            json={
+                "family": "independent",
+                "timeframe": "15m",
+                "to_parameter_set_id": "ps_prev",
+                "actor": "operator",
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload.get("integrity_blocked") is not True, (
+        "rollback 是安全止血动作，Step2 降级时仍必须可用，不能被 integrity gate 锁死"
+    )
+    assert payload["ok"] is True
 
 
 # ======================================================================

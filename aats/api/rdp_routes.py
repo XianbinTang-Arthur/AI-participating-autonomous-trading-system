@@ -575,6 +575,20 @@ async def apply_parameter_api(
     )
 
     root = _project_root(request)
+
+    # Server-side integrity gate：与 approve / supersede 对等。approve 时已
+    # 有门闸，但 approve → apply 之间 Step2 snapshot 仍可能 degrade（比如
+    # 研究数据落库失败），UI 会同步禁用按钮但 curl 可直接打过来。apply 动作
+    # 会把批准的 parameter set 推到 active_parameter_sets，影响面比
+    # approve 本身大，必须再次强制 server-side 校验。
+    blocking_reason = _step2_integrity_blocking_reason(root)
+    if blocking_reason is not None:
+        return {
+            "ok": False,
+            "message": blocking_reason,
+            "integrity_blocked": True,
+        }
+
     return apply_approved_recommendation(
         root,
         recommendation_id=body.recommendation_id,
@@ -650,6 +664,20 @@ async def create_release_api(
         create_parameter_release,
     )
     root = _project_root(request)
+
+    # Server-side integrity gate：/releases/create 触发 gate + apply 全链路，
+    # 比单独 /parameters/apply 影响更大（会生成 parameter_release 行并进入
+    # observation 阶段）。approve / apply 已各自有门闸，这里补齐入口层。
+    # 与 /parameters/rollback 区别：rollback 是安全操作，Step2 即便挂也必须
+    # 让运营能用；release/create 是前向动作，任何 Step2 降级都应先阻断。
+    blocking_reason = _step2_integrity_blocking_reason(root)
+    if blocking_reason is not None:
+        return {
+            "ok": False,
+            "message": blocking_reason,
+            "integrity_blocked": True,
+        }
+
     return create_parameter_release(
         root,
         recommendation_id=body.recommendation_id,
@@ -804,8 +832,7 @@ async def trigger_task_api(
     """触发 RDP workflow 任务（写入 pending 到任务队列）."""
     from aats.data_platform.governance.rdp_task_db import (
         VALID_WORKFLOWS,
-        db_create_task,
-        db_has_active_task,
+        db_create_task_if_idle,
     )
 
     if body.workflow not in VALID_WORKFLOWS:
@@ -816,26 +843,31 @@ async def trigger_task_api(
         }
 
     try:
+        # 原子创建：has_active_task → create_task 旧路径的 TOCTOU 已由
+        # db_create_task_if_idle 的 "INSERT ... ON CONFLICT DO NOTHING"
+        # 一条 SQL 吸收，并发 operator 触发不会再打印 IntegrityError。
         with _governance_session() as session:
-            active = db_has_active_task(session, body.workflow)
-            if active:
-                return {
-                    "ok": False,
-                    "message": f"{body.workflow} 已有 {active['status']} 任务"
-                               f"（{active['task_id']}），请等待完成后再触发。",
-                    "existing_task": active,
-                }
-            task_id = db_create_task(
+            task_id, existing = db_create_task_if_idle(
                 session,
                 workflow=body.workflow,
                 requested_by=_resolve_actor(principal, body.actor),
             )
     except Exception:
-        # H2 风格修复：task 创建异常属于内部错误（DB 约束冲突 / 连接失败
-        # 等），message 直接回显给 caller 会把 SQL 片段、schema 名泄漏出去。
-        # 固定文案 + logger.exception 把堆栈留日志。
+        # H2 风格修复：task 创建异常属于内部错误（DB 连接失败 / 事务异常等），
+        # message 直接回显给 caller 会把 SQL 片段、schema 名泄漏出去。固定
+        # 文案 + logger.exception 把堆栈留日志。
         logger.exception("Failed to create task for workflow=%s", body.workflow)
         return {"ok": False, "message": "创建任务失败，请查看服务端日志。"}
+
+    if task_id is None:
+        return {
+            "ok": False,
+            "message": (
+                f"{body.workflow} 已有 {existing['status']} 任务"
+                f"（{existing['task_id']}），请等待完成后再触发。"
+            ) if existing else f"{body.workflow} 已有活跃任务，请稍后再试。",
+            "existing_task": existing,
+        }
 
     return {"ok": True, "task_id": task_id, "workflow": body.workflow}
 

@@ -30,7 +30,10 @@ import pytest
 from aats.data_platform.governance.operational_state_db import (
     db_set_gate_result_release_id,
     db_update_parameter_release_status,
+    db_upsert_observation_result,
     db_upsert_parameter_release,
+    db_upsert_release_effectiveness,
+    db_upsert_rollback_recommendation,
 )
 
 
@@ -94,6 +97,15 @@ class _FakeSession:
         if sql.startswith("INSERT INTO governance.parameter_releases"):
             release_id = (params or {}).get("release_id")
             self.release_rows[release_id] = dict(params or {})
+            return _FakeResult([])
+
+        if sql.startswith("INSERT INTO governance.observation_results"):
+            return _FakeResult([])
+
+        if sql.startswith("INSERT INTO governance.rollback_recommendations"):
+            return _FakeResult([])
+
+        if sql.startswith("INSERT INTO governance.release_effectiveness"):
             return _FakeResult([])
 
         if sql.startswith("SELECT 1 AS present"):
@@ -328,3 +340,168 @@ def test_m6_noop_call_missing_row_returns_false() -> None:
     ok = db_update_parameter_release_status(session, "rel_missing")
 
     assert ok is False
+
+
+# =====================================================================
+# M5 扩展：observation_results / rollback_recommendations /
+# release_effectiveness 三张表同样要做 column↔payload 归一
+# =====================================================================
+#
+# 历史 bug：旧实现只 lower() 了 column，payload 仍直接 json_dumps(result)，
+# caller 传 "1H" 时 column="1h" 但 payload.timeframe="1H"；下游读 payload
+# 反序列化就会和列值对不上。
+
+
+def _find_insert_params(session: _FakeSession, table: str) -> dict[str, Any]:
+    prefix = f"INSERT INTO governance.{table}"
+    for sql, params in session.statements:
+        if sql.startswith(prefix):
+            return params
+    raise AssertionError(f"未找到 {table} 的 INSERT 语句")
+
+
+def test_m5_observation_result_timeframe_and_combo_key_normalized() -> None:
+    """db_upsert_observation_result：column 和 payload 的 timeframe/combo_key 都必须归一。"""
+    session = _FakeSession()
+
+    db_upsert_observation_result(
+        session,
+        {
+            "release_id": "rel_o1",
+            "family": "Directional",
+            "timeframe": "1H",
+            "combo_key": "Directional_1H",
+            "status": "active",
+            "recommendation": "review",
+            "observation_window_hours": 24,
+            "window_active": True,
+            "started_at": None,
+            "evaluated_at": None,
+        },
+    )
+
+    params = _find_insert_params(session, "observation_results")
+    assert params["timeframe"] == "1h"
+    assert params["combo_key"] == "directional_1h"
+    payload = json.loads(params["payload"])
+    assert payload["timeframe"] == "1h", (
+        "observation_results.payload.timeframe 必须与列归一一致，"
+        "否则读者从 JSON 反序列化会拿到 '1H' 与列 '1h' 冲突"
+    )
+    assert payload["combo_key"] == "directional_1h"
+
+
+def test_m5_observation_result_combo_key_inferred_when_missing() -> None:
+    """未传 combo_key → 由 family_timeframe 合成。"""
+    session = _FakeSession()
+
+    db_upsert_observation_result(
+        session,
+        {
+            "release_id": "rel_o2",
+            "family": "Independent",
+            "timeframe": "15M",
+            "status": "active",
+            "recommendation": "review",
+        },
+    )
+
+    params = _find_insert_params(session, "observation_results")
+    assert params["combo_key"] == "independent_15m"
+    payload = json.loads(params["payload"])
+    assert payload["combo_key"] == "independent_15m"
+
+
+def test_m5_rollback_recommendation_timeframe_and_combo_key_normalized() -> None:
+    """db_upsert_rollback_recommendation：column + payload 都归一。"""
+    session = _FakeSession()
+
+    db_upsert_rollback_recommendation(
+        session,
+        {
+            "release_id": "rel_r1",
+            "family": "Directional",
+            "timeframe": "4H",
+            "combo_key": "Directional_4H",
+            "rollback_recommended": True,
+            "severity": "high",
+            "suggested_target_parameter_set_id": "ps_prev",
+        },
+    )
+
+    params = _find_insert_params(session, "rollback_recommendations")
+    assert params["timeframe"] == "4h"
+    assert params["combo_key"] == "directional_4h"
+    payload = json.loads(params["payload"])
+    assert payload["timeframe"] == "4h"
+    assert payload["combo_key"] == "directional_4h"
+
+
+def test_m5_rollback_recommendation_combo_key_inferred_when_missing() -> None:
+    session = _FakeSession()
+
+    db_upsert_rollback_recommendation(
+        session,
+        {
+            "release_id": "rel_r2",
+            "family": "Contrarian",
+            "timeframe": "30M",
+            "rollback_recommended": False,
+            "severity": "none",
+        },
+    )
+
+    params = _find_insert_params(session, "rollback_recommendations")
+    assert params["combo_key"] == "contrarian_30m"
+    payload = json.loads(params["payload"])
+    assert payload["combo_key"] == "contrarian_30m"
+
+
+def test_m5_release_effectiveness_timeframe_normalized_in_column_and_payload() -> None:
+    """db_upsert_release_effectiveness：列里没 combo_key，但 payload 的
+    timeframe 必须归一；否则读 JSON 的 metrics 层会与 parameter_releases
+    的 combo_key 拼不起来。
+    """
+    session = _FakeSession()
+
+    db_upsert_release_effectiveness(
+        session,
+        {
+            "evaluation_id": "eval_1",
+            "release_id": "rel_e1",
+            "family": "Directional",
+            "timeframe": "1H",
+            "conclusion": "positive",
+            "evaluated_at": None,
+        },
+    )
+
+    params = _find_insert_params(session, "release_effectiveness")
+    assert params["timeframe"] == "1h"
+    payload = json.loads(params["payload"])
+    assert payload["timeframe"] == "1h", (
+        "release_effectiveness.payload.timeframe 必须与列归一一致"
+    )
+
+
+def test_m5_release_effectiveness_blank_timeframe_becomes_null_column() -> None:
+    """caller 没传 timeframe → 列落 NULL，payload 里保留 '' 以免破坏 JSON 结构。
+    （该表历史上允许 timeframe 为 NULL，防止 bind 层报错。）
+    """
+    session = _FakeSession()
+
+    db_upsert_release_effectiveness(
+        session,
+        {
+            "evaluation_id": "eval_2",
+            "release_id": "rel_e2",
+            "family": "Directional",
+            "conclusion": "negative",
+        },
+    )
+
+    params = _find_insert_params(session, "release_effectiveness")
+    assert params["timeframe"] is None, (
+        "caller 没传 timeframe 时列应保持 NULL，不要改成 '' "
+        "否则 UNIQUE index 语义和历史兼容被破坏"
+    )

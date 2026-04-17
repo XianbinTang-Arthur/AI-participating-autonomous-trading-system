@@ -30,6 +30,13 @@ VALID_WORKFLOWS = {
     "release_cycle",
 }
 
+# orphan-recovery 的 sentinel exit_code：daemon 崩溃 / 被 kill 后留下的
+# running 任务在 startup 阶段被统一改写成 failed，用这个特殊值让运维和
+# 下游看板能把 "任务自己退出非零" 与 "daemon 死了导致的补偿回收" 区分开。
+# 值落库到 governance.rdp_task_queue.exit_code，不要随意改动，以免和
+# 已有告警规则/仪表盘失配。
+_ORPHAN_RECOVERY_EXIT_CODE = -3
+
 
 # ── INSERT 新任务 ──────────────────────────────────────────────────
 
@@ -43,6 +50,12 @@ def db_create_task(
 
     调用前应校验 workflow 合法性。如果同类 workflow 已有 pending/running
     任务，调用方应拒绝创建（防止重复提交）。
+
+    并发安全性：governance.rdp_task_queue 上有
+    ``ix_rdp_task_one_active_per_workflow`` 这条 partial unique index
+    （workflow 列，status IN ('pending','running')）兜底，若并发 INSERT
+    撞到已有 active 任务会抛 ``IntegrityError``。希望把 race 归并为优雅的
+    "已有活跃任务" 响应的 caller，应改用 :func:`db_create_task_if_idle`。
     """
     if workflow not in VALID_WORKFLOWS:
         raise ValueError(f"Invalid workflow: {workflow!r}, expected one of {VALID_WORKFLOWS}")
@@ -64,6 +77,75 @@ def db_create_task(
     )
     log.info("DB created task: %s workflow=%s by=%s", task_id, workflow, requested_by)
     return task_id
+
+
+def db_create_task_if_idle(
+    session: Session,
+    *,
+    workflow: str,
+    requested_by: str = "operator",
+) -> tuple[str | None, dict[str, Any] | None]:
+    """原子创建任务：同 workflow 已有 pending/running 时不插入。
+
+    Returns
+    -------
+    (task_id, None)
+        新任务创建成功（状态 pending）.
+    (None, existing_active_task_dict)
+        已有同 workflow 的活跃任务，未创建；existing dict 的结构与
+        :func:`db_has_active_task` 一致（``task_id`` / ``status`` /
+        ``requested_at`` / ``started_at``）.
+
+    背景：旧路径是 ``db_has_active_task`` → ``db_create_task`` 两条 SQL，
+    API handler 与 scheduler 在高并发下可能都通过了 has_active_task 再
+    双双 INSERT。第二次 INSERT 虽然被 ``ix_rdp_task_one_active_per_workflow``
+    partial unique index 兜底拦下（IntegrityError），但 caller 的通用 except
+    会把它抹平成 "创建任务失败" 的误导消息，用户看到的是 500 一样的结果。
+
+    本函数把判断+插入收敛到一条 ``INSERT ... ON CONFLICT DO NOTHING
+    RETURNING`` SQL，用 partial unique index 的冲突语义直接吸收 race：
+      * 首先抢到索引的 writer → INSERT 成功 → RETURNING 返回 task_id.
+      * 后续并发 writer → ON CONFLICT DO NOTHING → RETURNING 空 → 读现有行
+        并返回给 caller 一个 "已有活跃任务" 的结构化响应，无异常路径。
+    """
+    if workflow not in VALID_WORKFLOWS:
+        raise ValueError(f"Invalid workflow: {workflow!r}, expected one of {VALID_WORKFLOWS}")
+
+    task_id = f"task_{uuid4().hex[:12]}"
+    now = datetime.now(timezone.utc)
+    result = session.execute(
+        text(
+            """
+            INSERT INTO governance.rdp_task_queue
+                (task_id, workflow, status, requested_by, requested_at, created_at)
+            VALUES
+                (:task_id, :workflow, 'pending', :requested_by, :now, :now)
+            ON CONFLICT (workflow) WHERE status IN ('pending', 'running')
+            DO NOTHING
+            RETURNING task_id
+            """
+        ),
+        {
+            "task_id": task_id,
+            "workflow": workflow,
+            "requested_by": requested_by,
+            "now": now,
+        },
+    )
+    row = result.fetchone()
+    if row is not None:
+        log.info(
+            "DB create_task_if_idle: created %s workflow=%s by=%s",
+            row.task_id, workflow, requested_by,
+        )
+        return row.task_id, None
+
+    existing = db_has_active_task(session, workflow)
+    log.info(
+        "DB create_task_if_idle: skip (existing active task %s for %s)",
+        (existing or {}).get("task_id") or "?", workflow,
+    )
+    return None, existing
 
 
 # ── 领取下一条待执行任务（daemon 专用）──────────────────────────────
@@ -151,7 +233,7 @@ def db_recover_orphaned_running_tasks(
     session: Session,
     *,
     error_message: str = "rdp_daemon_restarted_before_task_finished",
-    exit_code: int = -3,
+    exit_code: int = _ORPHAN_RECOVERY_EXIT_CODE,
 ) -> list[dict[str, Any]]:
     """将 daemon 异常退出后遗留的 running 任务统一回收成 failed。"""
     rows = session.execute(
