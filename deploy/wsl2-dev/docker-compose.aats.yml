@@ -96,6 +96,8 @@ services:
     environment:
       <<: *aats-common-env
       AATS_PROCESS_ROLE: gateway
+      AATS_OPERATOR_TLS_CERT_FILE: ${AATS_OPERATOR_TLS_CERT_FILE:-}
+      AATS_OPERATOR_TLS_KEY_FILE: ${AATS_OPERATOR_TLS_KEY_FILE:-}
     # command 走 scripts/compose_entrypoint.py shim：shim 读 AATS_PROFILE env var
     # 调 load_profiled_dotenv_into_process() 补齐 AATS_STARTUP_PROFILE /
     # AATS_ENV_TEMPLATE_PROFILE 两个派生变量，然后 execvp 到真正的 uvicorn 进程。
@@ -117,6 +119,8 @@ services:
     # 如果没传 --env-file 则 fallback 到 8000。
     ports:
       - "${AATS_API_PORT:-8000}:${AATS_API_PORT:-8000}"
+    volumes:
+      - ../../deploy/wsl2-dev/runtime/operator-tls:/app/deploy/wsl2-dev/runtime/operator-tls:ro
     networks:
       - aats
     # gateway 是 4 进程里最重的 API 层：跑所有 dashboard 查询 + ThreadPoolExecutor
@@ -131,7 +135,11 @@ services:
     # 下会调到 runtime.market_gateway / execution_adapter (都是 None)，NPE 500。
     # 改用 /healthz —— lightweight liveness，无 auth 无 service 依赖。
     healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:${AATS_API_PORT:-8000}/healthz"]
+      test:
+        [
+          "CMD-SHELL",
+          "if [ -n \"$AATS_OPERATOR_TLS_CERT_FILE\" ] && [ -n \"$AATS_OPERATOR_TLS_KEY_FILE\" ]; then curl -kfs https://localhost:${AATS_API_PORT:-8000}/healthz; else curl -fs http://localhost:${AATS_API_PORT:-8000}/healthz; fi",
+        ]
       interval: 15s
       timeout: 5s
       retries: 5
