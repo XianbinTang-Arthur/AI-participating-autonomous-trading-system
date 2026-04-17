@@ -4,6 +4,7 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from aats.api.auth_routes import auth_router, invalidate_bundle_cache
 from aats.api.rdp_routes import rdp_router
@@ -17,6 +18,10 @@ from aats.bootstrap.settings import (
     PROCESS_ROLE_MONOLITH,
 )
 from aats.bootstrap.telemetry import start_span
+from aats.data_platform.governance._exceptions import (
+    DBConstraintViolation,
+    DBUnavailableError,
+)
 
 # 任何 mutation 请求（POST/PATCH/PUT/DELETE）成功后都要把 dashboard bundle
 # 缓存清空一次。否则用户切 mode / 触发 halt / 激活 profile 后，紧接着的
@@ -130,6 +135,39 @@ async def _gateway_trace_root_span(request: Request, call_next):
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok", "process_role": _resolved_process_role()}
+
+
+# A-0.3：governance DB 写路径的统一错误→HTTP 映射。
+# DBUnavailableError 是基础设施级不可达（e.g. 数据库宕机 / 连接耗尽），
+# HTTP 契约上等价于 503 Service Unavailable，客户端应当重试；
+# DBConstraintViolation 代表 FK / UQ / CHECK 被触发，通常是上游脏数据或业务
+# 规则违反，映射成 422 Unprocessable Entity 让 operator / UI 看到原因。
+# 这两条 handler 把写路径的异常收口到明确的 HTTP 语义，避免 FastAPI 默认
+# 500 Internal Server Error 把基础设施故障与业务逻辑 bug 混成一锅。
+@app.exception_handler(DBUnavailableError)
+async def _handle_db_unavailable(_request: Request, exc: DBUnavailableError) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "ok": False,
+            "error": "db_unavailable",
+            "message": str(exc),
+        },
+    )
+
+
+@app.exception_handler(DBConstraintViolation)
+async def _handle_db_constraint_violation(
+    _request: Request, exc: DBConstraintViolation,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={
+            "ok": False,
+            "error": "db_constraint_violation",
+            "message": str(exc),
+        },
+    )
 
 
 app.include_router(auth_router)

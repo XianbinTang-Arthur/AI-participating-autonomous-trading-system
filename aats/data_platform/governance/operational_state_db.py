@@ -796,6 +796,17 @@ def db_upsert_observation_result(session: Session, result: dict[str, Any]) -> No
     # M5 归一：历史上只 lower() 了 column，payload 仍 json_dumps(result) 原封保留
     # 大小写 timeframe / combo_key，读者从 payload 反序列化时与列值不一致。
     timeframe_norm, combo_key_norm, result_for_payload = _normalize_combo_fields(result)
+    # A-0.3 (详见 rdp_hardening_batch_a_detailed_design.md §4.8 allowlist 注释):
+    # observation_results.status 允许的取值为 {observing, completed, rollback_recommended}。
+    # 历史的 .get("status", "unknown") 兜底会在 A-1 CHECK 约束上线后直接撞 FK / CHECK
+    # 违反，而且早在今天就会让 payload 与 column 进入互相矛盾的状态；这里直接抛
+    # ValueError，迫使上游修好 result 字典再来。
+    status_val = result.get("status")
+    if status_val not in {"observing", "completed", "rollback_recommended"}:
+        raise ValueError(
+            "db_upsert_observation_result: status must be one of "
+            f"{{'observing','completed','rollback_recommended'}}; got {status_val!r}"
+        )
     session.execute(
         text(
             """
@@ -826,7 +837,7 @@ def db_upsert_observation_result(session: Session, result: dict[str, Any]) -> No
             "family": result.get("family"),
             "timeframe": timeframe_norm,
             "combo_key": combo_key_norm or result.get("combo_key"),
-            "status": result.get("status", "unknown"),
+            "status": status_val,
             "recommendation": result.get("recommendation", "review"),
             "observation_window_hours": int(result.get("observation_window_hours") or 24),
             "window_active": bool(result.get("window_active")),

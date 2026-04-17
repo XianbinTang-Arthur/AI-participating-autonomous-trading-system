@@ -1143,6 +1143,21 @@ def _phase_b_patch_stack(root):
         "aats.data_platform.decision_system.recommendation_registry.try_governance_db",
         lambda: (None, False),
     ))
+    # A-0.3 之后 DB 不可达会抛 DBUnavailableError，这些 Phase B 测试只关心 API
+    # pre-check + 业务逻辑分支（404 / 409 / cas_race / 200），不测 DB 集成，所以
+    # 把底层 _db_* 辅助函数打桩成 no-op / 固定返回值，保留原测试意图。
+    stack.enter_context(patch(
+        "aats.data_platform.decision_system.recommendation_registry._db_sync_recommendation",
+        lambda *a, **kw: None,
+    ))
+    stack.enter_context(patch(
+        "aats.data_platform.decision_system.recommendation_registry._db_update_rec_status",
+        lambda *a, **kw: True,
+    ))
+    stack.enter_context(patch(
+        "aats.data_platform.decision_system.recommendation_registry._db_sync_active_decision",
+        lambda *a, **kw: None,
+    ))
     stack.enter_context(patch(
         "aats.api.rdp_routes._step2_integrity_blocking_reason",
         lambda _root: None,

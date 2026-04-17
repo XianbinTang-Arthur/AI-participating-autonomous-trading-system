@@ -30,6 +30,19 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
 
 
+def _fake_save_release_history(history: dict, project_root: Path) -> Path:
+    """Test stub for A-0.3: mimic the 'DB succeeded → JSON written' path without DB.
+
+    The real `save_release_history` now raises DBUnavailableError when governance
+    DB is unreachable (A-0.3 contract). These tests don't exercise the DB layer,
+    so we substitute this stub that performs only the JSON audit write.
+    """
+    path = project_root / "artifacts/production_workflow/parameter_release_history.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(history, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 def _seed_rdp_health_artifacts(root: Path) -> None:
     generated_at = datetime.now(timezone.utc).isoformat()
     _write_json(root / "artifacts/governance/artifact_index.json", {"generated_at": generated_at})
@@ -195,6 +208,10 @@ def test_create_parameter_release_passes_release_context_to_apply() -> None:
             "aats.data_platform.decision_system.active_parameter_apply.apply_approved_recommendation",
             return_value={"ok": True, "message": "applied"},
         ) as apply_mock,
+        patch(
+            "aats.data_platform.production_workflow.release_registry.save_release_history",
+            side_effect=_fake_save_release_history,
+        ),
     ):
         result = create_parameter_release(
             Path("."),
@@ -289,8 +306,8 @@ def test_rollback_marks_latest_successful_release_as_rolled_back(tmp_path: Path)
             return_value=(None, False),
         ),
         patch(
-            "aats.data_platform.production_workflow.release_registry.try_governance_db",
-            return_value=(None, False),
+            "aats.data_platform.production_workflow.release_registry.save_release_history",
+            side_effect=_fake_save_release_history,
         ),
     ):
         result = rollback_active_parameter_set(

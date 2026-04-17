@@ -371,7 +371,7 @@ def test_m5_observation_result_timeframe_and_combo_key_normalized() -> None:
             "family": "Directional",
             "timeframe": "1H",
             "combo_key": "Directional_1H",
-            "status": "active",
+            "status": "observing",
             "recommendation": "review",
             "observation_window_hours": 24,
             "window_active": True,
@@ -401,7 +401,7 @@ def test_m5_observation_result_combo_key_inferred_when_missing() -> None:
             "release_id": "rel_o2",
             "family": "Independent",
             "timeframe": "15M",
-            "status": "active",
+            "status": "observing",
             "recommendation": "review",
         },
     )

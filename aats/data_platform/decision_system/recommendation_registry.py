@@ -21,6 +21,10 @@ from typing import Any
 from uuid import uuid4
 
 from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance._exceptions import (
+    DBConstraintViolation,
+    DBUnavailableError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -28,15 +32,30 @@ log = logging.getLogger(__name__)
 # ── DB 辅助 ──────────────────────────────────────────────────────────
 
 def _db_sync_recommendation(rec: dict[str, Any]) -> None:
-    """将单个 recommendation dict 同步到 DB（best-effort）."""
+    """将单个 recommendation dict 同步到 governance DB.
+
+    A-0.3 硬纪律：DB 是真源，文件只是审计副本。DB 不可达或约束违反一律抛
+    异常交给上层，不允许悄悄降级到 "仅写文件" —— 那是上一次 split-brain 事故
+    的根因（approved 记录仅出现在 JSON，DB 里没落库，后续流程读 DB 就看不到）。
+
+    Raises
+    ------
+    DBUnavailableError
+        ``try_governance_db`` 失败或执行时连接挂了，基础设施级问题。
+    DBConstraintViolation
+        IntegrityError（FK / UQ / CHECK）；一般是上游脏数据或 schema bug。
+    """
+    from sqlalchemy.exc import IntegrityError, OperationalError
+    from sqlalchemy.orm import Session
+
+    from aats.data_platform.governance.recommendations_db import db_upsert_recommendation
+
     engine, ok = try_governance_db()
     if not ok:
-        return
+        raise DBUnavailableError(
+            f"governance DB unavailable while syncing recommendation {rec.get('recommendation_id')!r}"
+        )
     try:
-        from sqlalchemy.orm import Session
-
-        from aats.data_platform.governance.recommendations_db import db_upsert_recommendation
-
         with Session(engine) as session, session.begin():
             db_upsert_recommendation(
                 session,
@@ -60,8 +79,14 @@ def _db_sync_recommendation(rec: dict[str, Any]) -> None:
                 superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
                 created_at=rec.get("created_at"),
             )
-    except Exception as exc:
-        log.warning("recommendation_registry: DB 写入失败 (%s)", exc)
+    except IntegrityError as exc:
+        raise DBConstraintViolation(
+            f"recommendation {rec.get('recommendation_id')!r} violated DB constraint: {exc}"
+        ) from exc
+    except OperationalError as exc:
+        raise DBUnavailableError(
+            f"DB operational error while syncing recommendation {rec.get('recommendation_id')!r}: {exc}"
+        ) from exc
     finally:
         if engine is not None:
             engine.dispose()
@@ -71,35 +96,44 @@ def _db_update_rec_status(
     rec: dict[str, Any],
     *,
     expected_current_status: str | tuple[str, ...] | None = None,
-) -> bool | None:
+) -> bool:
     """将 recommendation 状态变更同步到 DB.
+
+    A-0.3 清扫后不再返回 ``None``：DB 不可达一律抛 :class:`DBUnavailableError`，
+    调用方必须显式回滚内存态、把异常抛给 API 层（503）或后台任务。
 
     Returns
     -------
-    None
-        governance DB 不可达 → 退化为文件模式，调用方当作"我尽力了"继续走。
     True
-        DB 可达且 UPDATE 生效（rowcount > 0）。
+        UPDATE 生效（rowcount > 0）。
     False
-        DB 可达但 UPDATE 没命中预期前置状态（rowcount == 0）——并发竞态检测
-        （另一 operator 已经抢先把该 rec 推进到新状态），或者 expected_current_status
-        指定了约束但 rec 根本没匹配上。调用方应当把内存里的本次变更回滚，避免
-        JSON 与 DB 不一致。
+        CAS 冲突：UPDATE 没命中预期前置状态（另一 operator 已经抢先改写）。
+        调用方回滚内存本次改动即可，不当作异常。
+
+    Raises
+    ------
+    DBUnavailableError
+        ``try_governance_db`` 失败或运行时连接异常（基础设施问题）。
+    DBConstraintViolation
+        IntegrityError（FK / UQ / CHECK）。
 
     Notes
     -----
-    调用方若不传 ``expected_current_status`` 则退化为 best-effort（历史行为），
-    只能区分 None / True，不会返回 False。状态流转（approve/reject/supersede）
-    必须传这个参数以拿到并发竞态信号。
+    调用方必须传 ``expected_current_status`` 才能拿到 CAS 竞态信号；不传则
+    相当于退化成 best-effort（只返回 ``True``，不会返回 ``False``），历史行为
+    保留是为了兼容早期读路径，新代码不要依赖。
     """
+    from sqlalchemy.exc import IntegrityError, OperationalError
+    from sqlalchemy.orm import Session
+
+    from aats.data_platform.governance.recommendations_db import db_update_recommendation_status
+
     engine, ok = try_governance_db()
     if not ok:
-        return None
+        raise DBUnavailableError(
+            f"governance DB unavailable while updating recommendation {rec.get('recommendation_id')!r}"
+        )
     try:
-        from sqlalchemy.orm import Session
-
-        from aats.data_platform.governance.recommendations_db import db_update_recommendation_status
-
         with Session(engine) as session, session.begin():
             return db_update_recommendation_status(
                 session,
@@ -115,9 +149,14 @@ def _db_update_rec_status(
                 superseded_by_recommendation_id=rec.get("superseded_by_recommendation_id"),
                 expected_current_status=expected_current_status,
             )
-    except Exception as exc:
-        log.warning("recommendation_registry: DB 状态更新失败 (%s)", exc)
-        return None
+    except IntegrityError as exc:
+        raise DBConstraintViolation(
+            f"recommendation {rec.get('recommendation_id')!r} status update violated constraint: {exc}"
+        ) from exc
+    except OperationalError as exc:
+        raise DBUnavailableError(
+            f"DB operational error while updating recommendation {rec.get('recommendation_id')!r}: {exc}"
+        ) from exc
     finally:
         if engine is not None:
             engine.dispose()
@@ -129,15 +168,21 @@ def _db_sync_active_decision(
     last_recommendation_id: str | None = None,
     notes: str | None = None,
 ) -> None:
-    """将 active decision UPSERT 同步到 DB（best-effort）."""
+    """将 active decision UPSERT 同步到 DB.
+
+    A-0.3：不再吞异常。DB 不可达或约束违反一律抛给上层。
+    """
+    from sqlalchemy.exc import IntegrityError, OperationalError
+    from sqlalchemy.orm import Session
+
+    from aats.data_platform.governance.recommendations_db import db_upsert_active_decision
+
     engine, ok = try_governance_db()
     if not ok:
-        return
+        raise DBUnavailableError(
+            f"governance DB unavailable while syncing active_decision {family}/{timeframe}"
+        )
     try:
-        from sqlalchemy.orm import Session
-
-        from aats.data_platform.governance.recommendations_db import db_upsert_active_decision
-
         with Session(engine) as session, session.begin():
             db_upsert_active_decision(
                 session,
@@ -147,8 +192,14 @@ def _db_sync_active_decision(
                 last_recommendation_id=last_recommendation_id,
                 notes=notes,
             )
-    except Exception as exc:
-        log.warning("recommendation_registry: DB active_decision 写入失败 (%s)", exc)
+    except IntegrityError as exc:
+        raise DBConstraintViolation(
+            f"active_decision {family}/{timeframe} violated constraint: {exc}"
+        ) from exc
+    except OperationalError as exc:
+        raise DBUnavailableError(
+            f"DB operational error while syncing active_decision {family}/{timeframe}: {exc}"
+        ) from exc
     finally:
         if engine is not None:
             engine.dispose()
@@ -327,9 +378,14 @@ def add_recommendation(
             existing["superseded_at"] = rec.get("created_at")
             existing["superseded_by"] = "system"
             existing["superseded_by_recommendation_id"] = new_id
-            db_result = _db_update_rec_status(
-                existing, expected_current_status="draft",
-            )
+            try:
+                db_result = _db_update_rec_status(
+                    existing, expected_current_status="draft",
+                )
+            except DBUnavailableError:
+                for key, value in prev_snapshot.items():
+                    existing[key] = value
+                raise
             if db_result is False:
                 for key, value in prev_snapshot.items():
                     existing[key] = value
@@ -339,8 +395,10 @@ def add_recommendation(
                     existing.get("recommendation_id"),
                 )
 
-    registry.setdefault("recommendations", []).append(rec)
+    # A-0.3：DB 真源写入成功后才 append 到内存并落审计副本，否则 DB 不可达时
+    # 内存里会残留一条 DB 无法回放的 recommendation，产生 split-brain。
     _db_sync_recommendation(rec)
+    registry.setdefault("recommendations", []).append(rec)
 
 
 def find_recommendation(
@@ -394,7 +452,12 @@ def approve_recommendation(
     rec["approved_at"] = datetime.now(timezone.utc).isoformat()
     if notes:
         rec["review_notes"] = notes
-    db_result = _db_update_rec_status(rec, expected_current_status="draft")
+    try:
+        db_result = _db_update_rec_status(rec, expected_current_status="draft")
+    except DBUnavailableError:
+        for key, value in prev_snapshot.items():
+            rec[key] = value
+        raise
     if db_result is False:
         # 并发：另一 operator 已经抢先转移了状态，回滚本次修改，让 JSON 保持
         # 与 DB 一致；调用方收到 None 后应提示"状态已被他人改写"。
@@ -439,7 +502,12 @@ def reject_recommendation(
     rec["rejected_at"] = datetime.now(timezone.utc).isoformat()
     if notes:
         rec["review_notes"] = notes
-    db_result = _db_update_rec_status(rec, expected_current_status="draft")
+    try:
+        db_result = _db_update_rec_status(rec, expected_current_status="draft")
+    except DBUnavailableError:
+        for key, value in prev_snapshot.items():
+            rec[key] = value
+        raise
     if db_result is False:
         for key, value in prev_snapshot.items():
             rec[key] = value
@@ -495,9 +563,14 @@ def supersede_recommendation(
         rec["superseded_by_recommendation_id"] = superseded_by_id
     if notes:
         rec["review_notes"] = notes
-    db_result = _db_update_rec_status(
-        rec, expected_current_status=("draft", "approved"),
-    )
+    try:
+        db_result = _db_update_rec_status(
+            rec, expected_current_status=("draft", "approved"),
+        )
+    except DBUnavailableError:
+        for key, value in prev_snapshot.items():
+            rec[key] = value
+        raise
     if db_result is False:
         for key, value in prev_snapshot.items():
             rec[key] = value
@@ -587,7 +660,14 @@ def upsert_active_decision(
 
     now = datetime.now(timezone.utc).isoformat()
 
+    # A-0.3: DB-first，失败时必须回滚内存态。existing 路径需要保留整条快照用于恢复，
+    # new 路径则记录"我们 append 的索引"以便 pop 掉——否则 DB 不可达时内存里残留
+    # 一条 DB 无法回放的 active_decision，产生 split-brain。
+    prev_snapshot: dict[str, Any] | None = None
+    appended_index: int | None = None
+
     if existing:
+        prev_snapshot = dict(existing)
         existing["current_status"] = current_status
         existing["active_parameter_set_id"] = active_parameter_set_id
         existing["last_recommendation_id"] = last_recommendation_id
@@ -597,6 +677,7 @@ def upsert_active_decision(
         if notes:
             existing["notes"] = notes
     else:
+        appended_index = len(decisions)
         decisions.append({
             "family": family,
             "symbol": symbol,
@@ -609,12 +690,23 @@ def upsert_active_decision(
             "notes": notes,
         })
 
-    _db_sync_active_decision(
-        family, timeframe_norm, current_status,
-        active_parameter_set_id=active_parameter_set_id,
-        last_recommendation_id=last_recommendation_id,
-        notes=notes,
-    )
+    try:
+        _db_sync_active_decision(
+            family, timeframe_norm, current_status,
+            active_parameter_set_id=active_parameter_set_id,
+            last_recommendation_id=last_recommendation_id,
+            notes=notes,
+        )
+    except DBUnavailableError:
+        if existing is not None and prev_snapshot is not None:
+            existing.clear()
+            existing.update(prev_snapshot)
+        elif appended_index is not None:
+            # 防御性：并发 upsert 可能插入了新 entry，删除前检查索引仍指向我们 append
+            # 的那一行（它会是最后一条，因为我们刚 append 完）。
+            if appended_index < len(decisions):
+                decisions.pop(appended_index)
+        raise
 
 
 # ── Evidence Bundle Index ────────────────────────────────────────────

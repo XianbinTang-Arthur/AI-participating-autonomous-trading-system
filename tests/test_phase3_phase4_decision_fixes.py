@@ -238,6 +238,19 @@ class TestEvidenceBundleOverallStatusFallback:
 class TestRecommendationRegistryStateGuard:
     """P0-3: approve/reject 非 draft 状态应返回 None 而非继续执行。"""
 
+    @pytest.fixture(autouse=True)
+    def _stub_governance_db(self, monkeypatch: Any) -> None:
+        """A-0.3 之后，add/approve/reject/supersede 在 DB 不可达时会直接抛
+        ``DBUnavailableError``。本类里的测试只关心 in-memory 状态机，不测 DB，
+        所以把 ``_db_*`` 辅助函数全部打桩成 no-op / 固定返回值——这与之前
+        "DB 不可达就悄悄跳过" 的行为等价，让测试意图保持不变。
+        """
+        from aats.data_platform.decision_system import recommendation_registry as rr
+
+        monkeypatch.setattr(rr, "_db_sync_recommendation", lambda *a, **kw: None)
+        monkeypatch.setattr(rr, "_db_update_rec_status", lambda *a, **kw: True)
+        monkeypatch.setattr(rr, "_db_sync_active_decision", lambda *a, **kw: None)
+
     def test_approve_draft_succeeds(self):
         from aats.data_platform.decision_system.recommendation_registry import (
             add_recommendation,

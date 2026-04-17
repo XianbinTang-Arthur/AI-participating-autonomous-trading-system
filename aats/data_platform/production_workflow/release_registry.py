@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,25 +27,14 @@ from uuid import uuid4
 from sqlalchemy.orm import Session
 
 from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance._exceptions import (
+    DBConstraintViolation,
+    DBUnavailableError,
+)
 
 log = logging.getLogger(__name__)
 
 _RELEASE_HISTORY_PATH = "artifacts/production_workflow/parameter_release_history.json"
-
-
-def _is_release_fail_loud_enabled() -> bool:
-    """生产开关：`AATS_P0_RELEASE_FAIL_LOUD=on` 强制 DB 不可达时立即中断。
-
-    默认 off 保留历史单机/测试兼容（很多单测用 ``try_governance_db → (None, False)``
-    模拟 no-DB 环境）。实盘部署必须显式打开，否则 DB 静默不可达时会走降级 JSON
-    写路径，产生运行时真源 ghost。
-    """
-    return os.environ.get("AATS_P0_RELEASE_FAIL_LOUD", "").strip().lower() in {
-        "1",
-        "on",
-        "true",
-        "yes",
-    }
 
 
 def _make_release_id() -> str:
@@ -126,6 +114,16 @@ def load_release_history(project_root: Path) -> dict[str, Any]:
 def save_release_history(
     history: dict[str, Any], project_root: Path,
 ) -> Path:
+    """持久化 release history 到 DB + JSON 副本。
+
+    A-0.3 硬纪律：DB 是真源，JSON 只是审计副本。DB 不可达时统一抛
+    :class:`DBUnavailableError`，不允许"仅写 JSON 假装成功"——否则 loader
+    下次 fallback 到 JSON 时会把未成功入真源的写入重新注入系统（上一次
+    split-brain 事故的根因）。之前的 ``AATS_P0_RELEASE_FAIL_LOUD`` 环境
+    开关已废除，所有调用方无条件走 fail-loud 路径。
+    """
+    from sqlalchemy.exc import IntegrityError, OperationalError
+
     from aats.data_platform.governance._atomic_io import atomic_json_write
 
     path = project_root / _RELEASE_HISTORY_PATH
@@ -137,56 +135,55 @@ def save_release_history(
     # 会回落到这份从未成功入真源的文件，把失败写入重新注入系统。
     engine, ok = try_governance_db()
     if not ok:
-        if _is_release_fail_loud_enabled():
-            raise RuntimeError(
-                "governance DB 不可达，release history 无法持久化到真源 "
-                "（AATS_P0_RELEASE_FAIL_LOUD=on 强制中断）"
-            )
-        log.warning(
-            "release history: DB 不可达，进入单机兼容模式仅写 JSON "
-            "（生产建议开启 AATS_P0_RELEASE_FAIL_LOUD）"
+        raise DBUnavailableError(
+            "governance DB unavailable while saving release history; "
+            "refusing to write JSON-only fallback to prevent split-brain"
         )
-    else:
-        try:
-            from aats.data_platform.governance.operational_state_db import (
-                db_set_gate_result_release_id,
-                db_upsert_parameter_release,
-            )
+    try:
+        from aats.data_platform.governance.operational_state_db import (
+            db_set_gate_result_release_id,
+            db_upsert_parameter_release,
+        )
 
-            with Session(engine) as session, session.begin():
-                for release in history.get("releases", []):
-                    if not isinstance(release, dict):
-                        continue
-                    db_upsert_parameter_release(session, release)
-                    # 把 release_id 回填到 gate 行，让 db_list_gate_results_for_release
-                    # 能在 release_id 索引上直接命中，而不是回落到 parameter_releases JOIN。
-                    # 同事务内做，确保 release upsert 与 gate 回填一起 commit / 一起回滚。
-                    gate_ref = release.get("gate_result_ref")
-                    rel_id = release.get("release_id")
-                    if gate_ref and rel_id:
-                        matched = db_set_gate_result_release_id(
-                            session,
-                            gate_run_id=gate_ref,
-                            release_id=rel_id,
+        with Session(engine) as session, session.begin():
+            for release in history.get("releases", []):
+                if not isinstance(release, dict):
+                    continue
+                db_upsert_parameter_release(session, release)
+                # 把 release_id 回填到 gate 行，让 db_list_gate_results_for_release
+                # 能在 release_id 索引上直接命中，而不是回落到 parameter_releases JOIN。
+                # 同事务内做，确保 release upsert 与 gate 回填一起 commit / 一起回滚。
+                gate_ref = release.get("gate_result_ref")
+                rel_id = release.get("release_id")
+                if gate_ref and rel_id:
+                    matched = db_set_gate_result_release_id(
+                        session,
+                        gate_run_id=gate_ref,
+                        release_id=rel_id,
+                    )
+                    if not matched:
+                        # gate 行缺失不该阻塞 release 落库（历史 release、单机
+                        # 模式等场景下 gate 表可能没写入），只打 warning 让运维可见。
+                        log.warning(
+                            "release %s 回填 gate_run_id=%s 未命中任何行",
+                            rel_id,
+                            gate_ref,
                         )
-                        if not matched:
-                            # gate 行缺失不该阻塞 release 落库（历史 release、单机
-                            # 模式等场景下 gate 表可能没写入），只打 warning 让运维可见。
-                            log.warning(
-                                "release %s 回填 gate_run_id=%s 未命中任何行",
-                                rel_id,
-                                gate_ref,
-                            )
-        except Exception as exc:
-            log.exception("release history DB 同步失败，保存未完成")
-            raise RuntimeError(
-                f"release history DB 同步失败，状态未持久化到真源: {exc}"
-            ) from exc
-        finally:
-            if engine is not None:
-                engine.dispose()
+    except IntegrityError as exc:
+        log.exception("release history DB 约束违反")
+        raise DBConstraintViolation(
+            f"release history violated DB constraint: {exc}"
+        ) from exc
+    except OperationalError as exc:
+        log.exception("release history DB 运行时异常")
+        raise DBUnavailableError(
+            f"DB operational error while saving release history: {exc}"
+        ) from exc
+    finally:
+        if engine is not None:
+            engine.dispose()
 
-    # DB 写成功（或 DB 不可达的单机兼容模式）后才写文件副本
+    # DB 写成功后才写文件副本
     atomic_json_write(history, path)
     log.info("已保存 release history: %d releases", len(history.get("releases", [])))
     return path

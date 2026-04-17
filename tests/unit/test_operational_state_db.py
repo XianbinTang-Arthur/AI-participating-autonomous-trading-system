@@ -743,70 +743,36 @@ def test_save_release_history_logs_warning_when_gate_row_missing(
     ), "gate 行缺失时应当有 warning 可见"
 
 
-# H-R1 回归：save_release_history 在 DB 不可达时的两种模式。
+# H-R1 回归：A-0.3 DB 降级清扫后，save_release_history 在 DB 不可达时必须抛
+# DBUnavailableError；原 AATS_P0_RELEASE_FAIL_LOUD 环境开关已废除，所有调用方
+# 走统一 fail-loud 路径，不再允许"仅写 JSON 假装成功"。
 
 
-def test_save_release_history_json_only_when_fail_loud_off(
-    monkeypatch: Any, tmp_path: Any, caplog: Any
-) -> None:
-    """默认（AATS_P0_RELEASE_FAIL_LOUD 未设置）：DB 不可达时走单机兼容模式，
-    仅写 JSON 并打 warning，不抛异常。这条路径是历史测试契约，不能回归。
-    """
-    import logging
-
-    from aats.data_platform.production_workflow import release_registry as rr
-
-    monkeypatch.delenv("AATS_P0_RELEASE_FAIL_LOUD", raising=False)
-    monkeypatch.setattr(rr, "try_governance_db", lambda: (None, False))
-
-    history = {
-        "releases": [
-            {
-                "release_id": "rel_local",
-                "family": "fam",
-                "timeframe": "1h",
-                "combo_key": "fam_1h",
-                "recommendation_id": "rec_local",
-                "parameter_set_id": "ps_local",
-                "apply_result": "success",
-                "observation_status": "observing",
-                "observation_window_hours": 24,
-            },
-        ],
-    }
-
-    with caplog.at_level(logging.WARNING, logger=rr.__name__):
-        path = rr.save_release_history(history, tmp_path)
-
-    assert path.exists(), "fail-loud off 时必须写 JSON 副本"
-    assert any(
-        "单机兼容模式" in rec.getMessage() for rec in caplog.records
-    ), "DB 不可达走降级路径必须留 warning 痕迹"
-
-
-def test_save_release_history_raises_when_fail_loud_on(
+def test_save_release_history_raises_when_db_unavailable(
     monkeypatch: Any, tmp_path: Any
 ) -> None:
-    """AATS_P0_RELEASE_FAIL_LOUD=on：DB 不可达必须立即抛，绝不能悄悄走 JSON。
+    """A-0.3：DB 不可达必须抛 DBUnavailableError，且绝不写 JSON 副本。
 
-    动机：实盘部署开启此 flag 后，任何 DB 暂时不可达都会中断 release 流程，
-    运营者立刻能看到故障；否则 JSON 副本会变成"从未入库的 ghost release"，
-    下一次 loader 再读 DB 时那份 ghost 永远不会被清除。
+    动机：JSON 副本只是审计视图，真源永远是 DB；若 DB 未 commit 就写 JSON，
+    下一次 loader fallback 会把"从未入库的 ghost release"重新注入系统（上一次
+    split-brain 事故的根因）。历史上用 AATS_P0_RELEASE_FAIL_LOUD env-var 让这
+    条硬纪律变成可选开关，结果线下/测试环境长期走降级路径、production gap 藏到
+    事故发生才暴露；A-0.3 把开关拿掉，强制所有调用方统一行为。
     """
+    from aats.data_platform.governance._exceptions import DBUnavailableError
     from aats.data_platform.production_workflow import release_registry as rr
 
-    monkeypatch.setenv("AATS_P0_RELEASE_FAIL_LOUD", "on")
     monkeypatch.setattr(rr, "try_governance_db", lambda: (None, False))
 
     history = {
         "releases": [
             {
-                "release_id": "rel_fail_loud",
+                "release_id": "rel_unavail",
                 "family": "fam",
                 "timeframe": "1h",
                 "combo_key": "fam_1h",
-                "recommendation_id": "rec_fl",
-                "parameter_set_id": "ps_fl",
+                "recommendation_id": "rec_unavail",
+                "parameter_set_id": "ps_unavail",
                 "apply_result": "success",
                 "observation_status": "observing",
                 "observation_window_hours": 24,
@@ -816,11 +782,11 @@ def test_save_release_history_raises_when_fail_loud_on(
 
     import pytest
 
-    with pytest.raises(RuntimeError, match="AATS_P0_RELEASE_FAIL_LOUD"):
+    with pytest.raises(DBUnavailableError):
         rr.save_release_history(history, tmp_path)
 
     path = tmp_path / "artifacts/production_workflow/parameter_release_history.json"
-    assert not path.exists(), "fail-loud 模式下 DB 不可达不得写 JSON 副本"
+    assert not path.exists(), "DB 不可达时不得写 JSON 副本，避免产生 ghost release"
 
 
 # M-R2 回归：load_release_history 必须在返回体上打 source / stale 标记。
