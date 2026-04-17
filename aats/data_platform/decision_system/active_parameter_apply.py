@@ -401,6 +401,31 @@ def apply_approved_recommendation(
 # ── Rollback 操作 ──────────────────────────────────────────────────
 
 
+def _log_rollback_rejection(
+    *,
+    family: str,
+    timeframe: str,
+    target_parameter_set_id: str,
+    reason: str,
+    actor: str,
+) -> None:
+    """结构化日志审计：rollback 请求被强校验拒绝。
+
+    设计文档 §2.3 曾建议写入 ``rollback_recommendations`` 表，但该表的
+    ``ck_rollback_severity`` 只允许 ``none/medium/high``。为避免在刚落地的
+    batch A CHECK 上再打补丁，这里改走 structured log —— Loki/Grafana
+    已是既有审计通道，足以检索被拒绝的尝试。
+    """
+    log.warning(
+        "rollback_rejected family=%s timeframe=%s target=%s reason=%s actor=%s",
+        family,
+        timeframe.lower(),
+        target_parameter_set_id,
+        reason,
+        actor,
+    )
+
+
 def rollback_active_parameter_set(
     project_root: Path,
     *,
@@ -413,14 +438,24 @@ def rollback_active_parameter_set(
 ) -> dict[str, Any]:
     """回滚 active parameter set 到上一版本.
 
-    如果指定 to_parameter_set_id，回滚到该版本。
-    否则自动从 apply history 查找上一个版本。
+    A-0.1 收口后语义（见批次 A 详设 §2）：
+
+    - 目标 ``values`` 从 ``governance.parameter_sets`` 表读，不再经过 JSON
+      registry —— 消除"写 JSON → 读 JSON → 写 DB"的注入通道。
+    - 接受任意 ``to_parameter_set_id`` 之前必须通过
+      :func:`validate_rollback_target` 的 6 条校验（存在/状态/归属/历史凭证/
+      非自回滚/批准链路），任何一条失败返回 ``code='VALIDATION_FAILED'``。
+    - 整个推导 + 校验 + 写入在**单一事务**内完成（包含 ``FOR UPDATE`` 锁），
+      确保校验到写入之间没有并发窗口。
+    - 未提供 ``to_parameter_set_id`` 时从 history 推导前值；推导失败返回
+      ``code='NO_PREVIOUS_TARGET'``。
+    - 环境守卫失败返回 ``code='ENVIRONMENT_BLOCKED'``。
+    - 任何 rejected 分支都通过 :func:`_log_rollback_rejection` 结构化留痕。
 
     Returns
     -------
-    dict  操作结果 {"ok": bool, "message": str, ...}
+    dict  ``{"ok": bool, "code": str | None, "message": str, ...}``。
     """
-    from aats.data_platform.governance.parameter_registry import load_registry
     from aats.data_platform.operations.environment_guard import (
         get_current_environment,
         guard_parameter_rollback,
@@ -429,82 +464,147 @@ def rollback_active_parameter_set(
     env = get_current_environment()
     rollback_guard = guard_parameter_rollback(env)
     if not rollback_guard.allowed:
-        return {"ok": False, "message": rollback_guard.reason, "environment": env}
+        return {
+            "ok": False,
+            "code": "ENVIRONMENT_BLOCKED",
+            "message": rollback_guard.reason,
+            "environment": env,
+        }
 
     combo_key = f"{family}_{timeframe.lower()}"
 
     from aats.data_platform.db import get_session
     from aats.data_platform.governance.active_params_db import (
         db_append_history,
+        db_get_parameter_set_values,
         db_get_previous_set_id,
         db_upsert_active_set,
+        validate_rollback_target,
     )
 
-    # 1. 确定当前 active set
+    op_id = _make_operation_id()
+
+    # ── 单一事务：推导 → 校验 → 写入（FOR UPDATE 锁住并发 rollback） ──
     with get_session() as session:
         existing = session.execute(
-            text("SELECT parameter_set_id FROM governance.active_parameter_sets WHERE family = :f AND timeframe = :t"),
+            text(
+                "SELECT parameter_set_id FROM governance.active_parameter_sets "
+                "WHERE family = :f AND timeframe = :t FOR UPDATE"
+            ),
             {"f": family, "t": timeframe.lower()},
         ).fetchone()
         from_ps_id = existing.parameter_set_id if existing else None
 
-    if not from_ps_id:
-        return {"ok": False, "message": f"{combo_key} 没有当前 active parameter set"}
-
-    # 2. 确定回滚目标
-    if to_parameter_set_id is None:
-        with get_session() as session:
-            to_parameter_set_id = db_get_previous_set_id(session, family, timeframe)
-        if to_parameter_set_id is None:
+        if not from_ps_id:
             return {
                 "ok": False,
-                "message": f"{combo_key} 没有可回滚的历史版本",
+                "code": "NO_ACTIVE_SET",
+                "message": f"{combo_key} 没有当前 active parameter set",
+                "combo_key": combo_key,
             }
 
-    if to_parameter_set_id == from_ps_id:
-        return {"ok": False, "message": f"回滚目标与当前版本相同: {from_ps_id}"}
+        # 推导目标（如未指定）—— db_get_previous_set_id 内部已加 FOR UPDATE
+        if to_parameter_set_id is None:
+            to_parameter_set_id = db_get_previous_set_id(
+                session, family, timeframe
+            )
+            if to_parameter_set_id is None:
+                return {
+                    "ok": False,
+                    "code": "NO_PREVIOUS_TARGET",
+                    "message": f"{combo_key} 没有可回滚的历史版本",
+                    "combo_key": combo_key,
+                }
 
-    # 3. 从 governance registry 获取目标参数
-    gov_reg_path = project_root / GOVERNANCE_DIR / "current_parameter_registry.json"
-    gov_registry = load_registry(gov_reg_path)
+        # 自回滚短路（也会被规则 5 捕获，但此处早一点返回更友好）
+        if to_parameter_set_id == from_ps_id:
+            _log_rollback_rejection(
+                family=family,
+                timeframe=timeframe,
+                target_parameter_set_id=to_parameter_set_id,
+                reason="target_is_currently_active",
+                actor=actor,
+            )
+            return {
+                "ok": False,
+                "code": "VALIDATION_FAILED",
+                "reason": "target_is_currently_active",
+                "message": f"回滚目标与当前版本相同: {from_ps_id}",
+                "combo_key": combo_key,
+                "from_parameter_set_id": from_ps_id,
+                "to_parameter_set_id": to_parameter_set_id,
+            }
 
-    target_ps = None
-    for ps in gov_registry.get("parameter_sets", []):
-        if ps["parameter_set_id"] == to_parameter_set_id:
-            target_ps = ps
-            break
+        # 6 条强校验 —— 失败即短路，不碰 active 表
+        ok, reason = validate_rollback_target(
+            session, family, timeframe, to_parameter_set_id
+        )
+        if not ok:
+            _log_rollback_rejection(
+                family=family,
+                timeframe=timeframe,
+                target_parameter_set_id=to_parameter_set_id,
+                reason=reason,
+                actor=actor,
+            )
+            return {
+                "ok": False,
+                "code": "VALIDATION_FAILED",
+                "reason": reason,
+                "message": f"rollback 目标校验失败: {reason}",
+                "combo_key": combo_key,
+                "from_parameter_set_id": from_ps_id,
+                "to_parameter_set_id": to_parameter_set_id,
+            }
 
-    if target_ps is None:
-        return {"ok": False, "message": f"parameter_registry 中未找到回滚目标 {to_parameter_set_id}"}
+        # 目标 values 直接从 DB 读，绕开 JSON registry
+        target = db_get_parameter_set_values(session, to_parameter_set_id)
+        if target is None:
+            # 理论上不会走到：validate_rollback_target 已证明 target 存在
+            _log_rollback_rejection(
+                family=family,
+                timeframe=timeframe,
+                target_parameter_set_id=to_parameter_set_id,
+                reason="target_values_missing",
+                actor=actor,
+            )
+            return {
+                "ok": False,
+                "code": "VALIDATION_FAILED",
+                "reason": "target_values_missing",
+                "message": "target parameter_set 存在但 values 读取失败",
+                "combo_key": combo_key,
+            }
 
-    values = target_ps["values"]
+        values = target["values"]
+        result: dict[str, Any] = {
+            "ok": True,
+            "operation_type": "rollback",
+            "combo_key": combo_key,
+            "family": family,
+            "timeframe": timeframe,
+            "from_parameter_set_id": from_ps_id,
+            "to_parameter_set_id": to_parameter_set_id,
+            "values": values,
+            "environment": env,
+        }
 
-    result = {
-        "ok": True,
-        "operation_type": "rollback",
-        "combo_key": combo_key,
-        "family": family,
-        "timeframe": timeframe,
-        "from_parameter_set_id": from_ps_id,
-        "to_parameter_set_id": to_parameter_set_id,
-        "values": values,
-        "environment": env,
-    }
+        if dry_run:
+            result["message"] = (
+                f"[DRY RUN] 将 rollback {combo_key}: "
+                f"{from_ps_id} → {to_parameter_set_id}"
+            )
+            # dry_run 也退出事务，锁随 session 关闭自动释放
+            return result
 
-    if dry_run:
-        result["message"] = f"[DRY RUN] 将 rollback {combo_key}: {from_ps_id} → {to_parameter_set_id}"
-        return result
-
-    op_id = _make_operation_id()
-
-    with get_session() as session:
         db_upsert_active_set(
             session,
             family=family,
             timeframe=timeframe,
             parameter_set_id=to_parameter_set_id,
             values=values,
-            source_round_id=target_ps.get("source_round_id"),
+            source_round_id=target.get("source_round_id"),
+            approval_recommendation_id=target.get("approval_recommendation_id"),
             applied_by=f"rdp_rollback ({actor})",
         )
         db_append_history(
@@ -518,7 +618,9 @@ def rollback_active_parameter_set(
             actor=actor,
             notes=notes or f"Rollback from {from_ps_id}",
         )
+        # session 退出 with 自动 commit，FOR UPDATE 锁同时释放
 
+    # ── 文件审计副本（best-effort，失败仅 warn，不回滚 DB） ──
     try:
         from aats.data_platform.production_workflow.release_registry import (
             load_release_history,
@@ -551,7 +653,9 @@ def rollback_active_parameter_set(
         log.warning("rollback 后同步 release history 失败: %s", exc)
 
     result["operation_id"] = op_id
-    result["message"] = f"已 rollback {combo_key}: {from_ps_id} → {to_parameter_set_id}"
+    result["message"] = (
+        f"已 rollback {combo_key}: {from_ps_id} → {to_parameter_set_id}"
+    )
     return result
 
 

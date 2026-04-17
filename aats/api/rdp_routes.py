@@ -608,13 +608,21 @@ async def rollback_parameter_api(
     body: RollbackRequest,
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
-    """回滚 active parameter set 到上一版本."""
+    """回滚 active parameter set 到上一版本.
+
+    A-0.1 收口后，``rollback_active_parameter_set`` 返回的 ``code`` 被映射到
+    HTTP 状态码：
+
+    - ``VALIDATION_FAILED`` / ``NO_PREVIOUS_TARGET`` / ``NO_ACTIVE_SET`` /
+      ``ENVIRONMENT_BLOCKED`` → 422（客户端提供的回滚请求不合法）
+    - 正常成功 → 200 + ok=True 载荷
+    """
     from aats.data_platform.decision_system.active_parameter_apply import (
         rollback_active_parameter_set,
     )
 
     root = _project_root(request)
-    return rollback_active_parameter_set(
+    result = rollback_active_parameter_set(
         root,
         family=body.family,
         timeframe=body.timeframe,
@@ -622,6 +630,14 @@ async def rollback_parameter_api(
         actor=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
+    if not result.get("ok") and result.get("code") in {
+        "VALIDATION_FAILED",
+        "NO_PREVIOUS_TARGET",
+        "NO_ACTIVE_SET",
+        "ENVIRONMENT_BLOCKED",
+    }:
+        raise HTTPException(status_code=422, detail=result)
+    return result
 
 
 # ══════════════════════════════════════════════════════════════════

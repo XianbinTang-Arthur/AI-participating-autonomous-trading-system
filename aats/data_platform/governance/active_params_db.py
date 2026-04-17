@@ -232,6 +232,9 @@ def db_get_previous_set_id(
     用于 rollback：当前 active 是最新一条 apply 的 to_parameter_set_id，
     那么上一版就是那条记录的 from_parameter_set_id。
 
+    加 ``FOR UPDATE`` 是为了防止并发两个 rollback 请求同时从同一条 history
+    行推导出同一个目标：第二个请求会在事务结束前被阻塞，避免双写竞态。
+
     Returns
     -------
     str | None  上一版的 parameter_set_id，如果没有历史则返回 None。
@@ -245,6 +248,7 @@ def db_get_previous_set_id(
               AND operation_type IN ('apply', 'rollback')
             ORDER BY created_at DESC
             LIMIT 1
+            FOR UPDATE
         """),
         {"family": family, "timeframe": timeframe.lower()},
     ).fetchone()
@@ -252,6 +256,124 @@ def db_get_previous_set_id(
     if row is None:
         return None
     return row.from_parameter_set_id
+
+
+# ── Rollback 目标强校验 ─────────────────────────────────────────────
+
+
+def validate_rollback_target(
+    session: Session,
+    family: str,
+    timeframe: str,
+    target_parameter_set_id: str,
+) -> tuple[bool, str]:
+    """校验 rollback 目标合法性。返回 ``(ok, reason_if_rejected)``.
+
+    见 ``docs/task/rdp_hardening_batch_a_detailed_design.md §2.3``。6 条规则：
+
+    1. parameter_sets 存在 + family/timeframe 匹配
+    2. status ∈ {frozen, released}
+    3. 归属正确（与 1 同查询）
+    4. parameter_apply_history 有一条 ``operation_type='apply'``、
+       ``to_parameter_set_id=target`` 的历史（证明 target 曾是 live）
+    5. active_parameter_sets 当前值 ≠ target（避免自回滚）
+    6. recommendations 表有一条 ``status IN ('approved','applied','rolled_back')``
+       指向 target 的记录（批准链路）
+
+    全部通过才返回 ``(True, "")``；任何一条失败，立即短路并返回英文理由码。
+    调用方负责映射到 HTTP 语义（422）与结构化日志审计。
+    """
+    tf = timeframe.lower()
+
+    # 规则 1+2+3: parameter_sets 存在 + 状态合法 + 归属正确
+    row = session.execute(
+        text("""
+            SELECT status FROM governance.parameter_sets
+            WHERE parameter_set_id = :pid
+              AND family = :family
+              AND timeframe = :tf
+        """),
+        {"pid": target_parameter_set_id, "family": family, "tf": tf},
+    ).fetchone()
+    if row is None:
+        return False, "target_not_found_or_wrong_combo"
+    if row.status not in ("frozen", "released"):
+        return False, f"target_status_illegal:{row.status}"
+
+    # 规则 4: 历史凭证（必须在该 combo 下作为 apply 的 to 出现过）
+    history_row = session.execute(
+        text("""
+            SELECT 1 FROM governance.parameter_apply_history
+            WHERE family = :family
+              AND timeframe = :tf
+              AND operation_type = 'apply'
+              AND to_parameter_set_id = :pid
+            LIMIT 1
+        """),
+        {"family": family, "tf": tf, "pid": target_parameter_set_id},
+    ).fetchone()
+    if history_row is None:
+        return False, "no_apply_history_for_target"
+
+    # 规则 5: 不是当前生效（同时锁住 active 行，防止校验后被改）
+    current_row = session.execute(
+        text("""
+            SELECT parameter_set_id FROM governance.active_parameter_sets
+            WHERE family = :family AND timeframe = :tf
+            FOR UPDATE
+        """),
+        {"family": family, "tf": tf},
+    ).fetchone()
+    if (
+        current_row is not None
+        and current_row.parameter_set_id == target_parameter_set_id
+    ):
+        return False, "target_is_currently_active"
+
+    # 规则 6: 批准链路（至少一条 approved/applied/rolled_back recommendation）
+    rec_row = session.execute(
+        text("""
+            SELECT 1 FROM governance.recommendations
+            WHERE target_parameter_set_id = :pid
+              AND family = :family
+              AND timeframe = :tf
+              AND status IN ('approved', 'applied', 'rolled_back')
+            LIMIT 1
+        """),
+        {"pid": target_parameter_set_id, "family": family, "tf": tf},
+    ).fetchone()
+    if rec_row is None:
+        return False, "no_approved_recommendation_lineage"
+
+    return True, ""
+
+
+def db_get_parameter_set_values(
+    session: Session,
+    parameter_set_id: str,
+) -> dict[str, Any] | None:
+    """从 DB 读 parameter_sets.values + source_round_id + approval_recommendation_id.
+
+    Rollback 强制从 DB 读目标 values，不再依赖 JSON registry —— 这是 A-0.1
+    的核心收口：消除"写 JSON → 读 JSON → 写 DB"的注入通道。
+    """
+    row = session.execute(
+        text("""
+            SELECT values AS param_values,
+                   source_round_id,
+                   approval_recommendation_id
+            FROM governance.parameter_sets
+            WHERE parameter_set_id = :pid
+        """),
+        {"pid": parameter_set_id},
+    ).fetchone()
+    if row is None:
+        return None
+    return {
+        "values": row.param_values,
+        "source_round_id": row.source_round_id,
+        "approval_recommendation_id": row.approval_recommendation_id,
+    }
 
 
 # ── 工具函数 ──────────────────────────────────────────────────────────

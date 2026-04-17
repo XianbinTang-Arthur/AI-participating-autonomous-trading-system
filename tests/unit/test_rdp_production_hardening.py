@@ -266,6 +266,11 @@ def test_rollback_marks_latest_successful_release_as_rolled_back(tmp_path: Path)
     )
 
     class _Result:
+        """A-0.1 后 rollback 走多条 SELECT，本测试只关心 release history 副作用，
+        因此所有查询都返回 "当前 active=ps_live_1"，其余 DB 语义交由 validate/
+        get_values 的 patch 伪造。
+        """
+
         def fetchone(self) -> SimpleNamespace:
             return SimpleNamespace(parameter_set_id="ps_live_1")
 
@@ -294,6 +299,18 @@ def test_rollback_marks_latest_successful_release_as_rolled_back(tmp_path: Path)
         patch(
             "aats.data_platform.db.get_session",
             side_effect=lambda: _Session(),
+        ),
+        patch(
+            "aats.data_platform.governance.active_params_db.validate_rollback_target",
+            return_value=(True, ""),
+        ),
+        patch(
+            "aats.data_platform.governance.active_params_db.db_get_parameter_set_values",
+            return_value={
+                "values": {"entry_threshold": 0.4},
+                "source_round_id": "round_prev",
+                "approval_recommendation_id": "rec_prev",
+            },
         ),
         patch(
             "aats.data_platform.governance.active_params_db.db_upsert_active_set",
