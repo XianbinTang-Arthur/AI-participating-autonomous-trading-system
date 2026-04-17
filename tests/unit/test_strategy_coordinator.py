@@ -22,6 +22,7 @@ from aats.schemas.portfolio import PortfolioSnapshot, SleevePnLRecord
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.strategy_runtime import (
     PortfolioAllocationDecision,
+    SleeveBudgetAssignment,
     StrategyBookRuntimeState,
     StrategyCandidate,
     StrategyCoordinatorSnapshot,
@@ -246,6 +247,69 @@ def _fill_event(
         pos_side=pos_side,
         td_mode=margin_mode,
         settle_currency="USDT",
+    )
+
+
+def _independent_full_close_intent(
+    *,
+    decision_id: str,
+    family_action: str,
+    book_action: str,
+    close_reason: str,
+    current_qty: str = "0.007",
+    reference_price: str = "100000",
+) -> StrategySleeveIntent:
+    current_decimal = Decimal(current_qty)
+    sleeve_id = build_strategy_sleeve_id(
+        family="independent",
+        primary_symbol="BTC-USDT-SWAP",
+        product_scope="derivatives",
+        margin_scope="cross",
+        symbol_scope=("BTC-USDT-SWAP",),
+    )
+    leg = StrategyLegIntent(
+        symbol="BTC-USDT-SWAP",
+        execution_chain_id=f"independent:{decision_id}:long:{book_action}",
+        product_type="derivatives",
+        side="sell",
+        position_mode="long_short_mode",
+        pos_side="long",
+        action="close",
+        family="independent",
+        role="primary",
+        margin_mode="cross",
+        target_leverage=3.0,
+        current_position_qty=current_decimal,
+        target_position_qty=Decimal("0"),
+        delta_position_qty=-current_decimal,
+        reference_price=Decimal(reference_price),
+        execution_compatible=True,
+        execution_mode="independent_long_book",
+        strategy_sleeve_id=sleeve_id,
+        book_action=book_action,
+        close_reason=close_reason,
+        policy_reason=f"test_{close_reason}",
+    )
+    return StrategySleeveIntent(
+        decision_id=decision_id,
+        family="independent",
+        strategy_sleeve_id=sleeve_id,
+        state="unwinding",
+        symbol="BTC-USDT-SWAP",
+        product_type="derivatives",
+        margin_mode="cross",
+        inventory_policy="inventory_accumulation",
+        route_action="override_target",
+        family_action=family_action,
+        headline="independent full close",
+        selectable=True,
+        execution_compatible=True,
+        current_position_qty=current_decimal,
+        target_position_qty=Decimal("0"),
+        delta_position_qty=-current_decimal,
+        target_notional=Decimal("0"),
+        requested_delta_position_qty=-current_decimal,
+        legs=[leg],
     )
 
 
@@ -4511,6 +4575,342 @@ class TestStrategyCoordinator(unittest.TestCase):
             ),
             "exit",
         )
+
+    def test_independent_full_close_failed_thesis_allocation_target_stays_zero(self) -> None:
+        settings = AATSSettings.model_validate({"trading_product_type": "derivatives", "margin_mode": "cross"})
+        allocator = PortfolioAllocatorV2Phase2(settings=settings)
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.007",
+            target_qty="0",
+            rebalance_reason="independent_strategy",
+            position_intent="close_long",
+        ).model_copy(update={"current_notional": Decimal("0"), "target_notional": Decimal("0")})
+        intent = _independent_full_close_intent(
+            decision_id="decision_failed_close",
+            family_action="close_failed_thesis_independent_book",
+            book_action="close_failed_thesis",
+            close_reason="failed_thesis",
+        )
+        assignment = SleeveBudgetAssignment(
+            budget_profile_id="budget_profile_test",
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            family="independent",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            effective_margin_budget_limit=Decimal("600"),
+            effective_max_symbol_notional=Decimal("600"),
+            effective_notional_cap=Decimal("600"),
+            effective_quote_budget_limit=Decimal("600"),
+        )
+
+        scaled_intent, budget_snapshot = allocator._apply_budget_assignment(
+            intent=intent,
+            base_target=base_target,
+            assignment=assignment,
+            allocation_id="alloc_failed_close",
+        )
+
+        self.assertEqual(scaled_intent.target_position_qty, Decimal("0"))
+        self.assertEqual(scaled_intent.delta_position_qty, Decimal("-0.007"))
+        self.assertEqual(budget_snapshot.requested_notional, Decimal("700"))
+        self.assertEqual(budget_snapshot.approved_notional, Decimal("700"))
+        self.assertFalse(budget_snapshot.clamped)
+        self.assertIn("allocator_budget_cap_bypassed_for_independent_full_close", budget_snapshot.reason_codes)
+
+    def test_independent_full_close_stale_thesis_allocation_target_stays_zero(self) -> None:
+        settings = AATSSettings.model_validate({"trading_product_type": "derivatives", "margin_mode": "cross"})
+        allocator = PortfolioAllocatorV2Phase2(settings=settings)
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.007",
+            target_qty="0",
+            rebalance_reason="independent_strategy",
+            position_intent="close_long",
+        ).model_copy(update={"current_notional": Decimal("0"), "target_notional": Decimal("0")})
+        intent = _independent_full_close_intent(
+            decision_id="decision_stale_close",
+            family_action="close_stale_thesis_independent_book",
+            book_action="close_stale_thesis",
+            close_reason="stale_thesis",
+        )
+        assignment = SleeveBudgetAssignment(
+            budget_profile_id="budget_profile_test",
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            family="independent",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            effective_margin_budget_limit=Decimal("600"),
+            effective_max_symbol_notional=Decimal("600"),
+            effective_notional_cap=Decimal("600"),
+            effective_quote_budget_limit=Decimal("600"),
+        )
+
+        scaled_intent, _budget_snapshot = allocator._apply_budget_assignment(
+            intent=intent,
+            base_target=base_target,
+            assignment=assignment,
+            allocation_id="alloc_stale_close",
+        )
+
+        self.assertEqual(scaled_intent.target_position_qty, Decimal("0"))
+        self.assertEqual(scaled_intent.delta_position_qty, Decimal("-0.007"))
+
+    def test_independent_full_close_derisk_promoted_to_close_allocation_target_stays_zero(self) -> None:
+        settings = AATSSettings.model_validate({"trading_product_type": "derivatives", "margin_mode": "cross"})
+        allocator = PortfolioAllocatorV2Phase2(settings=settings)
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.007",
+            target_qty="0",
+            rebalance_reason="independent_strategy",
+            position_intent="close_long",
+        ).model_copy(update={"current_notional": Decimal("0"), "target_notional": Decimal("0")})
+        intent = _independent_full_close_intent(
+            decision_id="decision_derisk_close",
+            family_action="de_risk_independent_book",
+            book_action="de_risk",
+            close_reason="execution_health_degraded",
+        )
+        assignment = SleeveBudgetAssignment(
+            budget_profile_id="budget_profile_test",
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            family="independent",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            effective_margin_budget_limit=Decimal("600"),
+            effective_max_symbol_notional=Decimal("600"),
+            effective_notional_cap=Decimal("600"),
+            effective_quote_budget_limit=Decimal("600"),
+        )
+
+        scaled_intent, _budget_snapshot = allocator._apply_budget_assignment(
+            intent=intent,
+            base_target=base_target,
+            assignment=assignment,
+            allocation_id="alloc_derisk_close",
+        )
+
+        self.assertEqual(scaled_intent.target_position_qty, Decimal("0"))
+        self.assertEqual(scaled_intent.delta_position_qty, Decimal("-0.007"))
+
+    def test_independent_full_close_requested_notional_does_not_fallback_to_max_symbol_notional(self) -> None:
+        settings = AATSSettings.model_validate({"trading_product_type": "derivatives", "margin_mode": "cross"})
+        allocator = PortfolioAllocatorV2Phase2(settings=settings)
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.007",
+            target_qty="0",
+            rebalance_reason="independent_strategy",
+            position_intent="close_long",
+        ).model_copy(update={"current_notional": Decimal("0"), "target_notional": Decimal("0")})
+        intent = _independent_full_close_intent(
+            decision_id="decision_requested_notional",
+            family_action="close_failed_thesis_independent_book",
+            book_action="close_failed_thesis",
+            close_reason="failed_thesis",
+        )
+        assignment = SleeveBudgetAssignment(
+            budget_profile_id="budget_profile_test",
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            family="independent",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            effective_margin_budget_limit=Decimal("10000"),
+            effective_max_symbol_notional=Decimal("10000"),
+            effective_notional_cap=Decimal("10000"),
+            effective_quote_budget_limit=Decimal("10000"),
+        )
+
+        requested_notional = allocator._requested_notional(
+            intent=intent,
+            base_target=base_target,
+            assignment=assignment,
+        )
+
+        self.assertEqual(requested_notional, Decimal("700"))
+
+    def test_independent_full_close_is_exempt_from_portfolio_redistribution(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "max_total_open_notional": 600,
+            }
+        )
+        allocator = PortfolioAllocatorV2Phase2(settings=settings)
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.007",
+            target_qty="0",
+            rebalance_reason="independent_strategy",
+            position_intent="close_long",
+        ).model_copy(update={"current_notional": Decimal("0"), "target_notional": Decimal("0")})
+        intent = _independent_full_close_intent(
+            decision_id="decision_portfolio_close",
+            family_action="close_failed_thesis_independent_book",
+            book_action="close_failed_thesis",
+            close_reason="failed_thesis",
+        )
+        assignment = SleeveBudgetAssignment(
+            budget_profile_id="budget_profile_test",
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            family="independent",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            effective_margin_budget_limit=Decimal("10000"),
+            effective_max_symbol_notional=Decimal("10000"),
+            effective_notional_cap=Decimal("10000"),
+            effective_quote_budget_limit=Decimal("10000"),
+        )
+
+        scaled_intent, budget_snapshot = allocator._apply_budget_assignment(
+            intent=intent,
+            base_target=base_target,
+            assignment=assignment,
+            allocation_id="alloc_portfolio_close",
+        )
+        redistributed_intents, redistributed_snapshots, budget_cut_reason_codes = allocator._apply_portfolio_budget_redistribution(
+            approved=[scaled_intent],
+            budget_snapshots=[budget_snapshot],
+            base_target=base_target,
+        )
+
+        self.assertEqual(budget_cut_reason_codes, [])
+        self.assertEqual(len(redistributed_intents), 1)
+        self.assertEqual(redistributed_intents[0].target_position_qty, Decimal("0"))
+        self.assertEqual(redistributed_intents[0].delta_position_qty, Decimal("-0.007"))
+        self.assertEqual(redistributed_snapshots[0].approved_notional, Decimal("700"))
+        self.assertIn(
+            "allocator_portfolio_cap_exempt_for_independent_full_close",
+            redistributed_snapshots[0].reason_codes,
+        )
+
+    def test_independent_mixed_full_close_preserves_closing_leg_while_scaling_open_leg(self) -> None:
+        settings = AATSSettings.model_validate({"trading_product_type": "derivatives", "margin_mode": "cross"})
+        allocator = PortfolioAllocatorV2Phase2(settings=settings)
+        sleeve_id = build_strategy_sleeve_id(
+            family="independent",
+            primary_symbol="BTC-USDT-SWAP",
+            product_scope="derivatives",
+            margin_scope="cross",
+            symbol_scope=("BTC-USDT-SWAP",),
+        )
+        long_close_leg = StrategyLegIntent(
+            symbol="BTC-USDT-SWAP",
+            execution_chain_id="independent:decision_mixed:long:close_failed_thesis",
+            product_type="derivatives",
+            side="sell",
+            position_mode="long_short_mode",
+            pos_side="long",
+            action="close",
+            family="independent",
+            role="primary",
+            margin_mode="cross",
+            target_leverage=3.0,
+            current_position_qty=Decimal("0.007"),
+            target_position_qty=Decimal("0"),
+            delta_position_qty=Decimal("-0.007"),
+            reference_price=Decimal("100000"),
+            execution_compatible=True,
+            execution_mode="independent_long_book",
+            strategy_sleeve_id=sleeve_id,
+            book_action="close_failed_thesis",
+            close_reason="failed_thesis",
+        )
+        short_open_leg = StrategyLegIntent(
+            symbol="BTC-USDT-SWAP",
+            execution_chain_id="independent:decision_mixed:short:open",
+            product_type="derivatives",
+            side="sell",
+            position_mode="long_short_mode",
+            pos_side="short",
+            action="open",
+            family="independent",
+            role="primary",
+            margin_mode="cross",
+            target_leverage=3.0,
+            current_position_qty=Decimal("0"),
+            target_position_qty=Decimal("-0.003"),
+            delta_position_qty=Decimal("-0.003"),
+            reference_price=Decimal("100000"),
+            execution_compatible=True,
+            execution_mode="independent_short_book",
+            strategy_sleeve_id=sleeve_id,
+            book_action="open",
+        )
+        intent = StrategySleeveIntent(
+            decision_id="decision_mixed",
+            family="independent",
+            strategy_sleeve_id=sleeve_id,
+            state="active",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            inventory_policy="inventory_accumulation",
+            route_action="override_target",
+            family_action="close_failed_thesis_independent_book",
+            headline="independent mixed close/open",
+            selectable=True,
+            execution_compatible=True,
+            current_position_qty=Decimal("0.007"),
+            target_position_qty=Decimal("-0.003"),
+            delta_position_qty=Decimal("-0.010"),
+            target_notional=Decimal("0"),
+            requested_delta_position_qty=Decimal("-0.010"),
+            legs=[long_close_leg, short_open_leg],
+        )
+        assignment = SleeveBudgetAssignment(
+            budget_profile_id="budget_profile_test",
+            strategy_sleeve_id=intent.strategy_sleeve_id,
+            family="independent",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            effective_margin_budget_limit=Decimal("200"),
+            effective_max_symbol_notional=Decimal("200"),
+            effective_notional_cap=Decimal("200"),
+            effective_quote_budget_limit=Decimal("200"),
+        )
+        base_target = _position_target(
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            current_qty="0.007",
+            target_qty="-0.003",
+            rebalance_reason="independent_strategy",
+            position_intent="reverse_to_short",
+        ).model_copy(update={"current_notional": Decimal("0"), "target_notional": Decimal("0")})
+
+        scaled_intent, budget_snapshot = allocator._apply_budget_assignment(
+            intent=intent,
+            base_target=base_target,
+            assignment=assignment,
+            allocation_id="alloc_mixed",
+        )
+
+        self.assertEqual(budget_snapshot.requested_notional, Decimal("1000"))
+        self.assertEqual(budget_snapshot.approved_notional, Decimal("900"))
+        self.assertTrue(budget_snapshot.clamped)
+        self.assertEqual(scaled_intent.legs[0].delta_position_qty, Decimal("-0.007"))
+        self.assertEqual(scaled_intent.legs[0].target_position_qty, Decimal("0"))
+        self.assertEqual(scaled_intent.legs[1].delta_position_qty, Decimal("-0.002"))
+        self.assertEqual(scaled_intent.legs[1].target_position_qty, Decimal("-0.002"))
 
 
 if __name__ == "__main__":

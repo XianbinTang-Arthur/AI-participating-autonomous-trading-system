@@ -936,16 +936,42 @@ def _execution_health_state(
         )
         or 0
     )
-    fee_drag_ratio = _guard_fee_drag_ratio(context=context, leg=leg)
-    churn_ratio = float(
-        _guard_health_value(
-            context,
-            leg,
-            "recent_guard_eligible_churn_ratio",
-            "recent_churn_ratio",
+    if closed_trade_count >= settings.strategy_performance_guard_min_closed_trades:
+        fee_drag_ratio = _guard_fee_drag_ratio(context=context, leg=leg)
+        churn_ratio = float(
+            _guard_health_value(
+                context,
+                leg,
+                "recent_guard_eligible_churn_ratio",
+                "recent_churn_ratio",
+            )
+            or 0.0
         )
-        or 0.0
-    )
+    else:
+        closed_trade_count = int(
+            _symbol_guard_value(
+                context,
+                "recent_guard_eligible_closed_trade_count",
+                "recent_closed_trade_count",
+            )
+            or 0
+        )
+        fee_drag_ratio = float(
+            _symbol_guard_value(
+                context,
+                "recent_guard_eligible_fee_drag_ratio",
+                "recent_fee_drag_ratio",
+            )
+            or 0.0
+        )
+        churn_ratio = float(
+            _symbol_guard_value(
+                context,
+                "recent_guard_eligible_churn_ratio",
+                "recent_churn_ratio",
+            )
+            or 0.0
+        )
     if closed_trade_count >= settings.strategy_performance_guard_min_closed_trades:
         if (
             fee_drag_ratio > float(settings.strategy_max_fee_drag_ratio)
@@ -989,7 +1015,33 @@ def _trial_guard_active(
         or 0
     )
     if closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
-        return False
+        symbol_closed_trade_count = int(
+            _symbol_guard_value(
+                context,
+                "recent_guard_eligible_closed_trade_count",
+                "recent_closed_trade_count",
+            )
+            or 0
+        )
+        if symbol_closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
+            return False
+        recent_net_realized_pnl = to_decimal(
+            _symbol_guard_value(
+                context,
+                "recent_guard_eligible_net_realized_pnl",
+                "recent_net_realized_pnl",
+            )
+            or Decimal("0")
+        )
+        recent_win_rate = float(
+            _symbol_guard_value(
+                context,
+                "recent_guard_eligible_win_rate",
+                "recent_win_rate",
+            )
+            or 0.0
+        )
+        return recent_net_realized_pnl < -EPSILON_DECIMAL_12 and recent_win_rate < 0.5
     recent_net_realized_pnl = to_decimal(
         _guard_health_value(
             context,
@@ -1021,6 +1073,19 @@ def _guard_health_value(
     if guarded_value is not None:
         return guarded_value
     return _leg_health_value(context, leg, fallback_key)
+
+
+def _symbol_guard_value(
+    context: DecisionContext,
+    guarded_key: str,
+    fallback_key: str,
+) -> object | None:
+    guarded_count = int(getattr(context, "recent_guard_eligible_closed_trade_count", 0) or 0)
+    if guarded_count > 0:
+        value = getattr(context, guarded_key, None)
+        if value is not None:
+            return value
+    return getattr(context, fallback_key, None)
 
 
 def _guard_fee_drag_ratio(*, context: DecisionContext, leg: IndependentLeg) -> float:

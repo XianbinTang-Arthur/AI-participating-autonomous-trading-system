@@ -1260,6 +1260,17 @@ def build_independent_leg(
         book_action=book.book_action,
         close_reason=book.close_reason,
     )
+    reference_price = None
+    if book.expectancy is not None:
+        reference_price = book.expectancy.reference_price
+        projected_notional = book.expectancy.projected_notional
+        planned_delta_qty = abs(to_decimal(book.expectancy.planned_delta_qty or Decimal("0")))
+        if (
+            reference_price is None
+            and projected_notional is not None
+            and planned_delta_qty > EPSILON_DECIMAL_12
+        ):
+            reference_price = to_decimal(projected_notional) / planned_delta_qty
     return StrategyLegIntent(
         symbol=symbol,
         execution_chain_id=execution_chain_id,
@@ -1275,6 +1286,7 @@ def build_independent_leg(
         current_position_qty=signed_current_qty,
         target_position_qty=signed_target_qty,
         delta_position_qty=signed_target_qty - signed_current_qty,
+        reference_price=reference_price,
         execution_compatible=True,
         execution_mode=execution_mode,
         state_phase="active",

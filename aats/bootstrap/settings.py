@@ -580,6 +580,7 @@ class AATSSettings(BaseSettings):
     strategy_min_hold_seconds: float = 720.0
     strategy_post_close_cooldown_seconds: float = 300.0
     strategy_health_lookback_trades: int = 12
+    strategy_health_lookback_window_seconds: float = 14_400.0
     strategy_performance_guard_min_closed_trades: int = 4
     strategy_max_fee_drag_ratio: float = 0.40
     strategy_max_churn_ratio: float = 0.35

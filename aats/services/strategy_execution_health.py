@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
+from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.services.accounting import resolve_symbol_currencies, try_fill_fee_cost_in_quote
@@ -28,6 +29,65 @@ class ClosedTradeOutcome:
     is_small_churn: bool
     is_low_edge: bool
     is_residual_exit: bool = False
+
+
+@dataclass(slots=True)
+class _LifecycleAccumulator:
+    opened_at: datetime
+    total_fee_quote: Decimal = Decimal("0")
+    close_notional: Decimal = Decimal("0")
+    net_realized_pnl: Decimal = Decimal("0")
+    exit_fill_ids: list[str] = field(default_factory=list)
+    guard_excluded_exit_count: int = 0
+
+    def add_entry_fee(self, fee_cost_quote: Decimal) -> None:
+        self.total_fee_quote += to_decimal(fee_cost_quote)
+
+    def add_exit_fragment(
+        self,
+        *,
+        fill_id: str,
+        fee_cost_quote: Decimal,
+        close_notional: Decimal,
+        net_realized_pnl: Decimal,
+        is_guard_excluded: bool,
+    ) -> None:
+        self.total_fee_quote += to_decimal(fee_cost_quote)
+        self.close_notional += to_decimal(close_notional)
+        self.net_realized_pnl += to_decimal(net_realized_pnl)
+        self.exit_fill_ids.append(str(fill_id))
+        if is_guard_excluded:
+            self.guard_excluded_exit_count += 1
+
+    def close_outcome(self, *, settings: AATSSettings, timestamp: datetime) -> ClosedTradeOutcome:
+        fee_cost_quote = to_decimal(self.total_fee_quote)
+        net_realized_pnl = to_decimal(self.net_realized_pnl)
+        gross_realized_pnl = net_realized_pnl + fee_cost_quote
+        close_notional = to_decimal(self.close_notional)
+        net_edge_bps = (
+            (net_realized_pnl / close_notional) * _BPS_SCALE
+            if close_notional > EPSILON_DECIMAL_12
+            else Decimal("0")
+        )
+        churn_cutoff = fee_cost_quote * _SMALL_PNL_CHURN_MULTIPLIER
+        exit_fill_count = len(self.exit_fill_ids)
+        return ClosedTradeOutcome(
+            timestamp=timestamp,
+            fill_id=self.exit_fill_ids[-1] if self.exit_fill_ids else "",
+            net_realized_pnl=net_realized_pnl,
+            gross_realized_pnl=gross_realized_pnl,
+            fee_cost_quote=fee_cost_quote,
+            close_notional=close_notional,
+            net_edge_bps=net_edge_bps,
+            is_win=net_realized_pnl > 0,
+            is_small_churn=(
+                abs(net_realized_pnl) <= churn_cutoff
+                if churn_cutoff > 0
+                else is_effectively_zero(net_realized_pnl)
+            ),
+            is_low_edge=net_edge_bps <= Decimal(str(settings.strategy_low_edge_threshold_bps)),
+            is_residual_exit=exit_fill_count > 0 and self.guard_excluded_exit_count >= exit_fill_count,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,14 +141,18 @@ class StrategyExecutionHealthSnapshot:
                 flags.append("post_close_cooldown_active")
                 cooldowns["post_close_cooldown_remaining_seconds"] = remaining
 
+        use_guard_eligible_low_edge = (
+            (self.recent_guard_eligible_closed_trade_count or 0) > 0
+            or self.recent_guard_eligible_low_edge_trade_at is not None
+        )
         guard_eligible_low_edge_trade_streak = (
             self.recent_guard_eligible_low_edge_trade_streak
-            if self.recent_guard_eligible_low_edge_trade_streak is not None
+            if use_guard_eligible_low_edge
             else self.recent_low_edge_trade_streak
         )
         guard_eligible_low_edge_trade_at = (
             self.recent_guard_eligible_low_edge_trade_at
-            if self.recent_guard_eligible_low_edge_trade_at is not None
+            if use_guard_eligible_low_edge
             else self.recent_low_edge_trade_at
         )
         if (
@@ -104,17 +168,17 @@ class StrategyExecutionHealthSnapshot:
 
         guard_eligible_closed_trade_count = (
             self.recent_guard_eligible_closed_trade_count
-            if self.recent_guard_eligible_closed_trade_count is not None
+            if (self.recent_guard_eligible_closed_trade_count or 0) > 0
             else self.recent_closed_trade_count
         )
         guard_eligible_churn_ratio = (
             self.recent_guard_eligible_churn_ratio
-            if self.recent_guard_eligible_churn_ratio is not None
+            if (self.recent_guard_eligible_closed_trade_count or 0) > 0
             else self.recent_churn_ratio
         )
         guard_eligible_fee_drag_ratio = (
             self.recent_guard_eligible_fee_drag_ratio
-            if self.recent_guard_eligible_fee_drag_ratio is not None
+            if (self.recent_guard_eligible_closed_trade_count or 0) > 0
             else self.recent_fee_drag_ratio
         )
         if guard_eligible_closed_trade_count >= settings.strategy_performance_guard_min_closed_trades:
@@ -176,6 +240,16 @@ def _fee_to_gross_ratio(*, fee_total: Decimal, gross_realized: Decimal) -> float
     return 1.0 if fee_total > 0 else 0.0
 
 
+def _fill_fee_quote(fill: FillEvent) -> Decimal:
+    base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
+    fee_cost_quote, _fee_error = try_fill_fee_cost_in_quote(
+        fill=fill,
+        base_currency=base_currency,
+        quote_currency=quote_currency,
+    )
+    return to_decimal(fee_cost_quote or Decimal("0"))
+
+
 def compute_strategy_execution_health(
     *,
     settings: AATSSettings,
@@ -186,6 +260,7 @@ def compute_strategy_execution_health(
     current_long_position_qty: Decimal | None = None,
     current_short_position_qty: Decimal | None = None,
     guard_excluded_fill_ids: set[str] | None = None,
+    as_of: datetime | None = None,
 ) -> StrategyExecutionHealthSnapshot:
     ordered_fills = sorted(
         [fill for fill in fills if fill.symbol == symbol],
@@ -210,6 +285,7 @@ def compute_strategy_execution_health(
             current_long_position_qty=resolved_current_long_qty,
             current_short_position_qty=resolved_current_short_qty,
             guard_excluded_fill_ids=excluded_fill_ids,
+            as_of=as_of,
         )
 
     current_position_opened_at, last_position_closed_at, outcomes = _walk_symbol_fills(
@@ -225,6 +301,7 @@ def compute_strategy_execution_health(
         current_position_opened_at=current_position_opened_at,
         last_position_closed_at=last_position_closed_at,
         latest_fill_timestamp=ordered_fills[-1].ingestion_timestamp if ordered_fills else None,
+        as_of=as_of,
         outcomes=outcomes,
     )
 
@@ -249,6 +326,7 @@ def _compute_hedge_mode_strategy_execution_health(
     current_long_position_qty: Decimal,
     current_short_position_qty: Decimal,
     guard_excluded_fill_ids: set[str],
+    as_of: datetime | None,
 ) -> StrategyExecutionHealthSnapshot:
     long_opened_at, long_last_closed_at, long_outcomes = _walk_leg_fills(
         settings=settings,
@@ -298,6 +376,7 @@ def _compute_hedge_mode_strategy_execution_health(
         current_position_opened_at=current_position_opened_at,
         last_position_closed_at=last_position_closed_at,
         latest_fill_timestamp=latest_fill_timestamp,
+        as_of=as_of,
         outcomes=outcomes,
     )
 
@@ -311,6 +390,7 @@ def compute_leg_strategy_execution_health(
     current_long_position_qty: Decimal,
     current_short_position_qty: Decimal,
     guard_excluded_fill_ids: set[str] | None = None,
+    as_of: datetime | None = None,
 ) -> dict[str, StrategyExecutionHealthSnapshot]:
     ordered_fills = sorted(
         [fill for fill in fills if fill.symbol == symbol],
@@ -328,6 +408,7 @@ def compute_leg_strategy_execution_health(
             current_position_qty=current_long_position_qty,
             leg="long",
             guard_excluded_fill_ids=excluded_fill_ids,
+            as_of=as_of,
         ),
         "short": _compute_leg_strategy_execution_health_snapshot(
             settings=settings,
@@ -337,6 +418,7 @@ def compute_leg_strategy_execution_health(
             current_position_qty=current_short_position_qty,
             leg="short",
             guard_excluded_fill_ids=excluded_fill_ids,
+            as_of=as_of,
         ),
     }
 
@@ -350,6 +432,7 @@ def _compute_leg_strategy_execution_health_snapshot(
     current_position_qty: Decimal,
     leg: str,
     guard_excluded_fill_ids: set[str],
+    as_of: datetime | None,
 ) -> StrategyExecutionHealthSnapshot:
     current_position_opened_at, last_position_closed_at, outcomes = _walk_leg_fills(
         settings=settings,
@@ -372,6 +455,7 @@ def _compute_leg_strategy_execution_health_snapshot(
             ),
             None,
         ),
+        as_of=as_of,
         outcomes=outcomes,
     )
 
@@ -388,66 +472,74 @@ def _walk_symbol_fills(
     current_position_opened_at: datetime | None = None
     last_position_closed_at: datetime | None = None
     outcomes: list[ClosedTradeOutcome] = []
+    active_lifecycle: _LifecycleAccumulator | None = None
 
     for fill in fills:
         fill_qty = to_decimal(fill.fill_qty)
         signed_qty = fill_qty if fill.side == "buy" else -fill_qty
         previous_qty = position_qty
-        position_qty = previous_qty + signed_qty
         close_qty = Decimal("0")
-        if not is_effectively_zero(previous_qty) and previous_qty * signed_qty < 0:
+        open_qty = Decimal("0")
+        if is_effectively_zero(previous_qty):
+            open_qty = abs(signed_qty)
+        elif previous_qty * signed_qty > 0:
+            open_qty = abs(signed_qty)
+        elif previous_qty * signed_qty < 0:
             close_qty = min(abs(previous_qty), abs(signed_qty))
-
-        if is_effectively_zero(previous_qty) and not is_effectively_zero(position_qty):
-            current_position_opened_at = fill.ingestion_timestamp
-        elif not is_effectively_zero(previous_qty) and is_effectively_zero(position_qty):
-            last_position_closed_at = fill.ingestion_timestamp
-            current_position_opened_at = None
-        elif not is_effectively_zero(previous_qty) and previous_qty * position_qty < 0:
-            last_position_closed_at = fill.ingestion_timestamp
-            current_position_opened_at = fill.ingestion_timestamp
-
-        if close_qty <= EPSILON_DECIMAL_12:
-            continue
-        base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
-        fee_cost_quote, _fee_error = try_fill_fee_cost_in_quote(
-            fill=fill,
-            base_currency=base_currency,
-            quote_currency=quote_currency,
+            if abs(signed_qty) > abs(previous_qty):
+                open_qty = abs(signed_qty) - abs(previous_qty)
+        position_qty = previous_qty + signed_qty
+        opening_continues_lifecycle = open_qty > EPSILON_DECIMAL_12 and previous_qty * signed_qty > 0
+        opening_new_lifecycle = open_qty > EPSILON_DECIMAL_12 and (
+            is_effectively_zero(previous_qty) or previous_qty * signed_qty < 0
         )
-        fee_cost_quote = to_decimal(fee_cost_quote or Decimal("0"))
-        close_fee_quote = fee_cost_quote
-        if fill_qty > EPSILON_DECIMAL_12 and close_qty < fill_qty:
+        fee_cost_quote = _fill_fee_quote(fill)
+        close_fee_quote = Decimal("0")
+        if fill_qty > EPSILON_DECIMAL_12 and close_qty > EPSILON_DECIMAL_12:
             close_fee_quote = fee_cost_quote * (close_qty / fill_qty)
-        net_realized_pnl = to_decimal(realized_delta_by_fill_id.get(fill.fill_id, Decimal("0")))
-        gross_realized_pnl = net_realized_pnl + close_fee_quote
-        close_notional = close_qty * to_decimal(fill.fill_price)
-        net_edge_bps = (
-            (net_realized_pnl / close_notional) * _BPS_SCALE
-            if close_notional > EPSILON_DECIMAL_12
-            else Decimal("0")
-        )
-        churn_cutoff = close_fee_quote * _SMALL_PNL_CHURN_MULTIPLIER
-        outcomes.append(
-            ClosedTradeOutcome(
-                timestamp=fill.ingestion_timestamp,
+        open_fee_quote = fee_cost_quote - close_fee_quote
+        if opening_continues_lifecycle:
+            if active_lifecycle is None:
+                active_lifecycle = _LifecycleAccumulator(opened_at=fill.ingestion_timestamp)
+            active_lifecycle.add_entry_fee(open_fee_quote)
+        if close_qty > EPSILON_DECIMAL_12:
+            if active_lifecycle is None:
+                active_lifecycle = _LifecycleAccumulator(opened_at=fill.ingestion_timestamp)
+            active_lifecycle.add_exit_fragment(
                 fill_id=fill.fill_id,
-                net_realized_pnl=net_realized_pnl,
-                gross_realized_pnl=gross_realized_pnl,
                 fee_cost_quote=close_fee_quote,
-                close_notional=close_notional,
-                net_edge_bps=net_edge_bps,
-                is_win=net_realized_pnl > 0,
-                is_small_churn=abs(net_realized_pnl) <= churn_cutoff if churn_cutoff > 0 else is_effectively_zero(net_realized_pnl),
-                is_low_edge=net_edge_bps <= Decimal(str(settings.strategy_low_edge_threshold_bps)),
-                is_residual_exit=str(fill.fill_id or "").strip() in guard_excluded_fill_ids,
+                close_notional=close_qty * to_decimal(fill.fill_price),
+                net_realized_pnl=to_decimal(realized_delta_by_fill_id.get(fill.fill_id, Decimal("0"))),
+                is_guard_excluded=str(fill.fill_id or "").strip() in guard_excluded_fill_ids,
+            )
+        lifecycle_closed = (
+            not is_effectively_zero(previous_qty)
+            and (
+                is_effectively_zero(position_qty)
+                or previous_qty * position_qty < 0
             )
         )
+        if lifecycle_closed and active_lifecycle is not None:
+            outcomes.append(
+                active_lifecycle.close_outcome(
+                    settings=settings,
+                    timestamp=fill.ingestion_timestamp,
+                )
+            )
+            last_position_closed_at = fill.ingestion_timestamp
+            active_lifecycle = None
+            current_position_opened_at = None
+        if opening_new_lifecycle and not is_effectively_zero(position_qty):
+            active_lifecycle = _LifecycleAccumulator(opened_at=fill.ingestion_timestamp)
+            active_lifecycle.add_entry_fee(open_fee_quote)
+            current_position_opened_at = fill.ingestion_timestamp
 
     if is_effectively_zero(current_position_qty):
         current_position_opened_at = None
     elif is_effectively_zero(position_qty) or (position_qty > 0) != (current_position_qty > 0):
         current_position_opened_at = None
+    elif active_lifecycle is not None:
+        current_position_opened_at = active_lifecycle.opened_at
     return current_position_opened_at, last_position_closed_at, outcomes
 
 
@@ -464,6 +556,7 @@ def _walk_leg_fills(
     current_position_opened_at: datetime | None = None
     last_position_closed_at: datetime | None = None
     outcomes: list[ClosedTradeOutcome] = []
+    active_lifecycle: _LifecycleAccumulator | None = None
 
     for fill in fills:
         if _fill_leg(fill) != leg:
@@ -472,61 +565,53 @@ def _walk_leg_fills(
         previous_qty = position_qty
         position_qty = max(previous_qty + signed_qty, Decimal("0"))
         close_qty = Decimal("0")
+        open_qty = Decimal("0")
+        if signed_qty > EPSILON_DECIMAL_12:
+            open_qty = signed_qty
         if previous_qty > EPSILON_DECIMAL_12 and signed_qty < -EPSILON_DECIMAL_12:
             close_qty = min(previous_qty, abs(signed_qty))
+        fee_cost_quote = _fill_fee_quote(fill)
+        fill_qty = to_decimal(fill.fill_qty)
+        close_fee_quote = Decimal("0")
+        if fill_qty > EPSILON_DECIMAL_12 and close_qty > EPSILON_DECIMAL_12:
+            close_fee_quote = fee_cost_quote * (close_qty / fill_qty)
+        open_fee_quote = fee_cost_quote - close_fee_quote
 
-        if previous_qty <= EPSILON_DECIMAL_12 and position_qty > EPSILON_DECIMAL_12:
-            current_position_opened_at = fill.ingestion_timestamp
-        elif previous_qty > EPSILON_DECIMAL_12 and position_qty <= EPSILON_DECIMAL_12:
+        if open_qty > EPSILON_DECIMAL_12:
+            if active_lifecycle is None:
+                active_lifecycle = _LifecycleAccumulator(opened_at=fill.ingestion_timestamp)
+            active_lifecycle.add_entry_fee(open_fee_quote)
+            if previous_qty <= EPSILON_DECIMAL_12:
+                current_position_opened_at = fill.ingestion_timestamp
+
+        if close_qty > EPSILON_DECIMAL_12:
+            if active_lifecycle is None:
+                active_lifecycle = _LifecycleAccumulator(opened_at=fill.ingestion_timestamp)
+            active_lifecycle.add_exit_fragment(
+                fill_id=fill.fill_id,
+                fee_cost_quote=close_fee_quote,
+                close_notional=close_qty * to_decimal(fill.fill_price),
+                net_realized_pnl=to_decimal(realized_delta_by_fill_id.get(fill.fill_id, Decimal("0"))),
+                is_guard_excluded=str(fill.fill_id or "").strip() in guard_excluded_fill_ids,
+            )
+
+        if previous_qty > EPSILON_DECIMAL_12 and position_qty <= EPSILON_DECIMAL_12 and active_lifecycle is not None:
+            outcomes.append(
+                active_lifecycle.close_outcome(
+                    settings=settings,
+                    timestamp=fill.ingestion_timestamp,
+                )
+            )
             last_position_closed_at = fill.ingestion_timestamp
             current_position_opened_at = None
-
-        if close_qty <= EPSILON_DECIMAL_12:
-            continue
-        base_currency, quote_currency = resolve_symbol_currencies(fill.symbol)
-        fee_cost_quote, _fee_error = try_fill_fee_cost_in_quote(
-            fill=fill,
-            base_currency=base_currency,
-            quote_currency=quote_currency,
-        )
-        fee_cost_quote = to_decimal(fee_cost_quote or Decimal("0"))
-        fill_qty = to_decimal(fill.fill_qty)
-        close_fee_quote = fee_cost_quote
-        if fill_qty > EPSILON_DECIMAL_12 and close_qty < fill_qty:
-            close_fee_quote = fee_cost_quote * (close_qty / fill_qty)
-        net_realized_pnl = to_decimal(realized_delta_by_fill_id.get(fill.fill_id, Decimal("0")))
-        gross_realized_pnl = net_realized_pnl + close_fee_quote
-        close_notional = close_qty * to_decimal(fill.fill_price)
-        net_edge_bps = (
-            (net_realized_pnl / close_notional) * _BPS_SCALE
-            if close_notional > EPSILON_DECIMAL_12
-            else Decimal("0")
-        )
-        churn_cutoff = close_fee_quote * _SMALL_PNL_CHURN_MULTIPLIER
-        outcomes.append(
-            ClosedTradeOutcome(
-                timestamp=fill.ingestion_timestamp,
-                fill_id=fill.fill_id,
-                net_realized_pnl=net_realized_pnl,
-                gross_realized_pnl=gross_realized_pnl,
-                fee_cost_quote=close_fee_quote,
-                close_notional=close_notional,
-                net_edge_bps=net_edge_bps,
-                is_win=net_realized_pnl > 0,
-                is_small_churn=(
-                    abs(net_realized_pnl) <= churn_cutoff
-                    if churn_cutoff > 0
-                    else is_effectively_zero(net_realized_pnl)
-                ),
-                is_low_edge=net_edge_bps <= Decimal(str(settings.strategy_low_edge_threshold_bps)),
-                is_residual_exit=str(fill.fill_id or "").strip() in guard_excluded_fill_ids,
-            )
-        )
+            active_lifecycle = None
 
     if is_effectively_zero(current_position_qty):
         current_position_opened_at = None
     elif is_effectively_zero(position_qty) or abs(position_qty - current_position_qty) > EPSILON_DECIMAL_12:
         current_position_opened_at = None
+    elif active_lifecycle is not None:
+        current_position_opened_at = active_lifecycle.opened_at
     return current_position_opened_at, last_position_closed_at, outcomes
 
 
@@ -537,10 +622,18 @@ def _strategy_health_snapshot_from_outcomes(
     current_position_opened_at: datetime | None,
     last_position_closed_at: datetime | None,
     latest_fill_timestamp: datetime | None,
+    as_of: datetime | None = None,
     outcomes: list[ClosedTradeOutcome],
 ) -> StrategyExecutionHealthSnapshot:
     lookback = max(settings.strategy_health_lookback_trades, 1)
-    recent_outcomes = outcomes[-lookback:]
+    recent_outcomes = list(outcomes)
+    reference_timestamp = as_of or latest_fill_timestamp or utc_now()
+    if (
+        settings.strategy_health_lookback_window_seconds > 0
+    ):
+        cutoff = reference_timestamp - timedelta(seconds=settings.strategy_health_lookback_window_seconds)
+        recent_outcomes = [item for item in recent_outcomes if item.timestamp >= cutoff]
+    recent_outcomes = recent_outcomes[-lookback:]
     guard_eligible_outcomes = [item for item in recent_outcomes if not item.is_residual_exit]
     recent_fee_total = sum((item.fee_cost_quote for item in recent_outcomes), Decimal("0"))
     recent_net_realized = sum((item.net_realized_pnl for item in recent_outcomes), Decimal("0"))

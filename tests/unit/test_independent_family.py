@@ -15,9 +15,11 @@ from aats.services.strategy_engines.families.independent_family import (
     IndependentBookEvaluation,
     _estimate_independent_lifecycle_cost_bps,
     _independent_family_action,
+    build_independent_leg,
     evaluate_independent_books,
     independent_candidate_from_directional_target,
 )
+from aats.services.strategy_engines.independent.models import IndependentExecutionPolicy
 from tests.support.strategy_family import make_ai_assessment, make_baseline, make_context, make_derivatives_hedge_settings
 
 
@@ -2159,6 +2161,144 @@ class TestIndependentFamily(unittest.TestCase):
                     f"{expected_leverage}，而非 parent flat 默认 1.0"
                 ),
             )
+
+    def test_build_independent_leg_sets_reference_price_for_close_failed_thesis(self) -> None:
+        leg = build_independent_leg(
+            decision_id="decision_failed_thesis",
+            symbol="BTC-USDT-SWAP",
+            book=IndependentBookEvaluation(
+                leg="long",
+                expectancy=IndependentBookExpectancy(
+                    leg="long",
+                    expected_signal_edge_bps=8.0,
+                    expected_slippage_bps=1.0,
+                    expected_cost_bps=4.0,
+                    expected_net_edge_bps=4.0,
+                    planned_delta_qty=Decimal("0.01"),
+                    reference_price=Decimal("100000"),
+                ),
+                score=0.20,
+                current_qty=Decimal("0.01"),
+                target_qty=Decimal("0"),
+                state="closing",
+                reason_codes=[],
+                blocked_reasons=[],
+                min_hold_remaining_seconds=0.0,
+                rebalance_cooldown_remaining_seconds=0.0,
+                book_action="close_failed_thesis",
+                close_reason="failed_thesis",
+                execution_policy=IndependentExecutionPolicy(
+                    edge_strength="weak",
+                    urgency="high",
+                    execution_style_preference="taker",
+                    order_type_preference="market",
+                    time_in_force_preference="ioc",
+                    limit_offset_bps_preference=None,
+                    max_acceptable_cost_bps=7.5,
+                    policy_reason="failed_thesis_close",
+                ),
+            ),
+            margin_mode="cross",
+            target_leverage=3.0,
+            reason_codes=["failed_thesis"],
+            family="independent",
+        )
+
+        self.assertIsNotNone(leg)
+        assert leg is not None
+        self.assertEqual(leg.reference_price, Decimal("100000"))
+
+    def test_build_independent_leg_sets_reference_price_for_close_stale_thesis(self) -> None:
+        leg = build_independent_leg(
+            decision_id="decision_stale_thesis",
+            symbol="BTC-USDT-SWAP",
+            book=IndependentBookEvaluation(
+                leg="long",
+                expectancy=IndependentBookExpectancy(
+                    leg="long",
+                    expected_signal_edge_bps=8.0,
+                    expected_slippage_bps=1.0,
+                    expected_cost_bps=4.0,
+                    expected_net_edge_bps=4.0,
+                    planned_delta_qty=Decimal("0.01"),
+                    projected_notional=Decimal("1000"),
+                ),
+                score=0.18,
+                current_qty=Decimal("0.01"),
+                target_qty=Decimal("0"),
+                state="closing",
+                reason_codes=[],
+                blocked_reasons=[],
+                min_hold_remaining_seconds=0.0,
+                rebalance_cooldown_remaining_seconds=0.0,
+                book_action="close_stale_thesis",
+                close_reason="stale_thesis",
+                execution_policy=IndependentExecutionPolicy(
+                    edge_strength="weak",
+                    urgency="medium",
+                    execution_style_preference="bounded_limit",
+                    order_type_preference="limit",
+                    time_in_force_preference="ioc",
+                    limit_offset_bps_preference=Decimal("0.8"),
+                    max_acceptable_cost_bps=7.5,
+                    policy_reason="stale_thesis_close",
+                ),
+            ),
+            margin_mode="cross",
+            target_leverage=3.0,
+            reason_codes=["stale_thesis"],
+            family="independent",
+        )
+
+        self.assertIsNotNone(leg)
+        assert leg is not None
+        self.assertEqual(leg.reference_price, Decimal("100000"))
+
+    def test_build_independent_leg_sets_reference_price_for_derisk_close_path(self) -> None:
+        leg = build_independent_leg(
+            decision_id="decision_derisk_close",
+            symbol="BTC-USDT-SWAP",
+            book=IndependentBookEvaluation(
+                leg="long",
+                expectancy=IndependentBookExpectancy(
+                    leg="long",
+                    expected_signal_edge_bps=8.0,
+                    expected_slippage_bps=1.0,
+                    expected_cost_bps=4.0,
+                    expected_net_edge_bps=4.0,
+                    planned_delta_qty=Decimal("0.01"),
+                    reference_price=Decimal("100500"),
+                ),
+                score=0.16,
+                current_qty=Decimal("0.01"),
+                target_qty=Decimal("0"),
+                state="de_risking",
+                reason_codes=[],
+                blocked_reasons=[],
+                min_hold_remaining_seconds=0.0,
+                rebalance_cooldown_remaining_seconds=0.0,
+                book_action="de_risk",
+                close_reason="execution_health_degraded",
+                execution_policy=IndependentExecutionPolicy(
+                    edge_strength="weak",
+                    urgency="high",
+                    execution_style_preference="bounded_taker",
+                    order_type_preference="market",
+                    time_in_force_preference="ioc",
+                    limit_offset_bps_preference=None,
+                    max_acceptable_cost_bps=7.5,
+                    policy_reason="execution_health_degraded",
+                ),
+            ),
+            margin_mode="cross",
+            target_leverage=3.0,
+            reason_codes=["execution_health_degraded"],
+            family="independent",
+        )
+
+        self.assertIsNotNone(leg)
+        assert leg is not None
+        self.assertEqual(leg.reference_price, Decimal("100500"))
 
 
 if __name__ == "__main__":

@@ -1391,24 +1391,53 @@ class TargetPositionEngine:
         return elapsed < self.settings.strategy_post_close_cooldown_seconds
 
     def _low_edge_cooldown_active(self, context: DecisionContext) -> bool:
+        use_guard_eligible_low_edge = (
+            context.recent_guard_eligible_closed_trade_count > 0
+            or context.recent_guard_eligible_low_edge_trade_at is not None
+        )
+        low_edge_streak = (
+            context.recent_guard_eligible_low_edge_trade_streak
+            if use_guard_eligible_low_edge
+            else context.recent_low_edge_trade_streak
+        )
+        low_edge_trade_at = (
+            context.recent_guard_eligible_low_edge_trade_at
+            if use_guard_eligible_low_edge
+            else context.recent_low_edge_trade_at
+        )
         if (
-            context.recent_low_edge_trade_streak < self.settings.strategy_low_edge_streak_limit
-            or context.recent_low_edge_trade_at is None
+            low_edge_streak < self.settings.strategy_low_edge_streak_limit
+            or low_edge_trade_at is None
             or self.settings.strategy_low_edge_cooldown_seconds <= 0
         ):
             return False
         elapsed = max(
-            (self._decision_as_of(context) - context.recent_low_edge_trade_at).total_seconds(),
+            (self._decision_as_of(context) - low_edge_trade_at).total_seconds(),
             0.0,
         )
         return elapsed < self.settings.strategy_low_edge_cooldown_seconds
 
     def _performance_degraded(self, context: DecisionContext) -> bool:
-        if context.recent_closed_trade_count < self.settings.strategy_performance_guard_min_closed_trades:
+        closed_trade_count = (
+            context.recent_guard_eligible_closed_trade_count
+            if context.recent_guard_eligible_closed_trade_count > 0
+            else context.recent_closed_trade_count
+        )
+        fee_drag_ratio = (
+            context.recent_guard_eligible_fee_drag_ratio
+            if context.recent_guard_eligible_closed_trade_count > 0
+            else context.recent_fee_drag_ratio
+        )
+        churn_ratio = (
+            context.recent_guard_eligible_churn_ratio
+            if context.recent_guard_eligible_closed_trade_count > 0
+            else context.recent_churn_ratio
+        )
+        if closed_trade_count < self.settings.strategy_performance_guard_min_closed_trades:
             return False
         return (
-            context.recent_fee_drag_ratio > self.settings.strategy_max_fee_drag_ratio
-            or context.recent_churn_ratio > self.settings.strategy_max_churn_ratio
+            fee_drag_ratio > self.settings.strategy_max_fee_drag_ratio
+            or churn_ratio > self.settings.strategy_max_churn_ratio
         )
 
     def _reversal_requires_additional_edge(

@@ -142,26 +142,6 @@ def resolve_entry_min_confirm_ticks(
     expected_net_edge_bps: float | None = None,
 ) -> int:
     configured_min_confirm_ticks = max(int(settings.strategy_hedge_independent_min_confirm_ticks), 1)
-    if configured_min_confirm_ticks <= 1 or side != "short":
-        return configured_min_confirm_ticks
-    strong_signal_threshold = (
-        float(scale_threshold)
-        if scale_threshold is not None and float(scale_threshold) > float(entry_threshold)
-        else min(float(entry_threshold) + 0.05, 1.0)
-    )
-    strong_signal = score + 1e-9 >= strong_signal_threshold
-    nominal_cost_bps = max(float(settings.strategy_hedge_independent_max_acceptable_cost_bps), 0.0)
-    high_net_edge_threshold = required_safe_net_edge_bps(settings=settings) + max(
-        float(settings.strategy_hedge_independent_expected_execution_buffer_bps),
-        nominal_cost_bps,
-        1.0,
-    )
-    high_net_edge = (
-        expected_net_edge_bps is not None
-        and float(expected_net_edge_bps) + 1e-9 >= high_net_edge_threshold
-    )
-    if strong_signal or high_net_edge:
-        return max(configured_min_confirm_ticks - 1, 1)
     return configured_min_confirm_ticks
 
 
@@ -223,17 +203,36 @@ def low_edge_cooldown_active(
         )
         or 0
     )
-    if streak < settings.strategy_low_edge_streak_limit:
-        return False
     recent_at = _guard_health_datetime(
         context,
         leg,
         guarded_key="recent_guard_eligible_low_edge_trade_at",
         fallback_key="recent_low_edge_trade_at",
     )
-    if recent_at is None:
+    if (
+        streak >= settings.strategy_low_edge_streak_limit
+        and recent_at is not None
+        and max((context.as_of_ts - recent_at).total_seconds(), 0.0) < settings.strategy_low_edge_cooldown_seconds
+    ):
+        return True
+    symbol_streak = int(
+        _symbol_guard_value(
+            context,
+            guarded_key="recent_guard_eligible_low_edge_trade_streak",
+            fallback_key="recent_low_edge_trade_streak",
+        )
+        or 0
+    )
+    if symbol_streak < settings.strategy_low_edge_streak_limit:
         return False
-    return max((context.as_of_ts - recent_at).total_seconds(), 0.0) < settings.strategy_low_edge_cooldown_seconds
+    symbol_recent_at = _symbol_guard_datetime(
+        context,
+        guarded_key="recent_guard_eligible_low_edge_trade_at",
+        fallback_key="recent_low_edge_trade_at",
+    )
+    if symbol_recent_at is None:
+        return False
+    return max((context.as_of_ts - symbol_recent_at).total_seconds(), 0.0) < settings.strategy_low_edge_cooldown_seconds
 
 
 def performance_degraded(
@@ -242,7 +241,7 @@ def performance_degraded(
     context: DecisionContext,
     leg: IndependentLeg,
 ) -> bool:
-    closed_trade_count = int(
+    leg_closed_trade_count = int(
         _guard_health_value(
             context,
             leg,
@@ -251,19 +250,48 @@ def performance_degraded(
         )
         or 0
     )
-    if closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
+    if leg_closed_trade_count >= settings.strategy_performance_guard_min_closed_trades:
+        return (
+            _guard_fee_drag_ratio(context=context, leg=leg) > settings.strategy_max_fee_drag_ratio
+            or float(
+                _guard_health_value(
+                    context,
+                    leg,
+                    guarded_key="recent_guard_eligible_churn_ratio",
+                    fallback_key="recent_churn_ratio",
+                )
+                or 0.0
+            ) > settings.strategy_max_churn_ratio
+        )
+    symbol_closed_trade_count = int(
+        _symbol_guard_value(
+            context,
+            guarded_key="recent_guard_eligible_closed_trade_count",
+            fallback_key="recent_closed_trade_count",
+        )
+        or 0
+    )
+    if symbol_closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
         return False
+    symbol_fee_drag_ratio = float(
+        _symbol_guard_value(
+            context,
+            guarded_key="recent_guard_eligible_fee_drag_ratio",
+            fallback_key="recent_fee_drag_ratio",
+        )
+        or 0.0
+    )
+    symbol_churn_ratio = float(
+        _symbol_guard_value(
+            context,
+            guarded_key="recent_guard_eligible_churn_ratio",
+            fallback_key="recent_churn_ratio",
+        )
+        or 0.0
+    )
     return (
-        _guard_fee_drag_ratio(context=context, leg=leg) > settings.strategy_max_fee_drag_ratio
-        or float(
-            _guard_health_value(
-                context,
-                leg,
-                guarded_key="recent_guard_eligible_churn_ratio",
-                fallback_key="recent_churn_ratio",
-            )
-            or 0.0
-        ) > settings.strategy_max_churn_ratio
+        symbol_fee_drag_ratio > settings.strategy_max_fee_drag_ratio
+        or symbol_churn_ratio > settings.strategy_max_churn_ratio
     )
 
 
@@ -285,7 +313,33 @@ def trial_guard_active(
         or 0
     )
     if closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
-        return False
+        symbol_closed_trade_count = int(
+            _symbol_guard_value(
+                context,
+                guarded_key="recent_guard_eligible_closed_trade_count",
+                fallback_key="recent_closed_trade_count",
+            )
+            or 0
+        )
+        if symbol_closed_trade_count < settings.strategy_performance_guard_min_closed_trades:
+            return False
+        recent_net_realized_pnl = float(
+            _symbol_guard_value(
+                context,
+                guarded_key="recent_guard_eligible_net_realized_pnl",
+                fallback_key="recent_net_realized_pnl",
+            )
+            or 0.0
+        )
+        recent_win_rate = float(
+            _symbol_guard_value(
+                context,
+                guarded_key="recent_guard_eligible_win_rate",
+                fallback_key="recent_win_rate",
+            )
+            or 0.0
+        )
+        return recent_net_realized_pnl < 0 and recent_win_rate < 0.5
     recent_net_realized_pnl = float(
         _guard_health_value(
             context,
@@ -342,6 +396,34 @@ def _guard_health_datetime(
     value = _guard_health_value(
         context,
         leg,
+        guarded_key=guarded_key,
+        fallback_key=fallback_key,
+    )
+    return value if hasattr(value, "isoformat") else None
+
+
+def _symbol_guard_value(
+    context: DecisionContext,
+    *,
+    guarded_key: str,
+    fallback_key: str,
+) -> object | None:
+    guarded_count = int(getattr(context, "recent_guard_eligible_closed_trade_count", 0) or 0)
+    if guarded_count > 0:
+        value = getattr(context, guarded_key, None)
+        if value is not None:
+            return value
+    return getattr(context, fallback_key, None)
+
+
+def _symbol_guard_datetime(
+    context: DecisionContext,
+    *,
+    guarded_key: str,
+    fallback_key: str,
+):
+    value = _symbol_guard_value(
+        context,
         guarded_key=guarded_key,
         fallback_key=fallback_key,
     )

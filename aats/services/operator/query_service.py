@@ -2127,6 +2127,7 @@ class OperatorQueryService:
                 Decimal("0") if position_state is None else position_state.short_position_qty
             ),
             guard_excluded_fill_ids=self._guard_excluded_fill_ids_for_symbol(symbol_fills),
+            as_of=utc_now(),
         )
         return snapshot.as_payload(
             settings=self.runtime.settings,

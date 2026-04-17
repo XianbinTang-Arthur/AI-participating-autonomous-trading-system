@@ -103,6 +103,13 @@ class DecisionContext(SchemaBase):
     recent_churn_ratio: float = 0.0
     recent_low_edge_trade_streak: int = 0
     recent_low_edge_trade_at: datetime | None = None
+    recent_guard_eligible_closed_trade_count: int = 0
+    recent_guard_eligible_win_rate: float = 0.0
+    recent_guard_eligible_fee_drag_ratio: float = 0.0
+    recent_guard_eligible_churn_ratio: float = 0.0
+    recent_guard_eligible_low_edge_trade_streak: int = 0
+    recent_guard_eligible_low_edge_trade_at: datetime | None = None
+    recent_guard_eligible_net_realized_pnl: Decimal = Decimal("0")
     leg_strategy_health: dict[str, dict[str, object]] = Field(default_factory=dict)
     strategy_guardrail_flags: list[str] = Field(default_factory=list)
     strategy_cooldowns: dict[str, float] = Field(default_factory=dict)

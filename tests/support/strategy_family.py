@@ -54,6 +54,13 @@ def make_context(
     recent_closed_trade_count: int = 0,
     recent_fee_drag_ratio: float = 0.0,
     recent_churn_ratio: float = 0.0,
+    recent_guard_eligible_closed_trade_count: int | None = None,
+    recent_guard_eligible_win_rate: float | None = None,
+    recent_guard_eligible_fee_drag_ratio: float | None = None,
+    recent_guard_eligible_churn_ratio: float | None = None,
+    recent_guard_eligible_low_edge_trade_streak: int | None = None,
+    recent_guard_eligible_low_edge_trade_seconds_ago: int | None = None,
+    recent_guard_eligible_net_realized_pnl: Decimal = Decimal("0"),
     leg_strategy_health: dict[str, dict[str, object]] | None = None,
     market_last_price: float = 0.0,
     available_trading_equity: float = 0.0,
@@ -70,25 +77,39 @@ def make_context(
         else (0.0 if current_short_position_qty is None else current_short_position_qty)
     )
     health_payload = leg_strategy_health or {
-        "long": {
-            "recent_closed_trade_count": 0,
-            "recent_win_rate": 0.0,
-            "recent_fee_drag_ratio": 0.0,
-            "recent_churn_ratio": 0.0,
-            "recent_low_edge_trade_streak": 0,
-            "recent_low_edge_trade_at": None,
-            "recent_net_realized_pnl": Decimal("0"),
-        },
-        "short": {
-            "recent_closed_trade_count": 0,
-            "recent_win_rate": 0.0,
-            "recent_fee_drag_ratio": 0.0,
-            "recent_churn_ratio": 0.0,
-            "recent_low_edge_trade_streak": 0,
-            "recent_low_edge_trade_at": None,
-            "recent_net_realized_pnl": Decimal("0"),
-        },
-    }
+            "long": {
+                "recent_closed_trade_count": 0,
+                "recent_win_rate": 0.0,
+                "recent_fee_drag_ratio": 0.0,
+                "recent_churn_ratio": 0.0,
+                "recent_low_edge_trade_streak": 0,
+                "recent_low_edge_trade_at": None,
+                "recent_guard_eligible_closed_trade_count": 0,
+                "recent_guard_eligible_win_rate": 0.0,
+                "recent_guard_eligible_fee_drag_ratio": 0.0,
+                "recent_guard_eligible_churn_ratio": 0.0,
+                "recent_guard_eligible_low_edge_trade_streak": 0,
+                "recent_guard_eligible_low_edge_trade_at": None,
+                "recent_guard_eligible_net_realized_pnl": Decimal("0"),
+                "recent_net_realized_pnl": Decimal("0"),
+            },
+            "short": {
+                "recent_closed_trade_count": 0,
+                "recent_win_rate": 0.0,
+                "recent_fee_drag_ratio": 0.0,
+                "recent_churn_ratio": 0.0,
+                "recent_low_edge_trade_streak": 0,
+                "recent_low_edge_trade_at": None,
+                "recent_guard_eligible_closed_trade_count": 0,
+                "recent_guard_eligible_win_rate": 0.0,
+                "recent_guard_eligible_fee_drag_ratio": 0.0,
+                "recent_guard_eligible_churn_ratio": 0.0,
+                "recent_guard_eligible_low_edge_trade_streak": 0,
+                "recent_guard_eligible_low_edge_trade_at": None,
+                "recent_guard_eligible_net_realized_pnl": Decimal("0"),
+                "recent_net_realized_pnl": Decimal("0"),
+            },
+        }
     return DecisionContext(
         decision_id="decision_target_test",
         symbol="BTC-USDT",
@@ -155,6 +176,39 @@ def make_context(
         recent_closed_trade_count=recent_closed_trade_count,
         recent_fee_drag_ratio=recent_fee_drag_ratio,
         recent_churn_ratio=recent_churn_ratio,
+        recent_guard_eligible_closed_trade_count=(
+            recent_closed_trade_count
+            if recent_guard_eligible_closed_trade_count is None
+            else recent_guard_eligible_closed_trade_count
+        ),
+        recent_guard_eligible_win_rate=(
+            0.0 if recent_guard_eligible_win_rate is None else recent_guard_eligible_win_rate
+        ),
+        recent_guard_eligible_fee_drag_ratio=(
+            recent_fee_drag_ratio
+            if recent_guard_eligible_fee_drag_ratio is None
+            else recent_guard_eligible_fee_drag_ratio
+        ),
+        recent_guard_eligible_churn_ratio=(
+            recent_churn_ratio
+            if recent_guard_eligible_churn_ratio is None
+            else recent_guard_eligible_churn_ratio
+        ),
+        recent_guard_eligible_low_edge_trade_streak=(
+            recent_low_edge_trade_streak
+            if recent_guard_eligible_low_edge_trade_streak is None
+            else recent_guard_eligible_low_edge_trade_streak
+        ),
+        recent_guard_eligible_low_edge_trade_at=(
+            now - timedelta(seconds=recent_guard_eligible_low_edge_trade_seconds_ago)
+            if recent_guard_eligible_low_edge_trade_seconds_ago is not None
+            else (
+                now - timedelta(seconds=recent_low_edge_trade_seconds_ago)
+                if recent_low_edge_trade_seconds_ago is not None
+                else None
+            )
+        ),
+        recent_guard_eligible_net_realized_pnl=recent_guard_eligible_net_realized_pnl,
         leg_strategy_health=health_payload,
         strategy_guardrail_flags=[],
         strategy_cooldowns={},

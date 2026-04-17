@@ -7,7 +7,11 @@ from decimal import Decimal
 from aats.schemas.strategy_runtime import StrategyBookRuntimeState
 from aats.services.strategy_engines.families.independent_family import _evaluate_independent_book
 from aats.services.strategy_engines.independent.diagnostics import runtime_state_from_decision
-from aats.services.strategy_engines.independent.engine import evaluate_independent_book
+from aats.services.strategy_engines.independent.engine import (
+    _execution_health_state,
+    _trial_guard_active,
+    evaluate_independent_book,
+)
 from aats.services.strategy_engines.independent.models import IndependentBookExpectancy
 from tests.support.strategy_family import make_ai_assessment, make_baseline, make_context, make_derivatives_hedge_settings
 
@@ -516,7 +520,7 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertEqual(runtime_state.guard_state, "suspended")
         self.assertIsNone(runtime_state.suspended_until)
 
-    def test_evaluate_independent_book_opens_short_on_high_net_edge_single_tick_confirmation(self) -> None:
+    def test_evaluate_independent_book_blocks_short_when_single_tick_confirmation_is_insufficient(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_independent_enabled=True,
             strategy_hedge_independent_adaptive_rollout_enabled=False,
@@ -562,11 +566,11 @@ class TestIndependentEngine(unittest.TestCase):
             recent_score_history=(0.286,),
         )
 
-        self.assertEqual(decision.state, "opening")
-        self.assertEqual(decision.book_action, "open")
-        self.assertEqual(decision.blocked_reasons, ())
+        self.assertEqual(decision.state, "blocked")
+        self.assertEqual(decision.book_action, "blocked")
+        self.assertIn("independent_short_book_score_support_below_min_confirm_ticks", decision.blocked_reasons)
         self.assertEqual(decision.score_stability_metrics.support_count, 1)
-        self.assertTrue(bool(decision.score_stability_metrics and decision.score_stability_metrics.stable))
+        self.assertFalse(bool(decision.score_stability_metrics and decision.score_stability_metrics.stable))
         self.assertEqual(decision.execution_health_state, "ok")
         self.assertIsNotNone(decision.eligibility)
         self.assertGreater(float(decision.eligibility.effective_max_cost_bps or 0.0), 10.6)
@@ -964,6 +968,63 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertEqual(decision.state, "opening")
         self.assertEqual(decision.book_action, "open")
 
+    def test_execution_health_state_falls_back_to_symbol_guard_metrics_when_leg_is_cold(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_performance_guard_min_closed_trades=4,
+            strategy_max_fee_drag_ratio=0.48,
+            strategy_max_churn_ratio=0.42,
+        )
+        context = make_context(
+            recent_closed_trade_count=6,
+            recent_guard_eligible_closed_trade_count=5,
+            recent_guard_eligible_fee_drag_ratio=0.7,
+            recent_guard_eligible_churn_ratio=0.8,
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 5,
+                    "recent_guard_eligible_closed_trade_count": 5,
+                    "recent_guard_eligible_fee_drag_ratio": 0.1,
+                    "recent_guard_eligible_churn_ratio": 0.1,
+                },
+                "short": {
+                    "recent_closed_trade_count": 0,
+                    "recent_guard_eligible_closed_trade_count": 0,
+                    "recent_guard_eligible_fee_drag_ratio": 0.0,
+                    "recent_guard_eligible_churn_ratio": 0.0,
+                },
+            },
+        )
+
+        self.assertEqual(_execution_health_state(settings=settings, context=context, leg="short"), "blocked")
+
+    def test_trial_guard_active_falls_back_to_symbol_guard_metrics_when_leg_is_cold(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_trial_guard_enabled=True,
+            strategy_performance_guard_min_closed_trades=4,
+        )
+        context = make_context(
+            recent_closed_trade_count=6,
+            recent_guard_eligible_closed_trade_count=5,
+            recent_guard_eligible_win_rate=0.2,
+            recent_guard_eligible_net_realized_pnl=Decimal("-3"),
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 5,
+                    "recent_guard_eligible_closed_trade_count": 5,
+                    "recent_guard_eligible_win_rate": 0.8,
+                    "recent_guard_eligible_net_realized_pnl": Decimal("2"),
+                },
+                "short": {
+                    "recent_closed_trade_count": 0,
+                    "recent_guard_eligible_closed_trade_count": 0,
+                    "recent_guard_eligible_win_rate": 0.0,
+                    "recent_guard_eligible_net_realized_pnl": Decimal("0"),
+                },
+            },
+        )
+
+        self.assertTrue(_trial_guard_active(settings=settings, context=context, leg="short"))
+
     def test_evaluate_independent_book_blocks_short_when_dynamic_cost_fuse_detects_anomaly(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_independent_enabled=True,
@@ -1017,7 +1078,7 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertEqual(decision.book_action, "blocked")
         self.assertIn("independent_short_book_expected_cost_above_max_acceptable", decision.blocked_reasons)
         self.assertEqual(decision.score_stability_metrics.support_count, 1)
-        self.assertTrue(bool(decision.score_stability_metrics and decision.score_stability_metrics.stable))
+        self.assertFalse(bool(decision.score_stability_metrics and decision.score_stability_metrics.stable))
 
 
 if __name__ == "__main__":

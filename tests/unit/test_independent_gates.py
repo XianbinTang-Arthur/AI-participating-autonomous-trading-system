@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 import unittest
 
 from aats.services.strategy_engines.families.independent_family import (
@@ -10,6 +11,8 @@ from aats.services.strategy_engines.independent.gates import (
     anomaly_cost_fuse_threshold_bps,
     evaluate_entry_quality_gate,
     evaluate_open_eligibility,
+    low_edge_cooldown_active,
+    performance_degraded,
     resolve_entry_min_confirm_ticks,
     trial_guard_active,
 )
@@ -258,7 +261,7 @@ class TestIndependentGates(unittest.TestCase):
         self.assertIsNotNone(high_depth_fuse)
         self.assertGreater(float(low_depth_fuse or 0.0), float(high_depth_fuse or 0.0))
 
-    def test_resolve_entry_min_confirm_ticks_relaxes_high_edge_short_entry(self) -> None:
+    def test_resolve_entry_min_confirm_ticks_keeps_configured_requirement_for_short_entry(self) -> None:
         settings = make_derivatives_hedge_settings(
             strategy_hedge_independent_min_confirm_ticks=2,
             strategy_hedge_independent_max_acceptable_cost_bps=7.5,
@@ -276,7 +279,7 @@ class TestIndependentGates(unittest.TestCase):
             expected_net_edge_bps=27.4,
         )
 
-        self.assertEqual(extracted, 1)
+        self.assertEqual(extracted, 2)
 
     def test_resolve_entry_min_confirm_ticks_keeps_long_entry_confirmation_requirement(self) -> None:
         settings = make_derivatives_hedge_settings(
@@ -354,6 +357,102 @@ class TestIndependentGates(unittest.TestCase):
         )
 
         self.assertFalse(trial_guard_active(settings=settings, context=context, leg="long"))
+
+    def test_performance_degraded_falls_back_to_symbol_guard_eligible_metrics_when_leg_is_cold(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_performance_guard_min_closed_trades=4,
+            strategy_max_fee_drag_ratio=0.48,
+            strategy_max_churn_ratio=0.42,
+        )
+        context = make_context(
+            recent_closed_trade_count=9,
+            recent_guard_eligible_closed_trade_count=5,
+            recent_fee_drag_ratio=3.0,
+            recent_guard_eligible_fee_drag_ratio=0.25,
+            recent_churn_ratio=0.8,
+            recent_guard_eligible_churn_ratio=0.8,
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 5,
+                    "recent_guard_eligible_closed_trade_count": 5,
+                    "recent_fee_drag_ratio": 0.25,
+                    "recent_guard_eligible_fee_drag_ratio": 0.25,
+                    "recent_churn_ratio": 0.10,
+                    "recent_guard_eligible_churn_ratio": 0.10,
+                },
+                "short": {
+                    "recent_closed_trade_count": 0,
+                    "recent_guard_eligible_closed_trade_count": 0,
+                    "recent_fee_drag_ratio": 0.0,
+                    "recent_guard_eligible_fee_drag_ratio": 0.0,
+                    "recent_churn_ratio": 0.0,
+                    "recent_guard_eligible_churn_ratio": 0.0,
+                },
+            },
+        )
+
+        self.assertTrue(performance_degraded(settings=settings, context=context, leg="short"))
+
+    def test_trial_guard_active_falls_back_to_symbol_guard_eligible_metrics_when_leg_is_cold(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_hedge_independent_trial_guard_enabled=True,
+            strategy_performance_guard_min_closed_trades=4,
+        )
+        context = make_context(
+            recent_closed_trade_count=6,
+            recent_guard_eligible_closed_trade_count=5,
+            recent_guard_eligible_win_rate=0.2,
+            recent_guard_eligible_net_realized_pnl=Decimal("-3"),
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 5,
+                    "recent_guard_eligible_closed_trade_count": 5,
+                    "recent_guard_eligible_win_rate": 0.8,
+                    "recent_guard_eligible_net_realized_pnl": Decimal("2"),
+                },
+                "short": {
+                    "recent_closed_trade_count": 0,
+                    "recent_guard_eligible_closed_trade_count": 0,
+                    "recent_guard_eligible_win_rate": 0.0,
+                    "recent_guard_eligible_net_realized_pnl": Decimal("0"),
+                },
+            },
+        )
+
+        self.assertTrue(trial_guard_active(settings=settings, context=context, leg="short"))
+
+    def test_low_edge_cooldown_active_falls_back_to_symbol_metrics_when_leg_is_cold(self) -> None:
+        settings = make_derivatives_hedge_settings(
+            strategy_low_edge_streak_limit=3,
+            strategy_low_edge_cooldown_seconds=900,
+        )
+        context = make_context(
+            recent_low_edge_trade_streak=3,
+            recent_low_edge_trade_seconds_ago=60,
+            recent_guard_eligible_closed_trade_count=0,
+            recent_guard_eligible_low_edge_trade_streak=0,
+            recent_guard_eligible_low_edge_trade_seconds_ago=None,
+            leg_strategy_health={
+                "long": {
+                    "recent_closed_trade_count": 5,
+                    "recent_guard_eligible_closed_trade_count": 5,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_guard_eligible_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_guard_eligible_low_edge_trade_at": None,
+                },
+                "short": {
+                    "recent_closed_trade_count": 0,
+                    "recent_guard_eligible_closed_trade_count": 0,
+                    "recent_low_edge_trade_streak": 0,
+                    "recent_guard_eligible_low_edge_trade_streak": 0,
+                    "recent_low_edge_trade_at": None,
+                    "recent_guard_eligible_low_edge_trade_at": None,
+                },
+            },
+        )
+
+        self.assertTrue(low_edge_cooldown_active(settings=settings, context=context, leg="short"))
 
 
 if __name__ == "__main__":

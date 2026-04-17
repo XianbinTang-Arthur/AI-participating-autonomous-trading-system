@@ -174,6 +174,7 @@ class DecisionContextBuilder:
         if portfolio_event is None and portfolio_snapshot is None:
             raise RuntimeError("Portfolio snapshot is required before building decision context")
 
+        decision_as_of = utc_now()
         market_snapshot = MarketSnapshot.model_validate(market_event.payload)
         account_snapshot = self._account_snapshot()
         current_position_state = self._position_state(portfolio_snapshot, symbol, self.settings.trading_product_type)
@@ -242,6 +243,7 @@ class DecisionContextBuilder:
             current_long_position_qty=current_long_qty,
             current_short_position_qty=current_short_qty,
             guard_excluded_fill_ids=guard_excluded_fill_ids,
+            as_of=decision_as_of,
         )
         leg_strategy_health = compute_leg_strategy_execution_health(
             settings=self.settings,
@@ -251,6 +253,7 @@ class DecisionContextBuilder:
             current_long_position_qty=current_long_qty,
             current_short_position_qty=current_short_qty,
             guard_excluded_fill_ids=guard_excluded_fill_ids,
+            as_of=decision_as_of,
         )
         leg_lifecycle = self._leg_lifecycle(
             symbol=symbol,
@@ -262,14 +265,14 @@ class DecisionContextBuilder:
         current_leg_qty_by_side = {"long": current_long_qty, "short": current_short_qty}
         guardrails = strategy_health.active_guardrails(
             settings=self.settings,
-            as_of=utc_now(),
+            as_of=decision_as_of,
             current_position_qty=current_position_qty,
         )
         return DecisionContext(
             decision_id=decision_id,
             symbol=symbol,
             timeframe=timeframe,
-            as_of_ts=utc_now(),
+            as_of_ts=decision_as_of,
             market_snapshot_ref=market_event.event_id,
             feature_snapshot_ref=feature_event.event_id,
             portfolio_snapshot_ref=(
@@ -314,10 +317,37 @@ class DecisionContextBuilder:
             recent_churn_ratio=strategy_health.recent_churn_ratio,
             recent_low_edge_trade_streak=strategy_health.recent_low_edge_trade_streak,
             recent_low_edge_trade_at=strategy_health.recent_low_edge_trade_at,
+            recent_guard_eligible_closed_trade_count=(
+                strategy_health.recent_guard_eligible_closed_trade_count
+                or 0
+            ),
+            recent_guard_eligible_win_rate=(
+                strategy_health.recent_guard_eligible_win_rate
+                or 0.0
+            ),
+            recent_guard_eligible_fee_drag_ratio=(
+                strategy_health.recent_guard_eligible_fee_drag_ratio
+                or 0.0
+            ),
+            recent_guard_eligible_churn_ratio=(
+                strategy_health.recent_guard_eligible_churn_ratio
+                or 0.0
+            ),
+            recent_guard_eligible_low_edge_trade_streak=(
+                strategy_health.recent_guard_eligible_low_edge_trade_streak
+                or 0
+            ),
+            recent_guard_eligible_low_edge_trade_at=(
+                strategy_health.recent_guard_eligible_low_edge_trade_at
+            ),
+            recent_guard_eligible_net_realized_pnl=(
+                strategy_health.recent_guard_eligible_net_realized_pnl
+                or Decimal("0")
+            ),
             leg_strategy_health={
                 leg: snapshot.as_payload(
                     settings=self.settings,
-                    as_of=utc_now(),
+                    as_of=decision_as_of,
                     current_position_qty=current_leg_qty_by_side.get(leg, Decimal("0")),
                 )
                 for leg, snapshot in leg_strategy_health.items()
