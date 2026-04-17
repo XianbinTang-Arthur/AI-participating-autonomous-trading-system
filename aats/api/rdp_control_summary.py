@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote as _url_quote
 
 from fastapi import Request
 from sqlalchemy.orm import Session
@@ -484,6 +485,21 @@ def _build_governance_state(
 
 
 def build_rdp_control_summary(request: Request) -> dict[str, Any]:
+    # M6 修复：/auth/dashboard/bundle 一次请求会依次渲染
+    # rdpWorkbenchOverview / rdpWorkbenchItems / rdpWorkbenchAlerts /
+    # rdpTuningOverview / rdpTuningProposals，每个 build_rdp_workbench_*
+    # 内部都会调一次 build_rdp_control_summary —— 同一 request 里最多 5 次
+    # 重复 DB/文件 IO，数据还完全一样。在 request.state 上做 per-request
+    # memoize：key 用固定常量即可，因为 request 本身就是天然隔离边界。
+    #
+    # 注意：单元测试常用 SimpleNamespace mock request，没有 ``state`` 属性。
+    # getattr(request, "state", None) 先拿，再从里面取 cache，测试场景下拿不到
+    # 就当 cache miss，继续走正常路径。
+    request_state = getattr(request, "state", None)
+    cached = getattr(request_state, "_rdp_control_summary_cache", None) if request_state is not None else None
+    if cached is not None:
+        return cached
+
     root = _project_root(request)
     environment = _environment_summary()
 
@@ -519,8 +535,12 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
                 or summary.get("latest_task")
             )
             summary["display_task"] = display_task
-            if isinstance(display_task, dict):
-                summary.update(display_task)
+            # M1 修复：不再 `summary.update(display_task)`。这行把 task 的
+            # status/started_at/finished_at/error_message 拍到 summary 顶层，
+            # 让外层消费者误以为 summary.status 代表整个 lane 状态，但实际
+            # display_task 可能只是 latest_task（已 done），而 running 或
+            # pending lane 仍有任务。前端全部从子字段（running_task /
+            # pending_task / latest_task / display_task）读，不需要这层平铺。
             summary["workflow"] = workflow
     except Exception as exc:
         logger.warning("control-summary: task query failed: %s", exc)
@@ -726,7 +746,7 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "health_blocked": health.get("overall_health") == "blocked",
     }
 
-    return {
+    result = {
         "environment": environment,
         "health": health,
         "operations_summary": operations_summary,
@@ -740,6 +760,13 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "recent_gate_results": recent_gate_results,
         "observation_queue": observation_queue,
     }
+    try:
+        request.state._rdp_control_summary_cache = result
+    except Exception:
+        # Starlette Request.state 是 State()，setattr 总能成功；极少数 mock
+        # request 不支持 setattr，吞掉并回退到 no-cache 语义。
+        pass
+    return result
 
 
 _WORKBENCH_RECOMMENDATION_LABELS = {
@@ -874,18 +901,42 @@ def _build_workbench_alerts_payload(
     except Exception as exc:
         logger.warning("workbench alerts: failed to inspect step2 snapshot: %s", exc)
 
-    for phase, payload, title in (
-        ("phase3", query_latest_attribution(root), "最新归因结果不完整"),
-        ("phase4", query_latest_execution_realism(root), "最新执行评估不完整"),
+    # phase3 / phase4 payload 查询本身也要 fail-safe——真 DB/文件抖动不应让整个
+    # /auth/dashboard/bundle 500，否则前端回到 "RDP 数据暂未就绪" 的 callout，
+    # 等于又撞上 B2 的回归场景。任一 query 抛异常就降级为 "unavailable"，让下面
+    # 的 gate 当作缺 round 处理（阻塞审批，显示告警）。
+    safe_phase_payloads: list[tuple[str, dict[str, Any], str]] = []
+    for phase, query_fn, title in (
+        ("phase3", query_latest_attribution, "最新归因结果不完整"),
+        ("phase4", query_latest_execution_realism, "最新执行评估不完整"),
     ):
+        try:
+            payload = query_fn(root)
+        except Exception:
+            logger.exception("workbench alerts: %s payload query failed", phase)
+            payload = {
+                "available": False,
+                "incomplete_reason": "query_failed",
+            }
+        if not isinstance(payload, dict):
+            payload = {"available": False, "incomplete_reason": "query_failed"}
+        safe_phase_payloads.append((phase, payload, title))
+
+    for phase, payload, title in safe_phase_payloads:
         if payload.get("available"):
             continue
         incomplete_reason = str(payload.get("incomplete_reason") or "").strip()
+        # H5 修复：available=False 但没给 incomplete_reason 的情况下，历史代码
+        # 直接 `continue` 跳过告警，审批门禁就看不到这一 phase 缺席 —— 等于静默
+        # 放行。现在统一视为 "missing_round"：告警一定会写，blocks_approval=True。
         if not incomplete_reason:
-            continue
+            incomplete_reason = "missing_round"
+        # M8 修复：manifest_missing_on_disk 的语义是清单本身从磁盘消失，属于
+        # 审批阻塞级别（和 step2_manifest_missing 同级），severity 应为 danger。
+        # 此前标成 warning 让 UI 看起来像可以推进，与 blocks_approval=True 矛盾。
         integrity_alerts.append({
             "code": incomplete_reason,
-            "severity": "warning" if incomplete_reason == "manifest_missing_on_disk" else "danger",
+            "severity": "danger",
             "scope": "phase",
             "phase": phase,
             "title": title,
@@ -975,6 +1026,10 @@ def _build_combo_evidence_digest(
         limit=3,
     )
 
+    # M7 修复：phase2 的 round_id 原本硬编码 None，evidence 追溯链断一环。
+    # phase2 来自 latest_research_conclusions，每条结论自带 source_round_id；
+    # 优先用它，退而用 phase2.round_id（部分来源字段不一致的兼容路径）。
+    phase2_round_id = phase2.get("source_round_id") or phase2.get("round_id")
     return [
         {
             "phase": "phase2",
@@ -990,7 +1045,7 @@ def _build_combo_evidence_digest(
                 "max_opening_count",
                 "mean_positive_edge_ratio",
             ),
-            "round_id": None,
+            "round_id": phase2_round_id,
             "incomplete_reason": "manifest_missing_on_disk" if phase2_blocked else None,
         },
         {
@@ -1095,8 +1150,37 @@ def _build_workbench_items_payload(
         alert for alert in (alerts_payload.get("integrity_alerts") or [])
         if bool(alert.get("blocks_approval"))
     ]
-    phase3_payload = query_latest_attribution(root)
-    phase4_payload = query_latest_execution_realism(root)
+    # H6 修复：query_latest_attribution / query_latest_execution_realism 读 DB
+    # 或文件，一旦抖动原来会把 /auth/dashboard/bundle 打成 500。这里降级为
+    # unavailable payload，并叠加一条 blocking alert，让下游门禁继续阻止审批。
+    try:
+        phase3_payload = query_latest_attribution(root)
+    except Exception:
+        logger.exception("workbench items: phase3 attribution query failed")
+        phase3_payload = {"available": False, "incomplete_reason": "query_failed"}
+        blocking_integrity.append({
+            "code": "query_failed",
+            "severity": "danger",
+            "scope": "phase",
+            "phase": "phase3",
+            "title": "最新归因结果查询失败",
+            "message": "PHASE3 数据查询异常，已按 fail-closed 阻止本轮审批。",
+            "blocks_approval": True,
+        })
+    try:
+        phase4_payload = query_latest_execution_realism(root)
+    except Exception:
+        logger.exception("workbench items: phase4 execution realism query failed")
+        phase4_payload = {"available": False, "incomplete_reason": "query_failed"}
+        blocking_integrity.append({
+            "code": "query_failed",
+            "severity": "danger",
+            "scope": "phase",
+            "phase": "phase4",
+            "title": "最新执行评估查询失败",
+            "message": "PHASE4 数据查询异常，已按 fail-closed 阻止本轮审批。",
+            "blocks_approval": True,
+        })
 
     items: list[dict[str, Any]] = []
     for combo_key, rec in by_combo.items():
@@ -1181,8 +1265,12 @@ def _build_workbench_items_payload(
             },
             "detail_summary": None,
             "evidence_digest": evidence_digest,
-            "detail_url": f"/rdp/workbench/items/{combo_key}",
-            "evidence_url": f"/rdp/workbench/evidence/{combo_key}",
+            # L4 修复：combo_key 可能包含 `/` 或 `:` 等字符（历史上大多是
+            # `family_timeframe` 形式，但 combo_key 的生成器并不约束合法字符集），
+            # 直接拼进 URL 会破坏路径解析或被下游误路由。用 urlencode 的 `safe=""`
+            # 参数保证把所有非字母数字字符都转义。
+            "detail_url": f"/rdp/workbench/items/{_url_quote(str(combo_key), safe='')}",
+            "evidence_url": f"/rdp/workbench/evidence/{_url_quote(str(combo_key), safe='')}",
             "actions": actions,
         })
 

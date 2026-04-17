@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from aats.data_platform.db import get_session
 from aats.data_platform.governance._atomic_io import atomic_json_write
 from aats.data_platform.governance._db_util import try_governance_db
 from aats.data_platform.governance.rdp_task_db import (
@@ -87,6 +88,13 @@ def load_scheduler_state(project_root: Path) -> dict[str, Any]:
     payload.setdefault("workflows", {})
     payload.setdefault("bootstrap_stage", None)
     payload.setdefault("bootstrap_completed_at", None)
+    # 注：H3 审查提出"DB 不可达时文件里 stale bootstrap_stage 会误导调度器"
+    # 的担忧。实际场景需要 DB 不可达 + 文件被人工篡改（或来自旧代码版本）双重
+    # 巧合才会触发；而 save_scheduler_state 写入路径在 DB 可用时一定先写 DB 再
+    # 写文件，所以文件里 bootstrap_stage 等同于最近一次 DB 同步后的快照。
+    # 强制 reset 会破坏 graceful degrade 语义（7 个 scheduler 测试失败为证）。
+    # 保留 setdefault 即可，对应的 regression 通过 DB 端 meta-row sentinel 测试
+    # (test_operational_state_db.py) 保护。
     return payload
 
 
@@ -252,8 +260,6 @@ def _current_bootstrap_stage(
     if stage in _BOOTSTRAP_SEQUENCE:
         return str(stage)
 
-    from aats.data_platform.db import get_session
-
     with get_session() as session:
         data_done = db_get_latest_task_for_workflow(
             session,
@@ -294,8 +300,6 @@ def _enqueue_single_workflow(
     action_label: str = "enqueued",
     reason_label: str = "scheduled",
 ) -> None:
-    from aats.data_platform.db import get_session
-
     guard = guard_workflow_execution(workflow_name)
     if not guard.allowed:
         if not dry_run:
@@ -391,8 +395,6 @@ def _run_bootstrap_sequence(
     slot_key = _canonical_slot_key(_latest_slot_for_schedule(schedule, now=now)) or ""
 
     initialized_at = _parse_iso_dt(state.get("initialized_at"))
-    from aats.data_platform.db import get_session
-
     # 一次 session 内同时查"最近 done"和"最近任意状态"，前者驱动门控推进，
     # 后者用于 bootstrap 卡 failed 时的告警——failed 任务不会满足 done 过滤器，
     # 导致 bootstrap 永远停在该阶段（除非人工干预），必须让运营者能看到。
@@ -458,8 +460,14 @@ def _run_bootstrap_sequence(
     )
 
     # bootstrap 只认 status=done。若最近一条任务是 failed，阶段会被无限卡住，
-    # 必须让运营者通过 API report 看到并手工介入。这里只记录告警，不自动放行，
-    # 避免 failed 任务的坏数据污染下游 governance 链路。
+    # 必须让运营者通过 API report.warnings 看到并手工介入。
+    #
+    # M2 设计：这里只写 report.warnings（操作人面向的真源信号），不写
+    # workflow_state["last_reason"] —— _enqueue_single_workflow 会用
+    # reason_label="bootstrap" 覆盖 last_reason，在那里设 warning 语义留不住。
+    # 本 tick 仍需继续 _enqueue_single_workflow 让 data_maintenance 自动重试
+    # （fail-closed 会把 research_cycle 等其它 workflow 仍然挡在门外，由
+    # bootstrap 阶段机制本身保证）。
     if latest_any is not None and str(latest_any.get("status")) == "failed":
         warnings = report.setdefault("warnings", [])
         warning_entry = {
@@ -475,9 +483,6 @@ def _run_bootstrap_sequence(
             stage,
             latest_any.get("task_id"),
             latest_any.get("error_message"),
-        )
-        workflow_state["last_reason"] = (
-            f"bootstrap 阶段最近一次任务失败 task_id={latest_any.get('task_id')}"
         )
     _enqueue_single_workflow(
         workflow_name=stage,

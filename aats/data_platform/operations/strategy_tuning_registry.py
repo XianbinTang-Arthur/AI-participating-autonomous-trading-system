@@ -265,31 +265,11 @@ def record_generated_proposals(
     }
 
 
-def _step2_snapshot_blocking_reason(project_root: Path) -> str | None:
-    """Step2 快照不完整时返回阻断原因；完整返回 None。
-
-    作为 server-side 的完整性门闸：前端把 UI action 的 enabled 标为 False
-    只是装饰，任何绕过 UI 的调用（脚本 / curl / 重放）都能把 blocked 提案
-    批准下去，必须在 server 端再做一次同样的 gate。查询失败时 fail-closed，
-    因为此时 governance DB 不可达，继续写入真源没有 safety 保证。
-    """
-    try:
-        from aats.data_platform.governance.snapshot_db import (
-            ROUND_PHASE_STEP2,
-            is_snapshot_incomplete,
-            load_latest_research_round_snapshot,
-        )
-
-        snapshot = load_latest_research_round_snapshot(
-            phase=ROUND_PHASE_STEP2,
-            project_root=project_root,
-        )
-    except Exception as exc:
-        return f"Step2 快照查询失败，无法校验完整性: {exc}"
-
-    if is_snapshot_incomplete(snapshot):
-        return "Step2 研究快照不完整，当前轮次不能据此做正式审批"
-    return None
+from aats.data_platform.governance.step2_integrity_guard import (
+    step2_integrity_blocking_reason as _step2_snapshot_blocking_reason,
+)
+# 历史符号保留以兼容可能的外部调用；语义现在由共享模块保证，不再允许
+# 本地分叉——任一修改都会同时影响 approve / supersede / tuning review 三条路径。
 
 
 def review_strategy_tuning_proposal(

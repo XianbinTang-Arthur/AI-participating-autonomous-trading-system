@@ -35,7 +35,26 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from aats.api._governance_db import governance_session as _governance_session
-from aats.api.auth import require_read_access, require_write_access
+from aats.api.auth import OperatorPrincipal, require_read_access, require_write_access
+from aats.data_platform.governance.step2_integrity_guard import (
+    step2_integrity_blocking_reason as _step2_integrity_blocking_reason,
+)
+
+
+def _resolve_actor(principal: OperatorPrincipal | None, body_actor: str | None) -> str:
+    """把审计追踪的 actor 绑到 session principal 而不是 request body。
+
+    L3 修复：原本写入端点直接用 ``body.actor``（默认 "operator" 字面量），任何
+    client 都能伪造 actor 字段，审计链形同虚设。现在优先用 session identity（只
+    有持有有效 cookie 的用户才能拿到），仅在匿名/无 auth 放行路径（比如 local
+    dev 的 operator_unsafe_write_without_auth）才落到 body.actor，两者都缺才
+    使用 "operator" 占位。
+    """
+    if principal is not None and principal.auth_enabled and principal.identity:
+        return str(principal.identity)
+    if body_actor:
+        return str(body_actor)
+    return "operator"
 from aats.services.operator.rdp_queries import (
     query_active_parameter_sets,
     query_latest_attribution,
@@ -81,33 +100,10 @@ def _project_root(request: Request) -> Path:
     return Path(".").resolve()
 
 
-def _step2_integrity_blocking_reason(project_root: Path) -> str | None:
-    """Step2 快照不完整时返回阻断原因；完整返回 None。
-
-    server-side 的统一完整性门闸，与 _build_workbench_alerts_payload /
-    _build_tuning_proposals_payload 检测 step2_manifest_missing 的语义一致。
-    前端把 UI action enabled 标为 False 只是装饰，任何绕过 UI 的调用都必须在
-    server 端再做一次同样的 gate。查询失败时 fail-closed —— 此时 governance
-    DB 不可达，继续写入真源没有 safety 保证。
-    """
-    try:
-        from aats.data_platform.governance.snapshot_db import (
-            ROUND_PHASE_STEP2,
-            is_snapshot_incomplete,
-            load_latest_research_round_snapshot,
-        )
-
-        snapshot = load_latest_research_round_snapshot(
-            phase=ROUND_PHASE_STEP2,
-            project_root=project_root,
-        )
-    except Exception as exc:
-        return f"Step2 快照查询失败，无法校验完整性: {exc}"
-
-    if is_snapshot_incomplete(snapshot):
-        return "Step2 研究快照不完整，当前轮次不能据此做正式审批"
-    return None
-
+# Step2 integrity gate 现在由共享模块提供（aats.data_platform.governance
+# .step2_integrity_guard），approve / supersede / tuning review 三条写入路径
+# 全部走同一个函数，避免历史上本地拷贝漂移的风险。错误信息对用户固定、具体
+# 异常只进日志，见该模块注释。
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -305,12 +301,12 @@ class EvaluateRollbackRequest(BaseModel):
 
 @rdp_router.post(
     "/recommendations/{recommendation_id}/approve",
-    dependencies=[Depends(require_write_access)],
 )
 async def approve_recommendation_api(
     request: Request,
     recommendation_id: str,
     body: ApprovalRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """审批 recommendation（draft → approved）."""
     from aats.data_platform.decision_system.recommendation_registry import (
@@ -337,7 +333,7 @@ async def approve_recommendation_api(
 
     rec = approve_recommendation(
         registry, recommendation_id,
-        approved_by=body.actor,
+        approved_by=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
@@ -353,12 +349,12 @@ async def approve_recommendation_api(
 
 @rdp_router.post(
     "/recommendations/{recommendation_id}/reject",
-    dependencies=[Depends(require_write_access)],
 )
 async def reject_recommendation_api(
     request: Request,
     recommendation_id: str,
     body: ApprovalRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """拒绝 recommendation（draft → rejected）."""
     from aats.data_platform.decision_system.recommendation_registry import (
@@ -373,7 +369,7 @@ async def reject_recommendation_api(
 
     rec = reject_recommendation(
         registry, recommendation_id,
-        rejected_by=body.actor,
+        rejected_by=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
@@ -389,12 +385,12 @@ async def reject_recommendation_api(
 
 @rdp_router.post(
     "/recommendations/{recommendation_id}/supersede",
-    dependencies=[Depends(require_write_access)],
 )
 async def supersede_recommendation_api(
     request: Request,
     recommendation_id: str,
     body: SupersedeRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """替代 recommendation（标记为 superseded）."""
     from aats.data_platform.decision_system.recommendation_registry import (
@@ -404,13 +400,25 @@ async def supersede_recommendation_api(
     )
 
     root = _project_root(request)
+
+    # supersede 语义是 "用新 rec 替换 active rec"，新 rec 同样会推进执行链路，
+    # 和 approve 的影响面对等，因此必须走同一个 Step2 integrity gate。历史上
+    # 只有 approve 加了 gate，supersede 未加，curl 可绕过；这里补齐。
+    blocking_reason = _step2_integrity_blocking_reason(root)
+    if blocking_reason is not None:
+        return {
+            "ok": False,
+            "message": blocking_reason,
+            "integrity_blocked": True,
+        }
+
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
     registry = load_recommendation_registry(reg_path)
 
     rec = supersede_recommendation(
         registry, recommendation_id,
         superseded_by_id=body.superseded_by_id,
-        actor=body.actor,
+        actor=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
@@ -426,11 +434,11 @@ async def supersede_recommendation_api(
 
 @rdp_router.post(
     "/parameters/apply",
-    dependencies=[Depends(require_write_access)],
 )
 async def apply_parameter_api(
     request: Request,
     body: ApplyRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """从已批准 recommendation 应用参数到 active parameter set."""
     from aats.data_platform.decision_system.active_parameter_apply import (
@@ -441,7 +449,7 @@ async def apply_parameter_api(
     return apply_approved_recommendation(
         root,
         recommendation_id=body.recommendation_id,
-        actor=body.actor,
+        actor=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
@@ -451,11 +459,11 @@ async def apply_parameter_api(
 
 @rdp_router.post(
     "/parameters/rollback",
-    dependencies=[Depends(require_write_access)],
 )
 async def rollback_parameter_api(
     request: Request,
     body: RollbackRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """回滚 active parameter set 到上一版本."""
     from aats.data_platform.decision_system.active_parameter_apply import (
@@ -468,7 +476,7 @@ async def rollback_parameter_api(
         family=body.family,
         timeframe=body.timeframe,
         to_parameter_set_id=body.to_parameter_set_id,
-        actor=body.actor,
+        actor=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
@@ -502,11 +510,11 @@ async def run_gate_api(
 
 @rdp_router.post(
     "/releases/create",
-    dependencies=[Depends(require_write_access)],
 )
 async def create_release_api(
     request: Request,
     body: CreateReleaseRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """创建 parameter release（gate + apply 完整流程）."""
     from aats.data_platform.production_workflow.release_registry import (
@@ -516,7 +524,7 @@ async def create_release_api(
     return create_parameter_release(
         root,
         recommendation_id=body.recommendation_id,
-        actor=body.actor,
+        actor=_resolve_actor(principal, body.actor),
         observation_window_hours=body.observation_window_hours,
         notes=body.notes,
         run_gate=not body.skip_gate,
@@ -658,11 +666,11 @@ async def evaluate_rollback_api(
 
 @rdp_router.post(
     "/tasks/trigger",
-    dependencies=[Depends(require_write_access)],
 )
 async def trigger_task_api(
     request: Request,
     body: TriggerTaskRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """触发 RDP workflow 任务（写入 pending 到任务队列）."""
     from aats.data_platform.governance.rdp_task_db import (
@@ -691,11 +699,14 @@ async def trigger_task_api(
             task_id = db_create_task(
                 session,
                 workflow=body.workflow,
-                requested_by=body.actor,
+                requested_by=_resolve_actor(principal, body.actor),
             )
     except Exception as exc:
-        logger.exception("Failed to create task: %s", exc)
-        return {"ok": False, "message": f"创建任务失败: {exc}"}
+        # H2 风格修复：task 创建异常属于内部错误（DB 约束冲突 / 连接失败
+        # 等），message 直接回显给 caller 会把 SQL 片段、schema 名泄漏出去。
+        # 固定文案 + logger.exception 把堆栈留日志。
+        logger.exception("Failed to create task for workflow=%s", body.workflow)
+        return {"ok": False, "message": "创建任务失败，请查看服务端日志。"}
 
     return {"ok": True, "task_id": task_id, "workflow": body.workflow}
 
@@ -711,9 +722,14 @@ async def task_status_api(
     try:
         with _governance_session() as session:
             tasks = db_get_recent_tasks(session, limit=limit)
-    except Exception as exc:
-        logger.warning("Failed to query task status: %s", exc)
-        return {"ok": False, "tasks": [], "message": str(exc)}
+    except Exception:
+        # 同 H2：不回显 str(exc)，避免 DSN / 表名 / SQL 碎片泄漏。
+        logger.exception("Failed to query task status")
+        return {
+            "ok": False,
+            "tasks": [],
+            "message": "查询任务状态失败，请查看服务端日志。",
+        }
 
     return {"ok": True, "tasks": tasks}
 
@@ -784,12 +800,12 @@ async def tuning_proposals_api(request: Request) -> dict[str, Any]:
 
 @rdp_router.post(
     "/tuning/proposals/{proposal_id}/approve",
-    dependencies=[Depends(require_write_access)],
 )
 async def approve_tuning_proposal_api(
     request: Request,
     proposal_id: str,
     body: ApprovalRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """批准自动调优提案。"""
     from aats.data_platform.operations.strategy_tuning_registry import (
@@ -801,19 +817,19 @@ async def approve_tuning_proposal_api(
         root,
         proposal_id=proposal_id,
         action="approve",
-        reviewer=body.actor,
+        reviewer=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
 
 @rdp_router.post(
     "/tuning/proposals/{proposal_id}/reject",
-    dependencies=[Depends(require_write_access)],
 )
 async def reject_tuning_proposal_api(
     request: Request,
     proposal_id: str,
     body: ApprovalRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """拒绝自动调优提案。"""
     from aats.data_platform.operations.strategy_tuning_registry import (
@@ -825,6 +841,6 @@ async def reject_tuning_proposal_api(
         root,
         proposal_id=proposal_id,
         action="reject",
-        reviewer=body.actor,
+        reviewer=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )

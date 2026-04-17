@@ -145,6 +145,175 @@ class TestDashboardRenderWiring(unittest.TestCase):
         placeholder because all five panels arrived undefined."""
         self._check("renderAIConfigView", "ai-config-view.js")
 
+    def test_all_other_render_views_pass_viewdata_by_reference(self) -> None:
+        """M3 regression guard: 其它 render*View 调用要么传 ``viewData`` /
+        ``state.data`` 整体（受 ``{...state.data}`` spread 保护），要么传
+        ``viewData, state.ui.*`` 这种额外 context——无论哪种都保证 view 读任意
+        ``data.key`` 都能拿到 state.data 里的同名字段。
+
+        如果有人把别的 render*View 也改成 ``render*View({...})`` 对象字面量
+        模式（像 AIConfigView 那样），就会重现 B2：新字段加到 view 但忘了
+        call site → undefined → placeholder。本测试用静态规则拦住这种改法：
+        任何新增的 object-literal 调用都必须显式加到上方的 ``_check``
+        白名单，否则此测试失败，强制开发者扩展 per-view 的字段对齐检查。
+        """
+        render_calls = re.findall(
+            r"\b(render(?:AI|Overview|Home|Strategy|Execution|Risk|ExitExecution|Replay|Admin|AIAnalysis|AIConfig)View)\s*\(([^)]{0,400})",
+            self.app_source,
+        )
+        # 允许以下 render 用对象字面量（每个都有对应 _check 测试覆盖）
+        object_literal_allowed = {"renderAIConfigView"}
+        violators: list[tuple[str, str]] = []
+        for render_fn, raw_first_arg in render_calls:
+            first_arg = raw_first_arg.lstrip()
+            if first_arg.startswith("{") and render_fn not in object_literal_allowed:
+                violators.append((render_fn, first_arg[:60]))
+        self.assertFalse(
+            violators,
+            msg=(
+                f"发现未登记的 object-literal render 调用: {violators!r}。"
+                f"任何新增的 render*View({{...}}) 调用都必须在本测试里加一条 "
+                f"_check(...) 用例（类似 test_ai_config_view_receives_all_keys_it_reads），"
+                f"验证 object literal 里的 key 覆盖 view 实际读取的 data.xxx，"
+                f"否则会重现 B2 回归：view 新加字段但 call site 漏 pass → undefined。"
+                f"确认已加测试后，把函数名加到 object_literal_allowed 集合。"
+            ),
+        )
+
+
+class TestWorkbenchPhaseGate(unittest.TestCase):
+    """M9: server-side 审批门禁的行为级测试。
+
+    H5 修复前，``_build_workbench_alerts_payload`` 里如果 phase3 / phase4 的
+    payload 回报 ``available=False`` 但没有 ``incomplete_reason`` 字段，就会
+    静默 ``continue`` —— 结果是告警列表里看不到这一缺席，审批门禁（上游按
+    ``blocks_approval=True`` 过滤）就认为没问题，能在零 evidence 的情况下放行
+    审批。H5 改为：available=False 一律写告警，code 回退为 ``missing_round``。
+
+    本测试直接调用修复后的函数，验证告警行为。
+    """
+
+    def test_phase3_missing_round_without_reason_still_blocks_approval(self) -> None:
+        from unittest.mock import patch
+
+        from aats.api import rdp_control_summary
+
+        def fake_phase3(_root):
+            # 模拟 DB/文件回报 "没有最新 round"，但没明确 incomplete_reason
+            return {"available": False}
+
+        def fake_phase4(_root):
+            return {"available": True, "combos": []}
+
+        with patch.object(rdp_control_summary, "query_latest_attribution", fake_phase3), \
+             patch.object(rdp_control_summary, "query_latest_execution_realism", fake_phase4):
+            payload = rdp_control_summary._build_workbench_alerts_payload(
+                Path("."),
+                summary={"health": {}},
+            )
+        phase3_alerts = [
+            alert for alert in payload["integrity_alerts"]
+            if alert.get("phase") == "phase3"
+        ]
+        self.assertTrue(
+            phase3_alerts,
+            "phase3 缺 round 且无 incomplete_reason 时必须仍写告警，否则审批门禁会绕过",
+        )
+        self.assertTrue(
+            all(alert["blocks_approval"] for alert in phase3_alerts),
+            "phase3 缺席告警的 blocks_approval 必须为 True",
+        )
+        self.assertEqual(
+            phase3_alerts[0]["code"],
+            "missing_round",
+            "缺 reason 时 code 要统一为 missing_round，便于下游识别",
+        )
+
+    def test_phase4_query_failure_degrades_with_blocking_alert(self) -> None:
+        """H6: 查询抛异常时不能让整个 bundle 500，必须降级 + 阻塞审批。"""
+        from unittest.mock import patch
+
+        from aats.api import rdp_control_summary
+
+        def fake_phase3(_root):
+            return {"available": True, "combos": []}
+
+        def boom(_root):
+            raise RuntimeError("simulated DB hiccup")
+
+        with patch.object(rdp_control_summary, "query_latest_attribution", fake_phase3), \
+             patch.object(rdp_control_summary, "query_latest_execution_realism", boom):
+            payload = rdp_control_summary._build_workbench_alerts_payload(
+                Path("."),
+                summary={"health": {}},
+            )
+        phase4_alerts = [
+            alert for alert in payload["integrity_alerts"]
+            if alert.get("phase") == "phase4"
+        ]
+        self.assertTrue(phase4_alerts, "phase4 query 失败时仍要写告警")
+        self.assertTrue(
+            all(alert["blocks_approval"] for alert in phase4_alerts),
+            "query_failed 告警必须阻塞审批",
+        )
+
+    def test_manifest_missing_severity_is_danger(self) -> None:
+        """M8: manifest_missing_on_disk 语义等同 step2_manifest_missing，severity=danger。"""
+        from unittest.mock import patch
+
+        from aats.api import rdp_control_summary
+
+        def fake_phase3(_root):
+            return {"available": False, "incomplete_reason": "manifest_missing_on_disk"}
+
+        def fake_phase4(_root):
+            return {"available": True, "combos": []}
+
+        with patch.object(rdp_control_summary, "query_latest_attribution", fake_phase3), \
+             patch.object(rdp_control_summary, "query_latest_execution_realism", fake_phase4):
+            payload = rdp_control_summary._build_workbench_alerts_payload(
+                Path("."),
+                summary={"health": {}},
+            )
+        phase3_alerts = [
+            alert for alert in payload["integrity_alerts"]
+            if alert.get("phase") == "phase3" and alert.get("code") == "manifest_missing_on_disk"
+        ]
+        self.assertTrue(phase3_alerts, "manifest_missing_on_disk 必须写告警")
+        self.assertEqual(
+            phase3_alerts[0]["severity"],
+            "danger",
+            "manifest_missing_on_disk = 清单从磁盘消失，必须是 danger 级，"
+            "historic warning 语义与 blocks_approval=True 矛盾",
+        )
+
+
+class TestStep2IntegrityGuard(unittest.TestCase):
+    """H2 regression guard: Step2 guard 异常路径不能泄漏 str(exc) 到用户响应。"""
+
+    def test_lookup_failure_returns_fixed_message_without_exc_detail(self) -> None:
+        from unittest.mock import patch
+
+        from aats.data_platform.governance import step2_integrity_guard
+
+        class _Secret(Exception):
+            def __str__(self) -> str:
+                return "postgres://admin:SECRET@db/aats"
+
+        def boom(*_args, **_kwargs):
+            raise _Secret()
+
+        with patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            boom,
+        ):
+            reason = step2_integrity_guard.step2_integrity_blocking_reason(Path("."))
+        self.assertIsNotNone(reason)
+        assert reason is not None
+        self.assertNotIn("SECRET", reason)
+        self.assertNotIn("postgres://", reason)
+        self.assertIn("fail-closed", reason)
+
 
 if __name__ == "__main__":
     unittest.main()
