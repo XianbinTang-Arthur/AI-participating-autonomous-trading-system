@@ -471,3 +471,13 @@ class _DummyLogger:
 
     def exception(self, *args, **kwargs) -> None:
         pass
+
+
+def test_compose_entrypoint_injects_uvicorn_tls_when_operator_cert_env_is_present() -> None:
+    text = (REPO_ROOT / "scripts" / "compose_entrypoint.py").read_text(encoding="utf-8")
+
+    assert "_maybe_inject_uvicorn_tls" in text
+    assert "--ssl-certfile" in text
+    assert "--ssl-keyfile" in text
+    assert "AATS_OPERATOR_TLS_CERT_FILE" in text
+    assert "AATS_OPERATOR_TLS_KEY_FILE" in text

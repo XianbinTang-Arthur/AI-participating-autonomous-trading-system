@@ -50,6 +50,39 @@ from pathlib import Path
 PROJECT_ROOT = Path("/app")
 
 
+def _maybe_inject_uvicorn_tls(argv: list[str]) -> list[str]:
+    """Append uvicorn TLS flags when operator TLS env vars are configured."""
+    if not argv:
+        return argv
+    executable = Path(argv[0]).name
+    if executable != "uvicorn":
+        return argv
+
+    cert_file = os.environ.get("AATS_OPERATOR_TLS_CERT_FILE", "").strip()
+    key_file = os.environ.get("AATS_OPERATOR_TLS_KEY_FILE", "").strip()
+    if not cert_file and not key_file:
+        return argv
+    if not cert_file or not key_file:
+        print(
+            "[compose_entrypoint] operator TLS requires both "
+            "AATS_OPERATOR_TLS_CERT_FILE and AATS_OPERATOR_TLS_KEY_FILE",
+            file=sys.stderr,
+        )
+        sys.exit(4)
+    missing = [path for path in (cert_file, key_file) if not Path(path).is_file()]
+    if missing:
+        print(
+            "[compose_entrypoint] operator TLS asset missing: "
+            + ", ".join(missing),
+            file=sys.stderr,
+        )
+        sys.exit(4)
+
+    if "--ssl-certfile" in argv or "--ssl-keyfile" in argv:
+        return argv
+    return [*argv, "--ssl-certfile", cert_file, "--ssl-keyfile", key_file]
+
+
 def _inject_managed_profile_env(profile: str) -> None:
     """把 AATS_STARTUP_PROFILE 和 AATS_ENV_TEMPLATE_PROFILE 两个派生变量
     注入 os.environ。
@@ -108,7 +141,8 @@ def main() -> None:
     # 不用 subprocess + wait，避免多一层进程树 + 信号转发复杂度。
     # 端口等参数由 docker-compose 模板层通过 --env-file 读取 .env.<profile>
     # 的 AATS_API_PORT 直接插值到 command 和 ports 中，shim 不需要干预。
-    os.execvp(sys.argv[1], sys.argv[1:])
+    command_argv = _maybe_inject_uvicorn_tls(sys.argv[1:])
+    os.execvp(command_argv[0], command_argv)
 
 
 if __name__ == "__main__":

@@ -52,7 +52,30 @@
       "Bash(wsl -d Ubuntu bash -c 'docker logs aats-decision --since 10m 2>&1')",
       "Bash(wsl -d Ubuntu bash -c \"docker exec aats-postgres psql -U admin -d aats_live_derivatives -t -c \\\\\"SELECT payload::jsonb->'data'->>'direction_bias' as direction, payload::jsonb->'data'->>'suggested_position_scale' as scale, payload::jsonb->'data'->'alpha_factors'->>'composite_alpha_score' as alpha, payload::jsonb->'data'->>'regime' as regime, created_at FROM event_store WHERE topic='strategy.baseline_assessment' ORDER BY sequence_id DESC LIMIT 10;\\\\\"\")",
       "Bash(wsl -d Ubuntu bash -c \"docker exec aats-postgres psql -U admin -d aats_live_derivatives -t -c \\\\\"SELECT payload::text FROM event_store WHERE topic='strategy.baseline_assessment' ORDER BY sequence_id DESC LIMIT 1;\\\\\"\")",
-      "Bash(.venv/Scripts/python.exe -c ':*)"
+      "Bash(.venv/Scripts/python.exe -c ':*)",
+      "Bash(bash scripts/deploy.sh --skip-commit)",
+      "Bash(wsl -d Ubuntu bash -c 'cd ~/aats && git log --oneline -1')",
+      "Bash(wsl -d Ubuntu bash -c 'for c in aats-gateway aats-market aats-decision aats-execution aats-rdp-daemon; do docker inspect --format \"$c {{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}\" $c 2>/dev/null || echo \"$c missing\"; done')",
+      "Bash(wsl -d Ubuntu bash -c 'curl -sf http://127.0.0.1:8011/healthz')",
+      "Bash(wsl -d Ubuntu bash -c 'docker ps --format \"{{.Names}} {{.Status}}\" | sort')",
+      "Bash(wsl -d Ubuntu bash -c 'curl -sf http://127.0.0.1:8011/rdp/health 2>&1 | python3 -m json.tool --no-ensure-ascii 2>/dev/null || curl -sf http://127.0.0.1:8011/rdp/health 2>&1')",
+      "Bash(wsl -d Ubuntu bash -c 'curl -s -o /dev/null -w \"%{http_code}\" http://127.0.0.1:8011/rdp/health')",
+      "Bash(wsl -d Ubuntu bash -c 'curl -s http://127.0.0.1:8011/rdp/health 2>&1 | head -5')",
+      "Bash(xargs grep:*)",
+      "Bash(wsl -d Ubuntu bash -c 'docker exec aats-gateway env | grep -qE \"AATS_OPERATOR_READ_API_KEY\" && echo \"READ_API_KEY exists\" || echo \"READ_API_KEY not set\"')",
+      "Bash(wsl -d Ubuntu bash -c 'docker exec aats-gateway env | grep -i \"OPERATOR\\\\|AUTH\\\\|SESSION\" | sed \"s/=.*/=<redacted>/\" | sort')",
+      "Bash(wsl -d Ubuntu bash -c 'docker exec aats-gateway printenv AATS_OPERATOR_ADMIN_USERNAME | wc -c')",
+      "Bash(wsl -d Ubuntu bash -c 'docker logs aats-gateway --since 2m 2>&1 | grep -i \"operator\\\\|login\\\\|auth\\\\|admin\" | tail -20')",
+      "Bash(wsl -d Ubuntu bash -c 'docker logs aats-gateway 2>&1 | grep -i \"admin_user\\\\|bootstrap\\\\|operator.*creat\\\\|seed\\\\|ensure\" | tail -10')",
+      "Bash(wsl -d Ubuntu bash -c 'docker logs aats-gateway 2>&1 | grep -i \"operator_user\\\\|admin.*ensure\\\\|admin.*seed\\\\|admin.*create\\\\|operator_repo\\\\|password_hash\" | head -10')",
+      "Bash(wsl -d Ubuntu bash -c 'docker exec aats-postgres psql -U admin -d aats_live_derivatives -t -c \"SELECT username, role, enabled FROM operator_users;\" 2>&1')",
+      "Bash(wsl -d Ubuntu bash -c \"docker ps --format '{{.Names}}\\\\t{{.Status}}' 2>/dev/null | grep aats | sort\")",
+      "Bash(wsl -d Ubuntu bash -c \"cd ~/aats && docker cp scripts/_tmp_rdp_ui_test.py aats-gateway:/tmp/_rdp_ui_test.py 2>/dev/null && docker exec aats-gateway python /tmp/_rdp_ui_test.py 2>&1\")",
+      "Bash(wsl -d Ubuntu bash -c 'docker exec aats-gateway python -c \":*)",
+      "Bash(grep -n \"@rdp_router\\\\\\\\.get\\\\|@rdp_router\\\\\\\\.post\" /d/文件/project/AIParticipatingAutonomousTradingSystem/aats/api/rdp_routes.py)",
+      "Bash(.venv\\\\Scripts\\\\python.exe -m pytest tests/unit/ -k \"rdp\" -x -q --tb=short)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -k \"rdp\" -x -q --tb=short)",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/ -k \"rdp or health or operator\" -x -q --tb=short)"
     ]
   }
 }

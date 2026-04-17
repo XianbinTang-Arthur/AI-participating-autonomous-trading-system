@@ -290,7 +290,9 @@ def test_strategy_tuning_proposal_review_changes_status(tmp_path: Path) -> None:
     assert review["ok"] is True
     assert review["proposal"]["status"] == "approved"
     assert review["proposal"]["reviewed_by"] == "operator"
-    assert review["overrides_path"]
+    # P0-3 后 JSON 导出默认关闭 → overrides_path 可以是空字符串；
+    # 真正有价值的断言是下面 get_combo_tuning_overrides 能从 cache 读出来。
+    assert isinstance(review["overrides_path"], str)
     assert get_combo_tuning_overrides(tmp_path, "independent", "15m") == {
         "min_safe_net_edge_bps": 1.5,
     }

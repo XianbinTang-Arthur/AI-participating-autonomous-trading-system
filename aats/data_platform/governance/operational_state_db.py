@@ -7,6 +7,7 @@ registry-like payload shapes; this module only persists and restores them.
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any
 
@@ -14,6 +15,8 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ._db_util import json_dumps, parse_dt
+
+log = logging.getLogger(__name__)
 
 
 def _utcnow() -> datetime:
@@ -52,6 +55,11 @@ def release_scheduler_lock(session: Session) -> None:
     """释放由 try_acquire_scheduler_lock 获取的 session 级 advisory lock。
 
     调用失败不抛异常——释放是 best-effort，session 关闭时 Postgres 也会自动释放。
+    M-A3-3 修复：历史 ``except Exception: pass`` 静默吞异常，当 DB 抖动 /
+    transaction 已 abort / 连接被 reset 时释放失败的信号就彻底丢了，但这种
+    场景又恰是 scheduler 互斥状态最容易混乱的时候（多个 scheduler 同时去
+    抢同一把锁、锁被谁持有变得不可观测）。改为 warning 级别打印异常类型，
+    依然不向上抛，保持 best-effort 语义。
     """
     try:
         session.execute(
@@ -59,8 +67,8 @@ def release_scheduler_lock(session: Session) -> None:
             {"key": _SCHEDULER_ADVISORY_LOCK_KEY},
         )
         session.commit()
-    except Exception:  # pragma: no cover - defensive
-        pass
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("advisory lock release failed (scheduler): %s", exc)
 
 
 def try_acquire_release_cycle_lock(session: Session) -> bool:
@@ -81,15 +89,16 @@ def try_acquire_release_cycle_lock(session: Session) -> bool:
 
 
 def release_release_cycle_lock(session: Session) -> None:
-    """释放 release_cycle advisory lock。"""
+    """释放 release_cycle advisory lock。与 release_scheduler_lock 同理，
+    把静默吞异常改成 warning 级可观测。"""
     try:
         session.execute(
             text("SELECT pg_advisory_unlock(:key)"),
             {"key": _RELEASE_CYCLE_ADVISORY_LOCK_KEY},
         )
         session.commit()
-    except Exception:  # pragma: no cover - defensive
-        pass
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning("advisory lock release failed (release_cycle): %s", exc)
 
 
 def _with_payload(payload: Any, **fields: Any) -> dict[str, Any]:
@@ -194,6 +203,12 @@ def db_list_workflow_runs(
     ]
 
 
+# sentinel workflow 名，用于在 workflow_scheduler_state 表里存放根级
+# scheduler meta（bootstrap_stage / bootstrap_completed_at）。
+# 选带双下划线前后缀的名字避免与真实 workflow 冲突。
+_SCHEDULER_META_WORKFLOW = "__scheduler_meta__"
+
+
 def db_load_scheduler_state(session: Session) -> dict[str, Any]:
     rows = session.execute(
         text(
@@ -207,8 +222,22 @@ def db_load_scheduler_state(session: Session) -> dict[str, Any]:
     ).fetchall()
     workflows: dict[str, Any] = {}
     initialized_at: str | None = None
+    bootstrap_stage: str | None = None
+    bootstrap_completed_at: str | None = None
     for row in rows:
-        workflows[str(row.workflow)] = _with_payload(
+        workflow_name = str(row.workflow)
+        if workflow_name == _SCHEDULER_META_WORKFLOW:
+            # meta 行：bootstrap 字段提到根级，不参与 workflows 归类，也不参与
+            # initialized_at 聚合。state_payload 里可能是 dict，容错成 {}。
+            payload = row.state_payload if isinstance(row.state_payload, dict) else {}
+            stage_value = payload.get("bootstrap_stage")
+            completed_value = payload.get("bootstrap_completed_at")
+            if isinstance(stage_value, str) and stage_value:
+                bootstrap_stage = stage_value
+            if isinstance(completed_value, str) and completed_value:
+                bootstrap_completed_at = completed_value
+            continue
+        workflows[workflow_name] = _with_payload(
             row.state_payload,
             last_processed_slot=(
                 row.last_processed_slot.isoformat() if row.last_processed_slot else None
@@ -226,6 +255,8 @@ def db_load_scheduler_state(session: Session) -> dict[str, Any]:
     return {
         "generated_at": _utcnow().isoformat(),
         "initialized_at": initialized_at,
+        "bootstrap_stage": bootstrap_stage,
+        "bootstrap_completed_at": bootstrap_completed_at,
         "workflows": workflows,
     }
 
@@ -271,19 +302,53 @@ def db_save_scheduler_state(session: Session, state: dict[str, Any]) -> None:
             },
         )
 
+    # 持久化根级 scheduler meta（bootstrap 状态）。即使两个字段都是 None 也要
+    # upsert，否则"已完成 bootstrap 后状态被清理"的语义无法表达。
+    meta_payload = {
+        "bootstrap_stage": state.get("bootstrap_stage"),
+        "bootstrap_completed_at": state.get("bootstrap_completed_at"),
+    }
+    session.execute(
+        text(
+            """
+            INSERT INTO governance.workflow_scheduler_state
+                (workflow, initialized_at, last_processed_slot, last_action,
+                 last_checked_at, last_task_id, last_reason, schedule,
+                 state_payload, updated_at)
+            VALUES
+                (:workflow, NULL, NULL, NULL,
+                 NULL, NULL, NULL, NULL,
+                 CAST(:state_payload AS jsonb), :updated_at)
+            ON CONFLICT (workflow) DO UPDATE SET
+                state_payload = EXCLUDED.state_payload,
+                updated_at = EXCLUDED.updated_at
+            """
+        ),
+        {
+            "workflow": _SCHEDULER_META_WORKFLOW,
+            "state_payload": json_dumps(meta_payload),
+            "updated_at": _utcnow(),
+        },
+    )
+
 
 def db_upsert_pre_apply_gate_result(session: Session, result: dict[str, Any]) -> None:
+    # release_id 在 gate 跑完时通常为 None（gate 是 apply 的前置），由 apply
+    # 流程成功创建 release 后通过 db_set_gate_result_release_id 回填。upsert
+    # 保留回填语义：如果 payload 里带了 release_id，覆盖原值；没带则不破坏
+    # 已回填的值（见 ON CONFLICT 分支用 COALESCE 保留已有值）。
     session.execute(
         text(
             """
             INSERT INTO governance.pre_apply_gate_results
-                (gate_run_id, recommendation_id, allow_apply, gate_status,
+                (gate_run_id, recommendation_id, release_id, allow_apply, gate_status,
                  total_checks, passed_checks, payload, created_at, updated_at)
             VALUES
-                (:gate_run_id, :recommendation_id, :allow_apply, :gate_status,
+                (:gate_run_id, :recommendation_id, :release_id, :allow_apply, :gate_status,
                  :total_checks, :passed_checks, CAST(:payload AS jsonb), :created_at, :updated_at)
             ON CONFLICT (gate_run_id) DO UPDATE SET
                 recommendation_id = EXCLUDED.recommendation_id,
+                release_id = COALESCE(EXCLUDED.release_id, governance.pre_apply_gate_results.release_id),
                 allow_apply = EXCLUDED.allow_apply,
                 gate_status = EXCLUDED.gate_status,
                 total_checks = EXCLUDED.total_checks,
@@ -295,6 +360,7 @@ def db_upsert_pre_apply_gate_result(session: Session, result: dict[str, Any]) ->
         {
             "gate_run_id": result.get("gate_run_id"),
             "recommendation_id": result.get("recommendation_id"),
+            "release_id": result.get("release_id"),
             "allow_apply": bool(result.get("allow_apply")),
             "gate_status": result.get("gate_status", "unknown"),
             "total_checks": int(result.get("total_checks") or 0),
@@ -304,6 +370,35 @@ def db_upsert_pre_apply_gate_result(session: Session, result: dict[str, Any]) ->
             "updated_at": _utcnow(),
         },
     )
+
+
+def db_set_gate_result_release_id(
+    session: Session,
+    *,
+    gate_run_id: str,
+    release_id: str,
+) -> bool:
+    """在 release 创建成功后，把 release_id 回填到对应 gate_run 行。
+
+    由 apply_active_parameter_set 在 release upsert 成功后调用。已经有 release_id
+    的行会被覆盖为新值（允许重放/回放场景），没有对应 gate_run_id 的返回 False。
+    """
+    result = session.execute(
+        text(
+            """
+            UPDATE governance.pre_apply_gate_results
+               SET release_id = :release_id,
+                   updated_at = :updated_at
+             WHERE gate_run_id = :gate_run_id
+            """
+        ),
+        {
+            "gate_run_id": gate_run_id,
+            "release_id": release_id,
+            "updated_at": _utcnow(),
+        },
+    )
+    return result.rowcount > 0
 
 
 def db_list_pre_apply_gate_results(session: Session, *, limit: int = 8) -> list[dict[str, Any]]:
@@ -320,6 +415,139 @@ def db_list_pre_apply_gate_results(session: Session, *, limit: int = 8) -> list[
     ).fetchall()
     return [
         _with_payload(row.payload, created_at=row.created_at.isoformat() if row.created_at else None)
+        for row in rows
+    ]
+
+
+# ── P0-2 新增：按业务维度查询 pre-apply gate 结果 ──────────────────
+# 命名对齐业务动作；与现有 db_upsert_pre_apply_gate_result 共用同一张表。
+# 历史上 gate 结果的唯一读路径是 db_list_pre_apply_gate_results(limit=N)，
+# 想看"某个 recommendation 的最近一次 gate"或"某个 release 的 gate 链路"
+# 只能在应用层 filter，导致 rdp_control_summary / operator query 各自拼逻辑。
+# 本阶段把查询下沉到 DB，后续读路径统一走这组 API。
+
+
+def db_record_gate_result(session: Session, result: dict[str, Any]) -> None:
+    """语义化封装：记录一次 gate 运行结果。
+
+    语义与 db_upsert_pre_apply_gate_result 完全相同；保留它作为"业务动作"API
+    的入口，避免调用方直接触达 upsert 的实现细节（比如字段展开规则）。
+    gate 运行的 gate_run_id 在业务上是幂等键，重复 record 会覆盖 payload。
+    """
+    db_upsert_pre_apply_gate_result(session, result)
+
+
+def db_get_gate_result_by_run_id(
+    session: Session,
+    gate_run_id: str,
+) -> dict[str, Any] | None:
+    """按 gate_run_id 精确查询单次 gate 结果。"""
+    row = session.execute(
+        text(
+            """
+            SELECT payload, created_at
+            FROM governance.pre_apply_gate_results
+            WHERE gate_run_id = :gate_run_id
+            """
+        ),
+        {"gate_run_id": gate_run_id},
+    ).fetchone()
+    if row is None:
+        return None
+    return _with_payload(
+        row.payload,
+        created_at=row.created_at.isoformat() if row.created_at else None,
+    )
+
+
+def db_get_latest_gate_result(
+    session: Session,
+    *,
+    recommendation_id: str,
+) -> dict[str, Any] | None:
+    """按 recommendation 取最近一次 gate 结果。
+
+    apply 链路只在乎"最新一次 gate 是否 allow"，历史记录由 list API 负责。
+    """
+    row = session.execute(
+        text(
+            """
+            SELECT payload, created_at
+            FROM governance.pre_apply_gate_results
+            WHERE recommendation_id = :rec_id
+            ORDER BY created_at DESC
+            LIMIT 1
+            """
+        ),
+        {"rec_id": recommendation_id},
+    ).fetchone()
+    if row is None:
+        return None
+    return _with_payload(
+        row.payload,
+        created_at=row.created_at.isoformat() if row.created_at else None,
+    )
+
+
+def db_list_gate_results_for_recommendation(
+    session: Session,
+    *,
+    recommendation_id: str,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """按 recommendation 维度列出历次 gate 结果（用于审计回溯）。"""
+    rows = session.execute(
+        text(
+            """
+            SELECT payload, created_at
+            FROM governance.pre_apply_gate_results
+            WHERE recommendation_id = :rec_id
+            ORDER BY created_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"rec_id": recommendation_id, "limit": limit},
+    ).fetchall()
+    return [
+        _with_payload(
+            row.payload,
+            created_at=row.created_at.isoformat() if row.created_at else None,
+        )
+        for row in rows
+    ]
+
+
+def db_list_gate_results_for_release(
+    session: Session,
+    *,
+    release_id: str,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """按 release 维度列出历次 gate 结果。
+
+    阶段 A 实现：通过 parameter_releases.gate_result_ref 反向 JOIN。
+    阶段 B 加 pre_apply_gate_results.release_id 列后，此查询会改为直接
+    走索引列，JOIN 会被删掉，但对外 API 语义不变。
+    """
+    rows = session.execute(
+        text(
+            """
+            SELECT g.payload, g.created_at
+            FROM governance.pre_apply_gate_results AS g
+            JOIN governance.parameter_releases AS r
+              ON r.gate_result_ref = g.gate_run_id
+            WHERE r.release_id = :release_id
+            ORDER BY g.created_at DESC
+            LIMIT :limit
+            """
+        ),
+        {"release_id": release_id, "limit": limit},
+    ).fetchall()
+    return [
+        _with_payload(
+            row.payload,
+            created_at=row.created_at.isoformat() if row.created_at else None,
+        )
         for row in rows
     ]
 

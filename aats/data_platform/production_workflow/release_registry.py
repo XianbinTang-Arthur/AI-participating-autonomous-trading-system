@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,21 @@ log = logging.getLogger(__name__)
 _RELEASE_HISTORY_PATH = "artifacts/production_workflow/parameter_release_history.json"
 
 
+def _is_release_fail_loud_enabled() -> bool:
+    """生产开关：`AATS_P0_RELEASE_FAIL_LOUD=on` 强制 DB 不可达时立即中断。
+
+    默认 off 保留历史单机/测试兼容（很多单测用 ``try_governance_db → (None, False)``
+    模拟 no-DB 环境）。实盘部署必须显式打开，否则 DB 静默不可达时会走降级 JSON
+    写路径，产生运行时真源 ghost。
+    """
+    return os.environ.get("AATS_P0_RELEASE_FAIL_LOUD", "").strip().lower() in {
+        "1",
+        "on",
+        "true",
+        "yes",
+    }
+
+
 def _make_release_id() -> str:
     return f"rel_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}"
 
@@ -41,6 +57,17 @@ def _make_release_id() -> str:
 
 
 def load_release_history(project_root: Path) -> dict[str, Any]:
+    """加载 release history。
+
+    返回体附带:
+      - ``source``: ``"db"`` / ``"json"`` / ``"empty"``
+      - ``stale``: ``True`` 表示数据来自 JSON 副本（DB 不可达或读取失败），
+        消费方需把这个信号透传到 UI / 监控，避免运营者误把 stale JSON 当成真源。
+
+    真源是 governance DB；JSON 副本仅作单机兼容 / DB 抖动时的 last-known 副本。
+    DB 读成功即返回（即使 releases 为空），不做"空就回退 JSON"的兜底——否则
+    旧 JSON 会把已淘汰的 release 重新注入运行链。
+    """
     engine, ok = try_governance_db()
     if ok:
         try:
@@ -50,25 +77,50 @@ def load_release_history(project_root: Path) -> dict[str, Any]:
 
             with Session(engine) as session:
                 history = db_load_release_history(session)
-            # DB 是真源 —— 即使结果为空也要直接返回，不能回退到旧 JSON
-            # 否则会把已淘汰的历史 release 重新注入运行链
+            if not isinstance(history, dict):
+                history = {"generated_at": None, "releases": []}
+            history.setdefault("releases", [])
+            history["source"] = "db"
+            history["stale"] = False
             return history
         except Exception as exc:
             log.warning(
                 "release history: DB 读取失败 (%s)，退化到文件（stale 风险）", exc,
             )
+            stale_reason = f"db_read_error: {exc}"
         finally:
             if engine is not None:
                 engine.dispose()
+    else:
+        stale_reason = "db_unreachable"
+
     path = project_root / _RELEASE_HISTORY_PATH
     if not path.exists():
-        return {"generated_at": None, "releases": []}
+        return {
+            "generated_at": None,
+            "releases": [],
+            "source": "empty",
+            "stale": False,
+        }
     try:
         with path.open(encoding="utf-8") as f:
-            return json.load(f)
+            history = json.load(f)
     except (json.JSONDecodeError, OSError) as exc:
         log.warning("无法加载 release history: %s", exc)
-        return {"generated_at": None, "releases": []}
+        return {
+            "generated_at": None,
+            "releases": [],
+            "source": "empty",
+            "stale": True,
+            "stale_reason": f"json_read_error: {exc}",
+        }
+    if not isinstance(history, dict):
+        history = {"generated_at": None, "releases": []}
+    history.setdefault("releases", [])
+    history["source"] = "json"
+    history["stale"] = True
+    history["stale_reason"] = stale_reason
+    return history
 
 
 def save_release_history(
@@ -84,16 +136,47 @@ def save_release_history(
     # "DB 未 commit、但文件已更新"的 ghost —— 否则 DB 暂时不可达时 loader
     # 会回落到这份从未成功入真源的文件，把失败写入重新注入系统。
     engine, ok = try_governance_db()
-    if ok:
+    if not ok:
+        if _is_release_fail_loud_enabled():
+            raise RuntimeError(
+                "governance DB 不可达，release history 无法持久化到真源 "
+                "（AATS_P0_RELEASE_FAIL_LOUD=on 强制中断）"
+            )
+        log.warning(
+            "release history: DB 不可达，进入单机兼容模式仅写 JSON "
+            "（生产建议开启 AATS_P0_RELEASE_FAIL_LOUD）"
+        )
+    else:
         try:
             from aats.data_platform.governance.operational_state_db import (
+                db_set_gate_result_release_id,
                 db_upsert_parameter_release,
             )
 
             with Session(engine) as session, session.begin():
                 for release in history.get("releases", []):
-                    if isinstance(release, dict):
-                        db_upsert_parameter_release(session, release)
+                    if not isinstance(release, dict):
+                        continue
+                    db_upsert_parameter_release(session, release)
+                    # 把 release_id 回填到 gate 行，让 db_list_gate_results_for_release
+                    # 能在 release_id 索引上直接命中，而不是回落到 parameter_releases JOIN。
+                    # 同事务内做，确保 release upsert 与 gate 回填一起 commit / 一起回滚。
+                    gate_ref = release.get("gate_result_ref")
+                    rel_id = release.get("release_id")
+                    if gate_ref and rel_id:
+                        matched = db_set_gate_result_release_id(
+                            session,
+                            gate_run_id=gate_ref,
+                            release_id=rel_id,
+                        )
+                        if not matched:
+                            # gate 行缺失不该阻塞 release 落库（历史 release、单机
+                            # 模式等场景下 gate 表可能没写入），只打 warning 让运维可见。
+                            log.warning(
+                                "release %s 回填 gate_run_id=%s 未命中任何行",
+                                rel_id,
+                                gate_ref,
+                            )
         except Exception as exc:
             log.exception("release history DB 同步失败，保存未完成")
             raise RuntimeError(

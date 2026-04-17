@@ -52,6 +52,13 @@ ENV_PROFILE_PATH=""
 WSL2_ENV_FILE=""
 APP_CONTAINERS=""
 COMPOSE_CMD_ARGS=""
+OPERATOR_TLS_ENABLED=false
+OPERATOR_HEALTH_SCHEME="http"
+OPERATOR_TLS_RUNTIME_DIR=""
+OPERATOR_TLS_CERT_WSL=""
+OPERATOR_TLS_KEY_WSL=""
+OPERATOR_TLS_CERT_CONTAINER=""
+OPERATOR_TLS_KEY_CONTAINER=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -98,6 +105,17 @@ required_app_containers_for_profile() {
         *)
             log_error "不支持的 profile: $profile"
             exit 1
+            ;;
+    esac
+}
+
+is_live_profile() {
+    case "$1" in
+        spot-live|derivatives-live|derivatives-live-monolith)
+            return 0
+            ;;
+        *)
+            return 1
             ;;
     esac
 }
@@ -150,6 +168,46 @@ resolve_wsl2_env_file() {
     fi
 }
 
+compose_env_prefix() {
+    if [[ "$OPERATOR_TLS_ENABLED" == true ]]; then
+        printf "AATS_OPERATOR_TLS_CERT_FILE='%s' AATS_OPERATOR_TLS_KEY_FILE='%s'" \
+            "$OPERATOR_TLS_CERT_CONTAINER" \
+            "$OPERATOR_TLS_KEY_CONTAINER"
+    fi
+}
+
+ensure_operator_tls_assets() {
+    if ! is_live_profile "$PROFILE"; then
+        return
+    fi
+
+    if ! wsl_run "command -v openssl >/dev/null 2>&1"; then
+        log_error "live profile 需要 openssl 生成 operator HTTPS 证书，请先在 WSL2 中安装 openssl"
+        exit 1
+    fi
+
+    OPERATOR_TLS_ENABLED=true
+    OPERATOR_HEALTH_SCHEME="https"
+    OPERATOR_TLS_RUNTIME_DIR="$WSL_PROJECT/$DEPLOY_DIR/runtime/operator-tls/$PROFILE"
+    OPERATOR_TLS_CERT_WSL="$OPERATOR_TLS_RUNTIME_DIR/operator.crt"
+    OPERATOR_TLS_KEY_WSL="$OPERATOR_TLS_RUNTIME_DIR/operator.key"
+    OPERATOR_TLS_CERT_CONTAINER="/app/deploy/wsl2-dev/runtime/operator-tls/$PROFILE/operator.crt"
+    OPERATOR_TLS_KEY_CONTAINER="/app/deploy/wsl2-dev/runtime/operator-tls/$PROFILE/operator.key"
+
+    wsl_run "mkdir -p '$OPERATOR_TLS_RUNTIME_DIR'"
+
+    if ! wsl_run "test -f '$OPERATOR_TLS_CERT_WSL' && test -f '$OPERATOR_TLS_KEY_WSL'"; then
+        log_info "为 live profile 生成本地 operator HTTPS 证书..."
+        wsl_run "openssl req -x509 -nodes -newkey rsa:2048 \
+            -keyout '$OPERATOR_TLS_KEY_WSL' \
+            -out '$OPERATOR_TLS_CERT_WSL' \
+            -days 365 \
+            -subj '/CN=localhost' \
+            -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' >/dev/null 2>&1"
+        wsl_run "chmod 600 '$OPERATOR_TLS_KEY_WSL' && chmod 644 '$OPERATOR_TLS_CERT_WSL'"
+    fi
+}
+
 all_required_app_containers_healthy() {
     local c
     local state
@@ -160,6 +218,41 @@ all_required_app_containers_healthy() {
     done
 
     return 0
+}
+
+gateway_health_ok() {
+    local port="$1"
+    if [[ "$OPERATOR_HEALTH_SCHEME" == "https" ]]; then
+        wsl_run "curl -kfs https://127.0.0.1:$port/healthz >/dev/null 2>&1"
+    else
+        wsl_run "curl -fs http://127.0.0.1:$port/healthz >/dev/null 2>&1"
+    fi
+}
+
+required_app_container_states_compact() {
+    local c
+    local state
+    local parts=()
+
+    for c in $APP_CONTAINERS; do
+        state="$(wsl_run "docker inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \"$c\" 2>/dev/null" || true)"
+        if [[ -n "$state" ]]; then
+            parts+=("$c=$state")
+        else
+            parts+=("$c=missing")
+        fi
+    done
+
+    local joined=""
+    local part
+    for part in "${parts[@]}"; do
+        if [[ -n "$joined" ]]; then
+            joined="$joined, "
+        fi
+        joined="$joined$part"
+    done
+
+    printf '%s\n' "$joined"
 }
 
 print_required_app_container_states() {
@@ -193,6 +286,7 @@ preflight() {
     fi
 
     resolve_wsl2_env_file
+    ensure_operator_tls_assets
 
     ENV_PROFILE_PATH="$WSL_PROJECT/${ENV_PROFILE#../../}"
     if ! wsl_run "test -f $ENV_PROFILE_PATH"; then
@@ -256,7 +350,9 @@ step_sync() {
 
 step_down() {
     log_info "Step 3/7: 停止旧服务..."
-    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose $COMPOSE_CMD_ARGS down --timeout 5" || {
+    local env_prefix
+    env_prefix="$(compose_env_prefix)"
+    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS down --timeout 5" || {
         log_warn "docker compose down 返回非零，可能当前没有运行中的服务，继续"
     }
     log_ok "旧服务已停止"
@@ -264,7 +360,9 @@ step_down() {
 
 step_build() {
     log_info "Step 4/7: 构建新镜像${NO_CACHE:+（无缓存）}..."
-    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose $COMPOSE_CMD_ARGS build $NO_CACHE"
+    local env_prefix
+    env_prefix="$(compose_env_prefix)"
+    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS build $NO_CACHE"
     log_ok "镜像构建完成"
 }
 
@@ -304,7 +402,9 @@ PWEOF
 
 step_app_up() {
     log_info "Step 7/7: 启动应用服务..."
-    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose $COMPOSE_CMD_ARGS up -d"
+    local env_prefix
+    env_prefix="$(compose_env_prefix)"
+    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS up -d"
     log_ok "应用服务已启动"
 }
 
@@ -317,11 +417,26 @@ step_health() {
 
     local elapsed=0
     local interval=3
+    local last_progress=""
     while [[ $elapsed -lt $HEALTH_TIMEOUT ]]; do
-        if wsl_run "curl -sf http://127.0.0.1:$port/healthz >/dev/null 2>&1" && all_required_app_containers_healthy; then
+        local gateway_state="未就绪"
+        if gateway_health_ok "$port"; then
+            gateway_state="已就绪"
+        fi
+
+        if [[ "$gateway_state" == "已就绪" ]] && all_required_app_containers_healthy; then
             log_ok "应用健康检查通过 (gateway port $port, containers: $APP_CONTAINERS, ${elapsed}s)"
             return 0
         fi
+
+        local container_states
+        container_states="$(required_app_container_states_compact)"
+        local progress="gateway=${gateway_state}; 容器=${container_states}"
+        if [[ "$progress" != "$last_progress" || $elapsed -eq 0 || $((elapsed % 15)) -eq 0 ]]; then
+            log_info "健康检查进度 ${elapsed}s/${HEALTH_TIMEOUT}s: ${progress}"
+            last_progress="$progress"
+        fi
+
         sleep "$interval"
         elapsed=$((elapsed + interval))
     done
@@ -343,12 +458,20 @@ report() {
     log_info "Env file:   $WSL2_ENV_FILE"
 
     echo
-    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && docker compose $COMPOSE_CMD_ARGS ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}'" || true
+    local env_prefix
+    env_prefix="$(compose_env_prefix)"
+    wsl_run "cd $WSL_PROJECT/$DEPLOY_DIR && ${env_prefix:+env $env_prefix }docker compose $COMPOSE_CMD_ARGS ps --format 'table {{.Name}}\t{{.Status}}\t{{.Ports}}'" || true
     echo
 
     local head
     head=$(cd "$PROJECT_ROOT" && git log --oneline -1)
     log_info "Git HEAD:   $head"
+    if [[ "$OPERATOR_TLS_ENABLED" == true ]]; then
+        local port
+        port=$(wsl_run "grep -h '^AATS_API_PORT=' \"$ENV_PROFILE_PATH\" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '\"'" || echo "")
+        port="${port:-8000}"
+        log_info "Operator:   https://127.0.0.1:$port (self-signed)"
+    fi
     echo
 }
 

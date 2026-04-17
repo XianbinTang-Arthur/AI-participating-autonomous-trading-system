@@ -85,6 +85,363 @@ def test_trigger_task_api_accepts_release_cycle() -> None:
     assert payload["task_id"] == "task_release_cycle_1"
 
 
+def test_tuning_review_routes_expose_and_review_pending_proposals(tmp_path) -> None:
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    (root / "artifacts" / "governance").mkdir(parents=True, exist_ok=True)
+    (root / "artifacts" / "governance" / "strategy_tuning_proposals.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-16T12:00:00Z",
+                "version": 1,
+                "proposals": [
+                    {
+                        "proposal_id": "tprop_demo_1",
+                        "created_at": "2026-04-16T12:00:00Z",
+                        "combo_key": "directional_1h",
+                        "family": "directional",
+                        "timeframe": "1h",
+                        "parameter": "min_safe_net_edge_bps",
+                        "current_value": 2.0,
+                        "proposed_value": 1.5,
+                        "status": "pending_review",
+                        "rationale": "Phase 4 边际为正，但安全边界阻断占主导",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "artifacts" / "governance" / "strategy_tuning_overrides.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-16T12:00:00Z",
+                "combo_overrides": {},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch("aats.data_platform.operations.strategy_tuning_registry.try_governance_db", lambda: (None, False)),
+    ):
+        client = TestClient(app)
+
+        overview = client.get("/rdp/tuning/overview").json()
+        assert overview["pending_review_count"] == 1
+
+        listing = client.get("/rdp/tuning/proposals").json()
+        assert listing["total"] == 1
+        assert listing["items"][0]["proposal_id"] == "tprop_demo_1"
+
+        approved = client.post(
+            "/rdp/tuning/proposals/tprop_demo_1/approve",
+            json={"actor": "operator", "notes": "approve"},
+        ).json()
+        assert approved["ok"] is True
+
+        listing_after = client.get("/rdp/tuning/proposals").json()
+        assert listing_after["total"] == 0
+
+
+def _seed_tuning_registry(root, proposals: list[dict[str, object]]) -> None:
+    (root / "artifacts" / "governance").mkdir(parents=True, exist_ok=True)
+    (root / "artifacts" / "governance" / "strategy_tuning_proposals.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-16T12:00:00Z",
+                "version": 1,
+                "proposals": proposals,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (root / "artifacts" / "governance" / "strategy_tuning_overrides.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-16T12:00:00Z",
+                "combo_overrides": {},
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_tuning_approve_returns_not_found_for_unknown_proposal(tmp_path) -> None:
+    """审批不存在的 proposal_id 应返回 ok=False，消息包含“未找到”。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(
+        root,
+        proposals=[
+            {
+                "proposal_id": "tprop_exists_1",
+                "created_at": "2026-04-16T12:00:00Z",
+                "combo_key": "directional_1h",
+                "family": "directional",
+                "timeframe": "1h",
+                "parameter": "min_safe_net_edge_bps",
+                "current_value": 2.0,
+                "proposed_value": 1.5,
+                "status": "pending_review",
+                "rationale": "seed",
+            },
+        ],
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/tuning/proposals/tprop_does_not_exist/approve",
+            json={"actor": "operator", "notes": "ghost"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert "未找到" in payload["message"]
+    assert payload["proposal"] is None
+
+
+def test_tuning_reject_returns_not_found_for_unknown_proposal(tmp_path) -> None:
+    """拒绝不存在的 proposal_id 同样应返回 ok=False，消息包含“未找到”。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(root, proposals=[])
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/tuning/proposals/tprop_missing/reject",
+            json={"actor": "operator", "notes": "ghost"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert "未找到" in payload["message"]
+    assert payload["proposal"] is None
+
+
+def test_tuning_approve_twice_blocks_second_review(tmp_path) -> None:
+    """已批准的提案再次批准应返回 ok=False，消息包含“不能继续审核”。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(
+        root,
+        proposals=[
+            {
+                "proposal_id": "tprop_once_1",
+                "created_at": "2026-04-16T12:00:00Z",
+                "combo_key": "directional_1h",
+                "family": "directional",
+                "timeframe": "1h",
+                "parameter": "min_safe_net_edge_bps",
+                "current_value": 2.0,
+                "proposed_value": 1.5,
+                "status": "pending_review",
+                "rationale": "seed",
+            },
+        ],
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+    ):
+        client = TestClient(app)
+
+        first = client.post(
+            "/rdp/tuning/proposals/tprop_once_1/approve",
+            json={"actor": "operator", "notes": "first"},
+        ).json()
+        assert first["ok"] is True
+        assert first["proposal"]["status"] == "approved"
+
+        second = client.post(
+            "/rdp/tuning/proposals/tprop_once_1/approve",
+            json={"actor": "operator", "notes": "second"},
+        ).json()
+
+    assert second["ok"] is False
+    assert "不能继续审核" in second["message"]
+    # 提案状态保持 approved，不被二次写入
+    assert second["proposal"]["status"] == "approved"
+
+
+def test_tuning_reject_then_approve_is_blocked(tmp_path) -> None:
+    """先拒绝的提案再调用 approve 时应返回 ok=False，消息包含“不能继续审核”。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(
+        root,
+        proposals=[
+            {
+                "proposal_id": "tprop_reject_1",
+                "created_at": "2026-04-16T12:00:00Z",
+                "combo_key": "directional_1h",
+                "family": "directional",
+                "timeframe": "1h",
+                "parameter": "min_safe_net_edge_bps",
+                "current_value": 2.0,
+                "proposed_value": 1.5,
+                "status": "pending_review",
+                "rationale": "seed",
+            },
+        ],
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+    ):
+        client = TestClient(app)
+
+        rejected = client.post(
+            "/rdp/tuning/proposals/tprop_reject_1/reject",
+            json={"actor": "operator", "notes": "nope"},
+        ).json()
+        assert rejected["ok"] is True
+        assert rejected["proposal"]["status"] == "rejected"
+
+        retry_approve = client.post(
+            "/rdp/tuning/proposals/tprop_reject_1/approve",
+            json={"actor": "operator", "notes": "retry"},
+        ).json()
+
+    assert retry_approve["ok"] is False
+    assert "不能继续审核" in retry_approve["message"]
+    assert retry_approve["proposal"]["status"] == "rejected"
+
+
+def test_workbench_detail_routes_expose_evidence_and_integrity_block(tmp_path) -> None:
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._governance_session", _fake_governance_session),
+        patch("aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot", return_value={"round_id": "step2_missing"}),
+        patch("aats.data_platform.governance.snapshot_db.is_snapshot_incomplete", return_value=True),
+        patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+            "overall_health": "healthy",
+            "blocking_reasons": [],
+            "warnings": [],
+            "checks": [],
+        }),
+        patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+        patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+        patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
+        patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={
+            "recommendations": [
+                {
+                    "recommendation_id": "rec_combo_1",
+                    "symbol": "BTC-USDT-SWAP",
+                    "family": "directional",
+                    "timeframe": "1h",
+                    "recommendation_type": "keep_active",
+                    "confidence": "low",
+                    "reason": "研究结果尚不完整；先不要审批",
+                    "status": "draft",
+                    "target_parameter_set_id": "ps_candidate_1",
+                    "source_round_id": "round_step2_1",
+                    "created_at": "2026-04-16T12:00:00Z",
+                },
+            ],
+        }),
+        patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+            "generated_at": "2026-04-16T11:40:00Z",
+            "governance_managed": True,
+            "paused_combos": [],
+            "known_combos": ["directional_1h"],
+            "active_sets": {},
+            "parameter_sets": [],
+        }),
+        patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+        patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+            "available": True,
+            "generated_at": "2026-04-16T11:55:00Z",
+            "status_distribution": {"keep_active": 1},
+            "decisions": [],
+        }),
+        patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+            "available": True,
+            "parameter_sets": [],
+        }),
+        patch(
+            "aats.data_platform.production_workflow.release_registry.load_release_history",
+            return_value={"releases": []},
+        ),
+        patch("aats.api.rdp_control_summary.query_latest_attribution", return_value={"available": True, "round_id": "round_phase3_1", "combos": []}),
+        patch("aats.api.rdp_control_summary.query_latest_execution_realism", return_value={"available": True, "round_id": "round_phase4_1", "combos": []}),
+    ):
+        client = TestClient(app)
+        detail = client.get("/rdp/workbench/items/directional_1h").json()
+        evidence = client.get("/rdp/workbench/evidence/directional_1h").json()
+
+    assert detail["available"] is True
+    assert detail["item"]["approval_enabled"] is False
+    assert detail["detail_summary"]["integrity_status"] == "blocked"
+    assert evidence["available"] is True
+    assert evidence["integrity_status"] == "blocked"
+    assert evidence["phase2"]["status"] == "blocked"
+
+
 def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_path) -> None:
     app = FastAPI()
     app.include_router(rdp_router)
@@ -357,3 +714,452 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             after_rollback["active_parameters"]["independent_15m"]["parameter_set_id"]
             == "ps_live_0"
         )
+
+
+# ══════════════════════════════════════════════════════════════════
+#  H1 回归：Step2 快照不完整时 server-side 审批门闸（tuning / recommendation）
+# ══════════════════════════════════════════════════════════════════
+#
+# 回归原因：之前 UI 把 action.enabled 标为 False 只能阻止按钮点击，任何绕过 UI
+# 的调用（curl / 脚本 / 重放）都能把 blocked 提案批准下去。必须在 server 端
+# 重新做同样的 gate，且 reject 路径不应被门闸阻断，否则运营者无法清理脏提案。
+
+
+def test_tuning_approve_blocked_when_step2_snapshot_incomplete(tmp_path) -> None:
+    """Step2 快照不完整时，tuning 提案 approve 必须被 server 端直接拒绝。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(
+        root,
+        proposals=[
+            {
+                "proposal_id": "tprop_gated_1",
+                "created_at": "2026-04-16T12:00:00Z",
+                "combo_key": "directional_1h",
+                "family": "directional",
+                "timeframe": "1h",
+                "parameter": "min_safe_net_edge_bps",
+                "current_value": 2.0,
+                "proposed_value": 1.5,
+                "status": "pending_review",
+                "rationale": "seed",
+            },
+        ],
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+        # 让两条路径的 snapshot 查询都返回"不完整"
+        patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value={"round_id": "round_step2_dirty", "manifest_synthesized": True},
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+            return_value=True,
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/tuning/proposals/tprop_gated_1/approve",
+            json={"actor": "operator", "notes": "bypass attempt"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False, "Step2 不完整时 approve 必须被拒绝"
+    assert payload.get("integrity_blocked") is True, \
+        "必须通过 integrity_blocked=True 让调用方区分完整性阻断和其他失败"
+    assert "不完整" in payload["message"]
+    # 提案状态不能被偷偷改写
+    assert payload["proposal"]["status"] == "pending_review"
+
+
+def test_tuning_reject_still_allowed_when_step2_snapshot_incomplete(tmp_path) -> None:
+    """reject 永远不受 integrity gate 限制——运营者必须能清理队列里过期/脏的提案。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    _seed_tuning_registry(
+        root,
+        proposals=[
+            {
+                "proposal_id": "tprop_reject_gated_1",
+                "created_at": "2026-04-16T12:00:00Z",
+                "combo_key": "directional_1h",
+                "family": "directional",
+                "timeframe": "1h",
+                "parameter": "min_safe_net_edge_bps",
+                "current_value": 2.0,
+                "proposed_value": 1.5,
+                "status": "pending_review",
+                "rationale": "seed",
+            },
+        ],
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value={"round_id": "round_step2_dirty", "manifest_synthesized": True},
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+            return_value=True,
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/tuning/proposals/tprop_reject_gated_1/reject",
+            json={"actor": "operator", "notes": "清理过期"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True, "reject 不受 Step2 完整性门闸限制"
+    assert payload["proposal"]["status"] == "rejected"
+
+
+def test_recommendation_approve_blocked_when_step2_snapshot_incomplete(tmp_path) -> None:
+    """Step2 快照不完整时，recommendation approve 也必须被 server 端直接拒绝。"""
+
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+
+    root = tmp_path
+    (root / "artifacts" / "decision_system").mkdir(parents=True, exist_ok=True)
+    (root / "artifacts" / "decision_system" / "recommendation_registry.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-16T11:50:00Z",
+                "version": 1,
+                "recommendations": [
+                    {
+                        "recommendation_id": "rec_gated_1",
+                        "created_at": "2026-04-16T11:55:00Z",
+                        "family": "independent",
+                        "symbol": "BTC-USDT-SWAP",
+                        "timeframe": "15m",
+                        "recommendation_type": "parameter_upgrade",
+                        "target_parameter_set_id": "ps_candidate_1",
+                        "confidence": "high",
+                        "status": "draft",
+                    },
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
+        patch(
+            "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+            return_value={"round_id": "round_step2_dirty", "manifest_synthesized": True},
+        ),
+        patch(
+            "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+            return_value=True,
+        ),
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_gated_1/approve",
+            json={"actor": "operator", "notes": "bypass attempt"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload.get("integrity_blocked") is True
+    assert "不完整" in payload["message"]
+
+    # 验证 recommendation_registry.json 里状态仍然是 draft，没有被写为 approved
+    registry_contents = json.loads(
+        (root / "artifacts/decision_system/recommendation_registry.json").read_text(
+            encoding="utf-8",
+        )
+    )
+    recs = registry_contents.get("recommendations", [])
+    assert recs and recs[0]["status"] == "draft", \
+        "Integrity gate 必须阻止 registry 被 approve"
+
+
+# ======================================================================
+# P0-1 阶段 B：approve/reject/supersede 的 404 / 409 精确化契约
+# ======================================================================
+#
+# 背景：旧代码对"找不到 rec / 状态已改 / CAS 并发改写"一律返回 200 + ok=False，
+# 前端看到的是 "200 OK but ok: false"，会把 UI 状态置为成功或模糊失败，
+# 让 operator 不知道到底是"点错了"还是"别人已经点了"。
+#
+# 阶段 B 改造后：
+# - rec 不存在 → 404
+# - rec 状态不在 expected_current_status → 409（带 current_status / expected_status）
+# - 预检通过但底层 CAS 失败（竞态）→ 409（reason=cas_race）
+#
+# 下列测试 patch ``try_governance_db`` 为 (None, False)，让 load/save 走 JSON-only
+# 路径，避免在 Windows 单测里跑 testcontainers；WSL2 集成测试走真实 Postgres。
+# ======================================================================
+
+
+def _write_rec_registry(root, recs: list[dict]) -> None:
+    """把给定 recommendation 列表写成 registry.json。"""
+    (root / "artifacts" / "decision_system").mkdir(parents=True, exist_ok=True)
+    (root / "artifacts" / "decision_system" / "recommendation_registry.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-17T00:00:00Z",
+                "version": 1,
+                "recommendations": recs,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _draft_rec(rec_id: str = "rec_phase_b_1") -> dict:
+    return {
+        "recommendation_id": rec_id,
+        "created_at": "2026-04-17T00:01:00Z",
+        "family": "independent",
+        "symbol": "BTC-USDT-SWAP",
+        "timeframe": "15m",
+        "recommendation_type": "parameter_upgrade",
+        "target_parameter_set_id": "ps_candidate_1",
+        "confidence": "high",
+        "status": "draft",
+    }
+
+
+def _phase_b_client(root):
+    """和 Phase B 所有测试共享的 app + patch 栈。
+
+    - ``_project_root`` 固定到 tmp_path
+    - ``try_governance_db`` 强制 (None, False)，让 load/save 走 JSON
+    - ``_step2_integrity_blocking_reason`` 返回 None，不让 integrity gate 拦截
+    """
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+    return app
+
+
+_PHASE_B_PATCHES: tuple[str, ...] = (
+    "aats.data_platform.decision_system.recommendation_registry.try_governance_db",
+)
+
+
+def _phase_b_patch_stack(root):
+    from contextlib import ExitStack
+    stack = ExitStack()
+    stack.enter_context(patch(
+        "aats.api.rdp_routes._project_root", lambda _request: root,
+    ))
+    stack.enter_context(patch(
+        "aats.data_platform.decision_system.recommendation_registry.try_governance_db",
+        lambda: (None, False),
+    ))
+    stack.enter_context(patch(
+        "aats.api.rdp_routes._step2_integrity_blocking_reason",
+        lambda _root: None,
+    ))
+    return stack
+
+
+def test_approve_returns_404_when_recommendation_missing(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [])  # 空 registry
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_does_not_exist/approve",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["recommendation_id"] == "rec_does_not_exist"
+    assert "未找到" in detail["message"]
+
+
+def test_approve_returns_409_when_rec_already_approved(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    rec = _draft_rec("rec_already_approved")
+    rec["status"] = "approved"
+    _write_rec_registry(tmp_path, [rec])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_already_approved/approve",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["current_status"] == "approved"
+    assert detail["expected_status"] == ["draft"]
+
+
+def test_approve_returns_409_on_cas_race(tmp_path) -> None:
+    """预检时是 draft，但底层 ``_db_update_rec_status`` 返回 False（CAS 竞态）。
+
+    由于 ``try_governance_db`` 被 patch 成 (None, False)，默认走不到 CAS
+    路径；这里换一种 patch 策略——直接把 ``approve_recommendation`` stub
+    成返回 None，模拟 "rec 被并发改写" 的结局。
+    """
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [_draft_rec("rec_cas_race_approve")])
+    with _phase_b_patch_stack(tmp_path), patch(
+        "aats.data_platform.decision_system.recommendation_registry.approve_recommendation",
+        return_value=None,
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_cas_race_approve/approve",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["reason"] == "cas_race"
+    assert detail["recommendation_id"] == "rec_cas_race_approve"
+
+
+def test_reject_returns_404_when_recommendation_missing(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_missing_reject/reject",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["recommendation_id"] == "rec_missing_reject"
+
+
+def test_reject_returns_409_when_status_is_rejected(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    rec = _draft_rec("rec_double_reject")
+    rec["status"] = "rejected"
+    _write_rec_registry(tmp_path, [rec])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_double_reject/reject",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["current_status"] == "rejected"
+
+
+def test_reject_returns_409_on_cas_race(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [_draft_rec("rec_cas_race_reject")])
+    with _phase_b_patch_stack(tmp_path), patch(
+        "aats.data_platform.decision_system.recommendation_registry.reject_recommendation",
+        return_value=None,
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_cas_race_reject/reject",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["reason"] == "cas_race"
+
+
+def test_supersede_returns_404_when_recommendation_missing(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_missing_supersede/supersede",
+            json={"actor": "operator", "superseded_by_id": "rec_new_1"},
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["recommendation_id"] == "rec_missing_supersede"
+
+
+def test_supersede_returns_409_when_status_is_terminal(tmp_path) -> None:
+    """superseded / rejected 是终态，supersede 必须 409 拒绝。"""
+    app = _phase_b_client(tmp_path)
+    rec = _draft_rec("rec_terminal_superseded")
+    rec["status"] = "superseded"
+    _write_rec_registry(tmp_path, [rec])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_terminal_superseded/supersede",
+            json={"actor": "operator", "superseded_by_id": "rec_new_1"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["current_status"] == "superseded"
+    assert set(detail["expected_status"]) == {"draft", "approved"}
+
+
+def test_supersede_allows_approved_state(tmp_path) -> None:
+    """approved 是 supersede 的合法前置状态，不能被误判成 409。"""
+    app = _phase_b_client(tmp_path)
+    rec = _draft_rec("rec_approved_supersede")
+    rec["status"] = "approved"
+    _write_rec_registry(tmp_path, [rec])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_approved_supersede/supersede",
+            json={"actor": "operator", "superseded_by_id": "rec_new_1"},
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["recommendation"]["status"] == "superseded"
+
+
+def test_supersede_returns_409_on_cas_race(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [_draft_rec("rec_cas_race_supersede")])
+    with _phase_b_patch_stack(tmp_path), patch(
+        "aats.data_platform.decision_system.recommendation_registry.supersede_recommendation",
+        return_value=None,
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_cas_race_supersede/supersede",
+            json={"actor": "operator", "superseded_by_id": "rec_new_1"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["reason"] == "cas_race"

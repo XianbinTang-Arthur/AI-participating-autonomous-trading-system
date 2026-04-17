@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -46,6 +47,17 @@ _GOVERNANCE_DIR = "artifacts/governance"
 _DECISION_SYSTEM_DIR = "artifacts/decision_system"
 _DECISION_ROUNDS_DIR = "artifacts/decision_rounds"
 _GATES_DIR = "artifacts/production_workflow/gates"
+
+
+def _is_gate_json_export_enabled() -> bool:
+    """P0-2 阶段 C：默认只把 gate 结果写入 governance DB。
+
+    只有显式置 ``AATS_P0_GATE_JSON_EXPORT=on/true/1/yes`` 时才额外导出
+    JSON 副本 + Markdown 报告，用于人工审计。生产默认 off，避免
+    artifacts/ 目录被当作真源。
+    """
+    raw = os.getenv("AATS_P0_GATE_JSON_EXPORT", "")
+    return raw.strip().lower() in {"1", "on", "true", "yes"}
 
 
 def _make_gate_run_id() -> str:
@@ -255,7 +267,19 @@ def run_pre_apply_gate(
     }
 
     if save_result:
-        _save_gate_result(project_root, gate_run_id, gate_result)
+        try:
+            _save_gate_result(project_root, gate_run_id, gate_result)
+        except Exception as exc:
+            log.error("pre-apply gate 落库失败，拒绝 apply: %s", exc)
+            gate_result = {
+                **gate_result,
+                "allow_apply": False,
+                "gate_status": "error",
+                "blocking_reasons": [
+                    *gate_result.get("blocking_reasons", []),
+                    f"[gate_persistence] gate 结果未能写入 governance DB: {exc}",
+                ],
+            }
 
     return gate_result
 
@@ -264,8 +288,42 @@ def _save_gate_result(
     project_root: Path,
     gate_run_id: str,
     result: dict[str, Any],
-) -> Path:
-    """保存 gate 结果到 artifacts."""
+) -> Path | None:
+    """把 gate 结果写入 governance DB；必要时再导出 JSON + Markdown 副本.
+
+    P0-2 阶段 C：DB 为单一真源，写失败 → 抛异常传递给 ``run_pre_apply_gate``，
+    后者会把 ``allow_apply`` 改为 ``False`` 并返回 ``gate_status="error"``.
+
+    仅当 ``AATS_P0_GATE_JSON_EXPORT`` 开启时，才额外导出
+    ``artifacts/production_workflow/gates/{gate_run_id}/`` 下的人可读副本。
+
+    Returns
+    -------
+    Path | None
+        JSON 导出启用时返回 gate_dir；否则返回 ``None``。
+    """
+    # Step 1: 必须写入 governance DB
+    engine, ok = try_governance_db()
+    if not ok:
+        raise RuntimeError(
+            "governance DB 不可达，pre-apply gate 结果无法持久化"
+        )
+    try:
+        from aats.data_platform.governance.operational_state_db import (
+            db_record_gate_result,
+        )
+
+        with Session(engine) as session, session.begin():
+            db_record_gate_result(session, result)
+    finally:
+        engine.dispose()
+
+    log.info("Gate result recorded in DB: gate_run_id=%s", gate_run_id)
+
+    # Step 2: 可选的人可读导出
+    if not _is_gate_json_export_enabled():
+        return None
+
     gate_dir = project_root / _GATES_DIR / gate_run_id
     gate_dir.mkdir(parents=True, exist_ok=True)
 
@@ -273,26 +331,10 @@ def _save_gate_result(
     with result_path.open("w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2, default=str)
 
-    engine, ok = try_governance_db()
-    if ok:
-        try:
-            from aats.data_platform.governance.operational_state_db import (
-                db_upsert_pre_apply_gate_result,
-            )
-
-            with Session(engine) as session, session.begin():
-                db_upsert_pre_apply_gate_result(session, result)
-        except Exception as exc:
-            log.warning("pre-apply gate DB 同步失败: %s", exc)
-        finally:
-            if engine is not None:
-                engine.dispose()
-
-    # 生成人可读报告
     report_path = gate_dir / "pre_apply_gate_report.md"
     _write_gate_report(result, report_path)
 
-    log.info("Gate result saved: %s", gate_dir)
+    log.info("Gate result exported to artifacts: %s", gate_dir)
     return gate_dir
 
 

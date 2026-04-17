@@ -49,7 +49,9 @@ async function login() {
 }
 
 function updateLoginAvailability(payload) {
-  const loginAvailable = Boolean(payload.auth_enabled && payload.session_enabled);
+  const blockedReason = String(payload.auth_blocked_reason || "").trim();
+  const transportCompatible = payload.transport_compatible !== false;
+  const loginAvailable = Boolean(payload.auth_enabled && payload.session_enabled && transportCompatible && !blockedReason);
   nodes.username.disabled = !loginAvailable;
   nodes.password.disabled = !loginAvailable;
   nodes.button.disabled = !loginAvailable;
@@ -63,6 +65,10 @@ function updateLoginAvailability(payload) {
     setMessage("当前没有启用浏览器会话登录，请先补齐 operator session 配置。", "warning");
     return;
   }
+  if (!transportCompatible || blockedReason) {
+    setMessage(localizeLoginError(blockedReason || "operator_https_required_for_secure_session"), "warning");
+    return;
+  }
   setMessage("请输入账号和密码后继续。", "info");
 }
 
@@ -74,6 +80,9 @@ function setMessage(message, tone) {
 function localizeLoginError(message) {
   const text = String(message || "").trim();
   if (text === "operator_auth_required") return "当前操作需要先登录。";
+  if (text === "operator_https_required_for_secure_session") {
+    return "当前入口使用 HTTP，安全会话只能通过 HTTPS 建立。请使用 HTTPS 访问控制台。";
+  }
   if (text === "operator_login_failed") return "用户名或密码错误。";
   if (text === "operator_session_auth_not_configured") return "当前没有启用浏览器会话登录。";
   if (/failed to fetch|networkerror|network error|load failed/i.test(text)) {

@@ -36,8 +36,36 @@ def test_deploy_script_health_helpers_check_each_container_safely() -> None:
     assert "printf '%s missing\\n' \"$c\"" in text
 
 
+def test_deploy_script_health_check_logs_progress_and_gateway_state() -> None:
+    text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    assert "gateway_health_ok()" in text
+    assert "required_app_container_states_compact()" in text
+    assert "gateway_state=\"未就绪\"" in text
+    assert "gateway_state=\"已就绪\"" in text
+    assert "健康检查进度" in text
+    assert "容器=${container_states}" in text
+
+
 def test_deploy_script_accepts_root_and_legacy_wsl2_env_file_locations() -> None:
     text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
 
     assert 'test -f $WSL_PROJECT/.env.wsl2' in text
     assert 'test -f $WSL_PROJECT/$DEPLOY_DIR/.env.wsl2' in text
+
+
+def test_deploy_script_provisions_tls_for_live_profiles_and_uses_https_health_checks() -> None:
+    text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+    compose_text = (REPO_ROOT / "deploy" / "wsl2-dev" / "docker-compose.aats.yml").read_text(encoding="utf-8")
+    gitignore_text = (REPO_ROOT / ".gitignore").read_text(encoding="utf-8")
+
+    assert "is_live_profile()" in text
+    assert "ensure_operator_tls_assets()" in text
+    assert "AATS_OPERATOR_TLS_CERT_FILE" in text
+    assert "AATS_OPERATOR_TLS_KEY_FILE" in text
+    assert "curl -kfs https://127.0.0.1:$port/healthz" in text
+    assert "runtime/operator-tls" in gitignore_text
+    assert "AATS_OPERATOR_TLS_CERT_FILE" in compose_text
+    assert "AATS_OPERATOR_TLS_KEY_FILE" in compose_text
+    assert "runtime/operator-tls:/app/deploy/wsl2-dev/runtime/operator-tls:ro" in compose_text
+    assert "curl -kfs https://localhost:${AATS_API_PORT:-8000}/healthz" in compose_text

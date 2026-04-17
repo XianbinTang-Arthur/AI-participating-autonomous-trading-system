@@ -259,6 +259,54 @@ export function createRdpActionHandlers({
     }
   }
 
+  async function approveTuningProposal(proposalId) {
+    if (!proposalId) return;
+    if (!windowRef.confirm(`确认批准调优提案 ${truncateForConfirm(proposalId)} 吗？`)) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在批准调优提案…");
+    try {
+      const result = await requestJson(
+        `/rdp/tuning/proposals/${encodeURIComponent(proposalId)}/approve`,
+        { method: "POST", body: { actor: "operator", notes: "UI 批准调优提案" } },
+      );
+      if (result.ok) {
+        setFlash(state, "info", `${truncateForConfirm(proposalId)} 已批准，后续 research 默认值会按新 override 生效。`);
+      } else {
+        setFlash(state, "warning", result.message || "批准调优提案失败。");
+      }
+      await refreshDashboard({ manual: true });
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      finishAction();
+    }
+  }
+
+  async function rejectTuningProposal(proposalId) {
+    if (!proposalId) return;
+    if (!windowRef.confirm(`确认拒绝调优提案 ${truncateForConfirm(proposalId)} 吗？`)) return;
+    if (!ensureNotBusy()) return;
+    const finishAction = beginAction(null, "正在拒绝调优提案…");
+    try {
+      const result = await requestJson(
+        `/rdp/tuning/proposals/${encodeURIComponent(proposalId)}/reject`,
+        { method: "POST", body: { actor: "operator", notes: "UI 拒绝调优提案" } },
+      );
+      if (result.ok) {
+        setFlash(state, "info", `${truncateForConfirm(proposalId)} 已拒绝。`);
+      } else {
+        setFlash(state, "warning", result.message || "拒绝调优提案失败。");
+      }
+      await refreshDashboard({ manual: true });
+    } catch (error) {
+      setFlash(state, "danger", error instanceof Error ? error.message : String(error));
+      renderBanners();
+    } finally {
+      finishAction();
+    }
+  }
+
   async function applyOnly(recommendationId) {
     await createRelease(recommendationId);
   }
@@ -273,5 +321,7 @@ export function createRdpActionHandlers({
     "rdp-run-gate": (recommendationId) => runGate(recommendationId),
     "rdp-create-release": (recommendationId) => createRelease(recommendationId),
     "rdp-run-observation": (value) => runObservation(value),
+    "rdp-approve-tuning-proposal": (proposalId) => approveTuningProposal(proposalId),
+    "rdp-reject-tuning-proposal": (proposalId) => rejectTuningProposal(proposalId),
   };
 }

@@ -1221,6 +1221,45 @@ h3 {
   line-height: 1.7;
 }
 
+/* tone 变体：让审批阻断等 danger-级 callout 在视觉上和普通信息卡 clearly 区分。
+   行 441-451 的 .tone-warning / .tone-danger 全局变量在这里用 border-left
+   高亮 + 柔和背景底色表达紧急程度。对应 M-A2-2 修复。 */
+.callout.tone-danger {
+  border-left: 4px solid var(--danger);
+  background: linear-gradient(
+    180deg,
+    rgba(217, 48, 52, 0.14),
+    rgba(255, 255, 255, 0.03) 72%
+  );
+}
+
+.callout.tone-warning {
+  border-left: 4px solid var(--warning);
+  background: linear-gradient(
+    180deg,
+    rgba(235, 150, 47, 0.12),
+    rgba(255, 255, 255, 0.03) 72%
+  );
+}
+
+.callout.tone-success {
+  border-left: 4px solid var(--positive);
+  background: linear-gradient(
+    180deg,
+    rgba(43, 184, 131, 0.11),
+    rgba(255, 255, 255, 0.03) 72%
+  );
+}
+
+.callout.tone-info {
+  border-left: 4px solid var(--info);
+  background: linear-gradient(
+    180deg,
+    rgba(96, 165, 250, 0.12),
+    rgba(255, 255, 255, 0.03) 72%
+  );
+}
+
 .table-wrap {
   overflow: auto;
   border-radius: var(--radius-md);

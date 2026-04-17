@@ -82,7 +82,23 @@ export async function requestJson(path, options = {}) {
         typeof payload === "object" && payload !== null && "detail" in payload
           ? payload.detail
           : text || response.statusText;
-      throw new Error(localizeError(typeof detail === "string" ? detail : JSON.stringify(detail)));
+      // RDP 阶段 B：approve/reject/supersede 在 409/404 时返回
+      //   HTTPException(detail={"ok": false, "message": "...", "current_status": ...})
+      // 给 operator 看到的应当是中文 `message`，不是裸 JSON。
+      let errorText;
+      if (typeof detail === "string") {
+        errorText = detail;
+      } else if (
+        detail !== null &&
+        typeof detail === "object" &&
+        typeof detail.message === "string" &&
+        detail.message.length > 0
+      ) {
+        errorText = detail.message;
+      } else {
+        errorText = JSON.stringify(detail);
+      }
+      throw new Error(localizeError(errorText));
     }
     return payload;
   } finally {
@@ -115,7 +131,17 @@ export async function fetchDashboardBundle(path, options = {}) {
     typeof payload === "object" && payload !== null && typeof payload.panels === "object" && payload.panels !== null
       ? payload.panels
       : {};
-  return localizePanelResults(panels);
+  return {
+    panels: localizePanelResults(panels),
+    auth:
+      typeof payload === "object" && payload !== null && typeof payload.auth === "object" && payload.auth !== null
+        ? payload.auth
+        : null,
+    timing:
+      typeof payload === "object" && payload !== null && typeof payload.timing === "object" && payload.timing !== null
+        ? payload.timing
+        : null,
+  };
 }
 
 function safeJsonParse(text) {

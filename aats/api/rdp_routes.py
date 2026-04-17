@@ -31,11 +31,47 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from aats.api._governance_db import governance_session as _governance_session
-from aats.api.auth import require_read_access, require_write_access
+from aats.api.auth import OperatorPrincipal, require_read_access, require_write_access
+from aats.data_platform.governance.step2_integrity_guard import (
+    step2_integrity_blocking_reason as _step2_integrity_blocking_reason,
+)
+
+
+def _resolve_actor(principal: OperatorPrincipal | None, body_actor: str | None) -> str:
+    """把审计追踪的 actor 绑到 session principal 而不是 request body。
+
+    L3 修复 + 防御深度加强：原本写入端点直接用 ``body.actor``（默认 "operator"
+    字面量），任何 client 都能伪造 actor 字段，审计链形同虚设。现在优先用
+    session identity（只有持有有效 cookie 的用户才能拿到）。
+
+    M-A1-3 补强：只要 ``principal.auth_enabled`` 为真——哪怕 ``identity`` 为空
+    或空白字符——都禁止回退到 ``body_actor``，避免将来某个 auth 路径（API key
+    / JWT）忘记设置 identity 时，审计 actor 被 request body 静默劫持。这种情况
+    下返回 ``f"unknown-{auth_source}"``，让运维能从 actor 字段看出"auth 开着但
+    identity 没设"的代码路径 bug，并提醒尽快修复。
+
+    只有 ``auth_enabled=False``（比如 local dev 的 operator_unsafe_write_without_auth）
+    这一条路径允许从 body.actor 取值；两者都缺才使用 "operator" 占位。
+    """
+    if principal is not None and principal.auth_enabled:
+        identity = (principal.identity or "").strip()
+        if identity:
+            return identity
+        # auth 启用但 identity 缺失：记录告警并返回 sentinel，严禁泄到 body
+        auth_source = getattr(principal, "auth_source", None) or "unknown"
+        logger.warning(
+            "operator principal auth_enabled=True but identity is empty; "
+            "refusing to fall back to body_actor. auth_source=%s",
+            auth_source,
+        )
+        return f"unknown-{auth_source}"
+    if body_actor:
+        return str(body_actor)
+    return "operator"
 from aats.services.operator.rdp_queries import (
     query_active_parameter_sets,
     query_latest_attribution,
@@ -45,6 +81,15 @@ from aats.services.operator.rdp_queries import (
     query_latest_recommendations,
     query_promotion_readiness,
     query_rdp_health,
+)
+from aats.api.rdp_control_summary import (
+    build_rdp_workbench_item_detail,
+    build_rdp_workbench_item_evidence,
+    build_rdp_tuning_overview,
+    build_rdp_tuning_proposals,
+    build_rdp_workbench_alerts,
+    build_rdp_workbench_items,
+    build_rdp_workbench_overview,
 )
 
 logger = logging.getLogger(__name__)
@@ -71,6 +116,11 @@ def _project_root(request: Request) -> Path:
     # 默认 cwd
     return Path(".").resolve()
 
+
+# Step2 integrity gate 现在由共享模块提供（aats.data_platform.governance
+# .step2_integrity_guard），approve / supersede / tuning review 三条写入路径
+# 全部走同一个函数，避免历史上本地拷贝漂移的风险。错误信息对用户固定、具体
+# 异常只进日志，见该模块注释。
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -263,19 +313,85 @@ class EvaluateRollbackRequest(BaseModel):
     timeframe: str | None = Field(default=None)
 
 
+# ── Recommendation 状态流转 shared helpers ─────────────────────────
+
+
+def _precheck_recommendation_transitionable(
+    root: Path,
+    recommendation_id: str,
+    *,
+    expected_current: tuple[str, ...],
+) -> dict[str, Any]:
+    """approve / reject / supersede 的统一预检。
+
+    - ``load_recommendation_registry`` 已经 DB-first、JSON fallback；
+      对 UI / operator 来说真源是 DB，但 DB 不可达的单机 / 测试场景仍然
+      能从 JSON 副本得到一致的 404/409 语义。
+    - 命中目标 recommendation 且状态合法 → 返回快照 dict。
+    - recommendation 不存在 → ``HTTPException(404)``。
+    - 状态不在 ``expected_current`` 内 → ``HTTPException(409)``；响应体带上
+      ``current_status`` / ``expected_status``，方便 UI / curl 客户端判断。
+
+    注意：这是"快照"预检。真正的 CAS 仍然由底层 helper
+    （``approve_recommendation`` 等）通过 ``expected_current_status`` 的
+    UPDATE WHERE 子句完成；如果在预检和 transition 之间另一个 operator 抢先
+    改写了状态，底层 helper 会返回 ``None``，handler 把那种情况映射成
+    第二道 409（"被并发改写"）。
+    """
+    from aats.data_platform.decision_system.recommendation_registry import (
+        find_recommendation,
+        load_recommendation_registry,
+    )
+
+    reg_path = root / "artifacts/decision_system/recommendation_registry.json"
+    registry = load_recommendation_registry(reg_path)
+    rec = find_recommendation(registry, recommendation_id)
+    if rec is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "ok": False,
+                "message": f"未找到 recommendation: {recommendation_id}",
+                "recommendation_id": recommendation_id,
+            },
+        )
+    current_status = rec.get("status")
+    if current_status not in expected_current:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "message": (
+                    f"recommendation 状态为 {current_status!r}，"
+                    f"期望: {list(expected_current)!r}"
+                ),
+                "recommendation_id": recommendation_id,
+                "current_status": current_status,
+                "expected_status": list(expected_current),
+            },
+        )
+    return rec
+
+
 # ── Recommendation Approve ─────────────────────────────────────────
 
 
 @rdp_router.post(
     "/recommendations/{recommendation_id}/approve",
-    dependencies=[Depends(require_write_access)],
 )
 async def approve_recommendation_api(
     request: Request,
     recommendation_id: str,
     body: ApprovalRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
-    """审批 recommendation（draft → approved）."""
+    """审批 recommendation（draft → approved）.
+
+    HTTP 语义:
+      - 200 ok: 审批成功
+      - 404: recommendation 不存在
+      - 409: 状态不是 draft（已被别人审批 / 拒绝 / supersede），或 CAS 竞态
+    """
     from aats.data_platform.decision_system.recommendation_registry import (
         approve_recommendation,
         load_recommendation_registry,
@@ -283,17 +399,44 @@ async def approve_recommendation_api(
     )
 
     root = _project_root(request)
+
+    # Server-side integrity gate：Step2 快照不完整时拒绝审批，避免 UI-only
+    # 禁用按钮被 curl / 脚本 / 重放请求绕过。reject 不受此门闸影响，运营者
+    # 仍需要能清理掉 draft 里过期/脏的 recommendation。
+    blocking_reason = _step2_integrity_blocking_reason(root)
+    if blocking_reason is not None:
+        return {
+            "ok": False,
+            "message": blocking_reason,
+            "integrity_blocked": True,
+        }
+
+    _precheck_recommendation_transitionable(
+        root, recommendation_id, expected_current=("draft",),
+    )
+
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
     registry = load_recommendation_registry(reg_path)
 
     rec = approve_recommendation(
         registry, recommendation_id,
-        approved_by=body.actor,
+        approved_by=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
     if rec is None:
-        return {"ok": False, "message": f"未找到 recommendation: {recommendation_id}"}
+        # 预检已经过了，这里 None 只可能来自 CAS race：另一个 operator 在
+        # 预检和 transition 之间抢先改写了状态。映射成 409，让客户端刷新 UI
+        # 再决定下一步。
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "message": "recommendation 状态在审批过程中被并发改写，请刷新后重试",
+                "recommendation_id": recommendation_id,
+                "reason": "cas_race",
+            },
+        )
 
     save_recommendation_registry(registry, reg_path)
     return {"ok": True, "recommendation": rec}
@@ -304,14 +447,20 @@ async def approve_recommendation_api(
 
 @rdp_router.post(
     "/recommendations/{recommendation_id}/reject",
-    dependencies=[Depends(require_write_access)],
 )
 async def reject_recommendation_api(
     request: Request,
     recommendation_id: str,
     body: ApprovalRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
-    """拒绝 recommendation（draft → rejected）."""
+    """拒绝 recommendation（draft → rejected）.
+
+    HTTP 语义:
+      - 200 ok: 拒绝成功
+      - 404: recommendation 不存在
+      - 409: 状态不是 draft，或 CAS 竞态
+    """
     from aats.data_platform.decision_system.recommendation_registry import (
         load_recommendation_registry,
         reject_recommendation,
@@ -319,17 +468,30 @@ async def reject_recommendation_api(
     )
 
     root = _project_root(request)
+
+    _precheck_recommendation_transitionable(
+        root, recommendation_id, expected_current=("draft",),
+    )
+
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
     registry = load_recommendation_registry(reg_path)
 
     rec = reject_recommendation(
         registry, recommendation_id,
-        rejected_by=body.actor,
+        rejected_by=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
     if rec is None:
-        return {"ok": False, "message": f"未找到 recommendation: {recommendation_id}"}
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "message": "recommendation 状态在拒绝过程中被并发改写，请刷新后重试",
+                "recommendation_id": recommendation_id,
+                "reason": "cas_race",
+            },
+        )
 
     save_recommendation_registry(registry, reg_path)
     return {"ok": True, "recommendation": rec}
@@ -340,14 +502,21 @@ async def reject_recommendation_api(
 
 @rdp_router.post(
     "/recommendations/{recommendation_id}/supersede",
-    dependencies=[Depends(require_write_access)],
 )
 async def supersede_recommendation_api(
     request: Request,
     recommendation_id: str,
     body: SupersedeRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
-    """替代 recommendation（标记为 superseded）."""
+    """替代 recommendation（标记为 superseded）.
+
+    HTTP 语义:
+      - 200 ok: supersede 成功
+      - 404: recommendation 不存在
+      - 409: 状态不在 (draft, approved) 里（已 superseded / rejected 是终态），
+        或 CAS 竞态
+    """
     from aats.data_platform.decision_system.recommendation_registry import (
         load_recommendation_registry,
         save_recommendation_registry,
@@ -355,18 +524,42 @@ async def supersede_recommendation_api(
     )
 
     root = _project_root(request)
+
+    # supersede 语义是 "用新 rec 替换 active rec"，新 rec 同样会推进执行链路，
+    # 和 approve 的影响面对等，因此必须走同一个 Step2 integrity gate。历史上
+    # 只有 approve 加了 gate，supersede 未加，curl 可绕过；这里补齐。
+    blocking_reason = _step2_integrity_blocking_reason(root)
+    if blocking_reason is not None:
+        return {
+            "ok": False,
+            "message": blocking_reason,
+            "integrity_blocked": True,
+        }
+
+    _precheck_recommendation_transitionable(
+        root, recommendation_id, expected_current=("draft", "approved"),
+    )
+
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
     registry = load_recommendation_registry(reg_path)
 
     rec = supersede_recommendation(
         registry, recommendation_id,
         superseded_by_id=body.superseded_by_id,
-        actor=body.actor,
+        actor=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
     if rec is None:
-        return {"ok": False, "message": f"未找到 recommendation: {recommendation_id}"}
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "message": "recommendation 状态在 supersede 过程中被并发改写，请刷新后重试",
+                "recommendation_id": recommendation_id,
+                "reason": "cas_race",
+            },
+        )
 
     save_recommendation_registry(registry, reg_path)
     return {"ok": True, "recommendation": rec}
@@ -377,11 +570,11 @@ async def supersede_recommendation_api(
 
 @rdp_router.post(
     "/parameters/apply",
-    dependencies=[Depends(require_write_access)],
 )
 async def apply_parameter_api(
     request: Request,
     body: ApplyRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """从已批准 recommendation 应用参数到 active parameter set."""
     from aats.data_platform.decision_system.active_parameter_apply import (
@@ -392,7 +585,7 @@ async def apply_parameter_api(
     return apply_approved_recommendation(
         root,
         recommendation_id=body.recommendation_id,
-        actor=body.actor,
+        actor=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
@@ -402,11 +595,11 @@ async def apply_parameter_api(
 
 @rdp_router.post(
     "/parameters/rollback",
-    dependencies=[Depends(require_write_access)],
 )
 async def rollback_parameter_api(
     request: Request,
     body: RollbackRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """回滚 active parameter set 到上一版本."""
     from aats.data_platform.decision_system.active_parameter_apply import (
@@ -419,7 +612,7 @@ async def rollback_parameter_api(
         family=body.family,
         timeframe=body.timeframe,
         to_parameter_set_id=body.to_parameter_set_id,
-        actor=body.actor,
+        actor=_resolve_actor(principal, body.actor),
         notes=body.notes,
     )
 
@@ -453,11 +646,11 @@ async def run_gate_api(
 
 @rdp_router.post(
     "/releases/create",
-    dependencies=[Depends(require_write_access)],
 )
 async def create_release_api(
     request: Request,
     body: CreateReleaseRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """创建 parameter release（gate + apply 完整流程）."""
     from aats.data_platform.production_workflow.release_registry import (
@@ -467,7 +660,7 @@ async def create_release_api(
     return create_parameter_release(
         root,
         recommendation_id=body.recommendation_id,
-        actor=body.actor,
+        actor=_resolve_actor(principal, body.actor),
         observation_window_hours=body.observation_window_hours,
         notes=body.notes,
         run_gate=not body.skip_gate,
@@ -609,11 +802,11 @@ async def evaluate_rollback_api(
 
 @rdp_router.post(
     "/tasks/trigger",
-    dependencies=[Depends(require_write_access)],
 )
 async def trigger_task_api(
     request: Request,
     body: TriggerTaskRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
     """触发 RDP workflow 任务（写入 pending 到任务队列）."""
     from aats.data_platform.governance.rdp_task_db import (
@@ -642,11 +835,14 @@ async def trigger_task_api(
             task_id = db_create_task(
                 session,
                 workflow=body.workflow,
-                requested_by=body.actor,
+                requested_by=_resolve_actor(principal, body.actor),
             )
     except Exception as exc:
-        logger.exception("Failed to create task: %s", exc)
-        return {"ok": False, "message": f"创建任务失败: {exc}"}
+        # H2 风格修复：task 创建异常属于内部错误（DB 约束冲突 / 连接失败
+        # 等），message 直接回显给 caller 会把 SQL 片段、schema 名泄漏出去。
+        # 固定文案 + logger.exception 把堆栈留日志。
+        logger.exception("Failed to create task for workflow=%s", body.workflow)
+        return {"ok": False, "message": "创建任务失败，请查看服务端日志。"}
 
     return {"ok": True, "task_id": task_id, "workflow": body.workflow}
 
@@ -662,9 +858,14 @@ async def task_status_api(
     try:
         with _governance_session() as session:
             tasks = db_get_recent_tasks(session, limit=limit)
-    except Exception as exc:
-        logger.warning("Failed to query task status: %s", exc)
-        return {"ok": False, "tasks": [], "message": str(exc)}
+    except Exception:
+        # 同 H2：不回显 str(exc)，避免 DSN / 表名 / SQL 碎片泄漏。
+        logger.exception("Failed to query task status")
+        return {
+            "ok": False,
+            "tasks": [],
+            "message": "查询任务状态失败，请查看服务端日志。",
+        }
 
     return {"ok": True, "tasks": tasks}
 
@@ -678,3 +879,104 @@ async def control_summary_api(request: Request) -> dict[str, Any]:
     from aats.api.rdp_control_summary import build_rdp_control_summary
 
     return build_rdp_control_summary(request)
+
+
+@rdp_router.get("/workbench/overview", dependencies=[Depends(require_read_access)])
+async def workbench_overview_api(request: Request) -> dict[str, Any]:
+    """RDP 工作台首页摘要。"""
+    return build_rdp_workbench_overview(request)
+
+
+@rdp_router.get("/workbench/items", dependencies=[Depends(require_read_access)])
+async def workbench_items_api(request: Request) -> dict[str, Any]:
+    """RDP 当前待处理事项。"""
+    return build_rdp_workbench_items(request)
+
+
+@rdp_router.get("/workbench/items/{combo_key}", dependencies=[Depends(require_read_access)])
+async def workbench_item_detail_api(request: Request, combo_key: str) -> dict[str, Any]:
+    """RDP 单个 combo 的当前处理详情。
+
+    状态：a5218fb 预留的 detail drawer 接口，当前前端 store.js 未注册消费者，
+    仅可通过 curl 手动调试。前端接入 drawer 时把 ``/rdp/workbench/items/{combo_key}``
+    加入 viewSpecs 即可复用 payload-building 逻辑。集成测试
+    ``test_workbench_detail_routes_expose_evidence_and_integrity_block`` 仍对
+    integrity gate 做回归保护。
+    """
+    return build_rdp_workbench_item_detail(request, combo_key)
+
+
+@rdp_router.get("/workbench/evidence/{combo_key}", dependencies=[Depends(require_read_access)])
+async def workbench_item_evidence_api(request: Request, combo_key: str) -> dict[str, Any]:
+    """RDP 单个 combo 的证据钻取摘要。
+
+    状态：与 ``/workbench/items/{combo_key}`` 同为 a5218fb 预留接口，前端尚未
+    接入。保留原因是 integrity gate 的回归测试依赖它，且前端接入成本低。
+    """
+    return build_rdp_workbench_item_evidence(request, combo_key)
+
+
+@rdp_router.get("/workbench/alerts", dependencies=[Depends(require_read_access)])
+async def workbench_alerts_api(request: Request) -> dict[str, Any]:
+    """RDP 数据完整性与系统阻断摘要。"""
+    return build_rdp_workbench_alerts(request)
+
+
+@rdp_router.get("/tuning/overview", dependencies=[Depends(require_read_access)])
+async def tuning_overview_api(request: Request) -> dict[str, Any]:
+    """自动调优摘要。"""
+    return build_rdp_tuning_overview(request)
+
+
+@rdp_router.get("/tuning/proposals", dependencies=[Depends(require_read_access)])
+async def tuning_proposals_api(request: Request) -> dict[str, Any]:
+    """待审核自动调优提案。"""
+    return build_rdp_tuning_proposals(request)
+
+
+@rdp_router.post(
+    "/tuning/proposals/{proposal_id}/approve",
+)
+async def approve_tuning_proposal_api(
+    request: Request,
+    proposal_id: str,
+    body: ApprovalRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
+) -> dict[str, Any]:
+    """批准自动调优提案。"""
+    from aats.data_platform.operations.strategy_tuning_registry import (
+        review_strategy_tuning_proposal,
+    )
+
+    root = _project_root(request)
+    return review_strategy_tuning_proposal(
+        root,
+        proposal_id=proposal_id,
+        action="approve",
+        reviewer=_resolve_actor(principal, body.actor),
+        notes=body.notes,
+    )
+
+
+@rdp_router.post(
+    "/tuning/proposals/{proposal_id}/reject",
+)
+async def reject_tuning_proposal_api(
+    request: Request,
+    proposal_id: str,
+    body: ApprovalRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
+) -> dict[str, Any]:
+    """拒绝自动调优提案。"""
+    from aats.data_platform.operations.strategy_tuning_registry import (
+        review_strategy_tuning_proposal,
+    )
+
+    root = _project_root(request)
+    return review_strategy_tuning_proposal(
+        root,
+        proposal_id=proposal_id,
+        action="reject",
+        reviewer=_resolve_actor(principal, body.actor),
+        notes=body.notes,
+    )

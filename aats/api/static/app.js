@@ -43,6 +43,7 @@ import {
   PAGE_LIMIT_AFFECTED_VIEWS,
   PAGE_LOAD_STEP,
   createState,
+  viewSpecs,
   invalidateCachedViews,
 } from "./modules/store.js";
 import {
@@ -59,6 +60,7 @@ import { renderExecutionSections, renderExecutionView } from "./modules/views/ex
 import { renderExitExecutionView } from "./modules/views/exit-execution-view.js";
 import { renderHomeView } from "./modules/views/home-view.js";
 import { renderOverviewView } from "./modules/views/overview-view.js";
+import { renderProtectedAuthBlockedView } from "./modules/views/protected-auth-view.js";
 import { renderReplaySections, renderReplayView } from "./modules/views/replay-view.js";
 import { renderRiskSections, renderRiskView } from "./modules/views/risk-view.js";
 import { renderStrategySections, renderStrategyView } from "./modules/views/strategy-view.js";
@@ -131,6 +133,7 @@ const shellRenderer = createDashboardShellRenderer({
   hasResolvedAuthContext,
   operatorCanWrite,
   controlPermissionMessage,
+  isProtectedViewAuthBlocked,
   resumeActionAvailable,
   resumeActionHintText,
   syncExitExecutionNavigationLinks,
@@ -328,9 +331,16 @@ function bindEvents() {
 }
 
 function applyPanelResults(results) {
-  for (const [key, result] of Object.entries(results || {})) {
+  const normalizedResults =
+    results && typeof results === "object" && typeof results.panels === "object" && results.panels !== null
+      ? results
+      : { panels: results || {}, auth: null };
+  for (const [key, result] of Object.entries(normalizedResults.panels || {})) {
     state.data[key] = result.data;
     state.errors[key] = result.error;
+  }
+  if (Object.prototype.hasOwnProperty.call(normalizedResults, "auth")) {
+    state.bundleAuth = normalizedResults.auth || null;
   }
 }
 
@@ -359,6 +369,11 @@ function resumeActionHintText() {
 function renderActiveView() {
   if (shouldRenderLoadingState(state.activeView)) {
     renderLoadingView();
+    return;
+  }
+
+  if (isProtectedViewAuthBlocked(state.activeView)) {
+    renderProtectedAuthBlockedCurrentView();
     return;
   }
 
@@ -422,15 +437,30 @@ function renderActiveView() {
     return;
   }
   if (state.activeView === "aiConfig" && nodes.aiConfigContent) {
+    // 历史回归修复：a5218fb 在 ai-config-view.js 里新增了 rdp*Workbench* /
+    // rdp*Tuning* / errors / authProviders 依赖（`resolveRdpAuthError` 要
+    // 看 errors + authProviders），并把 uiState 的契约改成 `data.uiState?.aiConfig`；
+    // 但当时忘了同步这里的调用方，所以无论后端返回什么，workbench/tuning
+    // 相关字段一律是 undefined→{}，Object.keys 长度永远 = 0，`renderAIConfigView`
+    // 就恒定走到“RDP 数据暂未就绪”callout。这里把 5 个 workbench/tuning panel、
+    // errors 和 authProviders 都透传过去，并用 state.ui 整体作为 uiState，
+    // 让视图内部的 `data.uiState?.aiConfig` 契约成立。
     patchHtml(
       nodes.aiConfigContent,
       renderAIConfigView({
         session: state.data.session || {},
+        authProviders: state.data.authProviders || {},
         aiRuntime: state.data.aiRuntime || {},
         summary: state.data.aiConfigModel || {},
         rdpControl: state.data.rdpControl || {},
+        rdpWorkbenchOverview: state.data.rdpWorkbenchOverview || {},
+        rdpWorkbenchItems: state.data.rdpWorkbenchItems || {},
+        rdpWorkbenchAlerts: state.data.rdpWorkbenchAlerts || {},
+        rdpTuningOverview: state.data.rdpTuningOverview || {},
+        rdpTuningProposals: state.data.rdpTuningProposals || {},
         error: state.errors.aiConfigModel || null,
-        uiState: state.ui.aiConfig,
+        errors: state.errors,
+        uiState: state.ui,
       }),
     );
     return;
@@ -438,6 +468,91 @@ function renderActiveView() {
   if (state.activeView === "admin" && nodes.adminContent) {
     patchHtml(nodes.adminContent, renderAdminView(viewData));
   }
+}
+
+const PROTECTED_DASHBOARD_VIEWS = new Set([
+  "home",
+  "overview",
+  "strategy",
+  "execution",
+  "risk",
+  "exitExecution",
+  "replay",
+  "aiAnalysis",
+  "aiConfig",
+  "admin",
+]);
+
+const DASHBOARD_AUTH_ERROR_CODES = [
+  "operator_auth_required",
+  "operator_write_auth_required",
+  "operator_write_access_required",
+  "operator_admin_access_required",
+  "operator_https_required_for_secure_session",
+];
+
+function currentBundleAuthSummary() {
+  return state.bundleAuth || null;
+}
+
+function rawAuthErrorCode(value) {
+  const text = typeof value === "string" ? value : "";
+  if (!text) return null;
+  const match = DASHBOARD_AUTH_ERROR_CODES.find((code) => text === code || text === localizeError(code));
+  return match || null;
+}
+
+function viewOwnedPanelKeys(view = state.activeView) {
+  return viewSpecs(view, state).map(([key]) => key);
+}
+
+function currentViewAuthErrorCode(view = state.activeView) {
+  const auth = currentBundleAuthSummary();
+  if (PROTECTED_DASHBOARD_VIEWS.has(view)) {
+    const summaryError = rawAuthErrorCode(auth?.auth_blocked_reason) || rawAuthErrorCode(auth?.primary_error);
+    if (summaryError && (auth?.access_state === "transport_blocked" || auth?.access_state === "auth_required")) {
+      return summaryError;
+    }
+  }
+  const panelKey = viewOwnedPanelKeys(view).find((key) => rawAuthErrorCode(state.errors[key]));
+  return panelKey ? rawAuthErrorCode(state.errors[panelKey]) : null;
+}
+
+function isProtectedViewAuthBlocked(view = state.activeView) {
+  if (!PROTECTED_DASHBOARD_VIEWS.has(view)) return false;
+  const auth = currentBundleAuthSummary();
+  if (auth?.access_state === "transport_blocked" || auth?.access_state === "auth_required") {
+    return true;
+  }
+  return Boolean(currentViewAuthErrorCode(view));
+}
+
+function activeViewContainerNode(view = state.activeView) {
+  if (view === "home") return nodes.homeContent;
+  if (view === "overview") return nodes.overviewContent;
+  if (view === "strategy") return nodes.strategyContent;
+  if (view === "execution") return nodes.executionContent;
+  if (view === "risk") return nodes.riskContent;
+  if (view === "exitExecution") return nodes.exitExecutionContent;
+  if (view === "replay") return nodes.replayContent;
+  if (view === "aiAnalysis") return nodes.aiAnalysisContent;
+  if (view === "aiConfig") return nodes.aiConfigContent;
+  if (view === "admin") return nodes.adminContent;
+  return null;
+}
+
+function renderProtectedAuthBlockedCurrentView() {
+  const container = activeViewContainerNode();
+  if (!container) return;
+  patchHtml(
+    container,
+    renderProtectedAuthBlockedView({
+      viewLabel: VIEW_LABELS[state.activeView] || "当前页面",
+      authSummary: currentBundleAuthSummary() || {},
+      session: state.data.session || {},
+      authProviders: state.data.authProviders || {},
+    }),
+  );
 }
 
 
@@ -940,6 +1055,7 @@ function setStrategyProfileControlMode(value, target = null) {
 }
 
 function operatorCanWrite() {
+  if (currentViewAuthErrorCode()) return false;
   const session = state.data.session || {};
   const runtimeAuth = state.data.runtime?.operator_auth || {};
   const authProviders = state.data.authProviders || {};
@@ -975,12 +1091,14 @@ function hasResolvedPanel(key) {
 }
 
 function shouldRedirectToLogin() {
-  const authProviders = state.data.authProviders || {};
-  const session = state.data.session || {};
-  return Boolean(authProviders.auth_enabled) && !session.authenticated;
+  return false;
 }
 
 function controlPermissionMessage() {
+  const authBlockedCode = currentViewAuthErrorCode();
+  if (authBlockedCode) {
+    return localizeError(authBlockedCode);
+  }
   if (!hasResolvedAuthContext()) {
     return "";
   }

@@ -14,6 +14,7 @@ __pycache__/
 
 # WSL2 dev infra runtime data
 deploy/wsl2-dev/jaeger/badger/
+deploy/wsl2-dev/runtime/operator-tls/
 
 .idea/
 .vscode/

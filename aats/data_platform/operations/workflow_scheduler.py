@@ -10,9 +10,14 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from aats.data_platform.db import get_session
 from aats.data_platform.governance._atomic_io import atomic_json_write
 from aats.data_platform.governance._db_util import try_governance_db
-from aats.data_platform.governance.rdp_task_db import db_create_task, db_has_active_task
+from aats.data_platform.governance.rdp_task_db import (
+    db_create_task,
+    db_get_latest_task_for_workflow,
+    db_has_active_task,
+)
 from aats.data_platform.operations.environment_guard import guard_workflow_execution
 from aats.data_platform.operations.workflow_dispatcher import (
     list_available_workflows,
@@ -31,6 +36,7 @@ _WEEKDAY_MAP = {
     "SAT": 5,
     "SUN": 6,
 }
+_BOOTSTRAP_SEQUENCE = ("data_maintenance", "research_cycle")
 
 
 def _utcnow() -> datetime:
@@ -63,16 +69,32 @@ def load_scheduler_state(project_root: Path) -> dict[str, Any]:
                 engine.dispose()
 
     path = _state_path(project_root)
+    empty_state = {
+        "generated_at": None,
+        "initialized_at": None,
+        "bootstrap_stage": None,
+        "bootstrap_completed_at": None,
+        "workflows": {},
+    }
     if not path.exists():
-        return {"generated_at": None, "initialized_at": None, "workflows": {}}
+        return dict(empty_state)
     try:
         with path.open(encoding="utf-8") as handle:
             payload = json.load(handle)
     except (json.JSONDecodeError, OSError):
-        return {"generated_at": None, "initialized_at": None, "workflows": {}}
+        return dict(empty_state)
     if not isinstance(payload, dict):
-        return {"generated_at": None, "initialized_at": None, "workflows": {}}
+        return dict(empty_state)
     payload.setdefault("workflows", {})
+    payload.setdefault("bootstrap_stage", None)
+    payload.setdefault("bootstrap_completed_at", None)
+    # 注：H3 审查提出"DB 不可达时文件里 stale bootstrap_stage 会误导调度器"
+    # 的担忧。实际场景需要 DB 不可达 + 文件被人工篡改（或来自旧代码版本）双重
+    # 巧合才会触发；而 save_scheduler_state 写入路径在 DB 可用时一定先写 DB 再
+    # 写文件，所以文件里 bootstrap_stage 等同于最近一次 DB 同步后的快照。
+    # 强制 reset 会破坏 graceful degrade 语义（7 个 scheduler 测试失败为证）。
+    # 保留 setdefault 即可，对应的 regression 通过 DB 端 meta-row sentinel 测试
+    # (test_operational_state_db.py) 保护。
     return payload
 
 
@@ -177,6 +199,329 @@ def _load_scheduled_workflows(project_root: Path) -> list[tuple[str, dict[str, A
     return scheduled
 
 
+def _parse_iso_dt(value: Any) -> datetime | None:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def _canonical_slot_key(value: datetime | str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+    else:
+        parsed = _parse_iso_dt(value)
+    if parsed is None:
+        return None
+    return parsed.astimezone(UTC).isoformat()
+
+
+def _initialize_bootstrap_state(
+    state: dict[str, Any],
+    *,
+    now: datetime,
+    scheduled_workflows: list[tuple[str, dict[str, Any], dict[str, Any]]],
+) -> None:
+    workflows_state = state.setdefault("workflows", {})
+    for workflow_name, _, schedule in scheduled_workflows:
+        workflow_state = workflows_state.setdefault(workflow_name, {})
+        workflow_state["last_checked_at"] = now.isoformat()
+        workflow_state["schedule"] = format_schedule(schedule)
+        if workflow_name in _BOOTSTRAP_SEQUENCE:
+            workflow_state.setdefault("last_action", "bootstrap_pending")
+            continue
+        slot = _latest_slot_for_schedule(schedule, now=now)
+        workflow_state["last_processed_slot"] = _canonical_slot_key(slot)
+        workflow_state["last_action"] = "initialized"
+    state["initialized_at"] = now.isoformat()
+    state["bootstrap_stage"] = _BOOTSTRAP_SEQUENCE[0]
+
+
+def _current_bootstrap_stage(
+    state: dict[str, Any],
+    *,
+    now: datetime,
+) -> str | None:
+    initialized_at = _parse_iso_dt(state.get("initialized_at"))
+    if initialized_at is None:
+        return None
+
+    # M-A3-1 修复：``bootstrap_completed_at`` 和 ``bootstrap_stage`` 是互斥的两个
+    # 状态——要么 bootstrap 已完成（completed_at 有值，stage 为 None），要么正
+    # 在某一阶段（stage 有值，completed_at 为 None）。但如果因为旧代码 bug /
+    # 人工编辑 / 文件被 race 改过，两个字段同时有值，应该以 completed_at 为
+    # 权威信号：bootstrap 既然已经完成，绝不能再触发一次（否则 data_maintenance
+    # 会被重复入队）。这里强制清理 stage 并短路返回 None。
+    if state.get("bootstrap_completed_at"):
+        if state.get("bootstrap_stage"):
+            log.warning(
+                "scheduler state inconsistent: bootstrap_completed_at=%s 与 bootstrap_stage=%s "
+                "同时存在，以 completed_at 为权威，清空 stage",
+                state.get("bootstrap_completed_at"),
+                state.get("bootstrap_stage"),
+            )
+            state["bootstrap_stage"] = None
+        return None
+
+    workflows_state = state.setdefault("workflows", {})
+    stage = state.get("bootstrap_stage")
+    if stage in _BOOTSTRAP_SEQUENCE:
+        return str(stage)
+
+    with get_session() as session:
+        data_done = db_get_latest_task_for_workflow(
+            session,
+            "data_maintenance",
+            statuses=("done",),
+            requested_after=initialized_at,
+        )
+        if not data_done:
+            state["bootstrap_stage"] = "data_maintenance"
+            workflows_state.setdefault("data_maintenance", {})["last_action"] = "bootstrap_pending"
+            return "data_maintenance"
+
+        research_done = db_get_latest_task_for_workflow(
+            session,
+            "research_cycle",
+            statuses=("done",),
+            requested_after=initialized_at,
+        )
+        if not research_done:
+            state["bootstrap_stage"] = "research_cycle"
+            workflows_state.setdefault("research_cycle", {})["last_action"] = "bootstrap_pending"
+            return "research_cycle"
+
+    state["bootstrap_stage"] = None
+    state["bootstrap_completed_at"] = now.isoformat()
+    return None
+
+
+def _enqueue_single_workflow(
+    *,
+    workflow_name: str,
+    schedule: dict[str, Any],
+    workflow_state: dict[str, Any],
+    slot_key: str,
+    actor: str,
+    dry_run: bool,
+    report: dict[str, Any],
+    action_label: str = "enqueued",
+    reason_label: str = "scheduled",
+) -> None:
+    guard = guard_workflow_execution(workflow_name)
+    if not guard.allowed:
+        if not dry_run:
+            workflow_state["last_processed_slot"] = slot_key
+            workflow_state["last_action"] = "blocked_by_environment"
+            workflow_state["last_reason"] = guard.reason
+        report["skipped"].append(
+            {
+                "workflow": workflow_name,
+                "reason": guard.reason,
+                "slot": slot_key,
+            },
+        )
+        return
+
+    try:
+        with get_session() as session:
+            active_task = db_has_active_task(session, workflow_name)
+            if active_task:
+                if not dry_run:
+                    workflow_state["last_processed_slot"] = slot_key
+                    workflow_state["last_action"] = "active_task_present"
+                    workflow_state["last_reason"] = active_task["task_id"]
+                report["skipped"].append(
+                    {
+                        "workflow": workflow_name,
+                        "reason": "已有 active task",
+                        "slot": slot_key,
+                        "task_id": active_task["task_id"],
+                    },
+                )
+                return
+            task_id = None
+            if not dry_run:
+                task_id = db_create_task(
+                    session,
+                    workflow=workflow_name,
+                    requested_by=actor,
+                )
+    except Exception as exc:  # pragma: no cover - defensive
+        log.exception("scheduler failed to enqueue workflow %s", workflow_name)
+        report["ok"] = False
+        report["errors"].append(
+            {
+                "workflow": workflow_name,
+                "slot": slot_key,
+                "error": str(exc),
+            },
+        )
+        return
+
+    if not dry_run:
+        workflow_state["last_processed_slot"] = slot_key
+        workflow_state["last_action"] = action_label
+        workflow_state["last_task_id"] = task_id
+        workflow_state["last_reason"] = reason_label
+    report["enqueued"].append(
+        {
+            "workflow": workflow_name,
+            "slot": slot_key,
+            "task_id": task_id,
+        },
+    )
+
+
+def _run_bootstrap_sequence(
+    *,
+    state: dict[str, Any],
+    scheduled_workflows: list[tuple[str, dict[str, Any], dict[str, Any]]],
+    now: datetime,
+    actor: str,
+    dry_run: bool,
+    report: dict[str, Any],
+) -> bool:
+    stage = _current_bootstrap_stage(state, now=now)
+    if not stage:
+        return False
+
+    workflows_by_name = {name: schedule for name, _, schedule in scheduled_workflows}
+    schedule = workflows_by_name.get(stage)
+    if schedule is None:
+        report["skipped"].append(
+            {
+                "workflow": stage,
+                "reason": "bootstrap workflow 缺少 schedule 配置",
+            },
+        )
+        return True
+
+    workflow_state = state.setdefault("workflows", {}).setdefault(stage, {})
+    workflow_state["last_checked_at"] = now.isoformat()
+    workflow_state["schedule"] = format_schedule(schedule)
+    slot_key = _canonical_slot_key(_latest_slot_for_schedule(schedule, now=now)) or ""
+
+    initialized_at = _parse_iso_dt(state.get("initialized_at"))
+    # 一次 session 内同时查"最近 done"和"最近任意状态"，前者驱动门控推进，
+    # 后者用于 bootstrap 卡 failed 时的告警——failed 任务不会满足 done 过滤器，
+    # 导致 bootstrap 永远停在该阶段（除非人工干预），必须让运营者能看到。
+    with get_session() as session:
+        latest_success = db_get_latest_task_for_workflow(
+            session,
+            stage,
+            statuses=("done",),
+            requested_after=initialized_at,
+        )
+        latest_any = db_get_latest_task_for_workflow(
+            session,
+            stage,
+            requested_after=initialized_at,
+        )
+
+    if latest_success:
+        if stage == _BOOTSTRAP_SEQUENCE[0]:
+            next_stage = _BOOTSTRAP_SEQUENCE[1]
+            log.info(
+                "scheduler bootstrap: %s 完成，推进到下一阶段 %s (latest_done_task=%s)",
+                stage, next_stage, latest_success.get("task_id"),
+            )
+            state["bootstrap_stage"] = next_stage
+            workflow_state["last_action"] = "bootstrap_completed"
+            report["skipped"].append(
+                {
+                    "workflow": stage,
+                    "reason": "bootstrap 已完成，切换到 research_cycle",
+                    "slot": slot_key,
+                },
+            )
+            return _run_bootstrap_sequence(
+                state=state,
+                scheduled_workflows=scheduled_workflows,
+                now=now,
+                actor=actor,
+                dry_run=dry_run,
+                report=report,
+            )
+
+        log.info(
+            "scheduler bootstrap: %s 完成，bootstrap 阶段全部结束 (latest_done_task=%s)",
+            stage, latest_success.get("task_id"),
+        )
+        state["bootstrap_stage"] = None
+        state["bootstrap_completed_at"] = now.isoformat()
+        workflow_state["last_action"] = "bootstrap_completed"
+        report["skipped"].append(
+            {
+                "workflow": stage,
+                "reason": "bootstrap 全部完成，等待下一个调度周期",
+                "slot": slot_key,
+            },
+        )
+        return True
+
+    # 每次 tick 都会走到这里，INFO 会淹没日志 → 降级为 DEBUG。
+    # 阶段推进和 bootstrap 收尾的两条 INFO 保留，确保状态变化可观测。
+    log.debug(
+        "scheduler bootstrap: 当前阶段 %s 等待完成，其它 workflow 全部被门控 (dry_run=%s)",
+        stage, dry_run,
+    )
+
+    # bootstrap 只认 status=done。若最近一条任务是 failed，阶段会被无限卡住，
+    # 必须让运营者通过 API report.warnings 看到并手工介入。
+    #
+    # M2 设计：这里只写 report.warnings（操作人面向的真源信号），不写
+    # workflow_state["last_reason"] —— _enqueue_single_workflow 会用
+    # reason_label="bootstrap" 覆盖 last_reason，在那里设 warning 语义留不住。
+    # 本 tick 仍需继续 _enqueue_single_workflow 让 data_maintenance 自动重试
+    # （fail-closed 会把 research_cycle 等其它 workflow 仍然挡在门外，由
+    # bootstrap 阶段机制本身保证）。
+    if latest_any is not None and str(latest_any.get("status")) == "failed":
+        warnings = report.setdefault("warnings", [])
+        warning_entry = {
+            "workflow": stage,
+            "reason": "bootstrap 阶段最近一次任务失败，需人工介入",
+            "task_id": latest_any.get("task_id"),
+            "error_message": latest_any.get("error_message"),
+            "finished_at": latest_any.get("finished_at"),
+        }
+        warnings.append(warning_entry)
+        log.warning(
+            "scheduler bootstrap: 阶段 %s 最近一次任务失败 task_id=%s error=%s",
+            stage,
+            latest_any.get("task_id"),
+            latest_any.get("error_message"),
+        )
+    _enqueue_single_workflow(
+        workflow_name=stage,
+        schedule=schedule,
+        workflow_state=workflow_state,
+        slot_key=slot_key,
+        actor=actor,
+        dry_run=dry_run,
+        report=report,
+        action_label="bootstrap_enqueued",
+        reason_label="bootstrap",
+    )
+    report["skipped"].extend(
+        {
+            "workflow": workflow_name,
+            "reason": f"cold-start bootstrap 等待 {stage} 完成",
+            "slot": _canonical_slot_key(_latest_slot_for_schedule(schedule_cfg, now=now)) or "",
+        }
+        for workflow_name, _, schedule_cfg in scheduled_workflows
+        if workflow_name != stage
+    )
+    return True
+
+
 def enqueue_due_workflows(
     project_root: Path,
     *,
@@ -263,39 +608,46 @@ def _enqueue_due_workflows_locked(
     initialize_if_missing: bool,
     report: dict[str, Any],
 ) -> dict[str, Any]:
-    from aats.data_platform.db import get_session
-
     state = load_scheduler_state(project_root)
 
     scheduled_workflows = _load_scheduled_workflows(project_root)
     if initialize_if_missing and not state.get("initialized_at"):
-        for workflow_name, _, schedule in scheduled_workflows:
-            slot = _latest_slot_for_schedule(schedule, now=now)
-            state.setdefault("workflows", {})[workflow_name] = {
-                "last_processed_slot": slot.isoformat(),
-                "last_action": "initialized",
-                "last_checked_at": now.isoformat(),
-            }
-        state["initialized_at"] = now.isoformat()
+        _initialize_bootstrap_state(
+            state,
+            now=now,
+            scheduled_workflows=scheduled_workflows,
+        )
         report["initialized"] = True
         report["skipped"].append(
             {
                 "workflow": "*",
-                "reason": "首次启动，仅建立调度基线，不补跑历史窗口。",
+                "reason": "首次启动仅建立调度基线，并进入 cold-start bootstrap：先数据刷新，再研究流程。",
             },
         )
         if save_state and not dry_run:
             save_scheduler_state(project_root, state)
         return report
 
+    if _run_bootstrap_sequence(
+        state=state,
+        scheduled_workflows=scheduled_workflows,
+        now=now,
+        actor=actor,
+        dry_run=dry_run,
+        report=report,
+    ):
+        if save_state and not dry_run:
+            save_scheduler_state(project_root, state)
+        return report
+
     for workflow_name, _, schedule in scheduled_workflows:
         slot = _latest_slot_for_schedule(schedule, now=now)
-        slot_key = slot.isoformat()
+        slot_key = _canonical_slot_key(slot) or ""
         workflow_state = state.setdefault("workflows", {}).setdefault(workflow_name, {})
         workflow_state["last_checked_at"] = now.isoformat()
         workflow_state["schedule"] = format_schedule(schedule)
 
-        if workflow_state.get("last_processed_slot") == slot_key:
+        if _canonical_slot_key(workflow_state.get("last_processed_slot")) == slot_key:
             report["skipped"].append(
                 {
                     "workflow": workflow_name,
@@ -305,68 +657,14 @@ def _enqueue_due_workflows_locked(
             )
             continue
 
-        guard = guard_workflow_execution(workflow_name)
-        if not guard.allowed:
-            if not dry_run:
-                workflow_state["last_processed_slot"] = slot_key
-                workflow_state["last_action"] = "blocked_by_environment"
-                workflow_state["last_reason"] = guard.reason
-            report["skipped"].append(
-                {
-                    "workflow": workflow_name,
-                    "reason": guard.reason,
-                    "slot": slot_key,
-                },
-            )
-            continue
-
-        try:
-            with get_session() as session:
-                active_task = db_has_active_task(session, workflow_name)
-                if active_task:
-                    if not dry_run:
-                        workflow_state["last_processed_slot"] = slot_key
-                        workflow_state["last_action"] = "active_task_present"
-                        workflow_state["last_reason"] = active_task["task_id"]
-                    report["skipped"].append(
-                        {
-                            "workflow": workflow_name,
-                            "reason": "已有 active task",
-                            "slot": slot_key,
-                            "task_id": active_task["task_id"],
-                        },
-                    )
-                    continue
-                task_id = None
-                if not dry_run:
-                    task_id = db_create_task(
-                        session,
-                        workflow=workflow_name,
-                        requested_by=actor,
-                    )
-        except Exception as exc:  # pragma: no cover - defensive
-            log.exception("scheduler failed to enqueue workflow %s", workflow_name)
-            report["ok"] = False
-            report["errors"].append(
-                {
-                    "workflow": workflow_name,
-                    "slot": slot_key,
-                    "error": str(exc),
-                },
-            )
-            continue
-
-        if not dry_run:
-            workflow_state["last_processed_slot"] = slot_key
-            workflow_state["last_action"] = "enqueued"
-            workflow_state["last_task_id"] = task_id
-            workflow_state["last_reason"] = "scheduled"
-        report["enqueued"].append(
-            {
-                "workflow": workflow_name,
-                "slot": slot_key,
-                "task_id": task_id,
-            },
+        _enqueue_single_workflow(
+            workflow_name=workflow_name,
+            schedule=schedule,
+            workflow_state=workflow_state,
+            slot_key=slot_key,
+            actor=actor,
+            dry_run=dry_run,
+            report=report,
         )
 
     if save_state and not dry_run:

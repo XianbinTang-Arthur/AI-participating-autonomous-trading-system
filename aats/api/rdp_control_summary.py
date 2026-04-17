@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import json
+import copy
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote as _url_quote
 
 from fastapi import Request
 from sqlalchemy.orm import Session
@@ -20,8 +21,10 @@ from aats.data_platform.operations.environment_guard import (
 from aats.services.operator.rdp_queries import query_rdp_health
 from aats.services.operator.rdp_queries import (
     query_active_parameter_sets,
+    query_latest_attribution,
     query_latest_decision_round,
     query_latest_decisions,
+    query_latest_execution_realism,
     query_latest_recommendations,
     query_parameter_registry,
 )
@@ -79,48 +82,29 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 
 def _load_recent_gate_results(project_root: Path, *, limit: int = 8) -> list[dict[str, Any]]:
+    """P0-2 阶段 D：只从 governance DB 读 pre-apply gate 历史.
+
+    DB 不可达或查询异常会抛出 ``RuntimeError`` / 原异常，调用方需要决定如何
+    向用户呈现（500、503 或显式 "gate 模块暂不可用" 状态码），不再伪造成
+    "没有 gate 历史" 这种误导性状态。``project_root`` 仅作签名保持，用于
+    将来扩展，不再用于扫描 ``artifacts/`` 目录。
+    """
+    del project_root  # artifacts/gates JSON 副本已退出读路径
     engine, ok = try_governance_db()
-    if ok:
-        try:
-            from aats.data_platform.governance.operational_state_db import (
-                db_list_pre_apply_gate_results,
-            )
+    if not ok:
+        raise RuntimeError("governance DB 不可达，无法加载 pre-apply gate 历史")
+    try:
+        from aats.data_platform.governance.operational_state_db import (
+            db_list_pre_apply_gate_results,
+        )
 
-            with Session(engine) as session:
-                results = db_list_pre_apply_gate_results(session, limit=limit)
-            if results:
-                return [
-                    {
-                        "gate_run_id": payload.get("gate_run_id"),
-                        "recommendation_id": payload.get("recommendation_id"),
-                        "created_at": payload.get("created_at"),
-                        "gate_status": payload.get("gate_status"),
-                        "allow_apply": bool(payload.get("allow_apply")),
-                        "blocking_reasons": payload.get("blocking_reasons") or [],
-                        "warnings": payload.get("warnings") or [],
-                        "checks": payload.get("checks") or [],
-                    }
-                    for payload in results
-                    if isinstance(payload, dict)
-                ]
-        except Exception as exc:
-            logger.warning("control-summary: failed to load gate results from DB: %s", exc)
-        finally:
-            if engine is not None:
-                engine.dispose()
+        with Session(engine) as session:
+            results = db_list_pre_apply_gate_results(session, limit=limit)
+    finally:
+        engine.dispose()
 
-    gates_root = project_root / "artifacts" / "production_workflow" / "gates"
-    if not gates_root.exists():
-        return []
-    results: list[dict[str, Any]] = []
-    for path in gates_root.glob("*/pre_apply_gate_result.json"):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        results.append({
+    return [
+        {
             "gate_run_id": payload.get("gate_run_id"),
             "recommendation_id": payload.get("recommendation_id"),
             "created_at": payload.get("created_at"),
@@ -129,9 +113,10 @@ def _load_recent_gate_results(project_root: Path, *, limit: int = 8) -> list[dic
             "blocking_reasons": payload.get("blocking_reasons") or [],
             "warnings": payload.get("warnings") or [],
             "checks": payload.get("checks") or [],
-        })
-    results.sort(key=lambda item: _iso_sort_key(item.get("created_at")), reverse=True)
-    return results[:limit]
+        }
+        for payload in results
+        if isinstance(payload, dict)
+    ]
 
 
 def _load_recent_releases(
@@ -180,7 +165,18 @@ def _build_observation_queue(
         if not release_id:
             continue
         observation_status = str(release.get("observation_status") or "unknown")
-        if observation_status not in {"observing", "rollback_recommended", "completed", "not_started"}:
+        # M-A2-4 修复：白名单要覆盖前端 OBSERVATION_STATUS_LABELS 里的全部有效
+        # 状态，否则像 "rolled_back"（前端已经有展示标签"已回滚"）会被这里静
+        # 默丢弃，dashboard 的观察队列看不到已回滚发布，运营者就失去了"刚发
+        # 生了一次回滚"的可见信号。保留 "unknown" 跳过，避免脏数据污染 UI。
+        if observation_status not in {
+            "pending",
+            "observing",
+            "rollback_recommended",
+            "completed",
+            "not_started",
+            "rolled_back",
+        }:
             continue
 
         from aats.data_platform.production_workflow.observation_window import (
@@ -222,19 +218,28 @@ def _build_observation_queue(
             "is_current_active_release": is_current_active_release,
         })
 
-    queue.sort(
-        key=lambda item: (
-            {"rollback_recommended": 0, "observing": 1, "completed": 2, "not_started": 3}.get(
-                str(item.get("observation_status") or ""), 9,
-            ),
-            -(
-                _parse_iso_datetime(item.get("created_at")).timestamp()
-                if _parse_iso_datetime(item.get("created_at")) is not None
-                else 0
-            ),
-        ),
-        reverse=False,
-    )
+    def _observation_sort_key(item: dict[str, Any]) -> tuple[int, float]:
+        status = str(item.get("observation_status") or "")
+        status_priority = {
+            "rollback_recommended": 0,
+            "observing": 1,
+            "pending": 2,
+            "not_started": 3,
+            "completed": 4,
+            "rolled_back": 5,
+        }.get(status, 9)
+        parsed = _parse_iso_datetime(item.get("created_at"))
+        if parsed is None:
+            return (status_priority, 0.0)
+        # Windows 上 datetime.timestamp() 对 1970-01-01 之前的时间会抛 OSError。
+        # 实际业务数据里 created_at 都是发布当下的时间戳（近期），理论上不会撞
+        # 这条边界；但以防 mock / 回填数据越过阈值破坏排序，加一层 guard。
+        try:
+            return (status_priority, -parsed.timestamp())
+        except (OSError, ValueError, OverflowError):
+            return (status_priority, 0.0)
+
+    queue.sort(key=_observation_sort_key, reverse=False)
     return queue
 
 
@@ -482,6 +487,26 @@ def _build_governance_state(
 
 
 def build_rdp_control_summary(request: Request) -> dict[str, Any]:
+    # M6 修复：/auth/dashboard/bundle 一次请求会依次渲染
+    # rdpWorkbenchOverview / rdpWorkbenchItems / rdpWorkbenchAlerts /
+    # rdpTuningOverview / rdpTuningProposals，每个 build_rdp_workbench_*
+    # 内部都会调一次 build_rdp_control_summary —— 同一 request 里最多 5 次
+    # 重复 DB/文件 IO，数据还完全一样。在 request.state 上做 per-request
+    # memoize：key 用固定常量即可，因为 request 本身就是天然隔离边界。
+    #
+    # M-A2-3 加强：返回的是深拷贝而不是引用。否则如果某个下游 builder（或
+    # 未来的维护者）不小心对返回的 dict 做 setitem / update，后续 builder
+    # 会读到被污染的 cache 值。deepcopy 一次 summary 约 1–10ms，远低于我们
+    # 省掉的多次 DB/文件 IO（50–500ms），划算。
+    #
+    # 注意：单元测试常用 SimpleNamespace mock request，没有 ``state`` 属性。
+    # getattr(request, "state", None) 先拿，再从里面取 cache，测试场景下拿不到
+    # 就当 cache miss，继续走正常路径。
+    request_state = getattr(request, "state", None)
+    cached = getattr(request_state, "_rdp_control_summary_cache", None) if request_state is not None else None
+    if cached is not None:
+        return copy.deepcopy(cached)
+
     root = _project_root(request)
     environment = _environment_summary()
 
@@ -490,11 +515,40 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         from aats.data_platform.governance.rdp_task_db import db_get_recent_tasks
 
         with _governance_session() as session:
-            recent = db_get_recent_tasks(session, limit=20)
+            recent = db_get_recent_tasks(session, limit=50)
         for task in recent:
-            workflow = task["workflow"]
-            if workflow not in tasks_by_workflow:
-                tasks_by_workflow[workflow] = task
+            workflow = str(task.get("workflow") or "").strip()
+            if not workflow:
+                continue
+            summary = tasks_by_workflow.setdefault(
+                workflow,
+                {
+                    "latest_task": None,
+                    "running_task": None,
+                    "pending_task": None,
+                },
+            )
+            if summary["latest_task"] is None:
+                summary["latest_task"] = task
+            if task.get("status") == "running" and summary["running_task"] is None:
+                summary["running_task"] = task
+            if task.get("status") == "pending" and summary["pending_task"] is None:
+                summary["pending_task"] = task
+
+        for workflow, summary in tasks_by_workflow.items():
+            display_task = (
+                summary.get("running_task")
+                or summary.get("pending_task")
+                or summary.get("latest_task")
+            )
+            summary["display_task"] = display_task
+            # M1 修复：不再 `summary.update(display_task)`。这行把 task 的
+            # status/started_at/finished_at/error_message 拍到 summary 顶层，
+            # 让外层消费者误以为 summary.status 代表整个 lane 状态，但实际
+            # display_task 可能只是 latest_task（已 done），而 running 或
+            # pending lane 仍有任务。前端全部从子字段（running_task /
+            # pending_task / latest_task / display_task）读，不需要这层平铺。
+            summary["workflow"] = workflow
     except Exception as exc:
         logger.warning("control-summary: task query failed: %s", exc)
 
@@ -539,12 +593,27 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     active_parameters = active_params_data.get("active_sets", {}) or {}
     applied_recommendation_ids = _build_applied_recommendation_ids(active_parameters)
     released_success_recommendation_ids: set[str] = set()
+    # release_history_status 默认未知；若下面 load_release_history 成功，这里会被覆盖
+    # 成 {"source": "db"|"json"|"empty", "stale": bool, ...}。UI 需要把 stale=True
+    # 的状态向运营者显式透出（比如在"最近 release"模块旁挂个 stale 标签），否则
+    # DB 抖动时运营者会误把 JSON 副本当成真源。
+    release_history_status: dict[str, Any] = {
+        "source": "unknown",
+        "stale": False,
+    }
     try:
         from aats.data_platform.production_workflow.release_registry import (
             load_release_history,
         )
 
         release_history = load_release_history(root)
+        release_history_status = {
+            "source": str(release_history.get("source") or "unknown"),
+            "stale": bool(release_history.get("stale")),
+        }
+        stale_reason = release_history.get("stale_reason")
+        if stale_reason:
+            release_history_status["stale_reason"] = str(stale_reason)
         released_success_recommendation_ids = {
             str(item.get("recommendation_id") or "").strip()
             for item in (release_history.get("releases") or [])
@@ -573,6 +642,11 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     try:
         decision_round = query_latest_decision_round(root)
         if decision_round.get("available"):
+            # decision_round 的 round_id 是"本 round 的所有 phase2 结论"的共同
+            # 追溯锚。evidence_bundle / phase2 卡片需要显示这个 round_id 才能形
+            # 成完整的证据链；如果每条结论本身也带了 source_round_id（例如从
+            # 跨 round 汇总合成的视图），优先用条目级的细粒度值。
+            decision_round_id = decision_round.get("round_id")
             conclusions = [
                 item
                 for item in (decision_round.get("family_timeframe_decisions") or [])
@@ -587,6 +661,10 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
                     "confidence": item.get("confidence"),
                     "reasons": item.get("reasons", []),
                     "signal_summary": item.get("signal_summary", {}),
+                    # 把 round_id 随每条结论下发，下游 evidence digest 读到的
+                    # phase2 就能直接拿到 round 追溯锚，不用再回头 join。
+                    "source_round_id": item.get("source_round_id") or decision_round_id,
+                    "round_id": item.get("round_id") or decision_round_id,
                 }
                 for item in conclusions
             ]
@@ -699,7 +777,7 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "health_blocked": health.get("overall_health") == "blocked",
     }
 
-    return {
+    result = {
         "environment": environment,
         "health": health,
         "operations_summary": operations_summary,
@@ -707,6 +785,842 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "pending_recommendations": pending_recommendations,
         "active_parameters": active_parameters,
         "governance_state": governance_state,
+        "latest_research_conclusions": latest_research_conclusions,
+        "round_upgrade_candidates": round_upgrade_candidates,
+        "latest_decision_state": latest_decision_state,
         "recent_gate_results": recent_gate_results,
         "observation_queue": observation_queue,
+        "release_history_status": release_history_status,
+    }
+    try:
+        # 存 deepcopy，这样后续调用方即便拿到本次返回值做了原地修改，下一个
+        # cache 读者也是从干净的拷贝开始。代价是多一次 deepcopy，收益是把
+        # "cache 不可变" 写死成函数契约。
+        request.state._rdp_control_summary_cache = copy.deepcopy(result)
+    except Exception:
+        # Starlette Request.state 是 State()，setattr 总能成功；极少数 mock
+        # request 不支持 setattr，吞掉并回退到 no-cache 语义。
+        pass
+    return result
+
+
+_WORKBENCH_RECOMMENDATION_LABELS = {
+    "parameter_upgrade": "参数候选待审批",
+    "keep_active": "治理建议：保持当前",
+    "lower_priority": "治理建议：降低优先级",
+    "pause": "治理建议：暂停",
+    "require_review": "治理建议：需要复核",
+}
+
+
+def _split_reason_text(value: str | None) -> list[str]:
+    if not value:
+        return []
+    text = str(value).replace("[", " ").replace("]", " ")
+    for delimiter in ("\r", "\n", "；", ";", "。", "|"):
+        text = text.replace(delimiter, "\n")
+    result: list[str] = []
+    for part in text.splitlines():
+        candidate = part.strip(" -,:，。；;")
+        if candidate:
+            result.append(candidate)
+    return result
+
+
+def _dedupe_texts(values: list[str], *, limit: int | None = None) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        candidate = str(value or "").strip()
+        if not candidate:
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+        if limit is not None and len(result) >= limit:
+            break
+    return result
+
+
+def _make_ui_action(
+    *,
+    key: str,
+    label: str,
+    ui_action: str,
+    value: str,
+    enabled: bool = True,
+    disabled_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "ui_action": ui_action,
+        "value": value,
+        "enabled": bool(enabled),
+        "disabled_reason": disabled_reason,
+    }
+
+
+def _build_task_lane_summary(tasks: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    running_candidates: list[dict[str, Any]] = []
+    pending_candidates: list[dict[str, Any]] = []
+    for workflow, payload in (tasks or {}).items():
+        if not isinstance(payload, dict):
+            continue
+        running = payload.get("running_task")
+        if isinstance(running, dict):
+            running_candidates.append({
+                "workflow": workflow,
+                "status": "running",
+                "started_at": running.get("started_at"),
+                "requested_at": running.get("requested_at"),
+                "task_id": running.get("task_id"),
+            })
+        pending = payload.get("pending_task")
+        if isinstance(pending, dict):
+            pending_candidates.append({
+                "workflow": workflow,
+                "status": "pending",
+                "requested_at": pending.get("requested_at"),
+                "task_id": pending.get("task_id"),
+            })
+
+    running_candidates.sort(key=lambda item: _iso_sort_key(item.get("started_at")))
+    pending_candidates.sort(key=lambda item: _iso_sort_key(item.get("requested_at")))
+    current_execution = running_candidates[0] if running_candidates else {
+        "workflow": None,
+        "status": "idle",
+        "task_id": None,
+        "started_at": None,
+        "requested_at": None,
+    }
+    next_queue = pending_candidates[0] if pending_candidates else {
+        "workflow": None,
+        "status": "none",
+        "task_id": None,
+        "requested_at": None,
+    }
+    return current_execution, next_queue
+
+
+def _build_workbench_alerts_payload(
+    root: Path,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    integrity_alerts: list[dict[str, Any]] = []
+    operational_alerts: list[dict[str, Any]] = []
+
+    try:
+        from aats.data_platform.governance.snapshot_db import (
+            ROUND_PHASE_STEP2,
+            is_snapshot_incomplete,
+            load_latest_research_round_snapshot,
+        )
+
+        step2_snapshot = load_latest_research_round_snapshot(
+            phase=ROUND_PHASE_STEP2,
+            project_root=root,
+        )
+        if is_snapshot_incomplete(step2_snapshot):
+            integrity_alerts.append({
+                "code": "step2_manifest_missing",
+                "severity": "danger",
+                "scope": "round",
+                "phase": "phase2",
+                "title": "Step2 研究快照不完整",
+                "message": "最新 Step2 目录缺少 round_manifest，当前轮次不能据此做正式审批。",
+                "blocks_approval": True,
+            })
+    except Exception as exc:
+        logger.warning("workbench alerts: failed to inspect step2 snapshot: %s", exc)
+
+    # phase3 / phase4 payload 查询本身也要 fail-safe——真 DB/文件抖动不应让整个
+    # /auth/dashboard/bundle 500，否则前端回到 "RDP 数据暂未就绪" 的 callout，
+    # 等于又撞上 B2 的回归场景。任一 query 抛异常就降级为 "unavailable"，让下面
+    # 的 gate 当作缺 round 处理（阻塞审批，显示告警）。
+    safe_phase_payloads: list[tuple[str, dict[str, Any], str]] = []
+    for phase, query_fn, title in (
+        ("phase3", query_latest_attribution, "最新归因结果不完整"),
+        ("phase4", query_latest_execution_realism, "最新执行评估不完整"),
+    ):
+        try:
+            payload = query_fn(root)
+        except Exception:
+            logger.exception("workbench alerts: %s payload query failed", phase)
+            payload = {
+                "available": False,
+                "incomplete_reason": "query_failed",
+            }
+        if not isinstance(payload, dict):
+            payload = {"available": False, "incomplete_reason": "query_failed"}
+        safe_phase_payloads.append((phase, payload, title))
+
+    for phase, payload, title in safe_phase_payloads:
+        if payload.get("available"):
+            continue
+        incomplete_reason = str(payload.get("incomplete_reason") or "").strip()
+        # H5 修复：available=False 但没给 incomplete_reason 的情况下，历史代码
+        # 直接 `continue` 跳过告警，审批门禁就看不到这一 phase 缺席 —— 等于静默
+        # 放行。现在统一视为 "missing_round"：告警一定会写，blocks_approval=True。
+        if not incomplete_reason:
+            incomplete_reason = "missing_round"
+        # M8 修复：manifest_missing_on_disk 的语义是清单本身从磁盘消失，属于
+        # 审批阻塞级别（和 step2_manifest_missing 同级），severity 应为 danger。
+        # 此前标成 warning 让 UI 看起来像可以推进，与 blocks_approval=True 矛盾。
+        integrity_alerts.append({
+            "code": incomplete_reason,
+            "severity": "danger",
+            "scope": "phase",
+            "phase": phase,
+            "title": title,
+            "message": f"{phase.upper()} 当前不可用于正式结论：{incomplete_reason}",
+            "blocks_approval": True,
+        })
+
+    health = summary.get("health") or {}
+    for check in health.get("checks") or []:
+        status = str(check.get("status") or "").lower()
+        if status not in {"warn", "blocked"}:
+            continue
+        operational_alerts.append({
+            "code": f"{check.get('category')}:{check.get('name')}",
+            "severity": "danger" if status == "blocked" else "warning",
+            "title": str(check.get("name") or "系统检查"),
+            "message": str(check.get("detail") or "当前存在阻断或警告"),
+        })
+
+    for reason in health.get("blocking_reasons") or []:
+        operational_alerts.append({
+            "code": str(reason),
+            "severity": "danger",
+            "title": "系统阻断",
+            "message": str(reason),
+        })
+
+    for reason in health.get("warnings") or []:
+        operational_alerts.append({
+            "code": str(reason),
+            "severity": "warning",
+            "title": "系统警告",
+            "message": str(reason),
+        })
+
+    return {
+        "integrity_alerts": integrity_alerts,
+        "operational_alerts": operational_alerts,
+    }
+
+
+def _find_combo_summary(payload: dict[str, Any] | None, combo_key: str) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    for item in payload.get("combos") or []:
+        if isinstance(item, dict) and item.get("combo_key") == combo_key:
+            summary = item.get("summary")
+            return summary if isinstance(summary, dict) else {}
+    return {}
+
+
+def _compact_metrics(raw_metrics: dict[str, Any], *keys: str) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
+    for key in keys:
+        value = raw_metrics.get(key)
+        if value in (None, "", []):
+            continue
+        metrics[key] = value
+    return metrics
+
+
+def _build_combo_evidence_digest(
+    *,
+    root: Path,
+    summary: dict[str, Any],
+    combo_key: str,
+    combo_state: dict[str, Any],
+    item_alerts: list[dict[str, Any]],
+    phase3_payload: dict[str, Any],
+    phase4_payload: dict[str, Any],
+) -> list[dict[str, Any]]:
+    latest_research_conclusions = {
+        item.get("combo_key"): item
+        for item in (summary.get("latest_research_conclusions") or [])
+        if isinstance(item, dict) and item.get("combo_key")
+    }
+    phase2 = latest_research_conclusions.get(combo_key) or {}
+    phase2_signal = phase2.get("signal_summary") or {}
+    phase2_blocked = any(alert.get("phase") == "phase2" for alert in item_alerts)
+
+    phase3_combo = _find_combo_summary(phase3_payload, combo_key)
+    phase4_combo = _find_combo_summary(phase4_payload, combo_key)
+    phase3_incomplete = str(phase3_payload.get("incomplete_reason") or "").strip()
+    phase4_incomplete = str(phase4_payload.get("incomplete_reason") or "").strip()
+    readiness_blockers = _dedupe_texts(
+        [str(item) for item in (combo_state.get("inconsistencies") or [])],
+        limit=3,
+    )
+
+    # M7 修复：phase2 的 round_id 原本硬编码 None，evidence 追溯链断一环。
+    # phase2 来自 latest_research_conclusions，每条结论自带 source_round_id；
+    # 优先用它，退而用 phase2.round_id（部分来源字段不一致的兼容路径）。
+    phase2_round_id = phase2.get("source_round_id") or phase2.get("round_id")
+    return [
+        {
+            "phase": "phase2",
+            "status": "blocked" if phase2_blocked else ("available" if phase2 else "missing"),
+            "headline": (
+                f"研究结论：{phase2.get('decision')}"
+                if phase2.get("decision")
+                else "当前没有可用的 Step2 研究结论"
+            ),
+            "metrics": _compact_metrics(
+                phase2_signal,
+                "experiments_with_openings",
+                "max_opening_count",
+                "mean_positive_edge_ratio",
+            ),
+            "round_id": phase2_round_id,
+            "incomplete_reason": "manifest_missing_on_disk" if phase2_blocked else None,
+        },
+        {
+            "phase": "phase3",
+            "status": "incomplete" if phase3_incomplete else ("available" if phase3_combo else "missing"),
+            "headline": (
+                "归因结论可用"
+                if phase3_combo
+                else ("最新归因结果不完整" if phase3_incomplete else "当前没有可用的归因结论")
+            ),
+            "metrics": _compact_metrics(
+                phase3_combo,
+                "status",
+                "failure_ratio",
+                "failure_count",
+                "total_count",
+            ),
+            "round_id": phase3_payload.get("round_id"),
+            "incomplete_reason": phase3_incomplete or None,
+        },
+        {
+            "phase": "phase4",
+            "status": "incomplete" if phase4_incomplete else ("available" if phase4_combo else "missing"),
+            "headline": (
+                "执行评估可用"
+                if phase4_combo
+                else ("最新执行评估不完整" if phase4_incomplete else "当前没有可用的执行评估")
+            ),
+            "metrics": _compact_metrics(
+                phase4_combo,
+                "full_fill_ratio",
+                "cost_adjusted_edge_proxy_bps",
+                "mean_cost_bps",
+            ),
+            "round_id": phase4_payload.get("round_id"),
+            "incomplete_reason": phase4_incomplete or None,
+        },
+        {
+            "phase": "readiness",
+            "status": "blocked" if readiness_blockers else "available",
+            "headline": (
+                "当前组合存在治理或一致性风险"
+                if readiness_blockers
+                else "当前组合没有新增的 readiness 阻断"
+            ),
+            "metrics": _compact_metrics(
+                {
+                    "decision_status": combo_state.get("decision_status"),
+                    "runtime_source": combo_state.get("runtime_source"),
+                },
+                "decision_status",
+                "runtime_source",
+            ),
+            "round_id": None,
+            "incomplete_reason": readiness_blockers[0] if readiness_blockers else None,
+        },
+    ]
+
+
+def _build_item_detail_payload(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "current_recommendation_reason": item.get("decision_summary"),
+        "risk_summary": _dedupe_texts(
+            list(item.get("reason_summary") or []) + list(item.get("blocking_flags") or []),
+            limit=4,
+        ),
+        "next_state_if_approved": "写入治理审批结果，并进入后续发布或继续观察链路。",
+        "next_state_if_rejected": "保留当前运行参数，并把这条建议标记为拒绝。",
+        "source_rounds": item.get("source_rounds") or {},
+        "integrity_status": item.get("integrity_status"),
+        "integrity_alerts": item.get("integrity_alerts") or [],
+    }
+
+
+def _build_workbench_items_payload(
+    root: Path,
+    summary: dict[str, Any],
+    alerts_payload: dict[str, Any],
+) -> dict[str, Any]:
+    governance_state = summary.get("governance_state") or {}
+    combo_states = {
+        item.get("combo_key"): item
+        for item in (governance_state.get("combo_states") or [])
+        if isinstance(item, dict) and item.get("combo_key")
+    }
+    pending_recommendations = [
+        item for item in (summary.get("pending_recommendations") or [])
+        if isinstance(item, dict) and item.get("status") == "draft"
+    ]
+
+    by_combo: dict[str, dict[str, Any]] = {}
+    for rec in sorted(
+        pending_recommendations,
+        key=lambda item: _iso_sort_key(item.get("created_at")),
+        reverse=True,
+    ):
+        combo_key = str(rec.get("combo_key") or _combo_key(rec.get("family"), rec.get("timeframe")))
+        if combo_key and combo_key not in by_combo:
+            by_combo[combo_key] = rec
+
+    blocking_integrity = [
+        alert for alert in (alerts_payload.get("integrity_alerts") or [])
+        if bool(alert.get("blocks_approval"))
+    ]
+    # H6 修复：query_latest_attribution / query_latest_execution_realism 读 DB
+    # 或文件，一旦抖动原来会把 /auth/dashboard/bundle 打成 500。这里降级为
+    # unavailable payload，并叠加一条 blocking alert，让下游门禁继续阻止审批。
+    try:
+        phase3_payload = query_latest_attribution(root)
+    except Exception:
+        logger.exception("workbench items: phase3 attribution query failed")
+        phase3_payload = {"available": False, "incomplete_reason": "query_failed"}
+        blocking_integrity.append({
+            "code": "query_failed",
+            "severity": "danger",
+            "scope": "phase",
+            "phase": "phase3",
+            "title": "最新归因结果查询失败",
+            "message": "PHASE3 数据查询异常，已按 fail-closed 阻止本轮审批。",
+            "blocks_approval": True,
+        })
+    try:
+        phase4_payload = query_latest_execution_realism(root)
+    except Exception:
+        logger.exception("workbench items: phase4 execution realism query failed")
+        phase4_payload = {"available": False, "incomplete_reason": "query_failed"}
+        blocking_integrity.append({
+            "code": "query_failed",
+            "severity": "danger",
+            "scope": "phase",
+            "phase": "phase4",
+            "title": "最新执行评估查询失败",
+            "message": "PHASE4 数据查询异常，已按 fail-closed 阻止本轮审批。",
+            "blocks_approval": True,
+        })
+
+    items: list[dict[str, Any]] = []
+    for combo_key, rec in by_combo.items():
+        combo_state = combo_states.get(combo_key) or {}
+        item_alerts = [
+            alert for alert in blocking_integrity
+            if not alert.get("combo_key") or alert.get("combo_key") == combo_key
+        ]
+        integrity_status = "blocked" if item_alerts else "complete"
+        reason_summary = _dedupe_texts(
+            _split_reason_text(rec.get("reason"))
+            + [str(item) for item in (combo_state.get("latest_round_reasons") or [])]
+            + [str(item) for item in (combo_state.get("inconsistencies") or [])],
+            limit=3,
+        )
+        missing_evidence = _dedupe_texts(
+            [str(alert.get("title") or "") for alert in item_alerts],
+            limit=3,
+        )
+        recommendation_type = str(rec.get("recommendation_type") or "require_review")
+        headline = _WORKBENCH_RECOMMENDATION_LABELS.get(
+            recommendation_type,
+            "当前组合需要处理",
+        )
+        decision_summary = str(rec.get("reason") or "").strip()
+        if not decision_summary:
+            decision_summary = "当前治理建议已生成，请先确认这一组组合的处理结论。"
+        disabled_reason = (
+            "当前轮次存在不完整证据，需先补齐研究/归因/执行结论。"
+            if item_alerts
+            else None
+        )
+        evidence_digest = _build_combo_evidence_digest(
+            root=root,
+            summary=summary,
+            combo_key=combo_key,
+            combo_state=combo_state,
+            item_alerts=item_alerts,
+            phase3_payload=phase3_payload,
+            phase4_payload=phase4_payload,
+        )
+        actions = [
+            _make_ui_action(
+                key="approve",
+                label="审批",
+                ui_action="rdp-approve-only",
+                value=str(rec.get("recommendation_id") or ""),
+                enabled=not item_alerts,
+                disabled_reason=disabled_reason,
+            ),
+            _make_ui_action(
+                key="reject",
+                label="拒绝",
+                ui_action="rdp-reject-recommendation",
+                value=str(rec.get("recommendation_id") or ""),
+                enabled=True,
+            ),
+        ]
+        items.append({
+            "combo_key": combo_key,
+            "family": rec.get("family") or combo_state.get("family"),
+            "timeframe": rec.get("timeframe") or combo_state.get("timeframe"),
+            "recommendation_id": rec.get("recommendation_id"),
+            "recommendation_type": recommendation_type,
+            "confidence": rec.get("confidence") or "unknown",
+            "status": rec.get("status") or "draft",
+            "headline": headline,
+            "decision_summary": decision_summary,
+            "reason_summary": reason_summary,
+            "missing_evidence": missing_evidence,
+            "blocking_flags": [str(item) for item in (combo_state.get("inconsistencies") or [])],
+            "integrity_status": integrity_status,
+            "integrity_alerts": item_alerts,
+            "approval_enabled": not item_alerts,
+            "approval_blocked_reason": disabled_reason,
+            "created_at": rec.get("created_at"),
+            "updated_at": rec.get("created_at"),
+            "source_rounds": {
+                "phase2_round_id": rec.get("source_round_id"),
+                "phase3_round_id": phase3_payload.get("round_id"),
+                "phase4_round_id": phase4_payload.get("round_id"),
+            },
+            "detail_summary": None,
+            "evidence_digest": evidence_digest,
+            # L4 修复：combo_key 可能包含 `/` 或 `:` 等字符（历史上大多是
+            # `family_timeframe` 形式，但 combo_key 的生成器并不约束合法字符集），
+            # 直接拼进 URL 会破坏路径解析或被下游误路由。用 urlencode 的 `safe=""`
+            # 参数保证把所有非字母数字字符都转义。
+            "detail_url": f"/rdp/workbench/items/{_url_quote(str(combo_key), safe='')}",
+            "evidence_url": f"/rdp/workbench/evidence/{_url_quote(str(combo_key), safe='')}",
+            "actions": actions,
+        })
+
+    for item in items:
+        item["detail_summary"] = _build_item_detail_payload(item)
+
+    return {
+        "total": len(items),
+        "items": items,
+    }
+
+
+def _build_tuning_overview_payload(root: Path) -> dict[str, Any]:
+    try:
+        from aats.data_platform.operations.strategy_tuning_registry import (
+            load_strategy_tuning_overrides,
+            load_strategy_tuning_registry,
+        )
+
+        registry = load_strategy_tuning_registry(root)
+        overrides = load_strategy_tuning_overrides(root)
+    except Exception as exc:
+        logger.warning("tuning overview: failed to load registry: %s", exc)
+        registry = {"proposals": []}
+        overrides = {"combo_overrides": {}}
+
+    # 与 proposals / alerts 两处保持一致：当前 Step2 快照不完整时不能让 overview
+    # 读起来像"可以放心点批准"。headline 显式告警，approvable_count 拉到 0。
+    step2_incomplete_reason: str | None = None
+    try:
+        from aats.data_platform.governance.snapshot_db import (
+            ROUND_PHASE_STEP2,
+            is_snapshot_incomplete,
+            load_latest_research_round_snapshot,
+        )
+
+        step2_snapshot = load_latest_research_round_snapshot(
+            phase=ROUND_PHASE_STEP2,
+            project_root=root,
+        )
+        if is_snapshot_incomplete(step2_snapshot):
+            step2_incomplete_reason = "manifest_missing_on_disk"
+    except Exception as exc:
+        logger.warning("tuning overview: failed to inspect step2 snapshot: %s", exc)
+
+    proposals = [
+        item for item in (registry.get("proposals") or [])
+        if isinstance(item, dict)
+    ]
+    pending_review = [item for item in proposals if item.get("status") == "pending_review"]
+    approved = [item for item in proposals if item.get("status") == "approved"]
+    active_overrides = overrides.get("combo_overrides") or {}
+
+    if step2_incomplete_reason:
+        headline = (
+            f"当前 Step2 研究快照不完整，{len(pending_review)} 条调优提案暂不能批准。"
+            if pending_review
+            else "当前 Step2 研究快照不完整，暂不能处理调优提案。"
+        )
+    elif pending_review:
+        headline = f"当前有 {len(pending_review)} 条自动调优提案待审核。"
+    elif approved:
+        headline = f"已有 {len(approved)} 条调优提案获批，正在影响后续 research 默认值。"
+    else:
+        headline = "当前没有待审核调优提案。"
+
+    return {
+        "pending_review_count": len(pending_review),
+        "approvable_count": 0 if step2_incomplete_reason else len(pending_review),
+        "approved_count": len(approved),
+        "active_override_count": len(active_overrides),
+        "headline": headline,
+        "step2_incomplete_reason": step2_incomplete_reason,
+    }
+
+
+def _build_tuning_proposals_payload(root: Path) -> dict[str, Any]:
+    try:
+        from aats.data_platform.operations.strategy_tuning_registry import (
+            load_strategy_tuning_registry,
+        )
+
+        registry = load_strategy_tuning_registry(root)
+    except Exception as exc:
+        logger.warning("tuning proposals: failed to load registry: %s", exc)
+        registry = {"proposals": []}
+
+    # Step2 当前快照不完整时，不能让运营者按现有 proposal 继续走审批：哪怕提案
+    # 自身是历史完整数据产出的，当前数据链不健康也意味着"立即应用"的影响不可控。
+    # 与 _build_workbench_alerts_payload 共用同一判定，保持 UI 两处信号一致：
+    # alerts 板块会亮红告警，这里则把 proposal 的 actions 禁用、integrity_status 改
+    # 为 blocked，同时保留 proposal 可见，让运营者清楚知道"有历史调优提案在排队，
+    # 但当前数据不完整不能点批准"。
+    step2_incomplete_reason: str | None = None
+    step2_incomplete_alert: dict[str, Any] | None = None
+    try:
+        from aats.data_platform.governance.snapshot_db import (
+            ROUND_PHASE_STEP2,
+            is_snapshot_incomplete,
+            load_latest_research_round_snapshot,
+        )
+
+        step2_snapshot = load_latest_research_round_snapshot(
+            phase=ROUND_PHASE_STEP2,
+            project_root=root,
+        )
+        if is_snapshot_incomplete(step2_snapshot):
+            step2_incomplete_reason = "manifest_missing_on_disk"
+            step2_incomplete_alert = {
+                "code": "step2_manifest_missing",
+                "severity": "danger",
+                "scope": "round",
+                "phase": "phase2",
+                "title": "Step2 研究快照不完整",
+                "message": "最新 Step2 目录缺少 round_manifest，不能据此批准调优提案。",
+                "blocks_approval": True,
+            }
+    except Exception as exc:
+        logger.warning("tuning proposals: failed to inspect step2 snapshot: %s", exc)
+
+    proposals = sorted(
+        [
+            item for item in (registry.get("proposals") or [])
+            if isinstance(item, dict) and item.get("status") == "pending_review"
+        ],
+        key=lambda item: _iso_sort_key(item.get("created_at")),
+        reverse=True,
+    )
+    items: list[dict[str, Any]] = []
+    for item in proposals[:8]:
+        approval_enabled = step2_incomplete_reason is None
+        disabled_reason = (
+            "当前 Step2 研究快照不完整，暂不能批准调优提案。"
+            if not approval_enabled
+            else None
+        )
+        integrity_alerts = [step2_incomplete_alert] if step2_incomplete_alert else []
+        items.append({
+            "proposal_id": item.get("proposal_id"),
+            "combo_key": item.get("combo_key"),
+            "family": item.get("family"),
+            "timeframe": item.get("timeframe"),
+            "status": item.get("status"),
+            "headline": f"建议调整 {item.get('parameter')}",
+            "proposed_changes": [
+                {
+                    "key": item.get("parameter"),
+                    "from": item.get("current_value"),
+                    "to": item.get("proposed_value"),
+                },
+            ],
+            "reason_summary": _dedupe_texts(
+                _split_reason_text(item.get("rationale")),
+                limit=3,
+            ),
+            "impact_scope": ["research", "replay", "scan", "step3"],
+            "integrity_status": "complete" if approval_enabled else "blocked",
+            "integrity_alerts": integrity_alerts,
+            "approval_enabled": approval_enabled,
+            "approval_blocked_reason": disabled_reason,
+            "created_at": item.get("created_at"),
+            "actions": [
+                _make_ui_action(
+                    key="approve_tuning",
+                    label="批准调优",
+                    ui_action="rdp-approve-tuning-proposal",
+                    value=str(item.get("proposal_id") or ""),
+                    enabled=approval_enabled,
+                    disabled_reason=disabled_reason,
+                ),
+                _make_ui_action(
+                    key="reject_tuning",
+                    label="拒绝调优",
+                    ui_action="rdp-reject-tuning-proposal",
+                    value=str(item.get("proposal_id") or ""),
+                ),
+            ],
+        })
+
+    return {
+        "total": len(proposals),
+        "items": items,
+        "step2_incomplete_reason": step2_incomplete_reason,
+    }
+
+
+def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
+    root = _project_root(request)
+    summary = build_rdp_control_summary(request)
+    alerts_payload = _build_workbench_alerts_payload(root, summary)
+    items_payload = _build_workbench_items_payload(root, summary, alerts_payload)
+    tuning_payload = _build_tuning_overview_payload(root)
+    current_execution, next_queue = _build_task_lane_summary(summary.get("tasks") or {})
+    observation_queue = summary.get("observation_queue") or []
+    operations_summary = summary.get("operations_summary") or {}
+
+    overall_status = "idle"
+    if any(item.get("observation_status") == "rollback_recommended" for item in observation_queue):
+        overall_status = "rollback_required"
+    elif items_payload["items"]:
+        overall_status = "needs_approval"
+    elif operations_summary.get("approved_release_candidate_count"):
+        overall_status = "ready_to_release"
+    elif operations_summary.get("observing_release_count"):
+        overall_status = "observing"
+    elif alerts_payload.get("integrity_alerts"):
+        overall_status = "needs_more_research"
+
+    headline = "当前没有新的治理动作，系统处于待命状态。"
+    subheadline = "当前轮次没有新的待审批建议或发布动作。"
+    if overall_status == "rollback_required":
+        headline = "当前有发布进入回滚建议状态，优先处理风险收口。"
+        subheadline = "先处理回滚，再继续推进新的研究或审批。"
+    elif overall_status == "needs_approval":
+        headline = f"当前轮次有 {items_payload['total']} 个组合需要治理审批。"
+        subheadline = "先看当前轮次结论，再决定审批还是拒绝。"
+    elif overall_status == "ready_to_release":
+        headline = "已有已批准参数可推进到发布流程。"
+        subheadline = "建议先运行 Gate，再创建 release。"
+    elif overall_status == "observing":
+        headline = "当前有 release 仍在观察窗口中。"
+        subheadline = "优先确认观察结果，再推进下一轮参数。"
+    elif overall_status == "needs_more_research":
+        headline = "当前轮次证据不完整，不能直接审批。"
+        subheadline = "需要先补研究、归因或执行评估，再进入治理。"
+
+    return {
+        "round_id": None,
+        "overall_status": overall_status,
+        "headline": headline,
+        "subheadline": subheadline,
+        "primary_action": None,
+        "secondary_actions": [],
+        "blockers": alerts_payload.get("integrity_alerts") or [],
+        "summary_counts": {
+            "pending_items": items_payload["total"],
+            "integrity_blocked_items": sum(
+                1 for item in items_payload["items"] if item.get("integrity_status") == "blocked"
+            ),
+            "observing_releases": int(operations_summary.get("observing_release_count") or 0),
+            "tuning_pending": int(tuning_payload.get("pending_review_count") or 0),
+        },
+        "current_execution": current_execution,
+        "next_queue": next_queue,
+        "health": {
+            "daemon": summary.get("health", {}).get("overall_health"),
+            "governance_db": "healthy" if not any(
+                check.get("category") == "governance_db" and check.get("status") == "blocked"
+                for check in (summary.get("health", {}).get("checks") or [])
+            ) else "blocked",
+            "latest_gate": operations_summary.get("latest_gate_status") or "not_run",
+        },
+    }
+
+
+def build_rdp_workbench_items(request: Request) -> dict[str, Any]:
+    root = _project_root(request)
+    summary = build_rdp_control_summary(request)
+    alerts_payload = _build_workbench_alerts_payload(root, summary)
+    return _build_workbench_items_payload(root, summary, alerts_payload)
+
+
+def build_rdp_workbench_alerts(request: Request) -> dict[str, Any]:
+    root = _project_root(request)
+    summary = build_rdp_control_summary(request)
+    return _build_workbench_alerts_payload(root, summary)
+
+
+def build_rdp_tuning_overview(request: Request) -> dict[str, Any]:
+    root = _project_root(request)
+    return _build_tuning_overview_payload(root)
+
+
+def build_rdp_tuning_proposals(request: Request) -> dict[str, Any]:
+    root = _project_root(request)
+    return _build_tuning_proposals_payload(root)
+
+
+def build_rdp_workbench_item_detail(request: Request, combo_key: str) -> dict[str, Any]:
+    root = _project_root(request)
+    summary = build_rdp_control_summary(request)
+    alerts_payload = _build_workbench_alerts_payload(root, summary)
+    payload = _build_workbench_items_payload(root, summary, alerts_payload)
+    item = next(
+        (entry for entry in (payload.get("items") or []) if entry.get("combo_key") == combo_key),
+        None,
+    )
+    return {
+        "available": bool(item),
+        "combo_key": combo_key,
+        "item": item,
+        "detail_summary": item.get("detail_summary") if item else {},
+        "evidence_digest": item.get("evidence_digest") if item else [],
+        "source_rounds": item.get("source_rounds") if item else {},
+    }
+
+
+def build_rdp_workbench_item_evidence(request: Request, combo_key: str) -> dict[str, Any]:
+    detail = build_rdp_workbench_item_detail(request, combo_key)
+    item = detail.get("item") or {}
+    evidence_by_phase = {
+        str(entry.get("phase")): entry
+        for entry in (item.get("evidence_digest") or [])
+        if isinstance(entry, dict) and entry.get("phase")
+    }
+    return {
+        "available": bool(item),
+        "combo_key": combo_key,
+        "integrity_status": item.get("integrity_status", "missing"),
+        "integrity_alerts": item.get("integrity_alerts") or [],
+        "evidence_digest": item.get("evidence_digest") or [],
+        "phase2": evidence_by_phase.get("phase2"),
+        "phase3": evidence_by_phase.get("phase3"),
+        "phase4": evidence_by_phase.get("phase4"),
+        "readiness": evidence_by_phase.get("readiness"),
+        "source_rounds": item.get("source_rounds") or {},
+        "detail_summary": item.get("detail_summary") or {},
     }
