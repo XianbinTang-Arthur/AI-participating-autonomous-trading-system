@@ -31,7 +31,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from aats.api._governance_db import governance_session as _governance_session
@@ -313,6 +313,66 @@ class EvaluateRollbackRequest(BaseModel):
     timeframe: str | None = Field(default=None)
 
 
+# ── Recommendation 状态流转 shared helpers ─────────────────────────
+
+
+def _precheck_recommendation_transitionable(
+    root: Path,
+    recommendation_id: str,
+    *,
+    expected_current: tuple[str, ...],
+) -> dict[str, Any]:
+    """approve / reject / supersede 的统一预检。
+
+    - ``load_recommendation_registry`` 已经 DB-first、JSON fallback；
+      对 UI / operator 来说真源是 DB，但 DB 不可达的单机 / 测试场景仍然
+      能从 JSON 副本得到一致的 404/409 语义。
+    - 命中目标 recommendation 且状态合法 → 返回快照 dict。
+    - recommendation 不存在 → ``HTTPException(404)``。
+    - 状态不在 ``expected_current`` 内 → ``HTTPException(409)``；响应体带上
+      ``current_status`` / ``expected_status``，方便 UI / curl 客户端判断。
+
+    注意：这是"快照"预检。真正的 CAS 仍然由底层 helper
+    （``approve_recommendation`` 等）通过 ``expected_current_status`` 的
+    UPDATE WHERE 子句完成；如果在预检和 transition 之间另一个 operator 抢先
+    改写了状态，底层 helper 会返回 ``None``，handler 把那种情况映射成
+    第二道 409（"被并发改写"）。
+    """
+    from aats.data_platform.decision_system.recommendation_registry import (
+        find_recommendation,
+        load_recommendation_registry,
+    )
+
+    reg_path = root / "artifacts/decision_system/recommendation_registry.json"
+    registry = load_recommendation_registry(reg_path)
+    rec = find_recommendation(registry, recommendation_id)
+    if rec is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "ok": False,
+                "message": f"未找到 recommendation: {recommendation_id}",
+                "recommendation_id": recommendation_id,
+            },
+        )
+    current_status = rec.get("status")
+    if current_status not in expected_current:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "message": (
+                    f"recommendation 状态为 {current_status!r}，"
+                    f"期望: {list(expected_current)!r}"
+                ),
+                "recommendation_id": recommendation_id,
+                "current_status": current_status,
+                "expected_status": list(expected_current),
+            },
+        )
+    return rec
+
+
 # ── Recommendation Approve ─────────────────────────────────────────
 
 
@@ -325,7 +385,13 @@ async def approve_recommendation_api(
     body: ApprovalRequest,
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
-    """审批 recommendation（draft → approved）."""
+    """审批 recommendation（draft → approved）.
+
+    HTTP 语义:
+      - 200 ok: 审批成功
+      - 404: recommendation 不存在
+      - 409: 状态不是 draft（已被别人审批 / 拒绝 / supersede），或 CAS 竞态
+    """
     from aats.data_platform.decision_system.recommendation_registry import (
         approve_recommendation,
         load_recommendation_registry,
@@ -345,6 +411,10 @@ async def approve_recommendation_api(
             "integrity_blocked": True,
         }
 
+    _precheck_recommendation_transitionable(
+        root, recommendation_id, expected_current=("draft",),
+    )
+
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
     registry = load_recommendation_registry(reg_path)
 
@@ -355,7 +425,18 @@ async def approve_recommendation_api(
     )
 
     if rec is None:
-        return {"ok": False, "message": f"未找到 recommendation: {recommendation_id}"}
+        # 预检已经过了，这里 None 只可能来自 CAS race：另一个 operator 在
+        # 预检和 transition 之间抢先改写了状态。映射成 409，让客户端刷新 UI
+        # 再决定下一步。
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "message": "recommendation 状态在审批过程中被并发改写，请刷新后重试",
+                "recommendation_id": recommendation_id,
+                "reason": "cas_race",
+            },
+        )
 
     save_recommendation_registry(registry, reg_path)
     return {"ok": True, "recommendation": rec}
@@ -373,7 +454,13 @@ async def reject_recommendation_api(
     body: ApprovalRequest,
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
-    """拒绝 recommendation（draft → rejected）."""
+    """拒绝 recommendation（draft → rejected）.
+
+    HTTP 语义:
+      - 200 ok: 拒绝成功
+      - 404: recommendation 不存在
+      - 409: 状态不是 draft，或 CAS 竞态
+    """
     from aats.data_platform.decision_system.recommendation_registry import (
         load_recommendation_registry,
         reject_recommendation,
@@ -381,6 +468,11 @@ async def reject_recommendation_api(
     )
 
     root = _project_root(request)
+
+    _precheck_recommendation_transitionable(
+        root, recommendation_id, expected_current=("draft",),
+    )
+
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
     registry = load_recommendation_registry(reg_path)
 
@@ -391,7 +483,15 @@ async def reject_recommendation_api(
     )
 
     if rec is None:
-        return {"ok": False, "message": f"未找到 recommendation: {recommendation_id}"}
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "message": "recommendation 状态在拒绝过程中被并发改写，请刷新后重试",
+                "recommendation_id": recommendation_id,
+                "reason": "cas_race",
+            },
+        )
 
     save_recommendation_registry(registry, reg_path)
     return {"ok": True, "recommendation": rec}
@@ -409,7 +509,14 @@ async def supersede_recommendation_api(
     body: SupersedeRequest,
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
-    """替代 recommendation（标记为 superseded）."""
+    """替代 recommendation（标记为 superseded）.
+
+    HTTP 语义:
+      - 200 ok: supersede 成功
+      - 404: recommendation 不存在
+      - 409: 状态不在 (draft, approved) 里（已 superseded / rejected 是终态），
+        或 CAS 竞态
+    """
     from aats.data_platform.decision_system.recommendation_registry import (
         load_recommendation_registry,
         save_recommendation_registry,
@@ -429,6 +536,10 @@ async def supersede_recommendation_api(
             "integrity_blocked": True,
         }
 
+    _precheck_recommendation_transitionable(
+        root, recommendation_id, expected_current=("draft", "approved"),
+    )
+
     reg_path = root / "artifacts/decision_system/recommendation_registry.json"
     registry = load_recommendation_registry(reg_path)
 
@@ -440,7 +551,15 @@ async def supersede_recommendation_api(
     )
 
     if rec is None:
-        return {"ok": False, "message": f"未找到 recommendation: {recommendation_id}"}
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "message": "recommendation 状态在 supersede 过程中被并发改写，请刷新后重试",
+                "recommendation_id": recommendation_id,
+                "reason": "cas_race",
+            },
+        )
 
     save_recommendation_registry(registry, reg_path)
     return {"ok": True, "recommendation": rec}

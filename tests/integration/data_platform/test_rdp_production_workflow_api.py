@@ -905,3 +905,261 @@ def test_recommendation_approve_blocked_when_step2_snapshot_incomplete(tmp_path)
     recs = registry_contents.get("recommendations", [])
     assert recs and recs[0]["status"] == "draft", \
         "Integrity gate 必须阻止 registry 被 approve"
+
+
+# ======================================================================
+# P0-1 阶段 B：approve/reject/supersede 的 404 / 409 精确化契约
+# ======================================================================
+#
+# 背景：旧代码对"找不到 rec / 状态已改 / CAS 并发改写"一律返回 200 + ok=False，
+# 前端看到的是 "200 OK but ok: false"，会把 UI 状态置为成功或模糊失败，
+# 让 operator 不知道到底是"点错了"还是"别人已经点了"。
+#
+# 阶段 B 改造后：
+# - rec 不存在 → 404
+# - rec 状态不在 expected_current_status → 409（带 current_status / expected_status）
+# - 预检通过但底层 CAS 失败（竞态）→ 409（reason=cas_race）
+#
+# 下列测试 patch ``try_governance_db`` 为 (None, False)，让 load/save 走 JSON-only
+# 路径，避免在 Windows 单测里跑 testcontainers；WSL2 集成测试走真实 Postgres。
+# ======================================================================
+
+
+def _write_rec_registry(root, recs: list[dict]) -> None:
+    """把给定 recommendation 列表写成 registry.json。"""
+    (root / "artifacts" / "decision_system").mkdir(parents=True, exist_ok=True)
+    (root / "artifacts" / "decision_system" / "recommendation_registry.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-17T00:00:00Z",
+                "version": 1,
+                "recommendations": recs,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _draft_rec(rec_id: str = "rec_phase_b_1") -> dict:
+    return {
+        "recommendation_id": rec_id,
+        "created_at": "2026-04-17T00:01:00Z",
+        "family": "independent",
+        "symbol": "BTC-USDT-SWAP",
+        "timeframe": "15m",
+        "recommendation_type": "parameter_upgrade",
+        "target_parameter_set_id": "ps_candidate_1",
+        "confidence": "high",
+        "status": "draft",
+    }
+
+
+def _phase_b_client(root):
+    """和 Phase B 所有测试共享的 app + patch 栈。
+
+    - ``_project_root`` 固定到 tmp_path
+    - ``try_governance_db`` 强制 (None, False)，让 load/save 走 JSON
+    - ``_step2_integrity_blocking_reason`` 返回 None，不让 integrity gate 拦截
+    """
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+    return app
+
+
+_PHASE_B_PATCHES: tuple[str, ...] = (
+    "aats.data_platform.decision_system.recommendation_registry.try_governance_db",
+)
+
+
+def _phase_b_patch_stack(root):
+    from contextlib import ExitStack
+    stack = ExitStack()
+    stack.enter_context(patch(
+        "aats.api.rdp_routes._project_root", lambda _request: root,
+    ))
+    stack.enter_context(patch(
+        "aats.data_platform.decision_system.recommendation_registry.try_governance_db",
+        lambda: (None, False),
+    ))
+    stack.enter_context(patch(
+        "aats.api.rdp_routes._step2_integrity_blocking_reason",
+        lambda _root: None,
+    ))
+    return stack
+
+
+def test_approve_returns_404_when_recommendation_missing(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [])  # 空 registry
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_does_not_exist/approve",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["recommendation_id"] == "rec_does_not_exist"
+    assert "未找到" in detail["message"]
+
+
+def test_approve_returns_409_when_rec_already_approved(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    rec = _draft_rec("rec_already_approved")
+    rec["status"] = "approved"
+    _write_rec_registry(tmp_path, [rec])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_already_approved/approve",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["current_status"] == "approved"
+    assert detail["expected_status"] == ["draft"]
+
+
+def test_approve_returns_409_on_cas_race(tmp_path) -> None:
+    """预检时是 draft，但底层 ``_db_update_rec_status`` 返回 False（CAS 竞态）。
+
+    由于 ``try_governance_db`` 被 patch 成 (None, False)，默认走不到 CAS
+    路径；这里换一种 patch 策略——直接把 ``approve_recommendation`` stub
+    成返回 None，模拟 "rec 被并发改写" 的结局。
+    """
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [_draft_rec("rec_cas_race_approve")])
+    with _phase_b_patch_stack(tmp_path), patch(
+        "aats.data_platform.decision_system.recommendation_registry.approve_recommendation",
+        return_value=None,
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_cas_race_approve/approve",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["reason"] == "cas_race"
+    assert detail["recommendation_id"] == "rec_cas_race_approve"
+
+
+def test_reject_returns_404_when_recommendation_missing(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_missing_reject/reject",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["ok"] is False
+    assert detail["recommendation_id"] == "rec_missing_reject"
+
+
+def test_reject_returns_409_when_status_is_rejected(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    rec = _draft_rec("rec_double_reject")
+    rec["status"] = "rejected"
+    _write_rec_registry(tmp_path, [rec])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_double_reject/reject",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["current_status"] == "rejected"
+
+
+def test_reject_returns_409_on_cas_race(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [_draft_rec("rec_cas_race_reject")])
+    with _phase_b_patch_stack(tmp_path), patch(
+        "aats.data_platform.decision_system.recommendation_registry.reject_recommendation",
+        return_value=None,
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_cas_race_reject/reject",
+            json={"actor": "operator"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["reason"] == "cas_race"
+
+
+def test_supersede_returns_404_when_recommendation_missing(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_missing_supersede/supersede",
+            json={"actor": "operator", "superseded_by_id": "rec_new_1"},
+        )
+    assert response.status_code == 404
+    detail = response.json()["detail"]
+    assert detail["recommendation_id"] == "rec_missing_supersede"
+
+
+def test_supersede_returns_409_when_status_is_terminal(tmp_path) -> None:
+    """superseded / rejected 是终态，supersede 必须 409 拒绝。"""
+    app = _phase_b_client(tmp_path)
+    rec = _draft_rec("rec_terminal_superseded")
+    rec["status"] = "superseded"
+    _write_rec_registry(tmp_path, [rec])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_terminal_superseded/supersede",
+            json={"actor": "operator", "superseded_by_id": "rec_new_1"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["current_status"] == "superseded"
+    assert set(detail["expected_status"]) == {"draft", "approved"}
+
+
+def test_supersede_allows_approved_state(tmp_path) -> None:
+    """approved 是 supersede 的合法前置状态，不能被误判成 409。"""
+    app = _phase_b_client(tmp_path)
+    rec = _draft_rec("rec_approved_supersede")
+    rec["status"] = "approved"
+    _write_rec_registry(tmp_path, [rec])
+    with _phase_b_patch_stack(tmp_path):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_approved_supersede/supersede",
+            json={"actor": "operator", "superseded_by_id": "rec_new_1"},
+        )
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["recommendation"]["status"] == "superseded"
+
+
+def test_supersede_returns_409_on_cas_race(tmp_path) -> None:
+    app = _phase_b_client(tmp_path)
+    _write_rec_registry(tmp_path, [_draft_rec("rec_cas_race_supersede")])
+    with _phase_b_patch_stack(tmp_path), patch(
+        "aats.data_platform.decision_system.recommendation_registry.supersede_recommendation",
+        return_value=None,
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/recommendations/rec_cas_race_supersede/supersede",
+            json={"actor": "operator", "superseded_by_id": "rec_new_1"},
+        )
+    assert response.status_code == 409
+    detail = response.json()["detail"]
+    assert detail["reason"] == "cas_race"
