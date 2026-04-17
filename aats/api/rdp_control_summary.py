@@ -916,12 +916,14 @@ def _humanize_reason_entry(value: str | None) -> str | None:
         return template.format(*match.groups())
 
     direct_map = {
-        "多维度正面且无负面": "研究和执行面整体偏正，没有明显反向信号。",
-        "治理要求继续运行，但当前未加载 active 参数": "治理层要求继续运行，但当前还没有 active 参数。",
+        "多维度正面且无负面": "研究和执行面整体偏正，暂时没有需要调整的信号。",
+        "治理要求继续运行，但当前未加载 active 参数": "系统建议继续观察，但目前还没有已生效的实盘参数。",
         "治理目标参数与当前实盘 active 参数不一致": "治理目标参数与当前实盘参数不一致。",
         "参数建议已审批但尚未应用到实盘": "参数建议已审批，但还没有应用到实盘。",
         "已完成审批，准备创建 release": "这组参数已经批准，下一步可以运行 Gate 或创建发布。",
         "等待审批": "这组参数已经生成，等待人工确认。",
+        "多维度正面且无负面。": "研究和执行面整体偏正，暂时没有需要调整的信号。",
+        "治理要求继续运行，但当前未加载 active 参数。": "系统建议继续观察，但目前还没有已生效的实盘参数。",
     }
     if compact in direct_map:
         return direct_map[compact]
@@ -938,6 +940,7 @@ def _humanize_reason_entry(value: str | None) -> str | None:
         "succeeded": "已完成",
         "degraded": "降级",
         "status": "状态",
+        "active": "已生效",
     }
     for raw, friendly in replacements.items():
         compact = re.sub(rf"\b{re.escape(raw)}\b", friendly, compact, flags=re.IGNORECASE)
@@ -958,84 +961,146 @@ def _build_reason_summary(rec: dict[str, Any], combo_state: dict[str, Any]) -> l
     )
     return _dedupe_texts(
         [humanized for value in values if (humanized := _humanize_reason_entry(value))],
-        limit=3,
+        limit=2,
     )
 
 
-def _approval_effect_summary(recommendation_type: str) -> str:
+def _approval_effect_summary_v2(recommendation_type: str) -> str:
     if recommendation_type == "parameter_upgrade":
-        return "批准后会进入待发布列表，下一步是运行 Gate 或创建发布。"
+        return "批准后进入待发布，下一步是运行 Gate 或创建发布。"
     if recommendation_type == "keep_active":
-        return "批准后只记录“保持当前”，不会创建新发布。"
+        return "批准后只记录“保持当前”，不会进入发布。"
     if recommendation_type == "lower_priority":
-        return "批准后只记录“降低优先级”，不会创建新发布。"
+        return "批准后只记录“降低优先级”，不会进入发布。"
     if recommendation_type == "pause":
-        return "批准后会把该组合标记为暂停，不会创建新发布。"
-    return "批准后只会记录本轮治理结论，不会创建新发布。"
+        return "批准后会把该组合标记为暂停，不会进入发布。"
+    return "批准后只会记录这轮治理结论，不会进入发布。"
 
 
-def _decision_summary(
+def _decision_summary_v2(
     recommendation_type: str,
     *,
     has_integrity_block: bool,
     combo_state: dict[str, Any],
 ) -> str:
     if has_integrity_block:
-        return "证据还不完整，先补研究结果，再决定是否审批。"
+        return "这轮证据还不完整，先补数据和研究结果，再决定是否审批。"
     if recommendation_type == "parameter_upgrade":
-        return "本轮生成了新参数候选，确认后可继续进入发布。"
+        return "这轮产出了一组新参数，确认后就会进入待发布。"
     if recommendation_type == "keep_active":
         if combo_state.get("runtime_source") != "active_parameters":
-            return "本轮建议保持当前；当前还没有 active 参数，只记录治理结论。"
-        return "本轮建议保持当前，不创建新发布。"
+            return "这轮先保持不动。现在还没有实盘参数，这次只记录治理结论。"
+        return "这轮先保持不动，不创建新发布。"
     if recommendation_type == "lower_priority":
-        return "本轮建议降低该组合优先级，不创建新发布。"
+        return "这轮建议降低这个组合的优先级，不创建新发布。"
     if recommendation_type == "pause":
-        return "本轮建议暂停该组合，不创建新发布。"
-    return "本轮证据存在冲突，需要人工复核后再定。"
+        return "这轮建议暂停这个组合，不创建新发布。"
+    return "这轮结论还不够稳定，需要人工复核后再定。"
 
 
-def _approval_action_label(recommendation_type: str) -> str:
+def _approval_action_label_v2(recommendation_type: str) -> str:
     if recommendation_type == "parameter_upgrade":
         return "批准参数候选"
     if recommendation_type == "keep_active":
-        return "确认保持当前"
+        return "同意保持当前"
     if recommendation_type == "lower_priority":
-        return "确认降优先级"
+        return "同意降优先级"
     if recommendation_type == "pause":
-        return "确认暂停"
-    return "确认需复核"
+        return "同意暂停"
+    return "转人工复核"
 
 
-def _reject_action_label(recommendation_type: str) -> str:
+def _reject_action_label_v2(recommendation_type: str) -> str:
     if recommendation_type == "parameter_upgrade":
-        return "驳回参数候选"
+        return "退回参数候选"
     if recommendation_type == "keep_active":
-        return "不采纳保持当前"
+        return "退回此结论"
     if recommendation_type == "lower_priority":
-        return "不采纳降优先级"
+        return "退回此结论"
     if recommendation_type == "pause":
-        return "不采纳暂停"
-    return "驳回复核结论"
+        return "退回此结论"
+    return "退回复核结论"
 
 
-def _humanize_operational_alert(title: str | None, message: str | None, code: str | None) -> tuple[str, str]:
+_WORKBENCH_HEALTH_ALERT_TITLE_LABELS = {
+    "queue_state": "任务队列积压",
+    "current_alerts": "最新告警结果",
+    "current_alerts_missing": "最新告警结果",
+    "readonly_access": "生产数据库连接",
+    "active_parameter_sets": "实盘参数",
+    "no_active_parameter_sets": "实盘参数",
+    "rdp_task_queue_backlog_or_failures": "任务队列积压",
+    "live_db_unhealthy": "生产数据库连接",
+    "workflow_runs_stale_or_missing": "流程结果过旧",
+    "workflow_runs_incomplete": "流程结果不完整",
+    "rdp_daemon_unhealthy": "后台服务状态",
+    "rdp_daemon_degraded": "后台服务状态",
+    "rdp_daemon_status_missing": "后台服务状态",
+    "governance_db_unreachable": "治理数据库",
+}
+
+
+def _workflow_disabled_reason(workflow: str, state: str) -> str:
+    action = _WORKFLOW_ACTION_LABELS.get(workflow, workflow)
+    if state == "running":
+        return f"{action}正在执行，完成后才能再次点击。"
+    if state == "pending":
+        return f"{action}已经在排队，请等待上一条任务完成。"
+    return "当前暂时不能执行这个操作。"
+
+
+def _summarize_queue_state(detail: str | None) -> str:
+    text = str(detail or "").strip()
+    if not text:
+        return "任务队列里还有未处理的任务。"
+    match = re.search(
+        r"pending\s*=\s*(\d+)\s*,\s*running\s*=\s*(\d+)\s*,\s*failed\s*=\s*(\d+)",
+        text,
+        re.IGNORECASE,
+    )
+    if not match:
+        return f"任务队列仍有积压或失败：{text}"
+    pending, running, failed = (int(item) for item in match.groups())
+    parts: list[str] = []
+    if pending:
+        parts.append(f"待执行 {pending} 条")
+    if running:
+        parts.append(f"执行中 {running} 条")
+    if failed:
+        parts.append(f"失败 {failed} 条")
+    if not parts:
+        return "任务队列目前没有异常。"
+    return f"任务队列里还有未处理记录：{'，'.join(parts)}。"
+
+
+def _humanize_operational_alert(title: str | None, message: str | None, code: str | None) -> tuple[str, str] | None:
     normalized_title = str(title or "").strip()
     normalized_code = str(code or "").strip()
     normalized_message = str(message or "").strip()
     title_key = normalized_title or normalized_code
-    friendly_title = _HEALTH_ALERT_TITLE_LABELS.get(title_key, normalized_title or "系统告警")
+    friendly_title = _WORKBENCH_HEALTH_ALERT_TITLE_LABELS.get(
+        title_key,
+        normalized_title or "系统告警",
+    )
 
+    if title_key in {"current_alerts", "current_alerts_missing", "rdp_task_queue_backlog_or_failures"}:
+        return None
     if title_key == "queue_state":
-        return friendly_title, f"任务队列存在积压或失败：{normalized_message}" if normalized_message else "任务队列存在积压或失败。"
-    if title_key == "current_alerts":
-        return friendly_title, "当前还没有生成最新告警文件，请先完成可靠性检查。"
+        return friendly_title, _summarize_queue_state(normalized_message)
     if title_key == "readonly_access":
-        return friendly_title, "当前没有配置生产数据库连接，发布链只能停留在只读状态。"
-    if title_key == "active_parameter_sets":
-        return friendly_title, "当前没有 active 参数，继续运行前需要先确认治理结论。"
-    if title_key == "rdp_task_queue_backlog_or_failures":
-        return friendly_title, "RDP 任务队列存在积压或失败，请先清理再继续。"
+        return friendly_title, "当前没有可写的生产数据库连接，发布链只能停留在只读状态。"
+    if title_key in {"active_parameter_sets", "no_active_parameter_sets"}:
+        return friendly_title, "当前还没有已生效的实盘参数。先完成治理结论，再决定是否发布。"
+    if title_key in {"rdp_daemon_unhealthy", "rdp_daemon_degraded", "rdp_daemon_status_missing"}:
+        return friendly_title, "后台服务状态异常，新的 RDP 任务可能不会继续推进。"
+    if title_key == "live_db_unhealthy":
+        return friendly_title, "生产数据库连接不可用，发布链当前不能继续。"
+    if title_key == "workflow_runs_stale_or_missing":
+        return friendly_title, "最近一轮流程结果过旧或缺失，请先补跑完整流程。"
+    if title_key == "workflow_runs_incomplete":
+        return friendly_title, "最近一轮流程结果还不完整，请先补齐再审批。"
+    if title_key == "governance_db_unreachable":
+        return friendly_title, "治理数据库当前不可用，治理和发布链都会受影响。"
     return friendly_title, normalized_message or "当前存在需要处理的系统告警。"
 
 
@@ -1047,10 +1112,10 @@ def _build_manual_workflow_actions(tasks: dict[str, Any]) -> tuple[dict[str, Any
         enabled = True
         if lane.get("running_task"):
             enabled = False
-            disabled_reason = "当前流程已在运行。"
+            disabled_reason = _workflow_disabled_reason(workflow, "running")
         elif lane.get("pending_task"):
             enabled = False
-            disabled_reason = "当前流程已在排队。"
+            disabled_reason = _workflow_disabled_reason(workflow, "pending")
         actions.append(_make_ui_action(
             key=f"trigger_{workflow}",
             label=_WORKFLOW_ACTION_LABELS[workflow],
@@ -1280,11 +1345,14 @@ def _build_workbench_alerts_payload(
         status = str(check.get("status") or "").lower()
         if status not in {"warn", "blocked"}:
             continue
-        title, message = _humanize_operational_alert(
+        humanized = _humanize_operational_alert(
             str(check.get("name") or ""),
             str(check.get("detail") or ""),
             str(check.get("name") or ""),
         )
+        if humanized is None:
+            continue
+        title, message = humanized
         operational_alerts.append({
             "code": f"{check.get('category')}:{check.get('name')}",
             "severity": "danger" if status == "blocked" else "warning",
@@ -1293,7 +1361,10 @@ def _build_workbench_alerts_payload(
         })
 
     for reason in health.get("blocking_reasons") or []:
-        title, message = _humanize_operational_alert(None, str(reason), str(reason))
+        humanized = _humanize_operational_alert(None, str(reason), str(reason))
+        if humanized is None:
+            continue
+        title, message = humanized
         operational_alerts.append({
             "code": str(reason),
             "severity": "danger",
@@ -1302,7 +1373,10 @@ def _build_workbench_alerts_payload(
         })
 
     for reason in health.get("warnings") or []:
-        title, message = _humanize_operational_alert(None, str(reason), str(reason))
+        humanized = _humanize_operational_alert(None, str(reason), str(reason))
+        if humanized is None:
+            continue
+        title, message = humanized
         operational_alerts.append({
             "code": str(reason),
             "severity": "warning",
@@ -1310,9 +1384,21 @@ def _build_workbench_alerts_payload(
             "message": message,
         })
 
+    deduped_operational_alerts: list[dict[str, Any]] = []
+    seen_operational_keys: set[tuple[str, str]] = set()
+    for alert in operational_alerts:
+        dedupe_key = (
+            str(alert.get("title") or "").strip(),
+            str(alert.get("message") or "").strip(),
+        )
+        if dedupe_key in seen_operational_keys:
+            continue
+        seen_operational_keys.add(dedupe_key)
+        deduped_operational_alerts.append(alert)
+
     return {
         "integrity_alerts": integrity_alerts,
-        "operational_alerts": operational_alerts,
+        "operational_alerts": deduped_operational_alerts,
     }
 
 
@@ -1451,7 +1537,7 @@ def _build_item_detail_payload(item: dict[str, Any]) -> dict[str, Any]:
             list(item.get("reason_summary") or []) + list(item.get("blocking_flags") or []),
             limit=4,
         ),
-        "next_state_if_approved": _approval_effect_summary(recommendation_type),
+        "next_state_if_approved": _approval_effect_summary_v2(recommendation_type),
         "next_state_if_rejected": "保留当前运行参数，并把这条建议标记为拒绝。",
         "source_rounds": item.get("source_rounds") or {},
         "integrity_status": item.get("integrity_status"),
@@ -1539,7 +1625,7 @@ def _build_workbench_items_payload(
             recommendation_type,
             "当前组合需要处理",
         )
-        decision_summary = _decision_summary(
+        decision_summary = _decision_summary_v2(
             recommendation_type,
             has_integrity_block=bool(item_alerts),
             combo_state=combo_state,
@@ -1561,7 +1647,7 @@ def _build_workbench_items_payload(
         actions = [
             _make_ui_action(
                 key="approve",
-                label=_approval_action_label(recommendation_type),
+                label=_approval_action_label_v2(recommendation_type),
                 ui_action="rdp-approve-only",
                 value=str(rec.get("recommendation_id") or ""),
                 enabled=not item_alerts,
@@ -1569,7 +1655,7 @@ def _build_workbench_items_payload(
             ),
             _make_ui_action(
                 key="reject",
-                label=_reject_action_label(recommendation_type),
+                label=_reject_action_label_v2(recommendation_type),
                 ui_action="rdp-reject-recommendation",
                 value=str(rec.get("recommendation_id") or ""),
                 enabled=True,
@@ -1585,7 +1671,7 @@ def _build_workbench_items_payload(
             "status": rec.get("status") or "draft",
             "headline": headline,
             "decision_summary": decision_summary,
-            "approval_effect_summary": _approval_effect_summary(recommendation_type),
+            "approval_effect_summary": _approval_effect_summary_v2(recommendation_type),
             "reason_summary": reason_summary,
             "missing_evidence": missing_evidence,
             "blocking_flags": [str(item) for item in (combo_state.get("inconsistencies") or [])],

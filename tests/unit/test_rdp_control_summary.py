@@ -9,6 +9,7 @@ from unittest.mock import patch
 import aats.api.rdp_control_summary as rdp_control_summary
 from aats.api.rdp_control_summary import (
     build_rdp_control_summary,
+    build_rdp_workbench_alerts,
     build_rdp_tuning_overview,
     build_rdp_tuning_proposals,
     build_rdp_workbench_item_detail,
@@ -941,7 +942,7 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(item["integrity_status"], "blocked")
         self.assertEqual(item["actions"][0]["enabled"], False)
         self.assertEqual(item["actions"][0]["label"], "批准参数候选")
-        self.assertEqual(item["approval_effect_summary"], "批准后会进入待发布列表，下一步是运行 Gate 或创建发布。")
+        self.assertEqual(item["approval_effect_summary"], "批准后进入待发布，下一步是运行 Gate 或创建发布。")
 
     def test_workbench_items_explain_keep_active_approval_as_record_only(self) -> None:
         request = _fake_request()
@@ -1020,9 +1021,9 @@ class TestRdpControlSummary(TestCase):
             payload = build_rdp_workbench_items(request)
 
         item = payload["items"][0]
-        self.assertEqual(item["actions"][0]["label"], "确认保持当前")
-        self.assertEqual(item["decision_summary"], "本轮建议保持当前；当前还没有 active 参数，只记录治理结论。")
-        self.assertEqual(item["approval_effect_summary"], "批准后只记录“保持当前”，不会创建新发布。")
+        self.assertEqual(item["actions"][0]["label"], "同意保持当前")
+        self.assertEqual(item["decision_summary"], "这轮先保持不动。现在还没有实盘参数，这次只记录治理结论。")
+        self.assertEqual(item["approval_effect_summary"], "批准后只记录“保持当前”，不会进入发布。")
 
     def test_workbench_items_include_release_candidates_after_parameter_upgrade_is_approved(self) -> None:
         request = _fake_request()
@@ -1493,3 +1494,140 @@ class TestRdpControlSummary(TestCase):
             "phase2 round_id must fall back to decision_round.round_id when item-level keys are absent",
         )
         self.assertEqual(phase2["status"], "available")
+
+    def test_workbench_overview_exposes_specific_disabled_reason_for_running_workflow(self) -> None:
+        request = _fake_request()
+
+        with (
+            patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
+            patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[
+                {
+                    "task_id": "task_running_data",
+                    "workflow": "data_maintenance",
+                    "status": "running",
+                    "requested_by": "scheduler",
+                    "requested_at": "2026-04-10T12:00:00Z",
+                    "started_at": "2026-04-10T12:01:00Z",
+                    "finished_at": None,
+                    "exit_code": None,
+                    "error_message": None,
+                    "log_tail": None,
+                },
+            ]),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "staging"}),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+                "overall_health": "healthy",
+                "blocking_reasons": [],
+                "warnings": [],
+                "checks": [],
+            }),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+            patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
+            patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={"recommendations": []}),
+            patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+                "generated_at": "2026-04-10T11:40:00Z",
+                "governance_managed": True,
+                "paused_combos": [],
+                "known_combos": [],
+                "active_sets": {},
+                "parameter_sets": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+                "available": False,
+                "generated_at": None,
+                "status_distribution": {},
+                "decisions": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+                "available": True,
+                "parameter_sets": [],
+            }),
+            patch("aats.data_platform.production_workflow.release_registry.load_release_history", return_value={"releases": []}),
+            patch("aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot", return_value=None),
+            patch("aats.data_platform.governance.snapshot_db.is_snapshot_incomplete", return_value=False),
+            patch("aats.api.rdp_control_summary.query_latest_attribution", return_value={"available": True}),
+            patch("aats.api.rdp_control_summary.query_latest_execution_realism", return_value={"available": True}),
+        ):
+            payload = build_rdp_workbench_overview(request)
+
+        self.assertFalse(payload["primary_action"]["enabled"])
+        self.assertEqual(
+            payload["primary_action"]["disabled_reason"],
+            "刷新数据正在执行，完成后才能再次点击。",
+        )
+
+    def test_workbench_alerts_dedupe_queue_noise_and_hide_missing_alert_file(self) -> None:
+        request = _fake_request()
+
+        with (
+            patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
+            patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "prod"}),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+                "overall_health": "blocked",
+                "blocking_reasons": [],
+                "warnings": [
+                    "rdp_task_queue_backlog_or_failures",
+                    "current_alerts_missing",
+                    "no_active_parameter_sets",
+                ],
+                "checks": [
+                    {
+                        "category": "task_queue",
+                        "name": "queue_state",
+                        "status": "warn",
+                        "detail": "pending=0, running=3, failed=315",
+                    },
+                    {
+                        "category": "alerts",
+                        "name": "current_alerts",
+                        "status": "warn",
+                        "detail": "current_alerts.json not found",
+                    },
+                    {
+                        "category": "parameters",
+                        "name": "active_parameter_sets",
+                        "status": "warn",
+                        "detail": "count=0",
+                    },
+                ],
+            }),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+            patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
+            patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={"recommendations": []}),
+            patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+                "generated_at": "2026-04-10T11:40:00Z",
+                "governance_managed": True,
+                "paused_combos": [],
+                "known_combos": [],
+                "active_sets": {},
+                "parameter_sets": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+                "available": False,
+                "generated_at": None,
+                "status_distribution": {},
+                "decisions": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+                "available": True,
+                "parameter_sets": [],
+            }),
+            patch("aats.data_platform.production_workflow.release_registry.load_release_history", return_value={"releases": []}),
+            patch("aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot", return_value=None),
+            patch("aats.data_platform.governance.snapshot_db.is_snapshot_incomplete", return_value=False),
+            patch("aats.api.rdp_control_summary.query_latest_attribution", return_value={"available": True}),
+            patch("aats.api.rdp_control_summary.query_latest_execution_realism", return_value={"available": True}),
+        ):
+            payload = build_rdp_workbench_alerts(request)
+
+        titles = [item["title"] for item in payload["operational_alerts"]]
+        messages = [item["message"] for item in payload["operational_alerts"]]
+        self.assertEqual(titles.count("任务队列积压"), 1)
+        self.assertTrue(any("执行中 3 条" in message and "失败 315 条" in message for message in messages))
+        self.assertFalse(any("current_alerts.json not found" in message for message in messages))
+        self.assertIn("当前还没有已生效的实盘参数。先完成治理结论，再决定是否发布。", messages)

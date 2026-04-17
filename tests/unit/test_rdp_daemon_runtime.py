@@ -103,3 +103,28 @@ def test_execute_workflow_handles_large_output_without_pipe_deadlock(
     assert exit_code == 0
     assert error_message == ""
     assert "x" in log_tail
+
+
+def test_recover_orphaned_running_tasks_marks_stale_rows_failed(monkeypatch) -> None:
+    daemon = importlib.import_module("scripts.rdp_task_daemon")
+
+    recovered_rows = [
+        {
+            "task_id": "task_stale_1",
+            "workflow": "data_maintenance",
+            "requested_at": "2026-04-17T11:00:00+00:00",
+            "started_at": "2026-04-17T11:01:00+00:00",
+        },
+    ]
+
+    with (
+        patch("aats.data_platform.db.get_session", _fake_session),
+        patch(
+            "aats.data_platform.governance.rdp_task_db.db_recover_orphaned_running_tasks",
+            return_value=recovered_rows,
+        ) as recover_mock,
+    ):
+        recovered = daemon._recover_orphaned_running_tasks()
+
+    assert recovered == recovered_rows
+    recover_mock.assert_called_once()

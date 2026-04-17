@@ -75,15 +75,15 @@ export function createRdpActionHandlers({
         const recommendationType = String(result.recommendation?.recommendation_type || "");
         let message = `${truncateForConfirm(recommendationId)} 已审批。`;
         if (recommendationType === "parameter_upgrade") {
-          message = `${truncateForConfirm(recommendationId)} 已批准，请到“待发布候选”里运行 Gate 或创建发布。`;
+          message = `${truncateForConfirm(recommendationId)} 已批准参数候选。下一步请到“待发布候选”里运行 Gate 或创建发布。`;
         } else if (recommendationType === "keep_active") {
-          message = `${truncateForConfirm(recommendationId)} 已确认保持当前，本轮到此结束，不会创建新发布。`;
+          message = `${truncateForConfirm(recommendationId)} 已同意“保持当前”。这轮不会创建新发布。`;
         } else if (recommendationType === "lower_priority") {
-          message = `${truncateForConfirm(recommendationId)} 已确认降优先级，本轮不会创建新发布。`;
+          message = `${truncateForConfirm(recommendationId)} 已同意“降低优先级”。这轮不会创建新发布。`;
         } else if (recommendationType === "pause") {
-          message = `${truncateForConfirm(recommendationId)} 已确认暂停，本轮不会创建新发布。`;
+          message = `${truncateForConfirm(recommendationId)} 已同意“暂停”。这轮不会创建新发布。`;
         } else if (recommendationType === "require_review") {
-          message = `${truncateForConfirm(recommendationId)} 已确认需人工复核，本轮不会创建新发布。`;
+          message = `${truncateForConfirm(recommendationId)} 已转入人工复核，这轮不会创建新发布。`;
         }
         setFlash(state, "info", message);
       } else {

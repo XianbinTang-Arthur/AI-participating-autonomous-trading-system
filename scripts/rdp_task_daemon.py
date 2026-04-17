@@ -199,6 +199,27 @@ def execute_workflow(
         return -2, "", str(exc)
 
 
+def _recover_orphaned_running_tasks() -> list[dict[str, object]]:
+    from aats.data_platform.db import get_session
+    from aats.data_platform.governance.rdp_task_db import (
+        db_recover_orphaned_running_tasks,
+    )
+
+    with get_session() as session:
+        recovered = db_recover_orphaned_running_tasks(
+            session,
+            error_message="rdp_daemon_restarted_before_task_finished",
+            exit_code=-3,
+        )
+    if recovered:
+        log.warning(
+            "Recovered %d orphaned running tasks after daemon startup: %s",
+            len(recovered),
+            ", ".join(str(item.get("task_id")) for item in recovered),
+        )
+    return recovered
+
+
 def process_one_task(*, poll_interval: int) -> dict[str, object]:
     """尝试领取并执行一个任务."""
     from aats.data_platform.db import get_session
@@ -283,6 +304,7 @@ def main() -> int:
     from aats.data_platform.db import run_migrations
 
     run_migrations()
+    _recover_orphaned_running_tasks()
 
     log.info("RDP Task Daemon started (poll_interval=%ds, once=%s)",
              args.poll_interval, args.once)

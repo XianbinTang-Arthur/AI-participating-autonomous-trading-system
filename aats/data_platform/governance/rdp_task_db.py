@@ -147,6 +147,59 @@ def db_update_task_status(
     log.info("DB updated task: %s -> %s (exit=%s)", task_id, status, exit_code)
 
 
+def db_recover_orphaned_running_tasks(
+    session: Session,
+    *,
+    error_message: str = "rdp_daemon_restarted_before_task_finished",
+    exit_code: int = -3,
+) -> list[dict[str, Any]]:
+    """将 daemon 异常退出后遗留的 running 任务统一回收成 failed。"""
+    rows = session.execute(
+        text(
+            """
+            SELECT task_id, workflow, requested_at, started_at
+            FROM governance.rdp_task_queue
+            WHERE status = 'running'
+            ORDER BY started_at ASC NULLS LAST, requested_at ASC
+            """
+        ),
+    ).fetchall()
+
+    if not rows:
+        return []
+
+    now = datetime.now(timezone.utc)
+    session.execute(
+        text(
+            """
+            UPDATE governance.rdp_task_queue
+            SET status = 'failed',
+                finished_at = :now,
+                exit_code = :exit_code,
+                error_message = :error_message
+            WHERE status = 'running'
+            """
+        ),
+        {
+            "now": now,
+            "exit_code": exit_code,
+            "error_message": error_message,
+        },
+    )
+
+    recovered = [
+        {
+            "task_id": row.task_id,
+            "workflow": row.workflow,
+            "requested_at": row.requested_at.isoformat() if row.requested_at else None,
+            "started_at": row.started_at.isoformat() if row.started_at else None,
+        }
+        for row in rows
+    ]
+    log.warning("Recovered %d orphaned running tasks", len(recovered))
+    return recovered
+
+
 # ── 查询最近任务（gateway 面板用）──────────────────────────────────
 
 def db_get_recent_tasks(

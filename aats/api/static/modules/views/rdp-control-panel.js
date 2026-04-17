@@ -56,7 +56,7 @@ const EVIDENCE_PHASE_LABELS = {
   phase2: "Step2 研究",
   phase3: "Phase3 归因",
   phase4: "Phase4 执行",
-  readiness: "Readiness",
+  readiness: "就绪度",
 };
 
 const EVIDENCE_STATUS_LABELS = {
@@ -97,7 +97,7 @@ const DECISION_STATUS_LABELS = {
 };
 
 const RUNTIME_SOURCE_LABELS = {
-  active_parameters: "active 参数",
+  active_parameters: "已生效参数",
   governance_pause: "治理暂停状态",
   governance_managed: "治理参数",
   unknown: "未知",
@@ -193,7 +193,7 @@ function labelForApplyResult(status) {
 }
 
 function labelForWorkflow(workflow) {
-  return WORKFLOW_LABELS[workflow] || workflow || "无";
+  return WORKFLOW_LABELS[workflow] || workflow || "暂无";
 }
 
 function labelForEvidencePhase(phase) {
@@ -325,12 +325,22 @@ function renderWorkbenchHero({
   canAdmin = false,
 }) {
   const blockers = overview.blockers || [];
+  const allActions = [
+    overview.primary_action,
+    ...(overview.secondary_actions || []),
+  ].filter(Boolean);
   const primaryAction = overview.primary_action
     ? renderActionDescriptor(overview.primary_action, canAdmin, "primary")
     : "";
   const secondaryActions = (overview.secondary_actions || [])
     .map((action) => renderActionDescriptor(action, canAdmin, "ghost"))
     .join("");
+  const disabledActionNotes = canAdmin
+    ? allActions
+      .filter((action) => action && action.enabled === false && action.disabled_reason)
+      .map((action) => `<span>${escapeHtml(`${action.label}：${action.disabled_reason}`)}</span>`)
+      .join("")
+    : "";
   const counts = overview.summary_counts || {};
   const runtime = overview.current_execution || {};
   const nextQueue = overview.next_queue || {};
@@ -339,13 +349,14 @@ function renderWorkbenchHero({
       ${primaryAction}
       ${secondaryActions}
     </div>
+    ${disabledActionNotes ? `<div class="rdp-inline-meta">${disabledActionNotes}</div>` : ""}
   `;
 
   return primaryStatusPanel({
     eyebrow: "RDP 工作台",
-    title: "先看当前轮次，再选择动作",
+    title: "当前轮次",
     headline: overview.headline || "当前没有新的治理动作",
-    summary: overview.subheadline || "需要时可以刷新数据，或重跑完整 RDP。",
+    summary: overview.subheadline || "先处理这轮结论，再决定是否发布或回滚。",
     tone: blockers.length ? "warning" : "neutral",
     actions: heroActions,
     pills: [
@@ -359,28 +370,28 @@ function renderWorkbenchHero({
     ].filter(Boolean),
     metrics: [
       {
-        label: "待审批",
+        label: "待处理",
         value: `${counts.pending_items || 0} 条`,
         meta: "只算当前轮次",
         tone: counts.pending_items ? "warning" : "outline",
         badge: actorTags("operator"),
       },
       {
-        label: "执行中",
+        label: "当前运行",
         value: labelForWorkflow(runtime.workflow),
         meta: runtime.started_at ? `开始于 ${relativeTime(runtime.started_at)}` : "当前没有运行中的流程",
         tone: runtime.workflow ? "info" : "outline",
         badge: actorTags("system"),
       },
       {
-        label: "排队中",
+        label: "下一项",
         value: labelForWorkflow(nextQueue.workflow),
         meta: nextQueue.requested_at ? `排队于 ${relativeTime(nextQueue.requested_at)}` : "当前没有新的排队任务",
         tone: nextQueue.workflow ? "warning" : "outline",
         badge: actorTags("system"),
       },
       {
-        label: "观察中",
+        label: "观察中发布",
         value: `${counts.observing_releases || 0} 条`,
         meta: counts.observing_releases ? "这些发布还在观察窗口内" : "当前没有观察中的发布",
         tone: counts.observing_releases ? "info" : "outline",
@@ -408,9 +419,9 @@ function renderWorkbenchItemsCard({
         : "",
     ].filter(Boolean),
     body: `
-      <p class="meta-copy">${escapeHtml(item.decision_summary || "当前治理结论已生成，请先处理这一组组合。")}</p>
+      <p class="meta-copy">${escapeHtml(item.decision_summary || "先看这轮结论，再决定是否批准。")}</p>
       ${item.approval_effect_summary
-        ? `<p class="meta-copy">批准后：${escapeHtml(item.approval_effect_summary)}</p>`
+        ? `<p class="meta-copy">如果批准：${escapeHtml(item.approval_effect_summary)}</p>`
         : ""}
       ${item.approval_enabled === false && item.approval_blocked_reason
         ? callout({
@@ -424,7 +435,7 @@ function renderWorkbenchItemsCard({
         ? `<ul class="rdp-bullet-list">${item.reason_summary.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>`
         : ""}
       ${item.missing_evidence?.length
-        ? `<p class="meta-copy">缺失项：${escapeHtml(item.missing_evidence.join("；"))}</p>`
+        ? `<p class="meta-copy">还缺：${escapeHtml(item.missing_evidence.join("；"))}</p>`
         : ""}
       ${renderEvidenceDigest(item)}
     `,
@@ -438,9 +449,9 @@ function renderWorkbenchItemsCard({
   }));
 
   return surfaceCard({
-    title: "待处理组合",
+    title: "当前待处理",
     kicker: "只看当前轮次",
-    copy: "每个组合只保留一张卡片。",
+    copy: "每个组合只保留一张主卡。",
     content: cards.length
       ? `<div class="rdp-worklist">${cards.join("")}</div>`
       : notice("当前没有新的待处理组合。", "info"),
@@ -480,7 +491,7 @@ function renderReleaseCandidatesCard({
   return surfaceCard({
     title: "待发布候选",
     kicker: "审批后的下一步",
-    copy: "先运行 Gate，再决定是否创建发布。创建发布时也会自动再跑一次 Gate。",
+    copy: "先跑 Gate，再决定是否创建发布。",
     content: `<div class="rdp-worklist">${cards.join("")}</div>`,
   });
 }
@@ -489,37 +500,37 @@ function renderIntegrityAlertsCard(alerts = []) {
   const integrity = alerts.integrity_alerts || [];
   const operational = alerts.operational_alerts || [];
   return surfaceCard({
-    title: "阻断与告警",
+    title: "当前阻断",
     kicker: "审批前先看",
-    copy: "先处理阻断，再继续审批和发布。",
+    copy: "先处理这些问题，再继续审批和发布。",
     content: `
       ${summaryStrip([
         {
-          label: "完整性告警",
+          label: "证据问题",
           value: `${integrity.length} 条`,
-          meta: integrity.length ? "存在不可直接审批的研究/归因/执行缺口" : "当前没有完整性阻断",
+          meta: integrity.length ? "这些问题会直接挡住审批" : "当前没有新的证据阻断",
           tone: integrity.length ? "danger" : "positive",
           badge: actorTags("system"),
         },
         {
-          label: "系统阻断",
+          label: "系统问题",
           value: `${operational.length} 条`,
-          meta: operational.length ? "存在运行态警告或阻断" : "当前没有额外系统阻断",
+          meta: operational.length ? "这些问题会拖慢流程推进" : "当前没有额外系统问题",
           tone: operational.length ? "warning" : "outline",
           badge: actorTags("system"),
         },
       ])}
       ${(integrity.length || operational.length)
-        ? `<div class="rdp-worklist">${[...integrity, ...operational].slice(0, 5).map((alert) => renderWorkItem({
+        ? `<div class="rdp-worklist">${[...integrity, ...operational].slice(0, 3).map((alert) => renderWorkItem({
             tone: alert.severity === "danger" ? "danger" : "warning",
-            kicker: alert.phase ? `${String(alert.phase).toUpperCase()} 告警` : "系统告警",
+            kicker: alert.phase ? `${labelForEvidencePhase(String(alert.phase))}` : "系统状态",
             title: alert.title || "当前存在阻断",
             body: `<p class="meta-copy">${escapeHtml(alert.message || "当前告警缺少详细说明。")}</p>`,
             meta: [
-              alert.blocks_approval ? "该告警会阻断审批" : "",
+              alert.blocks_approval ? "这个问题会阻断审批" : "",
             ],
           })).join("")}</div>`
-        : notice("当前轮次没有新的完整性告警。", "info")}
+        : notice("当前没有新的阻断。", "info")}
     `,
   });
 }
@@ -531,12 +542,12 @@ function renderRuntimeRailCard({
   const health = overview.health || {};
   const environment = rdpControl.environment || {};
   return surfaceCard({
-    title: "运行状态",
-    kicker: "手动流程",
-    copy: "这里只看执行和排队。",
+    title: "后台状态",
+    kicker: "只看流程推进",
+    copy: "这里只看现在在跑什么、下一步是什么。",
     content: summaryStrip([
       {
-        label: "执行中",
+        label: "当前运行",
         value: labelForWorkflow(overview.current_execution?.workflow),
         meta: overview.current_execution?.started_at
           ? `开始于 ${relativeTime(overview.current_execution.started_at)}`
@@ -545,7 +556,7 @@ function renderRuntimeRailCard({
         badge: actorTags("system"),
       },
       {
-        label: "排队中",
+        label: "下一项",
         value: labelForWorkflow(overview.next_queue?.workflow),
         meta: overview.next_queue?.requested_at
           ? `排队于 ${relativeTime(overview.next_queue.requested_at)}`
@@ -554,14 +565,14 @@ function renderRuntimeRailCard({
         badge: actorTags("system"),
       },
       {
-        label: "Daemon",
+        label: "后台服务",
         value: labelForHealth(health.daemon),
         meta: environment.name ? `环境 ${labelForEnvironment(environment.name)}` : "运行环境待确认",
         tone: toneForHealth(health.daemon),
         badge: actorTags("system"),
       },
       {
-        label: "最新 Gate",
+        label: "Gate 结果",
         value: labelForGate(health.latest_gate),
         meta: "发布前仍需以最新 Gate 为准",
         tone: toneForGate(health.latest_gate),
@@ -595,21 +606,21 @@ function renderTuningCard({
   const items = tuningProposals.items || [];
   return surfaceCard({
     title: "自动调优",
-    kicker: "strategy_tuning_review",
+    kicker: "只看需要人工确认的提案",
     copy: tuningOverview.headline || "这里只展示待审核的调优提案。",
     content: `
       ${summaryStrip([
         {
-          label: "待审核提案",
+          label: "待审核",
           value: `${tuningOverview.pending_review_count || 0} 条`,
-          meta: "需人工确认后才会进入 override",
+          meta: "人工确认后才会写入调优规则",
           tone: tuningOverview.pending_review_count ? "warning" : "outline",
           badge: actorTags("ai"),
         },
         {
-          label: "已生效 override",
+          label: "已生效规则",
           value: `${tuningOverview.active_override_count || 0} 组`,
-          meta: "已经会影响后续 research / replay 默认值",
+          meta: "会影响后续研究、回放和默认值",
           tone: tuningOverview.active_override_count ? "info" : "outline",
           badge: actorTags("system"),
         },
