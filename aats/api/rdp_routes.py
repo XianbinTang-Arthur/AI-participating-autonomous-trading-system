@@ -35,9 +35,28 @@ from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, Field
 
 from aats.api._governance_db import governance_session as _governance_session
+from aats.api.rdp_control_summary import (
+    build_rdp_tuning_overview,
+    build_rdp_tuning_proposals,
+    build_rdp_workbench_alerts,
+    build_rdp_workbench_item_detail,
+    build_rdp_workbench_item_evidence,
+    build_rdp_workbench_items,
+    build_rdp_workbench_overview,
+)
 from aats.api.auth import OperatorPrincipal, require_read_access, require_write_access
 from aats.data_platform.governance.step2_integrity_guard import (
     step2_integrity_blocking_reason as _step2_integrity_blocking_reason,
+)
+from aats.services.operator.rdp_queries import (
+    query_active_parameter_sets,
+    query_latest_attribution,
+    query_latest_decision_round,
+    query_latest_decisions,
+    query_latest_execution_realism,
+    query_latest_recommendations,
+    query_promotion_readiness,
+    query_rdp_health,
 )
 
 
@@ -72,25 +91,6 @@ def _resolve_actor(principal: OperatorPrincipal | None, body_actor: str | None) 
     if body_actor:
         return str(body_actor)
     return "operator"
-from aats.services.operator.rdp_queries import (
-    query_active_parameter_sets,
-    query_latest_attribution,
-    query_latest_decision_round,
-    query_latest_decisions,
-    query_latest_execution_realism,
-    query_latest_recommendations,
-    query_promotion_readiness,
-    query_rdp_health,
-)
-from aats.api.rdp_control_summary import (
-    build_rdp_workbench_item_detail,
-    build_rdp_workbench_item_evidence,
-    build_rdp_tuning_overview,
-    build_rdp_tuning_proposals,
-    build_rdp_workbench_alerts,
-    build_rdp_workbench_items,
-    build_rdp_workbench_overview,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -718,7 +718,7 @@ async def trigger_task_api(
                 workflow=body.workflow,
                 requested_by=_resolve_actor(principal, body.actor),
             )
-    except Exception as exc:
+    except Exception:
         # H2 风格修复：task 创建异常属于内部错误（DB 约束冲突 / 连接失败
         # 等），message 直接回显给 caller 会把 SQL 片段、schema 名泄漏出去。
         # 固定文案 + logger.exception 把堆栈留日志。

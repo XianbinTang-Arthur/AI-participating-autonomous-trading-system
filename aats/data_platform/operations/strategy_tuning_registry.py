@@ -11,6 +11,9 @@ from sqlalchemy.orm import Session
 
 from aats.data_platform.governance._atomic_io import atomic_json_write
 from aats.data_platform.governance._db_util import try_governance_db
+from aats.data_platform.governance.step2_integrity_guard import (
+    step2_integrity_blocking_reason as _step2_snapshot_blocking_reason,
+)
 
 _REGISTRY_PATH = Path("artifacts/governance/strategy_tuning_proposals.json")
 _OVERRIDES_PATH = Path("artifacts/governance/strategy_tuning_overrides.json")
@@ -264,10 +267,6 @@ def record_generated_proposals(
         ),
     }
 
-
-from aats.data_platform.governance.step2_integrity_guard import (
-    step2_integrity_blocking_reason as _step2_snapshot_blocking_reason,
-)
 # 历史符号保留以兼容可能的外部调用；语义现在由共享模块保证，不再允许
 # 本地分叉——任一修改都会同时影响 approve / supersede / tuning review 三条路径。
 

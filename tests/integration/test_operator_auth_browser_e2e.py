@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 import requests
 import uvicorn
-from fastapi import Depends, FastAPI
+from fastapi import Depends, FastAPI, Query
 from fastapi.responses import HTMLResponse
 from selenium import webdriver
 from selenium.common.exceptions import WebDriverException
@@ -155,6 +155,152 @@ def _build_app(*, secure_cookie_required: bool, include_bundle: bool = False) ->
 </html>
             """
 
+        @app.get("/dashboard/bundle")
+        async def _dashboard_bundle(
+            view: str = "overview",
+            panel: list[str] = Query(default=[]),
+            _principal: OperatorPrincipal = Depends(require_read_access),
+        ) -> dict[str, object]:
+            panel_data = {
+                "session": {
+                    "authenticated": True,
+                    "identity": "admin",
+                    "role": "admin",
+                    "auth_enabled": True,
+                    "request_scheme": "https",
+                    "secure_cookie_required": True,
+                    "transport_compatible": True,
+                    "required_transport": "https",
+                    "auth_blocked_reason": None,
+                },
+                "authProviders": {
+                    "auth_enabled": True,
+                    "session_enabled": True,
+                    "database_backed": True,
+                    "configured_roles": ["admin"],
+                    "stored_user_count": 1,
+                    "request_scheme": "https",
+                    "secure_cookie_required": True,
+                    "transport_compatible": True,
+                    "required_transport": "https",
+                    "auth_blocked_reason": None,
+                },
+                "health": {
+                    "runtime_state": "running",
+                    "overall_status": "running",
+                    "halted": False,
+                },
+                "mode": {
+                    "default_symbol": "BTC-USDT-SWAP",
+                },
+                "runtime": {
+                    "symbols": ["BTC-USDT-SWAP"],
+                },
+                "systemRecovery": {
+                    "recovery": {
+                        "safe_to_trade": True,
+                        "halted": False,
+                        "resume_eligible": True,
+                        "review_required": False,
+                    }
+                },
+                "blockerControl": {
+                    "blockers": [],
+                    "primary_blocker": None,
+                },
+                "blockers": {
+                    "blockers": [],
+                },
+                "metrics": {
+                    "decision_cycle_count": 3,
+                    "order_intent_count": 2,
+                    "fill_count": 1,
+                    "reconciliation_mismatch_count": 0,
+                    "current_open_order_count": 0,
+                },
+                "portfolio": {
+                    "portfolio": {
+                        "total_equity": 1200,
+                        "unrealized_pnl": 12,
+                        "realized_pnl": 8,
+                        "gross_exposure": 300,
+                        "net_exposure": 150,
+                        "positions": [],
+                    }
+                },
+                "positions": {
+                    "local_instrument_positions": [],
+                },
+                "latestDecision": {
+                    "decision_id": "dec-e2e-1",
+                    "decision_time": "2026-04-17T04:00:00Z",
+                    "decision_context": {
+                        "as_of_ts": "2026-04-17T04:00:00Z",
+                        "symbol": "BTC-USDT-SWAP",
+                    },
+                    "position_target": {
+                        "delta_position_qty": 0.01,
+                    },
+                    "policy_decision": {
+                        "execution_allowed": True,
+                    },
+                    "risk_decision": {
+                        "approved": True,
+                    },
+                },
+                "executionLatest": {
+                    "latest_order": {
+                        "status": "created",
+                        "client_order_id": "ord-e2e-1",
+                    },
+                    "latest_fill": None,
+                },
+                "reconciliationLatest": {
+                    "reconciliation": {
+                        "reconciliation_id": "recon-e2e-1",
+                        "severity": "ok",
+                        "halt_required": False,
+                    }
+                },
+                "accountState": {
+                    "connected": True,
+                    "fresh": True,
+                    "ready": True,
+                    "blockers": [],
+                },
+            }
+            requested_panels = panel or list(panel_data.keys())
+            return {
+                "view": view,
+                "panels": {
+                    key: {
+                        "data": panel_data.get(key),
+                        "error": None,
+                    }
+                    for key in requested_panels
+                },
+                "auth": {
+                    "auth_enabled": True,
+                    "authenticated": True,
+                    "request_scheme": "https",
+                    "secure_cookie_required": True,
+                    "transport_compatible": True,
+                    "required_transport": "https",
+                    "auth_blocked_reason": None,
+                    "protected_panel_keys": requested_panels,
+                    "blocked_panel_keys": [],
+                    "primary_error": None,
+                    "access_state": "granted",
+                },
+                "timing": {
+                    "total_ms": 1.0,
+                    "panels": {},
+                    "cache_hit": False,
+                    "cache_age_ms": 0.0,
+                    "deduped": False,
+                },
+            }
+
     return app
 
 
@@ -258,5 +404,35 @@ def test_https_secure_session_login_persists_and_can_read_rdp_bundle(tmp_path: P
                 wait.until(lambda browser: "/ui" in browser.current_url)
                 driver.get(f"{base_url}/e2e/auth-dashboard")
                 wait.until(lambda browser: "RDP 核心面板已就绪" in browser.find_element(By.ID, "status").text)
+            finally:
+                driver.quit()
+
+
+@pytest.mark.integration
+def test_https_secure_session_can_render_overview_without_console_errors(tmp_path: Path) -> None:
+    try:
+        driver = _build_browser(ignore_certificate_errors=True)
+    except WebDriverException as exc:  # pragma: no cover - env dependent
+        pytest.skip(f"Edge WebDriver unavailable: {exc}")
+
+    certfile, keyfile = _write_self_signed_cert(tmp_path)
+    app = _build_app(secure_cookie_required=True, include_bundle=True)
+    with patch("aats.api.auth_routes._query", return_value=SimpleNamespace(record_operator_login=lambda **_: None)):
+        with _live_server(app, scheme="https", certfile=certfile, keyfile=keyfile) as base_url:
+            try:
+                driver.get(f"{base_url}/login")
+                wait = WebDriverWait(driver, 20)
+                wait.until(EC.element_to_be_clickable((By.ID, "loginUsername")))
+                wait.until(lambda browser: browser.find_element(By.ID, "loginButton").is_enabled())
+                driver.find_element(By.ID, "loginUsername").send_keys("admin")
+                driver.find_element(By.ID, "loginPassword").send_keys("admin-pass")
+                driver.find_element(By.ID, "loginButton").click()
+                wait.until(lambda browser: "/ui" in browser.current_url)
+                driver.get(f"{base_url}/ui/overview")
+                wait.until(lambda browser: "资产概览" in browser.page_source)
+                severe_logs = [
+                    entry for entry in driver.get_log("browser") if entry.get("level") == "SEVERE"
+                ]
+                assert not severe_logs, severe_logs
             finally:
                 driver.quit()
