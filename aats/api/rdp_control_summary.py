@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,48 +82,29 @@ def _parse_iso_datetime(value: str | None) -> datetime | None:
 
 
 def _load_recent_gate_results(project_root: Path, *, limit: int = 8) -> list[dict[str, Any]]:
+    """P0-2 阶段 D：只从 governance DB 读 pre-apply gate 历史.
+
+    DB 不可达或查询异常会抛出 ``RuntimeError`` / 原异常，调用方需要决定如何
+    向用户呈现（500、503 或显式 "gate 模块暂不可用" 状态码），不再伪造成
+    "没有 gate 历史" 这种误导性状态。``project_root`` 仅作签名保持，用于
+    将来扩展，不再用于扫描 ``artifacts/`` 目录。
+    """
+    del project_root  # artifacts/gates JSON 副本已退出读路径
     engine, ok = try_governance_db()
-    if ok:
-        try:
-            from aats.data_platform.governance.operational_state_db import (
-                db_list_pre_apply_gate_results,
-            )
+    if not ok:
+        raise RuntimeError("governance DB 不可达，无法加载 pre-apply gate 历史")
+    try:
+        from aats.data_platform.governance.operational_state_db import (
+            db_list_pre_apply_gate_results,
+        )
 
-            with Session(engine) as session:
-                results = db_list_pre_apply_gate_results(session, limit=limit)
-            if results:
-                return [
-                    {
-                        "gate_run_id": payload.get("gate_run_id"),
-                        "recommendation_id": payload.get("recommendation_id"),
-                        "created_at": payload.get("created_at"),
-                        "gate_status": payload.get("gate_status"),
-                        "allow_apply": bool(payload.get("allow_apply")),
-                        "blocking_reasons": payload.get("blocking_reasons") or [],
-                        "warnings": payload.get("warnings") or [],
-                        "checks": payload.get("checks") or [],
-                    }
-                    for payload in results
-                    if isinstance(payload, dict)
-                ]
-        except Exception as exc:
-            logger.warning("control-summary: failed to load gate results from DB: %s", exc)
-        finally:
-            if engine is not None:
-                engine.dispose()
+        with Session(engine) as session:
+            results = db_list_pre_apply_gate_results(session, limit=limit)
+    finally:
+        engine.dispose()
 
-    gates_root = project_root / "artifacts" / "production_workflow" / "gates"
-    if not gates_root.exists():
-        return []
-    results: list[dict[str, Any]] = []
-    for path in gates_root.glob("*/pre_apply_gate_result.json"):
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        results.append({
+    return [
+        {
             "gate_run_id": payload.get("gate_run_id"),
             "recommendation_id": payload.get("recommendation_id"),
             "created_at": payload.get("created_at"),
@@ -133,9 +113,10 @@ def _load_recent_gate_results(project_root: Path, *, limit: int = 8) -> list[dic
             "blocking_reasons": payload.get("blocking_reasons") or [],
             "warnings": payload.get("warnings") or [],
             "checks": payload.get("checks") or [],
-        })
-    results.sort(key=lambda item: _iso_sort_key(item.get("created_at")), reverse=True)
-    return results[:limit]
+        }
+        for payload in results
+        if isinstance(payload, dict)
+    ]
 
 
 def _load_recent_releases(
