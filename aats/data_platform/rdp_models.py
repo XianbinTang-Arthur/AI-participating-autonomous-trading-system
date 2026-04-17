@@ -20,6 +20,7 @@ from sqlalchemy import (
     DateTime,
     Double,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -535,6 +536,13 @@ class ActiveParameterSetModel(RdpBase):
     __tablename__ = "active_parameter_sets"
     __table_args__ = (
         UniqueConstraint("family", "timeframe", name="uq_active_combo"),
+        ForeignKeyConstraint(
+            ["parameter_set_id"],
+            ["governance.parameter_sets.parameter_set_id"],
+            name="fk_active_ps_id",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
         {"schema": "governance"},
     )
 
@@ -555,6 +563,24 @@ class ParameterApplyHistoryModel(RdpBase):
     __table_args__ = (
         UniqueConstraint("operation_id", name="uq_apply_op"),
         Index("ix_apply_history_combo", "family", "timeframe", "created_at"),
+        ForeignKeyConstraint(
+            ["to_parameter_set_id"],
+            ["governance.parameter_sets.parameter_set_id"],
+            name="fk_apply_history_to_ps",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["from_parameter_set_id"],
+            ["governance.parameter_sets.parameter_set_id"],
+            name="fk_apply_history_from_ps",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint(
+            "operation_type IN ('apply', 'rollback', 'clear')",
+            name="ck_apply_op_type",
+        ),
         {"schema": "governance"},
     )
 
@@ -583,6 +609,10 @@ class ParameterSetModel(RdpBase):
         UniqueConstraint("parameter_set_id", name="uq_ps_id"),
         Index("ix_ps_family_tf_status", "family", "timeframe", "status"),
         Index("ix_ps_source_round", "source_round_id"),
+        CheckConstraint(
+            "status IN ('draft', 'candidate', 'frozen', 'deprecated')",
+            name="ck_ps_status",
+        ),
         {"schema": "governance"},
     )
 
@@ -614,6 +644,19 @@ class RecommendationModel(RdpBase):
     __table_args__ = (
         UniqueConstraint("recommendation_id", name="uq_rec_id"),
         Index("ix_rec_family_tf_status", "family", "timeframe", "status"),
+        Index(
+            "uq_rec_round_family_tf_active",
+            "source_round_id", "family", "timeframe",
+            unique=True,
+            postgresql_where=text(
+                "source_round_id IS NOT NULL "
+                "AND status NOT IN ('superseded', 'rejected')"
+            ),
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'approved', 'rejected', 'superseded')",
+            name="ck_rec_status",
+        ),
         {"schema": "governance"},
     )
 
@@ -624,6 +667,7 @@ class RecommendationModel(RdpBase):
     timeframe = Column(String(16), nullable=False)
     recommendation_type = Column(String(32), nullable=False)
     target_parameter_set_id = Column(String(128))
+    source_round_id = Column(String(128))
     confidence = Column(String(32), nullable=False)
     reason = Column(Text, nullable=False)
     evidence_bundle_ref = Column(String(128))
@@ -649,6 +693,13 @@ class ActiveDecisionModel(RdpBase):
     __tablename__ = "active_decisions"
     __table_args__ = (
         UniqueConstraint("family", "timeframe", name="uq_active_decision_combo"),
+        ForeignKeyConstraint(
+            ["active_parameter_set_id"],
+            ["governance.parameter_sets.parameter_set_id"],
+            name="fk_active_decision_ps",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
         {"schema": "governance"},
     )
 
@@ -850,6 +901,29 @@ class ParameterReleaseModel(RdpBase):
         UniqueConstraint("release_id", name="uq_parameter_release_release_id"),
         Index("ix_parameter_release_combo_created", "combo_key", "created_at"),
         Index("ix_parameter_release_recommendation", "recommendation_id"),
+        ForeignKeyConstraint(
+            ["parameter_set_id"],
+            ["governance.parameter_sets.parameter_set_id"],
+            name="fk_param_release_ps",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["previous_parameter_set_id"],
+            ["governance.parameter_sets.parameter_set_id"],
+            name="fk_param_release_prev_ps",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint(
+            "apply_result IN ('pending', 'blocked_by_gate', 'success', 'failed')",
+            name="ck_release_apply_result",
+        ),
+        CheckConstraint(
+            "observation_status IN ('pending', 'observing', 'completed', "
+            "'rollback_recommended', 'rolled_back')",
+            name="ck_release_observation_status",
+        ),
         {"schema": "governance"},
     )
 
@@ -878,6 +952,14 @@ class ObservationResultModel(RdpBase):
     __table_args__ = (
         UniqueConstraint("release_id", name="uq_observation_result_release_id"),
         Index("ix_observation_result_combo_eval", "combo_key", "evaluated_at"),
+        CheckConstraint(
+            "status IN ('observing', 'completed', 'rollback_recommended')",
+            name="ck_obs_status",
+        ),
+        CheckConstraint(
+            "recommendation IN ('keep', 'review', 'rollback_recommended')",
+            name="ck_obs_recommendation",
+        ),
         {"schema": "governance"},
     )
 
@@ -902,6 +984,17 @@ class RollbackRecommendationModel(RdpBase):
     __table_args__ = (
         UniqueConstraint("release_id", name="uq_rollback_recommendation_release_id"),
         Index("ix_rollback_recommendation_combo_eval", "combo_key", "evaluated_at"),
+        ForeignKeyConstraint(
+            ["suggested_target_parameter_set_id"],
+            ["governance.parameter_sets.parameter_set_id"],
+            name="fk_rollback_rec_target_ps",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint(
+            "severity IN ('none', 'medium', 'high')",
+            name="ck_rollback_severity",
+        ),
         {"schema": "governance"},
     )
 
@@ -925,6 +1018,11 @@ class ReleaseEffectivenessModel(RdpBase):
         UniqueConstraint("release_id", name="uq_release_effectiveness_release_id"),
         UniqueConstraint("evaluation_id", name="uq_release_effectiveness_evaluation_id"),
         Index("ix_release_effectiveness_combo_eval", "family", "timeframe", "evaluated_at"),
+        CheckConstraint(
+            "conclusion IN ('rollback_triggered', 'insufficient_evidence', "
+            "'ineffective', 'effective', 'mixed')",
+            name="ck_release_eff_conclusion",
+        ),
         {"schema": "governance"},
     )
 
