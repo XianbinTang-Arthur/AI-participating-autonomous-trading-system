@@ -198,3 +198,287 @@ def test_scheduler_state_load_ignores_meta_row_from_workflows() -> None:
     assert "data_maintenance" in reloaded["workflows"]
     assert _SCHEDULER_META_WORKFLOW not in reloaded["workflows"], \
         "sentinel workflow 绝不能出现在 workflows dict 里"
+
+
+# =====================================================================
+# P0-2 阶段 A：pre_apply_gate_results 业务查询 API
+# =====================================================================
+# 覆盖 db_record_gate_result / db_get_gate_result_by_run_id /
+# db_get_latest_gate_result / db_list_gate_results_for_recommendation /
+# db_list_gate_results_for_release。这些 API 是"gate 真源从 JSON 迁到 DB"
+# 的读路径契约——任何 SQL 语义回归（查不到最新、JOIN 方向错、payload 丢字段）
+# 都会让 apply 链路在 DB-only 模式下炸掉，这里先用 fake session 锁住语义。
+
+
+from datetime import datetime, timezone
+
+from aats.data_platform.governance.operational_state_db import (
+    db_get_gate_result_by_run_id,
+    db_get_latest_gate_result,
+    db_list_gate_results_for_recommendation,
+    db_list_gate_results_for_release,
+    db_record_gate_result,
+)
+
+
+class _FakeGateSession:
+    """Fake session 覆盖 pre_apply_gate_results + parameter_releases 的最小 SQL 方言。
+
+    支持的 SQL 模式：
+      - INSERT INTO governance.pre_apply_gate_results ... ON CONFLICT (gate_run_id)
+      - INSERT INTO governance.parameter_releases ...（仅用于测试 setup JOIN 数据）
+      - SELECT payload, created_at FROM governance.pre_apply_gate_results ...
+        WHERE gate_run_id / recommendation_id / LIMIT
+      - SELECT g.payload, g.created_at FROM ... JOIN parameter_releases ...
+        WHERE r.release_id
+
+    模拟策略：不做 SQL parsing，而是按 SQL 片段关键字路由；保留 gate_run_id
+    的幂等写（覆盖 payload）以便测试 record 的 upsert 语义。
+    """
+
+    def __init__(self) -> None:
+        self.gates: dict[str, dict[str, Any]] = {}
+        self.releases: dict[str, dict[str, Any]] = {}
+
+    def _store_gate(self, params: dict[str, Any]) -> None:
+        gate_run_id = params["gate_run_id"]
+        payload = params.get("payload")
+        if isinstance(payload, str):
+            try:
+                payload_decoded = json.loads(payload)
+            except (TypeError, ValueError):
+                payload_decoded = {}
+        else:
+            payload_decoded = payload or {}
+        self.gates[gate_run_id] = {
+            "gate_run_id": gate_run_id,
+            "recommendation_id": params.get("recommendation_id"),
+            "payload": payload_decoded,
+            "created_at": params.get("created_at"),
+        }
+
+    def _store_release(self, *, release_id: str, gate_result_ref: str) -> None:
+        self.releases[release_id] = {
+            "release_id": release_id,
+            "gate_result_ref": gate_result_ref,
+        }
+
+    def execute(self, statement: Any, params: dict[str, Any] | None = None) -> _FakeResult:
+        sql = str(statement).strip()
+
+        if sql.startswith("INSERT INTO governance.pre_apply_gate_results"):
+            assert params is not None
+            self._store_gate(params)
+            return _FakeResult([])
+
+        if (
+            "FROM governance.pre_apply_gate_results" in sql
+            and "WHERE gate_run_id = :gate_run_id" in sql
+            and "JOIN" not in sql
+        ):
+            assert params is not None
+            row = self.gates.get(params["gate_run_id"])
+            return _FakeResult([_FakeRow(row)] if row else [])
+
+        if (
+            "JOIN governance.parameter_releases" in sql
+            and "WHERE r.release_id = :release_id" in sql
+        ):
+            assert params is not None
+            release = self.releases.get(params["release_id"])
+            matched: list[_FakeRow] = []
+            if release is not None:
+                ref = release.get("gate_result_ref")
+                for g in self.gates.values():
+                    if g["gate_run_id"] == ref:
+                        matched.append(_FakeRow(g))
+            matched.sort(
+                key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
+            limit = int(params.get("limit") or 20)
+            return _FakeResult(matched[:limit])
+
+        if (
+            "FROM governance.pre_apply_gate_results" in sql
+            and "WHERE recommendation_id = :rec_id" in sql
+        ):
+            assert params is not None
+            matched = [
+                _FakeRow(g)
+                for g in self.gates.values()
+                if g["recommendation_id"] == params["rec_id"]
+            ]
+            matched.sort(
+                key=lambda r: r.created_at or datetime.min.replace(tzinfo=timezone.utc),
+                reverse=True,
+            )
+            if "LIMIT 1" in sql:
+                return _FakeResult(matched[:1])
+            limit = int(params.get("limit") or 20)
+            return _FakeResult(matched[:limit])
+
+        raise AssertionError(f"Unexpected SQL in fake gate session: {sql[:80]}...")
+
+
+def _make_gate_result(
+    *,
+    gate_run_id: str,
+    recommendation_id: str,
+    gate_status: str = "pass",
+    allow_apply: bool = True,
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "gate_run_id": gate_run_id,
+        "recommendation_id": recommendation_id,
+        "allow_apply": allow_apply,
+        "gate_status": gate_status,
+        "total_checks": 3,
+        "passed_checks": 3 if allow_apply else 2,
+        "checks": [],
+        "blocking_reasons": [] if allow_apply else ["rule_x"],
+        "warnings": [],
+        "created_at": created_at or "2026-04-16T12:00:00+00:00",
+    }
+
+
+def test_record_gate_result_is_upsert_by_run_id() -> None:
+    """db_record_gate_result 用 gate_run_id 做幂等键；重复写覆盖 payload。"""
+    session = _FakeGateSession()
+
+    first = _make_gate_result(gate_run_id="gate_001", recommendation_id="rec_a", gate_status="pass")
+    db_record_gate_result(session, first)
+    assert session.gates["gate_001"]["payload"]["gate_status"] == "pass"
+
+    second = _make_gate_result(
+        gate_run_id="gate_001",
+        recommendation_id="rec_a",
+        gate_status="block",
+        allow_apply=False,
+    )
+    db_record_gate_result(session, second)
+    assert len(session.gates) == 1, "同一 gate_run_id 不能在表里出现两行"
+    assert session.gates["gate_001"]["payload"]["gate_status"] == "block", \
+        "后写入的 payload 必须覆盖前一次"
+
+
+def test_get_gate_result_by_run_id_hit_and_miss() -> None:
+    session = _FakeGateSession()
+    db_record_gate_result(
+        session,
+        _make_gate_result(gate_run_id="gate_042", recommendation_id="rec_x"),
+    )
+
+    hit = db_get_gate_result_by_run_id(session, "gate_042")
+    assert hit is not None
+    assert hit["gate_run_id"] == "gate_042"
+    assert hit["recommendation_id"] == "rec_x"
+
+    miss = db_get_gate_result_by_run_id(session, "gate_999")
+    assert miss is None
+
+
+def test_get_latest_gate_result_returns_most_recent_for_recommendation() -> None:
+    """同一 rec 跑多轮 gate，latest 必须按 created_at 降序取第一条。"""
+    session = _FakeGateSession()
+    db_record_gate_result(
+        session,
+        _make_gate_result(
+            gate_run_id="gate_early",
+            recommendation_id="rec_k",
+            created_at="2026-04-15T08:00:00+00:00",
+        ),
+    )
+    db_record_gate_result(
+        session,
+        _make_gate_result(
+            gate_run_id="gate_mid",
+            recommendation_id="rec_k",
+            created_at="2026-04-15T12:00:00+00:00",
+        ),
+    )
+    db_record_gate_result(
+        session,
+        _make_gate_result(
+            gate_run_id="gate_late",
+            recommendation_id="rec_k",
+            gate_status="block",
+            allow_apply=False,
+            created_at="2026-04-15T16:00:00+00:00",
+        ),
+    )
+    # 噪声：别的 rec 也有数据，不应该被返回
+    db_record_gate_result(
+        session,
+        _make_gate_result(
+            gate_run_id="gate_other",
+            recommendation_id="rec_other",
+            created_at="2026-04-15T23:00:00+00:00",
+        ),
+    )
+
+    latest = db_get_latest_gate_result(session, recommendation_id="rec_k")
+    assert latest is not None
+    assert latest["gate_run_id"] == "gate_late", \
+        "latest 必须忠实于 rec_k 的最新 created_at，不能被其它 rec 污染"
+    assert latest["allow_apply"] is False
+
+
+def test_get_latest_gate_result_returns_none_when_no_history() -> None:
+    session = _FakeGateSession()
+    assert db_get_latest_gate_result(session, recommendation_id="rec_empty") is None
+
+
+def test_list_gate_results_for_recommendation_orders_desc_and_limits() -> None:
+    session = _FakeGateSession()
+    for idx, ts in enumerate(
+        ["2026-04-15T08:00:00+00:00", "2026-04-15T09:00:00+00:00", "2026-04-15T10:00:00+00:00"]
+    ):
+        db_record_gate_result(
+            session,
+            _make_gate_result(
+                gate_run_id=f"gate_{idx}",
+                recommendation_id="rec_z",
+                created_at=ts,
+            ),
+        )
+
+    rows = db_list_gate_results_for_recommendation(
+        session, recommendation_id="rec_z", limit=2
+    )
+    assert [r["gate_run_id"] for r in rows] == ["gate_2", "gate_1"], \
+        "list 必须按 created_at 降序，最新在前；limit 必须生效"
+
+
+def test_list_gate_results_for_release_joins_via_gate_result_ref() -> None:
+    """阶段 A 实现：通过 parameter_releases.gate_result_ref JOIN。
+
+    阶段 B 加 release_id 列后，这个 API 会换到直接索引，但语义不变——
+    这里锁住"按 release 能拉到它关联的那次 gate payload"。
+    """
+    session = _FakeGateSession()
+    db_record_gate_result(
+        session,
+        _make_gate_result(gate_run_id="gate_for_release", recommendation_id="rec_r"),
+    )
+    db_record_gate_result(
+        session,
+        _make_gate_result(gate_run_id="gate_unrelated", recommendation_id="rec_r"),
+    )
+    session._store_release(release_id="rel_abc", gate_result_ref="gate_for_release")
+
+    rows = db_list_gate_results_for_release(session, release_id="rel_abc", limit=10)
+    assert len(rows) == 1
+    assert rows[0]["gate_run_id"] == "gate_for_release", \
+        "JOIN 必须只返回 gate_result_ref 匹配的那条，不能带上 rec 其它 gate"
+
+
+def test_list_gate_results_for_release_empty_when_release_missing() -> None:
+    session = _FakeGateSession()
+    db_record_gate_result(
+        session,
+        _make_gate_result(gate_run_id="gate_only", recommendation_id="rec_q"),
+    )
+    # 没有 release 记录 → JOIN 返回空
+    assert db_list_gate_results_for_release(session, release_id="rel_missing") == []

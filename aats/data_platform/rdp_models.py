@@ -824,12 +824,17 @@ class PreApplyGateResultModel(RdpBase):
         UniqueConstraint("gate_run_id", name="uq_pre_apply_gate_result_gate_run_id"),
         Index("ix_pre_apply_gate_result_created", "created_at"),
         Index("ix_pre_apply_gate_result_recommendation", "recommendation_id", "created_at"),
+        # release_id 是 P0-2 阶段 B 加的软关联列：gate 跑完时可能还没有对应
+        # release（gate 是 apply 的前置），因此可为空；release 创建成功后由
+        # apply 流程回填，用于按 release 维度审计 gate 链路。
+        Index("ix_pre_apply_gate_result_release", "release_id", "created_at"),
         {"schema": "governance"},
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     gate_run_id = Column(String(128), nullable=False, unique=True)
     recommendation_id = Column(String(128), nullable=False)
+    release_id = Column(String(128))
     allow_apply = Column(Boolean, nullable=False, server_default=text("false"))
     gate_status = Column(String(32), nullable=False)
     total_checks = Column(Integer, nullable=False, server_default=text("0"))
@@ -1011,6 +1016,7 @@ def create_rdp_schema(engine: object) -> None:
 
     RdpBase.metadata.create_all(engine)  # type: ignore[arg-type]
     _migrate_governance_recommendations(engine)
+    _migrate_pre_apply_gate_results(engine)
 
 
 def _migrate_governance_recommendations(engine: object) -> None:
@@ -1052,4 +1058,35 @@ def _migrate_governance_recommendations(engine: object) -> None:
         conn.execute(_text(
             "ALTER TABLE governance.recommendations "
             "ADD COLUMN IF NOT EXISTS superseded_by VARCHAR(128)"
+        ))
+
+
+def _migrate_pre_apply_gate_results(engine: object) -> None:
+    """governance.pre_apply_gate_results 表结构迁移（幂等）。
+
+    P0-2 阶段 B 新增：
+      1. release_id VARCHAR(128) NULL — 软关联 parameter_releases.release_id，
+         用于按 release 维度审计 gate 链路。gate 跑完时可能还没 release（gate
+         是 apply 的前置），因此列可空，由 apply 流程回填。不加 FK，避免
+         recommendation 被 supersede 时阻塞清理。
+      2. ix_pre_apply_gate_result_release 索引 — 加速按 release_id 的查询，
+         待 `db_list_gate_results_for_release` 切到 release_id 直查后生效。
+    """
+    from sqlalchemy import text as _text
+
+    with engine.begin() as conn:  # type: ignore[union-attr]
+        tbl_exists = conn.execute(_text(
+            "SELECT 1 FROM information_schema.tables "
+            "WHERE table_schema = 'governance' AND table_name = 'pre_apply_gate_results'"
+        )).fetchone()
+        if not tbl_exists:
+            return
+
+        conn.execute(_text(
+            "ALTER TABLE governance.pre_apply_gate_results "
+            "ADD COLUMN IF NOT EXISTS release_id VARCHAR(128)"
+        ))
+        conn.execute(_text(
+            "CREATE INDEX IF NOT EXISTS ix_pre_apply_gate_result_release "
+            "ON governance.pre_apply_gate_results (release_id, created_at DESC)"
         ))
