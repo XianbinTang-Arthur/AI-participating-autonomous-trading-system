@@ -351,17 +351,24 @@ def validate_rollback_target(
 def db_get_parameter_set_values(
     session: Session,
     parameter_set_id: str,
+    *,
+    family: str | None = None,
+    timeframe: str | None = None,
 ) -> dict[str, Any] | None:
-    """从 DB 读 parameter_sets.values + source_round_id + approval_recommendation_id.
+    """从 DB 读 parameter_sets.values + source_round_id，并推导 lineage rec id.
 
     Rollback 强制从 DB 读目标 values，不再依赖 JSON registry —— 这是 A-0.1
     的核心收口：消除"写 JSON → 读 JSON → 写 DB"的注入通道。
+
+    ``approval_recommendation_id`` 不是 ``parameter_sets`` 的列，而是挂在
+    ``active_parameter_sets``/``parameter_apply_history`` 上。这里通过查询
+    最近一次把该 target 作为 ``to_parameter_set_id`` 的 apply 历史来推导
+    lineage（与 validator 规则 4 使用的是同一证据源）。
     """
     row = session.execute(
         text("""
             SELECT values AS param_values,
-                   source_round_id,
-                   approval_recommendation_id
+                   source_round_id
             FROM governance.parameter_sets
             WHERE parameter_set_id = :pid
         """),
@@ -369,10 +376,33 @@ def db_get_parameter_set_values(
     ).fetchone()
     if row is None:
         return None
+
+    lineage_rec_id: str | None = None
+    params: dict[str, Any] = {"pid": parameter_set_id}
+    where_extra = ""
+    if family is not None and timeframe is not None:
+        where_extra = " AND family = :family AND timeframe = :tf"
+        params["family"] = family
+        params["tf"] = timeframe.lower()
+    lineage_row = session.execute(
+        text(f"""
+            SELECT recommendation_id
+            FROM governance.parameter_apply_history
+            WHERE operation_type = 'apply'
+              AND to_parameter_set_id = :pid
+              {where_extra}
+            ORDER BY created_at DESC
+            LIMIT 1
+        """),
+        params,
+    ).fetchone()
+    if lineage_row is not None:
+        lineage_rec_id = lineage_row.recommendation_id
+
     return {
         "values": row.param_values,
         "source_round_id": row.source_round_id,
-        "approval_recommendation_id": row.approval_recommendation_id,
+        "approval_recommendation_id": lineage_rec_id,
     }
 
 

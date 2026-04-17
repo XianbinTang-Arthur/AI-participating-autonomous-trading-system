@@ -558,7 +558,12 @@ def rollback_active_parameter_set(
             }
 
         # 目标 values 直接从 DB 读，绕开 JSON registry
-        target = db_get_parameter_set_values(session, to_parameter_set_id)
+        target = db_get_parameter_set_values(
+            session,
+            to_parameter_set_id,
+            family=family,
+            timeframe=timeframe,
+        )
         if target is None:
             # 理论上不会走到：validate_rollback_target 已证明 target 存在
             _log_rollback_rejection(
