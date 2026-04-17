@@ -305,4 +305,11 @@ approve / reject / supersede handler：
   - `save_strategy_tuning_overrides`：转 deprecated shim，`DeprecationWarning` + 仅在 flag on 时落盘
   - `test_strategy_tuning_overrides.py` 9 条新单测锁住上述契约
   - `test_strategy_tuning_review.py:293` 的"overrides_path 必须 truthy"断言放宽为"是 str"（JSON 默认关）
-- [ ] P0-1 全流程
+- [x] P0-1 阶段 A：新增 4 个 DB API 并用 fake session 单测覆盖
+  - `db_transition_recommendation_status(session, *, recommendation_id, new_status, expected_current_status, actor, at=None, notes=None, superseded_by_recommendation_id=None) -> bool`：根据 `new_status` 自动把 actor / at 映射到 approved_* / rejected_* / superseded_* 列；CAS 未命中返回 False（供 rdp_routes 映射 409 Conflict）
+  - `db_get_recommendation` — 为 rdp_routes 新写路径提供语义更直白的名字（`db_find_recommendation` 的别名）
+  - `db_list_recommendations(*, status=None, family=None, timeframe=None, recommendation_type=None, limit=50, offset=0)` — 在 `db_find_recommendations` 基础上补 recommendation_type 过滤和 `limit`/`offset` 分页
+  - `db_count_recommendations(*, filters...)` — 供分页 total 使用
+  - `tests/unit/test_recommendations_db.py` 21 条新单测，覆盖 upsert / transition CAS hit & miss / actor 映射 / superseded_by_rec_id / get / list 过滤 / 分页 / count
+  - 现有 `db_update_recommendation_status` 保留，recommendation_registry.py 的 `_db_update_rec_status` 暂不改（Phase B 再切）
+- [ ] P0-1 阶段 B/C/D：rdp_routes 切 DB-first / load 去 JSON fallback / save 受 flag 控制
