@@ -1,7 +1,8 @@
-"""P1/P2 治理管道修复测试.
+"""P2 治理管道修复测试.
 
-P1: apply-frozen 不再绕过治理 — 检查 rollback_triggered 结论 + 创建 release 审计
-P2: rollback_triggered 不再死胡同 — enforce_pending_rollbacks 自动回滚
+P2: rollback_triggered 不再死胡同 — enforce_pending_rollbacks 自动回滚。
+（原 P1 "绕过 gate 的批量应用动作" 已在批次 A 物理删除，详见
+ docs/task/rdp_hardening_batch_a_detailed_design.md §3.4。）
 """
 
 from __future__ import annotations

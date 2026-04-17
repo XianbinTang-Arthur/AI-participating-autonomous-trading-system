@@ -378,7 +378,7 @@ def find_effectiveness(root: Path, release_id: str) -> dict | None:
 def pending_rollback_combos(root: Path) -> dict[str, str]:
     """返回所有 rollback_triggered 但未执行回滚的 combo → release_id 映射.
 
-    供 apply-frozen 等入口做安全检查。
+    供 apply/rollback 入口做安全检查。
     """
     registry = load_effectiveness_registry(root)
     result: dict[str, str] = {}

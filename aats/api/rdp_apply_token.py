@@ -1,9 +1,8 @@
 """RDP apply/rollback/freeze 动作的 short-lived HMAC token.
 
-批次 A · A-0.5 收口：废弃 ``RDP_PRODUCTION_APPLY_ENABLED`` env flag——那是
-"一个公开环境变量控制所有写动作"的单点屏障，容易被 CI 镜像层泄露。
-改用签发给指定操作员的 TTL-bounded HMAC token，每次 apply/rollback
-都必须带一个新鲜的 token 才能落库。
+批次 A · A-0.5 收口：废弃旧的生产写闸 env flag——那是"一个公开环境变量控制
+所有写动作"的单点屏障，容易被 CI 镜像层泄露。改用签发给指定操作员的
+TTL-bounded HMAC token，每次 apply/rollback 都必须带一个新鲜的 token 才能落库。
 
 Token 载荷（``actor|action|exp_ts``）用服务端 secret 做 HMAC-SHA256，外层
 再 base64-urlsafe。TTL 默认 300s、下限 60s、上限 900s，``RDP_APPLY_TOKEN_TTL_SECONDS``

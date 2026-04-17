@@ -648,9 +648,9 @@ async def emit_operator_token_api(
 ) -> dict[str, Any]:
     """签发一次性 apply/rollback/freeze 动作 token（TTL-bounded HMAC）。
 
-    A-0.5：废弃 ``RDP_PRODUCTION_APPLY_ENABLED``，改以 session-bound HMAC
-    token 作为写动作的第二把锁。``principal`` 身份写进 token 载荷，消费端
-    强制要求 ``session.identity == token.actor``。
+    A-0.5：废弃旧的生产写闸 env flag，改以 session-bound HMAC token 作为写动作
+    的第二把锁。``principal`` 身份写进 token 载荷，消费端强制要求
+    ``session.identity == token.actor``。
     """
     if body.action not in {"apply", "rollback", "freeze"}:
         raise HTTPException(
