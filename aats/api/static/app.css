@@ -395,6 +395,15 @@ h3 {
   font-size: 11px;
 }
 
+/* WCAG 1.4.1：状态胶囊内部的 tone 字形（✕/⚠/✓/ℹ/·）前缀，确保即便在
+   黑白打印或色盲场景下，danger/warning/positive/info/neutral 仍然可区分。
+   aria-hidden 由渲染层保证，这里只负责布局间距。 */
+.signal-pill__glyph {
+  margin-right: 4px;
+  font-weight: 900;
+  line-height: 1;
+}
+
 .actor-tag {
   display: inline-flex;
   align-items: center;

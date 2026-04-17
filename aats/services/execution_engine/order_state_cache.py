@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -93,6 +94,7 @@ class OrderStateHotCache:
         hot_state_store: HotStateStore,
         bus: EventBus,
         process_role: str,
+        truth_loader: Callable[[str], OrderState | None] | None = None,
         subscribe: bool = True,
     ) -> None:
         self._hot_state_store = hot_state_store
@@ -142,6 +144,9 @@ class OrderStateHotCache:
             log_event(self._logger, "order_state_cache_bootstrap_no_index",
                       process_role=self._process_role)
 
+        if callable(truth_loader) and self._latest:
+            await self._reconcile_bootstrap_truth(truth_loader=truth_loader)
+
         self._bootstrapped = True
         if subscribe:
             await self.register_remote_subscription(bus)
@@ -169,11 +174,10 @@ class OrderStateHotCache:
     async def publish(self, order: OrderState, *, skip_local: bool = False) -> None:
         if not skip_local:
             applied = self._apply_locally(order)
-            if not applied:
+            if not applied and order.client_order_id not in self._latest:
                 return
 
-        await self._best_effort_redis_set(order)
-        await self._best_effort_redis_index_update()
+        await self._publish_latest_known_state(order.client_order_id, fallback=order)
         # 注意：不调 _best_effort_nats_broadcast。与 ObligationHotStateCache 不同，
         # order state 变更已由 outbox publisher 的 flush_pending 通过
         # execution.order_updates topic 广播，cache 通过 register_remote_subscription
@@ -183,7 +187,7 @@ class OrderStateHotCache:
         if order is None:
             return
         applied = self._apply_locally(order)
-        if not applied:
+        if not applied and order.client_order_id not in self._latest:
             return
         if self._bus is None and self._hot_state_store is None:
             return
@@ -195,7 +199,7 @@ class OrderStateHotCache:
             return
         try:
             loop.create_task(
-                self.publish(order, skip_local=True),
+                self._publish_latest_known_state(order.client_order_id, fallback=order),
                 name="order_state_cache_publish",
             )
         except Exception:
@@ -239,10 +243,87 @@ class OrderStateHotCache:
         coid = order.client_order_id
         existing = self._latest.get(coid)
         if existing is not None:
-            if _compare_ts(order) <= _compare_ts(existing):
+            new_ts = _compare_ts(order)
+            old_ts = _compare_ts(existing)
+            # P0-6：严格 < 才丢弃。原代码用 <= 会在同毫秒内的两条状态转移中漏掉
+            # 第二条（例如 LIVE→FILLED 两次状态机推进发生在同一 ms，last_update_ts
+            # 可能相等）。NATS 的 at-least-once 可能产生真正重复的消息——这种
+            # 情况下本地覆盖成同值无害，ts == old_ts 的允许 apply 是可接受的代价。
+            if new_ts < old_ts:
+                return False
+            if new_ts == old_ts and order.model_dump(mode="json") == existing.model_dump(mode="json"):
                 return False
         self._latest[coid] = order
         return True
+
+    async def _reconcile_bootstrap_truth(
+        self,
+        *,
+        truth_loader: Callable[[str], OrderState | None],
+    ) -> None:
+        non_terminal_coids = [
+            coid
+            for coid, order in self._latest.items()
+            if order.status not in _TERMINAL_STATUSES
+        ]
+        if not non_terminal_coids:
+            return
+
+        refreshed_count = 0
+        removed_count = 0
+        unchanged_count = 0
+        for client_order_id in non_terminal_coids:
+            cached = self._latest.get(client_order_id)
+            if cached is None:
+                continue
+            try:
+                truth = await asyncio.to_thread(truth_loader, client_order_id)
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    "order_state_cache_bootstrap_truth_lookup_failed",
+                    level="warning",
+                    process_role=self._process_role,
+                    client_order_id=client_order_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                continue
+            if truth is None:
+                self._latest.pop(client_order_id, None)
+                removed_count += 1
+                await self._best_effort_redis_delete(_order_state_key(client_order_id))
+                continue
+            if truth.model_dump(mode="json") == cached.model_dump(mode="json"):
+                unchanged_count += 1
+                continue
+            self._latest[client_order_id] = truth
+            refreshed_count += 1
+            await self._best_effort_redis_set(truth)
+
+        if refreshed_count or removed_count:
+            await self._best_effort_redis_index_update()
+        log_event(
+            self._logger,
+            "order_state_cache_bootstrap_reconciled",
+            process_role=self._process_role,
+            reconciled_non_terminal_count=len(non_terminal_coids),
+            refreshed_count=refreshed_count,
+            removed_count=removed_count,
+            unchanged_count=unchanged_count,
+        )
+
+    async def _publish_latest_known_state(
+        self,
+        client_order_id: str,
+        *,
+        fallback: OrderState | None = None,
+    ) -> None:
+        order = self._latest.get(client_order_id) or fallback
+        if order is None:
+            return
+        await self._best_effort_redis_set(order)
+        await self._best_effort_redis_index_update()
 
     async def _best_effort_redis_set(self, order: OrderState) -> None:
         if self._hot_state_store is None:
@@ -258,6 +339,22 @@ class OrderStateHotCache:
                       level="warning", process_role=self._process_role,
                       client_order_id=order.client_order_id,
                       error_type=type(exc).__name__, error=str(exc))
+
+    async def _best_effort_redis_delete(self, key: str) -> None:
+        if self._hot_state_store is None:
+            return
+        try:
+            await self._hot_state_store.delete(key)
+        except Exception as exc:
+            log_event(
+                self._logger,
+                "order_state_cache_redis_delete_failed",
+                level="warning",
+                process_role=self._process_role,
+                key=key,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     async def _best_effort_redis_index_update(self) -> None:
         if self._hot_state_store is None:

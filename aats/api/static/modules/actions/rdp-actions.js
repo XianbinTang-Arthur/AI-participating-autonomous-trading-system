@@ -180,33 +180,41 @@ export function createRdpActionHandlers({
 
   async function approveAndCreateRelease(recommendationId) {
     if (!recommendationId) return;
-    if (!windowRef.confirm(`确认审批并推进 ${truncateForConfirm(recommendationId)} 到发布流程吗？`)) return;
+    if (!windowRef.confirm(`确认审批并发布 ${truncateForConfirm(recommendationId)} 吗？`)) return;
     if (!ensureNotBusy()) return;
-    const finishAction = beginAction(null, "正在审批并创建发布…");
+    const finishAction = beginAction(null, "正在审批并发布…");
     try {
-      const approveResult = await requestJson(
-        `/rdp/recommendations/${encodeURIComponent(recommendationId)}/approve`,
-        { method: "POST", body: { actor: "operator", notes: "UI 审批并创建发布" } },
-      );
-      if (!approveResult.ok) {
-        setFlash(state, "warning", approveResult.message || "审批失败。");
-        renderBanners();
-        return;
-      }
+      // Path B：原本要跑 `/approve` + `/releases/create` 两个独立 HTTP 请求，
+      // 中间任何一步失败都会留下 "approved 但没发布" 的中间态。改用服务端
+      // 原子端点 `/recommendations/{id}/approve-and-release`，后端把 approve →
+      // gate → release record → apply 打包成一条 audit 链；前端只需要处理一个
+      // 响应、三种结果：成功 / integrity 阻断 / 部分失败（approve 已落但 gate/apply
+      // 未通过）。
       const windowHours = defaultObservationWindowHours();
-      const releaseResult = await requestJson("/rdp/releases/create", {
-        method: "POST",
-        body: {
-          recommendation_id: recommendationId,
-          actor: "operator",
-          observation_window_hours: windowHours,
-          notes: "UI 审批并创建发布",
+      const result = await requestJson(
+        `/rdp/recommendations/${encodeURIComponent(recommendationId)}/approve-and-release`,
+        {
+          method: "POST",
+          body: {
+            actor: "operator",
+            approval_notes: "UI 审批并发布",
+            release_notes: "UI 审批并发布",
+            observation_window_hours: windowHours,
+          },
         },
-      });
-      if (releaseResult.ok) {
-        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已审批，并创建了新的发布。`);
+      );
+      const release = result.release || {};
+      const applyOutcome = release.apply_result;
+      if (result.integrity_blocked) {
+        setFlash(state, "warning", result.message || "Step2 数据完整性检查未通过，审批已拒绝。");
+      } else if (result.ok) {
+        setFlash(state, "info", `${truncateForConfirm(recommendationId)} 已审批并发布。`);
+      } else if (applyOutcome === "blocked_by_gate") {
+        setFlash(state, "warning", result.message || "Pre-apply gate 阻断；审批已落库，可先处理阻断原因再重试发布。");
+      } else if (applyOutcome === "failed") {
+        setFlash(state, "warning", result.message || "应用失败；审批已落库，可在发布面板单独重试。");
       } else {
-        setFlash(state, "warning", releaseResult.message || "发布创建失败，审批已经完成。");
+        setFlash(state, "warning", result.message || "审批并发布未成功。");
       }
       await refreshDashboard({ manual: true });
     } catch (error) {

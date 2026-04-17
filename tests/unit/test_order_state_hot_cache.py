@@ -112,11 +112,18 @@ async def _boot(
     *,
     store: InMemoryHotStateStore | None = None,
     bus: InMemoryEventBus | None = None,
+    truth_loader=None,
     subscribe: bool = True,
 ) -> tuple[InMemoryHotStateStore, InMemoryEventBus]:
     s = store if store is not None else InMemoryHotStateStore()
     b = bus if bus is not None else InMemoryEventBus()
-    await cache.bootstrap(hot_state_store=s, bus=b, process_role="execution", subscribe=subscribe)
+    await cache.bootstrap(
+        hot_state_store=s,
+        bus=b,
+        process_role="execution",
+        truth_loader=truth_loader,
+        subscribe=subscribe,
+    )
     return s, b
 
 
@@ -206,6 +213,65 @@ class TestOrderStateHotCacheBootstrap(unittest.IsolatedAsyncioTestCase):
         await _boot(cache, subscribe=False)
         self.assertTrue(cache.snapshot()["bootstrapped"])
         self.assertFalse(cache.snapshot()["subscribed"])
+
+    async def test_bootstrap_reconciles_stale_non_terminal_order_with_terminal_truth(self) -> None:
+        cache = OrderStateHotCache(logger=_logger())
+        store = InMemoryHotStateStore()
+        stale = _make_order(client_order_id="coid-stale", status="SUBMITTING")
+        truth = _make_order(
+            client_order_id="coid-stale",
+            status="FILLED",
+            last_update_ts=_BASE_TS + timedelta(seconds=5),
+        )
+        await store.set(_order_state_key(stale.client_order_id), stale.model_dump(mode="json"))
+        await store.set(
+            ORDER_STATE_INDEX_KEY,
+            {
+                "all_coids": [stale.client_order_id],
+                "open_coids": [stale.client_order_id],
+                "version": 1,
+            },
+        )
+
+        await _boot(
+            cache,
+            store=store,
+            truth_loader=lambda client_order_id: truth if client_order_id == stale.client_order_id else None,
+        )
+
+        self.assertEqual(cache.open_orders_for_scope_sync(_SCOPE), [])
+        stored = await store.get(_order_state_key(stale.client_order_id))
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["status"], "FILLED")
+        index_payload = await store.get(ORDER_STATE_INDEX_KEY)
+        self.assertIsNotNone(index_payload)
+        self.assertNotIn(stale.client_order_id, index_payload["open_coids"])
+
+    async def test_bootstrap_prunes_non_terminal_order_missing_in_truth_store(self) -> None:
+        cache = OrderStateHotCache(logger=_logger())
+        store = InMemoryHotStateStore()
+        stale = _make_order(client_order_id="coid-orphan", status="SUBMITTING")
+        await store.set(_order_state_key(stale.client_order_id), stale.model_dump(mode="json"))
+        await store.set(
+            ORDER_STATE_INDEX_KEY,
+            {
+                "all_coids": [stale.client_order_id],
+                "open_coids": [stale.client_order_id],
+                "version": 1,
+            },
+        )
+
+        await _boot(
+            cache,
+            store=store,
+            truth_loader=lambda client_order_id: None,
+        )
+
+        self.assertEqual(cache.open_orders_for_scope_sync(_SCOPE), [])
+        self.assertIsNone(await store.get(_order_state_key(stale.client_order_id)))
+        index_payload = await store.get(ORDER_STATE_INDEX_KEY)
+        self.assertIsNotNone(index_payload)
+        self.assertNotIn(stale.client_order_id, index_payload["all_coids"])
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -386,6 +452,25 @@ class TestOrderStateHotCacheRedisTTL(unittest.IsolatedAsyncioTestCase):
         o = _make_order(client_order_id="coid-ttl")
         await cache.publish(o)
         self.assertEqual(store.last_ttl, _REDIS_TTL_SECONDS)
+
+
+class TestOrderStateHotCacheReconciliation(unittest.IsolatedAsyncioTestCase):
+    async def test_fire_and_forget_persists_latest_state_after_self_subscription_applied_locally(self) -> None:
+        cache = OrderStateHotCache(logger=_logger())
+        store = InMemoryHotStateStore()
+        await _boot(cache, store=store)
+        order = _make_order(client_order_id="coid-self-sync", status="FILLED")
+
+        await cache._handle_remote_event(_make_remote_message(order))
+        cache.fire_and_forget_publish(order)
+        await asyncio.sleep(0.05)
+
+        stored = await store.get(_order_state_key(order.client_order_id))
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored["status"], "FILLED")
+        index_payload = await store.get(ORDER_STATE_INDEX_KEY)
+        self.assertIsNotNone(index_payload)
+        self.assertNotIn(order.client_order_id, index_payload["open_coids"])
 
 
 if __name__ == "__main__":

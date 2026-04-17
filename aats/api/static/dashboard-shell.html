@@ -42,6 +42,7 @@
   <link rel="modulepreload" href="/ui/modules/views/exit-execution-view.js">
   <link rel="modulepreload" href="/ui/modules/views/home-view.js">
   <link rel="modulepreload" href="/ui/modules/views/overview-view.js">
+  <link rel="modulepreload" href="/ui/modules/views/rdp-view.js">
   <link rel="modulepreload" href="/ui/modules/views/replay-view.js">
   <link rel="modulepreload" href="/ui/modules/views/risk-view.js">
   <link rel="modulepreload" href="/ui/modules/views/strategy-view.js">
@@ -58,6 +59,7 @@
       <a class="workspace-link" data-view="replay" href="/ui/replay">回放与复盘</a>
       <a class="workspace-link" data-view="aiAnalysis" href="/ui/ai-analysis">AI 分析</a>
       <a class="workspace-link" data-view="aiConfig" href="/ui/ai-config">AI 配置</a>
+      <a class="workspace-link" data-view="rdp" href="/ui/rdp">RDP 治理</a>
       <a class="workspace-link" data-view="admin" href="/ui/settings">账户与权限</a>
     </nav>
 
@@ -157,6 +159,10 @@
 
       <section class="workspace-view" data-view="aiConfig">
         <div id="aiConfigContent" class="view-layout"></div>
+      </section>
+
+      <section class="workspace-view" data-view="rdp" aria-label="RDP 治理工作台">
+        <div id="rdpContent" class="view-layout"></div>
       </section>
 
       <section class="workspace-view" data-view="admin">

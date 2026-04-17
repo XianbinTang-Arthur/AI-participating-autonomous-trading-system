@@ -17,12 +17,13 @@
   GET /rdp/control-summary              — RDP 控制卡片聚合数据
 
 写入端点（POST，require_write_access）:
-  POST /rdp/recommendations/{id}/approve    — 审批 recommendation
-  POST /rdp/recommendations/{id}/reject     — 拒绝 recommendation
-  POST /rdp/recommendations/{id}/supersede  — 替代 recommendation
-  POST /rdp/parameters/apply                — 应用已批准 recommendation 的参数
-  POST /rdp/parameters/rollback             — 回滚 active parameter set
-  POST /rdp/tasks/trigger                   — 触发 RDP workflow 任务
+  POST /rdp/recommendations/{id}/approve              — 审批 recommendation
+  POST /rdp/recommendations/{id}/reject               — 拒绝 recommendation
+  POST /rdp/recommendations/{id}/supersede            — 替代 recommendation
+  POST /rdp/recommendations/{id}/approve-and-release  — 审批 + gate + release + apply 原子链
+  POST /rdp/parameters/apply                          — 应用已批准 recommendation 的参数
+  POST /rdp/parameters/rollback                       — 回滚 active parameter set
+  POST /rdp/tasks/trigger                             — 触发 RDP workflow 任务
 """
 
 from __future__ import annotations
@@ -380,6 +381,35 @@ class CreateReleaseRequest(BaseModel):
     skip_apply: bool = Field(default=False, description="只创建 release 不 apply")
 
 
+class ApproveAndReleaseRequest(BaseModel):
+    """``/recommendations/{id}/approve-and-release`` 的请求载荷。
+
+    合并 ``approve`` + ``/releases/create``（已自带 gate + apply）为单次 HTTP
+    调用，目的是把 operator 的"审批 → 发布"链路从 2~3 个独立请求收敛到一个
+    原子端点。字段按"审批"与"发布"两段划分：
+
+    - ``approval_notes``：写进 recommendation.review_notes
+    - ``release_notes`` / ``observation_window_hours``：透传给 release record
+    - ``skip_gate`` / ``skip_apply``：与 ``/releases/create`` 同义，保留脚本
+      场景的对等能力；UI 入口应保持默认（gate on、apply on）
+    """
+
+    actor: str = Field(default="operator", description="操作人")
+    approval_notes: str | None = Field(
+        default=None, description="审批备注（写进 recommendation.review_notes）",
+    )
+    release_notes: str | None = Field(
+        default=None, description="发布备注（写进 release record.notes）",
+    )
+    observation_window_hours: int = Field(
+        default=24, description="观察窗口时长（小时）",
+    )
+    skip_gate: bool = Field(default=False, description="跳过 pre-apply gate 检查")
+    skip_apply: bool = Field(
+        default=False, description="只审批 + 创建 release 但不 apply",
+    )
+
+
 class RunObservationRequest(BaseModel):
     release_id: str = Field(..., description="release_id")
     family: str | None = Field(default=None, description="如不指定，从 release 推断")
@@ -636,6 +666,119 @@ async def supersede_recommendation_api(
 
     save_recommendation_registry(registry, reg_path)
     return {"ok": True, "recommendation": rec}
+
+
+# ── Recommendation Approve + Release 原子链 ───────────────────────
+
+
+@rdp_router.post(
+    "/recommendations/{recommendation_id}/approve-and-release",
+)
+async def approve_and_release_api(
+    request: Request,
+    recommendation_id: str,
+    body: ApproveAndReleaseRequest,
+    principal: OperatorPrincipal = Depends(require_write_access),
+) -> dict[str, Any]:
+    """审批 + gate + release + apply 一条龙（draft → approved → active）。
+
+    合并历史链路：``/recommendations/{id}/approve`` → ``/releases/create``
+    （后者自带 gate + apply）= 2 个独立 HTTP 请求。把这两步折叠成一次调用，
+    让 operator UI "审批并发布" 按钮能原子地走完整个治理链。
+
+    语义和 token 策略上，本端点对齐 ``/releases/create`` 而非 ``/parameters/apply``：
+    同样走 ``require_write_access`` + Step2 integrity gate，但不额外要求
+    ``X-Rdp-Apply-Token``。原因：``/releases/create`` 本身就是"gate + release +
+    apply"的官方组合入口且未要求 token；如果给这个语义相同的端点再加一道锁，
+    operator 就会被迫走两条政策不一致的路径，反而更乱。若未来把 HMAC token
+    推广到所有写动作，``/releases/create`` 与本端点应同步硬化，保持对等。
+
+    失败恢复：
+      - 审批失败（404 / CAS race）：recommendation 未变，release 未创建，回 HTTP 错误
+      - Step2 integrity 阻断：什么都没做，回 200 ``integrity_blocked=True``
+      - Gate 阻断：recommendation 已 approved 不回滚；release record 写入并标记
+        ``apply_result=blocked_by_gate``；返回 200 ``ok=False`` + release 详情
+      - Apply 失败：同 gate 阻断，release record 标记 ``apply_result=failed``
+      - 即"只要 approve 成功，recommendation 就是 approved 的"；下次可单独重试
+        ``/parameters/apply`` 或 ``/releases/create``。和现有链路保持一致。
+
+    HTTP 语义:
+      - 200 ok=True：全链路成功（或 ``skip_apply=True`` 的"仅审批 + 创建 release"）
+      - 200 ok=False, integrity_blocked=True：Step2 降级，整链拒绝
+      - 200 ok=False + release.apply_result=blocked_by_gate：gate 阻断
+      - 200 ok=False + release.apply_result=failed：apply 失败
+      - 404：recommendation 不存在
+      - 409：状态不是 draft，或 CAS 竞态
+    """
+    from aats.data_platform.decision_system.recommendation_registry import (
+        approve_recommendation,
+        save_recommendation_registry,
+    )
+    from aats.data_platform.production_workflow.release_registry import (
+        create_parameter_release,
+    )
+
+    root = _project_root(request)
+    actor = _resolve_actor(principal, body.actor)
+
+    # Step2 integrity gate：approve / release / apply 三条路径各自都有这个
+    # 门闸；合并路径只做一次，保证"在任何时刻 Step2 降级都在源头拒绝"，
+    # 不会先审批再在 release 阶段失败留下 orphan 的 approved recommendation。
+    blocking_reason = _step2_integrity_blocking_reason(root)
+    if blocking_reason is not None:
+        return {
+            "ok": False,
+            "message": blocking_reason,
+            "integrity_blocked": True,
+        }
+
+    # 预检 recommendation 状态；draft → approved 的真 CAS 由底层 helper 保证。
+    registry, _snapshot_rec = _precheck_recommendation_transitionable(
+        root, recommendation_id, expected_current=("draft",),
+    )
+    reg_path = root / "artifacts/decision_system/recommendation_registry.json"
+
+    # ── 1. 审批 ─────────────────────────────────────────────────
+    approved_rec = approve_recommendation(
+        registry, recommendation_id,
+        approved_by=actor,
+        notes=body.approval_notes,
+    )
+    if approved_rec is None:
+        # 预检过了但 approve 返回 None = CAS race（见 approve helper）。这里把
+        # race 映射成 409，让 UI 能刷新后重试。recommendation 本身没变。
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "ok": False,
+                "message": "recommendation 状态在审批过程中被并发改写，请刷新后重试",
+                "recommendation_id": recommendation_id,
+                "reason": "cas_race",
+            },
+        )
+    save_recommendation_registry(registry, reg_path)
+
+    # ── 2+3+4. Gate + release + apply ──────────────────────────
+    # approve 已经把 DB/JSON 都推到 approved；create_parameter_release 会再次
+    # load_recommendation_registry 命中同一条记录。
+    release_result = create_parameter_release(
+        root,
+        recommendation_id=recommendation_id,
+        actor=actor,
+        observation_window_hours=body.observation_window_hours,
+        notes=body.release_notes,
+        run_gate=not body.skip_gate,
+        run_apply=not body.skip_apply,
+    )
+
+    return {
+        "ok": bool(release_result.get("ok")),
+        "recommendation": approved_rec,
+        "release": release_result.get("release"),
+        "gate_result": release_result.get("gate_result"),
+        "apply_result": release_result.get("apply_result"),
+        "message": release_result.get("message") or "审批并发布完成",
+    }
 
 
 # ── Operator Token 签发 ───────────────────────────────────────────

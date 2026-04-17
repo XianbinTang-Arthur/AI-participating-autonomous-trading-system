@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import unittest
 import uuid
@@ -14,6 +16,7 @@ from aats.events import topics
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
+from aats.services.execution_engine.order_state_cache import OrderStateHotCache, _order_state_key
 from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
 from aats.storage.execution_order_repo_postgres import (
@@ -21,7 +24,9 @@ from aats.storage.execution_order_repo_postgres import (
     PostgresExecutionOrderRepository,
 )
 from aats.storage.event_store_postgres import PostgresEventStore
+from aats.storage.execution_repo_converged_postgres import ConvergedPostgresExecutionRepository
 from aats.storage.execution_repo_postgres import PostgresExecutionRepository
+from aats.storage.hot_state_store import InMemoryHotStateStore
 from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
 from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 from aats.storage.session import create_database_runtime, create_schema, validate_runtime_schema
@@ -481,6 +486,125 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_obligation.status, "RELEASED")
             self.assertEqual(event_store.count(topic=topics.FILL_EVENTS), 1)
             self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
+    async def test_persist_fill_syncs_order_state_cache_after_converged_repo_refresh(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            event_store = PostgresEventStore(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            order_history_repo = PostgresExecutionOrderHistoryRepository(runtime.session_factory)
+            fill_repo = PostgresExecutionFillRepositoryV2(runtime.session_factory)
+            execution_repo = ConvergedPostgresExecutionRepository(
+                runtime.session_factory,
+                execution_order_repo=order_repo,
+                execution_order_history_repo=order_history_repo,
+                execution_fill_repo=fill_repo,
+            )
+            obligation_repo = PostgresExecutionObligationRepository(runtime.session_factory)
+            outbox_repo = PostgresOutboxRepository(runtime.session_factory)
+            bus = InMemoryEventBus()
+            hot_store = InMemoryHotStateStore()
+            order_state_cache = OrderStateHotCache(
+                logger=logging.getLogger("test.execution_outbox.order_state_cache")
+            )
+            await order_state_cache.bootstrap(
+                hot_state_store=hot_store,
+                bus=bus,
+                process_role="execution",
+            )
+            publisher = PostgresExecutionOutboxPublisher(
+                session_factory=runtime.session_factory,
+                event_store=event_store,
+                execution_repo=execution_repo,
+                obligation_repo=obligation_repo,
+                outbox_repo=outbox_repo,
+                bus=bus,
+                execution_order_repo=order_repo,
+                execution_order_history_repo=order_history_repo,
+                execution_fill_repo=fill_repo,
+                order_state_cache=order_state_cache,
+            )
+
+            client_order_id = "clord_fill_cache_sync"
+            order_state = self._order_state(client_order_id=client_order_id, status="SUBMITTED")
+            order_repo.create_order(
+                order_id=client_order_id,
+                intent=OrderIntent(
+                    intent_id=order_state.intent_id,
+                    decision_id=order_state.decision_id,
+                    symbol=order_state.symbol,
+                    side="sell",
+                    quantity=Decimal("0.001"),
+                    execution_style="taker",
+                    order_type="market",
+                    reference_price=Decimal("60000"),
+                    urgency="medium",
+                    time_in_force="IOC",
+                    reduce_only=True,
+                    close_only=True,
+                    td_mode="cross",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    instrument_family="BTC-USDT",
+                    settle_currency="USDT",
+                    idempotency_key="submit:intent_fill_cache_sync",
+                    product_type="derivatives",
+                    margin_mode="cross",
+                    execution_attempt_id=f"execution_attempt:{client_order_id}",
+                    position_intent="close_long",
+                ),
+                initial_state="SUBMITTED",
+                created_at=utc_now(),
+                raw_payload={"client_order_id": client_order_id, "source_system": "local_order_manager"},
+            )
+
+            fill = FillEvent(
+                fill_id="fill_cache_sync_1",
+                decision_id=order_state.decision_id,
+                execution_attempt_id=f"execution_attempt:{client_order_id}",
+                intent_id=order_state.intent_id,
+                client_order_id=client_order_id,
+                exchange_order_id=order_state.exchange_order_id,
+                symbol=order_state.symbol,
+                venue="OKX",
+                side="sell",
+                fill_qty=Decimal("0.001"),
+                fill_price=Decimal("60000"),
+                fee_amount=Decimal("0"),
+                fee_currency="USDT",
+                reduce_only=True,
+                close_only=True,
+                td_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                reduce_only_reason="position_intent_close_path",
+                close_only_reason="position_intent_close_path",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_intent="close_long",
+                liquidity_role="taker",
+                exchange_timestamp=utc_now(),
+                ingestion_timestamp=utc_now(),
+                order_status_after_fill="FILLED",
+            )
+
+            saved = await publisher.persist_fill(fill=fill)
+            self.assertTrue(saved)
+            await asyncio.sleep(0.05)
+
+            latest_state = execution_repo.get_order_state(client_order_id)
+            self.assertIsNotNone(latest_state)
+            assert latest_state is not None
+            self.assertEqual(latest_state.status, "FILLED")
+
+            cached = await hot_store.get(_order_state_key(client_order_id))
+            self.assertIsNotNone(cached)
+            self.assertEqual(cached["status"], "FILLED")
         finally:
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)

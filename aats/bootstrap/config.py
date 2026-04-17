@@ -4710,6 +4710,7 @@ async def build_runtime(
         hot_state_store=hot_state_store,
         bus=slices.bus,
         process_role=effective_process_role or "monolith",
+        truth_loader=storage.execution_repo.get_order_state,
         subscribe=False,
     )
     log_event(

@@ -8,6 +8,7 @@
   replay: "/ui/replay",
   aiAnalysis: "/ui/ai-analysis",
   aiConfig: "/ui/ai-config",
+  rdp: "/ui/rdp",
   admin: "/ui/settings",
 };
 
@@ -75,6 +76,13 @@ export const VIEW_META = {
     copy: "左侧决定 AI 在交易里扮演什么角色，右侧决定 6 个策略档位是自动切换还是手动固定。",
     hidePageHead: false,
   },
+  rdp: {
+    docTitle: "AATS 自动交易监控台 | RDP 治理",
+    eyebrow: "研究数据平台",
+    heading: "RDP 治理工作台",
+    copy: "先把 Step2 数据完整性问题处理掉，再审批/发布 recommendation，最后跟进观察窗口。",
+    hidePageHead: false,
+  },
   admin: {
     docTitle: "AATS 自动交易控制台 | 账户与权限",
     eyebrow: "控制面",
@@ -94,6 +102,7 @@ export const VIEW_LABELS = {
   replay: "回放与复盘",
   aiAnalysis: "AI 分析",
   aiConfig: "AI 配置",
+  rdp: "RDP 治理",
   admin: "账户与权限",
 };
 

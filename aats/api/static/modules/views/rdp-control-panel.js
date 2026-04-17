@@ -110,6 +110,31 @@ const INCOMPLETE_REASON_LABELS = {
   query_failed: "查询失败",
 };
 
+// WCAG 1.4.1：状态胶囊原本只用颜色区分 danger/warning/positive/info，黑白
+// 打印、色盲、低对比度场景下无从区分。这里在标签前插入一个 tone-specific
+// 的 unicode 字形（aria-hidden，不影响屏幕阅读器读出的文本），让每种 tone
+// 都有独立的视觉特征。字形挑选原则：
+//   danger   → ✕ 表示阻断 / 拒绝
+//   warning  → ⚠ 表示待办 / 需关注
+//   positive → ✓ 表示通过 / 完整
+//   info     → ℹ 表示信息
+//   neutral  → · 中性分隔符，仅占位
+// 注意：标签本身仍然是含语义的中文（例如“证据完整”/“证据阻断”），glyph
+// 只做辅助冗余编码，符合 WCAG 1.4.1 “不要仅靠颜色传达信息”的要求。
+const STATUS_PILL_GLYPHS = {
+  danger: "✕",
+  warning: "⚠",
+  positive: "✓",
+  info: "ℹ",
+  neutral: "·",
+};
+
+function statusPill(label, tone = "neutral") {
+  const normalizedTone = typeof tone === "string" ? tone.trim().toLowerCase() : "neutral";
+  const glyph = STATUS_PILL_GLYPHS[normalizedTone] || STATUS_PILL_GLYPHS.neutral;
+  return `<span class="signal-pill tone-${escapeHtml(normalizedTone)}"><span class="signal-pill__glyph" aria-hidden="true">${escapeHtml(glyph)}</span>${escapeHtml(label)}</span>`;
+}
+
 function relativeTime(isoString) {
   if (!isoString) return "暂无记录";
   const timestamp = new Date(isoString).getTime();
@@ -279,8 +304,8 @@ function buildObservationCard(item, canAdmin) {
     kicker: `${item.family || "未知策略"} / ${item.timeframe || "未知周期"}`,
     title: `${labelForObservationStatus(item.observation_status)} ${shortId(item.release_id)}`,
     pills: [
-      `<span class="signal-pill tone-${escapeHtml(toneForObservationStatus(item.observation_status))}">${escapeHtml(labelForObservationStatus(item.observation_status))}</span>`,
-      `<span class="signal-pill tone-${escapeHtml(toneForApplyResult(item.apply_result))}">${escapeHtml(labelForApplyResult(item.apply_result))}</span>`,
+      statusPill(labelForObservationStatus(item.observation_status), toneForObservationStatus(item.observation_status)),
+      statusPill(labelForApplyResult(item.apply_result), toneForApplyResult(item.apply_result)),
     ],
     body: `
       <p class="meta-copy">当前参数集 ${escapeHtml(shortId(item.parameter_set_id))}，上一版 ${escapeHtml(shortId(item.previous_parameter_set_id))}</p>
@@ -303,16 +328,37 @@ function buildObservationCard(item, canAdmin) {
   });
 }
 
+// 以 ui_action 语义强制 tone，避免只用颜色承载“这是拒绝/回滚”的含义（WCAG
+// 1.4.1）。destructive 动作（拒绝 / 回滚 / supersede / 下线）一律显示 danger，
+// 这样即便调用方按位置把它们排在后面，视觉上也能和“推进”类按钮区分开。
+// 其余动作（run-gate、create-release、trigger-workflow 等）继续按调用方传
+// 入的 fallback tone 渲染，避免把一排按钮都渲染成同色的 primary。
+function toneForUiAction(uiAction = "", fallback = "secondary") {
+  const normalized = String(uiAction || "").trim();
+  if (!normalized) return fallback;
+  if (
+    normalized === "rdp-reject-recommendation"
+    || normalized === "rdp-reject-tuning-proposal"
+    || normalized === "rdp-rollback-parameters"
+    || normalized === "rdp-supersede-recommendation"
+    || normalized === "rdp-decommission-release"
+  ) {
+    return "danger";
+  }
+  return fallback;
+}
+
 function renderActionDescriptor(action = {}, canAdmin, tone = "secondary") {
   const enabled = Boolean(action.enabled);
   const title = !canAdmin
     ? "当前账号只有查看权限"
     : (!enabled ? (action.disabled_reason || "当前不可执行") : undefined);
+  const effectiveTone = toneForUiAction(action.ui_action, tone);
   return actionButton(
     action.label || "执行",
     action.ui_action || "",
     action.value || "",
-    tone,
+    effectiveTone,
     {
       disabled: !canAdmin || !enabled,
       title,
@@ -362,10 +408,10 @@ function renderWorkbenchHero({
     pills: [
       actorTags("operator"),
       counts.integrity_blocked_items
-        ? `<span class="signal-pill tone-danger">证据阻断 ${escapeHtml(String(counts.integrity_blocked_items))}</span>`
-        : `<span class="signal-pill tone-positive">证据完整</span>`,
+        ? statusPill(`证据阻断 ${counts.integrity_blocked_items}`, "danger")
+        : statusPill("证据完整", "positive"),
       counts.tuning_pending
-        ? `<span class="signal-pill tone-info">调优待审核 ${escapeHtml(String(counts.tuning_pending))}</span>`
+        ? statusPill(`调优待审核 ${counts.tuning_pending}`, "info")
         : "",
     ].filter(Boolean),
     metrics: [
@@ -411,11 +457,11 @@ function renderWorkbenchItemsCard({
     title: item.headline || "当前组合待处理",
     pills: [
       item.confidence
-        ? `<span class="signal-pill tone-${escapeHtml(toneForConfidence(item.confidence))}">置信度 ${escapeHtml(labelForConfidence(item.confidence))}</span>`
+        ? statusPill(`置信度 ${labelForConfidence(item.confidence)}`, toneForConfidence(item.confidence))
         : "",
-      `<span class="signal-pill tone-warning">待审批</span>`,
+      statusPill("待审批", "warning"),
       item.integrity_status === "blocked"
-        ? `<span class="signal-pill tone-danger">证据不完整</span>`
+        ? statusPill("证据不完整", "danger")
         : "",
     ].filter(Boolean),
     body: `
@@ -469,9 +515,9 @@ function renderReleaseCandidatesCard({
     kicker: `${item.family || "未知策略"} / ${item.timeframe || "未知周期"}`,
     title: item.headline || "已批准，待发布",
     pills: [
-      `<span class="signal-pill tone-info">待发布</span>`,
+      statusPill("待发布", "info"),
       item.gate_status && item.gate_status !== "not_run"
-        ? `<span class="signal-pill tone-${escapeHtml(toneForGate(item.gate_status))}">Gate ${escapeHtml(labelForGate(item.gate_status))}</span>`
+        ? statusPill(`Gate ${labelForGate(item.gate_status)}`, toneForGate(item.gate_status))
         : "",
     ].filter(Boolean),
     body: `
@@ -650,7 +696,7 @@ function renderTuningCard({
             kicker: `${item.family || "未知策略"} / ${item.timeframe || "未知周期"}`,
             title: item.headline || "待审核调优提案",
             pills: [
-              `<span class="signal-pill tone-warning">待审核</span>`,
+              statusPill("待审核", "warning"),
             ],
             body: `
               <p class="meta-copy">${escapeHtml((item.proposed_changes || []).map((change) => `${change.key}: ${change.from} -> ${change.to}`).join("；"))}</p>
@@ -682,6 +728,10 @@ export function renderRdpControlPanelV2({
 }) {
   void uiState;
 
+  // 内部三大工作区（当前待处理 / 侧栏告警与观察窗口 / 调优提案）各自标为
+  // aria-label 化的 region，方便屏幕阅读器按 landmark 跳转，也让键盘用户
+  // 对“RDP 治理工作台”的布局有明确的心智模型。外层壳由 dashboard-shell.html
+  // 的 <section data-view="rdp" aria-label="RDP 治理工作台"> 提供 landmark。
   return `
     <div class="rdp-ops-shell">
       ${renderWorkbenchHero({
@@ -689,7 +739,7 @@ export function renderRdpControlPanelV2({
         canAdmin,
       })}
       <div class="panel-grid ai-config-layout">
-        <div class="span-8 workspace-stack">
+        <section class="span-8 workspace-stack" role="region" aria-label="RDP 当前待处理与发布">
           ${renderWorkbenchItemsCard({
             items: rdpWorkbenchItems.items || [],
             canAdmin,
@@ -705,8 +755,8 @@ export function renderRdpControlPanelV2({
             tuningProposals: rdpTuningProposals,
             canAdmin,
           })}
-        </div>
-        <div class="span-4 workspace-stack">
+        </section>
+        <aside class="span-4 workspace-stack" role="region" aria-label="RDP 侧栏：告警、运行态与观察窗口">
           ${renderIntegrityAlertsCard(rdpWorkbenchAlerts)}
           ${renderRuntimeRailCard({
             overview: rdpWorkbenchOverview,
@@ -716,7 +766,7 @@ export function renderRdpControlPanelV2({
             rdpControl,
             canAdmin,
           })}
-        </div>
+        </aside>
       </div>
     </div>
   `;
