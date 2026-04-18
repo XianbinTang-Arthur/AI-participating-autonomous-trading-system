@@ -407,7 +407,11 @@ class StrategyProfileActivationFacade:
         }
 
     async def evaluate_mainline_profile_control(self, *, decision_id: str) -> ProfileControlDecision | None:
-        result = await self.owner.evaluate_now(allow_auto_activation=True)
+        # allow_auto_activation 必须按 strategy_profile_auto_control_enabled 决定:
+        # true  → AI 推荐自动应用(原语义)
+        # false → AI 生成推荐但不自动执行;手动激活走独立 admin API,不受此影响
+        allow_auto = bool(self.owner.settings.strategy_profile_auto_control_enabled)
+        result = await self.owner.evaluate_now(allow_auto_activation=allow_auto)
         recommendation = result.get("recommendation") or {}
         activation = result.get("auto_activation") or {}
         requested_profile_id = activation.get("candidate_profile_id") or recommendation.get("recommended_profile_id")

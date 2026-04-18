@@ -163,10 +163,10 @@ class DecisionOrchestrator:
             ai_assessment = await self.ai_service.assess(context=context, baseline=baseline)
             operating_mode = self.ai_service.effective_operating_mode()
         canonical_mode = self.ai_service.canonical_effective_operating_mode()
-        if (
-            self.ai_service.settings.strategy_profile_auto_control_is_enabled_for_mode(canonical_mode)
-            and self.strategy_profile_service is not None
-        ):
+        # profile service 总是被调用(只要已加载);内部按 strategy_profile_auto_control_enabled
+        # 决定是否允许 AI 自动激活。手动激活走独立 admin API,不经此路径。
+        # 开关 false 时:AI 仍出推荐但不自动执行;手动激活照常生效;active_profile_id 审计可见。
+        if self.strategy_profile_service is not None:
             profile_control_decision = await self.strategy_profile_service.evaluate_mainline_profile_control(
                 decision_id=context.decision_id,
             )
