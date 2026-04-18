@@ -212,9 +212,29 @@ PARAMETER_MAPPING_INDEPENDENT: dict[str, str] = {
 }
 
 PARAMETER_MAPPING_DIRECTIONAL: dict[str, str] = {
+    # ════════════════════════════════════════════════════════════════
+    # directional 家族 — 生产端直接消费字段
+    # ════════════════════════════════════════════════════════════════
+    #
+    # 注意：directional 不使用 `strategy_hedge_independent_*` overlay 的
+    # 专属字段（rebalance_cooldown / max_thesis_age / de_risk_net_edge 等），
+    # 那些字段仅对 independent family 生效。directional 的决策走
+    # target_position.py 的 `_baseline_target_qty()` → `_qty_from_bias()` 路径，
+    # 只消费 global 作用域的 strategy_* 字段。
+    #
+    # 因此 RDP 对 directional 输出的其它研究参数（entry_threshold / close_threshold
+    # 等）当前仅供 DirectionalReplayAdapter 回测使用，在生产端无生效位点，
+    # 不应强制映射（见 build_settings_overrides 的 per-family required 逻辑）。
+
+    # [DIRECT] 最小持仓秒数（directional 与 independent 共用 global 字段）
+    # 生产端消费点: target_position.py L1407/1413 self.settings.strategy_min_hold_seconds
+    # 单位一致: seconds; 语义: 防止过频交易
+    "min_hold_seconds": "strategy_min_hold_seconds",
+
     # [PLACEHOLDER] RDP 方向性策略的趋势权重 → 生产端 entry alpha 最小值
     # RDP 端: directional_trend_weight 是趋势信号在综合评分中的权重 (0~1)
     # 生产端: strategy_entry_alpha_min 是入场信号的最小 alpha 阈值
+    #         (target_position.py L1342, 入场门控统一逻辑, directional 也经过)
     # ⚠️ 语义张力较大: "权重" ≠ "最小阈值"
     #    第一版占位: 假设 trend_weight 越高 → 要求的 alpha_min 越高
     #    TODO: 需要明确两者的数学关系，或拆成独立映射
@@ -234,37 +254,66 @@ FAMILY_PARAMETER_MAPPINGS: dict[str, dict[str, str]] = {
     "directional": PARAMETER_MAPPING_DIRECTIONAL,
 }
 
-# ── RDP 研究参数的 "规范 key 集合"，用于检测映射缺失 ──────────────
+# ── RDP 研究参数的 "per-family required 集合"，用于检测映射缺失 ──────
 #
-# 这些 key 是 RDP Step 3 研究层输出的核心参数名，理论上每个家族都应
-# 提供完整映射。当 build_settings_overrides 发现 JSON 中存在这些 key
-# 但 family 映射缺失时，会记录 WARNING 级日志并统计被丢弃的参数数，
-# 以帮助快速发现 "研究输出了参数但生产端没接上" 的映射漏洞。
+# 每个 family 有各自必须映射到 AATSSettings 的子集。只有 required 子集
+# 里的 key 在 FAMILY_PARAMETER_MAPPINGS 中缺失时，build_settings_overrides
+# 才会记录 ERROR 并 skip 该 combo（fail-close）。非 required 且无映射的
+# key 视为 "RDP 回测专用参数"（仅供 replay adapter 消费），降级到 INFO
+# 记录被 dropped，避免在 family 间的语义差异引发日志污染。
 #
-# 非此集合中的参数（如 cost_config 子字段）不会触发警告。
-_RDP_CORE_RESEARCH_PARAMS: frozenset[str] = frozenset({
-    "entry_threshold",
-    "close_threshold",
-    "scale_in_threshold",
-    "short_entry_threshold",
-    "short_close_threshold",
-    "min_hold_seconds",
-    "rebalance_cooldown_seconds",
-    "max_thesis_age_seconds",
-    "de_risk_net_edge_bps",
-    "failed_thesis_net_edge_bps",
-    "catastrophic_failed_thesis_buffer_bps",
-    "expected_slippage_buffer_bps",
-    "expected_execution_buffer_bps",
-    "max_acceptable_cost_bps",
-    "min_score_drawdown_bps",
-    "min_liquidity_quality",
-    "limit_offset_bps_entry",
-    "signal_edge_scale_bps",
-    "score_stability_threshold",
-    "min_confirm_ticks",
-    "min_safe_net_edge_bps",
-})
+# 设计依据：
+#   - independent family 完整消费 21 个研究 key（含 independent-hedge-overlay
+#     的全部字段），任何缺失都是真实的"研究输出未接入生产"断链
+#   - directional family 的决策路径走 baseline.direction_bias → _qty_from_bias,
+#     不使用 _hedge_independent_* overlay 字段；只有 min_hold_seconds 能直接
+#     被 target_position.py 消费（其他研究 key 仅对 DirectionalReplayAdapter
+#     的 score 模型有效，生产端暂无生效位点）
+#   - 其余 family（如 smart_arbitrage）当前未纳入 RDP，required 留空
+#
+# 非 required 且未映射的研究 key ≠ "漏接"，而是"研究层比生产层多维度"，
+# 这是 RDP 设计的正常状态。
+_RDP_CORE_RESEARCH_PARAMS_BY_FAMILY: dict[str, frozenset[str]] = {
+    "independent": frozenset({
+        "entry_threshold",
+        "close_threshold",
+        "scale_in_threshold",
+        "short_entry_threshold",
+        "short_close_threshold",
+        "min_hold_seconds",
+        "rebalance_cooldown_seconds",
+        "max_thesis_age_seconds",
+        "de_risk_net_edge_bps",
+        "failed_thesis_net_edge_bps",
+        "catastrophic_failed_thesis_buffer_bps",
+        "expected_slippage_buffer_bps",
+        "expected_execution_buffer_bps",
+        "max_acceptable_cost_bps",
+        "min_score_drawdown_bps",
+        "min_liquidity_quality",
+        "limit_offset_bps_entry",
+        "signal_edge_scale_bps",
+        "score_stability_threshold",
+        "min_confirm_ticks",
+        "min_safe_net_edge_bps",
+    }),
+    "directional": frozenset({
+        # 当前 directional 生产决策路径只消费这一个 RDP 研究 key
+        # （见 target_position.py L1407/1413）。其它 RDP 研究 key
+        # 由 DirectionalReplayAdapter 在回测内部使用，不经生产端。
+        "min_hold_seconds",
+    }),
+    # 其他 family（smart_arbitrage / spot_grid / dca / protective /
+    # opportunistic）当前未纳入 RDP pipeline，required 留空。
+}
+
+# ── 兼容别名 ────────────────────────────────────────────────────
+#
+# 外部引用（包括历史测试）仍通过 `_RDP_CORE_RESEARCH_PARAMS` 访问 independent
+# 家族的规范 key 集合。为避免 breaking change，保留此别名。
+_RDP_CORE_RESEARCH_PARAMS: frozenset[str] = _RDP_CORE_RESEARCH_PARAMS_BY_FAMILY[
+    "independent"
+]
 
 # ── 参数白名单: 即使映射缺失，这些 key 也不会触发 WARNING ─────────
 #
@@ -711,8 +760,10 @@ def build_settings_overrides(
 
     overrides: dict[str, Any] = {}
     applied_combos: list[str] = []
-    # combo_key -> 被丢弃的参数集合（用于诊断映射缺失）
-    dropped_by_combo: dict[str, list[str]] = {}
+    # combo_key -> required 子集中缺映射的 key（fail-close 场景,ERROR 级）
+    missing_required_by_combo: dict[str, list[str]] = {}
+    # combo_key -> 非 required 且未映射的研究 key（"研究层多维度",INFO 级）
+    dropped_optional_by_combo: dict[str, list[str]] = {}
 
     for combo_key, data in all_sets.items():
         parts = combo_key.rsplit("_", 1)
@@ -726,25 +777,39 @@ def build_settings_overrides(
             continue
 
         mapping = FAMILY_PARAMETER_MAPPINGS.get(family, {})
+        required = _RDP_CORE_RESEARCH_PARAMS_BY_FAMILY.get(family, frozenset())
         values = data.get("values", {})
 
-        dropped: list[str] = []
+        # ── 分三类：required 缺映射 / 非 required 未映射 / 已映射 ──
+        missing_required: list[str] = []
+        dropped_optional: list[str] = []
         for rdp_param in values.keys():
             if rdp_param in mapping:
                 continue  # 已被映射
             if rdp_param in _RDP_REPLAY_ONLY_PARAMS:
                 continue  # 属于 replay-only, 不应映射
-            if rdp_param in _RDP_CORE_RESEARCH_PARAMS:
-                dropped.append(rdp_param)
-        if dropped:
-            dropped_by_combo[combo_key] = sorted(dropped)
+            if rdp_param in required:
+                missing_required.append(rdp_param)
+            else:
+                dropped_optional.append(rdp_param)
+
+        if missing_required:
+            missing_required_by_combo[combo_key] = sorted(missing_required)
             log.error(
-                "Active parameter combo skipped [%s]: core research params are not "
-                "fully mapped to AATSSettings. Missing keys: %s",
+                "Active parameter combo skipped [%s]: required research params "
+                "are not mapped to AATSSettings (family=%s). Missing keys: %s. "
+                "Check FAMILY_PARAMETER_MAPPINGS['%s'] and "
+                "_RDP_CORE_RESEARCH_PARAMS_BY_FAMILY['%s'].",
                 combo_key,
-                ", ".join(sorted(dropped)),
+                family,
+                ", ".join(sorted(missing_required)),
+                family,
+                family,
             )
             continue
+
+        if dropped_optional:
+            dropped_optional_by_combo[combo_key] = sorted(dropped_optional)
 
         for rdp_param, settings_field in mapping.items():
             if rdp_param not in values:
@@ -767,18 +832,18 @@ def build_settings_overrides(
             ", ".join(applied_combos),
         )
 
-    # 映射缺失 WARNING: 帮助运维/开发者快速定位 "研究输出 → 生产注入" 断链
-    for combo_key, dropped in dropped_by_combo.items():
+    # 非 required 未映射的研究 key：降级 INFO 记录（不是断链,是"研究层比
+    # 生产层多维度"的正常状态；保留日志以便排查 RDP 输出的实际范围）
+    for combo_key, dropped in dropped_optional_by_combo.items():
         family, _, _timeframe = combo_key.partition("_")
-        log.warning(
-            "Active parameter mapping gap [%s]: %d research params present in JSON "
-            "but not mapped to AATSSettings (family=%s). Dropped keys: %s. "
-            "Check FAMILY_PARAMETER_MAPPINGS['%s'] to add missing entries.",
+        log.info(
+            "Active parameter research-only keys [%s]: %d keys in research output "
+            "not required for production (family=%s). Dropped: %s. "
+            "These keys are consumed by RDP replay adapter only.",
             combo_key,
             len(dropped),
             family,
             ", ".join(dropped),
-            family,
         )
 
     return overrides
