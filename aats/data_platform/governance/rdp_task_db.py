@@ -28,6 +28,10 @@ VALID_WORKFLOWS = {
     "research_cycle",
     "decision_cycle",
     "release_cycle",
+    # RDP Bug 1: observation_cycle 从 decision_cycle.observation_check 拆出，
+    # hourly 推进 parameter_releases.observation_status，避免 24h 观察窗
+    # 被 weekly decision_cycle 拉长到 7 天。
+    "observation_cycle",
 }
 
 # orphan-recovery 的 sentinel exit_code：daemon 崩溃 / 被 kill 后留下的
