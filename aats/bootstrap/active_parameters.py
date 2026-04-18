@@ -231,14 +231,26 @@ PARAMETER_MAPPING_DIRECTIONAL: dict[str, str] = {
     # 单位一致: seconds; 语义: 防止过频交易
     "min_hold_seconds": "strategy_min_hold_seconds",
 
-    # [PLACEHOLDER] RDP 方向性策略的趋势权重 → 生产端 entry alpha 最小值
-    # RDP 端: directional_trend_weight 是趋势信号在综合评分中的权重 (0~1)
-    # 生产端: strategy_entry_alpha_min 是入场信号的最小 alpha 阈值
-    #         (target_position.py L1342, 入场门控统一逻辑, directional 也经过)
-    # ⚠️ 语义张力较大: "权重" ≠ "最小阈值"
-    #    第一版占位: 假设 trend_weight 越高 → 要求的 alpha_min 越高
-    #    TODO: 需要明确两者的数学关系，或拆成独立映射
-    "directional_trend_weight": "strategy_entry_alpha_min",
+    # ⚠️ 不映射 directional_trend_weight → strategy_entry_alpha_min
+    #
+    # 历史上此处有一个 PLACEHOLDER 映射 (已撤除):
+    #   "directional_trend_weight": "strategy_entry_alpha_min"
+    #
+    # 撤除原因 (2026-04-18 实盘发现):
+    #   - RDP 端 directional_trend_weight ∈ [0, 1], 典型值 0.7~1.0
+    #   - 生产端 strategy_entry_alpha_min 是"入场 alpha 最低阈值",
+    #     AI alpha ∈ [-1, 1], 默认 0.17 (profile=0.1)
+    #   - 语义完全不对等: "趋势信号的权重" ≠ "入场 alpha 最低阈值"
+    #   - 注入 1.0 会导致全家族 (含 independent) 入场门控全面锁死,
+    #     因为 strategy_entry_alpha_min 是 target_position._trade_thresholds()
+    #     的 global 门槛, 所有 family 走统一入口
+    #
+    # directional_trend_weight 已在 _RDP_REPLAY_ONLY_PARAMS 白名单中,
+    # DirectionalReplayAdapter 在回测时消费, 生产端应静默忽略.
+    #
+    # 如果未来策略层确定 trend_weight 与 alpha_min 的数学关系, 或新增
+    # directional 专属字段 (e.g. strategy_hedge_directional_entry_alpha_min),
+    # 再重新评估映射.
 
     # [DIRECT] RDP 回测使用的 taker 手续费 → 生产端衍生品 taker 费
     # 单位一致: bps; 语义: 同一概念

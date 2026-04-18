@@ -157,8 +157,9 @@ class TestBuildSettingsOverridesMappingGap(unittest.TestCase):
 
         # min_hold_seconds 应成功注入 strategy_min_hold_seconds (global)
         self.assertEqual(overrides.get("strategy_min_hold_seconds"), 300.0)
-        # directional_trend_weight → strategy_entry_alpha_min
-        self.assertEqual(overrides.get("strategy_entry_alpha_min"), 0.7)
+        # directional_trend_weight 已撤除 PLACEHOLDER 映射,应静默忽略
+        # (在 _RDP_REPLAY_ONLY_PARAMS 白名单中)
+        self.assertNotIn("strategy_entry_alpha_min", overrides)
 
         # 应有一条 INFO 级的 "research-only keys" 记录
         info_records = [r for r in cm.records if r.levelno == logging.INFO]
@@ -329,6 +330,51 @@ class TestBuildSettingsOverridesMappingGap(unittest.TestCase):
         self.assertEqual(
             PARAMETER_MAPPING_DIRECTIONAL["min_hold_seconds"],
             "strategy_min_hold_seconds",
+        )
+
+    def test_directional_trend_weight_not_mapped_to_alpha_min(self) -> None:
+        """回归保护: directional_trend_weight → strategy_entry_alpha_min 的
+        PLACEHOLDER 映射已撤除 (2026-04-18 实盘发现语义冲突).
+
+        不能重新引入此映射, 否则 directional combo 的 trend_weight=1.0
+        会被注入到全局 strategy_entry_alpha_min, 锁死所有 family 入场门控.
+        """
+        self.assertNotIn(
+            "directional_trend_weight",
+            PARAMETER_MAPPING_DIRECTIONAL,
+            msg=(
+                "directional_trend_weight 不应映射到 AATSSettings。"
+                "此 PLACEHOLDER 已撤除, 见 active_parameters.py 内相应注释。"
+            ),
+        )
+        # directional_trend_weight 必须在 replay-only 白名单中 (静默忽略)
+        self.assertIn("directional_trend_weight", _RDP_REPLAY_ONLY_PARAMS)
+
+    def test_directional_trend_weight_does_not_leak_to_alpha_min(self) -> None:
+        """端到端回归: 即使 directional combo 包含 trend_weight=1.0,
+        strategy_entry_alpha_min 也不应被 override。"""
+        db_result = _make_db_result({
+            "directional_15m": {
+                "min_hold_seconds": 300.0,
+                "directional_trend_weight": 1.0,  # 严重副作用的值
+                "taker_fee_bps": 5.0,
+                "slippage_bps": 2.0,
+            },
+        })
+
+        with patch(
+            "aats.bootstrap.active_parameters._try_load_from_db",
+            return_value=db_result,
+        ):
+            overrides = build_settings_overrides(db_url="mock://db")
+
+        # strategy_min_hold_seconds 应注入
+        self.assertEqual(overrides.get("strategy_min_hold_seconds"), 300.0)
+        # strategy_entry_alpha_min 绝对不能出现
+        self.assertNotIn(
+            "strategy_entry_alpha_min",
+            overrides,
+            msg="trend_weight=1.0 不应泄漏到全局 entry_alpha_min",
         )
 
     def test_replay_only_params_are_not_warned(self) -> None:
