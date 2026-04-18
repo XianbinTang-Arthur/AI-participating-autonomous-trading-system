@@ -566,6 +566,61 @@ def db_upsert_active_decision(
     log.info("DB upsert active_decision: %s -> %s", combo_key, current_status)
 
 
+def db_set_combo_pause(
+    session: Session,
+    *,
+    family: str,
+    timeframe: str,
+    reason: str,
+) -> bool:
+    """Bug 8 Layer 2: 把 combo 的 active_decision.current_status 设为 'pause'.
+
+    只更新 ``current_status``/``notes``/``last_updated_at``，**不动**
+    ``active_parameter_set_id`` 和 ``last_recommendation_id`` (那些是治理决策层
+    的真相源，不应被 pause 动作改写)。
+
+    触发路径：auto-rollback 无合法 target 时的保护兜底 (规则 2 的 deprecated
+    时间门控拒绝 + 没有其他 alternate)，通过 combo-level pause 阻止未来新 apply
+    (pre_apply_gate decision_consistency check 会 block severity=block)，
+    但不强制切换当前 live 参数。
+
+    Returns
+    -------
+    bool
+        True: UPDATE 成功（combo 有既存 active_decision 行）
+        False: combo 没有 active_decision 行（UPDATE 0 行），调用方应该 log
+        warning 而不是创建新 row——pause 是对已存在决策的降级，不是凭空写入。
+    """
+    result = session.execute(
+        text("""
+            UPDATE governance.active_decisions
+            SET current_status = 'pause',
+                last_updated_at = :now,
+                notes = :reason
+            WHERE family = :family AND timeframe = :tf
+        """),
+        {
+            "family": family,
+            "tf": timeframe.lower(),
+            "now": datetime.now(timezone.utc),
+            "reason": reason,
+        },
+    )
+    rowcount = result.rowcount or 0
+    if rowcount > 0:
+        log.info(
+            "combo_paused family=%s timeframe=%s reason=%s",
+            family, timeframe.lower(), reason,
+        )
+        return True
+    log.warning(
+        "db_set_combo_pause: combo family=%s timeframe=%s 无 active_decision 记录，"
+        "跳过 pause 写入 (可能是首次 apply 未产生决策层记录)",
+        family, timeframe.lower(),
+    )
+    return False
+
+
 def db_load_active_decisions(session: Session) -> dict[str, Any]:
     """导出全量 active decisions，返回与文件 registry 兼容的 dict 格式.
 

@@ -562,6 +562,19 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
         )
 
         rb_ok = rb_result.get("ok", False)
+        rb_reason = rb_result.get("reason") or ""
+        # Bug 8 Layer 2: 识别 "无合法 rollback target" 类型的失败 (而非临时锁/IO
+        # 错误)，降级为 soft pause —— 不硬回滚、不重试，通过 active_decisions
+        # pause 阻止未来新 apply，实盘当前参数保持不变。
+        _SOFT_PAUSE_REASONS = {
+            "target_deprecated_too_old",
+            "target_deprecated_without_timestamp",
+            "no_apply_history_for_target",
+            "target_not_found_or_wrong_combo",
+        }
+        rb_reason_head = rb_reason.split(":", 1)[0]
+        is_permanent_no_target = rb_reason_head in _SOFT_PAUSE_REASONS
+
         if rb_ok:
             # 仅在回滚成功时标记为已执行；失败时保留 pending 状态，
             # 下次调用 enforce_pending_rollbacks 会重试。
@@ -569,8 +582,58 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
             ev["rollback_enforced_at"] = datetime.now(timezone.utc).isoformat()
             ev["rollback_to_parameter_set_id"] = prev_ps_id
             modified = True
+        elif is_permanent_no_target:
+            # Layer 2 soft pause: 无合法 rollback target → 写 combo pause +
+            # 标记 evaluation cancelled (带 soft_paused reason)，避免无限重试。
+            from aats.data_platform.governance._db_util import try_governance_db
+            from aats.data_platform.governance.recommendations_db import (
+                db_set_combo_pause,
+            )
+            from sqlalchemy.orm import Session as _SQLSession
+
+            pause_ok = False
+            engine, db_ok = try_governance_db()
+            if db_ok and engine is not None:
+                try:
+                    with _SQLSession(engine) as pause_sess:
+                        pause_ok = db_set_combo_pause(
+                            pause_sess,
+                            family=family,
+                            timeframe=timeframe,
+                            reason=(
+                                f"soft_pause_auto_rollback_no_valid_target: "
+                                f"release={release_id} reason={rb_reason}"
+                            ),
+                        )
+                        pause_sess.commit()
+                finally:
+                    engine.dispose()
+
+            ev["rollback_cancelled"] = True
+            ev["rollback_cancelled_at"] = datetime.now(timezone.utc).isoformat()
+            ev["rollback_cancelled_reason"] = (
+                f"soft_paused_no_valid_rollback_target: {rb_reason}"
+            )
+            ev["rollback_soft_pause_applied"] = pause_ok
+            modified = True
+
+            # Layer 3 structured log → Loki/Grafana alert (Bug 6 链路)
+            log.error(
+                "rdp_rollback_soft_paused release_id=%s combo=%s reason=%r "
+                "pause_applied=%s",
+                release_id, combo_key, rb_reason, pause_ok,
+                extra={
+                    "event_name": "rdp_rollback_soft_paused",
+                    "release_id": release_id,
+                    "family": family,
+                    "timeframe": timeframe,
+                    "rollback_target": prev_ps_id,
+                    "rollback_reason": rb_reason,
+                    "pause_applied": pause_ok,
+                },
+            )
         else:
-            # 记录失败尝试但不标记 enforced，保证可重试
+            # 临时失败 (锁失败 / 网络 / 数据库连接等) → 保留 pending 重试
             ev.setdefault("rollback_attempts", 0)
             ev["rollback_attempts"] += 1
             ev["last_rollback_error"] = rb_result.get("message", "unknown error")
@@ -581,6 +644,7 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
             "family": family,
             "timeframe": timeframe,
             "ok": rb_ok,
+            "soft_paused": (not rb_ok) and is_permanent_no_target,
             "rollback_result": rb_result,
         })
 
