@@ -11,11 +11,11 @@
   "tasks": [
     {
       "name": "observation_check",
-      "description": "检查 observing 状态的 release，并自动评估 rollback/effectiveness。",
+      "description": "检查 observing 状态的 release，并自动评估 rollback/effectiveness。allow_failure=true：observation 评估暴露的业务问题（例如 rollback target 全部 deprecated 无处可回、release_effectiveness DB 约束错误等）不应该阻塞 hourly 观察推进。关键失败通过 structured log 告警（Bug 6）。",
       "command": "python scripts/rdp_run_release_observation_cycle.py",
       "timeout_seconds": 300,
       "enabled": true,
-      "allow_failure": false
+      "allow_failure": true
     }
   ]
 }
