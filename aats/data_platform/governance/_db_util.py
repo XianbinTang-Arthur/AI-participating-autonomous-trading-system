@@ -46,10 +46,23 @@ VALID_PS_STATUSES = frozenset({"draft", "candidate", "frozen", "deprecated"})
 VALID_REC_STATUSES = frozenset({"draft", "approved", "rejected", "superseded"})
 
 # 合法的 recommendation 类型
+# 批次 B(rdp_scope_expansion_v3)新增 2 个真正语义不同的类型:
+#   profile_type_review — 只用于 profile scope,连续 3 轮 clamp 超界
+#   sleeve_budget_adjust — 只用于 sleeve scope,budget 调整建议
+# parameter_upgrade / keep_active 为跨 scope 通用类型。
 VALID_REC_TYPES = frozenset({
     "parameter_upgrade", "keep_active", "lower_priority",
     "pause", "require_review",
+    "profile_type_review",
+    "sleeve_budget_adjust",
 })
+
+# 合法的 scope 枚举(rdp_scope_expansion_v3 §0.2)
+# combo   — family × timeframe 组合参数(既有行为)
+# profile — strategy profile 级阈值(Phase 1)
+# sleeve  — sleeve budget(Phase 3,observation-only)
+# risk    — 风控边界(Phase 4 占位)
+VALID_SCOPES = frozenset({"combo", "profile", "sleeve", "risk"})
 
 
 def resolve_governance_db_url() -> str | None:
