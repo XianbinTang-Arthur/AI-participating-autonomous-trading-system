@@ -227,6 +227,30 @@ def _make_recommendation_id() -> str:
 # ── Recommendation Registry ──────────────────────────────────────────
 
 
+def _read_disk_base_version(path: pathlib.Path) -> int:
+    """读审计副本文件里的 version 字段。文件不存在/损坏都返回 0。
+
+    专门服务 DB-first 路径：DB 加载不带 version（DB 没这个字段），但审计副本
+    文件自己维护 version 计数器用于 CAS。必须把磁盘 version 戳到内存 registry
+    上，否则下一次 ``save_recommendation_registry`` 会误报 CAS 冲突
+    （磁盘=N>0，内存 base=0）把 HTTP 500 抛回 UI——此时 DB 写入其实已经成功。
+    """
+    if not path.exists():
+        return 0
+    try:
+        with path.open(encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    raw = data.get("version", 0)
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
 def load_recommendation_registry(path: pathlib.Path, *, skip_db: bool = False) -> dict[str, Any]:
     """加载 recommendation registry.
 
@@ -245,6 +269,9 @@ def load_recommendation_registry(path: pathlib.Path, *, skip_db: bool = False) -
                 if registry.get("recommendations"):
                     log.info("从数据库加载 recommendation registry (%d recommendations)",
                              len(registry["recommendations"]))
+                    # DB 返回体没有 version 字段——把审计副本当前 version 戳进去,
+                    # 让 save 的 CAS 检查对齐磁盘基线。不戳会导致第二次 save 必 500。
+                    registry["version"] = _read_disk_base_version(path)
                     return registry
                 log.debug("recommendation_registry: DB 为空，fallback 到文件")
             except Exception as exc:

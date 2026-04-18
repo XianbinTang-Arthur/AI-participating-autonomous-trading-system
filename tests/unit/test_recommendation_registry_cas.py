@@ -126,3 +126,95 @@ def test_save_registry_older_disk_version_also_raises(
     registry = _registry(4, [{"recommendation_id": "rec_d", "status": "draft"}])
     with pytest.raises(RuntimeError, match="CAS 冲突"):
         save_recommendation_registry(registry, path)
+
+
+def test_db_load_stamps_disk_version_for_cas(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """回归：DB-loaded registry 必须把磁盘 version 戳进内存,否则下次 save 必 500。
+
+    真实事故回放:第一次 approve 成功(磁盘 v0→v1),第二次 approve DB 加载回
+    registry(无 version 字段)、写 DB 成功、再 save 文件时 base_version=0 vs
+    磁盘=1 → CAS 冲突 → 500 冒泡到 UI,但 DB 状态其实已经变了——split-brain。
+    修复后 load 应该把磁盘 version 戳到 registry 上,让 save CAS 通过。
+    """
+    from aats.data_platform.decision_system import recommendation_registry as mod
+
+    path = tmp_path / "recommendation_registry.json"
+    # 审计副本已经被前一轮 save 推到 v3(模拟已运行过几轮 approve)
+    path.write_text(
+        json.dumps({"version": 3, "recommendations": [{"recommendation_id": "rec_old"}]}),
+        encoding="utf-8",
+    )
+
+    # Mock DB 返回一份没有 version 字段的 payload（DB 不跟踪文件 version）
+    def fake_try_governance_db() -> tuple[object, bool]:
+        class _FakeEngine:
+            def dispose(self) -> None: ...
+        return _FakeEngine(), True
+
+    def fake_db_load(session: object) -> dict[str, Any]:
+        return {
+            "generated_at": "2026-04-18T00:00:00+00:00",
+            "recommendations": [{"recommendation_id": "rec_from_db", "status": "draft"}],
+        }
+
+    class _FakeSession:
+        def __init__(self, _engine: object) -> None: ...
+        def __enter__(self) -> "_FakeSession": return self
+        def __exit__(self, *_: object) -> None: ...
+
+    monkeypatch.setattr(mod, "try_governance_db", fake_try_governance_db)
+    import aats.data_platform.governance.recommendations_db as recs_db_mod
+    monkeypatch.setattr(recs_db_mod, "db_load_recommendation_registry", fake_db_load)
+    # load_recommendation_registry 里 import sqlalchemy.orm.Session,打补丁避免真连库
+    import sqlalchemy.orm
+    monkeypatch.setattr(sqlalchemy.orm, "Session", _FakeSession)
+
+    registry = mod.load_recommendation_registry(path)
+    assert registry["version"] == 3, "DB 加载必须把磁盘 version 戳进来"
+
+    # save 必须成功——disk=3, memory base=3 → bump 到 4
+    mod.save_recommendation_registry(registry, path)
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["version"] == 4
+    assert on_disk["recommendations"][0]["recommendation_id"] == "rec_from_db"
+
+
+def test_db_load_no_file_stamps_version_zero(
+    tmp_path: pathlib.Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB 加载但磁盘文件不存在（首次运行）→ version 戳 0,save 后磁盘 v1。"""
+    from aats.data_platform.decision_system import recommendation_registry as mod
+
+    path = tmp_path / "recommendation_registry.json"
+    assert not path.exists()
+
+    def fake_try_governance_db() -> tuple[object, bool]:
+        class _FakeEngine:
+            def dispose(self) -> None: ...
+        return _FakeEngine(), True
+
+    def fake_db_load(session: object) -> dict[str, Any]:
+        return {
+            "generated_at": "2026-04-18T00:00:00+00:00",
+            "recommendations": [{"recommendation_id": "rec_x", "status": "draft"}],
+        }
+
+    class _FakeSession:
+        def __init__(self, _engine: object) -> None: ...
+        def __enter__(self) -> "_FakeSession": return self
+        def __exit__(self, *_: object) -> None: ...
+
+    monkeypatch.setattr(mod, "try_governance_db", fake_try_governance_db)
+    import aats.data_platform.governance.recommendations_db as recs_db_mod
+    monkeypatch.setattr(recs_db_mod, "db_load_recommendation_registry", fake_db_load)
+    import sqlalchemy.orm
+    monkeypatch.setattr(sqlalchemy.orm, "Session", _FakeSession)
+
+    registry = mod.load_recommendation_registry(path)
+    assert registry["version"] == 0
+
+    mod.save_recommendation_registry(registry, path)
+    on_disk = json.loads(path.read_text(encoding="utf-8"))
+    assert on_disk["version"] == 1
