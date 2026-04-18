@@ -37,3 +37,6 @@ logs/
 docs/user.txt
 artifacts/
 loginpassword
+
+# Claude Code runtime state (lock files for scheduled tasks, etc.)
+.claude/scheduled_tasks.lock
