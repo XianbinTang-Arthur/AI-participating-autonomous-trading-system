@@ -44,6 +44,10 @@ def _json_dumps(payload: dict[str, Any]) -> str:
 
 
 class OKXPrivateWebSocketClient:
+    # R3-P1-U-D：订阅 ack 等待上限。超时 → 抛错 → 外层 run_forever 的重连逻辑会拆连接重来。
+    # 和 public WS 侧 _SUBSCRIPTION_ACK_TIMEOUT_SECONDS 保持同量级，避免两侧认知不一致。
+    _SUBSCRIPTION_ACK_TIMEOUT_SECONDS: float = 10.0
+
     def __init__(self, *, settings: AATSSettings) -> None:
         self.settings = settings
         self.logger = get_logger("aats.okx_private_ws")
@@ -51,6 +55,21 @@ class OKXPrivateWebSocketClient:
         self._connected = False
         self._last_message_ts: datetime | None = None
         self._last_error: str | None = None
+        # R3-P1-U-D：private WS 订阅 ack 追踪。镜像 P0-M1 public WS 语义。
+        # 原实现把 `{"op": "subscribe", ...}` 发出后就直接进 for-recv 循环，
+        # OKX 对 balance_and_position / orders 返回的 `event="subscribe"` ack 或
+        # `event="error"` 都被 _is_control_message 当作普通 control 消息跳过，
+        # 上层对 "订阅成功" vs "订阅被拒" 完全没有可视度。如果比如传了非法
+        # instType、或者权限不足被拒，websocket 本身还是连通的（心跳还在走），
+        # 但 balance_and_position / orders 永远没有数据推来——execution 进程的
+        # 账户/订单视图彻底静默失联。
+        # 修复：用一个 pending set 记录期望 ack 的 (channel, instType) 二元组，
+        # 收 event="subscribe" ack 从中移除，收 event="error" 时记录并告警；
+        # _subscribe 在发送后用 asyncio.wait_for 等待 pending 清空，超时即抛错
+        # 让 run_forever 外层 except 分支走重连。
+        self._pending_subscriptions: set[tuple[str, str]] = set()
+        self._subscription_errors: list[dict[str, Any]] = []
+        self._subscription_sent_ts: datetime | None = None
 
     async def run_forever(self, *, on_message: RawMessageHandler) -> None:
         if connect is None:
@@ -163,6 +182,19 @@ class OKXPrivateWebSocketClient:
         await self._await_login_ack(websocket)
 
     async def _subscribe(self, websocket: ClientConnection, subscribe_args: list[dict[str, str]]) -> None:
+        # R3-P1-U-D：发送 subscribe 前先把期望 ack 的 (channel, instType) 集合注册进
+        # pending set。OKX 对 balance_and_position 返回的 ack arg 里没有 instType，
+        # 用空字符串占位；orders 的 ack arg 会带 instType。配合 _is_control_message
+        # 收到 event="subscribe" 后 discard 对应 key，_keepalive_loop 负责超时兜底。
+        pending: set[tuple[str, str]] = set()
+        for arg in subscribe_args:
+            channel = str(arg.get("channel", ""))
+            inst_type = str(arg.get("instType", ""))
+            if channel:
+                pending.add((channel, inst_type))
+        self._pending_subscriptions = pending
+        self._subscription_errors = []
+        self._subscription_sent_ts = utc_now()
         await websocket.send(_json_dumps({"op": "subscribe", "args": subscribe_args}))
 
     def _subscription_args(self) -> list[dict[str, str]]:
@@ -226,10 +258,75 @@ class OKXPrivateWebSocketClient:
             )
         self._last_message_ts = utc_now()
 
-    @staticmethod
-    def _is_control_message(message: dict[str, Any]) -> bool:
+    def _is_control_message(self, message: dict[str, Any]) -> bool:
+        # R3-P1-U-D：除了把 event="subscribe"/"notice"/"login" 识别为控制消息以跳过
+        # 下游 on_message 路由外，还负责把订阅 ack 从 _pending_subscriptions 里抹掉、
+        # 把订阅 error 累积进 _subscription_errors，供 _keepalive_loop 做超时/失败
+        # 兜断连。与 public WS 的 _is_control_message 语义对齐（只是 private 只有
+        # 一条连接、不需要 connection_name 维度）。
         event = message.get("event")
-        return isinstance(event, str) and event in {"subscribe", "notice", "login"}
+        if not isinstance(event, str):
+            return False
+        if event == "subscribe":
+            arg = message.get("arg") or {}
+            if isinstance(arg, dict):
+                key = (str(arg.get("channel", "")), str(arg.get("instType", "")))
+                if key in self._pending_subscriptions:
+                    self._pending_subscriptions.discard(key)
+                    log_event(
+                        self.logger,
+                        "okx_private_ws_subscription_ack",
+                        level="debug",
+                        channel=key[0],
+                        instType=key[1],
+                        pending_count=len(self._pending_subscriptions),
+                    )
+                else:
+                    log_event(
+                        self.logger,
+                        "okx_private_ws_subscription_ack_unmatched",
+                        level="warning",
+                        channel=key[0],
+                        instType=key[1],
+                    )
+            return True
+        if event == "notice":
+            return True
+        if event == "login":
+            return True
+        if event == "error":
+            code = message.get("code", "")
+            msg = message.get("msg", "")
+            arg = message.get("arg") or {}
+            failed_channel = str(arg.get("channel", "")) if isinstance(arg, dict) else ""
+            failed_inst_type = str(arg.get("instType", "")) if isinstance(arg, dict) else ""
+            log_event(
+                self.logger,
+                "okx_private_ws_subscription_error",
+                level="error",
+                code=code,
+                msg=msg,
+                channel=failed_channel,
+                instType=failed_inst_type,
+            )
+            self._last_error = f"subscription_error:{code}:{msg}"
+            key = (failed_channel, failed_inst_type)
+            if key in self._pending_subscriptions:
+                self._subscription_errors.append(
+                    {"code": code, "msg": msg, "channel": failed_channel, "instType": failed_inst_type}
+                )
+            else:
+                log_event(
+                    self.logger,
+                    "okx_private_ws_subscription_error_unmatched",
+                    level="warning",
+                    code=code,
+                    msg=msg,
+                    channel=failed_channel,
+                    instType=failed_inst_type,
+                )
+            return True
+        return False
 
     @staticmethod
     def _is_pong_message(raw_message: str | bytes) -> bool:
@@ -252,9 +349,48 @@ class OKXPrivateWebSocketClient:
         idle_threshold = min(max(5.0, configured_idle), 15.0)
         pong_timeout = 10.0
         poll_interval = 1.0
+        close_wait = 3.0
         while not self._stop_event.is_set():
             await asyncio.sleep(poll_interval)
             if self._stop_event.is_set():
+                return
+            # R3-P1-U-D：订阅 ack 超时/失败检测。subscribe 发送后若在
+            # _SUBSCRIPTION_ACK_TIMEOUT_SECONDS 内未收齐所有 channel 的 ack，或收到
+            # 任一 event="error"，立即断连重连。静默订阅失败会让 WS 连着但没有
+            # balance/orders 推送，下游账户视图永久饿死。
+            if self._subscription_errors:
+                log_event(
+                    self.logger,
+                    "okx_private_ws_subscription_failed_reconnect",
+                    level="error",
+                    error_count=len(self._subscription_errors),
+                    errors=self._subscription_errors[:5],
+                )
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        websocket.close(code=1011, reason="subscription_failed"),
+                        timeout=close_wait,
+                    )
+                return
+            if (
+                self._subscription_sent_ts is not None
+                and self._pending_subscriptions
+                and (utc_now() - self._subscription_sent_ts).total_seconds()
+                > self._SUBSCRIPTION_ACK_TIMEOUT_SECONDS
+            ):
+                log_event(
+                    self.logger,
+                    "okx_private_ws_subscription_ack_timeout",
+                    level="error",
+                    pending_count=len(self._pending_subscriptions),
+                    pending_sample=[f"{c}:{i}" for c, i in list(self._pending_subscriptions)[:5]],
+                    timeout_seconds=self._SUBSCRIPTION_ACK_TIMEOUT_SECONDS,
+                )
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(
+                        websocket.close(code=1011, reason="subscription_ack_timeout"),
+                        timeout=close_wait,
+                    )
                 return
             last_ts = self._last_message_ts
             if last_ts is not None:

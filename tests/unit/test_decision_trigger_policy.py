@@ -68,13 +68,17 @@ class TestDecisionTriggerPolicy(unittest.TestCase):
         self.assertEqual(reason, "initial_decision")
         policy.record_trigger(feature_snapshot=feature, market_snapshot=market, timeframe="15m")
 
+        # R3-P1-U-B：同 snapshot_ts + 完全相同内容 → 不再 early-reject 为
+        # "duplicate_market_snapshot"，而是 fall-through 到 material_change
+        # 评估。内容完全相同时 material_change=False + cadence 未到 → 仍被
+        # 拒绝，但 reason 变为 suppressed_duplicate。真正重复的消息仍然被拦。
         duplicate_allowed, duplicate_reason = policy.should_trigger(
             feature_snapshot=feature,
             market_snapshot=market,
             timeframe="15m",
         )
         self.assertFalse(duplicate_allowed)
-        self.assertEqual(duplicate_reason, "duplicate_market_snapshot")
+        self.assertEqual(duplicate_reason, "suppressed_duplicate")
 
         next_ts = base_ts + timedelta(seconds=10)
         small_move_market = _market(snapshot_ts=next_ts, last_price=67_001.0)
@@ -178,7 +182,7 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str]] = []
 
-            async def run_cycle(self, *, symbol: str, timeframe: str):
+            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None):
                 self.calls.append((symbol, timeframe))
                 await asyncio.sleep(0)
 
@@ -224,7 +228,7 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str]] = []
 
-            async def run_cycle(self, *, symbol: str, timeframe: str):
+            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None):
                 self.calls.append((symbol, timeframe))
 
         class _FakeMarketGateway:
@@ -276,7 +280,7 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str]] = []
 
-            async def run_cycle(self, *, symbol: str, timeframe: str):
+            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None):
                 self.calls.append((symbol, timeframe))
 
         class _FakeMarketGateway:
@@ -309,5 +313,121 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
         await trigger.handle_feature_snapshot(message)
 
         self.assertEqual(orchestrator.calls, [])
+class TestGatewayTriggerSnapshotTsParity(unittest.TestCase):
+    """R3-P1-U-B 回归：market_gateway.apply_remote_snapshot 用 `<` 接收
+    （同 ms 新 tick 合法接受），trigger_policy.should_trigger 也必须用 `<`
+    拒绝，而不是 `==` 就早早抹掉合法更新。同 ts 不同内容必须能触发 decision。"""
+
+    def test_same_snapshot_ts_with_material_change_triggers_decision(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "decision_min_interval_seconds_15m": 60.0,
+                "decision_min_price_move_bps": 5.0,
+                "decision_min_momentum_delta": 0.2,
+            }
+        )
+        policy = DecisionTriggerPolicy(settings=settings)
+        base_ts = utc_now()
+        feature = _feature(snapshot_ts=base_ts, momentum=0.1, regime="trend")
+        market = _market(snapshot_ts=base_ts, last_price=67_000.0)
+        # 记录 initial decision
+        allowed, _ = policy.should_trigger(
+            feature_snapshot=feature, market_snapshot=market, timeframe="15m",
+        )
+        self.assertTrue(allowed)
+        policy.record_trigger(feature_snapshot=feature, market_snapshot=market, timeframe="15m")
+
+        # 同 snapshot_ts 新内容（price 大幅移动）→ 必须 fall-through 到
+        # material_change 并触发
+        bigger_move_market = _market(snapshot_ts=base_ts, last_price=67_500.0)  # +74 bps
+        allowed2, reason2 = policy.should_trigger(
+            feature_snapshot=feature,
+            market_snapshot=bigger_move_market,
+            timeframe="15m",
+        )
+        self.assertTrue(allowed2, f"same-ts material change must trigger (got reason={reason2})")
+        self.assertEqual(reason2, "material_change")
+
+    def test_strictly_older_snapshot_ts_is_rejected(self) -> None:
+        """严格更旧的 ts 仍然要被拒（reorder / replay 防御）。"""
+        settings = AATSSettings.model_validate(
+            {"decision_min_interval_seconds_15m": 60.0}
+        )
+        policy = DecisionTriggerPolicy(settings=settings)
+        base_ts = utc_now()
+        feature = _feature(snapshot_ts=base_ts, momentum=0.1, regime="trend")
+        market = _market(snapshot_ts=base_ts, last_price=67_000.0)
+        policy.should_trigger(feature_snapshot=feature, market_snapshot=market, timeframe="15m")
+        policy.record_trigger(feature_snapshot=feature, market_snapshot=market, timeframe="15m")
+
+        older_ts = base_ts - timedelta(seconds=5)
+        older_feature = _feature(snapshot_ts=older_ts, momentum=0.5, regime="trend")
+        older_market = _market(snapshot_ts=older_ts, last_price=67_999.0)  # 即使内容变化也应拒
+        allowed, reason = policy.should_trigger(
+            feature_snapshot=older_feature,
+            market_snapshot=older_market,
+            timeframe="15m",
+        )
+        self.assertFalse(allowed)
+        self.assertEqual(reason, "out_of_order_market_snapshot")
+
+
+class TestFeatureSnapshotHintPropagation(unittest.IsolatedAsyncioTestCase):
+    """R3-P1-U-A 回归：trigger 收到的 feature envelope 必须向下传给 run_cycle
+    成为 feature_snapshot_hint，保证 DecisionContext.feature_snapshot_ref 与
+    触发 cycle 的那条 FEATURE_SNAPSHOT envelope 完全一致，消除 trigger 评估
+    与 build 读取之间新 snapshot 抢跑导致的 ref 漂移。"""
+
+    async def test_run_cycle_receives_original_feature_envelope_as_hint(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "enabled_decision_timeframes": ["15m"],
+                "decision_min_interval_seconds_15m": 0.0,
+            }
+        )
+        policy = DecisionTriggerPolicy(settings=settings)
+        base_ts = utc_now()
+        market = _market(snapshot_ts=base_ts, last_price=67_000.0)
+        feature = _feature(snapshot_ts=base_ts, momentum=0.1, regime="trend")
+
+        class _HintCapturingOrchestrator:
+            def __init__(self) -> None:
+                self.hints: list[object] = []
+
+            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None):
+                self.hints.append(feature_snapshot_hint)
+
+        class _FakeMarketGateway:
+            def latest_snapshot(self, symbol: str):
+                return market if symbol == "BTC-USDT" else None
+
+        orchestrator = _HintCapturingOrchestrator()
+        trigger = DecisionCycleTrigger(
+            orchestrator=orchestrator,
+            market_gateway=_FakeMarketGateway(),
+            policy=policy,
+        )
+        envelope = build_envelope(
+            topic=topics.FEATURE_SNAPSHOTS,
+            key=feature.symbol,
+            payload_model=feature,
+            source_component="test",
+        )
+        message = {
+            "topic": topics.FEATURE_SNAPSHOTS,
+            "key": feature.symbol,
+            "payload": envelope.model_dump(mode="json"),
+        }
+
+        await trigger.handle_feature_snapshot(message)
+
+        self.assertEqual(len(orchestrator.hints), 1)
+        hint = orchestrator.hints[0]
+        self.assertIsNotNone(hint)
+        # hint 必须是触发 cycle 的那条 envelope：event_id / payload 完全一致
+        self.assertEqual(hint.event_id, envelope.event_id)  # type: ignore[union-attr]
+        self.assertEqual(hint.topic, topics.FEATURE_SNAPSHOTS)  # type: ignore[union-attr]
+
+
 if __name__ == "__main__":
     unittest.main()

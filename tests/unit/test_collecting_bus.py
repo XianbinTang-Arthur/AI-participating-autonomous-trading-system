@@ -143,11 +143,11 @@ class TestCollectingBus(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(downstream.publishes, [("topic.a", "k1", {"v": 1})])
 
-    async def test_fan_out_propagates_exception_from_first_handler(self) -> None:
-        """如果 fan-out 链里有 handler 抛异常，异常向上传播以便 NATS NAK 重投。
-        后续 handler 在本次 delivery 不会被调用，但因为 observer handler 已被
-        resilient_subscription_handler 包过，永远不抛，所以"中断后续"只可能是
-        critical handler 抛——这是期望行为。"""
+    async def test_fan_out_isolates_handler_failures(self) -> None:
+        """R3-P1-U-C：fan-out 链里任一 handler 抛异常时，**后续 handler 仍必须
+        被调用**，然后再把首个异常 re-raise 以便 NATS NAK 重投。这样单个
+        flaky observer 不会连带把顺序靠后的 critical handler 的首次执行窗口
+        一起吞掉；重投时再走一遍，所有 handler 都至少被尝试执行一次。"""
         downstream = _RecordingBus()
         bus = _CollectingBus(downstream)
         called: list[str] = []
@@ -159,15 +159,42 @@ class TestCollectingBus(unittest.IsolatedAsyncioTestCase):
         async def trailing(_: dict) -> None:
             called.append("trailing")
 
+        async def third(_: dict) -> None:
+            called.append("third")
+
         await bus.subscribe("topic.a", failing)
         await bus.subscribe("topic.a", trailing)
+        await bus.subscribe("topic.a", third)
         await bus.flush()
 
         _, fan_out = downstream.subscriptions[0]
+        # 首个 handler 的异常必须 re-raise 给 NATS NAK 重投
         with self.assertRaises(RuntimeError):
             await fan_out({"topic": "topic.a", "key": "k", "payload": {}})
 
-        self.assertEqual(called, ["failing"])
+        # 所有 handler 都应该被调用，不因 failing 抛错而跳过 trailing/third
+        self.assertEqual(called, ["failing", "trailing", "third"])
+
+    async def test_fan_out_reraises_first_exception_even_if_later_also_fails(self) -> None:
+        """R3-P1-U-C：多个 handler 同时抛错时，re-raise 第一个，避免异常链混乱
+        （否则 NATS 拿到最后一个异常，log 上下文不匹配真正第一个失败的 handler）。"""
+        downstream = _RecordingBus()
+        bus = _CollectingBus(downstream)
+
+        async def first_fail(_: dict) -> None:
+            raise RuntimeError("first_boom")
+
+        async def second_fail(_: dict) -> None:
+            raise ValueError("second_boom")
+
+        await bus.subscribe("topic.a", first_fail)
+        await bus.subscribe("topic.a", second_fail)
+        await bus.flush()
+
+        _, fan_out = downstream.subscriptions[0]
+        with self.assertRaises(RuntimeError) as ctx:
+            await fan_out({"topic": "topic.a", "key": "k", "payload": {}})
+        self.assertEqual(str(ctx.exception), "first_boom")
 
 
 if __name__ == "__main__":

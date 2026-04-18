@@ -66,6 +66,13 @@ class MarketDataGateway:
         self._rest_fallback_last_error: str | None = None
         self._rest_fallback_active = False
         self._rest_fallback_consecutive_failures: int = 0
+        # R3-P1-M3：REST fallback / refresh / gap-backfill 三条路径都可能并发
+        # 调 _fetch_okx_rest_snapshot(symbol=X)。并发到 OKX REST 会：
+        # 1) 触发同一 instrument 的重复计价 → publish 竞态（晚到的覆盖早到的）
+        # 2) 放大 OKX 限流风险（同品种 3 路径 × 3 endpoint = 9 REST 请求）
+        # 加 per-symbol asyncio.Lock：同品种串行化，不阻塞跨品种并发。
+        # 锁按需创建并保留（数量 = 白名单品种数，内存可忽略）。
+        self._rest_fetch_locks: dict[str, asyncio.Lock] = {}
 
     async def start(self) -> None:
         if self.settings.market_data_backend != "okx":
@@ -90,6 +97,10 @@ class MarketDataGateway:
                 invalid_symbols=[{"symbol": s, "error": e} for s, e in invalid_symbols],
                 total_configured=len(raw_symbols),
             )
+        # R3-P1-M2：启动时清理历史遗留的 _okx_states 条目（测试或热重载场景）。
+        # allowed_symbols 列表变化时无法靠运行时 setdefault 自动收敛 —— 启动时
+        # 主动剪掉不在白名单里的 key，确保 state 只承载当前订阅品种。
+        self._prune_stale_okx_states()
         if self.okx_ws_client is not None:
             if self._background_task is None or self._background_task.done():
                 self._background_task = asyncio.create_task(self._run_okx_stream(), name="aats_okx_market_stream")
@@ -455,33 +466,37 @@ class MarketDataGateway:
     async def _fetch_okx_rest_snapshot(self, *, symbol: str) -> MarketSnapshot:
         if self.okx_rest_client is None:
             raise RuntimeError("okx_rest_client_unavailable")
-        _gather_results = await asyncio.gather(
-            self.okx_rest_client.get_market_ticker(symbol=symbol),
-            self.okx_rest_client.get_market_candles(symbol=symbol, bar="15m", limit=1),
-            self.okx_rest_client.get_market_candles(symbol=symbol, bar="1H", limit=1),
-            return_exceptions=True,
-        )
-        for _r in _gather_results:
-            if isinstance(_r, Exception):
-                self.logger.warning("gather task failed: %s", _r)
-        ticker_payload = _gather_results[0] if not isinstance(_gather_results[0], Exception) else {}
-        candle_15m_payload = _gather_results[1] if not isinstance(_gather_results[1], Exception) else {}
-        candle_1h_payload = _gather_results[2] if not isinstance(_gather_results[2], Exception) else {}
-        ticker_rows = ticker_payload.get("data", [])
-        candle_15m_rows = candle_15m_payload.get("data", [])
-        candle_1h_rows = candle_1h_payload.get("data", [])
-        if not isinstance(ticker_rows, list) or not ticker_rows or not isinstance(ticker_rows[0], dict):
-            raise RuntimeError("okx_market_rest_ticker_missing")
-        if not isinstance(candle_15m_rows, list) or not candle_15m_rows or not isinstance(candle_15m_rows[0], list):
-            raise RuntimeError("okx_market_rest_candle_15m_missing")
-        if not isinstance(candle_1h_rows, list) or not candle_1h_rows or not isinstance(candle_1h_rows[0], list):
-            raise RuntimeError("okx_market_rest_candle_1h_missing")
-        return self.okx_normalizer.build_snapshot_from_rest_payloads(
-            symbol=symbol,
-            ticker_payload=ticker_rows[0],
-            candle_15m_payload=candle_15m_rows[0],
-            candle_1h_payload=candle_1h_rows[0],
-        )
+        # R3-P1-M3：同品种串行化 REST fetch，避免 fallback/refresh/gap-backfill
+        # 三路径同时撞同一 instrument 造成的发布竞态和 REST 限流放大。
+        lock = self._rest_fetch_locks.setdefault(symbol, asyncio.Lock())
+        async with lock:
+            _gather_results = await asyncio.gather(
+                self.okx_rest_client.get_market_ticker(symbol=symbol),
+                self.okx_rest_client.get_market_candles(symbol=symbol, bar="15m", limit=1),
+                self.okx_rest_client.get_market_candles(symbol=symbol, bar="1H", limit=1),
+                return_exceptions=True,
+            )
+            for _r in _gather_results:
+                if isinstance(_r, Exception):
+                    self.logger.warning("gather task failed: %s", _r)
+            ticker_payload = _gather_results[0] if not isinstance(_gather_results[0], Exception) else {}
+            candle_15m_payload = _gather_results[1] if not isinstance(_gather_results[1], Exception) else {}
+            candle_1h_payload = _gather_results[2] if not isinstance(_gather_results[2], Exception) else {}
+            ticker_rows = ticker_payload.get("data", [])
+            candle_15m_rows = candle_15m_payload.get("data", [])
+            candle_1h_rows = candle_1h_payload.get("data", [])
+            if not isinstance(ticker_rows, list) or not ticker_rows or not isinstance(ticker_rows[0], dict):
+                raise RuntimeError("okx_market_rest_ticker_missing")
+            if not isinstance(candle_15m_rows, list) or not candle_15m_rows or not isinstance(candle_15m_rows[0], list):
+                raise RuntimeError("okx_market_rest_candle_15m_missing")
+            if not isinstance(candle_1h_rows, list) or not candle_1h_rows or not isinstance(candle_1h_rows[0], list):
+                raise RuntimeError("okx_market_rest_candle_1h_missing")
+            return self.okx_normalizer.build_snapshot_from_rest_payloads(
+                symbol=symbol,
+                ticker_payload=ticker_rows[0],
+                candle_15m_payload=candle_15m_rows[0],
+                candle_1h_payload=candle_1h_rows[0],
+            )
 
     async def _handle_okx_message(self, message: dict[str, Any]) -> None:
         # P1-9：异常分级。
@@ -494,6 +509,28 @@ class MarketDataGateway:
         # OKX 可能动了 schema 或 normalizer 规则需要更新，必须 escalate critical。
         _CONSECUTIVE_ERROR_ESCALATION = 20
         _CONSECUTIVE_SCHEMA_ERROR_ESCALATION = 100
+        # R3-P1-M2：防御性过滤 — OKX 偶发会推送当前未订阅的 instId
+        # （共享连接、订阅切换窗口、或残留订阅）。原逻辑直接 setdefault 写入
+        # self._okx_states，陌生符号的 state 对象会在 dict 里常驻，既浪费内存
+        # 也让 drain_detected_gaps/backfill 路径误处理非白名单品种。
+        # 这里在 apply_message 之前按 expanded_allowed_symbols 过滤：不在白名单
+        # 的 instId 记 warning 后丢弃，不进入 _okx_states。
+        arg = message.get("arg") if isinstance(message, dict) else None
+        if isinstance(arg, dict):
+            raw_inst_id = str(arg.get("instId", "")).strip()
+            if raw_inst_id:
+                normalized_inst_id = raw_inst_id.upper()
+                allowed_symbols = frozenset(self._tracked_symbols())
+                if normalized_inst_id not in allowed_symbols:
+                    log_event(
+                        self.logger,
+                        "okx_market_unexpected_symbol_dropped",
+                        level="warning",
+                        inst_id=raw_inst_id,
+                        channel=str(arg.get("channel", "")),
+                        allowed_count=len(allowed_symbols),
+                    )
+                    return
         try:
             snapshots = self.okx_normalizer.apply_message(message=message, states=self._okx_states)
             for snapshot in snapshots:
@@ -596,6 +633,27 @@ class MarketDataGateway:
     def _tracked_symbols(self) -> tuple[str, ...]:
         symbols = tuple(dict.fromkeys(symbol for symbol in self.settings.expanded_allowed_symbols() if symbol))
         return symbols or (self.settings.default_symbol,)
+
+    def _prune_stale_okx_states(self) -> None:
+        """R3-P1-M2：移除 _okx_states 中不属于当前白名单的 symbol。
+
+        由 start() 调用。运行时 _handle_okx_message 的防御性过滤会阻止新的
+        陌生 symbol 写入；但之前累积的条目（测试夹具、热重载、配置收缩）
+        仍需显式剪掉。"""
+        allowed = frozenset(self._tracked_symbols())
+        stale = [key for key in self._okx_states if key not in allowed]
+        if not stale:
+            return
+        for key in stale:
+            self._okx_states.pop(key, None)
+        log_event(
+            self.logger,
+            "okx_market_stale_states_pruned",
+            level="info",
+            pruned_count=len(stale),
+            pruned_symbols=stale[:20],
+            allowed_count=len(allowed),
+        )
 
     def _build_local_payload(self, symbol: str) -> dict[str, Any]:
         return self._demo_provider.build_payload(symbol)

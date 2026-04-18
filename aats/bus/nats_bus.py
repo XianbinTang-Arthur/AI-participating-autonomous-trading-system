@@ -48,6 +48,28 @@ if TYPE_CHECKING:  # pragma: no cover - 仅用于类型检查
     from nats.js import JetStreamContext
 
 
+# R3-P1-X5：consumer 端 schema_version 兼容性校验用的主版本号。
+# EventEnvelope.schema_version 默认是 "1.0.0"；当前所有事件都处于 1.x.y 的
+# semver 主版本下，新增 optional 字段不算 breaking（MINOR 升），字段重命名 /
+# 类型变更才需要 MAJOR 升级（从 "1.x.y" → "2.0.0"）。
+# consumer 在收到 MAJOR 不同的 envelope 时应当直接 term() 掉，避免旧版本进程
+# 去解一个结构已变化的消息时静默跑错逻辑。
+_SUPPORTED_ENVELOPE_SCHEMA_MAJOR: str = "1"
+
+
+def _envelope_schema_compatible(schema_version: str | None) -> bool:
+    """返回 True 表示当前进程能安全解析该 envelope。
+
+    按 semver 主版本匹配：只要字符串以 "{_SUPPORTED_ENVELOPE_SCHEMA_MAJOR}." 开头就视为兼容。
+    空串 / None / 非 semver 形式一律视为不兼容（term 掉，避免歧义）。
+    """
+    if not isinstance(schema_version, str) or not schema_version:
+        return False
+    prefix = f"{_SUPPORTED_ENVELOPE_SCHEMA_MAJOR}."
+    # "1" 单独也算兼容（pre-semver fallback）；"1.x.y" 走前缀匹配
+    return schema_version == _SUPPORTED_ENVELOPE_SCHEMA_MAJOR or schema_version.startswith(prefix)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Topic 路由策略
 #
@@ -1071,9 +1093,28 @@ class NatsEventBus(EventBus):
                         raise
 
             body = envelope.model_dump_json().encode("utf-8")
+            # R3-P1-X4：激活 JetStream 发布端幂等（publish-side dedup）。
+            # stream 层配置了 duplicate_window=120s（见 StreamConfigSpec），但
+            # 只有在 publish 时带 Nats-Msg-Id header，JetStream 才会按这个 ID 在
+            # 窗口内去重。没有 header 的话 duplicate_window 配置完全是摆设。
+            #
+            # 场景：outbox.flush_pending 对单条 envelope 最多 retry 3 次
+            #   （_MAX_PUBLISH_ATTEMPTS=3，每次 5s 超时），加上 flush 之间的
+            #   间隔，一条 envelope 的 retry 总窗口 <30s，远小于 120s，
+            #   所以重试完全落在 duplicate_window 内：如果第一次 publish 实际
+            #   到达了 broker 但 ack 路径超时，caller 视为失败并重试，JetStream
+            #   会按 Nats-Msg-Id=event_id 识别为 duplicate 直接 ack 不重复入流。
+            #
+            # 进程崩溃后重启：未 PUBLISHED 的 outbox 行会被再次读出 publish，
+            # 只要 event_id 稳定（=envelope.event_id），JetStream 同样去重。
+            #
             # JetStream publish 返回 ack，包含 stream/sequence；同步等待是为了
             # 在 strict 模式下 publish 失败立即向 caller 抛错。
-            await self._js.publish(subject=subject, payload=body)
+            await self._js.publish(
+                subject=subject,
+                payload=body,
+                headers={"Nats-Msg-Id": envelope.event_id},
+            )
 
     async def subscribe(self, topic: str, handler: MessageHandler) -> None:
         """订阅 topic：注册一个 durable JetStream consumer。
@@ -1130,6 +1171,34 @@ class NatsEventBus(EventBus):
                     pass
                 return
 
+            # R3-P1-X5：envelope 反序列化成功不等于版本兼容。如果生产端发了
+            # schema_version="2.0.0" 的消息（未来某次 schema 变更），旧版本
+            # consumer 由于字段是 Optional 默认值，pydantic 并不会报错就放过
+            # 去，但业务语义已经被错误解读。在 consumer 入口按主版本号严格
+            # 过滤，不兼容直接 term() 不再重投；避免旧进程静默跑错逻辑。
+            if not _envelope_schema_compatible(envelope.schema_version):
+                log_event(
+                    self.logger,
+                    "nats_envelope_schema_incompatible",
+                    level="critical",
+                    topic=topic,
+                    durable=durable,
+                    event_id=envelope.event_id,
+                    event_type=envelope.event_type,
+                    source_component=envelope.source_component,
+                    envelope_schema_version=envelope.schema_version,
+                    supported_major=_SUPPORTED_ENVELOPE_SCHEMA_MAJOR,
+                    permanent=True,
+                )
+                try:
+                    if hasattr(msg, "term"):
+                        await msg.term()
+                    else:
+                        await msg.nak()
+                except Exception:
+                    pass
+                return
+
             # 高频 topic 写入进程内缓存，供 latest() / recent() 查询
             if self._stream_cache is not None and envelope.topic in _STREAM_CACHE_TOPICS:
                 self._stream_cache.update(envelope)
@@ -1162,10 +1231,31 @@ class NatsEventBus(EventBus):
                 except Exception:
                     parent_ctx = None
 
+            # R3-P1-X3：把 JetStream server-assigned sequence / num_delivered
+            # 附到 message dict 上。handler 可基于 nats_metadata.stream_seq
+            # 做单调性检查（per-subject 严格递增），num_delivered > 1 表明
+            # redelivery，用于 handler 侧的幂等判断。失败走 best-effort：
+            # nats-py 某些测试桩不暴露 metadata，取值失败 nats_metadata=None
+            # 仍能继续处理。
+            nats_metadata: dict[str, Any] | None = None
+            try:
+                _meta = getattr(msg, "metadata", None)
+                if _meta is not None:
+                    _seq = getattr(_meta, "sequence", None)
+                    nats_metadata = {
+                        "stream_seq": getattr(_seq, "stream", None) if _seq is not None else None,
+                        "consumer_seq": getattr(_seq, "consumer", None) if _seq is not None else None,
+                        "num_delivered": getattr(_meta, "num_delivered", None),
+                        "timestamp": getattr(_meta, "timestamp", None),
+                    }
+            except Exception:
+                nats_metadata = None
+
             message = {
                 "topic": envelope.topic,
                 "key": envelope.key,
                 "payload": envelope.model_dump(mode="json"),
+                "nats_metadata": nats_metadata,
             }
 
             # 绑定 parent context，使 start_span 开出的 span 成为子 span。

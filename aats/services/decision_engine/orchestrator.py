@@ -10,7 +10,7 @@ from aats.bootstrap.telemetry import start_span
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import publish_model
-from aats.schemas.common import new_id
+from aats.schemas.common import EventEnvelope, new_id
 from aats.schemas.decision import PositionTarget
 from aats.schemas.operator import ProcessingFailureRecord
 from aats.services.ai_service.inference import AIInferenceService
@@ -47,7 +47,13 @@ class DecisionOrchestrator:
         self.metrics = metrics
         self.logger = get_logger("aats.decision_engine")
 
-    async def run_cycle(self, symbol: str, timeframe: str) -> PositionTarget:
+    async def run_cycle(
+        self,
+        symbol: str,
+        timeframe: str,
+        *,
+        feature_snapshot_hint: EventEnvelope | None = None,
+    ) -> PositionTarget:
         # 关键背景：本函数原本几乎所有的工作都跑在 event loop 主线程上 ——
         # context_builder.build / baseline_strategy.evaluate /
         # target_engine.build* / strategy_coordinator.evaluate 都是纯 sync
@@ -82,6 +88,7 @@ class DecisionOrchestrator:
                     symbol=symbol,
                     timeframe=timeframe,
                     decision_id=decision_id,
+                    feature_snapshot_hint=feature_snapshot_hint,
                 )
             except Exception as exc:
                 # P1-11：若 run_cycle 在 position_target 发出之前崩溃，之前已经发过的
@@ -104,6 +111,7 @@ class DecisionOrchestrator:
         symbol: str,
         timeframe: str,
         decision_id: str,
+        feature_snapshot_hint: EventEnvelope | None = None,
     ) -> PositionTarget:
         health_snapshot = await asyncio.to_thread(
             self.context_builder.build_health_snapshot,
@@ -122,6 +130,7 @@ class DecisionOrchestrator:
             timeframe=timeframe,
             decision_id=decision_id,
             health_snapshot_ref=health_envelope.event_id,
+            feature_snapshot_hint=feature_snapshot_hint,
         )
         log_event(
             self.logger,

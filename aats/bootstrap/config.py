@@ -2892,9 +2892,31 @@ class _CollectingBus(EventBus):
             # 共享同一个 list 引用（topic-by-topic 循环里 handlers 会被复用）。
             ordered = tuple(handlers)
 
+            # R3-P1-U-C：per-handler 隔离。原实现 `for h in _hs: await h(...)`
+            # 只要第一个 handler 抛错，剩下的 handler 本轮全部被跳过；紧接着
+            # NATS 因为 _fan_out 抛错而 NAK + 重投，下一轮又从 handler[0] 开
+            # 始，已经成功的 handler 会被重复执行（依赖 handler 侧幂等才勉强
+            # 安全）。真正的 bug：如果失败 handler 刚好是 flaky 的 observer，
+            # 顺序靠后的 critical handler（例如 reconciliation_service.handle_
+            # portfolio_snapshot）在消息真正掉队之前从不执行。
+            # 隔离策略：每个 handler 独立 try；exception 聚合到 first_exc，
+            # 所有 handler 都跑完后再 raise first_exc。NATS 会看到一次异常就
+            # NAK 重投，所有 handler 都被标记执行过——但单 handler 的失败不
+            # 会把后续 handler 的首次执行窗口也吞掉。
+            # 注意：observer handler 已经在外层 resilient_subscription_handler
+            # 里 raise_on_error=False 吞掉自身异常，不会进入这里的 first_exc；
+            # 只有 critical handler 的真异常会被 re-raise，从而 NAK 重投，符合
+            # at-least-once 语义。
             async def _fan_out(message: dict, _hs: tuple[MessageHandler, ...] = ordered) -> None:
+                first_exc: BaseException | None = None
                 for h in _hs:
-                    await h(message)
+                    try:
+                        await h(message)
+                    except Exception as exc:
+                        if first_exc is None:
+                            first_exc = exc
+                if first_exc is not None:
+                    raise first_exc
 
             await self._bus.subscribe(topic, _fan_out)
         self._pending.clear()

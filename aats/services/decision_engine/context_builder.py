@@ -8,7 +8,7 @@ from decimal import Decimal
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
 from aats.schemas.audit import DecisionAuditRecord
-from aats.schemas.common import utc_now
+from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.decision import DecisionContext
 from aats.schemas.exchange import ExchangeAccountSnapshot
 from aats.schemas.market import MarketSnapshot
@@ -104,6 +104,7 @@ class DecisionContextBuilder:
         *,
         decision_id: str,
         health_snapshot_ref: str,
+        feature_snapshot_hint: EventEnvelope | None = None,
     ) -> DecisionContext:
         if timeframe not in self.settings.supported_timeframes:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
@@ -117,11 +118,20 @@ class DecisionContextBuilder:
         )
         if market_event is None:
             market_event = self.event_store.latest(topics.MARKET_SNAPSHOTS, key=symbol)
-        feature_event = (
-            self._stream_cache.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
-            if self._stream_cache is not None
-            else None
-        )
+        # R3-P1-U-A：trigger 路径优先使用触发本次 run_cycle 的 feature envelope；
+        # 这样 DecisionContext.feature_snapshot_ref 与 trigger_policy 评估依据的
+        # snapshot 完全一致，消除 trigger 评估 -> build 读取之间新 snapshot
+        # 抢跑导致的 ref 漂移（决策对应的 feature 与触发时评估的 feature 不是
+        # 同一个 envelope，审计/回放时难以还原触发因果）。
+        # 没传 hint 的调用路径（集成测试 / operator API 驱动的直接调用）继续
+        # 走 latest() fallback，保留原有行为。
+        feature_event: EventEnvelope | None = feature_snapshot_hint
+        if feature_event is None:
+            feature_event = (
+                self._stream_cache.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
+                if self._stream_cache is not None
+                else None
+            )
         if feature_event is None:
             feature_event = self.event_store.latest(topics.FEATURE_SNAPSHOTS, key=symbol)
 

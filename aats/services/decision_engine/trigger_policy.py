@@ -50,8 +50,19 @@ class DecisionTriggerPolicy:
         if state is None:
             return True, "initial_decision"
 
-        if state.last_market_snapshot_ts == market_snapshot.snapshot_ts:
-            return False, "duplicate_market_snapshot"
+        # R3-P1-U-B：与 market_gateway.apply_remote_snapshot 的接收语义保持
+        # 一致（gateway 用 `<` 判断严格更旧才拒收）。OKX 可能在同一 ms 发两笔
+        # ticker（不同 bid/ask），gateway 接受并覆盖本地 snapshot——这里如果
+        # 还用 `==` 把同 ts 视为重复就会把合法的新内容抹掉。改成 `<`：严格
+        # 更旧（reorder/replay）才 early-reject；同 ts 走下面的 material_change
+        # 分支，由内容变化判定是否需要触发新 decision。真正重复的消息内容
+        # 也相同 → material_change=False → 最终走 suppressed_duplicate，结果
+        # 等价；但同 ms 新内容不再被误杀。
+        if (
+            state.last_market_snapshot_ts is not None
+            and market_snapshot.snapshot_ts < state.last_market_snapshot_ts
+        ):
+            return False, "out_of_order_market_snapshot"
 
         decision_times = self._decision_times[state_key]
         self._prune_decision_times(decision_times=decision_times, reference_ts=market_snapshot.snapshot_ts)

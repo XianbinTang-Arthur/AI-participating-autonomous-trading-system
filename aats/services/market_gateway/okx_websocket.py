@@ -231,7 +231,7 @@ class OKXPublicWebSocketClient:
                                 continue
                             if not isinstance(message, dict):
                                 continue
-                            if self._is_control_message(message):
+                            if self._is_control_message(message, connection_name=connection_name):
                                 continue
                             # 只有真实行情数据才更新 market data 时间戳；
                             # pong / control 不计入，否则"有 pong 无行情"不会触发重连。
@@ -399,33 +399,43 @@ class OKXPublicWebSocketClient:
         self._subscription_sent_ts[connection_name] = utc_now()
         await websocket.send(_json_dumps({"op": "subscribe", "args": subscribe_args}))
 
-    def _is_control_message(self, message: dict[str, Any]) -> bool:
+    def _is_control_message(self, message: dict[str, Any], *, connection_name: str) -> bool:
         """Return True for OKX control-plane messages (subscribe ack, error, notice).
 
         Subscription errors are logged so callers can simply skip control messages.
+        R3-P0-M1：显式绑定到调用方连接，只操作本连接的 pending/errors，不再跨连接
+        遍历 _pending_subscriptions。消息本来就是从 connection_name 对应的 socket 读出
+        的，按连接 scope 匹配最严格、也避免未来某天两条连接订阅集出现交集时错配。
         """
         event = message.get("event")
         if not isinstance(event, str):
             return False
+        pending = self._pending_subscriptions.setdefault(connection_name, set())
         if event == "subscribe":
-            # P0-2：订阅成功 ack。从 pending 集合中移除该 channel×instId 组合；
-            # 若 pending 清空，记录"全部订阅已确认"供 keepalive 检查。
+            # P0-2：订阅成功 ack。从本连接 pending 集合中移除该 channel×instId 组合。
             arg = message.get("arg") or {}
             if isinstance(arg, dict):
                 key = (str(arg.get("channel", "")), str(arg.get("instId", "")))
-                for conn_name, pending in self._pending_subscriptions.items():
-                    if key in pending:
-                        pending.discard(key)
-                        log_event(
-                            self.logger,
-                            "okx_ws_subscription_ack",
-                            level="debug",
-                            connection=conn_name,
-                            channel=key[0],
-                            instId=key[1],
-                            pending_count=len(pending),
-                        )
-                        break
+                if key in pending:
+                    pending.discard(key)
+                    log_event(
+                        self.logger,
+                        "okx_ws_subscription_ack",
+                        level="debug",
+                        connection=connection_name,
+                        channel=key[0],
+                        instId=key[1],
+                        pending_count=len(pending),
+                    )
+                else:
+                    log_event(
+                        self.logger,
+                        "okx_ws_subscription_ack_unmatched",
+                        level="warning",
+                        connection=connection_name,
+                        channel=key[0],
+                        instId=key[1],
+                    )
             return True
         if event == "notice":
             return True
@@ -439,6 +449,7 @@ class OKXPublicWebSocketClient:
                 self.logger,
                 "okx_ws_subscription_error",
                 level="error",
+                connection=connection_name,
                 code=code,
                 msg=msg,
                 connId=message.get("connId", ""),
@@ -446,19 +457,10 @@ class OKXPublicWebSocketClient:
                 instId=failed_inst,
             )
             self._last_error = f"subscription_error:{code}:{msg}"
-            # R2-P0-M4 补丁：原代码把错误同时写入 public 和 business 两条连接的
-            # _subscription_errors 列表，导致 public 订阅失败连锁触发 business
-            # 重连（反之亦然）。改为按 pending 集合反查定位唯一来源连接。
-            # 找不到匹配时（理论不可能——只有我们自己订阅过的 channel 才会收到
-            # error 事件）回退到 debug 日志而不广播到全部连接。
+            # R3-P0-M1：错误一定归属本连接 —— 消息来自本连接 recv，不跨连接查 pending。
             key = (failed_channel, failed_inst)
-            matched_conn: str | None = None
-            for conn_name, pending in self._pending_subscriptions.items():
-                if key in pending:
-                    matched_conn = conn_name
-                    break
-            if matched_conn is not None:
-                self._subscription_errors[matched_conn].append(
+            if key in pending:
+                self._subscription_errors.setdefault(connection_name, []).append(
                     {"code": code, "msg": msg, "channel": failed_channel, "instId": failed_inst}
                 )
             else:
@@ -466,6 +468,7 @@ class OKXPublicWebSocketClient:
                     self.logger,
                     "okx_ws_subscription_error_unmatched",
                     level="warning",
+                    connection=connection_name,
                     code=code,
                     msg=msg,
                     channel=failed_channel,

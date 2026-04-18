@@ -184,6 +184,9 @@ class OrderStateHotCache:
         # 订阅该 topic 接收。重复广播只会产生无用的第二条 NATS 消息。
 
     def fire_and_forget_publish(self, order: OrderState | None) -> None:
+        # R3-P1-E5：对齐 obligation_cache 的日志级别。原实现静默吞掉
+        # "no running loop" / "loop closed" / create_task 异常 3 种失败，
+        # sidecar publish 丢失时 3 process 间的 order state 会偏差而无告警。
         if order is None:
             return
         applied = self._apply_locally(order)
@@ -194,16 +197,39 @@ class OrderStateHotCache:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            log_event(
+                self._logger,
+                "order_state_cache_fire_and_forget_no_loop",
+                level="warning",
+                process_role=self._process_role,
+                client_order_id=order.client_order_id,
+            )
             return
         if loop.is_closed() or not loop.is_running():
+            log_event(
+                self._logger,
+                "order_state_cache_fire_and_forget_loop_not_running",
+                level="warning",
+                process_role=self._process_role,
+                client_order_id=order.client_order_id,
+                loop_closed=loop.is_closed(),
+            )
             return
         try:
             loop.create_task(
                 self._publish_latest_known_state(order.client_order_id, fallback=order),
                 name="order_state_cache_publish",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event(
+                self._logger,
+                "order_state_cache_fire_and_forget_schedule_failed",
+                level="warning",
+                process_role=self._process_role,
+                client_order_id=order.client_order_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     # ──────────────────────────────────────────────────────────────────
     # 读路径（context_builder 调）
@@ -297,6 +323,27 @@ class OrderStateHotCache:
             if truth.model_dump(mode="json") == cached.model_dump(mode="json"):
                 unchanged_count += 1
                 continue
+            # R3-P0-E1：只在 PG truth 比缓存更新时才覆盖，防止把 Redis 里（例如
+            # 另一进程刚通过 outbox 写的）较新状态 backfill 成 PG 较旧的版本。
+            # outbox 顺序是 PG commit → Redis set → NATS publish，理论上 Redis 不
+            # 会比 PG 新；但 bootstrap 并发场景下（本进程 hydrate 用的 Redis 是其
+            # 他 writer 已发布的较新版）仍可能出现 truth_ts < cached_ts，必须保底。
+            truth_ts = _compare_ts(truth)
+            cached_ts = _compare_ts(cached)
+            if truth_ts < cached_ts:
+                log_event(
+                    self._logger,
+                    "order_state_cache_bootstrap_truth_stale_skip",
+                    level="warning",
+                    process_role=self._process_role,
+                    client_order_id=client_order_id,
+                    truth_ts=truth_ts.isoformat(),
+                    cached_ts=cached_ts.isoformat(),
+                    cached_status=cached.status,
+                    truth_status=truth.status,
+                )
+                unchanged_count += 1
+                continue
             self._latest[client_order_id] = truth
             refreshed_count += 1
             await self._best_effort_redis_set(truth)
@@ -359,14 +406,19 @@ class OrderStateHotCache:
     async def _best_effort_redis_index_update(self) -> None:
         if self._hot_state_store is None:
             return
-        self._index_version += 1
+        # R3-P1-E3：先构造版本号 next_version，写入 Redis 成功之后才把
+        # self._index_version 推进。原实现是先递增再写，set 异常时
+        # local = N+1 / redis = N，下一次成功后 local=N+2 / redis=N+1，
+        # 版本永远落后一代；这会把 HotStateStore 的可观测性搞乱，也让
+        # bootstrap 侧的 "index out of sync" 对比失去参考。
+        next_version = self._index_version + 1
         index_payload = {
             "all_coids": list(self._latest.keys()),
             "open_coids": [
                 coid for coid, o in self._latest.items()
                 if o.status not in _TERMINAL_STATUSES
             ],
-            "version": self._index_version,
+            "version": next_version,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "writer_role": self._process_role,
         }
@@ -378,6 +430,10 @@ class OrderStateHotCache:
             log_event(self._logger, "order_state_cache_redis_index_failed",
                       level="warning", process_role=self._process_role,
                       error_type=type(exc).__name__, error=str(exc))
+            return
+        # 写入成功后再原子递增，使 self._index_version 始终指向
+        # Redis 里最新的 version，避免 set 失败导致的版本漂移。
+        self._index_version = next_version
 
     # ──────────────────────────────────────────────────────────────────
     # 诊断

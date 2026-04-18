@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Callable
 
 from aats.bootstrap.logging import get_logger, log_event
-from aats.events.envelopes import parse_payload
+from aats.events.envelopes import parse_envelope, parse_payload
 from aats.schemas.features import FeatureSnapshot
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
 from aats.services.decision_engine.orchestrator import DecisionOrchestrator
@@ -35,7 +35,13 @@ class DecisionCycleTrigger:
         self._consecutive_failures: dict[tuple[str, str], int] = {}
 
     async def handle_feature_snapshot(self, message: dict) -> None:
-        snapshot = parse_payload(message, FeatureSnapshot)
+        # R3-P1-U-A：同时保留触发本次 cycle 的 feature envelope（parse_envelope 得到
+        # 完整 EventEnvelope，含 event_id / event_timestamp），向下游 run_cycle 透传。
+        # 保证 DecisionContext.feature_snapshot_ref = 本 envelope.event_id，与
+        # trigger_policy 评估依据的 snapshot 严格一致，消除触发与构建之间新
+        # snapshot 抢跑导致的 ref 漂移。
+        feature_envelope = parse_envelope(message)
+        snapshot = FeatureSnapshot.model_validate(feature_envelope.payload)
         if self.can_trigger is not None:
             allowed, _reason = self.can_trigger(symbol=snapshot.symbol)
             if not allowed:
@@ -57,7 +63,11 @@ class DecisionCycleTrigger:
                     continue
                 fail_key = (snapshot.symbol, timeframe)
                 try:
-                    await self.orchestrator.run_cycle(symbol=snapshot.symbol, timeframe=timeframe)
+                    await self.orchestrator.run_cycle(
+                        symbol=snapshot.symbol,
+                        timeframe=timeframe,
+                        feature_snapshot_hint=feature_envelope,
+                    )
                 except Exception as exc:
                     n = self._consecutive_failures.get(fail_key, 0) + 1
                     self._consecutive_failures[fail_key] = n

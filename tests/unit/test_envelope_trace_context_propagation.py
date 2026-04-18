@@ -71,6 +71,28 @@ def test_envelope_default_trace_context_is_none() -> None:
     assert env.trace_context is None
 
 
+def test_envelope_schema_compatible_accepts_same_major() -> None:
+    """R3-P1-X5：同主版本（1.x.y）均兼容。"""
+    from aats.bus.nats_bus import _envelope_schema_compatible
+
+    assert _envelope_schema_compatible("1.0.0") is True
+    assert _envelope_schema_compatible("1.5.17") is True
+    assert _envelope_schema_compatible("1") is True  # pre-semver fallback
+
+
+def test_envelope_schema_incompatible_rejects_other_major_and_garbage() -> None:
+    """R3-P1-X5：主版本不同 / 非 semver / 空值一律视为不兼容。"""
+    from aats.bus.nats_bus import _envelope_schema_compatible
+
+    assert _envelope_schema_compatible("2.0.0") is False
+    assert _envelope_schema_compatible("0.9.0") is False
+    assert _envelope_schema_compatible("") is False
+    assert _envelope_schema_compatible(None) is False
+    assert _envelope_schema_compatible("abc") is False
+    # "10.x" 这样前缀匹配陷阱：prefix 必须是 "1." 完整匹配
+    assert _envelope_schema_compatible("10.0.0") is False
+
+
 def test_envelope_backward_compat_without_trace_context_field() -> None:
     """旧版 publisher 产出的 JSON 没有 trace_context 字段时，新版 consumer
     必须能无错解析。这是 Stage 8 零停机升级的前提。"""
@@ -220,6 +242,29 @@ def test_publish_envelope_does_not_mutate_original_envelope(
     asyncio.run(bus.publish_envelope(env, persist=False))
     # 原 envelope 仍然是 None，说明 publish_envelope 没有 in-place 改它
     assert env.trace_context is None
+
+
+def test_publish_envelope_sets_nats_msg_id_header_for_dedup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R3-P1-X4 回归：publish_envelope 必须传 Nats-Msg-Id header = envelope.event_id，
+    否则 JetStream stream 上配的 duplicate_window=120s 完全失效：outbox 重试发同一条
+    envelope、或者进程崩溃重启后 PENDING 行重新发出去，broker 都会把每一次 publish
+    当作新消息，而不会按 event_id 去重。"""
+
+    def _noop_inject(carrier: Any) -> None:
+        return None
+
+    monkeypatch.setattr(nats_bus_mod, "inject_trace_context", _noop_inject)
+
+    bus, publish_mock = _build_bus_with_fake_js()
+    env = _make_envelope()
+    asyncio.run(bus.publish_envelope(env, persist=False))
+
+    publish_mock.assert_awaited_once()
+    headers = publish_mock.await_args.kwargs.get("headers")
+    assert headers is not None, "publish_envelope 必须向 JetStream 传 headers 以激活去重"
+    assert headers.get("Nats-Msg-Id") == env.event_id
 
 
 # ─────────────────────────────────────────────────────────────────────

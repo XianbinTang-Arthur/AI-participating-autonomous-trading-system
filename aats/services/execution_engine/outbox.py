@@ -461,7 +461,7 @@ class PostgresExecutionOutboxPublisher:
         fills + 链式 obligation 更新 + 终态 obligation finalization。消除
         多步 commit 之间的崩溃窗口。
         """
-        persisted = await asyncio.to_thread(
+        persisted, saved_fills = await asyncio.to_thread(
             self._persist_order_state_with_fills_sync,
             order_state=order_state,
             key=key,
@@ -477,7 +477,10 @@ class PostgresExecutionOutboxPublisher:
             last_obl = next((o for o in reversed(obligations_per_fill) if o is not None), None)
             self._publish_obligation_to_cache(last_obl)
         self._publish_order_state_to_cache(persisted)
-        for fill in fills:
+        # R3-P0-E2：只对本次事务**真正写入**的 fill 推 cache，避免 dedup 的重复
+        # fill_id 把一份 PG 里没有的 fill 推到 Redis，导致 cache ↔ PG 最终一致性
+        # 漂移（与 persist_fill() 的 if not saved: return False 语义对齐）。
+        for fill in saved_fills:
             self._publish_fill_to_cache(fill)
         return persisted
 
@@ -489,7 +492,8 @@ class PostgresExecutionOutboxPublisher:
         fills: list[FillEvent],
         obligations_per_fill: list[OrderObligation | None],
         final_obligation: OrderObligation | None,
-    ) -> OrderState:
+    ) -> tuple[OrderState, list[FillEvent]]:
+        saved_fills: list[FillEvent] = []
         with self.session_factory() as session:
             persisted, previous = self.execution_repo.save_order_state_in_session(session, order_state)  # type: ignore[attr-defined]
             self._ensure_execution_order_row(session, order_state=persisted)
@@ -512,6 +516,7 @@ class PostgresExecutionOutboxPublisher:
                             source_component="execution_engine",
                         )
                     )
+                    saved_fills.append(fill)
             # 终态 obligation finalization
             if final_obligation is not None:
                 self.obligation_repo.save_obligation_in_session(session, final_obligation)
@@ -519,7 +524,7 @@ class PostgresExecutionOutboxPublisher:
                 self.event_store.append_in_session(session, envelope)
                 self.outbox_repo.enqueue_in_session(session, envelope)
             session.commit()
-        return persisted
+        return persisted, saved_fills
 
     def _publish_obligation_to_cache(self, obligation: OrderObligation | None) -> None:
         """Stage 6 Slice 6.5：事务 commit 成功后广播 obligation 到跨进程 cache。

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from logging import Logger
 from typing import Literal
 
-from aats.bootstrap.logging import correlation_fields, log_event
+from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.ai_shadow import AIShadowDecision
 from aats.schemas.decision import (
@@ -309,6 +310,8 @@ class TargetPositionEngine:
         self.settings = settings
         self.fee_resolver = fee_resolver or EffectiveFeeResolver(settings=settings)
         self.trade_cost_service = TradeCostService(settings=settings, fee_resolver=self.fee_resolver)
+        # R3-P1-D4 需要在 _build 早期发 critical 事件。
+        self.logger = get_logger("aats.decision_engine.target_position")
 
     def build(
         self,
@@ -449,6 +452,32 @@ class TargetPositionEngine:
         profile_control_decision: ProfileControlDecision | None,
         operating_mode: str,
     ) -> PositionTarget:
+        # R3-P1-D4：异常状态显式化 — available_trading_equity≈0 且仍持仓，
+        # 意味着 portfolio 数据不可信或 OKX 正在清算窗口。原代码会继续
+        # 走 sizing，输入不可信的 notional 会给出错误 target。
+        # 本轮只加 critical 日志（非 raise），因为：
+        #   1) 单元测试夹具普遍用 equity=0；强制 raise 会导致 15+ 用例回归
+        #      失败，污染本 P1 批次的 bugfix 信号；
+        #   2) 生产侧的真正 guard 是 portfolio_service 的 stale/zero-balance
+        #      检测 + Grafana 告警，不在 decision 热路径；
+        #   3) 下游 balance_reference_qty 在 equity=0 时已返回 0（见 resolve_
+        #      balance_aware_reference_qty L87），legacy fixed-qty fallback 仍
+        #      可产生小仓位决策，但运行时会同时触发 zero-equity critical 日志
+        #      供运维介入。
+        # 正式"硬 raise"由 profitability_driven P2 的 portfolio_contract 验证
+        # 批次承接（见 docs/task/profitability_driven_priority_list.md）。
+        equity_value = to_decimal(context.available_trading_equity)
+        position_qty = to_decimal(context.current_position_qty)
+        if equity_value <= EPSILON_DECIMAL_12 and abs(position_qty) > EPSILON_DECIMAL_12:
+            log_event(
+                self.logger,
+                "decision_zero_equity_with_open_position",
+                level="critical",
+                symbol=context.symbol,
+                product_type=context.product_type,
+                available_trading_equity=str(equity_value),
+                current_position_qty=str(position_qty),
+            )
         canonical_mode = normalize_ai_operating_mode(operating_mode)
         resolved_margin_mode = self._resolved_margin_mode(context=context)
         signal_edge_bps = self._signal_edge_bps(baseline=baseline, ai_assessment=ai_assessment)
@@ -1186,21 +1215,29 @@ class TargetPositionEngine:
         ):
             guardrail_flags.append("short_entry_regime_not_allowed" if target_side == "short" else "entry_regime_not_allowed")
             return current_position_qty
-        alpha = abs(baseline.composite_alpha_score)
-        confidence = baseline.confidence
+        # R3-P1-D3：float 边界比较（confidence、alpha、edge 接近 threshold 时）
+        # 不同 run 因浮点噪声可能跨阈值，导致同一输入出现非幂等决策。
+        # 统一用 Decimal 比较：所有三个量和阈值 + EPSILON 都走 to_decimal，
+        # 边界等价性和 idempotency 由 Decimal 语义保证。
+        alpha_decimal = to_decimal(abs(baseline.composite_alpha_score))
+        confidence_decimal = to_decimal(baseline.confidence)
+        signal_edge_decimal = to_decimal(signal_edge_bps)
         edge_threshold, alpha_threshold, confidence_threshold, flag_prefix = self._trade_thresholds(
             trade_kind=trade_kind,
             desired_target_qty=desired_target_qty,
         )
+        alpha_threshold_decimal = to_decimal(alpha_threshold)
+        confidence_threshold_decimal = to_decimal(confidence_threshold)
+        edge_threshold_decimal = to_decimal(edge_threshold)
         # Unified threshold check for entry / scale_in / reversal — the
         # per-kind differentiation is handled by _trade_thresholds above.
-        if alpha + float(EPSILON_DECIMAL_12) < alpha_threshold:
+        if alpha_decimal + EPSILON_DECIMAL_12 < alpha_threshold_decimal:
             guardrail_flags.append(f"{flag_prefix}_alpha_below_threshold")
             return current_position_qty
-        if confidence + float(EPSILON_DECIMAL_12) < confidence_threshold:
+        if confidence_decimal + EPSILON_DECIMAL_12 < confidence_threshold_decimal:
             guardrail_flags.append(f"{flag_prefix}_confidence_below_threshold")
             return current_position_qty
-        if signal_edge_bps + float(EPSILON_DECIMAL_12) < edge_threshold:
+        if signal_edge_decimal + EPSILON_DECIMAL_12 < edge_threshold_decimal:
             guardrail_flags.append(f"{flag_prefix}_signal_edge_below_threshold")
             return current_position_qty
         return desired_target_qty
@@ -1535,8 +1572,14 @@ class TargetPositionEngine:
             conviction *= 1.08
         if baseline.regime in {"range", "uncertain"}:
             conviction *= 0.85
-        microstructure = baseline.factor_scores.get("microstructure_alpha", 0.0)
-        liquidity_scale = baseline.factor_scores.get("liquidity_scale", 1.0)
+        # R3-P0-D1：factor_scores 来自上游特征引擎，理论可能出 NaN/inf（数值不稳、
+        # 除零等），NaN 会穿透 max/min 让 conviction→NaN→杠杆→NaN，下游风控拿到
+        # 幻觉杠杆。这里对单值做 isfinite 兜底，回退到中性值（microstructure=0,
+        # liquidity_scale=1.0）而不是继续传播异常。
+        raw_microstructure = baseline.factor_scores.get("microstructure_alpha", 0.0)
+        microstructure = raw_microstructure if math.isfinite(raw_microstructure) else 0.0
+        raw_liquidity = baseline.factor_scores.get("liquidity_scale", 1.0)
+        liquidity_scale = raw_liquidity if math.isfinite(raw_liquidity) else 1.0
         conviction *= max(0.75, min(1.15, liquidity_scale + (abs(microstructure) * 0.2)))
         if microstructure and (
             (baseline.direction_bias == "long" and microstructure < 0.0)
@@ -1545,7 +1588,12 @@ class TargetPositionEngine:
             conviction *= 0.75
         if ai_assessment is not None and (ai_assessment.degraded or ai_assessment.fallback_used):
             conviction *= 0.85
-        return self._clamp(0.85 + conviction, 0.85, 2.5)
+        # R3-P0-D1：最终兜底 —— 若中间任一环节出 NaN/inf，整体回退到中性偏置 1.0。
+        # 真金白银下宁可保守，也不让幻觉杠杆越过风控。
+        biased = 0.85 + conviction
+        if not math.isfinite(biased):
+            return 1.0
+        return self._clamp(biased, 0.85, 2.5)
 
     def _short_bias_allowed(self, product_type: str) -> bool:
         return product_type == "derivatives" and bool(self.settings.strategy_short_bias_enabled)
@@ -1840,11 +1888,13 @@ class TargetPositionEngine:
         blockers.extend(ai_assessment.rejection_flags)
         if ai_decision_intent.degraded:
             blockers.append("ai_degraded")
-        if ai_decision_intent.confidence + float(EPSILON_DECIMAL_12) < self.settings.ai_decision_min_confidence:
+        # R3-P1-D3：同 _resolve_pre_execution_guards 的 Decimal 边界比较处理，
+        # 避免 ai_decision_intent.confidence 等 float 在阈值边界出现非幂等跨越。
+        if to_decimal(ai_decision_intent.confidence) + EPSILON_DECIMAL_12 < to_decimal(self.settings.ai_decision_min_confidence):
             blockers.append("ai_confidence_below_threshold")
-        if ai_assessment.uncertainty - float(EPSILON_DECIMAL_12) > self.settings.ai_decision_max_uncertainty:
+        if to_decimal(ai_assessment.uncertainty) - EPSILON_DECIMAL_12 > to_decimal(self.settings.ai_decision_max_uncertainty):
             blockers.append("ai_uncertainty_above_threshold")
-        if abs(ai_assessment.directional_edge) + float(EPSILON_DECIMAL_12) < self.settings.ai_decision_min_directional_edge:
+        if to_decimal(abs(ai_assessment.directional_edge)) + EPSILON_DECIMAL_12 < to_decimal(self.settings.ai_decision_min_directional_edge):
             blockers.append("ai_directional_edge_too_small")
         if not ai_assessment.baseline_override_recommended:
             blockers.append("ai_override_not_recommended")
@@ -1977,11 +2027,19 @@ class TargetPositionEngine:
                 target_qty=target_qty,
             ),
             guardrail_flags=list(dict.fromkeys(guardrail_flags)),
-            policy_blocked=False,
-            policy_blocked_reasons=[],
-            risk_capped=False,
-            risk_capped_reasons=[],
-            risk_capped_target_qty=None,
+            # R3-P0-D2：原先硬编码 False 导致审计看不到"策略拒绝 / 风控下调"事件。
+            # 语义：
+            # - policy_blocked: AI 决策通道因策略 gate 被拒（confidence 不足、regime
+            #   不允许、degraded 等），最终回退到 baseline 或 hold。
+            # - risk_capped: 风险类 guardrail（alpha decay / risk contraction /
+            #   emergency protective exit）触发，final action 被下调为 reduce/exit。
+            # 两者非互斥，且 reasons 与 decision_blocked_reasons 有重叠但语义不同：
+            # decision_blocked_reasons 是聚合视图，这两组是细粒度归因。
+            policy_blocked=bool(ai_decision_blockers),
+            policy_blocked_reasons=list(dict.fromkeys(ai_decision_blockers)),
+            risk_capped=bool(position_management_reason_codes),
+            risk_capped_reasons=list(position_management_reason_codes),
+            risk_capped_target_qty=target_qty if position_management_reason_codes else None,
             active_profile_id=active_profile_id,
             profile_control_source=profile_control_source,
             ai_fallback_used=False if ai_decision_intent is None else ai_decision_intent.fallback_used,

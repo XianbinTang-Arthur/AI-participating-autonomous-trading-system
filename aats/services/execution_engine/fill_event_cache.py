@@ -69,6 +69,8 @@ class FillEventHotCache:
         self._bootstrapped: bool = False
         self._subscribed: bool = False
         self._index_version: int = 0
+        # R3-P1-E4：popitem 淘汰出的 fill_id，待 publish 路径异步 Redis DEL。
+        self._pending_evictions: list[str] = []
 
     # ──────────────────────────────────────────────────────────────────
     # 启动 / 关闭
@@ -162,9 +164,18 @@ class FillEventHotCache:
                 return
 
         await self._best_effort_redis_set(fill)
+        # R3-P1-E4：把 popitem 淘汰的 fill 从 Redis 删掉，避免陈旧数据
+        # 在 TTL 过期前占据内存（TTL 7 天，2000 fill cap 下可能累积大量
+        # 非活跃 entries）。
+        await self._best_effort_redis_delete_evicted()
         await self._best_effort_redis_index_update()
 
     def fire_and_forget_publish(self, fill: FillEvent | None) -> None:
+        # R3-P1-E5：对齐 obligation_cache.fire_and_forget_publish 的日志级别。
+        # 原实现把 "no running loop" / "loop closed" / create_task 异常全部静默
+        # 吞掉，上游感知不到 sidecar publish 被丢失；导致 3 process 的 fill
+        # cache 会长期偏差而无告警。改为记 warning，让运维能在 Loki 里观察到
+        # fire-and-forget 掉任意一次广播。
         if fill is None:
             return
         applied = self._apply_locally(fill)
@@ -175,16 +186,39 @@ class FillEventHotCache:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
+            log_event(
+                self._logger,
+                "fill_event_cache_fire_and_forget_no_loop",
+                level="warning",
+                process_role=self._process_role,
+                fill_id=fill.fill_id,
+            )
             return
         if loop.is_closed() or not loop.is_running():
+            log_event(
+                self._logger,
+                "fill_event_cache_fire_and_forget_loop_not_running",
+                level="warning",
+                process_role=self._process_role,
+                fill_id=fill.fill_id,
+                loop_closed=loop.is_closed(),
+            )
             return
         try:
             loop.create_task(
                 self.publish(fill, skip_local=True),
                 name="fill_event_cache_publish",
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            log_event(
+                self._logger,
+                "fill_event_cache_fire_and_forget_schedule_failed",
+                level="warning",
+                process_role=self._process_role,
+                fill_id=fill.fill_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     # ──────────────────────────────────────────────────────────────────
     # 读路径（context_builder 调）
@@ -226,14 +260,19 @@ class FillEventHotCache:
     # ──────────────────────────────────────────────────────────────────
 
     def _apply_locally(self, fill: FillEvent) -> bool:
-        """Append-only dedup by fill_id. 已存在的 fill_id 被跳过。"""
+        """Append-only dedup by fill_id. 已存在的 fill_id 被跳过。
+
+        R3-P1-E4：popitem 淘汰时把被剔的 fill_id 塞进 _pending_evictions，
+        供上层 publish 路径异步 Redis DEL。TTL=7 天会兜底，但手动删能节省
+        远端内存 + 防止过期窗口内的读放大。"""
         fid = fill.fill_id
         if fid in self._fills:
             return False
         self._fills[fid] = fill
-        # FIFO 淘汰
+        # FIFO 淘汰，收集被剔 id 给上层走 Redis DEL
         while len(self._fills) > self._max_capacity:
-            self._fills.popitem(last=False)
+            evicted_fid, _ = self._fills.popitem(last=False)
+            self._pending_evictions.append(evicted_fid)
         return True
 
     async def _best_effort_redis_set(self, fill: FillEvent) -> None:
@@ -251,14 +290,36 @@ class FillEventHotCache:
                       fill_id=fill.fill_id,
                       error_type=type(exc).__name__, error=str(exc))
 
+    async def _best_effort_redis_delete_evicted(self) -> None:
+        """R3-P1-E4：对 _apply_locally 收集的 evict 列表做 best-effort Redis DEL。"""
+        if self._hot_state_store is None or not self._pending_evictions:
+            return
+        # 置换再处理：防止 delete 过程中新的 eviction 被并发追加后错过
+        to_delete, self._pending_evictions = self._pending_evictions, []
+        for fid in to_delete:
+            try:
+                await self._hot_state_store.delete(_fill_key(fid))
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    "fill_event_cache_redis_evict_delete_failed",
+                    level="warning",
+                    process_role=self._process_role,
+                    fill_id=fid,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+
     async def _best_effort_redis_index_update(self) -> None:
         if self._hot_state_store is None:
             return
-        self._index_version += 1
+        # R3-P1-E3 同 order_state_cache：先构造 next_version 再写，成功后
+        # 才原子递增 self._index_version，避免 set 异常导致版本漂移。
+        next_version = self._index_version + 1
         index_payload = {
             "all_fill_ids": list(self._fills.keys()),
             "count": len(self._fills),
-            "version": self._index_version,
+            "version": next_version,
             "updated_at": datetime.now(timezone.utc).isoformat(),
             "writer_role": self._process_role,
         }
@@ -270,6 +331,8 @@ class FillEventHotCache:
             log_event(self._logger, "fill_event_cache_redis_index_failed",
                       level="warning", process_role=self._process_role,
                       error_type=type(exc).__name__, error=str(exc))
+            return
+        self._index_version = next_version
 
     # ──────────────────────────────────────────────────────────────────
     # 诊断

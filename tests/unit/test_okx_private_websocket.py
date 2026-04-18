@@ -109,5 +109,116 @@ class TestOKXPrivateWebSocketClient(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class TestOKXPrivateWebSocketSubscriptionAck(unittest.IsolatedAsyncioTestCase):
+    """R3-P1-U-D：private WS 订阅 ack 追踪。
+
+    镜像 public WS `_is_control_message` 的订阅 ack / error 语义，确保
+    balance_and_position / orders 在静默失败时能被上层主动重连发现。
+    """
+
+    def _make_client(self) -> OKXPrivateWebSocketClient:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+            }
+        )
+        return OKXPrivateWebSocketClient(settings=settings)
+
+    async def test_subscribe_populates_pending_subscriptions(self) -> None:
+        client = self._make_client()
+        websocket = _FakeWebSocket("")
+
+        await client._subscribe(websocket, client._subscription_args())
+
+        self.assertEqual(
+            client._pending_subscriptions,
+            {("balance_and_position", ""), ("orders", "SWAP"), ("orders", "FUTURES")},
+        )
+        self.assertEqual(client._subscription_errors, [])
+        self.assertIsNotNone(client._subscription_sent_ts)
+
+    async def test_subscribe_ack_discards_pending(self) -> None:
+        client = self._make_client()
+        websocket = _FakeWebSocket("")
+        await client._subscribe(websocket, client._subscription_args())
+
+        self.assertTrue(
+            client._is_control_message(
+                {"event": "subscribe", "arg": {"channel": "orders", "instType": "SWAP"}}
+            )
+        )
+
+        self.assertEqual(
+            client._pending_subscriptions,
+            {("balance_and_position", ""), ("orders", "FUTURES")},
+        )
+
+    async def test_subscribe_ack_matches_balance_and_position_without_inst_type(self) -> None:
+        """balance_and_position ack arg 不带 instType，用空字符串占位匹配。"""
+        client = self._make_client()
+        websocket = _FakeWebSocket("")
+        await client._subscribe(websocket, client._subscription_args())
+
+        self.assertTrue(
+            client._is_control_message(
+                {"event": "subscribe", "arg": {"channel": "balance_and_position"}}
+            )
+        )
+
+        self.assertNotIn(("balance_and_position", ""), client._pending_subscriptions)
+
+    async def test_subscription_error_accumulates(self) -> None:
+        client = self._make_client()
+        websocket = _FakeWebSocket("")
+        await client._subscribe(websocket, client._subscription_args())
+
+        self.assertTrue(
+            client._is_control_message(
+                {
+                    "event": "error",
+                    "code": "60012",
+                    "msg": "Illegal request",
+                    "arg": {"channel": "orders", "instType": "SWAP"},
+                }
+            )
+        )
+
+        self.assertEqual(len(client._subscription_errors), 1)
+        self.assertEqual(client._subscription_errors[0]["code"], "60012")
+        self.assertEqual(client._subscription_errors[0]["channel"], "orders")
+        self.assertEqual(client._subscription_errors[0]["instType"], "SWAP")
+        self.assertIsNotNone(client._last_error)
+
+    async def test_subscription_error_for_unknown_key_does_not_accumulate(self) -> None:
+        """OKX 偶发错误如果不属于本次 subscribe 的期望集合，只记 log 不计入错误列表，
+        避免把全局系统噪音 error 当成订阅失败触发误重连。"""
+        client = self._make_client()
+        websocket = _FakeWebSocket("")
+        await client._subscribe(websocket, client._subscription_args())
+
+        self.assertTrue(
+            client._is_control_message(
+                {
+                    "event": "error",
+                    "code": "60013",
+                    "msg": "Unknown channel",
+                    "arg": {"channel": "account-greeks", "instType": "SPOT"},
+                }
+            )
+        )
+
+        self.assertEqual(client._subscription_errors, [])
+
+    async def test_non_control_message_returns_false(self) -> None:
+        """正常 data push（没有 event 字段）不能被 _is_control_message 吞掉，否则
+        上层 on_message 永远收不到 balance/orders 推送。"""
+        client = self._make_client()
+
+        self.assertFalse(
+            client._is_control_message({"arg": {"channel": "orders"}, "data": [{"ordId": "1"}]})
+        )
+        self.assertFalse(client._is_control_message({}))
+
+
 if __name__ == "__main__":
     unittest.main()
