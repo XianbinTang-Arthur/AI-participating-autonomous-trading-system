@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
+
+UTC = timezone.utc
 from typing import Any
 
 from sqlalchemy import text
@@ -291,9 +293,25 @@ def validate_rollback_target(
     tf = timeframe.lower()
 
     # 规则 1+2+3: parameter_sets 存在 + 状态合法 + 归属正确
+    #
+    # Bug 8 修复（2026-04-19）: 规则 2 放宽接受 deprecated target。
+    #
+    # 原规则仅接受 {frozen, released}，但：
+    #   - frozen 是"计划未交付"状态（freeze API 未实现，DB 0 行）
+    #   - Bug 9 让 apply 写 released；同 combo 下旧 released 自动降级为
+    #     deprecated（保持"任一时刻最多 1 条 released"invariant）
+    #   - 实际 rollback target 永远是"上一代曾 live 的 parameter_set"，在
+    #     Bug 9 机制下必然是 deprecated → 规则 2 永久拒绝 auto-rollback
+    #
+    # 修复语义：deprecated 是生命周期正常终点，规则 4 已强制要求"曾在 apply
+    # history 出现过"（= 曾经 live），规则 5 保证非 current，规则 6 保证审批链。
+    # 这三条合起来等于 rollback 的业务定义，deprecated 不应该是拒绝理由。
+    #
+    # 时间门控：deprecated_at 超过 30 天的拒绝，避免回滚到"业务语境已变"的老
+    # 参数。frozen/released 无时间门控（当前 state，不存在 "太老" 的问题）。
     row = session.execute(
         text("""
-            SELECT status FROM governance.parameter_sets
+            SELECT status, deprecated_at FROM governance.parameter_sets
             WHERE parameter_set_id = :pid
               AND family = :family
               AND timeframe = :tf
@@ -302,8 +320,16 @@ def validate_rollback_target(
     ).fetchone()
     if row is None:
         return False, "target_not_found_or_wrong_combo"
-    if row.status not in ("frozen", "released"):
+    if row.status not in ("frozen", "released", "deprecated"):
         return False, f"target_status_illegal:{row.status}"
+    if row.status == "deprecated":
+        deprecated_at = row.deprecated_at
+        if deprecated_at is None:
+            # 没有时间戳的 deprecated 视为"太老"（保守），拒绝
+            return False, "target_deprecated_without_timestamp"
+        age_days = (datetime.now(UTC) - deprecated_at).days
+        if age_days > 30:
+            return False, f"target_deprecated_too_old:{age_days}d"
 
     # 规则 4: 历史凭证（必须在该 combo 下作为 apply 的 to 出现过）
     history_row = session.execute(

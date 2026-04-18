@@ -90,23 +90,75 @@ def test_validate_rejects_target_from_different_timeframe() -> None:
     assert reason == "target_not_found_or_wrong_combo"
 
 
-def test_validate_rejects_deprecated_target() -> None:
-    """Rule 2: status must be in {frozen, released}."""
-    session = _make_session([SimpleNamespace(status="deprecated")])
-    ok, reason = validate_rollback_target(
-        session, "independent", "15m", "ps_dep"
-    )
-    assert ok is False
-    assert reason == "target_status_illegal:deprecated"
-
-
 def test_validate_rejects_draft_target() -> None:
-    session = _make_session([SimpleNamespace(status="draft")])
+    """Rule 2: draft not in allowlist."""
+    session = _make_session([SimpleNamespace(status="draft", deprecated_at=None)])
     ok, reason = validate_rollback_target(
         session, "independent", "15m", "ps_draft"
     )
     assert ok is False
     assert reason == "target_status_illegal:draft"
+
+
+def test_validate_rejects_candidate_target() -> None:
+    """Rule 2: candidate not in allowlist."""
+    session = _make_session([SimpleNamespace(status="candidate", deprecated_at=None)])
+    ok, reason = validate_rollback_target(
+        session, "independent", "15m", "ps_cand"
+    )
+    assert ok is False
+    assert reason == "target_status_illegal:candidate"
+
+
+def test_validate_rejects_ancient_deprecated_target() -> None:
+    """Bug 8: deprecated_at > 30 days ago → 拒绝 (business context changed)."""
+    from datetime import datetime, timedelta, timezone
+
+    ancient = datetime.now(timezone.utc) - timedelta(days=31)
+    session = _make_session(
+        [SimpleNamespace(status="deprecated", deprecated_at=ancient)]
+    )
+    ok, reason = validate_rollback_target(
+        session, "independent", "15m", "ps_old_deprecated"
+    )
+    assert ok is False
+    assert reason.startswith("target_deprecated_too_old:")
+
+
+def test_validate_rejects_deprecated_without_timestamp() -> None:
+    """Bug 8: deprecated_at IS NULL → 保守视为太老，拒绝."""
+    session = _make_session(
+        [SimpleNamespace(status="deprecated", deprecated_at=None)]
+    )
+    ok, reason = validate_rollback_target(
+        session, "independent", "15m", "ps_dep_no_ts"
+    )
+    assert ok is False
+    assert reason == "target_deprecated_without_timestamp"
+
+
+def test_validate_accepts_recent_deprecated_target() -> None:
+    """Bug 8: deprecated_at <= 30 days ago → 通过 (经规则 4/5/6 验证).
+
+    模拟 Bug 9 机制下的典型场景：apply 新参数时把同 combo 旧 released 降级为
+    deprecated，下次 observation 判定回滚时 target 是 deprecated but 刚发生。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    recent = datetime.now(timezone.utc) - timedelta(hours=6)
+    session = _make_session(
+        [
+            SimpleNamespace(status="deprecated", deprecated_at=recent),  # rule 1+2
+            SimpleNamespace(),  # rule 4: apply history
+            SimpleNamespace(parameter_set_id="ps_current_active"),  # rule 5
+            SimpleNamespace(),  # rule 6: approval chain
+        ]
+    )
+    ok, reason = validate_rollback_target(
+        session, "independent", "15m", "ps_recent_deprecated"
+    )
+    assert ok is True
+    assert reason == ""
 
 
 def test_validate_rejects_target_without_apply_history() -> None:
