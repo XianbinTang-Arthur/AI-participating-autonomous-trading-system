@@ -414,29 +414,51 @@ class StrategyProfileActivationFacade:
         result = await self.owner.evaluate_now(allow_auto_activation=allow_auto)
         recommendation = result.get("recommendation") or {}
         activation = result.get("auto_activation") or {}
-        requested_profile_id = activation.get("candidate_profile_id") or recommendation.get("recommended_profile_id")
-        if not requested_profile_id:
-            return None
         state = self.owner._activation_state()
         activation_record = activation.get("activation_record") or {}
         blocked_reasons = list(activation.get("blocked_reasons") or [])
         freeze_until = state.frozen_until
-        return ProfileControlDecision(
-            decision_id=decision_id,
-            requested_by="ai",
-            requested_profile_id=str(requested_profile_id),
-            current_profile_id=state.active_profile_id,
-            applied=bool(activation_record),
-            blocked_reasons=blocked_reasons,
-            frozen_by_admin_override=bool(
-                freeze_until is not None
-                and freeze_until > utc_now()
-                and "strategy_profile_auto_switch_frozen" in blocked_reasons
-            ),
-            freeze_until=freeze_until,
-            decision_reason_codes=list(recommendation.get("reason_codes") or []),
-            activation_record_ref=activation_record.get("activation_event_id"),
-        )
+
+        ai_requested_profile_id = activation.get("candidate_profile_id") or recommendation.get("recommended_profile_id")
+        if ai_requested_profile_id:
+            # Case A:AI 推荐或已激活 —— 正常上报
+            return ProfileControlDecision(
+                decision_id=decision_id,
+                requested_by="ai",
+                requested_profile_id=str(ai_requested_profile_id),
+                current_profile_id=state.active_profile_id,
+                applied=bool(activation_record),
+                blocked_reasons=blocked_reasons,
+                frozen_by_admin_override=bool(
+                    freeze_until is not None
+                    and freeze_until > utc_now()
+                    and "strategy_profile_auto_switch_frozen" in blocked_reasons
+                ),
+                freeze_until=freeze_until,
+                decision_reason_codes=list(recommendation.get("reason_codes") or []),
+                activation_record_ref=activation_record.get("activation_event_id"),
+            )
+
+        # Case B:AI 无变更推荐,但当前有 active profile(手动或历史遗留)
+        # 仍返回一个 system-requested decision,让 DecisionOutcome 的 active_profile_id 可见
+        if state.active_profile_id:
+            return ProfileControlDecision(
+                decision_id=decision_id,
+                requested_by="system",
+                requested_profile_id=state.active_profile_id,
+                current_profile_id=state.active_profile_id,
+                applied=False,
+                blocked_reasons=[],
+                frozen_by_admin_override=bool(
+                    freeze_until is not None and freeze_until > utc_now()
+                ),
+                freeze_until=freeze_until,
+                decision_reason_codes=[],
+                activation_record_ref=None,
+            )
+
+        # Case C:没有 active profile 也没有推荐 —— 维持原逻辑返回 None
+        return None
 
     def maybe_auto_execute_rollback(self, *, decision: StrategyProfileSelectionDecision) -> dict[str, Any] | None:
         recommendation = decision.auto_rollback_recommendation or {}
