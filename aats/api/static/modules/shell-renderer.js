@@ -1,5 +1,5 @@
 import { notice, pill, primaryStatusPanel } from "./components.js";
-import { FLASH_DEFAULT_TTL_MS, clearFlash } from "./flash.js";
+import { clearFlash, getFlashTtl } from "./flash.js";
 import {
   emptyState,
   formatMaybeTimestamp,
@@ -234,7 +234,7 @@ export function createDashboardShellRenderer({
       if (state.flash) {
         const now = Date.now();
         if (!state.flash._expiresAt) {
-          state.flash._expiresAt = now + FLASH_DEFAULT_TTL_MS;
+          state.flash._expiresAt = now + getFlashTtl(state.flash.tone);
         }
         if (now >= state.flash._expiresAt) {
           clearFlash(state);
@@ -274,7 +274,7 @@ export function createDashboardShellRenderer({
     if (state.flash) {
       const now = Date.now();
       if (!state.flash._expiresAt) {
-        state.flash._expiresAt = now + FLASH_DEFAULT_TTL_MS;
+        state.flash._expiresAt = now + getFlashTtl(state.flash.tone);
       }
       if (now >= state.flash._expiresAt) {
         clearFlash(state);
@@ -478,6 +478,7 @@ export function createDashboardShellRenderer({
       ["replay", nodes.replayContent],
       ["aiAnalysis", nodes.aiAnalysisContent],
       ["aiConfig", nodes.aiConfigContent],
+      ["rdp", nodes.rdpContent],
       ["admin", nodes.adminContent],
     ];
     contentNodes.forEach(([view, node]) => {
@@ -500,6 +501,7 @@ export function createDashboardShellRenderer({
       replay: nodes.replayContent,
       aiAnalysis: nodes.aiAnalysisContent,
       aiConfig: nodes.aiConfigContent,
+      rdp: nodes.rdpContent,
       admin: nodes.adminContent,
     };
     patchHtml(nodeMap[state.activeView], html);
@@ -550,7 +552,7 @@ export function createDashboardShellRenderer({
       `;
     }
 
-    if (view === "strategy" || view === "execution" || view === "risk" || view === "exitExecution" || view === "replay" || view === "aiAnalysis" || view === "aiConfig" || view === "admin") {
+    if (view === "strategy" || view === "execution" || view === "risk" || view === "exitExecution" || view === "replay" || view === "aiAnalysis" || view === "aiConfig" || view === "rdp" || view === "admin") {
       return `
         <div class="panel-grid skeleton-grid" aria-hidden="true">
           <section class="surface-card hero-card skeleton-surface skeleton-card span-7">

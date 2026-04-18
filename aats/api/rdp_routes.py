@@ -34,6 +34,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import OperationalError
 
 from aats.api._governance_db import governance_session as _governance_session
 from aats.api.rdp_apply_token import (
@@ -702,6 +703,12 @@ async def approve_and_release_api(
       - 即"只要 approve 成功，recommendation 就是 approved 的"；下次可单独重试
         ``/parameters/apply`` 或 ``/releases/create``。和现有链路保持一致。
 
+    返回体契约（UI 状态恢复依赖这个）：
+      **只要本端点返回 200**，``recommendation`` 字段就是 approve 之后的
+      权威状态；前端可以直接用它更新本地缓存而无需二次 ``/rdp/control-summary``
+      轮询。网络抖动时 operator 重试可能打到 409 CAS race，那时 ``detail``
+      带 ``current_recommendation`` 字段，同样是权威的当前状态。
+
     HTTP 语义:
       - 200 ok=True：全链路成功（或 ``skip_apply=True`` 的"仅审批 + 创建 release"）
       - 200 ok=False, integrity_blocked=True：Step2 降级，整链拒绝
@@ -712,6 +719,8 @@ async def approve_and_release_api(
     """
     from aats.data_platform.decision_system.recommendation_registry import (
         approve_recommendation,
+        find_recommendation,
+        load_recommendation_registry,
         save_recommendation_registry,
     )
     from aats.data_platform.production_workflow.release_registry import (
@@ -746,7 +755,15 @@ async def approve_and_release_api(
     )
     if approved_rec is None:
         # 预检过了但 approve 返回 None = CAS race（见 approve helper）。这里把
-        # race 映射成 409，让 UI 能刷新后重试。recommendation 本身没变。
+        # race 映射成 409，让 UI 能刷新后重试。recommendation 本身没变——
+        # 重新 load registry 取当前权威状态塞到 detail 里，前端就不必为了
+        # "到底成了没" 再多打一次 /control-summary。
+        try:
+            current_registry = load_recommendation_registry(reg_path)
+            current_rec = find_recommendation(current_registry, recommendation_id)
+        except Exception:
+            # 二次 load 失败不影响 race 的主响应语义，仅放弃附加信息。
+            current_rec = None
         raise HTTPException(
             status_code=409,
             detail={
@@ -754,6 +771,7 @@ async def approve_and_release_api(
                 "message": "recommendation 状态在审批过程中被并发改写，请刷新后重试",
                 "recommendation_id": recommendation_id,
                 "reason": "cas_race",
+                "current_recommendation": current_rec,
             },
         )
     save_recommendation_registry(registry, reg_path)
@@ -1043,9 +1061,17 @@ async def run_observation_api(
     if not family or not timeframe:
         history = load_release_history(root)
         release = find_release(history, body.release_id)
-        if release:
-            family = family or release.get("family")
-            timeframe = timeframe or release.get("timeframe")
+        if release is None:
+            # release_id 查不到时要让 operator 明确知道是 id 错了，而不是
+            # 回一条"无法确定 family/timeframe"把锅甩给 body 参数。
+            return {
+                "ok": False,
+                "message": f"release 未找到: {body.release_id}",
+                "reason": "release_not_found",
+                "release_id": body.release_id,
+            }
+        family = family or release.get("family")
+        timeframe = timeframe or release.get("timeframe")
 
     if not family or not timeframe:
         return {"ok": False, "message": "无法确定 family/timeframe"}
@@ -1086,9 +1112,15 @@ async def evaluate_rollback_api(
     if not family or not timeframe:
         history = load_release_history(root)
         release = find_release(history, body.release_id)
-        if release:
-            family = family or release.get("family")
-            timeframe = timeframe or release.get("timeframe")
+        if release is None:
+            return {
+                "ok": False,
+                "message": f"release 未找到: {body.release_id}",
+                "reason": "release_not_found",
+                "release_id": body.release_id,
+            }
+        family = family or release.get("family")
+        timeframe = timeframe or release.get("timeframe")
 
     if not family or not timeframe:
         return {"ok": False, "message": "无法确定 family/timeframe"}
@@ -1114,18 +1146,43 @@ async def trigger_task_api(
     body: TriggerTaskRequest,
     principal: OperatorPrincipal = Depends(require_write_access),
 ) -> dict[str, Any]:
-    """触发 RDP workflow 任务（写入 pending 到任务队列）."""
+    """触发 RDP workflow 任务（写入 pending 到任务队列）.
+
+    返回 schema 统一：所有分支都回 ``{ok, task_id, workflow, existing_task, message}``
+    五字段（缺省填 None）。``retryable`` 在 DB 故障分支额外附加，前端拿来决定
+    是否给 operator "稍后重试" 提示。
+    """
     from aats.data_platform.governance.rdp_task_db import (
         VALID_WORKFLOWS,
         db_create_task_if_idle,
     )
 
-    if body.workflow not in VALID_WORKFLOWS:
-        return {
-            "ok": False,
-            "message": f"未知的 workflow: {body.workflow}，"
-                       f"可选: {', '.join(sorted(VALID_WORKFLOWS))}",
+    def _response(
+        *,
+        ok: bool,
+        task_id: str | None = None,
+        existing_task: dict[str, Any] | None = None,
+        message: str | None = None,
+        **extras: Any,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "ok": ok,
+            "task_id": task_id,
+            "workflow": body.workflow,
+            "existing_task": existing_task,
+            "message": message,
         }
+        payload.update(extras)
+        return payload
+
+    if body.workflow not in VALID_WORKFLOWS:
+        return _response(
+            ok=False,
+            message=(
+                f"未知的 workflow: {body.workflow}，"
+                f"可选: {', '.join(sorted(VALID_WORKFLOWS))}"
+            ),
+        )
 
     try:
         # 原子创建：has_active_task → create_task 旧路径的 TOCTOU 已由
@@ -1137,24 +1194,40 @@ async def trigger_task_api(
                 workflow=body.workflow,
                 requested_by=_resolve_actor(principal, body.actor),
             )
+    except OperationalError:
+        # DB 连接层失败（governance DB 不可达、连接池耗尽等）——operator 需要
+        # 知道这是"后端 DB 不通"而不是"业务冲突"，好决定联系运维还是等待。
+        # 栈信息仍进日志，用户侧固定文案避免泄漏 SQL 片段。
+        logger.exception(
+            "trigger_task_api: governance DB unavailable while creating task workflow=%s",
+            body.workflow,
+        )
+        return _response(
+            ok=False,
+            message="governance 数据库暂时不可达，请稍后重试或联系运维。",
+            retryable=True,
+        )
     except Exception:
-        # H2 风格修复：task 创建异常属于内部错误（DB 连接失败 / 事务异常等），
+        # H2 风格修复：task 创建异常属于内部错误（事务异常 / 未知错误等），
         # message 直接回显给 caller 会把 SQL 片段、schema 名泄漏出去。固定
-        # 文案 + logger.exception 把堆栈留日志。
-        logger.exception("Failed to create task for workflow=%s", body.workflow)
-        return {"ok": False, "message": "创建任务失败，请查看服务端日志。"}
+        # 文案 + logger.exception 把堆栈留日志（带 workflow 上下文便于排查）。
+        logger.exception(
+            "trigger_task_api: failed to create task for workflow=%s",
+            body.workflow,
+        )
+        return _response(ok=False, message="创建任务失败，请查看服务端日志。")
 
     if task_id is None:
-        return {
-            "ok": False,
-            "message": (
+        return _response(
+            ok=False,
+            existing_task=existing,
+            message=(
                 f"{body.workflow} 已有 {existing['status']} 任务"
                 f"（{existing['task_id']}），请等待完成后再触发。"
             ) if existing else f"{body.workflow} 已有活跃任务，请稍后再试。",
-            "existing_task": existing,
-        }
+        )
 
-    return {"ok": True, "task_id": task_id, "workflow": body.workflow}
+    return _response(ok=True, task_id=task_id)
 
 
 @rdp_router.get("/tasks/status", dependencies=[Depends(require_read_access)])

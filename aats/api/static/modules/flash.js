@@ -42,6 +42,15 @@
 //    被提醒，而 success flash 在用户已经看见之后被覆盖是可以接受的代价。
 
 const FLASH_DEFAULT_TTL_MS = 8000;
+// danger 级 flash 承载后端 500/网络错误等关键信息，8 秒 TTL 会在 operator 抬
+// 头前被静默清理，事故现场信息丢失。拉长到 60 秒，让 operator 有充足时间
+// 看清原文再决定下一步；info / warning 仍沿用 8s 默认值。
+const FLASH_DANGER_TTL_MS = 60000;
+
+export function getFlashTtl(tone) {
+  if (tone === "danger") return FLASH_DANGER_TTL_MS;
+  return FLASH_DEFAULT_TTL_MS;
+}
 
 export function setFlash(state, tone, message) {
   state.flash = { tone, message };

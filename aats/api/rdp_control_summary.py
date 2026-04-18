@@ -55,8 +55,13 @@ def _combo_key(family: str | None, timeframe: str | None) -> str:
 
 
 def _build_applied_recommendation_ids(active_parameters: dict[str, Any]) -> set[str]:
+    # 防御：active_parameters 若 JSON 落地坏了（比如被反序列化成 str 或 list），
+    # `.values()` 会抛 AttributeError 让整个 control-summary 退化成裸 500。
+    # 这里把非 dict 输入统一视作"没有已应用 recommendation"。
+    if not isinstance(active_parameters, dict):
+        return set()
     result: set[str] = set()
-    for item in (active_parameters or {}).values():
+    for item in active_parameters.values():
         if not isinstance(item, dict):
             continue
         recommendation_id = str(item.get("approval_recommendation_id") or "").strip()
@@ -735,7 +740,23 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         recommendations=recommendations,
     )
     health = query_rdp_health(root)
-    recent_gate_results = _load_recent_gate_results(root)
+    # _load_recent_gate_results 在 governance DB 不可达时会抛 RuntimeError。
+    # 这里降级为空列表，并通过 gate_history_status 向 UI 透出不可用原因，
+    # 避免整个 control-summary 端点因为 gate 历史挂了而退化成裸 500。
+    gate_history_status: dict[str, Any] = {"source": "db", "available": True}
+    try:
+        recent_gate_results = _load_recent_gate_results(root)
+    except Exception as exc:
+        logger.warning(
+            "control-summary: gate 历史不可用（governance DB 抖动或查询失败）: %s",
+            exc,
+        )
+        recent_gate_results = []
+        gate_history_status = {
+            "source": "db",
+            "available": False,
+            "unavailable_reason": str(exc) or "governance_db_unavailable",
+        }
     recent_releases = _load_recent_releases(root, limit=10)
     observation_source_releases = _load_recent_releases(root, limit=None)
     observation_queue = _build_observation_queue(
@@ -791,6 +812,7 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
         "round_upgrade_candidates": round_upgrade_candidates,
         "latest_decision_state": latest_decision_state,
         "recent_gate_results": recent_gate_results,
+        "gate_history_status": gate_history_status,
         "observation_queue": observation_queue,
         "release_history_status": release_history_status,
     }
