@@ -423,11 +423,65 @@ def apply_approved_recommendation(
                 "current_recommendation_id=%s superseded_count=%d",
                 family, timeframe.lower(), recommendation_id, superseded_count,
             )
+
+        # RDP Bug 9 修复: parameter_sets.status 生命周期
+        #
+        # 原状态机: candidate → (freeze_parameter_set) frozen → deprecated
+        #          candidate → (deprecate_parameter_set) deprecated
+        #
+        # 但 `validate_rollback_target` 规则 2 要求 status ∈ {frozen, released}，
+        # 而 "released" 状态**从未被代码写入过**（grep 零命中）。结果：
+        #   - 当前所有 live parameter_sets 在 governance.parameter_sets 里
+        #     实际是 deprecated 状态
+        #   - auto-rollback 永远找不到合法 target，全部被拒
+        #
+        # 修复语义：apply 本身就是 "release" 动作。apply 到 active 的 parameter_set
+        # 应该在 parameter_sets 表同步标记为 `released`。同 combo 下其他 released
+        # 的降级为 deprecated（每个 combo 任一时刻最多 1 个 released）。
+        #
+        # frozen_at 字段用途扩展：原设计是"冻结、停止修改"的时间戳，现在同时承载
+        # "首次 release" 的时间戳（已 release 的参数隐含"不再修改"）。
+        ps_status_result = session.execute(
+            text(
+                """
+                UPDATE governance.parameter_sets
+                SET status = 'released',
+                    frozen_at = COALESCE(frozen_at, now())
+                WHERE parameter_set_id = :pid
+                  AND status != 'released'
+                """,
+            ),
+            {"pid": ps_id},
+        )
+        ps_demoted_result = session.execute(
+            text(
+                """
+                UPDATE governance.parameter_sets
+                SET status = 'deprecated',
+                    deprecated_at = now()
+                WHERE family = :family
+                  AND timeframe = :tf
+                  AND status = 'released'
+                  AND parameter_set_id != :pid
+                """,
+            ),
+            {"family": family, "tf": timeframe.lower(), "pid": ps_id},
+        )
+        ps_released_count = ps_status_result.rowcount or 0
+        ps_demoted_count = ps_demoted_result.rowcount or 0
+        if ps_released_count or ps_demoted_count:
+            log.info(
+                "apply_promoted_parameter_set_status family=%s timeframe=%s "
+                "parameter_set_id=%s released_transitions=%d demoted_count=%d",
+                family, timeframe.lower(), ps_id, ps_released_count, ps_demoted_count,
+            )
         # session 退出 with 块时自动 commit
 
     result["operation_id"] = op_id
     result["from_parameter_set_id"] = from_ps_id
     result["superseded_count"] = superseded_count
+    result["ps_released_transitions"] = ps_released_count
+    result["ps_demoted_count"] = ps_demoted_count
     result["message"] = f"已 apply {ps_id} 到 {combo_key}"
     return result
 
