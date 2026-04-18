@@ -236,6 +236,62 @@ class TestMarketGatewayStatus(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(gateway.latest_snapshot("BTC-USDT"), snapshot)
         self.assertEqual(gateway._last_error, "downstream failed")
 
+    async def test_snapshot_is_fresh_clamps_negative_age_from_clock_skew(self) -> None:
+        """R4-M7：本地时钟落后于 OKX 服务端时，utc_now() - snapshot_ts 可能得到负值。
+        clamp 到非负后，负 age 仍判新鲜（数据本来就很新），并且不会误导下游。"""
+        from datetime import timedelta
+
+        settings = AATSSettings.model_validate(
+            {
+                "market_data_backend": "okx",
+                "default_symbol": "BTC-USDT",
+                "market_data_stale_after_seconds": 30.0,
+            }
+        )
+        gateway = MarketDataGateway(
+            settings=settings,
+            normalizer=MarketSnapshotNormalizer(exchange_name="OKX"),
+            publisher=MarketSnapshotPublisher(bus=InMemoryEventBus()),
+        )
+        snapshot = await gateway.publish_local_snapshot(symbol="BTC-USDT")
+        # snapshot_ts 放到 10s 之后（本地时钟比 OKX 慢 10s）
+        gateway._latest_snapshots["BTC-USDT"] = snapshot.model_copy(
+            update={"snapshot_ts": utc_now() + timedelta(seconds=10)}
+        )
+
+        self.assertTrue(gateway.snapshot_is_fresh("BTC-USDT"))
+
+    async def test_snapshot_is_fresh_logs_warning_on_large_clock_skew(self) -> None:
+        """R4-M7：时钟偏差 > 60s 时写 warning log，便于 ops 发现时钟配置异常。"""
+        import logging
+        from datetime import timedelta
+
+        settings = AATSSettings.model_validate(
+            {
+                "market_data_backend": "okx",
+                "default_symbol": "BTC-USDT",
+                "market_data_stale_after_seconds": 30.0,
+            }
+        )
+        gateway = MarketDataGateway(
+            settings=settings,
+            normalizer=MarketSnapshotNormalizer(exchange_name="OKX"),
+            publisher=MarketSnapshotPublisher(bus=InMemoryEventBus()),
+        )
+        snapshot = await gateway.publish_local_snapshot(symbol="BTC-USDT")
+        # snapshot_ts 放到 120s 之后（本地时钟慢 2 分钟，明显异常）
+        gateway._latest_snapshots["BTC-USDT"] = snapshot.model_copy(
+            update={"snapshot_ts": utc_now() + timedelta(seconds=120)}
+        )
+
+        with self.assertLogs("aats.market_gateway", level="WARNING") as captured:
+            gateway.snapshot_is_fresh("BTC-USDT")
+
+        self.assertTrue(
+            any("market_snapshot_clock_skew_detected" in line for line in captured.output),
+            f"expected clock skew warning in logs, got: {captured.output}",
+        )
+
     async def test_okx_rest_fallback_restores_freshness_when_ws_snapshot_is_stale(self) -> None:
         settings = AATSSettings.model_validate(
             {

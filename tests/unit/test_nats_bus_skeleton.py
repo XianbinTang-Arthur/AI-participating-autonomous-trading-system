@@ -1415,3 +1415,166 @@ def test_delivery_semantics_return_type_is_literal() -> None:
 
     hints_spec = get_type_hints(ConsumerConfigSpec)
     assert hints_spec["deliver_policy"] is DeliverPolicyStr
+
+
+# ─────────────────────────────────────────────────────────────────────
+# R4-X2：consumer 回调对确定性失败必须 term()/ack() 而不是 nak()
+# ─────────────────────────────────────────────────────────────────────
+
+
+class _FakeMsgWithTerm:
+    """模拟 nats-py 2.10+ msg：既有 term() 又有 ack()/nak()。"""
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.term_called = 0
+        self.ack_called = 0
+        self.nak_called = 0
+
+    async def term(self) -> None:
+        self.term_called += 1
+
+    async def ack(self) -> None:
+        self.ack_called += 1
+
+    async def nak(self, delay: int | None = None) -> None:  # noqa: ARG002
+        self.nak_called += 1
+
+
+class _FakeMsgNoTerm:
+    """模拟老 nats-py：没 term()，只能 ack()/nak()。"""
+
+    def __init__(self, data: bytes) -> None:
+        self.data = data
+        self.ack_called = 0
+        self.nak_called = 0
+
+    async def ack(self) -> None:
+        self.ack_called += 1
+
+    async def nak(self, delay: int | None = None) -> None:  # noqa: ARG002
+        self.nak_called += 1
+
+
+class _CbCapturingJS:
+    """mock JetStreamContext：subscribe() 把 cb 捕获下来给测试调用。"""
+
+    def __init__(self) -> None:
+        self.captured_cb: Any = None
+
+    async def subscribe(
+        self,
+        *,
+        subject: str,  # noqa: ARG002
+        durable: str,  # noqa: ARG002
+        cb: Any,
+        manual_ack: bool,  # noqa: ARG002
+        config: Any,  # noqa: ARG002
+    ) -> Any:
+        self.captured_cb = cb
+        return object()
+
+
+async def _capture_on_msg(bus: NatsEventBus) -> Any:
+    """安装 _CbCapturingJS 并跑一次 subscribe()，拿到 _on_msg 闭包。"""
+
+    js = _CbCapturingJS()
+    bus._js = js  # type: ignore[assignment]
+
+    async def _noop_handler(_msg: dict[str, Any]) -> None:
+        pass
+
+    await bus.subscribe("market_snapshots", _noop_handler)
+    assert js.captured_cb is not None
+    return js.captured_cb
+
+
+def test_on_msg_parse_error_terms_when_term_supported() -> None:
+    """坏 JSON 在 nats-py 2.10+ 下必须 term()，不能 nak()——
+    nak() 会触发 JetStream 立即重投，同一条坏 JSON 会再次 parse 失败，
+    形成 NAK 循环直到 max_deliver 耗尽，期间 consumer 持续喷 error 日志。
+    """
+    bus = NatsEventBus(config=NatsBusConfig(), consumer_role="decision")
+
+    async def _run() -> _FakeMsgWithTerm:
+        on_msg = await _capture_on_msg(bus)
+        msg = _FakeMsgWithTerm(b"{not valid json")
+        await on_msg(msg)
+        return msg
+
+    msg = asyncio.run(_run())
+    assert msg.term_called == 1
+    assert msg.ack_called == 0
+    assert msg.nak_called == 0, "parse error must never nak() — would NAK-loop"
+
+
+def test_on_msg_parse_error_falls_back_to_ack_when_no_term() -> None:
+    """老 nats-py 没 term() 时必须 ack() 兜底——
+    旧实现 fallback 到 nak() 会让坏消息被 JetStream 按
+    max_deliver 重投几轮，每轮都 parse fail，消耗 consumer 配额
+    并污染日志。ack() 直接消费掉，语义上把坏消息当黑洞处理。
+    """
+    bus = NatsEventBus(config=NatsBusConfig(), consumer_role="decision")
+
+    async def _run() -> _FakeMsgNoTerm:
+        on_msg = await _capture_on_msg(bus)
+        msg = _FakeMsgNoTerm(b"{not valid json")
+        await on_msg(msg)
+        return msg
+
+    msg = asyncio.run(_run())
+    assert msg.ack_called == 1
+    assert msg.nak_called == 0, "parse error must never nak() — would NAK-loop"
+
+
+def test_on_msg_schema_incompatible_terms_when_term_supported() -> None:
+    """未来 schema 主版本跳到 2.x 时旧版 consumer 收到必须 term()，
+    不能 nak() 让消息回到 stream 再被投递到同一组旧 consumer。
+    """
+    bus = NatsEventBus(config=NatsBusConfig(), consumer_role="decision")
+
+    async def _run() -> _FakeMsgWithTerm:
+        on_msg = await _capture_on_msg(bus)
+        envelope = EventEnvelope.model_validate(
+            {
+                "event_type": "test_event",
+                "source_component": "unit_test",
+                "topic": "market_snapshots",
+                "key": "k1",
+                "payload": {"value": 42},
+                "schema_version": "2.0.0",
+            }
+        )
+        msg = _FakeMsgWithTerm(envelope.model_dump_json().encode("utf-8"))
+        await on_msg(msg)
+        return msg
+
+    msg = asyncio.run(_run())
+    assert msg.term_called == 1
+    assert msg.ack_called == 0
+    assert msg.nak_called == 0, "schema incompatible must never nak() — would NAK-loop"
+
+
+def test_on_msg_schema_incompatible_falls_back_to_ack_when_no_term() -> None:
+    """老 nats-py 没 term() 时 schema 不兼容必须 ack()，理由同 parse error。"""
+    bus = NatsEventBus(config=NatsBusConfig(), consumer_role="decision")
+
+    async def _run() -> _FakeMsgNoTerm:
+        on_msg = await _capture_on_msg(bus)
+        envelope = EventEnvelope.model_validate(
+            {
+                "event_type": "test_event",
+                "source_component": "unit_test",
+                "topic": "market_snapshots",
+                "key": "k1",
+                "payload": {"value": 42},
+                "schema_version": "2.0.0",
+            }
+        )
+        msg = _FakeMsgNoTerm(envelope.model_dump_json().encode("utf-8"))
+        await on_msg(msg)
+        return msg
+
+    msg = asyncio.run(_run())
+    assert msg.ack_called == 1
+    assert msg.nak_called == 0, "schema incompatible must never nak() — would NAK-loop"

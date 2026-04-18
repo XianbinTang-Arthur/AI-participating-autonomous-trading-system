@@ -237,6 +237,54 @@ class TestBaselineStrategy(unittest.TestCase):
         # baseline 用的必须是 v1 的 alpha，不是 v2 的 0.99
         self.assertAlmostEqual(baseline.composite_alpha_score, 0.05, places=4)
 
+    def test_feature_ref_miss_falls_back_to_latest_with_warning(self) -> None:
+        """R4-D3：ref 在 stream_cache 和 event_store 都查不到时，fallback 到
+        event_store.latest(topic, symbol) 保证服务连续性；同时 WARNING log 让 ops
+        能感知到"使用了 fallback"。hard-raise 会让本轮决策彻底丢失，不可接受。"""
+        event_store = InMemoryEventStore()
+        settings = AATSSettings.model_validate({"strategy_baseline_range_alpha_threshold": 0.12})
+        strategy = BaselineStrategy(event_store=event_store, settings=settings)
+        seed = self._feature_snapshot()
+        feature_snapshot = seed.model_copy(
+            update={
+                "regime_indicator": "range",
+                "composite_alpha_score": 0.13,
+                "analysis_context": seed.analysis_context.model_copy(  # type: ignore[union-attr]
+                    update={
+                        "alpha_factors": seed.analysis_context.alpha_factors.model_copy(  # type: ignore[union-attr]
+                            update={"microstructure_alpha": 0.04}
+                        ),
+                    }
+                ),
+            }
+        )
+        event = build_envelope(
+            topic=topics.FEATURE_SNAPSHOTS,
+            key=feature_snapshot.symbol,
+            payload_model=feature_snapshot,
+            source_component="test",
+        )
+        event_store.append(event)
+
+        bogus_ref = "evt_never_existed_abc123"
+        with self.assertLogs("aats.decision_engine.baseline", level="WARNING") as captured:
+            baseline = strategy.evaluate(self._context(feature_snapshot_ref=bogus_ref))
+
+        self.assertEqual(baseline.direction_bias, "long")
+        self.assertTrue(
+            any("baseline_feature_ref_miss_fallback" in line for line in captured.output),
+            f"expected fallback warning, got: {captured.output}",
+        )
+
+    def test_feature_ref_miss_without_fallback_raises(self) -> None:
+        """R4-D3：event_store 完全没有该 symbol 的 feature（冷启动 / wrong symbol），
+        仍然 raise——避免"所有 symbol 的 feature 都没有"时静默 fallback 错品种。"""
+        event_store = InMemoryEventStore()
+        strategy = BaselineStrategy(event_store=event_store)
+
+        with self.assertRaises(RuntimeError):
+            strategy.evaluate(self._context(feature_snapshot_ref="evt_never_existed"))
+
     @staticmethod
     def _context(*, feature_snapshot_ref: str) -> DecisionContext:
         now = utc_now()

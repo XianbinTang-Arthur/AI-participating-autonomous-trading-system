@@ -452,6 +452,27 @@ class DecisionContextBuilder:
             portfolio_eq = to_decimal(portfolio_snapshot.total_equity or 0)
             if portfolio_eq > EPSILON_DECIMAL_12:
                 return portfolio_eq
+        # R4-D4：三级回退全部为空/非正时必须喊出来。
+        # 返回 0 会污染 resolve_balance_aware_reference_qty 的
+        # 余额感知下限逻辑（balance * ratio → 0），
+        # 让 P0-D4 的零余额 guard 必须是唯一的托底。
+        # 如果 equity 源真的全坏了，运营侧需要立刻知道，
+        # 而不是等到决策被 guard 挡掉之后再事后定位。
+        _equity_log = logging.getLogger("aats.decision_engine.context_builder")
+        _equity_log.critical(
+            "available_trading_equity_all_fallbacks_exhausted "
+            "account_snapshot_present=%s risk_present=%s "
+            "avail_eq=%s total_eq=%s "
+            "portfolio_snapshot_present=%s portfolio_total_equity=%s",
+            account_snapshot is not None,
+            risk is not None,
+            getattr(risk, "available_equity", None) if risk is not None else None,
+            getattr(risk, "total_equity", None) if risk is not None else None,
+            portfolio_snapshot is not None,
+            getattr(portfolio_snapshot, "total_equity", None)
+            if portfolio_snapshot is not None
+            else None,
+        )
         return Decimal("0")
 
     @staticmethod

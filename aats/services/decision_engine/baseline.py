@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from aats.bootstrap.settings import AATSSettings
+from aats.events import topics
 from aats.schemas.decision import BaselineAssessment, DecisionContext
 from aats.schemas.features import AnalysisContext, DirectionalBias, FeatureSnapshot, RegimeIndicator
 from aats.storage.base import EventStore
 
 if TYPE_CHECKING:
     from aats.services.decision_engine.feature_resolver import FeatureSnapshotResolver
+
+_LOGGER = logging.getLogger("aats.decision_engine.baseline")
 
 
 class BaselineStrategy:
@@ -31,7 +35,26 @@ class BaselineStrategy:
         else:
             feature_event = self.event_store.get(context.feature_snapshot_ref)
         if feature_event is None:
-            raise RuntimeError("Feature snapshot reference is missing from the event store")
+            # R4-D3：ref 查询 miss。stream_cache 的 LRU 可能淘汰了这条 event，
+            # event_store 异步落盘可能还没完成。做一次 latest(topic, symbol) 兜底：
+            # 同 symbol 的最近一条 feature snapshot 大概率就是 ref 指向的那条或
+            # 一个略新版本。hard-raise 会让本轮决策彻底丢失；这里 WARNING + fallback
+            # 优先提供服务连续性，同时记录偏差以便 ops 审计。若 latest 也 miss
+            # （event_store 完全没有该 symbol 的 feature 记录，如冷启动）才 raise。
+            fallback_event = self.event_store.latest(topics.FEATURE_SNAPSHOTS, context.symbol)
+            if fallback_event is None:
+                raise RuntimeError("Feature snapshot reference is missing from the event store")
+            _LOGGER.warning(
+                "baseline_feature_ref_miss_fallback",
+                extra={
+                    "decision_id": context.decision_id,
+                    "symbol": context.symbol,
+                    "requested_ref": context.feature_snapshot_ref,
+                    "fallback_event_id": fallback_event.event_id,
+                    "fallback_topic": fallback_event.topic,
+                },
+            )
+            feature_event = fallback_event
 
         features = FeatureSnapshot.model_validate(feature_event.payload)
         analysis = features.analysis_context

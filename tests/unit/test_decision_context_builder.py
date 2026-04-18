@@ -119,12 +119,62 @@ class TestDecisionContextBuilder(unittest.TestCase):
 
     def test_available_trading_equity_returns_zero_when_no_data(self) -> None:
         """When both account and portfolio snapshots are None, return zero."""
-        resolved = DecisionContextBuilder._available_trading_equity(
-            account_snapshot=None,
-            portfolio_snapshot=None,
-        )
+        with self.assertLogs("aats.decision_engine.context_builder", level="CRITICAL") as ctx:
+            resolved = DecisionContextBuilder._available_trading_equity(
+                account_snapshot=None,
+                portfolio_snapshot=None,
+            )
 
         self.assertEqual(resolved, Decimal("0"))
+        # R4-D4：三级 fallback 全部失败时必须喊出来，否则下游
+        # resolve_balance_aware_reference_qty 基于 0 计算出的名义仓位
+        # 只会被 P0-D4 的零余额 guard 挡掉，运营侧拿不到任何预警线索。
+        self.assertTrue(
+            any(
+                "available_trading_equity_all_fallbacks_exhausted" in record.getMessage()
+                for record in ctx.records
+            )
+        )
+
+    def test_available_trading_equity_logs_critical_when_all_sources_zero(self) -> None:
+        """即使 snapshot 都存在、但三路数据都是 0/None，也必须 CRITICAL 告警，
+        因为 0 equity 已经无法继续 size 任何仓位，这是真实运营事故而非正常状态。"""
+        account_snapshot = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=datetime.now(timezone.utc),
+            risk_snapshot=ExchangeAccountRiskSnapshot(
+                available_equity=Decimal("0"),
+                total_equity=Decimal("0"),
+            ),
+        )
+        portfolio_snapshot = PortfolioSnapshot(
+            snapshot_ts=datetime.now(timezone.utc),
+            balances={"USDT": Decimal("0")},
+            positions=[],
+            cost_basis={},
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("0"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            risk_budget_usage={},
+        )
+
+        with self.assertLogs("aats.decision_engine.context_builder", level="CRITICAL") as ctx:
+            resolved = DecisionContextBuilder._available_trading_equity(
+                account_snapshot=account_snapshot,
+                portfolio_snapshot=portfolio_snapshot,
+            )
+
+        self.assertEqual(resolved, Decimal("0"))
+        critical_records = [
+            record for record in ctx.records if record.levelname == "CRITICAL"
+        ]
+        self.assertEqual(len(critical_records), 1)
+        message = critical_records[0].getMessage()
+        self.assertIn("available_trading_equity_all_fallbacks_exhausted", message)
+        self.assertIn("account_snapshot_present=True", message)
+        self.assertIn("portfolio_snapshot_present=True", message)
 
     def test_position_qty_falls_back_to_base_balance_for_spot_snapshots(self) -> None:
         snapshot = PortfolioSnapshot(

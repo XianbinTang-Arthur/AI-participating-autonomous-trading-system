@@ -1161,12 +1161,16 @@ class NatsEventBus(EventBus):
                 )
                 # 解析错误是确定性失败（坏 JSON / schema 不匹配），重投
                 # 也不会成功。优先 term()（JetStream 2.10+ 支持）直接终止
-                # 消息；如果 nats-py 版本不支持 term() 则回退到 nak()。
+                # 消息；R4-X2：如果 nats-py 版本不支持 term()，回退到
+                # ack() 把消息静默吃掉，**绝不能** nak()——那会让
+                # consumer 被同一条坏消息 NAK 死循环打穿。term() 本身
+                # 抛异常时也放任 ack_wait 过期，JetStream 自己按退避
+                # 策略重投（最坏只是延迟），也不主动 nak() 加速自爆。
                 try:
                     if hasattr(msg, "term"):
                         await msg.term()
                     else:
-                        await msg.nak()
+                        await msg.ack()
                 except Exception:
                     pass
                 return
@@ -1190,11 +1194,14 @@ class NatsEventBus(EventBus):
                     supported_major=_SUPPORTED_ENVELOPE_SCHEMA_MAJOR,
                     permanent=True,
                 )
+                # R4-X2：schema 主版本不兼容是永久性失败，回退到
+                # nak() 只会触发 NAK 循环——见同文件 parse_error 分支
+                # 的同款注释。
                 try:
                     if hasattr(msg, "term"):
                         await msg.term()
                     else:
-                        await msg.nak()
+                        await msg.ack()
                 except Exception:
                     pass
                 return

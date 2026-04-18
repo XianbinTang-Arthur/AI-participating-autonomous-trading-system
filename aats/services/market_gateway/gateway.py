@@ -314,7 +314,23 @@ class MarketDataGateway:
         snapshot = self._latest_snapshots.get(symbol)
         if snapshot is None:
             return False
+        # R4-M7：snapshot.snapshot_ts 由 OKX 服务端赋值，本地时钟相对 OKX 若有漂移
+        # （NTP 同步未完成 / VM 休眠唤醒 / 坏包带未来 ts），utc_now() - snapshot_ts
+        # 可能得到负数。负 age <= stale_after_seconds 恒真——返回 True 本身不致命
+        # （数据本来也"新鲜"），但让我们失去对真实新鲜度的检测能力，同时负 age 数值
+        # 可能误导下游 observability。clamp 到非负；skew > 60s 记 warning 告警，
+        # 便于发现时钟配置异常。
         age_seconds = (utc_now() - snapshot.snapshot_ts).total_seconds()
+        if age_seconds < -60.0:
+            log_event(
+                self.logger,
+                "market_snapshot_clock_skew_detected",
+                level="warning",
+                symbol=symbol,
+                skew_seconds=age_seconds,
+                snapshot_ts=snapshot.snapshot_ts.isoformat(),
+            )
+        age_seconds = max(age_seconds, 0.0)
         return age_seconds <= self.settings.market_data_stale_after_seconds
 
     def status(self) -> dict[str, Any]:
