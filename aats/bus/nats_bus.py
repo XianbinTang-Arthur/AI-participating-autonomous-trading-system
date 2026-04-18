@@ -1235,7 +1235,21 @@ class NatsEventBus(EventBus):
             if envelope.trace_context:
                 try:
                     parent_ctx = extract_trace_context(envelope.trace_context)
-                except Exception:
+                except Exception as _extract_exc:
+                    # R5-X5：extract 失败意味着 producer 注入过 carrier 但本地
+                    # 无法还原 parent context——下游 span 会变孤儿 root，分布式
+                    # 追踪断链。inject 侧已有 warning（见同文件 publish_envelope
+                    # line ~1059），这里补齐 extract 侧，确保链路断开时可被
+                    # ops 通过日志搜到而不是静默吞掉。
+                    log_event(
+                        self.logger,
+                        "trace_context_extract_failed",
+                        level="warning",
+                        topic=topic,
+                        event_id=envelope.event_id,
+                        error_type=type(_extract_exc).__name__,
+                        error=str(_extract_exc),
+                    )
                     parent_ctx = None
 
             # R3-P1-X3：把 JetStream server-assigned sequence / num_delivered

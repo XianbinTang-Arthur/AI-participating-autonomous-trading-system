@@ -1578,3 +1578,79 @@ def test_on_msg_schema_incompatible_falls_back_to_ack_when_no_term() -> None:
     msg = asyncio.run(_run())
     assert msg.ack_called == 1
     assert msg.nak_called == 0, "schema incompatible must never nak() — would NAK-loop"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# R5-X5：trace context extract 失败时必须落 WARNING，便于 ops 排查
+# 分布式追踪断链的上游 producer；否则 consumer 侧 span 会变孤儿 root
+# 却无日志线索。inject 侧已有 warning（publish_envelope ~line 1059），
+# extract 侧原先是静默 try/except，R5-X5 补齐。
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_on_msg_logs_warning_when_trace_context_extract_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """envelope.trace_context 非空但 extract_trace_context 抛异常时必须
+    落一条 WARNING（event_name=trace_context_extract_failed），并带上
+    topic + event_id + error_type/error 方便定位。handler 仍应被调用
+    (parent_ctx graceful fallback 到 None)，extract 失败不能阻塞业务。
+    """
+    import logging
+
+    from aats.bus import nats_bus as _nats_bus_mod
+
+    def _boom(_carrier: Any) -> Any:
+        raise RuntimeError("carrier malformed")
+
+    monkeypatch.setattr(_nats_bus_mod, "extract_trace_context", _boom)
+
+    bus = NatsEventBus(config=NatsBusConfig(), consumer_role="decision")
+    handler_called = 0
+
+    async def _handler(_msg: dict[str, Any]) -> None:
+        nonlocal handler_called
+        handler_called += 1
+
+    async def _run() -> _FakeMsgWithTerm:
+        js = _CbCapturingJS()
+        bus._js = js  # type: ignore[assignment]
+        await bus.subscribe("market_snapshots", _handler)
+        on_msg = js.captured_cb
+        assert on_msg is not None
+        envelope = EventEnvelope.model_validate(
+            {
+                "event_type": "test_event",
+                "source_component": "unit_test",
+                "topic": "market_snapshots",
+                "key": "k1",
+                "payload": {"value": 1},
+                "schema_version": "1.0.0",
+                "trace_context": {"traceparent": "garbage"},
+            }
+        )
+        msg = _FakeMsgWithTerm(envelope.model_dump_json().encode("utf-8"))
+        await on_msg(msg)
+        return msg
+
+    caplog.set_level(logging.WARNING, logger="aats.event_bus.nats")
+    asyncio.run(_run())
+
+    assert handler_called == 1, (
+        "extract 失败必须 graceful fallback（parent_ctx=None），"
+        "不能阻塞 handler 业务逻辑"
+    )
+    warn_records = [
+        rec for rec in caplog.records
+        if rec.name == "aats.event_bus.nats"
+        and rec.levelno == logging.WARNING
+        and "trace_context_extract_failed" in rec.getMessage()
+    ]
+    assert warn_records, (
+        "extract 失败必须落 WARNING（event=trace_context_extract_failed），"
+        "否则分布式追踪断链时 ops 无日志线索"
+    )
+    rendered = warn_records[0].getMessage()
+    assert "topic=market_snapshots" in rendered
+    assert "error_type=RuntimeError" in rendered

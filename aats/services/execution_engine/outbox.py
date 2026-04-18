@@ -542,11 +542,17 @@ class PostgresExecutionOutboxPublisher:
         try:
             self.obligation_cache.fire_and_forget_publish(obligation)
         except Exception as exc:  # pragma: no cover
+            # R5-E7：fail-soft 仅落 warning，但要带够 ops 定位所需字段。
+            # client_order_id 是跨进程主键，obligation_id / symbol / status
+            # 用于在 Redis / DB 之间反查具体那一单，缺了就只能全表扫。
             log_event(
                 self.logger,
                 "execution_outbox_obligation_cache_publish_failed",
                 level="warning",
                 client_order_id=obligation.client_order_id,
+                obligation_id=obligation.obligation_id,
+                symbol=obligation.symbol,
+                status=obligation.status,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
@@ -561,11 +567,14 @@ class PostgresExecutionOutboxPublisher:
         try:
             self.order_state_cache.fire_and_forget_publish(order)
         except Exception as exc:  # pragma: no cover
+            # R5-E7：见 _publish_obligation_to_cache 的同型注释。
             log_event(
                 self.logger,
                 "execution_outbox_order_state_cache_publish_failed",
                 level="warning",
                 client_order_id=order.client_order_id,
+                symbol=order.symbol,
+                status=order.status,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
@@ -580,11 +589,16 @@ class PostgresExecutionOutboxPublisher:
         try:
             self.fill_event_cache.fire_and_forget_publish(fill)
         except Exception as exc:  # pragma: no cover
+            # R5-E7：见 _publish_obligation_to_cache 的同型注释。
+            # 本方法原先只带 fill_id，缺 client_order_id / symbol 导致
+            # ops 无法关联到同一笔订单，本次补齐。
             log_event(
                 self.logger,
                 "execution_outbox_fill_cache_publish_failed",
                 level="warning",
                 fill_id=fill.fill_id,
+                client_order_id=fill.client_order_id,
+                symbol=fill.symbol,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
