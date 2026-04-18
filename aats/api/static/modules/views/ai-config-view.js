@@ -427,25 +427,13 @@ function executionShadowState(mode) {
   };
 }
 
-// #12 修复：把"故意把 ai_decision_maker_with_profile_control 折叠成
-// ai_decision_maker"这件事写清楚——后端真实存了带 _with_profile_control
-// 后缀的 enum，但是顶部"运行模式"按钮组只有 baseline_only / ai_advisor /
-// ai_decision_maker 三个 radio。如果不在这里折叠，按钮组会出现"高亮没有任何
-// 一个按钮"的尴尬状态，用户会以为运行模式坏了。
-//
-// 折叠仅作用于"按钮组高亮 / 当前模式标签"的展示层；底层的真实 enum 仍由
-// runtime.effective_operating_mode 等字段保留，对外暴露的 readableMode（下方）
-// 单独识别这个值并显示成"AI 决策者"，二者并不冲突。如果未来按钮组扩成 4 项，
-// 把这一行删掉即可。
 function currentOperatingMode(runtime = {}) {
-  const normalized = String(
+  return String(
     runtime.manual_override_mode
       || runtime.effective_operating_mode
       || runtime.configured_operating_mode
       || "baseline_only",
   ).trim();
-  if (normalized === "ai_decision_maker_with_profile_control") return "ai_decision_maker";
-  return normalized;
 }
 
 function currentStrategyProfile(activeRevision = {}, activation = {}) {
@@ -459,11 +447,7 @@ function readableProfile(value, fallback = "待确认") {
 
 function readableMode(value, fallback = "待确认") {
   if (value === null || value === undefined || value === "") return fallback;
-  const normalized = String(value).trim();
-  if (normalized === "ai_decision_maker_with_profile_control") {
-    return "AI 决策者";
-  }
-  return readableState(normalized, fallback);
+  return readableState(String(value).trim(), fallback);
 }
 
 // #6 / #7 / #8 修复：原本这里定义了三个和 copy.js 重复的 helper

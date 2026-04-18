@@ -642,9 +642,13 @@ class AIInferenceService:
             "baseline_only",
             "ai_assisted",
             "ai_decision_maker",
-            "ai_decision_maker_with_profile_control",
         }
         normalized_input = str(mode).strip()
+        # 历史遗留：ai_decision_maker_with_profile_control 已拆分为
+        # ai_decision_maker + strategy_profile_auto_control_enabled，此处仍接受
+        # 输入值但在 normalize 时折叠回 ai_decision_maker。
+        if normalized_input == "ai_decision_maker_with_profile_control":
+            normalized_input = "ai_decision_maker"
         if normalized_input not in allowed_modes:
             raise ValueError("invalid_ai_operating_mode")
         normalized_mode = normalize_ai_operating_mode(normalized_input)

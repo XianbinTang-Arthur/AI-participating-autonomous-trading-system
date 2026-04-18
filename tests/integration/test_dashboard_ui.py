@@ -1796,8 +1796,8 @@ const analysisHtml = renderAIAnalysisView({
   blockerControl: {},
   aiOverview: {
     runtime: {
-      configured_operating_mode: 'ai_decision_maker_with_profile_control',
-      effective_operating_mode: 'ai_decision_maker_with_profile_control',
+      configured_operating_mode: 'ai_decision_maker',
+      effective_operating_mode: 'ai_decision_maker',
       provider_ready: true,
       shadow_mode_enabled: true,
       manual_override_active: false,
@@ -1808,7 +1808,7 @@ const analysisHtml = renderAIAnalysisView({
       decision_source: 'baseline_fallback',
       final_action: 'hold',
       final_target_qty: 0,
-      decision_authority: 'final_decision_with_profile_control',
+      decision_authority: 'final_decision',
     },
     shadow_summary: { window_count: 3, outperformed_rate: 0.66, status: 'healthy' },
     downgrade_state: { provider_state: 'healthy', outcome_state: 'healthy' },
@@ -2096,8 +2096,8 @@ const baseTuningProposals = {
 const configHtml = renderAIConfigView({
   session: { role: 'admin' },
   aiRuntime: {
-    configured_operating_mode: 'ai_decision_maker_with_profile_control',
-    effective_operating_mode: 'ai_decision_maker_with_profile_control',
+    configured_operating_mode: 'ai_decision_maker',
+    effective_operating_mode: 'ai_decision_maker',
     manual_override_active: false,
     manual_override_default_freeze_seconds: 3600,
     shadow_mode_enabled: true,
@@ -2106,8 +2106,8 @@ const configHtml = renderAIConfigView({
   },
   summary: {
     ai: {
-      effective_operating_mode: 'ai_decision_maker_with_profile_control',
-      configured_operating_mode: 'ai_decision_maker_with_profile_control',
+      effective_operating_mode: 'ai_decision_maker',
+      configured_operating_mode: 'ai_decision_maker',
       shadow_mode_enabled: true,
       execution_suggestion_mode: 'shadow_translation',
       shadow_summary: { window_count: 3, outperformed_rate: 0.66 },
@@ -2859,14 +2859,14 @@ const drawer = buildDecisionDrawer({
   risk_decision: { approved: true },
   decision_outcome: {
     decision_source: 'baseline_fallback',
-    decision_authority: 'final_decision_with_profile_control',
+    decision_authority: 'final_decision',
     decision_blocked_reasons: ['ai_confidence_below_threshold'],
   },
   ai_decision_audit: {
-    configured_mode: 'ai_decision_maker_with_profile_control',
-    assessment_operating_mode: 'ai_decision_maker_with_profile_control',
+    configured_mode: 'ai_decision_maker',
+    assessment_operating_mode: 'ai_decision_maker',
     decision_source: 'baseline_fallback',
-    decision_authority: 'final_decision_with_profile_control',
+    decision_authority: 'final_decision',
   },
 });
 

@@ -885,10 +885,10 @@ Trial guard 助手：
 - `runtimeModeSummary(runtime)` — 左卡的 callout 文案 `{ title, copy, actors }`。
 - `autoControlSummary(runtime, latestProfileControl, latestSelectionDecision, latestOptimizationReport)` — 右卡的 callout 文案；6 分支：配置手动 / 配置自动但临时手动 / 配置手动但临时自动 / 本轮已切档 / 正在观察候选 / 自动但无动作。
 - `executionShadowState(mode)` — 4 分支：`enabled_live` / `shadow_translation` / `diagnostic_only` / 其它 → `{ value, meta, tone }`。
-- `currentOperatingMode(runtime)` — **问题 #12**：把 `ai_decision_maker_with_profile_control` 折叠成 `ai_decision_maker`。这个折叠对 UI 按钮对齐是必要的，但会让 UI 和真实运行模式出现轻微差异。
+- `currentOperatingMode(runtime)` — 归一化当前运行模式（manual override > effective > configured）。
 - `currentStrategyProfile(activeRevision, activation)` — 当前档位 id。
 - `readableProfile(value, fallback)` — profile 中文化。
-- `readableMode(value, fallback)` — mode 中文化；特判 `ai_decision_maker_with_profile_control → "AI 决策者"`。
+- `readableMode(value, fallback)` — mode 中文化。
 - `textOrFallback(value, fallback)` — **问题 #7**：本地重复 `copy.js` 里的 textOrFallback。
 - `listText(items, fallback)` — **问题 #6**：第三次重复。
 - `summarizeList(items, fallback)` — **问题 #8**：本地重复 `copy.js` 里的 summarizeLocalizedList，但 limit 硬编码为 2。
@@ -1101,7 +1101,7 @@ IDLE --(refreshDashboard)--> PRIMARY --(primary done)--> DEFERRED --(all deferre
 |---|---|---|
 | 9 | `risk-view.js` 行 1510-1516 | `noPrimaryBlockerSummary` 函数体的缩进明显错位（4 空格 vs 2 空格混用），不影响运行但扰乱 diff 阅读。 |
 | 10 | `risk-view.js` 行 2 | 只有一个 `kvList` 的独立 import，与下面成块的 import 分开；建议合并。 |
-| 12 | `ai-config-view.js::currentOperatingMode` | 把 `ai_decision_maker_with_profile_control` 折叠成 `ai_decision_maker`。这是有意为之（让 UI 按钮对齐），但导致界面上的运行模式和后端实际运行模式出现一处差异，没有 tooltip 说明。 |
+| 12 | `ai-config-view.js::currentOperatingMode` | 已修复：`ai_decision_maker_with_profile_control` 模式已从 UI 和后端移除（profile 自动换档独立由 `strategy_profile_auto_control_enabled` 控制）。 |
 | 14 | `strategy-view.js::tradeCostConfigRow` | 纯 delegator，没有自己的逻辑。 |
 | 15 | `strategy-view.js::escapeFallbackReadableState` | 使用率极低（看起来只剩 1 处调用），可以 inline。 |
 | 16 | `strategy-view.js::plainListText` | 定义了但在本文件里找不到调用者（dead code）。 |

@@ -566,10 +566,11 @@ class TargetPositionEngine:
             ai_decision_authorized=ai_decision_authorized,
         )
         rebalance_reason = f"{canonical_mode}_decision"
-        ai_decision_applied = canonical_mode in {
-            "ai_decision_maker",
-            "ai_decision_maker_with_profile_control",
-        } and ai_decision_authorized and ai_decision_blockers == []
+        ai_decision_applied = (
+            canonical_mode == "ai_decision_maker"
+            and ai_decision_authorized
+            and ai_decision_blockers == []
+        )
         decision_outcome = self._decision_outcome(
             context=context,
             baseline=baseline,
@@ -694,17 +695,6 @@ class TargetPositionEngine:
                 legacy_mode=legacy_mode,
             )
         if mode == "ai_decision_maker":
-            return self._target_quantity_ai_decision_maker(
-                context=context,
-                baseline=baseline,
-                ai_assessment=ai_assessment,
-                ai_decision_intent=ai_decision_intent,
-                product_type=product_type,
-                baseline_fallback_qty=baseline_fallback_qty,
-                ai_decision_authorized=ai_decision_authorized,
-                guardrail_flags=guardrail_flags,
-            )
-        if mode == "ai_decision_maker_with_profile_control":
             return self._target_quantity_ai_decision_maker(
                 context=context,
                 baseline=baseline,
@@ -1859,7 +1849,7 @@ class TargetPositionEngine:
         if mode == "ai_assisted":
             return {"baseline": 0.6, "ai": 0.4}
         if (
-            mode in {"ai_decision_maker", "ai_decision_maker_with_profile_control"}
+            mode == "ai_decision_maker"
             and ai_decision_authorized
             and ai_decision_intent is not None
             and not ai_decision_intent.fallback_used
@@ -1876,7 +1866,7 @@ class TargetPositionEngine:
         ai_decision_intent: AIDecisionIntent | None,
         operating_mode: CanonicalAIOperatingMode,
     ) -> tuple[bool, list[str]]:
-        if operating_mode not in {"ai_decision_maker", "ai_decision_maker_with_profile_control"}:
+        if operating_mode != "ai_decision_maker":
             return False, []
         if ai_assessment is None or ai_decision_intent is None:
             return False, ["ai_decision_intent_missing"]
@@ -1937,9 +1927,8 @@ class TargetPositionEngine:
             "baseline_only": "reference_only",
             "ai_assisted": "advisory",
             "ai_decision_maker": "final_decision",
-            "ai_decision_maker_with_profile_control": "final_decision_with_profile_control",
         }
-        if canonical_mode in {"ai_decision_maker", "ai_decision_maker_with_profile_control"}:
+        if canonical_mode == "ai_decision_maker":
             decision_source = "ai" if ai_decision_applied else "baseline_fallback"
         else:
             decision_source = "baseline"

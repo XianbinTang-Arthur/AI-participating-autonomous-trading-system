@@ -1503,13 +1503,14 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertTrue(shadow.would_override_baseline)
         self.assertIn(shadow.shadow_action_type, {"entry_override", "exit_override", "reverse_override"})
 
-    def test_ai_decision_maker_with_profile_control_emits_native_profile_control_decision(self) -> None:
+    def test_ai_decision_maker_emits_profile_control_decision_when_provided(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(
                 {
                     "default_order_qty": 0.01,
                     "trading_product_type": "derivatives",
-                    "ai_operating_mode": "ai_decision_maker_with_profile_control",
+                    "ai_operating_mode": "ai_decision_maker",
+                    "strategy_profile_auto_control_enabled": True,
                     "strategy_short_bias_enabled": True,
                     "ai_primary_min_confidence": 0.75,
                     "ai_primary_min_directional_edge": 0.2,
@@ -1538,14 +1539,14 @@ class TestTargetPositionEngine(unittest.TestCase):
             baseline,
             self._ai_assessment(direction=-0.45, confidence=0.9, fallback_used=False, override=True, actionable=True),
             profile_control_decision=profile_control,
-            operating_mode="ai_decision_maker_with_profile_control",
+            operating_mode="ai_decision_maker",
         )
 
         self.assertIsNotNone(target.profile_control_decision)
         self.assertEqual(target.profile_control_decision.requested_profile_id, "trend_strict")
         self.assertIsNotNone(target.decision_outcome)
-        self.assertEqual(target.decision_outcome.ai_operating_mode, "ai_decision_maker_with_profile_control")
-        self.assertEqual(target.decision_outcome.decision_authority, "final_decision_with_profile_control")
+        self.assertEqual(target.decision_outcome.ai_operating_mode, "ai_decision_maker")
+        self.assertEqual(target.decision_outcome.decision_authority, "final_decision")
         self.assertEqual(target.decision_outcome.active_profile_id, "trend_strict")
         self.assertEqual(target.decision_outcome.profile_control_source, "ai")
 

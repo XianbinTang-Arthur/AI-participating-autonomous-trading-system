@@ -1,5 +1,10 @@
 # Task70: AI 前端信息架构重组方案
 
+> **历史文档（2026-04 更新）**：`ai_decision_maker_with_profile_control` 已从
+> 运行模式枚举中移除；UI 仅保留 `baseline_only` / `ai_assisted` /
+> `ai_decision_maker` 三档。profile 自动换档独立由
+> `strategy_profile_auto_control_enabled` 控制。
+
 ## 1. 目标
 
 本方案只做信息架构与文案设计，不改代码。

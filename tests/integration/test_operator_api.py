@@ -4385,7 +4385,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
     async def test_ai_profile_control_decision_is_exposed_in_mainline_and_operator_views(self) -> None:
         runtime = await self._runtime(
-            ai_operating_mode="ai_decision_maker_with_profile_control",
+            ai_operating_mode="ai_decision_maker",
             strategy_profile_auto_control_enabled=True,
             ai_provider="openai",
             openai_api_key="test-key",
@@ -4432,7 +4432,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(latest.json()["profile_control_decision"]["requested_by"], "ai")
         self.assertEqual(
             decision_detail.json()["decision_outcome"]["decision_authority"],
-            "final_decision_with_profile_control",
+            "final_decision",
         )
         self.assertEqual(
             decision_detail.json()["decision_outcome"]["profile_control_source"],
@@ -4446,7 +4446,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
     async def test_ai_overview_and_ai_latest_share_cached_latest_payload(self) -> None:
         runtime = await self._runtime(
-            ai_operating_mode="ai_decision_maker_with_profile_control",
+            ai_operating_mode="ai_decision_maker",
             strategy_profile_auto_control_enabled=True,
             ai_provider="openai",
             openai_api_key="test-key",
@@ -4532,7 +4532,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
     async def test_profile_control_is_not_evaluated_when_ai_degrades_to_baseline_during_cycle(self) -> None:
         runtime = await self._runtime(
-            ai_operating_mode="ai_decision_maker_with_profile_control",
+            ai_operating_mode="ai_decision_maker",
             ai_provider="openai",
             openai_api_key="test-key",
             trading_product_type="derivatives",
@@ -4543,7 +4543,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(runtime.decision_engine.strategy_profile_service)
         runtime.ai_service.should_attempt_assessment = Mock(return_value=True)
-        effective_modes = iter(["ai_decision_maker_with_profile_control", "baseline_only"])
+        effective_modes = iter(["ai_decision_maker", "baseline_only"])
         runtime.ai_service.effective_operating_mode = Mock(
             side_effect=lambda: next(effective_modes, "baseline_only")
         )
@@ -4561,7 +4561,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 invalidation_conditions=[],
                 risk_tags=[],
                 rationale_summary="degraded_after_assess",
-                operating_mode="ai_decision_maker_with_profile_control",
+                operating_mode="ai_decision_maker",
                 provider_name="fake",
                 output_valid=True,
                 fallback_used=False,
@@ -6762,7 +6762,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
             operator_users=[("admin", "admin-pass")],
-            ai_operating_mode="ai_decision_maker_with_profile_control",
+            ai_operating_mode="ai_decision_maker",
             strategy_profile_auto_control_enabled=True,
             ai_shadow_mode_enabled=True,
         )
@@ -6807,7 +6807,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             operator_auth_enabled=True,
             operator_session_secret="session-secret",
             operator_users=[("admin", "admin-pass")],
-            ai_operating_mode="ai_decision_maker_with_profile_control",
+            ai_operating_mode="ai_decision_maker",
         )
         app = self._app(runtime)
 
@@ -6840,11 +6840,11 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         restored_payload = runtime_after_configured.json()
         self.assertFalse(restored_payload["manual_override_active"])
         self.assertIsNone(restored_payload["manual_override_mode"])
-        self.assertEqual(restored_payload["configured_operating_mode"], "ai_decision_maker_with_profile_control")
+        self.assertEqual(restored_payload["configured_operating_mode"], "ai_decision_maker")
         self.assertEqual(restored_payload["operating_mode_source"], "configured")
         self.assertIn(
             restored_payload["effective_operating_mode"],
-            {"ai_decision_maker_with_profile_control", "baseline_only"},
+            {"ai_decision_maker", "baseline_only"},
         )
 
         runtime = await self._runtime(

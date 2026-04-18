@@ -1,5 +1,9 @@
 # Task 32: Stage 1 Implementation Checklist
 
+> **Historical document (2026-04 update)**: `ai_decision_maker_with_profile_control`
+> 已从 canonical 运行模式枚举中移除；当前仅作为 legacy 兼容值保留在
+> `AI_OPERATING_MODE_CANONICAL_MAP` 中（折叠为 `ai_decision_maker`）。
+
 ## 1. Goal
 
 Stage 1 is the compatibility foundation for the AI decision-mainline refactor.

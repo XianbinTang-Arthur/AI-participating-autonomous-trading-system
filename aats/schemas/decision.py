@@ -26,29 +26,35 @@ CanonicalAIOperatingMode = Literal[
     "baseline_only",
     "ai_assisted",
     "ai_decision_maker",
-    "ai_decision_maker_with_profile_control",
 ]
 
-LegacyAIOperatingMode = Literal["ai_advisory", "ai_blended", "ai_primary"]
+LegacyAIOperatingMode = Literal[
+    "ai_advisory",
+    "ai_blended",
+    "ai_primary",
+    "ai_decision_maker_with_profile_control",
+]
 
 AIOperatingMode = Literal[
     "baseline_only",
     "ai_assisted",
     "ai_decision_maker",
-    "ai_decision_maker_with_profile_control",
     "ai_advisory",
     "ai_blended",
     "ai_primary",
+    "ai_decision_maker_with_profile_control",
 ]
 
 AI_OPERATING_MODE_CANONICAL_MAP: dict[str, CanonicalAIOperatingMode] = {
     "baseline_only": "baseline_only",
     "ai_assisted": "ai_assisted",
     "ai_decision_maker": "ai_decision_maker",
-    "ai_decision_maker_with_profile_control": "ai_decision_maker_with_profile_control",
     "ai_advisory": "ai_assisted",
     "ai_blended": "ai_assisted",
     "ai_primary": "ai_decision_maker",
+    # 历史值：profile 自动换档已独立为 strategy_profile_auto_control_enabled，
+    # 运行模式折叠回 ai_decision_maker 以保向后兼容。
+    "ai_decision_maker_with_profile_control": "ai_decision_maker",
 }
 
 
@@ -261,6 +267,8 @@ class AIDecisionIntent(SchemaBase):
 
 
 DecisionSource = Literal["baseline", "ai", "baseline_fallback", "admin_override"]
+# final_decision_with_profile_control 为历史值：当前 producer 已不再生成，
+# 仅保留用于反序列化历史决策事件。新决策一律落在 final_decision。
 DecisionAuthority = Literal["reference_only", "advisory", "final_decision", "final_decision_with_profile_control"]
 ProfileControlSource = Literal["env_default", "ai", "admin", "system"]
 

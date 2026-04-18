@@ -1,5 +1,12 @@
 # Task 31: AI Decision-Maker Architecture Refactor Design
 
+> **Historical document (2026-04 update)**: `ai_decision_maker_with_profile_control`
+> 已从运行模式枚举中移除。profile 自动换档现在由独立开关
+> `strategy_profile_auto_control_enabled` 控制，可以与任何 AI 运行模式
+> (`baseline_only` / `ai_assisted` / `ai_decision_maker`) 组合。保留此
+> 文档里对该模式的描述仅作为历史记录，当前代码会把历史值自动折叠为
+> `ai_decision_maker`。
+
 ## 1. Document Purpose
 
 This document defines the high-level refactor target for the trading decision stack.

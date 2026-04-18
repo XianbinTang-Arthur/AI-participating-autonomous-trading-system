@@ -7261,15 +7261,11 @@ class OperatorQueryService:
             "baseline_only": "reference_only",
             "ai_assisted": "advisory",
             "ai_decision_maker": "final_decision",
-            "ai_decision_maker_with_profile_control": "final_decision_with_profile_control",
         }
         ai_direction = self._direction_from_edge(None if ai_assessment is None else ai_assessment.get("directional_edge"))
-        if ai_assessment is not None and ai_assessment.get("fallback_used") and canonical_mode in {
-            "ai_decision_maker",
-            "ai_decision_maker_with_profile_control",
-        }:
+        if ai_assessment is not None and ai_assessment.get("fallback_used") and canonical_mode == "ai_decision_maker":
             decision_source = "baseline_fallback"
-        elif canonical_mode in {"ai_decision_maker", "ai_decision_maker_with_profile_control"} and ai_assessment is not None and (
+        elif canonical_mode == "ai_decision_maker" and ai_assessment is not None and (
             bool(ai_assessment.get("economically_actionable")) or ai_direction != "flat"
         ):
             decision_source = "ai"
@@ -10826,17 +10822,7 @@ class OperatorQueryService:
         ai_before = dict(self.runtime.ai_service.status())
         configured_mode = normalize_ai_operating_mode(self.runtime.settings.ai_operating_mode)
         requested_mode = normalize_ai_operating_mode(mode)
-        configured_display_mode = (
-            "ai_decision_maker"
-            if configured_mode == "ai_decision_maker_with_profile_control"
-            else configured_mode
-        )
-        requested_display_mode = (
-            "ai_decision_maker"
-            if requested_mode == "ai_decision_maker_with_profile_control"
-            else requested_mode
-        )
-        if requested_display_mode == configured_display_mode:
+        if requested_mode == configured_mode:
             ai_after = self.runtime.ai_service.clear_manual_operating_mode_override()
         else:
             ai_after = self.runtime.ai_service.set_manual_operating_mode_override(

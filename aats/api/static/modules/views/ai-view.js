@@ -492,9 +492,6 @@ function aiRuntimeNarrative(runtime, latestDegradation) {
   if (effectiveMode(runtime) === "ai_assisted") {
     return "AI 当前参与辅助判断和诊断，但最终是否进入真实交易，仍由基础策略和治理链路共同决定。";
   }
-  if (effectiveMode(runtime) === "ai_decision_maker_with_profile_control") {
-    return "AI 当前参与真实交易决策，并可联动控制运行策略档位；但最终落地前仍要通过经济可行动性、风控和执行状态等门禁。";
-  }
   return "AI 当前参与真实交易决策，但最终落地前仍要同时通过经济可行动性、风控和执行状态等门禁。";
 }
 

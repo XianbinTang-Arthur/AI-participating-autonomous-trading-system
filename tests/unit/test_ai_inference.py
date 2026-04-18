@@ -798,7 +798,7 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
 class TestAIOperatingModes(unittest.TestCase):
     def test_manual_operating_mode_override_expires_and_restores_automatic_logic(self) -> None:
         service, _context, _baseline, _provider = TestAIInferenceService._service(
-            ai_operating_mode="ai_decision_maker_with_profile_control",
+            ai_operating_mode="ai_decision_maker",
             provider=FakeProvider(),
         )
 
@@ -814,7 +814,7 @@ class TestAIOperatingModes(unittest.TestCase):
         self.assertFalse(restored["manual_override_active"])
         self.assertIsNone(restored["manual_override_mode"])
         self.assertIsNone(restored["manual_override_freeze_until"])
-        self.assertEqual(restored["effective_operating_mode"], "ai_decision_maker_with_profile_control")
+        self.assertEqual(restored["effective_operating_mode"], "ai_decision_maker")
         latest_event = service.event_store.latest(topics.AI_DEGRADATION_EVENTS, key=service.settings.default_symbol)
         self.assertIsNotNone(latest_event)
         self.assertEqual(latest_event.payload["reason_code"], "operator_manual_ai_mode_override_expired")

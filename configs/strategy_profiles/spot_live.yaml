@@ -3,7 +3,7 @@
 # 数据库、端口、日志、交易所凭证、仓位上限等运行时 override 请改根目录 `.env.spot.live`。
 
 # AI 与自动降级
-# [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker / ai_decision_maker_with_profile_control；推荐值：baseline_only。
+# [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker；推荐值：baseline_only。自动换档已独立，单独由 strategy_profile_auto_control_enabled 控制。
 ai_operating_mode: baseline_only
 # [常用可调] ai_provider：AI 提供方。可选值：disabled / openai；推荐值：openai。
 ai_provider: openai

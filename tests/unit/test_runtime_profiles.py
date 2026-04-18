@@ -8,9 +8,12 @@ from aats.services.operator.runtime_profiles import readonly_runtime_profile_sna
 
 class TestRuntimeProfiles(unittest.TestCase):
     def test_strategy_profile_auto_control_is_disabled_by_default(self) -> None:
+        # 回归：历史上 ai_decision_maker_with_profile_control 隐式启用自动换档；
+        # 现已拆分为独立开关 strategy_profile_auto_control_enabled，
+        # 仅传入历史遗留值不应再启用。
         settings = AATSSettings.model_validate({"ai_operating_mode": "ai_decision_maker_with_profile_control"})
         self.assertFalse(settings.strategy_profile_auto_control_configured)
-        self.assertFalse(settings.strategy_profile_auto_control_is_enabled_for_mode("ai_decision_maker_with_profile_control"))
+        self.assertFalse(settings.strategy_profile_auto_control_is_enabled_for_mode("ai_decision_maker"))
 
     def test_strategy_profile_auto_control_can_be_enabled_independently(self) -> None:
         settings = AATSSettings.model_validate(
