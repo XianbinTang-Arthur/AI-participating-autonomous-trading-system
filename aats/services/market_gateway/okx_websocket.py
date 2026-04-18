@@ -230,6 +230,18 @@ class OKXPublicWebSocketClient:
                                 self._last_error = f"json_parse_error:{type(exc).__name__}"
                                 continue
                             if not isinstance(message, dict):
+                                # R6-M2：非 dict 的 valid JSON（list / str / number
+                                # 等）走 silent continue 会让 OKX schema 演进 /
+                                # 共享连接消息污染无任何观测信号。此处落
+                                # warning 以便下游可查。
+                                log_event(
+                                    self.logger,
+                                    "okx_ws_non_dict_message",
+                                    level="warning",
+                                    connection=connection_name,
+                                    message_type=type(message).__name__,
+                                    raw_preview=text[:200],
+                                )
                                 continue
                             if self._is_control_message(message, connection_name=connection_name):
                                 continue

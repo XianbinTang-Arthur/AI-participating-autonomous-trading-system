@@ -307,5 +307,69 @@ class TestConnectionClosedOKImmediateReconnect(unittest.IsolatedAsyncioTestCase)
         )
 
 
+# ─────────────────────────────────────────────────────────────────────
+# R6-M2：非 dict JSON 消息必须落 warning 而不是 silent drop
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestNonDictJsonMessageLogsWarning(unittest.IsolatedAsyncioTestCase):
+    """valid JSON 但顶层不是 object（如 list / number）原先走 silent
+    `continue`，OKX schema 演进或共享连接消息污染无任何观测信号。
+    R6-M2 补一条 warning。
+    """
+
+    async def test_non_dict_json_emits_warning_and_skips(self) -> None:
+        settings = _make_ws_settings(okx_ws_read_timeout_seconds=1.0)
+        client = OKXPublicWebSocketClient(settings=settings)
+
+        frames = [
+            json.dumps([1, 2, 3]),  # list：非 dict valid JSON
+            json.dumps({"arg": {"channel": "tickers"}, "data": [{"last": "100"}]}),
+        ]
+        frame_index = 0
+
+        class _SequenceWebSocket(_FakeWebSocket):
+            async def recv(self_ws) -> str:
+                nonlocal frame_index
+                if frame_index < len(frames):
+                    msg = frames[frame_index]
+                    frame_index += 1
+                    return msg
+                await asyncio.Event().wait()
+                return ""  # pragma: no cover
+
+        ws = _SequenceWebSocket()
+        received: list[dict[str, Any]] = []
+
+        @contextlib.asynccontextmanager
+        async def fake_connect(url: str, **kw: Any):
+            yield ws
+
+        with patch("aats.services.market_gateway.okx_websocket.connect", fake_connect):
+            async def on_message(msg: dict[str, Any]) -> None:
+                received.append(msg)
+                client._stop_event.set()
+
+            with self.assertLogs("aats.okx_market_ws", level="WARNING") as captured:
+                await asyncio.wait_for(
+                    client._consume(
+                        connection_name="public",
+                        url="wss://fake",
+                        subscribe_args=[],
+                        on_message=on_message,
+                    ),
+                    timeout=5.0,
+                )
+
+        self.assertEqual(
+            len(received), 1,
+            "list 被 silent skip，后续 valid dict 正常派发——handler 只收到 1 条",
+        )
+        self.assertTrue(
+            any("okx_ws_non_dict_message" in r.getMessage() for r in captured.records),
+            "非 dict 消息必须落 warning（event=okx_ws_non_dict_message）",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

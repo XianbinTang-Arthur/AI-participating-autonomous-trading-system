@@ -229,6 +229,18 @@ class OKXMarketSnapshotNormalizer:
         last_ts = self._last_candle_ts.get(key)
         if last_ts is not None and new_ts == last_ts:
             return
+        # R6-M1：乱序 / 重放场景 new_ts < last_ts 时原先无条件覆盖
+        # _last_candle_ts，把跟踪状态回退到更旧 ts；且 gap_seconds < 0
+        # 不会触发 detected_gaps，行情时序异常静默丢失。这里明确拒绝回退：
+        # 不更新 _last_candle_ts，但落 warning 让下游 ops 可见。
+        if last_ts is not None and new_ts < last_ts:
+            _logger.warning(
+                "okx_candle_ts_regression symbol=%s channel=%s "
+                "last_ts=%s new_ts=%s regression_seconds=%s",
+                symbol, channel, last_ts.isoformat(), new_ts.isoformat(),
+                (last_ts - new_ts).total_seconds(),
+            )
+            return
         self._last_candle_ts[key] = new_ts
         if last_ts is None:
             return

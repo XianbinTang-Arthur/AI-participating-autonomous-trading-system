@@ -578,9 +578,13 @@ class NatsBusConfig:
     ack_wait_seconds: float = 30.0
     # 单个消费者最多 in-flight ack 待确认数
     max_ack_pending: int = 256
-    # Fix P1-4：per-topic max_ack_pending 覆盖。key 为 topic 名（如
-    # "aats.fill_events"），value 为该 consumer 的 max_ack_pending。
-    # 未列出的 topic 使用上面的全局默认值。
+    # Fix P1-4：per-topic max_ack_pending 覆盖。key 为 topic 名（**不带**
+    # "aats." 前缀，与 aats/events/topics.py 里的值一致，如
+    # "execution.fill_events" / "market.snapshots"；subject_for() 会在
+    # 发布时自己拼前缀）。value 为该 consumer 的 max_ack_pending。
+    # R6-X1：之前 docstring 示例写的 "aats.fill_events" 会让配置永不
+    # 匹配（line 698 是精确 `topic in dict` 比对，非 subject 比对），
+    # 导致 per-topic 反压覆盖形同虚设。未列出的 topic 使用上面的全局默认值。
     per_topic_max_ack_pending: dict[str, int] | None = None
     # 单条消息最大重投递次数（超出后会被丢入死信主题）
     max_deliver: int = 5
