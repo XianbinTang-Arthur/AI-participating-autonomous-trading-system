@@ -16,9 +16,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
 import os
 import time
 from typing import Tuple
+
+logger = logging.getLogger(__name__)
 
 # 合法 action 列表——防止误用其他字符串导致 HMAC 被绕过。
 #
@@ -106,11 +109,17 @@ def verify_token(token: str, required_action: str) -> Tuple[str, int]:
     actor, action, exp_ts_str, sig = parts
 
     if action not in _ALLOWED_ACTIONS:
-        raise InvalidTokenError(f"action_unknown:{action}")
+        # 短码化:routes 层会把 InvalidTokenError 的 args[0] 原样塞进 HTTP 403 响应,
+        # 任何 `:` 分隔的详情都会被外部看到,违反"reason 只含短码"的文档契约。
+        # 具体不匹配的 action 名只进 log,不回显给调用方。
+        logger.warning("verify_token action_unknown: payload_action=%r", action)
+        raise InvalidTokenError("action_unknown")
     if action != required_action:
-        raise InvalidTokenError(
-            f"action_mismatch:expected={required_action}:got={action}"
+        logger.warning(
+            "verify_token action_mismatch: expected=%r got=%r",
+            required_action, action,
         )
+        raise InvalidTokenError("action_mismatch")
 
     try:
         exp_ts = int(exp_ts_str)

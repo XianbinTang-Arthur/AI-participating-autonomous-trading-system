@@ -108,11 +108,16 @@ def db_load_active_registry(session: Session) -> dict[str, Any]:
     active_sets: dict[str, Any] = {}
     for row in rows:
         combo_key = f"{row.family}_{row.timeframe}"
+        # JSONB 列正常情况下一定是 dict,但若 DB 被手工订正成标量/数组(historical
+        # migration 事故或 ORM bypass 写入),下游 `_build_applied_recommendation_ids`
+        # 等消费者会 AttributeError。在最接近 DB 的加载层做类型护栏,把坏数据
+        # 降级为空 dict + log,避免整条读路径崩。
+        param_values = row.param_values if isinstance(row.param_values, dict) else {}
         active_sets[combo_key] = {
             "parameter_set_id": row.parameter_set_id,
             "family": row.family,
             "timeframe": row.timeframe,
-            "values": row.param_values,
+            "values": param_values,
             "source_round_id": row.source_round_id,
             "approval_recommendation_id": row.approval_recommendation_id,
             "applied_by": row.applied_by,

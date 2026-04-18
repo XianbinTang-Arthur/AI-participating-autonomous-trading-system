@@ -24,9 +24,15 @@ export function createRdpActionHandlers({
     return Number.isFinite(hours) && hours > 0 ? Math.floor(hours) : 24;
   }
 
+  // 观察窗口上界:1 年(8760 小时)。data-hours DOM 属性或 POST body 被篡改时,
+  // 过大的值会让后端时间窗口查询扫全表,拒绝超界值走默认兜底。
+  const OBSERVATION_WINDOW_MAX_HOURS = 8760;
+
   function resolveObservationWindowHours(rawValue) {
     const parsed = Number.parseInt(String(rawValue || "").trim(), 10);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    if (Number.isFinite(parsed) && parsed > 0 && parsed <= OBSERVATION_WINDOW_MAX_HOURS) {
+      return parsed;
+    }
     return defaultObservationWindowHours();
   }
 

@@ -32,7 +32,7 @@ def _dashboard_allowed(request: Request) -> bool:
 def _serve_dashboard_page(request: Request, page_name: str) -> FileResponse | RedirectResponse:
     if not _dashboard_allowed(request):
         return RedirectResponse(url="/login", status_code=303)
-    if page_name not in {"home", "overview", "strategy", "execution", "risk", "exit-execution", "replay", "ai-analysis", "ai-config", "settings"}:
+    if page_name not in {"home", "overview", "strategy", "execution", "risk", "exit-execution", "replay", "ai-analysis", "ai-config", "settings", "rdp"}:
         raise HTTPException(status_code=404, detail="ui_page_not_found")
     return FileResponse(DASHBOARD_SHELL, media_type="text/html; charset=utf-8", headers=PAGE_NO_STORE_HEADERS)
 
@@ -98,6 +98,13 @@ async def ai_config_index(request: Request):
 @ui_router.get("/ui/settings")
 async def settings_index(request: Request):
     return _serve_dashboard_page(request, "settings")
+
+
+@ui_router.get("/ui/rdp")
+async def rdp_index(request: Request):
+    # /ui/rdp 是 RDP tab 独立出来后的直链。之前没注册导致 F5 / 分享链接都 404。
+    # 前端仍然共用同一份 dashboard-shell.html,view-router 读 URL path 后切换 view。
+    return _serve_dashboard_page(request, "rdp")
 
 
 @ui_router.get("/login")

@@ -240,6 +240,13 @@ def find_release(
     return None
 
 
+# rolled_back 是 release 观察态的终态。一旦被标记为 rolled_back，后续任何业务
+# 路径（quality monitor 晚到的结论 / manual re-run 观察 / 重复 rollback 调用）
+# 都不应再改写 observation_status 或 rolled_back_at，否则审计链丢失首次回滚的
+# 时间戳/操作员/target parameter_set，事后追责失去锚点。
+_TERMINAL_OBSERVATION_STATUSES: frozenset[str] = frozenset({"rolled_back"})
+
+
 def update_release_status(
     history: dict[str, Any],
     release_id: str,
@@ -251,6 +258,13 @@ def update_release_status(
     rel = find_release(history, release_id)
     if rel is None:
         return None
+    current_obs = rel.get("observation_status")
+    if observation_status and current_obs in _TERMINAL_OBSERVATION_STATUSES:
+        log.warning(
+            "release %s observation_status=%s 已是终态，拒绝转为 %s",
+            release_id, current_obs, observation_status,
+        )
+        return rel
     if apply_result:
         rel["apply_result"] = apply_result
     if observation_status:
@@ -270,6 +284,12 @@ def mark_release_rolled_back(
     rel = find_release(history, release_id)
     if rel is None:
         return None
+    if rel.get("observation_status") == "rolled_back":
+        log.warning(
+            "release %s 已是 rolled_back(at=%s)，忽略重复回滚调用",
+            release_id, rel.get("rolled_back_at"),
+        )
+        return rel
     rel["observation_status"] = "rolled_back"
     rel["rolled_back_at"] = rolled_back_at or datetime.now(timezone.utc).isoformat()
     rel["rollback_to_parameter_set_id"] = rollback_to_parameter_set_id
