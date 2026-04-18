@@ -206,6 +206,7 @@ def run_workflow(
 
     succeeded = 0
     failed = 0
+    failed_but_allowed = 0
     skipped = 0
 
     for task in tasks:
@@ -224,27 +225,39 @@ def run_workflow(
         if task_result["status"] == "success" or task_result["status"] == "dry_run":
             succeeded += 1
         elif task_result["status"] in ("failed", "timeout", "error"):
-            failed += 1
-            if stop_on_failure and not task_result.get("allow_failure"):
-                # 后续任务标记为 skipped
-                remaining = tasks[tasks.index(task) + 1:]
-                for rt in remaining:
-                    report["tasks"].append({
-                        "name": rt.get("name", "?"),
-                        "status": "skipped_due_to_failure",
-                    })
-                    skipped += 1
-                break
+            if task_result.get("allow_failure"):
+                # allow_failure=true 的 task 失败视为 degraded 而非硬失败：
+                # workflow 整体可以继续推进，overall_status 不降为 failed。
+                # RDP Bug 1/8 场景：observation_cycle 遇到 rollback 被拒
+                # (deprecated target) 等业务问题时，不应阻塞 hourly observation
+                # 推进节奏，通过 Bug 6 structured log 暴露给 operator 人工处理。
+                failed_but_allowed += 1
+            else:
+                failed += 1
+                if stop_on_failure:
+                    # 后续任务标记为 skipped
+                    remaining = tasks[tasks.index(task) + 1:]
+                    for rt in remaining:
+                        report["tasks"].append({
+                            "name": rt.get("name", "?"),
+                            "status": "skipped_due_to_failure",
+                        })
+                        skipped += 1
+                    break
         else:
             skipped += 1
 
     report["finished_at"] = datetime.now(timezone.utc).isoformat()
     report["succeeded"] = succeeded
     report["failed"] = failed
+    report["failed_but_allowed"] = failed_but_allowed
     report["skipped"] = skipped
 
-    if failed == 0:
+    if failed == 0 and failed_but_allowed == 0:
         report["overall_status"] = "success"
+    elif failed == 0 and failed_but_allowed > 0:
+        # 所有失败都是 allow_failure task，视为 degraded 但不是硬失败
+        report["overall_status"] = "degraded"
     elif succeeded > 0:
         report["overall_status"] = "partial"
     else:

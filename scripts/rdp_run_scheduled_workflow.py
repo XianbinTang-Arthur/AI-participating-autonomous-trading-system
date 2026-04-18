@@ -134,6 +134,9 @@ def main() -> int:
             for line in output_tail.splitlines():
                 print(f"         {line}")
 
+    # "degraded" = 所有失败 task 都是 allow_failure=true 的（见 workflow_dispatcher）
+    # → 通过 structured log 暴露但不触发 exit=1，避免 hourly workflow 节奏被
+    # 单个业务软故障阻塞（RDP Bug 1 + Bug 8 场景）
     if report["overall_status"] in ("failed", "partial"):
         return 1
     return 0
