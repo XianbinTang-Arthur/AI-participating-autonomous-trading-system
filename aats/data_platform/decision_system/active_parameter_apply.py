@@ -435,6 +435,20 @@ def apply_approved_recommendation(
         #     实际是 deprecated 状态
         #   - auto-rollback 永远找不到合法 target，全部被拒
         #
+        # Forward-compat 说明 (与 Bug 8 fallback 策略配套):
+        # frozen 状态是"计划中但未交付"（rdp_hardening_batch_a_detailed_design.md
+        # §3 禁用 freeze_parameter_set 脚本, API 未实现, DB 0 行）。当前直接
+        # candidate → released 是合理的 (frozen 不产生)。
+        #
+        # 如果未来 freeze API 恢复 (rdp_full_hardening_sow.md 规划在后续批次):
+        #   - 应改为: 若 ps_id 已是 frozen 则保留 frozen 语义、新增 released 状态
+        #   - 或者: candidate → frozen → released 走双阶段, freeze 作为审批后冻结
+        # 届时 validate_rollback_target 规则 2 的 frozen 分支会自动生效，
+        # Bug 8 的 deprecated 时间门控退为备选路径。
+        #
+        # Bug 8 (Layer 0) 已放宽 rollback 接受 deprecated (≤30d)，所以本路径
+        # 把旧 released 降级 deprecated 的 invariant 不会再让 rollback 卡死。
+        #
         # 修复语义：apply 本身就是 "release" 动作。apply 到 active 的 parameter_set
         # 应该在 parameter_sets 表同步标记为 `released`。同 combo 下其他 released
         # 的降级为 deprecated（每个 combo 任一时刻最多 1 个 released）。
