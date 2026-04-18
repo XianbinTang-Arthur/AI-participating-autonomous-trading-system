@@ -16,7 +16,10 @@ from tests.support.strategy_family import make_ai_assessment, make_baseline, mak
 
 class TestIndependentScoring(unittest.TestCase):
     def test_compute_raw_book_score_matches_legacy_wrapper_and_fixture(self) -> None:
-        settings = make_derivatives_hedge_settings(strategy_short_bias_enabled=True)
+        settings = make_derivatives_hedge_settings(
+            strategy_short_bias_enabled=True,
+            ai_operating_mode="ai_decision_maker",
+        )
         baseline = make_baseline(
             direction_bias="long",
             confidence=0.84,

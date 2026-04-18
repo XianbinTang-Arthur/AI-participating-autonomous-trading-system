@@ -1,12 +1,117 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from typing import Literal
 
 from aats.bootstrap.settings import AATSSettings
-from aats.schemas.decision import AIMarketAssessment, BaselineAssessment
+from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, normalize_ai_operating_mode
 
 from aats.services.portfolio_service.decimals import clamp_float as _clamp
 from .models import IndependentLeg, ScoreStabilityMetrics
+
+
+# =========================================================================
+# AI Operating Mode Scoring Tiers
+# =========================================================================
+# Independent family 评分在三档 AI 运行模式下使用不同权重：
+#
+#   Mode A  (baseline_only / ai_assessment is None):
+#       AI 完全退出 composite score，权重按 RDP replay adapter 的设计
+#       重分配给其他因子。保持与 replay 一致以便回测 ↔ 生产对齐。
+#       ai_assessment is None 时无条件落入此档（防御性设计，
+#       防止 AI 服务超时/降级返回 None 时仍按 AI 在场公式算分）。
+#
+#   Mode B  (ai_assisted):
+#       AI 有一定参考价值但不主导决策。AI 权重降至 0.10（原 0.26），
+#       节省的 0.16 按 Mode A vs Mode C 的增量比例线性插值分配：
+#           Mode B[i] = Mode C[i] + (Mode A[i] - Mode C[i]) × 16/26
+#
+#   Mode C  (ai_decision_maker / ai_decision_maker_with_profile_control):
+#       原始公式，AI 权重 0.26。
+#
+# 修改任一档权重时必须：
+#   (1) 同步更新 aats/data_platform/replay/adapters/independent_adapter.py
+#       中 Mode A 的权重（否则 replay 与生产 drift）
+#   (2) 验证三档 Σ ≈ 1.0
+#   (3) 跑 test_scoring_ai_fallback.py 确认锁定测试通过
+
+AIScoringMode = Literal["MODE_A", "MODE_B", "MODE_C"]
+
+
+# ── Composite score 权重 (Mode A: baseline_only / AI=None) ──
+# 与 aats/data_platform/replay/adapters/independent_adapter.py 保持同步
+_MODE_A_W_ALPHA: float = 0.34
+_MODE_A_W_AI: float = 0.0
+_MODE_A_W_MOMENTUM: float = 0.24
+_MODE_A_W_TREND: float = 0.18
+_MODE_A_W_MICRO: float = 0.12
+_MODE_A_W_CONFIDENCE: float = 0.12
+
+# ── Composite score 权重 (Mode B: ai_assisted) ──
+# AI 权重 0.10；其他 = Mode C + (Mode A - Mode C) × 16/26，精确到 4 位小数。
+# alpha 补 +0.0001 消除累积 round-down 误差，保证 Σ = 1.0000 严格成立。
+_MODE_B_W_ALPHA: float = 0.3170
+_MODE_B_W_AI: float = 0.10
+_MODE_B_W_MOMENTUM: float = 0.2092
+_MODE_B_W_TREND: float = 0.1569
+_MODE_B_W_MICRO: float = 0.1046
+_MODE_B_W_CONFIDENCE: float = 0.1123
+
+# ── Composite score 权重 (Mode C: ai_decision_maker) ──
+_MODE_C_W_ALPHA: float = 0.28
+_MODE_C_W_AI: float = 0.26
+_MODE_C_W_MOMENTUM: float = 0.16
+_MODE_C_W_TREND: float = 0.12
+_MODE_C_W_MICRO: float = 0.08
+_MODE_C_W_CONFIDENCE: float = 0.10
+
+
+# ── Legacy component_edge bonus 系数 (三档) ──
+# 原系数 (Mode C): micro=25, momentum=15, trend=12, ai=20
+# 三档策略:
+#   - ai_coef 按 (AI权重/0.26) 缩放：Mode A=0, Mode B=20×10/26≈7.692, Mode C=20
+#   - "节省 pool" = 20 - ai_coef，按 micro:momentum:trend = 25:15:12 (合计 52) 比例
+#     补偿给三个 bonus
+#   - alpha_edge_scale 使用 settings.strategy_alpha_edge_bps_scale，不在此重分配
+#     (对齐 composite 设计精神：alpha 已是主力信号，不再补偿)
+
+_MODE_A_BONUS_MICRO: float = 34.6154
+_MODE_A_BONUS_MOMENTUM: float = 20.7692
+_MODE_A_BONUS_TREND: float = 16.6154
+_MODE_A_BONUS_AI: float = 0.0
+
+_MODE_B_BONUS_MICRO: float = 30.9172
+_MODE_B_BONUS_MOMENTUM: float = 18.5503
+_MODE_B_BONUS_TREND: float = 14.8402
+_MODE_B_BONUS_AI: float = 7.6923
+
+_MODE_C_BONUS_MICRO: float = 25.0
+_MODE_C_BONUS_MOMENTUM: float = 15.0
+_MODE_C_BONUS_TREND: float = 12.0
+_MODE_C_BONUS_AI: float = 20.0
+
+
+def _pick_ai_mode(
+    *,
+    settings: AATSSettings,
+    ai_assessment: AIMarketAssessment | None,
+) -> AIScoringMode:
+    """根据 AI 运行模式和 assessment 是否在场选择评分档位。
+
+    ai_assessment is None 时无条件返回 Mode A（防御性兜底），
+    即使配置的 ai_operating_mode 是 ai_decision_maker——因为此时 AI 已经
+    实质性失效（超时 / 降级 / 未构造），不能按 AI 在场公式算分。
+    """
+    if ai_assessment is None:
+        return "MODE_A"
+    mode = normalize_ai_operating_mode(settings.ai_operating_mode)
+    if mode == "baseline_only":
+        return "MODE_A"
+    if mode == "ai_assisted":
+        return "MODE_B"
+    if mode in {"ai_decision_maker", "ai_decision_maker_with_profile_control"}:
+        return "MODE_C"
+    return "MODE_A"  # 未来未知值兜底到最保守的档位
 
 
 def effective_score_drawdown_threshold_bps(*, settings: AATSSettings) -> float:
@@ -35,14 +140,38 @@ def compute_raw_book_score(
     trend_component = _clamp(max(0.0, side_sign * trend_alpha), 0.0, 1.0)
     microstructure_component = _clamp(max(0.0, side_sign * microstructure_alpha), 0.0, 1.0)
     confidence = _clamp(float(baseline.confidence), 0.0, 1.0)
-    score = (
-        (alpha_component * 0.28)
-        + (ai_component * 0.26)
-        + (momentum_component * 0.16)
-        + (trend_component * 0.12)
-        + (microstructure_component * 0.08)
-        + (confidence * 0.10)
-    )
+
+    mode = _pick_ai_mode(settings=settings, ai_assessment=ai_assessment)
+    if mode == "MODE_A":
+        # AI fallback：AI 权重 0，对齐 RDP replay adapter 的权重分配
+        score = (
+            (alpha_component * _MODE_A_W_ALPHA)
+            + (momentum_component * _MODE_A_W_MOMENTUM)
+            + (trend_component * _MODE_A_W_TREND)
+            + (microstructure_component * _MODE_A_W_MICRO)
+            + (confidence * _MODE_A_W_CONFIDENCE)
+        )
+    elif mode == "MODE_B":
+        # AI 低权重：Mode A 和 Mode C 之间的线性插值
+        score = (
+            (alpha_component * _MODE_B_W_ALPHA)
+            + (ai_component * _MODE_B_W_AI)
+            + (momentum_component * _MODE_B_W_MOMENTUM)
+            + (trend_component * _MODE_B_W_TREND)
+            + (microstructure_component * _MODE_B_W_MICRO)
+            + (confidence * _MODE_B_W_CONFIDENCE)
+        )
+    else:  # MODE_C
+        # AI 全权重（原始公式）
+        score = (
+            (alpha_component * _MODE_C_W_ALPHA)
+            + (ai_component * _MODE_C_W_AI)
+            + (momentum_component * _MODE_C_W_MOMENTUM)
+            + (trend_component * _MODE_C_W_TREND)
+            + (microstructure_component * _MODE_C_W_MICRO)
+            + (confidence * _MODE_C_W_CONFIDENCE)
+        )
+
     if baseline.regime in {"range", "uncertain"}:
         score += 0.04
     if baseline.direction_bias == leg:
@@ -81,10 +210,31 @@ def compute_signal_edge_bps(
     directional_trend = max(0.0, side_sign * float(baseline.factor_scores.get("trend_alpha", 0.0)))
     directional_ai = max(0.0, side_sign * _ai_directional_edge(ai_assessment))
     alpha_edge = directional_alpha * max(float(settings.strategy_alpha_edge_bps_scale), 0.0)
-    microstructure_bonus = max(directional_microstructure - 0.08, 0.0) * 25.0
-    momentum_bonus = max(directional_momentum - 0.08, 0.0) * 15.0
-    trend_bonus = max(directional_trend - 0.08, 0.0) * 12.0
-    ai_bonus = max(directional_ai - 0.1, 0.0) * 20.0
+
+    # ── Legacy bonus 系数按三档 AI 运行模式选取 ──
+    # 与 compute_raw_book_score 的 mode 判断保持一致。
+    # ai_assessment is None 时走 Mode A（ai_coef=0），其他 bonus 系数放大补偿。
+    mode = _pick_ai_mode(settings=settings, ai_assessment=ai_assessment)
+    if mode == "MODE_A":
+        micro_coef = _MODE_A_BONUS_MICRO
+        momentum_coef = _MODE_A_BONUS_MOMENTUM
+        trend_coef = _MODE_A_BONUS_TREND
+        ai_coef = _MODE_A_BONUS_AI
+    elif mode == "MODE_B":
+        micro_coef = _MODE_B_BONUS_MICRO
+        momentum_coef = _MODE_B_BONUS_MOMENTUM
+        trend_coef = _MODE_B_BONUS_TREND
+        ai_coef = _MODE_B_BONUS_AI
+    else:  # MODE_C
+        micro_coef = _MODE_C_BONUS_MICRO
+        momentum_coef = _MODE_C_BONUS_MOMENTUM
+        trend_coef = _MODE_C_BONUS_TREND
+        ai_coef = _MODE_C_BONUS_AI
+
+    microstructure_bonus = max(directional_microstructure - 0.08, 0.0) * micro_coef
+    momentum_bonus = max(directional_momentum - 0.08, 0.0) * momentum_coef
+    trend_bonus = max(directional_trend - 0.08, 0.0) * trend_coef
+    ai_bonus = max(directional_ai - 0.1, 0.0) * ai_coef
     component_edge = alpha_edge + microstructure_bonus + momentum_bonus + trend_bonus + ai_bonus
 
     # ── RDP score-based 信号边际路径 (P2-8: 单路径与 replay 对齐) ──────
@@ -183,6 +333,7 @@ def compute_score_stability(
             downward_drawdown_bps=downward_drawdown_bps,
         )
     support_count = _signal_confirmation_count(
+        settings=settings,
         leg=leg,
         baseline=baseline,
         ai_assessment=ai_assessment,
@@ -207,19 +358,30 @@ def compute_candidate_confidence(score: float) -> float:
 
 def _signal_confirmation_count(
     *,
+    settings: AATSSettings,
     leg: IndependentLeg,
     baseline: BaselineAssessment,
     ai_assessment: AIMarketAssessment | None,
 ) -> int:
+    """AI 运行模式三档下的 signal confirmation 统计。
+
+    Mode A (baseline_only / ai_assessment is None):
+        AI 彻底退出 confirmation 投票，仅统计 4 项特征派生信号。
+    Mode B / Mode C:
+        保留原 5 项投票（AI 以 ai_edge >= 0.10 作为独立确认项）。
+    """
     side_sign = 1.0 if leg == "long" else -1.0
-    confirmations = (
+    base_confirmations = (
         max(0.0, side_sign * float(baseline.composite_alpha_score)) >= 0.08,
         max(0.0, side_sign * float(baseline.factor_scores.get("momentum_alpha", 0.0))) >= 0.08,
         max(0.0, side_sign * float(baseline.factor_scores.get("trend_alpha", 0.0))) >= 0.08,
         max(0.0, side_sign * float(baseline.factor_scores.get("microstructure_alpha", 0.0))) >= 0.08,
-        max(0.0, side_sign * _ai_directional_edge(ai_assessment)) >= 0.10,
     )
-    return sum(1 for item in confirmations if item)
+    mode = _pick_ai_mode(settings=settings, ai_assessment=ai_assessment)
+    if mode == "MODE_A":
+        return sum(1 for item in base_confirmations if item)
+    ai_confirmation = max(0.0, side_sign * _ai_directional_edge(ai_assessment)) >= 0.10
+    return sum(1 for item in (*base_confirmations, ai_confirmation) if item)
 
 
 def _ai_directional_edge(ai_assessment: AIMarketAssessment | None) -> float:
