@@ -20,6 +20,7 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
@@ -295,8 +296,13 @@ def evaluate_release_effectiveness(
     )
     comparison_conclusion = comparison.get("conclusion") if comparison else None
 
+    # RDP Bug 7: 原生成器 f"eff_{strftime('%Y%m%d_%H%M%S')}" 在同一秒内对多个
+    # release 会产生相同 id。observation_cycle 从 weekly decision_cycle 拆到
+    # hourly 后（Bug 1），单次运行可能在同一秒内处理多条积压 release，命中
+    # uq_release_effectiveness_evaluation_id 唯一约束触发 IntegrityError，
+    # 导致整批评估滚回。加 6 位 uuid 后缀保证唯一。
     evaluation = {
-        "evaluation_id": f"eff_{now.strftime('%Y%m%d_%H%M%S')}",
+        "evaluation_id": f"eff_{now.strftime('%Y%m%d_%H%M%S')}_{uuid4().hex[:6]}",
         "release_id": release_id,
         "family": release.get("family"),
         "timeframe": release.get("timeframe"),
