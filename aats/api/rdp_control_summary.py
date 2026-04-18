@@ -571,6 +571,8 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
                 "family": rec.get("family"),
                 "timeframe": rec.get("timeframe"),
                 "combo_key": _combo_key(rec.get("family"), rec.get("timeframe")),
+                "scope": rec.get("scope") or "combo",
+                "scope_ref": rec.get("scope_ref"),
                 "recommendation_type": rec.get("recommendation_type"),
                 "confidence": rec.get("confidence"),
                 "reason": rec.get("reason"),
@@ -778,12 +780,26 @@ def build_rdp_control_summary(request: Request) -> dict[str, Any]:
     ]
     latest_gate = recent_gate_results[0] if recent_gate_results else None
     latest_release = recent_releases[0] if recent_releases else None
+
+    # v3 §1.10 UI: Hero 4-column breakdown — scope × draft count
+    # 让 operator 能一眼区分 combo vs profile vs sleeve 的 backlog。
+    pending_by_scope: dict[str, int] = {
+        "combo": 0, "profile": 0, "sleeve": 0, "risk": 0,
+    }
+    for rec in pending_recommendations:
+        if rec.get("status") != "draft":
+            continue
+        scope = str(rec.get("scope") or "combo")
+        if scope in pending_by_scope:
+            pending_by_scope[scope] += 1
+
     operations_summary = {
         "approved_release_candidate_count": len(approved_parameter_recommendations),
         "draft_recommendation_count": sum(
             1 for rec in pending_recommendations if rec.get("status") == "draft"
         ),
         "draft_parameter_recommendation_count": len(draft_parameter_recommendations),
+        "draft_recommendation_count_by_scope": pending_by_scope,
         "observing_release_count": sum(
             1 for item in observation_queue
             if item.get("observation_status") == "observing"

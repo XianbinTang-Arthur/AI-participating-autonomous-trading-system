@@ -65,18 +65,47 @@ def ttl_seconds() -> int:
     return max(_TTL_MIN_SECONDS, min(parsed, _TTL_MAX_SECONDS))
 
 
-def emit_token(actor: str, action: str) -> str:
-    """签发一枚 ``actor`` 对 ``action`` 的 TTL-bounded HMAC token。"""
+def emit_token(
+    actor: str,
+    action: str,
+    *,
+    scope: str | None = None,
+    recommendation_id: str | None = None,
+) -> str:
+    """签发一枚 ``actor`` 对 ``action`` 的 TTL-bounded HMAC token。
+
+    **v1 格式**(向后兼容):``actor|action|exp_ts|sig``
+        仅 ``scope=None and recommendation_id=None`` 时发 v1。
+        v1 token 只能用于 scope='combo' 的 rec(服务端校验)。
+
+    **v2 格式**(rdp_scope_expansion_v3 §0.4):
+        ``actor|action|scope|recommendation_id|exp_ts|sig``
+        profile / sleeve scope 的 apply 必须使用 v2(服务端强制要求)。
+    """
     if action not in _ALLOWED_ACTIONS:
         raise ValueError(
             f"action 必须是 {sorted(_ALLOWED_ACTIONS)} 之一，收到: {action!r}"
         )
     if not actor or "|" in actor:
-        # '|' 是载荷分隔符，actor 名必须干净
         raise ValueError(f"actor 非法或含分隔符: {actor!r}")
 
+    # v2 模式:scope + recommendation_id 必须都传或都不传
+    if (scope is None) != (recommendation_id is None):
+        raise ValueError(
+            "scope 与 recommendation_id 必须成对提供,或都不提供(v1 兼容模式)"
+        )
+
     exp_ts = int(time.time()) + ttl_seconds()
-    payload = f"{actor}|{action}|{exp_ts}"
+
+    if scope is None and recommendation_id is None:
+        # v1 格式
+        payload = f"{actor}|{action}|{exp_ts}"
+    else:
+        # v2 格式
+        if "|" in scope or "|" in recommendation_id:
+            raise ValueError("scope / recommendation_id 含分隔符")
+        payload = f"{actor}|{action}|{scope}|{recommendation_id}|{exp_ts}"
+
     sig = hmac.new(
         _secret(),
         payload.encode("utf-8"),
@@ -86,16 +115,31 @@ def emit_token(actor: str, action: str) -> str:
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii")
 
 
-def verify_token(token: str, required_action: str) -> Tuple[str, int]:
+def verify_token(
+    token: str,
+    required_action: str,
+    *,
+    required_scope: str | None = None,
+    required_recommendation_id: str | None = None,
+) -> Tuple[str, int]:
     """校验 ``token`` 是否为合法的 ``required_action`` 凭证。
 
-    通过返回 ``(actor, exp_ts)``；任一环节失败抛 :class:`InvalidTokenError`，
-    ``args[0]`` 是短码（``malformed`` / ``action_mismatch`` / ``expired`` /
-    ``bad_sig`` 等），便于调用方把错误透给 HTTP 层。
+    **向后兼容**:如果 ``required_scope=None and required_recommendation_id=None``,
+    则只做 v1 三段格式校验(现有 combo apply/rollback 路径不受影响)。
+
+    **v2 校验(Phase 1+)**:传入 ``required_scope`` + ``required_recommendation_id``,
+    token 必须是 5 段 v2 格式,且 token 的 scope/rec_id 与 required 严格匹配。
+    这防止 combo token 被拿去 apply profile rec(R2-04)。
+
+    返回 ``(actor, exp_ts)``;任一环节失败抛 :class:`InvalidTokenError`。
     """
     if required_action not in _ALLOWED_ACTIONS:
+        raise ValueError(f"required_action 非法: {required_action!r}")
+
+    # 两个必须成对
+    if (required_scope is None) != (required_recommendation_id is None):
         raise ValueError(
-            f"required_action 非法: {required_action!r}"
+            "required_scope 与 required_recommendation_id 必须成对提供"
         )
 
     try:
@@ -104,14 +148,20 @@ def verify_token(token: str, required_action: str) -> Tuple[str, int]:
         raise InvalidTokenError("malformed") from exc
 
     parts = raw.split("|")
-    if len(parts) != 4:
+    # v1: actor|action|exp_ts|sig        (4 parts)
+    # v2: actor|action|scope|rec_id|exp_ts|sig  (6 parts)
+    if len(parts) == 4:
+        actor, action, exp_ts_str, sig = parts
+        tok_scope: str | None = None
+        tok_rec_id: str | None = None
+        payload = f"{actor}|{action}|{exp_ts_str}"
+    elif len(parts) == 6:
+        actor, action, tok_scope, tok_rec_id, exp_ts_str, sig = parts
+        payload = f"{actor}|{action}|{tok_scope}|{tok_rec_id}|{exp_ts_str}"
+    else:
         raise InvalidTokenError("malformed")
-    actor, action, exp_ts_str, sig = parts
 
     if action not in _ALLOWED_ACTIONS:
-        # 短码化:routes 层会把 InvalidTokenError 的 args[0] 原样塞进 HTTP 403 响应,
-        # 任何 `:` 分隔的详情都会被外部看到,违反"reason 只含短码"的文档契约。
-        # 具体不匹配的 action 名只进 log,不回显给调用方。
         logger.warning("verify_token action_unknown: payload_action=%r", action)
         raise InvalidTokenError("action_unknown")
     if action != required_action:
@@ -120,6 +170,24 @@ def verify_token(token: str, required_action: str) -> Tuple[str, int]:
             required_action, action,
         )
         raise InvalidTokenError("action_mismatch")
+
+    # Scope / rec_id binding check (R2-04)
+    if required_scope is not None:
+        if tok_scope is None:
+            # caller 要求 v2 但 token 是 v1 → 拒绝
+            raise InvalidTokenError("v2_required")
+        if tok_scope != required_scope:
+            logger.warning(
+                "verify_token scope_mismatch: expected=%r got=%r",
+                required_scope, tok_scope,
+            )
+            raise InvalidTokenError("scope_mismatch")
+        if tok_rec_id != required_recommendation_id:
+            logger.warning(
+                "verify_token rec_id_mismatch: expected=%r got=%r",
+                required_recommendation_id, tok_rec_id,
+            )
+            raise InvalidTokenError("rec_id_mismatch")
 
     try:
         exp_ts = int(exp_ts_str)
@@ -130,7 +198,7 @@ def verify_token(token: str, required_action: str) -> Tuple[str, int]:
 
     expected_sig = hmac.new(
         _secret(),
-        f"{actor}|{action}|{exp_ts}".encode("utf-8"),
+        payload.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
     if not hmac.compare_digest(sig, expected_sig):

@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from aats.api.auth_routes import auth_router, invalidate_bundle_cache
+from aats.api.rdp_profile_routes import profile_router as rdp_profile_router
 from aats.api.rdp_routes import rdp_router
 from aats.api.routes import router
 from aats.api.ui import ui_router
@@ -174,3 +175,4 @@ app.include_router(auth_router)
 app.include_router(ui_router)
 app.include_router(router)
 app.include_router(rdp_router)
+app.include_router(rdp_profile_router)
