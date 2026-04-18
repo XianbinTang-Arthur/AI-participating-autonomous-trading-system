@@ -103,6 +103,8 @@ def run_migration(*, dry_run: bool) -> int:
             # payload 顶层 (与 release_effectiveness.py:484-490 的内存侧写入
             # 字段名一致, save_effectiveness_registry 会覆盖 payload)
             now_iso = datetime.now(timezone.utc).isoformat()
+            # 注: SQLAlchemy 的 :param 绑定不能与 PG 的 ::text cast 混用
+            # (冒号在 ::text 第二个位置会被当成 param 前缀)。用 CAST(..) 代替。
             result = session.execute(
                 text(
                     """
@@ -111,11 +113,11 @@ def run_migration(*, dry_run: bool) -> int:
                         jsonb_set(
                             jsonb_set(
                                 payload,
-                                '{rollback_cancelled}', 'true'::jsonb
+                                '{rollback_cancelled}', CAST('true' AS jsonb)
                             ),
-                            '{rollback_cancelled_at}', to_jsonb(:now::text)
+                            '{rollback_cancelled_at}', to_jsonb(CAST(:now AS text))
                         ),
-                        '{rollback_cancelled_reason}', to_jsonb(:reason::text)
+                        '{rollback_cancelled_reason}', to_jsonb(CAST(:reason AS text))
                     ),
                     updated_at = now()
                     WHERE conclusion = 'rollback_triggered'
