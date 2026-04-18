@@ -32,6 +32,7 @@ from aats.schemas.execution import (
     order_intent_from_leg_order_intent,
     pos_side_from_position_intent,
     position_intent_from_leg_intent,
+    side_from_position_intent,
 )
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangePosition, InstrumentMetadata
 from aats.services.execution_engine.exchange_adapter import ExchangeAdapter
@@ -2087,7 +2088,28 @@ class OKXExecutionAdapter(ExchangeAdapter):
     @staticmethod
     def _intent_from_state(state: OrderState) -> OrderIntent:
         payload = state.submission_payload
-        side = str(payload.get("side", "buy"))
+        # R7-X1：方向（buy/sell）只在 submission_payload 一处落库（OrderState
+        # schema 本身没有 side 列）。旧代码对缺失 payload["side"] 直接默认 "buy"，
+        # 会在 corruption / schema downgrade / DLQ replay 罕见场景把原 short 单
+        # 静默恢复成 long —— 反向建仓风险。这里改为三段式推导：
+        #   1. payload["side"] 合法（buy/sell）→ 直接用（happy path）
+        #   2. 否则用 position_intent 推导（position_intent 是 OrderState 顶层
+        #      列，与 status/pos_side 一样三重持久化；语义可审计）
+        #   3. 两者都无法推导 → 立即 raise（禁止静默 fallback 到默认方向）
+        payload_side = payload.get("side")
+        if payload_side in {"buy", "sell"}:
+            side = str(payload_side)
+        else:
+            derived_side = side_from_position_intent(state.position_intent)
+            if derived_side is None:
+                raise ValueError(
+                    f"intent_from_state_side_missing: cannot recover buy/sell side "
+                    f"for client_order_id={state.client_order_id} "
+                    f"intent_id={state.intent_id} "
+                    f"position_intent={state.position_intent!r} "
+                    f"payload_side={payload_side!r}"
+                )
+            side = derived_side
         order_type = str(payload.get("ordType", "market"))
         limit_price = to_decimal(payload["px"]) if "px" in payload and payload["px"] not in {"", None} else None
         reduce_only = str(payload.get("reduceOnly", "false")).lower() == "true" or state.reduce_only
