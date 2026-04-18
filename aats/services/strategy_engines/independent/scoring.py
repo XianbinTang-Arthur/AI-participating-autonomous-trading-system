@@ -33,7 +33,7 @@ from .models import IndependentLeg, ScoreStabilityMetrics
 #   (1) 同步更新 aats/data_platform/replay/adapters/independent_adapter.py
 #       中 Mode A 的权重（否则 replay 与生产 drift）
 #   (2) 验证三档 Σ ≈ 1.0
-#   (3) 跑 test_scoring_ai_fallback.py 确认锁定测试通过
+#   (3) 跑 test_independent_scoring_ai_fallback.py 确认锁定测试通过
 
 AIScoringMode = Literal["MODE_A", "MODE_B", "MODE_C"]
 

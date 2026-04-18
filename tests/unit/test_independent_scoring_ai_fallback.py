@@ -6,7 +6,6 @@
 
 from __future__ import annotations
 
-import math
 import unittest
 
 from aats.data_platform.replay.adapters.independent_adapter import (
@@ -110,6 +109,18 @@ class TestPickAIMode(unittest.TestCase):
         settings = make_derivatives_hedge_settings(ai_operating_mode="ai_blended")
         ai = make_ai_assessment(direction=0.3)
         self.assertEqual(_pick_ai_mode(settings=settings, ai_assessment=ai), "MODE_B")
+
+    def test_legacy_ai_advisory_normalizes_to_ai_assisted(self):
+        """历史遗留值 ai_advisory 映射到 ai_assisted，走 Mode B。"""
+        settings = make_derivatives_hedge_settings(ai_operating_mode="ai_advisory")
+        ai = make_ai_assessment(direction=0.3)
+        self.assertEqual(_pick_ai_mode(settings=settings, ai_assessment=ai), "MODE_B")
+
+    def test_legacy_ai_primary_normalizes_to_ai_decision_maker(self):
+        """历史遗留值 ai_primary 映射到 ai_decision_maker，走 Mode C。"""
+        settings = make_derivatives_hedge_settings(ai_operating_mode="ai_primary")
+        ai = make_ai_assessment(direction=0.3)
+        self.assertEqual(_pick_ai_mode(settings=settings, ai_assessment=ai), "MODE_C")
 
 
 class TestCompositeWeightsSum(unittest.TestCase):
@@ -588,6 +599,106 @@ class TestModeAFallbackRecoversEntryCapability(unittest.TestCase):
 
         # Mode A 下，强信号组合应该能达 >= 0.66（独立家族入场阈值）
         self.assertGreater(score, 0.66, f"Mode A strong-signal score {score:.4f} failed to clear 0.66 threshold")
+
+
+class TestShortLegThreeTierSymmetry(unittest.TestCase):
+    """short leg 三档行为对称性：side_sign=-1 时三档仍正确分流，且 short_bias_enabled=False 早退优先级高于 mode 选择。"""
+
+    def _short_baseline(self):
+        """多空翻转的 baseline：所有 alpha 符号取反，direction_bias=short。"""
+        return make_baseline(
+            direction_bias="short",
+            confidence=0.82,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": -0.48,
+                "trend_alpha": -0.42,
+                "microstructure_alpha": -0.18,
+                "liquidity_scale": 0.95,
+            },
+        ).model_copy(update={"regime": "trend", "composite_alpha_score": -0.32})
+
+    def test_short_bias_disabled_returns_zero_regardless_of_mode(self):
+        """leg=short 且 short_bias_enabled=False 时，无论何种 mode 都立即返回 0（早退优先）。"""
+        baseline = self._short_baseline()
+        ai = make_ai_assessment(direction=-0.25, confidence=0.82)
+        for mode in ("baseline_only", "ai_assisted", "ai_decision_maker"):
+            settings = make_derivatives_hedge_settings(
+                strategy_short_bias_enabled=False,
+                ai_operating_mode=mode,
+            )
+            score = compute_raw_book_score(
+                settings=settings, leg="short", baseline=baseline, ai_assessment=ai,
+            )
+            self.assertEqual(score, 0.0, f"mode={mode} short-bias-off must early-return 0")
+
+    def test_short_mode_a_uses_fallback_weights(self):
+        """short leg + Mode A 下，side_sign=-1 应让所有负 alpha 转为正分量后按 Mode A 权重算。"""
+        settings = make_derivatives_hedge_settings(
+            strategy_short_bias_enabled=True,
+            ai_operating_mode="baseline_only",
+        )
+        baseline = self._short_baseline()
+
+        actual = compute_raw_book_score(
+            settings=settings, leg="short", baseline=baseline, ai_assessment=None,
+        )
+
+        # side_sign=-1 * -0.32 = 0.32 (alpha), 等类似所有 short 特征都转成正分量
+        expected = (
+            0.32 * _MODE_A_W_ALPHA + 0.48 * _MODE_A_W_MOMENTUM
+            + 0.42 * _MODE_A_W_TREND + 0.18 * _MODE_A_W_MICRO
+            + 0.82 * _MODE_A_W_CONFIDENCE
+        )
+        expected += 0.06  # direction_bias=short == leg=short
+
+        self.assertAlmostEqual(actual, expected, places=9)
+
+    def test_short_three_modes_produce_different_scores(self):
+        """short leg 下三档同样产出不同分数（与 long leg 对称）。"""
+        baseline = self._short_baseline()
+        ai = make_ai_assessment(direction=-0.25, confidence=0.82)
+
+        scores = {}
+        for mode, tag in [
+            ("baseline_only", "MODE_A"),
+            ("ai_assisted", "MODE_B"),
+            ("ai_decision_maker", "MODE_C"),
+        ]:
+            settings = make_derivatives_hedge_settings(
+                strategy_short_bias_enabled=True,
+                ai_operating_mode=mode,
+            )
+            scores[tag] = compute_raw_book_score(
+                settings=settings, leg="short", baseline=baseline, ai_assessment=ai,
+            )
+
+        self.assertNotAlmostEqual(scores["MODE_A"], scores["MODE_B"], places=4)
+        self.assertNotAlmostEqual(scores["MODE_B"], scores["MODE_C"], places=4)
+        self.assertNotAlmostEqual(scores["MODE_A"], scores["MODE_C"], places=4)
+
+    def test_short_signal_confirmation_count_three_tier(self):
+        """short leg 下 _signal_confirmation_count 的三档行为（Mode A=4, B/C 含 AI 票=5）。"""
+        baseline = self._short_baseline()
+        # AI 方向为负（看空），对 short leg 而言 side_sign=-1 → directional_edge 正分量 = 0.25
+        ai = make_ai_assessment(direction=-0.25)
+
+        settings_a = make_derivatives_hedge_settings(
+            strategy_short_bias_enabled=True, ai_operating_mode="baseline_only",
+        )
+        settings_c = make_derivatives_hedge_settings(
+            strategy_short_bias_enabled=True, ai_operating_mode="ai_decision_maker",
+        )
+
+        count_a = _signal_confirmation_count(
+            settings=settings_a, leg="short", baseline=baseline, ai_assessment=ai,
+        )
+        count_c = _signal_confirmation_count(
+            settings=settings_c, leg="short", baseline=baseline, ai_assessment=ai,
+        )
+        self.assertEqual(count_a, 4, "Mode A short leg must cap at 4 confirmations")
+        self.assertEqual(count_c, 5, "Mode C short leg with strong AI must reach 5 confirmations")
 
 
 if __name__ == "__main__":
