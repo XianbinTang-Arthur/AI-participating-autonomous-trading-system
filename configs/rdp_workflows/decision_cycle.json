@@ -23,7 +23,7 @@
     },
     {
       "name": "reliability_check",
-      "description": "执行可靠性检查，并生成 alert summary。",
+      "description": "[DEPRECATED in-place] reliability_check 已拆到独立的 reliability_cycle (hourly)。此处保留作为 weekly decision_round 完成后立即 tick 一次的兜底，确保新 round 产出后 current_alerts.json 第一时间刷新。主力推进由 reliability_cycle 每小时接管。",
       "command": "python scripts/rdp_run_reliability_check.py",
       "timeout_seconds": 120,
       "enabled": true,

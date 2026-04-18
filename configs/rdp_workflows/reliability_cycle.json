@@ -1,0 +1,21 @@
+{
+  "workflow": "reliability_cycle",
+  "description": "可靠性层周期任务：运行 reliability 检查、生成 current_alerts.json，供 pre_apply_gate (live_db_health / current_alerts check) 消费。拆自 decision_cycle 的 reliability_check 任务，从 weekly 提频到 hourly (minute_utc=15 错开 release_cycle 的整点)，避免 current_alerts.json 因 decision_cycle 延迟而长期缺失导致 gate 降级放行。",
+  "schedule_hint": "hourly at :15 UTC",
+  "schedule": {
+    "enabled": true,
+    "frequency": "hourly",
+    "interval_hours": 1,
+    "minute_utc": 15
+  },
+  "tasks": [
+    {
+      "name": "reliability_check",
+      "description": "执行可靠性检查，并生成 alert summary。allow_failure=true: 业务层评估失败（数据缺失、告警源异常等）不应阻塞 hourly 节奏，通过 structured log 告警。",
+      "command": "python scripts/rdp_run_reliability_check.py",
+      "timeout_seconds": 180,
+      "enabled": true,
+      "allow_failure": true
+    }
+  ]
+}

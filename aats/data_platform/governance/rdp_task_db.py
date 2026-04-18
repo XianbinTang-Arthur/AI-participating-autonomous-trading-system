@@ -32,6 +32,10 @@ VALID_WORKFLOWS = {
     # hourly 推进 parameter_releases.observation_status，避免 24h 观察窗
     # 被 weekly decision_cycle 拉长到 7 天。
     "observation_cycle",
+    # RDP roadmap R1: reliability_cycle 从 decision_cycle.reliability_check
+    # 拆出 hourly，避免 current_alerts.json 因 decision_cycle 延迟而长期缺失
+    # 导致 pre_apply_gate 降级放行。
+    "reliability_cycle",
 }
 
 # orphan-recovery 的 sentinel exit_code：daemon 崩溃 / 被 kill 后留下的

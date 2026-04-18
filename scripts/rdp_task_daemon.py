@@ -56,6 +56,7 @@ WORKFLOW_TIMEOUTS = {
     "governance_cycle": 1800,  # 30 分钟 — 治理决策评估
     "release_cycle": 900,      # 15 分钟 — approved recommendation -> release/apply
     "observation_cycle": 300,  # 5 分钟 — hourly release observation_status 推进
+    "reliability_cycle": 300,  # 5 分钟 — hourly current_alerts.json 刷新
 }
 DEFAULT_TIMEOUT = 1800  # 30 分钟
 
