@@ -4393,8 +4393,8 @@ def _apply_post_init_guards(
             _re.recovery_status_provider = lambda: RecoveryPostureEvaluator(runtime).finalize_status(
                 base_status=runtime.recovery_status
             )
-    if runtime.decision_engine is not None:
-        runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
+    # strategy_profile_service 注入已移出本函数,
+    # 见 _attach_strategy_profile_service(),由 decision slice 拥有者装配。
 
     # Stage 9 checklist-4：AbortHookService sidecar。
     # 与 trial_guard 一样只在 decision+execution+monolith role 下实例化（都走
@@ -5250,6 +5250,14 @@ async def build_runtime(
             },
         )
         await runtime.operator_command_worker.bootstrap()
+
+    # StrategyProfileControlService 只依赖 shared + decision slice 资源
+    # (repo / settings / event_store),不走 startup_recovery(execution 侧)。
+    # 必须在 decision role 也装配,否则 4 进程拓扑下 decision 进程的
+    # orchestrator.strategy_profile_service=None,active_profile_id 永远为 null。
+    if _slice_active("decision", effective_process_role=effective_process_role):
+        if runtime.decision_engine is not None:
+            runtime.decision_engine.strategy_profile_service = StrategyProfileControlService(runtime)
 
     _apply_post_init_guards(runtime=runtime, effective_process_role=effective_process_role)
 
