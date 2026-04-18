@@ -232,6 +232,11 @@ services:
       # daemon 通过 AATS_ACTIVE_PARAMETER_DB_URL 连接 governance schema
       # （已在 x-aats-common-env 中定义，指向 aats_research）
       RDP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
+      # RDP Bug 3 修复: pre_apply_gate 的 live_db_health check 需要读实盘 DB
+      # 确认当前系统状态（持仓/告警/降级）才能 safely apply 新参数。
+      # 未配置时该 check 降级为 warn (allow_apply=true)，保护维度失效。
+      # 指向与 AATS_DATABASE_URL 相同的实盘 DB，但通过独立变量名维持 RDP 边界。
+      RDP_LIVE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/${AATS_DB_NAME:-aats}
     command: ["python", "scripts/rdp_task_daemon.py", "--poll-interval", "10", "--enable-scheduler"]
     networks:
       - aats

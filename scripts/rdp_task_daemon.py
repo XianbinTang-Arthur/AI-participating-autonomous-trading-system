@@ -55,6 +55,7 @@ WORKFLOW_TIMEOUTS = {
     "decision_cycle": 1800,    # 30 分钟 — 包含参数评估和可能的实盘回滚
     "governance_cycle": 1800,  # 30 分钟 — 治理决策评估
     "release_cycle": 900,      # 15 分钟 — approved recommendation -> release/apply
+    "observation_cycle": 300,  # 5 分钟 — hourly release observation_status 推进
 }
 DEFAULT_TIMEOUT = 1800  # 30 分钟
 
@@ -362,6 +363,23 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
             exit_code=exit_code,
             error_message=error_message or None,
             log_tail=log_tail or None,
+        )
+
+    # RDP Bug 6 修复: 失败告警
+    # 失败时打 structured error log，方便 Loki+Grafana alert rule
+    # 抓取（log key=rdp_workflow_failed）。
+    # 语义：operator 必须看到每次 workflow failed，不能依赖人工查 DB。
+    if status == "failed":
+        log.error(
+            "rdp_workflow_failed task_id=%s workflow=%s exit_code=%s error=%r",
+            task_id, workflow, exit_code, error_message,
+            extra={
+                "event_name": "rdp_workflow_failed",
+                "task_id": task_id,
+                "workflow": workflow,
+                "exit_code": exit_code,
+                "error_message": error_message,
+            },
         )
 
     log.info("=== Task %s finished: %s (exit=%s) ===", task_id, status, exit_code)

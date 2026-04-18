@@ -31,7 +31,7 @@
     },
     {
       "name": "observation_check",
-      "description": "检查 observing 状态的 release，并自动评估 rollback/effectiveness。",
+      "description": "[DEPRECATED in-place] observation_check 已拆到独立的 observation_cycle (hourly)。此处保留在 decision_cycle 结尾作为立即 tick 一次的兜底，确保 weekly decision_round 审批新 release 后立即推进一次观察。主力 observation 推进由 observation_cycle 每小时接管。",
       "command": "python scripts/rdp_run_release_observation_cycle.py",
       "timeout_seconds": 180,
       "enabled": true,

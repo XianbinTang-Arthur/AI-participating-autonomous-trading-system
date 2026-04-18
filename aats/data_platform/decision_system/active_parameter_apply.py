@@ -384,10 +384,50 @@ def apply_approved_recommendation(
             actor=actor,
             notes=notes,
         )
+
+        # RDP Bug 2 修复: apply 成功后，把同 (family, timeframe) 下其他
+        # 历史 approved parameter_upgrade recommendations 标记为 superseded。
+        # 原本语义：approved ≈ "ready to apply"，但实际上一个 combo 只能有
+        # 一条 live parameter set，旧 approved 被新 apply 覆盖后应该降级。
+        # 不标记会导致：
+        #   - `SELECT COUNT(*) WHERE status='approved'` 返回"虚假活跃"数字
+        #   - UI 显示 N 条可 apply 给 operator，实际只有 1 条是 live
+        # 与 Bug 2 的同事务：apply 失败会回滚 UPDATE，保证原子性。
+        supersede_result = session.execute(
+            text(
+                """
+                UPDATE governance.recommendations
+                SET status = 'superseded',
+                    superseded_by = :new_rec_id,
+                    superseded_at = now(),
+                    superseded_by_recommendation_id = :new_rec_id
+                WHERE family = :family
+                  AND timeframe = :timeframe
+                  AND recommendation_type = 'parameter_upgrade'
+                  AND status = 'approved'
+                  AND recommendation_id != :current_rec_id
+                  AND superseded_by IS NULL
+                """,
+            ),
+            {
+                "family": family,
+                "timeframe": timeframe.lower(),
+                "new_rec_id": recommendation_id,
+                "current_rec_id": recommendation_id,
+            },
+        )
+        superseded_count = supersede_result.rowcount if supersede_result.rowcount is not None else 0
+        if superseded_count > 0:
+            log.info(
+                "apply_superseded_stale_approvals family=%s timeframe=%s "
+                "current_recommendation_id=%s superseded_count=%d",
+                family, timeframe.lower(), recommendation_id, superseded_count,
+            )
         # session 退出 with 块时自动 commit
 
     result["operation_id"] = op_id
     result["from_parameter_set_id"] = from_ps_id
+    result["superseded_count"] = superseded_count
     result["message"] = f"已 apply {ps_id} 到 {combo_key}"
     return result
 

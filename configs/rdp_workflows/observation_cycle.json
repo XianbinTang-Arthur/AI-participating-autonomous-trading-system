@@ -1,0 +1,21 @@
+{
+  "workflow": "observation_cycle",
+  "description": "观察层周期任务：扫描 observing 状态的 release，评估 24h 窗口内的效果并推进 observation_status 到 passed/failed/rollback。拆自 decision_cycle 的 observation_check 任务，从 weekly 提频到 hourly，避免 24h 观察窗实际变成 7 天。",
+  "schedule_hint": "hourly when there are observing releases",
+  "schedule": {
+    "enabled": true,
+    "frequency": "hourly",
+    "interval_hours": 1,
+    "minute_utc": 30
+  },
+  "tasks": [
+    {
+      "name": "observation_check",
+      "description": "检查 observing 状态的 release，并自动评估 rollback/effectiveness。",
+      "command": "python scripts/rdp_run_release_observation_cycle.py",
+      "timeout_seconds": 300,
+      "enabled": true,
+      "allow_failure": false
+    }
+  ]
+}

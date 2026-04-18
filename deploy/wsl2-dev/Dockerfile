@@ -105,7 +105,27 @@ COPY --chown=aats:aats pyproject.toml README.md ./
 # 目录（aats/bootstrap/logging.py + active_parameters.py 的 mkdir 调用）。
 # 不预 chown /app 的话第一次 mkdir 就 PermissionError 13 让容器起不来。
 # 把 /app 整体 chown 给 aats，覆盖现在与未来所有 runtime-created 子目录。
-RUN chown aats:aats /app
+#
+# RDP Bug 4 修复：artifact_index.py 扫描 /app/artifacts/research/{experiments,
+# calibration_batches,calibration_rounds,step2_rounds,step3_rounds,
+# attribution_rounds,execution_rounds}。Image 如不预创建这些目录，
+# artifact_indexer 每次都日志 "跳过不存在的目录"，auto_import_candidates
+# 找不到任何 round → governance_cycle PARTIAL (1 task failed)。
+# 即使 --replay-only 模式不产出这些目录，让它们以空目录存在也能让
+# artifact_index 返回 "0 artifacts" 而不是 "skipped"。
+RUN mkdir -p \
+        /app/artifacts/research/experiments \
+        /app/artifacts/research/calibration_batches \
+        /app/artifacts/research/calibration_rounds \
+        /app/artifacts/research/step2_rounds \
+        /app/artifacts/research/step3_rounds \
+        /app/artifacts/research/attribution_rounds \
+        /app/artifacts/research/execution_rounds \
+        /app/artifacts/governance \
+        /app/artifacts/decision_rounds \
+        /app/artifacts/decision_system \
+        /app/artifacts/operations \
+    && chown -R aats:aats /app
 
 USER aats
 

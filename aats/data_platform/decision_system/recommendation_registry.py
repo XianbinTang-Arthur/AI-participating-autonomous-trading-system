@@ -216,6 +216,72 @@ RECOMMENDATION_TYPES = (
     "require_review",
 )
 
+# RDP Bug 5 语义分离: status=approved 在不同 recommendation_type 下语义不同。
+#
+#   parameter_upgrade + approved:  "待 apply 或已 apply 为 live"
+#       - 经 release_cycle 触发 apply，写入 active_parameter_sets
+#       - 同 combo 下旧 approved 在新 apply 成功后被 superseded (见 Bug 2)
+#
+#   keep_active + approved:         "本轮 decision_round 的结论是保持现状"
+#       - 不涉及参数变更，不进 release_cycle
+#       - 是 decision_round 产出的 "证据记录"，不是"可执行提案"
+#
+#   lower_priority / pause / require_review + approved:
+#       类似 keep_active，仅记录决策结论
+#
+# UI/监控/查询层应按 recommendation_type 过滤，而非单纯按 status。
+# 下面两个常量提供语义分离：
+_APPLY_TRIGGERING_TYPES = frozenset({"parameter_upgrade"})
+_INFORMATIONAL_TYPES = frozenset({"keep_active", "lower_priority", "pause", "require_review"})
+
+
+def is_apply_triggering_type(recommendation_type: str) -> bool:
+    """判断某 recommendation_type 是否会触发 parameter apply（即可实际改变 live 参数）。
+
+    parameter_upgrade → True（approved 后进 release_cycle）
+    其他（keep_active 等） → False（approved 仅代表决策结论已确认）
+    """
+    return str(recommendation_type) in _APPLY_TRIGGERING_TYPES
+
+
+def count_live_approvals(recommendations: list[dict]) -> dict[str, int]:
+    """按类型统计"活着"的 approved recommendations.
+
+    Returns a dict with keys:
+      - ``apply_triggering_live``: parameter_upgrade approved 且 superseded_by=None
+          （这些才是 UI 应该展示的 "ready/live" 条目）
+      - ``informational``: 非 parameter_upgrade 的 approved
+          （keep_active 等决策结论，不需要 apply）
+      - ``draft``: 所有 status=draft
+      - ``superseded``: 所有 status=superseded
+      - ``rejected``: 所有 status=rejected
+
+    这个 helper 给 operator UI / 监控查询用，避免 "SELECT COUNT(*)
+    WHERE status='approved'" 把 informational 和 live 混成一个数字。
+    """
+    result = {
+        "apply_triggering_live": 0,
+        "informational": 0,
+        "draft": 0,
+        "superseded": 0,
+        "rejected": 0,
+    }
+    for rec in recommendations:
+        status = rec.get("status")
+        if status == "draft":
+            result["draft"] += 1
+        elif status == "rejected":
+            result["rejected"] += 1
+        elif status == "superseded":
+            result["superseded"] += 1
+        elif status == "approved":
+            rec_type = rec.get("recommendation_type", "")
+            if is_apply_triggering_type(rec_type) and not rec.get("superseded_by"):
+                result["apply_triggering_live"] += 1
+            else:
+                result["informational"] += 1
+    return result
+
 
 # ── ID 生成 ──────────────────────────────────────────────────────────
 
