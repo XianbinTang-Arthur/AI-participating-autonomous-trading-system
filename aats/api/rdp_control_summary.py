@@ -1581,10 +1581,17 @@ def _build_workbench_items_payload(
         if isinstance(item, dict) and item.get("status") == "draft"
     ]
 
+    # Research 每轮会为同一个 combo 成对写入 parameter_upgrade + keep_active(时序
+    # 上 keep_active 常常后写),如果只按 created_at 去重,operator 只能看到
+    # keep_active,永远无法选参数升级。这里让 parameter_upgrade 优先露出,
+    # 被拒绝后下一轮刷新 keep_active 才有机会浮上来。
     by_combo: dict[str, dict[str, Any]] = {}
     for rec in sorted(
         pending_recommendations,
-        key=lambda item: _iso_sort_key(item.get("created_at")),
+        key=lambda item: (
+            1 if item.get("recommendation_type") == "parameter_upgrade" else 0,
+            _iso_sort_key(item.get("created_at")),
+        ),
         reverse=True,
     ):
         combo_key = str(rec.get("combo_key") or _combo_key(rec.get("family"), rec.get("timeframe")))

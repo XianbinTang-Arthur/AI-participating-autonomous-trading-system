@@ -1024,6 +1024,96 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(item["decision_summary"], "这轮先保持不动。现在还没有实盘参数，这次只记录治理结论。")
         self.assertEqual(item["approval_effect_summary"], "批准后只记录“保持当前”，不会进入发布。")
 
+    def test_workbench_items_prefer_parameter_upgrade_over_keep_active_for_same_combo(self) -> None:
+        """Research 每轮对同一 combo 会成对写 parameter_upgrade + keep_active,且
+        keep_active 的 created_at 往往更新。as-is 按 created_at 去重让 operator
+        永远只看到 keep_active,选不到参数升级。这里锁死新的优先级:同 combo 下
+        parameter_upgrade 先露出,keep_active 需要等它被拒后下一轮才能浮上来。
+        """
+        request = _fake_request()
+
+        with (
+            patch("aats.api.rdp_control_summary._governance_session", _dummy_session),
+            patch("aats.data_platform.governance.rdp_task_db.db_get_recent_tasks", return_value=[]),
+            patch("aats.api.rdp_control_summary._environment_summary", return_value={"name": "staging"}),
+            patch("aats.api.rdp_control_summary.query_rdp_health", return_value={
+                "overall_health": "healthy",
+                "blocking_reasons": [],
+                "warnings": [],
+                "checks": [],
+            }),
+            patch("aats.api.rdp_control_summary._load_recent_gate_results", return_value=[]),
+            patch("aats.api.rdp_control_summary._load_recent_releases", return_value=[]),
+            patch("aats.api.rdp_control_summary._build_observation_queue", return_value=[]),
+            patch("aats.api.rdp_control_summary.query_latest_recommendations", return_value={
+                "recommendations": [
+                    {
+                        "recommendation_id": "rec_upgrade_older",
+                        "symbol": "BTC-USDT-SWAP",
+                        "family": "independent",
+                        "timeframe": "1h",
+                        "recommendation_type": "parameter_upgrade",
+                        "confidence": "high",
+                        "reason": "候选参数已生成",
+                        "status": "draft",
+                        "target_parameter_set_id": "ps_candidate_1",
+                        "created_at": "2026-04-10T12:05:00Z",
+                    },
+                    {
+                        "recommendation_id": "rec_keep_newer",
+                        "symbol": "BTC-USDT-SWAP",
+                        "family": "independent",
+                        "timeframe": "1h",
+                        "recommendation_type": "keep_active",
+                        "confidence": "high",
+                        "reason": "维持现状",
+                        "status": "draft",
+                        "created_at": "2026-04-10T12:05:01Z",
+                    },
+                ],
+            }),
+            patch("aats.api.rdp_control_summary.query_active_parameter_sets", return_value={
+                "generated_at": "2026-04-10T11:40:00Z",
+                "governance_managed": True,
+                "paused_combos": [],
+                "known_combos": ["independent_1h"],
+                "active_sets": {},
+                "parameter_sets": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_latest_decision_round", return_value={"available": False}),
+            patch("aats.api.rdp_control_summary.query_latest_decisions", return_value={
+                "available": True,
+                "generated_at": "2026-04-10T11:55:00Z",
+                "status_distribution": {"parameter_upgrade": 1},
+                "decisions": [],
+            }),
+            patch("aats.api.rdp_control_summary.query_parameter_registry", return_value={
+                "available": True,
+                "parameter_sets": [],
+            }),
+            patch(
+                "aats.data_platform.production_workflow.release_registry.load_release_history",
+                return_value={"releases": []},
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.load_latest_research_round_snapshot",
+                return_value=None,
+            ),
+            patch(
+                "aats.data_platform.governance.snapshot_db.is_snapshot_incomplete",
+                return_value=False,
+            ),
+            patch("aats.api.rdp_control_summary.query_latest_attribution", return_value={"available": True}),
+            patch("aats.api.rdp_control_summary.query_latest_execution_realism", return_value={"available": True}),
+        ):
+            payload = build_rdp_workbench_items(request)
+
+        self.assertEqual(payload["total"], 1)
+        item = payload["items"][0]
+        self.assertEqual(item["recommendation_id"], "rec_upgrade_older")
+        self.assertEqual(item["recommendation_type"], "parameter_upgrade")
+        self.assertEqual(item["actions"][0]["label"], "批准参数候选")
+
     def test_workbench_items_include_release_candidates_after_parameter_upgrade_is_approved(self) -> None:
         request = _fake_request()
 
