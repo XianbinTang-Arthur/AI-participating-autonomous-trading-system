@@ -317,6 +317,36 @@ def evaluate_release_effectiveness(
         # 保存到 registry
         registry = load_effectiveness_registry(root)
         # 去重: 替换同 release_id 的旧评估
+        # Bug 8 修复: 保留前次 evaluation 的 rollback_cancelled / rollback_enforced
+        # 等 action state 字段。原逻辑每次 evaluate 都构造全新 dict,覆盖掉
+        # enforce_pending_rollbacks 写入的 rollback_cancelled 标记，导致:
+        #   - cleanup 脚本 (rdp_migration_bug8_cancel_stale_rollbacks) 的 cancel
+        #     标记在下一轮 observation_cycle 被抹掉, rollback 再次入 pending
+        #   - Layer 2 的 soft-pause (写 rollback_cancelled='soft_paused_...')
+        #     同样会被抹掉, 实际没有兜底效果
+        # carry-over 字段: rollback_cancelled, rollback_cancelled_at,
+        # rollback_cancelled_reason, rollback_enforced, rollback_enforced_at,
+        # rollback_to_parameter_set_id, rollback_attempts, last_rollback_error,
+        # rollback_soft_pause_applied
+        _ACTION_STATE_FIELDS = (
+            "rollback_cancelled",
+            "rollback_cancelled_at",
+            "rollback_cancelled_reason",
+            "rollback_enforced",
+            "rollback_enforced_at",
+            "rollback_to_parameter_set_id",
+            "rollback_attempts",
+            "last_rollback_error",
+            "rollback_soft_pause_applied",
+        )
+        previous = next(
+            (e for e in registry["evaluations"] if e.get("release_id") == release_id),
+            None,
+        )
+        if previous is not None:
+            for field in _ACTION_STATE_FIELDS:
+                if field in previous and field not in evaluation:
+                    evaluation[field] = previous[field]
         registry["evaluations"] = [
             e for e in registry["evaluations"]
             if e.get("release_id") != release_id
