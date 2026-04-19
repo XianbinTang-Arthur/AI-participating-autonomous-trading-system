@@ -245,7 +245,7 @@ class AATSSettings(BaseSettings):
     ai_operating_mode: AIOperatingMode = "baseline_only"
     ai_provider: Literal["disabled", "openai"] = "disabled"
     ai_model_name: str = "gpt-4o-mini"
-    ai_prompt_version: str = "0.2.0"
+    ai_prompt_version: str = "0.3.0"
     ai_model_version: str = "1.0.0"
     ai_timeout_seconds: float = 5.0
     ai_max_retries: int = 0

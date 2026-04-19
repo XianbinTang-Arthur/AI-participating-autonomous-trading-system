@@ -124,8 +124,8 @@ strategy_sleeve_auto_volatility_cap_enabled: true
 ai_provider: disabled
 # [常用可调] ai_model_name：AI 模型名。可选值：可用模型名；推荐值：gpt-4o-mini。
 ai_model_name: gpt-4o-mini
-# [常用可调] ai_prompt_version：提示词版本。可选值：自定义版本号；推荐值：0.2.0。
-ai_prompt_version: 0.2.0
+# [常用可调] ai_prompt_version：提示词版本。可选值：自定义版本号；推荐值：0.3.0（P1.4-P2.7 新 basis/funding/oi/ls reason_codes glossary 已注入）。
+ai_prompt_version: 0.3.0
 # [常用可调] ai_model_version：模型配置版本。可选值：自定义版本号；推荐值：1.0.0。
 ai_model_version: 1.0.0
 # [常用可调] ai_timeout_seconds：AI 请求超时秒数。可选值：1.0~60.0；推荐值：5.0。
