@@ -257,14 +257,30 @@ class TestBatchB06Registration(unittest.TestCase):
     """防止 refactor 意外丢弃 stage 06 注册, 导致 deploy 时 Silver migration 漏跑。"""
 
     def test_batch_b_06_silver_microstructure_registered_last(self) -> None:
+        """stage 6 位置验证。
+
+        Phase 1A deploy retro (2026-04-20): batch_b_07_ingest_runs_domain_extension
+        追加后, stage 6 自然不再是 tuple 末尾。原始意图 — "新 stage 以 append
+        形式入 tuple, 不随意插入中间" — 仍保留: 验证 stage 6 在 stage 7 之前。
+        """
         from aats.data_platform.migrations._batch_b import BATCH_B_STAGES
 
         self.assertIn("batch_b_06_silver_microstructure", BATCH_B_STAGES)
-        self.assertEqual(
-            BATCH_B_STAGES[-1],
-            "batch_b_06_silver_microstructure",
-            "stage 6 必须是 tuple 的最后一项, 保持严格 append 顺序",
-        )
+        idx_06 = BATCH_B_STAGES.index("batch_b_06_silver_microstructure")
+        # stage 6 必须在 stage 7 之前 (严格 append 顺序)
+        if "batch_b_07_ingest_runs_domain_extension" in BATCH_B_STAGES:
+            idx_07 = BATCH_B_STAGES.index("batch_b_07_ingest_runs_domain_extension")
+            self.assertLess(
+                idx_06, idx_07,
+                "stage 6 必须在 stage 7 之前, 保持严格 append 顺序",
+            )
+        else:
+            # stage 7 尚未加入, stage 6 必须是末尾
+            self.assertEqual(
+                BATCH_B_STAGES[-1],
+                "batch_b_06_silver_microstructure",
+                "stage 6 必须是 tuple 的最后一项, 保持严格 append 顺序",
+            )
 
     def test_batch_b_06_migration_files_exist(self) -> None:
         from pathlib import Path

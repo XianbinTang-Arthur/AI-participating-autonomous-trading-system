@@ -39,6 +39,7 @@ BATCH_B_STAGES: tuple[str, ...] = (
     "batch_b_04_sleeve_advice",
     "batch_b_05_microstructure",
     "batch_b_06_silver_microstructure",
+    "batch_b_07_ingest_runs_domain_extension",
 )
 
 
