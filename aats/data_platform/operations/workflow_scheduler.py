@@ -134,7 +134,7 @@ def get_workflow_schedule(config: dict[str, Any]) -> dict[str, Any] | None:
     if schedule.get("enabled", True) is False:
         return None
     frequency = str(schedule.get("frequency") or "").strip().lower()
-    if frequency not in {"daily", "weekly", "hourly"}:
+    if frequency not in {"daily", "weekly", "hourly", "custom"}:
         return None
     return schedule
 
@@ -152,6 +152,9 @@ def format_schedule(schedule: dict[str, Any] | None) -> str:
             f"weekly {weekday} "
             f"{int(schedule.get('hour_utc', 0)):02d}:{minute:02d} UTC"
         )
+    if frequency == "custom":
+        interval_minutes = max(int(schedule.get("interval_minutes", 15)), 1)
+        return f"custom every {interval_minutes}min (UTC aligned)"
     interval_hours = max(int(schedule.get("interval_hours", 1)), 1)
     return f"hourly every {interval_hours}h @ minute {minute:02d} UTC"
 
@@ -180,6 +183,18 @@ def _latest_slot_for_schedule(
         if candidate > now:
             candidate -= timedelta(days=7)
         return candidate
+
+    # P1-D Phase 1A (2026-04-20): custom frequency 支持 15 min interval.
+    # 支撑 microstructure_silver_15m workflow (configs/rdp_workflows/)
+    # 参见 docs/operations/p1d_phase1a_predeploy_checklist.md §2.3
+    if frequency == "custom":
+        interval_minutes = max(int(schedule.get("interval_minutes", 15)), 1)
+        # 锚点对齐到 1970-01-01 00:00 UTC + minute offset, 与 hourly 同构
+        anchor = datetime(1970, 1, 1, 0, 0, tzinfo=UTC)
+        elapsed_seconds = int((now - anchor).total_seconds())
+        slot_seconds = interval_minutes * 60
+        slot_index = elapsed_seconds // slot_seconds
+        return anchor + timedelta(seconds=slot_index * slot_seconds)
 
     interval_hours = max(int(schedule.get("interval_hours", 1)), 1)
     anchor = datetime(1970, 1, 1, 0, minute, tzinfo=UTC)

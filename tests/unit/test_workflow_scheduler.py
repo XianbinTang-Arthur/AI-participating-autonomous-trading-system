@@ -567,3 +567,70 @@ def test_scheduler_bootstrap_blocks_when_research_cycle_failed(tmp_path: Path) -
     state = load_scheduler_state(tmp_path)
     assert state["bootstrap_stage"] == "research_cycle"
     assert state.get("bootstrap_completed_at") is None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# P1-D Phase 1A (2026-04-20): custom frequency 单元测试
+# 支持 `microstructure_silver_15m` 的 interval_minutes=15 调度.
+# 参见 docs/operations/p1d_phase1a_predeploy_checklist.md §2.3
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_get_workflow_schedule_accepts_custom_frequency() -> None:
+    from aats.data_platform.operations.workflow_scheduler import get_workflow_schedule
+
+    schedule = {"enabled": True, "frequency": "custom", "interval_minutes": 15}
+    result = get_workflow_schedule({"schedule": schedule})
+    assert result == schedule
+
+
+def test_get_workflow_schedule_rejects_unknown_frequency() -> None:
+    from aats.data_platform.operations.workflow_scheduler import get_workflow_schedule
+
+    schedule = {"enabled": True, "frequency": "monthly", "day": 1}
+    assert get_workflow_schedule({"schedule": schedule}) is None
+
+
+def test_custom_frequency_latest_slot_aligns_to_interval() -> None:
+    from aats.data_platform.operations.workflow_scheduler import _latest_slot_for_schedule
+
+    schedule = {"enabled": True, "frequency": "custom", "interval_minutes": 15}
+
+    # 12:37:42 应该落到 12:30 slot
+    now = datetime(2026, 4, 20, 12, 37, 42, tzinfo=UTC)
+    assert _latest_slot_for_schedule(schedule, now=now) == datetime(
+        2026, 4, 20, 12, 30, tzinfo=UTC,
+    )
+
+    # 12:00:00 应该落到 12:00 slot (边界)
+    now = datetime(2026, 4, 20, 12, 0, 0, tzinfo=UTC)
+    assert _latest_slot_for_schedule(schedule, now=now) == datetime(
+        2026, 4, 20, 12, 0, tzinfo=UTC,
+    )
+
+    # 12:14:59 应该落到 12:00 slot (未到 12:15)
+    now = datetime(2026, 4, 20, 12, 14, 59, tzinfo=UTC)
+    assert _latest_slot_for_schedule(schedule, now=now) == datetime(
+        2026, 4, 20, 12, 0, tzinfo=UTC,
+    )
+
+
+def test_custom_frequency_slot_uses_default_interval_when_missing() -> None:
+    from aats.data_platform.operations.workflow_scheduler import _latest_slot_for_schedule
+
+    # 没写 interval_minutes 默认 15
+    schedule = {"enabled": True, "frequency": "custom"}
+    now = datetime(2026, 4, 20, 12, 37, 42, tzinfo=UTC)
+    assert _latest_slot_for_schedule(schedule, now=now) == datetime(
+        2026, 4, 20, 12, 30, tzinfo=UTC,
+    )
+
+
+def test_format_schedule_custom_frequency_string() -> None:
+    from aats.data_platform.operations.workflow_scheduler import format_schedule
+
+    schedule = {"enabled": True, "frequency": "custom", "interval_minutes": 15}
+    assert format_schedule(schedule) == "custom every 15min (UTC aligned)"
+
+    schedule = {"enabled": True, "frequency": "custom", "interval_minutes": 5}
+    assert format_schedule(schedule) == "custom every 5min (UTC aligned)"
