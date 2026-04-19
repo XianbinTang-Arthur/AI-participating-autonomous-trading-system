@@ -1503,3 +1503,29 @@ E2E: 启动 testcontainers Postgres → apply batch_b_05 migration → mock OKX 
 - **产出**: 本文件 `docs/design/p1d_phase1a_implementation_design_2026_04_20.md`
 - **下一步**: 用户 review → approval → W1 agent 照此文档执行 Phase 1A 2 人周 WBS
 - **疑问反馈**: §12 列出的 8 项建议用户在 kickoff W1 前确认
+
+---
+
+## 附录 E. §12 疑问决策确认（2026-04-19 晚间）
+
+用户决策（原文）: "Q3 + Q4 都走 agent default。 全部 8 个疑问采纳 default，
+W1 agent 直接照表施工，不再做任何决策。"
+
+**8 项疑问最终决策（W1 agent 照此施工，不再请示）**:
+
+| # | 疑问 | 最终决策 |
+|---|---|---|
+| 1 | W1 Agent 独立 review §2.3 代码行数估算？ | **接受**：W1 Day 2 结束时骨架完成后 update WBS |
+| 2 | collector 与 liquidations-daemon 合并为 raw-ingest-daemon？ | **不合并**：保持独立容器 `aats-microstructure-collector` |
+| 3 | Phase 1A 写入 `meta.ingest_runs` 追溯？ | **走 default**：跟 daily_ingest 保持一致，全量记 run；若未来 5000+/month 过噪声再改"只记 failed" |
+| 4 | 预留 Phase 2A `_1m` / `_5m` 多 horizon 表 migration？ | **不预留**：Phase 2A 需要时加 `batch_b_06_microstructure_multi_horizon`；不做技术债预付 |
+| 5 | bbo-tbt 客户端采样 1Hz vs 10Hz？ | **Phase 1 走 1Hz**；Phase 2A regression 后评估是否 10Hz |
+| 6 | `staging.market_oi_funding_ticks` 与 aats-market 订阅重复？ | **接受 redundancy**：Q3 "不发 NATS" 的代价；优于污染 aats-market 责任边界 |
+| 7 | Silver ETL workflow name？ | **`microstructure_silver_15m`**：配合 `ix_rdp_task_one_active_per_workflow` 唯一索引自动串行化 |
+| 8 | `microstructure_ws_daemon` 与 `liquidations_ws_daemon` 合并？ | **不合并**：保持独立 daemon，便于 Phase 2B ETH/SOL 扩展 |
+
+**签署**: Claude Opus 4.7（代表用户决策转达）· 2026-04-19
+
+**W1 agent 启动协议**: 用户开启新 session 说 "启动 P1-D W1 Phase 1A" 时，
+按本文档 §9 WBS 分阶段 spawn（建议每 2-3 day 一个 agent，不一次啃完 10 天
+工作量以保证 code quality）。每阶段完成后用户 review + merge 后再启下一段。
