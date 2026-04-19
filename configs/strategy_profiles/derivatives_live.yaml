@@ -375,12 +375,12 @@ strategy_hedge_opportunistic_passive_first_enabled: true
 strategy_hedge_independent_enabled: true
 # [进阶可调] strategy_hedge_independent_rollout_stage：独立双书的灰度阶段。推荐值：live。
 strategy_hedge_independent_rollout_stage: live
-# [进阶可调] strategy_hedge_independent_long_entry_threshold：独立 long book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.30。
-# 2026-04-19 下调到 0.25，与 DecisionEngine confidence_min=0.50 同级。
+# [进阶可调] strategy_hedge_independent_long_entry_threshold：独立 long book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.25。
+# 历史：0.30 → 0.25 (2026-04-19，与 DecisionEngine confidence_min=0.50 同级)。
 # 真正防乱单由 liquidity_quality + min_confirm_ticks + score_stability 保底 (gates.py:163-169)。
 strategy_hedge_independent_long_entry_threshold: 0.25
-# [进阶可调] strategy_hedge_independent_short_entry_threshold：独立 short book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.30。
-# 2026-04-19 同步下调。
+# [进阶可调] strategy_hedge_independent_short_entry_threshold：独立 short book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.25。
+# 历史：0.30 → 0.25 (2026-04-19，与 long 对齐)。
 strategy_hedge_independent_short_entry_threshold: 0.25
 # [进阶可调] strategy_hedge_independent_long_close_threshold：独立 long book 的平仓阈值。显式低于 entry，用于建立 hysteresis。可选值：0.0 ~ entry threshold；推荐值：0.15。
 # 实盘安全审查：原值 0.24 与 entry 0.30 间距仅 0.06。下调至 0.15 建立合理 hysteresis。

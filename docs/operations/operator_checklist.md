@@ -174,3 +174,45 @@
 - [ ] 当前 active parameter set 有清晰的审批、gate、apply history。
 - [ ] 本次启动前的代码版本、profile、数据库和 OKX 账户已记录。
 - [ ] 如有人工恢复、手动取消或参数回滚，已写入操作备注。
+
+---
+
+## 如何区分 "advisory-only candidate" vs "execution outage"（很容易误判）
+
+`strategy.portfolio_allocation_decisions` 的 `route_action=advisory_only` 有两种完全不同的语义，
+看错会导致"系统其实健康但被误判为故障"或"系统已经坏了被当作正常 shadow 输出"。
+
+### advisory-only candidate（设计态，**不是故障**）
+- reason_codes 包含 `independent_family_candidate_inactive` /
+  `candidate_execution_incompatible` / `legacy_configured_strategy_family_independent_hold_only`
+- sleeve_intents[].legs = [] 且 metrics.permission.permission_mode = `unsupported`
+- metrics.composition.execution_behavior = `hold_current`
+- 上游链路：`independent_family.py::_independent_execution_compatibility`
+  `bool(result.legs or overlay_decision.active)` = False → `sleeve_execution_permission.py`
+  把 approved_for_execution 降成 False → allocator 产 advisory_only
+- 根因：当前 baseline 信号条件（score / net_edge / regime）下没有 executable legs
+- **操作**：这是设计行为，不要 restart 也不要重 deploy；如需 independent 下单，要看
+  `docs/review/allocator_budget_zero_root_cause_2026_04_19.md` 以及 P1-A/B 系列任务
+
+### execution outage（真故障）
+- 容器 `aats-execution` 不 healthy
+- `/system/health` blockers 里有 `okx_ws_down` / `execution_outbox_pending_*_minutes`
+- reason_codes 里出现 `execution_health_not_ok` / `kill_switch_engaged`
+- 最近 `decision_target_sizing_resolved` 日志里 `policy_blocked=True` 或 `risk_capped=True`
+- **操作**：立即按 `docs/operations/workflow_failure_recovery.md` 走故障恢复流程
+
+### 快速辨别（一条命令）
+```bash
+# 最近 12 小时 independent intent 的 reason 分布；命中 candidate_execution_incompatible
+# 但不命中 execution_health_not_ok 即 advisory-only candidate 设计态.
+docker exec aats-postgres psql -U admin aats_live_derivatives -c "
+SELECT
+  COUNT(*) FILTER (WHERE payload::text LIKE '%candidate_execution_incompatible%') AS advisory_candidate,
+  COUNT(*) FILTER (WHERE payload::text LIKE '%execution_health_not_ok%')       AS real_outage,
+  COUNT(*)                                                                      AS total
+FROM event_store
+WHERE topic='strategy.portfolio_allocation_decisions'
+  AND event_timestamp > now() - interval '12 hours';"
+```
+
+**判断规则**：`advisory_candidate / total > 0.5` 且 `real_outage = 0` → advisory-only，正常。
