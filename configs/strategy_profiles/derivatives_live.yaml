@@ -265,14 +265,18 @@ strategy_entry_min_signal_edge_bps: 5.0
 # [常用可调] strategy_entry_alpha_min：开仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.18。
 strategy_entry_alpha_min: 0.10
 # [常用可调] strategy_entry_confidence_min：开仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.67。
-strategy_entry_confidence_min: 0.55
+# 2026-04-19 calibration 后下调：baseline.confidence 24h median=0.52/p95=0.58，
+# 0.55 只被 ~15% 决策触及；下调到 0.50（~40 分位）与新 composite_alpha 阈值 0.15 对齐。
+# 详见 docs/review/allocator_budget_zero_root_cause_2026_04_19.md
+strategy_entry_confidence_min: 0.50
 # [进阶可调] strategy_short_entry_min_signal_edge_bps：新开空最低信号边际。当前只在合约运行域生效；推荐值低于做多开仓，避免长期只减多不翻空。可选值：0.0 ~ 100.0；推荐值：12.0。
 # RDP Phase 2 研究同步下调，与 long 入场门槛保持一致逻辑。
 strategy_short_entry_min_signal_edge_bps: 4.0
 # [进阶可调] strategy_short_entry_alpha_min：新开空最低 alpha。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.15。
 strategy_short_entry_alpha_min: 0.15
 # [进阶可调] strategy_short_entry_confidence_min：新开空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.55。
-strategy_short_entry_confidence_min: 0.55
+# 2026-04-19 同步下调，理由同 long (baseline.confidence 分布结构性触不到 0.55)。
+strategy_short_entry_confidence_min: 0.50
 
 # [常用可调] strategy_scale_in_min_signal_edge_bps：加仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：16.0。
 strategy_scale_in_min_signal_edge_bps: 16.0
@@ -359,9 +363,12 @@ strategy_hedge_independent_enabled: true
 # [进阶可调] strategy_hedge_independent_rollout_stage：独立双书的灰度阶段。推荐值：live。
 strategy_hedge_independent_rollout_stage: live
 # [进阶可调] strategy_hedge_independent_long_entry_threshold：独立 long book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.30。
-strategy_hedge_independent_long_entry_threshold: 0.30
+# 2026-04-19 下调到 0.25，与 DecisionEngine confidence_min=0.50 同级。
+# 真正防乱单由 liquidity_quality + min_confirm_ticks + score_stability 保底 (gates.py:163-169)。
+strategy_hedge_independent_long_entry_threshold: 0.25
 # [进阶可调] strategy_hedge_independent_short_entry_threshold：独立 short book 的开仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.30。
-strategy_hedge_independent_short_entry_threshold: 0.30
+# 2026-04-19 同步下调。
+strategy_hedge_independent_short_entry_threshold: 0.25
 # [进阶可调] strategy_hedge_independent_long_close_threshold：独立 long book 的平仓阈值。显式低于 entry，用于建立 hysteresis。可选值：0.0 ~ entry threshold；推荐值：0.15。
 # 实盘安全审查：原值 0.24 与 entry 0.30 间距仅 0.06。下调至 0.15 建立合理 hysteresis。
 strategy_hedge_independent_long_close_threshold: 0.15

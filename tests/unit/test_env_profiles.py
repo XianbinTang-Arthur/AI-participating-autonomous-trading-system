@@ -317,7 +317,10 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_entry_allowed_regimes"] == ["trend", "breakout", "range", "uncertain"]
         assert values["strategy_short_entry_allowed_regimes"] == ["trend", "breakout", "range", "uncertain"]
         expected_entry_alpha = 0.10 if profile == "derivatives_live" else 0.18
-        expected_entry_confidence = 0.55 if profile == "derivatives_live" else 0.66
+        # 2026-04-19 下调 derivatives_live.strategy_entry_confidence_min 0.55→0.50
+        # (与 calibration 后 baseline.confidence 分布对齐, 详见
+        # docs/review/allocator_budget_zero_root_cause_2026_04_19.md).
+        expected_entry_confidence = 0.50 if profile == "derivatives_live" else 0.66
         assert values["strategy_entry_alpha_min"] == expected_entry_alpha
         assert values["strategy_entry_confidence_min"] == expected_entry_confidence
         assert values["strategy_scale_in_min_signal_edge_bps"] == 16.0
@@ -366,8 +369,11 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_family_independent_enabled"] is expected_independent_family_enabled
         assert values["strategy_family_independent_shadow_mode_enabled"] is False
         assert values["strategy_family_independent_live_execution_enabled"] is expected_independent_family_enabled
-        expected_independent_long_entry = 0.30 if profile == "derivatives_live" else 0.66
-        expected_independent_short_entry = 0.30 if profile == "derivatives_live" else 0.66
+        # 2026-04-19 下调 derivatives_live 独立双书 entry_threshold 0.30→0.25
+        # (与 DecisionEngine confidence_min=0.50 同步, 详见
+        # docs/review/allocator_budget_zero_root_cause_2026_04_19.md).
+        expected_independent_long_entry = 0.25 if profile == "derivatives_live" else 0.66
+        expected_independent_short_entry = 0.25 if profile == "derivatives_live" else 0.66
         expected_independent_long_scale_in = 0.34 if profile == "derivatives_live" else 0.70
         # P2-6: short_scale_in_threshold 已对齐至 long=0.40 (原 0.36 与注释声明的"钉住值：0.40"不一致)
         expected_independent_short_scale_in = 0.40 if profile == "derivatives_live" else 0.70
@@ -445,7 +451,8 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["smart_arbitrage_enabled"] is False
     assert values["strategy_hedge_overlay_mode"] == "independent"
     assert values["strategy_entry_alpha_min"] == 0.10
-    assert values["strategy_entry_confidence_min"] == 0.55
+    # 2026-04-19 下调 0.55→0.50 与 calibration 对齐
+    assert values["strategy_entry_confidence_min"] == 0.50
     # 2026-04-19 等分位标定后 P0→P2.7 权重重分配的新值
     # (docs/calibration/baseline_weight_recalibration_2026_04_19.md).
     assert values["strategy_baseline_breakout_alpha_threshold"] == 0.06
@@ -460,8 +467,9 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_baseline_impulse_range_ratio_min"] == 0.003
     assert values["strategy_baseline_impulse_body_ratio_min"] == 0.10
     assert values["strategy_baseline_impulse_require_mtf_alignment"] is True
-    assert values["strategy_hedge_independent_long_entry_threshold"] == 0.30
-    assert values["strategy_hedge_independent_short_entry_threshold"] == 0.30
+    # 2026-04-19 下调 0.30→0.25 与 calibration 对齐
+    assert values["strategy_hedge_independent_long_entry_threshold"] == 0.25
+    assert values["strategy_hedge_independent_short_entry_threshold"] == 0.25
     assert values["strategy_hedge_independent_long_scale_in_threshold"] == 0.34
     assert values["strategy_hedge_independent_short_scale_in_threshold"] == 0.40
     assert values["strategy_hedge_independent_long_close_threshold"] == 0.15
