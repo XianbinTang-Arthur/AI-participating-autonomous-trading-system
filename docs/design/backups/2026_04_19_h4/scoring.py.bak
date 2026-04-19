@@ -139,18 +139,7 @@ def compute_raw_book_score(
     momentum_component = _clamp(max(0.0, side_sign * momentum_alpha), 0.0, 1.0)
     trend_component = _clamp(max(0.0, side_sign * trend_alpha), 0.0, 1.0)
     microstructure_component = _clamp(max(0.0, side_sign * microstructure_alpha), 0.0, 1.0)
-    # H4 修复 (2026-04-19): confidence 仅在该 leg 与 baseline.direction_bias 对齐时计入。
-    # 旧实现 confidence = clamp(baseline.confidence) 两腿同加，而
-    # baseline.confidence = 0.35 + 0.35·|alpha_score| + ... 方向无关 → 在多头 drift
-    # 市场中系统性污染 short leg 的 score-realized 相关性（short slope 翻负、R²≈0）。
-    # 参见 docs/design/h4_confidence_direction_gating_2026_04_19.md
-    # 与 docs/review/short_leg_asymmetry_root_cause_2026_04_19.md §5 方案 A.1
-    leg_aligned = baseline.direction_bias == leg
-    confidence = _clamp(
-        float(baseline.confidence) if leg_aligned else 0.0,
-        0.0,
-        1.0,
-    )
+    confidence = _clamp(float(baseline.confidence), 0.0, 1.0)
 
     mode = _pick_ai_mode(settings=settings, ai_assessment=ai_assessment)
     if mode == "MODE_A":
@@ -183,13 +172,11 @@ def compute_raw_book_score(
             + (confidence * _MODE_C_W_CONFIDENCE)
         )
 
-    # H4 修复 (2026-04-19): 方向无关 bonus 仅在 leg 与 direction_bias 对齐时计入。
-    # 旧实现 regime_bonus 和 volatility_bonus 两腿同加，稀释 short slope 信号。
-    if baseline.regime in {"range", "uncertain"} and leg_aligned:
+    if baseline.regime in {"range", "uncertain"}:
         score += 0.04
     if baseline.direction_bias == leg:
         score += 0.06
-    if baseline.volatility_state == "high" and leg_aligned:
+    if baseline.volatility_state == "high":
         score += 0.03
     return _clamp(score, 0.0, 1.0)
 

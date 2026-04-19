@@ -250,15 +250,6 @@ class IndependentReplayAdapter(BaseReplayAdapter):
         vol_ratio = (current_vol / avg_vol) if avg_vol > 0 else 1.0
         confidence_raw = min(_sigmoid((vol_ratio - 1.0) * 200), 1.0)
 
-        # --- H4 方向门控 (2026-04-19): 对齐生产 scoring.py L148 ---
-        # 生产端 confidence 仅在 leg == baseline.direction_bias 时计入。
-        # 本 replay 没有 baseline 语义，用 "本 leg 在自身坐标系下 trend_dir 为正" 代理——
-        # trend_dir 在 short leg 时已翻转 (line 237-238)，所以两腿统一用 trend_dir > 0 判对齐。
-        # 参见 docs/design/h4_confidence_direction_gating_2026_04_19.md §2.2
-        leg_aligned_trend = trend_dir > 0
-        if not leg_aligned_trend:
-            confidence_raw = 0.0
-
         # --- 加权合成 ---
         score = (
             _W_ALPHA * alpha_raw

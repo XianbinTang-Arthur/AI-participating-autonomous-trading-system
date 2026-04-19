@@ -701,5 +701,120 @@ class TestShortLegThreeTierSymmetry(unittest.TestCase):
         self.assertEqual(count_c, 5, "Mode C short leg with strong AI must reach 5 confirmations")
 
 
+class TestH4DirectionGating(unittest.TestCase):
+    """H4 修复锁定测试：方向无关加项（confidence + regime_bonus + volatility_bonus）
+    仅在 leg 与 baseline.direction_bias 对齐时计入。
+
+    参见:
+      - docs/design/h4_confidence_direction_gating_2026_04_19.md
+      - docs/review/short_leg_asymmetry_root_cause_2026_04_19.md §5 方案 A.1
+    """
+
+    def _baseline_long_bias_with_all_bonuses_eligible(self):
+        """direction_bias=long, regime=range, volatility_state=high → 所有方向无关加项都应触发。"""
+        return make_baseline(
+            direction_bias="long",
+            confidence=0.80,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": 0.30,
+                "trend_alpha": 0.20,
+                "microstructure_alpha": 0.10,
+            },
+        ).model_copy(update={"regime": "range", "composite_alpha_score": 0.40})
+
+    def test_misaligned_short_leg_has_zero_confidence_contribution(self):
+        """direction_bias=long, leg=short → leg_aligned=False，confidence 项应为 0。"""
+        settings = make_derivatives_hedge_settings(
+            strategy_short_bias_enabled=True,
+            ai_operating_mode="baseline_only",
+        )
+        baseline = self._baseline_long_bias_with_all_bonuses_eligible()
+
+        # leg=short 但 direction_bias=long → 所有方向相关项 = 0（被 max(0, -α)=0 过滤）
+        #   （因为 composite_alpha=+0.40，short 方向 side_sign * α = -0.40 → clamp max(0,...) = 0）
+        # 所以整个 score 应该 = 0（方向相关 = 0 + confidence_contribution = 0 + regime_bonus 门控
+        # = 0 + direction_bias_bonus（short != long）= 0 + volatility_bonus 门控 = 0）
+        actual = compute_raw_book_score(
+            settings=settings, leg="short", baseline=baseline, ai_assessment=None,
+        )
+        self.assertAlmostEqual(actual, 0.0, places=9,
+                               msg="misaligned short leg should produce 0 score (all direction-agnostic "
+                                   "terms gated, all direction-aware terms 0 via max(0,-α))")
+
+    def test_misaligned_long_leg_with_short_bias_has_zero_confidence_contribution(self):
+        """direction_bias=short, leg=long → leg_aligned=False，confidence 项应为 0。"""
+        settings = make_derivatives_hedge_settings(
+            strategy_short_bias_enabled=True,
+            ai_operating_mode="baseline_only",
+        )
+        # 翻转方向: direction_bias=short, composite_alpha 为负
+        baseline = make_baseline(
+            direction_bias="short",
+            confidence=0.80,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            volatility_state="high",
+            factor_scores={
+                "momentum_alpha": -0.30,
+                "trend_alpha": -0.20,
+                "microstructure_alpha": -0.10,
+            },
+        ).model_copy(update={"regime": "range", "composite_alpha_score": -0.40})
+
+        # leg=long 但 direction_bias=short → 方向相关项全 0，方向无关项被门控
+        actual = compute_raw_book_score(
+            settings=settings, leg="long", baseline=baseline, ai_assessment=None,
+        )
+        self.assertAlmostEqual(actual, 0.0, places=9,
+                               msg="misaligned long leg should produce 0 score")
+
+    def test_aligned_leg_preserves_full_confidence_and_bonuses(self):
+        """direction_bias=long, leg=long, regime=range, vol=high → 全部加项都应触发。"""
+        settings = make_derivatives_hedge_settings(
+            strategy_short_bias_enabled=True,
+            ai_operating_mode="baseline_only",
+        )
+        baseline = self._baseline_long_bias_with_all_bonuses_eligible()
+
+        actual = compute_raw_book_score(
+            settings=settings, leg="long", baseline=baseline, ai_assessment=None,
+        )
+
+        # 手工展开：confidence 全量 + regime_bonus + direction_bias_bonus + volatility_bonus 全部触发
+        expected = (
+            0.40 * _MODE_A_W_ALPHA        # alpha_component
+            + 0.30 * _MODE_A_W_MOMENTUM    # momentum_component
+            + 0.20 * _MODE_A_W_TREND       # trend_component
+            + 0.10 * _MODE_A_W_MICRO       # micro_component
+            + 0.80 * _MODE_A_W_CONFIDENCE  # confidence_component (aligned)
+        )
+        expected += 0.04  # regime_bonus (range + aligned)
+        expected += 0.06  # direction_bias_bonus (long == long)
+        expected += 0.03  # volatility_bonus (high + aligned)
+
+        self.assertAlmostEqual(actual, expected, places=9,
+                               msg="aligned leg must receive confidence + regime + direction + volatility bonuses")
+
+    def test_misaligned_short_leg_no_contribution_across_all_modes(self):
+        """三档 mode × direction_bias=long, leg=short → score 均应为 0（方向相关项=0 + 门控=0）。"""
+        baseline = self._baseline_long_bias_with_all_bonuses_eligible()
+        ai = make_ai_assessment(direction=0.25, confidence=0.82)
+
+        for mode in ("baseline_only", "ai_assisted", "ai_decision_maker"):
+            settings = make_derivatives_hedge_settings(
+                strategy_short_bias_enabled=True,
+                ai_operating_mode=mode,
+            )
+            actual = compute_raw_book_score(
+                settings=settings, leg="short", baseline=baseline, ai_assessment=ai,
+            )
+            self.assertAlmostEqual(actual, 0.0, places=9,
+                                   msg=f"mode={mode} misaligned short leg must produce 0 score "
+                                       f"regardless of AI presence")
+
+
 if __name__ == "__main__":
     unittest.main()
