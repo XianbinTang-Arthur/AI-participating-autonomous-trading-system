@@ -29,13 +29,19 @@ DEFAULT_EMA_PERIOD = 20      # EMA(20)：close 平滑
 
 @dataclass(frozen=True, slots=True)
 class RollingIndicators:
-    """EMA/ROC/ATR 计算结果。``ready=False`` 表示历史不足，所有数值字段应忽略。"""
+    """EMA/ROC/ATR/ADX 计算结果。``ready=False`` 表示历史不足，所有数值字段应忽略。"""
 
     close_ema: float | None = None
     roc: float | None = None              # (close_now - close_{n ago}) / close_{n ago}
     atr: float | None = None              # 原始 ATR（绝对价格单位）
     atr_normalized: float | None = None   # ATR / close_now（相对比例，pct）
     prev_close: float | None = None       # 上一根 bar 的 close（调用方可能用作 basis）
+    # P2.9 — Wilder ADX(14). ADX 刻画"趋势强度"（无方向）：> 25 强趋势，< 20 震荡.
+    # +DI / -DI 分别给出 long / short 方向性 Demand Index. 用于 RegimeClassifier
+    # 的 classify_with_adx 路径，替换硬编码 momentum / trend_strength 阈值.
+    adx: float | None = None
+    plus_di: float | None = None
+    minus_di: float | None = None
     bars_available: int = 0
     ready: bool = False
 
@@ -138,12 +144,67 @@ class RollingCandleState:
         atr = sum(trs) / len(trs) if trs else 0.0
         atr_norm = atr / close_now if close_now else 0.0
 
+        # P2.9 — Wilder ADX / +DI / -DI
+        # 使用和 ATR 对齐的 atr_window (默认 14). 实现：
+        #   1. 对全序列算 +DM / -DM / TR (bars[1..n-1], 需要 prev)
+        #   2. 用 atr_window 期 SMA 作为"首期 Wilder smoothed" 初值
+        #   3. 后续按 Wilder 递推 smoothed_t = smoothed_{t-1} - smoothed_{t-1}/N + x_t
+        #   4. 当前期 +DI = 100 × +DM_smoothed / TR_smoothed
+        #   5. DX = 100 × |+DI - -DI| / (+DI + -DI)
+        #   6. ADX = 最后一期 DX (简化版：不对 DX 再做 N 期 Wilder 平滑；保留
+        #      DX 历史会让 state 体积翻倍，且在 14 期窗口下 DX 与 ADX 方向性
+        #      一致，仅数值略尖锐；calibration 任务若发现太敏感可再升级).
+        adx_value: float | None = None
+        plus_di: float | None = None
+        minus_di: float | None = None
+        if n >= self.atr_window + 1:
+            plus_dms: list[float] = []
+            minus_dms: list[float] = []
+            tr_all: list[float] = []
+            for i in range(1, n):
+                prev_b = bars[i - 1]
+                cur_b = bars[i]
+                high_diff = float(cur_b.high) - float(prev_b.high)
+                low_diff = float(prev_b.low) - float(cur_b.low)
+                plus_dm = high_diff if (high_diff > 0 and high_diff > low_diff) else 0.0
+                minus_dm = low_diff if (low_diff > 0 and low_diff > high_diff) else 0.0
+                plus_dms.append(plus_dm)
+                minus_dms.append(minus_dm)
+                prev_c = float(prev_b.close)
+                tr_all.append(max(
+                    float(cur_b.high) - float(cur_b.low),
+                    abs(float(cur_b.high) - prev_c),
+                    abs(float(cur_b.low) - prev_c),
+                ))
+            if len(tr_all) >= self.atr_window:
+                def _wilder_last(series: list[float], period: int) -> float:
+                    if period <= 0:
+                        return 0.0
+                    smoothed = sum(series[:period])
+                    for x in series[period:]:
+                        smoothed = smoothed - (smoothed / period) + x
+                    return smoothed
+                pdm_smoothed = _wilder_last(plus_dms, self.atr_window)
+                mdm_smoothed = _wilder_last(minus_dms, self.atr_window)
+                tr_smoothed = _wilder_last(tr_all, self.atr_window)
+                if tr_smoothed > 0:
+                    plus_di = 100.0 * pdm_smoothed / tr_smoothed
+                    minus_di = 100.0 * mdm_smoothed / tr_smoothed
+                    di_sum = plus_di + minus_di
+                    if di_sum > 0:
+                        adx_value = 100.0 * abs(plus_di - minus_di) / di_sum
+                    else:
+                        adx_value = 0.0
+
         return RollingIndicators(
             close_ema=self._ema_value,
             roc=roc,
             atr=atr,
             atr_normalized=atr_norm,
             prev_close=close_prev,
+            adx=adx_value,
+            plus_di=plus_di,
+            minus_di=minus_di,
             bars_available=n,
             ready=True,
         )

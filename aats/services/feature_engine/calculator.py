@@ -54,6 +54,7 @@ class FeatureCalculator:
         oi_max_snapshots: int = DEFAULT_OI_MAX_SNAPSHOTS,
         oi_ema_period: int = DEFAULT_OI_EMA_PERIOD,
         oi_dead_zone: float = DEFAULT_OI_DEAD_ZONE,
+        enable_regime_adx: bool = True,
     ) -> None:
         self.trend = trend or TrendCalculator()
         self.volatility = volatility or VolatilityAnalyzer()
@@ -81,6 +82,9 @@ class FeatureCalculator:
         self._oi_ema_period = oi_ema_period
         self.oi_dead_zone = oi_dead_zone
         self._oi_states: dict[str, OpenInterestState] = {}
+        # P2.9 ADX-driven regime classification 开关. 关闭 → 走旧 classify()
+        # 即硬编码 momentum / trend_strength 阈值 (紧急回滚).
+        self.enable_regime_adx = enable_regime_adx
         # Per (symbol, timeframe) 的滚动状态。跨 calculate() 调用累积历史。
         # 同 ts 的 update 幂等 → 同 snapshot 多次 calculate 结果一致
         # （守 test_feature_calculation_is_deterministic_for_same_snapshot 契约）。
@@ -168,15 +172,44 @@ class FeatureCalculator:
             if oi_ind.ready:
                 oi_delta = oi_ind.oi_delta
         liquidity = self.liquidity.calculate(snapshot)
-        regime = self.regime.classify(
-            momentum_15m=features_15m.momentum_score,
-            momentum_1h=features_1h.momentum_score,
-            trend_strength_15m=features_15m.trend_strength,
-            trend_strength_1h=features_1h.trend_strength,
-            volatility_state_15m=features_15m.volatility_state,
-            volatility_state_1h=features_1h.volatility_state,
-            liquidity_score=liquidity.liquidity_score,
-        )
+        # P2.9 — ADX 驱动的 regime 分类 (开关 enable_regime_adx). state 未 ready
+        # 或 ADX None → classify_with_adx 内部自动退化到 classify(). flag 关则
+        # 完全走旧 classify 路径 (紧急回滚).
+        adx_value: float | None = None
+        plus_di_value: float | None = None
+        minus_di_value: float | None = None
+        if self.enable_regime_adx and self.enable_timeseries_smoothing:
+            key_15m = (snapshot.symbol, "15m")
+            primary_state = self._rolling_states.get(key_15m)
+            if primary_state is not None:
+                primary_ind = primary_state.indicators()
+                if primary_ind.ready:
+                    adx_value = primary_ind.adx
+                    plus_di_value = primary_ind.plus_di
+                    minus_di_value = primary_ind.minus_di
+        if self.enable_regime_adx:
+            regime = self.regime.classify_with_adx(
+                adx=adx_value,
+                plus_di=plus_di_value,
+                minus_di=minus_di_value,
+                momentum_15m=features_15m.momentum_score,
+                momentum_1h=features_1h.momentum_score,
+                trend_strength_15m=features_15m.trend_strength,
+                trend_strength_1h=features_1h.trend_strength,
+                volatility_state_15m=features_15m.volatility_state,
+                volatility_state_1h=features_1h.volatility_state,
+                liquidity_score=liquidity.liquidity_score,
+            )
+        else:
+            regime = self.regime.classify(
+                momentum_15m=features_15m.momentum_score,
+                momentum_1h=features_1h.momentum_score,
+                trend_strength_15m=features_15m.trend_strength,
+                trend_strength_1h=features_1h.trend_strength,
+                volatility_state_15m=features_15m.volatility_state,
+                volatility_state_1h=features_1h.volatility_state,
+                liquidity_score=liquidity.liquidity_score,
+            )
         multi_timeframe_context = self._multi_timeframe_context(
             snapshot_ts=snapshot.snapshot_ts,
             features_15m=features_15m,

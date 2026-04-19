@@ -509,6 +509,14 @@ class AATSSettings(BaseSettings):
     strategy_baseline_oi_max_snapshots: int = 60     # ~3 分钟窗口 (3s × 60)
     strategy_baseline_oi_ema_period: int = 20        # EMA(20) 基线
     strategy_baseline_oi_dead_zone: float = 0.005    # |delta|<0.5% 忽略 (噪声)
+
+    # ── P2.9 ADX-driven regime classifier ───────────────────────────────────
+    # 替换 regime.py 原硬编码 momentum / trend_strength 阈值。Wilder ADX 只刻画
+    # "趋势强度"无方向，+DI / -DI 给出方向。经典阈值 > 25 强趋势, < 20 震荡,
+    # 20-25 uncertain. 关闭后完全走旧 classify() (紧急回滚).
+    strategy_baseline_regime_adx_enabled: bool = True
+    strategy_baseline_regime_adx_trend_threshold: float = 25.0
+    strategy_baseline_regime_adx_range_threshold: float = 20.0
     strategy_flat_signal_hold_enabled: bool = False
     strategy_flat_exit_microstructure_threshold: float = 0.12
     strategy_flat_exit_factor_threshold: float = 0.18

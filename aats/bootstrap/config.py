@@ -86,6 +86,7 @@ from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
 from aats.services.execution_engine.planner import ExecutionPlanner
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEngine
+from aats.services.feature_engine.regime import RegimeClassifier
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.derivatives_live_guard import DerivativesLiveGuardService
 from aats.services.governance_engine.kill_switch import KillSwitch
@@ -3705,7 +3706,14 @@ def _build_market_slice(
     """
     if not _slice_active("market", effective_process_role=effective_process_role):
         return
+    # P2.9 RegimeClassifier 按 settings 配置 ADX 阈值. 在此构造传给 FeatureCalculator,
+    # calculator 内部再按 enable_regime_adx 决定走 classify_with_adx 还是 classify.
+    regime_classifier = RegimeClassifier(
+        adx_trend_threshold=runtime_settings.strategy_baseline_regime_adx_trend_threshold,
+        adx_range_threshold=runtime_settings.strategy_baseline_regime_adx_range_threshold,
+    )
     calculator = FeatureCalculator(
+        regime=regime_classifier,
         enable_timeseries_smoothing=runtime_settings.strategy_baseline_timeseries_smoothing_enabled,
         rolling_max_bars=runtime_settings.strategy_baseline_rolling_max_bars,
         rolling_roc_window=runtime_settings.strategy_baseline_rolling_roc_window,
@@ -3718,6 +3726,7 @@ def _build_market_slice(
         oi_max_snapshots=runtime_settings.strategy_baseline_oi_max_snapshots,
         oi_ema_period=runtime_settings.strategy_baseline_oi_ema_period,
         oi_dead_zone=runtime_settings.strategy_baseline_oi_dead_zone,
+        enable_regime_adx=runtime_settings.strategy_baseline_regime_adx_enabled,
     )
     slices.feature_engine = FeatureEngine(bus=slices.bus, calculator=calculator)
 
