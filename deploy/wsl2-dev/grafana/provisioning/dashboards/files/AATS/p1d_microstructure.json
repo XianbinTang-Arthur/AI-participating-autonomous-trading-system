@@ -1,0 +1,430 @@
+{
+  "annotations": { "list": [] },
+  "description": "P1-D Phase 1A microstructure WS collector + Silver ETL 监控 (Stage 4). 4 panel: WS 健康 / Bronze 吞吐 / Silver ETL 耗时+错误率 / Storage 占用.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 100,
+      "title": "Panel 1: WebSocket Health",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "每 30s microstructure collector 推到 Prometheus 的 WS message 累计数. rate=0 持续 >60s 说明 WS 断连.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "never" },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 1 },
+      "id": 1,
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(rate(aats_microstructure_ws_messages_total[1m])) * 60",
+          "legendFormat": "messages/min",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(rate(aats_microstructure_ws_reconnect_total[5m])) * 3600",
+          "legendFormat": "reconnects/hour",
+          "refId": "B"
+        }
+      ],
+      "title": "WS Message Rate + Reconnect Rate",
+      "description": "Green line: messages/min (OKX public push rate, BTC-USDT-SWAP 期望 ~2000/min). Yellow line: reconnect/hour (期望 < 5).",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "最近 10 min microstructure daemon 心跳日志 (heartbeat 的 last_error / connected 字段). 若 'connected=False' 出现即为断线.",
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 1 },
+      "id": 2,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "{container=\"aats-microstructure-collector\"} |~ \"okx_ws_disconnected|okx_ws_connection_error|okx_ws_subscription_error\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "WS Disconnection / Subscription Errors (Loki)",
+      "type": "logs"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 8 },
+      "id": 200,
+      "title": "Panel 2: Bronze Ingest Throughput",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "每 15min 每张 Bronze 表的 UPSERT 行数. 预期 BTC-USDT-SWAP: market_trades ~32k/15min, market_orderbook_bbo ~900, market_orderbook_books5 ~1800, oi_funding_ticks ~90.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20, "lineWidth": 2 },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 9 },
+      "id": 3,
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(increase(aats_microstructure_bronze_rows_written_trades_total[15m]))",
+          "legendFormat": "trades/15m",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(increase(aats_microstructure_bronze_rows_written_bbo_total[15m]))",
+          "legendFormat": "bbo/15m",
+          "refId": "B"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(increase(aats_microstructure_bronze_rows_written_books5_total[15m]))",
+          "legendFormat": "books5/15m",
+          "refId": "C"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(increase(aats_microstructure_bronze_rows_written_oif_total[15m]))",
+          "legendFormat": "oif/15m",
+          "refId": "D"
+        }
+      ],
+      "title": "Bronze Rows Written per 15m (by table)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "description": "24h 滚动窗口的 Bronze row 总数 (直接查 PG). 验证 §11 Gate 3: bronze.market_trades 24h count ∈ [1M, 5M].",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 500000 },
+              { "color": "green", "value": 1000000 },
+              { "color": "yellow", "value": 5000000 },
+              { "color": "red", "value": 8000000 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 6, "x": 12, "y": 9 },
+      "id": 4,
+      "options": { "graphMode": "area", "colorMode": "value" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS trades_24h FROM bronze.market_trades WHERE ts >= NOW() - INTERVAL '24 hours';",
+          "refId": "A"
+        }
+      ],
+      "title": "Bronze trades row count (24h)",
+      "description": "Stage 4 acceptance gate: count in [1M, 5M] range (BTC 2.6M typical).",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "description": "最近一次 Bronze 写入到现在的秒数. 若 > 60s 说明 collector 停止写入 (可能 DB 故障 / WS 断开).",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 30 },
+              { "color": "red", "value": 60 }
+            ]
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 9 },
+      "id": 5,
+      "options": { "graphMode": "none", "colorMode": "value" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(ts)))::int AS seconds_ago FROM bronze.market_trades;",
+          "refId": "A"
+        }
+      ],
+      "title": "Bronze trades last-write lag",
+      "description": "staleness gauge; red >= 60s.",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 16 },
+      "id": 300,
+      "title": "Panel 3: Silver ETL Duration + Error Rate",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Silver ETL log event silver_microstructure_etl 的 duration 字段 (秒). §11 Gate 5: p95 < 10s.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 20, "lineWidth": 2 },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 17 },
+      "id": 6,
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {job=\"aats\"} |= \"silver_microstructure_etl\" | regexp \"duration=(?P<duration>[0-9.]+)s\" | unwrap duration [15m])",
+          "legendFormat": "p95",
+          "queryType": "range",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "avg_over_time({job=\"aats\"} |= \"silver_microstructure_etl\" | regexp \"duration=(?P<duration>[0-9.]+)s\" | unwrap duration [15m])",
+          "legendFormat": "avg",
+          "queryType": "range",
+          "refId": "B"
+        }
+      ],
+      "title": "Silver ETL Duration (p95 / avg)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "Silver ETL 成功 vs 错误次数. rate counter. §11 Gate 4 要求 'etl_failed' 事件 24h=0.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 6, "x": 12, "y": 17 },
+      "id": 7,
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(increase(aats_microstructure_silver_etl_runs_success_total[1h]))",
+          "legendFormat": "success/h",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "sum(increase(aats_microstructure_silver_etl_errors_total[1h]))",
+          "legendFormat": "error/h",
+          "refId": "B"
+        }
+      ],
+      "title": "Silver ETL Success vs Error (per hour)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "description": "24h 内 Silver 表中 quality_flags 含 'etl_failed' 的行数. §11 Gate 4 要求 = 0.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 6, "x": 18, "y": 17 },
+      "id": 8,
+      "options": { "graphMode": "none", "colorMode": "value" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS etl_failed_24h FROM silver.market_orderbook_metrics_15m WHERE 'etl_failed:orderbook_metrics' = ANY(quality_flags) AND ts >= NOW() - INTERVAL '24 hours';",
+          "refId": "A"
+        }
+      ],
+      "title": "Silver 'etl_failed' count (24h)",
+      "description": "Stage 4 acceptance: expected 0.",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 24 },
+      "id": 400,
+      "title": "Panel 4: Storage Growth (8 tables)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "description": "8 张 microstructure 表的当前 total_relation_size (bytes). 验证 §10.3 磁盘压力可控. Phase 1A 预估 30d 合计 < 10 GB.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 2 },
+          "unit": "bytes"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 24, "x": 0, "y": 25 },
+      "id": 9,
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "editorMode": "code",
+          "format": "time_series",
+          "rawQuery": true,
+          "rawSql": "SELECT NOW() AS time, schemaname || '.' || tablename AS metric, pg_total_relation_size(schemaname||'.'||tablename) AS value FROM pg_tables WHERE (schemaname='bronze' AND tablename LIKE 'market_%') OR (schemaname='silver' AND tablename LIKE 'market_%15m') OR (schemaname='staging' AND tablename='market_oi_funding_ticks') ORDER BY value DESC;",
+          "refId": "A"
+        }
+      ],
+      "title": "8 tables: pg_total_relation_size",
+      "description": "Stacked area chart showing disk footprint evolution; expected bronze.market_trades dominates (~300 MB/day with 30d retention).",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "description": "Silver 15m bar 覆盖率 — 过去 24h 在 silver.market_orderbook_metrics_15m 有行的 bar 数. §11 Gate 1 要求 >= 96 行/24h (每 15min 1 行 = 96/24h).",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 80 },
+              { "color": "green", "value": 96 }
+            ]
+          },
+          "min": 0,
+          "max": 96,
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 32 },
+      "id": 10,
+      "options": { "graphMode": "area", "colorMode": "value" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT COUNT(*) AS silver_bars_24h FROM silver.market_orderbook_metrics_15m WHERE symbol='BTC-USDT-SWAP' AND ts >= NOW() - INTERVAL '24 hours';",
+          "refId": "A"
+        }
+      ],
+      "title": "Silver 15m bars produced (24h)",
+      "description": "Stage 4 acceptance gate: >= 96 bars / 24h (96 = 24h / 15min).",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "description": "Silver 最近一 bar 离现在的分钟数. §11 Gate 2 要求 < 30 min (否则说明 ETL 失效).",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 20 },
+              { "color": "red", "value": 30 }
+            ]
+          },
+          "unit": "m"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 32 },
+      "id": 11,
+      "options": { "graphMode": "none", "colorMode": "value" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(ts)))/60 AS minutes_ago FROM silver.market_orderbook_metrics_15m WHERE symbol='BTC-USDT-SWAP';",
+          "refId": "A"
+        }
+      ],
+      "title": "Silver last-bar freshness",
+      "description": "Freshness gauge; red >= 30 min (Silver ETL should run every 15 min).",
+      "type": "stat"
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["aats", "p1d", "microstructure", "phase1a"],
+  "templating": { "list": [] },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "AATS P1-D Phase 1A Microstructure",
+  "uid": "p1d-microstructure",
+  "version": null
+}

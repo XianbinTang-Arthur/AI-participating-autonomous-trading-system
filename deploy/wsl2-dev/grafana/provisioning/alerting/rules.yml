@@ -157,3 +157,247 @@ groups:
         annotations:
           summary: "More than 5 errors in 15 minutes"
           description: "Elevated error rate detected. Review at next audit."
+
+      # ──────────────────────────────────────────────────────────────
+      # P1-D Phase 1A Stage 4: microstructure + Path C Fix 3 告警 (6 条)
+      # 对齐 docs/design/p1d_phase1a_implementation_design_2026_04_20.md §4.3
+      # 对齐 docs/design/path_c_fix3_monitoring_alerts_followup_2026_04_19.md
+      # ──────────────────────────────────────────────────────────────
+
+      # ── 微结构告警 1/3: WS stale ──────────────────────────────────
+      # 最近 2 min 未见 microstructure_ws_message 日志 = collector 断链或 daemon 挂
+      - uid: sev2-micro-ws-stale
+        title: "SEV2: Microstructure WS Stale"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "sum(count_over_time({container=\"aats-microstructure-collector\"} |= \"okx_ws_message_received\" [2m]))"
+              queryType: range
+            relativeTimeRange:
+              from: 120
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: Alerting
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: sev2
+          component: microstructure
+        annotations:
+          summary: "Microstructure WS no messages for 2+ minutes"
+          description: "aats-microstructure-collector has not logged okx_ws_message_received in the last 2 min. Check WS disconnection / OKX status / DB availability."
+
+      # ── 微结构告警 2/3: WS 重连频繁 ────────────────────────────────
+      # 1h 内 > 5 次 reconnect = OKX 不稳或网络问题
+      - uid: sev3-micro-ws-reconnect
+        title: "SEV3: Microstructure WS Frequent Reconnect"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "sum(count_over_time({container=\"aats-microstructure-collector\"} |= \"okx_ws_reconnecting\" [1h]))"
+              queryType: range
+            relativeTimeRange:
+              from: 3600
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [5] }
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: sev3
+          component: microstructure
+        annotations:
+          summary: "Microstructure WS reconnect rate > 5/hour"
+          description: "Excessive reconnect cycles in the last hour. Likely OKX public WS cluster instability or network saturation. Check okx_ws_disconnected events for root cause."
+
+      # ── 微结构告警 3/3: Silver ETL 耗时过长 ───────────────────────
+      # 连续 2 次 Silver ETL duration > 10s = 性能恶化或数据量暴涨
+      - uid: sev3-micro-silver-etl-slow
+        title: "SEV3: Silver ETL Slow"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "max_over_time({job=\"aats\"} |= \"silver_microstructure_etl\" | regexp \"duration=(?P<duration>[0-9.]+)s\" | unwrap duration [15m])"
+              queryType: range
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [10] }
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: sev3
+          component: microstructure
+        annotations:
+          summary: "Silver ETL duration > 10s (p95 budget exceeded)"
+          description: "microstructure silver ETL took >10s. §11 Gate 5 budget breached. Check Bronze 表膨胀 / PG IO / query plan. 对应 dashboard: Panel 3."
+
+      # ── Path C Fix 3 告警 1/3: Fee drift ───────────────────────────
+      # 7 天滚动 mean derived_fee_bps > 5.5 bps = 系统成本与 OKX taker 5.0 bps 偏离
+      # warning: 5.5 bps, critical: 6.0 bps (Path C Fix 3 设计)
+      - uid: sev2-cost-fee-drift
+        title: "SEV2: Fee Drift Above Baseline"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "avg_over_time({job=\"aats\"} |= \"fee_drift\" | regexp \"derived_fee_bps=(?P<fee>[0-9.]+)\" | unwrap fee [7d])"
+              queryType: range
+            relativeTimeRange:
+              from: 604800
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [5.5] }
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: OK
+        execErrState: Error
+        for: 1h
+        labels:
+          severity: sev2
+          component: cost_audit
+        annotations:
+          summary: "7d rolling mean derived_fee_bps > 5.5 bps (warning)"
+          description: "Execution fee drift detected vs OKX taker 5.0 bps baseline. Threshold breakdown: warning 5.5 / critical 6.0. Check cost_audit_live_reconciliation report §7.2."
+
+      # ── Path C Fix 3 告警 2/3: Cost margin tight ────────────────
+      # 单笔 total_entry_cost > max_acceptable_cost_bps × 0.9 (warning)
+      # ≥ 0.95 (critical) = 策略成本裕度逼近上限
+      # 默认 max_acceptable 7.5 → warning 6.75 / critical 7.125
+      - uid: sev2-cost-margin-tight
+        title: "SEV2: Cost Margin Tight (single order)"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "max_over_time({job=\"aats\"} |= \"cost_margin_tight\" | regexp \"total_entry_cost_bps=(?P<cost>[0-9.]+)\" | unwrap cost [15m])"
+              queryType: range
+            relativeTimeRange:
+              from: 900
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [6.75] }
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: sev2
+          component: cost_audit
+        annotations:
+          summary: "Single order total_entry_cost > 6.75 bps (warning)"
+          description: "One order exceeded 90% of max_acceptable_cost_bps (7.5). critical @ 7.125. Path C lived max 7.271 — 裕度 0.23 bps。Check cost_audit_live_reconciliation §5.3 + §6.1。"
+
+      # ── Path C Fix 3 告警 3/3: BLOCKED close-only race ──────────
+      # 24h 内 cancel_reason='okx_close_only_without_reducible_position'
+      # >= 2 (warning) / >= 5 (critical) = close_only 判定 vs 实际仓位 race
+      - uid: sev3-blocked-close-only-race
+        title: "SEV3: BLOCKED close_only race condition"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "sum(count_over_time({job=\"aats\"} |~ \"okx_close_only_without_reducible_position\" [24h]))"
+              queryType: range
+            relativeTimeRange:
+              from: 86400
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [1] }
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: sev3
+          component: execution
+        annotations:
+          summary: "24h >=2 BLOCKED orders with close_only race"
+          description: "cancel_reason=okx_close_only_without_reducible_position fired >=2 times in 24h (critical @ 5). Suspected race between close_only check and live position read. Check cost_audit_live_reconciliation §2.4 + §10 疑问 4。"

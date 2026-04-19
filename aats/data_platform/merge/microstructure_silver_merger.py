@@ -31,12 +31,41 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, Callable, Protocol
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 log = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Metrics protocol — duck-typed MetricsRegistry hook (Stage 4)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class _MetricsLike(Protocol):
+    """Minimal interface mirroring aats.bootstrap.metrics.MetricsRegistry.
+
+    Declared here (not imported) so Silver ETL stays decoupled from the
+    bootstrap runtime and can be unit-tested without MetricsRegistry.
+    """
+
+    def increment(self, metric_name: str, value: int = 1) -> None: ...
+
+
+def _record_metric(
+    registry: "_MetricsLike | None",
+    name: str,
+    value: int = 1,
+) -> None:
+    """Best-effort metric increment; never throws."""
+    if registry is None:
+        return
+    try:
+        registry.increment(name, value)
+    except Exception:  # pragma: no cover — metrics never block ETL
+        pass
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -1301,6 +1330,7 @@ def build_silver_microstructure_15m(
     bar_end_ts: datetime,
     ingest_run_id: str,
     dataset_version: str = DEFAULT_DATASET_VERSION,
+    metrics_registry: _MetricsLike | None = None,
 ) -> SilverMicrostructureResult:
     """§7.1 总入口 — 聚合 5 张 Silver 15m 表。
 
@@ -1317,16 +1347,20 @@ def build_silver_microstructure_15m(
         本次 ETL 所属 meta.ingest_runs UUID。caller 负责创建/关闭 run。
     dataset_version : str
         默认 'p1d_microstructure_v1.0'; 可由 CLI 覆盖测试。
+    metrics_registry : MetricsRegistry-like, optional
+        Stage 4 新增: 若传入, ETL 会递增如下 counter (Prometheus 名前缀
+        自动添加 'aats_'):
 
-    Returns
-    -------
-    SilverMicrostructureResult
-        tables_written + quality_flags + duration
+        - ``microstructure_silver_etl_runs_total`` — 每次入口调用 +1
+        - ``microstructure_silver_etl_runs_success_total`` — 无 table 失败时 +1
+        - ``microstructure_silver_etl_errors_total`` — 有 table 失败时 +1
+        - ``microstructure_silver_etl_errors_{table}_total`` — 按表拆分
+        - ``microstructure_silver_rows_written_{table}_total`` — 每次 UPSERT 的
+          rowcount (0 或 1) 累计
 
-    Raises
-    ------
-    ValueError
-        bar_start_ts / bar_end_ts 不满足对齐约束。
+        Duration p95 不在 MetricsRegistry 中追踪 (Counter 不支持 histogram,
+        见 §4.3); 走 log event ``silver_microstructure_etl`` 的 ``duration``
+        字段 + Loki ``| json | unwrap duration`` 查询。
     """
     _validate_bar_alignment(bar_start_ts, bar_end_ts)
 
@@ -1334,6 +1368,8 @@ def build_silver_microstructure_15m(
     flags: list[str] = []
     written: dict[str, int] = {}
     total_error: str | None = None
+
+    _record_metric(metrics_registry, "microstructure_silver_etl_runs_total")
 
     # Step 1: orderbook (provides mid_price_ref for downstream)
     mid_price_ref: Any = None
@@ -1359,6 +1395,9 @@ def build_silver_microstructure_15m(
         log.exception("orderbook_metrics build failed")
         written["orderbook_metrics_15m"] = 0
         total_error = total_error or repr(exc)
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_errors_orderbook_total",
+        )
 
     # Step 2: trade_flow
     try:
@@ -1373,6 +1412,9 @@ def build_silver_microstructure_15m(
         log.exception("trade_flow build failed")
         written["trade_flow_15m"] = 0
         total_error = total_error or repr(exc)
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_errors_trade_flow_total",
+        )
 
     # Step 3: oi_funding_metrics
     try:
@@ -1387,6 +1429,9 @@ def build_silver_microstructure_15m(
         log.exception("oi_funding_metrics build failed")
         written["oi_funding_metrics_15m"] = 0
         total_error = total_error or repr(exc)
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_errors_oi_funding_total",
+        )
 
     # Step 4: volume_profile (depends on trade_flow TFI, but 5.4 对依赖
     # 用 LEFT JOIN 读 silver.market_trade_flow_15m, 若上一步失败也不阻塞)
@@ -1402,6 +1447,9 @@ def build_silver_microstructure_15m(
         log.exception("volume_profile build failed")
         written["volume_profile_15m"] = 0
         total_error = total_error or repr(exc)
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_errors_volume_profile_total",
+        )
 
     # Step 5: liquidation_metrics
     try:
@@ -1416,6 +1464,9 @@ def build_silver_microstructure_15m(
         log.exception("liquidation_metrics build failed")
         written["liquidation_metrics_15m"] = 0
         total_error = total_error or repr(exc)
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_errors_liquidation_total",
+        )
 
     duration = time.monotonic() - start_time
     result = SilverMicrostructureResult(
@@ -1427,6 +1478,20 @@ def build_silver_microstructure_15m(
         duration_seconds=duration,
         error=total_error,
     )
+
+    # Aggregate metrics: success/error + per-table rows_written
+    if total_error is None:
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_runs_success_total",
+        )
+    else:
+        _record_metric(metrics_registry, "microstructure_silver_etl_errors_total")
+    for table_name, rowcount in written.items():
+        _record_metric(
+            metrics_registry,
+            f"microstructure_silver_rows_written_{table_name}_total",
+            value=rowcount,
+        )
 
     log.info(
         "silver_microstructure_etl symbol=%s bar=%s written=%s flags=%s "

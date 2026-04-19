@@ -26,6 +26,17 @@ scrape_configs:
         labels:
           env: dev
 
+  # P1-D Phase 1A Stage 4: microstructure WS collector 暴露自己的
+  # PrometheusMetricReader 在 :9465（与 9464 错开，避免同主机端口冲突）。
+  # Metrics 包括 microstructure_ws_messages_total / bronze_rows_written 等，
+  # 对应 Grafana dashboard p1d_microstructure.json Panel 1-2。
+  - job_name: aats-microstructure
+    static_configs:
+      - targets:
+          - aats-microstructure-collector:9465
+        labels:
+          env: dev
+
   # Redis Exporter — redis_commands_duration_seconds_total 等指标
   - job_name: redis
     static_configs:
