@@ -92,11 +92,15 @@ async def amain(args: argparse.Namespace) -> int:
         LiquidationsCollector,
     )
 
-    # process_role=None overrides AATS_PROCESS_ROLE=liquidations-daemon (set
-    # by compose for log/observability labeling) — this daemon is not part of
-    # the 4-process topology and would fail the gateway/market/decision/
-    # execution/monolith enum check otherwise.
-    settings = AATSSettings(process_role=None)
+    # AATSSettings.model_validate({}) bypasses BaseSettings' env-loading path
+    # entirely — only the class-level defaults (okx_public_ws_url, reconnect/
+    # keepalive tunings) are used. The daemon is pure data-lake ingest, not
+    # part of the 4-process runtime topology, so it deliberately sidesteps
+    # managed-profile resolution, process_role validation, and the derivatives
+    # cross-field checks that those paths enforce. DB connectivity goes through
+    # aats.data_platform.db → ResearchPlatformSettings, which reads its own
+    # RDP_DATABASE_URL / AATS_ACTIVE_PARAMETER_DB_URL env vars independently.
+    settings = AATSSettings.model_validate({})
     inst_types = tuple(args.inst_types) if args.inst_types else ("SWAP",)
     collector = LiquidationsCollector(
         settings=settings,

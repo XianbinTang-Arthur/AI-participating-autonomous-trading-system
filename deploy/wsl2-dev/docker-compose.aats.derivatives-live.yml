@@ -53,9 +53,17 @@ services:
 
   # ---------------------------------------------------------------------------
   # liquidations-daemon — OKX public `liquidation-orders` WebSocket → staging.raw_liquidations
-  # 旁路 data-lake ingest：OKX REST 只保留 7 天强平历史，该 daemon 订阅公共
-  # WS 频道长期积累原始事件供未来 baseline contrarian 反转信号回填。不动
-  # 主交易路径（market / decision / execution），不写 silver/gold。
+  #
+  # 旁路 data-lake ingest：OKX REST 只保留 7 天强平历史，该 daemon 订阅公共 WS
+  # 频道长期积累原始事件供未来 baseline contrarian 反转信号回填。不动主交易
+  # 路径（market / decision / execution），不写 silver/gold。
+  #
+  # 刻意与主 runtime slice 系统解耦：
+  #   - 不注入 AATS_PROCESS_ROLE（不在 4 进程枚举内，走 daemon 里的 model_validate({})
+  #     纯默认路径，跳过 managed profile / process_role / derivatives 校验）
+  #   - 不加载 .env.derivatives.live（daemon 只用公共 WS，不需要 OKX 凭证）
+  #   - 只注入 RDP 库连接（DB 落 staging 是它唯一的外部依赖）
+  #
   # 复用 aats-base:dev 镜像，不同 entrypoint：scripts/liquidations_ws_daemon.py。
   # ---------------------------------------------------------------------------
   aats-liquidations-daemon:
@@ -65,26 +73,13 @@ services:
     image: aats-base:dev
     container_name: aats-liquidations-daemon
     restart: unless-stopped
-    env_file:
-      - ../../.env.derivatives.live
     environment:
-      <<: *aats-derivatives-live-env
-      AATS_PROCESS_ROLE: liquidations-daemon
-      AATS_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
-      AATS_EVENT_BUS_BACKEND: hybrid
-      AATS_NATS_URL: nats://nats:4222
-      AATS_NATS_STREAM_NAME: AATS_EVENTS
-      AATS_HOT_STATE_BACKEND: redis
-      AATS_HOT_STATE_REDIS_URL: redis://:${REDIS_PASSWORD:-changeme}@redis:6379/0
       AATS_ACTIVE_PARAMETER_DB_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
       RDP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
       AATS_LOG_FORMAT: json
       AATS_LOG_LEVEL: INFO
       TZ: Asia/Shanghai
-    # compose_entrypoint shim 先补注入 AATS_STARTUP_PROFILE / AATS_ENV_TEMPLATE_PROFILE
-    # 派生变量（managed profile runtime_defaults 合并所需），再 execvp 到 daemon。
-    # 不走 shim 会让 AATSSettings 回退到 spot baseline，触发衍生品一致性校验崩。
-    command: ["python", "scripts/compose_entrypoint.py", "python", "scripts/liquidations_ws_daemon.py"]
+    command: ["python", "scripts/liquidations_ws_daemon.py"]
     networks:
       - aats
     deploy:
