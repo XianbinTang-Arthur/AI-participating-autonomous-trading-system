@@ -99,10 +99,13 @@ class TestParseLiquidationMessage(unittest.TestCase):
         self.assertEqual(r.sz, Decimal("1.5"))
         self.assertEqual(r.bk_loss, Decimal("0"))
         self.assertEqual(r.ccy, "USDT")
-        # ts is 2025-04-18 16:53:20 UTC-ish; we just verify tz-awareness + ms→s
         self.assertEqual(r.ts, datetime.fromtimestamp(1745000000, tz=timezone.utc))
-        self.assertIn("event", r.raw_payload)
-        self.assertIn("detail", r.raw_payload)
+        # raw_payload stores the detail dict unchanged — parent event and arg
+        # are redundant with dedicated columns (denormalized) and constant
+        # per-subscription respectively.
+        self.assertEqual(r.raw_payload["side"], "sell")
+        self.assertEqual(r.raw_payload["bkPx"], "95000")
+        self.assertEqual(r.raw_payload["ts"], "1745000000000")
 
     def test_multi_details(self) -> None:
         push = {
@@ -174,14 +177,41 @@ class TestParseLiquidationMessage(unittest.TestCase):
         self.assertIsNone(rows[0].inst_family)
 
 
+class _FakeResult:
+    def __init__(self, rowcount: int) -> None:
+        self.rowcount = rowcount
+
+
 class _CapturingSession:
-    def __init__(self) -> None:
+    """Test double for a SQLAlchemy Session — captures executes, counts rows.
+
+    Used in two modes:
+      * direct call (writer-only tests): commit/rollback/close are no-ops
+      * via patched get_session contextmanager (collector tests)
+
+    ``execute()`` returns a result with ``rowcount`` so
+    :func:`write_liquidation_batch` can read the "real" persisted count.
+    """
+
+    def __init__(self, rowcount_override: int | None = None) -> None:
         self.executed: list[tuple[str, list[dict[str, Any]]]] = []
+        self._rowcount_override = rowcount_override
 
     def execute(self, stmt, params):  # noqa: ANN001 — SQLAlchemy text stmt is opaque
         sql = str(stmt).strip()
         batch = list(params) if not isinstance(params, dict) else [params]
         self.executed.append((sql, batch))
+        rowcount = self._rowcount_override if self._rowcount_override is not None else len(batch)
+        return _FakeResult(rowcount)
+
+    def commit(self) -> None:
+        pass
+
+    def rollback(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
 
 
 class TestWriteLiquidationBatch(unittest.TestCase):
@@ -247,32 +277,13 @@ class TestLiquidationsWSClient(unittest.TestCase):
         self.assertIsInstance(client, OKXWebSocketConsumerBase)
 
 
-class _MockFlushSession:
-    """Session that records executed batches and commits cleanly."""
-
-    def __init__(self, store: list[list[dict[str, Any]]]) -> None:
-        self._store = store
-
-    def execute(self, stmt, params):  # noqa: ANN001
-        self._store.append(list(params) if not isinstance(params, dict) else [params])
-
-    def commit(self) -> None:
-        pass
-
-    def rollback(self) -> None:
-        pass
-
-    def close(self) -> None:
-        pass
-
-
 class TestCollectorBufferFlush(unittest.IsolatedAsyncioTestCase):
     async def test_flush_on_max_rows(self) -> None:
-        executed: list[list[dict[str, Any]]] = []
+        captured = _CapturingSession()
 
         @contextlib.contextmanager
         def _fake_session():
-            yield _MockFlushSession(executed)
+            yield captured
 
         with patch(
             "aats.data_platform.collectors.liquidations_ws_collector.get_session",
@@ -285,21 +296,22 @@ class TestCollectorBufferFlush(unittest.IsolatedAsyncioTestCase):
             )
             # Two messages of 1 row each — second one should trigger flush.
             await collector._handle_message(_SAMPLE_PUSH)
-            self.assertEqual(executed, [])
+            self.assertEqual(captured.executed, [])
             self.assertEqual(len(collector._buffer), 1)
             await collector._handle_message(_SAMPLE_PUSH)
-            self.assertEqual(len(executed), 1)
-            self.assertEqual(len(executed[0]), 2)
+            self.assertEqual(len(captured.executed), 1)
+            _sql, batch = captured.executed[0]
+            self.assertEqual(len(batch), 2)
             self.assertEqual(collector._buffer, [])
             today = datetime.now(tz=timezone.utc).date().isoformat()
             self.assertEqual(collector._daily_counts[today], 2)
 
     async def test_flush_on_periodic(self) -> None:
-        executed: list[list[dict[str, Any]]] = []
+        captured = _CapturingSession()
 
         @contextlib.contextmanager
         def _fake_session():
-            yield _MockFlushSession(executed)
+            yield captured
 
         with patch(
             "aats.data_platform.collectors.liquidations_ws_collector.get_session",
@@ -311,14 +323,42 @@ class TestCollectorBufferFlush(unittest.IsolatedAsyncioTestCase):
                 flush_max_seconds=0.05,
             )
             await collector._handle_message(_SAMPLE_PUSH)
-            self.assertEqual(executed, [])
+            self.assertEqual(captured.executed, [])
             flush_task = asyncio.create_task(collector._periodic_flush())
-            # Wait just long enough for one periodic flush to fire.
             await asyncio.sleep(0.15)
-            collector._stop_event.set()
+            # Stop via the client event — collector reuses it to coordinate
+            # shutdown across consumer and flush loops.
+            collector.client.stop_event.set()
             await asyncio.wait_for(flush_task, timeout=1.0)
-            self.assertEqual(len(executed), 1)
-            self.assertEqual(len(executed[0]), 1)
+            self.assertEqual(len(captured.executed), 1)
+            _sql, batch = captured.executed[0]
+            self.assertEqual(len(batch), 1)
+
+    async def test_flush_runs_db_io_outside_lock(self) -> None:
+        """Swap-and-release: DB roundtrip must not hold the buffer lock."""
+        captured = _CapturingSession()
+        lock_held_during_execute = False
+
+        @contextlib.contextmanager
+        def _fake_session():
+            nonlocal lock_held_during_execute
+            lock_held_during_execute = collector._buffer_lock.locked()
+            yield captured
+
+        with patch(
+            "aats.data_platform.collectors.liquidations_ws_collector.get_session",
+            _fake_session,
+        ):
+            collector = LiquidationsCollector(
+                settings=_ws_settings(),
+                flush_max_rows=1,
+                flush_max_seconds=60.0,
+            )
+            await collector._handle_message(_SAMPLE_PUSH)
+            self.assertFalse(
+                lock_held_during_execute,
+                "buffer lock must be released before DB I/O",
+            )
 
     async def test_status_exposes_daily_counts(self) -> None:
         collector = LiquidationsCollector(settings=_ws_settings())

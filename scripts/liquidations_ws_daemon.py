@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import logging
 import signal
 import sys
@@ -100,22 +101,19 @@ async def amain(args: argparse.Namespace) -> int:
         flush_max_seconds=args.flush_max_seconds,
     )
 
-    stop_event = asyncio.Event()
+    stop_event = collector.client.stop_event
     loop = asyncio.get_running_loop()
 
     def _request_stop(signum: int) -> None:
         log.info("received signal %s, requesting stop", signum)
         stop_event.set()
-        asyncio.create_task(collector.stop())
 
+    # add_signal_handler is Linux-only. The daemon runs in Docker, so that's
+    # the only path that matters. On Windows dev Ctrl-C still works via the
+    # default SIGINT → KeyboardInterrupt path caught in main().
     for sig in (signal.SIGTERM, signal.SIGINT):
-        try:
+        with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, _request_stop, int(sig))
-        except NotImplementedError:
-            # Windows dev environments don't support add_signal_handler for
-            # SIGTERM. The daemon is only meaningfully run under Linux (docker);
-            # on Windows, Ctrl-C still works via the default KeyboardInterrupt.
-            signal.signal(sig, lambda s, _f: _request_stop(s))
 
     heartbeat_task = asyncio.create_task(_heartbeat_loop(stop_event, collector))
     log.info("starting liquidations_ws_daemon (inst_types=%s)", list(inst_types))

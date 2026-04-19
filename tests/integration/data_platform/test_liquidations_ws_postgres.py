@@ -294,9 +294,11 @@ class LiquidationsPostgresIntegrationTests(unittest.TestCase):
         self.assertEqual(Decimal(r["sz"]), Decimal("1.5"))
         self.assertEqual(Decimal(r["bk_loss"]), Decimal("0"))
         self.assertEqual(r["ccy"], "USDT")
-        # raw_payload persists the full event context for future silver builds.
-        self.assertIn("event", r["raw_payload"])
-        self.assertIn("detail", r["raw_payload"])
+        # raw_payload persists the OKX detail dict unchanged for future
+        # silver-layer schema evolution.
+        self.assertEqual(r["raw_payload"]["side"], "sell")
+        self.assertEqual(r["raw_payload"]["bkPx"], "95000")
+        self.assertEqual(r["raw_payload"]["ts"], "1745000000000")
 
 
 if __name__ == "__main__":

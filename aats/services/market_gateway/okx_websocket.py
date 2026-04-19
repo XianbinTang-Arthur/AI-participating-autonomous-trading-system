@@ -94,6 +94,33 @@ class OKXWebSocketConsumerBase:
         self._subscription_errors: dict[str, list[dict[str, Any]]] = {}
         self._subscription_sent_ts: dict[str, datetime | None] = {}
 
+    @property
+    def stop_event(self) -> asyncio.Event:
+        """The event consumers can await to detect shutdown."""
+        return self._stop_event
+
+    def _register_connection(self, name: str) -> None:
+        """Pre-populate per-connection state so status()/connection_status()
+        can be called before :meth:`run_forever` has spun up the tasks.
+
+        Idempotent — calling twice on the same name is safe.
+        """
+        self._connected.setdefault(name, False)
+        self._last_message_ts.setdefault(name, None)
+        self._last_market_data_ts.setdefault(name, None)
+        self._pending_subscriptions.setdefault(name, set())
+        self._subscription_errors.setdefault(name, [])
+        self._subscription_sent_ts.setdefault(name, None)
+
+    def connection_status(self, name: str) -> dict[str, Any]:
+        """Per-connection observability snapshot. Safe before run_forever()."""
+        return {
+            "connected": self._connected.get(name, False),
+            "last_message_ts": self._last_message_ts.get(name),
+            "last_market_data_ts": self._last_market_data_ts.get(name),
+            "last_error": self._last_error,
+        }
+
     def _connection_specs(self) -> list[tuple[str, str, list[dict[str, str]]]]:
         """Return a list of ``(connection_name, ws_url, subscribe_args)`` tuples.
 
@@ -106,15 +133,8 @@ class OKXWebSocketConsumerBase:
         if connect is None:
             raise RuntimeError("websockets_dependency_missing")
         specs = self._connection_specs()
-        # Initialize per-connection state lazily so subclasses can pre-populate
-        # keys (for status() reporting before run_forever is called).
         for name, _, _ in specs:
-            self._connected.setdefault(name, False)
-            self._last_message_ts.setdefault(name, None)
-            self._last_market_data_ts.setdefault(name, None)
-            self._pending_subscriptions.setdefault(name, set())
-            self._subscription_errors.setdefault(name, [])
-            self._subscription_sent_ts.setdefault(name, None)
+            self._register_connection(name)
         _gather_results = await asyncio.gather(
             *[
                 self._consume(
@@ -512,15 +532,8 @@ class OKXPublicWebSocketClient(OKXWebSocketConsumerBase):
 
     def __init__(self, *, settings: AATSSettings) -> None:
         super().__init__(settings=settings, logger_name="aats.okx_market_ws")
-        # Pre-populate per-connection state keys so status() can be called
-        # before run_forever() spins up the tasks.
-        for name in ("public", "business"):
-            self._connected[name] = False
-            self._last_message_ts[name] = None
-            self._last_market_data_ts[name] = None
-            self._pending_subscriptions[name] = set()
-            self._subscription_errors[name] = []
-            self._subscription_sent_ts[name] = None
+        self._register_connection("public")
+        self._register_connection("business")
 
     def _connection_specs(self) -> list[tuple[str, str, list[dict[str, str]]]]:
         public_args, business_args = self._subscription_args()
