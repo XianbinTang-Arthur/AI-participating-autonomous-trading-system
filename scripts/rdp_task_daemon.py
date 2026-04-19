@@ -57,6 +57,9 @@ WORKFLOW_TIMEOUTS = {
     "release_cycle": 900,      # 15 分钟 — approved recommendation -> release/apply
     "observation_cycle": 300,  # 5 分钟 — hourly release observation_status 推进
     "reliability_cycle": 300,  # 5 分钟 — hourly current_alerts.json 刷新
+    # P1-D Phase 1A: microstructure Silver ETL — 每 15 min 聚合一次,
+    # 5 张表各 1 行 UPSERT, 实测 <10s, 留 300s 超时 (设计 §11 p95 < 10s)
+    "microstructure_silver_15m": 300,
 }
 DEFAULT_TIMEOUT = 1800  # 30 分钟
 

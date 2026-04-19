@@ -36,6 +36,11 @@ VALID_WORKFLOWS = {
     # 拆出 hourly，避免 current_alerts.json 因 decision_cycle 延迟而长期缺失
     # 导致 pre_apply_gate 降级放行。
     "reliability_cycle",
+    # P1-D Phase 1A: microstructure Silver ETL (每 15min 构建一次 5 张
+    # silver.market_*_15m 表)。走独立 workflow, 不进 daily_ingest 的 cron
+    # (附录 C.3 强主张); ix_rdp_task_one_active_per_workflow 唯一索引自动
+    # 串行化同 workflow 的 pending+running task。详见 §7.3 / 附录 E #7。
+    "microstructure_silver_15m",
 }
 
 # orphan-recovery 的 sentinel exit_code：daemon 崩溃 / 被 kill 后留下的

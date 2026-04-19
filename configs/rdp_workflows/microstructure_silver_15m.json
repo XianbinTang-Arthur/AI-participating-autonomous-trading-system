@@ -1,0 +1,20 @@
+{
+  "workflow": "microstructure_silver_15m",
+  "description": "P1-D Phase 1A microstructure Silver 15m ETL — 聚合 bronze.market_trades / bronze.market_orderbook_bbo / bronze.market_orderbook_books5 / staging.market_oi_funding_ticks / staging.raw_liquidations 到 5 张 silver.market_*_15m 表,每 15min 跑一次,产出 96 bar/day/symbol。详见 docs/design/p1d_phase1a_implementation_design_2026_04_20.md §7 与 附录 E #7 决策。",
+  "schedule_hint": "every 15 minutes when microstructure collector is active",
+  "schedule": {
+    "enabled": true,
+    "frequency": "custom",
+    "interval_minutes": 15
+  },
+  "tasks": [
+    {
+      "name": "build_silver_microstructure_15m",
+      "description": "对最近一个已完成的 15m bar 跑 5 个 _build_* 聚合,UPSERT silver 5 张表。allow_failure=true: 单次失败不应阻塞 hourly/daily 主链路;连续 2 次失败由 Grafana log-based SEV3 告警捕获。自动 retry 15min 后由 daemon 触发。",
+      "command": "python scripts/rdp_build_microstructure_silver.py --symbol BTC-USDT-SWAP --apply --confirm",
+      "timeout_seconds": 300,
+      "enabled": true,
+      "allow_failure": true
+    }
+  ]
+}
