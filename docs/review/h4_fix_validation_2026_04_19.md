@@ -156,3 +156,50 @@ H4 修复的价值不在"让 short slope 翻正"（这是基于 CHASE 假设的�
 - ✓ 与 fast_impulse 报告 FADE 结论互相验证
 
 **按新门槛全部达标**。
+
+---
+
+# 附录：2026-04-19 晚间修订 — bar-level vs raw-level 的方法学偏差
+
+**添加依据**: `docs/research/fade_strategy_investigation_proposal_2026_04_19.md`（P1-C 调研 agent 发现）
+
+## A.1 问题
+
+本报告 §1-§8 里引用的 `short 15m R² 0.00015 → 0.00329 (×22 放大)` 以及 `short slope -3.45 → -14.55 (负向更强)` 均来自**bar-level 聚合**（n=234，每 15m bar 折叠为 1 个样本，取该 bar 内最后一个 baseline 快照）。
+
+生产系统实际在**raw 粒度**做决策（每 baseline 1 个样本，约每 15m 14 个 baseline）。P1-C 的 raw-level 验证显示：
+
+| 粒度 | n | short 15m FADE slope | R² |
+|---|---|---|---|
+| **bar-level** | 232 | **+14.43** | **0.00324** |
+| **raw-level** | 8194 | **+0.50** | **0.00000** |
+
+两个粒度下**差两个数量级**。
+
+## A.2 含义
+
+- 本报告 §3.2 "H4 修复放大信号但方向与预期反" 的 "**22× 放大**" 描述是 bar-level 聚合的**方法学产物**，不代表生产粒度的真实效应
+- 本报告 §5 "**H4 修复的价值在揭示 FADE 信号**" 的经验支撑在 raw-level 下**不成立**
+- 本报告 §6 "两份报告互为佐证"仍然部分成立（fast_impulse 的 R²<0 结论基于 bar-level，与本报告同粒度），但**不能外推到生产可执行的 FADE edge**
+
+## A.3 不撤销的结论
+
+- **H4 修复代码本身仍然正确**：方向无关 confidence 在对称 long/short 框架下的泄漏是**确凿的设计缺陷**，修复的数学正确性不依赖 bar 或 raw 粒度
+- **2408 unit tests 全绿** 的断言仍有效
+- **long 端 R² 提升**（0.00984 → 0.01377）在 bar-level 上是真实的；raw-level 需 P1-C 后续验证
+- **不回退修复**
+
+## A.4 重新总结
+
+本报告的**正确主张**（修订版）：
+1. H4 修复消除了已确认的设计缺陷（✓ 保留）
+2. 长腿信号在 bar-level 有小幅提升（⚠️ raw-level 待验证）
+3. 短腿信号在 bar-level 被"隔离"出来（⚠️ raw-level 下此效应 ~0）
+4. ~~短腿本质是 FADE 信号~~ → **raw-level 下无 exploitable edge；P1-C 调研结论为 CONDITIONAL-GO，非 GO**
+5. 本报告作为 H4 修复的**设计正确性**证据有效，作为 FADE 策略启动的**经验性证据无效**
+
+## A.5 后续引用本报告时的注意事项
+
+引用本报告的其他文档（如 `docs/design/archived/p1a_dual_channel_chase_failed_path_2026_04_19.md` §6）中凡描述 "FADE 信号被揭示/放大" 的段落需同步标注"基于 bar-level；raw-level 下效应 ~0"。
+
+P1-D Microstructure 立项**不**以本报告为启动理由；启动理由在 `docs/review/fast_impulse_candidate_selection_2026_04_19.md` 的独立证伪（5 候选 R²<0）和 `docs/research/fade_strategy_investigation_proposal_2026_04_19.md` 的 raw-level 证伪（FADE 也无 edge）共同支撑的"**15m OHLC 特征无 alpha**"结论。

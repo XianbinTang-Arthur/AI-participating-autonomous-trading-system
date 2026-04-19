@@ -135,6 +135,47 @@ H4 修复后的数据揭示 short 端是 FADE 信号。下一阶段主线改为�
 
 详见 `docs/research/fade_strategy_investigation_proposal_2026_04_19.md`（与 P1-C spawn 任务同步产出）。
 
+**⚠️ 2026-04-19 晚间修订**：P1-C 调研完成后结论为 **CONDITIONAL-GO，不是 GO**。raw-level 下 FADE 也无 exploitable edge（short 15m slope=+0.50, R²=0.00000）。H4 修复后观察到的 FADE 信号是 bar-level 聚合的方法学产物。因此 **FADE 替代路径在当前数据条件下不成立**，不应作为下一阶段主线。
+
+---
+
+## 6.A 新增：FADE 替代路径也被证伪
+
+**背景**：2026-04-19 当天 spawn 的 P1-C FADE 策略调研任务完成后发现，H4 修复后观察到的"FADE 信号 22× 放大"仅在 bar-level 聚合（n=232）下成立；在**生产实际决策粒度 raw-level**（n=8194）下：
+
+| 粒度 | short 15m FADE slope | R² |
+|---|---|---|
+| bar-level | +14.43 | 0.00324 |
+| **raw-level** | **+0.50** | **0.00000** |
+
+所有 horizon 和 score 分位下，扣 6 bps 成本后 mean_net **全为负**；唯一擦过 0 轴的 q95 子集 n=10-12 无统计显著性（Bonferroni 矫正 p=0.24）。
+
+**结论**：
+
+1. P1-A CHASE 方向已证伪（fast_impulse 5 候选 R²<0）
+2. FADE 替代方向也证伪（raw-level R²≈0，扣成本全负）
+3. **更根本的结论：BTC 15m OHLC 衍生特征上没有可 exploit 的 alpha**
+
+**P1-C 的最终状态**: CONDITIONAL-GO，Gate 包括:
+- event_store retention ≥ 35 天（当前仅 2.87 天，等系统运行积累）
+- raw-level R² ≥ 0.01 且两个独立 30 天窗口 slope 同号
+- cost-adjusted net > 3 bps, win > 55% @ n ≥ 100 的可识别 subset
+
+**P1-C 不会在近期复跑**—— 等至少 30 天数据窗口并行积累。
+
+---
+
+## 6.B 新的主线方向：P1-D Microstructure
+
+由于 CHASE + FADE 同时证伪，OHLC 特征路径已经关闭。下一阶段启动 **P1-D Microstructure 研究**：
+
+- 数据源扩展: OKX L2 orderbook snapshot + 逐笔成交流 + OI delta + funding anomaly + 跨品种 lead-lag
+- 目标: 在 15m horizon 上找**非 OHLC 派生**的 predictive feature
+- 周期: 6-8 周（2 周可行性调研 + 4-6 周实施 + 回归验证）
+- 并行: P1-C FADE 自动在 30 天数据窗口达成后复跑
+
+详见 `docs/design/p1d_microstructure_feasibility_2026_04_19.md`（P1-D 调研 spawn 任务产出）。
+
 ---
 
 ## 7. 检查清单 — 如何避免重犯
@@ -145,6 +186,7 @@ H4 修复后的数据揭示 short 端是 FADE 信号。下一阶段主线改为�
 - [ ] long/short 对称性假设必须**经验验证**，不能直接 assume
 - [ ] 多样本窗口（震荡 vs 趋势）至少覆盖一次，避免过拟合
 - [ ] 双方法论交叉验证（如 fast_impulse 独立 + H4 后 empirical）
+- [ ] **粒度 check**（bar-level vs raw-level）—— 聚合会掩盖真实生产粒度下的效应。任何 empirical 结论必须在**生产决策粒度**下再验证一遍
 
 ---
 

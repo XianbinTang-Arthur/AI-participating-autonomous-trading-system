@@ -192,12 +192,25 @@ short R² 提升 ~20 倍，slope 由负翻正至与 long 对称量级。long 小
    ```
 2. **Mode A 权重 Σ = 1 锁定测试仍通过**（`TestCompositeWeightsSum`, `TestCompositeModeAReplaySync`）
 3. **Replay 回测 33 天 BTC-USDT-SWAP**：重跑 standalone-edge calibration，产出新的 long/short R² + slope 报告
-4. **验收门槛**（硬性）：
-   - short R² ≥ 0.01
-   - short slope > 0
-   - long R² ≥ 0.012（不严重退化）
-   - long slope ≥ +12
-5. **条件不满足时**：写 followup 报告分析，按 §7 回退或改 softer fix
+4. **~~原验收门槛（2026-04-19 晚间废弃）~~**：
+   - ~~short R² ≥ 0.01~~
+   - ~~short slope > 0~~
+   - ~~long R² ≥ 0.012（不严重退化）~~
+   - ~~long slope ≥ +12~~
+5. **新验收门槛（2026-04-19 晚间修订，基于设计正确性而非效应量）**：
+   - ✓ 数学公式无泄漏（单测断言覆盖）
+   - ✓ Replay ↔ 生产 scoring 保持对齐（Mode A 权重同步测试）
+   - ✓ Misaligned leg 的 confidence / regime_bonus / volatility_bonus 全部归零（新增 4 个测试覆盖）
+   - ✓ `direction_bias=flat` 两腿都不加 direction-agnostic 项（期望行为）
+   - ✓ 全量 unit tests 无回归（2408 passed，本次已达成）
+6. **不作为硬性验收门槛（仅监测，原因见下）**：
+   - bar-level / raw-level short R² / slope —— P1-C 调研（`docs/research/fade_strategy_investigation_proposal_2026_04_19.md`）已证伪 bar-level 效应是方法学产物，raw-level 下 FADE 无 exploitable edge；同时 fast_impulse 报告证伪 CHASE 方向。这些指标不再作为 H4 **修复**的验收标准
+   - 生产 fill rate —— 修复前系统 24h 零 fill，修复后预计短期仍零 fill（因 15m OHLC 本身无 alpha 源），**不是回归**
+7. **回退触发条件（软标准）**：
+   - 单元测试变红 → 必须回退
+   - 生产出现 NaN / 异常 score（接入 logging 监控） → 必须回退
+   - long 端 score 分布**形状**显著改变（不只是尺度收缩） → 暂停，先分析
+   - 其它指标异常**不触发自动回退**
 
 ---
 
