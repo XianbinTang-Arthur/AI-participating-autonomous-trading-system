@@ -2,11 +2,12 @@
 
 参考: docs/task/rdp_scope_expansion_detailed_design_v3.md §7
 
-Batch B 做四件事:
+Batch B 做五件事:
   - batch_b_01_core_schema.sql: scope 列 + system_config + saga + heartbeat
   - batch_b_02_profile_research.sql: profile_research_runs + streak
   - batch_b_03_cost_calibration.sql: cost_calibration_runs
   - batch_b_04_sleeve_advice.sql: vw_sleeve_advice_recent 视图
+  - batch_b_05_microstructure.sql: P1-D Phase 1A bronze + staging microstructure 表
 
 每个 stage 对应一个 rollback SQL,逆序回滚。
 
@@ -35,6 +36,7 @@ BATCH_B_STAGES: tuple[str, ...] = (
     "batch_b_02_profile_research",
     "batch_b_03_cost_calibration",
     "batch_b_04_sleeve_advice",
+    "batch_b_05_microstructure",
 )
 
 
