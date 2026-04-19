@@ -539,6 +539,22 @@ class ApplicationRuntime:
     process_role: str | None = None
 
     async def start_background_tasks(self) -> None:
+        # Bug-1 时序平滑：在 market_gateway.start() 之前先用 OKX REST 拉一次
+        # 历史 K 线灌入 FeatureCalculator 的 RollingCandleState。这样 market
+        # 进程一开始推送 tick，feature calculator 就立即走"时序平滑"路径而不是
+        # 退化到单 K 线瞬时算法。
+        #
+        # Best-effort：REST 失败/超时/数据不足 → 静默降级，FeatureCalculator
+        # 内部 analyze_with_state 会自动在 state 未 ready 时走 analyze_kline
+        # 退化路径，不阻断启动。
+        if (
+            self.settings.strategy_baseline_timeseries_smoothing_enabled
+            and self.settings.market_data_backend == "okx"
+            and self.feature_engine is not None
+            and _slice_active("market", effective_process_role=self.process_role)
+        ):
+            await self._prewarm_feature_rolling_states()
+
         # Stage 3 多进程切片化：market_gateway.start() 会开启 OKX WebSocket
         # 和 REST fallback 后台任务。仅 market / monolith 角色需要，否则 4 个
         # 进程各自连一次 OKX，造成 4× 连接和下游 feature / decision 重复计算。
@@ -652,6 +668,91 @@ class ApplicationRuntime:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
+
+    async def _prewarm_feature_rolling_states(self) -> None:
+        """Bug-1 时序平滑配套：OKX REST 拉历史 K 线灌入 RollingCandleState.
+
+        在 market_gateway.start() 之前调用。Best-effort — REST 失败不 raise，
+        FeatureCalculator.analyze_with_state 会自动走 analyze_kline 退化路径。
+
+        触发条件（start_background_tasks 已验证，本函数不再二次判）:
+          - settings.strategy_baseline_timeseries_smoothing_enabled 为 True
+          - market_data_backend == "okx"
+          - 当前 process 是 market / monolith
+          - feature_engine 非 None
+        """
+        from aats.services.feature_engine.warmup import (
+            collect_state_keys,
+            prewarm_many,
+        )
+
+        engine = self.feature_engine
+        if engine is None:  # 理论上 caller 已守门，防御性编码
+            return
+        calculator = getattr(engine, "calculator", None)
+        register_state = getattr(calculator, "register_rolling_state", None)
+        if calculator is None or register_state is None:
+            # 非 FeatureCalculator 实例（单测 stub 或未来替换实现）→ 静默跳过
+            log_event(
+                self.logger,
+                "feature_warmup_calculator_not_supported",
+                level="debug",
+            )
+            return
+
+        try:
+            symbols_iter = self.settings.expanded_allowed_symbols()
+        except Exception:
+            symbols_iter = ()
+        symbols = tuple(dict.fromkeys(str(s) for s in symbols_iter if s))
+        if not symbols and self.settings.default_symbol:
+            symbols = (str(self.settings.default_symbol),)
+        if not symbols:
+            log_event(
+                self.logger,
+                "feature_warmup_no_symbols",
+                level="warning",
+            )
+            return
+
+        timeframes = tuple(
+            tf for tf in self.settings.strategy_baseline_warmup_timeframes if tf
+        )
+        if not timeframes:
+            timeframes = ("15m", "1h")
+
+        keys = collect_state_keys(symbols=symbols, timeframes=timeframes)
+        states_by_key = {
+            key: register_state(symbol=key[0], timeframe=key[1]) for key in keys
+        }
+        try:
+            results = await prewarm_many(
+                states_by_key,
+                okx_rest_url=self.settings.okx_rest_url,
+                limit=int(self.settings.strategy_baseline_warmup_candle_limit),
+                timeout_seconds=float(self.settings.okx_timeout_seconds),
+            )
+        except Exception as exc:
+            # prewarm_many 内部已 best-effort，这里只防御万一的意外（网络堆栈异常等）
+            log_event(
+                self.logger,
+                "feature_warmup_unexpected_failure",
+                level="error",
+                error_type=type(exc).__name__,
+                error=str(exc)[:200],
+            )
+            return
+
+        ready_count = sum(1 for ok in results.values() if ok)
+        log_event(
+            self.logger,
+            "feature_warmup_complete",
+            total=len(results),
+            ready=ready_count,
+            failed=len(results) - ready_count,
+            symbols=list(symbols),
+            timeframes=list(timeframes),
+        )
 
     async def stop_background_tasks(self) -> None:
         await self.account_service.stop_private_ws()
@@ -3588,6 +3689,7 @@ def _build_market_slice(
     *,
     slices: _RuntimeSlices,
     effective_process_role: str | None,
+    runtime_settings: AATSSettings,
 ) -> None:
     """构造 market 进程独占资源：feature_engine。
 
@@ -3596,10 +3698,20 @@ def _build_market_slice(
 
     Stage 3 process_role 门控：仅 None / monolith / market 时构造，
     其他 role 跳过，slices.feature_engine 保留为 None。
+
+    Bug-1 时序平滑：FeatureCalculator 从 settings 读 rolling 窗口参数和
+    feature flag；warmup（OKX REST 拉历史 K 线灌入 RollingCandleState）
+    由启动序列在 bus.start 前按需触发（见 build_runtime）。
     """
     if not _slice_active("market", effective_process_role=effective_process_role):
         return
-    slices.feature_engine = FeatureEngine(bus=slices.bus, calculator=FeatureCalculator())
+    calculator = FeatureCalculator(
+        enable_timeseries_smoothing=runtime_settings.strategy_baseline_timeseries_smoothing_enabled,
+        rolling_max_bars=runtime_settings.strategy_baseline_rolling_max_bars,
+        rolling_roc_window=runtime_settings.strategy_baseline_rolling_roc_window,
+        rolling_atr_window=runtime_settings.strategy_baseline_rolling_atr_window,
+    )
+    slices.feature_engine = FeatureEngine(bus=slices.bus, calculator=calculator)
 
 
 def _build_decision_slice(
@@ -4822,7 +4934,11 @@ async def build_runtime(
                 recent_bills_count=len(slices.account_snapshot_cache.recent_bills),
             )
 
-    _build_market_slice(slices=slices, effective_process_role=effective_process_role)
+    _build_market_slice(
+        slices=slices,
+        effective_process_role=effective_process_role,
+        runtime_settings=runtime_settings,
+    )
     _build_decision_slice(
         runtime_settings=runtime_settings,
         storage=storage,

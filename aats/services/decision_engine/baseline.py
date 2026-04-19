@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
@@ -13,6 +14,26 @@ if TYPE_CHECKING:
     from aats.services.decision_engine.feature_resolver import FeatureSnapshotResolver
 
 _LOGGER = logging.getLogger("aats.decision_engine.baseline")
+
+
+def _parse_snapshot_ts(raw: Any) -> datetime | None:
+    """容错解析 FeatureSnapshot.payload['snapshot_ts']，失败返回 None.
+
+    payload 来自 event_store，可能是 ISO 字符串（JSON 持久化后）或 datetime
+    （内存路径）。解析失败不 raise——Bug-3 检查本身是保护性的，解析失败时
+    降级为 "无法判断是否过期"，照常 warning + fallback（旧行为）。
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):
+        return raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+    if isinstance(raw, str):
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    return None
 
 
 class BaselineStrategy:
@@ -44,6 +65,38 @@ class BaselineStrategy:
             fallback_event = self.event_store.latest(topics.FEATURE_SNAPSHOTS, context.symbol)
             if fallback_event is None:
                 raise RuntimeError("Feature snapshot reference is missing from the event store")
+
+            # Bug-3 修复：fallback 可能是"很久以前的 snapshot"（event_store 长期
+            # 持有历史）。如果 fallback 的 snapshot_ts 距 decision 时间 >
+            # max_stale_seconds，读旧行情做决策比 raise 更危险 → 拒绝。
+            # 阈值与开关可 settings 配置，紧急回滚关 flag 即回旧行为。
+            if self.settings.strategy_baseline_fallback_ts_check_enabled:
+                max_stale = float(self.settings.strategy_baseline_fallback_max_stale_seconds)
+                raw_ts = fallback_event.payload.get("snapshot_ts") if isinstance(fallback_event.payload, dict) else None
+                fallback_dt = _parse_snapshot_ts(raw_ts)
+                decision_dt = context.created_at
+                if decision_dt is not None and decision_dt.tzinfo is None:
+                    decision_dt = decision_dt.replace(tzinfo=timezone.utc)
+                if fallback_dt is not None and decision_dt is not None:
+                    age_seconds = (decision_dt - fallback_dt).total_seconds()
+                    if age_seconds > max_stale:
+                        _LOGGER.error(
+                            "baseline_feature_fallback_stale_refused",
+                            extra={
+                                "decision_id": context.decision_id,
+                                "symbol": context.symbol,
+                                "fallback_event_id": fallback_event.event_id,
+                                "fallback_age_seconds": age_seconds,
+                                "max_stale_seconds": max_stale,
+                            },
+                        )
+                        raise RuntimeError(
+                            "Feature snapshot fallback is stale by "
+                            f"{age_seconds:.1f}s (limit={max_stale:.1f}s); "
+                            "refusing baseline decision to avoid trading on "
+                            "outdated market state"
+                        )
+
             _LOGGER.warning(
                 "baseline_feature_ref_miss_fallback",
                 extra={
@@ -154,26 +207,25 @@ class BaselineStrategy:
             if directional_alignment in {"long", "short"}
             else 0.0
         )
-        same_sign = (
-            alpha_score == 0.0
-            or (alpha_score > 0.0 and microstructure_alpha > 0.0)
-            or (alpha_score < 0.0 and microstructure_alpha < 0.0)
-        )
-        opposite_sign = (
-            (alpha_score > 0.0 and microstructure_alpha < 0.0)
-            or (alpha_score < 0.0 and microstructure_alpha > 0.0)
-        )
-        significant_micro = abs(microstructure_alpha) >= float(
-            self.settings.strategy_baseline_significant_microstructure_threshold
-        )
-        microstructure_support = significant_micro and same_sign
-        microstructure_conflict = significant_micro and opposite_sign
 
+        # Bug-2 修复（去除 microstructure double-dipping）:
+        #   原实现让 microstructure_alpha 既进入 composite_alpha_score（在
+        #   FeatureCalculator._alpha_factors 里权重 0.15），又在 adjusted_threshold
+        #   里以 "support / conflict" 两种方式改动决策阈值 —— 同一信号源两处影响
+        #   决策，隐式权重远大于设计值，conflicts 下双重惩罚。
+        #
+        #   修复：alpha_score 已经吃过 micro 的 15% 权重，决策门槛不再二次读 micro。
+        #   alignment_bonus 保留，但它来自 directional_alignment（multi_timeframe 对
+        #   齐信号，与 micro 独立），语义正交，不属于 double-dipping。
+        #
+        #   range_regime 分支里仍有 microstructure_alpha 的独立使用（见下文），
+        #   那是 "方向确认" 语义（range 内只允许强 micro 支持的方向翻转），
+        #   与 "阈值调整" 是两件事，保留。
         def adjusted_threshold(value: float) -> float:
-            threshold = value - alignment_bonus if microstructure_support else value
-            if microstructure_conflict:
-                threshold += float(self.settings.strategy_baseline_microstructure_conflict_penalty)
-            return max(threshold, float(self.settings.strategy_baseline_min_threshold_floor))
+            return max(
+                value - alignment_bonus,
+                float(self.settings.strategy_baseline_min_threshold_floor),
+            )
 
         if regime_indicator == "breakout":
             threshold = adjusted_threshold(breakout_threshold)

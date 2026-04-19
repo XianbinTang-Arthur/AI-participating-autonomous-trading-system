@@ -458,6 +458,25 @@ class AATSSettings(BaseSettings):
     strategy_baseline_impulse_range_ratio_min: float = 0.003
     strategy_baseline_impulse_body_ratio_min: float = 0.10
     strategy_baseline_impulse_require_mtf_alignment: bool = True
+
+    # ── Bug-1 时序平滑（RollingCandleState / EMA / ROC / ATR）──────────────
+    # 默认打开。关闭后 FeatureCalculator 所有 timeframe 走单 K 线瞬时路径
+    # （紧急回滚用）。与 feature_engine.timeseries 的 RollingCandleState 参数对应。
+    strategy_baseline_timeseries_smoothing_enabled: bool = True
+    strategy_baseline_rolling_max_bars: int = 50
+    strategy_baseline_rolling_roc_window: int = 5
+    strategy_baseline_rolling_atr_window: int = 14
+    # Warmup 时单次 OKX /api/v5/market/candles 拉多少根（<= rolling_max_bars）。
+    strategy_baseline_warmup_candle_limit: int = 50
+    # Warmup 触达的 timeframe 列表。与 market_gateway 订阅的 candle 频道对应。
+    strategy_baseline_warmup_timeframes: tuple[str, ...] = Field(default=("15m", "1h"))
+
+    # ── Bug-3 fallback 过期保护 ─────────────────────────────────────────────
+    # baseline fallback (event_store.latest) 路径：当超过 max_stale_seconds 未
+    # 刷新的 snapshot 被挑为 fallback 时，refuse decision 而非盲目用旧数据。
+    # 默认打开；关闭后退回旧 WARN + 继续的行为（紧急回滚用）。
+    strategy_baseline_fallback_ts_check_enabled: bool = True
+    strategy_baseline_fallback_max_stale_seconds: float = 60.0
     strategy_flat_signal_hold_enabled: bool = False
     strategy_flat_exit_microstructure_threshold: float = 0.12
     strategy_flat_exit_factor_threshold: float = 0.18

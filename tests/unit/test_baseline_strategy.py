@@ -21,6 +21,10 @@ class TestBaselineStrategy(unittest.TestCase):
         settings = AATSSettings.model_validate({"strategy_baseline_range_alpha_threshold": 0.12})
         strategy = BaselineStrategy(event_store=event_store, settings=settings)
         seed = self._feature_snapshot()
+        # Bug-2 修复后 alignment_bonus 与 microstructure 解耦：只要 multi_timeframe
+        # 对齐方向是 long/short 就给 bonus。为了让本测试聚焦 range_threshold 配置
+        # 本身生效（而不是 alignment 对 threshold 的影响），这里显式把 alignment
+        # 置为 "flat" 来消除 alignment_bonus=0.02 的扣减。
         feature_snapshot = seed.model_copy(
             update={
                 "regime_indicator": "range",
@@ -29,6 +33,9 @@ class TestBaselineStrategy(unittest.TestCase):
                     update={
                         "alpha_factors": seed.analysis_context.alpha_factors.model_copy(  # type: ignore[union-attr]
                             update={"microstructure_alpha": 0.04}
+                        ),
+                        "multi_timeframe": seed.analysis_context.multi_timeframe.model_copy(  # type: ignore[union-attr]
+                            update={"directional_alignment": "flat"}
                         ),
                     }
                 ),

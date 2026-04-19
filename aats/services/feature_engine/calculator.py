@@ -17,6 +17,12 @@ from aats.schemas.features import (
 from aats.schemas.market import KlineBar, MarketSnapshot
 from aats.services.feature_engine.liquidity import LiquidityAnalyzer
 from aats.services.feature_engine.regime import RegimeClassifier
+from aats.services.feature_engine.timeseries import (
+    DEFAULT_ATR_WINDOW,
+    DEFAULT_MAX_BARS,
+    DEFAULT_ROC_WINDOW,
+    RollingCandleState,
+)
 from aats.services.feature_engine.trend import TrendCalculator
 from aats.services.feature_engine.volatility import VolatilityAnalyzer
 
@@ -29,11 +35,60 @@ class FeatureCalculator:
         volatility: VolatilityAnalyzer | None = None,
         liquidity: LiquidityAnalyzer | None = None,
         regime: RegimeClassifier | None = None,
+        enable_timeseries_smoothing: bool = True,
+        rolling_max_bars: int = DEFAULT_MAX_BARS,
+        rolling_roc_window: int = DEFAULT_ROC_WINDOW,
+        rolling_atr_window: int = DEFAULT_ATR_WINDOW,
     ) -> None:
         self.trend = trend or TrendCalculator()
         self.volatility = volatility or VolatilityAnalyzer()
         self.liquidity = liquidity or LiquidityAnalyzer()
         self.regime = regime or RegimeClassifier()
+        # Bug-1 时序平滑开关。默认开启；关闭后所有 timeframe 走单 K 线瞬时路径
+        # （紧急回滚）。
+        self.enable_timeseries_smoothing = enable_timeseries_smoothing
+        self._rolling_max_bars = rolling_max_bars
+        self._rolling_roc_window = rolling_roc_window
+        self._rolling_atr_window = rolling_atr_window
+        # Per (symbol, timeframe) 的滚动状态。跨 calculate() 调用累积历史。
+        # 同 ts 的 update 幂等 → 同 snapshot 多次 calculate 结果一致
+        # （守 test_feature_calculation_is_deterministic_for_same_snapshot 契约）。
+        self._rolling_states: dict[tuple[str, str], RollingCandleState] = {}
+
+    def _get_rolling_state(self, symbol: str, timeframe: str) -> RollingCandleState:
+        key = (symbol, timeframe)
+        state = self._rolling_states.get(key)
+        if state is None:
+            state = RollingCandleState(
+                symbol=symbol,
+                timeframe=timeframe,
+                max_bars=self._rolling_max_bars,
+                roc_window=self._rolling_roc_window,
+                atr_window=self._rolling_atr_window,
+            )
+            self._rolling_states[key] = state
+        return state
+
+    def rolling_state_snapshot(self) -> dict[tuple[str, str], RollingCandleState]:
+        """Observability helper — 暴露当前 state 引用供 warmup 和诊断使用.
+
+        返回字典的 values 与内部共享引用（非拷贝）；warmup.py 通过它直接
+        prewarm 已注册的 state，避免重复构造。
+        """
+        return self._rolling_states
+
+    def register_rolling_state(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+    ) -> RollingCandleState:
+        """显式注册 (symbol, timeframe) 对应 state，供 warmup 批量预热调用.
+
+        这样 warmup 可以在任何 market snapshot 到来前就提前构造好 state。
+        如已存在则返回既有实例。
+        """
+        return self._get_rolling_state(symbol, timeframe)
 
     def calculate(self, snapshot: MarketSnapshot, *, market_snapshot_ref: str | None = None) -> FeatureSnapshot:
         features_15m = self._timeframe_features(snapshot=snapshot, timeframe="15m", kline=snapshot.kline_15m)
@@ -120,8 +175,17 @@ class FeatureCalculator:
         timeframe: Literal["15m", "1h"],
         kline: KlineBar,
     ) -> TimeframeFeatureSet:
-        trend_metrics = self.trend.analyze_kline(kline)
-        volatility_metrics = self.volatility.analyze_kline(kline)
+        if self.enable_timeseries_smoothing:
+            state = self._get_rolling_state(snapshot.symbol, timeframe)
+            # 幂等：同 snapshot_ts 反复 update 覆盖末尾 bar，不推进 EMA/窗口。
+            # test_feature_calculation_is_deterministic_for_same_snapshot 依赖此契约。
+            state.update(kline, ts=snapshot.snapshot_ts)
+            trend_metrics = self.trend.analyze_with_state(state, kline)
+            volatility_metrics = self.volatility.analyze_with_state(state, kline)
+        else:
+            # 退化路径（feature flag off）：保留旧单 K 线行为
+            trend_metrics = self.trend.analyze_kline(kline)
+            volatility_metrics = self.volatility.analyze_kline(kline)
         return TimeframeFeatureSet(
             created_at=snapshot.snapshot_ts,
             timeframe=timeframe,
