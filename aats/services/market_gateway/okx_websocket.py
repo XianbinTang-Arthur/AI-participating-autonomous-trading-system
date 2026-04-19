@@ -42,42 +42,89 @@ def _json_dumps(payload: dict[str, Any]) -> str:
     return json.dumps(payload, separators=(",", ":"))
 
 
-class OKXPublicWebSocketClient:
-    def __init__(self, *, settings: AATSSettings) -> None:
-        self.settings = settings
-        self.logger = get_logger("aats.okx_market_ws")
-        self._stop_event = asyncio.Event()
-        self._connected: dict[str, bool] = {"public": False, "business": False}
-        self._last_message_ts: dict[str, datetime | None] = {"public": None, "business": None}
-        self._last_market_data_ts: dict[str, datetime | None] = {"public": None, "business": None}
-        self._last_error: str | None = None
-        # P0-2：订阅 ack 跟踪。_subscribe 发送后填充 pending_subscriptions[conn] =
-        # set of (channel, instId) 元组；收到 event="subscribe" ack 时从中移除；
-        # 收到 event="error" 时记录到 _subscription_errors[conn]。keepalive 循环
-        # 在 _SUBSCRIPTION_ACK_TIMEOUT 秒后若 pending 非空，主动断开重连。
-        self._pending_subscriptions: dict[str, set[tuple[str, str]]] = {"public": set(), "business": set()}
-        self._subscription_errors: dict[str, list[dict[str, Any]]] = {"public": [], "business": []}
-        self._subscription_sent_ts: dict[str, datetime | None] = {"public": None, "business": None}
+def _subscription_key(arg: dict[str, Any]) -> tuple[str, str]:
+    # OKX subscriptions key on different identifiers by channel:
+    #   instId      — per-instrument streams (tickers, candles, books)
+    #   instType    — type-wide streams (liquidation-orders, mark-price-candle)
+    #   instFamily  — family-wide streams (price-limit)
+    # The filter is the first non-empty of instId / instFamily / instType;
+    # an empty tuple slot means the arg is unroutable and will be skipped by
+    # ack tracking (the ack-timeout path will then surface the silent failure).
+    channel = str(arg.get("channel", "") or "")
+    filter_val = str(
+        arg.get("instId")
+        or arg.get("instFamily")
+        or arg.get("instType")
+        or ""
+    )
+    return channel, filter_val
+
+
+class OKXWebSocketConsumerBase:
+    """Generic OKX public-WebSocket consumer — reconnect, keepalive, ack-timeout.
+
+    Owns the connection-layer machinery shared by multiple OKX consumers
+    (market-data client + data-platform liquidations collector):
+
+    * N-connection asyncio.gather orchestration (one task per OKX WS endpoint)
+    * Per-connection reconnect with exponential backoff
+    * Subscription-ack tracking + silent-failure timeout detection
+    * Application-level keepalive (idle ping, pong timeout, market-data-stale)
+    * OKX control-plane message classification (subscribe / error / notice)
+
+    Subclasses implement :meth:`_connection_specs` to declare which OKX URLs to
+    connect to and which channels to subscribe on each.
+    """
 
     _SUBSCRIPTION_ACK_TIMEOUT_SECONDS: float = 10.0
+
+    def __init__(self, *, settings: AATSSettings, logger_name: str = "aats.okx_ws") -> None:
+        self.settings = settings
+        self.logger = get_logger(logger_name)
+        self._stop_event = asyncio.Event()
+        self._connected: dict[str, bool] = {}
+        self._last_message_ts: dict[str, datetime | None] = {}
+        self._last_market_data_ts: dict[str, datetime | None] = {}
+        self._last_error: str | None = None
+        # P0-2：订阅 ack 跟踪。_subscribe 发送后填充 pending_subscriptions[conn] =
+        # set of (channel, filter) 元组；收到 event="subscribe" ack 时从中移除；
+        # 收到 event="error" 时记录到 _subscription_errors[conn]。keepalive 循环
+        # 在 _SUBSCRIPTION_ACK_TIMEOUT 秒后若 pending 非空，主动断开重连。
+        self._pending_subscriptions: dict[str, set[tuple[str, str]]] = {}
+        self._subscription_errors: dict[str, list[dict[str, Any]]] = {}
+        self._subscription_sent_ts: dict[str, datetime | None] = {}
+
+    def _connection_specs(self) -> list[tuple[str, str, list[dict[str, str]]]]:
+        """Return a list of ``(connection_name, ws_url, subscribe_args)`` tuples.
+
+        Subclasses override. ``connection_name`` is the key in per-connection
+        state dicts and log fields; it is opaque to the base class.
+        """
+        raise NotImplementedError
 
     async def run_forever(self, *, on_message: RawMessageHandler) -> None:
         if connect is None:
             raise RuntimeError("websockets_dependency_missing")
-        public_args, business_args = self._subscription_args()
+        specs = self._connection_specs()
+        # Initialize per-connection state lazily so subclasses can pre-populate
+        # keys (for status() reporting before run_forever is called).
+        for name, _, _ in specs:
+            self._connected.setdefault(name, False)
+            self._last_message_ts.setdefault(name, None)
+            self._last_market_data_ts.setdefault(name, None)
+            self._pending_subscriptions.setdefault(name, set())
+            self._subscription_errors.setdefault(name, [])
+            self._subscription_sent_ts.setdefault(name, None)
         _gather_results = await asyncio.gather(
-            self._consume(
-                connection_name="public",
-                url=self.settings.okx_public_ws_url,
-                subscribe_args=public_args,
-                on_message=on_message,
-            ),
-            self._consume(
-                connection_name="business",
-                url=self.settings.okx_business_ws_url,
-                subscribe_args=business_args,
-                on_message=on_message,
-            ),
+            *[
+                self._consume(
+                    connection_name=name,
+                    url=url,
+                    subscribe_args=args,
+                    on_message=on_message,
+                )
+                for name, url, args in specs
+            ],
             return_exceptions=True,
         )
         for _r in _gather_results:
@@ -86,67 +133,6 @@ class OKXPublicWebSocketClient:
 
     async def stop(self) -> None:
         self._stop_event.set()
-
-    def status(self) -> dict[str, Any]:
-        last_message_ts = [
-            item
-            for item in self._last_message_ts.values()
-            if item is not None
-        ]
-        freshest = max(last_message_ts) if last_message_ts else None
-        last_market = [
-            item
-            for item in self._last_market_data_ts.values()
-            if item is not None
-        ]
-        freshest_market = max(last_market) if last_market else None
-        return {
-            "connected_public": self._connected["public"],
-            "connected_business": self._connected["business"],
-            "connected": all(self._connected.values()),
-            "last_message_ts": freshest,
-            "last_market_data_ts": freshest_market,
-            "last_error": self._last_error,
-            "subscribed_symbols": list(self._subscribed_symbols()),
-        }
-
-    def _subscription_args(self) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        symbols = self._subscribed_symbols()
-        public_args: list[dict[str, str]] = []
-        for symbol in symbols:
-            public_args.append({"channel": "tickers", "instId": symbol})
-            # P1.4 Mark price basis 信号 — 仅衍生品（SWAP / FUTURES）有 mark-price.
-            # 现货订阅 mark-price 会被 OKX 以 channel 错误拒，触发 subscription_error
-            # 路径 → keepalive 断线重连死循环；必须提前按 instId 过滤。
-            if self._is_derivative_symbol(symbol):
-                public_args.append({"channel": "mark-price", "instId": symbol})
-        business_args: list[dict[str, str]] = []
-        for symbol in symbols:
-            business_args.extend(
-                (
-                    {"channel": "candle15m", "instId": symbol},
-                    {"channel": "candle1H", "instId": symbol},
-                )
-            )
-        return public_args, business_args
-
-    @staticmethod
-    def _is_derivative_symbol(symbol: str) -> bool:
-        """Return True for OKX derivatives (SWAP perpetual / dated FUTURES).
-
-        SWAP: BASE-QUOTE-SWAP
-        FUTURES: BASE-QUOTE-YYMMDD (6 位数字后缀)
-        现货 BASE-QUOTE 不具备 mark-price，避免发起无效订阅.
-        """
-        upper = symbol.upper()
-        if upper.endswith("-SWAP"):
-            return True
-        tail = upper.rsplit("-", 1)[-1]
-        return len(tail) == 6 and tail.isdigit()
-
-    def _subscribed_symbols(self) -> tuple[str, ...]:
-        symbols = tuple(dict.fromkeys(symbol for symbol in self.settings.expanded_allowed_symbols() if symbol))
-        return symbols or (self.settings.default_symbol,)
 
     async def _consume(
         self,
@@ -419,15 +405,16 @@ class OKXPublicWebSocketClient:
         connection_name: str,
         subscribe_args: list[dict[str, str]],
     ) -> None:
-        # P0-2：记录期望订阅的 channel×instId 集合，等待 OKX 返回 event="subscribe" ack
-        # 逐个确认。未在 _SUBSCRIPTION_ACK_TIMEOUT_SECONDS 内确认完的视为静默失败，
-        # keepalive 循环会主动断线重连。
+        # P0-2：记录期望订阅的 (channel, filter) 集合，等待 OKX 返回 event="subscribe"
+        # ack 逐个确认。filter 对 instId-based 频道是 instId；对 instType-based 频道
+        # （如 liquidation-orders）是 instType，由 _subscription_key 统一归一化。
+        # 未在 _SUBSCRIPTION_ACK_TIMEOUT_SECONDS 内确认完的视为静默失败，keepalive
+        # 循环会主动断线重连。
         pending: set[tuple[str, str]] = set()
         for arg in subscribe_args:
-            channel = str(arg.get("channel", ""))
-            inst_id = str(arg.get("instId", ""))
-            if channel and inst_id:
-                pending.add((channel, inst_id))
+            key = _subscription_key(arg)
+            if key[0] and key[1]:
+                pending.add(key)
         self._pending_subscriptions[connection_name] = pending
         self._subscription_errors[connection_name] = []
         self._subscription_sent_ts[connection_name] = utc_now()
@@ -446,10 +433,10 @@ class OKXPublicWebSocketClient:
             return False
         pending = self._pending_subscriptions.setdefault(connection_name, set())
         if event == "subscribe":
-            # P0-2：订阅成功 ack。从本连接 pending 集合中移除该 channel×instId 组合。
+            # P0-2：订阅成功 ack。从本连接 pending 集合中移除该 (channel, filter) 组合。
             arg = message.get("arg") or {}
             if isinstance(arg, dict):
-                key = (str(arg.get("channel", "")), str(arg.get("instId", "")))
+                key = _subscription_key(arg)
                 if key in pending:
                     pending.discard(key)
                     log_event(
@@ -458,7 +445,7 @@ class OKXPublicWebSocketClient:
                         level="debug",
                         connection=connection_name,
                         channel=key[0],
-                        instId=key[1],
+                        filter=key[1],
                         pending_count=len(pending),
                     )
                 else:
@@ -468,7 +455,7 @@ class OKXPublicWebSocketClient:
                         level="warning",
                         connection=connection_name,
                         channel=key[0],
-                        instId=key[1],
+                        filter=key[1],
                     )
             return True
         if event == "notice":
@@ -477,8 +464,10 @@ class OKXPublicWebSocketClient:
             code = message.get("code", "")
             msg = message.get("msg", "")
             arg = message.get("arg") or {}
-            failed_channel = str(arg.get("channel", "")) if isinstance(arg, dict) else ""
-            failed_inst = str(arg.get("instId", "")) if isinstance(arg, dict) else ""
+            if isinstance(arg, dict):
+                failed_channel, failed_filter = _subscription_key(arg)
+            else:
+                failed_channel, failed_filter = "", ""
             log_event(
                 self.logger,
                 "okx_ws_subscription_error",
@@ -488,14 +477,14 @@ class OKXPublicWebSocketClient:
                 msg=msg,
                 connId=message.get("connId", ""),
                 channel=failed_channel,
-                instId=failed_inst,
+                filter=failed_filter,
             )
             self._last_error = f"subscription_error:{code}:{msg}"
             # R3-P0-M1：错误一定归属本连接 —— 消息来自本连接 recv，不跨连接查 pending。
-            key = (failed_channel, failed_inst)
+            key = (failed_channel, failed_filter)
             if key in pending:
                 self._subscription_errors.setdefault(connection_name, []).append(
-                    {"code": code, "msg": msg, "channel": failed_channel, "instId": failed_inst}
+                    {"code": code, "msg": msg, "channel": failed_channel, "filter": failed_filter}
                 )
             else:
                 log_event(
@@ -506,7 +495,97 @@ class OKXPublicWebSocketClient:
                     code=code,
                     msg=msg,
                     channel=failed_channel,
-                    instId=failed_inst,
+                    filter=failed_filter,
                 )
             return True
         return False
+
+
+class OKXPublicWebSocketClient(OKXWebSocketConsumerBase):
+    """Market-data client — public (tickers) + business (candles) dual subscription.
+
+    Preserves the historical 2-connection behaviour: one socket on the public WS
+    URL for tickers, one on the business WS URL for candle streams. All
+    connection-layer concerns (reconnect, keepalive, ack tracking) are inherited
+    from :class:`OKXWebSocketConsumerBase`.
+    """
+
+    def __init__(self, *, settings: AATSSettings) -> None:
+        super().__init__(settings=settings, logger_name="aats.okx_market_ws")
+        # Pre-populate per-connection state keys so status() can be called
+        # before run_forever() spins up the tasks.
+        for name in ("public", "business"):
+            self._connected[name] = False
+            self._last_message_ts[name] = None
+            self._last_market_data_ts[name] = None
+            self._pending_subscriptions[name] = set()
+            self._subscription_errors[name] = []
+            self._subscription_sent_ts[name] = None
+
+    def _connection_specs(self) -> list[tuple[str, str, list[dict[str, str]]]]:
+        public_args, business_args = self._subscription_args()
+        return [
+            ("public", self.settings.okx_public_ws_url, public_args),
+            ("business", self.settings.okx_business_ws_url, business_args),
+        ]
+
+    def status(self) -> dict[str, Any]:
+        last_message_ts = [
+            item
+            for item in self._last_message_ts.values()
+            if item is not None
+        ]
+        freshest = max(last_message_ts) if last_message_ts else None
+        last_market = [
+            item
+            for item in self._last_market_data_ts.values()
+            if item is not None
+        ]
+        freshest_market = max(last_market) if last_market else None
+        return {
+            "connected_public": self._connected["public"],
+            "connected_business": self._connected["business"],
+            "connected": all(self._connected.values()),
+            "last_message_ts": freshest,
+            "last_market_data_ts": freshest_market,
+            "last_error": self._last_error,
+            "subscribed_symbols": list(self._subscribed_symbols()),
+        }
+
+    def _subscription_args(self) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+        symbols = self._subscribed_symbols()
+        public_args: list[dict[str, str]] = []
+        for symbol in symbols:
+            public_args.append({"channel": "tickers", "instId": symbol})
+            # P1.4 Mark price basis 信号 — 仅衍生品（SWAP / FUTURES）有 mark-price.
+            # 现货订阅 mark-price 会被 OKX 以 channel 错误拒，触发 subscription_error
+            # 路径 → keepalive 断线重连死循环；必须提前按 instId 过滤。
+            if self._is_derivative_symbol(symbol):
+                public_args.append({"channel": "mark-price", "instId": symbol})
+        business_args: list[dict[str, str]] = []
+        for symbol in symbols:
+            business_args.extend(
+                (
+                    {"channel": "candle15m", "instId": symbol},
+                    {"channel": "candle1H", "instId": symbol},
+                )
+            )
+        return public_args, business_args
+
+    @staticmethod
+    def _is_derivative_symbol(symbol: str) -> bool:
+        """Return True for OKX derivatives (SWAP perpetual / dated FUTURES).
+
+        SWAP: BASE-QUOTE-SWAP
+        FUTURES: BASE-QUOTE-YYMMDD (6 位数字后缀)
+        现货 BASE-QUOTE 不具备 mark-price，避免发起无效订阅.
+        """
+        upper = symbol.upper()
+        if upper.endswith("-SWAP"):
+            return True
+        tail = upper.rsplit("-", 1)[-1]
+        return len(tail) == 6 and tail.isdigit()
+
+    def _subscribed_symbols(self) -> tuple[str, ...]:
+        symbols = tuple(dict.fromkeys(symbol for symbol in self.settings.expanded_allowed_symbols() if symbol))
+        return symbols or (self.settings.default_symbol,)

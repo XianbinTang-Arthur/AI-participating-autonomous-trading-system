@@ -425,6 +425,46 @@ for _inst in _INST_TYPES:
 
 
 # =====================================================================
+# STAGING — 附加静态表（非 candle / funding 模式）
+# =====================================================================
+
+class RawLiquidationsModel(RdpBase):
+    """staging.raw_liquidations — OKX liquidation-orders WebSocket 原始流落库。
+
+    承载 OKX public `liquidation-orders` 频道推送的每条 details 行。OKX REST
+    `/api/v5/public/liquidation-orders` 仅保留 7 天历史，本表是 data lake 侧
+    长期积累的唯一来源，供未来 baseline contrarian 反转信号回填使用。
+
+    Natural key 是 (inst_id, ts, side, bk_px, sz) —— OKX 重连 / 广播重发时
+    会看到相同事件，靠 UNIQUE 约束 + ON CONFLICT DO NOTHING 做 DB 级幂等。
+    """
+    __tablename__ = "raw_liquidations"
+    __table_args__ = (
+        UniqueConstraint(
+            "inst_id", "ts", "side", "bk_px", "sz",
+            name="uq_raw_liquidations_natural_key",
+        ),
+        Index("ix_raw_liquidations_inst_ts", "inst_id", "ts"),
+        Index("ix_raw_liquidations_received", "received_at"),
+        CheckConstraint("side IN ('buy','sell')", name="chk_raw_liq_side"),
+        {"schema": "staging"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    inst_id = Column(Text, nullable=False)
+    inst_type = Column(Text, nullable=False)
+    inst_family = Column(Text)
+    side = Column(Text, nullable=False)
+    bk_px = Column(Numeric(28, 10), nullable=False)
+    sz = Column(Numeric(28, 10), nullable=False)
+    bk_loss = Column(Numeric(28, 10))
+    ccy = Column(Text)
+    raw_payload = Column(JSONB, nullable=False)
+    received_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+# =====================================================================
 # RESEARCH Schema — 3 张表
 # =====================================================================
 
