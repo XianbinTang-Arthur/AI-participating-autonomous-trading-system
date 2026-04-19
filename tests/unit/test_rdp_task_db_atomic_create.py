@@ -208,3 +208,69 @@ def test_requested_by_is_bound_into_insert_params() -> None:
     assert insert_sql.startswith("INSERT INTO governance.rdp_task_queue")
     assert params["requested_by"] == "scheduler_daemon"
     assert params["workflow"] == "decision_cycle"
+
+
+# =====================================================================
+# R3 Bug 6 retry: earliest_start_at 延迟入队
+# =====================================================================
+
+
+def test_earliest_start_at_defaults_to_now_when_not_specified() -> None:
+    """未显式指定 earliest_start_at 时，参数 eligible_at 默认 = now()。
+
+    契约：scheduler 正常入队不传参，行为保持与之前一致（立即可领）。
+    """
+    from datetime import datetime, timezone
+
+    session = _FakeSession(insert_succeeds=True)
+    before = datetime.now(timezone.utc)
+    db_create_task_if_idle(session, workflow="release_cycle")
+    after = datetime.now(timezone.utc)
+
+    _, params = session.statements[0]
+    assert "eligible_at" in params, "SQL 必须绑定 eligible_at 参数"
+    # eligible_at 必须落在 [before, after] 窗口内（= now())
+    assert before <= params["eligible_at"] <= after, (
+        f"默认 eligible_at 应 = now()，实际 {params['eligible_at']}"
+    )
+
+
+def test_earliest_start_at_honors_explicit_future_timestamp() -> None:
+    """R3 auto_retry 路径: 显式传 earliest_start_at=now()+15min 要绑定到 SQL。"""
+    from datetime import datetime, timedelta, timezone
+
+    session = _FakeSession(insert_succeeds=True)
+    retry_eligible = datetime.now(timezone.utc) + timedelta(minutes=15)
+
+    db_create_task_if_idle(
+        session, workflow="observation_cycle",
+        requested_by="auto_retry_of_task_abc",
+        earliest_start_at=retry_eligible,
+    )
+
+    insert_sql, params = session.statements[0]
+    assert "earliest_start_at" in insert_sql, (
+        "INSERT SQL 必须包含 earliest_start_at 列才能让 claim 延迟生效"
+    )
+    assert params["eligible_at"] == retry_eligible
+    assert params["requested_by"].startswith("auto_retry_of_"), (
+        "requested_by 前缀 auto_retry_of_ 供 daemon 防循环判定"
+    )
+
+
+def test_claim_sql_filters_by_earliest_start_at() -> None:
+    """db_claim_next_task 的 SELECT 必须过滤 earliest_start_at <= now()。
+
+    契约：没有这个过滤，延迟入队的 retry task 会被立刻 claim，15min 窗口失效。
+    """
+    import re
+
+    from aats.data_platform.governance import rdp_task_db as mod
+    import inspect
+
+    src = inspect.getsource(mod.db_claim_next_task)
+    # SQL 里必须有 earliest_start_at <= now() 条件
+    assert re.search(r"earliest_start_at\s*<=\s*now\(\)", src), (
+        "db_claim_next_task SQL 必须过滤 earliest_start_at <= now() "
+        "才能让 R3 retry 延迟生效"
+    )

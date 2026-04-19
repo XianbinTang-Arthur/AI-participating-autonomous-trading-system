@@ -92,6 +92,7 @@ def db_create_task_if_idle(
     *,
     workflow: str,
     requested_by: str = "operator",
+    earliest_start_at: datetime | None = None,
 ) -> tuple[str | None, dict[str, Any] | None]:
     """原子创建任务：同 workflow 已有 pending/running 时不插入。
 
@@ -121,13 +122,18 @@ def db_create_task_if_idle(
 
     task_id = f"task_{uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
+    # R3 Bug 6 retry: 未显式指定 earliest_start_at 时 = now() (立即可领)；
+    # auto_retry 路径传 now()+15min 实现延迟入队。
+    eligible_at = earliest_start_at if earliest_start_at is not None else now
     result = session.execute(
         text(
             """
             INSERT INTO governance.rdp_task_queue
-                (task_id, workflow, status, requested_by, requested_at, created_at)
+                (task_id, workflow, status, requested_by, requested_at,
+                 earliest_start_at, created_at)
             VALUES
-                (:task_id, :workflow, 'pending', :requested_by, :now, :now)
+                (:task_id, :workflow, 'pending', :requested_by, :now,
+                 :eligible_at, :now)
             ON CONFLICT (workflow) WHERE status IN ('pending', 'running')
             DO NOTHING
             RETURNING task_id
@@ -138,6 +144,7 @@ def db_create_task_if_idle(
             "workflow": workflow,
             "requested_by": requested_by,
             "now": now,
+            "eligible_at": eligible_at,
         },
     )
     row = result.fetchone()
@@ -163,12 +170,17 @@ def db_claim_next_task(session: Session) -> dict[str, Any] | None:
 
     使用 FOR UPDATE SKIP LOCKED 避免多个 daemon 竞争同一任务。
     返回 task dict 或 None（无任务可领）。
+
+    R3 Bug 6 retry: 加 ``earliest_start_at <= now()`` 过滤，让 auto_retry 产生
+    的延迟任务在 15min 窗口内不会被立即 claim。scheduler 入队的 task 默认
+    earliest_start_at = now()，立即可领，不受影响。
     """
     row = session.execute(
         text("""
             SELECT task_id, workflow, requested_by, requested_at
             FROM governance.rdp_task_queue
             WHERE status = 'pending'
+              AND earliest_start_at <= now()
             ORDER BY created_at ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED

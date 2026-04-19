@@ -806,6 +806,11 @@ class RdpTaskQueueModel(RdpBase):
     status = Column(String(32), nullable=False, server_default=text("'pending'"))
     requested_by = Column(String(128), nullable=False, server_default=text("'operator'"))
     requested_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+    # R3 Bug 6 retry 延迟机制 (2026-04-19):
+    # daemon claim 时要求 earliest_start_at <= now()，让 auto_retry task 能延迟
+    # 15min 后才被领取。scheduler 正常入队时默认 = created_at（立即可领）。
+    # 现有数据 server_default='now()' 自动兼容（升级后旧 row 立刻 claimable）。
+    earliest_start_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
     started_at = Column(DateTime(timezone=True))
     finished_at = Column(DateTime(timezone=True))
     exit_code = Column(Integer)

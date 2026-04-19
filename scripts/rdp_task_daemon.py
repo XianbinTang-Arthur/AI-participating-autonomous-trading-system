@@ -316,6 +316,7 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
     from aats.data_platform.db import get_session
     from aats.data_platform.governance.rdp_task_db import (
         db_claim_next_task,
+        db_create_task_if_idle,
         db_update_task_status,
     )
 
@@ -328,6 +329,7 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
 
     task_id = task["task_id"]
     workflow = task["workflow"]
+    requested_by = task.get("requested_by")  # R3: auto_retry 防循环判定用
     log.info("=== Processing task %s: workflow=%s ===", task_id, workflow)
 
     active_task = {
@@ -370,6 +372,7 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
     # 失败时打 structured error log，方便 Loki+Grafana alert rule
     # 抓取（log key=rdp_workflow_failed）。
     # 语义：operator 必须看到每次 workflow failed，不能依赖人工查 DB。
+    auto_retry_enqueued: str | None = None
     if status == "failed":
         log.error(
             "rdp_workflow_failed task_id=%s workflow=%s exit_code=%s error=%r",
@@ -383,6 +386,61 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
             },
         )
 
+        # R3 Bug 6 retry: 自动产生 15min 延迟 retry task (只 retry 1 次)
+        # 防循环: requested_by 带 "auto_retry_of_" 前缀，daemon 对其再失败
+        # 不再入队新 retry。scheduler 路径 (requested_by="scheduler") 正常触发。
+        # 手动触发 (requested_by 为操作员名) 也 retry 1 次 —— 临时故障应该能自动恢复。
+        _RETRY_DELAY_MINUTES = 15
+        is_retry_already = str(requested_by or "").startswith("auto_retry_of_")
+        if not is_retry_already:
+            from datetime import timedelta as _timedelta
+
+            retry_eligible = _utcnow() + _timedelta(minutes=_RETRY_DELAY_MINUTES)
+            try:
+                with get_session() as retry_session:
+                    retry_task_id, existing = db_create_task_if_idle(
+                        retry_session,
+                        workflow=workflow,
+                        requested_by=f"auto_retry_of_{task_id}",
+                        earliest_start_at=retry_eligible,
+                    )
+                    retry_session.commit()
+                if retry_task_id:
+                    auto_retry_enqueued = retry_task_id
+                    log.warning(
+                        "rdp_workflow_retry_enqueued original=%s retry=%s workflow=%s "
+                        "earliest_start_at=%s",
+                        task_id, retry_task_id, workflow, retry_eligible.isoformat(),
+                        extra={
+                            "event_name": "rdp_workflow_retry_enqueued",
+                            "original_task_id": task_id,
+                            "retry_task_id": retry_task_id,
+                            "workflow": workflow,
+                        },
+                    )
+                else:
+                    # scheduler 已经入队了下轮 task (或前面 auto_retry 还在 pending)
+                    log.info(
+                        "rdp_workflow_retry_skipped original=%s workflow=%s reason=active_task_present existing=%s",
+                        task_id, workflow, (existing or {}).get("task_id"),
+                    )
+            except Exception:
+                log.exception(
+                    "rdp_workflow_retry_enqueue_failed original=%s workflow=%s",
+                    task_id, workflow,
+                )
+        else:
+            log.warning(
+                "rdp_workflow_retry_exhausted original=%s workflow=%s "
+                "(retry already failed, no further retry)",
+                task_id, workflow,
+                extra={
+                    "event_name": "rdp_workflow_retry_exhausted",
+                    "task_id": task_id,
+                    "workflow": workflow,
+                },
+            )
+
     log.info("=== Task %s finished: %s (exit=%s) ===", task_id, status, exit_code)
     return {
         "processed": True,
@@ -391,6 +449,7 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
         "status": status,
         "exit_code": exit_code,
         "error_message": error_message or None,
+        "auto_retry_enqueued": auto_retry_enqueued,  # R3: retry task_id or None
         "finished_at": _utcnow().isoformat(),
     }
 
