@@ -92,7 +92,11 @@ async def amain(args: argparse.Namespace) -> int:
         LiquidationsCollector,
     )
 
-    settings = AATSSettings()
+    # process_role=None overrides AATS_PROCESS_ROLE=liquidations-daemon (set
+    # by compose for log/observability labeling) — this daemon is not part of
+    # the 4-process topology and would fail the gateway/market/decision/
+    # execution/monolith enum check otherwise.
+    settings = AATSSettings(process_role=None)
     inst_types = tuple(args.inst_types) if args.inst_types else ("SWAP",)
     collector = LiquidationsCollector(
         settings=settings,
