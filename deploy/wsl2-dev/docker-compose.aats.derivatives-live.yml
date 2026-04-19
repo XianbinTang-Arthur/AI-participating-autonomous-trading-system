@@ -81,7 +81,10 @@ services:
       AATS_LOG_FORMAT: json
       AATS_LOG_LEVEL: INFO
       TZ: Asia/Shanghai
-    command: ["python", "scripts/liquidations_ws_daemon.py"]
+    # compose_entrypoint shim 先补注入 AATS_STARTUP_PROFILE / AATS_ENV_TEMPLATE_PROFILE
+    # 派生变量（managed profile runtime_defaults 合并所需），再 execvp 到 daemon。
+    # 不走 shim 会让 AATSSettings 回退到 spot baseline，触发衍生品一致性校验崩。
+    command: ["python", "scripts/compose_entrypoint.py", "python", "scripts/liquidations_ws_daemon.py"]
     networks:
       - aats
     deploy:
