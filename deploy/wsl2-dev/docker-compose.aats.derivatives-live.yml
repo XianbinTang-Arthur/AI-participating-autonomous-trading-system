@@ -132,16 +132,13 @@ services:
       # Stage 4 metrics: OTel PrometheusMetricReader 在 :9465,Prometheus
       # 按 target aats-microstructure-collector:9465 采集 (错开 4 个主进程的
       # :9464 端口)。OTel 在容器内跨进程仅用 Meter API,无须 OTLP endpoint。
+      # daemon 启动时调用 configure_telemetry + create_bridge,
+      # prometheus_client 读此端口 env 在容器内启动 /metrics HTTP 端点。
       OTEL_EXPORTER_PROMETHEUS_HOST: "0.0.0.0"
       OTEL_EXPORTER_PROMETHEUS_PORT: "9465"
       AATS_OTEL_SERVICE_NAME: aats-microstructure-collector
       AATS_PROCESS_ROLE: microstructure-collector
       TZ: Asia/Shanghai
-      # Stage 4: daemon 启动时调用 configure_telemetry + create_bridge,
-      # prometheus_client 读此端口 env 在容器内启动 /metrics HTTP 端点。
-      # 主 4 进程用默认 9464; daemon 独立用 9465 避免潜在冲突。
-      OTEL_EXPORTER_PROMETHEUS_PORT: "9465"
-      OTEL_EXPORTER_PROMETHEUS_HOST: "0.0.0.0"
     command: ["python", "scripts/microstructure_ws_daemon.py"]
     # Stage 4: expose :9465 internally to the compose network so Prometheus
     # can scrape. Not published to host (no `ports:` mapping) — metrics stay
@@ -150,9 +147,6 @@ services:
       - "9465"
     networks:
       - aats
-    # 暴露 9465 给 prometheus(同 network)scrape; 不映射宿主机端口。
-    expose:
-      - "9465"
     deploy:
       resources:
         limits:
