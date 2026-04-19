@@ -921,6 +921,112 @@ class SilverMarketLiquidationMetrics15mModel(RdpBase):
 
 
 # =====================================================================
+# BRONZE — P1-D Stage 5 OKX REST 历史回填 bronze 表 (§batch_b_08, §batch_b_09)
+# =====================================================================
+# 3 张 Bronze 表, 由 OKX REST backfill collectors (aats/data_platform/collectors/
+# backfill/okx_rest_history_collectors.py) 批量回填. 实际 DDL 由 migrations/
+# batch_b_08_oi_history.sql + batch_b_09_mark_ls_history.sql 承载; ORM 仅供
+# create_all 兜底 + 单元测试 + 程序化读写.
+#
+# 参考: docs/design/p1d_okx_historical_backfill_plan_2026_04_20.md
+#       §3.1 (OI history) / §3.2 (mark-price) / §3.3 (LS ratio)
+
+
+class BronzeMarketOIHistory1hModel(RdpBase):
+    """bronze.market_oi_history_1h — OKX REST open-interest-history 回填.
+
+    来源: /api/v5/rubik/stat/contracts/open-interest-history (period=1H).
+    natural PK: (symbol, ts) — 每 1h bar 起点唯一.
+    UPSERT 幂等: INSERT ... ON CONFLICT (PK) DO NOTHING (历史 OI 不会变).
+
+    oi 是 OKX 返回的 OI 张数 (contracts); oi_ccy 是基础货币量; oi_usd 保留列
+    但本 stage 不填 (OKX 另一 endpoint `open-interest-usd` 提供, 后续 Silver
+    ETL 可 join mark_price × oi_ccy 推导).
+    """
+    __tablename__ = "market_oi_history_1h"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_brz_oi_history_1h"),
+        Index("idx_brz_oi_history_1h_ts", "ts"),
+        Index("idx_brz_oi_history_1h_sym_ts", "symbol", "ts"),
+        {"schema": "bronze"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)             # 1h bar 起点 (UTC)
+    oi = Column(Numeric(28, 10), nullable=False)                     # OKX `oi` 张数
+    oi_ccy = Column(Numeric(28, 10))                                 # OKX `oiCcy` 基础货币量
+    oi_usd = Column(Numeric(28, 10))                                 # OKX `oiUsd` (optional)
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    received_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
+class BronzeMarketMarkPriceCandles1mModel(RdpBase):
+    """bronze.market_mark_price_candles_1m — OKX REST mark-price-candles-history 回填.
+
+    来源: /api/v5/market/mark-price-candles-history (period=1m).
+    natural PK: (symbol, ts).
+    5 个价列 open/high/low/close 全 required (OKX 返回 confirm=1 的 bar).
+    """
+    __tablename__ = "market_mark_price_candles_1m"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_brz_mark_candles_1m"),
+        Index("idx_brz_mark_candles_1m_ts", "ts"),
+        Index("idx_brz_mark_candles_1m_sym_ts", "symbol", "ts"),
+        {"schema": "bronze"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)             # 1m bar 起点 (UTC)
+    open = Column(Numeric(20, 10), nullable=False)
+    high = Column(Numeric(20, 10), nullable=False)
+    low = Column(Numeric(20, 10), nullable=False)
+    close = Column(Numeric(20, 10), nullable=False)
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    received_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
+class BronzeMarketLongShortRatio5mModel(RdpBase):
+    """bronze.market_long_short_ratio_5m — OKX REST long-short-account-ratio 回填.
+
+    来源: /api/v5/rubik/stat/contracts/long-short-account-ratio (period=5m).
+    natural PK: (symbol, ts).
+    OKX endpoint 以 `ccy` 为参数 (e.g. "BTC"), collector 在写入时规范化为
+    "{ccy}-USDT-SWAP" 以保持统一 symbol schema.
+
+    LS ratio 有两种:
+      - ls_ratio_positions: position-size based (部分市场/时段提供)
+      - ls_ratio_accounts:  account-count based (OKX long-short-account-ratio 主字段)
+    两列都 nullable, collector 按实际返回填.
+    """
+    __tablename__ = "market_long_short_ratio_5m"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_brz_ls_ratio_5m"),
+        Index("idx_brz_ls_ratio_5m_ts", "ts"),
+        Index("idx_brz_ls_ratio_5m_sym_ts", "symbol", "ts"),
+        {"schema": "bronze"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)             # 5m bar 起点 (UTC)
+    ls_ratio_positions = Column(Numeric(18, 10))
+    ls_ratio_accounts = Column(Numeric(18, 10))
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    received_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
+# =====================================================================
 # RESEARCH Schema — 3 张表
 # =====================================================================
 
