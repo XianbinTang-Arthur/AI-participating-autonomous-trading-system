@@ -51,6 +51,13 @@ class AlphaFactorSet(SchemaBase):
     # P1.5 — funding rate 拥挤度 alpha. funding 过高 (多头付费重) → 过度拥挤 →
     # funding_alpha 负 (抑制 long)；反向同理。默认 0 兼容旧 payload.
     funding_alpha: float = 0.0
+    # P1.6 — Open Interest 方向性 alpha. 价 × OI 联合判断:
+    #   价 ↑ OI ↑ → 新多头入场 (正 alpha)
+    #   价 ↑ OI ↓ → 多头平仓 (弱负 alpha)
+    #   价 ↓ OI ↑ → 新空头入场 (负 alpha)
+    #   价 ↓ OI ↓ → 空头平仓 (弱正 alpha)
+    # 默认 0 兼容旧 payload + OI 数据未就绪时退化.
+    oi_alpha: float = 0.0
     liquidity_scale: float
     composite_alpha_score: float
     conviction_score: float

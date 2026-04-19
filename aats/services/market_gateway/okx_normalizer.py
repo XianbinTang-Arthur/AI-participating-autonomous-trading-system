@@ -89,6 +89,19 @@ class OKXFundingRateState:
 
 
 @dataclass(slots=True)
+class OKXOpenInterestState:
+    """P1.6 — OKX open-interest 频道最新快照.
+
+    OKX push data 字段：instType / instId / oi (张数) / oiCcy (币本位) / ts.
+    保留 oi 和 oi_ccy (后者用于 observability，alpha 计算用张数即可).
+    """
+    symbol: str
+    open_interest: Decimal
+    open_interest_ccy: Decimal | None
+    snapshot_ts: datetime
+
+
+@dataclass(slots=True)
 class OKXInstrumentMarketState:
     symbol: str
     ticker: OKXTickerState | None = None
@@ -96,6 +109,7 @@ class OKXInstrumentMarketState:
     candle_1h: OKXCandleState | None = None
     mark_price: OKXMarkPriceState | None = None
     funding: OKXFundingRateState | None = None
+    open_interest: OKXOpenInterestState | None = None
     raw_messages: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=50))
 
 
@@ -194,6 +208,9 @@ class OKXMarketSnapshotNormalizer:
         elif channel == "funding-rate":
             # P1.5 衍生品 funding 拥挤度信号：变化时推，稳定时约 1 分钟一次。
             state.funding = self._parse_funding_rate(symbol=symbol, payload=data[0])
+        elif channel == "open-interest":
+            # P1.6 衍生品未平仓量信号：每 3s 推一次（官方规定）。
+            state.open_interest = self._parse_open_interest(symbol=symbol, payload=data[0])
         else:
             return []
 
@@ -240,6 +257,29 @@ class OKXMarketSnapshotNormalizer:
             bid_size=to_decimal(payload.get("bidSz", 0)),
             ask_size=to_decimal(payload.get("askSz", 0)),
             volume_24h=to_decimal(payload.get("vol24h", 0)),
+        )
+
+    def _parse_open_interest(self, *, symbol: str, payload: dict[str, Any]) -> OKXOpenInterestState:
+        """Parse OKX ``open-interest`` 频道推送 data 元素.
+
+        官方 schema 关键字段: ``instType``, ``instId``, ``oi`` (张数), ``oiCcy``
+        (币本位), ``ts``. 必存: ``oi`` + ``ts``. ``oiCcy`` 可缺失.
+
+        缺 oi 或 ts → ValueError (走 schema warning 路径).
+        """
+        if "oi" not in payload or "ts" not in payload:
+            raise ValueError(
+                f"okx_open_interest_payload_missing_fields: keys={list(payload.keys())}"
+            )
+        oi_ccy: Decimal | None = None
+        raw_oi_ccy = payload.get("oiCcy")
+        if raw_oi_ccy not in (None, ""):
+            oi_ccy = to_decimal(raw_oi_ccy)
+        return OKXOpenInterestState(
+            symbol=symbol,
+            open_interest=to_decimal(payload["oi"]),
+            open_interest_ccy=oi_ccy,
+            snapshot_ts=_parse_ms_timestamp(str(payload["ts"])),
         )
 
     def _parse_funding_rate(self, *, symbol: str, payload: dict[str, Any]) -> OKXFundingRateState:
@@ -366,6 +406,10 @@ class OKXMarketSnapshotNormalizer:
         # / candle 的 ts 都会更新）。若单独推 funding → 作为最新一次变更的 ts.
         if state.funding is not None:
             ts_candidates.append(state.funding.snapshot_ts)
+        # P1.6 — open-interest 每 3s 推，加入 ts candidate 保证 OI 变化能推动
+        # snapshot_ts 刷新 (下游 is_fresh / feature calculation 连锁触发).
+        if state.open_interest is not None:
+            ts_candidates.append(state.open_interest.snapshot_ts)
         snapshot_ts = max(ts_candidates)
 
         # Build a minimal orderbook from ticker top-of-book so that
@@ -396,6 +440,12 @@ class OKXMarketSnapshotNormalizer:
             ),
             next_funding_time=(
                 state.funding.next_funding_time if state.funding is not None else None
+            ),
+            open_interest=(
+                state.open_interest.open_interest if state.open_interest is not None else None
+            ),
+            open_interest_ccy=(
+                state.open_interest.open_interest_ccy if state.open_interest is not None else None
             ),
         )
 

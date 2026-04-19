@@ -17,6 +17,12 @@ from aats.schemas.features import (
 )
 from aats.schemas.market import KlineBar, MarketSnapshot
 from aats.services.feature_engine.liquidity import LiquidityAnalyzer
+from aats.services.feature_engine.oi_state import (
+    DEFAULT_OI_DEAD_ZONE,
+    DEFAULT_OI_EMA_PERIOD,
+    DEFAULT_OI_MAX_SNAPSHOTS,
+    OpenInterestState,
+)
 from aats.services.feature_engine.regime import RegimeClassifier
 from aats.services.feature_engine.timeseries import (
     DEFAULT_ATR_WINDOW,
@@ -44,6 +50,10 @@ class FeatureCalculator:
         basis_scale_bps: float = 10.0,
         enable_funding_signal: bool = True,
         funding_scale: float = 2000.0,
+        enable_oi_signal: bool = True,
+        oi_max_snapshots: int = DEFAULT_OI_MAX_SNAPSHOTS,
+        oi_ema_period: int = DEFAULT_OI_EMA_PERIOD,
+        oi_dead_zone: float = DEFAULT_OI_DEAD_ZONE,
     ) -> None:
         self.trend = trend or TrendCalculator()
         self.volatility = volatility or VolatilityAnalyzer()
@@ -63,6 +73,14 @@ class FeatureCalculator:
         # 应 funding_alpha ≈ -tanh(1.0) ≈ -0.76。关闭等价 0 贡献.
         self.enable_funding_signal = enable_funding_signal
         self.funding_scale = funding_scale
+        # P1.6 Open Interest 方向性信号。per-symbol OpenInterestState 持有滚动
+        # 历史+EMA。oi_dead_zone：|delta|<0.5% 视为噪声 oi_alpha=0，避免窄幅
+        # 震荡的 OI 呼吸 false-trigger。关闭时 oi_alpha 恒 0.
+        self.enable_oi_signal = enable_oi_signal
+        self._oi_max_snapshots = oi_max_snapshots
+        self._oi_ema_period = oi_ema_period
+        self.oi_dead_zone = oi_dead_zone
+        self._oi_states: dict[str, OpenInterestState] = {}
         # Per (symbol, timeframe) 的滚动状态。跨 calculate() 调用累积历史。
         # 同 ts 的 update 幂等 → 同 snapshot 多次 calculate 结果一致
         # （守 test_feature_calculation_is_deterministic_for_same_snapshot 契约）。
@@ -90,6 +108,39 @@ class FeatureCalculator:
         """
         return self._rolling_states
 
+    def _get_oi_state(self, symbol: str) -> OpenInterestState:
+        state = self._oi_states.get(symbol)
+        if state is None:
+            state = OpenInterestState(
+                symbol=symbol,
+                max_snapshots=self._oi_max_snapshots,
+                ema_period=self._oi_ema_period,
+            )
+            self._oi_states[symbol] = state
+        return state
+
+    def oi_state_snapshot(self) -> dict[str, OpenInterestState]:
+        """Observability helper for OI states (symmetric with rolling_state_snapshot)."""
+        return self._oi_states
+
+    def _extract_price_roc(self, symbol: str) -> float | None:
+        """Read ROC(5) from 15m rolling state for oi_alpha composition.
+
+        OI 方向性信号需要与价格方向联合判断。优先用 15m 的 ROC (primary
+        timeframe). state 未 ready 或未启用 smoothing 时返回 None →
+        oi_alpha=0 (退化).
+        """
+        if not self.enable_timeseries_smoothing:
+            return None
+        key = (symbol, "15m")
+        state = self._rolling_states.get(key)
+        if state is None:
+            return None
+        ind = state.indicators()
+        if not ind.ready:
+            return None
+        return ind.roc
+
     def register_rolling_state(
         self,
         *,
@@ -106,6 +157,16 @@ class FeatureCalculator:
     def calculate(self, snapshot: MarketSnapshot, *, market_snapshot_ref: str | None = None) -> FeatureSnapshot:
         features_15m = self._timeframe_features(snapshot=snapshot, timeframe="15m", kline=snapshot.kline_15m)
         features_1h = self._timeframe_features(snapshot=snapshot, timeframe="1h", kline=snapshot.kline_1h)
+        # P1.6 — 若本 tick 的 MarketSnapshot 带 open_interest，更新 per-symbol
+        # OpenInterestState。幂等：同 snapshot_ts 反复调用结果一致
+        # （同 RollingCandleState 契约）。
+        oi_delta: float | None = None
+        if self.enable_oi_signal and snapshot.open_interest is not None:
+            oi_state = self._get_oi_state(snapshot.symbol)
+            oi_state.update(float(snapshot.open_interest), ts=snapshot.snapshot_ts)
+            oi_ind = oi_state.indicators()
+            if oi_ind.ready:
+                oi_delta = oi_ind.oi_delta
         liquidity = self.liquidity.calculate(snapshot)
         regime = self.regime.classify(
             momentum_15m=features_15m.momentum_score,
@@ -142,6 +203,10 @@ class FeatureCalculator:
             funding_rate=float(snapshot.funding_rate) if snapshot.funding_rate is not None else None,
             funding_signal_enabled=self.enable_funding_signal,
             funding_scale=self.funding_scale,
+            oi_delta=oi_delta,
+            price_roc=self._extract_price_roc(snapshot.symbol),
+            oi_signal_enabled=self.enable_oi_signal,
+            oi_dead_zone=self.oi_dead_zone,
         )
         position_sizing = self._position_sizing_context(
             alpha_factors=alpha_factors,
@@ -286,6 +351,10 @@ class FeatureCalculator:
         funding_rate: float | None,
         funding_signal_enabled: bool,
         funding_scale: float,
+        oi_delta: float | None,
+        price_roc: float | None,
+        oi_signal_enabled: bool,
+        oi_dead_zone: float,
     ) -> AlphaFactorSet:
         momentum_alpha = FeatureCalculator._clamp(
             (features_15m.momentum_score * 140.0 * 0.65) + (features_1h.momentum_score * 90.0 * 0.35),
@@ -357,19 +426,49 @@ class FeatureCalculator:
                 -1.0,
                 1.0,
             )
+        # P1.6 Open Interest 方向性 alpha. 与 15m ROC 联合判断:
+        #   价 ↑ OI ↑ → 新多头入场 (正 alpha，趋势确认)
+        #   价 ↑ OI ↓ → 多头平仓反弹 (弱负 alpha, 短期谨慎)
+        #   价 ↓ OI ↑ → 新空头入场 (负 alpha，趋势确认)
+        #   价 ↓ OI ↓ → 多头平仓回调 (弱正 alpha)
+        # dead zone: |oi_delta| < threshold 或 |roc| = 0 → oi_alpha=0 避免噪声
+        oi_alpha = 0.0
+        if (
+            oi_signal_enabled
+            and oi_delta is not None
+            and price_roc is not None
+            and abs(oi_delta) >= oi_dead_zone
+        ):
+            price_dir = 1.0 if price_roc > 0 else (-1.0 if price_roc < 0 else 0.0)
+            oi_dir = 1.0 if oi_delta > 0 else -1.0
+            if price_dir != 0.0:
+                alignment = price_dir * oi_dir   # +1 同向 / -1 反向
+                # magnitude: |oi_delta| × 10 缩放 (0.5% → 5%，饱和 1.0)
+                magnitude = min(abs(oi_delta) * 10.0, 1.0)
+                # 同向 (alignment=+1) → oi_alpha 与 price_dir 同号 (趋势确认)
+                # 反向 (alignment=-1) → oi_alpha 与 price_dir 反号 (弱反转，magnitude 减半)
+                if alignment > 0:
+                    oi_alpha = FeatureCalculator._clamp(
+                        price_dir * magnitude, -1.0, 1.0,
+                    )
+                else:
+                    oi_alpha = FeatureCalculator._clamp(
+                        -price_dir * magnitude * 0.5, -1.0, 1.0,
+                    )
         liquidity_scale = FeatureCalculator._clamp(0.45 + (liquidity_score * 0.55), 0.25, 1.0)
-        # Composite 权重重分配（P1.5）：funding 引入 0.07 权重，其他按比例让出。
-        # 严格归一 1.00: momentum 0.28 + trend 0.19 + regime 0.14 + multi_tf 0.10
-        # + micro 0.11 + basis 0.11 + funding 0.07 = 1.00.
+        # Composite 权重重分配（P1.6）：oi 引入 0.07 权重，其他按比例让出。
+        # 严格归一 1.00: momentum 0.26 + trend 0.18 + regime 0.13 + multi_tf 0.09
+        # + micro 0.10 + basis 0.10 + funding 0.07 + oi 0.07 = 1.00.
         composite_alpha_score = FeatureCalculator._clamp(
             (
-                momentum_alpha * 0.28
-                + trend_alpha * 0.19
-                + regime_alpha * 0.14
-                + multi_timeframe_alpha * 0.10
-                + microstructure_alpha * 0.11
-                + basis_alpha * 0.11
+                momentum_alpha * 0.26
+                + trend_alpha * 0.18
+                + regime_alpha * 0.13
+                + multi_timeframe_alpha * 0.09
+                + microstructure_alpha * 0.10
+                + basis_alpha * 0.10
                 + funding_alpha * 0.07
+                + oi_alpha * 0.07
             )
             * liquidity_scale,
             -1.0,
@@ -392,6 +491,7 @@ class FeatureCalculator:
             microstructure_alpha=microstructure_alpha,
             basis_alpha=basis_alpha,
             funding_alpha=funding_alpha,
+            oi_alpha=oi_alpha,
             liquidity_scale=liquidity_scale,
             composite_alpha_score=composite_alpha_score,
             conviction_score=conviction_score,

@@ -85,6 +85,12 @@ class MarketSnapshot(SchemaBase):
     funding_rate: Decimal | None = None               # 本次结算 funding rate
     next_funding_rate: Decimal | None = None          # 下次预估 funding rate
     next_funding_time: datetime | None = None         # 下次结算时间（UTC）
+    # P1.6 — OKX 衍生品 open-interest 频道字段。None 表示：
+    #   - 现货 symbol（OKX 不推 open-interest）
+    #   - WebSocket 暂未收到第一条 open-interest 推送（~3s 一次）
+    # FeatureCalculator 用它更新 OpenInterestState 并联合 ROC 计算 oi_alpha.
+    open_interest: Decimal | None = None              # 未平仓合约张数
+    open_interest_ccy: Decimal | None = None          # 未平仓合约币本位数量
 
     @field_validator("recent_trades", "orderbook_depth", mode="before")
     @classmethod

@@ -578,6 +578,9 @@ class OKXPublicWebSocketClient(OKXWebSocketConsumerBase):
                 # P1.5 Funding rate 拥挤度信号：同样仅衍生品，变化时推送，稳定时
                 # 约 1 分钟一次，不吃额外订阅配额（1 次订阅长期推送）。
                 public_args.append({"channel": "funding-rate", "instId": symbol})
+                # P1.6 Open Interest 方向性信号：衍生品 OI 每 3s 推一次 (官方规定)，
+                # 与 ROC 联合计算 oi_alpha。同 symbol 长订阅，不吃额外配额。
+                public_args.append({"channel": "open-interest", "instId": symbol})
         business_args: list[dict[str, str]] = []
         for symbol in symbols:
             business_args.extend(

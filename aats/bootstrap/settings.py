@@ -497,6 +497,18 @@ class AATSSettings(BaseSettings):
     # 权重 0.07 进入 composite。默认打开；关闭后 funding_alpha 恒为 0。
     strategy_baseline_funding_signal_enabled: bool = True
     strategy_baseline_funding_scale: float = 2000.0
+
+    # ── P1.6 Open Interest 方向性信号 ──────────────────────────────────────
+    # 衍生品专属：OKX 推送 open-interest (每 3s 一次)。价 × OI 联合判断区分
+    # "新入场 vs 平仓"，是趋势确认 vs 反弹/回调的关键差异:
+    #   价↑ OI↑ = 新多头入场, 价↑ OI↓ = 多头平仓(弱), 价↓ OI↑ = 新空头入场,
+    #   价↓ OI↓ = 多头平仓(弱).
+    # oi_delta = (oi_now - oi_ema) / oi_ema, 仅 |delta| >= dead_zone 触发.
+    # 权重 0.07 进入 composite. 默认打开；关闭后 oi_alpha 恒 0.
+    strategy_baseline_oi_signal_enabled: bool = True
+    strategy_baseline_oi_max_snapshots: int = 60     # ~3 分钟窗口 (3s × 60)
+    strategy_baseline_oi_ema_period: int = 20        # EMA(20) 基线
+    strategy_baseline_oi_dead_zone: float = 0.005    # |delta|<0.5% 忽略 (噪声)
     strategy_flat_signal_hold_enabled: bool = False
     strategy_flat_exit_microstructure_threshold: float = 0.12
     strategy_flat_exit_factor_threshold: float = 0.18

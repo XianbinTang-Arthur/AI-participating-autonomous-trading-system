@@ -3714,6 +3714,10 @@ def _build_market_slice(
         basis_scale_bps=runtime_settings.strategy_baseline_basis_scale_bps,
         enable_funding_signal=runtime_settings.strategy_baseline_funding_signal_enabled,
         funding_scale=runtime_settings.strategy_baseline_funding_scale,
+        enable_oi_signal=runtime_settings.strategy_baseline_oi_signal_enabled,
+        oi_max_snapshots=runtime_settings.strategy_baseline_oi_max_snapshots,
+        oi_ema_period=runtime_settings.strategy_baseline_oi_ema_period,
+        oi_dead_zone=runtime_settings.strategy_baseline_oi_dead_zone,
     )
     slices.feature_engine = FeatureEngine(bus=slices.bus, calculator=calculator)
 
