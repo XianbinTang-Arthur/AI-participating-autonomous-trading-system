@@ -1168,6 +1168,14 @@ class OKXAccountService:
     def _merge_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
         merged_data: list[Any] = []
         for payload in payloads:
+            # 防御性: gather(return_exceptions=True) 可能让 payloads 里混入
+            # OKXRequestError 等异常对象 (如 OKX 401 / rate limit 时). 这些
+            # 对象没有 .get() 方法, 直接跳过避免 AttributeError 让整个
+            # build_runtime 崩溃 → execution 进程重启循环.
+            # 参见 Phase 1A deploy retrospect (2026-04-20): OKX 401 曾把
+            # execution 卡在 crash loop, 新 key 注入前无法优雅降级.
+            if not isinstance(payload, dict):
+                continue
             rows = payload.get("data", [])
             if isinstance(rows, list):
                 merged_data.extend(rows)

@@ -1601,3 +1601,64 @@ class TestOKXAccountService(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Phase 1A deploy retro (2026-04-20): _merge_payloads 防御性 fix 锁定测试
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class TestMergePayloadsDefensive(unittest.TestCase):
+    """Phase 1A deploy 发现 OKX 401 时 gather(return_exceptions=True)
+    会让 payloads 列表混入 OKXRequestError 对象, _merge_payloads 早先
+    直接 .get('data') 引发 AttributeError, 触发 execution 进程 crash
+    loop. 本测试锁定: 异常对象必须被跳过, 不让整个 refresh 流程崩溃.
+    """
+
+    def test_all_dict_payloads_merge_as_before(self) -> None:
+        """baseline: 全部合法 dict payload, 数据合并不丢。"""
+        payloads = [
+            {"code": "0", "data": [{"id": "a"}, {"id": "b"}]},
+            {"code": "0", "data": [{"id": "c"}]},
+        ]
+        merged = OKXAccountService._merge_payloads(payloads)
+        self.assertEqual(merged["code"], "0")
+        self.assertEqual([row["id"] for row in merged["data"]], ["a", "b", "c"])
+
+    def test_exception_object_is_skipped(self) -> None:
+        """单个 payload 是 Exception (如 OKXRequestError) → 跳过, 其余合并。"""
+        class OKXRequestError(Exception):
+            pass
+
+        payloads = [
+            {"code": "0", "data": [{"id": "ok1"}]},
+            OKXRequestError("401 Unauthorized"),  # type: ignore[list-item]
+            {"code": "0", "data": [{"id": "ok2"}]},
+        ]
+        # 关键: 不抛 AttributeError, 返回 2 行可用数据
+        merged = OKXAccountService._merge_payloads(payloads)
+        self.assertEqual([row["id"] for row in merged["data"]], ["ok1", "ok2"])
+
+    def test_all_exceptions_returns_empty_data(self) -> None:
+        """全部 OKX 失败 → merged 为空 list, 不抛异常。"""
+        class OKXRequestError(Exception):
+            pass
+
+        payloads = [OKXRequestError("401"), OKXRequestError("429")]
+        merged = OKXAccountService._merge_payloads(payloads)  # type: ignore[arg-type]
+        self.assertEqual(merged["data"], [])
+
+    def test_non_dict_non_exception_scalars_are_skipped(self) -> None:
+        """防御性: None / 字符串 / 列表等非 dict 类型都安全跳过。"""
+        payloads = [
+            None,  # type: ignore[list-item]
+            "error string",  # type: ignore[list-item]
+            [],  # type: ignore[list-item]
+            {"code": "0", "data": [{"id": "valid"}]},
+        ]
+        merged = OKXAccountService._merge_payloads(payloads)
+        self.assertEqual([row["id"] for row in merged["data"]], ["valid"])
+
+
+if __name__ == "__main__":
+    unittest.main()
