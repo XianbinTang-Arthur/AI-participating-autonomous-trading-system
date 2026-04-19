@@ -17,6 +17,7 @@ from aats.schemas.features import (
 )
 from aats.schemas.market import KlineBar, MarketSnapshot
 from aats.services.feature_engine.liquidity import LiquidityAnalyzer
+from aats.services.feature_engine.long_short_poller import LongShortRatioPoller
 from aats.services.feature_engine.oi_state import (
     DEFAULT_OI_DEAD_ZONE,
     DEFAULT_OI_EMA_PERIOD,
@@ -55,6 +56,10 @@ class FeatureCalculator:
         oi_ema_period: int = DEFAULT_OI_EMA_PERIOD,
         oi_dead_zone: float = DEFAULT_OI_DEAD_ZONE,
         enable_regime_adx: bool = True,
+        long_short_poller: LongShortRatioPoller | None = None,
+        enable_ls_ratio_signal: bool = False,
+        ls_ratio_scale: float = 2.0,
+        ls_ratio_max_staleness_seconds: float = 900.0,
     ) -> None:
         self.trend = trend or TrendCalculator()
         self.volatility = volatility or VolatilityAnalyzer()
@@ -85,6 +90,13 @@ class FeatureCalculator:
         # P2.9 ADX-driven regime classification 开关. 关闭 → 走旧 classify()
         # 即硬编码 momentum / trend_strength 阈值 (紧急回滚).
         self.enable_regime_adx = enable_regime_adx
+        # P2.7 Long-Short ratio 情绪极值信号. 由独立 poller 拉取；FeatureCalculator
+        # 仅读缓存. 默认关 (flag=False)，因为数据 5min 聚合与 tick 决策时间分辨率
+        # 差 100 倍，需上线观察后决定是否打开. enable 时 poller 必须非 None.
+        self._long_short_poller = long_short_poller
+        self.enable_ls_ratio_signal = enable_ls_ratio_signal
+        self.ls_ratio_scale = ls_ratio_scale
+        self.ls_ratio_max_staleness_seconds = ls_ratio_max_staleness_seconds
         # Per (symbol, timeframe) 的滚动状态。跨 calculate() 调用累积历史。
         # 同 ts 的 update 幂等 → 同 snapshot 多次 calculate 结果一致
         # （守 test_feature_calculation_is_deterministic_for_same_snapshot 契约）。
@@ -144,6 +156,36 @@ class FeatureCalculator:
         if not ind.ready:
             return None
         return ind.roc
+
+    def _extract_ls_ratio(
+        self, symbol: str, as_of_ts,
+    ) -> float | None:
+        """Read most recent ls_ratio from poller cache with staleness check.
+
+        缓存过期 (> max_staleness_seconds) 或 poller 不可用 → None →
+        ls_alpha = 0 (退化).
+        """
+        if self._long_short_poller is None:
+            return None
+        sample = self._long_short_poller.latest(symbol)
+        if sample is None:
+            return None
+        # as_of_ts 可能是 datetime；容错 None 或非 tz-aware
+        try:
+            cache_ts = sample.ts
+            if cache_ts.tzinfo is None:
+                from datetime import timezone as _tz
+                cache_ts = cache_ts.replace(tzinfo=_tz.utc)
+            if as_of_ts is not None:
+                if as_of_ts.tzinfo is None:
+                    from datetime import timezone as _tz
+                    as_of_ts = as_of_ts.replace(tzinfo=_tz.utc)
+                age = (as_of_ts - cache_ts).total_seconds()
+                if age > self.ls_ratio_max_staleness_seconds:
+                    return None
+        except Exception:
+            return None
+        return sample.ls_ratio
 
     def register_rolling_state(
         self,
@@ -240,6 +282,9 @@ class FeatureCalculator:
             price_roc=self._extract_price_roc(snapshot.symbol),
             oi_signal_enabled=self.enable_oi_signal,
             oi_dead_zone=self.oi_dead_zone,
+            ls_ratio=self._extract_ls_ratio(snapshot.symbol, snapshot.snapshot_ts),
+            ls_signal_enabled=self.enable_ls_ratio_signal,
+            ls_scale=self.ls_ratio_scale,
         )
         position_sizing = self._position_sizing_context(
             alpha_factors=alpha_factors,
@@ -388,6 +433,9 @@ class FeatureCalculator:
         price_roc: float | None,
         oi_signal_enabled: bool,
         oi_dead_zone: float,
+        ls_ratio: float | None,
+        ls_signal_enabled: bool,
+        ls_scale: float,
     ) -> AlphaFactorSet:
         momentum_alpha = FeatureCalculator._clamp(
             (features_15m.momentum_score * 140.0 * 0.65) + (features_1h.momentum_score * 90.0 * 0.35),
@@ -488,20 +536,34 @@ class FeatureCalculator:
                     oi_alpha = FeatureCalculator._clamp(
                         -price_dir * magnitude * 0.5, -1.0, 1.0,
                     )
+        # P2.7 Long-Short ratio 情绪极值 alpha.
+        #   ls_ratio > 1 = 多头占优, >> 1 (如 3-5) 多头拥挤 → 反转 alpha 负
+        #   ls_ratio < 1 = 空头占优, << 1 (如 0.2-0.33) 空头拥挤 → 反转 alpha 正
+        # 公式用 (ls_ratio - 1) / scale 的 tanh 做 S 型饱和:
+        #   ls_scale=2 → ls=3 (+2 from neutral 1) 对应 -tanh(1) ≈ -0.76
+        # stale / 未获取 / flag off → ls_ratio = None → ls_alpha = 0.
+        ls_alpha = 0.0
+        if ls_signal_enabled and ls_ratio is not None and ls_ratio > 0 and ls_scale > 0:
+            ls_alpha = FeatureCalculator._clamp(
+                -math.tanh((ls_ratio - 1.0) / ls_scale),
+                -1.0,
+                1.0,
+            )
         liquidity_scale = FeatureCalculator._clamp(0.45 + (liquidity_score * 0.55), 0.25, 1.0)
-        # Composite 权重重分配（P1.6）：oi 引入 0.07 权重，其他按比例让出。
-        # 严格归一 1.00: momentum 0.26 + trend 0.18 + regime 0.13 + multi_tf 0.09
-        # + micro 0.10 + basis 0.10 + funding 0.07 + oi 0.07 = 1.00.
+        # Composite 权重最终版（P2.7）：ls 引入 0.06, 其他按比例让出。严格归一 1.00:
+        # momentum 0.24 + trend 0.17 + regime 0.12 + multi_tf 0.08 + micro 0.09
+        # + basis 0.10 + funding 0.07 + oi 0.07 + ls 0.06 = 1.00.
         composite_alpha_score = FeatureCalculator._clamp(
             (
-                momentum_alpha * 0.26
-                + trend_alpha * 0.18
-                + regime_alpha * 0.13
-                + multi_timeframe_alpha * 0.09
-                + microstructure_alpha * 0.10
+                momentum_alpha * 0.24
+                + trend_alpha * 0.17
+                + regime_alpha * 0.12
+                + multi_timeframe_alpha * 0.08
+                + microstructure_alpha * 0.09
                 + basis_alpha * 0.10
                 + funding_alpha * 0.07
                 + oi_alpha * 0.07
+                + ls_alpha * 0.06
             )
             * liquidity_scale,
             -1.0,
@@ -525,6 +587,7 @@ class FeatureCalculator:
             basis_alpha=basis_alpha,
             funding_alpha=funding_alpha,
             oi_alpha=oi_alpha,
+            ls_alpha=ls_alpha,
             liquidity_scale=liquidity_scale,
             composite_alpha_score=composite_alpha_score,
             conviction_score=conviction_score,

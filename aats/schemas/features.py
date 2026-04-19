@@ -58,6 +58,11 @@ class AlphaFactorSet(SchemaBase):
     #   价 ↓ OI ↓ → 空头平仓 (弱正 alpha)
     # 默认 0 兼容旧 payload + OI 数据未就绪时退化.
     oi_alpha: float = 0.0
+    # P2.7 — Long-Short account ratio (大户持仓多空比) 情绪极值 alpha.
+    # ls_ratio > 1 多头占优, > 3 极度拥挤 → 反转 alpha 负 (抑制 long).
+    # ls_ratio < 1 空头占优, < 0.33 极度拥挤 → 反转 alpha 正 (鼓励 long).
+    # 5 min REST 聚合 + stale 过期保护，FeatureCalculator 未拿到或过期时 = 0.
+    ls_alpha: float = 0.0
     liquidity_scale: float
     composite_alpha_score: float
     conviction_score: float

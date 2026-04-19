@@ -517,6 +517,18 @@ class AATSSettings(BaseSettings):
     strategy_baseline_regime_adx_enabled: bool = True
     strategy_baseline_regime_adx_trend_threshold: float = 25.0
     strategy_baseline_regime_adx_range_threshold: float = 20.0
+
+    # ── P2.7 Long-Short ratio (情绪极值反转) 信号 ───────────────────────────
+    # OKX Rubik REST 端点: /api/v5/rubik/stat/contracts/long-short-account-ratio-
+    # contract-top-trader (大户持仓多空比，5min 聚合). Poller 周期轮询维护缓存.
+    # ls_alpha = -tanh((ls_ratio - 1) / ls_scale), ls_scale=2 → ls=3 对应 ≈ -0.76.
+    # 权重 0.06 进入 composite. 默认关 (flag=False) —— 数据 5min 粒度与 tick
+    # 决策差 100×, 需要先上线观察再决定是否打开. 打开时后台 poller 必须启动.
+    strategy_baseline_ls_ratio_signal_enabled: bool = False
+    strategy_baseline_ls_ratio_poll_interval_seconds: float = 300.0
+    strategy_baseline_ls_ratio_period: str = "5m"
+    strategy_baseline_ls_ratio_scale: float = 2.0
+    strategy_baseline_ls_ratio_max_staleness_seconds: float = 900.0
     strategy_flat_signal_hold_enabled: bool = False
     strategy_flat_exit_microstructure_threshold: float = 0.12
     strategy_flat_exit_factor_threshold: float = 0.18

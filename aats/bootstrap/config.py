@@ -86,6 +86,7 @@ from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
 from aats.services.execution_engine.planner import ExecutionPlanner
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEngine
+from aats.services.feature_engine.long_short_poller import LongShortRatioPoller
 from aats.services.feature_engine.regime import RegimeClassifier
 from aats.services.governance_engine.health import SystemHealthService
 from aats.services.governance_engine.derivatives_live_guard import DerivativesLiveGuardService
@@ -538,6 +539,9 @@ class ApplicationRuntime:
     # build_runtime 解析后的 effective_process_role。settings.process_role 可能
     # 与 kwarg 传入值不一致（kwarg 优先），运行时门禁必须读此字段。
     process_role: str | None = None
+    # P2.7 — Long-Short ratio poller (仅 flag=True 时由 _build_market_slice
+    # 构造，否则 None). start_background_tasks 按 None 跳过启动.
+    long_short_poller: LongShortRatioPoller | None = None
 
     async def start_background_tasks(self) -> None:
         # Bug-1 时序平滑：在 market_gateway.start() 之前先用 OKX REST 拉一次
@@ -563,6 +567,22 @@ class ApplicationRuntime:
             "market", effective_process_role=self.process_role
         ):
             await self.market_gateway.start()
+
+        # P2.7 — Long-Short ratio poller 后台循环. 仅在 market / monolith 角色
+        # 且 flag 开启时启动 (_build_market_slice 已保证 poller 非 None 等价于
+        # 开启). 否则 None → 跳过.
+        if self.long_short_poller is not None and _slice_active(
+            "market", effective_process_role=self.process_role
+        ):
+            symbols = tuple(self.settings.expanded_allowed_symbols())
+            if not symbols:
+                symbols = (self.settings.default_symbol,)
+            self.background_tasks.append(
+                asyncio.create_task(
+                    self.long_short_poller.run_forever(symbols=symbols),
+                    name="aats_long_short_ratio_poller",
+                )
+            )
         # Stage 3 多进程切片化：OKX 私有 WS 和账户刷新循环仅在 execution /
         # monolith 角色启动。execution 是账户状态的权威来源；其余角色不需要
         # 实时账户快照，让它们各自连 OKX 只会 4× 放大连接和 REST 配额，且
@@ -3395,6 +3415,7 @@ class _RuntimeSlices:
 
     # ---- market ----
     feature_engine: Any = None
+    long_short_poller: Any = None  # P2.7 optional 后台 poller，flag off 时 None
 
     # ---- decision ----
     ai_service: Any = None
@@ -3712,6 +3733,16 @@ def _build_market_slice(
         adx_trend_threshold=runtime_settings.strategy_baseline_regime_adx_trend_threshold,
         adx_range_threshold=runtime_settings.strategy_baseline_regime_adx_range_threshold,
     )
+    # P2.7 Long-Short ratio poller: 仅当 flag 开时才构造并后台轮询.
+    # poller 没启动时 FeatureCalculator 读缓存返回 None → ls_alpha=0 退化.
+    long_short_poller: LongShortRatioPoller | None = None
+    if runtime_settings.strategy_baseline_ls_ratio_signal_enabled:
+        long_short_poller = LongShortRatioPoller(
+            okx_rest_url=runtime_settings.okx_rest_url,
+            poll_interval_seconds=runtime_settings.strategy_baseline_ls_ratio_poll_interval_seconds,
+            timeout_seconds=float(runtime_settings.okx_timeout_seconds),
+            period=runtime_settings.strategy_baseline_ls_ratio_period,
+        )
     calculator = FeatureCalculator(
         regime=regime_classifier,
         enable_timeseries_smoothing=runtime_settings.strategy_baseline_timeseries_smoothing_enabled,
@@ -3727,8 +3758,14 @@ def _build_market_slice(
         oi_ema_period=runtime_settings.strategy_baseline_oi_ema_period,
         oi_dead_zone=runtime_settings.strategy_baseline_oi_dead_zone,
         enable_regime_adx=runtime_settings.strategy_baseline_regime_adx_enabled,
+        long_short_poller=long_short_poller,
+        enable_ls_ratio_signal=runtime_settings.strategy_baseline_ls_ratio_signal_enabled,
+        ls_ratio_scale=runtime_settings.strategy_baseline_ls_ratio_scale,
+        ls_ratio_max_staleness_seconds=runtime_settings.strategy_baseline_ls_ratio_max_staleness_seconds,
     )
     slices.feature_engine = FeatureEngine(bus=slices.bus, calculator=calculator)
+    # 把 poller 引用挂到 slices 以便 start_background_tasks 拿到并启动后台 loop
+    slices.long_short_poller = long_short_poller
 
 
 def _build_decision_slice(
@@ -5251,6 +5288,7 @@ async def build_runtime(
         housekeeping=slices.housekeeping,
         execution_leg_risk_engine=slices.execution_leg_risk_engine,
         process_role=effective_process_role,
+        long_short_poller=slices.long_short_poller,
     )
     if runtime.sleeve_pnl_projection_service is not None:
         runtime.sleeve_pnl_projection_service.rebuild_scope(scope=state_scope)
