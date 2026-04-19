@@ -99,3 +99,56 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # microstructure-collector — OKX public microstructure WebSocket 采集
+  #
+  # 订阅 trades-all / bbo-tbt / books5 / open-interest / funding-rate /
+  # mark-price 6 个 public 频道写入 bronze.market_trades /
+  # bronze.market_orderbook_bbo / bronze.market_orderbook_books5 /
+  # staging.market_oi_funding_ticks。P1-D Phase 1A Stage 2 交付物。
+  #
+  # 与 aats-liquidations-daemon 同解耦理由（见上方注释）：
+  #   - 不注入 AATS_PROCESS_ROLE（不在 4 进程枚举内，走 daemon 的
+  #     model_validate({}) 默认路径）
+  #   - 不加载 .env.derivatives.live（公共 WS 不需 OKX 凭证）
+  #   - 只注入 RDP 库连接；不连 NATS（Q3 决策：不发 NATS 只写 DB）
+  #
+  # 独立容器换取故障隔离 + 可独立 scale + 对主 snapshot 流零干扰
+  # （设计文档附录 C.1 + §2.3 方案 C）。
+  # ---------------------------------------------------------------------------
+  aats-microstructure-collector:
+    build:
+      context: ../..
+      dockerfile: deploy/wsl2-dev/Dockerfile
+    image: aats-base:dev
+    container_name: aats-microstructure-collector
+    restart: unless-stopped
+    environment:
+      AATS_ACTIVE_PARAMETER_DB_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
+      RDP_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-aats}:${POSTGRES_PASSWORD:-aats}@postgres:5432/aats_research
+      AATS_LOG_FORMAT: json
+      AATS_LOG_LEVEL: INFO
+      TZ: Asia/Shanghai
+    command: ["python", "scripts/microstructure_ws_daemon.py"]
+    networks:
+      - aats
+    deploy:
+      resources:
+        limits:
+          # 512M 对齐 liquidations-daemon。稳态 58-250 MB 预估（§9 Day 4），
+          # 512M 含 2× headroom 足以覆盖 Bronze buffer 满载 + DB pool。
+          memory: 512M
+    depends_on:
+      aats-gateway:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "test -f /tmp/aats_microstructure_heartbeat && test $$(($$(date +%s) - $$(stat -c %Y /tmp/aats_microstructure_heartbeat))) -lt 60",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
