@@ -17,6 +17,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Computed,
     DateTime,
     Double,
     ForeignKey,
@@ -24,6 +25,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -462,6 +464,187 @@ class RawLiquidationsModel(RdpBase):
     ccy = Column(Text)
     raw_payload = Column(JSONB, nullable=False)
     received_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
+
+
+# =====================================================================
+# BRONZE / STAGING — P1-D Phase 1A microstructure 表 (§6)
+# =====================================================================
+# 4 张表供 OKX `trades-all` / `bbo-tbt` / `books5` / open-interest-funding-mark
+# 三大 WS 频道落库。参考 docs/design/p1d_phase1a_implementation_design_2026_04_20.md。
+# 实际 DDL 由 migrations/batch_b_05_microstructure.sql 承载,ORM 仅供 create_all
+# 兜底 + 单元测试 + 程序化读写。
+
+class BronzeMarketTradesModel(RdpBase):
+    """bronze.market_trades — OKX trades-all WS 频道落库。
+
+    OKX `tradeId` 是全局唯一递增整数;重连重发靠 (symbol, ts, trade_id) 复合
+    主键 + INSERT ... ON CONFLICT DO NOTHING 做 DB 级幂等。同一 ts 可能有多笔
+    trade(尤其 liquidation cascade 时高频),因此 trade_id 必须进入 PK。
+
+    热路径 ETL 走 (symbol, ts) 窗口扫描,复合索引 idx_brz_market_trades_sym_ts
+    支持;独立 trade_id 索引不加(PK 已含,symbol 是强过滤)。
+    """
+    __tablename__ = "market_trades"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", "trade_id", name="pk_brz_market_trades"),
+        Index("idx_brz_market_trades_ts", "ts"),
+        Index("idx_brz_market_trades_sym_ts", "symbol", "ts"),
+        CheckConstraint("side IN ('buy','sell')", name="chk_brz_trades_side"),
+        {"schema": "bronze"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)             # OKX trade.ts (ms → utc)
+    trade_id = Column(Text, nullable=False)                          # OKX tradeId, string
+    px = Column(Numeric(20, 10), nullable=False)
+    sz = Column(Numeric(28, 10), nullable=False)
+    side = Column(Text, nullable=False)                              # 'buy' or 'sell' (taker side)
+    raw_payload = Column(JSONB)                                      # 仅保留 OKX detail, 不含 arg
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    received_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
+class BronzeMarketOrderbookBboModel(RdpBase):
+    """bronze.market_orderbook_bbo — OKX bbo-tbt WS 频道 1Hz 采样落库。
+
+    OKX bbo-tbt 原推送 10ms,客户端限流采样 1Hz(1 行/秒/symbol),Phase 1A
+    采样率对齐可行性报告 §4.1;Phase 2A regression 后评估是否提升到 10Hz。
+
+    mid / spread / imbalance 三个 GENERATED ALWAYS AS ... STORED 列在 DB 层
+    自动计算,避免 Silver ETL 每次重算。ORM 里用 SQLAlchemy Computed(...,
+    persisted=True),对 PostgreSQL 与 SQLite 3.31+ 都生成兼容 DDL。
+    """
+    __tablename__ = "market_orderbook_bbo"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_brz_market_orderbook_bbo"),
+        Index("idx_brz_market_orderbook_bbo_ts", "ts"),
+        {"schema": "bronze"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)             # 客户端采样时刻
+    source_ts = Column(DateTime(timezone=True), nullable=False)      # OKX 推送原 ts
+    bid_px = Column(Numeric(20, 10), nullable=False)
+    bid_sz = Column(Numeric(28, 10), nullable=False)
+    ask_px = Column(Numeric(20, 10), nullable=False)
+    ask_sz = Column(Numeric(28, 10), nullable=False)
+    # 便利性计算字段 (GENERATED ALWAYS AS ... STORED)
+    mid = Column(
+        Numeric(20, 10),
+        Computed("(bid_px + ask_px) / 2", persisted=True),
+    )
+    spread = Column(
+        Numeric(20, 10),
+        Computed("ask_px - bid_px", persisted=True),
+    )
+    imbalance = Column(
+        Numeric(18, 10),
+        Computed(
+            "CASE WHEN (bid_sz + ask_sz) > 0 "
+            "THEN (bid_sz - ask_sz) / (bid_sz + ask_sz) "
+            "ELSE 0 END",
+            persisted=True,
+        ),
+    )
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    received_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
+class BronzeMarketOrderbookBooks5Model(RdpBase):
+    """bronze.market_orderbook_books5 — OKX books5 WS 频道 2Hz 采样落库。
+
+    OKX books5 原推送 100ms,客户端限流采样 2Hz (500ms 一行),5 档深度展平
+    为 20 列 NUMERIC 避免 JSONB 解析开销。Level 1 (top) 为 NOT NULL,其余
+    level 2-5 可 NULL (OKX 有时只返回 < 5 档)。
+    """
+    __tablename__ = "market_orderbook_books5"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_brz_market_orderbook_books5"),
+        Index("idx_brz_market_orderbook_books5_ts", "ts"),
+        {"schema": "bronze"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)             # 客户端采样时刻
+    source_ts = Column(DateTime(timezone=True), nullable=False)      # OKX 推送原 ts
+    # Level 1 NOT NULL (top-of-book 总是存在)
+    bid_px_1 = Column(Numeric(20, 10), nullable=False)
+    bid_sz_1 = Column(Numeric(28, 10), nullable=False)
+    # Level 2-5 可 NULL (OKX 有时不足 5 档)
+    bid_px_2 = Column(Numeric(20, 10))
+    bid_sz_2 = Column(Numeric(28, 10))
+    bid_px_3 = Column(Numeric(20, 10))
+    bid_sz_3 = Column(Numeric(28, 10))
+    bid_px_4 = Column(Numeric(20, 10))
+    bid_sz_4 = Column(Numeric(28, 10))
+    bid_px_5 = Column(Numeric(20, 10))
+    bid_sz_5 = Column(Numeric(28, 10))
+    ask_px_1 = Column(Numeric(20, 10), nullable=False)
+    ask_sz_1 = Column(Numeric(28, 10), nullable=False)
+    ask_px_2 = Column(Numeric(20, 10))
+    ask_sz_2 = Column(Numeric(28, 10))
+    ask_px_3 = Column(Numeric(20, 10))
+    ask_sz_3 = Column(Numeric(28, 10))
+    ask_px_4 = Column(Numeric(20, 10))
+    ask_sz_4 = Column(Numeric(28, 10))
+    ask_px_5 = Column(Numeric(20, 10))
+    ask_sz_5 = Column(Numeric(28, 10))
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    received_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
+class StagingMarketOiFundingTicksModel(RdpBase):
+    """staging.market_oi_funding_ticks — open-interest / funding-rate /
+    mark-price 三个 OKX WS 频道统一 tick 表。
+
+    为什么放 staging 而非 bronze: 同 staging.raw_liquidations,这是每 tick
+    原始流,Silver ETL 直接 group-by 聚合为 silver_*_15m bar,不需要独立的
+    bronze 精简层。
+
+    BIGSERIAL id PK: 同一 (symbol, ts, tick_type) 在 OKX 推送毫秒级并发时
+    可能冲突,BIGSERIAL 避免 PK 冲突;ingest 是 append-only,不做 upsert。
+
+    tick_type 列区分语义: 'oi' 时 oi/oi_ccy 有值,'funding' 时 funding_rate/
+    next_funding_rate/next_funding_time 有值, 'mark' 时 mark_px 有值。
+    """
+    __tablename__ = "market_oi_funding_ticks"
+    __table_args__ = (
+        Index("ix_staging_market_oif_sym_ts", "symbol", "ts"),
+        Index("ix_staging_market_oif_type_ts", "tick_type", "ts"),
+        CheckConstraint(
+            "tick_type IN ('oi','funding','mark')",
+            name="chk_staging_oif_type",
+        ),
+        {"schema": "staging"},
+    )
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    ts = Column(DateTime(timezone=True), nullable=False)             # OKX 推送 ts
+    symbol = Column(Text, nullable=False)
+    tick_type = Column(Text, nullable=False)                         # 'oi' | 'funding' | 'mark'
+    oi = Column(Numeric(28, 10))                                     # when tick_type='oi'
+    oi_ccy = Column(Numeric(28, 10))
+    funding_rate = Column(Numeric(18, 12))                           # when tick_type='funding'
+    next_funding_rate = Column(Numeric(18, 12))
+    next_funding_time = Column(DateTime(timezone=True))
+    mark_px = Column(Numeric(20, 10))                                # when tick_type='mark'
+    received_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
 
 
 # =====================================================================
