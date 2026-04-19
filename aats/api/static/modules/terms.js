@@ -179,6 +179,17 @@
   alpha_trend_support: "趋势因子支持当前方向",
   alpha_regime_support: "市场状态因子支持当前方向",
   alpha_multi_timeframe_support: "多周期因子支持当前方向",
+  // P1.4~P2.7 新增 4 个方向性 alpha (basis / funding / oi / ls) 对应的 reason_codes；
+  // 与 aats/services/decision_engine/baseline.py::BaselineStrategy._factor_reason_codes
+  // 末尾 4 段 if 分支一一对应。新增 alpha 时两处需同步更新。
+  alpha_basis_contrarian_long: "基差反转偏多",
+  alpha_basis_contrarian_short: "基差反转偏空",
+  alpha_funding_long_bias: "资金费率拥挤偏多",
+  alpha_funding_short_bias: "资金费率拥挤偏空",
+  alpha_oi_long_confirming: "持仓量确认偏多",
+  alpha_oi_short_confirming: "持仓量确认偏空",
+  alpha_ls_contrarian_long: "多空比反转偏多",
+  alpha_ls_contrarian_short: "多空比反转偏空",
   regime_breakout: "市场处于突破阶段",
   regime_range: "市场处于震荡阶段",
   volatility_targeting_reduced_size: "波动率目标要求缩小仓位",
