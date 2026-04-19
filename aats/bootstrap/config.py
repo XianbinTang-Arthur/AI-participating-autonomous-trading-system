@@ -1100,7 +1100,13 @@ class ApplicationRuntime:
             await asyncio.sleep(interval_seconds)
 
     async def _housekeeping_loop(self) -> None:
-        """P3-1 / P3-2：每 6 小时执行一次数据库清理。"""
+        """P3-1 / P3-2 + Path B Phase 1：每 6 小时执行一次数据库清理。
+
+        任务：
+          - purge_published_outbox (outbox 已发布行 > 7 天)
+          - archive_hot_event_store (event_store 热表 > 14 天 → archive)
+          - purge_old_archive_events (archive 表 > 90 天)
+        """
         _INTERVAL_SECONDS = 6 * 3600  # 6h
         # 首次延迟 60s，避免启动热路径上叠加 DELETE 查询
         await asyncio.sleep(60)
@@ -1109,11 +1115,16 @@ class ApplicationRuntime:
                 housekeeping = getattr(self, "housekeeping", None)
                 if housekeeping is not None:
                     result = await asyncio.to_thread(housekeeping.run_all)
+                    archive_hot = result.get("archive_hot_report") or {}
                     log_event(
                         self.logger,
                         "db_housekeeping_completed",
                         outbox_purged=result.get("outbox_purged", 0),
                         archive_purged=result.get("archive_purged", 0),
+                        archive_hot_copied=archive_hot.get("copied_rows", 0),
+                        archive_hot_deleted=archive_hot.get("deleted_rows", 0),
+                        archive_hot_batches=archive_hot.get("batches", 0),
+                        archive_hot_time_ms=archive_hot.get("time_taken_ms", 0),
                     )
             except Exception as exc:
                 await self._record_background_failure(
