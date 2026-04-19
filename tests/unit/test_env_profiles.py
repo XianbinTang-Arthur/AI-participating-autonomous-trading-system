@@ -402,10 +402,12 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_hedge_independent_emit_close_reason_metrics"] is True
         assert values["strategy_hedge_independent_emit_execution_policy_metrics"] is True
         if profile == "derivatives_live":
-            assert values["strategy_baseline_breakout_alpha_threshold"] == 0.08
-            assert values["strategy_baseline_trend_alpha_threshold"] == 0.14
-            assert values["strategy_baseline_range_alpha_threshold"] == 0.16
-            assert values["strategy_baseline_uncertain_alpha_threshold"] == 0.26
+            # 2026-04-19 等分位标定后 P0→P2.7 权重重分配的新值
+            # (docs/calibration/baseline_weight_recalibration_2026_04_19.md).
+            assert values["strategy_baseline_breakout_alpha_threshold"] == 0.06
+            assert values["strategy_baseline_trend_alpha_threshold"] == 0.10
+            assert values["strategy_baseline_range_alpha_threshold"] == 0.11
+            assert values["strategy_baseline_uncertain_alpha_threshold"] == 0.18
             assert values["strategy_baseline_alignment_bonus"] == 0.03
             assert values["strategy_baseline_impulse_override_enabled"] is True
             assert values["strategy_baseline_impulse_alpha_min"] == 0.10
@@ -444,10 +446,12 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_hedge_overlay_mode"] == "independent"
     assert values["strategy_entry_alpha_min"] == 0.10
     assert values["strategy_entry_confidence_min"] == 0.55
-    assert values["strategy_baseline_breakout_alpha_threshold"] == 0.08
-    assert values["strategy_baseline_trend_alpha_threshold"] == 0.14
-    assert values["strategy_baseline_range_alpha_threshold"] == 0.16
-    assert values["strategy_baseline_uncertain_alpha_threshold"] == 0.26
+    # 2026-04-19 等分位标定后 P0→P2.7 权重重分配的新值
+    # (docs/calibration/baseline_weight_recalibration_2026_04_19.md).
+    assert values["strategy_baseline_breakout_alpha_threshold"] == 0.06
+    assert values["strategy_baseline_trend_alpha_threshold"] == 0.10
+    assert values["strategy_baseline_range_alpha_threshold"] == 0.11
+    assert values["strategy_baseline_uncertain_alpha_threshold"] == 0.18
     assert values["strategy_baseline_alignment_bonus"] == 0.03
     assert values["strategy_baseline_impulse_override_enabled"] is True
     assert values["strategy_baseline_impulse_alpha_min"] == 0.10

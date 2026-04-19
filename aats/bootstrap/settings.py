@@ -529,13 +529,29 @@ class AATSSettings(BaseSettings):
     strategy_baseline_ls_ratio_period: str = "5m"
     strategy_baseline_ls_ratio_scale: float = 2.0
     strategy_baseline_ls_ratio_max_staleness_seconds: float = 900.0
+
+    # ── 2026-04-19 等分位标定 (P2.7 权重重分配后) ────────────────────────────
+    # docs/calibration/baseline_weight_recalibration_2026_04_19.md.
+    # 以下 6 个字段原本是 strategy_profiles.py._fallback_recommendation /
+    # _transition_score 内部硬编码 (0.14 / 0.45 / 0.55 / 0.24 / 0.12 / 0.22).
+    # P2.7 权重重分配后 |composite_alpha| 整体缩约 30%, 硬编码不再匹配新分布,
+    # 抽成 settings 字段以便按分位标定并支持未来继续调优.
+    # Default = 标定后的 T_new (旧 T_old 在旧分布同分位映射到新分布).
+    strategy_profile_auto_switch_high_vol_alpha_ceiling: float = 0.32
+    strategy_profile_auto_switch_alpha_defensive_threshold: float = 0.10
+    strategy_profile_auto_switch_alpha_aggressive_threshold: float = 0.39
+    strategy_profile_auto_switch_alpha_normal_threshold: float = 0.17
+    strategy_profile_intent_fit_alpha_band_low: float = 0.08
+    strategy_profile_intent_fit_alpha_band_high: float = 0.15
+
     strategy_flat_signal_hold_enabled: bool = False
     strategy_flat_exit_microstructure_threshold: float = 0.12
     strategy_flat_exit_factor_threshold: float = 0.18
     strategy_flat_exit_ai_edge_threshold: float = 0.22
-    strategy_position_alpha_decay_reduce_alpha: float = 0.12
+    # alpha_decay default: 2026-04-19 等分位标定 0.12 → 0.08, 0.06 → 0.04.
+    strategy_position_alpha_decay_reduce_alpha: float = 0.08
     strategy_position_alpha_decay_reduce_confidence: float = 0.5
-    strategy_position_alpha_decay_exit_alpha: float = 0.06
+    strategy_position_alpha_decay_exit_alpha: float = 0.04
     strategy_position_high_volatility_reduce_fraction: float = 0.72
     strategy_position_range_reduce_fraction: float = 0.8
     strategy_position_uncertain_reduce_fraction: float = 0.65

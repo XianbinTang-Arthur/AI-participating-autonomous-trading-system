@@ -886,6 +886,13 @@ class StrategyProfileControlService:
         safety_state = context.get("safety_state") or {}
         safe_to_trade = bool(safety_state.get("safe_to_trade", True))
         review_required = bool(safety_state.get("review_required", False))
+        # 2026-04-19 等分位标定 (P2.7 权重重分配后): 原先硬编码 0.45/0.14/0.55/0.24
+        # 基于旧 composite 分布经验标定, 新分布整体缩约 30% 后不再匹配, 抽成
+        # settings 字段. 详见 docs/calibration/baseline_weight_recalibration_2026_04_19.md.
+        high_vol_alpha_ceiling = self.settings.strategy_profile_auto_switch_high_vol_alpha_ceiling
+        alpha_defensive = self.settings.strategy_profile_auto_switch_alpha_defensive_threshold
+        alpha_aggressive = self.settings.strategy_profile_auto_switch_alpha_aggressive_threshold
+        alpha_normal = self.settings.strategy_profile_auto_switch_alpha_normal_threshold
         fallback_rules = [
             {
                 "profile_id": "execution_degraded_safe",
@@ -896,28 +903,28 @@ class StrategyProfileControlService:
             },
             {
                 "profile_id": "high_volatility_defensive",
-                "when": volatility_state == "high" and (abs(composite_alpha) < 0.45 or regime in {"uncertain", "range"}),
+                "when": volatility_state == "high" and (abs(composite_alpha) < high_vol_alpha_ceiling or regime in {"uncertain", "range"}),
                 "summary": "Volatility is elevated; use the high-volatility defensive profile.",
                 "reasons": ["high_volatility_detected"],
                 "confidence": 0.84,
             },
             {
                 "profile_id": "range_defensive",
-                "when": regime in {"range", "uncertain"} or direction_bias == "flat" or fee_ratio >= 0.45 or churn_ratio >= 0.55 or abs(composite_alpha) < 0.14,
+                "when": regime in {"range", "uncertain"} or direction_bias == "flat" or fee_ratio >= 0.45 or churn_ratio >= 0.55 or abs(composite_alpha) < alpha_defensive,
                 "summary": "Range behavior or fee churn is dominant; reduce activity with the range defensive profile.",
                 "reasons": ["range_regime_detected", "fee_churn_elevated"],
                 "confidence": 0.82,
             },
             {
                 "profile_id": "trend_aggressive",
-                "when": regime in {"trend", "breakout"} and direction_bias != "flat" and composite_alpha >= 0.55 and regime_confidence >= 0.78 and fee_ratio <= 0.3 and execution_errors == 0 and suggested_position_scale >= 0.25,
+                "when": regime in {"trend", "breakout"} and direction_bias != "flat" and composite_alpha >= alpha_aggressive and regime_confidence >= 0.78 and fee_ratio <= 0.3 and execution_errors == 0 and suggested_position_scale >= 0.25,
                 "summary": "Trend evidence is strong; the aggressive trend profile is the best fit.",
                 "reasons": ["trend_signal_supported", "trend_signal_strong"],
                 "confidence": 0.86,
             },
             {
                 "profile_id": "trend_normal",
-                "when": regime in {"trend", "breakout"} and direction_bias != "flat" and composite_alpha >= 0.24 and regime_confidence >= 0.62,
+                "when": regime in {"trend", "breakout"} and direction_bias != "flat" and composite_alpha >= alpha_normal and regime_confidence >= 0.62,
                 "summary": "Trend evidence is healthy; use the standard trend profile.",
                 "reasons": ["trend_signal_supported"],
                 "confidence": 0.76,
@@ -1831,9 +1838,14 @@ class StrategyProfileControlService:
             score += 1.0 if revision.market_intent == "range" else (-0.25 if revision.market_intent == "trend" else 0.0)
         else:
             score += 1.0 if revision.market_intent == "trend" else 0.0
-            if revision.profile_id == "trend_strict" and 0.12 <= abs(composite_alpha) <= 0.22:
+            # 2026-04-19 等分位标定 (见 docs/calibration/baseline_weight_recalibration_2026_04_19.md):
+            # 原先硬编码 0.12/0.22 抽成 settings.strategy_profile_intent_fit_alpha_band_{low,high},
+            # 标定后 default = 0.08/0.15, 与 P2.7 新分布保持相同分位语义.
+            band_low = self.settings.strategy_profile_intent_fit_alpha_band_low
+            band_high = self.settings.strategy_profile_intent_fit_alpha_band_high
+            if revision.profile_id == "trend_strict" and band_low <= abs(composite_alpha) <= band_high:
                 score += 0.35
-            if revision.profile_id == "trend_normal" and abs(composite_alpha) >= 0.22:
+            if revision.profile_id == "trend_normal" and abs(composite_alpha) >= band_high:
                 score += 0.2
 
         if fee_ratio >= 0.5 or latest_fee_delta > 0:

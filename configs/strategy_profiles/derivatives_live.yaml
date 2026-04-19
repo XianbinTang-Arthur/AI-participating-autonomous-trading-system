@@ -206,10 +206,13 @@ decision_min_momentum_delta: 0.0003
 strategy_short_bias_enabled: true
 # [常用可调] strategy_dynamic_leverage_enabled：是否允许动态杠杆。可选值：true / false；推荐值：true。
 strategy_dynamic_leverage_enabled: true
-strategy_baseline_breakout_alpha_threshold: 0.08
-strategy_baseline_trend_alpha_threshold: 0.14
-strategy_baseline_range_alpha_threshold: 0.16
-strategy_baseline_uncertain_alpha_threshold: 0.26
+# 2026-04-19 等分位标定 (docs/calibration/baseline_weight_recalibration_2026_04_19.md):
+# P2.7 权重重分配后 |composite_alpha| 整体缩约 30%, 同分位阈值需随之下调以保持
+# 相同的 direction_bias=flat 触发率. 原值分别对应旧分布 P32/P51/P57/P78 分位.
+strategy_baseline_breakout_alpha_threshold: 0.06
+strategy_baseline_trend_alpha_threshold: 0.10
+strategy_baseline_range_alpha_threshold: 0.11
+strategy_baseline_uncertain_alpha_threshold: 0.18
 strategy_baseline_alignment_bonus: 0.03
 strategy_baseline_impulse_override_enabled: true
 strategy_baseline_impulse_alpha_min: 0.10
