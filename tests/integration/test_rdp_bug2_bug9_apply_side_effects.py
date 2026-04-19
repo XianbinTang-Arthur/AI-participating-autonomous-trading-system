@@ -194,15 +194,27 @@ class TestApplyBug2Bug9SideEffects(unittest.TestCase):
 
     def _invoke_apply(self, rec_id: str, project_root: Path) -> dict:
         """调用 apply_approved_recommendation，用 fake get_session 桥接 testcontainer."""
+        from contextlib import contextmanager
+
         from aats.data_platform.decision_system import active_parameter_apply
 
-        # 让 apply_approved_recommendation 里的 with get_session() 使用我们的 engine
+        # get_session 是 @contextmanager 装饰的 generator (db.py)
+        # 我们的 fake 必须也是 context manager + yield Session + commit/rollback
         from sqlalchemy.orm import sessionmaker
 
         SessionLocal = sessionmaker(bind=self.engine, future=True)
 
-        def _fake_get_session():
-            return SessionLocal()
+        @contextmanager
+        def _fake_get_session(settings=None):
+            session = SessionLocal()
+            try:
+                yield session
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+            finally:
+                session.close()
 
         # apply_approved_recommendation 内部从 aats.data_platform.db 局部 import
         # get_session；patch 必须在那个源头模块上生效才能覆盖 late import。
