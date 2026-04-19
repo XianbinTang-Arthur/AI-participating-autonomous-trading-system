@@ -16,8 +16,9 @@
 | 1 | `price_change_bps` / `oi_price_regime` 历史 mid_ref | Phase 1A 48h 运行完有 ≥10 bar 历史 | 0.5 人天 | `aats/data_platform/merge/microstructure_silver_merger.py::_build_oi_funding_metrics` |
 | 2 | `whale_threshold` 固定 2.0 → 1h rolling p99 | Phase 1A 稳定跑完 7 天 | 0.5 人天 | `microstructure_silver_merger.py::_build_trade_flow` |
 | 3 | `intensity_z_7d` / `funding_z_score_7d` 冷启动 NULL | Phase 1A 跑完 7 天自动解除 | 0 人天 (自动) | 不涉及代码改动, 仅监控配置 |
+| 4 | **所有 aats 进程 Prometheus :9464/:9465 `connection refused`** | T+1h 巡检 (2026-04-20) 发现 | 0.5-1 人天 | `aats/bootstrap/telemetry.py` / `aats/bootstrap/metrics_bridge.py` |
 
-**总工期**: **1 人天** + 1 周等待数据积累。
+**总工期**: **1.5-2 人天** + 1 周等待数据积累。
 
 ---
 
@@ -220,13 +221,79 @@ whale_threshold = max(
 
 ---
 
+## 遗留 4. Prometheus scrape 全部 `aats` 进程 `connection refused`
+
+**发现时间**: Phase 1A deploy T+1h 巡检 (2026-04-20)
+
+### 4.1 现状
+
+```
+up{instance="aats-gateway:9464",job="aats"}                        = 0
+up{instance="aats-decision:9464",job="aats"}                       = 0
+up{instance="aats-market:9464",job="aats"}                         = 0
+up{instance="aats-execution:9464",job="aats"}                      = 0
+up{instance="aats-microstructure-collector:9465",job="aats-microstructure"} = 0
+up{instance="redis-exporter:9121",job="redis"}                     = 1 (normal)
+```
+
+Prometheus 容器内 `wget http://aats-gateway:9464/metrics` 直接 `Connection refused`。
+所有 aats 主进程和新 microstructure-collector 的 HTTP metrics server 都没启。
+
+### 4.2 关键定性
+
+- **不是 Phase 1A 回归** — gateway / market / decision / execution 的 :9464 也 refused,说明 OTel Prometheus 桥接**很早就断了**,Phase 1A Stage 4 加的 microstructure 只是跟着同一个坏范式
+- **不影响数据采集** — Bronze/Silver 表直接 DB insert,不走 Prometheus
+- **影响观测** — Grafana P1-D dashboard (4 panel) 当前无数据;Gate 5 (Silver ETL p95 < 10s) 和 Gate 10 (dashboard 可视化) 无法通过 Grafana 验证,但 Gate 5 可 DB 查 `meta.ingest_runs.duration_ms` 替代验证
+
+### 4.3 可能原因
+
+候选 (需 Phase 2A 调研确认):
+
+1. **`aats/bootstrap/telemetry.py::configure_telemetry()`** 注册了 PrometheusMetricReader 但没调 `prometheus_client.start_http_server(port)`
+2. **OTEL_EXPORTER_PROMETHEUS_HOST / _PORT env vars** 在主 4 进程 compose service 未设置 (microstructure-collector compose 确实设了,仍 refused → 可能不只是 env 缺失)
+3. **MetricsRegistry → metrics_bridge.create_bridge()** 只挂了 Meter, 没挂 PrometheusMetricExporter
+4. **process_lifecycle.py** 可能没调 configure_telemetry 在 process role 特定的初始化路径
+
+### 4.4 Phase 2A 实现方案 (≈0.5-1 人天)
+
+**Step 1**: 盘点现有 telemetry 代码
+- Read `aats/bootstrap/telemetry.py` + `metrics_bridge.py` + `process_lifecycle.py`
+- 找到 4 主进程和 daemon 的 telemetry 初始化路径
+- 确认 PrometheusMetricReader + HTTP server 之间的接线
+
+**Step 2**: 修复 HTTP server 启动
+- 若是缺 `start_http_server(port)` → 加进 telemetry 初始化
+- 若是 env var 缺失 → 在 compose 4 主进程 service 加 `OTEL_EXPORTER_PROMETHEUS_HOST/PORT`
+- 若是 OTel 版本升级 API 变化 → 参考 opentelemetry-python docs/changelog
+
+**Step 3**: 验证 all 5 targets up=1 后, Grafana dashboard 正常显示
+
+### 4.5 验收标准
+
+- [ ] `curl http://prometheus-host:9090/api/v1/query?query=up{job="aats"}` 返回 5 条 value=1
+- [ ] P1-D Grafana dashboard 4 panel 有数据
+- [ ] 没触发现有 alert rule (等数据填充后)
+
+### 4.6 触发条件
+
+**立即 trigger**: Phase 2A kickoff Day 1 前置工作 (Prometheus 没修好会影响 Phase 2A 的监控面板 + Gate 5 自动化验证)。
+
+### 4.7 风险
+
+- 改动 `telemetry.py` 属于 bootstrap 路径, 误操作可能影响所有 4 主进程启动
+- **缓解**: 改完先在 dev env 全量跑单元测试 + 一次完整 deploy 确认无回归
+- **回退**: git revert + redeploy, 数据采集不受影响
+
+---
+
 ## Phase 2A kickoff 建议顺序
 
 按依赖和难度,Phase 2A Stage 1 建议实现顺序:
 
-1. **Day 1**: 遗留 #1 — `price_change_bps` + `oi_price_regime` 6 类扩展 (1 PR)
-2. **Day 2 AM**: 遗留 #3 — Grafana dashboard baseline maturity panel (1 PR)
-3. **Day 2 PM**: 遗留 #2 — whale_threshold rolling p99 (1 PR)
+1. **Day 0 (前置)**: 遗留 #4 — Prometheus scrape 修复 (否则 #3 监控 + Gate 5 自动验证无法做)
+2. **Day 1**: 遗留 #1 — `price_change_bps` + `oi_price_regime` 6 类扩展 (1 PR)
+3. **Day 2 AM**: 遗留 #3 — Grafana dashboard baseline maturity panel (1 PR)
+4. **Day 2 PM**: 遗留 #2 — whale_threshold rolling p99 (1 PR)
 
 Phase 2A Stage 2+ 才是真正的 regression study (多 horizon / 模型扩展),不属于本文档范围。
 
@@ -247,3 +314,6 @@ Phase 2A Stage 2+ 才是真正的 regression study (多 horizon / 模型扩展),
 - **作者**: P1-D Phase 1A Stage 4 agent · 2026-04-20
 - **审批**: 待用户 Phase 2A kickoff 时 review
 - **更新条件**: 若 Phase 1A 48h 稳定性观察期内发现新 debt,追加到本文档
+- **更新记录**:
+  - 2026-04-20 T+1h 巡检: 追加遗留 #4 (Prometheus scrape 全量 connection refused)
+  - 注: 今次已用 batch_b_07 命名另一个 migration (ingest_runs CHECK 扩展)。若 Phase 2A 加多 horizon silver 表, 命名改为 `batch_b_08_microstructure_multi_horizon` (替代上文"不纳入本文档的事项" #3 提到的旧命名)
