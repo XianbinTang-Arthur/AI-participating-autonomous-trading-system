@@ -323,12 +323,21 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         expected_entry_confidence = 0.50 if profile == "derivatives_live" else 0.66
         assert values["strategy_entry_alpha_min"] == expected_entry_alpha
         assert values["strategy_entry_confidence_min"] == expected_entry_confidence
-        assert values["strategy_scale_in_min_signal_edge_bps"] == 16.0
-        assert values["strategy_scale_in_alpha_min"] == 0.22
-        assert values["strategy_scale_in_confidence_min"] == 0.68
-        assert values["strategy_reversal_min_signal_edge_bps"] == 20.0
-        assert values["strategy_reversal_alpha_min"] == 0.28
-        assert values["strategy_reversal_confidence_min"] == 0.72
+        # 2026-04-19 蝴蝶效应审查: scale_in 三联 / reversal 三联同步下调
+        # (仅 derivatives_live, non-live profile 保留旧值).
+        # 详见 docs/review/allocator_butterfly_effect_2026_04_19.md
+        expected_scale_in_edge = 7.0 if profile == "derivatives_live" else 16.0
+        expected_scale_in_alpha = 0.14 if profile == "derivatives_live" else 0.22
+        expected_scale_in_conf = 0.58 if profile == "derivatives_live" else 0.68
+        expected_reversal_edge = 9.0 if profile == "derivatives_live" else 20.0
+        expected_reversal_alpha = 0.18 if profile == "derivatives_live" else 0.28
+        expected_reversal_conf = 0.60 if profile == "derivatives_live" else 0.72
+        assert values["strategy_scale_in_min_signal_edge_bps"] == expected_scale_in_edge
+        assert values["strategy_scale_in_alpha_min"] == expected_scale_in_alpha
+        assert values["strategy_scale_in_confidence_min"] == expected_scale_in_conf
+        assert values["strategy_reversal_min_signal_edge_bps"] == expected_reversal_edge
+        assert values["strategy_reversal_alpha_min"] == expected_reversal_alpha
+        assert values["strategy_reversal_confidence_min"] == expected_reversal_conf
         assert values["strategy_max_fee_drag_ratio"] == 0.48
         assert values["strategy_max_churn_ratio"] == 0.42
         assert values["strategy_low_edge_threshold_bps"] == 4.0
@@ -374,9 +383,11 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         # docs/review/allocator_budget_zero_root_cause_2026_04_19.md).
         expected_independent_long_entry = 0.25 if profile == "derivatives_live" else 0.66
         expected_independent_short_entry = 0.25 if profile == "derivatives_live" else 0.66
-        expected_independent_long_scale_in = 0.34 if profile == "derivatives_live" else 0.70
-        # P2-6: short_scale_in_threshold 已对齐至 long=0.40 (原 0.36 与注释声明的"钉住值：0.40"不一致)
-        expected_independent_short_scale_in = 0.40 if profile == "derivatives_live" else 0.70
+        # 2026-04-19 独立审查 Round 3: scale_in_threshold 再下调到 0.25 (等于 entry),
+        # 因为 9-alpha 新分布下 leg_score 天花板 ≈0.28 结构性贴近 entry, 更高的 scale_in
+        # 阈值让持仓 scale_in 几乎永不触发. 实盘保底靠 min_hold_seconds + rebalance_cooldown.
+        expected_independent_long_scale_in = 0.25 if profile == "derivatives_live" else 0.70
+        expected_independent_short_scale_in = 0.25 if profile == "derivatives_live" else 0.70
         assert values["strategy_hedge_independent_long_entry_threshold"] == expected_independent_long_entry
         assert values["strategy_hedge_independent_short_entry_threshold"] == expected_independent_short_entry
         assert values["strategy_hedge_independent_long_scale_in_threshold"] == expected_independent_long_scale_in
@@ -470,8 +481,9 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     # 2026-04-19 下调 0.30→0.25 与 calibration 对齐
     assert values["strategy_hedge_independent_long_entry_threshold"] == 0.25
     assert values["strategy_hedge_independent_short_entry_threshold"] == 0.25
-    assert values["strategy_hedge_independent_long_scale_in_threshold"] == 0.34
-    assert values["strategy_hedge_independent_short_scale_in_threshold"] == 0.40
+    # 2026-04-19 Round 3 再下调到 0.25 (=entry), 9-alpha 新分布 leg_score 天花板问题.
+    assert values["strategy_hedge_independent_long_scale_in_threshold"] == 0.25
+    assert values["strategy_hedge_independent_short_scale_in_threshold"] == 0.25
     assert values["strategy_hedge_independent_long_close_threshold"] == 0.15
     assert values["strategy_hedge_independent_short_close_threshold"] == 0.15
     assert values["strategy_hedge_independent_min_confirm_ticks"] == 2

@@ -116,9 +116,17 @@
 
 directional 适配器原始硬编码默认值与 independent **不同**：
 - directional: `entry_threshold=0.45`, `close_threshold=0.20`
-- independent: `entry_threshold=0.40`, `close_threshold=0.15`
+- independent: `entry_threshold=0.25`, `close_threshold=0.15`, `scale_in_threshold=0.25`
+  (2026-04-19 calibration + Round 3 下调；旧值 entry 0.40 / scale_in 0.40 已失效)
 
 使用 `ReplayParameterOverrides.for_family("directional")` 获取正确默认值。
+
+**⚠️ 运维操作员注意**：approve 任何关于 `entry_threshold` / `scale_in_threshold` /
+`composite_alpha` 的 RDP parameter_upgrade recommendation **前**，必须核对该
+recommendation 的 source_round 是否基于 2026-04-19 之后的 9-alpha baseline 分布。
+否则可能误覆盖当前 calibration 结果。详见
+`docs/calibration/baseline_weight_recalibration_2026_04_19.md` 与
+`docs/review/allocator_budget_zero_root_cause_2026_04_19.md`。
 
 ## 安全检查清单
 

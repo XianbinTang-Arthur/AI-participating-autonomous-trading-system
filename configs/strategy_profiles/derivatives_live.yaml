@@ -213,6 +213,9 @@ strategy_baseline_breakout_alpha_threshold: 0.06
 strategy_baseline_trend_alpha_threshold: 0.10
 strategy_baseline_range_alpha_threshold: 0.11
 strategy_baseline_uncertain_alpha_threshold: 0.18
+# 2026-04-19 calibration 孤儿字段显式固化到 yaml (原先只在 settings.py default，
+# 防 RDP 重写 / settings 回滚 / 新 profile 继承时隐式退回旧分布).
+strategy_baseline_min_threshold_floor: 0.06
 strategy_baseline_alignment_bonus: 0.03
 strategy_baseline_impulse_override_enabled: true
 strategy_baseline_impulse_alpha_min: 0.10
@@ -273,36 +276,46 @@ strategy_entry_confidence_min: 0.50
 # RDP Phase 2 研究同步下调，与 long 入场门槛保持一致逻辑。
 strategy_short_entry_min_signal_edge_bps: 4.0
 # [进阶可调] strategy_short_entry_alpha_min：新开空最低 alpha。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.15。
-strategy_short_entry_alpha_min: 0.15
+# 2026-04-19 对齐 long_entry_alpha_min=0.10。非对称 0.15 vs 0.10 与 calibration 新分布不一致。
+strategy_short_entry_alpha_min: 0.10
 # [进阶可调] strategy_short_entry_confidence_min：新开空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.55。
 # 2026-04-19 同步下调，理由同 long (baseline.confidence 分布结构性触不到 0.55)。
 strategy_short_entry_confidence_min: 0.50
 
+# 2026-04-19 scale_in 三联同步下调 (entry 下调 f9fa707 后 hysteresis 需要重建):
+# edge 16→7 (比 entry 5 高 40% hysteresis), alpha 0.22→0.14, confidence 0.68→0.58.
+# 详见 docs/review/allocator_butterfly_effect_2026_04_19.md
 # [常用可调] strategy_scale_in_min_signal_edge_bps：加仓最低信号边际。可选值：0.0 ~ 100.0；推荐值：16.0。
-strategy_scale_in_min_signal_edge_bps: 16.0
+strategy_scale_in_min_signal_edge_bps: 7.0
 # [常用可调] strategy_scale_in_alpha_min：加仓最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.22。
-strategy_scale_in_alpha_min: 0.22
+strategy_scale_in_alpha_min: 0.14
 # [常用可调] strategy_scale_in_confidence_min：加仓最低置信度。可选值：0.0 ~ 1.0；推荐值：0.68。
-strategy_scale_in_confidence_min: 0.68
+strategy_scale_in_confidence_min: 0.58
+# 2026-04-19 short scale_in 三联同步下调 (与 long 对齐): edge 16→6, alpha 0.20→0.13, confidence 0.64→0.56.
 # [进阶可调] strategy_short_scale_in_min_signal_edge_bps：继续加空最低信号边际。当前只在合约运行域生效。可选值：0.0 ~ 100.0；推荐值：16.0。
-strategy_short_scale_in_min_signal_edge_bps: 16.0
+strategy_short_scale_in_min_signal_edge_bps: 6.0
 # [进阶可调] strategy_short_scale_in_alpha_min：继续加空最低 alpha。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.20。
-strategy_short_scale_in_alpha_min: 0.20
+strategy_short_scale_in_alpha_min: 0.13
 # [进阶可调] strategy_short_scale_in_confidence_min：继续加空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.64。
-strategy_short_scale_in_confidence_min: 0.64
+strategy_short_scale_in_confidence_min: 0.56
 
+# 2026-04-19 reversal 三联同步下调 (防市场反转时被 reversal gate 锁死):
+# edge 20→9, alpha 0.28→0.18, confidence 0.72→0.60. 仍比 scale_in 高,保留反手严格度.
 # [常用可调] strategy_reversal_min_signal_edge_bps：反手最低信号边际。可选值：0.0 ~ 100.0；推荐值：20.0。
-strategy_reversal_min_signal_edge_bps: 20.0
+strategy_reversal_min_signal_edge_bps: 9.0
 # [常用可调] strategy_reversal_alpha_min：反手最低 alpha。可选值：0.0 ~ 1.0；推荐值：0.28。
-strategy_reversal_alpha_min: 0.28
+strategy_reversal_alpha_min: 0.18
 # [常用可调] strategy_reversal_confidence_min：反手最低置信度。可选值：0.0 ~ 1.0；推荐值：0.72。
-strategy_reversal_confidence_min: 0.72
+strategy_reversal_confidence_min: 0.60
+# 2026-04-19 short_reversal 三联同步下调 (Round 4 审查发现:
+# long_reversal 已改 9/0.18/0.60, short_reversal 仍 14/0.18/0.55 破坏"空头反转门槛低于
+# 多头反转"的对称性设计). short edge 7 略低于 long 的 9, alpha/confidence 与 long 对齐.
 # [进阶可调] strategy_short_reversal_min_signal_edge_bps：反手做空最低信号边际。当前只在合约运行域生效；推荐值低于做多反手，避免明显偏空时系统只减多。可选值：0.0 ~ 100.0；推荐值：14.0。
-strategy_short_reversal_min_signal_edge_bps: 14.0
+strategy_short_reversal_min_signal_edge_bps: 7.0
 # [进阶可调] strategy_short_reversal_alpha_min：反手做空最低 alpha。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.18。
-strategy_short_reversal_alpha_min: 0.18
+strategy_short_reversal_alpha_min: 0.12
 # [进阶可调] strategy_short_reversal_confidence_min：反手做空最低置信度。当前只在合约运行域生效。可选值：0.0 ~ 1.0；推荐值：0.55。
-strategy_short_reversal_confidence_min: 0.55
+strategy_short_reversal_confidence_min: 0.50
 
 # overlay 总开关与主模式
 # [进阶可调] strategy_hedge_overlay_enabled：overlay 总开关。当前只在合约 hedge 运行域生效；关闭后 protective / opportunistic / independent 都不会运行。可选值：true / false；推荐值：true。
@@ -376,13 +389,17 @@ strategy_hedge_independent_long_close_threshold: 0.15
 # 实盘安全审查：原值 0.24 与 short entry 0.30 间距仅 0.06，震荡市中易频繁开平。
 # 下调至 0.15 使 short hysteresis gap = 0.15，与 long 方向 gap 对齐。
 strategy_hedge_independent_short_close_threshold: 0.15
+# 2026-04-19 scale_in_threshold 下调历史:
+#   (1) 蝴蝶修复 2: long 0.34→0.30, short 0.40→0.32 (建 hysteresis)
+#   (2) 独立审查 Round 3: 9-alpha 新分布下 leg_score 天花板 ≈0.28, 结构性贴近 entry,
+#       scale_in=0.30/0.32 仍让持仓后触发率极低. 再次下调 long 0.30→0.25, short 0.32→0.25
+#       (等于 entry). 换言之持仓中 score 仍维持 entry 水位即允许 scale_in, 不再要求
+#       "高一档". 实盘风控由 min_hold_seconds=300 + rebalance_cooldown=60s 保底.
+#   详见 docs/review/independent_chain_review_round_3_2026_04_19.md
 # [进阶可调] strategy_hedge_independent_long_scale_in_threshold：独立 long book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.40。
-strategy_hedge_independent_long_scale_in_threshold: 0.34
+strategy_hedge_independent_long_scale_in_threshold: 0.25
 # [进阶可调] strategy_hedge_independent_short_scale_in_threshold：独立 short book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.40。
-# P2-6 修复：原值 0.36 与 long_scale_in_threshold(0.40) 及注释声明的"钉住值：0.40"不一致。
-# 对齐至 0.40 恢复对称语义；若有意保留方向性不对称，需在 Step3 recommendation + governance
-# 审计同步记录 asymmetric scale_in 决策原因。
-strategy_hedge_independent_short_scale_in_threshold: 0.40
+strategy_hedge_independent_short_scale_in_threshold: 0.25
 # [进阶可调] strategy_hedge_independent_long_min_hold_seconds：独立 long book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
 strategy_hedge_independent_long_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_independent_short_min_hold_seconds：独立 short book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
@@ -484,6 +501,19 @@ strategy_post_close_cooldown_seconds: 300.0
 strategy_max_fee_drag_ratio: 0.48
 # [常用可调] strategy_max_churn_ratio：允许的最大 churn 比例。可选值：0.0 ~ 1.0；推荐值：0.42。
 strategy_max_churn_ratio: 0.42
+
+# 2026-04-19 calibration 孤儿字段显式固化 (settings.py default 已更新, 此处 pin 防回滚):
+# alpha_decay 新分布下门槛 (权重重分配后 |alpha| 整体压缩 30%, 0.08/0.04 对应旧 0.12/0.06 等分位).
+strategy_position_alpha_decay_reduce_alpha: 0.08
+strategy_position_alpha_decay_exit_alpha: 0.04
+# profile auto-switch 阈值 (原 strategy_profiles.py 硬编码 0.14/0.55/0.24/0.12/0.22/0.45,
+# calibration 后按等分位下调到 0.10/0.39/0.17/0.08/0.15/0.32).
+strategy_profile_auto_switch_high_vol_alpha_ceiling: 0.32
+strategy_profile_auto_switch_alpha_defensive_threshold: 0.10
+strategy_profile_auto_switch_alpha_aggressive_threshold: 0.39
+strategy_profile_auto_switch_alpha_normal_threshold: 0.17
+strategy_profile_intent_fit_alpha_band_low: 0.08
+strategy_profile_intent_fit_alpha_band_high: 0.15
 # [常用可调] strategy_health_lookback_window_seconds：execution health 的时间窗；与计数窗共同生效，避免历史坏样本全天锁死。可选值：60 ~ 86400；当前保护性值：14400.0。
 strategy_health_lookback_window_seconds: 14400.0
 # [常用可调] strategy_low_edge_threshold_bps：低边际识别阈值。可选值：0.0 ~ 50.0；推荐值：4.0。
