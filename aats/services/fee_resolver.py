@@ -170,9 +170,17 @@ class EffectiveFeeResolver:
         )
         normalized_style = str(execution_style or "").lower()
         normalized_order_type = str(order_type or "").lower()
-        if normalized_order_type == "market" or normalized_style in {"taker", "bounded_taker_cap", "exchange"}:
+        # P1-B step 2 cost 审计修复 (2026-04-19): OKX 官方 ordType=ioc
+        # (Immediate-Or-Cancel) 永远付 taker fee —— 订单要么立刻和簿内单匹配 (taker),
+        # 要么取消 (不成交), 绝无停留成为 maker 的可能. 之前 bounded_limit_ioc 被归
+        # 到 maker-blend 分支, 按 passive_bias=0.7 给 fee 打折, 让 expected_cost_bps
+        # 低估 ~1.4 bps, 实盘永远看到 net_edge 过线但实际 fill 后亏费.
+        # 详见 docs/review/independent_cost_model_audit_2026_04_19.md
+        if normalized_order_type == "market" or normalized_style in {
+            "taker", "bounded_taker_cap", "bounded_limit_ioc", "exchange",
+        }:
             return taker
-        if normalized_order_type == "limit" or normalized_style in {"bounded_limit_ioc", "maker", "passive"}:
+        if normalized_order_type == "limit" or normalized_style in {"maker", "passive"}:
             passive = min(max(to_decimal(passive_bias or 0), Decimal("0")), Decimal("1"))
             maker_bias = min(max(-to_decimal(maker_taker_bias or 0), Decimal("0")), Decimal("1"))
             maker_weight = min(
