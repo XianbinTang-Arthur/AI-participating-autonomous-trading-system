@@ -104,13 +104,13 @@ class TestMicrostructureWSClientValidation(unittest.TestCase):
         """允许只订阅部分 channel,方便 Phase 2 分片化扩展。"""
         client = MicrostructureWSClient(
             settings=_ws_settings(),
-            channels=("trades-all", "mark-price"),
+            channels=("trades", "mark-price"),
         )
         _name, _url, args = client._connection_specs()[0]
         self.assertEqual(len(args), 2)
         self.assertEqual(
             sorted(a["channel"] for a in args),
-            ["mark-price", "trades-all"],
+            ["mark-price", "trades"],
         )
 
 

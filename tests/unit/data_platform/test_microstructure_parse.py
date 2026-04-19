@@ -46,7 +46,7 @@ class TestParseTradesMessage(unittest.TestCase):
         }
         detail.update(details_overrides)
         return {
-            "arg": {"channel": "trades-all", "instId": "BTC-USDT-SWAP"},
+            "arg": {"channel": "trades", "instId": "BTC-USDT-SWAP"},
             "data": [detail],
         }
 
@@ -69,7 +69,7 @@ class TestParseTradesMessage(unittest.TestCase):
         PK (symbol, ts, trade_id) 允许这种并发插入 (Stage 1 已验证)。
         """
         push = {
-            "arg": {"channel": "trades-all", "instId": "BTC-USDT-SWAP"},
+            "arg": {"channel": "trades", "instId": "BTC-USDT-SWAP"},
             "data": [
                 {"instId": "BTC-USDT-SWAP", "tradeId": "T-1",
                  "px": "95000", "sz": "0.1", "side": "buy", "ts": _TS_MS_1},

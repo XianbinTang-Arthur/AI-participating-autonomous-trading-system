@@ -77,7 +77,10 @@ log = logging.getLogger(__name__)
 
 _CONNECTION = "microstructure"  # distinct from market's "public"/"business"
 
-_CHANNEL_TRADES = "trades-all"
+# Fix (2026-04-20): OKX `trades-all` 频道需要 VIP5+ (60018 for VIP0/1).
+# AATS 生产账号 VIP0, 必须用 public `trades` 频道 (对所有 VIP 开放).
+# 参见 Phase 1A 首次 deploy 的 OKX 60018 "channel doesn't exist" 错误.
+_CHANNEL_TRADES = "trades"
 _CHANNEL_BBO = "bbo-tbt"
 _CHANNEL_BOOKS5 = "books5"
 _CHANNEL_OI = "open-interest"

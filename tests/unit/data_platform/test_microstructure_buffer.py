@@ -415,7 +415,7 @@ class TestCollectorDispatch(unittest.IsolatedAsyncioTestCase):
     async def test_handle_trades_message_routes_to_trades_buffer(self) -> None:
         collector = MicrostructureCollector(settings=_ws_settings())
         push = {
-            "arg": {"channel": "trades-all", "instId": "BTC-USDT-SWAP"},
+            "arg": {"channel": "trades", "instId": "BTC-USDT-SWAP"},
             "data": [{
                 "instId": "BTC-USDT-SWAP", "tradeId": "T-1",
                 "px": "95000", "sz": "0.1", "side": "buy",
@@ -462,7 +462,7 @@ class TestCollectorDispatch(unittest.IsolatedAsyncioTestCase):
             metrics_registry=registry,
         )
         push_trades = {
-            "arg": {"channel": "trades-all", "instId": "BTC-USDT-SWAP"},
+            "arg": {"channel": "trades", "instId": "BTC-USDT-SWAP"},
             "data": [{
                 "instId": "BTC-USDT-SWAP", "tradeId": "T-1",
                 "px": "95000", "sz": "0.1", "side": "buy",
