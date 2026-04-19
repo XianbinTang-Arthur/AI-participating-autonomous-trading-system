@@ -72,6 +72,12 @@ class MarketSnapshot(SchemaBase):
     kline_1h: KlineBar
     recent_trades: list[dict[str, Any]] = Field(default_factory=list)
     orderbook_depth: dict[str, Any] = Field(default_factory=dict)
+    # P1.4 — OKX 衍生品 mark-price 频道推送的标记价。None 表示：
+    #   - 现货 symbol（OKX 不推 mark-price）
+    #   - WebSocket 暂未收到第一条 mark-price 推送
+    #   - REST fallback 路径（当前不拉 mark-price）
+    # basis 信号在 FeatureCalculator 里遇到 None 会返回 0 贡献，不破坏 composite.
+    mark_price: Decimal | None = None
 
     @field_validator("recent_trades", "orderbook_depth", mode="before")
     @classmethod

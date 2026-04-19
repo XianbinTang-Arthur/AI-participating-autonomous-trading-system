@@ -44,6 +44,10 @@ class AlphaFactorSet(SchemaBase):
     regime_alpha: float
     multi_timeframe_alpha: float
     microstructure_alpha: float = 0.0
+    # P1.4 — mark-price basis alpha. 衍生品专属 (last - mark) / mark 经 tanh 归
+    # 一化。默认 0 → 已落盘的旧 payload 反序列化兼容；现货 / mark_price 缺失时
+    # FeatureCalculator 也返回 0.
+    basis_alpha: float = 0.0
     liquidity_scale: float
     composite_alpha_score: float
     conviction_score: float

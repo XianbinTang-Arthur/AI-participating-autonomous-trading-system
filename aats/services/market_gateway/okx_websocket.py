@@ -111,9 +111,17 @@ class OKXPublicWebSocketClient:
         }
 
     def _subscription_args(self) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
-        public_args = [{"channel": "tickers", "instId": symbol} for symbol in self._subscribed_symbols()]
+        symbols = self._subscribed_symbols()
+        public_args: list[dict[str, str]] = []
+        for symbol in symbols:
+            public_args.append({"channel": "tickers", "instId": symbol})
+            # P1.4 Mark price basis 信号 — 仅衍生品（SWAP / FUTURES）有 mark-price.
+            # 现货订阅 mark-price 会被 OKX 以 channel 错误拒，触发 subscription_error
+            # 路径 → keepalive 断线重连死循环；必须提前按 instId 过滤。
+            if self._is_derivative_symbol(symbol):
+                public_args.append({"channel": "mark-price", "instId": symbol})
         business_args: list[dict[str, str]] = []
-        for symbol in self._subscribed_symbols():
+        for symbol in symbols:
             business_args.extend(
                 (
                     {"channel": "candle15m", "instId": symbol},
@@ -121,6 +129,20 @@ class OKXPublicWebSocketClient:
                 )
             )
         return public_args, business_args
+
+    @staticmethod
+    def _is_derivative_symbol(symbol: str) -> bool:
+        """Return True for OKX derivatives (SWAP perpetual / dated FUTURES).
+
+        SWAP: BASE-QUOTE-SWAP
+        FUTURES: BASE-QUOTE-YYMMDD (6 位数字后缀)
+        现货 BASE-QUOTE 不具备 mark-price，避免发起无效订阅.
+        """
+        upper = symbol.upper()
+        if upper.endswith("-SWAP"):
+            return True
+        tail = upper.rsplit("-", 1)[-1]
+        return len(tail) == 6 and tail.isdigit()
 
     def _subscribed_symbols(self) -> tuple[str, ...]:
         symbols = tuple(dict.fromkeys(symbol for symbol in self.settings.expanded_allowed_symbols() if symbol))

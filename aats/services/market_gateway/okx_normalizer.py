@@ -63,11 +63,23 @@ class OKXCandleState:
 
 
 @dataclass(slots=True)
+class OKXMarkPriceState:
+    """P1.4 — OKX mark-price 频道最新快照.
+
+    只保留 markPx 和 ts；instType / instId 冗余（instId = symbol），不需要存。
+    """
+    symbol: str
+    mark_price: Decimal
+    snapshot_ts: datetime
+
+
+@dataclass(slots=True)
 class OKXInstrumentMarketState:
     symbol: str
     ticker: OKXTickerState | None = None
     candle_15m: OKXCandleState | None = None
     candle_1h: OKXCandleState | None = None
+    mark_price: OKXMarkPriceState | None = None
     raw_messages: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=50))
 
 
@@ -160,6 +172,9 @@ class OKXMarketSnapshotNormalizer:
                 state.candle_15m = candle
             else:
                 state.candle_1h = candle
+        elif channel == "mark-price":
+            # P1.4 衍生品基差信号：每次 mark 变化推送 200ms，无变化 10s 一次。
+            state.mark_price = self._parse_mark_price(symbol=symbol, payload=data[0])
         else:
             return []
 
@@ -206,6 +221,25 @@ class OKXMarketSnapshotNormalizer:
             bid_size=to_decimal(payload.get("bidSz", 0)),
             ask_size=to_decimal(payload.get("askSz", 0)),
             volume_24h=to_decimal(payload.get("vol24h", 0)),
+        )
+
+    def _parse_mark_price(self, *, symbol: str, payload: dict[str, Any]) -> OKXMarkPriceState:
+        """Parse OKX ``mark-price`` 频道推送 data 元素.
+
+        官方 schema: ``{"instType": "SWAP", "instId": "BTC-USDT-SWAP",
+        "markPx": "95000.5", "ts": "1745000000000"}``。
+
+        缺关键字段 raise ValueError —— 走 _handle_okx_message 的 schema warning
+        路径，独立计数，不参与系统错误升级阈值。
+        """
+        if "markPx" not in payload or "ts" not in payload:
+            raise ValueError(
+                f"okx_mark_price_payload_missing_fields: keys={list(payload.keys())}"
+            )
+        return OKXMarkPriceState(
+            symbol=symbol,
+            mark_price=to_decimal(payload["markPx"]),
+            snapshot_ts=_parse_ms_timestamp(str(payload["ts"])),
         )
 
     def _parse_candle(self, *, channel: str, payload: list[str]) -> OKXCandleState:
@@ -266,11 +300,17 @@ class OKXMarketSnapshotNormalizer:
         if sanity_reason is not None:
             return None
 
-        snapshot_ts = max(
+        ts_candidates = [
             ticker.snapshot_ts,
             state.candle_15m.snapshot_ts,
             state.candle_1h.snapshot_ts,
-        )
+        ]
+        # P1.4 — mark-price 可能晚于 ticker / candle 到达；snapshot_ts 取所有源的
+        # 最大值，保证 basis 信号更新也能推动下游 is_fresh 判定。
+        if state.mark_price is not None:
+            ts_candidates.append(state.mark_price.snapshot_ts)
+        snapshot_ts = max(ts_candidates)
+
         # Build a minimal orderbook from ticker top-of-book so that
         # downstream LiquidityAnalyzer has at least one level of depth
         # rather than operating on an empty dict.
@@ -292,6 +332,7 @@ class OKXMarketSnapshotNormalizer:
             kline_1h=state.candle_1h.to_market_kline(),
             recent_trades=[],
             orderbook_depth=orderbook_depth,
+            mark_price=state.mark_price.mark_price if state.mark_price is not None else None,
         )
 
     @staticmethod

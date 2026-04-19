@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 from aats.bus.base import EventBus
@@ -39,6 +40,8 @@ class FeatureCalculator:
         rolling_max_bars: int = DEFAULT_MAX_BARS,
         rolling_roc_window: int = DEFAULT_ROC_WINDOW,
         rolling_atr_window: int = DEFAULT_ATR_WINDOW,
+        enable_basis_signal: bool = True,
+        basis_scale_bps: float = 10.0,
     ) -> None:
         self.trend = trend or TrendCalculator()
         self.volatility = volatility or VolatilityAnalyzer()
@@ -50,6 +53,10 @@ class FeatureCalculator:
         self._rolling_max_bars = rolling_max_bars
         self._rolling_roc_window = rolling_roc_window
         self._rolling_atr_window = rolling_atr_window
+        # P1.4 Mark price basis 信号开关 + 灵敏度参数。关闭后 basis_alpha 恒为 0,
+        # composite 权重仍按新公式（含 0 贡献 basis）—— 等价于 "basis 不参与"。
+        self.enable_basis_signal = enable_basis_signal
+        self.basis_scale_bps = basis_scale_bps
         # Per (symbol, timeframe) 的滚动状态。跨 calculate() 调用累积历史。
         # 同 ts 的 update 幂等 → 同 snapshot 多次 calculate 结果一致
         # （守 test_feature_calculation_is_deterministic_for_same_snapshot 契约）。
@@ -122,6 +129,10 @@ class FeatureCalculator:
             regime_indicator=regime.regime_indicator,
             regime_confidence=regime.regime_confidence,
             regime_bias=regime.trend_bias,
+            last_price=float(snapshot.last_price),
+            mark_price=float(snapshot.mark_price) if snapshot.mark_price is not None else None,
+            basis_signal_enabled=self.enable_basis_signal,
+            basis_scale_bps=self.basis_scale_bps,
         )
         position_sizing = self._position_sizing_context(
             alpha_factors=alpha_factors,
@@ -259,6 +270,10 @@ class FeatureCalculator:
         regime_indicator: str,
         regime_confidence: float,
         regime_bias: str,
+        last_price: float,
+        mark_price: float | None,
+        basis_signal_enabled: bool,
+        basis_scale_bps: float,
     ) -> AlphaFactorSet:
         momentum_alpha = FeatureCalculator._clamp(
             (features_15m.momentum_score * 140.0 * 0.65) + (features_1h.momentum_score * 90.0 * 0.35),
@@ -298,14 +313,36 @@ class FeatureCalculator:
             -1.0,
             1.0,
         )
+        # P1.4 mark-price basis alpha：last vs mark 偏离度 → 超买/超卖反转倾向.
+        # basis_bps > 0 (last 高于 mark) → 短期超买 → basis_alpha 负
+        # basis_bps < 0 (last 低于 mark) → 短期超卖 → basis_alpha 正
+        # 用 tanh 做 S 型饱和，basis_scale_bps 定义 "达到 ±0.76 饱和" 的 bps。
+        basis_alpha = 0.0
+        if (
+            basis_signal_enabled
+            and mark_price is not None
+            and mark_price > 0.0
+            and last_price > 0.0
+            and basis_scale_bps > 0.0
+        ):
+            basis_bps = (last_price - mark_price) / mark_price * 10_000.0
+            basis_alpha = FeatureCalculator._clamp(
+                -math.tanh(basis_bps / basis_scale_bps),
+                -1.0,
+                1.0,
+            )
         liquidity_scale = FeatureCalculator._clamp(0.45 + (liquidity_score * 0.55), 0.25, 1.0)
+        # Composite 权重重分配（P1.4）：basis 引入 0.12 权重，其他因子按比例让出。
+        # 权重总和严格为 1.00: momentum 0.30 + trend 0.20 + regime 0.15 +
+        # multi_tf 0.11 + micro 0.12 + basis 0.12 = 1.00。
         composite_alpha_score = FeatureCalculator._clamp(
             (
-                momentum_alpha * 0.34
-                + trend_alpha * 0.22
-                + regime_alpha * 0.17
-                + multi_timeframe_alpha * 0.12
-                + microstructure_alpha * 0.15
+                momentum_alpha * 0.30
+                + trend_alpha * 0.20
+                + regime_alpha * 0.15
+                + multi_timeframe_alpha * 0.11
+                + microstructure_alpha * 0.12
+                + basis_alpha * 0.12
             )
             * liquidity_scale,
             -1.0,
@@ -326,6 +363,7 @@ class FeatureCalculator:
             regime_alpha=regime_alpha,
             multi_timeframe_alpha=multi_timeframe_alpha,
             microstructure_alpha=microstructure_alpha,
+            basis_alpha=basis_alpha,
             liquidity_scale=liquidity_scale,
             composite_alpha_score=composite_alpha_score,
             conviction_score=conviction_score,

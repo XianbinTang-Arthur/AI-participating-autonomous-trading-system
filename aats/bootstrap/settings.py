@@ -477,6 +477,17 @@ class AATSSettings(BaseSettings):
     # 默认打开；关闭后退回旧 WARN + 继续的行为（紧急回滚用）。
     strategy_baseline_fallback_ts_check_enabled: bool = True
     strategy_baseline_fallback_max_stale_seconds: float = 60.0
+
+    # ── P1.4 Mark price basis 正交信号 ──────────────────────────────────────
+    # 衍生品专属：OKX 推送 mark-price（防操纵标记价），与 last_price 的偏离度
+    # 反映短期超买/超卖。公式:
+    #   basis_bps = (last - mark) / mark × 10000
+    #   basis_alpha = -tanh(basis_bps / basis_scale_bps)
+    # basis_scale_bps=10 → 10 bps 偏离对应 ≈ -0.76 alpha（负号让超买偏离压低 long
+    # 倾向），进入 composite 权重 0.12。默认打开；关闭后 basis_alpha 恒为 0，
+    # composite 权重仍按新公式（等价于 basis 0 贡献）。
+    strategy_baseline_basis_signal_enabled: bool = True
+    strategy_baseline_basis_scale_bps: float = 10.0
     strategy_flat_signal_hold_enabled: bool = False
     strategy_flat_exit_microstructure_threshold: float = 0.12
     strategy_flat_exit_factor_threshold: float = 0.18
