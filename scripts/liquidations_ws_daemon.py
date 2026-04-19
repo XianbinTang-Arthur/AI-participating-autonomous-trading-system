@@ -87,12 +87,12 @@ async def _heartbeat_loop(stop_event: asyncio.Event, collector) -> None:
 
 async def amain(args: argparse.Namespace) -> int:
     # Deferred imports so --help works even when aats config is not ready.
-    from aats.bootstrap.settings import get_settings
+    from aats.bootstrap.settings import AATSSettings
     from aats.data_platform.collectors.liquidations_ws_collector import (
         LiquidationsCollector,
     )
 
-    settings = get_settings()
+    settings = AATSSettings()
     inst_types = tuple(args.inst_types) if args.inst_types else ("SWAP",)
     collector = LiquidationsCollector(
         settings=settings,
