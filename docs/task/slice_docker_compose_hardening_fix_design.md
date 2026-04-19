@@ -1,5 +1,8 @@
 # Slice `fix(config)+feat(deploy)+chore` — docker-compose 4 进程 managed profile 死锁根因修复
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 状态：**设计**
 > 安全网 git tag：`pre-slice-docker-compose-hardening-fix-v1`（commit `17ba1ef`）
 > 前置调查：Plan E 四层 TEMP-HACK-E 补丁（本轮会话）

@@ -1,5 +1,8 @@
 # Task 95: 合约对冲模式 Phase 4 腿级风控交付说明
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 1. 目标与边界
 
 本阶段对应 [Task 91](/D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/task91_derivatives_hedge_mode_phase_breakdown.md) 的 Phase 4，目标是把合约 `hedge mode` 的风控从单一净仓语义升级成：

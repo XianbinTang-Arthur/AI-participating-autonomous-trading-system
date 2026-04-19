@@ -1,8 +1,13 @@
 # Research Data Platform (RDP)
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 模块级 README。项目级概览见 [主 README §21](../../README.md#21-研究数据平台-research-data-platform)。
 
 RDP 是 AATS 的**离线参数研究子系统**,与实时交易主链路完全解耦。它从市场数据采集开始,经过参数研究、归因分析、执行可行性验证,最终通过受控审批流程把研究结论回灌到主交易系统。
+
+RDP 的存在不是为了做脱离收益目标的研究展示，而是为了持续提高主交易系统的真实净收益能力、风险收益比和稳定盈利证据质量，从而服务于 AI 资本的长期稳健增殖。完整定位见 [../../docs/project_positioning.md](../../docs/project_positioning.md)。
 
 - **数据库**: 独立的 `aats_research` PostgreSQL 库,6 schema 分层
 - **配置**: `.env.research`(`RDP_` 前缀),不与交易系统的 `.env.*` 混用

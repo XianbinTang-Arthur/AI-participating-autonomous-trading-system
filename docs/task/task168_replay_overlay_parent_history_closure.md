@@ -1,5 +1,8 @@
 # Task 168 - Replay Overlay Parent History Closure
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 把 `overlay_parent_exposure_summary` 从“最新一条 replay 摘要卡”继续接到 replay 历史表，便于横向比较最近几次校验。
 - 不改后端接口契约，不新增页面，只收口现有风险页里的 replay 区域。

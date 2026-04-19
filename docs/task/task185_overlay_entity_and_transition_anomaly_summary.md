@@ -1,5 +1,8 @@
 # Task 185 - Overlay Parent Exposure 独立持久化与 Transition 异常摘要
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 把 `overlay parent exposure` 从“稳定嵌套 payload”升级为可单独持久化、可按 `decision_id` 直接检索的正式事件实体。
 - 把 `transition_valid / transition_violation_reason` 从 runtime snapshot 内部字段升级为 operator/replay/UI 可直接消费的异常摘要。

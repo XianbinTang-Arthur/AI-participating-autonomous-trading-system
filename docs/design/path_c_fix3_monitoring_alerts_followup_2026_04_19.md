@@ -1,5 +1,8 @@
 # Path C Fix 3 后续任务：Fee drift / Cost margin / BLOCKED 订单告警
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 **日期**: 2026-04-19
 **状态**: 待启动（已从本次 session 范围剥离）
 **来源**: `docs/review/cost_audit_live_reconciliation_2026_04_19.md` §7.3 + §10

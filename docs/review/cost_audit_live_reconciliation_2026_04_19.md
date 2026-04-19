@@ -1,5 +1,8 @@
 # Cost Audit — 线上执行记录对账（Path C）
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 **日期**: 2026-04-19
 **执行者**: 独立调研任务（Claude Opus 4.7）
 **上下文**: H2 修复（commit `7f55176`, 2026-04-19 12:22:09 -0400）把 `execution_style=bounded_limit_ioc` 从 maker-blend 归为纯 taker。本报告核对修复后生产库 `aats_live_derivatives` 实际执行记录。

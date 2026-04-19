@@ -1,5 +1,8 @@
 # event_store 归档运维手册 (Path B Phase 1)
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 适用范围：`aats_live_derivatives.public.event_store` / `public.event_store_archive`
 >
 > 本文档 Phase 1 落地于 2026-04-19，后续 Phase 2/3 参见 `docs/design/event_store_retention_extension_design_2026_04_19.md`。

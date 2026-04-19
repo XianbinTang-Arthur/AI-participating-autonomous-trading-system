@@ -1,5 +1,8 @@
 # Task 87 - Smart Arbitrage Funding 事件边界估算修复
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 背景
 
 此前 `smart_arbitrage` 的 funding 事件数使用“预计持有时长 / funding 间隔”机械向上取整，最少记 1 次。这样会把“持有窗口还没跨过下一次 funding 结算边界”的场景估得过重，而且无法跟随 OKX 动态 funding 周期。

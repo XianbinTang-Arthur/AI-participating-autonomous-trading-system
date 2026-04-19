@@ -1,5 +1,8 @@
 # Task 189: Independent Guard-State 残留锁死 Bugfix
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 业务目标与边界
 - 修复 `independent` 在上一轮 `blocked` 被持久化为 guard-state（`cooldown` / `suspended`）后，下一轮真实 blocker 已消失却仍无法重新进入正常生命周期的问题。
 - 仅修复 `independent` 状态机与 runtime state 归一化语义，不改 allocator、coordinator、execution policy，也不在本轮调整 `score_stability` 阈值或公式。

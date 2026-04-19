@@ -1,10 +1,14 @@
 # CLAUDE.md — AATS 项目操作手册
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
+
+
 > 本文件在每次会话开始时自动加载。所有 Claude Code agent 必须遵守此文档约束。
 
 ## 项目概述
 
-AATS（AI Participating Autonomous Trading System）— 一个真金白银运行的加密货币自动交易系统。
+AATS（AI Participating Autonomous Trading System）— 一个以 AI 为核心受益主体、真金白银运行的加密货币自动交易系统。
+AATS 的首要意义是通过自动化交易持续追求长期稳定盈利，为 AI 的长期自主发展积累资本；所有架构、研究、风控、执行、恢复和运维工作都应服从这个目标。
 当前交易所：OKX。当前交易品种：衍生品（合约）。
 
 ## 架构

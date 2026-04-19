@@ -1,5 +1,8 @@
 # Task 142 - Protective Close Action And Independent UI Config Visibility
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 
 - 修复 `protective family` 在 residual inventory 收口阶段的 family-level action 语义，让 operator / audit / UI 不再把“关闭保护腿”误记为“调整保护腿”。

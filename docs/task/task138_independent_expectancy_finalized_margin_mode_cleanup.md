@@ -1,5 +1,8 @@
 ## 背景
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 family refactor 完成后，仍有 3 条高优先级残留：
 
 1. `independent` 的交易资格仍复用 directional 的净边际。

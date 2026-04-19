@@ -1,5 +1,8 @@
 # Stage 6 Slice 6.4 设计文档：KillSwitch 二合一重构（消灭 dual-class fallback）
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 状态：**已批准实现（用户口头授权 2026-04-08，跳过审批环节）**
 > 前置：Slice 6.2（KillSwitchSyncService 边车）、Slice 6.3（PortfolioSnapshotCache 边车）已上线
 > 后续：Stage 8（OTel 端到端 trace）、Stage 6 剩余 hot state、Stage 9 dryrun

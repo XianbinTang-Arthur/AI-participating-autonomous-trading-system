@@ -1,5 +1,8 @@
 # Task 190: Independent Book-State / Guard-State 分离小重构
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 业务目标与边界
 - 把 `independent` 的生命周期状态与 guard 阻断状态拆开，消除 `book_state` 同时承载两种语义的建模耦合。
 - 本轮只改 `independent` 状态机、runtime/replay/recovery schema、operator/UI 读数与相关测试。

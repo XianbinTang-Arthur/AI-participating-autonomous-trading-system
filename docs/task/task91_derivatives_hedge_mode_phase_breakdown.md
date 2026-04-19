@@ -1,5 +1,8 @@
 # Task 91: 合约对冲模式阶段拆解实施单
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 1. 文档目的
 
 本文是 [`Task 90`](/D:/文件/project/AIParticipatingAutonomousTradingSystem/docs/task90_derivatives_hedge_mode_rearchitecture.md) 的施工拆解版，用于把“合约 hedge mode 彻底改造”落成可执行的阶段计划。

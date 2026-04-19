@@ -1,5 +1,8 @@
 # P2-8 Release Notes — Signal Edge 单路径对齐
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > **状态**: 待发布
 > **影响范围**: independent 家族 production signal_edge 计算路径
 > **风险等级**: 🟡 Medium（生产行为可能发生 entry 频率下降）

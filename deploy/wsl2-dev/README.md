@@ -1,7 +1,11 @@
 # AATS WSL2 本地基础设施
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 多进程切片化部署所需的全部本地基础设施。
 > 全部组件运行在 WSL2 (Ubuntu) 的 docker compose 内，**零云费用**。
+> 本环境存在的意义，是为“长期稳定盈利、服务 AI 资本积累”的交易系统提供本地验证、演练与观测底座；完整定位见 [../../docs/project_positioning.md](../../docs/project_positioning.md)。
 
 ---
 

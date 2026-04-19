@@ -1,5 +1,8 @@
 # Task 149 - Overlay Parent Exposure Contract Refactor
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Scope
 - 将 `protective / opportunistic` 从“各自读取 directional target 字段，再在状态机里局部 inventory fallback”收敛成显式的 parent-exposure contract。
 - 保持 allocator / apply / execution 主链不变，不改 overlay family 依附主腿的业务边界。

@@ -1,4 +1,7 @@
 # Task 142 - Exit Execution Truth Pending 可见性与恢复契约收口
+
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
 ## 业务目标与边界
 - 修复 `truth_pending` 的父退出任务在 startup / recovery / operator 视图里可能不可见的问题。
 - 修复 `refresh_exit_execution_intents()` 对无 child refs 的非终态 parent 静默跳过的问题。

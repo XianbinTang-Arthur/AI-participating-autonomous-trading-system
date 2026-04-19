@@ -1,5 +1,8 @@
 # task118 target_position as-of 时钟一致性修复
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 业务目标与边界
 - 修复 `aats/services/decision_engine/target_position.py` 中策略时间守卫混用 `utc_now()` 的确定性问题。
 - 统一将 `min_hold`、`post-close cooldown`、`low-edge cooldown`、overlay `rebalance cooldown`、independent 腿级冷却的时钟基准收敛到 `DecisionContext.as_of_ts`。

@@ -1,5 +1,8 @@
 # Task 177 - 状态机违规收口、命令尝试计数修正、obligation 手续费隔离、启动恢复计数拆分
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 将 `independent` 非法状态转移从“仅记录”升级为“安全降级并阻断动作”，避免已知非法转移继续进入 live action。
 - 将 execution command 的 `attempt_count` 语义统一为“领取执行次数”，消除一次执行被双计数的问题。

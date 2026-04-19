@@ -1,5 +1,8 @@
 # Task 97：合约对冲模式 Phase 6 交付说明
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 本轮目标
 
 按 `task91_derivatives_hedge_mode_phase_breakdown.md` 的 `Phase 6`，把 operator / dashboard / audit 视图补成真正理解合约 `hedge mode` 的控制面，而不是只在底层代码里支持。

@@ -1,5 +1,8 @@
 # Task120 Postgres Startup Parent Refresh SOW
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 目标
 - 在 Postgres runtime 的启动恢复阶段主动刷新一次 `ExitExecutionIntent` 聚合真相。
 - 减少 parent-exit 必须等到首次 `sync_exchange_state()` 或 `reconciliation` 才收敛的时间窗。

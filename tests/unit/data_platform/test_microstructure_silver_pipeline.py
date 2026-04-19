@@ -405,5 +405,56 @@ class TestWorkflowRegistration(unittest.TestCase):
         )
 
 
+class TestSilverMetricsPlumbing(unittest.TestCase):
+    """Stage 4 新增: metrics_registry 可选注入, 产生 counter 增量。"""
+
+    def test_metrics_registry_none_is_noop(self) -> None:
+        """Stage 3 既有行为: metrics_registry 未传 → 零副作用,结果数据不变。"""
+        env = make_env()
+        with Session(env.engine) as sess:
+            result = build_silver_microstructure_15m(
+                session=sess, symbol=env.symbol,
+                bar_start_ts=env.bar_start, bar_end_ts=env.bar_end,
+                ingest_run_id=env.ingest_run_id,
+            )
+            sess.commit()
+        self.assertEqual(sum(result.tables_written.values()), 5)
+        self.assertEqual(result.error, None)
+
+    def test_metrics_registry_accumulates_counters(self) -> None:
+        """当 caller 注入 MetricsRegistry, ETL 每张表都产生 _success 与 rows_written 计数。"""
+        from aats.bootstrap.metrics import MetricsRegistry
+        env = make_env()
+        registry = MetricsRegistry()
+        with Session(env.engine) as sess:
+            build_silver_microstructure_15m(
+                session=sess, symbol=env.symbol,
+                bar_start_ts=env.bar_start, bar_end_ts=env.bar_end,
+                ingest_run_id=env.ingest_run_id,
+                metrics_registry=registry,
+            )
+            sess.commit()
+        snapshot = registry.snapshot()
+        # 5 张表的 success counter 全部打点 (空 bar 也是 "成功写入 NULL 行")
+        for key in (
+            "microstructure_silver_etl_runs_total_orderbook_success",
+            "microstructure_silver_etl_runs_total_trade_flow_success",
+            "microstructure_silver_etl_runs_total_oi_funding_success",
+            "microstructure_silver_etl_runs_total_volume_profile_success",
+            "microstructure_silver_etl_runs_total_liquidation_success",
+        ):
+            self.assertGreaterEqual(
+                snapshot.get(key, 0), 1,
+                f"expected {key} counter >= 1, got {snapshot.get(key, 0)}",
+            )
+        # duration bucket 必有一个被打: <1s (空 bar 通常毫秒级)
+        bucket_keys = {
+            k for k in snapshot
+            if k.startswith("microstructure_silver_etl_duration_bucket_")
+        }
+        self.assertEqual(len(bucket_keys), 1,
+                         f"exactly one duration bucket should fire, got {bucket_keys}")
+
+
 if __name__ == "__main__":
     unittest.main()

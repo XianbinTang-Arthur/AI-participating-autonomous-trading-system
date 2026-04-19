@@ -1,5 +1,7 @@
 # P1-D Microstructure 可行性调研报告 (2026-04-19)
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
 **状态**: 纯调研产出 / 决策文档
 **Scope**: OKX BTC-USDT-SWAP 15m horizon 的 microstructure 预测特征
 **调研边界**: 不动生产代码、不采集真实数据、不发 OKX API 请求；只读公开文档、项目源码、学术文献
@@ -1058,4 +1060,3 @@ Path B 的要点（来自 P1-C 报告 §10.4）：
 - **决策建议**: **GO Phase 1**，W3 gate 做 Phase 2A 准入决定，W8 最终 GO/NO-GO
 - **最短可能失败路径**: W4 end（Phase 2A 结束时）若 3 核心特征 R² 全 < 0.005，**提前 NO-GO**，沉没 2.5 人周 + 基础数据管道（可复用）
 - **最长成功路径**: W8 完整跑完 GO → W9+ 进入路径 A（microstructure sleeve）或路径 B（integrated feature）实施
-

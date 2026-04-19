@@ -1,5 +1,8 @@
 # Allocator `budgeted_notional=0` 根因调研报告
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 - 调研时间：2026-04-19 15:45 UTC+8
 - 环境：derivatives-live（`aats-live-derivatives`，BTC-USDT-SWAP）
 - 分支：`claude/hopeful-nightingale-8e49de` worktree（从 main@`09530b9` 切出）

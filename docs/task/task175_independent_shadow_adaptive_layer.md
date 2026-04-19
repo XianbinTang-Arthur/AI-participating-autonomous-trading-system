@@ -1,5 +1,8 @@
 # Task 175: Independent Shadow Adaptive Layer
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 将 `independent/adaptive.py` 从静态 settings 快照升级成 shadow-only 动态层。
 - 只做诊断/解释增强，不改变当前 `independent` 的真实开平仓 gating 语义。

@@ -1,5 +1,8 @@
 # Independent 合约实盘托管配置对齐修复 SOW
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 背景
 
 本轮针对 Independent 合约实盘链路做前后端与运行时复审时，`tests/integration/test_strategy_runtime_integration.py` 中

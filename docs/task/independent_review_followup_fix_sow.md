@@ -1,5 +1,8 @@
 # Independent Review Follow-up Fix SoW
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objective
 - 修复本轮代码审查暴露的遗留边界，确保 independent full-close 在 expectancy 缺失时仍保留真实退出 notional，并继续保持 operator 试盘守护摘要与决策层的 guarded/raw fallback 口径一致。
 

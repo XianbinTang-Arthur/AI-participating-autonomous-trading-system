@@ -1,5 +1,8 @@
 # Task 169 - Replay 工作区、筛选折叠与联动对读收口
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 在仓库内把 replay 从风险页的一张摘要卡，升级成独立工作区。
 - 让 replay 父腿历史支持筛选与折叠，便于 operator 只看 `inventory_only / target_only / target_and_inventory` 三类父腿阶段。

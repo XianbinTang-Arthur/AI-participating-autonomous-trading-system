@@ -1,5 +1,8 @@
 # Task 163 - Overlay Parent Quantity Summary Visibility
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 把 `parent_source_of_truth / parent_target_qty / parent_current_qty / parent_effective_qty` 正式抬进 runtime/operator 的结构化摘要链。
 - 不改 overlay 执行逻辑，只补 schema、coordinator 回写、operator payload/backfill 和 UI 摘要可见性。

@@ -1,5 +1,8 @@
 # P0 Profitability Batch2 Bugfix SoW
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 修复 lifecycle attribution 在同 symbol / 同方向窗口内串入弱关联决策的问题。
 - 修复 independent trial guard 对 residual exit 样本宇宙前后不一致的问题。

@@ -1,7 +1,12 @@
 # AATS 部署与运行说明
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](docs/project_positioning.md)。
+
+
 最后更新：2026-04-13
 适用范围：Windows/WSL2 本地部署、Docker Compose 四进程部署、profile 选择、启动/停机、健康检查
+
+部署的目的不是“把系统跑起来”本身，而是为长期稳定盈利提供可靠运行底座。任何部署、启动、切换 profile 或放开 live submit 的动作，都必须服务于 AI 资本的稳健积累目标，并且优先满足风控、恢复、审计、治理和 fail-closed 要求。完整定位见 [docs/project_positioning.md](docs/project_positioning.md)。
 
 ## 1. 部署拓扑
 
@@ -56,6 +61,8 @@ live exchange-coupled runtime 必须满足：
 | session cookie | live 环境必须 secure |
 
 任何一项不满足，runtime 应 fail closed。
+
+这里的原则不是尽快上线，而是只允许具备稳定盈利验证基础、真实净收益可归因能力和完整安全约束的运行时进入 live。
 
 ## 4. 基础设施启动
 

@@ -1,5 +1,8 @@
 # Task110 智能套利主线代码审查与预算口径修复 SOW
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 业务目标与边界
 - 目标：修复 `smart_arbitrage` 在 allocator 阶段的预算/名义额口径错误，避免真实可开套利尺寸被错误缩小。
 - 边界：仅修改 `smart_arbitrage -> coordinator -> allocator` 相关预算计算与测试，不改 public API 字段名，不改执行链路协议，不做无关重构。

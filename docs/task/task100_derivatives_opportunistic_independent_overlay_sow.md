@@ -1,5 +1,8 @@
 # Task 100：合约 Opportunistic / Independent Overlay 扩展任务书
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 1. 任务背景
 
 `Task 90` 和 `Task 91` 已经把合约 `hedge mode` 的底层能力拆解完成，`Task 99` 又交付了 `Phase 7 protective` 的第一版可实跑实现。

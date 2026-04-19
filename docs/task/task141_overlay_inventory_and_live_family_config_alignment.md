@@ -1,5 +1,8 @@
 ## Task 141 - Overlay Inventory Continuity And Live Family Config Alignment
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ### Business objectives and boundaries
 - 修正 `protective` 与 `opportunistic` 在 directional target 变为 `flat` 时过早 `inactive` 的问题。
 - 让 overlay family 在 target 已 flat 但真实库存仍存在时，继续按真实库存管理 overlay 腿。

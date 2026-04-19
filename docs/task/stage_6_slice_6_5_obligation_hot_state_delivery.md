@@ -1,5 +1,8 @@
 # Stage 6 Slice 6.5 交付验证报告：obligation 热状态跨进程缓存
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 状态：**全部开发完成，WSL2 4 进程真跑验证通过，等 dry run 测试确认**
 > 设计文档：[`stage_6_slice_6_5_obligation_hot_state_design.md`](stage_6_slice_6_5_obligation_hot_state_design.md)
 > Runbook 验证段：[`deploy/wsl2-dev/RUNBOOK.md`](../../deploy/wsl2-dev/RUNBOOK.md) §9.1 / §9.8

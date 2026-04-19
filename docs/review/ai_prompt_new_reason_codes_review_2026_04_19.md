@@ -1,5 +1,8 @@
 # AI Prompt 对 Baseline 新 reason_codes 的回归调研（2026-04-19）
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## TL;DR
 
 - **风险级别：A（有实质风险）** — AI 在 shadow 模式下已活跃调用 OpenAI，新 `alpha_basis_contrarian_*` code 在过去 30 分钟已触发 33 次进入真实 prompt。

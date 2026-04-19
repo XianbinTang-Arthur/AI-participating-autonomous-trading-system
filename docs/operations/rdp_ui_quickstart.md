@@ -1,5 +1,8 @@
 # RDP UI 速查 —— 5 分钟上手
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 目标: 打开 `https://127.0.0.1:8011/ui/rdp` 后, 不用查文档就知道该看什么、该点什么。
 > 深入 SOP 请看 [rdp_operator_workflow.md](./rdp_operator_workflow.md) 和 [operator_checklist.md](./operator_checklist.md)。
 

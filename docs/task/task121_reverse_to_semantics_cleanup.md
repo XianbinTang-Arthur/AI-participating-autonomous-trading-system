@@ -1,5 +1,8 @@
 # Task 121 - reverse_to_* 审计 / 存储 / UI 语义清理
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 目标：修复 `reverse_to_long` / `reverse_to_short` 在审计、存储回读、影子执行和前端展示中的语义丢失问题。
 - 边界：不改撮合逻辑、不改仓位决策逻辑、不改公开 API，只修正兼容恢复和展示语义。

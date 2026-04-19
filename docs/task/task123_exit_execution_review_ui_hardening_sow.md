@@ -1,5 +1,8 @@
 ## Task 123 - Exit Execution Review UI Hardening
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ### Objective
 - Fix the current-stage UI correctness issues in the exit-execution operator loop.
 - Harden the risk workspace so operators see one coherent parent-exit review card and only the actions they are actually allowed to run.

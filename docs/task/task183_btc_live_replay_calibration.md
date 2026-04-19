@@ -1,5 +1,8 @@
 # Task 183 - BTC Live Replay 成本熔断校准测试
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 
 - 将 `2026-04-01` 美国东部时间 `13:23`、`13:26`、`13:28`、`14:09` 这 4 个 BTC live short 候选窗口固化为本地可重复运行的校准测试。

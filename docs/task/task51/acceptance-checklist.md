@@ -1,5 +1,8 @@
 # Phase 1 验收清单
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../../docs/project_positioning.md)。
+
+
 ## 兼容层写入
 - [ ] `OrderManager` 会 shadow write 到 `execution_orders`
 - [ ] fill 会 shadow write 到 `execution_fills`

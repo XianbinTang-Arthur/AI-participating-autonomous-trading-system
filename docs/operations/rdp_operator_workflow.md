@@ -1,5 +1,8 @@
 # RDP Operator 工作流 SOP
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 本文档让 operator 不依赖口头知识即可执行完整的 RDP 运营流程：
 > 看结论、批 recommendation、apply 参数、rollback、日常巡检。
 

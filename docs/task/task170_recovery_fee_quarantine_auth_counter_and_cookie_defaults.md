@@ -1,5 +1,8 @@
 # Task 170 - Recovery、Fee Quarantine、认证计数与 Cookie 默认安全收口
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 为 phase4 启动恢复补齐 `SENT` 但未获交易所确认的 submit 命令专门阻断语义。
 - 为未知手续费币种提供单条坏数据隔离路径，避免查询和投影链路被单个 fill 直接打断。

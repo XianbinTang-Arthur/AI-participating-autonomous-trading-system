@@ -1,5 +1,8 @@
 # Task 123 - open_* / scale_in_* 合约方向文案补齐
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 目标：让合约 UI 在展示 `open_long/open_short`、`scale_in_long/scale_in_short` 时保留方向性文案。
 - 边界：仅改 `trade-display` 展示优先级，不改撮合逻辑、不改存储、不改审计 schema。

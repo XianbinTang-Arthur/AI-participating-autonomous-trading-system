@@ -1,5 +1,8 @@
 ## Business objectives and boundaries
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 - 把 `derivatives_live` 收敛成与当前 `Independent` 实盘主路径一致的显式配置，不再依赖“`directional` + overlay cutover”作为主要对外语义。
 - 修复仍停留在旧阶段的运行手册描述，避免继续把 `independent` 误标成只能 `dry_run / replay_only`。
 - 补齐 live PostgreSQL 缺失的 schema migration，确保当前代码依赖的执行归因列已经真实存在。

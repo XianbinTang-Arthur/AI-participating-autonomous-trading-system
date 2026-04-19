@@ -1,5 +1,8 @@
 # RDP 能力扩展 · 详细设计 v3 (Phase 1-4)
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 版本: v3 — 基于 [rdp_scope_expansion_review_v2.md](./rdp_scope_expansion_review_v2.md) 的 7 blocker + 8 warning 优化
 > 起草: 2026-04-18
 > 本文件替代 v2,最终实施版本

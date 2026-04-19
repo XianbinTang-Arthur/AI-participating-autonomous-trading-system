@@ -1,5 +1,8 @@
 # Task 105: Task90-104 审查后补丁修复 SOW
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 目标：修复 task90 到 task104 审查中确认的高优先级缺陷，保证合约 hedge mode 的主执行链不再把 long/short 双腿串味，并把 overlay rollout 安全门禁下沉到执行层。
 - 边界：只修审查确认的问题，不扩展新的交易能力，不改 public API，不改数据库 schema。

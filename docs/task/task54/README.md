@@ -1,5 +1,8 @@
 # Task54 - Phase 4 恢复与对账切换
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../../docs/project_positioning.md)。
+
+
 本阶段把恢复与对账主链切到 `execution + ledger` 视角，但仍然保持显式开关启用：
 
 - 配置开关：`recovery_reconciliation_execution_ledger_enabled`

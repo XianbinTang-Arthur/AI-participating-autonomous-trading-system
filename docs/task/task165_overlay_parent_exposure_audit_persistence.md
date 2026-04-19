@@ -1,5 +1,8 @@
 # Task 165 - Overlay Parent Exposure 审计对象持久化
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 把 `overlay_parent_exposure.py` 的关键信息升级成正式的审计/持久化对象，而不是只在运行时推导。
 - 保持现有扁平字段兼容，避免打断当前 runtime/operator/UI。

@@ -1,5 +1,8 @@
 # Stage 6 Slice 6.3 设计文档：portfolio_snapshot 跨进程缓存接 hot_state_store
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 状态：**待审批**
 > 前置：Slice 6.1（HotStateStore Redis 配线）✅、Slice 6.2（kill_switch 跨进程同步）✅
 > 后续：Slice 6.4（KillSwitch + KillSwitchSyncService 二合一去过渡 API，可选）

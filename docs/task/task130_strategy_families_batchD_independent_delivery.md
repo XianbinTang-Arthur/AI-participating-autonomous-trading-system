@@ -1,5 +1,8 @@
 # Task130: Strategy Families Batch D 交付说明
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 范围
 
 本批次只完成 `independent family` 的业务评估归属迁移，不提前切 allocator / apply / execution 主路径。

@@ -1,5 +1,8 @@
 # Task 167 - Overlay Parent Exposure Postmortem UI
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 把 `overlay_parent_exposure_summary` 从 API 字段升级成可直接阅读的前端 postmortem 区域。
 - 覆盖两个仓库内展示面：

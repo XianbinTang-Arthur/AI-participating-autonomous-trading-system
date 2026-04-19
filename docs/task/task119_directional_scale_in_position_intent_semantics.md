@@ -1,5 +1,8 @@
 # task119 directional scale-in position_intent 语义修复
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 业务目标与边界
 - 修复 `directional` 同向加仓仍被标记为 `open_long/open_short` 的语义问题。
 - 让 `PositionTarget.position_intent` 能区分“首次开仓”和“同向加仓”。

@@ -1,5 +1,8 @@
 # Stage 6 Slice 6.5 设计文档：obligation 热状态跨进程缓存
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 状态：**已批准实现（用户口头授权 2026-04-08 跳过审批环节）**
 > 前置：Slice 6.1（HotStateStore Redis backend）/ 6.2（KillSwitchSyncService 原型）/ 6.3（PortfolioSnapshotCache）/ 6.4（KillSwitch 二合一）全部已上线
 > 后续：Stage 9 dryrun（operator 真跑验证）、Slice 6.6（open_orders 热状态缓存，待定）

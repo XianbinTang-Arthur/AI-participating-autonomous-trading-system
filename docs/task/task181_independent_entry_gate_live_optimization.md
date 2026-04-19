@@ -1,5 +1,8 @@
 ## Business objectives and boundaries
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 - 优化 `independent` 家族 live 开仓门控，避免在净边际充足时被过紧的单腿成本硬门误杀。
 - 将开仓确认逻辑调整为条件化确认：弱信号保持保守，强信号与高净边际允许更快放行，优先改善 short 机会捕捉。
 - 保持现有 `independent` 家族 public API、运行配置结构和其他 family 行为不变。

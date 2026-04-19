@@ -1,5 +1,8 @@
 # Task 157 - Execution Chain Id 与 Chain-Aware EVR
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 
 - 为执行主链引入显式 `execution_chain_id`，让一条执行链不再只能靠 `decision_id + leg` 间接推断。

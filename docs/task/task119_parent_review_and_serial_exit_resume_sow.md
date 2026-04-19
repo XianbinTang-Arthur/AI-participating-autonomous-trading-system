@@ -1,5 +1,8 @@
 # Task119 Parent Review And Serial Exit Resume SOW
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 业务目标与边界
 - 将 `parent-child exit aggregation` 的 review / operator 语义上收到现有 `reconciliation -> recovery_view` 链路。
 - 让串行 `max-size` 退出拆单不再只停在“首次提交流程内”的保守串行，而是在后续 `sync_exchange_state()` 后基于 parent 聚合状态安全续派。

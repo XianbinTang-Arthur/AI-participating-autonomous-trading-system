@@ -1,5 +1,8 @@
 # Task 190 - 策略页 UI 回归恢复与 dataclass 收集修复
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 
 - 修复 `aats/bootstrap/config.py` 的 dataclass 字段顺序错误，恢复 `pytest` 基本收集能力。

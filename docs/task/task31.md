@@ -1,5 +1,8 @@
 # Task 31: AI Decision-Maker Architecture Refactor Design
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > **Historical document (2026-04 update)**: `ai_decision_maker_with_profile_control`
 > 已从运行模式枚举中移除。profile 自动换档现在由独立开关
 > `strategy_profile_auto_control_enabled` 控制，可以与任何 AI 运行模式

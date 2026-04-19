@@ -1,5 +1,8 @@
 # Task114 - Independent 同 Bundle Partial Fill 提交防误拦
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 目标
 
 - 修复 `independent` 双书在同一 bundle 内按腿顺序提交时，第一条腿已成交后把当前 bundle 自己误判成 `bundle_recovery_in_progress`，进而拦掉后续腿的问题。

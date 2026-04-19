@@ -1,5 +1,8 @@
 # Task115 Unknown Write Cancelability And Sync Priority SOW
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business Objectives And Boundaries
 
 - 修复 `submission_unknown_check_exchange:*` 状态下订单无法继续取消的问题。

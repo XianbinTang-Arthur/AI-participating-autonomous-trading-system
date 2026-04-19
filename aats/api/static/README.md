@@ -1,5 +1,8 @@
 # AATS 自主交易控制台 — 前端 README
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../../docs/project_positioning.md)。
+
+
 > 本 README 覆盖 `aats/api/static/` 下的全部前端代码（顶层 HTML/JS/CSS + `modules/` + `modules/views/` + `modules/actions/`），按"顶层资源 → 基础模块 → View 层 → Actions 层 → 关键机制 → 问题清单"的顺序组织，**逐文件、逐函数**记录。
 >
 > 生成时间：2026-04-06

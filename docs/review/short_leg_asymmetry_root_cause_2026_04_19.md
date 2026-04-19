@@ -1,5 +1,8 @@
 # Short leg slope 负 + R²=0.00063 根因诊断
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 **日期**: 2026-04-19
 **背景**: P1-B step 1 signal_edge_scale 标定报告发现 short leg 对 realized_edge 回归 slope 负、R²≈0.00063，long leg slope 正 (+16.94 bps/score)、R²=0.0173。本报告为 P1-A Phase 2 代码改动前的根因定位。
 **作用域**: 只做诊断，不改代码。

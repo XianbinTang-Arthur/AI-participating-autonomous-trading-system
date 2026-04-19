@@ -1,5 +1,8 @@
 # Independent Blocked Bundle Backfill Runtime Alignment
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 背景
 
 上一轮审查已经确认，Independent 历史 `blocked` bundle 回填链路存在两个和实盘部署环境不一致的点：

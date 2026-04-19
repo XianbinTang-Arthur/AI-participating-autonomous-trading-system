@@ -1390,6 +1390,9 @@ def build_silver_microstructure_15m(
         ).fetchone()
         if row is not None:
             mid_price_ref = row.mid_price_last
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_runs_total_orderbook_success",
+        )
     except Exception as exc:
         flags.append("etl_failed:orderbook_metrics")
         log.exception("orderbook_metrics build failed")
@@ -1407,6 +1410,9 @@ def build_silver_microstructure_15m(
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
             flags=flags, mid_price_ref=mid_price_ref,
         )
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_runs_total_trade_flow_success",
+        )
     except Exception as exc:
         flags.append("etl_failed:trade_flow")
         log.exception("trade_flow build failed")
@@ -1423,6 +1429,9 @@ def build_silver_microstructure_15m(
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
             flags=flags, mid_price_ref=mid_price_ref,
+        )
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_runs_total_oi_funding_success",
         )
     except Exception as exc:
         flags.append("etl_failed:oi_funding_metrics")
@@ -1442,6 +1451,9 @@ def build_silver_microstructure_15m(
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
             flags=flags,
         )
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_runs_total_volume_profile_success",
+        )
     except Exception as exc:
         flags.append("etl_failed:volume_profile")
         log.exception("volume_profile build failed")
@@ -1458,6 +1470,9 @@ def build_silver_microstructure_15m(
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
             flags=flags,
+        )
+        _record_metric(
+            metrics_registry, "microstructure_silver_etl_runs_total_liquidation_success",
         )
     except Exception as exc:
         flags.append("etl_failed:liquidation_metrics")
@@ -1492,6 +1507,24 @@ def build_silver_microstructure_15m(
             f"microstructure_silver_rows_written_{table_name}_total",
             value=rowcount,
         )
+
+    # Duration histogram bucket (recorded into single bucket by threshold).
+    # 确保某一档 (exactly one) 每次入口调用都被打点;
+    # 阈值对齐 §11 Gate: p95 < 10s. 超过 30s 视为病态, 需要独立告警.
+    if duration < 1.0:
+        duration_bucket = "1s"
+    elif duration < 5.0:
+        duration_bucket = "5s"
+    elif duration < 10.0:
+        duration_bucket = "10s"
+    elif duration < 30.0:
+        duration_bucket = "30s"
+    else:
+        duration_bucket = "inf"
+    _record_metric(
+        metrics_registry,
+        f"microstructure_silver_etl_duration_bucket_{duration_bucket}",
+    )
 
     log.info(
         "silver_microstructure_etl symbol=%s bar=%s written=%s flags=%s "

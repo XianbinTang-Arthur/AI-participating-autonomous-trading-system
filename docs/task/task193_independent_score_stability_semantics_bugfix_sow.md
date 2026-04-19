@@ -1,5 +1,8 @@
 ## Task 193: Independent Score-Stability 语义修复
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ### Business objectives and boundaries
 - 修复 `independent` 的 `score_stability` 语义错误，避免把强动量行情中的“分数增强”误判为“不稳定”。
 - 范围限定在 `independent` 的打分稳定性计算、gate 判定、诊断输出与相关测试。

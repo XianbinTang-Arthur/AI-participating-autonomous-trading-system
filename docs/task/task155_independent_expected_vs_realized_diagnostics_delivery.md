@@ -1,5 +1,8 @@
 # Task 155 - Independent 预期 vs 已实现诊断交付
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 本轮交付范围
 
 本轮完成 Deliverable 5 的最小可交付闭环，重点是把 `independent` 的 `expected vs realized` 诊断从内部计算结果抬升为 runtime / operator / replay / dashboard 都可见的正式摘要。

@@ -1,5 +1,8 @@
 # Task 182 - Size-Aware 成本模型与动态熔断
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 
 - 将 `independent` family 的开仓成本估算从静态 bps 估算升级为与订单规模、盘口深度、参考价格相关的 size-aware 模型。

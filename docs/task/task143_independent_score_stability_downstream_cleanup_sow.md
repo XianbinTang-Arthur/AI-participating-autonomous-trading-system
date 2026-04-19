@@ -1,4 +1,7 @@
 # Task 143 - Independent Score Stability 下游读侧语义收口
+
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
 ## 业务目标与边界
 - 将 `max_drawdown_bps` 从 independent 的下游展示与回放出口中逐步退掉。
 - 保留底层 `ScoreStabilityMetrics.max_drawdown_bps` 兼容字段，避免直接破坏内部与历史调用。

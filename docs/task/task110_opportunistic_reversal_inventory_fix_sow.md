@@ -1,5 +1,8 @@
 # Task 110：Opportunistic 反转库存归因修复 SOW
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## 业务目标与边界
 - 目标：修复 `opportunistic` 在方向性主腿翻向时错误接管旧方向库存的问题，避免把旧主腿残留仓位误判为机会腿。
 - 边界：仅修复 `aats/services/decision_engine/target_position.py` 中的 opportunistic 决策归因，不改 public API、不改执行器协议、不改 operator 展示结构。

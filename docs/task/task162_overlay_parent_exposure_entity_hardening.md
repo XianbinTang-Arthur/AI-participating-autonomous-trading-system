@@ -1,5 +1,8 @@
 # Task 162 - Overlay Parent Exposure Entity Hardening
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 继续把 `protective / opportunistic` 的 parent exposure 从“共享信号对象”收紧成更像业务实体的一等对象。
 - 不改 allocator / apply / execution 主链，不把 overlay family 改造成独立 alpha family。

@@ -1,5 +1,8 @@
 # Parameter Apply & Rollback 操作指南
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 > 本文档描述如何将已批准的 recommendation 受控地应用为 active parameter set，
 > 以及如何在出问题时回滚。
 

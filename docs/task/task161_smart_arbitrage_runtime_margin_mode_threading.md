@@ -1,5 +1,8 @@
 # Task 161 - Smart Arbitrage Runtime Margin Mode Threading
 
+> 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
+
+
 ## Business objectives and boundaries
 - 修复 `smart_arbitrage` 在 derivatives hedge leg metadata 和 derivatives cost scope 上仍硬读全局 `settings.margin_mode` 的问题。
 - 优先复用 engine 已经解析出的 runtime `directional_target.margin_mode`，不要新增第二套来源。
