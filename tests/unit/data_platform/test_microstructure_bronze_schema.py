@@ -479,14 +479,31 @@ class TestBatchBRegistration(unittest.TestCase):
     """
 
     def test_batch_b_05_registered_last(self) -> None:
+        """P1-D Phase 1A Stage 1 注册检查。
+
+        Stage 3 (batch_b_06_silver_microstructure) 追加后, stage 5 自然
+        不再是 tuple 末尾。该断言的原始意图 — "新 stage 以 append 形式入
+        tuple, 不随意插入中间" — 仍保留: 验证 stage 5 在 stage 6 之前。
+        """
         from aats.data_platform.migrations._batch_b import BATCH_B_STAGES
 
         self.assertIn("batch_b_05_microstructure", BATCH_B_STAGES)
-        self.assertEqual(
-            BATCH_B_STAGES[-1],
-            "batch_b_05_microstructure",
-            "stage 5 必须是 tuple 的最后一项,保持严格 append 顺序",
-        )
+        idx_05 = BATCH_B_STAGES.index("batch_b_05_microstructure")
+        # stage 5 必须在 stage 6 之前 (严格 append 顺序)
+        # 若未来 stage 7 加入, 本断言仍成立
+        if "batch_b_06_silver_microstructure" in BATCH_B_STAGES:
+            idx_06 = BATCH_B_STAGES.index("batch_b_06_silver_microstructure")
+            self.assertLess(
+                idx_05, idx_06,
+                "stage 5 必须在 stage 6 之前 (append 顺序)",
+            )
+        else:
+            # Stage 3 未 merge 前的旧状态 — stage 5 应该是最后一项
+            self.assertEqual(
+                BATCH_B_STAGES[-1],
+                "batch_b_05_microstructure",
+                "stage 5 必须是 tuple 的最后一项,保持严格 append 顺序",
+            )
 
 
 if __name__ == "__main__":
