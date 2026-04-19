@@ -10,10 +10,14 @@
 -- Idempotency: DO $$ EXCEPTION blocks. Re-running the migration is a no-op.
 
 -- parameter_sets.status
+-- Bug 9 修复 (2026-04-19): allowlist 加入 'released'。
+-- apply 事务把 target parameter_set 从 candidate 升 released，保持每 combo
+-- 任一时刻最多 1 条 released 的 invariant。旧的 4 值 allowlist 在新 DB 上
+-- 跑 apply 会触发 CHECK violation。
 DO $$ BEGIN
   ALTER TABLE governance.parameter_sets
     ADD CONSTRAINT ck_ps_status
-    CHECK (status IN ('draft', 'candidate', 'frozen', 'deprecated'));
+    CHECK (status IN ('draft', 'candidate', 'frozen', 'released', 'deprecated'));
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 

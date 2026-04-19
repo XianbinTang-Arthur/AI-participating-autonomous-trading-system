@@ -609,8 +609,13 @@ class ParameterSetModel(RdpBase):
         UniqueConstraint("parameter_set_id", name="uq_ps_id"),
         Index("ix_ps_family_tf_status", "family", "timeframe", "status"),
         Index("ix_ps_source_round", "source_round_id"),
+        # Bug 9 修复 (2026-04-19): 加入 'released' 状态 —— apply 事务把 target
+        # parameter_set 从 candidate 升 released，保持 "每 combo 任一时刻最多 1 条
+        # released" 的 invariant。之前 CHECK 只允许 {draft, candidate, frozen,
+        # deprecated}，导致新 DB 上跑 apply 时 CHECK violation。
+        # forward-compat: 未来 freeze API 恢复时 frozen 仍保留在 allowlist。
         CheckConstraint(
-            "status IN ('draft', 'candidate', 'frozen', 'deprecated')",
+            "status IN ('draft', 'candidate', 'frozen', 'released', 'deprecated')",
             name="ck_ps_status",
         ),
         {"schema": "governance"},
