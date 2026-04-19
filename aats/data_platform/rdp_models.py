@@ -648,6 +648,279 @@ class StagingMarketOiFundingTicksModel(RdpBase):
 
 
 # =====================================================================
+# SILVER — P1-D Phase 1A microstructure 15m 聚合表 (§5)
+# =====================================================================
+# 5 张 Silver 15m 表,由 microstructure_silver_merger 从 Bronze/staging
+# 聚合产出。实际 DDL 由 migrations/batch_b_06_silver_microstructure.sql 承载;
+# ORM 仅供 create_all 兜底 + 单元测试 + 程序化读写。
+#
+# 共用规范 (§5 开头):
+#   - schema = silver
+#   - PK = (symbol, ts), ts = 15m bar 起点 (UTC 对齐)
+#   - footer: ingest_run_id / dataset_version / quality_flags / created_at /
+#             updated_at
+#   - quality_flags TEXT[] 合法值:
+#       etl_failed, partial_data, gap_filled_with_nulls, stale_source,
+#       whale_threshold_reinit, ema_seed_from_sma, partial_baseline,
+#       orderbook_bbo_no_data, orderbook_books5_no_data,
+#       trades_no_data, oi_no_data, funding_no_data, mark_no_data,
+#       liquidation_no_data
+
+
+class SilverMarketOrderbookMetrics15mModel(RdpBase):
+    """silver.market_orderbook_metrics_15m — §5.1.
+
+    来源 bronze.market_orderbook_bbo (1Hz) + bronze.market_orderbook_books5
+    (2Hz),聚合为 15m 窗口统计 + depth + imbalance。
+    """
+    __tablename__ = "market_orderbook_metrics_15m"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_slv_micro_orderbook_15m"),
+        Index("idx_slv_micro_orderbook_15m_ts", "ts"),
+        Index("idx_slv_micro_orderbook_15m_ver", "dataset_version"),
+        {"schema": "silver"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    # BBO level
+    bbo_imbalance_mean = Column(Numeric(12, 8))
+    bbo_imbalance_std = Column(Numeric(12, 8))
+    bbo_imbalance_last = Column(Numeric(12, 8))
+    bbo_samples_n = Column(Integer, nullable=False, server_default=text("0"))
+    # Top-5 level
+    top5_bid_depth_ccy = Column(Numeric(28, 10))
+    top5_ask_depth_ccy = Column(Numeric(28, 10))
+    top5_imbalance_mean = Column(Numeric(12, 8))
+    top5_imbalance_ema = Column(Numeric(12, 8))
+    top5_weighted_imbalance = Column(Numeric(12, 8))
+    books5_samples_n = Column(Integer, nullable=False, server_default=text("0"))
+    # Spread
+    spread_bps_mean = Column(Numeric(12, 4))
+    spread_bps_max = Column(Numeric(12, 4))
+    spread_bps_min = Column(Numeric(12, 4))
+    # Mid anchor
+    mid_price_last = Column(Numeric(20, 10))
+    # Footer
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    dataset_version = Column(Text, nullable=False)
+    quality_flags = Column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]"),
+    )
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+
+
+class SilverMarketTradeFlow15mModel(RdpBase):
+    """silver.market_trade_flow_15m — §5.2.
+
+    来源 bronze.market_trades;聚合 volume + taker buy/sell split + whale
+    detection + VWAP 相对 mid 的偏移。
+    """
+    __tablename__ = "market_trade_flow_15m"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_slv_micro_trade_flow_15m"),
+        Index("idx_slv_micro_trade_flow_15m_ts", "ts"),
+        Index("idx_slv_micro_trade_flow_15m_ver", "dataset_version"),
+        {"schema": "silver"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    # Volume
+    total_volume_ccy = Column(Numeric(28, 10))
+    buy_volume_ccy = Column(Numeric(28, 10))
+    sell_volume_ccy = Column(Numeric(28, 10))
+    trade_count = Column(Integer, nullable=False, server_default=text("0"))
+    # Aggressor flow
+    taker_buy_ratio = Column(Numeric(12, 8))
+    trade_flow_imbalance = Column(Numeric(12, 8))
+    log_tfi = Column(Numeric(12, 8))
+    # Size distribution
+    mean_trade_size = Column(Numeric(18, 8))
+    p50_trade_size = Column(Numeric(18, 8))
+    p95_trade_size = Column(Numeric(18, 8))
+    p99_trade_size = Column(Numeric(18, 8))
+    max_trade_size = Column(Numeric(18, 8))
+    # Whale detection
+    whale_threshold_applied = Column(Numeric(18, 8))
+    whale_count = Column(Integer, nullable=False, server_default=text("0"))
+    whale_buy_volume_ccy = Column(Numeric(28, 10))
+    whale_sell_volume_ccy = Column(Numeric(28, 10))
+    whale_direction = Column(Numeric(12, 8))
+    # Aggressiveness
+    vwap = Column(Numeric(20, 10))
+    mid_price_ref = Column(Numeric(20, 10))
+    vwap_minus_mid_bps = Column(Numeric(12, 4))
+    # Footer
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    dataset_version = Column(Text, nullable=False)
+    quality_flags = Column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]"),
+    )
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+
+
+class SilverMarketOiFundingMetrics15mModel(RdpBase):
+    """silver.market_oi_funding_metrics_15m — §5.3.
+
+    来源 staging.market_oi_funding_ticks (tick_type∈{oi,funding,mark}) +
+    silver.market_orderbook_metrics_15m 的 mid_price_last;聚合 OI 四价 /
+    EMA-20 / price-OI regime / funding z-score 7d / basis bps。
+    """
+    __tablename__ = "market_oi_funding_metrics_15m"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_slv_micro_oi_funding_15m"),
+        Index("idx_slv_micro_oi_funding_15m_ts", "ts"),
+        Index("idx_slv_micro_oi_funding_15m_ver", "dataset_version"),
+        {"schema": "silver"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    # OI
+    oi_open = Column(Numeric(28, 10))
+    oi_close = Column(Numeric(28, 10))
+    oi_high = Column(Numeric(28, 10))
+    oi_low = Column(Numeric(28, 10))
+    oi_delta = Column(Numeric(18, 10))
+    oi_samples_n = Column(Integer, nullable=False, server_default=text("0"))
+    # EMA-20
+    oi_ema_20 = Column(Numeric(28, 10))
+    oi_delta_vs_ema = Column(Numeric(18, 10))
+    # Price-OI joint regime
+    price_change_bps = Column(Numeric(12, 4))
+    oi_price_regime = Column(Text)
+    # Funding
+    funding_rate_current = Column(Numeric(18, 12))
+    funding_rate_next_est = Column(Numeric(18, 12))
+    funding_z_score_7d = Column(Numeric(12, 6))
+    funding_deviation_30d = Column(Numeric(18, 12))
+    minutes_to_next_funding = Column(Integer)
+    # Mark / basis
+    mark_price = Column(Numeric(20, 10))
+    mid_price_ref = Column(Numeric(20, 10))
+    basis_bps = Column(Numeric(12, 4))
+    # Footer
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    dataset_version = Column(Text, nullable=False)
+    quality_flags = Column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]"),
+    )
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+
+
+class SilverMarketVolumeProfile15mModel(RdpBase):
+    """silver.market_volume_profile_15m — §5.4.
+
+    来源本 bar 的 volume_ccy (从 silver.market_trade_flow_15m 或直接读
+    bronze.market_trades 聚合) + 历史同时段 4-week rolling baseline
+    (同 dow × hod × 15min slot);冷启动阶段 baseline_sample_weeks < 4
+    时 z_score=NULL + quality_flags += 'partial_baseline'。
+    """
+    __tablename__ = "market_volume_profile_15m"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_slv_micro_volume_profile_15m"),
+        Index("idx_slv_micro_volume_profile_15m_ts", "ts"),
+        Index("idx_slv_micro_volume_profile_15m_ver", "dataset_version"),
+        {"schema": "silver"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    # 本 bar
+    volume_ccy = Column(Numeric(28, 10))
+    trade_count = Column(Integer, nullable=False, server_default=text("0"))
+    # Seasonal baseline
+    expected_volume_ccy = Column(Numeric(28, 10))
+    expected_volume_std = Column(Numeric(28, 10))
+    volume_z_score = Column(Numeric(12, 6))
+    volume_spike_flag = Column(
+        Boolean, nullable=False, server_default=text("FALSE"),
+    )
+    dow_hod_slot = Column(Text)
+    # Interaction
+    vol_weighted_tfi = Column(Numeric(14, 8))
+    # Cold-start diagnostic
+    baseline_sample_weeks = Column(
+        Integer, nullable=False, server_default=text("0"),
+    )
+    # Footer
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    dataset_version = Column(Text, nullable=False)
+    quality_flags = Column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]"),
+    )
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+
+
+class SilverMarketLiquidationMetrics15mModel(RdpBase):
+    """silver.market_liquidation_metrics_15m — §5.5.
+
+    来源 staging.raw_liquidations (inst_id = symbol 直接映射);聚合
+    long/short counts + notional + cascade detection + 7d z-score。
+    与 staging.raw_liquidations 的 "side" 字段 convention 对齐:
+    OKX liquidation-orders 中 side 表示被清算方向(长仓被清算 → side='sell',
+    短仓被清算 → side='buy'),具体映射见 §5.5 注释与 _build_liquidation_metrics。
+    """
+    __tablename__ = "market_liquidation_metrics_15m"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="pk_slv_micro_liq_metrics_15m"),
+        Index("idx_slv_micro_liq_metrics_15m_ts", "ts"),
+        Index("idx_slv_micro_liq_metrics_15m_ver", "dataset_version"),
+        {"schema": "silver"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    # Counts
+    long_liq_count = Column(Integer, nullable=False, server_default=text("0"))
+    short_liq_count = Column(Integer, nullable=False, server_default=text("0"))
+    # Notional
+    long_liq_notional_usd = Column(Numeric(28, 10))
+    short_liq_notional_usd = Column(Numeric(28, 10))
+    liq_imbalance = Column(Numeric(12, 8))
+    max_single_liq_usd = Column(Numeric(28, 10))
+    # Cascade detection
+    cascade_flag = Column(
+        Boolean, nullable=False, server_default=text("FALSE"),
+    )
+    cascade_threshold_used = Column(Integer)
+    intensity_z_7d = Column(Numeric(12, 6))
+    # Footer
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    dataset_version = Column(Text, nullable=False)
+    quality_flags = Column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]"),
+    )
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+
+
+# =====================================================================
 # RESEARCH Schema — 3 张表
 # =====================================================================
 
