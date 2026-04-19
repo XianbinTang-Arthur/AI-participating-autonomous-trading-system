@@ -78,6 +78,13 @@ class MarketSnapshot(SchemaBase):
     #   - REST fallback 路径（当前不拉 mark-price）
     # basis 信号在 FeatureCalculator 里遇到 None 会返回 0 贡献，不破坏 composite.
     mark_price: Decimal | None = None
+    # P1.5 — OKX 衍生品 funding-rate 频道字段。None 表示：
+    #   - 现货 symbol（OKX 不推 funding-rate）
+    #   - WebSocket 暂未收到第一条 funding-rate 推送（分钟级）
+    # FeatureCalculator 遇到 None 时 funding_alpha=0，composite 等价 0 贡献.
+    funding_rate: Decimal | None = None               # 本次结算 funding rate
+    next_funding_rate: Decimal | None = None          # 下次预估 funding rate
+    next_funding_time: datetime | None = None         # 下次结算时间（UTC）
 
     @field_validator("recent_trades", "orderbook_depth", mode="before")
     @classmethod

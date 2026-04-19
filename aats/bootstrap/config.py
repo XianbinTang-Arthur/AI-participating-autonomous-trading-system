@@ -3712,6 +3712,8 @@ def _build_market_slice(
         rolling_atr_window=runtime_settings.strategy_baseline_rolling_atr_window,
         enable_basis_signal=runtime_settings.strategy_baseline_basis_signal_enabled,
         basis_scale_bps=runtime_settings.strategy_baseline_basis_scale_bps,
+        enable_funding_signal=runtime_settings.strategy_baseline_funding_signal_enabled,
+        funding_scale=runtime_settings.strategy_baseline_funding_scale,
     )
     slices.feature_engine = FeatureEngine(bus=slices.bus, calculator=calculator)
 

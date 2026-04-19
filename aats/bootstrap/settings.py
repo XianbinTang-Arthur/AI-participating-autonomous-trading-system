@@ -488,6 +488,15 @@ class AATSSettings(BaseSettings):
     # composite 权重仍按新公式（等价于 basis 0 贡献）。
     strategy_baseline_basis_signal_enabled: bool = True
     strategy_baseline_basis_scale_bps: float = 10.0
+
+    # ── P1.5 Funding rate 拥挤度信号 ────────────────────────────────────────
+    # 衍生品专属：OKX 推送 funding-rate。funding 过高（多头付费重）→ 多头过度
+    # 拥挤 → 短期反转倾向。公式:
+    #   funding_alpha = -tanh(funding_rate × funding_scale)
+    # funding_scale=2000 → funding=0.0005（每 8h 0.05%）对应 ≈ -0.76 alpha。
+    # 权重 0.07 进入 composite。默认打开；关闭后 funding_alpha 恒为 0。
+    strategy_baseline_funding_signal_enabled: bool = True
+    strategy_baseline_funding_scale: float = 2000.0
     strategy_flat_signal_hold_enabled: bool = False
     strategy_flat_exit_microstructure_threshold: float = 0.12
     strategy_flat_exit_factor_threshold: float = 0.18

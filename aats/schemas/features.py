@@ -48,6 +48,9 @@ class AlphaFactorSet(SchemaBase):
     # 一化。默认 0 → 已落盘的旧 payload 反序列化兼容；现货 / mark_price 缺失时
     # FeatureCalculator 也返回 0.
     basis_alpha: float = 0.0
+    # P1.5 — funding rate 拥挤度 alpha. funding 过高 (多头付费重) → 过度拥挤 →
+    # funding_alpha 负 (抑制 long)；反向同理。默认 0 兼容旧 payload.
+    funding_alpha: float = 0.0
     liquidity_scale: float
     composite_alpha_score: float
     conviction_score: float

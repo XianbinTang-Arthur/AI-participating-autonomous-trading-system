@@ -74,12 +74,28 @@ class OKXMarkPriceState:
 
 
 @dataclass(slots=True)
+class OKXFundingRateState:
+    """P1.5 — OKX funding-rate 频道最新快照.
+
+    OKX push data 字段：fundingRate（当前）、nextFundingRate（下次预估）、
+    fundingTime / nextFundingTime / method（结算方法）。这里保留 FeatureCalculator
+    需要的三项：当前 funding_rate、next_funding_rate、next_funding_time。
+    """
+    symbol: str
+    funding_rate: Decimal
+    next_funding_rate: Decimal | None
+    next_funding_time: datetime | None
+    snapshot_ts: datetime
+
+
+@dataclass(slots=True)
 class OKXInstrumentMarketState:
     symbol: str
     ticker: OKXTickerState | None = None
     candle_15m: OKXCandleState | None = None
     candle_1h: OKXCandleState | None = None
     mark_price: OKXMarkPriceState | None = None
+    funding: OKXFundingRateState | None = None
     raw_messages: deque[dict[str, Any]] = field(default_factory=lambda: deque(maxlen=50))
 
 
@@ -175,6 +191,9 @@ class OKXMarketSnapshotNormalizer:
         elif channel == "mark-price":
             # P1.4 衍生品基差信号：每次 mark 变化推送 200ms，无变化 10s 一次。
             state.mark_price = self._parse_mark_price(symbol=symbol, payload=data[0])
+        elif channel == "funding-rate":
+            # P1.5 衍生品 funding 拥挤度信号：变化时推，稳定时约 1 分钟一次。
+            state.funding = self._parse_funding_rate(symbol=symbol, payload=data[0])
         else:
             return []
 
@@ -221,6 +240,39 @@ class OKXMarketSnapshotNormalizer:
             bid_size=to_decimal(payload.get("bidSz", 0)),
             ask_size=to_decimal(payload.get("askSz", 0)),
             volume_24h=to_decimal(payload.get("vol24h", 0)),
+        )
+
+    def _parse_funding_rate(self, *, symbol: str, payload: dict[str, Any]) -> OKXFundingRateState:
+        """Parse OKX ``funding-rate`` 频道推送 data 元素.
+
+        官方 schema 关键字段: ``fundingRate``, ``nextFundingRate``, ``fundingTime``,
+        ``nextFundingTime``, ``method``. next_funding_rate / next_funding_time 可
+        缺失（某些 settlement 方法下），必存字段: ``fundingRate`` + ``fundingTime``
+        (用作 snapshot_ts).
+
+        缺 fundingRate 或 fundingTime → ValueError (走 schema warning 路径).
+        """
+        if "fundingRate" not in payload or "fundingTime" not in payload:
+            raise ValueError(
+                f"okx_funding_rate_payload_missing_fields: keys={list(payload.keys())}"
+            )
+        next_rate: Decimal | None = None
+        raw_next_rate = payload.get("nextFundingRate")
+        if raw_next_rate not in (None, ""):
+            next_rate = to_decimal(raw_next_rate)
+        next_time: datetime | None = None
+        raw_next_time = payload.get("nextFundingTime")
+        if raw_next_time not in (None, ""):
+            try:
+                next_time = _parse_ms_timestamp(str(raw_next_time))
+            except (ValueError, OSError):
+                next_time = None
+        return OKXFundingRateState(
+            symbol=symbol,
+            funding_rate=to_decimal(payload["fundingRate"]),
+            next_funding_rate=next_rate,
+            next_funding_time=next_time,
+            snapshot_ts=_parse_ms_timestamp(str(payload["fundingTime"])),
         )
 
     def _parse_mark_price(self, *, symbol: str, payload: dict[str, Any]) -> OKXMarkPriceState:
@@ -309,6 +361,11 @@ class OKXMarketSnapshotNormalizer:
         # 最大值，保证 basis 信号更新也能推动下游 is_fresh 判定。
         if state.mark_price is not None:
             ts_candidates.append(state.mark_price.snapshot_ts)
+        # P1.5 — funding-rate 同理，但 fundingTime 是"本次结算时刻"而非"推送时刻"，
+        # 8h 一次。max() 会让非本次结算 tick 的 snapshot_ts 不被它拉旧（因为 ticker
+        # / candle 的 ts 都会更新）。若单独推 funding → 作为最新一次变更的 ts.
+        if state.funding is not None:
+            ts_candidates.append(state.funding.snapshot_ts)
         snapshot_ts = max(ts_candidates)
 
         # Build a minimal orderbook from ticker top-of-book so that
@@ -333,6 +390,13 @@ class OKXMarketSnapshotNormalizer:
             recent_trades=[],
             orderbook_depth=orderbook_depth,
             mark_price=state.mark_price.mark_price if state.mark_price is not None else None,
+            funding_rate=state.funding.funding_rate if state.funding is not None else None,
+            next_funding_rate=(
+                state.funding.next_funding_rate if state.funding is not None else None
+            ),
+            next_funding_time=(
+                state.funding.next_funding_time if state.funding is not None else None
+            ),
         )
 
     @staticmethod

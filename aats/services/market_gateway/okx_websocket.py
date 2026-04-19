@@ -575,6 +575,9 @@ class OKXPublicWebSocketClient(OKXWebSocketConsumerBase):
             # 路径 → keepalive 断线重连死循环；必须提前按 instId 过滤。
             if self._is_derivative_symbol(symbol):
                 public_args.append({"channel": "mark-price", "instId": symbol})
+                # P1.5 Funding rate 拥挤度信号：同样仅衍生品，变化时推送，稳定时
+                # 约 1 分钟一次，不吃额外订阅配额（1 次订阅长期推送）。
+                public_args.append({"channel": "funding-rate", "instId": symbol})
         business_args: list[dict[str, str]] = []
         for symbol in symbols:
             business_args.extend(

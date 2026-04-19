@@ -42,6 +42,8 @@ class FeatureCalculator:
         rolling_atr_window: int = DEFAULT_ATR_WINDOW,
         enable_basis_signal: bool = True,
         basis_scale_bps: float = 10.0,
+        enable_funding_signal: bool = True,
+        funding_scale: float = 2000.0,
     ) -> None:
         self.trend = trend or TrendCalculator()
         self.volatility = volatility or VolatilityAnalyzer()
@@ -57,6 +59,10 @@ class FeatureCalculator:
         # composite 权重仍按新公式（含 0 贡献 basis）—— 等价于 "basis 不参与"。
         self.enable_basis_signal = enable_basis_signal
         self.basis_scale_bps = basis_scale_bps
+        # P1.5 Funding rate 拥挤度信号。funding_scale=2000 → funding=0.0005 对
+        # 应 funding_alpha ≈ -tanh(1.0) ≈ -0.76。关闭等价 0 贡献.
+        self.enable_funding_signal = enable_funding_signal
+        self.funding_scale = funding_scale
         # Per (symbol, timeframe) 的滚动状态。跨 calculate() 调用累积历史。
         # 同 ts 的 update 幂等 → 同 snapshot 多次 calculate 结果一致
         # （守 test_feature_calculation_is_deterministic_for_same_snapshot 契约）。
@@ -133,6 +139,9 @@ class FeatureCalculator:
             mark_price=float(snapshot.mark_price) if snapshot.mark_price is not None else None,
             basis_signal_enabled=self.enable_basis_signal,
             basis_scale_bps=self.basis_scale_bps,
+            funding_rate=float(snapshot.funding_rate) if snapshot.funding_rate is not None else None,
+            funding_signal_enabled=self.enable_funding_signal,
+            funding_scale=self.funding_scale,
         )
         position_sizing = self._position_sizing_context(
             alpha_factors=alpha_factors,
@@ -274,6 +283,9 @@ class FeatureCalculator:
         mark_price: float | None,
         basis_signal_enabled: bool,
         basis_scale_bps: float,
+        funding_rate: float | None,
+        funding_signal_enabled: bool,
+        funding_scale: float,
     ) -> AlphaFactorSet:
         momentum_alpha = FeatureCalculator._clamp(
             (features_15m.momentum_score * 140.0 * 0.65) + (features_1h.momentum_score * 90.0 * 0.35),
@@ -331,18 +343,33 @@ class FeatureCalculator:
                 -1.0,
                 1.0,
             )
+        # P1.5 funding_rate 拥挤度 alpha：funding 高 (多头付费重) → 多头过度拥挤
+        # → funding_alpha 负抑制 long。funding_scale=2000 默认，让 fr=0.0005
+        # 对应 ≈ -0.76。
+        funding_alpha = 0.0
+        if (
+            funding_signal_enabled
+            and funding_rate is not None
+            and funding_scale > 0.0
+        ):
+            funding_alpha = FeatureCalculator._clamp(
+                -math.tanh(funding_rate * funding_scale),
+                -1.0,
+                1.0,
+            )
         liquidity_scale = FeatureCalculator._clamp(0.45 + (liquidity_score * 0.55), 0.25, 1.0)
-        # Composite 权重重分配（P1.4）：basis 引入 0.12 权重，其他因子按比例让出。
-        # 权重总和严格为 1.00: momentum 0.30 + trend 0.20 + regime 0.15 +
-        # multi_tf 0.11 + micro 0.12 + basis 0.12 = 1.00。
+        # Composite 权重重分配（P1.5）：funding 引入 0.07 权重，其他按比例让出。
+        # 严格归一 1.00: momentum 0.28 + trend 0.19 + regime 0.14 + multi_tf 0.10
+        # + micro 0.11 + basis 0.11 + funding 0.07 = 1.00.
         composite_alpha_score = FeatureCalculator._clamp(
             (
-                momentum_alpha * 0.30
-                + trend_alpha * 0.20
-                + regime_alpha * 0.15
-                + multi_timeframe_alpha * 0.11
-                + microstructure_alpha * 0.12
-                + basis_alpha * 0.12
+                momentum_alpha * 0.28
+                + trend_alpha * 0.19
+                + regime_alpha * 0.14
+                + multi_timeframe_alpha * 0.10
+                + microstructure_alpha * 0.11
+                + basis_alpha * 0.11
+                + funding_alpha * 0.07
             )
             * liquidity_scale,
             -1.0,
@@ -364,6 +391,7 @@ class FeatureCalculator:
             multi_timeframe_alpha=multi_timeframe_alpha,
             microstructure_alpha=microstructure_alpha,
             basis_alpha=basis_alpha,
+            funding_alpha=funding_alpha,
             liquidity_scale=liquidity_scale,
             composite_alpha_score=composite_alpha_score,
             conviction_score=conviction_score,
