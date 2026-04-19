@@ -69,6 +69,26 @@ STRATEGY_PROFILE_MANAGED_FIELDS: tuple[str, ...] = (
     "strategy_low_edge_streak_limit",
     "strategy_low_edge_cooldown_seconds",
     "strategy_transient_close_retry_cooldown_seconds",
+    # Independent hedge family — profile 管辖面扩展 (2026-04-19):
+    # 切 profile 时这 9 个字段跟着变, 让 operator/AI 自动切档对 independent
+    # family 真正生效 (之前 profile 只覆盖 mainline directional 字段, 独立双书
+    # 参数在档位切换时不动)。
+    # 范围限定原则:
+    #   - 只纳入"档位风格"字段 (entry/close/scale_in/持仓/确认严格度)
+    #   - 不纳入 family enable 开关, rollout/metrics, catastrophic buffer,
+    #     执行模式 (*_execution_mode), de_risk / liquidity 开关, ai_operating_mode
+    #     (后者是独立的 AI 参与度机制, 与 profile 切档解耦)
+    # 字段本身 independent 专属 (只有 independent engine 读), 但 "切档机制"
+    # 共用: 一次 apply_strategy_profile_payload 同时改 directional+independent 字段。
+    "strategy_hedge_independent_long_entry_threshold",
+    "strategy_hedge_independent_short_entry_threshold",
+    "strategy_hedge_independent_long_close_threshold",
+    "strategy_hedge_independent_short_close_threshold",
+    "strategy_hedge_independent_long_scale_in_threshold",
+    "strategy_hedge_independent_short_scale_in_threshold",
+    "strategy_hedge_independent_long_min_hold_seconds",
+    "strategy_hedge_independent_min_confirm_ticks",
+    "strategy_hedge_independent_min_score_stability_bps",
 )
 
 STRATEGY_PROFILE_SHORT_FIELD_PAIRS: tuple[tuple[str, str], ...] = (
@@ -150,6 +170,19 @@ class StrategyProfilePayload(SchemaBase):
     strategy_low_edge_streak_limit: int
     strategy_low_edge_cooldown_seconds: float
     strategy_transient_close_retry_cooldown_seconds: float
+    # Independent hedge family — profile 管辖面扩展 (2026-04-19):
+    # 默认值与 AATSSettings 同字段对齐 (settings.py:531-548), 保证历史 profile
+    # payload (DB 里存的 StrategyProfileRevision) 缺这些字段时能无损反序列化,
+    # 下一次 strategy_profile_payload_from_settings 时从 settings 读真实值覆盖。
+    strategy_hedge_independent_long_entry_threshold: float = 0.66
+    strategy_hedge_independent_short_entry_threshold: float = 0.66
+    strategy_hedge_independent_long_close_threshold: float = 0.66
+    strategy_hedge_independent_short_close_threshold: float = 0.66
+    strategy_hedge_independent_long_scale_in_threshold: float = 0.70
+    strategy_hedge_independent_short_scale_in_threshold: float = 0.70
+    strategy_hedge_independent_long_min_hold_seconds: float = 300.0
+    strategy_hedge_independent_min_confirm_ticks: int = 2
+    strategy_hedge_independent_min_score_stability_bps: float = 2.0
 
     @model_validator(mode="before")
     @classmethod
