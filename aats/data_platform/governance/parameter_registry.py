@@ -244,6 +244,28 @@ def freeze_parameter_set(
     """将一个 parameter set 冻结.
 
     Returns True 如果成功冻结.
+
+    TODO(rdp-future-freeze-api) Bug 9 forward-compat / R4 roadmap
+    ================================================================
+    当前状态 (2026-04-19):
+      - 本函数零调用方 (grep 过 aats/ scripts/ tests/)
+      - scripts/rdp_freeze_parameter_set.py 已 stub 化 (exit=2)，原 CLI 通道断
+      - API 端点 POST /rdp/parameters/freeze 未实现 (apply_token 白名单预留
+        'freeze' action 但无对应 route)
+      - DB 里 parameter_sets.status='frozen' 从未被写入过
+
+    Bug 9 (2026-04-19) 的 apply 路径让 candidate 直升 released，跳过 frozen。
+    当前 OK 因为 frozen 本身就是 "计划未交付" 状态。
+
+    未来 freeze API 恢复时需要同步改 (grep TODO(rdp-future-freeze-api) 定位):
+      1. active_parameter_apply.apply_approved_recommendation: 改为
+         候选 → (freeze API) frozen → (apply) released 双阶段，保留 frozen
+         作为"审批后冻结"阶段。
+      2. validate_rollback_target 规则 2 已经接受 frozen，Bug 8 的 deprecated
+         时间门控退化为备选路径。
+      3. evidence_bundle.py / baseline_comparison.py 的 status=='frozen' 读端
+         会自动激活。
+      4. rdp_routes.py 实现 POST /rdp/parameters/freeze 端点。
     """
     for ps in registry.get("parameter_sets", []):
         if ps["parameter_set_id"] == parameter_set_id:
