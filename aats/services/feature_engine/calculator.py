@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import math
 from typing import Literal
+
+_LOGGER_CALC = logging.getLogger("aats.feature_engine.calculator")
 
 from aats.bus.base import EventBus
 from aats.events import topics
@@ -170,20 +174,32 @@ class FeatureCalculator:
         sample = self._long_short_poller.latest(symbol)
         if sample is None:
             return None
-        # as_of_ts 可能是 datetime；容错 None 或非 tz-aware
         try:
             cache_ts = sample.ts
             if cache_ts.tzinfo is None:
-                from datetime import timezone as _tz
-                cache_ts = cache_ts.replace(tzinfo=_tz.utc)
+                # cache_ts 由 datetime.fromtimestamp(ms, tz=utc) 构造,必 aware.
+                # 走到这里说明源码被改坏 — 拒绝使用而不是隐式补 UTC.
+                _LOGGER_CALC.warning(
+                    "ls_ratio_cache_ts_naive_rejected symbol=%s", symbol,
+                )
+                return None
             if as_of_ts is not None:
                 if as_of_ts.tzinfo is None:
-                    from datetime import timezone as _tz
-                    as_of_ts = as_of_ts.replace(tzinfo=_tz.utc)
-                age = (as_of_ts - cache_ts).total_seconds()
+                    # R2-M3 审查修复: 原代码把 naive as_of_ts 强加 UTC，会把
+                    # 来自脏数据 (MarketSnapshot.snapshot_ts 缺 tz) 的时刻当 UTC
+                    # 时钟值，staleness 比较结果不可信 → 拒绝而不是静默假设.
+                    _LOGGER_CALC.warning(
+                        "ls_ratio_as_of_ts_naive_rejected symbol=%s", symbol,
+                    )
+                    return None
+                age = abs((as_of_ts - cache_ts).total_seconds())
                 if age > self.ls_ratio_max_staleness_seconds:
                     return None
-        except Exception:
+        except Exception as exc:
+            _LOGGER_CALC.warning(
+                "ls_ratio_staleness_check_error symbol=%s error=%s",
+                symbol, exc,
+            )
             return None
         return sample.ls_ratio
 
@@ -340,9 +356,23 @@ class FeatureCalculator:
     ) -> TimeframeFeatureSet:
         if self.enable_timeseries_smoothing:
             state = self._get_rolling_state(snapshot.symbol, timeframe)
-            # 幂等：同 snapshot_ts 反复 update 覆盖末尾 bar，不推进 EMA/窗口。
-            # test_feature_calculation_is_deterministic_for_same_snapshot 依赖此契约。
-            state.update(kline, ts=snapshot.snapshot_ts)
+            # P0 Bug-1 follow-up: 优先用 kline.ts (K 线自己的时刻)，只有在 ts 缺失
+            # (旧 payload / dict 构造) 时才 fallback 到 snapshot.snapshot_ts. 不能
+            # 直接用 snapshot.snapshot_ts —— 它取所有数据源 max，会被 mark-price /
+            # funding 推送拉到更新，导致同一根未闭合 K 线被当作"新 ts"反复 append
+            # 到 deque、推进 EMA、破坏幂等契约 (M-4 审查发现).
+            if kline.ts is None:
+                # R2-N3 审查修复: fallback 路径静默会重新暴露 M-4 问题 (未闭合 K
+                # 线被 mark/funding 拉 ts → 反复 append). Warning 让 replay/schema
+                # evolution 场景可见; 希望长期 schema 升级到必填 ts.
+                _LOGGER_CALC.warning(
+                    "kline_ts_missing_fallback_to_snapshot_ts symbol=%s timeframe=%s",
+                    snapshot.symbol, timeframe,
+                )
+                kline_ts = snapshot.snapshot_ts
+            else:
+                kline_ts = kline.ts
+            state.update(kline, ts=kline_ts)
             trend_metrics = self.trend.analyze_with_state(state, kline)
             volatility_metrics = self.volatility.analyze_with_state(state, kline)
         else:
@@ -659,22 +689,44 @@ class FeatureEngine:
         self.bus = bus
         self.calculator = calculator
         self._latest_snapshots: dict[str, FeatureSnapshot] = {}
+        # R2-B2 审查修复: NATS push subscription 在 max_ack_pending > 1 下会
+        # 并发调度 handler task. 同 symbol 两条 MARKET_SNAPSHOTS 同时到达时,
+        # FeatureCalculator._get_rolling_state / _get_oi_state 的 setdefault
+        # 式 get-or-create 在 await 切换点存在 double-create 竞态 → 一条 handler
+        # 持有孤儿 state 写入丢失; RollingCandleState.update 的 deque.append /
+        # EMA 读改写也非原子. Per-symbol lock 保证同 symbol 串行 + 跨 symbol 并行,
+        # latency 几乎无影响 (calculate() 是 CPU 毫秒级).
+        self._symbol_locks: dict[str, asyncio.Lock] = {}
 
     def latest_snapshot(self, symbol: str) -> FeatureSnapshot | None:
         return self._latest_snapshots.get(symbol)
 
+    def _lock_for_symbol(self, symbol: str) -> asyncio.Lock:
+        lock = self._symbol_locks.get(symbol)
+        if lock is None:
+            # asyncio.Lock 本身构造也有 loop-binding 风险 (Python 3.10+),
+            # 但此方法只在 running event loop 中被 handle_market_snapshot 调用,
+            # 所以没有和 B-1 同类的启动期绑错问题.
+            lock = asyncio.Lock()
+            self._symbol_locks[symbol] = lock
+        return lock
+
     async def handle_market_snapshot(self, message: dict) -> None:
         envelope = parse_envelope(message)
         market_snapshot = MarketSnapshot.model_validate(envelope.payload)
-        feature_snapshot = self.calculator.calculate(
-            market_snapshot,
-            market_snapshot_ref=envelope.event_id,
-        )
-        self._latest_snapshots[feature_snapshot.symbol] = feature_snapshot
-        await publish_model(
-            bus=self.bus,
-            topic=topics.FEATURE_SNAPSHOTS,
-            key=feature_snapshot.symbol,
-            payload_model=feature_snapshot,
-            source_component="feature_engine",
-        )
+        # R2-B2 同 symbol 串行化. lock 只覆盖 state 写入 + snapshot 发布,
+        # 不影响 envelope 解析和 pydantic validation 的并发性.
+        lock = self._lock_for_symbol(market_snapshot.symbol)
+        async with lock:
+            feature_snapshot = self.calculator.calculate(
+                market_snapshot,
+                market_snapshot_ref=envelope.event_id,
+            )
+            self._latest_snapshots[feature_snapshot.symbol] = feature_snapshot
+            await publish_model(
+                bus=self.bus,
+                topic=topics.FEATURE_SNAPSHOTS,
+                key=feature_snapshot.symbol,
+                payload_model=feature_snapshot,
+                source_component="feature_engine",
+            )

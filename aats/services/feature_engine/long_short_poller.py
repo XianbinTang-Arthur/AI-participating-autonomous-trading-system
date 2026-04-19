@@ -63,7 +63,11 @@ class LongShortRatioPoller:
         self.period = period
         self._cache: dict[str, LongShortRatioSample] = {}
         self._last_error: str | None = None
-        self._stop_event: asyncio.Event = asyncio.Event()
+        # B-1 审查修复: asyncio.Event 必须在 running loop 上构造，否则
+        # stop() 与 run_forever() 内的 wait() 可能绑不同 loop → stop 无效、
+        # shutdown 挂住。_build_market_slice 在同步 build_runtime 路径里调
+        # __init__, 那时通常还没有 running loop. 因此延迟到 run_forever 首行.
+        self._stop_event: asyncio.Event | None = None
 
     def latest(self, symbol: str) -> LongShortRatioSample | None:
         """线程安全读取最新样本（asyncio 单线程内不需要锁，此注释供未来参考）."""
@@ -79,10 +83,23 @@ class LongShortRatioPoller:
         }
 
     async def stop(self) -> None:
+        # B-1 审查修复: _stop_event 在 run_forever 首行惰性创建。若 stop() 在
+        # run_forever 启动前被调用 (极罕见)，构造一个空 event 并 set，下一次
+        # run_forever 检测到已 set 会立即返回.
+        if self._stop_event is None:
+            self._stop_event = asyncio.Event()
         self._stop_event.set()
 
     async def run_forever(self, symbols: Iterable[str]) -> None:
         """后台 loop - 轮询给定 symbols 直到 stop 事件触发."""
+        # B-1 审查修复: 在 running loop 上延迟构造 asyncio.Event. 如果 stop()
+        # 先调了 (init 过早)，_stop_event 已非 None 并 set，本方法会立即退.
+        if self._stop_event is None:
+            self._stop_event = asyncio.Event()
+        if self._stop_event.is_set():
+            log.info("long_short_poller_already_stopped_on_start")
+            return
+
         symbols_tuple = tuple(dict.fromkeys(s.upper() for s in symbols if s))
         if not symbols_tuple:
             log.info("long_short_poller_no_symbols_noop")
@@ -92,21 +109,20 @@ class LongShortRatioPoller:
             "long_short_poller_started symbols=%s period=%s interval=%ss",
             symbols_tuple, self.period, self.poll_interval_seconds,
         )
-        # 首轮立即拉取 (不等 interval); 后续按 interval 周期
-        try:
-            await self._poll_round(symbols_tuple)
-        except Exception as exc:  # best-effort first-round
-            log.warning("long_short_poller_initial_round_failed: %s", exc)
-
+        # B-3 审查修复: 把首轮和主循环的 poll 调用统一到一个路径，loop 开头
+        # 就检查 _stop_event，首轮失败也不会阻塞 shutdown.
+        first_iteration = True
         while not self._stop_event.is_set():
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(),
-                    timeout=self.poll_interval_seconds,
-                )
-                return  # stop 触发，退出
-            except (asyncio.TimeoutError, TimeoutError):
-                pass  # 正常 interval 到期
+            if not first_iteration:
+                try:
+                    await asyncio.wait_for(
+                        self._stop_event.wait(),
+                        timeout=self.poll_interval_seconds,
+                    )
+                    return  # stop 触发，退出
+                except (asyncio.TimeoutError, TimeoutError):
+                    pass  # 正常 interval 到期
+            first_iteration = False
             try:
                 await self._poll_round(symbols_tuple)
             except Exception as exc:  # 单轮失败不终止 loop
@@ -117,19 +133,38 @@ class LongShortRatioPoller:
                 self._last_error = f"{type(exc).__name__}: {exc}"
 
     async def _poll_round(self, symbols: tuple[str, ...]) -> None:
+        # B-2 + R2-M2 审查修复: _last_error 只有在**本轮所有 symbol 都新获得**
+        # sample 时才清。不能用 "cache.get(s) is not None" 判断 —— 那会让
+        # 上一轮已缓存的 symbol 即使本轮失败也保持 cache 非 None，误清 last_error。
+        success_this_round: set[str] = set()
         async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
             for symbol in symbols:
                 try:
                     sample = await self._poll_one(client, symbol)
                     if sample is not None:
+                        # R3-M4 审查修复: 首次成功样本打 info, 后续只在失败时打
+                        # warning. Ops 启动时能看到 ls_alpha 预热期完成的明确信号.
+                        was_first = symbol not in self._cache
                         self._cache[symbol] = sample
-                        self._last_error = None
+                        success_this_round.add(symbol)
+                        if was_first:
+                            log.info(
+                                "long_short_poller_first_sample symbol=%s "
+                                "ls_ratio=%.4f ts=%s",
+                                symbol, sample.ls_ratio, sample.ts.isoformat(),
+                            )
+                    else:
+                        # 静默失败 (code!=0 或 empty data) — 记录可见诊断
+                        self._last_error = f"{symbol}: empty_or_non_zero_code"
                 except Exception as exc:
                     self._last_error = f"{symbol}: {type(exc).__name__}: {exc}"
                     log.warning(
                         "long_short_poller_symbol_failed symbol=%s error=%s",
                         symbol, exc,
                     )
+        if success_this_round == set(symbols):
+            # 仅当本轮所有 symbol 都拿到新 sample 才清错误
+            self._last_error = None
 
     async def _poll_one(
         self, client: httpx.AsyncClient, symbol: str,

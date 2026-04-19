@@ -78,7 +78,26 @@ class BaselineStrategy:
                 if decision_dt is not None and decision_dt.tzinfo is None:
                     decision_dt = decision_dt.replace(tzinfo=timezone.utc)
                 if fallback_dt is not None and decision_dt is not None:
-                    age_seconds = (decision_dt - fallback_dt).total_seconds()
+                    # R2-M1 审查修复: 用 abs() 防 clock skew 漏检。若本地时钟
+                    # 早于 event_store 里的 snapshot_ts (容器时钟不同步 / NATS
+                    # 延迟 + OKX 服务器时间超前本地), signed age < 0, 原比较
+                    # age > max_stale 恒 False → 真陈旧的 fallback 被放行做决策。
+                    # abs 兼顾"时钟偏差异常"(负大) 和"fallback 真过期"(正大) 两种
+                    # 都拒绝交易。若确实是 skew 而非 stale，ops 应看到
+                    # baseline_feature_fallback_clock_skew 告警去修 NTP.
+                    signed_age = (decision_dt - fallback_dt).total_seconds()
+                    age_seconds = abs(signed_age)
+                    if signed_age < -max_stale:
+                        _LOGGER.warning(
+                            "baseline_feature_fallback_clock_skew",
+                            extra={
+                                "decision_id": context.decision_id,
+                                "symbol": context.symbol,
+                                "fallback_event_id": fallback_event.event_id,
+                                "signed_age_seconds": signed_age,
+                                "max_stale_seconds": max_stale,
+                            },
+                        )
                     if age_seconds > max_stale:
                         _LOGGER.error(
                             "baseline_feature_fallback_stale_refused",
@@ -87,14 +106,15 @@ class BaselineStrategy:
                                 "symbol": context.symbol,
                                 "fallback_event_id": fallback_event.event_id,
                                 "fallback_age_seconds": age_seconds,
+                                "signed_age_seconds": signed_age,
                                 "max_stale_seconds": max_stale,
                             },
                         )
                         raise RuntimeError(
                             "Feature snapshot fallback is stale by "
-                            f"{age_seconds:.1f}s (limit={max_stale:.1f}s); "
-                            "refusing baseline decision to avoid trading on "
-                            "outdated market state"
+                            f"{age_seconds:.1f}s |abs| (signed={signed_age:.1f}s, "
+                            f"limit={max_stale:.1f}s); refusing baseline decision "
+                            "to avoid trading on outdated or clock-skewed market state"
                         )
 
             _LOGGER.warning(
@@ -142,12 +162,20 @@ class BaselineStrategy:
         factor_scores: dict[str, float] = {}
         if analysis is not None:
             reason_codes.append(f"mtf_alignment_{analysis.multi_timeframe.directional_alignment}")
+            # R3-M1 审查修复: 4 个新 alpha (basis/funding/oi/ls) 已按 P1.4/1.5/1.6/
+            # 2.7 进入 composite_alpha_score 权重合成, 但之前未纳入 factor_scores
+            # 和 reason_codes → BaselineAssessment 审计日志看不到它们的贡献,
+            # 真金白银决策失败归因和回测对齐都不可能. 现在完整纳入.
             factor_scores = {
                 "momentum_alpha": analysis.alpha_factors.momentum_alpha,
                 "trend_alpha": analysis.alpha_factors.trend_alpha,
                 "regime_alpha": analysis.alpha_factors.regime_alpha,
                 "multi_timeframe_alpha": analysis.alpha_factors.multi_timeframe_alpha,
                 "microstructure_alpha": analysis.alpha_factors.microstructure_alpha,
+                "basis_alpha": analysis.alpha_factors.basis_alpha,
+                "funding_alpha": analysis.alpha_factors.funding_alpha,
+                "oi_alpha": analysis.alpha_factors.oi_alpha,
+                "ls_alpha": analysis.alpha_factors.ls_alpha,
                 "liquidity_scale": analysis.alpha_factors.liquidity_scale,
             }
             reason_codes.extend(self._factor_reason_codes(analysis))
@@ -323,6 +351,21 @@ class BaselineStrategy:
             reason_codes.append("alpha_regime_support")
         if abs(factors.multi_timeframe_alpha) >= 0.15:
             reason_codes.append("alpha_multi_timeframe_support")
+        # R3-M1 审查修复: 新 alpha (basis/funding/oi/ls) 的贡献反映在 reason_codes,
+        # 审计日志里可以看到"basis 在超买时抑制 long / funding 显示多头拥挤"等
+        # 语义可读信号, 方便实盘失败归因. 阈值 0.15 与既有 alpha 一致.
+        if abs(factors.basis_alpha) >= 0.15:
+            side = "contrarian_long" if factors.basis_alpha > 0 else "contrarian_short"
+            reason_codes.append(f"alpha_basis_{side}")
+        if abs(factors.funding_alpha) >= 0.15:
+            side = "funding_long_bias" if factors.funding_alpha > 0 else "funding_short_bias"
+            reason_codes.append(f"alpha_{side}")
+        if abs(factors.oi_alpha) >= 0.15:
+            side = "oi_long_confirming" if factors.oi_alpha > 0 else "oi_short_confirming"
+            reason_codes.append(f"alpha_{side}")
+        if abs(factors.ls_alpha) >= 0.15:
+            side = "ls_contrarian_long" if factors.ls_alpha > 0 else "ls_contrarian_short"
+            reason_codes.append(f"alpha_{side}")
         if analysis.position_sizing.volatility_target_scale < 0.8:
             reason_codes.append("volatility_targeting_reduced_size")
         elif analysis.position_sizing.volatility_target_scale > 1.05:

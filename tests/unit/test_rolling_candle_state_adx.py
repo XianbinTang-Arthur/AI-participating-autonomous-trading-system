@@ -38,7 +38,7 @@ class RollingCandleStateADXTests(unittest.TestCase):
         )
 
     def test_adx_none_before_enough_bars(self) -> None:
-        """样本不足以 atr_window+1 根时 ADX = None (和 roc/atr 一致 not ready)."""
+        """样本不足以 2*atr_window+1 根时 ADX = None (双重 Wilder 需要 29 根)."""
         for i in range(10):
             self.state.update(_bar(o=100, h=101, l=99, c=100), ts=_ts(i))
         ind = self.state.indicators()
@@ -47,21 +47,28 @@ class RollingCandleStateADXTests(unittest.TestCase):
         self.assertIsNone(ind.plus_di)
         self.assertIsNone(ind.minus_di)
 
-    def test_adx_low_for_flat_range(self) -> None:
-        """平稳震荡（无方向）→ ADX 应较低 (< 25)."""
-        # 20 根 close=100 小幅震荡（high=101, low=99）
+    def test_adx_none_when_only_atr_ready_but_below_double_wilder_threshold(self) -> None:
+        """ROC/ATR ready (>=15 根) 但 ADX 仍 None，因为双重 Wilder 需要 29 根.
+        M-1 审查修复: ADX 走 Wilder(Wilder(+DM/-DM/TR)) → 需要 2*14+1 = 29 根."""
         for i in range(20):
-            h, l = 101.0, 99.0
-            self.state.update(_bar(o=100, h=h, l=l, c=100), ts=_ts(i))
+            self.state.update(_bar(o=100, h=101, l=99, c=100), ts=_ts(i))
+        ind = self.state.indicators()
+        self.assertTrue(ind.ready)
+        self.assertIsNotNone(ind.atr)
+        self.assertIsNone(ind.adx, "ADX 不应在 < 2*atr_window+1 根时就 ready")
+
+    def test_adx_low_for_flat_range(self) -> None:
+        """平稳震荡（无方向）→ ADX 应较低 (< 25). 需要 >= 29 根 bar."""
+        for i in range(35):
+            self.state.update(_bar(o=100, h=101, l=99, c=100), ts=_ts(i))
         ind = self.state.indicators()
         self.assertTrue(ind.ready)
         assert ind.adx is not None
         self.assertLess(ind.adx, 25.0, f"flat range ADX too high: {ind.adx}")
 
     def test_adx_high_for_strong_uptrend(self) -> None:
-        """强单向上涨趋势 → ADX > 25, +DI > -DI."""
-        # 30 根阶梯上涨 close: 100, 101, 102, ..., 129
-        for i in range(30):
+        """强单向上涨趋势 → ADX > 25, +DI > -DI. 需要 >= 29 根."""
+        for i in range(40):
             c = 100.0 + i * 1.0
             h = c + 0.5
             l = c - 0.3
@@ -76,9 +83,9 @@ class RollingCandleStateADXTests(unittest.TestCase):
         self.assertGreater(ind.plus_di, ind.minus_di, "+DI should dominate in uptrend")
 
     def test_adx_high_for_strong_downtrend_with_minus_di_dominant(self) -> None:
-        """强单向下跌 → ADX > 25, -DI > +DI."""
-        for i in range(30):
-            c = 130.0 - i * 1.0
+        """强单向下跌 → ADX > 25, -DI > +DI. 需要 >= 29 根."""
+        for i in range(40):
+            c = 140.0 - i * 1.0
             h = c + 0.3
             l = c - 0.5
             o = c + 0.2

@@ -52,13 +52,26 @@ class OKXCandleState:
     volume: Decimal
     confirm: bool
 
-    def to_market_kline(self) -> dict[str, Decimal]:
+    def to_market_kline(self) -> dict[str, Decimal | datetime]:
+        """Serialize for MarketSnapshot.kline_{15m,1h} (KlineBar pydantic ingress).
+
+        返回 dict 混合类型:
+          - "open"/"high"/"low"/"close"/"volume": Decimal
+          - "ts": datetime (P0 Bug-1 follow-up)
+
+        下游 consumer 如果对 kline dict values 做通用数值操作 (e.g. any(v < 0)),
+        必须先过滤掉 "ts" key. KlineBar.model_validate 会按字段类型消化混合值.
+
+        P0 Bug-1 follow-up: ts 让 FeatureCalculator 基于 K 线自身时刻更新
+        RollingCandleState, 避免被 snapshot_ts 拉到更新 (M-4 审查).
+        """
         return {
             "open": self.open_price,
             "high": self.high_price,
             "low": self.low_price,
             "close": self.close_price,
             "volume": self.volume,
+            "ts": self.snapshot_ts,
         }
 
 
@@ -133,6 +146,10 @@ class OKXMarketSnapshotNormalizer:
         self.exchange_name = exchange_name
         self._last_candle_ts: dict[_CandleKey, datetime] = {}
         self._detected_gaps: list[CandleGap] = []
+        # R3-M4 审查修复: 记录已见过首条推送的 (symbol, channel), 用于只在
+        # first-arrival 打 info 日志. ops 启动后能看到"BTC-USDT-SWAP mark-price
+        # 首包已到达"这种明确信号, 诊断订阅是否成功比看 WS ack 更直白.
+        self._first_seen_channels: set[tuple[str, str]] = set()
 
     def drain_detected_gaps(self) -> list[CandleGap]:
         gaps = self._detected_gaps
@@ -213,6 +230,15 @@ class OKXMarketSnapshotNormalizer:
             state.open_interest = self._parse_open_interest(symbol=symbol, payload=data[0])
         else:
             return []
+        # R3-M4 审查修复: 首次到达的 (symbol, channel) 打 info 日志让 ops 能看见
+        # "订阅到底有没有真的推数据". ack 成功不等于数据流进来.
+        _channel_key = (symbol, channel)
+        if _channel_key not in self._first_seen_channels:
+            self._first_seen_channels.add(_channel_key)
+            _logger.info(
+                "okx_channel_first_message_received symbol=%s channel=%s",
+                symbol, channel,
+            )
 
         snapshot = self._build_snapshot(state)
         return [snapshot] if snapshot is not None else []
@@ -401,11 +427,13 @@ class OKXMarketSnapshotNormalizer:
         # 最大值，保证 basis 信号更新也能推动下游 is_fresh 判定。
         if state.mark_price is not None:
             ts_candidates.append(state.mark_price.snapshot_ts)
-        # P1.5 — funding-rate 同理，但 fundingTime 是"本次结算时刻"而非"推送时刻"，
-        # 8h 一次。max() 会让非本次结算 tick 的 snapshot_ts 不被它拉旧（因为 ticker
-        # / candle 的 ts 都会更新）。若单独推 funding → 作为最新一次变更的 ts.
-        if state.funding is not None:
-            ts_candidates.append(state.funding.snapshot_ts)
+        # P1.5 funding-rate: OKX push 的 fundingTime 语义是"本次 funding period 的
+        # 结算时刻" —— 临近结算时它会落在**未来**（比 now 晚几十分钟到 8h）。
+        # 把它加入 max(ts_candidates) 会让 snapshot_ts 被拉到未来，污染下游
+        # is_fresh 判定、Bug-3 fallback staleness 比较、NATS produced_at
+        # (M-3 审查). 因此 funding.snapshot_ts **不参与** snapshot_ts 计算；
+        # 新 funding 数据仍会通过 ticker/candle 的后续推送触发 snapshot_ts 刷新。
+        # (funding.snapshot_ts 作为数据字段仍保存在 state.funding，供审计使用.)
         # P1.6 — open-interest 每 3s 推，加入 ts candidate 保证 OI 变化能推动
         # snapshot_ts 刷新 (下游 is_fresh / feature calculation 连锁触发).
         if state.open_interest is not None:

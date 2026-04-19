@@ -777,6 +777,25 @@ class ApplicationRuntime:
 
     async def stop_background_tasks(self) -> None:
         await self.account_service.stop_private_ws()
+        # R2-B1 审查修复: poller.run_forever 被 background_tasks cancel 只能
+        # 终止正在 await 的协程点；先显式调 stop() 触发 _stop_event，让 poller
+        # 在下一个 while 条件检查处自然退出，避免 cancel 炸在 httpx.AsyncClient
+        # 生命周期内部造成资源回收不确定。
+        # getattr 兜底: 单测用 __new__ 构造 minimal runtime 时字段默认值不写入,
+        # 直接 self.long_short_poller 会 AttributeError (与 abort_hook_service /
+        # portfolio_snapshot_cache 等字段的处理方式一致).
+        _poller = getattr(self, "long_short_poller", None)
+        if _poller is not None:
+            try:
+                await _poller.stop()
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "long_short_poller_stop_failed",
+                    level="warning",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
         for task in self.background_tasks:
             task.cancel()
         for task in self.background_tasks:

@@ -13,12 +13,15 @@ Bug-1 时序平滑修复：baseline 原本只看单根未闭合 K 线，无时�
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Deque, Iterable
 
 from aats.schemas.market import KlineBar
+
+_LOGGER_TS = logging.getLogger("aats.feature_engine.timeseries")
 
 # 默认窗口参数。与 settings 字段同步，覆盖时由 FeatureCalculator 传入。
 DEFAULT_MAX_BARS = 50
@@ -89,6 +92,15 @@ class RollingCandleState:
                 self._bars[-1] = bar  # 覆盖末尾
                 return
             if ts < last_ts:
+                # R2-N2 审查修复: 乱序/回退 ts 静默丢弃 → 诊断盲区. 即使罕见也
+                # 要可见. 频率由 OKX WS 乱序决定; 若上游 bug 会变常态.
+                _LOGGER_TS.warning(
+                    "rolling_state_out_of_order_bar_dropped symbol=%s "
+                    "timeframe=%s last_ts=%s dropped_ts=%s regression_seconds=%s",
+                    self.symbol, self.timeframe,
+                    last_ts.isoformat(), ts.isoformat(),
+                    (last_ts - ts).total_seconds(),
+                )
                 return  # 乱序丢弃
 
         self._bars.append(bar)
@@ -144,20 +156,21 @@ class RollingCandleState:
         atr = sum(trs) / len(trs) if trs else 0.0
         atr_norm = atr / close_now if close_now else 0.0
 
-        # P2.9 — Wilder ADX / +DI / -DI
-        # 使用和 ATR 对齐的 atr_window (默认 14). 实现：
-        #   1. 对全序列算 +DM / -DM / TR (bars[1..n-1], 需要 prev)
-        #   2. 用 atr_window 期 SMA 作为"首期 Wilder smoothed" 初值
-        #   3. 后续按 Wilder 递推 smoothed_t = smoothed_{t-1} - smoothed_{t-1}/N + x_t
-        #   4. 当前期 +DI = 100 × +DM_smoothed / TR_smoothed
-        #   5. DX = 100 × |+DI - -DI| / (+DI + -DI)
-        #   6. ADX = 最后一期 DX (简化版：不对 DX 再做 N 期 Wilder 平滑；保留
-        #      DX 历史会让 state 体积翻倍，且在 14 期窗口下 DX 与 ADX 方向性
-        #      一致，仅数值略尖锐；calibration 任务若发现太敏感可再升级).
+        # P2.9 — Wilder ADX / +DI / -DI (审查 M-1: 双重 Wilder 平滑修复)
+        #
+        # 标准 Wilder ADX 需要两次平滑:
+        #   1. 对 +DM / -DM / TR 做 N 期 Wilder smoothing 得到 +DI / -DI / DX
+        #   2. 对 DX 再做 N 期 Wilder smoothing 得到 ADX
+        # 前一版用"最后一期 DX"代替 ADX，方向正确但数值抖动大得多，ADX 阈值
+        # 25/20 的学术共识基于"双重平滑 DX"，直接套 DX 阈值 → 在 ADX 25 附近
+        # 频繁 flip regime (trend↔uncertain↔range)，实盘反复进出场 (M-1 审查).
+        #
+        # 实现需要 2N+1 根 bar: N 根用于首期 SMA-smoothed +DM/-DM/TR, 下一根开始
+        # 产生第一个 DX, 再 N 期 DX 才能产生 ADX. ready 门槛提高到 2*atr_window+1.
         adx_value: float | None = None
         plus_di: float | None = None
         minus_di: float | None = None
-        if n >= self.atr_window + 1:
+        if n >= 2 * self.atr_window + 1:
             plus_dms: list[float] = []
             minus_dms: list[float] = []
             tr_all: list[float] = []
@@ -176,25 +189,40 @@ class RollingCandleState:
                     abs(float(cur_b.high) - prev_c),
                     abs(float(cur_b.low) - prev_c),
                 ))
-            if len(tr_all) >= self.atr_window:
-                def _wilder_last(series: list[float], period: int) -> float:
-                    if period <= 0:
-                        return 0.0
-                    smoothed = sum(series[:period])
-                    for x in series[period:]:
-                        smoothed = smoothed - (smoothed / period) + x
-                    return smoothed
-                pdm_smoothed = _wilder_last(plus_dms, self.atr_window)
-                mdm_smoothed = _wilder_last(minus_dms, self.atr_window)
-                tr_smoothed = _wilder_last(tr_all, self.atr_window)
-                if tr_smoothed > 0:
-                    plus_di = 100.0 * pdm_smoothed / tr_smoothed
-                    minus_di = 100.0 * mdm_smoothed / tr_smoothed
-                    di_sum = plus_di + minus_di
-                    if di_sum > 0:
-                        adx_value = 100.0 * abs(plus_di - minus_di) / di_sum
-                    else:
-                        adx_value = 0.0
+
+            w = self.atr_window
+            # 首期 Wilder smoothed = 前 w 个的和 (等价于 SMA × w 的 Wilder 惯例)
+            pdm_s = sum(plus_dms[:w])
+            mdm_s = sum(minus_dms[:w])
+            tr_s = sum(tr_all[:w])
+            dx_history: list[float] = []
+            # 从索引 w 开始: 每次推进 Wilder smooth 一步，产出一个 DX
+            for i in range(w, len(tr_all)):
+                pdm_s = pdm_s - (pdm_s / w) + plus_dms[i]
+                mdm_s = mdm_s - (mdm_s / w) + minus_dms[i]
+                tr_s = tr_s - (tr_s / w) + tr_all[i]
+                if tr_s > 0:
+                    di_plus_i = 100.0 * pdm_s / tr_s
+                    di_minus_i = 100.0 * mdm_s / tr_s
+                    di_sum_i = di_plus_i + di_minus_i
+                    dx_i = 100.0 * abs(di_plus_i - di_minus_i) / di_sum_i if di_sum_i > 0 else 0.0
+                else:
+                    dx_i = 0.0
+                dx_history.append(dx_i)
+
+            if len(dx_history) >= w:
+                # Wilder smooth DX → ADX: 首期 SMA + 后续递推
+                adx_s = sum(dx_history[:w]) / w
+                for dx in dx_history[w:]:
+                    adx_s = (adx_s * (w - 1) + dx) / w
+                adx_value = adx_s
+                # +DI / -DI 取最后一期 smoothed 值 (方向指标本就只需"当下")
+                if tr_s > 0:
+                    plus_di = 100.0 * pdm_s / tr_s
+                    minus_di = 100.0 * mdm_s / tr_s
+                else:
+                    plus_di = 0.0
+                    minus_di = 0.0
 
         return RollingIndicators(
             close_ema=self._ema_value,

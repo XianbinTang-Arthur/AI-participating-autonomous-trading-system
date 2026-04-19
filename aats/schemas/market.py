@@ -34,13 +34,24 @@ def _decimalize_nested(value: Any) -> Any:
 
 
 class KlineBar(BaseModel):
-    """Typed K-line (candlestick) bar with backward-compatible dict-style access."""
+    """Typed K-line (candlestick) bar with backward-compatible dict-style access.
+
+    ``ts`` (P0 Bug-1 follow-up): 该 K 线的起始时刻。与 MarketSnapshot.snapshot_ts 不同，
+    snapshot_ts 取所有数据源 max，会被 mark-price / funding 推送拉到更新，但 K 线本身
+    直到下一个 bar 边界才换 ts。FeatureCalculator 必须用 ``kline.ts`` 而不是
+    ``snapshot.snapshot_ts`` 去 update RollingCandleState，否则同一根未闭合 K 线会被当
+    做"新 ts" 反复 append 到 deque，彻底破坏 EMA/ROC/ATR 的幂等契约。
+
+    None 表示旧 payload 反序列化或非 normalizer 构造（单测 dict 形式）——caller 必须能
+    容忍 None 并 fallback 到 snapshot_ts（行为与修复前一致，用作安全边界）。
+    """
 
     open: Decimal
     high: Decimal
     low: Decimal
     close: Decimal
     volume: Decimal = Decimal("0")
+    ts: datetime | None = None
 
     @field_validator("open", "high", "low", "close", "volume", mode="before")
     @classmethod

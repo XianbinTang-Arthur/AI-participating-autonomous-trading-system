@@ -16,10 +16,13 @@ FeatureCalculator 同 snapshot 多次 calculate 一致。
 
 from __future__ import annotations
 
+import logging
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Deque
+
+_LOGGER_OI = logging.getLogger("aats.feature_engine.oi_state")
 
 DEFAULT_OI_MAX_SNAPSHOTS = 60      # ~3 分钟窗口（OKX 每 3s 推一次）
 DEFAULT_OI_EMA_PERIOD = 20         # EMA(20) 作为"基线 OI"
@@ -61,8 +64,16 @@ class OpenInterestState:
         self._timestamps = deque(maxlen=self.max_snapshots)
 
     def update(self, oi: float, *, ts: datetime) -> None:
-        if not isinstance(oi, (int, float)) or oi < 0:
-            return  # 非法样本拒绝（不触发异常，运行稳定优先）
+        # R3-M2 审查修复: 原先只拒绝 oi < 0, 但 oi == 0 也是异常值 (活跃合约
+        # OI 永远 > 0; OKX 推 0 意味着新上合约前瞬间 / 下架 / schema bug),
+        # 接受 0 会让 EMA 被拖死 → oi_delta 在后续正常 OI 恢复时爆炸放大.
+        # 现在 oi <= 0 一起拒绝, 加 warning 暴露 (不 raise 保持运行稳定).
+        if not isinstance(oi, (int, float)) or oi <= 0:
+            _LOGGER_OI.warning(
+                "oi_rejected_non_positive symbol=%s oi=%s ts=%s",
+                self.symbol, oi, ts.isoformat() if ts else None,
+            )
+            return
         oi_float = float(oi)
 
         if self._timestamps:
