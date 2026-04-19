@@ -204,9 +204,10 @@ class TestApplyBug2Bug9SideEffects(unittest.TestCase):
         def _fake_get_session():
             return SessionLocal()
 
-        # 同时 patch load_registry 走 DB (因为这个函数从 parameter_registry.json 读 values)
-        # 但 DB 已有 ps，走 db_load_full_registry 路径即可
-        with patch.object(active_parameter_apply, "get_session", _fake_get_session), \
+        # apply_approved_recommendation 内部从 aats.data_platform.db 局部 import
+        # get_session；patch 必须在那个源头模块上生效才能覆盖 late import。
+        # try_governance_db 同理 patch 真源 (governance._db_util)。
+        with patch("aats.data_platform.db.get_session", _fake_get_session), \
              patch("aats.data_platform.governance._db_util.try_governance_db",
                    return_value=(self.engine, True)):
             return active_parameter_apply.apply_approved_recommendation(
