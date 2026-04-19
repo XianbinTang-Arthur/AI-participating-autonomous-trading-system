@@ -1912,6 +1912,8 @@ class OKXExecutionAdapter(ExchangeAdapter):
                         if abs(cumulative_qty - intent.quantity) <= EPSILON_DECIMAL_12
                         else "PARTIALLY_FILLED"
                     ),
+                    # Path C observability (2026-04-19): 透传 OKX 原始字段白名单
+                    raw_exchange=fill.raw_exchange,
                 )
             )
         return fills
@@ -1962,6 +1964,19 @@ class OKXExecutionAdapter(ExchangeAdapter):
             state_payload.setdefault("maxSlippageToleranceBps", str(intent.max_slippage_tolerance_bps))
         return state_payload
 
+    # Path C observability (2026-04-19): OKX fill row 保留的白名单字段
+    # 用于事后对账 fee_resolver vs OKX 实际费率、maker/taker 身份。
+    # 不包含任何可能含凭证/账户余额的字段 — 纯 exchange-observable 的 fill 元数据。
+    # 参见 docs/review/cost_audit_live_reconciliation_2026_04_19.md §7.2
+    _OKX_FILL_RAW_WHITELIST: tuple[str, ...] = (
+        "feeRate",      # OKX 实际费率字符串，如 "-0.0005"
+        "execType",     # 执行类型 T=taker / M=maker
+        "liquidity",    # 流动性角色别名，部分 OKX 接口用
+        "ordType",      # 下单类型 market/limit/ioc/post_only
+        "posSide",      # 持仓方向 long/short/net
+        "tradeId",      # 交易 ID（原始）
+    )
+
     def _parse_fill_rows(self, payload: dict[str, Any]) -> list[ExchangeFill]:
         rows: list[ExchangeFill] = []
         for row in payload.get("data", []):
@@ -1971,6 +1986,11 @@ class OKXExecutionAdapter(ExchangeAdapter):
                 fill_id = f"{row.get('ordId', 'unknown')}-{fill_ts or 'unknown'}"
             symbol = str(row.get("instId"))
             instrument = self.account_service.instrument_metadata(symbol)
+            # 白名单提取 OKX 原始字段；缺失键跳过，非字符串值转字符串
+            raw_exchange: dict[str, Any] = {}
+            for key in self._OKX_FILL_RAW_WHITELIST:
+                if key in row and row[key] is not None and row[key] != "":
+                    raw_exchange[key] = str(row[key]) if not isinstance(row[key], (int, float)) else row[key]
             rows.append(
                 ExchangeFill(
                     fill_id=fill_id,
@@ -1989,6 +2009,7 @@ class OKXExecutionAdapter(ExchangeAdapter):
                     fee_amount=-to_decimal(row.get("fee", "0")),
                     fee_currency=str(row.get("feeCcy")) if row.get("feeCcy") else None,
                     fill_ts=self._row_timestamp(fill_ts),
+                    raw_exchange=raw_exchange if raw_exchange else None,
                 )
             )
         return rows

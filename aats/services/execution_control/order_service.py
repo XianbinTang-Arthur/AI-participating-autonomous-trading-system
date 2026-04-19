@@ -184,6 +184,9 @@ class ExecutionOrderService:
             raw_payload={
                 "client_order_id": client_order_id,
                 "source_system": "phase2_execution_command_flow",
+                # Path C observability fix (2026-04-19): 顶层落库 execution_style 供事后对账
+                # 参见 docs/review/cost_audit_live_reconciliation_2026_04_19.md §7.2
+                "execution_style": intent.execution_style,
                 "order_state": order_state.model_dump(mode="python") if order_state is not None else None,
             },
         )

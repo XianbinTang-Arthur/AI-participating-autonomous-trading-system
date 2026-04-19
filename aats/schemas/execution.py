@@ -717,6 +717,10 @@ class FillEvent(SchemaBase):
     exchange_timestamp: datetime
     ingestion_timestamp: datetime
     order_status_after_fill: OrderLifecycleStatus | None = None
+    # Path C observability (2026-04-19): 透传 ExchangeFill.raw_exchange 白名单子集
+    # 便于事后对账 fee_resolver vs OKX 实际 feeRate / execType / liquidity
+    # 参见 docs/review/cost_audit_live_reconciliation_2026_04_19.md §7.2
+    raw_exchange: dict[str, Any] | None = None
 
 
 class OrderObligation(SchemaBase):

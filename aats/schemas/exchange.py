@@ -62,6 +62,10 @@ class ExchangeFill(SchemaBase):
     fee_amount: Decimal = Decimal("0")
     fee_currency: str | None = None
     fill_ts: datetime | None = None
+    # Path C observability (2026-04-19): 保留 OKX 原始字段的白名单子集供事后对账
+    # 参见 docs/review/cost_audit_live_reconciliation_2026_04_19.md §7.2
+    # 字段子集: feeRate / execType / liquidity / ordType / posSide / tradeId
+    raw_exchange: dict[str, Any] | None = None
 
 
 class ExchangeAccountConfiguration(SchemaBase):
