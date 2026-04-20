@@ -142,12 +142,49 @@ cmd_pull() {
     local source_head=""
     source_head="$(cd "$WIN_PROJECT" && git rev-parse HEAD)"
 
+    # Branch drift 检查 (本 session 2026-04-20 P1-2 fix):
+    #   sub-agent worktree (isolation: worktree) 可能在 WSL2 遗留 worktree-agent-*
+    #   分支. deploy.sh 不会 reset 分支, 导致构建 Docker image 时用的是 agent 分支
+    #   老版本, 而非 main. 这里显式对齐 — 能自动修就修 (working tree clean 前提),
+    #   否则 loud fail.
+    local wsl_branch=""
+    wsl_branch="$(wsl_run "git -C $WSL_PROJECT symbolic-ref --quiet --short HEAD 2>/dev/null || echo '(detached)'" | tr -d '\r')"
+
+    if [[ -n "$source_branch" && "$wsl_branch" != "$source_branch" ]]; then
+        echo "[sync pull] ⚠ Branch drift: WSL2 on '$wsl_branch', Windows on '$source_branch'"
+        if [[ "$wsl_branch" == worktree-agent-* || "$wsl_branch" == "(detached)" ]]; then
+            echo "[sync pull] 检测到 sub-agent 遗留 branch / detached HEAD, 自动切回 $source_branch"
+            # 工作区已预检 clean, 安全切换
+            if ! wsl_run "git -C $WSL_PROJECT checkout '$source_branch' 2>/dev/null || git -C $WSL_PROJECT checkout -b '$source_branch' FETCH_HEAD 2>/dev/null || true"; then
+                echo "[ERROR] 无法自动切回 $source_branch; 手动执行:" >&2
+                echo "  wsl -d $DISTRO -- bash -c 'cd $WSL_PROJECT && git checkout $source_branch'" >&2
+                exit 2
+            fi
+        else
+            echo "[ERROR] WSL2 分支 '$wsl_branch' 非预期 (Windows 期望 '$source_branch')" >&2
+            echo "[ERROR] 若想强制对齐, 手动执行:" >&2
+            echo "  wsl -d $DISTRO -- bash -c 'cd $WSL_PROJECT && git checkout $source_branch'" >&2
+            echo "[ERROR] 本次同步终止以免覆盖有效分支数据" >&2
+            exit 2
+        fi
+    fi
+
     if [[ -n "$source_branch" ]]; then
         echo "[sync pull] 从 $WIN_PROJECT_WSL 同步分支 $source_branch @ $source_head 到 $WSL_PROJECT"
         wsl_run "cd $WSL_PROJECT && git fetch '$WIN_PROJECT_WSL' '$source_branch' && if git show-ref --verify --quiet refs/heads/'$source_branch'; then git checkout '$source_branch'; else git checkout -b '$source_branch' FETCH_HEAD; fi && git merge --ff-only FETCH_HEAD"
     else
         echo "[sync pull] 从 $WIN_PROJECT_WSL 同步 detached HEAD $source_head 到 $WSL_PROJECT"
         wsl_run "cd $WSL_PROJECT && git fetch '$WIN_PROJECT_WSL' '$source_head' && git checkout --detach FETCH_HEAD"
+    fi
+
+    # 同步后验证 HEAD 一致
+    local wsl_head_after=""
+    wsl_head_after="$(wsl_run "git -C $WSL_PROJECT rev-parse HEAD" | tr -d '\r')"
+    if [[ "$wsl_head_after" != "$source_head" ]]; then
+        echo "[ERROR] 同步后 WSL2 HEAD ($wsl_head_after) 不等于 Windows HEAD ($source_head)" >&2
+        echo "[ERROR] 可能是 merge 非 ff 或 fetch 失败; 手动诊断:" >&2
+        echo "  bash scripts/sync_to_wsl2.sh check" >&2
+        exit 2
     fi
 
     echo

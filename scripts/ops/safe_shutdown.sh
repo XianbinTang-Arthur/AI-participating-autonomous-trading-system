@@ -265,30 +265,17 @@ run_preflight() {
         preflight_abort_if_money=1
     fi
 
-    # 写入 snapshot 数据 (内存中, 最后落盘)
-    preflight_json=$(cat <<EOF
-{
-  "session_ts": "$NOW_UTC",
-  "script_version": "$SCRIPT_VERSION",
-  "reason": "$REASON",
-  "dry_run": $DRY_RUN,
-  "force_with_money": $FORCE_WITH_MONEY,
-  "skip_preflight": $SKIP_PREFLIGHT,
-  "preserve_postgres": $PRESERVE_POSTGRES,
-  "preflight": {
-    "postgres_reachable": $pg_ok,
-    "running_containers": $running_count,
-    "open_orders": $open_orders,
-    "positions_count": $positions_count,
-    "position_notional_usd": "$position_notional_usd",
-    "in_flight_orders": $in_flight_orders,
-    "recent_non_hold_5m": $recent_non_hold,
-    "ai_operating_mode": "$runtime_mode",
-    "any_money_at_risk": $any_money
-  }
-}
-EOF
-)
+    # 导出字段给 Phase 3 的 Python snapshot writer.
+    # 不在这里拼 JSON — 避免 bash heredoc 与 Python 双写冲突 (本 session 2026-04-20 P1-1 fix).
+    export _PFL_PG_OK="$pg_ok"
+    export _PFL_RUNNING_COUNT="$running_count"
+    export _PFL_OPEN_ORDERS="$open_orders"
+    export _PFL_POSITIONS_COUNT="$positions_count"
+    export _PFL_POSITION_NOTIONAL_USD="$position_notional_usd"
+    export _PFL_IN_FLIGHT_ORDERS="$in_flight_orders"
+    export _PFL_RECENT_NON_HOLD="$recent_non_hold"
+    export _PFL_RUNTIME_MODE="$runtime_mode"
+    export _PFL_ANY_MONEY="$any_money"
 
     if [[ $preflight_abort_if_money -eq 1 ]]; then
         err "Preflight 发现资金/实盘风险, 且未加 --force-with-money"
@@ -347,15 +334,39 @@ run_phase_2() {
     fi
 
     if container_running "$POSTGRES_CONTAINER"; then
-        if [[ ${DRY_RUN} -eq 1 ]]; then
-            log "  [DRY-RUN] Postgres graceful stop (pg_ctl fast, timeout=${TIMEOUT_POSTGRES}s)"
-        else
-            log "  Postgres graceful stop (pg_ctl fast, timeout=${TIMEOUT_POSTGRES}s)"
-            # pg_ctl fast 模式: 等 active txn 完成
-            wsl_docker exec "$POSTGRES_CONTAINER" su -c "pg_ctl stop -m fast -w -t $TIMEOUT_POSTGRES -D /var/lib/postgresql/data" postgres >/dev/null 2>&1 || warn "Postgres pg_ctl stop 失败, 继续 docker stop"
-        fi
-        stop_container "$POSTGRES_CONTAINER" "$TIMEOUT_POSTGRES"
+        stop_postgres_gracefully
     fi
+}
+
+# Postgres 优雅停机 (本 session 2026-04-20 P2-3 fix):
+#   旧做法: docker exec ... su -c "pg_ctl stop ..." postgres   ❌
+#     问题: 官方 postgres 镜像用 gosu, 没有 su 可用; 命令直接失败
+#           导致走 fallback docker stop (SIGTERM → smart shutdown 等 client 断开, 慢).
+#   新做法: docker stop --signal=SIGINT --time=$TIMEOUT_POSTGRES
+#     PostgreSQL 信号约定:
+#       SIGTERM  smart   等所有 active session 退出 (可能卡到 timeout → SIGKILL)
+#       SIGINT   fast    等当前 txn 结束, 主动踢 idle session, 安全回滚
+#       SIGQUIT  immed   强制退出, WAL 可能不一致
+#     SIGINT 是正解: 等当前 txn 但不等 idle 连接; 落 WAL 干净.
+#     docker stop 的 --time 超时后自动 SIGKILL, 所以无需我们自己 fallback kill.
+stop_postgres_gracefully() {
+    if [[ ${DRY_RUN} -eq 1 ]]; then
+        log "  [DRY-RUN] docker stop --signal=SIGINT --time=${TIMEOUT_POSTGRES} $POSTGRES_CONTAINER"
+        return 0
+    fi
+    log "  Postgres graceful stop (SIGINT=fast, timeout=${TIMEOUT_POSTGRES}s)"
+    if wsl_docker stop --signal=SIGINT --time="$TIMEOUT_POSTGRES" "$POSTGRES_CONTAINER" >/dev/null 2>&1; then
+        log "    ✓ $POSTGRES_CONTAINER stopped gracefully (SIGINT fast shutdown)"
+        return 0
+    fi
+    warn "$POSTGRES_CONTAINER SIGINT 停机超时 (${TIMEOUT_POSTGRES}s), 升级 kill"
+    if wsl_docker kill "$POSTGRES_CONTAINER" >/dev/null 2>&1; then
+        FORCE_KILL_LIST+=("$POSTGRES_CONTAINER")
+        return 0
+    fi
+    FAILED_STOP_LIST+=("$POSTGRES_CONTAINER")
+    err "$POSTGRES_CONTAINER kill 也失败, 数据层可能有风险, 需人工检查 WAL"
+    return 1
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -367,7 +378,8 @@ run_phase_3() {
 
     local still_running
     still_running=$(wsl_docker ps --format '{{.Names}}' 2>/dev/null | grep '^aats-' || true)
-    local still_count=$(echo "$still_running" | grep -c '.' || true)
+    local still_count
+    still_count=$(printf '%s\n' "$still_running" | grep -c '.' || true)
 
     if [[ -n "$still_running" ]]; then
         if [[ ${PRESERVE_POSTGRES} -eq 1 && "$still_running" == "$POSTGRES_CONTAINER" ]]; then
@@ -379,62 +391,141 @@ run_phase_3() {
         log "  ✓ 所有 aats-* 容器已停"
     fi
 
-    # 写 snapshot
     mkdir -p "$SNAPSHOT_DIR" 2>/dev/null || true
-    local force_kill_json="[]"
-    local failed_json="[]"
-    local warnings_json="[]"
-    if [[ ${#FORCE_KILL_LIST[@]} -gt 0 ]]; then
-        force_kill_json='["'$(IFS='","'; echo "${FORCE_KILL_LIST[*]}")'"]'
-    fi
-    if [[ ${#FAILED_STOP_LIST[@]} -gt 0 ]]; then
-        failed_json='["'$(IFS='","'; echo "${FAILED_STOP_LIST[*]}")'"]'
-    fi
-    if [[ ${#WARNINGS[@]} -gt 0 ]]; then
-        # Escape quotes in warnings
-        local w_escaped=()
-        for w in "${WARNINGS[@]}"; do
-            w_escaped+=("${w//\"/\\\"}")
+
+    # 本 session 2026-04-20 P1-1 fix:
+    #   旧做法: 所有字段通过 export 传给 Python.
+    #   问题 1: Windows git-bash 把 bash UTF-8 字符串在 export 时走 ANSI code page (GBK),
+    #           python.exe 拿到已经 mojibake 的字节, 写入 JSON 仍是 mojibake.
+    #   问题 2: python3 在 Windows git-bash PATH 里叫 python, 找不到会 fallback 失败.
+    #
+    #   新做法: bash 把字段逐行写入 UTF-8 临时文件 (bash printf 是字节透明),
+    #           Python 打开文件时用 encoding='utf-8' → 一次编码, 不经过 env ACP 转换.
+    local scratch="$SNAPSHOT_DIR/.scratch_${SESSION_TS}.txt"
+    {
+        printf 'SNAP_FILE=%s\n'           "$SNAPSHOT_FILE"
+        printf 'SESSION_TS=%s\n'          "$NOW_UTC"
+        printf 'VERSION=%s\n'             "$SCRIPT_VERSION"
+        printf 'REASON=%s\n'              "$REASON"
+        printf 'DRY_RUN=%s\n'             "$DRY_RUN"
+        printf 'FORCE_WITH_MONEY=%s\n'    "$FORCE_WITH_MONEY"
+        printf 'SKIP_PREFLIGHT=%s\n'      "$SKIP_PREFLIGHT"
+        printf 'PRESERVE_POSTGRES=%s\n'   "$PRESERVE_POSTGRES"
+        printf 'STILL_RUNNING=%s\n'       "$still_running"
+        printf 'STILL_COUNT=%s\n'         "$still_count"
+        printf 'PFL_PG_OK=%s\n'           "${_PFL_PG_OK:-0}"
+        printf 'PFL_RUNNING_COUNT=%s\n'   "${_PFL_RUNNING_COUNT:-0}"
+        printf 'PFL_OPEN_ORDERS=%s\n'     "${_PFL_OPEN_ORDERS:-0}"
+        printf 'PFL_POSITIONS_COUNT=%s\n' "${_PFL_POSITIONS_COUNT:-0}"
+        printf 'PFL_POSITION_NOTIONAL_USD=%s\n' "${_PFL_POSITION_NOTIONAL_USD:-0.00}"
+        printf 'PFL_IN_FLIGHT_ORDERS=%s\n' "${_PFL_IN_FLIGHT_ORDERS:-0}"
+        printf 'PFL_RECENT_NON_HOLD=%s\n' "${_PFL_RECENT_NON_HOLD:-0}"
+        printf 'PFL_RUNTIME_MODE=%s\n'    "${_PFL_RUNTIME_MODE:-unknown}"
+        printf 'PFL_ANY_MONEY=%s\n'       "${_PFL_ANY_MONEY:-0}"
+        for item in "${FORCE_KILL_LIST[@]:-}"; do
+            [[ -z "$item" ]] && continue
+            printf 'FORCE_KILL_ITEM=%s\n' "$item"
         done
-        warnings_json='["'$(IFS='","'; echo "${w_escaped[*]}")'"]'
+        for item in "${FAILED_STOP_LIST[@]:-}"; do
+            [[ -z "$item" ]] && continue
+            printf 'FAILED_STOP_ITEM=%s\n' "$item"
+        done
+        for item in "${WARNINGS[@]:-}"; do
+            [[ -z "$item" ]] && continue
+            printf 'WARNING_ITEM=%s\n' "$item"
+        done
+    } > "$scratch"
+
+    # Python 解析器自动探测 (Windows git-bash: 'python'; WSL2/Linux: 'python3')
+    local py_exe=""
+    for candidate in python3 python py; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            if [[ "$candidate" == "py" ]]; then
+                py_exe="py -3"
+            else
+                py_exe="$candidate"
+            fi
+            break
+        fi
+    done
+    if [[ -z "$py_exe" ]]; then
+        warn "未找到 python/python3, snapshot 仅 stdout 打印"
+        cat "$scratch"
+        rm -f "$scratch"
+        return 0
     fi
 
-    cat > "$SNAPSHOT_FILE" 2>/dev/null <<EOF
-$preflight_json,
-"phase1_2_result": {
-    "still_running_after": "$still_running",
-    "still_running_count": $still_count,
-    "force_kill_list": $force_kill_json,
-    "failed_stop_list": $failed_json,
-    "warnings": $warnings_json
-}
-}
-EOF
+    $py_exe - "$scratch" <<'PYEOF'
+import json, os, sys
 
-    # 上面 JSON 拼接粗糙, 修正为合法 JSON
-    python3 <<PYEOF 2>/dev/null || log "  (snapshot JSON 手工拼接失败, 见 stdout)"
-import json, os
-head = '''$preflight_json'''
-tail = {
+scratch = sys.argv[1]
+data = {}
+arrays = {"FORCE_KILL_ITEM": [], "FAILED_STOP_ITEM": [], "WARNING_ITEM": []}
+
+with open(scratch, "r", encoding="utf-8") as f:
+    for line in f:
+        line = line.rstrip("\r\n")
+        if not line or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        if k in arrays:
+            arrays[k].append(v)
+        else:
+            data[k] = v
+
+def i(k, d=0):
+    try:
+        return int(data.get(k, d) or d)
+    except ValueError:
+        return d
+
+snap = {
+    "session_ts": data.get("SESSION_TS", ""),
+    "script_version": data.get("VERSION", ""),
+    "reason": data.get("REASON", ""),
+    "dry_run": i("DRY_RUN"),
+    "force_with_money": i("FORCE_WITH_MONEY"),
+    "skip_preflight": i("SKIP_PREFLIGHT"),
+    "preserve_postgres": i("PRESERVE_POSTGRES"),
+    "preflight": {
+        "postgres_reachable": i("PFL_PG_OK"),
+        "running_containers": i("PFL_RUNNING_COUNT"),
+        "open_orders": i("PFL_OPEN_ORDERS"),
+        "positions_count": i("PFL_POSITIONS_COUNT"),
+        "position_notional_usd": data.get("PFL_POSITION_NOTIONAL_USD", "0.00"),
+        "in_flight_orders": i("PFL_IN_FLIGHT_ORDERS"),
+        "recent_non_hold_5m": i("PFL_RECENT_NON_HOLD"),
+        "ai_operating_mode": data.get("PFL_RUNTIME_MODE", "unknown"),
+        "any_money_at_risk": i("PFL_ANY_MONEY"),
+    },
     "phase1_2_result": {
-        "still_running_after": """$still_running""".strip(),
-        "still_running_count": $still_count,
-        "force_kill_list": ${force_kill_json},
-        "failed_stop_list": ${failed_json},
-        "warnings": ${warnings_json}
-    }
+        "still_running_after": data.get("STILL_RUNNING", "").strip(),
+        "still_running_count": i("STILL_COUNT"),
+        "force_kill_list": arrays["FORCE_KILL_ITEM"],
+        "failed_stop_list": arrays["FAILED_STOP_ITEM"],
+        "warnings": arrays["WARNING_ITEM"],
+    },
 }
+
+path = data.get("SNAP_FILE", "")
+if not path:
+    print("  WARN: SNAP_FILE missing, dumping snapshot to stdout")
+    print(json.dumps(snap, indent=2, ensure_ascii=False))
+    sys.exit(0)
 try:
-    d = json.loads(head)
-    d.update(tail)
-    path = "$SNAPSHOT_FILE"
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(d, f, indent=2, ensure_ascii=False)
-    print(f"  ✓ Snapshot: {path}")
-except Exception as e:
-    print(f"  WARN snapshot failed: {e}")
+        json.dump(snap, f, indent=2, ensure_ascii=False)
+    print(f"  Snapshot: {path}")
+except Exception as exc:
+    print(f"  WARN snapshot write failed: {exc}")
+    print(json.dumps(snap, indent=2, ensure_ascii=False))
 PYEOF
+    local snap_rc=$?
+    rm -f "$scratch"
+    if [[ $snap_rc -ne 0 ]]; then
+        warn "Snapshot Python writer 异常退出 ($snap_rc)"
+    fi
 
     log ""
     log "════════════════════════════════════════"
