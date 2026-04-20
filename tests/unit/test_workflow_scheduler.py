@@ -634,3 +634,99 @@ def test_format_schedule_custom_frequency_string() -> None:
 
     schedule = {"enabled": True, "frequency": "custom", "interval_minutes": 5}
     assert format_schedule(schedule) == "custom every 5min (UTC aligned)"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# P0-c Option A (2026-04-20): candles_rolling_15m workflow
+# 验证 configs/rdp_workflows/candles_rolling_15m.json 被 scheduler 正确识别,
+# slot 对齐到 15min 边界 (与 microstructure_silver_15m peer), 并且 schedule
+# 配置 / 命令字段符合 "只 collect, 不跑 Gold/Gap/Funding" 的设计.
+# 参见 docs/review/p0c_candles_silver_stale_diagnosis_2026_04_20.md §4 Option A
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def _load_workflow_config(name: str) -> dict:
+    """Helper: load configs/rdp_workflows/<name>.json as dict."""
+    root = Path(__file__).resolve().parents[2]
+    path = root / "configs" / "rdp_workflows" / f"{name}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_candles_rolling_15m_config_is_valid_schedule() -> None:
+    """新 workflow 配置文件 schedule 字段能被 get_workflow_schedule 接受."""
+    from aats.data_platform.operations.workflow_scheduler import get_workflow_schedule
+
+    cfg = _load_workflow_config("candles_rolling_15m")
+    schedule = get_workflow_schedule(cfg)
+    assert schedule is not None
+    assert schedule["enabled"] is True
+    assert schedule["frequency"] == "custom"
+    assert schedule["interval_minutes"] == 15
+
+
+def test_candles_rolling_15m_slot_aligns_to_microstructure_cadence() -> None:
+    """candles_rolling_15m 与 microstructure_silver_15m 落在同一 15min slot.
+
+    设计意图: 两个 workflow 同 cadence, 为路线 A phase 0 提供 15min 同步的
+    OHLC + microstructure 数据对齐. 本测试锁定这个对齐属性.
+    """
+    from aats.data_platform.operations.workflow_scheduler import _latest_slot_for_schedule
+
+    cfg = _load_workflow_config("candles_rolling_15m")
+    micro_cfg = _load_workflow_config("microstructure_silver_15m")
+
+    now = datetime(2026, 4, 20, 3, 37, 42, tzinfo=UTC)  # 与 P0-a 实施时刻对齐
+    candles_slot = _latest_slot_for_schedule(cfg["schedule"], now=now)
+    micro_slot = _latest_slot_for_schedule(micro_cfg["schedule"], now=now)
+
+    assert candles_slot == micro_slot, (
+        f"candles_rolling_15m slot {candles_slot} 与 microstructure {micro_slot} 不同步; "
+        f"两者应在 15min 边界严格对齐, 否则 OHLC/microstructure 对比分析会出现 T±15min 错位."
+    )
+    # 具体值: 03:37:42 应落到 03:30:00
+    assert candles_slot == datetime(2026, 4, 20, 3, 30, tzinfo=UTC)
+
+
+def test_candles_rolling_15m_command_excludes_gold_gap_funding() -> None:
+    """rolling 只做 collect, Gold/Gap/Funding 留给 data_maintenance.
+
+    断言 command 含 --no-gold / --no-gap-check / --no-funding, 并限制 --timeframes 15m.
+    保留这个测试防止后续无意改回"全量 pipeline 每 15min 跑一次"导致:
+      - 每天多 2304 次 Gold 重建 (vs 4 次, 576x 冗余)
+      - funding 8h cadence 的 OKX REST 每 15min 拉一次 (64x 冗余)
+    """
+    cfg = _load_workflow_config("candles_rolling_15m")
+    assert len(cfg["tasks"]) == 1
+    cmd = cfg["tasks"][0]["command"]
+    assert "rdp_run_daily_ingest.py" in cmd
+    assert "--timeframes 15m" in cmd
+    assert "--no-gold" in cmd
+    assert "--no-gap-check" in cmd
+    assert "--no-funding" in cmd
+
+
+def test_candles_rolling_15m_task_allows_failure() -> None:
+    """单次 15min tick 失败不应阻塞 daily 主链路, 与 microstructure_silver_15m 一致."""
+    cfg = _load_workflow_config("candles_rolling_15m")
+    task = cfg["tasks"][0]
+    assert task["allow_failure"] is True
+    assert task["enabled"] is True
+
+
+def test_rdp_run_daily_ingest_has_no_funding_flag() -> None:
+    """--no-funding flag 必须存在 — candles_rolling_15m command 依赖它."""
+    import subprocess
+    import sys
+
+    root = Path(__file__).resolve().parents[2]
+    script = root / "scripts" / "rdp_run_daily_ingest.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--help"],
+        capture_output=True, text=True, timeout=30,
+    )
+    # --help 退出码 0
+    assert result.returncode == 0, f"--help exit {result.returncode}: {result.stderr}"
+    assert "--no-funding" in result.stdout, (
+        "rdp_run_daily_ingest.py --no-funding flag 缺失; "
+        "candles_rolling_15m workflow 依赖此 flag 跳过重复 funding 拉取."
+    )

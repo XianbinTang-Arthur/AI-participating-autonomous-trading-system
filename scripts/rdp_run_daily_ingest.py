@@ -109,6 +109,13 @@ def parse_args() -> argparse.Namespace:
         help="跳过 Gap 检测",
     )
     p.add_argument(
+        # 2026-04-20 P0-c Option A 新增: candles_rolling_15m workflow 每 15min
+        # 只需要 candles, 不需要 funding (funding 由 data_maintenance 日批负责).
+        "--no-funding", action="store_true",
+        help="跳过 Funding 增量采集 (2026-04-20 P0-c: 给 candles_rolling_15m "
+             "workflow 用, 避免 15min cadence 重复拉 funding)",
+    )
+    p.add_argument(
         "--dry-run", action="store_true",
         help="仅打印计划, 不实际执行",
     )
@@ -361,6 +368,7 @@ def main() -> int:
     print(f"  Max pages         : {args.max_pages}")
     print(f"  Build Gold        : {not args.no_gold}")
     print(f"  Detect Gaps       : {not args.no_gap_check}")
+    print(f"  Ingest Funding    : {not args.no_funding}")
     if args.dry_run:
         print("  [DRY RUN MODE]")
     print("=" * 70)
@@ -382,16 +390,21 @@ def main() -> int:
     log.info("[1/4] Candles done: %d ok, %d failed", c_ok, c_fail)
 
     # ── 2. Funding 增量采集 ──
-    log.info("")
-    log.info("[2/4] Ingesting funding...")
-    f_ok, f_fail = _ingest_funding(
-        settings,
-        symbols=funding_symbols,
-        max_pages=args.max_pages,
-        dry_run=args.dry_run,
-    )
-    overall_failure += f_fail
-    log.info("[2/4] Funding done: %d ok, %d failed", f_ok, f_fail)
+    f_ok, f_fail = 0, 0  # 默认 0, 防止 --no-funding 时 summary 引用未绑定变量
+    if not args.no_funding:
+        log.info("")
+        log.info("[2/4] Ingesting funding...")
+        f_ok, f_fail = _ingest_funding(
+            settings,
+            symbols=funding_symbols,
+            max_pages=args.max_pages,
+            dry_run=args.dry_run,
+        )
+        overall_failure += f_fail
+        log.info("[2/4] Funding done: %d ok, %d failed", f_ok, f_fail)
+    else:
+        log.info("")
+        log.info("[2/4] Skipped funding ingest (--no-funding)")
 
     # ── 3. Gold 构建 ──
     if not args.no_gold and processed_pairs:
@@ -428,7 +441,10 @@ def main() -> int:
     print(f"  Daily ingest summary | {elapsed:.0f}s")
     print("=" * 70)
     print(f"  Candles : {c_ok} ok, {c_fail} failed")
-    print(f"  Funding : {f_ok} ok, {f_fail} failed")
+    if args.no_funding:
+        print("  Funding : skipped (--no-funding)")
+    else:
+        print(f"  Funding : {f_ok} ok, {f_fail} failed")
     if overall_failure == 0:
         print("  Status  : SUCCESS")
         return 0

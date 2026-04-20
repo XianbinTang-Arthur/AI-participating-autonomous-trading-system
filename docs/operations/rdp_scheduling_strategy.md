@@ -33,7 +33,9 @@ aats/data_platform/operations/
 
 | Workflow | 调度建议 | 说明 |
 |----------|---------|------|
-| `data_maintenance` | 每日 04:00 UTC | **日批 OKX 增量采集** + 数据缺口检测 + Gold 层构建 + 索引重建 |
+| `data_maintenance` | 每日 04:00 UTC | **日批 OKX 增量采集** (全 timeframe, safety net) + 数据缺口检测 + Gold 层构建 + 索引重建 |
+| `candles_rolling_15m` | 每 15min (custom) | **15m candles intra-day 新鲜度** (OHLC 对照基线); 只 collect, 不跑 Gold/Gap/Funding |
+| `microstructure_silver_15m` | 每 15min (custom) | Microstructure Silver ETL (OFI/TFI/orderbook metrics); 与 candles_rolling_15m 同 cadence 对齐 |
 | `governance_cycle` | 每日 07:00 UTC | 质量监控、产物验证、轮次索引刷新 |
 | `research_cycle` | 每周日 08:00 UTC | 研究轮次、归因分析、执行真实性评估 |
 | `decision_cycle` | 每周（研究后）或按需 | 决策轮次、可靠性检查、观察检查 |
@@ -100,6 +102,21 @@ schtasks /create /tn "RDP_DecisionCycle" /tr "python scripts/rdp_run_scheduled_w
 | 实盘交易引擎 | 实时 | ✅ 是 — **但走 OKX websocket, 不读 RDP 数据** |
 
 **结论**: 没有任何 RDP 消费方需要 60s tick 频率, daemon 是为不存在的 use case 服务的。
+
+### 2026-04-20 更新: 路线 A research phase 0 引入 intra-day 消费方
+
+**背景**: 2026-04-20 P0-c 诊断 (`docs/review/p0c_candles_silver_stale_diagnosis_2026_04_20.md`) 发现 `silver.market_*_candles_15m` 停更 19+ 小时, 根因是 `data_maintenance` daily 04:00 UTC 的 schedule 按设计生效 — 这不是 bug, 是 2026-04-07 的 scheduling 假设在当时对所有消费方都成立。
+
+**新假设失效**: 2026-04-20 启动的路线 A research phase 0 需要把 OHLC 作为 microstructure signal 的对照基线, 这是一个**新引入的 intra-day 消费方**, 不符合原假设"所有消费方都是 daily/weekly"。
+
+**修复 (Option A, 本次)**:
+
+1. 新增 `configs/rdp_workflows/candles_rolling_15m.json`, `frequency=custom`, `interval_minutes=15`, 与 `microstructure_silver_15m` peer cadence 对齐
+2. 本 workflow 只跑 `rdp_run_daily_ingest.py --timeframes 15m --no-gold --no-gap-check --no-funding` — 纯 collect, 其他步骤仍由 `data_maintenance` 日批负责
+3. `data_maintenance` 配置 command 保持不变 (UPSERT 幂等, 日批 15m 作为 rolling 长时间 outage 的 safety net)
+4. `rdp_run_daily_ingest.py` 新增 `--no-funding` flag 避免 15min cadence 下重复拉 funding (funding OKX 侧本就 8h 一次)
+
+**判断边界**: 若未来再引入新 intra-day 消费方 (比如某个 1m tf 特征), 复制同一模板新增 `candles_rolling_1m.json` 即可; 不要把 `data_maintenance` schedule 改成 intra-day (会带来 Gold/Gap/index 冗余重跑)。
 
 ### 新方案: `rdp_run_daily_ingest.py`
 

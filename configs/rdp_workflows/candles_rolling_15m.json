@@ -1,0 +1,20 @@
+{
+  "workflow": "candles_rolling_15m",
+  "description": "P0-c (2026-04-20 诊断 docs/review/p0c_candles_silver_stale_diagnosis_2026_04_20.md): 15m candles rolling ingest, 每 15min 从 OKX REST 增量拉 BTC/ETH spot+swap 的 15m K 线, 给路线 A research phase 0 的 OHLC 对照基线提供 intra-day 新鲜度 (microstructure silver 15m 的 peer)。不跑 Gold/Gap/Funding/index — 这些由 data_maintenance 日批负责, 避免重复工作。allow_failure=true 单次失败不阻塞 daily 主链路。",
+  "schedule_hint": "every 15 minutes",
+  "schedule": {
+    "enabled": true,
+    "frequency": "custom",
+    "interval_minutes": 15
+  },
+  "tasks": [
+    {
+      "name": "rolling_ingest_15m",
+      "description": "只拉 15m candles (BTC-USDT, ETH-USDT, BTC-USDT-SWAP, ETH-USDT-SWAP), 跳过 Gold 重建 / Gap 检测 / Funding 拉取 — 这些留给 data_maintenance 每日 04:00 UTC 批量处理。UPSERT 幂等, 失败下次 15min 自动补。",
+      "command": "python scripts/rdp_run_daily_ingest.py --timeframes 15m --no-gold --no-gap-check --no-funding",
+      "timeout_seconds": 300,
+      "enabled": true,
+      "allow_failure": true
+    }
+  ]
+}
