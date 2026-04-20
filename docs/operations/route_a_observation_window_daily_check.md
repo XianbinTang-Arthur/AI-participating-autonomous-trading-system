@@ -44,6 +44,21 @@
 
 ## 2. Daily check 协议
 
+### 2.0 DB matrix (operator 必读)
+
+脚本查**两个 DB**, 各司其职:
+
+| DB | 脚本用于 | 主要查询 |
+|---|---|---|
+| `aats_research` | Silver / Bronze 数据层 | `silver.market_*_15m` max(ts), gap detection, Bronze 健康 |
+| `aats_live_derivatives` | Live runtime 事件层 | `public.event_store` 的 `strategy.decision_outcome` 查 `ai_operating_mode` |
+
+对应的 bash helper:
+- `psql_q ...` → `aats_research` (Silver / Bronze 数据)
+- `psql_live ...` → `aats_live_derivatives` (runtime event store / decision outcomes)
+
+若某检查改 DB, 两个 helper 不要混用; 错 DB 会因 schema 不存在静默返回空值, 脚本可能误判 PASS。
+
 ### 2.1 运行命令
 
 ```bash

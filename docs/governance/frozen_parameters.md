@@ -83,6 +83,17 @@
 
 **禁止**: 重新提出已归档路径除非有**方法论级突破** (如换 horizon 层 + 非线性模型), 且提案必须先过 alpha evidence gate.
 
+### 2.6 Governance doc 自身 (闭环冻结)
+
+以下 governance 文档本身也纳入"不得随意改"范围, 防止有人"先改 gate 判据再用改过的 gate 解冻参数":
+
+- [`alpha_evidence_gate.md`](alpha_evidence_gate.md) — 改 gate 判据 / 反模式清单 / 判定矩阵, 必须**走 gate 同款纪律**: 引用实盘数据反例 + 双人 sign-off + CHANGELOG 记录 (gate §9.3 要求)
+- [`runtime_trading_mode_semantics.md`](runtime_trading_mode_semantics.md) — 改 §2 runtime mode 定义或 §3 切换前置条件, 视同 runtime mode 切换 (需 deploy audit + evidence)
+- `frozen_parameters.md` (本文件) — 改 §2 冻结清单需引用 alpha_evidence_gate 提案文档, 走 §3 解冻流程
+- 改 UI 允许切 `ai_operating_mode` 的路径 (`auth_routes.py:/ai/operating-mode/select`) — 视同解冻 `ai_operating_mode`, 走 §3
+
+**闭环判据**: 任何想绕过本文件的操作, 其自身也必须记录在本文件的改动里 — 即"绕过纪律"和"改纪律"都留 audit trail, 无 back door.
+
 ---
 
 ## 3. 解冻流程

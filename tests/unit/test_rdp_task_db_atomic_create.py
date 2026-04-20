@@ -319,3 +319,107 @@ def test_valid_workflows_covers_all_json_configs() -> None:
         f"以下 workflow 在 VALID_WORKFLOWS 但无 JSON 配置: {sorted(orphan)}; "
         f"可能是 workflow 被删但 VALID_WORKFLOWS 忘同步。"
     )
+
+
+# =====================================================================
+# meta.ingest_runs.chk_ir_type 与 create_ingest_run 调用点的双向契约
+# 2026-04-20 code review 发现: 4907af1 已为 workflow 名加契约, 但 run_type
+# 的 chk_ir_type CHECK constraint ({backfill, rolling, gap_repair, gold_build})
+# 没有类似契约. P0-a catchup 脚本当时用了 run_type='catchup' 就是被 chk_ir_type
+# 直接拒, 部署时才暴露. 本测试扫所有 create_ingest_run 调用点的 run_type
+# 字面量, 确保都在白名单内.
+# =====================================================================
+
+_IR_TYPE_WHITELIST = frozenset({
+    "backfill",
+    "rolling",
+    "gap_repair",
+    "gold_build",
+})
+
+
+def test_create_ingest_run_call_sites_use_whitelisted_run_type() -> None:
+    """aats/data_platform/ + scripts/ 下 create_ingest_run 的 run_type 必须在白名单.
+
+    对偶: aats/data_platform/migrations/batch_b_01_core_schema.sql 里
+    `chk_ir_type` 允许 {backfill, rolling, gap_repair, gold_build}. 若 code
+    path 用了其他字面量, DB INSERT 会直接 CheckViolation, 失败只在 deploy
+    才暴露 (本次 P0-a catchup 就是这个 bug).
+
+    扫描策略: grep 所有 `run_type=` 字面量赋值, 过滤掉 keyword-arg 定义
+    (如 `def create_ingest_run(... run_type=...)`) 和 test fixture.
+    """
+    import re
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[2]
+
+    # 扫描范围: 生产 code 路径 (不扫 test, test 可以有 mock 值)
+    search_dirs = [
+        project_root / "aats" / "data_platform",
+        project_root / "scripts",
+    ]
+
+    # 匹配 `run_type="..."` 或 `run_type='...'` (关键字参数字面量调用)
+    pattern = re.compile(r'''run_type\s*=\s*["']([a-z_]+)["']''')
+
+    violations: list[str] = []
+    for root in search_dirs:
+        for py_file in root.rglob("*.py"):
+            if "__pycache__" in py_file.parts:
+                continue
+            try:
+                content = py_file.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                continue
+            for m in pattern.finditer(content):
+                value = m.group(1)
+                if value not in _IR_TYPE_WHITELIST:
+                    # 定位到文件行号
+                    line_num = content[: m.start()].count("\n") + 1
+                    rel = py_file.relative_to(project_root)
+                    violations.append(
+                        f"  {rel}:{line_num} run_type={value!r} "
+                        f"(不在 chk_ir_type 白名单 {sorted(_IR_TYPE_WHITELIST)})"
+                    )
+
+    assert not violations, (
+        "以下 create_ingest_run 调用点 run_type 不在 meta.ingest_runs.chk_ir_type "
+        "CHECK 约束白名单内, deploy 时会 CheckViolation:\n"
+        + "\n".join(violations)
+        + "\n\n修复: 改字面量到 whitelist 之一, 或扩展 chk_ir_type 约束 "
+        "(aats/data_platform/migrations/batch_b_01_core_schema.sql)。"
+    )
+
+
+def test_ir_type_whitelist_matches_orm_check_constraint() -> None:
+    """_IR_TYPE_WHITELIST 必须和 SQLAlchemy ORM CheckConstraint 中 chk_ir_type 一致.
+
+    constraint 定义在 aats/data_platform/rdp_models.py (不在 SQL migration).
+    防止未来有人改 ORM 但忘同步测试 (或反之).
+    """
+    import re
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[2]
+    models_py = project_root / "aats" / "data_platform" / "rdp_models.py"
+    assert models_py.is_file(), f"rdp_models.py 缺失: {models_py}"
+
+    src = models_py.read_text(encoding="utf-8")
+    # 匹配 CheckConstraint("run_type IN ('a','b',...)", name="chk_ir_type")
+    m = re.search(
+        r'''CheckConstraint\s*\(\s*["']run_type\s+IN\s*\(([^)]+)\)["']\s*,\s*name\s*=\s*["']chk_ir_type["']''',
+        src,
+    )
+    assert m, (
+        "无法从 rdp_models.py 找到 chk_ir_type CheckConstraint; "
+        "若改了 constraint 形式 (如迁 SQL migration), 需更新本测试."
+    )
+    orm_values = frozenset(
+        v.strip().strip("'\"") for v in m.group(1).split(",")
+    )
+    assert orm_values == _IR_TYPE_WHITELIST, (
+        f"ORM chk_ir_type 白名单 = {sorted(orm_values)}, "
+        f"测试 _IR_TYPE_WHITELIST = {sorted(_IR_TYPE_WHITELIST)}, "
+        f"两者不一致, 同步修正."
+    )

@@ -367,14 +367,12 @@ groups:
       # 对齐 docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.3
       # 对齐 docs/governance/runtime_trading_mode_semantics.md §4.2
       #
-      # ⚠️ 前置依赖(spec §2.3/§2.4):
-      #   1. ``aats_runtime_ai_operating_mode_total{mode=...}`` — 由 Task 2.4 代码
-      #      暴露(aats/services/decision_engine/target_position.py)。
-      #   2. ``aats_orders_submitted_total{mode=...}`` — 目前 NOT YET EXPOSED
-      #      (order submission 没带 mode label). 规则先定义好, metric 数据到位后
-      #      自动生效. 这是 spec 明确允许的 "不硬阻塞" 情况.
-      #   3. P1 遗留的 "Prometheus scrape connection-refused" 修好之前, 上述 metrics
-      #      不会被 Prometheus 采. 规则保持 OK 直到 metrics 真正在线.
+      # 依赖指标 (2026-04-20 deploy 后全部在线):
+      #   1. ``aats_runtime_ai_operating_mode_total{mode=...}`` — Task 2.4 代码
+      #      (aats/services/decision_engine/target_position.py) ✓ commit ecc6001
+      #   2. ``aats_orders_submitted_total{mode=...}`` — order submission 带 mode
+      #      label, 由 aats/bootstrap/config.py 两处埋点 ✓ commit 4b2ac2d
+      #   3. Prometheus /metrics HTTP server 启动 ✓ commit 3c90c64 (6/6 targets UP)
       #
       # 每条规则都写 noDataState: OK 避免 "没数据就 fire" 的 false positive.
       # ──────────────────────────────────────────────────────────────
@@ -419,7 +417,7 @@ groups:
             spec: docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.3
             在 ai_operating_mode=baseline_only 下, decision_authority 固定为
             reference_only, 任何订单提交都违反 governance (见 runtime_trading_mode_semantics.md §1).
-            依赖指标: aats_orders_submitted_total{mode="baseline_only"} (待 order 提交链路接入 mode label).
+            依赖指标: aats_orders_submitted_total{mode="baseline_only"} (已由 commit 4b2ac2d 接入 mode label).
             响应: 立即 halt + reconciliation + 审查 authority_map 逻辑 (target_position.py:1926).
 
       - uid: sev3-runtime-ai-decision-no-orders
@@ -428,9 +426,22 @@ groups:
         data:
           - refId: A
             datasourceUid: prometheus
-            model:
-              expr: "sum(rate(aats_orders_submitted_total{mode=\"ai_decision_maker\"}[24h])) + 1 / clamp_min(sum(aats_runtime_ai_operating_mode_total{mode=\"ai_decision_maker\"}), 1)"
-              queryType: range
+            # 2026-04-20 code review 修:
+            # 原表达式 `sum(rate(...)) + 1 / clamp_min(...)` Prom operator 优先级
+            #   解析为 A + (1/B), 不是 (A+1)/B.
+            # Counter `aats_runtime_ai_operating_mode_total` 单调递增, 1/B 只有
+            #   B > 10000 时才跌破 0.0001 阈值 (decision ~15s/次 ≈ 1.74 day),
+            #   意味着实际告警延迟 ~2 天 + `for: 24h` = 3+ 天, 与"24h 零订单"
+            #   设计意图不符.
+            # 新表达式: 用 `and on()` 子句门控 — 仅当 ai_decision_maker mode 活
+            #   跃 (最近 5min 有 decision_outcome emit, rate>0) AND 24h 零订单
+            #   才触发. 保持分母非零但不污染分子.
+            expr: |
+              (sum(rate(aats_orders_submitted_total{mode="ai_decision_maker"}[24h])) == 0)
+              and on()
+              (sum(rate(aats_runtime_ai_operating_mode_total{mode="ai_decision_maker"}[5m])) > 0)
+              or on() vector(0)
+            queryType: range
             relativeTimeRange:
               from: 86400
               to: 0
@@ -446,8 +457,9 @@ groups:
             model:
               type: threshold
               expression: B
+              # 2026-04-20 修: 新 expr 返回 1 (触发) / 0 (不触发); gt 0.5 即可区分
               conditions:
-                - evaluator: { type: lt, params: [0.0001] }
+                - evaluator: { type: gt, params: [0.5] }
             relativeTimeRange: { from: 0, to: 0 }
         noDataState: OK
         execErrState: Error

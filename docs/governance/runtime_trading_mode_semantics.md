@@ -68,10 +68,12 @@ authority_map = {
 
 **禁止** operator 未经以下检查直接切 `ai_operating_mode` 到 `ai_assisted` 或 `ai_decision_maker`:
 
-### 3.1 Alpha 证据门槛 (未来 P1 evidence gate 成文后接入)
+### 3.1 Alpha 证据门槛 (已接入 `alpha_evidence_gate.md` v0.1)
 
-- 至少有**一条 alpha 路径**在 out-of-sample + 成本后净收益正 + cross-window 稳定
-- Gate 决议文档签字在案
+- 至少有**一条 alpha 路径** 通过 [`alpha_evidence_gate.md`](alpha_evidence_gate.md) §3 四条硬指标 (OOS / cross-window / cost-adjusted / regime-slice)
+- 提案文档需过 §7 八条反模式 red flag 自查
+- Go 决策记入提案文档末尾 + `[evidence: docs/research/...]` commit 前缀
+- §5 cost model 用 governance 当前值, 禁止"调低 cost 让 net edge 变正"反模式
 
 ### 3.2 基础设施可信 checklist
 
@@ -92,7 +94,7 @@ authority_map = {
 - [ ] Kill switch 测试过 (手动触发可用)
 - [ ] Reconciliation 对账流程跑过一次端到端
 
-### 3.5 切换流程
+### 3.5 持久化切换流程 (推荐)
 
 ```
 1. 阅读本文档 + 最新 alpha evidence gate 决议
@@ -105,10 +107,35 @@ authority_map = {
 6. 如任何异常, 立即 kill switch + 回 baseline_only
 ```
 
+### 3.6 临时 override 机制 (UI admin 通道)
+
+**存在的事实**: Admin UI 有 `/ai/operating-mode/select` 路径 (`aats/api/auth_routes.py`),
+调用 `set_manual_operating_mode_override`. 这是**设计上的 escape hatch**, 不是漏洞, 但有严格约束:
+
+| 属性 | 约束 |
+|---|---|
+| 授权 | 必须 `require_admin_access` (operator role=admin) |
+| 持久性 | **临时**: `ai_manual_operating_mode_override_freeze_seconds` 后自动 expire 回配置值 |
+| Audit | 调用时记录 `actor_role` / `actor_identity` / `auth_source` / `reason` |
+| 持久化 | **不改 .env.\*.live**; 重启服务或 expire 后回 baseline |
+| 门槛 | `AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE` env var, **默认 false** (2026-04-20 起, 见下文) |
+
+**何时允许用 UI override** (代替 §3.5 持久化流程):
+- 短时紧急 (< 24h) 实盘切换
+- 且 §3.2-3.4 checklist 也已满足
+- 且 operator 主动承诺"事后补 §3.5 持久化流程或显式 kill switch"
+- 且 alpha_evidence_gate 已有至少一条 Go 决策
+
+**何时不允许用 UI override**:
+- alpha_evidence_gate 尚未有任何 Go 决策 (2026-04-27 观察窗结束前即是此情况)
+- `AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE=false` (默认值) — 代码层直接拒, 前端按钮虽显示但后端返回 403
+- 任何"为了让系统立刻下单"的即兴动机
+
 **严禁**:
 - 跳过 checklist 直接改 env
 - 绕过 deploy.sh 手动 `docker exec` 改 env
 - 为了"让系统下单"而切模式但不先看 alpha 证据
+- 用 UI override 绕过 §3.5 持久化纪律 (override 必须 post-hoc 补 §3.5)
 
 ---
 
@@ -178,6 +205,7 @@ authority_map = {
 - 触发: 用户 2026-04-19 "为何不下单" + 2026-04-20 战略 framework directive
 - 批准状态: 待用户确认
 - 下次修订条件:
-  - alpha evidence gate 成文后补 §3.1 具体化
+  - ✅ alpha evidence gate 已在 v0.1 接入 (2026-04-20 d2d1c35), §3.1 已具体化
   - 任一 mode 切换发生后补 audit trail
+  - alpha_evidence_gate v0.2+ 引入新硬指标时同步 §3.1
 - **文档所有权**: governance layer, 改动需符合 "重大改动前必须备份+设计+获批准" 纪律 (CLAUDE.md §7)

@@ -15,7 +15,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "P0-b Task 2.2: 当前 ai_operating_mode → decision_authority 视图. 对齐 docs/governance/runtime_trading_mode_semantics.md §1-§2. Prometheus 采到带 mode label 的样本就显示. 若 Prometheus scrape 未修(P1 遗留), 本 panel 会 No Data, 这是预期.",
+      "description": "P0-b Task 2.2: 当前 ai_operating_mode → decision_authority 视图. 对齐 docs/governance/runtime_trading_mode_semantics.md §1-§2. Prometheus 采到带 mode label 的样本就显示. 2026-04-20 update: Prometheus scrape 已修复 (commit 3c90c64, 6/6 targets UP), P1 遗留条件已消除. legacy alias (ai_advisory/ai_blended/ai_primary/ai_decision_maker_with_profile_control) 会 normalize 到 canonical 三态后展示.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -25,7 +25,11 @@
               "options": {
                 "baseline_only": { "text": "REFERENCE ONLY (不下单)", "color": "blue", "index": 0 },
                 "ai_assisted": { "text": "ADVISORY (实盘)", "color": "orange", "index": 1 },
-                "ai_decision_maker": { "text": "FINAL DECISION (AI 实盘)", "color": "red", "index": 2 }
+                "ai_decision_maker": { "text": "FINAL DECISION (AI 实盘)", "color": "red", "index": 2 },
+                "ai_advisory": { "text": "ADVISORY (实盘) [legacy alias]", "color": "orange", "index": 3 },
+                "ai_blended": { "text": "ADVISORY (实盘) [legacy alias]", "color": "orange", "index": 4 },
+                "ai_primary": { "text": "FINAL DECISION (AI 实盘) [legacy alias]", "color": "red", "index": 5 },
+                "ai_decision_maker_with_profile_control": { "text": "FINAL DECISION (AI 实盘) [legacy alias]", "color": "red", "index": 6 }
               }
             }
           ],
@@ -35,7 +39,7 @@
               { "color": "blue", "value": null }
             ]
           },
-          "noValue": "No Data (Prometheus scrape 未修 / aats_runtime_ai_operating_mode 未暴露)"
+          "noValue": "No Data — 检查 Prometheus scrape (/metrics) + aats_runtime_ai_operating_mode counter 是否在 emit"
         },
         "overrides": []
       },
