@@ -42,6 +42,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
               # 2026-04-20 fix: Loki 空结果 (framesLength=0) 走 reduce 后是
               # NoData, threshold 无法评估 → execErrState=Error → 触发内置
@@ -55,6 +57,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator: { type: gt, params: [0] }
             relativeTimeRange: { from: 0, to: 0 }
@@ -87,6 +91,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
               # 2026-04-20 fix: Loki 空结果 (framesLength=0) 走 reduce 后是
               # NoData, threshold 无法评估 → execErrState=Error → 触发内置
@@ -100,6 +106,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator: { type: gt, params: [0] }
             relativeTimeRange: { from: 0, to: 0 }
@@ -132,6 +140,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
               # 2026-04-20 fix: Loki 空结果 (framesLength=0) 走 reduce 后是
               # NoData, threshold 无法评估 → execErrState=Error → 触发内置
@@ -145,6 +155,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator: { type: gt, params: [0] }
             relativeTimeRange: { from: 0, to: 0 }
@@ -178,6 +190,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
             relativeTimeRange: { from: 0, to: 0 }
           - refId: C
@@ -185,6 +199,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               # decision 每 15m 一次 cycle, 10min 窗口期望 ≥ 1 次; < 1 即停滞.
               conditions:
                 - evaluator: { type: lt, params: [1] }
@@ -218,6 +234,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
             relativeTimeRange:
               from: 0
@@ -227,6 +245,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator:
                     type: gt
@@ -272,6 +292,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
             relativeTimeRange: { from: 0, to: 0 }
           - refId: C
@@ -279,6 +301,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               # rate == 0 → stale. 允许 0.1/s 下限兜底 (容忍极低活跃期).
               conditions:
                 - evaluator: { type: lt, params: [0.1] }
@@ -312,6 +336,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
             relativeTimeRange: { from: 0, to: 0 }
           - refId: C
@@ -319,6 +345,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator: { type: gt, params: [5] }
             relativeTimeRange: { from: 0, to: 0 }
@@ -351,6 +379,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
             relativeTimeRange: { from: 0, to: 0 }
           - refId: C
@@ -358,6 +388,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator: { type: gt, params: [10] }
             relativeTimeRange: { from: 0, to: 0 }
@@ -391,6 +423,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
             relativeTimeRange: { from: 0, to: 0 }
           - refId: C
@@ -398,6 +432,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator: { type: gt, params: [5.5] }
             relativeTimeRange: { from: 0, to: 0 }
@@ -432,6 +468,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
             relativeTimeRange: { from: 0, to: 0 }
           - refId: C
@@ -439,6 +477,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator: { type: gt, params: [6.75] }
             relativeTimeRange: { from: 0, to: 0 }
@@ -482,6 +522,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: max
             relativeTimeRange: { from: 0, to: 0 }
           - refId: C
@@ -489,6 +531,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator: { type: gt, params: [0.5] }
             relativeTimeRange: { from: 0, to: 0 }
@@ -548,6 +592,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
               # 2026-04-20 fix: Loki 空结果 (framesLength=0) 走 reduce 后是
               # NoData, threshold 无法评估 → execErrState=Error → 触发内置
@@ -561,6 +607,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator: { type: gt, params: [0] }
             relativeTimeRange: { from: 0, to: 0 }
@@ -609,6 +657,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
             relativeTimeRange: { from: 0, to: 0 }
           - refId: C
@@ -616,6 +666,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               # 2026-04-20 修: 新 expr 返回 1 (触发) / 0 (不触发); gt 0.5 即可区分
               conditions:
                 - evaluator: { type: gt, params: [0.5] }
@@ -657,6 +709,8 @@ groups:
             model:
               type: reduce
               expression: A
+              intervalMs: 1000
+              maxDataPoints: 43200
               reducer: last
             relativeTimeRange: { from: 0, to: 0 }
           - refId: C
@@ -664,6 +718,8 @@ groups:
             model:
               type: threshold
               expression: B
+              intervalMs: 1000
+              maxDataPoints: 43200
               conditions:
                 - evaluator: { type: gt, params: [1] }
             relativeTimeRange: { from: 0, to: 0 }
