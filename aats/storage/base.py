@@ -136,6 +136,23 @@ class EventStore(Protocol):
     ) -> EventEnvelope | None:
         ...
 
+    def count_by_topic_scoped(
+        self,
+        topic: str,
+        *,
+        scope: RuntimeStateScope,
+    ) -> int:
+        """返回指定 topic + scope 的事件数。
+
+        Metrics / dashboard 聚合类查询只需要 ``len(events)``，却经由
+        ``by_topic_scoped`` 拉整张结果集再 ``len()``——对 ``event_store`` 热表
+        （当前 ~545K 行 / 6.2 GB）而言单次 SELECT 就能吃掉十秒级 Python
+        反序列化 + jsonb 解码。本方法直接 ``SELECT count(*)``，不解码
+        payload，作为 gateway_slow_query_systematic_fix_sow.md §S1 的一部分
+        引入。
+        """
+        ...
+
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
         ...
 
@@ -404,6 +421,21 @@ class ReconciliationRepository(Protocol):
         ...
 
     def latest_for_scope(self, *, scope: RuntimeStateScope) -> ReconciliationReport | None:
+        ...
+
+    def portfolio_snapshot_refs_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+    ) -> set[str]:
+        """返回指定 scope 下所有对账报告引用的 portfolio_snapshot_ref 去重集合。
+
+        dashboard metrics 只需要 ``{r.portfolio_snapshot_ref for r in history}``
+        这种 set，但 ``history_for_scope(limit=None)`` 会把完整 report 行
+        （含 payload JSON）全量拉到 Python 再做 set-comp。本方法改为
+        ``SELECT DISTINCT portfolio_snapshot_ref``，只返回 str 集合，
+        略过 payload 反序列化。
+        """
         ...
 
 

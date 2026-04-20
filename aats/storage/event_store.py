@@ -120,6 +120,24 @@ class InMemoryEventStore:
                 return event
         return None
 
+    def count_by_topic_scoped(
+        self,
+        topic: str,
+        *,
+        scope: RuntimeStateScope,
+    ) -> int:
+        """内存实现：遍历 by_topic(topic) 做 scope 过滤后计数。
+
+        ``by_topic_scoped`` 也做等价事情，再 ``len()`` 一下即可，但这里
+        直接定义 count 以匹配 Protocol 签名，并让测试里 count 语义
+        ``==len(by_topic_scoped(...))`` 成为显式契约。
+        """
+        return sum(
+            1
+            for event in self.by_topic(topic)
+            if self._event_matches_scope(event, scope)
+        )
+
     def by_decision(self, decision_id: str) -> list[EventEnvelope]:
         hot_ids = self._decision_index.get(decision_id, [])
         hot_events = [self._index[eid] for eid in hot_ids if eid in self._index]

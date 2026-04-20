@@ -286,6 +286,33 @@ class PostgresReconciliationRepository:
             )
         return self._to_report(row) if row is not None else None
 
+    def portfolio_snapshot_refs_for_scope(
+        self,
+        *,
+        scope: RuntimeStateScope,
+    ) -> set[str]:
+        """SQL 层面 ``SELECT DISTINCT portfolio_snapshot_ref``，不拉 payload。
+
+        历史做法是 ``history_for_scope(scope)`` 全量拉（含 payload JSON）
+        再在 Python 里做 set-comp；gateway dashboard 这条 fan-out 实测
+        稳定 11-21s，多半时间在 jsonb 反序列化 + 构造 report dataclass。
+        本方法直接在 DB 层 DISTINCT 去重，返回 str 集合。
+
+        注意：历史 query 里有 ``ORDER BY as_of_ts, reconciliation_id``，
+        本方法去掉排序（返回 set 无顺序含义），让 PG 可以直接 hash-based
+        DISTINCT。NULL ref 被过滤（业务上 snapshot_ref=NULL 的对账不参与
+        "snapshot_without_reconciliation" 聚合）。
+        """
+        query = (
+            select(ReconciliationReportModel.portfolio_snapshot_ref)
+            .where(ReconciliationReportModel.product_type == scope.product_type)
+            .where(ReconciliationReportModel.margin_mode == scope.margin_mode)
+            .where(ReconciliationReportModel.portfolio_snapshot_ref.isnot(None))
+            .distinct()
+        )
+        with self.session_factory() as session:
+            return set(session.scalars(query).all())
+
     @staticmethod
     def _to_report(row: ReconciliationReportModel) -> ReconciliationReport:
         payload = dict(row.payload)

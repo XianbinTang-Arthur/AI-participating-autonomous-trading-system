@@ -7937,22 +7937,27 @@ class OperatorQueryService:
 
     def _build_metrics(self) -> dict[str, Any]:
         # ── Phase 1：并行获取所有互相独立的子查询 ──
+        #
+        # 2026-04-20 gateway_slow_query_systematic_fix_sow.md §S1 改动说明：
+        # 原本 order_intent_events / decision_context_events / reconciliation_refs
+        # 三路是 "by_topic_scoped(limit=None)" 全量拉回 Python 再 len() / set-comp，
+        # 对 event_store 热表（~545K 行 / 6.2GB）而言单路可达 45s，叠加 12 路
+        # 并发让 wall time 飙到 79s。改为用 SQL 层的 count(*) / DISTINCT 直接
+        # 得到 int / set[str]，避免 jsonb 反序列化与 Python 行对象构造。
+        # snapshot_events 因为下游 snapshot_fill_ids 需要 payload，继续保留
+        # 全量拉取，实测 1.75s，非主要瓶颈（follow-up 独立处理）。
         phase1_queries = {
             "snapshot": self._latest_scoped_snapshot,
             "metrics": self.runtime.metrics.snapshot,
             "fills": self._scoped_fills,
             "phase1_shadow": self.phase1_shadow,
-            "order_intent_events": lambda: list(
-                self.runtime.event_store.by_topic_scoped(
-                    topics.ORDER_INTENTS,
-                    scope=self.state_scope,
-                )
+            "order_intent_event_count": lambda: self.runtime.event_store.count_by_topic_scoped(
+                topics.ORDER_INTENTS,
+                scope=self.state_scope,
             ),
-            "decision_context_events": lambda: list(
-                self.runtime.event_store.by_topic_scoped(
-                    topics.DECISION_CONTEXTS,
-                    scope=self.state_scope,
-                )
+            "decision_context_event_count": lambda: self.runtime.event_store.count_by_topic_scoped(
+                topics.DECISION_CONTEXTS,
+                scope=self.state_scope,
             ),
             "snapshot_events": lambda: list(
                 self.runtime.event_store.by_topic_scoped(
@@ -7960,10 +7965,9 @@ class OperatorQueryService:
                     scope=self.state_scope,
                 )
             ),
-            "reconciliation_refs": lambda: {
-                report.portfolio_snapshot_ref
-                for report in self.runtime.reconciliation_repo.history_for_scope(scope=self.state_scope)
-            },
+            "reconciliation_refs": lambda: self.runtime.reconciliation_repo.portfolio_snapshot_refs_for_scope(
+                scope=self.state_scope,
+            ),
             "rejections": lambda: order_states_for_scope(
                 self.runtime.execution_repo,
                 self.state_scope,
@@ -7980,8 +7984,8 @@ class OperatorQueryService:
         metrics = r["metrics"]
         fills = r["fills"]
         phase1_shadow = r["phase1_shadow"]
-        order_intent_events = r["order_intent_events"]
-        decision_context_events = r["decision_context_events"]
+        order_intent_event_count = r["order_intent_event_count"]
+        decision_context_event_count = r["decision_context_event_count"]
         snapshot_events = r["snapshot_events"]
         reconciliation_refs = r["reconciliation_refs"]
 
@@ -7991,8 +7995,8 @@ class OperatorQueryService:
             if isinstance(event.payload, dict) and event.payload.get("source_fill_id")
         }
         return {
-            "decision_cycle_count": len(decision_context_events),
-            "order_intent_count": len(order_intent_events),
+            "decision_cycle_count": decision_context_event_count,
+            "order_intent_count": order_intent_event_count,
             "fill_count": len(fills),
             "rejection_count": len(r["rejections"]),
             "reconciliation_mismatch_count": metrics.get("reconciliation_mismatches", 0),

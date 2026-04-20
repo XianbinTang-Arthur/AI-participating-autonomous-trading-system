@@ -219,6 +219,45 @@ class PostgresEventStore:
                 archive_rows = session.scalars(archive_query).all()
             return [self._to_schema(row) for row in [*archive_rows, *hot_rows]]
 
+    def count_by_topic_scoped(
+        self,
+        topic: str,
+        *,
+        scope: RuntimeStateScope,
+    ) -> int:
+        """返回指定 topic + scope 的事件数（hot + archive 两表合计）。
+
+        与 ``by_topic_scoped(..., limit=None)`` 不同，本方法在 SQL 层面
+        直接 ``SELECT count(*)`` 避免把 12K+ 行 jsonb payload 拉进 Python
+        再 ``len()``。本方法是 gateway_slow_query_systematic_fix_sow.md §S1
+        的核心改动：将 ``decision_context_events`` / ``order_intent_events``
+        这类 metrics 聚合从"全量拉取再计数"降级为"纯计数"，预期把单路
+        时延从 45s 降到 <100ms。
+
+        Scope 过滤语义与 ``by_topic_scoped`` 完全一致（共用 ``_scope_query``
+        构造 WHERE 子句），保证 count 结果等于 ``len(by_topic_scoped(...))``。
+        """
+        hot_query = (
+            select(func.count())
+            .select_from(EventEnvelopeModel)
+            .where(EventEnvelopeModel.topic == topic)
+        )
+        hot_query = self._scope_query(hot_query, scope, EventEnvelopeModel)
+
+        archive_query = (
+            select(func.count())
+            .select_from(EventEnvelopeArchiveModel)
+            .where(EventEnvelopeArchiveModel.topic == topic)
+        )
+        archive_query = self._scope_query(
+            archive_query, scope, EventEnvelopeArchiveModel
+        )
+
+        with self.session_factory() as session:
+            hot_count = session.scalar(hot_query) or 0
+            archive_count = session.scalar(archive_query) or 0
+        return int(hot_count) + int(archive_count)
+
     def latest_by_topic_scoped(
         self,
         topic: str,
