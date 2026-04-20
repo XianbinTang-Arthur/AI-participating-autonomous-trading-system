@@ -315,7 +315,11 @@ services:
   # 数据源已在 ./grafana/provisioning 里自动配置
   # ---------------------------------------------------------------------------
   grafana:
-    image: grafana/grafana:10.4.4
+    # 10.4.4 在 provisioning 加载 rules.yml (含 __expr__ server-side expression stage) 时
+    # setMaxDatapoints 对 nil modelProps map 写入 panic,导致容器无限 Restart。
+    # 12.4.0 的 PR #115239 给 setModelProps 加了 aq.Model == nil 的保护,
+    # 升级到 12.4.3 (最新补丁版) 修复该 panic 并恢复 17 条告警规则。
+    image: grafana/grafana:12.4.3
     container_name: aats-grafana
     restart: unless-stopped
     environment:
