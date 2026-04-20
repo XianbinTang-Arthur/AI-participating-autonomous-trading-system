@@ -29,6 +29,14 @@
     - 默认 dry-run: 只打日志不 commit, 安全看数据
     - --apply 切开 dry-run, 但仍需 --confirm 才真正 commit
     - 走 workflow 时 configs 里两个都带, 守护进程直接跑
+
+Exit codes (P0-a 后):
+    0 = 所有 bar 全部表写入成功
+    1 = 主 try/except 抛 uncaught exception (建 ingest_run / merger 入口失败)
+    2 = partial fail (至少一 bar 有表 written=0 但至少一张表成功, 场景:
+        Bug 1 NumericValueOutOfRange 只影响 volume_profile, 其他 4 张表
+        仍然写入)
+    3 = full fail (某 bar 所有表 written=0 + error 非空)
 """
 
 from __future__ import annotations
@@ -170,21 +178,48 @@ def _run_one_bar(
                 ingest_run_id=run_id,
                 dataset_version=version,
             )
+            # 分级记日志: build_silver_microstructure_15m 自己也会打
+            # COMMITTED/PARTIAL/FAILED, runner 再打一层带 mode 的辅助
+            # (给运维 grep 用)
             if apply and confirm:
-                session.commit()
-                log.info(
-                    "COMMITTED symbol=%s bar_start=%s tables_written=%s flags=%s "
-                    "duration=%.3fs",
-                    symbol, bar_start.isoformat(), result.tables_written,
-                    result.quality_flags, result.duration_seconds,
-                )
+                if result.tables_failed:
+                    # partial / full fail 场景: 即便 apply+confirm, 也
+                    # 把成功的 step 的写入 commit 掉 (SAVEPOINT 已隔离失败)
+                    session.commit()
+                    if result.error is not None and all(
+                        rc == 0 for rc in result.tables_written.values()
+                    ):
+                        log.error(
+                            "FAILED symbol=%s bar_start=%s tables_written=%s "
+                            "tables_failed=%s flags=%s duration=%.3fs error=%s",
+                            symbol, bar_start.isoformat(), result.tables_written,
+                            result.tables_failed, result.quality_flags,
+                            result.duration_seconds, result.error,
+                        )
+                    else:
+                        log.warning(
+                            "PARTIAL symbol=%s bar_start=%s tables_written=%s "
+                            "tables_failed=%s flags=%s duration=%.3fs error=%s",
+                            symbol, bar_start.isoformat(), result.tables_written,
+                            result.tables_failed, result.quality_flags,
+                            result.duration_seconds, result.error,
+                        )
+                else:
+                    session.commit()
+                    log.info(
+                        "COMMITTED symbol=%s bar_start=%s tables_written=%s flags=%s "
+                        "duration=%.3fs",
+                        symbol, bar_start.isoformat(), result.tables_written,
+                        result.quality_flags, result.duration_seconds,
+                    )
             else:
                 session.rollback()
                 log.info(
                     "DRY-RUN (no commit) symbol=%s bar_start=%s tables_written=%s "
-                    "flags=%s duration=%.3fs",
+                    "tables_failed=%s flags=%s duration=%.3fs",
                     symbol, bar_start.isoformat(), result.tables_written,
-                    result.quality_flags, result.duration_seconds,
+                    result.tables_failed, result.quality_flags,
+                    result.duration_seconds,
                 )
         except Exception as exc:
             session.rollback()
@@ -198,10 +233,20 @@ def _run_one_bar(
                 run_session.commit()
             raise
 
-    # 写 meta.ingest_runs 的 succeeded 状态 (独立 session)
+    # 写 meta.ingest_runs 状态 (独立 session): partial/full fail 也走
+    # failed 让 observability 能区分 success vs degraded
     if apply and confirm:
         with get_session() as run_session:
-            finish_ingest_run(run_session, run_id, status="succeeded")
+            if result.tables_failed:
+                finish_ingest_run(
+                    run_session, run_id, status="failed",
+                    error_message=(
+                        f"tables_failed={result.tables_failed!r} "
+                        f"error={result.error!r}"
+                    )[:500],
+                )
+            else:
+                finish_ingest_run(run_session, run_id, status="succeeded")
             run_session.commit()
 
     return {
@@ -209,6 +254,7 @@ def _run_one_bar(
         "bar_start": bar_start.isoformat(),
         "bar_end": bar_end.isoformat(),
         "tables_written": dict(result.tables_written),
+        "tables_failed": list(result.tables_failed),
         "quality_flags": list(result.quality_flags),
         "duration_seconds": result.duration_seconds,
         "ingest_run_id": run_id,
@@ -255,7 +301,9 @@ def main() -> int:
     bars.sort(key=lambda pair: pair[0])
 
     summaries: list[dict[str, Any]] = []
-    had_error = False
+    had_uncaught_exception = False
+    any_partial_fail = False
+    any_full_fail = False
     for bar_start, bar_end in bars:
         try:
             summary = _run_one_bar(
@@ -267,8 +315,16 @@ def main() -> int:
                 confirm=args.confirm,
             )
             summaries.append(summary)
+            tf = summary.get("tables_failed") or []
+            tw = summary.get("tables_written") or {}
+            if tf:
+                # 若所有表 written=0 + error 非空,视为 full fail; 否则 partial
+                if summary.get("error") and all(rc == 0 for rc in tw.values()):
+                    any_full_fail = True
+                else:
+                    any_partial_fail = True
         except Exception as exc:
-            had_error = True
+            had_uncaught_exception = True
             log.error("bar %s failed: %r", bar_start.isoformat(), exc)
             # 后续 bar 仍然继续尝试 (batch 内独立失败)
             summaries.append({
@@ -283,7 +339,30 @@ def main() -> int:
     for s in summaries:
         log.info("%s", s)
 
-    return 1 if had_error else 0
+    # Exit code 语义 (P0-a 修复后):
+    #   0 = 所有 bar 全部表全部写入成功
+    #   1 = 某 bar 主 try/except 抛 exception (historic 语义保留)
+    #   2 = partial fail (某些表写 0 行 但至少一张表成功)
+    #   3 = full fail (某 bar 所有表 written=0 + error 非空)
+    # 打 stdout 显式信号,让 scheduler task log_tail 能 grep 而非只靠 exit code
+    if had_uncaught_exception:
+        print("TASK_UNCAUGHT_EXCEPTION: 见 log 顶部堆栈", flush=True)
+        return 1
+    if any_full_fail:
+        tf_summary = [
+            (s.get("bar_start"), s.get("tables_failed"))
+            for s in summaries if s.get("tables_failed")
+        ]
+        print(f"TASK_FULL_FAIL: bars={tf_summary}", flush=True)
+        return 3
+    if any_partial_fail:
+        tf_summary = [
+            (s.get("bar_start"), s.get("tables_failed"))
+            for s in summaries if s.get("tables_failed")
+        ]
+        print(f"TASK_PARTIAL_FAIL: bars={tf_summary}", flush=True)
+        return 2
+    return 0
 
 
 if __name__ == "__main__":
