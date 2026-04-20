@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from unittest.mock import patch
 
+from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, ProfileControlDecision
@@ -1879,6 +1880,66 @@ class TestTargetPositionEngine(unittest.TestCase):
             model_version="1",
             prompt_version="1",
         )
+
+
+class TestTargetPositionEngineRuntimeModeMetric(TestTargetPositionEngine):
+    """P0-b Task 2.4：每次构造 DecisionOutcome 都要递增 per-mode counter。
+
+    对应 spec docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.4。
+    继承 TestTargetPositionEngine 以复用 ``_context`` / ``_baseline`` / ``_ai_assessment`` 构造 helper。
+    """
+
+    def test_metric_increments_per_canonical_mode(self) -> None:
+        metrics = MetricsRegistry()
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate({"default_order_qty": 0.001, "ai_operating_mode": "baseline_only"}),
+            metrics=metrics,
+        )
+        engine.build(
+            self._context(),
+            self._baseline(volatility_target_scale=1.0, suggested_position_scale=0.5),
+            self._ai_assessment(),
+        )
+        # 再跑一次 build,应累加
+        engine.build(
+            self._context(),
+            self._baseline(volatility_target_scale=1.0, suggested_position_scale=0.5),
+            self._ai_assessment(),
+        )
+        snap = metrics.labeled_snapshot()
+        key = ("runtime_ai_operating_mode", (("mode", "baseline_only"),))
+        assert snap[key] == 2
+
+    def test_metric_missing_registry_is_soft_skip(self) -> None:
+        """未注入 metrics 时，_decision_outcome 不应抛异常，行为等同原先。"""
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate({"default_order_qty": 0.001}),
+            metrics=None,
+        )
+        # 不抛 = ok
+        target = engine.build(
+            self._context(),
+            self._baseline(volatility_target_scale=1.0, suggested_position_scale=0.5),
+            self._ai_assessment(),
+        )
+        assert target.decision_outcome is not None
+
+    def test_metric_records_ai_decision_maker_mode(self) -> None:
+        """切到 ai_decision_maker 时 label 应相应变化。"""
+        metrics = MetricsRegistry()
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {"default_order_qty": 0.001, "ai_operating_mode": "ai_decision_maker"}
+            ),
+            metrics=metrics,
+        )
+        engine.build(
+            self._context(),
+            self._baseline(volatility_target_scale=1.0, suggested_position_scale=0.5),
+            self._ai_assessment(),
+        )
+        snap = metrics.labeled_snapshot()
+        assert ("runtime_ai_operating_mode", (("mode", "ai_decision_maker"),)) in snap
 
 
 if __name__ == "__main__":

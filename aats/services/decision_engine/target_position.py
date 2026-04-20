@@ -8,6 +8,7 @@ from logging import Logger
 from typing import Literal
 
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
+from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.ai_shadow import AIShadowDecision
 from aats.schemas.decision import (
@@ -306,10 +307,15 @@ class TargetPositionEngine:
         *,
         settings: AATSSettings,
         fee_resolver: EffectiveFeeResolver | None = None,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         self.settings = settings
         self.fee_resolver = fee_resolver or EffectiveFeeResolver(settings=settings)
         self.trade_cost_service = TradeCostService(settings=settings, fee_resolver=self.fee_resolver)
+        # P0-b Task 2.4：持有 MetricsRegistry 以便在 _decision_outcome 中
+        # 按 canonical mode 递增 ``runtime_ai_operating_mode{mode=...}`` counter。
+        # 未注入时（例如单测只构 engine）为 None，下游 _decision_outcome 安全 skip。
+        self.metrics = metrics
         # R3-P1-D4 需要在 _build 早期发 critical 事件。
         self.logger = get_logger("aats.decision_engine.target_position")
 
@@ -1928,6 +1934,19 @@ class TargetPositionEngine:
             "ai_assisted": "advisory",
             "ai_decision_maker": "final_decision",
         }
+        # P0-b Task 2.4：暴露 runtime mode 给 Prometheus/Grafana/Alerting。
+        # 详见 docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.4。
+        # 未装配 metrics 时（单测构 engine 走这条路）安全 skip。
+        # 依赖 Prometheus scrape connection-refused 修好后才会真正被采到
+        # （spec §2.4 的 "不硬阻塞" 条款）。
+        if self.metrics is not None:
+            try:
+                self.metrics.increment_labeled(
+                    "runtime_ai_operating_mode",
+                    labels={"mode": str(canonical_mode)},
+                )
+            except Exception:  # metrics 异常永不阻断决策
+                pass
         if canonical_mode == "ai_decision_maker":
             decision_source = "ai" if ai_decision_applied else "baseline_fallback"
         else:

@@ -67,6 +67,10 @@ def create_bridge(registry: MetricsRegistry) -> Callable[[], None] | None:
     # 使用 _total 后缀是 Prometheus 命名约定（Counter 类型）。
     counters: dict[str, Any] = {}
     last_snapshot: dict[str, int] = {}
+    # P0-b Task 2.4：labeled counters 复用同一个 OTel Counter，通过 attributes
+    # 区分 label 组（Prometheus 层面自动展开为多条 series）。
+    labeled_counters: dict[str, Any] = {}
+    last_labeled_snapshot: dict[tuple[str, tuple[tuple[str, str], ...]], int] = {}
 
     def _ensure_counter(name: str) -> Any:
         """惰性创建 Counter——支持运行时新增的指标名。"""
@@ -77,6 +81,16 @@ def create_bridge(registry: MetricsRegistry) -> Callable[[], None] | None:
                 unit="1",
             )
         return counters[name]
+
+    def _ensure_labeled_counter(name: str) -> Any:
+        """惰性创建带 attributes 的 Counter。"""
+        if name not in labeled_counters:
+            labeled_counters[name] = meter.create_counter(
+                name=f"aats_{name}",
+                description=f"AATS labeled counter: {name}",
+                unit="1",
+            )
+        return labeled_counters[name]
 
     def sync_once() -> None:
         """读取 MetricsRegistry 快照，计算增量，写入 OTel Counter。"""
@@ -91,6 +105,19 @@ def create_bridge(registry: MetricsRegistry) -> Callable[[], None] | None:
                 except Exception:
                     pass  # OTel SDK 异常不影响业务
             last_snapshot[metric_name] = current_value
+
+        # P0-b Task 2.4：同步 labeled counters。
+        labeled_current = registry.labeled_snapshot()
+        for (metric_name, label_tuple), current_value in labeled_current.items():
+            previous = last_labeled_snapshot.get((metric_name, label_tuple), 0)
+            delta = current_value - previous
+            if delta > 0:
+                counter = _ensure_labeled_counter(metric_name)
+                try:
+                    counter.add(delta, attributes=dict(label_tuple))
+                except Exception:
+                    pass  # OTel SDK 异常不影响业务
+            last_labeled_snapshot[(metric_name, label_tuple)] = current_value
 
     log_event(
         _logger,

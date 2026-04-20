@@ -131,3 +131,54 @@ async def test_bridge_loop_exits_when_no_meter() -> None:
         # 如果 loop 不退出，这里会永远挂住。设置极短 interval 作为安全网。
         await start_metrics_bridge_loop(registry, interval=0.01)
     # 到达这里说明 loop 正常退出
+
+
+# ─────────────────────────────────────────────────────────────────────
+# P0-b Task 2.4: labeled counters
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_sync_once_handles_labeled_counter_with_attributes() -> None:
+    """labeled counter 应 emit OTel Counter.add(delta, attributes=labels)。"""
+    registry = MetricsRegistry()
+    mock_meter = MagicMock()
+    mock_counter = MagicMock()
+    mock_meter.create_counter.return_value = mock_counter
+
+    with patch("aats.bootstrap.metrics_bridge.get_meter", return_value=mock_meter):
+        sync_fn = create_bridge(registry)
+
+    registry.increment_labeled("runtime_ai_operating_mode", labels={"mode": "baseline_only"})
+    sync_fn()
+
+    mock_counter.add.assert_called_once_with(1, attributes={"mode": "baseline_only"})
+
+
+def test_sync_once_labeled_counter_computes_delta_per_label_group() -> None:
+    """labeled counter 的增量应按 (metric, labels) 组合分别跟踪。"""
+    registry = MetricsRegistry()
+    mock_meter = MagicMock()
+    mock_counter = MagicMock()
+    mock_meter.create_counter.return_value = mock_counter
+
+    with patch("aats.bootstrap.metrics_bridge.get_meter", return_value=mock_meter):
+        sync_fn = create_bridge(registry)
+
+    # 两个不同的 label 组
+    registry.increment_labeled("runtime_ai_operating_mode", labels={"mode": "baseline_only"})
+    registry.increment_labeled("runtime_ai_operating_mode", labels={"mode": "ai_assisted"})
+    sync_fn()
+    assert mock_counter.add.call_count == 2
+    add_calls = {
+        frozenset(call.kwargs["attributes"].items()): call.args[0]
+        for call in mock_counter.add.call_args_list
+    }
+    assert add_calls[frozenset({("mode", "baseline_only")})] == 1
+    assert add_calls[frozenset({("mode", "ai_assisted")})] == 1
+    mock_counter.add.reset_mock()
+
+    # 只对 baseline_only 再递增 2 次,应只为该 label 组发出增量 2
+    registry.increment_labeled("runtime_ai_operating_mode", labels={"mode": "baseline_only"})
+    registry.increment_labeled("runtime_ai_operating_mode", labels={"mode": "baseline_only"})
+    sync_fn()
+    mock_counter.add.assert_called_once_with(2, attributes={"mode": "baseline_only"})

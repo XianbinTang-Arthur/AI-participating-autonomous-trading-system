@@ -3873,7 +3873,11 @@ def _build_decision_slice(
             settings=runtime_settings,
         ),
         ai_service=slices.ai_service,
-        target_engine=TargetPositionEngine(settings=runtime_settings, fee_resolver=slices.fee_resolver),
+        target_engine=TargetPositionEngine(
+            settings=runtime_settings,
+            fee_resolver=slices.fee_resolver,
+            metrics=slices.metrics,
+        ),
         strategy_coordinator=slices.strategy_coordinator,
         metrics=slices.metrics,
     )
