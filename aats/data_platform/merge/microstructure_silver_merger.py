@@ -109,17 +109,22 @@ class SilverMicrostructureResult:
         识别该 bar 的三元组
     tables_written : dict[str, int]
         每张 Silver 表实际 UPSERT 的 rowcount (0 或 1, 因为一 bar 一 row)
+    tables_failed : list[str]
+        所有 written=0 或 flags 含 ``etl_failed:<table>`` 的表名 (不含前缀
+        schema)。P0-a 之后 runner 用此字段决定 exit code: 非空 → partial
+        fail 走 exit 2, total_error 非 None → full fail 走 exit 3。
     quality_flags : list[str]
         5 张表产生的 quality_flag 合并; 用于 observability 告警
     duration_seconds : float
         end-to-end 耗时 (含 commit 前的聚合 SQL)
     error : str | None
-        若 total 失败, 存 exception repr; 单张表失败只打到 flags
+        若 total 失败, 存第一个异常 repr; 单张表失败也会填到 flags。
     """
     symbol: str
     bar_start_ts: datetime
     bar_end_ts: datetime
     tables_written: dict[str, int] = field(default_factory=dict)
+    tables_failed: list[str] = field(default_factory=list)
     quality_flags: list[str] = field(default_factory=list)
     duration_seconds: float = 0.0
     error: str | None = None
@@ -1367,121 +1372,122 @@ def build_silver_microstructure_15m(
     start_time = time.monotonic()
     flags: list[str] = []
     written: dict[str, int] = {}
+    tables_failed: list[str] = []
     total_error: str | None = None
 
     _record_metric(metrics_registry, "microstructure_silver_etl_runs_total")
 
+    def _run_step(
+        table_key: str,
+        table_name: str,
+        build_fn: Callable[[], int],
+    ) -> None:
+        """运行单个 _build_*, 用 SAVEPOINT 隔离失败。
+
+        关键语义 (P0-a 修复前的 bug 场景):
+            - 子事务失败后 *必须* rollback savepoint, 否则 PG session 会
+              进入 aborted transaction 状态,后续所有 session.execute 都
+              抛 InFailedSqlTransaction (live log_tail 看到的串链失败根源)
+            - 用 begin_nested() 创建 SAVEPOINT, __exit__ 会自动根据异常
+              rollback 到该 savepoint; 已成功的前置 step 的写入保留
+            - SQLite 和 PostgreSQL 都支持 SAVEPOINT, 单测走 sqlite 无兼容问题
+        """
+        nonlocal total_error
+        try:
+            with session.begin_nested():
+                written[table_name] = build_fn()
+            _record_metric(
+                metrics_registry,
+                f"microstructure_silver_etl_runs_total_{table_key}_success",
+            )
+        except Exception as exc:
+            flags.append(f"etl_failed:{table_key}")
+            log.exception("%s build failed", table_key)
+            written[table_name] = 0
+            tables_failed.append(table_name)
+            total_error = total_error or repr(exc)
+            _record_metric(
+                metrics_registry,
+                f"microstructure_silver_etl_errors_{table_key}_total",
+            )
+
     # Step 1: orderbook (provides mid_price_ref for downstream)
     mid_price_ref: Any = None
-    try:
-        written["orderbook_metrics_15m"] = _build_orderbook_metrics(
+    _run_step(
+        "orderbook",
+        "orderbook_metrics_15m",
+        lambda: _build_orderbook_metrics(
             session=session, symbol=symbol,
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
             flags=flags,
-        )
-        # 读刚写的 mid_price_last 供 trade_flow / oi_funding 用
-        row = session.execute(
-            text(
-                "SELECT mid_price_last FROM silver.market_orderbook_metrics_15m "
-                "WHERE symbol = :sym AND ts = :ts"
-            ),
-            {"sym": symbol, "ts": bar_start_ts},
-        ).fetchone()
-        if row is not None:
-            mid_price_ref = row.mid_price_last
-        _record_metric(
-            metrics_registry, "microstructure_silver_etl_runs_total_orderbook_success",
-        )
-    except Exception as exc:
-        flags.append("etl_failed:orderbook_metrics")
-        log.exception("orderbook_metrics build failed")
-        written["orderbook_metrics_15m"] = 0
-        total_error = total_error or repr(exc)
-        _record_metric(
-            metrics_registry, "microstructure_silver_etl_errors_orderbook_total",
-        )
+        ),
+    )
+    # 读刚写的 mid_price_last 供 trade_flow / oi_funding 用。
+    # Step 1 失败时 row 可能是 None,mid_price_ref 保持 None, 下游 step 仍会
+    # 尝试用 NULL mid 写入 (保留原有行为,只靠 SAVEPOINT 防止失败串链)。
+    if written.get("orderbook_metrics_15m", 0) > 0:
+        try:
+            row = session.execute(
+                text(
+                    "SELECT mid_price_last FROM silver.market_orderbook_metrics_15m "
+                    "WHERE symbol = :sym AND ts = :ts"
+                ),
+                {"sym": symbol, "ts": bar_start_ts},
+            ).fetchone()
+            if row is not None:
+                mid_price_ref = row.mid_price_last
+        except Exception:
+            log.exception("mid_price_ref lookup after orderbook step failed")
 
     # Step 2: trade_flow
-    try:
-        written["trade_flow_15m"] = _build_trade_flow(
+    _run_step(
+        "trade_flow",
+        "trade_flow_15m",
+        lambda: _build_trade_flow(
             session=session, symbol=symbol,
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
             flags=flags, mid_price_ref=mid_price_ref,
-        )
-        _record_metric(
-            metrics_registry, "microstructure_silver_etl_runs_total_trade_flow_success",
-        )
-    except Exception as exc:
-        flags.append("etl_failed:trade_flow")
-        log.exception("trade_flow build failed")
-        written["trade_flow_15m"] = 0
-        total_error = total_error or repr(exc)
-        _record_metric(
-            metrics_registry, "microstructure_silver_etl_errors_trade_flow_total",
-        )
+        ),
+    )
 
     # Step 3: oi_funding_metrics
-    try:
-        written["oi_funding_metrics_15m"] = _build_oi_funding_metrics(
+    _run_step(
+        "oi_funding",
+        "oi_funding_metrics_15m",
+        lambda: _build_oi_funding_metrics(
             session=session, symbol=symbol,
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
             flags=flags, mid_price_ref=mid_price_ref,
-        )
-        _record_metric(
-            metrics_registry, "microstructure_silver_etl_runs_total_oi_funding_success",
-        )
-    except Exception as exc:
-        flags.append("etl_failed:oi_funding_metrics")
-        log.exception("oi_funding_metrics build failed")
-        written["oi_funding_metrics_15m"] = 0
-        total_error = total_error or repr(exc)
-        _record_metric(
-            metrics_registry, "microstructure_silver_etl_errors_oi_funding_total",
-        )
+        ),
+    )
 
     # Step 4: volume_profile (depends on trade_flow TFI, but 5.4 对依赖
     # 用 LEFT JOIN 读 silver.market_trade_flow_15m, 若上一步失败也不阻塞)
-    try:
-        written["volume_profile_15m"] = _build_volume_profile(
+    _run_step(
+        "volume_profile",
+        "volume_profile_15m",
+        lambda: _build_volume_profile(
             session=session, symbol=symbol,
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
             flags=flags,
-        )
-        _record_metric(
-            metrics_registry, "microstructure_silver_etl_runs_total_volume_profile_success",
-        )
-    except Exception as exc:
-        flags.append("etl_failed:volume_profile")
-        log.exception("volume_profile build failed")
-        written["volume_profile_15m"] = 0
-        total_error = total_error or repr(exc)
-        _record_metric(
-            metrics_registry, "microstructure_silver_etl_errors_volume_profile_total",
-        )
+        ),
+    )
 
     # Step 5: liquidation_metrics
-    try:
-        written["liquidation_metrics_15m"] = _build_liquidation_metrics(
+    _run_step(
+        "liquidation",
+        "liquidation_metrics_15m",
+        lambda: _build_liquidation_metrics(
             session=session, symbol=symbol,
             bar_start=bar_start_ts, bar_end=bar_end_ts,
             ingest_run_id=ingest_run_id, dataset_version=dataset_version,
             flags=flags,
-        )
-        _record_metric(
-            metrics_registry, "microstructure_silver_etl_runs_total_liquidation_success",
-        )
-    except Exception as exc:
-        flags.append("etl_failed:liquidation_metrics")
-        log.exception("liquidation_metrics build failed")
-        written["liquidation_metrics_15m"] = 0
-        total_error = total_error or repr(exc)
-        _record_metric(
-            metrics_registry, "microstructure_silver_etl_errors_liquidation_total",
-        )
+        ),
+    )
 
     duration = time.monotonic() - start_time
     result = SilverMicrostructureResult(
@@ -1489,6 +1495,7 @@ def build_silver_microstructure_15m(
         bar_start_ts=bar_start_ts,
         bar_end_ts=bar_end_ts,
         tables_written=written,
+        tables_failed=list(tables_failed),
         quality_flags=sorted(set(flags)),
         duration_seconds=duration,
         error=total_error,
@@ -1526,12 +1533,24 @@ def build_silver_microstructure_15m(
         f"microstructure_silver_etl_duration_bucket_{duration_bucket}",
     )
 
-    log.info(
-        "silver_microstructure_etl symbol=%s bar=%s written=%s flags=%s "
-        "duration=%.3fs",
-        symbol, bar_start_ts.isoformat(), written, result.quality_flags,
-        duration,
+    # Final summary log — 按结果分级, 让 Loki 告警和运维 tail 能区分
+    # "全成功" / "部分失败" / "彻底失败" 三种状态 (P0-a 修复前都是 INFO 级
+    # COMMITTED, 与 exit code 双重说谎)
+    log_payload = (
+        "silver_microstructure_etl symbol=%s bar=%s written=%s "
+        "tables_failed=%s flags=%s duration=%.3fs error=%s"
     )
+    log_args = (
+        symbol, bar_start_ts.isoformat(), written, tables_failed,
+        result.quality_flags, duration, total_error,
+    )
+    all_zero = all(rc == 0 for rc in written.values()) if written else True
+    if total_error is not None and all_zero:
+        log.error("FAILED " + log_payload, *log_args)
+    elif tables_failed:
+        log.warning("PARTIAL " + log_payload, *log_args)
+    else:
+        log.info("COMMITTED " + log_payload, *log_args)
     return result
 
 
