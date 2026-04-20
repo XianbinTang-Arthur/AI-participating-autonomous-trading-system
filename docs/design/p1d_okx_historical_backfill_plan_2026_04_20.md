@@ -3,6 +3,10 @@
 > 项目定位声明: 本文件默认服从 AATS 的统一目标. 详见 [项目定位声明](../../docs/project_positioning.md).
 
 **状态**: 纯设计 / 不执行 / 决策文档
+**实施修正** (2026-04-20 Stage 5 实际执行): OKX 实测 OI history **只保留 60 天 (不是设计推断的 90 天)**;
+LS ratio 5m period **只保留 2 天 (不是 30 天)**, 但 **1H period 可保留 30 天**(Stage 5 未拉, 本文档后已补).
+Mark price endpoint 正确 URL 是 `/api/v5/market/history-mark-price-candles` (不是设计里的
+`mark-price-candles-history`).
 **Scope**: 用 OKX REST 批量回填 `open-interest history`、`trades history` 等 tick/bar 级历史到 RDP,
 补齐 P1-D Phase 2A 回归所需的特征基线
 **边界**: **不发任何 OKX API 请求; 不改生产代码; 仅读公开文档 + 已有 collector 代码**
@@ -21,7 +25,7 @@
 |---|---|---|
 | **Candles (history-candles)** | 可用 | **已实现**, `scripts/rdp_deep_backfill_api.py` 可拉数年数据 |
 | **Funding rate (funding-rate-history)** | 可用 | **已实现**, `rdp_deep_backfill_funding.py`, 见现有 3 月数据 |
-| **Open-interest history (`/api/v5/rubik/stat/contracts/open-interest-history`)** | **可用**, 粒度 5m/15m/30m/1H/2H/4H, 100 条/页 | **新建 backfill collector**, 补 60-90 天 |
+| **Open-interest history (`/api/v5/rubik/stat/contracts/open-interest-history`)** | **可用**, 粒度 5m/15m/30m/1H/2H/4H, 100 条/页. **实测 OKX 实际只给 60 天**(不是 90, 设计高估) | **新建 backfill collector**, 补 60 天 |
 | **Mark-price history (`/api/v5/market/mark-price-candles-history`)** | 可用 (candle-like) | **新建 collector**, 补 30-60 天 1m mark candles |
 | **Trades history (`/api/v5/market/history-trades`)** | **受限**, `after`/`before` 按 tradeId 而非 ts, 每页 100, **无官方时间范围 query** | **不推荐大规模回填**; 对历史 trades **建议买 Tardis.dev / Kaiko** |
 | **Long-short ratio (`/api/v5/rubik/stat/contracts/long-short-account-ratio`)** | 可用 | 现已 5min 实时 poll, 历史数据用 begin/end 可回填 |
