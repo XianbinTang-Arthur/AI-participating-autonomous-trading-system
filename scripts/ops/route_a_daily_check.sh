@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# Route A phase 0 — 7 天观察窗 daily health check
+#
+# 起算点: 2026-04-20 14:15 UTC (P0-a/b/c 全落地 + deploy 后第一次 candles
+#         和 microstructure 同 cadence 对齐的 tick).
+# 目标终点: 2026-04-27 14:15 UTC (Silver + OHLC 两 pipeline 连续 7×96=672 bar
+#         无 gap, 才允许启动路线 A phase 0 第一份 evidence 研究).
+#
+# 设计原则:
+#   - 只查询, 不改. 绝不触发任何 research / order / config 修改
+#   - 5 分钟内跑完, 全程只读 Postgres / docker ps / 简单 grep
+#   - 输出结构化 Pass/Fail, 便于逐日归档
+#
+# 用法:
+#   bash scripts/ops/route_a_daily_check.sh
+#
+# Exit codes:
+#   0 = 全部 check 通过 (观察窗计数 +1)
+#   1 = 有 WARN (观察窗不重置, 但需要 operator 注意)
+#   2 = 有 FAIL (观察窗重置, 起算点延后到问题解决日)
+#
+# 建议: 每日 22:00 Shanghai (~14:00 UTC, 15min tick 刚过) 跑一次,
+#       结果 append 到 artifacts/route_a_observation_window/<YYYY-MM-DD>.log
+
+set -u
+
+readonly WSL_DISTRO="${AATS_WSL_DISTRO:-Ubuntu}"
+readonly CHECK_DATE="$(date -u '+%Y-%m-%d')"
+readonly CHECK_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+# 观察窗起点 (固定, 不能改)
+readonly WINDOW_START_UTC="2026-04-20T14:15:00Z"
+readonly WINDOW_TARGET_UTC="2026-04-27T14:15:00Z"
+
+WARN_COUNT=0
+FAIL_COUNT=0
+
+log()   { printf '[%s] %s\n' "$(date -u '+%H:%M:%S')" "$*"; }
+pass()  { printf '  \033[32m✓ PASS\033[0m  %s\n' "$*"; }
+warn()  { printf '  \033[33m⚠ WARN\033[0m  %s\n' "$*" >&2; WARN_COUNT=$((WARN_COUNT+1)); }
+fail()  { printf '  \033[31m✗ FAIL\033[0m  %s\n' "$*" >&2; FAIL_COUNT=$((FAIL_COUNT+1)); }
+step()  { printf '\n═══ %s ═══\n' "$*"; }
+
+psql_q() {
+    wsl -d "$WSL_DISTRO" -- docker exec aats-postgres \
+        psql -U admin -d aats_research -tA -c "$*" 2>/dev/null
+}
+
+# 专门查 live_derivatives DB (event_store / runtime snapshots 在那边)
+psql_live() {
+    wsl -d "$WSL_DISTRO" -- docker exec aats-postgres \
+        psql -U admin -d aats_live_derivatives -tA -c "$*" 2>/dev/null
+}
+
+# ─────────────────────────────────────────────────────────────
+# 0. 基本 infra
+# ─────────────────────────────────────────────────────────────
+
+step "Route A phase 0 daily check · ${CHECK_TS}"
+log "观察窗: ${WINDOW_START_UTC} → ${WINDOW_TARGET_UTC}"
+
+# ─────────────────────────────────────────────────────────────
+# 1. 16 容器 healthy
+# ─────────────────────────────────────────────────────────────
+
+step "[1/6] Container health"
+unhealthy=$(wsl -d "$WSL_DISTRO" -- docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null \
+    | grep '^aats-' | grep -v 'healthy' || true)
+if [[ -z "$unhealthy" ]]; then
+    pass "16 个 aats-* 容器全部 healthy"
+else
+    fail "以下容器不 healthy:"
+    echo "$unhealthy" | sed 's/^/      /'
+fi
+
+# ─────────────────────────────────────────────────────────────
+# 2. Silver 两 pipeline 最新 bar 在 30min 内
+# ─────────────────────────────────────────────────────────────
+
+step "[2/6] Silver freshness"
+
+# 用 epoch 方式比较, 避免 bash 日期解析复杂度
+now_epoch=$(date -u +%s)
+
+for tbl in market_orderbook_metrics_15m market_swap_candles_15m; do
+    latest=$(psql_q "SELECT EXTRACT(EPOCH FROM (MAX(ts) AT TIME ZONE 'UTC'))::bigint FROM silver.${tbl} WHERE symbol='BTC-USDT-SWAP'")
+    if [[ -z "$latest" || "$latest" == "0" ]]; then
+        fail "silver.${tbl}: 无数据"
+        continue
+    fi
+    age=$((now_epoch - latest))
+    age_min=$((age / 60))
+    latest_str=$(date -u -d "@$latest" '+%Y-%m-%d %H:%M UTC')
+    if [[ $age_min -le 30 ]]; then
+        pass "silver.${tbl}: latest=${latest_str} (${age_min}min ago)"
+    elif [[ $age_min -le 60 ]]; then
+        warn "silver.${tbl}: latest=${latest_str} (${age_min}min ago, >30min)"
+    else
+        fail "silver.${tbl}: latest=${latest_str} (${age_min}min ago, >60min, 断档)"
+    fi
+done
+
+# ─────────────────────────────────────────────────────────────
+# 3. 两 pipeline 同 cadence 对齐 (ts 差 ≤ 1 bar)
+# ─────────────────────────────────────────────────────────────
+
+step "[3/6] Cadence alignment (micro vs candles)"
+
+micro_max=$(psql_q "SELECT EXTRACT(EPOCH FROM (MAX(ts) AT TIME ZONE 'UTC'))::bigint FROM silver.market_orderbook_metrics_15m WHERE symbol='BTC-USDT-SWAP'")
+swap_max=$(psql_q "SELECT EXTRACT(EPOCH FROM (MAX(ts) AT TIME ZONE 'UTC'))::bigint FROM silver.market_swap_candles_15m WHERE symbol='BTC-USDT-SWAP'")
+diff_sec=$((micro_max > swap_max ? micro_max - swap_max : swap_max - micro_max))
+diff_min=$((diff_sec / 60))
+
+if [[ $diff_min -le 15 ]]; then
+    pass "micro / candles 差 ${diff_min}min (≤ 1 bar)"
+else
+    warn "micro / candles 差 ${diff_min}min (> 1 bar, 有一条 pipeline 落后)"
+fi
+
+# ─────────────────────────────────────────────────────────────
+# 4. 最近 24h rdp_task_queue failed / timeout 统计
+# ─────────────────────────────────────────────────────────────
+
+step "[4/6] Task queue last 24h"
+
+failed_24h=$(psql_q "
+    SELECT workflow || ':' || COUNT(*)
+    FROM governance.rdp_task_queue
+    WHERE requested_at > NOW() - INTERVAL '24 hours'
+      AND status != 'done'
+    GROUP BY workflow
+    ORDER BY workflow" | grep -v '^$' || true)
+
+if [[ -z "$failed_24h" ]]; then
+    pass "24h 内全部 task done"
+else
+    log "  24h 内非 done task 统计:"
+    echo "$failed_24h" | sed 's/^/      /'
+    # rolling 类工作流 ≤ 2 次不 done 算 warn, > 2 算 fail
+    rolling_fails=$(echo "$failed_24h" | grep -E "microstructure_silver_15m|candles_rolling_15m" | awk -F: '{sum+=$2} END {print sum+0}')
+    if [[ $rolling_fails -gt 2 ]]; then
+        fail "rolling workflow 24h 非 done 数=${rolling_fails} (>2, 连续失败风险)"
+    elif [[ $rolling_fails -gt 0 ]]; then
+        warn "rolling workflow 24h 非 done 数=${rolling_fails} (≤2, 可接受偶发)"
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────
+# 5. 观察窗区间 Silver 连续性 (无 gap)
+# ─────────────────────────────────────────────────────────────
+
+step "[5/6] Gap detection in observation window"
+
+for tbl in market_orderbook_metrics_15m market_swap_candles_15m; do
+    gap_count=$(psql_q "
+        WITH observed AS (
+            SELECT ts FROM silver.${tbl}
+            WHERE symbol='BTC-USDT-SWAP'
+              AND ts >= '${WINDOW_START_UTC}'::timestamptz
+        ),
+        expected AS (
+            SELECT generate_series(
+                GREATEST('${WINDOW_START_UTC}'::timestamptz, (SELECT MIN(ts) FROM observed)),
+                (SELECT MAX(ts) FROM observed),
+                INTERVAL '15 minutes'
+            ) AS ts
+        )
+        SELECT COUNT(*) FROM expected e
+        LEFT JOIN observed o ON e.ts = o.ts
+        WHERE o.ts IS NULL")
+
+    if [[ "$gap_count" == "0" ]]; then
+        pass "silver.${tbl}: 观察窗内零 gap"
+    elif [[ "$gap_count" -le 1 ]]; then
+        warn "silver.${tbl}: 观察窗内 ${gap_count} 个 gap (允许 ≤ 1, 偶发可接受)"
+    else
+        fail "silver.${tbl}: 观察窗内 ${gap_count} 个 gap (>1, 观察窗需重置)"
+    fi
+done
+
+# ─────────────────────────────────────────────────────────────
+# 6. Runtime mode 仍是 baseline_only (不允许期间切换)
+# ─────────────────────────────────────────────────────────────
+
+step "[6/6] Runtime mode guard"
+
+mode=$(psql_live "SELECT payload::jsonb->>'ai_operating_mode' FROM public.event_store WHERE topic='strategy.decision_outcome' ORDER BY event_timestamp DESC LIMIT 1")
+if [[ "$mode" == "baseline_only" ]]; then
+    pass "ai_operating_mode=baseline_only (符合观察窗纪律)"
+elif [[ -z "$mode" ]]; then
+    warn "无 decision_outcome 记录 (可能 decision 没在跑, 注意)"
+else
+    fail "ai_operating_mode=${mode} (期间不应切换! 观察窗需重置)"
+fi
+
+# ─────────────────────────────────────────────────────────────
+# 7. 观察窗进度 (informational)
+# ─────────────────────────────────────────────────────────────
+
+step "进度"
+start_epoch=$(date -u -d "2026-04-20T14:15:00Z" +%s)
+target_epoch=$(date -u -d "2026-04-27T14:15:00Z" +%s)
+elapsed=$((now_epoch - start_epoch))
+total=$((target_epoch - start_epoch))
+pct=$((elapsed * 100 / total))
+days_elapsed=$(awk "BEGIN {printf \"%.2f\", ${elapsed}/86400}")
+
+if [[ $now_epoch -lt $start_epoch ]]; then
+    log "  观察窗尚未开始 (还有 $(( (start_epoch - now_epoch) / 3600 ))h)"
+elif [[ $now_epoch -ge $target_epoch ]]; then
+    log "  观察窗已达 7 天 (${days_elapsed}d elapsed / 100%+)"
+    log "  若所有 check 通过, 可启动路线 A phase 0 第一份 evidence 研究"
+else
+    log "  观察窗已跑 ${days_elapsed} 天 / 7 天 (${pct}%)"
+fi
+
+# ─────────────────────────────────────────────────────────────
+# 总结
+# ─────────────────────────────────────────────────────────────
+
+step "SUMMARY"
+log "Warnings : ${WARN_COUNT}"
+log "Fails    : ${FAIL_COUNT}"
+
+if [[ $FAIL_COUNT -gt 0 ]]; then
+    printf '\n\033[31m✗ OVERALL: FAIL\033[0m — 观察窗需重置, 修问题后从当前日重起\n'
+    exit 2
+elif [[ $WARN_COUNT -gt 0 ]]; then
+    printf '\n\033[33m⚠ OVERALL: PASS WITH WARN\033[0m — 观察窗计数 +1 天, 注意 warn\n'
+    exit 1
+else
+    printf '\n\033[32m✓ OVERALL: PASS\033[0m — 观察窗计数 +1 天\n'
+    exit 0
+fi
