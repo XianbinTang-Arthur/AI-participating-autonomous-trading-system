@@ -25,6 +25,7 @@ from aats.bus.nats_bus import (
     DEFAULT_CRITICAL_TOPICS,
     DEFAULT_MARKET_STREAM_TOPICS,
     DEFAULT_OBSERVER_TOPICS,
+    DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS,
     DEFAULT_STREAM_SPECS,
     SNAPSHOT_DELIVERY_TOPICS,
     TRANSIENT_DELIVERY_TOPICS,
@@ -820,14 +821,25 @@ def test_stream_spec_rejects_num_replicas_less_than_one() -> None:
 
 
 def test_stream_specs_cover_all_critical_topics_exactly_once() -> None:
-    """I-8：DEFAULT_STREAM_SPECS 的所有 topics 并集 == DEFAULT_CRITICAL_TOPICS。
+    """I-8'：DEFAULT_STREAM_SPECS topics 并集 ∪ DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS
+    == DEFAULT_CRITICAL_TOPICS。
 
-    每个 critical topic 必须恰好被一个 stream claim（不遗漏 / 不重复），否则
-    publish 时会路由歧义（两条 stream 都匹配）或干脆没有 stream 承载（silent drop）。
+    每个 critical topic 必须恰好归属到某一处（不遗漏/不重复），否则 publish
+    路由歧义或 silent drop：
+      - 普通 critical topic → 某个 StreamSpec 的 topics 里（通过 NATS stream
+        跨进程投递）
+      - persist-only critical topic → DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS 里
+        （publish_envelope 短路，只 event_store.append，不 js.publish）
 
-    加新 critical topic 时：要么加到 DEFAULT_MARKET_STREAM_TOPICS 高频类，
-    要么默认归 DEFAULT_CRITICAL_EVENTS_TOPICS。本测试强制把这个检查前置到
-    unit test 阶段。
+    2026-04-20 不变量从 I-8（stream_topics 并集 == CRITICAL_TOPICS）升级为
+    I-8'，加入 persist-only 类别。背景见
+    docs/task/nats_retention_global_architecture_sow.md §B0。
+
+    加新 critical topic 时：
+      - 高频（≥ 1 Hz）且跨进程订阅 → DEFAULT_MARKET_STREAM_TOPICS
+      - 跨进程订阅 → DEFAULT_CRITICAL_EVENTS_TOPICS（隐式，等于
+        CRITICAL_TOPICS - MARKET_STREAM_TOPICS - PERSIST_ONLY）
+      - 0 live NATS 订阅（只靠 PG 查询）→ DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS
     """
     all_spec_topics: set[str] = set()
     for spec in DEFAULT_STREAM_SPECS:
@@ -837,11 +849,39 @@ def test_stream_specs_cover_all_critical_topics_exactly_once() -> None:
         )
         all_spec_topics.update(spec.topics)
 
-    # 并集必须 == DEFAULT_CRITICAL_TOPICS
-    missing = DEFAULT_CRITICAL_TOPICS - all_spec_topics
-    extra = all_spec_topics - DEFAULT_CRITICAL_TOPICS
-    assert not missing, f"critical topics not covered by any stream: {missing}"
-    assert not extra, f"stream claims non-critical topics: {extra}"
+    # persist-only 不能同时出现在 stream 里（否则 js.publish 路径和短路路径
+    # 会竞争：短路先 return，但 stream 里的 subject claim 依然存在，测试拓扑
+    # 混乱）
+    overlap = all_spec_topics & DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS
+    assert not overlap, (
+        f"persist-only topics must NOT appear in any stream spec: {overlap}"
+    )
+
+    # 并集 == DEFAULT_CRITICAL_TOPICS（I-8' 不变量）
+    covered = all_spec_topics | DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS
+    missing = DEFAULT_CRITICAL_TOPICS - covered
+    extra = covered - DEFAULT_CRITICAL_TOPICS
+    assert not missing, (
+        f"critical topics not covered by any stream or persist-only: {missing}"
+    )
+    assert not extra, f"stream/persist-only claims non-critical topics: {extra}"
+
+
+def test_persist_only_topics_are_removed_from_stream_subjects() -> None:
+    """I-8' 配套：persist-only critical topic 不能出现在任何 StreamSpec 的
+    subjects 里——否则 publish_envelope 的短路 return 会跳过 js.publish，
+    但 stream 的 subject claim 仍然存在，导致 stream 路由元数据和实际行为
+    不一致（审计上产生疑问）。
+
+    2026-04-20 本测试锁定 persist-only topic 与 stream subjects 的互斥。
+    """
+    for persist_only_topic in DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS:
+        for spec in DEFAULT_STREAM_SPECS:
+            assert persist_only_topic not in spec.topics, (
+                f"persist-only topic {persist_only_topic!r} leaked into "
+                f"StreamSpec {spec.name}.topics — check "
+                f"DEFAULT_CRITICAL_EVENTS_TOPICS computation"
+            )
 
 
 def test_stream_specs_market_and_events_have_symmetric_max_msg_size() -> None:

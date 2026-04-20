@@ -162,6 +162,26 @@ DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
     }
 )
 
+# ── persist-only critical topics ───────────────────────────────────
+# 属于 critical（必须持久化合规）但**没有任何 live NATS consumer 订阅**的 topic。
+# 走 PG event_store.append（长期保留 + replay 数据源），不走 js.publish
+# （跳过 NATS stream，节省 40%+ stream 字节空间，避免 compaction 风暴）。
+#
+# 选入标准（严格）：
+#   (a) 合规/审计需要落盘 → 必须 event_store.append
+#   (b) 系统内无 subscribe 消费 → NATS stream 里保留只是浪费（等 TTL 到期）
+#   (c) ReplayEngine 从 PG 读（不依赖 NATS stream）
+#
+# 2026-04-20：AUDIT_RECORDS 满足上述条件。实测 stream 40.9% 字节占用，66 个
+# durable consumer 全扫过 0 订阅，ReplayEngine 已走 event_store。
+# 详见 docs/task/aats_events_stream_retention_root_fix_sow.md §6.1 "follow-up 方案 A"。
+DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS: frozenset[str] = frozenset(
+    {
+        _topics.AUDIT_RECORDS,
+    }
+)
+
+
 # 观察者 topic：仪表盘/指标流/调试事件，量大、丢失无关键影响，留在内存
 # ⚠️ 放入此集合的 topic 只走进程内 InMemoryEventBus，**绝不**通过 NATS
 # 跨进程。如果一个 topic 的生产者和消费者在不同进程，它**必须**在
@@ -458,10 +478,13 @@ DEFAULT_MARKET_STREAM_TOPICS: frozenset[str] = frozenset(
 )
 
 # 其他 critical topic → 长保留 stream AATS_EVENTS
-# 派生自 DEFAULT_CRITICAL_TOPICS 减掉 DEFAULT_MARKET_STREAM_TOPICS，保证
-# 两者并集 == DEFAULT_CRITICAL_TOPICS（I-8 不变量）。
+# 派生自 DEFAULT_CRITICAL_TOPICS 减掉 DEFAULT_MARKET_STREAM_TOPICS 和
+# DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS。新不变量 (I-8')：
+#   stream_topics 并集 ∪ persist_only == DEFAULT_CRITICAL_TOPICS
 DEFAULT_CRITICAL_EVENTS_TOPICS: frozenset[str] = (
-    DEFAULT_CRITICAL_TOPICS - DEFAULT_MARKET_STREAM_TOPICS
+    DEFAULT_CRITICAL_TOPICS
+    - DEFAULT_MARKET_STREAM_TOPICS
+    - DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS
 )
 
 
@@ -1118,6 +1141,24 @@ class NatsEventBus(EventBus):
                     )
                     if self._persistence_mode == "strict":
                         raise
+
+            # ── Persist-only 短路：只 PG event_store.append，跳过 NATS publish ─
+            #
+            # 2026-04-20 docs/task/nats_retention_global_architecture_sow.md §B0
+            #
+            # 适用于合规/审计需要落盘但**无 live NATS consumer 订阅**的 topic
+            # （见 DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS 的选入标准）。这类 topic
+            # 走 NATS stream 是纯浪费（消息进 stream 后等 TTL 到期自然 discard，
+            # 没人订阅），且占用 stream 字节额度触发 compaction 风暴。
+            #
+            # 上一步的 event_store.append 已把 envelope 持久化到 PG 用于长期
+            # 合规/回放（ReplayEngine 100% 走 event_store），所以直接 return
+            # 跳过 js.publish 是零副作用。
+            #
+            # 该短路必须放在 event_store.append 之后（上面 elif 分支），以保证
+            # PG 持久化仍然发生——这是 persist-only 的语义前提。
+            if envelope.topic in DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS:
+                return
 
             body = envelope.model_dump_json().encode("utf-8")
             # R3-P1-X4：激活 JetStream 发布端幂等（publish-side dedup）。
