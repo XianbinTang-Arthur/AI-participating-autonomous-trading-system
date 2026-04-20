@@ -189,17 +189,30 @@ class OperatorQueryService:
     _reentrant_guard: __import__("threading").local = __import__("threading").local()
 
     # Singleflight follower 最长等待时间。
-    # 2026-04-20 code review Issue 1 fix:
-    #   冷启动 cache stampede 观察: dashboard bundle 开 7 个并行 task,
-    #   follower 等 25s 超时后 fallback **自己跑** loader → 二次惊群, 共享
-    #   12-worker 线程池被挤爆, parallel_fetch_slow wall 达 231s. 真正 leader
-    #   还在等 OKX REST (账户 cold-start 15 次 REST × ~5s ≈ 75s), follower 等
-    #   不及已放弃.
-    # 调整: 25s → 60s 给 leader 更长窗口, 让 follower 等得住 leader 完成后
-    #   直接复用结果, 减少二次惊群概率.
-    # 前端侧: Operator UI DEFAULT_TIMEOUT_MS 也需同步调到 75s+, 否则
-    #   follower 60s 内等到 leader 结果但前端已 timeout, 用户仍看到错误.
-    _SINGLEFLIGHT_WAIT_SECONDS = 60
+    #
+    # ── 版本历史（取舍变化）──
+    #
+    # 2026-04-20 事故期 "60s 方案"（已推翻）：
+    #   曾经担心 "follower 25s 超时 → 自跑 loader → 二次惊群"，把值加到 60s，
+    #   并让前端 DEFAULT_TIMEOUT_MS 同步加到 75s+。但这条路径已被证明错的：
+    #   前端 api-client.js 的 DEFAULT_TIMEOUT_MS=30s 是**性能红线不能放宽**
+    #   （放宽等于长期默认后端慢，掩盖问题）。60s follower 等 + 30s 前端超时
+    #   的组合让 follower 变孤儿，leader 跑完没人接收。
+    #
+    # 2026-04-20 SOW §S5 "25s 方案"（当前）：
+    #   gateway_slow_query_systematic_fix_sow.md §S5 决策：
+    #   - follower 最多等 25s（< 前端 30s DEFAULT_TIMEOUT_MS）
+    #   - 如果 leader 在 25s 内完成，所有 follower 秒拿结果（理想路径）
+    #   - 如果 leader 超过 25s，follower 放弃等待自己下穿触发独立 loader 一次
+    #     ↑ 原 "60s 方案" 注释担心的 "二次惊群" —— 现在可接受，因为：
+    #       (a) S1 / S4 已大幅降低单路查询时延，leader 超 25s 场景极少
+    #       (b) PG max_connections=200 + DB pool 15+45=60 充裕，多一次 load
+    #           不会引爆基础设施
+    #       (c) follower 拿自己的结果胜过被前端 abort → 掩盖用户
+    #
+    # 前端侧保持 DEFAULT_TIMEOUT_MS = 30s 不变。这是性能红线：任何一次
+    # 主 bundle 请求 > 30s 都算性能回归，立即报警，而不是悄悄放宽超时。
+    _SINGLEFLIGHT_WAIT_SECONDS = 25
 
     def _cached_ttl(self, key: str, ttl_seconds: int, loader):
         if not hasattr(self, "_ttl_cache"):
