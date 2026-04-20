@@ -2774,6 +2774,19 @@ def _build_position_target_handler(
                         source_component="execution_engine",
                     )
                     metrics.increment("order_intents_generated")
+                    # P0-b Task 2.3 follow-up (2026-04-20):
+                    # 给 order submission 加 mode label, 让
+                    # aats_orders_submitted_total{mode=...} alert 能 fire.
+                    # 见 deploy/wsl2-dev/grafana/provisioning/alerting/rules.yml
+                    # sev2-runtime-baseline-has-orders / sev3-runtime-ai-decision-no-orders.
+                    # metrics.increment_labeled 异常永不阻断订单流.
+                    try:
+                        metrics.increment_labeled(
+                            "orders_submitted",
+                            labels={"mode": str(settings.canonical_ai_operating_mode)},
+                        )
+                    except Exception:
+                        pass
                     order_intent_refs.append(intent_envelope.event_id)
                     item["leg"] = item["leg"].model_copy(
                         update={
@@ -2981,6 +2994,15 @@ def _build_position_target_handler(
             )
             return
         metrics.increment("order_intents_generated")
+        # P0-b Task 2.3 follow-up (2026-04-20): mode label for alert rules.
+        # 同上面 execution leg intent 路径, 此路径为 single-leg position target.
+        try:
+            metrics.increment_labeled(
+                "orders_submitted",
+                labels={"mode": str(settings.canonical_ai_operating_mode)},
+            )
+        except Exception:
+            pass
         await execution_planner.publish_intent(bus=bus, intent=intent)
 
     return handle_position_target
