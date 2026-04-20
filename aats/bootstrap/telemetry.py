@@ -309,24 +309,32 @@ def configure_telemetry(config: TelemetryConfig) -> bool:
                 process_role=config.process_role,
             )
         except OSError as exc:
-            # 端口被占用 (同主机 4 进程在 monolith 部署模式会撞车), 降级
+            # 端口被占用 (同主机 4 进程在 monolith 部署模式会撞车), 降级.
+            # 2026-04-20 code review A-H2: 提升到 critical, 让 Loki + Grafana
+            # log-based alert + Prometheus `up{}` dead-man 能捕获 long-term
+            # scrape 不可用 (否则 P0-b 所有 metric/alert 自己不可观测 = 闭环漏洞).
             log_event(
                 _telemetry_logger,
                 "telemetry_metrics_http_bind_failed",
-                level="warning",
+                level="critical",
                 port=prom_port,
                 host=prom_host,
                 error_type=type(exc).__name__,
                 error=str(exc),
-                hint="Prometheus scrape will fail; OTel meter still records in-process",
+                hint=(
+                    "Prometheus scrape 会 connection-refused; P0-b metric/alert "
+                    "全部失效. 升级到 critical 便于 Loki alerting 捕获; "
+                    "Grafana 端有 `up{job=aats}` dead-man 规则 (rules.yml)."
+                ),
             )
         except Exception as exc:
             log_event(
                 _telemetry_logger,
                 "telemetry_metrics_http_unexpected_error",
-                level="warning",
+                level="critical",
                 error_type=type(exc).__name__,
                 error=str(exc),
+                hint="telemetry HTTP server 启动意外异常, 同 bind_failed 路径.",
             )
     except ImportError:
         pass  # opentelemetry-exporter-prometheus 未安装，跳过
