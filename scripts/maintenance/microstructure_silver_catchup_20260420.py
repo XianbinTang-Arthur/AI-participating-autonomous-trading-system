@@ -287,7 +287,11 @@ def main() -> int:
             with get_session() as session:
                 run_id = create_ingest_run(
                     session,
-                    run_type="catchup",
+                    # meta.ingest_runs.chk_ir_type 只允许
+                    #   {backfill, rolling, gap_repair, gold_build}
+                    # 历史空洞回填在语义上是 gap_repair.
+                    # (2026-04-20 P0-a catchup apply 时发现 chk violation, 现场修)
+                    run_type="gap_repair",
                     dataset_domain="microstructure",
                     instrument_type="swap",
                     symbol=args.symbol,
