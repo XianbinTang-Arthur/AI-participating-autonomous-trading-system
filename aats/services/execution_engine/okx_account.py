@@ -269,13 +269,13 @@ class OKXAccountService:
                     positions=self._parse_positions(positions_payload, instrument_map=instrument_map),
                     open_orders=self._dedupe_open_orders(
                         self._parse_open_orders(
-                            self._merge_payloads(open_orders_payloads),
+                            self._merge_payloads(open_orders_payloads, context="open_orders"),
                             instrument_map=instrument_map,
                         )
                     ),
                     fills=self._dedupe_fills(
                         self._parse_fills(
-                            self._merge_payloads(fills_payloads),
+                            self._merge_payloads(fills_payloads, context="fills"),
                             instrument_map=instrument_map,
                         )
                     ),
@@ -292,8 +292,8 @@ class OKXAccountService:
                     raw={
                         "balance": balance_payload,
                         "positions": positions_payload,
-                        "open_orders": self._merge_payloads(open_orders_payloads),
-                        "fills": self._merge_payloads(fills_payloads),
+                        "open_orders": self._merge_payloads(open_orders_payloads, context="raw_open_orders"),
+                        "fills": self._merge_payloads(fills_payloads, context="raw_fills"),
                         "instruments": instruments_payload,
                         "account_config": account_config_payload,
                         "trade_fee": trade_fee_payload,
@@ -1165,8 +1165,20 @@ class OKXAccountService:
         return payload if isinstance(payload, dict) else {"code": "0", "data": []}
 
     @staticmethod
-    def _merge_payloads(payloads: list[dict[str, Any]]) -> dict[str, Any]:
+    def _merge_payloads(
+        payloads: list[dict[str, Any]],
+        *,
+        context: str = "unknown",
+    ) -> dict[str, Any]:
+        """Merge OKX paged payloads into {code:"0", data:[...]}.
+
+        2026-04-20 code review A-H1: 之前版本对非 dict 条目 silent skip,
+        若 gather 所有 sub-task 都 Exception → 返回 {"code":"0","data":[]},
+        下游 reconciliation 把 open_orders 当空列表 → 误判"无未成交单".
+        现在 skip 时 log_event (warning), 并通过 `context` 定位调用点.
+        """
         merged_data: list[Any] = []
+        skipped_non_dict = 0
         for payload in payloads:
             # 防御性: gather(return_exceptions=True) 可能让 payloads 里混入
             # OKXRequestError 等异常对象 (如 OKX 401 / rate limit 时). 这些
@@ -1175,10 +1187,29 @@ class OKXAccountService:
             # 参见 Phase 1A deploy retrospect (2026-04-20): OKX 401 曾把
             # execution 卡在 crash loop, 新 key 注入前无法优雅降级.
             if not isinstance(payload, dict):
+                skipped_non_dict += 1
                 continue
             rows = payload.get("data", [])
             if isinstance(rows, list):
                 merged_data.extend(rows)
+
+        # A-H1 fix (2026-04-20 code review): 若有 skip, 显式 log 供运维追踪.
+        # 避免 "所有 sub-task 都 Exception → merge 返回空 data" 被下游当空列表.
+        if skipped_non_dict > 0:
+            _module_logger = get_logger("aats.okx_account.merge_payloads")
+            log_event(
+                _module_logger,
+                "okx_merge_payloads_skipped_exception",
+                level="warning",
+                context=context,
+                skipped_non_dict=skipped_non_dict,
+                total_payloads=len(payloads),
+                merged_rows=len(merged_data),
+                hint=(
+                    "下游 reconciliation 若看到空 data, 请结合本条 warning 与 "
+                    "上游 gather 报错确认是 OKX 失败还是真无数据."
+                ),
+            )
         return {"code": "0", "data": merged_data}
 
     @staticmethod

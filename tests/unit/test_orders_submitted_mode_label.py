@@ -97,3 +97,83 @@ def test_orders_submitted_increment_wrapped_in_try_except() -> None:
             f"orders_submitted @ char {m.start()} 前 200 字符没 try:, "
             f"违反 'metrics 异常不阻断订单流' 契约"
         )
+
+
+# ─────────────────────────────────────────────────────────────────────
+# 行为级单测 (2026-04-20 code review A-H3 fix)
+# 上面 3 个静态扫描 test 只能抓"字符出现与否", 抓不到:
+#   - MetricsRegistry.increment_labeled signature mismatch (调用不传 labels)
+#   - labels dict 实际不含 mode 键 (str(enum) 失效)
+#   - labeled counter 真没递增 (调用写错)
+# 本组测试直接跑 MetricsRegistry API, 锁死行为契约.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_metrics_registry_increment_labeled_accepts_mode_label() -> None:
+    """MetricsRegistry.increment_labeled 必须接受 labels={"mode": <str>} 参数.
+
+    这是 config.py 两处 orders_submitted 调用的 call signature; 若 MetricsRegistry
+    API 改了名或改了参数签名, 两处调用会 AttributeError/TypeError, 但被
+    `except Exception: pass` 吞掉 → metric 永不 emit 仍看起来"工作正常".
+    """
+    from aats.bootstrap.metrics import MetricsRegistry
+
+    registry = MetricsRegistry()
+
+    # 三种 canonical mode 分别增一次
+    for mode in ("baseline_only", "ai_assisted", "ai_decision_maker"):
+        registry.increment_labeled(
+            "orders_submitted",
+            labels={"mode": mode},
+            value=1,
+        )
+
+    snap = registry.labeled_snapshot()
+    # labeled_snapshot 格式: {(metric_name, tuple(sorted(labels.items()))): count}
+    assert snap.get(("orders_submitted", (("mode", "baseline_only"),))) == 1
+    assert snap.get(("orders_submitted", (("mode", "ai_assisted"),))) == 1
+    assert snap.get(("orders_submitted", (("mode", "ai_decision_maker"),))) == 1
+
+
+def test_metrics_registry_labels_isolated_per_mode() -> None:
+    """不同 mode label 之间 counter 独立 (不会被意外合并).
+
+    这是 Prometheus sum(rate(...{mode="baseline_only"}[24h])) 正确 dispatching
+    的前提. 若 label 隔离失败, 三个 mode 的 counter 会汇总到同一 series,
+    P0-b Task 2.3 sev2/sev3 alert 会误触发或永不触发.
+    """
+    from aats.bootstrap.metrics import MetricsRegistry
+
+    registry = MetricsRegistry()
+
+    registry.increment_labeled("orders_submitted", labels={"mode": "baseline_only"}, value=3)
+    registry.increment_labeled("orders_submitted", labels={"mode": "ai_assisted"}, value=7)
+
+    snap = registry.labeled_snapshot()
+    assert snap.get(("orders_submitted", (("mode", "baseline_only"),))) == 3
+    assert snap.get(("orders_submitted", (("mode", "ai_assisted"),))) == 7
+    # ai_decision_maker 没调过 → 不应有 entry
+    assert ("orders_submitted", (("mode", "ai_decision_maker"),)) not in snap
+
+
+def test_metrics_registry_plain_vs_labeled_separated() -> None:
+    """plain `increment("order_intents_generated")` 和 `increment_labeled(...)` 互不污染.
+
+    config.py 两处都保留了 plain 版本供 /api routes JSON 使用; 若 MetricsRegistry
+    把 labeled snapshot 归到 plain snapshot, legacy /api 会报"order_intents_generated=
+    0 但 orders_submitted_total=N", 暴露不一致.
+    """
+    from aats.bootstrap.metrics import MetricsRegistry
+
+    registry = MetricsRegistry()
+
+    registry.increment("order_intents_generated", value=5)
+    registry.increment_labeled("orders_submitted", labels={"mode": "baseline_only"}, value=5)
+
+    # plain snapshot 只含 order_intents_generated (不被 labeled 污染)
+    plain = registry.snapshot()
+    assert plain == {"order_intents_generated": 5}
+
+    # labeled snapshot 只含 labeled (不被 plain 污染)
+    labeled = registry.labeled_snapshot()
+    assert labeled == {("orders_submitted", (("mode", "baseline_only"),)): 5}

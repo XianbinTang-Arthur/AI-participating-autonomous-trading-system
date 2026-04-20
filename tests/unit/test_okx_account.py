@@ -1659,6 +1659,67 @@ class TestMergePayloadsDefensive(unittest.TestCase):
         merged = OKXAccountService._merge_payloads(payloads)
         self.assertEqual([row["id"] for row in merged["data"]], ["valid"])
 
+    def test_skip_logs_warning_with_context(self) -> None:
+        """2026-04-20 code review A-H1: 非 dict 被 skip 必须 log warning.
+
+        之前版本完全 silent, 导致"所有 gather 都 Exception → 返回空 data"
+        被下游 reconciliation 误判为"无未成交单". 本测试锁定: 任一 skip
+        必 emit structured log (event_name=okx_merge_payloads_skipped_exception),
+        且含 context + skipped_non_dict 字段供运维追踪.
+        """
+        import io
+        import json
+        import logging
+
+        # 捕获 aats.okx_account.merge_payloads logger 输出
+        logger = logging.getLogger("aats.okx_account.merge_payloads")
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setLevel(logging.WARNING)
+        logger.addHandler(handler)
+        logger.setLevel(logging.WARNING)
+
+        try:
+            class OKXRequestError(Exception):
+                pass
+
+            payloads = [
+                OKXRequestError("401"),  # type: ignore[list-item]
+                {"code": "0", "data": [{"id": "ok"}]},
+            ]
+            merged = OKXAccountService._merge_payloads(payloads, context="unit_test_scope")  # type: ignore[arg-type]
+            self.assertEqual([row["id"] for row in merged["data"]], ["ok"])
+        finally:
+            logger.removeHandler(handler)
+
+        output = stream.getvalue()
+        # 结构化 log 格式是 JSON; 这里检查关键字段出现即可 (不强求 JSON parse
+        # 因 log handler 格式可能 wrap)
+        self.assertIn("okx_merge_payloads_skipped_exception", output)
+        self.assertIn("unit_test_scope", output)
+        # skipped_non_dict=1, total_payloads=2, merged_rows=1 应在 log 里可追溯
+        self.assertIn("skipped_non_dict", output)
+
+    def test_no_skip_no_log(self) -> None:
+        """Baseline path (全部 dict payload) 不应触发 warning log."""
+        import io
+        import logging
+
+        logger = logging.getLogger("aats.okx_account.merge_payloads")
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.setLevel(logging.WARNING)
+        logger.addHandler(handler)
+        logger.setLevel(logging.WARNING)
+
+        try:
+            payloads = [{"code": "0", "data": [{"id": "a"}]}]
+            OKXAccountService._merge_payloads(payloads, context="baseline")
+        finally:
+            logger.removeHandler(handler)
+
+        self.assertEqual(stream.getvalue(), "", "正常路径不应产生任何 warning log")
+
 
 if __name__ == "__main__":
     unittest.main()
