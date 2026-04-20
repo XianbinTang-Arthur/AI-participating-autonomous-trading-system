@@ -56,10 +56,35 @@ def test_increment_labeled_stable_key_regardless_of_label_insertion_order() -> N
     assert snap[key] == 2
 
 
-def test_increment_labeled_rejects_non_mapping_labels() -> None:
+def test_increment_labeled_non_mapping_labels_warns_and_skips() -> None:
+    """2026-04-20 code review A-L3: 非 Mapping 时不再 raise TypeError.
+
+    旧语义 raise TypeError 但 caller 都 `except Exception: pass` 吞掉, 开发
+    期错误永不可见. 新语义 warn log + skip, Loki 可追溯 "metric 没 emit".
+    """
+    import logging
     registry = MetricsRegistry()
-    with pytest.raises(TypeError):
+
+    # 捕 aats.metrics logger 输出
+    caplog_handler = logging.getLogger("aats.metrics")
+    import io
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setLevel(logging.WARNING)
+    caplog_handler.addHandler(handler)
+
+    try:
+        # 不 raise
         registry.increment_labeled("x", labels=[("mode", "baseline_only")])  # type: ignore[arg-type]
+    finally:
+        caplog_handler.removeHandler(handler)
+
+    # labeled_snapshot 应为空 (skip 路径)
+    assert registry.labeled_snapshot() == {}
+    # Log 有 warning
+    output = stream.getvalue()
+    assert "Mapping" in output
+    assert "'x'" in output or "\"x\"" in output
 
 
 def test_labeled_and_unlabeled_storage_are_independent() -> None:

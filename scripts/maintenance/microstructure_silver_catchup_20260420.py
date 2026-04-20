@@ -222,10 +222,21 @@ def main() -> int:
         # 用 latest_complete_bar: 确保目标 bar 已完整关闭
         _, to_ts = latest_complete_bar()
     else:
-        to_ts = _align_down(args.to_ts)
+        aligned = _align_down(args.to_ts)
+        if aligned != args.to_ts:
+            log.warning(
+                "--to=%s 未对齐到 15min 边界, 已对齐 (align_down) 到 %s",
+                args.to_ts.isoformat(), aligned.isoformat(),
+            )
+        to_ts = aligned
 
     if args.from_ts is not None:
         from_ts = _align_up(args.from_ts)
+        if from_ts != args.from_ts:
+            log.warning(
+                "--from=%s 未对齐到 15min 边界, 已对齐 (align_up) 到 %s",
+                args.from_ts.isoformat(), from_ts.isoformat(),
+            )
     else:
         try:
             with get_session() as sess:

@@ -392,6 +392,52 @@ def test_create_ingest_run_call_sites_use_whitelisted_run_type() -> None:
     )
 
 
+def test_workflow_timeouts_covers_all_json_configs() -> None:
+    """WORKFLOW_TIMEOUTS (scripts/rdp_task_daemon.py) 必须覆盖 configs/rdp_workflows/*.json.
+
+    2026-04-20 code review B-M1: 4907af1 commit 修 VALID_WORKFLOWS 漏配 (candles_rolling_15m)
+    时, 自己注释承认 WORKFLOW_TIMEOUTS "(c) 暂靠人工 review". 本测试扫 daemon 源码里
+    WORKFLOW_TIMEOUTS dict key, 必须与 JSON config workflow name 严格一致,
+    否则 daemon 会用 DEFAULT_TIMEOUT (1800s) 掩盖"超时配置没给对"的真相.
+    """
+    import re
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[2]
+    workflows_dir = project_root / "configs" / "rdp_workflows"
+    daemon_py = project_root / "scripts" / "rdp_task_daemon.py"
+
+    assert workflows_dir.is_dir()
+    assert daemon_py.is_file()
+
+    # workflow JSON name 集合
+    import json
+    json_workflows = set()
+    for p in workflows_dir.glob("*.json"):
+        data = json.loads(p.read_text(encoding="utf-8"))
+        json_workflows.add(data["workflow"])
+
+    # 从 daemon py 抽 WORKFLOW_TIMEOUTS dict 的 key
+    src = daemon_py.read_text(encoding="utf-8")
+    m = re.search(r"WORKFLOW_TIMEOUTS\s*=\s*\{([^}]+)\}", src, flags=re.DOTALL)
+    assert m, "WORKFLOW_TIMEOUTS dict 未找到, 若已迁到其他文件请更新本测试"
+
+    # 抽所有 key (形如 "name": N)
+    keys_in_dict = set(re.findall(r'"([a-zA-Z_][a-zA-Z0-9_]*)"\s*:\s*\d+', m.group(1)))
+
+    missing = json_workflows - keys_in_dict
+    assert not missing, (
+        f"以下 workflow 有 JSON 配置但 WORKFLOW_TIMEOUTS 无对应 timeout: {sorted(missing)}; "
+        f"daemon 会 fallback DEFAULT_TIMEOUT=1800s 掩盖问题, 显式列出 timeout."
+    )
+
+    orphan = keys_in_dict - json_workflows
+    assert not orphan, (
+        f"以下 workflow 在 WORKFLOW_TIMEOUTS 但无 JSON 配置: {sorted(orphan)}; "
+        f"可能被删但 WORKFLOW_TIMEOUTS 忘同步, 留 dead entry."
+    )
+
+
 def test_ir_type_whitelist_matches_orm_check_constraint() -> None:
     """_IR_TYPE_WHITELIST 必须和 SQLAlchemy ORM CheckConstraint 中 chk_ir_type 一致.
 

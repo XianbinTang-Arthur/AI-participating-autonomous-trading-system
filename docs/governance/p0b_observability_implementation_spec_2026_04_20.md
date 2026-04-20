@@ -149,4 +149,10 @@ metrics.gauge("aats_runtime_ai_operating_mode", 1, labels={"mode": canonical_mod
 
 - 起草: Claude Opus 4.7 · 2026-04-20
 - 触发: P0-b governance doc 的 Observability 要求部分需要具体实施 spec
-- 状态: 等 P0-a 完成后分批实施
+- 状态: ✅ **全部 4 Task 已实施并 deploy** (2026-04-20):
+  - Task 2.1 顶栏 badge — commit 91b860f
+  - Task 2.2 Grafana panel — commit 7276674
+  - Task 2.3 Alerting rules — commit 7276674 + sev3 PromQL 修 (d14bd60)
+  - Task 2.4 OTel labeled metric — commit ecc6001 + order submission label (4b2ac2d)
+  - P1 遗留 Prometheus scrape 修复 — commit 3c90c64 (6/6 targets UP)
+  - dead-man alert — commit 7c5c5bc (sev1-metrics-scrape-dead-man)

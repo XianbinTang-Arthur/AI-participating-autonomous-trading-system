@@ -141,6 +141,8 @@
 
 - 起草: Claude Opus 4.7 · 2026-04-20
 - 基于: 用户 2026-04-20 战略 framework directive "停止在错误方向上试错"
-- 批准状态: 待用户确认
-- 下次修订: alpha evidence gate 成文后补充量化标准 (§3)
+- 批准状态: 用户 2026-04-20 战略 directive 已批准, 含 §2.6 governance doc 闭环冻结条款
+- 下次修订:
+  - ✅ alpha evidence gate v0.1 已成文 (d2d1c35), §3 解冻流程已闭链
+  - 下次触发: 路线 A phase 0 第一份 evidence 产出时 (预计 2026-04-27 观察窗结束后), 按 gate §9.2 反推数值具象化
 - 文档所有权: governance layer

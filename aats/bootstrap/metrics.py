@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import logging
 from collections import defaultdict
 from threading import Lock
 from typing import Mapping
+
+_logger = logging.getLogger("aats.metrics")
 
 
 class MetricsRegistry:
@@ -30,9 +33,19 @@ class MetricsRegistry:
 
         P0-b Task 2.4 引入：用于 runtime mode 等需要按枚举维度区分的指标。
         labels 必须是字符串→字符串映射，内部转 sorted tuple 确保 key 稳定。
+
+        2026-04-20 code review A-L3: 非 Mapping 输入时不再 raise TypeError
+        (caller 都 `except Exception: pass`, 异常被吞 → 开发期错误永不可见).
+        改成 warn log, 让错误至少出现在 Loki, 便于追溯"metric 不 emit 的原因".
         """
         if not isinstance(labels, Mapping):
-            raise TypeError("labels must be a Mapping[str, str]")
+            _logger.warning(
+                "increment_labeled: labels 必须是 Mapping[str, str], "
+                "传入类型 %r, metric=%r 的 labeled count 本次跳过",
+                type(labels).__name__,
+                metric_name,
+            )
+            return
         key = (metric_name, tuple(sorted((str(k), str(v)) for k, v in labels.items())))
         with self._lock:
             self._labeled_counts[key] += value

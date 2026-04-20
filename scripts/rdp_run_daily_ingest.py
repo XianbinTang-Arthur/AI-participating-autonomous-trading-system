@@ -390,7 +390,8 @@ def main() -> int:
     log.info("[1/4] Candles done: %d ok, %d failed", c_ok, c_fail)
 
     # ── 2. Funding 增量采集 ──
-    f_ok, f_fail = 0, 0  # 默认 0, 防止 --no-funding 时 summary 引用未绑定变量
+    # summary 分支按 args.no_funding 决定是否打印 f_ok/f_fail, 不再需要
+    # 初始化默认值 (code review B-NIT1: 防御性冗余).
     if not args.no_funding:
         log.info("")
         log.info("[2/4] Ingesting funding...")

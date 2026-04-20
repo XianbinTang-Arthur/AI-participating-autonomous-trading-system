@@ -61,7 +61,8 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "group by (mode) (aats_runtime_ai_operating_mode_total)",
+          "//": "2026-04-20 code review C-M3 fix: 原 query `group by (mode) (... _total)` 在 mode 切换后会显示**所有历史 mode** (counter 单调递增), value mapping 挑哪个变得不确定. 改用 `rate()[5m] > 0` 只返回**最近 5 min 有增长的 mode** = 当前活跃 mode. topk(1) 进一步保证单一结果.",
+          "expr": "topk(1, sum by (mode) (rate(aats_runtime_ai_operating_mode_total[5m])) > 0)",
           "instant": true,
           "legendFormat": "{{mode}}",
           "format": "table",

@@ -71,7 +71,7 @@ bash scripts/ops/route_a_daily_check.sh
 - 5 分钟以内完成
 - 结果 **append** 到 `artifacts/route_a_observation_window/<YYYY-MM-DD>.log`
 
-### 2.3 6 项 check
+### 2.3 6 项 check (含 threshold justification)
 
 | # | Check | Pass 条件 | 失败级别 |
 |:-:|---|---|---|
@@ -81,6 +81,18 @@ bash scripts/ops/route_a_daily_check.sh
 | 4 | 24h task queue | rolling workflow 非 done 数 ≤ 2 | WARN 1-2, FAIL > 2 |
 | 5 | 观察窗内 Silver gap count | 0 gap | WARN = 1, FAIL > 1 |
 | 6 | Runtime mode 守门 | `ai_operating_mode=baseline_only` | FAIL 任何其他值 |
+
+#### Threshold 设计理由 (2026-04-20 code review C-M1 补)
+
+| Check | 阈值 | 理由 |
+|:-:|---|---|
+| 2 | 30min WARN | cadence 是 15min bar. 1 bar 延迟 (= 15-30min age) 可能是 15min tick 执行窗口偏移; > 30min 说明至少错过 1 个 tick, 进 WARN 排查. |
+| 2 | 60min FAIL | 连续错过 4 次 tick (= 60min/15min) 说明 pipeline 明显卡住, 观察窗失去"连续产出"前提, 需 reset. |
+| 3 | 15min cadence diff | 两 pipeline 设计上同 cadence (commit 15dd04e + scheduler 测试 test_candles_rolling_15m_slot_aligns_to_microstructure_cadence 锁定). 差 > 1 bar = 某条线落后, 影响 T-bar 对齐. |
+| 4 | 2 次 WARN 阈值 | 24h = 96 个 15min tick, 2 / 96 ≈ 2.08% 容忍偶发网络抖动 / OKX REST 5xx. > 2 次说明系统性问题. |
+| 4 | **未**区分 contiguous vs sparse | 简化 v0.1. 若观察窗期间发现"连续 2 次同 workflow failed" 更严重但本测试没抓, operator 需手工查 log_tail 判断. 留 v0.2 迭代点. |
+| 5 | 1 gap WARN | 允许 1 次偶发数据源断 (OKX 维护 / 网络瞬断), UPSERT 幂等 + catchup 脚本能补. > 1 gap 需重置, 以免数据空洞污染 alpha 研究. |
+| 6 | FAIL 任何其他值 | §2.4 要求观察窗期间 runtime mode 不可改. ai_assisted / ai_decision_maker 都触发 FAIL + 观察窗 reset 7 天. |
 
 ### 2.4 Exit code 语义
 

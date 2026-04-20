@@ -12,15 +12,20 @@
 #   - 输出结构化 Pass/Fail, 便于逐日归档
 #
 # 用法:
+#   # 推荐 (自动归档): 默认 tee 到 artifacts/route_a_observation_window/<UTC-date>.log
 #   bash scripts/ops/route_a_daily_check.sh
+#
+#   # 仅看 stdout, 不落盘 (调试用):
+#   AATS_SKIP_DAILY_CHECK_LOG=true bash scripts/ops/route_a_daily_check.sh
 #
 # Exit codes:
 #   0 = 全部 check 通过 (观察窗计数 +1)
 #   1 = 有 WARN (观察窗不重置, 但需要 operator 注意)
 #   2 = 有 FAIL (观察窗重置, 起算点延后到问题解决日)
 #
-# 建议: 每日 22:00 Shanghai (~14:00 UTC, 15min tick 刚过) 跑一次,
-#       结果 append 到 artifacts/route_a_observation_window/<YYYY-MM-DD>.log
+# 建议: 每日 22:00 Shanghai (~14:00 UTC, 15min tick 刚过) 跑一次.
+# 脚本自动 tee 结果到 artifacts/route_a_observation_window/<YYYY-MM-DD>.log,
+# 不需要 operator 记得手动 | tee (C-L4 code review fix).
 
 set -u
 
@@ -31,6 +36,18 @@ readonly CHECK_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 # 观察窗起点 (固定, 不能改)
 readonly WINDOW_START_UTC="2026-04-20T14:15:00Z"
 readonly WINDOW_TARGET_UTC="2026-04-27T14:15:00Z"
+
+# 2026-04-20 code review C-L4 fix: 自动 tee 到 artifacts/, operator 不用
+# 记得手动 `| tee -a`. AATS_SKIP_DAILY_CHECK_LOG=true 可关 (调试场景).
+if [[ "${AATS_SKIP_DAILY_CHECK_LOG:-false}" != "true" ]]; then
+    _log_dir="artifacts/route_a_observation_window"
+    mkdir -p "$_log_dir" 2>/dev/null || true
+    _log_file="${_log_dir}/${CHECK_DATE}.log"
+    # 重定向全部后续 stdout/stderr 同时到屏幕和 log 文件 (append).
+    # 注: 本 tee 在此行之后生效, 上面已 echo 的行不会被记; 对日志完整性够.
+    exec > >(tee -a "$_log_file") 2>&1
+    printf '\n──── daily check run @ %s ────\n' "$CHECK_TS"
+fi
 
 WARN_COUNT=0
 FAIL_COUNT=0

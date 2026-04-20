@@ -798,15 +798,30 @@ def _build_oi_funding_metrics(
         # Phase 2A 回填时可考虑加 mid_price_ref_prev 列。
         pass
 
-    # Price-OI regime (简化版: 仅基于 oi_delta 符号)
+    # Price-OI regime: 需要 price_change_bps + oi_delta 两者都有才算得准.
+    # 2026-04-20 code review B-M5 fix:
+    #   之前版本在 price_change_bps 缺失时仍用 oi_delta 符号写 "trend_long"/
+    #   "long_cover", 语义错 (OI↑+价↓ = short build-up, 不是 "trend_long";
+    #   OI↓+价↑ = "short_cover" 不是 "long_cover"). 缺 price 就写 NULL,
+    #   等 Phase 2A 加 mid_price_ref_prev 列后真实计算 price_change 再填.
     oi_price_regime = None
-    if oi_delta is not None:
-        if oi_delta > Decimal("0.005"):
-            oi_price_regime = "trend_long"  # OI 增 + 价涨的 fallback,缺 price 用 OI 决定
-        elif oi_delta < Decimal("-0.005"):
-            oi_price_regime = "long_cover"
+    if oi_delta is not None and price_change_bps is not None:
+        up = price_change_bps > 0
+        down = price_change_bps < 0
+        oi_up = oi_delta > Decimal("0.005")
+        oi_down = oi_delta < Decimal("-0.005")
+        if oi_up and up:
+            oi_price_regime = "trend_long"   # 建仓多头
+        elif oi_up and down:
+            oi_price_regime = "trend_short"  # 建仓空头 (B-M5 修: 原缺此 case)
+        elif oi_down and down:
+            oi_price_regime = "long_cover"   # 多头平仓
+        elif oi_down and up:
+            oi_price_regime = "short_cover"  # 空头平仓 (B-M5 修: 原缺此 case)
         else:
             oi_price_regime = "flat"
+    # price_change_bps 缺失 → 留 NULL (Gold 层 / research 消费时可按 NULL 处理,
+    # 比写误导性字符串好)
 
     params = {
         "symbol": symbol,
@@ -1312,14 +1327,52 @@ def _upsert_silver_liquidation(session: Session, p: dict[str, Any]) -> None:
 def _quality_flags_for_table(all_flags: list[str], table_key: str) -> list[str]:
     """过滤 shared all_flags 里只属于本 table 的 flag。
 
-    Shared flags (etl_failed:*, partial_data, stale_source) 对所有 5 张表都
-    有意义, 所以每张表的 quality_flags 列都带上它们 + 自己专属的 '*_no_data'
-    / 'ema_seed_from_sma' / 'partial_baseline' 等。这里简化 Phase 1A:
-    每张表都带上完整 all_flags (避免丢失诊断信息), 后续读者按 table 列自行
-    过滤语义。
+    2026-04-20 code review B-M2 fix:
+      旧语义: 每张表都带完整 all_flags → "trade_flow 的 row 带 etl_failed:orderbook"
+      误导 Loki/Grafana alert 规则按 `quality_flags @> '["etl_failed:..."]'` 过滤.
+      新语义: per-table filtering, 只保留:
+        1. 真正 cross-table 的 flag (stale_source / partial_data)
+        2. 本 table 自己的 etl_failed (etl_failed:<self_table_key>)
+        3. 以 table_key 为前缀的 flag (e.g. volume_profile_* 只进 volume_profile)
+        4. 非前缀字符但语义上 per-table 不冲突的 flag (mark_no_data 等
+           source-layer 描述: 对所有使用该 source 的表有意义)
+
+    这样 trade_flow 的 etl_failed:orderbook flag 不再串进来, 告警规则能
+    精确定位问题表.
     """
-    # 简化: 直接返回 shallow copy,避免 shared mutable alias
-    return list(all_flags)
+    # 跨表真实 shared 的 flag (描述整个 bar 的全局质量, 对 5 张表都有意义)
+    _GLOBAL_FLAGS = {"stale_source", "partial_data", "partial_baseline"}
+    # Source-layer no_data 描述 Bronze 源, 对所有读该 source 的表都有意义
+    _SOURCE_NO_DATA_FLAGS = {
+        "trades_no_data",
+        "orderbook_bbo_no_data",
+        "orderbook_books5_no_data",
+        "mark_no_data",
+        "oi_no_data",
+        "funding_no_data",
+        "liquidation_no_data",
+    }
+
+    result: list[str] = []
+    for flag in all_flags:
+        if flag in _GLOBAL_FLAGS or flag in _SOURCE_NO_DATA_FLAGS:
+            result.append(flag)
+            continue
+        if flag == f"etl_failed:{table_key}":
+            # 本表 etl_failed → 保留
+            result.append(flag)
+            continue
+        if flag.startswith("etl_failed:"):
+            # 其他表的 etl_failed, 跳过 (不再污染本表)
+            continue
+        if flag.startswith(f"{table_key}_") or flag.startswith(f"{table_key}."):
+            # 本表前缀的 flag (如 ema_seed_from_sma 理论上也该加 table 前缀, 暂保留)
+            result.append(flag)
+            continue
+        # 不明前缀的 flag (如 ema_seed_from_sma): 保留全局可见, 直到 Phase 2
+        # 每张表改用严格 per-table prefix 命名
+        result.append(flag)
+    return result
 
 
 # ─────────────────────────────────────────────────────────────────────

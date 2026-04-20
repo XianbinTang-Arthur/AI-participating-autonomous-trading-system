@@ -119,6 +119,25 @@ if [[ ${APPLY} -eq 1 && ${CONFIRM} -eq 0 ]]; then
     exit 4
 fi
 
+# 2026-04-20 code review C-M2: --skip-preflight 可一步绕过全部资金安全
+# guardrail. 加 double-token: 必须配环境变量 AATS_I_KNOW_SKIP_PREFLIGHT_IS_DANGEROUS=true
+# 才真正生效. 否则报错提示 operator 自己手动确认.
+# 理由: 单 flag 易被脚本/自动化 blindly pass, 要求一个显式 env 确保**人为**
+# 输入每次都 explicit 确认; env 不太可能被打包到 cron / automation.
+if [[ ${SKIP_PREFLIGHT} -eq 1 ]]; then
+    if [[ "${AATS_I_KNOW_SKIP_PREFLIGHT_IS_DANGEROUS:-}" != "true" ]]; then
+        echo "ERROR: --skip-preflight 需要显式 AATS_I_KNOW_SKIP_PREFLIGHT_IS_DANGEROUS=true env." >&2
+        echo "       该 env 防止自动化脚本 blindly 绕过资金安全 preflight." >&2
+        echo "       正确用法: AATS_I_KNOW_SKIP_PREFLIGHT_IS_DANGEROUS=true bash $0 --apply --confirm --skip-preflight --reason 'emergency'" >&2
+        exit 4
+    fi
+    # 若 --skip-preflight 和 --force-with-money 同时出现, 也需要明示理由.
+    if [[ ${FORCE_WITH_MONEY} -eq 1 && -z "${REASON// /}" ]]; then
+        echo "ERROR: --skip-preflight + --force-with-money 组合必须显式 --reason '<具体理由>'" >&2
+        exit 4
+    fi
+fi
+
 # ─────────────────────────────────────────────────────────────
 # 工具函数
 # ─────────────────────────────────────────────────────────────
