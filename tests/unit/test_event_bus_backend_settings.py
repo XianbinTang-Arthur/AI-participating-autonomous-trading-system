@@ -48,10 +48,12 @@ def test_default_nats_stream_name_matches_runbook() -> None:
     assert settings.nats_stream_name == "AATS_EVENTS"
 
 
-def test_default_nats_stream_max_age_is_seven_days() -> None:
-    """默认 retention 7 天，与 NatsBusConfig 一致。"""
+def test_default_nats_stream_max_age_is_one_day() -> None:
+    """默认 retention 1 天 — NATS stream 是 hot buffer，不承担长期存档
+    （长期合规/回放由 PG event_store 承担，见
+    docs/task/aats_events_stream_retention_root_fix_sow.md）。"""
     settings = AATSSettings.model_validate({})
-    assert settings.nats_stream_max_age_seconds == 7 * 24 * 60 * 60
+    assert settings.nats_stream_max_age_seconds == 24 * 60 * 60
 
 
 def test_allowed_event_bus_backends_set_contents() -> None:

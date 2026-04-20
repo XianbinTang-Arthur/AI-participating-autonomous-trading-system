@@ -487,7 +487,16 @@ DEFAULT_AATS_EVENTS_MARKET_SPEC = StreamSpec(
 DEFAULT_AATS_EVENTS_SPEC = StreamSpec(
     name="AATS_EVENTS",
     topics=DEFAULT_CRITICAL_EVENTS_TOPICS,
-    max_age_seconds=604_800,             # 7 天（合规 / 回放窗口）
+    # 2026-04-20 根治 stream 接近 max_bytes 上限触发 compaction 风暴问题：
+    # NATS stream 应该是 "hot buffer"，给 live consumer 的短期 replay；长期保留/
+    # 合规/回放由 PG event_store 承担（ReplayEngine 100% 走 event_store，不
+    # 依赖 NATS stream）。原 7 天 retention 让 audit_records 等大 payload 累积
+    # 到 99.985% max_bytes，每条 publish 都撞 old-message discard compaction
+    # → audit.publish_model 批量 TimeoutError → noncritical_subscription_failed
+    # 每 2-3 分钟一条。改 1 天后 stream size 预估 ~600MB（~14% max_bytes），
+    # 有 85% headroom 处理 consumer 暂时落后（durable consumer 生产中秒级 ack，
+    # 24h 窗口极其充足）。详见 docs/task/aats_events_stream_retention_root_fix_sow.md。
+    max_age_seconds=86_400,              # 1 天（hot buffer；长期存档由 PG event_store）
     max_bytes=4_294_967_296,             # 4 GB
     max_msgs=5_000_000,                  # 500 万条
     max_msg_size=4_194_304,              # 4 MB（与 MARKET 对称）
@@ -573,7 +582,10 @@ class NatsBusConfig:
     stream_name: str = "AATS_EVENTS"
     # JetStream stream 内消息最大保留时间（秒），过期消息会被自动丢弃。
     # 默认 7 天足够 Stage 4 集成回放，生产可调长（30/90 天）。
-    stream_max_age_seconds: float = 7 * 24 * 60 * 60
+    # 1 天 hot buffer retention（长期存档由 PG event_store 承担）。详见
+    # DEFAULT_AATS_EVENTS_SPEC 注释和
+    # docs/task/aats_events_stream_retention_root_fix_sow.md。
+    stream_max_age_seconds: float = 24 * 60 * 60
     # 单条事件最大 ack_wait（秒），handler 处理超时后会被重试
     ack_wait_seconds: float = 30.0
     # 单个消费者最多 in-flight ack 待确认数

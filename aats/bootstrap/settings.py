@@ -195,8 +195,15 @@ class AATSSettings(BaseSettings):
         description="NATS JetStream stream name for AATS critical events.",
     )
     nats_stream_max_age_seconds: int = Field(
-        default=7 * 24 * 60 * 60,
-        description="JetStream retention max age (seconds). Default 7 days.",
+        default=24 * 60 * 60,
+        description=(
+            "JetStream retention max age (seconds). Default 1 day. "
+            "NATS stream is a hot buffer for live consumer replay; long-term "
+            "retention / audit / reconciliation replay is served from the PG "
+            "event_store (see ReplayEngine). See "
+            "docs/task/aats_events_stream_retention_root_fix_sow.md for the "
+            "root-cause analysis that motivated shortening this from 7 days."
+        ),
     )
     # ── Stage 6：HotStateStore backend ─────────────────────────────────
     # 跨进程共享 KV 缓存（kill_switch / portfolio / 等高频读状态）。

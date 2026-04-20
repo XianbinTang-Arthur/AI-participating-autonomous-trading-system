@@ -409,12 +409,16 @@ def test_consumer_config_spec_is_frozen() -> None:
 # ─────────────────────────────────────────────────────────────────────
 
 
-def test_stream_max_age_default_is_seven_days() -> None:
-    """默认 max_age = 7 天（NatsBusConfig 持秒；nats-py StreamConfig.max_age 也以秒为单位，
+def test_stream_max_age_default_is_one_day() -> None:
+    """默认 max_age = 1 天（2026-04-20 从 7 天改 1 天，参见
+    docs/task/aats_events_stream_retention_root_fix_sow.md ——
+    长期合规/回放由 PG event_store 承担，NATS 仅作 hot buffer）。
+
+    单位校对：NatsBusConfig 持秒；nats-py StreamConfig.max_age 也以秒为单位，
     内部 _to_nanoseconds() 自行换算，调用方不要再预乘 1e9 —— 否则会被双重换算成超大整数，
     触发 NATS server "invalid JSON" 拒绝。"""
     config = NatsBusConfig()
-    assert config.stream_max_age_seconds == 7 * 24 * 60 * 60
+    assert config.stream_max_age_seconds == 24 * 60 * 60
 
 
 def test_ensure_stream_passes_max_age_in_seconds_not_nanoseconds() -> None:
@@ -536,7 +540,9 @@ def test_ensure_stream_unchanged_when_subjects_match() -> None:
     # fake StreamInfo：.config 所有字段都必须和 legacy shim 默认容量完全相等，
     # 否则 _compute_stream_config_drift 会报 drift → 走 update_stream 分支。
     # legacy shim 容量默认（见 NatsEventBus.ensure_stream docstring）：
-    #   max_age = config.stream_max_age_seconds = 7 * 24 * 3600
+    #   max_age = config.stream_max_age_seconds = 24 * 3600（2026-04-20 改 1 天，
+    #             原 7 * 24 * 3600，参见
+    #             docs/task/aats_events_stream_retention_root_fix_sow.md）
     #   max_bytes = 128 MB
     #   max_msgs = 10_000
     #   max_msg_size = 4 MB
@@ -548,7 +554,7 @@ def test_ensure_stream_unchanged_when_subjects_match() -> None:
         "aats.execution.order_intents",
         "aats.decisions",
     ]
-    fake_info.config.max_age = 7 * 24 * 60 * 60
+    fake_info.config.max_age = 24 * 60 * 60
     fake_info.config.max_bytes = 128 * 1024 * 1024
     fake_info.config.max_msgs = 10_000
     fake_info.config.max_msg_size = 4 * 1024 * 1024
@@ -871,8 +877,11 @@ def test_default_stream_specs_match_design_doc_capacities() -> None:
     assert DEFAULT_AATS_EVENTS_MARKET_SPEC.max_bytes == 2 * 1024**3   # 2 GB
 
     assert DEFAULT_AATS_EVENTS_SPEC.name == "AATS_EVENTS"
-    assert DEFAULT_AATS_EVENTS_SPEC.max_age_seconds == 7 * 24 * 60 * 60  # 7 天
-    assert DEFAULT_AATS_EVENTS_SPEC.max_bytes == 4 * 1024**3   # 4 GB
+    # 2026-04-20 从 7 天改 1 天，参见
+    # docs/task/aats_events_stream_retention_root_fix_sow.md ——
+    # NATS stream 是 hot buffer，长期合规/回放由 PG event_store 承担。
+    assert DEFAULT_AATS_EVENTS_SPEC.max_age_seconds == 24 * 60 * 60  # 1 天
+    assert DEFAULT_AATS_EVENTS_SPEC.max_bytes == 4 * 1024**3   # 4 GB（不动）
 
     # MARKET 只承载 MARKET_SNAPSHOTS + FEATURE_SNAPSHOTS
     assert DEFAULT_MARKET_STREAM_TOPICS == frozenset(
@@ -1281,7 +1290,7 @@ def test_compute_stream_config_drift_handles_nanosecond_max_age() -> None:
     """
     spec = DEFAULT_AATS_EVENTS_SPEC
     info = _make_fake_stream_info_from_spec(spec)
-    # 模拟纳秒整数：604_800 秒 * 1e9 = 6.048e14 纳秒
+    # 模拟纳秒整数：spec.max_age_seconds * 1e9 = 纳秒（2026-04-20 改 1 天 = 8.64e13 纳秒）
     info.config.max_age = int(spec.max_age_seconds * 1e9)
     subjects = [f"aats.{t}" for t in sorted(spec.topics)]
 
