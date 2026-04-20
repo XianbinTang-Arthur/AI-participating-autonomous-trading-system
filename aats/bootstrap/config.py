@@ -835,6 +835,24 @@ class ApplicationRuntime:
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
+        # 2026-04-20 decision_features_handler_queue_decoupling_sow.md §3.S1
+        # 停掉 DecisionCycleTrigger 的 dispatcher task。和 abort_hook_service
+        # 同模式：_subscribe_critical_handlers 里 start()，stop_background_tasks
+        # 里 stop()。必须在 bus.close 之前（stop() 内部不走 NATS，但保持一致的
+        # teardown 顺序便于审计）。getattr 兜底是因为单测 __new__ minimal
+        # runtime 场景，字段默认值可能未写入。
+        try:
+            decision_trigger = getattr(self, "decision_trigger", None)
+            if decision_trigger is not None:
+                await decision_trigger.stop()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "decision_trigger_shutdown_close_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
         await self.market_gateway.stop()
         close_rest_client = getattr(self.account_service.client, "aclose", None)
         if callable(close_rest_client):
@@ -3124,6 +3142,11 @@ async def _subscribe_critical_handlers(
     if market_gateway is not None and not market_gateway.is_producer:
         await bus.subscribe(topics.MARKET_SNAPSHOTS, market_gateway.handle_remote_market_snapshot)
     if decision_trigger is not None:
+        # 2026-04-20 decision_features_handler_queue_decoupling_sow.md §3.S1
+        # 必须在 subscribe 之前调 start()：handler 有机会走 queue 路径时，queue
+        # 和 dispatcher task 都得先就位。flag 默认 False → start() 对生产行为
+        # 无影响，只建 infra；S2 切 flag=True 时 queue 会立即投入使用。
+        await decision_trigger.start()
         await bus.subscribe(topics.FEATURE_SNAPSHOTS, decision_trigger.handle_feature_snapshot)
     if order_manager is not None:
         await bus.subscribe(topics.ORDER_INTENTS, order_manager.handle_order_intent)
