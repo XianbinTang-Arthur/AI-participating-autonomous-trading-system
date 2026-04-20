@@ -195,12 +195,16 @@ def create_database_runtime(database_url: str) -> DatabaseRuntime:
     if parsed_url.get_backend_name() != "postgresql":
         raise ValueError("database_url_must_use_postgresql")
 
+    # 2026-04-20 S4 改动（gateway_slow_query_systematic_fix_sow.md §S4.3）：
+    # pool_size 10→15, max_overflow 20→45. 理由：_parallel.py 嵌套守卫改为
+    # "本地小池" 后，线程总数上限从 12 变成 12 × (1 + 4) = 60, 需要 DB 连接池
+    # 相应匹配。PG max_connections=200 充裕，不会引爆。
     engine = create_engine(
         database_url,
         future=True,
         pool_pre_ping=True,
-        pool_size=10,
-        max_overflow=20,
+        pool_size=15,
+        max_overflow=45,
         pool_timeout=30,
     )
     return DatabaseRuntime(
