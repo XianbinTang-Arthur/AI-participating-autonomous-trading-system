@@ -78,7 +78,7 @@ class DecisionCycleTrigger:
         self._dispatcher_task: asyncio.Task[None] | None = None
         self._dispatcher_shutdown = asyncio.Event()
         # Feature flag：S2 改成 True；S3 连同 flag 一起删。
-        self._use_queue_dispatcher: bool = False
+        self._use_queue_dispatcher: bool = True
 
     # ──────────────────────────────────────────────────────────────
     # 生命周期：start() / stop()
@@ -305,17 +305,53 @@ class DecisionCycleTrigger:
                 )
 
     async def _handle_feature_snapshot_via_queue(self, message: dict) -> None:
-        """S2 实现快路径（本 S1 stage 不启用）。
+        """快路径（S2 实施）：parse + should_trigger 判断，命中就 enqueue
+        立即 return 让 NATS ack。**不** 在这条路径上 await run_cycle。
 
-        S1 先写空壳避免 flag=True 时炸。S2 commit 会把这里填实，
-        flag 同步改 True。
+        语义对齐 legacy 的几处关键：
+        - R3-P1-U-A：feature_envelope 作为 feature_snapshot_hint 透传给
+          run_cycle（放进 _PendingTrigger），context_builder.py:128 的
+          hint 优先路径保证 ref 不漂移。
+        - can_trigger 门控：handler 入口做一次 + 每个 timeframe 前重做
+          一次，维持 legacy 的双重检查语义（legacy 在锁内重检，本路径
+          无锁，把第二次检查保留为"入队前最后一次兜底"）。
+        - policy.should_trigger / record_trigger：record_trigger 由
+          dispatcher 在 run_cycle 成功后调，handler 只 read should_trigger。
+
+        和 legacy 的差异：
+        - 没有 asyncio.Lock。单 dispatcher task 天然串行；多个 handler
+          可能并发命中 should_trigger=True 时通过 _enqueue_trigger 的
+          latest-wins 排重（SOW §7 已源码论证不破坏决策语义）。
         """
-        # S1 占位：flag 为 False 时此分支不会被调用（handle_feature_snapshot
-        # 已经 route 到 legacy）。万一有人误开 flag 至少不崩溃。
-        log_event(
-            self.logger,
-            "features_snapshot_via_queue_not_implemented",
-            level="warning",
-            note="S2 未合入时 flag 不应为 True；回退到 legacy",
-        )
-        await self._handle_feature_snapshot_legacy(message)
+        feature_envelope = parse_envelope(message)
+        snapshot = FeatureSnapshot.model_validate(feature_envelope.payload)
+        if self.can_trigger is not None:
+            allowed, _reason = self.can_trigger(symbol=snapshot.symbol)
+            if not allowed:
+                return
+        for timeframe in self.policy.enabled_timeframes():
+            # 入队前的 can_trigger 二次检查：对齐 legacy 锁内那次 (trigger.py
+            # 原 line 52-55)，处理的是"第一次 can_trigger check 之后、此 for 循环
+            # 执行期间 halted/mode_control 状态刚好切换"的极窄竞态。legacy
+            # 路径里是抓到 lock 再 check，本路径无锁，把这次 check 放在
+            # should_trigger 之前（策略计算之前）效果等价。
+            if self.can_trigger is not None:
+                allowed, _reason = self.can_trigger(symbol=snapshot.symbol)
+                if not allowed:
+                    continue
+            current_market_snapshot = self.market_gateway.latest_snapshot(snapshot.symbol)
+            should_trigger, _reason = self.policy.should_trigger(
+                feature_snapshot=snapshot,
+                market_snapshot=current_market_snapshot,
+                timeframe=timeframe,
+            )
+            if not should_trigger or current_market_snapshot is None:
+                continue
+            await self._enqueue_trigger(
+                _PendingTrigger(
+                    feature_envelope=feature_envelope,
+                    snapshot=snapshot,
+                    timeframe=timeframe,
+                    market_snapshot=current_market_snapshot,
+                )
+            )

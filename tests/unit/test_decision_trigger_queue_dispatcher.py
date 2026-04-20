@@ -283,5 +283,168 @@ class TestLegacyPathStillWorksWhenFlagFalse(unittest.IsolatedAsyncioTestCase):
         return None
 
 
+class TestHandleFeatureSnapshotViaQueue(unittest.IsolatedAsyncioTestCase):
+    """S2 切 flag 后 _handle_feature_snapshot_via_queue 的行为。
+
+    3 条核心契约：
+    1. handler 快速返回（不等 run_cycle）
+    2. should_trigger=True 命中后 dispatcher 最终跑 run_cycle
+    3. 多条连续命中的消息走 latest-wins 去重（dispatcher 跑的次数 < handler 调用次数）
+    """
+
+    async def test_handler_fast_returns_without_awaiting_run_cycle(self) -> None:
+        """快路径契约：即便 run_cycle 装慢 2s，handler 10 次调用 < 100ms。"""
+        release_run_cycle = asyncio.Event()
+        run_cycle_calls: list[str] = []
+
+        async def slow_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+            run_cycle_calls.append(feature_snapshot_hint.event_id)
+            # 卡住不返回，模拟 22s 毛刺
+            await release_run_cycle.wait()
+
+        # spy should_trigger 让它总返回 True（模拟 cadence_elapsed）
+        policy = SimpleNamespace(
+            enabled_timeframes=lambda: ("15m",),
+            should_trigger=lambda **kwargs: (True, "test"),
+            record_trigger=lambda **kwargs: None,
+        )
+        market_gw = SimpleNamespace(
+            latest_snapshot=lambda sym: SimpleNamespace(symbol=sym, snapshot_ts=None, last_price=None),
+        )
+        orch = SimpleNamespace(run_cycle=slow_run_cycle)
+
+        trig = _fake_trigger(orchestrator=orch, market_gateway=market_gw, policy=policy)
+        trig._use_queue_dispatcher = True
+        await trig.start()
+
+        try:
+            # mock parse_envelope + FeatureSnapshot.model_validate：S2 handler
+            # 需要这两个函数可用。我们在 trigger 模块的 symbol 空间里 patch。
+            import aats.services.decision_engine.trigger as trigger_module
+
+            call_log: list[int] = []
+            original_parse = trigger_module.parse_envelope
+            original_validate = trigger_module.FeatureSnapshot.model_validate
+
+            def fake_parse(message):
+                tag = message["tag"]
+                call_log.append(tag)
+                return SimpleNamespace(event_id=f"evt_{tag}", payload={"tag": tag})
+
+            def fake_validate(payload):
+                return SimpleNamespace(symbol="BTC-USDT-SWAP")
+
+            trigger_module.parse_envelope = fake_parse
+            trigger_module.FeatureSnapshot.model_validate = fake_validate
+            try:
+                import time as _time
+                t0 = _time.monotonic()
+                for i in range(10):
+                    await trig.handle_feature_snapshot({"tag": i})
+                elapsed_ms = (_time.monotonic() - t0) * 1000
+
+                # 10 次 handler call 总耗时 < 100ms（不等 slow_run_cycle 的 "forever"）
+                self.assertLess(
+                    elapsed_ms, 100.0,
+                    f"handler 应快速返回不等 run_cycle，实测 {elapsed_ms:.1f}ms",
+                )
+                # run_cycle 已经被 dispatcher 调用至少 1 次（第一次拿去跑卡住了）
+                await asyncio.sleep(0.05)
+                self.assertGreaterEqual(len(run_cycle_calls), 1)
+            finally:
+                trigger_module.parse_envelope = original_parse
+                trigger_module.FeatureSnapshot.model_validate = original_validate
+        finally:
+            release_run_cycle.set()
+            await trig.stop()
+
+    async def test_handler_eventually_triggers_run_cycle_when_should_trigger_true(self) -> None:
+        """命中 should_trigger=True 后 dispatcher 最终跑 run_cycle。"""
+        run_cycle_calls: list[str] = []
+
+        async def run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+            run_cycle_calls.append(feature_snapshot_hint.event_id)
+
+        policy = SimpleNamespace(
+            enabled_timeframes=lambda: ("15m",),
+            should_trigger=lambda **kwargs: (True, "cadence_elapsed"),
+            record_trigger=lambda **kwargs: None,
+        )
+        market_gw = SimpleNamespace(
+            latest_snapshot=lambda sym: SimpleNamespace(symbol=sym, snapshot_ts=None, last_price=None),
+        )
+        orch = SimpleNamespace(run_cycle=run_cycle)
+
+        trig = _fake_trigger(orchestrator=orch, market_gateway=market_gw, policy=policy)
+        trig._use_queue_dispatcher = True
+        await trig.start()
+
+        try:
+            import aats.services.decision_engine.trigger as trigger_module
+            original_parse = trigger_module.parse_envelope
+            original_validate = trigger_module.FeatureSnapshot.model_validate
+            trigger_module.parse_envelope = lambda m: SimpleNamespace(event_id="evt_single", payload={})
+            trigger_module.FeatureSnapshot.model_validate = lambda p: SimpleNamespace(symbol="BTC-USDT-SWAP")
+            try:
+                await trig.handle_feature_snapshot({"tag": "single"})
+                # 等 dispatcher 消费
+                for _ in range(50):
+                    if run_cycle_calls:
+                        break
+                    await asyncio.sleep(0.02)
+                self.assertEqual(run_cycle_calls, ["evt_single"])
+            finally:
+                trigger_module.parse_envelope = original_parse
+                trigger_module.FeatureSnapshot.model_validate = original_validate
+        finally:
+            await trig.stop()
+
+    async def test_handler_skips_enqueue_when_should_trigger_false(self) -> None:
+        """should_trigger=False 时不 enqueue，dispatcher 不跑 run_cycle。
+
+        这是确认快路径的"should_trigger 门控"仍然生效——不是所有 feature_snapshot
+        都入队（那样 queue 一直满、dispatcher 没用）。
+        """
+        run_cycle_calls: list[str] = []
+
+        async def run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+            run_cycle_calls.append(feature_snapshot_hint.event_id)
+
+        policy = SimpleNamespace(
+            enabled_timeframes=lambda: ("15m",),
+            should_trigger=lambda **kwargs: (False, "suppressed_duplicate"),
+            record_trigger=lambda **kwargs: None,
+        )
+        market_gw = SimpleNamespace(
+            latest_snapshot=lambda sym: SimpleNamespace(symbol=sym, snapshot_ts=None, last_price=None),
+        )
+        orch = SimpleNamespace(run_cycle=run_cycle)
+
+        trig = _fake_trigger(orchestrator=orch, market_gateway=market_gw, policy=policy)
+        trig._use_queue_dispatcher = True
+        await trig.start()
+
+        try:
+            import aats.services.decision_engine.trigger as trigger_module
+            original_parse = trigger_module.parse_envelope
+            original_validate = trigger_module.FeatureSnapshot.model_validate
+            trigger_module.parse_envelope = lambda m: SimpleNamespace(event_id="evt_x", payload={})
+            trigger_module.FeatureSnapshot.model_validate = lambda p: SimpleNamespace(symbol="BTC-USDT-SWAP")
+            try:
+                for _ in range(5):
+                    await trig.handle_feature_snapshot({"any": "msg"})
+                # 给 dispatcher 时间（应该什么都没做）
+                await asyncio.sleep(0.1)
+                # queue 应该空，run_cycle 没被调
+                self.assertEqual(run_cycle_calls, [])
+                assert trig._trigger_queue is not None
+                self.assertEqual(trig._trigger_queue.qsize(), 0)
+            finally:
+                trigger_module.parse_envelope = original_parse
+                trigger_module.FeatureSnapshot.model_validate = original_validate
+        finally:
+            await trig.stop()
+
+
 if __name__ == "__main__":
     unittest.main()

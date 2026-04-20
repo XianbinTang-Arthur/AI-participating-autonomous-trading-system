@@ -196,6 +196,11 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
             market_gateway=_FakeMarketGateway(),
             policy=policy,
         )
+        # S2 后 DecisionCycleTrigger 需要先 start() 起 dispatcher task。
+        # 生产路径由 bootstrap/config.py:_subscribe_critical_handlers 统一挂。
+        # 测试里手工调 + addAsyncCleanup 保证 teardown。
+        await trigger.start()
+        self.addAsyncCleanup(trigger.stop)
         envelope = build_envelope(
             topic=topics.FEATURE_SNAPSHOTS,
             key=feature.symbol,
@@ -209,6 +214,11 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
             trigger.handle_feature_snapshot(message),
             trigger.handle_feature_snapshot(message),
         )
+        # Queue 路径下 handler 立即返回，run_cycle 由 dispatcher 异步消费。
+        # 等 queue 排空 + task_done 配对再断言。enqueue 里 drain 也做了 task_done
+        # 配对，所以 join 语义清晰：unfinished_tasks==0 即"dispatcher 已跑完所有
+        # 实际进 queue 的 pending"。
+        await trigger._trigger_queue.join()
 
         self.assertEqual(orchestrator.calls, [("BTC-USDT", "15m")])
 
@@ -242,6 +252,8 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
             policy=policy,
             can_trigger=lambda *, symbol: (False, "kill_switch_active"),
         )
+        await trigger.start()
+        self.addAsyncCleanup(trigger.stop)
         envelope = build_envelope(
             topic=topics.FEATURE_SNAPSHOTS,
             key=feature.symbol,
@@ -252,6 +264,7 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
 
         await trigger.handle_feature_snapshot(message)
 
+        # can_trigger=False → handler 不入队，队列空；不需 join。
         self.assertEqual(orchestrator.calls, [])
 
     async def test_companion_spot_symbol_is_filtered_out_of_derivatives_decision_cycle(self) -> None:
@@ -302,6 +315,8 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
                 "symbol_not_enabled_for_decision_cycle",
             ),
         )
+        await trigger.start()
+        self.addAsyncCleanup(trigger.stop)
         envelope = build_envelope(
             topic=topics.FEATURE_SNAPSHOTS,
             key=feature.symbol,
@@ -312,6 +327,7 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
 
         await trigger.handle_feature_snapshot(message)
 
+        # can_trigger 把 spot companion symbol 挡住 → 不入队。
         self.assertEqual(orchestrator.calls, [])
 class TestGatewayTriggerSnapshotTsParity(unittest.TestCase):
     """R3-P1-U-B 回归：market_gateway.apply_remote_snapshot 用 `<` 接收
@@ -407,6 +423,8 @@ class TestFeatureSnapshotHintPropagation(unittest.IsolatedAsyncioTestCase):
             market_gateway=_FakeMarketGateway(),
             policy=policy,
         )
+        await trigger.start()
+        self.addAsyncCleanup(trigger.stop)
         envelope = build_envelope(
             topic=topics.FEATURE_SNAPSHOTS,
             key=feature.symbol,
@@ -420,6 +438,8 @@ class TestFeatureSnapshotHintPropagation(unittest.IsolatedAsyncioTestCase):
         }
 
         await trigger.handle_feature_snapshot(message)
+        # Queue 路径：dispatcher 异步消费，等它把 run_cycle 跑完。
+        await trigger._trigger_queue.join()
 
         self.assertEqual(len(orchestrator.hints), 1)
         hint = orchestrator.hints[0]
