@@ -499,12 +499,16 @@ groups:
             # 新表达式: 用 `and on()` 子句门控 — 仅当 ai_decision_maker mode 活
             #   跃 (最近 5min 有 decision_outcome emit, rate>0) AND 24h 零订单
             #   才触发. 保持分母非零但不污染分子.
-            expr: |
-              (sum(rate(aats_orders_submitted_total{mode="ai_decision_maker"}[24h])) == 0)
-              and on()
-              (sum(rate(aats_runtime_ai_operating_mode_total{mode="ai_decision_maker"}[5m])) > 0)
-              or on() vector(0)
-            queryType: range
+            # 2026-04-20 修: expr/queryType 之前未缩进到 model:, 导致
+            #   queryV1.Model.Raw=nil -> json.Marshal=null -> Grafana 解码后
+            #   modelProps=nil -> setMaxDatapoints 往 nil map 写入 panic.
+            model:
+              expr: |
+                (sum(rate(aats_orders_submitted_total{mode="ai_decision_maker"}[24h])) == 0)
+                and on()
+                (sum(rate(aats_runtime_ai_operating_mode_total{mode="ai_decision_maker"}[5m])) > 0)
+                or on() vector(0)
+              queryType: range
             relativeTimeRange:
               from: 86400
               to: 0
