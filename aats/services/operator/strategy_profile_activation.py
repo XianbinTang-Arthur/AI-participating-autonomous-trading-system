@@ -407,10 +407,33 @@ class StrategyProfileActivationFacade:
         }
 
     async def evaluate_mainline_profile_control(self, *, decision_id: str) -> ProfileControlDecision | None:
-        # allow_auto_activation 必须按 strategy_profile_auto_control_enabled 决定:
-        # true  → AI 推荐自动应用(原语义)
-        # false → AI 生成推荐但不自动执行;手动激活走独立 admin API,不受此影响
+        # strategy_profile_auto_control_enabled 与 ai_operating_mode 完全独立正交:
+        # 后者管主决策引擎,此处管档位自动切换。
+        # false 分支必须跳过 evaluate_now:该方法内部无条件调用 OpenAI 生成推荐,
+        # 若不短路,即使用户关闭"自动换档"开关也会持续产生 API 账单。
+        # 手动档位切换走独立 admin API(profiles/{id}/activate、manual-pause-auto、
+        # manual-restore-auto),不经此路径。
         allow_auto = bool(self.owner.settings.strategy_profile_auto_control_enabled)
+
+        if not allow_auto:
+            state = self.owner._activation_state()
+            if not state.active_profile_id:
+                return None
+            return ProfileControlDecision(
+                decision_id=decision_id,
+                requested_by="system",
+                requested_profile_id=state.active_profile_id,
+                current_profile_id=state.active_profile_id,
+                applied=False,
+                blocked_reasons=[],
+                frozen_by_admin_override=bool(
+                    state.frozen_until is not None and state.frozen_until > utc_now()
+                ),
+                freeze_until=state.frozen_until,
+                decision_reason_codes=[],
+                activation_record_ref=None,
+            )
+
         result = await self.owner.evaluate_now(allow_auto_activation=allow_auto)
         recommendation = result.get("recommendation") or {}
         activation = result.get("auto_activation") or {}
