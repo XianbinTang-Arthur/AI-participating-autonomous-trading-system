@@ -90,11 +90,11 @@
 任何冻结参数的改动 **必须**:
 
 1. **新证据**: 写在 `docs/research/` 下的回归/分析报告, 含 out-of-sample + cross-window + cost-adjusted
-2. **通过 alpha evidence gate** (待 P1 成文)
+2. **通过 alpha evidence gate** — 见 [`alpha_evidence_gate.md`](alpha_evidence_gate.md) v0.1, Go 决策必须写入提案文档末尾
 3. **独立 PR** (不能与无关改动捆绑)
 4. **双人批准**: 代码层面 review + 策略层面 signoff (现阶段 = 用户最终决定)
-5. **Deploy audit trail**: commit message 明确引用证据文档
-6. **回退预案**: 解冻后 24-48h 内数据异常必须能快速 revert
+5. **Deploy audit trail**: commit message 明确引用证据文档 (`[evidence: docs/research/...]`)
+6. **回退预案**: 解冻后 24-48h 内数据异常必须能快速 revert (evidence doc 中 Go 决策必带本项)
 
 ---
 
