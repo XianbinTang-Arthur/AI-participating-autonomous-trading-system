@@ -41,6 +41,13 @@ VALID_WORKFLOWS = {
     # (附录 C.3 强主张); ix_rdp_task_one_active_per_workflow 唯一索引自动
     # 串行化同 workflow 的 pending+running task。详见 §7.3 / 附录 E #7。
     "microstructure_silver_15m",
+    # P0-c Option A (2026-04-20, 诊断 docs/review/p0c_candles_silver_stale_diagnosis_2026_04_20.md):
+    # candles 15m rolling ingest (每 15min 从 OKX REST 增量拉 15m K 线),
+    # 给路线 A research phase 0 提供 OHLC 对照基线 intra-day 新鲜度。
+    # 与 microstructure_silver_15m 同 cadence 对齐; Gold/Gap/Funding 仍由
+    # data_maintenance 日批负责, 本 workflow 只做 collect。
+    # deploy-time 发现: scheduler 需把 workflow 名加到白名单才会被真正 enqueue。
+    "candles_rolling_15m",
 }
 
 # orphan-recovery 的 sentinel exit_code：daemon 崩溃 / 被 kill 后留下的

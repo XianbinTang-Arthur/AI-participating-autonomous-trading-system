@@ -60,6 +60,9 @@ WORKFLOW_TIMEOUTS = {
     # P1-D Phase 1A: microstructure Silver ETL — 每 15 min 聚合一次,
     # 5 张表各 1 行 UPSERT, 实测 <10s, 留 300s 超时 (设计 §11 p95 < 10s)
     "microstructure_silver_15m": 300,
+    # P0-c Option A (2026-04-20): candles rolling 15m — OKX REST 拉 4 symbol × 15m,
+    # 纯 collect (跳过 Gold/Gap/Funding), 实测 <30s, 留 300s 超时同 microstructure。
+    "candles_rolling_15m": 300,
 }
 DEFAULT_TIMEOUT = 1800  # 30 分钟
 

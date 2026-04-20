@@ -274,3 +274,48 @@ def test_claim_sql_filters_by_earliest_start_at() -> None:
         "db_claim_next_task SQL 必须过滤 earliest_start_at <= now() "
         "才能让 R3 retry 延迟生效"
     )
+
+
+# =====================================================================
+# VALID_WORKFLOWS 与 configs/rdp_workflows/*.json 的双向契约
+# 2026-04-20 P0-c deploy 发现: 新增 candles_rolling_15m JSON 配置但忘了加到
+# VALID_WORKFLOWS, 导致 scheduler 每 10s ERROR 一次 "Invalid workflow"。
+# 本测试防止再次漏配: 任何有 JSON 配置的 workflow, 必须在 VALID_WORKFLOWS 里。
+# =====================================================================
+
+
+def test_valid_workflows_covers_all_json_configs() -> None:
+    """configs/rdp_workflows/ 下每个 .json 对应的 workflow 名, 必须在 VALID_WORKFLOWS.
+
+    双向同步契约:
+      - 加新 workflow: JSON + VALID_WORKFLOWS + WORKFLOW_TIMEOUTS (后者非本测试范围)
+      - 删 workflow: 同步删 JSON + VALID_WORKFLOWS
+    若本测试失败, 说明某个新增 workflow 配置没同步到 task DB 白名单,
+    deploy 后 scheduler 会持续 ERROR 无法 enqueue 该 workflow 的 task。
+    """
+    import json
+    from pathlib import Path
+
+    project_root = Path(__file__).resolve().parents[2]
+    workflows_dir = project_root / "configs" / "rdp_workflows"
+    assert workflows_dir.is_dir(), f"workflows dir missing: {workflows_dir}"
+
+    json_workflow_names = set()
+    for path in sorted(workflows_dir.glob("*.json")):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        wf_name = data.get("workflow")
+        assert wf_name, f"{path.name} 缺少 'workflow' 字段"
+        json_workflow_names.add(wf_name)
+
+    missing = json_workflow_names - VALID_WORKFLOWS
+    assert not missing, (
+        f"以下 workflow 有 JSON 配置但不在 VALID_WORKFLOWS: {sorted(missing)}; "
+        f"scheduler 会每 tick ERROR 'Invalid workflow'. "
+        f"修复: 在 aats/data_platform/governance/rdp_task_db.py::VALID_WORKFLOWS 加入。"
+    )
+
+    orphan = VALID_WORKFLOWS - json_workflow_names
+    assert not orphan, (
+        f"以下 workflow 在 VALID_WORKFLOWS 但无 JSON 配置: {sorted(orphan)}; "
+        f"可能是 workflow 被删但 VALID_WORKFLOWS 忘同步。"
+    )
