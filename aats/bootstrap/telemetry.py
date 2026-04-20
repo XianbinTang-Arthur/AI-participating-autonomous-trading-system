@@ -286,6 +286,48 @@ def configure_telemetry(config: TelemetryConfig) -> bool:
         )
         metrics_api.set_meter_provider(meter_provider)
         meter = metrics_api.get_meter("aats", config.service_version)
+
+        # P1-D deferred fix (2026-04-20): PrometheusMetricReader 只注册 reader,
+        # 不启动 HTTP server. 必须调用 prometheus_client.start_http_server() 才
+        # 会监听端口, 否则 Prometheus scrape → connection refused (本次 deploy
+        # 后 6 个 target 里 5 个 DOWN 的原因).
+        # 配合 deploy/wsl2-dev/prometheus/prometheus.yml 里的 scrape targets:
+        #   aats-{gateway,market,decision,execution}:9464
+        #   aats-microstructure-collector:9465 (env var override)
+        import os
+        prom_host = os.environ.get("OTEL_EXPORTER_PROMETHEUS_HOST", "0.0.0.0")
+        prom_port = int(os.environ.get("OTEL_EXPORTER_PROMETHEUS_PORT", "9464"))
+        try:
+            import prometheus_client  # type: ignore[import-not-found]
+            # start_http_server alias for start_wsgi_server, 启守护线程 listen
+            prometheus_client.start_http_server(prom_port, prom_host)
+            log_event(
+                _telemetry_logger,
+                "telemetry_metrics_http_started",
+                host=prom_host,
+                port=prom_port,
+                process_role=config.process_role,
+            )
+        except OSError as exc:
+            # 端口被占用 (同主机 4 进程在 monolith 部署模式会撞车), 降级
+            log_event(
+                _telemetry_logger,
+                "telemetry_metrics_http_bind_failed",
+                level="warning",
+                port=prom_port,
+                host=prom_host,
+                error_type=type(exc).__name__,
+                error=str(exc),
+                hint="Prometheus scrape will fail; OTel meter still records in-process",
+            )
+        except Exception as exc:
+            log_event(
+                _telemetry_logger,
+                "telemetry_metrics_http_unexpected_error",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
     except ImportError:
         pass  # opentelemetry-exporter-prometheus 未安装，跳过
     except Exception as exc:

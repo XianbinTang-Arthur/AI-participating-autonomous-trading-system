@@ -276,3 +276,55 @@ def test_reset_for_tests_clears_meter_state() -> None:
     _reset_for_tests()
     assert _telemetry_state["meter"] is None
     assert _telemetry_state["meter_provider"] is None
+
+
+# ─────────────────────────────────────────────────────────────────────
+# P1-D deferred fix (2026-04-20): Prometheus HTTP server 启动回归
+# 问题: PrometheusMetricReader() 只注册 reader, 不启 HTTP server。
+#       必须显式调 prometheus_client.start_http_server() 才能让 Prometheus
+#       scrape 到 connection, 否则全部 5 个 aats-* target 永远 DOWN。
+# 本测试锁定 telemetry.py 里含有 prometheus_client.start_http_server 调用。
+# 详见 docs/design/p1d_phase1a_deferred_items_2026_04_20.md #4 (若仍在)
+# 以及 2026-04-20 deploy-time 诊断.
+# ─────────────────────────────────────────────────────────────────────
+
+
+def test_telemetry_source_starts_prometheus_http_server() -> None:
+    """契约: aats/bootstrap/telemetry.py 必须调 prometheus_client.start_http_server。
+
+    失败暗示: 有人改了 telemetry.py 把 start_http_server 调用移除或注释,
+    会导致 deploy 后 Prometheus scrape connection-refused, 所有 aats 指标看不到。
+    """
+    import inspect
+
+    from aats.bootstrap import telemetry as telemetry_mod
+
+    src = inspect.getsource(telemetry_mod)
+    assert "prometheus_client" in src, (
+        "telemetry.py 必须 import prometheus_client 才能启动 HTTP server 暴露 /metrics"
+    )
+    assert "start_http_server" in src, (
+        "telemetry.py 必须调用 prometheus_client.start_http_server(port, host); "
+        "PrometheusMetricReader() 只是 register reader, 不监听端口。"
+    )
+
+
+def test_telemetry_reads_otel_exporter_prometheus_env() -> None:
+    """契约: telemetry.py 从 OTEL_EXPORTER_PROMETHEUS_HOST / PORT 读配置。
+
+    deploy/wsl2-dev/docker-compose.aats.derivatives-live.yml 依赖这两个 env 把
+    microstructure-collector 的 port 从默认 9464 override 到 9465, 与 main
+    services 错开避免同主机 monolith 部署时的端口冲突。
+    """
+    import inspect
+
+    from aats.bootstrap import telemetry as telemetry_mod
+
+    src = inspect.getsource(telemetry_mod)
+    assert "OTEL_EXPORTER_PROMETHEUS_HOST" in src, (
+        "必须从 OTEL_EXPORTER_PROMETHEUS_HOST 读 bind host (默认 0.0.0.0)"
+    )
+    assert "OTEL_EXPORTER_PROMETHEUS_PORT" in src, (
+        "必须从 OTEL_EXPORTER_PROMETHEUS_PORT 读端口 (默认 9464), "
+        "否则 docker-compose 里的 9465 override 失效"
+    )
