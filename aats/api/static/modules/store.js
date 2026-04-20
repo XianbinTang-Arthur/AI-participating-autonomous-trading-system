@@ -100,6 +100,11 @@ export const CORE_SPECS = [
   ["runtime", "/system/runtime"],
   ["systemRecovery", "/system/recovery"],
   ["blockerControl", "/system/blocker-control"],
+  // P0-b Task 2.1：全局顶栏 mode badge 的数据源。任何 view 都能读到
+  // ai_runtime 的 effective/configured mode，不再要求用户切到 AI view 才看得见。
+  // /system/runtime 不含 ai_operating_mode；只有 /ai/runtime 返回 canonical
+  // effective/configured mode。
+  ["aiRuntime", "/ai/runtime"],
 ];
 
 const EXCLUDED_CORE_PANELS = {

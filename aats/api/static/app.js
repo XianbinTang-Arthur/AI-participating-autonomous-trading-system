@@ -107,6 +107,10 @@ const nodes = {
   drawerTitle: document.getElementById("drawerTitle"),
   drawerSummary: document.getElementById("drawerSummary"),
   drawerBody: document.getElementById("drawerBody"),
+  // P0-b Task 2.1: 全局顶栏 runtime mode badge + 语义 modal
+  runtimeModeBadge: document.getElementById("runtimeModeBadge"),
+  runtimeModeBadgeBody: document.getElementById("runtimeModeBadgeBody"),
+  runtimeModeInfoDialog: document.getElementById("runtimeModeInfoDialog"),
 };
 
 const navigationState = createNavigationStateController({ state, viewLinks });
@@ -710,7 +714,40 @@ const LOCAL_DISPATCH_ACTIONS = {
   "load-more-replay-validations": () => adjustPageLimit("recentReplayValidations", PAGE_LOAD_STEP),
   "collapse-replay-validations": () => resetPageLimit("recentReplayValidations"),
   "set-replay-parent-filter": (value) => setReplayParentFilter(value),
+  // P0-b Task 2.1: 顶栏 runtime mode badge 弹出/关闭语义 modal
+  "show-runtime-mode-info": () => showRuntimeModeInfoDialog(),
+  "close-runtime-mode-info": () => closeRuntimeModeInfoDialog(),
 };
+
+function showRuntimeModeInfoDialog() {
+  const dialog = nodes.runtimeModeInfoDialog;
+  if (!dialog) return;
+  // 优先使用 <dialog>.showModal() 语义（键盘 ESC / backdrop / 原生 modal 语义）
+  if (typeof dialog.showModal === "function") {
+    try {
+      dialog.showModal();
+      return;
+    } catch (_error) {
+      // 已经 open 状态下再 showModal 会抛, 忽略
+    }
+  }
+  // Fallback: 通过 open 属性直接显示
+  dialog.setAttribute("open", "");
+}
+
+function closeRuntimeModeInfoDialog() {
+  const dialog = nodes.runtimeModeInfoDialog;
+  if (!dialog) return;
+  if (typeof dialog.close === "function") {
+    try {
+      dialog.close();
+      return;
+    } catch (_error) {
+      // 已经 close 状态下再 close 会抛, 忽略
+    }
+  }
+  dialog.removeAttribute("open");
+}
 
 function navigateToView(value) {
   const nextView = resolveKnownView(value);

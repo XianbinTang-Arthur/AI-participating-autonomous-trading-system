@@ -473,6 +473,142 @@ h3 {
   background: rgba(17, 27, 38, 0.7);
 }
 
+/* ─────────────────────────────────────────────────────────────
+   P0-b Task 2.1: Runtime Mode Badge (全局顶栏)
+   颜色语义严格对齐 docs/governance/runtime_trading_mode_semantics.md:
+     baseline_only      → 灰底蓝字, tone-neutral-ish
+     ai_assisted        → 橙底白字, tone-warning-like
+     ai_decision_maker  → 红底白字, tone-danger-like
+   ───────────────────────────────────────────────────────────── */
+.runtime-mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  margin: 10px 0 0 0;
+  border-radius: 999px;
+  font-weight: 800;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
+  text-decoration: none;
+  font-family: inherit;
+}
+
+.runtime-mode-badge:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.2);
+}
+
+.runtime-mode-badge:focus-visible {
+  outline: 2px solid var(--info);
+  outline-offset: 2px;
+}
+
+.runtime-mode-badge__tag {
+  font-size: 10px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  opacity: 0.85;
+}
+
+.runtime-mode-badge__body {
+  white-space: nowrap;
+}
+
+/* 默认 (未知) — 接近 neutral */
+.runtime-mode-badge--unknown {
+  color: var(--text-soft);
+  background: var(--neutral-soft);
+  border-color: var(--line-strong);
+}
+
+/* baseline_only — 灰底蓝字, 按设计不下单 */
+.runtime-mode-badge--baseline-only {
+  color: #60a5fa;
+  background: rgba(24, 34, 50, 0.92);
+  border-color: rgba(96, 165, 250, 0.38);
+}
+
+/* ai_assisted — 橙底白字, 实盘中 */
+.runtime-mode-badge--ai-assisted {
+  color: #fff;
+  background: rgba(249, 115, 22, 0.92);
+  border-color: rgba(251, 146, 60, 0.8);
+}
+
+/* ai_decision_maker — 红底白字, AI 实盘中 */
+.runtime-mode-badge--ai-decision-maker {
+  color: #fff;
+  background: rgba(220, 38, 38, 0.95);
+  border-color: rgba(248, 113, 113, 0.85);
+}
+
+.runtime-mode-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.62);
+}
+
+.runtime-mode-dialog {
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  padding: 0;
+  max-width: 640px;
+  width: min(90vw, 640px);
+  background: rgba(18, 27, 38, 0.98);
+  color: var(--text);
+}
+
+.runtime-mode-dialog__panel {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.runtime-mode-dialog__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.runtime-mode-dialog__head h2 {
+  margin: 0;
+  font-size: 18px;
+}
+
+.runtime-mode-dialog__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.runtime-mode-dialog__table th,
+.runtime-mode-dialog__table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--line-strong);
+}
+
+.runtime-mode-dialog__table th {
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  color: var(--text-soft);
+}
+
+.runtime-mode-dialog__table td code,
+.runtime-mode-dialog p code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: rgba(8, 14, 22, 0.75);
+  color: #a5b4fc;
+}
+
 .workspace-nav {
   margin-top: 18px;
   display: flex;

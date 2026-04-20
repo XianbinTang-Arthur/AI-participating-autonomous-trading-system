@@ -63,6 +63,79 @@
       <a class="workspace-link" data-view="admin" href="/ui/settings">账户与权限</a>
     </nav>
 
+    <!--
+      P0-b Task 2.1: 全局顶栏 Runtime Mode badge.
+      数据源: /ai/runtime 的 effective_operating_mode (已加入 CORE_SPECS).
+      行为: 由 shell-renderer.renderRuntimeModeBadge() 每次 renderShell 时刷新;
+            点击弹 modal 解释当前模式语义;
+            颜色根据模式:
+              baseline_only      → 灰底蓝字 "按设计不下单"
+              ai_assisted        → 橙底白字 "实盘中"
+              ai_decision_maker  → 红底白字 "AI 实盘中"
+      详见 docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.1
+    -->
+    <button id="runtimeModeBadge"
+            type="button"
+            class="runtime-mode-badge runtime-mode-badge--unknown"
+            data-action="show-runtime-mode-info"
+            aria-label="当前运行模式(点击查看语义文档)"
+            aria-haspopup="dialog"
+            data-refresh-ignore
+            hidden>
+      <span class="runtime-mode-badge__tag">模式</span>
+      <span class="runtime-mode-badge__body" id="runtimeModeBadgeBody">加载中…</span>
+    </button>
+    <!--
+      P0-b Task 2.1: Runtime mode 语义 modal (隐藏直到点击 badge).
+      内容是 docs/governance/runtime_trading_mode_semantics.md §1-§2 的精简,
+      目标: 让 operator 一眼看出 "baseline_only = 按设计不下单, 不是 bug".
+    -->
+    <dialog id="runtimeModeInfoDialog" class="runtime-mode-dialog">
+      <article class="runtime-mode-dialog__panel">
+        <header class="runtime-mode-dialog__head">
+          <h2>运行模式 (ai_operating_mode) 语义</h2>
+          <button type="button" class="ghost-button" data-action="close-runtime-mode-info" data-refresh-ignore>关闭</button>
+        </header>
+        <p class="meta-copy">
+          决定 AATS 是否真下单的第一个开关是 <code>ai_operating_mode</code>。
+          它在配置层决定（<code>.env.*.live</code> 的 <code>AATS_AI_OPERATING_MODE</code>），
+          UI 无法切。
+        </p>
+        <table class="runtime-mode-dialog__table">
+          <thead>
+            <tr>
+              <th>canonical mode</th>
+              <th>decision_authority</th>
+              <th>实盘行为</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><strong>baseline_only</strong></td>
+              <td><code>reference_only</code></td>
+              <td>完全不下单 · 只产参考决策 · 当前生产默认</td>
+            </tr>
+            <tr>
+              <td><strong>ai_assisted</strong></td>
+              <td><code>advisory</code></td>
+              <td>按 baseline 下单,AI 仅咨询</td>
+            </tr>
+            <tr>
+              <td><strong>ai_decision_maker</strong></td>
+              <td><code>final_decision</code></td>
+              <td>AI 主导下单 · baseline fallback</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="meta-copy">
+          <strong>当前 live runtime = <code>baseline_only</code> → 按设计 100% 不下单。</strong>
+          这不是 bug,也不是 alpha 不够,不是 threshold 太严 —— 是治理纪律。
+          切模式需走 <code>.env.*.live</code> + deploy audit + alpha evidence gate,详见
+          <code>docs/governance/runtime_trading_mode_semantics.md §3.5</code>。
+        </p>
+      </article>
+    </dialog>
+
     <section id="bannerContainer" class="banner-stack" aria-live="polite"></section>
 
     <main class="workspace">

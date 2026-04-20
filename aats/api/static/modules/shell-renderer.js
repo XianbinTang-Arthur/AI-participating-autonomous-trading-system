@@ -71,6 +71,7 @@ export function createDashboardShellRenderer({
     viewSections.forEach((section) => section.classList.toggle("is-active", section.dataset.view === state.activeView));
     renderPageChrome();
     renderSessionSummary();
+    renderRuntimeModeBadge();
     renderStatusRibbon();
     renderBanners();
     renderActiveView();
@@ -78,6 +79,68 @@ export function createDashboardShellRenderer({
     updateActionAccess();
     updateRefreshLabel();
     syncRefreshInteractivity();
+  }
+
+  // P0-b Task 2.1: 全局顶栏 runtime mode badge.
+  // 数据源: state.data.aiRuntime.effective_operating_mode (从 /ai/runtime 取;
+  //         该 endpoint 已纳入 CORE_SPECS, 所以任何 view + 每次 refresh 都更新).
+  // 刷新频率: 跟随 dashboard 的 30s auto-refresh 周期,以及任何手动 refresh.
+  //
+  // 颜色/文案 (严格对齐 spec §2.1):
+  //   baseline_only      → 灰底蓝字 "按设计不下单"
+  //   ai_assisted        → 橙底白字 "实盘中"
+  //   ai_decision_maker  → 红底白字 "AI 实盘中"
+  //   其它 / 未知         → 灰底, "加载中…"
+  function renderRuntimeModeBadge() {
+    const badge = nodes.runtimeModeBadge;
+    const body = nodes.runtimeModeBadgeBody;
+    if (!badge || !body) return;
+
+    const aiRuntime = state.data?.aiRuntime || {};
+    const effective = String(aiRuntime.effective_operating_mode || "").trim();
+    const configured = String(aiRuntime.configured_operating_mode || "").trim();
+
+    // aiRuntime 还没到 / ai_service 未装配 → 隐藏 badge 避免误导
+    if (!effective) {
+      badge.hidden = true;
+      return;
+    }
+    badge.hidden = false;
+
+    let toneClass = "runtime-mode-badge--unknown";
+    let text = "";
+    let title = "";
+    if (effective === "baseline_only") {
+      toneClass = "runtime-mode-badge--baseline-only";
+      text = "baseline_only · reference only · 按设计不下单";
+      title = "当前系统不下单。这是 governance 决定的默认行为,不是 bug。点击查看语义文档。";
+    } else if (effective === "ai_assisted") {
+      toneClass = "runtime-mode-badge--ai-assisted";
+      text = "ai_assisted · advisory · 实盘中";
+      title = "AI 咨询模式,baseline 决定下单。真金白银运行中。点击查看语义文档。";
+    } else if (effective === "ai_decision_maker") {
+      toneClass = "runtime-mode-badge--ai-decision-maker";
+      text = "ai_decision_maker · final_decision · AI 实盘中";
+      title = "AI 完全主导下单,baseline 仅作 fallback。真金白银运行中。点击查看语义文档。";
+    } else {
+      toneClass = "runtime-mode-badge--unknown";
+      text = `${effective} · 未知模式`;
+      title = `未识别的 operating_mode=${effective}。点击查看已知语义。`;
+    }
+
+    // 若 effective 与 configured 不一致, 提示 operator 手动 override 状态
+    if (configured && configured !== effective) {
+      text += ` (默认 ${configured})`;
+      title += ` 配置默认是 ${configured},但当前以 ${effective} 生效(可能是临时 manual override)。`;
+    }
+
+    patchClassName(badge, `runtime-mode-badge ${toneClass}`);
+    // `<span class="runtime-mode-badge__tag">模式</span>` 已经渲染了 "模式" 前缀,
+    // body 只放冒号后的值部分避免重复显示 "模式" 两次.
+    patchText(body, text);
+    if (badge.getAttribute("title") !== title) {
+      badge.setAttribute("title", title);
+    }
   }
 
   function renderPageChrome() {
