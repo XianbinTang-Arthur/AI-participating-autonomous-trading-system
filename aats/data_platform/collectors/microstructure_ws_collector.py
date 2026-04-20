@@ -762,6 +762,14 @@ class MicrostructureBronzeBuffer:
         self._lock = asyncio.Lock()
         self._flush_max_rows = flush_max_rows
         self._flush_max_seconds = flush_max_seconds
+        # 2026-04-20 code review B-H1: 跟踪 hard-cap drop 累计数, 供 collector
+        # 在 shutdown 时推导 ingest_run status (非零 drop → retrying/failed).
+        self._rows_dropped_total: int = 0
+
+    @property
+    def rows_dropped_total(self) -> int:
+        """Cumulative rows dropped due to hard-cap (DB outage scenario)."""
+        return self._rows_dropped_total
 
     @property
     def table(self) -> str:
@@ -789,6 +797,7 @@ class MicrostructureBronzeBuffer:
             if len(self._rows) >= _BUFFER_HARD_CAP:
                 drop_n = _BUFFER_HARD_CAP // 2
                 del self._rows[:drop_n]
+                self._rows_dropped_total += drop_n  # B-H1 fix
                 log.critical(
                     "microstructure buffer hard-cap hit on %s: dropped %d oldest rows",
                     self._table, drop_n,
@@ -806,6 +815,7 @@ class MicrostructureBronzeBuffer:
                 # Make room by dropping oldest half first.
                 drop_n = _BUFFER_HARD_CAP // 2
                 del self._rows[:drop_n]
+                self._rows_dropped_total += drop_n  # B-H1 fix
                 log.critical(
                     "microstructure buffer hard-cap hit on %s: dropped %d oldest rows",
                     self._table, drop_n,
@@ -905,6 +915,15 @@ class MicrostructureCollector:
             "bronze.market_orderbook_books5": 0,
             "staging.market_oi_funding_ticks": 0,
         }
+        # Flush-failure + hard-cap-drop counters used at shutdown to derive
+        # ingest_run status (see 2026-04-20 code review B-H1: prior版本硬编码
+        # `status="succeeded"` 会在 DB 下线几小时 + drop thousands of rows 的
+        # 场景下仍 emit "succeeded", 复制 P0-a 假成功模式). 新语义:
+        #   - 全部 flush 0 error + 0 drop → "succeeded"
+        #   - 有 error 或 drop 但至少部分 written → "degraded" (新加的 status value)
+        #   - 全部 error + 0 written → "failed"
+        self._flush_errors_count: int = 0
+        self._rows_dropped_hardcap: int = 0
 
     @property
     def client(self) -> MicrostructureWSClient:
@@ -1065,6 +1084,9 @@ class MicrostructureCollector:
             # because unbounded retry during a prolonged outage would grow
             # memory without bound.
             self._metric_inc("microstructure_bronze_flush_errors_total")
+            # B-H1 fix (2026-04-20 code review): track errors to derive
+            # ingest_run status at shutdown instead of hardcoded "succeeded".
+            self._flush_errors_count += 1
             log.exception("%s flush failed; %d rows dropped", buffer.table, len(to_write))
             return FlushResult(
                 attempted=len(to_write),
@@ -1197,11 +1219,49 @@ class MicrostructureCollector:
             flush_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await flush_task
-            # Close the ingest_run with best-guess status.
+            # Close the ingest_run with **derived** status (not hardcoded).
+            # 2026-04-20 code review B-H1 fix:
+            #   之前: 硬编码 status="succeeded" → DB 下线数小时 drop thousands
+            #         of rows 后 meta.ingest_runs 仍显示 "succeeded", 运营只能
+            #         靠 Prometheus counter 发现真相, 是 P0-a 假成功模式在
+            #         Bronze 层的残余.
+            #   新语义:
+            #     total_written == 0 AND flush_errors > 0   → "failed"
+            #     flush_errors > 0 OR rows_dropped > 0      → "retrying"
+            #       (语义上是 "partial success", chk_ir_status 允许 retrying,
+            #        日批 / daily ingest 观察到 retrying 会记 audit + 人工 review)
+            #     else                                       → "succeeded"
             if self._ingest_run_id is not None:
+                total_written = sum(self._written_counts.values())
+                # 从各 buffer 聚合 hard-cap drop 累计
+                total_dropped = (
+                    self._buf_trades.rows_dropped_total
+                    + self._buf_bbo.rows_dropped_total
+                    + self._buf_books5.rows_dropped_total
+                    + self._buf_oif.rows_dropped_total
+                )
+                if total_written == 0 and self._flush_errors_count > 0:
+                    derived_status = "failed"
+                elif self._flush_errors_count > 0 or total_dropped > 0:
+                    derived_status = "retrying"
+                else:
+                    derived_status = "succeeded"
+
+                log.info(
+                    "finishing ingest_run %s status=%s written=%d flush_errors=%d dropped=%d",
+                    self._ingest_run_id,
+                    derived_status,
+                    total_written,
+                    self._flush_errors_count,
+                    total_dropped,
+                )
                 try:
                     with get_session() as session:
-                        finish_ingest_run(session, self._ingest_run_id, status="succeeded")
+                        finish_ingest_run(
+                            session,
+                            self._ingest_run_id,
+                            status=derived_status,
+                        )
                 except SQLAlchemyError:
                     log.exception("failed to close ingest_run %s", self._ingest_run_id)
 
