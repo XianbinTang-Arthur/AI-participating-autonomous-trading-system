@@ -130,7 +130,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "postgres", "uid": "postgres" },
+      "datasource": { "type": "postgres", "uid": "postgres_research" },
       "description": "24h 滚动窗口的 Bronze row 总数 (直接查 PG). 验证 §11 Gate 3: bronze.market_trades 24h count ∈ [1M, 5M].",
       "fieldConfig": {
         "defaults": {
@@ -154,7 +154,7 @@
       "options": { "graphMode": "area", "colorMode": "value" },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "postgres" },
+          "datasource": { "type": "postgres", "uid": "postgres_research" },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
@@ -167,7 +167,7 @@
       "type": "stat"
     },
     {
-      "datasource": { "type": "postgres", "uid": "postgres" },
+      "datasource": { "type": "postgres", "uid": "postgres_research" },
       "description": "最近一次 Bronze 写入到现在的秒数. 若 > 60s 说明 collector 停止写入 (可能 DB 故障 / WS 断开).",
       "fieldConfig": {
         "defaults": {
@@ -189,7 +189,7 @@
       "options": { "graphMode": "none", "colorMode": "value" },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "postgres" },
+          "datasource": { "type": "postgres", "uid": "postgres_research" },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
@@ -244,8 +244,8 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "Silver ETL 成功 vs 错误次数. rate counter. §11 Gate 4 要求 'etl_failed' 事件 24h=0.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "Silver ETL 成功 vs 错误次数/小时. §11 Gate 4 要求 'etl_failed' 事件 24h=0. 2026-04-20 Issue 5c fix: 从 PromQL 切到 LogQL, 查实际 COMMITTED/PARTIAL/FAILED log event (Silver ETL 是子进程 fork 跑, 没有独立 Prometheus endpoint, 聚合 log-based 最靠谱).",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },
@@ -258,16 +258,16 @@
       "id": 7,
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "sum(increase(aats_microstructure_silver_etl_runs_success_total[1h]))",
+          "expr": "sum(count_over_time({job=\"aats\"} |= \"silver_microstructure_etl\" |= \"COMMITTED\" [1h]))",
           "legendFormat": "success/h",
           "refId": "A"
         },
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "sum(increase(aats_microstructure_silver_etl_errors_total[1h]))",
+          "expr": "sum(count_over_time({job=\"aats\"} |= \"silver_microstructure_etl\" |~ \"FAILED|PARTIAL\" [1h]))",
           "legendFormat": "error/h",
           "refId": "B"
         }
@@ -276,7 +276,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "postgres", "uid": "postgres" },
+      "datasource": { "type": "postgres", "uid": "postgres_research" },
       "description": "24h 内 Silver 表中 quality_flags 含 'etl_failed' 的行数. §11 Gate 4 要求 = 0.",
       "fieldConfig": {
         "defaults": {
@@ -298,7 +298,7 @@
       "options": { "graphMode": "none", "colorMode": "value" },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "postgres" },
+          "datasource": { "type": "postgres", "uid": "postgres_research" },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
@@ -319,7 +319,7 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "postgres", "uid": "postgres" },
+      "datasource": { "type": "postgres", "uid": "postgres_research" },
       "description": "8 张 microstructure 表的当前 total_relation_size (bytes). 验证 §10.3 磁盘压力可控. Phase 1A 预估 30d 合计 < 10 GB.",
       "fieldConfig": {
         "defaults": {
@@ -333,7 +333,7 @@
       "id": 9,
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "postgres" },
+          "datasource": { "type": "postgres", "uid": "postgres_research" },
           "editorMode": "code",
           "format": "time_series",
           "rawQuery": true,
@@ -346,7 +346,7 @@
       "type": "timeseries"
     },
     {
-      "datasource": { "type": "postgres", "uid": "postgres" },
+      "datasource": { "type": "postgres", "uid": "postgres_research" },
       "description": "Silver 15m bar 覆盖率 — 过去 24h 在 silver.market_orderbook_metrics_15m 有行的 bar 数. §11 Gate 1 要求 >= 96 行/24h (每 15min 1 行 = 96/24h).",
       "fieldConfig": {
         "defaults": {
@@ -370,7 +370,7 @@
       "options": { "graphMode": "area", "colorMode": "value" },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "postgres" },
+          "datasource": { "type": "postgres", "uid": "postgres_research" },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
@@ -383,7 +383,7 @@
       "type": "stat"
     },
     {
-      "datasource": { "type": "postgres", "uid": "postgres" },
+      "datasource": { "type": "postgres", "uid": "postgres_research" },
       "description": "Silver 最近一 bar 离现在的分钟数. §11 Gate 2 要求 < 30 min (否则说明 ETL 失效).",
       "fieldConfig": {
         "defaults": {
@@ -405,7 +405,7 @@
       "options": { "graphMode": "none", "colorMode": "value" },
       "targets": [
         {
-          "datasource": { "type": "postgres", "uid": "postgres" },
+          "datasource": { "type": "postgres", "uid": "postgres_research" },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,

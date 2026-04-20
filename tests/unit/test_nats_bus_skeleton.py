@@ -1360,6 +1360,63 @@ def test_consumer_config_spec_event_delivers_all() -> None:
     assert spec.deliver_policy == "all"
 
 
+def test_per_topic_ack_wait_override_applies() -> None:
+    """2026-04-20 code review Issue 2+3 fix regression:
+    per_topic_ack_wait_seconds 覆盖单个 topic 的 ack_wait, 其他 topic 用默认.
+
+    诊断报告发现 aats-decision-features_snapshots 因 run_cycle 17s + ack_wait 30s
+    → 死循环重投 8580 次. 新加 per-topic ack_wait override 机制, 本测试锁定
+    机制真的生效.
+    """
+    config = NatsBusConfig(
+        per_topic_ack_wait_seconds={_topics.FEATURE_SNAPSHOTS: 90.0},
+        ack_wait_seconds=30.0,  # 全局默认保持 30s
+    )
+
+    # 被 override 的 topic 用 90s
+    spec_override = build_consumer_config_spec(
+        config=config,
+        durable="aats-decision-features_snapshots",
+        topic=_topics.FEATURE_SNAPSHOTS,
+    )
+    assert spec_override.ack_wait_seconds == 90.0, (
+        f"per_topic_ack_wait 未生效, 实际 {spec_override.ack_wait_seconds}"
+    )
+
+    # 未 override 的 topic 用默认 30s
+    spec_default = build_consumer_config_spec(
+        config=config,
+        durable="aats-execution-order_updates",
+        topic=_topics.ORDER_UPDATES,
+    )
+    assert spec_default.ack_wait_seconds == 30.0, (
+        f"非 override topic 应保持默认 30s, 实际 {spec_default.ack_wait_seconds}"
+    )
+
+
+def test_per_topic_max_ack_pending_and_ack_wait_combo_for_slow_consumers() -> None:
+    """2026-04-20 code review Issue 2+3 fix regression (combo):
+    FEATURE_SNAPSHOTS 必须同时有 per_topic_max_ack_pending=32 + ack_wait=90s
+    + deliver_policy="last" (from SNAPSHOT_DELIVERY_TOPICS). 三者联合防止
+    决策流堵塞 (pending 142K 的那类 backlog).
+    """
+    config = NatsBusConfig(
+        per_topic_max_ack_pending={_topics.FEATURE_SNAPSHOTS: 32},
+        per_topic_ack_wait_seconds={_topics.FEATURE_SNAPSHOTS: 90.0},
+    )
+    spec = build_consumer_config_spec(
+        config=config,
+        durable="aats-decision-features_snapshots",
+        topic=_topics.FEATURE_SNAPSHOTS,
+    )
+    assert spec.max_ack_pending == 32
+    assert spec.ack_wait_seconds == 90.0
+    assert spec.deliver_policy == "last", (
+        "FEATURE_SNAPSHOTS 必须在 SNAPSHOT_DELIVERY_TOPICS, 给出 deliver_policy=last"
+    )
+    assert spec.flow_control is True
+
+
 def test_consumer_config_spec_flow_control_defaults() -> None:
     """默认 NatsBusConfig 必须启用 flow_control=True + idle_heartbeat=5.0。
 

@@ -53,6 +53,12 @@ datasources:
       prometheusType: Prometheus
       timeInterval: "30s"
 
+  # 2026-04-20 code review Issue 5a fix:
+  # 原配置 database=$POSTGRES_DB (= "aats", 空库) 导致所有 SQL panel 看不到
+  # 数据. AATS 实际数据分 2 个库:
+  #   - aats_live_derivatives: public.event_store / decision_outcome / 运维
+  #   - aats_research:         bronze.* / silver.* / gold.* (data platform)
+  # Grafana Postgres driver 一个 datasource 只能连 1 个 DB, 所以分开配.
   - name: Postgres
     uid: postgres
     type: postgres
@@ -61,7 +67,26 @@ datasources:
     secureJsonData:
       password: $POSTGRES_PASSWORD
     jsonData:
-      database: $POSTGRES_DB
+      # 用于 AATS Operations 的 event_store / runtime mode fallback / pg_stat_activity 查询
+      database: aats_live_derivatives
+      sslmode: disable
+      maxOpenConns: 5
+      maxIdleConns: 2
+      connMaxLifetime: 14400
+      postgresVersion: 1600
+      timescaledb: false
+    editable: true
+
+  - name: Postgres Research
+    uid: postgres_research
+    type: postgres
+    url: postgres:5432
+    user: $POSTGRES_USER
+    secureJsonData:
+      password: $POSTGRES_PASSWORD
+    jsonData:
+      # 用于 P1-D Microstructure dashboard 查 bronze.* / silver.* / gold.* / staging.*
+      database: aats_research
       sslmode: disable
       maxOpenConns: 5
       maxIdleConns: 2

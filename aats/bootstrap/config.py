@@ -3552,11 +3552,36 @@ def _construct_event_bus(
     #   - AATS_EVENTS         : 7 天 / 4 GB  承载其他 critical 事件
     # legacy 字段 stream_name / stream_max_age_seconds 不再被 runtime 路径
     # 读取，只有 ensure_stream(topics=...) legacy shim 会读（给单元测试用）。
+    # 2026-04-20 code review Issue 2+3 fix:
+    #   诊断报告观察到 aats-decision-features_snapshots consumer
+    #   pending=142,441, ack_pending=256/256 打满, redelivered=8,580.
+    #   根因: decision run_cycle 单轮 17s (15 次同步 OKX REST), features
+    #   进入速率 17/min >> 决策处理 3-4/min, backlog 持续增长触发 NATS
+    #   storage 80% 阈值.
+    # 缓解:
+    #   (a) FEATURE_SNAPSHOTS 已在 SNAPSHOT_DELIVERY_TOPICS → DeliverPolicy.LAST
+    #       (只消费最新, 不回放历史积压). 但**现有 durable consumer 不会自动
+    #       更新**, 需运维侧删除 consumer 让新 deploy 按新 policy 重建.
+    #   (b) per-topic max_ack_pending 降到 32: 让 NATS 不再一次推 256 条到
+    #       decision buffer, 避免 ack_pending 常年打满的死循环.
+    #   (c) per-topic ack_wait 90s: 给 decision run_cycle 17s 留 5x buffer,
+    #       避免 30s 超时导致的 redelivered=8580 次死循环重投.
+    #   同样 policy 也应用到 market_snapshots (同 pattern, 同 run_cycle 消费者).
+    _slow_consumer_backpressure_topics = {
+        topics.FEATURE_SNAPSHOTS: 32,
+        topics.MARKET_SNAPSHOTS: 32,
+    }
+    _slow_consumer_ack_wait_topics = {
+        topics.FEATURE_SNAPSHOTS: 90.0,
+        topics.MARKET_SNAPSHOTS: 90.0,
+    }
     nats_config = NatsBusConfig(
         servers=(runtime_settings.nats_url,),
         streams=build_nats_streams_from_env(DEFAULT_STREAM_SPECS),
         stream_name=runtime_settings.nats_stream_name,
         stream_max_age_seconds=float(runtime_settings.nats_stream_max_age_seconds),
+        per_topic_max_ack_pending=_slow_consumer_backpressure_topics,
+        per_topic_ack_wait_seconds=_slow_consumer_ack_wait_topics,
     )
 
     if backend == "nats":

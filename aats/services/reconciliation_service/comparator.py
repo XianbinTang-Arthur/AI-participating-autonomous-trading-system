@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import timedelta
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
@@ -1441,8 +1442,44 @@ class StateComparator:
                 details_json=dict(details or {}),
             )
         exchange_fill_view = dict(fill_diff.get("exchange") or {})
+        # 2026-04-20 code review Issue 4 fix: 区分 "historic orphan fill" vs
+        # 真正的 fresh mismatch.
+        # 背景: OKX `/api/v5/trade/fills` 默认只返回最近 3 天. 若本地有 > 3 天
+        # 的 fill 记录 (如 2026-04-17 实盘关户前的历史订单), OKX 必然返回空,
+        # 每轮 reconciliation 都会报同一批 mismatch — 纯脏数据噪音.
+        # 新语义: local fill.exchange_timestamp 超过 HISTORIC_ORPHAN_CUTOFF_HOURS
+        # (默认 72h) 的, 标成 historic_orphan_fill + severity_class="info",
+        # 不计入 soft mismatch count, panel / alert 层面归零.
+        _HISTORIC_ORPHAN_CUTOFF = timedelta(hours=72)
+        # utc_now() 作为 "now" 参考, cutoff = 现在 - 72h.
+        # test 里自由构造 fill 时 exchange_timestamp < cutoff 即触发 historic_orphan.
+        _cutoff_ts = utc_now() - _HISTORIC_ORPHAN_CUTOFF
         for fill_id in list(exchange_fill_view.get("missing_on_exchange") or []):
             fill = local_fills_by_id.get(str(fill_id))
+            _is_historic_orphan = (
+                fill is not None
+                and fill.exchange_timestamp is not None
+                and fill.exchange_timestamp < _cutoff_ts
+            )
+            if _is_historic_orphan:
+                add_finding(
+                    layer="structural",
+                    finding_type="historic_orphan_fill",
+                    severity_class="info",
+                    reason_code="local_fill_older_than_exchange_lookback_window",
+                    scope_kind="fill",
+                    scope_ref=str(fill_id),
+                    blocks_resume=False,
+                    strategy_sleeve_id=None if fill is None else fill.strategy_sleeve_id,
+                    allocation_id=None if fill is None else fill.allocation_id,
+                    strategy_bundle_id=None if fill is None else fill.strategy_bundle_id,
+                    details_json={
+                        "exchange_timestamp": fill.exchange_timestamp.isoformat() if fill and fill.exchange_timestamp else None,
+                        "cutoff_hours": int(_HISTORIC_ORPHAN_CUTOFF.total_seconds() // 3600),
+                        "note": "OKX 默认只返 3 天内 fill, 更老的本地 fill 属历史轨迹, 非真正 mismatch",
+                    },
+                )
+                continue
             add_finding(
                 layer="structural",
                 finding_type="local_fill_missing_on_exchange",

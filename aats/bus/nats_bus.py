@@ -585,7 +585,13 @@ class NatsBusConfig:
     # R6-X1：之前 docstring 示例写的 "aats.fill_events" 会让配置永不
     # 匹配（line 698 是精确 `topic in dict` 比对，非 subject 比对），
     # 导致 per-topic 反压覆盖形同虚设。未列出的 topic 使用上面的全局默认值。
+    # 2026-04-20 code review Issue 2+3 fix: 给 feature.snapshots 加默认 32
+    # (原 256 让 decision 端 run_cycle 17s × 256 = 72min backlog 累积).
     per_topic_max_ack_pending: dict[str, int] | None = None
+    # 2026-04-20 code review Issue 2+3 fix: 同上, per-topic ack_wait 覆盖.
+    # key 同 per_topic_max_ack_pending; 用于给慢 consumer (如 decision run_cycle)
+    # 留更长重投阈值, 避免 30s 超时引起死循环重投 (observed redelivered=8580).
+    per_topic_ack_wait_seconds: dict[str, float] | None = None
     # 单条消息最大重投递次数（超出后会被丢入死信主题）
     max_deliver: int = 5
     # ── Slow consumer 防护（flow control + heartbeat）──────────────
@@ -702,9 +708,14 @@ def build_consumer_config_spec(
     if config.per_topic_max_ack_pending and topic in config.per_topic_max_ack_pending:
         effective_max_ack_pending = config.per_topic_max_ack_pending[topic]
 
+    # 2026-04-20 code review Issue 2+3 fix: per-topic ack_wait 覆盖
+    effective_ack_wait = config.ack_wait_seconds
+    if config.per_topic_ack_wait_seconds and topic in config.per_topic_ack_wait_seconds:
+        effective_ack_wait = config.per_topic_ack_wait_seconds[topic]
+
     return ConsumerConfigSpec(
         durable_name=durable,
-        ack_wait_seconds=config.ack_wait_seconds,
+        ack_wait_seconds=effective_ack_wait,
         max_ack_pending=effective_max_ack_pending,
         max_deliver=config.max_deliver,
         deliver_policy=dp,

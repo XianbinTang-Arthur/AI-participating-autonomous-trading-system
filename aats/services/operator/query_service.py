@@ -188,10 +188,18 @@ class OperatorQueryService:
     # loader 跳过 singleflight，避免死锁。
     _reentrant_guard: __import__("threading").local = __import__("threading").local()
 
-    # Singleflight follower 最长等待时间。必须 < 前端 DEFAULT_TIMEOUT_MS(30s)，
-    # 否则前端先超时用户看到错误，后端线程还在空等浪费线程池。设为 25s：给
-    # 前端留 5s 的网络往返余量。
-    _SINGLEFLIGHT_WAIT_SECONDS = 25
+    # Singleflight follower 最长等待时间。
+    # 2026-04-20 code review Issue 1 fix:
+    #   冷启动 cache stampede 观察: dashboard bundle 开 7 个并行 task,
+    #   follower 等 25s 超时后 fallback **自己跑** loader → 二次惊群, 共享
+    #   12-worker 线程池被挤爆, parallel_fetch_slow wall 达 231s. 真正 leader
+    #   还在等 OKX REST (账户 cold-start 15 次 REST × ~5s ≈ 75s), follower 等
+    #   不及已放弃.
+    # 调整: 25s → 60s 给 leader 更长窗口, 让 follower 等得住 leader 完成后
+    #   直接复用结果, 减少二次惊群概率.
+    # 前端侧: Operator UI DEFAULT_TIMEOUT_MS 也需同步调到 75s+, 否则
+    #   follower 60s 内等到 leader 结果但前端已 timeout, 用户仍看到错误.
+    _SINGLEFLIGHT_WAIT_SECONDS = 60
 
     def _cached_ttl(self, key: str, ttl_seconds: int, loader):
         if not hasattr(self, "_ttl_cache"):

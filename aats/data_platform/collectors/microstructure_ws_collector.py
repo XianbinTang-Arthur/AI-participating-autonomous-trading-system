@@ -924,6 +924,9 @@ class MicrostructureCollector:
         #   - 全部 error + 0 written → "failed"
         self._flush_errors_count: int = 0
         self._rows_dropped_hardcap: int = 0
+        # 2026-04-20 code review Issue 5b fix: 区分 initial connect vs reconnect
+        # 给 P1-D dashboard 的 microstructure_ws_reconnect_total counter 用.
+        self._seen_initial_connect: bool = False
 
     @property
     def client(self) -> MicrostructureWSClient:
@@ -1072,6 +1075,25 @@ class MicrostructureCollector:
             self._written_counts[buffer.table] += written
             self._metric_inc("microstructure_bronze_flush_total")
             self._metric_inc("microstructure_bronze_rows_written_total", int(written))
+            # 2026-04-20 code review Issue 5b fix:
+            # P1-D dashboard 期望按表拆的 counter (trades/bbo/books5/oif),
+            # 以前只有聚合 counter, dashboard panel 永无数据. 这里额外 emit
+            # per-table counter, 保持向后兼容聚合版本.
+            # buffer.table 形如 "bronze.market_trades" / "bronze.market_orderbook_bbo" /
+            # "bronze.market_orderbook_books5" / "staging.market_oi_funding_ticks"
+            # 把 "bronze.market_" / "staging.market_" 前缀去掉做 metric suffix.
+            _table_suffix_map = {
+                "bronze.market_trades": "trades",
+                "bronze.market_orderbook_bbo": "bbo",
+                "bronze.market_orderbook_books5": "books5",
+                "staging.market_oi_funding_ticks": "oif",
+            }
+            _suffix = _table_suffix_map.get(buffer.table)
+            if _suffix:
+                self._metric_inc(
+                    f"microstructure_bronze_rows_written_{_suffix}_total",
+                    int(written),
+                )
             log.info(
                 "flushed %d/%d rows to %s (reason=%s, cumulative=%d)",
                 written, len(to_write), buffer.table, reason,
@@ -1136,6 +1158,42 @@ class MicrostructureCollector:
             self._flush_oif(reason=reason),
             return_exceptions=False,
         )
+
+    # -- Reconnect watcher ---------------------------------------------------
+
+    async def _watch_reconnect_loop(self) -> None:
+        """Poll ``connection_status`` 每 5s 一次, 检测 False→True transition.
+
+        2026-04-20 code review Issue 5b: P1-D dashboard 期望
+        ``aats_microstructure_ws_reconnect_total`` counter, 但 base class
+        ``run_forever`` 阻塞不暴露 reconnect event. poll connection_status
+        state 变化是最小侵入的方式 (不改 base class).
+
+        初次 connect 不计 reconnect (已由 run_forever 开头 emit connect_total).
+        5s cadence 对 dashboard 足够; 短于此的闪断合并计一次.
+        """
+        last_connected: bool = False
+        while True:
+            try:
+                await asyncio.sleep(5.0)
+            except asyncio.CancelledError:
+                return
+            try:
+                status = self._client.connection_status(_CONNECTION)
+                now_connected = bool(status.get("connected", False))
+                if not last_connected and now_connected:
+                    if self._seen_initial_connect:
+                        # 已经经过 initial connect, 这是一次 reconnect
+                        self._metric_inc("microstructure_ws_reconnect_total")
+                        log.info("microstructure WS reconnected (counter +1)")
+                    else:
+                        self._seen_initial_connect = True
+                last_connected = now_connected
+            except asyncio.CancelledError:
+                return
+            except Exception as exc:  # noqa: BLE001
+                # 不让 watcher 因 transient 错误挂掉
+                log.warning("reconnect watcher poll failed: %r", exc)
 
     # -- Periodic flush loop -------------------------------------------------
 
@@ -1208,6 +1266,10 @@ class MicrostructureCollector:
             raise
 
         flush_task = asyncio.create_task(self._periodic_flush_loop())
+        # 2026-04-20 code review Issue 5b fix: 独立 task poll 连接状态
+        # 检测 reconnect. base class run_forever 阻塞不暴露 reconnect event,
+        # 只能 poll connection_status. 5s cadence 对 dashboard 足够.
+        reconnect_watch_task = asyncio.create_task(self._watch_reconnect_loop())
         try:
             await self._client.run_forever(on_message=self._handle_message)
         finally:
@@ -1217,8 +1279,11 @@ class MicrostructureCollector:
             except Exception:    # noqa: BLE001
                 log.exception("shutdown flush failed")
             flush_task.cancel()
+            reconnect_watch_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await flush_task
+            with contextlib.suppress(asyncio.CancelledError):
+                await reconnect_watch_task
             # Close the ingest_run with **derived** status (not hardcoded).
             # 2026-04-20 code review B-H1 fix:
             #   之前: 硬编码 status="succeeded" → DB 下线数小时 drop thousands
