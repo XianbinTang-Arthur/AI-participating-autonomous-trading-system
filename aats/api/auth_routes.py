@@ -866,6 +866,30 @@ async def select_ai_operating_mode(
     payload: AISelectOperatingModeRequest,
     principal: OperatorPrincipal = Depends(require_admin_access),
 ) -> dict[str, Any]:
+    # 2026-04-20 code review C1 fix:
+    #   UI /ai/operating-mode/select 允许 admin 对 ai_operating_mode 做临时 override
+    #   (有 freeze_seconds + audit trail 约束), 但 governance 3 份 doc 默认假设
+    #   "UI 不可切 mode". 为闭环此 doc-code 失步, 加一层 env-gated guard:
+    #   AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE=true 才放行, 否则 403 + hint 指向
+    #   runtime_trading_mode_semantics.md §3.6.
+    #
+    # 设计意图:
+    #   - 默认 false: 2026-04-27 alpha_evidence_gate 观察窗结束前 + 任何一条 Go
+    #     决策之前, UI override 路径直接禁止, 只能走 §3.5 持久化流程
+    #   - 运维场景需用 UI override 时, 显式在 .env.*.live 设 AATS_ALLOW_UI_
+    #     OPERATING_MODE_OVERRIDE=true + deploy (同样留 audit trail)
+    import os
+    if os.environ.get("AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE", "false").lower() not in ("true", "1", "yes"):
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                "UI operating mode override is disabled by governance policy. "
+                "Set AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE=true in .env.*.live + "
+                "deploy if this is a legitimate emergency override. See "
+                "docs/governance/runtime_trading_mode_semantics.md §3.6 for "
+                "the policy and §3.5 for the recommended persistent switch flow."
+            ),
+        )
     try:
         return _query(request).set_ai_operating_mode(
             mode=payload.mode,
