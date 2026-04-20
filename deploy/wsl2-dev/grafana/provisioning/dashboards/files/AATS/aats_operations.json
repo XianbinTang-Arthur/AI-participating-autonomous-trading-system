@@ -9,6 +9,77 @@
     {
       "collapsed": false,
       "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "id": 50,
+      "title": "Runtime Governance (P0-b)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "description": "P0-b Task 2.2: 当前 ai_operating_mode → decision_authority 视图. 对齐 docs/governance/runtime_trading_mode_semantics.md §1-§2. Prometheus 采到带 mode label 的样本就显示. 若 Prometheus scrape 未修(P1 遗留), 本 panel 会 No Data, 这是预期.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "baseline_only": { "text": "REFERENCE ONLY (不下单)", "color": "blue", "index": 0 },
+                "ai_assisted": { "text": "ADVISORY (实盘)", "color": "orange", "index": 1 },
+                "ai_decision_maker": { "text": "FINAL DECISION (AI 实盘)", "color": "red", "index": 2 }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          },
+          "noValue": "No Data (Prometheus scrape 未修 / aats_runtime_ai_operating_mode 未暴露)"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 24, "x": 0, "y": 1 },
+      "id": 11,
+      "options": {
+        "reduceOptions": {
+          "values": false,
+          "calcs": ["lastNotNull"],
+          "fields": "/^mode$/"
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "justifyMode": "center",
+        "textMode": "value",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "expr": "group by (mode) (aats_runtime_ai_operating_mode_total)",
+          "instant": true,
+          "legendFormat": "{{mode}}",
+          "format": "table",
+          "refId": "A"
+        },
+        {
+          "datasource": { "type": "postgres", "uid": "postgres" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT payload::jsonb->>'ai_operating_mode' AS mode FROM public.event_store WHERE topic='strategy.decision_outcome' ORDER BY event_timestamp DESC LIMIT 1",
+          "refId": "B",
+          "hide": false
+        }
+      ],
+      "title": "Runtime Trading Mode (当前授权)",
+      "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
       "id": 100,
       "title": "Process Health",
       "type": "row"
@@ -26,7 +97,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 1 },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 6 },
       "id": 1,
       "targets": [
         {
@@ -45,7 +116,7 @@
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 7 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 12 },
       "id": 200,
       "title": "Core Metrics (Prometheus)",
       "type": "row"
@@ -66,7 +137,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 8 },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 13 },
       "id": 2,
       "targets": [
         {
@@ -90,7 +161,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 8 },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 13 },
       "id": 3,
       "targets": [
         {
@@ -124,7 +195,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 8 },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 13 },
       "id": 4,
       "targets": [
         {
@@ -142,7 +213,7 @@
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 15 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 },
       "id": 300,
       "title": "Infrastructure",
       "type": "row"
@@ -156,7 +227,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 16 },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 21 },
       "id": 5,
       "targets": [
         {
@@ -189,7 +260,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 16 },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 21 },
       "id": 10,
       "targets": [
         {
@@ -213,7 +284,7 @@
         },
         "overrides": []
       },
-      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 16 },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 21 },
       "id": 6,
       "targets": [
         {
@@ -237,7 +308,7 @@
 
     {
       "collapsed": false,
-      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 23 },
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
       "id": 400,
       "title": "Logs (Loki)",
       "type": "row"
@@ -245,7 +316,7 @@
     {
       "datasource": { "type": "loki", "uid": "loki" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 29 },
       "id": 7,
       "options": {
         "dedupStrategy": "none",
@@ -272,7 +343,7 @@
     {
       "datasource": { "type": "loki", "uid": "loki" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 30 },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 35 },
       "id": 8,
       "options": {
         "dedupStrategy": "none",
@@ -299,7 +370,7 @@
     {
       "datasource": { "type": "loki", "uid": "loki" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 36 },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 41 },
       "id": 9,
       "options": {
         "dedupStrategy": "none",

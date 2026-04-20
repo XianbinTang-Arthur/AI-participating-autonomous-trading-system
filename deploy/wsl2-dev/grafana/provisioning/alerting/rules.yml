@@ -362,6 +362,110 @@ groups:
           summary: "Single order total_entry_cost > 6.75 bps (warning)"
           description: "One order exceeded 90% of max_acceptable_cost_bps (7.5). critical @ 7.125. Path C lived max 7.271 — 裕度 0.23 bps。Check cost_audit_live_reconciliation §5.3 + §6.1。"
 
+      # ──────────────────────────────────────────────────────────────
+      # P0-b Task 2.3 Runtime Governance Alerts
+      # 对齐 docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.3
+      # 对齐 docs/governance/runtime_trading_mode_semantics.md §4.2
+      #
+      # ⚠️ 前置依赖(spec §2.3/§2.4):
+      #   1. ``aats_runtime_ai_operating_mode_total{mode=...}`` — 由 Task 2.4 代码
+      #      暴露(aats/services/decision_engine/target_position.py)。
+      #   2. ``aats_orders_submitted_total{mode=...}`` — 目前 NOT YET EXPOSED
+      #      (order submission 没带 mode label). 规则先定义好, metric 数据到位后
+      #      自动生效. 这是 spec 明确允许的 "不硬阻塞" 情况.
+      #   3. P1 遗留的 "Prometheus scrape connection-refused" 修好之前, 上述 metrics
+      #      不会被 Prometheus 采. 规则保持 OK 直到 metrics 真正在线.
+      #
+      # 每条规则都写 noDataState: OK 避免 "没数据就 fire" 的 false positive.
+      # ──────────────────────────────────────────────────────────────
+
+      - uid: sev2-runtime-baseline-has-orders
+        title: "[SEV-2] baseline_only 模式下不应有订单提交"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            model:
+              expr: "sum(rate(aats_orders_submitted_total{mode=\"baseline_only\"}[24h]))"
+              instant: false
+              queryType: range
+            relativeTimeRange:
+              from: 86400
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [0] }
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: OK
+        execErrState: Error
+        for: 15m
+        labels:
+          severity: sev2
+          component: runtime_governance
+        annotations:
+          summary: "baseline_only mode 下 24h 内检测到订单提交 — authority_map 可能被绕过"
+          description: |
+            spec: docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.3
+            在 ai_operating_mode=baseline_only 下, decision_authority 固定为
+            reference_only, 任何订单提交都违反 governance (见 runtime_trading_mode_semantics.md §1).
+            依赖指标: aats_orders_submitted_total{mode="baseline_only"} (待 order 提交链路接入 mode label).
+            响应: 立即 halt + reconciliation + 审查 authority_map 逻辑 (target_position.py:1926).
+
+      - uid: sev3-runtime-ai-decision-no-orders
+        title: "[SEV-3] ai_decision_maker 模式下 24h 内 0 订单"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: prometheus
+            model:
+              expr: "sum(rate(aats_orders_submitted_total{mode=\"ai_decision_maker\"}[24h])) + 1 / clamp_min(sum(aats_runtime_ai_operating_mode_total{mode=\"ai_decision_maker\"}), 1)"
+              queryType: range
+            relativeTimeRange:
+              from: 86400
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: lt, params: [0.0001] }
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: OK
+        execErrState: Error
+        for: 24h
+        labels:
+          severity: sev3
+          component: runtime_governance
+        annotations:
+          summary: "ai_decision_maker mode 跑了 24h 但零订单 — alpha/cost 可能阻断"
+          description: |
+            spec: docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.3
+            ai_decision_maker 模式应当产生真实订单. 24h 零订单通常意味着:
+              - alpha signal 全部被 threshold/cost guard 过滤
+              - 或 decision_outcome 流在下游某处被卡住
+            依赖指标: aats_orders_submitted_total{mode="ai_decision_maker"} + aats_runtime_ai_operating_mode_total{mode="ai_decision_maker"}.
+            非告警 = 真的有一张单在这个周期内提交, 或者根本不在 ai_decision_maker 模式下.
+            响应: 核对 latest decision_outcome / execution suggestion / blockers.
+
       # ── Path C Fix 3 告警 3/3: BLOCKED close-only race ──────────
       # 24h 内 cancel_reason='okx_close_only_without_reducible_position'
       # >= 2 (warning) / >= 5 (critical) = close_only 判定 vs 实际仓位 race
