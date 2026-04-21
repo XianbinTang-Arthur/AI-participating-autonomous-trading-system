@@ -12,6 +12,11 @@ from aats.api.rdp_routes import rdp_router
 from aats.api.routes import router
 from aats.api.ui import ui_router
 from aats.bootstrap.config import build_runtime, load_settings
+from aats.bootstrap.logging import get_logger as _get_lifecycle_logger
+from aats.bootstrap.process_lifecycle import (
+    _announce_runtime_ready,
+    _wait_for_peer_roles_ready,
+)
 from aats.bootstrap.logging import configure_logging_for_settings
 from aats.bootstrap.settings import (
     ALLOWED_PROCESS_ROLES,
@@ -51,7 +56,23 @@ def _resolved_process_role() -> str:
 async def lifespan(app: FastAPI):
     settings = load_settings()
     configure_logging_for_settings(settings)
-    runtime = await build_runtime(settings, process_role=_resolved_process_role())
+    resolved_role = _resolved_process_role()
+    runtime = await build_runtime(settings, process_role=resolved_role)
+    # Readiness barrier (B1) — gateway 用 FastAPI lifespan 而不是 process_lifecycle.run_process，
+    # 所以要在这里手工挂钩。详见
+    # docs/task/nats_retention_global_architecture_sow.md §B1。
+    _lifespan_logger = _get_lifecycle_logger("apps.api_gateway.lifespan")
+    _hot_state = getattr(runtime, "hot_state_store", None)
+    await _announce_runtime_ready(
+        role=resolved_role,
+        hot_state_store=_hot_state,
+        logger=_lifespan_logger,
+    )
+    await _wait_for_peer_roles_ready(
+        role=resolved_role,
+        hot_state_store=_hot_state,
+        logger=_lifespan_logger,
+    )
     await runtime.start_background_tasks()
     app.state.runtime = runtime
     try:
