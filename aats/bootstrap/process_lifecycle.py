@@ -15,6 +15,17 @@
 * Windows 上 add_signal_handler 不可用（NotImplementedError），降级用
   signal.signal()。Windows 不是生产平台，但本地开发与单元测试会跑到，
   所以必须 fail-soft。
+
+Readiness barrier (B1, 2026-04-20)：
+* build_runtime 完成后（subscribe 全部就位）与 start_background_tasks 前
+  （publisher 启动）之间，加一层跨进程 readiness gate：
+    1. 本进程写 Redis key aats:runtime:ready:{role}
+    2. 阻塞等 peer roles 都写完自己的 key（或超时 fallback）
+* 目的：让 market 等 publisher 只有在 decision/execution/gateway 的 durable
+  consumer 创建完成后才开始 publish。这是 nats_retention_global_architecture_sow.md
+  §B1 对 INTEREST retention 切换的硬前置——INTEREST 下 publish 发生在
+  consumer 就位前就会消息丢失。
+* 超时 fallback 不硬失败，保持当前 LIMITS 模式下的向前兼容。
 """
 from __future__ import annotations
 
@@ -23,16 +34,192 @@ import os
 import signal
 import sys
 import tempfile
+import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Sequence
 
 from aats.bootstrap.config import ApplicationRuntime, build_runtime, load_settings
 from aats.bootstrap.logging import configure_logging_for_settings, get_logger
 from aats.bootstrap.settings import ALLOWED_PROCESS_ROLES, AATSSettings
+from aats.storage.hot_state_store import HotStateStore
 
 
 # 跨进程 entry 共享的 logger 命名空间。每个 entry 自己再 get 一个细分 logger。
 _LIFECYCLE_LOGGER = "aats.bootstrap.process_lifecycle"
+
+
+# ────────────────────────────────────────────────────────────────
+# Readiness barrier (B1)
+# ────────────────────────────────────────────────────────────────
+
+# Redis key 前缀：每个进程 build_runtime 完成后（subscribe 全部就位）写此 key。
+# 其他进程的 publisher 启动前阻塞读此 key 确认 peer 就位。
+_RUNTIME_READY_KEY_PREFIX = "aats:runtime:ready:"
+
+# Ready key TTL：防止进程异常退出后 key 残留让新启动进程误判。5 分钟够覆盖
+# 正常 startup window（build_runtime 通常 < 30s），又不会让"僵尸 key"挡新起
+# 进程超过一个部署周期。
+_RUNTIME_READY_TTL_SECONDS: float = 300.0
+
+# 轮询 peer ready 的间隔。50ms~1s 之间折中：太密 Redis QPS 浪费，太稀 startup
+# 延迟感知慢。500ms 对 startup order 影响 < 1s，可接受。
+_PEER_READY_POLL_INTERVAL_SECONDS: float = 0.5
+
+# Peer ready 等待超时。超时后 publisher 不再阻塞继续启动——这是 fallback 保护
+# 模式，保持 LIMITS retention 下的向前兼容（消息不会丢，只是 consumer 落后
+# 几秒）。INTEREST 切换后超时会真丢消息，但 60s 窗口足够覆盖 build_runtime
+# 的 slice builder + cache hydrate 全流程（实测 10-30s）。
+_PEER_READY_TIMEOUT_SECONDS: float = 60.0
+
+
+# Peer 依赖映射：每个 role 在 start_background_tasks 前必须等哪些 peer role
+# 的 subscribe 就位。
+#
+# 当前生产所有主 role 互相订阅（market 也订阅 execution 的 account_snapshots、
+# kill_switch_state 等；详见运行时 nats consumer 清单），所以保守策略：
+# 每个 role 等其他所有主 role 就位。monolith（单进程模式）无 peer。
+#
+# gateway daemon 依赖（rdp-daemon / liquidations-daemon / microstructure-collector）
+# 不走 build_runtime 主流程，不参与此 barrier。
+_PEER_READINESS_MAP: dict[str, tuple[str, ...]] = {
+    "market": ("decision", "execution", "gateway"),
+    "decision": ("market", "execution", "gateway"),
+    "execution": ("market", "decision", "gateway"),
+    "gateway": ("market", "decision", "execution"),
+    "monolith": (),
+}
+
+
+def _ready_key(role: str) -> str:
+    return f"{_RUNTIME_READY_KEY_PREFIX}{role}"
+
+
+async def _announce_runtime_ready(
+    *,
+    role: str,
+    hot_state_store: HotStateStore | None,
+    logger,
+) -> None:
+    """把本进程的 ready 信号写到 Redis，让其他 peer 能看到。
+
+    在 build_runtime 完成（subscribe 已全部就位）后调用。hot_state_store
+    为 None 时是 InMemory 单元测试场景，直接 no-op。
+    """
+    if hot_state_store is None:
+        logger.info(
+            "runtime_ready_gate_skipped_no_hot_state",
+            extra={
+                "event": "runtime_ready_gate_skipped_no_hot_state",
+                "process_role": role,
+            },
+        )
+        return
+    value = {
+        "process_role": role,
+        "ready_ts": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+    }
+    try:
+        await hot_state_store.set(
+            _ready_key(role),
+            value,
+            ttl_seconds=_RUNTIME_READY_TTL_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "runtime_ready_gate_announce_failed",
+            extra={
+                "event": "runtime_ready_gate_announce_failed",
+                "process_role": role,
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            },
+        )
+        return
+    logger.info(
+        "runtime_ready_gate_announced",
+        extra={
+            "event": "runtime_ready_gate_announced",
+            "process_role": role,
+        },
+    )
+
+
+async def _wait_for_peer_roles_ready(
+    *,
+    role: str,
+    hot_state_store: HotStateStore | None,
+    logger,
+    peers: Sequence[str] | None = None,
+    timeout_seconds: float = _PEER_READY_TIMEOUT_SECONDS,
+    poll_interval: float = _PEER_READY_POLL_INTERVAL_SECONDS,
+) -> None:
+    """阻塞等 peer role 都写完自己的 ready key。
+
+    超时仍未就位时不硬失败，日志 warning 后返回——fallback 到 LIMITS
+    retention 的向前兼容行为。
+
+    ``peers`` 默认读 ``_PEER_READINESS_MAP[role]``；测试可手动注入。
+    ``hot_state_store`` 为 None 时直接返回（InMemory 场景 / 单进程 smoke）。
+    """
+    if hot_state_store is None:
+        return
+    peer_list = list(peers if peers is not None else _PEER_READINESS_MAP.get(role, ()))
+    if not peer_list:
+        return
+    logger.info(
+        "runtime_ready_gate_wait_start",
+        extra={
+            "event": "runtime_ready_gate_wait_start",
+            "process_role": role,
+            "peers": peer_list,
+            "timeout_seconds": timeout_seconds,
+        },
+    )
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        try:
+            ready_values = await hot_state_store.get_many(
+                [_ready_key(p) for p in peer_list]
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "runtime_ready_gate_poll_failed",
+                extra={
+                    "event": "runtime_ready_gate_poll_failed",
+                    "process_role": role,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                },
+            )
+            return
+        missing = [p for p in peer_list if not ready_values.get(_ready_key(p))]
+        if not missing:
+            logger.info(
+                "runtime_ready_gate_all_peers_ready",
+                extra={
+                    "event": "runtime_ready_gate_all_peers_ready",
+                    "process_role": role,
+                    "peers": peer_list,
+                    "elapsed_seconds": round(
+                        time.monotonic() - (deadline - timeout_seconds), 2
+                    ),
+                },
+            )
+            return
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "runtime_ready_gate_timeout",
+                extra={
+                    "event": "runtime_ready_gate_timeout",
+                    "process_role": role,
+                    "missing_peers": missing,
+                    "timeout_seconds": timeout_seconds,
+                },
+            )
+            return
+        await asyncio.sleep(poll_interval)
 
 
 # Stage 7 修复：心跳文件目录。3 个 daemon 进程 (market/decision/execution)
@@ -228,6 +415,25 @@ async def run_process(
     heartbeat_stop = asyncio.Event()
     try:
         runtime = await build_runtime(effective_settings, process_role=role)
+        # ── Readiness barrier (B1) ─────────────────────────────
+        # build_runtime 内部已做 _wire_event_subscriptions，本进程的 durable
+        # consumer 已在 NATS server 注册。现在：
+        #   (1) 写 Redis 告诉其他 peer "我准备好了"
+        #   (2) 阻塞等其他 peer 也准备好（或超时 fallback）
+        # 再调 start_background_tasks 启动 publisher（见 SOW §B1）。
+        # getattr 兜底：测试场景可能传 InMemoryApplicationRuntime，没有
+        # hot_state_store。
+        _hot_state = getattr(runtime, "hot_state_store", None)
+        await _announce_runtime_ready(
+            role=role,
+            hot_state_store=_hot_state,
+            logger=logger,
+        )
+        await _wait_for_peer_roles_ready(
+            role=role,
+            hot_state_store=_hot_state,
+            logger=logger,
+        )
         await runtime.start_background_tasks()
         if extra_setup is not None:
             await extra_setup(runtime)
