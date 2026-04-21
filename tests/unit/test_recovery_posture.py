@@ -679,5 +679,32 @@ class TestAiRequiresManualReviewNoneGuard(unittest.TestCase):
         self.assertFalse(evaluator._ai_requires_manual_review())
 
 
+class TestPersistentStatusBlockersMembership(unittest.TestCase):
+    """task84 审查锚点：`derivatives_exchange_position_without_local_execution_chain`
+    必须在持久 blocker 集合里，防止下一轮 reconciliation 清掉
+    report.only_reduce_reasons 后 blocker 变成"幽灵"（status-level 残留
+    但被 recovery_posture 过滤掉，导致 /system/resume 意外放行）。"""
+
+    def test_derivatives_exchange_position_is_persistent_blocker(self) -> None:
+        blockers = RecoveryPostureEvaluator._PERSISTENT_STATUS_BLOCKERS
+        self.assertIn(
+            "derivatives_exchange_position_without_local_execution_chain",
+            blockers,
+        )
+
+    def test_all_expected_persistent_blockers_present(self) -> None:
+        """锁死集合，防止未来误删某条 kind 造成 silent resume 放行。"""
+        blockers = RecoveryPostureEvaluator._PERSISTENT_STATUS_BLOCKERS
+        expected_core = {
+            "pending_execution_commands",
+            "stuck_sent_submit_commands",
+            "account_snapshot_refresh_failed",
+            "strategy_bundle_recovery_in_progress",
+            "strategy_bundle_recovery_requires_review",
+            "derivatives_exchange_position_without_local_execution_chain",
+        }
+        self.assertTrue(expected_core.issubset(blockers))
+
+
 if __name__ == "__main__":
     unittest.main()

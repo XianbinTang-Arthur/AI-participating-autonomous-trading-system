@@ -42,12 +42,22 @@ class RecoveryPostureEvaluator:
     # Task 142：exit_execution_* 的 kind 字符串从 exit_intent_aggregator
     # 导入，防止两处散落（aggregator 的 review item kind / 本文件的
     # persistent blocker）未来添加新 kind 时漏配其中一侧。
+    #
+    # task84 审查（2026-04-21）：补入
+    # `derivatives_exchange_position_without_local_execution_chain`。该 reason 由
+    # reconciliation_service/comparator.py L479 写入 assessment.only_reduce_reasons，
+    # 经 L165-186 加入 resume_blockers。但旧实现只通过 report.only_reduce_reasons
+    # 传递，一旦下一轮 reconciliation 清除了该字段，幽灵 blocker 会消失，
+    # /system/resume API 会意外放行。把它纳入本文件的持久 blocker 集合，
+    # 保证 status-level 持久化下仍然 block（见 L166 `blocker in _PERSISTENT_STATUS_BLOCKERS`
+    # 过滤路径）。
     _PERSISTENT_STATUS_BLOCKERS = {
         "pending_execution_commands",
         "stuck_sent_submit_commands",
         "account_snapshot_refresh_failed",
         "strategy_bundle_recovery_in_progress",
         "strategy_bundle_recovery_requires_review",
+        "derivatives_exchange_position_without_local_execution_chain",
         *EXIT_EXECUTION_BLOCKER_KINDS,
     }
 
