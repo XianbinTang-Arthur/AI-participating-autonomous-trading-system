@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random as _random
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -979,10 +980,29 @@ class ApplicationRuntime:
         if self.database_runtime is not None:
             self.database_runtime.dispose()
 
+    @staticmethod
+    def _jittered_sleep_seconds(base_seconds: float, jitter_fraction: float = 0.10) -> float:
+        """2026-04-21 A2 · 给固定间隔 loop 加随机 jitter 防 4 进程锁步打 DB。
+
+        背景：gateway/market/decision/execution 4 进程在 deploy 时**同一秒**
+        启动，固定间隔的 background loop 会永远在同一个时间窗内触发，造成
+        协同 DB 峰值 + Prometheus metric 尖刺。加 jitter 后几次迭代内自然
+        decorrelate。
+
+        返回 [base, base * (1+jitter_fraction)) 区间内的随机时长。默认 10%
+        jitter 既能快速打散锁步，又不会显著改变 loop 语义。
+
+        不用在超长间隔（如 housekeeping 6h）上：10% 就是 36 分钟浮动。
+        不用在已有 exponential backoff 的 loop 上：backoff 本身就是变化的。
+        """
+        if base_seconds <= 0:
+            return base_seconds
+        return base_seconds + _random.random() * base_seconds * jitter_fraction
+
     async def _flush_stream_cache_loop(self) -> None:
         """定期将 StreamSnapshotCache 的 latest 快照 best-effort 写入 Redis。"""
         while True:
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(self._jittered_sleep_seconds(5.0))
             try:
                 await self.stream_snapshot_cache.flush_to_hot_state()
             except Exception as exc:
@@ -997,7 +1017,11 @@ class ApplicationRuntime:
                 await self._evaluate_derivatives_live_guard_after_refresh()
             except Exception as exc:
                 await self._record_background_failure(subsystem="account_refresh", exc=exc)
-            await asyncio.sleep(self.settings.okx_account_refresh_interval_seconds)
+            await asyncio.sleep(
+                self._jittered_sleep_seconds(
+                    float(self.settings.okx_account_refresh_interval_seconds)
+                )
+            )
 
     async def _publish_account_snapshot_to_cache(self) -> None:
         """refresh 成功后把 snapshot 广播到 account_snapshot_cache。
@@ -1054,7 +1078,11 @@ class ApplicationRuntime:
                 await self.order_manager.sync_exchange_state()
             except Exception as exc:
                 await self._record_background_failure(subsystem="execution_sync", exc=exc)
-            await asyncio.sleep(self.settings.okx_execution_sync_interval_seconds)
+            await asyncio.sleep(
+                self._jittered_sleep_seconds(
+                    float(self.settings.okx_execution_sync_interval_seconds)
+                )
+            )
 
     async def _refresh_reconciliation_loop(self) -> None:
         # Stage 3：reconciliation_service 在非 execution/monolith role 下为 None；
@@ -1071,7 +1099,7 @@ class ApplicationRuntime:
                 await self.reconciliation_service.validate_now(reason="background_refresh")
             except Exception as exc:
                 await self._record_background_failure(subsystem="reconciliation_refresh", exc=exc)
-            await asyncio.sleep(interval_seconds)
+            await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     async def _flush_execution_outbox_loop(self) -> None:
         backoff = 1.0
@@ -1093,7 +1121,7 @@ class ApplicationRuntime:
                     await self.execution_command_processor.process_pending()
             except Exception as exc:
                 await self._record_background_failure(subsystem="execution_command_flow", exc=exc)
-            await asyncio.sleep(interval_seconds)
+            await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     async def _monitor_phase1_shadow_loop(self) -> None:
         interval_seconds = max(
@@ -1105,7 +1133,7 @@ class ApplicationRuntime:
                 await asyncio.to_thread(self._record_phase1_shadow_state)
             except Exception as exc:
                 await self._record_background_failure(subsystem="phase1_shadow_monitor", exc=exc)
-            await asyncio.sleep(interval_seconds)
+            await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     async def _monitor_trial_guard_loop(self) -> None:
         interval_seconds = max(1.0, float(self.settings.trial_guard_poll_interval_seconds))
@@ -1115,7 +1143,7 @@ class ApplicationRuntime:
                     await asyncio.to_thread(self.trial_guard_service.evaluate_now)
             except Exception as exc:
                 await self._record_background_failure(subsystem="trial_guard_monitor", exc=exc)
-            await asyncio.sleep(interval_seconds)
+            await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
 
     async def _housekeeping_loop(self) -> None:
         """P3-1 / P3-2 + Path B Phase 1：每 6 小时执行一次数据库清理。
@@ -5626,7 +5654,8 @@ async def build_runtime(
                     )
 
             while True:
-                await _aio.sleep(10.0)
+                # 2026-04-21 A2: 10s base + 10% jitter 防跨进程锁步
+                await _aio.sleep(runtime._jittered_sleep_seconds(10.0))
                 try:
                     if runtime.derivatives_live_guard_service is not None:
                         # 先 evaluate_now 确保 snapshot 是最新评估结果，
