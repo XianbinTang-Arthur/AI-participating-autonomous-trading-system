@@ -107,6 +107,12 @@ class OKXPrivateWebSocketClient:
                         async for raw_message in websocket:
                             if self._stop_event.is_set():
                                 break
+
+                            # ── A1 · 2026-04-21 keepalive task 静默死监控 ──
+                            # 每条消息后快检 task 状态；发现它已 done 就抛进外层
+                            # 重连路径（见 _assert_keepalive_alive docstring）。
+                            self._assert_keepalive_alive(keepalive_task)
+
                             # Any inbound frame (pong, control, or payload) counts as
                             # channel liveness for the keepalive loop.
                             self._last_message_ts = utc_now()
@@ -145,6 +151,43 @@ class OKXPrivateWebSocketClient:
 
     async def stop(self) -> None:
         self._stop_event.set()
+
+    @staticmethod
+    def _assert_keepalive_alive(keepalive_task: "asyncio.Task[None]") -> None:
+        """2026-04-21 A1 · keepalive task 静默死检测。
+
+        `asyncio.create_task()` 会把内部异常静默存入 task；如果没人 await，
+        异常永远不冒出来。旧实现只在 finally 里 await keepalive_task，但主
+        循环退出时 task 往往已经死了很久——期间 keepalive ping 停发，OKX
+        30s 后 side-close 连接，我们收不到 fill / balance 更新。
+
+        新法：主循环每条消息后调这个 helper 快检 task 状态。发现 done
+        就立刻 raise 进外层 except 路径，让 reconnect 链路重起一个新
+        keepalive_task 恢复心跳。
+
+        `_keepalive_loop` 设计是无限循环到被 cancel，所以 **正常情况下
+        task.done() 永远是 False**。done 必然意味着出问题（异常 or 提前
+        return）——两种都视为 fatal，抛出触发重连。
+        """
+        if not keepalive_task.done():
+            return
+        # Cancelled task 的特殊形态：task.exception() 会 raise CancelledError
+        # 而不是 return。单独处理避免 watchdog 自己崩掉。
+        if keepalive_task.cancelled():
+            raise RuntimeError(
+                "keepalive_task was cancelled "
+                "(should only happen on stop / reconnect)"
+            )
+        keepalive_exc = keepalive_task.exception()
+        if keepalive_exc is not None:
+            raise RuntimeError(
+                f"keepalive_task died: "
+                f"{type(keepalive_exc).__name__}: {keepalive_exc}"
+            ) from keepalive_exc
+        raise RuntimeError(
+            "keepalive_task completed unexpectedly "
+            "(should run until cancelled)"
+        )
 
     def status(self) -> dict[str, Any]:
         return {
