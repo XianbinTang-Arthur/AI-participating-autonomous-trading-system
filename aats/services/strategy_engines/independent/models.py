@@ -129,7 +129,10 @@ class IndependentExecutionPolicy:
     edge_strength: Literal["weak", "medium", "strong"]
     urgency: Literal["low", "medium", "high"]
     execution_style_preference: str | None
-    order_type_preference: Literal["market", "limit"] | None
+    # post_only_with_timeout_fallback (2026-04-21): "post_only" 是 OKX 原生 ordType,
+    # 挂单侧不跨价; 运行时到 okx_adapter._order_type 映射为 "post_only" 提交.
+    # 见 docs/design/post_only_maker_exit_mode_2026_04_21.md §3
+    order_type_preference: Literal["market", "limit", "post_only"] | None
     time_in_force_preference: str | None
     limit_offset_bps_preference: Decimal | None
     max_acceptable_cost_bps: float | None
@@ -139,6 +142,9 @@ class IndependentExecutionPolicy:
     passive_first: bool = False
     bounded_limit_ioc: bool = False
     bounded_taker: bool = False
+    # post_only_with_timeout_fallback 标志: planner / order_manager 据此走 post_only
+    # 专用定价 + timeout orchestration. 详见 evidence doc §3.2 / §3.5
+    post_only: bool = False
     reason: str | None = None
 
 

@@ -35,6 +35,28 @@ def resolve_execution_policy_from_mode(
             bounded_taker=False,
             reason=policy_reason,
         )
+    if mode == "post_only_with_timeout_fallback":
+        # post_only_with_timeout_fallback (2026-04-21): 挂 post_only,
+        # 超时 fallback 由 order_manager orchestration 层完成 (Layer 4).
+        # 本层只生成策略; timeout_ms / fallback_mode 由 settings 承载.
+        # 详见 docs/design/post_only_maker_exit_mode_2026_04_21.md §3.2
+        return IndependentExecutionPolicy(
+            edge_strength=edge_strength,
+            urgency=urgency,
+            execution_style_preference="post_only",
+            order_type_preference="post_only",
+            time_in_force_preference="GTC",  # post_only 在 OKX 永远挂单, 不适用 IOC
+            limit_offset_bps_preference=limit_offset_bps,
+            max_acceptable_cost_bps=max_acceptable_cost_bps,
+            policy_reason=policy_reason,
+            mode=mode,
+            price_style="post_only",
+            passive_first=True,
+            bounded_limit_ioc=False,
+            bounded_taker=False,
+            post_only=True,
+            reason=policy_reason,
+        )
     execution_style = "bounded_taker_cap"
     if mode == "aggressive_bounded_taker":
         execution_style = "aggressive_bounded_taker_cap"
@@ -238,7 +260,11 @@ def _adaptive_entry_or_scale(
         return resolve_execution_policy_from_mode(
             mode=configured_mode,
             edge_strength=edge_strength,
-            urgency="low" if configured_mode in {"passive_first", "bounded_limit"} else "medium",
+            urgency="low" if configured_mode in {
+                "passive_first",
+                "bounded_limit",
+                "post_only_with_timeout_fallback",
+            } else "medium",
             limit_offset_bps=limit_offset,
             max_acceptable_cost_bps=max_cost,
             policy_reason=f"independent_{configured_label}_configured_{configured_mode}",
