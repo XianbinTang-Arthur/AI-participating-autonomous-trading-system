@@ -9,7 +9,11 @@ from aats.services.execution_engine.bundle_recovery import scoped_bundle_recover
 from aats.services.execution_engine.exit_intent_aggregator import (
     EXIT_EXECUTION_BLOCKER_KINDS,
 )
-from aats.services.runtime_scope import latest_matching_reconciliation, runtime_state_scope
+from aats.services.runtime_scope import (
+    latest_matching_reconciliation,
+    latest_reconciliation_for_scope,
+    runtime_state_scope,
+)
 
 if TYPE_CHECKING:
     from aats.bootstrap.config import ApplicationRuntime
@@ -166,8 +170,14 @@ class RecoveryPostureEvaluator:
         latest_reconciliation: ReconciliationReport | None = None,
     ) -> ResumeCheck:
         status = base_status or self.runtime.recovery_status
-        report = latest_reconciliation or latest_matching_reconciliation(
-            self.runtime.reconciliation_repo.history(),
+        # 2026-04-21 生产根治：原实现调 `repo.history()` —— 全表扫
+        # reconciliation_reports 并拉完整 JSONB payload，gateway `recovery_view`
+        # 单路测得 111-137s。换成 `latest_reconciliation_for_scope`，
+        # 底层走 `latest_for_scope`（SQL: WHERE product_type+margin_mode
+        # + ORDER BY as_of_ts DESC + LIMIT 1），毫秒级返回，语义等价
+        # （两者都只需要 "scope 下最新 matching report"）。
+        report = latest_reconciliation or latest_reconciliation_for_scope(
+            self.runtime.reconciliation_repo,
             self.state_scope,
         )
         blockers = [
@@ -218,8 +228,9 @@ class RecoveryPostureEvaluator:
         latest_reconciliation: ReconciliationReport | None = None,
     ) -> RecoveryAssessment:
         status = base_status or self.runtime.recovery_status
-        report = latest_reconciliation or latest_matching_reconciliation(
-            self.runtime.reconciliation_repo.history(),
+        # 2026-04-21 同上：全表扫 → SQL LIMIT 1，毫秒级。
+        report = latest_reconciliation or latest_reconciliation_for_scope(
+            self.runtime.reconciliation_repo,
             self.state_scope,
         )
         bundle_recovery = self._bundle_recovery_assessment()
