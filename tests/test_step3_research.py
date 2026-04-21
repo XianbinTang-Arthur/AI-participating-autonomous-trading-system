@@ -469,8 +469,9 @@ check(
     "scale_in_threshold" in merged["independent_15m"],
 )
 check(
-    "scale_in_threshold 有默认值 0.60",
-    merged["independent_15m"]["scale_in_threshold"]["value"] == 0.60,
+    # 2026-04-21 修正：truth source 对齐 replay_context.py L195 `scale_in_threshold=0.40`
+    "scale_in_threshold 有默认值 0.40",
+    merged["independent_15m"]["scale_in_threshold"]["value"] == 0.40,
 )
 
 print()
@@ -712,8 +713,9 @@ check(
 ind_defaults = _s3._get_param_defaults("independent")
 dir_defaults = _s3._get_param_defaults("directional")
 check(
-    "independent entry_threshold = 0.40",
-    ind_defaults["entry_threshold"] == 0.40,
+    # 2026-04-21 修正：truth source 对齐 replay_context.py L188
+    "independent entry_threshold = 0.30",
+    ind_defaults["entry_threshold"] == 0.30,
 )
 check(
     "independent close_threshold = 0.15",
@@ -765,8 +767,9 @@ s2_ind = {
 }
 m_ind = _s3._merge_recommendations(s2_ind, s3_empty)
 check(
-    "independent 合并后 entry_threshold = 0.40 (independent 默认)",
-    m_ind["independent_15m"]["entry_threshold"]["value"] == 0.40,
+    # 2026-04-21 修正：truth source 对齐 replay_context.py L188
+    "independent 合并后 entry_threshold = 0.30 (independent 默认)",
+    m_ind["independent_15m"]["entry_threshold"]["value"] == 0.30,
 )
 check(
     "independent 合并后 close_threshold = 0.15 (independent 默认)",
@@ -812,7 +815,7 @@ check(
     f"got {fixed_dir_close}",
 )
 
-# 对照: independent 同样场景 auto-fix 应使用 independent 的 0.40
+# 对照: independent 同样场景 auto-fix 应使用 independent 的 0.30
 ind_violation = {
     "independent_15m": {
         "close_threshold": {"value": 0.99, "confidence": "low"},
@@ -829,8 +832,9 @@ ind_violation = {
 cr_ind = _s3._validate_constraints(ind_violation)
 fixed_ind_close = ind_violation["independent_15m"]["close_threshold"]["value"]
 check(
-    f"independent auto-fix: close={fixed_ind_close} == 0.35 (independent entry=0.40 - 0.05)",
-    abs(fixed_ind_close - 0.35) < 1e-9,
+    # 2026-04-21 修正：independent entry=0.30，fix 后 close = 0.30 - 0.05 = 0.25
+    f"independent auto-fix: close={fixed_ind_close} == 0.25 (independent entry=0.30 - 0.05)",
+    abs(fixed_ind_close - 0.25) < 1e-9,
     f"got {fixed_ind_close}",
 )
 
@@ -850,8 +854,9 @@ check(
     hasattr(_s3, "_PARAM_DEFAULTS"),
 )
 check(
+    # 2026-04-21 修正：_PARAM_DEFAULTS 等于 _INDEPENDENT_DEFAULTS，entry=0.30
     "_PARAM_DEFAULTS 内容 = independent 默认",
-    _s3._PARAM_DEFAULTS["entry_threshold"] == 0.40,
+    _s3._PARAM_DEFAULTS["entry_threshold"] == 0.30,
 )
 check(
     "_CONSTRAINT_RULES 别名存在",
@@ -868,10 +873,17 @@ try:
     _replay_directional = ReplayParameterOverrides.for_family("directional")
 
     # 关键阈值字段必须逐一对齐（其他字段通过 14h 整体校验）
+    # 2026-04-21 修正：取值同步到当前真源 replay_context.py L188-196 + L340-342：
+    #   independent: entry=0.30, close=0.15, scale_in=0.40
+    #   directional: entry=0.45, close=0.20, scale_in=0.55
+    # 旧测试曾硬编码 entry=0.40 / scale_in=0.60，是 truth source 迁移前的残留，
+    # 与 ReplayParameterOverrides 实际默认长期不一致但未被 CI 捕获（脚本未
+    # 被 pytest 默认收集）。本次 P3-4 补齐 _DIRECTIONAL_DEFAULTS
+    # scale_in=0.55 时顺手把测试对齐到真源。
     _critical_fields = [
-        ("entry_threshold", 0.40, 0.45),
+        ("entry_threshold", 0.30, 0.45),
         ("close_threshold", 0.15, 0.20),
-        ("scale_in_threshold", 0.60, 0.60),
+        ("scale_in_threshold", 0.40, 0.55),
         ("min_safe_net_edge_bps", 2.0, 2.0),
         ("de_risk_net_edge_bps", 2.0, 2.0),
         ("failed_thesis_net_edge_bps", -1.0, -1.0),
@@ -910,17 +922,21 @@ try:
             f"got {getattr(_replay_directional, _field)}",
         )
 
-    # 14h: directional 与 independent 的差异点仅限 entry_threshold / close_threshold
-    # 如果未来 for_family 增加新差异字段，此断言会报错并提醒同步更新
-    # _DIRECTIONAL_DEFAULTS。
+    # 14h: directional 与 independent 的差异点 = {entry, close, scale_in}
+    # （truth source 长期现状）。如果未来 for_family 增加新差异字段，
+    # 此断言会报错并提醒同步更新 _DIRECTIONAL_DEFAULTS。
     _replay_diff_fields = {
         f
         for f in _critical_fields
         if getattr(_replay_independent, f[0]) != getattr(_replay_directional, f[0])
     }
-    _expected_diff = {("entry_threshold", 0.40, 0.45), ("close_threshold", 0.15, 0.20)}
+    _expected_diff = {
+        ("entry_threshold", 0.30, 0.45),
+        ("close_threshold", 0.15, 0.20),
+        ("scale_in_threshold", 0.40, 0.55),
+    }
     check(
-        "14h: ReplayParameterOverrides directional vs independent 差异 = {entry, close}",
+        "14h: ReplayParameterOverrides directional vs independent 差异 = {entry, close, scale_in}",
         _replay_diff_fields == _expected_diff,
         f"got diff fields = {_replay_diff_fields}",
     )

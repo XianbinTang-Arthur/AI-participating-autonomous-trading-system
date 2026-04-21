@@ -130,11 +130,18 @@ _INDEPENDENT_DEFAULTS: dict[str, float | int | None] = {
 }
 
 # directional 家族默认值（与 ReplayParameterOverrides.for_family("directional") 对齐）
-# 差异: entry_threshold 0.30→0.45, close_threshold 0.15→0.20
+# 差异: entry_threshold 0.30→0.45, close_threshold 0.15→0.20, scale_in_threshold 0.40→0.55
+# 修正记录（2026-04-21）：_DIRECTIONAL_DEFAULTS 原本漏掉 scale_in_threshold=0.55，
+# 导致 step3 合并 fallback 给 directional 继承 _INDEPENDENT_DEFAULTS["scale_in_threshold"]=0.40，
+# 与 replay 侧 ReplayParameterOverrides.for_family("directional").scale_in_threshold=0.55
+# 静默偏差。复审的真源对齐（replay_context.py:342）发现后补齐。
+# 影响面：directional 家族缺失 scale_in_threshold 时，约束检查 fallback 偏低，
+# 可能掩盖合理约束违反；replay 侧读 0.55 而 step3 写 0.40，两套默认不一致。
 _DIRECTIONAL_DEFAULTS: dict[str, float | int | None] = {
     **_INDEPENDENT_DEFAULTS,
     "entry_threshold": 0.45,
     "close_threshold": 0.20,
+    "scale_in_threshold": 0.55,
 }
 
 _DEFAULTS_BY_FAMILY: dict[str, dict[str, float | int | None]] = {
