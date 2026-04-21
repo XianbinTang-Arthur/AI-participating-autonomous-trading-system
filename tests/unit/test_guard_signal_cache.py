@@ -494,3 +494,282 @@ class TestDiagnostic(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(diag["has_data"])
         self.assertEqual(diag["stale_threshold_seconds"], 60.0)
         self.assertEqual(diag["process_role"], "decision")
+
+
+class _PersistTrackingBus:
+    """Mock bus that records every publish_envelope call's persist flag.
+
+    用于验证 guard_signal_cache.publish() 在 dedup 时传 persist=False、
+    在内容变化时传 persist=True。
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+        self._subs: list = []
+
+    async def publish_envelope(self, envelope, *, persist: bool = True) -> None:
+        # 记录 persist flag + envelope.key + business payload (排除 metadata)
+        biz_payload = {
+            k: v for k, v in envelope.payload.items()
+            if not k.startswith("_")
+        }
+        self.calls.append({
+            "persist": persist,
+            "key": envelope.key,
+            "business_payload": biz_payload,
+            "full_payload": envelope.payload,
+        })
+        # 模拟 NATS 投递：仍 invoke 订阅的 handler（reader 心跳必须保留）
+        message = {
+            "topic": envelope.topic,
+            "key": envelope.key,
+            "payload": envelope.model_dump(mode="json"),
+        }
+        for handler in list(self._subs):
+            await handler(message)
+
+    async def publish(self, topic: str, key: str, payload: dict) -> None:
+        # fallback path（老 bus 接口）—— 不应该在测试中走到
+        raise AssertionError(
+            "publish(...) fallback should not fire; "
+            "guard_signal_cache should prefer publish_envelope"
+        )
+
+    async def subscribe(self, topic: str, handler) -> None:
+        self._subs.append(handler)
+
+
+class TestDedup(unittest.IsolatedAsyncioTestCase):
+    """2026-04-21 TOCTOU 后续：`recovery` 信号 98.5% dedup 实施。
+
+    核心属性：
+      - 同 payload 连续 publish → 第 2 次起走 persist=False（不写 event_store）
+      - payload 变化 → 恢复 persist=True（落盘）
+      - 无论 persist=True/False，NATS 广播都要发出去（reader 心跳不丢）
+      - 这保证 reader 侧 `_last_updated_at` 每次都更新，不会触发 120s fail-closed
+    """
+
+    async def test_duplicate_payload_uses_persist_false(self) -> None:
+        """连续两次发布同一个 payload：第 2 次应 persist=False。"""
+        bus = _PersistTrackingBus()
+        cache = GuardSignalHotStateCache(
+            signal_name="recovery",
+            logger=_make_logger(),
+        )
+        await cache.bootstrap(bus=bus, process_role="execution")
+
+        payload = {
+            "safe_to_trade": True,
+            "review_required": False,
+            "independent_recovery_snapshots": [{"sleeve_id": "s1", "state": "ok"}],
+        }
+        await cache.publish(payload)
+        await cache.publish(payload)  # identical
+
+        self.assertEqual(len(bus.calls), 2)
+        self.assertTrue(
+            bus.calls[0]["persist"],
+            "第一次 publish 没有前置 hash，必须走持久化",
+        )
+        self.assertFalse(
+            bus.calls[1]["persist"],
+            "第二次同 payload 应 dedup → persist=False 跳过 event_store.append",
+        )
+
+    async def test_changed_payload_restores_persist_true(self) -> None:
+        """payload 变化 → 恢复 persist=True。"""
+        bus = _PersistTrackingBus()
+        cache = GuardSignalHotStateCache(
+            signal_name="recovery",
+            logger=_make_logger(),
+        )
+        await cache.bootstrap(bus=bus, process_role="execution")
+
+        await cache.publish({"safe_to_trade": True, "review_required": False})
+        await cache.publish({"safe_to_trade": True, "review_required": False})  # dup
+        await cache.publish({"safe_to_trade": False, "review_required": True})  # change!
+
+        self.assertEqual(len(bus.calls), 3)
+        self.assertTrue(bus.calls[0]["persist"])
+        self.assertFalse(bus.calls[1]["persist"])
+        self.assertTrue(
+            bus.calls[2]["persist"],
+            "payload 变了之后必须恢复持久化，否则 event_store 丢数据",
+        )
+
+    async def test_reader_heartbeat_preserved_under_dedup(self) -> None:
+        """**关键安全验证**：dedup 不能破坏 reader 的 120s staleness 检测。
+
+        reader 侧 `_last_updated_at` 只在收到 NATS 消息时更新；如果 dedup
+        跳过 NATS publish，reader 超过 120s 会 fail-closed（RiskEngine 误入
+        only-reduce 模式）。本测试保证即使 dedup 了，NATS 广播仍然发出、
+        reader `_last_updated_at` 每次都更新。
+        """
+        bus = _PersistTrackingBus()
+
+        writer = GuardSignalHotStateCache(
+            signal_name="recovery",
+            logger=_make_logger(),
+        )
+        await writer.bootstrap(bus=bus, process_role="execution")
+
+        reader = GuardSignalHotStateCache(
+            signal_name="recovery",
+            logger=_make_logger(),
+        )
+        await reader.bootstrap(
+            bus=bus,
+            process_role="decision",
+            subscribe=True,
+        )
+
+        # 第 1 次 publish 后，reader 有快照
+        await writer.publish({"safe_to_trade": True, "sleeves": []})
+        first_ts = reader._last_updated_at
+        self.assertGreater(first_ts, 0, "reader 第一次应收到消息")
+
+        # 等待一瞬（毫秒级）保证时间戳单调递增
+        await asyncio.sleep(0.01)
+
+        # 第 2 次 publish 同 payload（会被 dedup 成 persist=False）
+        await writer.publish({"safe_to_trade": True, "sleeves": []})
+        second_ts = reader._last_updated_at
+
+        # ★ 关键断言 ★：即使 dedup，reader 的 _last_updated_at 必须更新
+        self.assertGreater(
+            second_ts,
+            first_ts,
+            "CRITICAL: dedup 不能跳过 NATS 广播 —— 否则 reader _last_updated_at "
+            "冻结，120s 后 fail-closed 误入 only-reduce 模式。"
+            "dedup 只能跳过 event_store.append，NATS 必须继续发。",
+        )
+
+        # 顺便验证第二次确实是 dedup（persist=False）
+        self.assertFalse(bus.calls[1]["persist"])
+
+    async def test_different_signals_do_not_cross_contaminate_hash(self) -> None:
+        """`recovery` 和 `trial` 两个独立 cache，hash 互不影响。"""
+        bus_recovery = _PersistTrackingBus()
+        bus_trial = _PersistTrackingBus()
+
+        cache_recovery = GuardSignalHotStateCache(
+            signal_name="recovery",
+            logger=_make_logger(),
+        )
+        cache_trial = GuardSignalHotStateCache(
+            signal_name="trial",
+            logger=_make_logger(),
+        )
+        await cache_recovery.bootstrap(bus=bus_recovery, process_role="execution")
+        await cache_trial.bootstrap(bus=bus_trial, process_role="execution")
+
+        payload = {"safe_to_trade": True}
+
+        await cache_recovery.publish(payload)
+        await cache_trial.publish(payload)  # 不同 cache 实例，应各自走 persist=True
+
+        self.assertEqual(len(bus_recovery.calls), 1)
+        self.assertEqual(len(bus_trial.calls), 1)
+        self.assertTrue(bus_recovery.calls[0]["persist"])
+        self.assertTrue(
+            bus_trial.calls[0]["persist"],
+            "不同 cache 实例 _last_published_hash 互相独立，trial 第一次必须持久化",
+        )
+
+    async def test_first_publish_failure_forces_next_persist_true(self) -> None:
+        """★ 关键安全属性 ★：**第一次** publish 失败时 `_last_published_hash`
+        不更新 —— 第二次必须 persist=True 保证数据落盘（event_store 无此条）。
+
+        反例：如果实现先更新 hash 再 publish，call 1 会标记 hash=X 然后 raise；
+        call 2 看到 hash=X 以为已经持久化过了，走 persist=False →
+        **data loss**：event_store 从来没有这条业务 payload。
+        """
+        call_count = 0
+
+        class _FailFirstBus:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+
+            async def publish_envelope(self, envelope, *, persist: bool = True) -> None:
+                nonlocal call_count
+                call_count += 1
+                self.calls.append({"persist": persist})
+                if call_count == 1:
+                    raise RuntimeError("simulated NATS failure on first publish")
+
+            async def publish(self, topic: str, key: str, payload: dict) -> None:
+                raise AssertionError("should not fall back to publish()")
+
+            async def subscribe(self, topic: str, handler) -> None:
+                pass
+
+        bus = _FailFirstBus()
+        cache = GuardSignalHotStateCache(
+            signal_name="recovery",
+            logger=_make_logger(),
+        )
+        await cache.bootstrap(bus=bus, process_role="execution")
+
+        payload = {"safe_to_trade": True}
+        await cache.publish(payload)  # 第 1 次 persist=True 但 raise → hash 不应更新
+        await cache.publish(payload)  # 第 2 次必须再次 persist=True（event_store 还没这条）
+
+        self.assertEqual(len(bus.calls), 2)
+        self.assertTrue(
+            bus.calls[0]["persist"],
+            "第 1 次（新 cache, hash=None）应 persist=True",
+        )
+        self.assertTrue(
+            bus.calls[1]["persist"],
+            "FATAL IF FAIL: 第 1 次 publish raise → _last_published_hash 必须"
+            "保持为 None → 第 2 次同 payload 应再次 persist=True。"
+            "如果 hash 在 publish_envelope await 之前就被更新，第 2 次会误判为"
+            "dup → persist=False → event_store 永远没这条 → data loss。",
+        )
+
+    async def test_successful_publish_then_failed_dedup_does_not_corrupt_hash(self) -> None:
+        """call 1 成功写 event_store（hash=X），call 2 同 payload 走 persist=False
+        但 NATS raise —— 这种场景下 data 已经在 event_store 里（call 1 存的），
+        call 3 仍可继续 dedup（persist=False），因为真实状态未变。
+
+        说明：publish_envelope raise 不等于 data loss 只要它是 dedup 路径（persist=False）。
+        """
+        call_count = 0
+
+        class _FailSecondBus:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+
+            async def publish_envelope(self, envelope, *, persist: bool = True) -> None:
+                nonlocal call_count
+                call_count += 1
+                self.calls.append({"persist": persist})
+                if call_count == 2:
+                    raise RuntimeError("NATS hiccup mid-dedup")
+
+            async def publish(self, topic: str, key: str, payload: dict) -> None:
+                raise AssertionError("should not fall back to publish()")
+
+            async def subscribe(self, topic: str, handler) -> None:
+                pass
+
+        bus = _FailSecondBus()
+        cache = GuardSignalHotStateCache(
+            signal_name="recovery",
+            logger=_make_logger(),
+        )
+        await cache.bootstrap(bus=bus, process_role="execution")
+
+        payload = {"safe_to_trade": True}
+        await cache.publish(payload)  # call 1 success: persist=True, hash=X
+        await cache.publish(payload)  # call 2: persist=False, NATS raise
+        await cache.publish(payload)  # call 3: still persist=False (dedup ok,
+                                       # data safe in event_store from call 1)
+
+        self.assertEqual(len(bus.calls), 3)
+        self.assertTrue(bus.calls[0]["persist"])
+        self.assertFalse(bus.calls[1]["persist"])
+        self.assertFalse(
+            bus.calls[2]["persist"],
+            "call 3: call 1 已经落盘同 payload → event_store 有这条 → dedup 安全",
+        )

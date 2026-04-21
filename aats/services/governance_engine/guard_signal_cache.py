@@ -28,6 +28,8 @@ signal_name 约定：
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from typing import Any
 
@@ -108,6 +110,11 @@ class GuardSignalHotStateCache:
         self._last_updated_at: float = 0.0
         self._bootstrapped: bool = False
         self._subscribed: bool = False
+        # 2026-04-21：publish 时对业务 payload 做内容哈希，与上次持久化过的
+        # 对比；若相同则走 persist=False 的 publish_envelope 路径 —— 仍广播
+        # NATS（reader `_handle_remote_update` 心跳更新，避免 120s 后 fail-closed）
+        # 但跳过 event_store.append（3.3 GB 重复记录消失）。
+        self._last_published_hash: str | None = None
 
     @property
     def redis_key(self) -> str:
@@ -247,7 +254,21 @@ class GuardSignalHotStateCache:
                     error=str(exc),
                 )
 
-        # 3. best-effort NATS 广播
+        # 3. best-effort NATS 广播（+ event_store 持久化分流）
+        #
+        # 2026-04-21 dedup：在同 signal_name 连续 publish 时，如果业务 payload
+        # 与上次完全相同，跳过 event_store.append（避免 recovery 信号 709 KB ×
+        # 13s 的 98.5% 重复持久化），但**仍然** publish 到 NATS ——
+        #
+        # 为什么 NATS 必须保留：reader 侧（decision 进程）的
+        # `_handle_remote_update` 更新 `_last_updated_at`；``snapshot()`` 有
+        # `age > stale_threshold (120s) → fail-closed sentinel` 的硬约束。
+        # 如果 NATS 被 dedup 跳过，超过 120s 就会让 RiskEngine 误入 only-reduce
+        # 模式。NATS 传输是纯内存/临时的，重复消息零成本；只有 PG event_store
+        # 是昂贵的部分，所以只 dedup event_store。
+        #
+        # dedup hash 基于 business `snapshot`（不包括 `_cached_at`/`_writer_role`
+        # 等 metadata），保证同一业务状态连续 publish 识别为重复。
         if self._bus is not None:
             try:
                 from aats.schemas.common import EventEnvelope, dump_payload_exact
@@ -259,11 +280,43 @@ class GuardSignalHotStateCache:
                     key=self._signal_name,
                     payload=dump_payload_exact(enriched),
                 )
-                await self._bus.publish(
-                    topic=topics.GUARD_SIGNAL_UPDATES,
-                    key=self._signal_name,
-                    payload=envelope.model_dump(mode="json"),
+
+                # 计算业务 payload hash（排除 metadata）
+                try:
+                    payload_signature = json.dumps(
+                        snapshot, sort_keys=True, default=str
+                    )
+                    payload_hash = hashlib.sha256(
+                        payload_signature.encode("utf-8")
+                    ).hexdigest()
+                except Exception:
+                    # json 化失败（unlikely，snapshot 已经走过 dump_payload_exact）
+                    # → 保守起见按"不同"处理，持久化
+                    payload_hash = None
+
+                is_duplicate = (
+                    payload_hash is not None
+                    and payload_hash == self._last_published_hash
                 )
+
+                # 优先走 publish_envelope(persist=...)；如果 bus 不支持此接口
+                # （如 KafkaEventBus 只有 base 的 publish(...)），fallback 到
+                # 原 publish 路径，persist 由 bus 默认决定（= True）。
+                publish_envelope = getattr(self._bus, "publish_envelope", None)
+                if callable(publish_envelope):
+                    await publish_envelope(envelope, persist=not is_duplicate)
+                else:
+                    # fallback: 老 bus 接口，不能控制 persist 粒度
+                    await self._bus.publish(
+                        topic=topics.GUARD_SIGNAL_UPDATES,
+                        key=self._signal_name,
+                        payload=envelope.model_dump(mode="json"),
+                    )
+
+                # publish 成功后才更新 hash —— 失败时下次必须走 persist=True
+                # 以保证数据落盘
+                if payload_hash is not None:
+                    self._last_published_hash = payload_hash
             except Exception as exc:
                 log_event(
                     self._logger,
