@@ -576,6 +576,41 @@ class TestDedup(unittest.IsolatedAsyncioTestCase):
             "第二次同 payload 应 dedup → persist=False 跳过 event_store.append",
         )
 
+    async def test_duplicate_payload_sets_receive_side_skip_flag(self) -> None:
+        """★ 架构关键 ★：publish 端 persist=False 只关一处 event_store.append
+        （nats_bus.py publish_envelope 路径）；nats_bus.py 的 NATS receive
+        handler 里还有一处 event_store.append (line 1377) 独立于 persist flag。
+        所以必须在 envelope.payload 里放 `_dedup_skip_persist=True` 让 receive
+        端也跳过，否则跨进程 subscriber 仍会把重复消息写 PG → 单边 dedup 失效。
+
+        不加这条锚点测试的话，下一个读代码的人可能把 payload 字段当 "内部
+        metadata 冗余" 删掉，静默 regress。
+        """
+        bus = _PersistTrackingBus()
+        cache = GuardSignalHotStateCache(
+            signal_name="recovery",
+            logger=_make_logger(),
+        )
+        await cache.bootstrap(bus=bus, process_role="execution")
+
+        payload = {"safe_to_trade": True, "x": 1}
+        await cache.publish(payload)  # first: no flag
+        await cache.publish(payload)  # dup: must have flag
+
+        self.assertEqual(len(bus.calls), 2)
+        first_payload = bus.calls[0]["full_payload"]
+        second_payload = bus.calls[1]["full_payload"]
+        self.assertFalse(
+            first_payload.get("_dedup_skip_persist", False),
+            "第一次 publish 不应有 _dedup_skip_persist（新 payload，需要持久化）",
+        )
+        self.assertTrue(
+            second_payload.get("_dedup_skip_persist"),
+            "CRITICAL：第二次同 payload 必须在 envelope.payload 里写 "
+            "`_dedup_skip_persist=True`，否则 nats_bus receive 端会把重复消息 "
+            "append 到 event_store，单边 dedup 失效。",
+        )
+
     async def test_changed_payload_restores_persist_true(self) -> None:
         """payload 变化 → 恢复 persist=True。"""
         bus = _PersistTrackingBus()

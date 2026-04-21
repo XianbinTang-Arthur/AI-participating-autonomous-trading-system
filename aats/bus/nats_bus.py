@@ -1372,18 +1372,32 @@ class NatsEventBus(EventBus):
             # 此处补齐 receive 路径——否则非生产者进程（如 gateway）的
             # event_store 对跨进程 topic 永远为空，导致 dashboard 查询缺数据。
             # InMemoryEventStore.append 按 event_id 去重，不会重复写入。
+            #
+            # 2026-04-21：新增 `_dedup_skip_persist` content-hash 标记。
+            # guard_signal_cache 发现 `recovery` 信号 98.5% payload 重复，
+            # 在 publisher 端按业务 hash 判定重复时把 `_dedup_skip_persist=True`
+            # 写进 payload。publish 端 persist=False 已经跳过一处 event_store.
+            # append；此处是 NATS 接收端（跨进程），也要读同一个标记跳过第二处，
+            # 否则一条消息两次 append（publish 端跳一次、receive 端写一次）
+            # 等于单边 dedup 失效。
+            # NATS 广播本身不跳，reader 心跳（_last_updated_at 更新）正常。
             elif self._event_store is not None:
-                try:
-                    await asyncio.to_thread(self._event_store.append, envelope)
-                except Exception as _recv_persist_exc:
-                    log_event(
-                        self.logger,
-                        "event_store_receive_persist_failed",
-                        level="warning",
-                        topic=topic,
-                        error_type=type(_recv_persist_exc).__name__,
-                        error=str(_recv_persist_exc),
-                    )
+                if isinstance(envelope.payload, dict) and envelope.payload.get(
+                    "_dedup_skip_persist"
+                ):
+                    pass  # dedup signal honored on receive side
+                else:
+                    try:
+                        await asyncio.to_thread(self._event_store.append, envelope)
+                    except Exception as _recv_persist_exc:
+                        log_event(
+                            self.logger,
+                            "event_store_receive_persist_failed",
+                            level="warning",
+                            topic=topic,
+                            error_type=type(_recv_persist_exc).__name__,
+                            error=str(_recv_persist_exc),
+                        )
 
             # ── Phase 2: 提取 trace context + 在 span 内执行 handler ──
             # extract_trace_context 在没装 OTel 或 carrier 为空时返回 None；

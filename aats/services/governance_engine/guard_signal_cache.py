@@ -225,12 +225,32 @@ class GuardSignalHotStateCache:
           3. best-effort NATS 广播（亚秒级通知 decision 侧）
         """
         now = time.time()
+
+        # 2026-04-21：业务 payload content hash（不含 metadata）
+        # 用途：同 payload 连续 publish 时通知下游跳过 event_store 持久化。
+        try:
+            payload_signature = json.dumps(snapshot, sort_keys=True, default=str)
+            payload_hash = hashlib.sha256(payload_signature.encode("utf-8")).hexdigest()
+        except Exception:
+            payload_hash = None
+
+        is_duplicate = (
+            payload_hash is not None
+            and payload_hash == self._last_published_hash
+        )
+
         enriched = {
             **snapshot,
             "_cached_at": now,
             "_signal_name": self._signal_name,
             "_writer_role": self._process_role,
         }
+        # ★ 关键 dedup 信号 ★：publish 端和 NATS 接收端都会检查这个字段，
+        # 任一端看到即跳过 event_store.append。NATS 广播本身保留（reader 心跳
+        # 不中断）。nats_bus.py 的 publish_envelope + receive handler 两端都
+        # 读此字段。
+        if is_duplicate:
+            enriched["_dedup_skip_persist"] = True
 
         # 1. 本地写
         self._latest = enriched
@@ -269,6 +289,12 @@ class GuardSignalHotStateCache:
         #
         # dedup hash 基于 business `snapshot`（不包括 `_cached_at`/`_writer_role`
         # 等 metadata），保证同一业务状态连续 publish 识别为重复。
+        #
+        # 关键架构细节（2026-04-21 夜场实测发现）：
+        # nats_bus.py 有 **两处** event_store.append：publish 端 (line 1220)
+        # 和 NATS receive 端 (line 1377)。publish_envelope(persist=False) 只
+        # 关第一处；receive 端无条件 append → 单边 dedup 失效。所以必须让
+        # envelope.payload 携带 `_dedup_skip_persist` 标记，receive 端也检查。
         if self._bus is not None:
             try:
                 from aats.schemas.common import EventEnvelope, dump_payload_exact
@@ -281,24 +307,6 @@ class GuardSignalHotStateCache:
                     payload=dump_payload_exact(enriched),
                 )
 
-                # 计算业务 payload hash（排除 metadata）
-                try:
-                    payload_signature = json.dumps(
-                        snapshot, sort_keys=True, default=str
-                    )
-                    payload_hash = hashlib.sha256(
-                        payload_signature.encode("utf-8")
-                    ).hexdigest()
-                except Exception:
-                    # json 化失败（unlikely，snapshot 已经走过 dump_payload_exact）
-                    # → 保守起见按"不同"处理，持久化
-                    payload_hash = None
-
-                is_duplicate = (
-                    payload_hash is not None
-                    and payload_hash == self._last_published_hash
-                )
-
                 # 优先走 publish_envelope(persist=...)；如果 bus 不支持此接口
                 # （如 KafkaEventBus 只有 base 的 publish(...)），fallback 到
                 # 原 publish 路径，persist 由 bus 默认决定（= True）。
@@ -306,7 +314,8 @@ class GuardSignalHotStateCache:
                 if callable(publish_envelope):
                     await publish_envelope(envelope, persist=not is_duplicate)
                 else:
-                    # fallback: 老 bus 接口，不能控制 persist 粒度
+                    # fallback: 老 bus 接口，不能控制 persist 粒度；receive
+                    # 端会读 payload 的 _dedup_skip_persist 做兜底
                     await self._bus.publish(
                         topic=topics.GUARD_SIGNAL_UPDATES,
                         key=self._signal_name,
