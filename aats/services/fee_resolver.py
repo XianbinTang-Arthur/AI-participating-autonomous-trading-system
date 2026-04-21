@@ -180,6 +180,21 @@ class EffectiveFeeResolver:
             "taker", "bounded_taker_cap", "bounded_limit_ioc", "exchange",
         }:
             return taker
+        # post_only_with_timeout_fallback (2026-04-21): OKX ordType=post_only 是真 maker,
+        # 若跨价被 OKX 即时拒绝; 超时未成交时 fallback 为 taker. 期望成本按配置的
+        # expected_fill_rate 做 maker/taker 加权 —— **不是** H2 回退 (bounded_limit_ioc
+        # 仍归 taker), 这是新增分支. 详见 docs/design/post_only_maker_exit_mode_2026_04_21.md §3.6
+        if normalized_order_type == "post_only" or normalized_style == "post_only":
+            fill_rate_raw = getattr(
+                self.settings,
+                "strategy_hedge_independent_post_only_expected_fill_rate",
+                None,
+            )
+            fill_rate = min(
+                max(to_decimal(fill_rate_raw if fill_rate_raw is not None else 0), Decimal("0")),
+                Decimal("1"),
+            )
+            return (maker * fill_rate) + (taker * (Decimal("1") - fill_rate))
         if normalized_order_type == "limit" or normalized_style in {"maker", "passive"}:
             passive = min(max(to_decimal(passive_bias or 0), Decimal("0")), Decimal("1"))
             maker_bias = min(max(-to_decimal(maker_taker_bias or 0), Decimal("0")), Decimal("1"))

@@ -27,6 +27,7 @@ IndependentExecutionPolicyMode = Literal[
     "bounded_limit",
     "bounded_taker",
     "aggressive_bounded_taker",
+    "post_only_with_timeout_fallback",
 ]
 ConfigProfile = Literal[
     "local_demo",
@@ -661,6 +662,16 @@ class AATSSettings(BaseSettings):
     strategy_hedge_independent_limit_offset_bps_entry: float = 1.5
     strategy_hedge_independent_limit_offset_bps_scale_in: float = 1.0
     strategy_hedge_independent_limit_offset_bps_stale_close: float = 0.8
+    # post_only_with_timeout_fallback execution mode parameters
+    # 见 docs/design/post_only_maker_exit_mode_2026_04_21.md §3.1
+    # post_only 提交后等待 N 毫秒；超时则 cancel + 按 fallback_mode 重下
+    strategy_hedge_independent_post_only_timeout_ms: float = 3000.0
+    # fallback_mode 必须是 IndependentExecutionPolicyMode 除 adaptive/post_only 外的一个
+    strategy_hedge_independent_post_only_fallback_mode: IndependentExecutionPolicyMode = "bounded_taker"
+    # 保守 fill_rate 估计 (0.0–1.0)，用于 fee_resolver 的 maker/taker 加权
+    # 默认 0.3: 实盘 24-48h 收集真实 fill_rate 后，走独立 §3 流程才能上调
+    # 见 evidence doc §4.3 保守 fill_rate 选择论证
+    strategy_hedge_independent_post_only_expected_fill_rate: float = 0.3
     strategy_hedge_independent_emit_book_level_metrics: bool = True
     strategy_hedge_independent_emit_expected_vs_realized_metrics: bool = True
     strategy_hedge_independent_emit_close_reason_metrics: bool = True
