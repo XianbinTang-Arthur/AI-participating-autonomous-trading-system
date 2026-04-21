@@ -1676,14 +1676,27 @@ class OperatorQueryService:
                 "truth_source": "runtime_contract_plus_operator_safety_checks",
             }
 
-        mode_snapshot = self.system_mode()
-        recovery = self.recovery_view()
-        blockers = self.blockers()
-        account = self.account_state()
-        margin_buffer = self.margin_buffer_risk()
-        live_guard = self.derivatives_live_guard()
-        trial_guard = self.trial_guard()
-        account_snapshot = self.runtime.account_service.latest_snapshot()
+        # S3（task P2-1）：原 8 路纯串行。每路内部有 _cached_ttl 单飞，冷启动
+        # 时互相等，wall 能到 29s+。改 parallel_fetch 并行；S4 已经把嵌套守卫
+        # 换成本地小线程池，这里再 fan-out 不会被降级成串行。
+        _preflight_r = parallel_fetch({
+            "mode_snapshot": self.system_mode,
+            "recovery": self.recovery_view,
+            "blockers": self.blockers,
+            "account": self.account_state,
+            "margin_buffer": self.margin_buffer_risk,
+            "live_guard": self.derivatives_live_guard,
+            "trial_guard": self.trial_guard,
+            "account_snapshot": self.runtime.account_service.latest_snapshot,
+        })
+        mode_snapshot = _preflight_r["mode_snapshot"]
+        recovery = _preflight_r["recovery"]
+        blockers = _preflight_r["blockers"]
+        account = _preflight_r["account"]
+        margin_buffer = _preflight_r["margin_buffer"]
+        live_guard = _preflight_r["live_guard"]
+        trial_guard = _preflight_r["trial_guard"]
+        account_snapshot = _preflight_r["account_snapshot"]
         account_configuration = (
             None if account_snapshot is None else account_snapshot.account_configuration
         )
@@ -2020,15 +2033,30 @@ class OperatorQueryService:
         return self._cached_ttl(cache_key, 35, self._build_guarded_live_run_packet)
 
     def _build_guarded_live_run_packet(self) -> dict[str, Any]:
-        preflight = self.guarded_live_preflight()
-        live_guard = self.derivatives_live_guard()
-        trial_guard = self.trial_guard()
-        margin_buffer = self.margin_buffer_risk()
-        recovery = self.recovery_view()
-        blockers = self.blockers()
-        positions = self.positions()
-        account = self.account_state()
-        forward_validation = self.forward_validation_report(window_days=7, period_count=4)
+        # S3（task P2-1）：原 9 路纯串行。wall 观察到 38s+（preflight 本身 29s
+        # + 下游 8 路每路 1-2s 串行相加）。parallel_fetch fan-out 后每路各走
+        # _cached_ttl，冷启动时由 S4 的本地小池并发。preflight 单路较慢但不
+        # 再串行拖住整体。
+        _runpacket_r = parallel_fetch({
+            "preflight": self.guarded_live_preflight,
+            "live_guard": self.derivatives_live_guard,
+            "trial_guard": self.trial_guard,
+            "margin_buffer": self.margin_buffer_risk,
+            "recovery": self.recovery_view,
+            "blockers": self.blockers,
+            "positions": self.positions,
+            "account": self.account_state,
+            "forward_validation": lambda: self.forward_validation_report(window_days=7, period_count=4),
+        })
+        preflight = _runpacket_r["preflight"]
+        live_guard = _runpacket_r["live_guard"]
+        trial_guard = _runpacket_r["trial_guard"]
+        margin_buffer = _runpacket_r["margin_buffer"]
+        recovery = _runpacket_r["recovery"]
+        blockers = _runpacket_r["blockers"]
+        positions = _runpacket_r["positions"]
+        account = _runpacket_r["account"]
+        forward_validation = _runpacket_r["forward_validation"]
         latest_period = (forward_validation.get("periods") or [None])[0] or {}
         execution_blockers = [item for item in blockers if item.get("affects_execution")]
 
