@@ -137,6 +137,18 @@ class DatabaseRuntime:
         if not bool(acquired):
             connection.close()
             raise RuntimeError("database_single_runtime_lock_not_acquired")
+        # 2026-04-21 修复 idle_in_transaction_session_timeout（60s）副作用：
+        # SA 2.0 `connection.execute(text(...))` 会 autobegin tx。SELECT 完成后
+        # tx 保持 active → connection 处于 `idle in transaction` 状态 →
+        # 60s 后被 PG 强制 terminate → connection 断 → session-level
+        # advisory_lock **自动释放**（pg_try_advisory_lock 是 session-level，
+        # connection close 时释放）→ 所有 4 进程的 single-runtime-lock 全部
+        # 失效 → 违反 "单进程锁" 设计意图。
+        #
+        # 解决：显式 commit 关掉 tx，让 connection 处于 `idle` 状态。
+        # advisory_lock 是 session-level 而非 tx-level，commit 不影响持锁。
+        # state='idle' 下 PG 不会 kick in idle_in_transaction_session_timeout。
+        connection.commit()
         self.runtime_lock_key = lock_key
         self.runtime_lock_connection = connection
 
