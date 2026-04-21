@@ -98,11 +98,24 @@ class SystemHealthService:
     def _base_components(self) -> list[ComponentHealth]:
         market_status = self.market_provider.status()
         account_status = self.account_provider.status()
-        history_getter = getattr(self.reconciliation_repo, "history", None)
-        if callable(history_getter):
-            latest_reconciliation = latest_matching_reconciliation(history_getter(), self.state_scope)
+        # 2026-04-21 生产根治：原实现直接调 repo.history() 全表扫
+        # reconciliation_reports（无 WHERE + SELECT JSONB payload + ORDER BY），
+        # 实测 gateway recovery_view 单路 111-137s。_base_components 被
+        # health_service.snapshot() 高频调用（每次 recovery_view 通过
+        # resume_check 穿透过来），所以持续出现 full-scan。
+        #
+        # 改用 latest_for_scope 优先 + history fallback 的 cascade（与
+        # risk.py:1972-1982 的 _latest_scoped_reconciliation 同模式），让
+        # Postgres repo 走 SQL LIMIT 1，不再全表扫；InMemory repo 仍 fallback。
+        latest_for_scope_getter = getattr(self.reconciliation_repo, "latest_for_scope", None)
+        if callable(latest_for_scope_getter):
+            latest_reconciliation = latest_for_scope_getter(scope=self.state_scope)
         else:
-            latest_reconciliation = self.reconciliation_repo.latest()
+            history_getter = getattr(self.reconciliation_repo, "history", None)
+            if callable(history_getter):
+                latest_reconciliation = latest_matching_reconciliation(history_getter(), self.state_scope)
+            else:
+                latest_reconciliation = self.reconciliation_repo.latest()
         reconciliation_status = self._reconciliation_status(
             latest_reconciliation
         )
