@@ -171,14 +171,25 @@ class OperatorQueryService:
             return loader()
         try:
             value = loader()
-        finally:
+        except BaseException:
+            # Leader failed: wake followers without a cache entry, let them
+            # self-execute loader as the fallback path dictates.
             with self._cache_lock:
                 self._inflight.pop(key, None)
                 event.set()
+            raise
+        # 2026-04-21 TOCTOU fix：旧写法 event.set() 先发、cache_lock 释放后
+        # 再获取一次锁写 _cache，中间存在 race — 被唤醒的 follower 能抢先拿
+        # 到锁、发现 _cache 为空，回落到 `return loader()`，惊群放大 N→N+1。
+        # 修复：cache 写入与 event.set() 放进同一个 critical section，保证
+        # follower 醒来 ->拿 _cache_lock 时一定能看到缓存值。
         with self._cache_lock:
             if key not in self._cache:
                 self._cache[key] = value
-            return self._cache[key]
+            result = self._cache[key]
+            self._inflight.pop(key, None)
+            event.set()
+        return result
 
     # threading.local 用于检测同线程内的 _cached_ttl 重入。
     # 场景：query_service.method_A() → _cached_ttl(key_X) → loader → facade.method()
@@ -266,20 +277,37 @@ class OperatorQueryService:
         active_keys.add(key)
         try:
             value = loader()
-        finally:
+        except BaseException:
+            # Leader 失败：让 follower 走 "独立兜底 loader" 的 fallback path，
+            # 不写 _ttl_cache、只唤醒 follower。
             active_keys.discard(key)
             with self._cache_lock:
                 self._inflight.pop(key, None)
                 event.set()
+            raise
+        active_keys.discard(key)
+        # 2026-04-21 TOCTOU fix：旧写法里 event.set() 在 finally 里先触发、
+        # 释放 _cache_lock 后再获取一次锁写 _ttl_cache —— 中间存在窗口使被唤
+        # 醒的 follower 抢先拿到 _cache_lock、发现 _ttl_cache 没命中，回落到
+        # 下方 `return loader()`，出现 "singleflight 号称挡住、实际 1→N+1"
+        # 的惊群放大。修复：把 cache 写入与 event.set() 合并到同一个 critical
+        # section，follower 醒来再拿 _cache_lock 时一定能读到缓存。
         with self._cache_lock:
             now = utc_now()
             cached = self._ttl_cache.get(key)
             if cached is not None:
                 expires_at, existing_value = cached
                 if expires_at > now:
+                    # 防御：极罕见情况下另一个写者抢在我们前面落盘了更新的值
+                    # （例如 leader 被信号打断 + follower 兜底成功后回填）。
+                    # 保持幂等：优先返回已有 existing_value。
+                    self._inflight.pop(key, None)
+                    event.set()
                     return existing_value
             self._ttl_cache[key] = (now + timedelta(seconds=max(int(ttl_seconds), 1)), value)
-            return value
+            self._inflight.pop(key, None)
+            event.set()
+        return value
 
     def _invalidate_cache(self) -> None:
         # Task 212：对部分构造的 OperatorQueryService 实例（测试通过 `__new__`
