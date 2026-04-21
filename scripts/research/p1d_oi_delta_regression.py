@@ -708,7 +708,7 @@ def write_markdown(
     lines.append(f"**标的**: `{symbol}`, 1h bar (OI 原生粒度) ")
     lines.append(f"**样本**: {n_rows} 行 (warmup 1 bar 后; 实际 OI 深度受限于 OKX ~60 天)")
     lines.append(f"**Cost 假设**: {cost_bps:.1f} bps (taker 5 + slip 1, 与线上一致)")
-    lines.append(f"**生成日期**: 2026-04-20")
+    lines.append("**生成日期**: 2026-04-20")
     lines.append("")
 
     lines.append("## TL;DR")
@@ -866,7 +866,7 @@ def write_markdown(
     lines.append("")
     lines.append("```bash")
     lines.append("# 前提: scripts/rdp_backfill_okx_rest_history.py --apply 已跑")
-    lines.append(f"python scripts/research/p1d_oi_delta_regression.py \\")
+    lines.append("python scripts/research/p1d_oi_delta_regression.py \\")
     lines.append(f"  --symbol {symbol} --days {days} --cost-bps {cost_bps} \\")
     lines.append(f"  --output {path}")
     lines.append("```")

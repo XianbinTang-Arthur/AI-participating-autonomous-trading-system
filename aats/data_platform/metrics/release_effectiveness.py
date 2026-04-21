@@ -648,7 +648,10 @@ def enforce_pending_rollbacks(root: Path) -> list[dict]:
             modified = True
 
             # Layer 3 structured log → Loki/Grafana alert (Bug 6 链路)
-            log.error(
+            # Task P3-1：修 F821 —— 原先写 `log.error(...)` 但 `log` 未定义；
+            # 与本文件其他 except 分支一致走 logging.getLogger(__name__)。
+            import logging as _logging
+            _logging.getLogger(__name__).error(
                 "rdp_rollback_soft_paused release_id=%s combo=%s reason=%r "
                 "pause_applied=%s",
                 release_id, combo_key, rb_reason, pause_ok,

@@ -29,7 +29,6 @@ from sqlalchemy.orm import Session
 
 from aats.data_platform.merge import microstructure_silver_merger as msm
 from aats.data_platform.merge.microstructure_silver_merger import (
-    SilverMicrostructureResult,
     build_silver_microstructure_15m,
 )
 from aats.data_platform.migrations._batch_b import BATCH_B_STAGES, _load_sql

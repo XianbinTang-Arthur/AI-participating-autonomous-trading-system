@@ -102,7 +102,7 @@ def main() -> None:
               f"{ref_p:<10.2f} {avg_p:<10.2f} {slip:<+10.3f} {str(max_slip):<8s}")
 
     if slippages_bps:
-        print(f"\nSlippage bps distribution (cost sign; +ve = unfavorable):")
+        print("\nSlippage bps distribution (cost sign; +ve = unfavorable):")
         print(f"  count: {len(slippages_bps)}")
         print(f"  min:   {min(slippages_bps):+.3f}")
         print(f"  p05:   {percentile(slippages_bps, 0.05):+.3f}")
@@ -117,7 +117,7 @@ def main() -> None:
     # Total cost (fee + slippage) per order — rough, assume taker 5 bps for filled
     total_cost_bps = [5.0 + s for s in slippages_bps]
     if total_cost_bps:
-        print(f"\nTotal entry cost (fee 5.0 bps + slippage) bps distribution:")
+        print("\nTotal entry cost (fee 5.0 bps + slippage) bps distribution:")
         print(f"  mean:  {statistics.mean(total_cost_bps):.3f}")
         print(f"  p50:   {percentile(total_cost_bps, 0.50):.3f}")
         print(f"  p95:   {percentile(total_cost_bps, 0.95):.3f}")

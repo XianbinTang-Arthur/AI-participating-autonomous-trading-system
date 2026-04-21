@@ -40,10 +40,12 @@ sqlite3.register_adapter(Decimal, str)
 # PostgreSQL 驱动走 ARRAY(Text) 原生列,不会触发这个 adapter。
 sqlite3.register_adapter(list, lambda lst: "{" + ",".join(str(x) for x in lst) + "}")
 
-from sqlalchemy import create_engine, event, text
-from sqlalchemy.orm import Session
+# Task P3-1：E402 noqa —— 必须先 register_adapter 再 import sqlalchemy，否则
+# sqlalchemy 早绑定到默认 sqlite adapter 会让 Decimal/list 测试失败。
+from sqlalchemy import create_engine, event  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
 
-from aats.data_platform.rdp_models import (
+from aats.data_platform.rdp_models import (  # noqa: E402
     BronzeMarketOrderbookBboModel,
     BronzeMarketOrderbookBooks5Model,
     BronzeMarketTradesModel,

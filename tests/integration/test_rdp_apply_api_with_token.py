@@ -21,7 +21,6 @@ FastAPI 依赖栈行为。业务层调用（``apply_approved_recommendation``）
 
 from __future__ import annotations
 
-import os
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace

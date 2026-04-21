@@ -25,7 +25,6 @@ from __future__ import annotations
 import json
 from typing import Any
 
-import pytest
 
 from aats.data_platform.governance.operational_state_db import (
     db_set_gate_result_release_id,

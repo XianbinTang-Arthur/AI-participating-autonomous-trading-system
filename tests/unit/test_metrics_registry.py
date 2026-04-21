@@ -4,7 +4,6 @@ P0-b Task 2.4 新增 labeled counter 支持，补齐基础 registry 的单测。
 """
 from __future__ import annotations
 
-import pytest
 
 from aats.bootstrap.metrics import MetricsRegistry
 

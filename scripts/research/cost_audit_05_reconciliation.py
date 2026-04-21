@@ -3,7 +3,6 @@ simulate fee_resolver predictions, compare vs actual derived fee_bps."""
 from __future__ import annotations
 
 import os
-import statistics
 from decimal import Decimal, getcontext
 from pathlib import Path
 

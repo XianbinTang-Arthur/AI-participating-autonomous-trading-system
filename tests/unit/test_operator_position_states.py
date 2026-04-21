@@ -2058,6 +2058,33 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(summary["items"][0]["reconciliation_id"], "recon_leg_1")
         self.assertEqual(summary["items"][0]["kind"], "missing_execution_chain")
 
+    def test_invalidate_cache_is_safe_on_partially_constructed_instance(self) -> None:
+        """Task 212：用 __new__ 绕过 __init__ 的 partial instance 调
+        `_invalidate_cache()` 时不应 AttributeError（被测 runtime / state_scope /
+        _cache_lock / _ttl_cache 都没注入）。这是 read-only 工具脚本和单测的
+        合法 lifecycle 路径。"""
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        # 显式不注入 _cache / _ttl_cache / _cache_lock / state_scope 任何一个
+        query._invalidate_cache()  # 不应 raise
+        # 幂等：再次调用仍然 safe
+        query._invalidate_cache()
+
+    def test_invalidate_cache_clears_ttl_when_state_scope_missing(self) -> None:
+        """Task 212：partial instance 有 `_cache_lock` / `_cache` / `_ttl_cache`
+        但无 `state_scope`（测试只注入缓存结构时），`_invalidate_cache()` 应
+        保守整表清 ttl_cache 而不崩。"""
+        import threading
+        from datetime import timedelta
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query._cache = {"k1": "v1"}
+        future = datetime.now(timezone.utc) + timedelta(seconds=60)
+        query._ttl_cache = {"t1": (future, "v1")}
+        query._cache_lock = threading.RLock()
+        # 没有 state_scope
+        query._invalidate_cache()
+        self.assertEqual(query._cache, {})
+        self.assertEqual(query._ttl_cache, {})
+
     def test_leg_trial_guard_audit_summary_per_field_fallback_when_guarded_value_is_none(self) -> None:
         """Task P1-1：即便 guard window 非空（count>0），若某 guarded 字段是 None
         （上游数据质量缺口），也必须 per-field 回退到 raw，不能让 float(None)

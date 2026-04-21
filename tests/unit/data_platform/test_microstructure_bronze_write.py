@@ -36,15 +36,13 @@ from sqlalchemy.orm import Session
 # NULL 列保持 NULL (TEXT None → 保持 None),小数作为 TEXT round-trip。
 sqlite3.register_adapter(Decimal, str)
 
-from aats.data_platform.collectors.microstructure_ws_collector import (
+# Task P3-1：E402 noqa —— 必须先 register_adapter 再 import model 层。
+from aats.data_platform.collectors.microstructure_ws_collector import (  # noqa: E402
     BboRow,
     Books5Row,
     OiFundingMarkRow,
     TradeRow,
-    write_bbo_batch,
-    write_books5_batch,
     write_oif_batch,
-    write_trades_batch,
 )
 
 _TS = datetime(2026, 4, 20, 12, 0, 0, tzinfo=timezone.utc)

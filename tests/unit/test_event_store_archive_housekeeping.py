@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timedelta, timezone
-from unittest import mock
 
 from sqlalchemy import create_engine, select, func
 from sqlalchemy.orm import Session, sessionmaker

@@ -1668,7 +1668,6 @@ class TestMergePayloadsDefensive(unittest.TestCase):
         且含 context + skipped_non_dict 字段供运维追踪.
         """
         import io
-        import json
         import logging
 
         # 捕获 aats.okx_account.merge_payloads logger 输出

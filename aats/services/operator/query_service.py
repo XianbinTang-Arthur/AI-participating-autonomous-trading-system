@@ -282,12 +282,27 @@ class OperatorQueryService:
             return value
 
     def _invalidate_cache(self) -> None:
-        with self._cache_lock:
-            self._cache.clear()
-            scope_fragment = self._scope_cache_fragment()
-            stale_keys = [k for k in self._ttl_cache if scope_fragment in k]
+        # Task 212：对部分构造的 OperatorQueryService 实例（测试通过 `__new__`
+        # 绕过 `__init__` 构造 + 只手动注入一小部分属性）调 `_invalidate_cache()`
+        # 仍要 safe。原实现访问 `_cache_lock` / `_cache` / `_ttl_cache` 时会
+        # AttributeError 崩；test 侧没主动注入这几个是合法的 "无需 cache" 路径。
+        cache_lock = getattr(self, "_cache_lock", None)
+        cache = getattr(self, "_cache", None)
+        ttl_cache = getattr(self, "_ttl_cache", None)
+        if cache_lock is None or cache is None or ttl_cache is None:
+            return
+        with cache_lock:
+            cache.clear()
+            try:
+                scope_fragment = self._scope_cache_fragment()
+            except AttributeError:
+                # state_scope 也可能缺失（__new__ 路径），此时没有 scope 概念
+                # 就把 ttl_cache 整表清掉（最保守、幂等）。
+                ttl_cache.clear()
+                return
+            stale_keys = [k for k in ttl_cache if scope_fragment in k]
             for k in stale_keys:
-                del self._ttl_cache[k]
+                del ttl_cache[k]
 
     def _scope_cache_fragment(self) -> str:
         return (
@@ -10919,8 +10934,9 @@ class OperatorQueryService:
                     "ai_after": ai_after,
                     "configured_mode": configured_mode,
                     "requested_mode": requested_mode,
-                    "configured_display_mode": configured_display_mode,
-                    "requested_display_mode": requested_display_mode,
+                    # Task P3-1：去掉 configured_display_mode / requested_display_mode
+                    # —— 这两个 name 未定义（F821），grep 确认全仓无 consumer，属
+                    # 未完成片段。保留 configured_mode / requested_mode 已足够审计。
                     "effective_mode": ai_after.get("effective_operating_mode"),
                 },
             ),

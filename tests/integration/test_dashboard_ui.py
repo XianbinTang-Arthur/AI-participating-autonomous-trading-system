@@ -640,7 +640,6 @@ console.log(JSON.stringify({
         self.assertIn('"hidesProtectiveReference":true', result.stdout)
 
     def test_strategy_view_surfaces_opportunistic_overlay_config_and_state(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
         script = """
 import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
 
@@ -781,7 +780,6 @@ console.log(JSON.stringify({
         self.assertIn('"hidesOpportunisticReference":true', result.stdout)
 
     def _obsolete_test_strategy_view_surfaces_overlay_residual_close_summary_copy(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
         script = """
 import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
 
@@ -1063,7 +1061,6 @@ console.log(JSON.stringify({
         self.assertIn('"hasExpectancySummary":true', result.stdout)
 
     def test_strategy_view_surfaces_independent_overlay_config_and_state(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
         script = """
 import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
 
@@ -1226,7 +1223,6 @@ console.log(JSON.stringify({
         self.assertNotIn("分数回撤仍受控", response.text)
 
     def test_strategy_view_surfaces_overlay_rollout_stage_and_rollback_order(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
         script = """
 import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
 
@@ -1785,7 +1781,6 @@ console.log(JSON.stringify({
         )
 
     def test_ai_views_render_in_node_smoke_test(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
         script = """
 import { renderAIAnalysisView } from './aats/api/static/modules/views/ai-analysis-view.js';
 import { renderAIConfigView } from './aats/api/static/modules/views/ai-config-view.js';
@@ -2964,7 +2959,6 @@ console.log(JSON.stringify({
         self.assertIn('"manualOnlyRuntimeAvoidsLegacyButtons":true', result.stdout)
 
     def test_ai_config_view_surfaces_auth_failures_instead_of_fake_rdp_loading(self) -> None:
-        repo_root = Path(__file__).resolve().parents[2]
         script = """
 import { renderAIConfigView } from './aats/api/static/modules/views/ai-config-view.js';
 

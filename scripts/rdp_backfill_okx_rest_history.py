@@ -412,7 +412,8 @@ def main() -> int:
     args = ap.parse_args()
 
     if args.apply and args.verify:
-        log.error("--apply 和 --verify 不能同时给"); return 1
+        log.error("--apply 和 --verify 不能同时给")
+        return 1
 
     if args.verify:
         return run_verify(args.symbol)

@@ -243,7 +243,7 @@ class LiquidationsPostgresIntegrationTests(unittest.TestCase):
     def test_end_to_end_collector_flush(self) -> None:
         """Parse a real OKX-shaped message, buffer it, flush it, confirm the row."""
         from sqlalchemy import text
-        from sqlalchemy.orm import Session, sessionmaker
+        from sqlalchemy.orm import sessionmaker
         from unittest.mock import patch
 
         factory = sessionmaker(bind=self.engine, expire_on_commit=False)  # type: ignore[arg-type]

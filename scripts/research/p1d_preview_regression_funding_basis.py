@@ -754,7 +754,7 @@ def write_markdown(
     lines.append(f"**非空样本**: basis_z={basis_z_count}, funding_z={funding_z_count}, "
                  f"minutes_to_next_funding={minutes_count}")
     lines.append(f"**Cost 假设**: {cost_bps:.1f} bps (taker 5 + slip 1, 与线上一致)")
-    lines.append(f"**生成日期**: 2026-04-20")
+    lines.append("**生成日期**: 2026-04-20")
     lines.append("")
 
     lines.append("## TL;DR")
@@ -904,7 +904,7 @@ def write_markdown(
     lines.append("## 可复现")
     lines.append("")
     lines.append("```bash")
-    lines.append(f"python scripts/research/p1d_preview_regression_funding_basis.py \\")
+    lines.append("python scripts/research/p1d_preview_regression_funding_basis.py \\")
     lines.append(f"  --symbol {symbol} --days {days} --cost-bps {cost_bps} \\")
     lines.append(f"  --output {path}")
     lines.append("```")

@@ -8,7 +8,6 @@ Read-only. No mutations.
 from __future__ import annotations
 
 import os
-import json
 import statistics
 from decimal import Decimal, getcontext
 from pathlib import Path

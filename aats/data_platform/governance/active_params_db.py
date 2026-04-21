@@ -14,12 +14,13 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timezone
-
-UTC = timezone.utc
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
+
+# Task P3-1：常量定义移到 imports 之后，消除 E402（之前 UTC 夹在两组 import 中间）。
+UTC = timezone.utc
 
 log = logging.getLogger(__name__)
 

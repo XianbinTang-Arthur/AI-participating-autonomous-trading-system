@@ -162,7 +162,8 @@ class DecisionOrchestrator:
         if self.ai_service.should_attempt_assessment():
             ai_assessment = await self.ai_service.assess(context=context, baseline=baseline)
             operating_mode = self.ai_service.effective_operating_mode()
-        canonical_mode = self.ai_service.canonical_effective_operating_mode()
+        # Task P3-1：删除 `canonical_mode = self.ai_service.canonical_effective_operating_mode()`
+        # —— 赋值但未使用（F841），下游不消费。
         # strategy_profile_auto_control_enabled 与 ai_operating_mode 完全正交:
         # False → 连 evaluate_mainline_profile_control 都不调,杜绝 OpenAI 账单泄漏。
         # 手动激活走独立 admin API(profiles/{id}/activate 等),不经此路径,不受影响。

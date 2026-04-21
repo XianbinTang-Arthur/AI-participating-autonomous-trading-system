@@ -17,7 +17,6 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from aats.data_platform.merge.microstructure_silver_merger import (
-    DEFAULT_DATASET_VERSION,
     build_silver_microstructure_15m,
     latest_complete_bar,
 )
@@ -304,8 +303,7 @@ class TestBatchB06Rollback(unittest.TestCase):
 
     def test_rollback_drops_all_five_silver_tables(self) -> None:
         from pathlib import Path
-        from sqlalchemy import create_engine, text, event
-        import datetime as _dt
+        from sqlalchemy import text
 
         root = Path(__file__).resolve().parents[3]
         rollback_path = (

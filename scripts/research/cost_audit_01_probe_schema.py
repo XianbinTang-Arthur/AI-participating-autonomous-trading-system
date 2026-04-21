@@ -5,7 +5,6 @@ Read-only. No INSERT/UPDATE/DELETE. Safe to run against aats_live_derivatives.
 from __future__ import annotations
 
 import os
-import json
 from pathlib import Path
 
 import psycopg2

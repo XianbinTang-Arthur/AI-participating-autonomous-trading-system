@@ -5,7 +5,7 @@ import dataclasses
 from collections.abc import Callable
 
 from aats.bootstrap.logging import get_logger, log_event
-from aats.events.envelopes import parse_envelope, parse_payload
+from aats.events.envelopes import parse_envelope
 from aats.schemas.common import EventEnvelope
 from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot

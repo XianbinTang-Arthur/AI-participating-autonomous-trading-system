@@ -12,12 +12,19 @@ sentinel workflow ``__scheduler_meta__`` 落库，load 时从 meta 行还原到�
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from aats.data_platform.governance.operational_state_db import (
     _SCHEDULER_META_WORKFLOW,
+    db_get_gate_result_by_run_id,
+    db_get_latest_gate_result,
+    db_list_gate_results_for_recommendation,
+    db_list_gate_results_for_release,
     db_load_scheduler_state,
+    db_record_gate_result,
     db_save_scheduler_state,
+    db_set_gate_result_release_id,
 )
 
 
@@ -211,18 +218,6 @@ def test_scheduler_state_load_ignores_meta_row_from_workflows() -> None:
 # db_list_gate_results_for_release。这些 API 是"gate 真源从 JSON 迁到 DB"
 # 的读路径契约——任何 SQL 语义回归（查不到最新、JOIN 方向错、payload 丢字段）
 # 都会让 apply 链路在 DB-only 模式下炸掉，这里先用 fake session 锁住语义。
-
-
-from datetime import datetime, timezone
-
-from aats.data_platform.governance.operational_state_db import (
-    db_get_gate_result_by_run_id,
-    db_get_latest_gate_result,
-    db_list_gate_results_for_recommendation,
-    db_list_gate_results_for_release,
-    db_record_gate_result,
-    db_set_gate_result_release_id,
-)
 
 
 class _FakeGateSession:

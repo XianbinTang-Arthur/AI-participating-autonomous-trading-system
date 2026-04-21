@@ -10,14 +10,11 @@ behaviour (running the orphan report against a real schema) is covered by
 from __future__ import annotations
 
 import unittest
-from pathlib import Path
 
 from aats.data_platform.migrations import _batch_a
 from aats.data_platform.migrations._batch_a import (
     DISTRIBUTION_CHECKS,
     ORPHAN_CHECKS,
-    DistributionCheck,
-    OrphanCheck,
     OrphanReport,
     format_report_text,
     load_migration_sql,

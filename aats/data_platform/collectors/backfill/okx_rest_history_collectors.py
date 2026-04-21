@@ -556,15 +556,15 @@ def _parse_mark_candle_row(item: list[str]) -> dict[str, Any] | None:
         return None
     o = _to_decimal_or_none(item[1])
     h = _to_decimal_or_none(item[2])
-    l = _to_decimal_or_none(item[3])
+    low = _to_decimal_or_none(item[3])
     c = _to_decimal_or_none(item[4])
-    if None in (o, h, l, c):
+    if None in (o, h, low, c):
         return None
     return {
         "ts": ts,
         "open": o,
         "high": h,
-        "low": l,
+        "low": low,
         "close": c,
     }
 

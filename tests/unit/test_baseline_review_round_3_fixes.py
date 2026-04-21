@@ -13,9 +13,8 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
@@ -32,7 +31,6 @@ from aats.schemas.features import (
     PositionSizingContext,
     TimeframeFeatureSet,
 )
-from aats.schemas.market import MarketSnapshot
 from aats.services.decision_engine.baseline import BaselineStrategy
 from aats.services.feature_engine.calculator import FeatureCalculator
 from aats.services.feature_engine.long_short_poller import LongShortRatioPoller
@@ -181,7 +179,6 @@ class Round3FixesRegressionTests(unittest.TestCase):
 
         验证权重和严格 = 1.00 (从真实代码算, 不是测试里复制权重表).
         """
-        from aats.schemas.market import KlineBar
         calc = FeatureCalculator(
             enable_timeseries_smoothing=False,  # 避免 state 影响
         )

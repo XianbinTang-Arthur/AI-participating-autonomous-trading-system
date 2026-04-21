@@ -5,8 +5,6 @@ import logging
 import math
 from typing import Literal
 
-_LOGGER_CALC = logging.getLogger("aats.feature_engine.calculator")
-
 from aats.bus.base import EventBus
 from aats.events import topics
 from aats.events.envelopes import parse_envelope, publish_model
@@ -37,6 +35,9 @@ from aats.services.feature_engine.timeseries import (
 )
 from aats.services.feature_engine.trend import TrendCalculator
 from aats.services.feature_engine.volatility import VolatilityAnalyzer
+
+# Task P3-1：module-level logger 从 imports 中间挪到 imports 后，消除 E402。
+_LOGGER_CALC = logging.getLogger("aats.feature_engine.calculator")
 
 
 class FeatureCalculator:

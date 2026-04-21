@@ -13,9 +13,8 @@ from __future__ import annotations
 
 import asyncio
 import unittest
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from decimal import Decimal
-from unittest.mock import AsyncMock
 
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.memory_bus import InMemoryEventBus
@@ -23,7 +22,6 @@ from aats.events import topics
 from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
 from aats.schemas.decision import DecisionContext
-from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import KlineBar, MarketSnapshot
 from aats.services.decision_engine.baseline import BaselineStrategy
 from aats.services.feature_engine.calculator import FeatureCalculator, FeatureEngine

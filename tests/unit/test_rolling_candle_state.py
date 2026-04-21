@@ -23,11 +23,11 @@ from aats.schemas.market import KlineBar
 from aats.services.feature_engine.timeseries import RollingCandleState
 
 
-def _bar(*, o: float, h: float, l: float, c: float) -> KlineBar:
+def _bar(*, o: float, h: float, low: float, c: float) -> KlineBar:
     return KlineBar(
         open=Decimal(str(o)),
         high=Decimal(str(h)),
-        low=Decimal(str(l)),
+        low=Decimal(str(low)),
         close=Decimal(str(c)),
     )
 
@@ -57,12 +57,12 @@ class RollingCandleStateTests(unittest.TestCase):
         .test_feature_calculation_is_deterministic_for_same_snapshot）。
         """
         ts = _ts(0)
-        self.state.update(_bar(o=100, h=101, l=99, c=100.5), ts=ts)
+        self.state.update(_bar(o=100, h=101, low=99, c=100.5), ts=ts)
         ema_after_first = self.state.indicators().close_ema
 
         # 同 ts 反复 update（模拟同根未闭合 K 线的多个 tick）
-        self.state.update(_bar(o=100, h=102, l=98, c=101.5), ts=ts)
-        self.state.update(_bar(o=100, h=103, l=97, c=102.5), ts=ts)
+        self.state.update(_bar(o=100, h=102, low=98, c=101.5), ts=ts)
+        self.state.update(_bar(o=100, h=103, low=97, c=102.5), ts=ts)
         ema_after_multiple = self.state.indicators().close_ema
 
         self.assertEqual(self.state.bars_count(), 1, "同 ts 应覆盖而非 append")
@@ -73,9 +73,9 @@ class RollingCandleStateTests(unittest.TestCase):
 
     def test_update_with_older_ts_is_silently_ignored(self) -> None:
         """乱序回放：晚到的旧 bar 必须丢弃，否则破坏单调时序和 ROC/ATR 计算."""
-        self.state.update(_bar(o=100, h=101, l=99, c=100.5), ts=_ts(5))
+        self.state.update(_bar(o=100, h=101, low=99, c=100.5), ts=_ts(5))
         old_bar_count = self.state.bars_count()
-        self.state.update(_bar(o=50, h=51, l=49, c=50), ts=_ts(2))  # 旧 ts
+        self.state.update(_bar(o=50, h=51, low=49, c=50), ts=_ts(2))  # 旧 ts
         self.assertEqual(
             self.state.bars_count(), old_bar_count,
             "旧 ts 的 bar 不应进入 state",
@@ -86,7 +86,7 @@ class RollingCandleStateTests(unittest.TestCase):
     def test_indicators_not_ready_before_enough_bars(self) -> None:
         # atr_window=14 需要 15 根；roc_window=5 需要 6 根 → needed = 15
         for i in range(10):
-            self.state.update(_bar(o=100, h=101, l=99, c=100 + i * 0.1), ts=_ts(i))
+            self.state.update(_bar(o=100, h=101, low=99, c=100 + i * 0.1), ts=_ts(i))
         ind = self.state.indicators()
         self.assertFalse(ind.ready)
         self.assertEqual(ind.bars_available, 10)
@@ -95,7 +95,7 @@ class RollingCandleStateTests(unittest.TestCase):
 
     def test_indicators_ready_after_enough_bars(self) -> None:
         for i in range(20):
-            self.state.update(_bar(o=100, h=101, l=99, c=100 + i * 0.1), ts=_ts(i))
+            self.state.update(_bar(o=100, h=101, low=99, c=100 + i * 0.1), ts=_ts(i))
         ind = self.state.indicators()
         self.assertTrue(ind.ready)
         self.assertEqual(ind.bars_available, 20)
@@ -113,7 +113,7 @@ class RollingCandleStateTests(unittest.TestCase):
         for i in range(20):
             close = 100 + i * 0.5
             self.state.update(
-                _bar(o=close - 0.1, h=close + 0.2, l=close - 0.3, c=close),
+                _bar(o=close - 0.1, h=close + 0.2, low=close - 0.3, c=close),
                 ts=_ts(i),
             )
         ind = self.state.indicators()
@@ -132,7 +132,7 @@ class RollingCandleStateTests(unittest.TestCase):
         # 构造平稳序列 close = 100 + i*0.0（全相同）, high = close+1, low = close-1
         for i in range(20):
             self.state.update(
-                _bar(o=100.0, h=101.0, l=99.0, c=100.0),
+                _bar(o=100.0, h=101.0, low=99.0, c=100.0),
                 ts=_ts(i),
             )
         ind = self.state.indicators()
@@ -146,11 +146,11 @@ class RollingCandleStateTests(unittest.TestCase):
         # 全部稳定在 100 附近，然后最后一根跳空到 200
         for i in range(19):
             self.state.update(
-                _bar(o=100.0, h=100.5, l=99.5, c=100.0),
+                _bar(o=100.0, h=100.5, low=99.5, c=100.0),
                 ts=_ts(i),
             )
         # 第 20 根跳空
-        self.state.update(_bar(o=200.0, h=200.5, l=199.5, c=200.0), ts=_ts(19))
+        self.state.update(_bar(o=200.0, h=200.5, low=199.5, c=200.0), ts=_ts(19))
         ind = self.state.indicators()
         assert ind.atr is not None
         # 最近 14 根里最后一根的 TR = max(200.5-199.5, |200.5-100|, |199.5-100|) = 100.5
@@ -162,10 +162,10 @@ class RollingCandleStateTests(unittest.TestCase):
     def test_prewarm_sorts_input_by_ts_ascending(self) -> None:
         """prewarm 接受任意顺序，内部按 ts 升序处理."""
         out_of_order: list[tuple[datetime, KlineBar]] = [
-            (_ts(3), _bar(o=103, h=104, l=102, c=103.5)),
-            (_ts(1), _bar(o=101, h=102, l=100, c=101.5)),
-            (_ts(2), _bar(o=102, h=103, l=101, c=102.5)),
-            (_ts(0), _bar(o=100, h=101, l=99, c=100.5)),
+            (_ts(3), _bar(o=103, h=104, low=102, c=103.5)),
+            (_ts(1), _bar(o=101, h=102, low=100, c=101.5)),
+            (_ts(2), _bar(o=102, h=103, low=101, c=102.5)),
+            (_ts(0), _bar(o=100, h=101, low=99, c=100.5)),
         ]
         self.state.prewarm(out_of_order)
         self.assertEqual(self.state.bars_count(), 4)
@@ -174,7 +174,7 @@ class RollingCandleStateTests(unittest.TestCase):
     def test_prewarm_then_live_update_continues_chain(self) -> None:
         """预热后的实时 update 应无缝续接（新 ts 正常 append）."""
         bars: list[tuple[datetime, KlineBar]] = [
-            (_ts(i), _bar(o=100, h=101, l=99, c=100 + i * 0.1))
+            (_ts(i), _bar(o=100, h=101, low=99, c=100 + i * 0.1))
             for i in range(15)
         ]
         self.state.prewarm(bars)
@@ -182,7 +182,7 @@ class RollingCandleStateTests(unittest.TestCase):
         self.assertTrue(ind_before.ready)
 
         # 推一根新的
-        self.state.update(_bar(o=110, h=111, l=109, c=110.5), ts=_ts(15))
+        self.state.update(_bar(o=110, h=111, low=109, c=110.5), ts=_ts(15))
         ind_after = self.state.indicators()
         self.assertTrue(ind_after.ready)
         # ROC 应该有变化（新的 close 进入了计算）

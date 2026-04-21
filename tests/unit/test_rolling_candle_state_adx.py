@@ -23,10 +23,10 @@ def _ts(n: int) -> datetime:
     return datetime(2026, 4, 19, 0, 0, tzinfo=timezone.utc) + timedelta(minutes=15 * n)
 
 
-def _bar(*, o: float, h: float, l: float, c: float) -> KlineBar:
+def _bar(*, o: float, h: float, low: float, c: float) -> KlineBar:
     return KlineBar(
         open=Decimal(str(o)), high=Decimal(str(h)),
-        low=Decimal(str(l)), close=Decimal(str(c)),
+        low=Decimal(str(low)), close=Decimal(str(c)),
     )
 
 
@@ -40,7 +40,7 @@ class RollingCandleStateADXTests(unittest.TestCase):
     def test_adx_none_before_enough_bars(self) -> None:
         """样本不足以 2*atr_window+1 根时 ADX = None (双重 Wilder 需要 29 根)."""
         for i in range(10):
-            self.state.update(_bar(o=100, h=101, l=99, c=100), ts=_ts(i))
+            self.state.update(_bar(o=100, h=101, low=99, c=100), ts=_ts(i))
         ind = self.state.indicators()
         self.assertFalse(ind.ready)
         self.assertIsNone(ind.adx)
@@ -51,7 +51,7 @@ class RollingCandleStateADXTests(unittest.TestCase):
         """ROC/ATR ready (>=15 根) 但 ADX 仍 None，因为双重 Wilder 需要 29 根.
         M-1 审查修复: ADX 走 Wilder(Wilder(+DM/-DM/TR)) → 需要 2*14+1 = 29 根."""
         for i in range(20):
-            self.state.update(_bar(o=100, h=101, l=99, c=100), ts=_ts(i))
+            self.state.update(_bar(o=100, h=101, low=99, c=100), ts=_ts(i))
         ind = self.state.indicators()
         self.assertTrue(ind.ready)
         self.assertIsNotNone(ind.atr)
@@ -60,7 +60,7 @@ class RollingCandleStateADXTests(unittest.TestCase):
     def test_adx_low_for_flat_range(self) -> None:
         """平稳震荡（无方向）→ ADX 应较低 (< 25). 需要 >= 29 根 bar."""
         for i in range(35):
-            self.state.update(_bar(o=100, h=101, l=99, c=100), ts=_ts(i))
+            self.state.update(_bar(o=100, h=101, low=99, c=100), ts=_ts(i))
         ind = self.state.indicators()
         self.assertTrue(ind.ready)
         assert ind.adx is not None
@@ -71,9 +71,9 @@ class RollingCandleStateADXTests(unittest.TestCase):
         for i in range(40):
             c = 100.0 + i * 1.0
             h = c + 0.5
-            l = c - 0.3
+            low = c - 0.3
             o = c - 0.2
-            self.state.update(_bar(o=o, h=h, l=l, c=c), ts=_ts(i))
+            self.state.update(_bar(o=o, h=h, low=low, c=c), ts=_ts(i))
         ind = self.state.indicators()
         self.assertTrue(ind.ready)
         assert ind.adx is not None
@@ -87,9 +87,9 @@ class RollingCandleStateADXTests(unittest.TestCase):
         for i in range(40):
             c = 140.0 - i * 1.0
             h = c + 0.3
-            l = c - 0.5
+            low = c - 0.5
             o = c + 0.2
-            self.state.update(_bar(o=o, h=h, l=l, c=c), ts=_ts(i))
+            self.state.update(_bar(o=o, h=h, low=low, c=c), ts=_ts(i))
         ind = self.state.indicators()
         assert ind.adx is not None
         assert ind.plus_di is not None

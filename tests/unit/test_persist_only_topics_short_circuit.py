@@ -13,7 +13,6 @@ docs/task/nats_retention_global_architecture_sow.md §B0 引入：
 """
 from __future__ import annotations
 
-import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 

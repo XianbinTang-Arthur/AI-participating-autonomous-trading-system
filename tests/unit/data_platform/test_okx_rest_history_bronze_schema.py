@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import BigInteger, create_engine, event, text
+from sqlalchemy import BigInteger, create_engine, event
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.compiler import compiles

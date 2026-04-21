@@ -9,12 +9,6 @@ from typing import Any
 
 import httpx
 
-# P1-15：REST POST 超时后到 GET 确认之间的 grace sleep。OKX 端 order 入库
-# 存在短暂 eventual consistency 窗口（实测 ~500ms～2s），没有这段延迟会
-# 经常得到 51603 order-not-found 误报，让 order 误进入 unknown_write 冷冻
-# 态，后续新 intent 都被 block 直到 reconciliation 介入。
-_UNKNOWN_WRITE_RECOVERY_GRACE_SECONDS: float = 1.5
-
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import (
@@ -53,6 +47,13 @@ from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.storage.base import ExecutionObligationRepository
 from aats.services.runtime_scope import infer_product_type_from_symbol
 
+
+# P1-15：REST POST 超时后到 GET 确认之间的 grace sleep。OKX 端 order 入库
+# 存在短暂 eventual consistency 窗口（实测 ~500ms～2s），没有这段延迟会
+# 经常得到 51603 order-not-found 误报，让 order 误进入 unknown_write 冷冻
+# 态，后续新 intent 都被 block 直到 reconciliation 介入。
+# Task P3-1：常量从 imports 中间挪到 imports 后，消除 E402。
+_UNKNOWN_WRITE_RECOVERY_GRACE_SECONDS: float = 1.5
 
 OKX_DEMO_SUBMISSION_TARGETS = {"okx_demo_spot", "okx_demo_derivatives"}
 OKX_LIVE_SUBMISSION_TARGETS = {"okx_live_spot", "okx_live_derivatives"}

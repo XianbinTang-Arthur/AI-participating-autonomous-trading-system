@@ -263,7 +263,6 @@ class TestMarketGatewayStatus(unittest.IsolatedAsyncioTestCase):
 
     async def test_snapshot_is_fresh_logs_warning_on_large_clock_skew(self) -> None:
         """R4-M7：时钟偏差 > 60s 时写 warning log，便于 ops 发现时钟配置异常。"""
-        import logging
         from datetime import timedelta
 
         settings = AATSSettings.model_validate(

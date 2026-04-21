@@ -16,7 +16,6 @@ from __future__ import annotations
 import pathlib
 import re
 
-import pytest
 
 from aats.data_platform.governance._db_util import ADVISORY_LOCK_KEYS
 

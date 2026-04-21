@@ -53,13 +53,11 @@ from __future__ import annotations
 
 import argparse
 import csv
-import json
 import math
 import os
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -101,12 +99,15 @@ for env_file in (".env.wsl2", ".env.derivatives.live"):
             break
 
 try:
-    import numpy as np
+    import numpy as np  # noqa: E402 — .env 必须先加载
 except ImportError:
     print("missing numpy; pip install numpy", file=sys.stderr)
     sys.exit(1)
 
-from sqlalchemy import create_engine, text
+# Task P3-1：E402 noqa —— 脚本必须先 load_dotenv 再 import sqlalchemy，
+# 否则 create_engine() 读不到 DB 凭证。顺序是 intentional，而不是 import
+# 组织错误。
+from sqlalchemy import create_engine, text  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -584,7 +585,7 @@ def render_markdown(args, samples: list[LegSample], result: dict[str, Any]) -> s
     lines.append("## 附录 B. 复现")
     lines.append("")
     lines.append("```bash")
-    lines.append(f"python scripts/calibration/signal_edge_scale_regression.py \\")
+    lines.append("python scripts/calibration/signal_edge_scale_regression.py \\")
     lines.append(f"    --days {args.days} --symbol {args.symbol}")
     lines.append("```")
     lines.append("")
@@ -635,7 +636,7 @@ def build_narrative_conclusion(result: dict[str, Any]) -> str:
 
     verdict_lines: list[str] = []
     verdict_lines.append(
-        f"### 8.1 数值总览"
+        "### 8.1 数值总览"
     )
     verdict_lines.append("")
     verdict_lines.append(
@@ -663,7 +664,7 @@ def build_narrative_conclusion(result: dict[str, Any]) -> str:
         )
     verdict_lines.append("")
 
-    verdict_lines.append(f"### 8.2 核心判断")
+    verdict_lines.append("### 8.2 核心判断")
     verdict_lines.append("")
     high_bin_n = sum(b["n"] for b in bins if b["bin"].startswith("[0.4") or b["bin"].startswith("[0.5"))
     total_bin_n = max(sum(b["n"] for b in bins), 1)
@@ -690,11 +691,11 @@ def build_narrative_conclusion(result: dict[str, Any]) -> str:
         )
     verdict_lines.append("")
 
-    verdict_lines.append(f"### 8.3 scale 建议 (分层选项)")
+    verdict_lines.append("### 8.3 scale 建议 (分层选项)")
     verdict_lines.append("")
     verdict_lines.append(
-        f"以下三个 scale 选项, 分别对应不同的风险偏好. 主任务应根据"
-        f" **A/B 验证能力** + **short leg 是否同步改** 来选."
+        "以下三个 scale 选项, 分别对应不同的风险偏好. 主任务应根据"
+        " **A/B 验证能力** + **short leg 是否同步改** 来选."
     )
     verdict_lines.append("")
 
@@ -708,12 +709,12 @@ def build_narrative_conclusion(result: dict[str, Any]) -> str:
         f"- trigger_rate = {current_tr['pass_rate']*100:.1f}% ({current_tr['n_pass']}/{current_tr['n_total']}) — 事实上零 fill."
     )
     verdict_lines.append(
-        f"- 理由: R² < 0.005 说明 leg_score 公式本身需要重设计. 调 scale 是在\"放大噪声\", "
-        f"即使 fill 数变多, 胜率和期望 PnL 都可能不改善. 把工期花在 **P1-A 双通道 momentum / "
-        f"re-weighting + 加 future-return-aware 特征**, ROI 更高."
+        "- 理由: R² < 0.005 说明 leg_score 公式本身需要重设计. 调 scale 是在\"放大噪声\", "
+        "即使 fill 数变多, 胜率和期望 PnL 都可能不改善. 把工期花在 **P1-A 双通道 momentum / "
+        "re-weighting + 加 future-return-aware 特征**, ROI 更高."
     )
     verdict_lines.append(
-        f"- 风险: 继续 24h 零 fill, 用户体验差; 但这是\"诚实的零\"而不是\"靠虚假信号堆 fill\"."
+        "- 风险: 继续 24h 零 fill, 用户体验差; 但这是\"诚实的零\"而不是\"靠虚假信号堆 fill\"."
     )
     verdict_lines.append("")
 
@@ -727,9 +728,9 @@ def build_narrative_conclusion(result: dict[str, Any]) -> str:
         f"- trigger_rate ≈ {tr_slope.get('pass_rate', 0)*100:.1f}% (按 candidate scale={nearest_to_slope} 近似)."
     )
     verdict_lines.append(
-        f"- 理由: slope_origin 是\"每单位 score, realized_edge 条件期望增加多少 bps\"的 MLE 估计. "
-        f"scale = slope_origin 时, signal_edge 的数学期望与 realized_edge 的条件期望一致, "
-        f"既不高估也不低估."
+        "- 理由: slope_origin 是\"每单位 score, realized_edge 条件期望增加多少 bps\"的 MLE 估计. "
+        "scale = slope_origin 时, signal_edge 的数学期望与 realized_edge 的条件期望一致, "
+        "既不高估也不低估."
     )
     verdict_lines.append(
         f"- 风险: residual_std {r.residual_std:.0f} bps 远大于 slope × score (典型 {slope * 0.20:.1f} bps), "
@@ -756,19 +757,19 @@ def build_narrative_conclusion(result: dict[str, Any]) -> str:
     )
     verdict_lines.append("")
 
-    verdict_lines.append(f"### 8.4 推荐给主任务的优先级")
+    verdict_lines.append("### 8.4 推荐给主任务的优先级")
     verdict_lines.append("")
     verdict_lines.append(
-        f"1. **优先 P1-B step 2 (cost 审查)**: 把 expected_cost 从 passive_first 的 4.605 "
-        f"改成 maker-rebate / post-only 路径的 1.5-2.5 bps. 在不动 scale 的前提下, "
-        f"net_edge 会增加 2-3 bps, **同样能显著提升 trigger_rate**, 且不依赖 leg_score 的预测力. "
-        f"成本更低, 风险更可控."
+        "1. **优先 P1-B step 2 (cost 审查)**: 把 expected_cost 从 passive_first 的 4.605 "
+        "改成 maker-rebate / post-only 路径的 1.5-2.5 bps. 在不动 scale 的前提下, "
+        "net_edge 会增加 2-3 bps, **同样能显著提升 trigger_rate**, 且不依赖 leg_score 的预测力. "
+        "成本更低, 风险更可控."
     )
     verdict_lines.append(
-        f"2. **同步 P1-A (leg_score 公式改造)**: 这是根因. "
-        f"可选方向: (a) 引入 future-return-aware 特征如 mid-frequency momentum (30-60min ROC), "
-        f"(b) 区分 long/short 权重 (短腿 R² 接近 0 说明现公式对短不合适), "
-        f"(c) 引入 funding skew × regime 交互项."
+        "2. **同步 P1-A (leg_score 公式改造)**: 这是根因. "
+        "可选方向: (a) 引入 future-return-aware 特征如 mid-frequency momentum (30-60min ROC), "
+        "(b) 区分 long/short 权重 (短腿 R² 接近 0 说明现公式对短不合适), "
+        "(c) 引入 funding skew × regime 交互项."
     )
     verdict_lines.append(
         f"3. **最后再考虑 scale 调整**: 如果 step 1 + 2 完成后仍需要 fine-tune, "
@@ -778,7 +779,7 @@ def build_narrative_conclusion(result: dict[str, Any]) -> str:
     )
     verdict_lines.append("")
 
-    verdict_lines.append(f"### 8.5 诚实声明")
+    verdict_lines.append("### 8.5 诚实声明")
     verdict_lines.append("")
     verdict_lines.append(
         f"- 本报告的数据窗口只有 {result['actual_days']:.1f} 天 (event_store 保留窗口限制), "
@@ -790,7 +791,7 @@ def build_narrative_conclusion(result: dict[str, Any]) -> str:
         f" support_rate {sups[15]['support_rate']*100:.1f}% (T+15min), **结论只能是\"有微弱信号, 不足以单独用作 sizing\"**."
     )
     verdict_lines.append(
-        f"- 建议脚本每周重跑, 跟踪 slope_origin / R² 漂移. 如果 R² 稳定 > 0.02 可转为\"基于 slope 的自动调 scale\"."
+        "- 建议脚本每周重跑, 跟踪 slope_origin / R² 漂移. 如果 R² 稳定 > 0.02 可转为\"基于 slope 的自动调 scale\"."
     )
 
     return "\n".join(verdict_lines)

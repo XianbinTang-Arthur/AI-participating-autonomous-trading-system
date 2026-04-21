@@ -15,7 +15,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from aats.services.execution_engine.bundle_status_backfill import (
+# Task P3-1：E402 noqa —— 脚本必须先 sys.path.insert 再 from aats... 否则找不到包。
+from aats.services.execution_engine.bundle_status_backfill import (  # noqa: E402
     backfill_independent_blocked_bundles,
 )
 
