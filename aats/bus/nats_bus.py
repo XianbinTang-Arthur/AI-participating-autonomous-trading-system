@@ -182,6 +182,34 @@ DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS: frozenset[str] = frozenset(
 )
 
 
+# ── Critical commands topics（B2a 引入） ─────────────────────────
+# "真实交易指令" 类 topic —— 发送失败 / 消费失败 = 交易缺失 / 基线错乱 /
+# 仓位不一致。选入条件（全部满足）：
+#   (a) DeliverPolicy=ALL（消费者要看每一条）
+#   (b) 跨进程 publisher → consumer（decision → execution、execution → decision）
+#   (c) **没有** Redis hydrate cache 兜底（消费者掉线后无法重建状态）
+#   (d) **没有** outbox 事务性交付保护（publish 失败 = 消息丢）
+#
+# 2026-04-20 来源：background agent a5010db6f6e3c61fb 的 Q2/Q3/Q5 调查。
+# 这些 topic 放独立的 AATS_EVENTS_COMMANDS stream 保持 retention=LIMITS
+# + max_age 兜底；不切 INTEREST 是为了 B1 readiness gate 超时 fallback
+# 下仍有保护（INTEREST 下消息 consumer 未 ready 就丢，LIMITS 下保留到
+# max_age）。
+#
+# B2b follow-up 给 decision 扩 outbox 后可迁移到 INTEREST。
+DEFAULT_CRITICAL_COMMANDS_TOPICS: frozenset[str] = frozenset(
+    {
+        _topics.ORDER_INTENTS,
+        _topics.POSITION_TARGETS,
+        _topics.ACCOUNT_BASELINES,
+        _topics.STRATEGY_SLEEVE_INTENTS,
+        _topics.PORTFOLIO_ALLOCATION_DECISIONS,
+        _topics.STRATEGY_EXECUTION_BUNDLES,
+        _topics.EXECUTION_PLANS,
+    }
+)
+
+
 # 观察者 topic：仪表盘/指标流/调试事件，量大、丢失无关键影响，留在内存
 # ⚠️ 放入此集合的 topic 只走进程内 InMemoryEventBus，**绝不**通过 NATS
 # 跨进程。如果一个 topic 的生产者和消费者在不同进程，它**必须**在
@@ -297,7 +325,13 @@ class StreamSpec:
 
     # ── 行为策略（有默认值，稳定字段） ─────────────────────────
     storage: str = "file"         # "file" / "memory"；传给 nats-py 时再转 StorageType
-    retention: str = "limits"     # 固定 "limits"（本项目不用 workqueue/interest）
+    # retention: "limits" | "interest" | "workqueue"
+    # - limits（默认）：按 max_age/max_bytes/max_msgs 保留；老场景向前兼容
+    # - interest：所有 interested durable consumer ack 后立即 remove
+    #             （B2a 引入 —— observer / audit-relay 类 topic 用 INTEREST
+    #             让 stream 回归 hot buffer 本职，长期存档由 PG event_store）
+    # - workqueue：单消费者场景，ack 后 remove（AATS 不用）
+    retention: str = "limits"
     discard: str = "old"          # 固定 "old"
 
     # ── 副本 / dedup / 运维（slice nats-capacity 新增，带安全默认） ──
@@ -334,6 +368,11 @@ class StreamSpec:
                 f"stream {self.name} storage must be 'file' or 'memory', "
                 f"got {self.storage!r}"
             )
+        if self.retention not in ("limits", "interest", "workqueue"):
+            raise ValueError(
+                f"stream {self.name} retention must be 'limits' | 'interest' | "
+                f"'workqueue', got {self.retention!r}"
+            )
         if self.num_replicas < 1:
             raise ValueError(
                 f"stream {self.name} num_replicas must be >= 1, got {self.num_replicas}"
@@ -361,10 +400,15 @@ class StreamSpec:
         )
 
         subjects = [f"{subject_prefix}{topic}" for topic in sorted(self.topics)]
+        retention_map = {
+            "limits": RetentionPolicy.LIMITS,
+            "interest": RetentionPolicy.INTEREST,
+            "workqueue": RetentionPolicy.WORK_QUEUE,
+        }
         return StreamConfig(
             name=self.name,
             subjects=subjects,
-            retention=RetentionPolicy.LIMITS,
+            retention=retention_map[self.retention],
             storage=StorageType.FILE if self.storage == "file" else StorageType.MEMORY,
             discard=DiscardPolicy.OLD,
             max_age=self.max_age_seconds,
@@ -460,6 +504,24 @@ def _compute_stream_config_drift(
             "desired": spec.deny_purge,
         }
 
+    # ── retention (B2a 新增) ──
+    # 改 retention policy（limits → interest）必须触发 update_stream，否则已
+    # 存在的 stream 会继续按旧策略工作，对 live deploy 无感知。
+    # nats-py RetentionPolicy 是 enum，直接 != 比较能工作；spec 侧是 str，
+    # 映射表和 to_nats_stream_config 保持一致。
+    from nats.js.api import RetentionPolicy as _RetentionPolicy  # type: ignore[import-not-found]
+    spec_retention_enum = {
+        "limits": _RetentionPolicy.LIMITS,
+        "interest": _RetentionPolicy.INTEREST,
+        "workqueue": _RetentionPolicy.WORK_QUEUE,
+    }[spec.retention]
+    existing_retention = getattr(existing, "retention", None)
+    if existing_retention is not None and existing_retention != spec_retention_enum:
+        drift["retention"] = {
+            "existing": existing_retention,
+            "desired": spec_retention_enum,
+        }
+
     return drift
 
 
@@ -478,24 +540,32 @@ DEFAULT_MARKET_STREAM_TOPICS: frozenset[str] = frozenset(
 )
 
 # 其他 critical topic → 长保留 stream AATS_EVENTS
-# 派生自 DEFAULT_CRITICAL_TOPICS 减掉 DEFAULT_MARKET_STREAM_TOPICS 和
-# DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS。新不变量 (I-8')：
-#   stream_topics 并集 ∪ persist_only == DEFAULT_CRITICAL_TOPICS
+# 派生：DEFAULT_CRITICAL_TOPICS 减 MARKET / PERSIST_ONLY / COMMANDS。
+# 新不变量 (I-8'')：
+#   AATS_EVENTS.topics
+#   ∪ AATS_EVENTS_MARKET.topics
+#   ∪ AATS_EVENTS_COMMANDS.topics
+#   ∪ DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS
+#   == DEFAULT_CRITICAL_TOPICS
 DEFAULT_CRITICAL_EVENTS_TOPICS: frozenset[str] = (
     DEFAULT_CRITICAL_TOPICS
     - DEFAULT_MARKET_STREAM_TOPICS
     - DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS
+    - DEFAULT_CRITICAL_COMMANDS_TOPICS
 )
 
 
-# 默认的两个 stream spec（两者对称设计，见设计文档 §4.4）
+# 默认的三个 stream spec（2026-04-20 B2a 引入 COMMANDS stream）
 #
-# 容量预算对账（设计文档 §4.1）：
-#   AATS_EVENTS_MARKET.max_bytes = 2 GB
-#   AATS_EVENTS.max_bytes        = 4 GB
-#   合计                         = 6 GB
-#   server max_file_store        = 8 GB (nats-server.conf)
-#   headroom                     = 2 GB (25%，留给 index + consumer state)
+# 容量预算对账：
+#   AATS_EVENTS_MARKET.max_bytes   = 2.0 GB  (hot buffer 高频观察 + feature 派生)
+#   AATS_EVENTS.max_bytes          = 4.0 GB  (observer / audit relay / dashboard
+#                                             retention=INTEREST，消费 ack 后立即 remove，
+#                                             实际稳态 < 0.5 GB)
+#   AATS_EVENTS_COMMANDS.max_bytes = 0.5 GB  (危险交易指令 retention=LIMITS，max_age 兜底)
+#   合计预算                        = 6.5 GB
+#   server max_file_store          = 8 GB (nats-server.conf)
+#   headroom                       = 1.5 GB (19%，留给 index + consumer state)
 # 单元测试 test_total_stream_capacity_within_server_budget 锁死这个对齐。
 DEFAULT_AATS_EVENTS_MARKET_SPEC = StreamSpec(
     name="AATS_EVENTS_MARKET",
@@ -510,24 +580,44 @@ DEFAULT_AATS_EVENTS_MARKET_SPEC = StreamSpec(
 DEFAULT_AATS_EVENTS_SPEC = StreamSpec(
     name="AATS_EVENTS",
     topics=DEFAULT_CRITICAL_EVENTS_TOPICS,
-    # 2026-04-20 根治 stream 接近 max_bytes 上限触发 compaction 风暴问题：
-    # NATS stream 应该是 "hot buffer"，给 live consumer 的短期 replay；长期保留/
-    # 合规/回放由 PG event_store 承担（ReplayEngine 100% 走 event_store，不
-    # 依赖 NATS stream）。原 7 天 retention 让 audit_records 等大 payload 累积
-    # 到 99.985% max_bytes，每条 publish 都撞 old-message discard compaction
-    # → audit.publish_model 批量 TimeoutError → noncritical_subscription_failed
-    # 每 2-3 分钟一条。改 1 天后 stream size 预估 ~600MB（~14% max_bytes），
-    # 有 85% headroom 处理 consumer 暂时落后（durable consumer 生产中秒级 ack，
-    # 24h 窗口极其充足）。详见 docs/task/aats_events_stream_retention_root_fix_sow.md。
-    max_age_seconds=86_400,              # 1 天（hot buffer；长期存档由 PG event_store）
-    max_bytes=4_294_967_296,             # 4 GB
+    # 2026-04-20 B2a：retention=interest —— 消息所有 interested durable consumer
+    # ack 后立即 remove。B1 readiness barrier + B0 AUDIT_RECORDS 剥离 + 本 stream
+    # 的 observer/audit-relay 性质让 INTEREST 安全：
+    #   - 所有 consumer 都走 Redis hydrate cache 兜底（agent Q3 确认）
+    #   - B1 保证 consumer 在 publisher 启动前就位（INTEREST 下 consumer 未
+    #     ready 时 publish 会丢消息，B1 gate 消除此 race）
+    #   - AUDIT_RECORDS 已移到 DEFAULT_PERSIST_ONLY_CRITICAL_TOPICS，不走此 stream
+    # max_age 保留为 fallback：万一 B1 超时 fallback + 某 consumer 掉线，
+    # 1 天内消息仍保留。
+    # max_bytes 保持 4 GB 但实际稳态预估 < 0.5 GB（INTEREST ack-remove 下只
+    # 保留"还没被所有 consumer ack 的消息"）。
+    max_age_seconds=86_400,              # 1 天（INTEREST 下只作 fallback）
+    max_bytes=4_294_967_296,             # 4 GB（INTEREST 下稳态远低于此）
     max_msgs=5_000_000,                  # 500 万条
-    max_msg_size=4_194_304,              # 4 MB（与 MARKET 对称）
+    max_msg_size=4_194_304,              # 4 MB（与 MARKET / COMMANDS 对称）
+    retention="interest",                # B2a：改 INTEREST，回归 hot buffer 本职
+)
+
+
+# ── AATS_EVENTS_COMMANDS （B2a 引入）──────────────────────────
+# "真实交易指令" 类 topic 专用 stream。保持 retention=LIMITS + max_age
+# 兜底是为了在 B1 readiness gate 超时 fallback 等边缘场景下仍然不丢消息
+# —— 丢 ORDER_INTENTS / POSITION_TARGETS 等 = 交易指令缺失。
+# 待 B2b 给 decision 进程加 outbox 事务性交付后可迁移到 INTEREST。
+DEFAULT_AATS_EVENTS_COMMANDS_SPEC = StreamSpec(
+    name="AATS_EVENTS_COMMANDS",
+    topics=DEFAULT_CRITICAL_COMMANDS_TOPICS,
+    max_age_seconds=86_400,              # 1 天 fallback 窗口
+    max_bytes=536_870_912,               # 512 MB（这 7 个 topic 的 publish 量小）
+    max_msgs=1_000_000,                  # 100 万条保险丝
+    max_msg_size=4_194_304,              # 4 MB（对称）
+    retention="limits",                  # 保持 LIMITS，max_age 兜底保护交易指令
 )
 
 DEFAULT_STREAM_SPECS: tuple[StreamSpec, ...] = (
     DEFAULT_AATS_EVENTS_MARKET_SPEC,
     DEFAULT_AATS_EVENTS_SPEC,
+    DEFAULT_AATS_EVENTS_COMMANDS_SPEC,
 )
 
 

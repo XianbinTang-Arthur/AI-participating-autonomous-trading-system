@@ -19,8 +19,10 @@ import pytest
 
 from aats.bus.base import EventBus, MessageHandler
 from aats.bus.nats_bus import (
+    DEFAULT_AATS_EVENTS_COMMANDS_SPEC,
     DEFAULT_AATS_EVENTS_MARKET_SPEC,
     DEFAULT_AATS_EVENTS_SPEC,
+    DEFAULT_CRITICAL_COMMANDS_TOPICS,
     DEFAULT_CRITICAL_EVENTS_TOPICS,
     DEFAULT_CRITICAL_TOPICS,
     DEFAULT_MARKET_STREAM_TOPICS,
@@ -562,6 +564,9 @@ def test_ensure_stream_unchanged_when_subjects_match() -> None:
     fake_info.config.num_replicas = 1
     fake_info.config.duplicate_window = 120.0
     fake_info.config.deny_purge = False
+    # B2a 加入 retention 字段 drift 检测；legacy shim 默认是 limits
+    from nats.js.api import RetentionPolicy as _TestRetentionPolicy
+    fake_info.config.retention = _TestRetentionPolicy.LIMITS
     fake_js = MagicMock()
     fake_js.stream_info = AsyncMock(return_value=fake_info)
     fake_js.add_stream = AsyncMock()
@@ -612,6 +617,9 @@ def test_ensure_stream_updates_when_subjects_differ() -> None:
     fake_info.config.num_replicas = 1
     fake_info.config.duplicate_window = 120.0
     fake_info.config.deny_purge = False
+    # B2a 加入 retention 字段 drift 检测；legacy shim 默认是 limits
+    from nats.js.api import RetentionPolicy as _TestRetentionPolicy
+    fake_info.config.retention = _TestRetentionPolicy.LIMITS
     fake_js = MagicMock()
     fake_js.stream_info = AsyncMock(return_value=fake_info)
     fake_js.add_stream = AsyncMock()
@@ -676,6 +684,9 @@ def test_ensure_stream_updates_when_subject_removed() -> None:
     fake_info.config.num_replicas = 1
     fake_info.config.duplicate_window = 120.0
     fake_info.config.deny_purge = False
+    # B2a 加入 retention 字段 drift 检测；legacy shim 默认是 limits
+    from nats.js.api import RetentionPolicy as _TestRetentionPolicy
+    fake_info.config.retention = _TestRetentionPolicy.LIMITS
     fake_js = MagicMock()
     fake_js.stream_info = AsyncMock(return_value=fake_info)
     fake_js.add_stream = AsyncMock()
@@ -897,16 +908,25 @@ def test_stream_specs_market_and_events_have_symmetric_max_msg_size() -> None:
 
 
 def test_total_stream_capacity_within_server_budget() -> None:
-    """I-1 容量预算：两条 stream max_bytes 之和 <= 6 GB（留 2 GB headroom，
+    """I-1 容量预算：3 条 stream max_bytes 之和 <= 6.5 GB（留 1.5 GB headroom，
     server max_file_store = 8 GB）。
+
+    2026-04-20 B2a 新增 AATS_EVENTS_COMMANDS stream (512 MB)。预算：
+      AATS_EVENTS_MARKET   2.0 GB
+      AATS_EVENTS          4.0 GB  (INTEREST 实际稳态 < 0.5 GB)
+      AATS_EVENTS_COMMANDS 0.5 GB
+      合计                 6.5 GB
+      server max_file_store 8 GB (nats-server.conf)
+      headroom             1.5 GB
 
     加大 stream 容量时必须同步考虑 server 配置，否则一次过大的写入突袭会直接
     撞 server 硬限触发 10023（本 slice 修复的原病根）。
     """
     total = sum(spec.max_bytes for spec in DEFAULT_STREAM_SPECS)
-    # 6 GB 上限（4 GB EVENTS + 2 GB MARKET）
-    assert total <= 6 * 1024**3, (
-        f"total stream capacity {total} bytes exceeds 6 GB budget"
+    # 6.5 GB 上限
+    max_budget = int(6.5 * 1024**3)
+    assert total <= max_budget, (
+        f"total stream capacity {total} bytes exceeds 6.5 GB budget ({max_budget})"
     )
 
 
@@ -1040,6 +1060,7 @@ def test_build_nats_streams_from_env_rejects_invalid_override(
 def _make_fake_stream_info_from_spec(spec: StreamSpec, subject_prefix: str = "aats.") -> Any:
     """根据 StreamSpec 构造一个 FakeStreamInfo，字段全部匹配（走 unchanged 分支）。"""
     from unittest.mock import MagicMock
+    from nats.js.api import RetentionPolicy as _RetentionPolicy
     info = MagicMock()
     info.config.subjects = [f"{subject_prefix}{t}" for t in sorted(spec.topics)]
     info.config.max_age = spec.max_age_seconds
@@ -1049,6 +1070,13 @@ def _make_fake_stream_info_from_spec(spec: StreamSpec, subject_prefix: str = "aa
     info.config.num_replicas = spec.num_replicas
     info.config.duplicate_window = spec.duplicate_window_seconds
     info.config.deny_purge = spec.deny_purge
+    # B2a retention 字段加入 drift 检测，需要和 spec 保持一致才走 unchanged 分支
+    retention_map = {
+        "limits": _RetentionPolicy.LIMITS,
+        "interest": _RetentionPolicy.INTEREST,
+        "workqueue": _RetentionPolicy.WORK_QUEUE,
+    }
+    info.config.retention = retention_map[spec.retention]
     return info
 
 
@@ -1214,10 +1242,14 @@ def test_ensure_streams_updates_one_noop_another() -> None:
     market_info = _make_fake_stream_info_from_spec(DEFAULT_AATS_EVENTS_MARKET_SPEC)
     market_info.config.max_bytes = 1_000  # drift
     events_info = _make_fake_stream_info_from_spec(DEFAULT_AATS_EVENTS_SPEC)  # 精确匹配
+    # B2a 新增 COMMANDS spec 也要提供精确匹配 fake，否则 ensure_streams 第三条
+    # 查不到会 KeyError
+    commands_info = _make_fake_stream_info_from_spec(DEFAULT_AATS_EVENTS_COMMANDS_SPEC)
 
     name_to_info = {
         "AATS_EVENTS_MARKET": market_info,
         "AATS_EVENTS": events_info,
+        "AATS_EVENTS_COMMANDS": commands_info,
     }
 
     async def fake_stream_info(name: str) -> Any:

@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from aats.bus.nats_bus import (
+    DEFAULT_AATS_EVENTS_COMMANDS_SPEC,
     DEFAULT_AATS_EVENTS_MARKET_SPEC,
     DEFAULT_AATS_EVENTS_SPEC,
     DEFAULT_STREAM_SPECS,
@@ -141,21 +142,26 @@ def test_dry_run_prints_diff_no_side_effects(capsys: pytest.CaptureFixture[str])
 
 
 def test_sync_config_splits_old_into_two_streams() -> None:
-    """T1：老 AATS_EVENTS 含全部 critical topic + MARKET 不存在。
-    - plan: EVENTS=update, MARKET=add
-    - apply 阶段必须 **先** update_stream AATS_EVENTS（释放 market 子集）
-      **再** add_stream AATS_EVENTS_MARKET，否则 nats-py 会抛
-      "subjects overlap"（§11.4）
+    """T1：老 AATS_EVENTS 含全部 critical topic + MARKET/COMMANDS 不存在。
+    - plan: EVENTS=update, MARKET=add, COMMANDS=add
+    - apply 阶段必须 **先** update_stream AATS_EVENTS（释放 market + commands
+      子集）**再** add_stream AATS_EVENTS_MARKET / AATS_EVENTS_COMMANDS，否则
+      nats-py 会抛 "subjects overlap"（§11.4）
+
+    2026-04-20 B2a：DEFAULT_STREAM_SPECS 从 2 条扩到 3 条（加 AATS_EVENTS_COMMANDS），
+    migration plan 也对应扩展。
     """
     snapshots = {
         "AATS_EVENTS": _snapshot_old_monolith_events(),
         "AATS_EVENTS_MARKET": _snapshot_missing("AATS_EVENTS_MARKET"),
+        "AATS_EVENTS_COMMANDS": _snapshot_missing("AATS_EVENTS_COMMANDS"),
     }
     plan = compute_migration_plan(snapshots, DEFAULT_STREAM_SPECS)
 
     assert plan.per_spec_actions == {
         "AATS_EVENTS": "update",
         "AATS_EVENTS_MARKET": "add",
+        "AATS_EVENTS_COMMANDS": "add",
     }
 
     # 记录调用顺序，验证 update 先于 add
@@ -176,14 +182,19 @@ def test_sync_config_splits_old_into_two_streams() -> None:
 
     asyncio.run(apply_migration_plan(fake_js, plan, DEFAULT_STREAM_SPECS))
 
-    # 必须是 update EVENTS → add MARKET（§11.4 subject overlap 陷阱的防御）
-    assert call_order == [
-        "update:AATS_EVENTS",
-        "add:AATS_EVENTS_MARKET",
-    ], f"expected update-before-add but got: {call_order}"
+    # update AATS_EVENTS 必须**先于**所有 add；add 顺序本身不敏感（MARKET
+    # 和 COMMANDS 都是新 stream 且 subjects 互斥）
+    assert call_order[0] == "update:AATS_EVENTS", (
+        f"update AATS_EVENTS 必须在所有 add 之前（§11.4 subject overlap 防御），"
+        f"实际顺序 {call_order}"
+    )
+    add_names = {e.split(":", 1)[1] for e in call_order if e.startswith("add:")}
+    assert add_names == {"AATS_EVENTS_MARKET", "AATS_EVENTS_COMMANDS"}, (
+        f"add 集合应恰好 MARKET + COMMANDS，实际 {add_names}"
+    )
 
     fake_js.update_stream.assert_awaited_once()
-    fake_js.add_stream.assert_awaited_once()
+    assert fake_js.add_stream.await_count == 2
     fake_js.purge_stream.assert_not_awaited()
     fake_js.delete_stream.assert_not_awaited()
 
@@ -194,23 +205,28 @@ def test_sync_config_splits_old_into_two_streams() -> None:
 
 
 def test_sync_config_noop_when_already_new() -> None:
-    """T2：两条 stream 都已存在且完全匹配目标 spec → 都是 noop。
+    """T2：所有 stream 都已存在且完全匹配目标 spec → 都是 noop。
     apply 阶段不应调 update_stream / add_stream / purge_stream。
+
+    2026-04-20 B2a：DEFAULT_STREAM_SPECS 扩到 3 条，测试同步覆盖。
     """
     snapshots = {
         "AATS_EVENTS_MARKET": _snapshot_matching(DEFAULT_AATS_EVENTS_MARKET_SPEC),
         "AATS_EVENTS": _snapshot_matching(DEFAULT_AATS_EVENTS_SPEC),
+        "AATS_EVENTS_COMMANDS": _snapshot_matching(DEFAULT_AATS_EVENTS_COMMANDS_SPEC),
     }
     plan = compute_migration_plan(snapshots, DEFAULT_STREAM_SPECS)
 
     assert plan.per_spec_actions == {
         "AATS_EVENTS_MARKET": "noop",
         "AATS_EVENTS": "noop",
+        "AATS_EVENTS_COMMANDS": "noop",
     }
 
     joined = "\n".join(plan.actions)
     assert "[noop] AATS_EVENTS_MARKET" in joined
     assert "[noop] AATS_EVENTS" in joined
+    assert "[noop] AATS_EVENTS_COMMANDS" in joined
 
     fake_js = MagicMock()
     fake_js.update_stream = AsyncMock()
@@ -251,12 +267,14 @@ def test_sync_config_updates_capacity_drift() -> None:
     snapshots = {
         "AATS_EVENTS_MARKET": drifted_market_fixed,
         "AATS_EVENTS": _snapshot_matching(DEFAULT_AATS_EVENTS_SPEC),
+        "AATS_EVENTS_COMMANDS": _snapshot_matching(DEFAULT_AATS_EVENTS_COMMANDS_SPEC),
     }
     plan = compute_migration_plan(snapshots, DEFAULT_STREAM_SPECS)
 
     assert plan.per_spec_actions == {
         "AATS_EVENTS_MARKET": "update",
         "AATS_EVENTS": "noop",
+        "AATS_EVENTS_COMMANDS": "noop",
     }
 
     joined = "\n".join(plan.actions)
@@ -283,21 +301,27 @@ def test_sync_config_updates_capacity_drift() -> None:
 
 
 def test_sync_config_creates_both_from_empty() -> None:
-    """T4：首次部署 / clean slate —— 两条 stream 都不存在 → 两次 add_stream。"""
+    """T4：首次部署 / clean slate —— 3 条 stream 都不存在 → 三次 add_stream。
+
+    2026-04-20 B2a：DEFAULT_STREAM_SPECS 扩到 3 条。
+    """
     snapshots = {
         "AATS_EVENTS_MARKET": _snapshot_missing("AATS_EVENTS_MARKET"),
         "AATS_EVENTS": _snapshot_missing("AATS_EVENTS"),
+        "AATS_EVENTS_COMMANDS": _snapshot_missing("AATS_EVENTS_COMMANDS"),
     }
     plan = compute_migration_plan(snapshots, DEFAULT_STREAM_SPECS)
 
     assert plan.per_spec_actions == {
         "AATS_EVENTS_MARKET": "add",
         "AATS_EVENTS": "add",
+        "AATS_EVENTS_COMMANDS": "add",
     }
 
     joined = "\n".join(plan.actions)
     assert "[add] AATS_EVENTS_MARKET" in joined
     assert "[add] AATS_EVENTS" in joined
+    assert "[add] AATS_EVENTS_COMMANDS" in joined
 
     added: list[str] = []
 
@@ -312,8 +336,8 @@ def test_sync_config_creates_both_from_empty() -> None:
 
     asyncio.run(apply_migration_plan(fake_js, plan, DEFAULT_STREAM_SPECS))
 
-    assert sorted(added) == ["AATS_EVENTS", "AATS_EVENTS_MARKET"]
-    assert fake_js.add_stream.await_count == 2
+    assert sorted(added) == ["AATS_EVENTS", "AATS_EVENTS_COMMANDS", "AATS_EVENTS_MARKET"]
+    assert fake_js.add_stream.await_count == 3
     fake_js.update_stream.assert_not_awaited()
 
 
@@ -347,12 +371,14 @@ def test_sync_config_handles_incomplete_old_stream() -> None:
     snapshots = {
         "AATS_EVENTS": incomplete_events,
         "AATS_EVENTS_MARKET": _snapshot_missing("AATS_EVENTS_MARKET"),
+        "AATS_EVENTS_COMMANDS": _snapshot_missing("AATS_EVENTS_COMMANDS"),
     }
     plan = compute_migration_plan(snapshots, DEFAULT_STREAM_SPECS)
 
     assert plan.per_spec_actions == {
         "AATS_EVENTS": "update",
         "AATS_EVENTS_MARKET": "add",
+        "AATS_EVENTS_COMMANDS": "add",
     }
 
     # drift 应该同时包含 subjects / max_bytes / max_msgs / max_msg_size
@@ -361,7 +387,7 @@ def test_sync_config_handles_incomplete_old_stream() -> None:
     assert "subjects" in joined
     assert "max_bytes" in joined
 
-    # apply 顺序：先 update EVENTS，再 add MARKET（§11.4 防御）
+    # apply 顺序：先 update EVENTS，再 add MARKET / COMMANDS（§11.4 防御）
     call_order: list[str] = []
     fake_js = MagicMock()
 
@@ -377,10 +403,14 @@ def test_sync_config_handles_incomplete_old_stream() -> None:
 
     asyncio.run(apply_migration_plan(fake_js, plan, DEFAULT_STREAM_SPECS))
 
-    assert call_order == [
-        "update:AATS_EVENTS",
-        "add:AATS_EVENTS_MARKET",
-    ], f"expected update-before-add but got: {call_order}"
+    # update EVENTS 必须先于所有 add（避免 §11.4 subject overlap）
+    assert call_order[0] == "update:AATS_EVENTS", (
+        f"expected update-before-add but got: {call_order}"
+    )
+    add_names = {e.split(":", 1)[1] for e in call_order if e.startswith("add:")}
+    assert add_names == {"AATS_EVENTS_MARKET", "AATS_EVENTS_COMMANDS"}, (
+        f"expected 2 adds (MARKET + COMMANDS) but got {add_names}"
+    )
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -561,14 +591,20 @@ def test_fake_config_from_snapshot_fills_defaults_for_none() -> None:
 
 def test_recreate_path_uses_delete_then_add() -> None:
     """--recreate 分支：对每条 target spec delete_stream 后 add_stream。
-    这是 T6 的逃生口以及用户主动清库重建的入口。"""
+    这是 T6 的逃生口以及用户主动清库重建的入口。
+
+    2026-04-20 B2a：DEFAULT_STREAM_SPECS 扩到 3 条，recreate 路径也对 3 条
+    都执行 delete+add。
+    """
     snapshots = {
         "AATS_EVENTS_MARKET": _snapshot_matching(DEFAULT_AATS_EVENTS_MARKET_SPEC),
         "AATS_EVENTS": _snapshot_matching(DEFAULT_AATS_EVENTS_SPEC),
+        "AATS_EVENTS_COMMANDS": _snapshot_matching(DEFAULT_AATS_EVENTS_COMMANDS_SPEC),
     }
     plan = compute_migration_plan(snapshots, DEFAULT_STREAM_SPECS, recreate=True)
     assert plan.will_recreate is True
     assert all(v == "recreate" for v in plan.per_spec_actions.values())
+    assert len(plan.per_spec_actions) == 3
 
     order: list[str] = []
     fake_js = MagicMock()
@@ -586,12 +622,15 @@ def test_recreate_path_uses_delete_then_add() -> None:
 
     asyncio.run(apply_migration_plan(fake_js, plan, DEFAULT_STREAM_SPECS))
 
-    # 每条 spec 都先 delete 再 add（顺序按 target_specs 顺序）
+    # 每条 spec 都先 delete 再 add，顺序按 DEFAULT_STREAM_SPECS 顺序
+    # （MARKET → EVENTS → COMMANDS）
     expected = [
         "delete:AATS_EVENTS_MARKET",
         "add:AATS_EVENTS_MARKET",
         "delete:AATS_EVENTS",
         "add:AATS_EVENTS",
+        "delete:AATS_EVENTS_COMMANDS",
+        "add:AATS_EVENTS_COMMANDS",
     ]
     assert order == expected
     fake_js.update_stream.assert_not_awaited()
@@ -600,10 +639,14 @@ def test_recreate_path_uses_delete_then_add() -> None:
 
 def test_recreate_tolerates_missing_stream_on_delete() -> None:
     """--recreate 分支：如果 stream 本来就不存在，delete_stream 抛错应被吞掉
-    继续 add_stream（让 T4 状态下跑 --recreate 也能走通）。"""
+    继续 add_stream（让 T4 状态下跑 --recreate 也能走通）。
+
+    2026-04-20 B2a：扩 3 条 stream。
+    """
     snapshots = {
         "AATS_EVENTS_MARKET": _snapshot_missing("AATS_EVENTS_MARKET"),
         "AATS_EVENTS": _snapshot_missing("AATS_EVENTS"),
+        "AATS_EVENTS_COMMANDS": _snapshot_missing("AATS_EVENTS_COMMANDS"),
     }
     plan = compute_migration_plan(snapshots, DEFAULT_STREAM_SPECS, recreate=True)
 
@@ -620,5 +663,5 @@ def test_recreate_tolerates_missing_stream_on_delete() -> None:
     # 不应抛；delete 的 NotFoundError 被吞掉继续 add
     asyncio.run(apply_migration_plan(fake_js, plan, DEFAULT_STREAM_SPECS))
 
-    assert fake_js.delete_stream.await_count == 2
-    assert fake_js.add_stream.await_count == 2
+    assert fake_js.delete_stream.await_count == 3
+    assert fake_js.add_stream.await_count == 3
