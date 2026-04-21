@@ -384,7 +384,7 @@ class ExecutionPlanner:
         strategy_state_phase: str | None = None,
         position_intent: str | None = None,
         execution_style_preference: str | None = None,
-        order_type_preference: Literal["market", "limit"] | None = None,
+        order_type_preference: Literal["market", "limit", "post_only"] | None = None,
         time_in_force_preference: str | None = None,
         limit_offset_bps_preference: Decimal | float | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
@@ -577,7 +577,7 @@ class ExecutionPlanner:
         time_in_force: str,
         limit_price: Decimal | None,
         execution_style_preference: str | None,
-        order_type_preference: Literal["market", "limit"] | None,
+        order_type_preference: Literal["market", "limit", "post_only"] | None,
         time_in_force_preference: str | None,
         limit_offset_bps_preference: Decimal | float | None,
     ) -> tuple[str, Literal["market", "limit"], str, Decimal | None]:
@@ -588,6 +588,28 @@ class ExecutionPlanner:
                 "market",
                 time_in_force_preference or time_in_force,
                 None,
+            )
+        # post_only_with_timeout_fallback (2026-04-21):
+        # 走 _post_only_limit_price (非跨价方向) 生成挂单价.
+        # 内部 order_type 保持 "limit" + execution_style="post_only",
+        # 由 okx_adapter._order_type 翻译为 ordType=post_only 出站.
+        # 详见 docs/design/post_only_maker_exit_mode_2026_04_21.md §3.3
+        if preferred_order_type == "post_only":
+            limit_offset_bps = to_decimal(limit_offset_bps_preference or Decimal("0"))
+            post_only_price = self._post_only_limit_price(
+                side=side,
+                reference_price=reference_price,
+                limit_offset_bps=limit_offset_bps,
+            )
+            if post_only_price is None:
+                # 无法算出安全挂单价 (ref=None / offset<=0) → 不改原 execution_style,
+                # Layer 4 orchestration 会根据这个信号走 fallback.
+                return execution_style, order_type, time_in_force, limit_price
+            return (
+                execution_style_preference or "post_only",
+                "limit",
+                time_in_force_preference or "GTC",
+                post_only_price,
             )
         if preferred_order_type != "limit":
             return execution_style, order_type, time_in_force, limit_price
@@ -1021,3 +1043,36 @@ class ExecutionPlanner:
         if side == "buy":
             return reference * (Decimal("1") + offset_fraction)
         return reference * (Decimal("1") - offset_fraction)
+
+    def _post_only_limit_price(
+        self,
+        *,
+        side: str,
+        reference_price: Decimal | float | None,
+        limit_offset_bps: Decimal | None,
+    ) -> Decimal | None:
+        """post_only 挂单价 — **非跨价方向** (与 _bounded_live_limit_price 相反).
+
+        bounded_limit_ioc 跨价吃流动性: buy=ref×(1+offset), sell=ref×(1-offset).
+        post_only 绝不跨价, 必须落在 maker 侧等对手方吃:
+          buy  price = ref × (1 − offset_fraction)   低于 ref, 挂买侧
+          sell price = ref × (1 + offset_fraction)   高于 ref, 挂卖侧
+
+        若挂单价无效 (ref=None / <=0 / offset<=0), 返回 None — 上游保留原
+        limit_price + execution_style, Layer 4 orchestration 会走 fallback.
+
+        见 docs/design/post_only_maker_exit_mode_2026_04_21.md §3.3.
+        """
+        if (
+            reference_price is None
+            or limit_offset_bps is None
+            or limit_offset_bps <= Decimal("0")
+        ):
+            return None
+        reference = to_decimal(reference_price)
+        if reference <= Decimal("0"):
+            return None
+        offset_fraction = limit_offset_bps / Decimal("10000")
+        if side == "buy":
+            return reference * (Decimal("1") - offset_fraction)
+        return reference * (Decimal("1") + offset_fraction)

@@ -357,7 +357,7 @@ class StrategyLegIntent(SchemaBase):
     trigger_reason_codes: list[str] = Field(default_factory=list)
     note: str | None = None
     execution_style_preference: str | None = None
-    order_type_preference: Literal["market", "limit"] | None = None
+    order_type_preference: Literal["market", "limit", "post_only"] | None = None
     time_in_force_preference: str | None = None
     limit_offset_bps_preference: Decimal | None = None
     execution_preference_reason_codes: list[str] = Field(default_factory=list)
@@ -389,7 +389,7 @@ class StrategyBookExpectancyEntry(SchemaBase):
     policy_reason: str | None = None
     execution_policy_urgency: Literal["low", "medium", "high"] | None = None
     execution_style_preference: str | None = None
-    order_type_preference: Literal["market", "limit"] | None = None
+    order_type_preference: Literal["market", "limit", "post_only"] | None = None
     time_in_force_preference: str | None = None
     limit_offset_bps_preference: Decimal | None = None
     expected_leg_cost_bps: float | None = None

@@ -136,6 +136,14 @@ class OKXOrderPayloadBuilder:
 
     @staticmethod
     def _order_type(intent: OrderIntent) -> str:
+        # post_only_with_timeout_fallback (2026-04-21):
+        # execution_style=="post_only" 即意向为 OKX 原生 ordType=post_only.
+        # intent 侧 order_type 保持 "limit" (OrderIntent 的 Literal 不含
+        # post_only, 避免跨 4 处 schema 改动), 适配器在出站时翻译为
+        # exchange-specific "post_only". 详见
+        # docs/design/post_only_maker_exit_mode_2026_04_21.md §3.4
+        if str(intent.execution_style or "").lower() == "post_only":
+            return "post_only"
         if intent.order_type != "limit":
             return intent.order_type
         tif = str(intent.time_in_force or "IOC").upper()
