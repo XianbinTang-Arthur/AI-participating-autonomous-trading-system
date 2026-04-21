@@ -229,6 +229,10 @@ class _SplitFillAdapter(_SubmittedExitAdapter):
 
 
 class _FallbackSplitManager(OrderManager):
+    """Task 142：模拟 split 内部 early-return（没派发任何 slice）走 fallback
+    返回 anchor SUBMITTING 状态的情况。新契约下 split 必返回 OrderState，
+    这里直接复用 fallback helper 保证 submit 主路径契约不破。"""
+
     async def _execute_serial_exit_split(  # type: ignore[override]
         self,
         *,
@@ -237,8 +241,27 @@ class _FallbackSplitManager(OrderManager):
         leg_intent,
         split_limit: Decimal,
         start_slice_index: int = 1,
-    ):
-        return None
+    ) -> OrderState:
+        return self._fallback_serial_exit_split_anchor_state(client_order_id=client_order_id)
+
+
+class _MissingAnchorSplitManager(OrderManager):
+    """Task 142：模拟 split 内部 early-return 且 anchor state 被异常清掉的极端场景；
+    新契约下 fallback helper 必须 raise serial_exit_split_missing_anchor_state。"""
+
+    async def _execute_serial_exit_split(  # type: ignore[override]
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+        leg_intent,
+        split_limit: Decimal,
+        start_slice_index: int = 1,
+    ) -> OrderState:
+        # 故意把 anchor 清掉再走 fallback，让 fallback 触发 raise
+        self.execution_repo._order_states_by_client_order_id.pop(client_order_id, None)  # type: ignore[attr-defined]
+        self.execution_repo._non_terminal_ids.discard(client_order_id)  # type: ignore[attr-defined]
+        return self._fallback_serial_exit_split_anchor_state(client_order_id=client_order_id)
 
 
 class TestOrderManagerExitExecution(unittest.IsolatedAsyncioTestCase):
@@ -294,7 +317,10 @@ class TestOrderManagerExitExecution(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parent.remaining_dispatchable_quantity, Decimal("0"))
         self.assertEqual(parent.child_order_ids, ["clord_exit_parent_create"])
 
-    async def test_execute_submit_intent_falls_back_to_persisted_state_when_serial_split_returns_none(self) -> None:
+    async def test_execute_submit_intent_uses_fallback_anchor_when_split_dispatches_no_slice(self) -> None:
+        """Task 142 收口：split 早 return（没派发 slice）时，通过 fallback helper
+        返回 persisted SUBMITTING anchor 状态，而不是返回 None 让 caller 来 workaround。
+        新契约下 caller 不再做 3 段式兜底，split 自身负责恒返 OrderState。"""
         execution_repo = InMemoryExecutionRepository()
         exit_repo = InMemoryExitExecutionRepository()
         manager = _FallbackSplitManager(
@@ -331,8 +357,50 @@ class TestOrderManagerExitExecution(unittest.IsolatedAsyncioTestCase):
 
         state = await manager.process_submit_command(intent=intent)
 
+        self.assertIsNotNone(state)
         self.assertEqual(state.client_order_id, "clord_exit_split_fallback")
         self.assertEqual(state.status, "SUBMITTING")
+
+    async def test_execute_submit_intent_raises_when_split_anchor_state_missing(self) -> None:
+        """Task 142 收口（负例）：anchor state 缺失（基础设施级故障），fallback helper
+        必须 raise 明确的 RuntimeError，而不是让 None 在签名上隐形。"""
+        execution_repo = InMemoryExecutionRepository()
+        exit_repo = InMemoryExitExecutionRepository()
+        manager = _MissingAnchorSplitManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=_SplitFillAdapter(),
+            execution_repo=execution_repo,
+            exit_execution_repo=exit_repo,
+            kill_switch=KillSwitch(),
+        )
+        intent = OrderIntent(
+            intent_id="intent_exit_missing_anchor",
+            execution_chain_id="chain_exit_missing_anchor",
+            decision_id="decision_exit_missing_anchor",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("5"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=True,
+            close_only=True,
+            position_mode="long_short_mode",
+            pos_side="long",
+            execution_action="exit",
+            leg_action="close",
+            position_intent="close_long",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            idempotency_key="clord_exit_missing_anchor",
+        )
+
+        with self.assertRaises(RuntimeError) as ctx:
+            await manager.process_submit_command(intent=intent)
+        self.assertIn("serial_exit_split_missing_anchor_state", str(ctx.exception))
 
     async def test_sync_recomputes_parent_exit_intent_after_child_fill(self) -> None:
         execution_repo = InMemoryExecutionRepository()

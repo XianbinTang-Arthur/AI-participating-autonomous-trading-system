@@ -4,6 +4,7 @@ from decimal import Decimal
 import unittest
 
 from aats.schemas.strategy_runtime import PortfolioAllocationDecision, StrategyBookRuntimeState, StrategySleeveIntent
+from aats.services.strategy_engines.independent.models import ScoreStabilityMetrics
 from aats.services.strategy_engines.independent.replay import _decision_snapshot_from_sources
 from aats.services.strategy_engines.independent.scoring import compute_score_stability
 from tests.support.strategy_family import make_baseline, make_derivatives_hedge_settings
@@ -91,6 +92,41 @@ class TestIndependentScoreStabilityCompat(unittest.TestCase):
         self.assertEqual(snapshot.score_stability_metrics["downward_drawdown_bps"], 0.0)
         self.assertNotIn("max_drawdown_bps", snapshot.score_stability_metrics)
         self.assertNotIn("max_drawdown_bps_compat_source", snapshot.score_stability_metrics)
+
+    def test_is_legacy_drawdown_compat_true_when_only_legacy_field_provided(self) -> None:
+        """Task 142：只传旧字段构造时，is_legacy_drawdown_compat == True，
+        下游可据此显式走兼容 switch。"""
+        metrics = ScoreStabilityMetrics(
+            support_count=3,
+            min_score=0.50,
+            mean_score=0.52,
+            stable=True,
+            source="recent_target_history",
+            max_drawdown_bps=4.0,
+        )
+        self.assertTrue(metrics.is_legacy_drawdown_compat)
+        self.assertEqual(metrics.max_drawdown_bps_compat_source, "upward_excursion_bps")
+        # mirror：旧字段有值 → 新字段被自动填
+        self.assertEqual(metrics.upward_excursion_bps, 4.0)
+
+    def test_is_legacy_drawdown_compat_true_even_when_only_new_field_provided(self) -> None:
+        """Task 142：当前 __post_init__ 行为 —— 即便只传新字段，compat_source 也被
+        标记（因为新→旧的 mirror 把 max_drawdown_bps 回填了）。这条测试**锚定**当前
+        行为，提醒将来如果去掉新→旧 mirror，compat_source 在"新字段生产者"场景必须
+        保持 None，否则下游 is_legacy_drawdown_compat 会 false positive。"""
+        metrics = ScoreStabilityMetrics(
+            support_count=3,
+            min_score=0.50,
+            mean_score=0.52,
+            stable=True,
+            source="recent_target_history",
+            upward_excursion_bps=5.0,
+            downward_drawdown_bps=0.0,
+        )
+        # 注意：当前行为下 compat_source 也会被设置，这是 __post_init__ 新→旧 mirror
+        # 的副作用。如果未来有 semantic cleanup，此断言应相应调整。
+        self.assertEqual(metrics.max_drawdown_bps_compat_source, "upward_excursion_bps")
+        self.assertTrue(metrics.is_legacy_drawdown_compat)
 
 
 if __name__ == "__main__":

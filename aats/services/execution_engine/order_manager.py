@@ -532,18 +532,16 @@ class OrderManager:
         )
         split_limit = await self._serial_exit_split_limit(intent=intent)
         if split_limit is not None:
-            split_state = await self._execute_serial_exit_split(
+            # Task 142：split 统一返回 OrderState（或 raise
+            # serial_exit_split_missing_anchor_state），caller 不再做 3 段式
+            # workaround。anchor state 由上面的 _persist_submitting_state_for_intent
+            # 保证存在，split 内部 early-return 会用 fallback helper 兜底。
+            return await self._execute_serial_exit_split(
                 intent=intent,
                 client_order_id=resolved_client_order_id,
                 leg_intent=leg_intent,
                 split_limit=split_limit,
             )
-            if split_state is not None:
-                return split_state
-            fallback_state = self.execution_repo.get_order_state(resolved_client_order_id)
-            if fallback_state is not None:
-                return fallback_state
-            raise RuntimeError("serial_exit_split_missing_anchor_state")
         return await self._submit_single_order_intent(
             intent=intent,
             client_order_id=resolved_client_order_id,
@@ -842,6 +840,16 @@ class OrderManager:
             return None
         return normalized_limit
 
+    def _fallback_serial_exit_split_anchor_state(self, *, client_order_id: str) -> OrderState:
+        """Task 142：当 `_execute_serial_exit_split` 要在未派发任何 slice 的情况下提前
+        退出时，必须返回 anchor OrderState（通常是 caller 先 persist 的 SUBMITTING
+        状态）。anchor 不存在是基础设施级别 race / DB 写失败 —— raise 而非静默返回 None，
+        让上层看到明确故障而不是隐式签名不匹配。"""
+        anchor = self.execution_repo.get_order_state(client_order_id)
+        if anchor is None:
+            raise RuntimeError("serial_exit_split_missing_anchor_state")
+        return anchor
+
     async def _execute_serial_exit_split(
         self,
         *,
@@ -850,17 +858,26 @@ class OrderManager:
         leg_intent: LegOrderIntent | None,
         split_limit: Decimal,
         start_slice_index: int = 1,
-    ) -> OrderState | None:
-        last_state = self.execution_repo.get_order_state(client_order_id)
+    ) -> OrderState:
+        # Task 142：返回契约收口 —— 必定返回 OrderState。原签名 `OrderState | None`
+        # 把"没派发任何 slice 就退出"的语义与"anchor state 缺失"的基础设施错误混在
+        # 一起，caller `_execute_submit_intent` 不得不三段式 workaround（split→None→
+        # fallback→raise）。新契约下，所有 early-return 路径统一经
+        # `_fallback_serial_exit_split_anchor_state` 返回 anchor 或 raise。
+        last_state: OrderState | None = self.execution_repo.get_order_state(client_order_id)
         if split_limit <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
-            return last_state
+            return last_state if last_state is not None else self._fallback_serial_exit_split_anchor_state(
+                client_order_id=client_order_id
+            )
         for slice_index in range(start_slice_index, self._EXIT_SPLIT_MAX_CHILDREN + 1):
             parent = self._parent_exit_execution_intent(intent=intent)
             if parent is not None and (
                 parent.operator_review_required
                 or parent.aggregate_status in {"CANCEL_PENDING", "COMPLETED", "CANCELED", "FAILED_SAFE", "REVIEW_REQUIRED"}
             ):
-                return last_state
+                return last_state if last_state is not None else self._fallback_serial_exit_split_anchor_state(
+                    client_order_id=client_order_id
+                )
             remaining_quantity = (
                 max(Decimal(intent.quantity), Decimal("0"))
                 if slice_index == start_slice_index and start_slice_index <= 1
@@ -871,10 +888,14 @@ class OrderManager:
                 )
             )
             if remaining_quantity <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
-                return last_state
+                return last_state if last_state is not None else self._fallback_serial_exit_split_anchor_state(
+                    client_order_id=client_order_id
+                )
             child_quantity = min(split_limit, remaining_quantity)
             if child_quantity <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
-                return last_state
+                return last_state if last_state is not None else self._fallback_serial_exit_split_anchor_state(
+                    client_order_id=client_order_id
+                )
             child_intent, child_leg_intent = self._split_child_intent(
                 intent=intent,
                 leg_intent=leg_intent,

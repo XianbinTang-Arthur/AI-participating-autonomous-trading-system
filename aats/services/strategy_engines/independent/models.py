@@ -61,6 +61,26 @@ IndependentBookScorer = Callable[..., float]
 
 @dataclass(frozen=True, slots=True)
 class ScoreStabilityMetrics:
+    """Independent 策略家族的分数稳定性指标。
+
+    字段语义（Task 142 显性化）：
+    - ``upward_excursion_bps``：窗口内 mean_score → max_score 的**向上**偏移（bps）。
+      新代码一律使用此字段来表达"向上偏移幅度"。
+    - ``downward_drawdown_bps``：窗口内 max_score → min_score 的**向下**回撤（bps）。
+      新代码一律使用此字段来表达"向下回撤幅度"。
+    - ``max_drawdown_bps``：**【已弃用兼容字段】** 字面上"最大回撤"，但实际语义等于
+      ``upward_excursion_bps``（向上偏移）。名字的历史遗留误导下游，新代码不得使用。
+      保留目的：兼容反序列化老 replay 快照（semantics_version < 2），
+      ``__post_init__`` 会自动镜像到 ``upward_excursion_bps`` 并把
+      ``max_drawdown_bps_compat_source`` 设为 ``"upward_excursion_bps"``，
+      下游可据此识别这个值来自 legacy 兼容路径。
+    - ``max_drawdown_bps_compat_source``：兼容来源标记。非 None 表示本指标对象至少有一
+      个值来自 legacy 兼容路径（可能是入参用了旧字段被映射为新字段，也可能反向）。
+      下游可以 ``metrics.is_legacy_drawdown_compat`` 做显式 switch，对新字段做优先读。
+    - ``semantics_version``：语义版本号。当前 = 2（引入 upward/downward split）。
+      将来 >= 3 的版本会彻底移除 ``max_drawdown_bps``。
+    """
+
     support_count: int
     min_score: float
     mean_score: float
@@ -96,6 +116,12 @@ class ScoreStabilityMetrics:
             object.__setattr__(self, "max_drawdown_bps_compat_source", "upward_excursion_bps")
         if self.semantics_version < INDEPENDENT_SCORE_STABILITY_SEMANTICS_VERSION:
             object.__setattr__(self, "semantics_version", INDEPENDENT_SCORE_STABILITY_SEMANTICS_VERSION)
+
+    @property
+    def is_legacy_drawdown_compat(self) -> bool:
+        """当本指标对象经过 legacy ``max_drawdown_bps`` 兼容路径（含新→旧自动回填）
+        即为 True。Task 142：下游显式 switch 用。"""
+        return self.max_drawdown_bps_compat_source is not None
 
 
 @dataclass(frozen=True, slots=True)

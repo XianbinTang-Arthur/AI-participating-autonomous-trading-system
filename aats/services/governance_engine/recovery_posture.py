@@ -6,6 +6,9 @@ from typing import TYPE_CHECKING
 from aats.schemas.reconciliation import ReconciliationReport, ReconciliationStateSnapshot
 from aats.schemas.system import RecoveryStatus
 from aats.services.execution_engine.bundle_recovery import scoped_bundle_recovery_assessment
+from aats.services.execution_engine.exit_intent_aggregator import (
+    EXIT_EXECUTION_BLOCKER_KINDS,
+)
 from aats.services.runtime_scope import latest_matching_reconciliation, runtime_state_scope
 
 if TYPE_CHECKING:
@@ -36,17 +39,16 @@ class RecoveryPostureEvaluator:
         "local_demo_no_exchange_submission",
         "real_market_paper_uses_local_paper_execution",
     }
+    # Task 142：exit_execution_* 的 kind 字符串从 exit_intent_aggregator
+    # 导入，防止两处散落（aggregator 的 review item kind / 本文件的
+    # persistent blocker）未来添加新 kind 时漏配其中一侧。
     _PERSISTENT_STATUS_BLOCKERS = {
         "pending_execution_commands",
         "stuck_sent_submit_commands",
         "account_snapshot_refresh_failed",
         "strategy_bundle_recovery_in_progress",
         "strategy_bundle_recovery_requires_review",
-        "exit_execution_truth_pending",
-        "exit_execution_parent_review_required",
-        "exit_execution_missing_child_refs_for_parent",
-        "exit_execution_resume_template_missing",
-        "exit_execution_resume_limit_lookup_failed",
+        *EXIT_EXECUTION_BLOCKER_KINDS,
     }
 
     def __init__(self, runtime: ApplicationRuntime) -> None:

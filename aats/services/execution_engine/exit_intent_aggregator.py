@@ -26,6 +26,40 @@ _ZERO = Decimal("0")
 _EPSILON = Decimal("1e-12")
 _TERMINAL_PARENT_STATUSES = {"COMPLETED", "CANCELED", "FAILED_SAFE"}
 
+# ── Task 142：exit_execution review kind 常量集中化 ────────────────
+# 这些字符串同时在三处 consume（aggregator、recovery_posture、startup_recovery
+# overlay），早期以字面量散落在各处，一旦改动易错位。提到 module level 后
+# recovery_posture._PERSISTENT_STATUS_BLOCKERS 通过 EXIT_EXECUTION_BLOCKER_KINDS
+# 直接引用，保证"加一条 blocker kind"只需改本文件。字符串**不得**变更——
+# 下游 RecoveryStatus.resume_blocked_reasons、reconciliation finding_type、
+# Grafana 告警、operator UI 都按字面量匹配。
+EXIT_EXECUTION_PARENT_REVIEW_REQUIRED_KIND = "exit_execution_parent_review_required"
+EXIT_EXECUTION_TRUTH_PENDING_KIND = "exit_execution_truth_pending"
+EXIT_EXECUTION_MISSING_CHILD_REFS_KIND = "exit_execution_missing_child_refs_for_parent"
+EXIT_EXECUTION_RESUME_TEMPLATE_MISSING_KIND = "exit_execution_resume_template_missing"
+EXIT_EXECUTION_RESUME_LIMIT_LOOKUP_FAILED_KIND = "exit_execution_resume_limit_lookup_failed"
+
+EXIT_EXECUTION_BLOCKER_KINDS: frozenset[str] = frozenset(
+    {
+        EXIT_EXECUTION_PARENT_REVIEW_REQUIRED_KIND,
+        EXIT_EXECUTION_TRUTH_PENDING_KIND,
+        EXIT_EXECUTION_MISSING_CHILD_REFS_KIND,
+        EXIT_EXECUTION_RESUME_TEMPLATE_MISSING_KIND,
+        EXIT_EXECUTION_RESUME_LIMIT_LOOKUP_FAILED_KIND,
+    }
+)
+
+# ── resume_issue kind 常量（写入 parent.metadata["resume_issue"]["kind"]）──
+# 与上面的 review kind 不同：这些 kind 是 parent 级别的 resume issue 分类，
+# 不带 "exit_execution_" 前缀。review item kind 与之语义映射：
+#   MISSING_CHILD_REFS_RESUME_ISSUE_KIND    ↔ EXIT_EXECUTION_MISSING_CHILD_REFS_KIND
+#   RESUME_LIMIT_LOOKUP_FAILED_RESUME_ISSUE_KIND ↔ EXIT_EXECUTION_RESUME_LIMIT_LOOKUP_FAILED_KIND
+# 保留两套常量是因为在 metadata 里的 kind 不应该 leak review-specific 前缀，
+# 但它们必须成对变更。字符串**不得**变更——持久化在 DB metadata，改名会破坏
+# 已写入的 resume_issue 记录。
+MISSING_CHILD_REFS_RESUME_ISSUE_KIND = "missing_child_refs_for_parent"
+RESUME_LIMIT_LOOKUP_FAILED_RESUME_ISSUE_KIND = "resume_limit_lookup_failed"
+
 
 def parent_exit_intent_id_from_order_intent(intent: OrderIntent) -> str:
     base = str(intent.execution_chain_id or intent.intent_id).strip()
@@ -326,6 +360,16 @@ def record_resume_issue(
     error: str | None = None,
 ) -> ExitExecutionIntent:
     metadata = dict(parent.metadata)
+    # Task 142：若 parent 之前有**其他 kind** 的 resume_issue，保留旧 kind 到
+    # 新 issue 的 prior_kind，防止 "childless 发现后静默覆盖
+    # resume_limit_lookup_failed 原因" 这类无声丢失。下游 operator UI 可以
+    # 按 prior_kind 展示链式诊断。
+    prior_issue = metadata.get("resume_issue")
+    prior_kind: str | None = None
+    if isinstance(prior_issue, dict):
+        prior_kind_raw = str(prior_issue.get("kind") or "").strip()
+        if prior_kind_raw:
+            prior_kind = prior_kind_raw
     issue: dict[str, Any] = {
         "kind": kind,
         "updated_at": utc_now().isoformat(),
@@ -333,6 +377,8 @@ def record_resume_issue(
     }
     if error:
         issue["error"] = error
+    if prior_kind is not None and prior_kind != kind:
+        issue["prior_kind"] = prior_kind
     metadata["resume_issue"] = issue
     return parent.model_copy(update={"metadata": metadata, "updated_at": utc_now()})
 
@@ -355,8 +401,8 @@ def resume_block_reason(parent: ExitExecutionIntent) -> str | None:
         return "cancel_requested"
     if parent.operator_review_required or parent.aggregate_status == "REVIEW_REQUIRED":
         return "review_required"
-    if resume_issue_kind(parent) == "missing_child_refs_for_parent":
-        return "missing_child_refs_for_parent"
+    if resume_issue_kind(parent) == MISSING_CHILD_REFS_RESUME_ISSUE_KIND:
+        return MISSING_CHILD_REFS_RESUME_ISSUE_KIND
     if Decimal(parent.open_child_unknown_quantity) > _EPSILON:
         return "unknown_child_truth_pending"
     if Decimal(parent.open_child_working_quantity) > _EPSILON:
@@ -382,7 +428,7 @@ def exit_execution_review_items(parent_intents: list[ExitExecutionIntent]) -> li
             items.append(
                 _parent_review_detail(
                     parent=parent,
-                    kind="exit_execution_parent_review_required",
+                    kind=EXIT_EXECUTION_PARENT_REVIEW_REQUIRED_KIND,
                     resume_block_reason=block_reason or "review_required",
                     review_required=True,
                 )
@@ -392,18 +438,18 @@ def exit_execution_review_items(parent_intents: list[ExitExecutionIntent]) -> li
             items.append(
                 _parent_review_detail(
                     parent=parent,
-                    kind="exit_execution_truth_pending",
+                    kind=EXIT_EXECUTION_TRUTH_PENDING_KIND,
                     resume_block_reason=block_reason or "unknown_child_truth_pending",
                     review_required=False,
                 )
             )
             continue
-        if resume_issue_kind(parent) == "missing_child_refs_for_parent":
+        if resume_issue_kind(parent) == MISSING_CHILD_REFS_RESUME_ISSUE_KIND:
             items.append(
                 _parent_resume_issue_detail(
                     parent=parent,
-                    kind="exit_execution_missing_child_refs_for_parent",
-                    resume_block_reason="missing_child_refs_for_parent",
+                    kind=EXIT_EXECUTION_MISSING_CHILD_REFS_KIND,
+                    resume_block_reason=MISSING_CHILD_REFS_RESUME_ISSUE_KIND,
                 )
             )
             continue
@@ -411,18 +457,18 @@ def exit_execution_review_items(parent_intents: list[ExitExecutionIntent]) -> li
             items.append(
                 _parent_review_detail(
                     parent=parent,
-                    kind="exit_execution_resume_template_missing",
+                    kind=EXIT_EXECUTION_RESUME_TEMPLATE_MISSING_KIND,
                     resume_block_reason=block_reason,
                     review_required=True,
                 )
             )
             continue
-        if resume_issue_kind(parent) == "resume_limit_lookup_failed" and _parent_has_pending_resume(parent):
+        if resume_issue_kind(parent) == RESUME_LIMIT_LOOKUP_FAILED_RESUME_ISSUE_KIND and _parent_has_pending_resume(parent):
             items.append(
                 _parent_resume_issue_detail(
                     parent=parent,
-                    kind="exit_execution_resume_limit_lookup_failed",
-                    resume_block_reason="resume_limit_lookup_failed",
+                    kind=EXIT_EXECUTION_RESUME_LIMIT_LOOKUP_FAILED_KIND,
+                    resume_block_reason=RESUME_LIMIT_LOOKUP_FAILED_RESUME_ISSUE_KIND,
                 )
             )
     return items
@@ -445,7 +491,7 @@ def augment_reconciliation_report_with_exit_execution(
         if parent.operator_review_required or parent.aggregate_status == "REVIEW_REQUIRED":
             detail = _parent_review_detail(
                 parent=parent,
-                kind="exit_execution_parent_review_required",
+                kind=EXIT_EXECUTION_PARENT_REVIEW_REQUIRED_KIND,
                 resume_block_reason=block_reason or "review_required",
                 review_required=True,
             )
@@ -459,17 +505,17 @@ def augment_reconciliation_report_with_exit_execution(
                     margin_mode=report.margin_mode,
                     primary_symbol=parent.symbol,
                     layer="structural",
-                    finding_type="exit_execution_parent_review_required",
+                    finding_type=EXIT_EXECUTION_PARENT_REVIEW_REQUIRED_KIND,
                     severity_class="review",
                     structural=True,
                     review_required=True,
                     blocks_resume=True,
-                    reason_code=str(parent.operator_review_reason or "exit_execution_parent_review_required"),
+                    reason_code=str(parent.operator_review_reason or EXIT_EXECUTION_PARENT_REVIEW_REQUIRED_KIND),
                     details_json=detail,
                 )
             )
-            overlay_mismatch_categories.append("exit_execution_parent_review_required")
-            overlay_mismatch_reasons.append(str(parent.operator_review_reason or "exit_execution_parent_review_required"))
+            overlay_mismatch_categories.append(EXIT_EXECUTION_PARENT_REVIEW_REQUIRED_KIND)
+            overlay_mismatch_reasons.append(str(parent.operator_review_reason or EXIT_EXECUTION_PARENT_REVIEW_REQUIRED_KIND))
             overlay_safety_impacts.append("operator_review_required_before_resuming_exit_execution")
             if recommended_operator_action in {None, "", "review_unknown_write_and_refresh_exchange_state"}:
                 recommended_operator_action = "review_exit_execution_parent_and_refresh_exchange_state"
@@ -477,7 +523,7 @@ def augment_reconciliation_report_with_exit_execution(
         if block_reason == "unknown_child_truth_pending" or parent.reconciliation_state == "truth_pending":
             detail = _parent_review_detail(
                 parent=parent,
-                kind="exit_execution_truth_pending",
+                kind=EXIT_EXECUTION_TRUTH_PENDING_KIND,
                 resume_block_reason=block_reason or "unknown_child_truth_pending",
                 review_required=False,
             )
@@ -491,7 +537,7 @@ def augment_reconciliation_report_with_exit_execution(
                     margin_mode=report.margin_mode,
                     primary_symbol=parent.symbol,
                     layer="structural",
-                    finding_type="exit_execution_truth_pending",
+                    finding_type=EXIT_EXECUTION_TRUTH_PENDING_KIND,
                     severity_class="soft",
                     structural=True,
                     review_required=False,
@@ -500,17 +546,17 @@ def augment_reconciliation_report_with_exit_execution(
                     details_json=detail,
                 )
             )
-            overlay_mismatch_categories.append("exit_execution_truth_pending")
+            overlay_mismatch_categories.append(EXIT_EXECUTION_TRUTH_PENDING_KIND)
             overlay_mismatch_reasons.append(block_reason or "unknown_child_truth_pending")
             overlay_safety_impacts.append("resume_blocked_until_exit_execution_truth_converges")
             if recommended_operator_action in {None, "", "review_unknown_write_and_refresh_exchange_state"}:
                 recommended_operator_action = "review_exit_execution_parent_and_refresh_exchange_state"
             continue
-        if resume_issue_kind(parent) == "missing_child_refs_for_parent":
+        if resume_issue_kind(parent) == MISSING_CHILD_REFS_RESUME_ISSUE_KIND:
             detail = _parent_resume_issue_detail(
                 parent=parent,
-                kind="exit_execution_missing_child_refs_for_parent",
-                resume_block_reason="missing_child_refs_for_parent",
+                kind=EXIT_EXECUTION_MISSING_CHILD_REFS_KIND,
+                resume_block_reason=MISSING_CHILD_REFS_RESUME_ISSUE_KIND,
             )
             overlay_details.append(detail)
             overlay_findings.append(
@@ -522,17 +568,17 @@ def augment_reconciliation_report_with_exit_execution(
                     margin_mode=report.margin_mode,
                     primary_symbol=parent.symbol,
                     layer="structural",
-                    finding_type="exit_execution_missing_child_refs_for_parent",
+                    finding_type=EXIT_EXECUTION_MISSING_CHILD_REFS_KIND,
                     severity_class="review",
                     structural=True,
                     review_required=True,
                     blocks_resume=True,
-                    reason_code="exit_execution_missing_child_refs_for_parent",
+                    reason_code=EXIT_EXECUTION_MISSING_CHILD_REFS_KIND,
                     details_json=detail,
                 )
             )
-            overlay_mismatch_categories.append("exit_execution_missing_child_refs_for_parent")
-            overlay_mismatch_reasons.append("exit_execution_missing_child_refs_for_parent")
+            overlay_mismatch_categories.append(EXIT_EXECUTION_MISSING_CHILD_REFS_KIND)
+            overlay_mismatch_reasons.append(EXIT_EXECUTION_MISSING_CHILD_REFS_KIND)
             overlay_safety_impacts.append("operator_review_required_before_resuming_exit_execution")
             if recommended_operator_action in {None, "", "review_unknown_write_and_refresh_exchange_state"}:
                 recommended_operator_action = "review_exit_execution_parent_and_refresh_exchange_state"
@@ -540,7 +586,7 @@ def augment_reconciliation_report_with_exit_execution(
         if block_reason == "dispatch_template_missing":
             detail = _parent_review_detail(
                 parent=parent,
-                kind="exit_execution_resume_template_missing",
+                kind=EXIT_EXECUTION_RESUME_TEMPLATE_MISSING_KIND,
                 resume_block_reason=block_reason,
                 review_required=True,
             )
@@ -554,26 +600,26 @@ def augment_reconciliation_report_with_exit_execution(
                     margin_mode=report.margin_mode,
                     primary_symbol=parent.symbol,
                     layer="structural",
-                    finding_type="exit_execution_resume_template_missing",
+                    finding_type=EXIT_EXECUTION_RESUME_TEMPLATE_MISSING_KIND,
                     severity_class="review",
                     structural=True,
                     review_required=True,
                     blocks_resume=True,
-                    reason_code="exit_execution_resume_template_missing",
+                    reason_code=EXIT_EXECUTION_RESUME_TEMPLATE_MISSING_KIND,
                     details_json=detail,
                 )
             )
-            overlay_mismatch_categories.append("exit_execution_resume_template_missing")
-            overlay_mismatch_reasons.append("exit_execution_resume_template_missing")
+            overlay_mismatch_categories.append(EXIT_EXECUTION_RESUME_TEMPLATE_MISSING_KIND)
+            overlay_mismatch_reasons.append(EXIT_EXECUTION_RESUME_TEMPLATE_MISSING_KIND)
             overlay_safety_impacts.append("operator_review_required_before_resuming_exit_execution")
             if recommended_operator_action in {None, "", "review_unknown_write_and_refresh_exchange_state"}:
                 recommended_operator_action = "review_exit_execution_parent_and_prepare_manual_exit_completion"
             continue
-        if resume_issue_kind(parent) == "resume_limit_lookup_failed" and _parent_has_pending_resume(parent):
+        if resume_issue_kind(parent) == RESUME_LIMIT_LOOKUP_FAILED_RESUME_ISSUE_KIND and _parent_has_pending_resume(parent):
             detail = _parent_resume_issue_detail(
                 parent=parent,
-                kind="exit_execution_resume_limit_lookup_failed",
-                resume_block_reason="resume_limit_lookup_failed",
+                kind=EXIT_EXECUTION_RESUME_LIMIT_LOOKUP_FAILED_KIND,
+                resume_block_reason=RESUME_LIMIT_LOOKUP_FAILED_RESUME_ISSUE_KIND,
             )
             overlay_details.append(detail)
             overlay_findings.append(
@@ -585,17 +631,17 @@ def augment_reconciliation_report_with_exit_execution(
                     margin_mode=report.margin_mode,
                     primary_symbol=parent.symbol,
                     layer="structural",
-                    finding_type="exit_execution_resume_limit_lookup_failed",
+                    finding_type=EXIT_EXECUTION_RESUME_LIMIT_LOOKUP_FAILED_KIND,
                     severity_class="review",
                     structural=True,
                     review_required=True,
                     blocks_resume=True,
-                    reason_code="exit_execution_resume_limit_lookup_failed",
+                    reason_code=EXIT_EXECUTION_RESUME_LIMIT_LOOKUP_FAILED_KIND,
                     details_json=detail,
                 )
             )
-            overlay_mismatch_categories.append("exit_execution_resume_limit_lookup_failed")
-            overlay_mismatch_reasons.append("exit_execution_resume_limit_lookup_failed")
+            overlay_mismatch_categories.append(EXIT_EXECUTION_RESUME_LIMIT_LOOKUP_FAILED_KIND)
+            overlay_mismatch_reasons.append(EXIT_EXECUTION_RESUME_LIMIT_LOOKUP_FAILED_KIND)
             overlay_safety_impacts.append("operator_review_required_before_resuming_exit_execution")
             if recommended_operator_action in {None, "", "review_unknown_write_and_refresh_exchange_state"}:
                 recommended_operator_action = "review_exit_execution_parent_and_retry_limit_lookup"
@@ -647,6 +693,29 @@ def augment_reconciliation_report_with_exit_execution(
     )
 
 
+def _mark_parent_missing_child_refs(parent: ExitExecutionIntent) -> ExitExecutionIntent:
+    """给无 child refs 的非终态 parent 打 missing_child_refs_for_parent
+    structural resume issue。Task 142 收口：
+
+    - 若 parent 已带同 kind 的 issue：直接返回，`record_resume_issue` 不被
+      再次调用，避免 `updated_at` 无意义漂移但仍保留原 issue 语义。调用侧
+      仍会再 save —— save 是幂等写路径，对应 DB 外键/去重已处理。
+    - 若 parent 有别的 kind 的 resume_issue（如 resume_limit_lookup_failed）
+      但当前 childless：`record_resume_issue` 会把旧 kind 写入 prior_kind，
+      所以新 issue 不会静默吞掉原诊断信号。
+
+    child refs 重建时由 caller 调 `clear_resume_issue(..., kind=<this>)`
+    清除（clear 会整体 pop resume_issue，prior_kind 也一并清）。
+    """
+    if resume_issue_kind(parent) == MISSING_CHILD_REFS_RESUME_ISSUE_KIND:
+        return parent
+    return record_resume_issue(
+        parent,
+        kind=MISSING_CHILD_REFS_RESUME_ISSUE_KIND,
+        error="child_refs_not_reconstructable",
+    )
+
+
 def refresh_exit_execution_intents(
     *,
     execution_repo: ExecutionRepository,
@@ -681,19 +750,11 @@ def refresh_exit_execution_intents(
         if not child_refs:
             if parent.aggregate_status in _TERMINAL_PARENT_STATUSES:
                 continue
-            childless_parent = (
-                parent
-                if resume_issue_kind(parent) == "missing_child_refs_for_parent"
-                else record_resume_issue(
-                    parent,
-                    kind="missing_child_refs_for_parent",
-                    error="child_refs_not_reconstructable",
-                )
-            )
+            childless_parent = _mark_parent_missing_child_refs(parent)
             refreshed.append(exit_execution_repo.save_exit_execution_intent(childless_parent))
             continue
         recomputed = recompute_exit_execution_intent(
-            parent_intent=clear_resume_issue(parent, kind="missing_child_refs_for_parent"),
+            parent_intent=clear_resume_issue(parent, kind=MISSING_CHILD_REFS_RESUME_ISSUE_KIND),
             child_refs=child_refs,
         )
         refreshed.append(exit_execution_repo.save_exit_execution_intent(recomputed))
@@ -810,7 +871,7 @@ def _parent_review_detail(
     review_required: bool,
 ) -> dict[str, Any]:
     available_operator_actions = ["refresh_exchange_state", "safe_cancel"]
-    if kind == "exit_execution_resume_limit_lookup_failed":
+    if kind == EXIT_EXECUTION_RESUME_LIMIT_LOOKUP_FAILED_KIND:
         available_operator_actions.insert(1, "retry_limit_lookup")
     return {
         "kind": kind,
