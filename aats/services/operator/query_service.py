@@ -6959,23 +6959,54 @@ class OperatorQueryService:
                 use_guard_eligible_metrics
                 or payload.get("recent_guard_eligible_low_edge_trade_at") is not None
             )
+
+            def _pick(guarded_key: str, raw_key: str, *, use_guarded: bool = use_guard_eligible_metrics) -> Any:
+                """Task P1-1：guard-window + per-field None fallback。
+
+                决策：leg 层 boolean（`use_guarded`）决定优先读 guarded 还是 raw
+                —— 保留 operator UI 的 "guard window 为空就整体回退 raw" 语义
+                （decision 层对此场景走 symbol-level escape，UI 不必对齐）。
+                保护：即便 use_guarded=True，guarded 字段若是 None（数据质量缺口），
+                也要**字段级别**回退到 raw，而不是让 `float(None)` 崩在 UI 层。
+                这条保护就是 SOW 说的"operator 试盘守护摘要与决策层的
+                guarded/raw fallback 口径一致"—— 对齐"None 视为缺失"的统一认知。
+                """
+                if use_guarded:
+                    guarded_value = payload.get(guarded_key)
+                    if guarded_value is not None:
+                        return guarded_value
+                return payload.get(raw_key)
+
             closed_trade_count = int(
-                payload.get("recent_guard_eligible_closed_trade_count")
-                if use_guard_eligible_metrics
-                else payload.get("recent_closed_trade_count")
+                _pick("recent_guard_eligible_closed_trade_count", "recent_closed_trade_count")
                 or 0
             )
             recent_win_rate = float(
-                payload.get("recent_guard_eligible_win_rate")
-                if use_guard_eligible_metrics
-                else payload.get("recent_win_rate")
+                _pick("recent_guard_eligible_win_rate", "recent_win_rate")
                 or 0.0
             )
             recent_net_realized_pnl = (
-                self._to_decimal(payload.get("recent_guard_eligible_net_realized_pnl"))
-                if use_guard_eligible_metrics
-                else self._to_decimal(payload.get("recent_net_realized_pnl"))
-            ) or Decimal("0")
+                self._to_decimal(
+                    _pick("recent_guard_eligible_net_realized_pnl", "recent_net_realized_pnl")
+                )
+                or Decimal("0")
+            )
+            recent_fee_drag_ratio = float(
+                _pick("recent_guard_eligible_fee_drag_ratio", "recent_fee_drag_ratio")
+                or 0.0
+            )
+            recent_churn_ratio = float(
+                _pick("recent_guard_eligible_churn_ratio", "recent_churn_ratio")
+                or 0.0
+            )
+            recent_low_edge_trade_streak = int(
+                _pick(
+                    "recent_guard_eligible_low_edge_trade_streak",
+                    "recent_low_edge_trade_streak",
+                    use_guarded=use_guard_eligible_low_edge,
+                )
+                or 0
+            )
             sample_ready = closed_trade_count >= min_closed_trades
             active = bool(
                 enabled
@@ -7002,24 +7033,9 @@ class OperatorQueryService:
                     "recent_closed_trade_count": closed_trade_count,
                     "recent_win_rate": recent_win_rate,
                     "recent_net_realized_pnl": recent_net_realized_pnl,
-                    "recent_fee_drag_ratio": float(
-                        payload.get("recent_guard_eligible_fee_drag_ratio")
-                        if use_guard_eligible_metrics
-                        else payload.get("recent_fee_drag_ratio")
-                        or 0.0
-                    ),
-                    "recent_churn_ratio": float(
-                        payload.get("recent_guard_eligible_churn_ratio")
-                        if use_guard_eligible_metrics
-                        else payload.get("recent_churn_ratio")
-                        or 0.0
-                    ),
-                    "recent_low_edge_trade_streak": int(
-                        payload.get("recent_guard_eligible_low_edge_trade_streak")
-                        if use_guard_eligible_low_edge
-                        else payload.get("recent_low_edge_trade_streak")
-                        or 0
-                    ),
+                    "recent_fee_drag_ratio": recent_fee_drag_ratio,
+                    "recent_churn_ratio": recent_churn_ratio,
+                    "recent_low_edge_trade_streak": recent_low_edge_trade_streak,
                     "guardrail_flags": list(payload.get("guardrail_flags") or []),
                     "cooldowns": dict(payload.get("cooldowns") or {}),
                     "reason_code": f"independent_{leg}_book_trial_guard_active" if active else None,

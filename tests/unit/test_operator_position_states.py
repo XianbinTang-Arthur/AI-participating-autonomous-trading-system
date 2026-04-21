@@ -2058,6 +2058,65 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(summary["items"][0]["reconciliation_id"], "recon_leg_1")
         self.assertEqual(summary["items"][0]["kind"], "missing_execution_chain")
 
+    def test_leg_trial_guard_audit_summary_per_field_fallback_when_guarded_value_is_none(self) -> None:
+        """Task P1-1：即便 guard window 非空（count>0），若某 guarded 字段是 None
+        （上游数据质量缺口），也必须 per-field 回退到 raw，不能让 float(None)
+        在 UI 层崩溃。这是 SOW 与决策层 `_guard_health_value` 的语义对齐。"""
+        query = OperatorQueryService.__new__(OperatorQueryService)
+        query.runtime = SimpleNamespace(
+            settings=SimpleNamespace(
+                strategy_hedge_overlay_mode="independent",
+                strategy_hedge_independent_trial_guard_enabled=True,
+                strategy_performance_guard_min_closed_trades=4,
+            )
+        )
+        query._DECIMAL_EPSILON = Decimal("0.000000001")
+        query._overlay_audit_summary = lambda position_target: {  # type: ignore[method-assign]
+            "effective_mode": "independent",
+            "configured_mode": "independent",
+        }
+
+        # Guard window 有 6 个样本，但 win_rate / pnl / fee / churn 字段 None
+        # —— 上游 health 聚合器偶尔会丢字段，旧实现会 `float(None)` raise。
+        summary = query._leg_trial_guard_audit_summary(
+            decision_context={
+                "leg_strategy_health": {
+                    "long": {
+                        "recent_closed_trade_count": 5,
+                        "recent_win_rate": 0.30,
+                        "recent_net_realized_pnl": -2.5,
+                        "recent_fee_drag_ratio": 0.4,
+                        "recent_churn_ratio": 0.5,
+                        "recent_low_edge_trade_streak": 2,
+                        # Guard window 非空但字段缺失
+                        "recent_guard_eligible_closed_trade_count": 6,
+                        "recent_guard_eligible_win_rate": None,
+                        "recent_guard_eligible_net_realized_pnl": None,
+                        "recent_guard_eligible_fee_drag_ratio": None,
+                        "recent_guard_eligible_churn_ratio": None,
+                        "recent_guard_eligible_low_edge_trade_streak": None,
+                        "recent_guard_eligible_low_edge_trade_at": None,
+                    }
+                }
+            },
+            position_target={},
+        )
+
+        self.assertEqual(summary["total_count"], 1)
+        item = summary["items"][0]
+        # closed_trade_count 应该是 guarded 的 6（不是 None，有效值优先）
+        self.assertEqual(item["recent_closed_trade_count"], 6)
+        self.assertTrue(item["sample_ready"])  # 6 >= 4
+        # win_rate / pnl / fee / churn：guarded 是 None → 回退 raw
+        self.assertEqual(item["recent_win_rate"], 0.30)
+        self.assertEqual(item["recent_net_realized_pnl"], Decimal("-2.5"))
+        self.assertEqual(item["recent_fee_drag_ratio"], 0.4)
+        self.assertEqual(item["recent_churn_ratio"], 0.5)
+        self.assertEqual(item["recent_low_edge_trade_streak"], 2)
+        # 关键：blocked 判定不因 None 崩溃
+        self.assertTrue(item["active"])
+        self.assertEqual(item["status"], "blocked")
+
     def test_leg_trial_guard_audit_summary_falls_back_to_raw_metrics_when_guard_window_is_empty(self) -> None:
         query = OperatorQueryService.__new__(OperatorQueryService)
         query.runtime = SimpleNamespace(
