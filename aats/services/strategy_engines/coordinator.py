@@ -455,6 +455,8 @@ class StrategyCoordinatorService:
             target_qty = base_target.current_position_qty
             urgency = "low"
             applied_route_action = "advisory_only" if selected.route_action == "advisory_only" else "hold_current"
+            strategy_execution_legs = []
+            strategy_bundle_id = None
             if selected.family != "directional":
                 source_mix = {selected.family: 1.0}
 
