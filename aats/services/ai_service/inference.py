@@ -1007,12 +1007,21 @@ class AIInferenceService:
     def _decision_fills(self, decision_ids: list[str]) -> dict[str, list[FillEvent]]:
         if self.execution_repo is None or not decision_ids:
             return {}
+        # 2026-04-21 fix：旧版 `[f for f in repo.fills() if f.decision_id in allowed]`
+        # 载入全表 + Python 侧过滤，fills 表无界增长（每笔成交 +1 行）→ 未来
+        # 会把 AI shadow evaluation 拖慢。改用 fills_for_decisions（SQL WHERE
+        # decision_id IN (...) + 索引），对 Postgres 侧是 index-seek。
+        # 向后兼容：老 test stub 的 repo 可能没这个方法，fallback 到旧路径。
         allowed = set(decision_ids)
-        rows = [
-            fill
-            for fill in self.execution_repo.fills()
-            if fill.decision_id in allowed
-        ]
+        batch_getter = getattr(self.execution_repo, "fills_for_decisions", None)
+        if callable(batch_getter):
+            rows = list(batch_getter(list(allowed)))
+        else:
+            rows = [
+                fill
+                for fill in self.execution_repo.fills()
+                if fill.decision_id in allowed
+            ]
         rows.sort(key=fill_processing_sort_key)
         by_decision: dict[str, list[FillEvent]] = {}
         for fill in rows:

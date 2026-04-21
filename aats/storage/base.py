@@ -225,6 +225,16 @@ class ExecutionRepository(Protocol):
     def fills_for_order(self, client_order_id: str) -> list[FillEvent]:
         ...
 
+    def fills_for_decisions(self, decision_ids: list[str]) -> list[FillEvent]:
+        """SQL-side 过滤：根据 decision_id 批量查 fills。
+
+        2026-04-21 新增：替代 `_decision_fills()` 的 ``[f for f in repo.fills()
+        if f.decision_id in allowed]`` 载入全表 + Python 过滤反模式。
+        ``FillEventModel.decision_id`` 有 index，SQL 侧 IN/ANY 极快。
+        fills 表是无界增长，这条路径在 AI shadow evaluation 里会走，早修更稳。
+        """
+        ...
+
     def order_states_for_scope(
         self,
         *,

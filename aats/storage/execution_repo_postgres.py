@@ -261,6 +261,29 @@ class PostgresExecutionRepository:
             ).all()
         return [self._to_fill_event(row) for row in rows]
 
+    def fills_for_decisions(self, decision_ids: list[str]) -> list[FillEvent]:
+        # 2026-04-21：SQL-side filter 替代旧 `fills() + [if decision_id in allowed]`
+        # 载入全表 + Python 过滤的反模式。FillEventModel.decision_id 有 index
+        # （见 sqlalchemy_models.py:417），WHERE IN ANY 极快；fills 表无界增长，
+        # 替代前版在 AI shadow evaluation 里会扫全表。
+        if not decision_ids:
+            return []
+        # 去重并保持 deterministic order（便于 EXPLAIN 可复现）
+        unique_ids = sorted({str(did) for did in decision_ids if did})
+        if not unique_ids:
+            return []
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(FillEventModel)
+                .where(FillEventModel.decision_id.in_(unique_ids))
+                .order_by(
+                    FillEventModel.exchange_timestamp,
+                    FillEventModel.ingestion_timestamp,
+                    FillEventModel.fill_id,
+                )
+            ).all()
+        return [self._to_fill_event(row) for row in rows]
+
     def fills_since(
         self,
         *,

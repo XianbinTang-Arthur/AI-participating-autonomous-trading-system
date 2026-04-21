@@ -121,6 +121,19 @@ class InMemoryExecutionRepository:
             key=fill_processing_sort_key,
         )
 
+    def fills_for_decisions(self, decision_ids: list[str]) -> list[FillEvent]:
+        # 2026-04-21：InMemory 实现对应 Postgres 侧 WHERE decision_id IN (...)。
+        # InMemory 路径仍然是 in-memory 过滤，但 protocol 一致性要求有这个方法。
+        if not decision_ids:
+            return []
+        allowed = {str(did) for did in decision_ids if did}
+        if not allowed:
+            return []
+        return sorted(
+            [fill for fill in self._fills_by_fill_id.values() if fill.decision_id in allowed],
+            key=fill_processing_sort_key,
+        )
+
     def fills_since(
         self,
         *,
