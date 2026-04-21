@@ -155,5 +155,109 @@ class TestIndependentReplay(unittest.TestCase):
         self.assertEqual(normalized["score_drawdown_bps"], 6.0)
         self.assertEqual(normalized["effective_score_drawdown_bps"], 6.0)
 
+
+class TestBundleLegMatchesExcludesRejectedLegs(unittest.TestCase):
+    """task109 §4 一致性锚点：`_bundle_leg_matches` 必须过滤掉 bundle safe
+    subset 拒掉的 leg（带 risk_rejection_reasons / risk_approved=False）。
+    否则被拒腿的 execution_chain_id 会被误当作 active execution 污染
+    replay 状态；bundle.created_at 会被误当成最近一次执行时间。"""
+
+    def _make_bundle_leg(
+        self,
+        *,
+        risk_approved: bool | None = None,
+        risk_rejection_reasons: list[str] | None = None,
+    ):
+        from aats.schemas.strategy_runtime import StrategyExecutionBundle, StrategyLegIntent
+        return StrategyExecutionBundle(
+            bundle_id="bundle_anchor",
+            decision_id="decision_anchor",
+            family="independent",
+            participating_families=["independent"],
+            strategy_sleeve_id="sleeve_anchor",
+            product_type="derivatives",
+            margin_mode="cross",
+            route_action="override_target",
+            status="submitted",
+            selected_symbol="BTC-USDT-SWAP",
+            legs=[
+                StrategyLegIntent(
+                    symbol="BTC-USDT-SWAP",
+                    execution_chain_id="chain_rejected",
+                    product_type="derivatives",
+                    side="sell",
+                    position_mode="long_short_mode",
+                    pos_side="long",
+                    action="close",
+                    family="independent",
+                    role="primary",
+                    margin_mode="cross",
+                    target_leverage=3.0,
+                    current_position_qty=Decimal("0.01"),
+                    target_position_qty=Decimal("0"),
+                    delta_position_qty=Decimal("-0.01"),
+                    reference_price=Decimal("80000"),
+                    execution_compatible=True,
+                    execution_mode="independent_long_book",
+                    state_phase="active",
+                    overlay_mode="independent",
+                    trigger_reason_codes=[],
+                    note="test leg",
+                    strategy_sleeve_id="sleeve_anchor",
+                    risk_approved=risk_approved,
+                    risk_rejection_reasons=risk_rejection_reasons or [],
+                )
+            ],
+        )
+
+    def test_rejected_leg_with_false_risk_approved_filtered_out(self) -> None:
+        from aats.services.strategy_engines.independent.replay import _bundle_leg_matches
+        bundle = self._make_bundle_leg(
+            risk_approved=False,
+            risk_rejection_reasons=["bundle_leg_risk_constraints_applied"],
+        )
+        leg_intent = bundle.legs[0]
+        self.assertFalse(
+            _bundle_leg_matches(
+                bundle=bundle,
+                leg_intent=leg_intent,
+                symbol="BTC-USDT-SWAP",
+                strategy_sleeve_id="sleeve_anchor",
+                leg="long",
+            )
+        )
+
+    def test_rejected_leg_with_only_rejection_reasons_filtered_out(self) -> None:
+        from aats.services.strategy_engines.independent.replay import _bundle_leg_matches
+        bundle = self._make_bundle_leg(
+            risk_approved=None,  # 未显式 False，但 rejection_reasons 非空
+            risk_rejection_reasons=["symbol_notional_cap_exceeded"],
+        )
+        leg_intent = bundle.legs[0]
+        self.assertFalse(
+            _bundle_leg_matches(
+                bundle=bundle,
+                leg_intent=leg_intent,
+                symbol="BTC-USDT-SWAP",
+                strategy_sleeve_id="sleeve_anchor",
+                leg="long",
+            )
+        )
+
+    def test_executed_leg_not_filtered_out(self) -> None:
+        from aats.services.strategy_engines.independent.replay import _bundle_leg_matches
+        bundle = self._make_bundle_leg(risk_approved=True, risk_rejection_reasons=[])
+        leg_intent = bundle.legs[0]
+        self.assertTrue(
+            _bundle_leg_matches(
+                bundle=bundle,
+                leg_intent=leg_intent,
+                symbol="BTC-USDT-SWAP",
+                strategy_sleeve_id="sleeve_anchor",
+                leg="long",
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

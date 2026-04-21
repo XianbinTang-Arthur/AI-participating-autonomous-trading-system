@@ -609,6 +609,13 @@ def _bundle_leg_matches(
     strategy_sleeve_id: str | None,
     leg: str,
 ) -> bool:
+    # task109 §4 一致性（2026-04-21 补）：StrategyExecutionBundle.legs 是 audit
+    # 全量（含 bundle safe subset 被拒的腿，带 risk_rejection_reasons 标记）。
+    # replay 侧 "active execution chain" / "latest bundle timestamp" 查询
+    # 必须只看**实际执行的腿**，否则被拒腿的 execution_chain_id 会被误当作
+    # active chain 污染状态；bundle.created_at 会被误当成"最近一次执行"。
+    if leg_intent.risk_approved is False or leg_intent.risk_rejection_reasons:
+        return False
     if bundle.family != "independent" and "independent" not in bundle.participating_families:
         return False
     if str(leg_intent.family or "").strip() != "independent":

@@ -300,6 +300,15 @@ def _apply_strategy_bundle_status(
 
     legs = list(summary.legs)
     if not legs and strategy_bundle.legs:
+        # task109 §4 一致性：StrategyExecutionBundle.legs 是 audit 全量
+        # （含被 bundle safe subset 拒掉的 leg，带 risk_rejection_reasons
+        # 标记），但 recovery 必须只针对**实际发布过 order intent / plan
+        # 的执行腿**。被拒腿没有 order state / fill 可恢复，纳入 recovery
+        # 会让系统误认为有 "missing execution state" 无法推进。
+        #
+        # 判定："被拒腿" = `risk_approved is False` 或 `risk_rejection_reasons
+        # 非空`（两者都由 _apply_bundle_risk_rejection 写入；显式 False 而非
+        # None 区分"未评估"与"评估后拒绝"）。
         legs = [
             RecoveryBundleLegStatus(
                 client_order_id=f"{strategy_bundle.bundle_id}:{index}",
@@ -324,6 +333,7 @@ def _apply_strategy_bundle_status(
                 last_update_ts=strategy_bundle.created_at,
             )
             for index, leg in enumerate(strategy_bundle.legs, start=1)
+            if leg.risk_approved is not False and not leg.risk_rejection_reasons
         ]
 
     return summary.model_copy(
