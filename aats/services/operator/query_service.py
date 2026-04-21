@@ -6,7 +6,7 @@ from decimal import Decimal
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from aats.bootstrap.logging import get_logger
+from aats.bootstrap.logging import get_logger, log_event
 from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 from aats.events import topics
 from aats.events.envelopes import build_envelope
@@ -111,6 +111,23 @@ from aats.services.strategy_execution_health import compute_strategy_execution_h
 
 if TYPE_CHECKING:
     from aats.bootstrap.config import ApplicationRuntime
+
+
+class _CachedError:
+    """2026-04-21 B1 · Grafana negative-caching marker.
+
+    当 `_cached_ttl` 的 loader() 抛 ``Exception`` 时，把异常包进这个 marker
+    放入 `_ttl_cache`，**短 TTL** 内后续 follower 命中缓存立即 re-raise，
+    避免所有 requester 都各自跑 loader 打爆上游（OKX / PG）。
+
+    不缓存 ``BaseException``（``KeyboardInterrupt`` / ``SystemExit``）—— 那类是
+    进程退出信号，不应该被 cache 掩盖。
+    """
+
+    __slots__ = ("exc",)
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
 
 
 class OperatorQueryService:
@@ -225,6 +242,12 @@ class OperatorQueryService:
     # 主 bundle 请求 > 30s 都算性能回归，立即报警，而不是悄悄放宽超时。
     _SINGLEFLIGHT_WAIT_SECONDS = 25
 
+    # 2026-04-21 B1 · Grafana negative cache window。当 loader() 失败时把
+    # 异常 cache 这么久（秒）。follower 在窗口内命中会立即 re-raise，不打穿
+    # 上游。窗口选 2s 的依据：OKX / PG 的 transient 抖动通常秒内恢复；
+    # 再长会让"自愈"滞后用户感知。
+    _NEGATIVE_CACHE_SECONDS = 2
+
     def _cached_ttl(self, key: str, ttl_seconds: int, loader):
         if not hasattr(self, "_ttl_cache"):
             self._ttl_cache = {}
@@ -251,6 +274,10 @@ class OperatorQueryService:
             if cached is not None:
                 expires_at, value = cached
                 if expires_at > now:
+                    # 2026-04-21 B1: 负缓存命中 → 立即 re-raise 同一异常，
+                    # 不打穿上游。命中短 TTL 内的 cached error。
+                    if isinstance(value, _CachedError):
+                        raise value.exc
                     return value
             # 检查是否已有线程在计算这个 key
             existing_event = self._inflight.get(key)
@@ -271,17 +298,46 @@ class OperatorQueryService:
                 if cached is not None:
                     expires_at, value = cached
                     if expires_at > fresh_now:
+                        # 还在 TTL 内：负缓存 → 立即 raise；正缓存 → 返回
+                        if isinstance(value, _CachedError):
+                            raise value.exc
                         return value
-            # leader 失败了或超时，自己兜底执行
+                    # 2026-04-21 B1: Grafana stale-fallback —— leader 超时
+                    # 但 cache 有过期旧值：返回旧值比让 follower 独立跑 loader
+                    # 更 system-friendly（N follower 同时 self-execute 会把
+                    # 上游打爆）。下一次 TTL 到期时 leader 会用新值覆盖。
+                    # 注意：**过期的** _CachedError 不返回（不能把旧错误当 stale
+                    # value），直接穿透到下方 loader() 路径尝试 fresh。
+                    if value is not None and not isinstance(value, _CachedError):
+                        try:
+                            log_event(
+                                self.logger,
+                                "cached_ttl_stale_fallback",
+                                level="warning",
+                                key=key,
+                                age_seconds=round((fresh_now - expires_at).total_seconds(), 2),
+                            )
+                        except Exception:
+                            pass  # logger 可能在部分测试路径上没配好，不要抛
+                        return value
+            # leader 失败了且无任何旧缓存可用，follower 自己兜底执行
             return loader()
         active_keys.add(key)
         try:
             value = loader()
-        except BaseException:
-            # Leader 失败：让 follower 走 "独立兜底 loader" 的 fallback path，
-            # 不写 _ttl_cache、只唤醒 follower。
+        except BaseException as leader_exc:
+            # Leader 失败：
+            #   (a) 如果是 Exception 子类：写 negative cache（短 TTL） →
+            #       follower 醒来会立即 raise 同一异常，不会在 2s 内打穿上游
+            #   (b) 如果是 BaseException（KeyboardInterrupt/SystemExit 等）：
+            #       不 cache，让 follower 走兜底 loader
             active_keys.discard(key)
             with self._cache_lock:
+                if isinstance(leader_exc, Exception):
+                    neg_expires_at = utc_now() + timedelta(
+                        seconds=self._NEGATIVE_CACHE_SECONDS
+                    )
+                    self._ttl_cache[key] = (neg_expires_at, _CachedError(leader_exc))
                 self._inflight.pop(key, None)
                 event.set()
             raise
@@ -297,10 +353,13 @@ class OperatorQueryService:
             cached = self._ttl_cache.get(key)
             if cached is not None:
                 expires_at, existing_value = cached
-                if expires_at > now:
+                if expires_at > now and not isinstance(existing_value, _CachedError):
                     # 防御：极罕见情况下另一个写者抢在我们前面落盘了更新的值
                     # （例如 leader 被信号打断 + follower 兜底成功后回填）。
                     # 保持幂等：优先返回已有 existing_value。
+                    # 2026-04-21 B1：只在 existing_value 是正常值时保留；
+                    # _CachedError 即使没过期也必须被新 success 覆盖（loader
+                    # 刚刚成功 = 上游恢复，负缓存立刻失效）。
                     self._inflight.pop(key, None)
                     event.set()
                     return existing_value
