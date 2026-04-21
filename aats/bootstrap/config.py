@@ -5595,7 +5595,35 @@ async def build_runtime(
         # stop_background_tasks() 会 cancel + await 它，不再在关停后继续写
         # 已关闭的 bus/store。异常用 log_event 结构化记录，不再 silent pass。
         async def _guard_signal_publish_loop() -> None:
+            # 2026-04-21 修复：原实现 publish 调用无 timeout 保护。观察到
+            # NATS client 在持续 outbound buffer 溢出后进入某种未恢复态，
+            # `await cache.publish()` 永久 hang 而不抛 exception → 整个 loop
+            # 停在单次 publish 上、从 log 看像静默消失（每 10s 本应有活动，
+            # 实际 2.8h 无任何 guard_signal 事件）。Decision 侧看到 cache
+            # age=10000+s 触发 guard_signal_cache_fail_closed WARN 风暴。
+            #
+            # 修法：把每个 publish 包 asyncio.wait_for(..., timeout=8.0)，
+            # 让单次 publish 最多等 8 秒就 TimeoutError。except 捕获后
+            # log_event，下一轮 10s 后继续尝试，自动恢复；NATS client 内部
+            # 重连机制接管即可。
             import asyncio as _aio
+
+            _PUBLISH_TIMEOUT_SECONDS = 8.0
+
+            async def _safe_publish(signal_name: str, cache, payload) -> None:
+                try:
+                    await _aio.wait_for(
+                        cache.publish(payload),
+                        timeout=_PUBLISH_TIMEOUT_SECONDS,
+                    )
+                except _aio.TimeoutError:
+                    log_event(
+                        runtime.logger,
+                        "guard_signal_publish_loop_publish_timeout",
+                        level="warning",
+                        signal_name=signal_name,
+                        timeout_seconds=_PUBLISH_TIMEOUT_SECONDS,
+                    )
 
             while True:
                 await _aio.sleep(10.0)
@@ -5607,21 +5635,27 @@ async def build_runtime(
                         await _aio.to_thread(
                             runtime.derivatives_live_guard_service.evaluate_now
                         )
-                        await _guard_caches["derivatives_live"].publish(
-                            runtime.derivatives_live_guard_service.snapshot()
+                        await _safe_publish(
+                            "derivatives_live",
+                            _guard_caches["derivatives_live"],
+                            runtime.derivatives_live_guard_service.snapshot(),
                         )
                     if runtime.trial_guard_service is not None:
                         await _aio.to_thread(
                             runtime.trial_guard_service.evaluate_now
                         )
-                        await _guard_caches["trial"].publish(
-                            runtime.trial_guard_service.snapshot()
+                        await _safe_publish(
+                            "trial",
+                            _guard_caches["trial"],
+                            runtime.trial_guard_service.snapshot(),
                         )
                     _rec = _recovery_provider()
                     if hasattr(_rec, "model_dump"):
                         _rec = _rec.model_dump(mode="json")
                     if isinstance(_rec, dict) and _rec:
-                        await _guard_caches["recovery"].publish(_rec)
+                        await _safe_publish(
+                            "recovery", _guard_caches["recovery"], _rec,
+                        )
                 except Exception as exc:
                     log_event(
                         runtime.logger,
