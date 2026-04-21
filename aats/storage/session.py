@@ -199,6 +199,21 @@ def create_database_runtime(database_url: str) -> DatabaseRuntime:
     # pool_size 10→15, max_overflow 20→45. 理由：_parallel.py 嵌套守卫改为
     # "本地小池" 后，线程总数上限从 12 变成 12 × (1 + 4) = 60, 需要 DB 连接池
     # 相应匹配。PG max_connections=200 充裕，不会引爆。
+    #
+    # 2026-04-21 idle-in-transaction 安全网（生产诊断发现）：
+    # 观察到 gateway 在极端 parallel_fetch 场景下（recovery_view 137s +
+    # _cached_ttl singleflight 25s 惊群 → 5 批 followers 各起 9 路 fanout）
+    # 累积 15+ 个 idle-in-transaction 连接，最老 21 分钟没 rollback。诊断
+    # 数据：每个正常查询的 session.close()→rollback 延迟 150ms-3.5s（应为
+    # ms 级）——这是 Python GIL + psycopg2 sync I/O + 61 thread 并发的系统性
+    # 瓶颈。稳态下能 drain，但极端场景下累积超过 pool_size+max_overflow=60
+    # 就会 pool_timeout。
+    #
+    # connect_args 加 idle_in_transaction_session_timeout=60000 让 PG 服务端
+    # 在 60s 内没 rollback/commit 的 tx 被自动 terminate，强制回收连接。这是
+    # **安全网**，不替代 Python 侧慢查询治理（P2-2 SOW 会继续做）。
+    # 60s = 比 _cached_ttl singleflight_wait(25s) × 2 长，比 gateway API
+    # 合理响应上限（30s）×2 长，正常场景不会误杀。
     engine = create_engine(
         database_url,
         future=True,
@@ -206,6 +221,9 @@ def create_database_runtime(database_url: str) -> DatabaseRuntime:
         pool_size=15,
         max_overflow=45,
         pool_timeout=30,
+        connect_args={
+            "options": "-c idle_in_transaction_session_timeout=60000",
+        },
     )
     return DatabaseRuntime(
         engine=engine,
