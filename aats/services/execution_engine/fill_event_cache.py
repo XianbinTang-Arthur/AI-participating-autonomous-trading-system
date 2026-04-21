@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from datetime import datetime, timezone
 from typing import Any
 
@@ -46,6 +46,17 @@ FILL_INDEX_KEY = make_key(_NS_FILL, "index")
 # 决策周期只需要 scope 内的最近 fills 用于 strategy_health / leg_lifecycle。
 _MAX_CACHED_FILLS = 2000
 
+# 2026-04-21 A3: `_pending_evictions` 的硬上限。
+# 背景：纯 subscriber 进程（decision / market / gateway）通过
+# `_handle_remote_event` 接收 fills 时会触发 FIFO eviction（_apply_locally
+# 里 popitem），这些 fid 进 `_pending_evictions` 等 publish 路径消费。但
+# subscriber **永远不 publish**，所以 list 会随 NATS 消息无界增长（实测风险
+# 约 20k fills/day × 几天 = 内存泄漏）。
+# 换成 deque(maxlen=N)：满了新 append 会静默丢最老 fid；被丢的 fid 最终靠
+# Redis _REDIS_TTL_SECONDS=7d 过期兜底。读不到过期 fid 没语义问题（本就
+# 淘汰了）。
+_MAX_PENDING_EVICTIONS = 500
+
 
 def _fill_key(fill_id: str) -> str:
     return make_key(_NS_FILL, "by_fid", fill_id)
@@ -70,7 +81,10 @@ class FillEventHotCache:
         self._subscribed: bool = False
         self._index_version: int = 0
         # R3-P1-E4：popitem 淘汰出的 fill_id，待 publish 路径异步 Redis DEL。
-        self._pending_evictions: list[str] = []
+        # 2026-04-21 A3：换成 deque(maxlen=...)，防止 subscriber-only 进程
+        # （decision / gateway）通过 _handle_remote_event 接收 fills 时
+        # 无界堆积（这类进程不走 publish 因此不 drain）。
+        self._pending_evictions: deque[str] = deque(maxlen=_MAX_PENDING_EVICTIONS)
 
     # ──────────────────────────────────────────────────────────────────
     # 启动 / 关闭
@@ -291,11 +305,18 @@ class FillEventHotCache:
                       error_type=type(exc).__name__, error=str(exc))
 
     async def _best_effort_redis_delete_evicted(self) -> None:
-        """R3-P1-E4：对 _apply_locally 收集的 evict 列表做 best-effort Redis DEL。"""
+        """R3-P1-E4：对 _apply_locally 收集的 evict 列表做 best-effort Redis DEL。
+
+        2026-04-21 A3：`_pending_evictions` 现在是 deque(maxlen=500)。满了
+        最老的 fid 会被静默丢弃（靠 Redis TTL 兜底）。swap-to-list 的语义保持
+        不变：先原子替换出来（防止 iterate 时并发 append 丢 fid）再逐个 DEL。
+        """
         if self._hot_state_store is None or not self._pending_evictions:
             return
-        # 置换再处理：防止 delete 过程中新的 eviction 被并发追加后错过
-        to_delete, self._pending_evictions = self._pending_evictions, []
+        # 原子取出当前 pending set → 清空 deque → 再逐个删。
+        # list(deque) 创建 snapshot；clear() 保留 maxlen 属性用于后续 append。
+        to_delete = list(self._pending_evictions)
+        self._pending_evictions.clear()
         for fid in to_delete:
             try:
                 await self._hot_state_store.delete(_fill_key(fid))

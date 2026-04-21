@@ -281,6 +281,101 @@ class TestFillEventHotCacheFIFO(unittest.IsolatedAsyncioTestCase):
 
 
 # ─────────────────────────────────────────────────────────────────────
+# A3 · _pending_evictions bounded queue (2026-04-21)
+# ─────────────────────────────────────────────────────────────────────
+
+
+class TestFillEventHotCachePendingEvictionsBounded(unittest.IsolatedAsyncioTestCase):
+    """确保 subscriber-only 进程不会因为 NATS 消息持续触发 eviction 而内存
+    无界增长 —— `_pending_evictions` 必须是 deque(maxlen=N)，满了丢最老。"""
+
+    async def test_pending_evictions_is_bounded_deque(self) -> None:
+        """类型必须是带 maxlen 的 deque（而不是无界 list）。"""
+        from collections import deque
+
+        cache = FillEventHotCache(logger=_logger(), max_capacity=2)
+        self.assertIsInstance(
+            cache._pending_evictions,
+            deque,
+            "FATAL：_pending_evictions 必须是 deque(maxlen=...)，否则 subscriber "
+            "only 进程接收 NATS 时会无界增长（20k fills/day 累积到 6+ MB / 天）",
+        )
+        self.assertIsNotNone(
+            cache._pending_evictions.maxlen,
+            "deque 必须有 maxlen 才能真正 bounded",
+        )
+
+    async def test_subscriber_only_path_does_not_grow_unboundedly(self) -> None:
+        """关键属性：走纯 subscriber 路径（_handle_remote_event）触发 eviction，
+        `_pending_evictions` 不应超过 maxlen。
+
+        这模拟 decision / gateway / market 进程的真实情况：他们只订阅 fills，
+        从不 publish，所以旧代码里的 list 会随 NATS 消息无限增长。"""
+        cache = FillEventHotCache(logger=_logger(), max_capacity=5)
+        # 人为缩短 maxlen 便于测试
+        from collections import deque
+        cache._pending_evictions = deque(maxlen=10)
+        await _boot(cache)
+
+        # 模拟 100 个远端 fill 到达（触发 95 次 eviction，因 max_capacity=5）
+        for i in range(100):
+            f = _make_fill(
+                fill_id=f"remote-{i:04d}",
+                ingestion_timestamp=_BASE_TS + timedelta(seconds=i),
+            )
+            msg = _make_remote_message(f)
+            await cache._handle_remote_event(msg)
+
+        # 关键断言：即使触发了 95 次 eviction，pending 不应超过 maxlen=10
+        self.assertLessEqual(
+            len(cache._pending_evictions),
+            10,
+            f"subscriber-only 路径下 _pending_evictions={len(cache._pending_evictions)} "
+            f"> maxlen 10，说明 bounded 约束没生效，会 leak memory",
+        )
+
+    async def test_publisher_path_drains_pending_evictions(self) -> None:
+        """verify publisher 路径正常 drain pending_evictions（不因换 deque 破坏）。"""
+        cache = FillEventHotCache(logger=_logger(), max_capacity=2)
+        await _boot(cache)
+
+        # Publish 3 个 fill → 触发 1 次 eviction
+        for i in range(3):
+            f = _make_fill(
+                fill_id=f"pub-{i}",
+                ingestion_timestamp=_BASE_TS + timedelta(seconds=i),
+            )
+            await cache.publish(f)
+
+        # publish 结束后 _pending_evictions 应被 drain
+        self.assertEqual(
+            len(cache._pending_evictions),
+            0,
+            "publisher 路径应 drain _pending_evictions（_best_effort_redis_delete_evicted）",
+        )
+
+    async def test_deque_overflow_silently_drops_oldest(self) -> None:
+        """deque(maxlen) 超过上限的 append 会静默丢最老 —— 这是故意的行为，
+        被丢的 fid 靠 Redis TTL=7d 兜底清理，不影响正确性。"""
+        from collections import deque
+
+        cache = FillEventHotCache(logger=_logger(), max_capacity=2)
+        cache._pending_evictions = deque(maxlen=3)
+
+        # 直接操作 deque 模拟 overflow（避免 bootstrap 依赖）
+        for i in range(10):
+            cache._pending_evictions.append(f"fid-{i}")
+
+        # 只保留最后 3 个
+        self.assertEqual(len(cache._pending_evictions), 3)
+        self.assertEqual(
+            list(cache._pending_evictions),
+            ["fid-7", "fid-8", "fid-9"],
+            "deque 应该保留最新的 N 个，丢最老",
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────
 # fire_and_forget_publish
 # ─────────────────────────────────────────────────────────────────────
 
