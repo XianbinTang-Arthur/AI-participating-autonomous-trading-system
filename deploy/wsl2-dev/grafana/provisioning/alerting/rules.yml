@@ -415,7 +415,7 @@ groups:
             model:
               type: reduce
               expression: A
-              reducer: max
+              reducer: last
             relativeTimeRange: { from: 0, to: 0 }
           - refId: C
             datasourceUid: __expr__
@@ -428,6 +428,10 @@ groups:
         # C 用 math 而非 threshold: threshold 在条件不满足时会 DROP 序列,
         # 配合 noDataState=Alerting 会导致健康时误报 dead-man. math 总返回
         # 0/1 数值序列,不产生 NoData,彻底消除这类误报.
+        # reducer: last 而非 max: range query 返回 10min 内 21 个采样点,
+        # max 会捕捉任一过去时间点的 min_over_time==0(比如 20min 前的短暂 outage),
+        # 导致"过去曾经 down 10min+"也触发;我们只关心"当前是否处于 10min 连续 down",
+        # last 取最新采样等价于 instant query.
         noDataState: Alerting
         execErrState: Error
         for: 10m
