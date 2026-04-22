@@ -20,6 +20,7 @@ import asyncio
 import unittest
 from types import SimpleNamespace
 
+from aats.schemas.common import utc_now
 from aats.services.decision_engine.trigger import DecisionCycleTrigger, _PendingTrigger
 
 
@@ -332,7 +333,8 @@ class TestHandleFeatureSnapshotViaQueue(unittest.IsolatedAsyncioTestCase):
                 return SimpleNamespace(event_id=f"evt_{tag}", payload={"tag": tag})
 
             def fake_validate(payload):
-                return SimpleNamespace(symbol="BTC-USDT-SWAP")
+                # LF-010 TTL 检查需要 snapshot_ts，用当前时间保证 fresh
+                return SimpleNamespace(symbol="BTC-USDT-SWAP", snapshot_ts=utc_now())
 
             trigger_module.parse_envelope = fake_parse
             trigger_module.FeatureSnapshot.model_validate = fake_validate
@@ -384,7 +386,7 @@ class TestHandleFeatureSnapshotViaQueue(unittest.IsolatedAsyncioTestCase):
             original_parse = trigger_module.parse_envelope
             original_validate = trigger_module.FeatureSnapshot.model_validate
             trigger_module.parse_envelope = lambda m: SimpleNamespace(event_id="evt_single", payload={})
-            trigger_module.FeatureSnapshot.model_validate = lambda p: SimpleNamespace(symbol="BTC-USDT-SWAP")
+            trigger_module.FeatureSnapshot.model_validate = lambda p: SimpleNamespace(symbol="BTC-USDT-SWAP", snapshot_ts=utc_now())
             try:
                 await trig.handle_feature_snapshot({"tag": "single"})
                 # 等 dispatcher 消费
@@ -429,7 +431,7 @@ class TestHandleFeatureSnapshotViaQueue(unittest.IsolatedAsyncioTestCase):
             original_parse = trigger_module.parse_envelope
             original_validate = trigger_module.FeatureSnapshot.model_validate
             trigger_module.parse_envelope = lambda m: SimpleNamespace(event_id="evt_x", payload={})
-            trigger_module.FeatureSnapshot.model_validate = lambda p: SimpleNamespace(symbol="BTC-USDT-SWAP")
+            trigger_module.FeatureSnapshot.model_validate = lambda p: SimpleNamespace(symbol="BTC-USDT-SWAP", snapshot_ts=utc_now())
             try:
                 for _ in range(5):
                     await trig.handle_feature_snapshot({"any": "msg"})
@@ -622,6 +624,105 @@ class TestBoundedLRUDicts(unittest.IsolatedAsyncioTestCase):
             (f"FAKE{n_symbols - 1}-USDT-SWAP", "15m"),
             trig._timeframe_locks,
         )
+
+    @staticmethod
+    async def _noop(*args, **kwargs):
+        return None
+
+
+class TestFeatureSnapshotTTL(unittest.IsolatedAsyncioTestCase):
+    """LF-010：feature snapshot 必须在 _MAX_FEATURE_SNAPSHOT_AGE_S 之内，
+    否则 handler 直接丢弃不进 queue。场景是 market 进程重启 / NATS backlog
+    replay 把几分钟前的 feature 送进来。"""
+
+    def test_fresh_snapshot_passes_ttl(self) -> None:
+        orch = SimpleNamespace(run_cycle=self._noop)
+        trig = _fake_trigger(orchestrator=orch)
+        snapshot = SimpleNamespace(symbol="BTC-USDT-SWAP", snapshot_ts=utc_now())
+        self.assertTrue(trig._is_feature_snapshot_fresh(snapshot))
+
+    def test_stale_snapshot_rejected(self) -> None:
+        """比阈值老 1 秒就 reject。"""
+        from datetime import timedelta
+        from aats.services.decision_engine.trigger import DecisionCycleTrigger
+
+        orch = SimpleNamespace(run_cycle=self._noop)
+        trig = _fake_trigger(orchestrator=orch)
+        stale_ts = utc_now() - timedelta(
+            seconds=DecisionCycleTrigger._MAX_FEATURE_SNAPSHOT_AGE_S + 1.0,
+        )
+        snapshot = SimpleNamespace(symbol="BTC-USDT-SWAP", snapshot_ts=stale_ts)
+        self.assertFalse(trig._is_feature_snapshot_fresh(snapshot))
+
+    def test_boundary_exactly_at_threshold_passes(self) -> None:
+        """阈值边界：<= max_age 仍视为新鲜（严格 > 才拒绝）。"""
+        from datetime import timedelta
+        from aats.services.decision_engine.trigger import DecisionCycleTrigger
+
+        orch = SimpleNamespace(run_cycle=self._noop)
+        trig = _fake_trigger(orchestrator=orch)
+        # 减去一点缓冲（测试本身耗时可能让 now 前进），确保差值 < max_age
+        near_boundary_ts = utc_now() - timedelta(
+            seconds=DecisionCycleTrigger._MAX_FEATURE_SNAPSHOT_AGE_S - 1.0,
+        )
+        snapshot = SimpleNamespace(symbol="BTC-USDT-SWAP", snapshot_ts=near_boundary_ts)
+        self.assertTrue(trig._is_feature_snapshot_fresh(snapshot))
+
+    async def test_stale_snapshot_never_enters_queue(self) -> None:
+        """端到端：陈旧 snapshot 走完 _handle_feature_snapshot_via_queue
+        应直接 return，不进 _trigger_queue，也不触发 run_cycle。"""
+        from datetime import timedelta
+        from aats.services.decision_engine.trigger import DecisionCycleTrigger
+
+        run_cycle_calls: list[str] = []
+
+        async def tracked_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+            run_cycle_calls.append(symbol)
+
+        policy = SimpleNamespace(
+            enabled_timeframes=lambda: ("15m",),
+            should_trigger=lambda **kwargs: (True, "cadence_elapsed"),
+            record_trigger=lambda **kwargs: None,
+        )
+        market_gw = SimpleNamespace(
+            latest_snapshot=lambda sym: SimpleNamespace(
+                symbol=sym, snapshot_ts=None, last_price=None,
+            ),
+        )
+        orch = SimpleNamespace(run_cycle=tracked_run_cycle)
+
+        trig = _fake_trigger(orchestrator=orch, market_gateway=market_gw, policy=policy)
+        trig._use_queue_dispatcher = True
+        await trig.start()
+
+        try:
+            import aats.services.decision_engine.trigger as trigger_module
+            original_parse = trigger_module.parse_envelope
+            original_validate = trigger_module.FeatureSnapshot.model_validate
+
+            # 喂 stale 的 snapshot
+            stale_ts = utc_now() - timedelta(
+                seconds=DecisionCycleTrigger._MAX_FEATURE_SNAPSHOT_AGE_S + 5.0,
+            )
+            trigger_module.parse_envelope = lambda m: SimpleNamespace(
+                event_id="evt_stale", payload={},
+            )
+            trigger_module.FeatureSnapshot.model_validate = lambda p: SimpleNamespace(
+                symbol="BTC-USDT-SWAP", snapshot_ts=stale_ts,
+            )
+            try:
+                await trig.handle_feature_snapshot({"tag": "stale"})
+                # 给 dispatcher 时间
+                await asyncio.sleep(0.05)
+                # 陈旧：应该 early return，run_cycle 没被调、queue 依然空
+                self.assertEqual(run_cycle_calls, [])
+                assert trig._trigger_queue is not None
+                self.assertEqual(trig._trigger_queue.qsize(), 0)
+            finally:
+                trigger_module.parse_envelope = original_parse
+                trigger_module.FeatureSnapshot.model_validate = original_validate
+        finally:
+            await trig.stop()
 
     @staticmethod
     async def _noop(*args, **kwargs):

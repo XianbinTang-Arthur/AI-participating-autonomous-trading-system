@@ -9,7 +9,7 @@ from typing import Generic, TypeVar
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.events.envelopes import parse_envelope
-from aats.schemas.common import EventEnvelope
+from aats.schemas.common import EventEnvelope, utc_now
 from aats.schemas.features import FeatureSnapshot
 from aats.schemas.market import MarketSnapshot
 from aats.services.decision_engine.trigger_policy import DecisionTriggerPolicy
@@ -112,6 +112,13 @@ class DecisionCycleTrigger:
     # 连续失败后退避，避免堵死 asyncio 事件循环（冷启动时 feature store 为空）
     _BACKOFF_INITIAL_S = 2.0
     _BACKOFF_MAX_S = 30.0
+    # LF-010：feature snapshot 从进 handler 到被消费之间的最大允许年龄。
+    # market 进程重启 / NATS 积压 replay 时可能让 decision 收到很旧的 feature，
+    # 用 snapshot_ts 对比 utc_now() 兜底；超过阈值直接丢弃并 warn。
+    # 30s 经验值：trigger_policy 用的 market_data_stale_after_seconds=45s，
+    # 这里取更紧的 30s 因为 feature 是从 market 衍生出来、正常新鲜的 feature
+    # 一般在 1-2s 内到达 decision，30s 已经极宽。
+    _MAX_FEATURE_SNAPSHOT_AGE_S = 30.0
 
     def __init__(
         self,
@@ -341,6 +348,31 @@ class DecisionCycleTrigger:
     # NATS handler 入口（按 flag 分流，S2 会把 flag 切到 True）
     # ──────────────────────────────────────────────────────────────
 
+    def _is_feature_snapshot_fresh(self, snapshot: FeatureSnapshot) -> bool:
+        """LF-010：feature snapshot 的 wall-clock 年龄校验。
+
+        snapshot_ts 是 market 侧给 feature 盖的时间戳（exchange truth），
+        如果 market 进程崩/JetStream 背压导致老消息 replay 进来，可能是
+        几分钟前的。这里用 utc_now() - snapshot_ts 跟 _MAX_FEATURE_SNAPSHOT_AGE_S
+        对比；超过就拒绝并 log warning，避免下游 orchestrator 拿陈旧
+        feature 跑 run_cycle。
+
+        返回 True 表示可以继续处理。False 分支内已 log。
+        """
+        age_s = (utc_now() - snapshot.snapshot_ts).total_seconds()
+        if age_s > self._MAX_FEATURE_SNAPSHOT_AGE_S:
+            log_event(
+                self.logger,
+                "features_snapshot_rejected_stale",
+                level="warning",
+                symbol=snapshot.symbol,
+                snapshot_ts=snapshot.snapshot_ts.isoformat(),
+                age_s=age_s,
+                max_age_s=self._MAX_FEATURE_SNAPSHOT_AGE_S,
+            )
+            return False
+        return True
+
     async def handle_feature_snapshot(self, message: dict) -> None:
         if self._use_queue_dispatcher:
             await self._handle_feature_snapshot_via_queue(message)
@@ -355,6 +387,9 @@ class DecisionCycleTrigger:
         # snapshot 抢跑导致的 ref 漂移。
         feature_envelope = parse_envelope(message)
         snapshot = FeatureSnapshot.model_validate(feature_envelope.payload)
+        # LF-010：拒绝陈旧的 feature snapshot（market 重启 / NATS replay 保护）
+        if not self._is_feature_snapshot_fresh(snapshot):
+            return
         if self.can_trigger is not None:
             allowed, _reason = self.can_trigger(symbol=snapshot.symbol)
             if not allowed:
@@ -427,6 +462,9 @@ class DecisionCycleTrigger:
         """
         feature_envelope = parse_envelope(message)
         snapshot = FeatureSnapshot.model_validate(feature_envelope.payload)
+        # LF-010：拒绝陈旧的 feature snapshot（market 重启 / NATS replay 保护）
+        if not self._is_feature_snapshot_fresh(snapshot):
+            return
         if self.can_trigger is not None:
             allowed, _reason = self.can_trigger(symbol=snapshot.symbol)
             if not allowed:
