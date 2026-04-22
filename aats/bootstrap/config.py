@@ -2595,6 +2595,26 @@ def _build_position_target_handler(
 
     async def handle_position_target(message: dict[str, Any]) -> None:
         target = parse_payload(message, PositionTarget)
+        # LF-20260421-004 fix · 2026-04-22
+        # Kill Switch 同步预检：在任何 account.refresh / policy / risk / submit 之前
+        # 读本地 kill_switch.halted 状态。避免 Reconciliation → RecoveryPosture →
+        # kill_switch.halt 链路的 10-50ms 窗口内溜单。
+        #
+        # kill_switch.halted 是同步读、本地 cache、I1 保证 halt() 立即生效。
+        # 所以这个检查开销几乎为零（< 1 μs），但能堵住"halt 已经决定但 NATS 还
+        # 没广播到别的 process" 的窗口 —— 因为 execution 进程调 halt() 本身就
+        # 更新了自己 local cache，后续 handle_position_target 立刻能读到。
+        ks_status = kill_switch.status()
+        if ks_status.get("halted"):
+            log_event(
+                _log,
+                "position_target_rejected_kill_switch_halted",
+                level="warning",
+                decision_id=target.decision_id,
+                symbol=target.symbol,
+                reason=str(ks_status.get("reason") or "kill_switch_halted"),
+            )
+            return
         if runtime_layering.environment_capabilities.account_state_source_kind == "exchange":
             await account_service.refresh()
 
@@ -3998,6 +4018,7 @@ def _build_decision_slice(
             False,
             "symbol_not_enabled_for_decision_cycle",
         ),
+        metrics=slices.metrics,  # LF-019：decision_cycle_dropped_triggers_total 计数
     )
     slices.audit_service = DecisionAuditService(bus=slices.bus, audit_repo=storage.audit_repo)
     slices.policy_engine = PolicyEngine(

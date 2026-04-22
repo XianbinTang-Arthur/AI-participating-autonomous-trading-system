@@ -23,7 +23,7 @@ from types import SimpleNamespace
 from aats.services.decision_engine.trigger import DecisionCycleTrigger, _PendingTrigger
 
 
-def _fake_trigger(*, orchestrator, market_gateway=None, policy=None):
+def _fake_trigger(*, orchestrator, market_gateway=None, policy=None, metrics=None):
     """用 __new__ 绕过 __init__ 里对 logger 构造 + 各种 service 依赖的
     验证，装配出最小 DecisionCycleTrigger 实例供 dispatcher 单元测试用。"""
     t = DecisionCycleTrigger.__new__(DecisionCycleTrigger)
@@ -31,6 +31,7 @@ def _fake_trigger(*, orchestrator, market_gateway=None, policy=None):
     t.market_gateway = market_gateway or SimpleNamespace()
     t.policy = policy or SimpleNamespace()
     t.can_trigger = None
+    t.metrics = metrics
     # 最小 logger mock：只需支持 log_event 里用到的 log 方法。用标准 stdlib
     # logger 即可，不污染 test output。
     import logging
@@ -443,6 +444,106 @@ class TestHandleFeatureSnapshotViaQueue(unittest.IsolatedAsyncioTestCase):
                 trigger_module.FeatureSnapshot.model_validate = original_validate
         finally:
             await trig.stop()
+
+
+class TestDroppedTriggersMetric(unittest.IsolatedAsyncioTestCase):
+    """LF-019：_enqueue_trigger 覆盖旧 pending 时必须递增
+    ``decision_cycle_dropped_triggers_total`` counter。
+
+    维度验证：
+    - 单次 enqueue 空 queue：counter 不动
+    - 连续两次 enqueue（dispatcher 还在跑上一个）：counter +1（覆盖旧的那次）
+    - 没有 metrics 时不能崩（`metrics=None` 兜底）
+    """
+
+    async def test_no_drop_when_queue_empty(self) -> None:
+        """空 queue 上的 enqueue 不应计 dropped。"""
+        from aats.bootstrap.metrics import MetricsRegistry
+        from aats.services.decision_engine.trigger import METRIC_DROPPED_TRIGGERS
+
+        metrics = MetricsRegistry()
+        orch = SimpleNamespace(run_cycle=self._stuck_run_cycle)
+        policy = SimpleNamespace(record_trigger=lambda **kwargs: None)
+        trig = _fake_trigger(orchestrator=orch, policy=policy, metrics=metrics)
+        await trig.start()
+        try:
+            # 第一次 enqueue，queue 之前是空的；dispatcher 立刻拿走——
+            # 这个 case 不应计 dropped。
+            await trig._enqueue_trigger(_make_pending(tag="only"))
+            # 给 dispatcher 时间消费掉
+            await asyncio.sleep(0.05)
+            self.assertEqual(metrics.snapshot().get(METRIC_DROPPED_TRIGGERS, 0), 0)
+        finally:
+            self._release.set()
+            await trig.stop()
+
+    async def test_counter_increments_when_old_pending_is_overwritten(self) -> None:
+        """连续 enqueue，dispatcher 卡在第一个 run_cycle 时，后面的 enqueue
+        会覆盖 queue 里还没被消费的 pending，每次覆盖都应 counter+1。"""
+        from aats.bootstrap.metrics import MetricsRegistry
+        from aats.services.decision_engine.trigger import METRIC_DROPPED_TRIGGERS
+
+        metrics = MetricsRegistry()
+        release = asyncio.Event()
+
+        async def stuck_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+            await release.wait()
+
+        orch = SimpleNamespace(run_cycle=stuck_run_cycle)
+        policy = SimpleNamespace(record_trigger=lambda **kwargs: None)
+        trig = _fake_trigger(orchestrator=orch, policy=policy, metrics=metrics)
+        await trig.start()
+        try:
+            # 第一条：dispatcher 立刻拿走并卡在 stuck_run_cycle
+            await trig._enqueue_trigger(_make_pending(tag="first"))
+            # 等 dispatcher 真的拿走
+            for _ in range(50):
+                if trig._trigger_queue is not None and trig._trigger_queue.qsize() == 0:
+                    break
+                await asyncio.sleep(0.01)
+
+            # 第二条：queue 仍空（dispatcher 卡着），这条入 queue 不计 dropped
+            await trig._enqueue_trigger(_make_pending(tag="second"))
+            # 第三条：queue 里已有 second，这条覆盖它 → counter +1
+            await trig._enqueue_trigger(_make_pending(tag="third"))
+            # 第四条：queue 里已有 third，这条覆盖它 → counter +1
+            await trig._enqueue_trigger(_make_pending(tag="fourth"))
+
+            self.assertEqual(
+                metrics.snapshot().get(METRIC_DROPPED_TRIGGERS, 0),
+                2,
+                "third/fourth 各覆盖一次前一条，counter 应 = 2",
+            )
+        finally:
+            release.set()
+            await trig.stop()
+
+    async def test_metrics_none_does_not_crash(self) -> None:
+        """没有 metrics 注入时 _enqueue_trigger 必须兜底不抛。"""
+        release = asyncio.Event()
+
+        async def stuck_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+            await release.wait()
+
+        orch = SimpleNamespace(run_cycle=stuck_run_cycle)
+        policy = SimpleNamespace(record_trigger=lambda **kwargs: None)
+        trig = _fake_trigger(orchestrator=orch, policy=policy, metrics=None)
+        await trig.start()
+        try:
+            await trig._enqueue_trigger(_make_pending(tag="a"))
+            await asyncio.sleep(0.02)
+            # 覆盖路径：应该不抛
+            await trig._enqueue_trigger(_make_pending(tag="b"))
+            await trig._enqueue_trigger(_make_pending(tag="c"))
+        finally:
+            release.set()
+            await trig.stop()
+
+    _release = asyncio.Event()
+
+    async def _stuck_run_cycle(self, *, symbol, timeframe, feature_snapshot_hint=None):
+        # 为 test_no_drop_when_queue_empty 用；consume 掉 queue 后等解除
+        await self._release.wait()
 
 
 if __name__ == "__main__":

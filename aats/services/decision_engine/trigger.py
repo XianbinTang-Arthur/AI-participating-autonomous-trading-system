@@ -5,6 +5,7 @@ import dataclasses
 from collections.abc import Callable
 
 from aats.bootstrap.logging import get_logger, log_event
+from aats.bootstrap.metrics import MetricsRegistry
 from aats.events.envelopes import parse_envelope
 from aats.schemas.common import EventEnvelope
 from aats.schemas.features import FeatureSnapshot
@@ -14,6 +15,10 @@ from aats.services.decision_engine.orchestrator import DecisionOrchestrator
 from aats.services.market_gateway.gateway import MarketDataGateway
 
 CanTriggerCheck = Callable[..., tuple[bool, str]]
+
+# LF-019：_enqueue_trigger 覆盖旧 pending 时递增此 counter，用于长期观测
+# 队列饱和率（单次 run_cycle 毛刺越严重 → latest-wins 丢弃越多）。
+METRIC_DROPPED_TRIGGERS = "decision_cycle_dropped_triggers_total"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -45,11 +50,13 @@ class DecisionCycleTrigger:
         market_gateway: MarketDataGateway,
         policy: DecisionTriggerPolicy,
         can_trigger: CanTriggerCheck | None = None,
+        metrics: MetricsRegistry | None = None,
     ) -> None:
         self.orchestrator = orchestrator
         self.market_gateway = market_gateway
         self.policy = policy
         self.can_trigger = can_trigger
+        self.metrics = metrics
         self.logger = get_logger("aats.decision_trigger")
         # legacy handler 路径沿用的 per-(symbol, timeframe) 锁；S3 清理
         # 时会一起删掉。queue 路径不再需要这把锁，因为单 dispatcher
@@ -227,6 +234,10 @@ class DecisionCycleTrigger:
             # get_nowait 取出后必须 task_done 配对，否则 queue 的
             # unfinished_tasks 计数永远不归零，影响未来 join()。
             self._trigger_queue.task_done()
+            # LF-019：被新 pending 覆盖的旧 trigger 没被 run_cycle 消费，
+            # 递增 counter 供 Prometheus 长期观测队列饱和趋势。
+            if self.metrics is not None:
+                self.metrics.increment(METRIC_DROPPED_TRIGGERS)
         except asyncio.QueueEmpty:
             pass
 
@@ -243,6 +254,9 @@ class DecisionCycleTrigger:
                 symbol=pending.snapshot.symbol,
                 timeframe=pending.timeframe,
             )
+            # LF-019：竞态路径丢的是当前 pending（不是旧的），同样计数
+            if self.metrics is not None:
+                self.metrics.increment(METRIC_DROPPED_TRIGGERS)
 
     # ──────────────────────────────────────────────────────────────
     # NATS handler 入口（按 flag 分流，S2 会把 flag 切到 True）
