@@ -47,6 +47,21 @@ class DecisionOrchestrator:
         self.metrics = metrics
         self.logger = get_logger("aats.decision_engine")
 
+    # LF-20260421-003 fix · 2026-04-22
+    # run_cycle 全局 timeout（默认 30s）。
+    #
+    # 背景：run_cycle 里有多个 `publish_model` 和 `asyncio.to_thread` 调用，
+    # NATS 背压、JetStream 同步写慢、PG 锁等待都可能让某次 cycle 挂几十秒。
+    # trigger.py 的 `_timeframe_locks` 把同 (symbol, timeframe) 串行化，一个
+    # 周期挂住 = 该 symbol+timeframe 后续决策全部卡队。
+    #
+    # 30s 的选择：
+    # - 远高于正常 cycle 时间（~100ms）
+    # - 略低于前端 DEFAULT_TIMEOUT_MS（30s）+ 1 次 retry buffer
+    # - 触发超时时外层 try/except 走 `_publish_failure_best_effort` 把孤儿
+    #   事件标记成 processing_failure，trigger backoff 接管重试
+    _RUN_CYCLE_TIMEOUT_SECONDS = 30.0
+
     async def run_cycle(
         self,
         symbol: str,
@@ -84,12 +99,36 @@ class DecisionOrchestrator:
             },
         ):
             try:
-                return await self._run_cycle_body(
+                # LF-003: 全局 timeout 防止 NATS 背压 / PG 锁等待让 cycle 挂死
+                return await asyncio.wait_for(
+                    self._run_cycle_body(
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        decision_id=decision_id,
+                        feature_snapshot_hint=feature_snapshot_hint,
+                    ),
+                    timeout=self._RUN_CYCLE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError as exc:
+                # 超时 → 记 PROCESSING_FAILURES 标记孤儿 → 上抛让 trigger backoff 处理
+                log_event(
+                    self.logger,
+                    "decision_cycle_timeout",
+                    level="error",
+                    **correlation_fields(
+                        decision_id=decision_id,
+                        symbol=symbol,
+                        timeframe=timeframe,
+                        timeout_seconds=self._RUN_CYCLE_TIMEOUT_SECONDS,
+                    ),
+                )
+                await self._publish_failure_best_effort(
+                    decision_id=decision_id,
                     symbol=symbol,
                     timeframe=timeframe,
-                    decision_id=decision_id,
-                    feature_snapshot_hint=feature_snapshot_hint,
+                    exc=exc,
                 )
+                raise
             except Exception as exc:
                 # P1-11：若 run_cycle 在 position_target 发出之前崩溃，之前已经发过的
                 # decision_context / baseline / ai_assessment / shadow 等事件会在
