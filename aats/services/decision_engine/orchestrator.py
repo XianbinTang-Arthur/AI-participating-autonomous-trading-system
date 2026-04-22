@@ -314,22 +314,37 @@ class DecisionOrchestrator:
                 source_component="ai_service",
             )
         if shadow_assessment is not None:
-            shadow_decision = await asyncio.to_thread(
-                self.target_engine.build_shadow,
-                context=context,
-                baseline=baseline,
-                ai_assessment=shadow_assessment,
-                actual_target=target,
-                operating_mode=operating_mode,
-            )
-            self.ai_service.record_shadow_decision(shadow_decision)
-            await publish_model(
-                bus=self.bus,
-                topic=topics.AI_SHADOW_DECISIONS,
-                key=symbol,
-                payload_model=shadow_decision,
-                source_component="decision_engine",
-            )
+            # LF-Round3-backport · 2026-04-22
+            # AI shadow 也要加异常保护（之前没有）。shadow 路径是辅助数据，
+            # 任何失败绝不应该 kill live decision cycle。同 paper trading
+            # shadow 的 pattern。
+            try:
+                shadow_decision = await asyncio.to_thread(
+                    self.target_engine.build_shadow,
+                    context=context,
+                    baseline=baseline,
+                    ai_assessment=shadow_assessment,
+                    actual_target=target,
+                    operating_mode=operating_mode,
+                )
+                self.ai_service.record_shadow_decision(shadow_decision)
+                await publish_model(
+                    bus=self.bus,
+                    topic=topics.AI_SHADOW_DECISIONS,
+                    key=symbol,
+                    payload_model=shadow_decision,
+                    source_component="decision_engine",
+                )
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "ai_shadow_decision_build_or_publish_failed",
+                    level="warning",
+                    decision_id=context.decision_id,
+                    symbol=symbol,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
         position_target_envelope = await publish_model(
             bus=self.bus,
             topic=topics.POSITION_TARGETS,
