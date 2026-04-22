@@ -82,7 +82,9 @@
       "Bash(wsl -d Ubuntu bash -c \"docker stop aats-decision\")",
       "Bash(wsl -d Ubuntu bash -c \"docker ps --format '{{.Names}}\\\\t{{.Status}}' | grep -E 'aats-\\(decision|execution|gateway|market\\)'\")",
       "Bash(.venv/Scripts/python.exe -m pytest tests/unit/test_strategy_profile_activation_switch.py -x -v)",
-      "PowerShell(Get-Process | Sort-Object CPU -Descending | Select-Object -First 15 Name, Id, CPU, @{Name='WS_MB';Expression={[math]::Round\\($_.WorkingSet64/1MB,1\\)}}, Description | Format-Table -AutoSize)"
+      "PowerShell(Get-Process | Sort-Object CPU -Descending | Select-Object -First 15 Name, Id, CPU, @{Name='WS_MB';Expression={[math]::Round\\($_.WorkingSet64/1MB,1\\)}}, Description | Format-Table -AutoSize)",
+      "Bash(rm .claude/tmp_scan_candles.sh)",
+      "Bash(wsl -d Ubuntu bash -c \"rm -f /tmp/r1.json /tmp/r2.json /tmp/r3.json /tmp/r5.json\")"
     ]
   }
 }
