@@ -662,3 +662,45 @@ groups:
         annotations:
           summary: "OKX rate limit backoff > 6 events / hour"
           description: "okx_rate_limited_backoff 1h 内触发 > 6 次. 单次退避属于正常自愈 (P-B), 高频说明 OKX 公共端点持续限流. 排查方向: (1) _cached_aux_payload refresh_interval 是否过短; (2) instrument universe 是否扩大; (3) OKX Retry-After 是否被延长. 对应 log event: okx_rate_limited_backoff (WARNING)."
+
+      # ── Candles 15m Rolling 数据采集失活 ─────────────────────────────
+      # candles_rolling_15m 工作流每 15min 跑一次, 每次给 4 个 symbol
+      # (BTC-USDT, ETH-USDT, BTC-USDT-SWAP, ETH-USDT-SWAP) 拉 15m K 线增量,
+      # 完成时 rdp_daily_ingest 打 "[1/4] Candles done: 4 ok, 0 failed".
+      # 30min 窗口期望 >= 2 次 (每 15min 1 次). < 2 即采集卡住或全部失败,
+      # research phase 0 OHLC 对照基线会过期, microstructure silver 失去 peer.
+      # 用 math '$B < 2' + noDataState=Alerting 模式 (commit 7950b7c 破 threshold-drop 陷阱).
+      - uid: sev3-candles-15m-stale
+        title: "SEV3: Candles 15m Rolling Stale"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "sum(count_over_time({container=\"aats-rdp-daemon\"} |= \"[1/4] Candles done\" [30m])) or vector(0)"
+              queryType: range
+            relativeTimeRange:
+              from: 1800
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$B < 2"
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: Alerting
+        execErrState: Error
+        for: 5m
+        labels:
+          severity: sev3
+          component: rdp
+        annotations:
+          summary: "candles_rolling_15m: 30min 内 < 2 次完整 cycle (期望 >= 2)"
+          description: "candles_rolling_15m 工作流 30min 内 [1/4] Candles done 标记 < 2 次, 即 BTC/ETH spot+swap 15m K 线增量采集失活. 排查: (1) docker logs aats-rdp-daemon | grep candles_rolling_15m; (2) PG governance.rdp_task_queue WHERE workflow='candles_rolling_15m' AND requested_at > now() - interval '1 hour' (查 status); (3) OKX REST 是否限流 (sev3-okx-rate-limited-persistent 是否同时触发); (4) merge_pipeline.ValidationBlockedError 是否频发."

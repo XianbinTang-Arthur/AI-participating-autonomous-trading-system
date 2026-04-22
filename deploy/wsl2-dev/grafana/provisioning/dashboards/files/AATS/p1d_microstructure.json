@@ -416,6 +416,167 @@
       "title": "Silver last-bar freshness",
       "description": "Freshness gauge; red >= 30 min (Silver ETL should run every 15 min).",
       "type": "stat"
+    },
+
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 39 },
+      "id": 500,
+      "title": "Panel 5: Candles 15m Rolling (BTC/ETH spot+swap)",
+      "type": "row"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "postgres_research" },
+      "description": "candles_rolling_15m 工作流上次成功完成至今的分钟数. 期望 < 15 min (每 15min 一次), 红 >= 30 min 即数据采集失活. 数据源 = governance.rdp_task_queue (RDP research DB).",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 20 },
+              { "color": "red", "value": 30 }
+            ]
+          },
+          "unit": "m",
+          "noValue": "No Data — 检查 governance.rdp_task_queue 是否有 candles_rolling_15m 记录 (可能 RDP daemon 未启动)"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 40 },
+      "id": 12,
+      "options": { "graphMode": "none", "colorMode": "value", "textMode": "value" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres_research" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT EXTRACT(EPOCH FROM (NOW() - MAX(finished_at)))/60 AS minutes_since_last_success FROM governance.rdp_task_queue WHERE workflow='candles_rolling_15m' AND status='done'",
+          "refId": "A"
+        }
+      ],
+      "title": "Candles 15m: 上次成功后已过 (min)",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "postgres", "uid": "postgres_research" },
+      "description": "24h 内 candles_rolling_15m 工作流的成功比例. 红 < 95% / 黄 95-99% / 绿 >= 99%. allow_failure=true 单次失败可接受, 但持续低成功率说明 OKX 端有问题.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 95 },
+              { "color": "green", "value": 99 }
+            ]
+          },
+          "unit": "percent",
+          "max": 100,
+          "min": 0,
+          "noValue": "No Data — 24h 内无 candles_rolling_15m 记录"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 40 },
+      "id": 13,
+      "options": { "graphMode": "none", "colorMode": "value", "textMode": "value" },
+      "targets": [
+        {
+          "datasource": { "type": "postgres", "uid": "postgres_research" },
+          "editorMode": "code",
+          "format": "table",
+          "rawQuery": true,
+          "rawSql": "SELECT 100.0 * SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) / NULLIF(COUNT(*),0) AS success_pct FROM governance.rdp_task_queue WHERE workflow='candles_rolling_15m' AND requested_at > NOW() - INTERVAL '24 hours'",
+          "refId": "A"
+        }
+      ],
+      "title": "Candles 15m: 24h 成功率",
+      "type": "stat"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "每个 symbol 单次 collect_candles_incremental + merge_pipeline 耗时 p95 (15m window). 来源 = rdp_daily_ingest 日志 '[Candles] OK <symbol> 15m (<dur>s)'. 正常 ~0.4s, 持续 > 5s 说明 OKX REST 慢或 quality gate 延迟.",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "auto" },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 40 },
+      "id": 14,
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "quantile_over_time(0.95, {container=\"aats-rdp-daemon\"} |= \"[Candles] OK\" | regexp `\\[Candles\\] OK (?P<symbol>[A-Z\\-]+) 15m \\((?P<dur>[0-9.]+)s\\)` | unwrap dur [15m]) by (symbol)",
+          "legendFormat": "{{symbol}}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Candles 15m: per-symbol p95 耗时",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "每个 symbol 每 15m 窗口的成功 ingest 次数. 期望恒 = 1 (15m cycle / 15m window). 任一 symbol 跌到 0 = 该 symbol 采集失活. 4 symbols: BTC-USDT (spot), ETH-USDT (spot), BTC-USDT-SWAP (perp), ETH-USDT-SWAP (perp).",
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "always" },
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 5, "w": 12, "x": 0, "y": 45 },
+      "id": 15,
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "sum by (symbol) (count_over_time({container=\"aats-rdp-daemon\"} |= \"[Candles] OK\" | regexp `\\[Candles\\] OK (?P<symbol>[A-Z\\-]+) 15m` [15m]))",
+          "legendFormat": "{{symbol}}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Candles 15m: per-symbol 到货次数 (15m window)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": { "type": "loki", "uid": "loki" },
+      "description": "candles_rolling_15m 工作流的失败/质量门拦截日志流. 单次失败 allow_failure=true 不阻塞 daily 主链路, 但连续失败需介入排查 OKX REST / merge pipeline.",
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "gridPos": { "h": 5, "w": 12, "x": 12, "y": 45 },
+      "id": 16,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "prettifyLogMessage": true,
+        "showCommonLabels": false,
+        "showLabels": true,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "loki", "uid": "loki" },
+          "editorMode": "code",
+          "expr": "{container=\"aats-rdp-daemon\"} |~ `\\[Candles\\].*(FAILED|Quality gate blocked)`",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Candles 15m: 失败 / 质量门拦截日志",
+      "type": "logs"
     }
   ],
   "schemaVersion": 39,
