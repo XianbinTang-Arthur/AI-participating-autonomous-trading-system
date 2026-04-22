@@ -12,6 +12,7 @@
 #   ./scripts/deploy.sh --no-cache
 #   ./scripts/deploy.sh --skip-sync
 #   ./scripts/deploy.sh --skip-commit
+#   ./scripts/deploy.sh --yes            # 非交互：--skip-sync 且有未提交改动时默认继续
 #
 # 说明：
 #   - 默认 profile 为 derivatives-live
@@ -44,6 +45,7 @@ COMMIT_MSG=""
 NO_CACHE=""
 SKIP_SYNC=false
 SKIP_COMMIT=false
+ASSUME_YES=false
 HEALTH_TIMEOUT=90
 
 COMPOSE_OVERLAY=""
@@ -72,6 +74,8 @@ while [[ $# -gt 0 ]]; do
             SKIP_SYNC=true; shift ;;
         --skip-commit)
             SKIP_COMMIT=true; shift ;;
+        --yes|-y)
+            ASSUME_YES=true; shift ;;
         --timeout)
             HEALTH_TIMEOUT="$2"; shift 2 ;;
         --help|-h)
@@ -324,10 +328,17 @@ step_commit() {
             log_warn "以下文件有改动："
             git status --short
             echo
-            read -r -p "继续部署 WSL2 侧现有代码？[y/N] " confirm
-            if [[ "$confirm" != [yY] ]]; then
-                log_info "已取消"
-                exit 0
+            if [[ "$ASSUME_YES" == true ]]; then
+                log_info "--yes 已指定，继续部署 WSL2 侧现有代码"
+            elif [[ -t 0 ]]; then
+                read -r -p "继续部署 WSL2 侧现有代码？[y/N] " confirm
+                if [[ "$confirm" != [yY] ]]; then
+                    log_info "已取消"
+                    exit 0
+                fi
+            else
+                log_error "非交互环境检测到未提交改动；请显式传 --yes 或先提交/同步"
+                exit 4
             fi
         else
             log_error "检测到未提交改动；当前同步机制只会部署已提交的 Git HEAD，无法携带工作区改动"

@@ -8,8 +8,18 @@ def test_prewarm_script_waits_for_docker_and_gateway_health() -> None:
     text = (REPO_ROOT / "scripts" / "prewarm_wsl2_aats.ps1").read_text(encoding="utf-8")
 
     assert "docker info >/dev/null 2>&1" in text
-    assert 'http://127.0.0.1:{0}/healthz' in text
+    assert "curl -fs 'http://127.0.0.1:$Port/healthz'" in text
     assert "Test-RequiredContainersHealthy" in text
+
+
+def test_prewarm_script_picks_https_for_live_profiles() -> None:
+    text = (REPO_ROOT / "scripts" / "prewarm_wsl2_aats.ps1").read_text(encoding="utf-8")
+
+    assert "function Get-HealthScheme" in text
+    assert "'spot-live' { return 'https' }" in text
+    assert "'derivatives-live' { return 'https' }" in text
+    assert "'derivatives-live-monolith' { return 'https' }" in text
+    assert "curl -kfs 'https://127.0.0.1:$Port/healthz'" in text
 
 
 def test_prewarm_script_repairs_only_via_standard_wrapper() -> None:
@@ -18,7 +28,27 @@ def test_prewarm_script_repairs_only_via_standard_wrapper() -> None:
     assert ".codex\\skills\\wsl2-deploy\\scripts\\run-deploy.ps1" in text
     assert "'-SkipSync'" in text
     assert "'-SkipCommit'" in text
+    assert "'-AssumeYes'" in text
     assert "triggering repair deploy via standard wrapper" in text
+
+
+def test_run_deploy_wrapper_supports_assume_yes() -> None:
+    text = (REPO_ROOT / ".codex" / "skills" / "wsl2-deploy" / "scripts" / "run-deploy.ps1").read_text(
+        encoding="utf-8"
+    )
+
+    assert "[switch]$AssumeYes" in text
+    assert "$deployArgs += '--yes'" in text
+
+
+def test_deploy_sh_supports_non_interactive_skip_sync() -> None:
+    text = (REPO_ROOT / "scripts" / "deploy.sh").read_text(encoding="utf-8")
+
+    assert "--yes|-y)" in text
+    assert "ASSUME_YES=true" in text
+    assert '[[ "$ASSUME_YES" == true ]]' in text
+    assert "[[ -t 0 ]]" in text
+    assert "exit 4" in text
 
 
 def test_prewarm_script_ensures_keepalive_before_health_checks() -> None:

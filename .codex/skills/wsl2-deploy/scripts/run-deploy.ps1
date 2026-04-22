@@ -6,6 +6,7 @@ param(
     [switch]$SkipSync,
     [switch]$SkipCommit,
     [switch]$NoCache,
+    [switch]$AssumeYes,
     [int]$Timeout = 90,
     [switch]$DryRun
 )
@@ -68,6 +69,9 @@ if ($SkipCommit) {
 }
 if ($NoCache) {
     $deployArgs += '--no-cache'
+}
+if ($AssumeYes) {
+    $deployArgs += '--yes'
 }
 
 Write-Host "[wsl2-deploy] repo root: $repoRoot"

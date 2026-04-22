@@ -81,6 +81,17 @@ function Get-ApiPort {
     return 8000
 }
 
+function Get-HealthScheme {
+    param([string]$ResolvedProfile)
+
+    switch ($ResolvedProfile) {
+        'spot-live' { return 'https' }
+        'derivatives-live' { return 'https' }
+        'derivatives-live-monolith' { return 'https' }
+        default { return 'http' }
+    }
+}
+
 function Invoke-WslCommand {
     param([string]$Command)
     & wsl.exe -d $Distro bash -lc $Command
@@ -158,15 +169,22 @@ function Show-ContainerStates {
 }
 
 function Test-GatewayHealth {
-    param([int]$Port)
+    param(
+        [int]$Port,
+        [string]$Scheme = 'http'
+    )
 
-    try {
-        $response = Invoke-WebRequest -Uri ("http://127.0.0.1:{0}/healthz" -f $Port) -UseBasicParsing -TimeoutSec 5
-        return ($response.StatusCode -eq 200)
+    # Run curl inside WSL so we share deploy.sh's health-check semantics and
+    # sidestep Windows PowerShell 5.1 TLS 1.2 / self-signed cert limitations.
+    if ($Scheme -eq 'https') {
+        $command = "curl -kfs 'https://127.0.0.1:$Port/healthz' >/dev/null 2>&1"
     }
-    catch {
-        return $false
+    else {
+        $command = "curl -fs 'http://127.0.0.1:$Port/healthz' >/dev/null 2>&1"
     }
+
+    $null = Invoke-WslCommand -Command $command
+    return ($LASTEXITCODE -eq 0)
 }
 
 function Wait-Until {
@@ -209,6 +227,7 @@ function Invoke-RepairDeploy {
         $ResolvedProfile
         '-SkipSync'
         '-SkipCommit'
+        '-AssumeYes'
         '-Timeout'
         $DeployTimeoutSeconds
     )
@@ -222,8 +241,9 @@ function Invoke-RepairDeploy {
 
 $requiredContainers = Get-RequiredContainers -ResolvedProfile $Profile
 $apiPort = Get-ApiPort -ResolvedProfile $Profile
+$healthScheme = Get-HealthScheme -ResolvedProfile $Profile
 
-Write-PrewarmInfo "profile=$Profile distro=$Distro api_port=$apiPort"
+Write-PrewarmInfo "profile=$Profile distro=$Distro api_port=$apiPort scheme=$healthScheme"
 Write-PrewarmInfo "required_containers=$($requiredContainers -join ',')"
 
 if ($DryRun) {
@@ -251,7 +271,7 @@ if (-not (Wait-Until -Condition { Test-DockerReady } -TimeoutSeconds $DockerTime
 Write-PrewarmInfo "docker is ready"
 
 $healthReady = Wait-Until -Condition {
-    (Test-RequiredContainersHealthy -RequiredContainers $requiredContainers) -and (Test-GatewayHealth -Port $apiPort)
+    (Test-RequiredContainersHealthy -RequiredContainers $requiredContainers) -and (Test-GatewayHealth -Port $apiPort -Scheme $healthScheme)
 } -TimeoutSeconds $HealthTimeoutSeconds -Description 'AATS stack'
 
 if ($healthReady) {
@@ -268,7 +288,7 @@ if ($SkipRepairDeploy) {
 Invoke-RepairDeploy -ResolvedProfile $Profile
 
 if (-not (Wait-Until -Condition {
-    (Test-RequiredContainersHealthy -RequiredContainers $requiredContainers) -and (Test-GatewayHealth -Port $apiPort)
+    (Test-RequiredContainersHealthy -RequiredContainers $requiredContainers) -and (Test-GatewayHealth -Port $apiPort -Scheme $healthScheme)
 } -TimeoutSeconds $HealthTimeoutSeconds -Description 'AATS stack after repair')) {
     Show-ContainerStates -RequiredContainers $requiredContainers
     throw "AATS stack did not recover after repair deploy"
