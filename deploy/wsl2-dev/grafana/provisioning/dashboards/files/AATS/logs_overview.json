@@ -109,7 +109,7 @@
         {
           "datasource": { "type": "loki", "uid": "loki" },
           "editorMode": "code",
-          "expr": "{job=\"aats\", level=~\"ERROR|WARNING|CRITICAL\"}",
+          "expr": "{job=\"aats\", level=~\"ERROR|WARNING|CRITICAL\"} != \"okx_rate_limited_backoff\"",
           "queryType": "range",
           "refId": "A"
         }

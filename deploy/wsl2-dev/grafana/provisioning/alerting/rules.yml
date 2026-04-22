@@ -616,3 +616,49 @@ groups:
         annotations:
           summary: "24h >=2 BLOCKED orders with close_only race"
           description: "cancel_reason=okx_close_only_without_reducible_position fired >=2 times in 24h (critical @ 5). Suspected race between close_only check and live position read. Check cost_audit_live_reconciliation §2.4 + §10 疑问 4。"
+
+      # ── OKX 持续限流告警 ──────────────────────────────────────────
+      # P-B 修复后, okx_rate_limited_backoff 是 WARNING 级 "退避了,没事"信号,
+      # 单次/少量出现属于 OKX 公共端点限流 → 动态退避, 系统自愈, 不需人介入.
+      # 但如果 1h 内 > 6 次, 意味着:
+      #   - OKX 公共端点持续限流 (我们下游动作过于激进, 可能把 refresh_interval
+      #     压得太低, 或 instrument universe 扩张导致调用量上升)
+      #   - 或 retry_after_seconds 被 OKX 拉长, 退避不足以避免下一周期命中
+      # 任何一种都需要 operator 介入调查. 6/hour 阈值 = 平均每 10min 一次限流,
+      # 明显高于正常值 (稳态下 24h 应 <=1 次).
+      - uid: sev3-okx-rate-limited-persistent
+        title: "SEV3: OKX Rate Limit Persistent"
+        condition: C
+        data:
+          - refId: A
+            datasourceUid: loki
+            model:
+              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"okx_rate_limited_backoff\" [1h])) or vector(0)"
+              queryType: range
+            relativeTimeRange:
+              from: 3600
+              to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: gt, params: [6] }
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: OK
+        execErrState: Error
+        for: 0s
+        labels:
+          severity: sev3
+          component: execution
+        annotations:
+          summary: "OKX rate limit backoff > 6 events / hour"
+          description: "okx_rate_limited_backoff 1h 内触发 > 6 次. 单次退避属于正常自愈 (P-B), 高频说明 OKX 公共端点持续限流. 排查方向: (1) _cached_aux_payload refresh_interval 是否过短; (2) instrument universe 是否扩大; (3) OKX Retry-After 是否被延长. 对应 log event: okx_rate_limited_backoff (WARNING)."

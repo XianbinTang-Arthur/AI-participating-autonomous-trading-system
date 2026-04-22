@@ -281,6 +281,7 @@ def execute_workflow(
                     output_file.flush()
                     output_file.seek(0)
                     combined = output_file.read()
+                    _emit_subprocess_output_to_parent_stdout(workflow, combined)
                     return exit_code, tail_lines(combined, LOG_TAIL_LINES), ""
                 if time.monotonic() - start >= timeout:
                     proc.kill()
@@ -288,12 +289,30 @@ def execute_workflow(
                     output_file.flush()
                     output_file.seek(0)
                     combined = output_file.read()
+                    _emit_subprocess_output_to_parent_stdout(workflow, combined)
                     return -1, tail_lines(combined, LOG_TAIL_LINES), f"Timeout after {timeout}s"
                 if on_progress is not None:
                     on_progress()
                 time.sleep(HEARTBEAT_INTERVAL_SECONDS)
     except Exception as exc:
         return -2, "", str(exc)
+
+
+def _emit_subprocess_output_to_parent_stdout(workflow: str, combined: str) -> None:
+    # rdp_run_scheduled_workflow.py 是 fork 子进程, stdout 被 SpooledTemporaryFile
+    # 捕获并仅写入 governance.rdp_task_queue.log_tail. 不把这些行转发到父进程
+    # stdout, Promtail/Loki 就永远看不到子进程 log event (例如 silver_microstructure_etl
+    # 的 duration 字段), 导致 dashboard p95/avg + sev3-micro-silver-etl-slow 告警
+    # 永远是 no-data. 2026-04-22 诊断发现.
+    if not combined:
+        return
+    lines = [line for line in combined.splitlines() if line]
+    if not lines:
+        return
+    log.info("--- workflow %s stdout begin (%d lines) ---", workflow, len(lines))
+    for line in lines:
+        print(line, flush=True)
+    log.info("--- workflow %s stdout end ---", workflow)
 
 
 def _recover_orphaned_running_tasks() -> list[dict[str, object]]:
