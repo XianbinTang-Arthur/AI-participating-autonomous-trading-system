@@ -26,8 +26,15 @@ from aats.data_platform.replay.backtest.cost_validator import (
     CostValidationSummary,
     CostValidator,
 )
+from aats.data_platform.replay.backtest.harness import (
+    BacktestConfig,
+    BacktestResult,
+    run_backtest,
+)
 
 __all__ = [
+    "BacktestConfig",
+    "BacktestResult",
     "BacktestSummary",
     "CostDiagnostic",
     "CostValidationSummary",
@@ -42,4 +49,5 @@ __all__ = [
     "OrderType",
     "PositionSnapshot",
     "PositionTracker",
+    "run_backtest",
 ]
