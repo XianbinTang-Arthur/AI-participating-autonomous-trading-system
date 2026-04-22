@@ -409,6 +409,267 @@ class TestDecisionContextBuilder(unittest.TestCase):
         self.assertEqual(context.current_long_leg_opened_at, fill_ts)
         self.assertEqual(context.latest_long_leg_fill_timestamp, fill_ts)
 
+    def test_build_uses_market_snapshot_hint_when_cache_is_stale(self) -> None:
+        """2026-04-23 P1-a 锚定: market_snapshot_hint 优先于 stream_cache。
+
+        场景：trigger 在 T1 抓到 snapshot 并决定触发 run_cycle；但 run_cycle
+        实际执行到 context_builder.build() 时（可能几百 ms 后），stream_cache
+        已经被 T2 的新 snapshot 覆盖。pre-fix 行为：build 读 cache 得到 T2
+        snapshot，决策依据与 trigger 评估依据不一致（ref 漂移）。post-fix
+        行为：hint 里的 T1 snapshot 优先用于决策路径，ref 指向 inline envelope
+        供 audit。
+        """
+        from aats.schemas.market import MarketSnapshot
+        from aats.storage.stream_snapshot_cache import StreamSnapshotCache
+
+        settings = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+            }
+        )
+        event_store = InMemoryEventStore()
+        portfolio_repo = InMemoryPortfolioRepository()
+        execution_repo = InMemoryExecutionRepository()
+
+        now = datetime.now(timezone.utc)
+        trigger_ts = now - timedelta(milliseconds=500)  # T1 = trigger 时刻
+        cache_ts = now - timedelta(milliseconds=100)    # T2 = cache 最新（已 overwrite）
+
+        portfolio_repo.save_snapshot(
+            PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 75_000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=75_000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+
+        # Cache 里的是 T2 市场（last_price=71000）——新的
+        cache_envelope = build_envelope(
+            topic=topics.MARKET_SNAPSHOTS,
+            key="BTC-USDT-SWAP",
+            payload_model=MarketSnapshot(
+                symbol="BTC-USDT-SWAP",
+                exchange="OKX",
+                snapshot_ts=cache_ts,
+                best_bid=71_000.0,
+                best_ask=71_001.0,
+                last_price=71_000.5,
+                bid_size=1.0,
+                ask_size=1.0,
+                volume_24h=10_000_000.0,
+                kline_15m={"open": 71_000.0, "high": 71_100.0, "low": 70_900.0, "close": 71_000.5},
+                kline_1h={"open": 71_000.0, "high": 71_200.0, "low": 70_800.0, "close": 71_000.5},
+            ),
+            source_component="test_cache",
+        )
+        stream_cache = StreamSnapshotCache()
+        stream_cache.update(cache_envelope)
+        event_store.append(cache_envelope)
+
+        # Feature envelope 只走 event_store 即可（本 test 不关心 feature 路径）
+        event_store.append(
+            build_envelope(
+                topic=topics.FEATURE_SNAPSHOTS,
+                key="BTC-USDT-SWAP",
+                payload_model=FeatureSnapshot(
+                    symbol="BTC-USDT-SWAP",
+                    snapshot_ts=cache_ts,
+                    market_snapshot_ref=cache_envelope.event_id,
+                    trend_strength=0.7,
+                    volatility_state="medium",
+                    volatility_value=0.2,
+                    momentum_score=12.0,
+                    liquidity_score=0.8,
+                    regime_indicator="trend",
+                    regime_confidence=0.75,
+                    multi_timeframe_alignment=0.6,
+                    composite_alpha_score=0.4,
+                    suggested_position_scale=0.5,
+                    volatility_target_scale=1.0,
+                    feature_version="test",
+                ),
+                source_component="test",
+            )
+        )
+
+        # Hint 是 T1 市场（trigger 时刻的 snapshot）——旧的，但是决策应依据的
+        hint_snapshot = MarketSnapshot(
+            symbol="BTC-USDT-SWAP",
+            exchange="OKX",
+            snapshot_ts=trigger_ts,
+            best_bid=70_000.0,
+            best_ask=70_001.0,
+            last_price=70_000.5,  # 与 cache 的 71_000 显著不同
+            bid_size=1.0,
+            ask_size=1.0,
+            volume_24h=10_000_000.0,
+            kline_15m={"open": 69_900.0, "high": 70_100.0, "low": 69_800.0, "close": 70_000.5},
+            kline_1h={"open": 69_800.0, "high": 70_200.0, "low": 69_700.0, "close": 70_000.5},
+        )
+
+        builder = DecisionContextBuilder(
+            settings=settings,
+            event_store=event_store,
+            portfolio_repo=portfolio_repo,
+            execution_repo=execution_repo,
+            mode_controller=RuntimeModeController(settings=settings, kill_switch=KillSwitch()),
+            health_service=_FakeHealthService(),
+            stream_snapshot_cache=stream_cache,
+        )
+
+        context = builder.build(
+            "BTC-USDT-SWAP",
+            "15m",
+            decision_id="decision_p1a_hint_test",
+            health_snapshot_ref="evt_health_p1a_hint_test",
+            market_snapshot_hint=hint_snapshot,
+        )
+
+        # 关键断言 1: last_price 来自 hint（70000），不是 cache（71000）
+        self.assertEqual(
+            context.market_last_price,
+            Decimal("70000.5"),
+            "build 必须用 hint 的 market snapshot，不能因为 cache 已 overwrite 而读 cache",
+        )
+        # 关键断言 2: market_snapshot_ref 指向 inline envelope（非 cache 的 event_id）
+        self.assertTrue(
+            context.market_snapshot_ref.startswith("inline_market_"),
+            f"cache 已 overwrite 时应 synthesize inline envelope，实际 ref={context.market_snapshot_ref}",
+        )
+        self.assertNotEqual(
+            context.market_snapshot_ref,
+            cache_envelope.event_id,
+            "build 不应该使用 cache 里的 envelope（语义已漂移）",
+        )
+
+    def test_build_uses_cache_envelope_when_hint_ts_matches(self) -> None:
+        """2026-04-23 P1-a 锚定补充: 当 cache 仍保留 trigger 瞬间的 envelope
+        （即 hint.snapshot_ts == cache.payload.snapshot_ts），应优先用 cache
+        envelope（保留 canonical event_id 供 audit trail）而非 synthesize inline。
+        """
+        from aats.schemas.market import MarketSnapshot
+        from aats.storage.stream_snapshot_cache import StreamSnapshotCache
+
+        settings = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "derivatives_position_mode": "hedge",
+            }
+        )
+        event_store = InMemoryEventStore()
+        portfolio_repo = InMemoryPortfolioRepository()
+        execution_repo = InMemoryExecutionRepository()
+
+        now = datetime.now(timezone.utc)
+
+        portfolio_repo.save_snapshot(
+            PortfolioSnapshot(
+                snapshot_ts=now,
+                balances={"USDT": 75_000.0},
+                positions=[],
+                cost_basis={},
+                realized_pnl=0.0,
+                unrealized_pnl=0.0,
+                total_equity=75_000.0,
+                gross_exposure=0.0,
+                net_exposure=0.0,
+                risk_budget_usage={},
+                product_type="derivatives",
+                margin_mode="cross",
+            )
+        )
+
+        # Cache 和 hint 是同一个 ts（trigger 刚触发，尚未被覆盖）
+        shared_ts = now - timedelta(milliseconds=200)
+        shared_snapshot = MarketSnapshot(
+            symbol="BTC-USDT-SWAP",
+            exchange="OKX",
+            snapshot_ts=shared_ts,
+            best_bid=70_000.0,
+            best_ask=70_001.0,
+            last_price=70_000.5,
+            bid_size=1.0,
+            ask_size=1.0,
+            volume_24h=10_000_000.0,
+            kline_15m={"open": 69_900.0, "high": 70_100.0, "low": 69_800.0, "close": 70_000.5},
+            kline_1h={"open": 69_800.0, "high": 70_200.0, "low": 69_700.0, "close": 70_000.5},
+        )
+        cache_envelope = build_envelope(
+            topic=topics.MARKET_SNAPSHOTS,
+            key="BTC-USDT-SWAP",
+            payload_model=shared_snapshot,
+            source_component="test_canonical",
+        )
+        stream_cache = StreamSnapshotCache()
+        stream_cache.update(cache_envelope)
+        event_store.append(cache_envelope)
+
+        event_store.append(
+            build_envelope(
+                topic=topics.FEATURE_SNAPSHOTS,
+                key="BTC-USDT-SWAP",
+                payload_model=FeatureSnapshot(
+                    symbol="BTC-USDT-SWAP",
+                    snapshot_ts=shared_ts,
+                    market_snapshot_ref=cache_envelope.event_id,
+                    trend_strength=0.7,
+                    volatility_state="medium",
+                    volatility_value=0.2,
+                    momentum_score=12.0,
+                    liquidity_score=0.8,
+                    regime_indicator="trend",
+                    regime_confidence=0.75,
+                    multi_timeframe_alignment=0.6,
+                    composite_alpha_score=0.4,
+                    suggested_position_scale=0.5,
+                    volatility_target_scale=1.0,
+                    feature_version="test",
+                ),
+                source_component="test",
+            )
+        )
+
+        builder = DecisionContextBuilder(
+            settings=settings,
+            event_store=event_store,
+            portfolio_repo=portfolio_repo,
+            execution_repo=execution_repo,
+            mode_controller=RuntimeModeController(settings=settings, kill_switch=KillSwitch()),
+            health_service=_FakeHealthService(),
+            stream_snapshot_cache=stream_cache,
+        )
+
+        context = builder.build(
+            "BTC-USDT-SWAP",
+            "15m",
+            decision_id="decision_p1a_canonical_test",
+            health_snapshot_ref="evt_health_p1a_canonical_test",
+            market_snapshot_hint=shared_snapshot,
+        )
+
+        # hint 的 snapshot_ts 等于 cache 的 → 用 cache 的 canonical event_id
+        self.assertEqual(context.market_snapshot_ref, cache_envelope.event_id)
+        self.assertFalse(
+            context.market_snapshot_ref.startswith("inline_market_"),
+            "cache 仍保留同 ts envelope 时，不应 synthesize inline",
+        )
+
     def test_build_uses_continuous_open_snapshot_anchor_when_fill_history_is_missing(self) -> None:
         settings = AATSSettings.model_validate(
             {

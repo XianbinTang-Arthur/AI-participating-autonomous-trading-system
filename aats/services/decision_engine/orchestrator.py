@@ -12,6 +12,7 @@ from aats.events import topics
 from aats.events.envelopes import publish_model
 from aats.schemas.common import EventEnvelope, new_id
 from aats.schemas.decision import PositionTarget
+from aats.schemas.market import MarketSnapshot
 from aats.schemas.operator import ProcessingFailureRecord
 from aats.services.ai_service.inference import AIInferenceService
 from aats.services.decision_engine.baseline import BaselineStrategy
@@ -76,6 +77,7 @@ class DecisionOrchestrator:
         timeframe: str,
         *,
         feature_snapshot_hint: EventEnvelope | None = None,
+        market_snapshot_hint: MarketSnapshot | None = None,
     ) -> PositionTarget:
         # 关键背景：本函数原本几乎所有的工作都跑在 event loop 主线程上 ——
         # context_builder.build / baseline_strategy.evaluate /
@@ -114,6 +116,7 @@ class DecisionOrchestrator:
                         timeframe=timeframe,
                         decision_id=decision_id,
                         feature_snapshot_hint=feature_snapshot_hint,
+                        market_snapshot_hint=market_snapshot_hint,
                     ),
                     timeout=self._RUN_CYCLE_TIMEOUT_SECONDS,
                 )
@@ -159,6 +162,7 @@ class DecisionOrchestrator:
         timeframe: str,
         decision_id: str,
         feature_snapshot_hint: EventEnvelope | None = None,
+        market_snapshot_hint: MarketSnapshot | None = None,
     ) -> PositionTarget:
         health_snapshot = await asyncio.to_thread(
             self.context_builder.build_health_snapshot,
@@ -178,6 +182,7 @@ class DecisionOrchestrator:
             decision_id=decision_id,
             health_snapshot_ref=health_envelope.event_id,
             feature_snapshot_hint=feature_snapshot_hint,
+            market_snapshot_hint=market_snapshot_hint,
         )
         log_event(
             self.logger,

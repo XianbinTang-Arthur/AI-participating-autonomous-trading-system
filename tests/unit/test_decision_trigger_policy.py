@@ -182,7 +182,7 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str]] = []
 
-            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None):
+            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None, market_snapshot_hint=None):
                 self.calls.append((symbol, timeframe))
                 await asyncio.sleep(0)
 
@@ -238,7 +238,7 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str]] = []
 
-            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None):
+            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None, market_snapshot_hint=None):
                 self.calls.append((symbol, timeframe))
 
         class _FakeMarketGateway:
@@ -293,7 +293,7 @@ class TestDecisionCycleTrigger(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.calls: list[tuple[str, str]] = []
 
-            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None):
+            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None, market_snapshot_hint=None):
                 self.calls.append((symbol, timeframe))
 
         class _FakeMarketGateway:
@@ -410,7 +410,7 @@ class TestFeatureSnapshotHintPropagation(unittest.IsolatedAsyncioTestCase):
             def __init__(self) -> None:
                 self.hints: list[object] = []
 
-            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None):
+            async def run_cycle(self, *, symbol: str, timeframe: str, feature_snapshot_hint=None, market_snapshot_hint=None):
                 self.hints.append(feature_snapshot_hint)
 
         class _FakeMarketGateway:

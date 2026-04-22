@@ -105,17 +105,60 @@ class DecisionContextBuilder:
         decision_id: str,
         health_snapshot_ref: str,
         feature_snapshot_hint: EventEnvelope | None = None,
+        market_snapshot_hint: MarketSnapshot | None = None,
     ) -> DecisionContext:
         if timeframe not in self.settings.supported_timeframes:
             raise ValueError(f"Unsupported timeframe: {timeframe}")
         if not self.settings.symbol_allowed_for_decision_cycle(symbol):
             raise ValueError(f"symbol_not_enabled_for_decision_cycle:{symbol}")
 
-        market_event = (
-            self._stream_cache.latest(topics.MARKET_SNAPSHOTS, key=symbol)
-            if self._stream_cache is not None
-            else None
-        )
+        # 2026-04-23 P1-a：market_snapshot_hint 透传。对等于 feature_snapshot_hint，
+        # 消除 trigger 评估 -> build 读取之间新 market snapshot 抢跑的 ref 漂移。
+        #
+        # 选择策略（与 feature 路径不完全对称，因为 market_gateway.latest_snapshot()
+        # 只返回 MarketSnapshot 不含 EventEnvelope，而 trigger 里的 pending.market_snapshot
+        # 也是 MarketSnapshot 类型）：
+        #   1. 如果 hint 给了，**优先** 从 stream_cache 取 market envelope，若其 payload
+        #      的 snapshot_ts 与 hint.snapshot_ts 相等 → 用该 envelope（保留规范 event_id
+        #      供 audit/ replay 关联）。
+        #   2. 若 stream_cache 已被新 snapshot 覆盖（hint 与 cache 不一致）→ 构造 inline
+        #      envelope 承载 hint 数据，event_id 用 deterministic `inline_market_<sym>_<ts>`
+        #      格式，audit 能看出这是来自 trigger 内联、非 event_store 规范 envelope。
+        #   3. 若 hint 没给（集成测试 / operator API 等不走 trigger 的调用路径）→ 原始
+        #      stream_cache / event_store latest 逻辑不变。
+        market_event: EventEnvelope | None = None
+        if market_snapshot_hint is not None:
+            _cached_market = (
+                self._stream_cache.latest(topics.MARKET_SNAPSHOTS, key=symbol)
+                if self._stream_cache is not None
+                else None
+            )
+            if _cached_market is not None:
+                try:
+                    _cached_snap = MarketSnapshot.model_validate(_cached_market.payload)
+                    if _cached_snap.snapshot_ts == market_snapshot_hint.snapshot_ts:
+                        market_event = _cached_market
+                except Exception:
+                    # cache 里的 envelope 格式异常不应 block 决策；走 inline 分支
+                    market_event = None
+            if market_event is None:
+                # cache overwrite 或格式异常 → inline envelope 承载 hint
+                _hint_ts_iso = market_snapshot_hint.snapshot_ts.isoformat()
+                market_event = EventEnvelope(
+                    event_id=f"inline_market_{symbol}_{_hint_ts_iso}",
+                    event_type=type(market_snapshot_hint).__name__,
+                    event_timestamp=market_snapshot_hint.snapshot_ts,
+                    source_component="decision_engine_inline_from_trigger",
+                    topic=topics.MARKET_SNAPSHOTS,
+                    key=symbol,
+                    payload=market_snapshot_hint.model_dump(mode="python"),
+                )
+        if market_event is None:
+            market_event = (
+                self._stream_cache.latest(topics.MARKET_SNAPSHOTS, key=symbol)
+                if self._stream_cache is not None
+                else None
+            )
         if market_event is None:
             market_event = self.event_store.latest(topics.MARKET_SNAPSHOTS, key=symbol)
         # R3-P1-U-A：trigger 路径优先使用触发本次 run_cycle 的 feature envelope；

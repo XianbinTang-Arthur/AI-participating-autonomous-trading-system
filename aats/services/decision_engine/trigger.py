@@ -281,6 +281,11 @@ class DecisionCycleTrigger:
             symbol=pending.snapshot.symbol,
             timeframe=pending.timeframe,
             feature_snapshot_hint=pending.feature_envelope,
+            # 2026-04-23 P1-a：market snapshot 也透传，消除 trigger 评估 vs
+            # build 读取之间 new market snapshot 抢跑的 ref 漂移。pending 已经
+            # capture trigger 瞬间的 market_snapshot（trigger.py L482 抓取），
+            # 这里只需把它送进决策路径；context_builder 会优先用此 hint。
+            market_snapshot_hint=pending.market_snapshot,
         )
         fail_key = (pending.snapshot.symbol, pending.timeframe)
         self._consecutive_failures.pop(fail_key, None)
@@ -415,6 +420,9 @@ class DecisionCycleTrigger:
                         symbol=snapshot.symbol,
                         timeframe=timeframe,
                         feature_snapshot_hint=feature_envelope,
+                        # 2026-04-23 P1-a：对等于 feature hint，透传 market
+                        # snapshot。legacy inline 路径也修一遍，语义一致。
+                        market_snapshot_hint=current_market_snapshot,
                     )
                 except Exception as exc:
                     n = self._consecutive_failures.get(fail_key, 0) + 1

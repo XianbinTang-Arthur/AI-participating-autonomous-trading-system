@@ -102,7 +102,7 @@ class TestDispatcherLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(trig._trigger_queue)
 
     @staticmethod
-    async def _noop_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+    async def _noop_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
         return None
 
 
@@ -112,7 +112,7 @@ class TestDispatcherLoopConsumesQueue(unittest.IsolatedAsyncioTestCase):
     async def test_dispatcher_runs_cycle_for_enqueued_trigger(self) -> None:
         invocations: list[tuple[str, str]] = []
 
-        async def spy_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+        async def spy_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
             invocations.append((symbol, timeframe))
 
         orch = SimpleNamespace(run_cycle=spy_run_cycle)
@@ -142,7 +142,7 @@ class TestDispatcherLoopSurviveException(unittest.IsolatedAsyncioTestCase):
     async def test_exception_does_not_kill_loop(self) -> None:
         call_counts = {"n": 0}
 
-        async def mock_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+        async def mock_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
             call_counts["n"] += 1
             if call_counts["n"] == 1:
                 raise RuntimeError("intentional boom")
@@ -189,7 +189,7 @@ class TestEnqueueLatestWins(unittest.IsolatedAsyncioTestCase):
         release = asyncio.Event()
         invocations: list[str] = []
 
-        async def stuck_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+        async def stuck_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
             invocations.append(feature_snapshot_hint.event_id)
             await release.wait()
 
@@ -298,7 +298,7 @@ class TestHandleFeatureSnapshotViaQueue(unittest.IsolatedAsyncioTestCase):
         release_run_cycle = asyncio.Event()
         run_cycle_calls: list[str] = []
 
-        async def slow_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+        async def slow_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
             run_cycle_calls.append(feature_snapshot_hint.event_id)
             # 卡住不返回，模拟 22s 毛刺
             await release_run_cycle.wait()
@@ -364,7 +364,7 @@ class TestHandleFeatureSnapshotViaQueue(unittest.IsolatedAsyncioTestCase):
         """命中 should_trigger=True 后 dispatcher 最终跑 run_cycle。"""
         run_cycle_calls: list[str] = []
 
-        async def run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+        async def run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
             run_cycle_calls.append(feature_snapshot_hint.event_id)
 
         policy = SimpleNamespace(
@@ -409,7 +409,7 @@ class TestHandleFeatureSnapshotViaQueue(unittest.IsolatedAsyncioTestCase):
         """
         run_cycle_calls: list[str] = []
 
-        async def run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+        async def run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
             run_cycle_calls.append(feature_snapshot_hint.event_id)
 
         policy = SimpleNamespace(
@@ -488,7 +488,7 @@ class TestDroppedTriggersMetric(unittest.IsolatedAsyncioTestCase):
         metrics = MetricsRegistry()
         release = asyncio.Event()
 
-        async def stuck_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+        async def stuck_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
             await release.wait()
 
         orch = SimpleNamespace(run_cycle=stuck_run_cycle)
@@ -524,7 +524,7 @@ class TestDroppedTriggersMetric(unittest.IsolatedAsyncioTestCase):
         """没有 metrics 注入时 _enqueue_trigger 必须兜底不抛。"""
         release = asyncio.Event()
 
-        async def stuck_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+        async def stuck_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
             await release.wait()
 
         orch = SimpleNamespace(run_cycle=stuck_run_cycle)
@@ -543,7 +543,7 @@ class TestDroppedTriggersMetric(unittest.IsolatedAsyncioTestCase):
 
     _release = asyncio.Event()
 
-    async def _stuck_run_cycle(self, *, symbol, timeframe, feature_snapshot_hint=None):
+    async def _stuck_run_cycle(self, *, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
         # 为 test_no_drop_when_queue_empty 用；consume 掉 queue 后等解除
         await self._release.wait()
 
@@ -676,7 +676,7 @@ class TestFeatureSnapshotTTL(unittest.IsolatedAsyncioTestCase):
 
         run_cycle_calls: list[str] = []
 
-        async def tracked_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None):
+        async def tracked_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
             run_cycle_calls.append(symbol)
 
         policy = SimpleNamespace(
