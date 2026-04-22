@@ -530,6 +530,18 @@ class OrderManager:
             intent=intent,
             client_order_id=resolved_client_order_id,
         )
+        # post_only_with_timeout_fallback (Layer 4, 2026-04-21):
+        # execution_style="post_only" 是来自 planner 的信号 (见 §3.4).
+        # post_only 自带 orchestration: submit → 等 timeout → 若仍未成交则
+        # cancel + fallback 重下 remaining_qty (走 bounded_taker 路径).
+        # 优先于 serial_exit_split: 如果 fallback intent 触发 split, 由 fallback
+        # 的 _execute_submit_intent 递归处理.
+        if self._intent_signals_post_only(intent):
+            return await self._execute_post_only_with_timeout_fallback(
+                intent=intent,
+                client_order_id=resolved_client_order_id,
+                leg_intent=leg_intent,
+            )
         split_limit = await self._serial_exit_split_limit(intent=intent)
         if split_limit is not None:
             # Task 142：split 统一返回 OrderState（或 raise
@@ -547,6 +559,256 @@ class OrderManager:
             client_order_id=resolved_client_order_id,
             leg_intent=leg_intent,
         )
+
+    @staticmethod
+    def _intent_signals_post_only(intent: OrderIntent) -> bool:
+        """post_only_with_timeout_fallback (2026-04-21): execution_style 是
+        post_only 的唯一意图信号 (OrderIntent.order_type Literal 不含 post_only).
+        见 docs/design/post_only_maker_exit_mode_2026_04_21.md §3.4
+        """
+        return str(getattr(intent, "execution_style", "") or "").strip().lower() == "post_only"
+
+    async def _execute_post_only_with_timeout_fallback(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+        leg_intent: LegOrderIntent | None,
+    ) -> OrderState:
+        """post_only orchestration (Layer 4, 2026-04-21).
+
+        Sequence (见 docs/design/post_only_maker_exit_mode_2026_04_21.md §3.5):
+          1. _submit_single_order_intent(post_only) → OrderState
+          2. 若立即终态 (FILLED / FAILED / REJECTED / CANCELED / EXPIRED) → return
+             - sCode!=0 (OKX 拒绝, 通常 51005 will fill immediately) → 立即 fallback
+          3. asyncio.sleep(timeout_ms)
+          4. 重新读 order_state. 若已终态 → return
+          5. 若 remaining_qty <= epsilon → return (state machine 即将终结)
+          6. cancel_order(client_order_id) → 等取消完成
+          7. 用 remaining_qty 构造 fallback intent (bounded_taker), 递归 _execute_submit_intent
+
+        Fallback 走现有 bounded_taker 路径, 计费按 taker (fee_resolver 不给 maker 折扣).
+        所有 fallback 事件记 log_event 作为 post-deploy evidence.
+        """
+        post_only_state = await self._submit_single_order_intent(
+            intent=intent,
+            client_order_id=client_order_id,
+            leg_intent=leg_intent,
+        )
+        # 立即终态 (含 OKX REJECTED) → 触发 fallback 或直接返回
+        if self.order_state_machine.is_terminal(post_only_state.status):
+            if post_only_state.status in {"REJECTED", "FAILED"}:
+                # post_only 被 OKX 拒绝 (e.g., sCode 51116 跨价) → 立即 fallback
+                log_event(
+                    self.logger,
+                    "post_only_rejected_immediate_fallback",
+                    **correlation_fields(
+                        decision_id=intent.decision_id,
+                        intent_id=intent.intent_id,
+                        symbol=intent.symbol,
+                        client_order_id=client_order_id,
+                        rejection_status=post_only_state.status,
+                        rejection_reason=post_only_state.cancel_reason or post_only_state.execution_error,
+                    ),
+                )
+                return await self._submit_post_only_fallback(
+                    original_intent=intent,
+                    original_leg_intent=leg_intent,
+                    remaining_qty=post_only_state.remaining_qty or intent.quantity,
+                    trigger="rejected",
+                )
+            return post_only_state
+
+        # 等待 timeout
+        timeout_ms = self._post_only_timeout_ms()
+        await asyncio.sleep(max(timeout_ms, 0.0) / 1000.0)
+
+        # 重读最新 state (sync_exchange_state polling loop 已可能更新)
+        refreshed = self.execution_repo.get_order_state(client_order_id) or post_only_state
+        if self.order_state_machine.is_terminal(refreshed.status):
+            log_event(
+                self.logger,
+                "post_only_terminal_within_timeout",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    client_order_id=client_order_id,
+                    final_status=refreshed.status,
+                    filled_qty=str(refreshed.filled_qty),
+                ),
+            )
+            return refreshed
+
+        remaining_qty = max(
+            Decimal(refreshed.remaining_qty or Decimal("0")),
+            Decimal("0"),
+        )
+        if remaining_qty <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+            # 状态机将自然终结, 无需 fallback
+            return refreshed
+
+        # 超时未成交 → cancel post_only
+        log_event(
+            self.logger,
+            "post_only_timeout_cancel",
+            **correlation_fields(
+                decision_id=intent.decision_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                client_order_id=client_order_id,
+                pre_cancel_status=refreshed.status,
+                pre_cancel_filled_qty=str(refreshed.filled_qty),
+                pre_cancel_remaining_qty=str(remaining_qty),
+                timeout_ms=timeout_ms,
+            ),
+        )
+        try:
+            canceled = await self.cancel_order(client_order_id)
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "post_only_cancel_failed",
+                level="error",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    client_order_id=client_order_id,
+                    error=str(exc),
+                ),
+            )
+            # cancel 失败: 返回原 state, 不触发 fallback (避免 double-spend remaining)
+            return refreshed
+
+        # 重新计算 remaining (cancel 可能在 race 中带回新的 fill)
+        post_cancel_remaining = max(
+            Decimal(canceled.remaining_qty or Decimal("0")),
+            Decimal("0"),
+        )
+        if post_cancel_remaining <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+            log_event(
+                self.logger,
+                "post_only_filled_during_cancel_race",
+                **correlation_fields(
+                    decision_id=intent.decision_id,
+                    intent_id=intent.intent_id,
+                    symbol=intent.symbol,
+                    client_order_id=client_order_id,
+                    cancel_status=canceled.status,
+                    filled_qty=str(canceled.filled_qty),
+                ),
+            )
+            return canceled
+
+        return await self._submit_post_only_fallback(
+            original_intent=intent,
+            original_leg_intent=leg_intent,
+            remaining_qty=post_cancel_remaining,
+            trigger="timeout",
+        )
+
+    def _post_only_timeout_ms(self) -> float:
+        raw = getattr(
+            self.settings,
+            "strategy_hedge_independent_post_only_timeout_ms",
+            3000.0,
+        )
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 3000.0
+
+    def _post_only_fallback_mode(self) -> str:
+        raw = getattr(
+            self.settings,
+            "strategy_hedge_independent_post_only_fallback_mode",
+            "bounded_taker",
+        )
+        return str(raw).strip().lower() or "bounded_taker"
+
+    async def _submit_post_only_fallback(
+        self,
+        *,
+        original_intent: OrderIntent,
+        original_leg_intent: LegOrderIntent | None,
+        remaining_qty: Decimal,
+        trigger: str,
+    ) -> OrderState:
+        """构造 + 派发 fallback intent. 走 _execute_submit_intent 递归 (允许 split)."""
+        fallback_intent, fallback_leg_intent = self._build_post_only_fallback_intent(
+            original_intent=original_intent,
+            original_leg_intent=original_leg_intent,
+            remaining_qty=remaining_qty,
+        )
+        fallback_client_order_id = self._derived_post_only_fallback_client_order_id(fallback_intent)
+        log_event(
+            self.logger,
+            "post_only_fallback_dispatch",
+            **correlation_fields(
+                decision_id=fallback_intent.decision_id,
+                intent_id=fallback_intent.intent_id,
+                symbol=fallback_intent.symbol,
+                trigger=trigger,
+                fallback_mode=self._post_only_fallback_mode(),
+                fallback_quantity=str(remaining_qty),
+                original_intent_id=original_intent.intent_id,
+            ),
+        )
+        return await self._execute_submit_intent(
+            intent=fallback_intent,
+            client_order_id=fallback_client_order_id,
+            leg_intent=fallback_leg_intent,
+        )
+
+    def _build_post_only_fallback_intent(
+        self,
+        *,
+        original_intent: OrderIntent,
+        original_leg_intent: LegOrderIntent | None,
+        remaining_qty: Decimal,
+    ) -> tuple[OrderIntent, LegOrderIntent | None]:
+        """构造 fallback intent (Layer 4, evidence doc §3.5).
+
+        当前只支持 bounded_taker 一种 fallback (default).
+        其他 fallback_mode 在 Layer 5 配置审计阶段拒绝.
+        """
+        fallback_mode = self._post_only_fallback_mode()
+        if fallback_mode != "bounded_taker":
+            raise RuntimeError(
+                f"post_only_unsupported_fallback_mode:{fallback_mode}"
+            )
+        suffix = ":pof"  # post_only_fallback
+        update_fields = {
+            "intent_id": f"{original_intent.intent_id}{suffix}",
+            "quantity": remaining_qty,
+            "execution_style": "bounded_taker_cap",
+            "order_type": "market",
+            "time_in_force": "IOC",
+            "limit_price": None,
+            "idempotency_key": f"{original_intent.idempotency_key}{suffix}",
+            "execution_attempt_id": None,
+        }
+        fallback_intent = original_intent.model_copy(update=update_fields)
+        fallback_leg_intent: LegOrderIntent | None = None
+        if original_leg_intent is not None:
+            leg_update = {
+                **update_fields,
+                "leg_intent_id": f"{original_leg_intent.leg_intent_id}{suffix}",
+                "idempotency_key": f"{original_leg_intent.idempotency_key}{suffix}",
+            }
+            # OrderIntent has intent_id but LegOrderIntent has leg_intent_id; pop wrong key.
+            leg_update.pop("intent_id", None)
+            fallback_leg_intent = original_leg_intent.model_copy(update=leg_update)
+        return fallback_intent, fallback_leg_intent
+
+    def _derived_post_only_fallback_client_order_id(self, intent: OrderIntent) -> str:
+        preview_client_order_id_fn = getattr(self.adapter, "preview_client_order_id", None)
+        return (
+            preview_client_order_id_fn(intent)
+            if callable(preview_client_order_id_fn)
+            else None
+        ) or intent.idempotency_key or new_id("clord")
 
     async def _persist_submitting_state_for_intent(
         self,
