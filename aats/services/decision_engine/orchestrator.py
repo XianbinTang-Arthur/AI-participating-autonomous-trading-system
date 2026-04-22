@@ -22,6 +22,9 @@ from aats.services.strategy_engines.overlay_parent_exposure import overlay_paren
 if TYPE_CHECKING:
     from aats.services.operator.strategy_profiles import StrategyProfileControlService
     from aats.services.strategy_engines.coordinator import StrategyCoordinatorService
+    from aats.services.strategy_engines.paper_trading_shadow import (
+        PaperTradingShadowService,
+    )
 
 
 class DecisionOrchestrator:
@@ -35,6 +38,7 @@ class DecisionOrchestrator:
         target_engine: TargetPositionEngine,
         strategy_profile_service: StrategyProfileControlService | None = None,
         strategy_coordinator: StrategyCoordinatorService | None = None,
+        paper_trading_shadow_service: PaperTradingShadowService | None = None,
         metrics: MetricsRegistry | None = None,
     ) -> None:
         self.bus = bus
@@ -44,6 +48,10 @@ class DecisionOrchestrator:
         self.target_engine = target_engine
         self.strategy_profile_service = strategy_profile_service
         self.strategy_coordinator = strategy_coordinator
+        # Round 3 · 2026-04-22 · Non-AI paper trading shadow (独立于 AI shadow).
+        # 默认 None → 不跑 shadow code path，零开销。
+        # build_runtime() 在 settings.paper_trading_shadow_enabled=True 时才实例化。
+        self.paper_trading_shadow_service = paper_trading_shadow_service
         self.metrics = metrics
         self.logger = get_logger("aats.decision_engine")
 
@@ -273,6 +281,20 @@ class DecisionOrchestrator:
                 snapshot=strategy_snapshot,
                 snapshot_ref=strategy_envelope.event_id,
             )
+        # ── LF-Round3-P1.3 · 2026-04-22 · Paper trading shadow hook ──
+        # 在 live target 最终版本生成后（含 strategy_coordinator.apply_selected_target
+        # 之后）、AI shadow 之前评估候选 strategy 参数。
+        #
+        # 安全不变量（见 docs/task/round3_paper_trading_design.md §7）：
+        # - 整段 try/except 包，任何异常绝不 propagate 进 live run_cycle
+        # - service 默认 None（未注入）→ skip
+        # - service enabled=False 或 candidates 空 → skip
+        await self._maybe_record_paper_trading_shadows(
+            context=context,
+            baseline=baseline,
+            live_target=target,
+            symbol=symbol,
+        )
         brief = None if ai_assessment is None else self.ai_service.latest_brief(context.decision_id)
         shadow_assessment = None if ai_assessment is None else self.ai_service.latest_shadow_assessment(context.decision_id)
         if brief is not None:
@@ -450,3 +472,65 @@ class DecisionOrchestrator:
                     error=str(exc),
                 ),
             )
+
+    async def _maybe_record_paper_trading_shadows(
+        self,
+        *,
+        context,
+        baseline,
+        live_target,
+        symbol: str,
+    ) -> list[str]:
+        """Round 3 · 评估 non-AI paper trading 候选并 publish。
+
+        **安全不变量**：本方法内部对任何异常 swallow + warning log，永远不
+        让 shadow 评估破坏 live run_cycle。返回被 publish 的 shadow
+        decision event_id 列表（audit 层可 append）。
+
+        服务未注入或未 enabled 时直接返回空列表，零开销。
+        """
+        if self.paper_trading_shadow_service is None:
+            return []
+        if not self.paper_trading_shadow_service.enabled():
+            return []
+        try:
+            shadow_decisions = self.paper_trading_shadow_service.evaluate_candidates(
+                context=context,
+                baseline=baseline,
+                live_target=live_target,
+            )
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "paper_trading_shadow_evaluate_failed",
+                level="warning",
+                decision_id=live_target.decision_id,
+                symbol=symbol,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return []
+
+        event_ids: list[str] = []
+        for decision in shadow_decisions:
+            try:
+                envelope = await publish_model(
+                    bus=self.bus,
+                    topic=topics.STRATEGY_FAMILY_SHADOW_DECISIONS,
+                    key=symbol,
+                    payload_model=decision,
+                    source_component="paper_trading_shadow",
+                )
+                event_ids.append(envelope.event_id)
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "paper_trading_shadow_publish_failed",
+                    level="warning",
+                    decision_id=live_target.decision_id,
+                    symbol=symbol,
+                    candidate_id=decision.candidate_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+        return event_ids

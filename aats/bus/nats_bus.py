@@ -105,6 +105,8 @@ DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
         _topics.AI_DECISION_BRIEFS,       # AI 决策简报；决策核心载体
         _topics.AI_SHADOW_DECISIONS,      # 影子决策；shadow→real 切换依据
         _topics.AI_SHADOW_EVALUATIONS,    # 影子评估；同上
+        _topics.STRATEGY_FAMILY_SHADOW_DECISIONS,    # Round 3 · 非 AI 策略 paper trading 决策
+        _topics.STRATEGY_FAMILY_SHADOW_EVALUATIONS,  # Round 3 · 对应评估
         _topics.AI_DEGRADATION_EVENTS,    # AI 降级事件；触发 risk 自动降级
         _topics.STRATEGY_COORDINATOR_SNAPSHOTS,  # 协调器状态；重启恢复依赖
         _topics.STRATEGY_SLEEVE_INTENTS,  # sleeve 意图；决策→执行

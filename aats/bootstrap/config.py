@@ -3970,6 +3970,20 @@ def _build_decision_slice(
         stream_snapshot_cache=slices.stream_snapshot_cache,
     )
     slices.decision_trigger_policy = DecisionTriggerPolicy(settings=runtime_settings)
+    # Round 3 · 2026-04-22 · Non-AI paper trading shadow 服务 (optional).
+    # 只在 settings.paper_trading_shadow_enabled + candidates 非空时实例化；
+    # 否则传 None，orchestrator 里走零开销 skip 路径。
+    _paper_trading_shadow_service = None
+    if runtime_settings.paper_trading_shadow_enabled and runtime_settings.paper_trading_shadow_candidates:
+        from aats.services.strategy_engines.paper_trading_shadow import (
+            PaperTradingShadowService,
+        )
+
+        _paper_trading_shadow_service = PaperTradingShadowService(
+            base_settings=runtime_settings,
+            fee_resolver=slices.fee_resolver,
+            metrics=slices.metrics,
+        )
     slices.decision_engine = DecisionOrchestrator(
         bus=slices.bus,
         context_builder=DecisionContextBuilder(
@@ -3997,6 +4011,7 @@ def _build_decision_slice(
             metrics=slices.metrics,
         ),
         strategy_coordinator=slices.strategy_coordinator,
+        paper_trading_shadow_service=_paper_trading_shadow_service,
         metrics=slices.metrics,
     )
     _kill_switch = slices.kill_switch
