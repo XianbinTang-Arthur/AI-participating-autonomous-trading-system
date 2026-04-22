@@ -38,10 +38,13 @@ ai_decision_min_directional_edge: 0.16
 ai_shadow_mode_enabled: true
 # [常用可调] ai_shadow_evaluation_window：shadow 评估窗口长度。可选值：5 ~ 200；推荐值：30。
 ai_shadow_evaluation_window: 30
-# ── Round 3 · 2026-04-22 · Paper trading shadow ────────────────────
+# ── Round 3 · 2026-04-22/23 · Paper trading shadow ────────────────────
 # 非 AI 策略的候选参数 shadow 跑（和 AI shadow 正交，互不影响 live）。
-# 当前启用候选：entry_post_only —— 测试 "如果入场切 post_only_with_timeout_fallback
-# 而不是 IOC 会怎样"。真实 live 仍用 passive_first (IOC taker 5 bps)。
+# 三个正交维度：
+#   A) entry_post_only         —— 入场 IOC → post_only（maker）
+#   B) edge_buffer_1bps        —— 噪音缓冲 2.0 → 1.0 bps
+#   C) min_net_edge_1bps       —— 最小净边际 2.0 → 1.0 bps
+# live 保持 IOC + 2.0/2.0 不变。
 # 启用详情：docs/task/round3_paper_trading_usage.md
 paper_trading_shadow_enabled: true
 paper_trading_shadow_candidates:
@@ -49,6 +52,14 @@ paper_trading_shadow_candidates:
     family: "independent"
     overrides:
       strategy_hedge_independent_entry_execution_mode: "post_only_with_timeout_fallback"
+  - candidate_id: "edge_buffer_1bps"
+    family: "independent"
+    overrides:
+      strategy_edge_noise_buffer_bps: 1.0
+  - candidate_id: "min_net_edge_1bps"
+    family: "independent"
+    overrides:
+      strategy_min_net_edge_bps: 1.0
 # [常用可调] ai_outcome_review_bad_window_threshold：坏窗口数量达到多少后要求复核。可选值：1 ~ 20；推荐值：3。
 ai_outcome_review_bad_window_threshold: 3
 # [常用可调] ai_outcome_max_fee_ratio_delta：AI 相对 baseline 可多承担的费率漂移。可选值：0.0 ~ 1.0；推荐值：0.08。
