@@ -398,8 +398,11 @@ groups:
               # `min_over_time(...[10m]) == 0` 表示 10min 内至少一次 DOWN.
               # `(up == 0) or (absent(up)...)` 合并"target 挂"和"target 配置
               # 但 Prometheus 没采到"两种情形.
+              # 必须用 `== bool 0` 返回 0/1 数值（而非按条件过滤序列），
+              # 否则 target 健康时表达式返回空向量 → NoData → noDataState=Alerting
+              # 反而误报 dead-man。
               expr: |
-                (min_over_time(up{job=~"aats|aats-microstructure"}[10m]) == 0)
+                (min_over_time(up{job=~"aats|aats-microstructure"}[10m]) == bool 0)
                 or on() (absent(up{job=~"aats|aats-microstructure"}) * 0 + 1)
               queryType: range
             relativeTimeRange:
@@ -420,7 +423,9 @@ groups:
               conditions:
                 - evaluator: { type: gt, params: [0.5] }
             relativeTimeRange: { from: 0, to: 0 }
-        noDataState: Alerting  # 区别于其他规则: 无数据本身就是告警对象
+        # 配合 `== bool 0` 改写: 表达式现在 always 返回序列(0 或 1),
+        # NoData 只在 Prometheus 完全挂掉时发生 — 这时仍应告警.
+        noDataState: Alerting
         execErrState: Error
         for: 10m
         labels:
