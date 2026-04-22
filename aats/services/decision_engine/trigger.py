@@ -59,7 +59,7 @@ class DecisionCycleTrigger:
 
         # ──────────────────────────────────────────────────────────────
         # Queue dispatcher 基础设施（docs/task/
-        # decision_features_handler_queue_decoupling_sow.md §3.S1）。
+        # decision_features_handler_queue_decoupling_sow.md §3.S2）。
         #
         # 目的：把 run_cycle 从 NATS 订阅回调里搬出来。原设计里 handler
         # 直接 ``async with lock: await run_cycle(...)``，run_cycle 毛刺
@@ -67,17 +67,19 @@ class DecisionCycleTrigger:
         # sync I/O 冲击 → NATS publish 超时 → decision_cycle_failed
         # 级联（见 SOW §1.2 根因链）。
         #
-        # 新路径：handler 只做 parse + should_trigger 判断，命中的
+        # 当前路径：handler 只做 parse + should_trigger 判断，命中的
         # trigger 塞进 ``_trigger_queue`` 立即返回让 NATS ack；后台
-        # ``_dispatcher_loop`` 单协程消费 queue 跑 run_cycle。
+        # ``_dispatcher_loop``（由 ``start()`` 拉起）单协程消费 queue 跑
+        # run_cycle。``stop()`` 通过 cancel dispatcher task + 清空
+        # queue 的方式收敛。
         #
-        # S1 先建这个骨架，但 flag 默认 False，生产行为**完全不变**。
-        # S2 切 flag=True 启用；S3 彻底删 legacy。
+        # 当前进度：S2 已上线（flag 默认 True）。S3 待删 legacy 路径
+        # + flag 本身（legacy 的 ``_timeframe_locks`` 锁也随之回收）。
         # ──────────────────────────────────────────────────────────────
         self._trigger_queue: asyncio.Queue[_PendingTrigger] | None = None
         self._dispatcher_task: asyncio.Task[None] | None = None
         self._dispatcher_shutdown = asyncio.Event()
-        # Feature flag：S2 改成 True；S3 连同 flag 一起删。
+        # Feature flag：S2 已把默认切到 True；S3 会连同 flag + legacy 路径一起删。
         self._use_queue_dispatcher: bool = True
 
     # ──────────────────────────────────────────────────────────────
@@ -88,9 +90,16 @@ class DecisionCycleTrigger:
     # ──────────────────────────────────────────────────────────────
 
     async def start(self) -> None:
-        """初始化 queue + 起 dispatcher task。在 bus.subscribe 之前调。
+        """初始化 queue 并拉起后台 dispatcher task。在 bus.subscribe 之前调。
 
-        幂等：多次调用只起一个 task。
+        具体动作：
+        - 新建 ``_trigger_queue`` (``asyncio.Queue(maxsize=1)``，latest-wins
+          语义见 ``_enqueue_trigger``)；
+        - 清空 ``_dispatcher_shutdown``（支持 start→stop→start 的重启场景）；
+        - ``asyncio.create_task(_dispatcher_loop(), name="features_snapshot_dispatcher")``
+          并记录在 ``self._dispatcher_task`` 里，由 ``stop()`` 负责 cancel。
+
+        幂等：已 start 过（``_dispatcher_task is not None``）时直接返回。
         """
         if self._dispatcher_task is not None:
             return
