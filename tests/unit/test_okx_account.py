@@ -1720,5 +1720,97 @@ class TestMergePayloadsDefensive(unittest.TestCase):
         self.assertEqual(stream.getvalue(), "", "正常路径不应产生任何 warning log")
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# 2026-04-22 OKX 429 rate-limit 治理: P-B 根治锁定测试
+#   命中 OKX classification=rate_limited 时, _cached_aux_payload_optional
+#   把对应 cache_key 的 fetched_at 推到未来, 后续 refresh tick 在 backoff
+#   窗口内直接命中缓存, 不再访问 OKX 公共端点 → 限流自愈.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+class _RateLimitedSystemStatusClient(_CountingAuxClient):
+    def __init__(self, *, raise_n_times: int = 1) -> None:
+        super().__init__()
+        self.raise_n_times = raise_n_times
+
+    async def get_system_status(self):
+        self.system_status_calls += 1
+        if self.system_status_calls <= self.raise_n_times:
+            from aats.services.execution_engine.okx_rest import OKXRequestError
+
+            raise OKXRequestError(
+                path="/api/v5/system/status",
+                code="50011",
+                msg="Requests too frequent.",
+                status_code=429,
+                classification="rate_limited",
+                retryable=True,
+            )
+        return await super().get_system_status()
+
+
+class TestOKXRateLimitedBackoff(unittest.IsolatedAsyncioTestCase):
+    async def test_rate_limited_pushes_cache_fetched_at_forward(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "okx_account_refresh_interval_seconds": 0,
+                "okx_instruments_refresh_interval_seconds": 300,
+                "okx_account_config_refresh_interval_seconds": 300,
+                "okx_trade_fee_refresh_interval_seconds": 300,
+                "okx_account_position_risk_refresh_interval_seconds": 60,
+                "okx_system_status_refresh_interval_seconds": 60,
+                "okx_bills_refresh_interval_seconds": 60,
+            }
+        )
+        client = _RateLimitedSystemStatusClient(raise_n_times=1)
+        service = OKXAccountService(settings=settings, client=client)
+
+        await service.refresh()
+        await service.refresh()
+        await service.refresh()
+
+        # 三次 refresh 调用, 但 system_status 因 backoff 仅打 1 次 (首次触发限流).
+        self.assertEqual(
+            client.system_status_calls,
+            1,
+            "rate_limited 后续 tick 必须命中 backoff 缓存, 不能再次访问 OKX",
+        )
+        # 其他 cache_key 不受影响, instruments / account_config 仍仅 1 次.
+        self.assertEqual(client.instrument_calls, 1)
+        self.assertEqual(client.account_config_calls, 1)
+
+    async def test_rate_limited_falls_back_to_empty_payload_when_no_prior_cache(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_api_key": "demo_key",
+                "okx_api_secret": "demo_secret",
+                "okx_api_passphrase": "demo_passphrase",
+                "okx_account_refresh_interval_seconds": 0,
+                "okx_system_status_refresh_interval_seconds": 60,
+            }
+        )
+        client = _RateLimitedSystemStatusClient(raise_n_times=10)
+        service = OKXAccountService(settings=settings, client=client)
+
+        # 首次限流时无历史缓存, 必须降级为空 payload (默认非阻塞).
+        snapshot = await service.refresh()
+        self.assertIsNotNone(snapshot)
+        # 后续 refresh 不能再次打公共端点.
+        await service.refresh()
+        await service.refresh()
+        self.assertEqual(
+            client.system_status_calls,
+            1,
+            "无历史缓存场景下也应进入 backoff, 不能让 429 持续打到 OKX",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

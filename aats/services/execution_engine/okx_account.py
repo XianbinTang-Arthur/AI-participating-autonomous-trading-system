@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -22,7 +22,7 @@ from aats.schemas.exchange import (
 )
 from aats.services.execution_engine.okx_private_websocket import OKXPrivateWebSocketClient
 from aats.services.execution_engine.okx_bills import enrich_okx_bill_category
-from aats.services.execution_engine.okx_rest import OKXRESTClient, infer_okx_derivatives_inst_type
+from aats.services.execution_engine.okx_rest import OKXRequestError, OKXRESTClient, infer_okx_derivatives_inst_type
 from aats.services.execution_engine.quantity_rules import internal_quantity_from_exchange
 from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.strategy_engines.smart_arbitrage.pair_registry import load_pair_definitions
@@ -390,6 +390,47 @@ class OKXAccountService:
                 force=force,
                 fetcher=fetcher,
             )
+        except OKXRequestError as exc:
+            if exc.classification == "rate_limited":
+                # OKX 限流: 把该 cache_key 的 fetched_at 推到未来, 使
+                # 后续刷新周期 (refresh_account_loop 每 15s) 在 backoff
+                # 窗口内直接命中缓存, 不再访问 OKX. Retry-After 优先,
+                # 否则默认 300s (≈5 个 system_status 60s 周期).
+                backoff_seconds = (
+                    float(exc.retry_after_seconds)
+                    if exc.retry_after_seconds and exc.retry_after_seconds > 0
+                    else 300.0
+                )
+                cached = self._aux_payload_cache.get(cache_key)
+                if cached is not None:
+                    cached_payload = cached[1]
+                elif fallback is not None:
+                    cached_payload = fallback
+                else:
+                    cached_payload = {"code": "0", "data": []}
+                # new_fetched_at = now + (backoff - refresh_interval) 让
+                # _cached_aux_payload 在 (now + backoff) 之前把缓存视为新鲜.
+                new_fetched_at = utc_now() + timedelta(
+                    seconds=backoff_seconds - refresh_interval_seconds
+                )
+                self._aux_payload_cache[cache_key] = (new_fetched_at, cached_payload)
+                log_event(
+                    self.logger,
+                    "okx_rate_limited_backoff",
+                    level="warning",
+                    cache_key=cache_key,
+                    backoff_seconds=backoff_seconds,
+                    path=getattr(exc, "path", None),
+                    code=getattr(exc, "code", None),
+                    retry_after_seconds=exc.retry_after_seconds,
+                )
+                return cached_payload
+            cached = self._aux_payload_cache.get(cache_key)
+            if cached is not None:
+                return cached[1]
+            if fallback is not None:
+                return fallback
+            raise
         except Exception:
             cached = self._aux_payload_cache.get(cache_key)
             if cached is not None:
@@ -1152,6 +1193,21 @@ class OKXAccountService:
             return {"code": "0", "data": []}
         try:
             payload = await method(**kwargs)
+        except OKXRequestError as exc:
+            # rate_limited 上抛给 _cached_aux_payload_optional 触发动态退避,
+            # 避免每个刷新周期都打 OKX 公共端点 → 持续 429.
+            # 其它 OKX 错误 (business_error / network_error 等) 保持原降级语义.
+            if exc.classification == "rate_limited":
+                raise
+            log_event(
+                self.logger,
+                "optional_client_call_failed",
+                level="warning",
+                method=method_name,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return {"code": "0", "data": []}
         except Exception as exc:
             log_event(
                 self.logger,
