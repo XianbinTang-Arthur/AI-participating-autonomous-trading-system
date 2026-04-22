@@ -154,6 +154,13 @@ class OKXWebSocketConsumerBase:
     async def stop(self) -> None:
         self._stop_event.set()
 
+    # LF-20260421-014 · 2026-04-22
+    # OKX WS 连续连接失败阈值。达到后升级 log 严重级别到 critical，
+    # 方便 Grafana alert 区分 "偶发 1 次掉线" vs "持续连不上"。
+    # 不做 REST fallback —— REST 语义和 WS 不同，强切换风险大于收益；
+    # 对当前 1-symbol 规模来说，持续连不上就该停交易并 page operator。
+    _WS_CIRCUIT_OPEN_CONSECUTIVE_FAILURES = 10
+
     async def _consume(
         self,
         *,
@@ -163,6 +170,8 @@ class OKXWebSocketConsumerBase:
         on_message: RawMessageHandler,
     ) -> None:
         reconnect_delay = self.settings.okx_market_reconnect_delay_seconds
+        consecutive_failures = 0
+        circuit_open_logged = False
         while not self._stop_event.is_set():
             try:
                 # Disable the websockets library's protocol-level PING frames. OKX documents
@@ -292,6 +301,27 @@ class OKXWebSocketConsumerBase:
             except Exception as exc:
                 self._last_error = str(exc)
                 self._connected[connection_name] = False
+                consecutive_failures += 1
+                # LF-014：连续失败 > 阈值 → 一次性升级 critical log（不 spam）
+                if (
+                    consecutive_failures >= self._WS_CIRCUIT_OPEN_CONSECUTIVE_FAILURES
+                    and not circuit_open_logged
+                ):
+                    log_event(
+                        self.logger,
+                        "okx_ws_circuit_open",
+                        level="critical",
+                        connection=connection_name,
+                        consecutive_failures=consecutive_failures,
+                        last_error_type=type(exc).__name__,
+                        last_error=str(exc),
+                        message=(
+                            f"OKX WS {connection_name} has failed "
+                            f"{consecutive_failures} consecutive times — "
+                            f"operator should investigate; market data may be stale"
+                        ),
+                    )
+                    circuit_open_logged = True
                 log_event(
                     self.logger,
                     "okx_ws_error",
@@ -299,12 +329,28 @@ class OKXWebSocketConsumerBase:
                     connection=connection_name,
                     error_type=type(exc).__name__,
                     error=str(exc),
+                    consecutive_failures=consecutive_failures,
                 )
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(
                     max(reconnect_delay * 2.0, self.settings.okx_market_reconnect_delay_seconds),
                     self.settings.okx_market_reconnect_max_delay_seconds,
                 )
+            else:
+                # 成功跑完一轮 async with connect (被 break 退出但没抛) → 清
+                # consecutive_failures 计数；下次 critical 会重新从 0 累计。
+                # 注意：break out of the inner while happens when recv timeout,
+                # which goes through here. So "partial success" still resets.
+                if consecutive_failures > 0:
+                    log_event(
+                        self.logger,
+                        "okx_ws_circuit_closed",
+                        level="info",
+                        connection=connection_name,
+                        prior_consecutive_failures=consecutive_failures,
+                    )
+                consecutive_failures = 0
+                circuit_open_logged = False
             finally:
                 self._connected[connection_name] = False
 
