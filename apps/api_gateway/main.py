@@ -37,18 +37,38 @@ from aats.data_platform.governance._exceptions import (
 _MUTATING_METHODS = frozenset({"POST", "PATCH", "PUT", "DELETE"})
 
 
+_FASTAPI_ROLES: frozenset[str] = frozenset({PROCESS_ROLE_GATEWAY, PROCESS_ROLE_MONOLITH})
+
+
 def _resolved_process_role() -> str:
     """Stage 5d：FastAPI gateway 进程默认 role=gateway，但允许 monolith 兼容旧路径。
 
     通过 AATS_PROCESS_ROLE=monolith 让 api_gateway 同时承担 4 个 slice（开发机
     与单机部署的零依赖路径）。生产 4 进程拓扑下应当置 AATS_PROCESS_ROLE=gateway。
+
+    Fail-fast 校验（LF-017）：未设置环境变量 → 默认 gateway；如果**设置了**值
+    但不在合法集合里（如 "gateways" 之类的 typo）就抛 ValueError，避免
+    运维静默降级成 gateway 导致的排查困难。此外，合法但不是 gateway/monolith
+    的 role（market/decision/execution）明显走错了二进制入口，也抛。
     """
-    raw = os.environ.get("AATS_PROCESS_ROLE", PROCESS_ROLE_GATEWAY).strip().lower()
+    raw_env = os.environ.get("AATS_PROCESS_ROLE")
+    if raw_env is None:
+        return PROCESS_ROLE_GATEWAY
+    raw = raw_env.strip().lower()
+    if not raw:
+        return PROCESS_ROLE_GATEWAY
     if raw not in ALLOWED_PROCESS_ROLES:
-        raw = PROCESS_ROLE_GATEWAY
-    # gateway / monolith 之外的 role 不应该跑 FastAPI gateway
-    if raw not in {PROCESS_ROLE_GATEWAY, PROCESS_ROLE_MONOLITH}:
-        raw = PROCESS_ROLE_GATEWAY
+        raise ValueError(
+            f"AATS_PROCESS_ROLE={raw_env!r} is not in allowed set "
+            f"{sorted(ALLOWED_PROCESS_ROLES)}. Common typo: did you mean "
+            f"'{PROCESS_ROLE_GATEWAY}'?"
+        )
+    if raw not in _FASTAPI_ROLES:
+        raise ValueError(
+            f"AATS_PROCESS_ROLE={raw_env!r} is valid but not eligible for the "
+            f"api_gateway FastAPI process. Eligible roles: {sorted(_FASTAPI_ROLES)}. "
+            f"For role={raw!r}, use apps/{raw}_* entrypoint instead."
+        )
     return raw
 
 

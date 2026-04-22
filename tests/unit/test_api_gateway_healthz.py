@@ -59,21 +59,27 @@ def test_healthz_returns_monolith_role_when_set(monkeypatch) -> None:
     "non_gateway_role",
     [PROCESS_ROLE_MARKET, PROCESS_ROLE_DECISION, PROCESS_ROLE_EXECUTION],
 )
-def test_healthz_falls_back_to_gateway_for_non_gateway_roles(monkeypatch, non_gateway_role) -> None:
-    """如果有人误把 AATS_PROCESS_ROLE=market 注入到 api_gateway 进程，
-    _resolved_process_role() 会兜底回 gateway —— /healthz 必须反映这一点。
-    """
+def test_healthz_raises_on_non_gateway_valid_role(monkeypatch, non_gateway_role) -> None:
+    """LF-017：如果运维把 AATS_PROCESS_ROLE=market/decision/execution 注入到
+    api_gateway 进程，明显是起错了 binary。旧行为是静默兜底成 gateway，
+    掩盖部署错误；现在改为 fail-fast 抛 ValueError。"""
     monkeypatch.setenv("AATS_PROCESS_ROLE", non_gateway_role)
-    result = asyncio.run(gateway_main.healthz())
-    # api_gateway 进程不应当承担 market/decision/execution role，必须兜底回 gateway
-    assert result["process_role"] == PROCESS_ROLE_GATEWAY
+    with pytest.raises(ValueError, match=non_gateway_role):
+        asyncio.run(gateway_main.healthz())
 
 
-def test_healthz_handles_invalid_role_env_value(monkeypatch) -> None:
-    """非法值不能让 healthz 抛错，必须兜底回 gateway。"""
-    monkeypatch.setenv("AATS_PROCESS_ROLE", "not_a_real_role")
-    result = asyncio.run(gateway_main.healthz())
-    assert result["process_role"] == PROCESS_ROLE_GATEWAY
+def test_healthz_raises_on_invalid_role_env_value(monkeypatch) -> None:
+    """LF-017：非法值（typo 如 "gateways"）旧行为静默当成 gateway；现在 fail-fast
+    抛 ValueError，迫使运维纠正配置。"""
+    monkeypatch.setenv("AATS_PROCESS_ROLE", "gateways")
+    with pytest.raises(ValueError, match="gateways"):
+        asyncio.run(gateway_main.healthz())
+
+
+def test_resolved_process_role_empty_string_falls_back_to_gateway(monkeypatch) -> None:
+    """空白字符串仍等价于未设置（兼容 shell 脚本里 AATS_PROCESS_ROLE= 的写法）。"""
+    monkeypatch.setenv("AATS_PROCESS_ROLE", "   ")
+    assert gateway_main._resolved_process_role() == PROCESS_ROLE_GATEWAY
 
 
 # ─────────────────────────────────────────────────────────────────────
