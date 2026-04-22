@@ -11,10 +11,15 @@ buffer 起来，flush 时按 topic 聚合 fan-out。
   - flush() 幂等：空 buffer 不再 emit
   - publish 直通底层 bus
   - publish 在 _CollectingBus 上调用是合法的（壳层不丢消息）
+  - fan_out 异常隔离（所有 handler 跑完再 raise first）
+  - **fan_out 并行执行**（2026-04-23 P1-b：慢 handler 不拖累快 handler
+    也不拖累 NATS ack 延迟）
 """
 
 from __future__ import annotations
 
+import asyncio
+import time
 import unittest
 
 from aats.bootstrap.config import _CollectingBus
@@ -195,6 +200,76 @@ class TestCollectingBus(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError) as ctx:
             await fan_out({"topic": "topic.a", "key": "k", "payload": {}})
         self.assertEqual(str(ctx.exception), "first_boom")
+
+
+    async def test_fan_out_runs_handlers_concurrently(self) -> None:
+        """2026-04-23 P1-b 锚定：fan_out 必须并行调 handlers，而不是串行。
+
+        串行实现下，3 个 sleep(0.1s) 的 handler 总耗时 ≥ 0.3s。
+        并行（asyncio.gather）下，总耗时 ≈ 0.1s（所有 sleep 并发）。
+
+        这保证了慢 observer 不会拖累 cache handler 的新鲜度，也不会把
+        NATS ack 延迟累加——这正是 pre-fix 串行版本的核心痛点。
+        """
+        downstream = _RecordingBus()
+        bus = _CollectingBus(downstream)
+
+        async def sleepy(_: dict) -> None:
+            await asyncio.sleep(0.1)
+
+        await bus.subscribe("topic.a", sleepy)
+        await bus.subscribe("topic.a", sleepy)
+        await bus.subscribe("topic.a", sleepy)
+        await bus.flush()
+
+        _, fan_out = downstream.subscriptions[0]
+        start = time.perf_counter()
+        await fan_out({"topic": "topic.a", "key": "k", "payload": {}})
+        elapsed = time.perf_counter() - start
+
+        # 并行下 3 个并发 sleep(0.1s) ≈ 0.1-0.15s；串行会 ≥ 0.3s。
+        # 用 0.25s 作为宽裕的 upper bound 容纳 CI 抖动，同时足够 distinguish
+        # 串行 (≥0.3s) vs 并行 (≈0.1s)。
+        self.assertLess(
+            elapsed,
+            0.25,
+            f"fan_out 疑似串行执行（耗时 {elapsed:.3f}s，应接近 0.1s）",
+        )
+
+    async def test_fan_out_one_slow_handler_does_not_block_others(self) -> None:
+        """2026-04-23 P1-b 锚定：一个慢 handler 不应阻塞其他 handler 的开始执行。
+
+        在串行版本里，handler[1] 必须等 handler[0] await 完才开始；并行版本
+        里，所有 handler 几乎同时进入 body。用 timestamp 验证"几乎同时启动"
+        而不是"顺序启动"。
+        """
+        downstream = _RecordingBus()
+        bus = _CollectingBus(downstream)
+        start_times: list[float] = []
+
+        async def slow(_: dict) -> None:
+            start_times.append(time.perf_counter())
+            await asyncio.sleep(0.1)
+
+        async def fast(_: dict) -> None:
+            start_times.append(time.perf_counter())
+
+        await bus.subscribe("topic.a", slow)
+        await bus.subscribe("topic.a", fast)
+        await bus.flush()
+
+        _, fan_out = downstream.subscriptions[0]
+        await fan_out({"topic": "topic.a", "key": "k", "payload": {}})
+
+        # 两个 handler 都应该被调用
+        self.assertEqual(len(start_times), 2)
+        # 两者启动时间差应该 < 10ms（并行 scheduled），而非 ≥ 100ms（串行 await）
+        time_diff = abs(start_times[1] - start_times[0])
+        self.assertLess(
+            time_diff,
+            0.050,
+            f"fast handler 启动被 slow handler 阻塞（差 {time_diff*1000:.1f}ms）",
+        )
 
 
 if __name__ == "__main__":

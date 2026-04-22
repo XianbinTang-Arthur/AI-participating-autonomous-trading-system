@@ -3132,29 +3132,42 @@ class _CollectingBus(EventBus):
             # 共享同一个 list 引用（topic-by-topic 循环里 handlers 会被复用）。
             ordered = tuple(handlers)
 
-            # R3-P1-U-C：per-handler 隔离。原实现 `for h in _hs: await h(...)`
-            # 只要第一个 handler 抛错，剩下的 handler 本轮全部被跳过；紧接着
-            # NATS 因为 _fan_out 抛错而 NAK + 重投，下一轮又从 handler[0] 开
-            # 始，已经成功的 handler 会被重复执行（依赖 handler 侧幂等才勉强
-            # 安全）。真正的 bug：如果失败 handler 刚好是 flaky 的 observer，
-            # 顺序靠后的 critical handler（例如 reconciliation_service.handle_
-            # portfolio_snapshot）在消息真正掉队之前从不执行。
-            # 隔离策略：每个 handler 独立 try；exception 聚合到 first_exc，
-            # 所有 handler 都跑完后再 raise first_exc。NATS 会看到一次异常就
-            # NAK 重投，所有 handler 都被标记执行过——但单 handler 的失败不
-            # 会把后续 handler 的首次执行窗口也吞掉。
-            # 注意：observer handler 已经在外层 resilient_subscription_handler
-            # 里 raise_on_error=False 吞掉自身异常，不会进入这里的 first_exc；
-            # 只有 critical handler 的真异常会被 re-raise，从而 NAK 重投，符合
-            # at-least-once 语义。
+            # R3-P1-U-C：per-handler 隔离（初版）+ 2026-04-23 P1-b 并行化：
+            #
+            # 【隔离】每个 handler 独立 try；exception 聚合到 first_exc，所有
+            # handler 都跑完后再 raise first_exc。NATS 会看到一次异常就 NAK
+            # 重投，所有 handler 都被标记执行过——但单 handler 的失败不会把
+            # 后续 handler 的首次执行窗口也吞掉。observer handler 已经在外层
+            # resilient_subscription_handler(raise_on_error=False) 吞自身异常，
+            # 不会进入这里；只有 critical handler 的真异常会被 re-raise。
+            #
+            # 【并行】原串行 `for h in _hs: await h(...)` 把 observer / cache
+            # 的 freshness 绑在前序 handler 的耗时上，也把 NATS ack 延迟叠加
+            # 起来（慢 handler 会拖慢整个 fan_out 返回）。改用 asyncio.gather
+            # (return_exceptions=True) 让所有 handler 并发 await。
+            #
+            # 假设：handlers 是 order-independent（不同 handler 间不能依赖先
+            # 后次序）。此假设本来就该成立——因为：
+            #   1) 不同 topic 之间 NATS 没有 ordering 保证
+            #   2) 一个 topic 多 handler 的集合本身是 ad-hoc（由
+            #      _wire_event_subscriptions 累积，谁先 subscribe 谁先跑是
+            #      未承诺的实现细节）
+            # 若发现某 handler 对 order 有隐式依赖，那是该 handler 的 latent
+            # bug，不应让 fan_out 为此付串行代价。
+            #
+            # asyncio.gather(return_exceptions=True) 会把 Exception 包装成
+            # results item；BaseException（KeyboardInterrupt / SystemExit /
+            # asyncio.CancelledError）仍会 propagate，保留中断语义。
             async def _fan_out(message: dict, _hs: tuple[MessageHandler, ...] = ordered) -> None:
-                first_exc: BaseException | None = None
-                for h in _hs:
-                    try:
-                        await h(message)
-                    except Exception as exc:
+                results = await asyncio.gather(
+                    *(h(message) for h in _hs),
+                    return_exceptions=True,
+                )
+                first_exc: Exception | None = None
+                for r in results:
+                    if isinstance(r, Exception):
                         if first_exc is None:
-                            first_exc = exc
+                            first_exc = r
                 if first_exc is not None:
                     raise first_exc
 
