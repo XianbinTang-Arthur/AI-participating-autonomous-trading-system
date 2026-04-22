@@ -16,8 +16,24 @@ from aats.data_platform.replay.backtest.position_tracker import (
     PositionSnapshot,
     PositionTracker,
 )
+from aats.data_platform.replay.backtest.equity_builder import (
+    BacktestSummary,
+    EquityBuilder,
+    EquityPoint,
+)
+from aats.data_platform.replay.backtest.cost_validator import (
+    CostDiagnostic,
+    CostValidationSummary,
+    CostValidator,
+)
 
 __all__ = [
+    "BacktestSummary",
+    "CostDiagnostic",
+    "CostValidationSummary",
+    "CostValidator",
+    "EquityBuilder",
+    "EquityPoint",
     "Fill",
     "FillRequest",
     "FillResult",
