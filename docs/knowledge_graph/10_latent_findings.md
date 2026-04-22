@@ -149,13 +149,18 @@
   market 进程只会一直重试 WS。decision 收不到新 snapshot
 - **建议**：加 "WS 断连 >60s → 临时切 REST polling（低频）→ WS 恢复后切回" 机制
 
-### LF-20260421-015 · Operator command proxy 假定 execution 一直在
+### LF-20260421-015 · Operator command proxy 假定 execution 一直在 (DEFERRED 2026-04-22)
 
 - **Category**: 可用性
-- **位置**: `aats/services/operator/command_bridge.py` + 相关 handler
-- **现象**：gateway 收到 `/rebaseline` 等命令 → 发 OPERATOR_COMMAND_REQUESTS
-  → 等 OPERATOR_COMMAND_RESPONSES。如果 execution 挂着，HTTP 会超时 30s
-- **建议**：加 "execution 可达性预检"，提前返回 503，不让 UI 空等
+- **位置**: `aats/services/operator/command_bridge.py` `OperatorCommandClient.invoke`
+- **现状**：超时 30s 会 raise OperatorCommandTimeoutError，gateway 返回 500。
+  用户等 30s 才看到失败 —— 慢但不致命。
+- **为什么不修**：真正的 fix 需要 UI 显示 execution 实时状态 + 预检，属于
+  Phase 3 UI 层工作。当前规模（1 用户 / 不频繁触发 operator command）优先级低。
+  "execution 可达性预检" 本身又依赖 NATS（同一条有问题的通道），逻辑打结。
+- **对当前 ops 的影响**：gateway UI 等 30s 后报错，可接受；真关心的话加
+  Grafana alert 监控 `OperatorCommandTimeoutError` 日志出现率（docs/operations/
+  grafana_alerts.md 可扩）。
 
 ---
 
@@ -175,13 +180,20 @@
 - **风险**：运维打错字（如 "gateways"）不会被发现
 - **建议**：加 `allowed_roles = {"gateway", "market", "decision", "execution", "monolith"}`，不在内就 `raise ValueError`
 
-### LF-20260421-018 · RDP daemon 连接池与业务进程共享
+### LF-20260421-018 · ~~RDP daemon 连接池与业务进程共享~~ (CORRECTED 2026-04-22)
 
-- **Category**: 潜在性能影响
-- **位置**: `deploy/wsl2-dev/docker-compose.aats.yml:234-239` + `scripts/rdp_task_daemon.py`
-- **现象**：RDP daemon 运行长任务（research=3600s），用同一个 DB URL，可能
-  抢占业务进程的连接池
-- **建议**：单独的 RDP_DATABASE_URL 连接池 + 限流
+- **~~Category~~**: ~~潜在性能影响~~ **→ 假阳，RDP 已有隔离设计**
+- **实际情况**:
+  - `RDP_DATABASE_URL` → `aats_research` 独立数据库（物理隔离）
+  - `RDP_LIVE_DATABASE_URL` → `aats_live_derivatives`（只读），engine 在
+    `aats/data_platform/live_facts/db.py:59-66` 配置为 pool_size=3 + max_overflow=5
+    （非常小）
+- **现有架构已正确**：RDP 读实盘数据的连接池上限是 **8**，4 业务进程各 60，
+  PG max_connections=200 有足够 headroom
+- **可能的唯一小坑**（保留记录）：`RDP_DATABASE_URL` 和 `RDP_LIVE_DATABASE_URL`
+  引用不同 DB 但共享密码 —— 如果 POSTGRES_PASSWORD 变，两个 URL 都要同时
+  更新。config 层不是 single source of truth。但这是**运维一次性小麻烦**，
+  不是运行时 bug。
 
 ### LF-20260421-019 · 丢失触发指标
 
