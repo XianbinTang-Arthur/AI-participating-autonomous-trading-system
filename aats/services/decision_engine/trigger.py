@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+from collections import OrderedDict
 from collections.abc import Callable
+from typing import Generic, TypeVar
 
 from aats.bootstrap.logging import get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
@@ -19,6 +21,74 @@ CanTriggerCheck = Callable[..., tuple[bool, str]]
 # LF-019：_enqueue_trigger 覆盖旧 pending 时递增此 counter，用于长期观测
 # 队列饱和率（单次 run_cycle 毛刺越严重 → latest-wins 丢弃越多）。
 METRIC_DROPPED_TRIGGERS = "decision_cycle_dropped_triggers_total"
+
+# LF-007：_timeframe_locks / _consecutive_failures 原先是普通 dict，
+# 以 (symbol, timeframe) 为 key。长期跑下来 delisted symbol / 已下线品种
+# 的 entry 永远留着，内存无上限。用 OrderedDict + maxsize 的 LRU 约束。
+#
+# maxsize=256 经验值：symbol 组合×timeframe 上限目前几十级；预留 ~10×
+# 余量既能容纳所有当前 (symbol,timeframe)、也不至于评估运维 delisted
+# 后进入 legacy 旁路的锁也被误 evict（legacy 已默认关，production 下
+# 这两个 dict 在 queue 路径基本只 read consecutive_failures）。
+_MAX_TIMEFRAME_LOCK_ENTRIES = 256
+_MAX_CONSECUTIVE_FAILURE_ENTRIES = 256
+
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
+
+class _BoundedLRUDict(Generic[_K, _V]):
+    """轻量 FIFO/LRU 边界 dict：insert 超过 maxsize 时淘汰最旧 entry。
+
+    不依赖 cachetools（不在项目 deps 里），复用项目现有的 ``OrderedDict +
+    popitem(last=False)`` 模式（参见 fill_event_cache.py）。
+
+    语义约定：
+    - ``setdefault`` / ``__setitem__`` 在新增 entry 时触发淘汰；
+    - ``get`` 读路径 **不** move_to_end（避免给低价值查询带写锁语义）；
+    - ``pop`` / ``__delitem__`` 简单透传，和 dict 一致；
+    - 这个结构不是线程安全的，复用 trigger 原 dict 的语义（asyncio 单线程
+      内使用）。
+    """
+
+    def __init__(self, maxsize: int) -> None:
+        if maxsize <= 0:
+            raise ValueError(f"maxsize must be > 0, got {maxsize}")
+        self._maxsize = maxsize
+        self._data: OrderedDict[_K, _V] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._data
+
+    def __getitem__(self, key: _K) -> _V:
+        return self._data[key]
+
+    def __setitem__(self, key: _K, value: _V) -> None:
+        self._data[key] = value
+        self._evict_if_over()
+
+    def __delitem__(self, key: _K) -> None:
+        del self._data[key]
+
+    def get(self, key: _K, default: _V | None = None) -> _V | None:
+        return self._data.get(key, default)
+
+    def setdefault(self, key: _K, default: _V) -> _V:
+        if key in self._data:
+            return self._data[key]
+        self._data[key] = default
+        self._evict_if_over()
+        return default
+
+    def pop(self, key: _K, default: _V | None = None) -> _V | None:
+        return self._data.pop(key, default)
+
+    def _evict_if_over(self) -> None:
+        while len(self._data) > self._maxsize:
+            self._data.popitem(last=False)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -61,8 +131,17 @@ class DecisionCycleTrigger:
         # legacy handler 路径沿用的 per-(symbol, timeframe) 锁；S3 清理
         # 时会一起删掉。queue 路径不再需要这把锁，因为单 dispatcher
         # task 天然串行。
-        self._timeframe_locks: dict[tuple[str, str], asyncio.Lock] = {}
-        self._consecutive_failures: dict[tuple[str, str], int] = {}
+        #
+        # LF-007：两个 dict 都用 _BoundedLRUDict 封顶，避免 delisted
+        # symbol / 下线品种的 entry 永驻内存。Type annotation 保留
+        # dict 形式以最小化 call-site 修改（_BoundedLRUDict 实现了
+        # dict 需要的 setdefault/get/pop/in 操作）。
+        self._timeframe_locks: _BoundedLRUDict[
+            tuple[str, str], asyncio.Lock
+        ] = _BoundedLRUDict(maxsize=_MAX_TIMEFRAME_LOCK_ENTRIES)
+        self._consecutive_failures: _BoundedLRUDict[
+            tuple[str, str], int
+        ] = _BoundedLRUDict(maxsize=_MAX_CONSECUTIVE_FAILURE_ENTRIES)
 
         # ──────────────────────────────────────────────────────────────
         # Queue dispatcher 基础设施（docs/task/

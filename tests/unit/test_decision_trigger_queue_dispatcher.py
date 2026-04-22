@@ -546,5 +546,87 @@ class TestDroppedTriggersMetric(unittest.IsolatedAsyncioTestCase):
         await self._release.wait()
 
 
+class TestBoundedLRUDicts(unittest.IsolatedAsyncioTestCase):
+    """LF-007：_timeframe_locks / _consecutive_failures 必须有 LRU 上限，
+    避免 delisted symbol 的 entry 永驻内存。"""
+
+    def test_bounded_lru_dict_evicts_oldest_when_full(self) -> None:
+        from aats.services.decision_engine.trigger import _BoundedLRUDict
+
+        d: _BoundedLRUDict[str, int] = _BoundedLRUDict(maxsize=3)
+        d.setdefault("a", 1)
+        d.setdefault("b", 2)
+        d.setdefault("c", 3)
+        self.assertEqual(len(d), 3)
+        # 超过 maxsize：最旧的 "a" 应该被 evict
+        d.setdefault("d", 4)
+        self.assertEqual(len(d), 3)
+        self.assertNotIn("a", d)
+        self.assertIn("d", d)
+
+    def test_bounded_lru_dict_rejects_invalid_maxsize(self) -> None:
+        from aats.services.decision_engine.trigger import _BoundedLRUDict
+
+        with self.assertRaises(ValueError):
+            _BoundedLRUDict(maxsize=0)
+        with self.assertRaises(ValueError):
+            _BoundedLRUDict(maxsize=-1)
+
+    def test_bounded_lru_dict_setdefault_existing_does_not_trigger_evict(self) -> None:
+        """re-setdefault 同 key 不应 reset 也不应触发 evict。"""
+        from aats.services.decision_engine.trigger import _BoundedLRUDict
+
+        d: _BoundedLRUDict[str, int] = _BoundedLRUDict(maxsize=2)
+        d.setdefault("a", 1)
+        d.setdefault("b", 2)
+        # 同 key 再 setdefault：不改值，不 evict
+        result = d.setdefault("a", 999)
+        self.assertEqual(result, 1)
+        self.assertEqual(len(d), 2)
+        self.assertIn("a", d)
+        self.assertIn("b", d)
+
+    def test_timeframe_locks_stays_bounded_on_many_symbols(self) -> None:
+        """往 _timeframe_locks 灌 100 个假 symbol，保证不超 maxsize。
+        这是 LF-007 的核心回归守卫。"""
+        import asyncio as _asyncio
+        from aats.services.decision_engine.trigger import (
+            _MAX_TIMEFRAME_LOCK_ENTRIES,
+            _MAX_CONSECUTIVE_FAILURE_ENTRIES,
+        )
+
+        orch = SimpleNamespace(run_cycle=self._noop)
+        trig = _fake_trigger(orchestrator=orch)
+
+        # Manually re-init both dicts to LRU bounded (fake_trigger 里是 plain dict)
+        # 一起走真实的类型检查
+        from aats.services.decision_engine.trigger import _BoundedLRUDict
+
+        trig._timeframe_locks = _BoundedLRUDict(maxsize=_MAX_TIMEFRAME_LOCK_ENTRIES)
+        trig._consecutive_failures = _BoundedLRUDict(maxsize=_MAX_CONSECUTIVE_FAILURE_ENTRIES)
+
+        # 模拟大量 (symbol, timeframe) 进入——远超 maxsize
+        n_symbols = _MAX_TIMEFRAME_LOCK_ENTRIES + 100
+        for i in range(n_symbols):
+            trig._timeframe_locks.setdefault((f"FAKE{i}-USDT-SWAP", "15m"), _asyncio.Lock())
+            trig._consecutive_failures.setdefault((f"FAKE{i}-USDT-SWAP", "15m"), 1)
+
+        # 两个 dict 必须都留在 maxsize 之内
+        self.assertEqual(len(trig._timeframe_locks), _MAX_TIMEFRAME_LOCK_ENTRIES)
+        self.assertEqual(len(trig._consecutive_failures), _MAX_CONSECUTIVE_FAILURE_ENTRIES)
+
+        # 最早塞入的 FAKE0 应被 evict（FIFO）
+        self.assertNotIn(("FAKE0-USDT-SWAP", "15m"), trig._timeframe_locks)
+        # 最新的 FAKE{n-1} 应该留着
+        self.assertIn(
+            (f"FAKE{n_symbols - 1}-USDT-SWAP", "15m"),
+            trig._timeframe_locks,
+        )
+
+    @staticmethod
+    async def _noop(*args, **kwargs):
+        return None
+
+
 if __name__ == "__main__":
     unittest.main()
