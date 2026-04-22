@@ -334,9 +334,20 @@ def _process_decision(
             # Cost 校准：实际 cost ≈ fill fee + 模拟 slippage (bps)
             # 对 MVP，我们只使用 fee_bps 作 actual_cost proxy；更精细的
             # slippage 归因留给 Phase 4（需要 orderbook 数据）。
+            #
+            # 2026-04-23 修正（P2 口径）：assumed_cost_bps 必须取**本笔决策
+            # 当时自己估的** ``decision.cost_bps``（ReplayDecision 的 P0-3
+            # 统一 edge contract 字段），不是全局 ``config.assumed_cost_bps``。
+            # 后者只在 decision 本身不暴露 cost 时做 fallback，否则会让
+            # CostValidator 回答错的问题（全局假设 vs 实际 fee 的 gap）
+            # 而不是（策略 per-decision 假设 vs 实际 fee 的 gap）。
+            per_decision_cost = float(decision.cost_bps)
+            if per_decision_cost == 0.0:
+                # 决策层没给 cost（legacy / 未设）才回落到 config
+                per_decision_cost = config.assumed_cost_bps
             ctx.cost_validator.record(
                 decision_id=decision.ts.isoformat(),
-                assumed_cost_bps=config.assumed_cost_bps,
+                assumed_cost_bps=per_decision_cost,
                 actual_cost_bps=float(fill_result.fee_bps),
                 assumed_net_edge_bps=float(decision.expected_net_edge_bps),
                 notes=f"fill_kind={fill_result.fill_kind}",

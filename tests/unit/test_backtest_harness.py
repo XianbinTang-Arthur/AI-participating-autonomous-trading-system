@@ -76,6 +76,7 @@ def _make_decision(
     long_score: float = 0.5,
     short_score: float = 0.1,
     net_edge_bps: float = 10.0,
+    cost_bps: float = 6.0,
 ) -> ReplayDecision:
     """Build a minimal ReplayDecision tied to a specific bar timestamp."""
     return ReplayDecision(
@@ -94,7 +95,7 @@ def _make_decision(
         delta_position_qty=delta,
         signal_edge_proxy_bps=15.0,
         funding_adjustment_bps=0.0,
-        cost_bps=6.0,
+        cost_bps=cost_bps,
         noise_buffer_bps=2.0,
         action=action,
         close_reason="",
@@ -138,6 +139,7 @@ class _FakeAdapter(BaseReplayAdapter):
             long_score=entry.get("long_score", 0.5),
             short_score=entry.get("short_score", 0.1),
             net_edge_bps=entry.get("net_edge_bps", 10.0),
+            cost_bps=entry.get("cost_bps", 6.0),
         )
 
 
@@ -380,6 +382,82 @@ class TestCostValidationAndResultShape(unittest.TestCase):
         # ioc 下 actual cost = taker_fee_bps = 5.0 < assumed 6.0
         # → cost_diff = 5.0 - 6.0 = -1.0（悲观偏离）
         self.assertAlmostEqual(result.cost_summary.avg_cost_diff_bps, -1.0, places=6)
+
+    def test_cost_validator_uses_decision_cost_not_config_assumed(self) -> None:
+        """P2 口径修复锚定 (2026-04-23)。
+
+        Per-decision 自己估的 cost (decision.cost_bps) 必须优先于全局
+        config.assumed_cost_bps。否则 cost_summary 回答的问题是 "你的
+        全局假设 vs 实际"，而不是 "策略每笔决策的自估 cost vs 实际"，
+        决策路线判断会被污染。
+        """
+        session = MagicMock()
+        bars = [_make_bar(0, close=Decimal("50000"), volume=Decimal("1000"))]
+        # 关键：decision.cost_bps=4.0，config.assumed_cost_bps=99.0（极端不等）
+        # ioc taker fee_bps=5.0
+        script = [
+            {
+                "action": "open",
+                "delta": Decimal("1"),
+                "target": Decimal("1"),
+                "long_score": 0.6,
+                "short_score": 0.1,
+                "net_edge_bps": 5.0,
+                "cost_bps": 4.0,  # 本笔决策自估 cost
+            }
+        ]
+        adapter = _FakeAdapter(script)
+        # 全局 assumed 故意设成 99.0，确保老口径 bug 会让 diff = -94
+        config = BacktestConfig(assumed_cost_bps=99.0)
+        with patch(
+            "aats.data_platform.replay.backtest.harness.load_gold_bars",
+            return_value=bars,
+        ):
+            result = run_backtest(
+                session,
+                config=config,
+                start_ts=_BASE_TS,
+                end_ts=_BASE_TS + timedelta(days=1),
+                adapter=adapter,
+            )
+
+        self.assertEqual(result.cost_summary.total_decisions, 1)
+        # 修复后: assumed=decision.cost_bps(4.0), actual=fee_bps(5.0), diff=+1.0
+        # 修复前 bug: assumed=config(99.0), actual=5.0, diff=-94.0
+        self.assertAlmostEqual(result.cost_summary.avg_cost_diff_bps, +1.0, places=6)
+
+    def test_cost_validator_falls_back_to_config_when_decision_has_no_cost(self) -> None:
+        """Fallback: decision.cost_bps=0 (legacy / 未设) → 用 config.assumed_cost_bps。"""
+        session = MagicMock()
+        bars = [_make_bar(0, close=Decimal("50000"), volume=Decimal("1000"))]
+        script = [
+            {
+                "action": "open",
+                "delta": Decimal("1"),
+                "target": Decimal("1"),
+                "long_score": 0.6,
+                "short_score": 0.1,
+                "net_edge_bps": 5.0,
+                "cost_bps": 0.0,  # 显式 legacy
+            }
+        ]
+        adapter = _FakeAdapter(script)
+        config = BacktestConfig(assumed_cost_bps=7.0)
+        with patch(
+            "aats.data_platform.replay.backtest.harness.load_gold_bars",
+            return_value=bars,
+        ):
+            result = run_backtest(
+                session,
+                config=config,
+                start_ts=_BASE_TS,
+                end_ts=_BASE_TS + timedelta(days=1),
+                adapter=adapter,
+            )
+
+        self.assertEqual(result.cost_summary.total_decisions, 1)
+        # fallback 后: assumed=config(7.0), actual=5.0, diff=-2.0
+        self.assertAlmostEqual(result.cost_summary.avg_cost_diff_bps, -2.0, places=6)
 
     def test_backtest_result_includes_config(self) -> None:
         """BacktestResult.config 必须完整等于传入的 config。"""
