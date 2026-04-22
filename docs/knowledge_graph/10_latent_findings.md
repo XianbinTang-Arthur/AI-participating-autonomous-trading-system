@@ -16,19 +16,17 @@
 
 ## 🔴 HIGH — 安全或正确性相关
 
-### LF-20260421-001 · 心跳文件 health check 看不到 GIL 卡死
+### LF-20260421-001 · ~~心跳文件 health check 看不到 GIL 卡死~~ (CORRECTED 2026-04-22)
 
-- **Category**: 监控盲点
-- **位置**: `deploy/wsl2-dev/docker-compose.aats.yml`（health check 段）
-- **现象**：market / decision / execution 的 Docker health check 是
-  `test -f /tmp/aats_<role>_heartbeat && test $(($(date +%s) - $(stat -c %Y <file>))) -lt 30`
-- **问题**：如果后台线程在更新心跳但主 event loop 卡住（GIL contention、
-  psycopg2 阻塞 IO、锁等待），容器报 healthy 但决策链路已停
-- **风险**：业务静默停摆，Grafana 还显示"绿"
-- **建议修法**：加"主动 health check" —— gateway `/healthz/deep` 接口向各
-  进程发 RPC ping，验证真实响应性；或记录"最近一次 decision_id 的秒数"
-  做 metric，超时就告警
-- **谁受影响**：运维层（不是运行时安全）
+- **~~Category~~**: ~~监控盲点~~ **→ 部分假阳 + 改合并到 LF-020**
+- **实际情况**：`aats/bootstrap/process_lifecycle.py:247-309` `_heartbeat_loop`
+  是 **async 函数跑在 event loop 上**，不是后台线程。如果 event loop 卡住，
+  heartbeat 也会卡住，mtime 就不更新 → docker healthcheck 会捕获。
+- **真正的 gap**：不是 heartbeat 不可靠，而是**没有"业务活着"指标**（e.g.
+  `decision_cycle_total` rate），区分 "event loop 在跑但策略没决策" vs
+  "真没市场数据"。这就是 LF-020 的问题，二者合并处理。
+- **教训**：审计时先 trace 实际代码路径再下结论。我的 audit agent 凭名字
+  猜"heartbeat 是后台线程"是错的。
 
 ### LF-20260421-002 · OrderState 更新存在 WS vs REST 竞争
 
@@ -193,12 +191,15 @@
   弃次数没 metric 记录
 - **建议**：加 `decision_cycle_dropped_triggers_total` counter，长期趋势观察
 
-### LF-20260421-020 · Decision trigger idleness 无告警
+### LF-20260421-020 · ~~Decision trigger idleness 无告警~~ (CORRECTED 2026-04-22)
 
-- **Category**: 可观测性
-- **现象**：如果 market 停发 snapshot，decision 也会停跑（不是 bug，是设计）。
-  但没有 alerting 区分 "真没市场活动" vs "市场活动但 decision 卡住"
-- **建议**：加 metric `decision_cycles_total`，设 Grafana alert 基于 rate() 低于阈值
+- **~~Category~~**: ~~可观测性~~ **→ metric 已存在，只缺 alert 规则**
+- **实际情况**：`orchestrator.py:342 self.metrics.increment("decision_cycles")`
+  已经在发 counter。Prometheus 能抓到。缺的只是 Grafana alert rule
+  (e.g. `rate(decision_cycles_total[5m]) == 0 for 10m`)。
+- **性质**：Grafana 配置而非代码变更，不算 code latent bug。应放
+  `docs/operations/` 或 Grafana provisioning config，不属于本 latent 清单。
+- **不修**：把 grafana alert rule 写进 `docs/grafana_alerts.md` 供 ops 配置。
 
 ### LF-20260421-021 · 成本模型没扣 maker rebate
 
