@@ -195,6 +195,41 @@
   但没有 alerting 区分 "真没市场活动" vs "市场活动但 decision 卡住"
 - **建议**：加 metric `decision_cycles_total`，设 Grafana alert 基于 rate() 低于阈值
 
+### LF-20260421-021 · 成本模型没扣 maker rebate
+
+- **Category**: 经济学估算不准
+- **位置**: `aats/services/strategy_engines/independent/independent_family.py:1741-1745`
+- **现象**：`bounded_limit` / `passive_first` 执行模式里，fee 只考虑 "70% maker
+  + 30% taker"，但**不扣 OKX 的 maker rebate**（VIP 账户可达 -0.015%）
+- **影响**：生产 `expected_cost_bps` 比真实多估 ~1-2 bps，导致更多决策被判
+  "期望净亏" 而 hold
+- **建议**：`fee_resolver` 加 `maker_rebate_bps_decimal()` 方法，在 cost 里减掉；
+  验证 OKX 账户等级对应的实际 rebate
+
+### LF-20260421-022 · direction_bias = flat 时 confidence 对称性问题
+
+- **Category**: 信号偏置
+- **位置**: `aats/services/strategy_engines/independent/scoring.py:142-154`（H4 fix 2026-04-19）
+- **现象**：`confidence` 只在 `baseline.direction_bias == leg` 时计分；否则贡献 0
+- **副作用**：如果 baseline 长期 "flat"，long/short 两边 confidence 都 0（不对称）；
+  如果长期 "long"，short leg 被系统性压制
+- **实测**：最新 DecisionOutcome direction_bias = "flat" → 两边 confidence 都 0
+- **建议**：做 24h 采样统计 `direction_bias` 分布；如果 "flat" 占 80%+，应调整
+  confidence 的 gating 逻辑或引入 flat-bias 下的默认 confidence 值
+
+### LF-20260421-023 · score gate 与 net_edge gate 阈值不联动
+
+- **Category**: 策略几何冲突
+- **位置**: `aats/services/strategy_engines/independent/engine.py:284`
+- **现象**：entry 需要两道 gate 都过：
+  1. `score >= entry_threshold`（硬编码 0.25）
+  2. `net_edge >= safe_threshold`（0.0）
+- **问题**：`signal_edge = score × 20 bps`，所以 score=0.15 对应 signal_edge=3 bps，
+  扣 cost+buffer 后仍然净亏。**score < 0.30 的时候 net_edge 永远过不了**，
+  所以调低 entry_threshold 到 0.15 没用（被 net_edge gate 接着挡）
+- **实际的 "能 trade" 最小 score**: ~0.50（即 signal_edge > 10 bps 覆盖 cost 6 + buffer 4）
+- **建议**：要么 entry_threshold 和 safe_threshold 联动设置，要么降 cost / buffer 让 net_edge gate 更宽松
+
 ---
 
 ## 追踪 / Sync 状态
@@ -221,3 +256,6 @@
 | 018 | 2026-04-21 KG·2 | 否 | - |
 | 019 | 2026-04-21 KG·3 | 否 | - |
 | 020 | 2026-04-21 KG·3 | 否 | - |
+| 021 | 2026-04-21 Phase 2 | 否 | - |
+| 022 | 2026-04-21 Phase 2 | 否 | - |
+| 023 | 2026-04-21 Phase 2 | 否 | - |
