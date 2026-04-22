@@ -29,7 +29,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({job=\"aats\"} |= \"kill_switch_applied\" [5m]))"
+              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"kill_switch_applied\" [5m]))"
               queryType: range
             relativeTimeRange:
               from: 300
@@ -52,7 +52,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({job=\"aats\"} |= \"reconciliation_mismatch\" [15m]))"
+              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"reconciliation_mismatch\" [15m]))"
               queryType: range
             relativeTimeRange:
               from: 900
@@ -75,7 +75,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({job=\"aats\"} |= \"Traceback\" [5m]))"
+              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"Traceback\" [5m]))"
               queryType: range
             relativeTimeRange:
               from: 300
@@ -98,7 +98,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({job=\"aats\"} |= \"decision_cycle_completed\" [10m]))"
+              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"decision_cycle_completed\" [10m]))"
               queryType: range
             relativeTimeRange:
               from: 600
@@ -122,7 +122,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({job=\"aats\", level=\"ERROR\"} [15m]))"
+              expr: "sum(count_over_time({job=\"aats\", level=\"ERROR\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} [15m]))"
               queryType: range
             relativeTimeRange:
               from: 900
@@ -173,7 +173,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({container=\"aats-microstructure-collector\"} |= \"okx_ws_message_received\" [2m]))"
+              expr: "sum(count_over_time({container=\"aats-microstructure-collector\"} |~ \"flushed [0-9]+/[0-9]+ rows to\" [2m]))"
               queryType: range
             relativeTimeRange:
               from: 120
@@ -251,7 +251,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "max_over_time({job=\"aats\"} |= \"silver_microstructure_etl\" | regexp \"duration=(?P<duration>[0-9.]+)s\" | unwrap duration [15m])"
+              expr: "max_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"silver_microstructure_etl\" | regexp \"duration=(?P<duration>[0-9.]+)s\" | unwrap duration [15m])"
               queryType: range
             relativeTimeRange:
               from: 900
@@ -291,7 +291,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "avg_over_time({job=\"aats\"} |= \"fee_drift\" | regexp \"derived_fee_bps=(?P<fee>[0-9.]+)\" | unwrap fee [7d])"
+              expr: "avg_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"fee_drift\" | regexp \"derived_fee_bps=(?P<fee>[0-9.]+)\" | unwrap fee [7d])"
               queryType: range
             relativeTimeRange:
               from: 604800
@@ -332,7 +332,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "max_over_time({job=\"aats\"} |= \"cost_margin_tight\" | regexp \"total_entry_cost_bps=(?P<cost>[0-9.]+)\" | unwrap cost [15m])"
+              expr: "max_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"cost_margin_tight\" | regexp \"total_entry_cost_bps=(?P<cost>[0-9.]+)\" | unwrap cost [15m])"
               queryType: range
             relativeTimeRange:
               from: 900
@@ -555,7 +555,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({job=\"aats\"} |~ \"okx_close_only_without_reducible_position\" [24h]))"
+              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |~ \"okx_close_only_without_reducible_position\" [24h]))"
               queryType: range
             relativeTimeRange:
               from: 86400
