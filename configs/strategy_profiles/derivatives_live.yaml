@@ -459,14 +459,26 @@ strategy_hedge_independent_scale_in_execution_mode: bounded_limit
 strategy_hedge_independent_de_risk_execution_mode: bounded_taker
 # [进阶可调] strategy_hedge_independent_close_failed_thesis_execution_mode：independent thesis 失效退出采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：aggressive_bounded_taker。
 strategy_hedge_independent_close_failed_thesis_execution_mode: aggressive_bounded_taker
-# [进阶可调] strategy_hedge_independent_close_stale_execution_mode：independent thesis 过期退出采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker；推荐值：bounded_limit。
-strategy_hedge_independent_close_stale_execution_mode: bounded_limit
+# [进阶可调] strategy_hedge_independent_close_stale_execution_mode：independent thesis 过期退出采用的执行策略矩阵模式。可选值：adaptive / passive_first / bounded_limit / bounded_taker / aggressive_bounded_taker / post_only_with_timeout_fallback；推荐值：post_only_with_timeout_fallback。
+# 2026-04-21 切换：bounded_limit (跨价吃流动性, 5 bps taker 费) → post_only_with_timeout_fallback
+# (maker 挂单 + 3s 超时 fallback 到 bounded_taker; 期望成本 4.1 bps; 节省 ~0.9 bps).
+# 见 docs/design/post_only_maker_exit_mode_2026_04_21.md (§3 解冻申请已签).
+strategy_hedge_independent_close_stale_execution_mode: post_only_with_timeout_fallback
 # [进阶可调] strategy_hedge_independent_limit_offset_bps_entry：independent 开仓走 bounded-limit IOC 时使用的限价偏移。可选值：>= 0；推荐值：1.5。
 strategy_hedge_independent_limit_offset_bps_entry: 1.5
 # [进阶可调] strategy_hedge_independent_limit_offset_bps_scale_in：independent 加仓走 bounded-limit IOC 时使用的限价偏移。可选值：>= 0；推荐值：1.0。
 strategy_hedge_independent_limit_offset_bps_scale_in: 1.0
-# [进阶可调] strategy_hedge_independent_limit_offset_bps_stale_close：independent stale thesis 收口走 bounded-limit IOC 时使用的限价偏移。可选值：>= 0；推荐值：0.8。
+# [进阶可调] strategy_hedge_independent_limit_offset_bps_stale_close：independent stale thesis 收口的限价偏移。post_only 模式下表示 maker 挂单与 ref 的非跨价距离 (buy=ref×(1−offset), sell=ref×(1+offset))。可选值：>= 0；推荐值：0.8。
 strategy_hedge_independent_limit_offset_bps_stale_close: 0.8
+
+# post_only_with_timeout_fallback 专用配置 (2026-04-21 引入)
+# 见 docs/design/post_only_maker_exit_mode_2026_04_21.md §3.1
+# [进阶可调] strategy_hedge_independent_post_only_timeout_ms：post_only 挂单等待 maker 成交的最大毫秒数；超时即 cancel + fallback。可选值：>= 0；推荐值：3000.0。
+strategy_hedge_independent_post_only_timeout_ms: 3000.0
+# [进阶可调] strategy_hedge_independent_post_only_fallback_mode：超时未成交时的 fallback 模式。当前仅支持 bounded_taker (Layer 4 实现限制)。可选值：bounded_taker；推荐值：bounded_taker。
+strategy_hedge_independent_post_only_fallback_mode: bounded_taker
+# [进阶可调] strategy_hedge_independent_post_only_expected_fill_rate：成本估计模型用的 maker 成交率假设。fee = maker × fill_rate + taker × (1 − fill_rate)。可选值：[0, 1]；推荐值：0.3 (保守估计, 见 evidence doc §4.3)。
+strategy_hedge_independent_post_only_expected_fill_rate: 0.3
 
 # 诊断输出
 # [进阶可调] strategy_hedge_independent_emit_book_level_metrics：是否输出独立双书的 book 级诊断指标。可选值：true / false；推荐值：true。

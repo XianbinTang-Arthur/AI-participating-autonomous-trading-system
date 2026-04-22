@@ -410,7 +410,14 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_hedge_independent_scale_in_execution_mode"] == "bounded_limit"
         assert values["strategy_hedge_independent_de_risk_execution_mode"] == "bounded_taker"
         assert values["strategy_hedge_independent_close_failed_thesis_execution_mode"] == "aggressive_bounded_taker"
-        assert values["strategy_hedge_independent_close_stale_execution_mode"] == "bounded_limit"
+        # 2026-04-21 仅 derivatives_live 切到 post_only_with_timeout_fallback
+        # (maker 挂单 + 3s 超时 fallback to bounded_taker; 见
+        # docs/design/post_only_maker_exit_mode_2026_04_21.md). non-live profile
+        # 保持 bounded_limit 以隔离 sandbox 与实盘.
+        expected_close_stale_mode = (
+            "post_only_with_timeout_fallback" if profile == "derivatives_live" else "bounded_limit"
+        )
+        assert values["strategy_hedge_independent_close_stale_execution_mode"] == expected_close_stale_mode
         assert values["strategy_hedge_independent_limit_offset_bps_entry"] == 1.5
         assert values["strategy_hedge_independent_limit_offset_bps_scale_in"] == 1.0
         assert values["strategy_hedge_independent_limit_offset_bps_stale_close"] == 0.8
@@ -500,7 +507,13 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_hedge_independent_scale_in_execution_mode"] == "bounded_limit"
     assert values["strategy_hedge_independent_de_risk_execution_mode"] == "bounded_taker"
     assert values["strategy_hedge_independent_close_failed_thesis_execution_mode"] == "aggressive_bounded_taker"
-    assert values["strategy_hedge_independent_close_stale_execution_mode"] == "bounded_limit"
+    assert values["strategy_hedge_independent_close_stale_execution_mode"] == "post_only_with_timeout_fallback"
+    # 2026-04-21 引入的 post_only_with_timeout_fallback 三项专用参数
+    # (timeout=3s, fallback=bounded_taker, expected_fill_rate=30%); 详见
+    # docs/design/post_only_maker_exit_mode_2026_04_21.md §3.
+    assert values["strategy_hedge_independent_post_only_timeout_ms"] == 3000.0
+    assert values["strategy_hedge_independent_post_only_fallback_mode"] == "bounded_taker"
+    assert values["strategy_hedge_independent_post_only_expected_fill_rate"] == 0.3
     assert values["strategy_hedge_independent_limit_offset_bps_entry"] == 1.5
     assert values["strategy_hedge_independent_limit_offset_bps_scale_in"] == 1.0
     assert values["strategy_hedge_independent_limit_offset_bps_stale_close"] == 0.8

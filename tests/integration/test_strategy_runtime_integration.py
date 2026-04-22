@@ -1052,7 +1052,12 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(settings.strategy_hedge_independent_scale_in_execution_mode, "bounded_limit")
         self.assertEqual(settings.strategy_hedge_independent_de_risk_execution_mode, "bounded_taker")
         self.assertEqual(settings.strategy_hedge_independent_close_failed_thesis_execution_mode, "aggressive_bounded_taker")
-        self.assertEqual(settings.strategy_hedge_independent_close_stale_execution_mode, "bounded_limit")
+        # 2026-04-21 derivatives_live 切到 post_only_with_timeout_fallback (maker 优先 + 3s
+        # 超时 fallback to bounded_taker; 见 docs/design/post_only_maker_exit_mode_2026_04_21.md).
+        self.assertEqual(settings.strategy_hedge_independent_close_stale_execution_mode, "post_only_with_timeout_fallback")
+        self.assertEqual(settings.strategy_hedge_independent_post_only_timeout_ms, 3000.0)
+        self.assertEqual(settings.strategy_hedge_independent_post_only_fallback_mode, "bounded_taker")
+        self.assertEqual(settings.strategy_hedge_independent_post_only_expected_fill_rate, 0.3)
         self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_entry, 1.5)
         self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_scale_in, 1.0)
         self.assertEqual(settings.strategy_hedge_independent_limit_offset_bps_stale_close, 0.8)
