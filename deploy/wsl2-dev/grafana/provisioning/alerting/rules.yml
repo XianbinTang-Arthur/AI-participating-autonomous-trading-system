@@ -135,6 +135,8 @@ groups:
       # ── SEV3：错误率过高 ────────────────────────────────────────────
       # 15 分钟内超过 5 条 ERROR 级别日志。
       # 使用 reduce → threshold 链：A(Loki count) → B(取末值) → C(>5 判定)
+      # A 末尾 `or vector(0)`: 防止 count=0 窗口 Loki 不返回样本导致 reducer:last
+      # 读到过去窗口的非零值,在错误已停止的情况下仍然误报.
       - uid: sev3-error-rate
         title: "SEV3: High Error Rate"
         condition: C
@@ -142,7 +144,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({job=\"aats\", level=\"ERROR\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} [15m]))"
+              expr: "sum(count_over_time({job=\"aats\", level=\"ERROR\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} [15m])) or vector(0)"
               queryType: range
             relativeTimeRange:
               from: 900
@@ -232,7 +234,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({container=\"aats-microstructure-collector\"} |= \"okx_ws_reconnecting\" [1h]))"
+              expr: "sum(count_over_time({container=\"aats-microstructure-collector\"} |= \"okx_ws_reconnecting\" [1h])) or vector(0)"
               queryType: range
             relativeTimeRange:
               from: 3600
@@ -585,7 +587,7 @@ groups:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |~ \"okx_close_only_without_reducible_position\" [24h]))"
+              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |~ \"okx_close_only_without_reducible_position\" [24h])) or vector(0)"
               queryType: range
             relativeTimeRange:
               from: 86400
