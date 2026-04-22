@@ -85,16 +85,16 @@ agent 可以重跑相同的 grep / 查询命令确认图谱是否仍然对得上
 
 | # | 文件 | 状态 | 最后更新 |
 |---|------|------|---------|
-| 01 | system_topology | 🚧 待写 | - |
-| 02 | data_flow | 🚧 待写 | - |
-| 03 | safety_layers | 🚧 待写（基于 C2 审计报告扩展） | - |
-| 04 | state_machines | 🚧 待写 | - |
-| 05 | schema_catalog | 🚧 待写 | - |
-| 06 | service_catalog | 🚧 待写 | - |
-| 07 | storage_map | 🚧 待写 | - |
-| 08 | configuration | 🚧 待写 | - |
-| 09 | operational_guide | 🚧 待写 | - |
-| 10 | latent_findings | 🚧 边做边更新 | - |
+| 01 | [system_topology](01_system_topology.md) | ✅ 完成 | 2026-04-21 |
+| 02 | [data_flow](02_data_flow.md) | ✅ 完成 | 2026-04-21 |
+| 03 | [safety_layers](03_safety_layers.md) | ✅ 完成（基于 C2 审计） | 2026-04-21 |
+| 04 | [state_machines](04_state_machines.md) | ✅ 完成 | 2026-04-21 |
+| 05 | [schema_catalog](05_schema_catalog.md) | ✅ 完成 | 2026-04-21 |
+| 06 | [service_catalog](06_service_catalog.md) | ✅ 完成 | 2026-04-21 |
+| 07 | [storage_map](07_storage_map.md) | ✅ 完成 | 2026-04-21 |
+| 08 | [configuration](08_configuration.md) | ✅ 完成 | 2026-04-21 |
+| 09 | [operational_guide](09_operational_guide.md) | ✅ 完成 | 2026-04-21 |
+| 10 | [latent_findings](10_latent_findings.md) | ✅ 20 项 findings 已录 | 2026-04-21 |
 
 ---
 
