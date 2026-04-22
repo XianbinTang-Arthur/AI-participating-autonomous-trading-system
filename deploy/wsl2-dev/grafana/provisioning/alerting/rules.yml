@@ -94,14 +94,18 @@ groups:
       - uid: sev2-decision-stall
         title: "SEV2: Decision Cycle Stall"
         # 语义: count < 1 触发 (10 min 内 0 次 decision_cycle_completed = stall)
-        # 必须走 A→B(reduce:last)→C(threshold:lt 1) 链,否则 condition: A 会变成
+        # 必须走 A→B(reduce:last)→C(math:$B<1) 链,否则 condition: A 会变成
         # "有任何命中就 alert" (和 stall 意图相反).
+        # A 末尾 `or vector(0)`: Loki 在无匹配时返回空集,wrap 后保证 A always
+        # 有数值序列(0 或 N), 防止 threshold/math 阶段产生 NoData 误报.
+        # C 用 math 而非 threshold: math 总返回 0/1 数值序列,threshold 在条件
+        # 不满足时会 DROP 序列 → NoData → noDataState=Alerting → 健康也误报.
         condition: C
         data:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"decision_cycle_completed\" [10m]))"
+              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"decision_cycle_completed\" [10m])) or vector(0)"
               queryType: range
             relativeTimeRange:
               from: 600
@@ -116,10 +120,8 @@ groups:
           - refId: C
             datasourceUid: __expr__
             model:
-              type: threshold
-              expression: B
-              conditions:
-                - evaluator: { type: lt, params: [1] }
+              type: math
+              expression: "$B < 1"
             relativeTimeRange: { from: 0, to: 0 }
         noDataState: Alerting
         execErrState: Error
@@ -186,12 +188,14 @@ groups:
       # 最近 2 min 未见 microstructure_ws_message 日志 = collector 断链或 daemon 挂
       - uid: sev2-micro-ws-stale
         title: "SEV2: Microstructure WS Stale"
+        # A 末尾 `or vector(0)` + C 用 math: 同 sev2-decision-stall 反 threshold
+        # 陷阱; Loki 无匹配→0, 健康时 math 返回 0(不 fire),stall 时返回 1(fire).
         condition: C
         data:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({container=\"aats-microstructure-collector\"} |~ \"flushed [0-9]+/[0-9]+ rows to\" [2m]))"
+              expr: "sum(count_over_time({container=\"aats-microstructure-collector\"} |~ \"flushed [0-9]+/[0-9]+ rows to\" [2m])) or vector(0)"
               queryType: range
             relativeTimeRange:
               from: 120
@@ -206,10 +210,8 @@ groups:
           - refId: C
             datasourceUid: __expr__
             model:
-              type: threshold
-              expression: B
-              conditions:
-                - evaluator: { type: lt, params: [1] }
+              type: math
+              expression: "$B < 1"
             relativeTimeRange: { from: 0, to: 0 }
         noDataState: Alerting
         execErrState: Error
@@ -418,13 +420,14 @@ groups:
           - refId: C
             datasourceUid: __expr__
             model:
-              type: threshold
-              expression: B
-              conditions:
-                - evaluator: { type: gt, params: [0.5] }
+              type: math
+              expression: "$B > 0.5"
             relativeTimeRange: { from: 0, to: 0 }
         # 配合 `== bool 0` 改写: 表达式现在 always 返回序列(0 或 1),
         # NoData 只在 Prometheus 完全挂掉时发生 — 这时仍应告警.
+        # C 用 math 而非 threshold: threshold 在条件不满足时会 DROP 序列,
+        # 配合 noDataState=Alerting 会导致健康时误报 dead-man. math 总返回
+        # 0/1 数值序列,不产生 NoData,彻底消除这类误报.
         noDataState: Alerting
         execErrState: Error
         for: 10m
