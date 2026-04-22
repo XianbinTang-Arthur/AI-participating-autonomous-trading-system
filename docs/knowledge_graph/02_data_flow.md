@@ -143,6 +143,7 @@ graph TD
 | DECISION_CONTEXTS | decision | audit, reconciliation | event_store | - |
 | BASELINE_ASSESSMENTS | decision | audit | event_store | - |
 | AI_ASSESSMENTS | decision | audit | event_store | 仅 AI 模式 |
+| **DECISION_OUTCOMES** | **execution** (via `_publish_finalized_decision_outcome`) | **audit** | **event_store** | - |
 | POSITION_TARGETS | decision | execution | event_store | ✅ |
 | POLICY_DECISIONS | decision | execution | event_store | ✅ |
 | RISK_DECISIONS | decision | execution | event_store | ✅ |
@@ -178,7 +179,7 @@ graph TD
 
 （已抄进 [10_latent_findings.md](10_latent_findings.md)）：
 
-- `DECISION_OUTCOMES` topic 被 declared 但 never published — 看 audit 时要注意
+- ~~`DECISION_OUTCOMES` topic 被 declared 但 never published~~ — **已纠正**: 其实是 `_publish_finalized_decision_outcome` 在 `config.py:1868` 发布，我的 audit agent 漏搜了 bootstrap 目录
 - OrderState 更新存在 WS vs REST 竞争窗口 — **HIGH**
 - `run_cycle` 无全局 timeout，NATS 背压时可能卡死整个 decision 进程 — **HIGH**
 - Reconciliation 发报告到 KillSwitch halt 之间有 10-50ms 缝 — **HIGH**（安全敏感）

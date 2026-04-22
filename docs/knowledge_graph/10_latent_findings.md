@@ -85,12 +85,17 @@
 
 ## 🟡 MED — 值得改但不紧急
 
-### LF-20260421-006 · `DECISION_OUTCOMES` topic declared but never published
+### LF-20260421-006 · ~~`DECISION_OUTCOMES` topic declared but never published~~ (CORRECTED 2026-04-22)
 
-- **Category**: doc-drift / 死代码
-- **位置**: `aats/events/topics.py` declares `DECISION_OUTCOMES`，但 orchestrator.py 从不 `publish_model(topic=DECISION_OUTCOMES, ...)`
-- **后果**：下游如果期望"决策完成"信号必须依赖 PositionTarget 的到达，不是显式的 DecisionOutcome
-- **建议**：要么把 topic 清掉要么补发 event；现有 `DecisionAuditRecord` 已经覆盖审计需求
+- **~~Category~~**: ~~doc-drift~~ **→ false positive (my KG audit agent was wrong)**
+- **实际情况**：`DECISION_OUTCOMES` 有真实 publisher —— `_publish_finalized_decision_outcome()`
+  在 `aats/bootstrap/config.py:1866-1872` 发布，被 5 处调用（L2974/2986/2997/3005/3014）。
+  Audit agent 只查了 `orchestrator.py` 漏了 `bootstrap/config.py`。
+- **为什么会误判**：`_publish_finalized_decision_outcome` 是 `_build_position_target_handler`
+  内部的 closure，从 `bootstrap/config.py` 的 `build_runtime` 构造而非 orchestrator。
+  我在 [02_data_flow.md](02_data_flow.md) 把它标成"未发布"也是错的，已在本次一并修正。
+- **教训**：grep 某 topic 时要搜**全仓**，不只核心 service 文件。Audit agent 以后
+  需要 prompt 强调 "closure inside bootstrap/config.py 也是 production code"。
 
 ### LF-20260421-007 · `_timeframe_locks` / `_consecutive_failures` dict 无清理
 
