@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import defaultdict, deque
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -38,13 +40,25 @@ from aats.bootstrap.settings import AATSSettings
 from aats.schemas.ai_shadow import ShadowActionType
 from aats.schemas.common import utc_now
 from aats.schemas.decision import BaselineAssessment, DecisionContext, PositionTarget
-from aats.schemas.strategy_shadow import StrategyFamilyShadowDecision
+from aats.schemas.strategy_shadow import (
+    StrategyFamilyShadowDecision,
+    StrategyFamilyShadowEvaluation,
+)
 from aats.services.decision_engine.target_position import TargetPositionEngine
 from aats.services.fee_resolver import EffectiveFeeResolver
 
 # 决策 qty 差异阈值（< 此值视为"实际相同"，容忍浮点误差）。
 # 0.001 BTC 是 OKX 最小下单单位，shadow 分歧 < 此值无实际 execution 意义。
 _QTY_EPSILON = Decimal("0.0005")
+
+# Phase 2 · 窗口大小默认值。每 N 个 shadow decision 出一份 evaluation。
+# 和 AI shadow 的 ai_shadow_evaluation_window=50 对齐，保持运维认知一致。
+# 可被 settings.paper_trading_shadow_evaluation_window 覆盖（未加 → 用默认）。
+_DEFAULT_EVALUATION_WINDOW = 50
+
+# 每候选最多保留多少 shadow decisions（ring buffer 上限）。
+# 超过窗口大小、留 buffer 防 evaluation 窗口偏移。
+_MAX_PER_CANDIDATE_HISTORY = 500
 
 
 class PaperTradingShadowService:
@@ -63,6 +77,7 @@ class PaperTradingShadowService:
     _METRIC_SHADOW_COMPUTED = "paper_trading_shadow_computed_total"
     _METRIC_SHADOW_ERROR = "paper_trading_shadow_errors_total"
     _METRIC_SHADOW_OVERRIDE = "paper_trading_shadow_override_total"
+    _METRIC_EVALUATION_EMITTED = "paper_trading_shadow_evaluation_emitted_total"
 
     def __init__(
         self,
@@ -71,6 +86,7 @@ class PaperTradingShadowService:
         fee_resolver: EffectiveFeeResolver | None = None,
         metrics: MetricsRegistry | None = None,
         logger: Any | None = None,
+        evaluation_window: int | None = None,
     ) -> None:
         self._base_settings = base_settings
         self._fee_resolver = fee_resolver or EffectiveFeeResolver(settings=base_settings)
@@ -78,6 +94,21 @@ class PaperTradingShadowService:
         self._logger = logger or get_logger("aats.paper_trading_shadow")
         # engine 缓存：config_version → TargetPositionEngine
         self._engine_cache: dict[str, TargetPositionEngine] = {}
+        # Phase 2 · 窗口大小（每 N 个 shadow 出一份 evaluation）
+        self._evaluation_window = max(
+            1,
+            int(evaluation_window or _DEFAULT_EVALUATION_WINDOW),
+        )
+        # Phase 2 · tracker：每个 (candidate_id, config_version) 独立 ring buffer
+        # key = (candidate_id, config_version)
+        # value = deque of recent StrategyFamilyShadowDecision（maxlen=_MAX_PER_CANDIDATE_HISTORY）
+        self._per_candidate_history: dict[
+            tuple[str, str], deque[StrategyFamilyShadowDecision]
+        ] = defaultdict(
+            lambda: deque(maxlen=_MAX_PER_CANDIDATE_HISTORY)
+        )
+        # 距离上次 evaluation 累计了多少条（达到 window_size 就触发并清零）
+        self._per_candidate_counter: dict[tuple[str, str], int] = defaultdict(int)
 
     def enabled(self) -> bool:
         """True 当 paper_trading_shadow_enabled + candidates 非空时。"""
@@ -111,6 +142,8 @@ class PaperTradingShadowService:
                 )
                 if decision is not None:
                     results.append(decision)
+                    # Phase 2 · 累进 tracker
+                    self._record_for_window(decision)
                     if self._metrics is not None:
                         self._metrics.increment(self._METRIC_SHADOW_COMPUTED)
                         if decision.would_override_baseline:
@@ -220,6 +253,103 @@ class PaperTradingShadowService:
         )
         self._engine_cache[config_version] = engine
         return engine
+
+    # ──────────────────────────────────────────────────────────
+    # Phase 2 · Window tracker + evaluator
+    # ──────────────────────────────────────────────────────────
+
+    def _record_for_window(self, decision: StrategyFamilyShadowDecision) -> None:
+        """把 decision 加入 ring buffer 和计数器。evaluate_window() 之后清 counter。"""
+        key = (decision.candidate_id, decision.candidate_config_version)
+        self._per_candidate_history[key].append(decision)
+        self._per_candidate_counter[key] += 1
+
+    def evaluate_windows(self) -> list[StrategyFamilyShadowEvaluation]:
+        """对每个 candidate 检查是否累够窗口 (evaluation_window 个 decision)，
+        够了就出一份 Evaluation，同时重置 counter。
+
+        返回 list[Evaluation]，空表示没有窗口达到阈值。
+        上层（orchestrator）负责 publish。
+
+        本方法 **安全幂等**：每次调都只按 counter 判断，不会重复出同一个窗口。
+        """
+        evaluations: list[StrategyFamilyShadowEvaluation] = []
+        for key, counter in list(self._per_candidate_counter.items()):
+            if counter < self._evaluation_window:
+                continue
+            history = self._per_candidate_history[key]
+            if not history:
+                # 不应该发生（counter > 0 意味着 history 有数据），防御一下
+                self._per_candidate_counter[key] = 0
+                continue
+
+            # 取最后 evaluation_window 条 (如果 history 超过就截取)
+            window_slice = list(history)[-self._evaluation_window:]
+            try:
+                evaluation = self._build_evaluation(window_slice=window_slice)
+            except Exception as exc:
+                # 绝不 raise 进 orchestrator
+                log_event(
+                    self._logger,
+                    "paper_trading_shadow_evaluation_build_failed",
+                    level="warning",
+                    candidate_id=key[0],
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                self._per_candidate_counter[key] = 0  # 重置避免卡死
+                continue
+
+            evaluations.append(evaluation)
+            # 触发后重置 counter，下一窗口重新累积
+            self._per_candidate_counter[key] = 0
+
+            if self._metrics is not None:
+                self._metrics.increment(self._METRIC_EVALUATION_EMITTED)
+
+        return evaluations
+
+    def _build_evaluation(
+        self, *, window_slice: list[StrategyFamilyShadowDecision]
+    ) -> StrategyFamilyShadowEvaluation:
+        """由一组 shadow decisions 聚合成一份 Evaluation。"""
+        first = window_slice[0]
+        last = window_slice[-1]
+
+        baseline_trade_count = sum(
+            1
+            for d in window_slice
+            if d.baseline_action not in ("hold", "unknown")
+        )
+        shadow_trade_count = sum(
+            1
+            for d in window_slice
+            if d.shadow_action not in ("hold", "unknown")
+        )
+        override_count = sum(1 for d in window_slice if d.would_override_baseline)
+        agreement_count = sum(
+            1 for d in window_slice if d.shadow_action_type == "same_as_baseline"
+        )
+        disagreement_count = len(window_slice) - agreement_count
+
+        return StrategyFamilyShadowEvaluation(
+            window_start=first.created_at,
+            window_end=last.created_at,
+            symbol=first.symbol,
+            timeframe=first.timeframe,
+            candidate_id=first.candidate_id,
+            candidate_config_version=first.candidate_config_version,
+            decision_ids=[d.decision_id for d in window_slice],
+            baseline_trade_count=baseline_trade_count,
+            shadow_trade_count=shadow_trade_count,
+            override_count=override_count,
+            agreement_count=agreement_count,
+            disagreement_count=disagreement_count,
+            # Phase 2 · 纯决策层（无 PnL 数据，Phase 3+ 接 cheap PnL model 时填）
+            baseline_net_pnl=None,
+            shadow_net_pnl=None,
+            shadow_outperformed=None,
+        )
 
 
 # ──────────────────────────────────────────────────────────

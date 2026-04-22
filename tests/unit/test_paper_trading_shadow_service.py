@@ -204,5 +204,123 @@ class TestSafetyInvariants(unittest.TestCase):
         self.assertEqual(result, [])
 
 
+class TestWindowEvaluator(unittest.TestCase):
+    """Phase 2: evaluate_windows() 按 (candidate_id, config_version) 聚合。"""
+
+    def _make_service(self, *, window: int = 3) -> PaperTradingShadowService:
+        base = AATSSettings.model_validate(
+            {
+                "default_symbol": "BTC-USDT",
+                "allowed_symbols": ("BTC-USDT",),
+            }
+        )
+        return PaperTradingShadowService(
+            base_settings=base,
+            logger=MagicMock(),
+            evaluation_window=window,  # 小窗口易测
+        )
+
+    def _make_decision(
+        self,
+        *,
+        candidate_id: str = "c1",
+        config_version: str = "v1",
+        baseline_action: str = "hold",
+        shadow_action: str = "hold",
+        would_override: bool = False,
+        shadow_action_type: str = "same_as_baseline",
+    ):
+        from aats.schemas.strategy_shadow import StrategyFamilyShadowDecision
+
+        return StrategyFamilyShadowDecision(
+            decision_id=f"d_{candidate_id}_{len(shadow_action)}",
+            symbol="BTC-USDT-SWAP",
+            timeframe="1m",
+            candidate_id=candidate_id,
+            candidate_family="independent",
+            candidate_config_version=config_version,
+            baseline_family="independent",
+            baseline_target_qty=Decimal("0"),
+            baseline_action=baseline_action,
+            shadow_target_qty=Decimal("0"),
+            shadow_action=shadow_action,
+            would_override_baseline=would_override,
+            shadow_action_type=shadow_action_type,
+        )
+
+    def test_under_window_yields_no_evaluation(self) -> None:
+        svc = self._make_service(window=3)
+        svc._record_for_window(self._make_decision())
+        svc._record_for_window(self._make_decision())
+        # 2 < 3 → 不出 evaluation
+        self.assertEqual(svc.evaluate_windows(), [])
+
+    def test_exact_window_yields_one_evaluation(self) -> None:
+        svc = self._make_service(window=3)
+        for _ in range(3):
+            svc._record_for_window(self._make_decision())
+        result = svc.evaluate_windows()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].candidate_id, "c1")
+        self.assertEqual(len(result[0].decision_ids), 3)
+
+    def test_second_call_after_window_yields_nothing(self) -> None:
+        """触发后 counter 重置，再次调用（无新 decision）返回空。"""
+        svc = self._make_service(window=2)
+        svc._record_for_window(self._make_decision())
+        svc._record_for_window(self._make_decision())
+        self.assertEqual(len(svc.evaluate_windows()), 1)
+        # 再调一次，counter 已重置
+        self.assertEqual(svc.evaluate_windows(), [])
+
+    def test_multiple_candidates_independent_windows(self) -> None:
+        svc = self._make_service(window=2)
+        svc._record_for_window(self._make_decision(candidate_id="c1"))
+        svc._record_for_window(self._make_decision(candidate_id="c1"))
+        svc._record_for_window(self._make_decision(candidate_id="c2"))
+        # c1 窗口满，c2 还没
+        result = svc.evaluate_windows()
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].candidate_id, "c1")
+        # 再加一个 c2 触发
+        svc._record_for_window(self._make_decision(candidate_id="c2"))
+        result2 = svc.evaluate_windows()
+        self.assertEqual(len(result2), 1)
+        self.assertEqual(result2[0].candidate_id, "c2")
+
+    def test_evaluation_counts_trades_and_overrides(self) -> None:
+        svc = self._make_service(window=3)
+        svc._record_for_window(self._make_decision(baseline_action="open_long"))
+        svc._record_for_window(
+            self._make_decision(
+                baseline_action="open_long",
+                shadow_action="hold",
+                would_override=True,
+                shadow_action_type="hold_instead",
+            )
+        )
+        svc._record_for_window(self._make_decision())  # hold / hold same
+        result = svc.evaluate_windows()
+        self.assertEqual(len(result), 1)
+        e = result[0]
+        # baseline_trade_count: 2 个 open_long (非 hold)
+        self.assertEqual(e.baseline_trade_count, 2)
+        # shadow_trade_count: 没有非 hold shadow
+        self.assertEqual(e.shadow_trade_count, 0)
+        self.assertEqual(e.override_count, 1)
+        self.assertEqual(e.agreement_count, 2)  # 两个 same_as_baseline
+        self.assertEqual(e.disagreement_count, 1)
+        # Phase 2 不算 PnL
+        self.assertIsNone(e.baseline_net_pnl)
+        self.assertIsNone(e.shadow_net_pnl)
+
+    def test_window_size_zero_or_negative_is_coerced_to_1(self) -> None:
+        """防御：恶意 window=0/-1 不能让 tracker 永远触发或从不触发。"""
+        svc = self._make_service(window=0)
+        self.assertGreaterEqual(svc._evaluation_window, 1)
+        svc2 = self._make_service(window=-5)
+        self.assertGreaterEqual(svc2._evaluation_window, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

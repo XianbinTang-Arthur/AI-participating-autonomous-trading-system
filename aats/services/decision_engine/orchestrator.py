@@ -533,4 +533,48 @@ class DecisionOrchestrator:
                     error_type=type(exc).__name__,
                     error=str(exc),
                 )
+
+        # Phase 2 · 窗口达到阈值时 publish evaluation
+        await self._maybe_publish_paper_trading_evaluations(symbol=symbol)
         return event_ids
+
+    async def _maybe_publish_paper_trading_evaluations(self, *, symbol: str) -> None:
+        """Round 3 Phase 2 · 每次记 shadow 后检查是否有窗口满了，满了就 publish 聚合报告。
+
+        service.evaluate_windows() 安全幂等，返回已满窗口的 evaluations（可能空）。
+        任何 publish 失败 swallow，不影响 live。
+        """
+        if self.paper_trading_shadow_service is None:
+            return
+        try:
+            evaluations = self.paper_trading_shadow_service.evaluate_windows()
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "paper_trading_shadow_evaluation_loop_failed",
+                level="warning",
+                symbol=symbol,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return
+
+        for evaluation in evaluations:
+            try:
+                await publish_model(
+                    bus=self.bus,
+                    topic=topics.STRATEGY_FAMILY_SHADOW_EVALUATIONS,
+                    key=symbol,
+                    payload_model=evaluation,
+                    source_component="paper_trading_shadow",
+                )
+            except Exception as exc:
+                log_event(
+                    self.logger,
+                    "paper_trading_shadow_evaluation_publish_failed",
+                    level="warning",
+                    symbol=symbol,
+                    candidate_id=evaluation.candidate_id,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
