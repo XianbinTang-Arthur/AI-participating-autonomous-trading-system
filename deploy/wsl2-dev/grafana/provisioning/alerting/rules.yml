@@ -93,7 +93,10 @@ groups:
       # 10 分钟内没有 decision_cycle_completed 日志 = 决策引擎卡死。
       - uid: sev2-decision-stall
         title: "SEV2: Decision Cycle Stall"
-        condition: A
+        # 语义: count < 1 触发 (10 min 内 0 次 decision_cycle_completed = stall)
+        # 必须走 A→B(reduce:last)→C(threshold:lt 1) 链,否则 condition: A 会变成
+        # "有任何命中就 alert" (和 stall 意图相反).
+        condition: C
         data:
           - refId: A
             datasourceUid: loki
@@ -103,6 +106,21 @@ groups:
             relativeTimeRange:
               from: 600
               to: 0
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: threshold
+              expression: B
+              conditions:
+                - evaluator: { type: lt, params: [1] }
+            relativeTimeRange: { from: 0, to: 0 }
         noDataState: Alerting
         execErrState: Error
         for: 5m
@@ -200,8 +218,8 @@ groups:
           severity: sev2
           component: microstructure
         annotations:
-          summary: "Microstructure WS no messages for 2+ minutes"
-          description: "aats-microstructure-collector has not logged okx_ws_message_received in the last 2 min. Check WS disconnection / OKX status / DB availability."
+          summary: "Microstructure WS flush stall (2+ minutes)"
+          description: "aats-microstructure-collector has not logged any bronze flush ('flushed N/M rows to ...') in the last 2 min. Check WS disconnection / OKX status / DB availability."
 
       # ── 微结构告警 2/3: WS 重连频繁 ────────────────────────────────
       # 1h 内 > 5 次 reconnect = OKX 不稳或网络问题
