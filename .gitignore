@@ -40,6 +40,3 @@ loginpassword
 
 # Claude Code runtime state (lock files for scheduled tasks, etc.)
 .claude/scheduled_tasks.lock
-
-# Temporary: backtest MVP WIP by background agents (will remove once committed)
-aats/data_platform/replay/backtest/
