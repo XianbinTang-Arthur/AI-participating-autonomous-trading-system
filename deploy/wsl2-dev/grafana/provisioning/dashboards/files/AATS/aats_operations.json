@@ -14,8 +14,8 @@
       "type": "row"
     },
     {
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "description": "P0-b Task 2.2: 当前 ai_operating_mode → decision_authority 视图. 对齐 docs/governance/runtime_trading_mode_semantics.md §1-§2. Prometheus 采到带 mode label 的样本就显示. 2026-04-20 update: Prometheus scrape 已修复 (commit 3c90c64, 6/6 targets UP), P1 遗留条件已消除. legacy alias (ai_advisory/ai_blended/ai_primary/ai_decision_maker_with_profile_control) 会 normalize 到 canonical 三态后展示.",
+      "datasource": { "type": "postgres", "uid": "postgres" },
+      "description": "P0-b Task 2.2: 当前 ai_operating_mode → decision_authority 视图. 对齐 docs/governance/runtime_trading_mode_semantics.md §1-§2. 主数据源 = PG event_store (strategy.decision_outcome 最新一条) — 字符串 mode 可直接走 value mappings. Prometheus counter (refId A) 保留作诊断备查但 hide=true — 其 rate 是 numeric, 无法被 mappings 映射, 会让 stat panel 显示 No Data (2026-04-22 修复). legacy alias (ai_advisory/ai_blended/ai_primary/ai_decision_maker_with_profile_control) 会 normalize 到 canonical 三态后展示.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -39,7 +39,7 @@
               { "color": "blue", "value": null }
             ]
           },
-          "noValue": "No Data — 检查 Prometheus scrape (/metrics) + aats_runtime_ai_operating_mode counter 是否在 emit"
+          "noValue": "No Data — 检查 PG event_store 是否有 strategy.decision_outcome 事件 (SELECT ... FROM public.event_store WHERE topic='strategy.decision_outcome')"
         },
         "overrides": []
       },
@@ -59,23 +59,24 @@
       },
       "targets": [
         {
-          "datasource": { "type": "prometheus", "uid": "prometheus" },
-          "editorMode": "code",
-          "//": "2026-04-20 code review C-M3 fix: 原 query `group by (mode) (... _total)` 在 mode 切换后会显示**所有历史 mode** (counter 单调递增), value mapping 挑哪个变得不确定. 改用 `rate()[5m] > 0` 只返回**最近 5 min 有增长的 mode** = 当前活跃 mode. topk(1) 进一步保证单一结果.",
-          "expr": "topk(1, sum by (mode) (rate(aats_runtime_ai_operating_mode_total[5m])) > 0)",
-          "instant": true,
-          "legendFormat": "{{mode}}",
-          "format": "table",
-          "refId": "A"
-        },
-        {
           "datasource": { "type": "postgres", "uid": "postgres" },
           "editorMode": "code",
           "format": "table",
           "rawQuery": true,
           "rawSql": "SELECT payload::jsonb->>'ai_operating_mode' AS mode FROM public.event_store WHERE topic='strategy.decision_outcome' ORDER BY event_timestamp DESC LIMIT 1",
-          "refId": "B",
+          "refId": "A",
           "hide": false
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "editorMode": "code",
+          "//": "诊断备查: 2026-04-20 C-M3 用 rate()[5m] > 0 只返回最近 5min 活跃 mode. 但 rate value 是 numeric, 无法被字符串 value mappings 映射, 会压过 refId A 的字符串导致 panel 显示 No Data. 2026-04-22 改为 hide=true, 主数据走 PG (refId A 已互换).",
+          "expr": "topk(1, sum by (mode) (rate(aats_runtime_ai_operating_mode_total[5m])) > 0)",
+          "instant": true,
+          "legendFormat": "{{mode}}",
+          "format": "table",
+          "refId": "B",
+          "hide": true
         }
       ],
       "title": "Runtime Trading Mode (当前授权)",
