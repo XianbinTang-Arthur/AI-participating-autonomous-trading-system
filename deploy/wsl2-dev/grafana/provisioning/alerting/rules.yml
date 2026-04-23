@@ -68,21 +68,42 @@ groups:
 
       # ── SEV2：进程崩溃 ─────────────────────────────────────────────
       # Python Traceback 表示未捕获异常，进程可能已挂。
+      # 语义: count > 0 触发 (5 min 内至少 1 次 Traceback = 可能崩溃)
+      # 必须走 A→B(reduce:last)→C(math:$B>0) 链,否则 condition: A 会拿到
+      # time series → Grafana 告警 DatasourceError "only reduced data can
+      # be alerted on" (历史上这条 alert 因此坏过 20h+, 见 2026-04-23 诊断).
+      # A 末尾 `or vector(0)`: Loki 无匹配时返回空集,wrap 后保证 A 总有数值
+      # 序列(0 或 N), 防止 threshold/math 阶段产生 NoData.
+      # C 用 math 而非 threshold: math 总返回 0/1 数值序列,threshold 条件
+      # 不满足时会 DROP → NoData → noDataState=Alerting → 健康也误报.
       - uid: sev2-process-crash
         title: "SEV2: Process Crash (Traceback)"
-        condition: A
+        condition: C
         data:
           - refId: A
             datasourceUid: loki
             model:
-              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"Traceback\" [5m]))"
+              expr: "sum(count_over_time({job=\"aats\", container=~\"aats-gateway|aats-market|aats-decision|aats-execution|aats-rdp-daemon|aats-microstructure-collector\"} |= \"Traceback\" [5m])) or vector(0)"
               queryType: range
             relativeTimeRange:
               from: 300
               to: 0
-        noDataState: OK
+          - refId: B
+            datasourceUid: __expr__
+            model:
+              type: reduce
+              expression: A
+              reducer: last
+            relativeTimeRange: { from: 0, to: 0 }
+          - refId: C
+            datasourceUid: __expr__
+            model:
+              type: math
+              expression: "$B > 0"
+            relativeTimeRange: { from: 0, to: 0 }
+        noDataState: Alerting
         execErrState: Error
-        for: 0s
+        for: 2m
         labels:
           severity: sev2
         annotations:

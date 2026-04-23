@@ -56,7 +56,12 @@ class PostgresEventStore:
                 timeframe=envelope_scope_metadata(envelope)["timeframe"],
                 product_type=envelope_scope_metadata(envelope)["product_type"],
                 margin_mode=envelope_scope_metadata(envelope)["margin_mode"],
-                payload=envelope.payload,
+                # 用 model_dump(mode="json") 而非 envelope.payload:
+                # payload 是原始 dict, 可能含 datetime 对象; psycopg 的 JSON
+                # 编码器不认 datetime → TypeError "Object of type datetime is
+                # not JSON serializable". 走 Pydantic 先序列化成 ISO 字符串.
+                # (2026-04-23 诊断: decision service 每小时 191 条 warning)
+                payload=envelope.model_dump(mode="json")["payload"],
             )
         )
 
