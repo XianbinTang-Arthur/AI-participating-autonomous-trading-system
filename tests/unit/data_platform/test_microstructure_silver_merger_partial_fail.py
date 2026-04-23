@@ -300,7 +300,13 @@ class TestRunnerExitCode(unittest.TestCase):
                     raise run_one_bar_return
                 return run_one_bar_return
 
-            with _mock.patch.object(rbms, "_run_one_bar", side_effect=fake_run_one_bar):
+            # watermark → None 让 runner 走冷启动 fallback (旧 --backfill-bars=N 路径),
+            # 不触 DB; 本组测试锁的是 exit code 语义, 不关心水位线路径。
+            with _mock.patch.object(
+                rbms, "_detect_trade_flow_watermark", return_value=None,
+            ), _mock.patch.object(
+                rbms, "_run_one_bar", side_effect=fake_run_one_bar,
+            ):
                 exit_code = rbms.main()
         finally:
             sys.argv = orig_argv

@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import sys
 import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -495,6 +496,270 @@ class TestSilverMetricsPlumbing(unittest.TestCase):
                 snapshot.get(key, 0), 1,
                 f"expected {key} >= 1 on empty bar, got {snapshot.get(key, 0)}",
             )
+
+
+class TestRunnerWatermarkResolution(unittest.TestCase):
+    """P1-4: 默认 (未传 --bar-start) 时 runner 必须读 silver 水位线, 从
+    watermark + 15min 补到 latest_complete_bar, 而不是只回看最近 N 根。
+
+    行为:
+      1. watermark 落后多根 → 枚举 [watermark+15m, latest_complete_bar] 连续 bars;
+      2. gap > 64 → cap 到最近 64 根 (prevents stampede / EMA 代价爆炸);
+      3. 无 watermark (冷启动) → 退回旧 --backfill-bars=N 路径;
+      4. 显式 --bar-start → main() 仍只跑该单根 bar, 水位线逻辑不触发。
+    """
+
+    def _import_runner(self):
+        import importlib
+        return importlib.import_module("scripts.rdp_build_microstructure_silver")
+
+    def test_watermark_behind_many_bars_enumerates_continuous_gap(self) -> None:
+        """watermark = 10:00, latest = 12:45 → 应得 11 根连续 bars (10:15..12:45)."""
+        rbms = self._import_runner()
+        # 固定 now 让 latest_complete_bar(lookback_bars=1) = (12:30, 12:45)
+        now = datetime(2026, 4, 20, 12, 47, 0, tzinfo=timezone.utc)
+        watermark = datetime(2026, 4, 20, 10, 0, 0, tzinfo=timezone.utc)
+
+        bars = rbms._resolve_bars_from_watermark(
+            symbol="BTC-USDT-SWAP",
+            backfill_bars=1,
+            watermark=watermark,
+            now=now,
+        )
+
+        # 从 10:15 到 12:30 起点, 共 (12*60 - 10*60) / 15 - 1 = 10... 算: 11 根
+        # 10:15, 10:30, 10:45, 11:00, 11:15, 11:30, 11:45, 12:00, 12:15, 12:30
+        # = 10 根. bar_end 是 12:45 的那根 bar_start=12:30.
+        self.assertEqual(len(bars), 10)
+        self.assertEqual(
+            bars[0][0],
+            datetime(2026, 4, 20, 10, 15, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            bars[0][1],
+            datetime(2026, 4, 20, 10, 30, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            bars[-1][0],
+            datetime(2026, 4, 20, 12, 30, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            bars[-1][1],
+            datetime(2026, 4, 20, 12, 45, 0, tzinfo=timezone.utc),
+        )
+        # 连续无跳: 每相邻两根差 15min
+        for prev, curr in zip(bars, bars[1:]):
+            self.assertEqual(curr[0] - prev[0], timedelta(minutes=15))
+
+    def test_gap_exceeds_cap_truncates_to_most_recent_64(self) -> None:
+        """watermark 落后 200 根 → 只补最近 64 根 (cap)."""
+        rbms = self._import_runner()
+        # 200 根 15min bar = 50h, watermark 落在 50h 前
+        now = datetime(2026, 4, 20, 12, 17, 0, tzinfo=timezone.utc)
+        # latest_complete_bar(lookback_bars=1) → bar_start = 12:00
+        # 往前 200 根 bar_start = 12:00 - 200 * 15min = 12:00 - 50h
+        watermark = datetime(2026, 4, 18, 9, 45, 0, tzinfo=timezone.utc)
+        # 预期 gap bars: 10:00, 10:15, ... 12:00 → 需要 > 64, 我们验 cap 生效
+
+        bars = rbms._resolve_bars_from_watermark(
+            symbol="BTC-USDT-SWAP",
+            backfill_bars=1,
+            watermark=watermark,
+            now=now,
+            watermark_cap=64,
+        )
+
+        self.assertEqual(len(bars), 64)
+        # cap 保留最近 64 根 → 最后一根 bar_start=12:00 bar_end=12:15
+        self.assertEqual(
+            bars[-1][0],
+            datetime(2026, 4, 20, 12, 0, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            bars[-1][1],
+            datetime(2026, 4, 20, 12, 15, 0, tzinfo=timezone.utc),
+        )
+        # 第一根应该是 12:00 - 63*15min = 12:00 - 15h45min = 2026-04-19 20:15
+        expected_first_start = (
+            datetime(2026, 4, 20, 12, 0, 0, tzinfo=timezone.utc)
+            - timedelta(minutes=15 * 63)
+        )
+        self.assertEqual(bars[0][0], expected_first_start)
+        # 序列仍然连续
+        for prev, curr in zip(bars, bars[1:]):
+            self.assertEqual(curr[0] - prev[0], timedelta(minutes=15))
+
+    def test_watermark_up_to_date_returns_empty(self) -> None:
+        """watermark 已 = latest_complete_bar.bar_start → 无 gap, 返回空."""
+        rbms = self._import_runner()
+        now = datetime(2026, 4, 20, 12, 17, 0, tzinfo=timezone.utc)
+        # latest_complete_bar(lookback_bars=1) → bar_start=12:00
+        watermark = datetime(2026, 4, 20, 12, 0, 0, tzinfo=timezone.utc)
+
+        bars = rbms._resolve_bars_from_watermark(
+            symbol="BTC-USDT-SWAP",
+            backfill_bars=1,
+            watermark=watermark,
+            now=now,
+        )
+        self.assertEqual(bars, [])
+
+    def test_no_watermark_falls_back_to_backfill_bars(self) -> None:
+        """冷启动 (watermark=None) → 退回旧 --backfill-bars=N 路径."""
+        rbms = self._import_runner()
+        now = datetime(2026, 4, 20, 12, 17, 0, tzinfo=timezone.utc)
+
+        bars = rbms._resolve_bars_from_watermark(
+            symbol="BTC-USDT-SWAP",
+            backfill_bars=3,
+            watermark=None,
+            now=now,
+        )
+
+        # 旧语义: lookback=1,2,3 → 3 根 bar, 但返回时未排序 (main() 会 sort)
+        # 我们这里只验 len 和 bar 集合
+        self.assertEqual(len(bars), 3)
+        starts = sorted(bs for bs, _ in bars)
+        # now=12:17 → current bar start 12:15 (unclosed)
+        # lookback=1 → (12:00, 12:15); =2 → (11:45, 12:00); =3 → (11:30, 11:45)
+        self.assertEqual(starts[0], datetime(2026, 4, 20, 11, 30, 0, tzinfo=timezone.utc))
+        self.assertEqual(starts[1], datetime(2026, 4, 20, 11, 45, 0, tzinfo=timezone.utc))
+        self.assertEqual(starts[2], datetime(2026, 4, 20, 12, 0, 0, tzinfo=timezone.utc))
+
+    def test_main_with_explicit_bar_start_skips_watermark(self) -> None:
+        """显式 --bar-start 时 main() 只跑该单根 bar; _detect_trade_flow_watermark
+        不应被调用 (用户已确定要跑哪根)."""
+        import io
+        import unittest.mock as _mock
+        rbms = self._import_runner()
+
+        captured_args: list[tuple] = []
+
+        def fake_run_one_bar(*, symbol, bar_start, bar_end, **_kw):
+            captured_args.append((bar_start, bar_end))
+            return {
+                "symbol": symbol,
+                "bar_start": bar_start.isoformat(),
+                "bar_end": bar_end.isoformat(),
+                "tables_written": {
+                    "orderbook_metrics_15m": 1, "trade_flow_15m": 1,
+                    "oi_funding_metrics_15m": 1, "volume_profile_15m": 1,
+                    "liquidation_metrics_15m": 1,
+                },
+                "tables_failed": [],
+                "quality_flags": [],
+                "duration_seconds": 0.1,
+                "ingest_run_id": "rid",
+                "mode": "dry-run",
+                "error": None,
+            }
+
+        orig_argv = sys.argv
+        orig_stdout = sys.stdout
+        try:
+            sys.argv = [
+                "rdp_build_microstructure_silver.py",
+                "--symbol", "BTC-USDT-SWAP",
+                "--bar-start", "2026-04-20T09:00:00+00:00",
+            ]
+            sys.stdout = io.StringIO()
+            with _mock.patch.object(
+                rbms, "_detect_trade_flow_watermark",
+            ) as wm_mock, _mock.patch.object(
+                rbms, "_run_one_bar", side_effect=fake_run_one_bar,
+            ):
+                exit_code = rbms.main()
+            # 水位线不应被触发
+            wm_mock.assert_not_called()
+        finally:
+            sys.argv = orig_argv
+            sys.stdout = orig_stdout
+
+        self.assertEqual(exit_code, 0)
+        # 只跑了一根 bar = user 指定的那根
+        self.assertEqual(len(captured_args), 1)
+        self.assertEqual(
+            captured_args[0][0],
+            datetime(2026, 4, 20, 9, 0, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            captured_args[0][1],
+            datetime(2026, 4, 20, 9, 15, 0, tzinfo=timezone.utc),
+        )
+
+    def test_main_uses_watermark_by_default(self) -> None:
+        """未传 --bar-start 时 main() 走水位线路径: detect 返回 watermark →
+        runner 枚举 gap bars 而不是 lookback=1..N."""
+        import io
+        import unittest.mock as _mock
+        rbms = self._import_runner()
+
+        captured_args: list[tuple] = []
+
+        def fake_run_one_bar(*, symbol, bar_start, bar_end, **_kw):
+            captured_args.append((bar_start, bar_end))
+            return {
+                "symbol": symbol,
+                "bar_start": bar_start.isoformat(),
+                "bar_end": bar_end.isoformat(),
+                "tables_written": {
+                    "orderbook_metrics_15m": 1, "trade_flow_15m": 1,
+                    "oi_funding_metrics_15m": 1, "volume_profile_15m": 1,
+                    "liquidation_metrics_15m": 1,
+                },
+                "tables_failed": [],
+                "quality_flags": [],
+                "duration_seconds": 0.1,
+                "ingest_run_id": "rid",
+                "mode": "apply",
+                "error": None,
+            }
+
+        # 冻结 _utc_now 的返回让 latest_complete_bar 可预测
+        from aats.data_platform.merge import (
+            microstructure_silver_merger as _msm,
+        )
+        fixed_now = datetime(2026, 4, 20, 12, 47, 0, tzinfo=timezone.utc)
+        # watermark 落后 2 根 → gap = 11:00, 11:15, 11:30 (bar_starts); latest = 12:30
+        # 其实 latest_complete_bar(lookback_bars=1) with now=12:47 → bar_start=12:30
+        # watermark=11:15 → next_start=11:30 → 枚举 11:30, 11:45, 12:00, 12:15, 12:30 = 5 根
+        watermark = datetime(2026, 4, 20, 11, 15, 0, tzinfo=timezone.utc)
+
+        orig_argv = sys.argv
+        orig_stdout = sys.stdout
+        try:
+            sys.argv = [
+                "rdp_build_microstructure_silver.py",
+                "--symbol", "BTC-USDT-SWAP",
+                "--backfill-bars", "1",  # 若走冷启动只有 1 根, 用于区分
+                "--apply", "--confirm",
+            ]
+            sys.stdout = io.StringIO()
+            with _mock.patch.object(
+                _msm, "_utc_now", return_value=fixed_now,
+            ), _mock.patch.object(
+                rbms, "_detect_trade_flow_watermark", return_value=watermark,
+            ), _mock.patch.object(
+                rbms, "_run_one_bar", side_effect=fake_run_one_bar,
+            ):
+                exit_code = rbms.main()
+        finally:
+            sys.argv = orig_argv
+            sys.stdout = orig_stdout
+
+        self.assertEqual(exit_code, 0)
+        # 走水位线路径 → 5 根, 而非冷启动的 1 根
+        self.assertEqual(len(captured_args), 5)
+        starts = [bs for bs, _ in captured_args]
+        # main() 已 sort asc
+        self.assertEqual(
+            starts[0],
+            datetime(2026, 4, 20, 11, 30, 0, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            starts[-1],
+            datetime(2026, 4, 20, 12, 30, 0, tzinfo=timezone.utc),
+        )
 
 
 if __name__ == "__main__":

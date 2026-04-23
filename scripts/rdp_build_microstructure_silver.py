@@ -44,7 +44,7 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +129,125 @@ def parse_args() -> argparse.Namespace:
         help="配合 --apply 使用, 确认 commit。",
     )
     return parser.parse_args()
+
+
+# Default cap: 单次 watermark-backfill 最多补 64 根 bar (= 16h)。
+# 超过这个缺口的 gap 需要运维手动跑 scripts/maintenance/microstructure_silver_catchup_*.py。
+_WATERMARK_BACKFILL_CAP = 64
+
+# Sentinel — 用于 _resolve_bars_from_watermark 的可选 watermark 参数区分
+# "未传" vs "显式传 None" (后者表示调用方已确认无 watermark, 直接走 cold-start fallback)。
+_WATERMARK_UNSET: Any = object()
+
+
+def _detect_trade_flow_watermark(symbol: str) -> datetime | None:
+    """查询 silver.market_trade_flow_15m 的 MAX(ts) 作为 watermark。
+
+    返回 UTC-aware datetime; 若无 row / DB 不可达 / 查询失败, 返回 None
+    (视作冷启动, 由 caller 走 --backfill-bars fallback)。
+    """
+    try:
+        from sqlalchemy import text
+        from aats.data_platform.db import get_session
+    except Exception as exc:  # pragma: no cover - import time failure
+        log.warning(
+            "failed to import db layer for watermark detection: %r; "
+            "falling back to --backfill-bars cold-start path", exc,
+        )
+        return None
+
+    try:
+        with get_session() as session:
+            row = session.execute(
+                text(
+                    "SELECT MAX(ts) AS max_ts "
+                    "FROM silver.market_trade_flow_15m "
+                    "WHERE symbol = :sym"
+                ),
+                {"sym": symbol},
+            ).fetchone()
+    except Exception as exc:
+        log.warning(
+            "watermark probe on silver.market_trade_flow_15m failed for "
+            "symbol=%s: %r; falling back to --backfill-bars cold-start path",
+            symbol, exc,
+        )
+        return None
+
+    if row is None or row.max_ts is None:
+        return None
+    max_ts = row.max_ts
+    if max_ts.tzinfo is None:
+        max_ts = max_ts.replace(tzinfo=timezone.utc)
+    return max_ts
+
+
+def _resolve_bars_from_watermark(
+    *,
+    symbol: str,
+    backfill_bars: int,
+    watermark_cap: int = _WATERMARK_BACKFILL_CAP,
+    watermark: Any = _WATERMARK_UNSET,
+    now: datetime | None = None,
+) -> list[tuple[datetime, datetime]]:
+    """在未显式指定 --bar-start 时, 解析本次 runner 要处理的 bar 列表。
+
+    Policy:
+      1. 上界 = latest_complete_bar(lookback_bars=1) 的 bar_start (最近已关 bar)。
+      2. watermark = silver.market_trade_flow_15m 的 max(ts), 由
+         `_detect_trade_flow_watermark` 自动探测; 测试可显式注入。
+      3. watermark 存在且落后 → 枚举 [watermark + 15m, upper_bar_start] 所有 15m
+         bar, 单次 cap 到最近 `watermark_cap` 根 (超出的老缺口交给 catchup 脚本)。
+      4. watermark 不存在 → 冷启动 fallback: for i in 1..backfill_bars:
+         latest_complete_bar(lookback_bars=i) (保留旧语义)。
+    """
+    from aats.data_platform.merge.microstructure_silver_merger import (
+        BAR_SECONDS,
+        latest_complete_bar,
+    )
+
+    if watermark is _WATERMARK_UNSET:
+        watermark = _detect_trade_flow_watermark(symbol)
+
+    # 上界: 最近一个已关闭 bar 的 bar_start
+    upper_bar_start, _upper_bar_end = latest_complete_bar(
+        now=now, lookback_bars=1,
+    )
+
+    if watermark is None:
+        # 冷启动 fallback — 保留旧 --backfill-bars 语义
+        bars: list[tuple[datetime, datetime]] = []
+        for i in range(1, backfill_bars + 1):
+            bs, be = latest_complete_bar(now=now, lookback_bars=i)
+            bars.append((bs, be))
+        return bars
+
+    # watermark = 已提交 bar 的最大 ts; 下一根要补的 bar_start 就是 watermark + 15m
+    next_start = watermark + timedelta(seconds=BAR_SECONDS)
+    if next_start > upper_bar_start:
+        log.info(
+            "silver watermark %s already at or past latest closed bar %s; "
+            "nothing to backfill",
+            watermark.isoformat(), upper_bar_start.isoformat(),
+        )
+        return []
+
+    bars = []
+    cursor = next_start
+    while cursor <= upper_bar_start:
+        bars.append((cursor, cursor + timedelta(seconds=BAR_SECONDS)))
+        cursor = cursor + timedelta(seconds=BAR_SECONDS)
+
+    if len(bars) > watermark_cap:
+        log.warning(
+            "silver watermark gap = %d bars exceeds cap = %d; will backfill "
+            "the most recent %d bars this run, older gap bars left for the "
+            "next tick / manual catchup script",
+            len(bars), watermark_cap, watermark_cap,
+        )
+        bars = bars[-watermark_cap:]
+
+    return bars
 
 
 def _run_one_bar(
@@ -291,9 +410,7 @@ def main() -> int:
 
     from aats.data_platform.merge.microstructure_silver_merger import (
         BAR_SECONDS,
-        latest_complete_bar,
     )
-    from datetime import timedelta
 
     # 决定 bar 窗口
     bars: list[tuple[datetime, datetime]] = []
@@ -302,10 +419,17 @@ def main() -> int:
         bar_end = args.bar_end or (bar_start + timedelta(seconds=BAR_SECONDS))
         bars.append((bar_start, bar_end))
     else:
-        # 补跑 N 个最近 bar: lookback_bars=1..N
-        for i in range(1, args.backfill_bars + 1):
-            bs, be = latest_complete_bar(lookback_bars=i)
-            bars.append((bs, be))
+        # 默认: 先看 silver.market_trade_flow_15m 水位线, 有 → 枚举 gap bars
+        # (cap 64); 无 watermark → 冷启动 fallback 到 --backfill-bars。
+        bars = _resolve_bars_from_watermark(
+            symbol=args.symbol,
+            backfill_bars=args.backfill_bars,
+        )
+        if not bars:
+            log.info(
+                "no bars to process (silver up-to-date or empty window); exit 0"
+            )
+            return 0
 
     # 从最早 bar 开始跑 (让 EMA 递归 / baseline 按时间顺序建立)
     bars.sort(key=lambda pair: pair[0])
