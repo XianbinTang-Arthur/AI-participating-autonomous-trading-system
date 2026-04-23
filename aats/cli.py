@@ -46,6 +46,12 @@ from aats.data_platform.replay.backtest.harness import (
     BacktestResult,
     run_backtest,
 )
+from aats.data_platform.replay.backtest.route_a_evidence_scaffold import (
+    DEFAULT_OUTPUT_ROOT as _DEFAULT_SCAFFOLD_OUTPUT_ROOT,
+    ScaffoldError,
+    ScaffoldInputs,
+    create_scaffold,
+)
 
 log = logging.getLogger("aats.cli.backtest")
 
@@ -161,6 +167,75 @@ def _add_backtest_parser(subparsers: argparse._SubParsersAction) -> None:
     p.set_defaults(func=_run_backtest_cmd)
 
 
+def _add_route_a_scaffold_parser(subparsers: argparse._SubParsersAction) -> None:
+    p: argparse.ArgumentParser = subparsers.add_parser(
+        "route-a-evidence-scaffold",
+        help=(
+            "Scaffold a Route A phase 0 evidence bundle directory from existing "
+            "scorecard + observation-window JSONs."
+        ),
+        description=(
+            "本地 research/governance 工具：把已有 scorecard JSON 和 observation-"
+            "window JSON summary 拼成 evidence bundle 骨架，落在 "
+            "<output-root>/<proposal-id>/ 下。不输出 verdict / go-no-go / archive "
+            "判定，也不触及 live runtime / configs / deploy。"
+        ),
+    )
+    p.add_argument("--proposal-id", required=True, help="Proposal identifier.")
+    p.add_argument(
+        "--feature", required=True, help="Feature name (e.g. OFI / TFI)."
+    )
+    p.add_argument(
+        "--horizon", required=True, help="Horizon label (e.g. 5s / 15min)."
+    )
+    p.add_argument(
+        "--scorecard-json",
+        required=True,
+        help="Path to an existing backtest evidence scorecard JSON.",
+    )
+    p.add_argument(
+        "--observation-window-json",
+        required=True,
+        help="Path to an existing observation-window daily-check JSON summary.",
+    )
+    p.add_argument(
+        "--proposer",
+        default=None,
+        help="Optional proposer name; written into proposal.md metadata.",
+    )
+    p.add_argument(
+        "--output-root",
+        default=str(_DEFAULT_SCAFFOLD_OUTPUT_ROOT),
+        help=(
+            "Directory under which <proposal-id>/ is created "
+            f"(default: {_DEFAULT_SCAFFOLD_OUTPUT_ROOT})."
+        ),
+    )
+    p.set_defaults(func=_run_route_a_scaffold_cmd)
+
+
+def _run_route_a_scaffold_cmd(args: argparse.Namespace) -> int:
+    inputs = ScaffoldInputs(
+        proposal_id=args.proposal_id,
+        feature=args.feature,
+        horizon=args.horizon,
+        scorecard_json=Path(args.scorecard_json),
+        observation_window_json=Path(args.observation_window_json),
+        proposer=args.proposer,
+        output_root=Path(args.output_root),
+    )
+    try:
+        result = create_scaffold(inputs)
+    except ScaffoldError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(f"Route A evidence bundle scaffold created: {result.proposal_dir}")
+    print(f"  manifest : {result.manifest_path}")
+    print(f"  scorecard: {result.scorecard_path}")
+    print(f"  observation_window: {result.observation_window_summary_path}")
+    print(f"  proposal.md: {result.proposal_md_path}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the top-level argparse parser.
 
@@ -173,6 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     _add_backtest_parser(subparsers)
+    _add_route_a_scaffold_parser(subparsers)
     return parser
 
 
