@@ -86,7 +86,8 @@
       "Bash(rm .claude/tmp_scan_candles.sh)",
       "Bash(wsl -d Ubuntu bash -c \"rm -f /tmp/r1.json /tmp/r2.json /tmp/r3.json /tmp/r5.json\")",
       "Bash(rm .claude/tmp_verify_candles_panels.sh)",
-      "Bash(wsl -d Ubuntu bash -c \"rm -f /tmp/p1d_in_container.json /tmp/rules_in_container.yml /tmp/p14.json /tmp/p15.json /tmp/alert.json\")"
+      "Bash(wsl -d Ubuntu bash -c \"rm -f /tmp/p1d_in_container.json /tmp/rules_in_container.yml /tmp/p14.json /tmp/p15.json /tmp/alert.json\")",
+      "Bash(.venv/Scripts/python.exe -m pytest tests/unit/test_grafana_runtime_mode_observability.py tests/unit/test_dashboard_runtime_mode_badge.py tests/unit/test_orders_submitted_mode_label.py -x -q)"
     ]
   }
 }
