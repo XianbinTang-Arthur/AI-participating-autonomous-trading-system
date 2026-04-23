@@ -410,6 +410,7 @@ class TestScorecardCostAdjusted(unittest.TestCase):
                 "net_edge_bps",
                 "train",
                 "test",
+                "sensitivity",
             },
         )
         self.assertAlmostEqual(ca["fee_bps"], 5.0, places=6)
@@ -615,6 +616,140 @@ class TestScorecardCostAdjustedSplit(unittest.TestCase):
         self.assertAlmostEqual(ca["slip_bps"], 1.5, places=6)
         self.assertAlmostEqual(ca["exec_buffer_bps"], -0.5, places=6)
         self.assertAlmostEqual(ca["net_edge_bps"], 11.0, places=6)
+
+
+# ---------------------------------------------------------------------------
+# 4c. cost_adjusted.sensitivity (v0.5)
+# ---------------------------------------------------------------------------
+
+
+_SENSITIVITY_FIELDS = {
+    "net_edge_fee_up_20pct_bps",
+    "net_edge_slip_plus_0_5bps_bps",
+}
+
+
+class TestScorecardCostAdjustedSensitivity(unittest.TestCase):
+    def test_sensitivity_structure_present(self) -> None:
+        curve = tuple(_mk_point(i, str(i)) for i in range(4))
+        diagnostics = tuple(
+            _mk_diagnostic(i, assumed_cost=6.0, actual_cost=5.0, assumed_net=10.0)
+            for i in range(4)
+        )
+        config = BacktestConfig(ioc_slippage_bps=1.5, assumed_cost_bps=6.0)
+        result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
+        sc = build_scorecard(result)
+        sens = sc["cost_adjusted"]["sensitivity"]
+        self.assertEqual(set(sens.keys()), {"overall", "train", "test"})
+        for side in ("overall", "train", "test"):
+            self.assertEqual(set(sens[side].keys()), _SENSITIVITY_FIELDS)
+
+    def test_sensitivity_formulas_match_manual_derivation(self) -> None:
+        """overall bucket: fee=5, slip=1.5, realized=16, exec_buf=-0.5."""
+        curve = tuple(_mk_point(i, str(i)) for i in range(4))
+        diagnostics = tuple(
+            _mk_diagnostic(i, assumed_cost=6.0, actual_cost=5.0, assumed_net=10.0)
+            for i in range(4)
+        )
+        config = BacktestConfig(ioc_slippage_bps=1.5, assumed_cost_bps=6.0)
+        result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
+        sc = build_scorecard(result)
+        overall_sens = sc["cost_adjusted"]["sensitivity"]["overall"]
+        # fee_up_20pct = 16 - (5*1.2) - 1.5 - (-0.5) = 9.0
+        self.assertAlmostEqual(
+            overall_sens["net_edge_fee_up_20pct_bps"], 9.0, places=6
+        )
+        # slip_plus_0_5bps = 16 - 5 - (1.5 + 0.5) - (-0.5) = 9.5
+        self.assertAlmostEqual(
+            overall_sens["net_edge_slip_plus_0_5bps_bps"], 9.5, places=6
+        )
+
+    def test_sensitivity_train_test_formulas_independent(self) -> None:
+        """train 和 test 两侧的 sensitivity 都基于本侧 bucket 数值。"""
+        curve = tuple(_mk_point(i, str(i * 5)) for i in range(8))
+        train_diags = tuple(
+            _mk_diagnostic(i, assumed_cost=4.0, actual_cost=2.0, assumed_net=8.0)
+            for i in range(3)
+        )
+        test_diags = tuple(
+            _mk_diagnostic(i, assumed_cost=10.0, actual_cost=7.0, assumed_net=20.0)
+            for i in range(4, 8)
+        )
+        diagnostics = train_diags + test_diags
+        config = BacktestConfig(ioc_slippage_bps=1.0, assumed_cost_bps=6.0)
+        result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
+        split = _BASE_TS + timedelta(hours=4)
+        sc = build_scorecard(result, split_ts=split)
+        sens = sc["cost_adjusted"]["sensitivity"]
+        ca = sc["cost_adjusted"]
+
+        # train: realized=12, fee=2, slip=1, exec_buf = 4 - 2 - 1 = 1
+        # fee_up_20pct = 12 - 2.4 - 1 - 1 = 7.6
+        # slip_plus_0_5bps = 12 - 2 - 1.5 - 1 = 7.5
+        self.assertAlmostEqual(ca["train"]["exec_buffer_bps"], 1.0, places=6)
+        self.assertAlmostEqual(
+            sens["train"]["net_edge_fee_up_20pct_bps"], 7.6, places=6
+        )
+        self.assertAlmostEqual(
+            sens["train"]["net_edge_slip_plus_0_5bps_bps"], 7.5, places=6
+        )
+
+        # test: realized=30, fee=7, slip=1, exec_buf = 10 - 7 - 1 = 2
+        # fee_up_20pct = 30 - 8.4 - 1 - 2 = 18.6
+        # slip_plus_0_5bps = 30 - 7 - 1.5 - 2 = 19.5
+        self.assertAlmostEqual(ca["test"]["exec_buffer_bps"], 2.0, places=6)
+        self.assertAlmostEqual(
+            sens["test"]["net_edge_fee_up_20pct_bps"], 18.6, places=6
+        )
+        self.assertAlmostEqual(
+            sens["test"]["net_edge_slip_plus_0_5bps_bps"], 19.5, places=6
+        )
+
+    def test_sensitivity_empty_diagnostics_all_zero(self) -> None:
+        """空 diagnostics: 即使 slip_bps 非零, sensitivity 全部稳定为零值。"""
+        curve = tuple(_mk_point(i, "0") for i in range(4))
+        config = BacktestConfig(order_type="ioc", ioc_slippage_bps=2.5)
+        result = _mk_result(curve=curve, diagnostics=(), config=config)
+        sc = build_scorecard(result)
+        sens = sc["cost_adjusted"]["sensitivity"]
+        for side in ("overall", "train", "test"):
+            self.assertEqual(sens[side]["net_edge_fee_up_20pct_bps"], 0.0)
+            self.assertEqual(sens[side]["net_edge_slip_plus_0_5bps_bps"], 0.0)
+
+    def test_sensitivity_empty_side_only_is_zero(self) -> None:
+        """只有一侧为空 (explicit split 超出 curve): 该侧 sensitivity 为零。"""
+        curve = tuple(_mk_point(i, str(i)) for i in range(4))
+        diagnostics = tuple(
+            _mk_diagnostic(i, assumed_cost=6.0, actual_cost=5.0, assumed_net=10.0)
+            for i in range(4)
+        )
+        config = BacktestConfig(ioc_slippage_bps=1.5, assumed_cost_bps=6.0)
+        result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
+        far_future = _BASE_TS + timedelta(days=30)
+        sc = build_scorecard(result, split_ts=far_future)
+        sens = sc["cost_adjusted"]["sensitivity"]
+        # test 侧为空 → 稳定零
+        self.assertEqual(sens["test"]["net_edge_fee_up_20pct_bps"], 0.0)
+        self.assertEqual(sens["test"]["net_edge_slip_plus_0_5bps_bps"], 0.0)
+        # train 侧非空 → 按公式计算, 与 overall 一致
+        self.assertAlmostEqual(
+            sens["train"]["net_edge_fee_up_20pct_bps"],
+            sens["overall"]["net_edge_fee_up_20pct_bps"],
+            places=6,
+        )
+
+    def test_sensitivity_does_not_change_top_level_schema(self) -> None:
+        curve = tuple(_mk_point(i, str(i)) for i in range(4))
+        diagnostics = tuple(_mk_diagnostic(i) for i in range(4))
+        result = _mk_result(curve=curve, diagnostics=diagnostics)
+        sc = build_scorecard(result)
+        self.assertEqual(
+            set(sc.keys()),
+            {"meta", "oos", "cross_window", "cost_adjusted", "regime_slice"},
+        )
+        # 旧的 overall / train / test 5 字段仍然原样存在
+        for side in ("train", "test"):
+            self.assertEqual(set(sc["cost_adjusted"][side].keys()), _COST_FIELDS)
 
 
 # ---------------------------------------------------------------------------

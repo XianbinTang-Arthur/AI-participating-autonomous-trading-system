@@ -384,6 +384,31 @@ def _cost_bucket(
     }
 
 
+def _cost_sensitivity(
+    bucket: dict[str, Any],
+    *,
+    is_empty: bool,
+) -> dict[str, float]:
+    """压力测试: fee 上调 20% / slip +0.5bps 后的 net edge。
+
+    空桶统一返回稳定零值, 避免在 slip_bps 继承自 order_type 时产生误导性
+    负值。
+    """
+    if is_empty:
+        return {
+            "net_edge_fee_up_20pct_bps": 0.0,
+            "net_edge_slip_plus_0_5bps_bps": 0.0,
+        }
+    realized = bucket["realized_edge_bps"]
+    fee = bucket["fee_bps"]
+    slip = bucket["slip_bps"]
+    exec_buf = bucket["exec_buffer_bps"]
+    return {
+        "net_edge_fee_up_20pct_bps": realized - (fee * 1.2) - slip - exec_buf,
+        "net_edge_slip_plus_0_5bps_bps": realized - fee - (slip + 0.5) - exec_buf,
+    }
+
+
 def _split_diagnostics(
     diagnostics: Sequence[CostDiagnostic],
     curve: Sequence[EquityPoint],
@@ -449,8 +474,15 @@ def _build_cost_adjusted(
     )
     overall = _cost_bucket(diagnostics, slip_bps)
     train_diags, test_diags = _split_diagnostics(diagnostics, curve, split_ts)
-    overall["train"] = _cost_bucket(train_diags, slip_bps)
-    overall["test"] = _cost_bucket(test_diags, slip_bps)
+    train_bucket = _cost_bucket(train_diags, slip_bps)
+    test_bucket = _cost_bucket(test_diags, slip_bps)
+    overall["train"] = train_bucket
+    overall["test"] = test_bucket
+    overall["sensitivity"] = {
+        "overall": _cost_sensitivity(overall, is_empty=not diagnostics),
+        "train": _cost_sensitivity(train_bucket, is_empty=not train_diags),
+        "test": _cost_sensitivity(test_bucket, is_empty=not test_diags),
+    }
     return overall
 
 
