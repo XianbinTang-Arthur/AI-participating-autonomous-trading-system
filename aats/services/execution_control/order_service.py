@@ -187,6 +187,13 @@ class ExecutionOrderService:
                 # Path C observability fix (2026-04-19): 顶层落库 execution_style 供事后对账
                 # 参见 docs/review/cost_audit_live_reconciliation_2026_04_19.md §7.2
                 "execution_style": intent.execution_style,
+                # Execution truth snapshot refs：顶层落库 decision 层四类 snapshot refs
+                # 作为盘口快照事后归因的稳定锚点。沿用 execution_style 的顶层锚点约定
+                # 便于 SQL 直接查询，无需解压 nested intent dump。
+                "market_snapshot_ref": intent.market_snapshot_ref,
+                "feature_snapshot_ref": intent.feature_snapshot_ref,
+                "portfolio_snapshot_ref": intent.portfolio_snapshot_ref,
+                "health_snapshot_ref": intent.health_snapshot_ref,
                 "order_state": order_state.model_dump(mode="python") if order_state is not None else None,
             },
         )
@@ -248,4 +255,8 @@ class ExecutionOrderService:
             strategy_opportunity_kind=order_state.strategy_opportunity_kind,
             strategy_execution_mode=order_state.strategy_execution_mode,
             strategy_state_phase=order_state.strategy_state_phase,
+            market_snapshot_ref=order_state.market_snapshot_ref,
+            feature_snapshot_ref=order_state.feature_snapshot_ref,
+            portfolio_snapshot_ref=order_state.portfolio_snapshot_ref,
+            health_snapshot_ref=order_state.health_snapshot_ref,
         )

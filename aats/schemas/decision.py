@@ -546,3 +546,9 @@ class PositionTarget(SchemaBase):
     profile_control_decision: ProfileControlDecision | None = None
     sizing_breakdown: PositionSizingBreakdown | None = None
     decision_outcome: DecisionOutcome | None = None
+    # Execution truth snapshot refs：承接 DecisionContext 的四类 refs，作为
+    # execution truth chain 的上游锚点，后续 plan/intent/order_state/fill 继承。
+    market_snapshot_ref: str | None = None
+    feature_snapshot_ref: str | None = None
+    portfolio_snapshot_ref: str | None = None
+    health_snapshot_ref: str | None = None

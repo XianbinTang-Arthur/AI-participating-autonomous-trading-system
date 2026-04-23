@@ -335,6 +335,10 @@ class OrderManager:
                     strategy_opportunity_kind=intent.strategy_opportunity_kind,
                     strategy_execution_mode=intent.strategy_execution_mode,
                     strategy_state_phase=intent.strategy_state_phase,
+                    market_snapshot_ref=intent.market_snapshot_ref,
+                    feature_snapshot_ref=intent.feature_snapshot_ref,
+                    portfolio_snapshot_ref=intent.portfolio_snapshot_ref,
+                    health_snapshot_ref=intent.health_snapshot_ref,
                     execution_error=str(exc),
                     submission_payload={},
                 )
@@ -384,6 +388,10 @@ class OrderManager:
                 strategy_opportunity_kind=intent.strategy_opportunity_kind,
                 strategy_execution_mode=intent.strategy_execution_mode,
                 strategy_state_phase=intent.strategy_state_phase,
+                market_snapshot_ref=intent.market_snapshot_ref,
+                feature_snapshot_ref=intent.feature_snapshot_ref,
+                portfolio_snapshot_ref=intent.portfolio_snapshot_ref,
+                health_snapshot_ref=intent.health_snapshot_ref,
                 submission_payload={},
             )
             submit_command = None
@@ -862,6 +870,10 @@ class OrderManager:
                 strategy_opportunity_kind=intent.strategy_opportunity_kind,
                 strategy_execution_mode=intent.strategy_execution_mode,
                 strategy_state_phase=intent.strategy_state_phase,
+                market_snapshot_ref=intent.market_snapshot_ref,
+                feature_snapshot_ref=intent.feature_snapshot_ref,
+                portfolio_snapshot_ref=intent.portfolio_snapshot_ref,
+                health_snapshot_ref=intent.health_snapshot_ref,
                 submission_payload={},
             )
         submitting_state = current.model_copy(
@@ -902,6 +914,10 @@ class OrderManager:
                 "strategy_opportunity_kind": intent.strategy_opportunity_kind,
                 "strategy_execution_mode": intent.strategy_execution_mode,
                 "strategy_state_phase": intent.strategy_state_phase,
+                "market_snapshot_ref": intent.market_snapshot_ref,
+                "feature_snapshot_ref": intent.feature_snapshot_ref,
+                "portfolio_snapshot_ref": intent.portfolio_snapshot_ref,
+                "health_snapshot_ref": intent.health_snapshot_ref,
             }
         )
         await self._persist_order_state(order_state=submitting_state, key=intent.symbol)
@@ -967,6 +983,10 @@ class OrderManager:
                 strategy_opportunity_kind=intent.strategy_opportunity_kind,
                 strategy_execution_mode=intent.strategy_execution_mode,
                 strategy_state_phase=intent.strategy_state_phase,
+                market_snapshot_ref=intent.market_snapshot_ref,
+                feature_snapshot_ref=intent.feature_snapshot_ref,
+                portfolio_snapshot_ref=intent.portfolio_snapshot_ref,
+                health_snapshot_ref=intent.health_snapshot_ref,
                 cancel_reason=str(exc),
                 execution_error=str(exc),
                 submission_payload={},
@@ -1940,6 +1960,10 @@ class OrderManager:
                 strategy_opportunity_kind=intent.strategy_opportunity_kind,
                 strategy_execution_mode=intent.strategy_execution_mode,
                 strategy_state_phase=intent.strategy_state_phase,
+                market_snapshot_ref=intent.market_snapshot_ref,
+                feature_snapshot_ref=intent.feature_snapshot_ref,
+                portfolio_snapshot_ref=intent.portfolio_snapshot_ref,
+                health_snapshot_ref=intent.health_snapshot_ref,
                 execution_error=f"transient_close_retry_cooldown_active:{state.execution_error or state.cancel_reason or 'transient_exchange_failure'}",
                 submission_payload={},
             )
@@ -2116,6 +2140,10 @@ class OrderManager:
             strategy_opportunity_kind=intent.strategy_opportunity_kind,
             strategy_execution_mode=intent.strategy_execution_mode,
             strategy_state_phase=intent.strategy_state_phase,
+            market_snapshot_ref=intent.market_snapshot_ref,
+            feature_snapshot_ref=intent.feature_snapshot_ref,
+            portfolio_snapshot_ref=intent.portfolio_snapshot_ref,
+            health_snapshot_ref=intent.health_snapshot_ref,
             execution_error=execution_error,
             submission_payload={},
         )
@@ -2267,6 +2295,12 @@ class OrderManager:
             payload.setdefault("allocation_id", raw_payload.get("allocation_id") or row.get("allocation_id"))
             payload.setdefault("strategy_bundle_id", raw_payload.get("strategy_bundle_id"))
             payload.setdefault("strategy_leg_role", raw_payload.get("strategy_leg_role"))
+            # Execution truth snapshot refs 优先取已持久化的 order_state payload 值，
+            # 缺失则回退到 raw_payload 顶层锚点（outbox/order_service 在落库时写入）。
+            payload.setdefault("market_snapshot_ref", raw_payload.get("market_snapshot_ref"))
+            payload.setdefault("feature_snapshot_ref", raw_payload.get("feature_snapshot_ref"))
+            payload.setdefault("portfolio_snapshot_ref", raw_payload.get("portfolio_snapshot_ref"))
+            payload.setdefault("health_snapshot_ref", raw_payload.get("health_snapshot_ref"))
             payload.setdefault("submission_payload", submission_payload)
             if payload.get("pos_side") in {"", None}:
                 payload["pos_side"] = row.get("pos_side") or submission_payload.get("posSide") or None
@@ -2327,6 +2361,10 @@ class OrderManager:
             allocation_id=raw_payload.get("allocation_id") or row.get("allocation_id"),
             strategy_bundle_id=raw_payload.get("strategy_bundle_id"),
             strategy_leg_role=raw_payload.get("strategy_leg_role"),
+            market_snapshot_ref=raw_payload.get("market_snapshot_ref"),
+            feature_snapshot_ref=raw_payload.get("feature_snapshot_ref"),
+            portfolio_snapshot_ref=raw_payload.get("portfolio_snapshot_ref"),
+            health_snapshot_ref=raw_payload.get("health_snapshot_ref"),
             submission_payload={},
         )
 

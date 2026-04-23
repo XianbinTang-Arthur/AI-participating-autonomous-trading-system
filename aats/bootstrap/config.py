@@ -1971,6 +1971,10 @@ def _build_position_target_handler(
             strategy_execution_mode=target.strategy_execution_mode,
             strategy_state_phase=target.strategy_state_phase,
             ai_execution_parameter_suggestion=target.ai_execution_parameter_suggestion,
+            market_snapshot_ref=target.market_snapshot_ref,
+            feature_snapshot_ref=target.feature_snapshot_ref,
+            portfolio_snapshot_ref=target.portfolio_snapshot_ref,
+            health_snapshot_ref=target.health_snapshot_ref,
         )
 
     def _position_intent_for_target(*, current_qty: Decimal, target_qty: Decimal) -> str:
@@ -2041,6 +2045,10 @@ def _build_position_target_handler(
             ai_execution_parameter_suggestion=base_target.ai_execution_parameter_suggestion,
             ai_decision_intent=base_target.ai_decision_intent,
             profile_control_decision=base_target.profile_control_decision,
+            market_snapshot_ref=base_target.market_snapshot_ref,
+            feature_snapshot_ref=base_target.feature_snapshot_ref,
+            portfolio_snapshot_ref=base_target.portfolio_snapshot_ref,
+            health_snapshot_ref=base_target.health_snapshot_ref,
         )
 
     def _strategy_leg_execution_semantics(*, leg) -> dict[str, Any] | None:
@@ -2155,6 +2163,10 @@ def _build_position_target_handler(
                 time_in_force_preference=getattr(leg, "time_in_force_preference", None),
                 limit_offset_bps_preference=getattr(leg, "limit_offset_bps_preference", None),
                 ai_execution_parameter_suggestion=base_target.ai_execution_parameter_suggestion,
+                market_snapshot_ref=base_target.market_snapshot_ref,
+                feature_snapshot_ref=base_target.feature_snapshot_ref,
+                portfolio_snapshot_ref=base_target.portfolio_snapshot_ref,
+                health_snapshot_ref=base_target.health_snapshot_ref,
             )
             if provisional_plan is None:
                 _log.warning(

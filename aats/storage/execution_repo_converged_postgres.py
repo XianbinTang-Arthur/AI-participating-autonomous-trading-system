@@ -365,6 +365,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             execution_action=row.get("execution_action"),
             position_intent=str(row.get("position_intent") or "open_long"),
             submission_payload={},
+            # Execution truth snapshot refs：fallback 水化路径从 raw_payload
+            # 顶层（outbox/order_service 落库约定）恢复，避免 DB 再水化时再次断层。
+            market_snapshot_ref=payload.get("market_snapshot_ref"),
+            feature_snapshot_ref=payload.get("feature_snapshot_ref"),
+            portfolio_snapshot_ref=payload.get("portfolio_snapshot_ref"),
+            health_snapshot_ref=payload.get("health_snapshot_ref"),
         )
 
     def _refresh_synthetic_order_state_from_fills(self, session: Session, *, order_id: str) -> None:
@@ -400,6 +406,9 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         last_fill = fills[-1]
         remaining_qty = max(requested_qty - total_filled_qty, Decimal("0"))
         status = last_fill.order_status_after_fill or ("FILLED" if remaining_qty <= Decimal("0") else "PARTIALLY_FILLED")
+        existing_order_state_payload = (
+            payload.get("order_state") if isinstance(payload.get("order_state"), dict) else {}
+        )
         order_state = OrderState(
             decision_id=str(row.decision_id or last_fill.decision_id or ""),
             execution_attempt_id=row.execution_attempt_id or last_fill.execution_attempt_id,
@@ -442,6 +451,29 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             execution_action=row.execution_action or last_fill.execution_action,
             position_intent=str(row.position_intent or last_fill.position_intent or "open_long"),
             submission_payload={},
+            # Execution truth snapshot refs：synthetic 回填路径优先从已存 raw_payload
+            # 顶层 / 已存 order_state 子树读取，其次 fallback 到最后一笔 fill，确保
+            # backfill 后的 DB 再水化仍能保留 decision 层锚点。
+            market_snapshot_ref=(
+                payload.get("market_snapshot_ref")
+                or existing_order_state_payload.get("market_snapshot_ref")
+                or last_fill.market_snapshot_ref
+            ),
+            feature_snapshot_ref=(
+                payload.get("feature_snapshot_ref")
+                or existing_order_state_payload.get("feature_snapshot_ref")
+                or last_fill.feature_snapshot_ref
+            ),
+            portfolio_snapshot_ref=(
+                payload.get("portfolio_snapshot_ref")
+                or existing_order_state_payload.get("portfolio_snapshot_ref")
+                or last_fill.portfolio_snapshot_ref
+            ),
+            health_snapshot_ref=(
+                payload.get("health_snapshot_ref")
+                or existing_order_state_payload.get("health_snapshot_ref")
+                or last_fill.health_snapshot_ref
+            ),
         )
         row.state = order_state.status
         row.venue_order_id = order_state.exchange_order_id or row.venue_order_id
@@ -494,6 +526,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             liquidity_role=str(row.get("liquidity_role") or "taker"),
             exchange_timestamp=row["exchange_ts"],
             ingestion_timestamp=row["ingestion_ts"],
+            # Execution truth snapshot refs：fallback 路径从 raw_payload 顶层恢复
+            # （outbox._ensure_execution_fill_row 落库约定），与 fill_event dict 路径对齐。
+            market_snapshot_ref=payload.get("market_snapshot_ref"),
+            feature_snapshot_ref=payload.get("feature_snapshot_ref"),
+            portfolio_snapshot_ref=payload.get("portfolio_snapshot_ref"),
+            health_snapshot_ref=payload.get("health_snapshot_ref"),
         )
 
     @staticmethod
@@ -535,6 +573,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             exposure_side=order_state.exposure_side,
             execution_action=order_state.execution_action,
             position_intent=order_state.position_intent,
+            # Execution truth snapshot refs：OrderState → OrderIntent 回转路径保留
+            # 四类锚点，避免 DB 层 hydrate 后再 rebuild 时 refs 断层。
+            market_snapshot_ref=order_state.market_snapshot_ref,
+            feature_snapshot_ref=order_state.feature_snapshot_ref,
+            portfolio_snapshot_ref=order_state.portfolio_snapshot_ref,
+            health_snapshot_ref=order_state.health_snapshot_ref,
         )
 
 

@@ -234,4 +234,8 @@ class Phase1ExecutionShadowService:
             strategy_sleeve_id=fill.strategy_sleeve_id,
             allocation_id=fill.allocation_id,
             strategy_bundle_id=fill.strategy_bundle_id,
+            market_snapshot_ref=fill.market_snapshot_ref,
+            feature_snapshot_ref=fill.feature_snapshot_ref,
+            portfolio_snapshot_ref=fill.portfolio_snapshot_ref,
+            health_snapshot_ref=fill.health_snapshot_ref,
         )

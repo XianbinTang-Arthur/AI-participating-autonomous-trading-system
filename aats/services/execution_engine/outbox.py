@@ -330,6 +330,13 @@ class PostgresExecutionOutboxPublisher:
                 "client_order_id": order_state.client_order_id,
                 "venue_order_id": order_state.exchange_order_id,
                 "source_system": order_state.submission_mode or "execution_outbox_publisher",
+                # Execution truth snapshot refs：顶层落库 decision 层四类 snapshot refs
+                # (market/feature/portfolio/health)。优先取 intent，回退到 order_state
+                # ——两者之一有即可稳定关联盘口快照，避免只能靠 decision_id 间接猜。
+                "market_snapshot_ref": intent.market_snapshot_ref or order_state.market_snapshot_ref,
+                "feature_snapshot_ref": intent.feature_snapshot_ref or order_state.feature_snapshot_ref,
+                "portfolio_snapshot_ref": intent.portfolio_snapshot_ref or order_state.portfolio_snapshot_ref,
+                "health_snapshot_ref": intent.health_snapshot_ref or order_state.health_snapshot_ref,
                 "intent": intent.model_dump(mode="python"),
                 "order_state": order_state.model_dump(mode="python"),
             },
@@ -374,6 +381,12 @@ class PostgresExecutionOutboxPublisher:
                         "client_order_id": fill.client_order_id,
                         "venue_order_id": fill.exchange_order_id,
                         "source_system": "execution_outbox_fill_backfill",
+                        # Execution truth snapshot refs：backfill 路径下 fill 若带 refs
+                        # 则顶层落库，与 submit-time raw_payload 保持对称。
+                        "market_snapshot_ref": fill.market_snapshot_ref,
+                        "feature_snapshot_ref": fill.feature_snapshot_ref,
+                        "portfolio_snapshot_ref": fill.portfolio_snapshot_ref,
+                        "health_snapshot_ref": fill.health_snapshot_ref,
                         "fill_event": fill.model_dump(mode="python"),
                     },
                 )
@@ -386,6 +399,12 @@ class PostgresExecutionOutboxPublisher:
             source=fill.venue.lower(),
             raw_payload={
                 "venue_fill_id": fill.fill_id,
+                # Execution truth snapshot refs：顶层落库 fill 携带的 refs，便于
+                # fill row 直接关联盘口快照；没有 refs 时字段值为 None，不破坏旧行为。
+                "market_snapshot_ref": fill.market_snapshot_ref,
+                "feature_snapshot_ref": fill.feature_snapshot_ref,
+                "portfolio_snapshot_ref": fill.portfolio_snapshot_ref,
+                "health_snapshot_ref": fill.health_snapshot_ref,
                 "fill_event": fill.model_dump(mode="python"),
             },
         )

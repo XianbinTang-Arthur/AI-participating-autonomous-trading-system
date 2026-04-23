@@ -398,6 +398,12 @@ class OrderIntent(SchemaBase):
         "reverse_to_short",
     ] = "open_long"
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
+    # Execution truth snapshot refs：贯穿 intent→order_state→raw_payload→fill 的
+    # decision 层锚点，事后可直接关联 market/feature/portfolio/health 快照。
+    market_snapshot_ref: str | None = None
+    feature_snapshot_ref: str | None = None
+    portfolio_snapshot_ref: str | None = None
+    health_snapshot_ref: str | None = None
 
 
 class LegOrderIntent(SchemaBase):
@@ -462,6 +468,11 @@ class LegOrderIntent(SchemaBase):
         "reverse_to_short",
     ] | None = None
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
+    # Execution truth snapshot refs：见 OrderIntent 同名字段。
+    market_snapshot_ref: str | None = None
+    feature_snapshot_ref: str | None = None
+    portfolio_snapshot_ref: str | None = None
+    health_snapshot_ref: str | None = None
 
 
 class ExecutionPlan(SchemaBase):
@@ -529,6 +540,11 @@ class ExecutionPlan(SchemaBase):
         "reverse_to_short",
     ] = "open_long"
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
+    # Execution truth snapshot refs：见 OrderIntent 同名字段。
+    market_snapshot_ref: str | None = None
+    feature_snapshot_ref: str | None = None
+    portfolio_snapshot_ref: str | None = None
+    health_snapshot_ref: str | None = None
 
 
 class LegExecutionPlan(SchemaBase):
@@ -594,6 +610,11 @@ class LegExecutionPlan(SchemaBase):
         "reverse_to_short",
     ]
     ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None
+    # Execution truth snapshot refs：见 OrderIntent 同名字段。
+    market_snapshot_ref: str | None = None
+    feature_snapshot_ref: str | None = None
+    portfolio_snapshot_ref: str | None = None
+    health_snapshot_ref: str | None = None
 
 
 class OrderState(SchemaBase):
@@ -659,6 +680,11 @@ class OrderState(SchemaBase):
     cancel_reason: str | None = None
     execution_error: str | None = None
     submission_payload: dict[str, str] = Field(default_factory=dict)
+    # Execution truth snapshot refs：见 OrderIntent 同名字段。
+    market_snapshot_ref: str | None = None
+    feature_snapshot_ref: str | None = None
+    portfolio_snapshot_ref: str | None = None
+    health_snapshot_ref: str | None = None
 
 
 class FillEvent(SchemaBase):
@@ -721,6 +747,12 @@ class FillEvent(SchemaBase):
     # 便于事后对账 fee_resolver vs OKX 实际 feeRate / execType / liquidity
     # 参见 docs/review/cost_audit_live_reconciliation_2026_04_19.md §7.2
     raw_exchange: dict[str, Any] | None = None
+    # Execution truth snapshot refs：见 OrderIntent 同名字段。fill 侧若上游
+    # (OrderState / intent) 有 refs 则保留，便于盘口快照的事后归因。
+    market_snapshot_ref: str | None = None
+    feature_snapshot_ref: str | None = None
+    portfolio_snapshot_ref: str | None = None
+    health_snapshot_ref: str | None = None
 
 
 class OrderObligation(SchemaBase):
@@ -812,6 +844,10 @@ def leg_intent_from_order_intent(intent: OrderIntent) -> LegOrderIntent | None:
         exposure_side=intent.exposure_side,
         position_intent=intent.position_intent,
         ai_execution_parameter_suggestion=intent.ai_execution_parameter_suggestion,
+        market_snapshot_ref=intent.market_snapshot_ref,
+        feature_snapshot_ref=intent.feature_snapshot_ref,
+        portfolio_snapshot_ref=intent.portfolio_snapshot_ref,
+        health_snapshot_ref=intent.health_snapshot_ref,
     )
 
 
@@ -902,4 +938,8 @@ def order_intent_from_leg_order_intent(leg_intent: LegOrderIntent) -> OrderInten
         leg_action=leg_intent.action,
         position_intent=position_intent,
         ai_execution_parameter_suggestion=leg_intent.ai_execution_parameter_suggestion,
+        market_snapshot_ref=leg_intent.market_snapshot_ref,
+        feature_snapshot_ref=leg_intent.feature_snapshot_ref,
+        portfolio_snapshot_ref=leg_intent.portfolio_snapshot_ref,
+        health_snapshot_ref=leg_intent.health_snapshot_ref,
     )

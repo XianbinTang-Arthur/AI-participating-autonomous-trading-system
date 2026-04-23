@@ -82,6 +82,10 @@ class ExecutionPlanner:
         strategy_execution_mode: str | None = None,
         strategy_state_phase: str | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
+        market_snapshot_ref: str | None = None,
+        feature_snapshot_ref: str | None = None,
+        portfolio_snapshot_ref: str | None = None,
+        health_snapshot_ref: str | None = None,
     ) -> ExecutionPlan | None:
         normalized_current_position_qty = to_decimal(current_position_qty)
         normalized_target_position_qty = to_decimal(target_position_qty)
@@ -236,6 +240,10 @@ class ExecutionPlanner:
             leg_action=None,
             position_intent=position_intent,  # type: ignore[arg-type]
             ai_execution_parameter_suggestion=translated_suggestion,
+            market_snapshot_ref=market_snapshot_ref,
+            feature_snapshot_ref=feature_snapshot_ref,
+            portfolio_snapshot_ref=portfolio_snapshot_ref,
+            health_snapshot_ref=health_snapshot_ref,
         )
 
     def _normalize_delta_to_instrument_rule(
@@ -340,6 +348,10 @@ class ExecutionPlanner:
             leg_action=plan.leg_action,
             position_intent=plan.position_intent,
             ai_execution_parameter_suggestion=plan.ai_execution_parameter_suggestion,
+            market_snapshot_ref=plan.market_snapshot_ref,
+            feature_snapshot_ref=plan.feature_snapshot_ref,
+            portfolio_snapshot_ref=plan.portfolio_snapshot_ref,
+            health_snapshot_ref=plan.health_snapshot_ref,
         )
 
     def build_leg_plan(
@@ -388,6 +400,10 @@ class ExecutionPlanner:
         time_in_force_preference: str | None = None,
         limit_offset_bps_preference: Decimal | float | None = None,
         ai_execution_parameter_suggestion: AIExecutionParameterSuggestionEnvelope | None = None,
+        market_snapshot_ref: str | None = None,
+        feature_snapshot_ref: str | None = None,
+        portfolio_snapshot_ref: str | None = None,
+        health_snapshot_ref: str | None = None,
     ) -> LegExecutionPlan | None:
         normalized_quantity = to_decimal(quantity)
         if normalized_quantity <= EPSILON_DECIMAL_12:
@@ -564,6 +580,10 @@ class ExecutionPlanner:
             execution_action=execution_action_from_leg_action(action),
             position_intent=resolved_position_intent,
             ai_execution_parameter_suggestion=translated_suggestion,
+            market_snapshot_ref=market_snapshot_ref,
+            feature_snapshot_ref=feature_snapshot_ref,
+            portfolio_snapshot_ref=portfolio_snapshot_ref,
+            health_snapshot_ref=health_snapshot_ref,
         )
 
     def _apply_explicit_leg_execution_preference(
@@ -695,6 +715,10 @@ class ExecutionPlanner:
             exposure_side=plan.exposure_side,
             position_intent=plan.position_intent,
             ai_execution_parameter_suggestion=plan.ai_execution_parameter_suggestion,
+            market_snapshot_ref=plan.market_snapshot_ref,
+            feature_snapshot_ref=plan.feature_snapshot_ref,
+            portfolio_snapshot_ref=plan.portfolio_snapshot_ref,
+            health_snapshot_ref=plan.health_snapshot_ref,
         )
 
     @staticmethod

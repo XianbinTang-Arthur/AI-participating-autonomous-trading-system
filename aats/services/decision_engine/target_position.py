@@ -640,6 +640,10 @@ class TargetPositionEngine:
             profile_control_decision=profile_control_decision,
             sizing_breakdown=sizing_breakdown,
             decision_outcome=decision_outcome,
+            market_snapshot_ref=context.market_snapshot_ref,
+            feature_snapshot_ref=context.feature_snapshot_ref,
+            portfolio_snapshot_ref=context.portfolio_snapshot_ref,
+            health_snapshot_ref=context.health_snapshot_ref,
         )
 
     def _target_quantity(
