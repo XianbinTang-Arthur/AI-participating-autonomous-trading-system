@@ -48,6 +48,11 @@ VALID_WORKFLOWS = {
     # data_maintenance 日批负责, 本 workflow 只做 collect。
     # deploy-time 发现: scheduler 需把 workflow 名加到白名单才会被真正 enqueue。
     "candles_rolling_15m",
+    # Platform hygiene (2026-04-23, 恢复 2026-04-20 后停采的 OI/mark/long-short):
+    # 每小时 rolling 拉取 OKX 3 个 REST history endpoint 到 Bronze 表。
+    # 对应 configs/rdp_workflows/okx_rest_history_rolling_1h.json —
+    # 白名单同步契约由 test_valid_workflows_covers_all_json_configs 守护。
+    "okx_rest_history_rolling_1h",
 }
 
 # orphan-recovery 的 sentinel exit_code：daemon 崩溃 / 被 kill 后留下的

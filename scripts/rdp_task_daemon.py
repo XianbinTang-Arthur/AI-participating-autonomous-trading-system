@@ -63,6 +63,9 @@ WORKFLOW_TIMEOUTS = {
     # P0-c Option A (2026-04-20): candles rolling 15m — OKX REST 拉 4 symbol × 15m,
     # 纯 collect (跳过 Gold/Gap/Funding), 实测 <30s, 留 300s 超时同 microstructure。
     "candles_rolling_15m": 300,
+    # Platform hygiene (2026-04-23): OKX REST history rolling 1h — 拉 OI / mark /
+    # long-short 3 端点, task-level timeout 180s, workflow 余量 300s 与同类对齐。
+    "okx_rest_history_rolling_1h": 300,
 }
 DEFAULT_TIMEOUT = 1800  # 30 分钟
 
