@@ -65,6 +65,10 @@ class TestPhase5ControlPlaneRuntime(unittest.IsolatedAsyncioTestCase):
                     reduce_only=False,
                     close_only=False,
                     idempotency_key="phase5_control_1",
+                    market_snapshot_ref="mkt_snap_phase5_control_1",
+                    feature_snapshot_ref="feat_snap_phase5_control_1",
+                    portfolio_snapshot_ref="port_snap_phase5_control_1",
+                    health_snapshot_ref="health_snap_phase5_control_1",
                 )
                 runtime.audit_repo.upsert(
                     DecisionAuditRecord(
@@ -131,6 +135,44 @@ class TestPhase5ControlPlaneRuntime(unittest.IsolatedAsyncioTestCase):
                     "phase5_order_state_unavailable",
                 )
                 self.assertEqual(fills_payload["fills"][0]["truth_source"], "execution_fill_repo_v2")
+
+                # Execution truth exposure: phase5 control-plane order/fill payloads must
+                # surface execution_style + 4 snapshot refs (and raw_exchange on fill rows)
+                # as flat top-level keys so callers don't need to dig through raw_payload.
+                # Real truth shape along this paper/phase5 path:
+                #   - Order raw_payload 最终是 OrderState.model_dump 覆盖写入的结果；
+                #     OrderState 继承了 intent 的 4 个 snapshot_ref，所以 refs 在 order
+                #     行上必须等于 intent 播种的值；而 OrderState 不携带 execution_style，
+                #     所以 execution_style 在 paper 路径下合法为 None，契约是 "key 在顶层
+                #     出现"，不是 "值一定非空"。
+                #   - Paper 路径合成 FillEvent 不携带 refs / 不带交易所原始 payload，
+                #     所以 4 refs 与 raw_exchange 都可能为 None（真实 truth），契约是
+                #     "key 在顶层出现"。
+                expected_refs = {
+                    "market_snapshot_ref": "mkt_snap_phase5_control_1",
+                    "feature_snapshot_ref": "feat_snap_phase5_control_1",
+                    "portfolio_snapshot_ref": "port_snap_phase5_control_1",
+                    "health_snapshot_ref": "health_snap_phase5_control_1",
+                }
+
+                first_order = orders_payload["orders"][0]
+                self.assertIn("execution_style", first_order)
+                for ref_key, ref_value in expected_refs.items():
+                    self.assertEqual(first_order[ref_key], ref_value)
+
+                detail_order = order_detail_payload["order"]
+                self.assertIn("execution_style", detail_order)
+                for ref_key, ref_value in expected_refs.items():
+                    self.assertEqual(detail_order[ref_key], ref_value)
+
+                first_fill = fills_payload["fills"][0]
+                for ref_key in expected_refs:
+                    self.assertIn(ref_key, first_fill)
+                self.assertIn("raw_exchange", first_fill)
+                self.assertTrue(
+                    first_fill["raw_exchange"] is None
+                    or isinstance(first_fill["raw_exchange"], dict)
+                )
                 self.assertTrue(runtime_payload["control_plane"]["phase5_enabled"])
                 self.assertTrue(runtime_payload["control_plane"]["auth_hardened"])
                 self.assertFalse(runtime_payload["control_plane"]["legacy_layer_authoritative"])

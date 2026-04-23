@@ -6648,18 +6648,10 @@ class OperatorQueryService:
         if isinstance(record, dict):
             payload = dict(record)
             raw_payload = dict(payload.get("raw_payload") or {})
-            nested_payload = next(
-                (
-                    dict(candidate)
-                    for candidate in (
-                        raw_payload.get("fill_event"),
-                        raw_payload.get("order_state"),
-                        raw_payload.get("intent"),
-                    )
-                    if isinstance(candidate, dict)
-                ),
-                {},
-            )
+            fill_event_nested = raw_payload.get("fill_event") if isinstance(raw_payload.get("fill_event"), dict) else {}
+            order_state_nested = raw_payload.get("order_state") if isinstance(raw_payload.get("order_state"), dict) else {}
+            intent_nested = raw_payload.get("intent") if isinstance(raw_payload.get("intent"), dict) else {}
+            nested_payload = fill_event_nested or order_state_nested or intent_nested or {}
             if "state" in payload and "status" not in payload:
                 payload["status"] = payload.get("state")
             if "requested_qty" in payload and "quantity" not in payload:
@@ -6689,7 +6681,42 @@ class OperatorQueryService:
                 execution_action=raw_payload.get("execution_action", payload.get("execution_action")),
                 position_intent=raw_payload.get("position_intent", payload.get("position_intent")),
             )
+            # Execution truth exposure: surface execution_style + 4 snapshot refs + (fills)
+            # raw_exchange from existing raw_payload / nested paths so operator/control-plane
+            # order & fill payloads expose these without callers having to dig through
+            # raw_payload. OrderState 本身 schema 无 execution_style 字段，因此只能来自
+            # 顶层 raw_payload 或 nested intent / fill_event。四个 snapshot refs 在
+            # OrderState / FillEvent / OrderIntent 均有，优先级：已有 payload 字段 > raw_payload
+            # 顶层 > nested order_state > nested fill_event > nested intent。
+            payload["execution_style"] = (
+                payload.get("execution_style")
+                or raw_payload.get("execution_style")
+                or intent_nested.get("execution_style")
+                or fill_event_nested.get("execution_style")
+                or order_state_nested.get("execution_style")
+            )
+            for _ref_key in (
+                "market_snapshot_ref",
+                "feature_snapshot_ref",
+                "portfolio_snapshot_ref",
+                "health_snapshot_ref",
+            ):
+                payload[_ref_key] = (
+                    payload.get(_ref_key)
+                    or raw_payload.get(_ref_key)
+                    or order_state_nested.get(_ref_key)
+                    or fill_event_nested.get(_ref_key)
+                    or intent_nested.get(_ref_key)
+                )
             fill_id = payload.get("fill_id")
+            if fill_id:
+                # raw_exchange 只出现在 fill 侧 (ExchangeFill / FillEvent)。
+                raw_exchange = (
+                    payload.get("raw_exchange")
+                    or raw_payload.get("raw_exchange")
+                    or fill_event_nested.get("raw_exchange")
+                )
+                payload["raw_exchange"] = raw_exchange if isinstance(raw_exchange, dict) else None
             if fill_id:
                 outcome = self._fill_outcome_map().get(fill_id)
                 payload["has_fill_outcome"] = outcome is not None
