@@ -144,6 +144,7 @@ def _empty_slice() -> dict[str, Any]:
         "ir": 0.0,
         "hit_rate": 0.0,
         "fills": 0,
+        "sample_n": 0,
     }
 
 
@@ -157,6 +158,8 @@ def _slice_stats(
     points: Sequence[EquityPoint],
     diagnostics: Sequence[CostDiagnostic],
 ) -> dict[str, Any]:
+    # sample_n 口径: 参与 IR/hit_rate 的 bar-level return 样本数, 即 len(points) - 1
+    # (_bar_returns 丢弃首点无前值段)。空段 → 0。
     if not points:
         return _empty_slice()
     returns = _bar_returns(points)
@@ -167,6 +170,7 @@ def _slice_stats(
         "ir": _information_ratio(r.delta for r in returns),
         "hit_rate": _hit_rate(r.delta for r in returns),
         "fills": _fills_in_ms_set(diagnostics, ms_set),
+        "sample_n": len(returns),
     }
 
 
@@ -224,8 +228,8 @@ def _build_oos(
         return {
             "split_method": "explicit" if split_ts is not None else "time_midpoint",
             "split_ts": _to_utc_iso(split_ts) if split_ts is not None else None,
-            "train": _empty_slice(),
-            "test": _empty_slice(),
+            "train": _empty_cross_slice(),
+            "test": _empty_cross_slice(),
         }
 
     if split_ts is not None:
@@ -244,8 +248,8 @@ def _build_oos(
         return {
             "split_method": "explicit",
             "split_ts": _to_utc_iso(split_ts),
-            "train": _slice_stats(train_points, diagnostics),
-            "test": _slice_stats(test_points, diagnostics),
+            "train": _cross_slice_stats(train_points, diagnostics),
+            "test": _cross_slice_stats(test_points, diagnostics),
         }
 
     first_ts = curve[0].ts_ms
@@ -264,8 +268,8 @@ def _build_oos(
     return {
         "split_method": "time_midpoint",
         "split_ts": _ms_to_iso(mid_ms),
-        "train": _slice_stats(train_points, diagnostics),
-        "test": _slice_stats(test_points, diagnostics),
+        "train": _cross_slice_stats(train_points, diagnostics),
+        "test": _cross_slice_stats(test_points, diagnostics),
     }
 
 
@@ -373,7 +377,7 @@ def _build_regime_slice(
     realized vol 的代理。更贴近 governance 建议的独立 realized vol 指标
     将在后续迭代接入 (需要 bar close / ATR, 超出本任务 scope)。
     """
-    empty_bucket = {"ir": 0.0, "fills": 0}
+    empty_bucket = {"ir": 0.0, "fills": 0, "sample_n": 0}
     if len(curve) < 2:
         return {
             "vol": {
@@ -408,12 +412,14 @@ def _build_regime_slice(
                 "fills": _fills_in_ms_set(
                     diagnostics, {r.ts_ms for r in low}
                 ),
+                "sample_n": len(low),
             },
             "high": {
                 "ir": _information_ratio(r.delta for r in high),
                 "fills": _fills_in_ms_set(
                     diagnostics, {r.ts_ms for r in high}
                 ),
+                "sample_n": len(high),
             },
         }
     }

@@ -260,6 +260,35 @@ class TestScorecardOOS(unittest.TestCase):
         self.assertEqual(default_sc["oos"]["split_method"], "time_midpoint")
         self.assertEqual(explicit_sc["oos"]["split_method"], "explicit")
 
+    def test_oos_sample_n_and_max_drawdown_bps_present(self) -> None:
+        """v0.2 模板对齐: oos.train/test 必须同时含 sample_n 与 max_drawdown_bps。"""
+        # 人造一段有明显回撤的 curve: 升到 300 再下到 50
+        values = ["0", "100", "200", "300", "150", "50", "120", "240"]
+        curve = tuple(_mk_point(i, v) for i, v in enumerate(values))
+        result = _mk_result(curve=curve, diagnostics=(), window_hours=len(values))
+        sc = build_scorecard(result)
+        for side in ("train", "test"):
+            slot = sc["oos"][side]
+            self.assertIn("sample_n", slot)
+            self.assertIn("max_drawdown_bps", slot)
+            self.assertIsInstance(slot["sample_n"], int)
+            self.assertGreaterEqual(slot["sample_n"], 0)
+            self.assertGreaterEqual(slot["max_drawdown_bps"], 0.0)
+        # 至少一侧应捕捉到非零回撤 (curve 从 300 跌至 50)
+        self.assertTrue(
+            sc["oos"]["train"]["max_drawdown_bps"] > 0
+            or sc["oos"]["test"]["max_drawdown_bps"] > 0
+        )
+
+    def test_oos_empty_curve_new_fields_are_zero(self) -> None:
+        """空 curve → train/test 的 sample_n 和 max_drawdown_bps 必须为零值。"""
+        result = _mk_result(curve=(), diagnostics=())
+        sc = build_scorecard(result)
+        for side in ("train", "test"):
+            slot = sc["oos"][side]
+            self.assertEqual(slot["sample_n"], 0)
+            self.assertEqual(slot["max_drawdown_bps"], 0.0)
+
     def test_oos_explicit_split_outside_curve_leaves_one_side_empty(self) -> None:
         """explicit 模式不做 index 兜底 — 超出 curve 的 split 会让一侧为空。"""
         curve = tuple(_mk_point(i, str(i)) for i in range(4))
@@ -295,7 +324,15 @@ class TestScorecardCrossWindow(unittest.TestCase):
         for slot in sc["cross_window"]:
             self.assertEqual(
                 set(slot.keys()),
-                {"start", "end", "ir", "hit_rate", "fills", "max_drawdown_bps"},
+                {
+                    "start",
+                    "end",
+                    "ir",
+                    "hit_rate",
+                    "fills",
+                    "max_drawdown_bps",
+                    "sample_n",
+                },
             )
             if slot["start"] is not None:
                 self.assertTrue(slot["start"].endswith("+00:00"))
@@ -315,6 +352,20 @@ class TestScorecardCrossWindow(unittest.TestCase):
             # 下一片的 start 不可早于上一片的 start
             self.assertGreaterEqual(starts[i], starts[i - 1])
             self.assertGreaterEqual(ends[i], ends[i - 1])
+
+    def test_cross_window_sample_n_present_and_nonneg(self) -> None:
+        """v0.2 模板对齐: 每个 cross_window slot 必须含整数 sample_n >= 0。"""
+        curve = tuple(_mk_point(i, str(i)) for i in range(9))
+        result = _mk_result(curve=curve, diagnostics=(), window_hours=9)
+        sc = build_scorecard(result)
+        for slot in sc["cross_window"]:
+            self.assertIn("sample_n", slot)
+            self.assertIsInstance(slot["sample_n"], int)
+            self.assertGreaterEqual(slot["sample_n"], 0)
+        # 空 curve → 每片 sample_n == 0
+        empty_sc = build_scorecard(_mk_result(curve=(), diagnostics=()))
+        for slot in empty_sc["cross_window"]:
+            self.assertEqual(slot["sample_n"], 0)
 
     def test_cross_window_with_drawdown(self) -> None:
         """明显回撤段 -> max_drawdown_bps > 0。"""
@@ -452,6 +503,30 @@ class TestScorecardRegimeSlice(unittest.TestCase):
             bucket = regime["vol"][bucket_key]
             self.assertIn("ir", bucket)
             self.assertIn("fills", bucket)
+
+    def test_regime_slice_sample_n_present(self) -> None:
+        """v0.2 模板对齐: regime_slice.vol.low/high 必须含 sample_n >= 0, 且总和等于 bar-return 样本数。"""
+        curve = tuple(_mk_point(i, str(i * i)) for i in range(6))
+        result = _mk_result(curve=curve, diagnostics=())
+        sc = build_scorecard(result)
+        vol = sc["regime_slice"]["vol"]
+        for key in ("low", "high"):
+            self.assertIn("sample_n", vol[key])
+            self.assertIsInstance(vol[key]["sample_n"], int)
+            self.assertGreaterEqual(vol[key]["sample_n"], 0)
+        # bar-level returns 数 = len(curve) - 1 = 5
+        self.assertEqual(
+            vol["low"]["sample_n"] + vol["high"]["sample_n"], len(curve) - 1
+        )
+
+    def test_regime_slice_empty_curve_sample_n_zero(self) -> None:
+        """空 / 单点 curve → 两个 bucket 的 sample_n 均为 0。"""
+        for curve in ((), (_mk_point(0, "0"),)):
+            result = _mk_result(curve=curve, diagnostics=())
+            sc = build_scorecard(result)
+            vol = sc["regime_slice"]["vol"]
+            self.assertEqual(vol["low"]["sample_n"], 0)
+            self.assertEqual(vol["high"]["sample_n"], 0)
 
     def test_regime_slice_fills_allocation(self) -> None:
         curve = tuple(_mk_point(i, str(i * i)) for i in range(6))
