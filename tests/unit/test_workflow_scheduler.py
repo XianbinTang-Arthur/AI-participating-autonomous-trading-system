@@ -713,6 +713,205 @@ def test_candles_rolling_15m_task_allows_failure() -> None:
     assert task["enabled"] is True
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# Gap backfill (2026-04-23): daemon 停机后重启能把错过的 slot 补齐,
+# 不只是跳到 latest. 对应 _iter_due_slots 与 steady-state 主循环的新行为.
+# ─────────────────────────────────────────────────────────────────────────
+
+
+def test_iter_due_slots_returns_all_missing_slots_between_last_and_latest() -> None:
+    from aats.data_platform.operations.workflow_scheduler import _iter_due_slots
+
+    schedule = {"enabled": True, "frequency": "custom", "interval_minutes": 15}
+    now = datetime(2026, 4, 23, 12, 2, tzinfo=UTC)
+    last_processed = datetime(2026, 4, 23, 11, 0, tzinfo=UTC)
+    assert _iter_due_slots(schedule, now=now, last_processed=last_processed) == [
+        datetime(2026, 4, 23, 11, 15, tzinfo=UTC),
+        datetime(2026, 4, 23, 11, 30, tzinfo=UTC),
+        datetime(2026, 4, 23, 11, 45, tzinfo=UTC),
+        datetime(2026, 4, 23, 12, 0, tzinfo=UTC),
+    ]
+
+
+def test_iter_due_slots_empty_when_last_processed_is_latest() -> None:
+    from aats.data_platform.operations.workflow_scheduler import _iter_due_slots
+
+    schedule = {"enabled": True, "frequency": "hourly", "interval_hours": 1}
+    now = datetime(2026, 4, 23, 12, 5, tzinfo=UTC)
+    last_processed = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    assert _iter_due_slots(schedule, now=now, last_processed=last_processed) == []
+
+
+def test_iter_due_slots_none_last_processed_returns_only_latest() -> None:
+    from aats.data_platform.operations.workflow_scheduler import _iter_due_slots
+
+    schedule = {"enabled": True, "frequency": "daily", "hour_utc": 4, "minute_utc": 0}
+    now = datetime(2026, 4, 23, 12, 0, tzinfo=UTC)
+    assert _iter_due_slots(schedule, now=now, last_processed=None) == [
+        datetime(2026, 4, 23, 4, 0, tzinfo=UTC),
+    ]
+
+
+def test_iter_due_slots_weekly_spans_multiple_weeks() -> None:
+    from aats.data_platform.operations.workflow_scheduler import _iter_due_slots
+
+    schedule = {
+        "enabled": True,
+        "frequency": "weekly",
+        "weekday_utc": "SUN",
+        "hour_utc": 8,
+        "minute_utc": 0,
+    }
+    # 2026-04-05 Sun → 2026-04-26 Sun, three missing Sundays in between
+    now = datetime(2026, 4, 26, 10, 0, tzinfo=UTC)
+    last_processed = datetime(2026, 4, 5, 8, 0, tzinfo=UTC)
+    assert _iter_due_slots(schedule, now=now, last_processed=last_processed) == [
+        datetime(2026, 4, 12, 8, 0, tzinfo=UTC),
+        datetime(2026, 4, 19, 8, 0, tzinfo=UTC),
+        datetime(2026, 4, 26, 8, 0, tzinfo=UTC),
+    ]
+
+
+def test_scheduler_backfills_all_missing_custom_15min_slots_in_one_tick(
+    tmp_path: Path,
+) -> None:
+    """daemon 停机后 last_processed 落后多个 15min slot,
+    一次 tick 必须把所有缺失 slot 都 enqueue, state 推进到 latest.
+    """
+    _write_state(
+        tmp_path,
+        {
+            "initialized_at": "2026-04-20T00:00:00+00:00",
+            "bootstrap_completed_at": "2026-04-20T00:10:00+00:00",
+            "workflows": {
+                "candles_rolling_15m": {
+                    "last_processed_slot": "2026-04-23T11:00:00+00:00",
+                    "last_action": "enqueued",
+                },
+            },
+        },
+    )
+    now = datetime(2026, 4, 23, 12, 2, tzinfo=UTC)
+    schedule = {"enabled": True, "frequency": "custom", "interval_minutes": 15}
+
+    task_counter = {"n": 0}
+
+    def _create_task(_session, **_kwargs):
+        task_counter["n"] += 1
+        return (f"task_backfill_{task_counter['n']}", None)
+
+    with (
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.list_available_workflows",
+            return_value=["candles_rolling_15m"],
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.load_workflow_config",
+            return_value={"schedule": schedule},
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.guard_workflow_execution",
+            return_value=type("Guard", (), {"allowed": True, "reason": None})(),
+        ),
+        patch("aats.data_platform.db.get_session", _fake_session),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_create_task_if_idle",
+            side_effect=_create_task,
+        ),
+    ):
+        result = enqueue_due_workflows(
+            tmp_path, now=now, save_state=True, initialize_if_missing=False,
+        )
+
+    enqueued_slots = [item["slot"] for item in result["enqueued"]]
+    assert enqueued_slots == [
+        "2026-04-23T11:15:00+00:00",
+        "2026-04-23T11:30:00+00:00",
+        "2026-04-23T11:45:00+00:00",
+        "2026-04-23T12:00:00+00:00",
+    ]
+    assert task_counter["n"] == 4
+    state = load_scheduler_state(tmp_path)
+    assert (
+        state["workflows"]["candles_rolling_15m"]["last_processed_slot"]
+        == "2026-04-23T12:00:00+00:00"
+    )
+
+
+def test_scheduler_backfill_does_not_stall_when_middle_slot_has_active_task(
+    tmp_path: Path,
+) -> None:
+    """补齐过程中间某个 slot 遇到 active task (create_task_if_idle 返回 existing)
+    不能阻断后续 slot 补齐, state 最终推进到 latest 已处理 slot;
+    每个 slot 在 report 里都要有独立条目 (enqueued 或 skipped), 不能吞细节.
+    """
+    _write_state(
+        tmp_path,
+        {
+            "initialized_at": "2026-04-20T00:00:00+00:00",
+            "bootstrap_completed_at": "2026-04-20T00:10:00+00:00",
+            "workflows": {
+                "candles_rolling_15m": {
+                    "last_processed_slot": "2026-04-23T11:00:00+00:00",
+                    "last_action": "enqueued",
+                },
+            },
+        },
+    )
+    now = datetime(2026, 4, 23, 11, 46, tzinfo=UTC)  # latest = 11:45
+    schedule = {"enabled": True, "frequency": "custom", "interval_minutes": 15}
+
+    call_order: list[str] = []
+
+    def _create_task(_session, **_kwargs):
+        call_order.append("call")
+        # 第 1 / 3 次成功, 第 2 次模拟 "已有 active task" 的 ON CONFLICT 分支
+        if len(call_order) == 2:
+            return (None, {"task_id": "task_existing_mid"})
+        return (f"task_backfill_{len(call_order)}", None)
+
+    with (
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.list_available_workflows",
+            return_value=["candles_rolling_15m"],
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.load_workflow_config",
+            return_value={"schedule": schedule},
+        ),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.guard_workflow_execution",
+            return_value=type("Guard", (), {"allowed": True, "reason": None})(),
+        ),
+        patch("aats.data_platform.db.get_session", _fake_session),
+        patch(
+            "aats.data_platform.operations.workflow_scheduler.db_create_task_if_idle",
+            side_effect=_create_task,
+        ),
+    ):
+        result = enqueue_due_workflows(
+            tmp_path, now=now, save_state=True, initialize_if_missing=False,
+        )
+
+    enqueued_slots = [item["slot"] for item in result["enqueued"]]
+    skipped_slots = [
+        item["slot"]
+        for item in result["skipped"]
+        if item.get("workflow") == "candles_rolling_15m"
+    ]
+    # 1st (11:15) enqueued, 2nd (11:30) skipped as active task, 3rd (11:45) enqueued.
+    assert enqueued_slots == [
+        "2026-04-23T11:15:00+00:00",
+        "2026-04-23T11:45:00+00:00",
+    ]
+    assert skipped_slots == ["2026-04-23T11:30:00+00:00"]
+    state = load_scheduler_state(tmp_path)
+    assert (
+        state["workflows"]["candles_rolling_15m"]["last_processed_slot"]
+        == "2026-04-23T11:45:00+00:00"
+    )
+
+
 def test_rdp_run_daily_ingest_has_no_funding_flag() -> None:
     """--no-funding flag 必须存在 — candles_rolling_15m command 依赖它."""
     import subprocess

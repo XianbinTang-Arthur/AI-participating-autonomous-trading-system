@@ -204,6 +204,48 @@ def _latest_slot_for_schedule(
     return anchor + timedelta(seconds=slot_index * slot_seconds)
 
 
+def _schedule_step(schedule: dict[str, Any]) -> timedelta:
+    frequency = str(schedule.get("frequency") or "").strip().lower()
+    if frequency == "daily":
+        return timedelta(days=1)
+    if frequency == "weekly":
+        return timedelta(days=7)
+    if frequency == "custom":
+        return timedelta(minutes=max(int(schedule.get("interval_minutes", 15)), 1))
+    return timedelta(hours=max(int(schedule.get("interval_hours", 1)), 1))
+
+
+def _iter_due_slots(
+    schedule: dict[str, Any],
+    *,
+    now: datetime,
+    last_processed: datetime | None,
+) -> list[datetime]:
+    """Return due slots strictly after last_processed up through latest (inclusive).
+
+    ``last_processed=None`` (cold-start / post-bootstrap) returns just
+    ``[latest]`` to avoid backfilling from epoch — the caller is responsible
+    for seeding last_processed via ``_initialize_bootstrap_state`` or
+    bootstrap completion. When a daemon outage leaves ``last_processed``
+    multiple slots behind, the list contains every missed slot in order.
+    """
+    latest = _latest_slot_for_schedule(schedule, now=now)
+    if last_processed is None:
+        return [latest]
+
+    aligned_last = _latest_slot_for_schedule(schedule, now=last_processed)
+    if aligned_last >= latest:
+        return []
+
+    step = _schedule_step(schedule)
+    slots: list[datetime] = []
+    current = aligned_last + step
+    while current <= latest:
+        slots.append(current)
+        current += step
+    return slots
+
+
 def _load_scheduled_workflows(project_root: Path) -> list[tuple[str, dict[str, Any], dict[str, Any]]]:
     scheduled: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
     for workflow_name in list_available_workflows(project_root):
@@ -673,31 +715,47 @@ def _enqueue_due_workflows_locked(
         return report
 
     for workflow_name, _, schedule in scheduled_workflows:
-        slot = _latest_slot_for_schedule(schedule, now=now)
-        slot_key = _canonical_slot_key(slot) or ""
         workflow_state = state.setdefault("workflows", {}).setdefault(workflow_name, {})
         workflow_state["last_checked_at"] = now.isoformat()
         workflow_state["schedule"] = format_schedule(schedule)
 
-        if _canonical_slot_key(workflow_state.get("last_processed_slot")) == slot_key:
+        latest_slot = _latest_slot_for_schedule(schedule, now=now)
+        latest_slot_key = _canonical_slot_key(latest_slot) or ""
+        last_processed = _parse_iso_dt(workflow_state.get("last_processed_slot"))
+        due_slots = _iter_due_slots(
+            schedule, now=now, last_processed=last_processed,
+        )
+
+        if not due_slots:
             report["skipped"].append(
                 {
                     "workflow": workflow_name,
                     "reason": "当前窗口已处理",
-                    "slot": slot_key,
+                    "slot": latest_slot_key,
                 },
             )
             continue
 
-        _enqueue_single_workflow(
-            workflow_name=workflow_name,
-            schedule=schedule,
-            workflow_state=workflow_state,
-            slot_key=slot_key,
-            actor=actor,
-            dry_run=dry_run,
-            report=report,
-        )
+        # Gap backfill: when daemon outage leaves multiple slots missed,
+        # enqueue each in order. _enqueue_single_workflow advances
+        # last_processed_slot per accepted slot (enqueued / active_task /
+        # blocked_by_environment), so idempotency and ordering are preserved.
+        # A DB failure on any slot leaves last_processed_slot at the previous
+        # slot and breaks the loop so the next tick retries from the same point.
+        for slot in due_slots:
+            slot_key = _canonical_slot_key(slot) or ""
+            errors_before = len(report["errors"])
+            _enqueue_single_workflow(
+                workflow_name=workflow_name,
+                schedule=schedule,
+                workflow_state=workflow_state,
+                slot_key=slot_key,
+                actor=actor,
+                dry_run=dry_run,
+                report=report,
+            )
+            if len(report["errors"]) > errors_before:
+                break
 
     if save_state and not dry_run:
         save_scheduler_state(project_root, state)
