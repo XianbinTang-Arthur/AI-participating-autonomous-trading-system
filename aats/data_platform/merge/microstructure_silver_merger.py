@@ -94,6 +94,37 @@ _WHALE_SIZE_FALLBACK = Decimal("2.0")
 DEFAULT_DATASET_VERSION = "p1d_microstructure_v1.0"
 
 
+#: Per-table "源空" 判定: table_key -> {source *_no_data flag 子集}。
+#: 当该集合 ⊆ 当前 bar 的 flags 时, 意味着该表的 silver row 完全来自 NULL/0
+#: (源 bronze/staging 对该表全空), 触发 per-table no-data counter。
+#: 用于 observability 区分 "ETL 成功且有数据" vs "ETL 成功但输入为空"。
+_TABLE_NO_DATA_TRIGGERS: dict[str, frozenset[str]] = {
+    "orderbook": frozenset({"orderbook_bbo_no_data", "orderbook_books5_no_data"}),
+    "trade_flow": frozenset({"trades_no_data"}),
+    "oi_funding": frozenset({"oi_no_data", "funding_no_data", "mark_no_data"}),
+    "volume_profile": frozenset({"trades_no_data"}),
+    "liquidation": frozenset({"liquidation_no_data"}),
+}
+
+#: table_key -> table_name 映射, 用于 metrics / tables_failed 比对。
+_TABLE_KEY_TO_NAME: dict[str, str] = {
+    "orderbook": "orderbook_metrics_15m",
+    "trade_flow": "trade_flow_15m",
+    "oi_funding": "oi_funding_metrics_15m",
+    "volume_profile": "volume_profile_15m",
+    "liquidation": "liquidation_metrics_15m",
+}
+
+
+def _table_had_no_data(table_key: str, flags: list[str]) -> bool:
+    """本 bar 的 flags 是否命中 table_key 的全部 *_no_data trigger。"""
+    triggers = _TABLE_NO_DATA_TRIGGERS.get(table_key)
+    if not triggers:
+        return False
+    flags_set = set(flags)
+    return triggers.issubset(flags_set)
+
+
 # ─────────────────────────────────────────────────────────────────────
 # 结果数据类
 # ─────────────────────────────────────────────────────────────────────
@@ -1415,6 +1446,9 @@ def build_silver_microstructure_15m(
         - ``microstructure_silver_etl_errors_{table}_total`` — 按表拆分
         - ``microstructure_silver_rows_written_{table}_total`` — 每次 UPSERT 的
           rowcount (0 或 1) 累计
+        - ``microstructure_silver_bars_with_no_data_{table_key}_total`` — 该表
+          本 bar 成功写入但输入源全空 (对应 *_no_data flags 全命中) 时 +1;
+          用于区分 "ETL 成功 + 有数据" vs "ETL 成功 + 输入为空 (NULL row)"
 
         Duration p95 不在 MetricsRegistry 中追踪 (Counter 不支持 histogram,
         见 §4.3); 走 log event ``silver_microstructure_etl`` 的 ``duration``
@@ -1568,6 +1602,17 @@ def build_silver_microstructure_15m(
             value=rowcount,
         )
 
+    # Per-table no-data counter: 对成功写入但输入源全空的表 +1, 让 observability
+    # 区分 "ETL 成功 + 有数据" vs "ETL 成功 + 输入空 (NULL row)"。失败的表已经
+    # 被 etl_errors_<table>_total 覆盖, 不重复计入 no-data。
+    for tk, tname in _TABLE_KEY_TO_NAME.items():
+        if written.get(tname, 0) > 0 and tname not in tables_failed:
+            if _table_had_no_data(tk, flags):
+                _record_metric(
+                    metrics_registry,
+                    f"microstructure_silver_bars_with_no_data_{tk}_total",
+                )
+
     # Duration histogram bucket (recorded into single bucket by threshold).
     # 确保某一档 (exactly one) 每次入口调用都被打点;
     # 阈值对齐 §11 Gate: p95 < 10s. 超过 30s 视为病态, 需要独立告警.
@@ -1598,10 +1643,16 @@ def build_silver_microstructure_15m(
         result.quality_flags, duration, total_error,
     )
     all_zero = all(rc == 0 for rc in written.values()) if written else True
+    has_no_data_flag = any(f.endswith("_no_data") for f in result.quality_flags)
     if total_error is not None and all_zero:
         log.error("FAILED " + log_payload, *log_args)
     elif tables_failed:
         log.warning("PARTIAL " + log_payload, *log_args)
+    elif has_no_data_flag:
+        # ETL 成功但至少一个源 bronze/staging 空, silver row 带 NULL 指标。
+        # INFO 级保留 (仍是 success 语义), 只把文本标签区分出来, 让 Loki /
+        # oncall 能搜 "COMMITTED_BUT_EMPTY" 直接定位 silent-skip 场景。
+        log.info("COMMITTED_BUT_EMPTY " + log_payload, *log_args)
     else:
         log.info("COMMITTED " + log_payload, *log_args)
     return result

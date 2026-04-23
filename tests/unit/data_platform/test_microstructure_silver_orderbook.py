@@ -145,6 +145,63 @@ class TestOrderbookEmptyBar(unittest.TestCase):
             self.assertIsNone(row.bbo_imbalance_mean)
             self.assertIsNone(row.top5_imbalance_mean)
 
+    def test_empty_bronze_increments_no_data_counter(self) -> None:
+        """空 orderbook bar → bars_with_no_data_orderbook_total +1。"""
+        from aats.bootstrap.metrics import MetricsRegistry
+        env = make_env()
+        registry = MetricsRegistry()
+        with Session(env.engine) as sess:
+            build_silver_microstructure_15m(
+                session=sess, symbol=env.symbol,
+                bar_start_ts=env.bar_start, bar_end_ts=env.bar_end,
+                ingest_run_id=env.ingest_run_id,
+                metrics_registry=registry,
+            )
+            sess.commit()
+        snap = registry.snapshot()
+        self.assertGreaterEqual(
+            snap.get("microstructure_silver_bars_with_no_data_orderbook_total", 0),
+            1,
+        )
+
+    def test_happy_path_does_not_fire_orderbook_no_data_counter(self) -> None:
+        """有 BBO + books5 数据的 bar 不应让 orderbook no-data counter +1。
+
+        books5_no_data 单独命中不等价于 orderbook 整表空, 仅当两个 source
+        *_no_data flag 都命中才 +1。本例注入 BBO 数据 (未注入 books5),
+        `orderbook_books5_no_data` flag 会出现但不满足 "全命中", 应不 +1。
+        """
+        from aats.bootstrap.metrics import MetricsRegistry
+        env = make_env()
+        registry = MetricsRegistry()
+        with Session(env.engine) as sess:
+            rows = [
+                {
+                    "ts": env.bar_start + timedelta(seconds=i),
+                    "bid_px": Decimal("95000"),
+                    "bid_sz": Decimal("1.0"),
+                    "ask_px": Decimal("95010"),
+                    "ask_sz": Decimal("3.0"),
+                }
+                for i in range(10)
+            ]
+            insert_bbo(
+                sess, symbol=env.symbol, ingest_run_id=env.ingest_run_id,
+                rows=rows,
+            )
+            build_silver_microstructure_15m(
+                session=sess, symbol=env.symbol,
+                bar_start_ts=env.bar_start, bar_end_ts=env.bar_end,
+                ingest_run_id=env.ingest_run_id,
+                metrics_registry=registry,
+            )
+            sess.commit()
+        snap = registry.snapshot()
+        self.assertEqual(
+            snap.get("microstructure_silver_bars_with_no_data_orderbook_total", 0),
+            0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -469,6 +469,33 @@ class TestSilverMetricsPlumbing(unittest.TestCase):
         self.assertEqual(len(bucket_keys), 1,
                          f"exactly one duration bucket should fire, got {bucket_keys}")
 
+    def test_empty_bar_fires_bars_with_no_data_counters(self) -> None:
+        """空 bar (bronze/staging 全空) 应让 5 张表的 per-table no-data
+        counter 都 +1, 让 observability 能区分 "ETL 成功+有数据" vs
+        "ETL 成功+输入空"。
+        """
+        from aats.bootstrap.metrics import MetricsRegistry
+        env = make_env()
+        registry = MetricsRegistry()
+        with Session(env.engine) as sess:
+            build_silver_microstructure_15m(
+                session=sess, symbol=env.symbol,
+                bar_start_ts=env.bar_start, bar_end_ts=env.bar_end,
+                ingest_run_id=env.ingest_run_id,
+                metrics_registry=registry,
+            )
+            sess.commit()
+        snapshot = registry.snapshot()
+        for table_key in (
+            "orderbook", "trade_flow", "oi_funding",
+            "volume_profile", "liquidation",
+        ):
+            key = f"microstructure_silver_bars_with_no_data_{table_key}_total"
+            self.assertGreaterEqual(
+                snapshot.get(key, 0), 1,
+                f"expected {key} >= 1 on empty bar, got {snapshot.get(key, 0)}",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

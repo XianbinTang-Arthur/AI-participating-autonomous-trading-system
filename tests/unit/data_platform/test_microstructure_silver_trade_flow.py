@@ -158,6 +158,73 @@ class TestTradeFlowEmptyBar(unittest.TestCase):
             self.assertEqual(row.trade_count, 0)
             self.assertIsNone(row.total_volume_ccy)
 
+    def test_empty_trades_increments_no_data_counter(self) -> None:
+        """空 trades bar → bars_with_no_data_trade_flow_total +1;
+        volume_profile 也共享 trades source, 同样 +1。
+        """
+        from aats.bootstrap.metrics import MetricsRegistry
+        env = make_env()
+        registry = MetricsRegistry()
+        with Session(env.engine) as sess:
+            build_silver_microstructure_15m(
+                session=sess, symbol=env.symbol,
+                bar_start_ts=env.bar_start, bar_end_ts=env.bar_end,
+                ingest_run_id=env.ingest_run_id,
+                metrics_registry=registry,
+            )
+            sess.commit()
+        snap = registry.snapshot()
+        self.assertGreaterEqual(
+            snap.get("microstructure_silver_bars_with_no_data_trade_flow_total", 0),
+            1,
+        )
+        self.assertGreaterEqual(
+            snap.get(
+                "microstructure_silver_bars_with_no_data_volume_profile_total", 0,
+            ),
+            1,
+        )
+
+    def test_happy_path_does_not_fire_no_data_counter(self) -> None:
+        """有 trade 的 bar 不应触发 trade_flow no-data counter (0 或 未注册)。"""
+        from aats.bootstrap.metrics import MetricsRegistry
+        env = make_env()
+        registry = MetricsRegistry()
+        with Session(env.engine) as sess:
+            from tests.unit.data_platform._silver_test_helpers import insert_trades
+            trades = [
+                {
+                    "ts": env.bar_start + timedelta(seconds=i * 30),
+                    "trade_id": f"t-{i}",
+                    "px": Decimal("95000"),
+                    "sz": Decimal("0.5"),
+                    "side": "buy",
+                }
+                for i in range(5)
+            ]
+            insert_trades(
+                sess, symbol=env.symbol, ingest_run_id=env.ingest_run_id,
+                trades=trades,
+            )
+            build_silver_microstructure_15m(
+                session=sess, symbol=env.symbol,
+                bar_start_ts=env.bar_start, bar_end_ts=env.bar_end,
+                ingest_run_id=env.ingest_run_id,
+                metrics_registry=registry,
+            )
+            sess.commit()
+        snap = registry.snapshot()
+        self.assertEqual(
+            snap.get("microstructure_silver_bars_with_no_data_trade_flow_total", 0),
+            0,
+        )
+        self.assertEqual(
+            snap.get(
+                "microstructure_silver_bars_with_no_data_volume_profile_total", 0,
+            ),
+            0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

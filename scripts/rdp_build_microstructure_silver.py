@@ -206,11 +206,21 @@ def _run_one_bar(
                         )
                 else:
                     session.commit()
+                    # 区分 "ETL 成功 + 有数据" vs "ETL 成功 + 输入源空":
+                    # 后者保持 INFO + success 语义, 只把日志标签改为
+                    # COMMITTED_BUT_EMPTY, 让 operator / Loki 能 grep 出来。
+                    has_no_data_flag = any(
+                        f.endswith("_no_data") for f in result.quality_flags
+                    )
+                    status_tag = (
+                        "COMMITTED_BUT_EMPTY" if has_no_data_flag else "COMMITTED"
+                    )
                     log.info(
-                        "COMMITTED symbol=%s bar_start=%s tables_written=%s flags=%s "
+                        "%s symbol=%s bar_start=%s tables_written=%s flags=%s "
                         "duration=%.3fs",
-                        symbol, bar_start.isoformat(), result.tables_written,
-                        result.quality_flags, result.duration_seconds,
+                        status_tag, symbol, bar_start.isoformat(),
+                        result.tables_written, result.quality_flags,
+                        result.duration_seconds,
                     )
             else:
                 session.rollback()
