@@ -91,20 +91,32 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────
-# 2. Silver 两 pipeline 最新 bar 在 30min 内
+# 2. Silver 依赖链最新 bar 在 30min 内
 # ─────────────────────────────────────────────────────────────
+# 观察对象 (2026-04-23 升级):
+#   - silver.market_trade_flow_15m       ← microstructure silver runner 的
+#                                          watermark 基准 (见
+#                                          scripts/rdp_build_microstructure_silver.py
+#                                          _detect_trade_flow_watermark); 若断档
+#                                          整个 silver backfill 链停摆
+#   - silver.market_orderbook_metrics_15m ← microstructure silver 另一主表
+#   - silver.market_swap_candles_15m      ← 独立 OHLC pipeline
+# 三者必须都新鲜, 否则观察窗的"连续产出"前提不成立.
 
-step "[2/6] Silver freshness"
+step "[2/6] Silver freshness (依赖链三表)"
 
 # 用 epoch 方式比较, 避免 bash 日期解析复杂度
 now_epoch=$(date -u +%s)
 
-for tbl in market_orderbook_metrics_15m market_swap_candles_15m; do
+declare -A LATEST_EPOCH
+for tbl in market_trade_flow_15m market_orderbook_metrics_15m market_swap_candles_15m; do
     latest=$(psql_q "SELECT EXTRACT(EPOCH FROM (MAX(ts) AT TIME ZONE 'UTC'))::bigint FROM silver.${tbl} WHERE symbol='BTC-USDT-SWAP'")
     if [[ -z "$latest" || "$latest" == "0" ]]; then
         fail "silver.${tbl}: 无数据"
+        LATEST_EPOCH[$tbl]=0
         continue
     fi
+    LATEST_EPOCH[$tbl]=$latest
     age=$((now_epoch - latest))
     age_min=$((age / 60))
     latest_str=$(date -u -d "@$latest" '+%Y-%m-%d %H:%M UTC')
@@ -118,20 +130,44 @@ for tbl in market_orderbook_metrics_15m market_swap_candles_15m; do
 done
 
 # ─────────────────────────────────────────────────────────────
-# 3. 两 pipeline 同 cadence 对齐 (ts 差 ≤ 1 bar)
+# 3. 依赖链三表同 cadence 对齐 (极差 ≤ 1 bar)
 # ─────────────────────────────────────────────────────────────
+# trade_flow 是 silver watermark 基准, 落后 orderbook_metrics 意味着下一 tick
+# backfill 会被 watermark 拉回去补 — 短期可自愈, 长期说明 trades bronze 异常.
+# candles 是独立 pipeline, 落后 = OKX candles REST/WS 异常.
 
-step "[3/6] Cadence alignment (micro vs candles)"
+step "[3/6] Cadence alignment (trade_flow / orderbook / candles 三表)"
 
-micro_max=$(psql_q "SELECT EXTRACT(EPOCH FROM (MAX(ts) AT TIME ZONE 'UTC'))::bigint FROM silver.market_orderbook_metrics_15m WHERE symbol='BTC-USDT-SWAP'")
-swap_max=$(psql_q "SELECT EXTRACT(EPOCH FROM (MAX(ts) AT TIME ZONE 'UTC'))::bigint FROM silver.market_swap_candles_15m WHERE symbol='BTC-USDT-SWAP'")
-diff_sec=$((micro_max > swap_max ? micro_max - swap_max : swap_max - micro_max))
-diff_min=$((diff_sec / 60))
+tf_max=${LATEST_EPOCH[market_trade_flow_15m]:-0}
+ob_max=${LATEST_EPOCH[market_orderbook_metrics_15m]:-0}
+sw_max=${LATEST_EPOCH[market_swap_candles_15m]:-0}
 
-if [[ $diff_min -le 15 ]]; then
-    pass "micro / candles 差 ${diff_min}min (≤ 1 bar)"
+if [[ "$tf_max" == "0" || "$ob_max" == "0" || "$sw_max" == "0" ]]; then
+    warn "cadence 对齐跳过 (某表无数据, 见 [2/6])"
 else
-    warn "micro / candles 差 ${diff_min}min (> 1 bar, 有一条 pipeline 落后)"
+    max_ts=$tf_max
+    min_ts=$tf_max
+    for v in "$ob_max" "$sw_max"; do
+        [[ $v -gt $max_ts ]] && max_ts=$v
+        [[ $v -lt $min_ts ]] && min_ts=$v
+    done
+    diff_sec=$((max_ts - min_ts))
+    diff_min=$((diff_sec / 60))
+
+    # 找出最落后的表名方便 operator 诊断
+    lag_tbl="unknown"
+    for tbl in market_trade_flow_15m market_orderbook_metrics_15m market_swap_candles_15m; do
+        if [[ "${LATEST_EPOCH[$tbl]}" == "$min_ts" ]]; then
+            lag_tbl=$tbl
+            break
+        fi
+    done
+
+    if [[ $diff_min -le 15 ]]; then
+        pass "三表 cadence 极差 ${diff_min}min (≤ 1 bar)"
+    else
+        warn "三表 cadence 极差 ${diff_min}min (> 1 bar, 最落后: silver.${lag_tbl})"
+    fi
 fi
 
 # ─────────────────────────────────────────────────────────────
@@ -166,9 +202,9 @@ fi
 # 5. 观察窗区间 Silver 连续性 (无 gap)
 # ─────────────────────────────────────────────────────────────
 
-step "[5/6] Gap detection in observation window"
+step "[5/6] Gap detection in observation window (依赖链三表)"
 
-for tbl in market_orderbook_metrics_15m market_swap_candles_15m; do
+for tbl in market_trade_flow_15m market_orderbook_metrics_15m market_swap_candles_15m; do
     gap_count=$(psql_q "
         WITH observed AS (
             SELECT ts FROM silver.${tbl}

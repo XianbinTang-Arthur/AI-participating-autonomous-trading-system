@@ -76,11 +76,24 @@ bash scripts/ops/route_a_daily_check.sh
 | # | Check | Pass 条件 | 失败级别 |
 |:-:|---|---|---|
 | 1 | 16 个 `aats-*` 容器 healthy | 全部 `Status=healthy` | FAIL (任一不 healthy) |
-| 2 | Silver 两 pipeline 最新 bar < 30min | `market_orderbook_metrics_15m` / `market_swap_candles_15m` 的 `max(ts)` 距 now 不超 30min | WARN 30-60min, FAIL > 60min |
-| 3 | Micro / candles cadence 对齐 | 两表 `max(ts)` 差 ≤ 15min (1 bar) | WARN > 15min |
+| 2 | Silver 依赖链三表最新 bar < 30min | `market_trade_flow_15m` / `market_orderbook_metrics_15m` / `market_swap_candles_15m` 的 `max(ts)` 距 now 不超 30min | WARN 30-60min, FAIL > 60min |
+| 3 | 三表 cadence 对齐 | 三表 `max(ts)` 极差 ≤ 15min (1 bar) | WARN > 15min |
 | 4 | 24h task queue | rolling workflow 非 done 数 ≤ 2 | WARN 1-2, FAIL > 2 |
-| 5 | 观察窗内 Silver gap count | 0 gap | WARN = 1, FAIL > 1 |
+| 5 | 观察窗内 Silver gap count (三表各自) | 0 gap | WARN = 1, FAIL > 1 |
 | 6 | Runtime mode 守门 | `ai_operating_mode=baseline_only` | FAIL 任何其他值 |
+
+#### Check 2/3/5 为何看 `market_trade_flow_15m` (2026-04-23 升级)
+
+`scripts/rdp_build_microstructure_silver.py::_detect_trade_flow_watermark` 以
+`silver.market_trade_flow_15m` 的 `MAX(ts)` 作为 microstructure silver runner 的
+watermark, watermark 不推进则整个 silver backfill 链停摆 (orderbook_metrics /
+volume_profile / oi_funding / vol_weighted_tfi 都跟着落后)。因此
+**trade_flow 新鲜度 = 整条 microstructure silver pipeline 的活性指示器**, 必须
+和 orderbook_metrics / candles 一起纳入 check 2/3/5。
+
+反过来, orderbook_metrics 新鲜不代表 trade_flow 新鲜 (bronze trades 可能瞬断
+而 books5 还在, commit c331e2b "committed-but-empty bars" 正是此场景), 老脚本
+只看 orderbook_metrics 会漏掉 watermark 停滞。
 
 #### Threshold 设计理由 (2026-04-20 code review C-M1 补)
 
@@ -88,7 +101,7 @@ bash scripts/ops/route_a_daily_check.sh
 |:-:|---|---|
 | 2 | 30min WARN | cadence 是 15min bar. 1 bar 延迟 (= 15-30min age) 可能是 15min tick 执行窗口偏移; > 30min 说明至少错过 1 个 tick, 进 WARN 排查. |
 | 2 | 60min FAIL | 连续错过 4 次 tick (= 60min/15min) 说明 pipeline 明显卡住, 观察窗失去"连续产出"前提, 需 reset. |
-| 3 | 15min cadence diff | 两 pipeline 设计上同 cadence (commit 15dd04e + scheduler 测试 test_candles_rolling_15m_slot_aligns_to_microstructure_cadence 锁定). 差 > 1 bar = 某条线落后, 影响 T-bar 对齐. |
+| 3 | 15min cadence diff | 三表设计上同 cadence (commit 15dd04e + scheduler 测试 test_candles_rolling_15m_slot_aligns_to_microstructure_cadence 锁定; trade_flow/orderbook_metrics 同 silver run 同 bar 写入). 极差 > 1 bar = 某条线落后 (脚本打印最落后表名), 影响 T-bar 对齐 + watermark 推进. |
 | 4 | 2 次 WARN 阈值 | 24h = 96 个 15min tick, 2 / 96 ≈ 2.08% 容忍偶发网络抖动 / OKX REST 5xx. > 2 次说明系统性问题. |
 | 4 | **未**区分 contiguous vs sparse | 简化 v0.1. 若观察窗期间发现"连续 2 次同 workflow failed" 更严重但本测试没抓, operator 需手工查 log_tail 判断. 留 v0.2 迭代点. |
 | 5 | 1 gap WARN | 允许 1 次偶发数据源断 (OKX 维护 / 网络瞬断), UPSERT 幂等 + catchup 脚本能补. > 1 gap 需重置, 以免数据空洞污染 alpha 研究. |
