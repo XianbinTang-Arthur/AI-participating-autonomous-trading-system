@@ -59,6 +59,22 @@
 
 若某检查改 DB, 两个 helper 不要混用; 错 DB 会因 schema 不存在静默返回空值, 脚本可能误判 PASS。
 
+### 2.0.1 infra/查询失败语义 (2026-04-23 强化)
+
+`psql_q` / `psql_live` 以及 check 1 的 `docker ps` 遇到 **wsl / docker / psql 任一环节非零退出** 时:
+
+- 把 psql / docker stderr 摘要打到屏幕 (operator 能直接看到故障原因)
+- 在 stdout 输出哨兵值 `__PSQL_ERR__` (psql helpers) / 单独走 rc 分支 (docker ps)
+- 调用点通过 `is_psql_err`、rc 校验以及 "COUNT(*) 必为非负整数" 的形态校验识别故障, 直接 `fail`
+
+这条纪律意味着:
+
+- 任一数据源 (aats-postgres / wsl / docker) 不可用 → check 直接 FAIL, 不会被折叠成 "无数据 WARN" 或默认 0 PASS。
+- check 5 / 6 的 `COUNT(*)` 查询返回空串 / 非数字 也一律视为 infra 异常 FAIL (psql 对 COUNT 查询必返回一行)。
+- check 4 的 task queue 查询与 check 7 的 runtime mode 查询若 infra 挂掉, 不再退化成 "24h 全部 done PASS" 或 "无 decision_outcome WARN", 而是显式 FAIL。
+
+即: daily check 的"数据源本身不可用" 一律按 FAIL 处理, 观察窗 reset, 先恢复 infra 再说。
+
 ### 2.1 运行命令
 
 ```bash

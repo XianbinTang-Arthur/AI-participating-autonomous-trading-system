@@ -58,16 +58,36 @@ warn()  { printf '  \033[33m⚠ WARN\033[0m  %s\n' "$*" >&2; WARN_COUNT=$((WARN_
 fail()  { printf '  \033[31m✗ FAIL\033[0m  %s\n' "$*" >&2; FAIL_COUNT=$((FAIL_COUNT+1)); }
 step()  { printf '\n═══ %s ═══\n' "$*"; }
 
-psql_q() {
-    wsl -d "$WSL_DISTRO" -- docker exec aats-postgres \
-        psql -U admin -d aats_research -tA -c "$*" 2>/dev/null
+# infra/query 失败哨兵. psql_q / psql_live 遇到 wsl / docker / psql 任一环节
+# 非零退出时在 stdout 输出该值, 同时把 stderr 摘要打到屏幕; 下游调用点用
+# is_psql_err 显式识别并进入 FAIL 分支, 避免把 infra 故障折叠成 "空表" 或
+# 默认 0, 误判为 PASS / WARN.
+readonly PSQL_ERR='__PSQL_ERR__'
+
+is_psql_err() { [[ "${1-}" == "$PSQL_ERR" ]]; }
+
+_psql_run() {
+    # 内部实现: $1=db, 其余=SQL.
+    local db="$1"; shift
+    local out rc err_file
+    err_file=$(mktemp 2>/dev/null || echo "/tmp/aats_psql_err.$$")
+    out=$(wsl -d "$WSL_DISTRO" -- docker exec aats-postgres \
+        psql -U admin -d "$db" -tA -c "$*" 2>"$err_file")
+    rc=$?
+    if (( rc != 0 )); then
+        local err_msg
+        err_msg=$(tr '\n' ' ' <"$err_file" 2>/dev/null)
+        rm -f "$err_file" 2>/dev/null || true
+        printf 'psql 查询失败 (rc=%s, db=%s): %s\n' "$rc" "$db" "${err_msg:-<no stderr>}" >&2
+        printf '%s' "$PSQL_ERR"
+        return "$rc"
+    fi
+    rm -f "$err_file" 2>/dev/null || true
+    printf '%s' "$out"
 }
 
-# 专门查 live_derivatives DB (event_store / runtime snapshots 在那边)
-psql_live() {
-    wsl -d "$WSL_DISTRO" -- docker exec aats-postgres \
-        psql -U admin -d aats_live_derivatives -tA -c "$*" 2>/dev/null
-}
+psql_q()    { _psql_run aats_research "$@"; }
+psql_live() { _psql_run aats_live_derivatives "$@"; }
 
 # ─────────────────────────────────────────────────────────────
 # 0. 基本 infra
@@ -81,14 +101,27 @@ log "观察窗: ${WINDOW_START_UTC} → ${WINDOW_TARGET_UTC}"
 # ─────────────────────────────────────────────────────────────
 
 step "[1/7] Container health"
-unhealthy=$(wsl -d "$WSL_DISTRO" -- docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null \
-    | grep '^aats-' | grep -v 'healthy' || true)
-if [[ -z "$unhealthy" ]]; then
-    pass "16 个 aats-* 容器全部 healthy"
+# 用 rc + 行数双保险: wsl / docker 挂或无 aats-* 容器时显式 FAIL, 不能因
+# "grep 什么都没匹配到" 走进假 PASS 分支.
+docker_ps_err=$(mktemp 2>/dev/null || echo "/tmp/aats_docker_ps.$$")
+docker_ps_out=$(wsl -d "$WSL_DISTRO" -- docker ps --format '{{.Names}}\t{{.Status}}' 2>"$docker_ps_err")
+docker_ps_rc=$?
+if (( docker_ps_rc != 0 )); then
+    fail "docker ps 查询失败 (rc=${docker_ps_rc}): $(tr '\n' ' ' <"$docker_ps_err" 2>/dev/null)"
 else
-    fail "以下容器不 healthy:"
-    echo "$unhealthy" | sed 's/^/      /'
+    aats_lines=$(printf '%s\n' "$docker_ps_out" | grep '^aats-' || true)
+    aats_total=$(printf '%s\n' "$aats_lines" | grep -c '^aats-' || true)
+    unhealthy=$(printf '%s\n' "$aats_lines" | grep -v 'healthy' | grep -v '^$' || true)
+    if (( aats_total == 0 )); then
+        fail "docker ps 未返回任何 aats-* 容器 (wsl/docker 可能不可用)"
+    elif [[ -z "$unhealthy" ]]; then
+        pass "${aats_total} 个 aats-* 容器全部 healthy"
+    else
+        fail "以下容器不 healthy:"
+        echo "$unhealthy" | sed 's/^/      /'
+    fi
 fi
+rm -f "$docker_ps_err" 2>/dev/null || true
 
 # ─────────────────────────────────────────────────────────────
 # 2. Silver 依赖链最新 bar 在 30min 内
@@ -111,6 +144,11 @@ now_epoch=$(date -u +%s)
 declare -A LATEST_EPOCH
 for tbl in market_trade_flow_15m market_orderbook_metrics_15m market_swap_candles_15m; do
     latest=$(psql_q "SELECT EXTRACT(EPOCH FROM (MAX(ts) AT TIME ZONE 'UTC'))::bigint FROM silver.${tbl} WHERE symbol='BTC-USDT-SWAP'")
+    if is_psql_err "$latest"; then
+        fail "silver.${tbl}: freshness 查询失败 (infra/数据源不可用, 见上方 stderr)"
+        LATEST_EPOCH[$tbl]=0
+        continue
+    fi
     if [[ -z "$latest" || "$latest" == "0" ]]; then
         fail "silver.${tbl}: 无数据"
         LATEST_EPOCH[$tbl]=0
@@ -176,25 +214,30 @@ fi
 
 step "[4/7] Task queue last 24h"
 
-failed_24h=$(psql_q "
+failed_24h_raw=$(psql_q "
     SELECT workflow || ':' || COUNT(*)
     FROM governance.rdp_task_queue
     WHERE requested_at > NOW() - INTERVAL '24 hours'
       AND status != 'done'
     GROUP BY workflow
-    ORDER BY workflow" | grep -v '^$' || true)
+    ORDER BY workflow")
 
-if [[ -z "$failed_24h" ]]; then
-    pass "24h 内全部 task done"
+if is_psql_err "$failed_24h_raw"; then
+    fail "task queue 24h 查询失败 (infra/数据源不可用, 见上方 stderr)"
 else
-    log "  24h 内非 done task 统计:"
-    echo "$failed_24h" | sed 's/^/      /'
-    # rolling 类工作流 ≤ 2 次不 done 算 warn, > 2 算 fail
-    rolling_fails=$(echo "$failed_24h" | grep -E "microstructure_silver_15m|candles_rolling_15m" | awk -F: '{sum+=$2} END {print sum+0}')
-    if [[ $rolling_fails -gt 2 ]]; then
-        fail "rolling workflow 24h 非 done 数=${rolling_fails} (>2, 连续失败风险)"
-    elif [[ $rolling_fails -gt 0 ]]; then
-        warn "rolling workflow 24h 非 done 数=${rolling_fails} (≤2, 可接受偶发)"
+    failed_24h=$(printf '%s\n' "$failed_24h_raw" | grep -v '^$' || true)
+    if [[ -z "$failed_24h" ]]; then
+        pass "24h 内全部 task done"
+    else
+        log "  24h 内非 done task 统计:"
+        echo "$failed_24h" | sed 's/^/      /'
+        # rolling 类工作流 ≤ 2 次不 done 算 warn, > 2 算 fail
+        rolling_fails=$(echo "$failed_24h" | grep -E "microstructure_silver_15m|candles_rolling_15m" | awk -F: '{sum+=$2} END {print sum+0}')
+        if [[ $rolling_fails -gt 2 ]]; then
+            fail "rolling workflow 24h 非 done 数=${rolling_fails} (>2, 连续失败风险)"
+        elif [[ $rolling_fails -gt 0 ]]; then
+            warn "rolling workflow 24h 非 done 数=${rolling_fails} (≤2, 可接受偶发)"
+        fi
     fi
 fi
 
@@ -222,7 +265,12 @@ for tbl in market_trade_flow_15m market_orderbook_metrics_15m market_swap_candle
         LEFT JOIN observed o ON e.ts = o.ts
         WHERE o.ts IS NULL")
 
-    if [[ "$gap_count" == "0" ]]; then
+    if is_psql_err "$gap_count"; then
+        fail "silver.${tbl}: gap 查询失败 (infra/数据源不可用, 见上方 stderr)"
+    elif [[ -z "$gap_count" || ! "$gap_count" =~ ^[0-9]+$ ]]; then
+        # COUNT(*) 必定返回一行非负整数, 空串 / 非数字 = 查询意外异常, 不容落 PASS
+        fail "silver.${tbl}: gap 查询返回非预期输出='${gap_count}' (视为 infra 异常)"
+    elif [[ "$gap_count" == "0" ]]; then
         pass "silver.${tbl}: 观察窗内零 gap"
     elif [[ "$gap_count" -le 1 ]]; then
         warn "silver.${tbl}: 观察窗内 ${gap_count} 个 gap (允许 ≤ 1, 偶发可接受)"
@@ -258,12 +306,13 @@ done
 step "[6/7] Microstructure empty-bar / no-data 24h"
 
 # trade_flow: 单 flag 即代表整张表 row 饿死
+# 注意: 不能用 `${tf_empty:-0}` 把查询失败折叠成 0 — 必须区分 "查询失败 (infra)"
+# 与 "查询成功返回 0 (真无饿死)". 前者需 FAIL, 后者才 PASS.
 tf_empty=$(psql_q "
     SELECT COUNT(*) FROM silver.market_trade_flow_15m
     WHERE symbol='BTC-USDT-SWAP'
       AND ts > NOW() - INTERVAL '24 hours'
       AND 'trades_no_data' = ANY(quality_flags)")
-tf_empty=${tf_empty:-0}
 
 # orderbook: bbo + books5 必须都 no_data 才算整行饿死 (与 merger 对齐)
 ob_empty=$(psql_q "
@@ -272,11 +321,18 @@ ob_empty=$(psql_q "
       AND ts > NOW() - INTERVAL '24 hours'
       AND 'orderbook_bbo_no_data' = ANY(quality_flags)
       AND 'orderbook_books5_no_data' = ANY(quality_flags)")
-ob_empty=${ob_empty:-0}
 
 for pair in "market_trade_flow_15m:${tf_empty}" "market_orderbook_metrics_15m:${ob_empty}"; do
     tbl=${pair%%:*}
     cnt=${pair##*:}
+    if is_psql_err "$cnt"; then
+        fail "silver.${tbl}: 24h empty-bar 查询失败 (infra/数据源不可用, 见上方 stderr)"
+        continue
+    fi
+    if [[ -z "$cnt" || ! "$cnt" =~ ^[0-9]+$ ]]; then
+        fail "silver.${tbl}: 24h empty-bar 查询返回非预期输出='${cnt}' (视为 infra 异常)"
+        continue
+    fi
     if [[ "$cnt" == "0" ]]; then
         pass "silver.${tbl}: 24h 内 0 个 COMMITTED_BUT_EMPTY bar"
     elif [[ $cnt -le 4 ]]; then
@@ -293,7 +349,9 @@ done
 step "[7/7] Runtime mode guard"
 
 mode=$(psql_live "SELECT payload::jsonb->>'ai_operating_mode' FROM public.event_store WHERE topic='strategy.decision_outcome' ORDER BY event_timestamp DESC LIMIT 1")
-if [[ "$mode" == "baseline_only" ]]; then
+if is_psql_err "$mode"; then
+    fail "runtime mode 查询失败 (aats_live_derivatives 不可用, 见上方 stderr)"
+elif [[ "$mode" == "baseline_only" ]]; then
     pass "ai_operating_mode=baseline_only (符合观察窗纪律)"
 elif [[ -z "$mode" ]]; then
     warn "无 decision_outcome 记录 (可能 decision 没在跑, 注意)"
