@@ -57,6 +57,30 @@ if TYPE_CHECKING:  # pragma: no cover - 仅用于类型检查
 _SUPPORTED_ENVELOPE_SCHEMA_MAJOR: str = "1"
 
 
+# _on_error 分级用白名单：以下异常类型视为 nats-py 内置重连逻辑在处理的
+# "连接瞬态"（典型场景：infra 部署时 NATS 容器被 recreate, 4 个 app 服务
+# 几乎同时收到 UnexpectedEOF → ConnectionRefusedError → 静默重连成功）。
+# 命中白名单时 _on_error 打 WARNING 而非 ERROR, 避免污染
+# sev3-error-rate 告警信噪比。用 type(exc).__name__ 做字符串匹配, 不
+# 耦合 nats-py 内部异常类, 库升级时也不会坏。
+# 真正需要 page 的场景（重连彻底失败 → 耗尽 max_reconnect_attempts）会
+# 由 _on_closed 捕获, 不在本白名单覆盖范围内。
+# (2026-04-23: 引入前每次 deploy 重启 NATS 会误触发 sev3-error-rate,
+# 见 docs/review / 该 commit 日志)
+_TRANSIENT_NATS_ERROR_TYPES: frozenset[str] = frozenset(
+    {
+        "UnexpectedEOF",          # 老 NATS 容器 TCP FIN, nats-py 原生错误
+        "ConnectionRefusedError", # 新 NATS 容器尚未监听端口
+        "ConnectionClosedError",  # nats-py 包装的连接关闭
+        "ConnectionResetError",   # TCP RST
+        "BrokenPipeError",        # socket 半关闭
+        "TimeoutError",           # 握手 / 心跳超时 (重连会重试)
+        "NoServersError",         # nats-py: 当前无可达服务器 (重连 backoff)
+        "OSError",                # Linux 底层 socket 故障, 上层会重连
+    }
+)
+
+
 def _envelope_schema_compatible(schema_version: str | None) -> bool:
     """返回 True 表示当前进程能安全解析该 envelope。
 
@@ -1655,12 +1679,19 @@ class NatsEventBus(EventBus):
 
     # ── NATS 回调 ────────────────────────────────────────────────
     async def _on_error(self, exc: Exception) -> None:
+        # 连接瞬态 (见 _TRANSIENT_NATS_ERROR_TYPES 注释) → WARNING:
+        # nats-py 的内置重连会自动处理, 不是需要 page 的事件。
+        # 真正的持续故障会在 _on_closed 体现 (重连耗尽 → bus 关闭), 那里
+        # 才是需要 SEV alert 的分水岭。
+        error_type = type(exc).__name__
+        is_transient = error_type in _TRANSIENT_NATS_ERROR_TYPES
         log_event(
             self.logger,
             "nats_client_error",
-            level="error",
-            error_type=type(exc).__name__,
+            level="warning" if is_transient else "error",
+            error_type=error_type,
             error=str(exc),
+            transient=is_transient,
         )
 
     async def _on_disconnected(self) -> None:

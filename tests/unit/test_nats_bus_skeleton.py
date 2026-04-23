@@ -363,6 +363,62 @@ def test_nats_bus_construction_does_not_require_nats_py() -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────
+# _on_error 分级：连接瞬态 → WARNING；未知错误 → ERROR
+# 背景：deploy 重启 NATS 容器时 4 个 app 服务几乎同时收到 EOF +
+# ConnectionRefused，如果都打 ERROR 会误触发 sev3-error-rate 告警
+# （15m 内 >5 条 ERROR）。见 2026-04-23 问题报告。
+# ─────────────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "exc_factory",
+    [
+        lambda: ConnectionRefusedError(111, "Connect call failed"),
+        lambda: ConnectionResetError("peer reset"),
+        lambda: BrokenPipeError("pipe"),
+        lambda: TimeoutError("handshake timeout"),
+        lambda: OSError("sock"),
+        # 模拟 nats-py 自己抛的 UnexpectedEOF (名字匹配即可)
+        lambda: type("UnexpectedEOF", (Exception,), {})("eof"),
+        lambda: type("ConnectionClosedError", (Exception,), {})("closed"),
+        lambda: type("NoServersError", (Exception,), {})("no servers"),
+    ],
+)
+def test_on_error_transient_logged_as_warning(
+    caplog: pytest.LogCaptureFixture,
+    exc_factory,
+) -> None:
+    """重连瞬态 (UnexpectedEOF/ConnectionRefused/... 白名单) → WARNING，
+    不会计入 sev3-error-rate 告警。"""
+    bus = NatsEventBus(config=NatsBusConfig(), consumer_role="test")
+    caplog.set_level("DEBUG", logger=bus.logger.name)
+    caplog.clear()
+
+    asyncio.run(bus._on_error(exc_factory()))
+
+    records = [r for r in caplog.records if r.__dict__.get("event_name") == "nats_client_error"]
+    assert len(records) == 1, f"expected 1 nats_client_error, got {len(records)}"
+    assert records[0].levelname == "WARNING", (
+        f"transient NATS error should log WARNING, got {records[0].levelname}: {records[0].getMessage()}"
+    )
+    assert "transient=True" in records[0].getMessage()
+
+
+def test_on_error_unknown_still_logged_as_error(caplog: pytest.LogCaptureFixture) -> None:
+    """未登记在白名单的异常 → 保持 ERROR，保护真故障信号。"""
+    bus = NatsEventBus(config=NatsBusConfig(), consumer_role="test")
+    caplog.set_level("DEBUG", logger=bus.logger.name)
+    caplog.clear()
+
+    asyncio.run(bus._on_error(ValueError("something unexpected")))
+
+    records = [r for r in caplog.records if r.__dict__.get("event_name") == "nats_client_error"]
+    assert len(records) == 1
+    assert records[0].levelname == "ERROR"
+    assert "transient=False" in records[0].getMessage()
+
+
+# ─────────────────────────────────────────────────────────────────────
 # M1: ConsumerConfigSpec — NatsBusConfig 真的流到 subscribe 路径上
 # ─────────────────────────────────────────────────────────────────────
 
