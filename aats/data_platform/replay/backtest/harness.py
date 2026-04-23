@@ -36,6 +36,7 @@ from aats.data_platform.replay.adapters.independent_adapter import (
     IndependentReplayAdapter,
 )
 from aats.data_platform.replay.backtest.cost_validator import (
+    CostDiagnostic,
     CostValidationSummary,
     CostValidator,
 )
@@ -120,6 +121,9 @@ class BacktestResult:
     fills_count: int
     start_ts: datetime
     end_ts: datetime
+    # 2026-04-23 P3-scorecard: 透出 per-decision cost diagnostics, 供下游
+    # evidence_scorecard 消费; 不改变既有字段语义。
+    cost_diagnostics: tuple[CostDiagnostic, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +257,7 @@ def run_backtest(
         fills_count=ctx.fills_count,
         start_ts=start_ts,
         end_ts=end_ts,
+        cost_diagnostics=ctx.cost_validator.diagnostics,
     )
 
 

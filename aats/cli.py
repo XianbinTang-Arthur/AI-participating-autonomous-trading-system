@@ -40,6 +40,7 @@ from typing import Any
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from aats.data_platform.replay.backtest.evidence_scorecard import build_scorecard
 from aats.data_platform.replay.backtest.harness import (
     BacktestConfig,
     BacktestResult,
@@ -138,6 +139,24 @@ def _add_backtest_parser(subparsers: argparse._SubParsersAction) -> None:
         type=float,
         default=6.0,
         help="Decision-side assumed cost for CostValidator (bps).",
+    )
+    p.add_argument(
+        "--scorecard-out",
+        default=None,
+        help=(
+            "Optional path to write an evidence scorecard JSON "
+            "(see docs/governance/alpha_evidence_gate.md). "
+            "Outputs numeric stats only; no verdict fields."
+        ),
+    )
+    p.add_argument(
+        "--scorecard-split-ts",
+        default=None,
+        help=(
+            "Optional ISO-8601 UTC timestamp used as the OOS train/test split "
+            "boundary. When provided, scorecard.oos.split_method == 'explicit'; "
+            "otherwise falls back to time midpoint."
+        ),
     )
     p.set_defaults(func=_run_backtest_cmd)
 
@@ -270,6 +289,13 @@ def _run_backtest_cmd(args: argparse.Namespace) -> int:
         session.close()
 
     _write_outputs(output_dir, result)
+    if args.scorecard_out:
+        split_ts = (
+            _parse_iso(args.scorecard_split_ts, field="scorecard-split-ts")
+            if args.scorecard_split_ts
+            else None
+        )
+        _write_scorecard(Path(args.scorecard_out), result, split_ts=split_ts)
     log.info(
         "Backtest done: %d bars / %d fills, final_equity=%s",
         result.summary.bar_count,
@@ -342,6 +368,21 @@ def _write_outputs(output_dir: Path, result: BacktestResult) -> None:
     # cost_validation.json
     cost_path.write_text(
         json.dumps(_dataclass_to_dict(result.cost_summary), indent=2),
+        encoding="utf-8",
+    )
+
+
+def _write_scorecard(
+    path: Path,
+    result: BacktestResult,
+    *,
+    split_ts: datetime | None = None,
+) -> None:
+    """Serialize the evidence scorecard to a JSON file (numeric-only)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    scorecard = build_scorecard(result, split_ts=split_ts)
+    path.write_text(
+        json.dumps(scorecard, indent=2, cls=_DecimalJSONEncoder),
         encoding="utf-8",
     )
 
