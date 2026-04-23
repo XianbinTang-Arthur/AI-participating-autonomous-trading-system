@@ -328,6 +328,8 @@ class TestScorecardCrossWindow(unittest.TestCase):
                     "start",
                     "end",
                     "ir",
+                    "ir_annualized",
+                    "sharpe_ratio",
                     "hit_rate",
                     "fills",
                     "max_drawdown_bps",
@@ -577,6 +579,71 @@ class TestScorecardEdgeCases(unittest.TestCase):
         # oos 至少要有 train 和 test 两键，即便其中一段空
         self.assertIn("train", sc["oos"])
         self.assertIn("test", sc["oos"])
+
+
+# ---------------------------------------------------------------------------
+# 6b. Annualized IR / Sharpe alignment (v0.3)
+# ---------------------------------------------------------------------------
+
+
+class TestScorecardAnnualizedMetrics(unittest.TestCase):
+    def test_oos_and_cross_window_expose_new_fields(self) -> None:
+        curve = tuple(_mk_point(i, str(i * 5)) for i in range(10))
+        result = _mk_result(curve=curve, diagnostics=(), window_hours=10)
+        sc = build_scorecard(result)
+        for side in ("train", "test"):
+            slot = sc["oos"][side]
+            self.assertIn("ir_annualized", slot)
+            self.assertIn("sharpe_ratio", slot)
+        for slot in sc["cross_window"]:
+            self.assertIn("ir_annualized", slot)
+            self.assertIn("sharpe_ratio", slot)
+
+    def test_top_level_schema_unchanged(self) -> None:
+        curve = tuple(_mk_point(i, str(i)) for i in range(6))
+        result = _mk_result(curve=curve, diagnostics=())
+        sc = build_scorecard(result)
+        self.assertEqual(
+            set(sc.keys()),
+            {"meta", "oos", "cross_window", "cost_adjusted", "regime_slice"},
+        )
+
+    def test_monotone_rising_ir_annualized_ge_ir(self) -> None:
+        """单调上涨样本 → ir_annualized >= ir (sqrt(factor) >= 1 for hourly bars)。"""
+        curve = tuple(_mk_point(i, str(i * 7)) for i in range(12))
+        result = _mk_result(curve=curve, diagnostics=(), window_hours=12)
+        sc = build_scorecard(result)
+        for side in ("train", "test"):
+            slot = sc["oos"][side]
+            self.assertGreaterEqual(slot["ir_annualized"], slot["ir"])
+            self.assertGreaterEqual(slot["sharpe_ratio"], slot["ir"])
+        for slot in sc["cross_window"]:
+            if slot["sample_n"] >= 2:
+                self.assertGreaterEqual(slot["ir_annualized"], slot["ir"])
+                self.assertGreaterEqual(slot["sharpe_ratio"], slot["ir"])
+
+    def test_constant_equity_annualized_metrics_are_zero(self) -> None:
+        curve = tuple(_mk_point(i, "100") for i in range(8))
+        result = _mk_result(curve=curve, diagnostics=())
+        sc = build_scorecard(result)
+        for side in ("train", "test"):
+            slot = sc["oos"][side]
+            self.assertEqual(slot["ir_annualized"], 0.0)
+            self.assertEqual(slot["sharpe_ratio"], 0.0)
+        for slot in sc["cross_window"]:
+            self.assertEqual(slot["ir_annualized"], 0.0)
+            self.assertEqual(slot["sharpe_ratio"], 0.0)
+
+    def test_empty_curve_annualized_metrics_are_zero(self) -> None:
+        result = _mk_result(curve=(), diagnostics=())
+        sc = build_scorecard(result)
+        for side in ("train", "test"):
+            slot = sc["oos"][side]
+            self.assertEqual(slot["ir_annualized"], 0.0)
+            self.assertEqual(slot["sharpe_ratio"], 0.0)
+        for slot in sc["cross_window"]:
+            self.assertEqual(slot["ir_annualized"], 0.0)
+            self.assertEqual(slot["sharpe_ratio"], 0.0)
 
 
 # ---------------------------------------------------------------------------

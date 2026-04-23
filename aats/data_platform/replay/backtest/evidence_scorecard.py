@@ -33,6 +33,7 @@ from aats.data_platform.replay.backtest.harness import BacktestResult
 _BPS_DENOM = Decimal("10000")
 _DEFAULT_CROSS_WINDOW_SLICES = 3
 _HIT_EPS = 1e-12
+_MS_PER_YEAR = 365.25 * 24 * 60 * 60 * 1000  # calendar year (crypto trades 24/7)
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +98,33 @@ def _information_ratio(returns: Iterable[float]) -> float:
     return mean / math.sqrt(var)
 
 
+def _annualization_factor(ts_ms_seq: Sequence[int]) -> float:
+    """段内 bar 间距中位数推算的年化期数。
+
+    退化情形 (样本 < 2 / 全部同刻 / 非正间距) 返回 0.0, 上层据此将
+    ir_annualized / sharpe_ratio 置零。
+    """
+    if len(ts_ms_seq) < 2:
+        return 0.0
+    deltas = [
+        ts_ms_seq[i] - ts_ms_seq[i - 1]
+        for i in range(1, len(ts_ms_seq))
+        if ts_ms_seq[i] > ts_ms_seq[i - 1]
+    ]
+    if not deltas:
+        return 0.0
+    deltas.sort()
+    n = len(deltas)
+    median = (
+        deltas[n // 2]
+        if n % 2 == 1
+        else (deltas[n // 2 - 1] + deltas[n // 2]) / 2.0
+    )
+    if median <= 0:
+        return 0.0
+    return _MS_PER_YEAR / median
+
+
 def _hit_rate(returns: Iterable[float], eps: float = _HIT_EPS) -> float:
     """r > 0 的比例, 分母为 |r| > eps 的样本数; 全零样本返回 0.0。"""
     active = [v for v in returns if abs(v) > eps]
@@ -142,6 +170,8 @@ def _empty_slice() -> dict[str, Any]:
         "start": None,
         "end": None,
         "ir": 0.0,
+        "ir_annualized": 0.0,
+        "sharpe_ratio": 0.0,
         "hit_rate": 0.0,
         "fills": 0,
         "sample_n": 0,
@@ -164,11 +194,18 @@ def _slice_stats(
         return _empty_slice()
     returns = _bar_returns(points)
     ms_set = {p.ts_ms for p in points}
+    deltas = [r.delta for r in returns]
+    ir = _information_ratio(deltas)
+    factor = _annualization_factor([p.ts_ms for p in points])
+    # IR 与 Sharpe 在 bar-level (risk-free = 0) 口径下同式: mean/stdev * sqrt(factor)
+    annualized = ir * math.sqrt(factor) if factor > 0 else 0.0
     return {
         "start": _ms_to_iso(points[0].ts_ms),
         "end": _ms_to_iso(points[-1].ts_ms),
-        "ir": _information_ratio(r.delta for r in returns),
-        "hit_rate": _hit_rate(r.delta for r in returns),
+        "ir": ir,
+        "ir_annualized": annualized,
+        "sharpe_ratio": annualized,
+        "hit_rate": _hit_rate(deltas),
         "fills": _fills_in_ms_set(diagnostics, ms_set),
         "sample_n": len(returns),
     }
