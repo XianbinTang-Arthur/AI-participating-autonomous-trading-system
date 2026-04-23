@@ -127,31 +127,251 @@ def _to_utc_iso(ts: datetime) -> str:
     return aware.astimezone(timezone.utc).isoformat()
 
 
+_TBD = "<TBD>"
+
+
+def _fmt_scalar(value: Any) -> str:
+    """渲染标量为表格值; None / "" / 缺字段 → <TBD>。
+
+    浮点统一 ``%.6g`` 以保留显著位; 整数/字符串 / bool 按 ``str`` 渲染。
+    """
+    if value is None:
+        return _TBD
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, float):
+        if value != value:  # NaN
+            return _TBD
+        return f"{value:.6g}"
+    if isinstance(value, str) and value == "":
+        return _TBD
+    return str(value)
+
+
+def _render_metadata_table(
+    inputs: ScaffoldInputs,
+    *,
+    generated_iso: str,
+    scorecard: dict[str, Any],
+) -> str:
+    """元数据 (提案头) — 从 CLI inputs + scorecard.meta + scorecard.oos 预填。"""
+    proposer = inputs.proposer or _TBD
+    meta = scorecard.get("meta") if isinstance(scorecard.get("meta"), dict) else {}
+    oos = scorecard.get("oos") if isinstance(scorecard.get("oos"), dict) else {}
+
+    symbol = _fmt_scalar(meta.get("symbol"))
+    timeframe = _fmt_scalar(meta.get("timeframe"))
+    dataset_version = _fmt_scalar(meta.get("dataset_version"))
+    order_type = _fmt_scalar(meta.get("order_type"))
+
+    start_ts = meta.get("start_ts")
+    end_ts = meta.get("end_ts")
+    split_ts = oos.get("split_ts")
+    if start_ts or end_ts or split_ts:
+        time_range = (
+            f"`{_fmt_scalar(start_ts)}` → `{_fmt_scalar(end_ts)}` "
+            f"(split @ `{_fmt_scalar(split_ts)}`)"
+        )
+    else:
+        time_range = _TBD
+
+    rows = [
+        ("提案 ID", f"`{inputs.proposal_id}`"),
+        ("提案日期", f"`{generated_iso}`"),
+        ("提案人", f"`{proposer}`"),
+        ("Scope: feature", f"`{inputs.feature}`"),
+        ("Scope: horizon", f"`{inputs.horizon}`"),
+        ("Scope: symbol", f"`{symbol}`"),
+        ("Scope: timeframe", f"`{timeframe}`"),
+        ("Scope: dataset_version", f"`{dataset_version}`"),
+        ("Scope: order_type", f"`{order_type}`"),
+        ("Scope: time range", time_range),
+    ]
+    lines = ["## 元数据 (提案头)", "", "| 字段 | 值 |", "|---|---|"]
+    for k, v in rows:
+        lines.append(f"| {k} | {v} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _render_train_test_split(scorecard: dict[str, Any]) -> str:
+    """§4 Train / Test 分割 — 只写事实, 不写'边界理由'判断。"""
+    oos = scorecard.get("oos") if isinstance(scorecard.get("oos"), dict) else {}
+    train = oos.get("train") if isinstance(oos.get("train"), dict) else {}
+    test = oos.get("test") if isinstance(oos.get("test"), dict) else {}
+
+    lines = [
+        "## §4 Train / Test 分割",
+        "",
+        "从 `scorecard.oos` 预填 (时间边界 / 切分方法), 边界理由等定性分析"
+        "仍需人工补写。",
+        "",
+        "| 字段 | 值 |",
+        "|---|---|",
+        f"| train_start | `{_fmt_scalar(train.get('start'))}` |",
+        f"| train_end | `{_fmt_scalar(train.get('end'))}` |",
+        f"| test_start | `{_fmt_scalar(test.get('start'))}` |",
+        f"| test_end | `{_fmt_scalar(test.get('end'))}` |",
+        f"| split_method | `{_fmt_scalar(oos.get('split_method'))}` |",
+        f"| split_ts | `{_fmt_scalar(oos.get('split_ts'))}` |",
+        "",
+        "**待填**: 分割理由 / 是否跨已知 regime 切换 (见模板 §4)。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _render_oos_table(scorecard: dict[str, Any]) -> str:
+    """§6.1 OOS — 从 scorecard.oos.train/test 预填, 不写判据结论。"""
+    oos = scorecard.get("oos") if isinstance(scorecard.get("oos"), dict) else {}
+    train = oos.get("train") if isinstance(oos.get("train"), dict) else {}
+    test = oos.get("test") if isinstance(oos.get("test"), dict) else {}
+
+    def _cell(bucket: dict[str, Any], key: str) -> str:
+        return _fmt_scalar(bucket.get(key))
+
+    lines = [
+        "### §6.1 OOS (预填原始值)",
+        "",
+        "| 指标 | train | test |",
+        "|---|---|---|",
+        f"| IR (annualized) | {_cell(train, 'ir_annualized')} | "
+        f"{_cell(test, 'ir_annualized')} |",
+        f"| Sharpe | {_cell(train, 'sharpe_ratio')} | "
+        f"{_cell(test, 'sharpe_ratio')} |",
+        f"| Hit rate | {_cell(train, 'hit_rate')} | "
+        f"{_cell(test, 'hit_rate')} |",
+        f"| Max drawdown (bps) | {_cell(train, 'max_drawdown_bps')} | "
+        f"{_cell(test, 'max_drawdown_bps')} |",
+        f"| Sample N | {_cell(train, 'sample_n')} | "
+        f"{_cell(test, 'sample_n')} |",
+        "",
+        "**待填**: 判据结论 / 累计曲线图路径 (见模板 §6.1)。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _render_cross_window_table(scorecard: dict[str, Any]) -> str:
+    """§6.2 Cross-window — 自动按 S1/S2/S3... label 列出所有 slice 原始值。"""
+    cross = scorecard.get("cross_window")
+    slices: list[dict[str, Any]] = (
+        [s for s in cross if isinstance(s, dict)] if isinstance(cross, list) else []
+    )
+
+    lines = [
+        "### §6.2 Cross-window (预填原始值)",
+        "",
+        "| Slice | 时间范围 | IR (annualized) | Hit rate | Max DD (bps) | Sample N |",
+        "|---|---|---|---|---|---|",
+    ]
+    if not slices:
+        lines.append("| <TBD> | <TBD> | <TBD> | <TBD> | <TBD> | <TBD> |")
+    else:
+        for idx, slc in enumerate(slices, start=1):
+            label = f"S{idx}"
+            start = _fmt_scalar(slc.get("start"))
+            end = _fmt_scalar(slc.get("end"))
+            ir = _fmt_scalar(slc.get("ir_annualized"))
+            hit = _fmt_scalar(slc.get("hit_rate"))
+            dd = _fmt_scalar(slc.get("max_drawdown_bps"))
+            n = _fmt_scalar(slc.get("sample_n"))
+            lines.append(
+                f"| {label} | `{start}` → `{end}` | {ir} | {hit} | {dd} | {n} |"
+            )
+    lines.extend(
+        [
+            "",
+            "**待填**: 判据结论 / 切片对比图 (见模板 §6.2)。",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _render_cost_adjusted_table(scorecard: dict[str, Any]) -> str:
+    """§6.3 Cost-adjusted — train/test 5 字段 + sensitivity 原始值, 不写结论。"""
+    cost = (
+        scorecard.get("cost_adjusted")
+        if isinstance(scorecard.get("cost_adjusted"), dict)
+        else {}
+    )
+    train = cost.get("train") if isinstance(cost.get("train"), dict) else {}
+    test = cost.get("test") if isinstance(cost.get("test"), dict) else {}
+    sens = (
+        cost.get("sensitivity") if isinstance(cost.get("sensitivity"), dict) else {}
+    )
+    sens_train = sens.get("train") if isinstance(sens.get("train"), dict) else {}
+    sens_test = sens.get("test") if isinstance(sens.get("test"), dict) else {}
+
+    def _cell(bucket: dict[str, Any], key: str) -> str:
+        return _fmt_scalar(bucket.get(key))
+
+    lines = [
+        "### §6.3 Cost-adjusted (预填原始值)",
+        "",
+        "| 字段 | train | test |",
+        "|---|---|---|",
+        f"| realized_edge_bps | {_cell(train, 'realized_edge_bps')} | "
+        f"{_cell(test, 'realized_edge_bps')} |",
+        f"| fee_bps | {_cell(train, 'fee_bps')} | {_cell(test, 'fee_bps')} |",
+        f"| slip_bps | {_cell(train, 'slip_bps')} | {_cell(test, 'slip_bps')} |",
+        f"| exec_buffer_bps | {_cell(train, 'exec_buffer_bps')} | "
+        f"{_cell(test, 'exec_buffer_bps')} |",
+        f"| net_edge_bps | {_cell(train, 'net_edge_bps')} | "
+        f"{_cell(test, 'net_edge_bps')} |",
+        "",
+        "**Sensitivity 原始值** (仅列值, 不判断是否仍 > 0):",
+        "",
+        "| 压力情景 | train | test |",
+        "|---|---|---|",
+        f"| fee 上调 20% 后 net_edge_bps | {_cell(sens_train, 'net_edge_fee_up_20pct_bps')}"
+        f" | {_cell(sens_test, 'net_edge_fee_up_20pct_bps')} |",
+        f"| slip +0.5 bps 后 net_edge_bps | {_cell(sens_train, 'net_edge_slip_plus_0_5bps_bps')}"
+        f" | {_cell(sens_test, 'net_edge_slip_plus_0_5bps_bps')} |",
+        "",
+        "**待填**: 判据结论 (见模板 §6.3)。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def _render_observation_window_summary(observation: dict[str, Any]) -> str:
+    """观察窗摘要 — 把 candidate evidence 与观察窗真相层绑在一起。"""
+    lines = [
+        "## 观察窗摘要 (引用 `observation_window_summary.json`)",
+        "",
+        "| 字段 | 值 |",
+        "|---|---|",
+        f"| overall | `{_fmt_scalar(observation.get('overall'))}` |",
+        f"| window_start | `{_fmt_scalar(observation.get('window_start'))}` |",
+        f"| window_target | `{_fmt_scalar(observation.get('window_target'))}` |",
+        f"| warn_count | {_fmt_scalar(observation.get('warn_count'))} |",
+        f"| fail_count | {_fmt_scalar(observation.get('fail_count'))} |",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _render_proposal_md(
     inputs: ScaffoldInputs,
     *,
     generated_iso: str,
     source_paths: dict[str, str],
+    scorecard: dict[str, Any],
+    observation: dict[str, Any],
 ) -> str:
-    proposer = inputs.proposer or "<TBD>"
-    return (
+    header = (
         f"# 路线 A Phase 0 · Evidence 提案 · `{inputs.feature}` @ `{inputs.horizon}`\n"
         "\n"
-        "> 本文件由 `aats.cli route-a-evidence-scaffold` 生成，预填 metadata + "
-        "已复制 artifact 引用。\n"
+        "> 本文件由 `aats.cli route-a-evidence-scaffold` 生成，预填已具备数据来源"
+        "的段落 (metadata / §4 / §6.1 / §6.2 / §6.3 / 观察窗摘要)。\n"
         "> 完整提案骨架请参照 "
-        "`docs/research/_templates/route_a_phase0_evidence_template.md` 逐段填写。\n"
+        "`docs/research/_templates/route_a_phase0_evidence_template.md` 逐段填写。"
+        "本脚手架**不**输出任何判据结论 / 归档裁决文案, 以保持数值追溯口径。\n"
         "\n"
-        "## 元数据 (提案头)\n"
-        "\n"
-        "| 字段 | 值 |\n"
-        "|---|---|\n"
-        f"| 提案 ID | `{inputs.proposal_id}` |\n"
-        f"| 提案日期 | `{generated_iso}` |\n"
-        f"| 提案人 | `{proposer}` |\n"
-        f"| Scope: feature | `{inputs.feature}` |\n"
-        f"| Scope: horizon | `{inputs.horizon}` |\n"
-        "\n"
+    )
+    artifact = (
         "## 已复制 artifact\n"
         "\n"
         f"- `{_MANIFEST_NAME}` — bundle 元数据 + source provenance (sha256)\n"
@@ -160,11 +380,46 @@ def _render_proposal_md(
         f"- `{_COPIED_OBSERVATION_NAME}` — 复制自 "
         f"`{source_paths['observation_window_json']}`\n"
         "\n"
-        "## 待填内容\n"
+    )
+    hardcoded_sections_header = "## §6 四条硬指标实际数据 (预填原始值)\n\n"
+    todo_tail = (
+        "## 待人工填写\n"
         "\n"
-        "按 `docs/research/_templates/route_a_phase0_evidence_template.md` "
-        "§1~§15 逐段填写。本脚手架**只**做 metadata + artifact 复制，**不**输出 "
-        "verdict / go-no-go / archive。\n"
+        "以下段落当前无机械数据来源, 需按模板 "
+        "`docs/research/_templates/route_a_phase0_evidence_template.md` 手填:\n"
+        "\n"
+        "- §1 数据源 (表 + 时间范围 + 样本 N + 过滤条件 + snapshot hash)\n"
+        "- §2 特征定义 / 特征统计表\n"
+        "- §3 模型定义 / 默认超参 / sweep 说明\n"
+        "- §4 分割理由 / 是否跨 regime 切换 (本脚手架只写事实边界)\n"
+        "- §5 Cost model 引用 (fee_resolver commit hash + governance 当前值)\n"
+        "- §6.4 Regime-slice 切片 (波动率 × funding 方向, 需独立计算)\n"
+        "- §6.1 / §6.2 / §6.3 判据结论与图表路径\n"
+        "- §7 加分项 (physical plausibility / cross-symbol / neighborhood / replay / "
+        "independent re-run)\n"
+        "- §8 反模式 red flag 自查\n"
+        "- §9~§15 结论 / 回退预案 / 可复现性证据 / cross-check / 决策 audit / "
+        "附录 / 签署\n"
+    )
+    return (
+        header
+        + _render_metadata_table(
+            inputs, generated_iso=generated_iso, scorecard=scorecard
+        )
+        + "\n"
+        + artifact
+        + _render_train_test_split(scorecard)
+        + "\n"
+        + hardcoded_sections_header
+        + _render_oos_table(scorecard)
+        + "\n"
+        + _render_cross_window_table(scorecard)
+        + "\n"
+        + _render_cost_adjusted_table(scorecard)
+        + "\n"
+        + _render_observation_window_summary(observation)
+        + "\n"
+        + todo_tail
     )
 
 
@@ -185,10 +440,10 @@ def create_scaffold(
     scorecard_src = Path(inputs.scorecard_json)
     observation_src = Path(inputs.observation_window_json)
 
-    _load_and_validate_json(
+    scorecard_data = _load_and_validate_json(
         scorecard_src, SCORECARD_REQUIRED_KEYS, label="scorecard"
     )
-    _load_and_validate_json(
+    observation_data = _load_and_validate_json(
         observation_src,
         OBSERVATION_WINDOW_REQUIRED_KEYS,
         label="observation-window",
@@ -243,6 +498,8 @@ def create_scaffold(
             inputs,
             generated_iso=generated_iso,
             source_paths=source_paths,
+            scorecard=scorecard_data,
+            observation=observation_data,
         ),
         encoding="utf-8",
     )

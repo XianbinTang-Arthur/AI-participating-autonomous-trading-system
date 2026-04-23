@@ -339,6 +339,231 @@ class TestCreateScaffoldErrors(unittest.TestCase):
             self.assertFalse((existing / "manifest.json").exists())
 
 
+def _rich_scorecard_payload() -> dict:
+    """Scorecard 以真实形态提供 meta/oos/cross_window/cost_adjusted 字段,
+    用于验证 proposal.md 的预填段落。
+    """
+    return {
+        "meta": {
+            "symbol": "BTC-USDT-SWAP",
+            "timeframe": "15m",
+            "dataset_version": "aats-research-20260420",
+            "order_type": "ioc",
+            "start_ts": "2026-03-01T00:00:00+00:00",
+            "end_ts": "2026-04-20T00:00:00+00:00",
+            "generated_at": "2026-04-25T12:00:00+00:00",
+        },
+        "oos": {
+            "split_method": "explicit",
+            "split_ts": "2026-04-01T00:00:00+00:00",
+            "train": {
+                "start": "2026-03-01T00:00:00+00:00",
+                "end": "2026-04-01T00:00:00+00:00",
+                "ir_annualized": 1.23,
+                "sharpe_ratio": 1.23,
+                "hit_rate": 0.54,
+                "max_drawdown_bps": 80.0,
+                "sample_n": 720,
+            },
+            "test": {
+                "start": "2026-04-01T00:00:00+00:00",
+                "end": "2026-04-20T00:00:00+00:00",
+                "ir_annualized": 0.91,
+                "sharpe_ratio": 0.91,
+                "hit_rate": 0.51,
+                "max_drawdown_bps": 45.0,
+                "sample_n": 456,
+            },
+        },
+        "cross_window": [
+            {
+                "start": "2026-04-01T00:00:00+00:00",
+                "end": "2026-04-07T00:00:00+00:00",
+                "ir_annualized": 0.88,
+                "hit_rate": 0.52,
+                "max_drawdown_bps": 30.0,
+                "sample_n": 150,
+            },
+            {
+                "start": "2026-04-07T00:00:00+00:00",
+                "end": "2026-04-14T00:00:00+00:00",
+                "ir_annualized": 0.95,
+                "hit_rate": 0.50,
+                "max_drawdown_bps": 40.0,
+                "sample_n": 155,
+            },
+            {
+                "start": "2026-04-14T00:00:00+00:00",
+                "end": "2026-04-20T00:00:00+00:00",
+                "ir_annualized": 0.90,
+                "hit_rate": 0.51,
+                "max_drawdown_bps": 35.0,
+                "sample_n": 151,
+            },
+        ],
+        "cost_adjusted": {
+            "fee_bps": 1.0,
+            "slip_bps": 0.5,
+            "exec_buffer_bps": 0.2,
+            "realized_edge_bps": 3.0,
+            "net_edge_bps": 1.3,
+            "train": {
+                "realized_edge_bps": 3.2,
+                "fee_bps": 1.0,
+                "slip_bps": 0.5,
+                "exec_buffer_bps": 0.2,
+                "net_edge_bps": 1.5,
+            },
+            "test": {
+                "realized_edge_bps": 2.8,
+                "fee_bps": 1.0,
+                "slip_bps": 0.5,
+                "exec_buffer_bps": 0.2,
+                "net_edge_bps": 1.1,
+            },
+            "sensitivity": {
+                "overall": {
+                    "net_edge_fee_up_20pct_bps": 1.1,
+                    "net_edge_slip_plus_0_5bps_bps": 0.8,
+                },
+                "train": {
+                    "net_edge_fee_up_20pct_bps": 1.3,
+                    "net_edge_slip_plus_0_5bps_bps": 1.0,
+                },
+                "test": {
+                    "net_edge_fee_up_20pct_bps": 0.9,
+                    "net_edge_slip_plus_0_5bps_bps": 0.6,
+                },
+            },
+        },
+        "regime_slice": {"vol": {"low": {}, "high": {}}},
+    }
+
+
+class TestProposalMdPrefill(unittest.TestCase):
+    """SoW 要求 proposal.md 预填 metadata + §4 + §6.1 + §6.2 + §6.3
+    + observation-window 摘要, 且不出现 verdict / 裁决文案。
+    """
+
+    def _build_bundle(self, tmp: Path) -> Path:
+        scorecard_src = tmp / "scorecard.json"
+        observation_src = tmp / "observation.json"
+        _write_json(scorecard_src, _rich_scorecard_payload())
+        _write_json(observation_src, _valid_observation_payload())
+
+        inputs = ScaffoldInputs(
+            proposal_id="route-a-phase0-ofi-5s-20260430",
+            feature="OFI",
+            horizon="5s",
+            scorecard_json=scorecard_src,
+            observation_window_json=observation_src,
+            proposer="alice",
+            output_root=tmp / "bundle",
+        )
+        result = create_scaffold(inputs)
+        return result.proposal_md_path
+
+    def test_prefilled_sections_contain_expected_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            md_text = self._build_bundle(Path(tmp)).read_text(encoding="utf-8")
+
+            # metadata
+            self.assertIn("BTC-USDT-SWAP", md_text)
+            self.assertIn("aats-research-20260420", md_text)
+            self.assertIn("ioc", md_text)
+            self.assertIn("2026-03-01T00:00:00+00:00", md_text)
+
+            # §4 train/test boundaries + split
+            self.assertIn("train_start", md_text)
+            self.assertIn("train_end", md_text)
+            self.assertIn("test_start", md_text)
+            self.assertIn("test_end", md_text)
+            self.assertIn("split_method", md_text)
+            self.assertIn("explicit", md_text)
+            self.assertIn("2026-04-01T00:00:00+00:00", md_text)
+
+            # §6.1 OOS train/test numeric cells present
+            self.assertIn("§6.1 OOS", md_text)
+            self.assertIn("1.23", md_text)
+            self.assertIn("0.91", md_text)
+            self.assertIn("0.54", md_text)
+            self.assertIn("720", md_text)
+            self.assertIn("456", md_text)
+
+            # §6.2 cross-window: S1/S2/S3 labels + values
+            self.assertIn("§6.2 Cross-window", md_text)
+            self.assertIn("| S1 |", md_text)
+            self.assertIn("| S2 |", md_text)
+            self.assertIn("| S3 |", md_text)
+            self.assertIn("0.88", md_text)
+            self.assertIn("0.95", md_text)
+            self.assertIn("0.9", md_text)  # last slice ir_annualized 0.90
+
+            # §6.3 cost-adjusted + sensitivity
+            self.assertIn("§6.3 Cost-adjusted", md_text)
+            self.assertIn("realized_edge_bps", md_text)
+            self.assertIn("net_edge_bps", md_text)
+            self.assertIn("exec_buffer_bps", md_text)
+            self.assertIn("fee 上调 20%", md_text)
+            self.assertIn("slip +0.5 bps", md_text)
+            # sensitivity numeric values
+            self.assertIn("1.3", md_text)
+            self.assertIn("0.9", md_text)
+            self.assertIn("0.6", md_text)
+
+            # observation-window summary
+            self.assertIn("观察窗摘要", md_text)
+            self.assertIn("overall", md_text)
+            self.assertIn("window_start", md_text)
+            self.assertIn("window_target", md_text)
+            self.assertIn("warn_count", md_text)
+            self.assertIn("fail_count", md_text)
+            self.assertIn("2026-04-22T00:00:00Z", md_text)
+            self.assertIn("2026-04-29T00:00:00Z", md_text)
+
+            # 仍保留待填提示
+            self.assertIn("待人工填写", md_text)
+
+    def test_no_verdict_or_gate_ruling_words_present(self) -> None:
+        """SoW 硬边界: proposal.md 不得输出 verdict / 归档 / 过关裁决文案。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            md_text = self._build_bundle(Path(tmp)).read_text(encoding="utf-8")
+            for forbidden in ("PASS", "FAIL", "Archive", "Go", "verdict"):
+                self.assertNotIn(
+                    forbidden,
+                    md_text,
+                    f"proposal.md 不应出现裁决文案: {forbidden!r}",
+                )
+
+    def test_minimal_scorecard_still_renders_with_tbd_placeholders(self) -> None:
+        """当 scorecard 只带必需顶层键 (子字段缺失) 时, 预填段落仍可生成, 缺值用 <TBD>。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scorecard_src = root / "s.json"
+            observation_src = root / "o.json"
+            _write_json(scorecard_src, _valid_scorecard_payload())
+            _write_json(observation_src, _valid_observation_payload())
+
+            inputs = ScaffoldInputs(
+                proposal_id="p1",
+                feature="OFI",
+                horizon="5s",
+                scorecard_json=scorecard_src,
+                observation_window_json=observation_src,
+                output_root=root / "bundle",
+            )
+            result = create_scaffold(inputs)
+            md_text = result.proposal_md_path.read_text(encoding="utf-8")
+
+            # 所有关键段落仍写出
+            self.assertIn("§6.1 OOS", md_text)
+            self.assertIn("§6.2 Cross-window", md_text)
+            self.assertIn("§6.3 Cost-adjusted", md_text)
+            self.assertIn("观察窗摘要", md_text)
+            # 缺字段渲染为 <TBD>
+            self.assertIn("<TBD>", md_text)
+
+
 class TestCLIRouteAScaffold(unittest.TestCase):
     def test_cli_end_to_end_creates_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
