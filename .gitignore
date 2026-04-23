@@ -40,3 +40,9 @@ loginpassword
 
 # Claude Code runtime state (lock files for scheduled tasks, etc.)
 .claude/scheduled_tasks.lock
+
+# Manual backups (e.g. *.yml.bak-20260422); git history is the canonical source
+*.bak-*
+
+# Reference archives dropped at project root (not shipped, not synced)
+/*.zip
