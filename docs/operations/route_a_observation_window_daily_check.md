@@ -71,7 +71,7 @@ bash scripts/ops/route_a_daily_check.sh
 - 5 分钟以内完成
 - 结果 **append** 到 `artifacts/route_a_observation_window/<YYYY-MM-DD>.log`
 
-### 2.3 6 项 check (含 threshold justification)
+### 2.3 7 项 check (含 threshold justification)
 
 | # | Check | Pass 条件 | 失败级别 |
 |:-:|---|---|---|
@@ -80,7 +80,8 @@ bash scripts/ops/route_a_daily_check.sh
 | 3 | 三表 cadence 对齐 | 三表 `max(ts)` 极差 ≤ 15min (1 bar) | WARN > 15min |
 | 4 | 24h task queue | rolling workflow 非 done 数 ≤ 2 | WARN 1-2, FAIL > 2 |
 | 5 | 观察窗内 Silver gap count (三表各自) | 0 gap | WARN = 1, FAIL > 1 |
-| 6 | Runtime mode 守门 | `ai_operating_mode=baseline_only` | FAIL 任何其他值 |
+| 6 | Microstructure 24h empty-bar / no-data | `trade_flow_15m` 命中 `trades_no_data` 的行数 = 0 **且** `orderbook_metrics_15m` 同时命中 `orderbook_bbo_no_data`+`orderbook_books5_no_data` 的行数 = 0 | WARN 1-4, FAIL > 4 (每表独立判定) |
+| 7 | Runtime mode 守门 | `ai_operating_mode=baseline_only` | FAIL 任何其他值 |
 
 #### Check 2/3/5 为何看 `market_trade_flow_15m` (2026-04-23 升级)
 
@@ -95,6 +96,15 @@ volume_profile / oi_funding / vol_weighted_tfi 都跟着落后)。因此
 而 books5 还在, commit c331e2b "committed-but-empty bars" 正是此场景), 老脚本
 只看 orderbook_metrics 会漏掉 watermark 停滞。
 
+#### Check 6 为何扫 `quality_flags` 而非 freshness (2026-04-23 新增)
+
+check 2/3/5 只能回答 "silver row 是否按时落地"。但 silver runner 遇 bronze 全空时
+仍会 commit NULL/0 指标 + `quality_flags=['trades_no_data' / 'orderbook_*_no_data']`,
+watermark 照推 (`COMMITTED_BUT_EMPTY`) —— 结果 check 2/3/5 全绿但 microstructure
+input 实际已饿死。check 6 直接扫 `silver.market_trade_flow_15m.quality_flags`
+和 `silver.market_orderbook_metrics_15m.quality_flags`, 是唯一能区分
+"pipeline 还在转 / 输入是否真有内容" 的观测点。
+
 #### Threshold 设计理由 (2026-04-20 code review C-M1 补)
 
 | Check | 阈值 | 理由 |
@@ -105,7 +115,8 @@ volume_profile / oi_funding / vol_weighted_tfi 都跟着落后)。因此
 | 4 | 2 次 WARN 阈值 | 24h = 96 个 15min tick, 2 / 96 ≈ 2.08% 容忍偶发网络抖动 / OKX REST 5xx. > 2 次说明系统性问题. |
 | 4 | **未**区分 contiguous vs sparse | 简化 v0.1. 若观察窗期间发现"连续 2 次同 workflow failed" 更严重但本测试没抓, operator 需手工查 log_tail 判断. 留 v0.2 迭代点. |
 | 5 | 1 gap WARN | 允许 1 次偶发数据源断 (OKX 维护 / 网络瞬断), UPSERT 幂等 + catchup 脚本能补. > 1 gap 需重置, 以免数据空洞污染 alpha 研究. |
-| 6 | FAIL 任何其他值 | §2.4 要求观察窗期间 runtime mode 不可改. ai_assisted / ai_decision_maker 都触发 FAIL + 观察窗 reset 7 天. |
+| 6 | 1-4 bar WARN / >4 FAIL | 24h = 96 bar. silver runner 遇 bronze 全空会 commit "一行 NULL/0 + `*_no_data` quality_flags" 并推 watermark (`COMMITTED_BUT_EMPTY`, commit c331e2b), 于是 freshness/cadence/gap 三项全绿但输入其实饿死 —— 必须直接扫 `quality_flags` 才能抓到. ≤ 4 bar (≈ 1h) 容忍 collector 重启 / WS 断线自愈; > 4 bar (> 1h 连续饿死) 说明 bronze 上游系统性中断, 观察窗的 "连续 microstructure 输入" 前提挖空, 必须 reset. orderbook 要求 bbo + books5 双 flag 命中才计 (和 merger `_TABLE_NO_DATA_TRIGGERS['orderbook']` 对齐), 避免把 "单 source 缺, row 还有部分真实数据" 误报成饿死. |
+| 7 | FAIL 任何其他值 | §2.4 要求观察窗期间 runtime mode 不可改. ai_assisted / ai_decision_maker 都触发 FAIL + 观察窗 reset 7 天. |
 
 ### 2.4 Exit code 语义
 
@@ -146,7 +157,22 @@ volume_profile / oi_funding / vol_weighted_tfi 都跟着落后)。因此
 - 用 `scripts/maintenance/microstructure_silver_catchup_20260420.py` 回填 gap (上次用过)
 - 必要时开独立诊断 task
 
-### 3.3 FAIL case 3: Runtime mode 变了
+### 3.3 FAIL case 3: Microstructure 24h empty-bar 超阈值 (check 6 FAIL)
+
+可能原因:
+- bronze collector 容器挂 / 重启循环 (trades / books5 / bbo 任一断)
+- OKX WS 连接断 (collector 侧 auto-reconnect 失败)
+- OKX 维护窗口 > 1h
+- Bronze 写 Postgres 失败 (磁盘满 / 权限)
+
+**应对**:
+- 立即看 market / collector 容器 healthy + 日志
+- `SELECT ts, quality_flags FROM silver.market_trade_flow_15m ORDER BY ts DESC LIMIT 20` 看饿死区间
+- 对照 `bronze.market_trades` / `bronze.market_orderbook_*` 同期是否真的空, 定位是 bronze 缺 or silver 误标
+- 修根因后, 观察窗 reset, 起算点延后到 bronze 恢复当日 (和 FAIL case 2 处理一致)
+- 不要用 backfill 把 empty bar 覆盖掉 — silver ETL 对 bronze 全空期幂等, 补不回真实 tick
+
+### 3.4 FAIL case 4: Runtime mode 变了
 
 **严重程度最高**. `ai_operating_mode` 从 `baseline_only` 切走意味着:
 - 要么有人手动改了 `.env.*.live` (违纪)
@@ -159,7 +185,7 @@ volume_profile / oi_funding / vol_weighted_tfi 都跟着落后)。因此
 - 找到切换者 + 还原
 - 观察窗重置, 起算点延后 7 天
 
-### 3.4 WARN case: 偶发 task 失败
+### 3.5 WARN case: 偶发 task 失败
 
 rolling workflow 设计上 `allow_failure=true`, 单次失败由下一个 15min tick 自愈。24h 内 ≤ 2 次是正常容忍。
 

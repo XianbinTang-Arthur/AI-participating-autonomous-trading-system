@@ -80,7 +80,7 @@ log "观察窗: ${WINDOW_START_UTC} → ${WINDOW_TARGET_UTC}"
 # 1. 16 容器 healthy
 # ─────────────────────────────────────────────────────────────
 
-step "[1/6] Container health"
+step "[1/7] Container health"
 unhealthy=$(wsl -d "$WSL_DISTRO" -- docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null \
     | grep '^aats-' | grep -v 'healthy' || true)
 if [[ -z "$unhealthy" ]]; then
@@ -103,7 +103,7 @@ fi
 #   - silver.market_swap_candles_15m      ← 独立 OHLC pipeline
 # 三者必须都新鲜, 否则观察窗的"连续产出"前提不成立.
 
-step "[2/6] Silver freshness (依赖链三表)"
+step "[2/7] Silver freshness (依赖链三表)"
 
 # 用 epoch 方式比较, 避免 bash 日期解析复杂度
 now_epoch=$(date -u +%s)
@@ -136,14 +136,14 @@ done
 # backfill 会被 watermark 拉回去补 — 短期可自愈, 长期说明 trades bronze 异常.
 # candles 是独立 pipeline, 落后 = OKX candles REST/WS 异常.
 
-step "[3/6] Cadence alignment (trade_flow / orderbook / candles 三表)"
+step "[3/7] Cadence alignment (trade_flow / orderbook / candles 三表)"
 
 tf_max=${LATEST_EPOCH[market_trade_flow_15m]:-0}
 ob_max=${LATEST_EPOCH[market_orderbook_metrics_15m]:-0}
 sw_max=${LATEST_EPOCH[market_swap_candles_15m]:-0}
 
 if [[ "$tf_max" == "0" || "$ob_max" == "0" || "$sw_max" == "0" ]]; then
-    warn "cadence 对齐跳过 (某表无数据, 见 [2/6])"
+    warn "cadence 对齐跳过 (某表无数据, 见 [2/7])"
 else
     max_ts=$tf_max
     min_ts=$tf_max
@@ -174,7 +174,7 @@ fi
 # 4. 最近 24h rdp_task_queue failed / timeout 统计
 # ─────────────────────────────────────────────────────────────
 
-step "[4/6] Task queue last 24h"
+step "[4/7] Task queue last 24h"
 
 failed_24h=$(psql_q "
     SELECT workflow || ':' || COUNT(*)
@@ -202,7 +202,7 @@ fi
 # 5. 观察窗区间 Silver 连续性 (无 gap)
 # ─────────────────────────────────────────────────────────────
 
-step "[5/6] Gap detection in observation window (依赖链三表)"
+step "[5/7] Gap detection in observation window (依赖链三表)"
 
 for tbl in market_trade_flow_15m market_orderbook_metrics_15m market_swap_candles_15m; do
     gap_count=$(psql_q "
@@ -232,10 +232,65 @@ for tbl in market_trade_flow_15m market_orderbook_metrics_15m market_swap_candle
 done
 
 # ─────────────────────────────────────────────────────────────
-# 6. Runtime mode 仍是 baseline_only (不允许期间切换)
+# 6. Microstructure 24h empty-bar / no-data 饿死检测
+# ─────────────────────────────────────────────────────────────
+# 为什么需要这个 check:
+#   freshness/cadence/gap 看的是 "silver row 是否按时落地".
+#   但 microstructure silver runner 遇到 bronze 全空时仍会 commit
+#   一行 NULL/0 指标 + quality_flags=['trades_no_data' / 'orderbook_*_no_data']
+#   并把 watermark 推到本 bar (commit c331e2b COMMITTED_BUT_EMPTY).
+#   —— 于是 freshness/cadence/gap 三项全绿, 其实 input 已饿死, 观察窗
+#   "连续产出" 前提被挖空.
+#
+# 本 check 用 quality_flags 数组直接扫最近 24h 的饿死 bar:
+#   - trade_flow: 'trades_no_data' = ANY(quality_flags)
+#       → bronze.market_trades 断了, 同时也会拖 volume_profile NULL
+#   - orderbook:  bbo_no_data AND books5_no_data 双命中
+#       → 和 merger 的 _TABLE_NO_DATA_TRIGGERS['orderbook'] 对齐, 只在
+#         两档 books 都断时才算整张 orderbook row 完全饿死;
+#         单 source 缺只算 partial, 不触发本检查以免噪音.
+#
+# 阈值: 24h = 96 bar. 0 PASS / 1-4 WARN / >4 FAIL.
+#   - 1-4 bar (≤ 4%, ≤ 1h) 容忍 collector 重启 / WS 断线瞬时自愈;
+#   - > 4 bar (> 1h 连续) 说明 bronze 上游系统性中断, 即使 watermark
+#     在推, row 也只是空壳, 观察窗必须 reset.
+
+step "[6/7] Microstructure empty-bar / no-data 24h"
+
+# trade_flow: 单 flag 即代表整张表 row 饿死
+tf_empty=$(psql_q "
+    SELECT COUNT(*) FROM silver.market_trade_flow_15m
+    WHERE symbol='BTC-USDT-SWAP'
+      AND ts > NOW() - INTERVAL '24 hours'
+      AND 'trades_no_data' = ANY(quality_flags)")
+tf_empty=${tf_empty:-0}
+
+# orderbook: bbo + books5 必须都 no_data 才算整行饿死 (与 merger 对齐)
+ob_empty=$(psql_q "
+    SELECT COUNT(*) FROM silver.market_orderbook_metrics_15m
+    WHERE symbol='BTC-USDT-SWAP'
+      AND ts > NOW() - INTERVAL '24 hours'
+      AND 'orderbook_bbo_no_data' = ANY(quality_flags)
+      AND 'orderbook_books5_no_data' = ANY(quality_flags)")
+ob_empty=${ob_empty:-0}
+
+for pair in "market_trade_flow_15m:${tf_empty}" "market_orderbook_metrics_15m:${ob_empty}"; do
+    tbl=${pair%%:*}
+    cnt=${pair##*:}
+    if [[ "$cnt" == "0" ]]; then
+        pass "silver.${tbl}: 24h 内 0 个 COMMITTED_BUT_EMPTY bar"
+    elif [[ $cnt -le 4 ]]; then
+        warn "silver.${tbl}: 24h 内 ${cnt} 个 empty/no_data bar (≤4, 偶发可接受; 查 bronze collector 健康)"
+    else
+        fail "silver.${tbl}: 24h 内 ${cnt} 个 empty/no_data bar (>4, bronze 系统性饿死; 观察窗需重置)"
+    fi
+done
+
+# ─────────────────────────────────────────────────────────────
+# 7. Runtime mode 仍是 baseline_only (不允许期间切换)
 # ─────────────────────────────────────────────────────────────
 
-step "[6/6] Runtime mode guard"
+step "[7/7] Runtime mode guard"
 
 mode=$(psql_live "SELECT payload::jsonb->>'ai_operating_mode' FROM public.event_store WHERE topic='strategy.decision_outcome' ORDER BY event_timestamp DESC LIMIT 1")
 if [[ "$mode" == "baseline_only" ]]; then
@@ -247,7 +302,7 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────
-# 7. 观察窗进度 (informational)
+# 观察窗进度 (informational, 不计入 check 统计)
 # ─────────────────────────────────────────────────────────────
 
 step "进度"
