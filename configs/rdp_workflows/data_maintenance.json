@@ -24,6 +24,14 @@
       "timeout_seconds": 60,
       "enabled": true,
       "allow_failure": true
+    },
+    {
+      "name": "microstructure_retention",
+      "description": "Microstructure Bronze/Staging retention housekeeping: bronze.market_trades 30d, bronze.market_orderbook_bbo/books5 14d, staging.market_oi_funding_ticks 7d。housekeeping 软故障不阻塞主链 (allow_failure=true)。",
+      "command": "python scripts/rdp_microstructure_retention.py --apply --confirm",
+      "timeout_seconds": 600,
+      "enabled": true,
+      "allow_failure": true
     }
   ]
 }
