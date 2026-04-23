@@ -86,10 +86,10 @@ export function createDashboardShellRenderer({
   //         该 endpoint 已纳入 CORE_SPECS, 所以任何 view + 每次 refresh 都更新).
   // 刷新频率: 跟随 dashboard 的 30s auto-refresh 周期,以及任何手动 refresh.
   //
-  // 颜色/文案 (严格对齐 spec §2.1):
-  //   baseline_only      → 灰底蓝字 "按设计不下单"
-  //   ai_assisted        → 橙底白字 "实盘中"
-  //   ai_decision_maker  → 红底白字 "AI 实盘中"
+  // 颜色/文案 (2026-04-23 勘误后):
+  //   baseline_only      → 灰底蓝字 "仅 baseline, 不使用 AI"
+  //   ai_assisted        → 橙底白字 "AI 咨询实盘中"
+  //   ai_decision_maker  → 红底白字 "AI 主导实盘中"
   //   其它 / 未知         → 灰底, "加载中…"
   function renderRuntimeModeBadge() {
     const badge = nodes.runtimeModeBadge;
@@ -112,15 +112,15 @@ export function createDashboardShellRenderer({
     let title = "";
     if (effective === "baseline_only") {
       toneClass = "runtime-mode-badge--baseline-only";
-      text = "baseline_only · reference only · 按设计不下单";
-      title = "当前系统不下单。这是 governance 决定的默认行为,不是 bug。点击查看语义文档。";
+      text = "baseline_only · reference only · 仅 baseline, 不使用 AI";
+      title = "当前不调用 AI 参与决策,仅按 baseline 决策与下单。是否下单由 baseline 信号决定。点击查看语义文档。";
     } else if (effective === "ai_assisted") {
       toneClass = "runtime-mode-badge--ai-assisted";
-      text = "ai_assisted · advisory · 实盘中";
+      text = "ai_assisted · advisory · AI 咨询实盘中";
       title = "AI 咨询模式,baseline 决定下单。真金白银运行中。点击查看语义文档。";
     } else if (effective === "ai_decision_maker") {
       toneClass = "runtime-mode-badge--ai-decision-maker";
-      text = "ai_decision_maker · final_decision · AI 实盘中";
+      text = "ai_decision_maker · final_decision · AI 主导实盘中";
       title = "AI 完全主导下单,baseline 仅作 fallback。真金白银运行中。点击查看语义文档。";
     } else {
       toneClass = "runtime-mode-badge--unknown";

@@ -1,29 +1,30 @@
-# Runtime Trading Mode 语义 (2026-04-20)
+# Runtime Trading Mode 语义 (2026-04-20, 2026-04-23 勘误)
 
 > **本文件为 governance 文档, 不是实施指引.**
-> 作用: 让 operator / reviewer 一眼看出 "系统在不下单是按设计行为, 不是 bug".
+> 作用: 让 operator / reviewer 精确理解 `ai_operating_mode` 的真实语义, 不要再把 "不下单" 误当作模式层面的硬约束.
 
 **创建时间**: 2026-04-20
-**创建背景**: 2026-04-19 用户问 "1.2% 阳线为何不下单", 诊断链条最终追到 `decision_authority = "reference_only"`. 调查发现 **这不是 bug, 是当前 `ai_operating_mode = "baseline_only"` 的按设计行为**. 但之前缺少文档把这件事说清楚, 导致 30+ 小时 alpha 挖掘工作建立在"不下单 = bug"的错误前提上.
+**2026-04-23 勘误**: 原版本错误地把 `baseline_only` 描述成 "按设计完全不下单 / 100% 不下单 / final_target_qty=0". 经全量代码审阅 (见 §8 修订记录), 这个描述与代码实际行为**不符**. 真实语义是: **`baseline_only` 只是不调用 AI 参与决策, 系统仍走完整的 baseline → target → 下单流程**. 是否下单由 baseline 信号驱动, 不是由模式强制 hold. 下文均已按真实语义改写.
 
 ---
 
-## 1. 硬事实 (2026-04-20 WSL2 live)
+## 1. 硬事实 (2026-04-23 校对后)
 
 ```
-AATSSettings.ai_operating_mode = "baseline_only"           ← aats/bootstrap/settings.py:245
-→ DecisionOutcome.decision_authority = "reference_only"     ← target_position.py:1927, 1990
-→ DecisionOutcome.final_action = "hold"                     ← 无视 book_runtime_states.score
-→ final_target_qty = 0                                      ← 系统不下单, 按设计
+AATSSettings.ai_operating_mode = "baseline_only"           ← aats/bootstrap/settings.py
+→ DecisionOutcome.decision_authority = "reference_only"     ← target_position.py:1936-1940 (authority_map)
+→ target_qty 由 _target_quantity_baseline_only() 计算        ← target_position.py:724-755
+→ final_action 由 baseline 派生的 position_intent 派生         ← target_position.py:1971-1983 action_map
+→ final_target_qty = target_qty (不被 mode 改写为 0)         ← target_position.py:2016
+→ 进入执行链 (order_manager / okx_adapter) 正常下单           ← execution_engine 不检查 decision_authority
 ```
 
-即使:
-- Baseline 有 composite_alpha_score (例 -0.21, short 倾向)
-- Book runtime state 有 score (例 long=0.14)
-- Effective entry threshold 合理 (例 0.25)
-- Expected net edge 计算完整 (例 -6.33 bps)
+关键点:
+- **`decision_authority="reference_only"` 是一个标签字段**, 用于下游审计/展示, **不是执行拦截关卡**. 执行引擎 (`aats/services/execution_engine/`, `aats/services/execution_control/`) **不存在**任何对 `reference_only` 或 `baseline_only` 的分支判断.
+- `baseline_only` 下是否下单, 完全由 baseline 的 `composite_alpha_score` / `direction_bias` / `position_intent` 等决定. 若 baseline 有信号且过风控, **系统会下单**; 若 baseline 是 flat 或被 guardrail 拦截, **系统不下单** —— 但这和 `ai_assisted` / `ai_decision_maker` 模式下 baseline fallback 的行为是一致的.
+- `ai_operating_mode` 唯一明确拦的是 "是否调用 AI" (见 `build_ai_decision_intent` target_position.py:406) 以及 "target_qty 计算分支选哪一个" (baseline_only / ai_assisted / ai_decision_maker).
 
-**只要 `ai_operating_mode = "baseline_only"`, 系统 100% 不下单**, 无论上述其他字段什么值.
+"不下单" 本身在 `baseline_only` 下 **既可能是正常的 (baseline 无信号)**, **也可能意味着 alpha/cost 问题** —— 需要看 baseline 层诊断, 不能归因到模式.
 
 ---
 
@@ -35,11 +36,13 @@ AATSSettings.ai_operating_mode = "baseline_only"           ← aats/bootstrap/se
 
 ```python
 authority_map = {
-    "baseline_only":     "reference_only",   # 不下单
+    "baseline_only":     "reference_only",   # 纯 baseline 决策, 不调用 AI; 是否下单由 baseline 信号决定
     "ai_assisted":       "advisory",          # AI 弱参与, 默认按 baseline 下单
     "ai_decision_maker": "final_decision",   # 完全按 AI (+baseline fallback) 下单
 }
 ```
+
+注意: `authority_map` 的值 (`reference_only` / `advisory` / `final_decision`) 仅作为 **标签** 参与 `DecisionOutcome.decision_authority` 字段, 用于审计/展示. 执行引擎不会根据它决定是否下单.
 
 历史 alias (见 `aats/schemas/decision.py:48-58`):
 - `ai_advisory / ai_blended` → 折叠到 `ai_assisted`
@@ -49,18 +52,23 @@ authority_map = {
 
 | canonical mode | decision_authority | 实盘行为 | 风险级别 | 适用阶段 |
 |---|---|---|---|---|
-| `baseline_only` | `reference_only` | **完全不下单**, 全程 hold/flat, 只产 reference decision 用于观察 | 零资金风险 | 开发 / 调试 / 压测 / alpha 探索 / 当前生产 |
+| `baseline_only` | `reference_only` | **不调用 AI**, 决策链 = pure baseline. 是否下单由 baseline 信号决定 (有信号会真下单) | 等于 baseline 策略自身的风险 | Baseline 为唯一 alpha 来源时 / AI 未 validated 时 / 当前生产 |
 | `ai_assisted` | `advisory` | Baseline 决定, AI 仅咨询; final_action 跟随 baseline; 真下单 | 中 (baseline quality 决定) | Baseline alpha 已 validated, AI 开始接入但不主导 |
 | `ai_decision_maker` | `final_decision` | AI 主导, baseline 作为 fallback 源; final_action 跟随 AI 或 baseline; 真下单 | 高 (AI quality + fallback 双重决定) | AI 已 validated, 准备放给 AI 决策 |
 
-### 2.3 本次 session 发现的共识误区
+### 2.3 勘误: 把 "不下单" 误当模式硬约束
 
-**误区**: "不下单 → 系统坏了 / 模型不够好 / 门槛太严 / 数据不够"
+**曾经的误区** (2026-04-20 起至 2026-04-23 勘误前):
+> "`baseline_only` = 按设计不下单, 所以诊断链遇到 `decision_authority=reference_only` 就可以停手, 不是 bug 要修."
 
-**真相**: 在 `baseline_only` 模式下, **上述任何原因都不是不下单的原因**. 系统在 `decision_authority="reference_only"` 硬拦截下**按设计 hold**.
+**真相**: 代码里**没有**任何基于 mode 的下单硬拦截. `baseline_only` 下不下单的唯一原因是 **baseline 层没产出可下单的信号** (direction=flat / 被 guardrail 拦 / target_qty 等于当前持仓 等). 这和 alpha 层诊断**完全同一条路径**.
 
-**直接的、避免未来重犯的 check**:
-> 任何 "为什么系统不下单" 的讨论, **第一步必须确认 `ai_operating_mode` 是什么**. 若是 `baseline_only`, 答案已结束, 没有 bug 要修.
+**正确的诊断顺序** (2026-04-23 起):
+1. **先查 baseline 层**: `baseline.direction_bias` / `composite_alpha_score` / `position_intent` / `guardrail_flags`. 是 flat? 被 guardrail 拦? target 等于当前仓?
+2. **再查风控/成本层**: `expected_net_edge_bps`, `max_acceptable_cost_bps`, `strategy_edge_noise_buffer_bps`, cooldown 等.
+3. **最后才看 mode**: `ai_operating_mode` 只影响 "是否调 AI" 和 "target_qty 算法选哪条", 不影响 "下不下单" 的布尔判断.
+
+**注意**: 2026-04-19 至 2026-04-20 session 里 "1.2% 阳线为何不下单" 的归因结论 (归咎 `ai_operating_mode=baseline_only`) **是错的**. 真实原因应回到 baseline 层 (`composite_alpha_score` / `position_intent`) 重新诊断. 5 份 NO-GO 证据的**数据层发现仍然有效** (15m OHLC 线性 alpha 不足), 但"所以 mode 挡住不下单"的解释**不成立**.
 
 ---
 
@@ -145,8 +153,8 @@ authority_map = {
 
 ### 4.1 Operator UI 明示
 
-- 主页面**顶栏永久可见**显示 "当前运行模式: **baseline_only** (reference_only / 按设计不下单)"
-- 若模式 = `ai_assisted` / `ai_decision_maker`, 颜色变红, 提醒实盘中
+- 主页面**顶栏永久可见**显示 "当前运行模式: **baseline_only** (reference_only / 仅 baseline, 不使用 AI)"
+- 若模式 = `ai_assisted` / `ai_decision_maker`, 颜色变红, 提醒 AI 已接入实盘
 - 点击标签可跳到本文档
 
 ### 4.2 Grafana panel
@@ -155,10 +163,10 @@ authority_map = {
 - 显示:
   - 当前 canonical mode (从 `strategy.decision_outcome.ai_operating_mode` 最新值取)
   - decision_authority (derived)
-  - 最近 1h / 24h 下单数 (应与 mode 一致: baseline_only = 0)
-- 告警规则:
-  - 若 baseline_only 模式下过去 24h 有 order submitted → 警报 (不可能情况, 防御性监控)
-  - 若 ai_decision_maker 模式下过去 24h 0 order → 告警 (可能 alpha/cost 问题)
+  - 最近 1h / 24h 下单数 (用于观察, **不绑定 mode 的应然值**: 任何 mode 都可能 0 或非零)
+- 告警规则 (2026-04-23 校正):
+  - ~~"baseline_only 模式下过去 24h 有 order submitted → 警报"~~ 已废弃. 理由: baseline_only 下下单是合法行为, 该规则会产生持续误报. 见 §8 修订记录.
+  - 若 `ai_decision_maker` 模式下过去 24h 0 order → 告警 (可能 alpha/cost 问题) — 保留
 
 ### 4.3 Decision outcome event
 
@@ -170,7 +178,7 @@ authority_map = {
 
 ## 5. 回到本 session 的 30 小时工作
 
-按本文档的事实:
+按本文档的事实 (2026-04-23 勘误后重新校对):
 
 - H4 方向门控修复: ✅ 真 bug 修复, 数学正确, 保留
 - fast_impulse NO-GO: ✅ 真发现 (15m OHLC linear 无 alpha), 结论有效
@@ -178,10 +186,10 @@ authority_map = {
 - kline+funding preview NO-GO: ✅ 真发现, 结论有效
 - OI delta NO-GO: ✅ 真发现, 结论有效
 - True basis × OI NO-GO: ✅ 真发现 (agent 第 5 份), 结论有效
-- "等 30 天 microstructure 后系统会下单" → **❌ 伪推论**, 本文档第 1 节否决: `ai_operating_mode` 不改, 永远不下单.
-- "为 1.2% 阳线调 entry_threshold / min_confirm_ticks" → **❌ 按本文档第 3 节, 是绕过门槛的不当做法**.
+- "等 30 天 microstructure 后系统会下单" → 推论**条件正确**: 只要 baseline 层有 validated alpha, `baseline_only` 下系统就会下单. 之前版本的反驳 ("mode 不改永远不下单") **已撤回**.
+- "为 1.2% 阳线调 entry_threshold / min_confirm_ticks" → 仍然是 **❌ 绕过 alpha_evidence_gate 的反模式** (见 §3 + `frozen_parameters.md`).
 
-5 份 NO-GO 的**数据层面发现**仍然有效(它们回答"15m OHLC 线性特征是否有可 exploit alpha"), 但**运维层面的 "所以系统才不下单" 解释错了** —— 系统不下单的第一原因始终是 `baseline_only` 模式, 不是 alpha 缺失.
+5 份 NO-GO 的**数据层面发现**仍然有效. 但**运维层面的归因**需要倒回去: 系统不下单的第一原因是 **baseline 层无可下单信号 (alpha/cost 不足)**, 不是 `baseline_only` 模式. 模式只决定是否调 AI, 不决定是否下单.
 
 ---
 
@@ -203,9 +211,40 @@ authority_map = {
 
 - 起草: Claude Opus 4.7 · 2026-04-20
 - 触发: 用户 2026-04-19 "为何不下单" + 2026-04-20 战略 framework directive
-- 批准状态: 待用户确认
+- 批准状态: 用户 2026-04-20 初稿批准; 2026-04-23 勘误修订版已批准 (见 §8)
 - 下次修订条件:
   - ✅ alpha evidence gate 已在 v0.1 接入 (2026-04-20 d2d1c35), §3.1 已具体化
   - 任一 mode 切换发生后补 audit trail
   - alpha_evidence_gate v0.2+ 引入新硬指标时同步 §3.1
 - **文档所有权**: governance layer, 改动需符合 "重大改动前必须备份+设计+获批准" 纪律 (CLAUDE.md §7)
+
+---
+
+## 8. 修订记录
+
+### 2026-04-23 — 语义勘误
+
+**触发**: 用户指出原文档 `baseline_only = reference_only = 完全不下单` 的核心断言与代码实际行为不符.
+
+**验证**: 全量审阅:
+- `aats/services/decision_engine/target_position.py:688-755` — `_target_quantity_baseline_only()` 基于 baseline 计算 target_qty, 不强制返回 0
+- `aats/services/decision_engine/target_position.py:2007-2016` — `_decision_outcome` 中 `final_target_qty=target_qty` 直接传入, 不因 mode 改写
+- `aats/services/execution_engine/` + `aats/services/execution_control/` — **零处**检查 `reference_only` / `baseline_only`, 不存在执行层的 mode 硬拦截
+
+**结论**: `baseline_only` 的真实语义 = 不调用 AI 参与决策, 仅基于 baseline 走完整决策 + 完整下单流程. `decision_authority="reference_only"` 是标签字段, 不是执行拦截关卡.
+
+**改动范围**:
+- 本文档: §1 "硬事实", §2.1 authority_map 注释, §2.2 表格 `baseline_only` 行, §2.3 误区→勘误改写, §4.1 UI 文案, §4.2 Grafana 告警描述, §5 session 结论校对
+- `docs/governance/p0b_observability_implementation_spec_2026_04_20.md` — §1.2, §2.1, §2.2, §2.3 的 "baseline_only = 不下单" 描述
+- `docs/governance/frozen_parameters.md` — §4 快照冻结理由措辞
+- `aats/api/static/dashboard-shell.html` / `shell-renderer.js` / `app.css` — UI 顶栏 badge 与 modal 文案
+- `deploy/wsl2-dev/grafana/provisioning/alerting/rules.yml` — 删除 `sev2-runtime-baseline-has-orders` 告警 (误报源)
+- `tests/unit/test_grafana_runtime_mode_observability.py` — 对应测试删除
+- `tests/unit/test_orders_submitted_mode_label.py` — docstring 调整 (metric label 本身仍保留, 供 sev3 告警使用)
+
+**不改动的部分** (代码本身是对的):
+- `target_position.py` 的 `_target_quantity_baseline_only()` / `_decision_outcome()` / `authority_map`
+- 执行引擎 (本就不拦 mode, 符合真实语义)
+- `aats_orders_submitted_total{mode=...}` metric (label 本身有用, sev3 告警需要)
+
+**已批准**: 用户 2026-04-23

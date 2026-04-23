@@ -27,7 +27,7 @@
 | 点模式 badge 跳 governance doc | 无 | 新加 |
 | Grafana 新 panel "Runtime Trading Mode" | 无 | 新加 |
 | Prometheus / Loki metric `aats_ai_operating_mode` 可查询 | 未确认 | 需查 decision_outcome payload 是否透传到 OTel |
-| "baseline_only 下有 order 提交" 告警 | 无 | 新加 alert rule |
+| ~~"baseline_only 下有 order 提交" 告警~~ | ~~无~~ | **2026-04-23 已废弃**: 原假设 "baseline_only = 不下单" 与代码实际行为不符, baseline_only 下下单合法 (仅 AI 未介入), 该告警会误报. 见 `runtime_trading_mode_semantics.md §8`. |
 | "ai_decision_maker 下 24h 零 order" 告警 | 无 | 新加 alert rule |
 
 ---
@@ -43,10 +43,10 @@
 
 **行为**:
 - 数据源: `/api/v1/system/runtime` 的 `operating_mode` 字段 (已有 endpoint; 若无需新建)
-- 显示文本:
-  - `baseline_only`: "模式: baseline_only · reference only · 按设计不下单" (灰底蓝字)
-  - `ai_assisted`: "模式: ai_assisted · advisory · **实盘中**" (橙底白字)
-  - `ai_decision_maker`: "模式: ai_decision_maker · final_decision · **AI 实盘中**" (红底白字)
+- 显示文本 (2026-04-23 勘误后):
+  - `baseline_only`: "模式: baseline_only · reference only · 仅 baseline, 不使用 AI" (灰底蓝字)
+  - `ai_assisted`: "模式: ai_assisted · advisory · **AI 咨询实盘中**" (橙底白字)
+  - `ai_decision_maker`: "模式: ai_decision_maker · final_decision · **AI 主导实盘中**" (红底白字)
 - 点击跳 `/api/docs/governance/runtime_trading_mode_semantics.md` 或等价链接
 
 **验收**:
@@ -71,10 +71,10 @@
   ORDER BY event_timestamp DESC
   LIMIT 1
   ```
-- Value mapping:
-  - `baseline_only` → 灰底 "REFERENCE ONLY (不下单)"
-  - `ai_assisted` → 橙底 "ADVISORY (实盘)"
-  - `ai_decision_maker` → 红底 "FINAL DECISION (AI 实盘)"
+- Value mapping (2026-04-23 勘误后):
+  - `baseline_only` → 灰底 "REFERENCE ONLY (仅 baseline)"
+  - `ai_assisted` → 橙底 "ADVISORY (AI 咨询)"
+  - `ai_decision_maker` → 红底 "FINAL DECISION (AI 主导)"
 
 **Grafana row 位置**: 主 dashboard 最顶部, 与"Deploy HEAD" / "系统 healthy 容器数" 并排
 
@@ -82,18 +82,12 @@
 
 **文件**: `deploy/wsl2-dev/grafana/provisioning/alerting/rules.yml`
 
-```yaml
-- uid: "sev2-runtime-baseline-has-orders"
-  title: "[SEV-2] baseline_only 模式下不应有订单提交"
-  condition: A
-  data:
-    - refId: A
-      model:
-        expr: |
-          (sum(rate(aats_orders_submitted_total{mode="baseline_only"}[24h])) > 0)
-  for: 15m
-  # 若 baseline_only 下有 order 提交, 说明 authority_map 被绕过或有 bug
+**2026-04-23 勘误**: 原 spec 里的 `sev2-runtime-baseline-has-orders` 告警已**废弃**.
+原假设 "baseline_only 下有 order 提交 → authority_map 被绕过" 与代码实际行为不符 —
+`baseline_only` 仅代表不调用 AI, 执行引擎从不按 `decision_authority` 拦订单, baseline
+驱动的下单是合法的. 见 `runtime_trading_mode_semantics.md §8 修订记录`. 仅保留 sev3.
 
+```yaml
 - uid: "sev3-runtime-ai-decision-no-orders"
   title: "[SEV-3] ai_decision_maker 模式下 24h 内 0 订单"
   condition: A
@@ -150,9 +144,9 @@ metrics.gauge("aats_runtime_ai_operating_mode", 1, labels={"mode": canonical_mod
 - 起草: Claude Opus 4.7 · 2026-04-20
 - 触发: P0-b governance doc 的 Observability 要求部分需要具体实施 spec
 - 状态: ✅ **全部 4 Task 已实施并 deploy** (2026-04-20):
-  - Task 2.1 顶栏 badge — commit 91b860f
-  - Task 2.2 Grafana panel — commit 7276674
-  - Task 2.3 Alerting rules — commit 7276674 + sev3 PromQL 修 (d14bd60)
-  - Task 2.4 OTel labeled metric — commit ecc6001 + order submission label (4b2ac2d)
+  - Task 2.1 顶栏 badge — commit 91b860f (文案 2026-04-23 勘误调整)
+  - Task 2.2 Grafana panel — commit 7276674 (value mapping 2026-04-23 勘误调整)
+  - Task 2.3 Alerting rules — commit 7276674 + sev3 PromQL 修 (d14bd60); **2026-04-23: sev2-runtime-baseline-has-orders 废弃删除** (语义错误)
+  - Task 2.4 OTel labeled metric — commit ecc6001 + order submission label (4b2ac2d) — label 保留, sev3 仍需
   - P1 遗留 Prometheus scrape 修复 — commit 3c90c64 (6/6 targets UP)
   - dead-man alert — commit 7c5c5bc (sev1-metrics-scrape-dead-man)

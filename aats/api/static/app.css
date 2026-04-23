@@ -475,10 +475,11 @@ h3 {
 
 /* ─────────────────────────────────────────────────────────────
    P0-b Task 2.1: Runtime Mode Badge (全局顶栏)
-   颜色语义严格对齐 docs/governance/runtime_trading_mode_semantics.md:
-     baseline_only      → 灰底蓝字, tone-neutral-ish
-     ai_assisted        → 橙底白字, tone-warning-like
-     ai_decision_maker  → 红底白字, tone-danger-like
+   颜色语义严格对齐 docs/governance/runtime_trading_mode_semantics.md
+   (2026-04-23 勘误后):
+     baseline_only      → 灰底蓝字, 仅 baseline, 不使用 AI
+     ai_assisted        → 橙底白字, AI 咨询实盘
+     ai_decision_maker  → 红底白字, AI 主导实盘
    ───────────────────────────────────────────────────────────── */
 .runtime-mode-badge {
   display: inline-flex;
@@ -526,21 +527,21 @@ h3 {
   border-color: var(--line-strong);
 }
 
-/* baseline_only — 灰底蓝字, 按设计不下单 */
+/* baseline_only — 灰底蓝字, 仅 baseline, 不使用 AI */
 .runtime-mode-badge--baseline-only {
   color: #60a5fa;
   background: rgba(24, 34, 50, 0.92);
   border-color: rgba(96, 165, 250, 0.38);
 }
 
-/* ai_assisted — 橙底白字, 实盘中 */
+/* ai_assisted — 橙底白字, AI 咨询实盘中 */
 .runtime-mode-badge--ai-assisted {
   color: #fff;
   background: rgba(249, 115, 22, 0.92);
   border-color: rgba(251, 146, 60, 0.8);
 }
 
-/* ai_decision_maker — 红底白字, AI 实盘中 */
+/* ai_decision_maker — 红底白字, AI 主导实盘中 */
 .runtime-mode-badge--ai-decision-maker {
   color: #fff;
   background: rgba(220, 38, 38, 0.95);

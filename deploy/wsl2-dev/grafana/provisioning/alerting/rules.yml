@@ -493,48 +493,13 @@ groups:
       # 每条规则都写 noDataState: OK 避免 "没数据就 fire" 的 false positive.
       # ──────────────────────────────────────────────────────────────
 
-      - uid: sev2-runtime-baseline-has-orders
-        title: "[SEV-2] baseline_only 模式下不应有订单提交"
-        condition: C
-        data:
-          - refId: A
-            datasourceUid: prometheus
-            model:
-              expr: "sum(rate(aats_orders_submitted_total{mode=\"baseline_only\"}[24h]))"
-              instant: false
-              queryType: range
-            relativeTimeRange:
-              from: 86400
-              to: 0
-          - refId: B
-            datasourceUid: __expr__
-            model:
-              type: reduce
-              expression: A
-              reducer: last
-            relativeTimeRange: { from: 0, to: 0 }
-          - refId: C
-            datasourceUid: __expr__
-            model:
-              type: threshold
-              expression: B
-              conditions:
-                - evaluator: { type: gt, params: [0] }
-            relativeTimeRange: { from: 0, to: 0 }
-        noDataState: OK
-        execErrState: Error
-        for: 15m
-        labels:
-          severity: sev2
-          component: runtime_governance
-        annotations:
-          summary: "baseline_only mode 下 24h 内检测到订单提交 — authority_map 可能被绕过"
-          description: |
-            spec: docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.3
-            在 ai_operating_mode=baseline_only 下, decision_authority 固定为
-            reference_only, 任何订单提交都违反 governance (见 runtime_trading_mode_semantics.md §1).
-            依赖指标: aats_orders_submitted_total{mode="baseline_only"} (已由 commit 4b2ac2d 接入 mode label).
-            响应: 立即 halt + reconciliation + 审查 authority_map 逻辑 (target_position.py:1926).
+      # 2026-04-23 勘误废弃: `sev2-runtime-baseline-has-orders` 告警已删除.
+      # 原假设 "baseline_only 下有 order 提交 = authority_map 被绕过" 与代码实际行为不符:
+      #   - `baseline_only` 仅代表不调用 AI 参与决策, 系统仍走完整 baseline → 下单流程
+      #   - 执行引擎 (aats/services/execution_engine/, execution_control/) 不检查 decision_authority
+      #   - baseline 驱动的下单是合法的, 告警会持续误报
+      # 见 docs/governance/runtime_trading_mode_semantics.md §8 修订记录.
+      # `aats_orders_submitted_total{mode=...}` 指标本身保留, sev3 仍需要.
 
       - uid: sev3-runtime-ai-decision-no-orders
         title: "[SEV-3] ai_decision_maker 模式下 24h 内 0 订单"

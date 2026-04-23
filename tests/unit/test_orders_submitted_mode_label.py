@@ -1,10 +1,14 @@
 """Regression: order submission 埋点必须带 mode label, 供 P0-b alert 使用.
 
 2026-04-20 P0-b Task 2.3 alert rule (deploy/wsl2-dev/grafana/provisioning/alerting/rules.yml)
-依赖 Prometheus metric ``aats_orders_submitted_total{mode="baseline_only"}`` 才能 fire:
+依赖 Prometheus metric ``aats_orders_submitted_total{mode="..."}`` 才能 fire:
 
-  - sev2-runtime-baseline-has-orders: baseline_only 下有订单提交 (authority_map 被绕过)
   - sev3-runtime-ai-decision-no-orders: ai_decision_maker 下 24h 零订单 (alpha/cost 阻断)
+
+2026-04-23 勘误: 原 sev2-runtime-baseline-has-orders 告警基于错误假设
+("baseline_only = 不下单") 已删除. 见 docs/governance/runtime_trading_mode_semantics.md §8.
+但 mode label 本身仍保留 — sev3 告警仍需根据 mode 过滤, 且 label 本身对
+operator 观察不同模式下的下单活动有价值.
 
 若有人改 aats/bootstrap/config.py 把 metrics.increment_labeled("orders_submitted", ...)
 移除或改掉 mode label, 下游 alert 永不 fire, 违反观测层契约.
@@ -46,7 +50,7 @@ def test_order_intents_generated_has_sibling_labeled_metric() -> None:
     assert orders_submitted_labeled_count >= 2, (
         f"orders_submitted labeled metric 埋点数 = {orders_submitted_labeled_count}, "
         f"预期至少 2 (与 order_intents_generated 一一对应). "
-        f"若移除会导致 P0-b sev2/sev3 runtime governance alert 永不 fire."
+        f"若移除会导致 P0-b sev3 runtime governance alert 永不 fire."
     )
 
 
@@ -138,9 +142,9 @@ def test_metrics_registry_increment_labeled_accepts_mode_label() -> None:
 def test_metrics_registry_labels_isolated_per_mode() -> None:
     """不同 mode label 之间 counter 独立 (不会被意外合并).
 
-    这是 Prometheus sum(rate(...{mode="baseline_only"}[24h])) 正确 dispatching
+    这是 Prometheus sum(rate(...{mode="ai_decision_maker"}[24h])) 正确 dispatching
     的前提. 若 label 隔离失败, 三个 mode 的 counter 会汇总到同一 series,
-    P0-b Task 2.3 sev2/sev3 alert 会误触发或永不触发.
+    P0-b Task 2.3 sev3 alert 会误触发或永不触发.
     """
     from aats.bootstrap.metrics import MetricsRegistry
 

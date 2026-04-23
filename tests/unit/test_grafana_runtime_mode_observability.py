@@ -2,9 +2,14 @@
 
 验证 Grafana dashboard 和 alerting 规则里包含 P0-b governance observability 资源:
 - dashboard ``aats_operations.json`` 包含 "Runtime Trading Mode" stat panel
-- ``rules.yml`` 包含 2 条 runtime governance alerts
+- ``rules.yml`` 包含 runtime governance alert (2026-04-23 勘误后仅保留 sev3)
 
 对应 spec: docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.2 + §2.3.
+
+2026-04-23 勘误: 原 sev2-runtime-baseline-has-orders 告警基于错误假设
+("baseline_only = 不下单") 已删除, 对应 `test_alert_sev2_baseline_has_orders_defined`
+测试及 `test_alerts_have_runtime_governance_component_label` 的 `>=2` 断言已相应修订.
+见 docs/governance/runtime_trading_mode_semantics.md §8.
 """
 from __future__ import annotations
 
@@ -77,7 +82,10 @@ class TestGrafanaRuntimeModePanel(unittest.TestCase):
 
 
 class TestGrafanaRuntimeModeAlerts(unittest.TestCase):
-    """Task 2.3: rules.yml 包含 2 条 runtime governance 告警."""
+    """Task 2.3: rules.yml 包含 runtime governance 告警.
+
+    2026-04-23 勘误: sev2-runtime-baseline-has-orders 已废弃删除 (见 docstring).
+    """
 
     @classmethod
     def setUpClass(cls) -> None:
@@ -94,12 +102,15 @@ class TestGrafanaRuntimeModeAlerts(unittest.TestCase):
                     uids.add(str(uid))
         return uids
 
-    def test_alert_sev2_baseline_has_orders_defined(self) -> None:
+    def test_alert_sev2_baseline_has_orders_absent(self) -> None:
+        """2026-04-23 勘误: 该告警基于错误假设 (baseline_only = 不下单) 已删除,
+        确保不会被误恢复."""
         uids = self._all_rule_uids()
-        self.assertIn(
+        self.assertNotIn(
             "sev2-runtime-baseline-has-orders",
             uids,
-            "Task 2.3: 缺 SEV-2 baseline_only-has-orders 告警",
+            "sev2-runtime-baseline-has-orders 已废弃 (见 runtime_trading_mode_semantics.md §8), "
+            "不应重新出现在 rules.yml",
         )
 
     def test_alert_sev3_ai_decision_no_orders_defined(self) -> None:
@@ -116,7 +127,8 @@ class TestGrafanaRuntimeModeAlerts(unittest.TestCase):
             for rule in group.get("rules", []):
                 if str(rule.get("uid", "")).startswith(("sev2-runtime-", "sev3-runtime-")):
                     runtime_rules.append(rule)
-        self.assertGreaterEqual(len(runtime_rules), 2)
+        # 2026-04-23 勘误后仅剩 sev3-runtime-ai-decision-no-orders.
+        self.assertGreaterEqual(len(runtime_rules), 1)
         for rule in runtime_rules:
             labels = rule.get("labels", {})
             self.assertEqual(

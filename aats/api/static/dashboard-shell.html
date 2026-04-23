@@ -68,10 +68,10 @@
       数据源: /ai/runtime 的 effective_operating_mode (已加入 CORE_SPECS).
       行为: 由 shell-renderer.renderRuntimeModeBadge() 每次 renderShell 时刷新;
             点击弹 modal 解释当前模式语义;
-            颜色根据模式:
-              baseline_only      → 灰底蓝字 "按设计不下单"
-              ai_assisted        → 橙底白字 "实盘中"
-              ai_decision_maker  → 红底白字 "AI 实盘中"
+            颜色根据模式 (2026-04-23 勘误后):
+              baseline_only      → 灰底蓝字 "仅 baseline, 不使用 AI"
+              ai_assisted        → 橙底白字 "AI 咨询实盘中"
+              ai_decision_maker  → 红底白字 "AI 主导实盘中"
       详见 docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.1
     -->
     <button id="runtimeModeBadge"
@@ -88,7 +88,8 @@
     <!--
       P0-b Task 2.1: Runtime mode 语义 modal (隐藏直到点击 badge).
       内容是 docs/governance/runtime_trading_mode_semantics.md §1-§2 的精简,
-      目标: 让 operator 一眼看出 "baseline_only = 按设计不下单, 不是 bug".
+      目标: 让 operator 一眼看出 "baseline_only = 仅 baseline, 不使用 AI;
+      是否下单由 baseline 信号决定, 不是模式硬拦截" (2026-04-23 勘误).
     -->
     <dialog id="runtimeModeInfoDialog" class="runtime-mode-dialog">
       <article class="runtime-mode-dialog__panel">
@@ -113,7 +114,7 @@
             <tr>
               <td><strong>baseline_only</strong></td>
               <td><code>reference_only</code></td>
-              <td>完全不下单 · 只产参考决策 · 当前生产默认</td>
+              <td>不调用 AI · 纯 baseline 决策 · 是否下单由 baseline 信号决定 · 当前生产默认</td>
             </tr>
             <tr>
               <td><strong>ai_assisted</strong></td>
@@ -128,9 +129,9 @@
           </tbody>
         </table>
         <p class="meta-copy">
-          <strong>当前 live runtime = <code>baseline_only</code> → 按设计 100% 不下单。</strong>
-          这不是 bug,也不是 alpha 不够,不是 threshold 太严 —— 是治理纪律。
-          切模式需走 <code>.env.*.live</code> + deploy audit + alpha evidence gate,详见
+          <strong>当前 live runtime = <code>baseline_only</code> → 不调用 AI,仅按 baseline 决策与下单。</strong>
+          是否真下单由 baseline 层的信号决定,模式本身不拦订单。
+          若想启用 AI 决策,切模式需走 <code>.env.*.live</code> + deploy audit + alpha evidence gate,详见
           <code>docs/governance/runtime_trading_mode_semantics.md §3.5</code>。
         </p>
       </article>

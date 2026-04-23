@@ -4,7 +4,14 @@
 > **对应 governance**: `docs/governance/runtime_trading_mode_semantics.md`
 > **冻结参数参考**: `docs/governance/frozen_parameters.md` §2.4
 
-**目标**: 让 "AATS 不下单 = by design, 不是 bug" 在前端 / Grafana / alerting / metrics 四个层面都可见。
+> **⚠️ 2026-04-23 勘误**: 本报告的原始目标表述("AATS 不下单 = by design")基于对 `baseline_only` 语义的错误理解.
+> 真实语义: `baseline_only` = 不调用 AI 参与决策, 但仍走完整 baseline 决策 + 下单流程. 是否下单由 baseline 信号决定, 不是模式硬拦截.
+> 相应地, 本报告中列出的 `sev2-runtime-baseline-has-orders` 告警**已废弃删除** (会持续误报).
+> `sev3-runtime-ai-decision-no-orders` 告警保留. UI 文案已按新语义更新.
+> 详见 `docs/governance/runtime_trading_mode_semantics.md §8 修订记录`.
+> 本报告作为**历史实施记录**保留原文, 不逐句改写; 阅读时请以勘误后语义为准.
+
+**目标** (2026-04-23 校正): 让 "当前运行模式" 及 "是否启用 AI 参与决策" 在前端 / Grafana / alerting / metrics 四个层面都可见, 便于 operator 判断 "当前是否 AI 实盘" 与 "下单活动是否与 mode 预期一致".
 
 ---
 

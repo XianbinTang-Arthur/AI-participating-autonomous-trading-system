@@ -2856,7 +2856,9 @@ def _build_position_target_handler(
                     # 给 order submission 加 mode label, 让
                     # aats_orders_submitted_total{mode=...} alert 能 fire.
                     # 见 deploy/wsl2-dev/grafana/provisioning/alerting/rules.yml
-                    # sev2-runtime-baseline-has-orders / sev3-runtime-ai-decision-no-orders.
+                    # sev3-runtime-ai-decision-no-orders.
+                    # (2026-04-23: sev2-runtime-baseline-has-orders 已废弃删除,
+                    # 见 docs/governance/runtime_trading_mode_semantics.md §8).
                     # metrics.increment_labeled 异常永不阻断订单流.
                     try:
                         metrics.increment_labeled(

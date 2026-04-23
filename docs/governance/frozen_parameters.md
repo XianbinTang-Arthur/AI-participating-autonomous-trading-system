@@ -71,7 +71,7 @@
 - `ai_assisted → advisory`
 - `ai_decision_maker → final_decision`
 
-**冻结理由**: 见 `docs/governance/runtime_trading_mode_semantics.md`. 改动此 map **等于**改变实盘授权路径, 不得为 "debug 让系统下单" 而触碰.
+**冻结理由**: 见 `docs/governance/runtime_trading_mode_semantics.md`. 改动此 map **等于**改变实盘授权路径下游标签, 不得为"debug"而触碰. 注: 2026-04-23 勘误确认, `authority_map` 的值仅作标签用, 不是执行拦截; 但它仍决定是否调 AI 以及 target_qty 算法分支, 仍属重冻结范围.
 
 ### 2.5 已归档路径 (更强的冻结)
 
@@ -113,8 +113,8 @@
 
 | 参数 | 值 | 冻结 since |
 |---|---|---|
-| `ai_operating_mode` | `baseline_only` | **permanently frozen 到 alpha evidence gate 通过** |
-| `decision_authority` (derived) | `reference_only` | 同上 |
+| `ai_operating_mode` | `baseline_only` | **frozen 到 alpha evidence gate 有 Go 决策** (语义: 不启用 AI 参与决策, 仅运行 baseline; 是否下单由 baseline 信号决定) |
+| `decision_authority` (derived) | `reference_only` | 同上 — 注意这是 `authority_map` 的标签派生, 不是执行拦截 (见 [`runtime_trading_mode_semantics.md §1`](runtime_trading_mode_semantics.md)) |
 | `entry_threshold` (independent_15m) | 0.25 | 2026-04-20 战略 directive |
 | `max_acceptable_cost_bps` | 7.5 | 2026-04-20 战略 directive |
 | `min_safe_net_edge_bps` | 2.0 | 同上 |
