@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Route A phase 0 — 7 天观察窗 daily health check
 #
-# 起算点: 2026-04-20 14:15 UTC (P0-a/b/c 全落地 + deploy 后第一次 candles
-#         和 microstructure 同 cadence 对齐的 tick).
-# 目标终点: 2026-04-27 14:15 UTC (Silver + OHLC 两 pipeline 连续 7×96=672 bar
-#         无 gap, 才允许启动路线 A phase 0 第一份 evidence 研究).
+# 起算点: 2026-04-22 00:00 UTC (2026-04-23 daily check 发现
+#         silver.market_trade_flow_15m / silver.market_orderbook_metrics_15m 在
+#         2026-04-21 21:30 / 23:15 / 23:45 UTC 存在 3 个历史 gap; 从
+#         2026-04-22 00:00 UTC 起两表连续性洁净, 观察窗据此 reset).
+# 目标终点: 2026-04-29 00:00 UTC (起点 + 7 天 = 672 bar, Silver + OHLC 两
+#         pipeline 连续无 gap, 才允许启动路线 A phase 0 第一份 evidence 研究).
 #
 # 设计原则:
 #   - 只查询, 不改. 绝不触发任何 research / order / config 修改
@@ -34,8 +36,8 @@ readonly CHECK_DATE="$(date -u '+%Y-%m-%d')"
 readonly CHECK_TS="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 
 # 观察窗起点 (固定, 不能改)
-readonly WINDOW_START_UTC="2026-04-20T14:15:00Z"
-readonly WINDOW_TARGET_UTC="2026-04-27T14:15:00Z"
+readonly WINDOW_START_UTC="2026-04-22T00:00:00Z"
+readonly WINDOW_TARGET_UTC="2026-04-29T00:00:00Z"
 
 # 2026-04-20 code review C-L4 fix: 自动 tee 到 artifacts/, operator 不用
 # 记得手动 `| tee -a`. AATS_SKIP_DAILY_CHECK_LOG=true 可关 (调试场景).
@@ -410,8 +412,8 @@ fi
 # ─────────────────────────────────────────────────────────────
 
 step "进度"
-start_epoch=$(date -u -d "2026-04-20T14:15:00Z" +%s)
-target_epoch=$(date -u -d "2026-04-27T14:15:00Z" +%s)
+start_epoch=$(date -u -d "$WINDOW_START_UTC" +%s)
+target_epoch=$(date -u -d "$WINDOW_TARGET_UTC" +%s)
 elapsed=$((now_epoch - start_epoch))
 total=$((target_epoch - start_epoch))
 pct=$((elapsed * 100 / total))

@@ -2,7 +2,9 @@
 
 > 项目定位声明：本文件默认服从 AATS 的统一目标：在严格风控、可审计、可恢复、可治理前提下，通过自动化交易追求长期稳定盈利，为 AI 的持续自治与终身发展积累资本。详见 [项目定位声明](../../docs/project_positioning.md)。
 
-> **本文件定义 2026-04-20 ~ 2026-04-27 观察窗期间的每日健康检查协议, 为路线 A phase 0 research 启动前置条件.**
+> **本文件定义 2026-04-22 ~ 2026-04-29 观察窗期间的每日健康检查协议, 为路线 A phase 0 research 启动前置条件.**
+>
+> **2026-04-23 reset 说明**: 原观察窗 2026-04-20 14:15 UTC ~ 2026-04-27 14:15 UTC。2026-04-23 daily check 回扫发现 `silver.market_trade_flow_15m` 与 `silver.market_orderbook_metrics_15m` 在 **2026-04-21 21:30 / 23:15 / 23:45 UTC** 各存在 3 个历史 gap (两表同 bar 命中, 属 microstructure silver pipeline 同源断档)。从 **2026-04-22 00:00 UTC** 起两表连续性洁净 (0 gap)。按 §2.4 exit-code 2 语义, 观察窗重置, 起点移至 2026-04-22 00:00 UTC, 终点顺延至 2026-04-29 00:00 UTC。本次是 **reset, 不是对旧窗口阈值的重解释** —— 历史 3 个 gap 仍记为 FAIL 日, 已归档在 `artifacts/route_a_observation_window/` 对应日志。
 
 ---
 
@@ -18,8 +20,9 @@
 
 | 项 | 时间 (UTC) | 说明 |
 |---|---|---|
-| 观察窗起点 | **2026-04-20 14:15:00** | P0-a/b/c 全落地 + deploy + candles_rolling_15m 修 VALID_WORKFLOWS 白名单后, 两 pipeline 首次同 cadence 对齐的 tick |
-| 观察窗终点 | **2026-04-27 14:15:00** | 起点 + 7 天 = 672 bars |
+| 观察窗起点 | **2026-04-22 00:00:00** | 2026-04-23 daily check 发现 2026-04-21 21:30 / 23:15 / 23:45 UTC 三个历史 gap 后 reset 的新起点; 从该 tick 起 `silver.market_trade_flow_15m` 与 `silver.market_orderbook_metrics_15m` 连续性洁净 (0 gap) |
+| 观察窗终点 | **2026-04-29 00:00:00** | 起点 + 7 天 = 672 bars |
+| 历史起点 (已 reset) | 2026-04-20 14:15:00 | P0-a/b/c 全落地 + deploy + candles_rolling_15m 修 VALID_WORKFLOWS 白名单后的初始起点; 因 2026-04-21 晚间 3 个 gap 触发 §2.4 exit-code 2 reset, 仅留作审计参考 |
 
 **若期间任一日 check 失败 (FAIL 级别), 观察窗重置, 起算点延后到问题解决当日**。
 
@@ -212,7 +215,7 @@ rolling workflow 设计上 `allow_failure=true`, 单次失败由下一个 15min 
 
 ---
 
-## 4. 通过观察窗后 (2026-04-27 14:15 UTC 之后)
+## 4. 通过观察窗后 (2026-04-29 00:00 UTC 之后)
 
 若 **7 个连续 daily check 全 exit 0** (允许偶发 WARN), 满足以下额外条件即可正式启动路线 A phase 0:
 
@@ -229,13 +232,13 @@ rolling workflow 设计上 `allow_failure=true`, 单次失败由下一个 15min 
 每日 check 结果 append 到:
 ```
 artifacts/route_a_observation_window/
-├── 2026-04-20.log
-├── 2026-04-21.log
+├── 2026-04-22.log   ← reset 后新窗口起点
+├── 2026-04-23.log
 ├── ...
-└── 2026-04-27.log
+└── 2026-04-29.log
 ```
 
-观察窗结束后, 整批日志 commit 到 `docs/research/route_a_phase0/observation_window_logs/` 作为 evidence 提案的一部分 (Silver 稳定性的**第一手证据**)。
+观察窗结束后, 整批日志 (含 reset 前 2026-04-20 ~ 2026-04-22 的 FAIL 归档) commit 到 `docs/research/route_a_phase0/observation_window_logs/` 作为 evidence 提案的一部分 (Silver 稳定性的**第一手证据**, reset 轨迹保留以供审计)。
 
 ---
 
@@ -254,4 +257,5 @@ artifacts/route_a_observation_window/
 
 - 起草: Claude Opus 4.7 · 2026-04-20
 - 触发: 用户 2026-04-20 战略 directive "下周才允许开始 A 路线" 的观察窗前置条件
-- 状态: v0.1, 2026-04-27 观察窗结束后归档, 若经验表明需调整 check 项则 v0.2 迭代
+- 2026-04-23 修订: 发现 2026-04-21 21:30 / 23:15 / 23:45 UTC 三个历史 gap, 观察窗 reset 至 2026-04-22 00:00 UTC → 2026-04-29 00:00 UTC (见 §1.2)
+- 状态: v0.1, 2026-04-29 观察窗结束后归档, 若经验表明需调整 check 项则 v0.2 迭代
