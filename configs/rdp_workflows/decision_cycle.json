@@ -3,7 +3,7 @@
   "description": "决策层周期任务，执行 Phase 6 decision round、可靠性检查、发布观察与自动调优审查。",
   "schedule_hint": "weekly after research_cycle or on-demand",
   "schedule": {
-    "enabled": true,
+    "enabled": false,
     "frequency": "weekly",
     "weekday_utc": "SUN",
     "hour_utc": 10,
@@ -39,13 +39,13 @@
     },
     {
       "name": "strategy_tuning_review",
-      "description": "基于最新 Step2/Phase4 结果生成自动调优提案，默认待审核。",
+      "description": "基于最新 Step2/Phase4 结果生成自动调优提案，默认待审核。frozen golden-path 下禁用：避免自动生成调优提案。",
       "command": "python scripts/rdp_run_strategy_tuning_review.py",
       "success_markers": [
         "Strategy tuning review completed"
       ],
       "timeout_seconds": 120,
-      "enabled": true,
+      "enabled": false,
       "allow_failure": true
     }
   ]

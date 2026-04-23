@@ -35,10 +35,10 @@
     },
     {
       "name": "auto_import_candidates",
-      "description": "自动导入最新 Step 3 参数候选到 registry；若 full pipeline 已执行，该步骤保持幂等。",
+      "description": "自动导入最新 Step 3 参数候选到 registry；若 full pipeline 已执行，该步骤保持幂等。frozen golden-path 下禁用：避免自动导入新候选进入 registry。",
       "command": "python -m aats.data_platform.governance.auto_import_candidates --run",
       "timeout_seconds": 30,
-      "enabled": true,
+      "enabled": false,
       "allow_failure": true
     }
   ]

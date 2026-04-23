@@ -3,7 +3,7 @@
   "description": "发布层周期任务，扫描已批准 recommendation，并通过既有 gate/release/apply 链推进。",
   "schedule_hint": "hourly when approvals pending or on-demand",
   "schedule": {
-    "enabled": true,
+    "enabled": false,
     "frequency": "hourly",
     "interval_hours": 1,
     "minute_utc": 0
