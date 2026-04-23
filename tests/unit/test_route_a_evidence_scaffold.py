@@ -436,12 +436,17 @@ def _rich_scorecard_payload() -> dict:
                 },
             },
         },
-        "regime_slice": {"vol": {"low": {}, "high": {}}},
+        "regime_slice": {
+            "vol": {
+                "low": {"ir": 0.72, "fills": 321, "sample_n": 210},
+                "high": {"ir": 0.48, "fills": 275, "sample_n": 189},
+            }
+        },
     }
 
 
 class TestProposalMdPrefill(unittest.TestCase):
-    """SoW 要求 proposal.md 预填 metadata + §4 + §6.1 + §6.2 + §6.3
+    """SoW 要求 proposal.md 预填 metadata + §4 + §6.1 + §6.2 + §6.3 + §6.4
     + observation-window 摘要, 且不出现 verdict / 裁决文案。
     """
 
@@ -511,6 +516,19 @@ class TestProposalMdPrefill(unittest.TestCase):
             self.assertIn("0.9", md_text)
             self.assertIn("0.6", md_text)
 
+            # §6.4 regime-slice vol low/high 预填
+            self.assertIn("§6.4 Regime-slice", md_text)
+            self.assertIn("| low_vol |", md_text)
+            self.assertIn("| high_vol |", md_text)
+            self.assertIn("0.72", md_text)
+            self.assertIn("321", md_text)
+            self.assertIn("210", md_text)
+            self.assertIn("0.48", md_text)
+            self.assertIn("275", md_text)
+            self.assertIn("189", md_text)
+            # §6.4 明确点出 funding 方向 / 2×2 heatmap 仍待手工
+            self.assertIn("funding 方向", md_text)
+
             # observation-window summary
             self.assertIn("观察窗摘要", md_text)
             self.assertIn("overall", md_text)
@@ -559,9 +577,38 @@ class TestProposalMdPrefill(unittest.TestCase):
             self.assertIn("§6.1 OOS", md_text)
             self.assertIn("§6.2 Cross-window", md_text)
             self.assertIn("§6.3 Cost-adjusted", md_text)
+            self.assertIn("§6.4 Regime-slice", md_text)
+            self.assertIn("| low_vol |", md_text)
+            self.assertIn("| high_vol |", md_text)
             self.assertIn("观察窗摘要", md_text)
             # 缺字段渲染为 <TBD>
             self.assertIn("<TBD>", md_text)
+
+    def test_regime_slice_renders_with_tbd_when_vol_key_missing(self) -> None:
+        """``regime_slice`` 顶层必填但 ``vol`` 子键缺失时, §6.4 仍渲染且用 <TBD>。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            scorecard_src = root / "s.json"
+            observation_src = root / "o.json"
+            payload = _valid_scorecard_payload()
+            payload["regime_slice"] = {}  # keep top-level key, drop vol/low/high
+            _write_json(scorecard_src, payload)
+            _write_json(observation_src, _valid_observation_payload())
+
+            inputs = ScaffoldInputs(
+                proposal_id="p1",
+                feature="OFI",
+                horizon="5s",
+                scorecard_json=scorecard_src,
+                observation_window_json=observation_src,
+                output_root=root / "bundle",
+            )
+            result = create_scaffold(inputs)
+            md_text = result.proposal_md_path.read_text(encoding="utf-8")
+
+            self.assertIn("§6.4 Regime-slice", md_text)
+            self.assertIn("| low_vol | <TBD> | <TBD> | <TBD> |", md_text)
+            self.assertIn("| high_vol | <TBD> | <TBD> | <TBD> |", md_text)
 
 
 class TestCLIRouteAScaffold(unittest.TestCase):

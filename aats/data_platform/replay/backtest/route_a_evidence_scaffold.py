@@ -336,6 +336,43 @@ def _render_cost_adjusted_table(scorecard: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _render_regime_slice_table(scorecard: dict[str, Any]) -> str:
+    """§6.4 Regime-slice — 从 ``scorecard.regime_slice.vol.low/high`` 预填原始值。
+
+    当前只覆盖 vol 单维切片 (low_vol / high_vol); funding 方向 / 2×2 heatmap
+    仍需人工补或后续迭代。缺字段用 ``<TBD>`` 占位, 不写任何判据结论。
+    """
+    regime = (
+        scorecard.get("regime_slice")
+        if isinstance(scorecard.get("regime_slice"), dict)
+        else {}
+    )
+    vol = regime.get("vol") if isinstance(regime.get("vol"), dict) else {}
+    low = vol.get("low") if isinstance(vol.get("low"), dict) else {}
+    high = vol.get("high") if isinstance(vol.get("high"), dict) else {}
+
+    def _cell(bucket: dict[str, Any], key: str) -> str:
+        return _fmt_scalar(bucket.get(key))
+
+    lines = [
+        "### §6.4 Regime-slice (预填原始值)",
+        "",
+        "当前自动预填只覆盖 **vol 单维切片**; funding 方向 / 2×2 heatmap 仍需"
+        "人工补或后续迭代。此处只列原始值, 不给结论。",
+        "",
+        "| bucket | IR | fills | sample_n |",
+        "|---|---|---|---|",
+        f"| low_vol | {_cell(low, 'ir')} | {_cell(low, 'fills')} | "
+        f"{_cell(low, 'sample_n')} |",
+        f"| high_vol | {_cell(high, 'ir')} | {_cell(high, 'fills')} | "
+        f"{_cell(high, 'sample_n')} |",
+        "",
+        "**待填**: funding 方向切片 / 2×2 heatmap / 判据结论 (见模板 §6.4)。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def _render_observation_window_summary(observation: dict[str, Any]) -> str:
     """观察窗摘要 — 把 candidate evidence 与观察窗真相层绑在一起。"""
     lines = [
@@ -365,7 +402,7 @@ def _render_proposal_md(
         f"# 路线 A Phase 0 · Evidence 提案 · `{inputs.feature}` @ `{inputs.horizon}`\n"
         "\n"
         "> 本文件由 `aats.cli route-a-evidence-scaffold` 生成，预填已具备数据来源"
-        "的段落 (metadata / §4 / §6.1 / §6.2 / §6.3 / 观察窗摘要)。\n"
+        "的段落 (metadata / §4 / §6.1 / §6.2 / §6.3 / §6.4 vol 切片 / 观察窗摘要)。\n"
         "> 完整提案骨架请参照 "
         "`docs/research/_templates/route_a_phase0_evidence_template.md` 逐段填写。"
         "本脚手架**不**输出任何判据结论 / 归档裁决文案, 以保持数值追溯口径。\n"
@@ -393,8 +430,8 @@ def _render_proposal_md(
         "- §3 模型定义 / 默认超参 / sweep 说明\n"
         "- §4 分割理由 / 是否跨 regime 切换 (本脚手架只写事实边界)\n"
         "- §5 Cost model 引用 (fee_resolver commit hash + governance 当前值)\n"
-        "- §6.4 Regime-slice 切片 (波动率 × funding 方向, 需独立计算)\n"
-        "- §6.1 / §6.2 / §6.3 判据结论与图表路径\n"
+        "- §6.4 Regime-slice funding 方向切片 / 2×2 heatmap (本脚手架仅预填 vol 单维)\n"
+        "- §6.1 / §6.2 / §6.3 / §6.4 判据结论与图表路径\n"
         "- §7 加分项 (physical plausibility / cross-symbol / neighborhood / replay / "
         "independent re-run)\n"
         "- §8 反模式 red flag 自查\n"
@@ -416,6 +453,8 @@ def _render_proposal_md(
         + _render_cross_window_table(scorecard)
         + "\n"
         + _render_cost_adjusted_table(scorecard)
+        + "\n"
+        + _render_regime_slice_table(scorecard)
         + "\n"
         + _render_observation_window_summary(observation)
         + "\n"
