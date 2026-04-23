@@ -354,9 +354,76 @@ def _build_cross_window(
     return slices
 
 
+def _cost_bucket(
+    diagnostics: Sequence[CostDiagnostic],
+    slip_bps: float,
+) -> dict[str, Any]:
+    """单个 diagnostics 分桶的 5 字段 cost 结构; 空桶返回稳定零值。
+
+    ``slip_bps`` 沿用 order_type 决定的全局假设, 不随桶内样本变化。
+    """
+    if not diagnostics:
+        return {
+            "realized_edge_bps": 0.0,
+            "fee_bps": 0.0,
+            "slip_bps": slip_bps,
+            "exec_buffer_bps": 0.0,
+            "net_edge_bps": 0.0,
+        }
+    n = len(diagnostics)
+    fee_bps = sum(d.actual_cost_bps for d in diagnostics) / n
+    assumed_cost = sum(d.assumed_cost_bps for d in diagnostics) / n
+    assumed_net = sum(d.assumed_net_edge_bps for d in diagnostics) / n
+    actual_net = sum(d.actual_net_edge_bps for d in diagnostics) / n
+    return {
+        "realized_edge_bps": assumed_net + assumed_cost,
+        "fee_bps": fee_bps,
+        "slip_bps": slip_bps,
+        "exec_buffer_bps": assumed_cost - fee_bps - slip_bps,
+        "net_edge_bps": actual_net,
+    }
+
+
+def _split_diagnostics(
+    diagnostics: Sequence[CostDiagnostic],
+    curve: Sequence[EquityPoint],
+    split_ts: datetime | None,
+) -> tuple[list[CostDiagnostic], list[CostDiagnostic]]:
+    """按 OOS 相同的 split 规则把 diagnostics 切成 train / test。
+
+    * 显式 ``split_ts`` 优先 (ts_ms < split_ms → train, 其余 → test)
+    * 否则按 curve 的 time-midpoint 兜底
+    * 无 curve 且无 split_ts 时无法定义分界 — 全部归 train, test 留空
+    * 无法解析 ``decision_id`` 的记录保守忽略, 与 ``_fills_in_ms_set`` 一致
+    """
+    if split_ts is not None:
+        aware = split_ts if split_ts.tzinfo else split_ts.replace(tzinfo=timezone.utc)
+        split_ms = int(aware.astimezone(timezone.utc).timestamp() * 1000)
+    elif curve:
+        first_ts = curve[0].ts_ms
+        last_ts = curve[-1].ts_ms
+        split_ms = first_ts + (last_ts - first_ts) // 2
+    else:
+        return list(diagnostics), []
+
+    train: list[CostDiagnostic] = []
+    test: list[CostDiagnostic] = []
+    for d in diagnostics:
+        ms = _parse_iso_to_ms(d.decision_id)
+        if ms is None:
+            continue
+        if ms < split_ms:
+            train.append(d)
+        else:
+            test.append(d)
+    return train, test
+
+
 def _build_cost_adjusted(
     result: BacktestResult,
     diagnostics: Sequence[CostDiagnostic],
+    curve: Sequence[EquityPoint],
+    split_ts: datetime | None,
 ) -> dict[str, Any]:
     """Cost 分解 — 全部复用 BacktestResult 已有的 cost 口径, 不新增估算。
 
@@ -370,37 +437,21 @@ def _build_cost_adjusted(
           mean(assumed_net_edge_bps) + mean(assumed_cost_bps)
         * ``net_edge_bps``   — 套用实际 fee 后的 net edge =
           mean(actual_net_edge_bps) (来自 CostValidator)
+
+    顶层保留既有 5 字段 (overall aggregate) 以维持向后兼容; 另外挂
+    ``train`` / ``test`` 两个子对象, 切分规则与 OOS 对齐 (explicit
+    ``split_ts`` 优先, 否则 time-midpoint)。
     """
     slip_bps = (
         float(result.config.ioc_slippage_bps)
         if result.config.order_type == "ioc"
         else 0.0
     )
-    if not diagnostics:
-        return {
-            "realized_edge_bps": 0.0,
-            "fee_bps": 0.0,
-            "slip_bps": slip_bps,
-            "exec_buffer_bps": 0.0,
-            "net_edge_bps": 0.0,
-        }
-
-    n = len(diagnostics)
-    fee_bps = sum(d.actual_cost_bps for d in diagnostics) / n
-    assumed_cost = sum(d.assumed_cost_bps for d in diagnostics) / n
-    assumed_net = sum(d.assumed_net_edge_bps for d in diagnostics) / n
-    actual_net = sum(d.actual_net_edge_bps for d in diagnostics) / n
-
-    exec_buffer_bps = assumed_cost - fee_bps - slip_bps
-    realized_edge_bps = assumed_net + assumed_cost
-
-    return {
-        "realized_edge_bps": realized_edge_bps,
-        "fee_bps": fee_bps,
-        "slip_bps": slip_bps,
-        "exec_buffer_bps": exec_buffer_bps,
-        "net_edge_bps": actual_net,
-    }
+    overall = _cost_bucket(diagnostics, slip_bps)
+    train_diags, test_diags = _split_diagnostics(diagnostics, curve, split_ts)
+    overall["train"] = _cost_bucket(train_diags, slip_bps)
+    overall["test"] = _cost_bucket(test_diags, slip_bps)
+    return overall
 
 
 def _build_regime_slice(
@@ -499,7 +550,9 @@ def build_scorecard(
         "cross_window": _build_cross_window(
             curve, diagnostics, cross_window_slices
         ),
-        "cost_adjusted": _build_cost_adjusted(result, diagnostics),
+        "cost_adjusted": _build_cost_adjusted(
+            result, diagnostics, curve, split_ts
+        ),
         "regime_slice": _build_regime_slice(curve, diagnostics),
     }
 

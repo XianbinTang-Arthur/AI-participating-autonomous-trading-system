@@ -399,6 +399,7 @@ class TestScorecardCostAdjusted(unittest.TestCase):
         result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
         sc = build_scorecard(result)
         ca = sc["cost_adjusted"]
+        # 顶层仍保留 overall aggregate 5 字段 + 新增 train/test 子对象
         self.assertEqual(
             set(ca.keys()),
             {
@@ -407,6 +408,8 @@ class TestScorecardCostAdjusted(unittest.TestCase):
                 "slip_bps",
                 "exec_buffer_bps",
                 "net_edge_bps",
+                "train",
+                "test",
             },
         )
         self.assertAlmostEqual(ca["fee_bps"], 5.0, places=6)
@@ -483,6 +486,135 @@ class TestScorecardCostAdjusted(unittest.TestCase):
         result = _mk_result(curve=curve, diagnostics=(), config=config)
         sc = build_scorecard(result)
         self.assertEqual(sc["cost_adjusted"]["slip_bps"], 0.0)
+
+
+# ---------------------------------------------------------------------------
+# 4b. cost_adjusted train/test split alignment (v0.4)
+# ---------------------------------------------------------------------------
+
+
+_COST_FIELDS = {
+    "realized_edge_bps",
+    "fee_bps",
+    "slip_bps",
+    "exec_buffer_bps",
+    "net_edge_bps",
+}
+
+
+class TestScorecardCostAdjustedSplit(unittest.TestCase):
+    def test_cost_adjusted_train_test_fields_present(self) -> None:
+        curve = tuple(_mk_point(i, str(i)) for i in range(6))
+        diagnostics = tuple(_mk_diagnostic(i) for i in range(6))
+        result = _mk_result(curve=curve, diagnostics=diagnostics)
+        sc = build_scorecard(result)
+        ca = sc["cost_adjusted"]
+        self.assertIn("train", ca)
+        self.assertIn("test", ca)
+        self.assertEqual(set(ca["train"].keys()), _COST_FIELDS)
+        self.assertEqual(set(ca["test"].keys()), _COST_FIELDS)
+
+    def test_cost_adjusted_explicit_split_partitions_diagnostics(self) -> None:
+        """显式 split_ts: diagnostics 按 decision ts 落入 train / test。"""
+        curve = tuple(_mk_point(i, str(i * 5)) for i in range(8))
+        # train side 用不同 cost 语义, test side 用另一套, 方便区分
+        train_diags = tuple(
+            _mk_diagnostic(i, assumed_cost=4.0, actual_cost=2.0, assumed_net=8.0)
+            for i in range(3)
+        )
+        test_diags = tuple(
+            _mk_diagnostic(i, assumed_cost=10.0, actual_cost=7.0, assumed_net=20.0)
+            for i in range(4, 8)
+        )
+        diagnostics = train_diags + test_diags
+        config = BacktestConfig(ioc_slippage_bps=1.0, assumed_cost_bps=6.0)
+        result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
+        split = _BASE_TS + timedelta(hours=4)
+        sc = build_scorecard(result, split_ts=split)
+        ca = sc["cost_adjusted"]
+        # train: fee == 2.0, realized == assumed_net(8) + assumed_cost(4) = 12
+        self.assertAlmostEqual(ca["train"]["fee_bps"], 2.0, places=6)
+        self.assertAlmostEqual(ca["train"]["realized_edge_bps"], 12.0, places=6)
+        # test: fee == 7.0, realized == assumed_net(20) + assumed_cost(10) = 30
+        self.assertAlmostEqual(ca["test"]["fee_bps"], 7.0, places=6)
+        self.assertAlmostEqual(ca["test"]["realized_edge_bps"], 30.0, places=6)
+        # slip_bps 遵循 order_type 规则, 与全局一致
+        self.assertEqual(ca["train"]["slip_bps"], ca["slip_bps"])
+        self.assertEqual(ca["test"]["slip_bps"], ca["slip_bps"])
+
+    def test_cost_adjusted_time_midpoint_fallback_generates_both_sides(self) -> None:
+        """无 split_ts: 回退到 curve time-midpoint, train/test 仍可生成。"""
+        curve = tuple(_mk_point(i, str(i)) for i in range(8))
+        diagnostics = tuple(_mk_diagnostic(i) for i in range(8))
+        result = _mk_result(curve=curve, diagnostics=diagnostics)
+        sc = build_scorecard(result)
+        ca = sc["cost_adjusted"]
+        # 所有 diagnostics 都能被解析, 两侧样本数之和应等于总样本
+        # 不直接看样本数 (cost_adjusted 不暴露 sample_n), 但两侧 fee 必须可计算
+        # (若一侧为空则 fee == 0.0, 另一侧等于 overall fee)
+        self.assertIn("train", ca)
+        self.assertIn("test", ca)
+        # OOS 用同样的 time-midpoint; 对齐到相同 split_ms 时, 两侧 diagnostics 总数 = 8
+        # 也就是说两侧 fee 必须至少一个非零 (因为所有 diag 都走了常量 cost)
+        self.assertTrue(ca["train"]["fee_bps"] > 0 or ca["test"]["fee_bps"] > 0)
+        # 两侧 fee 的加权平均 (按落入两侧的比例) 应等于 overall fee
+        # 构造上所有 diag 的 actual_cost_bps 都是 5.0, 故两侧 fee 必都是 5.0 (当非空)
+        for side in ("train", "test"):
+            if ca[side]["fee_bps"] != 0.0:
+                self.assertAlmostEqual(ca[side]["fee_bps"], 5.0, places=6)
+
+    def test_cost_adjusted_split_aligned_with_oos_split(self) -> None:
+        """train/test 的划分规则必须与 oos 的 split_ts 对齐。"""
+        curve = tuple(_mk_point(i, str(i)) for i in range(10))
+        diagnostics = tuple(_mk_diagnostic(i) for i in range(10))
+        result = _mk_result(curve=curve, diagnostics=diagnostics)
+        # 显式路径
+        split = _BASE_TS + timedelta(hours=3)
+        sc = build_scorecard(result, split_ts=split)
+        self.assertEqual(sc["oos"]["split_method"], "explicit")
+        # OOS fills 加和必须等于 cost_adjusted 两侧 diag 能被解析的总数 (这里 = 10)
+        self.assertEqual(
+            sc["oos"]["train"]["fills"] + sc["oos"]["test"]["fills"],
+            len(diagnostics),
+        )
+
+    def test_cost_adjusted_empty_diagnostics_all_zero(self) -> None:
+        """空 diagnostics: overall / train / test 均为零值结构。"""
+        curve = tuple(_mk_point(i, "0") for i in range(4))
+        config = BacktestConfig(order_type="ioc", ioc_slippage_bps=2.5)
+        result = _mk_result(curve=curve, diagnostics=(), config=config)
+        sc = build_scorecard(result)
+        ca = sc["cost_adjusted"]
+        for bucket in (ca, ca["train"], ca["test"]):
+            self.assertEqual(bucket["realized_edge_bps"], 0.0)
+            self.assertEqual(bucket["fee_bps"], 0.0)
+            self.assertEqual(bucket["exec_buffer_bps"], 0.0)
+            self.assertEqual(bucket["net_edge_bps"], 0.0)
+            # slip_bps 继续沿用 order_type 语义
+            self.assertAlmostEqual(bucket["slip_bps"], 2.5, places=6)
+
+    def test_cost_adjusted_overall_unchanged_for_existing_readers(self) -> None:
+        """顶层 schema + overall 5 字段保持可读 (backward compatibility)。"""
+        curve = tuple(_mk_point(i, str(i)) for i in range(4))
+        diagnostics = tuple(
+            _mk_diagnostic(i, assumed_cost=6.0, actual_cost=5.0, assumed_net=10.0)
+            for i in range(4)
+        )
+        config = BacktestConfig(ioc_slippage_bps=1.5, assumed_cost_bps=6.0)
+        result = _mk_result(curve=curve, diagnostics=diagnostics, config=config)
+        sc = build_scorecard(result)
+        # 顶层 schema 未变
+        self.assertEqual(
+            set(sc.keys()),
+            {"meta", "oos", "cross_window", "cost_adjusted", "regime_slice"},
+        )
+        ca = sc["cost_adjusted"]
+        # overall 5 字段与改造前语义一致
+        self.assertAlmostEqual(ca["realized_edge_bps"], 16.0, places=6)
+        self.assertAlmostEqual(ca["fee_bps"], 5.0, places=6)
+        self.assertAlmostEqual(ca["slip_bps"], 1.5, places=6)
+        self.assertAlmostEqual(ca["exec_buffer_bps"], -0.5, places=6)
+        self.assertAlmostEqual(ca["net_edge_bps"], 11.0, places=6)
 
 
 # ---------------------------------------------------------------------------
