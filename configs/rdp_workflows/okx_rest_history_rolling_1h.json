@@ -1,0 +1,21 @@
+{
+  "workflow": "okx_rest_history_rolling_1h",
+  "description": "Platform hygiene (2026-04-23): 每小时 rolling 拉取 OKX 3 个 REST history endpoint 到 Bronze 表, 恢复 2026-04-20 后停采的 OI/mark/long-short 数据. 从设计缺口(backfill 脚本存在但没 scheduled)转为自动调度. 已有 UPSERT 幂等保证, rolling 1d 窗口只重写最后 24h 数据无污染. 每 1h ~19 req 公共端点, 远低于 20 req/2s rate limit.",
+  "schedule_hint": "every 1 hour @ minute 20 UTC",
+  "schedule": {
+    "enabled": true,
+    "frequency": "hourly",
+    "interval_hours": 1,
+    "minute_utc": 20
+  },
+  "tasks": [
+    {
+      "name": "rolling_rest_history_1d_window",
+      "description": "拉 BTC-USDT-SWAP 的 OI history 1h / mark price 1m / long-short 5m, 窗口=1d rolling, UPSERT 到 Bronze. allow_failure=true 单次失败不阻塞下次. 写入: bronze.market_oi_history_1h, bronze.market_mark_price_candles_1m, bronze.market_long_short_ratio_5m.",
+      "command": "python scripts/rdp_backfill_okx_rest_history.py --symbol BTC-USDT-SWAP --days-oi 1 --days-mark 1 --days-ls 1 --apply",
+      "timeout_seconds": 180,
+      "enabled": true,
+      "allow_failure": true
+    }
+  ]
+}
