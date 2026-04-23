@@ -507,6 +507,10 @@ class TestReadinessEvaluatorCheck2:
             "phase5_governance_evidence": {"quality_health": "healthy"},
         }
 
+    @staticmethod
+    def _get_check(result: dict[str, Any], name: str) -> dict[str, Any]:
+        return next(c for c in result["checks"] if c["check"] == name)
+
     def test_check2_passes_when_combos_succeeded(self):
         """combos 有 succeeded → attribution_ok = True。"""
         from aats.data_platform.decision_system.readiness_evaluator import (
@@ -623,8 +627,8 @@ class TestReadinessEvaluatorCheck2:
         )
         assert check2["passed"] is True
 
-    def test_check2_no_phase3_data_skipped(self):
-        """无 Phase 3 数据应视为中性（不阻塞）。"""
+    def test_check2_no_phase3_data_fails_readiness(self):
+        """无 Phase 3 数据必须 failed check；不能再"跳过即通过"。"""
         from aats.data_platform.decision_system.readiness_evaluator import (
             evaluate_promotion_readiness,
         )
@@ -632,11 +636,26 @@ class TestReadinessEvaluatorCheck2:
         evidence = self._build_evidence(p3_round_count=0)
         result = evaluate_promotion_readiness(evidence, [], [])
 
-        check2 = next(
-            c for c in result["checks"]
-            if c["check"] == "attribution_no_severe_issue"
+        check2 = self._get_check(result, "attribution_no_severe_issue")
+        assert check2["passed"] is False
+        assert result["readiness"] != "ready_for_next_live_test"
+
+    def test_check2_phase3_replay_only_fails(self):
+        """latest_round.replay_only=True 时 Phase 3 attribution 必须 failed。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
         )
-        assert check2["passed"] is True, "无 Phase 3 数据时应视为中性"
+
+        evidence = self._build_evidence(
+            p3_combos={"independent_15m": {"status": "succeeded"}},
+            p3_latest_extra={"replay_only": True, "overall_status": "succeeded"},
+        )
+        result = evaluate_promotion_readiness(evidence, [], [])
+
+        check2 = self._get_check(result, "attribution_no_severe_issue")
+        assert check2["passed"] is False, "replay_only attribution 不应 promote"
+        assert "replay_only" in check2["detail"]
+        assert result["readiness"] != "ready_for_next_live_test"
 
 
 # =========================================================================
@@ -786,10 +805,12 @@ class TestReadinessEvaluatorIntegration:
 
         evidence: dict[str, Any] = {
             "phase2_evidence": {
-                "aggregate_stats": {
-                    "experiments_with_openings": 3,
-                    "mean_positive_edge_ratio": 0.4,
-                    "max_opening_count": 10,
+                "combo_stats": {
+                    "independent_15m": {
+                        "available": True,
+                        "experiments_with_openings": 3,
+                        "mean_positive_edge_ratio": 0.4,
+                    },
                 },
             },
             "phase3_evidence": {
@@ -798,6 +819,7 @@ class TestReadinessEvaluatorIntegration:
                 "latest_round": {
                     "round_id": "test",
                     "overall_status": "succeeded",
+                    "replay_only": False,
                     "combos": {
                         "independent_15m": {"status": "succeeded"},
                         "independent_1h": {"status": "succeeded"},
@@ -815,6 +837,7 @@ class TestReadinessEvaluatorIntegration:
                             "cost_summary": {
                                 "cost_adjusted_edge_mean": 2.0,
                                 "full_fill_ratio": 0.8,
+                                "total_candidates": 10,
                             },
                         },
                     },
@@ -884,3 +907,213 @@ class TestReadinessEvaluatorIntegration:
             if c["check"] == "attribution_no_severe_issue"
         )
         assert check2["passed"] is False, "旧 manifest 无有效状态应 FAIL"
+
+
+# =========================================================================
+# Section 9: readiness_evaluator — gate hardening (SoW: golden_path_readiness_gate_hardening)
+# =========================================================================
+
+
+def _gate_evidence_with_overrides(
+    *,
+    phase3: dict[str, Any] | None = None,
+    phase4: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """完整可 promote 证据模板；调用方用 overrides 只替换需要被测的 Phase。"""
+    return {
+        "phase2_evidence": {
+            "combo_stats": {
+                "independent_15m": {
+                    "available": True,
+                    "experiments_with_openings": 3,
+                    "mean_positive_edge_ratio": 0.4,
+                },
+            },
+        },
+        "phase3_evidence": phase3 if phase3 is not None else {
+            "round_count": 1,
+            "trusted_round_count": 1,
+            "latest_round": {
+                "round_id": "r1",
+                "replay_only": False,
+                "overall_status": "succeeded",
+                "combos": {
+                    "independent_15m": {"status": "succeeded"},
+                },
+            },
+        },
+        "phase4_evidence": phase4 if phase4 is not None else {
+            "round_count": 1,
+            "trusted_round_count": 1,
+            "latest_round": {
+                "round_id": "r1",
+                "combos": {
+                    "independent_15m": {
+                        "status": "succeeded",
+                        "cost_summary": {
+                            "cost_adjusted_edge_mean": 2.0,
+                            "full_fill_ratio": 0.8,
+                            "total_candidates": 10,
+                        },
+                    },
+                },
+            },
+        },
+        "phase5_governance_evidence": {
+            "quality_health": "healthy",
+            "frozen_parameter_sets": [{"parameter_set_id": "ps_001"}],
+            "candidate_parameter_sets": [],
+        },
+    }
+
+
+_GATE_PROMOTE_CANDIDATES = [
+    {"decision": "promote_candidate", "parameter_set_id": "ps_001", "score_ratio": 0.85},
+]
+_GATE_FT_DECISIONS = [
+    {"combo_key": "independent_15m", "decision": "keep_active", "confidence": "high"},
+]
+
+
+class TestReadinessGateHardening:
+    """SoW: 只认完整、非 replay-only 的 Phase 3/4 证据；移除 critical subset 中径。"""
+
+    def test_baseline_full_evidence_is_ready(self):
+        """完整证据仍应 ready_for_next_live_test (确保 fixture 自身有效)。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
+        )
+
+        result = evaluate_promotion_readiness(
+            _gate_evidence_with_overrides(),
+            _GATE_PROMOTE_CANDIDATES,
+            _GATE_FT_DECISIONS,
+        )
+        assert result["readiness"] == "ready_for_next_live_test"
+        assert result["overall_confidence"] == "high"
+        assert result["checks_failed"] == 0
+
+    def test_missing_phase3_blocks_readiness(self):
+        """Phase 3 无数据不能再跳过通过，必须阻塞 readiness。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
+        )
+
+        evidence = _gate_evidence_with_overrides(phase3={"round_count": 0})
+        result = evaluate_promotion_readiness(
+            evidence, _GATE_PROMOTE_CANDIDATES, _GATE_FT_DECISIONS,
+        )
+        check = next(
+            c for c in result["checks"] if c["check"] == "attribution_no_severe_issue"
+        )
+        assert check["passed"] is False
+        assert result["readiness"] == "not_ready_attribution_issue"
+        assert any("Phase 3" in b for b in result["blockers"])
+
+    def test_replay_only_phase3_blocks_readiness(self):
+        """Phase 3 latest round replay_only=True 必须 failed，并写出 replay_only 说明。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
+        )
+
+        evidence = _gate_evidence_with_overrides(
+            phase3={
+                "round_count": 1,
+                "trusted_round_count": 1,
+                "latest_round": {
+                    "round_id": "r_replay",
+                    "replay_only": True,
+                    "overall_status": "succeeded",
+                    "combos": {
+                        "independent_15m": {"status": "succeeded"},
+                    },
+                },
+            },
+        )
+        result = evaluate_promotion_readiness(
+            evidence, _GATE_PROMOTE_CANDIDATES, _GATE_FT_DECISIONS,
+        )
+        check = next(
+            c for c in result["checks"] if c["check"] == "attribution_no_severe_issue"
+        )
+        assert check["passed"] is False
+        assert "replay_only" in check["detail"]
+        assert any("replay_only" in b for b in result["blockers"])
+        assert result["readiness"] != "ready_for_next_live_test"
+
+    def test_missing_phase4_blocks_readiness(self):
+        """Phase 4 无数据不能再跳过通过，必须阻塞 readiness。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
+        )
+
+        evidence = _gate_evidence_with_overrides(phase4={"round_count": 0})
+        result = evaluate_promotion_readiness(
+            evidence, _GATE_PROMOTE_CANDIDATES, _GATE_FT_DECISIONS,
+        )
+        check = next(
+            c for c in result["checks"] if c["check"] == "execution_not_severe"
+        )
+        assert check["passed"] is False
+        assert result["readiness"] == "not_ready_execution_issue"
+        assert any("Phase 4" in b for b in result["blockers"])
+
+    def test_phase4_latest_round_missing_cost_summary_blocks_readiness(self):
+        """Phase 4 latest round 全部 combo 缺可用 cost_summary 时必须 failed。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
+        )
+
+        evidence = _gate_evidence_with_overrides(
+            phase4={
+                "round_count": 1,
+                "trusted_round_count": 1,
+                "latest_round": {
+                    "round_id": "r1",
+                    "combos": {
+                        "independent_15m": {"status": "succeeded", "cost_summary": {}},
+                    },
+                },
+            },
+        )
+        result = evaluate_promotion_readiness(
+            evidence, _GATE_PROMOTE_CANDIDATES, _GATE_FT_DECISIONS,
+        )
+        check = next(
+            c for c in result["checks"] if c["check"] == "execution_not_severe"
+        )
+        assert check["passed"] is False
+        assert result["readiness"] == "not_ready_execution_issue"
+
+    def test_critical_subset_only_no_longer_ready(self):
+        """旧中径：research+governance+promote_candidate 通过但 attribution 失败，
+        不应再返回 ready_for_next_live_test。"""
+        from aats.data_platform.decision_system.readiness_evaluator import (
+            evaluate_promotion_readiness,
+        )
+
+        # Phase 3 全部 combo failed → attribution 失败；其余保持"关键子集"通过
+        evidence = _gate_evidence_with_overrides(
+            phase3={
+                "round_count": 1,
+                "trusted_round_count": 1,
+                "latest_round": {
+                    "round_id": "r1",
+                    "replay_only": False,
+                    "combos": {
+                        "independent_15m": {"status": "failed"},
+                    },
+                },
+            },
+        )
+        result = evaluate_promotion_readiness(
+            evidence, _GATE_PROMOTE_CANDIDATES, _GATE_FT_DECISIONS,
+        )
+        # research_stability / governance_healthy / has_promote_candidate 都通过
+        passed_names = {c["check"] for c in result["checks"] if c["passed"]}
+        assert "research_stability" in passed_names
+        assert "governance_healthy" in passed_names
+        assert "has_promote_candidate" in passed_names
+        # 但 attribution failed，不应再被 critical subset 救回来
+        assert result["readiness"] == "not_ready_attribution_issue"
+        assert result["overall_confidence"] != "medium" or result["readiness"] != "ready_for_next_live_test"

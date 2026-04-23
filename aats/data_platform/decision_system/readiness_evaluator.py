@@ -19,6 +19,25 @@ READINESS_STATUSES = (
 )
 
 
+def _phase4_has_usable_cost_summary(latest_round: dict[str, Any]) -> bool:
+    """Phase 4 latest round 至少需要一个 combo 带有可用 cost_summary。
+
+    "可用" 的最低门槛：cost_summary 为非空 dict，且带有 cost_adjusted_edge_mean
+    或 total_candidates 字段。否则视为执行证据缺失。
+    """
+    combos = latest_round.get("combos") or {}
+    for combo_data in combos.values():
+        cost_summary = combo_data.get("cost_summary") or {}
+        if not cost_summary:
+            continue
+        if (
+            cost_summary.get("cost_adjusted_edge_mean") is not None
+            or cost_summary.get("total_candidates") is not None
+        ):
+            return True
+    return False
+
+
 def evaluate_promotion_readiness(
     evidence_bundle: dict[str, Any],
     upgrade_candidates: list[dict[str, Any]],
@@ -31,13 +50,19 @@ def evaluate_promotion_readiness(
     has_promote_candidate / has_keep_active_ft。
 
     readiness 按如下规则分类：
-    - 全部通过 → ``ready_for_next_live_test`` (confidence=high)
-    - 仅"关键"子集 {research_stability, governance_healthy,
-      has_promote_candidate} 全通过 → ``ready_for_next_live_test`` (confidence=medium)
+    - **全部通过** → ``ready_for_next_live_test`` (confidence=high)
     - 否则按首个失败检查的位置归类到具体的 not_ready_* 状态；
       此时 confidence 表达"对 not_ready 判定的确信度"：
       blockers<=2 → medium（个别指标失败，可能是噪声），>2 → high（多指标
       同时失败，确信现在不宜上线）。
+
+    Phase 3 / Phase 4 均不允许"无数据即跳过通过"：
+    - Phase 3 无 round、``latest_round.replay_only=True``、或 combos / overall_status
+      无法证明成功 → ``attribution_no_severe_issue`` failed。
+    - Phase 4 无 round、或 latest round 所有 combo 都缺少可用 ``cost_summary``
+      → ``execution_not_severe`` failed。
+
+    不存在"关键子集通过即 medium ready"的中径：半成品 / replay-only 结果不能 promote。
     """
     checks: list[dict[str, Any]] = []
     blockers: list[str] = []
@@ -85,7 +110,21 @@ def evaluate_promotion_readiness(
 
     p3 = evidence_bundle.get("phase3_evidence", {})
     p3_round_count = p3.get("round_count", 0)
-    if p3_round_count > 0:
+    if p3_round_count <= 0:
+        checks.append({
+            "check": "attribution_no_severe_issue",
+            "passed": False,
+            "detail": "no_phase3_round_data",
+        })
+        blockers.append("缺少 Phase 3 attribution 证据，不能 promote")
+    elif p3.get("latest_round", {}).get("replay_only"):
+        checks.append({
+            "check": "attribution_no_severe_issue",
+            "passed": False,
+            "detail": "phase3_latest_round_replay_only",
+        })
+        blockers.append("Phase 3 latest round 为 replay_only attribution，无法 promote")
+    else:
         p3_latest = p3.get("latest_round", {})
         p3_combos = p3_latest.get("combos", {})
         if p3_combos:
@@ -105,22 +144,36 @@ def evaluate_promotion_readiness(
             "detail": f"latest_phase3_status={p3_status}",
         })
         if not attribution_ok:
-            blockers.append(f"归因显示严重问题: latest_phase3_status={p3_status}")
-    else:
-        checks.append({
-            "check": "attribution_no_severe_issue",
-            "passed": True,
-            "detail": "无 Phase 3 数据，跳过",
-        })
+            blockers.append(
+                f"Phase 3 combos/overall_status 无法证明成功: latest_phase3_status={p3_status}",
+            )
 
     p4 = evidence_bundle.get("phase4_evidence", {})
     p4_round_count = p4.get("round_count", 0)
-    if p4_round_count > 0:
+    if p4_round_count <= 0:
+        checks.append({
+            "check": "execution_not_severe",
+            "passed": False,
+            "detail": "no_phase4_round_data",
+        })
+        blockers.append("缺少 Phase 4 execution realism 证据，不能 promote")
+    elif not _phase4_has_usable_cost_summary(p4.get("latest_round", {})):
+        checks.append({
+            "check": "execution_not_severe",
+            "passed": False,
+            "detail": (
+                f"phase4_rounds={p4_round_count}, "
+                "latest_round_has_no_usable_cost_summary"
+            ),
+        })
+        blockers.append("Phase 4 latest round 无可用 combo cost_summary，无法验证执行成本")
+    else:
         p4_latest = p4.get("latest_round", {})
         severe_exec = False
         for combo_data in p4_latest.get("combos", {}).values():
-            adj_edge = combo_data.get("cost_summary", {}).get("cost_adjusted_edge_mean", 0)
-            if adj_edge < -5.0:
+            cost_summary = combo_data.get("cost_summary") or {}
+            adj_edge = cost_summary.get("cost_adjusted_edge_mean")
+            if adj_edge is not None and adj_edge < -5.0:
                 severe_exec = True
                 break
         execution_ok = not severe_exec
@@ -131,12 +184,6 @@ def evaluate_promotion_readiness(
         })
         if not execution_ok:
             blockers.append("执行 realism 显示严重成本问题")
-    else:
-        checks.append({
-            "check": "execution_not_severe",
-            "passed": True,
-            "detail": "无 Phase 4 数据，跳过",
-        })
 
     p5 = evidence_bundle.get("phase5_governance_evidence", {})
     health = p5.get("quality_health")
@@ -184,17 +231,10 @@ def evaluate_promotion_readiness(
         blockers.append("无 family/timeframe 被建议 keep_active")
 
     all_passed = all(check["passed"] for check in checks)
-    critical_passed = all(
-        check["passed"] for check in checks
-        if check["check"] in {"research_stability", "governance_healthy", "has_promote_candidate"}
-    )
 
     if all_passed:
         readiness = "ready_for_next_live_test"
         overall_confidence = "high"
-    elif critical_passed:
-        readiness = "ready_for_next_live_test"
-        overall_confidence = "medium"
     else:
         if not checks[0]["passed"]:
             readiness = "not_ready_more_research_needed"
