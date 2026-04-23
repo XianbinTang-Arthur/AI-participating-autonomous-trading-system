@@ -94,7 +94,7 @@ bash scripts/ops/route_a_daily_check.sh
 | 1 | 16 个 `aats-*` 容器 healthy | 全部 `Status=healthy` | FAIL (任一不 healthy) |
 | 2 | Silver 依赖链三表最新 bar < 30min | `market_trade_flow_15m` / `market_orderbook_metrics_15m` / `market_swap_candles_15m` 的 `max(ts)` 距 now 不超 30min | WARN 30-60min, FAIL > 60min |
 | 3 | 三表 cadence 对齐 | 三表 `max(ts)` 极差 ≤ 15min (1 bar) | WARN > 15min |
-| 4 | 24h task queue | rolling workflow 非 done 数 ≤ 2 | WARN 1-2, FAIL > 2 |
+| 4 | 24h task queue | (a) rolling workflow 24h 非 done 数 ≤ 2; (b) 末段连续未 done streak ≤ 1 | (a) WARN 1-2, FAIL > 2; (b) WARN streak ≥ 2, FAIL streak ≥ 3 |
 | 5 | 观察窗内 Silver gap count (三表各自) | 0 gap | WARN = 1, FAIL > 1 |
 | 6 | Microstructure 24h empty-bar / no-data | `trade_flow_15m` 命中 `trades_no_data` 的行数 = 0 **且** `orderbook_metrics_15m` 同时命中 `orderbook_bbo_no_data`+`orderbook_books5_no_data` 的行数 = 0 | WARN 1-4, FAIL > 4 (每表独立判定) |
 | 7 | Runtime mode 守门 | `ai_operating_mode=baseline_only` | FAIL 任何其他值 |
@@ -128,8 +128,8 @@ input 实际已饿死。check 6 直接扫 `silver.market_trade_flow_15m.quality_
 | 2 | 30min WARN | cadence 是 15min bar. 1 bar 延迟 (= 15-30min age) 可能是 15min tick 执行窗口偏移; > 30min 说明至少错过 1 个 tick, 进 WARN 排查. |
 | 2 | 60min FAIL | 连续错过 4 次 tick (= 60min/15min) 说明 pipeline 明显卡住, 观察窗失去"连续产出"前提, 需 reset. |
 | 3 | 15min cadence diff | 三表设计上同 cadence (commit 15dd04e + scheduler 测试 test_candles_rolling_15m_slot_aligns_to_microstructure_cadence 锁定; trade_flow/orderbook_metrics 同 silver run 同 bar 写入). 极差 > 1 bar = 某条线落后 (脚本打印最落后表名), 影响 T-bar 对齐 + watermark 推进. |
-| 4 | 2 次 WARN 阈值 | 24h = 96 个 15min tick, 2 / 96 ≈ 2.08% 容忍偶发网络抖动 / OKX REST 5xx. > 2 次说明系统性问题. |
-| 4 | **未**区分 contiguous vs sparse | 简化 v0.1. 若观察窗期间发现"连续 2 次同 workflow failed" 更严重但本测试没抓, operator 需手工查 log_tail 判断. 留 v0.2 迭代点. |
+| 4a | 2 次 WARN 阈值 | 24h = 96 个 15min tick, 2 / 96 ≈ 2.08% 容忍偶发网络抖动 / OKX REST 5xx. > 2 次说明系统性问题. |
+| 4b | streak ≥ 2 WARN / ≥ 3 FAIL | 单次失败下一 tick 自愈是 `allow_failure=true` 的设计语义; 末段连续 2 次未 done = 自愈未生效, 需 operator 主动看 `log_tail`; 连续 3 次 (= 45min) 自愈链路视为已断, 即将拖垮 check 2 freshness, 直接 reset 观察窗. SQL 取每 rolling workflow 自上次 `status='done'` 之后的非 done 数 (24h 内), 因此 streak 永远是 4a 总数的子集 — 4b 不会把 4a 的 PASS 提级 FAIL, 只在 4a 已经 PASS/WARN 时显式补充自愈语义 (保守附加判定). |
 | 5 | 1 gap WARN | 允许 1 次偶发数据源断 (OKX 维护 / 网络瞬断), UPSERT 幂等 + catchup 脚本能补. > 1 gap 需重置, 以免数据空洞污染 alpha 研究. |
 | 6 | 1-4 bar WARN / >4 FAIL | 24h = 96 bar. silver runner 遇 bronze 全空会 commit "一行 NULL/0 + `*_no_data` quality_flags" 并推 watermark (`COMMITTED_BUT_EMPTY`, commit c331e2b), 于是 freshness/cadence/gap 三项全绿但输入其实饿死 —— 必须直接扫 `quality_flags` 才能抓到. ≤ 4 bar (≈ 1h) 容忍 collector 重启 / WS 断线自愈; > 4 bar (> 1h 连续饿死) 说明 bronze 上游系统性中断, 观察窗的 "连续 microstructure 输入" 前提挖空, 必须 reset. orderbook 要求 bbo + books5 双 flag 命中才计 (和 merger `_TABLE_NO_DATA_TRIGGERS['orderbook']` 对齐), 避免把 "单 source 缺, row 还有部分真实数据" 误报成饿死. |
 | 7 | FAIL 任何其他值 | §2.4 要求观察窗期间 runtime mode 不可改. ai_assisted / ai_decision_maker 都触发 FAIL + 观察窗 reset 7 天. |
@@ -203,9 +203,12 @@ input 实际已饿死。check 6 直接扫 `silver.market_trade_flow_15m.quality_
 
 ### 3.5 WARN case: 偶发 task 失败
 
-rolling workflow 设计上 `allow_failure=true`, 单次失败由下一个 15min tick 自愈。24h 内 ≤ 2 次是正常容忍。
+rolling workflow 设计上 `allow_failure=true`, 单次失败由下一个 15min tick 自愈。24h 内 ≤ 2 次是正常容忍 (check 4a)。
 
-但若出现**连续 2 次以上同一 workflow 失败**, 即使没破 FAIL 阈值, operator 也要主动看 `log_tail` 找原因, 不能放任。
+**末段连续 streak (check 4b) 触发后必须主动排查**:
+
+- streak ≥ 2 (WARN): 同一 rolling workflow 自上次 `done` 后已连续 2 个 tick 未 done, 自愈链路没有按 `allow_failure=true` 设计自动恢复。立即 `psql -c "SELECT task_id, status, requested_at, exit_code, log_tail FROM governance.rdp_task_queue WHERE workflow=... ORDER BY requested_at DESC LIMIT 5"` 看最近 5 次 task 的 log_tail / exit_code。
+- streak ≥ 3 (FAIL): 自愈链路视为已断, 观察窗 reset, 起算点延后到自愈恢复当日。处理参照 §3.2 (Silver pipeline 断档) — check 4b 经常先于 check 2 freshness 触发, 是早期信号。
 
 ---
 

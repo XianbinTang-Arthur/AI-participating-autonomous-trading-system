@@ -241,6 +241,52 @@ else
     fi
 fi
 
+# 4b. rolling workflow 末段连续未 done streak (2026-04-23 补)
+# 为什么单独看 streak: 上面 4a 只数 24h 总非 done 数, 把 "3 次稀疏失败 + 中间
+# 各有 done 自愈" 与 "3 次最近 tick 连续失败" 视为同一情况. 后者意味着 rolling
+# 自愈链路 (allow_failure=true → 下一 tick 自动重试) 已失效, 即使 freshness
+# (check 2) 还没掉到 30min 阈值, 也很快会掉. 单独追一次 streak 让 operator
+# 在风险显化前看到信号.
+#
+# SQL 取每个 rolling workflow 上次 done 之后 (24h 范围内) 的非 done 数 =
+# 末段连续 streak. 因为 streak 是 4a 总数的子集, 永远不会把 4a 的 PASS
+# 提级为 FAIL — 只是补充自愈语义 (保守).
+
+contiguous_raw=$(psql_q "
+    WITH last_done AS (
+        SELECT workflow, MAX(requested_at) AS last_done_at
+        FROM governance.rdp_task_queue
+        WHERE workflow IN ('microstructure_silver_15m', 'candles_rolling_15m')
+          AND status = 'done'
+        GROUP BY workflow
+    )
+    SELECT q.workflow || ':' || COUNT(*)
+    FROM governance.rdp_task_queue q
+    LEFT JOIN last_done d ON d.workflow = q.workflow
+    WHERE q.workflow IN ('microstructure_silver_15m', 'candles_rolling_15m')
+      AND q.status != 'done'
+      AND (d.last_done_at IS NULL OR q.requested_at > d.last_done_at)
+      AND q.requested_at > NOW() - INTERVAL '24 hours'
+    GROUP BY q.workflow
+    ORDER BY q.workflow")
+
+if is_psql_err "$contiguous_raw"; then
+    fail "task queue 24h contiguous streak 查询失败 (infra/数据源不可用, 见上方 stderr)"
+else
+    contiguous_streak=$(printf '%s\n' "$contiguous_raw" | grep -v '^$' || true)
+    if [[ -n "$contiguous_streak" ]]; then
+        log "  rolling workflow 末段连续未 done streak (自上次 done 之后, 24h 内):"
+        echo "$contiguous_streak" | sed 's/^/      /'
+        max_streak=$(echo "$contiguous_streak" | awk -F: 'BEGIN{m=0} {if ($2+0 > m) m=$2+0} END {print m+0}')
+        worst_wf=$(echo "$contiguous_streak" | awk -F: -v m="$max_streak" '$2+0 == m {print $1; exit}')
+        if [[ $max_streak -ge 3 ]]; then
+            fail "rolling workflow ${worst_wf} 末段连续未 done streak=${max_streak} (≥3, 自愈链路断, 观察窗需重置)"
+        elif [[ $max_streak -ge 2 ]]; then
+            warn "rolling workflow ${worst_wf} 末段连续未 done streak=${max_streak} (≥2, 自愈未生效, 排查 log_tail)"
+        fi
+    fi
+fi
+
 # ─────────────────────────────────────────────────────────────
 # 5. 观察窗区间 Silver 连续性 (无 gap)
 # ─────────────────────────────────────────────────────────────
