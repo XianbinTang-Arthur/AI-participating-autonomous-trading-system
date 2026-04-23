@@ -20,6 +20,14 @@
 #   # 仅看 stdout, 不落盘 (调试用):
 #   AATS_SKIP_DAILY_CHECK_LOG=true bash scripts/ops/route_a_daily_check.sh
 #
+#   # 跳过机读 JSON summary 落盘 (调试用, 例如手跑时不想覆盖当日 JSON):
+#   AATS_SKIP_DAILY_CHECK_JSON=true bash scripts/ops/route_a_daily_check.sh
+#
+# Machine-readable summary:
+#   除了 human-readable tee log, 每次跑完自动写
+#   artifacts/route_a_observation_window/<YYYY-MM-DD>.json (最近一次运行
+#   快照, 同日多次跑会覆盖). 字段见 ops doc §5.
+#
 # Exit codes:
 #   0 = 全部 check 通过 (观察窗计数 +1)
 #   1 = 有 WARN (观察窗不重置, 但需要 operator 注意)
@@ -54,11 +62,35 @@ fi
 WARN_COUNT=0
 FAIL_COUNT=0
 
+# 记录每个 check 的状态, 用于最后写机读 JSON summary (automation / PM loop
+# 可 stable consume, 不用 scrape 终端文本). CURRENT_SECTION 由 step() 更新,
+# pass/warn/fail 把 (section, status, message) 塞进 STATUS_ENTRIES.
+CURRENT_SECTION=""
+STATUS_ENTRIES=()
+
+# JSON string body 转义: 只处理 \ 和 " (pass/warn/fail 消息均为单行, 无需
+# 处理换行 / 控制字符; 引入 python/jq 属过度工程).
+_json_escape() {
+    local s="$1"
+    s=${s//\\/\\\\}
+    s=${s//\"/\\\"}
+    printf '%s' "$s"
+}
+
+_record_status() {
+    # $1=status (pass|warn|fail), $2=message
+    local status="$1" message="$2"
+    local safe_section safe_msg
+    safe_section=$(_json_escape "$CURRENT_SECTION")
+    safe_msg=$(_json_escape "$message")
+    STATUS_ENTRIES+=("{\"section\":\"${safe_section}\",\"status\":\"${status}\",\"message\":\"${safe_msg}\"}")
+}
+
 log()   { printf '[%s] %s\n' "$(date -u '+%H:%M:%S')" "$*"; }
-pass()  { printf '  \033[32m✓ PASS\033[0m  %s\n' "$*"; }
-warn()  { printf '  \033[33m⚠ WARN\033[0m  %s\n' "$*" >&2; WARN_COUNT=$((WARN_COUNT+1)); }
-fail()  { printf '  \033[31m✗ FAIL\033[0m  %s\n' "$*" >&2; FAIL_COUNT=$((FAIL_COUNT+1)); }
-step()  { printf '\n═══ %s ═══\n' "$*"; }
+pass()  { _record_status pass "$*"; printf '  \033[32m✓ PASS\033[0m  %s\n' "$*"; }
+warn()  { _record_status warn "$*"; printf '  \033[33m⚠ WARN\033[0m  %s\n' "$*" >&2; WARN_COUNT=$((WARN_COUNT+1)); }
+fail()  { _record_status fail "$*"; printf '  \033[31m✗ FAIL\033[0m  %s\n' "$*" >&2; FAIL_COUNT=$((FAIL_COUNT+1)); }
+step()  { CURRENT_SECTION="$*"; printf '\n═══ %s ═══\n' "$*"; }
 
 # infra/query 失败哨兵. psql_q / psql_live 遇到 wsl / docker / psql 任一环节
 # 非零退出时在 stdout 输出该值, 同时把 stderr 摘要打到屏幕; 下游调用点用
@@ -437,12 +469,47 @@ log "Warnings : ${WARN_COUNT}"
 log "Fails    : ${FAIL_COUNT}"
 
 if [[ $FAIL_COUNT -gt 0 ]]; then
-    printf '\n\033[31m✗ OVERALL: FAIL\033[0m — 观察窗需重置, 修问题后从当前日重起\n'
-    exit 2
+    OVERALL="fail"
+    EXIT_CODE=2
 elif [[ $WARN_COUNT -gt 0 ]]; then
-    printf '\n\033[33m⚠ OVERALL: PASS WITH WARN\033[0m — 观察窗计数 +1 天, 注意 warn\n'
-    exit 1
+    OVERALL="pass_with_warn"
+    EXIT_CODE=1
 else
-    printf '\n\033[32m✓ OVERALL: PASS\033[0m — 观察窗计数 +1 天\n'
-    exit 0
+    OVERALL="pass"
+    EXIT_CODE=0
 fi
+
+# 机读 summary: 供 automation / PM loop stable consume (不用 scrape 终端).
+# 同日多次跑会覆盖, log 文件保留完整历史; 跳过 JSON 落盘可设
+# AATS_SKIP_DAILY_CHECK_JSON=true (和 _LOG 对称).
+if [[ "${AATS_SKIP_DAILY_CHECK_JSON:-false}" != "true" ]]; then
+    _json_dir="artifacts/route_a_observation_window"
+    mkdir -p "$_json_dir" 2>/dev/null || true
+    _json_file="${_json_dir}/${CHECK_DATE}.json"
+    {
+        printf '{'
+        printf '"generated_at":"%s",' "$CHECK_TS"
+        printf '"window_start":"%s",' "$WINDOW_START_UTC"
+        printf '"window_target":"%s",' "$WINDOW_TARGET_UTC"
+        printf '"overall":"%s",' "$OVERALL"
+        printf '"exit_code":%s,' "$EXIT_CODE"
+        printf '"warn_count":%s,' "$WARN_COUNT"
+        printf '"fail_count":%s,' "$FAIL_COUNT"
+        printf '"checks":['
+        _first=1
+        # bash 4.4+ 下 "${arr[@]}" 对空数组在 set -u 中安全, 无需额外保护.
+        for _entry in "${STATUS_ENTRIES[@]}"; do
+            if (( _first )); then _first=0; else printf ','; fi
+            printf '%s' "$_entry"
+        done
+        printf ']}'
+        printf '\n'
+    } >"$_json_file" 2>/dev/null || log "  (warn: JSON summary 写入失败, 不影响 check 结果)"
+fi
+
+case "$EXIT_CODE" in
+    2) printf '\n\033[31m✗ OVERALL: FAIL\033[0m — 观察窗需重置, 修问题后从当前日重起\n' ;;
+    1) printf '\n\033[33m⚠ OVERALL: PASS WITH WARN\033[0m — 观察窗计数 +1 天, 注意 warn\n' ;;
+    0) printf '\n\033[32m✓ OVERALL: PASS\033[0m — 观察窗计数 +1 天\n' ;;
+esac
+exit "$EXIT_CODE"

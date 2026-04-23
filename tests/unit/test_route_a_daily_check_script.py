@@ -121,3 +121,83 @@ def test_ops_doc_documents_fail_semantics() -> None:
     assert "infra/查询失败语义" in doc
     assert "__PSQL_ERR__" in doc
     assert "数据源本身不可用" in doc
+
+
+def test_script_emits_machine_readable_json_summary(script_text: str) -> None:
+    # 机读 JSON artifact 写到 artifacts/route_a_observation_window/<date>.json;
+    # 字段至少覆盖 generated_at / window_start / window_target / overall /
+    # exit_code / warn_count / fail_count / checks, 自动化 (PM loop 等) 才能
+    # stable consume 不用 scrape 终端文本.
+    assert 'AATS_SKIP_DAILY_CHECK_JSON' in script_text
+    assert '_json_dir="artifacts/route_a_observation_window"' in script_text
+    assert '"${_json_dir}/${CHECK_DATE}.json"' in script_text
+    for field in (
+        '"generated_at":',
+        '"window_start":',
+        '"window_target":',
+        '"overall":',
+        '"exit_code":',
+        '"warn_count":',
+        '"fail_count":',
+        '"checks":',
+    ):
+        assert field in script_text, f"missing JSON field emitter: {field}"
+
+
+def test_script_json_verdicts_use_stable_string_values(script_text: str) -> None:
+    # automation 会 switch 到这三个字面量上, 不能随手改成 "PASS" / "FAIL" 等大写
+    # 变体或加前缀 — 一改就是一次消费者协议破坏.
+    assert 'OVERALL="fail"' in script_text
+    assert 'OVERALL="pass_with_warn"' in script_text
+    assert 'OVERALL="pass"' in script_text
+
+
+def test_script_records_status_for_every_pass_warn_fail(script_text: str) -> None:
+    # pass/warn/fail 三个 helper 都必须 _record_status, 否则 JSON checks
+    # 数组会缺条目, 下游告警 / 看板判定失真.
+    assert "_record_status() {" in script_text
+    assert "pass()  { _record_status pass " in script_text
+    assert "warn()  { _record_status warn " in script_text
+    assert "fail()  { _record_status fail " in script_text
+    # step() 要更新 CURRENT_SECTION 供 _record_status 取到"所在 check 段"
+    assert 'step()  { CURRENT_SECTION="$*";' in script_text
+
+
+def test_script_json_written_before_exit(script_text: str) -> None:
+    # JSON 必须在最终 `exit "$EXIT_CODE"` 之前写; 否则 FAIL 分支会提前退出,
+    # artifacts/ 里的 JSON 永远停留在上一天的 PASS 状态.
+    json_write_idx = script_text.find('_json_file="${_json_dir}/${CHECK_DATE}.json"')
+    exit_idx = script_text.find('exit "$EXIT_CODE"')
+    assert json_write_idx > 0 and exit_idx > 0
+    assert json_write_idx < exit_idx, "JSON writer must run before final exit"
+
+
+def test_script_json_escape_handles_quote_and_backslash(script_text: str) -> None:
+    # 不能依赖 python/jq (项目禁止额外 runtime 依赖), 但至少要转义 \ 和 ";
+    # 少转一样会产生破损 JSON.
+    assert "_json_escape()" in script_text
+    assert r's=${s//\\/\\\\}' in script_text  # \ → \\
+    assert r's=${s//\"/\\\"}' in script_text  # " → \"
+
+
+def test_ops_doc_documents_json_artifact() -> None:
+    doc = DOC_PATH.read_text(encoding="utf-8")
+    # 文档必须告诉 operator JSON 存在 + 字段表
+    assert "<date>.json" in doc or "<YYYY-MM-DD>.json" in doc or ".json" in doc
+    assert "machine-readable" in doc.lower() or "机读" in doc or "机器看" in doc
+    # 字段必须逐条列出, 否则 operator / automation 作者只能猜
+    for field in (
+        "generated_at",
+        "window_start",
+        "window_target",
+        "overall",
+        "exit_code",
+        "warn_count",
+        "fail_count",
+        "checks",
+    ):
+        assert field in doc, f"ops doc missing JSON field: {field}"
+    # 文档必须明说同日覆盖语义, 否则 operator 以为 JSON 也是 append
+    assert "覆盖" in doc
+    # 必须指出 AATS_SKIP_DAILY_CHECK_JSON 的开关, 和 LOG 对称
+    assert "AATS_SKIP_DAILY_CHECK_JSON" in doc

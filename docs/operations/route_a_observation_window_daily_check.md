@@ -232,11 +232,53 @@ rolling workflow 设计上 `allow_failure=true`, 单次失败由下一个 15min 
 每日 check 结果 append 到:
 ```
 artifacts/route_a_observation_window/
-├── 2026-04-22.log   ← reset 后新窗口起点
+├── 2026-04-22.log    ← reset 后新窗口起点 (human-readable tee log)
+├── 2026-04-22.json   ← machine-readable summary (最近一次运行快照)
 ├── 2026-04-23.log
+├── 2026-04-23.json
 ├── ...
-└── 2026-04-29.log
+├── 2026-04-29.log
+└── 2026-04-29.json
 ```
+
+### 5.1 `<date>.log` — 人看
+
+`pass/warn/fail/log/step` 的完整 stdout/stderr append, 同日多次运行会叠加 (`──── daily check run @ <ts> ────` 分隔). 用于归档审计 + operator 逐行回读。`AATS_SKIP_DAILY_CHECK_LOG=true` 可关闭落盘 (调试).
+
+### 5.2 `<date>.json` — 机器看 (2026-04-23 新增)
+
+每次运行结束写一份 compact JSON 到 `<UTC-date>.json`, **同日多次跑会覆盖** (log 已保留完整历史, JSON 只保最近一次快照, 便于 automation / PM loop 拿到"当下状态"而不用解析多 run). 字段:
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `generated_at` | ISO8601 UTC | 脚本开始时间 (= log header 的 `CHECK_TS`) |
+| `window_start` | ISO8601 UTC | 观察窗起点 (当前 = `2026-04-22T00:00:00Z`) |
+| `window_target` | ISO8601 UTC | 观察窗终点 (当前 = `2026-04-29T00:00:00Z`) |
+| `overall` | `"pass" / "pass_with_warn" / "fail"` | 与 exit code 1:1 对应 |
+| `exit_code` | 0 / 1 / 2 | 与 §2.4 exit code 语义一致 |
+| `warn_count` | int | 本次 WARN 数 |
+| `fail_count` | int | 本次 FAIL 数 |
+| `checks` | array | 每个 `pass/warn/fail` 一条, 按触发顺序排列: `{section, status, message}`. `section` 为最近一次 `step()` 标题 (含 `[1/7]`, `[2/7]` 前缀). `status ∈ {pass, warn, fail}`. `message` 是 helper 收到的 `$*`, UTF-8 原文, 不含 ANSI 颜色码. |
+
+示例 (PASS 场景, 部分 checks 省略):
+
+```json
+{
+  "generated_at": "2026-04-24T14:02:11Z",
+  "window_start": "2026-04-22T00:00:00Z",
+  "window_target": "2026-04-29T00:00:00Z",
+  "overall": "pass",
+  "exit_code": 0,
+  "warn_count": 0,
+  "fail_count": 0,
+  "checks": [
+    {"section": "[1/7] Container health", "status": "pass", "message": "16 个 aats-* 容器全部 healthy"},
+    {"section": "[2/7] Silver freshness (依赖链三表)", "status": "pass", "message": "silver.market_trade_flow_15m: latest=2026-04-24 13:45 UTC (17min ago)"}
+  ]
+}
+```
+
+`AATS_SKIP_DAILY_CHECK_JSON=true` 可关闭 JSON 落盘 (例如手跑调试时不想覆盖当日 automation 要看的 JSON)。写失败只记 WARN log, **不影响 check 通过/失败判定** (JSON 是额外 artifact, log 和 exit code 仍是 source-of-truth).
 
 观察窗结束后, 整批日志 (含 reset 前 2026-04-20 ~ 2026-04-22 的 FAIL 归档) commit 到 `docs/research/route_a_phase0/observation_window_logs/` 作为 evidence 提案的一部分 (Silver 稳定性的**第一手证据**, reset 轨迹保留以供审计)。
 
