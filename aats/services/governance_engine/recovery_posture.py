@@ -10,7 +10,6 @@ from aats.services.execution_engine.exit_intent_aggregator import (
     EXIT_EXECUTION_BLOCKER_KINDS,
 )
 from aats.services.runtime_scope import (
-    latest_matching_reconciliation,
     latest_reconciliation_for_scope,
     runtime_state_scope,
 )
