@@ -671,6 +671,17 @@ async def dashboard_bundle(
         except HTTPException as exc:
             read_error = exc
 
+        authoritative_ai_runtime: dict[str, Any] | None = None
+        authoritative_ai_runtime_lock = asyncio.Lock()
+
+        async def _load_authoritative_ai_runtime() -> dict[str, Any]:
+            nonlocal authoritative_ai_runtime
+            if authoritative_ai_runtime is None:
+                async with authoritative_ai_runtime_lock:
+                    if authoritative_ai_runtime is None:
+                        authoritative_ai_runtime = dict(await query.ai_runtime_authoritative())
+            return dict(authoritative_ai_runtime)
+
         def _load_panel_sync(panel_key: str) -> tuple[str, dict[str, Any], float]:
             panel_started_at = perf_counter()
             try:
@@ -702,8 +713,26 @@ async def dashboard_bundle(
             except Exception as exc:
                 return panel_key, {"data": None, "error": _dashboard_panel_error(exc)}, round((perf_counter() - panel_started_at) * 1000.0, 3)
 
+        async def _load_panel(panel_key: str) -> tuple[str, dict[str, Any], float]:
+            if panel_key not in {"aiRuntime", "aiOverview", "aiConfigModel"}:
+                return await asyncio.to_thread(_load_panel_sync, panel_key)
+            panel_started_at = perf_counter()
+            try:
+                if read_error is not None:
+                    raise read_error
+                runtime_payload = await _load_authoritative_ai_runtime()
+                if panel_key == "aiRuntime":
+                    payload = runtime_payload
+                elif panel_key == "aiOverview":
+                    payload = query.ai_overview_with_runtime(runtime_payload)
+                else:
+                    payload = query.ai_config_summary_with_runtime(runtime_payload)
+                return panel_key, {"data": payload, "error": None}, round((perf_counter() - panel_started_at) * 1000.0, 3)
+            except Exception as exc:
+                return panel_key, {"data": None, "error": _dashboard_panel_error(exc)}, round((perf_counter() - panel_started_at) * 1000.0, 3)
+
         results = await asyncio.gather(
-            *[asyncio.to_thread(_load_panel_sync, key) for key in panel_keys]
+            *[_load_panel(key) for key in panel_keys]
         )
         panels: dict[str, dict[str, Any]] = {}
         panel_timings: dict[str, dict[str, float]] = {}

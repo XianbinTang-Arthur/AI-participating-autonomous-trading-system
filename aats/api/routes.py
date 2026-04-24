@@ -510,12 +510,12 @@ async def ai_runtime(request: Request) -> dict[str, Any]:
 
 @router.get("/ai/overview")
 async def ai_overview(request: Request) -> dict[str, Any]:
-    return _query(request).ai_overview()
+    return await _query(request).ai_overview_authoritative()
 
 
 @router.get("/ai-config/summary")
 async def ai_config_summary(request: Request) -> dict[str, Any]:
-    return _query(request).ai_config_summary()
+    return await _query(request).ai_config_summary_authoritative()
 
 
 @router.get("/ai/performance/overview")

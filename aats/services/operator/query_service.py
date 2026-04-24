@@ -4430,8 +4430,18 @@ class OperatorQueryService:
     def ai_overview(self) -> dict[str, Any]:
         return self._cached("ai_overview", self.runtime_queries.ai_overview)
 
+    def ai_overview_with_runtime(self, runtime: dict[str, Any]) -> dict[str, Any]:
+        overview = dict(self.ai_overview())
+        overview["runtime"] = dict(runtime)
+        return overview
+
+    async def ai_overview_authoritative(self) -> dict[str, Any]:
+        return self.ai_overview_with_runtime(await self.ai_runtime_authoritative())
+
     def ai_config_summary(self) -> dict[str, Any]:
-        runtime = self.ai_runtime()
+        return self.ai_config_summary_with_runtime(self.ai_runtime())
+
+    def ai_config_summary_with_runtime(self, runtime: dict[str, Any]) -> dict[str, Any]:
         latest_decision_id = self.latest_decision_id()
         latest_decision_detail = self.decision_view(latest_decision_id) if latest_decision_id is not None else None
         return {
@@ -4450,6 +4460,9 @@ class OperatorQueryService:
                 else latest_decision_detail.get("profile_control_decision"),
             },
         }
+
+    async def ai_config_summary_authoritative(self) -> dict[str, Any]:
+        return self.ai_config_summary_with_runtime(await self.ai_runtime_authoritative())
 
     def _ai_history_visible(self) -> bool:
         return self.runtime.settings.canonical_ai_operating_mode != "baseline_only"

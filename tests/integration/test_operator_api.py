@@ -638,6 +638,69 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(payload["timing"]["panels"].keys()), panel_keys)
         self.assertGreaterEqual(payload["timing"]["panels"]["health"]["duration_ms"], 0.0)
 
+    async def test_ai_config_read_paths_use_authoritative_runtime_when_gateway_has_no_ai_service(self) -> None:
+        runtime = await self._runtime()
+        runtime.ai_service = None
+        authoritative_runtime = {
+            "provider": "deepseek",
+            "configured": True,
+            "provider_ready": True,
+            "configured_operating_mode": "ai_decision_maker",
+            "canonical_configured_operating_mode": "ai_decision_maker",
+            "effective_operating_mode": "ai_decision_maker",
+            "canonical_effective_operating_mode": "ai_decision_maker",
+            "manual_override_active": False,
+            "manual_override_mode": None,
+            "shadow_mode_enabled": True,
+            "strategy_profile_auto_control_configured": True,
+            "strategy_profile_auto_control_effective": True,
+            "strategy_profile_auto_control_reason": "configured_auto",
+            "ai_service_loaded": True,
+            "process_role": "decision",
+            "ai_runtime_source": "remote_decision",
+        }
+        runtime.ai_command_client = Mock()
+        runtime.ai_command_client.invoke = AsyncMock(return_value=authoritative_runtime)
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            summary = client.get("/ai-config/summary")
+            overview = client.get("/ai/overview")
+            bundle = client.get(
+                self._dashboard_bundle_url(
+                    view="aiConfig",
+                    panels=["aiRuntime", "aiConfigModel", "aiOverview"],
+                )
+            )
+
+        self.assertEqual(summary.status_code, 200, summary.text)
+        self.assertEqual(overview.status_code, 200, overview.text)
+        self.assertEqual(bundle.status_code, 200, bundle.text)
+
+        summary_ai = summary.json()["ai"]
+        self.assertEqual(summary_ai["configured_operating_mode"], "ai_decision_maker")
+        self.assertEqual(summary_ai["effective_operating_mode"], "ai_decision_maker")
+        self.assertTrue(summary_ai["strategy_profile_auto_control_configured"])
+        self.assertTrue(summary_ai["strategy_profile_auto_control_effective"])
+
+        overview_runtime = overview.json()["runtime"]
+        self.assertEqual(overview_runtime["configured_operating_mode"], "ai_decision_maker")
+        self.assertEqual(overview_runtime["effective_operating_mode"], "ai_decision_maker")
+
+        bundle_payload = bundle.json()
+        bundle_runtime = bundle_payload["panels"]["aiRuntime"]["data"]
+        bundle_summary_ai = bundle_payload["panels"]["aiConfigModel"]["data"]["ai"]
+        bundle_overview_runtime = bundle_payload["panels"]["aiOverview"]["data"]["runtime"]
+        self.assertIsNone(bundle_payload["panels"]["aiRuntime"]["error"])
+        self.assertEqual(bundle_runtime["process_role"], "decision")
+        self.assertEqual(bundle_runtime["provider"], "deepseek")
+        self.assertEqual(bundle_runtime["effective_operating_mode"], "ai_decision_maker")
+        self.assertTrue(bundle_runtime["strategy_profile_auto_control_effective"])
+        self.assertEqual(bundle_summary_ai["effective_operating_mode"], "ai_decision_maker")
+        self.assertTrue(bundle_summary_ai["strategy_profile_auto_control_effective"])
+        self.assertEqual(bundle_overview_runtime["effective_operating_mode"], "ai_decision_maker")
+        self.assertEqual(runtime.ai_command_client.invoke.await_count, 3)
+
     async def test_dashboard_bundle_keeps_session_context_when_read_access_is_denied(self) -> None:
         runtime = await self._runtime(
             operator_users=[("admin", "secret-pass")],
