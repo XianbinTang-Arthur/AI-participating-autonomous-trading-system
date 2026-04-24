@@ -79,7 +79,7 @@ class TestPickAIMode(unittest.TestCase):
 
     def test_ai_assessment_none_always_returns_mode_a(self):
         """AI 挂了（assessment 为 None）无条件 fallback，即使配置的 mode 是 ai_decision_maker。"""
-        for mode in ("baseline_only", "ai_assisted", "ai_decision_maker", "ai_decision_maker_with_profile_control"):
+        for mode in ("baseline_only", "ai_assisted", "ai_decision_maker"):
             settings = make_derivatives_hedge_settings(ai_operating_mode=mode)
             picked = _pick_ai_mode(settings=settings, ai_assessment=None)
             self.assertEqual(picked, "MODE_A", f"mode={mode} with None assessment must fallback to MODE_A")
@@ -96,11 +96,6 @@ class TestPickAIMode(unittest.TestCase):
 
     def test_ai_decision_maker_returns_mode_c(self):
         settings = make_derivatives_hedge_settings(ai_operating_mode="ai_decision_maker")
-        ai = make_ai_assessment(direction=0.3)
-        self.assertEqual(_pick_ai_mode(settings=settings, ai_assessment=ai), "MODE_C")
-
-    def test_ai_decision_maker_with_profile_control_returns_mode_c(self):
-        settings = make_derivatives_hedge_settings(ai_operating_mode="ai_decision_maker_with_profile_control")
         ai = make_ai_assessment(direction=0.3)
         self.assertEqual(_pick_ai_mode(settings=settings, ai_assessment=ai), "MODE_C")
 

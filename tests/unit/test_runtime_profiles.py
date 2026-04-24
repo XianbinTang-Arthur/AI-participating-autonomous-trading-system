@@ -7,23 +7,29 @@ from aats.services.operator.runtime_profiles import readonly_runtime_profile_sna
 
 
 class TestRuntimeProfiles(unittest.TestCase):
-    def test_strategy_profile_auto_control_is_disabled_by_default(self) -> None:
-        # 回归：历史上 ai_decision_maker_with_profile_control 隐式启用自动换档；
-        # 现已拆分为独立开关 strategy_profile_auto_control_enabled，
-        # 仅传入历史遗留值不应再启用。
-        settings = AATSSettings.model_validate({"ai_operating_mode": "ai_decision_maker_with_profile_control"})
-        self.assertFalse(settings.strategy_profile_auto_control_configured)
-        self.assertFalse(settings.strategy_profile_auto_control_is_enabled_for_mode("ai_decision_maker"))
-
-    def test_strategy_profile_auto_control_can_be_enabled_independently(self) -> None:
-        settings = AATSSettings.model_validate(
-            {
-                "ai_operating_mode": "baseline_only",
-                "strategy_profile_auto_control_enabled": True,
-            }
-        )
-        self.assertTrue(settings.strategy_profile_auto_control_configured)
-        self.assertTrue(settings.strategy_profile_auto_control_is_enabled_for_mode("baseline_only"))
+    def test_ai_operating_mode_and_auto_control_are_fully_independent(self) -> None:
+        # "AI 运行模式" (ai_operating_mode) 和 "策略档位自动换档"
+        # (strategy_profile_auto_control_enabled) 是两个正交的开关：
+        # 一个控制 AI 在单次决策里扮演什么角色，另一个控制 6 个策略档位
+        # 是否由系统自动评估/切换。两者必须独立拍板——AI 模式是什么值，
+        # 不应该隐式影响换档开关；反之亦然。
+        for ai_mode in ("baseline_only", "ai_assisted", "ai_decision_maker"):
+            with self.subTest(ai_mode=ai_mode, auto_control=False):
+                settings = AATSSettings.model_validate(
+                    {
+                        "ai_operating_mode": ai_mode,
+                        "strategy_profile_auto_control_enabled": False,
+                    }
+                )
+                self.assertFalse(settings.strategy_profile_auto_control_configured)
+            with self.subTest(ai_mode=ai_mode, auto_control=True):
+                settings = AATSSettings.model_validate(
+                    {
+                        "ai_operating_mode": ai_mode,
+                        "strategy_profile_auto_control_enabled": True,
+                    }
+                )
+                self.assertTrue(settings.strategy_profile_auto_control_configured)
 
     def test_resolution_is_env_only(self) -> None:
         settings = AATSSettings.model_validate({"default_symbol": "BTC-USDT"})

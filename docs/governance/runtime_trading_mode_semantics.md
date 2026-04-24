@@ -44,9 +44,15 @@ authority_map = {
 
 注意: `authority_map` 的值 (`reference_only` / `advisory` / `final_decision`) 仅作为 **标签** 参与 `DecisionOutcome.decision_authority` 字段, 用于审计/展示. 执行引擎不会根据它决定是否下单.
 
-历史 alias (见 `aats/schemas/decision.py:48-58`):
+历史 alias (见 `aats/schemas/decision.py` 中的 `AI_OPERATING_MODE_CANONICAL_MAP`):
 - `ai_advisory / ai_blended` → 折叠到 `ai_assisted`
-- `ai_primary / ai_decision_maker_with_profile_control` → 折叠到 `ai_decision_maker`
+- `ai_primary` → 折叠到 `ai_decision_maker`
+
+**已删除**（2026-04-24）：`ai_decision_maker_with_profile_control` 曾经把"AI 决策者"和"自动换档"
+两个模块捆在一个枚举值里，违反正交性原则，已彻底移除。运行模式（`ai_operating_mode`）和
+档位自动换档（`strategy_profile_auto_control_enabled`）现在完全独立——前者是 AI 在单次决策里
+扮演什么角色，后者是 6 个策略档位由谁选，两个开关互不影响。老事件 payload 若仍含该值，
+`normalize_ai_operating_mode` 会 fallback 到 `baseline_only`（安全兜底）。
 
 ### 2.2 四档语义表
 

@@ -15,7 +15,7 @@
     },
     {
       "datasource": { "type": "postgres", "uid": "postgres" },
-      "description": "P0-b Task 2.2: 当前 ai_operating_mode → decision_authority 视图. 对齐 docs/governance/runtime_trading_mode_semantics.md §1-§2. 主数据源 = PG event_store (strategy.decision_outcome 最新一条) — 字符串 mode 可直接走 value mappings. Prometheus counter (refId A) 保留作诊断备查但 hide=true — 其 rate 是 numeric, 无法被 mappings 映射, 会让 stat panel 显示 No Data (2026-04-22 修复). legacy alias (ai_advisory/ai_blended/ai_primary/ai_decision_maker_with_profile_control) 会 normalize 到 canonical 三态后展示.",
+      "description": "P0-b Task 2.2: 当前 ai_operating_mode → decision_authority 视图. 对齐 docs/governance/runtime_trading_mode_semantics.md §1-§2. 主数据源 = PG event_store (strategy.decision_outcome 最新一条) — 字符串 mode 可直接走 value mappings. Prometheus counter (refId A) 保留作诊断备查但 hide=true — 其 rate 是 numeric, 无法被 mappings 映射, 会让 stat panel 显示 No Data (2026-04-22 修复). legacy alias (ai_advisory/ai_blended/ai_primary) 会 normalize 到 canonical 三态后展示.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -28,8 +28,7 @@
                 "ai_decision_maker": { "text": "FINAL DECISION (AI 实盘)", "color": "red", "index": 2 },
                 "ai_advisory": { "text": "ADVISORY (实盘) [legacy alias]", "color": "orange", "index": 3 },
                 "ai_blended": { "text": "ADVISORY (实盘) [legacy alias]", "color": "orange", "index": 4 },
-                "ai_primary": { "text": "FINAL DECISION (AI 实盘) [legacy alias]", "color": "red", "index": 5 },
-                "ai_decision_maker_with_profile_control": { "text": "FINAL DECISION (AI 实盘) [legacy alias]", "color": "red", "index": 6 }
+                "ai_primary": { "text": "FINAL DECISION (AI 实盘) [legacy alias]", "color": "red", "index": 5 }
               }
             }
           ],

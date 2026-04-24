@@ -32,7 +32,6 @@ LegacyAIOperatingMode = Literal[
     "ai_advisory",
     "ai_blended",
     "ai_primary",
-    "ai_decision_maker_with_profile_control",
 ]
 
 AIOperatingMode = Literal[
@@ -42,7 +41,6 @@ AIOperatingMode = Literal[
     "ai_advisory",
     "ai_blended",
     "ai_primary",
-    "ai_decision_maker_with_profile_control",
 ]
 
 AI_OPERATING_MODE_CANONICAL_MAP: dict[str, CanonicalAIOperatingMode] = {
@@ -52,9 +50,6 @@ AI_OPERATING_MODE_CANONICAL_MAP: dict[str, CanonicalAIOperatingMode] = {
     "ai_advisory": "ai_assisted",
     "ai_blended": "ai_assisted",
     "ai_primary": "ai_decision_maker",
-    # 历史值：profile 自动换档已独立为 strategy_profile_auto_control_enabled，
-    # 运行模式折叠回 ai_decision_maker 以保向后兼容。
-    "ai_decision_maker_with_profile_control": "ai_decision_maker",
 }
 
 

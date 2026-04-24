@@ -1089,10 +1089,6 @@ class AATSSettings(BaseSettings):
     def strategy_profile_auto_control_configured(self) -> bool:
         return bool(self.strategy_profile_auto_control_enabled)
 
-    def strategy_profile_auto_control_is_enabled_for_mode(self, operating_mode: str | None) -> bool:
-        _ = operating_mode
-        return bool(self.strategy_profile_auto_control_enabled)
-
     @property
     def effective_strategy_sleeve_auto_execution_enabled(self) -> bool:
         return bool(self.strategy_sleeve_auto_execution_enabled)

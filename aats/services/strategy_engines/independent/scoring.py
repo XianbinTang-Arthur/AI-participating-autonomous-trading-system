@@ -26,7 +26,7 @@ from .models import IndependentLeg, ScoreStabilityMetrics
 #       节省的 0.16 按 Mode A vs Mode C 的增量比例线性插值分配：
 #           Mode B[i] = Mode C[i] + (Mode A[i] - Mode C[i]) × 16/26
 #
-#   Mode C  (ai_decision_maker / ai_decision_maker_with_profile_control):
+#   Mode C  (ai_decision_maker):
 #       原始公式，AI 权重 0.26。
 #
 # 修改任一档权重时必须：
@@ -109,7 +109,7 @@ def _pick_ai_mode(
         return "MODE_A"
     if mode == "ai_assisted":
         return "MODE_B"
-    if mode in {"ai_decision_maker", "ai_decision_maker_with_profile_control"}:
+    if mode == "ai_decision_maker":
         return "MODE_C"
     return "MODE_A"  # 未来未知值兜底到最保守的档位
 

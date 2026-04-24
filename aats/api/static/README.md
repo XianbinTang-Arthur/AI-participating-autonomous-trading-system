@@ -1104,7 +1104,7 @@ IDLE --(refreshDashboard)--> PRIMARY --(primary done)--> DEFERRED --(all deferre
 |---|---|---|
 | 9 | `risk-view.js` 行 1510-1516 | `noPrimaryBlockerSummary` 函数体的缩进明显错位（4 空格 vs 2 空格混用），不影响运行但扰乱 diff 阅读。 |
 | 10 | `risk-view.js` 行 2 | 只有一个 `kvList` 的独立 import，与下面成块的 import 分开；建议合并。 |
-| 12 | `ai-config-view.js::currentOperatingMode` | 已修复：`ai_decision_maker_with_profile_control` 模式已从 UI 和后端移除（profile 自动换档独立由 `strategy_profile_auto_control_enabled` 控制）。 |
+| 12 | `ai-config-view.js::currentOperatingMode` | 已彻底删除：`ai_decision_maker_with_profile_control` 枚举值、UI 翻译、canonical map 条目均已从代码库移除（profile 自动换档独立由 `strategy_profile_auto_control_enabled` 控制）。 |
 | 14 | `strategy-view.js::tradeCostConfigRow` | 纯 delegator，没有自己的逻辑。 |
 | 15 | `strategy-view.js::escapeFallbackReadableState` | 使用率极低（看起来只剩 1 处调用），可以 inline。 |
 | 16 | `strategy-view.js::plainListText` | 定义了但在本文件里找不到调用者（dead code）。 |

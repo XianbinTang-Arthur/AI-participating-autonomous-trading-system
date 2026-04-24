@@ -399,8 +399,6 @@
   baseline_only: "仅按基础策略运行",
   ai_assisted: "AI 辅助决策",
   ai_decision_maker: "AI 决策者",
-  // legacy：历史决策事件 payload 可能仍含此值，保留标签避免渲染成原始 enum。
-  ai_decision_maker_with_profile_control: "AI 决策者",
   winner_engine: "系统候选引擎",
   activation_gate: "激活裁决层",
   auto_activation_executed: "自动激活已执行",
