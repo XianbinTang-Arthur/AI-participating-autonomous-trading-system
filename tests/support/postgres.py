@@ -31,7 +31,7 @@ def bootstrap_postgres_test_env(
     root = project_root or Path(__file__).resolve().parents[2]
     test_dotenv_path = root / ".env.test.postgres"
     if test_dotenv_path.exists():
-        database_url = str(dotenv_values(test_dotenv_path).get("AATS_DATABASE_URL") or "").strip()
+        database_url = _database_url_from_values(dotenv_values(test_dotenv_path))
         if database_url:
             os.environ["AATS_DATABASE_URL"] = database_url
             return database_url
@@ -50,7 +50,11 @@ def bootstrap_postgres_test_env(
     if not dotenv_path.exists():
         return None
 
-    database_url = str(dotenv_values(dotenv_path).get("AATS_DATABASE_URL") or "").strip()
+    profile_values = dict(dotenv_values(dotenv_path))
+    database_url = _database_url_from_values(profile_values)
+    if not database_url:
+        wsl2_values = _safe_wsl2_dotenv_values(root)
+        database_url = _database_url_from_values({**wsl2_values, **profile_values})
     if not database_url:
         return None
     os.environ["AATS_DATABASE_URL"] = database_url
@@ -59,6 +63,44 @@ def bootstrap_postgres_test_env(
     if startup_profile:
         os.environ.setdefault("AATS_STARTUP_PROFILE", startup_profile)
     return database_url
+
+
+def _safe_wsl2_dotenv_values(root: Path) -> dict[str, str | None]:
+    dotenv_path = root / ".env.wsl2"
+    if not dotenv_path.exists():
+        return {}
+    values = dict(dotenv_values(dotenv_path))
+    values.pop("AATS_DATABASE_URL", None)
+    return values
+
+
+def _database_url_from_values(values: dict[str, str | None]) -> str | None:
+    direct_url = str(values.get("AATS_DATABASE_URL") or "").strip()
+    if direct_url:
+        return direct_url
+
+    username = str(values.get("POSTGRES_USER") or values.get("AATS_DB_USER") or "").strip()
+    password = values.get("POSTGRES_PASSWORD") or values.get("AATS_DB_PASSWORD")
+    database = str(
+        values.get("AATS_DB_NAME")
+        or values.get("AATS_LIVE_DB_NAME")
+        or values.get("POSTGRES_DB")
+        or ""
+    ).strip()
+    if not username or not password or not database:
+        return None
+
+    host = str(values.get("POSTGRES_HOST") or values.get("AATS_DB_HOST") or "127.0.0.1").strip()
+    port_value = str(values.get("POSTGRES_PORT") or values.get("AATS_DB_PORT") or "5432").strip()
+    port = int(port_value) if port_value else 5432
+    return URL.create(
+        drivername="postgresql+psycopg",
+        username=username,
+        password=str(password),
+        host=host,
+        port=port,
+        database=database,
+    ).render_as_string(hide_password=False)
 
 
 def postgres_test_url() -> str:

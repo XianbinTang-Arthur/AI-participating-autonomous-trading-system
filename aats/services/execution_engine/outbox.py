@@ -16,6 +16,12 @@ from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, Orde
 from aats.schemas.operator import ExecutionErrorSummary
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
+from aats.services.execution_engine.lifecycle_snapshot_refs import (
+    choose_snapshot_refs,
+    lifecycle_snapshot_ref_payload,
+    snapshot_refs_from_obj,
+    top_level_snapshot_ref_payload,
+)
 from aats.storage.event_store_postgres import PostgresEventStore
 from aats.storage.base import ExecutionRepository
 from aats.storage.execution_command_repo_postgres import PostgresExecutionCommandRepository
@@ -320,6 +326,10 @@ class PostgresExecutionOutboxPublisher:
         if intent is None:
             intent = ExecutionOrderService._intent_from_order_state(order_state)
         created_at = order_state.created_at
+        snapshot_refs = choose_snapshot_refs(
+            snapshot_refs_from_obj(intent),
+            snapshot_refs_from_obj(order_state),
+        )
         self.execution_order_repo.create_order_in_session(
             session,
             order_id=order_state.client_order_id,
@@ -333,10 +343,12 @@ class PostgresExecutionOutboxPublisher:
                 # Execution truth snapshot refs：顶层落库 decision 层四类 snapshot refs
                 # (market/feature/portfolio/health)。优先取 intent，回退到 order_state
                 # ——两者之一有即可稳定关联盘口快照，避免只能靠 decision_id 间接猜。
-                "market_snapshot_ref": intent.market_snapshot_ref or order_state.market_snapshot_ref,
-                "feature_snapshot_ref": intent.feature_snapshot_ref or order_state.feature_snapshot_ref,
-                "portfolio_snapshot_ref": intent.portfolio_snapshot_ref or order_state.portfolio_snapshot_ref,
-                "health_snapshot_ref": intent.health_snapshot_ref or order_state.health_snapshot_ref,
+                **top_level_snapshot_ref_payload(snapshot_refs),
+                **lifecycle_snapshot_ref_payload(
+                    stage="submit",
+                    refs=snapshot_refs,
+                    source="execution_outbox_submit",
+                ),
                 "intent": intent.model_dump(mode="python"),
                 "order_state": order_state.model_dump(mode="python"),
             },
@@ -371,6 +383,7 @@ class PostgresExecutionOutboxPublisher:
             )
             if existing is None:
                 intent = Phase1ExecutionShadowService.intent_from_fill(fill)
+                snapshot_refs = snapshot_refs_from_obj(fill)
                 self.execution_order_repo.create_order_in_session(
                     session,
                     order_id=fill.client_order_id,
@@ -383,15 +396,18 @@ class PostgresExecutionOutboxPublisher:
                         "source_system": "execution_outbox_fill_backfill",
                         # Execution truth snapshot refs：backfill 路径下 fill 若带 refs
                         # 则顶层落库，与 submit-time raw_payload 保持对称。
-                        "market_snapshot_ref": fill.market_snapshot_ref,
-                        "feature_snapshot_ref": fill.feature_snapshot_ref,
-                        "portfolio_snapshot_ref": fill.portfolio_snapshot_ref,
-                        "health_snapshot_ref": fill.health_snapshot_ref,
+                        **top_level_snapshot_ref_payload(snapshot_refs),
+                        **lifecycle_snapshot_ref_payload(
+                            stage="fill",
+                            refs=snapshot_refs,
+                            source="execution_outbox_fill_backfill",
+                        ),
                         "fill_event": fill.model_dump(mode="python"),
                     },
                 )
             else:
                 order_id = str(existing["order_id"])
+        fill_snapshot_refs = snapshot_refs_from_obj(fill)
         self.execution_fill_repo.save_fill_in_session(
             session,
             fill=fill,
@@ -401,10 +417,12 @@ class PostgresExecutionOutboxPublisher:
                 "venue_fill_id": fill.fill_id,
                 # Execution truth snapshot refs：顶层落库 fill 携带的 refs，便于
                 # fill row 直接关联盘口快照；没有 refs 时字段值为 None，不破坏旧行为。
-                "market_snapshot_ref": fill.market_snapshot_ref,
-                "feature_snapshot_ref": fill.feature_snapshot_ref,
-                "portfolio_snapshot_ref": fill.portfolio_snapshot_ref,
-                "health_snapshot_ref": fill.health_snapshot_ref,
+                **top_level_snapshot_ref_payload(fill_snapshot_refs),
+                **lifecycle_snapshot_ref_payload(
+                    stage="fill",
+                    refs=fill_snapshot_refs,
+                    source="execution_outbox_fill",
+                ),
                 "fill_event": fill.model_dump(mode="python"),
             },
         )

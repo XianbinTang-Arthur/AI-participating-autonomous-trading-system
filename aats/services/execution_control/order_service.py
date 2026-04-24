@@ -6,6 +6,13 @@ from typing import Any
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import OrderIntent, OrderState, side_from_position_intent
+from aats.services.execution_engine.lifecycle_snapshot_refs import (
+    choose_snapshot_refs,
+    lifecycle_snapshot_ref_payload,
+    order_state_lifecycle_stage,
+    snapshot_refs_from_obj,
+    top_level_snapshot_ref_payload,
+)
 from aats.storage.execution_command_repo import ExecutionCommandRepository
 from aats.storage.execution_order_repo import ExecutionOrderHistoryRepository, ExecutionOrderRepository
 
@@ -176,6 +183,15 @@ class ExecutionOrderService:
         if existing is not None:
             return
         created_at = order_state.created_at if order_state is not None else intent.created_at
+        snapshot_refs = choose_snapshot_refs(
+            snapshot_refs_from_obj(intent),
+            snapshot_refs_from_obj(order_state) if order_state is not None else None,
+        )
+        lifecycle_stage = (
+            "submit"
+            if order_state is None
+            else order_state_lifecycle_stage(initial_state, exchange_order_id=order_state.exchange_order_id)
+        )
         self.execution_order_repo.create_order(
             order_id=client_order_id,
             intent=intent,
@@ -190,10 +206,12 @@ class ExecutionOrderService:
                 # Execution truth snapshot refs：顶层落库 decision 层四类 snapshot refs
                 # 作为盘口快照事后归因的稳定锚点。沿用 execution_style 的顶层锚点约定
                 # 便于 SQL 直接查询，无需解压 nested intent dump。
-                "market_snapshot_ref": intent.market_snapshot_ref,
-                "feature_snapshot_ref": intent.feature_snapshot_ref,
-                "portfolio_snapshot_ref": intent.portfolio_snapshot_ref,
-                "health_snapshot_ref": intent.health_snapshot_ref,
+                **top_level_snapshot_ref_payload(snapshot_refs),
+                **lifecycle_snapshot_ref_payload(
+                    stage=lifecycle_stage,
+                    refs=snapshot_refs,
+                    source="execution_order_service",
+                ),
                 "order_state": order_state.model_dump(mode="python") if order_state is not None else None,
             },
         )

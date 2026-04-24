@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 import yaml
+from sqlalchemy.engine import URL
 
 from aats.bootstrap.env_profiles import (
     load_profiled_dotenv_into_process,
@@ -114,6 +115,60 @@ def test_bootstrap_postgres_test_env_defaults_to_local_derivatives_live_profile(
         assert os.environ["AATS_DATABASE_URL"] == loaded
         assert os.environ["AATS_ENV_TEMPLATE_PROFILE"] == "derivatives_live"
         assert os.environ["AATS_STARTUP_PROFILE"] == "derivatives"
+
+
+def test_bootstrap_postgres_test_env_builds_database_url_from_profile_parts(tmp_path: Path) -> None:
+    (tmp_path / ".env.derivatives.live").write_text(
+        "POSTGRES_USER=admin\n"
+        "POSTGRES_PASSWORD=secret value\n"
+        "POSTGRES_HOST=127.0.0.1\n"
+        "POSTGRES_PORT=5432\n"
+        "AATS_DB_NAME=aats_live_derivatives\n",
+        encoding="utf-8",
+    )
+    expected = URL.create(
+        drivername="postgresql+psycopg",
+        username="admin",
+        password="secret value",
+        host="127.0.0.1",
+        port=5432,
+        database="aats_live_derivatives",
+    ).render_as_string(hide_password=False)
+    with patch.dict(os.environ, {}, clear=True):
+        loaded = bootstrap_postgres_test_env(project_root=tmp_path)
+
+        assert loaded == expected
+        assert os.environ["AATS_DATABASE_URL"] == expected
+        assert os.environ["AATS_ENV_TEMPLATE_PROFILE"] == "derivatives_live"
+        assert os.environ["AATS_STARTUP_PROFILE"] == "derivatives"
+
+
+def test_bootstrap_postgres_test_env_combines_profile_db_with_wsl2_credentials(tmp_path: Path) -> None:
+    (tmp_path / ".env.derivatives.live").write_text(
+        "AATS_DB_NAME=aats_live_derivatives\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env.wsl2").write_text(
+        "POSTGRES_USER=admin\n"
+        "POSTGRES_PASSWORD=secret value\n"
+        "POSTGRES_HOST=127.0.0.1\n"
+        "POSTGRES_PORT=5432\n"
+        "AATS_DATABASE_URL=postgresql+psycopg://wrong:wrong@example-host:5432/wrong_db\n",
+        encoding="utf-8",
+    )
+    expected = URL.create(
+        drivername="postgresql+psycopg",
+        username="admin",
+        password="secret value",
+        host="127.0.0.1",
+        port=5432,
+        database="aats_live_derivatives",
+    ).render_as_string(hide_password=False)
+    with patch.dict(os.environ, {}, clear=True):
+        loaded = bootstrap_postgres_test_env(project_root=tmp_path)
+
+        assert loaded == expected
+        assert os.environ["AATS_DATABASE_URL"] == expected
 
 
 def test_bootstrap_postgres_test_env_prefers_explicit_test_database_url(tmp_path: Path) -> None:

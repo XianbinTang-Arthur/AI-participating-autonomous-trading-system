@@ -215,6 +215,10 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 margin_mode="cross",
                 exposure_side="short",
                 position_intent="open_short",
+                market_snapshot_ref="mkt_outbox_limit_seed",
+                feature_snapshot_ref="feat_outbox_limit_seed",
+                portfolio_snapshot_ref="port_outbox_limit_seed",
+                health_snapshot_ref="health_outbox_limit_seed",
             )
             state = OrderState(
                 decision_id=intent.decision_id,
@@ -263,6 +267,10 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(raw_payload["intent"]["order_type"], "limit")
             self.assertEqual(raw_payload["intent"]["time_in_force"], "GTC")
             self.assertEqual(Decimal(str(raw_payload["intent"]["limit_price"])), Decimal("70010.5"))
+            self.assertEqual(raw_payload["market_snapshot_ref"], "mkt_outbox_limit_seed")
+            lifecycle = raw_payload["lifecycle_snapshot_refs"]
+            self.assertEqual(lifecycle["submit"]["market_snapshot_ref"], "mkt_outbox_limit_seed")
+            self.assertEqual(lifecycle["submit"]["source"], "execution_outbox_submit")
         finally:
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
@@ -461,6 +469,10 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 exchange_timestamp=utc_now(),
                 ingestion_timestamp=utc_now(),
                 order_status_after_fill="FILLED",
+                market_snapshot_ref="mkt_fill_atomic",
+                feature_snapshot_ref="feat_fill_atomic",
+                portfolio_snapshot_ref="port_fill_atomic",
+                health_snapshot_ref="health_fill_atomic",
             )
             updated_obligation = base_obligation.model_copy(
                 update={
@@ -481,6 +493,11 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             stored_fill_row = fill_repo.get_fill("fill_atomic_1")
             self.assertIsNotNone(stored_fill_row)
             self.assertEqual(stored_fill_row["execution_attempt_id"], "execution_attempt:clord_fill_atomic")
+            fill_payload = dict(stored_fill_row.get("raw_payload") or {})
+            self.assertEqual(fill_payload["market_snapshot_ref"], "mkt_fill_atomic")
+            lifecycle = fill_payload["lifecycle_snapshot_refs"]
+            self.assertEqual(lifecycle["fill"]["market_snapshot_ref"], "mkt_fill_atomic")
+            self.assertEqual(lifecycle["fill"]["source"], "execution_outbox_fill")
             stored_obligation = obligation_repo.get_obligation("clord_fill_atomic")
             self.assertIsNotNone(stored_obligation)
             self.assertEqual(stored_obligation.consumed_amount, Decimal("60.0"))

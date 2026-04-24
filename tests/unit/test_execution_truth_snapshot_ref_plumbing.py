@@ -36,6 +36,13 @@ _REFS = {
     "health_snapshot_ref": "health_snap_jkl",
 }
 
+_ACK_REFS = {
+    "market_snapshot_ref": "mkt_snap_ack",
+    "feature_snapshot_ref": "feat_snap_ack",
+    "portfolio_snapshot_ref": "port_snap_ack",
+    "health_snapshot_ref": "health_snap_ack",
+}
+
 
 def _make_intent(**overrides: Any) -> OrderIntent:
     base = dict(
@@ -149,6 +156,34 @@ class TestSchemaDefaults(unittest.TestCase):
         self.assertEqual(intent.health_snapshot_ref, "health_snap_jkl")
 
 
+class TestLifecycleSnapshotRefPayload(unittest.TestCase):
+    """P1 lifecycle linkage：submit/ack/fill refs 使用固定 machine-readable 结构。"""
+
+    def test_merges_existing_submit_stage_when_adding_ack(self) -> None:
+        from aats.services.execution_engine.lifecycle_snapshot_refs import lifecycle_snapshot_ref_payload
+
+        existing_payload = {
+            "lifecycle_snapshot_refs": {
+                "submit": {
+                    **_REFS,
+                    "source": "execution_outbox_submit",
+                }
+            }
+        }
+
+        payload = lifecycle_snapshot_ref_payload(
+            existing_raw_payload=existing_payload,
+            stage="ack",
+            refs=_ACK_REFS,
+            source="converged_execution_repo",
+        )
+
+        lifecycle = payload["lifecycle_snapshot_refs"]
+        self.assertEqual(lifecycle["submit"]["market_snapshot_ref"], "mkt_snap_abc")
+        self.assertEqual(lifecycle["ack"]["market_snapshot_ref"], "mkt_snap_ack")
+        self.assertEqual(lifecycle["ack"]["source"], "converged_execution_repo")
+
+
 class TestRoundTripHelpersPreserveRefs(unittest.TestCase):
     """leg_intent_from_order_intent / order_intent_from_leg_order_intent 双向保留 refs。"""
 
@@ -238,6 +273,10 @@ class TestOrderServiceEnsureOrderRow(unittest.TestCase):
         self.assertEqual(payload["feature_snapshot_ref"], "feat_snap_def")
         self.assertEqual(payload["portfolio_snapshot_ref"], "port_snap_ghi")
         self.assertEqual(payload["health_snapshot_ref"], "health_snap_jkl")
+        lifecycle = payload["lifecycle_snapshot_refs"]
+        self.assertEqual(lifecycle["submit"]["market_snapshot_ref"], "mkt_snap_abc")
+        self.assertEqual(lifecycle["submit"]["feature_snapshot_ref"], "feat_snap_def")
+        self.assertEqual(lifecycle["submit"]["source"], "execution_order_service")
         # 既有顶层锚点字段继续存在（避免回归 Path C 观测性修复）。
         self.assertEqual(payload["execution_style"], "bounded_limit_ioc")
 
@@ -257,6 +296,9 @@ class TestOrderServiceEnsureOrderRow(unittest.TestCase):
         self.assertIsNone(payload["feature_snapshot_ref"])
         self.assertIsNone(payload["portfolio_snapshot_ref"])
         self.assertIsNone(payload["health_snapshot_ref"])
+        lifecycle = payload["lifecycle_snapshot_refs"]
+        self.assertIsNone(lifecycle["submit"]["market_snapshot_ref"])
+        self.assertEqual(lifecycle["submit"]["source"], "execution_order_service")
 
 
 class TestIntentFromOrderStatePreservesRefs(unittest.TestCase):
@@ -371,6 +413,10 @@ class TestOutboxEnsureExecutionOrderRow(unittest.TestCase):
         self.assertEqual(payload["feature_snapshot_ref"], "feat_snap_def")
         self.assertEqual(payload["portfolio_snapshot_ref"], "port_snap_ghi")
         self.assertEqual(payload["health_snapshot_ref"], "health_snap_jkl")
+        lifecycle = payload["lifecycle_snapshot_refs"]
+        self.assertEqual(lifecycle["submit"]["market_snapshot_ref"], "mkt_snap_abc")
+        self.assertEqual(lifecycle["submit"]["feature_snapshot_ref"], "feat_snap_def")
+        self.assertEqual(lifecycle["submit"]["source"], "execution_outbox_submit")
 
     def test_raw_payload_falls_back_to_order_state_refs(self) -> None:
         """command_payload 无 refs（或不存在），但 order_state 带 refs 时仍填充。"""
@@ -410,6 +456,9 @@ class TestOutboxEnsureExecutionOrderRow(unittest.TestCase):
         self.assertIsNone(payload["feature_snapshot_ref"])
         self.assertIsNone(payload["portfolio_snapshot_ref"])
         self.assertIsNone(payload["health_snapshot_ref"])
+        lifecycle = payload["lifecycle_snapshot_refs"]
+        self.assertIsNone(lifecycle["submit"]["market_snapshot_ref"])
+        self.assertEqual(lifecycle["submit"]["source"], "execution_outbox_submit")
 
 
 class TestOutboxEnsureExecutionFillRow(unittest.TestCase):
@@ -440,10 +489,16 @@ class TestOutboxEnsureExecutionFillRow(unittest.TestCase):
         self.assertEqual(fill_payload["feature_snapshot_ref"], "feat_snap_def")
         self.assertEqual(fill_payload["portfolio_snapshot_ref"], "port_snap_ghi")
         self.assertEqual(fill_payload["health_snapshot_ref"], "health_snap_jkl")
+        fill_lifecycle = fill_payload["lifecycle_snapshot_refs"]
+        self.assertEqual(fill_lifecycle["fill"]["market_snapshot_ref"], "mkt_snap_abc")
+        self.assertEqual(fill_lifecycle["fill"]["source"], "execution_outbox_fill")
         # backfill 路径的 execution_order 行也带 refs（与 submit-time 对称）。
         order_payload = order_repo.created_raw_payload
         assert order_payload is not None
         self.assertEqual(order_payload["market_snapshot_ref"], "mkt_snap_abc")
+        order_lifecycle = order_payload["lifecycle_snapshot_refs"]
+        self.assertEqual(order_lifecycle["fill"]["market_snapshot_ref"], "mkt_snap_abc")
+        self.assertEqual(order_lifecycle["fill"]["source"], "execution_outbox_fill_backfill")
 
     def test_fill_raw_payload_refs_none_when_fill_has_no_refs(self) -> None:
         order_repo = _CapturingOrderRepo()
@@ -457,6 +512,9 @@ class TestOutboxEnsureExecutionFillRow(unittest.TestCase):
         self.assertIsNone(fill_payload["feature_snapshot_ref"])
         self.assertIsNone(fill_payload["portfolio_snapshot_ref"])
         self.assertIsNone(fill_payload["health_snapshot_ref"])
+        lifecycle = fill_payload["lifecycle_snapshot_refs"]
+        self.assertIsNone(lifecycle["fill"]["market_snapshot_ref"])
+        self.assertEqual(lifecycle["fill"]["source"], "execution_outbox_fill")
 
 
 class TestPlanAndTargetSchemaDefaults(unittest.TestCase):
@@ -881,6 +939,30 @@ class TestConvergedRepoHydrateOrderStateFallbackPreservesRefs(unittest.TestCase)
         self.assertEqual(state.market_snapshot_ref, "mkt_snap_abc")
         self.assertEqual(state.health_snapshot_ref, "health_snap_jkl")
 
+    def test_order_state_dict_path_falls_back_to_top_level_refs(self) -> None:
+        """order_state 子树缺 refs 时，仍从 raw_payload 顶层恢复，避免早返回断链。"""
+        from aats.storage.execution_repo_converged_postgres import (
+            ConvergedPostgresExecutionRepository,
+        )
+
+        row = {
+            "raw_payload": {
+                **_REFS,
+                "order_state": {
+                    "decision_id": "decision_snapref",
+                    "intent_id": "intent_snapref",
+                    "symbol": "BTC-USDT-SWAP",
+                    "client_order_id": "cl_snapref",
+                    "status": "SUBMITTED",
+                    "requested_qty": "0.01",
+                    "remaining_qty": "0.01",
+                },
+            },
+        }
+        state = ConvergedPostgresExecutionRepository._hydrate_order_state(row)
+        self.assertEqual(state.market_snapshot_ref, "mkt_snap_abc")
+        self.assertEqual(state.feature_snapshot_ref, "feat_snap_def")
+
 
 class TestConvergedRepoHydrateFillFallbackPreservesRefs(unittest.TestCase):
     """SOW §8: execution_repo_converged_postgres._hydrate_fill fallback 路径保留 refs。"""
@@ -931,6 +1013,17 @@ class TestConvergedRepoHydrateFillFallbackPreservesRefs(unittest.TestCase):
         self.assertIsNone(fill.portfolio_snapshot_ref)
         self.assertIsNone(fill.health_snapshot_ref)
 
+    def test_fill_event_dict_path_falls_back_to_top_level_refs(self) -> None:
+        from aats.storage.execution_repo_converged_postgres import (
+            ConvergedPostgresExecutionRepository,
+        )
+
+        fill_payload = _make_fill_event().model_dump(mode="python")
+        row = self._base_row(raw_payload={**_REFS, "fill_event": fill_payload})
+        fill = ConvergedPostgresExecutionRepository._hydrate_fill(row)
+        self.assertEqual(fill.market_snapshot_ref, "mkt_snap_abc")
+        self.assertEqual(fill.feature_snapshot_ref, "feat_snap_def")
+
 
 class TestConvergedRepoIntentFromOrderStatePreservesRefs(unittest.TestCase):
     """SOW §8: execution_repo_converged_postgres._intent_from_order_state 保留 refs。"""
@@ -958,6 +1051,86 @@ class TestConvergedRepoIntentFromOrderStatePreservesRefs(unittest.TestCase):
         self.assertIsNone(intent.feature_snapshot_ref)
         self.assertIsNone(intent.portfolio_snapshot_ref)
         self.assertIsNone(intent.health_snapshot_ref)
+
+
+class TestConvergedRepoLifecycleSnapshotRefs(unittest.TestCase):
+    """P1 lifecycle linkage：converged repo ack 更新必须保留 submit refs 并补 ack refs。"""
+
+    class _OrderRepo:
+        def __init__(self, existing: dict[str, Any]) -> None:
+            self.existing = existing
+            self.updated_raw_payload: dict[str, Any] | None = None
+
+        def get_order_by_client_order_id_in_session(
+            self, session: Any, client_order_id: str, for_update: bool = False
+        ) -> dict[str, Any]:
+            return self.existing
+
+        def update_order_state_in_session(
+            self,
+            session: Any,
+            *,
+            order_id: str,
+            expected_state_version: int,
+            next_state: str,
+            venue_order_id: str | None,
+            last_exchange_ts: datetime | None,
+            updated_at: datetime,
+            raw_payload: dict[str, Any],
+        ) -> None:
+            self.updated_raw_payload = raw_payload
+
+    def test_ack_update_merges_submit_and_ack_lifecycle_refs(self) -> None:
+        from aats.services.execution_engine.state_machine import OrderStateMachine
+        from aats.storage.execution_repo_converged_postgres import (
+            ConvergedPostgresExecutionRepository,
+        )
+
+        client_order_id = "cl_snapref_lifecycle"
+        submit_state = _make_order_state(
+            client_order_id=client_order_id,
+            status="SUBMITTING",
+            exchange_order_id=None,
+            **_REFS,
+        )
+        existing = {
+            "order_id": client_order_id,
+            "state_version": 3,
+            "raw_payload": {
+                **_REFS,
+                "lifecycle_snapshot_refs": {
+                    "submit": {
+                        **_REFS,
+                        "source": "execution_outbox_submit",
+                    }
+                },
+                "order_state": submit_state.model_dump(mode="python"),
+            },
+        }
+        order_repo = self._OrderRepo(existing)
+        repo = object.__new__(ConvergedPostgresExecutionRepository)
+        repo.execution_order_repo = order_repo  # type: ignore[attr-defined]
+        repo.execution_order_history_repo = None  # type: ignore[attr-defined]
+        repo.state_machine = OrderStateMachine()  # type: ignore[attr-defined]
+
+        ack_state = _make_order_state(
+            client_order_id=client_order_id,
+            status="SUBMITTED",
+            exchange_order_id="ord_snapref_ack",
+            last_update_ts=datetime.now(timezone.utc),
+            last_exchange_update_ts=datetime.now(timezone.utc),
+            **_ACK_REFS,
+        )
+        repo.save_order_state_in_session(session=object(), state=ack_state)
+
+        payload = order_repo.updated_raw_payload
+        assert payload is not None
+        lifecycle = payload["lifecycle_snapshot_refs"]
+        self.assertEqual(lifecycle["submit"]["market_snapshot_ref"], "mkt_snap_abc")
+        self.assertEqual(lifecycle["ack"]["market_snapshot_ref"], "mkt_snap_ack")
+        self.assertEqual(lifecycle["ack"]["source"], "converged_execution_repo")
+        self.assertEqual(payload["market_snapshot_ref"], "mkt_snap_ack")
+        self.assertEqual(payload["order_state"]["market_snapshot_ref"], "mkt_snap_ack")
 
 
 class TestConvergedRepoSyntheticRefreshPreservesRefs(unittest.TestCase):
@@ -1093,6 +1266,9 @@ class TestConvergedRepoSyntheticRefreshPreservesRefs(unittest.TestCase):
         self.assertEqual(new_order_state["feature_snapshot_ref"], "feat_snap_def")
         self.assertEqual(new_order_state["portfolio_snapshot_ref"], "port_snap_ghi")
         self.assertEqual(new_order_state["health_snapshot_ref"], "health_snap_jkl")
+        lifecycle = row.raw_payload["lifecycle_snapshot_refs"]
+        self.assertEqual(lifecycle["fill"]["market_snapshot_ref"], "mkt_snap_abc")
+        self.assertEqual(lifecycle["fill"]["source"], "converged_fill_refresh")
 
     def test_refresh_falls_back_to_last_fill_refs(self) -> None:
         repo = self._make_repo()
@@ -1104,6 +1280,8 @@ class TestConvergedRepoSyntheticRefreshPreservesRefs(unittest.TestCase):
         new_order_state = row.raw_payload["order_state"]
         self.assertEqual(new_order_state["market_snapshot_ref"], "mkt_snap_abc")
         self.assertEqual(new_order_state["health_snapshot_ref"], "health_snap_jkl")
+        lifecycle = row.raw_payload["lifecycle_snapshot_refs"]
+        self.assertEqual(lifecycle["fill"]["market_snapshot_ref"], "mkt_snap_abc")
 
     def test_refresh_without_any_refs_yields_none(self) -> None:
         repo = self._make_repo()
