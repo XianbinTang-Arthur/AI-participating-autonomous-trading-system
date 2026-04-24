@@ -43,7 +43,36 @@ class PostgresExecutionFillRepositoryV2:
         source: str,
         raw_payload: dict,
     ) -> bool:
-        venue_fill_id = raw_payload.get("venue_fill_id")
+        raw_payload_dict = dict(raw_payload or {})
+        venue_fill_id = raw_payload_dict.get("venue_fill_id")
+        top_level_raw_exchange = (
+            raw_payload_dict.get("raw_exchange")
+            if isinstance(raw_payload_dict.get("raw_exchange"), dict)
+            else {}
+        )
+        nested_fill_event = (
+            raw_payload_dict.get("fill_event")
+            if isinstance(raw_payload_dict.get("fill_event"), dict)
+            else {}
+        )
+        nested_raw_exchange = (
+            nested_fill_event.get("raw_exchange")
+            if isinstance(nested_fill_event.get("raw_exchange"), dict)
+            else {}
+        )
+        fill_raw_exchange = fill.raw_exchange if isinstance(fill.raw_exchange, dict) else {}
+        fee_rate = (
+            str(fill_raw_exchange.get("feeRate") or "").strip()
+            or str(top_level_raw_exchange.get("feeRate") or "").strip()
+            or str(nested_raw_exchange.get("feeRate") or "").strip()
+            or None
+        )
+        exec_type = (
+            str(fill_raw_exchange.get("execType") or "").strip()
+            or str(top_level_raw_exchange.get("execType") or "").strip()
+            or str(nested_raw_exchange.get("execType") or "").strip()
+            or None
+        )
         inserted_fill_id = session.scalar(
             insert(ExecutionFillModelV2)
             .values(
@@ -76,10 +105,12 @@ class PostgresExecutionFillRepositoryV2:
                 strategy_bundle_id=fill.strategy_bundle_id,
                 strategy_leg_role=fill.strategy_leg_role,
                 liquidity_role=fill.liquidity_role,
+                fee_rate=fee_rate,
+                exec_type=exec_type,
                 exchange_ts=fill.exchange_timestamp,
                 ingestion_ts=fill.ingestion_timestamp,
                 source_system=source,
-                raw_payload=dump_payload_exact(raw_payload or fill),
+                raw_payload=dump_payload_exact(raw_payload_dict or fill),
                 created_at=fill.created_at,
             )
             .returning(ExecutionFillModelV2.fill_id)
@@ -184,6 +215,8 @@ def _fill_row_to_dict(row: ExecutionFillModelV2) -> dict:
         "strategy_bundle_id": row.strategy_bundle_id,
         "strategy_leg_role": row.strategy_leg_role,
         "liquidity_role": row.liquidity_role,
+        "fee_rate": row.fee_rate,
+        "exec_type": row.exec_type,
         "exchange_ts": row.exchange_ts,
         "ingestion_ts": row.ingestion_ts,
         "source_system": row.source_system,

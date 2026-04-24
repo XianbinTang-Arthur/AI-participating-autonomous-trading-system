@@ -257,6 +257,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_order["time_in_force"], "GTC")
             self.assertEqual(Decimal(str(stored_order["limit_price"])), Decimal("70010.5"))
             self.assertEqual(stored_order["side"], "sell")
+            self.assertEqual(stored_order["execution_style"], "maker")
             raw_payload = dict(stored_order.get("raw_payload") or {})
             self.assertIn("intent", raw_payload)
             self.assertEqual(raw_payload["intent"]["order_type"], "limit")
@@ -674,6 +675,10 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
                 margin_mode="cross",
                 position_intent="close_long",
                 liquidity_role="taker",
+                raw_exchange={
+                    "feeRate": "-0.0005",
+                    "execType": "T",
+                },
                 exchange_timestamp=exchange_ts,
                 ingestion_timestamp=ingestion_ts,
                 order_status_after_fill="FILLED",
@@ -698,6 +703,8 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             stored = fill_repo.get_fill_by_dedupe_key("OKX", "venue_fill_idem_1")
             self.assertIsNotNone(stored)
             self.assertEqual(stored["fill_id"], "fill_idem_1")
+            self.assertEqual(stored["fee_rate"], "-0.0005")
+            self.assertEqual(stored["exec_type"], "T")
         finally:
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)

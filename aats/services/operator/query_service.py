@@ -6651,6 +6651,12 @@ class OperatorQueryService:
             fill_event_nested = raw_payload.get("fill_event") if isinstance(raw_payload.get("fill_event"), dict) else {}
             order_state_nested = raw_payload.get("order_state") if isinstance(raw_payload.get("order_state"), dict) else {}
             intent_nested = raw_payload.get("intent") if isinstance(raw_payload.get("intent"), dict) else {}
+            top_level_raw_exchange = raw_payload.get("raw_exchange") if isinstance(raw_payload.get("raw_exchange"), dict) else {}
+            fill_event_raw_exchange = (
+                fill_event_nested.get("raw_exchange")
+                if isinstance(fill_event_nested.get("raw_exchange"), dict)
+                else {}
+            )
             nested_payload = fill_event_nested or order_state_nested or intent_nested or {}
             if "state" in payload and "status" not in payload:
                 payload["status"] = payload.get("state")
@@ -6690,6 +6696,7 @@ class OperatorQueryService:
             # 顶层 > nested order_state > nested fill_event > nested intent。
             payload["execution_style"] = (
                 payload.get("execution_style")
+                or record.get("execution_style")
                 or raw_payload.get("execution_style")
                 or intent_nested.get("execution_style")
                 or fill_event_nested.get("execution_style")
@@ -6710,6 +6717,20 @@ class OperatorQueryService:
                 )
             fill_id = payload.get("fill_id")
             if fill_id:
+                payload["fee_rate"] = (
+                    payload.get("fee_rate")
+                    or record.get("fee_rate")
+                    or raw_payload.get("fee_rate")
+                    or top_level_raw_exchange.get("feeRate")
+                    or fill_event_raw_exchange.get("feeRate")
+                )
+                payload["exec_type"] = (
+                    payload.get("exec_type")
+                    or record.get("exec_type")
+                    or raw_payload.get("exec_type")
+                    or top_level_raw_exchange.get("execType")
+                    or fill_event_raw_exchange.get("execType")
+                )
                 # raw_exchange 只出现在 fill 侧 (ExchangeFill / FillEvent)。
                 raw_exchange = (
                     payload.get("raw_exchange")

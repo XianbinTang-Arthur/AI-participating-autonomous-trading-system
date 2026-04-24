@@ -48,6 +48,16 @@ class TestPhase1StorageScaffold(unittest.TestCase):
                     }.issubset(tables)
                 )
 
+                execution_order_columns = {
+                    column["name"] for column in inspect(runtime.engine).get_columns("execution_orders")
+                }
+                execution_fill_columns = {
+                    column["name"] for column in inspect(runtime.engine).get_columns("execution_fills")
+                }
+                self.assertIn("execution_style", execution_order_columns)
+                self.assertIn("fee_rate", execution_fill_columns)
+                self.assertIn("exec_type", execution_fill_columns)
+
                 PostgresExecutionOrderRepository(runtime.session_factory)
                 PostgresExecutionOrderHistoryRepository(runtime.session_factory)
                 PostgresExecutionCommandRepository(runtime.session_factory)
