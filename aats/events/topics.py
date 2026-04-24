@@ -47,6 +47,14 @@ OPERATOR_ACTIONS = "system.operator_actions"
 # 两条 topic 都归 critical（丢包会让 HTTP 超时、系统卡在 blocker）。
 OPERATOR_COMMAND_REQUESTS = "system.operator_command_requests"
 OPERATOR_COMMAND_RESPONSES = "system.operator_command_responses"
+# AI command proxy：gateway → decision 方向，与 OPERATOR_COMMAND_* 对称。
+# set_ai_operating_mode / ai_review_restore / ai_review_degrade_to_baseline 这类
+# 依赖 ai_service 的 operator 命令在 4 进程 gateway role 下无法本地执行
+# （ai_service 仅在 decision role 装配），必须通过 NATS 代理到 decision 进程。
+# 与 OPERATOR_COMMAND_* 区分独立 topic 避免 execution/decision 两个 worker
+# 竞争订阅造成命令错投。
+AI_COMMAND_REQUESTS = "system.ai_command_requests"
+AI_COMMAND_RESPONSES = "system.ai_command_responses"
 # Finding 3: decision 侧 guard signal 跨进程缓存。execution 进程周期性地把
 # DerivativesLiveGuardService / ForwardTrialGuardService / RecoveryPostureEvaluator
 # 的快照 publish 到本 topic，decision 进程的 GuardSignalHotStateCache 订阅并

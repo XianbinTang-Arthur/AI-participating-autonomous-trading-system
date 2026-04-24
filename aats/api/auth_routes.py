@@ -22,6 +22,11 @@ from aats.api.session_auth import issue_session_token
 from aats.bootstrap.config import ApplicationRuntime
 from aats.schemas.common import utc_now
 from aats.schemas.system import RuntimeModeState
+from aats.services.operator.command_bridge import (
+    OperatorCommandError,
+    OperatorCommandRemoteError,
+    OperatorCommandTimeoutError,
+)
 from aats.services.operator.query_service import OperatorQueryService
 
 
@@ -891,15 +896,19 @@ async def select_ai_operating_mode(
             ),
         )
     try:
-        return _query(request).set_ai_operating_mode(
+        return await _query(request).set_ai_operating_mode(
             mode=payload.mode,
             reason=payload.reason,
             actor_role=principal.role,
             actor_identity=principal.identity,
             auth_source=principal.auth_source,
         )
-    except ValueError as exc:
+    except OperatorCommandTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (ValueError, OperatorCommandRemoteError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OperatorCommandError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @auth_router.post("/auth/users")

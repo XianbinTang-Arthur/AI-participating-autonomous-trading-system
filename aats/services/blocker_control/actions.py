@@ -81,7 +81,7 @@ class BlockerActionService:
             )
             message = "已记录影子兼容层人工核查结果，当前阻断会继续保留，直到兼容层恢复正常。"
         elif action_id == "ai-review-restore":
-            self.owner.ai_review_restore(
+            await self.owner.ai_review_restore(
                 reason=reason,
                 actor_role=actor_role,
                 actor_identity=actor_identity,
@@ -89,7 +89,7 @@ class BlockerActionService:
             )
             message = "已确认恢复 AI 决策链路。"
         elif action_id == "ai-review-degrade-to-baseline":
-            self.owner.ai_review_degrade_to_baseline(
+            await self.owner.ai_review_degrade_to_baseline(
                 reason=reason,
                 actor_role=actor_role,
                 actor_identity=actor_identity,

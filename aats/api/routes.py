@@ -303,14 +303,18 @@ async def system_ai_review_restore(
 ) -> dict[str, Any]:
     reason = payload.reason if payload is not None else "operator_restore_ai_review"
     try:
-        return _query(request).ai_review_restore(
+        return await _query(request).ai_review_restore(
             reason=reason,
             actor_role=principal.role,
             actor_identity=principal.identity,
             auth_source=principal.auth_source,
         )
-    except ValueError as exc:
+    except OperatorCommandTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (ValueError, OperatorCommandRemoteError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OperatorCommandError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/system/ai-review/degrade-to-baseline")
@@ -321,14 +325,18 @@ async def system_ai_review_degrade_to_baseline(
 ) -> dict[str, Any]:
     reason = payload.reason if payload is not None else "operator_degrade_ai_review_to_baseline"
     try:
-        return _query(request).ai_review_degrade_to_baseline(
+        return await _query(request).ai_review_degrade_to_baseline(
             reason=reason,
             actor_role=principal.role,
             actor_identity=principal.identity,
             auth_source=principal.auth_source,
         )
-    except ValueError as exc:
+    except OperatorCommandTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except (ValueError, OperatorCommandRemoteError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OperatorCommandError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/system/blocker-actions/{action_id}")

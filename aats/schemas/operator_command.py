@@ -57,6 +57,10 @@ OperatorCommandName = Literal[
     "retry_limit_lookup",
     "safe_cancel_exit_execution",
     "reset_trial_guard",
+    # AI command proxy（topic=AI_COMMAND_REQUESTS/RESPONSES，worker 驻 decision）
+    "ai_operating_mode_select",
+    "ai_review_restore",
+    "ai_review_degrade_to_baseline",
 ]
 
 

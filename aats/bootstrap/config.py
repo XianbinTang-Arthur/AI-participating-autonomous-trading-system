@@ -532,6 +532,12 @@ class ApplicationRuntime:
     # 详见 docs/task/slice_4proc_operator_command_proxy_fix_design.md §4/§5。
     operator_command_client: OperatorCommandClient | None = None
     operator_command_worker: OperatorCommandWorker | None = None
+    # AI command proxy：gateway→decision 方向。UI 的 AI 运行模式切换、AI
+    # review restore / degrade-to-baseline 这三个 POST mutate 必须在装了
+    # ai_service 的 decision 进程执行。gateway 装 client、decision 装 worker，
+    # 用 AI_COMMAND_* topic 与 execution 的 OPERATOR_COMMAND_* 隔离。
+    ai_command_client: OperatorCommandClient | None = None
+    ai_command_worker: OperatorCommandWorker | None = None
     # Finding 3: guard signal 跨进程缓存。execution 侧 publish，decision 侧 read。
     # monolith 下为 None（guard service 直接注入 risk_engine）。
     guard_signal_caches: dict[str, Any] | None = None
@@ -5504,6 +5510,15 @@ async def build_runtime(
             logger=runtime.logger,
         )
         await runtime.operator_command_client.bootstrap()
+        # AI command client：同进程再装一个，topic 换成 AI_COMMAND_*。
+        runtime.ai_command_client = OperatorCommandClient(
+            bus=bus,
+            process_role=PROCESS_ROLE_GATEWAY,
+            logger=runtime.logger,
+            request_topic=topics.AI_COMMAND_REQUESTS,
+            response_topic=topics.AI_COMMAND_RESPONSES,
+        )
+        await runtime.ai_command_client.bootstrap()
     elif effective_process_role == PROCESS_ROLE_EXECUTION:
         # 局部 import 是为了打破循环依赖：OperatorQueryService 间接依赖
         # ApplicationRuntime 的大量字段，模块顶层 import 会让 bootstrap.config
@@ -5616,6 +5631,53 @@ async def build_runtime(
             },
         )
         await runtime.operator_command_worker.bootstrap()
+    elif effective_process_role == PROCESS_ROLE_DECISION:
+        # AI command worker：gateway 通过 NATS 转发的 AI mutate 请求在 decision
+        # 进程落地执行。ai_service 驻 decision role，因此 dispatch 的 3 个命令
+        # 回到 OperatorQueryService 本地方法即可直接调用 ai_service。
+        from aats.services.operator.query_service import OperatorQueryService as _AIQueryService
+
+        async def _handle_ai_operating_mode_select(payload: dict[str, Any]) -> dict[str, Any]:
+            service = _AIQueryService(runtime)
+            return await service.set_ai_operating_mode(
+                mode=payload["mode"],
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
+        async def _handle_ai_review_restore(payload: dict[str, Any]) -> dict[str, Any]:
+            service = _AIQueryService(runtime)
+            return await service.ai_review_restore(
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
+        async def _handle_ai_review_degrade_to_baseline(payload: dict[str, Any]) -> dict[str, Any]:
+            service = _AIQueryService(runtime)
+            return await service.ai_review_degrade_to_baseline(
+                reason=payload.get("reason", ""),
+                actor_role=payload.get("actor_role", "anonymous"),
+                actor_identity=payload.get("actor_identity"),
+                auth_source=payload.get("auth_source", "anonymous"),
+            )
+
+        runtime.ai_command_worker = OperatorCommandWorker(
+            bus=bus,
+            process_role=PROCESS_ROLE_DECISION,
+            logger=runtime.logger,
+            command_handlers={
+                "ai_operating_mode_select": _handle_ai_operating_mode_select,
+                "ai_review_restore": _handle_ai_review_restore,
+                "ai_review_degrade_to_baseline": _handle_ai_review_degrade_to_baseline,
+            },
+            request_topic=topics.AI_COMMAND_REQUESTS,
+            response_topic=topics.AI_COMMAND_RESPONSES,
+        )
+        await runtime.ai_command_worker.bootstrap()
 
     # StrategyProfileControlService 只依赖 shared + decision slice 资源
     # (repo / settings / event_store),不走 startup_recovery(execution 侧)。

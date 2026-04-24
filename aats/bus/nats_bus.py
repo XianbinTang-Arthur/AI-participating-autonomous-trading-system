@@ -163,6 +163,12 @@ DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
                                             # 依赖 execution-only service，走代理）
         _topics.OPERATOR_COMMAND_RESPONSES, # 同上，execution→gateway 响应 topic；
                                             # 两条都归 critical 防丢包卡 HTTP handler
+        _topics.AI_COMMAND_REQUESTS,        # AI command proxy: gateway→decision 请求 topic
+                                            # (set_ai_operating_mode / ai_review_restore /
+                                            # ai_review_degrade_to_baseline 依赖 decision-only
+                                            # ai_service，走代理)
+        _topics.AI_COMMAND_RESPONSES,       # 同上，decision→gateway 响应 topic；
+                                            # 两条都归 critical 防丢包卡 UI 超时
         _topics.EXECUTION_ERROR_SUMMARIES,    # 执行错误汇总；驱动 risk 降级
         _topics.PROCESSING_FAILURES,      # 处理失败；同上
         _topics.KILL_SWITCH_STATE,        # Stage 6 Slice 6.2：kill_switch 跨进程同步
@@ -279,6 +285,8 @@ TRANSIENT_DELIVERY_TOPICS: frozenset[str] = frozenset(
     {
         _topics.OPERATOR_COMMAND_REQUESTS,     # 操作员命令请求
         _topics.OPERATOR_COMMAND_RESPONSES,    # 操作员命令响应
+        _topics.AI_COMMAND_REQUESTS,           # AI 命令请求（gateway→decision）
+        _topics.AI_COMMAND_RESPONSES,          # AI 命令响应（decision→gateway）
     }
 )
 

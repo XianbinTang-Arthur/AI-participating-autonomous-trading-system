@@ -11062,7 +11062,7 @@ class OperatorQueryService:
             "details": details,
         }
 
-    def ai_review_restore(
+    async def ai_review_restore(
         self,
         *,
         reason: str,
@@ -11070,9 +11070,21 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
-        # Stage 7：gateway-only role 下 ai_service 为 None，POST 仅在 decision role 可执行。
+        # Stage 7：gateway-only role 下 ai_service 为 None；4 进程拓扑下走
+        # AI command client 通过 NATS 代理到 decision 进程执行。
         if self.runtime.ai_service is None:
-            raise ValueError("ai_service_not_loaded_in_this_process_role")
+            client = getattr(self.runtime, "ai_command_client", None)
+            if client is None:
+                raise ValueError("ai_service_not_loaded_in_this_process_role")
+            return await client.invoke(
+                command="ai_review_restore",
+                payload={
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
         recovery_before = self.recovery_view()["recovery_state"]
         ai_before = dict(self.runtime.ai_service.status())
         ai_after = self.runtime.ai_service.resolve_outcome_review_restore_ai()
@@ -11110,7 +11122,7 @@ class OperatorQueryService:
             "ai_runtime": self.ai_runtime(),
         }
 
-    def set_ai_operating_mode(
+    async def set_ai_operating_mode(
         self,
         *,
         mode: str,
@@ -11119,9 +11131,22 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
-        # Stage 7：gateway-only role 下 ai_service 为 None，POST 仅在 decision role 可执行。
+        # Stage 7：gateway-only role 下 ai_service 为 None；4 进程拓扑下走
+        # AI command client 通过 NATS 代理到 decision 进程执行。
         if self.runtime.ai_service is None:
-            raise ValueError("ai_service_not_loaded_in_this_process_role")
+            client = getattr(self.runtime, "ai_command_client", None)
+            if client is None:
+                raise ValueError("ai_service_not_loaded_in_this_process_role")
+            return await client.invoke(
+                command="ai_operating_mode_select",
+                payload={
+                    "mode": mode,
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
         recovery_before = self.recovery_view()["recovery_state"]
         ai_before = dict(self.runtime.ai_service.status())
         configured_mode = normalize_ai_operating_mode(self.runtime.settings.ai_operating_mode)
@@ -11173,7 +11198,7 @@ class OperatorQueryService:
             "ai_runtime": self.ai_runtime(),
         }
 
-    def ai_review_degrade_to_baseline(
+    async def ai_review_degrade_to_baseline(
         self,
         *,
         reason: str,
@@ -11181,9 +11206,21 @@ class OperatorQueryService:
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
-        # Stage 7：gateway-only role 下 ai_service 为 None，POST 仅在 decision role 可执行。
+        # Stage 7：gateway-only role 下 ai_service 为 None；4 进程拓扑下走
+        # AI command client 通过 NATS 代理到 decision 进程执行。
         if self.runtime.ai_service is None:
-            raise ValueError("ai_service_not_loaded_in_this_process_role")
+            client = getattr(self.runtime, "ai_command_client", None)
+            if client is None:
+                raise ValueError("ai_service_not_loaded_in_this_process_role")
+            return await client.invoke(
+                command="ai_review_degrade_to_baseline",
+                payload={
+                    "reason": reason,
+                    "actor_role": actor_role,
+                    "actor_identity": actor_identity,
+                    "auth_source": auth_source,
+                },
+            )
         recovery_before = self.recovery_view()["recovery_state"]
         ai_before = dict(self.runtime.ai_service.status())
         ai_after = self.runtime.ai_service.resolve_outcome_review_degrade_to_baseline()

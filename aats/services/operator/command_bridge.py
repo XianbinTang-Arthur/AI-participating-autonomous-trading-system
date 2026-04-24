@@ -121,11 +121,18 @@ class OperatorCommandClient:
         process_role: str,
         logger: Any,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        request_topic: str = topics.OPERATOR_COMMAND_REQUESTS,
+        response_topic: str = topics.OPERATOR_COMMAND_RESPONSES,
     ) -> None:
+        # request_topic / response_topic 默认指向 OPERATOR_COMMAND_*，保持
+        # 现有 gateway↔execution 代理完全不变；AI 代理（gateway↔decision）
+        # 构造时覆盖为 AI_COMMAND_* 即可复用同一套客户端逻辑。
         self._bus = bus
         self._process_role = process_role
         self._logger = logger
         self._timeout_seconds = timeout_seconds
+        self._request_topic = request_topic
+        self._response_topic = response_topic
         self._pending: dict[str, asyncio.Future[OperatorCommandResponse]] = {}
         self._subscribed = False
         self._stopped = False
@@ -140,7 +147,7 @@ class OperatorCommandClient:
             return
         try:
             await self._bus.subscribe(
-                topics.OPERATOR_COMMAND_RESPONSES,
+                self._response_topic,
                 self._handle_response,
             )
             self._subscribed = True
@@ -148,7 +155,7 @@ class OperatorCommandClient:
                 self._logger,
                 "operator_command_client_subscribed",
                 process_role=self._process_role,
-                topic=topics.OPERATOR_COMMAND_RESPONSES,
+                topic=self._response_topic,
             )
         except Exception as exc:
             log_event(
@@ -156,7 +163,7 @@ class OperatorCommandClient:
                 "operator_command_client_subscribe_failed",
                 level="error",
                 process_role=self._process_role,
-                topic=topics.OPERATOR_COMMAND_RESPONSES,
+                topic=self._response_topic,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
@@ -217,7 +224,7 @@ class OperatorCommandClient:
         envelope = EventEnvelope(
             event_type=_REQUEST_EVENT_TYPE,
             source_component=_SOURCE_COMPONENT,
-            topic=topics.OPERATOR_COMMAND_REQUESTS,
+            topic=self._request_topic,
             key=correlation_id,
             payload=dump_payload_exact(request),
         )
@@ -232,7 +239,7 @@ class OperatorCommandClient:
 
         try:
             await self._bus.publish(
-                topic=topics.OPERATOR_COMMAND_REQUESTS,
+                topic=self._request_topic,
                 key=correlation_id,
                 payload=envelope.model_dump(mode="json"),
             )
@@ -415,11 +422,18 @@ class OperatorCommandWorker:
         process_role: str,
         logger: Any,
         command_handlers: dict[OperatorCommandName, CommandHandler],
+        request_topic: str = topics.OPERATOR_COMMAND_REQUESTS,
+        response_topic: str = topics.OPERATOR_COMMAND_RESPONSES,
     ) -> None:
+        # request_topic / response_topic 默认指向 OPERATOR_COMMAND_*；
+        # AI worker 构造时覆盖为 AI_COMMAND_* 以避免与 execution worker
+        # 争抢同一条 NATS 订阅。
         self._bus = bus
         self._process_role = process_role
         self._logger = logger
         self._handlers = dict(command_handlers)
+        self._request_topic = request_topic
+        self._response_topic = response_topic
         self._lock = asyncio.Lock()
         self._subscribed = False
         self._stopped = False
@@ -440,7 +454,7 @@ class OperatorCommandWorker:
             return
         try:
             await self._bus.subscribe(
-                topics.OPERATOR_COMMAND_REQUESTS,
+                self._request_topic,
                 self._handle_request,
             )
             self._subscribed = True
@@ -448,7 +462,7 @@ class OperatorCommandWorker:
                 self._logger,
                 "operator_command_worker_subscribed",
                 process_role=self._process_role,
-                topic=topics.OPERATOR_COMMAND_REQUESTS,
+                topic=self._request_topic,
                 registered_commands=sorted(self._handlers.keys()),
             )
         except Exception as exc:
@@ -457,7 +471,7 @@ class OperatorCommandWorker:
                 "operator_command_worker_subscribe_failed",
                 level="error",
                 process_role=self._process_role,
-                topic=topics.OPERATOR_COMMAND_REQUESTS,
+                topic=self._request_topic,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )
@@ -523,12 +537,12 @@ class OperatorCommandWorker:
             response_envelope = EventEnvelope(
                 event_type=_RESPONSE_EVENT_TYPE,
                 source_component=_SOURCE_COMPONENT,
-                topic=topics.OPERATOR_COMMAND_RESPONSES,
+                topic=self._response_topic,
                 key=response.correlation_id,
                 payload=dump_payload_exact(response),
             )
             await self._bus.publish(
-                topic=topics.OPERATOR_COMMAND_RESPONSES,
+                topic=self._response_topic,
                 key=response.correlation_id,
                 payload=response_envelope.model_dump(mode="json"),
             )
