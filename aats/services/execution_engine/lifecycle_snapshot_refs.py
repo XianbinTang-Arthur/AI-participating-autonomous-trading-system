@@ -11,6 +11,11 @@ SNAPSHOT_REF_KEYS = (
     "health_snapshot_ref",
 )
 
+LIFECYCLE_MARKET_CONTEXT_REF_KEYS = (
+    "pre_event_orderbook_snapshot_ref",
+    "post_event_orderbook_snapshot_ref",
+)
+
 
 def snapshot_refs_from_obj(obj: Any) -> dict[str, str | None]:
     return {
@@ -42,6 +47,30 @@ def top_level_snapshot_ref_payload(refs: Mapping[str, Any]) -> dict[str, str | N
     return {key: _normalize_snapshot_ref(refs.get(key)) for key in SNAPSHOT_REF_KEYS}
 
 
+def lifecycle_market_context_ref_payload(refs: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    source = refs if isinstance(refs, Mapping) else {}
+    normalized_refs = {
+        key: _normalize_snapshot_ref(source.get(key))
+        for key in LIFECYCLE_MARKET_CONTEXT_REF_KEYS
+    }
+    missing_refs = [
+        key
+        for key, value in normalized_refs.items()
+        if value is None
+    ]
+    if not missing_refs:
+        capture_status = "captured"
+    elif len(missing_refs) == len(LIFECYCLE_MARKET_CONTEXT_REF_KEYS):
+        capture_status = "missing"
+    else:
+        capture_status = "partial"
+    return {
+        **normalized_refs,
+        "capture_status": capture_status,
+        "missing_refs": missing_refs,
+    }
+
+
 def lifecycle_snapshot_ref_payload(
     *,
     existing_raw_payload: Mapping[str, Any] | None = None,
@@ -52,11 +81,39 @@ def lifecycle_snapshot_ref_payload(
     existing = existing_raw_payload if isinstance(existing_raw_payload, Mapping) else {}
     existing_lifecycle = existing.get("lifecycle_snapshot_refs")
     lifecycle = dict(existing_lifecycle) if isinstance(existing_lifecycle, Mapping) else {}
+    existing_stage_payload = lifecycle.get(stage)
+    existing_stage = existing_stage_payload if isinstance(existing_stage_payload, Mapping) else {}
+    existing_market_context_payload = existing_stage.get("market_context_snapshot_refs")
+    market_context_refs = (
+        dict(existing_market_context_payload)
+        if isinstance(existing_market_context_payload, Mapping)
+        else {}
+    )
+    for key in LIFECYCLE_MARKET_CONTEXT_REF_KEYS:
+        ref_value = _normalize_snapshot_ref(refs.get(key))
+        if ref_value is not None:
+            market_context_refs[key] = ref_value
     lifecycle[stage] = {
         **top_level_snapshot_ref_payload(refs),
+        "market_context_snapshot_refs": lifecycle_market_context_ref_payload(market_context_refs),
         "source": source,
     }
-    return {"lifecycle_snapshot_refs": lifecycle}
+    normalized_lifecycle: dict[str, Any] = {}
+    for lifecycle_stage, stage_payload in lifecycle.items():
+        if not isinstance(stage_payload, Mapping):
+            continue
+        stage_dict = dict(stage_payload)
+        raw_market_context = stage_dict.get("market_context_snapshot_refs")
+        market_context_source = (
+            raw_market_context
+            if isinstance(raw_market_context, Mapping)
+            else stage_dict
+        )
+        stage_dict["market_context_snapshot_refs"] = lifecycle_market_context_ref_payload(
+            market_context_source
+        )
+        normalized_lifecycle[str(lifecycle_stage)] = stage_dict
+    return {"lifecycle_snapshot_refs": normalized_lifecycle}
 
 
 def order_state_lifecycle_stage(status: str | None, *, exchange_order_id: str | None = None) -> str:

@@ -182,6 +182,38 @@ class TestLifecycleSnapshotRefPayload(unittest.TestCase):
         self.assertEqual(lifecycle["submit"]["market_snapshot_ref"], "mkt_snap_abc")
         self.assertEqual(lifecycle["ack"]["market_snapshot_ref"], "mkt_snap_ack")
         self.assertEqual(lifecycle["ack"]["source"], "converged_execution_repo")
+        self.assertEqual(
+            lifecycle["submit"]["market_context_snapshot_refs"],
+            {
+                "pre_event_orderbook_snapshot_ref": None,
+                "post_event_orderbook_snapshot_ref": None,
+                "capture_status": "missing",
+                "missing_refs": [
+                    "pre_event_orderbook_snapshot_ref",
+                    "post_event_orderbook_snapshot_ref",
+                ],
+            },
+        )
+
+    def test_lifecycle_market_context_refs_are_preserved_when_supplied(self) -> None:
+        from aats.services.execution_engine.lifecycle_snapshot_refs import lifecycle_snapshot_ref_payload
+
+        payload = lifecycle_snapshot_ref_payload(
+            existing_raw_payload=None,
+            stage="submit",
+            refs={
+                **_REFS,
+                "pre_event_orderbook_snapshot_ref": "book_before_submit",
+                "post_event_orderbook_snapshot_ref": "book_after_submit",
+            },
+            source="execution_outbox_submit",
+        )
+
+        market_context = payload["lifecycle_snapshot_refs"]["submit"]["market_context_snapshot_refs"]
+        self.assertEqual(market_context["pre_event_orderbook_snapshot_ref"], "book_before_submit")
+        self.assertEqual(market_context["post_event_orderbook_snapshot_ref"], "book_after_submit")
+        self.assertEqual(market_context["capture_status"], "captured")
+        self.assertEqual(market_context["missing_refs"], [])
 
 
 class TestRoundTripHelpersPreserveRefs(unittest.TestCase):

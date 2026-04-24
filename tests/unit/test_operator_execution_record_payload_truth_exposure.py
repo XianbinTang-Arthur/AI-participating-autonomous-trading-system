@@ -104,6 +104,26 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
                 "all_present_stages_complete": True,
             },
         )
+        self.assertEqual(
+            payload["lifecycle_market_context_completeness"],
+            {
+                "has_lifecycle_snapshot_refs": True,
+                "present_stages": ["submit", "ack"],
+                "complete_stages": [],
+                "incomplete_stages": ["submit", "ack"],
+                "missing_market_context_refs_by_stage": {
+                    "submit": [
+                        "pre_event_orderbook_snapshot_ref",
+                        "post_event_orderbook_snapshot_ref",
+                    ],
+                    "ack": [
+                        "pre_event_orderbook_snapshot_ref",
+                        "post_event_orderbook_snapshot_ref",
+                    ],
+                },
+                "all_present_stages_have_market_context": False,
+            },
+        )
         self.assertEqual(payload["truth_source"], "execution_order_repo")
 
     def test_nested_intent_supplies_execution_style_when_top_level_absent(self) -> None:
@@ -187,6 +207,17 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
                 "all_present_stages_complete": False,
             },
         )
+        self.assertEqual(
+            payload["lifecycle_market_context_completeness"],
+            {
+                "has_lifecycle_snapshot_refs": False,
+                "present_stages": [],
+                "complete_stages": [],
+                "incomplete_stages": [],
+                "missing_market_context_refs_by_stage": {},
+                "all_present_stages_have_market_context": False,
+            },
+        )
         # 既有 truth_source 行为不回归
         self.assertEqual(payload["truth_source"], "execution_order_repo")
 
@@ -225,6 +256,53 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
             {"ack": ["health_snapshot_ref"]},
         )
         self.assertFalse(payload["lifecycle_snapshot_refs_completeness"]["all_present_stages_complete"])
+
+    def test_lifecycle_market_context_completeness_reports_missing_refs_by_stage(self) -> None:
+        svc = _make_service()
+        row = self._order_row(
+            raw_payload={
+                "lifecycle_snapshot_refs": {
+                    "submit": {
+                        **_REFS,
+                        "source": "execution_order_service",
+                    },
+                    "ack": {
+                        **_REFS,
+                        "source": "converged_execution_repo",
+                        "market_context_snapshot_refs": {
+                            "pre_event_orderbook_snapshot_ref": "book_before_ack",
+                            "post_event_orderbook_snapshot_ref": "book_after_ack",
+                        },
+                    },
+                }
+            }
+        )
+        payload = svc._execution_record_payload(row)
+
+        self.assertEqual(
+            payload["lifecycle_snapshot_refs"]["submit"]["market_context_snapshot_refs"]["capture_status"],
+            "missing",
+        )
+        self.assertEqual(
+            payload["lifecycle_snapshot_refs"]["ack"]["market_context_snapshot_refs"]["capture_status"],
+            "captured",
+        )
+        self.assertEqual(
+            payload["lifecycle_market_context_completeness"],
+            {
+                "has_lifecycle_snapshot_refs": True,
+                "present_stages": ["submit", "ack"],
+                "complete_stages": ["ack"],
+                "incomplete_stages": ["submit"],
+                "missing_market_context_refs_by_stage": {
+                    "submit": [
+                        "pre_event_orderbook_snapshot_ref",
+                        "post_event_orderbook_snapshot_ref",
+                    ],
+                },
+                "all_present_stages_have_market_context": False,
+            },
+        )
 
 
 class TestFillDictRowTruthExposure(unittest.TestCase):
