@@ -202,13 +202,20 @@ class TestQueryServiceGatewayFallback(unittest.IsolatedAsyncioTestCase):
 
         await service.set_ai_operating_mode(
             mode="ai_decision_maker",
-            reason="ui",
+            reason="ui_toggle_decision_maker",
             actor_role="admin",
+            actor_identity="tang",
+            auth_source="session",
         )
 
         kwargs = runtime.ai_command_client.invoke.call_args.kwargs
         self.assertEqual(kwargs["command"], "ai_operating_mode_select")
-        self.assertEqual(kwargs["payload"]["mode"], "ai_decision_maker")
+        payload = kwargs["payload"]
+        self.assertEqual(payload["mode"], "ai_decision_maker")
+        self.assertEqual(payload["reason"], "ui_toggle_decision_maker")
+        self.assertEqual(payload["actor_role"], "admin")
+        self.assertEqual(payload["actor_identity"], "tang")
+        self.assertEqual(payload["auth_source"], "session")
 
     async def test_ai_review_degrade_proxies_through_client(self) -> None:
         runtime = self._make_runtime(with_client=True)

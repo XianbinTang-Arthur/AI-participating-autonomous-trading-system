@@ -4,10 +4,13 @@ Slice 4-proc operator command proxy 设计文档：
 docs/task/slice_4proc_operator_command_proxy_fix_design.md §4.3
 
 设计意图：
-    gateway 进程的 HTTP endpoint（POST /system/rebaseline、/system/resume）
-    需要访问 portfolio_service / reconciliation_service，但 4 进程切片化
-    门控让这两个 service 只在 execution role 装配。本 schema 定义了通过
-    NATS 从 gateway 把命令代理到 execution 进程的请求-响应消息格式。
+    gateway 进程的 HTTP endpoint（POST /system/rebaseline、/system/resume、
+    /ai/operating-mode/select、/system/ai-review/*）需要访问
+    portfolio_service / reconciliation_service / ai_service，但 4 进程
+    切片化门控让这些 service 只在 execution 或 decision role 装配。本
+    schema 定义了通过 NATS 把命令代理到目标进程的请求-响应消息格式，
+    Execution 类命令与 AI 类命令共用 Request/Response 结构但走独立
+    topic（OPERATOR_COMMAND_* vs AI_COMMAND_*）以避免 worker 争抢订阅。
 
 correlation_id 规则：
     - gateway 端 OperatorCommandClient 在发请求前生成 ``new_id("opcmd")``
@@ -33,21 +36,24 @@ payload 结构不做强类型约束：
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Union
 
 from pydantic import Field
 
 from aats.schemas.common import SchemaBase, utc_now
 
-# 支持的命令枚举。
+# 支持的命令枚举，按目标 worker 进程拆成两组，避免将来第 N 类命令加进
+# 来时 OperatorCommandName Literal 无限膨胀：
+#   - ExecutionCommandName：worker 驻 execution role，topic=OPERATOR_COMMAND_*
+#   - AICommandName：worker 驻 decision role，topic=AI_COMMAND_*
 #
 # 新增命令时必须：
-#   1) 在本 Literal 里加名称
-#   2) 在 ``OperatorCommandWorker._COMMAND_HANDLERS`` 注册 dispatcher
-#   3) 在 ``reconciliation_system_queries`` 对应方法的 gateway 分支里
-#      改 client.invoke 的 command 参数
-#   4) 在 test_operator_command_bridge 加 unit test 覆盖新命令
-OperatorCommandName = Literal[
+#   1) 按目标 worker 归到 ExecutionCommandName 或 AICommandName
+#   2) 在 bootstrap/config.py 对应 role 分支的 ``command_handlers`` 注册 dispatcher
+#   3) 在对应 query 服务（reconciliation_system_queries / query_service）
+#      的 gateway 分支里 client.invoke 调用的 command 参数里加新名字
+#   4) 在 test_operator_command_bridge / test_ai_command_bridge 加 unit test
+ExecutionCommandName = Literal[
     "rebaseline",
     "resume",
     "validate_reconciliation",
@@ -57,11 +63,18 @@ OperatorCommandName = Literal[
     "retry_limit_lookup",
     "safe_cancel_exit_execution",
     "reset_trial_guard",
-    # AI command proxy（topic=AI_COMMAND_REQUESTS/RESPONSES，worker 驻 decision）
+]
+
+AICommandName = Literal[
     "ai_operating_mode_select",
     "ai_review_restore",
     "ai_review_degrade_to_baseline",
 ]
+
+# 历史兼容别名：Request.command、Worker.command_handlers dict key 用这个
+# Union，Pydantic 把 Union[Literal[...], Literal[...]] 等价展开为 Literal
+# 全集，对 callers 零改动。
+OperatorCommandName = Union[ExecutionCommandName, AICommandName]
 
 
 class OperatorCommandRequest(SchemaBase):

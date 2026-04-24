@@ -5511,12 +5511,15 @@ async def build_runtime(
         )
         await runtime.operator_command_client.bootstrap()
         # AI command client：同进程再装一个，topic 换成 AI_COMMAND_*。
+        # component_name="ai_command" 让日志 event 打成 ai_command_*
+        # 前缀，可与 execution 代理独立 grep / 告警。
         runtime.ai_command_client = OperatorCommandClient(
             bus=bus,
             process_role=PROCESS_ROLE_GATEWAY,
             logger=runtime.logger,
             request_topic=topics.AI_COMMAND_REQUESTS,
             response_topic=topics.AI_COMMAND_RESPONSES,
+            component_name="ai_command",
         )
         await runtime.ai_command_client.bootstrap()
     elif effective_process_role == PROCESS_ROLE_EXECUTION:
@@ -5676,6 +5679,7 @@ async def build_runtime(
             },
             request_topic=topics.AI_COMMAND_REQUESTS,
             response_topic=topics.AI_COMMAND_RESPONSES,
+            component_name="ai_command",
         )
         await runtime.ai_command_worker.bootstrap()
 

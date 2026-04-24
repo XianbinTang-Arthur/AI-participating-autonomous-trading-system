@@ -1,4 +1,4 @@
-"""4-proc operator command 请求-响应代理。
+"""4-proc operator command 请求-响应代理（通用跨进程命令总线）。
 
 设计文档：docs/task/slice_4proc_operator_command_proxy_fix_design.md §4.4/§4.5
 
@@ -8,18 +8,20 @@
    - 跑在 gateway 进程（HTTP endpoint 入口所在进程）
    - ``invoke(command, payload)`` 发请求 + 按 correlation_id 等响应
    - 构造期注入 ``process_role`` / ``bus`` / ``logger``，
-     ``bootstrap()`` 订阅 ``OPERATOR_COMMAND_RESPONSES``
+     ``bootstrap()`` 订阅 response topic
 
 2. ``OperatorCommandWorker``
-   - 跑在 execution 进程（portfolio_service / reconciliation_service 所在进程）
-   - 订阅 ``OPERATOR_COMMAND_REQUESTS``，按 ``command`` 字段 dispatch 到
-     ``OperatorQueryService`` 上已有的方法（rebaseline / resume），直接复用
-     monolith 路径的业务逻辑（此时 runtime 所有字段都非 None）
+   - 跑在目标业务进程（execution 驻 portfolio_service / reconciliation_service；
+     decision 驻 ai_service）
+   - 订阅 request topic，按 ``command`` 字段 dispatch 到注册过的 handler，
+     直接复用 monolith 路径的业务逻辑（此时 runtime 所有字段都非 None）
    - 业务抛错时包成 ``success=False`` 的 Response 发回，不让异常漏出订阅 handler
 
-两者通过 NATS JetStream 的 ``aats.system.operator_command_requests`` 与
-``aats.system.operator_command_responses`` 两条 topic 通讯，correlation_id
-用 ``dict[str, asyncio.Future]`` 做请求-响应匹配。
+两者的 request/response topic 通过构造参数注入，默认指向
+``aats.system.operator_command_*``（execution 代理专用）；AI 代理复用本类、
+构造时覆盖为 ``aats.system.ai_command_*``（decision 代理专用）。correlation_id
+用 ``dict[str, asyncio.Future]`` 做请求-响应匹配。``component_name`` 参数
+让 AI 链路的日志事件换前缀（``ai_command_*``）便于独立 grep / 告警。
 
 设计原则：
     - Gateway 超时（默认 90 秒）会 fail HTTP handler；不做 retry（rebaseline
@@ -27,8 +29,8 @@
     - Worker 按请求 serial 处理（内部 asyncio.Lock），避免两个 rebaseline
       并发触发把 kill_switch / baseline 状态搅乱
     - source_role 标签用于避免自己发自己消费的回环（monolith 下本模块根本
-      不装，不需要这层保护；但 4 进程下 worker 只在 execution role 装，
-      client 只在 gateway role 装，天然不会回环——这里仍记 role 是为了
+      不装，不需要这层保护；但 4 进程下 worker 只在 execution / decision 装，
+      client 只在 gateway 装，天然不会回环——这里仍记 role 是为了
       日志溯源 + 未来灵活性）
 """
 from __future__ import annotations
@@ -123,16 +125,22 @@ class OperatorCommandClient:
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         request_topic: str = topics.OPERATOR_COMMAND_REQUESTS,
         response_topic: str = topics.OPERATOR_COMMAND_RESPONSES,
+        component_name: str = "operator_command",
     ) -> None:
         # request_topic / response_topic 默认指向 OPERATOR_COMMAND_*，保持
         # 现有 gateway↔execution 代理完全不变；AI 代理（gateway↔decision）
         # 构造时覆盖为 AI_COMMAND_* 即可复用同一套客户端逻辑。
+        # component_name 作为日志 event 名前缀 + 结构化字段 ``component``，
+        # 默认 "operator_command" 兼容既有调用，AI 链路传 "ai_command" 后
+        # 日志会打成 ai_command_client_subscribed 等，便于独立 grep/告警。
         self._bus = bus
         self._process_role = process_role
         self._logger = logger
         self._timeout_seconds = timeout_seconds
         self._request_topic = request_topic
         self._response_topic = response_topic
+        self._event_prefix = component_name
+        self._component_name = component_name
         self._pending: dict[str, asyncio.Future[OperatorCommandResponse]] = {}
         self._subscribed = False
         self._stopped = False
@@ -153,14 +161,14 @@ class OperatorCommandClient:
             self._subscribed = True
             log_event(
                 self._logger,
-                "operator_command_client_subscribed",
+                f"{self._event_prefix}_client_subscribed",
                 process_role=self._process_role,
                 topic=self._response_topic,
             )
         except Exception as exc:
             log_event(
                 self._logger,
-                "operator_command_client_subscribe_failed",
+                f"{self._event_prefix}_client_subscribe_failed",
                 level="error",
                 process_role=self._process_role,
                 topic=self._response_topic,
@@ -231,7 +239,7 @@ class OperatorCommandClient:
 
         log_event(
             self._logger,
-            "operator_command_request_publishing",
+            f"{self._event_prefix}_request_publishing",
             process_role=self._process_role,
             correlation_id=correlation_id,
             command=command,
@@ -248,7 +256,7 @@ class OperatorCommandClient:
             self._pending.pop(correlation_id, None)
             log_event(
                 self._logger,
-                "operator_command_request_publish_failed",
+                f"{self._event_prefix}_request_publish_failed",
                 level="error",
                 process_role=self._process_role,
                 correlation_id=correlation_id,
@@ -264,7 +272,7 @@ class OperatorCommandClient:
             # finally 块统一清理 _pending，这里不重复 pop
             log_event(
                 self._logger,
-                "operator_command_request_timeout",
+                f"{self._event_prefix}_request_timeout",
                 level="error",
                 process_role=self._process_role,
                 correlation_id=correlation_id,
@@ -278,7 +286,7 @@ class OperatorCommandClient:
         except asyncio.CancelledError:
             log_event(
                 self._logger,
-                "operator_command_request_cancelled",
+                f"{self._event_prefix}_request_cancelled",
                 level="warning",
                 process_role=self._process_role,
                 correlation_id=correlation_id,
@@ -291,7 +299,7 @@ class OperatorCommandClient:
         if not response.success:
             log_event(
                 self._logger,
-                "operator_command_request_remote_error",
+                f"{self._event_prefix}_request_remote_error",
                 level="error",
                 process_role=self._process_role,
                 correlation_id=correlation_id,
@@ -306,7 +314,7 @@ class OperatorCommandClient:
 
         log_event(
             self._logger,
-            "operator_command_request_succeeded",
+            f"{self._event_prefix}_request_succeeded",
             process_role=self._process_role,
             correlation_id=correlation_id,
             command=command,
@@ -327,7 +335,7 @@ class OperatorCommandClient:
         except Exception as exc:
             log_event(
                 self._logger,
-                "operator_command_response_parse_failed",
+                f"{self._event_prefix}_response_parse_failed",
                 level="warning",
                 process_role=self._process_role,
                 error_type=type(exc).__name__,
@@ -339,7 +347,7 @@ class OperatorCommandClient:
         if future is None:
             log_event(
                 self._logger,
-                "operator_command_response_unknown_correlation",
+                f"{self._event_prefix}_response_unknown_correlation",
                 level="warning",
                 process_role=self._process_role,
                 correlation_id=response.correlation_id,
@@ -351,7 +359,7 @@ class OperatorCommandClient:
             # 已经超时或被其他消息 resolve 过了
             log_event(
                 self._logger,
-                "operator_command_response_future_already_done",
+                f"{self._event_prefix}_response_future_already_done",
                 level="warning",
                 process_role=self._process_role,
                 correlation_id=response.correlation_id,
@@ -386,7 +394,7 @@ class OperatorCommandClient:
         self._pending.clear()
         log_event(
             self._logger,
-            "operator_command_client_stopped",
+            f"{self._event_prefix}_client_stopped",
             process_role=self._process_role,
         )
 
@@ -424,16 +432,20 @@ class OperatorCommandWorker:
         command_handlers: dict[OperatorCommandName, CommandHandler],
         request_topic: str = topics.OPERATOR_COMMAND_REQUESTS,
         response_topic: str = topics.OPERATOR_COMMAND_RESPONSES,
+        component_name: str = "operator_command",
     ) -> None:
         # request_topic / response_topic 默认指向 OPERATOR_COMMAND_*；
         # AI worker 构造时覆盖为 AI_COMMAND_* 以避免与 execution worker
-        # 争抢同一条 NATS 订阅。
+        # 争抢同一条 NATS 订阅。component_name 作用同 Client：日志 event
+        # 名前缀 + structured log 字段。
         self._bus = bus
         self._process_role = process_role
         self._logger = logger
         self._handlers = dict(command_handlers)
         self._request_topic = request_topic
         self._response_topic = response_topic
+        self._event_prefix = component_name
+        self._component_name = component_name
         self._lock = asyncio.Lock()
         self._subscribed = False
         self._stopped = False
@@ -460,7 +472,7 @@ class OperatorCommandWorker:
             self._subscribed = True
             log_event(
                 self._logger,
-                "operator_command_worker_subscribed",
+                f"{self._event_prefix}_worker_subscribed",
                 process_role=self._process_role,
                 topic=self._request_topic,
                 registered_commands=sorted(self._handlers.keys()),
@@ -468,7 +480,7 @@ class OperatorCommandWorker:
         except Exception as exc:
             log_event(
                 self._logger,
-                "operator_command_worker_subscribe_failed",
+                f"{self._event_prefix}_worker_subscribe_failed",
                 level="error",
                 process_role=self._process_role,
                 topic=self._request_topic,
@@ -491,7 +503,7 @@ class OperatorCommandWorker:
         except Exception as exc:
             log_event(
                 self._logger,
-                "operator_command_request_parse_failed",
+                f"{self._event_prefix}_request_parse_failed",
                 level="warning",
                 process_role=self._process_role,
                 error_type=type(exc).__name__,
@@ -501,7 +513,7 @@ class OperatorCommandWorker:
 
         log_event(
             self._logger,
-            "operator_command_request_received",
+            f"{self._event_prefix}_request_received",
             process_role=self._process_role,
             correlation_id=request.correlation_id,
             command=request.command,
@@ -515,7 +527,7 @@ class OperatorCommandWorker:
             if request.correlation_id in self._processed_ids:
                 log_event(
                     self._logger,
-                    "operator_command_request_deduplicated",
+                    f"{self._event_prefix}_request_deduplicated",
                     level="warning",
                     process_role=self._process_role,
                     correlation_id=request.correlation_id,
@@ -548,7 +560,7 @@ class OperatorCommandWorker:
             )
             log_event(
                 self._logger,
-                "operator_command_response_published",
+                f"{self._event_prefix}_response_published",
                 process_role=self._process_role,
                 correlation_id=response.correlation_id,
                 command=request.command,
@@ -557,7 +569,7 @@ class OperatorCommandWorker:
         except Exception as exc:
             log_event(
                 self._logger,
-                "operator_command_response_publish_failed",
+                f"{self._event_prefix}_response_publish_failed",
                 level="error",
                 process_role=self._process_role,
                 correlation_id=response.correlation_id,
@@ -596,7 +608,7 @@ class OperatorCommandWorker:
             is_business_error = isinstance(exc, (ValueError, KeyError, RuntimeError))
             log_event(
                 self._logger,
-                "operator_command_handler_raised",
+                f"{self._event_prefix}_handler_raised",
                 level="info" if is_business_error else "error",
                 process_role=self._process_role,
                 correlation_id=request.correlation_id,
@@ -614,7 +626,7 @@ class OperatorCommandWorker:
         if not isinstance(result, dict):
             log_event(
                 self._logger,
-                "operator_command_handler_non_dict_result",
+                f"{self._event_prefix}_handler_non_dict_result",
                 level="warning",
                 process_role=self._process_role,
                 correlation_id=request.correlation_id,
@@ -633,6 +645,6 @@ class OperatorCommandWorker:
         self._stopped = True
         log_event(
             self._logger,
-            "operator_command_worker_stopped",
+            f"{self._event_prefix}_worker_stopped",
             process_role=self._process_role,
         )
