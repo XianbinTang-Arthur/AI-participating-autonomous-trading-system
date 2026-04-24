@@ -30,6 +30,7 @@ from aats.services.operator.command_bridge import (
     OperatorCommandWorker,
 )
 from aats.services.operator.query_service import OperatorQueryService
+from aats.services.operator.runtime_queries import RuntimeQueryFacade
 
 
 def _make_logger() -> logging.Logger:
@@ -160,6 +161,27 @@ class TestAICommandEndToEnd(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(calls, ["restore", "degrade"])
 
+    async def test_ai_runtime_status_dispatches_read_only_result(self) -> None:
+        async def _runtime_status(_payload: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "provider": "deepseek",
+                "configured": True,
+                "ai_service_loaded": True,
+                "process_role": "decision",
+            }
+
+        client, _ = await self._build_pair({"ai_runtime_status": _runtime_status})
+
+        result = await client.invoke(
+            command="ai_runtime_status",
+            payload={},
+        )
+
+        self.assertEqual(result["provider"], "deepseek")
+        self.assertTrue(result["configured"])
+        self.assertTrue(result["ai_service_loaded"])
+        self.assertEqual(result["process_role"], "decision")
+
 
 class TestQueryServiceGatewayFallback(unittest.IsolatedAsyncioTestCase):
     """When ai_service is None but ai_command_client is set, the 3 AI mutate
@@ -230,6 +252,29 @@ class TestQueryServiceGatewayFallback(unittest.IsolatedAsyncioTestCase):
         kwargs = runtime.ai_command_client.invoke.call_args.kwargs
         self.assertEqual(kwargs["command"], "ai_review_degrade_to_baseline")
         self.assertEqual(kwargs["payload"]["reason"], "d")
+
+    async def test_ai_runtime_authoritative_proxies_read_status_through_client(self) -> None:
+        runtime = self._make_runtime(with_client=True)
+        runtime.ai_command_client.invoke = AsyncMock(
+            return_value={
+                "provider": "deepseek",
+                "configured": True,
+                "ai_service_loaded": True,
+                "process_role": "decision",
+            }
+        )
+        service = OperatorQueryService.__new__(OperatorQueryService)
+        service.runtime = runtime
+        service.runtime_queries = RuntimeQueryFacade(service)
+
+        result = await service.ai_runtime_authoritative()
+
+        self.assertEqual(result["provider"], "deepseek")
+        self.assertTrue(result["configured"])
+        runtime.ai_command_client.invoke.assert_awaited_once_with(
+            command="ai_runtime_status",
+            payload={},
+        )
 
     async def test_missing_ai_service_and_client_preserves_original_error(self) -> None:
         runtime = self._make_runtime(with_client=False)

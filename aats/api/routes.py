@@ -498,7 +498,14 @@ async def decision_detail(request: Request, decision_id: str) -> dict[str, Any]:
 
 @router.get("/ai/runtime")
 async def ai_runtime(request: Request) -> dict[str, Any]:
-    return _query(request).ai_runtime()
+    try:
+        return await _query(request).ai_runtime_authoritative()
+    except OperatorCommandTimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+    except OperatorCommandRemoteError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except OperatorCommandError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/ai/overview")

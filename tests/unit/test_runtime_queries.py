@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from aats.services.operator.runtime_queries import RuntimeQueryFacade
 
@@ -168,3 +169,44 @@ class TestAiRuntimeStubWhenServiceMissing(unittest.TestCase):
         result = facade.ai_runtime()
 
         self.assertIsNone(result["manual_override_default_freeze_seconds"])
+
+
+class TestAiRuntimeAuthoritativeRead(unittest.IsolatedAsyncioTestCase):
+    async def test_gateway_uses_ai_command_client_for_authoritative_status(self) -> None:
+        owner = _AIRuntimeFakeOwner(ai_service=None, process_role="gateway")
+        owner.runtime.ai_command_client = SimpleNamespace(
+            invoke=AsyncMock(
+                return_value={
+                    "provider": "deepseek",
+                    "configured": True,
+                    "provider_ready": True,
+                    "ai_service_loaded": True,
+                    "process_role": "decision",
+                }
+            )
+        )
+        facade = RuntimeQueryFacade(owner)
+
+        result = await facade.ai_runtime_authoritative()
+
+        self.assertEqual(result["provider"], "deepseek")
+        self.assertTrue(result["configured"])
+        self.assertTrue(result["ai_service_loaded"])
+        self.assertEqual(result["process_role"], "decision")
+        self.assertEqual(result["ai_runtime_source"], "remote_decision")
+        self.assertEqual(result["queried_from_process_role"], "gateway")
+        owner.runtime.ai_command_client.invoke.assert_awaited_once_with(
+            command="ai_runtime_status",
+            payload={},
+        )
+
+    async def test_gateway_without_client_preserves_stable_stub(self) -> None:
+        owner = _AIRuntimeFakeOwner(ai_service=None, process_role="gateway")
+        owner.runtime.ai_command_client = None
+        facade = RuntimeQueryFacade(owner)
+
+        result = await facade.ai_runtime_authoritative()
+
+        self.assertEqual(result["provider"], "not_loaded")
+        self.assertFalse(result["ai_service_loaded"])
+        self.assertEqual(result["ai_runtime_source"], "local_stub")

@@ -5716,9 +5716,15 @@ async def build_runtime(
         await runtime.operator_command_worker.bootstrap()
     elif effective_process_role == PROCESS_ROLE_DECISION:
         # AI command worker：gateway 通过 NATS 转发的 AI mutate 请求在 decision
-        # 进程落地执行。ai_service 驻 decision role，因此 dispatch 的 3 个命令
+        # 进程落地执行。ai_service 驻 decision role，因此 dispatch 的 AI 命令
         # 回到 OperatorQueryService 本地方法即可直接调用 ai_service。
         from aats.services.operator.query_service import OperatorQueryService as _AIQueryService
+
+        async def _handle_ai_runtime_status(_payload: dict[str, Any]) -> dict[str, Any]:
+            service = _AIQueryService(runtime)
+            status = service.ai_runtime()
+            status["ai_runtime_source"] = "local_decision"
+            return status
 
         async def _handle_ai_operating_mode_select(payload: dict[str, Any]) -> dict[str, Any]:
             service = _AIQueryService(runtime)
@@ -5753,6 +5759,7 @@ async def build_runtime(
             process_role=PROCESS_ROLE_DECISION,
             logger=runtime.logger,
             command_handlers={
+                "ai_runtime_status": _handle_ai_runtime_status,
                 "ai_operating_mode_select": _handle_ai_operating_mode_select,
                 "ai_review_restore": _handle_ai_review_restore,
                 "ai_review_degrade_to_baseline": _handle_ai_review_degrade_to_baseline,

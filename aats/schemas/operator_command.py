@@ -66,6 +66,7 @@ ExecutionCommandName = Literal[
 ]
 
 AICommandName = Literal[
+    "ai_runtime_status",
     "ai_operating_mode_select",
     "ai_review_restore",
     "ai_review_degrade_to_baseline",

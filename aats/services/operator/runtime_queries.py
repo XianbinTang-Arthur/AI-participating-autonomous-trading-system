@@ -160,6 +160,39 @@ class RuntimeQueryFacade:
         status["process_role"] = getattr(settings, "process_role", None)
         return status
 
+    async def ai_runtime_authoritative(self) -> dict[str, Any]:
+        """Return authoritative AI runtime status for HTTP read paths.
+
+        In the 4-process topology the gateway does not load ``ai_service``.
+        The synchronous ``ai_runtime()`` method must keep returning a stable
+        local stub for health/recovery callers. The public ``/ai/runtime`` read
+        path can afford an async bridge call, so when gateway has an
+        ``ai_command_client`` we ask the decision process for its local status.
+        """
+        if getattr(self.owner.runtime, "ai_service", None) is not None:
+            status = self.ai_runtime()
+            status.setdefault("ai_runtime_source", "local")
+            return status
+
+        client = getattr(self.owner.runtime, "ai_command_client", None)
+        if client is None:
+            status = self.ai_runtime()
+            status.setdefault("ai_runtime_source", "local_stub")
+            return status
+
+        status = dict(
+            await client.invoke(
+                command="ai_runtime_status",
+                payload={},
+            )
+        )
+        status.setdefault("ai_runtime_source", "remote_decision")
+        status.setdefault(
+            "queried_from_process_role",
+            getattr(self.owner.runtime.settings, "process_role", None),
+        )
+        return status
+
     def ai_performance_overview(self) -> dict[str, Any]:
         return self.owner._ai_performance_overview_impl()
 

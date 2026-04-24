@@ -4141,6 +4141,9 @@ class OperatorQueryService:
     def ai_runtime(self) -> dict[str, Any]:
         return self._cached("ai_runtime", self.runtime_queries.ai_runtime)
 
+    async def ai_runtime_authoritative(self) -> dict[str, Any]:
+        return await self.runtime_queries.ai_runtime_authoritative()
+
     def _recent_ai_shadow_evaluation_events(self, *, limit: int | None = None):
         if not self._ai_history_visible():
             return []
