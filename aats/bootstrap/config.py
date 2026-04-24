@@ -636,6 +636,23 @@ class ApplicationRuntime:
             self.background_tasks.append(
                 asyncio.create_task(self._monitor_trial_guard_loop(), name="aats_trial_guard_monitor")
             )
+        # 策略档位自动换档：与主决策链路解耦。strategy_profile_service 驻
+        # decision/monolith role（_attach_strategy_profile_service 装配），
+        # 每逢 :00 / :30 触发 evaluate_now()，最多每小时 2 次 AI 调用，避免
+        # 每个 decision tick 都打 OpenAI/DeepSeek 账单。auto_control_enabled
+        # 运行时可切换，loop 不退出，下次 boundary 按 flag 决定是否短路。
+        _strategy_profile_service = (
+            getattr(self.decision_engine, "strategy_profile_service", None)
+            if self.decision_engine is not None
+            else None
+        )
+        if _strategy_profile_service is not None:
+            self.background_tasks.append(
+                asyncio.create_task(
+                    self._run_profile_auto_switch_loop(_strategy_profile_service),
+                    name="aats_strategy_profile_auto_switch",
+                )
+            )
         # StreamSnapshotCache 定期 flush：将 latest + recent 快照 best-effort
         # 写入 Redis，供下次 bootstrap 恢复。高频 topic 不落 Postgres。
         # 仅 market / monolith 角色运行 flush——这两个角色是 MARKET_SNAPSHOTS
@@ -1150,6 +1167,53 @@ class ApplicationRuntime:
             except Exception as exc:
                 await self._record_background_failure(subsystem="trial_guard_monitor", exc=exc)
             await asyncio.sleep(self._jittered_sleep_seconds(interval_seconds))
+
+    @staticmethod
+    def _seconds_until_next_half_hour_boundary(now: datetime) -> float:
+        """从 ``now`` 到下一个整点或半点（:00 / :30）之间的秒数。
+
+        Edge cases：
+          - now == :00:00.000 → 返回 1800（下一次 :30）
+          - now == :30:00.000 → 返回 1800（下一次 :00）
+          - now == :29:59.5   → 返回 0.5
+        保持每小时恰好两次触发，不依赖具体对齐时刻。
+        """
+        total_past_hour_seconds = (
+            now.minute * 60 + now.second + now.microsecond / 1_000_000
+        )
+        next_boundary_seconds = 1800 if now.minute < 30 else 3600
+        delta = next_boundary_seconds - total_past_hour_seconds
+        return delta if delta > 0 else 1800.0
+
+    async def _run_profile_auto_switch_loop(self, service: Any) -> None:
+        """自动换档调度循环：每逢 :00 / :30 触发一次 evaluate_now()。
+
+        与主决策链路解耦（原本每个 decision tick 都会触发 AI 推断，API 账单
+        线性叠加）；改为 clock-aligned 定时任务后每小时最多两次 AI 调用。
+
+        运行时 ``strategy_profile_auto_control_enabled`` 被运维关闭时 loop 不
+        退出，下一次 boundary 醒来直接短路—避免运维每次切换都要重启进程。
+        异常只记 failure event，不让 loop 挂掉。
+        """
+        while True:
+            delay = self._seconds_until_next_half_hour_boundary(utc_now())
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                raise
+            if not self.settings.strategy_profile_auto_control_enabled:
+                continue
+            try:
+                await service.evaluate_now(allow_auto_activation=True)
+                log_event(
+                    self.logger,
+                    "strategy_profile_auto_switch_scheduled_tick",
+                    fired_at=utc_now().isoformat(),
+                )
+            except Exception as exc:
+                await self._record_background_failure(
+                    subsystem="strategy_profile_auto_switch", exc=exc
+                )
 
     async def _housekeeping_loop(self) -> None:
         """P3-1 / P3-2 + Path B Phase 1：每 6 小时执行一次数据库清理。

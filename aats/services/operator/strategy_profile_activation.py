@@ -407,81 +407,32 @@ class StrategyProfileActivationFacade:
         }
 
     async def evaluate_mainline_profile_control(self, *, decision_id: str) -> ProfileControlDecision | None:
-        # strategy_profile_auto_control_enabled 与 ai_operating_mode 完全独立正交:
-        # 后者管主决策引擎,此处管档位自动切换。
-        # false 分支必须跳过 evaluate_now:该方法内部无条件调用 OpenAI 生成推荐,
-        # 若不短路,即使用户关闭"自动换档"开关也会持续产生 API 账单。
-        # 手动档位切换走独立 admin API(profiles/{id}/activate、manual-pause-auto、
-        # manual-restore-auto),不经此路径。
-        allow_auto = bool(self.owner.settings.strategy_profile_auto_control_enabled)
-
-        if not allow_auto:
-            state = self.owner._activation_state()
-            if not state.active_profile_id:
-                return None
-            return ProfileControlDecision(
-                decision_id=decision_id,
-                requested_by="system",
-                requested_profile_id=state.active_profile_id,
-                current_profile_id=state.active_profile_id,
-                applied=False,
-                blocked_reasons=[],
-                frozen_by_admin_override=bool(
-                    state.frozen_until is not None and state.frozen_until > utc_now()
-                ),
-                freeze_until=state.frozen_until,
-                decision_reason_codes=[],
-                activation_record_ref=None,
-            )
-
-        result = await self.owner.evaluate_now(allow_auto_activation=allow_auto)
-        recommendation = result.get("recommendation") or {}
-        activation = result.get("auto_activation") or {}
+        # 自动换档已从主决策链路剥离，改由 ApplicationRuntime 的
+        # ``_run_profile_auto_switch_loop`` 定时任务在每个 :00 / :30 boundary
+        # 调用 ``evaluate_now``（见 aats/bootstrap/config.py）。主决策 tick
+        # 只需要当前 active profile 的快照视图，不再触发 AI 推断——这将
+        # AI API 账单从每 decision 一次降到每小时最多两次。
+        #
+        # 手动档位切换仍走独立 admin API（profiles/{id}/activate、
+        # manual-pause-auto、manual-restore-auto），不经此路径。
         state = self.owner._activation_state()
-        activation_record = activation.get("activation_record") or {}
-        blocked_reasons = list(activation.get("blocked_reasons") or [])
+        if not state.active_profile_id:
+            return None
         freeze_until = state.frozen_until
-
-        ai_requested_profile_id = activation.get("candidate_profile_id") or recommendation.get("recommended_profile_id")
-        if ai_requested_profile_id:
-            # Case A:AI 推荐或已激活 —— 正常上报
-            return ProfileControlDecision(
-                decision_id=decision_id,
-                requested_by="ai",
-                requested_profile_id=str(ai_requested_profile_id),
-                current_profile_id=state.active_profile_id,
-                applied=bool(activation_record),
-                blocked_reasons=blocked_reasons,
-                frozen_by_admin_override=bool(
-                    freeze_until is not None
-                    and freeze_until > utc_now()
-                    and "strategy_profile_auto_switch_frozen" in blocked_reasons
-                ),
-                freeze_until=freeze_until,
-                decision_reason_codes=list(recommendation.get("reason_codes") or []),
-                activation_record_ref=activation_record.get("activation_event_id"),
-            )
-
-        # Case B:AI 无变更推荐,但当前有 active profile(手动或历史遗留)
-        # 仍返回一个 system-requested decision,让 DecisionOutcome 的 active_profile_id 可见
-        if state.active_profile_id:
-            return ProfileControlDecision(
-                decision_id=decision_id,
-                requested_by="system",
-                requested_profile_id=state.active_profile_id,
-                current_profile_id=state.active_profile_id,
-                applied=False,
-                blocked_reasons=[],
-                frozen_by_admin_override=bool(
-                    freeze_until is not None and freeze_until > utc_now()
-                ),
-                freeze_until=freeze_until,
-                decision_reason_codes=[],
-                activation_record_ref=None,
-            )
-
-        # Case C:没有 active profile 也没有推荐 —— 维持原逻辑返回 None
-        return None
+        return ProfileControlDecision(
+            decision_id=decision_id,
+            requested_by="system",
+            requested_profile_id=state.active_profile_id,
+            current_profile_id=state.active_profile_id,
+            applied=False,
+            blocked_reasons=[],
+            frozen_by_admin_override=bool(
+                freeze_until is not None and freeze_until > utc_now()
+            ),
+            freeze_until=freeze_until,
+            decision_reason_codes=[],
+            activation_record_ref=None,
+        )
 
     def maybe_auto_execute_rollback(self, *, decision: StrategyProfileSelectionDecision) -> dict[str, Any] | None:
         recommendation = decision.auto_rollback_recommendation or {}

@@ -102,13 +102,21 @@ class EvaluateMainlineProfileControlSwitchTests(unittest.IsolatedAsyncioTestCase
         assert decision is not None
         self.assertFalse(decision.frozen_by_admin_override)
 
-    async def test_enabled_still_invokes_evaluate_now(self) -> None:
+    async def test_enabled_no_longer_invokes_evaluate_now_per_decision(self) -> None:
+        # 自动换档已剥离到 ApplicationRuntime._run_profile_auto_switch_loop
+        # 定时任务（:00 / :30 boundary），主决策 tick 不再触发 evaluate_now
+        # 以避免每 tick 打 AI API 账单。本用例锁死这个契约——若将来有人
+        # 误把 AI 调用搬回 per-cycle 路径，测试会立刻红。
         owner = _make_owner(auto_control_enabled=True, active_profile_id="trend_aggressive")
         facade = StrategyProfileActivationFacade(owner=owner)
 
-        await facade.evaluate_mainline_profile_control(decision_id="d5")
+        decision = await facade.evaluate_mainline_profile_control(decision_id="d5")
 
-        owner.evaluate_now.assert_awaited_once_with(allow_auto_activation=True)
+        owner.evaluate_now.assert_not_awaited()
+        assert decision is not None
+        self.assertEqual(decision.requested_by, "system")
+        self.assertEqual(decision.requested_profile_id, "trend_aggressive")
+        self.assertEqual(decision.decision_reason_codes, [])
 
 
 if __name__ == "__main__":
