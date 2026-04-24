@@ -48,6 +48,7 @@ from aats.services.accounting import (
     try_fill_fee_cost_in_quote,
     try_fill_fee_delta_in_quote,
 )
+from aats.services.execution_engine.lifecycle_snapshot_refs import SNAPSHOT_REF_KEYS
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.execution_engine.exit_intent_aggregator import exit_execution_review_items
 from aats.services.fill_ordering import fill_processing_sort_key
@@ -6715,6 +6716,13 @@ class OperatorQueryService:
                     or fill_event_nested.get(_ref_key)
                     or intent_nested.get(_ref_key)
                 )
+            payload["lifecycle_snapshot_refs"] = self._lifecycle_snapshot_refs_payload(
+                payload,
+                raw_payload,
+                order_state_nested,
+                fill_event_nested,
+                intent_nested,
+            )
             fill_id = payload.get("fill_id")
             if fill_id:
                 payload["fee_rate"] = (
@@ -6784,6 +6792,26 @@ class OperatorQueryService:
                 payload["balance_deltas"] = outcome_payload.get("balance_deltas") or {}
                 payload["fill_outcome_recorded_at"] = outcome_payload.get("created_at")
         return payload
+
+    @staticmethod
+    def _lifecycle_snapshot_refs_payload(*sources: Any) -> dict[str, Any] | None:
+        for source in sources:
+            if not isinstance(source, dict):
+                continue
+            lifecycle = source.get("lifecycle_snapshot_refs")
+            if not isinstance(lifecycle, dict):
+                continue
+            normalized: dict[str, Any] = {}
+            for stage, stage_payload in lifecycle.items():
+                stage_key = str(stage or "").strip()
+                if not stage_key or not isinstance(stage_payload, dict):
+                    continue
+                stage_dict = dict(stage_payload)
+                for ref_key in SNAPSHOT_REF_KEYS:
+                    stage_dict.setdefault(ref_key, None)
+                normalized[stage_key] = stage_dict
+            return normalized or None
+        return None
 
     def _execution_plan_payload(self, execution_plan: dict[str, Any] | None) -> dict[str, Any] | None:
         if execution_plan is None:

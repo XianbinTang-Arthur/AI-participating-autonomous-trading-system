@@ -4,6 +4,7 @@
 即可获得：
 - execution_style（来源优先：payload > raw_payload 顶层 > nested intent > fill_event > order_state）
 - 四个 snapshot refs (market / feature / portfolio / health)
+- lifecycle_snapshot_refs（来源优先：payload > raw_payload 顶层 > nested order_state/fill_event/intent）
 - fill 行的 raw_exchange（来源优先：payload > raw_payload 顶层 > nested fill_event）
 
 对应 acceptance：/orders/recent、/orders/{id}、/fills/recent 等 phase5 控制面
@@ -25,6 +26,20 @@ _REFS = {
     "feature_snapshot_ref": "feat_snap_def",
     "portfolio_snapshot_ref": "port_snap_ghi",
     "health_snapshot_ref": "health_snap_jkl",
+}
+
+_LIFECYCLE_REFS = {
+    "submit": {
+        **_REFS,
+        "source": "execution_order_service",
+    },
+    "ack": {
+        "market_snapshot_ref": "mkt_snap_ack",
+        "feature_snapshot_ref": "feat_snap_ack",
+        "portfolio_snapshot_ref": "port_snap_ack",
+        "health_snapshot_ref": "health_snap_ack",
+        "source": "converged_execution_repo",
+    },
 }
 
 _RAW_EXCHANGE = {
@@ -68,6 +83,7 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
             raw_payload={
                 "execution_style": "bounded_limit_ioc",
                 **_REFS,
+                "lifecycle_snapshot_refs": _LIFECYCLE_REFS,
                 # 旧 order_service 路径无 nested intent：仅有 top-level 锚点字段
             },
         )
@@ -75,6 +91,8 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
         self.assertEqual(payload["execution_style"], "bounded_limit_ioc")
         for key, value in _REFS.items():
             self.assertEqual(payload[key], value)
+        self.assertEqual(payload["lifecycle_snapshot_refs"]["submit"]["market_snapshot_ref"], "mkt_snap_abc")
+        self.assertEqual(payload["lifecycle_snapshot_refs"]["ack"]["source"], "converged_execution_repo")
         self.assertEqual(payload["truth_source"], "execution_order_repo")
 
     def test_nested_intent_supplies_execution_style_when_top_level_absent(self) -> None:
@@ -128,6 +146,7 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
                     "requested_qty": "0.01",
                     "remaining_qty": "0.01",
                     **_REFS,
+                    "lifecycle_snapshot_refs": _LIFECYCLE_REFS,
                 },
             },
         )
@@ -135,6 +154,7 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
         self.assertEqual(payload["execution_style"], "taker")
         for key, value in _REFS.items():
             self.assertEqual(payload[key], value)
+        self.assertEqual(payload["lifecycle_snapshot_refs"]["submit"]["source"], "execution_order_service")
 
     def test_missing_fields_yield_none_no_crash(self) -> None:
         """旧数据无 refs / execution_style → 字段存在且值为 None，保持向后兼容。"""
@@ -144,8 +164,15 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
         self.assertIsNone(payload["execution_style"])
         for key in _REFS:
             self.assertIsNone(payload[key])
+        self.assertIsNone(payload["lifecycle_snapshot_refs"])
         # 既有 truth_source 行为不回归
         self.assertEqual(payload["truth_source"], "execution_order_repo")
+
+    def test_malformed_lifecycle_refs_yields_none(self) -> None:
+        svc = _make_service()
+        row = self._order_row(raw_payload={"lifecycle_snapshot_refs": "not_a_dict"})
+        payload = svc._execution_record_payload(row)
+        self.assertIsNone(payload["lifecycle_snapshot_refs"])
 
 
 class TestFillDictRowTruthExposure(unittest.TestCase):
@@ -179,6 +206,12 @@ class TestFillDictRowTruthExposure(unittest.TestCase):
             raw_payload={
                 # 与 outbox._ensure_execution_fill_row 对称：顶层 refs + nested fill_event
                 **_REFS,
+                "lifecycle_snapshot_refs": {
+                    "fill": {
+                        **_REFS,
+                        "source": "execution_outbox_fill",
+                    }
+                },
                 "fill_event": {
                     "fill_id": "fill_snapref",
                     "decision_id": "decision_snapref",
@@ -204,6 +237,7 @@ class TestFillDictRowTruthExposure(unittest.TestCase):
         self.assertEqual(payload["exec_type"], "T")
         for key, value in _REFS.items():
             self.assertEqual(payload[key], value)
+        self.assertEqual(payload["lifecycle_snapshot_refs"]["fill"]["source"], "execution_outbox_fill")
         self.assertEqual(payload["truth_source"], "execution_fill_repo_v2")
 
     def test_raw_exchange_from_top_level_raw_payload(self) -> None:
@@ -240,6 +274,7 @@ class TestFillDictRowTruthExposure(unittest.TestCase):
         self.assertIsNone(payload["raw_exchange"])
         for key in _REFS:
             self.assertIsNone(payload[key])
+        self.assertIsNone(payload["lifecycle_snapshot_refs"])
 
     def test_non_dict_raw_exchange_coerced_to_none(self) -> None:
         """防御：raw_exchange 若是非 dict 类型（历史脏数据）→ 暴露为 None，避免向下游泄露奇怪类型。"""
