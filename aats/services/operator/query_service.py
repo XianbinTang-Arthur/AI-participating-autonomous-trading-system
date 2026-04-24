@@ -6723,6 +6723,11 @@ class OperatorQueryService:
                 fill_event_nested,
                 intent_nested,
             )
+            payload["lifecycle_snapshot_refs_completeness"] = (
+                self._lifecycle_snapshot_refs_completeness_payload(
+                    payload.get("lifecycle_snapshot_refs")
+                )
+            )
             fill_id = payload.get("fill_id")
             if fill_id:
                 payload["fee_rate"] = (
@@ -6812,6 +6817,58 @@ class OperatorQueryService:
                 normalized[stage_key] = stage_dict
             return normalized or None
         return None
+
+    @staticmethod
+    def _lifecycle_snapshot_refs_completeness_payload(lifecycle: Any) -> dict[str, Any]:
+        if not isinstance(lifecycle, dict):
+            return {
+                "has_lifecycle_snapshot_refs": False,
+                "present_stages": [],
+                "complete_stages": [],
+                "incomplete_stages": [],
+                "missing_snapshot_refs_by_stage": {},
+                "all_present_stages_complete": False,
+            }
+
+        ordered_stages = [
+            stage
+            for stage in ("submit", "ack", "fill")
+            if isinstance(lifecycle.get(stage), dict)
+        ]
+        ordered_stages.extend(
+            sorted(
+                str(stage)
+                for stage, stage_payload in lifecycle.items()
+                if stage not in {"submit", "ack", "fill"} and isinstance(stage_payload, dict)
+            )
+        )
+        missing_by_stage: dict[str, list[str]] = {}
+        complete_stages: list[str] = []
+        incomplete_stages: list[str] = []
+        for stage in ordered_stages:
+            stage_payload = lifecycle.get(stage)
+            if not isinstance(stage_payload, dict):
+                continue
+            missing_refs = [
+                ref_key
+                for ref_key in SNAPSHOT_REF_KEYS
+                if not str(stage_payload.get(ref_key) or "").strip()
+            ]
+            if missing_refs:
+                incomplete_stages.append(stage)
+                missing_by_stage[stage] = missing_refs
+            else:
+                complete_stages.append(stage)
+
+        has_refs = bool(ordered_stages)
+        return {
+            "has_lifecycle_snapshot_refs": has_refs,
+            "present_stages": ordered_stages,
+            "complete_stages": complete_stages,
+            "incomplete_stages": incomplete_stages,
+            "missing_snapshot_refs_by_stage": missing_by_stage,
+            "all_present_stages_complete": has_refs and not incomplete_stages,
+        }
 
     def _execution_plan_payload(self, execution_plan: dict[str, Any] | None) -> dict[str, Any] | None:
         if execution_plan is None:

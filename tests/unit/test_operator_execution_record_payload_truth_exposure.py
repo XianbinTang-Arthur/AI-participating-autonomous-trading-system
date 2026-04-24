@@ -93,6 +93,17 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
             self.assertEqual(payload[key], value)
         self.assertEqual(payload["lifecycle_snapshot_refs"]["submit"]["market_snapshot_ref"], "mkt_snap_abc")
         self.assertEqual(payload["lifecycle_snapshot_refs"]["ack"]["source"], "converged_execution_repo")
+        self.assertEqual(
+            payload["lifecycle_snapshot_refs_completeness"],
+            {
+                "has_lifecycle_snapshot_refs": True,
+                "present_stages": ["submit", "ack"],
+                "complete_stages": ["submit", "ack"],
+                "incomplete_stages": [],
+                "missing_snapshot_refs_by_stage": {},
+                "all_present_stages_complete": True,
+            },
+        )
         self.assertEqual(payload["truth_source"], "execution_order_repo")
 
     def test_nested_intent_supplies_execution_style_when_top_level_absent(self) -> None:
@@ -165,6 +176,17 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
         for key in _REFS:
             self.assertIsNone(payload[key])
         self.assertIsNone(payload["lifecycle_snapshot_refs"])
+        self.assertEqual(
+            payload["lifecycle_snapshot_refs_completeness"],
+            {
+                "has_lifecycle_snapshot_refs": False,
+                "present_stages": [],
+                "complete_stages": [],
+                "incomplete_stages": [],
+                "missing_snapshot_refs_by_stage": {},
+                "all_present_stages_complete": False,
+            },
+        )
         # 既有 truth_source 行为不回归
         self.assertEqual(payload["truth_source"], "execution_order_repo")
 
@@ -173,6 +195,36 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
         row = self._order_row(raw_payload={"lifecycle_snapshot_refs": "not_a_dict"})
         payload = svc._execution_record_payload(row)
         self.assertIsNone(payload["lifecycle_snapshot_refs"])
+        self.assertFalse(payload["lifecycle_snapshot_refs_completeness"]["has_lifecycle_snapshot_refs"])
+
+    def test_lifecycle_completeness_reports_missing_refs_by_stage(self) -> None:
+        svc = _make_service()
+        incomplete_ack_refs = {
+            "market_snapshot_ref": "mkt_ack",
+            "feature_snapshot_ref": "feat_ack",
+            "portfolio_snapshot_ref": "port_ack",
+            "source": "converged_execution_repo",
+        }
+        row = self._order_row(
+            raw_payload={
+                "lifecycle_snapshot_refs": {
+                    "submit": {
+                        **_REFS,
+                        "source": "execution_order_service",
+                    },
+                    "ack": incomplete_ack_refs,
+                }
+            }
+        )
+        payload = svc._execution_record_payload(row)
+        self.assertEqual(payload["lifecycle_snapshot_refs_completeness"]["present_stages"], ["submit", "ack"])
+        self.assertEqual(payload["lifecycle_snapshot_refs_completeness"]["complete_stages"], ["submit"])
+        self.assertEqual(payload["lifecycle_snapshot_refs_completeness"]["incomplete_stages"], ["ack"])
+        self.assertEqual(
+            payload["lifecycle_snapshot_refs_completeness"]["missing_snapshot_refs_by_stage"],
+            {"ack": ["health_snapshot_ref"]},
+        )
+        self.assertFalse(payload["lifecycle_snapshot_refs_completeness"]["all_present_stages_complete"])
 
 
 class TestFillDictRowTruthExposure(unittest.TestCase):
@@ -238,6 +290,9 @@ class TestFillDictRowTruthExposure(unittest.TestCase):
         for key, value in _REFS.items():
             self.assertEqual(payload[key], value)
         self.assertEqual(payload["lifecycle_snapshot_refs"]["fill"]["source"], "execution_outbox_fill")
+        self.assertEqual(payload["lifecycle_snapshot_refs_completeness"]["present_stages"], ["fill"])
+        self.assertEqual(payload["lifecycle_snapshot_refs_completeness"]["complete_stages"], ["fill"])
+        self.assertTrue(payload["lifecycle_snapshot_refs_completeness"]["all_present_stages_complete"])
         self.assertEqual(payload["truth_source"], "execution_fill_repo_v2")
 
     def test_raw_exchange_from_top_level_raw_payload(self) -> None:
