@@ -325,11 +325,15 @@ def test_managed_profile_local_env_templates_are_minimal_utf8_overrides() -> Non
         # - AATS_OPERATOR_ADMIN_*: seed_operator_admin bootstrap script
         # - AI_SELECTOR: unprefixed shell-level AI provider override consumed
         #   by AATSSettings.apply_ai_selector_env_override via os.environ
+        # - AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE: governance gate for UI-based
+        #   operating-mode switching, read via os.environ in auth_routes.py;
+        #   not a Pydantic field by design (see runtime_trading_mode_semantics.md §3.6).
         infrastructure_only_keys = {
             "AATS_DB_NAME",
             "AATS_OPERATOR_ADMIN_USERNAME",
             "AATS_OPERATOR_ADMIN_PASSWORD",
             "AI_SELECTOR",
+            "AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE",
         }
         for key in values:
             assert key in supported_keys or key in infrastructure_only_keys, key
