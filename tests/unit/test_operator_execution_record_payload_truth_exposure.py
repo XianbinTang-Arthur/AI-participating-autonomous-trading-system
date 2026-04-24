@@ -102,6 +102,17 @@ class TestOrderDictRowTruthExposure(unittest.TestCase):
         for key, value in _REFS.items():
             self.assertEqual(payload[key], value)
 
+    def test_hard_column_execution_style_precedes_json_fallback(self) -> None:
+        svc = _make_service()
+        row = self._order_row(
+            raw_payload={
+                "execution_style": "bounded_limit_ioc",
+            },
+        )
+        row["execution_style"] = "post_only"
+        payload = svc._execution_record_payload(row)
+        self.assertEqual(payload["execution_style"], "post_only")
+
     def test_nested_order_state_supplies_refs_when_top_level_absent(self) -> None:
         """raw_payload 顶层无 refs，但 nested order_state 带 refs 时仍暴露。"""
         svc = _make_service()
@@ -189,6 +200,8 @@ class TestFillDictRowTruthExposure(unittest.TestCase):
         )
         payload = svc._execution_record_payload(row)
         self.assertEqual(payload["raw_exchange"], _RAW_EXCHANGE)
+        self.assertEqual(payload["fee_rate"], "-0.0005")
+        self.assertEqual(payload["exec_type"], "T")
         for key, value in _REFS.items():
             self.assertEqual(payload[key], value)
         self.assertEqual(payload["truth_source"], "execution_fill_repo_v2")
@@ -204,6 +217,21 @@ class TestFillDictRowTruthExposure(unittest.TestCase):
         )
         payload = svc._execution_record_payload(row)
         self.assertEqual(payload["raw_exchange"], _RAW_EXCHANGE)
+        self.assertEqual(payload["fee_rate"], "-0.0005")
+        self.assertEqual(payload["exec_type"], "T")
+
+    def test_hard_columns_precede_raw_exchange_fallbacks(self) -> None:
+        svc = _make_service()
+        row = self._fill_row(
+            raw_payload={
+                "raw_exchange": dict(_RAW_EXCHANGE),
+            },
+        )
+        row["fee_rate"] = "-0.0002"
+        row["exec_type"] = "M"
+        payload = svc._execution_record_payload(row)
+        self.assertEqual(payload["fee_rate"], "-0.0002")
+        self.assertEqual(payload["exec_type"], "M")
 
     def test_missing_raw_exchange_yields_none(self) -> None:
         svc = _make_service()

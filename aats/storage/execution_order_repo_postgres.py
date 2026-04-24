@@ -52,7 +52,15 @@ class PostgresExecutionOrderRepository:
             existing = session.scalar(select(ExecutionOrderModel).where(ExecutionOrderModel.intent_id == intent.intent_id).limit(1))
         if existing is not None:
             return
-        payload = dump_payload_exact(raw_payload or intent)
+        raw_payload_dict = dict(raw_payload or {})
+        nested_intent = raw_payload_dict.get("intent") if isinstance(raw_payload_dict.get("intent"), dict) else {}
+        payload = dump_payload_exact(raw_payload_dict or intent)
+        execution_style = (
+            str(intent.execution_style).strip()
+            or str(raw_payload_dict.get("execution_style") or "").strip()
+            or str(nested_intent.get("execution_style") or "").strip()
+            or None
+        )
         session.add(
             ExecutionOrderModel(
                 order_id=order_id,
@@ -85,6 +93,7 @@ class PostgresExecutionOrderRepository:
                 margin_mode=intent.margin_mode,
                 execution_action=intent.execution_action,
                 position_intent=intent.position_intent,
+                execution_style=execution_style,
                 state=initial_state,
                 state_version=1,
                 source_system=str(raw_payload.get("source_system", "aats")),
@@ -371,6 +380,7 @@ def _order_row_to_dict(row: ExecutionOrderModel) -> dict:
         "margin_mode": row.margin_mode,
         "execution_action": row.execution_action,
         "position_intent": row.position_intent,
+        "execution_style": row.execution_style,
         "state": row.state,
         "state_version": row.state_version,
         "source_system": row.source_system,
