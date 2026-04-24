@@ -22,8 +22,8 @@ ai_operating_mode: ai_decision_maker
 ai_provider: deepseek
 # [常用可调] ai_model_name：AI 模型名。DeepSeek 可选：deepseek-v4-pro / deepseek-v4-flash；OpenAI 可选：gpt-4.1-mini / gpt-4o-mini 等；推荐值：deepseek-v4-pro。
 ai_model_name: deepseek-v4-pro
-# [常用可调] ai_timeout_seconds：AI 请求超时秒数。可选值：1.0 ~ 60.0；推荐值：10.0。
-ai_timeout_seconds: 10.0
+# [常用可调] ai_timeout_seconds：AI 请求超时秒数。可选值：1.0 ~ 60.0；推荐值：30.0（deepseek-v4-pro 实盘链路）。
+ai_timeout_seconds: 30.0
 # [常用可调] ai_degrade_after_failures：连续失败多少次后自动降级。可选值：1 ~ 10；推荐值：3。
 ai_degrade_after_failures: 3
 # [常用可调] ai_recovery_probe_interval_seconds：降级后多久做一次恢复探测。可选值：30 ~ 3600；推荐值：180.0。

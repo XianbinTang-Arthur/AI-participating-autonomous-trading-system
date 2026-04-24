@@ -516,6 +516,7 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     repo_root = Path(__file__).resolve().parents[2]
     values = load_managed_profile_values("derivatives_live", project_root=repo_root)
 
+    assert values["ai_timeout_seconds"] == 30.0
     assert values["derivatives_position_mode"] == "hedge"
     assert values["strategy_family_active"] == "independent"
     assert values["strategy_family_auto_selection_enabled"] is False
