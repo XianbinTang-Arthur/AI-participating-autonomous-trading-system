@@ -11228,13 +11228,16 @@ class OperatorQueryService:
         ai_before = dict(self.runtime.ai_service.status())
         configured_mode = normalize_ai_operating_mode(self.runtime.settings.ai_operating_mode)
         requested_mode = normalize_ai_operating_mode(mode)
-        if requested_mode == configured_mode:
-            ai_after = self.runtime.ai_service.clear_manual_operating_mode_override()
-        else:
-            ai_after = self.runtime.ai_service.set_manual_operating_mode_override(
-                mode=requested_mode,
-                freeze_seconds=0.0,
-            )
+        # 历史逻辑曾经在 ``requested_mode == configured_mode`` 时自动 clear override，
+        # 期望"回到默认"。这一"匹配即清"的捷径与 ``ai_service._degraded`` / 自动降级
+        # 状态交互后会让 UI 读到 ``effective_operating_mode == baseline_only``——即便
+        # 操作员显式点了"AI 决策者"也会被降级状态悄悄覆盖。UI 按钮的契约是"点什么=
+        # 得什么"，所以这里无条件设置 override；``clear_manual_operating_mode_override``
+        # 仍然保留作为独立 endpoint，后续如需"恢复配置默认"可单独暴露出来。
+        ai_after = self.runtime.ai_service.set_manual_operating_mode_override(
+            mode=requested_mode,
+            freeze_seconds=0.0,
+        )
         self._invalidate_cache()
         self.runtime.recovery_status = self.recovery_posture.finalize_status()
         self._invalidate_cache()

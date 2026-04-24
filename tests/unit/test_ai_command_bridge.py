@@ -291,6 +291,100 @@ class TestQueryServiceGatewayFallback(unittest.IsolatedAsyncioTestCase):
             self.assertIn("ai_service_not_loaded_in_this_process_role", str(ctx.exception))
 
 
+class TestSetAIOperatingModeDecisionPath(unittest.IsolatedAsyncioTestCase):
+    """Decision-role behavior of ``set_ai_operating_mode``.
+
+    Regression lock: operator clicks must always ``set_manual_operating_mode_override``
+    even when the requested mode happens to equal the YAML-configured default. The
+    prior "match → clear override" shortcut let ``ai_service._degraded`` state bleed
+    back into ``effective_operating_mode`` and silently surfaced as ``baseline_only``
+    in the UI banner — exactly the opposite of what the button click promises.
+    """
+
+    def _make_service_with_configured_mode(self, *, configured_mode: str):
+        runtime = MagicMock()
+        ai_service = MagicMock()
+        ai_service.status.return_value = {
+            "configured_operating_mode": configured_mode,
+            "effective_operating_mode": configured_mode,
+        }
+        ai_service.set_manual_operating_mode_override = MagicMock(
+            return_value={"effective_operating_mode": "placeholder"}
+        )
+        ai_service.clear_manual_operating_mode_override = MagicMock(
+            return_value={"effective_operating_mode": configured_mode}
+        )
+        runtime.ai_service = ai_service
+        runtime.settings = MagicMock()
+        runtime.settings.ai_operating_mode = configured_mode
+        runtime.recovery_status = MagicMock()
+
+        service = OperatorQueryService.__new__(OperatorQueryService)
+        service.runtime = runtime
+        service.recovery_view = MagicMock(return_value={"recovery_state": "nominal"})
+        service.recovery_posture = MagicMock()
+        service.recovery_posture.finalize_status = MagicMock(return_value=MagicMock())
+        service._invalidate_cache = MagicMock()
+        service._append_event = MagicMock()
+        service._persist_blocker_snapshot = MagicMock()
+        service.system_health = MagicMock(return_value={"runtime_state": {}})
+        service.system_mode = MagicMock(return_value={})
+        service.blockers = MagicMock(return_value=[])
+        service.ai_runtime = MagicMock(return_value={})
+        return service, ai_service
+
+    async def test_click_matching_configured_mode_still_sets_override(self) -> None:
+        service, ai_service = self._make_service_with_configured_mode(
+            configured_mode="ai_decision_maker"
+        )
+
+        await service.set_ai_operating_mode(
+            mode="ai_decision_maker",
+            reason="ui_click",
+            actor_role="admin",
+        )
+
+        ai_service.set_manual_operating_mode_override.assert_called_once_with(
+            mode="ai_decision_maker",
+            freeze_seconds=0.0,
+        )
+        ai_service.clear_manual_operating_mode_override.assert_not_called()
+
+    async def test_click_mismatching_configured_mode_sets_override(self) -> None:
+        service, ai_service = self._make_service_with_configured_mode(
+            configured_mode="baseline_only"
+        )
+
+        await service.set_ai_operating_mode(
+            mode="ai_decision_maker",
+            reason="ui_click",
+            actor_role="admin",
+        )
+
+        ai_service.set_manual_operating_mode_override.assert_called_once_with(
+            mode="ai_decision_maker",
+            freeze_seconds=0.0,
+        )
+        ai_service.clear_manual_operating_mode_override.assert_not_called()
+
+    async def test_baseline_click_when_configured_baseline_still_sets_override(self) -> None:
+        service, ai_service = self._make_service_with_configured_mode(
+            configured_mode="baseline_only"
+        )
+
+        await service.set_ai_operating_mode(
+            mode="baseline_only",
+            reason="ui_click",
+            actor_role="admin",
+        )
+
+        ai_service.set_manual_operating_mode_override.assert_called_once_with(
+            mode="baseline_only",
+            freeze_seconds=0.0,
+        )
+        ai_service.clear_manual_operating_mode_override.assert_not_called()
+
+
 class TestComponentNameLogPrefix(unittest.IsolatedAsyncioTestCase):
     """Regression guard for the ``component_name`` constructor param on
     Client/Worker. If someone accidentally reverts the f-string prefix back
