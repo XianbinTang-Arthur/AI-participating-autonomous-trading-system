@@ -1154,6 +1154,7 @@ async def trigger_task_api(
     """
     from aats.data_platform.governance.rdp_task_db import (
         VALID_WORKFLOWS,
+        WorkflowEnqueueBlockedError,
         db_create_task_if_idle,
     )
 
@@ -1194,6 +1195,15 @@ async def trigger_task_api(
                 workflow=body.workflow,
                 requested_by=_resolve_actor(principal, body.actor),
             )
+    except WorkflowEnqueueBlockedError:
+        return _response(
+            ok=False,
+            message=(
+                f"{body.workflow} 当前处于 golden-path freeze，"
+                "不能通过任务队列手动触发。"
+            ),
+            blocked_by_freeze=True,
+        )
     except OperationalError:
         # DB 连接层失败（governance DB 不可达、连接池耗尽等）——operator 需要
         # 知道这是"后端 DB 不通"而不是"业务冲突"，好决定联系运维还是等待。

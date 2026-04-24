@@ -66,16 +66,18 @@ def test_create_release_api_rejects_prod_skip_gate() -> None:
     assert "requires gate pass" in payload["message"]
 
 
-def test_trigger_task_api_accepts_release_cycle() -> None:
+def test_trigger_task_api_rejects_release_cycle_under_golden_path_freeze() -> None:
     app = FastAPI()
     app.include_router(rdp_router)
     app.state.runtime = _build_runtime()
+
+    from aats.data_platform.governance.rdp_task_db import WorkflowEnqueueBlockedError
 
     with (
         patch("aats.api.rdp_routes._governance_session", _fake_governance_session),
         patch(
             "aats.data_platform.governance.rdp_task_db.db_create_task_if_idle",
-            return_value=("task_release_cycle_1", None),
+            side_effect=WorkflowEnqueueBlockedError("golden-path freeze"),
         ),
     ):
         client = TestClient(app)
@@ -86,9 +88,11 @@ def test_trigger_task_api_accepts_release_cycle() -> None:
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["ok"] is True
+    assert payload["ok"] is False
     assert payload["workflow"] == "release_cycle"
-    assert payload["task_id"] == "task_release_cycle_1"
+    assert payload["task_id"] is None
+    assert payload["blocked_by_freeze"] is True
+    assert "golden-path freeze" in payload["message"]
 
 
 def test_tuning_review_routes_expose_and_review_pending_proposals(tmp_path) -> None:

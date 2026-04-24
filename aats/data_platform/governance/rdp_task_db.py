@@ -55,6 +55,21 @@ VALID_WORKFLOWS = {
     "okx_rest_history_rolling_1h",
 }
 
+ENQUEUE_BLOCKED_WORKFLOWS = frozenset({"release_cycle"})
+
+
+class WorkflowEnqueueBlockedError(ValueError):
+    """Raised when a valid workflow is frozen from creating new queue tasks."""
+
+
+def _validate_workflow_can_enqueue(workflow: str) -> None:
+    if workflow not in VALID_WORKFLOWS:
+        raise ValueError(f"Invalid workflow: {workflow!r}, expected one of {VALID_WORKFLOWS}")
+    if workflow in ENQUEUE_BLOCKED_WORKFLOWS:
+        raise WorkflowEnqueueBlockedError(
+            f"Workflow {workflow!r} is blocked from task queue enqueue during golden-path freeze"
+        )
+
 # orphan-recovery 的 sentinel exit_code：daemon 崩溃 / 被 kill 后留下的
 # running 任务在 startup 阶段被统一改写成 failed，用这个特殊值让运维和
 # 下游看板能把 "任务自己退出非零" 与 "daemon 死了导致的补偿回收" 区分开。
@@ -82,8 +97,7 @@ def db_create_task(
     撞到已有 active 任务会抛 ``IntegrityError``。希望把 race 归并为优雅的
     "已有活跃任务" 响应的 caller，应改用 :func:`db_create_task_if_idle`。
     """
-    if workflow not in VALID_WORKFLOWS:
-        raise ValueError(f"Invalid workflow: {workflow!r}, expected one of {VALID_WORKFLOWS}")
+    _validate_workflow_can_enqueue(workflow)
     task_id = f"task_{uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)
     session.execute(
@@ -134,8 +148,7 @@ def db_create_task_if_idle(
       * 后续并发 writer → ON CONFLICT DO NOTHING → RETURNING 空 → 读现有行
         并返回给 caller 一个 "已有活跃任务" 的结构化响应，无异常路径。
     """
-    if workflow not in VALID_WORKFLOWS:
-        raise ValueError(f"Invalid workflow: {workflow!r}, expected one of {VALID_WORKFLOWS}")
+    _validate_workflow_can_enqueue(workflow)
 
     task_id = f"task_{uuid4().hex[:12]}"
     now = datetime.now(timezone.utc)

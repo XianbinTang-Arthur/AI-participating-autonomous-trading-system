@@ -1,14 +1,8 @@
-"""Phase 0: daemon 的 release_cycle in-process 特判回归。
+"""Daemon release_cycle execution contracts.
 
-批次 A 把 ``scripts/rdp_run_release_cycle.py`` stub 成 ``sys.exit(2)``——但
-daemon 通过 ``scripts/rdp_run_scheduled_workflow.py --workflow release_cycle``
-间接调用了这个 stub,结果是每小时 exit=1 的自引用死循环(连续 8 轮失败才被
-发现)。修复方式是 daemon 对 release_cycle 走 in-process(直接调
-``run_release_cycle`` Python 入口),绕开 stub 的 CLI;其他 workflow 保持
-subprocess 模式不变。
-
-本测试锁定这一 routing 契约,防止日后有人误把 release_cycle 又改回 subprocess
-而导致 regression 回到 stub 死循环。
+Golden-path freeze 下, release_cycle 既不能新入队,也不能由 daemon 执行
+pre-patch 残留任务。底层 in-process helper 仍保留并由直接单测覆盖,方便未来
+明确解冻时复用,但 execute_workflow 当前必须先命中 freeze guard。
 """
 
 from __future__ import annotations
@@ -34,8 +28,8 @@ def _load_daemon_module():
         sys.path.remove(str(root / "scripts"))
 
 
-def test_release_cycle_is_routed_to_inprocess_not_subprocess() -> None:
-    """核心契约:execute_workflow('release_cycle') 必须走 in-process,不能 fork 子进程。"""
+def test_release_cycle_execution_is_blocked_under_golden_path_freeze() -> None:
+    """核心契约:execute_workflow('release_cycle') 不能触发 release/apply。"""
     daemon = _load_daemon_module()
 
     captured = {}
@@ -50,13 +44,11 @@ def test_release_cycle_is_routed_to_inprocess_not_subprocess() -> None:
     ):
         exit_code, tail, err = daemon.execute_workflow("release_cycle")
 
-    assert captured.get("called") is True, "release_cycle 必须走 in-process 路径"
-    assert fake_popen.call_count == 0, (
-        "release_cycle 不能走 subprocess;否则会撞上批次 A 的 stub 并 exit=2"
-    )
-    assert exit_code == 0
-    assert "Release cycle completed" in tail
-    assert err == ""
+    assert captured.get("called") is None, "freeze 下不得调用 release_cycle in-process"
+    assert fake_popen.call_count == 0, "freeze 下也不得回退到 subprocess"
+    assert exit_code == 1
+    assert "golden-path freeze" in tail
+    assert "golden-path freeze" in err
 
 
 def test_other_workflows_still_use_subprocess() -> None:

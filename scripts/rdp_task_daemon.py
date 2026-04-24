@@ -108,6 +108,12 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _blocked_workflows() -> frozenset[str]:
+    from aats.data_platform.governance.rdp_task_db import ENQUEUE_BLOCKED_WORKFLOWS
+
+    return ENQUEUE_BLOCKED_WORKFLOWS
+
+
 def _write_local_heartbeat(payload: dict[str, object]) -> None:
     try:
         LOCAL_HEARTBEAT_PATH.write_text(
@@ -248,6 +254,13 @@ def execute_workflow(
     on_progress: Callable[[], None] | None = None,
 ) -> tuple[int, str, str]:
     """执行一个 workflow，返回 (exit_code, stdout_tail, error_message)."""
+    if workflow in _blocked_workflows():
+        message = (
+            f"workflow={workflow} is blocked from daemon execution during golden-path freeze"
+        )
+        log.warning(message)
+        return 1, message, message
+
     # release_cycle 特判：in-process 调用，绕开批次 A 的 CLI stub。其他 workflow
     # 仍走 subprocess，保持 scheduler 通用语义不变。详见 _execute_release_cycle_inprocess。
     if workflow == "release_cycle":
@@ -420,7 +433,18 @@ def process_one_task(*, poll_interval: int) -> dict[str, object]:
         # 手动触发 (requested_by 为操作员名) 也 retry 1 次 —— 临时故障应该能自动恢复。
         _RETRY_DELAY_MINUTES = 15
         is_retry_already = str(requested_by or "").startswith("auto_retry_of_")
-        if not is_retry_already:
+        if workflow in _blocked_workflows():
+            log.warning(
+                "rdp_workflow_retry_skipped original=%s workflow=%s reason=golden_path_freeze",
+                task_id, workflow,
+                extra={
+                    "event_name": "rdp_workflow_retry_skipped",
+                    "original_task_id": task_id,
+                    "workflow": workflow,
+                    "reason": "golden_path_freeze",
+                },
+            )
+        elif not is_retry_already:
             from datetime import timedelta as _timedelta
 
             retry_eligible = _utcnow() + _timedelta(minutes=_RETRY_DELAY_MINUTES)

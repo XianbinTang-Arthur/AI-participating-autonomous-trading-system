@@ -25,7 +25,10 @@ from typing import Any
 import pytest
 
 from aats.data_platform.governance.rdp_task_db import (
+    ENQUEUE_BLOCKED_WORKFLOWS,
     VALID_WORKFLOWS,
+    WorkflowEnqueueBlockedError,
+    db_create_task,
     db_create_task_if_idle,
 )
 
@@ -158,7 +161,7 @@ def test_conflict_without_existing_row_returns_none_existing() -> None:
     """
     session = _FakeSession(insert_succeeds=False, existing_active=None)
 
-    task_id, existing = db_create_task_if_idle(session, workflow="release_cycle")
+    task_id, existing = db_create_task_if_idle(session, workflow="research_cycle")
 
     assert task_id is None
     assert existing is None
@@ -186,10 +189,30 @@ def test_all_valid_workflows_accepted() -> None:
 
     若后续 VALID_WORKFLOWS 删除项要同步更新 migration / scheduler tests。
     """
-    for wf in VALID_WORKFLOWS:
+    for wf in VALID_WORKFLOWS - ENQUEUE_BLOCKED_WORKFLOWS:
         session = _FakeSession(insert_succeeds=True)
         task_id, _ = db_create_task_if_idle(session, workflow=wf)
         assert task_id is not None, f"workflow={wf} 应插入成功"
+
+
+def test_release_cycle_enqueue_is_blocked_before_touching_db() -> None:
+    """P0 golden-path freeze: release_cycle 不得再通过共享队列边界入队。"""
+    session = _FakeSession(insert_succeeds=True)
+
+    with pytest.raises(WorkflowEnqueueBlockedError, match="golden-path freeze"):
+        db_create_task_if_idle(session, workflow="release_cycle")
+
+    assert session.statements == [], "release_cycle blocked 时不应触达 DB"
+
+
+def test_release_cycle_legacy_create_is_blocked_before_touching_db() -> None:
+    """旧 create helper 也必须共享同一 freeze 边界，避免旁路入队。"""
+    session = _FakeSession(insert_succeeds=True)
+
+    with pytest.raises(WorkflowEnqueueBlockedError, match="golden-path freeze"):
+        db_create_task(session, workflow="release_cycle")
+
+    assert session.statements == [], "release_cycle blocked 时不应触达 DB"
 
 
 # =====================================================================
@@ -224,7 +247,7 @@ def test_earliest_start_at_defaults_to_now_when_not_specified() -> None:
 
     session = _FakeSession(insert_succeeds=True)
     before = datetime.now(timezone.utc)
-    db_create_task_if_idle(session, workflow="release_cycle")
+    db_create_task_if_idle(session, workflow="research_cycle")
     after = datetime.now(timezone.utc)
 
     _, params = session.statements[0]
