@@ -37,7 +37,7 @@ from aats.schemas.strategy_profile_reports import (
     StrategyProfileOptimizationReport,
     StrategyProfileSelectionDecision,
 )
-from aats.services.ai_service.openai_provider import OpenAIProvider
+from aats.services.ai_service.factory import build_ai_provider
 from aats.services.operator.strategy_profile_optimization import (
     build_comparison_report,
     build_offline_replay_pipeline,
@@ -119,7 +119,7 @@ class StrategyProfileControlService:
         self.repo = self.runtime.strategy_profile_repo
         self.settings = self.runtime.settings
         self.event_store: EventStore = self.runtime.event_store
-        self.provider = OpenAIProvider(settings=self.settings) if self.settings.ai_provider_configured else None
+        self.provider = build_ai_provider(self.settings)
         self.prompt_version = "strategy_tuning_v1"
         self.logger = get_logger("aats.strategy_profiles")
         self.evaluation_window_limit = _EVALUATION_WINDOW_LIMIT

@@ -3,12 +3,12 @@
 # 数据库、端口、日志、交易所凭证、仓位上限等运行时 override 请改根目录 `.env.spot`。
 
 # AI 与自动降级
-# [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker；推荐值：baseline_only。自动换档已独立，单独由 strategy_profile_auto_control_enabled 控制。
-ai_operating_mode: baseline_only
-# [常用可调] ai_provider：AI 提供方。可选值：disabled / openai；推荐值：openai。
-ai_provider: openai
-# [常用可调] ai_model_name：AI 模型名。可选值：可用的 OpenAI 模型名；推荐值：gpt-4.1-mini。
-ai_model_name: gpt-4.1-mini
+# [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker；推荐值：ai_decision_maker（AI 功能全面开放）。自动换档已独立，单独由 strategy_profile_auto_control_enabled 控制。
+ai_operating_mode: ai_decision_maker
+# [常用可调] ai_provider：AI 提供方。可选值：disabled / openai / deepseek；推荐值：deepseek。运行时可用 AI_SELECTOR 环境变量覆盖（AI_SELECTOR=DEEPSEEK|OPENAI）。
+ai_provider: deepseek
+# [常用可调] ai_model_name：AI 模型名。DeepSeek 可选：deepseek-v4-pro / deepseek-v4-flash；OpenAI 可选：gpt-4.1-mini / gpt-4o-mini 等；推荐值：deepseek-v4-pro。
+ai_model_name: deepseek-v4-pro
 # [常用可调] ai_timeout_seconds：AI 请求超时秒数。可选值：1.0 ~ 60.0；推荐值：10.0。
 ai_timeout_seconds: 10.0
 # [常用可调] ai_degrade_after_failures：连续失败多少次后自动降级。可选值：1 ~ 10；推荐值：4。
@@ -21,8 +21,8 @@ ai_decision_min_confidence: 0.75
 ai_decision_max_uncertainty: 0.38
 # [常用可调] ai_decision_min_directional_edge：AI 方向信号最低边际。可选值：0.0 ~ 1.0；推荐值：0.18。
 ai_decision_min_directional_edge: 0.18
-# [常用可调] ai_shadow_mode_enabled：是否启用 AI shadow 观察。可选值：true / false；推荐值：false。
-ai_shadow_mode_enabled: false
+# [常用可调] ai_shadow_mode_enabled：是否启用 AI shadow 观察。可选值：true / false；推荐值：true（AI 功能全面开放）。
+ai_shadow_mode_enabled: true
 # [常用可调] ai_shadow_evaluation_window：shadow 评估窗口长度。可选值：5 ~ 200；推荐值：30。
 ai_shadow_evaluation_window: 30
 # [常用可调] ai_outcome_review_bad_window_threshold：坏窗口数量达到多少后要求复核。可选值：1 ~ 20；推荐值：3。

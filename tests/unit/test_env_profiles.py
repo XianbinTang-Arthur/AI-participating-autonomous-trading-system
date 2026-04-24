@@ -319,14 +319,17 @@ def test_managed_profile_local_env_templates_are_minimal_utf8_overrides() -> Non
             assert key not in values, key
         for key in deprecated_strategy_keys:
             assert key not in values, key
-        # Keys consumed by Docker compose / bootstrap scripts, not
-        # AATSSettings runtime fields:
+        # Keys consumed by Docker compose / bootstrap scripts or shell-level
+        # overrides, not AATSSettings runtime fields:
         # - AATS_DB_NAME: compose interpolation for DATABASE_URL
         # - AATS_OPERATOR_ADMIN_*: seed_operator_admin bootstrap script
+        # - AI_SELECTOR: unprefixed shell-level AI provider override consumed
+        #   by AATSSettings.apply_ai_selector_env_override via os.environ
         infrastructure_only_keys = {
             "AATS_DB_NAME",
             "AATS_OPERATOR_ADMIN_USERNAME",
             "AATS_OPERATOR_ADMIN_PASSWORD",
+            "AI_SELECTOR",
         }
         for key in values:
             assert key in supported_keys or key in infrastructure_only_keys, key

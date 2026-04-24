@@ -152,7 +152,7 @@ class TestAATSSettings(unittest.TestCase):
         self.assertEqual(settings.market_data_backend, "okx")
         self.assertEqual(settings.execution_backend, "okx")
         self.assertEqual(settings.account_backend, "okx")
-        self.assertEqual(settings.ai_execution_suggestion_mode, "diagnostic_only")
+        self.assertEqual(settings.ai_execution_suggestion_mode, "enabled_live")
         self.assertFalse(settings.strategy_profile_auto_control_enabled)
         self.assertEqual(settings.decision_min_interval_seconds_15m, 60.0)
         self.assertEqual(settings.strategy_min_hold_seconds, 720.0)

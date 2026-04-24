@@ -98,8 +98,8 @@ max_margin_usage_fraction: 0.85
 # [常用可调] liquidation_buffer_fraction：合约预留的强平缓冲比例。可选值：0.0~1.0；推荐值：0.15。
 liquidation_buffer_fraction: 0.15
 
-# [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker；基线推荐：baseline_only。自动换档已独立，单独由 strategy_profile_auto_control_enabled 控制。
-ai_operating_mode: baseline_only
+# [常用可调] ai_operating_mode：AI 运行模式。可选值：baseline_only / ai_assisted / ai_decision_maker；基线推荐：ai_decision_maker（AI 功能全面开放）。自动换档已独立，单独由 strategy_profile_auto_control_enabled 控制。
+ai_operating_mode: ai_decision_maker
 # [常用可调] strategy_profile_emergency_safety_fast_track_enabled：是否允许安全事件走快速切档通道。可选值：true / false；推荐值：true。
 strategy_profile_emergency_safety_fast_track_enabled: true
 # [常用可调] strategy_profile_emergency_safety_confidence_min：快速切入安全档的最低置信度。可选值：0.0~1.0；推荐值：0.68。
@@ -120,10 +120,10 @@ strategy_sleeve_auto_soft_loss_usdt: 10.0
 strategy_sleeve_auto_hard_loss_usdt: 25.0
 # [常用可调] strategy_sleeve_auto_volatility_cap_enabled：是否按 baseline 波动率目标自动收缩 sleeve 预算。可选值：true / false；推荐值：true。
 strategy_sleeve_auto_volatility_cap_enabled: true
-# [运行必改] ai_provider：AI 提供方。可选值：disabled / openai；基线推荐：disabled。
-ai_provider: disabled
-# [常用可调] ai_model_name：AI 模型名。可选值：可用模型名；推荐值：gpt-4o-mini。
-ai_model_name: gpt-4o-mini
+# [运行必改] ai_provider：AI 提供方。可选值：disabled / openai / deepseek；基线推荐：deepseek。运行时可用 AI_SELECTOR 环境变量覆盖（AI_SELECTOR=DEEPSEEK|OPENAI）。
+ai_provider: deepseek
+# [常用可调] ai_model_name：AI 模型名。DeepSeek 可选：deepseek-v4-pro / deepseek-v4-flash；OpenAI 可选：gpt-4.1-mini / gpt-4o-mini 等；推荐值：deepseek-v4-pro。
+ai_model_name: deepseek-v4-pro
 # [常用可调] ai_prompt_version：提示词版本。可选值：自定义版本号；推荐值：0.3.0（P1.4-P2.7 新 basis/funding/oi/ls reason_codes glossary 已注入）。
 ai_prompt_version: 0.3.0
 # [常用可调] ai_model_version：模型配置版本。可选值：自定义版本号；推荐值：1.0.0。
@@ -144,6 +144,8 @@ ai_decision_max_uncertainty: 0.35
 ai_decision_min_directional_edge: 0.2
 # [运行必改] openai_base_url：OpenAI API 基础地址。可选值：https://api.openai.com 或兼容代理地址；推荐值：https://api.openai.com。
 openai_base_url: https://api.openai.com
+# [运行必改] deepseek_base_url：DeepSeek API 基础地址。可选值：https://api.deepseek.com 或兼容代理地址；推荐值：https://api.deepseek.com。
+deepseek_base_url: https://api.deepseek.com
 
 # [常用可调] market_data_stale_after_seconds：行情快照过期阈值秒数。可选值：1.0~300.0；推荐值：45.0。
 market_data_stale_after_seconds: 45.0

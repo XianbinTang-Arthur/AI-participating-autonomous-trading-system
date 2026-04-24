@@ -25,7 +25,7 @@ from aats.schemas.decision import (
 from aats.schemas.execution import FillEvent
 from aats.schemas.features import FeatureSnapshot
 from aats.services.ai_service.evaluator import AIEvaluationTracker
-from aats.services.ai_service.openai_provider import OpenAIProvider
+from aats.services.ai_service.factory import build_ai_provider
 from aats.services.ai_service.provider import AIProvider, AIProviderError, AIProviderTimeoutError
 from aats.services.ai_service.prompt_builder import PromptBuilder
 from aats.services.ai_service.validator import AIOutputValidationError, AssessmentValidator
@@ -596,9 +596,7 @@ class AIInferenceService:
             )
 
     def _default_provider(self) -> AIProvider | None:
-        if self.settings.ai_provider == "openai" and self.settings.ai_provider_configured:
-            return OpenAIProvider(settings=self.settings)
-        return None
+        return build_ai_provider(self.settings)
 
     def _clear_manual_operating_mode_override(
         self,

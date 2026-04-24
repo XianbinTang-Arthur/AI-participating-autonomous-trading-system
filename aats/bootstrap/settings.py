@@ -1,10 +1,20 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Literal
 
 from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from aats.schemas.decision import AIOperatingMode, CanonicalAIOperatingMode, normalize_ai_operating_mode
+
+
+AIProviderName = Literal["disabled", "openai", "deepseek"]
+_AI_SELECTOR_ENV_VAR = "AI_SELECTOR"
+_AI_SELECTOR_ALIASES: dict[str, AIProviderName] = {
+    "DEEPSEEK": "deepseek",
+    "OPENAI": "openai",
+    "DISABLED": "disabled",
+}
 
 
 RuntimeMode = Literal["backtest", "paper_live", "guarded_live", "autonomous_live"]
@@ -251,7 +261,7 @@ class AATSSettings(BaseSettings):
     trade_cost_derivatives_slippage_bps: float = 1.0
     max_slippage_tolerance_bps: int = 20
     ai_operating_mode: AIOperatingMode = "baseline_only"
-    ai_provider: Literal["disabled", "openai"] = "disabled"
+    ai_provider: AIProviderName = "disabled"
     ai_model_name: str = "gpt-4o-mini"
     ai_prompt_version: str = "0.3.0"
     ai_model_version: str = "1.0.0"
@@ -303,6 +313,8 @@ class AATSSettings(BaseSettings):
     strategy_profile_auto_control_enabled: bool = False
     openai_api_key: str | None = None
     openai_base_url: str = "https://api.openai.com"
+    deepseek_api_key: str | None = None
+    deepseek_base_url: str = "https://api.deepseek.com"
     market_data_stale_after_seconds: float = 45.0
     account_state_stale_after_seconds: float = 120.0
     reconciliation_stale_after_seconds: float = 300.0
@@ -852,6 +864,25 @@ class AATSSettings(BaseSettings):
         return value
 
     @model_validator(mode="after")
+    def apply_ai_selector_env_override(self) -> "AATSSettings":
+        # Honor the explicit AI_SELECTOR env var without the AATS_ prefix.
+        # The operator sets AI_SELECTOR=DEEPSEEK|OPENAI at the shell/compose
+        # layer to swap providers without editing YAML. Env wins over YAML.
+        raw = os.environ.get(_AI_SELECTOR_ENV_VAR)
+        if raw is None:
+            return self
+        normalized = raw.strip().upper()
+        if not normalized:
+            return self
+        canonical = _AI_SELECTOR_ALIASES.get(normalized)
+        if canonical is None:
+            raise ValueError(f"unknown_ai_selector_value:{raw}")
+        if self.ai_provider != canonical:
+            self.ai_provider = canonical
+            self.__pydantic_fields_set__.add("ai_provider")
+        return self
+
+    @model_validator(mode="after")
     def validate_supported_runtime_overrides(self) -> "AATSSettings":
         # The current market/feature pipeline is still built around fixed
         # 15m + 1h snapshots. Exposing broader timeframe configurability in
@@ -1053,6 +1084,8 @@ class AATSSettings(BaseSettings):
             return False
         if self.ai_provider == "openai":
             return bool(self.openai_api_key and not is_placeholder_config_value(self.openai_api_key))
+        if self.ai_provider == "deepseek":
+            return bool(self.deepseek_api_key and not is_placeholder_config_value(self.deepseek_api_key))
         return False
 
     @property
