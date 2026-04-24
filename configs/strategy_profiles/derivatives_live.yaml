@@ -20,9 +20,9 @@ active_parameters_enabled: true
 ai_operating_mode: ai_decision_maker
 # [常用可调] ai_provider：AI 提供方。可选值：disabled / openai / deepseek；推荐值：deepseek。运行时可用 AI_SELECTOR 环境变量覆盖（AI_SELECTOR=DEEPSEEK|OPENAI）。
 ai_provider: deepseek
-# [常用可调] ai_model_name：AI 模型名。DeepSeek 可选：deepseek-v4-pro / deepseek-v4-flash；OpenAI 可选：gpt-4.1-mini / gpt-4o-mini 等；推荐值：deepseek-v4-pro。
-ai_model_name: deepseek-v4-pro
-# [常用可调] ai_timeout_seconds：AI 请求超时秒数。可选值：1.0 ~ 60.0；推荐值：30.0（deepseek-v4-pro 实盘链路）。
+# [常用可调] ai_model_name：AI 模型名。DeepSeek 可选：deepseek-v4-pro / deepseek-v4-flash；OpenAI 可选：gpt-4.1-mini / gpt-4o-mini 等；当前实盘试运行 deepseek-v4-flash 以降低同步决策延迟。
+ai_model_name: deepseek-v4-flash
+# [常用可调] ai_timeout_seconds：AI 请求超时秒数。可选值：1.0 ~ 60.0；当前保留 30.0 以隔离模型切换变量。
 ai_timeout_seconds: 30.0
 # [常用可调] ai_degrade_after_failures：连续失败多少次后自动降级。可选值：1 ~ 10；推荐值：3。
 ai_degrade_after_failures: 3
