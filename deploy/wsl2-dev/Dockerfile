@@ -96,6 +96,7 @@ WORKDIR /app
 COPY --chown=aats:aats aats/ ./aats/
 COPY --chown=aats:aats apps/ ./apps/
 COPY --chown=aats:aats configs/ ./configs/
+COPY --chown=aats:aats migrations/ ./migrations/
 COPY --chown=aats:aats scripts/ ./scripts/
 COPY --chown=aats:aats pyproject.toml README.md ./
 

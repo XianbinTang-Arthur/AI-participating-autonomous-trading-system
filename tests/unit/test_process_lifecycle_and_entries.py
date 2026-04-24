@@ -365,6 +365,17 @@ def test_dockerfile_runtime_installs_curl_for_gateway_healthcheck() -> None:
     )
 
 
+def test_dockerfile_runtime_copies_root_migrations_for_live_startup() -> None:
+    """Golden path 回归：runtime image 必须带上 /app/migrations，否则 apply_current_migrations 只会对空目录工作。"""
+    dockerfile = REPO_ROOT / "deploy" / "wsl2-dev" / "Dockerfile"
+    text = dockerfile.read_text(encoding="utf-8")
+
+    assert "COPY --chown=aats:aats migrations/ ./migrations/" in text, (
+        "Dockerfile runtime 段必须复制根 migrations/ 目录，否则 live 启动时 "
+        "apply_current_migrations() 看不到任何 SQL migration，schema_migrations 会保持空表"
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────
 # 5) Stage 7 心跳：daemon 进程的 docker healthcheck 信号源
 # ─────────────────────────────────────────────────────────────────────
