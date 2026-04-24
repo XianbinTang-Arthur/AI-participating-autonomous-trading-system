@@ -13,8 +13,9 @@
 - **绝不 commit** 凭证相关的文件
 
 ### 实盘资金 & 仓位
-- **绝不触发**下单、平仓、资金转移、提现
-- **绝不修改** `ai_operating_mode` 从 `baseline_only` 切到任何 "live" 或 "decision_maker" 模式
+- AI agent **绝不通过手工命令、临时脚本、API 调用或数据库写入**直接触发下单、平仓、资金转移、提现；真实交易只能由已部署 runtime 在已配置的风控、kill switch、执行网关和审计链内产生
+- `ai_operating_mode` / `ai_execution_suggestion_mode` / `ai_provider` 可以被修改为全面启用 AI，但必须满足：用户明确授权、bounded task、SOW、相关测试、可回滚路径、运行范围不扩大、风控与执行硬门不被绕过
+- AI 可在 `ai_decision_maker` 与 `enabled_live` 配置下参与或主导决策/执行建议，但不得绕过 symbol/venue/family 范围、risk engine、kill switch、truth chain、release/promotion gate 或人工明确冻结
 - **绝不改** Kill switch / recovery policy 语义字段
 - **绝不改** Risk engine 的硬约束（max_symbol_notional、only_reduce 触发条件等）
 
