@@ -32,7 +32,6 @@ from aats.schemas.strategy_profiles import (
 )
 from aats.schemas.strategy_profile_reports import (
     StrategyProfileActivationPolicyConfig,
-    StrategyProfileAutoRollbackPolicyConfig,
     StrategyProfileOptimizationCandidate,
     StrategyProfileOptimizationReport,
     StrategyProfileSelectionDecision,
@@ -50,20 +49,11 @@ from aats.services.operator.strategy_profile_policies import (
     activation_policy_history_payload,
     activation_policy_view,
     approve_activation_policy as approve_activation_policy_helper,
-    approve_auto_rollback_policy as approve_auto_rollback_policy_helper,
-    auto_rollback_policy_history,
-    auto_rollback_policy_history_payload,
-    auto_rollback_policy_view,
     freeze_activation_policy as freeze_activation_policy_helper,
-    freeze_auto_rollback_policy as freeze_auto_rollback_policy_helper,
     resolved_activation_policy,
-    resolved_auto_rollback_policy,
     staged_activation_policy_view,
-    staged_auto_rollback_policy_view,
     stored_activation_policy,
-    stored_auto_rollback_policy,
     update_activation_policy as update_activation_policy_helper,
-    update_auto_rollback_policy as update_auto_rollback_policy_helper,
 )
 from aats.services.operator.strategy_profile_seed import seed_strategy_profiles
 from aats.services.operator.strategy_profile_snapshot import (
@@ -1093,24 +1083,6 @@ class StrategyProfileControlService:
             "summary": "Reserved schema only. The deterministic execution planner still owns all live order construction.",
         }
 
-    def _auto_rollback_policy_view(self) -> dict[str, Any]:
-        return auto_rollback_policy_view(self)
-
-    def _staged_auto_rollback_policy_view(self) -> dict[str, Any] | None:
-        return staged_auto_rollback_policy_view(self)
-
-    def _stored_auto_rollback_policy(self) -> StrategyProfileAutoRollbackPolicyConfig | None:
-        return stored_auto_rollback_policy(self)
-
-    def _auto_rollback_policy_history(self, *, limit: int | None = None) -> list[StrategyProfileAutoRollbackPolicyConfig]:
-        return auto_rollback_policy_history(self, limit=limit)
-
-    def _auto_rollback_policy_history_payload(self, *, limit: int | None = None) -> list[dict[str, Any]]:
-        return auto_rollback_policy_history_payload(self, limit=limit)
-
-    def _resolved_auto_rollback_policy(self) -> StrategyProfileAutoRollbackPolicyConfig:
-        return resolved_auto_rollback_policy(self)
-
     def _activation_policy_view(self) -> dict[str, Any]:
         return activation_policy_view(self)
 
@@ -1181,60 +1153,6 @@ class StrategyProfileControlService:
         reason: str,
     ) -> dict[str, Any]:
         return freeze_activation_policy_helper(
-            self,
-            frozen=frozen,
-            actor_identity=actor_identity,
-            reason=reason,
-        )
-
-    def update_auto_rollback_policy(
-        self,
-        *,
-        enabled: bool,
-        review_required_only: bool,
-        min_trade_count: int,
-        cooldown_seconds: float,
-        matrix_allowed_symbols: tuple[str, ...],
-        matrix_allowed_regimes: tuple[str, ...],
-        matrix_allowed_profiles: tuple[str, ...],
-        reason: str,
-        actor_identity: str | None,
-    ) -> dict[str, Any]:
-        return update_auto_rollback_policy_helper(
-            self,
-            enabled=enabled,
-            review_required_only=review_required_only,
-            min_trade_count=min_trade_count,
-            cooldown_seconds=cooldown_seconds,
-            matrix_allowed_symbols=matrix_allowed_symbols,
-            matrix_allowed_regimes=matrix_allowed_regimes,
-            matrix_allowed_profiles=matrix_allowed_profiles,
-            reason=reason,
-            actor_identity=actor_identity,
-        )
-
-    def approve_auto_rollback_policy(
-        self,
-        *,
-        policy_id: str | None,
-        actor_identity: str | None,
-        reason: str,
-    ) -> dict[str, Any]:
-        return approve_auto_rollback_policy_helper(
-            self,
-            policy_id=policy_id,
-            actor_identity=actor_identity,
-            reason=reason,
-        )
-
-    def freeze_auto_rollback_policy(
-        self,
-        *,
-        frozen: bool,
-        actor_identity: str | None,
-        reason: str,
-    ) -> dict[str, Any]:
-        return freeze_auto_rollback_policy_helper(
             self,
             frozen=frozen,
             actor_identity=actor_identity,
@@ -1709,7 +1627,6 @@ class StrategyProfileControlService:
         rationale: list[str],
         blocked_reasons: list[str] | None = None,
         execution_outcome: dict[str, Any] | None = None,
-        auto_rollback_recommendation: dict[str, Any] | None = None,
         notes: list[str],
         transition_class: str | None = None,
         transition_risk_direction: str | None = None,
@@ -1727,7 +1644,6 @@ class StrategyProfileControlService:
             rationale=rationale,
             blocked_reasons=blocked_reasons,
             execution_outcome=execution_outcome,
-            auto_rollback_recommendation=auto_rollback_recommendation,
             notes=notes,
             transition_class=transition_class,
             transition_risk_direction=transition_risk_direction,
@@ -1761,9 +1677,6 @@ class StrategyProfileControlService:
             evaluations=evaluations,
             optimization_report=optimization_report,
         )
-
-    def _maybe_auto_execute_rollback(self, *, decision: StrategyProfileSelectionDecision) -> dict[str, Any] | None:
-        return self.activation.maybe_auto_execute_rollback(decision=decision)
 
     def _consecutive_candidate_win_count(self, *, candidate_profile_id: str | None) -> int:
         if not candidate_profile_id:

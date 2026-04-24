@@ -268,7 +268,6 @@ class StrategyProfileRecommendationFacade:
         rationale: list[str],
         blocked_reasons: list[str] | None = None,
         execution_outcome: dict[str, Any] | None = None,
-        auto_rollback_recommendation: dict[str, Any] | None = None,
         notes: list[str],
         transition_class: str | None = None,
         transition_risk_direction: str | None = None,
@@ -356,11 +355,6 @@ class StrategyProfileRecommendationFacade:
                 if execution_outcome is not None
                 else (previous.execution_outcome if previous is not None else {})
             ),
-            auto_rollback_recommendation=(
-                auto_rollback_recommendation
-                if auto_rollback_recommendation is not None
-                else (previous.auto_rollback_recommendation if previous is not None else {})
-            ),
             notes=notes,
         )
         self.owner.event_store.append(
@@ -432,46 +426,21 @@ class StrategyProfileRecommendationFacade:
             execution_outcome["trigger_type"] = latest_activation.trigger_type
             execution_outcome["activation_result"] = latest_activation.result
         rollback_target = latest_decision.rollback_profile_id or optimization_report.active_profile_id
-        rollback_reasons: list[str] = []
-        failure_rules = (optimization_report.winner_selection_policy or {}).get("failure_rollback_rules") or {}
-        if bool(failure_rules.get("on_degraded_evaluation", True)) and current_evaluation.status in {"degraded", "rollback_recommended"}:
-            rollback_reasons.append(f"evaluation_status_{current_evaluation.status}")
-        if bool(failure_rules.get("on_alternative_winner", True)) and optimization_report.recommended_profile_id and optimization_report.recommended_profile_id != active_profile_id:
-            rollback_reasons.append("optimization_report_prefers_alternative_profile")
-        if bool(failure_rules.get("on_shadow_review_required", True)) and bool(optimization_report.ai_performance_summary.get("review_required")):
-            rollback_reasons.append("ai_shadow_guard_review_required")
-        auto_rollback_recommendation = {
-            "recommended": bool(rollback_reasons and rollback_target and rollback_target != active_profile_id),
-            "target_profile_id": rollback_target if rollback_target != active_profile_id else None,
-            "reason_codes": rollback_reasons,
-            "symbol": self.owner.settings.default_symbol,
-            "regime": replay_summary.get("target_regime") if (replay_summary := optimization_report.replay_summary) else None,
-            "active_profile_id": active_profile_id,
-        }
-        next_status = (
-            "auto_rollback_recommended"
-            if auto_rollback_recommendation["recommended"]
-            else "execution_outcome_recorded"
-        )
+        next_status = "execution_outcome_recorded"
         if (
             latest_decision.decision_status == next_status
             and latest_decision.execution_outcome.get("evaluation_id") == current_evaluation.evaluation_id
-            and latest_decision.auto_rollback_recommendation == auto_rollback_recommendation
         ):
             return None
         rationale = ["selection_execution_outcome_written_back", f"evaluation_status_{current_evaluation.status}"]
-        recommended_action = "review_rollback" if auto_rollback_recommendation["recommended"] else "keep_observing"
-        if auto_rollback_recommendation["recommended"]:
-            rationale.append("auto_rollback_advice_generated")
         return self.append_selection_decision_transition(
             status=next_status,
             candidate_profile_id=active_profile_id,
             rollback_profile_id=rollback_target,
             execution_state="rolled_back" if latest_decision.execution_state == "rolled_back" else "executed",
-            recommended_action=recommended_action,
+            recommended_action="keep_observing",
             rationale=rationale,
             execution_outcome=execution_outcome,
-            auto_rollback_recommendation=auto_rollback_recommendation,
             notes=[f"evaluation_ref={current_evaluation.evaluation_id}"],
         )
 

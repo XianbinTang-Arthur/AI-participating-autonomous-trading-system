@@ -181,7 +181,6 @@ DEFAULT_CRITICAL_TOPICS: frozenset[str] = frozenset(
         _topics.STRATEGY_PROFILE_ACTIVATIONS,        # profile 激活；影响实盘
         _topics.STRATEGY_PROFILE_REJECTIONS,         # profile 拒绝；状态记录
         _topics.STRATEGY_PROFILE_SELECTION_DECISIONS,    # profile 选择决策
-        _topics.STRATEGY_PROFILE_AUTO_ROLLBACK_POLICIES, # 自动回滚规则配置
         _topics.STRATEGY_PROFILE_ACTIVATION_POLICIES,    # 激活规则配置
         # ── decision→gateway 跨进程报告 ────────────────────
         _topics.AI_PERFORMANCE_REPORTS,   # AI 表现报告；decision 生产，gateway API

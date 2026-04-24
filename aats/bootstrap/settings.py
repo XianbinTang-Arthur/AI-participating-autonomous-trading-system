@@ -361,13 +361,6 @@ class AATSSettings(BaseSettings):
     okx_account_config_validation_enabled: bool = True
     okx_system_status_gate_enabled: bool = True
     okx_private_balance_position_ws_enabled: bool = True
-    strategy_profile_auto_rollback_enabled: bool = False
-    strategy_profile_auto_rollback_review_required_only: bool = True
-    strategy_profile_auto_rollback_min_trade_count: int = 3
-    strategy_profile_auto_rollback_cooldown_seconds: float = 1_800.0
-    strategy_profile_auto_rollback_allowed_symbols: tuple[str, ...] = Field(default=tuple())
-    strategy_profile_auto_rollback_allowed_regimes: tuple[str, ...] = Field(default=tuple())
-    strategy_profile_auto_rollback_allowed_profiles: tuple[str, ...] = Field(default=tuple())
     strategy_profile_offline_replay_windows: tuple[int, ...] = Field(default=(10, 20, 50))
     strategy_profile_offline_replay_pipeline_version: str = "offline_replay_pipeline_v2"
     strategy_profile_auto_activation_min_composite_score: float = 0.0

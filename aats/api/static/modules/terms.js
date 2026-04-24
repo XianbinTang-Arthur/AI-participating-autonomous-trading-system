@@ -413,8 +413,6 @@
   stable_keep_active: "继续保持当前策略档位",
   recommended_not_executed: "已推荐但未执行",
   winner_policy_recommended_not_executed: "优胜策略档位已推荐但未执行",
-  auto_rollback_recommended: "建议自动回滚",
-  auto_rollback_executed: "自动回滚已执行",
   observe_outcome: "观察结果",
   activate_or_reject: "激活或拒绝",
   keep_current_profile: "保持当前策略档位",
