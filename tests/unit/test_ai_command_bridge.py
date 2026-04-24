@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import unittest
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
@@ -244,6 +244,68 @@ class TestQueryServiceGatewayFallback(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError) as ctx:
                 await coro
             self.assertIn("ai_service_not_loaded_in_this_process_role", str(ctx.exception))
+
+
+class TestComponentNameLogPrefix(unittest.IsolatedAsyncioTestCase):
+    """Regression guard for the ``component_name`` constructor param on
+    Client/Worker. If someone accidentally reverts the f-string prefix back
+    to the hardcoded ``"operator_command_"`` literal, the AI bridge's
+    independent-grep property silently breaks — this test catches it.
+    """
+
+    async def test_client_default_component_emits_operator_command_prefix(self) -> None:
+        bus = InMemoryEventBus(event_store=None, persistence_mode="lenient")
+        client = OperatorCommandClient(
+            bus=bus,
+            process_role="gateway",
+            logger=_make_logger(),
+        )
+        with patch("aats.services.operator.command_bridge.log_event") as spy:
+            await client.bootstrap()
+        event_names = [call.args[1] for call in spy.call_args_list]
+        self.assertIn("operator_command_client_subscribed", event_names)
+        for name in event_names:
+            self.assertFalse(name.startswith("ai_command_"), f"unexpected ai_command event: {name}")
+
+    async def test_client_component_name_ai_emits_ai_command_prefix(self) -> None:
+        bus = InMemoryEventBus(event_store=None, persistence_mode="lenient")
+        client = OperatorCommandClient(
+            bus=bus,
+            process_role="gateway",
+            logger=_make_logger(),
+            request_topic=topics.AI_COMMAND_REQUESTS,
+            response_topic=topics.AI_COMMAND_RESPONSES,
+            component_name="ai_command",
+        )
+        with patch("aats.services.operator.command_bridge.log_event") as spy:
+            await client.bootstrap()
+        event_names = [call.args[1] for call in spy.call_args_list]
+        self.assertIn("ai_command_client_subscribed", event_names)
+        for name in event_names:
+            self.assertFalse(
+                name.startswith("operator_command_"),
+                f"AI bridge should not emit operator_command events: {name}",
+            )
+
+    async def test_worker_component_name_ai_emits_ai_command_prefix(self) -> None:
+        bus = InMemoryEventBus(event_store=None, persistence_mode="lenient")
+
+        async def _noop(_: dict[str, Any]) -> dict[str, Any]:
+            return {"status": "ok"}
+
+        worker = OperatorCommandWorker(
+            bus=bus,
+            process_role="decision",
+            logger=_make_logger(),
+            command_handlers={"ai_review_restore": _noop},
+            request_topic=topics.AI_COMMAND_REQUESTS,
+            response_topic=topics.AI_COMMAND_RESPONSES,
+            component_name="ai_command",
+        )
+        with patch("aats.services.operator.command_bridge.log_event") as spy:
+            await worker.bootstrap()
+        event_names = [call.args[1] for call in spy.call_args_list]
+        self.assertIn("ai_command_worker_subscribed", event_names)
 
 
 if __name__ == "__main__":

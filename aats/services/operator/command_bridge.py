@@ -140,7 +140,6 @@ class OperatorCommandClient:
         self._request_topic = request_topic
         self._response_topic = response_topic
         self._event_prefix = component_name
-        self._component_name = component_name
         self._pending: dict[str, asyncio.Future[OperatorCommandResponse]] = {}
         self._subscribed = False
         self._stopped = False
@@ -445,7 +444,6 @@ class OperatorCommandWorker:
         self._request_topic = request_topic
         self._response_topic = response_topic
         self._event_prefix = component_name
-        self._component_name = component_name
         self._lock = asyncio.Lock()
         self._subscribed = False
         self._stopped = False
