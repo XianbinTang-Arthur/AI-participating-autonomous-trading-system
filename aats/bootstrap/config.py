@@ -5,6 +5,7 @@ import logging
 import os
 import random as _random
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
@@ -1202,6 +1203,21 @@ class ApplicationRuntime:
             except asyncio.CancelledError:
                 raise
             if not self.settings.strategy_profile_auto_control_enabled:
+                continue
+            effective_enabled = False
+            try:
+                checker = getattr(service, "auto_switch_effective_enabled", None)
+                effective_enabled = (
+                    bool(await asyncio.to_thread(checker))
+                    if callable(checker)
+                    else True
+                )
+            except Exception as exc:
+                await self._record_background_failure(
+                    subsystem="strategy_profile_auto_switch_state", exc=exc
+                )
+                continue
+            if not effective_enabled:
                 continue
             try:
                 await service.evaluate_now(allow_auto_activation=True)

@@ -76,6 +76,7 @@ class TestProfileAutoSwitchLoop(unittest.IsolatedAsyncioTestCase):
     async def test_loop_invokes_evaluate_now_at_boundary(self) -> None:
         runtime = self._make_runtime(auto_enabled=True)
         service = MagicMock()
+        service.auto_switch_effective_enabled = MagicMock(return_value=True)
         service.evaluate_now = AsyncMock(return_value={"status": "ok"})
 
         # Run one iteration then cancel, so sleep(0) returns immediately and
@@ -93,11 +94,13 @@ class TestProfileAutoSwitchLoop(unittest.IsolatedAsyncioTestCase):
                 await ApplicationRuntime._run_profile_auto_switch_loop(runtime, service)
 
         service.evaluate_now.assert_awaited_once_with(allow_auto_activation=True)
+        service.auto_switch_effective_enabled.assert_called_once_with()
         runtime._record_background_failure.assert_not_awaited()
 
     async def test_loop_skips_evaluate_when_auto_control_disabled(self) -> None:
         runtime = self._make_runtime(auto_enabled=False)
         service = MagicMock()
+        service.auto_switch_effective_enabled = MagicMock(return_value=True)
         service.evaluate_now = AsyncMock()
 
         sleep_calls = 0
@@ -113,10 +116,33 @@ class TestProfileAutoSwitchLoop(unittest.IsolatedAsyncioTestCase):
                 await ApplicationRuntime._run_profile_auto_switch_loop(runtime, service)
 
         service.evaluate_now.assert_not_awaited()
+        service.auto_switch_effective_enabled.assert_not_called()
+
+    async def test_loop_skips_evaluate_when_effective_auto_control_disabled(self) -> None:
+        runtime = self._make_runtime(auto_enabled=True)
+        service = MagicMock()
+        service.auto_switch_effective_enabled = MagicMock(return_value=False)
+        service.evaluate_now = AsyncMock()
+
+        sleep_calls = 0
+
+        async def _fake_sleep(delay: float) -> None:
+            nonlocal sleep_calls
+            sleep_calls += 1
+            if sleep_calls >= 2:
+                raise asyncio.CancelledError()
+
+        with patch("aats.bootstrap.config.asyncio.sleep", new=_fake_sleep):
+            with self.assertRaises(asyncio.CancelledError):
+                await ApplicationRuntime._run_profile_auto_switch_loop(runtime, service)
+
+        service.auto_switch_effective_enabled.assert_called_once_with()
+        service.evaluate_now.assert_not_awaited()
 
     async def test_loop_swallows_evaluate_exception_and_continues(self) -> None:
         runtime = self._make_runtime(auto_enabled=True)
         service = MagicMock()
+        service.auto_switch_effective_enabled = MagicMock(return_value=True)
         service.evaluate_now = AsyncMock(side_effect=RuntimeError("ai_api_hiccup"))
 
         sleep_calls = 0

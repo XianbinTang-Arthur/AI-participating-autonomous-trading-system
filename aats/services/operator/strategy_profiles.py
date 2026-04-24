@@ -142,6 +142,11 @@ class StrategyProfileControlService:
     def ai_config_snapshot(self) -> dict[str, Any]:
         return build_strategy_profile_ai_config_snapshot(self)
 
+    def auto_switch_effective_enabled(self) -> bool:
+        if not self.settings.strategy_profile_auto_control_enabled:
+            return False
+        return bool(self._activation_state().auto_switch_enabled)
+
     async def evaluate_now(self, *, allow_auto_activation: bool = True) -> dict[str, Any]:
         # 原本 evaluate_now 在 event loop 主线程上顺序跑：
         #   1) ensure_seed_profiles + repo.list_revisions
