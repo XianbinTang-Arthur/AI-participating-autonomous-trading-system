@@ -226,6 +226,17 @@ def create_database_runtime(database_url: str) -> DatabaseRuntime:
     # **安全网**，不替代 Python 侧慢查询治理（P2-2 SOW 会继续做）。
     # 60s = 比 _cached_ttl singleflight_wait(25s) × 2 长，比 gateway API
     # 合理响应上限（30s）×2 长，正常场景不会误杀。
+    existing_options = str(parsed_url.query.get("options") or "").strip()
+    idle_timeout_option = "-c idle_in_transaction_session_timeout=60000"
+    if "idle_in_transaction_session_timeout" in existing_options:
+        merged_options = existing_options
+    else:
+        merged_options = (
+            f"{existing_options} {idle_timeout_option}".strip()
+            if existing_options
+            else idle_timeout_option
+        )
+
     engine = create_engine(
         database_url,
         future=True,
@@ -234,7 +245,7 @@ def create_database_runtime(database_url: str) -> DatabaseRuntime:
         max_overflow=45,
         pool_timeout=30,
         connect_args={
-            "options": "-c idle_in_transaction_session_timeout=60000",
+            "options": merged_options,
         },
     )
     return DatabaseRuntime(
