@@ -18,7 +18,6 @@ Covers:
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import unittest
 from typing import Any
