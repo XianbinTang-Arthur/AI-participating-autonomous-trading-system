@@ -23,6 +23,7 @@ from aats.services.execution_engine.lifecycle_snapshot_refs import (
     snapshot_refs_from_payload,
     top_level_snapshot_ref_payload,
 )
+from aats.services.execution_engine.orderbook_snapshot_refs import capture_orderbook_snapshot_refs_for_event
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.base import ExecutionRepository
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
@@ -82,6 +83,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             lifecycle_market_context_refs_from_obj(merged),
             lifecycle_market_context_refs_from_payload(merged.submission_payload),
             lifecycle_market_context_refs_from_payload(existing_payload),
+        )
+        lifecycle_market_context_refs = capture_orderbook_snapshot_refs_for_event(
+            session,
+            symbol=merged.symbol,
+            event_time=self._order_state_event_time(merged),
+            existing_refs=lifecycle_market_context_refs,
         )
         lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         lifecycle_stage = order_state_lifecycle_stage(merged.status, exchange_order_id=merged.exchange_order_id)
@@ -168,6 +175,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
                 lifecycle_market_context_refs_from_obj(fill),
                 lifecycle_market_context_refs_from_payload(fill.model_dump(mode="python")),
             )
+            lifecycle_market_context_refs = capture_orderbook_snapshot_refs_for_event(
+                session,
+                symbol=fill.symbol,
+                event_time=self._fill_event_time(fill),
+                existing_refs=lifecycle_market_context_refs,
+            )
             lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
             self.execution_order_repo.create_order_in_session(
                 session,
@@ -195,6 +208,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         lifecycle_market_context_refs = choose_lifecycle_market_context_refs(
             lifecycle_market_context_refs_from_obj(fill),
             lifecycle_market_context_refs_from_payload(fill.model_dump(mode="python")),
+        )
+        lifecycle_market_context_refs = capture_orderbook_snapshot_refs_for_event(
+            session,
+            symbol=fill.symbol,
+            event_time=self._fill_event_time(fill),
+            existing_refs=lifecycle_market_context_refs,
         )
         lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         saved = self.execution_fill_repo.save_fill_in_session(
@@ -552,6 +571,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             lifecycle_market_context_refs_from_obj(last_fill),
             lifecycle_market_context_refs_from_payload(last_fill.model_dump(mode="python")),
         )
+        lifecycle_market_context_refs = capture_orderbook_snapshot_refs_for_event(
+            session,
+            symbol=last_fill.symbol,
+            event_time=self._fill_event_time(last_fill),
+            existing_refs=lifecycle_market_context_refs,
+        )
         lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         row.raw_payload = {
             **payload,
@@ -564,6 +589,19 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             ),
             "order_state": dump_payload_exact(order_state),
         }
+
+    @staticmethod
+    def _order_state_event_time(order_state: OrderState) -> datetime | None:
+        return (
+            order_state.last_exchange_update_ts
+            or order_state.last_update_ts
+            or order_state.submitted_ts
+            or order_state.created_at
+        )
+
+    @staticmethod
+    def _fill_event_time(fill: FillEvent) -> datetime | None:
+        return fill.exchange_timestamp or fill.ingestion_timestamp or fill.created_at
 
     @staticmethod
     def _hydrate_fill(row: dict) -> FillEvent:
