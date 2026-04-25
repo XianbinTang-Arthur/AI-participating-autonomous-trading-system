@@ -13,6 +13,7 @@ from aats.services.execution_engine.orderbook_snapshot_refs import (
     capture_orderbook_snapshot_refs_for_event,
     default_orderbook_snapshot_read_source,
     reset_default_orderbook_snapshot_read_source_for_tests,
+    resolve_orderbook_snapshot_ref_row,
     resolve_orderbook_market_context_db_url,
 )
 
@@ -93,6 +94,63 @@ class TestOrderbookSnapshotRefCapture(unittest.TestCase):
         with patch.dict("os.environ", {"AATS_MARKET_CONTEXT_DB_URL": "not-a-db-url"}, clear=True):
             self.assertIsNone(default_orderbook_snapshot_read_source())
         reset_default_orderbook_snapshot_read_source_for_tests()
+
+    def test_resolves_bbo_ref_row_with_stable_checksum(self) -> None:
+        ts = datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)
+        row = {
+            "symbol": "BTC-USDT-SWAP",
+            "ts": ts,
+            "source_ts": ts,
+            "bid_px": Decimal("77000.1000000000"),
+            "bid_sz": Decimal("0.1000"),
+            "ask_px": Decimal("77000.2000000000"),
+            "ask_sz": Decimal("0.2000"),
+            "ingest_run_id": "11111111-1111-1111-1111-111111111111",
+            "received_at": ts,
+        }
+        session = _FakeSession([row, dict(row)])
+        source = OrderbookSnapshotReadSource(
+            session_factory=lambda: session,  # type: ignore[arg-type]
+            source_name="aats_research",
+        )
+
+        first = resolve_orderbook_snapshot_ref_row(
+            "aats_research.bronze.market_orderbook_bbo:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z",
+            expected_symbol="BTC-USDT-SWAP",
+            market_context_source=source,
+            use_default_source=False,
+        )
+        second = resolve_orderbook_snapshot_ref_row(
+            "aats_research.bronze.market_orderbook_bbo:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z",
+            expected_symbol="BTC-USDT-SWAP",
+            market_context_source=source,
+            use_default_source=False,
+        )
+
+        self.assertEqual(first["row_lookup_status"], "row_resolved")
+        self.assertTrue(first["row_exists"])
+        self.assertTrue(first["content_checksum"].startswith("sha256:"))
+        self.assertEqual(first["content_checksum"], second["content_checksum"])
+        self.assertEqual(first["sequence_key"]["source_ts"], "2026-04-25T03:48:30.000000Z")
+
+    def test_ref_row_resolver_reports_missing_row_without_default_source(self) -> None:
+        session = _FakeSession([None])
+        source = OrderbookSnapshotReadSource(
+            session_factory=lambda: session,  # type: ignore[arg-type]
+            source_name="aats_research",
+        )
+
+        payload = resolve_orderbook_snapshot_ref_row(
+            "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z",
+            expected_symbol="BTC-USDT-SWAP",
+            market_context_source=source,
+            use_default_source=False,
+        )
+
+        self.assertEqual(payload["ts"], "2026-04-25T03:48:30.000000Z")
+        self.assertEqual(payload["row_lookup_status"], "row_missing")
+        self.assertFalse(payload["row_exists"])
+        self.assertIn("orderbook_row_missing", payload["missing_evidence"])
 
     def test_captures_pre_and_post_books5_refs(self) -> None:
         event_time = datetime(2026, 4, 25, 3, 48, 30, 500000, tzinfo=timezone.utc)

@@ -53,6 +53,12 @@ from aats.services.execution_engine.lifecycle_snapshot_refs import (
     SNAPSHOT_REF_KEYS,
     lifecycle_market_context_ref_payload,
 )
+from aats.services.execution_engine.orderbook_snapshot_refs import (
+    default_orderbook_snapshot_read_source,
+    parse_orderbook_ref_ts_for_query,
+    parse_orderbook_snapshot_ref,
+    resolve_orderbook_snapshot_ref_row,
+)
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.execution_engine.exit_intent_aggregator import exit_execution_review_items
 from aats.services.fill_ordering import fill_processing_sort_key
@@ -3226,68 +3232,21 @@ class OperatorQueryService:
 
     @staticmethod
     def _orderbook_snapshot_ref_payload(ref: Any) -> dict[str, Any]:
-        raw_ref = OperatorQueryService._nonempty_string(ref)
-        if raw_ref is None:
-            return {
-                "raw_ref": None,
-                "parse_status": "missing",
-                "source_name": None,
-                "table_name": None,
-                "symbol": None,
-                "ts": None,
-            }
+        return parse_orderbook_snapshot_ref(ref)
 
-        parts = raw_ref.split(":", 2)
-        if len(parts) != 3:
-            return {
-                "raw_ref": raw_ref,
-                "parse_status": "unparseable",
-                "source_name": None,
-                "table_name": None,
-                "symbol": None,
-                "ts": None,
-            }
+    def _orderbook_ref_row_truth_source(self) -> Any:
+        runtime = getattr(self, "runtime", None)
+        execution_repo = getattr(runtime, "execution_repo", None)
+        if execution_repo is not None and hasattr(execution_repo, "orderbook_snapshot_read_source"):
+            source = getattr(execution_repo, "orderbook_snapshot_read_source", None)
+            if source is not None:
+                return source
+        if runtime is not None and hasattr(runtime, "orderbook_snapshot_read_source"):
+            return getattr(runtime, "orderbook_snapshot_read_source", None)
+        return default_orderbook_snapshot_read_source()
 
-        raw_table, symbol, raw_ts = (part.strip() for part in parts)
-        table_name: str | None = None
-        source_name: str | None = None
-        for table_suffix in _ORDERBOOK_REF_TABLE_SUFFIXES:
-            if raw_table == table_suffix:
-                table_name = table_suffix
-                break
-            qualified_suffix = f".{table_suffix}"
-            if raw_table.endswith(qualified_suffix):
-                table_name = table_suffix
-                source_name = raw_table[: -len(qualified_suffix)] or None
-                break
-
-        try:
-            parsed_ts = parse_iso_datetime_utc(
-                raw_ts,
-                context="operator.truth_chain.orderbook_snapshot_ref",
-            )
-        except ValueError:
-            parsed_ts = None
-
-        parse_status = "parsed"
-        if table_name is None:
-            parse_status = "unsupported_table"
-        elif not symbol:
-            parse_status = "missing_symbol"
-        elif parsed_ts is None:
-            parse_status = "unparseable_ts"
-
-        return {
-            "raw_ref": raw_ref,
-            "parse_status": parse_status,
-            "source_name": source_name,
-            "table_name": table_name,
-            "symbol": symbol or None,
-            "ts": parsed_ts.isoformat().replace("+00:00", "Z") if parsed_ts is not None else None,
-        }
-
-    @staticmethod
     def _orderbook_ref_sequence_payload(
+        self,
         *,
         pre_ref: Any,
         post_ref: Any,
@@ -3298,6 +3257,13 @@ class OperatorQueryService:
         pre = OperatorQueryService._orderbook_snapshot_ref_payload(pre_ref)
         post = OperatorQueryService._orderbook_snapshot_ref_payload(post_ref)
         missing_evidence: list[str] = []
+        ordered_by = {
+            "snapshot_ref_ts": False,
+            "source_ts": None,
+            "client_ts": None,
+        }
+        source_delta_ms = None
+        client_delta_ms = None
 
         if missing_refs:
             missing_evidence.extend(str(item) for item in missing_refs)
@@ -3331,8 +3297,62 @@ class OperatorQueryService:
             )
             ordered = bool(pre_ts is not None and post_ts is not None and pre_ts <= post_ts)
             if ordered and pre_ts is not None and post_ts is not None:
+                ordered_by["snapshot_ref_ts"] = True
                 status = "snapshot_ref_ordered"
                 delta_ms = int((post_ts - pre_ts).total_seconds() * 1000)
+                source = self._orderbook_ref_row_truth_source()
+                pre = resolve_orderbook_snapshot_ref_row(
+                    pre_ref,
+                    expected_symbol=expected_symbol_text,
+                    market_context_source=source,
+                    use_default_source=False,
+                )
+                post = resolve_orderbook_snapshot_ref_row(
+                    post_ref,
+                    expected_symbol=expected_symbol_text,
+                    market_context_source=source,
+                    use_default_source=False,
+                )
+                row_missing_evidence = [
+                    f"{side}_{item}"
+                    for side, payload in (("pre", pre), ("post", post))
+                    for item in payload.get("missing_evidence", [])
+                ]
+                if row_missing_evidence:
+                    missing_evidence.extend(row_missing_evidence)
+                    missing_evidence.extend(_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE)
+                    status = "snapshot_ref_sequence_validated_row_truth_missing"
+                else:
+                    pre_client_ts = parse_orderbook_ref_ts_for_query(pre.get("ts"))
+                    post_client_ts = parse_orderbook_ref_ts_for_query(post.get("ts"))
+                    pre_source_ts = parse_orderbook_ref_ts_for_query(pre.get("source_ts"))
+                    post_source_ts = parse_orderbook_ref_ts_for_query(post.get("source_ts"))
+                    client_ordered = bool(
+                        pre_client_ts is not None
+                        and post_client_ts is not None
+                        and pre_client_ts <= post_client_ts
+                    )
+                    source_ordered = bool(
+                        pre_source_ts is not None
+                        and post_source_ts is not None
+                        and pre_source_ts <= post_source_ts
+                    )
+                    ordered_by["client_ts"] = client_ordered
+                    ordered_by["source_ts"] = source_ordered
+                    if client_ordered and source_ordered:
+                        status = "local_snapshot_row_sequence_validated_diff_payload_missing"
+                        if pre_source_ts is not None and post_source_ts is not None:
+                            source_delta_ms = int((post_source_ts - pre_source_ts).total_seconds() * 1000)
+                        if pre_client_ts is not None and post_client_ts is not None:
+                            client_delta_ms = int((post_client_ts - pre_client_ts).total_seconds() * 1000)
+                        missing_evidence.extend(_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE)
+                    else:
+                        if not client_ordered:
+                            missing_evidence.append("client_ts_order_invalid")
+                        if not source_ordered:
+                            missing_evidence.append("source_ts_order_invalid")
+                        status = "invalid_local_orderbook_sequence"
+                        ordered = False
             else:
                 missing_evidence.append("pre_ref_after_post_ref")
                 status = "invalid_ref_order"
@@ -3346,6 +3366,9 @@ class OperatorQueryService:
             "pre": pre,
             "post": post,
             "delta_ms": delta_ms,
+            "source_delta_ms": source_delta_ms,
+            "client_delta_ms": client_delta_ms,
+            "ordered_by": ordered_by,
         }
 
     def _decision_execution_science_payload(
@@ -3363,6 +3386,9 @@ class OperatorQueryService:
         valid_sequence_stage_count = 0
         missing_sequence_stage_count = 0
         invalid_sequence_stage_count = 0
+        local_row_sequence_stage_count = 0
+        row_truth_missing_stage_count = 0
+        invalid_local_sequence_stage_count = 0
 
         for record_kind, payloads in (("order", order_payloads), ("fill", fill_payloads)):
             for payload in payloads:
@@ -3396,10 +3422,21 @@ class OperatorQueryService:
                         expected_symbol=payload.get("symbol"),
                         missing_refs=missing_refs,
                     )
-                    if ref_sequence["status"] == "snapshot_ref_ordered":
+                    if ref_sequence["status"] in {
+                        "snapshot_ref_ordered",
+                        "snapshot_ref_sequence_validated_row_truth_missing",
+                        "local_snapshot_row_sequence_validated_diff_payload_missing",
+                    }:
                         valid_sequence_stage_count += 1
+                    if ref_sequence["status"] == "local_snapshot_row_sequence_validated_diff_payload_missing":
+                        local_row_sequence_stage_count += 1
+                    elif ref_sequence["status"] == "snapshot_ref_sequence_validated_row_truth_missing":
+                        row_truth_missing_stage_count += 1
                     elif ref_sequence["status"] == "missing_refs":
                         missing_sequence_stage_count += 1
+                    elif ref_sequence["status"] == "invalid_local_orderbook_sequence":
+                        invalid_sequence_stage_count += 1
+                        invalid_local_sequence_stage_count += 1
                     else:
                         invalid_sequence_stage_count += 1
                     sequence_evidence.append(
@@ -3446,15 +3483,32 @@ class OperatorQueryService:
         elif not sequence_evidence:
             sequence_validation_status = "absent_no_lifecycle_record"
             sequence_missing_evidence = ["lifecycle_snapshot_refs_absent"]
+        elif invalid_local_sequence_stage_count:
+            sequence_validation_status = "invalid_local_orderbook_sequence"
+            sequence_missing_evidence = ["invalid_local_orderbook_sequence"]
         elif invalid_sequence_stage_count:
             sequence_validation_status = "invalid_snapshot_ref_sequence"
             sequence_missing_evidence = ["invalid_snapshot_ref_sequence"]
         elif valid_sequence_stage_count and missing_sequence_stage_count:
-            sequence_validation_status = "partial_snapshot_ref_sequence_validated_diff_missing"
+            if local_row_sequence_stage_count:
+                sequence_validation_status = "partial_local_snapshot_row_sequence_validated_diff_payload_missing"
+            elif row_truth_missing_stage_count:
+                sequence_validation_status = "partial_snapshot_ref_sequence_validated_row_truth_missing"
+            else:
+                sequence_validation_status = "partial_snapshot_ref_sequence_validated_diff_missing"
             sequence_missing_evidence = [
                 "missing_orderbook_refs",
                 *_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE,
             ]
+        elif row_truth_missing_stage_count:
+            sequence_validation_status = "snapshot_ref_sequence_validated_row_truth_missing"
+            sequence_missing_evidence = [
+                "orderbook_row_truth_missing",
+                *_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE,
+            ]
+        elif local_row_sequence_stage_count:
+            sequence_validation_status = "local_snapshot_row_sequence_validated_diff_payload_missing"
+            sequence_missing_evidence = list(_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE)
         elif valid_sequence_stage_count:
             sequence_validation_status = "snapshot_ref_sequence_validated_diff_missing"
             sequence_missing_evidence = list(_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE)
@@ -3483,6 +3537,9 @@ class OperatorQueryService:
                 "valid_snapshot_ref_sequence_stage_count": valid_sequence_stage_count,
                 "missing_snapshot_ref_sequence_stage_count": missing_sequence_stage_count,
                 "invalid_snapshot_ref_sequence_stage_count": invalid_sequence_stage_count,
+                "local_orderbook_row_sequence_stage_count": local_row_sequence_stage_count,
+                "row_truth_missing_stage_count": row_truth_missing_stage_count,
+                "invalid_local_orderbook_sequence_stage_count": invalid_local_sequence_stage_count,
                 "stage_evidence": sequence_evidence[:50],
             },
         }
