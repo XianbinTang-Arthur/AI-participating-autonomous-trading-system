@@ -8036,6 +8036,25 @@ const noTradeClassification = {
   book_runtime_states: [
     { leg: 'short', state: 'inactive', score: 0.15, entry_threshold: 0.25, expected_net_edge_bps: -3.2 },
   ],
+  pre_order_feasibility: {
+    status: 'blocked',
+    evidence_available: true,
+    blocked_dimensions: ['signal_threshold', 'liquidity'],
+    dimensions: {
+      signal_threshold: {
+        status: 'blocked',
+        evidence_available: true,
+        legs: [{ leg: 'short', status: 'blocked', score: 0.15, entry_threshold: 0.25 }],
+      },
+      liquidity: {
+        status: 'observed',
+        evidence_available: true,
+        legs: [{ leg: 'short', status: 'observed', liquidity_quality_score: 0.48, execution_health_state: 'ok' }],
+      },
+      policy_gate: { status: 'passed', evidence_available: true, reason_codes: [] },
+      risk_gate: { status: 'passed', evidence_available: true, reason_codes: [] },
+    },
+  },
 };
 
 const sections = renderStrategySections({
@@ -8083,11 +8102,16 @@ const sections = renderStrategySections({
   strategyRuntime: {},
 });
 
-const html = sections.strategyHero + sections.strategyDecisionWorkbench + sections.strategyHistory;
+const workbenchHtml = sections.strategyDecisionWorkbench;
+const historyHtml = sections.strategyHistory;
+const html = sections.strategyHero + workbenchHtml + historyHtml;
 console.log(JSON.stringify({
   heroShowsNoTradePill: html.includes('无交易：双书信号未达阈值'),
   workbenchShowsNoTradeRow: html.includes('无交易分类') && html.includes('范围 策略信号或净边际门禁'),
+  workbenchShowsPreOrderFeasibility: workbenchHtml.includes('执行可行性') && workbenchHtml.includes('阻断维度：信号阈值 / 盘口/流动性') && workbenchHtml.includes('信号阈值') && workbenchHtml.includes('盘口/流动性'),
   historyShowsClassification: html.includes('双书信号未达阈值') && !html.includes('AI 超时'),
+  historyShowsPreOrderFeasibility: historyHtml.includes('执行可行性') && historyHtml.includes('信号阈值') && historyHtml.includes('盘口/流动性'),
+  historyNarrativeIncludesFeasibility: historyHtml.includes('双书信号未达阈值 | 执行可行性：阻断'),
   narrativeUsesClassifier: html.includes('独立双书的 long/short 账本分数没有达到开仓阈值'),
 }));
 """
@@ -8096,7 +8120,10 @@ console.log(JSON.stringify({
         stdout = result.stdout or ""
         self.assertIn('"heroShowsNoTradePill":true', stdout)
         self.assertIn('"workbenchShowsNoTradeRow":true', stdout)
+        self.assertIn('"workbenchShowsPreOrderFeasibility":true', stdout)
         self.assertIn('"historyShowsClassification":true', stdout)
+        self.assertIn('"historyShowsPreOrderFeasibility":true', stdout)
+        self.assertIn('"historyNarrativeIncludesFeasibility":true', stdout)
         self.assertIn('"narrativeUsesClassifier":true', stdout)
 
     def test_decision_drawer_surfaces_book_runtime_state_summary(self) -> None:

@@ -16,10 +16,13 @@ import { decisionTableHeaders, inferTradeScene } from "../trade-display.js";
 import {
   extractNoTradeClassification,
   hasNoTradeClassification,
+  hasPreOrderFeasibility,
   noTradeClassificationCopy,
   noTradeClassificationLabel,
   noTradeClassificationMeta,
   noTradeClassificationTone,
+  preOrderFeasibilityRows,
+  preOrderFeasibilitySummary,
 } from "../no-trade-display.js";
 
 export function renderStrategySections(data) {
@@ -206,6 +209,7 @@ export function renderStrategySections(data) {
           hasNoTradeClassification(latestNoTradeClassification)
             ? ["无交易分类", noTradeClassificationLabel(latestNoTradeClassification), noTradeClassificationMeta(latestNoTradeClassification)]
             : null,
+          ...strategyPreOrderFeasibilityRows(latestNoTradeClassification),
           ["执行约束", localizeList(target.guardrail_flags, "当前没有额外执行限制"), targetExpectancySummary(targetExpectancy)],
           ["当前保护规则", localizeList(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
           ["最近执行质量", `${formatNumber(strategyHealth.recent_closed_trade_count, 0)} 笔闭合样本 | 胜率 ${formatRatio(strategyHealth.recent_win_rate)}`, `费用拖累 ${formatRatio(strategyHealth.recent_fee_drag_ratio)} | 来回交易占比 ${formatRatio(strategyHealth.recent_churn_ratio)}`],
@@ -606,6 +610,7 @@ export function renderStrategySections(data) {
             hasNoTradeClassification(extractNoTradeClassification(item))
               ? { label: "无交易分类", value: noTradeClassificationLabel(extractNoTradeClassification(item)), meta: noTradeClassificationMeta(extractNoTradeClassification(item)) }
               : null,
+            ...strategyPreOrderFeasibilityFields(extractNoTradeClassification(item)),
           ].filter(Boolean),
           details: [
             { label: "标的", value: item.symbol || "标的待确认", meta: item.timeframe || "周期待确认" },
@@ -2470,13 +2475,32 @@ function strategyNarrative(detail) {
 function recentDecisionNarrative(item, scene) {
   const noTradeClassification = extractNoTradeClassification(item);
   if (hasNoTradeClassification(noTradeClassification) && noTradeClassification.is_no_trade !== false) {
-    return noTradeClassificationLabel(noTradeClassification);
+    const feasibility = strategyPreOrderFeasibilityHistoryMeta(noTradeClassification);
+    return feasibility ? `${noTradeClassificationLabel(noTradeClassification)} | ${feasibility}` : noTradeClassificationLabel(noTradeClassification);
   }
   const delta = item.delta_position_qty ?? item.target_delta_qty;
   if (delta === null || delta === undefined) {
     return scene === "derivatives" ? "没有新的净仓位调整" : "没有新的持仓调整";
   }
   return `${scene === "derivatives" ? "净仓位变化" : "持仓变化"} ${formatSigned(delta)} | ${item.decision_id || "当前没有编号"}`;
+}
+
+function strategyPreOrderFeasibilityRows(noTradeClassification) {
+  if (!hasPreOrderFeasibility(noTradeClassification)) return [];
+  return preOrderFeasibilityRows(noTradeClassification.pre_order_feasibility);
+}
+
+function strategyPreOrderFeasibilityFields(noTradeClassification) {
+  return strategyPreOrderFeasibilityRows(noTradeClassification).map(([label, value, meta = ""]) => ({
+    label,
+    value,
+    meta,
+  }));
+}
+
+function strategyPreOrderFeasibilityHistoryMeta(noTradeClassification) {
+  if (!hasPreOrderFeasibility(noTradeClassification)) return "";
+  return preOrderFeasibilitySummary(noTradeClassification.pre_order_feasibility);
 }
 
 function readableRegime(detail) {

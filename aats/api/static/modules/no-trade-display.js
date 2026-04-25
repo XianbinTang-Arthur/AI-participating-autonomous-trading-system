@@ -152,6 +152,16 @@ export function noTradeClassificationRows(payload) {
   ];
 }
 
+export function hasPreOrderFeasibility(payload) {
+  const feasibility = payload?.pre_order_feasibility;
+  return Boolean(feasibility && typeof feasibility === "object");
+}
+
+export function preOrderFeasibilitySummary(feasibility) {
+  const [label, value, meta = ""] = preOrderFeasibilityRows(feasibility)[0] || ["执行可行性", "证据缺失", ""];
+  return `${label}：${value}${meta ? ` | ${meta}` : ""}`;
+}
+
 export function preOrderFeasibilityRows(feasibility) {
   if (!feasibility || typeof feasibility !== "object") {
     return [["执行可行性", "证据缺失", "当前无交易分类没有携带 pre-order 可行性证据。"]];
