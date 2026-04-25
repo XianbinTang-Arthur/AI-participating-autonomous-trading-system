@@ -122,7 +122,8 @@ def test_decision_truth_chain_links_repo_order_fill_and_lifecycle_refs() -> None
             "pre_event_orderbook_snapshot_ref",
         ]
     }
-    assert payload["execution_science"]["sequence_validation"]["status"] == "missing_not_implemented"
+    assert payload["execution_science"]["sequence_validation"]["status"] == "missing_orderbook_refs"
+    assert payload["execution_science"]["sequence_validation"]["missing_snapshot_ref_sequence_stage_count"] == 1
 
 
 def test_decision_truth_chain_reports_linked_orderbook_context_by_stage() -> None:
@@ -142,8 +143,12 @@ def test_decision_truth_chain_reports_linked_orderbook_context_by_stage() -> Non
                         "portfolio_snapshot_ref": "port-1",
                         "health_snapshot_ref": "health-1",
                         "market_context_snapshot_refs": {
-                            "pre_event_orderbook_snapshot_ref": "book-before-submit",
-                            "post_event_orderbook_snapshot_ref": "book-after-submit",
+                            "pre_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z"
+                            ),
+                            "post_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z"
+                            ),
                         },
                     }
                 },
@@ -171,11 +176,61 @@ def test_decision_truth_chain_reports_linked_orderbook_context_by_stage() -> Non
             "stage": "submit",
             "status": "linked",
             "missing_market_context_refs": [],
+            "orderbook_ref_sequence_status": "snapshot_ref_ordered",
         }
     ]
-    assert payload["execution_science"]["sequence_validation"]["missing_evidence"] == [
-        "local_orderbook_diff_sequence_not_exposed"
+    sequence_validation = payload["execution_science"]["sequence_validation"]
+    assert sequence_validation["status"] == "snapshot_ref_sequence_validated_diff_missing"
+    assert sequence_validation["valid_snapshot_ref_sequence_stage_count"] == 1
+    assert sequence_validation["stage_evidence"][0]["delta_ms"] == 1000
+    assert sequence_validation["missing_evidence"] == [
+        "local_orderbook_diff_payload_not_exposed",
+        "local_orderbook_diff_checksum_not_exposed",
     ]
+
+
+def test_decision_truth_chain_marks_invalid_orderbook_ref_sequence() -> None:
+    query = _service(
+        order_states=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "status": "SUBMITTED",
+                "lifecycle_snapshot_refs": {
+                    "submit": {
+                        "market_snapshot_ref": "mkt-1",
+                        "feature_snapshot_ref": "feat-1",
+                        "portfolio_snapshot_ref": "port-1",
+                        "health_snapshot_ref": "health-1",
+                        "market_context_snapshot_refs": {
+                            "pre_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z"
+                            ),
+                            "post_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z"
+                            ),
+                        },
+                    }
+                },
+            }
+        ],
+    )
+
+    payload = query._decision_truth_chain_payload(
+        decision_id="decision-1",
+        audit=_audit(order_intent_refs=["intent-1"]),
+        order_updates=[],
+        fills=[],
+    )
+
+    sequence_validation = payload["execution_science"]["sequence_validation"]
+    assert sequence_validation["status"] == "invalid_snapshot_ref_sequence"
+    assert sequence_validation["invalid_snapshot_ref_sequence_stage_count"] == 1
+    assert sequence_validation["stage_evidence"][0]["status"] == "invalid_ref_order"
+    assert "pre_ref_after_post_ref" in sequence_validation["stage_evidence"][0]["missing_evidence"]
 
 
 def test_decision_truth_chain_distinguishes_clean_no_execution_from_missing_links() -> None:

@@ -114,6 +114,15 @@ from aats.services.strategy_execution_guard_filters import (
 )
 from aats.services.strategy_execution_health import compute_strategy_execution_health
 
+_ORDERBOOK_REF_TABLE_SUFFIXES = (
+    "bronze.market_orderbook_books5",
+    "bronze.market_orderbook_bbo",
+)
+_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE = (
+    "local_orderbook_diff_payload_not_exposed",
+    "local_orderbook_diff_checksum_not_exposed",
+)
+
 if TYPE_CHECKING:
     from aats.bootstrap.config import ApplicationRuntime
 
@@ -3215,6 +3224,130 @@ class OperatorQueryService:
             return self._nonempty_string(payload.get("fill_id")) or self._nonempty_string(payload.get("client_order_id"))
         return self._nonempty_string(payload.get("client_order_id"))
 
+    @staticmethod
+    def _orderbook_snapshot_ref_payload(ref: Any) -> dict[str, Any]:
+        raw_ref = OperatorQueryService._nonempty_string(ref)
+        if raw_ref is None:
+            return {
+                "raw_ref": None,
+                "parse_status": "missing",
+                "source_name": None,
+                "table_name": None,
+                "symbol": None,
+                "ts": None,
+            }
+
+        parts = raw_ref.split(":", 2)
+        if len(parts) != 3:
+            return {
+                "raw_ref": raw_ref,
+                "parse_status": "unparseable",
+                "source_name": None,
+                "table_name": None,
+                "symbol": None,
+                "ts": None,
+            }
+
+        raw_table, symbol, raw_ts = (part.strip() for part in parts)
+        table_name: str | None = None
+        source_name: str | None = None
+        for table_suffix in _ORDERBOOK_REF_TABLE_SUFFIXES:
+            if raw_table == table_suffix:
+                table_name = table_suffix
+                break
+            qualified_suffix = f".{table_suffix}"
+            if raw_table.endswith(qualified_suffix):
+                table_name = table_suffix
+                source_name = raw_table[: -len(qualified_suffix)] or None
+                break
+
+        try:
+            parsed_ts = parse_iso_datetime_utc(
+                raw_ts,
+                context="operator.truth_chain.orderbook_snapshot_ref",
+            )
+        except ValueError:
+            parsed_ts = None
+
+        parse_status = "parsed"
+        if table_name is None:
+            parse_status = "unsupported_table"
+        elif not symbol:
+            parse_status = "missing_symbol"
+        elif parsed_ts is None:
+            parse_status = "unparseable_ts"
+
+        return {
+            "raw_ref": raw_ref,
+            "parse_status": parse_status,
+            "source_name": source_name,
+            "table_name": table_name,
+            "symbol": symbol or None,
+            "ts": parsed_ts.isoformat().replace("+00:00", "Z") if parsed_ts is not None else None,
+        }
+
+    @staticmethod
+    def _orderbook_ref_sequence_payload(
+        *,
+        pre_ref: Any,
+        post_ref: Any,
+        expected_symbol: Any,
+        missing_refs: list[str],
+    ) -> dict[str, Any]:
+        expected_symbol_text = OperatorQueryService._nonempty_string(expected_symbol)
+        pre = OperatorQueryService._orderbook_snapshot_ref_payload(pre_ref)
+        post = OperatorQueryService._orderbook_snapshot_ref_payload(post_ref)
+        missing_evidence: list[str] = []
+
+        if missing_refs:
+            missing_evidence.extend(str(item) for item in missing_refs)
+            status = "missing_refs"
+            ordered = False
+            delta_ms = None
+        elif pre["parse_status"] != "parsed" or post["parse_status"] != "parsed":
+            missing_evidence.extend(
+                f"{side}_ref_{payload['parse_status']}"
+                for side, payload in (("pre", pre), ("post", post))
+                if payload["parse_status"] != "parsed"
+            )
+            status = "unparseable_ref"
+            ordered = False
+            delta_ms = None
+        elif expected_symbol_text and (
+            pre.get("symbol") != expected_symbol_text or post.get("symbol") != expected_symbol_text
+        ):
+            missing_evidence.append("snapshot_ref_symbol_mismatch")
+            status = "symbol_mismatch"
+            ordered = False
+            delta_ms = None
+        else:
+            pre_ts = parse_iso_datetime_utc(
+                pre["ts"],
+                context="operator.truth_chain.orderbook_snapshot_ref_sequence.pre",
+            )
+            post_ts = parse_iso_datetime_utc(
+                post["ts"],
+                context="operator.truth_chain.orderbook_snapshot_ref_sequence.post",
+            )
+            ordered = bool(pre_ts is not None and post_ts is not None and pre_ts <= post_ts)
+            if ordered and pre_ts is not None and post_ts is not None:
+                status = "snapshot_ref_ordered"
+                delta_ms = int((post_ts - pre_ts).total_seconds() * 1000)
+            else:
+                missing_evidence.append("pre_ref_after_post_ref")
+                status = "invalid_ref_order"
+                delta_ms = None
+
+        return {
+            "status": status,
+            "complete": status == "snapshot_ref_ordered",
+            "ordered": ordered,
+            "missing_evidence": missing_evidence,
+            "pre": pre,
+            "post": post,
+            "delta_ms": delta_ms,
+        }
+
     def _decision_execution_science_payload(
         self,
         *,
@@ -3226,6 +3359,10 @@ class OperatorQueryService:
         missing_by_stage: dict[str, list[str]] = {}
         complete_stage_count = 0
         incomplete_stage_count = 0
+        sequence_evidence: list[dict[str, Any]] = []
+        valid_sequence_stage_count = 0
+        missing_sequence_stage_count = 0
+        invalid_sequence_stage_count = 0
 
         for record_kind, payloads in (("order", order_payloads), ("fill", fill_payloads)):
             for payload in payloads:
@@ -3247,6 +3384,33 @@ class OperatorQueryService:
                         missing_by_stage[stage_key] = sorted(combined)
                     else:
                         complete_stage_count += 1
+                    stage_payload = lifecycle.get(stage_key)
+                    stage_payload = stage_payload if isinstance(stage_payload, dict) else {}
+                    raw_market_context = stage_payload.get("market_context_snapshot_refs")
+                    market_context_payload = (
+                        raw_market_context if isinstance(raw_market_context, dict) else stage_payload
+                    )
+                    ref_sequence = self._orderbook_ref_sequence_payload(
+                        pre_ref=market_context_payload.get("pre_event_orderbook_snapshot_ref"),
+                        post_ref=market_context_payload.get("post_event_orderbook_snapshot_ref"),
+                        expected_symbol=payload.get("symbol"),
+                        missing_refs=missing_refs,
+                    )
+                    if ref_sequence["status"] == "snapshot_ref_ordered":
+                        valid_sequence_stage_count += 1
+                    elif ref_sequence["status"] == "missing_refs":
+                        missing_sequence_stage_count += 1
+                    else:
+                        invalid_sequence_stage_count += 1
+                    sequence_evidence.append(
+                        {
+                            "record_kind": record_kind,
+                            "record_id": record_id,
+                            "client_order_id": self._nonempty_string(payload.get("client_order_id")),
+                            "stage": stage_key,
+                            **ref_sequence,
+                        }
+                    )
                     stage_evidence.append(
                         {
                             "record_kind": record_kind,
@@ -3255,6 +3419,7 @@ class OperatorQueryService:
                             "stage": stage_key,
                             "status": stage_status,
                             "missing_market_context_refs": missing_refs,
+                            "orderbook_ref_sequence_status": ref_sequence["status"],
                         }
                     )
 
@@ -3275,16 +3440,27 @@ class OperatorQueryService:
         if orderbook_status in {"absent_no_lifecycle_record", "missing_after_lifecycle_record", "partial"}:
             orderbook_missing_evidence.append(orderbook_status)
 
-        sequence_validation_status = (
-            "absent_no_execution_record"
-            if execution_record_count == 0
-            else "missing_not_implemented"
-        )
-        sequence_missing_evidence = (
-            []
-            if execution_record_count == 0
-            else ["local_orderbook_diff_sequence_not_exposed"]
-        )
+        if execution_record_count == 0:
+            sequence_validation_status = "absent_no_execution_record"
+            sequence_missing_evidence: list[str] = []
+        elif not sequence_evidence:
+            sequence_validation_status = "absent_no_lifecycle_record"
+            sequence_missing_evidence = ["lifecycle_snapshot_refs_absent"]
+        elif invalid_sequence_stage_count:
+            sequence_validation_status = "invalid_snapshot_ref_sequence"
+            sequence_missing_evidence = ["invalid_snapshot_ref_sequence"]
+        elif valid_sequence_stage_count and missing_sequence_stage_count:
+            sequence_validation_status = "partial_snapshot_ref_sequence_validated_diff_missing"
+            sequence_missing_evidence = [
+                "missing_orderbook_refs",
+                *_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE,
+            ]
+        elif valid_sequence_stage_count:
+            sequence_validation_status = "snapshot_ref_sequence_validated_diff_missing"
+            sequence_missing_evidence = list(_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE)
+        else:
+            sequence_validation_status = "missing_orderbook_refs"
+            sequence_missing_evidence = ["missing_orderbook_refs"]
 
         return {
             "complete": orderbook_status == "linked" and not sequence_missing_evidence,
@@ -3303,6 +3479,11 @@ class OperatorQueryService:
                 "status": sequence_validation_status,
                 "complete": False,
                 "missing_evidence": sequence_missing_evidence,
+                "stage_count": len(sequence_evidence),
+                "valid_snapshot_ref_sequence_stage_count": valid_sequence_stage_count,
+                "missing_snapshot_ref_sequence_stage_count": missing_sequence_stage_count,
+                "invalid_snapshot_ref_sequence_stage_count": invalid_sequence_stage_count,
+                "stage_evidence": sequence_evidence[:50],
             },
         }
 
