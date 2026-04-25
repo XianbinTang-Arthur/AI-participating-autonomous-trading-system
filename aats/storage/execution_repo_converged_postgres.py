@@ -264,6 +264,23 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         states.sort(key=lambda item: (item.last_update_ts or item.created_at, item.client_order_id), reverse=True)
         return states[:limit]
 
+    def order_states_for_decision(self, decision_id: str) -> list[OrderState]:
+        normalized = str(decision_id or "").strip()
+        if not normalized:
+            return []
+        query = (
+            select(ExecutionOrderModel)
+            .where(ExecutionOrderModel.decision_id == normalized)
+            .order_by(
+                ExecutionOrderModel.updated_at.desc(),
+                ExecutionOrderModel.created_at.desc(),
+                ExecutionOrderModel.order_id.desc(),
+            )
+        )
+        with self.session_factory() as session:
+            rows = session.execute(query).scalars().all()
+        return [self._hydrate_order_state(_order_model_to_dict(row)) for row in rows]
+
     def open_order_states(self) -> list[OrderState]:
         return [self._hydrate_order_state(row) for row in self.execution_order_repo.open_orders()]
 

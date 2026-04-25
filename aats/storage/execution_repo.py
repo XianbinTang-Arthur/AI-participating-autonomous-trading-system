@@ -109,6 +109,15 @@ class InMemoryExecutionRepository:
             rows = [row for row in rows if row.status.upper() in allowed]
         return rows[:limit]
 
+    def order_states_for_decision(self, decision_id: str) -> list[OrderState]:
+        normalized = str(decision_id or "").strip()
+        if not normalized:
+            return []
+        return sorted(
+            [state for state in self.order_states() if state.decision_id == normalized],
+            key=lambda item: (item.last_update_ts or item.created_at, item.client_order_id),
+        )
+
     def open_order_states(self) -> list[OrderState]:
         return [state for state in self.order_states() if self._state_machine.is_open(state.status)]
 

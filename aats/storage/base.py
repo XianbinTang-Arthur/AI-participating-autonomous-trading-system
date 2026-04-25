@@ -208,6 +208,10 @@ class ExecutionRepository(Protocol):
     ) -> list[OrderState]:
         ...
 
+    def order_states_for_decision(self, decision_id: str) -> list[OrderState]:
+        """Decision-side filter for order truth-chain lookups."""
+        ...
+
     def open_order_states(self) -> list[OrderState]:
         ...
 

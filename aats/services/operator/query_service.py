@@ -3111,6 +3111,254 @@ class OperatorQueryService:
             "decision_outcome": decision_outcome,
         }
 
+    @staticmethod
+    def _nonempty_string(value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
+
+    @classmethod
+    def _unique_nonempty_strings(cls, values: list[Any]) -> list[str]:
+        unique: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            normalized = cls._nonempty_string(value)
+            if normalized is None or normalized in seen:
+                continue
+            unique.append(normalized)
+            seen.add(normalized)
+        return unique
+
+    @staticmethod
+    def _record_payload_dict(record: Any) -> dict[str, Any]:
+        if isinstance(record, dict):
+            return dict(record)
+        dump = getattr(record, "model_dump", None)
+        if callable(dump):
+            return dump(mode="json")
+        return dict(getattr(record, "__dict__", {}) or {})
+
+    def _record_matches_state_scope(self, payload: dict[str, Any]) -> bool:
+        symbol = self._nonempty_string(payload.get("symbol"))
+        if not self.state_scope.symbol_allowed(symbol):
+            return False
+        product_type = payload.get("product_type")
+        margin_mode = payload.get("margin_mode")
+        if product_type is not None and product_type != self.state_scope.product_type:
+            return False
+        if margin_mode is not None and margin_mode != self.state_scope.margin_mode:
+            return False
+        return True
+
+    def _decision_order_payloads_from_repo(self, decision_id: str) -> tuple[list[dict[str, Any]], str | None]:
+        runtime = getattr(self, "runtime", None)
+        execution_repo = getattr(runtime, "execution_repo", None)
+        if execution_repo is None:
+            return [], "execution_repo_unavailable"
+        try:
+            order_states_for_decision = getattr(execution_repo, "order_states_for_decision", None)
+            if callable(order_states_for_decision):
+                rows = order_states_for_decision(decision_id)
+            else:
+                rows = order_states_for_scope(execution_repo, self.state_scope)
+        except Exception as exc:
+            return [], f"order_lookup_failed:{type(exc).__name__}"
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._record_payload_dict(row)
+            if self._nonempty_string(payload.get("decision_id")) != decision_id:
+                continue
+            if not self._record_matches_state_scope(payload):
+                continue
+            payloads.append(payload)
+        return payloads, None
+
+    def _decision_fill_payloads_from_repo(self, decision_id: str) -> tuple[list[dict[str, Any]], str | None]:
+        runtime = getattr(self, "runtime", None)
+        execution_repo = getattr(runtime, "execution_repo", None)
+        if execution_repo is None:
+            return [], "execution_repo_unavailable"
+        try:
+            fills_for_decisions = getattr(execution_repo, "fills_for_decisions", None)
+            if callable(fills_for_decisions):
+                rows = fills_for_decisions([decision_id])
+            else:
+                rows = fills_for_scope(execution_repo, self.state_scope)
+        except Exception as exc:
+            return [], f"fill_lookup_failed:{type(exc).__name__}"
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self._record_payload_dict(row)
+            if self._nonempty_string(payload.get("decision_id")) != decision_id:
+                continue
+            if not self._record_matches_state_scope(payload):
+                continue
+            payloads.append(payload)
+        return payloads, None
+
+    def _truth_chain_lifecycle_payload(self, payload: dict[str, Any]) -> dict[str, Any] | None:
+        raw_payload = payload.get("raw_payload") if isinstance(payload.get("raw_payload"), dict) else {}
+        order_state_nested = raw_payload.get("order_state") if isinstance(raw_payload.get("order_state"), dict) else {}
+        fill_event_nested = raw_payload.get("fill_event") if isinstance(raw_payload.get("fill_event"), dict) else {}
+        intent_nested = raw_payload.get("intent") if isinstance(raw_payload.get("intent"), dict) else {}
+        return self._lifecycle_snapshot_refs_payload(
+            payload,
+            raw_payload,
+            order_state_nested,
+            fill_event_nested,
+            intent_nested,
+        )
+
+    def _decision_truth_chain_payload(
+        self,
+        *,
+        decision_id: str,
+        audit: Any | None,
+        order_updates: list[dict[str, Any]] | None = None,
+        fills: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        audit_order_updates = [dict(item) for item in (order_updates or []) if isinstance(item, dict)]
+        audit_fills = [dict(item) for item in (fills or []) if isinstance(item, dict)]
+        repo_order_payloads, order_lookup_issue = self._decision_order_payloads_from_repo(decision_id)
+        repo_fill_payloads, fill_lookup_issue = self._decision_fill_payloads_from_repo(decision_id)
+
+        order_payloads = audit_order_updates + repo_order_payloads
+        fill_payloads = audit_fills + repo_fill_payloads
+        client_order_ids = self._unique_nonempty_strings(
+            [payload.get("client_order_id") for payload in order_payloads]
+            + [payload.get("client_order_id") for payload in fill_payloads]
+        )
+        fill_ids = self._unique_nonempty_strings([payload.get("fill_id") for payload in fill_payloads])
+        order_statuses = self._unique_nonempty_strings([payload.get("status") for payload in order_payloads])
+        filled_order_statuses = {"FILLED", "PARTIALLY_FILLED"}
+        has_filled_order = any(status.upper() in filled_order_statuses for status in order_statuses)
+
+        order_intent_ref_count = 0 if audit is None else len(getattr(audit, "order_intent_refs", []) or [])
+        audit_order_ref_count = 0 if audit is None else len(getattr(audit, "order_state_refs", []) or [])
+        audit_fill_ref_count = 0 if audit is None else len(getattr(audit, "fill_event_refs", []) or [])
+        reconciliation_ref_count = 0 if audit is None else len(getattr(audit, "reconciliation_refs", []) or [])
+        order_total = len(client_order_ids)
+        fill_total = len(fill_ids)
+
+        if order_lookup_issue is not None:
+            order_status = "unknown_lookup_failed"
+        elif order_total:
+            order_status = "linked"
+        elif order_intent_ref_count:
+            order_status = "missing_after_order_intent"
+        else:
+            order_status = "absent_no_order_intent"
+
+        if fill_lookup_issue is not None:
+            fill_status = "unknown_lookup_failed"
+        elif fill_total:
+            fill_status = "linked"
+        elif has_filled_order:
+            fill_status = "missing_after_filled_order"
+        elif order_total:
+            fill_status = "absent_no_fill"
+        else:
+            fill_status = "absent_no_order"
+
+        lifecycle_stage_names: list[str] = []
+        lifecycle_record_count = 0
+        for payload in order_payloads + fill_payloads:
+            lifecycle = self._truth_chain_lifecycle_payload(payload)
+            if not isinstance(lifecycle, dict):
+                continue
+            lifecycle_record_count += 1
+            lifecycle_stage_names.extend(str(stage) for stage in lifecycle.keys())
+        lifecycle_stage_names = self._unique_nonempty_strings(lifecycle_stage_names)
+        if lifecycle_record_count:
+            lifecycle_status = "linked"
+        elif order_total or fill_total:
+            lifecycle_status = "missing_after_execution_record"
+        else:
+            lifecycle_status = "absent_no_execution_record"
+
+        required_refs = {
+            "decision_context_ref": None if audit is None else getattr(audit, "decision_context_ref", None),
+            "position_target_ref": None if audit is None else getattr(audit, "position_target_ref", None),
+            "policy_decision_ref": None if audit is None else getattr(audit, "policy_decision_ref", None),
+            "risk_decision_ref": None if audit is None else getattr(audit, "risk_decision_ref", None),
+            "decision_outcome_ref": None if audit is None else getattr(audit, "decision_outcome_ref", None),
+        }
+        conditional_refs = {
+            "execution_plan_ref": None if audit is None else getattr(audit, "execution_plan_ref", None),
+        }
+        missing_required_refs = [name for name, value in required_refs.items() if not self._nonempty_string(value)]
+        missing_conditional_refs = (
+            [name for name, value in conditional_refs.items() if not self._nonempty_string(value)]
+            if order_intent_ref_count or order_total or fill_total
+            else []
+        )
+        if audit is None:
+            provenance_status = "missing_audit_record"
+        elif missing_required_refs or missing_conditional_refs:
+            provenance_status = "partial"
+        else:
+            provenance_status = "linked"
+
+        missing_evidence: list[str] = []
+        if order_status.startswith("missing"):
+            missing_evidence.append(order_status)
+        if fill_status.startswith("missing"):
+            missing_evidence.append(fill_status)
+        if lifecycle_status.startswith("missing"):
+            missing_evidence.append(lifecycle_status)
+        if provenance_status in {"missing_audit_record", "partial"}:
+            missing_evidence.append(f"provenance_{provenance_status}")
+        if order_lookup_issue is not None:
+            missing_evidence.append(order_lookup_issue)
+        if fill_lookup_issue is not None:
+            missing_evidence.append(fill_lookup_issue)
+
+        return {
+            "decision_id": decision_id,
+            "overall_status": "incomplete" if missing_evidence else "complete",
+            "complete": not missing_evidence,
+            "missing_evidence": missing_evidence,
+            "provenance": {
+                "status": provenance_status,
+                "required_refs": required_refs,
+                "conditional_refs": conditional_refs,
+                "missing_required_refs": missing_required_refs,
+                "missing_conditional_refs": missing_conditional_refs,
+                "informational_ref_counts": {
+                    "strategy_sleeve_intent_refs": 0
+                    if audit is None
+                    else len(getattr(audit, "strategy_sleeve_intent_refs", []) or []),
+                    "portfolio_delta_refs": 0
+                    if audit is None
+                    else len(getattr(audit, "portfolio_delta_refs", []) or []),
+                    "reconciliation_refs": reconciliation_ref_count,
+                },
+            },
+            "order": {
+                "status": order_status,
+                "order_intent_ref_count": order_intent_ref_count,
+                "audit_order_state_ref_count": audit_order_ref_count,
+                "repo_order_state_count": len(repo_order_payloads),
+                "client_order_ids": client_order_ids[:20],
+                "statuses": order_statuses,
+                "lookup_issue": order_lookup_issue,
+            },
+            "fill": {
+                "status": fill_status,
+                "audit_fill_event_ref_count": audit_fill_ref_count,
+                "repo_fill_count": len(repo_fill_payloads),
+                "fill_ids": fill_ids[:20],
+                "client_order_ids": client_order_ids[:20],
+                "lookup_issue": fill_lookup_issue,
+            },
+            "lifecycle": {
+                "status": lifecycle_status,
+                "record_count_with_lifecycle_refs": lifecycle_record_count,
+                "stages": lifecycle_stage_names,
+            },
+        }
+
     def _execution_quality_row(self, fill_record: Any) -> dict[str, Any]:
         fill_payload = self._execution_record_payload(fill_record)
         decision_support = self._decision_support_payload(fill_payload.get("decision_id"))
@@ -8593,6 +8841,12 @@ class OperatorQueryService:
             "decision_outcome": decision_outcome_payload,
             "no_trade_classification": no_trade_classification,
             "execution_plan": execution_plan,
+            "truth_chain": self._decision_truth_chain_payload(
+                decision_id=decision_id,
+                audit=audit,
+                order_updates=order_updates,
+                fills=fills,
+            ),
             "audit": audit.model_dump(mode="json"),
             "latest_order_intent": order_intents[-1] if order_intents else None,
             "latest_order_update": order_updates[-1] if order_updates else None,

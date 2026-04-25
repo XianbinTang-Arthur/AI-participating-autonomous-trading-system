@@ -227,6 +227,18 @@ class PostgresExecutionRepository:
             ).all()
         return [self._to_order_state(row) for row in rows]
 
+    def order_states_for_decision(self, decision_id: str) -> list[OrderState]:
+        normalized = str(decision_id or "").strip()
+        if not normalized:
+            return []
+        with self.session_factory() as session:
+            rows = session.scalars(
+                select(OrderStateModel)
+                .where(OrderStateModel.decision_id == normalized)
+                .order_by(OrderStateModel.created_at, OrderStateModel.client_order_id)
+            ).all()
+        return [self._to_order_state(row) for row in rows]
+
     def open_order_states(self) -> list[OrderState]:
         final_statuses = ("FILLED", "CANCELED", "REJECTED", "BLOCKED", "DRY_RUN", "FAILED", "EXPIRED")
         with self.session_factory() as session:
