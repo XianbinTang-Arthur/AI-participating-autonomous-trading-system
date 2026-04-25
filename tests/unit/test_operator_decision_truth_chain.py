@@ -115,6 +115,67 @@ def test_decision_truth_chain_links_repo_order_fill_and_lifecycle_refs() -> None
     assert payload["lifecycle"]["status"] == "linked"
     assert payload["lifecycle"]["stages"] == ["submit"]
     assert payload["provenance"]["status"] == "linked"
+    assert payload["execution_science"]["orderbook_context"]["status"] == "missing_after_lifecycle_record"
+    assert payload["execution_science"]["orderbook_context"]["missing_market_context_refs_by_stage"] == {
+        "submit": [
+            "post_event_orderbook_snapshot_ref",
+            "pre_event_orderbook_snapshot_ref",
+        ]
+    }
+    assert payload["execution_science"]["sequence_validation"]["status"] == "missing_not_implemented"
+
+
+def test_decision_truth_chain_reports_linked_orderbook_context_by_stage() -> None:
+    query = _service(
+        order_states=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "status": "SUBMITTED",
+                "lifecycle_snapshot_refs": {
+                    "submit": {
+                        "market_snapshot_ref": "mkt-1",
+                        "feature_snapshot_ref": "feat-1",
+                        "portfolio_snapshot_ref": "port-1",
+                        "health_snapshot_ref": "health-1",
+                        "market_context_snapshot_refs": {
+                            "pre_event_orderbook_snapshot_ref": "book-before-submit",
+                            "post_event_orderbook_snapshot_ref": "book-after-submit",
+                        },
+                    }
+                },
+            }
+        ],
+    )
+
+    payload = query._decision_truth_chain_payload(
+        decision_id="decision-1",
+        audit=_audit(order_intent_refs=["intent-1"]),
+        order_updates=[],
+        fills=[],
+    )
+
+    orderbook_context = payload["execution_science"]["orderbook_context"]
+    assert orderbook_context["status"] == "linked"
+    assert orderbook_context["complete"] is True
+    assert orderbook_context["complete_stage_count"] == 1
+    assert orderbook_context["incomplete_stage_count"] == 0
+    assert orderbook_context["stage_evidence"] == [
+        {
+            "record_kind": "order",
+            "record_id": "order-1",
+            "client_order_id": "order-1",
+            "stage": "submit",
+            "status": "linked",
+            "missing_market_context_refs": [],
+        }
+    ]
+    assert payload["execution_science"]["sequence_validation"]["missing_evidence"] == [
+        "local_orderbook_diff_sequence_not_exposed"
+    ]
 
 
 def test_decision_truth_chain_distinguishes_clean_no_execution_from_missing_links() -> None:
@@ -131,6 +192,8 @@ def test_decision_truth_chain_distinguishes_clean_no_execution_from_missing_link
     assert payload["order"]["status"] == "absent_no_order_intent"
     assert payload["fill"]["status"] == "absent_no_order"
     assert payload["lifecycle"]["status"] == "absent_no_execution_record"
+    assert payload["execution_science"]["orderbook_context"]["status"] == "absent_no_execution_record"
+    assert payload["execution_science"]["sequence_validation"]["status"] == "absent_no_execution_record"
     assert payload["missing_evidence"] == []
 
 

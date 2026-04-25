@@ -3210,6 +3210,102 @@ class OperatorQueryService:
             intent_nested,
         )
 
+    def _truth_chain_record_id(self, *, record_kind: str, payload: dict[str, Any]) -> str | None:
+        if record_kind == "fill":
+            return self._nonempty_string(payload.get("fill_id")) or self._nonempty_string(payload.get("client_order_id"))
+        return self._nonempty_string(payload.get("client_order_id"))
+
+    def _decision_execution_science_payload(
+        self,
+        *,
+        order_payloads: list[dict[str, Any]],
+        fill_payloads: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        execution_record_count = len(order_payloads) + len(fill_payloads)
+        stage_evidence: list[dict[str, Any]] = []
+        missing_by_stage: dict[str, list[str]] = {}
+        complete_stage_count = 0
+        incomplete_stage_count = 0
+
+        for record_kind, payloads in (("order", order_payloads), ("fill", fill_payloads)):
+            for payload in payloads:
+                lifecycle = self._truth_chain_lifecycle_payload(payload)
+                if not isinstance(lifecycle, dict):
+                    continue
+                completeness = self._lifecycle_market_context_completeness_payload(lifecycle)
+                record_id = self._truth_chain_record_id(record_kind=record_kind, payload=payload)
+                for stage in completeness.get("present_stages", []):
+                    stage_key = str(stage)
+                    missing_refs = list(
+                        completeness.get("missing_market_context_refs_by_stage", {}).get(stage_key, [])
+                    )
+                    stage_status = "linked" if not missing_refs else "missing_refs"
+                    if missing_refs:
+                        incomplete_stage_count += 1
+                        combined = set(missing_by_stage.get(stage_key, []))
+                        combined.update(str(ref) for ref in missing_refs)
+                        missing_by_stage[stage_key] = sorted(combined)
+                    else:
+                        complete_stage_count += 1
+                    stage_evidence.append(
+                        {
+                            "record_kind": record_kind,
+                            "record_id": record_id,
+                            "client_order_id": self._nonempty_string(payload.get("client_order_id")),
+                            "stage": stage_key,
+                            "status": stage_status,
+                            "missing_market_context_refs": missing_refs,
+                        }
+                    )
+
+        if not stage_evidence:
+            orderbook_status = (
+                "absent_no_execution_record"
+                if execution_record_count == 0
+                else "absent_no_lifecycle_record"
+            )
+        elif incomplete_stage_count == 0:
+            orderbook_status = "linked"
+        elif complete_stage_count > 0:
+            orderbook_status = "partial"
+        else:
+            orderbook_status = "missing_after_lifecycle_record"
+
+        orderbook_missing_evidence: list[str] = []
+        if orderbook_status in {"absent_no_lifecycle_record", "missing_after_lifecycle_record", "partial"}:
+            orderbook_missing_evidence.append(orderbook_status)
+
+        sequence_validation_status = (
+            "absent_no_execution_record"
+            if execution_record_count == 0
+            else "missing_not_implemented"
+        )
+        sequence_missing_evidence = (
+            []
+            if execution_record_count == 0
+            else ["local_orderbook_diff_sequence_not_exposed"]
+        )
+
+        return {
+            "complete": orderbook_status == "linked" and not sequence_missing_evidence,
+            "missing_evidence": orderbook_missing_evidence + sequence_missing_evidence,
+            "orderbook_context": {
+                "status": orderbook_status,
+                "complete": orderbook_status == "linked",
+                "execution_record_count": execution_record_count,
+                "stage_count": len(stage_evidence),
+                "complete_stage_count": complete_stage_count,
+                "incomplete_stage_count": incomplete_stage_count,
+                "missing_market_context_refs_by_stage": missing_by_stage,
+                "stage_evidence": stage_evidence[:50],
+            },
+            "sequence_validation": {
+                "status": sequence_validation_status,
+                "complete": False,
+                "missing_evidence": sequence_missing_evidence,
+            },
+        }
+
     def _decision_truth_chain_payload(
         self,
         *,
@@ -3225,6 +3321,10 @@ class OperatorQueryService:
 
         order_payloads = audit_order_updates + repo_order_payloads
         fill_payloads = audit_fills + repo_fill_payloads
+        execution_science_payload = self._decision_execution_science_payload(
+            order_payloads=order_payloads,
+            fill_payloads=fill_payloads,
+        )
         client_order_ids = self._unique_nonempty_strings(
             [payload.get("client_order_id") for payload in order_payloads]
             + [payload.get("client_order_id") for payload in fill_payloads]
@@ -3357,6 +3457,7 @@ class OperatorQueryService:
                 "record_count_with_lifecycle_refs": lifecycle_record_count,
                 "stages": lifecycle_stage_names,
             },
+            "execution_science": execution_science_payload,
         }
 
     def _execution_quality_row(self, fill_record: Any) -> dict[str, Any]:
