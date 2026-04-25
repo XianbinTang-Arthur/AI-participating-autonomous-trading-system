@@ -22,8 +22,15 @@ ai_operating_mode: ai_decision_maker
 ai_provider: deepseek
 # [常用可调] ai_model_name：AI 模型名。DeepSeek 可选：deepseek-v4-pro / deepseek-v4-flash；OpenAI 可选：gpt-4.1-mini / gpt-4o-mini 等；当前实盘试运行 deepseek-v4-flash 以降低同步决策延迟。
 ai_model_name: deepseek-v4-flash
-# [常用可调] ai_timeout_seconds：AI 请求超时秒数。可选值：1.0 ~ 60.0；当前保留 30.0 以隔离模型切换变量。
-ai_timeout_seconds: 30.0
+# [常用可调] ai_timeout_seconds：AI 请求超时秒数。可选值：1.0 ~ 60.0；当前 20.0。
+# 重要约束：必须严格小于 _RUN_CYCLE_TIMEOUT_SECONDS=30.0（orchestrator.py:72，
+# 由 test_run_cycle_timeout.py 锚定不可改）。如果两者相等，AI 一旦吃满预算，
+# cycle 内剩余 ~11 个 phase（context_builder / baseline / target_engine /
+# strategy_coordinator / publish_model …）就没有任何 buffer，必然撞 cycle
+# timeout。20s 给后续 phase 留 ~10s 余量。
+# 历史：10.0 → 30.0（commit 142fc8a 切 deepseek-flash 时为隔离变量临时拉满）
+#       → 20.0（2026-04-24，发现 cycle_timeout=ai_timeout 数学不可能成立后回收）
+ai_timeout_seconds: 20.0
 # [常用可调] ai_degrade_after_failures：连续失败多少次后自动降级。可选值：1 ~ 10；推荐值：3。
 ai_degrade_after_failures: 3
 # [常用可调] ai_recovery_probe_interval_seconds：降级后多久做一次恢复探测。可选值：30 ~ 3600；推荐值：180.0。

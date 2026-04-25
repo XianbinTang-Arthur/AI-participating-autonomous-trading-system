@@ -74,7 +74,7 @@ export function buildDecisionDrawer(detail) {
       aiEconomic
         ? surfaceCard({
             title: "AI 经济可行性",
-            content: kvList(decisionEconomicRows(aiEconomic, decisionOutcome)),
+            content: kvList(decisionEconomicRows(aiEconomic, decisionOutcome, detail.ai_assessment)),
           })
         : "",
       aiDecisionAudit
@@ -83,7 +83,7 @@ export function buildDecisionDrawer(detail) {
             content: kvList(decisionAuditRows(aiDecisionAudit, decisionOutcome)),
           })
         : "",
-      aiExecutionSuggestion
+      hasMeaningfulAiExecutionSuggestion(aiExecutionSuggestion)
         ? surfaceCard({
             title: "AI 受限执行建议",
             content: kvList(decisionExecutionRows(aiExecutionSuggestion)),
@@ -236,17 +236,54 @@ export function buildReconciliationDrawer(detail, { recovery = {}, latestReconci
   };
 }
 
-function decisionEconomicRows(aiEconomic, decisionOutcome) {
-  return [
-    ["这轮值不值得让 AI 直接接管", booleanWord(aiEconomic.economically_actionable), `最低净优势要求 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
-    ["本轮预估边际", `${formatNumber(aiEconomic.estimated_edge_bps ?? 0, 2)} 个基点`, `成本 ${formatNumber(aiEconomic.estimated_cost_bps ?? 0, 2)} / 净优势 ${formatNumber(aiEconomic.estimated_net_edge_bps ?? 0, 2)} 个基点`],
-    ["目标动作预估边际", `${formatNumber(aiEconomic.target_expected_signal_edge_bps ?? 0, 2)} 个基点`, targetExpectancyDisciplineSummary(aiEconomic)],
+function decisionEconomicRows(aiEconomic, decisionOutcome, aiAssessment = null) {
+  const rows = [
+    ["AI 采纳门槛", aiEconomic.economically_actionable ? "通过" : "未通过", `最低净优势要求 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
+    ["AI 评估净边际", `${formatNumber(aiEconomic.estimated_net_edge_bps ?? 0, 2)} 个基点`, `信号 ${formatNumber(aiEconomic.estimated_edge_bps ?? 0, 2)} / 成本 ${formatNumber(aiEconomic.estimated_cost_bps ?? 0, 2)} 个基点`],
+    ["策略候选净边际", `${formatNumber(aiEconomic.target_expected_net_edge_bps ?? 0, 2)} 个基点`, `信号 ${formatNumber(aiEconomic.target_expected_signal_edge_bps ?? 0, 2)} / ${targetExpectancyDisciplineSummary(aiEconomic)}`],
     ["最终门槛", `${formatNumber(aiEconomic.required_total_edge_bps ?? 0, 2)} 个基点`, `噪声缓冲 ${formatNumber(aiEconomic.noise_buffer_bps ?? 0, 2)} / 最低净优势 ${formatNumber(aiEconomic.min_required_net_edge_bps ?? 0, 2)} 个基点`],
-    ["这轮最终采用谁的结论", decisionSourceLabel(decisionOutcome?.decision_source), decisionSourceNarrative(decisionOutcome)],
-    ["行情和账户状态", `行情快照 ${booleanWord(aiEconomic.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiEconomic.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiEconomic.safe_to_trade)} / ${drawerText(aiEconomic.execution_condition, "当前没有额外执行条件")}`],
+    ["最终采纳路径", decisionSourceLabel(decisionOutcome?.decision_source), decisionSourceNarrative(decisionOutcome)],
+    ["行情和账户状态", `行情快照 ${freshnessWord(aiEconomic.market_snapshot_fresh)} / 账户快照 ${freshnessWord(aiEconomic.account_snapshot_fresh)}`, `交易前置 ${aiEconomic.safe_to_trade ? "可交易" : "不可交易"} / ${readableState(aiEconomic.execution_condition, "当前没有额外执行条件")}`],
     ["最近执行健康度", `手续费拖累 ${formatNumber(aiEconomic.recent_fee_drag_ratio ?? 0, 3)} / 来回交易 ${formatNumber(aiEconomic.recent_churn_ratio ?? 0, 3)}`, `低边际连续次数 ${formatNumber(aiEconomic.recent_low_edge_trade_streak ?? 0, 0)} / 活动委托 ${formatNumber(aiEconomic.current_open_order_count ?? 0, 0)}`],
     ["校验与拦截标记", drawerListText(aiEconomic.validation_flags, "当前没有额外校验标记"), drawerListText(aiEconomic.rejection_flags, "当前没有额外拦截说明")],
   ];
+  const modelRow = aiModelAuditRow(aiAssessment);
+  return modelRow ? [modelRow, ...rows] : rows;
+}
+
+function aiModelAuditRow(aiAssessment = null) {
+  if (!aiAssessment || typeof aiAssessment !== "object") return null;
+  const model = aiAssessment.model_name || aiAssessment.model_version
+    ? [aiAssessment.model_name, aiAssessment.model_version ? `v${aiAssessment.model_version}` : null].filter(Boolean).join(" ")
+    : drawerText(aiAssessment.provider_name, "");
+  const status = aiAssessment.output_valid === true
+    ? "输出有效"
+    : aiAssessment.output_valid === false
+      ? "输出无效"
+      : "输出状态待确认";
+  const meta = [
+    aiAssessment.provider_name ? `服务 ${aiAssessment.provider_name}` : null,
+    aiAssessment.provider_latency_ms !== undefined && aiAssessment.provider_latency_ms !== null
+      ? `耗时 ${formatLatencyMs(aiAssessment.provider_latency_ms)}`
+      : null,
+    aiAssessment.prompt_version ? `prompt ${aiAssessment.prompt_version}` : null,
+    aiAssessment.fallback_used ? `回退 ${drawerText(aiAssessment.fallback_reason, "原因待确认")}` : null,
+  ].filter(Boolean);
+  if (!model && !meta.length && status === "输出状态待确认") return null;
+  return ["模型响应", model ? `${model} / ${status}` : status, meta.length ? meta.join(" | ") : "当前没有额外模型响应信息"];
+}
+
+function formatLatencyMs(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "待确认";
+  if (number >= 1000) return `${formatNumber(number / 1000, 2)} 秒`;
+  return `${formatNumber(number, 0)} 毫秒`;
+}
+
+function freshnessWord(value) {
+  if (value === true) return "可用";
+  if (value === false) return "不可用";
+  return "待确认";
 }
 
 function targetExpectancyDisciplineSummary(aiEconomic = {}) {
@@ -311,11 +348,27 @@ function decisionAuditRows(aiDecisionAudit, decisionOutcome) {
     ["自适应阈值与仓位因子", readableIndependentAdaptiveSummary(aiDecisionAudit, "当前还没有独立双书自适应摘要"), readableIndependentAdaptiveMeta(aiDecisionAudit, "当前没有额外自适应说明")],
     ["迁移异常摘要", readableIndependentTransitionExceptionSummary(aiDecisionAudit, "当前没有独立双书迁移异常摘要"), readableIndependentTransitionExceptionMeta(aiDecisionAudit, "当前没有额外迁移异常说明")],
     ["预期 vs 已实现", readableExpectedVsRealizedSummary(aiDecisionAudit, "当前还没有预期与已实现诊断"), readableExpectedVsRealizedMeta(aiDecisionAudit, "当前没有额外诊断说明")],
-    ["这轮最终采用谁的结论", decisionSourceLabel(aiDecisionAudit.decision_source), `${decisionSourceNarrative(decisionOutcome)} / ${decisionAuthorityLabel(aiDecisionAudit.decision_authority)}`],
-    ["为什么没有直接采用 AI", drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有额外决策链路阻断项"), drawerListText(aiDecisionAudit.guardrail_flags, "当前没有额外保护规则")],
-    ["行情和账户状态", `行情快照 ${booleanWord(aiDecisionAudit.market_snapshot_fresh)} / 账户快照 ${booleanWord(aiDecisionAudit.account_snapshot_fresh)}`, `允许交易 ${booleanWord(aiDecisionAudit.safe_to_trade)} / ${drawerText(aiDecisionAudit.execution_condition, "当前没有额外执行条件")}`],
+    ["最终采纳路径", decisionSourceLabel(aiDecisionAudit.decision_source), `${decisionSourceNarrative(decisionOutcome)} / ${decisionAuthorityLabel(aiDecisionAudit.decision_authority)}`],
+    ["AI 未采纳原因", drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有额外决策链路阻断项"), drawerListText(aiDecisionAudit.guardrail_flags, "当前没有额外保护规则")],
+    ["行情和账户状态", `行情快照 ${freshnessWord(aiDecisionAudit.market_snapshot_fresh)} / 账户快照 ${freshnessWord(aiDecisionAudit.account_snapshot_fresh)}`, `交易前置 ${aiDecisionAudit.safe_to_trade ? "可交易" : "不可交易"} / ${readableState(aiDecisionAudit.execution_condition, "当前没有额外执行条件")}`],
     ["最近执行健康度", `手续费拖累 ${formatNumber(aiDecisionAudit.recent_fee_drag_ratio ?? 0, 3)} / 来回交易 ${formatNumber(aiDecisionAudit.recent_churn_ratio ?? 0, 3)}`, `低边际连续次数 ${formatNumber(aiDecisionAudit.recent_low_edge_trade_streak ?? 0, 0)} / 活动委托 ${formatNumber(aiDecisionAudit.current_open_order_count ?? 0, 0)}`],
   ];
+}
+
+function hasMeaningfulAiExecutionSuggestion(aiExecutionSuggestion = null) {
+  if (!aiExecutionSuggestion || typeof aiExecutionSuggestion !== "object") return false;
+  return Boolean(
+    aiExecutionSuggestion.suggestion_present
+    || aiExecutionSuggestion.translation_present
+    || aiExecutionSuggestion.latest_translation
+    || aiExecutionSuggestion.assessment_suggestion
+    || aiExecutionSuggestion.execution_plan_translation
+    || aiExecutionSuggestion.latest_order_intent_translation
+    || aiExecutionSuggestion.live_order_type
+    || aiExecutionSuggestion.live_time_in_force
+    || (aiExecutionSuggestion.live_limit_price !== null && aiExecutionSuggestion.live_limit_price !== undefined)
+    || aiExecutionSuggestion.live_execution_style
+  );
 }
 
 function decisionExecutionRows(aiExecutionSuggestion) {
@@ -511,7 +564,7 @@ function decisionLegReconciliationRows(legReconciliation) {
 function decisionSourceLabel(value) {
   const source = String(value || "baseline").toLowerCase();
   if (source === "ai") return "本轮最终采用 AI 结论";
-  if (source === "baseline_fallback") return "本轮最终回退到基础策略";
+  if (source === "baseline_fallback") return "AI 未被采纳，沿用基础策略";
   if (source === "admin_override") return "本轮由管理员手动覆盖";
   return "本轮继续沿用基础策略";
 }
@@ -542,7 +595,7 @@ function decisionSourceNarrative(decisionOutcome = null) {
     return "虽然系统会继续检查风控和执行条件，但这轮最终结论已经直接采用了 AI。";
   }
   if (source === "baseline_fallback") {
-    return `当前运行模式允许 AI 参与，但这轮 AI 没有通过最终门槛，所以系统改为采用基础策略。${drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有额外阻断说明")}`;
+    return `AI 已参与本轮评估，但没有通过最终采纳门槛；系统沿用基础策略的空仓/持仓结论。${drawerListText((decisionOutcome?.decision_blocked_reasons || []).map(localizeError), "当前没有额外阻断说明")}`;
   }
   if (source === "admin_override") {
     return "这轮最终结论来自管理员手动覆盖，而不是系统自动采用 AI 或基础策略。";
@@ -645,9 +698,21 @@ function strategySummary(detail) {
   const policy = detail.policy_decision || {};
   const risk = detail.risk_decision || {};
   if (!detail.decision_id) return "当前暂无新的策略详情。";
+  if (isNoOrderDecision(detail) && policy.execution_allowed && risk.approved) {
+    return `系统当前对 ${detail.decision_context?.symbol || "当前标的"} 的交易结论是 ${describeDecisionIntent(detail)}。策略门禁和风控均未阻断，但本轮没有下单目标。`;
+  }
   return `系统当前对 ${detail.decision_context?.symbol || "当前标的"} 的交易结论是 ${describeDecisionIntent(detail)}。`
     + `${policy.execution_allowed ? "策略门禁已通过，" : "策略门禁未通过，"}`
     + `${risk.approved ? "风控当前没有继续阻断。" : `风控仍在拦截：${listOrDash(risk.rejection_reasons)}。`}`;
+}
+
+function isNoOrderDecision(detail = {}) {
+  const target = detail.position_target || {};
+  const rawIntent = String(target.position_intent || "hold").toLowerCase();
+  const targetQty = Number(target.target_position_qty ?? 0);
+  const deltaQty = Number(target.delta_position_qty ?? 0);
+  const orderCount = Array.isArray(detail.order_intents) ? detail.order_intents.length : 0;
+  return rawIntent === "hold" && targetQty === 0 && deltaQty === 0 && orderCount === 0;
 }
 
 function describeDecisionIntent(detail) {

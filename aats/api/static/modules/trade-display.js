@@ -169,6 +169,7 @@ export function decisionDrawerRows(detail = {}, describeDecisionIntent) {
   const productType = inferTradeScene(target.product_type ? target : detail.decision_context || {});
   const intent = typeof describeDecisionIntent === "function" ? describeDecisionIntent(detail) : readableState(target.position_intent || "hold");
   const sizingBreakdown = target.sizing_breakdown || target.sizingBreakdown || null;
+  const noOrderTarget = isNoOrderTarget(detail);
   const commonRows = [
     ["交易标的", detail.decision_context?.symbol || "标的待确认", detail.decision_context?.timeframe || "周期待确认"],
     [productType === "derivatives" ? "仓位动作" : "买卖动作", intent, readableState(target.target_exposure_side, "目标方向待确认")],
@@ -182,7 +183,13 @@ export function decisionDrawerRows(detail = {}, describeDecisionIntent) {
     productType === "derivatives"
       ? [
         ["保证金模式", readableState(target.margin_mode || detail.decision_context?.margin_mode, "保证金模式待确认"), `目标杠杆 ${formatNumber(target.target_leverage)} 倍`],
-        ...(sizingBreakdown
+        ...(noOrderTarget
+          ? [[
+            "本轮下单规模",
+            "无新增订单",
+            `目标仓位 ${formatSigned(target.target_position_qty, 6, "0")} / 仓位变化 ${formatSigned(target.delta_position_qty, 6, "0")}`,
+          ]]
+          : sizingBreakdown
           ? [[
             "下单规模分解",
             sizingBreakdownSummary(sizingBreakdown),
@@ -194,9 +201,28 @@ export function decisionDrawerRows(detail = {}, describeDecisionIntent) {
   return [
     ...commonRows,
     ...sceneRows,
-    ["策略门禁", readableState(detail.policy_decision?.execution_allowed ? "ready" : "blocked"), listOrDash(detail.policy_decision?.blocker_reasons, "当前没有额外门禁说明")],
-    ["风控结论", readableState(detail.risk_decision?.approved ? "ready" : "blocked"), listOrDash(detail.risk_decision?.rejection_reasons, "当前没有额外风控说明")],
+    ["策略门禁", gateStateText(detail.policy_decision?.execution_allowed), gateMetaText(detail.policy_decision?.blocker_reasons, noOrderTarget, "当前没有额外门禁说明", "策略门禁未阻断，但本轮没有下单意图")],
+    ["风控结论", gateStateText(detail.risk_decision?.approved), gateMetaText(detail.risk_decision?.rejection_reasons, noOrderTarget, "当前没有额外风控说明", "风控未阻断，但本轮没有下单意图")],
   ];
+}
+
+function isNoOrderTarget(detail = {}) {
+  const target = detail.position_target || {};
+  const rawIntent = String(target.position_intent || "hold").toLowerCase();
+  const targetQty = Number(target.target_position_qty ?? 0);
+  const deltaQty = Number(target.delta_position_qty ?? 0);
+  const orderCount = Array.isArray(detail.order_intents) ? detail.order_intents.length : 0;
+  return rawIntent === "hold" && targetQty === 0 && deltaQty === 0 && orderCount === 0;
+}
+
+function gateStateText(value) {
+  return value ? "未阻断" : readableState("blocked");
+}
+
+function gateMetaText(reasons, noOrderTarget, fallback, noOrderCopy) {
+  const reasonText = listOrDash(reasons, fallback);
+  if (!noOrderTarget || reasonText !== fallback) return reasonText;
+  return noOrderCopy;
 }
 
 function spotOrderAction(order = {}) {

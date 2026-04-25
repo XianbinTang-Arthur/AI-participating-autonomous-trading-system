@@ -20,9 +20,14 @@ function activeProfileSummary(activeRevision = {}, activation = {}) {
 }
 
 function candidateSummary(selection = {}, optimization = {}) {
-  const candidate = optimization.recommended_profile_id || selection.candidate_profile_id || "";
+  const gateCandidate = selection.candidate_profile_id || selection.recommended_profile_id || "";
+  const optimizationCandidate = optimization.recommended_profile_id || "";
+  const candidate = gateCandidate || optimizationCandidate;
   const blockedReasons = Array.isArray(selection.blocked_reasons) ? selection.blocked_reasons : [];
   const notes = Array.isArray(optimization.notes) ? optimization.notes : [];
+  const optimizerMeta = optimizationCandidate && optimizationCandidate !== candidate
+    ? `优化器建议 ${readableProfile(optimizationCandidate)}，但最终门控候选为 ${readableProfile(candidate)}。`
+    : "";
 
   if (!candidate) {
     return {
@@ -34,7 +39,7 @@ function candidateSummary(selection = {}, optimization = {}) {
   if (blockedReasons.length) {
     return {
       value: readableProfile(candidate),
-      meta: `系统已经选出候选档位，但暂时不能自动切过去：${summarizeLocalizedList(blockedReasons, {
+      meta: `${optimizerMeta}系统已经选出门控候选档位，但暂时不能自动切过去：${summarizeLocalizedList(blockedReasons, {
         fallback: "当前没有额外阻断说明",
         limit: 2,
       })}`,
@@ -44,23 +49,23 @@ function candidateSummary(selection = {}, optimization = {}) {
   if (notes.length) {
     return {
       value: readableProfile(candidate),
-      meta: summarizeLocalizedList(notes, {
+      meta: `${optimizerMeta}${summarizeLocalizedList(notes, {
         fallback: "当前没有额外候选说明",
         limit: 2,
-      }),
+      })}`,
     };
   }
 
   if (optimization.score_delta_vs_active !== null && optimization.score_delta_vs_active !== undefined) {
     return {
       value: readableProfile(candidate),
-      meta: `相对当前档位的综合分差为 ${formatSigned(optimization.score_delta_vs_active, 2)}。`,
+      meta: `${optimizerMeta}相对当前档位的综合分差为 ${formatSigned(optimization.score_delta_vs_active, 2)}。`,
     };
   }
 
   return {
     value: readableProfile(candidate),
-    meta: "当前没有额外候选说明。",
+    meta: optimizerMeta || "当前没有额外候选说明。",
   };
 }
 
@@ -77,6 +82,9 @@ function controlStateSummary(state = {}, fallback = "当前没有额外说明。
 function gatingSummary(selection = {}) {
   const gating = selection.gating_state || {};
   const segments = [];
+  if (gating.reconciliation_clean === false) {
+    segments.push("对账未清洁");
+  }
   if (gating.confidence_floor !== null && gating.confidence_floor !== undefined) {
     segments.push(`自动切档最低置信度 ${formatNumber(gating.confidence_floor, 2, "待确认")}`);
   }
@@ -113,10 +121,23 @@ function fastTrackSummary(selection = {}) {
     };
   }
   return {
-    value: "未触发",
-    meta: "当前没有触发紧急安全快速通道。",
+    value: "未应用",
+    meta: summarizeLocalizedList(selection.gating_state?.fast_track_reasons, {
+      fallback: "当前没有应用快速通道。",
+      limit: 3,
+    }),
     tone: "outline",
   };
+}
+
+function blockedReasonSummary(selection = {}) {
+  const reasons = Array.isArray(selection.blocked_reasons) ? selection.blocked_reasons : [];
+  if (!reasons.length) return "当前没有新的自动切档阻断原因。";
+  const summary = summarizeLocalizedList(reasons, {
+    fallback: "当前没有新的自动切档阻断原因。",
+    limit: 4,
+  });
+  return reasons.length > 4 ? `${summary}（共 ${formatNumber(reasons.length, 0)} 条）` : summary;
 }
 
 function profileEvidenceCallout(controlSummary = {}, evidence = {}, latestCandidate = {}) {
@@ -218,7 +239,7 @@ function profileEvidenceCard(data) {
           badge: actorTags("system"),
         },
         {
-          label: "紧急安全切档",
+          label: "快速通道",
           value: fastTrack.value,
           meta: fastTrack.meta,
           tone: fastTrack.tone,
@@ -247,7 +268,7 @@ function profileEvidenceCard(data) {
         ],
         [
           "自动切档阻断原因",
-          localizeList(selection.blocked_reasons, "当前没有新的自动切档阻断原因。"),
+          blockedReasonSummary(selection),
           "这里优先解释为什么系统保持当前档位，或者为什么只是给出候选但没有真正切档。",
         ],
         [

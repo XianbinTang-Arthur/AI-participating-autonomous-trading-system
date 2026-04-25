@@ -257,8 +257,8 @@
   independent_short_book_signal_above_scale_in_threshold: "short book 的双书分已经超过加仓阈值，系统允许继续扩大空书",
   independent_long_book_hold_above_entry_threshold: "long book 当前分数仍高于开仓阈值，系统继续保留这条多书",
   independent_short_book_hold_above_entry_threshold: "short book 当前分数仍高于开仓阈值，系统继续保留这条空书",
-  independent_long_book_signal_below_entry_threshold: "long book 的双书分已经回落到开仓阈值下方，系统开始收口这条多书",
-  independent_short_book_signal_below_entry_threshold: "short book 的双书分已经回落到开仓阈值下方，系统开始收口这条空书",
+  independent_long_book_signal_below_entry_threshold: "long book 的双书分低于开仓阈值，本轮不打开多书",
+  independent_short_book_signal_below_entry_threshold: "short book 的双书分低于开仓阈值，本轮不打开空书",
   independent_long_book_post_close_cooldown_active: "long book 最近刚平过，这轮仍处在 post-close 冷却期",
   independent_short_book_post_close_cooldown_active: "short book 最近刚平过，这轮仍处在 post-close 冷却期",
   independent_long_book_low_edge_cooldown_active: "long book 最近连续出现低边际交易，这轮仍处在低边际冷却期",
@@ -399,6 +399,9 @@
   baseline_only: "仅按基础策略运行",
   ai_assisted: "AI 辅助决策",
   ai_decision_maker: "AI 决策者",
+  baseline: "基础策略路径",
+  ai: "AI 决策路径",
+  admin_override: "管理员覆盖路径",
   winner_engine: "系统候选引擎",
   activation_gate: "激活裁决层",
   auto_activation_executed: "自动激活已执行",
@@ -464,10 +467,11 @@
   insufficient_data: "样本仍少，先继续观察",
   caution: "收益转弱，建议谨慎",
   failing: "已触发警戒",
-  baseline_fallback: "本轮最终回退到基础策略",
+  baseline_fallback: "AI 未被采纳，沿用基础策略",
   reference_only: "当前只把 AI 当参考",
-  final_decision: "当前由 AI 直接给出最终结论",
-  final_decision_with_profile_control: "当前由 AI 给出最终结论并联动档位控制",
+  final_decision: "最终决策权限",
+  final_decision_with_profile_control: "最终决策与档位控制权限",
+  auto_downgraded: "结果复核已自动降级",
   continue_small_capital: "继续小资金试盘",
   shrink_trial: "建议缩小试盘规模",
   pause_trial: "建议暂停试盘",
@@ -1330,7 +1334,7 @@ export function readableBookRuntimeStateSummary(source = {}, fallback = "当前�
   return states
     .map((item) => {
       const leg = readableBookLabel(String(item?.leg || "").trim().toLowerCase(), "independent_book");
-      const parts = [`${leg}${readableState(item?.state || "inactive", item?.state || "inactive")}`];
+      const parts = [`${leg} ${readableState(item?.state || "inactive", item?.state || "inactive")}`];
       if (item?.book_state) {
         parts.push(`生命周期 ${readableState(item.book_state, item.book_state)}`);
       }
@@ -1392,17 +1396,17 @@ export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
   const currentQty = overlay.parent_current_qty;
   const effectiveQty = overlay.parent_effective_qty;
   if (
-    !targetSignal
-    && !currentSignal
-    && !effectiveSignal
-    && !signalSource
-    && lifecycleState === undefined
-    && targetActive === undefined
-    && inventoryActive === undefined
-    && !sourceOfTruth
-    && targetQty === undefined
-    && currentQty === undefined
-    && effectiveQty === undefined
+    !hasOverlaySignalValue(targetSignal)
+    && !hasOverlaySignalValue(currentSignal)
+    && !hasOverlaySignalValue(effectiveSignal)
+    && !hasOverlaySignalValue(signalSource)
+    && !hasOverlaySignalValue(lifecycleState)
+    && !hasOverlaySignalValue(targetActive)
+    && !hasOverlaySignalValue(inventoryActive)
+    && !hasOverlaySignalValue(sourceOfTruth)
+    && !hasOverlaySignalValue(targetQty)
+    && !hasOverlaySignalValue(currentQty)
+    && !hasOverlaySignalValue(effectiveQty)
   ) return fallback;
   const parts = [
     `这次判断主要由${overlayDriverLabel(signalSource, sourceOfTruth)}驱动`,
@@ -1416,6 +1420,12 @@ export function readableOverlayParentSignalSummary(source = {}, fallback = "") {
     parts.push(`目标 / 当前 ${readableSignedQuantity(targetQty)} / ${readableSignedQuantity(currentQty)}`);
   }
   return parts.join("，");
+}
+
+function hasOverlaySignalValue(value) {
+  if (value === null || value === undefined) return false;
+  if (typeof value === "boolean") return true;
+  return String(value).trim() !== "";
 }
 
 export function readableOverlayParentPostmortemMeta(source = {}, fallback = "") {

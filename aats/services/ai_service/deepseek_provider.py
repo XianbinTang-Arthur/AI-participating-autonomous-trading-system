@@ -79,7 +79,13 @@ class DeepSeekProvider:
         try:
             parsed_payload = json.loads(content)
         except json.JSONDecodeError as exc:
-            raise AIProviderError("deepseek_invalid_json_content") from exc
+            # 诊断 hint：把 deepseek 实际返回的前缀塞进 error code，便于在
+            # ai_assessment_fallback 日志的 fallback_reason 里看到模型究竟
+            # 返回了什么（markdown fence？前导散文？被截断？）。160 字符
+            # 上限避免污染日志；换行折叠成空格保证单行。
+            snippet = content[:160].replace("\n", " ").replace("\r", " ").strip()
+            suffix = f":{snippet}" if snippet else ""
+            raise AIProviderError(f"deepseek_invalid_json_content{suffix}") from exc
 
         if not isinstance(parsed_payload, dict):
             raise AIProviderError("deepseek_non_object_json")

@@ -2905,7 +2905,7 @@ console.log(JSON.stringify({
   configNoJumpButtons: !configHtml.includes('前往 AI 工作台') && !configHtml.includes('查看 AI 分析'),
   analysisHasAdaptiveControls: analysisHtml.includes('风险预算乘数') && analysisHtml.includes('自动切档闸门'),
   drawerExplainsFallback: drawer.body.includes('当前运行模式允许 AI 参与'),
-  drawerUsesHumanDecisionSource: drawer.body.includes('本轮最终回退到基础策略'),
+  drawerUsesHumanDecisionSource: drawer.body.includes('AI 未被采纳，沿用基础策略'),
   manualOnlyProfileDefaultsToManual: /<button class="primary-button" data-action="set-profile-control-mode" data-value="manual"[^>]*disabled/.test(manualOnlyConfigHtml),
   manualOnlyProfileAutoEnabled: /<button class="secondary-button" data-action="set-profile-control-mode" data-value="auto"/.test(manualOnlyConfigHtml),
   manualOnlyProfileButtonsUnlocked: /data-action="manual-activate-strategy-profile" data-value="trend_strict"/.test(manualOnlyConfigHtml) && !/data-action="manual-activate-strategy-profile" data-value="trend_strict"[^>]*disabled/.test(manualOnlyConfigHtml),
@@ -2957,6 +2957,233 @@ console.log(JSON.stringify({
         self.assertIn('"manualOnlyProfileButtonsUnlocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeCurrentModeLocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeAvoidsLegacyButtons":true', result.stdout)
+
+    def test_ai_analysis_view_uses_truthful_ai_enabled_semantics(self) -> None:
+        script = """
+import { renderAIAnalysisView } from './aats/api/static/modules/views/ai-analysis-view.js';
+
+const html = renderAIAnalysisView({
+  session: { role: 'admin' },
+  blockerControl: {},
+  aiRuntime: {
+    configured_operating_mode: 'ai_decision_maker',
+    effective_operating_mode: 'ai_decision_maker',
+    operating_mode_source: 'manual_selection',
+    provider_ready: true,
+    provider_state: 'healthy',
+    outcome_state: 'auto_downgraded',
+    outcome_review_required: false,
+    shadow_mode_enabled: true,
+    recent_fallback_ratio: 0.04,
+    recent_timeout_count: 0,
+    recent_invalid_output_count: 1,
+    consecutive_failures: 0,
+    consecutive_successes: 13,
+    recent_assessment_count: 25,
+    failure_budget: {
+      remaining_failures_until_degrade: 3,
+      remaining_successes_until_recover: 0,
+    },
+    outcome_policy: {
+      bad_window_threshold: 3,
+      remaining_bad_windows_until_review: 0,
+    },
+  },
+  aiOverview: {
+    runtime: {
+      configured_operating_mode: 'ai_decision_maker',
+      effective_operating_mode: 'ai_decision_maker',
+    },
+    downgrade_state: {
+      provider_state: 'not_loaded',
+      outcome_state: 'not_loaded',
+      failure_budget: {},
+      outcome_policy: {},
+    },
+    latest_assessment: {
+      created_at: '2026-04-25T01:10:33Z',
+      provider_name: 'deepseek',
+      model_name: 'deepseek-v4-flash',
+      model_version: '1.0.0',
+      prompt_version: '0.3.0',
+      provider_latency_ms: 12826.4,
+      output_valid: true,
+      fallback_used: false,
+      economically_actionable: false,
+      estimated_edge_bps: 5,
+      estimated_cost_bps: 11,
+      estimated_net_edge_bps: -6,
+      directional_edge: 0.12,
+      validation_flags: ['low_edge'],
+      rejection_flags: [],
+      regime: 'trend',
+    },
+    latest_baseline_reference: {
+      direction_bias: 'flat',
+      confidence: 0.53,
+      reason_codes: ['baseline_direction_threshold_trend_0_100'],
+    },
+    latest_ai_decision_intent: null,
+    latest_decision_outcome: {
+      decision_source: 'baseline',
+      decision_authority: 'final_decision',
+      final_action: 'hold',
+      final_target_qty: 0,
+      decision_blocked_reasons: [],
+      profile_control_source: 'system',
+    },
+    latest_profile_control_decision: null,
+    latest_shadow_decision: {
+      created_at: '2026-04-25T01:10:35Z',
+      baseline_action: 'hold',
+      baseline_target_qty: 0,
+      ai_shadow_action: 'long',
+      ai_shadow_target_qty: 1,
+      would_override_baseline: true,
+      shadow_action_type: 'override_target',
+      reason_codes: ['low_edge'],
+    },
+    shadow_summary: {
+      window_count: 10,
+      outperformed_rate: 0,
+      status: 'underperforming',
+      review_required: false,
+      latest_net_pnl_delta: -6.9,
+      latest_fee_ratio_delta: 7.0,
+      latest_churn_ratio_delta: 1,
+    },
+    performance_windows: {
+      short: { net_pnl_delta_total: -20.968, outperformed_rate: 0, sample_size: 3 },
+      medium: { net_pnl_delta_total: -34.9467, outperformed_rate: 0, sample_size: 5 },
+      long: { avg_fee_ratio_delta: 8.1261, avg_churn_ratio_delta: 1, review_required_count: 2, sample_size: 10 },
+    },
+    performance_view: {
+      report_count: 20,
+      status_counts: { pending_review: 8, underperforming: 12 },
+      trend: { avg_short_net_pnl_delta: -11.5775, avg_medium_net_pnl_delta: -17.4549 },
+      replay_context: { validation_count: 0, healthy_rate: 0, latest_validation: null },
+      recent_reports: [],
+    },
+  },
+  aiLatest: {},
+  aiRecent: {
+    assessments: [{
+      created_at: '2026-04-25T01:09:30Z',
+      regime: 'trend',
+      directional_edge: 0.12,
+      baseline_override_recommended: false,
+      economically_actionable: false,
+      estimated_net_edge_bps: -6,
+      output_valid: true,
+      fallback_used: true,
+      fallback_reason: 'ai_timeout',
+      validation_flags: ['low_edge'],
+      rejection_flags: [],
+    }],
+    total_available: 1,
+    limit: 8,
+    has_more: false,
+  },
+  aiShadowRecent: {
+    shadow_decisions: [{
+      created_at: '2026-04-25T01:10:35Z',
+      baseline_action: 'hold',
+      baseline_target_qty: 0,
+      ai_shadow_action: 'long',
+      ai_shadow_target_qty: 1,
+      would_override_baseline: true,
+      shadow_action_type: 'override_target',
+      reason_codes: ['low_edge'],
+    }],
+    total_available: 1,
+    limit: 8,
+    has_more: false,
+  },
+  aiShadowEvaluations: {
+    evaluations: [{
+      window_start: '2026-04-25T00:00:00Z',
+      window_end: '2026-04-25T01:00:00Z',
+      baseline_net_pnl: 1,
+      baseline_gross_pnl: 2,
+      baseline_trade_count: 1,
+      shadow_net_pnl: -1,
+      shadow_gross_pnl: 0,
+      shadow_trade_count: 1,
+      baseline_fee_ratio: 0.01,
+      shadow_fee_ratio: 0.08,
+      baseline_churn_ratio: 0,
+      shadow_churn_ratio: 1,
+      shadow_outperformed: false,
+    }],
+    total_available: 1,
+    limit: 8,
+    has_more: false,
+  },
+  profileControlSummary: {
+    control_summary: {
+      safety_profile_required: true,
+      evidence: { cold_start_active: true, closed_trades: 0, min_closed_trades: 0, replay_validations: 0, min_replay_validations: 5 },
+      adaptive_controls: {
+        risk_budget: { multiplier: 0.4, status: 'contracted', reasons: ['execution_errors_elevated'] },
+        execution_aggressiveness: { multiplier: 0.3, status: 'safe_mode', reasons: ['execution_errors_elevated'] },
+      },
+    },
+    activation: { active_profile_id: 'trend_normal', last_activation_at: '2026-04-25T00:59:43Z' },
+    active_revision: { profile_id: 'trend_normal', profile_label: '趋势标准' },
+    latest_selection_decision: {
+      candidate_profile_id: 'trend_normal',
+      transition_class: 'same_risk_optimization',
+      blocked_reasons: [
+        'strategy_profile_already_active',
+        'strategy_profile_switch_cooldown_active',
+        'strategy_profile_reconciliation_not_clean',
+        'strategy_profile_requires_more_replay_validations',
+        'strategy_profile_cold_start_lock_active',
+      ],
+      gating_state: {
+        confidence_floor: 0.8,
+        remaining_closed_trades: 0,
+        remaining_replay_validations: 5,
+        reconciliation_clean: false,
+        fast_track_reasons: ['safety_profile_required', 'execution_errors_elevated'],
+        fast_track_bypass_gates: [],
+      },
+    },
+    latest_optimization_report: {
+      recommended_profile_id: 'execution_degraded_safe',
+      score_delta_vs_active: 0,
+      notes: [],
+    },
+  },
+});
+
+console.log(JSON.stringify({
+  providerUsesRuntime: html.includes('模型服务状态') && html.includes('运行正常') && !html.includes('not_loaded'),
+  modeSourceNotOverstated: html.includes('当前运行模式与配置一致：AI 决策者') && !html.includes('当前运行模式已手动切到 AI 决策者'),
+  decisionSourceLocalized: html.includes('基础策略路径') && !html.includes('>baseline<'),
+  noIntentIsFactual: html.includes('本轮未生成 AI 交易意图') && !html.includes('或 AI 已回退') && !html.includes('当前暂无新的 AI 决策意图'),
+  lowEdgeShownAsAdoptionReason: html.includes('AI 未进入最终路径的原因') && html.includes('净优势偏低'),
+  modelAndLatencyShown: html.includes('deepseek-v4-flash v1.0.0') && html.includes('12.83 秒') && html.includes('prompt 0.3.0'),
+  profileCandidateUsesGateSelection: html.includes('候选策略档位') && html.includes('趋势标准') && html.includes('优化器建议 执行降级安全'),
+  replayZeroIsNotFalseUnhealthy: html.includes('暂无回放验证') && !html.includes('回放健康率</span>\\n              <strong class=\"summary-tile__value\">0</strong>'),
+  windowsUseOverviewSource: html.includes('-20.968') && html.includes('-34.9467') && !html.includes('近 3 窗口净收益差</span>\\n              <strong class=\"summary-tile__value\">暂未形成结论</strong>'),
+  assessmentFallbackIsNotFinalFallback: html.includes('使用回退评估') && !html.includes('最终回退到基础策略') && !html.includes('最终采用模型结果'),
+  shadowCopyIsObservationOnly: html.includes('提出改写建议（未直接执行）') && !html.includes('会不会真的改动') && !html.includes('AI 影子结果'),
+}));
+"""
+        result = _run_node_module(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"providerUsesRuntime":true', result.stdout)
+        self.assertIn('"modeSourceNotOverstated":true', result.stdout)
+        self.assertIn('"decisionSourceLocalized":true', result.stdout)
+        self.assertIn('"noIntentIsFactual":true', result.stdout)
+        self.assertIn('"lowEdgeShownAsAdoptionReason":true', result.stdout)
+        self.assertIn('"modelAndLatencyShown":true', result.stdout)
+        self.assertIn('"profileCandidateUsesGateSelection":true', result.stdout)
+        self.assertIn('"replayZeroIsNotFalseUnhealthy":true', result.stdout)
+        self.assertIn('"windowsUseOverviewSource":true', result.stdout)
+        self.assertIn('"assessmentFallbackIsNotFinalFallback":true', result.stdout)
+        self.assertIn('"shadowCopyIsObservationOnly":true', result.stdout)
 
     def test_ai_config_safety_profile_is_explained_as_guard_not_default(self) -> None:
         script = """
@@ -7461,6 +7688,159 @@ console.log(JSON.stringify({
         self.assertEqual(result.returncode, 0, msg=result.stderr)
         self.assertIn('"strategyShowsSizing":true', result.stdout)
         self.assertIn('"drawerShowsSizing":true', result.stdout)
+
+    def test_decision_drawer_uses_truthful_hold_and_ai_adoption_copy(self) -> None:
+        script = """
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const drawer = buildDecisionDrawer({
+  decision_id: 'decision_truthful_hold',
+  decision_context: { symbol: 'BTC-USDT-SWAP', timeframe: '15m', current_position_qty: '0' },
+  position_target: {
+    product_type: 'derivatives',
+    margin_mode: 'cross',
+    position_intent: 'hold',
+    current_position_qty: '0',
+    target_position_qty: '0',
+    delta_position_qty: '0',
+    target_exposure_side: 'flat',
+    target_leverage: 1,
+    sizing_breakdown: {
+      sizing_mode: 'fixed_order_qty',
+      available_equity: '393.7345',
+      margin_usage_fraction: '0.75',
+      target_leverage: 1,
+      last_price: '77400.5',
+      legacy_reference_qty: '0',
+      resolved_reference_qty: '0',
+      resolved_target_qty: '0',
+    },
+  },
+  policy_decision: { execution_allowed: true, blocker_reasons: [] },
+  risk_decision: { approved: true, rejection_reasons: [] },
+  ai_assessment: {
+    provider_name: 'deepseek',
+    model_name: 'deepseek-v4-flash',
+    model_version: '1.0.0',
+    prompt_version: '0.3.0',
+    provider_latency_ms: 16119.58,
+    output_valid: true,
+    fallback_used: false,
+  },
+  decision_outcome: {
+    decision_source: 'baseline_fallback',
+    decision_authority: 'final_decision',
+    decision_blocked_reasons: [
+      'ai_confidence_below_threshold',
+      'ai_not_economically_actionable',
+    ],
+  },
+  ai_economic_actionability: {
+    economically_actionable: false,
+    estimated_edge_bps: 0,
+    estimated_cost_bps: 11,
+    estimated_net_edge_bps: -11,
+    min_required_net_edge_bps: 2,
+    noise_buffer_bps: 2,
+    required_total_edge_bps: 15,
+    target_expected_signal_edge_bps: 3.97,
+    target_expected_cost_bps: 6,
+    target_expected_net_edge_bps: -4.03,
+    validation_flags: ['low_edge'],
+    rejection_flags: [],
+    market_snapshot_fresh: true,
+    account_snapshot_fresh: true,
+    safe_to_trade: true,
+    execution_condition: 'normal',
+    current_open_order_count: 0,
+    recent_fee_drag_ratio: 0,
+    recent_churn_ratio: 0,
+    recent_low_edge_trade_streak: 0,
+  },
+  ai_decision_audit: {
+    configured_mode: 'ai_decision_maker',
+    assessment_operating_mode: 'ai_decision_maker',
+    provider_name: 'deepseek',
+    baseline_direction: 'flat',
+    ai_direction: 'flat',
+    final_direction: 'flat',
+    final_action: 'hold',
+    decision_source: 'baseline_fallback',
+    decision_authority: 'final_decision',
+    book_runtime_states: [
+      { leg: 'long', state: 'inactive', book_state: 'flat', book_action: 'inactive' },
+      { leg: 'short', state: 'inactive', book_state: 'flat', book_action: 'inactive' },
+    ],
+  },
+  hedge_mode_audit: {
+    position_mode: {
+      configured_derivatives_position_mode: 'hedge',
+      required_exchange_position_mode: 'long_short_mode',
+      exchange_position_mode: 'long_short_mode',
+      exchange_position_mode_matches_configured: true,
+      position_mode_match_required: true,
+    },
+    overlay: {
+      configured_mode: 'independent',
+      effective_mode: 'independent',
+      overlay_source: 'independent_books',
+      state: 'inactive',
+      active: false,
+      parent_target_signal: null,
+      parent_current_signal: null,
+      parent_effective_signal: null,
+      signal_source: null,
+      parent_lifecycle_state: null,
+      parent_target_active: null,
+      parent_inventory_active: null,
+      parent_source_of_truth: null,
+      parent_target_qty: null,
+      parent_current_qty: null,
+      parent_effective_qty: null,
+      reason_codes: [
+        'independent_long_book_signal_below_entry_threshold',
+        'independent_short_book_signal_below_entry_threshold',
+      ],
+      blocked_reasons: [],
+      long_leg_score: 0.04,
+      short_leg_score: 0.01,
+      items: [],
+    },
+  },
+  ai_execution_suggestion: {
+    configured_mode: 'enabled_live',
+    status: 'absent',
+    suggestion_present: false,
+    translation_present: false,
+    latest_translation: null,
+    live_limit_price: null,
+  },
+});
+
+console.log(JSON.stringify({
+  summarySaysNoOrder: drawer.summary.includes('本轮没有下单目标'),
+  hidesOrderSizingForHold: !drawer.body.includes('下单规模分解') && drawer.body.includes('本轮下单规模') && drawer.body.includes('无新增订单'),
+  gateCopyIsNotBlocked: drawer.body.includes('策略门禁') && drawer.body.includes('未阻断') && drawer.body.includes('策略门禁未阻断，但本轮没有下单意图') && drawer.body.includes('风控未阻断，但本轮没有下单意图'),
+  aiCopyIsAdoptionGate: drawer.body.includes('AI 采纳门槛') && drawer.body.includes('AI 未被采纳，沿用基础策略') && !drawer.body.includes('直接接管') && !drawer.body.includes('回退到基础策略'),
+  showsModelLatency: drawer.body.includes('deepseek-v4-flash') && drawer.body.includes('输出有效') && drawer.body.includes('耗时 16.12 秒') && drawer.body.includes('prompt 0.3.0'),
+  hidesEmptyExecutionSuggestion: !drawer.body.includes('AI 受限执行建议'),
+  avoidsFakeOverlayParentSignal: !drawer.body.includes('当前驱动来源待确认驱动') && !drawer.body.includes('最终按待确认方向生效'),
+  belowEntryMeansNoOpen: drawer.body.includes('本轮不打开多书') && drawer.body.includes('本轮不打开空书') && !drawer.body.includes('系统开始收口这条多书'),
+  bookRuntimeHasReadableSpacing: drawer.body.includes('多书 当前未介入') && drawer.body.includes('空书 当前未介入'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"summarySaysNoOrder":true', stdout)
+        self.assertIn('"hidesOrderSizingForHold":true', stdout)
+        self.assertIn('"gateCopyIsNotBlocked":true', stdout)
+        self.assertIn('"aiCopyIsAdoptionGate":true', stdout)
+        self.assertIn('"showsModelLatency":true', stdout)
+        self.assertIn('"hidesEmptyExecutionSuggestion":true', stdout)
+        self.assertIn('"avoidsFakeOverlayParentSignal":true', stdout)
+        self.assertIn('"belowEntryMeansNoOpen":true', stdout)
+        self.assertIn('"bookRuntimeHasReadableSpacing":true', stdout)
 
     def test_decision_drawer_surfaces_book_runtime_state_summary(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

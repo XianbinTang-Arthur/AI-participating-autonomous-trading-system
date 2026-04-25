@@ -51,6 +51,14 @@ function basisPoints(value, digits = 2, fallback = "待确认") {
   return value === null || value === undefined ? fallback : `${formatNumber(value, digits)} 个基点`;
 }
 
+function formatLatencyMs(value) {
+  if (value === null || value === undefined) return "未记录耗时";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return "耗时待确认";
+  if (numeric >= 1000) return `${formatNumber(numeric / 1000, 2)} 秒`;
+  return `${formatNumber(numeric, 0)} 毫秒`;
+}
+
 function configuredMode(runtime = {}) {
   return runtime.configured_operating_mode || "unknown";
 }
@@ -59,8 +67,20 @@ function effectiveMode(runtime = {}) {
   return runtime.effective_operating_mode || "unknown";
 }
 
+function modeDiffersFromConfigured(runtime = {}) {
+  return configuredMode(runtime) !== "unknown"
+    && effectiveMode(runtime) !== "unknown"
+    && configuredMode(runtime) !== effectiveMode(runtime);
+}
+
+function runtimeActor(runtime = {}) {
+  if (runtime.operating_mode_source === "manual_selection" && modeDiffersFromConfigured(runtime)) return "admin";
+  if (effectiveMode(runtime) === "baseline_only") return "system";
+  return "ai";
+}
+
 function toneForRuntime(runtime) {
-  if (runtime?.operating_mode_source === "manual_selection") return "warning";
+  if (runtime?.operating_mode_source === "manual_selection" && modeDiffersFromConfigured(runtime)) return "warning";
   if (effectiveMode(runtime) === "baseline_only" && configuredMode(runtime) !== "baseline_only") {
     return "warning";
   }
@@ -86,10 +106,10 @@ function readableShadowMeta(shadowSummary = {}) {
 
 function decisionSourceSummary(latestOutcome) {
   if (!latestOutcome) return "当前暂无统一决策结果。";
-  if (latestOutcome.decision_source === "ai") return "当前由 AI 直接给出最终决策。";
-  if (latestOutcome.decision_source === "baseline_fallback") return "AI 已给出建议，但系统自动决定回退到基础策略。";
+  if (latestOutcome.decision_source === "ai") return "本轮最终采纳 AI 决策路径。";
+  if (latestOutcome.decision_source === "baseline_fallback") return "AI 评估或意图未通过最终采纳门，最终沿用基础策略路径。";
   if (latestOutcome.decision_source === "admin_override") return "当前由管理员手动覆盖决策链路。";
-  return "当前由系统自动决定继续按基础策略执行。";
+  return "本轮最终沿用基础策略路径。";
 }
 
 function profileControlSummary(latestOutcome, latestProfileControl) {
@@ -122,15 +142,15 @@ function latestDecisionCallout(latestOutcome, latestAssessment, latestProfileCon
   const blocker = blockerSummary(latestOutcome, latestAssessment);
   const profileControl = profileControlSummary(latestOutcome, latestProfileControl);
   const title = latestOutcome?.decision_source === "ai"
-    ? "本轮由 AI 直接给出最终决策"
+    ? "本轮最终采纳 AI 决策"
     : latestOutcome?.decision_source === "baseline_fallback"
-      ? "系统自动决定回退到基础策略"
-      : "本轮仍由基础策略主导";
+      ? "AI 未被最终采纳，沿用基础策略"
+      : "本轮最终沿用基础策略路径";
   const copy = latestOutcome?.decision_source === "ai"
-    ? `AI 这轮已经通过最终门禁，真实动作会按 AI 决策链路落地。当前档位控制状态：${profileControl.value}。`
+    ? `AI 这轮已经通过最终采纳门，真实动作仍会继续经过风控和执行门。当前档位控制状态：${profileControl.value}。`
     : latestOutcome?.decision_source === "baseline_fallback"
-      ? `AI 这轮给出了建议，但没有通过最终门禁，所以系统自动决定回退到基础策略。主要原因：${blocker.value}。`
-      : `当前还没有形成新的 AI 最终决策，所以系统自动决定继续沿用基础策略链路。当前档位控制状态：${profileControl.value}。`;
+      ? `AI 这轮存在评估或意图，但没有通过最终采纳门，系统沿用基础策略路径。主要原因：${blocker.value}。`
+      : `AI 服务可以参与评估，但本轮最终路径仍是基础策略。主要原因：${blocker.value}。当前档位控制状态：${profileControl.value}。`;
   return callout({
     title,
     copy,
@@ -183,6 +203,8 @@ function executionSuggestionCallout(summary = {}) {
 }
 
 function historyCallout(shadowSummary = {}, performanceWindows = {}) {
+  const shortWindow = performanceWindows.short || {};
+  const hasShortDelta = shortWindow.net_pnl_delta_total !== null && shortWindow.net_pnl_delta_total !== undefined;
   const title = shadowSummary.review_required
     ? "策略层 shadow 近期需要人工复核"
     : shadowSummary.window_count
@@ -191,7 +213,9 @@ function historyCallout(shadowSummary = {}, performanceWindows = {}) {
   const copy = shadowSummary.review_required
     ? "最近策略层 shadow 已经触发复核条件，后续要重点看它到底是净收益差转负、手续费拖累升高，还是来回交易过多。这里所有“窗口”都表示最近一组评估样本，不是自然日。"
     : shadowSummary.window_count
-      ? `最近 ${formatNumber(shadowSummary.window_count, 0)} 个窗口里，策略层 shadow 相对基础策略的短窗净收益差为 ${signedOrFallback(performanceWindows.short?.net_pnl_delta_total, 4, "待同步")}。净收益差正数通常更好；手续费拖累差和来回交易差则相反，越低越好。`
+      ? hasShortDelta
+        ? `最近可用评估窗口中，策略层 shadow 相对基础策略的短窗净收益差为 ${signedOrFallback(shortWindow.net_pnl_delta_total, 4, "待同步")}。净收益差正数通常更好；手续费拖累差和来回交易差则相反，越低越好。`
+        : `当前已有 ${formatNumber(shadowSummary.window_count, 0)} 个策略层 shadow 评估窗口，但长期表现窗口尚未同步，不能据此下强结论。`
       : "当前样本还不够，适合先看趋势，不适合据此下强结论。这里的窗口表示最近几组评估样本，不是自然日。";
   return callout({
     title,
@@ -207,10 +231,34 @@ function performanceCallout(performanceView = {}) {
   return callout({
     title: performanceView.report_count ? "长期表现报告已经开始积累" : "当前还没有长期表现报告",
     copy: performanceView.report_count
-      ? `系统目前已经持久化 ${formatNumber(performanceView.report_count, 0)} 条长期表现报告。这里更适合看趋势是否稳定，而不是拿单次窗口结果下判断。收益差正数通常代表策略层 shadow 更好；回放健康率越接近 1 越稳定。`
+      ? `系统目前已经持久化 ${formatNumber(performanceView.report_count, 0)} 条长期表现报告。这里更适合看趋势是否稳定，而不是拿单次窗口结果下判断。收益差正数通常代表策略层 shadow 更好；只有存在回放验证时，回放健康率才有解释价值。`
       : "只有当长周期表现开始稳定积累后，这里的长期报告才真正有参考价值。这里的窗口表示最近几组评估样本，不是自然日。",
     pills: [pill(statusCounts, "info")],
   });
+}
+
+function replayHealthValue(replayContext = {}) {
+  if (Number(replayContext.validation_count ?? 0) <= 0) return "暂无回放验证";
+  return formatNumber(replayContext.healthy_rate ?? 0, 3);
+}
+
+function assessmentOutputStatus(item = {}) {
+  if (item.fallback_used) {
+    return {
+      value: "使用回退评估",
+      meta: humanError(item.fallback_reason || "ai_fallback_used"),
+    };
+  }
+  if (item.output_valid === false) {
+    return {
+      value: "模型输出无效",
+      meta: localizeList(item.rejection_flags || item.validation_flags, "当前没有额外处理说明。"),
+    };
+  }
+  return {
+    value: "模型输出有效",
+    meta: localizeList(item.validation_flags || item.rejection_flags, "当前没有额外处理说明。"),
+  };
 }
 
 export function renderAIAnalysisSectionCards(data) {
@@ -228,7 +276,7 @@ export function renderAIAnalysisSectionCards(data) {
   const evaluations = evaluationsPayload.evaluations || [];
   const shadowSummary = aiOverview.shadow_summary || {};
   const performanceView = aiOverview.performance_view || {};
-  const performanceWindows = performanceView.windows || {};
+  const performanceWindows = aiOverview.performance_windows || performanceView.windows || performanceView.latest_report?.windows || {};
   const recentReports = performanceView.recent_reports || [];
   const replayContext = performanceView.replay_context || {};
   const hasHistoryRecords = recentAssessments.length > 0 || shadowRecent.length > 0 || evaluations.length > 0;
@@ -323,8 +371,8 @@ export function renderAIAnalysisSectionCards(data) {
                     `<div><strong>${formatRelativeAge(item.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.created_at)}</div><div class="inline-pills">${actorTags(item.fallback_used ? "system" : "ai", item.fallback_used ? "ai" : null)}</div></div>`,
                     `<div><strong>${humanState(item.regime || "unknown")}</strong><div class="table-meta">方向优势 ${formatNumber(item.directional_edge ?? 0, 2)}</div></div>`,
                     `<div><strong>${item.baseline_override_recommended ? "建议改写基础策略" : "不建议改写"}</strong><div class="table-meta">${localizeList(item.override_reason_codes, "当前没有额外改写理由。")}</div></div>`,
-                    `<div><strong>${item.economically_actionable ? "值得继续做" : "现在不值得做"}</strong><div class="table-meta">净边际 ${basisPoints(item.estimated_net_edge_bps, 2)}</div></div>`,
-                    `<div><strong>${item.fallback_used ? "最终回退到基础策略" : "最终采用模型结果"}</strong><div class="table-meta">${localizeList(item.rejection_flags || item.validation_flags, "当前没有额外处理说明。")}</div></div>`,
+                    `<div><strong>${item.economically_actionable ? "通过经济门槛" : "未通过经济门槛"}</strong><div class="table-meta">净边际 ${basisPoints(item.estimated_net_edge_bps, 2)}</div></div>`,
+                    `<div><strong>${assessmentOutputStatus(item).value}</strong><div class="table-meta">${assessmentOutputStatus(item).meta}</div></div>`,
                   ]),
                   "当前还没有可复盘的 AI 判断记录。",
                   assessmentCards(recentAssessments)
@@ -341,12 +389,12 @@ export function renderAIAnalysisSectionCards(data) {
               </div>
               <div class="span-12">
                 ${responsiveTable(
-                  ["时间", "基础策略会怎么做", "AI 影子会怎么做", "会不会真的改动", "主要差异"],
+                  ["时间", "基础策略会怎么做", "策略层 shadow 会怎么做", "是否形成改写建议", "主要差异"],
                   shadowRecent.map((item) => [
                     `<div><strong>${formatRelativeAge(item.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(item.created_at)}</div><div class="inline-pills">${actorTags("system", "ai")}</div></div>`,
                     `<div><strong>${humanState(item.baseline_action || "unknown")}</strong><div class="table-meta">目标 ${formatNumber(item.baseline_target_qty ?? 0)}</div></div>`,
                     `<div><strong>${humanState(item.ai_shadow_action || "unknown")}</strong><div class="table-meta">目标 ${formatNumber(item.ai_shadow_target_qty ?? 0)}</div></div>`,
-                    item.would_override_baseline ? pill("会改写基础策略", "warning") : pill("与基础策略一致", "positive"),
+                    item.would_override_baseline ? pill("提出改写建议（未直接执行）", "warning") : pill("与基础策略一致", "positive"),
                     `<div><strong>${humanState(item.shadow_action_type || "unknown")}</strong><div class="table-meta">${localizeList(item.reason_codes, "当前没有额外差异说明。")}</div></div>`,
                   ]),
                   "当前还没有可复盘的影子动作记录。",
@@ -372,7 +420,7 @@ export function renderAIAnalysisSectionCards(data) {
                   },
                 ])}
                 ${responsiveTable(
-                  ["评估窗口", "基础策略结果", "AI 影子结果", "成本与来回交易", "这一窗谁更好"],
+                  ["评估窗口", "基础策略结果", "策略层 shadow 结果", "成本与来回交易", "这一窗谁更好"],
                   evaluations.map((item) => [
                     `<div><strong>${formatMaybeTimestamp(item.window_end)}</strong><div class="table-meta">${formatMaybeTimestamp(item.window_start)} ~ ${formatMaybeTimestamp(item.window_end)}</div><div class="inline-pills">${actorTags("system")}</div></div>`,
                     `<div><strong>净收益 ${formatNumber(item.baseline_net_pnl ?? 0)}</strong><div class="table-meta">毛收益 ${formatNumber(item.baseline_gross_pnl ?? 0)} / 成交 ${formatNumber(item.baseline_trade_count ?? 0, 0)} 笔</div></div>`,
@@ -381,7 +429,7 @@ export function renderAIAnalysisSectionCards(data) {
                     item.shadow_outperformed === null
                       ? pill("尚未得出结论", "outline")
                       : item.shadow_outperformed
-                        ? pill("影子结果更优", "positive")
+                        ? pill("策略层 shadow 更优", "positive")
                         : pill("基础策略更优", "warning"),
                   ]),
                   "当前还没有影子收益对比结果。",
@@ -430,20 +478,24 @@ export function renderAIAnalysisSectionCards(data) {
               {
                 label: "平均短窗净收益差",
                 value: signedOrFallback(performanceView.trend?.avg_short_net_pnl_delta, 4, "暂未形成结论"),
-                meta: "基于最近 3 个窗口，正数通常表示 AI 影子更好",
+                meta: "基于最近 3 个窗口，正数通常表示策略层 shadow 更好",
                 tone: Number(performanceView.trend?.avg_short_net_pnl_delta || 0) >= 0 ? "positive" : "warning",
               },
               {
                 label: "平均中窗净收益差",
                 value: signedOrFallback(performanceView.trend?.avg_medium_net_pnl_delta, 4, "暂未形成结论"),
-                meta: "基于最近 5 个窗口，正数通常表示 AI 影子更好",
+                meta: "基于最近 5 个窗口，正数通常表示策略层 shadow 更好",
                 tone: Number(performanceView.trend?.avg_medium_net_pnl_delta || 0) >= 0 ? "positive" : "warning",
               },
               {
                 label: "回放健康率",
-                value: formatNumber(replayContext.healthy_rate ?? 0, 3),
-                meta: `验证 ${formatNumber(replayContext.validation_count ?? 0, 0)} 次 | 越接近 1 越稳定`,
-                tone: Number(replayContext.healthy_rate || 0) >= 0.8 ? "positive" : "warning",
+                value: replayHealthValue(replayContext),
+                meta: Number(replayContext.validation_count ?? 0) > 0
+                  ? `验证 ${formatNumber(replayContext.validation_count ?? 0, 0)} 次 | 越接近 1 越稳定`
+                  : "当前还没有回放验证样本，不能按 0 解读为不健康。",
+                tone: Number(replayContext.validation_count ?? 0) > 0
+                  ? Number(replayContext.healthy_rate || 0) >= 0.8 ? "positive" : "warning"
+                  : "outline",
               },
             ])}
             ${responsiveTable(
@@ -477,8 +529,11 @@ function aiRuntimeNarrative(runtime, latestDegradation) {
   if (!runtime || Object.keys(runtime).length === 0) {
     return "当前暂无 AI 决策链路运行状态，可能是页面刚加载完，或当前配置没有启用 AI。";
   }
-  if (runtime.operating_mode_source === "manual_selection") {
+  if (runtime.operating_mode_source === "manual_selection" && modeDiffersFromConfigured(runtime)) {
     return `当前运行模式已手动切到 ${humanState(effectiveMode(runtime))}。配置默认仍是 ${humanState(configuredMode(runtime))}。`;
+  }
+  if (runtime.operating_mode_source === "manual_selection") {
+    return `当前运行模式与配置一致：${humanState(effectiveMode(runtime))}。虽然存在手动选择记录，但它没有改变当前配置目标。`;
   }
   if (effectiveMode(runtime) === "baseline_only" && configuredMode(runtime) !== "baseline_only") {
     return `AI 当前没有真实参与下单决策链路。最近一次降级原因：${humanError(runtime.degradation_reason || latestDegradation?.reason_code)}。`;
@@ -495,9 +550,116 @@ function aiRuntimeNarrative(runtime, latestDegradation) {
   return "AI 当前参与真实交易决策，但最终落地前仍要同时通过经济可行动性、风控和执行状态等门禁。";
 }
 
+function providerState(runtime = {}, downgradeState = {}) {
+  const state = runtime.provider_state || downgradeState.provider_state;
+  if ((!state || state === "not_loaded") && runtime.provider_ready === true) return "healthy";
+  return state || "unknown";
+}
+
+function outcomeState(runtime = {}, downgradeState = {}) {
+  const state = runtime.outcome_state || downgradeState.outcome_state;
+  if ((!state || state === "not_loaded") && runtime.outcome_review_required === false) return "healthy";
+  return state || "unknown";
+}
+
+function toneForOutcomeState(runtime = {}, downgradeState = {}, shadowSummary = {}) {
+  const state = outcomeState(runtime, downgradeState);
+  if (runtime.outcome_review_required || shadowSummary.review_required) return "warning";
+  if (state === "healthy") return "positive";
+  if (state === "unknown") return "outline";
+  return "warning";
+}
+
+function outcomeStateMeta(runtime = {}, downgradeState = {}, shadowSummary = {}) {
+  const state = outcomeState(runtime, downgradeState);
+  if (runtime.outcome_review_required || shadowSummary.review_required) return "当前已进入人工复核流程。";
+  if (state === "auto_downgraded") return "结果策略处于自动降级状态；当前没有新的人工复核动作。";
+  if (state === "healthy") return "当前没有新的人工复核。";
+  return "当前结果状态需要继续观察。";
+}
+
+function failureBudgetRows(runtime = {}, downgradeState = {}) {
+  const failureBudget = runtime.failure_budget || downgradeState.failure_budget || {};
+  const outcomePolicy = runtime.outcome_policy || downgradeState.outcome_policy || {};
+  return [
+    [
+      "失败预算",
+      failureBudget.remaining_failures_until_degrade === null || failureBudget.remaining_failures_until_degrade === undefined
+        ? "失败预算待同步"
+        : `还能承受失败 ${formatNumber(failureBudget.remaining_failures_until_degrade, 0)} 次`,
+      failureBudget.remaining_successes_until_recover === null || failureBudget.remaining_successes_until_recover === undefined
+        ? "恢复预算待同步"
+        : `恢复还需成功 ${formatNumber(failureBudget.remaining_successes_until_recover, 0)} 次`,
+    ],
+    [
+      "结果预算",
+      outcomePolicy.bad_window_threshold === null || outcomePolicy.bad_window_threshold === undefined
+        ? "结果预算待同步"
+        : `坏窗口阈值 ${formatNumber(outcomePolicy.bad_window_threshold, 0)}`,
+      outcomePolicy.remaining_bad_windows_until_review === null || outcomePolicy.remaining_bad_windows_until_review === undefined
+        ? "剩余坏窗口待同步"
+        : `还可承受 ${formatNumber(outcomePolicy.remaining_bad_windows_until_review, 0)} 个坏窗口`,
+    ],
+  ];
+}
+
+function aiIntentSummary(latestIntent, latestAssessment) {
+  if (latestIntent) {
+    return {
+      value: humanState(latestIntent.direction),
+      meta: `${humanState(latestIntent.action)} / 目标 ${formatNumber(latestIntent.target_qty ?? 0)} / ${summarizeLocalizedList(latestIntent.reason_codes, { fallback: "当前没有额外意图说明。", limit: 3 })}`,
+      tone: "warning",
+    };
+  }
+  if (latestAssessment) {
+    const reason = summarizeLocalizedList(
+      latestAssessment.validation_flags || latestAssessment.rejection_flags || [],
+      { fallback: latestAssessment.economically_actionable ? "AI 评估存在，但本轮没有生成交易意图。" : "AI 评估存在，但未通过经济门槛。", limit: 3 },
+    );
+    return {
+      value: "本轮未生成 AI 交易意图",
+      meta: reason,
+      tone: latestAssessment.economically_actionable ? "info" : "warning",
+    };
+  }
+  return {
+    value: "当前暂无 AI 评估",
+    meta: "当前没有可展示的 AI assessment 或交易意图。",
+    tone: "outline",
+  };
+}
+
 function economicGateRows(latestAssessment, latestOutcome, latestProfileControl) {
   if (!latestAssessment) return [];
+  const modelParts = [
+    latestAssessment.model_name,
+    latestAssessment.model_version ? `v${latestAssessment.model_version}` : null,
+  ].filter(Boolean);
+  const modelValue = modelParts.join(" ") || "模型待确认";
+  const outputValue = latestAssessment.output_valid === true
+    ? "模型输出有效"
+    : latestAssessment.output_valid === false
+      ? "模型输出无效"
+      : "输出状态待确认";
   return [
+    [
+      "模型与 prompt",
+      modelValue,
+      [
+        latestAssessment.provider_name ? `provider ${latestAssessment.provider_name}` : null,
+        latestAssessment.prompt_version ? `prompt ${latestAssessment.prompt_version}` : null,
+      ].filter(Boolean).join(" / ") || "当前没有模型元数据。",
+    ],
+    [
+      "模型输出与时效",
+      outputValue,
+      [
+        formatLatencyMs(latestAssessment.provider_latency_ms),
+        latestAssessment.fallback_used
+          ? `使用回退评估：${humanError(latestAssessment.fallback_reason)}`
+          : "未使用回退评估",
+      ].join(" / "),
+    ],
     [
       "预期优势",
       basisPoints(latestAssessment.estimated_edge_bps, 2),
@@ -626,7 +788,14 @@ export function hasExecutionSuggestionContent(summary = {}) {
 }
 
 function blockerSummary(latestOutcome, latestAssessment) {
-  const reasons = splitCodeList(latestOutcome?.decision_blocked_reasons || latestAssessment?.rejection_flags || []);
+  const outcomeReasons = splitCodeList(latestOutcome?.decision_blocked_reasons || []);
+  const rejectionReasons = splitCodeList(latestAssessment?.rejection_flags || []);
+  const validationReasons = splitCodeList(latestAssessment?.validation_flags || []);
+  const reasons = outcomeReasons.length
+    ? outcomeReasons
+    : rejectionReasons.length
+      ? rejectionReasons
+      : validationReasons;
   if (!reasons.length) {
     return {
       value: "当前没有额外决策链路阻断",
@@ -651,7 +820,7 @@ function assessmentCards(assessments) {
     fields: [
       { label: "AI 会不会改主策略", value: item.baseline_override_recommended ? "建议改写基础策略" : "不建议改写" },
       { label: "值不值得做", value: basisPoints(item.estimated_net_edge_bps, 2), meta: `方向优势 ${formatNumber(item.directional_edge ?? 0, 2)}` },
-      { label: "最终怎么处理", value: item.fallback_used ? "最终走回退结果" : "最终采用模型结果" },
+      { label: "模型输出状态", value: assessmentOutputStatus(item).value, meta: assessmentOutputStatus(item).meta },
     ],
     details: [
       { label: "建议这样处理的原因", value: localizeList(item.override_reason_codes, "当前没有额外改写理由") },
@@ -736,7 +905,7 @@ export function renderAISections(data) {
   const blockerControl = data.blockerControl || {};
   const overview = data.aiOverview || {};
   const performanceView = overview.performance_view || {};
-  const runtime = overview.runtime || data.aiRuntime || {};
+  const runtime = data.aiRuntime || overview.runtime || {};
   const latest = data.aiLatest || {};
   const recentPayload = data.aiRecent || {};
   const recentAssessments = recentPayload.assessments || [];
@@ -752,11 +921,13 @@ export function renderAISections(data) {
   const evaluationsPayload = data.aiShadowEvaluations || {};
   const evaluations = evaluationsPayload.evaluations || [];
   const shadowSummary = overview.shadow_summary || {};
-  const performanceWindows = overview.performance_windows || {};
+  const performanceWindows = overview.performance_windows || overview.performance_view?.windows || overview.performance_view?.latest_report?.windows || {};
   const downgradeState = overview.downgrade_state || {};
   const executionSuggestion = overview.latest_execution_suggestion || latest.execution_suggestion || {};
   const aiReviewBlocker = (blockerControl.blockers || []).find((item) => item?.blocker === "ai_degraded_requires_manual_review") || null;
   const latestEconomicRows = economicGateRows(latestAssessment, latestOutcome, latestProfileControl);
+  const latestIntentSummary = aiIntentSummary(latestIntent, latestAssessment);
+  const shadowWindowCount = Number(shadowSummary.window_count ?? 0);
 
   const analysisSections = renderAIAnalysisSectionCards(data);
   return {
@@ -772,7 +943,7 @@ export function renderAISections(data) {
             value: humanState(effectiveMode(runtime)),
             meta: `默认运行模式 ${humanState(configuredMode(runtime))}`,
             tone: toneForRuntime(runtime),
-            badge: actorTags(runtime.operating_mode_source === "manual_selection" ? "admin" : "system"),
+            badge: actorTags(runtimeActor(runtime)),
           },
           {
             label: "最近一轮真实决策结果",
@@ -789,16 +960,16 @@ export function renderAISections(data) {
           },
           {
             label: "模型服务状态",
-            value: humanState(downgradeState.provider_state || "healthy"),
+            value: humanState(providerState(runtime, downgradeState)),
             meta: runtime.provider_ready ? "模型服务当前可用。" : "模型服务当前不可用。",
             tone: runtime.provider_ready ? "positive" : "warning",
             badge: actorTags("ai"),
           },
           {
             label: "人工复核状态",
-            value: humanState(downgradeState.outcome_state || "healthy"),
-            meta: shadowSummary.review_required ? "当前已进入人工复核流程。" : "当前没有新的人工复核。",
-            tone: shadowSummary.review_required ? "warning" : "positive",
+            value: humanState(outcomeState(runtime, downgradeState)),
+            meta: outcomeStateMeta(runtime, downgradeState, shadowSummary),
+            tone: toneForOutcomeState(runtime, downgradeState, shadowSummary),
             badge: actorTags("admin"),
           },
         ])}
@@ -809,7 +980,7 @@ export function renderAISections(data) {
               : "当前允许 AI 参与真实交易决策",
           copy: aiRuntimeNarrative(runtime, latestDegradation),
           pills: [
-            actorTags(runtime.operating_mode_source === "manual_selection" ? "admin" : effectiveMode(runtime) === "baseline_only" ? "system" : "ai"),
+            actorTags(runtimeActor(runtime)),
             pill(`策略层 shadow ${runtime.shadow_mode_enabled ? "已开启" : "未开启"}`, runtime.shadow_mode_enabled ? "info" : "outline"),
           ],
         })}
@@ -820,7 +991,7 @@ export function renderAISections(data) {
             meta: `最近评估 ${formatNumber(runtime.recent_assessment_count ?? 0, 0)} 次`,
           },
           {
-            label: "近期回退到基础策略比率",
+            label: "AI 评估回退比率",
             value: formatNumber(runtime.recent_fallback_ratio ?? 0, 3),
             meta: `timeout ${formatNumber(runtime.recent_timeout_count ?? 0, 0)} / 无效输出 ${formatNumber(runtime.recent_invalid_output_count ?? 0, 0)}`,
           },
@@ -829,10 +1000,10 @@ export function renderAISections(data) {
                 value: reviewResolutionSummary(runtime, latestDegradation) || humanError(latestDegradation?.reason_code),
                 meta: formatMaybeTimestamp(latestDegradation?.created_at),
               },
-              {
+          {
                 label: "策略层 shadow 优于基础策略",
-            value: formatNumber(shadowSummary.outperformed_rate ?? 0, 3),
-            meta: `评估窗口 ${formatNumber(shadowSummary.window_count ?? 0, 0)} / 状态 ${humanState(shadowSummary.status || "insufficient_data")}`,
+            value: shadowWindowCount > 0 ? formatNumber(shadowSummary.outperformed_rate ?? 0, 3) : "暂无样本",
+            meta: `评估窗口 ${formatNumber(shadowWindowCount, 0)} / 状态 ${humanState(shadowSummary.status || "insufficient_data")}`,
           },
         ])}
         ${latestDegradation
@@ -854,8 +1025,7 @@ export function renderAISections(data) {
                 reviewResolutionSummary(runtime, latestDegradation) || "",
               ]]
             : []),
-          ["失败预算", `还能承受失败 ${formatNumber(downgradeState.failure_budget?.remaining_failures_until_degrade ?? 0, 0)} 次`, `恢复还需成功 ${formatNumber(downgradeState.failure_budget?.remaining_successes_until_recover ?? 0, 0)} 次`],
-          ["结果预算", `坏窗口阈值 ${formatNumber(downgradeState.outcome_policy?.bad_window_threshold ?? 0, 0)}`, `还可承受 ${formatNumber(downgradeState.outcome_policy?.remaining_bad_windows_until_review ?? 0, 0)} 个坏窗口`],
+          ...failureBudgetRows(runtime, downgradeState),
         ])}
       `,
     }),
@@ -878,11 +1048,9 @@ export function renderAISections(data) {
               },
               {
                 label: "AI 决策意图",
-                value: humanState(latestIntent?.direction || "unknown"),
-                meta: latestIntent
-                  ? `${humanState(latestIntent.action)} / 目标 ${formatNumber(latestIntent.target_qty ?? 0)} / ${summarizeLocalizedList(latestIntent.reason_codes, { fallback: "当前没有额外意图说明。", limit: 3 })}`
-                  : "当前暂无新的 AI 决策意图",
-                tone: latestIntent ? "warning" : "outline",
+                value: latestIntentSummary.value,
+                meta: latestIntentSummary.meta,
+                tone: latestIntentSummary.tone,
                 badge: actorTags("ai"),
               },
               {
@@ -918,9 +1086,9 @@ export function renderAISections(data) {
             ${kvList([
               ["判断时间", formatMaybeTimestamp(latestAssessment?.created_at), formatRelativeAge(latestAssessment?.created_at)],
               ["基础策略参考", humanState(latestBaseline?.direction_bias || "unknown"), latestBaseline ? `置信度 ${formatNumber(latestBaseline.confidence ?? 0, 2)} / ${summarizeLocalizedList(latestBaseline.reason_codes, { fallback: "当前没有额外信号说明。", limit: 4 })}` : "当前暂无新的基础策略参考"],
-              ["AI 决策意图", latestIntent ? `${humanState(latestIntent.direction)} / ${humanState(latestIntent.action)}` : "当前暂无新的 AI 决策意图", latestIntent ? `目标 ${formatNumber(latestIntent.target_qty ?? 0)} / ${summarizeLocalizedList(latestIntent.reason_codes, { fallback: "当前没有额外意图说明。", limit: 3 })}` : "多半仍在基础策略决策链路，或 AI 已回退"],
+              ["AI 决策意图", latestIntentSummary.value, latestIntentSummary.meta],
               ["最终决策来源", humanState(latestOutcome?.decision_source || "baseline"), latestOutcome ? humanState(latestOutcome.decision_authority || "reference_only") : "当前暂无统一决策结果"],
-              ["AI 未被采用的主要原因", blockerSummary(latestOutcome, latestAssessment).value, blockerSummary(latestOutcome, latestAssessment).meta],
+              ["AI 未进入最终路径的原因", blockerSummary(latestOutcome, latestAssessment).value, blockerSummary(latestOutcome, latestAssessment).meta],
               ["策略档位控制", profileControlSummary(latestOutcome, latestProfileControl).value, profileControlSummary(latestOutcome, latestProfileControl).meta],
               ["最新策略层 shadow 动作", humanState(latestShadowDecision?.ai_shadow_action || "unknown"), latestShadowDecision ? `相对基础策略：${humanState(latestShadowDecision.shadow_action_type)}` : "当前暂无策略层 shadow 动作"],
             ])}
