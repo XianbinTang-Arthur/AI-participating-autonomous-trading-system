@@ -33,6 +33,8 @@ class TestRuntimeModeBadgeWiring(unittest.TestCase):
         self.assertIn("baseline_only", html)
         self.assertIn("reference_only", html)
         self.assertIn("ai_decision_maker", html)
+        self.assertIn("风控", html)
+        self.assertNotIn("AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE", html)
 
     def test_shell_renderer_exposes_runtime_mode_badge_render(self) -> None:
         source = (STATIC_DIR / "modules" / "shell-renderer.js").read_text(encoding="utf-8")
@@ -46,6 +48,7 @@ class TestRuntimeModeBadgeWiring(unittest.TestCase):
         self.assertIn("runtime-mode-badge--baseline-only", source)
         self.assertIn("runtime-mode-badge--ai-assisted", source)
         self.assertIn("runtime-mode-badge--ai-decision-maker", source)
+        self.assertIn("AI 决策者已启用", source)
         # 必须在 renderShell 内被调用
         render_shell_block = source.split("function renderShell()", 1)[1].split("}", 1)[0]
         self.assertIn("renderRuntimeModeBadge", render_shell_block)
@@ -56,6 +59,7 @@ class TestRuntimeModeBadgeWiring(unittest.TestCase):
         self.assertIn(".runtime-mode-badge--ai-assisted", css)
         self.assertIn(".runtime-mode-badge--ai-decision-maker", css)
         self.assertIn(".runtime-mode-dialog", css)
+        self.assertNotIn("rgba(220, 38, 38", css)
 
     def test_core_specs_pulls_ai_runtime(self) -> None:
         store = (STATIC_DIR / "modules" / "store.js").read_text(encoding="utf-8")

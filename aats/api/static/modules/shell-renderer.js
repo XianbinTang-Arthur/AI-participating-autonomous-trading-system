@@ -88,8 +88,8 @@ export function createDashboardShellRenderer({
   //
   // 颜色/文案 (2026-04-23 勘误后):
   //   baseline_only      → 灰底蓝字 "仅 baseline, 不使用 AI"
-  //   ai_assisted        → 橙底白字 "AI 咨询实盘中"
-  //   ai_decision_maker  → 红底白字 "AI 主导实盘中"
+  //   ai_assisted        → 温和琥珀色 "AI 咨询实盘中"
+  //   ai_decision_maker  → 稳态蓝色 "AI 决策者已启用"
   //   其它 / 未知         → 灰底, "加载中…"
   function renderRuntimeModeBadge() {
     const badge = nodes.runtimeModeBadge;
@@ -120,8 +120,8 @@ export function createDashboardShellRenderer({
       title = "AI 咨询模式,baseline 决定下单。真金白银运行中。点击查看语义文档。";
     } else if (effective === "ai_decision_maker") {
       toneClass = "runtime-mode-badge--ai-decision-maker";
-      text = "ai_decision_maker · final_decision · AI 主导实盘中";
-      title = "AI 完全主导下单,baseline 仅作 fallback。真金白银运行中。点击查看语义文档。";
+      text = "ai_decision_maker · final_decision · AI 决策者已启用";
+      title = "AI 决策者模式已启用；AI 给出最终交易意图，仍受风控、kill switch、执行门与审计链约束。点击查看语义文档。";
     } else {
       toneClass = "runtime-mode-badge--unknown";
       text = `${effective} · 未知模式`;

@@ -31,6 +31,9 @@ export function renderAIConfigView(data) {
   const activeRevision = strategyProfiles.active_revision || {};
   const latestSelectionDecision = strategyProfiles.latest_selection_decision || {};
   const latestOptimizationReport = strategyProfiles.latest_optimization_report || {};
+  const activationHistory = Array.isArray(strategyProfiles.activation_history)
+    ? strategyProfiles.activation_history
+    : [];
   const latestProfileControl = aiState.latest_profile_control_decision || {};
   const canAdmin = session.role === "admin" || session.identity === "api_key_write";
   const summaryError = data.error || null;
@@ -58,6 +61,7 @@ export function renderAIConfigView(data) {
           runtime,
           activeRevision,
           activation,
+          activationHistory,
           latestProfileControl,
           latestSelectionDecision,
           latestOptimizationReport,
@@ -100,6 +104,7 @@ function renderManualOperatingModePanel({ runtime = {}, canAdmin = false }) {
         title: summary.title,
         copy: summary.copy,
         pills: [actorTags(...summary.actors)],
+        tone: summary.tone,
       })}
       ${summaryStrip([
         {
@@ -137,13 +142,17 @@ function renderProfileControlPanel({
   runtime = {},
   activeRevision = {},
   activation = {},
+  activationHistory = [],
   latestProfileControl = {},
   latestSelectionDecision = {},
   latestOptimizationReport = {},
   canAdmin = false,
 }) {
   const activeProfileId = currentStrategyProfile(activeRevision, activation);
-  const summary = autoControlSummary(runtime, latestProfileControl, latestSelectionDecision, latestOptimizationReport);
+  const summary = autoControlSummary(runtime, latestProfileControl, latestSelectionDecision, latestOptimizationReport, {
+    activeProfileId,
+    activationHistory,
+  });
   const configured = Boolean(runtime.strategy_profile_auto_control_configured);
   const autoEnabled = Boolean(runtime.strategy_profile_auto_control_effective);
   const profileButtons = PROFILE_OPTIONS.map(([profileId, label, tone]) =>
@@ -151,7 +160,7 @@ function renderProfileControlPanel({
       profileId === activeProfileId ? `${label}（当前）` : label,
       "manual-activate-strategy-profile",
       profileId,
-      profileId === activeProfileId ? "primary" : tone,
+      profileId === activeProfileId ? activeProfileButtonTone(profileId) : tone,
       {
         disabled: !canAdmin || autoEnabled || profileId === activeProfileId,
         title: !canAdmin
@@ -175,6 +184,7 @@ function renderProfileControlPanel({
         title: summary.title,
         copy: summary.copy,
         pills: [actorTags(...summary.actors)],
+        tone: summary.tone,
       })}
       ${summaryStrip([
         {
@@ -194,9 +204,9 @@ function renderProfileControlPanel({
         {
           label: "当前档位",
           value: readableProfile(activeProfileId, "待确认"),
-          meta: autoEnabled ? "当前正在自动管理这个档位" : "当前手动固定在这个档位",
-          tone: "info",
-          badge: actorTags("system"),
+          meta: activeProfileMeta(activeProfileId, autoEnabled, activationHistory),
+          tone: activeProfileTone(activeProfileId),
+          badge: actorTags(activeProfileId === "execution_degraded_safe" ? "risk_control" : "system"),
         },
         {
           label: "紧急安全切档",
@@ -262,9 +272,11 @@ function renderCurrentConfigurationCard({ runtimeProfiles = {}, runtime = {}, ai
         {
           label: "策略档位",
           value: readableProfile(activeRevision.profile_id || activation.active_profile_id, "待确认"),
-          meta: activation.active_profile_id ? "当前阈值由这套档位控制" : "当前没有活动档位",
-          tone: activation.active_profile_id ? "positive" : "outline",
-          badge: actorTags("system"),
+          meta: activation.active_profile_id
+            ? activeProfileMeta(activeRevision.profile_id || activation.active_profile_id, true, [])
+            : "当前没有活动档位",
+          tone: activation.active_profile_id ? activeProfileTone(activeRevision.profile_id || activation.active_profile_id) : "outline",
+          badge: actorTags((activeRevision.profile_id || activation.active_profile_id) === "execution_degraded_safe" ? "risk_control" : "system"),
         },
         {
           label: "策略层 shadow",
@@ -331,10 +343,28 @@ function runtimeModeSummary(runtime = {}) {
   };
 }
 
-function autoControlSummary(runtime = {}, latestProfileControl = {}, latestSelectionDecision = {}, latestOptimizationReport = {}) {
+function autoControlSummary(
+  runtime = {},
+  latestProfileControl = {},
+  latestSelectionDecision = {},
+  latestOptimizationReport = {},
+  context = {},
+) {
   const configured = Boolean(runtime.strategy_profile_auto_control_configured);
   const enabled = Boolean(runtime.strategy_profile_auto_control_effective);
   const candidate = latestOptimizationReport.recommended_profile_id || latestSelectionDecision.candidate_profile_id || "";
+  const activeProfileId = String(context.activeProfileId || "").trim();
+  const activationHistory = Array.isArray(context.activationHistory) ? context.activationHistory : [];
+  const latestActivation = activationHistory[0] || {};
+  const latestTriggerType = String(latestActivation.trigger_type || "").trim();
+  const fastTrackReasons = [
+    ...((latestSelectionDecision.gating_state || {}).fast_track_reasons || []),
+    ...((latestSelectionDecision.fast_track_state || {}).reasons || []),
+  ];
+  const activeIsExecutionSafety = activeProfileId === "execution_degraded_safe";
+  const safetyGuardEvidence = latestTriggerType === "system_guard"
+    || latestSelectionDecision.execution_state === "executed"
+    || fastTrackReasons.length > 0;
 
   if (!configured && !enabled) {
     return {
@@ -361,6 +391,14 @@ function autoControlSummary(runtime = {}, latestProfileControl = {}, latestSelec
     };
   }
   if (latestProfileControl.applied) {
+    if (latestProfileControl.requested_profile_id === "execution_degraded_safe") {
+      return {
+        title: "安全保护档已生效",
+        copy: "这不是默认档位。系统已经把当前档位切入执行降级安全，用来降低决策频率和执行风险。",
+        tone: "warning",
+        actors: ["risk_control", "system"],
+      };
+    }
     return {
       title: `本轮已切到${readableProfile(latestProfileControl.requested_profile_id)}`,
       copy: "系统已经完成这一轮自动换档。",
@@ -368,7 +406,28 @@ function autoControlSummary(runtime = {}, latestProfileControl = {}, latestSelec
       actors: ["system", "ai"],
     };
   }
+  if (enabled && activeIsExecutionSafety) {
+    return {
+      title: "安全保护档已生效",
+      copy: safetyGuardEvidence
+        ? `这不是默认档位。最近一次系统保护把当前档位切入执行降级安全；触发线索：${summarizeLocalizedList(fastTrackReasons, {
+          fallback: readableState(latestTriggerType || "system_guard"),
+          limit: 3,
+        })}`
+        : "这不是默认档位。当前 active profile 是执行降级安全，但页面没有拿到明确触发原因；请复查激活历史和风控事件。",
+      tone: "warning",
+      actors: ["risk_control", "system"],
+    };
+  }
   if (candidate) {
+    if (candidate === activeProfileId) {
+      return {
+        title: `当前保持${readableProfile(activeProfileId)}`,
+        copy: "候选档位已经是当前生效档位，本轮没有新的切换动作。系统会继续观察证据，而不是重复切换。",
+        tone: "info",
+        actors: ["system", "ai"],
+      };
+    }
     return {
       title: `正在观察${readableProfile(candidate)}`,
       // #8：改用 copy.summarizeLocalizedList；原本的本地 summarizeList 只看 slice(0,2)
@@ -395,6 +454,23 @@ function autoControlSummary(runtime = {}, latestProfileControl = {}, latestSelec
     tone: "warning",
     actors: ["admin"],
   };
+}
+
+function activeProfileButtonTone(profileId) {
+  return profileId === "execution_degraded_safe" ? "warning" : "primary";
+}
+
+function activeProfileTone(profileId) {
+  return profileId === "execution_degraded_safe" ? "warning" : "info";
+}
+
+function activeProfileMeta(profileId, autoEnabled, activationHistory = []) {
+  if (profileId === "execution_degraded_safe") {
+    const latestActivation = Array.isArray(activationHistory) ? activationHistory[0] || {} : {};
+    const trigger = readableState(latestActivation.trigger_type || "system_guard");
+    return `当前处于安全保护档，不是默认档位；最近触发来源：${trigger}`;
+  }
+  return autoEnabled ? "当前正在自动管理这个档位" : "当前手动固定在这个档位";
 }
 
 function executionShadowState(mode) {

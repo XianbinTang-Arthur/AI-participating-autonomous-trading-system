@@ -2958,6 +2958,80 @@ console.log(JSON.stringify({
         self.assertIn('"manualOnlyRuntimeCurrentModeLocked":true', result.stdout)
         self.assertIn('"manualOnlyRuntimeAvoidsLegacyButtons":true', result.stdout)
 
+    def test_ai_config_safety_profile_is_explained_as_guard_not_default(self) -> None:
+        script = """
+import { renderAIConfigView } from './aats/api/static/modules/views/ai-config-view.js';
+
+const html = renderAIConfigView({
+  session: { role: 'admin' },
+  aiRuntime: {
+    configured_operating_mode: 'ai_decision_maker',
+    effective_operating_mode: 'ai_decision_maker',
+    strategy_profile_auto_control_configured: true,
+    strategy_profile_auto_control_effective: true,
+    strategy_profile_auto_control_reason: 'configured_auto',
+  },
+  summary: {
+    ai: {
+      configured_operating_mode: 'ai_decision_maker',
+      effective_operating_mode: 'ai_decision_maker',
+      strategy_profile_auto_control_configured: true,
+      strategy_profile_auto_control_effective: true,
+      strategy_profile_auto_control_reason: 'configured_auto',
+    },
+    runtime_profile: { current_runtime_payload: {} },
+    strategy_profile: {
+      activation: {
+        active_profile_id: 'execution_degraded_safe',
+        auto_switch_enabled: true,
+        last_activation_result: 'activation_succeeded',
+      },
+      active_revision: {
+        profile_id: 'execution_degraded_safe',
+        profile_label: 'Execution Safe',
+      },
+      latest_selection_decision: {
+        candidate_profile_id: 'execution_degraded_safe',
+        execution_state: 'executed',
+        fast_track_applied: false,
+        fast_track_eligible: false,
+        blocked_reasons: ['strategy_profile_already_active'],
+        gating_state: {
+          fast_track_reasons: ['safety_profile_required', 'execution_errors_elevated'],
+        },
+      },
+      latest_optimization_report: {
+        recommended_profile_id: 'execution_degraded_safe',
+      },
+      activation_history: [
+        {
+          to_profile_id: 'execution_degraded_safe',
+          trigger_type: 'system_guard',
+          executed_at: '2026-04-24T22:30:36Z',
+        },
+      ],
+    },
+  },
+});
+
+console.log(JSON.stringify({
+  safetyTitle: html.includes('安全保护档已生效'),
+  explainsNotDefault: html.includes('这不是默认档位'),
+  showsGuardTrigger: html.includes('最近触发来源：系统保护'),
+  calloutWarning: html.includes('class="callout tone-warning"'),
+  currentSafetyButtonWarning: /<button class="warning-button" data-action="manual-activate-strategy-profile" data-value="execution_degraded_safe"[^>]*>执行降级安全（当前）/.test(html),
+  avoidsMisleadingObserveCopy: !html.includes('正在观察执行降级安全'),
+}));
+"""
+        result = _run_node_module(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertIn('"safetyTitle":true', result.stdout)
+        self.assertIn('"explainsNotDefault":true', result.stdout)
+        self.assertIn('"showsGuardTrigger":true', result.stdout)
+        self.assertIn('"calloutWarning":true', result.stdout)
+        self.assertIn('"currentSafetyButtonWarning":true', result.stdout)
+        self.assertIn('"avoidsMisleadingObserveCopy":true', result.stdout)
+
     def test_ai_config_view_surfaces_auth_failures_instead_of_fake_rdp_loading(self) -> None:
         script = """
 import { renderAIConfigView } from './aats/api/static/modules/views/ai-config-view.js';

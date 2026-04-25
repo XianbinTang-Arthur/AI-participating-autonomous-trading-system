@@ -68,10 +68,10 @@
       数据源: /ai/runtime 的 effective_operating_mode (已加入 CORE_SPECS).
       行为: 由 shell-renderer.renderRuntimeModeBadge() 每次 renderShell 时刷新;
             点击弹 modal 解释当前模式语义;
-            颜色根据模式 (2026-04-23 勘误后):
+      颜色根据模式:
               baseline_only      → 灰底蓝字 "仅 baseline, 不使用 AI"
-              ai_assisted        → 橙底白字 "AI 咨询实盘中"
-              ai_decision_maker  → 红底白字 "AI 主导实盘中"
+              ai_assisted        → 琥珀色 "AI 咨询实盘中"
+              ai_decision_maker  → 稳态蓝色 "AI 决策者已启用"
       详见 docs/governance/p0b_observability_implementation_spec_2026_04_20.md §2.1
     -->
     <button id="runtimeModeBadge"
@@ -98,10 +98,9 @@
           <button type="button" class="ghost-button" data-action="close-runtime-mode-info" data-refresh-ignore>关闭</button>
         </header>
         <p class="meta-copy">
-          决定 AATS 是否真下单的第一个开关是 <code>ai_operating_mode</code>。配置层默认值由
-          <code>.env.*.live</code> / strategy profile YAML 决定；运行时 admin 可通过 AI
-          配置页的三个按钮临时覆盖（"仅按基础策略运行 / AI 辅助决策 / AI 决策者"），
-          需要 <code>AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE=true</code> 才放行。
+          <code>ai_operating_mode</code> 决定 AI 在单次交易决策里扮演什么角色。AATS 当前允许
+          AI 服务全面开启，但所有 AI 决策仍必须经过风控、kill switch、执行门、truth chain、
+          symbol/venue/family 范围和审计链；这个开关不允许绕过这些硬边界。
         </p>
         <table class="runtime-mode-dialog__table">
           <thead>
@@ -115,17 +114,17 @@
             <tr>
               <td><strong>baseline_only</strong></td>
               <td><code>reference_only</code></td>
-              <td>不调用 AI · 纯 baseline 决策 · 是否下单由 baseline 信号决定</td>
+              <td>不调用 AI · 纯 baseline 决策 · baseline 仍可在风控允许时真实下单</td>
             </tr>
             <tr>
               <td><strong>ai_assisted</strong></td>
               <td><code>advisory</code></td>
-              <td>按 baseline 下单,AI 仅咨询</td>
+              <td>baseline 拍板 · AI 只提供咨询和解释</td>
             </tr>
             <tr>
               <td><strong>ai_decision_maker</strong></td>
               <td><code>final_decision</code></td>
-              <td>AI 主导下单 · baseline fallback</td>
+              <td>AI 给最终交易意图 · baseline fallback · 仍受所有风控与执行门约束</td>
             </tr>
           </tbody>
         </table>
