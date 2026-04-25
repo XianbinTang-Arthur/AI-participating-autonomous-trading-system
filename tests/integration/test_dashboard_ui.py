@@ -7903,6 +7903,121 @@ console.log(JSON.stringify({
         self.assertIn('"showsBookEvidence":true', stdout)
         self.assertIn('"avoidsGenericNoOrder":true', stdout)
 
+    def test_decision_drawer_surfaces_pre_order_feasibility_dimensions(self) -> None:
+        script = """
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const detail = {
+  decision_id: 'decision-pre-order-feasibility',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_open_orders: [] },
+  position_target: {
+    strategy_family: 'independent',
+    position_intent: 'hold',
+    current_position_qty: '0',
+    target_position_qty: '0',
+    delta_position_qty: '0',
+  },
+  decision_outcome: {
+    final_action: 'hold',
+    final_target_qty: '0',
+    selected_strategy_family: 'independent',
+    no_trade_classification: {
+      is_no_trade: true,
+      classification: 'no_executable_independent_legs_due_signal_and_net_edge_gates',
+      scope: 'strategy_signal_or_net_edge_gate',
+      strategy_family: 'independent',
+      final_action: 'hold',
+      final_target_qty: '0',
+      order_count: 0,
+      fill_count: 0,
+      policy_risk_active_blocker: false,
+      reason_codes: [
+        'independent_long_book_signal_below_entry_threshold',
+        'independent_long_book_expected_net_edge_below_safe_threshold',
+      ],
+      book_runtime_states: [
+        {
+          leg: 'long',
+          state: 'blocked',
+          score: 0.22,
+          entry_threshold: 0.25,
+          expected_cost_bps: 6.0,
+          expected_net_edge_bps: -4.4,
+          required_safe_net_edge_bps: 2.0,
+          liquidity_quality_score: 0.42,
+          execution_health_state: 'degraded',
+          blocking_reasons: [
+            'independent_long_book_signal_below_entry_threshold',
+            'independent_long_book_expected_net_edge_below_safe_threshold',
+          ],
+        },
+      ],
+      pre_order_feasibility: {
+        status: 'blocked',
+        evidence_available: true,
+        blocked_dimensions: ['signal_threshold', 'net_edge', 'book_state'],
+        dimensions: {
+          signal_threshold: {
+            status: 'blocked',
+            evidence_available: true,
+            legs: [{ leg: 'long', status: 'blocked', score: 0.22, entry_threshold: 0.25 }],
+          },
+          net_edge: {
+            status: 'blocked',
+            evidence_available: true,
+            legs: [{
+              leg: 'long',
+              status: 'blocked',
+              expected_cost_bps: 6.0,
+              expected_net_edge_bps: -4.4,
+              required_safe_net_edge_bps: 2.0,
+            }],
+          },
+          cost: {
+            status: 'observed',
+            evidence_available: true,
+            legs: [{ leg: 'long', status: 'observed', expected_cost_bps: 6.0 }],
+          },
+          book_state: {
+            status: 'blocked',
+            evidence_available: true,
+            legs: [{ leg: 'long', status: 'blocked', state: 'blocked' }],
+          },
+          liquidity: {
+            status: 'observed',
+            evidence_available: true,
+            legs: [{ leg: 'long', status: 'observed', liquidity_quality_score: 0.42, execution_health_state: 'degraded' }],
+          },
+          policy_gate: { status: 'passed', evidence_available: true, reason_codes: [] },
+          risk_gate: { status: 'passed', evidence_available: true, reason_codes: [] },
+        },
+      },
+    },
+  },
+  policy_decision: { execution_allowed: true, submission_allowed: true },
+  risk_decision: { approved: true },
+};
+
+const drawer = buildDecisionDrawer(detail);
+console.log(JSON.stringify({
+  hasFeasibilitySummary: drawer.body.includes('执行可行性') && drawer.body.includes('阻断维度：信号阈值 / 净边际 / 盘口/账本状态'),
+  hasSignalDimension: drawer.body.includes('信号阈值') && drawer.body.includes('分数 0.22 / 阈值 0.25'),
+  hasNetEdgeDimension: drawer.body.includes('净边际') && drawer.body.includes('净边际 -4.4bp') && drawer.body.includes('安全门槛 2bp'),
+  hasCostDimension: drawer.body.includes('成本证据') && drawer.body.includes('成本 6bp') && drawer.body.includes('最大可接受成本缺失'),
+  hasLiquidityDimension: drawer.body.includes('盘口/流动性') && drawer.body.includes('流动性分 0.42') && drawer.body.includes('执行健康'),
+  hasGateDimensions: drawer.body.includes('策略门禁') && drawer.body.includes('风控门禁') && drawer.body.includes('通过'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"hasFeasibilitySummary":true', stdout)
+        self.assertIn('"hasSignalDimension":true', stdout)
+        self.assertIn('"hasNetEdgeDimension":true', stdout)
+        self.assertIn('"hasCostDimension":true', stdout)
+        self.assertIn('"hasLiquidityDimension":true', stdout)
+        self.assertIn('"hasGateDimensions":true', stdout)
+
     def test_strategy_view_surfaces_no_trade_classification_in_summary_and_history(self) -> None:
         script = """
 import { renderStrategySections } from './aats/api/static/modules/views/strategy-view.js';

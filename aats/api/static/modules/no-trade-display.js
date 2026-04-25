@@ -64,6 +64,25 @@ const SCOPE_LABELS = {
   unknown: "待确认",
 };
 
+const FEASIBILITY_DIMENSION_LABELS = {
+  signal_threshold: "信号阈值",
+  net_edge: "净边际",
+  cost: "成本证据",
+  book_state: "盘口/账本状态",
+  liquidity: "盘口/流动性",
+  policy_gate: "策略门禁",
+  risk_gate: "风控门禁",
+};
+
+const FEASIBILITY_STATUS_LABELS = {
+  blocked: "阻断",
+  mixed: "部分阻断",
+  passed: "通过",
+  observed: "已记录",
+  unavailable: "证据缺失",
+  execution_activity_present: "已有执行活动",
+};
+
 export function extractNoTradeClassification(source = {}) {
   const direct = source?.no_trade_classification;
   if (direct && typeof direct === "object") return direct;
@@ -128,7 +147,32 @@ export function noTradeClassificationRows(payload) {
         ? policyRiskReasonSummary(payload)
         : "当前分类没有把这轮无交易归因到策略/风控 active blocker。",
     ],
+    ...preOrderFeasibilityRows(payload.pre_order_feasibility),
     ["双书证据", summarizeBookStates(payload.book_runtime_states), "按 long / short 原生账本状态摘要。"],
+  ];
+}
+
+export function preOrderFeasibilityRows(feasibility) {
+  if (!feasibility || typeof feasibility !== "object") {
+    return [["执行可行性", "证据缺失", "当前无交易分类没有携带 pre-order 可行性证据。"]];
+  }
+  const dimensions = feasibility.dimensions && typeof feasibility.dimensions === "object" ? feasibility.dimensions : {};
+  const orderedKeys = ["signal_threshold", "net_edge", "cost", "book_state", "liquidity", "policy_gate", "risk_gate"];
+  return [
+    [
+      "执行可行性",
+      feasibilityStatusLabel(feasibility.status),
+      feasibility.blocked_dimensions?.length
+        ? `阻断维度：${feasibility.blocked_dimensions.map((key) => FEASIBILITY_DIMENSION_LABELS[key] || readableState(key, key)).join(" / ")}`
+        : "当前没有记录到阻断维度；若证据缺失，不推断为可执行。",
+    ],
+    ...orderedKeys
+      .filter((key) => dimensions[key])
+      .map((key) => [
+        FEASIBILITY_DIMENSION_LABELS[key] || readableState(key, key),
+        feasibilityStatusLabel(dimensions[key]?.status),
+        feasibilityDimensionSummary(key, dimensions[key]),
+      ]),
   ];
 }
 
@@ -145,6 +189,70 @@ function collectReasonCodes(payload) {
 function policyRiskReasonSummary(payload) {
   const reasons = collectReasonCodes(payload);
   return reasons.length ? reasons.slice(0, 4).map((item) => localizeError(item, item)).join(" / ") : "当前没有额外策略/风控原因码。";
+}
+
+function feasibilityStatusLabel(status) {
+  const normalized = String(status || "unavailable").trim();
+  return FEASIBILITY_STATUS_LABELS[normalized] || readableState(normalized, normalized || "证据缺失");
+}
+
+function feasibilityDimensionSummary(key, dimension) {
+  if (!dimension || typeof dimension !== "object") return "证据缺失。";
+  const legs = Array.isArray(dimension.legs) ? dimension.legs : [];
+  if (legs.length) {
+    return summarizeFeasibilityLegs(key, legs);
+  }
+  const reasons = Array.isArray(dimension.reason_codes) ? dimension.reason_codes : [];
+  if (reasons.length) {
+    return reasons.slice(0, 4).map((item) => localizeError(item, item)).join(" / ");
+  }
+  return dimension.evidence_available ? "已有门禁状态证据。" : "当前没有记录该维度证据。";
+}
+
+function summarizeFeasibilityLegs(key, legs) {
+  return legs
+    .slice(0, 3)
+    .map((leg) => {
+      const base = `${readableState(leg?.leg, leg?.leg || "账本")} ${feasibilityStatusLabel(leg?.status)}`;
+      if (key === "signal_threshold") {
+        const score = leg?.score === null || leg?.score === undefined ? "分数缺失" : `分数 ${formatNumber(leg.score, 3)}`;
+        const threshold = leg?.entry_threshold === null || leg?.entry_threshold === undefined ? "阈值缺失" : `阈值 ${formatNumber(leg.entry_threshold, 3)}`;
+        return `${base}，${score} / ${threshold}`;
+      }
+      if (key === "net_edge") {
+        const net = leg?.expected_net_edge_bps === null || leg?.expected_net_edge_bps === undefined
+          ? "净边际缺失"
+          : `净边际 ${formatNumber(leg.expected_net_edge_bps, 2)}bp`;
+        const required = leg?.required_safe_net_edge_bps === null || leg?.required_safe_net_edge_bps === undefined
+          ? "安全门槛缺失"
+          : `安全门槛 ${formatNumber(leg.required_safe_net_edge_bps, 2)}bp`;
+        const cost = leg?.expected_cost_bps === null || leg?.expected_cost_bps === undefined
+          ? "成本缺失"
+          : `成本 ${formatNumber(leg.expected_cost_bps, 2)}bp`;
+        return `${base}，${net} / ${required} / ${cost}`;
+      }
+      if (key === "cost") {
+        const cost = leg?.expected_cost_bps === null || leg?.expected_cost_bps === undefined
+          ? "成本缺失"
+          : `成本 ${formatNumber(leg.expected_cost_bps, 2)}bp`;
+        const maxCost = leg?.max_acceptable_cost_bps === null || leg?.max_acceptable_cost_bps === undefined
+          ? "最大可接受成本缺失"
+          : `最大可接受 ${formatNumber(leg.max_acceptable_cost_bps, 2)}bp`;
+        return `${base}，${cost} / ${maxCost}`;
+      }
+      if (key === "book_state") {
+        return `${base}，状态 ${readableState(leg?.state || leg?.book_state, leg?.state || leg?.book_state || "缺失")}`;
+      }
+      if (key === "liquidity") {
+        const score = leg?.liquidity_quality_score === null || leg?.liquidity_quality_score === undefined
+          ? "流动性分缺失"
+          : `流动性分 ${formatNumber(leg.liquidity_quality_score, 3)}`;
+        const health = leg?.execution_health_state ? `执行健康 ${readableState(leg.execution_health_state, leg.execution_health_state)}` : "执行健康缺失";
+        return `${base}，${score} / ${health}`;
+      }
+      return base;
+    })
+    .join(" | ");
 }
 
 function summarizeBookStates(value) {

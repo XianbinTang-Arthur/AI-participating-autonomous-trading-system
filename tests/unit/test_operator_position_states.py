@@ -628,6 +628,54 @@ class TestOperatorPositionStates(unittest.TestCase):
         self.assertEqual(payload["book_runtime_states"][0]["leg"], "long")
         self.assertEqual(payload["book_runtime_states"][0]["expected_net_edge_bps"], -4.4)
 
+    def test_no_trade_classification_exposes_pre_order_feasibility_dimensions(self) -> None:
+        payload = OperatorQueryService._no_trade_classification_payload(
+            decision_outcome={
+                "final_action": "hold",
+                "final_target_qty": "0",
+                "selected_strategy_family": "independent",
+            },
+            position_target={
+                "target_position_qty": "0",
+                "strategy_family": "independent",
+                "book_runtime_states": [
+                    {
+                        "leg": "long",
+                        "state": "blocked",
+                        "score": 0.22,
+                        "entry_threshold": 0.25,
+                        "expected_signal_edge_bps": 3.6,
+                        "expected_cost_bps": 6.0,
+                        "expected_net_edge_bps": -4.4,
+                        "required_safe_net_edge_bps": 2.0,
+                        "liquidity_quality_score": 0.42,
+                        "execution_health_state": "degraded",
+                        "threshold_snapshot": {"leg": "long", "effective_entry_threshold": 0.25},
+                        "blocked_reasons": [
+                            "independent_long_book_signal_below_entry_threshold",
+                            "independent_long_book_expected_net_edge_below_safe_threshold",
+                            "independent_long_book_liquidity_quality_below_minimum",
+                        ],
+                    }
+                ],
+            },
+            policy_decision={"execution_allowed": True, "submission_allowed": True},
+            risk_decision={"approved": True},
+        )
+
+        feasibility = payload["pre_order_feasibility"]
+        self.assertEqual(feasibility["status"], "blocked")
+        self.assertEqual(feasibility["dimensions"]["signal_threshold"]["status"], "blocked")
+        self.assertEqual(feasibility["dimensions"]["net_edge"]["status"], "blocked")
+        self.assertEqual(feasibility["dimensions"]["cost"]["status"], "observed")
+        self.assertEqual(feasibility["dimensions"]["book_state"]["status"], "blocked")
+        self.assertEqual(feasibility["dimensions"]["liquidity"]["status"], "blocked")
+        self.assertEqual(feasibility["dimensions"]["policy_gate"]["status"], "passed")
+        self.assertEqual(feasibility["dimensions"]["risk_gate"]["status"], "passed")
+        self.assertIn("signal_threshold", feasibility["blocked_dimensions"])
+        self.assertIn("net_edge", feasibility["blocked_dimensions"])
+        self.assertTrue(feasibility["evidence_available"])
+
     def test_no_trade_classification_flags_actionable_decision_without_execution_activity(self) -> None:
         payload = OperatorQueryService._no_trade_classification_payload(
             decision_outcome={

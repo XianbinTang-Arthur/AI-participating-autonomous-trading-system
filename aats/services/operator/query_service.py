@@ -2428,6 +2428,14 @@ class OperatorQueryService:
             "policy_risk_active_blocker": False,
             "reason_codes": reason_codes,
             "book_runtime_states": book_states,
+            "pre_order_feasibility": cls._pre_order_feasibility_payload(
+                book_states=book_states,
+                reason_codes=reason_codes,
+                policy_decision=policy,
+                risk_decision=risk,
+                order_count=order_count,
+                fill_count=fill_count,
+            ),
         }
 
         if order_count > 0 or fill_count > 0:
@@ -2549,7 +2557,7 @@ class OperatorQueryService:
                 if isinstance(value, list):
                     codes.extend(str(item) for item in value if item)
         for state in cls._book_runtime_states_from_payload(outcome) or cls._book_runtime_states_from_payload(target):
-            for key in ("reason_codes", "blocking_reasons", "warnings"):
+            for key in ("reason_codes", "blocking_reasons", "blocked_reasons", "warnings"):
                 value = state.get(key)
                 if isinstance(value, list):
                     codes.extend(str(item) for item in value if item)
@@ -2580,11 +2588,356 @@ class OperatorQueryService:
                     "expected_signal_edge_bps": state.get("expected_signal_edge_bps"),
                     "expected_cost_bps": state.get("expected_cost_bps"),
                     "expected_net_edge_bps": state.get("expected_net_edge_bps"),
+                    "required_safe_net_edge_bps": (
+                        state.get("required_safe_net_edge_bps")
+                        or state.get("effective_safe_net_edge_bps")
+                    ),
+                    "max_acceptable_cost_bps": state.get("max_acceptable_cost_bps"),
+                    "liquidity_quality_score": state.get("liquidity_quality_score"),
+                    "execution_health_state": state.get("execution_health_state"),
                     "reason_codes": list(state.get("reason_codes") or []),
-                    "blocking_reasons": list(state.get("blocking_reasons") or []),
+                    "blocking_reasons": list(state.get("blocking_reasons") or state.get("blocked_reasons") or []),
                 }
             )
         return summaries
+
+    @classmethod
+    def _pre_order_feasibility_payload(
+        cls,
+        *,
+        book_states: list[dict[str, Any]],
+        reason_codes: list[str],
+        policy_decision: dict[str, Any],
+        risk_decision: dict[str, Any],
+        order_count: int,
+        fill_count: int,
+    ) -> dict[str, Any]:
+        normalized_reasons = cls._normalized_reason_codes(reason_codes)
+        dimensions = {
+            "signal_threshold": cls._signal_threshold_feasibility(
+                book_states=book_states,
+                normalized_reasons=normalized_reasons,
+            ),
+            "net_edge": cls._net_edge_feasibility(
+                book_states=book_states,
+                normalized_reasons=normalized_reasons,
+            ),
+            "cost": cls._cost_feasibility(
+                book_states=book_states,
+                normalized_reasons=normalized_reasons,
+            ),
+            "book_state": cls._book_state_feasibility(
+                book_states=book_states,
+                normalized_reasons=normalized_reasons,
+            ),
+            "liquidity": cls._liquidity_feasibility(
+                book_states=book_states,
+                normalized_reasons=normalized_reasons,
+            ),
+            "policy_gate": cls._policy_gate_feasibility(policy_decision),
+            "risk_gate": cls._risk_gate_feasibility(risk_decision),
+        }
+        if order_count > 0 or fill_count > 0:
+            status = "execution_activity_present"
+        else:
+            status = cls._overall_pre_order_feasibility_status(dimensions)
+        return {
+            "status": status,
+            "evidence_available": any(bool(item.get("evidence_available")) for item in dimensions.values()),
+            "blocked_dimensions": [
+                key
+                for key, item in dimensions.items()
+                if item.get("status") in {"blocked", "mixed"}
+            ],
+            "dimensions": dimensions,
+        }
+
+    @classmethod
+    def _signal_threshold_feasibility(
+        cls,
+        *,
+        book_states: list[dict[str, Any]],
+        normalized_reasons: list[str],
+    ) -> dict[str, Any]:
+        legs: list[dict[str, Any]] = []
+        for state in book_states:
+            reasons = cls._normalized_reason_codes(
+                [
+                    *list(state.get("reason_codes") or []),
+                    *list(state.get("blocking_reasons") or []),
+                    *list(state.get("blocked_reasons") or []),
+                ]
+            )
+            score = cls._to_decimal(state.get("score"))
+            threshold = cls._to_decimal(state.get("entry_threshold"))
+            if score is not None and threshold is not None:
+                status = "passed" if score >= threshold else "blocked"
+            elif cls._reason_contains(reasons, "signal_below_entry_threshold"):
+                status = "blocked"
+            elif cls._reason_contains(reasons, "signal_above_entry_threshold"):
+                status = "passed"
+            else:
+                status = "unavailable"
+            legs.append(
+                {
+                    "leg": state.get("leg"),
+                    "status": status,
+                    "score": state.get("score"),
+                    "entry_threshold": state.get("entry_threshold"),
+                    "reason_codes": reasons,
+                }
+            )
+        status = cls._dimension_status([str(item.get("status")) for item in legs])
+        if status == "unavailable" and cls._reason_contains(normalized_reasons, "signal_below_entry_threshold"):
+            status = "blocked"
+        return {
+            "status": status,
+            "evidence_available": any(item.get("status") != "unavailable" for item in legs)
+            or cls._reason_contains(normalized_reasons, "signal"),
+            "legs": legs,
+            "reason_codes": [code for code in normalized_reasons if "signal" in code],
+        }
+
+    @classmethod
+    def _net_edge_feasibility(
+        cls,
+        *,
+        book_states: list[dict[str, Any]],
+        normalized_reasons: list[str],
+    ) -> dict[str, Any]:
+        legs: list[dict[str, Any]] = []
+        for state in book_states:
+            reasons = cls._normalized_reason_codes(
+                [
+                    *list(state.get("reason_codes") or []),
+                    *list(state.get("blocking_reasons") or []),
+                    *list(state.get("blocked_reasons") or []),
+                ]
+            )
+            net_edge = cls._to_decimal(state.get("expected_net_edge_bps"))
+            required = cls._to_decimal(state.get("required_safe_net_edge_bps"))
+            if cls._reason_contains(reasons, "expected_net_edge_below_safe_threshold"):
+                status = "blocked"
+            elif net_edge is not None and required is not None:
+                status = "passed" if net_edge >= required else "blocked"
+            elif net_edge is not None:
+                status = "observed"
+            else:
+                status = "unavailable"
+            legs.append(
+                {
+                    "leg": state.get("leg"),
+                    "status": status,
+                    "expected_signal_edge_bps": state.get("expected_signal_edge_bps"),
+                    "expected_cost_bps": state.get("expected_cost_bps"),
+                    "expected_net_edge_bps": state.get("expected_net_edge_bps"),
+                    "required_safe_net_edge_bps": state.get("required_safe_net_edge_bps"),
+                    "reason_codes": reasons,
+                }
+            )
+        status = cls._dimension_status([str(item.get("status")) for item in legs])
+        if status == "unavailable" and cls._reason_contains(normalized_reasons, "expected_net_edge_below_safe_threshold"):
+            status = "blocked"
+        return {
+            "status": status,
+            "evidence_available": any(item.get("status") != "unavailable" for item in legs)
+            or cls._reason_contains(normalized_reasons, "net_edge"),
+            "legs": legs,
+            "reason_codes": [code for code in normalized_reasons if "net_edge" in code],
+        }
+
+    @classmethod
+    def _cost_feasibility(
+        cls,
+        *,
+        book_states: list[dict[str, Any]],
+        normalized_reasons: list[str],
+    ) -> dict[str, Any]:
+        legs: list[dict[str, Any]] = []
+        for state in book_states:
+            cost = cls._to_decimal(state.get("expected_cost_bps"))
+            max_cost = cls._to_decimal(state.get("max_acceptable_cost_bps"))
+            if cost is not None and max_cost is not None:
+                status = "passed" if cost <= max_cost else "blocked"
+            elif cost is not None:
+                status = "observed"
+            else:
+                status = "unavailable"
+            legs.append(
+                {
+                    "leg": state.get("leg"),
+                    "status": status,
+                    "expected_cost_bps": state.get("expected_cost_bps"),
+                    "max_acceptable_cost_bps": state.get("max_acceptable_cost_bps"),
+                }
+            )
+        return {
+            "status": cls._dimension_status([str(item.get("status")) for item in legs]),
+            "evidence_available": any(item.get("status") != "unavailable" for item in legs)
+            or cls._reason_contains(normalized_reasons, "cost"),
+            "legs": legs,
+            "reason_codes": [code for code in normalized_reasons if "cost" in code],
+        }
+
+    @classmethod
+    def _book_state_feasibility(
+        cls,
+        *,
+        book_states: list[dict[str, Any]],
+        normalized_reasons: list[str],
+    ) -> dict[str, Any]:
+        legs: list[dict[str, Any]] = []
+        for state in book_states:
+            state_value = str(state.get("state") or state.get("book_state") or "").strip().lower()
+            reasons = cls._normalized_reason_codes(
+                [
+                    *list(state.get("reason_codes") or []),
+                    *list(state.get("blocking_reasons") or []),
+                    *list(state.get("blocked_reasons") or []),
+                ]
+            )
+            if state_value in {"blocked", "inactive", "suspended"} or cls._reason_contains(reasons, "candidate_inactive"):
+                status = "blocked"
+            elif state_value:
+                status = "observed"
+            else:
+                status = "unavailable"
+            legs.append(
+                {
+                    "leg": state.get("leg"),
+                    "status": status,
+                    "state": state.get("state"),
+                    "book_state": state.get("book_state"),
+                    "reason_codes": reasons,
+                }
+            )
+        return {
+            "status": cls._dimension_status([str(item.get("status")) for item in legs]),
+            "evidence_available": any(item.get("status") != "unavailable" for item in legs)
+            or cls._reason_contains(normalized_reasons, "candidate_inactive"),
+            "legs": legs,
+            "reason_codes": [code for code in normalized_reasons if "candidate_inactive" in code or "hold_only" in code],
+        }
+
+    @classmethod
+    def _liquidity_feasibility(
+        cls,
+        *,
+        book_states: list[dict[str, Any]],
+        normalized_reasons: list[str],
+    ) -> dict[str, Any]:
+        legs: list[dict[str, Any]] = []
+        for state in book_states:
+            reasons = cls._normalized_reason_codes(
+                [
+                    *list(state.get("reason_codes") or []),
+                    *list(state.get("blocking_reasons") or []),
+                    *list(state.get("blocked_reasons") or []),
+                ]
+            )
+            liquidity_score = state.get("liquidity_quality_score")
+            execution_health = state.get("execution_health_state")
+            if cls._reason_contains(reasons, "liquidity") or cls._reason_contains(reasons, "execution_health_degraded"):
+                status = "blocked"
+            elif liquidity_score is not None or execution_health:
+                status = "observed"
+            else:
+                status = "unavailable"
+            legs.append(
+                {
+                    "leg": state.get("leg"),
+                    "status": status,
+                    "liquidity_quality_score": liquidity_score,
+                    "execution_health_state": execution_health,
+                    "reason_codes": reasons,
+                }
+            )
+        return {
+            "status": cls._dimension_status([str(item.get("status")) for item in legs]),
+            "evidence_available": any(item.get("status") != "unavailable" for item in legs)
+            or cls._reason_contains(normalized_reasons, "liquidity"),
+            "legs": legs,
+            "reason_codes": [
+                code
+                for code in normalized_reasons
+                if "liquidity" in code or "execution_health" in code
+            ],
+        }
+
+    @classmethod
+    def _policy_gate_feasibility(cls, policy_decision: dict[str, Any]) -> dict[str, Any]:
+        reasons = cls._normalized_reason_codes(list(policy_decision.get("rejection_reasons") or []))
+        available = bool(policy_decision)
+        blocked = (
+            cls._payload_bool(policy_decision.get("allowed")) is False
+            or cls._payload_bool(policy_decision.get("execution_allowed")) is False
+            or cls._payload_bool(policy_decision.get("submission_allowed")) is False
+            or cls._payload_bool(policy_decision.get("dry_run_only")) is True
+            or cls._payload_bool(policy_decision.get("requires_human_approval")) is True
+            or bool(reasons)
+        )
+        status = "blocked" if blocked else ("passed" if available else "unavailable")
+        return {
+            "status": status,
+            "evidence_available": available,
+            "reason_codes": reasons,
+        }
+
+    @classmethod
+    def _risk_gate_feasibility(cls, risk_decision: dict[str, Any]) -> dict[str, Any]:
+        reasons = cls._normalized_reason_codes(
+            [
+                *list(risk_decision.get("rejection_reasons") or []),
+                *list(risk_decision.get("constraints_applied") or []),
+            ]
+        )
+        available = bool(risk_decision)
+        blocked = (
+            cls._payload_bool(risk_decision.get("approved")) is False
+            or cls._payload_bool(risk_decision.get("halt_required")) is True
+            or cls._payload_bool(risk_decision.get("flatten_required")) is True
+            or cls._payload_bool(risk_decision.get("only_reduce_required")) is True
+            or cls._payload_bool(risk_decision.get("risk_limit_breached")) is True
+            or bool(risk_decision.get("rejection_reasons") or [])
+        )
+        status = "blocked" if blocked else ("passed" if available else "unavailable")
+        return {
+            "status": status,
+            "evidence_available": available,
+            "reason_codes": reasons,
+        }
+
+    @staticmethod
+    def _normalized_reason_codes(values: list[Any]) -> list[str]:
+        return list(dict.fromkeys(str(item or "").strip().lower() for item in values if str(item or "").strip()))
+
+    @staticmethod
+    def _reason_contains(reason_codes: list[str], needle: str) -> bool:
+        return any(needle in code for code in reason_codes)
+
+    @staticmethod
+    def _dimension_status(statuses: list[str]) -> str:
+        observed = [status for status in statuses if status and status != "unavailable"]
+        if not observed:
+            return "unavailable"
+        if any(status == "blocked" for status in observed):
+            if any(status in {"passed", "observed"} for status in observed):
+                return "mixed"
+            return "blocked"
+        if any(status == "observed" for status in observed):
+            return "observed"
+        return "passed"
+
+    @classmethod
+    def _overall_pre_order_feasibility_status(cls, dimensions: dict[str, dict[str, Any]]) -> str:
+        statuses = [str(item.get("status") or "") for item in dimensions.values()]
+        if any(status == "blocked" for status in statuses):
+            return "blocked"
+        if any(status == "mixed" for status in statuses):
+            return "mixed"
+        if any(status in {"passed", "observed"} for status in statuses):
+            return "observed"
+        return "unavailable"
 
     @staticmethod
     def _format_fraction_percent(value: Any, *, places: int = 2) -> str:
