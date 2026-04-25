@@ -38,6 +38,10 @@ from aats.storage.base import EventStore, ExecutionRepository
 
 
 class AIInferenceService:
+    # Shadow assessment is auxiliary audit evidence. It must not consume the
+    # same budget as the primary live AI assessment inside a 30s decision cycle.
+    _SHADOW_ASSESSMENT_TIMEOUT_SECONDS = 3.0
+
     def __init__(
         self,
         *,
@@ -516,6 +520,11 @@ class AIInferenceService:
             operating_mode="ai_decision_maker",
             include_execution_suggestion=self.settings.ai_execution_suggestion_mode != "disabled",
         )
+        shadow_timeout = max(
+            0.01,
+            min(float(self.settings.ai_timeout_seconds), self._SHADOW_ASSESSMENT_TIMEOUT_SECONDS),
+        )
+        fallback_reason = "ai_shadow_fallback"
         try:
             response = await asyncio.wait_for(
                 self.provider.generate_assessment(
@@ -524,7 +533,7 @@ class AIInferenceService:
                         include_execution_suggestion=self.settings.ai_execution_suggestion_mode != "disabled"
                     ),
                 ),
-                timeout=self.settings.ai_timeout_seconds,
+                timeout=shadow_timeout,
             )
             shadow_assessment = self.validator.validate_provider_output(
                 raw_output=response.payload,
@@ -542,13 +551,14 @@ class AIInferenceService:
                 edge_bps_scale=self.settings.strategy_alpha_edge_bps_scale,
             )
             self.evaluator.record_shadow_assessment(shadow_assessment)
-        except Exception:
+        except (asyncio.TimeoutError, AIProviderTimeoutError):
+            fallback_reason = "ai_shadow_timeout"
             shadow_assessment = self.validator.fallback_assessment(
                 brief=brief,
                 context=context,
                 baseline=baseline,
                 operating_mode="ai_decision_maker",
-                fallback_reason="ai_shadow_fallback",
+                fallback_reason=fallback_reason,
                 degraded=self._degraded,
                 output_valid=False,
                 model_name=self.settings.ai_model_name,
@@ -556,6 +566,43 @@ class AIInferenceService:
                 prompt_version=self.settings.ai_prompt_version,
             )
             self.evaluator.record_shadow_assessment(shadow_assessment)
+            log_event(
+                self.logger,
+                "ai_shadow_assessment_fallback",
+                level="warning",
+                **correlation_fields(
+                    decision_id=context.decision_id,
+                    provider=self.settings.ai_provider,
+                    operating_mode="ai_decision_maker",
+                    fallback_reason=fallback_reason,
+                    timeout_seconds=shadow_timeout,
+                ),
+            )
+        except Exception:
+            shadow_assessment = self.validator.fallback_assessment(
+                brief=brief,
+                context=context,
+                baseline=baseline,
+                operating_mode="ai_decision_maker",
+                fallback_reason=fallback_reason,
+                degraded=self._degraded,
+                output_valid=False,
+                model_name=self.settings.ai_model_name,
+                model_version=self.settings.ai_model_version,
+                prompt_version=self.settings.ai_prompt_version,
+            )
+            self.evaluator.record_shadow_assessment(shadow_assessment)
+            log_event(
+                self.logger,
+                "ai_shadow_assessment_fallback",
+                level="warning",
+                **correlation_fields(
+                    decision_id=context.decision_id,
+                    provider=self.settings.ai_provider,
+                    operating_mode="ai_decision_maker",
+                    fallback_reason=fallback_reason,
+                ),
+            )
 
     def _feature_snapshot(self, context: DecisionContext) -> FeatureSnapshot | None:
         if self._feature_resolver is not None:

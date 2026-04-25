@@ -4,6 +4,7 @@ import asyncio
 import unittest
 from datetime import timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from aats.bootstrap.settings import AATSSettings
 from aats.events import topics
@@ -80,6 +81,26 @@ class SequenceProvider(FakeProvider):
             request_id=f"seq_{self.calls}",
             latency_ms=10.0,
             payload=payload,
+        )
+
+
+class PerCallDelayProvider(FakeProvider):
+    def __init__(self, *, delays: list[float]) -> None:
+        super().__init__()
+        self._delays = list(delays)
+
+    async def generate_assessment(self, *, prompt: str, response_schema: dict[str, object]) -> AIProviderResponse:
+        self.calls += 1
+        _ = prompt
+        _ = response_schema
+        delay = self._delays.pop(0) if self._delays else 0.0
+        if delay > 0:
+            await asyncio.sleep(delay)
+        return AIProviderResponse(
+            provider_name="per_call_delay_provider",
+            request_id=f"delay_{self.calls}",
+            latency_ms=delay * 1000.0,
+            payload=self.payload,
         )
 
 
@@ -170,6 +191,28 @@ class TestAIInferenceService(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(assessment.output_valid)
         self.assertGreater(assessment.calibrated_confidence, 0.0)
         self.assertEqual(assessment.provider_name, "fake_provider")
+
+    async def test_slow_shadow_assessment_times_out_without_invalidating_primary_assessment(self) -> None:
+        provider = PerCallDelayProvider(delays=[0.0, 0.05])
+        service, context, baseline, _ = self._service(
+            ai_operating_mode="ai_decision_maker",
+            provider=provider,
+            ai_timeout_seconds=5.0,
+            ai_shadow_mode_enabled=True,
+        )
+
+        with patch.object(AIInferenceService, "_SHADOW_ASSESSMENT_TIMEOUT_SECONDS", 0.01):
+            assessment = await service.assess(context=context, baseline=baseline)
+
+        shadow = service.latest_shadow_assessment(context.decision_id)
+        self.assertEqual(provider.calls, 2)
+        self.assertFalse(assessment.fallback_used)
+        self.assertTrue(assessment.output_valid)
+        self.assertIsNotNone(shadow)
+        self.assertTrue(shadow.fallback_used)
+        self.assertFalse(shadow.output_valid)
+        self.assertEqual(shadow.fallback_reason, "ai_shadow_timeout")
+        self.assertFalse(service.status()["degraded"])
 
     async def test_brief_prefers_dynamic_taker_fee_when_resolver_available(self) -> None:
         service, context, baseline, _ = self._service(

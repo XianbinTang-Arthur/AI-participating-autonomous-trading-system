@@ -4548,6 +4548,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             allowed_symbols=("BTC-USDT-SWAP",),
         )
         runtime.ai_service.provider = FakeShadowProvider()
+        await self._stop_background_decision_trigger(runtime)
         runtime.ai_service.evaluate_shadow_window = Mock(side_effect=RuntimeError("shadow_eval_failed"))
         position_targets_before = len(runtime.event_store.by_topic(topics.POSITION_TARGETS))
         shadow_evaluations_before = len(runtime.event_store.by_topic(topics.AI_SHADOW_EVALUATIONS))
@@ -4557,6 +4558,10 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(target)
         self.assertEqual(len(runtime.event_store.by_topic(topics.POSITION_TARGETS)), position_targets_before + 1)
+        self.assertEqual(
+            runtime.event_store.count(topic=topics.POSITION_TARGETS, decision_id=target.decision_id),
+            1,
+        )
         self.assertEqual(len(runtime.event_store.by_topic(topics.AI_SHADOW_EVALUATIONS)), shadow_evaluations_before)
         self.assertEqual(len(runtime.event_store.by_topic(topics.AI_PERFORMANCE_REPORTS)), performance_reports_before)
 
@@ -4573,6 +4578,7 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             allowed_symbols=("BTC-USDT-SWAP",),
         )
         runtime.ai_service.provider = FakeShadowProvider()
+        await self._stop_background_decision_trigger(runtime)
         from aats.services.decision_engine import orchestrator as orchestrator_module
 
         original_publish_model = orchestrator_module.publish_model
@@ -4590,6 +4596,10 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(target)
         self.assertEqual(len(runtime.event_store.by_topic(topics.POSITION_TARGETS)), position_targets_before + 1)
+        self.assertEqual(
+            runtime.event_store.count(topic=topics.POSITION_TARGETS, decision_id=target.decision_id),
+            1,
+        )
         self.assertEqual(len(runtime.event_store.by_topic(topics.AI_SHADOW_EVALUATIONS)), shadow_evaluations_before)
         self.assertEqual(len(runtime.event_store.by_topic(topics.AI_PERFORMANCE_REPORTS)), performance_reports_before)
 
@@ -9143,6 +9153,12 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
             interval_seconds=0.0,
         )
         return runtime
+
+    @staticmethod
+    async def _stop_background_decision_trigger(runtime) -> None:
+        decision_trigger = getattr(runtime, "decision_trigger", None)
+        if decision_trigger is not None:
+            await decision_trigger.stop()
 
     @staticmethod
     def _app(runtime) -> FastAPI:
