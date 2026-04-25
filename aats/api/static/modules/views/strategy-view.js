@@ -13,6 +13,14 @@ import {
   readableState,
 } from "../terms.js";
 import { decisionTableHeaders, inferTradeScene } from "../trade-display.js";
+import {
+  extractNoTradeClassification,
+  hasNoTradeClassification,
+  noTradeClassificationCopy,
+  noTradeClassificationLabel,
+  noTradeClassificationMeta,
+  noTradeClassificationTone,
+} from "../no-trade-display.js";
 
 export function renderStrategySections(data) {
   const latestDecision = data.latestDecision || {};
@@ -63,6 +71,7 @@ export function renderStrategySections(data) {
   const target = latestDecision.position_target || {};
   const policy = latestDecision.policy_decision || {};
   const risk = latestDecision.risk_decision || {};
+  const latestNoTradeClassification = extractNoTradeClassification(latestDecision);
   const intentLabel = readableIntent(latestDecision);
   const regimeLabel = readableRegime(latestDecision);
   const decisionScene = inferDecisionScene(latestDecision, recentDecisions);
@@ -119,6 +128,9 @@ export function renderStrategySections(data) {
             pill(`市场状态：${regimeLabel}`, "info"),
             pill(`策略门禁：${readableState(policy.execution_allowed ? "ready" : "blocked")}`, policy.execution_allowed ? "positive" : "danger"),
             pill(`风控：${readableState(risk.approved ? "ready" : "blocked")}`, risk.approved ? "positive" : "danger"),
+            hasNoTradeClassification(latestNoTradeClassification)
+              ? pill(`无交易：${noTradeClassificationLabel(latestNoTradeClassification)}`, noTradeClassificationTone(latestNoTradeClassification))
+              : "",
           ],
         })}
         ${statGrid([
@@ -191,10 +203,13 @@ export function renderStrategySections(data) {
         ])}
         ${kvList([
           ["本轮结论", strategyNarrative(latestDecision), `${readableState(target.strategy_family || latestDecision.decision_outcome?.selected_strategy_family || "directional")} | ${regimeLabel}`],
+          hasNoTradeClassification(latestNoTradeClassification)
+            ? ["无交易分类", noTradeClassificationLabel(latestNoTradeClassification), noTradeClassificationMeta(latestNoTradeClassification)]
+            : null,
           ["执行约束", localizeList(target.guardrail_flags, "当前没有额外执行限制"), targetExpectancySummary(targetExpectancy)],
           ["当前保护规则", localizeList(strategyHealth.guardrail_flags, "当前没有额外保护规则"), cooldownSummary(strategyHealth.cooldowns)],
           ["最近执行质量", `${formatNumber(strategyHealth.recent_closed_trade_count, 0)} 笔闭合样本 | 胜率 ${formatRatio(strategyHealth.recent_win_rate)}`, `费用拖累 ${formatRatio(strategyHealth.recent_fee_drag_ratio)} | 来回交易占比 ${formatRatio(strategyHealth.recent_churn_ratio)}`],
-        ])}
+        ].filter(Boolean))}
       `,
     }),
     strategyCoordinator: surfaceCard({
@@ -588,7 +603,10 @@ export function renderStrategySections(data) {
           fields: [
             { label: "决策时间", value: formatMaybeTimestamp(item.decision_time), meta: formatRelativeAge(item.decision_time) },
             { label: "决策摘要", value: readableRecentIntent(item), meta: recentDecisionNarrative(item, decisionScene) },
-          ],
+            hasNoTradeClassification(extractNoTradeClassification(item))
+              ? { label: "无交易分类", value: noTradeClassificationLabel(extractNoTradeClassification(item)), meta: noTradeClassificationMeta(extractNoTradeClassification(item)) }
+              : null,
+          ].filter(Boolean),
           details: [
             { label: "标的", value: item.symbol || "标的待确认", meta: item.timeframe || "周期待确认" },
             { label: "策略结果", value: item.policy_result ? "允许执行" : "已阻断" },
@@ -2429,6 +2447,10 @@ function strategyNarrative(detail) {
   const intentLabel = readableIntent(detail);
   const regimeLabel = readableRegime(detail);
   const strategyFamily = readableState(outcome.selected_strategy_family || target.strategy_family || "directional");
+  const noTradeClassification = extractNoTradeClassification(detail);
+  if (hasNoTradeClassification(noTradeClassification) && noTradeClassification.is_no_trade !== false) {
+    return `当前市场状态为 ${regimeLabel}，本轮由 ${strategyFamily} 接管。${noTradeClassificationCopy(noTradeClassification)}`;
+  }
   const currentQty = Number(target.current_position_qty ?? detail.decision_context?.current_position_qty ?? 0);
   const targetQty = Number(target.target_position_qty ?? 0);
   const openOrders = Array.isArray(detail.decision_context?.current_open_orders) ? detail.decision_context.current_open_orders : [];
@@ -2446,6 +2468,10 @@ function strategyNarrative(detail) {
 }
 
 function recentDecisionNarrative(item, scene) {
+  const noTradeClassification = extractNoTradeClassification(item);
+  if (hasNoTradeClassification(noTradeClassification) && noTradeClassification.is_no_trade !== false) {
+    return noTradeClassificationLabel(noTradeClassification);
+  }
   const delta = item.delta_position_qty ?? item.target_delta_qty;
   if (delta === null || delta === undefined) {
     return scene === "derivatives" ? "没有新的净仓位调整" : "没有新的持仓调整";

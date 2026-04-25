@@ -28,6 +28,12 @@ import {
   readableState,
 } from "./terms.js";
 import {
+  extractNoTradeClassification,
+  hasNoTradeClassification,
+  noTradeClassificationCopy,
+  noTradeClassificationRows,
+} from "./no-trade-display.js";
+import {
   decisionDrawerRows,
   executionSuggestionLabel,
   fillFeeText,
@@ -50,6 +56,7 @@ export function buildDecisionDrawer(detail) {
   const aiDecisionAudit = detail.ai_decision_audit || null;
   const aiExecutionSuggestion = detail.ai_execution_suggestion || null;
   const decisionOutcome = detail.decision_outcome || null;
+  const noTradeClassification = extractNoTradeClassification(detail);
   const hedgeModeAudit = detail.hedge_mode_audit || null;
   const overlayParentPostmortem =
     aiDecisionAudit?.overlay_parent_exposure_summary
@@ -71,6 +78,12 @@ export function buildDecisionDrawer(detail) {
         title: "交易解释",
         content: `<div class="callout"><p>${escapeHtml(strategySummary(detail))}</p></div>`,
       }),
+      hasNoTradeClassification(noTradeClassification)
+        ? surfaceCard({
+            title: "无交易原因",
+            content: kvList(noTradeClassificationRows(noTradeClassification)),
+          })
+        : "",
       aiEconomic
         ? surfaceCard({
             title: "AI 经济可行性",
@@ -697,7 +710,11 @@ function drawerListText(value, fallback = "当前没有额外说明") {
 function strategySummary(detail) {
   const policy = detail.policy_decision || {};
   const risk = detail.risk_decision || {};
+  const noTradeClassification = extractNoTradeClassification(detail);
   if (!detail.decision_id) return "当前暂无新的策略详情。";
+  if (hasNoTradeClassification(noTradeClassification) && noTradeClassification.is_no_trade !== false) {
+    return `系统当前对 ${detail.decision_context?.symbol || "当前标的"} 的交易结论是 ${describeDecisionIntent(detail)}。${noTradeClassificationCopy(noTradeClassification)}`;
+  }
   if (isNoOrderDecision(detail) && policy.execution_allowed && risk.approved) {
     return `系统当前对 ${detail.decision_context?.symbol || "当前标的"} 的交易结论是 ${describeDecisionIntent(detail)}。策略门禁和风控均未阻断，但本轮没有下单目标。`;
   }

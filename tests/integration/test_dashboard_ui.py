@@ -7842,6 +7842,148 @@ console.log(JSON.stringify({
         self.assertIn('"belowEntryMeansNoOpen":true', stdout)
         self.assertIn('"bookRuntimeHasReadableSpacing":true', stdout)
 
+    def test_decision_drawer_surfaces_no_trade_classification_as_primary_cause(self) -> None:
+        script = """
+import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
+
+const detail = {
+  decision_id: 'decision-no-trade-classified',
+  decision_context: { symbol: 'BTC-USDT-SWAP', current_open_orders: [] },
+  position_target: {
+    strategy_family: 'independent',
+    position_intent: 'hold',
+    current_position_qty: '0',
+    target_position_qty: '0',
+    delta_position_qty: '0',
+  },
+  decision_outcome: {
+    final_action: 'hold',
+    final_target_qty: '0',
+    selected_strategy_family: 'independent',
+    no_trade_classification: {
+      is_no_trade: true,
+      classification: 'no_executable_independent_legs_due_signal_threshold',
+      scope: 'strategy_signal_or_net_edge_gate',
+      strategy_family: 'independent',
+      final_action: 'hold',
+      final_target_qty: '0',
+      order_count: 0,
+      fill_count: 0,
+      policy_risk_active_blocker: false,
+      reason_codes: ['independent_short_book_signal_below_entry_threshold'],
+      book_runtime_states: [
+        {
+          leg: 'short',
+          state: 'inactive',
+          score: 0.15,
+          entry_threshold: 0.25,
+          expected_net_edge_bps: -3.2,
+          reason_codes: ['independent_short_book_signal_below_entry_threshold'],
+        },
+      ],
+    },
+  },
+  policy_decision: { execution_allowed: true, submission_allowed: true },
+  risk_decision: { approved: true },
+};
+
+const drawer = buildDecisionDrawer(detail);
+console.log(JSON.stringify({
+  summaryUsesClassifier: drawer.summary.includes('独立双书的 long/short 账本分数没有达到开仓阈值'),
+  hasNoTradeCard: drawer.body.includes('无交易原因') && drawer.body.includes('双书信号未达阈值'),
+  showsBookEvidence: drawer.body.includes('净边际 -3.2bp') && drawer.body.includes('short book 的双书分低于开仓阈值'),
+  avoidsGenericNoOrder: !drawer.summary.includes('本轮没有下单目标'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"summaryUsesClassifier":true', stdout)
+        self.assertIn('"hasNoTradeCard":true', stdout)
+        self.assertIn('"showsBookEvidence":true', stdout)
+        self.assertIn('"avoidsGenericNoOrder":true', stdout)
+
+    def test_strategy_view_surfaces_no_trade_classification_in_summary_and_history(self) -> None:
+        script = """
+import { renderStrategySections } from './aats/api/static/modules/views/strategy-view.js';
+
+const noTradeClassification = {
+  is_no_trade: true,
+  classification: 'no_executable_independent_legs_due_signal_threshold',
+  scope: 'strategy_signal_or_net_edge_gate',
+  strategy_family: 'independent',
+  final_action: 'hold',
+  final_target_qty: '0',
+  order_count: 0,
+  fill_count: 0,
+  policy_risk_active_blocker: false,
+  reason_codes: ['independent_short_book_signal_below_entry_threshold'],
+  book_runtime_states: [
+    { leg: 'short', state: 'inactive', score: 0.15, entry_threshold: 0.25, expected_net_edge_bps: -3.2 },
+  ],
+};
+
+const sections = renderStrategySections({
+  latestDecision: {
+    decision_id: 'decision-no-trade-classified',
+    decision_time: '2026-04-25T18:00:00Z',
+    decision_context: { symbol: 'BTC-USDT-SWAP', current_open_orders: [] },
+    baseline_assessment: { regime: 'trend' },
+    position_target: {
+      product_type: 'derivatives',
+      strategy_family: 'independent',
+      position_intent: 'hold',
+      current_position_qty: '0',
+      target_position_qty: '0',
+      delta_position_qty: '0',
+      margin_mode: 'cross',
+    },
+    decision_outcome: {
+      selected_strategy_family: 'independent',
+      no_trade_classification: noTradeClassification,
+    },
+    policy_decision: { execution_allowed: true, submission_allowed: true },
+    risk_decision: { approved: true },
+  },
+  recentDecisions: {
+    decisions: [{
+      decision_id: 'decision-no-trade-classified',
+      decision_time: '2026-04-25T18:00:00Z',
+      symbol: 'BTC-USDT-SWAP',
+      timeframe: '15m',
+      product_type: 'derivatives',
+      position_intent: 'hold',
+      current_position_qty: '0',
+      target_position_qty: '0',
+      delta_position_qty: '0',
+      policy_result: true,
+      risk_result: true,
+      no_trade_classification: noTradeClassification,
+    }],
+    total_available: 1,
+    limit: 20,
+    has_more: false,
+  },
+  executionLatest: {},
+  strategyRuntime: {},
+});
+
+const html = sections.strategyHero + sections.strategyDecisionWorkbench + sections.strategyHistory;
+console.log(JSON.stringify({
+  heroShowsNoTradePill: html.includes('无交易：双书信号未达阈值'),
+  workbenchShowsNoTradeRow: html.includes('无交易分类') && html.includes('范围 策略信号或净边际门禁'),
+  historyShowsClassification: html.includes('双书信号未达阈值') && !html.includes('AI 超时'),
+  narrativeUsesClassifier: html.includes('独立双书的 long/short 账本分数没有达到开仓阈值'),
+}));
+"""
+        result = _run_node_module(script, encoding="utf-8")
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"heroShowsNoTradePill":true', stdout)
+        self.assertIn('"workbenchShowsNoTradeRow":true', stdout)
+        self.assertIn('"historyShowsClassification":true', stdout)
+        self.assertIn('"narrativeUsesClassifier":true', stdout)
+
     def test_decision_drawer_surfaces_book_runtime_state_summary(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """
