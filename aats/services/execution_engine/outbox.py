@@ -17,7 +17,10 @@ from aats.schemas.operator import ExecutionErrorSummary
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
 from aats.services.execution_engine.lifecycle_snapshot_refs import (
+    choose_lifecycle_market_context_refs,
     choose_snapshot_refs,
+    lifecycle_market_context_refs_from_obj,
+    lifecycle_market_context_refs_from_payload,
     lifecycle_snapshot_ref_payload,
     snapshot_refs_from_obj,
     top_level_snapshot_ref_payload,
@@ -330,6 +333,13 @@ class PostgresExecutionOutboxPublisher:
             snapshot_refs_from_obj(intent),
             snapshot_refs_from_obj(order_state),
         )
+        lifecycle_market_context_refs = choose_lifecycle_market_context_refs(
+            lifecycle_market_context_refs_from_payload(command_payload),
+            lifecycle_market_context_refs_from_obj(intent),
+            lifecycle_market_context_refs_from_obj(order_state),
+            lifecycle_market_context_refs_from_payload(order_state.submission_payload),
+        )
+        lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         self.execution_order_repo.create_order_in_session(
             session,
             order_id=order_state.client_order_id,
@@ -346,7 +356,7 @@ class PostgresExecutionOutboxPublisher:
                 **top_level_snapshot_ref_payload(snapshot_refs),
                 **lifecycle_snapshot_ref_payload(
                     stage="submit",
-                    refs=snapshot_refs,
+                    refs=lifecycle_refs,
                     source="execution_outbox_submit",
                 ),
                 "intent": intent.model_dump(mode="python"),
@@ -384,6 +394,11 @@ class PostgresExecutionOutboxPublisher:
             if existing is None:
                 intent = Phase1ExecutionShadowService.intent_from_fill(fill)
                 snapshot_refs = snapshot_refs_from_obj(fill)
+                lifecycle_market_context_refs = choose_lifecycle_market_context_refs(
+                    lifecycle_market_context_refs_from_obj(fill),
+                    lifecycle_market_context_refs_from_payload(fill.model_dump(mode="python")),
+                )
+                lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
                 self.execution_order_repo.create_order_in_session(
                     session,
                     order_id=fill.client_order_id,
@@ -399,7 +414,7 @@ class PostgresExecutionOutboxPublisher:
                         **top_level_snapshot_ref_payload(snapshot_refs),
                         **lifecycle_snapshot_ref_payload(
                             stage="fill",
-                            refs=snapshot_refs,
+                            refs=lifecycle_refs,
                             source="execution_outbox_fill_backfill",
                         ),
                         "fill_event": fill.model_dump(mode="python"),
@@ -408,6 +423,11 @@ class PostgresExecutionOutboxPublisher:
             else:
                 order_id = str(existing["order_id"])
         fill_snapshot_refs = snapshot_refs_from_obj(fill)
+        fill_lifecycle_market_context_refs = choose_lifecycle_market_context_refs(
+            lifecycle_market_context_refs_from_obj(fill),
+            lifecycle_market_context_refs_from_payload(fill.model_dump(mode="python")),
+        )
+        fill_lifecycle_refs = {**fill_snapshot_refs, **fill_lifecycle_market_context_refs}
         self.execution_fill_repo.save_fill_in_session(
             session,
             fill=fill,
@@ -420,7 +440,7 @@ class PostgresExecutionOutboxPublisher:
                 **top_level_snapshot_ref_payload(fill_snapshot_refs),
                 **lifecycle_snapshot_ref_payload(
                     stage="fill",
-                    refs=fill_snapshot_refs,
+                    refs=fill_lifecycle_refs,
                     source="execution_outbox_fill",
                 ),
                 "fill_event": fill.model_dump(mode="python"),

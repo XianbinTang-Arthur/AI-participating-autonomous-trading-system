@@ -13,7 +13,10 @@ from aats.services.execution_engine.state_machine import OrderStateMachine
 from aats.services.execution_control.shadow import Phase1ExecutionShadowService
 from aats.services.execution_engine.lifecycle_snapshot_refs import (
     SNAPSHOT_REF_KEYS,
+    choose_lifecycle_market_context_refs,
     choose_snapshot_refs,
+    lifecycle_market_context_refs_from_obj,
+    lifecycle_market_context_refs_from_payload,
     lifecycle_snapshot_ref_payload,
     order_state_lifecycle_stage,
     snapshot_refs_from_obj,
@@ -75,6 +78,12 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             snapshot_refs_from_obj(merged),
             snapshot_refs_from_payload(existing_payload),
         )
+        lifecycle_market_context_refs = choose_lifecycle_market_context_refs(
+            lifecycle_market_context_refs_from_obj(merged),
+            lifecycle_market_context_refs_from_payload(merged.submission_payload),
+            lifecycle_market_context_refs_from_payload(existing_payload),
+        )
+        lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         lifecycle_stage = order_state_lifecycle_stage(merged.status, exchange_order_id=merged.exchange_order_id)
         order_state_payload = dump_payload_exact(merged.model_copy(update=snapshot_refs))
         raw_payload = {
@@ -86,7 +95,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             **lifecycle_snapshot_ref_payload(
                 existing_raw_payload=existing_payload,
                 stage=lifecycle_stage,
-                refs=snapshot_refs,
+                refs=lifecycle_refs,
                 source="converged_execution_repo",
             ),
             "order_state": order_state_payload,
@@ -155,6 +164,11 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         if existing is None:
             synthetic_intent = Phase1ExecutionShadowService.intent_from_fill(fill)
             snapshot_refs = snapshot_refs_from_obj(fill)
+            lifecycle_market_context_refs = choose_lifecycle_market_context_refs(
+                lifecycle_market_context_refs_from_obj(fill),
+                lifecycle_market_context_refs_from_payload(fill.model_dump(mode="python")),
+            )
+            lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
             self.execution_order_repo.create_order_in_session(
                 session,
                 order_id=fill.client_order_id,
@@ -168,7 +182,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
                     **top_level_snapshot_ref_payload(snapshot_refs),
                     **lifecycle_snapshot_ref_payload(
                         stage="fill",
-                        refs=snapshot_refs,
+                        refs=lifecycle_refs,
                         source="converged_fill_backfill",
                     ),
                     "fill_event": dump_payload_exact(fill),
@@ -178,6 +192,11 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         else:
             order_id = str(existing["order_id"])
         snapshot_refs = snapshot_refs_from_obj(fill)
+        lifecycle_market_context_refs = choose_lifecycle_market_context_refs(
+            lifecycle_market_context_refs_from_obj(fill),
+            lifecycle_market_context_refs_from_payload(fill.model_dump(mode="python")),
+        )
+        lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         saved = self.execution_fill_repo.save_fill_in_session(
             session,
             fill=fill,
@@ -188,7 +207,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
                 **top_level_snapshot_ref_payload(snapshot_refs),
                 **lifecycle_snapshot_ref_payload(
                     stage="fill",
-                    refs=snapshot_refs,
+                    refs=lifecycle_refs,
                     source="converged_execution_repo_fill",
                 ),
                 "fill_event": dump_payload_exact(fill),
@@ -527,13 +546,20 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             snapshot_refs_from_payload(payload),
             snapshot_refs_from_obj(last_fill),
         )
+        lifecycle_market_context_refs = choose_lifecycle_market_context_refs(
+            lifecycle_market_context_refs_from_payload(payload),
+            lifecycle_market_context_refs_from_obj(order_state),
+            lifecycle_market_context_refs_from_obj(last_fill),
+            lifecycle_market_context_refs_from_payload(last_fill.model_dump(mode="python")),
+        )
+        lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         row.raw_payload = {
             **payload,
             **top_level_snapshot_ref_payload(snapshot_refs),
             **lifecycle_snapshot_ref_payload(
                 existing_raw_payload=payload,
                 stage="fill",
-                refs=snapshot_refs,
+                refs=lifecycle_refs,
                 source="converged_fill_refresh",
             ),
             "order_state": dump_payload_exact(order_state),

@@ -29,9 +29,52 @@ def snapshot_refs_from_payload(payload: Mapping[str, Any] | None) -> dict[str, s
     return {key: _normalize_snapshot_ref(source.get(key)) for key in SNAPSHOT_REF_KEYS}
 
 
+def lifecycle_market_context_refs_from_obj(obj: Any) -> dict[str, str | None]:
+    direct_refs = {
+        key: _normalize_snapshot_ref(getattr(obj, key, None))
+        for key in LIFECYCLE_MARKET_CONTEXT_REF_KEYS
+    }
+    return choose_lifecycle_market_context_refs(
+        direct_refs,
+        lifecycle_market_context_refs_from_payload(getattr(obj, "submission_payload", None)),
+        lifecycle_market_context_refs_from_payload(getattr(obj, "raw_exchange", None)),
+    )
+
+
+def lifecycle_market_context_refs_from_payload(payload: Mapping[str, Any] | None) -> dict[str, str | None]:
+    source = payload if isinstance(payload, Mapping) else {}
+    candidates: list[Mapping[str, Any]] = [source]
+    for nested_key in (
+        "market_context_snapshot_refs",
+        "lifecycle_market_context_refs",
+        "intent",
+        "order_state",
+        "fill_event",
+        "raw_exchange",
+    ):
+        nested = source.get(nested_key)
+        if isinstance(nested, Mapping):
+            candidates.append(nested)
+    return choose_lifecycle_market_context_refs(*candidates)
+
+
 def choose_snapshot_refs(*candidates: Mapping[str, Any] | None) -> dict[str, str | None]:
     chosen: dict[str, str | None] = {}
     for key in SNAPSHOT_REF_KEYS:
+        chosen[key] = next(
+            (
+                _normalize_snapshot_ref(candidate.get(key))
+                for candidate in candidates
+                if isinstance(candidate, Mapping) and _normalize_snapshot_ref(candidate.get(key)) is not None
+            ),
+            None,
+        )
+    return chosen
+
+
+def choose_lifecycle_market_context_refs(*candidates: Mapping[str, Any] | None) -> dict[str, str | None]:
+    chosen: dict[str, str | None] = {}
+    for key in LIFECYCLE_MARKET_CONTEXT_REF_KEYS:
         chosen[key] = next(
             (
                 _normalize_snapshot_ref(candidate.get(key))

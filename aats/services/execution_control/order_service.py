@@ -7,7 +7,10 @@ from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.schemas.common import new_id, utc_now
 from aats.schemas.execution import OrderIntent, OrderState, side_from_position_intent
 from aats.services.execution_engine.lifecycle_snapshot_refs import (
+    choose_lifecycle_market_context_refs,
     choose_snapshot_refs,
+    lifecycle_market_context_refs_from_obj,
+    lifecycle_market_context_refs_from_payload,
     lifecycle_snapshot_ref_payload,
     order_state_lifecycle_stage,
     snapshot_refs_from_obj,
@@ -187,6 +190,14 @@ class ExecutionOrderService:
             snapshot_refs_from_obj(intent),
             snapshot_refs_from_obj(order_state) if order_state is not None else None,
         )
+        lifecycle_market_context_refs = choose_lifecycle_market_context_refs(
+            lifecycle_market_context_refs_from_obj(intent),
+            lifecycle_market_context_refs_from_obj(order_state) if order_state is not None else None,
+            lifecycle_market_context_refs_from_payload(
+                order_state.submission_payload if order_state is not None else None
+            ),
+        )
+        lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         lifecycle_stage = (
             "submit"
             if order_state is None
@@ -209,7 +220,7 @@ class ExecutionOrderService:
                 **top_level_snapshot_ref_payload(snapshot_refs),
                 **lifecycle_snapshot_ref_payload(
                     stage=lifecycle_stage,
-                    refs=snapshot_refs,
+                    refs=lifecycle_refs,
                     source="execution_order_service",
                 ),
                 "order_state": order_state.model_dump(mode="python") if order_state is not None else None,

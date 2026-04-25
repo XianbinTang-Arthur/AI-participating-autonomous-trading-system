@@ -43,6 +43,21 @@ _ACK_REFS = {
     "health_snapshot_ref": "health_snap_ack",
 }
 
+_SUBMIT_BOOK_REFS = {
+    "pre_event_orderbook_snapshot_ref": "book_before_submit",
+    "post_event_orderbook_snapshot_ref": "book_after_submit",
+}
+
+_ACK_BOOK_REFS = {
+    "pre_event_orderbook_snapshot_ref": "book_before_ack",
+    "post_event_orderbook_snapshot_ref": "book_after_ack",
+}
+
+_FILL_BOOK_REFS = {
+    "pre_event_orderbook_snapshot_ref": "book_before_fill",
+    "post_event_orderbook_snapshot_ref": "book_after_fill",
+}
+
 
 def _make_intent(**overrides: Any) -> OrderIntent:
     base = dict(
@@ -214,6 +229,24 @@ class TestLifecycleSnapshotRefPayload(unittest.TestCase):
         self.assertEqual(market_context["post_event_orderbook_snapshot_ref"], "book_after_submit")
         self.assertEqual(market_context["capture_status"], "captured")
         self.assertEqual(market_context["missing_refs"], [])
+
+    def test_lifecycle_market_context_refs_can_be_extracted_from_nested_payloads(self) -> None:
+        from aats.services.execution_engine.lifecycle_snapshot_refs import (
+            lifecycle_market_context_refs_from_payload,
+        )
+
+        refs = lifecycle_market_context_refs_from_payload(
+            {
+                "intent": dict(_SUBMIT_BOOK_REFS),
+                "raw_exchange": {
+                    "pre_event_orderbook_snapshot_ref": "ignored_later_candidate",
+                    "post_event_orderbook_snapshot_ref": "ignored_later_candidate",
+                },
+            }
+        )
+
+        self.assertEqual(refs["pre_event_orderbook_snapshot_ref"], "book_before_submit")
+        self.assertEqual(refs["post_event_orderbook_snapshot_ref"], "book_after_submit")
 
 
 class TestRoundTripHelpersPreserveRefs(unittest.TestCase):
@@ -450,6 +483,30 @@ class TestOutboxEnsureExecutionOrderRow(unittest.TestCase):
         self.assertEqual(lifecycle["submit"]["feature_snapshot_ref"], "feat_snap_def")
         self.assertEqual(lifecycle["submit"]["source"], "execution_outbox_submit")
 
+    def test_submit_lifecycle_contains_orderbook_refs_from_command_payload(self) -> None:
+        order_repo = _CapturingOrderRepo()
+        publisher = self._make_publisher(order_repo)
+        intent = _make_intent(**_REFS)
+        order_state = _make_order_state()
+        command_payload = {
+            "intent": intent.model_dump(mode="python"),
+            **_SUBMIT_BOOK_REFS,
+        }
+        publisher._ensure_execution_order_row(
+            session=object(),
+            order_state=order_state,
+            command_type="submit",
+            command_payload=command_payload,
+        )
+
+        payload = order_repo.created_raw_payload
+        assert payload is not None
+        market_context = payload["lifecycle_snapshot_refs"]["submit"]["market_context_snapshot_refs"]
+        self.assertEqual(market_context["pre_event_orderbook_snapshot_ref"], "book_before_submit")
+        self.assertEqual(market_context["post_event_orderbook_snapshot_ref"], "book_after_submit")
+        self.assertEqual(market_context["capture_status"], "captured")
+        self.assertEqual(market_context["missing_refs"], [])
+
     def test_raw_payload_falls_back_to_order_state_refs(self) -> None:
         """command_payload 无 refs（或不存在），但 order_state 带 refs 时仍填充。"""
         order_repo = _CapturingOrderRepo()
@@ -531,6 +588,27 @@ class TestOutboxEnsureExecutionFillRow(unittest.TestCase):
         order_lifecycle = order_payload["lifecycle_snapshot_refs"]
         self.assertEqual(order_lifecycle["fill"]["market_snapshot_ref"], "mkt_snap_abc")
         self.assertEqual(order_lifecycle["fill"]["source"], "execution_outbox_fill_backfill")
+
+    def test_fill_lifecycle_contains_orderbook_refs_from_raw_exchange(self) -> None:
+        order_repo = _CapturingOrderRepo()
+        fill_repo = _CapturingFillRepo()
+        publisher = self._make_publisher(order_repo, fill_repo)
+        fill = _make_fill_event(**_REFS, raw_exchange=dict(_FILL_BOOK_REFS))
+        publisher._ensure_execution_fill_row(session=object(), fill=fill)
+
+        fill_payload = fill_repo.saved_raw_payload
+        assert fill_payload is not None
+        market_context = fill_payload["lifecycle_snapshot_refs"]["fill"]["market_context_snapshot_refs"]
+        self.assertEqual(market_context["pre_event_orderbook_snapshot_ref"], "book_before_fill")
+        self.assertEqual(market_context["post_event_orderbook_snapshot_ref"], "book_after_fill")
+        self.assertEqual(market_context["capture_status"], "captured")
+        self.assertEqual(market_context["missing_refs"], [])
+
+        order_payload = order_repo.created_raw_payload
+        assert order_payload is not None
+        order_market_context = order_payload["lifecycle_snapshot_refs"]["fill"]["market_context_snapshot_refs"]
+        self.assertEqual(order_market_context["pre_event_orderbook_snapshot_ref"], "book_before_fill")
+        self.assertEqual(order_market_context["post_event_orderbook_snapshot_ref"], "book_after_fill")
 
     def test_fill_raw_payload_refs_none_when_fill_has_no_refs(self) -> None:
         order_repo = _CapturingOrderRepo()
@@ -1133,6 +1211,7 @@ class TestConvergedRepoLifecycleSnapshotRefs(unittest.TestCase):
                 "lifecycle_snapshot_refs": {
                     "submit": {
                         **_REFS,
+                        "market_context_snapshot_refs": dict(_SUBMIT_BOOK_REFS),
                         "source": "execution_outbox_submit",
                     }
                 },
@@ -1151,6 +1230,7 @@ class TestConvergedRepoLifecycleSnapshotRefs(unittest.TestCase):
             exchange_order_id="ord_snapref_ack",
             last_update_ts=datetime.now(timezone.utc),
             last_exchange_update_ts=datetime.now(timezone.utc),
+            submission_payload=dict(_ACK_BOOK_REFS),
             **_ACK_REFS,
         )
         repo.save_order_state_in_session(session=object(), state=ack_state)
@@ -1161,6 +1241,13 @@ class TestConvergedRepoLifecycleSnapshotRefs(unittest.TestCase):
         self.assertEqual(lifecycle["submit"]["market_snapshot_ref"], "mkt_snap_abc")
         self.assertEqual(lifecycle["ack"]["market_snapshot_ref"], "mkt_snap_ack")
         self.assertEqual(lifecycle["ack"]["source"], "converged_execution_repo")
+        submit_market_context = lifecycle["submit"]["market_context_snapshot_refs"]
+        self.assertEqual(submit_market_context["pre_event_orderbook_snapshot_ref"], "book_before_submit")
+        self.assertEqual(submit_market_context["post_event_orderbook_snapshot_ref"], "book_after_submit")
+        ack_market_context = lifecycle["ack"]["market_context_snapshot_refs"]
+        self.assertEqual(ack_market_context["pre_event_orderbook_snapshot_ref"], "book_before_ack")
+        self.assertEqual(ack_market_context["post_event_orderbook_snapshot_ref"], "book_after_ack")
+        self.assertEqual(ack_market_context["capture_status"], "captured")
         self.assertEqual(payload["market_snapshot_ref"], "mkt_snap_ack")
         self.assertEqual(payload["order_state"]["market_snapshot_ref"], "mkt_snap_ack")
 
@@ -1314,6 +1401,21 @@ class TestConvergedRepoSyntheticRefreshPreservesRefs(unittest.TestCase):
         self.assertEqual(new_order_state["health_snapshot_ref"], "health_snap_jkl")
         lifecycle = row.raw_payload["lifecycle_snapshot_refs"]
         self.assertEqual(lifecycle["fill"]["market_snapshot_ref"], "mkt_snap_abc")
+
+    def test_refresh_uses_last_fill_raw_exchange_orderbook_refs(self) -> None:
+        repo = self._make_repo()
+        raw_payload = {"source_system": "converged_fill_backfill"}
+        row = self._stub_row(raw_payload)
+        fill_payload = _make_fill_event(**_REFS, raw_exchange=dict(_FILL_BOOK_REFS)).model_dump(mode="python")
+        fill_row = self._stub_fill_model(fill_event=fill_payload)
+        session = self._stub_session(row, [fill_row])
+        repo._refresh_synthetic_order_state_from_fills(session, order_id="ord_snapref")
+
+        lifecycle = row.raw_payload["lifecycle_snapshot_refs"]
+        market_context = lifecycle["fill"]["market_context_snapshot_refs"]
+        self.assertEqual(market_context["pre_event_orderbook_snapshot_ref"], "book_before_fill")
+        self.assertEqual(market_context["post_event_orderbook_snapshot_ref"], "book_after_fill")
+        self.assertEqual(market_context["capture_status"], "captured")
 
     def test_refresh_without_any_refs_yields_none(self) -> None:
         repo = self._make_repo()
