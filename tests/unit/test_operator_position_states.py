@@ -547,6 +547,113 @@ class TestOperatorPositionStates(unittest.TestCase):
         )
         self.assertEqual(normalized["diagnostic_metric_flags"], metric_flags)
 
+    def test_no_trade_classification_detects_policy_block(self) -> None:
+        payload = OperatorQueryService._no_trade_classification_payload(
+            decision_outcome={
+                "final_action": "enter",
+                "final_target_qty": "0.004",
+                "selected_strategy_family": "independent",
+            },
+            position_target={"target_position_qty": "0.004", "strategy_family": "independent"},
+            policy_decision={
+                "execution_allowed": False,
+                "rejection_reasons": ["kill_switch_active"],
+            },
+            risk_decision={"approved": True},
+        )
+
+        self.assertTrue(payload["is_no_trade"])
+        self.assertEqual(payload["classification"], "policy_execution_block")
+        self.assertTrue(payload["policy_risk_active_blocker"])
+        self.assertEqual(payload["policy_reasons"], ["kill_switch_active"])
+
+    def test_no_trade_classification_uses_independent_book_states_for_net_edge_block(self) -> None:
+        payload = OperatorQueryService._no_trade_classification_payload(
+            decision_outcome={
+                "final_action": "hold",
+                "final_target_qty": "0",
+                "selected_strategy_family": "independent",
+                "strategy_selection_reason_codes": [
+                    "independent_long_book_signal_above_entry_threshold",
+                    "independent_short_book_signal_below_entry_threshold",
+                    "independent_family_candidate_inactive",
+                ],
+            },
+            position_target={
+                "target_position_qty": "0",
+                "strategy_family": "independent",
+                "book_runtime_states": [
+                    {
+                        "leg": "long",
+                        "state": "blocked",
+                        "score": 0.30,
+                        "expected_signal_edge_bps": 3.6,
+                        "expected_cost_bps": 6.0,
+                        "expected_net_edge_bps": -4.4,
+                        "threshold_snapshot": {"leg": "long", "effective_entry_threshold": 0.25},
+                        "blocked_reasons": [
+                            "independent_long_book_expected_net_edge_below_safe_threshold",
+                        ],
+                    },
+                    {
+                        "leg": "short",
+                        "state": "inactive",
+                        "score": 0.0,
+                        "expected_signal_edge_bps": 0.0,
+                        "expected_cost_bps": 6.0,
+                        "expected_net_edge_bps": -8.0,
+                        "threshold_snapshot": {"leg": "short", "effective_entry_threshold": 0.25},
+                        "reason_codes": ["independent_short_book_signal_below_entry_threshold"],
+                    },
+                ],
+            },
+            policy_decision={"execution_allowed": True, "submission_allowed": True},
+            risk_decision={"approved": True},
+            strategy_sleeve_intents=[
+                {
+                    "family": "independent",
+                    "approved_for_execution": False,
+                    "blocking_reasons": [
+                        "independent_long_book_expected_net_edge_below_safe_threshold",
+                    ],
+                }
+            ],
+        )
+
+        self.assertEqual(
+            payload["classification"],
+            "no_executable_independent_legs_due_signal_and_net_edge_gates",
+        )
+        self.assertFalse(payload["policy_risk_active_blocker"])
+        self.assertEqual(payload["book_runtime_states"][0]["leg"], "long")
+        self.assertEqual(payload["book_runtime_states"][0]["expected_net_edge_bps"], -4.4)
+
+    def test_no_trade_classification_flags_actionable_decision_without_execution_activity(self) -> None:
+        payload = OperatorQueryService._no_trade_classification_payload(
+            decision_outcome={
+                "final_action": "enter",
+                "final_target_qty": "0.004",
+                "selected_strategy_family": "independent",
+            },
+            position_target={"target_position_qty": "0.004", "strategy_family": "independent"},
+            policy_decision={"execution_allowed": True},
+            risk_decision={"approved": True},
+        )
+
+        self.assertEqual(payload["classification"], "actionable_decision_missing_execution_activity")
+        self.assertEqual(payload["scope"], "runtime_execution_gap")
+
+    def test_no_trade_classification_preserves_unknown_for_sparse_hold(self) -> None:
+        payload = OperatorQueryService._no_trade_classification_payload(
+            decision_outcome={"final_action": "hold", "final_target_qty": "0"},
+            position_target={"target_position_qty": "0"},
+            policy_decision={"execution_allowed": True},
+            risk_decision={"approved": True},
+        )
+
+        self.assertEqual(payload["classification"], "unknown_no_trade_blocker")
+        self.assertEqual(payload["scope"], "unknown")
+
     def test_overlay_parent_exposure_backfill_does_not_treat_plain_target_fields_as_overlay_object(self) -> None:
         payload = OperatorQueryService._overlay_parent_exposure_from_payload(
             {

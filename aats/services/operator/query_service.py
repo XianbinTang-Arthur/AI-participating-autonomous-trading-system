@@ -2364,6 +2364,229 @@ class OperatorQueryService:
             return None
 
     @staticmethod
+    def _payload_bool(value: Any) -> bool | None:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "y", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "n", "off"}:
+                return False
+        if isinstance(value, (int, float, Decimal)):
+            return bool(value)
+        return None
+
+    @classmethod
+    def _no_trade_classification_payload(
+        cls,
+        *,
+        decision_outcome: dict[str, Any] | None,
+        position_target: dict[str, Any] | None,
+        policy_decision: dict[str, Any] | None,
+        risk_decision: dict[str, Any] | None,
+        strategy_sleeve_intents: list[dict[str, Any]] | None = None,
+        order_count: int = 0,
+        fill_count: int = 0,
+    ) -> dict[str, Any]:
+        outcome = decision_outcome if isinstance(decision_outcome, dict) else {}
+        target = position_target if isinstance(position_target, dict) else {}
+        policy = policy_decision if isinstance(policy_decision, dict) else {}
+        risk = risk_decision if isinstance(risk_decision, dict) else {}
+        sleeves = [item for item in (strategy_sleeve_intents or []) if isinstance(item, dict)]
+        order_count = max(int(order_count or 0), 0)
+        fill_count = max(int(fill_count or 0), 0)
+
+        strategy_family = str(
+            outcome.get("selected_strategy_family") or target.get("strategy_family") or ""
+        ).strip().lower()
+        final_action = str(
+            outcome.get("final_action") or target.get("position_intent") or ""
+        ).strip().lower()
+        final_target_qty = cls._to_decimal(
+            outcome.get("final_target_qty") or target.get("target_position_qty")
+        )
+        no_target = final_target_qty is None or final_target_qty == Decimal("0")
+        reason_codes = cls._no_trade_reason_codes(
+            outcome=outcome,
+            target=target,
+            sleeves=sleeves,
+        )
+        book_states = cls._no_trade_book_state_summaries(outcome=outcome, target=target)
+
+        base = {
+            "is_no_trade": True,
+            "classification": "unknown_no_trade_blocker",
+            "scope": "unknown",
+            "strategy_family": strategy_family or None,
+            "final_action": final_action or None,
+            "final_target_qty": None if final_target_qty is None else str(final_target_qty),
+            "order_count": order_count,
+            "fill_count": fill_count,
+            "policy_risk_active_blocker": False,
+            "reason_codes": reason_codes,
+            "book_runtime_states": book_states,
+        }
+
+        if order_count > 0 or fill_count > 0:
+            return {
+                **base,
+                "is_no_trade": False,
+                "classification": "execution_activity_present",
+                "scope": "execution_activity",
+            }
+
+        policy_reasons = list(policy.get("rejection_reasons") or [])
+        policy_blocked = (
+            cls._payload_bool(outcome.get("policy_blocked")) is True
+            or cls._payload_bool(policy.get("allowed")) is False
+            or cls._payload_bool(policy.get("execution_allowed")) is False
+            or cls._payload_bool(policy.get("submission_allowed")) is False
+            or cls._payload_bool(policy.get("dry_run_only")) is True
+            or cls._payload_bool(policy.get("requires_human_approval")) is True
+            or bool(policy_reasons)
+        )
+        if policy_blocked:
+            return {
+                **base,
+                "classification": "policy_execution_block",
+                "scope": "policy_gate",
+                "policy_risk_active_blocker": True,
+                "policy_reasons": policy_reasons,
+            }
+
+        risk_rejection_reasons = list(risk.get("rejection_reasons") or [])
+        risk_constraints = list(risk.get("constraints_applied") or [])
+        risk_blocked = (
+            cls._payload_bool(risk.get("approved")) is False
+            or cls._payload_bool(risk.get("halt_required")) is True
+            or cls._payload_bool(risk.get("flatten_required")) is True
+            or cls._payload_bool(risk.get("only_reduce_required")) is True
+            or cls._payload_bool(risk.get("risk_limit_breached")) is True
+            or bool(risk_rejection_reasons)
+        )
+        capped_target = cls._to_decimal(risk.get("capped_target_position_qty"))
+        if risk_blocked or (capped_target is not None and capped_target == Decimal("0") and not no_target):
+            return {
+                **base,
+                "classification": "risk_execution_block",
+                "scope": "risk_gate",
+                "policy_risk_active_blocker": True,
+                "risk_rejection_reasons": risk_rejection_reasons,
+                "risk_constraints_applied": risk_constraints,
+            }
+
+        if final_action not in {"", "hold", "flat", "none"} and not no_target:
+            return {
+                **base,
+                "classification": "actionable_decision_missing_execution_activity",
+                "scope": "runtime_execution_gap",
+            }
+
+        reason_text = " ".join(reason_codes).lower()
+        has_net_edge_block = "expected_net_edge_below_safe_threshold" in reason_text
+        has_signal_block = "signal_below_entry_threshold" in reason_text
+        has_independent_inactive = (
+            "independent_family_candidate_inactive" in reason_codes
+            or any("hold_only" in code for code in reason_codes)
+        )
+        if strategy_family == "independent" and (
+            has_net_edge_block or has_signal_block or has_independent_inactive
+        ):
+            if has_net_edge_block and has_signal_block:
+                classification = "no_executable_independent_legs_due_signal_and_net_edge_gates"
+            elif has_net_edge_block:
+                classification = "no_executable_independent_legs_due_net_edge_gate"
+            elif has_signal_block:
+                classification = "no_executable_independent_legs_due_signal_threshold"
+            else:
+                classification = "no_executable_independent_candidate_inactive"
+            return {
+                **base,
+                "classification": classification,
+                "scope": "strategy_signal_or_net_edge_gate",
+            }
+
+        if reason_codes:
+            return {
+                **base,
+                "classification": "strategy_no_trade_reason_codes_present",
+                "scope": "strategy_gate",
+            }
+        return base
+
+    @classmethod
+    def _no_trade_reason_codes(
+        cls,
+        *,
+        outcome: dict[str, Any],
+        target: dict[str, Any],
+        sleeves: list[dict[str, Any]],
+    ) -> list[str]:
+        codes: list[str] = []
+        for source, keys in (
+            (
+                outcome,
+                (
+                    "decision_blocked_reasons",
+                    "strategy_selection_reason_codes",
+                    "strategy_blocking_reasons",
+                    "policy_blocked_reasons",
+                    "risk_capped_reasons",
+                ),
+            ),
+            (target, ("strategy_reason_codes", "strategy_blocking_reasons", "guardrail_flags")),
+        ):
+            for key in keys:
+                value = source.get(key)
+                if isinstance(value, list):
+                    codes.extend(str(item) for item in value if item)
+        for sleeve in sleeves:
+            for key in ("reason_codes", "blocking_reasons", "control_reason_codes"):
+                value = sleeve.get(key)
+                if isinstance(value, list):
+                    codes.extend(str(item) for item in value if item)
+        for state in cls._book_runtime_states_from_payload(outcome) or cls._book_runtime_states_from_payload(target):
+            for key in ("reason_codes", "blocking_reasons", "warnings"):
+                value = state.get(key)
+                if isinstance(value, list):
+                    codes.extend(str(item) for item in value if item)
+        return list(dict.fromkeys(codes))
+
+    @classmethod
+    def _no_trade_book_state_summaries(
+        cls,
+        *,
+        outcome: dict[str, Any],
+        target: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        states = cls._book_runtime_states_from_payload(outcome) or cls._book_runtime_states_from_payload(target)
+        summaries: list[dict[str, Any]] = []
+        for state in states:
+            threshold = state.get("threshold_snapshot")
+            threshold = threshold if isinstance(threshold, dict) else {}
+            summaries.append(
+                {
+                    "leg": state.get("leg"),
+                    "state": state.get("state") or state.get("book_state"),
+                    "score": state.get("score"),
+                    "entry_threshold": (
+                        threshold.get("effective_entry_threshold")
+                        or threshold.get("entry_threshold")
+                        or state.get("entry_threshold")
+                    ),
+                    "expected_signal_edge_bps": state.get("expected_signal_edge_bps"),
+                    "expected_cost_bps": state.get("expected_cost_bps"),
+                    "expected_net_edge_bps": state.get("expected_net_edge_bps"),
+                    "reason_codes": list(state.get("reason_codes") or []),
+                    "blocking_reasons": list(state.get("blocking_reasons") or []),
+                }
+            )
+        return summaries
+
+    @staticmethod
     def _format_fraction_percent(value: Any, *, places: int = 2) -> str:
         try:
             resolved = Decimal(str(value))
@@ -7939,6 +8162,7 @@ class OperatorQueryService:
         order_updates = self.payloads_by_refs(audit.order_state_refs)
         fills = self.payloads_by_refs(audit.fill_event_refs)
         reconciliations = self.payloads_by_refs(audit.reconciliation_refs)
+        strategy_sleeve_intents = self.payloads_by_refs(audit.strategy_sleeve_intent_refs)
         ai_visible = self._ai_history_visible()
         ai_decision_brief = self.payload_by_ref(audit.ai_decision_brief_ref) if ai_visible else None
         ai_assessment = self.payload_by_ref(audit.ai_market_assessment_ref) if ai_visible else None
@@ -7971,6 +8195,26 @@ class OperatorQueryService:
                 decision_ids={decision_id},
                 limit=1,
             )
+        decision_outcome_payload = self._decision_outcome_payload(
+            finalized_decision_outcome=finalized_decision_outcome,
+            decision_context=decision_context,
+            baseline_assessment=baseline_assessment,
+            ai_assessment=ai_assessment,
+            position_target=position_target,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+        )
+        no_trade_classification = self._no_trade_classification_payload(
+            decision_outcome=decision_outcome_payload,
+            position_target=position_target,
+            policy_decision=policy_decision,
+            risk_decision=risk_decision,
+            strategy_sleeve_intents=strategy_sleeve_intents,
+            order_count=len(order_intents),
+            fill_count=len(fills),
+        )
+        if isinstance(decision_outcome_payload, dict):
+            decision_outcome_payload.setdefault("no_trade_classification", no_trade_classification)
         return {
             "decision_id": decision_id,
             "health_snapshot": health_snapshot,
@@ -7993,15 +8237,8 @@ class OperatorQueryService:
             "position_target": position_target,
             "policy_decision": policy_decision,
             "risk_decision": risk_decision,
-            "decision_outcome": self._decision_outcome_payload(
-                finalized_decision_outcome=finalized_decision_outcome,
-                decision_context=decision_context,
-                baseline_assessment=baseline_assessment,
-                ai_assessment=ai_assessment,
-                position_target=position_target,
-                policy_decision=policy_decision,
-                risk_decision=risk_decision,
-            ),
+            "decision_outcome": decision_outcome_payload,
+            "no_trade_classification": no_trade_classification,
             "execution_plan": execution_plan,
             "audit": audit.model_dump(mode="json"),
             "latest_order_intent": order_intents[-1] if order_intents else None,
@@ -8011,6 +8248,7 @@ class OperatorQueryService:
             "order_intents": order_intents,
             "order_updates": order_updates,
             "fills": fills,
+            "strategy_sleeve_intents": strategy_sleeve_intents,
             "portfolio_snapshot": self.payload_by_ref(audit.portfolio_delta_ref),
             "reconciliations": reconciliations,
             "strategy_execution_health": strategy_execution_health,
@@ -8075,6 +8313,27 @@ class OperatorQueryService:
                     decision_ids={record.decision_id},
                     limit=1,
                 )
+            native_outcome = finalized_outcome if isinstance(finalized_outcome, dict) else None
+            if native_outcome is None and isinstance(target, dict):
+                nested_outcome = target.get("decision_outcome")
+                native_outcome = nested_outcome if isinstance(nested_outcome, dict) else None
+            strategy_sleeve_intents = [
+                payload
+                for payload in (
+                    self.payload_by_ref(ref)
+                    for ref in record.strategy_sleeve_intent_refs
+                )
+                if payload is not None
+            ]
+            no_trade_classification = self._no_trade_classification_payload(
+                decision_outcome=native_outcome,
+                position_target=target,
+                policy_decision=policy,
+                risk_decision=risk,
+                strategy_sleeve_intents=strategy_sleeve_intents,
+                order_count=len(record.order_intent_refs),
+                fill_count=len(record.fill_event_refs),
+            )
             payloads.append(
                 {
                     "decision_id": record.decision_id,
@@ -8120,6 +8379,7 @@ class OperatorQueryService:
                     "strategy_reason_codes": [] if target is None else list(target.get("strategy_reason_codes") or []),
                     "guardrail_flags": target.get("guardrail_flags") if target else [],
                     "expected_net_edge_bps": target.get("expected_net_edge_bps") if target else None,
+                    "no_trade_classification": no_trade_classification,
                     "policy_result": policy.get("execution_allowed") if policy else None,
                     "risk_result": risk.get("approved") if risk else None,
                     "execution_result": {
