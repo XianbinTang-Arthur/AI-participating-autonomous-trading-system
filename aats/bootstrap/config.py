@@ -81,6 +81,7 @@ from aats.services.execution_control.subsystem import Phase1ShadowSubsystem
 from aats.services.execution_engine.account_snapshot_cache import AccountSnapshotCache
 from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
 from aats.services.execution_engine.order_manager import OrderManager
+from aats.services.execution_engine.orderbook_snapshot_refs import default_orderbook_snapshot_read_source
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 from aats.services.portfolio_service.snapshot_cache import PortfolioSnapshotCache
@@ -1713,12 +1714,18 @@ def build_storage_backends(
         )
 
     legacy_execution_repo = PostgresExecutionRepository(database_runtime.session_factory)
+    orderbook_snapshot_read_source = (
+        default_orderbook_snapshot_read_source()
+        if process_role in {None, PROCESS_ROLE_MONOLITH, PROCESS_ROLE_EXECUTION}
+        else None
+    )
     execution_repo = (
         ConvergedPostgresExecutionRepository(
             database_runtime.session_factory,
             execution_order_repo=execution_order_repo,
             execution_order_history_repo=execution_order_history_repo,
             execution_fill_repo=execution_fill_repo_v2,
+            orderbook_snapshot_read_source=orderbook_snapshot_read_source,
         )
         if settings.financial_convergence_mode_enabled
         else legacy_execution_repo

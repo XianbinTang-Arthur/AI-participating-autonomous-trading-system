@@ -23,7 +23,10 @@ from aats.services.execution_engine.lifecycle_snapshot_refs import (
     snapshot_refs_from_payload,
     top_level_snapshot_ref_payload,
 )
-from aats.services.execution_engine.orderbook_snapshot_refs import capture_orderbook_snapshot_refs_for_event
+from aats.services.execution_engine.orderbook_snapshot_refs import (
+    OrderbookSnapshotReadSource,
+    capture_orderbook_snapshot_refs_for_event,
+)
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.base import ExecutionRepository
 from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
@@ -45,11 +48,13 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         execution_order_repo: PostgresExecutionOrderRepository,
         execution_order_history_repo: PostgresExecutionOrderHistoryRepository | None,
         execution_fill_repo: PostgresExecutionFillRepositoryV2,
+        orderbook_snapshot_read_source: OrderbookSnapshotReadSource | None = None,
     ) -> None:
         self.session_factory = session_factory
         self.execution_order_repo = execution_order_repo
         self.execution_order_history_repo = execution_order_history_repo
         self.execution_fill_repo = execution_fill_repo
+        self.orderbook_snapshot_read_source = orderbook_snapshot_read_source
         self.state_machine = OrderStateMachine()
 
     def save_order_state(self, state: OrderState) -> OrderState:
@@ -89,6 +94,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             symbol=merged.symbol,
             event_time=self._order_state_event_time(merged),
             existing_refs=lifecycle_market_context_refs,
+            market_context_source=getattr(self, "orderbook_snapshot_read_source", None),
         )
         lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         lifecycle_stage = order_state_lifecycle_stage(merged.status, exchange_order_id=merged.exchange_order_id)
@@ -180,6 +186,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
                 symbol=fill.symbol,
                 event_time=self._fill_event_time(fill),
                 existing_refs=lifecycle_market_context_refs,
+                market_context_source=getattr(self, "orderbook_snapshot_read_source", None),
             )
             lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
             self.execution_order_repo.create_order_in_session(
@@ -214,6 +221,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             symbol=fill.symbol,
             event_time=self._fill_event_time(fill),
             existing_refs=lifecycle_market_context_refs,
+            market_context_source=getattr(self, "orderbook_snapshot_read_source", None),
         )
         lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         saved = self.execution_fill_repo.save_fill_in_session(
@@ -576,6 +584,7 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
             symbol=last_fill.symbol,
             event_time=self._fill_event_time(last_fill),
             existing_refs=lifecycle_market_context_refs,
+            market_context_source=getattr(self, "orderbook_snapshot_read_source", None),
         )
         lifecycle_refs = {**snapshot_refs, **lifecycle_market_context_refs}
         row.raw_payload = {

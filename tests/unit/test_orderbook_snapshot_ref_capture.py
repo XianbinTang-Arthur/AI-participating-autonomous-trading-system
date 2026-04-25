@@ -4,10 +4,16 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
+from unittest.mock import patch
 
 from aats.schemas.execution import OrderState
 from aats.services.execution_engine.orderbook_snapshot_refs import (
+    OrderbookSnapshotReadSource,
+    build_orderbook_snapshot_read_source,
     capture_orderbook_snapshot_refs_for_event,
+    default_orderbook_snapshot_read_source,
+    reset_default_orderbook_snapshot_read_source_for_tests,
+    resolve_orderbook_market_context_db_url,
 )
 
 
@@ -31,11 +37,15 @@ class _FakeSession:
     def __init__(self, rows: list[dict[str, Any] | None]) -> None:
         self._rows = list(rows)
         self.execute_calls: list[dict[str, Any]] = []
+        self.close_count = 0
 
     def execute(self, _statement: Any, params: dict[str, Any]) -> _FakeExecuteResult:
         self.execute_calls.append(dict(params))
         row = self._rows.pop(0) if self._rows else None
         return _FakeExecuteResult(row)
+
+    def close(self) -> None:
+        self.close_count += 1
 
 
 class _FailingSession:
@@ -44,6 +54,46 @@ class _FailingSession:
 
 
 class TestOrderbookSnapshotRefCapture(unittest.TestCase):
+    def test_resolves_market_context_db_url_with_explicit_precedence(self) -> None:
+        env = {
+            "AATS_MARKET_CONTEXT_DB_URL": "postgresql+psycopg://user:pw@host:5432/explicit_context",
+            "AATS_ACTIVE_PARAMETER_DB_URL": "postgresql+psycopg://user:pw@host:5432/active_parameters",
+            "RDP_DATABASE_URL": "postgresql+psycopg://user:pw@host:5432/rdp",
+        }
+
+        self.assertEqual(
+            resolve_orderbook_market_context_db_url(env),
+            "postgresql+psycopg://user:pw@host:5432/explicit_context",
+        )
+        env.pop("AATS_MARKET_CONTEXT_DB_URL")
+        self.assertEqual(
+            resolve_orderbook_market_context_db_url(env),
+            "postgresql+psycopg://user:pw@host:5432/active_parameters",
+        )
+        env.pop("AATS_ACTIVE_PARAMETER_DB_URL")
+        self.assertEqual(
+            resolve_orderbook_market_context_db_url(env),
+            "postgresql+psycopg://user:pw@host:5432/rdp",
+        )
+
+    def test_build_source_uses_read_only_postgres_options_and_source_name(self) -> None:
+        url = "postgresql+psycopg://user:pw@host:5432/aats_research"
+
+        with patch("aats.services.execution_engine.orderbook_snapshot_refs.create_engine") as create_engine_mock:
+            source = build_orderbook_snapshot_read_source(url)
+
+        self.assertEqual(source.source_name, "aats_research")
+        self.assertEqual(create_engine_mock.call_args.args, (url,))
+        self.assertIn("default_transaction_read_only=on", create_engine_mock.call_args.kwargs["connect_args"]["options"])
+        self.assertEqual(create_engine_mock.call_args.kwargs["pool_size"], 1)
+        self.assertEqual(create_engine_mock.call_args.kwargs["max_overflow"], 1)
+
+    def test_default_source_invalid_url_fails_soft(self) -> None:
+        reset_default_orderbook_snapshot_read_source_for_tests()
+        with patch.dict("os.environ", {"AATS_MARKET_CONTEXT_DB_URL": "not-a-db-url"}, clear=True):
+            self.assertIsNone(default_orderbook_snapshot_read_source())
+        reset_default_orderbook_snapshot_read_source_for_tests()
+
     def test_captures_pre_and_post_books5_refs(self) -> None:
         event_time = datetime(2026, 4, 25, 3, 48, 30, 500000, tzinfo=timezone.utc)
         pre_ts = datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)
@@ -65,6 +115,63 @@ class TestOrderbookSnapshotRefCapture(unittest.TestCase):
             "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z",
         )
         self.assertEqual(len(session.execute_calls), 2)
+
+    def test_captures_from_readonly_market_context_source_first(self) -> None:
+        event_time = datetime(2026, 4, 25, 3, 48, 30, 500000, tzinfo=timezone.utc)
+        execution_session = _FailingSession()
+        source_session = _FakeSession(
+            [
+                {"ts": datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)},
+                {"ts": datetime(2026, 4, 25, 3, 48, 31, tzinfo=timezone.utc)},
+            ]
+        )
+        source = OrderbookSnapshotReadSource(
+            session_factory=lambda: source_session,  # type: ignore[arg-type]
+            source_name="aats_research",
+        )
+
+        refs = capture_orderbook_snapshot_refs_for_event(
+            execution_session,  # type: ignore[arg-type]
+            symbol="BTC-USDT-SWAP",
+            event_time=event_time,
+            market_context_source=source,
+        )
+
+        self.assertEqual(
+            refs["pre_event_orderbook_snapshot_ref"],
+            "aats_research.bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z",
+        )
+        self.assertEqual(
+            refs["post_event_orderbook_snapshot_ref"],
+            "aats_research.bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z",
+        )
+        self.assertEqual(len(source_session.execute_calls), 2)
+        self.assertEqual(source_session.close_count, 1)
+
+    def test_market_context_source_failure_falls_back_to_execution_session(self) -> None:
+        event_time = datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)
+        execution_session = _FakeSession([{"ts": event_time}, {"ts": event_time}])
+        source = OrderbookSnapshotReadSource(
+            session_factory=lambda: _FailingSession(),  # type: ignore[arg-type]
+            source_name="aats_research",
+        )
+
+        refs = capture_orderbook_snapshot_refs_for_event(
+            execution_session,  # type: ignore[arg-type]
+            symbol="BTC-USDT-SWAP",
+            event_time=event_time,
+            market_context_source=source,
+        )
+
+        self.assertEqual(
+            refs["pre_event_orderbook_snapshot_ref"],
+            "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z",
+        )
+        self.assertEqual(
+            refs["post_event_orderbook_snapshot_ref"],
+            "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z",
+        )
+        self.assertEqual(len(execution_session.execute_calls), 2)
 
     def test_preserves_explicit_refs_and_only_captures_missing_side(self) -> None:
         event_time = datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)
@@ -185,6 +292,56 @@ class TestConvergedRepoOrderbookSnapshotCapture(unittest.TestCase):
         self.assertEqual(
             market_context["post_event_orderbook_snapshot_ref"],
             "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z",
+        )
+        self.assertEqual(market_context["capture_status"], "captured")
+
+    def test_converged_repo_uses_market_context_read_source(self) -> None:
+        from aats.services.execution_engine.state_machine import OrderStateMachine
+        from aats.storage.execution_repo_converged_postgres import ConvergedPostgresExecutionRepository
+
+        event_time = datetime(2026, 4, 25, 3, 48, 30, 500000, tzinfo=timezone.utc)
+        execution_session = _FailingSession()
+        source_session = _FakeSession(
+            [
+                {"ts": datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)},
+                {"ts": datetime(2026, 4, 25, 3, 48, 31, tzinfo=timezone.utc)},
+            ]
+        )
+        order_repo = self._OrderRepo()
+        repo = object.__new__(ConvergedPostgresExecutionRepository)
+        repo.execution_order_repo = order_repo  # type: ignore[attr-defined]
+        repo.execution_order_history_repo = None  # type: ignore[attr-defined]
+        repo.orderbook_snapshot_read_source = OrderbookSnapshotReadSource(  # type: ignore[attr-defined]
+            session_factory=lambda: source_session,  # type: ignore[arg-type]
+            source_name="aats_research",
+        )
+        repo.state_machine = OrderStateMachine()  # type: ignore[attr-defined]
+
+        repo.save_order_state_in_session(
+            session=execution_session,  # type: ignore[arg-type]
+            state=OrderState(
+                decision_id="decision_orderbook_capture",
+                intent_id="intent_orderbook_capture",
+                symbol="BTC-USDT-SWAP",
+                client_order_id="cl_orderbook_capture",
+                status="SUBMITTING",
+                submitted_ts=event_time,
+                last_update_ts=event_time,
+                requested_qty=Decimal("0.01"),
+                remaining_qty=Decimal("0.01"),
+            ),
+        )
+
+        payload = order_repo.created_raw_payload
+        assert payload is not None
+        market_context = payload["lifecycle_snapshot_refs"]["submit"]["market_context_snapshot_refs"]
+        self.assertEqual(
+            market_context["pre_event_orderbook_snapshot_ref"],
+            "aats_research.bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z",
+        )
+        self.assertEqual(
+            market_context["post_event_orderbook_snapshot_ref"],
+            "aats_research.bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z",
         )
         self.assertEqual(market_context["capture_status"], "captured")
 
