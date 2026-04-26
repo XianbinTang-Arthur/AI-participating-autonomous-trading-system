@@ -389,6 +389,89 @@ def test_execution_science_truth_reports_smallest_missing_orderbook_field() -> N
     assert summary["fill_feasibility_truth_status"] == "blocked_missing_orderbook_truth"
 
 
+def test_slippage_cost_calibration_truth_verifies_fee_and_slippage_context() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "slippage_cost_calibration": {
+            "symbol": "BTC-USDT-SWAP",
+            "fills_total": 12,
+            "fills_24h": 4,
+            "fills_with_order": 12,
+            "fills_with_limit_price": 12,
+            "fee_bps_samples": 12,
+            "fee_bps_mean": "5.0",
+            "fee_bps_p95": "5.0",
+            "slippage_proxy_samples": 12,
+            "slippage_proxy_mean": "0.2",
+            "slippage_proxy_p95": "0.5",
+            "latest_fill_ts": "2026-04-26T20:45:00Z",
+            "liquidity_role_samples": 12,
+            "taker_fills": 12,
+            "by_liquidity_role": [{"liquidity_role": "taker", "n": 12}],
+        },
+    }
+    execution_science = {
+        "silver_orderbook": {
+            "status": "verified_silver_orderbook_bar_present",
+            "spread_bps_mean": "0.015",
+        },
+        "silver_trade_flow": {
+            "status": "verified_silver_trade_flow_bar_present",
+            "vwap_minus_mid_bps": "1.2",
+            "trade_count": 100,
+        },
+    }
+
+    summary = mod.summarize_slippage_cost_calibration_truth(
+        db,
+        execution_science,
+        report_generated_at="2026-04-26T20:50:00Z",
+    )
+
+    assert summary["status"] == "verified_slippage_cost_calibration_evidence_present"
+    assert summary["smallest_missing_field"] is None
+    assert summary["fee"]["sample_count"] == 12
+    assert summary["slippage_proxy"]["sample_count"] == 12
+    assert summary["market_context"]["silver_trade_flow_status"] == "verified_silver_trade_flow_bar_present"
+
+
+def test_slippage_cost_calibration_truth_reports_missing_slippage_reference() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "slippage_cost_calibration": {
+            "symbol": "BTC-USDT-SWAP",
+            "fills_total": 62,
+            "fills_24h": 37,
+            "fills_with_order": 62,
+            "fills_with_limit_price": 0,
+            "fee_bps_samples": 62,
+            "fee_bps_mean": "5.0",
+            "fee_bps_p95": "5.0",
+            "slippage_proxy_samples": 0,
+            "latest_fill_ts": "2026-04-26T20:45:00Z",
+            "liquidity_role_samples": 62,
+            "taker_fills": 62,
+        },
+    }
+    execution_science = {
+        "silver_orderbook": {"status": "verified_silver_orderbook_bar_present"},
+        "silver_trade_flow": {"status": "verified_silver_trade_flow_bar_present"},
+    }
+
+    summary = mod.summarize_slippage_cost_calibration_truth(
+        db,
+        execution_science,
+        report_generated_at="2026-04-26T20:50:00Z",
+    )
+
+    assert summary["status"] == "partial_fee_verified_slippage_proxy_missing"
+    assert summary["smallest_missing_field"] == "execution_orders.limit_price_or_reference_price_for_slippage_proxy"
+    assert summary["fee"]["sample_count"] == 62
+    assert summary["slippage_proxy"]["sample_count"] == 0
+
+
 def test_latest_decision_no_trade_attribution_detects_inactive_hold_only() -> None:
     mod = load_module()
     latest = {
@@ -1139,7 +1222,14 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
             "smallest_missing_field": None,
             "payload_sequence": {"status": "sequence_continuous"},
             "silver_orderbook": {"status": "verified_silver_orderbook_bar_present"},
+            "silver_trade_flow": {"status": "verified_silver_trade_flow_bar_present"},
             "fill_feasibility_truth_status": "verified_preorder_orderbook_features_available",
+        },
+        "slippage_cost_calibration_truth": {
+            "status": "partial_fee_verified_slippage_proxy_missing",
+            "smallest_missing_field": "execution_orders.limit_price_or_reference_price_for_slippage_proxy",
+            "fee": {"sample_count": 62},
+            "slippage_proxy": {"sample_count": 0},
         },
         "git": {
             "deployed_matches_windows": True,
@@ -1174,6 +1264,14 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["execution_science_truth_status"] == "verified_orderbook_sequence_and_silver_bar_present"
     assert live_facts["orderbook_sequence_validation_status"] == "sequence_continuous"
     assert live_facts["fill_feasibility_truth_status"] == "verified_preorder_orderbook_features_available"
+    assert live_facts["silver_trade_flow_truth_status"] == "verified_silver_trade_flow_bar_present"
+    assert live_facts["slippage_cost_calibration_truth_status"] == "partial_fee_verified_slippage_proxy_missing"
+    assert (
+        live_facts["slippage_cost_calibration_smallest_missing_field"]
+        == "execution_orders.limit_price_or_reference_price_for_slippage_proxy"
+    )
+    assert live_facts["slippage_cost_fee_sample_count"] == 62
+    assert live_facts["slippage_cost_slippage_proxy_sample_count"] == 0
     assert authority["authoritative_source"] == "runtime.live_runtime_facts"
     assert authority["artifact_may_override_live"] is False
 

@@ -97,6 +97,7 @@ if not url:
     raise SystemExit(0)
 
 execution_command_flow_enabled = bool_from_env("AATS_EXECUTION_COMMAND_FLOW_ENABLED")
+symbol = os.environ.get("AATS_EXECUTION_SCIENCE_SYMBOL", "BTC-USDT-SWAP")
 runtime_config = {
     "execution_command_flow_enabled": bool(execution_command_flow_enabled)
     if execution_command_flow_enabled is not None
@@ -254,6 +255,56 @@ with engine.connect() as conn:
     latest_executable_directional_audit, latest_executable_directional_counts = decision_audit_and_counts(
         latest_executable_directional
     )
+    slippage_cost_row = conn.execute(text(
+        "with joined as ("
+        "  select f.symbol, f.side, f.fill_qty, f.fill_price, f.fee_amount, "
+        "         f.fee_currency, f.liquidity_role, f.fee_rate, f.exec_type, f.ingestion_ts, "
+        "         o.order_id, o.limit_price, o.order_type, o.time_in_force, o.strategy_family, "
+        "         case when f.fill_qty > 0 and f.fill_price > 0 "
+        "              then abs(f.fee_amount) / (f.fill_qty * f.fill_price) * 10000 end as actual_fee_bps, "
+        "         case when o.limit_price is not null and o.limit_price > 0 "
+        "                   and f.fill_price > 0 and f.side = 'buy' "
+        "              then (f.fill_price - o.limit_price) / o.limit_price * 10000 "
+        "              when o.limit_price is not null and o.limit_price > 0 "
+        "                   and f.fill_price > 0 and f.side = 'sell' "
+        "              then (o.limit_price - f.fill_price) / o.limit_price * 10000 "
+        "         end as limit_fill_slippage_bps "
+        "  from execution_fills f "
+        "  left join execution_orders o on o.order_id = f.order_id "
+        "  where f.symbol = :symbol"
+        ") "
+        "select count(*) as fills_total, "
+        "       count(*) filter (where ingestion_ts >= now() - interval '24 hour') as fills_24h, "
+        "       count(*) filter (where order_id is not null) as fills_with_order, "
+        "       count(*) filter (where limit_price is not null) as fills_with_limit_price, "
+        "       count(*) filter (where actual_fee_bps is not null) as fee_bps_samples, "
+        "       min(actual_fee_bps) as fee_bps_min, "
+        "       avg(actual_fee_bps) as fee_bps_mean, "
+        "       percentile_disc(0.95) within group (order by actual_fee_bps) as fee_bps_p95, "
+        "       max(actual_fee_bps) as fee_bps_max, "
+        "       count(*) filter (where limit_fill_slippage_bps is not null) as slippage_proxy_samples, "
+        "       min(limit_fill_slippage_bps) as slippage_proxy_min, "
+        "       avg(limit_fill_slippage_bps) as slippage_proxy_mean, "
+        "       percentile_disc(0.95) within group (order by limit_fill_slippage_bps) as slippage_proxy_p95, "
+        "       max(limit_fill_slippage_bps) as slippage_proxy_max, "
+        "       max(ingestion_ts) as latest_fill_ts, "
+        "       count(*) filter (where liquidity_role is not null) as liquidity_role_samples, "
+        "       count(*) filter (where fee_rate is not null) as fee_rate_samples, "
+        "       count(*) filter (where liquidity_role = 'maker') as maker_fills, "
+        "       count(*) filter (where liquidity_role = 'taker') as taker_fills, "
+        "       count(*) filter (where liquidity_role is null) as unknown_liquidity_fills "
+        "from joined"
+    ), {"symbol": symbol}).mappings().first()
+    slippage_cost_calibration = dict(slippage_cost_row or {})
+    slippage_cost_calibration["symbol"] = symbol
+    slippage_cost_calibration["by_liquidity_role"] = [
+        dict(row)
+        for row in conn.execute(text(
+            "select coalesce(liquidity_role, 'unknown') as liquidity_role, count(*) as n "
+            "from execution_fills where symbol = :symbol "
+            "group by coalesce(liquidity_role, 'unknown') order by liquidity_role"
+        ), {"symbol": symbol}).mappings().all()
+    ]
 
 print(json.dumps({
     "ok": True,
@@ -270,6 +321,7 @@ print(json.dumps({
     ),
     "latest_executable_directional_decision_counts": latest_executable_directional_counts,
     "runtime_config": runtime_config,
+    "slippage_cost_calibration": slippage_cost_calibration,
 }, default=str, sort_keys=True))
 """
 
@@ -316,6 +368,21 @@ def latest_silver_orderbook(conn):
             "select ts, bbo_samples_n, books5_samples_n, spread_bps_mean, "
             "spread_bps_max, spread_bps_min, mid_price_last, quality_flags "
             "from silver.market_orderbook_metrics_15m "
+            "where symbol=:symbol order by ts desc limit 1"
+        ),
+        {"symbol": symbol},
+    ).mappings().first()
+    return dict(row) if row else None
+
+def latest_silver_trade_flow(conn):
+    if not table_exists(conn, "silver.market_trade_flow_15m"):
+        return None
+    row = conn.execute(
+        text(
+            "select ts, total_volume_ccy, trade_count, taker_buy_ratio, "
+            "trade_flow_imbalance, vwap, mid_price_ref, vwap_minus_mid_bps, "
+            "quality_flags "
+            "from silver.market_trade_flow_15m "
             "where symbol=:symbol order by ts desc limit 1"
         ),
         {"symbol": symbol},
@@ -399,6 +466,7 @@ with engine.connect() as conn:
                     "silver.market_trade_flow_15m": table_stats(conn, "silver", "market_trade_flow_15m"),
                 },
                 "latest_silver_orderbook": latest_silver_orderbook(conn),
+                "latest_silver_trade_flow": latest_silver_trade_flow(conn),
                 "payload_sequence": payload_sequence(conn),
                 "workflow": microstructure_workflow(conn),
             },
@@ -1814,6 +1882,41 @@ def summarize_latest_silver_orderbook(
     }
 
 
+def summarize_latest_silver_trade_flow(
+    raw: dict[str, Any] | None,
+    table_summary: dict[str, Any],
+) -> dict[str, Any]:
+    latest = as_dict(raw)
+    trade_count = int_or_zero(latest.get("trade_count"))
+    quality_flags = as_list(latest.get("quality_flags"))
+    if table_summary.get("status") in {"missing_table", "empty_table"}:
+        status = table_summary.get("status")
+    elif table_summary.get("status") == "stale":
+        status = "stale"
+    elif trade_count <= 0:
+        status = "missing_trade_samples"
+    elif quality_flags:
+        status = "quality_flags_present"
+    elif latest.get("vwap_minus_mid_bps") is None:
+        status = "missing_vwap_minus_mid_bps"
+    else:
+        status = "verified_silver_trade_flow_bar_present"
+    return {
+        "status": status,
+        "latest_bar_ts": latest.get("ts") or table_summary.get("latest_ts"),
+        "age_seconds": table_summary.get("age_seconds"),
+        "stale_after_seconds": table_summary.get("stale_after_seconds"),
+        "trade_count": trade_count,
+        "total_volume_ccy": decimal_text(latest.get("total_volume_ccy")),
+        "taker_buy_ratio": decimal_text(latest.get("taker_buy_ratio")),
+        "trade_flow_imbalance": decimal_text(latest.get("trade_flow_imbalance")),
+        "vwap": decimal_text(latest.get("vwap")),
+        "mid_price_ref": decimal_text(latest.get("mid_price_ref")),
+        "vwap_minus_mid_bps": decimal_text(latest.get("vwap_minus_mid_bps")),
+        "quality_flags": quality_flags,
+    }
+
+
 def summarize_execution_science_truth(
     raw: dict[str, Any],
     *,
@@ -1861,6 +1964,10 @@ def summarize_execution_science_truth(
         raw.get("latest_silver_orderbook") if isinstance(raw.get("latest_silver_orderbook"), dict) else None,
         silver_orderbook_table,
     )
+    silver_trade_flow = summarize_latest_silver_trade_flow(
+        raw.get("latest_silver_trade_flow") if isinstance(raw.get("latest_silver_trade_flow"), dict) else None,
+        trade_flow_table,
+    )
     missing_checks = [
         ("bronze.market_orderbook_bbo", bbo.get("status") == "fresh"),
         ("bronze.market_orderbook_books5", books5.get("status") == "fresh"),
@@ -1889,13 +1996,105 @@ def summarize_execution_science_truth(
         },
         "payload_sequence": sequence,
         "silver_orderbook": silver_orderbook,
-        "silver_trade_flow": trade_flow_table,
+        "silver_trade_flow": silver_trade_flow,
         "workflow": raw.get("workflow") if isinstance(raw.get("workflow"), dict) else {},
         "fill_feasibility_truth_status": (
             "verified_preorder_orderbook_features_available"
             if smallest_missing is None
             else "blocked_missing_orderbook_truth"
         ),
+    }
+
+
+def summarize_slippage_cost_calibration_truth(
+    db: dict[str, Any],
+    execution_science: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    if not db.get("ok"):
+        return {
+            "source": "live_db_and_rdp_microstructure",
+            "ok": False,
+            "status": "live_db_unavailable",
+            "smallest_missing_field": "database_truth",
+        }
+    raw = as_dict(db.get("slippage_cost_calibration"))
+    report_time = parse_utc_timestamp(report_generated_at)
+    latest_fill_ts = raw.get("latest_fill_ts")
+    latest_fill_time = parse_utc_timestamp(str(latest_fill_ts)) if latest_fill_ts is not None else None
+    latest_fill_age_seconds = seconds_between(latest_fill_time, report_time)
+    fills_total = int_or_zero(raw.get("fills_total"))
+    fee_samples = int_or_zero(raw.get("fee_bps_samples"))
+    slippage_samples = int_or_zero(raw.get("slippage_proxy_samples"))
+    silver_orderbook = as_dict(execution_science.get("silver_orderbook"))
+    silver_trade_flow = as_dict(execution_science.get("silver_trade_flow"))
+    silver_orderbook_ok = silver_orderbook.get("status") == "verified_silver_orderbook_bar_present"
+    silver_trade_flow_ok = silver_trade_flow.get("status") == "verified_silver_trade_flow_bar_present"
+
+    missing_checks = [
+        ("execution_fills", fills_total > 0),
+        ("execution_fills.actual_fee_bps", fee_samples > 0),
+        ("execution_orders.limit_price_or_reference_price_for_slippage_proxy", slippage_samples > 0),
+        ("silver.market_orderbook_metrics_15m", silver_orderbook_ok),
+        ("silver.market_trade_flow_15m", silver_trade_flow_ok),
+    ]
+    smallest_missing = next((field for field, passed in missing_checks if not passed), None)
+    if fills_total <= 0:
+        status = "no_live_fill_samples"
+    elif fee_samples > 0 and slippage_samples <= 0:
+        status = "partial_fee_verified_slippage_proxy_missing"
+    elif smallest_missing is None:
+        status = "verified_slippage_cost_calibration_evidence_present"
+    else:
+        status = "missing_slippage_cost_calibration_evidence"
+
+    return {
+        "source": "live_db_and_rdp_microstructure",
+        "ok": True,
+        "symbol": raw.get("symbol"),
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "latest_fill_ts": latest_fill_ts,
+        "latest_fill_age_seconds": latest_fill_age_seconds,
+        "fills_total": fills_total,
+        "fills_24h": int_or_zero(raw.get("fills_24h")),
+        "fills_with_order": int_or_zero(raw.get("fills_with_order")),
+        "fills_with_limit_price": int_or_zero(raw.get("fills_with_limit_price")),
+        "fee": {
+            "sample_count": fee_samples,
+            "min_bps": decimal_text(raw.get("fee_bps_min")),
+            "mean_bps": decimal_text(raw.get("fee_bps_mean")),
+            "p95_bps": decimal_text(raw.get("fee_bps_p95")),
+            "max_bps": decimal_text(raw.get("fee_bps_max")),
+            "fee_rate_sample_count": int_or_zero(raw.get("fee_rate_samples")),
+            "liquidity_role_sample_count": int_or_zero(raw.get("liquidity_role_samples")),
+            "maker_fills": int_or_zero(raw.get("maker_fills")),
+            "taker_fills": int_or_zero(raw.get("taker_fills")),
+            "unknown_liquidity_fills": int_or_zero(raw.get("unknown_liquidity_fills")),
+            "by_liquidity_role": [
+                {
+                    "liquidity_role": item.get("liquidity_role"),
+                    "row_count": int_or_zero(item.get("n")),
+                }
+                for item in [as_dict(row) for row in as_list(raw.get("by_liquidity_role"))]
+            ],
+        },
+        "slippage_proxy": {
+            "sample_count": slippage_samples,
+            "reference": "order_limit_price",
+            "min_bps": decimal_text(raw.get("slippage_proxy_min")),
+            "mean_bps": decimal_text(raw.get("slippage_proxy_mean")),
+            "p95_bps": decimal_text(raw.get("slippage_proxy_p95")),
+            "max_bps": decimal_text(raw.get("slippage_proxy_max")),
+        },
+        "market_context": {
+            "silver_orderbook_status": silver_orderbook.get("status"),
+            "silver_orderbook_spread_bps_mean": silver_orderbook.get("spread_bps_mean"),
+            "silver_trade_flow_status": silver_trade_flow.get("status"),
+            "silver_trade_flow_vwap_minus_mid_bps": silver_trade_flow.get("vwap_minus_mid_bps"),
+            "silver_trade_flow_trade_count": silver_trade_flow.get("trade_count"),
+        },
     }
 
 
@@ -2050,6 +2249,7 @@ def load_artifact_runtime_projection(repo_root: Path, report_generated_at: str) 
 def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     db = report.get("database_truth") or {}
     execution_science = as_dict(report.get("execution_science_truth"))
+    slippage_cost = as_dict(report.get("slippage_cost_calibration_truth"))
     dashboard = ((report.get("runtime") or {}).get("dashboard_bundle") or {})
     git = report.get("git") or {}
     health = report.get("deployment_health") or {}
@@ -2122,6 +2322,17 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "fill_feasibility_truth_status": execution_science.get("fill_feasibility_truth_status"),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
+        ),
+        "silver_trade_flow_truth_status": (
+            as_dict(execution_science.get("silver_trade_flow")).get("status")
+        ),
+        "slippage_cost_calibration_truth_status": slippage_cost.get("status"),
+        "slippage_cost_calibration_smallest_missing_field": slippage_cost.get("smallest_missing_field"),
+        "slippage_cost_fee_sample_count": (
+            as_dict(slippage_cost.get("fee")).get("sample_count")
+        ),
+        "slippage_cost_slippage_proxy_sample_count": (
+            as_dict(slippage_cost.get("slippage_proxy")).get("sample_count")
         ),
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),
         "effective_operating_mode_status": (dashboard.get("effective_operating_mode") or {}).get("status"),
@@ -2291,6 +2502,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     }
     report["execution_science_truth"] = summarize_execution_science_truth(
         report["rdp_microstructure_truth"],
+        report_generated_at=generated_at,
+    )
+    report["slippage_cost_calibration_truth"] = summarize_slippage_cost_calibration_truth(
+        report["database_truth"],
+        report["execution_science_truth"],
         report_generated_at=generated_at,
     )
     report["runtime"]["ai_timeout_active_blocker"] = False
