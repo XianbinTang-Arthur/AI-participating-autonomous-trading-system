@@ -1534,10 +1534,63 @@ class OrderManager:
             if not self._semantic_duplicate_state_can_block(state):
                 continue
             state_lanes = self._semantic_duplicate_lanes_from_state(state)
-            if intent_lanes.isdisjoint(state_lanes):
+            if not state_lanes:
                 continue
+            if intent_lanes.isdisjoint(state_lanes):
+                if self._semantic_duplicate_disjoint_lanes_allowed(
+                    intent=intent,
+                    state=state,
+                    intent_lanes=intent_lanes,
+                    state_lanes=state_lanes,
+                ):
+                    continue
+                return state
             return state
         return None
+
+    def _semantic_duplicate_disjoint_lanes_allowed(
+        self,
+        *,
+        intent: OrderIntent,
+        state: OrderState,
+        intent_lanes: set[str],
+        state_lanes: set[str],
+    ) -> bool:
+        if not (
+            self._semantic_duplicate_independent_book_context(intent)
+            and self._semantic_duplicate_independent_book_context(state)
+        ):
+            return False
+        intent_books = self._semantic_duplicate_lane_books(intent_lanes)
+        state_books = self._semantic_duplicate_lane_books(state_lanes)
+        return bool(intent_books and state_books and intent_books.isdisjoint(state_books))
+
+    @staticmethod
+    def _semantic_duplicate_independent_book_context(value: object) -> bool:
+        for field_name in (
+            "strategy_family",
+            "strategy_execution_mode",
+            "strategy_bundle_id",
+            "execution_chain_id",
+        ):
+            normalized = str(getattr(value, field_name, "") or "").strip().lower()
+            if normalized == "independent" or normalized.startswith(("independent:", "independent_")):
+                return True
+        return False
+
+    @staticmethod
+    def _semantic_duplicate_lane_books(lanes: set[str]) -> set[str]:
+        books: set[str] = set()
+        for lane in lanes:
+            normalized = str(lane or "").strip().lower()
+            if normalized.startswith("long_"):
+                books.add("long")
+                continue
+            if normalized.startswith("short_"):
+                books.add("short")
+                continue
+            return set()
+        return books
 
     def _semantic_duplicate_state_can_block(self, state: OrderState) -> bool:
         filled_qty = self._decimal_or_zero(state.filled_qty)

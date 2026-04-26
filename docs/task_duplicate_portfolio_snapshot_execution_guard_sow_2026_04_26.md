@@ -8,9 +8,9 @@
 
 `decision_engine.trigger` 负责将 feature snapshot 转为串行决策周期。它必须在真正执行 `run_cycle` 前重新确认 pending trigger 仍然满足策略节流条件。
 
-`decision_engine.target_position` 负责将当前持仓、baseline 和 AI 信号转成目标仓位。它必须避免同一持仓快照在本进程内重复触发 alpha decay reduce。
+`decision_engine.target_position` 负责将当前持仓、baseline 和 AI 信号转成目标仓位。它必须避免同一持仓快照在本进程内重复触发 alpha decay reduce，同时保证 shadow / evaluation 构建不污染实盘路径的本地去重状态。
 
-`execution_engine.order_manager` 是真实下单前的最后防线。它必须把 `portfolio_snapshot_ref + symbol + semantic action lane` 作为实盘语义幂等键，阻止同一持仓快照产生的重复订单，即使 `intent_id` 和 `client_order_id` 不同。
+`execution_engine.order_manager` 是真实下单前的最后防线。它必须把 `portfolio_snapshot_ref + symbol + semantic action lane` 作为实盘语义幂等键，阻止同一持仓快照产生的重复订单，即使 `intent_id` 和 `client_order_id` 不同。对于 directional / one-way 路径，同一持仓快照下的相反方向风险动作也必须被阻止；只有显式 independent 双书上下文允许同一快照分别作用于 long book 和 short book。
 
 ## Input/output interfaces
 
@@ -26,7 +26,7 @@
 
 执行层检查放在 `_reservation_lock` 内，在保证金 reservation preview 和订单持久化之前执行，避免并发 intent 同时通过语义检查。`process_submit_command` 入口也重复执行相同检查，覆盖持久化命令回放或恢复路径。
 
-同一 `execution_chain_id` 的 split / fallback / retry 不被语义去重误杀，避免破坏受控拆单生命周期。
+同一 `execution_chain_id` 的 split / fallback / retry 不被语义去重误杀，避免破坏受控拆单生命周期。不同 `execution_chain_id` 但来自同一 stale portfolio snapshot 的 directional 风险动作会被执行层阻止，包括 open_long 后 open_short 这类 lane 不相交但共享同一持仓事实的动作。
 
 ## Authorization, Authentication, Data Security
 
@@ -42,7 +42,7 @@
 
 新增 BLOCKED 状态仍走既有 `_persist_order_state`，不会绕过 Redis / Postgres / event bus 同步路径。
 
-Target alpha decay 本地快照 guard 只在实际缩仓发生时记录快照键；min-hold 等未实际缩仓的分支不占用该键。
+Target alpha decay 本地快照 guard 只在实际缩仓发生时记录快照键；min-hold 等未实际缩仓的分支不占用该键。Shadow build 不写入也不读取该实盘去重 guard，避免污染 AI shadow 评估和自动治理判断。
 
 ## Caching and Performance
 
@@ -64,8 +64,11 @@ Target alpha decay 本地快照 guard 只在实际缩仓发生时记录快照键
 
 - pending trigger 消费前二次校验失败时不会运行 `run_cycle`。
 - 同一 `portfolio_snapshot_ref` 的重复开仓 intent 被执行层 BLOCKED。
+- 同一 `portfolio_snapshot_ref` 的 directional 反向开仓 intent 被执行层 BLOCKED。
+- 同一 `portfolio_snapshot_ref` 的 independent 双书 long/short 开仓 intent 被允许分别执行。
 - 同一 `portfolio_snapshot_ref` 的重复 reduce intent 被执行层 BLOCKED。
 - 同一 `portfolio_snapshot_ref` 的第二次 alpha decay reduce 在 target 层返回 hold。
+- Shadow build 在同一 engine 实例上不会被 live alpha decay guard 误判为 duplicate。
 
 运行 ruff、相关单测和全量 unit。若集成测试环境不可用或存在既有失败，明确报告。
 
@@ -90,6 +93,8 @@ Target alpha decay 本地快照 guard 只在实际缩仓发生时记录快照键
 验收标准：
 
 - 同一 `portfolio_snapshot_ref` 重复 pending trigger 不会执行第二个 `run_cycle`。
-- 同一 `portfolio_snapshot_ref`、同一 symbol、同一语义动作的重复订单被 BLOCKED。
+- 同一 `portfolio_snapshot_ref`、同一 symbol、同一或 directional 相反方向的语义风险动作被 BLOCKED。
+- 显式 independent 双书上下文的同快照 long book / short book 动作不被 directional stale-snapshot guard 误杀。
 - alpha decay reduce 不会在同一持仓快照上连续产生多次缩仓 target。
+- AI shadow 构建不占用、不读取 live alpha decay snapshot guard。
 - 单元测试通过，lint 通过。

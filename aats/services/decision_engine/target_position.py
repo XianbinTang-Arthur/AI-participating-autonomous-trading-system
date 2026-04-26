@@ -379,6 +379,7 @@ class TargetPositionEngine:
             ai_decision_intent=shadow_intent,
             profile_control_decision=None,
             operating_mode=shadow_mode,
+            reserve_alpha_decay_snapshot=False,
         )
         return AIShadowDecision(
             decision_id=context.decision_id,
@@ -462,6 +463,7 @@ class TargetPositionEngine:
         ai_decision_intent: AIDecisionIntent | None,
         profile_control_decision: ProfileControlDecision | None,
         operating_mode: str,
+        reserve_alpha_decay_snapshot: bool = True,
     ) -> PositionTarget:
         # R3-P1-D4：异常状态显式化 — available_trading_equity≈0 且仍持仓，
         # 意味着 portfolio 数据不可信或 OKX 正在清算窗口。原代码会继续
@@ -516,6 +518,7 @@ class TargetPositionEngine:
             signal_edge_bps=signal_edge_bps,
             guardrail_flags=guardrail_flags,
             cost_guard_audits=cost_guard_audits,
+            reserve_alpha_decay_snapshot=reserve_alpha_decay_snapshot,
         )
         if (
             not self._short_bias_allowed(context.product_type)
@@ -668,6 +671,7 @@ class TargetPositionEngine:
         signal_edge_bps: float,
         guardrail_flags: list[str],
         cost_guard_audits: list[dict[str, object]],
+        reserve_alpha_decay_snapshot: bool = True,
     ) -> Decimal:
         legacy_mode = (operating_mode or "").strip()
         mode = normalize_ai_operating_mode(operating_mode)
@@ -705,6 +709,7 @@ class TargetPositionEngine:
                 product_type=product_type,
                 baseline_qty=baseline_fallback_qty,
                 guardrail_flags=guardrail_flags,
+                reserve_alpha_decay_snapshot=reserve_alpha_decay_snapshot,
             )
         if mode == "ai_assisted":
             return self._target_quantity_ai_assisted(
@@ -715,6 +720,7 @@ class TargetPositionEngine:
                 baseline_qty=baseline_fallback_qty,
                 guardrail_flags=guardrail_flags,
                 legacy_mode=legacy_mode,
+                reserve_alpha_decay_snapshot=reserve_alpha_decay_snapshot,
             )
         if mode == "ai_decision_maker":
             return self._target_quantity_ai_decision_maker(
@@ -728,6 +734,7 @@ class TargetPositionEngine:
                 signal_edge_bps=signal_edge_bps,
                 guardrail_flags=guardrail_flags,
                 cost_guard_audits=cost_guard_audits,
+                reserve_alpha_decay_snapshot=reserve_alpha_decay_snapshot,
             )
         return self._apply_position_management(
             current_position_qty=context.current_position_qty,
@@ -744,6 +751,7 @@ class TargetPositionEngine:
         product_type: str,
         baseline_qty: Decimal,
         guardrail_flags: list[str],
+        reserve_alpha_decay_snapshot: bool = True,
     ) -> Decimal:
         guardrail_flags_before_management = set(guardrail_flags)
         managed_target_qty = self._manage_existing_position(
@@ -753,6 +761,7 @@ class TargetPositionEngine:
             desired_target_qty=baseline_qty,
             product_type=product_type,
             guardrail_flags=guardrail_flags,
+            reserve_alpha_decay_snapshot=reserve_alpha_decay_snapshot,
         )
         if self._flat_signal_hold_after_management_applies(
             context=context,
@@ -781,6 +790,7 @@ class TargetPositionEngine:
         baseline_qty: Decimal,
         guardrail_flags: list[str],
         legacy_mode: str,
+        reserve_alpha_decay_snapshot: bool = True,
     ) -> Decimal:
         if legacy_mode == "ai_blended" and self._legacy_ai_blended_blocks_baseline(
             context=context,
@@ -798,6 +808,7 @@ class TargetPositionEngine:
             desired_target_qty=baseline_qty,
             product_type=product_type,
             guardrail_flags=guardrail_flags,
+            reserve_alpha_decay_snapshot=reserve_alpha_decay_snapshot,
         )
         if self._flat_signal_hold_after_management_applies(
             context=context,
@@ -852,6 +863,7 @@ class TargetPositionEngine:
         signal_edge_bps: float,
         guardrail_flags: list[str],
         cost_guard_audits: list[dict[str, object]],
+        reserve_alpha_decay_snapshot: bool = True,
     ) -> Decimal:
         if ai_decision_intent is not None and ai_decision_authorized:
             desired_target_qty = self._desired_target_qty_from_ai_decision_intent(
@@ -885,6 +897,7 @@ class TargetPositionEngine:
                 desired_target_qty=desired_target_qty,
                 product_type=product_type,
                 guardrail_flags=guardrail_flags,
+                reserve_alpha_decay_snapshot=reserve_alpha_decay_snapshot,
             )
             return self._apply_position_management(
                 current_position_qty=context.current_position_qty,
@@ -898,6 +911,7 @@ class TargetPositionEngine:
             desired_target_qty=baseline_fallback_qty,
             product_type=product_type,
             guardrail_flags=guardrail_flags,
+            reserve_alpha_decay_snapshot=reserve_alpha_decay_snapshot,
         )
         return self._apply_position_management(
             current_position_qty=context.current_position_qty,
@@ -957,6 +971,7 @@ class TargetPositionEngine:
         desired_target_qty: Decimal,
         product_type: str,
         guardrail_flags: list[str],
+        reserve_alpha_decay_snapshot: bool = True,
     ) -> Decimal:
         current_position_qty = context.current_position_qty
         if abs(current_position_qty) < EPSILON_DECIMAL_12:
@@ -990,7 +1005,7 @@ class TargetPositionEngine:
                 guardrail_flags=guardrail_flags,
             )
             if abs(reduced_target - current_position_qty) > EPSILON_DECIMAL_12:
-                if not self._reserve_alpha_decay_snapshot(
+                if reserve_alpha_decay_snapshot and not self._reserve_alpha_decay_snapshot(
                     context=context,
                     product_type=product_type,
                     current_position_qty=current_position_qty,
@@ -1016,7 +1031,7 @@ class TargetPositionEngine:
                 guardrail_flags=guardrail_flags,
             )
             if abs(managed_target) + EPSILON_DECIMAL_12 < abs(current_position_qty):
-                if not self._reserve_alpha_decay_snapshot(
+                if reserve_alpha_decay_snapshot and not self._reserve_alpha_decay_snapshot(
                     context=context,
                     product_type=product_type,
                     current_position_qty=current_position_qty,

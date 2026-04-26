@@ -132,6 +132,113 @@ class TestRound2SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_state.submission_mode, "semantic_duplicate_snapshot_blocked")
         self.assertEqual(second_state.execution_error, "semantic_duplicate_snapshot_order:clsemantic_open_1")
 
+    async def test_same_portfolio_snapshot_opposite_direction_directional_intent_is_semantically_blocked(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=PaperExecutionAdapter(price_provider=lambda _symbol: 100.0, taker_fee_bps=5.0),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        first = OrderIntent(
+            intent_id="intent_semantic_directional_flip_1",
+            decision_id="decision_semantic_directional_flip_1",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.0028"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="semantic_directional_flip_1",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            pos_side="long",
+            position_intent="open_long",
+            portfolio_snapshot_ref="evt_portfolio_stale_directional_flip",
+            strategy_family="directional",
+            strategy_execution_mode="directional",
+        )
+        second = first.model_copy(
+            update={
+                "intent_id": "intent_semantic_directional_flip_2",
+                "decision_id": "decision_semantic_directional_flip_2",
+                "side": "sell",
+                "idempotency_key": "semantic_directional_flip_2",
+                "exposure_side": "short",
+                "pos_side": "short",
+                "position_intent": "open_short",
+            }
+        )
+
+        await manager.handle_order_intent(_order_intent_message(first))
+        await manager.handle_order_intent(_order_intent_message(second))
+
+        first_state = repo.get_order_state("clsemantic_directional_flip_1")
+        second_state = repo.get_order_state("clsemantic_directional_flip_2")
+        self.assertIsNotNone(first_state)
+        self.assertIsNotNone(second_state)
+        self.assertEqual(first_state.status, "FILLED")
+        self.assertEqual(second_state.status, "BLOCKED")
+        self.assertEqual(second_state.submission_mode, "semantic_duplicate_snapshot_blocked")
+        self.assertEqual(second_state.execution_error, "semantic_duplicate_snapshot_order:clsemantic_directional_flip_1")
+
+    async def test_same_portfolio_snapshot_independent_dual_book_opposite_direction_is_allowed(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=PaperExecutionAdapter(price_provider=lambda _symbol: 100.0, taker_fee_bps=5.0),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        first = OrderIntent(
+            intent_id="intent_semantic_independent_long_1",
+            decision_id="decision_semantic_independent_long_1",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.0028"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="semantic_independent_long_1",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            pos_side="long",
+            position_intent="open_long",
+            portfolio_snapshot_ref="evt_portfolio_independent_dual_book",
+            strategy_family="independent",
+            strategy_execution_mode="independent",
+            strategy_bundle_id="independent:dual_book:test",
+            execution_chain_id="independent:dual_book:test:long",
+        )
+        second = first.model_copy(
+            update={
+                "intent_id": "intent_semantic_independent_short_1",
+                "decision_id": "decision_semantic_independent_short_1",
+                "side": "sell",
+                "idempotency_key": "semantic_independent_short_1",
+                "exposure_side": "short",
+                "pos_side": "short",
+                "position_intent": "open_short",
+                "execution_chain_id": "independent:dual_book:test:short",
+            }
+        )
+
+        await manager.handle_order_intent(_order_intent_message(first))
+        await manager.handle_order_intent(_order_intent_message(second))
+
+        first_state = repo.get_order_state("clsemantic_independent_long_1")
+        second_state = repo.get_order_state("clsemantic_independent_short_1")
+        self.assertIsNotNone(first_state)
+        self.assertIsNotNone(second_state)
+        self.assertEqual(first_state.status, "FILLED")
+        self.assertEqual(second_state.status, "FILLED")
+
     async def test_same_portfolio_snapshot_reduce_intent_is_semantically_blocked(self) -> None:
         repo = InMemoryExecutionRepository()
         manager = OrderManager(

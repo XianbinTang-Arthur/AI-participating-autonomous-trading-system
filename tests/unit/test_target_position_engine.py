@@ -716,6 +716,51 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(second.position_intent, "hold")
         self.assertIn("alpha_decay_reduce_duplicate_snapshot_blocked", second.guardrail_flags)
 
+    def test_shadow_build_is_not_blocked_by_live_alpha_decay_snapshot_guard(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.1,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "ai_operating_mode": "ai_decision_maker",
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+            portfolio_snapshot_ref="evt_portfolio_alpha_decay_shadow",
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.42,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.05,
+                "trend_alpha": 0.04,
+                "microstructure_alpha": 0.03,
+                "liquidity_scale": 0.9,
+            },
+        ).model_copy(update={"composite_alpha_score": 0.08})
+        ai_assessment = self._ai_assessment(direction=0.06, confidence=0.45)
+
+        actual = engine.build(context, baseline, ai_assessment, operating_mode="baseline_only")
+        shadow = engine.build_shadow(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            actual_target=actual,
+            operating_mode="ai_decision_maker",
+        )
+
+        self.assertEqual(actual.position_intent, "reduce_long")
+        self.assertIn("alpha_decay_reduce", actual.guardrail_flags)
+        self.assertEqual(shadow.ai_shadow_action, "reduce_long")
+        self.assertEqual(shadow.ai_shadow_target_qty, actual.target_position_qty)
+
     def test_derivatives_risk_contraction_reduces_existing_position_in_high_volatility(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(
