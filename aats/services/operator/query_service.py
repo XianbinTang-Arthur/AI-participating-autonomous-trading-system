@@ -431,6 +431,35 @@ class OperatorQueryService:
             for k in stale_keys:
                 del ttl_cache[k]
 
+    async def _invoke_operator_command_mutation(
+        self,
+        *,
+        command: str,
+        payload: dict[str, Any],
+        missing_client_error: str,
+    ) -> dict[str, Any]:
+        client = getattr(self.runtime, "operator_command_client", None)
+        if client is None:
+            raise RuntimeError(missing_client_error)
+        try:
+            return await client.invoke(command=command, payload=payload)
+        finally:
+            self._invalidate_cache()
+
+    async def _invoke_ai_command_mutation(
+        self,
+        *,
+        command: str,
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        client = getattr(self.runtime, "ai_command_client", None)
+        if client is None:
+            raise ValueError("ai_service_not_loaded_in_this_process_role")
+        try:
+            return await client.invoke(command=command, payload=payload)
+        finally:
+            self._invalidate_cache()
+
     def _scope_cache_fragment(self) -> str:
         return (
             f"{self.state_scope.product_type}:"
@@ -12048,15 +12077,22 @@ class OperatorQueryService:
                     "trial_guard_not_configured_and_no_command_client: "
                     "gateway runtime missing operator_command_client wiring"
                 )
-            return client.invoke(
-                command="reset_trial_guard",
-                payload={
-                    "reason": reason,
-                    "actor_role": actor_role,
-                    "actor_identity": actor_identity,
-                    "auth_source": auth_source,
-                },
-            )
+
+            async def _invoke_reset_trial_guard() -> dict[str, Any]:
+                try:
+                    return await client.invoke(
+                        command="reset_trial_guard",
+                        payload={
+                            "reason": reason,
+                            "actor_role": actor_role,
+                            "actor_identity": actor_identity,
+                            "auth_source": auth_source,
+                        },
+                    )
+                finally:
+                    self._invalidate_cache()
+
+            return _invoke_reset_trial_guard()
         before = service.snapshot()
         if str(before.get("status") or "").lower() != "breached":
             raise ValueError("trial_guard_reset_not_required")
@@ -12474,13 +12510,7 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         # 4-proc gateway proxy: reconciliation_service 仅在 execution 进程装配
         if self.runtime.reconciliation_service is None:
-            client = getattr(self.runtime, "operator_command_client", None)
-            if client is None:
-                raise RuntimeError(
-                    "validate_reconciliation_requires_operator_command_client: "
-                    "gateway runtime missing client wiring"
-                )
-            return await client.invoke(
+            return await self._invoke_operator_command_mutation(
                 command="validate_reconciliation",
                 payload={
                     "reason": reason,
@@ -12488,6 +12518,10 @@ class OperatorQueryService:
                     "actor_identity": actor_identity,
                     "auth_source": auth_source,
                 },
+                missing_client_error=(
+                    "validate_reconciliation_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                ),
             )
         return await self.reconciliation_system_queries.validate_reconciliation(
             reason=reason,
@@ -12507,13 +12541,7 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         # 4-proc gateway proxy: order_manager 仅在 execution 进程装配
         if self.runtime.order_manager is None:
-            client = getattr(self.runtime, "operator_command_client", None)
-            if client is None:
-                raise RuntimeError(
-                    "cancel_order_requires_operator_command_client: "
-                    "gateway runtime missing client wiring"
-                )
-            return await client.invoke(
+            return await self._invoke_operator_command_mutation(
                 command="cancel_order",
                 payload={
                     "client_order_id": client_order_id,
@@ -12522,6 +12550,10 @@ class OperatorQueryService:
                     "actor_identity": actor_identity,
                     "auth_source": auth_source,
                 },
+                missing_client_error=(
+                    "cancel_order_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                ),
             )
         recovery_before = self.recovery_view()["recovery_state"]
         state = await self.runtime.order_manager.cancel_order(client_order_id)
@@ -12556,13 +12588,7 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         # 4-proc gateway proxy: reconciliation_service 仅在 execution 进程装配
         if self.runtime.reconciliation_service is None:
-            client = getattr(self.runtime, "operator_command_client", None)
-            if client is None:
-                raise RuntimeError(
-                    "resolve_stuck_submission_requires_operator_command_client: "
-                    "gateway runtime missing client wiring"
-                )
-            return await client.invoke(
+            return await self._invoke_operator_command_mutation(
                 command="resolve_stuck_submission",
                 payload={
                     "client_order_id": client_order_id,
@@ -12571,6 +12597,10 @@ class OperatorQueryService:
                     "actor_identity": actor_identity,
                     "auth_source": auth_source,
                 },
+                missing_client_error=(
+                    "resolve_stuck_submission_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                ),
             )
         return await self.reconciliation_system_queries.resolve_stuck_submission(
             client_order_id=client_order_id,
@@ -12640,13 +12670,7 @@ class OperatorQueryService:
         # 4-proc gateway proxy: market_gateway / account_service / order_manager
         # 仅在 execution 进程装配，refresh 操作必须在 execution 侧执行
         if self.runtime.order_manager is None:
-            client = getattr(self.runtime, "operator_command_client", None)
-            if client is None:
-                raise RuntimeError(
-                    "refresh_exchange_state_requires_operator_command_client: "
-                    "gateway runtime missing client wiring"
-                )
-            return await client.invoke(
+            return await self._invoke_operator_command_mutation(
                 command="refresh_exchange_state",
                 payload={
                     "blocker": blocker,
@@ -12656,6 +12680,10 @@ class OperatorQueryService:
                     "actor_identity": actor_identity,
                     "auth_source": auth_source,
                 },
+                missing_client_error=(
+                    "refresh_exchange_state_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                ),
             )
         recovery_before = self.recovery_view()["recovery_state"]
         startup_snapshot_context_before = self._startup_exit_execution_snapshot_context(parent_intent_id=parent_intent_id)
@@ -12867,13 +12895,7 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         # 4-proc gateway proxy: order_manager 仅在 execution 进程装配
         if self.runtime.order_manager is None:
-            client = getattr(self.runtime, "operator_command_client", None)
-            if client is None:
-                raise RuntimeError(
-                    "retry_limit_lookup_requires_operator_command_client: "
-                    "gateway runtime missing client wiring"
-                )
-            return await client.invoke(
+            return await self._invoke_operator_command_mutation(
                 command="retry_limit_lookup",
                 payload={
                     "parent_intent_id": parent_intent_id,
@@ -12882,6 +12904,10 @@ class OperatorQueryService:
                     "actor_identity": actor_identity,
                     "auth_source": auth_source,
                 },
+                missing_client_error=(
+                    "retry_limit_lookup_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                ),
             )
         recovery_before = self.recovery_view()["recovery_state"]
         parent_before, startup_snapshot_context = self._resolve_exit_execution_parent_for_operator_action(
@@ -12964,13 +12990,7 @@ class OperatorQueryService:
     ) -> dict[str, Any]:
         # 4-proc gateway proxy: order_manager 仅在 execution 进程装配
         if self.runtime.order_manager is None:
-            client = getattr(self.runtime, "operator_command_client", None)
-            if client is None:
-                raise RuntimeError(
-                    "safe_cancel_exit_execution_requires_operator_command_client: "
-                    "gateway runtime missing client wiring"
-                )
-            return await client.invoke(
+            return await self._invoke_operator_command_mutation(
                 command="safe_cancel_exit_execution",
                 payload={
                     "parent_intent_id": parent_intent_id,
@@ -12979,6 +12999,10 @@ class OperatorQueryService:
                     "actor_identity": actor_identity,
                     "auth_source": auth_source,
                 },
+                missing_client_error=(
+                    "safe_cancel_exit_execution_requires_operator_command_client: "
+                    "gateway runtime missing client wiring"
+                ),
             )
         recovery_before = self.recovery_view()["recovery_state"]
         parent_before, startup_snapshot_context = self._resolve_exit_execution_parent_for_operator_action(
@@ -13050,10 +13074,7 @@ class OperatorQueryService:
         # Stage 7：gateway-only role 下 ai_service 为 None；4 进程拓扑下走
         # AI command client 通过 NATS 代理到 decision 进程执行。
         if self.runtime.ai_service is None:
-            client = getattr(self.runtime, "ai_command_client", None)
-            if client is None:
-                raise ValueError("ai_service_not_loaded_in_this_process_role")
-            return await client.invoke(
+            return await self._invoke_ai_command_mutation(
                 command="ai_review_restore",
                 payload={
                     "reason": reason,
@@ -13111,10 +13132,7 @@ class OperatorQueryService:
         # Stage 7：gateway-only role 下 ai_service 为 None；4 进程拓扑下走
         # AI command client 通过 NATS 代理到 decision 进程执行。
         if self.runtime.ai_service is None:
-            client = getattr(self.runtime, "ai_command_client", None)
-            if client is None:
-                raise ValueError("ai_service_not_loaded_in_this_process_role")
-            return await client.invoke(
+            return await self._invoke_ai_command_mutation(
                 command="ai_operating_mode_select",
                 payload={
                     "mode": mode,
@@ -13189,10 +13207,7 @@ class OperatorQueryService:
         # Stage 7：gateway-only role 下 ai_service 为 None；4 进程拓扑下走
         # AI command client 通过 NATS 代理到 decision 进程执行。
         if self.runtime.ai_service is None:
-            client = getattr(self.runtime, "ai_command_client", None)
-            if client is None:
-                raise ValueError("ai_service_not_loaded_in_this_process_role")
-            return await client.invoke(
+            return await self._invoke_ai_command_mutation(
                 command="ai_review_degrade_to_baseline",
                 payload={
                     "reason": reason,
@@ -13566,6 +13581,8 @@ class OperatorQueryService:
             return False
         if unexpected_on_exchange or status_mismatch_keys:
             return False
+        if OperatorQueryService._report_value_has_truthy_items(order_diff.get("reconstructed")):
+            return False
 
         unknown_state_details = OperatorQueryService._report_field(report, "unknown_state_details", [])
         if not isinstance(unknown_state_details, list):
@@ -13585,12 +13602,57 @@ class OperatorQueryService:
 
         fill_diff = OperatorQueryService._report_field(report, "fill_diff", {})
         fill_diff = fill_diff if isinstance(fill_diff, dict) else {}
+        if OperatorQueryService._report_value_has_truthy_items(fill_diff.get("replayed")):
+            return False
         exchange_fill_view = fill_diff.get("exchange")
         exchange_fill_view = exchange_fill_view if isinstance(exchange_fill_view, dict) else {}
-        unexpected_exchange_fills = OperatorQueryService._string_set_from_report_value(
-            exchange_fill_view.get("unexpected_on_exchange")
+        if OperatorQueryService._report_value_has_truthy_items(exchange_fill_view):
+            return False
+
+        balance_diff = OperatorQueryService._report_field(report, "balance_diff", {})
+        if OperatorQueryService._report_value_has_truthy_items(balance_diff):
+            return False
+        position_diff = OperatorQueryService._report_field(report, "position_diff", {})
+        if OperatorQueryService._report_value_has_truthy_items(position_diff):
+            return False
+        if bool(OperatorQueryService._report_field(report, "financial_review_required", False)):
+            return False
+        if bool(OperatorQueryService._report_field(report, "structural_review_required", False)):
+            return False
+
+        allowed_categories = {
+            "local_open_order_divergence",
+            "derivatives_order_state_unknown_on_exchange",
+        }
+        categories = OperatorQueryService._string_set_from_report_value(
+            OperatorQueryService._report_field(report, "mismatch_categories", [])
         )
-        return not unexpected_exchange_fills
+        if categories and not categories.issubset(allowed_categories):
+            return False
+
+        allowed_reasons = {
+            "local_open_orders_diverge_from_exchange_open_orders",
+            "derivatives_local_order_missing_from_exchange_open_order_view",
+        }
+        reasons = OperatorQueryService._string_set_from_report_value(
+            OperatorQueryService._report_field(report, "mismatch_reasons", [])
+        )
+        if reasons and not reasons.issubset(allowed_reasons):
+            return False
+
+        findings = OperatorQueryService._report_field(report, "findings", [])
+        if isinstance(findings, list):
+            for finding in findings:
+                reason_code = (
+                    OperatorQueryService._report_field(finding, "reason_code", "")
+                    if not isinstance(finding, dict)
+                    else finding.get("reason_code", "")
+                )
+                if reason_code and str(reason_code).strip() not in allowed_reasons:
+                    return False
+        elif findings:
+            return False
+        return True
 
     @staticmethod
     def _string_set_from_report_value(value: Any) -> set[str]:
@@ -13614,6 +13676,16 @@ class OperatorQueryService:
             return result
         text = str(value or "").strip()
         return {text} if text else set()
+
+    @staticmethod
+    def _report_value_has_truthy_items(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, dict):
+            return any(OperatorQueryService._report_value_has_truthy_items(item) for item in value.values())
+        if isinstance(value, (list, tuple, set)):
+            return any(OperatorQueryService._report_value_has_truthy_items(item) for item in value)
+        return bool(value)
 
     @staticmethod
     def _stuck_submission_resolution_summary(reason_code: str | None) -> str:

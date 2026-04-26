@@ -430,17 +430,12 @@ strategy_hedge_independent_long_close_threshold: 0.15
 # 实盘安全审查：原值 0.24 与 short entry 0.30 间距仅 0.06，震荡市中易频繁开平。
 # 下调至 0.15 使 short hysteresis gap = 0.15，与 long 方向 gap 对齐。
 strategy_hedge_independent_short_close_threshold: 0.15
-# 2026-04-19 scale_in_threshold 下调历史:
-#   (1) 蝴蝶修复 2: long 0.34→0.30, short 0.40→0.32 (建 hysteresis)
-#   (2) 独立审查 Round 3: 9-alpha 新分布下 leg_score 天花板 ≈0.28, 结构性贴近 entry,
-#       scale_in=0.30/0.32 仍让持仓后触发率极低. 再次下调 long 0.30→0.25, short 0.32→0.25
-#       (等于 entry). 换言之持仓中 score 仍维持 entry 水位即允许 scale_in, 不再要求
-#       "高一档". 实盘风控由 min_hold_seconds=300 + rebalance_cooldown=60s 保底.
-#   详见 docs/review/independent_chain_review_round_3_2026_04_19.md
-# [进阶可调] strategy_hedge_independent_long_scale_in_threshold：独立 long book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.40。
-strategy_hedge_independent_long_scale_in_threshold: 0.25
-# [进阶可调] strategy_hedge_independent_short_scale_in_threshold：独立 short book 的加仓阈值。可选值：0.0 ~ 1.0；当前实盘钉住值：0.40。
-strategy_hedge_independent_short_scale_in_threshold: 0.25
+# 2026-04-26 审查修正：scale-in 必须高于 entry，避免“刚够开仓”信号在持仓后立即允许加仓。
+# independent 当前仍关闭；该值只为未来灰度保持正确语义。
+# [进阶可调] strategy_hedge_independent_long_scale_in_threshold：独立 long book 的加仓阈值。可选值：entry threshold ~ 1.0；当前实盘钉住值：0.30。
+strategy_hedge_independent_long_scale_in_threshold: 0.30
+# [进阶可调] strategy_hedge_independent_short_scale_in_threshold：独立 short book 的加仓阈值。可选值：entry threshold ~ 1.0；当前实盘钉住值：0.30。
+strategy_hedge_independent_short_scale_in_threshold: 0.30
 # [进阶可调] strategy_hedge_independent_long_min_hold_seconds：独立 long book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。
 strategy_hedge_independent_long_min_hold_seconds: 300.0
 # [进阶可调] strategy_hedge_independent_short_min_hold_seconds：独立 short book 最小持有秒数。可选值：0 ~ 86400；推荐值：300.0。

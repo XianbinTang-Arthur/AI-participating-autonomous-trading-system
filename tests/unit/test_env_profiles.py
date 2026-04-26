@@ -443,11 +443,10 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         # docs/review/allocator_budget_zero_root_cause_2026_04_19.md).
         expected_independent_long_entry = 0.25 if profile == "derivatives_live" else 0.66
         expected_independent_short_entry = 0.25 if profile == "derivatives_live" else 0.66
-        # 2026-04-19 独立审查 Round 3: scale_in_threshold 再下调到 0.25 (等于 entry),
-        # 因为 9-alpha 新分布下 leg_score 天花板 ≈0.28 结构性贴近 entry, 更高的 scale_in
-        # 阈值让持仓 scale_in 几乎永不触发. 实盘保底靠 min_hold_seconds + rebalance_cooldown.
-        expected_independent_long_scale_in = 0.25 if profile == "derivatives_live" else 0.70
-        expected_independent_short_scale_in = 0.25 if profile == "derivatives_live" else 0.70
+        # 2026-04-26 审查修正: scale_in_threshold 必须高于 entry,
+        # 避免“刚够开仓”的信号在持仓后立即允许加仓。
+        expected_independent_long_scale_in = 0.30 if profile == "derivatives_live" else 0.70
+        expected_independent_short_scale_in = 0.30 if profile == "derivatives_live" else 0.70
         assert values["strategy_hedge_independent_long_entry_threshold"] == expected_independent_long_entry
         assert values["strategy_hedge_independent_short_entry_threshold"] == expected_independent_short_entry
         assert values["strategy_hedge_independent_long_scale_in_threshold"] == expected_independent_long_scale_in
@@ -551,9 +550,9 @@ def test_derivatives_live_managed_profile_is_pinned_for_directional_live() -> No
     # 2026-04-19 下调 0.30→0.25 与 calibration 对齐
     assert values["strategy_hedge_independent_long_entry_threshold"] == 0.25
     assert values["strategy_hedge_independent_short_entry_threshold"] == 0.25
-    # 2026-04-19 Round 3 再下调到 0.25 (=entry), 9-alpha 新分布 leg_score 天花板问题.
-    assert values["strategy_hedge_independent_long_scale_in_threshold"] == 0.25
-    assert values["strategy_hedge_independent_short_scale_in_threshold"] == 0.25
+    # 2026-04-26 审查修正: scale-in 必须高于 entry。
+    assert values["strategy_hedge_independent_long_scale_in_threshold"] == 0.30
+    assert values["strategy_hedge_independent_short_scale_in_threshold"] == 0.30
     assert values["strategy_hedge_independent_long_close_threshold"] == 0.15
     assert values["strategy_hedge_independent_short_close_threshold"] == 0.15
     assert values["strategy_hedge_independent_min_confirm_ticks"] == 2

@@ -17,7 +17,7 @@ import asyncio
 import logging
 import unittest
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.services.operator.command_bridge import (
@@ -123,6 +123,7 @@ class TestGatewayProxyBranch(unittest.IsolatedAsyncioTestCase):
         mock_client = AsyncMock()
         mock_client.invoke.return_value = {"reconciled": True}
         service = self._make_service_with_mock_runtime(client=mock_client)
+        service._invalidate_cache = Mock()
 
         result = await service.validate_reconciliation(
             reason="proxy_test",
@@ -140,11 +141,13 @@ class TestGatewayProxyBranch(unittest.IsolatedAsyncioTestCase):
                 "auth_source": "password",
             },
         )
+        service._invalidate_cache.assert_called_once()
 
     async def test_cancel_order_proxies_to_client(self) -> None:
         mock_client = AsyncMock()
         mock_client.invoke.return_value = {"order": {"status": "cancelled"}}
         service = self._make_service_with_mock_runtime(client=mock_client)
+        service._invalidate_cache = Mock()
 
         result = await service.cancel_order(
             client_order_id="ord_abc",
@@ -156,11 +159,13 @@ class TestGatewayProxyBranch(unittest.IsolatedAsyncioTestCase):
         call_kwargs = mock_client.invoke.call_args.kwargs
         self.assertEqual(call_kwargs["command"], "cancel_order")
         self.assertEqual(call_kwargs["payload"]["client_order_id"], "ord_abc")
+        service._invalidate_cache.assert_called_once()
 
     async def test_resolve_stuck_submission_proxies_to_client(self) -> None:
         mock_client = AsyncMock()
         mock_client.invoke.return_value = {"resolved": True}
         service = self._make_service_with_mock_runtime(client=mock_client)
+        service._invalidate_cache = Mock()
 
         result = await service.resolve_stuck_submission(
             client_order_id="ord_stuck",
@@ -171,11 +176,13 @@ class TestGatewayProxyBranch(unittest.IsolatedAsyncioTestCase):
         call_kwargs = mock_client.invoke.call_args.kwargs
         self.assertEqual(call_kwargs["command"], "resolve_stuck_submission")
         self.assertEqual(call_kwargs["payload"]["client_order_id"], "ord_stuck")
+        service._invalidate_cache.assert_called_once()
 
     async def test_refresh_exchange_state_proxies_to_client(self) -> None:
         mock_client = AsyncMock()
         mock_client.invoke.return_value = {"status": "completed"}
         service = self._make_service_with_mock_runtime(client=mock_client)
+        service._invalidate_cache = Mock()
 
         result = await service.refresh_exchange_state(
             blocker="some_blocker",
@@ -188,11 +195,13 @@ class TestGatewayProxyBranch(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(call_kwargs["command"], "refresh_exchange_state")
         self.assertEqual(call_kwargs["payload"]["blocker"], "some_blocker")
         self.assertEqual(call_kwargs["payload"]["parent_intent_id"], "intent_1")
+        service._invalidate_cache.assert_called_once()
 
     async def test_retry_limit_lookup_proxies_to_client(self) -> None:
         mock_client = AsyncMock()
         mock_client.invoke.return_value = {"status": "completed", "order": None}
         service = self._make_service_with_mock_runtime(client=mock_client)
+        service._invalidate_cache = Mock()
 
         result = await service.retry_limit_lookup(
             parent_intent_id="intent_2",
@@ -203,11 +212,13 @@ class TestGatewayProxyBranch(unittest.IsolatedAsyncioTestCase):
         call_kwargs = mock_client.invoke.call_args.kwargs
         self.assertEqual(call_kwargs["command"], "retry_limit_lookup")
         self.assertEqual(call_kwargs["payload"]["parent_intent_id"], "intent_2")
+        service._invalidate_cache.assert_called_once()
 
     async def test_safe_cancel_exit_execution_proxies_to_client(self) -> None:
         mock_client = AsyncMock()
         mock_client.invoke.return_value = {"status": "completed", "orders": []}
         service = self._make_service_with_mock_runtime(client=mock_client)
+        service._invalidate_cache = Mock()
 
         result = await service.safe_cancel_exit_execution(
             parent_intent_id="intent_3",
@@ -218,6 +229,18 @@ class TestGatewayProxyBranch(unittest.IsolatedAsyncioTestCase):
         call_kwargs = mock_client.invoke.call_args.kwargs
         self.assertEqual(call_kwargs["command"], "safe_cancel_exit_execution")
         self.assertEqual(call_kwargs["payload"]["parent_intent_id"], "intent_3")
+        service._invalidate_cache.assert_called_once()
+
+    async def test_proxy_mutation_invalidates_cache_after_remote_failure(self) -> None:
+        mock_client = AsyncMock()
+        mock_client.invoke.side_effect = RuntimeError("remote_failed_after_mutation")
+        service = self._make_service_with_mock_runtime(client=mock_client)
+        service._invalidate_cache = Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "remote_failed_after_mutation"):
+            await service.validate_reconciliation(reason="proxy_failure", actor_role="admin")
+
+        service._invalidate_cache.assert_called_once()
 
 
 # ────────────────────────────────────────────────────────────────

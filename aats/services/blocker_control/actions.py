@@ -41,21 +41,21 @@ class BlockerActionService:
             )
             message = "已重新执行对账，并刷新恢复状态。"
         elif action_id == "accept-rebaseline":
-            await self.owner.rebaseline(
+            result = await self.owner.rebaseline(
                 reason=reason,
                 actor_role=actor_role,
                 actor_identity=actor_identity,
                 auth_source=auth_source,
             )
-            message = "已接受当前状态为新基线，并重新计算恢复资格。"
+            message = str(result.get("message") or "已接受当前状态为新基线，并重新计算恢复资格。")
         elif action_id == "resume-system":
-            await self.owner.resume(
+            result = await self.owner.resume(
                 reason=reason,
                 actor_role=actor_role,
                 actor_identity=actor_identity,
                 auth_source=auth_source,
             )
-            message = "已执行恢复自动运行请求。"
+            message = str(result.get("message") or "已执行恢复自动运行请求。")
         elif action_id == "halt-system":
             await self.owner.halt(
                 reason=reason,

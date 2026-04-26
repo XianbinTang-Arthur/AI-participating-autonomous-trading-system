@@ -96,7 +96,7 @@ class TestIndependentEngine(unittest.TestCase):
         self.assertIsNotNone(runtime_state.threshold_snapshot.capital_multiplier)
         self.assertTrue(runtime_state.threshold_snapshot.reason_codes)
 
-    def test_evaluate_independent_book_uses_balance_aware_entry_size_when_directional_target_is_zero(self) -> None:
+    def test_evaluate_independent_book_caps_balance_aware_entry_size_to_half_gross_budget(self) -> None:
         settings = make_derivatives_hedge_settings(
             default_order_qty=0.004,
             default_target_leverage=5.0,
@@ -145,7 +145,7 @@ class TestIndependentEngine(unittest.TestCase):
             recent_score_history=(0.99, 0.99, 0.99),
         )
 
-        self.assertEqual(decision.target_qty, Decimal("0.014625"))
+        self.assertEqual(decision.target_qty, Decimal("0.0073125"))
         self.assertGreater(decision.target_qty, Decimal("0.004"))
 
     def test_evaluate_independent_book_inherits_prior_runtime_state_for_counts_and_transition(self) -> None:

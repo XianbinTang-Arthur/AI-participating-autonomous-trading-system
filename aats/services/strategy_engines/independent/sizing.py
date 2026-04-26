@@ -16,13 +16,22 @@ def compute_entry_target_qty(
     directional_leg_target_qty: Decimal,
     balance_reference_qty: Decimal | None = None,
 ) -> Decimal:
-    candidates = [
+    base_target_qty = max(
         to_decimal(settings.default_order_qty),
         to_decimal(directional_leg_target_qty),
-    ]
-    if balance_reference_qty is not None:
-        candidates.append(abs(to_decimal(balance_reference_qty)))
-    return max(candidates)
+    )
+    if balance_reference_qty is None:
+        return base_target_qty
+
+    gross_budget_qty = abs(to_decimal(balance_reference_qty))
+    if gross_budget_qty <= EPSILON_DECIMAL_12:
+        return base_target_qty
+
+    # In independent mode the balance-aware reference is a family gross budget:
+    # reserve symmetric capacity so simultaneous long/short books cannot each
+    # consume the full balance-aware size before the risk layer sees the order.
+    per_book_budget_qty = gross_budget_qty / Decimal("2")
+    return per_book_budget_qty
 
 
 def compute_scale_in_target_qty(

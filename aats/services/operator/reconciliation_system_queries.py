@@ -305,15 +305,18 @@ class ReconciliationSystemQueryFacade:
                     "rebaseline_requires_operator_command_client: "
                     "gateway runtime missing client wiring"
                 )
-            return await client.invoke(
-                command="rebaseline",
-                payload={
-                    "reason": reason,
-                    "actor_role": actor_role,
-                    "actor_identity": actor_identity,
-                    "auth_source": auth_source,
-                },
-            )
+            try:
+                return await client.invoke(
+                    command="rebaseline",
+                    payload={
+                        "reason": reason,
+                        "actor_role": actor_role,
+                        "actor_identity": actor_identity,
+                        "auth_source": auth_source,
+                    },
+                )
+            finally:
+                self.owner._invalidate_cache()
 
         recovery_before = self.owner.recovery_view()["recovery_state"]
         previous_baseline_event = latest_topic_event_for_scope(
@@ -516,17 +519,111 @@ class ReconciliationSystemQueryFacade:
                 auth_source=auth_source,
             )
         effective_recovery = self.owner.recovery_view()
+        message = self._rebaseline_result_message(
+            rebaseline_status=recovery_state,
+            effective_recovery=effective_recovery,
+            baseline=imported.snapshot.model_dump(mode="json"),
+            reconciliation=report.model_dump(mode="json"),
+            auto_resume=auto_resume,
+        )
         return {
             "status": effective_recovery["recovery_state"],
             "rebaseline_status": recovery_state,
             "halted": self.owner.runtime.kill_switch.halted,
             "reason": reason,
+            "message": message,
             "baseline": imported.snapshot.model_dump(mode="json"),
             "baseline_event_ref": imported.event_id,
             "reconciliation": report.model_dump(mode="json"),
             "recovery": effective_recovery,
             "auto_resume": auto_resume,
         }
+
+    @classmethod
+    def _rebaseline_result_message(
+        cls,
+        *,
+        rebaseline_status: str,
+        effective_recovery: dict[str, Any],
+        baseline: dict[str, Any],
+        reconciliation: dict[str, Any],
+        auto_resume: dict[str, Any] | None,
+    ) -> str:
+        final_state = str(effective_recovery.get("recovery_state") or "")
+        auto_resume_status = str((auto_resume or {}).get("status") or "")
+        blockers = cls._rebaseline_message_blockers(
+            effective_recovery=effective_recovery,
+            baseline=baseline,
+            reconciliation=reconciliation,
+            auto_resume=auto_resume,
+        )
+        blocker_text = cls._join_rebaseline_blockers(blockers)
+
+        if auto_resume_status in {"resumed", "already_resumed"} and bool(effective_recovery.get("safe_to_trade")):
+            return "已接受当前状态为新基线，并已重新校验后恢复自动运行。"
+        if final_state == "normal_operation" or bool(effective_recovery.get("safe_to_trade")):
+            return "已接受当前状态为新基线，当前恢复状态允许自动运行。"
+        if final_state == "manually_halted" or bool(effective_recovery.get("resume_eligible")):
+            return "已接受当前状态为新基线，当前只剩手动暂停；确认无误后可恢复自动运行。"
+
+        if rebaseline_status == "review_required" or final_state == "review_required":
+            if blocker_text:
+                return f"已接受当前状态为新基线，但最新恢复校验仍需要人工复核：{blocker_text}。"
+            return "已接受当前状态为新基线，但最新恢复校验仍需要人工复核。"
+
+        if rebaseline_status == "resume_blocked" or final_state in {"resume_blocked", "only_reduce"}:
+            if blocker_text:
+                return f"已接受当前状态为新基线，但当前仍不能恢复自动运行：{blocker_text}。"
+            return "已接受当前状态为新基线，但当前仍不能恢复自动运行；请查看最新对账和恢复限制。"
+
+        if auto_resume_status == "resume_blocked":
+            if blocker_text:
+                return f"已接受当前状态为新基线，但自动恢复校验被阻断：{blocker_text}。"
+            return "已接受当前状态为新基线，但自动恢复校验被阻断。"
+
+        return "已接受当前状态为新基线，并已重新计算恢复资格。"
+
+    @staticmethod
+    def _rebaseline_message_blockers(
+        *,
+        effective_recovery: dict[str, Any],
+        baseline: dict[str, Any],
+        reconciliation: dict[str, Any],
+        auto_resume: dict[str, Any] | None,
+    ) -> list[str]:
+        blockers: list[str] = []
+        baseline_open_orders = baseline.get("open_order_count")
+        if isinstance(baseline_open_orders, int) and baseline_open_orders > 0:
+            blockers.append(f"交易所仍有 {baseline_open_orders} 条挂单")
+        elif bool(baseline.get("requires_operator_review")):
+            blockers.append("基线仍需要人工复核")
+
+        if bool(reconciliation.get("halt_required")):
+            blockers.append("最新对账要求暂停")
+        elif bool(reconciliation.get("review_required")):
+            blockers.append("最新对账需要人工复核")
+        if bool(reconciliation.get("only_reduce_required")):
+            blockers.append("当前仍处于 only-reduce 限制")
+
+        for reason in effective_recovery.get("resume_blocked_reasons") or []:
+            if reason:
+                blockers.append(str(reason))
+        for blocker in (auto_resume or {}).get("blockers") or []:
+            if isinstance(blocker, dict):
+                code = blocker.get("blocker") or blocker.get("code")
+            else:
+                code = blocker
+            if code:
+                blockers.append(str(code))
+        return list(dict.fromkeys(blockers))
+
+    @staticmethod
+    def _join_rebaseline_blockers(blockers: list[str]) -> str:
+        if not blockers:
+            return ""
+        visible = blockers[:4]
+        suffix = f" 等 {len(blockers)} 项" if len(blockers) > len(visible) else ""
+        return "、".join(visible) + suffix
 
     async def halt(
         self,
@@ -600,15 +697,18 @@ class ReconciliationSystemQueryFacade:
                     "resume_requires_operator_command_client: "
                     "gateway runtime missing client wiring"
                 )
-            return await client.invoke(
-                command="resume",
-                payload={
-                    "reason": reason,
-                    "actor_role": actor_role,
-                    "actor_identity": actor_identity,
-                    "auth_source": auth_source,
-                },
-            )
+            try:
+                return await client.invoke(
+                    command="resume",
+                    payload={
+                        "reason": reason,
+                        "actor_role": actor_role,
+                        "actor_identity": actor_identity,
+                        "auth_source": auth_source,
+                    },
+                )
+            finally:
+                self.owner._invalidate_cache()
 
         was_halted = self.owner.runtime.kill_switch.halted
         recovery_before = self.owner.recovery_view()["recovery_state"]
@@ -743,12 +843,70 @@ class ReconciliationSystemQueryFacade:
             mode_snapshot=mode_state,
             blockers=blockers,
         )
+        recovery = self.owner.recovery_view()
         return {
             "status": status,
             "halted": self.owner.runtime.kill_switch.halted,
             "reason": reason,
+            "message": self._resume_result_message(
+                status=status,
+                runnable=runnable,
+                blockers=blockers,
+                recovery=recovery,
+                refresh_error=refresh_error,
+            ),
             "runnable": runnable,
             "blockers": blockers,
-            "recovery": self.owner.recovery_view(),
+            "recovery": recovery,
             "reconciliation": None if report is None else report.model_dump(mode="json"),
         }
+
+    @classmethod
+    def _resume_result_message(
+        cls,
+        *,
+        status: str,
+        runnable: bool,
+        blockers: list[dict[str, Any]],
+        recovery: dict[str, Any],
+        refresh_error: Exception | None = None,
+    ) -> str:
+        if status in {"resumed", "already_resumed"} and runnable:
+            return "恢复校验已通过，系统已恢复自动运行。"
+        blocker_text = cls._join_rebaseline_blockers(
+            cls._resume_message_blockers(
+                blockers=blockers,
+                recovery=recovery,
+                refresh_error=refresh_error,
+            )
+        )
+        if status == "resume_blocked":
+            if blocker_text:
+                return f"恢复自动运行被阻断：{blocker_text}。"
+            return "恢复自动运行被阻断；请查看最新对账和恢复限制。"
+        if bool(recovery.get("resume_eligible")) and not bool(recovery.get("safe_to_trade")):
+            if blocker_text:
+                return f"恢复请求已重新校验，但仍需要人工确认：{blocker_text}。"
+            return "恢复请求已重新校验，但仍需要人工确认。"
+        return "恢复请求已重新校验。"
+
+    @staticmethod
+    def _resume_message_blockers(
+        *,
+        blockers: list[dict[str, Any]],
+        recovery: dict[str, Any],
+        refresh_error: Exception | None = None,
+    ) -> list[str]:
+        reasons: list[str] = []
+        if refresh_error is not None:
+            reasons.append("账户状态刷新失败")
+        for reason in recovery.get("resume_blocked_reasons") or []:
+            if reason:
+                reasons.append(str(reason))
+        for blocker in blockers:
+            if not isinstance(blocker, dict):
+                continue
+            code = blocker.get("blocker") or blocker.get("code")
+            if code:
+                reasons.append(str(code))
+        return list(dict.fromkeys(reasons))

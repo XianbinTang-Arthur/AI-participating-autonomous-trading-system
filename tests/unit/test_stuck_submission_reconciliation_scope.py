@@ -102,3 +102,45 @@ def test_stuck_submission_rejects_reconciliation_with_unbooked_exchange_fill() -
         report,
         client_order_id="cl_target",
     )
+
+
+def test_stuck_submission_rejects_reconciliation_with_balance_diff() -> None:
+    report = _report(
+        balance_diff={
+            "exchange": {
+                "USDT": {"local": "100", "exchange": "90"},
+            },
+        },
+    )
+
+    assert not OperatorQueryService._latest_reconciliation_allows_stuck_submission_resolution(
+        report,
+        client_order_id="cl_target",
+    )
+
+
+def test_stuck_submission_rejects_reconciliation_with_structural_review_required() -> None:
+    report = _report(structural_review_required=True)
+
+    assert not OperatorQueryService._latest_reconciliation_allows_stuck_submission_resolution(
+        report,
+        client_order_id="cl_target",
+    )
+
+
+def test_stuck_submission_rejects_reconciliation_with_unrelated_category() -> None:
+    report = _report(
+        mismatch_categories=[
+            "local_open_order_divergence",
+            "local_position_divergence",
+        ],
+        mismatch_reasons=[
+            "local_open_orders_diverge_from_exchange_open_orders",
+            "local_position_differs_from_exchange_position",
+        ],
+    )
+
+    assert not OperatorQueryService._latest_reconciliation_allows_stuck_submission_resolution(
+        report,
+        client_order_id="cl_target",
+    )
