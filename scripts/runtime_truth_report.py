@@ -217,6 +217,11 @@ def decimal_is_positive(value: Any) -> bool:
         return False
 
 
+def decimal_is_zero(value: Any) -> bool:
+    parsed = decimal_value(value)
+    return parsed is not None and parsed == 0
+
+
 def decimal_value(value: Any) -> Decimal | None:
     if value is None:
         return None
@@ -764,6 +769,125 @@ def classify_no_trade(
     }
 
 
+def summarize_execution_truth_chain(
+    *,
+    latest_decision: dict[str, Any],
+    execution_chain: dict[str, Any],
+    execution_legs_count: int,
+    candidate_drilldown: list[dict[str, Any]],
+) -> dict[str, Any]:
+    route_action = latest_decision.get("route_action")
+    primary_family = latest_decision.get("primary_family")
+    primary_candidate = next(
+        (
+            item
+            for item in candidate_drilldown
+            if item.get("family") == primary_family
+        ),
+        candidate_drilldown[0] if candidate_drilldown else {},
+    )
+    composition = as_dict(primary_candidate.get("composition"))
+    budget = as_dict(primary_candidate.get("budget"))
+    execution = as_dict(primary_candidate.get("execution"))
+    execution_behavior = first_present(
+        composition.get("execution_behavior"),
+        execution.get("execution_behavior"),
+    )
+    requested_delta_position_qty = first_present(
+        composition.get("requested_delta_position_qty"),
+        budget.get("requested_delta_position_qty"),
+    )
+    composed_delta_position_qty = first_present(
+        composition.get("composed_delta_position_qty"),
+        budget.get("scaled_delta_position_qty"),
+        requested_delta_position_qty,
+    )
+    db_order_count = int(execution_chain.get("db_order_count") or 0)
+    db_order_state_count = int(execution_chain.get("db_order_state_count") or 0)
+    db_fill_count = int(execution_chain.get("db_fill_count") or 0)
+    legacy_fill_event_count = int(execution_chain.get("legacy_fill_event_count") or 0)
+    execution_plan_ref_count = int(execution_chain.get("execution_plan_ref_count") or 0)
+    order_intent_ref_count = int(execution_chain.get("order_intent_ref_count") or 0)
+    order_state_ref_count = int(execution_chain.get("order_state_ref_count") or 0)
+    fill_event_ref_count = int(execution_chain.get("fill_event_ref_count") or 0)
+
+    has_order_surface = any(
+        (
+            db_order_count,
+            db_order_state_count,
+            order_intent_ref_count,
+            order_state_ref_count,
+        ),
+    )
+    has_fill_surface = any((db_fill_count, legacy_fill_event_count, fill_event_ref_count))
+    zero_delta = (
+        decimal_is_zero(requested_delta_position_qty)
+        and decimal_is_zero(composed_delta_position_qty)
+    )
+
+    order_expected = route_action not in {None, "advisory_only", "hold_current"} or execution_legs_count > 0
+    fill_expected = order_expected
+    lifecycle_expected = order_expected
+    status = "needs_manual_review"
+    missing_fields: list[str] = []
+    evidence: list[str] = compact_unique(
+        [
+            f"route_action={route_action}" if route_action else None,
+            f"execution_behavior={execution_behavior}" if execution_behavior else None,
+            f"execution_legs_count={execution_legs_count}",
+            f"requested_delta_position_qty={decimal_text(requested_delta_position_qty)}",
+            f"composed_delta_position_qty={decimal_text(composed_delta_position_qty)}",
+            f"db_order_count={db_order_count}",
+            f"db_fill_count={db_fill_count}",
+        ],
+        limit=12,
+    )
+
+    if route_action == "hold_current" and execution_behavior == "hold_current" and zero_delta and execution_legs_count == 0:
+        order_expected = False
+        fill_expected = False
+        lifecycle_expected = False
+        if has_order_surface or has_fill_surface:
+            status = "unexpected_order_or_fill_surface_for_hold_current"
+            if has_order_surface:
+                missing_fields.append("explain_unexpected_order_surface")
+            if has_fill_surface:
+                missing_fields.append("explain_unexpected_fill_surface")
+        else:
+            status = "verified_no_order_expected_hold_current_zero_delta"
+    elif order_expected:
+        if execution_plan_ref_count == 0:
+            missing_fields.append("execution_plan_refs")
+        if order_intent_ref_count == 0 and db_order_count == 0:
+            missing_fields.append("order_intent_refs_or_execution_orders")
+        if fill_expected and fill_event_ref_count == 0 and db_fill_count == 0:
+            missing_fields.append("fill_event_refs_or_execution_fills")
+        if missing_fields:
+            status = "expected_execution_surface_missing"
+        else:
+            status = "verified_execution_surface_present"
+    elif not has_order_surface and not has_fill_surface:
+        status = "verified_no_order_expected"
+
+    if not missing_fields and not lifecycle_expected:
+        lifecycle_status = "no_position_lifecycle_transition_expected"
+    elif not missing_fields and lifecycle_expected:
+        lifecycle_status = "position_lifecycle_transition_evidence_present"
+    else:
+        lifecycle_status = "position_lifecycle_transition_evidence_missing"
+
+    return {
+        "status": status,
+        "order_expected": order_expected,
+        "fill_expected": fill_expected,
+        "position_lifecycle_transition_expected": lifecycle_expected,
+        "position_lifecycle_status": lifecycle_status,
+        "smallest_missing_field": missing_fields[0] if missing_fields else None,
+        "missing_fields": missing_fields,
+        "evidence": evidence,
+    }
+
+
 def summarize_latest_decision(
     latest: dict[str, Any] | None,
     audit: dict[str, Any] | None,
@@ -792,21 +916,29 @@ def summarize_latest_decision(
         collect_reason_codes(payload) + collect_sleeve_reason_codes(sleeve_summaries),
         limit=32,
     )
+    candidate_drilldown = summarize_candidate_execution_drilldown(
+        payload,
+        primary_family=latest.get("primary_family"),
+    )
     classification = classify_no_trade(
         latest_decision=latest,
         execution_chain=execution_chain,
         reason_codes=reason_codes,
     )
+    execution_legs_count = len(as_list(payload.get("execution_legs")))
+    execution_truth_chain = summarize_execution_truth_chain(
+        latest_decision=latest,
+        execution_chain=execution_chain,
+        execution_legs_count=execution_legs_count,
+        candidate_drilldown=candidate_drilldown,
+    )
     no_trade_attribution = {
         **classification,
         "reason_codes": reason_codes,
         "operator_summary": truncate_text(payload.get("operator_summary")),
-        "execution_legs_count": len(as_list(payload.get("execution_legs"))),
+        "execution_legs_count": execution_legs_count,
         "sleeve_intent_summary": sleeve_summaries,
-        "candidate_execution_drilldown": summarize_candidate_execution_drilldown(
-            payload,
-            primary_family=latest.get("primary_family"),
-        ),
+        "candidate_execution_drilldown": candidate_drilldown,
     }
     return {
         "allocation_id": latest.get("allocation_id"),
@@ -827,6 +959,7 @@ def summarize_latest_decision(
             "updated_at": audit_payload.get("updated_at"),
         },
         "execution_chain": execution_chain,
+        "execution_truth_chain": execution_truth_chain,
         "no_trade_attribution": no_trade_attribution,
     }
 
@@ -1266,6 +1399,21 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_decision_no_trade_classification": no_trade.get("classification"),
         "latest_decision_is_current_no_trade": no_trade.get("is_current_no_trade"),
+        "latest_decision_execution_truth_status": (
+            latest.get("execution_truth_chain") or {}
+        ).get("status"),
+        "latest_decision_order_expected": (
+            latest.get("execution_truth_chain") or {}
+        ).get("order_expected"),
+        "latest_decision_fill_expected": (
+            latest.get("execution_truth_chain") or {}
+        ).get("fill_expected"),
+        "latest_decision_position_lifecycle_status": (
+            latest.get("execution_truth_chain") or {}
+        ).get("position_lifecycle_status"),
+        "latest_decision_truth_chain_smallest_missing_field": (
+            latest.get("execution_truth_chain") or {}
+        ).get("smallest_missing_field"),
         "portfolio_allocation_decisions": db.get("portfolio_allocation_decisions") if db.get("ok") else None,
         "execution_fills": db.get("execution_fills") if db.get("ok") else None,
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),

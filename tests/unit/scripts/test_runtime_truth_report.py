@@ -448,6 +448,150 @@ def test_no_trade_attribution_separates_soft_contraction_from_final_blockers() -
     ]
 
 
+def test_directional_hold_current_zero_delta_has_verified_no_order_expectation() -> None:
+    mod = load_module()
+    latest = {
+        "allocation_id": "alloc-directional",
+        "decision_id": "decision-directional",
+        "symbol": "BTC-USDT-SWAP",
+        "route_action": "hold_current",
+        "primary_family": "directional",
+        "portfolio_requested_notional": "54.532170000000000000",
+        "portfolio_approved_notional": "54.532170000000000000",
+        "portfolio_budget_cut_notional": "0",
+        "payload": {
+            "operator_summary": "当前 allocator v2 识别到活跃 sleeve，但本轮没有新的可执行 delta。",
+            "reason_codes": [
+                "approved_for_non_protective_execution",
+                "no_budget_contraction",
+                "composed_as_hold_current",
+                "allocator_budget_assignment_active",
+            ],
+            "execution_legs": [],
+            "strategy_sleeve_intents": [
+                {
+                    "family": "directional",
+                    "strategy_sleeve_id": "sleeve-directional",
+                    "route_action": "hold_current",
+                    "approved_for_execution": True,
+                    "execution_behavior": "hold_current",
+                    "execution_control_mode": "approved",
+                    "permission_mode": "approved",
+                    "automatic_enabled": True,
+                    "selectable": True,
+                    "target_notional": "54.532170000000",
+                    "reason_codes": ["directional_strategy_target"],
+                    "control_trace": {
+                        "permission": {
+                            "approved_for_execution": True,
+                            "candidate_enabled": True,
+                            "candidate_execution_compatible": True,
+                            "execution_prerequisites_supported": True,
+                            "configured_auto_execution_enabled": True,
+                            "permission_mode": "approved",
+                            "runtime_supported": True,
+                            "state_runtime_supported": True,
+                            "reason_codes": ["approved_for_non_protective_execution"],
+                        },
+                        "composition": {
+                            "approved_for_execution": True,
+                            "route_action": "hold_current",
+                            "execution_behavior": "hold_current",
+                            "execution_control_mode": "approved",
+                            "requested_delta_position_qty": "0E-12",
+                            "composed_delta_position_qty": "0",
+                            "reason_codes": ["composed_as_hold_current"],
+                        },
+                        "budget": {
+                            "base_scale": "1",
+                            "effective_scale": "1",
+                            "requested_delta_position_qty": "0",
+                            "scaled_delta_position_qty": "0",
+                            "budget_zero_suppressed": False,
+                            "reason_codes": ["no_budget_contraction"],
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    summarized = mod.summarize_latest_decision(
+        latest,
+        {
+            "execution_plan_ref": None,
+            "execution_plan_refs": [],
+            "order_intent_refs": [],
+            "order_state_refs": [],
+            "fill_event_refs": [],
+            "strategy_sleeve_intent_refs": ["intent-directional"],
+            "portfolio_allocation_decision_ref": "alloc-directional",
+            "risk_decision_ref": "risk-directional",
+            "decision_outcome_ref": "outcome-directional",
+        },
+        {"execution_orders": 0, "order_states": 0, "execution_fills": 0, "legacy_fill_events": 0},
+    )
+
+    assert summarized is not None
+    truth_chain = summarized["execution_truth_chain"]
+    assert truth_chain["status"] == "verified_no_order_expected_hold_current_zero_delta"
+    assert truth_chain["order_expected"] is False
+    assert truth_chain["fill_expected"] is False
+    assert truth_chain["position_lifecycle_transition_expected"] is False
+    assert truth_chain["position_lifecycle_status"] == "no_position_lifecycle_transition_expected"
+    assert truth_chain["smallest_missing_field"] is None
+    assert truth_chain["missing_fields"] == []
+    assert "route_action=hold_current" in truth_chain["evidence"]
+    assert "execution_behavior=hold_current" in truth_chain["evidence"]
+    assert "execution_legs_count=0" in truth_chain["evidence"]
+    assert summarized["no_trade_attribution"]["classification"] == (
+        "execution_activity_or_positive_allocation_present"
+    )
+
+
+def test_expected_execution_surface_reports_smallest_missing_field() -> None:
+    mod = load_module()
+
+    truth_chain = mod.summarize_execution_truth_chain(
+        latest_decision={"route_action": "override_target", "primary_family": "directional"},
+        execution_chain={
+            "execution_plan_ref_count": 0,
+            "order_intent_ref_count": 0,
+            "order_state_ref_count": 0,
+            "fill_event_ref_count": 0,
+            "db_order_count": 0,
+            "db_order_state_count": 0,
+            "db_fill_count": 0,
+            "legacy_fill_event_count": 0,
+        },
+        execution_legs_count=1,
+        candidate_drilldown=[
+            {
+                "family": "directional",
+                "composition": {
+                    "route_action": "override_target",
+                    "execution_behavior": "submit_order",
+                    "requested_delta_position_qty": "0.01",
+                    "composed_delta_position_qty": "0.01",
+                },
+                "budget": {},
+                "execution": {"execution_behavior": "submit_order"},
+            },
+        ],
+    )
+
+    assert truth_chain["status"] == "expected_execution_surface_missing"
+    assert truth_chain["order_expected"] is True
+    assert truth_chain["fill_expected"] is True
+    assert truth_chain["position_lifecycle_status"] == "position_lifecycle_transition_evidence_missing"
+    assert truth_chain["smallest_missing_field"] == "execution_plan_refs"
+    assert truth_chain["missing_fields"] == [
+        "execution_plan_refs",
+        "order_intent_refs_or_execution_orders",
+        "fill_event_refs_or_execution_fills",
+    ]
+
+
 def test_permission_root_cause_missing_evidence_degrades_safely() -> None:
     mod = load_module()
 
