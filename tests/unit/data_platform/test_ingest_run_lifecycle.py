@@ -37,7 +37,8 @@ def test_mark_orphaned_ingest_runs_closes_only_matching_running_runs() -> None:
     assert "WHERE status = 'running'" in session.sql
     assert "run_type = :run_type" in session.sql
     assert "dataset_domain = :domain" in session.sql
-    assert "trigger_mode = :trigger_mode" in session.sql
+    assert "trigger_mode = CAST(:trigger_mode AS TEXT)" in session.sql
+    assert "instrument_type = CAST(:instrument_type AS TEXT)" in session.sql
     assert session.params is not None
     assert session.params["run_type"] == "rolling"
     assert session.params["domain"] == "microstructure"

@@ -99,8 +99,14 @@ def mark_orphaned_ingest_runs(
             WHERE status = 'running'
               AND run_type = :run_type
               AND dataset_domain = :domain
-              AND (:instrument_type IS NULL OR instrument_type = :instrument_type)
-              AND (:trigger_mode IS NULL OR trigger_mode = :trigger_mode)
+              AND (
+                    CAST(:instrument_type AS TEXT) IS NULL
+                    OR instrument_type = CAST(:instrument_type AS TEXT)
+                  )
+              AND (
+                    CAST(:trigger_mode AS TEXT) IS NULL
+                    OR trigger_mode = CAST(:trigger_mode AS TEXT)
+                  )
         """),
         dict(
             now=now,
