@@ -216,6 +216,7 @@ def resolve_orderbook_snapshot_ref_row(
             "checksum_source": None,
             "checksum_version": _ORDERBOOK_CHECKSUM_VERSION,
             "sequence_key": None,
+            "top_of_book": None,
             "missing_evidence": [],
         }
     )
@@ -282,6 +283,7 @@ def resolve_orderbook_snapshot_ref_row(
                 "ts": payload["ts"],
                 "content_checksum": content_checksum,
             },
+            "top_of_book": _orderbook_top_of_book(str(payload["table_name"]), normalized_row),
             "missing_evidence": [],
         }
     )
@@ -600,6 +602,66 @@ def _orderbook_row_checksum(table_name: str, row: Mapping[str, Any]) -> str:
     }
     serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return f"sha256:{hashlib.sha256(serialized.encode('utf-8')).hexdigest()}"
+
+
+def _orderbook_top_of_book(table_name: str, row: Mapping[str, Any]) -> dict[str, Any] | None:
+    if table_name == "bronze.market_orderbook_books5":
+        bid_px = _decimal_payload_value(row.get("bid_px_1"))
+        bid_sz = _decimal_payload_value(row.get("bid_sz_1"))
+        ask_px = _decimal_payload_value(row.get("ask_px_1"))
+        ask_sz = _decimal_payload_value(row.get("ask_sz_1"))
+    elif table_name == "bronze.market_orderbook_bbo":
+        bid_px = _decimal_payload_value(row.get("bid_px"))
+        bid_sz = _decimal_payload_value(row.get("bid_sz"))
+        ask_px = _decimal_payload_value(row.get("ask_px"))
+        ask_sz = _decimal_payload_value(row.get("ask_sz"))
+    else:
+        return None
+
+    bid_px_decimal = _to_decimal(row.get("bid_px_1") if table_name.endswith("books5") else row.get("bid_px"))
+    ask_px_decimal = _to_decimal(row.get("ask_px_1") if table_name.endswith("books5") else row.get("ask_px"))
+    mid_px: Decimal | None = None
+    spread_px: Decimal | None = None
+    spread_bps: Decimal | None = None
+    if (
+        bid_px_decimal is not None
+        and ask_px_decimal is not None
+        and bid_px_decimal > Decimal("0")
+        and ask_px_decimal > Decimal("0")
+    ):
+        mid_px = (bid_px_decimal + ask_px_decimal) / Decimal("2")
+        spread_px = ask_px_decimal - bid_px_decimal
+        if mid_px != Decimal("0"):
+            spread_bps = (spread_px / mid_px) * Decimal("10000")
+
+    return {
+        "source": "level1_projection_from_persisted_row",
+        "bid_px": bid_px,
+        "bid_sz": bid_sz,
+        "ask_px": ask_px,
+        "ask_sz": ask_sz,
+        "mid_px": _decimal_payload_value(mid_px),
+        "spread_px": _decimal_payload_value(spread_px),
+        "spread_bps": _decimal_payload_value(spread_bps),
+    }
+
+
+def _to_decimal(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except Exception:
+        return None
+
+
+def _decimal_payload_value(value: Any) -> str | None:
+    resolved = _to_decimal(value)
+    if resolved is None:
+        return None
+    if resolved.is_zero():
+        return "0"
+    return format(resolved.normalize(), "f")
 
 
 def _canonical_checksum_value(value: Any) -> Any:

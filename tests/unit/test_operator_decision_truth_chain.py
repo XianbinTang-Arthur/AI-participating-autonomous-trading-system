@@ -349,6 +349,256 @@ def test_decision_truth_chain_resolves_orderbook_rows_and_checksums() -> None:
         "local_orderbook_diff_payload_not_exposed",
         "local_orderbook_diff_checksum_not_exposed",
     ]
+    assert stage["pre"]["top_of_book"]["source"] == "level1_projection_from_persisted_row"
+    assert stage["pre"]["top_of_book"]["bid_px"] == "77000.1"
+    assert stage["pre"]["top_of_book"]["bid_sz"] == "0.1"
+    assert stage["pre"]["top_of_book"]["ask_px"] == "77000.2"
+    assert stage["pre"]["top_of_book"]["ask_sz"] == "0.2"
+    assert stage["pre"]["top_of_book"]["mid_px"] == "77000.15"
+    assert stage["pre"]["top_of_book"]["spread_px"] == "0.1"
+    assert stage["pre"]["top_of_book"]["spread_bps"] is not None
+
+
+def test_decision_truth_chain_reports_fill_feasibility_from_resolved_book_rows() -> None:
+    pre_ts = datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)
+    post_ts = datetime(2026, 4, 25, 3, 48, 31, tzinfo=timezone.utc)
+    query = _service(
+        orderbook_rows=[
+            _books5_row(ts=pre_ts),
+            _books5_row(ts=post_ts),
+        ],
+        order_states=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "status": "FILLED",
+                "lifecycle_snapshot_refs": {
+                    "submit": {
+                        "market_snapshot_ref": "mkt-1",
+                        "feature_snapshot_ref": "feat-1",
+                        "portfolio_snapshot_ref": "port-1",
+                        "health_snapshot_ref": "health-1",
+                        "market_context_snapshot_refs": {
+                            "pre_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z"
+                            ),
+                            "post_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z"
+                            ),
+                        },
+                    }
+                },
+            }
+        ],
+        fills=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "fill_id": "fill-1",
+                "side": "buy",
+                "fill_price": Decimal("77000.3"),
+                "fill_qty": Decimal("0.05"),
+                "fill_notional": Decimal("3850.015"),
+            }
+        ],
+    )
+
+    payload = query._decision_truth_chain_payload(
+        decision_id="decision-1",
+        audit=_audit(order_intent_refs=["intent-1"]),
+        order_updates=[],
+        fills=[],
+    )
+
+    feasibility = payload["execution_science"]["fill_feasibility"]
+    assert feasibility["status"] == "local_book_fill_feasibility_observed"
+    assert feasibility["feasible_stage_count"] == 1
+    stage = feasibility["stage_evidence"][0]
+    assert stage["status"] == "fill_feasibility_observed"
+    fill = stage["fill_evidence"][0]
+    assert fill["status"] == "top_of_book_size_covers_fill"
+    assert fill["side"] == "buy"
+    assert fill["expected_price_source"] == "pre_event_top_of_book"
+    assert fill["expected_price"] == "77000.2"
+    assert fill["top_level_size_covers_fill"] is True
+    assert fill["adverse_slippage_bps"] is not None
+    assert fill["estimated_adverse_cost_source"] == "fill_notional_x_pre_event_adverse_slippage_bps"
+
+
+def test_decision_truth_chain_fill_feasibility_reports_no_fill_for_resolved_book_rows() -> None:
+    pre_ts = datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)
+    post_ts = datetime(2026, 4, 25, 3, 48, 31, tzinfo=timezone.utc)
+    query = _service(
+        orderbook_rows=[
+            _books5_row(ts=pre_ts),
+            _books5_row(ts=post_ts),
+        ],
+        order_states=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "status": "SUBMITTED",
+                "lifecycle_snapshot_refs": {
+                    "submit": {
+                        "market_snapshot_ref": "mkt-1",
+                        "feature_snapshot_ref": "feat-1",
+                        "portfolio_snapshot_ref": "port-1",
+                        "health_snapshot_ref": "health-1",
+                        "market_context_snapshot_refs": {
+                            "pre_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z"
+                            ),
+                            "post_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z"
+                            ),
+                        },
+                    }
+                },
+            }
+        ],
+    )
+
+    payload = query._decision_truth_chain_payload(
+        decision_id="decision-1",
+        audit=_audit(order_intent_refs=["intent-1"]),
+        order_updates=[],
+        fills=[],
+    )
+
+    feasibility = payload["execution_science"]["fill_feasibility"]
+    assert feasibility["status"] == "no_fills_for_resolved_book_rows"
+    assert feasibility["no_fill_stage_count"] == 1
+    assert feasibility["stage_evidence"][0]["status"] == "no_fill_observed_for_client_order"
+    assert "fill_absent_for_orderbook_stage" in feasibility["stage_evidence"][0]["missing_evidence"]
+
+
+def test_decision_truth_chain_fill_feasibility_reports_depth_limited_fill() -> None:
+    pre_ts = datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)
+    post_ts = datetime(2026, 4, 25, 3, 48, 31, tzinfo=timezone.utc)
+    query = _service(
+        orderbook_rows=[
+            _books5_row(ts=pre_ts),
+            _books5_row(ts=post_ts),
+        ],
+        order_states=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "status": "FILLED",
+                "lifecycle_snapshot_refs": {
+                    "submit": {
+                        "market_snapshot_ref": "mkt-1",
+                        "feature_snapshot_ref": "feat-1",
+                        "portfolio_snapshot_ref": "port-1",
+                        "health_snapshot_ref": "health-1",
+                        "market_context_snapshot_refs": {
+                            "pre_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z"
+                            ),
+                            "post_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z"
+                            ),
+                        },
+                    }
+                },
+            }
+        ],
+        fills=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "fill_id": "fill-1",
+                "side": "buy",
+                "fill_price": Decimal("77000.3"),
+                "fill_qty": Decimal("0.30"),
+                "fill_notional": Decimal("23100.09"),
+            }
+        ],
+    )
+
+    payload = query._decision_truth_chain_payload(
+        decision_id="decision-1",
+        audit=_audit(order_intent_refs=["intent-1"]),
+        order_updates=[],
+        fills=[],
+    )
+
+    feasibility = payload["execution_science"]["fill_feasibility"]
+    assert feasibility["status"] == "fill_requires_depth_or_maker_context"
+    fill = feasibility["stage_evidence"][0]["fill_evidence"][0]
+    assert fill["status"] == "top_of_book_size_insufficient_or_unknown_depth"
+    assert fill["top_level_size_covers_fill"] is False
+
+
+def test_decision_truth_chain_fill_feasibility_keeps_missing_row_evidence_explicit() -> None:
+    query = _service(
+        order_states=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "status": "FILLED",
+                "lifecycle_snapshot_refs": {
+                    "submit": {
+                        "market_snapshot_ref": "mkt-1",
+                        "feature_snapshot_ref": "feat-1",
+                        "portfolio_snapshot_ref": "port-1",
+                        "health_snapshot_ref": "health-1",
+                        "market_context_snapshot_refs": {
+                            "pre_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z"
+                            ),
+                            "post_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z"
+                            ),
+                        },
+                    }
+                },
+            }
+        ],
+        fills=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "fill_id": "fill-1",
+                "side": "buy",
+                "fill_price": Decimal("77000.3"),
+                "fill_qty": Decimal("0.05"),
+            }
+        ],
+    )
+
+    payload = query._decision_truth_chain_payload(
+        decision_id="decision-1",
+        audit=_audit(order_intent_refs=["intent-1"]),
+        order_updates=[],
+        fills=[],
+    )
+
+    feasibility = payload["execution_science"]["fill_feasibility"]
+    assert feasibility["status"] == "missing_fill_feasibility_evidence"
+    assert "orderbook_row_truth_missing" in feasibility["missing_evidence"]
+    assert feasibility["stage_evidence"][0]["fill_evidence"] == []
 
 
 def test_decision_truth_chain_marks_source_timestamp_order_invalid() -> None:

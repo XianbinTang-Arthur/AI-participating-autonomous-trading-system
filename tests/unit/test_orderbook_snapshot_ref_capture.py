@@ -132,6 +132,10 @@ class TestOrderbookSnapshotRefCapture(unittest.TestCase):
         self.assertTrue(first["content_checksum"].startswith("sha256:"))
         self.assertEqual(first["content_checksum"], second["content_checksum"])
         self.assertEqual(first["sequence_key"]["source_ts"], "2026-04-25T03:48:30.000000Z")
+        self.assertEqual(first["top_of_book"]["bid_px"], "77000.1")
+        self.assertEqual(first["top_of_book"]["bid_sz"], "0.1")
+        self.assertEqual(first["top_of_book"]["ask_px"], "77000.2")
+        self.assertEqual(first["top_of_book"]["ask_sz"], "0.2")
 
     def test_ref_row_resolver_reports_missing_row_without_default_source(self) -> None:
         session = _FakeSession([None])

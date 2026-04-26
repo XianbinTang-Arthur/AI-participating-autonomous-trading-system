@@ -3371,6 +3371,299 @@ class OperatorQueryService:
             "ordered_by": ordered_by,
         }
 
+    @staticmethod
+    def _payload_execution_side(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+        raw_side = OperatorQueryService._nonempty_string(
+            payload.get("side")
+            or payload.get("order_side")
+            or payload.get("execution_side")
+        )
+        if raw_side is not None:
+            normalized = raw_side.strip().lower()
+            if normalized in {"buy", "sell"}:
+                return normalized, "side"
+
+        action = OperatorQueryService._nonempty_string(
+            payload.get("execution_action")
+            or payload.get("position_intent")
+            or payload.get("action")
+        )
+        action_normalized = "" if action is None else action.strip().lower()
+        if action_normalized in {"open_long", "close_short", "buy"}:
+            return "buy", "execution_action"
+        if action_normalized in {"open_short", "close_long", "sell"}:
+            return "sell", "execution_action"
+        return None, None
+
+    @staticmethod
+    def _decimal_truth_value(value: Decimal | None) -> str | None:
+        if value is None:
+            return None
+        if value.is_zero():
+            return "0"
+        return format(value.normalize(), "f")
+
+    def _side_top_of_book_quote(
+        self,
+        *,
+        row_payload: dict[str, Any],
+        side: str | None,
+    ) -> dict[str, Any]:
+        if side not in {"buy", "sell"}:
+            return {
+                "side": side,
+                "quote_side": None,
+                "price": None,
+                "size": None,
+                "spread_bps": None,
+                "spread_px": None,
+                "source": None,
+                "_price_decimal": None,
+                "_size_decimal": None,
+            }
+        top = row_payload.get("top_of_book") if isinstance(row_payload, dict) else None
+        top = top if isinstance(top, dict) else {}
+        price_key = "ask_px" if side == "buy" else "bid_px"
+        size_key = "ask_sz" if side == "buy" else "bid_sz"
+        quote_price = self._to_decimal(top.get(price_key))
+        quote_size = self._to_decimal(top.get(size_key))
+        return {
+            "side": side,
+            "quote_side": "ask" if side == "buy" else "bid",
+            "price": self._decimal_truth_value(quote_price),
+            "size": self._decimal_truth_value(quote_size),
+            "spread_bps": top.get("spread_bps"),
+            "spread_px": top.get("spread_px"),
+            "source": top.get("source"),
+            "_price_decimal": quote_price,
+            "_size_decimal": quote_size,
+        }
+
+    def _fill_feasibility_for_fill(
+        self,
+        *,
+        fill_payload: dict[str, Any],
+        pre_row: dict[str, Any],
+        post_row: dict[str, Any],
+    ) -> dict[str, Any]:
+        side, side_source = self._payload_execution_side(fill_payload)
+        fill_price = self._to_decimal(
+            fill_payload.get("fill_price")
+            or fill_payload.get("average_fill_price")
+            or fill_payload.get("price")
+        )
+        fill_qty = self._to_decimal(
+            fill_payload.get("fill_qty")
+            or fill_payload.get("filled_qty")
+            or fill_payload.get("quantity")
+            or fill_payload.get("qty")
+        )
+        if fill_qty is not None:
+            fill_qty = abs(fill_qty)
+        fill_notional = self._to_decimal(fill_payload.get("fill_notional"))
+
+        missing_evidence: list[str] = []
+        if side not in {"buy", "sell"}:
+            missing_evidence.append("unsupported_or_missing_fill_side")
+        pre_quote = self._side_top_of_book_quote(row_payload=pre_row, side=side)
+        post_quote = self._side_top_of_book_quote(row_payload=post_row, side=side)
+        expected_price = self._to_decimal(pre_quote.get("price"))
+        if expected_price is None:
+            missing_evidence.append("pre_event_top_of_book_price_missing")
+        if fill_price is None:
+            missing_evidence.append("fill_price_missing")
+        if fill_qty is None:
+            missing_evidence.append("fill_qty_missing")
+
+        top_size_covers_fill = None
+        pre_quote_size = pre_quote.get("_size_decimal")
+        if isinstance(pre_quote_size, Decimal) and fill_qty is not None:
+            top_size_covers_fill = pre_quote_size >= fill_qty
+
+        adverse_slippage_bps = None
+        adverse_price_delta = None
+        estimated_adverse_cost_quote = None
+        if fill_price is not None and expected_price is not None and expected_price != Decimal("0"):
+            adverse_price_delta = (
+                fill_price - expected_price
+                if side == "buy"
+                else expected_price - fill_price
+            )
+            adverse_slippage_bps = (adverse_price_delta / expected_price) * Decimal("10000")
+            if fill_notional is not None:
+                estimated_adverse_cost_quote = fill_notional * adverse_slippage_bps / Decimal("10000")
+
+        post_adverse_slippage_bps = None
+        post_expected_price = self._to_decimal(post_quote.get("price"))
+        if fill_price is not None and post_expected_price is not None and post_expected_price != Decimal("0"):
+            post_delta = fill_price - post_expected_price if side == "buy" else post_expected_price - fill_price
+            post_adverse_slippage_bps = (post_delta / post_expected_price) * Decimal("10000")
+
+        if missing_evidence:
+            status = "missing_required_fill_or_book_facts"
+        elif top_size_covers_fill is True:
+            status = "top_of_book_size_covers_fill"
+        else:
+            status = "top_of_book_size_insufficient_or_unknown_depth"
+
+        return {
+            "status": status,
+            "missing_evidence": missing_evidence,
+            "fill_id": self._nonempty_string(fill_payload.get("fill_id")),
+            "client_order_id": self._nonempty_string(fill_payload.get("client_order_id")),
+            "side": side,
+            "side_source": side_source,
+            "fill_price": self._decimal_truth_value(fill_price),
+            "fill_qty": self._decimal_truth_value(fill_qty),
+            "fill_notional": self._decimal_truth_value(fill_notional),
+            "expected_price_source": "pre_event_top_of_book",
+            "expected_price": self._decimal_truth_value(expected_price),
+            "post_event_expected_price": self._decimal_truth_value(post_expected_price),
+            "top_level_size_covers_fill": top_size_covers_fill,
+            "pre_event_quote": {key: value for key, value in pre_quote.items() if not key.startswith("_")},
+            "post_event_quote": {key: value for key, value in post_quote.items() if not key.startswith("_")},
+            "adverse_price_delta": self._decimal_truth_value(adverse_price_delta),
+            "adverse_slippage_bps": self._decimal_truth_value(adverse_slippage_bps),
+            "post_event_adverse_slippage_bps": self._decimal_truth_value(post_adverse_slippage_bps),
+            "estimated_adverse_cost_quote": self._decimal_truth_value(estimated_adverse_cost_quote),
+            "estimated_adverse_cost_source": (
+                "fill_notional_x_pre_event_adverse_slippage_bps"
+                if estimated_adverse_cost_quote is not None
+                else "missing_fill_notional_or_slippage_basis"
+            ),
+        }
+
+    def _decision_fill_feasibility_payload(
+        self,
+        *,
+        order_payloads: list[dict[str, Any]],
+        fill_payloads: list[dict[str, Any]],
+        sequence_evidence: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        execution_record_count = len(order_payloads) + len(fill_payloads)
+        if execution_record_count == 0:
+            return {
+                "status": "absent_no_execution_record",
+                "complete": False,
+                "missing_evidence": [],
+                "stage_count": 0,
+                "feasible_stage_count": 0,
+                "missing_evidence_stage_count": 0,
+                "no_fill_stage_count": 0,
+                "stage_evidence": [],
+            }
+        if not sequence_evidence:
+            return {
+                "status": "absent_no_lifecycle_record",
+                "complete": False,
+                "missing_evidence": ["lifecycle_snapshot_refs_absent"],
+                "stage_count": 0,
+                "feasible_stage_count": 0,
+                "missing_evidence_stage_count": 0,
+                "no_fill_stage_count": 0,
+                "stage_evidence": [],
+            }
+
+        fills_by_order: dict[str, list[dict[str, Any]]] = {}
+        for fill in fill_payloads:
+            client_order_id = self._nonempty_string(fill.get("client_order_id"))
+            if client_order_id is None:
+                continue
+            fills_by_order.setdefault(client_order_id, []).append(fill)
+
+        stage_evidence: list[dict[str, Any]] = []
+        feasible_stage_count = 0
+        missing_evidence_stage_count = 0
+        no_fill_stage_count = 0
+        depth_limited_stage_count = 0
+        aggregate_missing: list[str] = []
+
+        for item in sequence_evidence:
+            pre_row = item.get("pre") if isinstance(item.get("pre"), dict) else {}
+            post_row = item.get("post") if isinstance(item.get("post"), dict) else {}
+            client_order_id = self._nonempty_string(item.get("client_order_id"))
+            stage_missing: list[str] = []
+            if not pre_row.get("row_exists") or not post_row.get("row_exists"):
+                stage_missing.append("orderbook_row_truth_missing")
+            if not isinstance(pre_row.get("top_of_book"), dict) or not isinstance(post_row.get("top_of_book"), dict):
+                stage_missing.append("top_of_book_projection_missing")
+
+            fills_for_stage = fills_by_order.get(client_order_id or "", [])
+            if stage_missing:
+                status = "missing_orderbook_row_truth"
+                fill_evidence: list[dict[str, Any]] = []
+                missing_evidence_stage_count += 1
+            elif not fills_for_stage:
+                status = "no_fill_observed_for_client_order"
+                fill_evidence = []
+                stage_missing.append("fill_absent_for_orderbook_stage")
+                no_fill_stage_count += 1
+            else:
+                fill_evidence = [
+                    self._fill_feasibility_for_fill(
+                        fill_payload=fill,
+                        pre_row=pre_row,
+                        post_row=post_row,
+                    )
+                    for fill in fills_for_stage[:10]
+                ]
+                if any(fill.get("status") == "top_of_book_size_covers_fill" for fill in fill_evidence):
+                    status = "fill_feasibility_observed"
+                    feasible_stage_count += 1
+                elif any(
+                    fill.get("status") == "top_of_book_size_insufficient_or_unknown_depth"
+                    for fill in fill_evidence
+                ):
+                    status = "fill_requires_depth_or_maker_context"
+                    depth_limited_stage_count += 1
+                else:
+                    status = "missing_required_fill_or_book_facts"
+                    missing_evidence_stage_count += 1
+                for fill in fill_evidence:
+                    stage_missing.extend(str(value) for value in fill.get("missing_evidence", []))
+
+            aggregate_missing.extend(stage_missing)
+            stage_evidence.append(
+                {
+                    "record_kind": item.get("record_kind"),
+                    "record_id": item.get("record_id"),
+                    "client_order_id": client_order_id,
+                    "stage": item.get("stage"),
+                    "status": status,
+                    "sequence_status": item.get("status"),
+                    "pre_ref": pre_row.get("raw_ref"),
+                    "post_ref": post_row.get("raw_ref"),
+                    "pre_checksum": pre_row.get("content_checksum"),
+                    "post_checksum": post_row.get("content_checksum"),
+                    "missing_evidence": list(dict.fromkeys(stage_missing)),
+                    "fill_evidence": fill_evidence,
+                }
+            )
+
+        unique_missing = list(dict.fromkeys(aggregate_missing))
+        if feasible_stage_count and not unique_missing and depth_limited_stage_count == 0:
+            status = "local_book_fill_feasibility_observed"
+        elif feasible_stage_count:
+            status = "partial_local_book_fill_feasibility_observed"
+        elif depth_limited_stage_count:
+            status = "fill_requires_depth_or_maker_context"
+        elif no_fill_stage_count and not missing_evidence_stage_count:
+            status = "no_fills_for_resolved_book_rows"
+        else:
+            status = "missing_fill_feasibility_evidence"
+
+        return {
+            "status": status,
+            "complete": False,
+            "missing_evidence": unique_missing,
+            "stage_count": len(stage_evidence),
+            "feasible_stage_count": feasible_stage_count,
+            "missing_evidence_stage_count": missing_evidence_stage_count,
+            "no_fill_stage_count": no_fill_stage_count,
+            "depth_limited_stage_count": depth_limited_stage_count,
+            "stage_evidence": stage_evidence[:50],
+        }
+
     def _decision_execution_science_payload(
         self,
         *,
@@ -3542,6 +3835,11 @@ class OperatorQueryService:
                 "invalid_local_orderbook_sequence_stage_count": invalid_local_sequence_stage_count,
                 "stage_evidence": sequence_evidence[:50],
             },
+            "fill_feasibility": self._decision_fill_feasibility_payload(
+                order_payloads=order_payloads,
+                fill_payloads=fill_payloads,
+                sequence_evidence=sequence_evidence,
+            ),
         }
 
     def _decision_truth_chain_payload(
