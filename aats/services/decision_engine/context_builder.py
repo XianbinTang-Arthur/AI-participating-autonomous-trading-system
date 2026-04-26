@@ -425,6 +425,7 @@ class DecisionContextBuilder:
                 account_snapshot=account_snapshot,
                 portfolio_snapshot=portfolio_snapshot,
             ),
+            market_snapshot=market_snapshot,
         )
 
     def _payload_by_ref(self, ref: str | None) -> dict[str, object] | None:

@@ -9,6 +9,7 @@ from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, ProfileControlDecision
+from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import InstrumentPositionState
 from aats.services.decision_engine.target_position import TargetPositionEngine
 
@@ -513,6 +514,40 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(target.target_position_qty, context.current_position_qty)
         self.assertEqual(target.delta_position_qty, Decimal("0"))
         self.assertEqual(target.position_intent, "hold")
+
+    def test_derivatives_flat_signal_hold_yields_to_alpha_decay_exit(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_flat_signal_hold_enabled": True,
+                }
+            )
+        )
+        context = self._context(current_position_qty=0.028, product_type="derivatives", current_exposure_side="long")
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=0.2,
+            direction_bias="flat",
+            confidence=0.52,
+            composite_alpha_score=0.02,
+            factor_scores={
+                "momentum_alpha": 0.04,
+                "trend_alpha": 0.03,
+                "microstructure_alpha": -0.04,
+                "liquidity_scale": 0.9,
+            },
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=-0.04, confidence=0.55))
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "close_long")
+        self.assertIn("alpha_decay_exit", target.guardrail_flags)
+        self.assertNotIn("flat_signal_hold", target.guardrail_flags)
+        self.assertEqual(target.decision_outcome.exit_attribution, "alpha_decay_exit")
 
     def test_derivatives_flat_signal_exits_when_multiple_adverse_factors_align(self) -> None:
         engine = TargetPositionEngine(
@@ -1255,6 +1290,83 @@ class TestTargetPositionEngine(unittest.TestCase):
 
         self.assertEqual(target.expected_cost_bps, 17.0)
 
+    def test_directional_cost_guard_uses_target_delta_and_market_snapshot(self) -> None:
+        class _SizeAwareCostService:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def estimate_single_leg_entry(self, **kwargs):
+                self.calls.append(kwargs)
+                quantity = kwargs.get("quantity")
+                drag = (
+                    Decimal("30")
+                    if quantity is not None and Decimal(str(quantity)) >= Decimal("0.01")
+                    else Decimal("1")
+                )
+                return type("Estimate", (), {"executable_total_drag_bps": drag})()
+
+        settings = AATSSettings.model_validate(
+            {
+                "default_order_qty": 0.004,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_target_leverage": 5.0,
+                "max_target_leverage": 10.0,
+                "max_margin_usage_fraction": 0.75,
+                "strategy_dynamic_leverage_enabled": False,
+                "strategy_short_bias_enabled": True,
+                "strategy_cost_guard_enabled": True,
+                "strategy_edge_noise_buffer_bps": 0.0,
+                "strategy_min_net_edge_bps": 0.0,
+                "strategy_entry_min_signal_edge_bps": 0.0,
+                "strategy_entry_alpha_min": 0.0,
+                "strategy_entry_confidence_min": 0.0,
+                "strategy_alpha_edge_bps_scale": 100.0,
+            }
+        )
+        engine = TargetPositionEngine(settings=settings)
+        cost_service = _SizeAwareCostService()
+        engine.trade_cost_service = cost_service  # type: ignore[assignment]
+        market_snapshot = MarketSnapshot(
+            symbol="BTC-USDT",
+            exchange="OKX",
+            snapshot_ts=datetime.now(timezone.utc),
+            best_bid=Decimal("99990"),
+            best_ask=Decimal("100010"),
+            last_price=Decimal("100000"),
+            bid_size=Decimal("0.002"),
+            ask_size=Decimal("0.002"),
+            volume_24h=Decimal("1000000"),
+            kline_15m={"open": Decimal("99900"), "high": Decimal("100200"), "low": Decimal("99800"), "close": Decimal("100000")},
+            kline_1h={"open": Decimal("99500"), "high": Decimal("100500"), "low": Decimal("99000"), "close": Decimal("100000")},
+        )
+        context = self._context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            market_last_price=Decimal("100000"),
+            available_trading_equity=Decimal("390"),
+            market_snapshot=market_snapshot,
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            composite_alpha_score=0.25,
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.10, confidence=0.70))
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.expected_cost_bps, 30.0)
+        self.assertIn("expected_edge_below_cost_buffer", target.guardrail_flags)
+        self.assertTrue(cost_service.calls)
+        cost_call = cost_service.calls[0]
+        self.assertEqual(cost_call["side"], "buy")
+        self.assertEqual(cost_call["quantity"], Decimal("0.014625"))
+        self.assertEqual(cost_call["projected_notional"], Decimal("1462.500000"))
+        self.assertIs(cost_call["market_snapshot"], market_snapshot)
+
     def test_cost_guard_uses_contextual_derivatives_cost_components(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(
@@ -1639,6 +1751,7 @@ class TestTargetPositionEngine(unittest.TestCase):
         leg_strategy_health: dict[str, dict[str, object]] | None = None,
         market_last_price: Decimal = Decimal("0"),
         available_trading_equity: Decimal = Decimal("0"),
+        market_snapshot: MarketSnapshot | None = None,
     ) -> DecisionContext:
         now = as_of_ts or utc_now()
         derived_long_qty = (
@@ -1805,6 +1918,7 @@ class TestTargetPositionEngine(unittest.TestCase):
             strategy_cooldowns={},
             market_last_price=market_last_price,
             available_trading_equity=available_trading_equity,
+            market_snapshot=market_snapshot,
         )
 
     @staticmethod

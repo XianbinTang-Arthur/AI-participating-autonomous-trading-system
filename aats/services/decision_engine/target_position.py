@@ -10,6 +10,7 @@ from typing import Literal
 from aats.bootstrap.logging import correlation_fields, get_logger, log_event
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
+from aats.schemas.market import MarketSnapshot
 from aats.schemas.ai_shadow import AIShadowDecision
 from aats.schemas.decision import (
     AIDecisionIntent,
@@ -487,13 +488,6 @@ class TargetPositionEngine:
         canonical_mode = normalize_ai_operating_mode(operating_mode)
         resolved_margin_mode = self._resolved_margin_mode(context=context)
         signal_edge_bps = self._signal_edge_bps(baseline=baseline, ai_assessment=ai_assessment)
-        expected_cost_bps = self._estimated_trade_cost_bps(
-            symbol=context.symbol,
-            product_type=context.product_type,
-            ai_assessment=ai_assessment,
-            margin_mode=resolved_margin_mode,
-        )
-        expected_net_edge_bps = signal_edge_bps - expected_cost_bps - max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
         guardrail_flags = list(context.strategy_guardrail_flags)
         leverage_bias = self._leverage_bias(
             baseline=baseline,
@@ -533,6 +527,24 @@ class TargetPositionEngine:
                 baseline=baseline,
                 ai_assessment=ai_assessment,
             )
+        cost_reference_target_qty = self._cost_reference_target_qty(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            ai_decision_intent=ai_decision_intent,
+            canonical_mode=canonical_mode,
+            ai_decision_authorized=ai_decision_authorized,
+            target_qty=target_qty,
+            guardrail_flags=guardrail_flags,
+        )
+        expected_cost_bps = self._estimated_trade_cost_bps(
+            context=context,
+            product_type=context.product_type,
+            ai_assessment=ai_assessment,
+            margin_mode=resolved_margin_mode,
+            desired_target_qty=cost_reference_target_qty,
+        )
+        expected_net_edge_bps = signal_edge_bps - expected_cost_bps - max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
         target_leverage = self._target_leverage(
             context=context,
             baseline=baseline,
@@ -713,6 +725,7 @@ class TargetPositionEngine:
                 product_type=product_type,
                 baseline_fallback_qty=baseline_fallback_qty,
                 ai_decision_authorized=ai_decision_authorized,
+                signal_edge_bps=signal_edge_bps,
                 guardrail_flags=guardrail_flags,
             )
         return self._apply_position_management(
@@ -731,15 +744,7 @@ class TargetPositionEngine:
         baseline_qty: Decimal,
         guardrail_flags: list[str],
     ) -> Decimal:
-        if self._should_hold_on_flat_signal(
-            current_position_qty=context.current_position_qty,
-            desired_target_qty=baseline_qty,
-            baseline=baseline,
-            ai_assessment=None,
-            product_type=product_type,
-        ):
-            guardrail_flags.append("flat_signal_hold")
-            return context.current_position_qty
+        guardrail_flags_before_management = set(guardrail_flags)
         managed_target_qty = self._manage_existing_position(
             context=context,
             baseline=baseline,
@@ -748,6 +753,17 @@ class TargetPositionEngine:
             product_type=product_type,
             guardrail_flags=guardrail_flags,
         )
+        if self._flat_signal_hold_after_management_applies(
+            context=context,
+            desired_target_qty=baseline_qty,
+            baseline=baseline,
+            ai_assessment=None,
+            product_type=product_type,
+            guardrail_flags_before_management=guardrail_flags_before_management,
+            guardrail_flags=guardrail_flags,
+        ):
+            guardrail_flags.append("flat_signal_hold")
+            return context.current_position_qty
         return self._apply_position_management(
             current_position_qty=context.current_position_qty,
             desired_target_qty=managed_target_qty,
@@ -773,15 +789,7 @@ class TargetPositionEngine:
         ):
             guardrail_flags.append("ai_consistency_filter_blocked")
             return context.current_position_qty
-        if self._should_hold_on_flat_signal(
-            current_position_qty=context.current_position_qty,
-            desired_target_qty=baseline_qty,
-            baseline=baseline,
-            ai_assessment=ai_assessment,
-            product_type=product_type,
-        ):
-            guardrail_flags.append("flat_signal_hold")
-            return context.current_position_qty
+        guardrail_flags_before_management = set(guardrail_flags)
         managed_target_qty = self._manage_existing_position(
             context=context,
             baseline=baseline,
@@ -790,6 +798,17 @@ class TargetPositionEngine:
             product_type=product_type,
             guardrail_flags=guardrail_flags,
         )
+        if self._flat_signal_hold_after_management_applies(
+            context=context,
+            desired_target_qty=baseline_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            product_type=product_type,
+            guardrail_flags_before_management=guardrail_flags_before_management,
+            guardrail_flags=guardrail_flags,
+        ):
+            guardrail_flags.append("flat_signal_hold")
+            return context.current_position_qty
         return self._apply_position_management(
             current_position_qty=context.current_position_qty,
             desired_target_qty=managed_target_qty,
@@ -829,12 +848,31 @@ class TargetPositionEngine:
         product_type: str,
         baseline_fallback_qty: Decimal,
         ai_decision_authorized: bool,
+        signal_edge_bps: float,
         guardrail_flags: list[str],
     ) -> Decimal:
         if ai_decision_intent is not None and ai_decision_authorized:
             desired_target_qty = self._desired_target_qty_from_ai_decision_intent(
                 context=context,
                 ai_decision_intent=ai_decision_intent,
+            )
+            desired_target_qty = self._apply_entry_edge_gate(
+                context=context,
+                desired_target_qty=desired_target_qty,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
+                product_type=product_type,
+                signal_edge_bps=signal_edge_bps,
+                guardrail_flags=guardrail_flags,
+            )
+            desired_target_qty = self._apply_strategy_execution_guards(
+                context=context,
+                desired_target_qty=desired_target_qty,
+                baseline=baseline,
+                ai_assessment=ai_assessment,
+                signal_edge_bps=signal_edge_bps,
+                product_type=product_type,
+                guardrail_flags=guardrail_flags,
             )
             managed_target_qty = self._manage_existing_position(
                 context=context,
@@ -1174,10 +1212,11 @@ class TargetPositionEngine:
         if self._same_direction(context.current_position_qty, desired_target_qty) and abs(desired_target_qty) <= abs(context.current_position_qty):
             return desired_target_qty
         estimated_cost_bps = self._estimated_trade_cost_bps(
-            symbol=context.symbol,
+            context=context,
             product_type=product_type,
             ai_assessment=ai_assessment,
             margin_mode=self._resolved_margin_mode(context=context),
+            desired_target_qty=desired_target_qty,
         )
         required_edge_bps = (
             estimated_cost_bps
@@ -1392,6 +1431,36 @@ class TargetPositionEngine:
             current_position_qty=current_position_qty,
             baseline=baseline,
             ai_assessment=ai_assessment,
+        )
+
+    def _flat_signal_hold_after_management_applies(
+        self,
+        *,
+        context: DecisionContext,
+        desired_target_qty: Decimal,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        product_type: str,
+        guardrail_flags_before_management: set[str],
+        guardrail_flags: list[str],
+    ) -> bool:
+        if not self._should_hold_on_flat_signal(
+            current_position_qty=context.current_position_qty,
+            desired_target_qty=desired_target_qty,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            product_type=product_type,
+        ):
+            return False
+        management_flags = {
+            "alpha_decay_exit",
+            "alpha_decay_reduce",
+            "risk_contraction_exit",
+            "emergency_protective_exit",
+        }
+        return not any(
+            flag in guardrail_flags and flag not in guardrail_flags_before_management
+            for flag in management_flags
         )
 
     def _min_hold_blocks_adjustment(
@@ -2153,20 +2222,72 @@ class TargetPositionEngine:
     def _flat_cleanup_threshold(self) -> Decimal:
         return max(to_decimal(self.settings.default_order_qty) * Decimal("0.15"), EPSILON_DECIMAL_12)
 
+    def _cost_reference_target_qty(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        ai_assessment: AIMarketAssessment | None,
+        ai_decision_intent: AIDecisionIntent | None,
+        canonical_mode: CanonicalAIOperatingMode,
+        ai_decision_authorized: bool,
+        target_qty: Decimal,
+        guardrail_flags: list[str],
+    ) -> Decimal:
+        if abs(target_qty - context.current_position_qty) > EPSILON_DECIMAL_12:
+            return target_qty
+        if "expected_edge_below_cost_buffer" not in guardrail_flags:
+            return target_qty
+        if canonical_mode == "ai_decision_maker" and ai_decision_authorized and ai_decision_intent is not None:
+            ai_target_qty = self._desired_target_qty_from_ai_decision_intent(
+                context=context,
+                ai_decision_intent=ai_decision_intent,
+            )
+            if abs(ai_target_qty - context.current_position_qty) > EPSILON_DECIMAL_12:
+                return ai_target_qty
+        return self._baseline_target_qty(
+            context=context,
+            baseline=baseline,
+            ai_assessment=ai_assessment,
+            product_type=context.product_type,
+        )
+
     def _estimated_trade_cost_bps(
         self,
         *,
+        context: DecisionContext | None = None,
         symbol: str | None = None,
         product_type: str = "spot",
         ai_assessment: AIMarketAssessment | None = None,
         margin_mode: str | None = None,
+        desired_target_qty: Decimal | None = None,
     ) -> float:
+        if context is not None:
+            symbol = symbol or context.symbol
+            product_type = context.product_type
         expected_slippage_bps = max(self.settings.max_slippage_tolerance_bps, 0) * max(
             self.settings.strategy_expected_slippage_bps_fraction,
             0.0,
         )
         envelope = None if ai_assessment is None else ai_assessment.ai_execution_parameter_suggestion
         suggestion = None if envelope is None else envelope.suggestion
+        side: str | None = None
+        quantity: Decimal | None = None
+        projected_notional: Decimal | None = None
+        reference_price: Decimal | None = None
+        market_snapshot: MarketSnapshot | None = None
+        if context is not None and desired_target_qty is not None:
+            current_qty = to_decimal(context.current_position_qty)
+            target_qty = to_decimal(desired_target_qty)
+            delta_qty = target_qty - current_qty
+            if abs(delta_qty) <= EPSILON_DECIMAL_12:
+                return 0.0
+            side = "buy" if delta_qty > 0 else "sell"
+            quantity = abs(delta_qty)
+            reference_price = max(to_decimal(context.market_last_price), Decimal("0"))
+            if reference_price > EPSILON_DECIMAL_12:
+                projected_notional = quantity * reference_price
+            market_snapshot = context.market_snapshot
         estimate = self.trade_cost_service.estimate_single_leg_entry(
             model_name="directional_target_position",
             symbol=symbol,
@@ -2179,6 +2300,11 @@ class TargetPositionEngine:
             order_type="limit" if suggestion is not None else "market",
             passive_bias=None if suggestion is None else suggestion.passive_bias,
             maker_taker_bias=None if suggestion is None else suggestion.maker_taker_bias,
+            side=side,
+            quantity=quantity,
+            projected_notional=projected_notional,
+            reference_price=reference_price,
+            market_snapshot=market_snapshot,
             expected_slippage_bps=expected_slippage_bps,
             include_spread=False,
             include_funding=product_type == "derivatives",

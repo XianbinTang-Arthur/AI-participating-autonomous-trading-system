@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from aats.schemas.common import SchemaBase, new_id, utc_now
 from aats.schemas.execution import AIExecutionParameterSuggestionEnvelope
 from aats.schemas.features import RegimeIndicator, VolatilityState
+from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import InstrumentPositionState, PositionLegState
 from aats.schemas.strategy_runtime import (
     StrategyFamily,
@@ -116,6 +117,7 @@ class DecisionContext(SchemaBase):
     strategy_cooldowns: dict[str, float] = Field(default_factory=dict)
     market_last_price: Decimal = Decimal("0")
     available_trading_equity: Decimal = Decimal("0")
+    market_snapshot: MarketSnapshot | None = Field(default=None, exclude=True)
 
 class BaselineAssessment(SchemaBase):
     decision_id: str
