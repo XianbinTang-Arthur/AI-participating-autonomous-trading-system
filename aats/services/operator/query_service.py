@@ -13440,6 +13440,7 @@ class OperatorQueryService:
         exchange_fill_present: bool | None = None
         private_ws_order_present: bool | None = None
         private_ws_fill_present: bool | None = None
+        latest_reconciliation_self_blocking = False
         reason_code: str | None = None
 
         private_order_lookup = getattr(self.runtime.account_service, "latest_private_order_row", None)
@@ -13496,7 +13497,14 @@ class OperatorQueryService:
             elif latest_reconciliation is not None and (
                 latest_reconciliation.halt_required or latest_reconciliation.review_required
             ):
-                reason_code = "latest_reconciliation_not_clean"
+                latest_reconciliation_self_blocking = (
+                    self._latest_reconciliation_allows_stuck_submission_resolution(
+                        latest_reconciliation,
+                        client_order_id=order.client_order_id,
+                    )
+                )
+                if not latest_reconciliation_self_blocking:
+                    reason_code = "latest_reconciliation_not_clean"
 
         eligible = reason_code is None
         summary = (
@@ -13520,11 +13528,92 @@ class OperatorQueryService:
             "latest_reconciliation_severity": (
                 latest_reconciliation.severity if latest_reconciliation is not None else None
             ),
+            "latest_reconciliation_self_blocking": latest_reconciliation_self_blocking,
             "exchange_order_present": exchange_order_present,
             "exchange_fill_present": exchange_fill_present,
             "private_ws_order_present": private_ws_order_present,
             "private_ws_fill_present": private_ws_fill_present,
         }
+
+    @staticmethod
+    def _latest_reconciliation_allows_stuck_submission_resolution(
+        report,
+        *,
+        client_order_id: str,
+    ) -> bool:
+        client_order_id = str(client_order_id or "").strip()
+        if not client_order_id:
+            return False
+
+        order_diff = OperatorQueryService._report_field(report, "order_diff", {})
+        order_diff = order_diff if isinstance(order_diff, dict) else {}
+        exchange_order_view = order_diff.get("exchange")
+        exchange_order_view = exchange_order_view if isinstance(exchange_order_view, dict) else {}
+        missing_on_exchange = OperatorQueryService._string_set_from_report_value(
+            exchange_order_view.get("missing_on_exchange")
+        )
+        unexpected_on_exchange = OperatorQueryService._string_set_from_report_value(
+            exchange_order_view.get("unexpected_on_exchange")
+        )
+        status_mismatches = exchange_order_view.get("status_mismatches")
+        status_mismatch_keys = (
+            {str(item).strip() for item in status_mismatches if str(item).strip()}
+            if isinstance(status_mismatches, dict)
+            else OperatorQueryService._string_set_from_report_value(status_mismatches)
+        )
+
+        if missing_on_exchange != {client_order_id}:
+            return False
+        if unexpected_on_exchange or status_mismatch_keys:
+            return False
+
+        unknown_state_details = OperatorQueryService._report_field(report, "unknown_state_details", [])
+        if not isinstance(unknown_state_details, list):
+            return False
+        for detail in unknown_state_details:
+            if not isinstance(detail, dict):
+                return False
+            detail_kind = str(detail.get("kind") or "").strip()
+            detail_order_key = str(
+                detail.get("order_key")
+                or detail.get("client_order_id")
+                or detail.get("order_id")
+                or ""
+            ).strip()
+            if detail_kind != "order_state_unknown_on_exchange" or detail_order_key != client_order_id:
+                return False
+
+        fill_diff = OperatorQueryService._report_field(report, "fill_diff", {})
+        fill_diff = fill_diff if isinstance(fill_diff, dict) else {}
+        exchange_fill_view = fill_diff.get("exchange")
+        exchange_fill_view = exchange_fill_view if isinstance(exchange_fill_view, dict) else {}
+        unexpected_exchange_fills = OperatorQueryService._string_set_from_report_value(
+            exchange_fill_view.get("unexpected_on_exchange")
+        )
+        return not unexpected_exchange_fills
+
+    @staticmethod
+    def _string_set_from_report_value(value: Any) -> set[str]:
+        if value is None:
+            return set()
+        if isinstance(value, dict):
+            return {str(item).strip() for item in value if str(item).strip()}
+        if isinstance(value, (list, tuple, set)):
+            result: set[str] = set()
+            for item in value:
+                if isinstance(item, dict):
+                    for key in ("order_key", "client_order_id", "order_id", "fill_id"):
+                        text = str(item.get(key) or "").strip()
+                        if text:
+                            result.add(text)
+                            break
+                    continue
+                text = str(item or "").strip()
+                if text:
+                    result.add(text)
+            return result
+        text = str(value or "").strip()
+        return {text} if text else set()
 
     @staticmethod
     def _stuck_submission_resolution_summary(reason_code: str | None) -> str:

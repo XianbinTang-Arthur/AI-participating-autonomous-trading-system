@@ -8357,6 +8357,110 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resolution_action["reason"], "ui_resolve_stuck_submission")
         self.assertEqual(resolution_action["order_id"], "cl_restart_stuck")
 
+    async def test_stuck_submission_can_be_resolved_when_latest_reconciliation_is_self_blocking(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "config_profile": "guarded_simulated_submit_dry_run",
+                "mode": "guarded_live",
+                "market_data_backend": "demo",
+                "execution_backend": "okx",
+                "account_backend": "okx",
+                "account_read_enabled": True,
+                "okx_simulated_trading": True,
+                "live_submit_enabled": False,
+                "guarded_execution_dry_run": False,
+                "bootstrap_portfolio_from_exchange": True,
+                "storage_mode": "memory",
+                "event_persistence_mode": "strict",
+                "operator_unsafe_write_without_auth": True,
+            }
+        )
+        FakeOperatorAccountService.SNAPSHOT = ExchangeAccountSnapshot(
+            account_source="okx",
+            fetched_at=utc_now(),
+            balances=[ExchangeBalance(currency="USDT", total=1000.0, available=1000.0, frozen=0.0)],
+            positions=[],
+            open_orders=[],
+            fills=[],
+            instruments=[],
+            account_mode="cash",
+        )
+        with patch("aats.bootstrap.config.OKXAccountService", FakeOperatorAccountService):
+            runtime = await build_runtime(settings)
+        await runtime.market_gateway.run_local_publisher(
+            symbol=settings.default_symbol,
+            iterations=2,
+            interval_seconds=0.0,
+        )
+        stale_ts = utc_now() - timedelta(minutes=10)
+        runtime.execution_repo.save_order_state(
+            OrderState(
+                decision_id="decision_restart_stuck_self_blocking",
+                intent_id="intent_restart_stuck_self_blocking",
+                symbol=settings.default_symbol,
+                client_order_id="cl_restart_stuck_self_blocking",
+                venue="OKX",
+                exchange_order_id=None,
+                status="SUBMITTING",
+                submission_mode="local_order_manager",
+                submitted_ts=None,
+                last_update_ts=stale_ts,
+                requested_qty=0.1,
+                filled_qty=0.0,
+                remaining_qty=0.1,
+                product_type="spot",
+                margin_mode="cash",
+                submission_payload={},
+            )
+        )
+        runtime.reconciliation_repo.save_report(
+            ReconciliationReport(
+                reconciliation_id="recon_self_blocking_stuck_submission",
+                as_of_ts=utc_now(),
+                exchange_snapshot_ts=FakeOperatorAccountService.SNAPSHOT.fetched_at,
+                product_type="spot",
+                margin_mode="cash",
+                allowed_symbols=[settings.default_symbol],
+                exchange_comparison_enabled=True,
+                order_diff={
+                    "reconstructed": {},
+                    "exchange": {
+                        "missing_on_exchange": ["cl_restart_stuck_self_blocking"],
+                        "unexpected_on_exchange": [],
+                        "status_mismatches": {},
+                    },
+                },
+                fill_diff={"replayed": {}, "exchange": {}},
+                balance_diff={},
+                position_diff={},
+                mismatch_categories=["local_open_order_divergence"],
+                mismatch_reasons=["local_open_orders_diverge_from_exchange_open_orders"],
+                unknown_state_details=[
+                    {
+                        "kind": "order_state_unknown_on_exchange",
+                        "symbol": settings.default_symbol,
+                        "order_key": "cl_restart_stuck_self_blocking",
+                    }
+                ],
+                severity="HARD_MISMATCH",
+                review_required=True,
+                halt_required=True,
+            )
+        )
+        runtime.started_at = utc_now()
+        app = self._app(runtime)
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/orders/cl_restart_stuck_self_blocking/resolve-stuck-submission",
+                json={"reason": "ui_resolve_stuck_submission"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["order"]["status"], "FAILED")
+        self.assertTrue(payload["resolution"]["latest_reconciliation_self_blocking"])
+
     async def test_stuck_submission_resolution_updates_audit_record_when_decision_audit_exists(self) -> None:
         settings = AATSSettings.model_validate(
             {
