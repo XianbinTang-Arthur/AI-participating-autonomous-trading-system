@@ -2,7 +2,7 @@
 
 ## Business Objectives and Boundaries
 
-Expose the most recent executable directional decision in runtime truth so latest `hold_current` decisions do not hide the last decision/order/fill provenance candidate. This is read-only observability for OKX + BTC-USDT-SWAP.
+Expose the most recent executable directional decision in runtime truth so latest `hold_current` decisions do not hide the last decision/order/fill provenance candidate. Executable means a directional route that is not `advisory_only` or `hold_current`; non-zero notional on a hold decision is not sufficient. This is read-only observability for OKX + BTC-USDT-SWAP.
 
 ## Module Responsibilities and Domain Model
 

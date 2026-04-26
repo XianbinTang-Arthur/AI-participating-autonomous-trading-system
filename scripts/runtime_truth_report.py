@@ -104,11 +104,7 @@ with engine.connect() as conn:
     latest_executable_directional = conn.execute(text(
         decision_select
         + "where primary_family = 'directional' "
-        + "and ("
-        + "route_action not in ('advisory_only', 'hold_current') "
-        + "or coalesce(portfolio_requested_notional, 0) <> 0 "
-        + "or coalesce(portfolio_approved_notional, 0) <> 0"
-        + ") "
+        + "and route_action not in ('advisory_only', 'hold_current') "
         + "order by created_at desc limit 1"
     )).mappings().first()
 

@@ -111,6 +111,14 @@ def test_db_probe_command_does_not_embed_database_url() -> None:
     assert "AATS_DATABASE_URL" not in command
 
 
+def test_db_probe_executable_directional_query_excludes_hold_current_notional() -> None:
+    mod = load_module()
+
+    assert "route_action not in ('advisory_only', 'hold_current')" in mod.DB_PROBE
+    assert "coalesce(portfolio_requested_notional, 0) <> 0" not in mod.DB_PROBE
+    assert "coalesce(portfolio_approved_notional, 0) <> 0" not in mod.DB_PROBE
+
+
 def test_parse_db_probe_returns_only_json_payload() -> None:
     mod = load_module()
     payload = {
