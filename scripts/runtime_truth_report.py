@@ -1647,6 +1647,7 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     dashboard = ((report.get("runtime") or {}).get("dashboard_bundle") or {})
     git = report.get("git") or {}
     health = report.get("deployment_health") or {}
+    runtime_config = db.get("runtime_config") if isinstance(db.get("runtime_config"), dict) else {}
     latest = db.get("latest_decision") if isinstance(db.get("latest_decision"), dict) else {}
     latest_executable_directional = (
         db.get("latest_executable_directional_decision")
@@ -1660,6 +1661,7 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "source": "live_runtime",
         "authoritative": True,
         "may_be_overridden_by_artifact": False,
+        "active_live_carrier": infer_live_carrier_from_database_truth(db),
         "latest_decision_id": latest.get("decision_id"),
         "latest_decision_route_action": latest.get("route_action"),
         "latest_decision_symbol": latest.get("symbol"),
@@ -1704,6 +1706,8 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "portfolio_allocation_decisions": db.get("portfolio_allocation_decisions") if db.get("ok") else None,
         "execution_fills": db.get("execution_fills") if db.get("ok") else None,
+        "execution_command_flow_enabled": runtime_config.get("execution_command_flow_enabled"),
+        "execution_command_flow_flag_present": runtime_config.get("execution_command_flow_flag_present"),
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),
         "effective_operating_mode_status": (dashboard.get("effective_operating_mode") or {}).get("status"),
         "profile_auto_control_effective": (dashboard.get("profile_auto_control_effective") or {}).get("value"),
@@ -1717,6 +1721,31 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "shadow_benchmark": ((report.get("scope") or {}).get("shadow_benchmark")),
         "ai_timeout_active_blocker": ((report.get("runtime") or {}).get("ai_timeout_active_blocker")),
     }
+
+
+def infer_live_carrier_from_database_truth(db: dict[str, Any]) -> str | None:
+    latest = db.get("latest_decision") if isinstance(db.get("latest_decision"), dict) else {}
+    carrier = latest.get("primary_family")
+    if isinstance(carrier, str) and carrier.strip():
+        return carrier.strip()
+
+    latest_executable_directional = (
+        db.get("latest_executable_directional_decision")
+        if isinstance(db.get("latest_executable_directional_decision"), dict)
+        else {}
+    )
+    fallback = latest_executable_directional.get("primary_family")
+    if isinstance(fallback, str) and fallback.strip():
+        return fallback.strip()
+    return None
+
+
+def apply_live_runtime_scope(report: dict[str, Any], live_facts: dict[str, Any]) -> None:
+    scope = dict(as_dict(report.get("scope")))
+    live_carrier = live_facts.get("active_live_carrier")
+    if isinstance(live_carrier, str) and live_carrier.strip():
+        scope["live_carrier"] = live_carrier.strip()
+    report["scope"] = scope
 
 
 def summarize_artifact_runtime_status(
@@ -1830,7 +1859,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "scope": {
             "venue": "OKX",
             "symbol": "BTC-USDT-SWAP",
-            "live_carrier": "independent",
+            "live_carrier": "unknown_pending_database_truth",
             "shadow_benchmark": "none_verified",
         },
         "git": git_truth(repo_root, args.wsl_distro, args.wsl_project),
@@ -1849,6 +1878,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     if runtime_mode.get("value") not in (None, "baseline_only"):
         report["runtime"]["ai_timeout_active_blocker"] = "requires_provider_path_evidence"
     live_facts = project_live_runtime_facts(report)
+    apply_live_runtime_scope(report, live_facts)
     artifact_status = summarize_artifact_runtime_status(
         artifact_projection=artifact_projection,
         live_facts=live_facts,

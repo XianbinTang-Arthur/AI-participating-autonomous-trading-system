@@ -979,6 +979,10 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
             "ok": True,
             "portfolio_allocation_decisions": 11,
             "execution_fills": 2,
+            "runtime_config": {
+                "execution_command_flow_enabled": True,
+                "execution_command_flow_flag_present": True,
+            },
             "latest_decision": {
                 "decision_id": "decision_new",
                 "route_action": "advisory_only",
@@ -1028,5 +1032,49 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["latest_executable_directional_truth_chain_smallest_missing_field"] is None
     assert live_facts["latest_executable_directional_submission_gap_root_cause"] is None
     assert live_facts["portfolio_allocation_decisions"] == 11
+    assert live_facts["active_live_carrier"] == "independent"
+    assert live_facts["execution_command_flow_enabled"] is True
+    assert live_facts["execution_command_flow_flag_present"] is True
     assert authority["authoritative_source"] == "runtime.live_runtime_facts"
     assert authority["artifact_may_override_live"] is False
+
+
+def test_runtime_truth_scope_uses_live_carrier_from_database_truth() -> None:
+    mod = load_module()
+    report = {
+        "scope": {
+            "venue": "OKX",
+            "symbol": "BTC-USDT-SWAP",
+            "live_carrier": "unknown_pending_database_truth",
+            "shadow_benchmark": "none_verified",
+        },
+        "runtime": {
+            "ai_timeout_active_blocker": False,
+            "dashboard_bundle": {},
+        },
+        "database_truth": {
+            "ok": True,
+            "portfolio_allocation_decisions": 1,
+            "execution_fills": 0,
+            "runtime_config": {
+                "execution_command_flow_enabled": True,
+                "execution_command_flow_flag_present": True,
+            },
+            "latest_decision": {
+                "decision_id": "decision_directional",
+                "route_action": "advisory_only",
+                "symbol": "BTC-USDT-SWAP",
+                "primary_family": "directional",
+            },
+        },
+        "git": {},
+        "deployment_health": {},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+    mod.apply_live_runtime_scope(report, live_facts)
+
+    assert live_facts["active_live_carrier"] == "directional"
+    assert live_facts["execution_command_flow_enabled"] is True
+    assert live_facts["execution_command_flow_flag_present"] is True
+    assert report["scope"]["live_carrier"] == "directional"
