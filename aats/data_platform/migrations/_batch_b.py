@@ -13,6 +13,7 @@ Batch B 做十件事:
   - batch_b_08_oi_history.sql: P1-D Stage 5 OKX REST OI history bronze 表
   - batch_b_09_mark_ls_history.sql: P1-D Stage 5 OKX REST mark + LS history bronze 表
   - batch_b_11_silver_numeric_widen.sql: P0-a Silver vol_weighted_tfi 精度扩展
+  - batch_b_12_orderbook_payloads.sql: execution science orderbook payload sidecar
 
 每个 stage 对应一个 rollback SQL,逆序回滚。
 
@@ -47,6 +48,7 @@ BATCH_B_STAGES: tuple[str, ...] = (
     "batch_b_08_oi_history",
     "batch_b_09_mark_ls_history",
     "batch_b_11_silver_numeric_widen",
+    "batch_b_12_orderbook_payloads",
 )
 
 
@@ -77,6 +79,17 @@ def _load_sql(stage: str, *, rollback: bool = False) -> str:
     suffix = "_rollback.sql" if rollback else ".sql"
     filename = f"{stage}{suffix}"
     path = MIGRATIONS_DIR / filename
+    if rollback and not path.exists():
+        # Early Batch B rollback files used `batch_b_05_rollback.sql`
+        # instead of `batch_b_05_microstructure_rollback.sql`. Keep the
+        # runner backward-compatible so mixed old/new stage names remain
+        # reversible without renaming deployed migration files.
+        parts = stage.split("_")
+        if len(parts) >= 3:
+            legacy_filename = f"{'_'.join(parts[:3])}_rollback.sql"
+            legacy_path = MIGRATIONS_DIR / legacy_filename
+            if legacy_path.exists():
+                path = legacy_path
     if not path.exists():
         raise FileNotFoundError(f"migration SQL not found: {path}")
     return path.read_text(encoding="utf-8")

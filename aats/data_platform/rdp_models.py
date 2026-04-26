@@ -605,6 +605,139 @@ class BronzeMarketOrderbookBooks5Model(RdpBase):
     )
 
 
+class BronzeMarketOrderbookPayloadModel(RdpBase):
+    """bronze.market_orderbook_payloads — orderbook payload truth sidecar.
+
+    This is schema-only execution-science infrastructure. Runtime collector
+    writes are intentionally not connected by this model. The table stores
+    payload and collector-sequence evidence next to existing bbo/books5 snapshot
+    rows without duplicating that truth into the execution database.
+    """
+
+    __tablename__ = "market_orderbook_payloads"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "snapshot_table",
+            "symbol",
+            "ts",
+            "row_checksum",
+            name="pk_brz_orderbook_payloads",
+        ),
+        Index("idx_brz_orderbook_payloads_snapshot", "snapshot_table", "symbol", "ts"),
+        Index(
+            "idx_brz_orderbook_payloads_sequence",
+            "snapshot_table",
+            "symbol",
+            "collector_sequence",
+        ),
+        Index(
+            "idx_brz_orderbook_payloads_source_ts",
+            "snapshot_table",
+            "symbol",
+            "source_ts",
+        ),
+        CheckConstraint(
+            "storage_table = 'bronze.market_orderbook_payloads'",
+            name="chk_brz_orderbook_payload_storage_table",
+        ),
+        CheckConstraint(
+            "snapshot_table IN ("
+            "'bronze.market_orderbook_bbo',"
+            "'bronze.market_orderbook_books5'"
+            ")",
+            name="chk_brz_orderbook_payload_snapshot_table",
+        ),
+        CheckConstraint(
+            "collector_sequence > 0",
+            name="chk_brz_orderbook_payload_collector_sequence",
+        ),
+        CheckConstraint(
+            "collector_sequence_scope = 'per_ingest_run_symbol_channel'",
+            name="chk_brz_orderbook_payload_sequence_scope",
+        ),
+        CheckConstraint(
+            "length(row_checksum) = 71 AND row_checksum LIKE 'sha256:%'",
+            name="chk_brz_orderbook_payload_row_checksum",
+        ),
+        CheckConstraint(
+            "checksum_version = 'orderbook_row_v1'",
+            name="chk_brz_orderbook_payload_checksum_version",
+        ),
+        CheckConstraint(
+            "capture_status IN ("
+            "'snapshot_only_diff_payload_missing',"
+            "'diff_payload_persisted',"
+            "'diff_payload_unavailable'"
+            ")",
+            name="chk_brz_orderbook_payload_capture_status",
+        ),
+        CheckConstraint(
+            "payload_hash IS NULL OR "
+            "(length(payload_hash) = 71 AND payload_hash LIKE 'sha256:%')",
+            name="chk_brz_orderbook_payload_hash",
+        ),
+        CheckConstraint(
+            "previous_payload_hash IS NULL OR "
+            "(length(previous_payload_hash) = 71 "
+            "AND previous_payload_hash LIKE 'sha256:%')",
+            name="chk_brz_orderbook_payload_previous_hash",
+        ),
+        CheckConstraint(
+            "payload_schema_version IS NULL OR "
+            "payload_schema_version = 'orderbook_diff_payload_v1'",
+            name="chk_brz_orderbook_payload_schema_version",
+        ),
+        CheckConstraint(
+            "capture_status <> 'diff_payload_persisted' OR ("
+            "payload_hash IS NOT NULL "
+            "AND payload_schema_version = 'orderbook_diff_payload_v1' "
+            "AND payload_kind IS NOT NULL "
+            "AND raw_payload IS NOT NULL"
+            ")",
+            name="chk_brz_orderbook_payload_diff_required",
+        ),
+        {"schema": "bronze"},
+    )
+
+    storage_table = Column(
+        Text,
+        nullable=False,
+        server_default=text("'bronze.market_orderbook_payloads'"),
+    )
+    snapshot_table = Column(Text, nullable=False)
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)
+    source_ts = Column(DateTime(timezone=True), nullable=False)
+    collector_sequence = Column(BigInteger, nullable=False)
+    collector_sequence_scope = Column(
+        Text,
+        nullable=False,
+        server_default=text("'per_ingest_run_symbol_channel'"),
+    )
+    row_checksum = Column(Text, nullable=False)
+    checksum_version = Column(
+        Text,
+        nullable=False,
+        server_default=text("'orderbook_row_v1'"),
+    )
+    capture_status = Column(Text, nullable=False)
+    payload_hash = Column(Text)
+    payload_schema_version = Column(Text)
+    payload_kind = Column(Text)
+    raw_payload = Column(JSONB)
+    exchange_sequence_id = Column(Text)
+    previous_payload_hash = Column(Text)
+    channel = Column(Text)
+    capture_reason = Column(Text)
+    missing_evidence = Column(JSONB)
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    received_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
 class StagingMarketOiFundingTicksModel(RdpBase):
     """staging.market_oi_funding_ticks — open-interest / funding-rate /
     mark-price 三个 OKX WS 频道统一 tick 表。
