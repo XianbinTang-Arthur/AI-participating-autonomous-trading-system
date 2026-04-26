@@ -3734,6 +3734,154 @@ class OperatorQueryService:
             ),
         }
 
+    def _fill_feasibility_slippage_cost_calibration(
+        self,
+        stage_evidence: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        fill_count = 0
+        calibrated_fill_count = 0
+        missing_calibration_fill_count = 0
+        total_fill_notional = Decimal("0")
+        total_depth_cost = Decimal("0")
+        total_top_cost = Decimal("0")
+        top_cost_count = 0
+        weighted_slippage_sum = Decimal("0")
+        weighted_slippage_notional = Decimal("0")
+        arithmetic_slippage_sum = Decimal("0")
+        calibrated_evidence: list[dict[str, Any]] = []
+        missing_evidence: list[str] = []
+
+        for stage in stage_evidence:
+            fill_evidence = stage.get("fill_evidence") if isinstance(stage, dict) else None
+            if not isinstance(fill_evidence, list):
+                continue
+            for fill in fill_evidence:
+                if not isinstance(fill, dict):
+                    continue
+                fill_count += 1
+                fill_notional = self._to_decimal(fill.get("fill_notional"))
+                depth_slippage_bps = self._to_decimal(fill.get("depth_adverse_slippage_bps"))
+                depth_cost = self._to_decimal(fill.get("estimated_depth_adverse_cost_quote"))
+                depth_expected_price = self._to_decimal(fill.get("depth_expected_price"))
+                top_cost = self._to_decimal(fill.get("estimated_adverse_cost_quote"))
+
+                fill_missing: list[str] = []
+                fill_missing.extend(str(value) for value in fill.get("missing_evidence", []))
+                fill_missing.extend(str(value) for value in fill.get("depth_missing_evidence", []))
+                if depth_expected_price is None:
+                    fill_missing.append("depth_expected_price_missing")
+                if depth_slippage_bps is None:
+                    fill_missing.append("depth_adverse_slippage_bps_missing")
+                if depth_cost is None:
+                    fill_missing.append("estimated_depth_adverse_cost_quote_missing")
+                if fill_notional is None:
+                    fill_missing.append("fill_notional_missing")
+
+                if fill_missing:
+                    missing_calibration_fill_count += 1
+                    missing_evidence.extend(fill_missing)
+                    continue
+
+                assert fill_notional is not None
+                assert depth_slippage_bps is not None
+                assert depth_cost is not None
+                calibrated_fill_count += 1
+                total_fill_notional += fill_notional
+                total_depth_cost += depth_cost
+                arithmetic_slippage_sum += depth_slippage_bps
+                if fill_notional != Decimal("0"):
+                    weighted_slippage_sum += depth_slippage_bps * fill_notional
+                    weighted_slippage_notional += fill_notional
+
+                depth_minus_top_cost = None
+                if top_cost is not None:
+                    total_top_cost += top_cost
+                    top_cost_count += 1
+                    depth_minus_top_cost = depth_cost - top_cost
+
+                calibrated_evidence.append(
+                    {
+                        "record_kind": stage.get("record_kind"),
+                        "record_id": stage.get("record_id"),
+                        "stage": stage.get("stage"),
+                        "client_order_id": fill.get("client_order_id") or stage.get("client_order_id"),
+                        "fill_id": fill.get("fill_id"),
+                        "side": fill.get("side"),
+                        "fill_price": fill.get("fill_price"),
+                        "fill_qty": fill.get("fill_qty"),
+                        "fill_notional": fill.get("fill_notional"),
+                        "depth_expected_price": fill.get("depth_expected_price"),
+                        "depth_weighted_average_price": fill.get("depth_weighted_average_price"),
+                        "depth_levels_used": fill.get("depth_levels_used"),
+                        "depth_adverse_slippage_bps": fill.get("depth_adverse_slippage_bps"),
+                        "estimated_depth_adverse_cost_quote": fill.get(
+                            "estimated_depth_adverse_cost_quote"
+                        ),
+                        "top_of_book_adverse_slippage_bps": fill.get("adverse_slippage_bps"),
+                        "estimated_top_of_book_adverse_cost_quote": fill.get(
+                            "estimated_adverse_cost_quote"
+                        ),
+                        "depth_minus_top_estimated_cost_quote": self._decimal_truth_value(
+                            depth_minus_top_cost
+                        ),
+                        "calibration_basis": "fill_notional_x_pre_event_depth_adverse_slippage_bps",
+                    }
+                )
+
+        unique_missing = list(dict.fromkeys(missing_evidence))
+        weighted_depth_slippage_bps = (
+            weighted_slippage_sum / weighted_slippage_notional
+            if weighted_slippage_notional != Decimal("0")
+            else None
+        )
+        arithmetic_mean_depth_slippage_bps = (
+            arithmetic_slippage_sum / Decimal(calibrated_fill_count)
+            if calibrated_fill_count
+            else None
+        )
+        depth_minus_top_total_cost = total_depth_cost - total_top_cost if top_cost_count else None
+
+        if fill_count == 0:
+            status = "no_fill_evidence_for_slippage_calibration"
+            unique_missing = ["fill_evidence_absent"]
+        elif calibrated_fill_count == 0:
+            status = "missing_depth_backed_slippage_cost_calibration"
+            if not unique_missing:
+                unique_missing = ["depth_backed_fill_evidence_absent"]
+        elif calibrated_fill_count < fill_count:
+            status = "partial_depth_backed_slippage_cost_calibrated"
+        else:
+            status = "depth_backed_slippage_cost_calibrated"
+
+        return {
+            "status": status,
+            "complete": fill_count > 0 and calibrated_fill_count == fill_count,
+            "missing_evidence": unique_missing,
+            "fill_count": fill_count,
+            "calibrated_fill_count": calibrated_fill_count,
+            "missing_calibration_fill_count": missing_calibration_fill_count,
+            "total_fill_notional": self._decimal_truth_value(
+                total_fill_notional if calibrated_fill_count else None
+            ),
+            "total_estimated_depth_adverse_cost_quote": self._decimal_truth_value(
+                total_depth_cost if calibrated_fill_count else None
+            ),
+            "notional_weighted_depth_adverse_slippage_bps": self._decimal_truth_value(
+                weighted_depth_slippage_bps
+            ),
+            "arithmetic_mean_depth_adverse_slippage_bps": self._decimal_truth_value(
+                arithmetic_mean_depth_slippage_bps
+            ),
+            "total_estimated_top_of_book_adverse_cost_quote": self._decimal_truth_value(
+                total_top_cost if top_cost_count else None
+            ),
+            "depth_minus_top_estimated_cost_quote": self._decimal_truth_value(
+                depth_minus_top_total_cost
+            ),
+            "calibration_basis": "depth_weighted_average_price_vs_actual_fill_price",
+            "calibrated_evidence": calibrated_evidence[:50],
+        }
+
     def _decision_fill_feasibility_payload(
         self,
         *,
@@ -3751,6 +3899,7 @@ class OperatorQueryService:
                 "feasible_stage_count": 0,
                 "missing_evidence_stage_count": 0,
                 "no_fill_stage_count": 0,
+                "slippage_cost_calibration": self._fill_feasibility_slippage_cost_calibration([]),
                 "stage_evidence": [],
             }
         if not sequence_evidence:
@@ -3762,6 +3911,7 @@ class OperatorQueryService:
                 "feasible_stage_count": 0,
                 "missing_evidence_stage_count": 0,
                 "no_fill_stage_count": 0,
+                "slippage_cost_calibration": self._fill_feasibility_slippage_cost_calibration([]),
                 "stage_evidence": [],
             }
 
@@ -3877,6 +4027,9 @@ class OperatorQueryService:
             "missing_evidence_stage_count": missing_evidence_stage_count,
             "no_fill_stage_count": no_fill_stage_count,
             "depth_limited_stage_count": depth_limited_stage_count,
+            "slippage_cost_calibration": self._fill_feasibility_slippage_cost_calibration(
+                stage_evidence
+            ),
             "stage_evidence": stage_evidence[:50],
         }
 

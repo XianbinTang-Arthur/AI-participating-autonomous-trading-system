@@ -555,6 +555,9 @@ def test_decision_truth_chain_reports_fill_feasibility_from_resolved_book_rows()
     assert fill["top_level_size_covers_fill"] is True
     assert fill["adverse_slippage_bps"] is not None
     assert fill["estimated_adverse_cost_source"] == "fill_notional_x_pre_event_adverse_slippage_bps"
+    calibration = feasibility["slippage_cost_calibration"]
+    assert calibration["status"] == "missing_depth_backed_slippage_cost_calibration"
+    assert "depth_orderbook_payload_sidecar_missing" in calibration["missing_evidence"]
 
 
 def test_decision_truth_chain_fill_feasibility_reports_no_fill_for_resolved_book_rows() -> None:
@@ -605,6 +608,10 @@ def test_decision_truth_chain_fill_feasibility_reports_no_fill_for_resolved_book
     assert feasibility["no_fill_stage_count"] == 1
     assert feasibility["stage_evidence"][0]["status"] == "no_fill_observed_for_client_order"
     assert "fill_absent_for_orderbook_stage" in feasibility["stage_evidence"][0]["missing_evidence"]
+    assert (
+        feasibility["slippage_cost_calibration"]["status"]
+        == "no_fill_evidence_for_slippage_calibration"
+    )
 
 
 def test_decision_truth_chain_fill_feasibility_reports_depth_limited_fill() -> None:
@@ -670,6 +677,10 @@ def test_decision_truth_chain_fill_feasibility_reports_depth_limited_fill() -> N
     assert fill["status"] == "top_of_book_size_insufficient_or_unknown_depth"
     assert fill["top_level_size_covers_fill"] is False
     assert "depth_orderbook_payload_sidecar_missing" in fill["depth_missing_evidence"]
+    calibration = feasibility["slippage_cost_calibration"]
+    assert calibration["status"] == "missing_depth_backed_slippage_cost_calibration"
+    assert calibration["calibrated_fill_count"] == 0
+    assert "depth_orderbook_payload_sidecar_missing" in calibration["missing_evidence"]
 
 
 def test_decision_truth_chain_fill_feasibility_uses_books5_depth_when_sidecar_present() -> None:
@@ -765,6 +776,19 @@ def test_decision_truth_chain_fill_feasibility_uses_books5_depth_when_sidecar_pr
     assert fill["estimated_depth_adverse_cost_source"] == (
         "fill_notional_x_pre_event_depth_adverse_slippage_bps"
     )
+    calibration = feasibility["slippage_cost_calibration"]
+    assert calibration["status"] == "depth_backed_slippage_cost_calibrated"
+    assert calibration["complete"] is True
+    assert calibration["fill_count"] == 1
+    assert calibration["calibrated_fill_count"] == 1
+    assert calibration["missing_evidence"] == []
+    assert calibration["total_fill_notional"] == "23100.09"
+    assert calibration["total_estimated_depth_adverse_cost_quote"] is not None
+    assert calibration["notional_weighted_depth_adverse_slippage_bps"] is not None
+    assert calibration["depth_minus_top_estimated_cost_quote"] is not None
+    calibrated_fill = calibration["calibrated_evidence"][0]
+    assert calibrated_fill["calibration_basis"] == "fill_notional_x_pre_event_depth_adverse_slippage_bps"
+    assert calibrated_fill["depth_levels_used"] == 2
 
 
 def test_decision_truth_chain_fill_feasibility_keeps_missing_row_evidence_explicit() -> None:
