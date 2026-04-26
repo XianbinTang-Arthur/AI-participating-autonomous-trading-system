@@ -465,6 +465,40 @@ def test_slippage_cost_calibration_truth_accepts_command_intent_reference_price(
                 {"reference_source": "execution_commands.command_payload.intent.reference_price", "n": 12},
                 {"reference_source": "missing", "n": 56},
             ],
+            "by_reference_coverage_path": [
+                {
+                    "coverage": "missing",
+                    "source_system": "local_order_manager",
+                    "order_type": "market",
+                    "time_in_force": "IOC",
+                    "execution_style": "local_order_manager",
+                    "strategy_family": "directional",
+                    "order_state": "FILLED",
+                    "command_presence": "no_submit_command",
+                    "command_reference_presence": "command_no_reference",
+                    "submit_command_states": "none",
+                    "n": 56,
+                    "order_count": 54,
+                    "first_fill_ingestion_ts": "2026-04-26T13:03:29Z",
+                    "last_fill_ingestion_ts": "2026-04-26T15:21:51Z",
+                },
+                {
+                    "coverage": "covered",
+                    "source_system": "local_order_manager",
+                    "order_type": "market",
+                    "time_in_force": "IOC",
+                    "execution_style": "taker",
+                    "strategy_family": "directional",
+                    "order_state": "FILLED",
+                    "command_presence": "has_submit_command",
+                    "command_reference_presence": "command_has_reference",
+                    "submit_command_states": "ACKED",
+                    "n": 12,
+                    "order_count": 8,
+                    "first_fill_ingestion_ts": "2026-04-26T20:35:12Z",
+                    "last_fill_ingestion_ts": "2026-04-26T21:55:29Z",
+                },
+            ],
         },
     }
     execution_science = {
@@ -486,6 +520,14 @@ def test_slippage_cost_calibration_truth_accepts_command_intent_reference_price(
     assert summary["slippage_proxy"]["by_reference_source"][0]["reference_source"] == (
         "execution_commands.command_payload.intent.reference_price"
     )
+    coverage_audit = summary["slippage_proxy"]["coverage_audit"]
+    assert coverage_audit["classification"] == "missing_reference_price_coverage_is_no_submit_command_path"
+    assert coverage_audit["missing_reference_fills"] == 56
+    assert coverage_audit["missing_reference_fills_with_submit_command"] == 0
+    assert coverage_audit["missing_reference_fills_without_submit_command"] == 56
+    assert coverage_audit["covered_reference_fills_with_command_reference"] == 12
+    assert coverage_audit["by_order_path"][0]["source_system"] == "local_order_manager"
+    assert coverage_audit["by_order_path"][0]["row_count"] == 56
 
 
 def test_slippage_cost_calibration_truth_reports_missing_slippage_reference() -> None:
@@ -1282,7 +1324,16 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
             "status": "partial_fee_verified_slippage_proxy_missing",
             "smallest_missing_field": "order_or_command_reference_price_for_slippage_proxy",
             "fee": {"sample_count": 62},
-            "slippage_proxy": {"sample_count": 0},
+            "slippage_proxy": {
+                "sample_count": 0,
+                "coverage_audit": {
+                    "classification": "missing_reference_price_coverage_is_no_submit_command_path",
+                    "missing_reference_fills": 62,
+                    "missing_reference_fills_with_submit_command": 0,
+                    "missing_reference_fills_without_submit_command": 62,
+                    "covered_reference_fills_with_command_reference": 0,
+                },
+            },
         },
         "git": {
             "deployed_matches_windows": True,
@@ -1325,6 +1376,14 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     )
     assert live_facts["slippage_cost_fee_sample_count"] == 62
     assert live_facts["slippage_cost_slippage_proxy_sample_count"] == 0
+    assert (
+        live_facts["slippage_reference_coverage_classification"]
+        == "missing_reference_price_coverage_is_no_submit_command_path"
+    )
+    assert live_facts["slippage_missing_reference_fills"] == 62
+    assert live_facts["slippage_missing_reference_fills_with_submit_command"] == 0
+    assert live_facts["slippage_missing_reference_fills_without_submit_command"] == 62
+    assert live_facts["slippage_covered_reference_fills_with_command_reference"] == 0
     assert authority["authoritative_source"] == "runtime.live_runtime_facts"
     assert authority["artifact_may_override_live"] is False
 

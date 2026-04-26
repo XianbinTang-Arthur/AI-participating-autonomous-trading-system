@@ -10,7 +10,6 @@ non-sensitive identifiers are returned.
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import re
 import shlex
@@ -399,6 +398,89 @@ with engine.connect() as conn:
             ") "
             "select reference_source, count(*) as n "
             "from joined group by reference_source order by reference_source"
+        ), {"symbol": symbol}).mappings().all()
+    ]
+    slippage_cost_calibration["by_reference_coverage_path"] = [
+        dict(row)
+        for row in conn.execute(text(
+            "with command_refs as ("
+            "  select order_id, "
+            "         count(*) filter (where command_type = 'submit') as submit_commands, "
+            "         string_agg(distinct state, ',' order by state) "
+            "             filter (where command_type = 'submit') as submit_command_states, "
+            "         max(case when command_type = 'submit' "
+            "                    and command_payload #>> '{intent,limit_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "                  then (command_payload #>> '{intent,limit_price}')::numeric end) "
+            "             as command_intent_limit_price, "
+            "         max(case when command_type = 'submit' "
+            "                    and command_payload #>> '{intent,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "                  then (command_payload #>> '{intent,reference_price}')::numeric end) "
+            "             as command_intent_reference_price "
+            "  from execution_commands group by order_id"
+            "), joined as ("
+            "  select f.order_id, f.ingestion_ts, o.created_at as order_created_at, "
+            "         o.order_type, o.time_in_force, o.source_system, o.execution_style, "
+            "         o.strategy_family, o.state as order_state, o.limit_price, "
+            "         case when o.raw_payload #>> '{intent,limit_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "              then (o.raw_payload #>> '{intent,limit_price}')::numeric end "
+            "             as order_intent_limit_price, "
+            "         case when o.raw_payload #>> '{intent,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "              then (o.raw_payload #>> '{intent,reference_price}')::numeric end "
+            "             as order_intent_reference_price, "
+            "         case when o.raw_payload #>> '{order_state,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "              then (o.raw_payload #>> '{order_state,reference_price}')::numeric end "
+            "             as order_state_reference_price, "
+            "         case when o.raw_payload #>> '{order_state,submission_payload,referencePrice}' "
+            "                   ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "              then (o.raw_payload #>> '{order_state,submission_payload,referencePrice}')::numeric end "
+            "             as order_state_submission_reference_price, "
+            "         cr.submit_commands, cr.submit_command_states, "
+            "         cr.command_intent_limit_price, cr.command_intent_reference_price "
+            "  from execution_fills f "
+            "  left join execution_orders o on o.order_id = f.order_id "
+            "  left join command_refs cr on cr.order_id = f.order_id "
+            "  where f.symbol = :symbol"
+            "), classified as ("
+            "  select *, "
+            "         case "
+            "             when limit_price is not null then 'execution_orders.limit_price' "
+            "             when order_intent_limit_price is not null then 'execution_orders.raw_payload.intent.limit_price' "
+            "             when order_intent_reference_price is not null "
+            "                 then 'execution_orders.raw_payload.intent.reference_price' "
+            "             when order_state_reference_price is not null "
+            "                 then 'execution_orders.raw_payload.order_state.reference_price' "
+            "             when order_state_submission_reference_price is not null "
+            "                 then 'execution_orders.raw_payload.order_state.submission_payload.referencePrice' "
+            "             when command_intent_limit_price is not null "
+            "                 then 'execution_commands.command_payload.intent.limit_price' "
+            "             when command_intent_reference_price is not null "
+            "                 then 'execution_commands.command_payload.intent.reference_price' "
+            "             else 'missing' "
+            "         end as reference_source, "
+            "         case when coalesce(submit_commands, 0) > 0 "
+            "              then 'has_submit_command' else 'no_submit_command' end as command_presence, "
+            "         case when command_intent_reference_price is not null or command_intent_limit_price is not null "
+            "              then 'command_has_reference' else 'command_no_reference' end as command_reference_presence "
+            "  from joined"
+            ") "
+            "select case when reference_source = 'missing' then 'missing' else 'covered' end as coverage, "
+            "       coalesce(source_system, 'null') as source_system, "
+            "       coalesce(order_type, 'null') as order_type, "
+            "       coalesce(time_in_force, 'null') as time_in_force, "
+            "       coalesce(execution_style, 'null') as execution_style, "
+            "       coalesce(strategy_family, 'null') as strategy_family, "
+            "       coalesce(order_state, 'null') as order_state, "
+            "       command_presence, command_reference_presence, "
+            "       coalesce(submit_command_states, 'none') as submit_command_states, "
+            "       count(*) as n, count(distinct order_id) as order_count, "
+            "       min(order_created_at) as first_order_created_at, "
+            "       max(order_created_at) as last_order_created_at, "
+            "       min(ingestion_ts) as first_fill_ingestion_ts, "
+            "       max(ingestion_ts) as last_fill_ingestion_ts "
+            "from classified "
+            "group by coverage, source_system, order_type, time_in_force, execution_style, strategy_family, "
+            "         order_state, command_presence, command_reference_presence, submit_command_states "
+            "order by coverage desc, n desc, source_system, order_type, time_in_force"
         ), {"symbol": symbol}).mappings().all()
     ]
     slippage_cost_calibration["by_liquidity_role"] = [
@@ -1552,7 +1634,13 @@ def sanitize_db_probe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return sanitized
 
 
-def run_command(args: list[str], *, cwd: Path | None = None, timeout: int = 30) -> dict[str, Any]:
+def run_command(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int = 30,
+    stdin: str | None = None,
+) -> dict[str, Any]:
     try:
         proc = subprocess.run(
             args,
@@ -1563,6 +1651,7 @@ def run_command(args: list[str], *, cwd: Path | None = None, timeout: int = 30) 
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            input=stdin,
         )
     except FileNotFoundError as exc:
         return {
@@ -1763,7 +1852,6 @@ def summarize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def db_probe_command(distro: str, gateway_container: str) -> list[str]:
-    encoded = base64.b64encode(DB_PROBE.encode("utf-8")).decode("ascii")
     return [
         "wsl",
         "-d",
@@ -1771,10 +1859,10 @@ def db_probe_command(distro: str, gateway_container: str) -> list[str]:
         "--",
         "docker",
         "exec",
+        "-i",
         gateway_container,
         "python",
-        "-c",
-        f"import base64; exec(base64.b64decode('{encoded}'))",
+        "-",
     ]
 
 
@@ -1793,7 +1881,7 @@ def parse_db_probe(stdout: str, stderr: str = "") -> dict[str, Any]:
 
 
 def database_truth_probe(distro: str, gateway_container: str) -> dict[str, Any]:
-    completed = run_command(db_probe_command(distro, gateway_container), timeout=45)
+    completed = run_command(db_probe_command(distro, gateway_container), timeout=45, stdin=DB_PROBE)
     if not completed["ok"]:
         return {
             "ok": False,
@@ -1805,7 +1893,6 @@ def database_truth_probe(distro: str, gateway_container: str) -> dict[str, Any]:
 
 
 def rdp_microstructure_probe_command(distro: str, gateway_container: str) -> list[str]:
-    encoded = base64.b64encode(RDP_MICROSTRUCTURE_PROBE.encode("utf-8")).decode("ascii")
     return [
         "wsl",
         "-d",
@@ -1813,10 +1900,10 @@ def rdp_microstructure_probe_command(distro: str, gateway_container: str) -> lis
         "--",
         "docker",
         "exec",
+        "-i",
         gateway_container,
         "python",
-        "-c",
-        f"import base64; exec(base64.b64decode('{encoded}'))",
+        "-",
     ]
 
 
@@ -1839,7 +1926,11 @@ def parse_rdp_microstructure_probe(stdout: str, stderr: str = "") -> dict[str, A
 
 
 def rdp_microstructure_truth_probe(distro: str, gateway_container: str) -> dict[str, Any]:
-    completed = run_command(rdp_microstructure_probe_command(distro, gateway_container), timeout=45)
+    completed = run_command(
+        rdp_microstructure_probe_command(distro, gateway_container),
+        timeout=45,
+        stdin=RDP_MICROSTRUCTURE_PROBE,
+    )
     if not completed["ok"]:
         return {
             "ok": False,
@@ -2153,6 +2244,57 @@ def summarize_slippage_cost_calibration_truth(
     else:
         status = "missing_slippage_cost_calibration_evidence"
 
+    reference_coverage_rows = []
+    for row in [as_dict(item) for item in as_list(raw.get("by_reference_coverage_path"))]:
+        reference_coverage_rows.append(
+            {
+                "coverage": row.get("coverage"),
+                "source_system": row.get("source_system"),
+                "order_type": row.get("order_type"),
+                "time_in_force": row.get("time_in_force"),
+                "execution_style": row.get("execution_style"),
+                "strategy_family": row.get("strategy_family"),
+                "order_state": row.get("order_state"),
+                "command_presence": row.get("command_presence"),
+                "command_reference_presence": row.get("command_reference_presence"),
+                "submit_command_states": row.get("submit_command_states"),
+                "row_count": int_or_zero(row.get("n")),
+                "order_count": int_or_zero(row.get("order_count")),
+                "first_order_created_at": row.get("first_order_created_at"),
+                "last_order_created_at": row.get("last_order_created_at"),
+                "first_fill_ingestion_ts": row.get("first_fill_ingestion_ts"),
+                "last_fill_ingestion_ts": row.get("last_fill_ingestion_ts"),
+            }
+        )
+    missing_reference_fills = sum(
+        int_or_zero(row.get("row_count")) for row in reference_coverage_rows if row.get("coverage") == "missing"
+    )
+    missing_reference_fills_with_submit_command = sum(
+        int_or_zero(row.get("row_count"))
+        for row in reference_coverage_rows
+        if row.get("coverage") == "missing" and row.get("command_presence") == "has_submit_command"
+    )
+    missing_reference_fills_without_submit_command = sum(
+        int_or_zero(row.get("row_count"))
+        for row in reference_coverage_rows
+        if row.get("coverage") == "missing" and row.get("command_presence") == "no_submit_command"
+    )
+    covered_reference_fills_with_command_reference = sum(
+        int_or_zero(row.get("row_count"))
+        for row in reference_coverage_rows
+        if row.get("coverage") == "covered" and row.get("command_reference_presence") == "command_has_reference"
+    )
+    if missing_reference_fills <= 0 and slippage_samples > 0:
+        reference_coverage_classification = "all_fills_have_reference_price"
+    elif missing_reference_fills_with_submit_command > 0:
+        reference_coverage_classification = "current_command_path_reference_gap_possible"
+    elif missing_reference_fills_without_submit_command > 0 and covered_reference_fills_with_command_reference > 0:
+        reference_coverage_classification = "missing_reference_price_coverage_is_no_submit_command_path"
+    elif missing_reference_fills_without_submit_command > 0:
+        reference_coverage_classification = "missing_reference_price_coverage_no_submit_command_no_current_coverage"
+    else:
+        reference_coverage_classification = "reference_price_coverage_unknown"
+
     return {
         "source": "live_db_and_rdp_microstructure",
         "ok": True,
@@ -2209,6 +2351,14 @@ def summarize_slippage_cost_calibration_truth(
                 }
                 for item in [as_dict(row) for row in as_list(raw.get("by_reference_source"))]
             ],
+            "coverage_audit": {
+                "classification": reference_coverage_classification,
+                "missing_reference_fills": missing_reference_fills,
+                "missing_reference_fills_with_submit_command": missing_reference_fills_with_submit_command,
+                "missing_reference_fills_without_submit_command": missing_reference_fills_without_submit_command,
+                "covered_reference_fills_with_command_reference": covered_reference_fills_with_command_reference,
+                "by_order_path": reference_coverage_rows,
+            },
         },
         "market_context": {
             "silver_orderbook_status": silver_orderbook.get("status"),
@@ -2372,6 +2522,8 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     db = report.get("database_truth") or {}
     execution_science = as_dict(report.get("execution_science_truth"))
     slippage_cost = as_dict(report.get("slippage_cost_calibration_truth"))
+    slippage_proxy = as_dict(slippage_cost.get("slippage_proxy"))
+    slippage_coverage = as_dict(slippage_proxy.get("coverage_audit"))
     dashboard = ((report.get("runtime") or {}).get("dashboard_bundle") or {})
     git = report.get("git") or {}
     health = report.get("deployment_health") or {}
@@ -2454,7 +2606,18 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
             as_dict(slippage_cost.get("fee")).get("sample_count")
         ),
         "slippage_cost_slippage_proxy_sample_count": (
-            as_dict(slippage_cost.get("slippage_proxy")).get("sample_count")
+            slippage_proxy.get("sample_count")
+        ),
+        "slippage_reference_coverage_classification": slippage_coverage.get("classification"),
+        "slippage_missing_reference_fills": slippage_coverage.get("missing_reference_fills"),
+        "slippage_missing_reference_fills_with_submit_command": slippage_coverage.get(
+            "missing_reference_fills_with_submit_command"
+        ),
+        "slippage_missing_reference_fills_without_submit_command": slippage_coverage.get(
+            "missing_reference_fills_without_submit_command"
+        ),
+        "slippage_covered_reference_fills_with_command_reference": slippage_coverage.get(
+            "covered_reference_fills_with_command_reference"
         ),
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),
         "effective_operating_mode_status": (dashboard.get("effective_operating_mode") or {}).get("status"),
