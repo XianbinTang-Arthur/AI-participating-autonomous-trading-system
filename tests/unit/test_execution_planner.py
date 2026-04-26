@@ -10,6 +10,7 @@ from aats.schemas.execution import (
     ExecutionParameterSuggestion,
     ExecutionPlan,
     order_intent_from_leg_order_intent,
+    position_intent_matches_leg_intent,
 )
 from aats.services.execution_engine.planner import ExecutionPlanner
 
@@ -129,7 +130,7 @@ class TestExecutionPlanner(unittest.TestCase):
         self.assertIsNotNone(plan)
         assert plan is not None
         self.assertEqual(plan.position_intent, "scale_in_long")
-        self.assertEqual(plan.execution_action, "enter")
+        self.assertEqual(plan.execution_action, "scale_in")
 
         leg_intent = planner.build_leg_intent(plan=plan)
 
@@ -141,7 +142,7 @@ class TestExecutionPlanner(unittest.TestCase):
         order_intent = order_intent_from_leg_order_intent(leg_intent)
 
         self.assertEqual(order_intent.position_intent, "scale_in_long")
-        self.assertEqual(order_intent.execution_action, "enter")
+        self.assertEqual(order_intent.execution_action, "scale_in")
         self.assertEqual(order_intent.side, "buy")
 
     def test_build_leg_plan_and_intent_preserve_execution_chain_id(self) -> None:
@@ -653,6 +654,83 @@ class TestExecutionPlanner(unittest.TestCase):
         self.assertTrue(order_intent.close_only)
         # position_intent 应被升级为 close_long（不能是 reduce_long）
         self.assertEqual(order_intent.position_intent, "close_long")
+
+    def test_leg_order_intent_open_action_preserves_scale_in_long_semantics(self) -> None:
+        """scale_in_long 是 open long leg 的生命周期细分，不能被降级成 enter。"""
+        planner = ExecutionPlanner(settings=AATSSettings.model_validate({}))
+
+        plan = planner.build_leg_plan(
+            decision_id="decision_scale_in_open_semantics",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            pos_side="long",
+            action="open",
+            quantity=Decimal("0.001"),
+            urgency="high",
+            max_slippage_tolerance_bps=30,
+            product_type="derivatives",
+            target_leverage=5.0,
+            margin_mode="cross",
+            td_mode="cross",
+            position_mode="long_short_mode",
+            position_intent="scale_in_long",
+        )
+
+        self.assertIsNotNone(plan)
+        assert plan is not None
+        self.assertEqual(plan.action, "open")
+        self.assertEqual(plan.position_intent, "scale_in_long")
+        self.assertEqual(plan.execution_action, "scale_in")
+
+        leg_intent = planner.build_leg_intent(plan=plan)
+        self.assertIsNotNone(leg_intent)
+        assert leg_intent is not None
+
+        order_intent = order_intent_from_leg_order_intent(leg_intent)
+
+        self.assertEqual(order_intent.leg_action, "open")
+        self.assertEqual(order_intent.position_intent, "scale_in_long")
+        self.assertEqual(order_intent.execution_action, "scale_in")
+        self.assertFalse(order_intent.reduce_only)
+        self.assertFalse(order_intent.close_only)
+
+    def test_leg_position_intent_compatibility_accepts_scale_in_and_reverse_lifecycle(self) -> None:
+        self.assertTrue(
+            position_intent_matches_leg_intent(
+                side="buy",
+                pos_side="long",
+                action="open",
+                position_mode="long_short_mode",
+                position_intent="scale_in_long",
+            )
+        )
+        self.assertTrue(
+            position_intent_matches_leg_intent(
+                side="sell",
+                pos_side="short",
+                action="open",
+                position_mode="long_short_mode",
+                position_intent="reverse_to_short",
+            )
+        )
+        self.assertTrue(
+            position_intent_matches_leg_intent(
+                side="sell",
+                pos_side="long",
+                action="close",
+                position_mode="long_short_mode",
+                position_intent="reverse_to_short",
+            )
+        )
+        self.assertFalse(
+            position_intent_matches_leg_intent(
+                side="buy",
+                pos_side="long",
+                action="open",
+                position_mode="long_short_mode",
+                position_intent="scale_in_short",
+            )
+        )
 
     def test_leg_order_intent_reduce_action_preserves_reduce_long(self) -> None:
         """当 leg_action=reduce 时，close_only=False，position_intent 保持 reduce_long。"""

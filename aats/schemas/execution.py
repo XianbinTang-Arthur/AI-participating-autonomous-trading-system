@@ -275,6 +275,33 @@ def position_intent_from_leg_intent(
     return mapping[normalized_action]  # type: ignore[return-value]
 
 
+def position_intent_matches_leg_intent(
+    *,
+    side: Literal["buy", "sell"],
+    pos_side: PositionSide | None,
+    action: LegOrderAction,
+    position_mode: PositionMode | None,
+    position_intent: str | None,
+) -> bool:
+    expected = position_intent_from_leg_intent(
+        side=side,
+        pos_side=pos_side,
+        action=action,
+        position_mode=position_mode,
+    )
+    normalized = str(position_intent or "").strip().lower()
+    compatible: set[str] = {expected}
+    if expected == "open_long":
+        compatible.update({"scale_in_long", "reverse_to_long"})
+    elif expected == "open_short":
+        compatible.update({"scale_in_short", "reverse_to_short"})
+    elif expected in {"reduce_long", "close_long"}:
+        compatible.add("reverse_to_short")
+    elif expected in {"reduce_short", "close_short"}:
+        compatible.add("reverse_to_long")
+    return normalized in compatible
+
+
 def execution_attempt_id_from_components(
     *,
     execution_attempt_id: str | None = None,
@@ -934,7 +961,10 @@ def order_intent_from_leg_order_intent(leg_intent: LegOrderIntent) -> OrderInten
         target_leverage=leg_intent.target_leverage,
         margin_mode=leg_intent.margin_mode,
         exposure_side=leg_intent.exposure_side,
-        execution_action=execution_action_from_leg_action(leg_intent.action),
+        execution_action=(
+            execution_action_from_position_intent(position_intent)
+            or execution_action_from_leg_action(leg_intent.action)
+        ),
         leg_action=leg_intent.action,
         position_intent=position_intent,
         ai_execution_parameter_suggestion=leg_intent.ai_execution_parameter_suggestion,

@@ -25,7 +25,7 @@ from aats.schemas.execution import (
     execution_attempt_id_from_components,
     order_intent_from_leg_order_intent,
     pos_side_from_position_intent,
-    position_intent_from_leg_intent,
+    position_intent_matches_leg_intent,
     side_from_position_intent,
 )
 from aats.schemas.exchange import ExchangeAccountSnapshot, ExchangeFill, ExchangePosition, InstrumentMetadata
@@ -873,15 +873,16 @@ class OKXExecutionAdapter(ExchangeAdapter):
             if pos_side not in {"long", "short"}:
                 return "okx_pos_side_missing_for_long_short_mode"
             try:
-                expected_position_intent = position_intent_from_leg_intent(
+                position_intent_matches = position_intent_matches_leg_intent(
                     side=intent.side,
                     pos_side=pos_side,  # type: ignore[arg-type]
                     action=intent.leg_action,
                     position_mode="long_short_mode",
+                    position_intent=intent.position_intent,
                 )
             except ValueError as exc:
                 return str(exc)
-            if intent.position_intent != expected_position_intent:
+            if not position_intent_matches:
                 return "okx_leg_action_mismatch_with_position_intent"
         elif intent.leg_action is not None:
             return "okx_explicit_leg_order_requires_long_short_mode"

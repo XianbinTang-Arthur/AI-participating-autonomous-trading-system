@@ -25,6 +25,7 @@ from aats.schemas.execution import (
     default_close_only_reason,
     default_reduce_only_reason,
     execution_action_from_leg_action,
+    execution_action_from_position_intent,
     order_intent_from_leg_order_intent,
     pos_side_from_position_intent,
     position_intent_from_leg_intent,
@@ -577,7 +578,10 @@ class ExecutionPlanner:
             target_leverage=target_leverage,
             margin_mode=margin_mode,  # type: ignore[arg-type]
             exposure_side=self._leg_exposure_side(pos_side=pos_side, action=action),  # type: ignore[arg-type]
-            execution_action=execution_action_from_leg_action(action),
+            execution_action=(
+                execution_action_from_position_intent(resolved_position_intent)
+                or execution_action_from_leg_action(action)
+            ),
             position_intent=resolved_position_intent,
             ai_execution_parameter_suggestion=translated_suggestion,
             market_snapshot_ref=market_snapshot_ref,
