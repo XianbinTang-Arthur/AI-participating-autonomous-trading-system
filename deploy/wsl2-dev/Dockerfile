@@ -53,7 +53,8 @@ COPY apps/ ./apps/
 # - otel：Stage 8 OpenTelemetry + Jaeger，aats/bootstrap/telemetry.py 在装了之后
 #         自动走 OTLP gRPC exporter 到 docker-compose 里的 jaeger:4317
 RUN python -m venv /opt/aats-venv \
-    && /opt/aats-venv/bin/pip install --upgrade pip \
+    && /opt/aats-venv/bin/pip install --upgrade "pip<26" \
+    && /opt/aats-venv/bin/pip install "grpcio>=1.63.2,<2" \
     && /opt/aats-venv/bin/pip install -e ".[nats,redis,otel]"
 
 
