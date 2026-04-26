@@ -10,9 +10,13 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
+from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.data_platform.collectors.microstructure_ws_collector import (
+    BboRow,
+    MicrostructureCollector,
     MicrostructureWSClient,
     _CONNECTION,
     _SUBSCRIBE_CHANNELS,
@@ -138,6 +142,40 @@ class TestMicrostructureWSClientInheritance(unittest.TestCase):
         status = client.connection_status(_CONNECTION)
         # register_connection 已预填,所以可以无 run_forever 访问
         self.assertIn("connected", status)
+
+
+class TestMicrostructurePayloadSequence(unittest.TestCase):
+    def test_assigns_monotonic_sequence_per_symbol_channel(self) -> None:
+        collector = MicrostructureCollector(settings=_ws_settings())
+        ts = datetime(2026, 4, 26, 4, 0, tzinfo=timezone.utc)
+        rows = [
+            BboRow(
+                symbol="BTC-USDT-SWAP",
+                ts=ts,
+                source_ts=ts,
+                bid_px=Decimal("95000"),
+                bid_sz=Decimal("1"),
+                ask_px=Decimal("95010"),
+                ask_sz=Decimal("2"),
+            ),
+            BboRow(
+                symbol="BTC-USDT-SWAP",
+                ts=ts,
+                source_ts=ts,
+                bid_px=Decimal("95001"),
+                bid_sz=Decimal("1"),
+                ask_px=Decimal("95011"),
+                ask_sz=Decimal("2"),
+            ),
+        ]
+
+        sequenced = collector._assign_payload_sequences("bbo-tbt", rows)
+
+        self.assertEqual([row.collector_sequence for row in sequenced], [1, 2])
+        self.assertEqual(
+            collector.status()["payload_sequences"],
+            {"bbo-tbt:BTC-USDT-SWAP": 2},
+        )
 
 
 if __name__ == "__main__":

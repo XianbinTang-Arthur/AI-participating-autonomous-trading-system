@@ -9,6 +9,8 @@ from aats.data_platform.orderbook_diff_payload_contract import (
     ORDERBOOK_DIFF_PAYLOAD_SCHEMA_VERSION,
     ORDERBOOK_DIFF_PAYLOAD_TABLE,
     ORDERBOOK_ROW_CHECKSUM_VERSION,
+    compute_orderbook_payload_hash,
+    compute_orderbook_row_checksum,
     orderbook_diff_payload_contract_spec,
     required_write_fields_for_status,
     validate_orderbook_diff_payload_record,
@@ -140,3 +142,47 @@ def test_required_write_fields_are_status_specific():
     assert "raw_payload" not in snapshot_fields
     assert "payload_hash" in diff_fields
     assert "raw_payload" in diff_fields
+
+
+def test_row_checksum_matches_existing_execution_science_resolver_contract():
+    from aats.services.execution_engine.orderbook_snapshot_refs import (
+        _orderbook_row_checksum,
+    )
+
+    row = {
+        "symbol": "BTC-USDT-SWAP",
+        "ts": _TS,
+        "source_ts": _TS,
+        "bid_px_1": "64000.0",
+        "bid_sz_1": "1.00",
+        "bid_px_2": None,
+        "bid_sz_2": None,
+        "bid_px_3": None,
+        "bid_sz_3": None,
+        "bid_px_4": None,
+        "bid_sz_4": None,
+        "bid_px_5": None,
+        "bid_sz_5": None,
+        "ask_px_1": "64001.0",
+        "ask_sz_1": "2.00",
+        "ask_px_2": None,
+        "ask_sz_2": None,
+        "ask_px_3": None,
+        "ask_sz_3": None,
+        "ask_px_4": None,
+        "ask_sz_4": None,
+        "ask_px_5": None,
+        "ask_sz_5": None,
+    }
+
+    assert compute_orderbook_row_checksum(
+        "bronze.market_orderbook_books5",
+        row,
+    ) == _orderbook_row_checksum("bronze.market_orderbook_books5", row)
+
+
+def test_payload_hash_is_stable_for_public_json_ordering():
+    left = {"data": [{"asks": [["2", "1"]], "bids": [["1", "1"]]}], "arg": {"channel": "books5"}}
+    right = {"arg": {"channel": "books5"}, "data": [{"bids": [["1", "1"]], "asks": [["2", "1"]]}]}
+
+    assert compute_orderbook_payload_hash(left) == compute_orderbook_payload_hash(right)

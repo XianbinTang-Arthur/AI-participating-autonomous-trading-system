@@ -48,7 +48,7 @@ import contextlib
 import json
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -67,6 +67,17 @@ from aats.data_platform.jobs.run_registry import (
 )
 from aats.data_platform.models import utc_now
 from aats.data_platform.normalize.time_normalizer import ms_to_utc
+from aats.data_platform.orderbook_diff_payload_contract import (
+    CAPTURE_STATUS_DIFF_PERSISTED,
+    CAPTURE_STATUS_SNAPSHOT_ONLY,
+    COLLECTOR_SEQUENCE_SCOPE,
+    ORDERBOOK_DIFF_PAYLOAD_SCHEMA_VERSION,
+    ORDERBOOK_DIFF_PAYLOAD_TABLE,
+    ORDERBOOK_ROW_CHECKSUM_VERSION,
+    compute_orderbook_payload_hash,
+    compute_orderbook_row_checksum,
+    validate_orderbook_diff_payload_record,
+)
 from aats.services.market_gateway.okx_websocket import OKXWebSocketConsumerBase
 
 log = logging.getLogger(__name__)
@@ -153,6 +164,9 @@ class BboRow:
     bid_sz: Decimal
     ask_px: Decimal
     ask_sz: Decimal
+    raw_payload: dict[str, Any] | None = None
+    exchange_sequence_id: str | None = None
+    collector_sequence: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +196,9 @@ class Books5Row:
     ask_sz_4: Decimal | None
     ask_px_5: Decimal | None
     ask_sz_5: Decimal | None
+    raw_payload: dict[str, Any] | None = None
+    exchange_sequence_id: str | None = None
+    collector_sequence: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,6 +298,15 @@ def _arg_channel(message: dict[str, Any]) -> str:
     if not isinstance(arg, dict):
         return ""
     return str(arg.get("channel", "") or "")
+
+
+def _exchange_sequence_id(entry: dict[str, Any]) -> str | None:
+    """Return OKX sequence id when the public payload carries one."""
+
+    value = entry.get("seqId")
+    if value in (None, ""):
+        return None
+    return str(value)
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +425,8 @@ def parse_bbo_message(message: dict[str, Any]) -> list[BboRow]:
             bid_sz=bid_sz,
             ask_px=ask_px,
             ask_sz=ask_sz,
+            raw_payload=dict(entry),
+            exchange_sequence_id=_exchange_sequence_id(entry),
         ))
     return rows
 
@@ -477,6 +505,8 @@ def parse_books5_message(message: dict[str, Any]) -> list[Books5Row]:
             ask_px_3=ask3_px, ask_sz_3=ask3_sz,
             ask_px_4=ask4_px, ask_sz_4=ask4_sz,
             ask_px_5=ask5_px, ask_sz_5=ask5_sz,
+            raw_payload=dict(entry),
+            exchange_sequence_id=_exchange_sequence_id(entry),
         ))
     return rows
 
@@ -596,6 +626,7 @@ def write_bbo_batch(
     *,
     ingest_run_id: str,
 ) -> int:
+    rows_list = list(rows)
     # mid / spread / imbalance are GENERATED STORED — never written client-side.
     batch = [
         {
@@ -608,7 +639,7 @@ def write_bbo_batch(
             "ask_sz": r.ask_sz,
             "ingest_run_id": ingest_run_id,
         }
-        for r in rows
+        for r in rows_list
     ]
     if not batch:
         return 0
@@ -624,6 +655,10 @@ def write_bbo_batch(
         batch,
     )
     rowcount = getattr(result, "rowcount", None)
+    write_orderbook_payload_batch(
+        session,
+        _build_bbo_payload_records(rows_list, ingest_run_id=ingest_run_id),
+    )
     return int(rowcount) if rowcount is not None and rowcount >= 0 else len(batch)
 
 
@@ -633,6 +668,7 @@ def write_books5_batch(
     *,
     ingest_run_id: str,
 ) -> int:
+    rows_list = list(rows)
     batch = [
         {
             "symbol": r.symbol,
@@ -650,7 +686,7 @@ def write_books5_batch(
             "ask_px_5": r.ask_px_5, "ask_sz_5": r.ask_sz_5,
             "ingest_run_id": ingest_run_id,
         }
-        for r in rows
+        for r in rows_list
     ]
     if not batch:
         return 0
@@ -675,7 +711,197 @@ def write_books5_batch(
         batch,
     )
     rowcount = getattr(result, "rowcount", None)
+    write_orderbook_payload_batch(
+        session,
+        _build_books5_payload_records(rows_list, ingest_run_id=ingest_run_id),
+    )
     return int(rowcount) if rowcount is not None and rowcount >= 0 else len(batch)
+
+
+def write_orderbook_payload_batch(
+    session: Session,
+    records: Iterable[dict[str, Any]],
+) -> int:
+    """Persist orderbook sidecar payload rows with DB-level idempotency."""
+
+    batch: list[dict[str, Any]] = []
+    for record in records:
+        validation = validate_orderbook_diff_payload_record(record)
+        if not validation.ok:
+            raise ValueError(
+                "invalid orderbook payload sidecar record: "
+                f"missing={validation.missing_fields} errors={validation.errors}"
+            )
+        batch.append({
+            **record,
+            "raw_payload": _json_dumps_or_none(record.get("raw_payload")),
+            "missing_evidence": _json_dumps_or_none(record.get("missing_evidence")),
+        })
+    if not batch:
+        return 0
+    result = session.execute(
+        text("""
+            INSERT INTO bronze.market_orderbook_payloads
+                (storage_table, snapshot_table, symbol, ts, source_ts,
+                 collector_sequence, collector_sequence_scope, row_checksum,
+                 checksum_version, capture_status, payload_hash,
+                 payload_schema_version, payload_kind, raw_payload,
+                 exchange_sequence_id, previous_payload_hash, channel,
+                 capture_reason, missing_evidence, ingest_run_id, received_at)
+            VALUES
+                (:storage_table, :snapshot_table, :symbol, :ts, :source_ts,
+                 :collector_sequence, :collector_sequence_scope, :row_checksum,
+                 :checksum_version, :capture_status, :payload_hash,
+                 :payload_schema_version, :payload_kind, CAST(:raw_payload AS JSONB),
+                 :exchange_sequence_id, :previous_payload_hash, :channel,
+                 :capture_reason, CAST(:missing_evidence AS JSONB),
+                 CAST(:ingest_run_id AS UUID), :received_at)
+            ON CONFLICT ON CONSTRAINT pk_brz_orderbook_payloads DO NOTHING
+        """),
+        batch,
+    )
+    rowcount = getattr(result, "rowcount", None)
+    return int(rowcount) if rowcount is not None and rowcount >= 0 else len(batch)
+
+
+def _build_bbo_payload_records(
+    rows: Iterable[BboRow],
+    *,
+    ingest_run_id: str,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        if row.collector_sequence is None:
+            continue
+        snapshot_row = {
+            "symbol": row.symbol,
+            "ts": row.ts,
+            "source_ts": row.source_ts,
+            "bid_px": row.bid_px,
+            "bid_sz": row.bid_sz,
+            "ask_px": row.ask_px,
+            "ask_sz": row.ask_sz,
+        }
+        records.append(_build_orderbook_payload_record(
+            snapshot_table="bronze.market_orderbook_bbo",
+            row_checksum=compute_orderbook_row_checksum(
+                "bronze.market_orderbook_bbo",
+                snapshot_row,
+            ),
+            symbol=row.symbol,
+            ts=row.ts,
+            source_ts=row.source_ts,
+            channel=_CHANNEL_BBO,
+            payload_kind="okx_bbo_tbt_snapshot",
+            raw_payload=row.raw_payload,
+            exchange_sequence_id=row.exchange_sequence_id,
+            collector_sequence=row.collector_sequence,
+            ingest_run_id=ingest_run_id,
+        ))
+    return records
+
+
+def _build_books5_payload_records(
+    rows: Iterable[Books5Row],
+    *,
+    ingest_run_id: str,
+) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for row in rows:
+        if row.collector_sequence is None:
+            continue
+        snapshot_row = {
+            "symbol": row.symbol,
+            "ts": row.ts,
+            "source_ts": row.source_ts,
+            "bid_px_1": row.bid_px_1,
+            "bid_sz_1": row.bid_sz_1,
+            "bid_px_2": row.bid_px_2,
+            "bid_sz_2": row.bid_sz_2,
+            "bid_px_3": row.bid_px_3,
+            "bid_sz_3": row.bid_sz_3,
+            "bid_px_4": row.bid_px_4,
+            "bid_sz_4": row.bid_sz_4,
+            "bid_px_5": row.bid_px_5,
+            "bid_sz_5": row.bid_sz_5,
+            "ask_px_1": row.ask_px_1,
+            "ask_sz_1": row.ask_sz_1,
+            "ask_px_2": row.ask_px_2,
+            "ask_sz_2": row.ask_sz_2,
+            "ask_px_3": row.ask_px_3,
+            "ask_sz_3": row.ask_sz_3,
+            "ask_px_4": row.ask_px_4,
+            "ask_sz_4": row.ask_sz_4,
+            "ask_px_5": row.ask_px_5,
+            "ask_sz_5": row.ask_sz_5,
+        }
+        records.append(_build_orderbook_payload_record(
+            snapshot_table="bronze.market_orderbook_books5",
+            row_checksum=compute_orderbook_row_checksum(
+                "bronze.market_orderbook_books5",
+                snapshot_row,
+            ),
+            symbol=row.symbol,
+            ts=row.ts,
+            source_ts=row.source_ts,
+            channel=_CHANNEL_BOOKS5,
+            payload_kind="okx_books5_snapshot",
+            raw_payload=row.raw_payload,
+            exchange_sequence_id=row.exchange_sequence_id,
+            collector_sequence=row.collector_sequence,
+            ingest_run_id=ingest_run_id,
+        ))
+    return records
+
+
+def _build_orderbook_payload_record(
+    *,
+    snapshot_table: str,
+    row_checksum: str,
+    symbol: str,
+    ts: datetime,
+    source_ts: datetime,
+    channel: str,
+    payload_kind: str,
+    raw_payload: dict[str, Any] | None,
+    exchange_sequence_id: str | None,
+    collector_sequence: int,
+    ingest_run_id: str,
+) -> dict[str, Any]:
+    has_payload = raw_payload is not None
+    return {
+        "storage_table": ORDERBOOK_DIFF_PAYLOAD_TABLE,
+        "snapshot_table": snapshot_table,
+        "symbol": symbol,
+        "ts": ts,
+        "source_ts": source_ts,
+        "collector_sequence": collector_sequence,
+        "collector_sequence_scope": COLLECTOR_SEQUENCE_SCOPE,
+        "row_checksum": row_checksum,
+        "checksum_version": ORDERBOOK_ROW_CHECKSUM_VERSION,
+        "capture_status": (
+            CAPTURE_STATUS_DIFF_PERSISTED
+            if has_payload
+            else CAPTURE_STATUS_SNAPSHOT_ONLY
+        ),
+        "payload_hash": compute_orderbook_payload_hash(raw_payload) if has_payload else None,
+        "payload_schema_version": ORDERBOOK_DIFF_PAYLOAD_SCHEMA_VERSION if has_payload else None,
+        "payload_kind": payload_kind if has_payload else None,
+        "raw_payload": raw_payload,
+        "exchange_sequence_id": exchange_sequence_id,
+        "previous_payload_hash": None,
+        "channel": channel,
+        "capture_reason": "microstructure_ws_collector_sampled_payload",
+        "missing_evidence": None if has_payload else {"missing": ["raw_payload"]},
+        "ingest_run_id": ingest_run_id,
+        "received_at": utc_now(),
+    }
+
+
+def _json_dumps_or_none(value: Any) -> str | None:
+    if value is None:
+        return None
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def write_oif_batch(session: Session, rows: Iterable[OiFundingMarkRow]) -> int:
@@ -908,6 +1134,7 @@ class MicrostructureCollector:
         self._books5_min_interval = max(0.0, float(books5_min_interval_seconds))
         self._last_bbo_sample: dict[str, datetime] = {}
         self._last_books5_sample: dict[str, datetime] = {}
+        self._payload_sequences: dict[tuple[str, str], int] = {}
 
         # Per-table persisted counters (cumulative across the daemon run).
         self._written_counts: dict[str, int] = {
@@ -961,6 +1188,10 @@ class MicrostructureCollector:
                 "oi_funding_mark": self._buf_oif.buffered(),
             },
             "written_counts": dict(self._written_counts),
+            "payload_sequences": {
+                f"{channel}:{symbol}": sequence
+                for (channel, symbol), sequence in self._payload_sequences.items()
+            },
         }
 
     # -- Message dispatch ----------------------------------------------------
@@ -979,11 +1210,13 @@ class MicrostructureCollector:
             elif channel == _CHANNEL_BBO:
                 rows = parse_bbo_message(message)
                 sampled = self._throttle_bbo(rows)
+                sampled = self._assign_payload_sequences(_CHANNEL_BBO, sampled)
                 if sampled and await self._buf_bbo.add_many(sampled):
                     await self._flush_bbo(reason="max_rows")
             elif channel == _CHANNEL_BOOKS5:
                 rows = parse_books5_message(message)
                 sampled = self._throttle_books5(rows)
+                sampled = self._assign_payload_sequences(_CHANNEL_BOOKS5, sampled)
                 if sampled and await self._buf_books5.add_many(sampled):
                     await self._flush_books5(reason="max_rows")
             elif channel in (_CHANNEL_OI, _CHANNEL_FUNDING, _CHANNEL_MARK):
@@ -993,6 +1226,21 @@ class MicrostructureCollector:
             # else: control / unknown channel — ignore
         except Exception:       # noqa: BLE001 — defence in depth, per channel
             log.exception("microstructure message dispatch failed (channel=%s)", channel)
+
+    def _assign_payload_sequences(
+        self,
+        channel: str,
+        rows: list[BboRow] | list[Books5Row],
+    ) -> list[BboRow] | list[Books5Row]:
+        """Attach monotonic sidecar sequence numbers per ingest_run/symbol/channel."""
+
+        sequenced: list[BboRow | Books5Row] = []
+        for row in rows:
+            key = (channel, row.symbol)
+            next_sequence = self._payload_sequences.get(key, 0) + 1
+            self._payload_sequences[key] = next_sequence
+            sequenced.append(replace(row, collector_sequence=next_sequence))
+        return sequenced  # type: ignore[return-value]
 
     def _throttle_bbo(self, rows: list[BboRow]) -> list[BboRow]:
         """Keep at most 1 sample per symbol per ``bbo_min_interval_seconds``.
@@ -1018,6 +1266,9 @@ class MicrostructureCollector:
                 source_ts=r.source_ts,
                 bid_px=r.bid_px, bid_sz=r.bid_sz,
                 ask_px=r.ask_px, ask_sz=r.ask_sz,
+                raw_payload=r.raw_payload,
+                exchange_sequence_id=r.exchange_sequence_id,
+                collector_sequence=r.collector_sequence,
             ))
         return out
 
@@ -1045,6 +1296,9 @@ class MicrostructureCollector:
                 ask_px_3=r.ask_px_3, ask_sz_3=r.ask_sz_3,
                 ask_px_4=r.ask_px_4, ask_sz_4=r.ask_sz_4,
                 ask_px_5=r.ask_px_5, ask_sz_5=r.ask_sz_5,
+                raw_payload=r.raw_payload,
+                exchange_sequence_id=r.exchange_sequence_id,
+                collector_sequence=r.collector_sequence,
             ))
         return out
 
@@ -1101,11 +1355,11 @@ class MicrostructureCollector:
                 self._written_counts[buffer.table],
             )
             return FlushResult(attempted=len(to_write), written=int(written), reason=reason)
-        except (SQLAlchemyError, OSError) as exc:
-            # Narrow catch: DB / connectivity issues drop the batch. Same
-            # trade-off as LiquidationsCollector — rows are not re-queued
-            # because unbounded retry during a prolonged outage would grow
-            # memory without bound.
+        except (SQLAlchemyError, OSError, ValueError) as exc:
+            # Narrow catch: DB/connectivity issues or sidecar evidence-contract
+            # failures drop the batch. Same trade-off as LiquidationsCollector:
+            # rows are not re-queued because unbounded retry during a prolonged
+            # outage would grow memory without bound.
             self._metric_inc("microstructure_bronze_flush_errors_total")
             # B-H1 fix (2026-04-20 code review): track errors to derive
             # ingest_run status at shutdown instead of hardcoded "succeeded".
@@ -1362,5 +1616,6 @@ __all__ = [
     "write_bbo_batch",
     "write_books5_batch",
     "write_oif_batch",
+    "write_orderbook_payload_batch",
     "write_trades_batch",
 ]

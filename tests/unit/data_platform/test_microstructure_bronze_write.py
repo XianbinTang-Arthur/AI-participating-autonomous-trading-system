@@ -42,6 +42,10 @@ from aats.data_platform.collectors.microstructure_ws_collector import (  # noqa:
     Books5Row,
     OiFundingMarkRow,
     TradeRow,
+    parse_bbo_message,
+    parse_books5_message,
+    write_bbo_batch,
+    write_books5_batch,
     write_oif_batch,
 )
 
@@ -89,6 +93,40 @@ def _sqlite_insert_trades(session: Session, rows, ingest_run_id: str) -> int:
 # =====================================================================
 # Case 1: write_trades_batch field projection
 # =====================================================================
+
+
+class TestOrderbookPayloadParserEvidence(unittest.TestCase):
+    def test_bbo_parser_preserves_public_raw_payload_and_exchange_sequence(self) -> None:
+        msg = {
+            "arg": {"channel": "bbo-tbt", "instId": "BTC-USDT-SWAP"},
+            "data": [{
+                "bids": [["95000", "1", "0", "1"]],
+                "asks": [["95010", "2", "0", "1"]],
+                "ts": "1770000000000",
+                "seqId": 123,
+            }],
+        }
+
+        row = parse_bbo_message(msg)[0]
+
+        self.assertEqual(row.exchange_sequence_id, "123")
+        self.assertEqual(row.raw_payload, msg["data"][0])
+
+    def test_books5_parser_preserves_public_raw_payload_and_exchange_sequence(self) -> None:
+        msg = {
+            "arg": {"channel": "books5", "instId": "BTC-USDT-SWAP"},
+            "data": [{
+                "bids": [["95000", "1", "0", "1"]],
+                "asks": [["95010", "2", "0", "1"]],
+                "ts": "1770000000000",
+                "seqId": 456,
+            }],
+        }
+
+        row = parse_books5_message(msg)[0]
+
+        self.assertEqual(row.exchange_sequence_id, "456")
+        self.assertEqual(row.raw_payload, msg["data"][0])
 
 
 class TestWriteTradesBatchFields(unittest.TestCase):
@@ -206,6 +244,56 @@ class TestWriteBboBatchFields(unittest.TestCase):
                     "ASK_PX", "ASK_SZ", "INGEST_RUN_ID"):
             self.assertIn(col, sql_upper)
 
+    def test_sidecar_payload_write_when_sequence_present(self) -> None:
+        class _Cap:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, object]] = []
+
+            def execute(self, stmt, params):
+                self.calls.append((str(stmt), params))
+
+                class R:
+                    rowcount = 1
+
+                return R()
+
+        sess = _Cap()
+        rows = [
+            BboRow(
+                symbol="BTC-USDT-SWAP",
+                ts=_TS,
+                source_ts=_TS,
+                bid_px=Decimal("95000"),
+                bid_sz=Decimal("1"),
+                ask_px=Decimal("95010"),
+                ask_sz=Decimal("2"),
+                raw_payload={
+                    "bids": [["95000", "1", "0", "1"]],
+                    "asks": [["95010", "2", "0", "1"]],
+                    "ts": "1770000000000",
+                    "seqId": 123,
+                },
+                exchange_sequence_id="123",
+                collector_sequence=7,
+            )
+        ]
+
+        written = write_bbo_batch(sess, rows, ingest_run_id=str(uuid4()))  # type: ignore[arg-type]
+
+        self.assertEqual(written, 1)
+        self.assertEqual(len(sess.calls), 2)
+        sidecar_sql, sidecar_params = sess.calls[1]
+        self.assertIn("INSERT INTO bronze.market_orderbook_payloads", sidecar_sql)
+        payload = list(sidecar_params)[0]  # type: ignore[arg-type]
+        self.assertEqual(payload["snapshot_table"], "bronze.market_orderbook_bbo")
+        self.assertEqual(payload["channel"], "bbo-tbt")
+        self.assertEqual(payload["collector_sequence"], 7)
+        self.assertEqual(payload["exchange_sequence_id"], "123")
+        self.assertEqual(payload["capture_status"], "diff_payload_persisted")
+        self.assertEqual(payload["payload_schema_version"], "orderbook_diff_payload_v1")
+        self.assertTrue(payload["row_checksum"].startswith("sha256:"))
+        self.assertTrue(payload["payload_hash"].startswith("sha256:"))
+
 
 # =====================================================================
 # Case 3: write_books5_batch 20 列完备
@@ -250,6 +338,70 @@ class TestWriteBooks5BatchFields(unittest.TestCase):
             for level in range(1, 6):
                 self.assertIn(f"{side}_PX_{level}", sql_upper)
                 self.assertIn(f"{side}_SZ_{level}", sql_upper)
+
+    def test_sidecar_payload_write_when_sequence_present(self) -> None:
+        class _Cap:
+            def __init__(self) -> None:
+                self.calls: list[tuple[str, object]] = []
+
+            def execute(self, stmt, params):
+                self.calls.append((str(stmt), params))
+
+                class R:
+                    rowcount = 1
+
+                return R()
+
+        sess = _Cap()
+        rows = [
+            Books5Row(
+                symbol="BTC-USDT-SWAP",
+                ts=_TS,
+                source_ts=_TS,
+                bid_px_1=Decimal("95000"),
+                bid_sz_1=Decimal("1"),
+                bid_px_2=None,
+                bid_sz_2=None,
+                bid_px_3=None,
+                bid_sz_3=None,
+                bid_px_4=None,
+                bid_sz_4=None,
+                bid_px_5=None,
+                bid_sz_5=None,
+                ask_px_1=Decimal("95010"),
+                ask_sz_1=Decimal("2"),
+                ask_px_2=None,
+                ask_sz_2=None,
+                ask_px_3=None,
+                ask_sz_3=None,
+                ask_px_4=None,
+                ask_sz_4=None,
+                ask_px_5=None,
+                ask_sz_5=None,
+                raw_payload={
+                    "bids": [["95000", "1", "0", "1"]],
+                    "asks": [["95010", "2", "0", "1"]],
+                    "ts": "1770000000000",
+                    "seqId": 456,
+                },
+                exchange_sequence_id="456",
+                collector_sequence=3,
+            )
+        ]
+
+        written = write_books5_batch(sess, rows, ingest_run_id=str(uuid4()))  # type: ignore[arg-type]
+
+        self.assertEqual(written, 1)
+        self.assertEqual(len(sess.calls), 2)
+        sidecar_sql, sidecar_params = sess.calls[1]
+        self.assertIn("INSERT INTO bronze.market_orderbook_payloads", sidecar_sql)
+        payload = list(sidecar_params)[0]  # type: ignore[arg-type]
+        self.assertEqual(payload["snapshot_table"], "bronze.market_orderbook_books5")
+        self.assertEqual(payload["channel"], "books5")
+        self.assertEqual(payload["collector_sequence"], 3)
+        self.assertEqual(payload["exchange_sequence_id"], "456")
+        self.assertEqual(payload["capture_status"], "diff_payload_persisted")
+        self.assertEqual(payload["payload_kind"], "okx_books5_snapshot")
 
 
 # =====================================================================
