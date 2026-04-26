@@ -1065,6 +1065,32 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertIn("post_close_cooldown_blocks_entry", target.guardrail_flags)
         self.assertEqual(target.target_position_qty, Decimal("0"))
 
+    def test_post_close_cooldown_uses_leg_close_timestamp_when_aggregate_missing(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.001,
+                    "trading_product_type": "derivatives",
+                    "strategy_post_close_cooldown_seconds": 900,
+                }
+            )
+        )
+        context = self._context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            last_long_leg_closed_seconds_ago=120,
+        )
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="long",
+        ).model_copy(update={"composite_alpha_score": 0.30})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.3))
+
+        self.assertIn("post_close_cooldown_blocks_entry", target.guardrail_flags)
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+
     def test_low_edge_streak_blocks_new_entry(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(
@@ -1395,7 +1421,7 @@ class TestTargetPositionEngine(unittest.TestCase):
             self._ai_assessment(direction=0.24, confidence=0.86),
         )
 
-        self.assertEqual(target.expected_cost_bps, 17.0)
+        self.assertEqual(target.expected_cost_bps, 29.5)
 
     def test_directional_cost_guard_uses_target_delta_and_market_snapshot(self) -> None:
         settings = AATSSettings.model_validate(
@@ -1447,6 +1473,8 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(cost_call["quantity"], Decimal("0.014625"))
         self.assertEqual(cost_call["projected_notional"], Decimal("1462.500000"))
         self.assertIs(cost_call["market_snapshot"], market_snapshot)
+        self.assertTrue(cost_call["include_spread"])
+        self.assertTrue(cost_call["include_close_fee"])
         self.assertIsNotNone(target.decision_outcome)
         cost_gate = next(stage for stage in target.decision_outcome.decision_blocker_chain if stage["stage"] == "cost_gate")
         self.assertEqual(cost_gate["candidates"][0]["source"], "baseline_fallback")
@@ -1486,7 +1514,7 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertIn("expected_edge_below_cost_buffer", target.guardrail_flags)
         self.assertIsNotNone(target.decision_outcome)
         cost_gate = next(stage for stage in target.decision_outcome.decision_blocker_chain if stage["stage"] == "cost_gate")
-        self.assertEqual(cost_gate["candidates"][0]["expected_cost_bps"], 25.0)
+        self.assertEqual(cost_gate["candidates"][0]["expected_cost_bps"], 30.5)
 
     def test_ai_decision_maker_cost_guard_audits_authorized_entry_candidate(self) -> None:
         settings = AATSSettings.model_validate(
@@ -1617,6 +1645,8 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertTrue(cost_service.calls)
         self.assertEqual(cost_service.calls[0]["side"], "sell")
         self.assertEqual(cost_service.calls[0]["quantity"], Decimal("0.02"))
+        self.assertFalse(cost_service.calls[0]["include_spread"])
+        self.assertFalse(cost_service.calls[0]["include_close_fee"])
 
     def test_ai_primary_requires_override_and_actionable_edge(self) -> None:
         engine = TargetPositionEngine(

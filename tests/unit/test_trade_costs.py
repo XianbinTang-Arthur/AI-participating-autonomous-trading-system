@@ -60,6 +60,33 @@ class TestTradeCostService(unittest.TestCase):
         self.assertEqual(estimate.ideal_total_cost_bps, Decimal("12"))
         self.assertEqual(estimate.executable_total_drag_bps, Decimal("13.5"))
 
+    def test_derivatives_lifecycle_entry_can_include_expected_close_fee(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "trade_cost_derivatives_taker_fee_bps": 5.0,
+                "trade_cost_derivatives_spread_bps": 0.5,
+                "trade_cost_derivatives_slippage_bps": 1.0,
+            }
+        )
+        service = TradeCostService(settings=settings)
+
+        estimate = service.estimate_single_leg_entry(
+            model_name="directional_lifecycle_entry",
+            symbol="BTC-USDT-SWAP",
+            product_type="derivatives",
+            margin_mode="cross",
+            include_spread=True,
+            include_close_fee=True,
+        )
+
+        self.assertEqual(estimate.ideal_open_fee_bps, Decimal("5"))
+        self.assertEqual(estimate.ideal_close_fee_bps, Decimal("5"))
+        self.assertEqual(estimate.ideal_total_cost_bps, Decimal("10"))
+        self.assertEqual(estimate.executable_total_drag_bps, Decimal("11.5"))
+        self.assertIn("close_fee_trade_cost_service", estimate.cost_source_flags)
+
     def test_fee_resolver_distinguishes_spot_and_derivatives_defaults(self) -> None:
         settings = AATSSettings.model_validate(
             {

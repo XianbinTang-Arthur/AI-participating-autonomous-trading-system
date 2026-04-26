@@ -1616,16 +1616,32 @@ class TargetPositionEngine:
         )
 
     def _post_close_cooldown_active(self, context: DecisionContext) -> bool:
-        if (
-            context.last_position_closed_at is None
-            or self.settings.strategy_post_close_cooldown_seconds <= 0
-        ):
+        if self.settings.strategy_post_close_cooldown_seconds <= 0:
             return False
+        closed_at = self._latest_position_closed_at(context)
+        if closed_at is None:
+            remaining = context.strategy_cooldowns.get("post_close_cooldown_remaining_seconds")
+            if remaining is not None and to_decimal(remaining) > EPSILON_DECIMAL_12:
+                return True
+            return "post_close_cooldown_active" in context.strategy_guardrail_flags
         elapsed = max(
-            (self._decision_as_of(context) - context.last_position_closed_at).total_seconds(),
+            (self._decision_as_of(context) - closed_at).total_seconds(),
             0.0,
         )
         return elapsed < self.settings.strategy_post_close_cooldown_seconds
+
+    @staticmethod
+    def _latest_position_closed_at(context: DecisionContext) -> datetime | None:
+        closed_ats = [
+            ts
+            for ts in (
+                context.last_position_closed_at,
+                context.last_long_leg_closed_at,
+                context.last_short_leg_closed_at,
+            )
+            if ts is not None
+        ]
+        return max(closed_ats) if closed_ats else None
 
     def _low_edge_cooldown_active(self, context: DecisionContext) -> bool:
         use_guard_eligible_low_edge = (
@@ -2393,6 +2409,15 @@ class TargetPositionEngine:
             if reference_price > EPSILON_DECIMAL_12:
                 projected_notional = quantity * reference_price
             market_snapshot = context.market_snapshot
+        trade_kind = (
+            None
+            if context is None or desired_target_qty is None
+            else self._trade_kind(
+                current_position_qty=to_decimal(context.current_position_qty),
+                desired_target_qty=to_decimal(desired_target_qty),
+            )
+        )
+        lifecycle_cost_required = product_type == "derivatives" and trade_kind in {"entry", "scale_in", "reversal"}
         estimate = self.trade_cost_service.estimate_single_leg_entry(
             model_name="directional_target_position",
             symbol=symbol,
@@ -2411,7 +2436,8 @@ class TargetPositionEngine:
             reference_price=reference_price,
             market_snapshot=market_snapshot,
             expected_slippage_bps=expected_slippage_bps,
-            include_spread=False,
+            include_spread=lifecycle_cost_required,
+            include_close_fee=lifecycle_cost_required,
             include_funding=product_type == "derivatives",
         )
         return float(estimate.executable_total_drag_bps)

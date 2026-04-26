@@ -70,7 +70,7 @@ class TradeCostService:
         product_type: str | None = None,
         margin_mode: str | None = None,
     ) -> Decimal:
-        kind = self.fee_resolver.instrument_kind(
+        kind = self._instrument_kind(
             symbol=symbol,
             product_type=product_type,
             margin_mode=margin_mode,
@@ -88,7 +88,7 @@ class TradeCostService:
         product_type: str | None = None,
         margin_mode: str | None = None,
     ) -> Decimal:
-        kind = self.fee_resolver.instrument_kind(
+        kind = self._instrument_kind(
             symbol=symbol,
             product_type=product_type,
             margin_mode=margin_mode,
@@ -98,6 +98,40 @@ class TradeCostService:
         if kind == "margin_spot":
             return max(to_decimal(self.settings.trade_cost_margin_slippage_bps), Decimal("0"))
         return max(to_decimal(self.settings.trade_cost_derivatives_slippage_bps), Decimal("0"))
+
+    def _instrument_kind(
+        self,
+        *,
+        symbol: str | None = None,
+        product_type: str | None = None,
+        margin_mode: str | None = None,
+    ) -> str:
+        method = getattr(self.fee_resolver, "instrument_kind", None)
+        if callable(method):
+            return method(
+                symbol=symbol,
+                product_type=product_type,
+                margin_mode=margin_mode,
+            )
+        normalized_product = str(product_type or "").strip().lower()
+        normalized_margin = str(margin_mode or "").strip().lower()
+        normalized_symbol = str(symbol or "").strip().upper()
+        if normalized_product == "spot":
+            if normalized_margin in {"cross", "isolated"}:
+                return "margin_spot"
+            return "spot"
+        if normalized_product == "derivatives":
+            if normalized_symbol.endswith("-SWAP"):
+                return "perpetual"
+            tail = normalized_symbol.rsplit("-", 1)[-1] if normalized_symbol else ""
+            if tail.isdigit():
+                return "delivery"
+            if normalized_symbol.count("-") >= 3:
+                return "option"
+            return "perpetual"
+        if normalized_margin in {"cross", "isolated"}:
+            return "margin_spot"
+        return "spot"
 
     def settlement_fee_bps_decimal(
         self,
@@ -128,6 +162,7 @@ class TradeCostService:
         market_snapshot: MarketSnapshot | None = None,
         expected_slippage_bps: Decimal | float | int | str | None = None,
         include_spread: bool = False,
+        include_close_fee: bool = False,
         expected_spread_bps: Decimal | float | int | str | None = None,
         include_funding: bool = False,
         include_settlement: bool = False,
@@ -146,6 +181,9 @@ class TradeCostService:
         )
         if fee_bps > Decimal("0"):
             source_flags.append("fee_trade_cost_service")
+        close_fee_bps = fee_bps if include_close_fee else Decimal("0")
+        if close_fee_bps > Decimal("0"):
+            source_flags.append("close_fee_trade_cost_service")
 
         spread_bps = Decimal("0")
         if include_spread:
@@ -225,7 +263,7 @@ class TradeCostService:
                 cost_model_enabled=True,
                 edge_reference_bps=Decimal("0"),
                 ideal_open_fee_bps=fee_bps,
-                ideal_close_fee_bps=Decimal("0"),
+                ideal_close_fee_bps=close_fee_bps,
                 executable_spread_bps=spread_bps,
                 executable_slippage_bps=slippage_bps,
                 funding_cost_bps=funding_bps,
