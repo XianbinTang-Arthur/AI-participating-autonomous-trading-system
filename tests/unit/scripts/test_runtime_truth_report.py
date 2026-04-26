@@ -122,12 +122,102 @@ def test_parse_db_probe_returns_only_json_payload() -> None:
             "symbol": "BTC-USDT-SWAP",
             "route_action": "advisory_only",
             "primary_family": "independent",
+            "portfolio_requested_notional": "0",
+            "portfolio_approved_notional": "0",
+            "portfolio_budget_cut_notional": "0",
+            "payload": {
+                "reason_codes": [
+                    "allocator_primary_family_independent",
+                    "independent_long_book_signal_below_entry_threshold",
+                ],
+                "operator_summary": "no executable allocation",
+                "execution_legs": [],
+            },
+        },
+        "latest_decision_audit": {
+            "execution_plan_ref": None,
+            "execution_plan_refs": [],
+            "order_intent_refs": [],
+            "order_state_refs": [],
+            "fill_event_refs": [],
+            "strategy_sleeve_intent_refs": ["intent-1", "intent-2"],
+            "risk_decision_ref": "risk-1",
+            "decision_outcome_ref": "outcome-1",
+        },
+        "latest_decision_counts": {
+            "execution_orders": 0,
+            "order_states": 0,
+            "execution_fills": 0,
+            "legacy_fill_events": 0,
         },
     }
 
     parsed = mod.parse_db_probe(json.dumps(payload), "")
 
-    assert parsed == payload
+    latest = parsed["latest_decision"]
+    assert "payload" not in latest
+    assert latest["execution_chain"]["db_order_count"] == 0
+    assert latest["execution_chain"]["strategy_sleeve_intent_ref_count"] == 2
+    assert latest["no_trade_attribution"] == {
+        "classification": "no_order_fill_expected_for_latest_decision",
+        "primary_blocker": "strategy_signal_below_entry_threshold",
+        "is_current_no_trade": True,
+        "reason_codes": [
+            "allocator_primary_family_independent",
+            "independent_long_book_signal_below_entry_threshold",
+        ],
+        "operator_summary": "no executable allocation",
+        "execution_legs_count": 0,
+        "sleeve_intent_summary": [],
+    }
+
+
+def test_latest_decision_no_trade_attribution_detects_inactive_hold_only() -> None:
+    mod = load_module()
+    latest = {
+        "allocation_id": "alloc-1",
+        "decision_id": "decision-1",
+        "symbol": "BTC-USDT-SWAP",
+        "route_action": "advisory_only",
+        "primary_family": "independent",
+        "portfolio_requested_notional": "0",
+        "portfolio_approved_notional": "0",
+        "portfolio_budget_cut_notional": "0",
+        "payload": {
+            "reason_codes": [
+                "independent_family_candidate_inactive",
+                "legacy_configured_strategy_family_independent_hold_only",
+            ],
+            "strategy_sleeve_intents": [
+                {
+                    "family": "independent",
+                    "strategy_sleeve_id": "sleeve-1",
+                    "route_action": "hold_current",
+                    "delta_notional": "0",
+                    "reason_codes": ["independent_family_candidate_inactive"],
+                }
+            ],
+        },
+    }
+
+    summarized = mod.summarize_latest_decision(
+        latest,
+        {
+            "execution_plan_ref": None,
+            "execution_plan_refs": [],
+            "order_intent_refs": [],
+            "order_state_refs": [],
+            "fill_event_refs": [],
+        },
+        {"execution_orders": 0, "order_states": 0, "execution_fills": 0, "legacy_fill_events": 0},
+    )
+
+    assert summarized is not None
+    attribution = summarized["no_trade_attribution"]
+    assert attribution["is_current_no_trade"] is True
+    assert attribution["primary_blocker"] == "strategy_candidate_inactive"
+    assert attribution["sleeve_intent_summary"][0]["family"] == "independent"
+    assert attribution["sleeve_intent_summary"][0]["reason_codes"] == ["independent_family_candidate_inactive"]
 
 
 def test_blocking_findings_separate_report_generation_from_runtime_state() -> None:

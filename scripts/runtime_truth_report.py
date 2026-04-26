@@ -85,15 +85,48 @@ with engine.connect() as conn:
     decisions = conn.execute(text("select count(*) from portfolio_allocation_decisions")).scalar()
     fills = conn.execute(text("select count(*) from execution_fills")).scalar()
     latest = conn.execute(text(
-        "select decision_id, symbol, created_at, route_action, primary_family "
+        "select allocation_id, decision_id, symbol, created_at, route_action, primary_family, "
+        "portfolio_requested_notional, portfolio_approved_notional, portfolio_budget_cut_notional, "
+        "expected_edge_bps, expected_cost_bps, payload "
         "from portfolio_allocation_decisions order by created_at desc limit 1"
     )).mappings().first()
+    latest_audit = None
+    decision_counts = {}
+    if latest:
+        decision_id = latest["decision_id"]
+        latest_audit = conn.execute(text(
+            "select decision_id, updated_at, execution_plan_ref, execution_plan_refs, "
+            "order_intent_refs, order_state_refs, fill_event_refs, strategy_sleeve_intent_refs, "
+            "portfolio_allocation_decision_ref, decision_outcome_ref, risk_decision_ref "
+            "from decision_audit_records "
+            "where decision_id = :decision_id order by audit_revision_id desc limit 1"
+        ), {"decision_id": decision_id}).mappings().first()
+        decision_counts = {
+            "execution_orders": int(conn.execute(
+                text("select count(*) from execution_orders where decision_id = :decision_id"),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "order_states": int(conn.execute(
+                text("select count(*) from order_states where decision_id = :decision_id"),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "execution_fills": int(conn.execute(
+                text("select count(*) from execution_fills where decision_id = :decision_id"),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "legacy_fill_events": int(conn.execute(
+                text("select count(*) from fill_events where decision_id = :decision_id"),
+                {"decision_id": decision_id},
+            ).scalar()),
+        }
 
 print(json.dumps({
     "ok": True,
     "portfolio_allocation_decisions": int(decisions),
     "execution_fills": int(fills),
     "latest_decision": dict(latest) if latest else None,
+    "latest_decision_audit": dict(latest_audit) if latest_audit else None,
+    "latest_decision_counts": decision_counts,
 }, default=str, sort_keys=True))
 """
 
@@ -137,6 +170,242 @@ def redact_secret_text(value: str | None) -> str:
         else:
             text = pattern.sub(lambda m: f"{m.group(1)}<redacted-url>", text)
     return text
+
+
+def truncate_text(value: Any, *, limit: int = 240) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3] + "..."
+
+
+def as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def as_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def decimal_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
+def decimal_is_positive(value: Any) -> bool:
+    try:
+        return float(value or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def compact_unique(values: list[Any], *, limit: int = 16) -> list[str]:
+    seen: set[str] = set()
+    compacted: list[str] = []
+    for value in values:
+        text = truncate_text(value, limit=128)
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        compacted.append(text)
+        if len(compacted) >= limit:
+            break
+    return compacted
+
+
+def collect_reason_codes(payload: dict[str, Any], *, limit: int = 24) -> list[str]:
+    """Collect stable reason-code strings without returning raw payload bodies."""
+
+    collected: list[Any] = []
+
+    def visit(value: Any, depth: int = 0) -> None:
+        if len(collected) >= limit or depth > 4:
+            return
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if len(collected) >= limit:
+                    break
+                if str(key).endswith("reason_codes") or str(key) in {
+                    "blocked_reason_codes",
+                    "budget_cut_reason_codes",
+                    "reason_code",
+                }:
+                    collected.extend(as_list(nested))
+                elif isinstance(nested, (dict, list)):
+                    visit(nested, depth + 1)
+        elif isinstance(value, list):
+            for item in value[:8]:
+                if len(collected) >= limit:
+                    break
+                visit(item, depth + 1)
+
+    visit(payload)
+    return compact_unique(collected, limit=limit)
+
+
+def summarize_sleeve_intents(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = (
+        payload.get("strategy_sleeve_intents")
+        or payload.get("sleeve_intents")
+        or payload.get("sleeve_decisions")
+        or []
+    )
+    summaries: list[dict[str, Any]] = []
+    for item in as_list(candidates)[:8]:
+        item_dict = as_dict(item)
+        if not item_dict:
+            continue
+        summaries.append(
+            {
+                "family": item_dict.get("family") or item_dict.get("strategy_family"),
+                "strategy_sleeve_id": item_dict.get("strategy_sleeve_id") or item_dict.get("sleeve_id"),
+                "route_action": item_dict.get("route_action"),
+                "position_intent": item_dict.get("position_intent"),
+                "target_notional": decimal_text(
+                    item_dict.get("target_notional") or item_dict.get("target_exposure_notional")
+                ),
+                "delta_notional": decimal_text(item_dict.get("delta_notional") or item_dict.get("net_delta_notional")),
+                "reason_codes": compact_unique(
+                    as_list(item_dict.get("reason_codes")) + as_list(item_dict.get("blocked_reason_codes")),
+                    limit=6,
+                ),
+            }
+        )
+    return summaries
+
+
+def classify_no_trade(
+    *,
+    latest_decision: dict[str, Any],
+    execution_chain: dict[str, Any],
+    reason_codes: list[str],
+) -> dict[str, Any]:
+    route_action = latest_decision.get("route_action")
+    approved_notional = latest_decision.get("portfolio_approved_notional")
+    requested_notional = latest_decision.get("portfolio_requested_notional")
+    has_execution_activity = any(
+        bool(execution_chain.get(key))
+        for key in (
+            "execution_plan_ref_present",
+            "execution_plan_ref_count",
+            "order_intent_ref_count",
+            "order_state_ref_count",
+            "fill_event_ref_count",
+            "db_order_count",
+            "db_order_state_count",
+            "db_fill_count",
+            "legacy_fill_event_count",
+        )
+    )
+
+    if decimal_is_positive(approved_notional) or has_execution_activity:
+        return {
+            "classification": "execution_activity_or_positive_allocation_present",
+            "primary_blocker": None,
+            "is_current_no_trade": False,
+        }
+    if "reconciliation_contraction_active" in reason_codes:
+        primary = "reconciliation_contraction_active"
+    elif "candidate_execution_incompatible" in reason_codes:
+        primary = "candidate_execution_incompatible"
+    elif any("signal_below_entry_threshold" in code for code in reason_codes):
+        primary = "strategy_signal_below_entry_threshold"
+    elif any("candidate_inactive" in code for code in reason_codes):
+        primary = "strategy_candidate_inactive"
+    elif any("hold_only" in code for code in reason_codes):
+        primary = "strategy_hold_only"
+    elif route_action == "advisory_only" and not decimal_is_positive(requested_notional):
+        primary = "allocator_zero_notional_advisory"
+    elif not execution_chain.get("execution_plan_ref_present"):
+        primary = "no_execution_plan_emitted"
+    else:
+        primary = "unclassified_no_trade"
+    return {
+        "classification": "no_order_fill_expected_for_latest_decision",
+        "primary_blocker": primary,
+        "is_current_no_trade": True,
+    }
+
+
+def summarize_latest_decision(
+    latest: dict[str, Any] | None,
+    audit: dict[str, Any] | None,
+    decision_counts: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(latest, dict):
+        return None
+    payload = as_dict(latest.get("payload"))
+    audit_payload = as_dict(audit)
+    counts = as_dict(decision_counts)
+    execution_plan_refs = as_list(audit_payload.get("execution_plan_refs"))
+    execution_chain = {
+        "execution_plan_ref_present": bool(audit_payload.get("execution_plan_ref")),
+        "execution_plan_ref_count": len(execution_plan_refs),
+        "order_intent_ref_count": len(as_list(audit_payload.get("order_intent_refs"))),
+        "order_state_ref_count": len(as_list(audit_payload.get("order_state_refs"))),
+        "fill_event_ref_count": len(as_list(audit_payload.get("fill_event_refs"))),
+        "strategy_sleeve_intent_ref_count": len(as_list(audit_payload.get("strategy_sleeve_intent_refs"))),
+        "db_order_count": int(counts.get("execution_orders") or 0),
+        "db_order_state_count": int(counts.get("order_states") or 0),
+        "db_fill_count": int(counts.get("execution_fills") or 0),
+        "legacy_fill_event_count": int(counts.get("legacy_fill_events") or 0),
+    }
+    reason_codes = collect_reason_codes(payload)
+    classification = classify_no_trade(
+        latest_decision=latest,
+        execution_chain=execution_chain,
+        reason_codes=reason_codes,
+    )
+    no_trade_attribution = {
+        **classification,
+        "reason_codes": reason_codes,
+        "operator_summary": truncate_text(payload.get("operator_summary")),
+        "execution_legs_count": len(as_list(payload.get("execution_legs"))),
+        "sleeve_intent_summary": summarize_sleeve_intents(payload),
+    }
+    return {
+        "allocation_id": latest.get("allocation_id"),
+        "decision_id": latest.get("decision_id"),
+        "symbol": latest.get("symbol"),
+        "created_at": latest.get("created_at"),
+        "route_action": latest.get("route_action"),
+        "primary_family": latest.get("primary_family"),
+        "portfolio_requested_notional": decimal_text(latest.get("portfolio_requested_notional")),
+        "portfolio_approved_notional": decimal_text(latest.get("portfolio_approved_notional")),
+        "portfolio_budget_cut_notional": decimal_text(latest.get("portfolio_budget_cut_notional")),
+        "expected_edge_bps": decimal_text(latest.get("expected_edge_bps")),
+        "expected_cost_bps": decimal_text(latest.get("expected_cost_bps")),
+        "audit_refs": {
+            "portfolio_allocation_decision_ref": audit_payload.get("portfolio_allocation_decision_ref"),
+            "decision_outcome_ref_present": bool(audit_payload.get("decision_outcome_ref")),
+            "risk_decision_ref_present": bool(audit_payload.get("risk_decision_ref")),
+            "updated_at": audit_payload.get("updated_at"),
+        },
+        "execution_chain": execution_chain,
+        "no_trade_attribution": no_trade_attribution,
+    }
+
+
+def sanitize_db_probe_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    sanitized = dict(payload)
+    latest = summarize_latest_decision(
+        sanitized.get("latest_decision"),
+        sanitized.pop("latest_decision_audit", None),
+        sanitized.pop("latest_decision_counts", None),
+    )
+    sanitized["latest_decision"] = latest
+    return sanitized
 
 
 def run_command(args: list[str], *, cwd: Path | None = None, timeout: int = 30) -> dict[str, Any]:
@@ -376,7 +645,7 @@ def parse_db_probe(stdout: str, stderr: str = "") -> dict[str, Any]:
             "reason": f"db_probe_invalid_json:{exc.msg}",
             "stderr": redact_secret_text(stderr),
         }
-    return payload
+    return sanitize_db_probe_payload(payload)
 
 
 def database_truth_probe(distro: str, gateway_container: str) -> dict[str, Any]:
@@ -545,6 +814,7 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     git = report.get("git") or {}
     health = report.get("deployment_health") or {}
     latest = db.get("latest_decision") if isinstance(db.get("latest_decision"), dict) else {}
+    no_trade = latest.get("no_trade_attribution") if isinstance(latest.get("no_trade_attribution"), dict) else {}
 
     return {
         "source": "live_runtime",
@@ -554,6 +824,9 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "latest_decision_route_action": latest.get("route_action"),
         "latest_decision_symbol": latest.get("symbol"),
         "latest_decision_primary_family": latest.get("primary_family"),
+        "latest_decision_no_trade_primary_blocker": no_trade.get("primary_blocker"),
+        "latest_decision_no_trade_classification": no_trade.get("classification"),
+        "latest_decision_is_current_no_trade": no_trade.get("is_current_no_trade"),
         "portfolio_allocation_decisions": db.get("portfolio_allocation_decisions") if db.get("ok") else None,
         "execution_fills": db.get("execution_fills") if db.get("ok") else None,
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),
