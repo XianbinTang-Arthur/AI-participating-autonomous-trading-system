@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
-from aats.bootstrap.logging import get_logger
+from aats.bootstrap.logging import get_logger, log_event
 from aats.data_platform.governance._time_util import parse_iso_datetime_utc
 from aats.events import topics
 from aats.events.envelopes import build_envelope
@@ -137,7 +137,12 @@ class StrategyProfileControlService:
             return False
         return bool(self._activation_state().auto_switch_enabled)
 
-    async def evaluate_now(self, *, allow_auto_activation: bool = True) -> dict[str, Any]:
+    async def evaluate_now(
+        self,
+        *,
+        allow_auto_activation: bool = True,
+        use_ai_recommendation: bool = True,
+    ) -> dict[str, Any]:
         # 原本 evaluate_now 在 event loop 主线程上顺序跑：
         #   1) ensure_seed_profiles + repo.list_revisions
         #   2) N 次 repo.save_evaluation + event_store.append（N = revisions 数）
@@ -155,7 +160,19 @@ class StrategyProfileControlService:
         # `_timeframe_locks` / operator 触发锁已经保证不会有同服务对同 key 并发
         # 跑 evaluate_now，所以这两段 thread 不会交叉，不存在 state 竞态。
         phase1 = await asyncio.to_thread(self._evaluate_now_phase1_sync)
-        ai_recommendation = await self._generate_recommendation(context=phase1["context"])
+        if use_ai_recommendation:
+            ai_recommendation = await self._generate_recommendation(context=phase1["context"])
+        else:
+            ai_recommendation = await asyncio.to_thread(
+                self._fallback_recommendation,
+                context=phase1["context"],
+                active_profile_id=phase1["state"].active_profile_id,
+                fallback_reason_code="strategy_profile_scheduled_manual_mode",
+                fallback_reason_detail=(
+                    "scheduled profile freshness evaluation ran while auto switch was "
+                    "manual/disabled; provider call and auto activation were skipped"
+                ),
+            )
         result = await asyncio.to_thread(
             self._evaluate_now_phase3_sync,
             phase1=phase1,
@@ -260,6 +277,7 @@ class StrategyProfileControlService:
             optimization_report=optimization_report,
             ai_recommendation=ai_recommendation,
         )
+        expired_pending_count = self._expire_stale_pending_recommendations()
         self.repo.save_recommendation(recommendation)
         self.event_store.append(
             build_envelope(
@@ -291,6 +309,7 @@ class StrategyProfileControlService:
             "optimization_report": optimization_report.model_dump(mode="json"),
             "selection_decision": selection_decision.model_dump(mode="json"),
             "evaluation_pipeline": [item.model_dump(mode="json") for item in evaluations],
+            "expired_pending_recommendations": expired_pending_count,
         }
         if current_evaluation is not None:
             result["current_evaluation"] = current_evaluation.model_dump(mode="json")
@@ -308,6 +327,29 @@ class StrategyProfileControlService:
         if outcome_decision is not None:
             result["selection_decision"] = outcome_decision.model_dump(mode="json")
         return result
+
+    def _expire_stale_pending_recommendations(self) -> int:
+        expirer = getattr(self.repo, "expire_pending_recommendations", None)
+        if not callable(expirer):
+            return 0
+        try:
+            return int(
+                expirer(
+                    product_type=self.settings.trading_product_type,
+                    margin_mode=self.settings.margin_mode,
+                    allowed_symbols=self.settings.allowed_symbols,
+                    now=utc_now(),
+                )
+            )
+        except Exception as exc:
+            log_event(
+                self.logger,
+                "strategy_profile_recommendation_expire_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return 0
 
     def accept_recommendation(
         self,

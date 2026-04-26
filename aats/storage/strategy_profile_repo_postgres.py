@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -261,6 +263,41 @@ class PostgresStrategyProfileRepository:
         with self.session_factory() as session:
             rows = session.scalars(query).all()
         return [StrategyProfileRecommendation.model_validate(row.payload) for row in rows]
+
+    def expire_pending_recommendations(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        allowed_symbols: tuple[str, ...],
+        now: datetime,
+    ) -> int:
+        query = select(StrategyProfileRecommendationModel).where(
+            StrategyProfileRecommendationModel.product_type == product_type,
+            StrategyProfileRecommendationModel.margin_mode == margin_mode,
+            StrategyProfileRecommendationModel.decision_status == "pending",
+            StrategyProfileRecommendationModel.expires_at <= now,
+        )
+        expired = 0
+        with self.session_factory() as session:
+            rows = session.scalars(query).all()
+            for row in rows:
+                recommendation = StrategyProfileRecommendation.model_validate(row.payload)
+                if recommendation.allowed_symbols != allowed_symbols:
+                    continue
+                payload = recommendation.model_copy(
+                    update={
+                        "decision_status": "expired",
+                        "decision_reason_code": "recommendation_expired",
+                        "decision_reason_detail": "pending recommendation expired before next freshness evaluation",
+                    }
+                ).model_dump(mode="json")
+                row.decision_status = "expired"
+                row.payload = payload
+                expired += 1
+            if expired:
+                session.commit()
+        return expired
 
     def save_activation_record(self, record: StrategyProfileActivationRecord) -> StrategyProfileActivationRecord:
         payload = record.model_dump(mode="json")

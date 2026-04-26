@@ -93,7 +93,10 @@ class TestProfileAutoSwitchLoop(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await ApplicationRuntime._run_profile_auto_switch_loop(runtime, service)
 
-        service.evaluate_now.assert_awaited_once_with(allow_auto_activation=True)
+        service.evaluate_now.assert_awaited_once_with(
+            allow_auto_activation=True,
+            use_ai_recommendation=True,
+        )
         service.auto_switch_effective_enabled.assert_called_once_with()
         runtime._record_background_failure.assert_not_awaited()
 
@@ -118,7 +121,7 @@ class TestProfileAutoSwitchLoop(unittest.IsolatedAsyncioTestCase):
         service.evaluate_now.assert_not_awaited()
         service.auto_switch_effective_enabled.assert_not_called()
 
-    async def test_loop_skips_evaluate_when_effective_auto_control_disabled(self) -> None:
+    async def test_loop_runs_readonly_evaluation_when_effective_auto_control_disabled(self) -> None:
         runtime = self._make_runtime(auto_enabled=True)
         service = MagicMock()
         service.auto_switch_effective_enabled = MagicMock(return_value=False)
@@ -137,7 +140,10 @@ class TestProfileAutoSwitchLoop(unittest.IsolatedAsyncioTestCase):
                 await ApplicationRuntime._run_profile_auto_switch_loop(runtime, service)
 
         service.auto_switch_effective_enabled.assert_called_once_with()
-        service.evaluate_now.assert_not_awaited()
+        service.evaluate_now.assert_awaited_once_with(
+            allow_auto_activation=False,
+            use_ai_recommendation=False,
+        )
 
     async def test_loop_swallows_evaluate_exception_and_continues(self) -> None:
         runtime = self._make_runtime(auto_enabled=True)
@@ -158,7 +164,10 @@ class TestProfileAutoSwitchLoop(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await ApplicationRuntime._run_profile_auto_switch_loop(runtime, service)
 
-        service.evaluate_now.assert_awaited_once()
+        service.evaluate_now.assert_awaited_once_with(
+            allow_auto_activation=True,
+            use_ai_recommendation=True,
+        )
         runtime._record_background_failure.assert_awaited_once()
         failure_kwargs = runtime._record_background_failure.call_args.kwargs
         self.assertEqual(failure_kwargs["subsystem"], "strategy_profile_auto_switch")

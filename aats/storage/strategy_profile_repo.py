@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from aats.schemas.strategy_profiles import (
     StrategyProfileActivationRecord,
     StrategyProfileActivationState,
@@ -106,6 +108,34 @@ class InMemoryStrategyProfileRepository:
         if decision_status is not None:
             rows = [item for item in rows if item.decision_status == decision_status]
         return sorted(rows, key=lambda item: item.generated_at, reverse=True)
+
+    def expire_pending_recommendations(
+        self,
+        *,
+        product_type: str,
+        margin_mode: str,
+        allowed_symbols: tuple[str, ...],
+        now: datetime,
+    ) -> int:
+        expired = 0
+        for recommendation_id, recommendation in list(self._recommendations.items()):
+            if (
+                recommendation.product_type != product_type
+                or recommendation.margin_mode != margin_mode
+                or recommendation.allowed_symbols != allowed_symbols
+                or recommendation.decision_status != "pending"
+                or recommendation.expires_at > now
+            ):
+                continue
+            self._recommendations[recommendation_id] = recommendation.model_copy(
+                update={
+                    "decision_status": "expired",
+                    "decision_reason_code": "recommendation_expired",
+                    "decision_reason_detail": "pending recommendation expired before next freshness evaluation",
+                }
+            )
+            expired += 1
+        return expired
 
     def save_activation_record(self, record: StrategyProfileActivationRecord) -> StrategyProfileActivationRecord:
         self._activation_history.append(record)

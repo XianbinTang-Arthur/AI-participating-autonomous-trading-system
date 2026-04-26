@@ -1188,13 +1188,15 @@ class ApplicationRuntime:
         return delta if delta > 0 else 1800.0
 
     async def _run_profile_auto_switch_loop(self, service: Any) -> None:
-        """自动换档调度循环：每逢 :00 / :30 触发一次 evaluate_now()。
+        """档位评估调度循环：每逢 :00 / :30 触发一次 evaluate_now()。
 
         与主决策链路解耦（原本每个 decision tick 都会触发 AI 推断，API 账单
         线性叠加）；改为 clock-aligned 定时任务后每小时最多两次 AI 调用。
 
         运行时 ``strategy_profile_auto_control_enabled`` 被运维关闭时 loop 不
         退出，下一次 boundary 醒来直接短路—避免运维每次切换都要重启进程。
+        当 operator 手动固定档位导致 ``auto_switch_effective_enabled`` 为 false
+        时，loop 仍写入只读评估证据，但禁用 AI recommendation 与自动激活。
         异常只记 failure event，不让 loop 挂掉。
         """
         while True:
@@ -1205,10 +1207,10 @@ class ApplicationRuntime:
                 raise
             if not self.settings.strategy_profile_auto_control_enabled:
                 continue
-            effective_enabled = False
+            auto_activation_enabled = False
             try:
                 checker = getattr(service, "auto_switch_effective_enabled", None)
-                effective_enabled = (
+                auto_activation_enabled = (
                     bool(await asyncio.to_thread(checker))
                     if callable(checker)
                     else True
@@ -1218,14 +1220,17 @@ class ApplicationRuntime:
                     subsystem="strategy_profile_auto_switch_state", exc=exc
                 )
                 continue
-            if not effective_enabled:
-                continue
             try:
-                await service.evaluate_now(allow_auto_activation=True)
+                await service.evaluate_now(
+                    allow_auto_activation=auto_activation_enabled,
+                    use_ai_recommendation=auto_activation_enabled,
+                )
                 log_event(
                     self.logger,
                     "strategy_profile_auto_switch_scheduled_tick",
                     fired_at=utc_now().isoformat(),
+                    allow_auto_activation=auto_activation_enabled,
+                    use_ai_recommendation=auto_activation_enabled,
                 )
             except Exception as exc:
                 await self._record_background_failure(
