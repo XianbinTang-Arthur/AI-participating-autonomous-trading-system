@@ -148,3 +148,104 @@ def test_blocking_findings_separate_report_generation_from_runtime_state() -> No
     }
 
     assert mod.collect_blocking_findings(report) == ["windows_worktree_dirty"]
+
+
+def test_artifact_last_known_is_non_authoritative_when_live_fact_differs(tmp_path: Path) -> None:
+    mod = load_module()
+    artifact_dir = tmp_path / "artifacts" / "automation"
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "task_registry.json").write_text(
+        json.dumps(
+            {
+                "generated_at": "2026-04-26T06:30:00Z",
+                "latest_runtime_facts": {
+                    "latest_decision_id": "decision_old",
+                    "portfolio_allocation_decisions": 10,
+                    "execution_fills": 2,
+                    "shadow_benchmark": "none_verified",
+                    "ai_timeout_active_blocker": False,
+                    "runtime_truth_generated_at": "2026-04-26T06:30:00Z",
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    projection = mod.load_artifact_runtime_projection(tmp_path, "2026-04-26T07:01:00Z")
+    live_facts = {
+        "latest_decision_id": "decision_new",
+        "portfolio_allocation_decisions": 11,
+        "execution_fills": 2,
+        "shadow_benchmark": "none_verified",
+        "ai_timeout_active_blocker": False,
+    }
+
+    status = mod.summarize_artifact_runtime_status(
+        artifact_projection=projection,
+        live_facts=live_facts,
+        report_generated_at="2026-04-26T07:01:00Z",
+    )
+
+    assert status["status"] == "stale_mismatch"
+    assert status["may_override_live"] is False
+    assert {item["fact"] for item in status["mismatched_facts"]} == {
+        "latest_decision_id",
+        "portfolio_allocation_decisions",
+    }
+
+
+def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
+    mod = load_module()
+    report = {
+        "scope": {"shadow_benchmark": "none_verified"},
+        "runtime": {
+            "ai_timeout_active_blocker": False,
+            "dashboard_bundle": {
+                "status": "auth_required",
+                "effective_operating_mode": {
+                    "status": "unknown_auth_required",
+                    "value": None,
+                },
+                "profile_auto_control_effective": {
+                    "status": "unknown_auth_required",
+                    "value": None,
+                },
+            },
+            "artifact_last_known": {
+                "latest_decision_id": "decision_old",
+                "portfolio_allocation_decisions": 10,
+            },
+        },
+        "database_truth": {
+            "ok": True,
+            "portfolio_allocation_decisions": 11,
+            "execution_fills": 2,
+            "latest_decision": {
+                "decision_id": "decision_new",
+                "route_action": "advisory_only",
+                "symbol": "BTC-USDT-SWAP",
+                "primary_family": "independent",
+            },
+        },
+        "git": {
+            "deployed_matches_windows": True,
+            "windows": {
+                "dirty": False,
+                "origin_divergence": {"ahead": 0, "behind": 0},
+            },
+        },
+        "deployment_health": {
+            "gateway_health": {"ok": True},
+            "containers": {"all_required_app_containers_healthy": True},
+        },
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+    authority = mod.summarize_runtime_fact_authority(
+        live_facts=live_facts,
+        artifact_status={"status": "stale_mismatch"},
+    )
+
+    assert live_facts["latest_decision_id"] == "decision_new"
+    assert live_facts["portfolio_allocation_decisions"] == 11
+    assert authority["authoritative_source"] == "runtime.live_runtime_facts"
+    assert authority["artifact_may_override_live"] is False

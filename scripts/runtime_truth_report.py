@@ -49,6 +49,15 @@ STATIC_MARKERS = {
         "阻断维度",
     ),
 }
+ARTIFACT_STALE_AFTER_SECONDS = 1800
+ARTIFACT_COMPARE_FACTS = (
+    "latest_decision_id",
+    "latest_decision_route_action",
+    "portfolio_allocation_decisions",
+    "execution_fills",
+    "shadow_benchmark",
+    "ai_timeout_active_blocker",
+)
 
 SECRET_PATTERNS = (
     re.compile(r"(?i)(postgres(?:ql)?(?:\+[a-z0-9_]+)?://)[^\s'\"<>]+"),
@@ -91,6 +100,27 @@ print(json.dumps({
 
 def utc_now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def parse_utc_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
+
+def seconds_between(start: datetime | None, end: datetime | None) -> int | None:
+    if start is None or end is None:
+        return None
+    return max(0, int((end - start).total_seconds()))
 
 
 def redact_secret_text(value: str | None) -> str:
@@ -439,7 +469,34 @@ def static_truth_surface(api_base: str) -> dict[str, Any]:
 
 
 def load_artifact_runtime_facts(repo_root: Path) -> dict[str, Any]:
+    return load_artifact_runtime_projection(repo_root, utc_now_iso())["facts"]
+
+
+def _merge_artifact_runtime_facts(
+    *,
+    facts: dict[str, Any],
+    sources: list[dict[str, Any]],
+    rel: Path,
+    kind: str,
+    payload_generated_at: Any,
+    runtime_facts: Any,
+) -> None:
+    if not isinstance(runtime_facts, dict):
+        return
+    facts.update(runtime_facts)
+    sources.append(
+        {
+            "path": rel.as_posix(),
+            "kind": kind,
+            "generated_at": runtime_facts.get("runtime_truth_generated_at") or payload_generated_at,
+            "fact_keys": sorted(str(key) for key in runtime_facts.keys()),
+        },
+    )
+
+
+def load_artifact_runtime_projection(repo_root: Path, report_generated_at: str) -> dict[str, Any]:
     facts: dict[str, Any] = {}
+    sources: list[dict[str, Any]] = []
     for rel in (
         Path("artifacts/automation/task_registry.json"),
         Path("artifacts/automation/current_state.json"),
@@ -451,12 +508,146 @@ def load_artifact_runtime_facts(repo_root: Path) -> dict[str, Any]:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if isinstance(payload.get("latest_runtime_facts"), dict):
-            facts.update(payload["latest_runtime_facts"])
+        payload_generated_at = payload.get("generated_at")
+        _merge_artifact_runtime_facts(
+            facts=facts,
+            sources=sources,
+            rel=rel,
+            kind="latest_runtime_facts",
+            payload_generated_at=payload_generated_at,
+            runtime_facts=payload.get("latest_runtime_facts"),
+        )
         latest = payload.get("latest_pm_loop_check")
         if isinstance(latest, dict) and isinstance(latest.get("runtime_truth"), dict):
-            facts.update(latest["runtime_truth"])
-    return facts
+            _merge_artifact_runtime_facts(
+                facts=facts,
+                sources=sources,
+                rel=rel,
+                kind="latest_pm_loop_check.runtime_truth",
+                payload_generated_at=latest.get("completed_at") or payload_generated_at,
+                runtime_facts=latest.get("runtime_truth"),
+            )
+    return {
+        "facts": facts,
+        "sources": sources,
+        "status": {
+            "source": "artifact_last_known",
+            "status": "pending_live_comparison",
+            "may_override_live": False,
+            "report_generated_at": report_generated_at,
+        },
+    }
+
+
+def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
+    db = report.get("database_truth") or {}
+    dashboard = ((report.get("runtime") or {}).get("dashboard_bundle") or {})
+    git = report.get("git") or {}
+    health = report.get("deployment_health") or {}
+    latest = db.get("latest_decision") if isinstance(db.get("latest_decision"), dict) else {}
+
+    return {
+        "source": "live_runtime",
+        "authoritative": True,
+        "may_be_overridden_by_artifact": False,
+        "latest_decision_id": latest.get("decision_id"),
+        "latest_decision_route_action": latest.get("route_action"),
+        "latest_decision_symbol": latest.get("symbol"),
+        "latest_decision_primary_family": latest.get("primary_family"),
+        "portfolio_allocation_decisions": db.get("portfolio_allocation_decisions") if db.get("ok") else None,
+        "execution_fills": db.get("execution_fills") if db.get("ok") else None,
+        "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),
+        "effective_operating_mode_status": (dashboard.get("effective_operating_mode") or {}).get("status"),
+        "profile_auto_control_effective": (dashboard.get("profile_auto_control_effective") or {}).get("value"),
+        "profile_auto_control_status": (dashboard.get("profile_auto_control_effective") or {}).get("status"),
+        "dashboard_bundle_status": dashboard.get("status"),
+        "deployed_matches_windows": git.get("deployed_matches_windows"),
+        "windows_dirty": ((git.get("windows") or {}).get("dirty")),
+        "windows_origin_divergence": ((git.get("windows") or {}).get("origin_divergence")),
+        "gateway_health_ok": ((health.get("gateway_health") or {}).get("ok")),
+        "required_app_containers_healthy": ((health.get("containers") or {}).get("all_required_app_containers_healthy")),
+        "shadow_benchmark": ((report.get("scope") or {}).get("shadow_benchmark")),
+        "ai_timeout_active_blocker": ((report.get("runtime") or {}).get("ai_timeout_active_blocker")),
+    }
+
+
+def summarize_artifact_runtime_status(
+    *,
+    artifact_projection: dict[str, Any],
+    live_facts: dict[str, Any],
+    report_generated_at: str,
+) -> dict[str, Any]:
+    artifact_facts = artifact_projection.get("facts") or {}
+    sources = artifact_projection.get("sources") or []
+    report_time = parse_utc_timestamp(report_generated_at)
+
+    newest_source_time: datetime | None = None
+    newest_source_at: str | None = None
+    for source in sources:
+        source_time = parse_utc_timestamp(source.get("generated_at"))
+        if source_time is not None and (newest_source_time is None or source_time > newest_source_time):
+            newest_source_time = source_time
+            newest_source_at = source.get("generated_at")
+
+    mismatches: list[dict[str, Any]] = []
+    compared: list[str] = []
+    for fact in ARTIFACT_COMPARE_FACTS:
+        if fact not in artifact_facts or fact not in live_facts:
+            continue
+        compared.append(fact)
+        if artifact_facts.get(fact) != live_facts.get(fact):
+            mismatches.append(
+                {
+                    "fact": fact,
+                    "artifact_value": artifact_facts.get(fact),
+                    "live_value": live_facts.get(fact),
+                },
+            )
+
+    age_seconds = seconds_between(newest_source_time, report_time)
+    age_stale = age_seconds is not None and age_seconds > ARTIFACT_STALE_AFTER_SECONDS
+    if not artifact_facts:
+        status = "missing_artifact"
+    elif mismatches:
+        status = "stale_mismatch"
+    elif age_stale:
+        status = "age_stale"
+    elif compared:
+        status = "fresh_match"
+    else:
+        status = "missing_live_comparison"
+
+    return {
+        "source": "artifact_last_known",
+        "status": status,
+        "may_override_live": False,
+        "report_generated_at": report_generated_at,
+        "newest_source_generated_at": newest_source_at,
+        "newest_source_age_seconds": age_seconds,
+        "stale_after_seconds": ARTIFACT_STALE_AFTER_SECONDS,
+        "age_stale": age_stale,
+        "compared_facts": compared,
+        "mismatched_facts": mismatches,
+        "source_count": len(sources),
+    }
+
+
+def summarize_runtime_fact_authority(
+    *,
+    live_facts: dict[str, Any],
+    artifact_status: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "policy": "live_runtime_facts_are_authoritative",
+        "authoritative_source": "runtime.live_runtime_facts",
+        "fallback_reference_source": "runtime.artifact_last_known",
+        "artifact_may_override_live": False,
+        "artifact_status": artifact_status.get("status"),
+        "artifact_stale_blocks_runtime": False,
+        "authoritative_fact_keys": sorted(
+            key for key, value in live_facts.items() if key not in {"source", "authoritative"} and value is not None
+        ),
+    }
 
 
 def collect_blocking_findings(report: dict[str, Any]) -> list[str]:
@@ -483,9 +674,11 @@ def collect_blocking_findings(report: dict[str, Any]) -> list[str]:
 
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     repo_root = Path(args.repo_root).resolve()
+    generated_at = utc_now_iso()
+    artifact_projection = load_artifact_runtime_projection(repo_root, generated_at)
     report: dict[str, Any] = {
         "ok": True,
-        "generated_at": utc_now_iso(),
+        "generated_at": generated_at,
         "scope": {
             "venue": "OKX",
             "symbol": "BTC-USDT-SWAP",
@@ -496,16 +689,30 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "deployment_health": deployment_health(args.api_base, args.wsl_distro),
         "runtime": {
             "dashboard_bundle": dashboard_bundle_probe(args.api_base),
-            "artifact_last_known": load_artifact_runtime_facts(repo_root),
+            "artifact_last_known": artifact_projection["facts"],
+            "artifact_last_known_sources": artifact_projection["sources"],
+            "artifact_last_known_status": artifact_projection["status"],
         },
         "database_truth": database_truth_probe(args.wsl_distro, args.gateway_container),
         "static_truth_surface": static_truth_surface(args.api_base),
     }
-    report["blocking_findings"] = collect_blocking_findings(report)
     report["runtime"]["ai_timeout_active_blocker"] = False
     runtime_mode = report["runtime"]["dashboard_bundle"].get("effective_operating_mode", {})
     if runtime_mode.get("value") not in (None, "baseline_only"):
         report["runtime"]["ai_timeout_active_blocker"] = "requires_provider_path_evidence"
+    live_facts = project_live_runtime_facts(report)
+    artifact_status = summarize_artifact_runtime_status(
+        artifact_projection=artifact_projection,
+        live_facts=live_facts,
+        report_generated_at=generated_at,
+    )
+    report["runtime"]["live_runtime_facts"] = live_facts
+    report["runtime"]["artifact_last_known_status"] = artifact_status
+    report["runtime"]["fact_authority"] = summarize_runtime_fact_authority(
+        live_facts=live_facts,
+        artifact_status=artifact_status,
+    )
+    report["blocking_findings"] = collect_blocking_findings(report)
     return report
 
 
