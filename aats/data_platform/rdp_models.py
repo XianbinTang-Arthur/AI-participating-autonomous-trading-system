@@ -1169,6 +1169,33 @@ class BronzeMarketLongShortRatio5mModel(RdpBase):
     )
 
 
+class BronzeMarketLongShortRatio1hModel(RdpBase):
+    """bronze.market_long_short_ratio_1h — OKX REST long-short-account-ratio 回填.
+
+    来源: /api/v5/rubik/stat/contracts/long-short-account-ratio (period=1H).
+    与 5m 表 schema 保持一致。1H 粒度用于补足 OKX 5m 历史窗口较短导致的
+    research lookback 缺口。
+    """
+    __tablename__ = "market_long_short_ratio_1h"
+    __table_args__ = (
+        PrimaryKeyConstraint("symbol", "ts", name="market_long_short_ratio_1h_pkey"),
+        Index("idx_brz_ls_ratio_1h_ts", "ts"),
+        Index("idx_brz_ls_ratio_1h_sym_ts", "symbol", "ts"),
+        {"schema": "bronze"},
+    )
+
+    symbol = Column(Text, nullable=False)
+    ts = Column(DateTime(timezone=True), nullable=False)             # 1h bar 起点 (UTC)
+    ls_ratio_positions = Column(Numeric(18, 10))
+    ls_ratio_accounts = Column(Numeric(18, 10))
+    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    received_at = Column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
 # =====================================================================
 # RESEARCH Schema — 3 张表
 # =====================================================================

@@ -15,6 +15,7 @@ Batch B 做十件事:
   - batch_b_11_silver_numeric_widen.sql: P0-a Silver vol_weighted_tfi 精度扩展
   - batch_b_12_orderbook_payloads.sql: execution science orderbook payload sidecar
   - batch_b_13_rdp_collection_modeling_hygiene.sql: collection/modeling hygiene
+  - batch_b_14_ls_ratio_1h_schedule.sql: official 1H long-short ratio bronze table
 
 每个 stage 对应一个 rollback SQL,逆序回滚。
 
@@ -51,6 +52,7 @@ BATCH_B_STAGES: tuple[str, ...] = (
     "batch_b_11_silver_numeric_widen",
     "batch_b_12_orderbook_payloads",
     "batch_b_13_rdp_collection_modeling_hygiene",
+    "batch_b_14_ls_ratio_1h_schedule",
 )
 
 

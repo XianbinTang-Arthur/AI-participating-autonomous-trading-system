@@ -4,9 +4,10 @@
   - bronze.market_oi_history_1h              (symbol, ts) PK
   - bronze.market_mark_price_candles_1m      (symbol, ts) PK
   - bronze.market_long_short_ratio_5m        (symbol, ts) PK
+  - bronze.market_long_short_ratio_1h        (symbol, ts) PK
 
 测试策略 (对齐 test_microstructure_bronze_schema 的 Stage 1 子集):
-  1. 3 张表的 ORM round-trip 正确 (insert → select → field match)
+  1. 4 张表的 ORM round-trip 正确 (insert → select → field match)
   2. PK 冲突检测: 同 (symbol, ts) 二次 insert 触发 IntegrityError
   3. LS ratio 两列都 nullable (OKX 实际只返回 account-based)
   4. Mark candles OHLC 全 required, 缺一 INSERT 失败
@@ -52,6 +53,7 @@ def _compile_bigint_sqlite(_type, _compiler, **_kw):  # type: ignore[unused-argu
 
 
 from aats.data_platform.rdp_models import (  # noqa: E402
+    BronzeMarketLongShortRatio1hModel,
     BronzeMarketLongShortRatio5mModel,
     BronzeMarketMarkPriceCandles1mModel,
     BronzeMarketOIHistory1hModel,
@@ -83,6 +85,7 @@ def _make_sqlite_engine():
         BronzeMarketOIHistory1hModel.__table__,
         BronzeMarketMarkPriceCandles1mModel.__table__,
         BronzeMarketLongShortRatio5mModel.__table__,
+        BronzeMarketLongShortRatio1hModel.__table__,
     ]
     RdpBase.metadata.create_all(engine, tables=tables)
     return engine
@@ -92,7 +95,7 @@ _SAMPLE_TS = datetime(2026, 3, 20, 0, 0, 0, tzinfo=timezone.utc)
 
 
 # =====================================================================
-# Case 1: 3 张表 ORM round-trip 正确
+# Case 1: 4 张表 ORM round-trip 正确
 # =====================================================================
 
 
@@ -126,6 +129,12 @@ class TestStage5SchemaRoundtrip(unittest.TestCase):
                 # ls_ratio_positions 故意 NULL (OKX 常只返回 accounts)
                 ingest_run_id=run_id,
             ))
+            session.add(BronzeMarketLongShortRatio1hModel(
+                symbol="BTC-USDT-SWAP",
+                ts=_SAMPLE_TS,
+                ls_ratio_accounts=Decimal("1.08"),
+                ingest_run_id=run_id,
+            ))
             session.commit()
 
             oi = session.query(BronzeMarketOIHistory1hModel).one()
@@ -144,6 +153,9 @@ class TestStage5SchemaRoundtrip(unittest.TestCase):
             ls = session.query(BronzeMarketLongShortRatio5mModel).one()
             self.assertAlmostEqual(float(ls.ls_ratio_accounts), 1.07, places=2)
             self.assertIsNone(ls.ls_ratio_positions)
+
+            ls_1h = session.query(BronzeMarketLongShortRatio1hModel).one()
+            self.assertAlmostEqual(float(ls_1h.ls_ratio_accounts), 1.08, places=2)
 
 
 # =====================================================================
@@ -258,6 +270,7 @@ class TestStage5RollbackSQL(unittest.TestCase):
             session.commit()
         tables = [
             BronzeMarketLongShortRatio5mModel.__table__,
+            BronzeMarketLongShortRatio1hModel.__table__,
             BronzeMarketMarkPriceCandles1mModel.__table__,
             BronzeMarketOIHistory1hModel.__table__,
         ]

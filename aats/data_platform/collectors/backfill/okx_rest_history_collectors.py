@@ -10,7 +10,7 @@
   - 支持 `--dry-run` 计算预估而不发请求
   - INSERT ... ON CONFLICT (PK) DO NOTHING 幂等
   - 用 `aats.data_platform.jobs.run_registry.create_ingest_run` 记
-    ingest_run (dataset_domain='microstructure', trigger_mode='manual')
+    ingest_run (dataset_domain='microstructure', trigger_mode 由 CLI/调用方决定)
   - 用 `aats.data_platform.jobs.checkpoint_manager.upsert_checkpoint` 记
     进度, 支持 resume
   - 每 N rows 打 progress 日志
@@ -20,8 +20,8 @@
      → bronze.market_oi_history_1h
   2. /api/v5/market/mark-price-candles-history (period=1m)
      → bronze.market_mark_price_candles_1m
-  3. /api/v5/rubik/stat/contracts/long-short-account-ratio (period=5m)
-     → bronze.market_long_short_ratio_5m
+  3. /api/v5/rubik/stat/contracts/long-short-account-ratio (period=5m/1H)
+     → bronze.market_long_short_ratio_5m / bronze.market_long_short_ratio_1h
 
 参数名约定 (OKX v5):
   - OI history: instId, period, begin, end, limit (ts_ms based)
@@ -739,6 +739,26 @@ def _write_bronze_mark_candles(
 
 
 LS_RATIO_PATH = "/api/v5/rubik/stat/contracts/long-short-account-ratio"
+LS_RATIO_PERIOD_TABLES = {
+    "5m": ("bronze.market_long_short_ratio_5m", "ls_5m"),
+    "1H": ("bronze.market_long_short_ratio_1h", "ls_1h"),
+}
+
+
+def normalize_ls_period(period: str) -> str:
+    """Normalize supported OKX long-short ratio periods to storage keys."""
+    p = str(period).strip()
+    if p.lower() == "1h":
+        return "1H"
+    return p
+
+
+def ls_ratio_storage_for_period(period: str) -> tuple[str, str]:
+    normalized = normalize_ls_period(period)
+    try:
+        return LS_RATIO_PERIOD_TABLES[normalized]
+    except KeyError as exc:
+        raise ValueError(f"unsupported LS ratio storage period: {period}") from exc
 
 
 def normalize_ls_symbol(ccy: str) -> str:
@@ -776,6 +796,7 @@ def _oldest_ls_ts_ms(item: list[str]) -> int:
 
 
 def estimate_ls_ratio_requests(target_days: int, period: str = "5m") -> dict[str, Any]:
+    period = normalize_ls_period(period)
     tf_min = {"5m": 5, "15m": 15, "30m": 30, "1H": 60}.get(period)
     if tf_min is None:
         raise ValueError(f"unsupported period: {period}")
@@ -806,7 +827,7 @@ def collect_ls_ratio_history(
     dry_run: bool = False,
     ingest_run_id: str | None = None,
 ) -> BackfillStats:
-    """回填 OKX `long-short-account-ratio` 到 bronze.market_long_short_ratio_5m.
+    """回填 OKX `long-short-account-ratio` 到 Bronze long-short ratio 表.
 
     ccy: "BTC" / "ETH" (OKX 用 ccy 不 instId). 我们在 Bronze 里规范化为 "BTC-USDT-SWAP".
     """
@@ -816,6 +837,8 @@ def collect_ls_ratio_history(
     from aats.data_platform.models import utc_now
 
     t0 = time.monotonic()
+    period = normalize_ls_period(period)
+    _, checkpoint_timeframe = ls_ratio_storage_for_period(period)
     end_ts = utc_now()
     start_ts = end_ts - timedelta(days=target_days)
     symbol = normalize_ls_symbol(ccy)
@@ -871,7 +894,9 @@ def collect_ls_ratio_history(
         stats.latest_ts = max(r["ts"] for r in rows)
 
     if rows and ingest_run_id is not None:
-        written = _write_bronze_ls_ratio(session, rows, ingest_run_id)
+        written = _write_bronze_ls_ratio(
+            session, rows, ingest_run_id, period=period,
+        )
         stats.rows_written = written
         stats.rows_skipped_conflict = len(rows) - written
 
@@ -881,7 +906,7 @@ def collect_ls_ratio_history(
                 dataset_domain="microstructure",
                 instrument_type="swap",
                 symbol=symbol,
-                timeframe="ls_5m",
+                timeframe=checkpoint_timeframe,
                 last_successful_ts=stats.latest_ts,
                 last_ingest_run_id=ingest_run_id,
             )
@@ -904,14 +929,17 @@ def _write_bronze_ls_ratio(
     session: "Session",
     rows: list[dict[str, Any]],
     ingest_run_id: str,
+    *,
+    period: str = "5m",
 ) -> int:
     from sqlalchemy import text
 
     if not rows:
         return 0
 
-    sql = text("""
-        INSERT INTO bronze.market_long_short_ratio_5m
+    table_name, _ = ls_ratio_storage_for_period(period)
+    sql = text(f"""
+        INSERT INTO {table_name}
             (symbol, ts, ls_ratio_positions, ls_ratio_accounts, ingest_run_id)
         VALUES
             (:symbol, :ts, :ls_ratio_positions, :ls_ratio_accounts, :ingest_run_id)

@@ -32,6 +32,7 @@ from aats.data_platform.collectors.backfill.okx_rest_history_collectors import (
     estimate_ls_ratio_requests,
     estimate_mark_candles_requests,
     estimate_oi_history_requests,
+    ls_ratio_storage_for_period,
     normalize_ls_symbol,
 )
 
@@ -207,6 +208,21 @@ class TestEstimates(unittest.TestCase):
         self.assertEqual(est["estimated_rows"], 8640)  # 288×30
         self.assertEqual(est["estimated_pages"], 87)
 
+    def test_ls_30d_1h(self) -> None:
+        est = estimate_ls_ratio_requests(30, "1H")
+        self.assertEqual(est["estimated_rows"], 720)  # 24×30
+        self.assertEqual(est["estimated_pages"], 8)
+
+    def test_ls_storage_for_period(self) -> None:
+        self.assertEqual(
+            ls_ratio_storage_for_period("5m"),
+            ("bronze.market_long_short_ratio_5m", "ls_5m"),
+        )
+        self.assertEqual(
+            ls_ratio_storage_for_period("1h"),
+            ("bronze.market_long_short_ratio_1h", "ls_1h"),
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────
 # collect_* dry-run (不发请求, 返回 estimate)
@@ -248,6 +264,18 @@ class TestCollectDryRun(unittest.TestCase):
         )
         self.assertEqual(stats.symbol, "BTC-USDT-SWAP")
         self.assertEqual(stats.rows_fetched, 8640)
+
+    def test_ls_1h_dry_run_no_http(self) -> None:
+        stats = collect_ls_ratio_history(
+            session=MagicMock(),
+            ccy="BTC",
+            target_days=30,
+            period="1H",
+            dry_run=True,
+        )
+        self.assertEqual(stats.symbol, "BTC-USDT-SWAP")
+        self.assertEqual(stats.period, "1H")
+        self.assertEqual(stats.rows_fetched, 720)
 
 
 # ─────────────────────────────────────────────────────────────────────

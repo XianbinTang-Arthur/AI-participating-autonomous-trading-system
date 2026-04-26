@@ -8,13 +8,13 @@
      → bronze.market_oi_history_1h
   2. /api/v5/market/mark-price-candles-history (period=1m)
      → bronze.market_mark_price_candles_1m
-  3. /api/v5/rubik/stat/contracts/long-short-account-ratio (period=5m)
-     → bronze.market_long_short_ratio_5m
+  3. /api/v5/rubik/stat/contracts/long-short-account-ratio (period=5m/1H)
+     → bronze.market_long_short_ratio_5m / bronze.market_long_short_ratio_1h
 
 三层保护:
   --dry-run (default): 只计算预估, 不发请求不写 DB. 显示预期 pages/rows/时长.
   --apply:             真发请求, 走 ingest_run + checkpoint 流程.
-  --verify:            只查 3 张 Bronze 表行数 + min/max ts, 不发请求不写 DB.
+  --verify:            只查 Bronze 表行数 + min/max ts, 不发请求不写 DB.
 
 用法:
     # 1. 看看要发多少请求、拉多少行
@@ -145,6 +145,7 @@ def run_verify(symbol: str) -> int:
         ("bronze.market_oi_history_1h", symbol),
         ("bronze.market_mark_price_candles_1m", symbol),
         ("bronze.market_long_short_ratio_5m", symbol),
+        ("bronze.market_long_short_ratio_1h", symbol),
     ]
     print()
     print("=" * 80)
@@ -193,6 +194,7 @@ def run_oi_history(
     dry_run: bool,
     base_url: str,
     rate_limit_sleep: float,
+    trigger_mode: str,
 ) -> dict[str, Any]:
     from aats.data_platform.collectors.backfill.okx_rest_history_collectors import (
         collect_oi_history,
@@ -220,7 +222,7 @@ def run_oi_history(
             instrument_type=instrument_type_for_symbol(symbol),
             symbol=symbol,
             timeframe="oi_1h",
-            trigger_mode="manual",
+            trigger_mode=trigger_mode,
         )
         session.commit()  # 独立事务创建 run, 后续写数据另起
         try:
@@ -252,6 +254,7 @@ def run_mark_candles(
     dry_run: bool,
     base_url: str,
     rate_limit_sleep: float,
+    trigger_mode: str,
 ) -> dict[str, Any]:
     from aats.data_platform.collectors.backfill.okx_rest_history_collectors import (
         collect_mark_candles_history,
@@ -279,7 +282,7 @@ def run_mark_candles(
             instrument_type=instrument_type_for_symbol(symbol),
             symbol=symbol,
             timeframe="mark_1m",
-            trigger_mode="manual",
+            trigger_mode=trigger_mode,
         )
         session.commit()
         try:
@@ -308,13 +311,16 @@ def run_ls_ratio(
     *,
     ccy: str,
     days: int,
+    period: str,
     dry_run: bool,
     base_url: str,
     rate_limit_sleep: float,
+    trigger_mode: str,
 ) -> dict[str, Any]:
     from aats.data_platform.collectors.backfill.okx_rest_history_collectors import (
         collect_ls_ratio_history,
         estimate_ls_ratio_requests,
+        ls_ratio_storage_for_period,
         normalize_ls_symbol,
     )
     from aats.data_platform.jobs.run_registry import (
@@ -323,13 +329,14 @@ def run_ls_ratio(
     )
 
     if dry_run:
-        est = estimate_ls_ratio_requests(days, "5m")
-        log.info("[LS dry-run] ccy=%s: %d pages, %d rows, ~%.1fs",
-                 ccy, est["estimated_pages"], est["estimated_rows"],
+        est = estimate_ls_ratio_requests(days, period)
+        log.info("[LS dry-run] ccy=%s period=%s: %d pages, %d rows, ~%.1fs",
+                 ccy, period, est["estimated_pages"], est["estimated_rows"],
                  est["estimated_seconds_at_default_rate"])
         return est
 
     sym = normalize_ls_symbol(ccy)
+    _, timeframe = ls_ratio_storage_for_period(period)
     engine, SessionMaker = _build_session_factory(resolve_db_url())
     with SessionMaker() as session:
         run_id = create_ingest_run(
@@ -338,8 +345,8 @@ def run_ls_ratio(
             dataset_domain="microstructure",
             instrument_type="swap",
             symbol=sym,
-            timeframe="ls_5m",
-            trigger_mode="manual",
+            timeframe=timeframe,
+            trigger_mode=trigger_mode,
         )
         session.commit()
         try:
@@ -347,7 +354,7 @@ def run_ls_ratio(
                 session,
                 ccy=ccy,
                 target_days=days,
-                period="5m",
+                period=period,
                 base_url=base_url,
                 rate_limit_sleep=rate_limit_sleep,
                 dry_run=False,
@@ -395,6 +402,10 @@ def main() -> int:
     ap.add_argument("--days-oi", type=int, default=90)
     ap.add_argument("--days-mark", type=int, default=30)
     ap.add_argument("--days-ls", type=int, default=30)
+    ap.add_argument(
+        "--days-ls-1h", type=int, default=30,
+        help="1H long-short ratio 回填窗口天数; 仅在 --include-ls-1h 时使用",
+    )
     ap.add_argument("--base-url", default="https://www.okx.com")
     ap.add_argument("--rate-limit-sleep", type=float, default=0.15,
                     help="请求间隔 (秒), 默认 0.15 = 6.7 req/s, "
@@ -402,6 +413,17 @@ def main() -> int:
     ap.add_argument("--skip-oi", action="store_true")
     ap.add_argument("--skip-mark", action="store_true")
     ap.add_argument("--skip-ls", action="store_true")
+    ap.add_argument(
+        "--include-ls-1h", action="store_true",
+        help="同时采集 OKX long-short-account-ratio period=1H "
+             "→ bronze.market_long_short_ratio_1h",
+    )
+    ap.add_argument(
+        "--trigger-mode",
+        choices=("manual", "scheduler"),
+        default="manual",
+        help="写入 meta.ingest_runs.trigger_mode 的来源; scheduler workflow 必须传 scheduler",
+    )
     ap.add_argument("--apply", action="store_true",
                     help="实际发 OKX REST 请求 + 写 DB (默认 dry-run)")
     ap.add_argument("--verify", action="store_true",
@@ -430,6 +452,10 @@ def main() -> int:
     log.info("OKX REST 历史 backfill — %s mode", mode_label)
     log.info("  symbol=%s ccy=%s days_oi=%d days_mark=%d days_ls=%d",
              args.symbol, args.ccy, args.days_oi, args.days_mark, args.days_ls)
+    if args.include_ls_1h:
+        log.info("  days_ls_1h=%d trigger_mode=%s", args.days_ls_1h, args.trigger_mode)
+    else:
+        log.info("  trigger_mode=%s", args.trigger_mode)
     log.info("  base_url=%s rate_limit_sleep=%.3fs",
              args.base_url, args.rate_limit_sleep)
     log.info("=" * 80)
@@ -447,6 +473,8 @@ def main() -> int:
         estimates.append(estimate_mark_candles_requests(args.days_mark, "1m"))
     if not args.skip_ls:
         estimates.append(estimate_ls_ratio_requests(args.days_ls, "5m"))
+    if args.include_ls_1h:
+        estimates.append(estimate_ls_ratio_requests(args.days_ls_1h, "1H"))
     warn_if_excessive(estimates)
 
     results: dict[str, Any] = {
@@ -464,6 +492,7 @@ def main() -> int:
             results["oi"] = run_oi_history(
                 symbol=args.symbol, days=args.days_oi, dry_run=dry_run,
                 base_url=args.base_url, rate_limit_sleep=args.rate_limit_sleep,
+                trigger_mode=args.trigger_mode,
             )
         except Exception as exc:
             log.exception("OI backfill failed: %s", exc)
@@ -476,6 +505,7 @@ def main() -> int:
             results["mark"] = run_mark_candles(
                 symbol=args.symbol, days=args.days_mark, dry_run=dry_run,
                 base_url=args.base_url, rate_limit_sleep=args.rate_limit_sleep,
+                trigger_mode=args.trigger_mode,
             )
         except Exception as exc:
             log.exception("MARK backfill failed: %s", exc)
@@ -486,12 +516,26 @@ def main() -> int:
         log.info("--- Long-short ratio (period=5m, %d days) ---", args.days_ls)
         try:
             results["ls"] = run_ls_ratio(
-                ccy=args.ccy, days=args.days_ls, dry_run=dry_run,
+                ccy=args.ccy, days=args.days_ls, period="5m", dry_run=dry_run,
                 base_url=args.base_url, rate_limit_sleep=args.rate_limit_sleep,
+                trigger_mode=args.trigger_mode,
             )
         except Exception as exc:
             log.exception("LS backfill failed: %s", exc)
             results["ls_error"] = str(exc)
+            any_failed = True
+
+    if args.include_ls_1h:
+        log.info("--- Long-short ratio (period=1H, %d days) ---", args.days_ls_1h)
+        try:
+            results["ls_1h"] = run_ls_ratio(
+                ccy=args.ccy, days=args.days_ls_1h, period="1H", dry_run=dry_run,
+                base_url=args.base_url, rate_limit_sleep=args.rate_limit_sleep,
+                trigger_mode=args.trigger_mode,
+            )
+        except Exception as exc:
+            log.exception("LS 1H backfill failed: %s", exc)
+            results["ls_1h_error"] = str(exc)
             any_failed = True
 
     results["finished_at"] = datetime.now(timezone.utc).isoformat()
