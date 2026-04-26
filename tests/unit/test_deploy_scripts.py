@@ -69,3 +69,11 @@ def test_deploy_script_provisions_tls_for_live_profiles_and_uses_https_health_ch
     assert "AATS_OPERATOR_TLS_KEY_FILE" in compose_text
     assert "runtime/operator-tls:/app/deploy/wsl2-dev/runtime/operator-tls:ro" in compose_text
     assert "curl -kfs https://localhost:${AATS_API_PORT:-8000}/healthz" in compose_text
+
+
+def test_derivatives_live_overlay_enables_execution_command_flow() -> None:
+    compose_text = (
+        REPO_ROOT / "deploy" / "wsl2-dev" / "docker-compose.aats.derivatives-live.yml"
+    ).read_text(encoding="utf-8")
+
+    assert 'AATS_EXECUTION_COMMAND_FLOW_ENABLED: "true"' in compose_text

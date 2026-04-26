@@ -18,6 +18,7 @@ name: aats-dev
 
 x-aats-derivatives-live-env: &aats-derivatives-live-env
   AATS_PROFILE: derivatives_live
+  AATS_EXECUTION_COMMAND_FLOW_ENABLED: "true"
 
 services:
   aats-gateway:

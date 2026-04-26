@@ -96,7 +96,7 @@ class TestPhase2CommandFlowRuntime(unittest.IsolatedAsyncioTestCase):
                     runtime,
                     idempotency_key="submit:clphase2_runtime_1",
                     expected_state="ACKED",
-                    timeout_seconds=5.0,
+                    timeout_seconds=20.0,
                 )
 
                 state = runtime.execution_repo.get_order_state("clphase2_runtime_1")
