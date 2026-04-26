@@ -158,18 +158,23 @@ def test_parse_db_probe_returns_only_json_payload() -> None:
     assert "payload" not in latest
     assert latest["execution_chain"]["db_order_count"] == 0
     assert latest["execution_chain"]["strategy_sleeve_intent_ref_count"] == 2
-    assert latest["no_trade_attribution"] == {
-        "classification": "no_order_fill_expected_for_latest_decision",
-        "primary_blocker": "strategy_signal_below_entry_threshold",
-        "is_current_no_trade": True,
-        "reason_codes": [
-            "allocator_primary_family_independent",
-            "independent_long_book_signal_below_entry_threshold",
-        ],
-        "operator_summary": "no executable allocation",
-        "execution_legs_count": 0,
-        "sleeve_intent_summary": [],
-    }
+    attribution = latest["no_trade_attribution"]
+    assert attribution["classification"] == "no_order_fill_expected_for_latest_decision"
+    assert attribution["primary_blocker"] == "strategy_signal_below_entry_threshold"
+    assert attribution["is_current_no_trade"] is True
+    assert attribution["final_blockers"] == [
+        "strategy_signal_below_entry_threshold",
+        "allocator_zero_notional_advisory",
+        "no_execution_plan_emitted",
+    ]
+    assert attribution["contributing_factors"] == []
+    assert attribution["reason_codes"] == [
+        "allocator_primary_family_independent",
+        "independent_long_book_signal_below_entry_threshold",
+    ]
+    assert attribution["operator_summary"] == "no executable allocation"
+    assert attribution["execution_legs_count"] == 0
+    assert attribution["sleeve_intent_summary"] == []
 
 
 def test_latest_decision_no_trade_attribution_detects_inactive_hold_only() -> None:
@@ -216,8 +221,92 @@ def test_latest_decision_no_trade_attribution_detects_inactive_hold_only() -> No
     attribution = summarized["no_trade_attribution"]
     assert attribution["is_current_no_trade"] is True
     assert attribution["primary_blocker"] == "strategy_candidate_inactive"
+    assert attribution["final_blockers"] == [
+        "strategy_candidate_inactive",
+        "strategy_hold_only",
+        "allocator_zero_notional_advisory",
+        "no_execution_plan_emitted",
+    ]
     assert attribution["sleeve_intent_summary"][0]["family"] == "independent"
     assert attribution["sleeve_intent_summary"][0]["reason_codes"] == ["independent_family_candidate_inactive"]
+
+
+def test_no_trade_attribution_separates_soft_contraction_from_final_blockers() -> None:
+    mod = load_module()
+    latest = {
+        "allocation_id": "alloc-1",
+        "decision_id": "decision-1",
+        "symbol": "BTC-USDT-SWAP",
+        "route_action": "advisory_only",
+        "primary_family": "independent",
+        "portfolio_requested_notional": "0",
+        "portfolio_approved_notional": "0",
+        "portfolio_budget_cut_notional": "0",
+        "payload": {
+            "reason_codes": [
+                "approved_for_non_protective_execution",
+                "reconciliation_contraction_active",
+                "allocator_budget_assignment_active",
+                "candidate_execution_incompatible",
+                "composed_as_advisory_only",
+                "no_budget_contraction",
+            ],
+            "strategy_sleeve_intents": [
+                {
+                    "family": "directional",
+                    "strategy_sleeve_id": "sleeve-directional",
+                    "route_action": "override_target",
+                    "approved_for_execution": True,
+                    "effective_scale": "0.5",
+                    "target_notional": "780",
+                    "reason_codes": ["directional_strategy_target", "reconciliation_contraction_active"],
+                },
+                {
+                    "family": "independent",
+                    "strategy_sleeve_id": "sleeve-independent",
+                    "route_action": "advisory_only",
+                    "approved_for_execution": False,
+                    "target_notional": "0",
+                    "reason_codes": [
+                        "independent_long_book_signal_below_entry_threshold",
+                        "independent_short_book_signal_below_entry_threshold",
+                        "independent_family_candidate_inactive",
+                    ],
+                },
+            ],
+        },
+    }
+
+    summarized = mod.summarize_latest_decision(
+        latest,
+        {
+            "execution_plan_ref": None,
+            "execution_plan_refs": [],
+            "order_intent_refs": [],
+            "order_state_refs": [],
+            "fill_event_refs": [],
+        },
+        {"execution_orders": 0, "order_states": 0, "execution_fills": 0, "legacy_fill_events": 0},
+    )
+
+    assert summarized is not None
+    attribution = summarized["no_trade_attribution"]
+    assert attribution["primary_blocker"] == "candidate_execution_incompatible"
+    assert "reconciliation_contraction_active" in attribution["contributing_factors"]
+    assert "reconciliation_contraction_active" != attribution["primary_blocker"]
+    assert attribution["final_blockers"] == [
+        "candidate_execution_incompatible",
+        "strategy_candidate_inactive",
+        "strategy_signal_below_entry_threshold",
+        "composed_as_advisory_only",
+        "allocator_zero_notional_advisory",
+        "no_execution_plan_emitted",
+    ]
+    independent = attribution["sleeve_intent_summary"][1]
+    assert independent["family"] == "independent"
+    assert independent["approved_for_execution"] is False
+    assert independent["route_action"] == "advisory_only"
+    assert "independent_family_candidate_inactive" in independent["reason_codes"]
 
 
 def test_blocking_findings_separate_report_generation_from_runtime_state() -> None:

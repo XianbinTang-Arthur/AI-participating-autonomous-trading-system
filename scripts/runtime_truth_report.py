@@ -58,6 +58,12 @@ ARTIFACT_COMPARE_FACTS = (
     "shadow_benchmark",
     "ai_timeout_active_blocker",
 )
+SOFT_CONTRIBUTING_REASON_CODES = {
+    "approved_for_non_protective_execution",
+    "allocator_budget_assignment_active",
+    "no_budget_contraction",
+    "reconciliation_contraction_active",
+}
 
 SECRET_PATTERNS = (
     re.compile(r"(?i)(postgres(?:ql)?(?:\+[a-z0-9_]+)?://)[^\s'\"<>]+"),
@@ -271,6 +277,9 @@ def summarize_sleeve_intents(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "family": item_dict.get("family") or item_dict.get("strategy_family"),
                 "strategy_sleeve_id": item_dict.get("strategy_sleeve_id") or item_dict.get("sleeve_id"),
                 "route_action": item_dict.get("route_action"),
+                "approved_for_execution": item_dict.get("approved_for_execution"),
+                "permission_mode": item_dict.get("permission_mode"),
+                "effective_scale": decimal_text(item_dict.get("effective_scale")),
                 "position_intent": item_dict.get("position_intent"),
                 "target_notional": decimal_text(
                     item_dict.get("target_notional") or item_dict.get("target_exposure_notional")
@@ -283,6 +292,45 @@ def summarize_sleeve_intents(payload: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return summaries
+
+
+def collect_sleeve_reason_codes(sleeve_summaries: list[dict[str, Any]]) -> list[str]:
+    collected: list[Any] = []
+    for sleeve in sleeve_summaries:
+        collected.extend(as_list(sleeve.get("reason_codes")))
+    return compact_unique(collected, limit=24)
+
+
+def classify_final_blockers(
+    *,
+    route_action: Any,
+    requested_notional: Any,
+    execution_chain: dict[str, Any],
+    reason_codes: list[str],
+) -> list[str]:
+    final_blockers: list[str] = []
+    if "candidate_execution_incompatible" in reason_codes:
+        final_blockers.append("candidate_execution_incompatible")
+    if any("candidate_inactive" in code for code in reason_codes):
+        final_blockers.append("strategy_candidate_inactive")
+    if any("signal_below_entry_threshold" in code for code in reason_codes):
+        final_blockers.append("strategy_signal_below_entry_threshold")
+    if any("hold_only" in code for code in reason_codes):
+        final_blockers.append("strategy_hold_only")
+    if "composed_as_advisory_only" in reason_codes:
+        final_blockers.append("composed_as_advisory_only")
+    if route_action == "advisory_only" and not decimal_is_positive(requested_notional):
+        final_blockers.append("allocator_zero_notional_advisory")
+    if not execution_chain.get("execution_plan_ref_present"):
+        final_blockers.append("no_execution_plan_emitted")
+    return compact_unique(final_blockers, limit=12)
+
+
+def classify_contributing_factors(reason_codes: list[str]) -> list[str]:
+    return compact_unique(
+        [code for code in reason_codes if code in SOFT_CONTRIBUTING_REASON_CODES],
+        limit=12,
+    )
 
 
 def classify_no_trade(
@@ -313,27 +361,39 @@ def classify_no_trade(
         return {
             "classification": "execution_activity_or_positive_allocation_present",
             "primary_blocker": None,
+            "final_blockers": [],
+            "contributing_factors": classify_contributing_factors(reason_codes),
+            "blocker_chain": [],
             "is_current_no_trade": False,
         }
-    if "reconciliation_contraction_active" in reason_codes:
-        primary = "reconciliation_contraction_active"
-    elif "candidate_execution_incompatible" in reason_codes:
-        primary = "candidate_execution_incompatible"
-    elif any("signal_below_entry_threshold" in code for code in reason_codes):
-        primary = "strategy_signal_below_entry_threshold"
-    elif any("candidate_inactive" in code for code in reason_codes):
-        primary = "strategy_candidate_inactive"
-    elif any("hold_only" in code for code in reason_codes):
-        primary = "strategy_hold_only"
-    elif route_action == "advisory_only" and not decimal_is_positive(requested_notional):
-        primary = "allocator_zero_notional_advisory"
-    elif not execution_chain.get("execution_plan_ref_present"):
-        primary = "no_execution_plan_emitted"
-    else:
+    final_blockers = classify_final_blockers(
+        route_action=route_action,
+        requested_notional=requested_notional,
+        execution_chain=execution_chain,
+        reason_codes=reason_codes,
+    )
+    contributing_factors = classify_contributing_factors(reason_codes)
+    primary = final_blockers[0] if final_blockers else (contributing_factors[0] if contributing_factors else None)
+    if primary is None:
         primary = "unclassified_no_trade"
+    blocker_chain: list[dict[str, Any]] = [
+        {
+            "stage": "allocation",
+            "route_action": route_action,
+            "requested_notional_positive": decimal_is_positive(requested_notional),
+            "approved_notional_positive": decimal_is_positive(approved_notional),
+        }
+    ]
+    if contributing_factors:
+        blocker_chain.append({"stage": "soft_contributing_factors", "reason_codes": contributing_factors})
+    if final_blockers:
+        blocker_chain.append({"stage": "final_no_trade_blockers", "reason_codes": final_blockers})
     return {
         "classification": "no_order_fill_expected_for_latest_decision",
         "primary_blocker": primary,
+        "final_blockers": final_blockers,
+        "contributing_factors": contributing_factors,
+        "blocker_chain": blocker_chain,
         "is_current_no_trade": True,
     }
 
@@ -361,7 +421,11 @@ def summarize_latest_decision(
         "db_fill_count": int(counts.get("execution_fills") or 0),
         "legacy_fill_event_count": int(counts.get("legacy_fill_events") or 0),
     }
-    reason_codes = collect_reason_codes(payload)
+    sleeve_summaries = summarize_sleeve_intents(payload)
+    reason_codes = compact_unique(
+        collect_reason_codes(payload) + collect_sleeve_reason_codes(sleeve_summaries),
+        limit=32,
+    )
     classification = classify_no_trade(
         latest_decision=latest,
         execution_chain=execution_chain,
@@ -372,7 +436,7 @@ def summarize_latest_decision(
         "reason_codes": reason_codes,
         "operator_summary": truncate_text(payload.get("operator_summary")),
         "execution_legs_count": len(as_list(payload.get("execution_legs"))),
-        "sleeve_intent_summary": summarize_sleeve_intents(payload),
+        "sleeve_intent_summary": sleeve_summaries,
     }
     return {
         "allocation_id": latest.get("allocation_id"),
@@ -825,6 +889,8 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "latest_decision_symbol": latest.get("symbol"),
         "latest_decision_primary_family": latest.get("primary_family"),
         "latest_decision_no_trade_primary_blocker": no_trade.get("primary_blocker"),
+        "latest_decision_no_trade_final_blockers": no_trade.get("final_blockers"),
+        "latest_decision_no_trade_contributing_factors": no_trade.get("contributing_factors"),
         "latest_decision_no_trade_classification": no_trade.get("classification"),
         "latest_decision_is_current_no_trade": no_trade.get("is_current_no_trade"),
         "portfolio_allocation_decisions": db.get("portfolio_allocation_decisions") if db.get("ok") else None,
