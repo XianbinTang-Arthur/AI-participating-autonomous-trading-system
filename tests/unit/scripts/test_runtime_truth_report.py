@@ -686,6 +686,7 @@ def test_created_order_without_submit_command_reports_submission_gap() -> None:
             "order_state_ref_count": 1,
             "fill_event_ref_count": 0,
             "db_order_count": 1,
+            "execution_command_flow_enabled": True,
             "db_execution_order_created_or_submitting_count": 1,
             "db_execution_order_submitted_or_later_count": 0,
             "db_execution_command_count": 0,
@@ -720,6 +721,57 @@ def test_created_order_without_submit_command_reports_submission_gap() -> None:
     assert truth_chain["position_lifecycle_status"] == "position_lifecycle_transition_evidence_missing"
     assert truth_chain["smallest_missing_field"] == "execution_command_or_submitted_order_state"
     assert truth_chain["missing_fields"] == ["execution_command_or_submitted_order_state"]
+    assert truth_chain["submission_gap_root_cause"] == "execution_command_missing_for_created_order"
+
+
+def test_direct_submit_created_order_reports_command_flow_disabled_root_cause() -> None:
+    mod = load_module()
+
+    truth_chain = mod.summarize_execution_truth_chain(
+        latest_decision={"route_action": "override_target", "primary_family": "directional"},
+        execution_chain={
+            "execution_plan_ref_count": 1,
+            "order_intent_ref_count": 1,
+            "order_state_ref_count": 1,
+            "fill_event_ref_count": 0,
+            "db_order_count": 1,
+            "execution_command_flow_enabled": False,
+            "db_execution_order_created_or_submitting_count": 1,
+            "db_execution_order_submitted_or_later_count": 0,
+            "db_execution_command_count": 0,
+            "db_execution_submit_command_count": 0,
+            "db_order_state_count": 1,
+            "db_order_state_created_or_submitting_count": 1,
+            "db_order_state_submitted_or_later_count": 0,
+            "db_fill_count": 0,
+            "db_fill_via_order_count": 0,
+            "legacy_fill_event_count": 0,
+            "legacy_fill_event_via_order_count": 0,
+        },
+        execution_legs_count=1,
+        candidate_drilldown=[
+            {
+                "family": "directional",
+                "composition": {
+                    "route_action": "override_target",
+                    "execution_behavior": "submit_order",
+                    "requested_delta_position_qty": "0.0002",
+                    "composed_delta_position_qty": "0.0002",
+                },
+                "budget": {},
+                "execution": {"execution_behavior": "submit_order"},
+            },
+        ],
+    )
+
+    assert truth_chain["status"] == "expected_order_submission_missing"
+    assert truth_chain["order_expected"] is True
+    assert truth_chain["fill_expected"] is False
+    assert truth_chain["smallest_missing_field"] == "enable_execution_command_flow_or_recover_created_order"
+    assert truth_chain["missing_fields"] == ["enable_execution_command_flow_or_recover_created_order"]
+    assert truth_chain["submission_gap_root_cause"] == (
+        "execution_command_flow_disabled_direct_submit_interruption_window"
+    )
 
 
 def test_fill_joined_through_execution_order_satisfies_fill_surface() -> None:
@@ -733,6 +785,7 @@ def test_fill_joined_through_execution_order_satisfies_fill_surface() -> None:
             "order_state_ref_count": 1,
             "fill_event_ref_count": 0,
             "db_order_count": 1,
+            "execution_command_flow_enabled": True,
             "db_execution_order_created_or_submitting_count": 0,
             "db_execution_order_submitted_or_later_count": 1,
             "db_execution_command_count": 1,
@@ -893,6 +946,7 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                     "fill_expected": True,
                     "position_lifecycle_status": "position_lifecycle_transition_evidence_present",
                     "smallest_missing_field": None,
+                    "submission_gap_root_cause": None,
                 },
             },
         },
@@ -921,6 +975,7 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["latest_executable_directional_order_expected"] is True
     assert live_facts["latest_executable_directional_fill_expected"] is True
     assert live_facts["latest_executable_directional_truth_chain_smallest_missing_field"] is None
+    assert live_facts["latest_executable_directional_submission_gap_root_cause"] is None
     assert live_facts["portfolio_allocation_decisions"] == 11
     assert authority["authoritative_source"] == "runtime.live_runtime_facts"
     assert authority["artifact_may_override_live"] is False

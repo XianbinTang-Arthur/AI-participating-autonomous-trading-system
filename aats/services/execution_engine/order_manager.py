@@ -66,6 +66,16 @@ class OrderManager:
     _OBLIGATION_ATOMIC_FINALIZE_EPSILON = Decimal("1e-12")
     _FILL_BACKFILL_RECENT_LIMIT = 100
     _FILL_BACKFILL_TERMINAL_STATUSES = ("FILLED", "CANCELED", "EXPIRED")
+    _SEMANTIC_DUPLICATE_RECENT_LIMIT = 100
+    _SEMANTIC_DUPLICATE_NO_EFFECT_STATUSES = {
+        "BLOCKED",
+        "CANCELED",
+        "CANCELLED",
+        "DRY_RUN",
+        "EXPIRED",
+        "FAILED",
+        "REJECTED",
+    }
     _TRANSIENT_RETRY_PATTERNS = ("50013", "systems are busy", "service busy", "temporarily unavailable")
     _EXIT_SPLIT_MAX_CHILDREN = 32
 
@@ -267,6 +277,17 @@ class OrderManager:
                         intent_id=intent.intent_id,
                         symbol=intent.symbol,
                     ),
+                )
+                return
+            semantic_duplicate_block = self._semantic_duplicate_snapshot_submit_block(
+                intent=intent,
+                client_order_id=preview_client_order_id,
+            )
+            if semantic_duplicate_block is not None:
+                await self._persist_order_state(
+                    order_state=semantic_duplicate_block,
+                    key=intent.symbol,
+                    intent=intent,
                 )
                 return
             intent, leg_intent, blocked_state = self._apply_leg_submit_guards(
@@ -494,6 +515,16 @@ class OrderManager:
             client_order_id=resolved_client_order_id,
             leg_intent=leg_intent,
         )
+        semantic_duplicate_block = self._semantic_duplicate_snapshot_submit_block(
+            intent=intent,
+            client_order_id=resolved_client_order_id,
+        )
+        if semantic_duplicate_block is not None:
+            return await self._persist_order_state(
+                order_state=semantic_duplicate_block,
+                key=intent.symbol,
+                intent=intent,
+            )
         intent, leg_intent, blocked_state = self._apply_leg_submit_guards(
             intent=intent,
             client_order_id=resolved_client_order_id,
@@ -1003,6 +1034,14 @@ class OrderManager:
                     error=str(exc),
                 ),
             )
+        order_state = self._order_state_with_intent_context(
+            order_state=order_state,
+            intent=intent,
+        )
+        fills = [
+            self._fill_with_intent_context(fill=fill, intent=intent)
+            for fill in fills
+        ]
 
         # ── Fix P1-3：当有 fills 且有 outbox publisher 时，走单事务原子路径 ──
         if fills and self.execution_outbox_publisher is not None and self.obligation_service is not None:
@@ -1426,6 +1465,258 @@ class OrderManager:
             leg_intent=None,
             split_limit=split_limit,
             start_slice_index=next_slice_index,
+        )
+
+    def _semantic_duplicate_snapshot_submit_block(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+    ) -> OrderState | None:
+        blocker = self._semantic_duplicate_snapshot_state(
+            intent=intent,
+            client_order_id=client_order_id,
+        )
+        if blocker is None:
+            return None
+        log_event(
+            self.logger,
+            "semantic_duplicate_order_intent_blocked",
+            level="critical",
+            **correlation_fields(
+                decision_id=intent.decision_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                client_order_id=client_order_id,
+                portfolio_snapshot_ref=intent.portfolio_snapshot_ref,
+                blocking_client_order_id=blocker.client_order_id,
+                blocking_intent_id=blocker.intent_id,
+                blocking_status=blocker.status,
+                blocking_position_intent=blocker.position_intent,
+            ),
+        )
+        return self._blocked_order_state_from_intent(
+            intent=intent,
+            client_order_id=client_order_id,
+            submission_mode="semantic_duplicate_snapshot_blocked",
+            execution_error=f"semantic_duplicate_snapshot_order:{blocker.client_order_id}",
+        )
+
+    def _semantic_duplicate_snapshot_state(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+    ) -> OrderState | None:
+        snapshot_ref = self._normalized_snapshot_ref(intent.portfolio_snapshot_ref)
+        if not snapshot_ref:
+            return None
+        intent_lanes = self._semantic_duplicate_lanes_from_intent(intent)
+        if not intent_lanes:
+            return None
+        for state in self.execution_repo.recent_order_states(
+            limit=self._SEMANTIC_DUPLICATE_RECENT_LIMIT,
+        ):
+            if state.client_order_id == client_order_id or state.intent_id == intent.intent_id:
+                continue
+            if (
+                state.execution_chain_id
+                and intent.execution_chain_id
+                and state.execution_chain_id == intent.execution_chain_id
+            ):
+                continue
+            if self._normalized_snapshot_ref(state.portfolio_snapshot_ref) != snapshot_ref:
+                continue
+            if state.symbol != intent.symbol:
+                continue
+            if self._semantic_duplicate_product_mismatch(state=state, intent=intent):
+                continue
+            if not self._semantic_duplicate_state_can_block(state):
+                continue
+            state_lanes = self._semantic_duplicate_lanes_from_state(state)
+            if intent_lanes.isdisjoint(state_lanes):
+                continue
+            return state
+        return None
+
+    def _semantic_duplicate_state_can_block(self, state: OrderState) -> bool:
+        filled_qty = self._decimal_or_zero(state.filled_qty)
+        if filled_qty > self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+            return True
+        status = str(state.status or "").upper()
+        if status in self._SEMANTIC_DUPLICATE_NO_EFFECT_STATUSES:
+            return False
+        if self.order_state_machine.is_terminal(status):
+            return False
+        return True
+
+    @staticmethod
+    def _semantic_duplicate_product_mismatch(
+        *,
+        state: OrderState,
+        intent: OrderIntent,
+    ) -> bool:
+        for field_name in ("product_type", "margin_mode"):
+            state_value = getattr(state, field_name, None)
+            intent_value = getattr(intent, field_name, None)
+            if state_value is None or intent_value is None:
+                continue
+            if str(state_value).strip().lower() != str(intent_value).strip().lower():
+                return True
+        return False
+
+    def _semantic_duplicate_lanes_from_intent(self, intent: OrderIntent) -> set[str]:
+        return self._semantic_duplicate_lanes(
+            position_intent=intent.position_intent,
+            side=intent.side,
+            pos_side=intent.pos_side,
+            exposure_side=intent.exposure_side,
+            reduce_only=effective_reduce_only_for_intent(intent),
+            close_only=effective_close_only_for_intent(intent),
+        )
+
+    def _semantic_duplicate_lanes_from_state(self, state: OrderState) -> set[str]:
+        return self._semantic_duplicate_lanes(
+            position_intent=state.position_intent,
+            side=getattr(state, "side", None),
+            pos_side=state.pos_side,
+            exposure_side=state.exposure_side,
+            reduce_only=state.reduce_only,
+            close_only=state.close_only,
+        )
+
+    @staticmethod
+    def _semantic_duplicate_lanes(
+        *,
+        position_intent: str | None,
+        side: str | None,
+        pos_side: str | None,
+        exposure_side: str | None,
+        reduce_only: bool | None,
+        close_only: bool | None,
+    ) -> set[str]:
+        mapped = {
+            "open_long": {"long_increase"},
+            "scale_in_long": {"long_increase"},
+            "reduce_long": {"long_reduce"},
+            "close_long": {"long_reduce"},
+            "open_short": {"short_increase"},
+            "scale_in_short": {"short_increase"},
+            "reduce_short": {"short_reduce"},
+            "close_short": {"short_reduce"},
+            "reverse_to_long": {"short_reduce", "long_increase"},
+            "reverse_to_short": {"long_reduce", "short_increase"},
+        }.get(str(position_intent or "").strip().lower())
+        if mapped is not None:
+            return set(mapped)
+        exposure = str(pos_side or exposure_side or "").strip().lower()
+        if bool(reduce_only) or bool(close_only):
+            if exposure in {"long", "short"}:
+                return {f"{exposure}_reduce"}
+            return set()
+        side_value = str(side or "").strip().lower()
+        if side_value == "buy":
+            return {"long_increase"}
+        if side_value == "sell":
+            return {"short_increase"}
+        return set()
+
+    @staticmethod
+    def _normalized_snapshot_ref(value: object) -> str:
+        return str(value or "").strip()
+
+    @staticmethod
+    def _decimal_or_zero(value: object) -> Decimal:
+        if value is None:
+            return Decimal("0")
+        if isinstance(value, Decimal):
+            return value
+        return Decimal(str(value))
+
+    @staticmethod
+    def _order_state_with_intent_context(
+        *,
+        order_state: OrderState,
+        intent: OrderIntent,
+    ) -> OrderState:
+        return order_state.model_copy(
+            update={
+                "execution_chain_id": order_state.execution_chain_id or intent.execution_chain_id,
+                "execution_attempt_id": order_state.execution_attempt_id or intent.execution_attempt_id,
+                "leg_intent_id": order_state.leg_intent_id or intent.leg_intent_id,
+                "reduce_only": effective_reduce_only_for_intent(intent),
+                "close_only": effective_close_only_for_intent(intent),
+                "td_mode": intent.td_mode,
+                "position_mode": intent.position_mode,
+                "pos_side": intent.pos_side,
+                "reduce_only_reason": intent.reduce_only_reason,
+                "close_only_reason": intent.close_only_reason,
+                "instrument_family": intent.instrument_family,
+                "settle_currency": intent.settle_currency,
+                "strategy_family": intent.strategy_family,
+                "strategy_sleeve_id": intent.strategy_sleeve_id,
+                "allocation_id": intent.allocation_id,
+                "strategy_bundle_id": intent.strategy_bundle_id,
+                "strategy_leg_role": intent.strategy_leg_role,
+                "strategy_pair_id": intent.strategy_pair_id,
+                "strategy_opportunity_kind": intent.strategy_opportunity_kind,
+                "strategy_execution_mode": intent.strategy_execution_mode,
+                "strategy_state_phase": intent.strategy_state_phase,
+                "product_type": intent.product_type,
+                "target_leverage": intent.target_leverage,
+                "margin_mode": intent.margin_mode,
+                "exposure_side": intent.exposure_side,
+                "execution_action": intent.execution_action,
+                "leg_action": intent.leg_action,
+                "position_intent": intent.position_intent,
+                "market_snapshot_ref": intent.market_snapshot_ref,
+                "feature_snapshot_ref": intent.feature_snapshot_ref,
+                "portfolio_snapshot_ref": intent.portfolio_snapshot_ref,
+                "health_snapshot_ref": intent.health_snapshot_ref,
+            }
+        )
+
+    @staticmethod
+    def _fill_with_intent_context(
+        *,
+        fill: FillEvent,
+        intent: OrderIntent,
+    ) -> FillEvent:
+        return fill.model_copy(
+            update={
+                "execution_chain_id": fill.execution_chain_id or intent.execution_chain_id,
+                "execution_attempt_id": fill.execution_attempt_id or intent.execution_attempt_id,
+                "leg_intent_id": fill.leg_intent_id or intent.leg_intent_id,
+                "reduce_only": effective_reduce_only_for_intent(intent),
+                "close_only": effective_close_only_for_intent(intent),
+                "td_mode": intent.td_mode,
+                "position_mode": intent.position_mode,
+                "pos_side": intent.pos_side,
+                "reduce_only_reason": intent.reduce_only_reason,
+                "close_only_reason": intent.close_only_reason,
+                "instrument_family": intent.instrument_family,
+                "settle_currency": intent.settle_currency,
+                "strategy_family": intent.strategy_family,
+                "strategy_sleeve_id": intent.strategy_sleeve_id,
+                "allocation_id": intent.allocation_id,
+                "strategy_bundle_id": intent.strategy_bundle_id,
+                "strategy_leg_role": intent.strategy_leg_role,
+                "strategy_pair_id": intent.strategy_pair_id,
+                "strategy_opportunity_kind": intent.strategy_opportunity_kind,
+                "strategy_execution_mode": intent.strategy_execution_mode,
+                "strategy_state_phase": intent.strategy_state_phase,
+                "product_type": intent.product_type,
+                "target_leverage": intent.target_leverage,
+                "margin_mode": intent.margin_mode,
+                "exposure_side": intent.exposure_side,
+                "execution_action": intent.execution_action,
+                "leg_action": intent.leg_action,
+                "position_intent": intent.position_intent,
+                "market_snapshot_ref": intent.market_snapshot_ref,
+                "feature_snapshot_ref": intent.feature_snapshot_ref,
+                "portfolio_snapshot_ref": intent.portfolio_snapshot_ref,
+                "health_snapshot_ref": intent.health_snapshot_ref,
+            }
         )
 
     def _unknown_write_submit_block(

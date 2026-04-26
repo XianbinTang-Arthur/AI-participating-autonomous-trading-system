@@ -135,6 +135,24 @@ class TestDispatcherLoopConsumesQueue(unittest.IsolatedAsyncioTestCase):
         finally:
             await trig.stop()
 
+    async def test_dispatcher_revalidates_pending_before_run_cycle(self) -> None:
+        invocations: list[tuple[str, str]] = []
+        records: list[dict[str, object]] = []
+
+        async def spy_run_cycle(*, symbol, timeframe, feature_snapshot_hint=None, market_snapshot_hint=None):
+            invocations.append((symbol, timeframe))
+
+        policy = SimpleNamespace(
+            should_trigger=lambda **kwargs: (False, "suppressed_after_prior_record"),
+            record_trigger=lambda **kwargs: records.append(kwargs),
+        )
+        trig = _fake_trigger(orchestrator=SimpleNamespace(run_cycle=spy_run_cycle), policy=policy)
+
+        await trig._run_cycle_with_backoff(_make_pending(tag="stale"))
+
+        self.assertEqual(invocations, [])
+        self.assertEqual(records, [])
+
 
 class TestDispatcherLoopSurviveException(unittest.IsolatedAsyncioTestCase):
     """run_cycle 抛异常时 dispatcher 继续活着处理下一个 trigger。"""

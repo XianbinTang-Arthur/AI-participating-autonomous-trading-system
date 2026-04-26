@@ -39,6 +39,19 @@ class _NullFetcher:
         return None
 
 
+def _order_intent_message(intent: OrderIntent) -> dict:
+    return {
+        "topic": topics.ORDER_INTENTS,
+        "key": intent.symbol,
+        "payload": build_envelope(
+            topic=topics.ORDER_INTENTS,
+            key=intent.symbol,
+            payload_model=intent,
+            source_component="test",
+        ).model_dump(mode="json"),
+    }
+
+
 class TestRound2SafetyRegressions(unittest.IsolatedAsyncioTestCase):
     async def test_duplicate_order_intent_is_logged_and_not_reprocessed(self) -> None:
         repo = InMemoryExecutionRepository()
@@ -63,16 +76,7 @@ class TestRound2SafetyRegressions(unittest.IsolatedAsyncioTestCase):
             close_only=False,
             idempotency_key="duplicate_round2",
         )
-        message = {
-            "topic": topics.ORDER_INTENTS,
-            "key": intent.symbol,
-            "payload": build_envelope(
-                topic=topics.ORDER_INTENTS,
-                key=intent.symbol,
-                payload_model=intent,
-                source_component="test",
-            ).model_dump(mode="json"),
-        }
+        message = _order_intent_message(intent)
 
         await manager.handle_order_intent(message)
         with self.assertLogs("aats.execution_engine", level="WARNING") as logs:
@@ -80,6 +84,102 @@ class TestRound2SafetyRegressions(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(repo.order_states()), 1)
         self.assertTrue(any("duplicate_order_intent_ignored" in entry for entry in logs.output))
+
+    async def test_same_portfolio_snapshot_open_intent_is_semantically_blocked(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=PaperExecutionAdapter(price_provider=lambda _symbol: 100.0, taker_fee_bps=5.0),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        first = OrderIntent(
+            intent_id="intent_semantic_open_1",
+            decision_id="decision_semantic_open_1",
+            symbol="BTC-USDT-SWAP",
+            side="buy",
+            quantity=Decimal("0.0028"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="semantic_open_1",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            position_intent="open_long",
+            portfolio_snapshot_ref="evt_portfolio_stale_open",
+        )
+        second = first.model_copy(
+            update={
+                "intent_id": "intent_semantic_open_2",
+                "decision_id": "decision_semantic_open_2",
+                "idempotency_key": "semantic_open_2",
+            }
+        )
+
+        await manager.handle_order_intent(_order_intent_message(first))
+        await manager.handle_order_intent(_order_intent_message(second))
+
+        first_state = repo.get_order_state("clsemantic_open_1")
+        second_state = repo.get_order_state("clsemantic_open_2")
+        self.assertIsNotNone(first_state)
+        self.assertIsNotNone(second_state)
+        self.assertEqual(first_state.status, "FILLED")
+        self.assertEqual(first_state.portfolio_snapshot_ref, "evt_portfolio_stale_open")
+        self.assertEqual(second_state.status, "BLOCKED")
+        self.assertEqual(second_state.submission_mode, "semantic_duplicate_snapshot_blocked")
+        self.assertEqual(second_state.execution_error, "semantic_duplicate_snapshot_order:clsemantic_open_1")
+
+    async def test_same_portfolio_snapshot_reduce_intent_is_semantically_blocked(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=PaperExecutionAdapter(price_provider=lambda _symbol: 100.0, taker_fee_bps=5.0),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        first = OrderIntent(
+            intent_id="intent_semantic_reduce_1",
+            decision_id="decision_semantic_reduce_1",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.0025"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            reduce_only=True,
+            idempotency_key="semantic_reduce_1",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="long",
+            pos_side="long",
+            position_intent="reduce_long",
+            portfolio_snapshot_ref="evt_portfolio_stale_reduce",
+        )
+        second = first.model_copy(
+            update={
+                "intent_id": "intent_semantic_reduce_2",
+                "decision_id": "decision_semantic_reduce_2",
+                "idempotency_key": "semantic_reduce_2",
+            }
+        )
+
+        await manager.handle_order_intent(_order_intent_message(first))
+        await manager.handle_order_intent(_order_intent_message(second))
+
+        first_state = repo.get_order_state("clsemantic_reduce_1")
+        second_state = repo.get_order_state("clsemantic_reduce_2")
+        self.assertIsNotNone(first_state)
+        self.assertIsNotNone(second_state)
+        self.assertEqual(first_state.status, "FILLED")
+        self.assertEqual(first_state.position_intent, "reduce_long")
+        self.assertEqual(second_state.status, "BLOCKED")
+        self.assertEqual(second_state.submission_mode, "semantic_duplicate_snapshot_blocked")
+        self.assertEqual(second_state.execution_error, "semantic_duplicate_snapshot_order:clsemantic_reduce_1")
 
     def test_invalid_order_state_regression_is_logged(self) -> None:
         repo = InMemoryExecutionRepository()

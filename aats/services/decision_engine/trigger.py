@@ -277,6 +277,18 @@ class DecisionCycleTrigger:
         失败抛到 _dispatcher_loop 里处理 backoff。调用语义等价于 legacy
         handler 的 ``try: run_cycle else: record_trigger``。
         """
+        should_run, drop_reason = self._pending_still_triggerable(pending)
+        if not should_run:
+            log_event(
+                self.logger,
+                "features_snapshot_trigger_dropped_stale_pending",
+                level="info",
+                symbol=pending.snapshot.symbol,
+                timeframe=pending.timeframe,
+                reason=drop_reason,
+                feature_event_id=getattr(pending.feature_envelope, "event_id", None),
+            )
+            return
         await self.orchestrator.run_cycle(
             symbol=pending.snapshot.symbol,
             timeframe=pending.timeframe,
@@ -294,6 +306,31 @@ class DecisionCycleTrigger:
             market_snapshot=pending.market_snapshot,
             timeframe=pending.timeframe,
         )
+
+    def _pending_still_triggerable(self, pending: _PendingTrigger) -> tuple[bool, str]:
+        """Re-check a queued trigger immediately before running a decision cycle.
+
+        Queue admission and queue consumption can be separated by a full
+        ``run_cycle`` duration. A previous cycle may record a trigger while a
+        newer pending item is waiting in the queue, so the waiting item must go
+        through the same policy gate again before it can consume another stale
+        portfolio snapshot.
+        """
+        if self.can_trigger is not None:
+            allowed, reason = self.can_trigger(symbol=pending.snapshot.symbol)
+            if not allowed:
+                return False, reason or "can_trigger_rejected_at_dispatch"
+        should_trigger_fn = getattr(self.policy, "should_trigger", None)
+        if not callable(should_trigger_fn):
+            return True, "policy_revalidation_unavailable"
+        should_trigger, reason = should_trigger_fn(
+            feature_snapshot=pending.snapshot,
+            market_snapshot=pending.market_snapshot,
+            timeframe=pending.timeframe,
+        )
+        if not should_trigger:
+            return False, reason or "policy_rejected_at_dispatch"
+        return True, reason or "policy_revalidated"
 
     async def _enqueue_trigger(self, pending: _PendingTrigger) -> None:
         """覆盖式入队：queue maxsize=1 + latest-wins。

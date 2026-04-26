@@ -82,10 +82,31 @@ import json
 import os
 from sqlalchemy import create_engine, text
 
+def bool_from_env(name):
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
 url = os.environ.get("AATS_DATABASE_URL") or os.environ.get("DATABASE_URL")
 if not url:
     print(json.dumps({"ok": False, "reason": "database_url_not_available_in_container_env"}, sort_keys=True))
     raise SystemExit(0)
+
+execution_command_flow_enabled = bool_from_env("AATS_EXECUTION_COMMAND_FLOW_ENABLED")
+runtime_config = {
+    "execution_command_flow_enabled": bool(execution_command_flow_enabled)
+    if execution_command_flow_enabled is not None
+    else False,
+    "execution_command_flow_flag_present": execution_command_flow_enabled is not None,
+    "operator_control_plane_execution_ledger_enabled": bool_from_env(
+        "AATS_OPERATOR_CONTROL_PLANE_EXECUTION_LEDGER_ENABLED"
+    ),
+    "financial_convergence_mode_enabled": bool_from_env("AATS_FINANCIAL_CONVERGENCE_MODE_ENABLED"),
+    "recovery_reconciliation_execution_ledger_enabled": bool_from_env(
+        "AATS_RECOVERY_RECONCILIATION_EXECUTION_LEDGER_ENABLED"
+    ),
+}
 
 engine = create_engine(url)
 with engine.connect() as conn:
@@ -124,6 +145,8 @@ with engine.connect() as conn:
                 text("select count(*) from execution_orders where decision_id = :decision_id"),
                 {"decision_id": decision_id},
             ).scalar()),
+            "execution_command_flow_enabled": runtime_config["execution_command_flow_enabled"],
+            "execution_command_flow_flag_present": runtime_config["execution_command_flow_flag_present"],
             "execution_orders_created_or_submitting": int(conn.execute(
                 text(
                     "select count(*) from execution_orders "
@@ -227,6 +250,7 @@ print(json.dumps({
         dict(latest_executable_directional_audit) if latest_executable_directional_audit else None
     ),
     "latest_executable_directional_decision_counts": latest_executable_directional_counts,
+    "runtime_config": runtime_config,
 }, default=str, sort_keys=True))
 """
 
@@ -915,6 +939,9 @@ def summarize_execution_truth_chain(
     )
     db_execution_command_count = int(execution_chain.get("db_execution_command_count") or 0)
     db_execution_submit_command_count = int(execution_chain.get("db_execution_submit_command_count") or 0)
+    execution_command_flow_enabled = execution_chain.get("execution_command_flow_enabled")
+    if execution_command_flow_enabled is not None:
+        execution_command_flow_enabled = bool(execution_command_flow_enabled)
     execution_plan_ref_count = int(execution_chain.get("execution_plan_ref_count") or 0)
     order_intent_ref_count = int(execution_chain.get("order_intent_ref_count") or 0)
     order_state_ref_count = int(execution_chain.get("order_state_ref_count") or 0)
@@ -980,9 +1007,15 @@ def summarize_execution_truth_chain(
             f"db_fill_via_order_count={db_fill_via_order_count}",
             f"db_execution_command_count={db_execution_command_count}",
             f"db_order_submitted_or_later_count={db_execution_order_submitted_or_later_count}",
+            (
+                f"execution_command_flow_enabled={str(execution_command_flow_enabled).lower()}"
+                if execution_command_flow_enabled is not None
+                else None
+            ),
         ],
         limit=12,
     )
+    submission_gap_root_cause = None
 
     if route_action == "hold_current" and execution_behavior == "hold_current" and zero_delta and execution_legs_count == 0:
         order_expected = False
@@ -1007,13 +1040,22 @@ def summarize_execution_truth_chain(
             and not has_fill_surface
         ):
             fill_expected = False
-            missing_fields.append("execution_command_or_submitted_order_state")
+            if execution_command_flow_enabled is False:
+                submission_gap_root_cause = "execution_command_flow_disabled_direct_submit_interruption_window"
+                missing_fields.append("enable_execution_command_flow_or_recover_created_order")
+            else:
+                submission_gap_root_cause = "execution_command_missing_for_created_order"
+                missing_fields.append("execution_command_or_submitted_order_state")
         elif fill_expected and fill_event_ref_count == 0 and not has_fill_surface:
             missing_fields.append("fill_event_refs_or_execution_fills")
         if missing_fields:
             status = (
                 "expected_order_submission_missing"
-                if missing_fields == ["execution_command_or_submitted_order_state"]
+                if missing_fields
+                in (
+                    ["execution_command_or_submitted_order_state"],
+                    ["enable_execution_command_flow_or_recover_created_order"],
+                )
                 else "expected_execution_surface_missing"
             )
         else:
@@ -1036,6 +1078,7 @@ def summarize_execution_truth_chain(
         "position_lifecycle_status": lifecycle_status,
         "smallest_missing_field": missing_fields[0] if missing_fields else None,
         "missing_fields": missing_fields,
+        "submission_gap_root_cause": submission_gap_root_cause,
         "evidence": evidence,
     }
 
@@ -1059,6 +1102,8 @@ def summarize_latest_decision(
         "fill_event_ref_count": len(as_list(audit_payload.get("fill_event_refs"))),
         "strategy_sleeve_intent_ref_count": len(as_list(audit_payload.get("strategy_sleeve_intent_refs"))),
         "db_order_count": int(counts.get("execution_orders") or 0),
+        "execution_command_flow_enabled": counts.get("execution_command_flow_enabled"),
+        "execution_command_flow_flag_present": counts.get("execution_command_flow_flag_present"),
         "db_execution_order_created_or_submitting_count": int(
             counts.get("execution_orders_created_or_submitting") or 0
         ),
@@ -1605,6 +1650,9 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_executable_directional_truth_chain_smallest_missing_field": executable_truth_chain.get(
             "smallest_missing_field",
+        ),
+        "latest_executable_directional_submission_gap_root_cause": executable_truth_chain.get(
+            "submission_gap_root_cause",
         ),
         "portfolio_allocation_decisions": db.get("portfolio_allocation_decisions") if db.get("ok") else None,
         "execution_fills": db.get("execution_fills") if db.get("ok") else None,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -303,6 +304,8 @@ class AdverseFactors:
 
 
 class TargetPositionEngine:
+    _MAX_ALPHA_DECAY_SNAPSHOT_GUARDS = 512
+
     def __init__(
         self,
         *,
@@ -319,6 +322,7 @@ class TargetPositionEngine:
         self.metrics = metrics
         # R3-P1-D4 需要在 _build 早期发 critical 事件。
         self.logger = get_logger("aats.decision_engine.target_position")
+        self._alpha_decay_snapshot_guards: OrderedDict[tuple[str, str, str, str], None] = OrderedDict()
 
     def build(
         self,
@@ -986,6 +990,14 @@ class TargetPositionEngine:
                 guardrail_flags=guardrail_flags,
             )
             if abs(reduced_target - current_position_qty) > EPSILON_DECIMAL_12:
+                if not self._reserve_alpha_decay_snapshot(
+                    context=context,
+                    product_type=product_type,
+                    current_position_qty=current_position_qty,
+                    action="alpha_decay_exit",
+                    guardrail_flags=guardrail_flags,
+                ):
+                    return current_position_qty
                 guardrail_flags.append("alpha_decay_exit")
             return reduced_target
 
@@ -1004,6 +1016,14 @@ class TargetPositionEngine:
                 guardrail_flags=guardrail_flags,
             )
             if abs(managed_target) + EPSILON_DECIMAL_12 < abs(current_position_qty):
+                if not self._reserve_alpha_decay_snapshot(
+                    context=context,
+                    product_type=product_type,
+                    current_position_qty=current_position_qty,
+                    action="alpha_decay_reduce",
+                    guardrail_flags=guardrail_flags,
+                ):
+                    return current_position_qty
                 guardrail_flags.append("alpha_decay_reduce")
                 return managed_target
 
@@ -1120,6 +1140,44 @@ class TargetPositionEngine:
             baseline=baseline,
             ai_assessment=ai_assessment,
         )
+
+    def _reserve_alpha_decay_snapshot(
+        self,
+        *,
+        context: DecisionContext,
+        product_type: str,
+        current_position_qty: Decimal,
+        action: str,
+        guardrail_flags: list[str],
+    ) -> bool:
+        snapshot_ref = str(context.portfolio_snapshot_ref or "").strip()
+        if not snapshot_ref:
+            return True
+        current_side = self._exposure_side(current_position_qty)
+        if current_side == "flat":
+            return True
+        key = (context.symbol, product_type, snapshot_ref, current_side)
+        if key in self._alpha_decay_snapshot_guards:
+            duplicate_flag = f"{action}_duplicate_snapshot_blocked"
+            guardrail_flags.append(duplicate_flag)
+            log_event(
+                self.logger,
+                "alpha_decay_duplicate_snapshot_blocked",
+                level="warning",
+                **correlation_fields(
+                    decision_id=context.decision_id,
+                    symbol=context.symbol,
+                    portfolio_snapshot_ref=snapshot_ref,
+                    product_type=product_type,
+                    exposure_side=current_side,
+                    action=action,
+                ),
+            )
+            return False
+        self._alpha_decay_snapshot_guards[key] = None
+        while len(self._alpha_decay_snapshot_guards) > self._MAX_ALPHA_DECAY_SNAPSHOT_GUARDS:
+            self._alpha_decay_snapshot_guards.popitem(last=False)
+        return True
 
     def _alpha_decay_reduce_target_qty(
         self,
