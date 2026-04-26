@@ -85,6 +85,20 @@ def test_run_forever_source_derives_status_not_hardcoded() -> None:
     )
 
 
+def test_run_forever_source_reconciles_orphaned_daemon_runs_before_create() -> None:
+    """契约: 新 daemon run 创建前必须关闭上次异常退出遗留的 running run."""
+    src = inspect.getsource(MicrostructureCollector.run_forever)
+    create_idx = src.index("create_ingest_run(")
+    orphan_idx = src.index("mark_orphaned_ingest_runs(")
+
+    assert orphan_idx < create_idx, (
+        "microstructure daemon 新 run 创建前必须先 reconcile 旧 running ingest_run, "
+        "否则容器重启/kill 会让 meta.ingest_runs 永久堆积 orphan running."
+    )
+    assert 'dataset_domain="microstructure"' in src
+    assert 'trigger_mode="daemon"' in src
+
+
 def test_run_forever_source_references_three_status_values() -> None:
     """契约: 三个目标 status 值 (succeeded/retrying/failed) 必须都在源码中出现.
 

@@ -100,6 +100,7 @@ class TestParseLiquidationMessage(unittest.TestCase):
         self.assertEqual(r.bk_loss, Decimal("0"))
         self.assertEqual(r.ccy, "USDT")
         self.assertEqual(r.ts, datetime.fromtimestamp(1745000000, tz=timezone.utc))
+        self.assertEqual(r.source_scope, "fixed_trading_scope")
         # raw_payload stores the detail dict unchanged — parent event and arg
         # are redundant with dedicated columns (denormalized) and constant
         # per-subscription respectively.
@@ -124,6 +125,7 @@ class TestParseLiquidationMessage(unittest.TestCase):
         rows = parse_liquidation_message(push)
         self.assertEqual(len(rows), 2)
         self.assertEqual({r.side for r in rows}, {"buy", "sell"})
+        self.assertEqual({r.source_scope for r in rows}, {"broad_market_context"})
 
     def test_empty_data(self) -> None:
         self.assertEqual(parse_liquidation_message({"arg": {}, "data": []}), [])
@@ -236,9 +238,11 @@ class TestWriteLiquidationBatch(unittest.TestCase):
         self.assertEqual(len(session.executed), 1)
         sql, batch = session.executed[0]
         self.assertIn("INSERT INTO staging.raw_liquidations", sql)
+        self.assertIn("source_scope", sql)
         self.assertIn("ON CONFLICT ON CONSTRAINT uq_raw_liquidations_natural_key DO NOTHING", sql)
         self.assertEqual(len(batch), 1)
         self.assertEqual(batch[0]["inst_id"], "BTC-USDT-SWAP")
+        self.assertEqual(batch[0]["source_scope"], "fixed_trading_scope")
         # raw_payload must be serialized JSON for CAST(:raw_payload AS JSONB)
         self.assertEqual(json.loads(batch[0]["raw_payload"]), {"foo": "bar"})
 

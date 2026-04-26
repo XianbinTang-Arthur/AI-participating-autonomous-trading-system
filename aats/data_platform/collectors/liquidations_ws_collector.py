@@ -50,6 +50,9 @@ _CONNECTION = "public"  # OKX hosts liquidation-orders on the public WS URL.
 # signals. Extendable to ("SWAP", "FUTURES") if someone wants the full
 # derivatives tape — OKX accepts one subscription arg per inst_type.
 _DEFAULT_INST_TYPES: tuple[str, ...] = ("SWAP",)
+_FIXED_TRADING_INSTRUMENT = "BTC-USDT-SWAP"
+_SOURCE_SCOPE_FIXED = "fixed_trading_scope"
+_SOURCE_SCOPE_BROAD = "broad_market_context"
 
 # Flush heuristics. Liquidation throughput is spiky but generally low; these
 # numbers keep write latency bounded while still amortizing the round-trip per
@@ -72,6 +75,7 @@ class LiquidationRow:
     bk_loss: Decimal | None
     ccy: str | None
     raw_payload: dict[str, Any]
+    source_scope: str | None = None
 
 
 class OKXLiquidationsWSClient(OKXWebSocketConsumerBase):
@@ -121,6 +125,10 @@ def _parse_decimal(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, TypeError, ValueError):
         return None
+
+
+def _source_scope_for_inst_id(inst_id: str) -> str:
+    return _SOURCE_SCOPE_FIXED if inst_id == _FIXED_TRADING_INSTRUMENT else _SOURCE_SCOPE_BROAD
 
 
 def parse_liquidation_message(message: dict[str, Any]) -> list[LiquidationRow]:
@@ -200,6 +208,7 @@ def parse_liquidation_message(message: dict[str, Any]) -> list[LiquidationRow]:
                     bk_loss=bk_loss,
                     ccy=ccy,
                     raw_payload=dict(detail),
+                    source_scope=_source_scope_for_inst_id(inst_id),
                 )
             )
     return rows
@@ -224,6 +233,7 @@ def write_liquidation_batch(session: Session, rows: Iterable[LiquidationRow]) ->
             "bk_loss": r.bk_loss,
             "ccy": r.ccy,
             "raw_payload": json.dumps(r.raw_payload),
+            "source_scope": r.source_scope or _source_scope_for_inst_id(r.inst_id),
         }
         for r in rows
     ]
@@ -233,10 +243,11 @@ def write_liquidation_batch(session: Session, rows: Iterable[LiquidationRow]) ->
         text("""
             INSERT INTO staging.raw_liquidations
                 (ts, inst_id, inst_type, inst_family, side,
-                 bk_px, sz, bk_loss, ccy, raw_payload)
+                 bk_px, sz, bk_loss, ccy, raw_payload, source_scope)
             VALUES
                 (:ts, :inst_id, :inst_type, :inst_family, :side,
-                 :bk_px, :sz, :bk_loss, :ccy, CAST(:raw_payload AS JSONB))
+                 :bk_px, :sz, :bk_loss, :ccy, CAST(:raw_payload AS JSONB),
+                 :source_scope)
             ON CONFLICT ON CONSTRAINT uq_raw_liquidations_natural_key DO NOTHING
         """),
         batch,

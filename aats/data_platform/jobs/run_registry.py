@@ -72,6 +72,49 @@ def finish_ingest_run(
     )
 
 
+def mark_orphaned_ingest_runs(
+    session: Session,
+    *,
+    run_type: str,
+    dataset_domain: str,
+    instrument_type: str | None = None,
+    trigger_mode: str | None = None,
+    reason: str,
+) -> int:
+    """Close stale ``running`` ingest runs before replacing a daemon process.
+
+    Long-running collectors normally finish their run in ``finally``. Container
+    kills and host restarts bypass that path, leaving old rows permanently
+    ``running``. This helper is intentionally narrow: callers must provide the
+    exact run/domain/trigger tuple they are replacing.
+    """
+    now = utc_now()
+    result = session.execute(
+        text("""
+            UPDATE meta.ingest_runs
+            SET status = 'failed',
+                ended_at = COALESCE(ended_at, :now),
+                error_message = COALESCE(error_message, :reason),
+                updated_at = :now
+            WHERE status = 'running'
+              AND run_type = :run_type
+              AND dataset_domain = :domain
+              AND (:instrument_type IS NULL OR instrument_type = :instrument_type)
+              AND (:trigger_mode IS NULL OR trigger_mode = :trigger_mode)
+        """),
+        dict(
+            now=now,
+            reason=reason,
+            run_type=run_type,
+            domain=dataset_domain,
+            instrument_type=instrument_type,
+            trigger_mode=trigger_mode,
+        ),
+    )
+    rowcount = getattr(result, "rowcount", None)
+    return int(rowcount) if rowcount is not None and rowcount >= 0 else 0
+
+
 def create_run_item(
     session: Session,
     *,

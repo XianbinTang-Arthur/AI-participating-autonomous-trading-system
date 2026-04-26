@@ -63,6 +63,7 @@ from aats.data_platform.db import get_session
 from aats.data_platform.jobs.run_registry import (
     create_ingest_run,
     finish_ingest_run,
+    mark_orphaned_ingest_runs,
 )
 from aats.data_platform.models import utc_now
 from aats.data_platform.normalize.time_normalizer import ms_to_utc
@@ -1249,6 +1250,17 @@ class MicrostructureCollector:
         # immediately rather than silently running without provenance.
         try:
             with get_session() as session:
+                orphaned_runs = mark_orphaned_ingest_runs(
+                    session,
+                    run_type="rolling",
+                    dataset_domain="microstructure",
+                    instrument_type="SWAP",
+                    trigger_mode="daemon",
+                    reason=(
+                        "orphaned_by_microstructure_daemon_startup:"
+                        " previous daemon did not close ingest_run"
+                    ),
+                )
                 self._ingest_run_id = create_ingest_run(
                     session,
                     run_type="rolling",
@@ -1258,8 +1270,8 @@ class MicrostructureCollector:
                 )
             self._metric_inc("microstructure_ws_connect_total")
             log.info(
-                "microstructure ingest_run created: run_id=%s symbols=%s",
-                self._ingest_run_id, list(self._symbols),
+                "microstructure ingest_run created: run_id=%s symbols=%s orphaned_runs_closed=%d",
+                self._ingest_run_id, list(self._symbols), orphaned_runs,
             )
         except SQLAlchemyError:
             log.exception("failed to create ingest_run — aborting collector startup")

@@ -153,6 +153,13 @@ class LiquidationsPostgresIntegrationTests(unittest.TestCase):
             ).fetchone()
             self.assertIsNotNone(chk)
 
+            scope_chk = conn.execute(
+                text(
+                    "SELECT 1 FROM pg_constraint WHERE conname = 'chk_raw_liq_source_scope'"
+                )
+            ).fetchone()
+            self.assertIsNotNone(scope_chk)
+
     def test_write_batch_roundtrip(self) -> None:
         from sqlalchemy import text
         from sqlalchemy.orm import Session
@@ -180,7 +187,10 @@ class LiquidationsPostgresIntegrationTests(unittest.TestCase):
 
         with self.engine.begin() as conn:  # type: ignore[union-attr]
             result = conn.execute(
-                text("SELECT inst_id, side, bk_px, sz, raw_payload FROM staging.raw_liquidations")
+                text(
+                    "SELECT inst_id, side, bk_px, sz, raw_payload, source_scope "
+                    "FROM staging.raw_liquidations"
+                )
             ).mappings().all()
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["inst_id"], "BTC-USDT-SWAP")
@@ -188,6 +198,7 @@ class LiquidationsPostgresIntegrationTests(unittest.TestCase):
         self.assertEqual(Decimal(result[0]["bk_px"]), Decimal("95000"))
         self.assertEqual(Decimal(result[0]["sz"]), Decimal("1.5"))
         self.assertEqual(result[0]["raw_payload"], {"source": "integration_test"})
+        self.assertEqual(result[0]["source_scope"], "fixed_trading_scope")
 
     def test_duplicate_insert_is_noop(self) -> None:
         """OKX retransmits the same event after reconnect; unique + ON CONFLICT suppresses it."""
@@ -281,8 +292,8 @@ class LiquidationsPostgresIntegrationTests(unittest.TestCase):
         with self.engine.begin() as conn:  # type: ignore[union-attr]
             rows = conn.execute(
                 text(
-                    "SELECT inst_id, inst_family, side, bk_px, sz, bk_loss, ccy, raw_payload "
-                    "FROM staging.raw_liquidations"
+                    "SELECT inst_id, inst_family, side, bk_px, sz, bk_loss, ccy, raw_payload, "
+                    "source_scope FROM staging.raw_liquidations"
                 )
             ).mappings().all()
         self.assertEqual(len(rows), 1)
@@ -294,6 +305,7 @@ class LiquidationsPostgresIntegrationTests(unittest.TestCase):
         self.assertEqual(Decimal(r["sz"]), Decimal("1.5"))
         self.assertEqual(Decimal(r["bk_loss"]), Decimal("0"))
         self.assertEqual(r["ccy"], "USDT")
+        self.assertEqual(r["source_scope"], "fixed_trading_scope")
         # raw_payload persists the OKX detail dict unchanged for future
         # silver-layer schema evolution.
         self.assertEqual(r["raw_payload"]["side"], "sell")

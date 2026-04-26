@@ -56,10 +56,10 @@ class DatasetManifestModel(RdpBase):
         Index("idx_dm_version", "dataset_version"),
         Index("idx_dm_status", "status"),
         CheckConstraint("dataset_layer IN ('staging','bronze','silver','gold')", name="chk_dm_layer"),
-        CheckConstraint("dataset_domain IN ('candles','funding')", name="chk_dm_domain"),
+        CheckConstraint("dataset_domain IN ('candles','funding','microstructure')", name="chk_dm_domain"),
         CheckConstraint("instrument_type IN ('spot','swap')", name="chk_dm_inst"),
-        CheckConstraint("source_type IN ('historical_file','api','derived')", name="chk_dm_source"),
-        CheckConstraint("status IN ('active','superseded','building','failed')", name="chk_dm_status"),
+        CheckConstraint("source_type IN ('historical_file','api','api_stream','derived')", name="chk_dm_source"),
+        CheckConstraint("status IN ('active','superseded','building','failed','dormant')", name="chk_dm_status"),
         {"schema": "meta"},
     )
 
@@ -91,8 +91,8 @@ class RawSourceFileModel(RdpBase):
         Index("idx_rsf_checksum", "checksum"),
         Index("idx_rsf_status", "parse_status", "ingested_status"),
         UniqueConstraint("source_path", name="uq_rsf_path"),
-        CheckConstraint("dataset_domain IN ('candles','funding')", name="chk_rsf_domain"),
-        CheckConstraint("source_type IN ('historical_file','api_snapshot')", name="chk_rsf_source"),
+        CheckConstraint("dataset_domain IN ('candles','funding','microstructure')", name="chk_rsf_domain"),
+        CheckConstraint("source_type IN ('historical_file','api_snapshot','api_stream')", name="chk_rsf_source"),
         CheckConstraint("parse_status IN ('pending','parsed','failed')", name="chk_rsf_parse"),
         CheckConstraint("ingested_status IN ('pending','ingested','failed','skipped')", name="chk_rsf_ingest"),
         {"schema": "meta"},
@@ -127,9 +127,9 @@ class IngestRunModel(RdpBase):
         Index("idx_ir_symbol", "symbol", "timeframe"),
         Index("idx_ir_started", "started_at"),
         CheckConstraint("run_type IN ('backfill','rolling','gap_repair','gold_build')", name="chk_ir_type"),
-        CheckConstraint("dataset_domain IN ('candles','funding')", name="chk_ir_domain"),
+        CheckConstraint("dataset_domain IN ('candles','funding','microstructure')", name="chk_ir_domain"),
         CheckConstraint("status IN ('pending','running','succeeded','failed','retrying','backfilling')", name="chk_ir_status"),
-        CheckConstraint("trigger_mode IN ('scheduler','manual','auto_gap_repair')", name="chk_ir_trigger"),
+        CheckConstraint("trigger_mode IN ('scheduler','manual','auto_gap_repair','daemon')", name="chk_ir_trigger"),
         {"schema": "meta"},
     )
 
@@ -157,7 +157,7 @@ class IngestRunItemModel(RdpBase):
     __table_args__ = (
         Index("idx_iri_run", "ingest_run_id"),
         Index("idx_iri_status", "dataset_domain", "symbol", "timeframe", "status"),
-        CheckConstraint("dataset_domain IN ('candles','funding')", name="chk_iri_domain"),
+        CheckConstraint("dataset_domain IN ('candles','funding','microstructure')", name="chk_iri_domain"),
         CheckConstraint("status IN ('pending','running','succeeded','failed')", name="chk_iri_status"),
         {"schema": "meta"},
     )
@@ -188,7 +188,7 @@ class IngestCheckpointModel(RdpBase):
         UniqueConstraint("dataset_domain", "instrument_type", "symbol", "timeframe", name="uq_checkpoint_key"),
         Index("idx_cp_status", "checkpoint_status"),
         Index("idx_cp_symbol", "symbol", "timeframe"),
-        CheckConstraint("dataset_domain IN ('candles','funding')", name="chk_cp_domain"),
+        CheckConstraint("dataset_domain IN ('candles','funding','microstructure')", name="chk_cp_domain"),
         CheckConstraint("instrument_type IN ('spot','swap')", name="chk_cp_inst"),
         CheckConstraint("checkpoint_status IN ('active','stale','gap_detected')", name="chk_cp_status"),
         {"schema": "meta"},
@@ -221,7 +221,7 @@ class QualityReportModel(RdpBase):
         Index("idx_qr_version", "dataset_version"),
         Index("idx_qr_run", "ingest_run_id"),
         CheckConstraint("dataset_layer IN ('staging','bronze','silver','gold')", name="chk_qr_layer"),
-        CheckConstraint("dataset_domain IN ('candles','funding')", name="chk_qr_domain"),
+        CheckConstraint("dataset_domain IN ('candles','funding','microstructure')", name="chk_qr_domain"),
         CheckConstraint("quality_status IN ('pass','warn','fail')", name="chk_qr_status"),
         {"schema": "meta"},
     )
@@ -447,8 +447,13 @@ class RawLiquidationsModel(RdpBase):
             name="uq_raw_liquidations_natural_key",
         ),
         Index("ix_raw_liquidations_inst_ts", "inst_id", "ts"),
+        Index("ix_raw_liquidations_scope_inst_ts", "source_scope", "inst_id", "ts"),
         Index("ix_raw_liquidations_received", "received_at"),
         CheckConstraint("side IN ('buy','sell')", name="chk_raw_liq_side"),
+        CheckConstraint(
+            "source_scope IN ('fixed_trading_scope','broad_market_context')",
+            name="chk_raw_liq_source_scope",
+        ),
         {"schema": "staging"},
     )
 
@@ -463,6 +468,11 @@ class RawLiquidationsModel(RdpBase):
     bk_loss = Column(Numeric(28, 10))
     ccy = Column(Text)
     raw_payload = Column(JSONB, nullable=False)
+    source_scope = Column(
+        Text,
+        nullable=False,
+        server_default=text("'broad_market_context'"),
+    )
     received_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
 
@@ -730,7 +740,7 @@ class BronzeMarketOrderbookPayloadModel(RdpBase):
     channel = Column(Text)
     capture_reason = Column(Text)
     missing_evidence = Column(JSONB)
-    ingest_run_id = Column(UUID(as_uuid=False), nullable=False)
+    ingest_run_id = Column(UUID(as_uuid=False), ForeignKey("meta.ingest_runs.ingest_run_id"), nullable=False)
     received_at = Column(
         DateTime(timezone=True),
         nullable=False,
