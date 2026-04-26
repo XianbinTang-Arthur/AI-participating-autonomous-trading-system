@@ -41,13 +41,19 @@ def _baseline(volatility_target_scale: float = 1.0) -> BaselineAssessment:
     )
 
 
-def _leg(delta_qty: str = "0.25") -> StrategyLegIntent:
+def _leg(
+    delta_qty: str = "0.25",
+    *,
+    current_qty: str = "0",
+    target_qty: str | None = None,
+) -> StrategyLegIntent:
+    resolved_target_qty = delta_qty if target_qty is None else target_qty
     return StrategyLegIntent(
         symbol="BTC-USDT",
         product_type="spot",
         side="buy",
-        current_position_qty=Decimal("0"),
-        target_position_qty=Decimal(delta_qty),
+        current_position_qty=Decimal(current_qty),
+        target_position_qty=Decimal(resolved_target_qty),
         delta_position_qty=Decimal(delta_qty),
     )
 
@@ -107,6 +113,79 @@ class TestSleeveBudgetController(TestCase):
 
         self.assertLess(decision.effective_scale, Decimal("1"))
         self.assertIn("pnl_contraction_active", decision.contraction_reason_codes)
+
+    def test_directional_loss_blocks_new_entry_budget_to_zero(self) -> None:
+        controller = SleeveBudgetController(_settings(strategy_sleeve_auto_soft_loss_usdt=10.0))
+
+        decision = controller.evaluate(
+            raw=_raw(
+                family="directional",
+                strategy_sleeve_id="sleeve_directional",
+                current_position_qty=Decimal("0"),
+                target_position_qty=Decimal("0.003"),
+                delta_position_qty=Decimal("0.003"),
+                requested_legs=(_leg("0.003"),),
+            ),
+            baseline=_baseline(1.0),
+            recent_net_pnl=Decimal("-2"),
+            latest_reconciliation=None,
+        )
+
+        self.assertEqual(decision.effective_scale, Decimal("0"))
+        self.assertEqual(decision.scaled_delta_position_qty, Decimal("0"))
+        self.assertTrue(decision.budget_zero_suppressed)
+        self.assertIn("pnl_contraction_active", decision.contraction_reason_codes)
+        self.assertIn("directional_loss_blocks_risk_increase", decision.contraction_reason_codes)
+        self.assertIn("budget_contracted_to_zero", decision.contraction_reason_codes)
+
+    def test_directional_loss_blocks_same_side_scale_in_budget_to_zero(self) -> None:
+        controller = SleeveBudgetController(_settings(strategy_sleeve_auto_soft_loss_usdt=10.0))
+
+        decision = controller.evaluate(
+            raw=_raw(
+                family="directional",
+                strategy_sleeve_id="sleeve_directional",
+                current_position_qty=Decimal("0.002"),
+                target_position_qty=Decimal("0.003"),
+                delta_position_qty=Decimal("0.001"),
+                requested_legs=(_leg("0.001", current_qty="0.002", target_qty="0.003"),),
+                active_inventory=True,
+                current_inventory_notional=Decimal("157"),
+            ),
+            baseline=_baseline(1.0),
+            recent_net_pnl=Decimal("-2"),
+            latest_reconciliation=None,
+        )
+
+        self.assertEqual(decision.effective_scale, Decimal("0"))
+        self.assertEqual(decision.scaled_delta_position_qty, Decimal("0"))
+        self.assertTrue(decision.budget_zero_suppressed)
+        self.assertIn("directional_loss_blocks_risk_increase", decision.contraction_reason_codes)
+
+    def test_directional_loss_does_not_block_reduce_budget(self) -> None:
+        controller = SleeveBudgetController(_settings(strategy_sleeve_auto_soft_loss_usdt=10.0))
+
+        decision = controller.evaluate(
+            raw=_raw(
+                family="directional",
+                strategy_sleeve_id="sleeve_directional",
+                current_position_qty=Decimal("0.003"),
+                target_position_qty=Decimal("0.001"),
+                delta_position_qty=Decimal("-0.002"),
+                requested_legs=(_leg("-0.002", current_qty="0.003", target_qty="0.001"),),
+                active_inventory=True,
+                current_inventory_notional=Decimal("236"),
+            ),
+            baseline=_baseline(1.0),
+            recent_net_pnl=Decimal("-2"),
+            latest_reconciliation=None,
+        )
+
+        self.assertLess(decision.effective_scale, Decimal("1"))
+        self.assertLess(decision.scaled_delta_position_qty, Decimal("0"))
+        self.assertFalse(decision.budget_zero_suppressed)
+        self.assertIn("pnl_contraction_active", decision.contraction_reason_codes)
+        self.assertNotIn("directional_loss_blocks_risk_increase", decision.contraction_reason_codes)
 
     def test_reconciliation_contraction_reduces_scale(self) -> None:
         controller = SleeveBudgetController(

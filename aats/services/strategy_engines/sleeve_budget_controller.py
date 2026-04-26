@@ -8,6 +8,7 @@ from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, quantiz
 from aats.services.strategy_engines.sleeve_reason_codes import (
     BASELINE_VOLATILITY_CONTRACTION_ACTIVE,
     BUDGET_CONTRACTED_TO_ZERO,
+    DIRECTIONAL_LOSS_BLOCKS_RISK_INCREASE,
     HARD_LOSS_BUDGET_BLOCK,
     NO_BUDGET_CONTRACTION,
     PNL_CONTRACTION_ACTIVE,
@@ -87,6 +88,15 @@ class SleeveBudgetController:
                         pnl_multiplier = Decimal("0")
                         reasons.append(HARD_LOSS_BUDGET_BLOCK)
                         trace.append("hard_loss_block=0")
+                if (
+                    raw.family == "directional"
+                    and soft_loss > EPSILON_DECIMAL_12
+                    and self._directional_risk_increase_requested(raw)
+                ):
+                    pnl_multiplier = Decimal("0")
+                    reasons.append(PNL_CONTRACTION_ACTIVE)
+                    reasons.append(DIRECTIONAL_LOSS_BLOCKS_RISK_INCREASE)
+                    trace.append("directional_loss_blocks_risk_increase=0")
                 if pnl_multiplier > EPSILON_DECIMAL_12 and soft_loss > EPSILON_DECIMAL_12:
                     loss_ratio = min(abs(recent_net_pnl) / soft_loss, Decimal("1"))
                     soft_loss_multiplier = max(
@@ -158,6 +168,18 @@ class SleeveBudgetController:
                 )
             )
         return tuple(scaled)
+
+    @staticmethod
+    def _directional_risk_increase_requested(raw: RawSleeveCandidateInputs) -> bool:
+        current_qty = to_decimal(raw.current_position_qty)
+        target_qty = to_decimal(raw.target_position_qty)
+        if abs(target_qty) <= EPSILON_DECIMAL_12:
+            return False
+        if abs(current_qty) <= EPSILON_DECIMAL_12:
+            return True
+        if current_qty * target_qty <= Decimal("0"):
+            return False
+        return abs(target_qty) > abs(current_qty) + EPSILON_DECIMAL_12
 
     @staticmethod
     def _clamp(value: Decimal, *, lower: Decimal, upper: Decimal) -> Decimal:
