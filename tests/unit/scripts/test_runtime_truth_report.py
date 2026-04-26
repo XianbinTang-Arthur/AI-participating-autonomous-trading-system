@@ -266,7 +266,91 @@ def test_no_trade_attribution_separates_soft_contraction_from_final_blockers() -
                     "strategy_sleeve_id": "sleeve-independent",
                     "route_action": "advisory_only",
                     "approved_for_execution": False,
+                    "execution_compatible": False,
+                    "execution_prerequisites_supported": False,
+                    "execution_behavior": "advisory_only",
+                    "execution_control_mode": "permission_denied",
+                    "execution_mode": "independent_books",
+                    "permission_mode": "unsupported",
+                    "automatic_enabled": False,
+                    "selectable": False,
+                    "state": "inactive",
+                    "state_phase": "inactive",
+                    "family_action": "hold_family",
                     "target_notional": "0",
+                    "control_reason_codes": [
+                        "candidate_execution_incompatible",
+                        "reconciliation_contraction_active",
+                        "composed_as_advisory_only",
+                    ],
+                    "control_summary": "current sleeve candidate is not execution compatible",
+                    "control_trace": {
+                        "permission": {
+                            "approved_for_execution": False,
+                            "candidate_enabled": True,
+                            "candidate_execution_compatible": False,
+                            "execution_prerequisites_supported": False,
+                            "configured_auto_execution_enabled": True,
+                            "permission_mode": "unsupported",
+                            "runtime_supported": True,
+                            "state_runtime_supported": True,
+                            "reason_codes": ["candidate_execution_incompatible"],
+                            "human_summary": "candidate is not execution compatible",
+                        },
+                        "composition": {
+                            "approved_for_execution": False,
+                            "route_action": "advisory_only",
+                            "execution_behavior": "advisory_only",
+                            "execution_control_mode": "permission_denied",
+                            "requested_delta_position_qty": "0",
+                            "composed_delta_position_qty": "0",
+                            "reason_codes": ["composed_as_advisory_only"],
+                        },
+                        "budget": {
+                            "base_scale": "1",
+                            "effective_scale": "0.5",
+                            "requested_delta_position_qty": "0",
+                            "scaled_delta_position_qty": "0",
+                            "budget_zero_suppressed": False,
+                            "reason_codes": ["reconciliation_contraction_active"],
+                        },
+                    },
+                    "metrics": {
+                        "book_runtime_states": [
+                            {
+                                "leg": "long",
+                                "state": "inactive",
+                                "book_action": "inactive",
+                                "book_state": "flat",
+                                "score": 0.041,
+                                "score_adjusted": 0.041,
+                                "expected_signal_edge_bps": 0.5,
+                                "expected_cost_bps": 6.0,
+                                "expected_net_edge_bps": -7.5,
+                                "health_state": "ok",
+                                "execution_health_state": "ok",
+                                "transition_valid": True,
+                                "reason_codes": ["independent_long_book_signal_below_entry_threshold"],
+                                "threshold_snapshot": {"effective_entry_threshold": 0.25},
+                            },
+                            {
+                                "leg": "short",
+                                "state": "inactive",
+                                "book_action": "inactive",
+                                "book_state": "flat",
+                                "score": 0.0,
+                                "score_adjusted": 0.0,
+                                "expected_signal_edge_bps": 0.0,
+                                "expected_cost_bps": 6.0,
+                                "expected_net_edge_bps": -8.0,
+                                "health_state": "ok",
+                                "execution_health_state": "ok",
+                                "transition_valid": True,
+                                "reason_codes": ["independent_short_book_signal_below_entry_threshold"],
+                                "threshold_snapshot": {"effective_entry_threshold": 0.25},
+                            },
+                        ],
+                    },
                     "reason_codes": [
                         "independent_long_book_signal_below_entry_threshold",
                         "independent_short_book_signal_below_entry_threshold",
@@ -307,6 +391,20 @@ def test_no_trade_attribution_separates_soft_contraction_from_final_blockers() -
     assert independent["approved_for_execution"] is False
     assert independent["route_action"] == "advisory_only"
     assert "independent_family_candidate_inactive" in independent["reason_codes"]
+    drilldown = attribution["candidate_execution_drilldown"][0]
+    assert drilldown["family"] == "independent"
+    assert drilldown["execution"]["execution_compatible"] is False
+    assert drilldown["execution"]["permission_mode"] == "unsupported"
+    assert drilldown["permission"]["candidate_execution_compatible"] is False
+    assert drilldown["permission"]["reason_codes"] == ["candidate_execution_incompatible"]
+    assert drilldown["composition"]["reason_codes"] == ["composed_as_advisory_only"]
+    assert drilldown["budget"]["effective_scale"] == "0.5"
+    assert drilldown["budget"]["reason_codes"] == ["reconciliation_contraction_active"]
+    assert drilldown["book_runtime_states"][0]["leg"] == "long"
+    assert drilldown["book_runtime_states"][0]["effective_entry_threshold"] == "0.25"
+    assert drilldown["book_runtime_states"][0]["reason_codes"] == [
+        "independent_long_book_signal_below_entry_threshold"
+    ]
 
 
 def test_blocking_findings_separate_report_generation_from_runtime_state() -> None:

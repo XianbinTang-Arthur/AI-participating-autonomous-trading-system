@@ -216,6 +216,13 @@ def decimal_is_positive(value: Any) -> bool:
         return False
 
 
+def first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
+
+
 def compact_unique(values: list[Any], *, limit: int = 16) -> list[str]:
     seen: set[str] = set()
     compacted: list[str] = []
@@ -333,6 +340,199 @@ def classify_contributing_factors(reason_codes: list[str]) -> list[str]:
     )
 
 
+def nested_control_trace(item: dict[str, Any]) -> dict[str, Any]:
+    direct = as_dict(item.get("control_trace"))
+    if direct:
+        return direct
+    return as_dict(as_dict(item.get("metrics")).get("auto_control_trace"))
+
+
+def summarize_permission_trace(item: dict[str, Any]) -> dict[str, Any]:
+    trace = nested_control_trace(item)
+    permission = as_dict(trace.get("permission"))
+    return {
+        "approved_for_execution": first_present(
+            permission.get("approved_for_execution"),
+            item.get("approved_for_execution"),
+        ),
+        "candidate_enabled": permission.get("candidate_enabled"),
+        "candidate_execution_compatible": first_present(
+            permission.get("candidate_execution_compatible"),
+            item.get("execution_compatible"),
+        ),
+        "execution_prerequisites_supported": first_present(
+            permission.get("execution_prerequisites_supported"),
+            item.get("execution_prerequisites_supported"),
+        ),
+        "configured_auto_execution_enabled": permission.get("configured_auto_execution_enabled"),
+        "permission_mode": first_present(permission.get("permission_mode"), item.get("permission_mode")),
+        "runtime_supported": permission.get("runtime_supported"),
+        "state_runtime_supported": permission.get("state_runtime_supported"),
+        "reason_codes": compact_unique(as_list(permission.get("reason_codes")), limit=8),
+        "human_summary": truncate_text(
+            permission.get("human_summary") or item.get("control_summary"),
+            limit=180,
+        ),
+    }
+
+
+def summarize_composition_trace(item: dict[str, Any]) -> dict[str, Any]:
+    composition = as_dict(nested_control_trace(item).get("composition"))
+    return {
+        "approved_for_execution": first_present(
+            composition.get("approved_for_execution"),
+            item.get("approved_for_execution"),
+        ),
+        "route_action": first_present(composition.get("route_action"), item.get("route_action")),
+        "execution_behavior": first_present(composition.get("execution_behavior"), item.get("execution_behavior")),
+        "execution_control_mode": first_present(
+            composition.get("execution_control_mode"),
+            item.get("execution_control_mode"),
+        ),
+        "requested_delta_position_qty": decimal_text(
+            first_present(
+                composition.get("requested_delta_position_qty"),
+                item.get("requested_delta_position_qty"),
+            ),
+        ),
+        "composed_delta_position_qty": decimal_text(composition.get("composed_delta_position_qty")),
+        "budget_zero_suppressed": composition.get("budget_zero_suppressed"),
+        "reason_codes": compact_unique(as_list(composition.get("reason_codes")), limit=8),
+    }
+
+
+def summarize_budget_trace(item: dict[str, Any]) -> dict[str, Any]:
+    budget = as_dict(nested_control_trace(item).get("budget"))
+    return {
+        "base_scale": decimal_text(budget.get("base_scale")),
+        "effective_scale": decimal_text(first_present(budget.get("effective_scale"), item.get("effective_scale"))),
+        "requested_delta_position_qty": decimal_text(
+            first_present(
+                budget.get("requested_delta_position_qty"),
+                item.get("requested_delta_position_qty"),
+            ),
+        ),
+        "scaled_delta_position_qty": decimal_text(budget.get("scaled_delta_position_qty")),
+        "budget_zero_suppressed": first_present(
+            budget.get("budget_zero_suppressed"),
+            item.get("budget_zero_suppressed"),
+        ),
+        "reason_codes": compact_unique(as_list(budget.get("reason_codes")), limit=8),
+    }
+
+
+def summarize_book_runtime_states(item: dict[str, Any]) -> list[dict[str, Any]]:
+    metrics = as_dict(item.get("metrics"))
+    summaries: list[dict[str, Any]] = []
+    for book in as_list(metrics.get("book_runtime_states"))[:2]:
+        book_dict = as_dict(book)
+        if not book_dict:
+            continue
+        threshold = as_dict(book_dict.get("threshold_snapshot"))
+        summaries.append(
+            {
+                "leg": book_dict.get("leg"),
+                "state": book_dict.get("state"),
+                "book_action": book_dict.get("book_action"),
+                "book_state": book_dict.get("book_state"),
+                "score": decimal_text(book_dict.get("score")),
+                "score_adjusted": decimal_text(book_dict.get("score_adjusted")),
+                "effective_entry_threshold": decimal_text(
+                    first_present(threshold.get("effective_entry_threshold"), threshold.get("entry_threshold")),
+                ),
+                "expected_signal_edge_bps": decimal_text(book_dict.get("expected_signal_edge_bps")),
+                "expected_cost_bps": decimal_text(book_dict.get("expected_cost_bps")),
+                "expected_net_edge_bps": decimal_text(book_dict.get("expected_net_edge_bps")),
+                "health_state": book_dict.get("health_state"),
+                "execution_health_state": book_dict.get("execution_health_state"),
+                "transition_valid": book_dict.get("transition_valid"),
+                "reason_codes": compact_unique(as_list(book_dict.get("reason_codes")), limit=8),
+            },
+        )
+    return summaries
+
+
+def is_candidate_drilldown_relevant(
+    *,
+    item: dict[str, Any],
+    family: Any,
+    primary_family: Any,
+    reason_codes: list[str],
+) -> bool:
+    if family == primary_family:
+        return True
+    return any(
+        "candidate_inactive" in code or "signal_below_entry_threshold" in code
+        for code in reason_codes
+    )
+
+
+def summarize_candidate_execution_drilldown(
+    payload: dict[str, Any],
+    *,
+    primary_family: Any,
+) -> list[dict[str, Any]]:
+    candidates = (
+        payload.get("strategy_sleeve_intents")
+        or payload.get("sleeve_intents")
+        or payload.get("sleeve_decisions")
+        or []
+    )
+    summaries: list[dict[str, Any]] = []
+    for item in as_list(candidates):
+        item_dict = as_dict(item)
+        if not item_dict:
+            continue
+        family = item_dict.get("family") or item_dict.get("strategy_family")
+        reason_codes = compact_unique(
+            as_list(item_dict.get("reason_codes"))
+            + as_list(item_dict.get("blocked_reason_codes"))
+            + as_list(item_dict.get("control_reason_codes"))
+            + as_list(item_dict.get("blocking_reasons")),
+            limit=12,
+        )
+        if not is_candidate_drilldown_relevant(
+            item=item_dict,
+            family=family,
+            primary_family=primary_family,
+            reason_codes=reason_codes,
+        ):
+            continue
+        summaries.append(
+            {
+                "family": family,
+                "strategy_sleeve_id": item_dict.get("strategy_sleeve_id") or item_dict.get("sleeve_id"),
+                "state": item_dict.get("state"),
+                "state_phase": item_dict.get("state_phase"),
+                "family_action": item_dict.get("family_action"),
+                "route_action": item_dict.get("route_action"),
+                "target_notional": decimal_text(
+                    item_dict.get("target_notional") or item_dict.get("target_exposure_notional"),
+                ),
+                "reason_codes": reason_codes,
+                "execution": {
+                    "approved_for_execution": item_dict.get("approved_for_execution"),
+                    "execution_compatible": item_dict.get("execution_compatible"),
+                    "execution_prerequisites_supported": item_dict.get("execution_prerequisites_supported"),
+                    "execution_behavior": item_dict.get("execution_behavior"),
+                    "execution_control_mode": item_dict.get("execution_control_mode"),
+                    "execution_mode": item_dict.get("execution_mode"),
+                    "permission_mode": item_dict.get("permission_mode"),
+                    "automatic_enabled": item_dict.get("automatic_enabled"),
+                    "selectable": item_dict.get("selectable"),
+                    "legs_count": len(as_list(item_dict.get("legs"))),
+                },
+                "permission": summarize_permission_trace(item_dict),
+                "composition": summarize_composition_trace(item_dict),
+                "budget": summarize_budget_trace(item_dict),
+                "book_runtime_states": summarize_book_runtime_states(item_dict),
+            },
+        )
+        if len(summaries) >= 4:
+            break
+    return summaries
+
+
 def classify_no_trade(
     *,
     latest_decision: dict[str, Any],
@@ -437,6 +637,10 @@ def summarize_latest_decision(
         "operator_summary": truncate_text(payload.get("operator_summary")),
         "execution_legs_count": len(as_list(payload.get("execution_legs"))),
         "sleeve_intent_summary": sleeve_summaries,
+        "candidate_execution_drilldown": summarize_candidate_execution_drilldown(
+            payload,
+            primary_family=latest.get("primary_family"),
+        ),
     }
     return {
         "allocation_id": latest.get("allocation_id"),
@@ -891,6 +1095,9 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "latest_decision_no_trade_primary_blocker": no_trade.get("primary_blocker"),
         "latest_decision_no_trade_final_blockers": no_trade.get("final_blockers"),
         "latest_decision_no_trade_contributing_factors": no_trade.get("contributing_factors"),
+        "latest_decision_no_trade_candidate_drilldown_count": len(
+            as_list(no_trade.get("candidate_execution_drilldown")),
+        ),
         "latest_decision_no_trade_classification": no_trade.get("classification"),
         "latest_decision_is_current_no_trade": no_trade.get("is_current_no_trade"),
         "portfolio_allocation_decisions": db.get("portfolio_allocation_decisions") if db.get("ok") else None,
