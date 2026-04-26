@@ -675,6 +675,98 @@ def test_expected_execution_surface_reports_smallest_missing_field() -> None:
     ]
 
 
+def test_created_order_without_submit_command_reports_submission_gap() -> None:
+    mod = load_module()
+
+    truth_chain = mod.summarize_execution_truth_chain(
+        latest_decision={"route_action": "override_target", "primary_family": "directional"},
+        execution_chain={
+            "execution_plan_ref_count": 1,
+            "order_intent_ref_count": 1,
+            "order_state_ref_count": 1,
+            "fill_event_ref_count": 0,
+            "db_order_count": 1,
+            "db_execution_order_created_or_submitting_count": 1,
+            "db_execution_order_submitted_or_later_count": 0,
+            "db_execution_command_count": 0,
+            "db_execution_submit_command_count": 0,
+            "db_order_state_count": 1,
+            "db_order_state_created_or_submitting_count": 1,
+            "db_order_state_submitted_or_later_count": 0,
+            "db_fill_count": 0,
+            "db_fill_via_order_count": 0,
+            "legacy_fill_event_count": 0,
+            "legacy_fill_event_via_order_count": 0,
+        },
+        execution_legs_count=1,
+        candidate_drilldown=[
+            {
+                "family": "directional",
+                "composition": {
+                    "route_action": "override_target",
+                    "execution_behavior": "submit_order",
+                    "requested_delta_position_qty": "0.0002",
+                    "composed_delta_position_qty": "0.0002",
+                },
+                "budget": {},
+                "execution": {"execution_behavior": "submit_order"},
+            },
+        ],
+    )
+
+    assert truth_chain["status"] == "expected_order_submission_missing"
+    assert truth_chain["order_expected"] is True
+    assert truth_chain["fill_expected"] is False
+    assert truth_chain["position_lifecycle_status"] == "position_lifecycle_transition_evidence_missing"
+    assert truth_chain["smallest_missing_field"] == "execution_command_or_submitted_order_state"
+    assert truth_chain["missing_fields"] == ["execution_command_or_submitted_order_state"]
+
+
+def test_fill_joined_through_execution_order_satisfies_fill_surface() -> None:
+    mod = load_module()
+
+    truth_chain = mod.summarize_execution_truth_chain(
+        latest_decision={"route_action": "override_target", "primary_family": "directional"},
+        execution_chain={
+            "execution_plan_ref_count": 1,
+            "order_intent_ref_count": 1,
+            "order_state_ref_count": 1,
+            "fill_event_ref_count": 0,
+            "db_order_count": 1,
+            "db_execution_order_created_or_submitting_count": 0,
+            "db_execution_order_submitted_or_later_count": 1,
+            "db_execution_command_count": 1,
+            "db_execution_submit_command_count": 1,
+            "db_order_state_count": 1,
+            "db_order_state_created_or_submitting_count": 0,
+            "db_order_state_submitted_or_later_count": 1,
+            "db_fill_count": 0,
+            "db_fill_via_order_count": 1,
+            "legacy_fill_event_count": 0,
+            "legacy_fill_event_via_order_count": 0,
+        },
+        execution_legs_count=1,
+        candidate_drilldown=[
+            {
+                "family": "directional",
+                "composition": {
+                    "route_action": "override_target",
+                    "execution_behavior": "submit_order",
+                    "requested_delta_position_qty": "0.0002",
+                    "composed_delta_position_qty": "0.0002",
+                },
+                "budget": {},
+                "execution": {"execution_behavior": "submit_order"},
+            },
+        ],
+    )
+
+    assert truth_chain["status"] == "verified_execution_surface_present"
+    assert truth_chain["fill_expected"] is True
+    assert truth_chain["smallest_missing_field"] is None
+    assert truth_chain["missing_fields"] == []
+
+
 def test_permission_root_cause_missing_evidence_degrades_safely() -> None:
     mod = load_module()
 

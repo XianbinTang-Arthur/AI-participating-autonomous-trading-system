@@ -124,16 +124,82 @@ with engine.connect() as conn:
                 text("select count(*) from execution_orders where decision_id = :decision_id"),
                 {"decision_id": decision_id},
             ).scalar()),
+            "execution_orders_created_or_submitting": int(conn.execute(
+                text(
+                    "select count(*) from execution_orders "
+                    "where decision_id = :decision_id "
+                    "and state in ('CREATED', 'SUBMITTING') "
+                    "and venue_order_id is null"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "execution_orders_submitted_or_later": int(conn.execute(
+                text(
+                    "select count(*) from execution_orders "
+                    "where decision_id = :decision_id "
+                    "and (state not in ('CREATED', 'SUBMITTING') or venue_order_id is not null)"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "execution_commands": int(conn.execute(
+                text(
+                    "select count(*) from execution_commands c "
+                    "join execution_orders o on o.order_id = c.order_id "
+                    "where o.decision_id = :decision_id"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "execution_submit_commands": int(conn.execute(
+                text(
+                    "select count(*) from execution_commands c "
+                    "join execution_orders o on o.order_id = c.order_id "
+                    "where o.decision_id = :decision_id and c.command_type = 'submit'"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
             "order_states": int(conn.execute(
                 text("select count(*) from order_states where decision_id = :decision_id"),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "order_states_created_or_submitting": int(conn.execute(
+                text(
+                    "select count(*) from order_states "
+                    "where decision_id = :decision_id "
+                    "and status in ('CREATED', 'SUBMITTING') "
+                    "and exchange_order_id is null"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "order_states_submitted_or_later": int(conn.execute(
+                text(
+                    "select count(*) from order_states "
+                    "where decision_id = :decision_id "
+                    "and (status not in ('CREATED', 'SUBMITTING') or exchange_order_id is not null)"
+                ),
                 {"decision_id": decision_id},
             ).scalar()),
             "execution_fills": int(conn.execute(
                 text("select count(*) from execution_fills where decision_id = :decision_id"),
                 {"decision_id": decision_id},
             ).scalar()),
+            "execution_fills_via_orders": int(conn.execute(
+                text(
+                    "select count(*) from execution_fills f "
+                    "join execution_orders o on o.order_id = f.order_id "
+                    "where o.decision_id = :decision_id"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
             "legacy_fill_events": int(conn.execute(
                 text("select count(*) from fill_events where decision_id = :decision_id"),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "legacy_fill_events_via_orders": int(conn.execute(
+                text(
+                    "select count(*) from fill_events f "
+                    "join execution_orders o on o.client_order_id = f.client_order_id "
+                    "where o.decision_id = :decision_id"
+                ),
                 {"decision_id": decision_id},
             ).scalar()),
         }
@@ -832,7 +898,23 @@ def summarize_execution_truth_chain(
     db_order_count = int(execution_chain.get("db_order_count") or 0)
     db_order_state_count = int(execution_chain.get("db_order_state_count") or 0)
     db_fill_count = int(execution_chain.get("db_fill_count") or 0)
+    db_fill_via_order_count = int(execution_chain.get("db_fill_via_order_count") or 0)
     legacy_fill_event_count = int(execution_chain.get("legacy_fill_event_count") or 0)
+    legacy_fill_event_via_order_count = int(execution_chain.get("legacy_fill_event_via_order_count") or 0)
+    db_execution_order_created_or_submitting_count = int(
+        execution_chain.get("db_execution_order_created_or_submitting_count") or 0
+    )
+    db_execution_order_submitted_or_later_count = int(
+        execution_chain.get("db_execution_order_submitted_or_later_count") or 0
+    )
+    db_order_state_created_or_submitting_count = int(
+        execution_chain.get("db_order_state_created_or_submitting_count") or 0
+    )
+    db_order_state_submitted_or_later_count = int(
+        execution_chain.get("db_order_state_submitted_or_later_count") or 0
+    )
+    db_execution_command_count = int(execution_chain.get("db_execution_command_count") or 0)
+    db_execution_submit_command_count = int(execution_chain.get("db_execution_submit_command_count") or 0)
     execution_plan_ref_count = int(execution_chain.get("execution_plan_ref_count") or 0)
     order_intent_ref_count = int(execution_chain.get("order_intent_ref_count") or 0)
     order_state_ref_count = int(execution_chain.get("order_state_ref_count") or 0)
@@ -846,7 +928,36 @@ def summarize_execution_truth_chain(
             order_state_ref_count,
         ),
     )
-    has_fill_surface = any((db_fill_count, legacy_fill_event_count, fill_event_ref_count))
+    has_fill_surface = any(
+        (
+            db_fill_count,
+            db_fill_via_order_count,
+            legacy_fill_event_count,
+            legacy_fill_event_via_order_count,
+            fill_event_ref_count,
+        )
+    )
+    has_submit_surface = any(
+        (
+            db_execution_command_count,
+            db_execution_submit_command_count,
+            db_execution_order_submitted_or_later_count,
+            db_order_state_submitted_or_later_count,
+            has_fill_surface,
+        )
+    )
+    order_created_but_not_submitted = (
+        has_order_surface
+        and not has_submit_surface
+        and any(
+            (
+                db_execution_order_created_or_submitting_count,
+                db_order_state_created_or_submitting_count,
+                db_order_count,
+                db_order_state_count,
+            )
+        )
+    )
     zero_delta = (
         decimal_is_zero(requested_delta_position_qty)
         and decimal_is_zero(composed_delta_position_qty)
@@ -866,6 +977,9 @@ def summarize_execution_truth_chain(
             f"composed_delta_position_qty={decimal_text(composed_delta_position_qty)}",
             f"db_order_count={db_order_count}",
             f"db_fill_count={db_fill_count}",
+            f"db_fill_via_order_count={db_fill_via_order_count}",
+            f"db_execution_command_count={db_execution_command_count}",
+            f"db_order_submitted_or_later_count={db_execution_order_submitted_or_later_count}",
         ],
         limit=12,
     )
@@ -887,10 +1001,21 @@ def summarize_execution_truth_chain(
             missing_fields.append("execution_plan_refs")
         if order_intent_ref_count == 0 and db_order_count == 0:
             missing_fields.append("order_intent_refs_or_execution_orders")
-        if fill_expected and fill_event_ref_count == 0 and db_fill_count == 0:
+        if (
+            not missing_fields
+            and order_created_but_not_submitted
+            and not has_fill_surface
+        ):
+            fill_expected = False
+            missing_fields.append("execution_command_or_submitted_order_state")
+        elif fill_expected and fill_event_ref_count == 0 and not has_fill_surface:
             missing_fields.append("fill_event_refs_or_execution_fills")
         if missing_fields:
-            status = "expected_execution_surface_missing"
+            status = (
+                "expected_order_submission_missing"
+                if missing_fields == ["execution_command_or_submitted_order_state"]
+                else "expected_execution_surface_missing"
+            )
         else:
             status = "verified_execution_surface_present"
     elif not has_order_surface and not has_fill_surface:
@@ -934,9 +1059,25 @@ def summarize_latest_decision(
         "fill_event_ref_count": len(as_list(audit_payload.get("fill_event_refs"))),
         "strategy_sleeve_intent_ref_count": len(as_list(audit_payload.get("strategy_sleeve_intent_refs"))),
         "db_order_count": int(counts.get("execution_orders") or 0),
+        "db_execution_order_created_or_submitting_count": int(
+            counts.get("execution_orders_created_or_submitting") or 0
+        ),
+        "db_execution_order_submitted_or_later_count": int(
+            counts.get("execution_orders_submitted_or_later") or 0
+        ),
+        "db_execution_command_count": int(counts.get("execution_commands") or 0),
+        "db_execution_submit_command_count": int(counts.get("execution_submit_commands") or 0),
         "db_order_state_count": int(counts.get("order_states") or 0),
+        "db_order_state_created_or_submitting_count": int(
+            counts.get("order_states_created_or_submitting") or 0
+        ),
+        "db_order_state_submitted_or_later_count": int(
+            counts.get("order_states_submitted_or_later") or 0
+        ),
         "db_fill_count": int(counts.get("execution_fills") or 0),
+        "db_fill_via_order_count": int(counts.get("execution_fills_via_orders") or 0),
         "legacy_fill_event_count": int(counts.get("legacy_fill_events") or 0),
+        "legacy_fill_event_via_order_count": int(counts.get("legacy_fill_events_via_orders") or 0),
     }
     sleeve_summaries = summarize_sleeve_intents(payload)
     reason_codes = compact_unique(
