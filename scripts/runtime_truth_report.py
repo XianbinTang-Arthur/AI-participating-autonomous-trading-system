@@ -328,17 +328,20 @@ def payload_sequence(conn):
     rows = conn.execute(
         text(
             "with recent as ("
-            "  select collector_sequence_scope, collector_sequence "
+            "  select collector_sequence_scope, ingest_run_id::text as ingest_run_id, "
+            "         coalesce(channel, '') as channel, collector_sequence "
             "  from bronze.market_orderbook_payloads "
             "  where symbol=:symbol and ts >= now() - (:window_minutes * interval '1 minute')"
             "), agg as ("
-            "  select collector_sequence_scope, count(*) n, min(collector_sequence) min_seq, "
+            "  select collector_sequence_scope, ingest_run_id, channel, "
+            "         count(*) n, min(collector_sequence) min_seq, "
             "         max(collector_sequence) max_seq, count(distinct collector_sequence) distinct_n "
-            "  from recent group by collector_sequence_scope"
+            "  from recent group by collector_sequence_scope, ingest_run_id, channel"
             ") "
-            "select collector_sequence_scope, n, min_seq, max_seq, distinct_n, "
+            "select collector_sequence_scope, left(ingest_run_id, 8) as ingest_run_id_prefix, "
+            "       channel, n, min_seq, max_seq, distinct_n, "
             "       (max_seq - min_seq + 1 - distinct_n) as sequence_gap_count "
-            "from agg order by collector_sequence_scope"
+            "from agg order by collector_sequence_scope, ingest_run_id_prefix, channel"
         ),
         {"symbol": symbol, "window_minutes": 30},
     ).mappings().all()
@@ -1755,6 +1758,8 @@ def summarize_payload_sequence(
         "scopes": [
             {
                 "collector_sequence_scope": item.get("collector_sequence_scope"),
+                "ingest_run_id_prefix": item.get("ingest_run_id_prefix"),
+                "channel": item.get("channel"),
                 "row_count": int_or_zero(item.get("n")),
                 "min_sequence": int_or_zero(item.get("min_seq")) if item.get("min_seq") is not None else None,
                 "max_sequence": int_or_zero(item.get("max_seq")) if item.get("max_seq") is not None else None,

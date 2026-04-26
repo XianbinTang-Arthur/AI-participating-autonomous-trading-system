@@ -8,7 +8,7 @@
 - `scripts/runtime_truth_report.py` owns the no-secret runtime truth projection used by automation and PM loops.
 - `aats_research` microstructure tables are the source of orderbook and execution-science evidence.
 - Bronze BBO/books5 rows prove live orderbook ingestion freshness.
-- `bronze.market_orderbook_payloads` proves payload persistence and collector sequence continuity.
+- `bronze.market_orderbook_payloads` proves payload persistence and collector sequence continuity within `(ingest_run_id, symbol, channel)`.
 - `silver.market_orderbook_metrics_15m` proves aggregated orderbook features are available for fill-feasibility and slippage analysis.
 
 ## Input/output interfaces
@@ -42,7 +42,7 @@
 
 ## Logging, Monitoring, Auditing
 - Automation can now distinguish healthy orderbook/fill-feasibility evidence from missing or stale microstructure facts.
-- Payload sequence gap status is surfaced for operator audit.
+- Payload sequence gap status is surfaced for operator audit within the sidecar uniqueness scope.
 
 ## Testing Strategy
 - Unit tests cover no-secret command generation, probe parsing, execution-science summary status, and live facts projection.

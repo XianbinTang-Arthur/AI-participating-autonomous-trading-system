@@ -122,6 +122,16 @@ def test_rdp_microstructure_probe_command_does_not_embed_database_url() -> None:
     assert "AATS_ACTIVE_PARAMETER_DB_URL" not in command
 
 
+def test_rdp_microstructure_payload_sequence_groups_by_unique_scope() -> None:
+    mod = load_module()
+
+    probe = mod.RDP_MICROSTRUCTURE_PROBE
+
+    assert "group by collector_sequence_scope, ingest_run_id, channel" in probe
+    assert "left(ingest_run_id, 8) as ingest_run_id_prefix" in probe
+    assert "coalesce(channel, '') as channel" in probe
+
+
 def test_db_probe_executable_directional_query_excludes_hold_current_notional() -> None:
     mod = load_module()
 
@@ -309,6 +319,8 @@ def test_execution_science_truth_verifies_orderbook_sequence_and_silver_bar() ->
             "scopes": [
                 {
                     "collector_sequence_scope": "per_ingest_run_symbol_channel",
+                    "ingest_run_id_prefix": "11111111",
+                    "channel": "books5",
                     "n": 30,
                     "min_seq": 1,
                     "max_seq": 30,
@@ -345,6 +357,8 @@ def test_execution_science_truth_verifies_orderbook_sequence_and_silver_bar() ->
     assert summary["status"] == "verified_orderbook_sequence_and_silver_bar_present"
     assert summary["smallest_missing_field"] is None
     assert summary["payload_sequence"]["status"] == "sequence_continuous"
+    assert summary["payload_sequence"]["scopes"][0]["ingest_run_id_prefix"] == "11111111"
+    assert summary["payload_sequence"]["scopes"][0]["channel"] == "books5"
     assert summary["silver_orderbook"]["status"] == "verified_silver_orderbook_bar_present"
     assert summary["fill_feasibility_truth_status"] == "verified_preorder_orderbook_features_available"
 
