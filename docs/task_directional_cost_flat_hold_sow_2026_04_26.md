@@ -10,7 +10,7 @@ Fix two live directional strategy defects without changing strategy family routi
 
 ## Input/Output Interfaces
 
-Input remains the same for external callers. `DecisionContext` gets an optional `market_snapshot` field excluded from serialization. `PositionTarget` output fields stay compatible; `expected_cost_bps` and `expected_net_edge_bps` become based on the actionable target delta or the blocked candidate delta.
+Input remains the same for external callers. `DecisionContext` gets an optional `market_snapshot` field excluded from serialization. `PositionTarget` output fields stay compatible; `expected_cost_bps` and `expected_net_edge_bps` describe the final target delta only. Cost-blocked candidate economics are exposed separately through `DecisionOutcome.decision_blocker_chain`.
 
 ## Database Schema / Tables / Indexes / Constraints
 
@@ -38,11 +38,11 @@ The market snapshot already exists in context building. Passing it through as a 
 
 ## Logging, Monitoring, Auditing
 
-No new log stream is required. `expected_cost_bps`, `expected_net_edge_bps`, and guardrail flags become more audit-correct for size-aware directional decisions.
+No new log stream is required. `expected_cost_bps`, `expected_net_edge_bps`, and guardrail flags become more audit-correct for size-aware directional decisions. When the cost gate blocks a candidate and the final target is hold, the blocked candidate cost is retained in a dedicated `cost_gate` blocker-chain stage instead of being mixed into final-target cost fields.
 
 ## Testing Strategy
 
-Add focused unit tests in `tests/unit/test_target_position_engine.py` for size-aware cost-gated entry and flat hold yielding to alpha-decay exit. Run narrow unit tests, ruff, then the full unit suite if feasible.
+Add focused unit tests in `tests/unit/test_target_position_engine.py` for size-aware cost-gated entry, flat hold yielding to alpha-decay exit, final hold cost-field semantics, and the live `ai_decision_maker` cost-gate path. Run narrow unit tests, ruff, then the full unit suite if feasible.
 
 ## Migration, Rollback, Compatibility
 
@@ -62,4 +62,4 @@ This SoW documents scope and acceptance. No operator manual changes are required
 
 ## Deployment and Acceptance Criteria
 
-Deploy through the standard repository deployment path only after tests pass. Acceptance criteria: directional entry cost gating receives side/quantity/notional/snapshot when available, cost-blocked entries remain blocked with meaningful cost metadata, and flat-signal hold no longer suppresses alpha-decay exits.
+Deploy through the standard repository deployment path only after tests pass. Acceptance criteria: directional entry cost gating receives side/quantity/notional/snapshot when available, cost-blocked entries remain blocked with meaningful candidate-level cost metadata, final hold top-level cost remains tied to the final no-op target, and flat-signal hold no longer suppresses alpha-decay exits.

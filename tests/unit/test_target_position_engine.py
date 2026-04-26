@@ -8,7 +8,7 @@ from unittest.mock import patch
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
-from aats.schemas.decision import AIMarketAssessment, BaselineAssessment, DecisionContext, ProfileControlDecision
+from aats.schemas.decision import AIDecisionIntent, AIMarketAssessment, BaselineAssessment, DecisionContext, ProfileControlDecision
 from aats.schemas.market import MarketSnapshot
 from aats.schemas.portfolio import InstrumentPositionState
 from aats.services.decision_engine.target_position import TargetPositionEngine
@@ -40,6 +40,30 @@ class _FundingAwareFeeResolver(_FixedFeeResolver):
     def funding_fee_bps(self, *, symbol: str | None = None) -> float:
         _ = symbol
         return self.funding_bps
+
+
+class _RecordingSizeAwareCostService:
+    def __init__(
+        self,
+        *,
+        high_cost_bps: Decimal = Decimal("30"),
+        low_cost_bps: Decimal = Decimal("1"),
+        high_cost_quantity_threshold: Decimal = Decimal("0.01"),
+    ) -> None:
+        self.high_cost_bps = high_cost_bps
+        self.low_cost_bps = low_cost_bps
+        self.high_cost_quantity_threshold = high_cost_quantity_threshold
+        self.calls: list[dict[str, object]] = []
+
+    def estimate_single_leg_entry(self, **kwargs):
+        self.calls.append(kwargs)
+        quantity = kwargs.get("quantity")
+        drag = (
+            self.high_cost_bps
+            if quantity is not None and Decimal(str(quantity)) >= self.high_cost_quantity_threshold
+            else self.low_cost_bps
+        )
+        return type("Estimate", (), {"executable_total_drag_bps": drag})()
 
 
 class TestTargetPositionEngine(unittest.TestCase):
@@ -1291,20 +1315,6 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(target.expected_cost_bps, 17.0)
 
     def test_directional_cost_guard_uses_target_delta_and_market_snapshot(self) -> None:
-        class _SizeAwareCostService:
-            def __init__(self) -> None:
-                self.calls: list[dict[str, object]] = []
-
-            def estimate_single_leg_entry(self, **kwargs):
-                self.calls.append(kwargs)
-                quantity = kwargs.get("quantity")
-                drag = (
-                    Decimal("30")
-                    if quantity is not None and Decimal(str(quantity)) >= Decimal("0.01")
-                    else Decimal("1")
-                )
-                return type("Estimate", (), {"executable_total_drag_bps": drag})()
-
         settings = AATSSettings.model_validate(
             {
                 "default_order_qty": 0.004,
@@ -1325,21 +1335,9 @@ class TestTargetPositionEngine(unittest.TestCase):
             }
         )
         engine = TargetPositionEngine(settings=settings)
-        cost_service = _SizeAwareCostService()
+        cost_service = _RecordingSizeAwareCostService()
         engine.trade_cost_service = cost_service  # type: ignore[assignment]
-        market_snapshot = MarketSnapshot(
-            symbol="BTC-USDT",
-            exchange="OKX",
-            snapshot_ts=datetime.now(timezone.utc),
-            best_bid=Decimal("99990"),
-            best_ask=Decimal("100010"),
-            last_price=Decimal("100000"),
-            bid_size=Decimal("0.002"),
-            ask_size=Decimal("0.002"),
-            volume_24h=Decimal("1000000"),
-            kline_15m={"open": Decimal("99900"), "high": Decimal("100200"), "low": Decimal("99800"), "close": Decimal("100000")},
-            kline_1h={"open": Decimal("99500"), "high": Decimal("100500"), "low": Decimal("99000"), "close": Decimal("100000")},
-        )
+        market_snapshot = self._market_snapshot()
         context = self._context(
             product_type="derivatives",
             current_exposure_side="flat",
@@ -1358,7 +1356,7 @@ class TestTargetPositionEngine(unittest.TestCase):
         target = engine.build(context, baseline, self._ai_assessment(direction=0.10, confidence=0.70))
 
         self.assertEqual(target.target_position_qty, Decimal("0"))
-        self.assertEqual(target.expected_cost_bps, 30.0)
+        self.assertEqual(target.expected_cost_bps, 0.0)
         self.assertIn("expected_edge_below_cost_buffer", target.guardrail_flags)
         self.assertTrue(cost_service.calls)
         cost_call = cost_service.calls[0]
@@ -1366,6 +1364,11 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(cost_call["quantity"], Decimal("0.014625"))
         self.assertEqual(cost_call["projected_notional"], Decimal("1462.500000"))
         self.assertIs(cost_call["market_snapshot"], market_snapshot)
+        self.assertIsNotNone(target.decision_outcome)
+        cost_gate = next(stage for stage in target.decision_outcome.decision_blocker_chain if stage["stage"] == "cost_gate")
+        self.assertEqual(cost_gate["candidates"][0]["source"], "baseline_fallback")
+        self.assertEqual(cost_gate["candidates"][0]["expected_cost_bps"], 30.0)
+        self.assertEqual(cost_gate["candidates"][0]["candidate_delta_qty"], "0.014625")
 
     def test_cost_guard_uses_contextual_derivatives_cost_components(self) -> None:
         engine = TargetPositionEngine(
@@ -1395,9 +1398,142 @@ class TestTargetPositionEngine(unittest.TestCase):
             self._ai_assessment(direction=0.24, confidence=0.86),
         )
 
-        self.assertEqual(target.expected_cost_bps, 25.0)
+        self.assertEqual(target.expected_cost_bps, 0.0)
         self.assertEqual(target.target_position_qty, Decimal("0"))
         self.assertIn("expected_edge_below_cost_buffer", target.guardrail_flags)
+        self.assertIsNotNone(target.decision_outcome)
+        cost_gate = next(stage for stage in target.decision_outcome.decision_blocker_chain if stage["stage"] == "cost_gate")
+        self.assertEqual(cost_gate["candidates"][0]["expected_cost_bps"], 25.0)
+
+    def test_ai_decision_maker_cost_guard_audits_authorized_entry_candidate(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_order_qty": 0.004,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "ai_operating_mode": "ai_decision_maker",
+                "default_target_leverage": 5.0,
+                "max_target_leverage": 10.0,
+                "max_margin_usage_fraction": 0.75,
+                "strategy_dynamic_leverage_enabled": False,
+                "strategy_short_bias_enabled": True,
+                "strategy_cost_guard_enabled": True,
+                "strategy_edge_noise_buffer_bps": 0.0,
+                "strategy_min_net_edge_bps": 0.0,
+                "strategy_entry_min_signal_edge_bps": 0.0,
+                "strategy_entry_alpha_min": 0.0,
+                "strategy_entry_confidence_min": 0.0,
+                "strategy_alpha_edge_bps_scale": 100.0,
+            }
+        )
+        engine = TargetPositionEngine(settings=settings)
+        cost_service = _RecordingSizeAwareCostService(
+            high_cost_bps=Decimal("50"),
+            high_cost_quantity_threshold=Decimal("0.001"),
+        )
+        engine.trade_cost_service = cost_service  # type: ignore[assignment]
+        market_snapshot = self._market_snapshot()
+        context = self._context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            market_last_price=Decimal("100000"),
+            available_trading_equity=Decimal("390"),
+            market_snapshot=market_snapshot,
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.84,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            composite_alpha_score=0.25,
+        )
+
+        target = engine.build(
+            context,
+            baseline,
+            self._ai_assessment(direction=0.45, confidence=0.90, fallback_used=False, override=True, actionable=True),
+            operating_mode="ai_decision_maker",
+        )
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.expected_cost_bps, 0.0)
+        self.assertIn("expected_edge_below_cost_buffer", target.guardrail_flags)
+        self.assertIsNotNone(target.decision_outcome)
+        self.assertEqual(target.decision_outcome.decision_source, "ai")
+        cost_gate = next(stage for stage in target.decision_outcome.decision_blocker_chain if stage["stage"] == "cost_gate")
+        ai_candidates = [
+            candidate
+            for candidate in cost_gate["candidates"]
+            if candidate["source"] == "ai_decision_intent"
+        ]
+        self.assertEqual(len(ai_candidates), 1)
+        self.assertEqual(ai_candidates[0]["expected_cost_bps"], 50.0)
+        self.assertEqual(ai_candidates[0]["candidate_delta_qty"], "0.014625")
+        self.assertTrue(ai_candidates[0]["market_snapshot_available"])
+        self.assertTrue(any(call["market_snapshot"] is market_snapshot for call in cost_service.calls))
+
+    def test_ai_decision_maker_exit_is_not_blocked_by_cost_gate(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "default_order_qty": 0.004,
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "ai_operating_mode": "ai_decision_maker",
+                "strategy_short_bias_enabled": True,
+                "strategy_cost_guard_enabled": True,
+                "strategy_alpha_edge_bps_scale": 100.0,
+            }
+        )
+        engine = TargetPositionEngine(settings=settings)
+        cost_service = _RecordingSizeAwareCostService(
+            high_cost_bps=Decimal("80"),
+            high_cost_quantity_threshold=Decimal("0"),
+        )
+        engine.trade_cost_service = cost_service  # type: ignore[assignment]
+        market_snapshot = self._market_snapshot()
+        context = self._context(
+            current_position_qty=0.02,
+            product_type="derivatives",
+            current_exposure_side="long",
+            market_last_price=Decimal("100000"),
+            market_snapshot=market_snapshot,
+        )
+        intent = AIDecisionIntent(
+            decision_id="decision_target_test",
+            symbol="BTC-USDT",
+            timeframe="15m",
+            direction="flat",
+            action="exit",
+            target_qty=Decimal("0"),
+            confidence=0.90,
+            economically_actionable=True,
+            reason_codes=["ai_exit"],
+            fallback_used=False,
+            degraded=False,
+            provider_name="test",
+        )
+
+        target = engine.build(
+            context,
+            self._baseline(
+                direction_bias="flat",
+                confidence=0.84,
+                suggested_position_scale=0.0,
+                volatility_target_scale=1.0,
+                composite_alpha_score=0.25,
+            ),
+            self._ai_assessment(direction=-0.45, confidence=0.90, fallback_used=False, override=True, actionable=True),
+            ai_decision_intent=intent,
+            operating_mode="ai_decision_maker",
+        )
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "close_long")
+        self.assertNotIn("expected_edge_below_cost_buffer", target.guardrail_flags)
+        self.assertEqual(target.expected_cost_bps, 80.0)
+        self.assertTrue(cost_service.calls)
+        self.assertEqual(cost_service.calls[0]["side"], "sell")
+        self.assertEqual(cost_service.calls[0]["quantity"], Decimal("0.02"))
 
     def test_ai_primary_requires_override_and_actionable_edge(self) -> None:
         engine = TargetPositionEngine(
@@ -1919,6 +2055,32 @@ class TestTargetPositionEngine(unittest.TestCase):
             market_last_price=market_last_price,
             available_trading_equity=available_trading_equity,
             market_snapshot=market_snapshot,
+        )
+
+    @staticmethod
+    def _market_snapshot() -> MarketSnapshot:
+        return MarketSnapshot(
+            symbol="BTC-USDT",
+            exchange="OKX",
+            snapshot_ts=datetime.now(timezone.utc),
+            best_bid=Decimal("99990"),
+            best_ask=Decimal("100010"),
+            last_price=Decimal("100000"),
+            bid_size=Decimal("0.002"),
+            ask_size=Decimal("0.002"),
+            volume_24h=Decimal("1000000"),
+            kline_15m={
+                "open": Decimal("99900"),
+                "high": Decimal("100200"),
+                "low": Decimal("99800"),
+                "close": Decimal("100000"),
+            },
+            kline_1h={
+                "open": Decimal("99500"),
+                "high": Decimal("100500"),
+                "low": Decimal("99000"),
+                "close": Decimal("100000"),
+            },
         )
 
     @staticmethod

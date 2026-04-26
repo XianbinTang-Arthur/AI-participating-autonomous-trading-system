@@ -489,6 +489,7 @@ class TargetPositionEngine:
         resolved_margin_mode = self._resolved_margin_mode(context=context)
         signal_edge_bps = self._signal_edge_bps(baseline=baseline, ai_assessment=ai_assessment)
         guardrail_flags = list(context.strategy_guardrail_flags)
+        cost_guard_audits: list[dict[str, object]] = []
         leverage_bias = self._leverage_bias(
             baseline=baseline,
             ai_assessment=ai_assessment,
@@ -510,6 +511,7 @@ class TargetPositionEngine:
             ai_decision_authorized=ai_decision_authorized,
             signal_edge_bps=signal_edge_bps,
             guardrail_flags=guardrail_flags,
+            cost_guard_audits=cost_guard_audits,
         )
         if (
             not self._short_bias_allowed(context.product_type)
@@ -527,22 +529,12 @@ class TargetPositionEngine:
                 baseline=baseline,
                 ai_assessment=ai_assessment,
             )
-        cost_reference_target_qty = self._cost_reference_target_qty(
-            context=context,
-            baseline=baseline,
-            ai_assessment=ai_assessment,
-            ai_decision_intent=ai_decision_intent,
-            canonical_mode=canonical_mode,
-            ai_decision_authorized=ai_decision_authorized,
-            target_qty=target_qty,
-            guardrail_flags=guardrail_flags,
-        )
         expected_cost_bps = self._estimated_trade_cost_bps(
             context=context,
             product_type=context.product_type,
             ai_assessment=ai_assessment,
             margin_mode=resolved_margin_mode,
-            desired_target_qty=cost_reference_target_qty,
+            desired_target_qty=target_qty,
         )
         expected_net_edge_bps = signal_edge_bps - expected_cost_bps - max(self.settings.strategy_edge_noise_buffer_bps, 0.0)
         target_leverage = self._target_leverage(
@@ -603,6 +595,7 @@ class TargetPositionEngine:
             ai_decision_applied=ai_decision_applied,
             ai_decision_blockers=ai_decision_blockers,
             guardrail_flags=guardrail_flags,
+            cost_guard_audits=cost_guard_audits,
             sizing_breakdown=sizing_breakdown,
         )
 
@@ -670,6 +663,7 @@ class TargetPositionEngine:
         ai_decision_authorized: bool,
         signal_edge_bps: float,
         guardrail_flags: list[str],
+        cost_guard_audits: list[dict[str, object]],
     ) -> Decimal:
         legacy_mode = (operating_mode or "").strip()
         mode = normalize_ai_operating_mode(operating_mode)
@@ -687,6 +681,8 @@ class TargetPositionEngine:
             product_type=product_type,
             signal_edge_bps=signal_edge_bps,
             guardrail_flags=guardrail_flags,
+            candidate_source="baseline_fallback",
+            cost_guard_audits=cost_guard_audits,
         )
         baseline_fallback_qty = self._apply_strategy_execution_guards(
             context=context,
@@ -727,6 +723,7 @@ class TargetPositionEngine:
                 ai_decision_authorized=ai_decision_authorized,
                 signal_edge_bps=signal_edge_bps,
                 guardrail_flags=guardrail_flags,
+                cost_guard_audits=cost_guard_audits,
             )
         return self._apply_position_management(
             current_position_qty=context.current_position_qty,
@@ -850,6 +847,7 @@ class TargetPositionEngine:
         ai_decision_authorized: bool,
         signal_edge_bps: float,
         guardrail_flags: list[str],
+        cost_guard_audits: list[dict[str, object]],
     ) -> Decimal:
         if ai_decision_intent is not None and ai_decision_authorized:
             desired_target_qty = self._desired_target_qty_from_ai_decision_intent(
@@ -864,6 +862,8 @@ class TargetPositionEngine:
                 product_type=product_type,
                 signal_edge_bps=signal_edge_bps,
                 guardrail_flags=guardrail_flags,
+                candidate_source="ai_decision_intent",
+                cost_guard_audits=cost_guard_audits,
             )
             desired_target_qty = self._apply_strategy_execution_guards(
                 context=context,
@@ -1195,6 +1195,8 @@ class TargetPositionEngine:
         product_type: str,
         signal_edge_bps: float,
         guardrail_flags: list[str],
+        candidate_source: str = "target_candidate",
+        cost_guard_audits: list[dict[str, object]] | None = None,
     ) -> Decimal:
         desired_target_qty = self._apply_trade_qualification_gate(
             current_position_qty=context.current_position_qty,
@@ -1226,7 +1228,55 @@ class TargetPositionEngine:
         if signal_edge_bps + float(EPSILON_DECIMAL_12) >= required_edge_bps:
             return desired_target_qty
         guardrail_flags.append("expected_edge_below_cost_buffer")
+        self._append_cost_guard_audit(
+            cost_guard_audits=cost_guard_audits,
+            context=context,
+            candidate_source=candidate_source,
+            desired_target_qty=desired_target_qty,
+            estimated_cost_bps=estimated_cost_bps,
+            required_edge_bps=required_edge_bps,
+            signal_edge_bps=signal_edge_bps,
+        )
         return context.current_position_qty
+
+    @staticmethod
+    def _append_cost_guard_audit(
+        *,
+        cost_guard_audits: list[dict[str, object]] | None,
+        context: DecisionContext,
+        candidate_source: str,
+        desired_target_qty: Decimal,
+        estimated_cost_bps: float,
+        required_edge_bps: float,
+        signal_edge_bps: float,
+    ) -> None:
+        if cost_guard_audits is None:
+            return
+        current_qty = to_decimal(context.current_position_qty)
+        target_qty = to_decimal(desired_target_qty)
+        delta_qty = target_qty - current_qty
+        side = "buy" if delta_qty > 0 else "sell" if delta_qty < 0 else "none"
+        reference_price = max(to_decimal(context.market_last_price), Decimal("0"))
+        projected_notional = (
+            abs(delta_qty) * reference_price
+            if reference_price > EPSILON_DECIMAL_12 and abs(delta_qty) > EPSILON_DECIMAL_12
+            else None
+        )
+        cost_guard_audits.append(
+            {
+                "source": candidate_source,
+                "current_position_qty": str(current_qty),
+                "candidate_target_qty": str(target_qty),
+                "candidate_delta_qty": str(delta_qty),
+                "side": side,
+                "projected_notional": None if projected_notional is None else str(projected_notional),
+                "expected_cost_bps": float(estimated_cost_bps),
+                "required_edge_bps": float(required_edge_bps),
+                "signal_edge_bps": float(signal_edge_bps),
+                "market_snapshot_ref": context.market_snapshot_ref,
+                "market_snapshot_available": context.market_snapshot is not None,
+            }
+        )
 
     def _apply_trade_qualification_gate(
         self,
@@ -2000,6 +2050,7 @@ class TargetPositionEngine:
         ai_decision_applied: bool,
         ai_decision_blockers: list[str],
         guardrail_flags: list[str],
+        cost_guard_audits: list[dict[str, object]],
         sizing_breakdown: PositionSizingBreakdown | None,
     ) -> DecisionOutcome:
         authority_map = {
@@ -2105,6 +2156,7 @@ class TargetPositionEngine:
                 baseline=baseline,
                 ai_decision_blockers=ai_decision_blockers,
                 guardrail_flags=guardrail_flags,
+                cost_guard_audits=cost_guard_audits,
                 target_qty=target_qty,
             ),
             guardrail_flags=list(dict.fromkeys(guardrail_flags)),
@@ -2141,6 +2193,7 @@ class TargetPositionEngine:
         baseline: BaselineAssessment,
         ai_decision_blockers: list[str],
         guardrail_flags: list[str],
+        cost_guard_audits: list[dict[str, object]],
         target_qty: Decimal,
     ) -> list[dict[str, object]]:
         chain: list[dict[str, object]] = []
@@ -2172,6 +2225,15 @@ class TargetPositionEngine:
                 "reasons": list(dict.fromkeys(guardrail_flags)),
             }
         )
+        if cost_guard_audits:
+            chain.append(
+                {
+                    "stage": "cost_gate",
+                    "blocked": True,
+                    "reasons": ["expected_edge_below_cost_buffer"],
+                    "candidates": list(cost_guard_audits),
+                }
+            )
         chain.append(
             {
                 "stage": "ai_gate",
@@ -2221,36 +2283,6 @@ class TargetPositionEngine:
 
     def _flat_cleanup_threshold(self) -> Decimal:
         return max(to_decimal(self.settings.default_order_qty) * Decimal("0.15"), EPSILON_DECIMAL_12)
-
-    def _cost_reference_target_qty(
-        self,
-        *,
-        context: DecisionContext,
-        baseline: BaselineAssessment,
-        ai_assessment: AIMarketAssessment | None,
-        ai_decision_intent: AIDecisionIntent | None,
-        canonical_mode: CanonicalAIOperatingMode,
-        ai_decision_authorized: bool,
-        target_qty: Decimal,
-        guardrail_flags: list[str],
-    ) -> Decimal:
-        if abs(target_qty - context.current_position_qty) > EPSILON_DECIMAL_12:
-            return target_qty
-        if "expected_edge_below_cost_buffer" not in guardrail_flags:
-            return target_qty
-        if canonical_mode == "ai_decision_maker" and ai_decision_authorized and ai_decision_intent is not None:
-            ai_target_qty = self._desired_target_qty_from_ai_decision_intent(
-                context=context,
-                ai_decision_intent=ai_decision_intent,
-            )
-            if abs(ai_target_qty - context.current_position_qty) > EPSILON_DECIMAL_12:
-                return ai_target_qty
-        return self._baseline_target_qty(
-            context=context,
-            baseline=baseline,
-            ai_assessment=ai_assessment,
-            product_type=context.product_type,
-        )
 
     def _estimated_trade_cost_bps(
         self,
