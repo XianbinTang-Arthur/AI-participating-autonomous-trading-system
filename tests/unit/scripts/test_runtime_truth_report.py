@@ -402,6 +402,14 @@ def test_no_trade_attribution_separates_soft_contraction_from_final_blockers() -
     assert drilldown["budget"]["reason_codes"] == ["reconciliation_contraction_active"]
     assert drilldown["book_runtime_states"][0]["leg"] == "long"
     assert drilldown["book_runtime_states"][0]["effective_entry_threshold"] == "0.25"
+    assert drilldown["book_runtime_states"][0]["activation_gap"] == {
+        "score_gap_to_entry_threshold": "0.209",
+        "score_minus_entry_threshold": "-0.209",
+        "score_meets_entry_threshold": False,
+        "signal_edge_minus_cost_bps": "-5.5",
+        "signal_edge_gap_to_cost_bps": "5.5",
+        "signal_edge_covers_cost": False,
+    }
     assert drilldown["book_runtime_states"][0]["reason_codes"] == [
         "independent_long_book_signal_below_entry_threshold"
     ]

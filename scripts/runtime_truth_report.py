@@ -18,6 +18,7 @@ import ssl
 import subprocess
 import sys
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -214,6 +215,39 @@ def decimal_is_positive(value: Any) -> bool:
         return float(value or 0) > 0
     except (TypeError, ValueError):
         return False
+
+
+def decimal_value(value: Any) -> Decimal | None:
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def decimal_plain_text(value: Decimal | None) -> str | None:
+    if value is None:
+        return None
+    if value == value.to_integral_value():
+        return format(value.quantize(Decimal("1")), "f")
+    return format(value.normalize(), "f")
+
+
+def decimal_subtract_text(left: Any, right: Any) -> str | None:
+    left_value = decimal_value(left)
+    right_value = decimal_value(right)
+    if left_value is None or right_value is None:
+        return None
+    return decimal_plain_text(left_value - right_value)
+
+
+def decimal_gte(left: Any, right: Any) -> bool | None:
+    left_value = decimal_value(left)
+    right_value = decimal_value(right)
+    if left_value is None or right_value is None:
+        return None
+    return left_value >= right_value
 
 
 def first_present(*values: Any) -> Any:
@@ -429,6 +463,10 @@ def summarize_book_runtime_states(item: dict[str, Any]) -> list[dict[str, Any]]:
         if not book_dict:
             continue
         threshold = as_dict(book_dict.get("threshold_snapshot"))
+        score = first_present(book_dict.get("score_adjusted"), book_dict.get("score"))
+        entry_threshold = first_present(threshold.get("effective_entry_threshold"), threshold.get("entry_threshold"))
+        signal_edge = book_dict.get("expected_signal_edge_bps")
+        expected_cost = book_dict.get("expected_cost_bps")
         summaries.append(
             {
                 "leg": book_dict.get("leg"),
@@ -437,12 +475,18 @@ def summarize_book_runtime_states(item: dict[str, Any]) -> list[dict[str, Any]]:
                 "book_state": book_dict.get("book_state"),
                 "score": decimal_text(book_dict.get("score")),
                 "score_adjusted": decimal_text(book_dict.get("score_adjusted")),
-                "effective_entry_threshold": decimal_text(
-                    first_present(threshold.get("effective_entry_threshold"), threshold.get("entry_threshold")),
-                ),
+                "effective_entry_threshold": decimal_text(entry_threshold),
                 "expected_signal_edge_bps": decimal_text(book_dict.get("expected_signal_edge_bps")),
                 "expected_cost_bps": decimal_text(book_dict.get("expected_cost_bps")),
                 "expected_net_edge_bps": decimal_text(book_dict.get("expected_net_edge_bps")),
+                "activation_gap": {
+                    "score_gap_to_entry_threshold": decimal_subtract_text(entry_threshold, score),
+                    "score_minus_entry_threshold": decimal_subtract_text(score, entry_threshold),
+                    "score_meets_entry_threshold": decimal_gte(score, entry_threshold),
+                    "signal_edge_minus_cost_bps": decimal_subtract_text(signal_edge, expected_cost),
+                    "signal_edge_gap_to_cost_bps": decimal_subtract_text(expected_cost, signal_edge),
+                    "signal_edge_covers_cost": decimal_gte(signal_edge, expected_cost),
+                },
                 "health_state": book_dict.get("health_state"),
                 "execution_health_state": book_dict.get("execution_health_state"),
                 "transition_valid": book_dict.get("transition_valid"),
