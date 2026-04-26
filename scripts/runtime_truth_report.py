@@ -51,6 +51,9 @@ STATIC_MARKERS = {
     ),
 }
 ARTIFACT_STALE_AFTER_SECONDS = 1800
+ORDERBOOK_BRONZE_STALE_AFTER_SECONDS = 180
+ORDERBOOK_PAYLOAD_SEQUENCE_WINDOW_MINUTES = 30
+ORDERBOOK_SILVER_STALE_AFTER_SECONDS = 3600
 ARTIFACT_COMPARE_FACTS = (
     "latest_decision_id",
     "latest_decision_route_action",
@@ -268,6 +271,138 @@ print(json.dumps({
     "latest_executable_directional_decision_counts": latest_executable_directional_counts,
     "runtime_config": runtime_config,
 }, default=str, sort_keys=True))
+"""
+
+RDP_MICROSTRUCTURE_PROBE = r"""
+import json
+import os
+from sqlalchemy import create_engine, text
+
+url = os.environ.get("RDP_DATABASE_URL") or os.environ.get("AATS_ACTIVE_PARAMETER_DB_URL")
+if not url:
+    print(json.dumps({"ok": False, "reason": "rdp_database_url_not_available_in_container_env"}, sort_keys=True))
+    raise SystemExit(0)
+
+symbol = os.environ.get("AATS_EXECUTION_SCIENCE_SYMBOL", "BTC-USDT-SWAP")
+engine = create_engine(url)
+
+def table_exists(conn, name):
+    return bool(conn.execute(text("select to_regclass(:name)"), {"name": name}).scalar())
+
+def table_stats(conn, schema, table):
+    name = f"{schema}.{table}"
+    exists = table_exists(conn, name)
+    stats = {"exists": exists}
+    if not exists:
+        return stats
+    row = conn.execute(
+        text(f"select count(*) as n, max(ts) as max_ts, min(ts) as min_ts from {name} where symbol=:symbol"),
+        {"symbol": symbol},
+    ).mappings().first()
+    stats.update(
+        {
+            "count": int((row or {}).get("n") or 0),
+            "max_ts": (row or {}).get("max_ts"),
+            "min_ts": (row or {}).get("min_ts"),
+        }
+    )
+    return stats
+
+def latest_silver_orderbook(conn):
+    if not table_exists(conn, "silver.market_orderbook_metrics_15m"):
+        return None
+    row = conn.execute(
+        text(
+            "select ts, bbo_samples_n, books5_samples_n, spread_bps_mean, "
+            "spread_bps_max, spread_bps_min, mid_price_last, quality_flags "
+            "from silver.market_orderbook_metrics_15m "
+            "where symbol=:symbol order by ts desc limit 1"
+        ),
+        {"symbol": symbol},
+    ).mappings().first()
+    return dict(row) if row else None
+
+def payload_sequence(conn):
+    if not table_exists(conn, "bronze.market_orderbook_payloads"):
+        return {"exists": False}
+    rows = conn.execute(
+        text(
+            "with recent as ("
+            "  select collector_sequence_scope, collector_sequence "
+            "  from bronze.market_orderbook_payloads "
+            "  where symbol=:symbol and ts >= now() - (:window_minutes * interval '1 minute')"
+            "), agg as ("
+            "  select collector_sequence_scope, count(*) n, min(collector_sequence) min_seq, "
+            "         max(collector_sequence) max_seq, count(distinct collector_sequence) distinct_n "
+            "  from recent group by collector_sequence_scope"
+            ") "
+            "select collector_sequence_scope, n, min_seq, max_seq, distinct_n, "
+            "       (max_seq - min_seq + 1 - distinct_n) as sequence_gap_count "
+            "from agg order by collector_sequence_scope"
+        ),
+        {"symbol": symbol, "window_minutes": 30},
+    ).mappings().all()
+    capture_rows = conn.execute(
+        text(
+            "select capture_status, count(*) n, max(ts) max_ts "
+            "from bronze.market_orderbook_payloads "
+            "where symbol=:symbol and ts >= now() - (:window_minutes * interval '1 minute') "
+            "group by capture_status order by capture_status"
+        ),
+        {"symbol": symbol, "window_minutes": 30},
+    ).mappings().all()
+    return {
+        "exists": True,
+        "window_minutes": 30,
+        "scopes": [dict(row) for row in rows],
+        "capture_status_counts": [dict(row) for row in capture_rows],
+    }
+
+def microstructure_workflow(conn):
+    if not table_exists(conn, "governance.rdp_task_queue"):
+        return {"exists": False}
+    rows = conn.execute(
+        text(
+            "select workflow, status, count(*) n, "
+            "       max(coalesce(finished_at, started_at, requested_at, created_at)) max_seen "
+            "from governance.rdp_task_queue "
+            "where workflow='microstructure_silver_15m' "
+            "group by workflow, status order by status"
+        )
+    ).mappings().all()
+    active = conn.execute(
+        text(
+            "select count(*) from governance.rdp_task_queue "
+            "where workflow='microstructure_silver_15m' and status in ('pending', 'running')"
+        )
+    ).scalar()
+    return {
+        "exists": True,
+        "active_count": int(active or 0),
+        "status_counts": [dict(row) for row in rows],
+    }
+
+with engine.connect() as conn:
+    print(
+        json.dumps(
+            {
+                "ok": True,
+                "symbol": symbol,
+                "tables": {
+                    "bronze.market_orderbook_bbo": table_stats(conn, "bronze", "market_orderbook_bbo"),
+                    "bronze.market_orderbook_books5": table_stats(conn, "bronze", "market_orderbook_books5"),
+                    "bronze.market_orderbook_payloads": table_stats(conn, "bronze", "market_orderbook_payloads"),
+                    "silver.market_orderbook_metrics_15m": table_stats(conn, "silver", "market_orderbook_metrics_15m"),
+                    "silver.market_trade_flow_15m": table_stats(conn, "silver", "market_trade_flow_15m"),
+                },
+                "latest_silver_orderbook": latest_silver_orderbook(conn),
+                "payload_sequence": payload_sequence(conn),
+                "workflow": microstructure_workflow(conn),
+            },
+            default=str,
+            sort_keys=True,
+        )
+    )
 """
 
 
@@ -1494,6 +1629,271 @@ def database_truth_probe(distro: str, gateway_container: str) -> dict[str, Any]:
     return parse_db_probe(completed["stdout"], completed["stderr"])
 
 
+def rdp_microstructure_probe_command(distro: str, gateway_container: str) -> list[str]:
+    encoded = base64.b64encode(RDP_MICROSTRUCTURE_PROBE.encode("utf-8")).decode("ascii")
+    return [
+        "wsl",
+        "-d",
+        distro,
+        "--",
+        "docker",
+        "exec",
+        gateway_container,
+        "python",
+        "-c",
+        f"import base64; exec(base64.b64decode('{encoded}'))",
+    ]
+
+
+def parse_rdp_microstructure_probe(stdout: str, stderr: str = "") -> dict[str, Any]:
+    if not stdout.strip():
+        return {
+            "ok": False,
+            "reason": "rdp_microstructure_probe_empty_output",
+            "stderr": redact_secret_text(stderr),
+        }
+    try:
+        payload = json.loads(stdout)
+    except json.JSONDecodeError as exc:
+        return {
+            "ok": False,
+            "reason": f"rdp_microstructure_probe_invalid_json:{exc.msg}",
+            "stderr": redact_secret_text(stderr),
+        }
+    return payload if isinstance(payload, dict) else {"ok": False, "reason": "rdp_microstructure_probe_non_object"}
+
+
+def rdp_microstructure_truth_probe(distro: str, gateway_container: str) -> dict[str, Any]:
+    completed = run_command(rdp_microstructure_probe_command(distro, gateway_container), timeout=45)
+    if not completed["ok"]:
+        return {
+            "ok": False,
+            "reason": "rdp_microstructure_probe_command_failed",
+            "returncode": completed["returncode"],
+            "stderr": completed["stderr"],
+        }
+    return parse_rdp_microstructure_probe(completed["stdout"], completed["stderr"])
+
+
+def int_or_zero(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def summarize_microstructure_table(
+    raw: dict[str, Any],
+    *,
+    report_generated_at: str,
+    stale_after_seconds: int,
+) -> dict[str, Any]:
+    report_time = parse_utc_timestamp(report_generated_at)
+    latest_ts = raw.get("max_ts")
+    latest_time = parse_utc_timestamp(str(latest_ts)) if latest_ts is not None else None
+    age_seconds = seconds_between(latest_time, report_time)
+    exists = bool(raw.get("exists"))
+    count = int_or_zero(raw.get("count"))
+    if not exists:
+        status = "missing_table"
+    elif count <= 0:
+        status = "empty_table"
+    elif age_seconds is None:
+        status = "latest_timestamp_unparseable"
+    elif age_seconds > stale_after_seconds:
+        status = "stale"
+    else:
+        status = "fresh"
+    return {
+        "exists": exists,
+        "count": count,
+        "latest_ts": latest_ts,
+        "age_seconds": age_seconds,
+        "stale_after_seconds": stale_after_seconds,
+        "status": status,
+    }
+
+
+def summarize_payload_sequence(
+    raw: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    report_time = parse_utc_timestamp(report_generated_at)
+    exists = bool(raw.get("exists"))
+    scopes = [as_dict(item) for item in as_list(raw.get("scopes"))]
+    capture_status_counts = [as_dict(item) for item in as_list(raw.get("capture_status_counts"))]
+    total_rows = sum(int_or_zero(item.get("n")) for item in scopes)
+    total_gap_count = sum(int_or_zero(item.get("sequence_gap_count")) for item in scopes)
+    latest_status_time: datetime | None = None
+    for item in capture_status_counts:
+        max_ts = item.get("max_ts")
+        candidate = parse_utc_timestamp(str(max_ts)) if max_ts is not None else None
+        if candidate is not None and (latest_status_time is None or candidate > latest_status_time):
+            latest_status_time = candidate
+    age_seconds = seconds_between(latest_status_time, report_time)
+    if not exists:
+        status = "missing_table"
+    elif total_rows <= 0:
+        status = "no_recent_payloads"
+    elif total_gap_count > 0:
+        status = "sequence_gap_detected"
+    elif age_seconds is None:
+        status = "latest_timestamp_unparseable"
+    elif age_seconds > ORDERBOOK_BRONZE_STALE_AFTER_SECONDS:
+        status = "stale"
+    else:
+        status = "sequence_continuous"
+    return {
+        "exists": exists,
+        "window_minutes": raw.get("window_minutes") or ORDERBOOK_PAYLOAD_SEQUENCE_WINDOW_MINUTES,
+        "row_count": total_rows,
+        "sequence_gap_count": total_gap_count,
+        "latest_ts": latest_status_time.isoformat().replace("+00:00", "Z") if latest_status_time else None,
+        "age_seconds": age_seconds,
+        "status": status,
+        "scopes": [
+            {
+                "collector_sequence_scope": item.get("collector_sequence_scope"),
+                "row_count": int_or_zero(item.get("n")),
+                "min_sequence": int_or_zero(item.get("min_seq")) if item.get("min_seq") is not None else None,
+                "max_sequence": int_or_zero(item.get("max_seq")) if item.get("max_seq") is not None else None,
+                "distinct_sequence_count": int_or_zero(item.get("distinct_n")),
+                "sequence_gap_count": int_or_zero(item.get("sequence_gap_count")),
+            }
+            for item in scopes
+        ],
+        "capture_status_counts": [
+            {
+                "capture_status": item.get("capture_status"),
+                "row_count": int_or_zero(item.get("n")),
+                "max_ts": item.get("max_ts"),
+            }
+            for item in capture_status_counts
+        ],
+    }
+
+
+def summarize_latest_silver_orderbook(
+    raw: dict[str, Any] | None,
+    table_summary: dict[str, Any],
+) -> dict[str, Any]:
+    latest = as_dict(raw)
+    bbo_samples = int_or_zero(latest.get("bbo_samples_n"))
+    books5_samples = int_or_zero(latest.get("books5_samples_n"))
+    quality_flags = as_list(latest.get("quality_flags"))
+    if table_summary.get("status") in {"missing_table", "empty_table"}:
+        status = table_summary.get("status")
+    elif table_summary.get("status") == "stale":
+        status = "stale"
+    elif bbo_samples <= 0:
+        status = "missing_bbo_samples"
+    elif books5_samples <= 0:
+        status = "missing_books5_samples"
+    elif quality_flags:
+        status = "quality_flags_present"
+    else:
+        status = "verified_silver_orderbook_bar_present"
+    return {
+        "status": status,
+        "latest_bar_ts": latest.get("ts") or table_summary.get("latest_ts"),
+        "age_seconds": table_summary.get("age_seconds"),
+        "stale_after_seconds": table_summary.get("stale_after_seconds"),
+        "bbo_samples_n": bbo_samples,
+        "books5_samples_n": books5_samples,
+        "spread_bps_mean": decimal_text(latest.get("spread_bps_mean")),
+        "spread_bps_max": decimal_text(latest.get("spread_bps_max")),
+        "spread_bps_min": decimal_text(latest.get("spread_bps_min")),
+        "mid_price_last": decimal_text(latest.get("mid_price_last")),
+        "quality_flags": quality_flags,
+    }
+
+
+def summarize_execution_science_truth(
+    raw: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    if not raw.get("ok"):
+        return {
+            "source": "rdp_microstructure",
+            "ok": False,
+            "status": "rdp_microstructure_unavailable",
+            "reason": raw.get("reason"),
+            "smallest_missing_field": "rdp_microstructure_probe",
+        }
+    tables = raw.get("tables") if isinstance(raw.get("tables"), dict) else {}
+    bbo = summarize_microstructure_table(
+        as_dict(tables.get("bronze.market_orderbook_bbo")),
+        report_generated_at=report_generated_at,
+        stale_after_seconds=ORDERBOOK_BRONZE_STALE_AFTER_SECONDS,
+    )
+    books5 = summarize_microstructure_table(
+        as_dict(tables.get("bronze.market_orderbook_books5")),
+        report_generated_at=report_generated_at,
+        stale_after_seconds=ORDERBOOK_BRONZE_STALE_AFTER_SECONDS,
+    )
+    payload_table = summarize_microstructure_table(
+        as_dict(tables.get("bronze.market_orderbook_payloads")),
+        report_generated_at=report_generated_at,
+        stale_after_seconds=ORDERBOOK_BRONZE_STALE_AFTER_SECONDS,
+    )
+    silver_orderbook_table = summarize_microstructure_table(
+        as_dict(tables.get("silver.market_orderbook_metrics_15m")),
+        report_generated_at=report_generated_at,
+        stale_after_seconds=ORDERBOOK_SILVER_STALE_AFTER_SECONDS,
+    )
+    trade_flow_table = summarize_microstructure_table(
+        as_dict(tables.get("silver.market_trade_flow_15m")),
+        report_generated_at=report_generated_at,
+        stale_after_seconds=ORDERBOOK_SILVER_STALE_AFTER_SECONDS,
+    )
+    sequence = summarize_payload_sequence(
+        as_dict(raw.get("payload_sequence")),
+        report_generated_at=report_generated_at,
+    )
+    silver_orderbook = summarize_latest_silver_orderbook(
+        raw.get("latest_silver_orderbook") if isinstance(raw.get("latest_silver_orderbook"), dict) else None,
+        silver_orderbook_table,
+    )
+    missing_checks = [
+        ("bronze.market_orderbook_bbo", bbo.get("status") == "fresh"),
+        ("bronze.market_orderbook_books5", books5.get("status") == "fresh"),
+        ("bronze.market_orderbook_payloads.collector_sequence", sequence.get("status") == "sequence_continuous"),
+        (
+            "silver.market_orderbook_metrics_15m",
+            silver_orderbook.get("status") == "verified_silver_orderbook_bar_present",
+        ),
+    ]
+    smallest_missing = next((field for field, passed in missing_checks if not passed), None)
+    status = (
+        "verified_orderbook_sequence_and_silver_bar_present"
+        if smallest_missing is None
+        else "missing_execution_science_evidence"
+    )
+    return {
+        "source": "rdp_microstructure",
+        "ok": True,
+        "symbol": raw.get("symbol"),
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "bronze_orderbook": {
+            "bbo": bbo,
+            "books5": books5,
+            "payloads": payload_table,
+        },
+        "payload_sequence": sequence,
+        "silver_orderbook": silver_orderbook,
+        "silver_trade_flow": trade_flow_table,
+        "workflow": raw.get("workflow") if isinstance(raw.get("workflow"), dict) else {},
+        "fill_feasibility_truth_status": (
+            "verified_preorder_orderbook_features_available"
+            if smallest_missing is None
+            else "blocked_missing_orderbook_truth"
+        ),
+    }
+
+
 def git_truth(repo_root: Path, distro: str, wsl_project: str) -> dict[str, Any]:
     win_status = run_command(["git", "status", "--short", "--branch"], cwd=repo_root)
     win_head = run_command(["git", "rev-parse", "HEAD"], cwd=repo_root)
@@ -1644,6 +2044,7 @@ def load_artifact_runtime_projection(repo_root: Path, report_generated_at: str) 
 
 def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     db = report.get("database_truth") or {}
+    execution_science = as_dict(report.get("execution_science_truth"))
     dashboard = ((report.get("runtime") or {}).get("dashboard_bundle") or {})
     git = report.get("git") or {}
     health = report.get("deployment_health") or {}
@@ -1708,6 +2109,15 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "execution_fills": db.get("execution_fills") if db.get("ok") else None,
         "execution_command_flow_enabled": runtime_config.get("execution_command_flow_enabled"),
         "execution_command_flow_flag_present": runtime_config.get("execution_command_flow_flag_present"),
+        "execution_science_truth_status": execution_science.get("status"),
+        "execution_science_smallest_missing_field": execution_science.get("smallest_missing_field"),
+        "orderbook_sequence_validation_status": (
+            as_dict(execution_science.get("payload_sequence")).get("status")
+        ),
+        "fill_feasibility_truth_status": execution_science.get("fill_feasibility_truth_status"),
+        "silver_orderbook_truth_status": (
+            as_dict(execution_science.get("silver_orderbook")).get("status")
+        ),
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),
         "effective_operating_mode_status": (dashboard.get("effective_operating_mode") or {}).get("status"),
         "profile_auto_control_effective": (dashboard.get("profile_auto_control_effective") or {}).get("value"),
@@ -1871,8 +2281,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             "artifact_last_known_status": artifact_projection["status"],
         },
         "database_truth": database_truth_probe(args.wsl_distro, args.gateway_container),
+        "rdp_microstructure_truth": rdp_microstructure_truth_probe(args.wsl_distro, args.gateway_container),
         "static_truth_surface": static_truth_surface(args.api_base),
     }
+    report["execution_science_truth"] = summarize_execution_science_truth(
+        report["rdp_microstructure_truth"],
+        report_generated_at=generated_at,
+    )
     report["runtime"]["ai_timeout_active_blocker"] = False
     runtime_mode = report["runtime"]["dashboard_bundle"].get("effective_operating_mode", {})
     if runtime_mode.get("value") not in (None, "baseline_only"):

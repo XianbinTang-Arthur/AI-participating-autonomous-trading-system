@@ -111,6 +111,17 @@ def test_db_probe_command_does_not_embed_database_url() -> None:
     assert "AATS_DATABASE_URL" not in command
 
 
+def test_rdp_microstructure_probe_command_does_not_embed_database_url() -> None:
+    mod = load_module()
+
+    command = " ".join(mod.rdp_microstructure_probe_command("Ubuntu", "aats-gateway"))
+
+    assert "postgresql://" not in command
+    assert "postgresql+psycopg://" not in command
+    assert "RDP_DATABASE_URL" not in command
+    assert "AATS_ACTIVE_PARAMETER_DB_URL" not in command
+
+
 def test_db_probe_executable_directional_query_excludes_hold_current_notional() -> None:
     mod = load_module()
 
@@ -258,6 +269,110 @@ def test_parse_db_probe_summarizes_latest_executable_directional_decision() -> N
     assert executable["execution_truth_chain"]["order_expected"] is True
     assert executable["execution_truth_chain"]["fill_expected"] is True
     assert executable["execution_truth_chain"]["smallest_missing_field"] is None
+
+
+def test_execution_science_truth_verifies_orderbook_sequence_and_silver_bar() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "symbol": "BTC-USDT-SWAP",
+        "tables": {
+            "bronze.market_orderbook_bbo": {
+                "exists": True,
+                "count": 10,
+                "max_ts": "2026-04-26T20:29:10+00:00",
+            },
+            "bronze.market_orderbook_books5": {
+                "exists": True,
+                "count": 20,
+                "max_ts": "2026-04-26T20:29:20+00:00",
+            },
+            "bronze.market_orderbook_payloads": {
+                "exists": True,
+                "count": 30,
+                "max_ts": "2026-04-26T20:29:20+00:00",
+            },
+            "silver.market_orderbook_metrics_15m": {
+                "exists": True,
+                "count": 2,
+                "max_ts": "2026-04-26T20:00:00+00:00",
+            },
+            "silver.market_trade_flow_15m": {
+                "exists": True,
+                "count": 2,
+                "max_ts": "2026-04-26T20:00:00+00:00",
+            },
+        },
+        "payload_sequence": {
+            "exists": True,
+            "window_minutes": 30,
+            "scopes": [
+                {
+                    "collector_sequence_scope": "per_ingest_run_symbol_channel",
+                    "n": 30,
+                    "min_seq": 1,
+                    "max_seq": 30,
+                    "distinct_n": 30,
+                    "sequence_gap_count": 0,
+                },
+            ],
+            "capture_status_counts": [
+                {
+                    "capture_status": "diff_payload_persisted",
+                    "n": 30,
+                    "max_ts": "2026-04-26T20:29:20+00:00",
+                },
+            ],
+        },
+        "latest_silver_orderbook": {
+            "ts": "2026-04-26T20:00:00+00:00",
+            "bbo_samples_n": 700,
+            "books5_samples_n": 1300,
+            "spread_bps_mean": "0.0128",
+            "spread_bps_max": "0.0130",
+            "spread_bps_min": "0.0120",
+            "mid_price_last": "78000.1",
+            "quality_flags": [],
+        },
+        "workflow": {"exists": True, "active_count": 0, "status_counts": []},
+    }
+
+    summary = mod.summarize_execution_science_truth(
+        raw,
+        report_generated_at="2026-04-26T20:30:00Z",
+    )
+
+    assert summary["status"] == "verified_orderbook_sequence_and_silver_bar_present"
+    assert summary["smallest_missing_field"] is None
+    assert summary["payload_sequence"]["status"] == "sequence_continuous"
+    assert summary["silver_orderbook"]["status"] == "verified_silver_orderbook_bar_present"
+    assert summary["fill_feasibility_truth_status"] == "verified_preorder_orderbook_features_available"
+
+
+def test_execution_science_truth_reports_smallest_missing_orderbook_field() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "symbol": "BTC-USDT-SWAP",
+        "tables": {
+            "bronze.market_orderbook_bbo": {"exists": True, "count": 0},
+            "bronze.market_orderbook_books5": {"exists": True, "count": 10, "max_ts": "2026-04-26T20:29:20Z"},
+            "bronze.market_orderbook_payloads": {"exists": True, "count": 10, "max_ts": "2026-04-26T20:29:20Z"},
+            "silver.market_orderbook_metrics_15m": {"exists": True, "count": 1, "max_ts": "2026-04-26T20:00:00Z"},
+            "silver.market_trade_flow_15m": {"exists": True, "count": 1, "max_ts": "2026-04-26T20:00:00Z"},
+        },
+        "payload_sequence": {"exists": True, "scopes": [], "capture_status_counts": []},
+        "latest_silver_orderbook": {"bbo_samples_n": 1, "books5_samples_n": 1, "quality_flags": []},
+    }
+
+    summary = mod.summarize_execution_science_truth(
+        raw,
+        report_generated_at="2026-04-26T20:30:00Z",
+    )
+
+    assert summary["status"] == "missing_execution_science_evidence"
+    assert summary["smallest_missing_field"] == "bronze.market_orderbook_bbo"
+    assert summary["fill_feasibility_truth_status"] == "blocked_missing_orderbook_truth"
 
 
 def test_latest_decision_no_trade_attribution_detects_inactive_hold_only() -> None:
@@ -1005,6 +1120,13 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 },
             },
         },
+        "execution_science_truth": {
+            "status": "verified_orderbook_sequence_and_silver_bar_present",
+            "smallest_missing_field": None,
+            "payload_sequence": {"status": "sequence_continuous"},
+            "silver_orderbook": {"status": "verified_silver_orderbook_bar_present"},
+            "fill_feasibility_truth_status": "verified_preorder_orderbook_features_available",
+        },
         "git": {
             "deployed_matches_windows": True,
             "windows": {
@@ -1035,6 +1157,9 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["active_live_carrier"] == "independent"
     assert live_facts["execution_command_flow_enabled"] is True
     assert live_facts["execution_command_flow_flag_present"] is True
+    assert live_facts["execution_science_truth_status"] == "verified_orderbook_sequence_and_silver_bar_present"
+    assert live_facts["orderbook_sequence_validation_status"] == "sequence_continuous"
+    assert live_facts["fill_feasibility_truth_status"] == "verified_preorder_orderbook_features_available"
     assert authority["authoritative_source"] == "runtime.live_runtime_facts"
     assert authority["artifact_may_override_live"] is False
 
