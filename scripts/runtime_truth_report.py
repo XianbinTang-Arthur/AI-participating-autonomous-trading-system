@@ -91,24 +91,39 @@ engine = create_engine(url)
 with engine.connect() as conn:
     decisions = conn.execute(text("select count(*) from portfolio_allocation_decisions")).scalar()
     fills = conn.execute(text("select count(*) from execution_fills")).scalar()
-    latest = conn.execute(text(
+    decision_select = (
         "select allocation_id, decision_id, symbol, created_at, route_action, primary_family, "
         "portfolio_requested_notional, portfolio_approved_notional, portfolio_budget_cut_notional, "
         "expected_edge_bps, expected_cost_bps, payload "
-        "from portfolio_allocation_decisions order by created_at desc limit 1"
+        "from portfolio_allocation_decisions "
+    )
+    latest = conn.execute(text(
+        decision_select + "order by created_at desc limit 1"
     )).mappings().first()
-    latest_audit = None
-    decision_counts = {}
-    if latest:
-        decision_id = latest["decision_id"]
-        latest_audit = conn.execute(text(
+
+    latest_executable_directional = conn.execute(text(
+        decision_select
+        + "where primary_family = 'directional' "
+        + "and ("
+        + "route_action not in ('advisory_only', 'hold_current') "
+        + "or coalesce(portfolio_requested_notional, 0) <> 0 "
+        + "or coalesce(portfolio_approved_notional, 0) <> 0"
+        + ") "
+        + "order by created_at desc limit 1"
+    )).mappings().first()
+
+    def decision_audit_and_counts(decision):
+        if not decision:
+            return None, {}
+        decision_id = decision["decision_id"]
+        audit = conn.execute(text(
             "select decision_id, updated_at, execution_plan_ref, execution_plan_refs, "
             "order_intent_refs, order_state_refs, fill_event_refs, strategy_sleeve_intent_refs, "
             "portfolio_allocation_decision_ref, decision_outcome_ref, risk_decision_ref "
             "from decision_audit_records "
             "where decision_id = :decision_id order by audit_revision_id desc limit 1"
         ), {"decision_id": decision_id}).mappings().first()
-        decision_counts = {
+        counts = {
             "execution_orders": int(conn.execute(
                 text("select count(*) from execution_orders where decision_id = :decision_id"),
                 {"decision_id": decision_id},
@@ -126,6 +141,15 @@ with engine.connect() as conn:
                 {"decision_id": decision_id},
             ).scalar()),
         }
+        return audit, counts
+
+    latest_audit = None
+    decision_counts = {}
+    if latest:
+        latest_audit, decision_counts = decision_audit_and_counts(latest)
+    latest_executable_directional_audit, latest_executable_directional_counts = decision_audit_and_counts(
+        latest_executable_directional
+    )
 
 print(json.dumps({
     "ok": True,
@@ -134,6 +158,13 @@ print(json.dumps({
     "latest_decision": dict(latest) if latest else None,
     "latest_decision_audit": dict(latest_audit) if latest_audit else None,
     "latest_decision_counts": decision_counts,
+    "latest_executable_directional_decision": (
+        dict(latest_executable_directional) if latest_executable_directional else None
+    ),
+    "latest_executable_directional_decision_audit": (
+        dict(latest_executable_directional_audit) if latest_executable_directional_audit else None
+    ),
+    "latest_executable_directional_decision_counts": latest_executable_directional_counts,
 }, default=str, sort_keys=True))
 """
 
@@ -971,7 +1002,13 @@ def sanitize_db_probe_payload(payload: dict[str, Any]) -> dict[str, Any]:
         sanitized.pop("latest_decision_audit", None),
         sanitized.pop("latest_decision_counts", None),
     )
+    latest_executable_directional = summarize_latest_decision(
+        sanitized.get("latest_executable_directional_decision"),
+        sanitized.pop("latest_executable_directional_decision_audit", None),
+        sanitized.pop("latest_executable_directional_decision_counts", None),
+    )
     sanitized["latest_decision"] = latest
+    sanitized["latest_executable_directional_decision"] = latest_executable_directional
     return sanitized
 
 
@@ -1381,7 +1418,13 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     git = report.get("git") or {}
     health = report.get("deployment_health") or {}
     latest = db.get("latest_decision") if isinstance(db.get("latest_decision"), dict) else {}
+    latest_executable_directional = (
+        db.get("latest_executable_directional_decision")
+        if isinstance(db.get("latest_executable_directional_decision"), dict)
+        else {}
+    )
     no_trade = latest.get("no_trade_attribution") if isinstance(latest.get("no_trade_attribution"), dict) else {}
+    executable_truth_chain = latest_executable_directional.get("execution_truth_chain") or {}
 
     return {
         "source": "live_runtime",
@@ -1414,6 +1457,18 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "latest_decision_truth_chain_smallest_missing_field": (
             latest.get("execution_truth_chain") or {}
         ).get("smallest_missing_field"),
+        "latest_executable_directional_decision_id": latest_executable_directional.get("decision_id"),
+        "latest_executable_directional_route_action": latest_executable_directional.get("route_action"),
+        "latest_executable_directional_created_at": latest_executable_directional.get("created_at"),
+        "latest_executable_directional_execution_truth_status": executable_truth_chain.get("status"),
+        "latest_executable_directional_order_expected": executable_truth_chain.get("order_expected"),
+        "latest_executable_directional_fill_expected": executable_truth_chain.get("fill_expected"),
+        "latest_executable_directional_position_lifecycle_status": executable_truth_chain.get(
+            "position_lifecycle_status",
+        ),
+        "latest_executable_directional_truth_chain_smallest_missing_field": executable_truth_chain.get(
+            "smallest_missing_field",
+        ),
         "portfolio_allocation_decisions": db.get("portfolio_allocation_decisions") if db.get("ok") else None,
         "execution_fills": db.get("execution_fills") if db.get("ok") else None,
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),

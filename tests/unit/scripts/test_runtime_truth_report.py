@@ -177,6 +177,81 @@ def test_parse_db_probe_returns_only_json_payload() -> None:
     assert attribution["sleeve_intent_summary"] == []
 
 
+def test_parse_db_probe_summarizes_latest_executable_directional_decision() -> None:
+    mod = load_module()
+    payload = {
+        "ok": True,
+        "portfolio_allocation_decisions": 120,
+        "execution_fills": 7,
+        "latest_decision": {
+            "allocation_id": "alloc-hold",
+            "decision_id": "decision_hold",
+            "symbol": "BTC-USDT-SWAP",
+            "route_action": "hold_current",
+            "primary_family": "directional",
+            "portfolio_requested_notional": "0",
+            "portfolio_approved_notional": "0",
+            "portfolio_budget_cut_notional": "0",
+            "payload": {"execution_legs": []},
+        },
+        "latest_decision_audit": {
+            "execution_plan_ref": None,
+            "execution_plan_refs": [],
+            "order_intent_refs": [],
+            "order_state_refs": [],
+            "fill_event_refs": [],
+        },
+        "latest_decision_counts": {
+            "execution_orders": 0,
+            "order_states": 0,
+            "execution_fills": 0,
+            "legacy_fill_events": 0,
+        },
+        "latest_executable_directional_decision": {
+            "allocation_id": "alloc-exec",
+            "decision_id": "decision_exec",
+            "symbol": "BTC-USDT-SWAP",
+            "created_at": "2026-04-26T15:00:00Z",
+            "route_action": "override_target",
+            "primary_family": "directional",
+            "portfolio_requested_notional": "1000",
+            "portfolio_approved_notional": "1000",
+            "portfolio_budget_cut_notional": "0",
+            "payload": {"execution_legs": [{"side": "buy"}]},
+        },
+        "latest_executable_directional_decision_audit": {
+            "execution_plan_ref": "plan-exec",
+            "execution_plan_refs": ["plan-exec"],
+            "order_intent_refs": ["order-exec"],
+            "order_state_refs": ["state-exec"],
+            "fill_event_refs": ["fill-exec"],
+            "strategy_sleeve_intent_refs": ["intent-directional"],
+            "risk_decision_ref": "risk-exec",
+            "decision_outcome_ref": "outcome-exec",
+        },
+        "latest_executable_directional_decision_counts": {
+            "execution_orders": 1,
+            "order_states": 1,
+            "execution_fills": 1,
+            "legacy_fill_events": 0,
+        },
+    }
+
+    parsed = mod.parse_db_probe(json.dumps(payload), "")
+
+    latest = parsed["latest_decision"]
+    executable = parsed["latest_executable_directional_decision"]
+    assert latest["decision_id"] == "decision_hold"
+    assert executable["decision_id"] == "decision_exec"
+    assert "payload" not in executable
+    assert executable["execution_chain"]["db_order_count"] == 1
+    assert executable["execution_chain"]["db_fill_count"] == 1
+    assert executable["execution_truth_chain"]["status"] == "verified_execution_surface_present"
+    assert executable["execution_truth_chain"]["order_expected"] is True
+    assert executable["execution_truth_chain"]["fill_expected"] is True
+    assert executable["execution_truth_chain"]["smallest_missing_field"] is None
+
+
 def test_latest_decision_no_trade_attribution_detects_inactive_hold_only() -> None:
     mod = load_module()
     latest = {
@@ -706,6 +781,20 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 "symbol": "BTC-USDT-SWAP",
                 "primary_family": "independent",
             },
+            "latest_executable_directional_decision": {
+                "decision_id": "decision_exec",
+                "created_at": "2026-04-26T15:00:00Z",
+                "route_action": "override_target",
+                "symbol": "BTC-USDT-SWAP",
+                "primary_family": "directional",
+                "execution_truth_chain": {
+                    "status": "verified_execution_surface_present",
+                    "order_expected": True,
+                    "fill_expected": True,
+                    "position_lifecycle_status": "position_lifecycle_transition_evidence_present",
+                    "smallest_missing_field": None,
+                },
+            },
         },
         "git": {
             "deployed_matches_windows": True,
@@ -727,6 +816,11 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     )
 
     assert live_facts["latest_decision_id"] == "decision_new"
+    assert live_facts["latest_executable_directional_decision_id"] == "decision_exec"
+    assert live_facts["latest_executable_directional_execution_truth_status"] == "verified_execution_surface_present"
+    assert live_facts["latest_executable_directional_order_expected"] is True
+    assert live_facts["latest_executable_directional_fill_expected"] is True
+    assert live_facts["latest_executable_directional_truth_chain_smallest_missing_field"] is None
     assert live_facts["portfolio_allocation_decisions"] == 11
     assert authority["authoritative_source"] == "runtime.live_runtime_facts"
     assert authority["artifact_may_override_live"] is False
