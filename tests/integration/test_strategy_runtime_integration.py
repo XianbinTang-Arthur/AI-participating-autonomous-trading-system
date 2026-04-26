@@ -992,7 +992,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied_target["strategy_execution_legs"][0]["execution_mode"], "opportunistic_overlay")
         self.assertEqual(applied_target["strategy_execution_legs"][0]["overlay_mode"], "opportunistic")
 
-    async def test_managed_derivatives_live_profile_selects_independent_family_for_overlay(self) -> None:
+    async def test_managed_derivatives_live_profile_selects_directional_family(self) -> None:
         values = load_managed_profile_values("derivatives_live")
         settings = self._settings(
             **{
@@ -1019,26 +1019,27 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         target = await runtime.decision_engine.run_cycle(settings.default_symbol, settings.primary_timeframe)
 
         self.assertEqual(settings.derivatives_position_mode, "hedge")
-        self.assertEqual(settings.strategy_family_active, "independent")
+        self.assertEqual(settings.strategy_family_active, "directional")
         self.assertFalse(settings.strategy_family_auto_selection_enabled)
-        self.assertTrue(settings.strategy_family_independent_enabled)
+        self.assertFalse(settings.strategy_family_independent_enabled)
         self.assertFalse(settings.strategy_family_independent_shadow_mode_enabled)
-        self.assertTrue(settings.strategy_family_independent_live_execution_enabled)
+        self.assertFalse(settings.strategy_family_independent_live_execution_enabled)
         self.assertFalse(settings.strategy_family_protective_shadow_mode_enabled)
         self.assertFalse(settings.strategy_family_opportunistic_shadow_mode_enabled)
         self.assertFalse(settings.smart_arbitrage_enabled)
-        self.assertEqual(settings.strategy_hedge_overlay_mode, "independent")
+        self.assertFalse(settings.strategy_hedge_overlay_enabled)
+        self.assertEqual(settings.strategy_hedge_overlay_mode, "protective")
         self.assertFalse(settings.strategy_hedge_protective_enabled)
         self.assertFalse(settings.strategy_hedge_opportunistic_enabled)
         self.assertEqual(settings.strategy_hedge_opportunistic_rollout_stage, "dry_run")
-        self.assertEqual(settings.strategy_hedge_independent_rollout_stage, "live")
-        self.assertEqual(settings.strategy_hedge_independent_long_entry_threshold, 0.30)
-        self.assertEqual(settings.strategy_hedge_independent_short_entry_threshold, 0.30)
+        self.assertFalse(settings.strategy_hedge_independent_enabled)
+        self.assertEqual(settings.strategy_hedge_independent_rollout_stage, "dry_run")
+        self.assertEqual(settings.strategy_hedge_independent_long_entry_threshold, 0.25)
+        self.assertEqual(settings.strategy_hedge_independent_short_entry_threshold, 0.25)
         self.assertEqual(settings.strategy_hedge_independent_long_close_threshold, 0.15)
         self.assertEqual(settings.strategy_hedge_independent_short_close_threshold, 0.15)
-        self.assertEqual(settings.strategy_hedge_independent_long_scale_in_threshold, 0.34)
-        # P2-6: short_scale_in_threshold 已从 0.36 对齐至 0.40，与 long 对称
-        self.assertEqual(settings.strategy_hedge_independent_short_scale_in_threshold, 0.40)
+        self.assertEqual(settings.strategy_hedge_independent_long_scale_in_threshold, 0.25)
+        self.assertEqual(settings.strategy_hedge_independent_short_scale_in_threshold, 0.25)
         self.assertEqual(settings.strategy_hedge_independent_min_confirm_ticks, 2)
         self.assertEqual(settings.strategy_health_lookback_window_seconds, 14400.0)
         self.assertEqual(settings.strategy_hedge_independent_min_score_drawdown_bps, 6.0)
@@ -1067,7 +1068,7 @@ class TestStrategyRuntimeIntegration(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(settings.strategy_hedge_independent_long_short_asymmetry_enabled)
         self.assertEqual(settings.strategy_hedge_independent_short_asymmetry_penalty_multiplier, 0.85)
         self.assertEqual(settings.strategy_hedge_independent_entry_size_down_floor, 0.50)
-        self.assertEqual(target.strategy_family, "independent")
+        self.assertEqual(target.strategy_family, "directional")
 
     async def test_derivatives_independent_overlay_runtime_exposes_leg_scoped_thresholds_and_books(self) -> None:
         settings = self._settings(

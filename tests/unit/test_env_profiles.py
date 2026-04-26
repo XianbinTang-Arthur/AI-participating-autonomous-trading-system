@@ -349,8 +349,7 @@ def test_generated_managed_config_artifacts_exist_and_match_profile_layout() -> 
         assert strategy_path.exists(), strategy_path
         data = yaml.safe_load(strategy_path.read_text(encoding="utf-8"))
         assert isinstance(data, dict)
-        expected_active_family = "independent" if profile == "derivatives_live" else "directional"
-        assert data["strategy_family_active"] == expected_active_family
+        assert data["strategy_family_active"] == "directional"
         assert "ai_operating_mode" in data
         assert "max_decisions_per_minute" in data
         example_env = repo_root / "configs" / "templates" / f".env.{profile}.example"
@@ -405,8 +404,7 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_low_edge_threshold_bps"] == 4.0
         assert values["strategy_low_edge_streak_limit"] == 4
         assert values["strategy_low_edge_cooldown_seconds"] == 900.0
-        expected_overlay_mode = "independent" if profile == "derivatives_live" else "protective"
-        assert values["strategy_hedge_overlay_mode"] == expected_overlay_mode
+        assert values["strategy_hedge_overlay_mode"] == "protective"
         expected_protective_enabled = profile != "derivatives_live"
         assert values["strategy_hedge_protective_enabled"] is expected_protective_enabled
         expected_opportunistic_enabled = False
@@ -426,9 +424,9 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
         assert values["strategy_hedge_opportunistic_weak_edge_execution_mode"] == "report_only"
         assert values["strategy_hedge_opportunistic_max_acceptable_cost_bps"] == 7.5
         assert values["strategy_hedge_opportunistic_passive_first_enabled"] is True
-        expected_independent_enabled = profile == "derivatives_live"
-        expected_independent_rollout = "live" if profile == "derivatives_live" else "dry_run"
-        expected_independent_family_enabled = profile == "derivatives_live"
+        expected_independent_enabled = False
+        expected_independent_rollout = "dry_run"
+        expected_independent_family_enabled = False
         assert values["strategy_family_protective_enabled"] is False
         assert values["strategy_family_protective_shadow_mode_enabled"] is False
         assert values["strategy_family_protective_live_execution_enabled"] is False
@@ -512,18 +510,18 @@ def test_derivatives_managed_profiles_use_relaxed_directional_thresholds() -> No
             assert values["strategy_hedge_independent_passive_first_enabled"] is True
 
 
-def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> None:
+def test_derivatives_live_managed_profile_is_pinned_for_directional_live() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     values = load_managed_profile_values("derivatives_live", project_root=repo_root)
 
     assert values["ai_model_name"] == "deepseek-v4-flash"
     assert values["ai_timeout_seconds"] == 20.0
     assert values["derivatives_position_mode"] == "hedge"
-    assert values["strategy_family_active"] == "independent"
+    assert values["strategy_family_active"] == "directional"
     assert values["strategy_family_auto_selection_enabled"] is False
-    assert values["strategy_family_independent_enabled"] is True
+    assert values["strategy_family_independent_enabled"] is False
     assert values["strategy_family_independent_shadow_mode_enabled"] is False
-    assert values["strategy_family_independent_live_execution_enabled"] is True
+    assert values["strategy_family_independent_live_execution_enabled"] is False
     assert values["strategy_family_protective_enabled"] is False
     assert values["strategy_family_protective_shadow_mode_enabled"] is False
     assert values["strategy_family_protective_live_execution_enabled"] is False
@@ -531,7 +529,8 @@ def test_derivatives_live_managed_profile_is_pinned_for_independent_live() -> No
     assert values["strategy_family_opportunistic_shadow_mode_enabled"] is False
     assert values["strategy_family_opportunistic_live_execution_enabled"] is False
     assert values["smart_arbitrage_enabled"] is False
-    assert values["strategy_hedge_overlay_mode"] == "independent"
+    assert values["strategy_hedge_overlay_enabled"] is False
+    assert values["strategy_hedge_overlay_mode"] == "protective"
     assert values["strategy_entry_alpha_min"] == 0.10
     # 2026-04-19 下调 0.55→0.50 与 calibration 对齐
     assert values["strategy_entry_confidence_min"] == 0.50
