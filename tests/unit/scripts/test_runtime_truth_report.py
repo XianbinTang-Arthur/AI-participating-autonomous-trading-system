@@ -820,6 +820,57 @@ def test_fill_joined_through_execution_order_satisfies_fill_surface() -> None:
     assert truth_chain["missing_fields"] == []
 
 
+def test_terminal_failed_order_without_fill_does_not_expect_fill_surface() -> None:
+    mod = load_module()
+
+    truth_chain = mod.summarize_execution_truth_chain(
+        latest_decision={"route_action": "override_target", "primary_family": "directional"},
+        execution_chain={
+            "execution_plan_ref_count": 1,
+            "order_intent_ref_count": 1,
+            "order_state_ref_count": 2,
+            "fill_event_ref_count": 0,
+            "db_order_count": 1,
+            "execution_command_flow_enabled": True,
+            "db_execution_order_created_or_submitting_count": 0,
+            "db_execution_order_submitted_or_later_count": 1,
+            "db_execution_order_terminal_no_fill_count": 1,
+            "db_execution_command_count": 0,
+            "db_execution_submit_command_count": 0,
+            "db_order_state_count": 1,
+            "db_order_state_created_or_submitting_count": 0,
+            "db_order_state_submitted_or_later_count": 1,
+            "db_order_state_terminal_no_fill_count": 1,
+            "db_fill_count": 0,
+            "db_fill_via_order_count": 0,
+            "legacy_fill_event_count": 0,
+            "legacy_fill_event_via_order_count": 0,
+        },
+        execution_legs_count=1,
+        candidate_drilldown=[
+            {
+                "family": "directional",
+                "composition": {
+                    "route_action": "override_target",
+                    "execution_behavior": "submit_order",
+                    "requested_delta_position_qty": "0.0002",
+                    "composed_delta_position_qty": "0.0002",
+                },
+                "budget": {},
+                "execution": {"execution_behavior": "submit_order"},
+            },
+        ],
+    )
+
+    assert truth_chain["status"] == "verified_terminal_order_no_fill_expected"
+    assert truth_chain["order_expected"] is True
+    assert truth_chain["fill_expected"] is False
+    assert truth_chain["position_lifecycle_transition_expected"] is False
+    assert truth_chain["position_lifecycle_status"] == "no_position_lifecycle_transition_expected"
+    assert truth_chain["smallest_missing_field"] is None
+    assert truth_chain["missing_fields"] == []
+
+
 def test_permission_root_cause_missing_evidence_degrades_safely() -> None:
     mod = load_module()
 

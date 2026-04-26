@@ -164,6 +164,14 @@ with engine.connect() as conn:
                 ),
                 {"decision_id": decision_id},
             ).scalar()),
+            "execution_orders_terminal_no_fill": int(conn.execute(
+                text(
+                    "select count(*) from execution_orders "
+                    "where decision_id = :decision_id "
+                    "and state in ('FAILED', 'REJECTED', 'CANCELED', 'BLOCKED', 'EXPIRED', 'DRY_RUN')"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
             "execution_commands": int(conn.execute(
                 text(
                     "select count(*) from execution_commands c "
@@ -198,6 +206,14 @@ with engine.connect() as conn:
                     "select count(*) from order_states "
                     "where decision_id = :decision_id "
                     "and (status not in ('CREATED', 'SUBMITTING') or exchange_order_id is not null)"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "order_states_terminal_no_fill": int(conn.execute(
+                text(
+                    "select count(*) from order_states "
+                    "where decision_id = :decision_id "
+                    "and status in ('FAILED', 'REJECTED', 'CANCELED', 'BLOCKED', 'EXPIRED', 'DRY_RUN')"
                 ),
                 {"decision_id": decision_id},
             ).scalar()),
@@ -931,11 +947,17 @@ def summarize_execution_truth_chain(
     db_execution_order_submitted_or_later_count = int(
         execution_chain.get("db_execution_order_submitted_or_later_count") or 0
     )
+    db_execution_order_terminal_no_fill_count = int(
+        execution_chain.get("db_execution_order_terminal_no_fill_count") or 0
+    )
     db_order_state_created_or_submitting_count = int(
         execution_chain.get("db_order_state_created_or_submitting_count") or 0
     )
     db_order_state_submitted_or_later_count = int(
         execution_chain.get("db_order_state_submitted_or_later_count") or 0
+    )
+    db_order_state_terminal_no_fill_count = int(
+        execution_chain.get("db_order_state_terminal_no_fill_count") or 0
     )
     db_execution_command_count = int(execution_chain.get("db_execution_command_count") or 0)
     db_execution_submit_command_count = int(execution_chain.get("db_execution_submit_command_count") or 0)
@@ -985,6 +1007,21 @@ def summarize_execution_truth_chain(
             )
         )
     )
+    order_surface_terminal_no_fill = (
+        has_order_surface
+        and not has_fill_surface
+        and db_execution_order_created_or_submitting_count == 0
+        and db_order_state_created_or_submitting_count == 0
+        and (
+            db_order_count == 0
+            or db_execution_order_terminal_no_fill_count >= db_order_count
+        )
+        and (
+            db_order_state_count == 0
+            or db_order_state_terminal_no_fill_count >= db_order_state_count
+        )
+        and any((db_order_count, db_order_state_count))
+    )
     zero_delta = (
         decimal_is_zero(requested_delta_position_qty)
         and decimal_is_zero(composed_delta_position_qty)
@@ -1007,6 +1044,7 @@ def summarize_execution_truth_chain(
             f"db_fill_via_order_count={db_fill_via_order_count}",
             f"db_execution_command_count={db_execution_command_count}",
             f"db_order_submitted_or_later_count={db_execution_order_submitted_or_later_count}",
+            f"db_order_terminal_no_fill_count={db_execution_order_terminal_no_fill_count}",
             (
                 f"execution_command_flow_enabled={str(execution_command_flow_enabled).lower()}"
                 if execution_command_flow_enabled is not None
@@ -1046,6 +1084,10 @@ def summarize_execution_truth_chain(
             else:
                 submission_gap_root_cause = "execution_command_missing_for_created_order"
                 missing_fields.append("execution_command_or_submitted_order_state")
+        elif not missing_fields and order_surface_terminal_no_fill:
+            fill_expected = False
+            lifecycle_expected = False
+            status = "verified_terminal_order_no_fill_expected"
         elif fill_expected and fill_event_ref_count == 0 and not has_fill_surface:
             missing_fields.append("fill_event_refs_or_execution_fills")
         if missing_fields:
@@ -1058,7 +1100,7 @@ def summarize_execution_truth_chain(
                 )
                 else "expected_execution_surface_missing"
             )
-        else:
+        elif status == "needs_manual_review":
             status = "verified_execution_surface_present"
     elif not has_order_surface and not has_fill_surface:
         status = "verified_no_order_expected"
@@ -1110,6 +1152,9 @@ def summarize_latest_decision(
         "db_execution_order_submitted_or_later_count": int(
             counts.get("execution_orders_submitted_or_later") or 0
         ),
+        "db_execution_order_terminal_no_fill_count": int(
+            counts.get("execution_orders_terminal_no_fill") or 0
+        ),
         "db_execution_command_count": int(counts.get("execution_commands") or 0),
         "db_execution_submit_command_count": int(counts.get("execution_submit_commands") or 0),
         "db_order_state_count": int(counts.get("order_states") or 0),
@@ -1118,6 +1163,9 @@ def summarize_latest_decision(
         ),
         "db_order_state_submitted_or_later_count": int(
             counts.get("order_states_submitted_or_later") or 0
+        ),
+        "db_order_state_terminal_no_fill_count": int(
+            counts.get("order_states_terminal_no_fill") or 0
         ),
         "db_fill_count": int(counts.get("execution_fills") or 0),
         "db_fill_via_order_count": int(counts.get("execution_fills_via_orders") or 0),
