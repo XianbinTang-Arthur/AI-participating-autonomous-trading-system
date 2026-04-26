@@ -16,6 +16,10 @@ from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import Session
 from sqlalchemy.orm import sessionmaker
 
+from aats.data_platform.orderbook_diff_payload_contract import (
+    CAPTURE_STATUS_DIFF_PERSISTED,
+    ORDERBOOK_DIFF_PAYLOAD_TABLE,
+)
 from aats.services.execution_engine.lifecycle_snapshot_refs import (
     LIFECYCLE_MARKET_CONTEXT_REF_KEYS,
     choose_lifecycle_market_context_refs,
@@ -217,6 +221,10 @@ def resolve_orderbook_snapshot_ref_row(
             "checksum_version": _ORDERBOOK_CHECKSUM_VERSION,
             "sequence_key": None,
             "top_of_book": None,
+            "payload_evidence": _orderbook_payload_evidence_missing(
+                status="not_checked",
+                missing_evidence=("orderbook_row_truth_missing",),
+            ),
             "missing_evidence": [],
         }
     )
@@ -250,6 +258,24 @@ def resolve_orderbook_snapshot_ref_row(
                 symbol=str(payload["symbol"]),
                 ts=parse_orderbook_ref_ts_for_query(payload["ts"]),
             )
+            payload_row: Mapping[str, Any] | None = None
+            payload_lookup_failed = False
+            if row:
+                normalized_for_checksum = dict(row)
+                content_checksum_for_lookup = _orderbook_row_checksum(
+                    str(payload["table_name"]),
+                    normalized_for_checksum,
+                )
+                try:
+                    payload_row = _execute_orderbook_payload_lookup(
+                        session,
+                        snapshot_table=str(payload["table_name"]),
+                        symbol=str(payload["symbol"]),
+                        ts=parse_orderbook_ref_ts_for_query(payload["ts"]),
+                        row_checksum=content_checksum_for_lookup,
+                    )
+                except Exception:
+                    payload_lookup_failed = True
     except Exception:
         missing_evidence.append("orderbook_row_truth_source_unavailable")
         payload["row_lookup_status"] = "source_unavailable"
@@ -267,6 +293,13 @@ def resolve_orderbook_snapshot_ref_row(
     received_at = normalized_row.get("received_at")
     ingest_run_id = normalized_row.get("ingest_run_id")
     content_checksum = _orderbook_row_checksum(str(payload["table_name"]), normalized_row)
+    if payload_lookup_failed:
+        payload_evidence = _orderbook_payload_evidence_missing(
+            status="lookup_failed",
+            missing_evidence=("orderbook_payload_sidecar_lookup_failed",),
+        )
+    else:
+        payload_evidence = _orderbook_payload_evidence_from_row(payload_row)
     payload.update(
         {
             "row_lookup_status": "row_resolved",
@@ -284,6 +317,7 @@ def resolve_orderbook_snapshot_ref_row(
                 "content_checksum": content_checksum,
             },
             "top_of_book": _orderbook_top_of_book(str(payload["table_name"]), normalized_row),
+            "payload_evidence": payload_evidence,
             "missing_evidence": [],
         }
     )
@@ -535,6 +569,62 @@ def _execute_orderbook_row_lookup(
     return session.execute(statement, params).mappings().first()
 
 
+def _execute_orderbook_payload_lookup(
+    session: Session,
+    *,
+    snapshot_table: str,
+    symbol: str,
+    ts: datetime | None,
+    row_checksum: str | None,
+) -> Mapping[str, Any] | None:
+    if ts is None or not row_checksum:
+        return None
+    statement = text(
+        """
+        SELECT
+            storage_table,
+            snapshot_table,
+            symbol,
+            ts,
+            source_ts,
+            collector_sequence,
+            collector_sequence_scope,
+            row_checksum,
+            checksum_version,
+            capture_status,
+            payload_hash,
+            payload_schema_version,
+            payload_kind,
+            exchange_sequence_id,
+            previous_payload_hash,
+            channel,
+            ingest_run_id,
+            received_at
+        FROM bronze.market_orderbook_payloads
+        WHERE snapshot_table = :snapshot_table
+          AND symbol = :symbol
+          AND ts = :ts
+          AND row_checksum = :row_checksum
+        LIMIT 1
+        """
+    )
+    params = {
+        "snapshot_table": snapshot_table,
+        "symbol": symbol,
+        "ts": ts,
+        "row_checksum": row_checksum,
+    }
+    connection_factory = getattr(session, "connection", None)
+    if callable(connection_factory):
+        connection = connection_factory()
+        begin_nested = getattr(connection, "begin_nested", None)
+        execute = getattr(connection, "execute", None)
+        if callable(begin_nested) and callable(execute):
+            with begin_nested():
+                return execute(statement, params).mappings().first()
+    return session.execute(statement, params).mappings().first()
+
+
 def _normalize_event_time(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -644,6 +734,101 @@ def _orderbook_top_of_book(table_name: str, row: Mapping[str, Any]) -> dict[str,
         "spread_px": _decimal_payload_value(spread_px),
         "spread_bps": _decimal_payload_value(spread_bps),
     }
+
+
+def _orderbook_payload_evidence_from_row(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    if not row or row.get("capture_status") is None:
+        return _orderbook_payload_evidence_missing(
+            status="missing",
+            missing_evidence=("orderbook_payload_sidecar_missing",),
+        )
+
+    normalized = dict(row)
+    capture_status = str(normalized.get("capture_status") or "").strip()
+    payload_hash = _nonempty_text(normalized.get("payload_hash"))
+    has_persisted_payload = capture_status == CAPTURE_STATUS_DIFF_PERSISTED and payload_hash is not None
+    missing_evidence: list[str] = []
+    status = capture_status or "missing"
+    if not has_persisted_payload:
+        if capture_status != CAPTURE_STATUS_DIFF_PERSISTED:
+            missing_evidence.append("orderbook_diff_payload_not_persisted")
+        if payload_hash is None:
+            missing_evidence.append("orderbook_payload_hash_missing")
+    return {
+        "status": "diff_payload_persisted" if has_persisted_payload else status,
+        "complete": has_persisted_payload,
+        "raw_payload_exposed": False,
+        "storage_table": _nonempty_text(normalized.get("storage_table")) or ORDERBOOK_DIFF_PAYLOAD_TABLE,
+        "snapshot_table": _nonempty_text(normalized.get("snapshot_table")),
+        "symbol": _nonempty_text(normalized.get("symbol")),
+        "ts": _format_snapshot_ts(normalized.get("ts")) if normalized.get("ts") is not None else None,
+        "source_ts": (
+            _format_snapshot_ts(normalized.get("source_ts")) if normalized.get("source_ts") is not None else None
+        ),
+        "collector_sequence": _int_payload_value(normalized.get("collector_sequence")),
+        "collector_sequence_scope": _nonempty_text(normalized.get("collector_sequence_scope")),
+        "row_checksum": _nonempty_text(normalized.get("row_checksum")),
+        "checksum_version": _nonempty_text(normalized.get("checksum_version")),
+        "capture_status": capture_status or None,
+        "payload_hash": payload_hash,
+        "payload_schema_version": _nonempty_text(normalized.get("payload_schema_version")),
+        "payload_kind": _nonempty_text(normalized.get("payload_kind")),
+        "exchange_sequence_id": _nonempty_text(normalized.get("exchange_sequence_id")),
+        "previous_payload_hash": _nonempty_text(normalized.get("previous_payload_hash")),
+        "channel": _nonempty_text(normalized.get("channel")),
+        "ingest_run_id": _nonempty_text(normalized.get("ingest_run_id")),
+        "received_at": (
+            _format_snapshot_ts(normalized.get("received_at")) if normalized.get("received_at") is not None else None
+        ),
+        "missing_evidence": missing_evidence,
+    }
+
+
+def _orderbook_payload_evidence_missing(
+    *,
+    status: str,
+    missing_evidence: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "status": status,
+        "complete": False,
+        "raw_payload_exposed": False,
+        "storage_table": ORDERBOOK_DIFF_PAYLOAD_TABLE,
+        "snapshot_table": None,
+        "symbol": None,
+        "ts": None,
+        "source_ts": None,
+        "collector_sequence": None,
+        "collector_sequence_scope": None,
+        "row_checksum": None,
+        "checksum_version": None,
+        "capture_status": None,
+        "payload_hash": None,
+        "payload_schema_version": None,
+        "payload_kind": None,
+        "exchange_sequence_id": None,
+        "previous_payload_hash": None,
+        "channel": None,
+        "ingest_run_id": None,
+        "received_at": None,
+        "missing_evidence": list(missing_evidence),
+    }
+
+
+def _nonempty_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text_value = str(value).strip()
+    return text_value or None
+
+
+def _int_payload_value(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
 
 
 def _to_decimal(value: Any) -> Decimal | None:

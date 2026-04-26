@@ -35,13 +35,35 @@ class _FakeExecuteResult:
 
 
 class _FakeSession:
-    def __init__(self, rows: list[dict[str, Any] | None]) -> None:
+    def __init__(
+        self,
+        rows: list[dict[str, Any] | None],
+        *,
+        payload_rows: list[dict[str, Any]] | None = None,
+    ) -> None:
         self._rows = list(rows)
+        self._payload_rows_by_key = {
+            (
+                row.get("snapshot_table"),
+                row.get("symbol"),
+                row.get("ts"),
+                row.get("row_checksum"),
+            ): row
+            for row in (payload_rows or [])
+        }
         self.execute_calls: list[dict[str, Any]] = []
         self.close_count = 0
 
-    def execute(self, _statement: Any, params: dict[str, Any]) -> _FakeExecuteResult:
+    def execute(self, statement: Any, params: dict[str, Any]) -> _FakeExecuteResult:
         self.execute_calls.append(dict(params))
+        if "market_orderbook_payloads" in str(statement):
+            key = (
+                params.get("snapshot_table"),
+                params.get("symbol"),
+                params.get("ts"),
+                params.get("row_checksum"),
+            )
+            return _FakeExecuteResult(self._payload_rows_by_key.get(key))
         row = self._rows.pop(0) if self._rows else None
         return _FakeExecuteResult(row)
 
@@ -132,6 +154,9 @@ class TestOrderbookSnapshotRefCapture(unittest.TestCase):
         self.assertTrue(first["content_checksum"].startswith("sha256:"))
         self.assertEqual(first["content_checksum"], second["content_checksum"])
         self.assertEqual(first["sequence_key"]["source_ts"], "2026-04-25T03:48:30.000000Z")
+        self.assertEqual(first["payload_evidence"]["status"], "missing")
+        self.assertFalse(first["payload_evidence"]["raw_payload_exposed"])
+        self.assertIn("orderbook_payload_sidecar_missing", first["payload_evidence"]["missing_evidence"])
         self.assertEqual(first["top_of_book"]["bid_px"], "77000.1")
         self.assertEqual(first["top_of_book"]["bid_sz"], "0.1")
         self.assertEqual(first["top_of_book"]["ask_px"], "77000.2")
@@ -155,6 +180,65 @@ class TestOrderbookSnapshotRefCapture(unittest.TestCase):
         self.assertEqual(payload["row_lookup_status"], "row_missing")
         self.assertFalse(payload["row_exists"])
         self.assertIn("orderbook_row_missing", payload["missing_evidence"])
+
+    def test_ref_row_resolver_projects_sidecar_payload_evidence_without_raw_payload(self) -> None:
+        ts = datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)
+        row = {
+            "symbol": "BTC-USDT-SWAP",
+            "ts": ts,
+            "source_ts": ts,
+            "bid_px": Decimal("77000.1000000000"),
+            "bid_sz": Decimal("0.1000"),
+            "ask_px": Decimal("77000.2000000000"),
+            "ask_sz": Decimal("0.2000"),
+            "ingest_run_id": "11111111-1111-1111-1111-111111111111",
+            "received_at": ts,
+        }
+        from aats.data_platform.orderbook_diff_payload_contract import compute_orderbook_row_checksum
+
+        checksum = compute_orderbook_row_checksum("bronze.market_orderbook_bbo", row)
+        payload_row = {
+            "storage_table": "bronze.market_orderbook_payloads",
+            "snapshot_table": "bronze.market_orderbook_bbo",
+            "symbol": "BTC-USDT-SWAP",
+            "ts": ts,
+            "source_ts": ts,
+            "collector_sequence": 7,
+            "collector_sequence_scope": "per_ingest_run_symbol_channel",
+            "row_checksum": checksum,
+            "checksum_version": "orderbook_row_v1",
+            "capture_status": "diff_payload_persisted",
+            "payload_hash": "sha256:" + "a" * 64,
+            "payload_schema_version": "orderbook_diff_payload_v1",
+            "payload_kind": "okx_bbo_tbt_snapshot",
+            "exchange_sequence_id": "123456789",
+            "previous_payload_hash": None,
+            "channel": "bbo-tbt",
+            "ingest_run_id": "11111111-1111-1111-1111-111111111111",
+            "received_at": ts,
+        }
+        session = _FakeSession([row], payload_rows=[payload_row])
+        source = OrderbookSnapshotReadSource(
+            session_factory=lambda: session,  # type: ignore[arg-type]
+            source_name="aats_research",
+        )
+
+        payload = resolve_orderbook_snapshot_ref_row(
+            "bronze.market_orderbook_bbo:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z",
+            expected_symbol="BTC-USDT-SWAP",
+            market_context_source=source,
+            use_default_source=False,
+        )
+
+        evidence = payload["payload_evidence"]
+        self.assertEqual(evidence["status"], "diff_payload_persisted")
+        self.assertTrue(evidence["complete"])
+        self.assertEqual(evidence["collector_sequence"], 7)
+        self.assertEqual(evidence["exchange_sequence_id"], "123456789")
+        self.assertEqual(evidence["payload_hash"], "sha256:" + "a" * 64)
+        self.assertEqual(evidence["channel"], "bbo-tbt")
+        self.assertFalse(evidence["raw_payload_exposed"])
+        self.assertNotIn("raw_payload", evidence)
 
     def test_captures_pre_and_post_books5_refs(self) -> None:
         event_time = datetime(2026, 4, 25, 3, 48, 30, 500000, tzinfo=timezone.utc)

@@ -128,6 +128,26 @@ _ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE = (
     "local_orderbook_diff_payload_not_exposed",
     "local_orderbook_diff_checksum_not_exposed",
 )
+_ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS = "local_snapshot_row_sequence_validated_diff_payload_persisted"
+
+
+def _orderbook_payload_missing_evidence_by_side(
+    *,
+    pre: dict[str, Any],
+    post: dict[str, Any],
+) -> list[str]:
+    missing: list[str] = []
+    for side, payload in (("pre", pre), ("post", post)):
+        evidence = payload.get("payload_evidence") if isinstance(payload, dict) else None
+        evidence = evidence if isinstance(evidence, dict) else {}
+        if evidence.get("complete") is True and evidence.get("payload_hash"):
+            continue
+        side_missing = evidence.get("missing_evidence")
+        if isinstance(side_missing, list) and side_missing:
+            missing.extend(f"{side}_{item}" for item in side_missing)
+        else:
+            missing.append(f"{side}_orderbook_payload_sidecar_missing")
+    return list(dict.fromkeys(missing))
 
 if TYPE_CHECKING:
     from aats.bootstrap.config import ApplicationRuntime
@@ -3340,12 +3360,20 @@ class OperatorQueryService:
                     ordered_by["client_ts"] = client_ordered
                     ordered_by["source_ts"] = source_ordered
                     if client_ordered and source_ordered:
-                        status = "local_snapshot_row_sequence_validated_diff_payload_missing"
                         if pre_source_ts is not None and post_source_ts is not None:
                             source_delta_ms = int((post_source_ts - pre_source_ts).total_seconds() * 1000)
                         if pre_client_ts is not None and post_client_ts is not None:
                             client_delta_ms = int((post_client_ts - pre_client_ts).total_seconds() * 1000)
-                        missing_evidence.extend(_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE)
+                        payload_missing_evidence = _orderbook_payload_missing_evidence_by_side(
+                            pre=pre,
+                            post=post,
+                        )
+                        if payload_missing_evidence:
+                            status = "local_snapshot_row_sequence_validated_diff_payload_missing"
+                            missing_evidence.extend(_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE)
+                            missing_evidence.extend(payload_missing_evidence)
+                        else:
+                            status = _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS
                     else:
                         if not client_ordered:
                             missing_evidence.append("client_ts_order_invalid")
@@ -3360,7 +3388,7 @@ class OperatorQueryService:
 
         return {
             "status": status,
-            "complete": status == "snapshot_ref_ordered",
+            "complete": status in {"snapshot_ref_ordered", _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS},
             "ordered": ordered,
             "missing_evidence": missing_evidence,
             "pre": pre,
@@ -3680,6 +3708,7 @@ class OperatorQueryService:
         missing_sequence_stage_count = 0
         invalid_sequence_stage_count = 0
         local_row_sequence_stage_count = 0
+        local_diff_payload_stage_count = 0
         row_truth_missing_stage_count = 0
         invalid_local_sequence_stage_count = 0
 
@@ -3719,10 +3748,18 @@ class OperatorQueryService:
                         "snapshot_ref_ordered",
                         "snapshot_ref_sequence_validated_row_truth_missing",
                         "local_snapshot_row_sequence_validated_diff_payload_missing",
+                        _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS,
                     }:
                         valid_sequence_stage_count += 1
-                    if ref_sequence["status"] == "local_snapshot_row_sequence_validated_diff_payload_missing":
+                    if ref_sequence["status"] in {
+                        "local_snapshot_row_sequence_validated_diff_payload_missing",
+                        _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS,
+                    }:
                         local_row_sequence_stage_count += 1
+                    if ref_sequence["status"] == _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS:
+                        local_diff_payload_stage_count += 1
+                    elif ref_sequence["status"] == "local_snapshot_row_sequence_validated_diff_payload_missing":
+                        pass
                     elif ref_sequence["status"] == "snapshot_ref_sequence_validated_row_truth_missing":
                         row_truth_missing_stage_count += 1
                     elif ref_sequence["status"] == "missing_refs":
@@ -3800,8 +3837,12 @@ class OperatorQueryService:
                 *_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE,
             ]
         elif local_row_sequence_stage_count:
-            sequence_validation_status = "local_snapshot_row_sequence_validated_diff_payload_missing"
-            sequence_missing_evidence = list(_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE)
+            if local_diff_payload_stage_count and local_diff_payload_stage_count == local_row_sequence_stage_count:
+                sequence_validation_status = _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS
+                sequence_missing_evidence = []
+            else:
+                sequence_validation_status = "local_snapshot_row_sequence_validated_diff_payload_missing"
+                sequence_missing_evidence = list(_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE)
         elif valid_sequence_stage_count:
             sequence_validation_status = "snapshot_ref_sequence_validated_diff_missing"
             sequence_missing_evidence = list(_ORDERBOOK_DIFF_SEQUENCE_MISSING_EVIDENCE)
@@ -3824,13 +3865,14 @@ class OperatorQueryService:
             },
             "sequence_validation": {
                 "status": sequence_validation_status,
-                "complete": False,
+                "complete": sequence_validation_status == _ORDERBOOK_DIFF_PAYLOAD_PERSISTED_STATUS,
                 "missing_evidence": sequence_missing_evidence,
                 "stage_count": len(sequence_evidence),
                 "valid_snapshot_ref_sequence_stage_count": valid_sequence_stage_count,
                 "missing_snapshot_ref_sequence_stage_count": missing_sequence_stage_count,
                 "invalid_snapshot_ref_sequence_stage_count": invalid_sequence_stage_count,
                 "local_orderbook_row_sequence_stage_count": local_row_sequence_stage_count,
+                "local_orderbook_diff_payload_stage_count": local_diff_payload_stage_count,
                 "row_truth_missing_stage_count": row_truth_missing_stage_count,
                 "invalid_local_orderbook_sequence_stage_count": invalid_local_sequence_stage_count,
                 "stage_evidence": sequence_evidence[:50],
