@@ -399,6 +399,7 @@ def test_slippage_cost_calibration_truth_verifies_fee_and_slippage_context() -> 
             "fills_24h": 4,
             "fills_with_order": 12,
             "fills_with_limit_price": 12,
+            "fills_with_slippage_reference_price": 12,
             "fee_bps_samples": 12,
             "fee_bps_mean": "5.0",
             "fee_bps_p95": "5.0",
@@ -409,6 +410,7 @@ def test_slippage_cost_calibration_truth_verifies_fee_and_slippage_context() -> 
             "liquidity_role_samples": 12,
             "taker_fills": 12,
             "by_liquidity_role": [{"liquidity_role": "taker", "n": 12}],
+            "by_reference_source": [{"reference_source": "execution_orders.limit_price", "n": 12}],
         },
     }
     execution_science = {
@@ -433,7 +435,57 @@ def test_slippage_cost_calibration_truth_verifies_fee_and_slippage_context() -> 
     assert summary["smallest_missing_field"] is None
     assert summary["fee"]["sample_count"] == 12
     assert summary["slippage_proxy"]["sample_count"] == 12
+    assert summary["slippage_proxy"]["reference"] == "coalesced_order_or_command_reference_price"
+    assert summary["slippage_proxy"]["by_reference_source"][0]["reference_source"] == "execution_orders.limit_price"
     assert summary["market_context"]["silver_trade_flow_status"] == "verified_silver_trade_flow_bar_present"
+
+
+def test_slippage_cost_calibration_truth_accepts_command_intent_reference_price() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "slippage_cost_calibration": {
+            "symbol": "BTC-USDT-SWAP",
+            "fills_total": 68,
+            "fills_24h": 40,
+            "fills_with_order": 68,
+            "fills_with_limit_price": 0,
+            "fills_with_command_intent_reference_price": 12,
+            "fills_with_slippage_reference_price": 12,
+            "fee_bps_samples": 68,
+            "fee_bps_mean": "5.0",
+            "fee_bps_p95": "5.0",
+            "slippage_proxy_samples": 12,
+            "slippage_proxy_mean": "0.42",
+            "slippage_proxy_p95": "0.8",
+            "latest_fill_ts": "2026-04-26T21:40:00Z",
+            "liquidity_role_samples": 68,
+            "taker_fills": 68,
+            "by_reference_source": [
+                {"reference_source": "execution_commands.command_payload.intent.reference_price", "n": 12},
+                {"reference_source": "missing", "n": 56},
+            ],
+        },
+    }
+    execution_science = {
+        "silver_orderbook": {"status": "verified_silver_orderbook_bar_present"},
+        "silver_trade_flow": {"status": "verified_silver_trade_flow_bar_present"},
+    }
+
+    summary = mod.summarize_slippage_cost_calibration_truth(
+        db,
+        execution_science,
+        report_generated_at="2026-04-26T21:45:00Z",
+    )
+
+    assert summary["status"] == "verified_slippage_cost_calibration_evidence_present"
+    assert summary["smallest_missing_field"] is None
+    assert summary["fills_with_command_intent_reference_price"] == 12
+    assert summary["fills_with_slippage_reference_price"] == 12
+    assert summary["slippage_proxy"]["sample_count"] == 12
+    assert summary["slippage_proxy"]["by_reference_source"][0]["reference_source"] == (
+        "execution_commands.command_payload.intent.reference_price"
+    )
 
 
 def test_slippage_cost_calibration_truth_reports_missing_slippage_reference() -> None:
@@ -446,6 +498,7 @@ def test_slippage_cost_calibration_truth_reports_missing_slippage_reference() ->
             "fills_24h": 37,
             "fills_with_order": 62,
             "fills_with_limit_price": 0,
+            "fills_with_slippage_reference_price": 0,
             "fee_bps_samples": 62,
             "fee_bps_mean": "5.0",
             "fee_bps_p95": "5.0",
@@ -467,7 +520,7 @@ def test_slippage_cost_calibration_truth_reports_missing_slippage_reference() ->
     )
 
     assert summary["status"] == "partial_fee_verified_slippage_proxy_missing"
-    assert summary["smallest_missing_field"] == "execution_orders.limit_price_or_reference_price_for_slippage_proxy"
+    assert summary["smallest_missing_field"] == "order_or_command_reference_price_for_slippage_proxy"
     assert summary["fee"]["sample_count"] == 62
     assert summary["slippage_proxy"]["sample_count"] == 0
 
@@ -1227,7 +1280,7 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
         },
         "slippage_cost_calibration_truth": {
             "status": "partial_fee_verified_slippage_proxy_missing",
-            "smallest_missing_field": "execution_orders.limit_price_or_reference_price_for_slippage_proxy",
+            "smallest_missing_field": "order_or_command_reference_price_for_slippage_proxy",
             "fee": {"sample_count": 62},
             "slippage_proxy": {"sample_count": 0},
         },
@@ -1268,7 +1321,7 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["slippage_cost_calibration_truth_status"] == "partial_fee_verified_slippage_proxy_missing"
     assert (
         live_facts["slippage_cost_calibration_smallest_missing_field"]
-        == "execution_orders.limit_price_or_reference_price_for_slippage_proxy"
+        == "order_or_command_reference_price_for_slippage_proxy"
     )
     assert live_facts["slippage_cost_fee_sample_count"] == 62
     assert live_facts["slippage_cost_slippage_proxy_sample_count"] == 0

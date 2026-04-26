@@ -256,47 +256,151 @@ with engine.connect() as conn:
         latest_executable_directional
     )
     slippage_cost_row = conn.execute(text(
-        "with joined as ("
+        "with command_refs as ("
+        "  select order_id, "
+        "         max(case when command_payload #>> '{intent,limit_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+        "                  then (command_payload #>> '{intent,limit_price}')::numeric end) "
+        "             as command_intent_limit_price, "
+        "         max(case when command_payload #>> '{intent,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+        "                  then (command_payload #>> '{intent,reference_price}')::numeric end) "
+        "             as command_intent_reference_price "
+        "  from execution_commands "
+        "  where command_type = 'submit' "
+        "  group by order_id"
+        "), base as ("
         "  select f.symbol, f.side, f.fill_qty, f.fill_price, f.fee_amount, "
         "         f.fee_currency, f.liquidity_role, f.fee_rate, f.exec_type, f.ingestion_ts, "
         "         o.order_id, o.limit_price, o.order_type, o.time_in_force, o.strategy_family, "
+        "         case when o.raw_payload #>> '{intent,limit_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+        "              then (o.raw_payload #>> '{intent,limit_price}')::numeric end "
+        "             as order_intent_limit_price, "
+        "         case when o.raw_payload #>> '{intent,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+        "              then (o.raw_payload #>> '{intent,reference_price}')::numeric end "
+        "             as order_intent_reference_price, "
+        "         case when o.raw_payload #>> '{order_state,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+        "              then (o.raw_payload #>> '{order_state,reference_price}')::numeric end "
+        "             as order_state_reference_price, "
+        "         case when o.raw_payload #>> '{order_state,submission_payload,referencePrice}' "
+        "                   ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+        "              then (o.raw_payload #>> '{order_state,submission_payload,referencePrice}')::numeric end "
+        "             as order_state_submission_reference_price, "
+        "         cr.command_intent_limit_price, cr.command_intent_reference_price, "
         "         case when f.fill_qty > 0 and f.fill_price > 0 "
-        "              then abs(f.fee_amount) / (f.fill_qty * f.fill_price) * 10000 end as actual_fee_bps, "
-        "         case when o.limit_price is not null and o.limit_price > 0 "
-        "                   and f.fill_price > 0 and f.side = 'buy' "
-        "              then (f.fill_price - o.limit_price) / o.limit_price * 10000 "
-        "              when o.limit_price is not null and o.limit_price > 0 "
-        "                   and f.fill_price > 0 and f.side = 'sell' "
-        "              then (o.limit_price - f.fill_price) / o.limit_price * 10000 "
-        "         end as limit_fill_slippage_bps "
+        "              then abs(f.fee_amount) / (f.fill_qty * f.fill_price) * 10000 end as actual_fee_bps "
         "  from execution_fills f "
         "  left join execution_orders o on o.order_id = f.order_id "
+        "  left join command_refs cr on cr.order_id = f.order_id "
         "  where f.symbol = :symbol"
+        "), joined as ("
+        "  select base.*, "
+        "         coalesce("
+        "             limit_price, "
+        "             order_intent_limit_price, "
+        "             order_intent_reference_price, "
+        "             order_state_reference_price, "
+        "             order_state_submission_reference_price, "
+        "             command_intent_limit_price, "
+        "             command_intent_reference_price"
+        "         ) as slippage_reference_price, "
+        "         case "
+        "             when limit_price is not null then 'execution_orders.limit_price' "
+        "             when order_intent_limit_price is not null then 'execution_orders.raw_payload.intent.limit_price' "
+        "             when order_intent_reference_price is not null then 'execution_orders.raw_payload.intent.reference_price' "
+        "             when order_state_reference_price is not null then 'execution_orders.raw_payload.order_state.reference_price' "
+        "             when order_state_submission_reference_price is not null "
+        "                 then 'execution_orders.raw_payload.order_state.submission_payload.referencePrice' "
+        "             when command_intent_limit_price is not null "
+        "                 then 'execution_commands.command_payload.intent.limit_price' "
+        "             when command_intent_reference_price is not null "
+        "                 then 'execution_commands.command_payload.intent.reference_price' "
+        "         end as slippage_reference_source "
+        "  from base"
+        "), final as ("
+        "  select joined.*, "
+        "         case when slippage_reference_price is not null and slippage_reference_price > 0 "
+        "                   and fill_price > 0 and side = 'buy' "
+        "              then (fill_price - slippage_reference_price) / slippage_reference_price * 10000 "
+        "              when slippage_reference_price is not null and slippage_reference_price > 0 "
+        "                   and fill_price > 0 and side = 'sell' "
+        "              then (slippage_reference_price - fill_price) / slippage_reference_price * 10000 "
+        "         end as reference_fill_slippage_bps "
+        "  from joined"
         ") "
         "select count(*) as fills_total, "
         "       count(*) filter (where ingestion_ts >= now() - interval '24 hour') as fills_24h, "
         "       count(*) filter (where order_id is not null) as fills_with_order, "
         "       count(*) filter (where limit_price is not null) as fills_with_limit_price, "
+        "       count(*) filter (where order_intent_limit_price is not null) as fills_with_order_intent_limit_price, "
+        "       count(*) filter (where order_intent_reference_price is not null) "
+        "           as fills_with_order_intent_reference_price, "
+        "       count(*) filter (where order_state_reference_price is not null) "
+        "           as fills_with_order_state_reference_price, "
+        "       count(*) filter (where order_state_submission_reference_price is not null) "
+        "           as fills_with_order_state_submission_reference_price, "
+        "       count(*) filter (where command_intent_limit_price is not null) "
+        "           as fills_with_command_intent_limit_price, "
+        "       count(*) filter (where command_intent_reference_price is not null) "
+        "           as fills_with_command_intent_reference_price, "
+        "       count(*) filter (where slippage_reference_price is not null) as fills_with_slippage_reference_price, "
         "       count(*) filter (where actual_fee_bps is not null) as fee_bps_samples, "
         "       min(actual_fee_bps) as fee_bps_min, "
         "       avg(actual_fee_bps) as fee_bps_mean, "
         "       percentile_disc(0.95) within group (order by actual_fee_bps) as fee_bps_p95, "
         "       max(actual_fee_bps) as fee_bps_max, "
-        "       count(*) filter (where limit_fill_slippage_bps is not null) as slippage_proxy_samples, "
-        "       min(limit_fill_slippage_bps) as slippage_proxy_min, "
-        "       avg(limit_fill_slippage_bps) as slippage_proxy_mean, "
-        "       percentile_disc(0.95) within group (order by limit_fill_slippage_bps) as slippage_proxy_p95, "
-        "       max(limit_fill_slippage_bps) as slippage_proxy_max, "
+        "       count(*) filter (where reference_fill_slippage_bps is not null) as slippage_proxy_samples, "
+        "       min(reference_fill_slippage_bps) as slippage_proxy_min, "
+        "       avg(reference_fill_slippage_bps) as slippage_proxy_mean, "
+        "       percentile_disc(0.95) within group (order by reference_fill_slippage_bps) as slippage_proxy_p95, "
+        "       max(reference_fill_slippage_bps) as slippage_proxy_max, "
         "       max(ingestion_ts) as latest_fill_ts, "
         "       count(*) filter (where liquidity_role is not null) as liquidity_role_samples, "
         "       count(*) filter (where fee_rate is not null) as fee_rate_samples, "
         "       count(*) filter (where liquidity_role = 'maker') as maker_fills, "
         "       count(*) filter (where liquidity_role = 'taker') as taker_fills, "
         "       count(*) filter (where liquidity_role is null) as unknown_liquidity_fills "
-        "from joined"
+        "from final"
     ), {"symbol": symbol}).mappings().first()
     slippage_cost_calibration = dict(slippage_cost_row or {})
     slippage_cost_calibration["symbol"] = symbol
+    slippage_cost_calibration["by_reference_source"] = [
+        dict(row)
+        for row in conn.execute(text(
+            "with command_refs as ("
+            "  select order_id, "
+            "         max(case when command_payload #>> '{intent,limit_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "                  then (command_payload #>> '{intent,limit_price}')::numeric end) "
+            "             as command_intent_limit_price, "
+            "         max(case when command_payload #>> '{intent,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "                  then (command_payload #>> '{intent,reference_price}')::numeric end) "
+            "             as command_intent_reference_price "
+            "  from execution_commands where command_type = 'submit' group by order_id"
+            "), joined as ("
+            "  select case "
+            "             when o.limit_price is not null then 'execution_orders.limit_price' "
+            "             when o.raw_payload #>> '{intent,limit_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "                 then 'execution_orders.raw_payload.intent.limit_price' "
+            "             when o.raw_payload #>> '{intent,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "                 then 'execution_orders.raw_payload.intent.reference_price' "
+            "             when o.raw_payload #>> '{order_state,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "                 then 'execution_orders.raw_payload.order_state.reference_price' "
+            "             when o.raw_payload #>> '{order_state,submission_payload,referencePrice}' "
+            "                   ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+            "                 then 'execution_orders.raw_payload.order_state.submission_payload.referencePrice' "
+            "             when cr.command_intent_limit_price is not null "
+            "                 then 'execution_commands.command_payload.intent.limit_price' "
+            "             when cr.command_intent_reference_price is not null "
+            "                 then 'execution_commands.command_payload.intent.reference_price' "
+            "             else 'missing' "
+            "         end as reference_source "
+            "  from execution_fills f "
+            "  left join execution_orders o on o.order_id = f.order_id "
+            "  left join command_refs cr on cr.order_id = f.order_id "
+            "  where f.symbol = :symbol"
+            ") "
+            "select reference_source, count(*) as n "
+            "from joined group by reference_source order by reference_source"
+        ), {"symbol": symbol}).mappings().all()
+    ]
     slippage_cost_calibration["by_liquidity_role"] = [
         dict(row)
         for row in conn.execute(text(
@@ -2035,7 +2139,7 @@ def summarize_slippage_cost_calibration_truth(
     missing_checks = [
         ("execution_fills", fills_total > 0),
         ("execution_fills.actual_fee_bps", fee_samples > 0),
-        ("execution_orders.limit_price_or_reference_price_for_slippage_proxy", slippage_samples > 0),
+        ("order_or_command_reference_price_for_slippage_proxy", slippage_samples > 0),
         ("silver.market_orderbook_metrics_15m", silver_orderbook_ok),
         ("silver.market_trade_flow_15m", silver_trade_flow_ok),
     ]
@@ -2061,6 +2165,17 @@ def summarize_slippage_cost_calibration_truth(
         "fills_24h": int_or_zero(raw.get("fills_24h")),
         "fills_with_order": int_or_zero(raw.get("fills_with_order")),
         "fills_with_limit_price": int_or_zero(raw.get("fills_with_limit_price")),
+        "fills_with_order_intent_limit_price": int_or_zero(raw.get("fills_with_order_intent_limit_price")),
+        "fills_with_order_intent_reference_price": int_or_zero(raw.get("fills_with_order_intent_reference_price")),
+        "fills_with_order_state_reference_price": int_or_zero(raw.get("fills_with_order_state_reference_price")),
+        "fills_with_order_state_submission_reference_price": int_or_zero(
+            raw.get("fills_with_order_state_submission_reference_price")
+        ),
+        "fills_with_command_intent_limit_price": int_or_zero(raw.get("fills_with_command_intent_limit_price")),
+        "fills_with_command_intent_reference_price": int_or_zero(
+            raw.get("fills_with_command_intent_reference_price")
+        ),
+        "fills_with_slippage_reference_price": int_or_zero(raw.get("fills_with_slippage_reference_price")),
         "fee": {
             "sample_count": fee_samples,
             "min_bps": decimal_text(raw.get("fee_bps_min")),
@@ -2082,11 +2197,18 @@ def summarize_slippage_cost_calibration_truth(
         },
         "slippage_proxy": {
             "sample_count": slippage_samples,
-            "reference": "order_limit_price",
+            "reference": "coalesced_order_or_command_reference_price",
             "min_bps": decimal_text(raw.get("slippage_proxy_min")),
             "mean_bps": decimal_text(raw.get("slippage_proxy_mean")),
             "p95_bps": decimal_text(raw.get("slippage_proxy_p95")),
             "max_bps": decimal_text(raw.get("slippage_proxy_max")),
+            "by_reference_source": [
+                {
+                    "reference_source": item.get("reference_source"),
+                    "row_count": int_or_zero(item.get("n")),
+                }
+                for item in [as_dict(row) for row in as_list(raw.get("by_reference_source"))]
+            ],
         },
         "market_context": {
             "silver_orderbook_status": silver_orderbook.get("status"),
