@@ -397,6 +397,39 @@ def test_no_trade_attribution_separates_soft_contraction_from_final_blockers() -
     assert drilldown["execution"]["permission_mode"] == "unsupported"
     assert drilldown["permission"]["candidate_execution_compatible"] is False
     assert drilldown["permission"]["reason_codes"] == ["candidate_execution_incompatible"]
+    assert drilldown["permission_root_cause"] == {
+        "primary": "candidate_execution_incompatible",
+        "classification": "permission_denied_by_candidate_execution_compatibility",
+        "blocking_evidence": [
+            "permission_mode=unsupported",
+            "approved_for_execution=false",
+            "candidate_execution_compatible=false",
+            "execution_prerequisites_supported=false",
+            "execution_compatible=false",
+            "reason_code=candidate_execution_incompatible",
+        ],
+        "upstream_reason_codes": [
+            "independent_long_book_signal_below_entry_threshold",
+            "independent_short_book_signal_below_entry_threshold",
+            "independent_family_candidate_inactive",
+        ],
+        "positive_context": [
+            "candidate_enabled=true",
+            "configured_auto_execution_enabled=true",
+            "runtime_supported=true",
+            "state_runtime_supported=true",
+        ],
+        "composition_effect": [
+            "route_action=advisory_only",
+            "execution_behavior=advisory_only",
+            "execution_control_mode=permission_denied",
+            "reason_code=composed_as_advisory_only",
+        ],
+        "summary": (
+            "候选已启用且运行时支持，但执行兼容性或执行前置条件未满足；"
+            "因此权限模式为 unsupported，组合层只能输出 advisory_only。"
+        ),
+    }
     assert drilldown["composition"]["reason_codes"] == ["composed_as_advisory_only"]
     assert drilldown["budget"]["effective_scale"] == "0.5"
     assert drilldown["budget"]["reason_codes"] == ["reconciliation_contraction_active"]
@@ -413,6 +446,25 @@ def test_no_trade_attribution_separates_soft_contraction_from_final_blockers() -
     assert drilldown["book_runtime_states"][0]["reason_codes"] == [
         "independent_long_book_signal_below_entry_threshold"
     ]
+
+
+def test_permission_root_cause_missing_evidence_degrades_safely() -> None:
+    mod = load_module()
+
+    assert mod.summarize_permission_root_cause(
+        permission={},
+        execution={},
+        composition={},
+        candidate_reason_codes=[],
+    ) == {
+        "primary": None,
+        "classification": "insufficient_evidence",
+        "blocking_evidence": [],
+        "upstream_reason_codes": [],
+        "positive_context": [],
+        "composition_effect": [],
+        "summary": None,
+    }
 
 
 def test_blocking_findings_separate_report_generation_from_runtime_state() -> None:

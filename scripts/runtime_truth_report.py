@@ -435,6 +435,119 @@ def summarize_composition_trace(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def boolean_evidence(label: str, value: Any) -> str | None:
+    if value is True:
+        return f"{label}=true"
+    if value is False:
+        return f"{label}=false"
+    return None
+
+
+def summarize_permission_root_cause(
+    *,
+    permission: dict[str, Any],
+    execution: dict[str, Any],
+    composition: dict[str, Any],
+    candidate_reason_codes: list[str],
+) -> dict[str, Any]:
+    permission_reasons = compact_unique(as_list(permission.get("reason_codes")), limit=8)
+    composition_reasons = compact_unique(as_list(composition.get("reason_codes")), limit=8)
+    all_reasons = compact_unique(
+        candidate_reason_codes + permission_reasons + composition_reasons,
+        limit=16,
+    )
+
+    blocking_evidence: list[str] = []
+    permission_mode = first_present(permission.get("permission_mode"), execution.get("permission_mode"))
+    if permission_mode == "unsupported":
+        blocking_evidence.append("permission_mode=unsupported")
+    for label, value in (
+        ("approved_for_execution", first_present(permission.get("approved_for_execution"), execution.get("approved_for_execution"))),
+        ("candidate_execution_compatible", permission.get("candidate_execution_compatible")),
+        (
+            "execution_prerequisites_supported",
+            first_present(
+                permission.get("execution_prerequisites_supported"),
+                execution.get("execution_prerequisites_supported"),
+            ),
+        ),
+        ("execution_compatible", execution.get("execution_compatible")),
+    ):
+        evidence = boolean_evidence(label, value)
+        if evidence and evidence.endswith("=false"):
+            blocking_evidence.append(evidence)
+    blocking_evidence.extend(f"reason_code={code}" for code in permission_reasons)
+
+    positive_context: list[str] = []
+    for label, value in (
+        ("candidate_enabled", permission.get("candidate_enabled")),
+        ("configured_auto_execution_enabled", permission.get("configured_auto_execution_enabled")),
+        ("runtime_supported", permission.get("runtime_supported")),
+        ("state_runtime_supported", permission.get("state_runtime_supported")),
+    ):
+        evidence = boolean_evidence(label, value)
+        if evidence and evidence.endswith("=true"):
+            positive_context.append(evidence)
+
+    composition_effect: list[str] = []
+    for label in ("route_action", "execution_behavior", "execution_control_mode"):
+        value = composition.get(label)
+        if value:
+            composition_effect.append(f"{label}={value}")
+    composition_effect.extend(f"reason_code={code}" for code in composition_reasons)
+
+    upstream_reason_codes = compact_unique(
+        [
+            code
+            for code in all_reasons
+            if code not in permission_reasons
+            and code not in composition_reasons
+            and (
+                "candidate_inactive" in code
+                or "signal_below_entry_threshold" in code
+                or "family_candidate_inactive" in code
+            )
+        ],
+        limit=8,
+    )
+
+    if "candidate_execution_incompatible" in permission_reasons:
+        primary = "candidate_execution_incompatible"
+        classification = "permission_denied_by_candidate_execution_compatibility"
+    elif first_present(
+        permission.get("execution_prerequisites_supported"),
+        execution.get("execution_prerequisites_supported"),
+    ) is False:
+        primary = "execution_prerequisites_unsupported"
+        classification = "permission_denied_by_execution_prerequisites"
+    elif permission_mode == "unsupported":
+        primary = "permission_mode_unsupported"
+        classification = "permission_mode_unsupported"
+    elif composition.get("execution_control_mode") == "permission_denied":
+        primary = "composition_permission_denied"
+        classification = "composition_denied_execution"
+    else:
+        primary = None
+        classification = "insufficient_evidence"
+
+    summary = None
+    if primary:
+        summary = (
+            "候选已启用且运行时支持，但执行兼容性或执行前置条件未满足；"
+            "因此权限模式为 unsupported，组合层只能输出 advisory_only。"
+        )
+
+    return {
+        "primary": primary,
+        "classification": classification,
+        "blocking_evidence": compact_unique(blocking_evidence, limit=12),
+        "upstream_reason_codes": upstream_reason_codes,
+        "positive_context": compact_unique(positive_context, limit=8),
+        "composition_effect": compact_unique(composition_effect, limit=8),
+        "summary": summary,
+    }
+
+
 def summarize_budget_trace(item: dict[str, Any]) -> dict[str, Any]:
     budget = as_dict(nested_control_trace(item).get("budget"))
     return {
@@ -542,6 +655,20 @@ def summarize_candidate_execution_drilldown(
             reason_codes=reason_codes,
         ):
             continue
+        execution_summary = {
+            "approved_for_execution": item_dict.get("approved_for_execution"),
+            "execution_compatible": item_dict.get("execution_compatible"),
+            "execution_prerequisites_supported": item_dict.get("execution_prerequisites_supported"),
+            "execution_behavior": item_dict.get("execution_behavior"),
+            "execution_control_mode": item_dict.get("execution_control_mode"),
+            "execution_mode": item_dict.get("execution_mode"),
+            "permission_mode": item_dict.get("permission_mode"),
+            "automatic_enabled": item_dict.get("automatic_enabled"),
+            "selectable": item_dict.get("selectable"),
+            "legs_count": len(as_list(item_dict.get("legs"))),
+        }
+        permission_summary = summarize_permission_trace(item_dict)
+        composition_summary = summarize_composition_trace(item_dict)
         summaries.append(
             {
                 "family": family,
@@ -554,20 +681,15 @@ def summarize_candidate_execution_drilldown(
                     item_dict.get("target_notional") or item_dict.get("target_exposure_notional"),
                 ),
                 "reason_codes": reason_codes,
-                "execution": {
-                    "approved_for_execution": item_dict.get("approved_for_execution"),
-                    "execution_compatible": item_dict.get("execution_compatible"),
-                    "execution_prerequisites_supported": item_dict.get("execution_prerequisites_supported"),
-                    "execution_behavior": item_dict.get("execution_behavior"),
-                    "execution_control_mode": item_dict.get("execution_control_mode"),
-                    "execution_mode": item_dict.get("execution_mode"),
-                    "permission_mode": item_dict.get("permission_mode"),
-                    "automatic_enabled": item_dict.get("automatic_enabled"),
-                    "selectable": item_dict.get("selectable"),
-                    "legs_count": len(as_list(item_dict.get("legs"))),
-                },
-                "permission": summarize_permission_trace(item_dict),
-                "composition": summarize_composition_trace(item_dict),
+                "execution": execution_summary,
+                "permission": permission_summary,
+                "permission_root_cause": summarize_permission_root_cause(
+                    permission=permission_summary,
+                    execution=execution_summary,
+                    composition=composition_summary,
+                    candidate_reason_codes=reason_codes,
+                ),
+                "composition": composition_summary,
                 "budget": summarize_budget_trace(item_dict),
                 "book_runtime_states": summarize_book_runtime_states(item_dict),
             },
