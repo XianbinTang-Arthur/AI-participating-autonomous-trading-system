@@ -221,6 +221,7 @@ def resolve_orderbook_snapshot_ref_row(
             "checksum_version": _ORDERBOOK_CHECKSUM_VERSION,
             "sequence_key": None,
             "top_of_book": None,
+            "depth_ladder": None,
             "payload_evidence": _orderbook_payload_evidence_missing(
                 status="not_checked",
                 missing_evidence=("orderbook_row_truth_missing",),
@@ -317,6 +318,7 @@ def resolve_orderbook_snapshot_ref_row(
                 "content_checksum": content_checksum,
             },
             "top_of_book": _orderbook_top_of_book(str(payload["table_name"]), normalized_row),
+            "depth_ladder": _orderbook_depth_ladder(str(payload["table_name"]), normalized_row),
             "payload_evidence": payload_evidence,
             "missing_evidence": [],
         }
@@ -733,6 +735,80 @@ def _orderbook_top_of_book(table_name: str, row: Mapping[str, Any]) -> dict[str,
         "mid_px": _decimal_payload_value(mid_px),
         "spread_px": _decimal_payload_value(spread_px),
         "spread_bps": _decimal_payload_value(spread_bps),
+    }
+
+
+def _orderbook_depth_ladder(table_name: str, row: Mapping[str, Any]) -> dict[str, Any] | None:
+    if table_name == "bronze.market_orderbook_books5":
+        max_level = 5
+        bids = [
+            _orderbook_depth_level(
+                level=level,
+                price=row.get(f"bid_px_{level}"),
+                size=row.get(f"bid_sz_{level}"),
+            )
+            for level in range(1, max_level + 1)
+        ]
+        asks = [
+            _orderbook_depth_level(
+                level=level,
+                price=row.get(f"ask_px_{level}"),
+                size=row.get(f"ask_sz_{level}"),
+            )
+            for level in range(1, max_level + 1)
+        ]
+        source = "books5_projection_from_persisted_row"
+    elif table_name == "bronze.market_orderbook_bbo":
+        max_level = 1
+        bids = [
+            _orderbook_depth_level(
+                level=1,
+                price=row.get("bid_px"),
+                size=row.get("bid_sz"),
+            )
+        ]
+        asks = [
+            _orderbook_depth_level(
+                level=1,
+                price=row.get("ask_px"),
+                size=row.get("ask_sz"),
+            )
+        ]
+        source = "bbo_projection_from_persisted_row"
+    else:
+        return None
+
+    return {
+        "source": source,
+        "max_depth_levels": max_level,
+        "bids": [level for level in bids if level is not None],
+        "asks": [level for level in asks if level is not None],
+    }
+
+
+def _orderbook_depth_level(
+    *,
+    level: int,
+    price: Any,
+    size: Any,
+) -> dict[str, Any] | None:
+    price_text = _decimal_payload_value(price)
+    size_text = _decimal_payload_value(size)
+    price_decimal = _to_decimal(price)
+    size_decimal = _to_decimal(size)
+    if (
+        price_text is None
+        or size_text is None
+        or price_decimal is None
+        or size_decimal is None
+        or price_decimal <= Decimal("0")
+        or size_decimal <= Decimal("0")
+    ):
+        return None
+    return {
+        "level": level,
+        "price": price_text,
+        "size": size_text,
     }
 
 

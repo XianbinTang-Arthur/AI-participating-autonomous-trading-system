@@ -3467,6 +3467,127 @@ class OperatorQueryService:
             "_size_decimal": quote_size,
         }
 
+    def _side_depth_book_projection(
+        self,
+        *,
+        row_payload: dict[str, Any],
+        side: str | None,
+        fill_qty: Decimal | None,
+    ) -> dict[str, Any]:
+        quote_side = "ask" if side == "buy" else "bid" if side == "sell" else None
+        base = {
+            "side": side,
+            "quote_side": quote_side,
+            "source": None,
+            "max_depth_levels": None,
+            "levels_available": 0,
+            "depth_levels_used": 0,
+            "available_qty": None,
+            "feasible_qty": None,
+            "unfilled_qty": None,
+            "weighted_average_price": None,
+            "depth_size_covers_fill": None,
+            "levels": [],
+            "missing_evidence": [],
+            "_weighted_average_price_decimal": None,
+        }
+        missing: list[str] = []
+        if side not in {"buy", "sell"}:
+            missing.append("unsupported_or_missing_fill_side")
+        if fill_qty is None:
+            missing.append("fill_qty_missing")
+
+        payload_evidence = row_payload.get("payload_evidence") if isinstance(row_payload, dict) else None
+        payload_evidence = payload_evidence if isinstance(payload_evidence, dict) else {}
+        if not (payload_evidence.get("complete") is True and payload_evidence.get("payload_hash")):
+            evidence_missing = payload_evidence.get("missing_evidence")
+            if isinstance(evidence_missing, list) and evidence_missing:
+                missing.extend(f"depth_{item}" for item in evidence_missing)
+            else:
+                missing.append("orderbook_payload_evidence_missing_for_depth")
+
+        ladder = row_payload.get("depth_ladder") if isinstance(row_payload, dict) else None
+        ladder = ladder if isinstance(ladder, dict) else {}
+        side_key = "asks" if side == "buy" else "bids" if side == "sell" else None
+        raw_levels = ladder.get(side_key) if side_key else None
+        if not isinstance(raw_levels, list):
+            missing.append("orderbook_depth_ladder_missing")
+            raw_levels = []
+
+        levels: list[dict[str, Any]] = []
+        for raw_level in raw_levels:
+            if not isinstance(raw_level, dict):
+                continue
+            price = self._to_decimal(raw_level.get("price"))
+            size = self._to_decimal(raw_level.get("size"))
+            if price is None or size is None or price <= Decimal("0") or size <= Decimal("0"):
+                continue
+            levels.append(
+                {
+                    "level": raw_level.get("level"),
+                    "price": self._decimal_truth_value(price),
+                    "size": self._decimal_truth_value(size),
+                    "_price_decimal": price,
+                    "_size_decimal": size,
+                }
+            )
+
+        if not levels:
+            missing.append("orderbook_depth_ladder_side_empty")
+        if missing:
+            return {
+                **base,
+                "source": ladder.get("source"),
+                "max_depth_levels": ladder.get("max_depth_levels"),
+                "levels_available": len(levels),
+                "levels": [{key: value for key, value in level.items() if not key.startswith("_")} for level in levels],
+                "missing_evidence": list(dict.fromkeys(missing)),
+            }
+
+        assert fill_qty is not None
+        remaining_qty = fill_qty
+        feasible_qty = Decimal("0")
+        notional = Decimal("0")
+        consumed_levels: list[dict[str, Any]] = []
+        for level in levels:
+            if remaining_qty <= Decimal("0"):
+                break
+            level_size = level["_size_decimal"]
+            level_price = level["_price_decimal"]
+            take_qty = min(level_size, remaining_qty)
+            if take_qty <= Decimal("0"):
+                continue
+            feasible_qty += take_qty
+            notional += take_qty * level_price
+            remaining_qty -= take_qty
+            consumed_levels.append(
+                {
+                    "level": level.get("level"),
+                    "price": level["price"],
+                    "available_size": level["size"],
+                    "used_size": self._decimal_truth_value(take_qty),
+                }
+            )
+
+        available_qty = sum((level["_size_decimal"] for level in levels), Decimal("0"))
+        weighted_average_price = notional / feasible_qty if feasible_qty > Decimal("0") else None
+        depth_size_covers_fill = feasible_qty >= fill_qty
+        return {
+            **base,
+            "source": ladder.get("source"),
+            "max_depth_levels": ladder.get("max_depth_levels"),
+            "levels_available": len(levels),
+            "depth_levels_used": len(consumed_levels),
+            "available_qty": self._decimal_truth_value(available_qty),
+            "feasible_qty": self._decimal_truth_value(feasible_qty),
+            "unfilled_qty": self._decimal_truth_value(max(fill_qty - feasible_qty, Decimal("0"))),
+            "weighted_average_price": self._decimal_truth_value(weighted_average_price),
+            "depth_size_covers_fill": depth_size_covers_fill,
+            "levels": consumed_levels,
+            "missing_evidence": [],
+            "_weighted_average_price_decimal": weighted_average_price,
+        }
+
     def _fill_feasibility_for_fill(
         self,
         *,
@@ -3495,6 +3616,7 @@ class OperatorQueryService:
             missing_evidence.append("unsupported_or_missing_fill_side")
         pre_quote = self._side_top_of_book_quote(row_payload=pre_row, side=side)
         post_quote = self._side_top_of_book_quote(row_payload=post_row, side=side)
+        pre_depth = self._side_depth_book_projection(row_payload=pre_row, side=side, fill_qty=fill_qty)
         expected_price = self._to_decimal(pre_quote.get("price"))
         if expected_price is None:
             missing_evidence.append("pre_event_top_of_book_price_missing")
@@ -3508,6 +3630,8 @@ class OperatorQueryService:
         if isinstance(pre_quote_size, Decimal) and fill_qty is not None:
             top_size_covers_fill = pre_quote_size >= fill_qty
 
+        depth_size_covers_fill = pre_depth.get("depth_size_covers_fill")
+        depth_expected_price = pre_depth.get("_weighted_average_price_decimal")
         adverse_slippage_bps = None
         adverse_price_delta = None
         estimated_adverse_cost_quote = None
@@ -3521,6 +3645,27 @@ class OperatorQueryService:
             if fill_notional is not None:
                 estimated_adverse_cost_quote = fill_notional * adverse_slippage_bps / Decimal("10000")
 
+        depth_adverse_slippage_bps = None
+        depth_adverse_price_delta = None
+        estimated_depth_adverse_cost_quote = None
+        if (
+            fill_price is not None
+            and isinstance(depth_expected_price, Decimal)
+            and depth_expected_price != Decimal("0")
+        ):
+            depth_adverse_price_delta = (
+                fill_price - depth_expected_price
+                if side == "buy"
+                else depth_expected_price - fill_price
+            )
+            depth_adverse_slippage_bps = (
+                depth_adverse_price_delta / depth_expected_price
+            ) * Decimal("10000")
+            if fill_notional is not None:
+                estimated_depth_adverse_cost_quote = (
+                    fill_notional * depth_adverse_slippage_bps / Decimal("10000")
+                )
+
         post_adverse_slippage_bps = None
         post_expected_price = self._to_decimal(post_quote.get("price"))
         if fill_price is not None and post_expected_price is not None and post_expected_price != Decimal("0"):
@@ -3531,6 +3676,10 @@ class OperatorQueryService:
             status = "missing_required_fill_or_book_facts"
         elif top_size_covers_fill is True:
             status = "top_of_book_size_covers_fill"
+        elif depth_size_covers_fill is True:
+            status = "depth_book_size_covers_fill"
+        elif depth_size_covers_fill is False:
+            status = "depth_book_size_insufficient"
         else:
             status = "top_of_book_size_insufficient_or_unknown_depth"
 
@@ -3548,8 +3697,22 @@ class OperatorQueryService:
             "expected_price": self._decimal_truth_value(expected_price),
             "post_event_expected_price": self._decimal_truth_value(post_expected_price),
             "top_level_size_covers_fill": top_size_covers_fill,
+            "depth_expected_price_source": (
+                "pre_event_books5_depth_weighted_average"
+                if isinstance(depth_expected_price, Decimal)
+                else "missing_depth_weighted_average_price"
+            ),
+            "depth_expected_price": self._decimal_truth_value(depth_expected_price),
+            "depth_size_covers_fill": depth_size_covers_fill,
+            "depth_levels_used": pre_depth.get("depth_levels_used"),
+            "depth_available_qty": pre_depth.get("available_qty"),
+            "depth_feasible_qty": pre_depth.get("feasible_qty"),
+            "depth_unfilled_qty": pre_depth.get("unfilled_qty"),
+            "depth_weighted_average_price": pre_depth.get("weighted_average_price"),
+            "depth_missing_evidence": pre_depth.get("missing_evidence", []),
             "pre_event_quote": {key: value for key, value in pre_quote.items() if not key.startswith("_")},
             "post_event_quote": {key: value for key, value in post_quote.items() if not key.startswith("_")},
+            "pre_event_depth": {key: value for key, value in pre_depth.items() if not key.startswith("_")},
             "adverse_price_delta": self._decimal_truth_value(adverse_price_delta),
             "adverse_slippage_bps": self._decimal_truth_value(adverse_slippage_bps),
             "post_event_adverse_slippage_bps": self._decimal_truth_value(post_adverse_slippage_bps),
@@ -3558,6 +3721,16 @@ class OperatorQueryService:
                 "fill_notional_x_pre_event_adverse_slippage_bps"
                 if estimated_adverse_cost_quote is not None
                 else "missing_fill_notional_or_slippage_basis"
+            ),
+            "depth_adverse_price_delta": self._decimal_truth_value(depth_adverse_price_delta),
+            "depth_adverse_slippage_bps": self._decimal_truth_value(depth_adverse_slippage_bps),
+            "estimated_depth_adverse_cost_quote": self._decimal_truth_value(
+                estimated_depth_adverse_cost_quote
+            ),
+            "estimated_depth_adverse_cost_source": (
+                "fill_notional_x_pre_event_depth_adverse_slippage_bps"
+                if estimated_depth_adverse_cost_quote is not None
+                else "missing_fill_notional_or_depth_slippage_basis"
             ),
         }
 
@@ -3635,11 +3808,22 @@ class OperatorQueryService:
                     )
                     for fill in fills_for_stage[:10]
                 ]
-                if any(fill.get("status") == "top_of_book_size_covers_fill" for fill in fill_evidence):
+                if any(
+                    fill.get("status")
+                    in {
+                        "top_of_book_size_covers_fill",
+                        "depth_book_size_covers_fill",
+                    }
+                    for fill in fill_evidence
+                ):
                     status = "fill_feasibility_observed"
                     feasible_stage_count += 1
                 elif any(
-                    fill.get("status") == "top_of_book_size_insufficient_or_unknown_depth"
+                    fill.get("status")
+                    in {
+                        "top_of_book_size_insufficient_or_unknown_depth",
+                        "depth_book_size_insufficient",
+                    }
                     for fill in fill_evidence
                 ):
                     status = "fill_requires_depth_or_maker_context"
@@ -3649,6 +3833,10 @@ class OperatorQueryService:
                     missing_evidence_stage_count += 1
                 for fill in fill_evidence:
                     stage_missing.extend(str(value) for value in fill.get("missing_evidence", []))
+                    if fill.get("status") == "top_of_book_size_insufficient_or_unknown_depth":
+                        stage_missing.extend(
+                            str(value) for value in fill.get("depth_missing_evidence", [])
+                        )
 
             aggregate_missing.extend(stage_missing)
             stage_evidence.append(

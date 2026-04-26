@@ -476,6 +476,13 @@ def test_decision_truth_chain_projects_orderbook_payload_sidecar_without_raw_pay
     assert stage["pre"]["payload_evidence"]["channel"] == "books5"
     assert stage["pre"]["payload_evidence"]["raw_payload_exposed"] is False
     assert "raw_payload" not in stage["pre"]["payload_evidence"]
+    assert stage["pre"]["depth_ladder"]["source"] == "books5_projection_from_persisted_row"
+    assert len(stage["pre"]["depth_ladder"]["asks"]) == 5
+    assert stage["pre"]["depth_ladder"]["asks"][0] == {
+        "level": 1,
+        "price": "77000.2",
+        "size": "0.2",
+    }
 
 
 def test_decision_truth_chain_reports_fill_feasibility_from_resolved_book_rows() -> None:
@@ -662,6 +669,102 @@ def test_decision_truth_chain_fill_feasibility_reports_depth_limited_fill() -> N
     fill = feasibility["stage_evidence"][0]["fill_evidence"][0]
     assert fill["status"] == "top_of_book_size_insufficient_or_unknown_depth"
     assert fill["top_level_size_covers_fill"] is False
+    assert "depth_orderbook_payload_sidecar_missing" in fill["depth_missing_evidence"]
+
+
+def test_decision_truth_chain_fill_feasibility_uses_books5_depth_when_sidecar_present() -> None:
+    pre_ts = datetime(2026, 4, 25, 3, 48, 30, tzinfo=timezone.utc)
+    post_ts = datetime(2026, 4, 25, 3, 48, 31, tzinfo=timezone.utc)
+    pre_row = _books5_row(ts=pre_ts)
+    post_row = _books5_row(ts=post_ts)
+    query = _service(
+        orderbook_rows=[
+            pre_row,
+            post_row,
+        ],
+        orderbook_payload_rows=[
+            _payload_sidecar_row(row=pre_row, collector_sequence=11),
+            _payload_sidecar_row(row=post_row, collector_sequence=12),
+        ],
+        order_states=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "status": "FILLED",
+                "lifecycle_snapshot_refs": {
+                    "submit": {
+                        "market_snapshot_ref": "mkt-1",
+                        "feature_snapshot_ref": "feat-1",
+                        "portfolio_snapshot_ref": "port-1",
+                        "health_snapshot_ref": "health-1",
+                        "market_context_snapshot_refs": {
+                            "pre_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:30.000000Z"
+                            ),
+                            "post_event_orderbook_snapshot_ref": (
+                                "bronze.market_orderbook_books5:BTC-USDT-SWAP:2026-04-25T03:48:31.000000Z"
+                            ),
+                        },
+                    }
+                },
+            }
+        ],
+        fills=[
+            {
+                "decision_id": "decision-1",
+                "symbol": "BTC-USDT-SWAP",
+                "product_type": "derivatives",
+                "margin_mode": "cross",
+                "client_order_id": "order-1",
+                "fill_id": "fill-1",
+                "side": "buy",
+                "fill_price": Decimal("77000.3"),
+                "fill_qty": Decimal("0.30"),
+                "fill_notional": Decimal("23100.09"),
+            }
+        ],
+    )
+
+    payload = query._decision_truth_chain_payload(
+        decision_id="decision-1",
+        audit=_audit(order_intent_refs=["intent-1"]),
+        order_updates=[],
+        fills=[],
+    )
+
+    feasibility = payload["execution_science"]["fill_feasibility"]
+    assert feasibility["status"] == "local_book_fill_feasibility_observed"
+    assert feasibility["feasible_stage_count"] == 1
+    assert feasibility["depth_limited_stage_count"] == 0
+    fill = feasibility["stage_evidence"][0]["fill_evidence"][0]
+    assert fill["status"] == "depth_book_size_covers_fill"
+    assert fill["top_level_size_covers_fill"] is False
+    assert fill["depth_size_covers_fill"] is True
+    assert fill["depth_levels_used"] == 2
+    assert fill["depth_available_qty"] == "1.1"
+    assert fill["depth_feasible_qty"] == "0.3"
+    assert fill["depth_unfilled_qty"] == "0"
+    assert fill["depth_weighted_average_price"] is not None
+    assert fill["depth_expected_price_source"] == "pre_event_books5_depth_weighted_average"
+    assert fill["depth_missing_evidence"] == []
+    assert fill["pre_event_depth"]["levels"][0] == {
+        "level": 1,
+        "price": "77000.2",
+        "available_size": "0.2",
+        "used_size": "0.2",
+    }
+    assert fill["pre_event_depth"]["levels"][1] == {
+        "level": 2,
+        "price": "77000.3",
+        "available_size": "0.21",
+        "used_size": "0.1",
+    }
+    assert fill["estimated_depth_adverse_cost_source"] == (
+        "fill_notional_x_pre_event_depth_adverse_slippage_bps"
+    )
 
 
 def test_decision_truth_chain_fill_feasibility_keeps_missing_row_evidence_explicit() -> None:
