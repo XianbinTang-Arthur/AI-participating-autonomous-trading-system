@@ -1249,7 +1249,10 @@ class TestConvergedRepoLifecycleSnapshotRefs(unittest.TestCase):
         self.assertEqual(ack_market_context["post_event_orderbook_snapshot_ref"], "book_after_ack")
         self.assertEqual(ack_market_context["capture_status"], "captured")
         self.assertEqual(payload["market_snapshot_ref"], "mkt_snap_ack")
+        self.assertEqual(payload["status"], "SUBMITTED")
+        self.assertEqual(payload["exchange_order_id"], "ord_snapref_ack")
         self.assertEqual(payload["order_state"]["market_snapshot_ref"], "mkt_snap_ack")
+        self.assertEqual(payload["order_state"]["status"], "SUBMITTED")
 
 
 class TestConvergedRepoSyntheticRefreshPreservesRefs(unittest.TestCase):

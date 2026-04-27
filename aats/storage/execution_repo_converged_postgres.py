@@ -102,7 +102,11 @@ class ConvergedPostgresExecutionRepository(ExecutionRepository):
         raw_payload = {
             **existing_payload,
             "client_order_id": merged.client_order_id,
+            "status": merged.status,
+            "exchange_order_id": merged.exchange_order_id,
             "venue_order_id": merged.exchange_order_id,
+            "submitted_ts": merged.submitted_ts,
+            "last_update_ts": merged.last_update_ts,
             "source_system": existing_payload.get("source_system") or merged.submission_mode or "converged_execution_repo",
             **top_level_snapshot_ref_payload(snapshot_refs),
             **lifecycle_snapshot_ref_payload(

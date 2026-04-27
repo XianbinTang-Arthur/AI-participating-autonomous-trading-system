@@ -311,6 +311,9 @@ class TestTask58ConvergedExecutionTruth(unittest.IsolatedAsyncioTestCase):
                         stored_fill = session.get(ExecutionFillModelV2, "fill_task58_repo")
                         self.assertIsNotNone(stored_order)
                         self.assertIsNotNone(stored_fill)
+                        self.assertEqual(stored_order.raw_payload["status"], "SUBMITTED")
+                        self.assertEqual(stored_order.raw_payload["exchange_order_id"], state.exchange_order_id)
+                        self.assertEqual(stored_order.raw_payload["order_state"]["status"], "SUBMITTED")
                         self.assertEqual(stored_order.td_mode, "cross")
                         self.assertEqual(stored_order.position_mode, "long_short_mode")
                         self.assertEqual(stored_order.pos_side, "long")
@@ -321,6 +324,50 @@ class TestTask58ConvergedExecutionTruth(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(session.scalar(select(func.count()).select_from(ExecutionFillModelV2)), 1)
                         self.assertEqual(session.scalar(select(func.count()).select_from(OrderStateModel)), 0)
                         self.assertEqual(session.scalar(select(func.count()).select_from(FillEventModel)), 0)
+        except SAOperationalError:
+            self.skipTest("Postgres 不可达")
+
+    def test_converged_repo_syncs_top_level_payload_status_on_terminal_update(self) -> None:
+        try:
+            with temporary_postgres_runtime() as (runtime, _admin_engine, _schema_name):
+                    repo = ConvergedPostgresExecutionRepository(
+                        runtime.session_factory,
+                        execution_order_repo=PostgresExecutionOrderRepository(runtime.session_factory),
+                        execution_order_history_repo=PostgresExecutionOrderHistoryRepository(runtime.session_factory),
+                        execution_fill_repo=PostgresExecutionFillRepositoryV2(runtime.session_factory),
+                    )
+
+                    initial = _order_state(client_order_id="cl_task58_terminal_sync", status="SUBMITTING").model_copy(
+                        update={
+                            "exchange_order_id": None,
+                            "filled_qty": Decimal("0"),
+                            "remaining_qty": Decimal("0.010000000000000000"),
+                            "average_fill_price": None,
+                        }
+                    )
+                    repo.save_order_state(initial)
+
+                    terminal = initial.model_copy(
+                        update={
+                            "status": "FILLED",
+                            "exchange_order_id": "ord_cl_task58_terminal_sync",
+                            "filled_qty": Decimal("0.010000000000000000"),
+                            "remaining_qty": Decimal("0"),
+                            "average_fill_price": Decimal("100.000000000000000000"),
+                        }
+                    )
+                    repo.save_order_state(terminal)
+
+                    with runtime.session_factory() as session:
+                        stored_order = session.get(ExecutionOrderModel, terminal.client_order_id)
+                        self.assertIsNotNone(stored_order)
+                        assert stored_order is not None
+                        self.assertEqual(stored_order.state, "FILLED")
+                        self.assertEqual(stored_order.venue_order_id, terminal.exchange_order_id)
+                        self.assertEqual(stored_order.raw_payload["status"], "FILLED")
+                        self.assertEqual(stored_order.raw_payload["exchange_order_id"], terminal.exchange_order_id)
+                        self.assertEqual(stored_order.raw_payload["venue_order_id"], terminal.exchange_order_id)
+                        self.assertEqual(stored_order.raw_payload["order_state"]["status"], "FILLED")
         except SAOperationalError:
             self.skipTest("Postgres 不可达")
 
