@@ -698,6 +698,7 @@ class TestPersistentStatusBlockersMembership(unittest.TestCase):
         expected_core = {
             "pending_execution_commands",
             "stuck_sent_submit_commands",
+            "claimed_submit_commands_require_exchange_reconciliation",
             "account_snapshot_refresh_failed",
             "strategy_bundle_recovery_in_progress",
             "strategy_bundle_recovery_requires_review",

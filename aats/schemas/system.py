@@ -251,6 +251,7 @@ class RecoveryStatus(SchemaBase):
     sent_stale_submit_command_count: int = 0
     sent_stale_cancel_command_count: int = 0
     stuck_sent_submit_order_count: int = 0
+    claimed_submit_command_count: int = 0
     divergence_count: int = 0
     safe_startup: bool = True
     safe_to_trade: bool = False

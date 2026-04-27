@@ -253,13 +253,9 @@ class TestPhase4RecoveryReconciliationRuntime(unittest.IsolatedAsyncioTestCase):
             )
             command = runtime.execution_command_repo.get_by_idempotency_key("submit:clphase4_stuck_sent_submit")
             assert command is not None
-            self.assertTrue(
-                runtime.execution_command_repo.claim_command(
-                    command_id=str(command["command_id"]),
-                    expected_state=str(command["state"]),
-                    expected_updated_at=command["updated_at"],
-                    updated_at=utc_now(),
-                )
+            runtime.execution_command_repo.mark_sent_to_venue(
+                str(command["command_id"]),
+                updated_at=utc_now(),
             )
 
             recovered_runtime = await build_runtime(settings, bootstrap_portfolio_snapshot=False)

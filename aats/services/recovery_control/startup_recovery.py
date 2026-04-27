@@ -336,6 +336,7 @@ class ExecutionLedgerRecoveryService:
         sent_stale_cancel_command_count = 0
         stranded_submit_order_count = 0
         stuck_sent_submit_order_count = 0
+        claimed_submit_command_count = 0
         if self.execution_order_repo is not None:
             count_orders = getattr(self.execution_order_repo, "count_orders", None)
             open_orders = getattr(self.execution_order_repo, "open_orders", None)
@@ -344,7 +345,11 @@ class ExecutionLedgerRecoveryService:
             if callable(open_orders):
                 scoped_open_orders = list(open_orders())
                 open_order_count = max(open_order_count, len(scoped_open_orders))
-                stranded_submit_order_count, stuck_sent_submit_order_count = self._submit_command_order_recovery_counts(
+                (
+                    stranded_submit_order_count,
+                    stuck_sent_submit_order_count,
+                    claimed_submit_command_count,
+                ) = self._submit_command_order_recovery_counts(
                     scoped_open_orders
                 )
         if self.execution_command_repo is not None:
@@ -460,9 +465,25 @@ class ExecutionLedgerRecoveryService:
         if sent_stale_cancel_command_count:
             notes.append(f"sent_stale_cancel_commands:{sent_stale_cancel_command_count}")
 
+        if claimed_submit_command_count:
+            pending_command_count = max(pending_command_count - claimed_submit_command_count, 0)
+            pending_submit_command_count = max(pending_submit_command_count - claimed_submit_command_count, 0)
+            _halt_and_block(
+                "phase4_claimed_submit_commands_require_exchange_reconciliation",
+                "claimed_submit_commands_require_exchange_reconciliation",
+            )
+            if recovery_action != "halted_stuck_sent_submit_commands":
+                recovery_action = "halted_claimed_submit_commands_require_exchange_reconciliation"
+            notes.append(
+                f"claimed_submit_commands_require_exchange_reconciliation:{claimed_submit_command_count}"
+            )
+
         if pending_command_count:
             _halt_and_block("phase4_pending_execution_commands", "pending_execution_commands")
-            if recovery_action != "halted_stuck_sent_submit_commands":
+            if recovery_action not in {
+                "halted_stuck_sent_submit_commands",
+                "halted_claimed_submit_commands_require_exchange_reconciliation",
+            }:
                 recovery_action = "halted_pending_execution_commands"
             notes.append(f"pending_execution_commands:{pending_command_count}")
 
@@ -489,6 +510,7 @@ class ExecutionLedgerRecoveryService:
                 "sent_stale_submit_command_count": sent_stale_submit_command_count,
                 "sent_stale_cancel_command_count": sent_stale_cancel_command_count,
                 "stuck_sent_submit_order_count": stuck_sent_submit_order_count,
+                "claimed_submit_command_count": claimed_submit_command_count,
                 "recovered_snapshot_available": latest_snapshot is not None,
                 "latest_reconciliation_id": latest_reconciliation.reconciliation_id if latest_reconciliation is not None else base_status.latest_reconciliation_id,
                 "latest_reconciliation_severity": latest_reconciliation.severity if latest_reconciliation is not None else base_status.latest_reconciliation_severity,
@@ -514,14 +536,15 @@ class ExecutionLedgerRecoveryService:
             }
         )
 
-    def _submit_command_order_recovery_counts(self, open_orders: list[dict]) -> tuple[int, int]:
+    def _submit_command_order_recovery_counts(self, open_orders: list[dict]) -> tuple[int, int, int]:
         if self.execution_command_repo is None:
-            return 0, 0
+            return 0, 0, 0
         get_by_idempotency_key = getattr(self.execution_command_repo, "get_by_idempotency_key", None)
         if not callable(get_by_idempotency_key):
-            return 0, 0
+            return 0, 0, 0
         stranded = 0
         stuck_sent = 0
+        claimed_submit = 0
         for row in open_orders:
             state = str(row.get("state") or "").upper()
             if state not in {"CREATED", "SUBMITTING"}:
@@ -545,4 +568,11 @@ class ExecutionLedgerRecoveryService:
                 continue
             if any(str(command.get("state") or "").upper() == "SENT" for command in matched_commands):
                 stuck_sent += 1
-        return stranded, stuck_sent
+                continue
+            if any(
+                str(command.get("state") or "").upper() == "CLAIMED"
+                and str(command.get("command_type") or "").strip().lower() == "submit"
+                for command in matched_commands
+            ):
+                claimed_submit += 1
+        return stranded, stuck_sent, claimed_submit

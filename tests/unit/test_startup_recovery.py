@@ -10,10 +10,13 @@ from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.execution_engine.exit_intent_aggregator import create_exit_execution_intent_from_order_state
 from aats.schemas.system import RecoveryStatus
 from aats.services.recovery_control.startup_recovery import (
+    ExecutionLedgerRecoveryService,
     apply_startup_exit_execution_review_overlay,
     persist_startup_exit_execution_state_snapshot,
     startup_refresh_exit_execution_truth,
 )
+from aats.services.governance_engine.kill_switch import KillSwitch
+from aats.services.recovery_control.reconciliation_classifier import RecoveryReconciliationClassifier
 from aats.services.runtime_scope import runtime_state_scope
 from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.exit_execution_repo import InMemoryExitExecutionRepository
@@ -59,7 +62,115 @@ class _BrokenExitExecutionRepository(InMemoryExitExecutionRepository):
         raise RuntimeError("boom")
 
 
+class _EmptyPortfolioRepository:
+    def history(self) -> list:
+        return []
+
+
+class _OpenOrderRepository:
+    def __init__(self, rows: list[dict]) -> None:
+        self.rows = rows
+
+    def count_orders(self) -> int:
+        return len(self.rows)
+
+    def open_orders(self) -> list[dict]:
+        return list(self.rows)
+
+
+class _CommandRepository:
+    def __init__(self, rows: dict[str, dict]) -> None:
+        self.rows = rows
+
+    def get_by_idempotency_key(self, key: str) -> dict | None:
+        return self.rows.get(key)
+
+    def command_counts(self, *, sent_stale_before=None) -> dict[str, int]:
+        counts = {
+            "pending_total": 0,
+            "pending_submit": 0,
+            "pending_cancel": 0,
+            "sent_stale_total": 0,
+            "sent_stale_submit": 0,
+            "sent_stale_cancel": 0,
+        }
+        for row in self.rows.values():
+            state = str(row.get("state") or "").upper()
+            command_type = str(row.get("command_type") or "").strip().lower()
+            if state in {"PENDING", "CLAIMED"}:
+                counts["pending_total"] += 1
+                if command_type == "submit":
+                    counts["pending_submit"] += 1
+                elif command_type == "cancel":
+                    counts["pending_cancel"] += 1
+            elif state == "SENT":
+                counts["sent_stale_total"] += 1
+                if command_type == "submit":
+                    counts["sent_stale_submit"] += 1
+                elif command_type == "cancel":
+                    counts["sent_stale_cancel"] += 1
+        return counts
+
+
 class TestStartupRecovery(unittest.TestCase):
+    def test_phase4_classifies_claimed_submit_as_exchange_reconcile_blocker(self) -> None:
+        settings = AATSSettings.model_validate(
+            {
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ("BTC-USDT-SWAP",),
+            }
+        )
+        order_repo = _OpenOrderRepository(
+            [
+                {
+                    "order_id": "cl_claimed_submit",
+                    "client_order_id": "cl_claimed_submit",
+                    "intent_id": "intent_claimed_submit",
+                    "state": "SUBMITTING",
+                    "venue_order_id": None,
+                }
+            ]
+        )
+        command_repo = _CommandRepository(
+            {
+                "submit:cl_claimed_submit": {
+                    "command_id": "cmd_claimed_submit",
+                    "order_id": "cl_claimed_submit",
+                    "command_type": "submit",
+                    "idempotency_key": "submit:cl_claimed_submit",
+                    "state": "CLAIMED",
+                }
+            }
+        )
+        service = ExecutionLedgerRecoveryService(
+            settings=settings,
+            base_recovery_service=None,  # type: ignore[arg-type]
+            reconciliation_repo=InMemoryReconciliationRepository(),
+            portfolio_repo=_EmptyPortfolioRepository(),
+            kill_switch=KillSwitch(),
+            reconciliation_classifier=RecoveryReconciliationClassifier(),
+            execution_order_repo=order_repo,
+            execution_command_repo=command_repo,
+        )
+
+        status = service._phase4_status(
+            base_status=RecoveryStatus(status="recovered", recovery_state="normal_operation", safe_startup=True),
+            latest_reconciliation=None,
+        )
+
+        self.assertTrue(status.halted)
+        self.assertEqual(status.pending_command_count, 0)
+        self.assertEqual(status.pending_submit_command_count, 0)
+        self.assertEqual(status.claimed_submit_command_count, 1)
+        self.assertEqual(status.recovery_action, "halted_claimed_submit_commands_require_exchange_reconciliation")
+        self.assertIn(
+            "claimed_submit_commands_require_exchange_reconciliation",
+            status.resume_blocked_reasons,
+        )
+        self.assertIn("claimed_submit_commands_require_exchange_reconciliation:1", status.notes)
+
     def test_startup_refresh_updates_stale_parent_exit_execution_projection(self) -> None:
         settings = AATSSettings.model_validate(
             {
