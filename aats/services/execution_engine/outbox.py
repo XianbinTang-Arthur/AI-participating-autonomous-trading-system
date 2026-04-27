@@ -94,6 +94,10 @@ class PostgresExecutionOutboxPublisher:
         order_state: OrderState,
         key: str,
         obligation: OrderObligation | None = None,
+        source_component: str = "execution_engine",
+        emit_execution_error_summary: bool = True,
+        sync_execution_order_truth: bool = False,
+        history_reason_code: str = "execution_outbox_state_sync",
     ) -> OrderState:
         # 原来 with self.session_factory() as session: 开启的是 SQLAlchemy 同步
         # session——BEGIN / UPDATE / INSERT / COMMIT 全跑在 event loop 主线程上。
@@ -105,6 +109,10 @@ class PostgresExecutionOutboxPublisher:
             order_state=order_state,
             key=key,
             obligation=obligation,
+            source_component=source_component,
+            emit_execution_error_summary=emit_execution_error_summary,
+            sync_execution_order_truth=sync_execution_order_truth,
+            history_reason_code=history_reason_code,
         )
         await self.flush_pending()
         # Stage 6 Slice 6.5：事务已 commit，obligation 广播到 cache。必须放在
@@ -122,6 +130,10 @@ class PostgresExecutionOutboxPublisher:
         order_state: OrderState,
         key: str,
         obligation: OrderObligation | None,
+        source_component: str = "execution_engine",
+        emit_execution_error_summary: bool = True,
+        sync_execution_order_truth: bool = False,
+        history_reason_code: str = "execution_outbox_state_sync",
     ) -> OrderState:
         # Stage 5：OCC retry 包装。每次失败重新打开 session，让
         # _persist_order_state_sync 内部重新 SELECT 最新 row，
@@ -133,6 +145,10 @@ class PostgresExecutionOutboxPublisher:
                     order_state=order_state,
                     key=key,
                     obligation=obligation,
+                    source_component=source_component,
+                    emit_execution_error_summary=emit_execution_error_summary,
+                    sync_execution_order_truth=sync_execution_order_truth,
+                    history_reason_code=history_reason_code,
                 )
             except StaleDataError as exc:
                 last_exc = exc
@@ -162,14 +178,40 @@ class PostgresExecutionOutboxPublisher:
         order_state: OrderState,
         key: str,
         obligation: OrderObligation | None,
+        source_component: str = "execution_engine",
+        emit_execution_error_summary: bool = True,
+        sync_execution_order_truth: bool = False,
+        history_reason_code: str = "execution_outbox_state_sync",
     ) -> OrderState:
         with self.session_factory() as session:
             persisted, previous = self.execution_repo.save_order_state_in_session(session, order_state)  # type: ignore[attr-defined]
-            self._ensure_execution_order_row(session, order_state=persisted)
+            if sync_execution_order_truth and not self._execution_repo_syncs_order_truth():
+                self._sync_execution_order_row_in_session(
+                    session,
+                    order_state=persisted,
+                    source_component=source_component,
+                    history_reason_code=history_reason_code,
+                )
+            else:
+                self._ensure_execution_order_row(session, order_state=persisted)
             if obligation is not None:
                 self.obligation_repo.save_obligation_in_session(session, obligation)
-            envelopes = [self._order_update_envelope(key=key, persisted=persisted)]
-            summary = self._execution_error_summary(previous=previous, persisted=persisted)
+            envelopes = [
+                self._order_update_envelope(
+                    key=key,
+                    persisted=persisted,
+                    source_component=source_component,
+                )
+            ]
+            summary = (
+                self._execution_error_summary(
+                    previous=previous,
+                    persisted=persisted,
+                    source_component=source_component,
+                )
+                if emit_execution_error_summary
+                else None
+            )
             if summary is not None:
                 envelopes.append(summary)
             for envelope in envelopes:
@@ -375,6 +417,65 @@ class PostgresExecutionOutboxPublisher:
                 payload=order_state.model_dump(mode="python"),
                 created_at=created_at,
             )
+
+    def _sync_execution_order_row_in_session(
+        self,
+        session: Session,
+        *,
+        order_state: OrderState,
+        source_component: str,
+        history_reason_code: str,
+    ) -> None:
+        """Synchronize execution_orders truth for repair/operator writes."""
+
+        if self.execution_order_repo is None:
+            return
+        existing = self.execution_order_repo.get_order_by_client_order_id_in_session(
+            session,
+            order_state.client_order_id,
+            for_update=True,
+        )
+        if existing is None:
+            self._ensure_execution_order_row(session, order_state=order_state)
+            return
+
+        previous_state = str(existing["state"])
+        existing_payload = dict(existing.get("raw_payload") or {})
+        raw_payload = {
+            **existing_payload,
+            "client_order_id": order_state.client_order_id,
+            "venue_order_id": order_state.exchange_order_id,
+            "source_system": source_component,
+            "order_state": order_state.model_dump(mode="python"),
+        }
+        self.execution_order_repo.update_order_state_in_session(
+            session,
+            order_id=str(existing["order_id"]),
+            expected_state_version=int(existing["state_version"]),
+            next_state=order_state.status,
+            venue_order_id=order_state.exchange_order_id,
+            last_exchange_ts=order_state.last_exchange_update_ts,
+            updated_at=order_state.last_update_ts or order_state.created_at,
+            raw_payload=raw_payload,
+        )
+        if (
+            self.execution_order_history_repo is not None
+            and previous_state != order_state.status
+        ):
+            self.execution_order_history_repo.append_transition_in_session(
+                session,
+                order_id=str(existing["order_id"]),
+                from_state=previous_state,
+                to_state=order_state.status,
+                reason_code=history_reason_code,
+                source=source_component,
+                source_message_id=order_state.intent_id,
+                payload=order_state.model_dump(mode="python"),
+                created_at=order_state.last_update_ts or order_state.created_at,
+            )
+
+    def _execution_repo_syncs_order_truth(self) -> bool:
+        return type(self.execution_repo).__name__ == "ConvergedPostgresExecutionRepository"
 
     def _ensure_execution_fill_row(
         self,
@@ -730,12 +831,17 @@ class PostgresExecutionOutboxPublisher:
             return None
 
     @staticmethod
-    def _order_update_envelope(*, key: str, persisted: OrderState) -> EventEnvelope:
+    def _order_update_envelope(
+        *,
+        key: str,
+        persisted: OrderState,
+        source_component: str = "execution_engine",
+    ) -> EventEnvelope:
         return build_envelope(
             topic=topics.ORDER_UPDATES,
             key=key,
             payload_model=persisted,
-            source_component="execution_engine",
+            source_component=source_component,
         )
 
     @staticmethod
@@ -743,6 +849,7 @@ class PostgresExecutionOutboxPublisher:
         *,
         previous: OrderState | None,
         persisted: OrderState,
+        source_component: str = "execution_engine",
     ) -> EventEnvelope | None:
         if persisted.status not in {"FAILED", "REJECTED", "BLOCKED"}:
             return None
@@ -762,5 +869,5 @@ class PostgresExecutionOutboxPublisher:
             topic=topics.EXECUTION_ERROR_SUMMARIES,
             key=persisted.symbol,
             payload_model=summary,
-            source_component="execution_engine",
+            source_component=source_component,
         )

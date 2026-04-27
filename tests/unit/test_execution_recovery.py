@@ -50,6 +50,26 @@ class _RecordingPersistentLotBookService:
         )
 
 
+class _RecordingPortfolioOutboxPublisher:
+    def __init__(self) -> None:
+        self.persisted: list[dict[str, object]] = []
+
+    def persist_snapshot_sync(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        source_component: str,
+        schedule_post_commit: bool = True,
+    ) -> None:
+        self.persisted.append(
+            {
+                "snapshot": snapshot,
+                "source_component": source_component,
+                "schedule_post_commit": schedule_post_commit,
+            }
+        )
+
+
 class TestExecutionRecovery(unittest.TestCase):
     def test_recovery_tracks_structured_bundle_open_orders_without_halting(self) -> None:
         execution_repo = InMemoryExecutionRepository()
@@ -394,6 +414,49 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertFalse(kill_switch.halted)
         self.assertIn("auto_healed_portfolio_divergence", ":".join(artifacts.status.notes))
         self.assertIn("stored_snapshot_replaced_by_fill_reconstruction", artifacts.status.notes)
+
+    def test_recovery_auto_heal_persists_snapshot_via_portfolio_outbox_writer(self) -> None:
+        portfolio_repo = InMemoryPortfolioRepository()
+        baseline_snapshot = PortfolioSnapshot(
+            snapshot_ts=utc_now(),
+            snapshot_origin="exchange_import",
+            balances={"USDT": Decimal("1000")},
+            positions=[],
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("0"),
+            total_equity=Decimal("1000"),
+            gross_exposure=Decimal("0"),
+            net_exposure=Decimal("0"),
+            product_type="spot",
+            margin_mode="cash",
+        )
+        divergent_snapshot = baseline_snapshot.model_copy(
+            update={
+                "snapshot_ts": utc_now(),
+                "snapshot_origin": "fill_derived",
+                "balances": {"USDT": Decimal("900"), "BTC": Decimal("1")},
+                "total_equity": Decimal("1000"),
+            }
+        )
+        portfolio_repo.save_snapshot(baseline_snapshot)
+        portfolio_repo.save_snapshot(divergent_snapshot)
+        publisher = _RecordingPortfolioOutboxPublisher()
+        recovery = self._service(
+            portfolio_repo=portfolio_repo,
+            bootstrap_portfolio_from_exchange=True,
+            portfolio_outbox_publisher=publisher,
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=1_000.0))
+
+        self.assertTrue(artifacts.rebuilt_snapshot_saved)
+        self.assertEqual(len(publisher.persisted), 1)
+        persisted_snapshot = publisher.persisted[0]["snapshot"]
+        self.assertIsInstance(persisted_snapshot, PortfolioSnapshot)
+        assert isinstance(persisted_snapshot, PortfolioSnapshot)
+        self.assertEqual(persisted_snapshot.snapshot_origin, "recovery_auto_healed")
+        self.assertEqual(publisher.persisted[0]["source_component"], "execution_recovery")
+        self.assertTrue(publisher.persisted[0]["schedule_post_commit"])
 
     def test_recovery_marks_unknown_derivatives_position_as_review_required(self) -> None:
         reconciliation_repo = InMemoryReconciliationRepository()
@@ -1013,6 +1076,7 @@ class TestExecutionRecovery(unittest.TestCase):
         strategy_runtime_repo: InMemoryStrategyRuntimeRepository | None = None,
         fill_outcome_repo: InMemoryFillOutcomeRepository | None = None,
         persistent_lot_book_service: object | None = None,
+        portfolio_outbox_publisher: object | None = None,
         settings_override: dict | None = None,
     ) -> ExecutionRecoveryService:
         payload = {
@@ -1041,4 +1105,5 @@ class TestExecutionRecovery(unittest.TestCase):
             reconciliation_stale_after_seconds=settings.reconciliation_stale_after_seconds,
             fill_outcome_repo=fill_outcome_repo,
             persistent_lot_book_service=persistent_lot_book_service,  # type: ignore[arg-type]
+            portfolio_outbox_publisher=portfolio_outbox_publisher,  # type: ignore[arg-type]
         )

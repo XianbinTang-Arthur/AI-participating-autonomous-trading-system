@@ -59,6 +59,7 @@ from aats.services.execution_engine.orderbook_snapshot_refs import (
     parse_orderbook_snapshot_ref,
     resolve_orderbook_snapshot_ref_row,
 )
+from aats.services.execution_engine.state_writer import sync_execution_order_truth_direct_legacy_only
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.execution_engine.exit_intent_aggregator import exit_execution_review_items
 from aats.services.fill_ordering import fill_processing_sort_key
@@ -1373,39 +1374,15 @@ class OperatorQueryService:
         return hydrated
 
     def _sync_execution_order_truth(self, order_state: OrderState) -> None:
-        shadow_service = self.runtime.phase1_execution_shadow_service
-        if shadow_service is not None:
-            shadow_service.shadow_order_state(order_state=order_state)
-            return
-        if self.runtime.execution_order_repo is None:
-            return
-        existing = self.runtime.execution_order_repo.get_order_by_client_order_id(order_state.client_order_id)
-        if existing is None:
-            return
-        previous_state = str(existing["state"])
-        self.runtime.execution_order_repo.update_order_state(
-            order_id=str(existing["order_id"]),
-            expected_state_version=int(existing["state_version"]),
-            next_state=order_state.status,
-            venue_order_id=order_state.exchange_order_id,
-            last_exchange_ts=order_state.last_exchange_update_ts,
-            updated_at=order_state.last_update_ts or order_state.created_at,
-            raw_payload=order_state.model_dump(mode="python"),
+        sync_execution_order_truth_direct_legacy_only(
+            order_state=order_state,
+            phase1_execution_shadow_service=self.runtime.phase1_execution_shadow_service,
+            execution_order_repo=self.runtime.execution_order_repo,
+            execution_order_history_repo=self.runtime.execution_order_history_repo,
+            source_component="operator_control_plane",
+            history_reason_code="operator_state_sync",
+            logger=self.logger,
         )
-        if (
-            self.runtime.execution_order_history_repo is not None
-            and previous_state != order_state.status
-        ):
-            self.runtime.execution_order_history_repo.append_transition(
-                order_id=str(existing["order_id"]),
-                from_state=previous_state,
-                to_state=order_state.status,
-                reason_code="operator_state_sync",
-                source="operator_control_plane",
-                source_message_id=order_state.intent_id,
-                payload=order_state.model_dump(mode="python"),
-                created_at=order_state.last_update_ts or order_state.created_at,
-            )
 
     def _current_symbol_position_qty(self, symbol: str) -> Any:
         snapshot = self._latest_scoped_snapshot()

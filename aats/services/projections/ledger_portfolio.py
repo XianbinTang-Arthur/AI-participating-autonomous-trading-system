@@ -19,6 +19,10 @@ from aats.services.ledger.persistent_lot_book import PersistentLotBookService
 from aats.services.ledger.settlement_posting import FillSettlementProjection, LedgerSettlementPostingService
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
 from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
+from aats.services.portfolio_service.snapshot_writer import (
+    ensure_direct_snapshot_write_allowed,
+    save_snapshot_direct_legacy_only,
+)
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.base import ExecutionRepository, FillOutcomeRepository, PortfolioRepository
@@ -78,7 +82,12 @@ class LedgerBackedPortfolioService:
                 source_component="ledger_portfolio_service",
             )
         else:
-            self.portfolio_repo.save_snapshot(snapshot)
+            save_snapshot_direct_legacy_only(
+                portfolio_repo=self.portfolio_repo,
+                snapshot=snapshot,
+                source_component="ledger_portfolio_service",
+                logger=self.logger,
+            )
             await publish_model(
                 bus=self.bus,
                 topic=topics.PORTFOLIO_SNAPSHOTS,
@@ -131,6 +140,11 @@ class LedgerBackedPortfolioService:
         balance_delta = None
         try:
             if self.portfolio_outbox_publisher is None:
+                ensure_direct_snapshot_write_allowed(
+                    portfolio_repo=self.portfolio_repo,
+                    source_component="ledger_portfolio_service",
+                    logger=self.logger,
+                )
                 self.settlement_posting_service.post_fill_effects(fill=fill, projection=projection)
                 after_balances = self._current_balances(fill=fill)
                 after_state = self._rebuild_projection_state(balances_override=after_balances)
@@ -143,7 +157,12 @@ class LedgerBackedPortfolioService:
                     source_fill_id=fill.fill_id,
                     snapshot_origin="fill_derived",
                 )
-                self.portfolio_repo.save_snapshot(snapshot)
+                save_snapshot_direct_legacy_only(
+                    portfolio_repo=self.portfolio_repo,
+                    snapshot=snapshot,
+                    source_component="ledger_portfolio_service",
+                    logger=self.logger,
+                )
                 self._sync_persistent_lots()
                 balance_delta = PortfolioService._balance_delta_event(
                     fill=fill,
@@ -197,7 +216,7 @@ class LedgerBackedPortfolioService:
                         source_component="ledger_portfolio_service",
                     )
                     session.commit()
-                await self.portfolio_outbox_publisher.flush_pending()
+                await self.portfolio_outbox_publisher.publish_committed_snapshot_effects(snapshot)
         except Exception as exc:
             await self._emit_processing_failure(
                 stage="ledger_portfolio_projection",

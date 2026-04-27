@@ -55,17 +55,48 @@ class PostgresPortfolioOutboxPublisher:
         # 每笔成交一次，两条路径都包含完整的 SQLAlchemy sync session 事务
         # （save_snapshot_in_session / append_in_session / enqueue_in_session
         # / commit）。全部丢到 asyncio.to_thread 让 event loop 专心调度协程。
-        await asyncio.to_thread(
-            self._persist_bootstrap_snapshot_sync,
+        await self.persist_snapshot(
             snapshot=snapshot,
             source_component=source_component,
         )
-        # Stage 6 Slice 6.3：commit 成功后把最新 snapshot 注入跨进程 cache。
-        # publish 内部 best-effort Redis + 同步本地 dict，不抛。
-        await self._publish_to_cache(snapshot)
-        await self.flush_pending()
 
-    def _persist_bootstrap_snapshot_sync(
+    async def persist_snapshot(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        source_component: str,
+    ) -> None:
+        """Persist one snapshot through the durable portfolio outbox path."""
+
+        await asyncio.to_thread(
+            self._persist_snapshot_sync,
+            snapshot=snapshot,
+            source_component=source_component,
+        )
+        await self.publish_committed_snapshot_effects(snapshot)
+
+    def persist_snapshot_sync(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        source_component: str,
+        schedule_post_commit: bool = True,
+    ) -> None:
+        """Sync entrypoint for startup recovery / sync repair code.
+
+        The DB transaction still writes ``portfolio_snapshots`` + event_store +
+        outbox atomically. When called on a running event loop, post-commit cache
+        publication and outbox flushing are scheduled asynchronously.
+        """
+
+        self._persist_snapshot_sync(
+            snapshot=snapshot,
+            source_component=source_component,
+        )
+        if schedule_post_commit:
+            self._schedule_committed_snapshot_effects(snapshot)
+
+    def _persist_snapshot_sync(
         self,
         *,
         snapshot: PortfolioSnapshot,
@@ -77,6 +108,76 @@ class PostgresPortfolioOutboxPublisher:
             self.event_store.append_in_session(session, envelope)
             self.outbox_repo.enqueue_in_session(session, envelope)
             session.commit()
+
+    async def publish_committed_snapshot_effects(self, snapshot: PortfolioSnapshot) -> None:
+        """Run post-commit cache publication and durable outbox flush."""
+
+        await self._publish_to_cache(snapshot)
+        await self.flush_pending()
+
+    def _schedule_committed_snapshot_effects(self, snapshot: PortfolioSnapshot) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            log_event(
+                self.logger,
+                "portfolio_outbox_post_commit_not_scheduled",
+                level="warning",
+                reason="no_running_loop",
+                decision_id=snapshot.decision_id,
+                snapshot_origin=snapshot.snapshot_origin,
+            )
+            return
+        if loop.is_closed() or not loop.is_running():
+            log_event(
+                self.logger,
+                "portfolio_outbox_post_commit_not_scheduled",
+                level="warning",
+                reason="loop_not_running",
+                loop_closed=loop.is_closed(),
+                decision_id=snapshot.decision_id,
+                snapshot_origin=snapshot.snapshot_origin,
+            )
+            return
+        try:
+            task = loop.create_task(
+                self.publish_committed_snapshot_effects(snapshot),
+                name="portfolio_outbox_post_commit",
+            )
+            task.add_done_callback(self._log_background_publish_result)
+        except Exception as exc:  # pragma: no cover
+            log_event(
+                self.logger,
+                "portfolio_outbox_post_commit_schedule_failed",
+                level="warning",
+                decision_id=snapshot.decision_id,
+                snapshot_origin=snapshot.snapshot_origin,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    def _log_background_publish_result(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        try:
+            exc = task.exception()
+        except Exception as err:  # pragma: no cover
+            log_event(
+                self.logger,
+                "portfolio_outbox_post_commit_task_inspect_failed",
+                level="warning",
+                error_type=type(err).__name__,
+                error=str(err),
+            )
+            return
+        if exc is not None:
+            log_event(
+                self.logger,
+                "portfolio_outbox_post_commit_failed",
+                level="warning",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
 
     async def persist_fill_projection(
         self,

@@ -260,6 +260,7 @@ class ExecutionLedgerRecoveryService:
     reconciliation_classifier: RecoveryReconciliationClassifier
     execution_order_repo: object | None = None
     execution_command_repo: object | None = None
+    execution_outbox_publisher: object | None = None
     exchange_order_client: object | None = None
     runtime_scope: object = field(init=False)
     _exchange_reconciled_count: int = field(init=False, default=0)
@@ -291,6 +292,8 @@ class ExecutionLedgerRecoveryService:
             open_orders=scoped_open_orders,
             exchange_client=self.exchange_order_client,
             order_repo=self.execution_order_repo,
+            order_state_repo=self.base_recovery_service.execution_repo,
+            execution_outbox_publisher=self.execution_outbox_publisher,
         )
         self._exchange_reconciled_count = resolved
         self._exchange_reconcile_notes = notes

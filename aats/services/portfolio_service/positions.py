@@ -26,6 +26,7 @@ from aats.services.accounting import (
 )
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
 from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
+from aats.services.portfolio_service.snapshot_writer import save_snapshot_direct_legacy_only
 from aats.services.portfolio_service.position_keys import (
     build_position_key,
     exposure_side_from_quantity,
@@ -470,7 +471,13 @@ class PortfolioService:
                 source_component="portfolio_service",
             )
             return
-        await asyncio.to_thread(self.portfolio_repo.save_snapshot, snapshot)
+        await asyncio.to_thread(
+            save_snapshot_direct_legacy_only,
+            portfolio_repo=self.portfolio_repo,
+            snapshot=snapshot,
+            source_component="portfolio_service",
+            logger=self.logger,
+        )
         await publish_model(
             bus=self.bus,
             topic=topics.PORTFOLIO_SNAPSHOTS,
@@ -529,7 +536,13 @@ class PortfolioService:
                 snapshot_origin="fill_derived",
             )
             if self.portfolio_outbox_publisher is None:
-                await asyncio.to_thread(self.portfolio_repo.save_snapshot, snapshot)
+                await asyncio.to_thread(
+                    save_snapshot_direct_legacy_only,
+                    portfolio_repo=self.portfolio_repo,
+                    snapshot=snapshot,
+                    source_component="portfolio_service",
+                    logger=self.logger,
+                )
         except Exception as exc:
             self.state.restore(checkpoint)
             await self._emit_processing_failure(

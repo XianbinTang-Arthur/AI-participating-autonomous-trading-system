@@ -107,6 +107,10 @@ class _StubPublisher:
         order_state: OrderState,
         key: str,
         obligation: OrderObligation | None,
+        source_component: str = "execution_engine",
+        emit_execution_error_summary: bool = True,
+        sync_execution_order_truth: bool = False,
+        history_reason_code: str = "execution_outbox_state_sync",
     ) -> OrderState:
         self.calls.append(order_state)
         if len(self.calls) <= self.fail_times:

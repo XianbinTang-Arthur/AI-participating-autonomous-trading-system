@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime
 from decimal import Decimal
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 from dataclasses import dataclass
 
+from aats.bootstrap.logging import get_logger
 from aats.bootstrap.metrics import MetricsRegistry
 from aats.bootstrap.settings import AATSSettings
 from aats.bus.base import EventBus
@@ -19,6 +20,7 @@ from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.portfolio_service.snapshot_cache import PORTFOLIO_SNAPSHOT_CACHE_SOURCE_COMPONENT
+from aats.services.portfolio_service.snapshot_writer import save_snapshot_direct_legacy_only
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.bootstrap.telemetry import traced
@@ -42,6 +44,9 @@ from aats.services.runtime_scope import (
     runtime_state_scope,
 )
 from aats.storage.base import ExitExecutionRepository, PortfolioRepository
+
+if TYPE_CHECKING:
+    from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +93,7 @@ class ReconciliationRepairService:
     price_provider: Callable[[str], Decimal] | None = None
     runtime_scope: object | None = None
     settings: AATSSettings | None = None
+    portfolio_outbox_publisher: "PostgresPortfolioOutboxPublisher | None" = None
 
     def configure(
         self,
@@ -99,6 +105,7 @@ class ReconciliationRepairService:
         reconstruction_service: PortfolioReconstructionService,
         price_provider: Callable[[str], Decimal],
         runtime_scope,
+        portfolio_outbox_publisher: "PostgresPortfolioOutboxPublisher | None" = None,
     ) -> None:
         self.settings = settings
         self.portfolio_repo = portfolio_repo
@@ -107,8 +114,14 @@ class ReconciliationRepairService:
         self.reconstruction_service = reconstruction_service
         self.price_provider = price_provider
         self.runtime_scope = runtime_scope
+        self.portfolio_outbox_publisher = portfolio_outbox_publisher
 
-    def repair(self, report: ReconciliationReport) -> PortfolioSnapshot | None:
+    def repair(
+        self,
+        report: ReconciliationReport,
+        *,
+        schedule_post_commit: bool = True,
+    ) -> PortfolioSnapshot | None:
         if (
             self.portfolio_repo is None
             or self.execution_repo is None
@@ -141,8 +154,35 @@ class ReconciliationRepairService:
         latest_snapshot = latest_snapshot_for_scope(self.portfolio_repo, self.runtime_scope)
         if latest_snapshot is not None and latest_snapshot.model_dump(mode="json") == rebuilt_snapshot.model_dump(mode="json"):
             return None
-        self.portfolio_repo.save_snapshot(rebuilt_snapshot)
+        self._persist_repaired_snapshot(
+            rebuilt_snapshot,
+            schedule_post_commit=schedule_post_commit,
+        )
         return rebuilt_snapshot
+
+    def _persist_repaired_snapshot(
+        self,
+        snapshot: PortfolioSnapshot,
+        *,
+        schedule_post_commit: bool,
+    ) -> None:
+        if self.portfolio_outbox_publisher is not None:
+            self.portfolio_outbox_publisher.persist_snapshot_sync(
+                snapshot=snapshot,
+                source_component="reconciliation_service",
+                schedule_post_commit=schedule_post_commit,
+            )
+            return
+        self._legacy_direct_save(snapshot)
+
+    def _legacy_direct_save(self, snapshot: PortfolioSnapshot) -> None:
+        assert self.portfolio_repo is not None
+        save_snapshot_direct_legacy_only(
+            portfolio_repo=self.portfolio_repo,
+            snapshot=snapshot,
+            source_component="reconciliation_service",
+            logger=get_logger("aats.reconciliation.repair"),
+        )
 
     def _rebuild_snapshot_baseline_aware(
         self,
@@ -214,6 +254,7 @@ class ReconciliationService:
         recovery_policy: RecoveryPolicy | None = None,
         metrics: MetricsRegistry | None = None,
         reconciliation_classifier: RecoveryReconciliationClassifier | None = None,
+        portfolio_outbox_publisher: "PostgresPortfolioOutboxPublisher | None" = None,
     ) -> None:
         self.settings = settings
         self.bus = bus
@@ -230,6 +271,7 @@ class ReconciliationService:
         self.recovery_policy = recovery_policy
         self.metrics = metrics
         self.reconciliation_classifier = reconciliation_classifier
+        self.portfolio_outbox_publisher = portfolio_outbox_publisher
         self.runtime_scope = runtime_state_scope(settings)
         configure_comparator = getattr(self.comparator, "configure", None)
         if callable(configure_comparator):
@@ -244,6 +286,7 @@ class ReconciliationService:
                 reconstruction_service=self.reconstruction_service,
                 price_provider=self.price_provider,
                 runtime_scope=self.runtime_scope,
+                portfolio_outbox_publisher=self.portfolio_outbox_publisher,
             )
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
@@ -320,16 +363,28 @@ class ReconciliationService:
             }
         )
         try:
-            await asyncio.to_thread(self.portfolio_repo.save_snapshot, repaired_snapshot)
+            if self.portfolio_outbox_publisher is not None:
+                await self.portfolio_outbox_publisher.persist_snapshot(
+                    snapshot=repaired_snapshot,
+                    source_component="reconciliation_service",
+                )
+            else:
+                await asyncio.to_thread(
+                    save_snapshot_direct_legacy_only,
+                    portfolio_repo=self.portfolio_repo,
+                    snapshot=repaired_snapshot,
+                    source_component="reconciliation_service",
+                    logger=get_logger("aats.reconciliation"),
+                )
+                await publish_model(
+                    bus=self.bus,
+                    topic=topics.PORTFOLIO_SNAPSHOTS,
+                    key="portfolio",
+                    payload_model=repaired_snapshot,
+                    source_component="reconciliation_service",
+                )
             if self.metrics is not None:
                 self.metrics.increment("portfolio_snapshot_repairs")
-            await publish_model(
-                bus=self.bus,
-                topic=topics.PORTFOLIO_SNAPSHOTS,
-                key="portfolio",
-                payload_model=repaired_snapshot,
-                source_component="reconciliation_service",
-            )
         except Exception as exc:
             await self._emit_snapshot_repair_failure(
                 latest_fill=latest_fill,
@@ -652,13 +707,18 @@ class ReconciliationService:
                 source_component="reconciliation_service",
             )
             if repaired_snapshot is not None:
-                await publish_model(
-                    bus=self.bus,
-                    topic=topics.PORTFOLIO_SNAPSHOTS,
-                    key="portfolio",
-                    payload_model=repaired_snapshot,
-                    source_component="reconciliation_service",
-                )
+                if self.portfolio_outbox_publisher is not None:
+                    await self.portfolio_outbox_publisher.publish_committed_snapshot_effects(
+                        repaired_snapshot
+                    )
+                else:
+                    await publish_model(
+                        bus=self.bus,
+                        topic=topics.PORTFOLIO_SNAPSHOTS,
+                        key="portfolio",
+                        payload_model=repaired_snapshot,
+                        source_component="reconciliation_service",
+                    )
             return report_to_save
         except Exception as exc:
             await self._emit_processing_failure(report=report, stage="reconciliation_persist", message=str(exc))
@@ -683,7 +743,10 @@ class ReconciliationService:
         if report_to_save.severity != "CLEAN":
             if self.metrics is not None:
                 self.metrics.increment("reconciliation_mismatches")
-            repaired_snapshot = self.repair_service.repair(report_to_save)
+            repaired_snapshot = self.repair_service.repair(
+                report_to_save,
+                schedule_post_commit=False,
+            )
         return report_to_save, repaired_snapshot
 
     async def _emit_processing_failure(

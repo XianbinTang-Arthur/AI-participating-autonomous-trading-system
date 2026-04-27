@@ -54,6 +54,10 @@ from aats.services.execution_engine.order_truth import (
     unknown_write_operation,
 )
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
+from aats.services.execution_engine.state_writer import (
+    save_fill_direct_legacy_only,
+    save_order_state_direct_legacy_only,
+)
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.ledger.posting import Phase1LedgerMirrorService
 from aats.services.strategy_overlay_rollout import overlay_mode_from_execution_mode, overlay_rollout_status
@@ -2158,7 +2162,12 @@ class OrderManager:
             self._sync_exit_execution_intent(order_state=persisted, intent=intent)
             return persisted
         previous = self.execution_repo.get_order_state(order_state.client_order_id)
-        persisted = self.execution_repo.save_order_state(order_state)
+        persisted = save_order_state_direct_legacy_only(
+            execution_repo=self.execution_repo,
+            order_state=order_state,
+            source_component="execution_engine",
+            logger=self.logger,
+        )
         log_event(
             self.logger,
             "order_state_persisted",
@@ -2311,7 +2320,12 @@ class OrderManager:
             self._shadow_write_fill(fill)
             self._shadow_sync_obligation(mirrored_obligation, reason="fill_settlement", related_fill=fill)
             return
-        elif not self.execution_repo.save_fill(fill):
+        elif not save_fill_direct_legacy_only(
+            execution_repo=self.execution_repo,
+            fill=fill,
+            source_component="execution_engine",
+            logger=self.logger,
+        ):
             return
         log_event(
             self.logger,

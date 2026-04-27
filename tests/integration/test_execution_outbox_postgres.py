@@ -80,6 +80,110 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
 
+    async def test_persist_order_state_can_sync_existing_execution_order_truth_for_repair(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            event_store = PostgresEventStore(runtime.session_factory)
+            execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            order_history_repo = PostgresExecutionOrderHistoryRepository(runtime.session_factory)
+            obligation_repo = PostgresExecutionObligationRepository(runtime.session_factory)
+            outbox_repo = PostgresOutboxRepository(runtime.session_factory)
+            bus = InMemoryEventBus()
+            publisher = PostgresExecutionOutboxPublisher(
+                session_factory=runtime.session_factory,
+                event_store=event_store,
+                execution_repo=execution_repo,
+                obligation_repo=obligation_repo,
+                outbox_repo=outbox_repo,
+                bus=bus,
+                execution_order_repo=order_repo,
+                execution_order_history_repo=order_history_repo,
+            )
+            initial = self._order_state(client_order_id="clord_repair_truth_sync", status="SUBMITTING")
+            execution_repo.save_order_state(initial)
+            intent = OrderIntent(
+                intent_id=initial.intent_id,
+                decision_id=initial.decision_id,
+                symbol=initial.symbol,
+                side="sell",
+                quantity=initial.requested_qty,
+                execution_style="taker",
+                order_type="market",
+                reference_price=Decimal("60000"),
+                urgency="medium",
+                time_in_force="IOC",
+                reduce_only=True,
+                close_only=True,
+                td_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                instrument_family="BTC-USDT",
+                settle_currency="USDT",
+                idempotency_key=f"submit:{initial.intent_id}",
+                product_type="derivatives",
+                margin_mode="cross",
+                execution_attempt_id=initial.execution_attempt_id,
+                position_intent="close_long",
+            )
+            order_repo.create_order(
+                order_id=initial.client_order_id,
+                intent=intent,
+                initial_state="SUBMITTING",
+                created_at=initial.created_at,
+                raw_payload={
+                    "client_order_id": initial.client_order_id,
+                    "source_system": "execution_command_service",
+                    "intent": intent.model_dump(mode="python"),
+                    "lifecycle_snapshot_refs": {"submit": {"source": "seed_submit"}},
+                    "operator_note": "preserve_me",
+                },
+            )
+            failed = initial.model_copy(
+                update={
+                    "status": "FAILED",
+                    "execution_error": "operator_resolved_stuck_submission_after_restart",
+                    "last_update_ts": utc_now(),
+                }
+            )
+
+            persisted = await publisher.persist_order_state(
+                order_state=failed,
+                key=failed.symbol,
+                source_component="operator_api",
+                emit_execution_error_summary=False,
+                sync_execution_order_truth=True,
+                history_reason_code="operator_state_sync",
+            )
+
+            self.assertEqual(persisted.status, "FAILED")
+            stored_state = execution_repo.get_order_state(initial.client_order_id)
+            self.assertIsNotNone(stored_state)
+            assert stored_state is not None
+            self.assertEqual(stored_state.status, "FAILED")
+            stored_order = order_repo.get_order(initial.client_order_id)
+            self.assertIsNotNone(stored_order)
+            assert stored_order is not None
+            self.assertEqual(stored_order["state"], "FAILED")
+            raw_payload = dict(stored_order["raw_payload"])
+            self.assertEqual(raw_payload["source_system"], "operator_api")
+            self.assertEqual(raw_payload["operator_note"], "preserve_me")
+            self.assertEqual(raw_payload["intent"]["intent_id"], initial.intent_id)
+            self.assertEqual(raw_payload["lifecycle_snapshot_refs"]["submit"]["source"], "seed_submit")
+            self.assertEqual(raw_payload["order_state"]["status"], "FAILED")
+            history = order_history_repo.history_for_order(initial.client_order_id)
+            self.assertEqual(len(history), 1)
+            self.assertEqual(history[0]["from_state"], "SUBMITTING")
+            self.assertEqual(history[0]["to_state"], "FAILED")
+            self.assertEqual(history[0]["reason_code"], "operator_state_sync")
+            self.assertEqual(history[0]["source"], "operator_api")
+            self.assertEqual(event_store.count(topic=topics.ORDER_UPDATES), 1)
+            self.assertEqual(event_store.count(topic=topics.EXECUTION_ERROR_SUMMARIES), 0)
+            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
     async def test_subscriber_failure_leaves_outbox_pending_after_database_commit(self) -> None:
         runtime, admin_engine, schema_name = self._schema_runtime()
         try:

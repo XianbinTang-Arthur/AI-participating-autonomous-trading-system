@@ -4544,7 +4544,8 @@ def _build_reconciliation_slice(
       - shared slice: bus、market_gateway、account_service、snapshot_builder、
         execution_adapter（OKXExecutionAdapter 实例提供 exchange_order_client）、
         kill_switch、metrics、bootstrap_from_exchange、reconciliation_classifier
-    本 slice 不依赖 decision/execution/portfolio slice 的产物。
+    本 slice 依赖 execution slice 提前构造 portfolio_outbox_publisher，用于
+    recovery/repair snapshot 单 writer 收敛。
 
     Stage 3 process_role 门控：与 execution/portfolio 一起，仅 None / monolith /
     execution 时构造。
@@ -4571,6 +4572,7 @@ def _build_reconciliation_slice(
         recovery_policy=runtime_layering.recovery_policy,
         metrics=slices.metrics,
         reconciliation_classifier=slices.reconciliation_classifier,
+        portfolio_outbox_publisher=slices.portfolio_outbox_publisher,
     )
     slices.base_recovery_service = ExecutionRecoveryService(
         settings=runtime_settings,
@@ -4602,6 +4604,7 @@ def _build_reconciliation_slice(
         # Stage 6 Slice 6.5：注入 obligation cache，让 _cleanup_orphan_obligations
         # 的释放结果广播到跨进程 cache。
         obligation_cache=slices.obligation_hot_state_cache,
+        portfolio_outbox_publisher=slices.portfolio_outbox_publisher,
     )
     # OKXExecutionAdapter.client satisfies ExchangeOrderQuerier protocol.
     _exchange_order_client = (
@@ -4619,6 +4622,7 @@ def _build_reconciliation_slice(
             reconciliation_classifier=slices.reconciliation_classifier or RecoveryReconciliationClassifier(),
             execution_order_repo=storage.execution_order_repo,
             execution_command_repo=storage.execution_command_repo,
+            execution_outbox_publisher=slices.execution_outbox_publisher,
             exchange_order_client=_exchange_order_client,
         )
         if runtime_settings.recovery_reconciliation_execution_ledger_enabled
@@ -5156,36 +5160,10 @@ async def build_runtime(
         bootstrap_state=slices.portfolio_snapshot_cache.snapshot(),
     )
 
-    # Stage 6 Slice 6.3 hot-fix：把 portfolio_snapshot_cache.fire_and_forget_publish 注入为
-    # portfolio_repo 的 snapshot listener。所有绕过 outbox publisher 直接
-    # save_snapshot 的路径（recovery / repair / projections / positions / tests）
-    # commit 成功后会立即通知 cache，并异步推进 Redis + portfolio.snapshots，
-    # 修复 operator UI / gateway 读到 stale bootstrap snapshot 的资金安全 bug。
-    # 设计文档：docs/task/stage_6_slice_6_3_cache_listener_fix_design.md §D4
-    # 时机要求：必须在 portfolio_snapshot_cache.bootstrap(...) 之后（上面几行），
-    # 这样 cache._latest 已 hydrate，listener 触发时 _apply_locally 的
-    # snapshot_ts <= existing 去重规则才有正确的基准。
-    # D1 决策：attach_snapshot_listener 只在两个具体 repo 实现类里声明，
-    # Protocol 不变；所以这里用 hasattr 做 duck-typing 守卫，未来 mock /
-    # 第三方 Protocol 实现不会因为缺失方法而炸。
-    _attach_snapshot_listener = getattr(
-        storage.portfolio_repo, "attach_snapshot_listener", None
-    )
-    if callable(_attach_snapshot_listener):
-        _attach_snapshot_listener(slices.portfolio_snapshot_cache.fire_and_forget_publish)
-        log_event(
-            get_logger("aats.bootstrap"),
-            "portfolio_repo_cache_listener_attached",
-            process_role=effective_process_role or "monolith",
-        )
-    else:
-        log_event(
-            get_logger("aats.bootstrap"),
-            "portfolio_repo_cache_listener_skipped",
-            level="warning",
-            process_role=effective_process_role or "monolith",
-            reason="repo_has_no_attach_snapshot_listener",
-        )
+    # 2026-04-27 single-writer convergence：production portfolio snapshot writes
+    # must go through PostgresPortfolioOutboxPublisher. The repository listener
+    # remains available for low-level unit tests, but build_runtime no longer
+    # wires it as a production cache publication path.
 
     # Stage 6 Slice 6.5：跨进程 obligation 缓存边车。和 6.3 PortfolioSnapshotCache
     # 同模板：bus.start 完成后立即构造 + Redis hydrate，让所有 slice builder

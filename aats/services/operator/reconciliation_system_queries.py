@@ -15,6 +15,7 @@ from aats.schemas.operator import (
     ReconciliationValidationSummary,
 )
 from aats.services.execution_engine.baseline_import import AccountBaselineImportService
+from aats.services.execution_engine.state_writer import save_order_state_direct_legacy_only
 from aats.services.runtime_scope import latest_topic_event_for_scope, reconciliation_reports_for_scope
 
 if TYPE_CHECKING:
@@ -195,22 +196,42 @@ class ReconciliationSystemQueryFacade:
                 "cancel_reason": reason,
             }
         )
-        persisted = self.owner.runtime.execution_repo.save_order_state(resolved_state)
-        self.owner._sync_execution_order_truth(persisted)
-        if self.owner.runtime.audit_repo.get(persisted.decision_id) is not None:
-            await publish_model(
-                bus=self.owner.runtime.bus,
-                topic=topics.ORDER_UPDATES,
-                key=persisted.symbol,
-                payload_model=persisted,
+        execution_outbox_publisher = getattr(
+            self.owner.runtime,
+            "execution_outbox_publisher",
+            None,
+        )
+        if execution_outbox_publisher is not None:
+            persisted = await execution_outbox_publisher.persist_order_state(
+                order_state=resolved_state,
+                key=resolved_state.symbol,
                 source_component="operator_api",
+                emit_execution_error_summary=False,
+                sync_execution_order_truth=True,
+                history_reason_code="operator_state_sync",
             )
         else:
-            self.owner._append_event(
-                topic=topics.ORDER_UPDATES,
-                key=persisted.symbol,
-                payload_model=persisted,
+            persisted = save_order_state_direct_legacy_only(
+                execution_repo=self.owner.runtime.execution_repo,
+                order_state=resolved_state,
+                source_component="operator_api",
+                logger=self.owner.logger,
             )
+            self.owner._sync_execution_order_truth(persisted)
+            if self.owner.runtime.audit_repo.get(persisted.decision_id) is not None:
+                await publish_model(
+                    bus=self.owner.runtime.bus,
+                    topic=topics.ORDER_UPDATES,
+                    key=persisted.symbol,
+                    payload_model=persisted,
+                    source_component="operator_api",
+                )
+            else:
+                self.owner._append_event(
+                    topic=topics.ORDER_UPDATES,
+                    key=persisted.symbol,
+                    payload_model=persisted,
+                )
         await publish_model(
             bus=self.owner.runtime.bus,
             topic=topics.EXECUTION_ERROR_SUMMARIES,

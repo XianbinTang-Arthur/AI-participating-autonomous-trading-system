@@ -9,6 +9,7 @@ from aats.bootstrap.settings import AATSSettings
 if TYPE_CHECKING:
     from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
     from aats.services.ledger.persistent_lot_book import PersistentLotBookService
+    from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshot, is_trusted_baseline_snapshot
@@ -25,6 +26,7 @@ from aats.services.portfolio_service.position_keys import position_key_for_snaps
 from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
+from aats.services.portfolio_service.snapshot_writer import save_snapshot_direct_legacy_only
 from aats.services.runtime_scope import (
     fills_for_scope,
     latest_reconciliation_for_scope,
@@ -73,6 +75,7 @@ class ExecutionRecoveryService:
         event_store: object | None = None,
         obligation_cache: "ObligationHotStateCache | None" = None,
         persistent_lot_book_service: "PersistentLotBookService | None" = None,
+        portfolio_outbox_publisher: "PostgresPortfolioOutboxPublisher | None" = None,
     ) -> None:
         self.settings = settings
         self.execution_repo = execution_repo
@@ -88,6 +91,7 @@ class ExecutionRecoveryService:
         self.fill_outcome_repo = fill_outcome_repo
         self.event_store = event_store
         self.persistent_lot_book_service = persistent_lot_book_service
+        self.portfolio_outbox_publisher = portfolio_outbox_publisher
         # Stage 6 Slice 6.5：跨进程 obligation 缓存。_cleanup_orphan_obligations
         # 修复遗留 obligation 后会 best-effort 广播到 cache，让后续进程读路径
         # 拿到的是 release 后的状态。None = 未接线（legacy path），行为退化。
@@ -189,7 +193,10 @@ class ExecutionRecoveryService:
                     applied_fill_ids={fill.fill_id for fill in fills},
                     total_fees_paid=PortfolioState.total_fee_delta_in_quote(fills),
                 )
-                self.portfolio_repo.save_snapshot(healed_snapshot)
+                self._persist_recovery_snapshot(
+                    healed_snapshot,
+                    source_component="execution_recovery",
+                )
                 rebuilt_snapshot_saved = True
                 # Note: intentionally NOT setting rebuilt_snapshot_for_event here.
                 # The snapshot is persisted above; publishing it as an event during
@@ -225,7 +232,10 @@ class ExecutionRecoveryService:
                     applied_fill_ids={fill.fill_id for fill in fills},
                     total_fees_paid=PortfolioState.total_fee_delta_in_quote(fills),
                 )
-                self.portfolio_repo.save_snapshot(rebuilt_snapshot)
+                self._persist_recovery_snapshot(
+                    rebuilt_snapshot,
+                    source_component="execution_recovery",
+                )
                 rebuilt_snapshot_saved = True
                 rebuilt_snapshot_for_event = rebuilt_snapshot
                 notes.append("portfolio_rebuilt_from_fills")
@@ -408,6 +418,25 @@ class ExecutionRecoveryService:
             status=status,
             rebuilt_snapshot_saved=rebuilt_snapshot_saved,
             rebuilt_snapshot=rebuilt_snapshot_for_event,
+        )
+
+    def _persist_recovery_snapshot(
+        self,
+        snapshot: PortfolioSnapshot,
+        *,
+        source_component: str,
+    ) -> None:
+        if self.portfolio_outbox_publisher is not None:
+            self.portfolio_outbox_publisher.persist_snapshot_sync(
+                snapshot=snapshot,
+                source_component=source_component,
+            )
+            return
+        save_snapshot_direct_legacy_only(
+            portfolio_repo=self.portfolio_repo,
+            snapshot=snapshot,
+            source_component=source_component,
+            logger=self.logger,
         )
 
     def _rebuild_snapshot_for_validation(

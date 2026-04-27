@@ -25,6 +25,31 @@ class _ExplodingFillOutcomeRepository(PostgresFillOutcomeRepository):
 
 
 class TestPortfolioOutboxPostgres(unittest.IsolatedAsyncioTestCase):
+    async def test_persist_snapshot_writes_snapshot_event_and_outbox(self) -> None:
+        with temporary_postgres_runtime() as (runtime, _admin_engine, _schema_name):
+            bus = InMemoryEventBus()
+            event_store = PostgresEventStore(runtime.session_factory)
+            outbox_repo = PostgresOutboxRepository(runtime.session_factory)
+            publisher = PostgresPortfolioOutboxPublisher(
+                session_factory=runtime.session_factory,
+                event_store=event_store,
+                outbox_repo=outbox_repo,
+                bus=bus,
+                portfolio_repo=PostgresPortfolioRepository(runtime.session_factory),
+                fill_outcome_repo=PostgresFillOutcomeRepository(runtime.session_factory),
+            )
+
+            await publisher.persist_snapshot(
+                snapshot=_snapshot(),
+                source_component="test_recovery",
+            )
+
+            with runtime.session_factory() as session:
+                self.assertEqual(session.scalar(select(func.count()).select_from(PortfolioSnapshotModel)), 1)
+                self.assertEqual(session.scalar(select(func.count()).select_from(FillOutcomeModel)), 0)
+            self.assertEqual(event_store.count(topic=topics.PORTFOLIO_SNAPSHOTS), 1)
+            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
+
     async def test_persist_fill_projection_keeps_snapshot_and_outcome_atomic(self) -> None:
         with temporary_postgres_runtime() as (runtime, _admin_engine, _schema_name):
             bus = InMemoryEventBus()
