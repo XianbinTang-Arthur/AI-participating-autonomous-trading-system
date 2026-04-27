@@ -850,6 +850,69 @@ def test_directional_episode_attribution_truth_summarizes_edge_cost_fill_and_pnl
     assert "budget_scale_applied" in latest["guard_decision"]["reason_codes"]
 
 
+def test_directional_spike_reversion_truth_classifies_adverse_fill_and_reversion() -> None:
+    mod = load_module()
+    decision = {
+        "decision_id": "decision_spike",
+        "created_at": "2026-04-27T05:55:00+08:00",
+        "route_action": "override_target",
+        "fill": {"count": 1},
+        "latest_fill": {
+            "side": "buy",
+            "fill_price": "101.5",
+            "ingestion_ts": "2026-04-27T05:55:20+08:00",
+            "slippage_bps": "12.0",
+        },
+        "pretrade_microstructure": {
+            "status": "verified_pretrade_microstructure_context_present",
+            "decision_context": {
+                "orderbook": {
+                    "mid_price_last": "100",
+                    "spread_bps_mean": "0.2",
+                },
+                "trade_flow": {
+                    "vwap_minus_mid_bps": "14.0",
+                    "trade_flow_imbalance": "0.66",
+                    "taker_buy_ratio": "0.83",
+                },
+            },
+            "latest_fill_context": {
+                "orderbook": {
+                    "mid_price_last": "101.4",
+                },
+                "trade_flow": {},
+            },
+            "post_fill_context": {
+                "orderbook": {
+                    "mid_price_last": "99.0",
+                },
+                "trade_flow": {},
+            },
+        },
+    }
+
+    summary = mod.summarize_directional_spike_reversion_truth(
+        {
+            "status": "verified_directional_episode_edge_cost_pnl_attribution_present",
+            "recent_decisions": [decision],
+            "latest_filled_decision": decision,
+        }
+    )
+    latest = summary["latest_filled_decision"]
+
+    assert summary["status"] == "verified_directional_spike_reversion_execution_context_present"
+    assert summary["smallest_missing_field"] is None
+    assert summary["coverage"]["recent_filled_directional_decision_count"] == 1
+    assert summary["coverage"]["filled_decisions_with_spike_reversion_context"] == 1
+    assert summary["coverage"]["adverse_fill_vs_decision_mid_10bps_count"] == 1
+    assert summary["coverage"]["post_fill_adverse_reversion_10bps_count"] == 1
+    assert summary["coverage"]["decision_trade_flow_dislocation_10bps_count"] == 1
+    assert latest["classification"] == "adverse_fill_and_post_fill_reversion_observed"
+    assert latest["adverse_fill_vs_decision_mid_bps"] == "150"
+    assert latest["post_fill_mid_move_bps"] == "-246.3054187192118226600985222"
+    assert latest["decision_trade_flow_vwap_minus_mid_bps"] == "14.0"
+
+
 def test_directional_episode_pnl_lifecycle_classifies_open_unrealized_position() -> None:
     mod = load_module()
     raw = {
@@ -2017,6 +2080,23 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 },
             },
         },
+        "directional_spike_reversion_truth": {
+            "status": "verified_directional_spike_reversion_execution_context_present",
+            "smallest_missing_field": None,
+            "coverage": {
+                "recent_filled_directional_decision_count": 5,
+                "filled_decisions_with_spike_reversion_context": 5,
+                "adverse_fill_vs_decision_mid_10bps_count": 2,
+                "post_fill_adverse_reversion_10bps_count": 1,
+                "decision_trade_flow_dislocation_10bps_count": 3,
+            },
+            "latest_filled_decision": {
+                "classification": "adverse_fill_vs_decision_mid_observed",
+                "adverse_fill_vs_decision_mid_bps": "27.66",
+                "post_fill_mid_move_bps": "-4.2",
+                "decision_trade_flow_vwap_minus_mid_bps": "-11.78",
+            },
+        },
         "target_convergence_guard_truth": {
             "status": "deployed_no_trigger_no_current_open_orders",
             "smallest_missing_field": None,
@@ -2140,6 +2220,22 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
         "verified_pretrade_microstructure_context_present"
     )
     assert live_facts["latest_directional_episode_pretrade_microstructure_smallest_missing_field"] is None
+    assert (
+        live_facts["directional_spike_reversion_truth_status"]
+        == "verified_directional_spike_reversion_execution_context_present"
+    )
+    assert live_facts["directional_spike_reversion_smallest_missing_field"] is None
+    assert live_facts["directional_spike_reversion_filled_decision_count"] == 5
+    assert live_facts["directional_spike_reversion_context_count"] == 5
+    assert live_facts["directional_spike_reversion_adverse_fill_10bps_count"] == 2
+    assert live_facts["directional_spike_reversion_post_fill_adverse_reversion_10bps_count"] == 1
+    assert live_facts["directional_spike_reversion_trade_flow_dislocation_10bps_count"] == 3
+    assert live_facts["latest_directional_spike_reversion_classification"] == (
+        "adverse_fill_vs_decision_mid_observed"
+    )
+    assert live_facts["latest_directional_spike_reversion_adverse_fill_vs_decision_mid_bps"] == "27.66"
+    assert live_facts["latest_directional_spike_reversion_post_fill_mid_move_bps"] == "-4.2"
+    assert live_facts["latest_directional_spike_reversion_decision_trade_flow_vwap_minus_mid_bps"] == "-11.78"
     assert live_facts["target_convergence_guard_truth_status"] == "deployed_no_trigger_no_current_open_orders"
     assert live_facts["target_convergence_guard_smallest_missing_field"] is None
     assert (

@@ -1083,6 +1083,14 @@ def decimal_add_text(left: Any, right: Any) -> str | None:
     return decimal_plain_text(left_value + right_value)
 
 
+def decimal_bps_change_text(new: Any, old: Any) -> str | None:
+    new_value = decimal_value(new)
+    old_value = decimal_value(old)
+    if new_value is None or old_value is None or old_value == 0:
+        return None
+    return decimal_plain_text((new_value - old_value) / old_value * Decimal("10000"))
+
+
 def decimal_gte(left: Any, right: Any) -> bool | None:
     left_value = decimal_value(left)
     right_value = decimal_value(right)
@@ -2078,6 +2086,30 @@ def _nearest_microstructure_bar_at_or_before(
     return selected, age_seconds
 
 
+def _nearest_microstructure_bar_at_or_after(
+    rows: list[dict[str, Any]],
+    timestamp: Any,
+) -> tuple[dict[str, Any], int | None]:
+    target = parse_utc_timestamp(str(timestamp)) if timestamp is not None else None
+    if target is None:
+        return {}, None
+    selected: dict[str, Any] = {}
+    selected_ts: datetime | None = None
+    for row in rows:
+        row_ts = parse_utc_timestamp(str(row.get("ts"))) if row.get("ts") is not None else None
+        if row_ts is None or row_ts < target:
+            continue
+        if selected_ts is None or row_ts < selected_ts:
+            selected = row
+            selected_ts = row_ts
+    if selected_ts is None:
+        return {}, None
+    age_seconds = seconds_between(target, selected_ts)
+    if age_seconds is None or age_seconds > MICROSTRUCTURE_BAR_MATCH_MAX_AGE_SECONDS:
+        return {}, age_seconds
+    return selected, age_seconds
+
+
 def _microstructure_orderbook_context(row: dict[str, Any], age_seconds: int | None) -> dict[str, Any]:
     if not row:
         return {}
@@ -2111,6 +2143,122 @@ def _microstructure_trade_flow_context(row: dict[str, Any], age_seconds: int | N
     }
 
 
+def _side_adverse_fill_bps(fill_side: Any, fill_price: Any, reference_price: Any) -> str | None:
+    side = str(fill_side or "").lower()
+    fill = decimal_value(fill_price)
+    reference = decimal_value(reference_price)
+    if fill is None or reference is None or reference == 0:
+        return None
+    if side == "buy":
+        return decimal_plain_text((fill - reference) / reference * Decimal("10000"))
+    if side == "sell":
+        return decimal_plain_text((reference - fill) / reference * Decimal("10000"))
+    return None
+
+
+def _side_post_fill_mid_move_bps(fill_side: Any, fill_price: Any, post_fill_mid: Any) -> str | None:
+    side = str(fill_side or "").lower()
+    fill = decimal_value(fill_price)
+    mid = decimal_value(post_fill_mid)
+    if fill is None or mid is None or fill == 0:
+        return None
+    if side == "buy":
+        return decimal_plain_text((mid - fill) / fill * Decimal("10000"))
+    if side == "sell":
+        return decimal_plain_text((fill - mid) / fill * Decimal("10000"))
+    return None
+
+
+def _classify_spike_reversion_context(
+    *,
+    adverse_fill_vs_decision_mid_bps: Any,
+    post_fill_mid_move_bps: Any,
+    decision_vwap_minus_mid_bps: Any,
+) -> str:
+    adverse = decimal_value(adverse_fill_vs_decision_mid_bps)
+    post_move = decimal_value(post_fill_mid_move_bps)
+    vwap_minus_mid = decimal_value(decision_vwap_minus_mid_bps)
+    adverse_10bps = adverse is not None and adverse >= Decimal("10")
+    adverse_reversion_10bps = post_move is not None and post_move <= Decimal("-10")
+    dislocation_10bps = vwap_minus_mid is not None and abs(vwap_minus_mid) >= Decimal("10")
+    if adverse_10bps and adverse_reversion_10bps:
+        return "adverse_fill_and_post_fill_reversion_observed"
+    if adverse_10bps:
+        return "adverse_fill_vs_decision_mid_observed"
+    if adverse_reversion_10bps:
+        return "post_fill_adverse_reversion_observed"
+    if dislocation_10bps:
+        return "decision_bar_trade_flow_dislocation_observed"
+    return "no_large_spike_reversion_context_observed"
+
+
+def _directional_spike_reversion_context(decision: dict[str, Any]) -> dict[str, Any]:
+    latest_fill = as_dict(decision.get("latest_fill"))
+    microstructure = as_dict(decision.get("pretrade_microstructure"))
+    decision_context = as_dict(microstructure.get("decision_context"))
+    latest_fill_context = as_dict(microstructure.get("latest_fill_context"))
+    post_fill_context = as_dict(microstructure.get("post_fill_context"))
+    decision_orderbook = as_dict(decision_context.get("orderbook"))
+    decision_trade_flow = as_dict(decision_context.get("trade_flow"))
+    fill_orderbook = as_dict(latest_fill_context.get("orderbook"))
+    post_fill_orderbook = as_dict(post_fill_context.get("orderbook"))
+    fill_price = latest_fill.get("fill_price")
+    fill_side = latest_fill.get("side")
+    decision_mid = decision_orderbook.get("mid_price_last")
+    fill_bar_mid = fill_orderbook.get("mid_price_last")
+    post_fill_mid = post_fill_orderbook.get("mid_price_last")
+    adverse_fill_vs_decision_mid_bps = _side_adverse_fill_bps(fill_side, fill_price, decision_mid)
+    adverse_fill_vs_fill_bar_mid_bps = _side_adverse_fill_bps(fill_side, fill_price, fill_bar_mid)
+    post_fill_mid_move_bps = _side_post_fill_mid_move_bps(fill_side, fill_price, post_fill_mid)
+    decision_mid_to_fill_bar_mid_bps = decimal_bps_change_text(fill_bar_mid, decision_mid)
+    decision_vwap_minus_mid_bps = decision_trade_flow.get("vwap_minus_mid_bps")
+
+    checks = [
+        ("directional_episode.latest_fill.fill_price", fill_price is not None),
+        ("directional_episode.latest_fill.side", fill_side is not None),
+        ("directional_episode.pretrade_microstructure.decision_mid", decision_mid is not None),
+        ("directional_episode.pretrade_microstructure.fill_bar_mid", fill_bar_mid is not None),
+    ]
+    smallest_missing = next((field for field, passed in checks if not passed), None)
+    status = (
+        "verified_spike_reversion_context_present"
+        if smallest_missing is None
+        else "missing_spike_reversion_context"
+    )
+    classification = (
+        _classify_spike_reversion_context(
+            adverse_fill_vs_decision_mid_bps=adverse_fill_vs_decision_mid_bps,
+            post_fill_mid_move_bps=post_fill_mid_move_bps,
+            decision_vwap_minus_mid_bps=decision_vwap_minus_mid_bps,
+        )
+        if status == "verified_spike_reversion_context_present"
+        else "missing_context"
+    )
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "classification": classification,
+        "decision_id": decision.get("decision_id"),
+        "route_action": decision.get("route_action"),
+        "created_at": decision.get("created_at"),
+        "latest_fill_ts": latest_fill.get("ingestion_ts"),
+        "latest_fill_side": fill_side,
+        "latest_fill_price": decimal_text(fill_price),
+        "decision_mid_price": decimal_text(decision_mid),
+        "fill_bar_mid_price": decimal_text(fill_bar_mid),
+        "post_fill_mid_price": decimal_text(post_fill_mid),
+        "adverse_fill_vs_decision_mid_bps": adverse_fill_vs_decision_mid_bps,
+        "adverse_fill_vs_fill_bar_mid_bps": adverse_fill_vs_fill_bar_mid_bps,
+        "decision_mid_to_fill_bar_mid_bps": decision_mid_to_fill_bar_mid_bps,
+        "post_fill_mid_move_bps": post_fill_mid_move_bps,
+        "decision_trade_flow_vwap_minus_mid_bps": decimal_text(decision_vwap_minus_mid_bps),
+        "decision_trade_flow_imbalance": decimal_text(decision_trade_flow.get("trade_flow_imbalance")),
+        "decision_taker_buy_ratio": decimal_text(decision_trade_flow.get("taker_buy_ratio")),
+        "decision_spread_bps_mean": decimal_text(decision_orderbook.get("spread_bps_mean")),
+        "latest_fill_slippage_bps": latest_fill.get("slippage_bps"),
+    }
+
+
 def _directional_episode_microstructure_context(
     decision: dict[str, Any],
     *,
@@ -2135,12 +2283,24 @@ def _directional_episode_microstructure_context(
     fill_orderbook_age: int | None = None
     fill_trade_flow: dict[str, Any] = {}
     fill_trade_flow_age: int | None = None
+    post_fill_orderbook: dict[str, Any] = {}
+    post_fill_orderbook_age: int | None = None
+    post_fill_trade_flow: dict[str, Any] = {}
+    post_fill_trade_flow_age: int | None = None
     if fill_count > 0:
         fill_orderbook, fill_orderbook_age = _nearest_microstructure_bar_at_or_before(
             orderbook_rows,
             latest_fill_ts,
         )
         fill_trade_flow, fill_trade_flow_age = _nearest_microstructure_bar_at_or_before(
+            trade_flow_rows,
+            latest_fill_ts,
+        )
+        post_fill_orderbook, post_fill_orderbook_age = _nearest_microstructure_bar_at_or_after(
+            orderbook_rows,
+            latest_fill_ts,
+        )
+        post_fill_trade_flow, post_fill_trade_flow_age = _nearest_microstructure_bar_at_or_after(
             trade_flow_rows,
             latest_fill_ts,
         )
@@ -2178,6 +2338,15 @@ def _directional_episode_microstructure_context(
                 "trade_flow": _microstructure_trade_flow_context(fill_trade_flow, fill_trade_flow_age),
             }
             if fill_count > 0
+            else None
+        ),
+        "post_fill_context": (
+            {
+                "latest_fill_ts": latest_fill_ts,
+                "orderbook": _microstructure_orderbook_context(post_fill_orderbook, post_fill_orderbook_age),
+                "trade_flow": _microstructure_trade_flow_context(post_fill_trade_flow, post_fill_trade_flow_age),
+            }
+            if fill_count > 0 and (post_fill_orderbook or post_fill_trade_flow)
             else None
         ),
     }
@@ -3569,6 +3738,66 @@ def summarize_directional_episode_attribution_truth(
     }
 
 
+def summarize_directional_spike_reversion_truth(
+    directional_attribution: dict[str, Any],
+) -> dict[str, Any]:
+    recent = [as_dict(item) for item in as_list(directional_attribution.get("recent_decisions"))]
+    filled = [item for item in recent if int_or_zero(as_dict(item.get("fill")).get("count")) > 0]
+    contexts = [_directional_spike_reversion_context(item) for item in filled]
+    verified_contexts = [
+        item for item in contexts if item.get("status") == "verified_spike_reversion_context_present"
+    ]
+    latest_context = contexts[0] if contexts else {}
+    smallest_missing = latest_context.get("smallest_missing_field") or next(
+        (item.get("smallest_missing_field") for item in contexts if item.get("smallest_missing_field")),
+        None,
+    )
+    adverse_fill_10bps = sum(
+        1
+        for item in verified_contexts
+        if (decimal_value(item.get("adverse_fill_vs_decision_mid_bps")) or Decimal("0")) >= Decimal("10")
+    )
+    post_fill_adverse_reversion_10bps = sum(
+        1
+        for item in verified_contexts
+        if (decimal_value(item.get("post_fill_mid_move_bps")) or Decimal("0")) <= Decimal("-10")
+    )
+    trade_flow_dislocation_10bps = sum(
+        1
+        for item in verified_contexts
+        if abs(decimal_value(item.get("decision_trade_flow_vwap_minus_mid_bps")) or Decimal("0")) >= Decimal("10")
+    )
+    if not filled:
+        status = "no_recent_filled_directional_decisions"
+    elif not verified_contexts:
+        status = "missing_directional_spike_reversion_context"
+    else:
+        status = "verified_directional_spike_reversion_execution_context_present"
+    return {
+        "source": "directional_episode_attribution_truth.pretrade_microstructure",
+        "status": status,
+        "smallest_missing_field": None if verified_contexts else smallest_missing,
+        "coverage": {
+            "recent_filled_directional_decision_count": len(filled),
+            "filled_decisions_with_spike_reversion_context": len(verified_contexts),
+            "adverse_fill_vs_decision_mid_10bps_count": adverse_fill_10bps,
+            "post_fill_adverse_reversion_10bps_count": post_fill_adverse_reversion_10bps,
+            "decision_trade_flow_dislocation_10bps_count": trade_flow_dislocation_10bps,
+        },
+        "latest_filled_decision": latest_context,
+        "recent_contexts": contexts[:6],
+        "interpretation": {
+            "adverse_fill_vs_decision_mid_bps": (
+                "positive means buy filled above decision mid or sell filled below decision mid"
+            ),
+            "post_fill_mid_move_bps": (
+                "positive means post-fill mid moved in fill direction; negative means immediate adverse reversion"
+            ),
+            "thresholds": "10 bps counters are diagnostic only and do not gate execution",
+        },
+    }
+
+
 def git_truth(repo_root: Path, distro: str, wsl_project: str) -> dict[str, Any]:
     win_status = run_command(["git", "status", "--short", "--branch"], cwd=repo_root)
     win_head = run_command(["git", "rev-parse", "HEAD"], cwd=repo_root)
@@ -3726,6 +3955,9 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     directional_command_flow = as_dict(report.get("directional_command_flow_provenance_truth"))
     directional_command_flow_coverage = as_dict(directional_command_flow.get("coverage"))
     directional_attribution = as_dict(report.get("directional_episode_attribution_truth"))
+    directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
+    directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
+    latest_directional_spike_reversion = as_dict(directional_spike_reversion.get("latest_filled_decision"))
     target_convergence_guard = as_dict(report.get("target_convergence_guard_truth"))
     target_convergence_guard_coverage = as_dict(target_convergence_guard.get("coverage"))
     target_convergence_guard_open_orders = as_dict(target_convergence_guard.get("current_open_orders"))
@@ -3936,6 +4168,37 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "latest_directional_episode_pretrade_microstructure_smallest_missing_field": (
             latest_directional_episode_pretrade_microstructure.get("smallest_missing_field")
         ),
+        "directional_spike_reversion_truth_status": directional_spike_reversion.get("status"),
+        "directional_spike_reversion_smallest_missing_field": directional_spike_reversion.get(
+            "smallest_missing_field"
+        ),
+        "directional_spike_reversion_filled_decision_count": directional_spike_reversion_coverage.get(
+            "recent_filled_directional_decision_count"
+        ),
+        "directional_spike_reversion_context_count": directional_spike_reversion_coverage.get(
+            "filled_decisions_with_spike_reversion_context"
+        ),
+        "directional_spike_reversion_adverse_fill_10bps_count": directional_spike_reversion_coverage.get(
+            "adverse_fill_vs_decision_mid_10bps_count"
+        ),
+        "directional_spike_reversion_post_fill_adverse_reversion_10bps_count": (
+            directional_spike_reversion_coverage.get("post_fill_adverse_reversion_10bps_count")
+        ),
+        "directional_spike_reversion_trade_flow_dislocation_10bps_count": (
+            directional_spike_reversion_coverage.get("decision_trade_flow_dislocation_10bps_count")
+        ),
+        "latest_directional_spike_reversion_classification": latest_directional_spike_reversion.get(
+            "classification"
+        ),
+        "latest_directional_spike_reversion_adverse_fill_vs_decision_mid_bps": (
+            latest_directional_spike_reversion.get("adverse_fill_vs_decision_mid_bps")
+        ),
+        "latest_directional_spike_reversion_post_fill_mid_move_bps": latest_directional_spike_reversion.get(
+            "post_fill_mid_move_bps"
+        ),
+        "latest_directional_spike_reversion_decision_trade_flow_vwap_minus_mid_bps": (
+            latest_directional_spike_reversion.get("decision_trade_flow_vwap_minus_mid_bps")
+        ),
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),
         "effective_operating_mode_status": (dashboard.get("effective_operating_mode") or {}).get("status"),
         "profile_auto_control_effective": (dashboard.get("profile_auto_control_effective") or {}).get("value"),
@@ -4117,6 +4380,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["directional_episode_attribution_truth"] = summarize_directional_episode_attribution_truth(
         report["database_truth"],
         report["rdp_microstructure_truth"],
+    )
+    report["directional_spike_reversion_truth"] = summarize_directional_spike_reversion_truth(
+        report["directional_episode_attribution_truth"],
     )
     report["target_convergence_guard_truth"] = summarize_target_convergence_guard_truth(
         report["database_truth"],
