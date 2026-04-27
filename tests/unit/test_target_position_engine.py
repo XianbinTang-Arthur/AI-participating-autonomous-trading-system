@@ -376,6 +376,75 @@ class TestTargetPositionEngine(unittest.TestCase):
         self.assertEqual(target.position_intent, "open_short")
         self.assertNotIn("short_entry_alpha_below_threshold", target.guardrail_flags)
 
+    def test_derivatives_entry_is_blocked_while_target_has_open_order(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                }
+            )
+        )
+        context = self._context(
+            product_type="derivatives",
+            current_exposure_side="flat",
+            current_open_orders=["order_pending_target_convergence"],
+        )
+        baseline = self._baseline(
+            volatility_target_scale=1.0,
+            suggested_position_scale=1.0,
+            direction_bias="long",
+            confidence=0.92,
+        )
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.45, confidence=0.92))
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertEqual(target.position_intent, "hold")
+        self.assertIn("target_convergence_open_orders_block_exposure_increase", target.guardrail_flags)
+
+    def test_derivatives_reduce_is_not_blocked_by_target_open_order_guard(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.1,
+                    "trading_product_type": "derivatives",
+                    "strategy_short_bias_enabled": True,
+                    "strategy_cost_guard_enabled": False,
+                }
+            )
+        )
+        context = self._context(
+            current_position_qty=0.05,
+            product_type="derivatives",
+            current_exposure_side="long",
+            current_open_orders=["order_pending_reduce"],
+        )
+        baseline = self._baseline(
+            direction_bias="long",
+            confidence=0.42,
+            suggested_position_scale=1.0,
+            volatility_target_scale=1.0,
+            factor_scores={
+                "momentum_alpha": 0.05,
+                "trend_alpha": 0.04,
+                "microstructure_alpha": 0.03,
+                "liquidity_scale": 0.9,
+            },
+        ).model_copy(update={"composite_alpha_score": 0.08})
+
+        target = engine.build(context, baseline, self._ai_assessment(direction=0.06, confidence=0.45))
+
+        self.assertGreater(target.target_position_qty, Decimal("0"))
+        self.assertLess(target.target_position_qty, context.current_position_qty)
+        self.assertEqual(target.position_intent, "reduce_long")
+        self.assertIn("alpha_decay_reduce", target.guardrail_flags)
+
     def test_derivatives_short_reversal_uses_independent_short_thresholds(self) -> None:
         engine = TargetPositionEngine(
             settings=AATSSettings.model_validate(
@@ -2141,6 +2210,7 @@ class TestTargetPositionEngine(unittest.TestCase):
         available_trading_equity: Decimal = Decimal("0"),
         market_snapshot: MarketSnapshot | None = None,
         portfolio_snapshot_ref: str = "evt_portfolio",
+        current_open_orders: list[str] | None = None,
     ) -> DecisionContext:
         now = as_of_ts or utc_now()
         derived_long_qty = (
@@ -2308,6 +2378,7 @@ class TestTargetPositionEngine(unittest.TestCase):
             market_last_price=market_last_price,
             available_trading_equity=available_trading_equity,
             market_snapshot=market_snapshot,
+            current_open_orders=current_open_orders or [],
         )
 
     @staticmethod

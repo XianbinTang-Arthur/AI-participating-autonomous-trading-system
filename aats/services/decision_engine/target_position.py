@@ -1377,6 +1377,12 @@ class TargetPositionEngine:
         )
         if trade_kind is None:
             return desired_target_qty
+        if self._target_convergence_blocks_exposure_increase(
+            context=context,
+            trade_kind=trade_kind,
+            guardrail_flags=guardrail_flags,
+        ):
+            return current_position_qty
         target_side = self._exposure_side(desired_target_qty)
         if trade_kind == "entry" and not self._regime_allowed_for_entry(
             baseline.regime,
@@ -1419,6 +1425,20 @@ class TargetPositionEngine:
             guardrail_flags.append(f"{flag_prefix}_signal_edge_below_threshold")
             return current_position_qty
         return desired_target_qty
+
+    @staticmethod
+    def _target_convergence_blocks_exposure_increase(
+        *,
+        context: DecisionContext,
+        trade_kind: str,
+        guardrail_flags: list[str],
+    ) -> bool:
+        if trade_kind not in {"entry", "scale_in", "reversal"}:
+            return False
+        if not any(str(order_id).strip() for order_id in context.current_open_orders):
+            return False
+        guardrail_flags.append("target_convergence_open_orders_block_exposure_increase")
+        return True
 
     def _impulse_entry_chase_guard_reason(
         self,
