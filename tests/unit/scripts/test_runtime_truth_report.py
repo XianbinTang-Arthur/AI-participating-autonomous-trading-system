@@ -176,6 +176,8 @@ def test_db_probe_executable_directional_query_excludes_hold_current_notional() 
     for flag in mod.IMPULSE_CHASE_GUARD_FLAGS:
         assert flag in mod.DB_PROBE
     assert "directional_impulse_chase_guard" in mod.DB_PROBE
+    assert mod.OKX_HEDGE_SCALE_IN_MISMATCH_REASON in mod.DB_PROBE
+    assert "okx_hedge_scale_in_intent" in mod.DB_PROBE
     assert (
         "status not in ('FILLED', 'CANCELED', 'REJECTED', 'BLOCKED', 'DRY_RUN', 'FAILED', 'EXPIRED')"
         in mod.DB_PROBE
@@ -1991,6 +1993,124 @@ def test_directional_impulse_chase_guard_truth_verifies_blocked_entry() -> None:
     assert summary["coverage"]["blocked_live_entry_hits_total"] == 1
     assert summary["latest_guard_hit"]["decision_id"] == "decision_impulse_guard"
     assert summary["latest_guard_hit"]["matched_guard_flags"] == [matched_flag]
+
+
+def test_okx_hedge_scale_in_intent_truth_reports_historical_only_mismatch() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "okx_hedge_scale_in_intent": {
+            "mismatch_reason": mod.OKX_HEDGE_SCALE_IN_MISMATCH_REASON,
+            "history_reason_counts": {"total": 0, "last_24h": 0, "last_1h": 0},
+            "execution_payload_reason_counts": {
+                "total": 151,
+                "last_24h": 150,
+                "last_1h": 0,
+                "latest_created_at": "2026-04-27 06:32:46.981909+08:00",
+            },
+            "order_state_payload_reason_counts": {
+                "total": 151,
+                "last_24h": 150,
+                "last_1h": 0,
+                "latest_created_at": "2026-04-27 06:32:48.913749+08:00",
+            },
+            "open_scale_in_leg_counts": {
+                "total": 151,
+                "last_24h": 150,
+                "last_1h": 0,
+                "latest_created_at": "2026-04-27 06:32:46.981909+08:00",
+            },
+            "latest_mismatches": [
+                {
+                    "created_at": "2026-04-27 06:32:46.981909+08:00",
+                    "order_id": "cl_scale_in",
+                    "position_intent": "scale_in_long",
+                    "side": "buy",
+                    "pos_side": "long",
+                    "leg_action": "open",
+                    "state": "BLOCKED",
+                },
+            ],
+        },
+    }
+    code_markers = {"all_required_markers_present": True}
+
+    summary = mod.summarize_okx_hedge_scale_in_intent_truth(
+        db,
+        {"deployed_matches_windows": True},
+        code_markers,
+        report_generated_at="2026-04-27T11:56:02Z",
+    )
+
+    assert summary["status"] == "historical_scale_in_intent_mismatch_no_recent_hits"
+    assert summary["smallest_missing_field"] is None
+    assert summary["coverage"]["mismatch_24h"] == 150
+    assert summary["coverage"]["mismatch_1h"] == 0
+    assert summary["coverage"]["open_scale_in_leg_total"] == 151
+    assert summary["latest_mismatch_created_at"] == "2026-04-27 06:32:46.981909+08:00"
+
+
+def test_okx_hedge_scale_in_intent_truth_reports_active_mismatch() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "okx_hedge_scale_in_intent": {
+            "mismatch_reason": mod.OKX_HEDGE_SCALE_IN_MISMATCH_REASON,
+            "history_reason_counts": {"total": 0, "last_24h": 0, "last_1h": 0},
+            "execution_payload_reason_counts": {"total": 2, "last_24h": 2, "last_1h": 1},
+            "order_state_payload_reason_counts": {"total": 2, "last_24h": 2, "last_1h": 1},
+            "open_scale_in_leg_counts": {"total": 4, "last_24h": 4, "last_1h": 1},
+            "latest_mismatches": [],
+        },
+    }
+    code_markers = {"all_required_markers_present": True}
+
+    summary = mod.summarize_okx_hedge_scale_in_intent_truth(
+        db,
+        {"deployed_matches_windows": True},
+        code_markers,
+        report_generated_at="2026-04-27T11:56:02Z",
+    )
+
+    assert summary["status"] == "active_scale_in_intent_mismatch_after_alignment"
+    assert summary["smallest_missing_field"] == "recent_okx_hedge_scale_in_mismatch_payload"
+    assert summary["coverage"]["mismatch_1h"] == 1
+
+
+def test_project_live_runtime_facts_exposes_okx_hedge_scale_in_truth() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {"ok": True, "latest_decision": {}, "latest_executable_directional_decision": {}},
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+        "okx_hedge_scale_in_intent_truth": {
+            "status": "historical_scale_in_intent_mismatch_no_recent_hits",
+            "smallest_missing_field": None,
+            "deployed_matches_windows": True,
+            "code": {"all_required_markers_present": True},
+            "coverage": {
+                "mismatch_total": 151,
+                "mismatch_24h": 150,
+                "mismatch_1h": 0,
+                "open_scale_in_leg_total": 151,
+                "open_scale_in_leg_24h": 150,
+                "open_scale_in_leg_1h": 0,
+            },
+            "latest_mismatch_created_at": "2026-04-27 06:32:46.981909+08:00",
+        },
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["okx_hedge_scale_in_intent_truth_status"] == (
+        "historical_scale_in_intent_mismatch_no_recent_hits"
+    )
+    assert live_facts["okx_hedge_scale_in_intent_code_present"] is True
+    assert live_facts["okx_hedge_scale_in_intent_mismatch_24h"] == 150
+    assert live_facts["okx_hedge_scale_in_intent_mismatch_1h"] == 0
+    assert live_facts["okx_hedge_scale_in_open_leg_total"] == 151
 
 
 def test_artifact_last_known_is_non_authoritative_when_live_fact_differs(tmp_path: Path) -> None:

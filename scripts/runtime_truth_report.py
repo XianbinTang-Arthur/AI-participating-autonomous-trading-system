@@ -82,6 +82,18 @@ IMPULSE_CHASE_GUARD_CODE_MARKERS = (
     "impulse_entry_post_spike_pullback_unconfirmed",
     "impulse_entry_extreme_chase_unconfirmed",
 )
+OKX_HEDGE_SCALE_IN_MISMATCH_REASON = "okx_leg_action_mismatch_with_position_intent"
+OKX_HEDGE_SCALE_IN_CODE_MARKERS = {
+    "aats/schemas/execution.py": (
+        "def position_intent_matches_leg_intent",
+        'compatible.update({"scale_in_long", "reverse_to_long"})',
+        'compatible.update({"scale_in_short", "reverse_to_short"})',
+    ),
+    "aats/services/execution_engine/okx_adapter.py": (
+        "position_intent_matches_leg_intent(",
+        "okx_leg_action_mismatch_with_position_intent",
+    ),
+}
 
 SECRET_PATTERNS = (
     re.compile(r"(?i)(postgres(?:ql)?(?:\+[a-z0-9_]+)?://)[^\s'\"<>]+"),
@@ -403,6 +415,83 @@ with engine.connect() as conn:
         "coverage": impulse_chase_guard_coverage,
         "flag_hits_total": impulse_chase_flag_hits_total,
         "latest_guard_hit": impulse_chase_guard_hit_summary(latest_impulse_chase_guard_hit),
+    }
+    okx_scale_in_mismatch_reason = "okx_leg_action_mismatch_with_position_intent"
+    okx_scale_in_mismatch_needle = f"%{okx_scale_in_mismatch_reason}%"
+
+    def count_row_with_windows(table_sql, params):
+        return dict(conn.execute(text(table_sql), params).mappings().first() or {})
+
+    okx_scale_in_history_counts = count_row_with_windows(
+        "select count(*) as total, "
+        "       count(*) filter (where created_at >= now() - interval '24 hour') as last_24h, "
+        "       count(*) filter (where created_at >= now() - interval '1 hour') as last_1h, "
+        "       max(created_at) as latest_created_at "
+        "from execution_order_state_history "
+        "where reason_code = :reason",
+        {"reason": okx_scale_in_mismatch_reason},
+    )
+    okx_scale_in_execution_payload_counts = count_row_with_windows(
+        "select count(*) as total, "
+        "       count(*) filter (where created_at >= now() - interval '24 hour') as last_24h, "
+        "       count(*) filter (where created_at >= now() - interval '1 hour') as last_1h, "
+        "       max(created_at) as latest_created_at "
+        "from execution_orders "
+        "where raw_payload::text like :needle",
+        {"needle": okx_scale_in_mismatch_needle},
+    )
+    okx_scale_in_order_state_payload_counts = count_row_with_windows(
+        "select count(*) as total, "
+        "       count(*) filter (where created_at >= now() - interval '24 hour') as last_24h, "
+        "       count(*) filter (where created_at >= now() - interval '1 hour') as last_1h, "
+        "       max(created_at) as latest_created_at "
+        "from order_states "
+        "where payload::text like :needle",
+        {"needle": okx_scale_in_mismatch_needle},
+    )
+    okx_scale_in_open_leg_counts = count_row_with_windows(
+        "select count(*) as total, "
+        "       count(*) filter (where created_at >= now() - interval '24 hour') as last_24h, "
+        "       count(*) filter (where created_at >= now() - interval '1 hour') as last_1h, "
+        "       max(created_at) as latest_created_at "
+        "from execution_orders "
+        "where symbol = :symbol "
+        "  and position_intent in ('scale_in_long', 'scale_in_short') "
+        "  and coalesce(raw_payload ->> 'leg_action', '') = 'open'",
+        {"symbol": symbol},
+    )
+    latest_okx_scale_in_mismatch_rows = conn.execute(text(
+        "select created_at, order_id, position_intent, side, pos_side, state, "
+        "       raw_payload ->> 'leg_action' as raw_leg_action, "
+        "       raw_payload ->> 'status' as raw_status "
+        "from execution_orders "
+        "where raw_payload::text like :needle "
+        "order by created_at desc limit 5"
+    ), {"needle": okx_scale_in_mismatch_needle}).mappings().all()
+
+    def okx_scale_in_mismatch_summary(row):
+        return {
+            "created_at": row.get("created_at"),
+            "order_id": row.get("order_id"),
+            "position_intent": row.get("position_intent"),
+            "side": row.get("side"),
+            "pos_side": row.get("pos_side"),
+            "leg_action": row.get("raw_leg_action"),
+            "state": row.get("state"),
+            "raw_status": row.get("raw_status"),
+        }
+
+    okx_hedge_scale_in_intent = {
+        "symbol": symbol,
+        "mismatch_reason": okx_scale_in_mismatch_reason,
+        "history_reason_counts": okx_scale_in_history_counts,
+        "execution_payload_reason_counts": okx_scale_in_execution_payload_counts,
+        "order_state_payload_reason_counts": okx_scale_in_order_state_payload_counts,
+        "open_scale_in_leg_counts": okx_scale_in_open_leg_counts,
+        "latest_mismatches": [
+            okx_scale_in_mismatch_summary(row)
+            for row in latest_okx_scale_in_mismatch_rows
+        ],
     }
     slippage_cost_row = conn.execute(text(
         "with command_refs as ("
@@ -875,6 +964,7 @@ print(json.dumps({
     "directional_episode_attribution": directional_episode_attribution,
     "target_convergence_guard": target_convergence_guard,
     "directional_impulse_chase_guard": directional_impulse_chase_guard,
+    "okx_hedge_scale_in_intent": okx_hedge_scale_in_intent,
 }, default=str, sort_keys=True))
 """
 
@@ -3241,6 +3331,145 @@ def summarize_directional_impulse_chase_guard_truth(
     }
 
 
+def okx_hedge_scale_in_code_markers(repo_root: Path) -> dict[str, Any]:
+    files: dict[str, dict[str, Any]] = {}
+    missing_all: list[str] = []
+    present_all: list[str] = []
+    for relative_path, markers in OKX_HEDGE_SCALE_IN_CODE_MARKERS.items():
+        source_path = repo_root / relative_path
+        if not source_path.exists():
+            files[relative_path] = {
+                "source_file_present": False,
+                "present_markers": [],
+                "missing_markers": list(markers),
+            }
+            missing_all.extend(f"{relative_path}:{marker}" for marker in markers)
+            continue
+        source = source_path.read_text(encoding="utf-8", errors="replace")
+        present = [marker for marker in markers if marker in source]
+        missing = [marker for marker in markers if marker not in source]
+        files[relative_path] = {
+            "source_file_present": True,
+            "present_markers": present,
+            "missing_markers": missing,
+        }
+        present_all.extend(f"{relative_path}:{marker}" for marker in present)
+        missing_all.extend(f"{relative_path}:{marker}" for marker in missing)
+    return {
+        "all_required_markers_present": not missing_all,
+        "files": files,
+        "present_markers": present_all,
+        "missing_markers": missing_all,
+    }
+
+
+def summarize_okx_hedge_scale_in_intent_truth(
+    db: dict[str, Any],
+    git: dict[str, Any],
+    code_markers: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    raw = as_dict(db.get("okx_hedge_scale_in_intent"))
+    code_present = bool(code_markers.get("all_required_markers_present"))
+    if not code_present:
+        return {
+            "status": "missing_okx_hedge_scale_in_code_markers",
+            "smallest_missing_field": "execution_scale_in_intent_compatibility_code_markers",
+            "report_generated_at": report_generated_at,
+            "code": code_markers,
+            "interpretation": "source code does not contain the full scale-in/open-leg compatibility marker set",
+        }
+    if not db.get("ok"):
+        return {
+            "status": "missing_database_truth",
+            "smallest_missing_field": "database_truth",
+            "report_generated_at": report_generated_at,
+            "code": code_markers,
+            "interpretation": "database probe did not return authoritative OKX hedge scale-in facts",
+        }
+    if not raw:
+        return {
+            "status": "missing_okx_hedge_scale_in_intent_probe",
+            "smallest_missing_field": "database_truth.okx_hedge_scale_in_intent",
+            "report_generated_at": report_generated_at,
+            "code": code_markers,
+            "interpretation": "runtime truth report lacks OKX hedge scale-in compatibility coverage",
+        }
+
+    history_counts = as_dict(raw.get("history_reason_counts"))
+    execution_counts = as_dict(raw.get("execution_payload_reason_counts"))
+    order_state_counts = as_dict(raw.get("order_state_payload_reason_counts"))
+    open_scale_counts = as_dict(raw.get("open_scale_in_leg_counts"))
+
+    mismatch_total = max(
+        int_or_zero(history_counts.get("total")),
+        int_or_zero(execution_counts.get("total")),
+        int_or_zero(order_state_counts.get("total")),
+    )
+    mismatch_24h = max(
+        int_or_zero(history_counts.get("last_24h")),
+        int_or_zero(execution_counts.get("last_24h")),
+        int_or_zero(order_state_counts.get("last_24h")),
+    )
+    mismatch_1h = max(
+        int_or_zero(history_counts.get("last_1h")),
+        int_or_zero(execution_counts.get("last_1h")),
+        int_or_zero(order_state_counts.get("last_1h")),
+    )
+    open_scale_total = int_or_zero(open_scale_counts.get("total"))
+    open_scale_24h = int_or_zero(open_scale_counts.get("last_24h"))
+    open_scale_1h = int_or_zero(open_scale_counts.get("last_1h"))
+    deployed_matches_windows = git.get("deployed_matches_windows")
+
+    status = "verified_scale_in_open_leg_semantics"
+    smallest_missing_field = None
+    interpretation = "OKX hedge open-leg scale-in semantics are code-compatible and no mismatch is active"
+    if deployed_matches_windows is False:
+        status = "deployment_mismatch_scale_in_truth_not_authoritative"
+        smallest_missing_field = "deployed_head_matches_windows_head"
+        interpretation = "runtime may not be running the local scale-in compatibility implementation"
+    elif mismatch_1h > 0:
+        status = "active_scale_in_intent_mismatch_after_alignment"
+        smallest_missing_field = "recent_okx_hedge_scale_in_mismatch_payload"
+        interpretation = "scale-in/open-leg mismatch is still appearing in recent runtime payloads"
+    elif mismatch_24h > 0 or mismatch_total > 0:
+        status = "historical_scale_in_intent_mismatch_no_recent_hits"
+        interpretation = "historical scale-in/open-leg mismatch rows exist, but no recent active hit is visible"
+    elif open_scale_total == 0:
+        status = "deployed_no_scale_in_samples"
+        interpretation = "code is compatible, but no scale-in/open-leg runtime sample is present"
+
+    latest_mismatches = as_list(raw.get("latest_mismatches"))
+    latest_created_at = None
+    if latest_mismatches and isinstance(latest_mismatches[0], dict):
+        latest_created_at = latest_mismatches[0].get("created_at")
+
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing_field,
+        "report_generated_at": report_generated_at,
+        "deployed_matches_windows": deployed_matches_windows,
+        "mismatch_reason": raw.get("mismatch_reason") or OKX_HEDGE_SCALE_IN_MISMATCH_REASON,
+        "code": code_markers,
+        "coverage": {
+            "mismatch_total": mismatch_total,
+            "mismatch_24h": mismatch_24h,
+            "mismatch_1h": mismatch_1h,
+            "open_scale_in_leg_total": open_scale_total,
+            "open_scale_in_leg_24h": open_scale_24h,
+            "open_scale_in_leg_1h": open_scale_1h,
+            "history_reason_counts": history_counts,
+            "execution_payload_reason_counts": execution_counts,
+            "order_state_payload_reason_counts": order_state_counts,
+            "open_scale_in_leg_counts": open_scale_counts,
+        },
+        "latest_mismatch_created_at": latest_created_at,
+        "latest_mismatches": latest_mismatches,
+        "interpretation": interpretation,
+    }
+
+
 def summarize_microstructure_table(
     raw: dict[str, Any],
     *,
@@ -4178,6 +4407,9 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     directional_impulse_chase_guard_latest_hit = as_dict(
         directional_impulse_chase_guard.get("latest_guard_hit")
     )
+    okx_hedge_scale_in_intent = as_dict(report.get("okx_hedge_scale_in_intent_truth"))
+    okx_hedge_scale_in_intent_code = as_dict(okx_hedge_scale_in_intent.get("code"))
+    okx_hedge_scale_in_intent_coverage = as_dict(okx_hedge_scale_in_intent.get("coverage"))
     directional_attribution_coverage = as_dict(directional_attribution.get("coverage"))
     directional_pretrade_microstructure = as_dict(directional_attribution.get("pretrade_microstructure"))
     directional_pretrade_microstructure_coverage = as_dict(
@@ -4375,6 +4607,37 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "directional_impulse_chase_guard_latest_hit_matched_flags": (
             directional_impulse_chase_guard_latest_hit.get("matched_guard_flags")
+        ),
+        "okx_hedge_scale_in_intent_truth_status": okx_hedge_scale_in_intent.get("status"),
+        "okx_hedge_scale_in_intent_smallest_missing_field": okx_hedge_scale_in_intent.get(
+            "smallest_missing_field"
+        ),
+        "okx_hedge_scale_in_intent_code_present": okx_hedge_scale_in_intent_code.get(
+            "all_required_markers_present"
+        ),
+        "okx_hedge_scale_in_intent_deployed_matches_windows": okx_hedge_scale_in_intent.get(
+            "deployed_matches_windows"
+        ),
+        "okx_hedge_scale_in_intent_mismatch_total": okx_hedge_scale_in_intent_coverage.get(
+            "mismatch_total"
+        ),
+        "okx_hedge_scale_in_intent_mismatch_24h": okx_hedge_scale_in_intent_coverage.get(
+            "mismatch_24h"
+        ),
+        "okx_hedge_scale_in_intent_mismatch_1h": okx_hedge_scale_in_intent_coverage.get(
+            "mismatch_1h"
+        ),
+        "okx_hedge_scale_in_open_leg_total": okx_hedge_scale_in_intent_coverage.get(
+            "open_scale_in_leg_total"
+        ),
+        "okx_hedge_scale_in_open_leg_24h": okx_hedge_scale_in_intent_coverage.get(
+            "open_scale_in_leg_24h"
+        ),
+        "okx_hedge_scale_in_open_leg_1h": okx_hedge_scale_in_intent_coverage.get(
+            "open_scale_in_leg_1h"
+        ),
+        "okx_hedge_scale_in_intent_latest_mismatch_created_at": (
+            okx_hedge_scale_in_intent.get("latest_mismatch_created_at")
         ),
         "directional_episode_recent_decision_count": directional_attribution_coverage.get("recent_decision_count"),
         "directional_episode_decisions_with_edge_cost": directional_attribution_coverage.get(
@@ -4646,6 +4909,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         report["database_truth"],
         report["git"],
         directional_impulse_chase_guard_code_markers(repo_root),
+        report_generated_at=generated_at,
+    )
+    report["okx_hedge_scale_in_intent_truth"] = summarize_okx_hedge_scale_in_intent_truth(
+        report["database_truth"],
+        report["git"],
+        okx_hedge_scale_in_code_markers(repo_root),
         report_generated_at=generated_at,
     )
     report["runtime"]["ai_timeout_active_blocker"] = False
