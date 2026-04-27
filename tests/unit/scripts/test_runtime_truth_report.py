@@ -171,6 +171,12 @@ def test_db_probe_executable_directional_query_excludes_hold_current_notional() 
     assert "route_action not in ('advisory_only', 'hold_current')" in mod.DB_PROBE
     assert "coalesce(portfolio_requested_notional, 0) <> 0" not in mod.DB_PROBE
     assert "coalesce(portfolio_approved_notional, 0) <> 0" not in mod.DB_PROBE
+    assert mod.TARGET_CONVERGENCE_GUARD_FLAG in mod.DB_PROBE
+    assert "target_convergence_guard" in mod.DB_PROBE
+    assert (
+        "status not in ('FILLED', 'CANCELED', 'REJECTED', 'BLOCKED', 'DRY_RUN', 'FAILED', 'EXPIRED')"
+        in mod.DB_PROBE
+    )
 
 
 def test_parse_db_probe_returns_only_json_payload() -> None:
@@ -1634,6 +1640,99 @@ def test_blocking_findings_separate_report_generation_from_runtime_state() -> No
     assert mod.collect_blocking_findings(report) == ["windows_worktree_dirty"]
 
 
+def test_target_convergence_guard_truth_reports_exact_no_trigger_reason() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "target_convergence_guard": {
+            "symbol": "BTC-USDT-SWAP",
+            "guard_flag": mod.TARGET_CONVERGENCE_GUARD_FLAG,
+            "coverage": {
+                "directional_decisions_total": 31,
+                "directional_decisions_24h": 4,
+                "directional_decisions_1h": 0,
+                "guard_hits_total": 0,
+                "guard_hits_24h": 0,
+                "guard_hits_1h": 0,
+            },
+            "current_open_orders": {
+                "execution_orders": {
+                    "open_order_count": 0,
+                    "directional_open_order_count": 0,
+                    "states": None,
+                },
+                "legacy_order_states": {
+                    "open_order_count": 0,
+                    "directional_open_order_count": 0,
+                    "states": None,
+                },
+            },
+            "latest_guard_hit": None,
+        },
+    }
+
+    summary = mod.summarize_target_convergence_guard_truth(
+        db,
+        {"deployed_matches_windows": True},
+        report_generated_at="2026-04-27T07:46:34Z",
+    )
+
+    assert summary["status"] == "deployed_no_trigger_no_recent_decisions_no_open_orders"
+    assert summary["smallest_missing_field"] is None
+    assert summary["coverage"]["directional_decisions_1h"] == 0
+    assert summary["coverage"]["guard_hits_1h"] == 0
+    assert summary["current_open_orders"]["total_open_order_count"] == 0
+    assert "no current open order condition" in summary["interpretation"]
+
+
+def test_target_convergence_guard_truth_verifies_guard_hit() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "target_convergence_guard": {
+            "symbol": "BTC-USDT-SWAP",
+            "guard_flag": mod.TARGET_CONVERGENCE_GUARD_FLAG,
+            "coverage": {
+                "directional_decisions_total": 32,
+                "directional_decisions_24h": 5,
+                "directional_decisions_1h": 2,
+                "guard_hits_total": 1,
+                "guard_hits_24h": 1,
+                "guard_hits_1h": 1,
+            },
+            "current_open_orders": {
+                "execution_orders": {
+                    "open_order_count": 1,
+                    "directional_open_order_count": 1,
+                    "states": "SUBMITTING",
+                },
+                "legacy_order_states": {
+                    "open_order_count": 0,
+                    "directional_open_order_count": 0,
+                    "states": None,
+                },
+            },
+            "latest_guard_hit": {
+                "decision_id": "decision_guard",
+                "created_at": "2026-04-27T07:44:00Z",
+                "route_action": "hold_current",
+            },
+        },
+    }
+
+    summary = mod.summarize_target_convergence_guard_truth(
+        db,
+        {"deployed_matches_windows": True},
+        report_generated_at="2026-04-27T07:46:34Z",
+    )
+
+    assert summary["status"] == "verified_guard_triggered"
+    assert summary["smallest_missing_field"] is None
+    assert summary["coverage"]["guard_hits_total"] == 1
+    assert summary["current_open_orders"]["total_open_order_count"] == 1
+    assert summary["latest_guard_hit"]["decision_id"] == "decision_guard"
+
+
 def test_artifact_last_known_is_non_authoritative_when_live_fact_differs(tmp_path: Path) -> None:
     mod = load_module()
     artifact_dir = tmp_path / "artifacts" / "automation"
@@ -1806,6 +1905,25 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 },
             },
         },
+        "target_convergence_guard_truth": {
+            "status": "deployed_no_trigger_no_current_open_orders",
+            "smallest_missing_field": None,
+            "guard_flag": "target_convergence_open_orders_block_exposure_increase",
+            "coverage": {
+                "directional_decisions_total": 31,
+                "directional_decisions_24h": 7,
+                "directional_decisions_1h": 2,
+                "guard_hits_total": 0,
+                "guard_hits_24h": 0,
+                "guard_hits_1h": 0,
+            },
+            "current_open_orders": {
+                "total_open_order_count": 0,
+                "execution_orders_open_order_count": 0,
+                "legacy_order_states_open_order_count": 0,
+            },
+            "latest_guard_hit": None,
+        },
         "git": {
             "deployed_matches_windows": True,
             "windows": {
@@ -1899,6 +2017,17 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
         "verified_pretrade_microstructure_context_present"
     )
     assert live_facts["latest_directional_episode_pretrade_microstructure_smallest_missing_field"] is None
+    assert live_facts["target_convergence_guard_truth_status"] == "deployed_no_trigger_no_current_open_orders"
+    assert live_facts["target_convergence_guard_smallest_missing_field"] is None
+    assert (
+        live_facts["target_convergence_guard_flag"]
+        == "target_convergence_open_orders_block_exposure_increase"
+    )
+    assert live_facts["target_convergence_guard_directional_decisions_1h"] == 2
+    assert live_facts["target_convergence_guard_hits_24h"] == 0
+    assert live_facts["target_convergence_guard_hits_1h"] == 0
+    assert live_facts["target_convergence_guard_current_open_order_count"] == 0
+    assert live_facts["target_convergence_guard_latest_hit_decision_id"] is None
     assert authority["authoritative_source"] == "runtime.live_runtime_facts"
     assert authority["artifact_may_override_live"] is False
 

@@ -68,6 +68,7 @@ SOFT_CONTRIBUTING_REASON_CODES = {
     "no_budget_contraction",
     "reconciliation_contraction_active",
 }
+TARGET_CONVERGENCE_GUARD_FLAG = "target_convergence_open_orders_block_exposure_increase"
 
 SECRET_PATTERNS = (
     re.compile(r"(?i)(postgres(?:ql)?(?:\+[a-z0-9_]+)?://)[^\s'\"<>]+"),
@@ -255,6 +256,60 @@ with engine.connect() as conn:
     latest_executable_directional_audit, latest_executable_directional_counts = decision_audit_and_counts(
         latest_executable_directional
     )
+    target_convergence_guard_flag = "target_convergence_open_orders_block_exposure_increase"
+    target_convergence_guard_coverage = dict(conn.execute(text(
+        "select count(*) as directional_decisions_total, "
+        "       count(*) filter (where created_at >= now() - interval '24 hour') as directional_decisions_24h, "
+        "       count(*) filter (where created_at >= now() - interval '1 hour') as directional_decisions_1h, "
+        "       count(*) filter (where payload::text like '%' || :guard_flag || '%') as guard_hits_total, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '24 hour' "
+        "           and payload::text like '%' || :guard_flag || '%'"
+        "       ) as guard_hits_24h, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '1 hour' "
+        "           and payload::text like '%' || :guard_flag || '%'"
+        "       ) as guard_hits_1h "
+        "from portfolio_allocation_decisions "
+        "where symbol = :symbol and primary_family = 'directional'"
+    ), {"symbol": symbol, "guard_flag": target_convergence_guard_flag}).mappings().first() or {})
+    latest_target_convergence_guard_hit = conn.execute(text(
+        "select decision_id, created_at, route_action, expected_edge_bps, expected_cost_bps "
+        "from portfolio_allocation_decisions "
+        "where symbol = :symbol and primary_family = 'directional' "
+        "and payload::text like '%' || :guard_flag || '%' "
+        "order by created_at desc limit 1"
+    ), {"symbol": symbol, "guard_flag": target_convergence_guard_flag}).mappings().first()
+    execution_open_orders = dict(conn.execute(text(
+        "select count(*) as open_order_count, "
+        "       count(*) filter (where strategy_family = 'directional') as directional_open_order_count, "
+        "       min(created_at) as oldest_open_order_created_at, "
+        "       max(updated_at) as latest_open_order_updated_at, "
+        "       string_agg(distinct coalesce(state, 'null'), ',' order by coalesce(state, 'null')) as states "
+        "from execution_orders "
+        "where symbol = :symbol "
+        "and state not in ('FILLED', 'CANCELED', 'REJECTED', 'BLOCKED', 'DRY_RUN', 'FAILED', 'EXPIRED')"
+    ), {"symbol": symbol}).mappings().first() or {})
+    legacy_open_order_states = dict(conn.execute(text(
+        "select count(*) as open_order_count, "
+        "       count(*) filter (where strategy_family = 'directional') as directional_open_order_count, "
+        "       min(created_at) as oldest_open_order_created_at, "
+        "       max(last_update_ts) as latest_open_order_updated_at, "
+        "       string_agg(distinct coalesce(status, 'null'), ',' order by coalesce(status, 'null')) as states "
+        "from order_states "
+        "where symbol = :symbol "
+        "and status not in ('FILLED', 'CANCELED', 'REJECTED', 'BLOCKED', 'DRY_RUN', 'FAILED', 'EXPIRED')"
+    ), {"symbol": symbol}).mappings().first() or {})
+    target_convergence_guard = {
+        "symbol": symbol,
+        "guard_flag": target_convergence_guard_flag,
+        "coverage": target_convergence_guard_coverage,
+        "latest_guard_hit": dict(latest_target_convergence_guard_hit) if latest_target_convergence_guard_hit else None,
+        "current_open_orders": {
+            "execution_orders": execution_open_orders,
+            "legacy_order_states": legacy_open_order_states,
+        },
+    }
     slippage_cost_row = conn.execute(text(
         "with command_refs as ("
         "  select order_id, "
@@ -724,6 +779,7 @@ print(json.dumps({
     "runtime_config": runtime_config,
     "slippage_cost_calibration": slippage_cost_calibration,
     "directional_episode_attribution": directional_episode_attribution,
+    "target_convergence_guard": target_convergence_guard,
 }, default=str, sort_keys=True))
 """
 
@@ -2707,6 +2763,107 @@ def int_or_zero(value: Any) -> int:
         return 0
 
 
+def summarize_target_convergence_guard_truth(
+    db: dict[str, Any],
+    git: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    raw = as_dict(db.get("target_convergence_guard"))
+    if not db.get("ok"):
+        return {
+            "status": "missing_database_truth",
+            "smallest_missing_field": "database_truth",
+            "guard_flag": TARGET_CONVERGENCE_GUARD_FLAG,
+            "report_generated_at": report_generated_at,
+            "interpretation": "database probe did not return authoritative live facts",
+        }
+    if not raw:
+        return {
+            "status": "missing_target_convergence_guard_probe",
+            "smallest_missing_field": "database_truth.target_convergence_guard",
+            "guard_flag": TARGET_CONVERGENCE_GUARD_FLAG,
+            "report_generated_at": report_generated_at,
+            "interpretation": "runtime truth report lacks target convergence guard coverage",
+        }
+
+    coverage = as_dict(raw.get("coverage"))
+    current = as_dict(raw.get("current_open_orders"))
+    execution_orders = as_dict(current.get("execution_orders"))
+    legacy_order_states = as_dict(current.get("legacy_order_states"))
+    execution_open_count = int_or_zero(execution_orders.get("open_order_count"))
+    legacy_open_count = int_or_zero(legacy_order_states.get("open_order_count"))
+    current_open_order_count = execution_open_count + legacy_open_count
+    guard_hits_total = int_or_zero(coverage.get("guard_hits_total"))
+    guard_hits_24h = int_or_zero(coverage.get("guard_hits_24h"))
+    guard_hits_1h = int_or_zero(coverage.get("guard_hits_1h"))
+    recent_decisions_1h = int_or_zero(coverage.get("directional_decisions_1h"))
+    deployed_matches_windows = git.get("deployed_matches_windows")
+
+    status = "pending_guard_trigger_sample"
+    smallest_missing_field = None
+    interpretation = "guard deployed but no qualifying trigger sample has appeared yet"
+    if deployed_matches_windows is False:
+        status = "deployment_mismatch_guard_truth_not_authoritative"
+        smallest_missing_field = "deployed_head_matches_windows_head"
+        interpretation = "runtime may not be running the local guard implementation"
+    elif guard_hits_total > 0:
+        status = "verified_guard_triggered"
+        interpretation = "at least one directional decision carries the target convergence guard flag"
+    elif current_open_order_count == 0 and recent_decisions_1h == 0:
+        status = "deployed_no_trigger_no_recent_decisions_no_open_orders"
+        interpretation = "no current open order condition and no recent directional decision sample to trigger the guard"
+    elif current_open_order_count == 0:
+        status = "deployed_no_trigger_no_current_open_orders"
+        interpretation = "recent decisions did not have current open orders, so the guard condition was false"
+    elif recent_decisions_1h == 0:
+        status = "deployed_no_trigger_no_recent_decisions"
+        interpretation = "open orders exist, but no recent directional decision sampled the guard path"
+    else:
+        status = "pending_open_orders_no_guard_hit"
+        smallest_missing_field = TARGET_CONVERGENCE_GUARD_FLAG
+        interpretation = "open orders and recent directional decisions exist, but no guard hit is visible yet"
+
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing_field,
+        "guard_flag": raw.get("guard_flag") or TARGET_CONVERGENCE_GUARD_FLAG,
+        "report_generated_at": report_generated_at,
+        "deployed_matches_windows": deployed_matches_windows,
+        "coverage": {
+            "directional_decisions_total": int_or_zero(coverage.get("directional_decisions_total")),
+            "directional_decisions_24h": int_or_zero(coverage.get("directional_decisions_24h")),
+            "directional_decisions_1h": recent_decisions_1h,
+            "guard_hits_total": guard_hits_total,
+            "guard_hits_24h": guard_hits_24h,
+            "guard_hits_1h": guard_hits_1h,
+        },
+        "current_open_orders": {
+            "total_open_order_count": current_open_order_count,
+            "execution_orders_open_order_count": execution_open_count,
+            "execution_orders_directional_open_order_count": int_or_zero(
+                execution_orders.get("directional_open_order_count")
+            ),
+            "execution_orders_states": execution_orders.get("states"),
+            "execution_orders_oldest_open_order_created_at": execution_orders.get("oldest_open_order_created_at"),
+            "execution_orders_latest_open_order_updated_at": execution_orders.get("latest_open_order_updated_at"),
+            "legacy_order_states_open_order_count": legacy_open_count,
+            "legacy_order_states_directional_open_order_count": int_or_zero(
+                legacy_order_states.get("directional_open_order_count")
+            ),
+            "legacy_order_states_states": legacy_order_states.get("states"),
+            "legacy_order_states_oldest_open_order_created_at": legacy_order_states.get(
+                "oldest_open_order_created_at"
+            ),
+            "legacy_order_states_latest_open_order_updated_at": legacy_order_states.get(
+                "latest_open_order_updated_at"
+            ),
+        },
+        "latest_guard_hit": raw.get("latest_guard_hit"),
+        "interpretation": interpretation,
+    }
+
+
 def summarize_microstructure_table(
     raw: dict[str, Any],
     *,
@@ -3451,6 +3608,10 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     slippage_proxy = as_dict(slippage_cost.get("slippage_proxy"))
     slippage_coverage = as_dict(slippage_proxy.get("coverage_audit"))
     directional_attribution = as_dict(report.get("directional_episode_attribution_truth"))
+    target_convergence_guard = as_dict(report.get("target_convergence_guard_truth"))
+    target_convergence_guard_coverage = as_dict(target_convergence_guard.get("coverage"))
+    target_convergence_guard_open_orders = as_dict(target_convergence_guard.get("current_open_orders"))
+    target_convergence_guard_latest_hit = as_dict(target_convergence_guard.get("latest_guard_hit"))
     directional_attribution_coverage = as_dict(directional_attribution.get("coverage"))
     directional_pretrade_microstructure = as_dict(directional_attribution.get("pretrade_microstructure"))
     directional_pretrade_microstructure_coverage = as_dict(
@@ -3577,6 +3738,19 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "directional_episode_attribution_smallest_missing_field": directional_attribution.get(
             "smallest_missing_field"
         ),
+        "target_convergence_guard_truth_status": target_convergence_guard.get("status"),
+        "target_convergence_guard_smallest_missing_field": target_convergence_guard.get("smallest_missing_field"),
+        "target_convergence_guard_flag": target_convergence_guard.get("guard_flag"),
+        "target_convergence_guard_directional_decisions_1h": target_convergence_guard_coverage.get(
+            "directional_decisions_1h"
+        ),
+        "target_convergence_guard_hits_24h": target_convergence_guard_coverage.get("guard_hits_24h"),
+        "target_convergence_guard_hits_1h": target_convergence_guard_coverage.get("guard_hits_1h"),
+        "target_convergence_guard_current_open_order_count": target_convergence_guard_open_orders.get(
+            "total_open_order_count"
+        ),
+        "target_convergence_guard_latest_hit_decision_id": target_convergence_guard_latest_hit.get("decision_id"),
+        "target_convergence_guard_latest_hit_created_at": target_convergence_guard_latest_hit.get("created_at"),
         "directional_episode_recent_decision_count": directional_attribution_coverage.get("recent_decision_count"),
         "directional_episode_decisions_with_edge_cost": directional_attribution_coverage.get(
             "decisions_with_edge_cost"
@@ -3800,6 +3974,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["directional_episode_attribution_truth"] = summarize_directional_episode_attribution_truth(
         report["database_truth"],
         report["rdp_microstructure_truth"],
+    )
+    report["target_convergence_guard_truth"] = summarize_target_convergence_guard_truth(
+        report["database_truth"],
+        report["git"],
+        report_generated_at=generated_at,
     )
     report["runtime"]["ai_timeout_active_blocker"] = False
     runtime_mode = report["runtime"]["dashboard_bundle"].get("effective_operating_mode", {})
