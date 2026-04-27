@@ -14,6 +14,39 @@ if TYPE_CHECKING:
     from aats.services.operator.query_service import OperatorQueryService
 
 
+_TERMINAL_NO_FILL_STATES = {"FAILED", "REJECTED", "CANCELED", "BLOCKED", "EXPIRED", "DRY_RUN"}
+_CREATED_OR_SUBMITTING_STATES = {"CREATED", "SUBMITTING"}
+
+
+def _compact_unique(values: list[Any], *, limit: int = 8) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+        if len(result) >= limit:
+            break
+    return result
+
+
+def _terminal_no_fill_reason_from_states(states: list[str]) -> str:
+    normalized = {state.upper() for state in states}
+    if "BLOCKED" in normalized:
+        return "terminal_order_blocked_before_fill"
+    if normalized & {"REJECTED", "FAILED"}:
+        return "terminal_order_failed_or_rejected_before_fill"
+    if "CANCELED" in normalized:
+        return "terminal_order_canceled_before_fill"
+    if "EXPIRED" in normalized:
+        return "terminal_order_expired_before_fill"
+    if "DRY_RUN" in normalized:
+        return "terminal_order_dry_run_no_fill_expected"
+    return "terminal_order_surface_without_fill"
+
+
 class AccountQueryFacade:
     def __init__(self, owner: "OperatorQueryService") -> None:
         self.owner = owner
@@ -425,12 +458,14 @@ class AccountQueryFacade:
         latest_fill = self.owner.latest_fill()
         latest_reconciliation = self.owner._latest_scoped_reconciliation()
         recovery = self.owner.recovery_view()
+        terminal_no_fill_explanation = self._latest_terminal_no_fill_explanation(latest_order=latest_order)
         return {
             "mode": self.owner.system_mode(),
             "execution": self.owner.runtime.execution_adapter.readiness(),
             "latest_order": self.owner._execution_record_payload(latest_order) if latest_order is not None else None,
             "latest_fill": self.owner._execution_record_payload(latest_fill) if latest_fill is not None else None,
             "latest_reconciliation": latest_reconciliation.model_dump(mode="json") if latest_reconciliation is not None else None,
+            "terminal_no_fill_explanation": terminal_no_fill_explanation,
             "recent_failures": self.owner.execution_errors()["errors"],
             "recovery": recovery,
             "truth_source": {
@@ -439,6 +474,119 @@ class AccountQueryFacade:
                 "balances": "ledger_accounts" if self.owner._phase5_control_plane_enabled() else "portfolio_snapshot",
             },
         }
+
+    def _latest_terminal_no_fill_explanation(self, *, latest_order: Any | None) -> dict[str, Any] | None:
+        if latest_order is None:
+            return None
+        latest_order_payload = self.owner._execution_record_payload(latest_order)
+        decision_id = str(latest_order_payload.get("decision_id") or "").strip()
+        if not decision_id:
+            return None
+
+        order_payloads = self._recent_order_payloads_for_decision(decision_id)
+        if not order_payloads:
+            order_payloads = [latest_order_payload]
+        states = [
+            str(payload.get("state") or payload.get("status") or "").strip().upper()
+            for payload in order_payloads
+        ]
+        if not states or any(state in _CREATED_OR_SUBMITTING_STATES for state in states):
+            return None
+        if any(state not in _TERMINAL_NO_FILL_STATES for state in states):
+            return None
+        if self._fill_payloads_for_order_group(order_payloads, decision_id=decision_id):
+            return None
+
+        return {
+            "classification": "terminal_order_surface_without_fill",
+            "reason": _terminal_no_fill_reason_from_states(states),
+            "decision_id": decision_id,
+            "latest_order_id": latest_order_payload.get("order_id") or latest_order_payload.get("client_order_id"),
+            "latest_order_updated_at": (
+                latest_order_payload.get("updated_at")
+                or latest_order_payload.get("last_update_ts")
+                or latest_order_payload.get("created_at")
+            ),
+            "terminal_states": _compact_unique(states),
+            "execution_order_terminal_states": _compact_unique(states),
+            "order_state_terminal_statuses": [],
+            "terminal_source_systems": _compact_unique([payload.get("source_system") for payload in order_payloads]),
+            "terminal_execution_styles": _compact_unique([payload.get("execution_style") for payload in order_payloads]),
+            "terminal_position_intents": _compact_unique([payload.get("position_intent") for payload in order_payloads]),
+            "execution_order_count": len(order_payloads),
+            "order_state_count": 0,
+            "terminal_execution_order_count": len(order_payloads),
+            "terminal_order_state_count": 0,
+            "created_or_submitting_execution_order_count": 0,
+            "created_or_submitting_order_state_count": 0,
+            "fill_surface_present": False,
+            "operator_summary": "all_visible_order_surfaces_are_terminal_no_fill",
+            "truth_source": (
+                "execution_order_repo"
+                if self.owner._phase5_control_plane_enabled()
+                else "execution_repo_order_states"
+            ),
+        }
+
+    def _recent_order_payloads_for_decision(self, decision_id: str) -> list[dict[str, Any]]:
+        if self.owner._phase5_control_plane_enabled():
+            rows = self.owner._phase5_order_rows(limit=100)
+        else:
+            rows = self.owner._scoped_order_states()
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self.owner._execution_record_payload(row)
+            if str(payload.get("decision_id") or "").strip() == decision_id:
+                payloads.append(payload)
+        return payloads
+
+    def _recent_fill_payloads_for_decision(self, decision_id: str) -> list[dict[str, Any]]:
+        if self.owner._phase5_control_plane_enabled():
+            rows = self.owner._phase5_fill_rows(limit=500)
+        else:
+            rows = self.owner._scoped_fills()
+        payloads: list[dict[str, Any]] = []
+        for row in rows:
+            payload = self.owner._execution_record_payload(row)
+            if str(payload.get("decision_id") or "").strip() == decision_id:
+                payloads.append(payload)
+        return payloads
+
+    def _fill_payloads_for_order_group(
+        self,
+        order_payloads: list[dict[str, Any]],
+        *,
+        decision_id: str,
+    ) -> list[dict[str, Any]]:
+        payloads: list[dict[str, Any]] = []
+        if self.owner._phase5_control_plane_enabled():
+            fill_repo = getattr(self.owner.runtime, "execution_fill_repo_v2", None)
+            fills_for_order = getattr(fill_repo, "fills_for_order", None)
+            if callable(fills_for_order):
+                for order in order_payloads:
+                    order_id = str(order.get("order_id") or "").strip()
+                    if not order_id:
+                        continue
+                    payloads.extend(self.owner._execution_record_payload(row) for row in fills_for_order(order_id))
+                return [
+                    payload
+                    for payload in payloads
+                    if str(payload.get("decision_id") or "").strip() == decision_id
+                ]
+        else:
+            fills_for_order = getattr(self.owner, "_scoped_fills_for_order", None)
+            if callable(fills_for_order):
+                for order in order_payloads:
+                    client_order_id = str(order.get("client_order_id") or "").strip()
+                    if not client_order_id:
+                        continue
+                    payloads.extend(self.owner._execution_record_payload(row) for row in fills_for_order(client_order_id))
+                return [
+                    payload
+                    for payload in payloads
+                    if str(payload.get("decision_id") or "").strip() == decision_id
+                ]
+        return self._recent_fill_payloads_for_decision(decision_id)
 
     def _recent_persisted_funding_fee_summary(self, *, limit: int = 200) -> dict[str, Any]:
         return self.owner._recent_persisted_funding_fee_summary(limit=limit)

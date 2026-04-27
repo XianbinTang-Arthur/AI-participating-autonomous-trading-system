@@ -7035,6 +7035,115 @@ console.log(JSON.stringify({
         self.assertIn('"overviewUsesFamilySummary":true', stdout)
         self.assertIn('"drawerUsesFamilySummary":true', stdout)
 
+    def test_strategy_and_overview_surface_terminal_no_fill_explanation(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { renderStrategyView } from './aats/api/static/modules/views/strategy-view.js';
+import { renderOverviewView } from './aats/api/static/modules/views/overview-view.js';
+
+const latestDecision = {
+  decision_id: 'decision-terminal-no-fill',
+  decision_time: '2026-04-27T09:49:53Z',
+  decision_context: { as_of_ts: '2026-04-27T09:49:53Z', symbol: 'BTC-USDT-SWAP' },
+  baseline_assessment: { regime: 'trend' },
+  position_target: {
+    position_intent: 'open_short',
+    target_exposure_side: 'short',
+    current_position_qty: 0.0015,
+    target_position_qty: -0.0033,
+    delta_position_qty: -0.0048,
+  },
+  policy_decision: { execution_allowed: true },
+  risk_decision: { approved: true },
+};
+
+const executionLatest = {
+  latest_order: {
+    client_order_id: 'client-terminal-no-fill',
+    decision_id: 'decision-terminal-no-fill',
+    status: 'BLOCKED',
+    state: 'BLOCKED',
+    requested_qty: 0.0048,
+    created_at: '2026-04-27T09:49:54Z',
+    last_update_ts: '2026-04-27T09:49:54Z',
+  },
+  terminal_no_fill_explanation: {
+    classification: 'terminal_order_surface_without_fill',
+    reason: 'terminal_order_blocked_before_fill',
+    decision_id: 'decision-terminal-no-fill',
+    latest_order_updated_at: '2026-04-27T09:49:54Z',
+    terminal_states: ['BLOCKED'],
+    terminal_position_intents: ['close_long', 'open_short'],
+    terminal_execution_styles: ['semantic_dup_snapshot_blocked', 'taker'],
+    execution_order_count: 2,
+    terminal_execution_order_count: 2,
+    fill_surface_present: false,
+  },
+};
+
+const strategyHtml = renderStrategyView({
+  latestDecision,
+  executionLatest,
+  recentDecisions: { decisions: [] },
+  strategyRuntime: {
+    summary: {},
+    latest_snapshot: { candidates: [], automation_decisions: [] },
+    configured_parameters: { directional: {} },
+    latest_applied_target: latestDecision.position_target,
+    latest_bundle: {},
+    latest_allocation_decision: {},
+    recent_sleeve_intents: [],
+    recent_execution_bundles: [],
+    recent_budget_snapshots: [],
+    recent_conflict_resolutions: [],
+    recent_netting_decisions: [],
+    family_enablement: {},
+  },
+});
+
+const overviewHtml = renderOverviewView({
+  latestDecision,
+  executionLatest,
+  health: { runtime_state: 'healthy', overall_status: 'healthy' },
+  mode: { default_symbol: 'BTC-USDT-SWAP' },
+  runtime: { symbols: ['BTC-USDT-SWAP'] },
+  systemRecovery: { recovery: { safe_to_trade: true, halted: false, resume_eligible: true } },
+  blockers: { blockers: [] },
+  portfolio: { portfolio: { total_equity: 1200, realized_pnl: 0, unrealized_pnl: 0, gross_exposure: 0, net_exposure: 0, positions: [] } },
+  positions: { local_instrument_positions: [] },
+  metrics: { fill_count: 73, current_open_order_count: 0 },
+  aiRuntime: {},
+  strategyRuntime: { summary: {}, entry_execution_guard: {} },
+  reconciliationLatest: {},
+  uiHints: {},
+});
+
+console.log(JSON.stringify({
+  strategyExplainsNoFill:
+    strategyHtml.includes('这次为什么没有成交')
+    && strategyHtml.includes('下单前被阻断')
+    && strategyHtml.includes('平多 / 开空')
+    && strategyHtml.includes('无成交终局'),
+  overviewExplainsNoFill:
+    overviewHtml.includes('无成交终局')
+    && overviewHtml.includes('终端无成交解释')
+    && overviewHtml.includes('下单前被阻断')
+    && overviewHtml.includes('平多 / 开空'),
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        stdout = result.stdout or ""
+        self.assertIn('"strategyExplainsNoFill":true', stdout)
+        self.assertIn('"overviewExplainsNoFill":true', stdout)
+
     def test_home_and_overview_views_surface_parent_signal_summary_from_family_execution_summary(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

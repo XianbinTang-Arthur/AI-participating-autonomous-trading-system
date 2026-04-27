@@ -30,6 +30,7 @@ export function renderStrategySections(data) {
   const recentPayload = data.recentDecisions || {};
   const recentDecisions = recentPayload.decisions || [];
   const executionLatest = data.executionLatest || {};
+  const terminalNoFill = executionLatest.terminal_no_fill_explanation || null;
   const strategyRuntime = data.strategyRuntime || {};
   const strategyRuntimeSummary = strategyRuntime.summary || {};
   const entryExecutionGuard = strategyRuntime.entry_execution_guard || strategyRuntimeSummary.entry_execution_guard || {};
@@ -136,6 +137,7 @@ export function renderStrategySections(data) {
               : "",
           ],
         })}
+        ${renderTerminalNoFillCallout(terminalNoFill)}
         ${statGrid([
           {
             label: decisionScene === "derivatives" ? "目标净仓位变化" : "目标持仓变化",
@@ -208,6 +210,9 @@ export function renderStrategySections(data) {
           ["本轮结论", strategyNarrative(latestDecision), `${readableState(target.strategy_family || latestDecision.decision_outcome?.selected_strategy_family || "directional")} | ${regimeLabel}`],
           hasNoTradeClassification(latestNoTradeClassification)
             ? ["无交易分类", noTradeClassificationLabel(latestNoTradeClassification), noTradeClassificationMeta(latestNoTradeClassification)]
+            : null,
+          hasTerminalNoFill(terminalNoFill)
+            ? ["无成交终局", readableTerminalNoFillReason(terminalNoFill.reason), terminalNoFillMeta(terminalNoFill)]
             : null,
           ...strategyPreOrderFeasibilityRows(latestNoTradeClassification),
           ["执行约束", localizeList(target.guardrail_flags, "当前没有额外执行限制"), targetExpectancySummary(targetExpectancy)],
@@ -2440,6 +2445,54 @@ function renderExpandableSection(title, body, options = {}) {
 }
 
 // #11 修复：renderPaginationFooter 的本地定义已删除，统一到 components.js。
+
+function hasTerminalNoFill(explanation) {
+  return Boolean(explanation && explanation.classification === "terminal_order_surface_without_fill");
+}
+
+function renderTerminalNoFillCallout(explanation) {
+  if (!hasTerminalNoFill(explanation)) return "";
+  const orderCount = Number(explanation.execution_order_count || explanation.terminal_execution_order_count || 0);
+  const countText = orderCount > 0 ? `${formatNumber(orderCount, 0)} 条委托` : "可见委托";
+  return callout({
+    title: "这次为什么没有成交",
+    copy: `这不是成交链路丢失。${countText}已经进入终端无成交状态，系统确认这轮不再期待新的 fill 或仓位生命周期变化。`,
+    tone: "warning",
+    pills: [
+      pill(`终局原因：${readableTerminalNoFillReason(explanation.reason)}`, "warning"),
+      pill(`状态：${terminalNoFillStateSummary(explanation)}`, "info"),
+      pill(`意图：${terminalNoFillIntentSummary(explanation)}`, "info"),
+    ],
+  });
+}
+
+function readableTerminalNoFillReason(reason) {
+  const map = {
+    terminal_order_blocked_before_fill: "下单前被阻断",
+    terminal_order_failed_or_rejected_before_fill: "失败或拒单且无成交",
+    terminal_order_canceled_before_fill: "撤单且无成交",
+    terminal_order_expired_before_fill: "过期且无成交",
+    terminal_order_dry_run_no_fill_expected: "演练单不期待成交",
+    terminal_order_surface_without_fill: "终端委托无成交",
+  };
+  return map[String(reason || "").trim()] || readableState(reason || "terminal_order_surface_without_fill");
+}
+
+function terminalNoFillStateSummary(explanation) {
+  const states = Array.isArray(explanation?.terminal_states) ? explanation.terminal_states : [];
+  return states.length ? states.map((item) => readableState(item, item)).join(" / ") : "状态待确认";
+}
+
+function terminalNoFillIntentSummary(explanation) {
+  const intents = Array.isArray(explanation?.terminal_position_intents) ? explanation.terminal_position_intents : [];
+  return intents.length ? intents.map((item) => readableState(item, item)).join(" / ") : "意图待确认";
+}
+
+function terminalNoFillMeta(explanation) {
+  const styles = Array.isArray(explanation?.terminal_execution_styles) ? explanation.terminal_execution_styles : [];
+  const styleText = styles.length ? `执行样式 ${styles.map((item) => readableState(item, item)).join(" / ")}` : "执行样式待确认";
+  return `${terminalNoFillIntentSummary(explanation)} | ${terminalNoFillStateSummary(explanation)} | ${styleText}`;
+}
 
 function strategyNarrative(detail) {
   if (!detail.decision_id) {

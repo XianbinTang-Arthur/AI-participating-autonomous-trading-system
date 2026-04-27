@@ -28,6 +28,7 @@ export function renderOverviewView(data) {
   const latestDecision = data.latestDecision || {};
   const latestOrder = data.executionLatest?.latest_order || null;
   const latestFill = data.executionLatest?.latest_fill || null;
+  const terminalNoFill = data.executionLatest?.terminal_no_fill_explanation || null;
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
   const positionsView = data.positions || {};
   const metrics = data.metrics || {};
@@ -45,6 +46,7 @@ export function renderOverviewView(data) {
     latestDecision,
     latestOrder,
     latestFill,
+    terminalNoFill,
     metrics,
     blockers,
     recovery,
@@ -155,7 +157,7 @@ export function renderOverviewView(data) {
           kicker: "关键链路",
           panelKey: ["latestDecision", "executionLatest", "reconciliationLatest"],
           copy: "按时间把最近一次关键节点串起来，方便快速定位问题卡在哪一段链路。",
-          content: timeline(buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation }), "当前暂无新的运行活动。"),
+          content: timeline(buildTimeline({ latestDecision, latestOrder, latestFill, terminalNoFill, reconciliation }), "当前暂无新的运行活动。"),
         })}
       </div>
 
@@ -219,6 +221,7 @@ function buildOperatorTruthCockpit({
   latestDecision,
   latestOrder,
   latestFill,
+  terminalNoFill,
   metrics,
   blockers,
   recovery,
@@ -274,6 +277,12 @@ function buildOperatorTruthCockpit({
         tone: decisionExecutionTone(latestDecision, latestOrder),
       },
       {
+        label: "无成交终局",
+        value: hasTerminalNoFill(terminalNoFill) ? readableTerminalNoFillReason(terminalNoFill.reason) : "无",
+        meta: hasTerminalNoFill(terminalNoFill) ? terminalNoFillMeta(terminalNoFill) : "当前没有终端无成交解释",
+        tone: hasTerminalNoFill(terminalNoFill) ? "warning" : "neutral",
+      },
+      {
         label: "成交证据",
         value: formatNumber(metrics.fill_count, 0),
         meta: latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "当前暂无最新成交",
@@ -308,6 +317,15 @@ function buildOperatorTruthCockpit({
             detail: `${overviewIntentLabel(latestDecision)}；${latestOrder ? `委托 ${readableState(latestOrder.status)}` : "未生成新委托"}；成交累计 ${formatNumber(metrics.fill_count, 0)}。`,
             timestamp: formatMaybeTimestamp(decisionFreshness),
             pill: pill("链路", latestOrder ? toneForOrderStatus(latestOrder.status) : "info"),
+          }
+        : null,
+      hasTerminalNoFill(terminalNoFill)
+        ? {
+            title: "终端无成交解释",
+            subtitle: readableTerminalNoFillReason(terminalNoFill.reason),
+            detail: `这不是成交链路丢失；${terminalNoFillMeta(terminalNoFill)}。`,
+            timestamp: formatMaybeTimestamp(terminalNoFill.latest_order_updated_at, "执行时间待同步"),
+            pill: pill("no-fill已解释", "warning"),
           }
         : null,
       blockers.length
@@ -345,6 +363,36 @@ function decisionExecutionTone(latestDecision, latestOrder) {
   if (!latestDecision.decision_id) return "neutral";
   if (!latestOrder) return "info";
   return toneForOrderStatus(latestOrder.status);
+}
+
+function hasTerminalNoFill(explanation) {
+  return Boolean(explanation && explanation.classification === "terminal_order_surface_without_fill");
+}
+
+function readableTerminalNoFillReason(reason) {
+  const map = {
+    terminal_order_blocked_before_fill: "下单前被阻断",
+    terminal_order_failed_or_rejected_before_fill: "失败或拒单且无成交",
+    terminal_order_canceled_before_fill: "撤单且无成交",
+    terminal_order_expired_before_fill: "过期且无成交",
+    terminal_order_dry_run_no_fill_expected: "演练单不期待成交",
+    terminal_order_surface_without_fill: "终端委托无成交",
+  };
+  return map[String(reason || "").trim()] || readableState(reason || "terminal_order_surface_without_fill");
+}
+
+function terminalNoFillStateSummary(explanation) {
+  const states = Array.isArray(explanation?.terminal_states) ? explanation.terminal_states : [];
+  return states.length ? states.map((item) => readableState(item, item)).join(" / ") : "状态待确认";
+}
+
+function terminalNoFillIntentSummary(explanation) {
+  const intents = Array.isArray(explanation?.terminal_position_intents) ? explanation.terminal_position_intents : [];
+  return intents.length ? intents.map((item) => readableState(item, item)).join(" / ") : "意图待确认";
+}
+
+function terminalNoFillMeta(explanation) {
+  return `${terminalNoFillIntentSummary(explanation)} | ${terminalNoFillStateSummary(explanation)}`;
 }
 
 function overviewFocusItems({ blockers, recovery, reconciliation, uiHints }) {
@@ -490,7 +538,7 @@ function formatLegValue(position = {}, side) {
   return `${qty} / ${notional}`;
 }
 
-function buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation }) {
+function buildTimeline({ latestDecision, latestOrder, latestFill, terminalNoFill, reconciliation }) {
   return [
     latestDecision?.decision_id
       ? {
@@ -517,6 +565,15 @@ function buildTimeline({ latestDecision, latestOrder, latestFill, reconciliation
           detail: `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}`,
           timestamp: formatMaybeTimestamp(latestFill.ingestion_timestamp),
           pill: pill("成交", "positive"),
+        }
+      : null,
+    hasTerminalNoFill(terminalNoFill)
+      ? {
+          title: "终端无成交",
+          subtitle: readableTerminalNoFillReason(terminalNoFill.reason),
+          detail: terminalNoFillMeta(terminalNoFill),
+          timestamp: formatMaybeTimestamp(terminalNoFill.latest_order_updated_at),
+          pill: pill("no-fill", "warning"),
         }
       : null,
     reconciliation?.reconciliation_id

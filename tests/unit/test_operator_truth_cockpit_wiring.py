@@ -25,6 +25,9 @@ class TestOperatorTruthCockpitWiring(unittest.TestCase):
         self.assertIn("交易显微镜", source)
         self.assertIn("影子基准：未验证", source)
         self.assertIn("buildOperatorTruthCockpit", source)
+        self.assertIn("terminal_no_fill_explanation", source)
+        self.assertIn("无成交终局", source)
+        self.assertIn("终端无成交解释", source)
         self.assertIn("data.strategyRuntime", source)
         self.assertIn("data.aiRuntime", source)
 
@@ -50,6 +53,7 @@ class TestOperatorTruthCockpitWiring(unittest.TestCase):
             "strategy_profile_auto_control_effective",
             "entry_execution_guard",
             "latest_bundle_status",
+            "terminalNoFill",
         ]:
             self.assertIn(field, source)
 
