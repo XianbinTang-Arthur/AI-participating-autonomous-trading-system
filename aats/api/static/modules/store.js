@@ -146,6 +146,7 @@ export function viewSpecs(view, state = null) {
       ["metrics", "/system/metrics"],
       ["portfolio", "/portfolio/latest"],
       ["positions", "/positions"],
+      ["strategyRuntime", "/strategy/runtime"],
       ["latestDecision", "/decision/latest"],
       ["executionLatest", "/execution/latest"],
       ["reconciliationLatest", "/reconciliation/latest"],

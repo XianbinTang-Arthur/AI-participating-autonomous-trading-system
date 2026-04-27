@@ -31,11 +31,49 @@ export function renderOverviewView(data) {
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
   const positionsView = data.positions || {};
   const metrics = data.metrics || {};
+  const aiRuntime = data.aiRuntime || {};
+  const strategyRuntime = data.strategyRuntime || {};
+  const strategyRuntimeSummary = strategyRuntime.summary || {};
+  const entryExecutionGuard = strategyRuntime.entry_execution_guard || strategyRuntimeSummary.entry_execution_guard || {};
   const uiHints = data.uiHints || {};
   const currentPosition = trackedPosition(portfolio, runtime.symbols?.[0] || mode.default_symbol);
+  const operatorTruthCockpit = buildOperatorTruthCockpit({
+    aiRuntime,
+    strategyRuntime,
+    strategyRuntimeSummary,
+    entryExecutionGuard,
+    latestDecision,
+    latestOrder,
+    latestFill,
+    metrics,
+    blockers,
+    recovery,
+    reconciliation,
+  });
 
   return `
     <div class="panel-grid">
+      <div class="span-12">
+        ${surfaceCard({
+          title: "运行真相驾驶舱",
+          kicker: "交易显微镜",
+          panelKey: ["aiRuntime", "strategyRuntime", "latestDecision", "executionLatest", "blockers", "metrics"],
+          copy: operatorTruthCockpit.copy,
+          actions: `
+            <div class="stack-actions table-actions--compact">
+              ${actionButton("策略", "navigate-view", "strategy", "ghost")}
+              ${actionButton("执行", "navigate-view", "execution", "ghost")}
+              ${actionButton("风控", "navigate-view", "risk", "ghost")}
+              ${actionButton("AI分析", "navigate-view", "aiAnalysis", "ghost")}
+            </div>
+          `,
+          content: `
+            ${summaryStrip(operatorTruthCockpit.summary)}
+            ${timeline(operatorTruthCockpit.items, "当前暂无可展示的运行真相。")}
+          `,
+        })}
+      </div>
+
       <div class="span-12">
         ${primaryStatusPanel({
           eyebrow: "交易总览",
@@ -171,6 +209,142 @@ function overviewTone({ health, recovery, blockers, latestOrder }) {
   if (health.halted || blockers.length > 0 || !recovery.safe_to_trade) return "danger";
   if (latestOrder && ["submitting", "partially_filled", "cancel_pending"].includes(String(latestOrder.status || "").toLowerCase())) return "info";
   return "positive";
+}
+
+function buildOperatorTruthCockpit({
+  aiRuntime,
+  strategyRuntime,
+  strategyRuntimeSummary,
+  entryExecutionGuard,
+  latestDecision,
+  latestOrder,
+  latestFill,
+  metrics,
+  blockers,
+  recovery,
+  reconciliation,
+}) {
+  const configuredMode = textOrFallback(aiRuntime.configured_operating_mode || aiRuntime.legacy_modes?.configured_operating_mode);
+  const effectiveMode = textOrFallback(aiRuntime.effective_operating_mode || aiRuntime.legacy_modes?.effective_operating_mode);
+  const activeFamily = textOrFallback(
+    strategyRuntimeSummary.latest_selected_family
+      || strategyRuntimeSummary.configured_active_family
+      || strategyRuntime.configured_parameters?.strategy_family_active,
+    "directional",
+  );
+  const latestBundleStatus = strategyRuntimeSummary.latest_bundle_status || strategyRuntime.latest_bundle?.status || "unknown";
+  const executionControlSummary = strategyRuntimeSummary.execution_control_summary || {};
+  const providerState = aiRuntime.provider_state || aiRuntime.provider || "unknown";
+  const providerConfigured = aiRuntime.configured === true || aiRuntime.provider_ready === true;
+  const profileAutoEffective = aiRuntime.strategy_profile_auto_control_effective === true;
+  const guardActive = entryExecutionGuard.active === true;
+  const decisionFreshness = latestDecision.decision_time || latestDecision.decision_context?.as_of_ts;
+
+  return {
+    copy: `OKX BTC-USDT-SWAP；当前实盘载体 ${readableState(activeFamily)}；影子基准：未验证。`,
+    summary: [
+      {
+        label: "有效运行态",
+        value: readableState(effectiveMode),
+        meta: `目标 ${readableState(configuredMode)} / ${aiRuntime.manual_override_active ? "手动覆盖生效" : "无手动覆盖"}`,
+        tone: aiRuntimeTone(effectiveMode, aiRuntime),
+      },
+      {
+        label: "AI 服务",
+        value: providerConfigured ? "已配置" : readableState(providerState),
+        meta: `服务 ${readableState(providerState)} / 影子 ${aiRuntime.shadow_mode_enabled ? "开启" : "关闭"}`,
+        tone: providerConfigured && !aiRuntime.provider_degraded ? "positive" : aiRuntime.provider_degraded ? "warning" : "neutral",
+      },
+      {
+        label: "策略载体",
+        value: readableState(activeFamily),
+        meta: `最新执行包 ${readableState(latestBundleStatus)} / 自动档 ${profileAutoEffective ? "生效" : "手动"}`,
+        tone: activeFamily === "directional" ? "info" : "warning",
+      },
+      {
+        label: "准入门禁",
+        value: guardActive ? "仅参考" : "允许自动执行",
+        meta: entryExecutionGuard.operator_summary || entryExecutionGuard.summary || readableState(executionControlSummary.primary_mode || "unknown"),
+        tone: guardActive ? "warning" : "positive",
+      },
+      {
+        label: "决策到执行",
+        value: latestDecision.decision_id ? overviewIntentLabel(latestDecision) : "暂无决策",
+        meta: latestOrder ? `委托 ${readableState(latestOrder.status)}` : "本轮暂未生成委托",
+        tone: decisionExecutionTone(latestDecision, latestOrder),
+      },
+      {
+        label: "成交证据",
+        value: formatNumber(metrics.fill_count, 0),
+        meta: latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "当前暂无最新成交",
+        tone: Number(metrics.fill_count || 0) > 0 ? "positive" : "neutral",
+      },
+      {
+        label: "阻断队列",
+        value: blockers.length ? `${formatNumber(blockers.length, 0)} 条` : recovery.safe_to_trade ? "清空" : "恢复受限",
+        meta: blockers[0] ? localizeError(blockers[0].blocker) : reconciliation ? `对账 ${readableState(reconciliation.severity)}` : "当前没有硬阻断",
+        tone: blockers.length ? "danger" : recovery.safe_to_trade ? "positive" : "warning",
+      },
+    ],
+    items: [
+      {
+        title: "AI 有效路径",
+        subtitle: `配置 ${readableState(configuredMode)} / 生效 ${readableState(effectiveMode)}`,
+        detail: `模型服务 ${readableState(providerState)}；手动覆盖 ${aiRuntime.manual_override_active ? "生效" : "未生效"}；档位自动控制 ${profileAutoEffective ? "生效" : "未生效"}。`,
+        timestamp: formatMaybeTimestamp(aiRuntime.last_provider_recovered_at || aiRuntime.last_provider_degraded_at, "AI 时间待同步"),
+        pill: pill("AI", aiRuntimeTone(effectiveMode, aiRuntime)),
+      },
+      {
+        title: "策略与门禁",
+        subtitle: `${readableState(activeFamily)} / ${readableState(latestBundleStatus)}`,
+        detail: entryExecutionGuard.operator_summary || executionControlSummary.summary || strategyRuntimeSummary.operator_summary || "当前没有额外策略门禁说明。",
+        timestamp: formatMaybeTimestamp(strategyRuntime.generated_at, "策略时间待同步"),
+        pill: pill("策略", guardActive ? "warning" : "positive"),
+      },
+      latestDecision.decision_id
+        ? {
+            title: "最新决策证据",
+            subtitle: middleEllipsis(latestDecision.decision_id, 12, 8),
+            detail: `${overviewIntentLabel(latestDecision)}；${latestOrder ? `委托 ${readableState(latestOrder.status)}` : "未生成新委托"}；成交累计 ${formatNumber(metrics.fill_count, 0)}。`,
+            timestamp: formatMaybeTimestamp(decisionFreshness),
+            pill: pill("链路", latestOrder ? toneForOrderStatus(latestOrder.status) : "info"),
+          }
+        : null,
+      blockers.length
+        ? {
+            title: "当前阻断",
+            subtitle: blockers[0].subsystem ? `来源：${readableState(blockers[0].subsystem)}` : "系统阻断",
+            detail: localizeError(blockers[0].recommended_action || blockers[0].blocker),
+            pill: pill(blockers[0].affects_execution ? "阻断执行" : "人工关注", blockers[0].affects_execution ? "danger" : "warning"),
+          }
+        : {
+            title: "恢复与对账",
+            subtitle: recovery.safe_to_trade ? "当前允许执行" : readableState(recovery.recovery_state),
+            detail: reconciliation ? `最近对账 ${readableState(reconciliation.severity)}。` : "当前没有新的对账异常。",
+            timestamp: formatMaybeTimestamp(reconciliation?.as_of_ts, "对账时间待同步"),
+            pill: pill(recovery.safe_to_trade ? "未阻断" : "恢复受限", recovery.safe_to_trade ? "positive" : "warning"),
+          },
+    ].filter(Boolean),
+  };
+}
+
+function textOrFallback(value, fallback = "unknown") {
+  const text = String(value ?? "").trim();
+  return text || fallback;
+}
+
+function aiRuntimeTone(effectiveMode, aiRuntime) {
+  if (aiRuntime.provider_degraded || aiRuntime.outcome_review_required) return "warning";
+  if (effectiveMode === "ai_decision_maker") return "positive";
+  if (effectiveMode === "ai_assisted") return "info";
+  if (effectiveMode === "baseline_only") return "neutral";
+  return "warning";
+}
+
+function decisionExecutionTone(latestDecision, latestOrder) {
+  if (!latestDecision.decision_id) return "neutral";
+  if (!latestOrder) return "info";
+  return toneForOrderStatus(latestOrder.status);
 }
 
 function overviewFocusItems({ blockers, recovery, reconciliation, uiHints }) {
