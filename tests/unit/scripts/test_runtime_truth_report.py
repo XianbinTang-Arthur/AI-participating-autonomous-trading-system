@@ -173,6 +173,9 @@ def test_db_probe_executable_directional_query_excludes_hold_current_notional() 
     assert "coalesce(portfolio_approved_notional, 0) <> 0" not in mod.DB_PROBE
     assert mod.TARGET_CONVERGENCE_GUARD_FLAG in mod.DB_PROBE
     assert "target_convergence_guard" in mod.DB_PROBE
+    for flag in mod.IMPULSE_CHASE_GUARD_FLAGS:
+        assert flag in mod.DB_PROBE
+    assert "directional_impulse_chase_guard" in mod.DB_PROBE
     assert (
         "status not in ('FILLED', 'CANCELED', 'REJECTED', 'BLOCKED', 'DRY_RUN', 'FAILED', 'EXPIRED')"
         in mod.DB_PROBE
@@ -1896,6 +1899,100 @@ def test_target_convergence_guard_truth_verifies_guard_hit() -> None:
     assert summary["latest_guard_hit"]["decision_id"] == "decision_guard"
 
 
+def test_directional_impulse_chase_guard_truth_reports_deployed_no_trigger() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "directional_impulse_chase_guard": {
+            "symbol": "BTC-USDT-SWAP",
+            "guard_flags": list(mod.IMPULSE_CHASE_GUARD_FLAGS),
+            "coverage": {
+                "directional_decisions_total": 44,
+                "directional_decisions_24h": 3,
+                "directional_decisions_1h": 0,
+                "guard_hits_total": 0,
+                "guard_hits_24h": 0,
+                "guard_hits_1h": 0,
+                "blocked_live_entry_hits_total": 0,
+                "blocked_live_entry_hits_24h": 0,
+                "blocked_live_entry_hits_1h": 0,
+            },
+            "flag_hits_total": {
+                flag: 0 for flag in mod.IMPULSE_CHASE_GUARD_FLAGS
+            },
+            "latest_guard_hit": None,
+        },
+    }
+    code_markers = {
+        "source_file_present": True,
+        "all_required_markers_present": True,
+        "missing_markers": [],
+    }
+
+    summary = mod.summarize_directional_impulse_chase_guard_truth(
+        db,
+        {"deployed_matches_windows": True},
+        code_markers,
+        report_generated_at="2026-04-27T11:20:00Z",
+    )
+
+    assert summary["status"] == "deployed_no_trigger_no_recent_directional_decisions"
+    assert summary["smallest_missing_field"] is None
+    assert summary["code"]["all_required_markers_present"] is True
+    assert summary["coverage"]["guard_hits_total"] == 0
+    assert summary["coverage"]["blocked_live_entry_hits_total"] == 0
+
+
+def test_directional_impulse_chase_guard_truth_verifies_blocked_entry() -> None:
+    mod = load_module()
+    matched_flag = "long_impulse_entry_extreme_chase_unconfirmed"
+    db = {
+        "ok": True,
+        "directional_impulse_chase_guard": {
+            "symbol": "BTC-USDT-SWAP",
+            "guard_flags": list(mod.IMPULSE_CHASE_GUARD_FLAGS),
+            "coverage": {
+                "directional_decisions_total": 45,
+                "directional_decisions_24h": 4,
+                "directional_decisions_1h": 2,
+                "guard_hits_total": 1,
+                "guard_hits_24h": 1,
+                "guard_hits_1h": 1,
+                "blocked_live_entry_hits_total": 1,
+                "blocked_live_entry_hits_24h": 1,
+                "blocked_live_entry_hits_1h": 1,
+            },
+            "flag_hits_total": {
+                matched_flag: 1,
+            },
+            "latest_guard_hit": {
+                "decision_id": "decision_impulse_guard",
+                "created_at": "2026-04-27T11:19:00Z",
+                "route_action": "hold_current",
+                "matched_guard_flags": [matched_flag],
+            },
+        },
+    }
+    code_markers = {
+        "source_file_present": True,
+        "all_required_markers_present": True,
+        "missing_markers": [],
+    }
+
+    summary = mod.summarize_directional_impulse_chase_guard_truth(
+        db,
+        {"deployed_matches_windows": True},
+        code_markers,
+        report_generated_at="2026-04-27T11:20:00Z",
+    )
+
+    assert summary["status"] == "verified_guard_blocked_live_directional_entry"
+    assert summary["coverage"]["guard_hits_1h"] == 1
+    assert summary["coverage"]["blocked_live_entry_hits_total"] == 1
+    assert summary["latest_guard_hit"]["decision_id"] == "decision_impulse_guard"
+    assert summary["latest_guard_hit"]["matched_guard_flags"] == [matched_flag]
+
+
 def test_artifact_last_known_is_non_authoritative_when_live_fact_differs(tmp_path: Path) -> None:
     mod = load_module()
     artifact_dir = tmp_path / "artifacts" / "automation"
@@ -2116,6 +2213,32 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
             },
             "latest_guard_hit": None,
         },
+        "directional_impulse_chase_guard_truth": {
+            "status": "verified_guard_blocked_live_directional_entry",
+            "smallest_missing_field": None,
+            "deployed_matches_windows": True,
+            "code": {
+                "all_required_markers_present": True,
+            },
+            "coverage": {
+                "directional_decisions_total": 34,
+                "directional_decisions_24h": 4,
+                "directional_decisions_1h": 1,
+                "guard_hits_total": 1,
+                "guard_hits_24h": 1,
+                "guard_hits_1h": 1,
+                "blocked_live_entry_hits_total": 1,
+                "blocked_live_entry_hits_24h": 1,
+                "blocked_live_entry_hits_1h": 1,
+            },
+            "latest_guard_hit": {
+                "decision_id": "decision_impulse_guard",
+                "created_at": "2026-04-27T11:19:00Z",
+                "matched_guard_flags": [
+                    "long_impulse_entry_extreme_chase_unconfirmed",
+                ],
+            },
+        },
         "git": {
             "deployed_matches_windows": True,
             "windows": {
@@ -2247,6 +2370,27 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["target_convergence_guard_hits_1h"] == 0
     assert live_facts["target_convergence_guard_current_open_order_count"] == 0
     assert live_facts["target_convergence_guard_latest_hit_decision_id"] is None
+    assert live_facts["directional_impulse_chase_guard_truth_status"] == (
+        "verified_guard_blocked_live_directional_entry"
+    )
+    assert live_facts["directional_impulse_chase_guard_smallest_missing_field"] is None
+    assert live_facts["directional_impulse_chase_guard_code_present"] is True
+    assert live_facts["directional_impulse_chase_guard_deployed_matches_windows"] is True
+    assert live_facts["directional_impulse_chase_guard_directional_decisions_1h"] == 1
+    assert live_facts["directional_impulse_chase_guard_hits_24h"] == 1
+    assert live_facts["directional_impulse_chase_guard_hits_1h"] == 1
+    assert live_facts["directional_impulse_chase_guard_blocked_live_entry_hits_total"] == 1
+    assert live_facts["directional_impulse_chase_guard_blocked_live_entry_hits_24h"] == 1
+    assert live_facts["directional_impulse_chase_guard_blocked_live_entry_hits_1h"] == 1
+    assert live_facts["directional_impulse_chase_guard_latest_hit_decision_id"] == (
+        "decision_impulse_guard"
+    )
+    assert live_facts["directional_impulse_chase_guard_latest_hit_created_at"] == (
+        "2026-04-27T11:19:00Z"
+    )
+    assert live_facts["directional_impulse_chase_guard_latest_hit_matched_flags"] == [
+        "long_impulse_entry_extreme_chase_unconfirmed",
+    ]
     assert authority["authoritative_source"] == "runtime.live_runtime_facts"
     assert authority["artifact_may_override_live"] is False
 

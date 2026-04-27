@@ -69,6 +69,19 @@ SOFT_CONTRIBUTING_REASON_CODES = {
     "reconciliation_contraction_active",
 }
 TARGET_CONVERGENCE_GUARD_FLAG = "target_convergence_open_orders_block_exposure_increase"
+IMPULSE_CHASE_GUARD_FLAGS = (
+    "long_impulse_entry_post_spike_pullback_unconfirmed",
+    "short_impulse_entry_post_spike_pullback_unconfirmed",
+    "long_impulse_entry_extreme_chase_unconfirmed",
+    "short_impulse_entry_extreme_chase_unconfirmed",
+)
+IMPULSE_CHASE_GUARD_CODE_MARKERS = (
+    "_impulse_entry_chase_guard_reason",
+    "_recent_trade_impulse_chase_reason",
+    "_kline_impulse_chase_reason",
+    "impulse_entry_post_spike_pullback_unconfirmed",
+    "impulse_entry_extreme_chase_unconfirmed",
+)
 
 SECRET_PATTERNS = (
     re.compile(r"(?i)(postgres(?:ql)?(?:\+[a-z0-9_]+)?://)[^\s'\"<>]+"),
@@ -309,6 +322,87 @@ with engine.connect() as conn:
             "execution_orders": execution_open_orders,
             "legacy_order_states": legacy_open_order_states,
         },
+    }
+    impulse_chase_guard_flags = (
+        "long_impulse_entry_post_spike_pullback_unconfirmed",
+        "short_impulse_entry_post_spike_pullback_unconfirmed",
+        "long_impulse_entry_extreme_chase_unconfirmed",
+        "short_impulse_entry_extreme_chase_unconfirmed",
+    )
+    impulse_chase_guard_params = {
+        f"impulse_guard_{idx}": f"%{flag}%"
+        for idx, flag in enumerate(impulse_chase_guard_flags)
+    }
+    impulse_chase_guard_predicate = " or ".join(
+        f"payload::text like :impulse_guard_{idx}"
+        for idx, _ in enumerate(impulse_chase_guard_flags)
+    )
+    impulse_chase_guard_coverage = dict(conn.execute(text(
+        "select count(*) as directional_decisions_total, "
+        "       count(*) filter (where created_at >= now() - interval '24 hour') as directional_decisions_24h, "
+        "       count(*) filter (where created_at >= now() - interval '1 hour') as directional_decisions_1h, "
+        f"      count(*) filter (where {impulse_chase_guard_predicate}) as guard_hits_total, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '24 hour' "
+        f"          and ({impulse_chase_guard_predicate})"
+        "       ) as guard_hits_24h, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '1 hour' "
+        f"          and ({impulse_chase_guard_predicate})"
+        "       ) as guard_hits_1h, "
+        "       count(*) filter ("
+        f"          where ({impulse_chase_guard_predicate}) "
+        "           and route_action in ('hold_current', 'advisory_only')"
+        "       ) as blocked_live_entry_hits_total, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '24 hour' "
+        f"          and ({impulse_chase_guard_predicate}) "
+        "           and route_action in ('hold_current', 'advisory_only')"
+        "       ) as blocked_live_entry_hits_24h, "
+        "       count(*) filter ("
+        "           where created_at >= now() - interval '1 hour' "
+        f"          and ({impulse_chase_guard_predicate}) "
+        "           and route_action in ('hold_current', 'advisory_only')"
+        "       ) as blocked_live_entry_hits_1h "
+        "from portfolio_allocation_decisions "
+        "where symbol = :symbol and primary_family = 'directional'"
+    ), {"symbol": symbol, **impulse_chase_guard_params}).mappings().first() or {})
+    latest_impulse_chase_guard_hit = conn.execute(text(
+        "select decision_id, created_at, route_action, expected_edge_bps, expected_cost_bps, payload "
+        "from portfolio_allocation_decisions "
+        "where symbol = :symbol and primary_family = 'directional' "
+        f"and ({impulse_chase_guard_predicate}) "
+        "order by created_at desc limit 1"
+    ), {"symbol": symbol, **impulse_chase_guard_params}).mappings().first()
+    impulse_chase_flag_hits_total = {}
+    for idx, flag in enumerate(impulse_chase_guard_flags):
+        impulse_chase_flag_hits_total[flag] = int(conn.execute(text(
+            "select count(*) from portfolio_allocation_decisions "
+            "where symbol = :symbol and primary_family = 'directional' "
+            f"and payload::text like :impulse_guard_{idx}"
+        ), {"symbol": symbol, **impulse_chase_guard_params}).scalar() or 0)
+
+    def impulse_chase_guard_hit_summary(row):
+        if not row:
+            return None
+        payload_text = json.dumps(row.get("payload") or {}, default=str)
+        return {
+            "decision_id": row.get("decision_id"),
+            "created_at": row.get("created_at"),
+            "route_action": row.get("route_action"),
+            "expected_edge_bps": row.get("expected_edge_bps"),
+            "expected_cost_bps": row.get("expected_cost_bps"),
+            "matched_guard_flags": [
+                flag for flag in impulse_chase_guard_flags if flag in payload_text
+            ],
+        }
+
+    directional_impulse_chase_guard = {
+        "symbol": symbol,
+        "guard_flags": list(impulse_chase_guard_flags),
+        "coverage": impulse_chase_guard_coverage,
+        "flag_hits_total": impulse_chase_flag_hits_total,
+        "latest_guard_hit": impulse_chase_guard_hit_summary(latest_impulse_chase_guard_hit),
     }
     slippage_cost_row = conn.execute(text(
         "with command_refs as ("
@@ -780,6 +874,7 @@ print(json.dumps({
     "slippage_cost_calibration": slippage_cost_calibration,
     "directional_episode_attribution": directional_episode_attribution,
     "target_convergence_guard": target_convergence_guard,
+    "directional_impulse_chase_guard": directional_impulse_chase_guard,
 }, default=str, sort_keys=True))
 """
 
@@ -3033,6 +3128,119 @@ def summarize_target_convergence_guard_truth(
     }
 
 
+def directional_impulse_chase_guard_code_markers(repo_root: Path) -> dict[str, Any]:
+    source_path = repo_root / "aats" / "services" / "decision_engine" / "target_position.py"
+    if not source_path.exists():
+        return {
+            "source_path": str(source_path.relative_to(repo_root)) if source_path.is_absolute() else str(source_path),
+            "source_file_present": False,
+            "all_required_markers_present": False,
+            "present_markers": [],
+            "missing_markers": list(IMPULSE_CHASE_GUARD_CODE_MARKERS),
+        }
+    source = source_path.read_text(encoding="utf-8", errors="replace")
+    present = [marker for marker in IMPULSE_CHASE_GUARD_CODE_MARKERS if marker in source]
+    missing = [marker for marker in IMPULSE_CHASE_GUARD_CODE_MARKERS if marker not in source]
+    return {
+        "source_path": str(source_path.relative_to(repo_root)),
+        "source_file_present": True,
+        "all_required_markers_present": not missing,
+        "present_markers": present,
+        "missing_markers": missing,
+    }
+
+
+def summarize_directional_impulse_chase_guard_truth(
+    db: dict[str, Any],
+    git: dict[str, Any],
+    code_markers: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    raw = as_dict(db.get("directional_impulse_chase_guard"))
+    code_present = bool(code_markers.get("all_required_markers_present"))
+    if not code_present:
+        return {
+            "status": "missing_guard_code_markers",
+            "smallest_missing_field": "target_position.impulse_chase_guard_code_markers",
+            "report_generated_at": report_generated_at,
+            "guard_flags": list(IMPULSE_CHASE_GUARD_FLAGS),
+            "code": code_markers,
+            "interpretation": "source code does not contain the full deterministic impulse-chase guard marker set",
+        }
+    if not db.get("ok"):
+        return {
+            "status": "missing_database_truth",
+            "smallest_missing_field": "database_truth",
+            "report_generated_at": report_generated_at,
+            "guard_flags": list(IMPULSE_CHASE_GUARD_FLAGS),
+            "code": code_markers,
+            "interpretation": "database probe did not return authoritative live guard-hit facts",
+        }
+    if not raw:
+        return {
+            "status": "missing_directional_impulse_chase_guard_probe",
+            "smallest_missing_field": "database_truth.directional_impulse_chase_guard",
+            "report_generated_at": report_generated_at,
+            "guard_flags": list(IMPULSE_CHASE_GUARD_FLAGS),
+            "code": code_markers,
+            "interpretation": "runtime truth report lacks directional impulse-chase guard coverage",
+        }
+
+    coverage = as_dict(raw.get("coverage"))
+    guard_hits_total = int_or_zero(coverage.get("guard_hits_total"))
+    guard_hits_24h = int_or_zero(coverage.get("guard_hits_24h"))
+    guard_hits_1h = int_or_zero(coverage.get("guard_hits_1h"))
+    blocked_hits_total = int_or_zero(coverage.get("blocked_live_entry_hits_total"))
+    blocked_hits_24h = int_or_zero(coverage.get("blocked_live_entry_hits_24h"))
+    blocked_hits_1h = int_or_zero(coverage.get("blocked_live_entry_hits_1h"))
+    recent_decisions_1h = int_or_zero(coverage.get("directional_decisions_1h"))
+    deployed_matches_windows = git.get("deployed_matches_windows")
+
+    status = "deployed_no_trigger_recent_directional_decisions"
+    smallest_missing_field = None
+    interpretation = "guard code is present, but no live directional decision has triggered the guard yet"
+    if deployed_matches_windows is False:
+        status = "deployment_mismatch_guard_truth_not_authoritative"
+        smallest_missing_field = "deployed_head_matches_windows_head"
+        interpretation = "runtime may not be running the local impulse-chase guard implementation"
+    elif blocked_hits_total > 0:
+        status = "verified_guard_blocked_live_directional_entry"
+        interpretation = "at least one live directional decision was blocked by an impulse-chase guard flag"
+    elif guard_hits_total > 0:
+        status = "verified_guard_triggered"
+        interpretation = "at least one live directional decision carries an impulse-chase guard flag"
+    elif recent_decisions_1h == 0:
+        status = "deployed_no_trigger_no_recent_directional_decisions"
+        interpretation = "guard code is present, but no recent directional decision sampled the guard path"
+
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing_field,
+        "report_generated_at": report_generated_at,
+        "deployed_matches_windows": deployed_matches_windows,
+        "guard_flags": list(raw.get("guard_flags") or IMPULSE_CHASE_GUARD_FLAGS),
+        "code": code_markers,
+        "coverage": {
+            "directional_decisions_total": int_or_zero(coverage.get("directional_decisions_total")),
+            "directional_decisions_24h": int_or_zero(coverage.get("directional_decisions_24h")),
+            "directional_decisions_1h": recent_decisions_1h,
+            "guard_hits_total": guard_hits_total,
+            "guard_hits_24h": guard_hits_24h,
+            "guard_hits_1h": guard_hits_1h,
+            "blocked_live_entry_hits_total": blocked_hits_total,
+            "blocked_live_entry_hits_24h": blocked_hits_24h,
+            "blocked_live_entry_hits_1h": blocked_hits_1h,
+        },
+        "flag_hits_total": {
+            str(flag): int_or_zero(count)
+            for flag, count in as_dict(raw.get("flag_hits_total")).items()
+        },
+        "latest_guard_hit": raw.get("latest_guard_hit"),
+        "interpretation": interpretation,
+    }
+
+
 def summarize_microstructure_table(
     raw: dict[str, Any],
     *,
@@ -3962,6 +4170,14 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     target_convergence_guard_coverage = as_dict(target_convergence_guard.get("coverage"))
     target_convergence_guard_open_orders = as_dict(target_convergence_guard.get("current_open_orders"))
     target_convergence_guard_latest_hit = as_dict(target_convergence_guard.get("latest_guard_hit"))
+    directional_impulse_chase_guard = as_dict(report.get("directional_impulse_chase_guard_truth"))
+    directional_impulse_chase_guard_code = as_dict(directional_impulse_chase_guard.get("code"))
+    directional_impulse_chase_guard_coverage = as_dict(
+        directional_impulse_chase_guard.get("coverage")
+    )
+    directional_impulse_chase_guard_latest_hit = as_dict(
+        directional_impulse_chase_guard.get("latest_guard_hit")
+    )
     directional_attribution_coverage = as_dict(directional_attribution.get("coverage"))
     directional_pretrade_microstructure = as_dict(directional_attribution.get("pretrade_microstructure"))
     directional_pretrade_microstructure_coverage = as_dict(
@@ -4123,6 +4339,43 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "target_convergence_guard_latest_hit_decision_id": target_convergence_guard_latest_hit.get("decision_id"),
         "target_convergence_guard_latest_hit_created_at": target_convergence_guard_latest_hit.get("created_at"),
+        "directional_impulse_chase_guard_truth_status": directional_impulse_chase_guard.get("status"),
+        "directional_impulse_chase_guard_smallest_missing_field": directional_impulse_chase_guard.get(
+            "smallest_missing_field"
+        ),
+        "directional_impulse_chase_guard_code_present": directional_impulse_chase_guard_code.get(
+            "all_required_markers_present"
+        ),
+        "directional_impulse_chase_guard_deployed_matches_windows": directional_impulse_chase_guard.get(
+            "deployed_matches_windows"
+        ),
+        "directional_impulse_chase_guard_directional_decisions_1h": (
+            directional_impulse_chase_guard_coverage.get("directional_decisions_1h")
+        ),
+        "directional_impulse_chase_guard_hits_24h": directional_impulse_chase_guard_coverage.get(
+            "guard_hits_24h"
+        ),
+        "directional_impulse_chase_guard_hits_1h": directional_impulse_chase_guard_coverage.get(
+            "guard_hits_1h"
+        ),
+        "directional_impulse_chase_guard_blocked_live_entry_hits_total": (
+            directional_impulse_chase_guard_coverage.get("blocked_live_entry_hits_total")
+        ),
+        "directional_impulse_chase_guard_blocked_live_entry_hits_24h": (
+            directional_impulse_chase_guard_coverage.get("blocked_live_entry_hits_24h")
+        ),
+        "directional_impulse_chase_guard_blocked_live_entry_hits_1h": (
+            directional_impulse_chase_guard_coverage.get("blocked_live_entry_hits_1h")
+        ),
+        "directional_impulse_chase_guard_latest_hit_decision_id": (
+            directional_impulse_chase_guard_latest_hit.get("decision_id")
+        ),
+        "directional_impulse_chase_guard_latest_hit_created_at": (
+            directional_impulse_chase_guard_latest_hit.get("created_at")
+        ),
+        "directional_impulse_chase_guard_latest_hit_matched_flags": (
+            directional_impulse_chase_guard_latest_hit.get("matched_guard_flags")
+        ),
         "directional_episode_recent_decision_count": directional_attribution_coverage.get("recent_decision_count"),
         "directional_episode_decisions_with_edge_cost": directional_attribution_coverage.get(
             "decisions_with_edge_cost"
@@ -4387,6 +4640,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["target_convergence_guard_truth"] = summarize_target_convergence_guard_truth(
         report["database_truth"],
         report["git"],
+        report_generated_at=generated_at,
+    )
+    report["directional_impulse_chase_guard_truth"] = summarize_directional_impulse_chase_guard_truth(
+        report["database_truth"],
+        report["git"],
+        directional_impulse_chase_guard_code_markers(repo_root),
         report_generated_at=generated_at,
     )
     report["runtime"]["ai_timeout_active_blocker"] = False
