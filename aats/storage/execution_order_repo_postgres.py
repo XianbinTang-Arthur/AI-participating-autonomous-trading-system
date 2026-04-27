@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from aats.schemas.common import dump_payload_exact
 from aats.schemas.execution import OrderIntent
+from aats.storage.execution_order_labels import execution_order_storage_label
 from aats.storage.sqlalchemy_models import ExecutionOrderModel, ExecutionOrderStateHistoryModel
 
 
@@ -93,10 +94,17 @@ class PostgresExecutionOrderRepository:
                 margin_mode=intent.margin_mode,
                 execution_action=intent.execution_action,
                 position_intent=intent.position_intent,
-                execution_style=execution_style,
+                execution_style=(
+                    execution_order_storage_label(execution_style, fallback="unknown")
+                    if execution_style
+                    else None
+                ),
                 state=initial_state,
                 state_version=1,
-                source_system=str(raw_payload.get("source_system", "aats")),
+                source_system=execution_order_storage_label(
+                    raw_payload.get("source_system"),
+                    fallback="aats",
+                ),
                 last_exchange_ts=None,
                 created_at=created_at,
                 updated_at=created_at,
