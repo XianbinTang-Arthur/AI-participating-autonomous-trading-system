@@ -1943,10 +1943,17 @@ def classify_directional_episode_pnl_lifecycle(decision: dict[str, Any]) -> dict
         status = "open_position_not_yet_realized"
         smallest_missing_field = None
         explanation = "Fill opened or still owns an open lot, so realized PnL is expected to remain null until close/reduce."
-    elif lot_close_event_count > 0 or intent_tokens.intersection(CLOSE_POSITION_INTENTS):
+    elif lot_close_event_count > 0:
         status = "closed_lifecycle_missing_fill_outcome"
         smallest_missing_field = "fill_outcomes.realized_pnl_delta"
         explanation = "Lifecycle evidence shows a close/reduce path, but realized PnL is not linked through fill_outcomes."
+    elif intent_tokens.intersection(CLOSE_POSITION_INTENTS):
+        status = "close_intent_missing_portfolio_projection"
+        smallest_missing_field = "lot_events.fill_id"
+        explanation = (
+            "Fill intent is close/reduce, but portfolio projection did not record a lot close event; "
+            "fill_outcomes cannot be interpreted as a closed lifecycle until projection evidence exists."
+        )
     elif intent_tokens.intersection(OPEN_POSITION_INTENTS):
         status = "open_position_lot_evidence_missing"
         smallest_missing_field = "position_lots.source_fill_id"

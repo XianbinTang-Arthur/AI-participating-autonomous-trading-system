@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
-from aats.schemas.execution import OrderObligation, OrderState
+from aats.schemas.execution import FillEvent, OrderObligation, OrderState
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.strategy_runtime import (
     PortfolioAllocationDecision,
@@ -22,6 +22,7 @@ from aats.services.portfolio_service.reconstruction import PortfolioReconstructi
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.storage.execution_repo import InMemoryExecutionRepository
+from aats.storage.fill_outcome_repo import InMemoryFillOutcomeRepository
 from aats.storage.obligation_repo import InMemoryExecutionObligationRepository
 from aats.storage.portfolio_repo import InMemoryPortfolioRepository
 from aats.storage.reconciliation_repo import InMemoryReconciliationRepository
@@ -809,6 +810,85 @@ class TestExecutionRecovery(unittest.TestCase):
                 self.assertEqual(long_snapshot.replay_snapshot["book_state"], expected_book_state)
                 self.assertEqual(long_snapshot.replay_snapshot["guard_state"], expected_guard_state)
 
+    def test_recovery_backfills_missing_fill_outcomes_from_replay(self) -> None:
+        execution_repo = InMemoryExecutionRepository()
+        fill_outcome_repo = InMemoryFillOutcomeRepository()
+        now = utc_now()
+        execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_open_long",
+                decision_id="decision_open_long",
+                intent_id="intent_open_long",
+                client_order_id="client_open_long",
+                exchange_order_id="exchange_open_long",
+                symbol="BTC-USDT-SWAP",
+                venue="OKX",
+                side="buy",
+                fill_qty=Decimal("0.001"),
+                fill_price=Decimal("78000"),
+                fee_amount=Decimal("0"),
+                fee_currency="USDT",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                exposure_side="long",
+                execution_action="enter",
+                position_intent="open_long",
+                liquidity_role="taker",
+                exchange_timestamp=now,
+                ingestion_timestamp=now,
+            )
+        )
+        execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_close_long",
+                decision_id="decision_close_long",
+                intent_id="intent_close_long",
+                client_order_id="client_close_long",
+                exchange_order_id="exchange_close_long",
+                symbol="BTC-USDT-SWAP",
+                venue="OKX",
+                side="sell",
+                fill_qty=Decimal("0.001"),
+                fill_price=Decimal("78100"),
+                fee_amount=Decimal("0"),
+                fee_currency="USDT",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                exposure_side="long",
+                execution_action="exit",
+                position_intent="close_long",
+                liquidity_role="taker",
+                exchange_timestamp=now + timedelta(seconds=1),
+                ingestion_timestamp=now + timedelta(seconds=1),
+            )
+        )
+        recovery = self._service(
+            execution_repo=execution_repo,
+            fill_outcome_repo=fill_outcome_repo,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        open_outcome = fill_outcome_repo.get_outcome("fill_open_long")
+        close_outcome = fill_outcome_repo.get_outcome("fill_close_long")
+        self.assertIsNotNone(open_outcome)
+        self.assertIsNotNone(close_outcome)
+        assert close_outcome is not None
+        self.assertEqual(close_outcome.starting_position_qty, Decimal("0.001"))
+        self.assertEqual(close_outcome.ending_position_qty, Decimal("0"))
+        self.assertEqual(close_outcome.realized_pnl_delta, Decimal("0.100"))
+        self.assertIn("fill_gap_compensated:2", artifacts.status.notes)
+
     @staticmethod
     def _service(
         *,
@@ -819,6 +899,7 @@ class TestExecutionRecovery(unittest.TestCase):
         bootstrap_portfolio_from_exchange: bool = False,
         reconciliation_repo: InMemoryReconciliationRepository | None = None,
         strategy_runtime_repo: InMemoryStrategyRuntimeRepository | None = None,
+        fill_outcome_repo: InMemoryFillOutcomeRepository | None = None,
         settings_override: dict | None = None,
     ) -> ExecutionRecoveryService:
         payload = {
@@ -845,4 +926,5 @@ class TestExecutionRecovery(unittest.TestCase):
             kill_switch=kill_switch or KillSwitch(),
             bootstrap_portfolio_from_exchange=bootstrap_portfolio_from_exchange,
             reconciliation_stale_after_seconds=settings.reconciliation_stale_after_seconds,
+            fill_outcome_repo=fill_outcome_repo,
         )

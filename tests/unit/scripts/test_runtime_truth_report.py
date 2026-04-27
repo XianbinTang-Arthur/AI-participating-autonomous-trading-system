@@ -871,6 +871,63 @@ def test_directional_episode_pnl_lifecycle_reports_closed_missing_outcome_link()
     assert summary["coverage"]["filled_decisions_with_resolved_pnl_lifecycle"] == 0
 
 
+def test_directional_episode_pnl_lifecycle_does_not_treat_close_intent_as_lot_close() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "directional_episode_attribution": {
+            "symbol": "BTC-USDT-SWAP",
+            "recent_decisions": [
+                {
+                    "decision_id": "decision_close_intent_without_projection",
+                    "symbol": "BTC-USDT-SWAP",
+                    "created_at": "2026-04-27T06:55:00+08:00",
+                    "route_action": "override_target",
+                    "primary_family": "directional",
+                    "expected_edge_bps": "2.0",
+                    "expected_cost_bps": "8.0",
+                    "order_count": 1,
+                    "order_states": "FILLED",
+                    "order_position_intents": "close_long",
+                    "order_execution_actions": "close",
+                    "fill_count": 1,
+                    "filled_order_count": 1,
+                    "fill_outcome_count": 0,
+                    "actual_fee_bps_sample_count": 1,
+                    "actual_fee_bps_mean": "5.0",
+                    "realized_slippage_sample_count": 1,
+                    "realized_slippage_bps_mean": "1.0",
+                    "slippage_reference_sample_count": 1,
+                    "fill_position_intents": "close_long",
+                    "source_lot_count": 0,
+                    "lot_event_count": 0,
+                    "lot_open_event_count": 0,
+                    "lot_close_event_count": 0,
+                    "latest_fill_id": "fill_close_intent_without_projection",
+                    "latest_fill_side": "sell",
+                    "latest_fill_qty": "0.001",
+                    "latest_fill_price": "78700.0",
+                    "latest_fill_ingestion_ts": "2026-04-27T06:55:03+08:00",
+                    "latest_fill_lot_open_event_count": 0,
+                    "latest_fill_lot_close_event_count": 0,
+                    "payload": {"reason_codes": ["reduce_after_loss"]},
+                }
+            ],
+        },
+    }
+
+    parsed = mod.parse_db_probe(json.dumps(raw))
+    summary = mod.summarize_directional_episode_attribution_truth(parsed, {"ok": False})
+    latest = summary["latest_filled_decision"]
+
+    assert latest["pnl_lifecycle"]["status"] == "close_intent_missing_portfolio_projection"
+    assert latest["pnl_lifecycle"]["smallest_missing_field"] == "lot_events.fill_id"
+    assert latest["pnl_lifecycle"]["lifecycle_evidence"]["lot_close_event_count"] == 0
+    assert summary["pnl_lifecycle"]["status"] == "missing_directional_episode_pnl_lifecycle_evidence"
+    assert summary["pnl_lifecycle"]["smallest_missing_field"] == "lot_events.fill_id"
+    assert summary["coverage"]["filled_decisions_with_resolved_pnl_lifecycle"] == 0
+
+
 def test_directional_episode_attribution_truth_reports_missing_microstructure_context() -> None:
     mod = load_module()
     raw = {

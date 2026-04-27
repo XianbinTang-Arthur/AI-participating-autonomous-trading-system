@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import AccountBaselineSnapshot
-from aats.schemas.portfolio import PortfolioSnapshot, is_trusted_baseline_snapshot
+from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshot, is_trusted_baseline_snapshot
 from aats.schemas.execution import FillEvent, OrderObligation, OrderState
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.schemas.system import RecoveryStatus
@@ -21,6 +21,7 @@ from aats.services.fill_ordering import fill_processing_sort_key
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
+from aats.services.portfolio_service.decimals import to_decimal
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.runtime_scope import (
@@ -832,38 +833,106 @@ class ExecutionRecoveryService:
         portfolio_state: PortfolioState,
         notes: list[str],
     ) -> int:
-        """Detect fills in execution_repo that have no FillOutcomeRecord.
-
-        Portfolio state is already correct from snapshot reconstruction
-        (P0-B auto-heal restores the authoritative fill-derived state).
-        This method provides **observability**: it logs fills whose
-        portfolio-side processing was never recorded — indicating a crash
-        occurred between fill persistence and portfolio event delivery.
+        """Backfill missing FillOutcomeRecord rows from deterministic replay.
 
         Note: We cannot rely on ``portfolio_state.has_applied_fill()``
         because ``load_portfolio_snapshot()`` pre-marks ALL fill IDs as
         applied.  The sole reliable detection signal is the absence of a
         FillOutcomeRecord in ``fill_outcome_repo``.
 
-        Returns the number of fills with missing outcome records.
+        Returns the number of outcome records actually compensated.
         """
+        _ = portfolio_state
         if self.fill_outcome_repo is None or not fills:
             return 0
-        gap_count = 0
+        compensated_count = 0
+        failed_count = 0
+        replay_state = PortfolioState(
+            initial_usdt_balance=self.settings.initial_usdt_balance,
+            default_product_type=self.runtime_scope.product_type,
+            default_margin_mode=self.runtime_scope.margin_mode,
+        )
         for fill in sorted(fills, key=fill_processing_sort_key):
-            if self.fill_outcome_repo.get_outcome(fill.fill_id) is not None:
+            existing_outcome = self.fill_outcome_repo.get_outcome(fill.fill_id)
+            balances_before = dict(replay_state.balances)
+            application_result = replay_state.apply_fill(fill)
+            balances_after = dict(replay_state.balances)
+            if existing_outcome is not None:
                 continue
-            # Fill exists in execution_repo but has no outcome record —
-            # portfolio service never completed processing for this fill.
-            # State is already correct via reconstruction; log for ops.
-            gap_count += 1
+            if not application_result.applied:
+                continue
+            balance_delta = self._balance_delta_event_from_replay(
+                fill=fill,
+                balances_before=balances_before,
+                balances_after=balances_after,
+                realized_pnl_delta=application_result.realized_pnl_delta,
+                fee_delta=application_result.fee_delta,
+            )
+            outcome = FillOutcomeRecord.from_fill_and_balance_delta(
+                fill=fill,
+                balance_delta=balance_delta,
+                starting_position_qty=application_result.starting_quantity,
+                starting_avg_entry_price=application_result.starting_avg_entry_price,
+                ending_position_qty=application_result.ending_quantity,
+                ending_avg_entry_price=application_result.ending_avg_entry_price,
+            )
+            try:
+                self.fill_outcome_repo.save_outcome(outcome)
+            except Exception as exc:  # pragma: no cover - repository specific failure path
+                failed_count += 1
+                log_event(
+                    self.logger,
+                    "fill_outcome_backfill_failed",
+                    level="error",
+                    fill_id=fill.fill_id,
+                    symbol=fill.symbol,
+                    side=fill.side,
+                    qty=str(fill.fill_qty),
+                    error=str(exc),
+                )
+                continue
+            compensated_count += 1
             log_event(
                 self.logger,
-                "fill_missing_outcome_record",
-                level="warning",
+                "fill_outcome_backfilled_from_replay",
+                level="info",
                 fill_id=fill.fill_id,
                 symbol=fill.symbol,
                 side=fill.side,
                 qty=str(fill.fill_qty),
+                realized_pnl_delta=str(outcome.realized_pnl_delta),
+                fee_delta=str(outcome.fee_delta),
             )
-        return gap_count
+        if failed_count:
+            notes.append(f"fill_gap_backfill_failed:{failed_count}")
+        return compensated_count
+
+    @staticmethod
+    def _balance_delta_event_from_replay(
+        *,
+        fill: FillEvent,
+        balances_before: dict[str, Decimal],
+        balances_after: dict[str, Decimal],
+        realized_pnl_delta: Decimal,
+        fee_delta: Decimal,
+    ) -> PortfolioBalanceDelta:
+        currencies = sorted(set(balances_before) | set(balances_after))
+        balance_deltas = {
+            currency: to_decimal(balances_after.get(currency, 0)) - to_decimal(balances_before.get(currency, 0))
+            for currency in currencies
+            if to_decimal(balances_after.get(currency, 0)) != to_decimal(balances_before.get(currency, 0))
+        }
+        return PortfolioBalanceDelta(
+            decision_id=fill.decision_id,
+            intent_id=fill.intent_id,
+            order_id=fill.client_order_id,
+            fill_id=fill.fill_id,
+            symbol=fill.symbol,
+            balances_before={currency: to_decimal(value) for currency, value in balances_before.items()},
+            balances_after={currency: to_decimal(value) for currency, value in balances_after.items()},
+            balance_deltas=balance_deltas,
+            realized_pnl_delta=realized_pnl_delta,
+            fee_delta=fee_delta,
+            product_type=fill.product_type,
+            margin_mode=fill.margin_mode,
+        )
