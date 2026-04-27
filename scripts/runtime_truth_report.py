@@ -491,6 +491,175 @@ with engine.connect() as conn:
             "group by coalesce(liquidity_role, 'unknown') order by liquidity_role"
         ), {"symbol": symbol}).mappings().all()
     ]
+    directional_episode_attribution = {
+        "symbol": symbol,
+        "recent_decisions": [
+            dict(row)
+            for row in conn.execute(text(
+                "with recent_decisions as ("
+                "  select allocation_id, decision_id, symbol, created_at, route_action, primary_family, "
+                "         portfolio_requested_notional, portfolio_approved_notional, "
+                "         portfolio_budget_cut_notional, expected_edge_bps, expected_cost_bps, payload "
+                "  from portfolio_allocation_decisions "
+                "  where symbol = :symbol and primary_family = 'directional' "
+                "  order by created_at desc limit 24"
+                "), command_refs as ("
+                "  select order_id, "
+                "         max(case when command_payload #>> '{intent,limit_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+                "                  then (command_payload #>> '{intent,limit_price}')::numeric end) "
+                "             as command_intent_limit_price, "
+                "         max(case when command_payload #>> '{intent,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+                "                  then (command_payload #>> '{intent,reference_price}')::numeric end) "
+                "             as command_intent_reference_price "
+                "  from execution_commands where command_type = 'submit' group by order_id"
+                "), order_summary as ("
+                "  select o.decision_id, count(*) as order_count, "
+                "         count(*) filter (where o.state in ('CREATED', 'SUBMITTING') "
+                "                          and o.venue_order_id is null) as created_or_submitting_no_venue_count, "
+                "         count(*) filter (where o.state in ('FAILED', 'REJECTED', 'CANCELED', 'BLOCKED', "
+                "                          'EXPIRED', 'DRY_RUN')) as terminal_no_fill_order_count, "
+                "         count(*) filter (where o.state = 'BLOCKED') as blocked_order_count, "
+                "         string_agg(distinct coalesce(o.state, 'null'), ',' order by coalesce(o.state, 'null')) "
+                "             as order_states, "
+                "         string_agg(distinct coalesce(o.position_intent, 'null'), ',' "
+                "             order by coalesce(o.position_intent, 'null')) as order_position_intents, "
+                "         string_agg(distinct coalesce(o.execution_action, 'null'), ',' "
+                "             order by coalesce(o.execution_action, 'null')) as order_execution_actions, "
+                "         string_agg(distinct coalesce(o.strategy_bundle_id, 'null'), ',' "
+                "             order by coalesce(o.strategy_bundle_id, 'null')) as order_strategy_bundle_ids, "
+                "         min(o.created_at) as first_order_created_at, max(o.created_at) as last_order_created_at "
+                "  from execution_orders o "
+                "  join recent_decisions rd on rd.decision_id = o.decision_id "
+                "  group by o.decision_id"
+                "), fill_enriched as ("
+                "  select coalesce(f.decision_id, o.decision_id) as decision_id, f.fill_id, f.order_id, "
+                "         f.side, f.fill_qty, f.fill_price, f.fee_amount, f.liquidity_role, "
+                "         f.strategy_bundle_id as fill_strategy_bundle_id, f.ingestion_ts, "
+                "         o.state as order_state, o.position_intent, o.execution_action, "
+                "         o.strategy_bundle_id as order_strategy_bundle_id, o.limit_price, "
+                "         case when o.raw_payload #>> '{intent,limit_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+                "              then (o.raw_payload #>> '{intent,limit_price}')::numeric end "
+                "             as order_intent_limit_price, "
+                "         case when o.raw_payload #>> '{intent,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+                "              then (o.raw_payload #>> '{intent,reference_price}')::numeric end "
+                "             as order_intent_reference_price, "
+                "         case when o.raw_payload #>> '{order_state,reference_price}' ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+                "              then (o.raw_payload #>> '{order_state,reference_price}')::numeric end "
+                "             as order_state_reference_price, "
+                "         case when o.raw_payload #>> '{order_state,submission_payload,referencePrice}' "
+                "                   ~ '^-?[0-9]+(\\.[0-9]+)?$' "
+                "              then (o.raw_payload #>> '{order_state,submission_payload,referencePrice}')::numeric end "
+                "             as order_state_submission_reference_price, "
+                "         cr.command_intent_limit_price, cr.command_intent_reference_price, "
+                "         fo.realized_pnl_delta as fill_outcome_realized_pnl_delta, "
+                "         fo.fee_delta as fill_outcome_fee_delta, "
+                "         case when f.fill_qty > 0 and f.fill_price > 0 "
+                "              then abs(f.fee_amount) / (f.fill_qty * f.fill_price) * 10000 end as actual_fee_bps "
+                "  from execution_fills f "
+                "  left join execution_orders o on o.order_id = f.order_id "
+                "  left join command_refs cr on cr.order_id = f.order_id "
+                "  left join fill_outcomes fo on fo.fill_id = f.fill_id "
+                "  where f.symbol = :symbol "
+                "    and coalesce(f.decision_id, o.decision_id) in (select decision_id from recent_decisions)"
+                "), fill_with_slippage as ("
+                "  select fill_enriched.*, "
+                "         coalesce(limit_price, order_intent_limit_price, order_intent_reference_price, "
+                "                  order_state_reference_price, order_state_submission_reference_price, "
+                "                  command_intent_limit_price, command_intent_reference_price) "
+                "             as slippage_reference_price, "
+                "         case "
+                "             when limit_price is not null then 'execution_orders.limit_price' "
+                "             when order_intent_limit_price is not null then 'execution_orders.raw_payload.intent.limit_price' "
+                "             when order_intent_reference_price is not null "
+                "                 then 'execution_orders.raw_payload.intent.reference_price' "
+                "             when order_state_reference_price is not null "
+                "                 then 'execution_orders.raw_payload.order_state.reference_price' "
+                "             when order_state_submission_reference_price is not null "
+                "                 then 'execution_orders.raw_payload.order_state.submission_payload.referencePrice' "
+                "             when command_intent_limit_price is not null "
+                "                 then 'execution_commands.command_payload.intent.limit_price' "
+                "             when command_intent_reference_price is not null "
+                "                 then 'execution_commands.command_payload.intent.reference_price' "
+                "         end as slippage_reference_source "
+                "  from fill_enriched"
+                "), fill_final as ("
+                "  select fill_with_slippage.*, "
+                "         case when slippage_reference_price is not null and slippage_reference_price > 0 "
+                "                   and fill_price > 0 and side = 'buy' "
+                "              then (fill_price - slippage_reference_price) / slippage_reference_price * 10000 "
+                "              when slippage_reference_price is not null and slippage_reference_price > 0 "
+                "                   and fill_price > 0 and side = 'sell' "
+                "              then (slippage_reference_price - fill_price) / slippage_reference_price * 10000 "
+                "         end as reference_fill_slippage_bps "
+                "  from fill_with_slippage"
+                "), fill_summary as ("
+                "  select decision_id, count(distinct fill_id) as fill_count, "
+                "         count(distinct order_id) as filled_order_count, "
+                "         count(fill_outcome_realized_pnl_delta) as fill_outcome_count, "
+                "         min(ingestion_ts) as first_fill_ts, max(ingestion_ts) as latest_fill_ts, "
+                "         sum(abs(fill_qty * fill_price)) as turnover_usdt, "
+                "         sum(abs(fee_amount)) as fee_usdt, "
+                "         sum(fill_outcome_realized_pnl_delta) as realized_pnl_usdt, "
+                "         sum(fill_outcome_fee_delta) as fill_outcome_fee_delta_usdt, "
+                "         count(actual_fee_bps) as actual_fee_bps_sample_count, "
+                "         avg(actual_fee_bps) as actual_fee_bps_mean, "
+                "         count(reference_fill_slippage_bps) as realized_slippage_sample_count, "
+                "         avg(reference_fill_slippage_bps) as realized_slippage_bps_mean, "
+                "         count(slippage_reference_price) as slippage_reference_sample_count, "
+                "         string_agg(distinct coalesce(side, 'null'), ',' order by coalesce(side, 'null')) "
+                "             as fill_sides, "
+                "         string_agg(distinct coalesce(liquidity_role, 'unknown'), ',' "
+                "             order by coalesce(liquidity_role, 'unknown')) as liquidity_roles, "
+                "         string_agg(distinct coalesce(position_intent, 'null'), ',' "
+                "             order by coalesce(position_intent, 'null')) as fill_position_intents, "
+                "         string_agg(distinct coalesce(order_state, 'null'), ',' "
+                "             order by coalesce(order_state, 'null')) as filled_order_states, "
+                "         string_agg(distinct coalesce(fill_strategy_bundle_id, order_strategy_bundle_id, 'null'), ',' "
+                "             order by coalesce(fill_strategy_bundle_id, order_strategy_bundle_id, 'null')) "
+                "             as fill_strategy_bundle_ids "
+                "  from fill_final group by decision_id"
+                "), latest_fill as ("
+                "  select * from ("
+                "    select fill_final.*, "
+                "           row_number() over (partition by decision_id order by ingestion_ts desc, fill_id desc) as rn "
+                "    from fill_final"
+                "  ) ranked where rn = 1"
+                ") "
+                "select rd.allocation_id, rd.decision_id, rd.symbol, rd.created_at, rd.route_action, "
+                "       rd.primary_family, rd.portfolio_requested_notional, rd.portfolio_approved_notional, "
+                "       rd.portfolio_budget_cut_notional, rd.expected_edge_bps, rd.expected_cost_bps, rd.payload, "
+                "       coalesce(os.order_count, 0) as order_count, "
+                "       coalesce(os.created_or_submitting_no_venue_count, 0) as created_or_submitting_no_venue_count, "
+                "       coalesce(os.terminal_no_fill_order_count, 0) as terminal_no_fill_order_count, "
+                "       coalesce(os.blocked_order_count, 0) as blocked_order_count, "
+                "       os.order_states, os.order_position_intents, os.order_execution_actions, "
+                "       os.order_strategy_bundle_ids, os.first_order_created_at, os.last_order_created_at, "
+                "       coalesce(fs.fill_count, 0) as fill_count, "
+                "       coalesce(fs.filled_order_count, 0) as filled_order_count, "
+                "       coalesce(fs.fill_outcome_count, 0) as fill_outcome_count, "
+                "       fs.first_fill_ts, fs.latest_fill_ts, fs.turnover_usdt, fs.fee_usdt, fs.realized_pnl_usdt, "
+                "       fs.fill_outcome_fee_delta_usdt, coalesce(fs.actual_fee_bps_sample_count, 0) "
+                "           as actual_fee_bps_sample_count, "
+                "       fs.actual_fee_bps_mean, coalesce(fs.realized_slippage_sample_count, 0) "
+                "           as realized_slippage_sample_count, "
+                "       fs.realized_slippage_bps_mean, coalesce(fs.slippage_reference_sample_count, 0) "
+                "           as slippage_reference_sample_count, "
+                "       fs.fill_sides, fs.liquidity_roles, fs.fill_position_intents, "
+                "       fs.filled_order_states, fs.fill_strategy_bundle_ids, "
+                "       lf.fill_id as latest_fill_id, lf.side as latest_fill_side, "
+                "       lf.fill_qty as latest_fill_qty, lf.fill_price as latest_fill_price, "
+                "       lf.fee_amount as latest_fill_fee_amount, lf.ingestion_ts as latest_fill_ingestion_ts, "
+                "       lf.reference_fill_slippage_bps as latest_fill_slippage_bps, "
+                "       lf.slippage_reference_source as latest_fill_slippage_reference_source, "
+                "       lf.fill_outcome_realized_pnl_delta as latest_fill_realized_pnl_delta "
+                "from recent_decisions rd "
+                "left join order_summary os on os.decision_id = rd.decision_id "
+                "left join fill_summary fs on fs.decision_id = rd.decision_id "
+                "left join latest_fill lf on lf.decision_id = rd.decision_id "
+                "order by rd.created_at desc"
+            ), {"symbol": symbol}).mappings().all()
+        ],
+    }
 
 print(json.dumps({
     "ok": True,
@@ -508,6 +677,7 @@ print(json.dumps({
     "latest_executable_directional_decision_counts": latest_executable_directional_counts,
     "runtime_config": runtime_config,
     "slippage_cost_calibration": slippage_cost_calibration,
+    "directional_episode_attribution": directional_episode_attribution,
 }, default=str, sort_keys=True))
 """
 
@@ -770,6 +940,14 @@ def decimal_subtract_text(left: Any, right: Any) -> str | None:
     if left_value is None or right_value is None:
         return None
     return decimal_plain_text(left_value - right_value)
+
+
+def decimal_add_text(left: Any, right: Any) -> str | None:
+    left_value = decimal_value(left)
+    right_value = decimal_value(right)
+    if left_value is None or right_value is None:
+        return None
+    return decimal_plain_text(left_value + right_value)
 
 
 def decimal_gte(left: Any, right: Any) -> bool | None:
@@ -1617,6 +1795,125 @@ def summarize_latest_decision(
     }
 
 
+def classify_directional_episode_row(row: dict[str, Any]) -> str:
+    fill_count = int_or_zero(row.get("fill_count"))
+    order_count = int_or_zero(row.get("order_count"))
+    outcome_count = int_or_zero(row.get("fill_outcome_count"))
+    terminal_no_fill_count = int_or_zero(row.get("terminal_no_fill_order_count"))
+    blocked_order_count = int_or_zero(row.get("blocked_order_count"))
+    if fill_count > 0 and outcome_count > 0:
+        return "filled_with_realized_pnl_outcome"
+    if fill_count > 0:
+        return "filled_without_realized_pnl_outcome"
+    if blocked_order_count > 0:
+        return "blocked_order_without_fill"
+    if terminal_no_fill_count > 0:
+        return "terminal_order_without_fill"
+    if order_count > 0:
+        return "active_order_without_fill"
+    return "decision_without_order"
+
+
+def sanitize_directional_episode_attribution(
+    raw: dict[str, Any] | None,
+) -> dict[str, Any]:
+    raw = as_dict(raw)
+    decisions: list[dict[str, Any]] = []
+    for row in [as_dict(item) for item in as_list(raw.get("recent_decisions"))]:
+        payload = as_dict(row.get("payload"))
+        sleeve_summaries = summarize_sleeve_intents(payload)
+        reason_codes = compact_unique(
+            collect_reason_codes(payload) + collect_sleeve_reason_codes(sleeve_summaries),
+            limit=32,
+        )
+        realized_cost_proxy_bps = decimal_add_text(
+            row.get("actual_fee_bps_mean"),
+            row.get("realized_slippage_bps_mean"),
+        )
+        decisions.append(
+            {
+                "allocation_id": row.get("allocation_id"),
+                "decision_id": row.get("decision_id"),
+                "symbol": row.get("symbol"),
+                "created_at": row.get("created_at"),
+                "route_action": row.get("route_action"),
+                "primary_family": row.get("primary_family"),
+                "portfolio_requested_notional": decimal_text(row.get("portfolio_requested_notional")),
+                "portfolio_approved_notional": decimal_text(row.get("portfolio_approved_notional")),
+                "portfolio_budget_cut_notional": decimal_text(row.get("portfolio_budget_cut_notional")),
+                "expected_edge_bps": decimal_text(row.get("expected_edge_bps")),
+                "expected_cost_bps": decimal_text(row.get("expected_cost_bps")),
+                "expected_net_edge_bps": decimal_subtract_text(
+                    row.get("expected_edge_bps"),
+                    row.get("expected_cost_bps"),
+                ),
+                "realized_cost_proxy_bps": realized_cost_proxy_bps,
+                "edge_after_realized_cost_proxy_bps": decimal_subtract_text(
+                    row.get("expected_edge_bps"),
+                    realized_cost_proxy_bps,
+                ),
+                "order": {
+                    "count": int_or_zero(row.get("order_count")),
+                    "created_or_submitting_no_venue_count": int_or_zero(
+                        row.get("created_or_submitting_no_venue_count")
+                    ),
+                    "terminal_no_fill_count": int_or_zero(row.get("terminal_no_fill_order_count")),
+                    "blocked_count": int_or_zero(row.get("blocked_order_count")),
+                    "states": row.get("order_states"),
+                    "position_intents": row.get("order_position_intents"),
+                    "execution_actions": row.get("order_execution_actions"),
+                    "strategy_bundle_ids": row.get("order_strategy_bundle_ids"),
+                    "first_created_at": row.get("first_order_created_at"),
+                    "last_created_at": row.get("last_order_created_at"),
+                },
+                "fill": {
+                    "count": int_or_zero(row.get("fill_count")),
+                    "filled_order_count": int_or_zero(row.get("filled_order_count")),
+                    "first_fill_ts": row.get("first_fill_ts"),
+                    "latest_fill_ts": row.get("latest_fill_ts"),
+                    "turnover_usdt": decimal_text(row.get("turnover_usdt")),
+                    "fee_usdt": decimal_text(row.get("fee_usdt")),
+                    "actual_fee_bps_sample_count": int_or_zero(row.get("actual_fee_bps_sample_count")),
+                    "actual_fee_bps_mean": decimal_text(row.get("actual_fee_bps_mean")),
+                    "realized_slippage_sample_count": int_or_zero(row.get("realized_slippage_sample_count")),
+                    "realized_slippage_bps_mean": decimal_text(row.get("realized_slippage_bps_mean")),
+                    "slippage_reference_sample_count": int_or_zero(row.get("slippage_reference_sample_count")),
+                    "sides": row.get("fill_sides"),
+                    "liquidity_roles": row.get("liquidity_roles"),
+                    "position_intents": row.get("fill_position_intents"),
+                    "order_states": row.get("filled_order_states"),
+                    "strategy_bundle_ids": row.get("fill_strategy_bundle_ids"),
+                },
+                "pnl_outcome": {
+                    "fill_outcome_count": int_or_zero(row.get("fill_outcome_count")),
+                    "realized_pnl_usdt": decimal_text(row.get("realized_pnl_usdt")),
+                    "fill_outcome_fee_delta_usdt": decimal_text(row.get("fill_outcome_fee_delta_usdt")),
+                },
+                "latest_fill": {
+                    "fill_id": row.get("latest_fill_id"),
+                    "side": row.get("latest_fill_side"),
+                    "fill_qty": decimal_text(row.get("latest_fill_qty")),
+                    "fill_price": decimal_text(row.get("latest_fill_price")),
+                    "fee_amount": decimal_text(row.get("latest_fill_fee_amount")),
+                    "ingestion_ts": row.get("latest_fill_ingestion_ts"),
+                    "slippage_bps": decimal_text(row.get("latest_fill_slippage_bps")),
+                    "slippage_reference_source": row.get("latest_fill_slippage_reference_source"),
+                    "realized_pnl_delta": decimal_text(row.get("latest_fill_realized_pnl_delta")),
+                },
+                "guard_decision": {
+                    "reason_codes": reason_codes,
+                    "operator_summary": truncate_text(payload.get("operator_summary")),
+                    "sleeve_intent_summary": sleeve_summaries,
+                },
+                "classification": classify_directional_episode_row(row),
+            }
+        )
+    return {
+        "symbol": raw.get("symbol"),
+        "recent_decisions": decisions,
+    }
+
+
 def sanitize_db_probe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(payload)
     latest = summarize_latest_decision(
@@ -1631,6 +1928,9 @@ def sanitize_db_probe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
     sanitized["latest_decision"] = latest
     sanitized["latest_executable_directional_decision"] = latest_executable_directional
+    sanitized["directional_episode_attribution"] = sanitize_directional_episode_attribution(
+        sanitized.get("directional_episode_attribution"),
+    )
     return sanitized
 
 
@@ -2370,6 +2670,89 @@ def summarize_slippage_cost_calibration_truth(
     }
 
 
+def summarize_directional_episode_attribution_truth(db: dict[str, Any]) -> dict[str, Any]:
+    if not db.get("ok"):
+        return {
+            "source": "live_db",
+            "ok": False,
+            "status": "live_db_unavailable",
+            "smallest_missing_field": "database_truth",
+        }
+
+    raw = as_dict(db.get("directional_episode_attribution"))
+    recent = [as_dict(item) for item in as_list(raw.get("recent_decisions"))]
+    recent_count = len(recent)
+    decisions_with_edge_cost = sum(
+        1
+        for item in recent
+        if item.get("expected_edge_bps") is not None and item.get("expected_cost_bps") is not None
+    )
+    decisions_with_orders = sum(1 for item in recent if int_or_zero(as_dict(item.get("order")).get("count")) > 0)
+    decisions_with_fills = sum(1 for item in recent if int_or_zero(as_dict(item.get("fill")).get("count")) > 0)
+    decisions_with_pnl = sum(
+        1
+        for item in recent
+        if int_or_zero(as_dict(item.get("pnl_outcome")).get("fill_outcome_count")) > 0
+    )
+    decisions_with_slippage_reference = sum(
+        1
+        for item in recent
+        if int_or_zero(as_dict(item.get("fill")).get("slippage_reference_sample_count")) > 0
+    )
+    decisions_with_realized_fee = sum(
+        1
+        for item in recent
+        if int_or_zero(as_dict(item.get("fill")).get("actual_fee_bps_sample_count")) > 0
+    )
+    latest_filled = next(
+        (item for item in recent if int_or_zero(as_dict(item.get("fill")).get("count")) > 0),
+        None,
+    )
+
+    missing_checks = [
+        ("portfolio_allocation_decisions.directional", recent_count > 0),
+        ("portfolio_allocation_decisions.expected_edge_bps_or_expected_cost_bps", decisions_with_edge_cost > 0),
+        ("execution_orders.directional_recent_decision", decisions_with_orders > 0),
+        ("execution_fills.directional_recent_decision", decisions_with_fills > 0),
+        ("execution_fills.actual_fee_bps", decisions_with_realized_fee > 0),
+        ("order_or_command_reference_price_for_recent_directional_fills", decisions_with_slippage_reference > 0),
+        ("fill_outcomes.realized_pnl_delta", decisions_with_pnl > 0),
+    ]
+    smallest_missing = next((field for field, passed in missing_checks if not passed), None)
+
+    if recent_count <= 0:
+        status = "no_recent_directional_decisions"
+    elif decisions_with_fills <= 0:
+        status = "partial_directional_episode_decisions_without_fills"
+    elif decisions_with_pnl <= 0:
+        status = "partial_directional_episode_fills_without_pnl_outcome"
+    elif decisions_with_slippage_reference <= 0:
+        status = "partial_directional_episode_pnl_without_slippage_proxy"
+    elif smallest_missing is None:
+        status = "verified_directional_episode_edge_cost_pnl_attribution_present"
+    else:
+        status = "missing_directional_episode_attribution_evidence"
+
+    return {
+        "source": "live_db",
+        "ok": True,
+        "symbol": raw.get("symbol"),
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "coverage": {
+            "recent_decision_count": recent_count,
+            "decisions_with_edge_cost": decisions_with_edge_cost,
+            "decisions_with_orders": decisions_with_orders,
+            "decisions_with_fills": decisions_with_fills,
+            "decisions_with_realized_fee": decisions_with_realized_fee,
+            "decisions_with_slippage_reference": decisions_with_slippage_reference,
+            "decisions_with_pnl_outcome": decisions_with_pnl,
+        },
+        "latest_filled_decision": latest_filled,
+        "recent_decisions": recent[:12],
+    }
+
+
 def git_truth(repo_root: Path, distro: str, wsl_project: str) -> dict[str, Any]:
     win_status = run_command(["git", "status", "--short", "--branch"], cwd=repo_root)
     win_head = run_command(["git", "rev-parse", "HEAD"], cwd=repo_root)
@@ -2524,6 +2907,11 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     slippage_cost = as_dict(report.get("slippage_cost_calibration_truth"))
     slippage_proxy = as_dict(slippage_cost.get("slippage_proxy"))
     slippage_coverage = as_dict(slippage_proxy.get("coverage_audit"))
+    directional_attribution = as_dict(report.get("directional_episode_attribution_truth"))
+    directional_attribution_coverage = as_dict(directional_attribution.get("coverage"))
+    latest_directional_episode = as_dict(directional_attribution.get("latest_filled_decision"))
+    latest_directional_episode_fill = as_dict(latest_directional_episode.get("fill"))
+    latest_directional_episode_pnl = as_dict(latest_directional_episode.get("pnl_outcome"))
     dashboard = ((report.get("runtime") or {}).get("dashboard_bundle") or {})
     git = report.get("git") or {}
     health = report.get("deployment_health") or {}
@@ -2619,6 +3007,25 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "slippage_covered_reference_fills_with_command_reference": slippage_coverage.get(
             "covered_reference_fills_with_command_reference"
         ),
+        "directional_episode_attribution_truth_status": directional_attribution.get("status"),
+        "directional_episode_attribution_smallest_missing_field": directional_attribution.get(
+            "smallest_missing_field"
+        ),
+        "directional_episode_recent_decision_count": directional_attribution_coverage.get("recent_decision_count"),
+        "directional_episode_decisions_with_edge_cost": directional_attribution_coverage.get(
+            "decisions_with_edge_cost"
+        ),
+        "directional_episode_decisions_with_fills": directional_attribution_coverage.get("decisions_with_fills"),
+        "directional_episode_decisions_with_pnl_outcome": directional_attribution_coverage.get(
+            "decisions_with_pnl_outcome"
+        ),
+        "latest_directional_episode_decision_id": latest_directional_episode.get("decision_id"),
+        "latest_directional_episode_expected_net_edge_bps": latest_directional_episode.get("expected_net_edge_bps"),
+        "latest_directional_episode_realized_cost_proxy_bps": latest_directional_episode.get(
+            "realized_cost_proxy_bps"
+        ),
+        "latest_directional_episode_fill_count": latest_directional_episode_fill.get("count"),
+        "latest_directional_episode_realized_pnl_usdt": latest_directional_episode_pnl.get("realized_pnl_usdt"),
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),
         "effective_operating_mode_status": (dashboard.get("effective_operating_mode") or {}).get("status"),
         "profile_auto_control_effective": (dashboard.get("profile_auto_control_effective") or {}).get("value"),
@@ -2793,6 +3200,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         report["database_truth"],
         report["execution_science_truth"],
         report_generated_at=generated_at,
+    )
+    report["directional_episode_attribution_truth"] = summarize_directional_episode_attribution_truth(
+        report["database_truth"],
     )
     report["runtime"]["ai_timeout_active_blocker"] = False
     runtime_mode = report["runtime"]["dashboard_bundle"].get("effective_operating_mode", {})

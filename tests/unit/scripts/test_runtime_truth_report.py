@@ -567,6 +567,106 @@ def test_slippage_cost_calibration_truth_reports_missing_slippage_reference() ->
     assert summary["slippage_proxy"]["sample_count"] == 0
 
 
+def test_directional_episode_attribution_truth_summarizes_edge_cost_fill_and_pnl() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "portfolio_allocation_decisions": 100,
+        "execution_fills": 3,
+        "directional_episode_attribution": {
+            "symbol": "BTC-USDT-SWAP",
+            "recent_decisions": [
+                {
+                    "allocation_id": "alloc_1",
+                    "decision_id": "decision_loss_drilldown",
+                    "symbol": "BTC-USDT-SWAP",
+                    "created_at": "2026-04-27T06:00:00+08:00",
+                    "route_action": "override_target",
+                    "primary_family": "directional",
+                    "portfolio_requested_notional": "200",
+                    "portfolio_approved_notional": "100",
+                    "portfolio_budget_cut_notional": "100",
+                    "expected_edge_bps": "47.19",
+                    "expected_cost_bps": "6.00",
+                    "order_count": 1,
+                    "created_or_submitting_no_venue_count": 0,
+                    "terminal_no_fill_order_count": 0,
+                    "blocked_order_count": 0,
+                    "order_states": "FILLED",
+                    "order_position_intents": "open_long",
+                    "order_execution_actions": "open",
+                    "order_strategy_bundle_ids": "bundle_1",
+                    "fill_count": 2,
+                    "filled_order_count": 1,
+                    "fill_outcome_count": 2,
+                    "turnover_usdt": "1000",
+                    "fee_usdt": "0.50",
+                    "realized_pnl_usdt": "0.12",
+                    "fill_outcome_fee_delta_usdt": "-0.50",
+                    "actual_fee_bps_sample_count": 2,
+                    "actual_fee_bps_mean": "5.10",
+                    "realized_slippage_sample_count": 2,
+                    "realized_slippage_bps_mean": "1.40",
+                    "slippage_reference_sample_count": 2,
+                    "fill_sides": "buy",
+                    "liquidity_roles": "taker",
+                    "fill_position_intents": "open_long",
+                    "filled_order_states": "FILLED",
+                    "fill_strategy_bundle_ids": "bundle_1",
+                    "latest_fill_id": "fill_2",
+                    "latest_fill_side": "buy",
+                    "latest_fill_qty": "0.001",
+                    "latest_fill_price": "78813.2",
+                    "latest_fill_fee_amount": "-0.25",
+                    "latest_fill_ingestion_ts": "2026-04-27T06:00:10+08:00",
+                    "latest_fill_slippage_bps": "1.5",
+                    "latest_fill_slippage_reference_source": (
+                        "execution_commands.command_payload.intent.reference_price"
+                    ),
+                    "latest_fill_realized_pnl_delta": "0.04",
+                    "payload": {
+                        "operator_summary": "directional executable allocation",
+                        "reason_codes": ["baseline_impulse_override_long", "pnl_contraction_active"],
+                        "strategy_sleeve_intents": [
+                            {
+                                "family": "directional",
+                                "route_action": "override_target",
+                                "position_intent": "open_long",
+                                "effective_scale": "0.5",
+                                "reason_codes": ["budget_scale_applied"],
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    }
+
+    parsed = mod.parse_db_probe(json.dumps(raw))
+    rows = parsed["directional_episode_attribution"]["recent_decisions"]
+    summary = mod.summarize_directional_episode_attribution_truth(parsed)
+
+    assert "payload" not in rows[0]
+    assert summary["status"] == "verified_directional_episode_edge_cost_pnl_attribution_present"
+    assert summary["smallest_missing_field"] is None
+    assert summary["coverage"]["recent_decision_count"] == 1
+    assert summary["coverage"]["decisions_with_edge_cost"] == 1
+    assert summary["coverage"]["decisions_with_fills"] == 1
+    assert summary["coverage"]["decisions_with_pnl_outcome"] == 1
+    latest = summary["latest_filled_decision"]
+    assert latest["decision_id"] == "decision_loss_drilldown"
+    assert latest["expected_net_edge_bps"] == "41.19"
+    assert latest["realized_cost_proxy_bps"] == "6.5"
+    assert latest["edge_after_realized_cost_proxy_bps"] == "40.69"
+    assert latest["classification"] == "filled_with_realized_pnl_outcome"
+    assert latest["pnl_outcome"]["realized_pnl_usdt"] == "0.12"
+    assert latest["latest_fill"]["slippage_reference_source"] == (
+        "execution_commands.command_payload.intent.reference_price"
+    )
+    assert "baseline_impulse_override_long" in latest["guard_decision"]["reason_codes"]
+    assert "budget_scale_applied" in latest["guard_decision"]["reason_codes"]
+
+
 def test_latest_decision_no_trade_attribution_detects_inactive_hold_only() -> None:
     mod = load_module()
     latest = {
@@ -1335,6 +1435,23 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 },
             },
         },
+        "directional_episode_attribution_truth": {
+            "status": "verified_directional_episode_edge_cost_pnl_attribution_present",
+            "smallest_missing_field": None,
+            "coverage": {
+                "recent_decision_count": 12,
+                "decisions_with_edge_cost": 12,
+                "decisions_with_fills": 5,
+                "decisions_with_pnl_outcome": 4,
+            },
+            "latest_filled_decision": {
+                "decision_id": "decision_episode",
+                "expected_net_edge_bps": "41.19",
+                "realized_cost_proxy_bps": "6.5",
+                "fill": {"count": 2},
+                "pnl_outcome": {"realized_pnl_usdt": "-0.42"},
+            },
+        },
         "git": {
             "deployed_matches_windows": True,
             "windows": {
@@ -1384,6 +1501,20 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["slippage_missing_reference_fills_with_submit_command"] == 0
     assert live_facts["slippage_missing_reference_fills_without_submit_command"] == 62
     assert live_facts["slippage_covered_reference_fills_with_command_reference"] == 0
+    assert (
+        live_facts["directional_episode_attribution_truth_status"]
+        == "verified_directional_episode_edge_cost_pnl_attribution_present"
+    )
+    assert live_facts["directional_episode_attribution_smallest_missing_field"] is None
+    assert live_facts["directional_episode_recent_decision_count"] == 12
+    assert live_facts["directional_episode_decisions_with_edge_cost"] == 12
+    assert live_facts["directional_episode_decisions_with_fills"] == 5
+    assert live_facts["directional_episode_decisions_with_pnl_outcome"] == 4
+    assert live_facts["latest_directional_episode_decision_id"] == "decision_episode"
+    assert live_facts["latest_directional_episode_expected_net_edge_bps"] == "41.19"
+    assert live_facts["latest_directional_episode_realized_cost_proxy_bps"] == "6.5"
+    assert live_facts["latest_directional_episode_fill_count"] == 2
+    assert live_facts["latest_directional_episode_realized_pnl_usdt"] == "-0.42"
     assert authority["authoritative_source"] == "runtime.live_runtime_facts"
     assert authority["artifact_may_override_live"] is False
 
