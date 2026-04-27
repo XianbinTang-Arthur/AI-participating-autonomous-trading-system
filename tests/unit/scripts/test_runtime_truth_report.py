@@ -721,6 +721,9 @@ def test_directional_episode_attribution_truth_summarizes_edge_cost_fill_and_pnl
     assert latest["edge_after_realized_cost_proxy_bps"] == "40.69"
     assert latest["classification"] == "filled_with_realized_pnl_outcome"
     assert latest["pnl_outcome"]["realized_pnl_usdt"] == "0.12"
+    assert latest["pnl_lifecycle"]["status"] == "realized_pnl_outcome_complete"
+    assert latest["pnl_lifecycle"]["smallest_missing_field"] is None
+    assert summary["pnl_lifecycle"]["status"] == "verified_directional_episode_pnl_lifecycle_explained"
     assert latest["latest_fill"]["slippage_reference_source"] == (
         "execution_commands.command_payload.intent.reference_price"
     )
@@ -734,6 +737,138 @@ def test_directional_episode_attribution_truth_summarizes_edge_cost_fill_and_pnl
     assert latest["pretrade_microstructure"]["latest_fill_context"]["trade_flow"]["taker_buy_ratio"] == "0.71"
     assert "baseline_impulse_override_long" in latest["guard_decision"]["reason_codes"]
     assert "budget_scale_applied" in latest["guard_decision"]["reason_codes"]
+
+
+def test_directional_episode_pnl_lifecycle_classifies_open_unrealized_position() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "directional_episode_attribution": {
+            "symbol": "BTC-USDT-SWAP",
+            "recent_decisions": [
+                {
+                    "decision_id": "decision_open_position",
+                    "symbol": "BTC-USDT-SWAP",
+                    "created_at": "2026-04-27T06:34:36+08:00",
+                    "route_action": "override_target",
+                    "primary_family": "directional",
+                    "expected_edge_bps": "-3.27",
+                    "expected_cost_bps": "0.94",
+                    "order_count": 1,
+                    "order_states": "FILLED",
+                    "order_position_intents": "open_long",
+                    "order_execution_actions": "open",
+                    "fill_count": 1,
+                    "filled_order_count": 1,
+                    "fill_outcome_count": 0,
+                    "turnover_usdt": "100",
+                    "fee_usdt": "0.05",
+                    "actual_fee_bps_sample_count": 1,
+                    "actual_fee_bps_mean": "5.0",
+                    "realized_slippage_sample_count": 1,
+                    "realized_slippage_bps_mean": "-0.79",
+                    "slippage_reference_sample_count": 1,
+                    "fill_position_intents": "open_long",
+                    "filled_order_states": "FILLED",
+                    "source_lot_count": 1,
+                    "open_source_lot_count": 1,
+                    "closed_source_lot_count": 0,
+                    "open_source_lot_qty": "0.001",
+                    "source_lot_statuses": "OPEN",
+                    "source_lot_exposure_sides": "long",
+                    "lot_event_count": 1,
+                    "lot_open_event_count": 1,
+                    "lot_close_event_count": 0,
+                    "lot_event_types": "open",
+                    "latest_fill_id": "fill_open",
+                    "latest_fill_side": "buy",
+                    "latest_fill_qty": "0.001",
+                    "latest_fill_price": "78813.2",
+                    "latest_fill_ingestion_ts": "2026-04-27T06:34:40+08:00",
+                    "latest_fill_source_lot_status": "OPEN",
+                    "latest_fill_source_lot_open_qty": "0.001",
+                    "latest_fill_source_lot_exposure_side": "long",
+                    "latest_fill_lot_event_types": "open",
+                    "latest_fill_lot_open_event_count": 1,
+                    "latest_fill_lot_close_event_count": 0,
+                    "payload": {"reason_codes": ["baseline_directional_entry"]},
+                }
+            ],
+        },
+    }
+
+    parsed = mod.parse_db_probe(json.dumps(raw))
+    summary = mod.summarize_directional_episode_attribution_truth(parsed, {"ok": False})
+    latest = summary["latest_filled_decision"]
+
+    assert latest["pnl_outcome"]["realized_pnl_usdt"] is None
+    assert latest["pnl_lifecycle"]["status"] == "open_position_not_yet_realized"
+    assert latest["pnl_lifecycle"]["smallest_missing_field"] is None
+    assert latest["pnl_lifecycle"]["lifecycle_evidence"]["open_source_lot_count"] == 1
+    assert summary["pnl_lifecycle"]["status"] == "latest_filled_directional_episode_open_unrealized"
+    assert summary["pnl_lifecycle"]["smallest_missing_field"] is None
+    assert summary["coverage"]["filled_decisions_with_resolved_pnl_lifecycle"] == 1
+
+
+def test_directional_episode_pnl_lifecycle_reports_closed_missing_outcome_link() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "directional_episode_attribution": {
+            "symbol": "BTC-USDT-SWAP",
+            "recent_decisions": [
+                {
+                    "decision_id": "decision_missing_closed_outcome",
+                    "symbol": "BTC-USDT-SWAP",
+                    "created_at": "2026-04-27T06:10:00+08:00",
+                    "route_action": "override_target",
+                    "primary_family": "directional",
+                    "expected_edge_bps": "2.0",
+                    "expected_cost_bps": "8.0",
+                    "order_count": 1,
+                    "order_states": "FILLED",
+                    "order_position_intents": "close_long",
+                    "order_execution_actions": "close",
+                    "fill_count": 1,
+                    "filled_order_count": 1,
+                    "fill_outcome_count": 0,
+                    "actual_fee_bps_sample_count": 1,
+                    "actual_fee_bps_mean": "5.0",
+                    "realized_slippage_sample_count": 1,
+                    "realized_slippage_bps_mean": "1.0",
+                    "slippage_reference_sample_count": 1,
+                    "fill_position_intents": "close_long",
+                    "source_lot_count": 0,
+                    "lot_event_count": 1,
+                    "lot_open_event_count": 0,
+                    "lot_close_event_count": 1,
+                    "lot_realized_pnl_usdt": "-0.42",
+                    "lot_event_types": "close",
+                    "latest_fill_id": "fill_close_missing_outcome",
+                    "latest_fill_side": "sell",
+                    "latest_fill_qty": "0.001",
+                    "latest_fill_price": "78700.0",
+                    "latest_fill_ingestion_ts": "2026-04-27T06:10:03+08:00",
+                    "latest_fill_lot_event_types": "close",
+                    "latest_fill_lot_open_event_count": 0,
+                    "latest_fill_lot_close_event_count": 1,
+                    "latest_fill_lot_realized_pnl_delta": "-0.42",
+                    "payload": {"reason_codes": ["reduce_after_loss"]},
+                }
+            ],
+        },
+    }
+
+    parsed = mod.parse_db_probe(json.dumps(raw))
+    summary = mod.summarize_directional_episode_attribution_truth(parsed, {"ok": False})
+    latest = summary["latest_filled_decision"]
+
+    assert latest["pnl_lifecycle"]["status"] == "closed_lifecycle_missing_fill_outcome"
+    assert latest["pnl_lifecycle"]["smallest_missing_field"] == "fill_outcomes.realized_pnl_delta"
+    assert latest["pnl_lifecycle"]["lifecycle_evidence"]["lot_close_event_count"] == 1
+    assert summary["pnl_lifecycle"]["status"] == "missing_directional_episode_pnl_lifecycle_evidence"
+    assert summary["pnl_lifecycle"]["smallest_missing_field"] == "fill_outcomes.realized_pnl_delta"
+    assert summary["coverage"]["filled_decisions_with_resolved_pnl_lifecycle"] == 0
 
 
 def test_directional_episode_attribution_truth_reports_missing_microstructure_context() -> None:
@@ -1565,6 +1700,18 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 "decisions_with_pnl_outcome": 4,
                 "decisions_with_pretrade_microstructure": 9,
                 "filled_decisions_with_pretrade_microstructure": 5,
+                "filled_decisions_with_pnl_lifecycle_classification": 5,
+                "filled_decisions_with_resolved_pnl_lifecycle": 4,
+            },
+            "pnl_lifecycle": {
+                "status": "missing_directional_episode_pnl_lifecycle_evidence",
+                "smallest_missing_field": "fill_outcomes.realized_pnl_delta",
+                "coverage": {
+                    "filled_decisions_with_pnl_lifecycle_classification": 5,
+                    "filled_decisions_with_resolved_pnl_lifecycle": 4,
+                },
+                "latest_filled_decision_status": "closed_lifecycle_missing_fill_outcome",
+                "latest_filled_decision_smallest_missing_field": "fill_outcomes.realized_pnl_delta",
             },
             "pretrade_microstructure": {
                 "status": "verified_filled_directional_episode_pretrade_microstructure_present",
@@ -1580,6 +1727,10 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 "realized_cost_proxy_bps": "6.5",
                 "fill": {"count": 2},
                 "pnl_outcome": {"realized_pnl_usdt": "-0.42"},
+                "pnl_lifecycle": {
+                    "status": "closed_lifecycle_missing_fill_outcome",
+                    "smallest_missing_field": "fill_outcomes.realized_pnl_delta",
+                },
                 "pretrade_microstructure": {
                     "status": "verified_pretrade_microstructure_context_present",
                     "smallest_missing_field": None,
@@ -1644,6 +1795,14 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["directional_episode_decisions_with_edge_cost"] == 12
     assert live_facts["directional_episode_decisions_with_fills"] == 5
     assert live_facts["directional_episode_decisions_with_pnl_outcome"] == 4
+    assert live_facts["directional_episode_pnl_lifecycle_status"] == (
+        "missing_directional_episode_pnl_lifecycle_evidence"
+    )
+    assert live_facts["directional_episode_pnl_lifecycle_smallest_missing_field"] == (
+        "fill_outcomes.realized_pnl_delta"
+    )
+    assert live_facts["directional_episode_filled_decisions_with_pnl_lifecycle_classification"] == 5
+    assert live_facts["directional_episode_filled_decisions_with_resolved_pnl_lifecycle"] == 4
     assert live_facts["directional_episode_pretrade_microstructure_status"] == (
         "verified_filled_directional_episode_pretrade_microstructure_present"
     )
@@ -1655,6 +1814,12 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["latest_directional_episode_realized_cost_proxy_bps"] == "6.5"
     assert live_facts["latest_directional_episode_fill_count"] == 2
     assert live_facts["latest_directional_episode_realized_pnl_usdt"] == "-0.42"
+    assert live_facts["latest_directional_episode_pnl_lifecycle_status"] == (
+        "closed_lifecycle_missing_fill_outcome"
+    )
+    assert live_facts["latest_directional_episode_pnl_lifecycle_smallest_missing_field"] == (
+        "fill_outcomes.realized_pnl_delta"
+    )
     assert live_facts["latest_directional_episode_pretrade_microstructure_status"] == (
         "verified_pretrade_microstructure_context_present"
     )

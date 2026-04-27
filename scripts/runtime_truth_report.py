@@ -513,6 +513,14 @@ with engine.connect() as conn:
                 "                  then (command_payload #>> '{intent,reference_price}')::numeric end) "
                 "             as command_intent_reference_price "
                 "  from execution_commands where command_type = 'submit' group by order_id"
+                "), lot_event_summary as ("
+                "  select fill_id, count(*) as lot_event_count, "
+                "         count(*) filter (where event_type = 'open') as lot_open_event_count, "
+                "         count(*) filter (where event_type = 'close') as lot_close_event_count, "
+                "         sum(realized_pnl_delta) as lot_realized_pnl_delta, "
+                "         string_agg(distinct coalesce(event_type, 'null'), ',' "
+                "             order by coalesce(event_type, 'null')) as lot_event_types "
+                "  from lot_events group by fill_id"
                 "), order_summary as ("
                 "  select o.decision_id, count(*) as order_count, "
                 "         count(*) filter (where o.state in ('CREATED', 'SUBMITTING') "
@@ -554,12 +562,19 @@ with engine.connect() as conn:
                 "         cr.command_intent_limit_price, cr.command_intent_reference_price, "
                 "         fo.realized_pnl_delta as fill_outcome_realized_pnl_delta, "
                 "         fo.fee_delta as fill_outcome_fee_delta, "
+                "         pl.lot_id as source_lot_id, pl.status as source_lot_status, "
+                "         pl.signed_quantity_open as source_lot_signed_quantity_open, "
+                "         pl.exposure_side as source_lot_exposure_side, "
+                "         les.lot_event_count, les.lot_open_event_count, les.lot_close_event_count, "
+                "         les.lot_realized_pnl_delta, les.lot_event_types, "
                 "         case when f.fill_qty > 0 and f.fill_price > 0 "
                 "              then abs(f.fee_amount) / (f.fill_qty * f.fill_price) * 10000 end as actual_fee_bps "
                 "  from execution_fills f "
                 "  left join execution_orders o on o.order_id = f.order_id "
                 "  left join command_refs cr on cr.order_id = f.order_id "
                 "  left join fill_outcomes fo on fo.fill_id = f.fill_id "
+                "  left join position_lots pl on pl.source_fill_id = f.fill_id and pl.symbol = f.symbol "
+                "  left join lot_event_summary les on les.fill_id = f.fill_id "
                 "  where f.symbol = :symbol "
                 "    and coalesce(f.decision_id, o.decision_id) in (select decision_id from recent_decisions)"
                 "), fill_with_slippage as ("
@@ -607,6 +622,15 @@ with engine.connect() as conn:
                 "         count(reference_fill_slippage_bps) as realized_slippage_sample_count, "
                 "         avg(reference_fill_slippage_bps) as realized_slippage_bps_mean, "
                 "         count(slippage_reference_price) as slippage_reference_sample_count, "
+                "         count(source_lot_id) as source_lot_count, "
+                "         count(source_lot_id) filter (where source_lot_status = 'OPEN') as open_source_lot_count, "
+                "         count(source_lot_id) filter (where source_lot_status = 'CLOSED') as closed_source_lot_count, "
+                "         coalesce(sum(abs(source_lot_signed_quantity_open)) "
+                "             filter (where source_lot_status = 'OPEN'), 0) as open_source_lot_qty, "
+                "         coalesce(sum(lot_event_count), 0) as lot_event_count, "
+                "         coalesce(sum(lot_open_event_count), 0) as lot_open_event_count, "
+                "         coalesce(sum(lot_close_event_count), 0) as lot_close_event_count, "
+                "         sum(lot_realized_pnl_delta) as lot_realized_pnl_usdt, "
                 "         string_agg(distinct coalesce(side, 'null'), ',' order by coalesce(side, 'null')) "
                 "             as fill_sides, "
                 "         string_agg(distinct coalesce(liquidity_role, 'unknown'), ',' "
@@ -617,7 +641,13 @@ with engine.connect() as conn:
                 "             order by coalesce(order_state, 'null')) as filled_order_states, "
                 "         string_agg(distinct coalesce(fill_strategy_bundle_id, order_strategy_bundle_id, 'null'), ',' "
                 "             order by coalesce(fill_strategy_bundle_id, order_strategy_bundle_id, 'null')) "
-                "             as fill_strategy_bundle_ids "
+                "             as fill_strategy_bundle_ids, "
+                "         string_agg(distinct coalesce(source_lot_status, 'null'), ',' "
+                "             order by coalesce(source_lot_status, 'null')) as source_lot_statuses, "
+                "         string_agg(distinct coalesce(source_lot_exposure_side, 'null'), ',' "
+                "             order by coalesce(source_lot_exposure_side, 'null')) as source_lot_exposure_sides, "
+                "         string_agg(distinct coalesce(lot_event_types, 'null'), ',' "
+                "             order by coalesce(lot_event_types, 'null')) as lot_event_types "
                 "  from fill_final group by decision_id"
                 "), latest_fill as ("
                 "  select * from ("
@@ -645,6 +675,14 @@ with engine.connect() as conn:
                 "           as realized_slippage_sample_count, "
                 "       fs.realized_slippage_bps_mean, coalesce(fs.slippage_reference_sample_count, 0) "
                 "           as slippage_reference_sample_count, "
+                "       coalesce(fs.source_lot_count, 0) as source_lot_count, "
+                "       coalesce(fs.open_source_lot_count, 0) as open_source_lot_count, "
+                "       coalesce(fs.closed_source_lot_count, 0) as closed_source_lot_count, "
+                "       fs.open_source_lot_qty, coalesce(fs.lot_event_count, 0) as lot_event_count, "
+                "       coalesce(fs.lot_open_event_count, 0) as lot_open_event_count, "
+                "       coalesce(fs.lot_close_event_count, 0) as lot_close_event_count, "
+                "       fs.lot_realized_pnl_usdt, fs.source_lot_statuses, fs.source_lot_exposure_sides, "
+                "       fs.lot_event_types, "
                 "       fs.fill_sides, fs.liquidity_roles, fs.fill_position_intents, "
                 "       fs.filled_order_states, fs.fill_strategy_bundle_ids, "
                 "       lf.fill_id as latest_fill_id, lf.side as latest_fill_side, "
@@ -652,7 +690,14 @@ with engine.connect() as conn:
                 "       lf.fee_amount as latest_fill_fee_amount, lf.ingestion_ts as latest_fill_ingestion_ts, "
                 "       lf.reference_fill_slippage_bps as latest_fill_slippage_bps, "
                 "       lf.slippage_reference_source as latest_fill_slippage_reference_source, "
-                "       lf.fill_outcome_realized_pnl_delta as latest_fill_realized_pnl_delta "
+                "       lf.fill_outcome_realized_pnl_delta as latest_fill_realized_pnl_delta, "
+                "       lf.source_lot_status as latest_fill_source_lot_status, "
+                "       lf.source_lot_signed_quantity_open as latest_fill_source_lot_open_qty, "
+                "       lf.source_lot_exposure_side as latest_fill_source_lot_exposure_side, "
+                "       lf.lot_event_types as latest_fill_lot_event_types, "
+                "       lf.lot_open_event_count as latest_fill_lot_open_event_count, "
+                "       lf.lot_close_event_count as latest_fill_lot_close_event_count, "
+                "       lf.lot_realized_pnl_delta as latest_fill_lot_realized_pnl_delta "
                 "from recent_decisions rd "
                 "left join order_summary os on os.decision_id = rd.decision_id "
                 "left join fill_summary fs on fs.decision_id = rd.decision_id "
@@ -1846,6 +1891,106 @@ def classify_directional_episode_row(row: dict[str, Any]) -> str:
     return "decision_without_order"
 
 
+OPEN_POSITION_INTENTS = {
+    "open_long",
+    "open_short",
+    "scale_in_long",
+    "scale_in_short",
+}
+
+CLOSE_POSITION_INTENTS = {
+    "close_long",
+    "close_short",
+    "reduce_long",
+    "reduce_short",
+    "flip_long_to_short",
+    "flip_short_to_long",
+}
+
+
+def csv_tokens(value: Any) -> set[str]:
+    if value is None:
+        return set()
+    return {part.strip() for part in str(value).split(",") if part.strip() and part.strip() != "null"}
+
+
+def classify_directional_episode_pnl_lifecycle(decision: dict[str, Any]) -> dict[str, Any]:
+    fill = as_dict(decision.get("fill"))
+    pnl_outcome = as_dict(decision.get("pnl_outcome"))
+    lifecycle = as_dict(decision.get("position_lifecycle"))
+    latest_fill = as_dict(decision.get("latest_fill"))
+    fill_count = int_or_zero(fill.get("count"))
+    outcome_count = int_or_zero(pnl_outcome.get("fill_outcome_count"))
+    open_lot_count = int_or_zero(lifecycle.get("open_source_lot_count"))
+    lot_open_event_count = int_or_zero(lifecycle.get("lot_open_event_count"))
+    lot_close_event_count = int_or_zero(lifecycle.get("lot_close_event_count"))
+    latest_lot_status = latest_fill.get("source_lot_status")
+    intent_tokens = csv_tokens(fill.get("position_intents")) | csv_tokens(as_dict(decision.get("order")).get("position_intents"))
+
+    if fill_count <= 0:
+        status = "no_fill_pnl_not_applicable"
+        smallest_missing_field = None
+        explanation = "No fill exists for this directional episode, so realized PnL outcome is not applicable."
+    elif outcome_count >= fill_count:
+        status = "realized_pnl_outcome_complete"
+        smallest_missing_field = None
+        explanation = "Every observed fill has a fill_outcomes realized PnL record."
+    elif outcome_count > 0:
+        status = "partial_fill_outcome_coverage"
+        smallest_missing_field = "fill_outcomes.fill_id"
+        explanation = "Some fills have realized PnL records and at least one fill is still missing fill_outcomes linkage."
+    elif open_lot_count > 0 or latest_lot_status == "OPEN" or (lot_open_event_count > 0 and lot_close_event_count <= 0):
+        status = "open_position_not_yet_realized"
+        smallest_missing_field = None
+        explanation = "Fill opened or still owns an open lot, so realized PnL is expected to remain null until close/reduce."
+    elif lot_close_event_count > 0 or intent_tokens.intersection(CLOSE_POSITION_INTENTS):
+        status = "closed_lifecycle_missing_fill_outcome"
+        smallest_missing_field = "fill_outcomes.realized_pnl_delta"
+        explanation = "Lifecycle evidence shows a close/reduce path, but realized PnL is not linked through fill_outcomes."
+    elif intent_tokens.intersection(OPEN_POSITION_INTENTS):
+        status = "open_position_lot_evidence_missing"
+        smallest_missing_field = "position_lots.source_fill_id"
+        explanation = "Intent is an opening directional fill, but open lot evidence is missing from position_lots/lot_events."
+    else:
+        status = "missing_fill_outcome_lifecycle_link"
+        smallest_missing_field = "fill_outcomes.realized_pnl_delta_or_position_lots.source_fill_id"
+        explanation = "The episode has a fill but neither realized PnL outcome nor position-lifecycle evidence explains it."
+
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing_field,
+        "explanation": explanation,
+        "coverage": {
+            "fill_count": fill_count,
+            "fill_outcome_count": outcome_count,
+            "missing_fill_outcome_count": max(fill_count - outcome_count, 0),
+        },
+        "lifecycle_evidence": {
+            "source_lot_count": int_or_zero(lifecycle.get("source_lot_count")),
+            "open_source_lot_count": open_lot_count,
+            "closed_source_lot_count": int_or_zero(lifecycle.get("closed_source_lot_count")),
+            "open_source_lot_qty": lifecycle.get("open_source_lot_qty"),
+            "source_lot_statuses": lifecycle.get("source_lot_statuses"),
+            "source_lot_exposure_sides": lifecycle.get("source_lot_exposure_sides"),
+            "lot_event_count": int_or_zero(lifecycle.get("lot_event_count")),
+            "lot_open_event_count": lot_open_event_count,
+            "lot_close_event_count": lot_close_event_count,
+            "lot_event_types": lifecycle.get("lot_event_types"),
+            "lot_realized_pnl_usdt": lifecycle.get("lot_realized_pnl_usdt"),
+        },
+        "latest_fill_evidence": {
+            "fill_id": latest_fill.get("fill_id"),
+            "source_lot_status": latest_lot_status,
+            "source_lot_open_qty": latest_fill.get("source_lot_open_qty"),
+            "source_lot_exposure_side": latest_fill.get("source_lot_exposure_side"),
+            "lot_event_types": latest_fill.get("lot_event_types"),
+            "lot_open_event_count": int_or_zero(latest_fill.get("lot_open_event_count")),
+            "lot_close_event_count": int_or_zero(latest_fill.get("lot_close_event_count")),
+            "lot_realized_pnl_delta": latest_fill.get("lot_realized_pnl_delta"),
+        },
+    }
+
+
 def _nearest_microstructure_bar_at_or_before(
     rows: list[dict[str, Any]],
     timestamp: Any,
@@ -2067,84 +2212,104 @@ def sanitize_directional_episode_attribution(
             row.get("actual_fee_bps_mean"),
             row.get("realized_slippage_bps_mean"),
         )
-        decisions.append(
-            {
-                "allocation_id": row.get("allocation_id"),
-                "decision_id": row.get("decision_id"),
-                "symbol": row.get("symbol"),
-                "created_at": row.get("created_at"),
-                "route_action": row.get("route_action"),
-                "primary_family": row.get("primary_family"),
-                "portfolio_requested_notional": decimal_text(row.get("portfolio_requested_notional")),
-                "portfolio_approved_notional": decimal_text(row.get("portfolio_approved_notional")),
-                "portfolio_budget_cut_notional": decimal_text(row.get("portfolio_budget_cut_notional")),
-                "expected_edge_bps": decimal_text(row.get("expected_edge_bps")),
-                "expected_cost_bps": decimal_text(row.get("expected_cost_bps")),
-                "expected_net_edge_bps": decimal_subtract_text(
-                    row.get("expected_edge_bps"),
-                    row.get("expected_cost_bps"),
+        decision = {
+            "allocation_id": row.get("allocation_id"),
+            "decision_id": row.get("decision_id"),
+            "symbol": row.get("symbol"),
+            "created_at": row.get("created_at"),
+            "route_action": row.get("route_action"),
+            "primary_family": row.get("primary_family"),
+            "portfolio_requested_notional": decimal_text(row.get("portfolio_requested_notional")),
+            "portfolio_approved_notional": decimal_text(row.get("portfolio_approved_notional")),
+            "portfolio_budget_cut_notional": decimal_text(row.get("portfolio_budget_cut_notional")),
+            "expected_edge_bps": decimal_text(row.get("expected_edge_bps")),
+            "expected_cost_bps": decimal_text(row.get("expected_cost_bps")),
+            "expected_net_edge_bps": decimal_subtract_text(
+                row.get("expected_edge_bps"),
+                row.get("expected_cost_bps"),
+            ),
+            "realized_cost_proxy_bps": realized_cost_proxy_bps,
+            "edge_after_realized_cost_proxy_bps": decimal_subtract_text(
+                row.get("expected_edge_bps"),
+                realized_cost_proxy_bps,
+            ),
+            "order": {
+                "count": int_or_zero(row.get("order_count")),
+                "created_or_submitting_no_venue_count": int_or_zero(
+                    row.get("created_or_submitting_no_venue_count")
                 ),
-                "realized_cost_proxy_bps": realized_cost_proxy_bps,
-                "edge_after_realized_cost_proxy_bps": decimal_subtract_text(
-                    row.get("expected_edge_bps"),
-                    realized_cost_proxy_bps,
-                ),
-                "order": {
-                    "count": int_or_zero(row.get("order_count")),
-                    "created_or_submitting_no_venue_count": int_or_zero(
-                        row.get("created_or_submitting_no_venue_count")
-                    ),
-                    "terminal_no_fill_count": int_or_zero(row.get("terminal_no_fill_order_count")),
-                    "blocked_count": int_or_zero(row.get("blocked_order_count")),
-                    "states": row.get("order_states"),
-                    "position_intents": row.get("order_position_intents"),
-                    "execution_actions": row.get("order_execution_actions"),
-                    "strategy_bundle_ids": row.get("order_strategy_bundle_ids"),
-                    "first_created_at": row.get("first_order_created_at"),
-                    "last_created_at": row.get("last_order_created_at"),
-                },
-                "fill": {
-                    "count": int_or_zero(row.get("fill_count")),
-                    "filled_order_count": int_or_zero(row.get("filled_order_count")),
-                    "first_fill_ts": row.get("first_fill_ts"),
-                    "latest_fill_ts": row.get("latest_fill_ts"),
-                    "turnover_usdt": decimal_text(row.get("turnover_usdt")),
-                    "fee_usdt": decimal_text(row.get("fee_usdt")),
-                    "actual_fee_bps_sample_count": int_or_zero(row.get("actual_fee_bps_sample_count")),
-                    "actual_fee_bps_mean": decimal_text(row.get("actual_fee_bps_mean")),
-                    "realized_slippage_sample_count": int_or_zero(row.get("realized_slippage_sample_count")),
-                    "realized_slippage_bps_mean": decimal_text(row.get("realized_slippage_bps_mean")),
-                    "slippage_reference_sample_count": int_or_zero(row.get("slippage_reference_sample_count")),
-                    "sides": row.get("fill_sides"),
-                    "liquidity_roles": row.get("liquidity_roles"),
-                    "position_intents": row.get("fill_position_intents"),
-                    "order_states": row.get("filled_order_states"),
-                    "strategy_bundle_ids": row.get("fill_strategy_bundle_ids"),
-                },
-                "pnl_outcome": {
-                    "fill_outcome_count": int_or_zero(row.get("fill_outcome_count")),
-                    "realized_pnl_usdt": decimal_text(row.get("realized_pnl_usdt")),
-                    "fill_outcome_fee_delta_usdt": decimal_text(row.get("fill_outcome_fee_delta_usdt")),
-                },
-                "latest_fill": {
-                    "fill_id": row.get("latest_fill_id"),
-                    "side": row.get("latest_fill_side"),
-                    "fill_qty": decimal_text(row.get("latest_fill_qty")),
-                    "fill_price": decimal_text(row.get("latest_fill_price")),
-                    "fee_amount": decimal_text(row.get("latest_fill_fee_amount")),
-                    "ingestion_ts": row.get("latest_fill_ingestion_ts"),
-                    "slippage_bps": decimal_text(row.get("latest_fill_slippage_bps")),
-                    "slippage_reference_source": row.get("latest_fill_slippage_reference_source"),
-                    "realized_pnl_delta": decimal_text(row.get("latest_fill_realized_pnl_delta")),
-                },
-                "guard_decision": {
-                    "reason_codes": reason_codes,
-                    "operator_summary": truncate_text(payload.get("operator_summary")),
-                    "sleeve_intent_summary": sleeve_summaries,
-                },
-                "classification": classify_directional_episode_row(row),
-            }
-        )
+                "terminal_no_fill_count": int_or_zero(row.get("terminal_no_fill_order_count")),
+                "blocked_count": int_or_zero(row.get("blocked_order_count")),
+                "states": row.get("order_states"),
+                "position_intents": row.get("order_position_intents"),
+                "execution_actions": row.get("order_execution_actions"),
+                "strategy_bundle_ids": row.get("order_strategy_bundle_ids"),
+                "first_created_at": row.get("first_order_created_at"),
+                "last_created_at": row.get("last_order_created_at"),
+            },
+            "fill": {
+                "count": int_or_zero(row.get("fill_count")),
+                "filled_order_count": int_or_zero(row.get("filled_order_count")),
+                "first_fill_ts": row.get("first_fill_ts"),
+                "latest_fill_ts": row.get("latest_fill_ts"),
+                "turnover_usdt": decimal_text(row.get("turnover_usdt")),
+                "fee_usdt": decimal_text(row.get("fee_usdt")),
+                "actual_fee_bps_sample_count": int_or_zero(row.get("actual_fee_bps_sample_count")),
+                "actual_fee_bps_mean": decimal_text(row.get("actual_fee_bps_mean")),
+                "realized_slippage_sample_count": int_or_zero(row.get("realized_slippage_sample_count")),
+                "realized_slippage_bps_mean": decimal_text(row.get("realized_slippage_bps_mean")),
+                "slippage_reference_sample_count": int_or_zero(row.get("slippage_reference_sample_count")),
+                "sides": row.get("fill_sides"),
+                "liquidity_roles": row.get("liquidity_roles"),
+                "position_intents": row.get("fill_position_intents"),
+                "order_states": row.get("filled_order_states"),
+                "strategy_bundle_ids": row.get("fill_strategy_bundle_ids"),
+            },
+            "pnl_outcome": {
+                "fill_outcome_count": int_or_zero(row.get("fill_outcome_count")),
+                "realized_pnl_usdt": decimal_text(row.get("realized_pnl_usdt")),
+                "fill_outcome_fee_delta_usdt": decimal_text(row.get("fill_outcome_fee_delta_usdt")),
+            },
+            "position_lifecycle": {
+                "source_lot_count": int_or_zero(row.get("source_lot_count")),
+                "open_source_lot_count": int_or_zero(row.get("open_source_lot_count")),
+                "closed_source_lot_count": int_or_zero(row.get("closed_source_lot_count")),
+                "open_source_lot_qty": decimal_text(row.get("open_source_lot_qty")),
+                "source_lot_statuses": row.get("source_lot_statuses"),
+                "source_lot_exposure_sides": row.get("source_lot_exposure_sides"),
+                "lot_event_count": int_or_zero(row.get("lot_event_count")),
+                "lot_open_event_count": int_or_zero(row.get("lot_open_event_count")),
+                "lot_close_event_count": int_or_zero(row.get("lot_close_event_count")),
+                "lot_realized_pnl_usdt": decimal_text(row.get("lot_realized_pnl_usdt")),
+                "lot_event_types": row.get("lot_event_types"),
+            },
+            "latest_fill": {
+                "fill_id": row.get("latest_fill_id"),
+                "side": row.get("latest_fill_side"),
+                "fill_qty": decimal_text(row.get("latest_fill_qty")),
+                "fill_price": decimal_text(row.get("latest_fill_price")),
+                "fee_amount": decimal_text(row.get("latest_fill_fee_amount")),
+                "ingestion_ts": row.get("latest_fill_ingestion_ts"),
+                "slippage_bps": decimal_text(row.get("latest_fill_slippage_bps")),
+                "slippage_reference_source": row.get("latest_fill_slippage_reference_source"),
+                "realized_pnl_delta": decimal_text(row.get("latest_fill_realized_pnl_delta")),
+                "source_lot_status": row.get("latest_fill_source_lot_status"),
+                "source_lot_open_qty": decimal_text(row.get("latest_fill_source_lot_open_qty")),
+                "source_lot_exposure_side": row.get("latest_fill_source_lot_exposure_side"),
+                "lot_event_types": row.get("latest_fill_lot_event_types"),
+                "lot_open_event_count": int_or_zero(row.get("latest_fill_lot_open_event_count")),
+                "lot_close_event_count": int_or_zero(row.get("latest_fill_lot_close_event_count")),
+                "lot_realized_pnl_delta": decimal_text(row.get("latest_fill_lot_realized_pnl_delta")),
+            },
+            "guard_decision": {
+                "reason_codes": reason_codes,
+                "operator_summary": truncate_text(payload.get("operator_summary")),
+                "sleeve_intent_summary": sleeve_summaries,
+            },
+            "classification": classify_directional_episode_row(row),
+        }
+        decision["pnl_lifecycle"] = classify_directional_episode_pnl_lifecycle(decision)
+        decisions.append(decision)
     return {
         "symbol": raw.get("symbol"),
         "recent_decisions": decisions,
@@ -3002,6 +3167,31 @@ def summarize_directional_episode_attribution_truth(
         (item for item in recent if int_or_zero(as_dict(item.get("fill")).get("count")) > 0),
         None,
     )
+    filled_with_pnl_lifecycle = [
+        item
+        for item in recent
+        if int_or_zero(as_dict(item.get("fill")).get("count")) > 0 and as_dict(item.get("pnl_lifecycle")).get("status")
+    ]
+    filled_with_resolved_pnl_lifecycle = [
+        item for item in filled_with_pnl_lifecycle if as_dict(item.get("pnl_lifecycle")).get("smallest_missing_field") is None
+    ]
+    latest_filled_pnl_lifecycle = as_dict(latest_filled.get("pnl_lifecycle")) if latest_filled else {}
+    pnl_lifecycle_smallest_missing = latest_filled_pnl_lifecycle.get("smallest_missing_field") or next(
+        (
+            as_dict(item.get("pnl_lifecycle")).get("smallest_missing_field")
+            for item in filled_with_pnl_lifecycle
+            if as_dict(item.get("pnl_lifecycle")).get("smallest_missing_field")
+        ),
+        None,
+    )
+    if decisions_with_fills <= 0:
+        pnl_lifecycle_status = "no_recent_filled_directional_decisions"
+    elif latest_filled_pnl_lifecycle.get("status") == "open_position_not_yet_realized":
+        pnl_lifecycle_status = "latest_filled_directional_episode_open_unrealized"
+    elif pnl_lifecycle_smallest_missing is None:
+        pnl_lifecycle_status = "verified_directional_episode_pnl_lifecycle_explained"
+    else:
+        pnl_lifecycle_status = "missing_directional_episode_pnl_lifecycle_evidence"
 
     missing_checks = [
         ("portfolio_allocation_decisions.directional", recent_count > 0),
@@ -3047,8 +3237,23 @@ def summarize_directional_episode_attribution_truth(
             "filled_decisions_with_pretrade_microstructure": as_dict(
                 pretrade_microstructure.get("coverage")
             ).get("filled_decisions_with_pretrade_microstructure"),
+            "filled_decisions_with_pnl_lifecycle_classification": len(filled_with_pnl_lifecycle),
+            "filled_decisions_with_resolved_pnl_lifecycle": len(filled_with_resolved_pnl_lifecycle),
         },
         "pretrade_microstructure": pretrade_microstructure,
+        "pnl_lifecycle": {
+            "source": "live_db_fill_outcomes_position_lots_lot_events",
+            "status": pnl_lifecycle_status,
+            "smallest_missing_field": pnl_lifecycle_smallest_missing,
+            "coverage": {
+                "filled_decisions_with_pnl_lifecycle_classification": len(filled_with_pnl_lifecycle),
+                "filled_decisions_with_resolved_pnl_lifecycle": len(filled_with_resolved_pnl_lifecycle),
+            },
+            "latest_filled_decision_status": latest_filled_pnl_lifecycle.get("status"),
+            "latest_filled_decision_smallest_missing_field": latest_filled_pnl_lifecycle.get(
+                "smallest_missing_field"
+            ),
+        },
         "latest_filled_decision": latest_filled,
         "recent_decisions": recent[:12],
     }
@@ -3214,9 +3419,12 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     directional_pretrade_microstructure_coverage = as_dict(
         directional_pretrade_microstructure.get("coverage")
     )
+    directional_pnl_lifecycle = as_dict(directional_attribution.get("pnl_lifecycle"))
+    directional_pnl_lifecycle_coverage = as_dict(directional_pnl_lifecycle.get("coverage"))
     latest_directional_episode = as_dict(directional_attribution.get("latest_filled_decision"))
     latest_directional_episode_fill = as_dict(latest_directional_episode.get("fill"))
     latest_directional_episode_pnl = as_dict(latest_directional_episode.get("pnl_outcome"))
+    latest_directional_episode_pnl_lifecycle = as_dict(latest_directional_episode.get("pnl_lifecycle"))
     latest_directional_episode_pretrade_microstructure = as_dict(
         latest_directional_episode.get("pretrade_microstructure")
     )
@@ -3327,6 +3535,16 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "directional_episode_decisions_with_pnl_outcome": directional_attribution_coverage.get(
             "decisions_with_pnl_outcome"
         ),
+        "directional_episode_pnl_lifecycle_status": directional_pnl_lifecycle.get("status"),
+        "directional_episode_pnl_lifecycle_smallest_missing_field": directional_pnl_lifecycle.get(
+            "smallest_missing_field"
+        ),
+        "directional_episode_filled_decisions_with_pnl_lifecycle_classification": (
+            directional_pnl_lifecycle_coverage.get("filled_decisions_with_pnl_lifecycle_classification")
+        ),
+        "directional_episode_filled_decisions_with_resolved_pnl_lifecycle": (
+            directional_pnl_lifecycle_coverage.get("filled_decisions_with_resolved_pnl_lifecycle")
+        ),
         "directional_episode_pretrade_microstructure_status": directional_pretrade_microstructure.get("status"),
         "directional_episode_pretrade_microstructure_smallest_missing_field": (
             directional_pretrade_microstructure.get("smallest_missing_field")
@@ -3344,6 +3562,10 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_directional_episode_fill_count": latest_directional_episode_fill.get("count"),
         "latest_directional_episode_realized_pnl_usdt": latest_directional_episode_pnl.get("realized_pnl_usdt"),
+        "latest_directional_episode_pnl_lifecycle_status": latest_directional_episode_pnl_lifecycle.get("status"),
+        "latest_directional_episode_pnl_lifecycle_smallest_missing_field": (
+            latest_directional_episode_pnl_lifecycle.get("smallest_missing_field")
+        ),
         "latest_directional_episode_pretrade_microstructure_status": (
             latest_directional_episode_pretrade_microstructure.get("status")
         ),
