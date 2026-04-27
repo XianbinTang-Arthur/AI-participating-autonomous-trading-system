@@ -41,6 +41,14 @@ STATIC_MARKERS = {
     "/ui/modules/views/strategy-view.js": (
         "strategyPreOrderFeasibility",
         "preOrderFeasibilitySummary",
+        "terminal_no_fill_explanation",
+        "无成交终局",
+        "这次为什么没有成交",
+    ),
+    "/ui/modules/views/overview-view.js": (
+        "terminal_no_fill_explanation",
+        "无成交终局",
+        "终端无成交解释",
     ),
     "/ui/modules/no-trade-display.js": (
         "hasPreOrderFeasibility",

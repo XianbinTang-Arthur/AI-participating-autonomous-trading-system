@@ -100,6 +100,44 @@ def test_dashboard_auth_required_is_not_confused_with_runtime_mode() -> None:
     }
 
 
+def test_static_truth_surface_checks_terminal_no_fill_ui_markers(monkeypatch) -> None:
+    mod = load_module()
+
+    bodies = {
+        "/ui/modules/views/strategy-view.js": (
+            "strategyPreOrderFeasibility preOrderFeasibilitySummary "
+            "terminal_no_fill_explanation 无成交终局 这次为什么没有成交"
+        ),
+        "/ui/modules/views/overview-view.js": (
+            "terminal_no_fill_explanation 无成交终局 终端无成交解释"
+        ),
+        "/ui/modules/no-trade-display.js": (
+            "hasPreOrderFeasibility preOrderFeasibilitySummary 执行可行性 阻断维度"
+        ),
+    }
+
+    def fake_fetch_url_text(url: str, timeout: int) -> dict[str, object]:
+        assert timeout == 10
+        for path, body in bodies.items():
+            if url.endswith(path):
+                return {"ok": True, "status": 200, "body": body, "error": None}
+        return {"ok": False, "status": 404, "body": "", "error": "unexpected_url"}
+
+    monkeypatch.setattr(mod, "fetch_url_text", fake_fetch_url_text)
+
+    result = mod.static_truth_surface("https://operator.local")
+
+    strategy_markers = result["/ui/modules/views/strategy-view.js"]["markers"]
+    assert strategy_markers["terminal_no_fill_explanation"] is True
+    assert strategy_markers["无成交终局"] is True
+    assert strategy_markers["这次为什么没有成交"] is True
+    overview_markers = result["/ui/modules/views/overview-view.js"]["markers"]
+    assert overview_markers["terminal_no_fill_explanation"] is True
+    assert overview_markers["无成交终局"] is True
+    assert overview_markers["终端无成交解释"] is True
+    assert all(surface["ok"] for surface in result.values())
+
+
 def test_db_probe_command_does_not_embed_database_url() -> None:
     mod = load_module()
 
