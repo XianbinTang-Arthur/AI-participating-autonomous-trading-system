@@ -305,6 +305,11 @@ class AdverseFactors:
 
 class TargetPositionEngine:
     _MAX_ALPHA_DECAY_SNAPSHOT_GUARDS = 512
+    _IMPULSE_CHASE_RECENT_TRADE_LIMIT = 32
+    _IMPULSE_CHASE_MIN_SPIKE_BPS = Decimal("35")
+    _IMPULSE_CHASE_MIN_PULLBACK_BPS = Decimal("18")
+    _IMPULSE_CHASE_EXTREME_PROXIMITY_BPS = Decimal("8")
+    _RECENT_TRADE_PRICE_KEYS = ("price", "px", "last_price", "p", "fill_price")
 
     def __init__(
         self,
@@ -1272,6 +1277,7 @@ class TargetPositionEngine:
         cost_guard_audits: list[dict[str, object]] | None = None,
     ) -> Decimal:
         desired_target_qty = self._apply_trade_qualification_gate(
+            context=context,
             current_position_qty=context.current_position_qty,
             desired_target_qty=desired_target_qty,
             baseline=baseline,
@@ -1354,6 +1360,7 @@ class TargetPositionEngine:
     def _apply_trade_qualification_gate(
         self,
         *,
+        context: DecisionContext,
         current_position_qty: Decimal,
         desired_target_qty: Decimal,
         baseline: BaselineAssessment,
@@ -1377,6 +1384,15 @@ class TargetPositionEngine:
         ):
             guardrail_flags.append("short_entry_regime_not_allowed" if target_side == "short" else "entry_regime_not_allowed")
             return current_position_qty
+        if trade_kind in {"entry", "scale_in"}:
+            impulse_chase_reason = self._impulse_entry_chase_guard_reason(
+                context=context,
+                baseline=baseline,
+                desired_target_qty=desired_target_qty,
+            )
+            if impulse_chase_reason is not None:
+                guardrail_flags.append(impulse_chase_reason)
+                return current_position_qty
         # R3-P1-D3：float 边界比较（confidence、alpha、edge 接近 threshold 时）
         # 不同 run 因浮点噪声可能跨阈值，导致同一输入出现非幂等决策。
         # 统一用 Decimal 比较：所有三个量和阈值 + EPSILON 都走 to_decimal，
@@ -1403,6 +1419,158 @@ class TargetPositionEngine:
             guardrail_flags.append(f"{flag_prefix}_signal_edge_below_threshold")
             return current_position_qty
         return desired_target_qty
+
+    def _impulse_entry_chase_guard_reason(
+        self,
+        *,
+        context: DecisionContext,
+        baseline: BaselineAssessment,
+        desired_target_qty: Decimal,
+    ) -> str | None:
+        impulse_direction = self._baseline_impulse_override_direction(baseline)
+        if impulse_direction is None or self._exposure_side(desired_target_qty) != impulse_direction:
+            return None
+        market_snapshot = context.market_snapshot
+        if market_snapshot is None:
+            return None
+        last_price = self._snapshot_last_price(context=context, market_snapshot=market_snapshot)
+        recent_prices = self._recent_trade_prices(market_snapshot=market_snapshot, last_price=last_price)
+        if len(recent_prices) >= 3:
+            recent_reason = self._recent_trade_impulse_chase_reason(
+                direction=impulse_direction,
+                prices=recent_prices,
+            )
+            if recent_reason is not None:
+                return recent_reason
+        return self._kline_impulse_chase_reason(
+            direction=impulse_direction,
+            market_snapshot=market_snapshot,
+            last_price=last_price,
+        )
+
+    @staticmethod
+    def _baseline_impulse_override_direction(baseline: BaselineAssessment) -> str | None:
+        direction_rule = str(baseline.direction_rule or "").strip().lower()
+        if direction_rule == "baseline_impulse_override_long":
+            return "long"
+        if direction_rule == "baseline_impulse_override_short":
+            return "short"
+        return None
+
+    def _recent_trade_prices(
+        self,
+        *,
+        market_snapshot: MarketSnapshot,
+        last_price: Decimal,
+    ) -> list[Decimal]:
+        prices: list[Decimal] = []
+        for trade in list(market_snapshot.recent_trades)[-self._IMPULSE_CHASE_RECENT_TRADE_LIMIT :]:
+            price = self._recent_trade_price(trade)
+            if price is not None and price > EPSILON_DECIMAL_12:
+                prices.append(price)
+        if last_price > EPSILON_DECIMAL_12 and (
+            not prices or abs(prices[-1] - last_price) > EPSILON_DECIMAL_12
+        ):
+            prices.append(last_price)
+        return prices
+
+    def _recent_trade_price(self, trade: dict[str, object]) -> Decimal | None:
+        for key in self._RECENT_TRADE_PRICE_KEYS:
+            value = trade.get(key)
+            if value is None:
+                continue
+            try:
+                price = to_decimal(value)  # type: ignore[arg-type]
+            except Exception:
+                continue
+            if price > EPSILON_DECIMAL_12:
+                return price
+        return None
+
+    @staticmethod
+    def _snapshot_last_price(
+        *,
+        context: DecisionContext,
+        market_snapshot: MarketSnapshot,
+    ) -> Decimal:
+        snapshot_last = to_decimal(market_snapshot.last_price)
+        if snapshot_last > EPSILON_DECIMAL_12:
+            return snapshot_last
+        return max(to_decimal(context.market_last_price), Decimal("0"))
+
+    def _recent_trade_impulse_chase_reason(
+        self,
+        *,
+        direction: str,
+        prices: list[Decimal],
+    ) -> str | None:
+        first_price = prices[0]
+        latest_price = prices[-1]
+        if first_price <= EPSILON_DECIMAL_12 or latest_price <= EPSILON_DECIMAL_12:
+            return None
+        if direction == "long":
+            extreme_price = max(prices)
+            spike_bps = self._positive_bps(extreme_price - first_price, first_price)
+            pullback_bps = self._positive_bps(extreme_price - latest_price, extreme_price)
+        else:
+            extreme_price = min(prices)
+            spike_bps = self._positive_bps(first_price - extreme_price, first_price)
+            pullback_bps = self._positive_bps(latest_price - extreme_price, extreme_price)
+        if spike_bps < self._IMPULSE_CHASE_MIN_SPIKE_BPS:
+            return None
+        if pullback_bps >= self._IMPULSE_CHASE_MIN_PULLBACK_BPS:
+            return f"{direction}_impulse_entry_post_spike_pullback_unconfirmed"
+        if pullback_bps <= self._IMPULSE_CHASE_EXTREME_PROXIMITY_BPS:
+            return f"{direction}_impulse_entry_extreme_chase_unconfirmed"
+        return None
+
+    def _kline_impulse_chase_reason(
+        self,
+        *,
+        direction: str,
+        market_snapshot: MarketSnapshot,
+        last_price: Decimal,
+    ) -> str | None:
+        kline_15m = market_snapshot.kline_15m
+        open_price = self._bar_price(kline_15m, "open")
+        high_price = self._bar_price(kline_15m, "high")
+        low_price = self._bar_price(kline_15m, "low")
+        close_price = self._bar_price(kline_15m, "close")
+        latest_price = last_price if last_price > EPSILON_DECIMAL_12 else close_price
+        if open_price <= EPSILON_DECIMAL_12 or latest_price <= EPSILON_DECIMAL_12:
+            return None
+        if direction == "long":
+            extreme_price = max(high_price, latest_price)
+            spike_bps = self._positive_bps(extreme_price - open_price, open_price)
+            pullback_bps = self._positive_bps(extreme_price - latest_price, extreme_price)
+        else:
+            extreme_price = min(low_price, latest_price)
+            spike_bps = self._positive_bps(open_price - extreme_price, open_price)
+            pullback_bps = self._positive_bps(latest_price - extreme_price, extreme_price)
+        if spike_bps < self._IMPULSE_CHASE_MIN_SPIKE_BPS:
+            return None
+        if pullback_bps >= self._IMPULSE_CHASE_MIN_PULLBACK_BPS:
+            return f"{direction}_impulse_entry_post_spike_pullback_unconfirmed"
+        if pullback_bps <= self._IMPULSE_CHASE_EXTREME_PROXIMITY_BPS:
+            return f"{direction}_impulse_entry_extreme_chase_unconfirmed"
+        return None
+
+    @staticmethod
+    def _bar_price(bar: object, key: str) -> Decimal:
+        try:
+            value = getattr(bar, key)
+        except AttributeError:
+            if isinstance(bar, dict):
+                value = bar.get(key)
+            else:
+                value = None
+        return max(to_decimal(value), Decimal("0"))  # type: ignore[arg-type]
+
+    @staticmethod
+    def _positive_bps(delta: Decimal, reference: Decimal) -> Decimal:
+        if reference <= EPSILON_DECIMAL_12 or delta <= EPSILON_DECIMAL_12:
+            return Decimal("0")
+        return (delta / reference) * Decimal("10000")
 
     def _apply_strategy_execution_guards(
         self,

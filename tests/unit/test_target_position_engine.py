@@ -1516,6 +1516,145 @@ class TestTargetPositionEngine(unittest.TestCase):
         cost_gate = next(stage for stage in target.decision_outcome.decision_blocker_chain if stage["stage"] == "cost_gate")
         self.assertEqual(cost_gate["candidates"][0]["expected_cost_bps"], 30.5)
 
+    def test_impulse_entry_blocks_post_spike_pullback_chase(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_alpha_edge_bps_scale": 100.0,
+                }
+            )
+        )
+        market_snapshot = MarketSnapshot(
+            symbol="BTC-USDT",
+            exchange="OKX",
+            snapshot_ts=datetime.now(timezone.utc),
+            best_bid=Decimal("78466.9"),
+            best_ask=Decimal("78467.3"),
+            last_price=Decimal("78467.1"),
+            bid_size=Decimal("0.003"),
+            ask_size=Decimal("0.003"),
+            volume_24h=Decimal("1000000"),
+            kline_15m={
+                "open": Decimal("77870.7"),
+                "high": Decimal("78868.3"),
+                "low": Decimal("77860.0"),
+                "close": Decimal("78467.1"),
+            },
+            kline_1h={
+                "open": Decimal("77750.0"),
+                "high": Decimal("78868.3"),
+                "low": Decimal("77700.0"),
+                "close": Decimal("78467.1"),
+            },
+            recent_trades=[
+                {"price": Decimal("77870.7")},
+                {"price": Decimal("78210.0")},
+                {"price": Decimal("78868.3")},
+                {"price": Decimal("78620.0")},
+                {"price": Decimal("78467.1")},
+            ],
+        )
+
+        target = engine.build(
+            self._context(
+                product_type="derivatives",
+                current_exposure_side="flat",
+                market_last_price=Decimal("78467.1"),
+                market_snapshot=market_snapshot,
+            ),
+            self._baseline(
+                direction_bias="long",
+                confidence=0.90,
+                suggested_position_scale=1.0,
+                volatility_target_scale=1.0,
+                composite_alpha_score=0.80,
+                direction_rule="baseline_impulse_override_long",
+                factor_scores={"momentum_alpha": 1.0, "microstructure_alpha": 0.5},
+            ),
+            self._ai_assessment(direction=0.20, confidence=0.85),
+        )
+
+        self.assertEqual(target.target_position_qty, Decimal("0"))
+        self.assertIn("long_impulse_entry_post_spike_pullback_unconfirmed", target.guardrail_flags)
+        self.assertIsNotNone(target.decision_outcome)
+        target_gate = next(
+            stage for stage in target.decision_outcome.decision_blocker_chain if stage["stage"] == "target_gate"
+        )
+        self.assertIn("long_impulse_entry_post_spike_pullback_unconfirmed", target_gate["reasons"])
+
+    def test_impulse_entry_allows_non_spike_trend_continuation(self) -> None:
+        engine = TargetPositionEngine(
+            settings=AATSSettings.model_validate(
+                {
+                    "default_order_qty": 0.01,
+                    "trading_product_type": "derivatives",
+                    "strategy_cost_guard_enabled": False,
+                    "strategy_entry_min_signal_edge_bps": 0.0,
+                    "strategy_entry_alpha_min": 0.0,
+                    "strategy_entry_confidence_min": 0.0,
+                    "strategy_alpha_edge_bps_scale": 100.0,
+                }
+            )
+        )
+        market_snapshot = MarketSnapshot(
+            symbol="BTC-USDT",
+            exchange="OKX",
+            snapshot_ts=datetime.now(timezone.utc),
+            best_bid=Decimal("78209.8"),
+            best_ask=Decimal("78210.2"),
+            last_price=Decimal("78210.0"),
+            bid_size=Decimal("0.003"),
+            ask_size=Decimal("0.003"),
+            volume_24h=Decimal("1000000"),
+            kline_15m={
+                "open": Decimal("78000.0"),
+                "high": Decimal("78212.0"),
+                "low": Decimal("77980.0"),
+                "close": Decimal("78210.0"),
+            },
+            kline_1h={
+                "open": Decimal("77900.0"),
+                "high": Decimal("78212.0"),
+                "low": Decimal("77850.0"),
+                "close": Decimal("78210.0"),
+            },
+            recent_trades=[
+                {"price": Decimal("78000.0")},
+                {"price": Decimal("78060.0")},
+                {"price": Decimal("78135.0")},
+                {"price": Decimal("78210.0")},
+            ],
+        )
+
+        target = engine.build(
+            self._context(
+                product_type="derivatives",
+                current_exposure_side="flat",
+                market_last_price=Decimal("78210.0"),
+                market_snapshot=market_snapshot,
+            ),
+            self._baseline(
+                direction_bias="long",
+                confidence=0.90,
+                suggested_position_scale=1.0,
+                volatility_target_scale=1.0,
+                composite_alpha_score=0.80,
+                direction_rule="baseline_impulse_override_long",
+                factor_scores={"momentum_alpha": 0.6, "microstructure_alpha": 0.3},
+            ),
+            self._ai_assessment(direction=0.20, confidence=0.85),
+        )
+
+        self.assertGreater(target.target_position_qty, Decimal("0"))
+        self.assertNotIn("long_impulse_entry_post_spike_pullback_unconfirmed", target.guardrail_flags)
+        self.assertNotIn("long_impulse_entry_extreme_chase_unconfirmed", target.guardrail_flags)
+
     def test_ai_decision_maker_cost_guard_audits_authorized_entry_candidate(self) -> None:
         settings = AATSSettings.model_validate(
             {
