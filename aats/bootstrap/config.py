@@ -2011,6 +2011,36 @@ def _build_position_target_handler(
             None,
         )
 
+    def _risk_budget_state_with_execution_convergence(risk_decision: RiskDecision) -> dict[str, Any]:
+        state = dict(risk_decision.risk_budget_state or {})
+        convergence = state.get("execution_convergence")
+        convergence_state = dict(convergence) if isinstance(convergence, dict) else {}
+
+        def _add_exposure(prefix: str, exposure: Any | None) -> None:
+            if exposure is None:
+                return
+            for field_name in (
+                "long_position_qty",
+                "short_position_qty",
+                "net_position_qty",
+                "gross_position_qty",
+                "long_notional",
+                "short_notional",
+                "net_notional",
+                "gross_notional",
+                "net_exposure_side",
+            ):
+                value = getattr(exposure, field_name, None)
+                if value is not None:
+                    convergence_state[f"{prefix}_{field_name}"] = str(value)
+
+        _add_exposure("current", risk_decision.current_derivatives_exposure)
+        _add_exposure("projected", risk_decision.projected_derivatives_exposure)
+        if convergence_state:
+            convergence_state.setdefault("source", "risk_engine_derivatives_exposure")
+            state["execution_convergence"] = convergence_state
+        return state
+
     def _plan_for_target(
         *,
         target: PositionTarget,
@@ -2054,7 +2084,7 @@ def _build_position_target_handler(
             projected_margin_usage=risk_decision.projected_margin_usage,
             projected_notional=risk_decision.projected_notional,
             risk_budget_multiplier=risk_decision.risk_budget_multiplier,
-            risk_budget_state=risk_decision.risk_budget_state,
+            risk_budget_state=_risk_budget_state_with_execution_convergence(risk_decision),
             execution_aggressiveness_multiplier=risk_decision.execution_aggressiveness_multiplier,
             execution_aggressiveness_state=risk_decision.execution_aggressiveness_state,
             only_reduce_required=risk_decision.only_reduce_required,
@@ -2303,7 +2333,7 @@ def _build_position_target_handler(
                     "projected_margin_usage": risk_decision.projected_margin_usage,
                     "projected_notional": risk_decision.projected_notional,
                     "risk_budget_multiplier": risk_decision.risk_budget_multiplier,
-                    "risk_budget_state": dict(risk_decision.risk_budget_state),
+                    "risk_budget_state": _risk_budget_state_with_execution_convergence(risk_decision),
                     "execution_aggressiveness_multiplier": risk_decision.execution_aggressiveness_multiplier,
                     "execution_aggressiveness_state": dict(risk_decision.execution_aggressiveness_state),
                     "only_reduce_required": risk_decision.only_reduce_required,

@@ -67,6 +67,9 @@ class OrderManager:
     _FILL_BACKFILL_RECENT_LIMIT = 100
     _FILL_BACKFILL_TERMINAL_STATUSES = ("FILLED", "CANCELED", "EXPIRED")
     _SEMANTIC_DUPLICATE_RECENT_LIMIT = 100
+    _RISK_INCREASE_CONVERGENCE_RECENT_LIMIT = 100
+    _RISK_INCREASE_CONVERGENCE_RECENT_SECONDS = 300
+    _RISK_INCREASE_CONVERGENCE_LANES = {"long_increase", "short_increase"}
     _SEMANTIC_DUPLICATE_NO_EFFECT_STATUSES = {
         "BLOCKED",
         "CANCELED",
@@ -286,6 +289,17 @@ class OrderManager:
             if semantic_duplicate_block is not None:
                 await self._persist_order_state(
                     order_state=semantic_duplicate_block,
+                    key=intent.symbol,
+                    intent=intent,
+                )
+                return
+            convergence_block = self._risk_increase_convergence_submit_block(
+                intent=intent,
+                client_order_id=preview_client_order_id,
+            )
+            if convergence_block is not None:
+                await self._persist_order_state(
+                    order_state=convergence_block,
                     key=intent.symbol,
                     intent=intent,
                 )
@@ -522,6 +536,16 @@ class OrderManager:
         if semantic_duplicate_block is not None:
             return await self._persist_order_state(
                 order_state=semantic_duplicate_block,
+                key=intent.symbol,
+                intent=intent,
+            )
+        convergence_block = self._risk_increase_convergence_submit_block(
+            intent=intent,
+            client_order_id=resolved_client_order_id,
+        )
+        if convergence_block is not None:
+            return await self._persist_order_state(
+                order_state=convergence_block,
                 key=intent.symbol,
                 intent=intent,
             )
@@ -1546,6 +1570,133 @@ class OrderManager:
                     continue
                 return state
             return state
+        return None
+
+    def _risk_increase_convergence_submit_block(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+    ) -> OrderState | None:
+        blocker = self._risk_increase_convergence_state(
+            intent=intent,
+            client_order_id=client_order_id,
+        )
+        if blocker is None:
+            return None
+        log_event(
+            self.logger,
+            "directional_risk_increase_convergence_blocked",
+            level="critical",
+            **correlation_fields(
+                decision_id=intent.decision_id,
+                intent_id=intent.intent_id,
+                symbol=intent.symbol,
+                client_order_id=client_order_id,
+                portfolio_snapshot_ref=intent.portfolio_snapshot_ref,
+                blocking_client_order_id=blocker.client_order_id,
+                blocking_intent_id=blocker.intent_id,
+                blocking_status=blocker.status,
+                blocking_position_intent=blocker.position_intent,
+                blocking_filled_qty=blocker.filled_qty,
+            ),
+        )
+        return self._blocked_order_state_from_intent(
+            intent=intent,
+            client_order_id=client_order_id,
+            submission_mode="risk_increase_convergence_blocked",
+            execution_error=f"risk_increase_convergence_order:{blocker.client_order_id}",
+        )
+
+    def _risk_increase_convergence_state(
+        self,
+        *,
+        intent: OrderIntent,
+        client_order_id: str,
+    ) -> OrderState | None:
+        intent_lanes = self._semantic_duplicate_lanes_from_intent(intent)
+        if not self._directional_risk_increase_context(intent):
+            return None
+        if not (intent_lanes & self._RISK_INCREASE_CONVERGENCE_LANES):
+            return None
+        for state in self.execution_repo.recent_order_states(
+            limit=self._RISK_INCREASE_CONVERGENCE_RECENT_LIMIT,
+        ):
+            if state.client_order_id == client_order_id or state.intent_id == intent.intent_id:
+                continue
+            if state.symbol != intent.symbol:
+                continue
+            if self._semantic_duplicate_product_mismatch(state=state, intent=intent):
+                continue
+            if not self._directional_risk_increase_context(state):
+                continue
+            state_lanes = self._semantic_duplicate_lanes_from_state(state)
+            state_increase_lanes = state_lanes & self._RISK_INCREASE_CONVERGENCE_LANES
+            if not state_increase_lanes:
+                continue
+            if self._risk_increase_state_is_inflight(state):
+                return state
+            if not self._risk_increase_state_is_recently_filled(state):
+                continue
+            for lane in state_increase_lanes:
+                exposure_side = "long" if lane == "long_increase" else "short"
+                current_qty = self._intent_current_exposure_qty(intent=intent, side=exposure_side)
+                if (
+                    current_qty is None
+                    or current_qty <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON
+                ):
+                    return state
+        return None
+
+    @classmethod
+    def _risk_increase_state_is_inflight(cls, state: OrderState) -> bool:
+        status = str(state.status or "").upper()
+        if status in cls._SEMANTIC_DUPLICATE_NO_EFFECT_STATUSES:
+            return False
+        if status == "FILLED":
+            return False
+        return status not in {"CANCELED", "CANCELLED", "EXPIRED", "REJECTED", "FAILED"}
+
+    def _risk_increase_state_is_recently_filled(self, state: OrderState) -> bool:
+        if str(state.status or "").upper() != "FILLED":
+            return False
+        filled_qty = self._decimal_or_zero(state.filled_qty)
+        if filled_qty <= self._OBLIGATION_ATOMIC_FINALIZE_EPSILON:
+            return False
+        state_ts = state.last_update_ts or state.submitted_ts or state.created_at
+        if state_ts is None:
+            return True
+        now = utc_now()
+        if state_ts.tzinfo is None:
+            state_ts = state_ts.replace(tzinfo=timezone.utc)
+        return now - state_ts <= timedelta(seconds=self._RISK_INCREASE_CONVERGENCE_RECENT_SECONDS)
+
+    @staticmethod
+    def _directional_risk_increase_context(value: object) -> bool:
+        for field_name in (
+            "strategy_family",
+            "strategy_execution_mode",
+            "strategy_bundle_id",
+            "execution_chain_id",
+        ):
+            normalized = str(getattr(value, field_name, "") or "").strip().lower()
+            if normalized == "directional" or normalized.startswith(("directional:", "directional_")):
+                return True
+        return False
+
+    def _intent_current_exposure_qty(self, *, intent: OrderIntent, side: str) -> Decimal | None:
+        risk_budget_state = intent.risk_budget_state if isinstance(intent.risk_budget_state, dict) else {}
+        convergence = risk_budget_state.get("execution_convergence")
+        if not isinstance(convergence, dict):
+            convergence = {}
+        for key in (
+            f"current_{side}_position_qty",
+            f"{side}_position_qty",
+        ):
+            if key in convergence:
+                return self._decimal_or_zero(convergence.get(key))
+            if key in risk_budget_state:
+                return self._decimal_or_zero(risk_budget_state.get(key))
         return None
 
     def _semantic_duplicate_disjoint_lanes_allowed(

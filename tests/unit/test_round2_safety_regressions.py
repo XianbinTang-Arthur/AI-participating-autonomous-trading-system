@@ -288,6 +288,166 @@ class TestRound2SafetyRegressions(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second_state.submission_mode, "semantic_duplicate_snapshot_blocked")
         self.assertEqual(second_state.execution_error, "semantic_duplicate_snapshot_order:clsemantic_reduce_1")
 
+    async def test_directional_risk_increase_from_stale_zero_exposure_is_blocked(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=PaperExecutionAdapter(price_provider=lambda _symbol: 100.0, taker_fee_bps=5.0),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        first = OrderIntent(
+            intent_id="intent_directional_convergence_short_1",
+            decision_id="decision_directional_convergence_short_1",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.0028"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="directional_convergence_short_1",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="short",
+            pos_side="short",
+            position_intent="open_short",
+            portfolio_snapshot_ref="evt_portfolio_convergence_1",
+            strategy_family="directional",
+            strategy_execution_mode="directional",
+        )
+        second = first.model_copy(
+            update={
+                "intent_id": "intent_directional_convergence_short_2",
+                "decision_id": "decision_directional_convergence_short_2",
+                "idempotency_key": "directional_convergence_short_2",
+                "portfolio_snapshot_ref": "evt_portfolio_convergence_2",
+                "risk_budget_state": {
+                    "execution_convergence": {"current_short_position_qty": "0"}
+                },
+            }
+        )
+
+        await manager.handle_order_intent(_order_intent_message(first))
+        await manager.handle_order_intent(_order_intent_message(second))
+
+        first_state = repo.get_order_state("cldirectional_convergence_short_1")
+        second_state = repo.get_order_state("cldirectional_convergence_short_2")
+        self.assertIsNotNone(first_state)
+        self.assertIsNotNone(second_state)
+        self.assertEqual(first_state.status, "FILLED")
+        self.assertEqual(second_state.status, "BLOCKED")
+        self.assertEqual(second_state.submission_mode, "risk_increase_convergence_blocked")
+        self.assertEqual(
+            second_state.execution_error,
+            "risk_increase_convergence_order:cldirectional_convergence_short_1",
+        )
+
+    async def test_directional_risk_increase_with_fresh_exposure_evidence_is_allowed(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=PaperExecutionAdapter(price_provider=lambda _symbol: 100.0, taker_fee_bps=5.0),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        first = OrderIntent(
+            intent_id="intent_directional_convergence_fresh_1",
+            decision_id="decision_directional_convergence_fresh_1",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.0028"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="directional_convergence_fresh_1",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="short",
+            pos_side="short",
+            position_intent="open_short",
+            portfolio_snapshot_ref="evt_portfolio_convergence_fresh_1",
+            strategy_family="directional",
+            strategy_execution_mode="directional",
+        )
+        second = first.model_copy(
+            update={
+                "intent_id": "intent_directional_convergence_fresh_2",
+                "decision_id": "decision_directional_convergence_fresh_2",
+                "idempotency_key": "directional_convergence_fresh_2",
+                "portfolio_snapshot_ref": "evt_portfolio_convergence_fresh_2",
+                "position_intent": "scale_in_short",
+                "risk_budget_state": {
+                    "execution_convergence": {"current_short_position_qty": "0.0028"}
+                },
+            }
+        )
+
+        await manager.handle_order_intent(_order_intent_message(first))
+        await manager.handle_order_intent(_order_intent_message(second))
+
+        first_state = repo.get_order_state("cldirectional_convergence_fresh_1")
+        second_state = repo.get_order_state("cldirectional_convergence_fresh_2")
+        self.assertIsNotNone(first_state)
+        self.assertIsNotNone(second_state)
+        self.assertEqual(first_state.status, "FILLED")
+        self.assertEqual(second_state.status, "FILLED")
+
+    async def test_directional_protective_reduce_is_allowed_after_recent_risk_increase(self) -> None:
+        repo = InMemoryExecutionRepository()
+        manager = OrderManager(
+            settings=AATSSettings.model_validate({}),
+            bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+            adapter=PaperExecutionAdapter(price_provider=lambda _symbol: 100.0, taker_fee_bps=5.0),
+            execution_repo=repo,
+            kill_switch=KillSwitch(),
+        )
+        open_intent = OrderIntent(
+            intent_id="intent_directional_convergence_reduce_open",
+            decision_id="decision_directional_convergence_reduce_open",
+            symbol="BTC-USDT-SWAP",
+            side="sell",
+            quantity=Decimal("0.0028"),
+            execution_style="exchange",
+            order_type="market",
+            urgency="medium",
+            time_in_force="IOC",
+            idempotency_key="directional_convergence_reduce_open",
+            product_type="derivatives",
+            margin_mode="cross",
+            exposure_side="short",
+            pos_side="short",
+            position_intent="open_short",
+            portfolio_snapshot_ref="evt_portfolio_convergence_reduce_1",
+            strategy_family="directional",
+            strategy_execution_mode="directional",
+        )
+        reduce_intent = open_intent.model_copy(
+            update={
+                "intent_id": "intent_directional_convergence_reduce_close",
+                "decision_id": "decision_directional_convergence_reduce_close",
+                "side": "buy",
+                "quantity": Decimal("0.0010"),
+                "idempotency_key": "directional_convergence_reduce_close",
+                "portfolio_snapshot_ref": "evt_portfolio_convergence_reduce_2",
+                "position_intent": "reduce_short",
+                "reduce_only": True,
+            }
+        )
+
+        await manager.handle_order_intent(_order_intent_message(open_intent))
+        await manager.handle_order_intent(_order_intent_message(reduce_intent))
+
+        open_state = repo.get_order_state("cldirectional_convergence_reduce_open")
+        reduce_state = repo.get_order_state("cldirectional_convergence_reduce_close")
+        self.assertIsNotNone(open_state)
+        self.assertIsNotNone(reduce_state)
+        self.assertEqual(open_state.status, "FILLED")
+        self.assertEqual(reduce_state.status, "FILLED")
+
     def test_invalid_order_state_regression_is_logged(self) -> None:
         repo = InMemoryExecutionRepository()
         filled = OrderState(
