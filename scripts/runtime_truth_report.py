@@ -255,6 +255,42 @@ with engine.connect() as conn:
                 ),
                 {"decision_id": decision_id},
             ).scalar()),
+            "execution_submit_commands_pending": int(conn.execute(
+                text(
+                    "select count(*) from execution_commands c "
+                    "join execution_orders o on o.order_id = c.order_id "
+                    "where o.decision_id = :decision_id "
+                    "and c.command_type = 'submit' and c.state = 'PENDING'"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "execution_submit_commands_claimed": int(conn.execute(
+                text(
+                    "select count(*) from execution_commands c "
+                    "join execution_orders o on o.order_id = c.order_id "
+                    "where o.decision_id = :decision_id "
+                    "and c.command_type = 'submit' and c.state = 'CLAIMED'"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "execution_submit_commands_sent": int(conn.execute(
+                text(
+                    "select count(*) from execution_commands c "
+                    "join execution_orders o on o.order_id = c.order_id "
+                    "where o.decision_id = :decision_id "
+                    "and c.command_type = 'submit' and c.state = 'SENT'"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
+            "execution_submit_commands_failed": int(conn.execute(
+                text(
+                    "select count(*) from execution_commands c "
+                    "join execution_orders o on o.order_id = c.order_id "
+                    "where o.decision_id = :decision_id "
+                    "and c.command_type = 'submit' and c.state = 'FAILED'"
+                ),
+                {"decision_id": decision_id},
+            ).scalar()),
             "order_states": int(conn.execute(
                 text("select count(*) from order_states where decision_id = :decision_id"),
                 {"decision_id": decision_id},
@@ -2004,6 +2040,18 @@ def summarize_execution_truth_chain(
     )
     db_execution_command_count = int(execution_chain.get("db_execution_command_count") or 0)
     db_execution_submit_command_count = int(execution_chain.get("db_execution_submit_command_count") or 0)
+    db_execution_submit_command_pending_count = int(
+        execution_chain.get("db_execution_submit_command_pending_count") or 0
+    )
+    db_execution_submit_command_claimed_count = int(
+        execution_chain.get("db_execution_submit_command_claimed_count") or 0
+    )
+    db_execution_submit_command_sent_count = int(
+        execution_chain.get("db_execution_submit_command_sent_count") or 0
+    )
+    db_execution_submit_command_failed_count = int(
+        execution_chain.get("db_execution_submit_command_failed_count") or 0
+    )
     execution_command_flow_enabled = execution_chain.get("execution_command_flow_enabled")
     if execution_command_flow_enabled is not None:
         execution_command_flow_enabled = bool(execution_command_flow_enabled)
@@ -2146,15 +2194,41 @@ def summarize_execution_truth_chain(
             f"db_execution_command_count={db_execution_command_count}",
             f"db_order_submitted_or_later_count={db_execution_order_submitted_or_later_count}",
             f"db_order_terminal_no_fill_count={db_execution_order_terminal_no_fill_count}",
+            f"db_submit_pending_count={db_execution_submit_command_pending_count}",
+            f"db_submit_claimed_count={db_execution_submit_command_claimed_count}",
+            f"db_submit_sent_count={db_execution_submit_command_sent_count}",
+            f"db_submit_failed_count={db_execution_submit_command_failed_count}",
             (
                 f"execution_command_flow_enabled={str(execution_command_flow_enabled).lower()}"
                 if execution_command_flow_enabled is not None
                 else None
             ),
         ],
-        limit=12,
+        limit=16,
     )
     submission_gap_root_cause = None
+    submit_command_pending_or_claimed = (
+        db_execution_submit_command_pending_count
+        + db_execution_submit_command_claimed_count
+    ) > 0
+    submit_command_sent_without_terminal_order = (
+        db_execution_submit_command_sent_count > 0
+        and any(
+            (
+                db_execution_order_created_or_submitting_count,
+                db_order_state_created_or_submitting_count,
+            )
+        )
+    )
+    submit_command_failed_without_terminal_order = (
+        db_execution_submit_command_failed_count > 0
+        and any(
+            (
+                db_execution_order_created_or_submitting_count,
+                db_order_state_created_or_submitting_count,
+            )
+        )
+    )
 
     if route_action == "hold_current" and execution_behavior == "hold_current" and zero_delta and execution_legs_count == 0:
         order_expected = False
@@ -2192,6 +2266,34 @@ def summarize_execution_truth_chain(
             else:
                 submission_gap_root_cause = "execution_command_missing_for_created_order"
                 missing_fields.append("execution_command_or_submitted_order_state")
+        elif (
+            not missing_fields
+            and not has_fill_surface
+            and any(
+                (
+                    submit_command_pending_or_claimed,
+                    submit_command_sent_without_terminal_order,
+                    submit_command_failed_without_terminal_order,
+                )
+            )
+            and any(
+                (
+                    db_execution_order_created_or_submitting_count,
+                    db_order_state_created_or_submitting_count,
+                )
+            )
+        ):
+            fill_expected = False
+            lifecycle_expected = False
+            if db_execution_submit_command_claimed_count > 0:
+                submission_gap_root_cause = "execution_submit_command_claimed_without_terminal_order_ack"
+            elif db_execution_submit_command_pending_count > 0:
+                submission_gap_root_cause = "execution_submit_command_pending_without_terminal_order_ack"
+            elif submit_command_sent_without_terminal_order:
+                submission_gap_root_cause = "execution_submit_command_sent_without_terminal_order_ack"
+            else:
+                submission_gap_root_cause = "execution_submit_command_failed_without_terminal_order_ack"
+            missing_fields.append("execution_command_terminal_ack_or_exchange_order_id")
         elif not missing_fields and order_surface_terminal_no_fill:
             fill_expected = False
             lifecycle_expected = False
@@ -2206,6 +2308,7 @@ def summarize_execution_truth_chain(
                     ["execution_command_or_submitted_order_state"],
                     ["enable_execution_command_flow_or_recover_created_order"],
                     ["execution_order_or_order_state_from_order_intent_refs"],
+                    ["execution_command_terminal_ack_or_exchange_order_id"],
                 )
                 else "expected_execution_surface_missing"
             )
@@ -2214,7 +2317,7 @@ def summarize_execution_truth_chain(
     elif not has_order_surface and not has_fill_surface:
         status = "verified_no_order_expected"
 
-    if not missing_fields and not lifecycle_expected:
+    if not lifecycle_expected:
         lifecycle_status = "no_position_lifecycle_transition_expected"
     elif not missing_fields and lifecycle_expected:
         lifecycle_status = "position_lifecycle_transition_evidence_present"
@@ -2279,6 +2382,10 @@ def summarize_latest_decision(
         ),
         "db_execution_command_count": int(counts.get("execution_commands") or 0),
         "db_execution_submit_command_count": int(counts.get("execution_submit_commands") or 0),
+        "db_execution_submit_command_pending_count": int(counts.get("execution_submit_commands_pending") or 0),
+        "db_execution_submit_command_claimed_count": int(counts.get("execution_submit_commands_claimed") or 0),
+        "db_execution_submit_command_sent_count": int(counts.get("execution_submit_commands_sent") or 0),
+        "db_execution_submit_command_failed_count": int(counts.get("execution_submit_commands_failed") or 0),
         "db_order_state_count": int(counts.get("order_states") or 0),
         "db_order_state_created_or_submitting_count": int(
             counts.get("order_states_created_or_submitting") or 0
