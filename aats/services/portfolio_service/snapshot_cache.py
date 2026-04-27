@@ -55,13 +55,14 @@ I9 scope 隔离：不同 product_type/margin_mode 的 snapshot 互不污染
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 from aats.bootstrap.logging import log_event
 from aats.bus.base import EventBus
 from aats.events import topics
-from aats.events.envelopes import parse_envelope
+from aats.events.envelopes import build_envelope, parse_envelope
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.services.runtime_scope import RuntimeStateScope
 from aats.storage.hot_state_store import HotStateStore, make_key
@@ -83,6 +84,9 @@ PORTFOLIO_SNAPSHOT_EVENT_TYPE = "PortfolioSnapshotPublished"
 """outbox publisher 发的 envelope event_type。cache 不强依赖这个字段（远端事件
 解析只看 envelope.payload），但记录在此供诊断 / 文档用途。"""
 
+PORTFOLIO_SNAPSHOT_CACHE_SOURCE_COMPONENT = "aats.portfolio_service.snapshot_cache"
+"""直接 save_snapshot listener 路径补发 portfolio.snapshots 时使用的 source_component。"""
+
 
 class PortfolioSnapshotCache:
     """Sidecar cache for the latest ``PortfolioSnapshot`` per scope.
@@ -93,9 +97,10 @@ class PortfolioSnapshotCache:
       source of cached truth for sync readers (D2, D9: only
       ``OperatorQueryService._latest_scoped_snapshot`` reads it).
     - ``publish(snapshot)`` updates the local dict synchronously and
-      best-effort writes Redis. It does NOT broadcast NATS — the outbox
-      publisher's existing ``flush_pending()`` flow drives the NATS path
-      (D5).
+      best-effort writes Redis. The outbox publisher keeps the default
+      ``broadcast=False`` because its ``flush_pending()`` flow drives NATS.
+      Direct ``save_snapshot()`` listeners use ``fire_and_forget_publish()``
+      so recovery / repair snapshots also advance Redis and portfolio.snapshots.
     - ``_handle_remote_event()`` applies remote NATS events using the
       ``snapshot_ts <= local`` rule, which simultaneously handles self-loop
       noop and stale-event rejection (D6).
@@ -124,6 +129,9 @@ class PortfolioSnapshotCache:
         self._subscribed: bool = False
         # bootstrap 时记下的 fingerprints（诊断用）
         self._bootstrapped_scopes: list[str] = []
+        # bootstrap 所在的事件循环；sync listener 可能从非 async stack 触发，
+        # 用它把 Redis/NATS best-effort publish 调回 runtime loop。
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     # ──────────────────────────────────────────────────────────────────
     # 启动 / 关闭
@@ -156,6 +164,8 @@ class PortfolioSnapshotCache:
 
         ⚠️ 任何步骤的失败都不能阻止 build_runtime 完成（与 6.2 同语义）。
         """
+        self._loop = asyncio.get_running_loop()
+
         # Step 1: Redis hydrate
         key = self._key_for(scope_fingerprint)
         try:
@@ -261,30 +271,59 @@ class PortfolioSnapshotCache:
     # 写路径（execution outbox commit hook 调）
     # ──────────────────────────────────────────────────────────────────
 
-    async def publish(self, snapshot: PortfolioSnapshot) -> None:
+    async def publish(
+        self,
+        snapshot: PortfolioSnapshot,
+        *,
+        skip_local: bool = False,
+        broadcast: bool = False,
+    ) -> None:
         """outbox publisher commit 之后的 hook。
 
-        步骤（D5）：
-        1. **同步**更新本地 in-memory dict（execution 进程自己的 dashboard 立
-           即受益，不必 fallback PG）
+        步骤：
+        1. 默认 **同步**更新本地 in-memory dict（execution 进程自己的
+           dashboard 立即受益，不必 fallback PG）
         2. **best-effort** 写 Redis（其他进程 bootstrap 时 hydrate 兜底）
-        3. **不广播 NATS** — outbox publisher 的 ``flush_pending`` 已经发了
+        3. ``broadcast=True`` 时补发 ``portfolio.snapshots`` NATS 事件；outbox
+           publisher 默认不传，因为它的 ``flush_pending`` 已经负责广播
 
         idempotent 保证（D6）：如果 snapshot.snapshot_ts <= 本地同 scope 的
         ts，视为重复或乱序，noop（不抛、不写 Redis）。
+
+        ``skip_local=True`` 仅供 ``fire_and_forget_publish`` 使用：sync listener
+        已经 eager apply 过本地 dict，这里的 task 只负责远端 Redis/NATS。
         """
         scope_fingerprint = self._scope_fingerprint_from_snapshot(snapshot)
-        applied = self._apply_locally(scope_fingerprint, snapshot)
-        if not applied:
-            log_event(
-                self._logger,
-                "portfolio_snapshot_cache_publish_noop_stale",
-                process_role=self._process_role,
-                scope_fingerprint=scope_fingerprint,
-                snapshot_ts=snapshot.snapshot_ts.isoformat(),
-            )
-            return
+        if not skip_local:
+            applied = self._apply_locally(scope_fingerprint, snapshot)
+            if not applied:
+                log_event(
+                    self._logger,
+                    "portfolio_snapshot_cache_publish_noop_stale",
+                    process_role=self._process_role,
+                    scope_fingerprint=scope_fingerprint,
+                    snapshot_ts=snapshot.snapshot_ts.isoformat(),
+                    skip_local=skip_local,
+                    broadcast=broadcast,
+                )
+                return
+        else:
+            existing = self._latest.get(scope_fingerprint)
+            if existing is not None and snapshot.snapshot_ts < existing.snapshot_ts:
+                log_event(
+                    self._logger,
+                    "portfolio_snapshot_cache_publish_noop_stale",
+                    process_role=self._process_role,
+                    scope_fingerprint=scope_fingerprint,
+                    snapshot_ts=snapshot.snapshot_ts.isoformat(),
+                    current_snapshot_ts=existing.snapshot_ts.isoformat(),
+                    skip_local=skip_local,
+                    broadcast=broadcast,
+                )
+                return
         await self._best_effort_redis_set(scope_fingerprint, snapshot)
+        if broadcast:
+            await self._best_effort_nats_broadcast(snapshot)
         log_event(
             self._logger,
             "portfolio_snapshot_cache_publish_applied",
@@ -292,6 +331,8 @@ class PortfolioSnapshotCache:
             scope_fingerprint=scope_fingerprint,
             snapshot_ts=snapshot.snapshot_ts.isoformat(),
             decision_id=snapshot.decision_id,
+            skip_local=skip_local,
+            broadcast=broadcast,
         )
 
     def apply_sync(self, snapshot: PortfolioSnapshot) -> None:
@@ -331,6 +372,120 @@ class PortfolioSnapshotCache:
                 scope_fingerprint=scope_fingerprint,
                 snapshot_ts=snapshot.snapshot_ts.isoformat(),
                 decision_id=snapshot.decision_id,
+            )
+
+    def fire_and_forget_publish(self, snapshot: PortfolioSnapshot | None) -> None:
+        """Sync listener wrapper that also advances cross-process hot state.
+
+        ``PortfolioRepository.save_snapshot()`` is sync, but recovery / repair
+        paths still need the latest snapshot to become visible outside the
+        current process. This method eagerly applies local dict state, then
+        schedules Redis + portfolio.snapshots best-effort publication on the
+        runtime event loop. If no loop is available, it degrades to the old
+        local-only behavior and never raises into the repository commit path.
+        """
+        if snapshot is None:
+            return
+
+        try:
+            scope_fingerprint = self._scope_fingerprint_from_snapshot(snapshot)
+        except Exception as exc:
+            log_event(
+                self._logger,
+                "portfolio_snapshot_cache_fire_and_forget_parse_failed",
+                level="warning",
+                process_role=self._process_role,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return
+
+        applied = self._apply_locally(scope_fingerprint, snapshot)
+        if not applied:
+            log_event(
+                self._logger,
+                "portfolio_snapshot_cache_fire_and_forget_noop_stale",
+                process_role=self._process_role,
+                scope_fingerprint=scope_fingerprint,
+                snapshot_ts=snapshot.snapshot_ts.isoformat(),
+            )
+            return
+
+        try:
+            running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            running_loop = None
+
+        target_loop = running_loop
+        if target_loop is None and self._loop is not None:
+            target_loop = self._loop
+
+        if target_loop is None or target_loop.is_closed() or not target_loop.is_running():
+            log_event(
+                self._logger,
+                "portfolio_snapshot_cache_fire_and_forget_no_loop",
+                level="debug",
+                process_role=self._process_role,
+                scope_fingerprint=scope_fingerprint,
+                snapshot_ts=snapshot.snapshot_ts.isoformat(),
+            )
+            return
+
+        loop = target_loop
+
+        def _schedule() -> None:
+            try:
+                task = loop.create_task(
+                    self.publish(snapshot, skip_local=True, broadcast=True),
+                    name="portfolio_snapshot_cache_publish",
+                )
+                task.add_done_callback(self._log_background_publish_result)
+            except Exception as exc:  # pragma: no cover
+                log_event(
+                    self._logger,
+                    "portfolio_snapshot_cache_fire_and_forget_schedule_failed",
+                    level="warning",
+                    process_role=self._process_role,
+                    scope_fingerprint=scope_fingerprint,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+
+        if running_loop is loop:
+            _schedule()
+            return
+
+        try:
+            loop.call_soon_threadsafe(_schedule)
+        except Exception as exc:  # pragma: no cover
+            log_event(
+                self._logger,
+                "portfolio_snapshot_cache_fire_and_forget_schedule_failed",
+                level="warning",
+                process_role=self._process_role,
+                scope_fingerprint=scope_fingerprint,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    def _log_background_publish_result(self, task: asyncio.Task[None]) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            log_event(
+                self._logger,
+                "portfolio_snapshot_cache_fire_and_forget_cancelled",
+                level="debug",
+                process_role=self._process_role,
+            )
+        except Exception as exc:
+            log_event(
+                self._logger,
+                "portfolio_snapshot_cache_fire_and_forget_task_failed",
+                level="warning",
+                process_role=self._process_role,
+                error_type=type(exc).__name__,
+                error=str(exc),
             )
 
     # ──────────────────────────────────────────────────────────────────
@@ -434,6 +589,31 @@ class PortfolioSnapshotCache:
                 level="warning",
                 process_role=self._process_role,
                 scope_fingerprint=scope_fingerprint,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    async def _best_effort_nats_broadcast(self, snapshot: PortfolioSnapshot) -> None:
+        """best-effort 广播 NATS PORTFOLIO_SNAPSHOTS。失败 log warning 不抛。"""
+        try:
+            envelope = build_envelope(
+                topic=topics.PORTFOLIO_SNAPSHOTS,
+                key="portfolio",
+                payload_model=snapshot,
+                source_component=PORTFOLIO_SNAPSHOT_CACHE_SOURCE_COMPONENT,
+            )
+            await self._bus.publish(
+                topic=topics.PORTFOLIO_SNAPSHOTS,
+                key="portfolio",
+                payload=envelope.model_dump(mode="json"),
+            )
+        except Exception as exc:
+            log_event(
+                self._logger,
+                "portfolio_snapshot_cache_nats_publish_failed",
+                level="warning",
+                process_role=self._process_role,
+                decision_id=snapshot.decision_id,
                 error_type=type(exc).__name__,
                 error=str(exc),
             )

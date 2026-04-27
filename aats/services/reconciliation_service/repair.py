@@ -18,6 +18,7 @@ from aats.schemas.operator import ProcessingFailureRecord
 from aats.schemas.portfolio import PortfolioSnapshot
 from aats.schemas.reconciliation import ReconciliationReport
 from aats.services.fill_ordering import fill_processing_sort_key
+from aats.services.portfolio_service.snapshot_cache import PORTFOLIO_SNAPSHOT_CACHE_SOURCE_COMPONENT
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.bootstrap.telemetry import traced
@@ -247,6 +248,10 @@ class ReconciliationService:
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
         envelope = parse_envelope(message)
+        if envelope.source_component == PORTFOLIO_SNAPSHOT_CACHE_SOURCE_COMPONENT:
+            # cache-only broadcasts keep gateway hot state fresh for direct
+            # save_snapshot() paths. They are not durable reconciliation inputs.
+            return
         # _report_exists_for_portfolio_snapshot_ref 会扫 reconciliation_repo
         # history。_build_report 更重：里面会做 fetcher.fetch_snapshot（同步
         # 网络调用）、多次 DB 读以及重算 snapshot。两处都在 event loop 线程

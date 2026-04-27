@@ -19,6 +19,7 @@ from aats.schemas.exchange import (
     ExchangePosition,
 )
 from aats.schemas.portfolio import PortfolioSnapshot, Position
+from aats.services.portfolio_service.snapshot_cache import PORTFOLIO_SNAPSHOT_CACHE_SOURCE_COMPONENT
 from aats.services.portfolio_service.pnl import PortfolioPnLCalculator
 from aats.services.portfolio_service.snapshots import PortfolioSnapshotBuilder
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
@@ -3041,14 +3042,15 @@ class TestReconciliationComparator(unittest.TestCase):
 
 
 class TestReconciliationServiceIdempotency(unittest.IsolatedAsyncioTestCase):
-    async def test_duplicate_portfolio_snapshot_event_does_not_create_duplicate_report(self) -> None:
-        now = utc_now()
-        event_store = InMemoryEventStore()
-        bus = InMemoryEventBus(event_store=event_store, persistence_mode="strict")
-        reconciliation_repo = InMemoryReconciliationRepository()
-        service = ReconciliationService(
+    def _make_service(
+        self,
+        *,
+        event_store: InMemoryEventStore,
+        reconciliation_repo: InMemoryReconciliationRepository,
+    ) -> ReconciliationService:
+        return ReconciliationService(
             settings=AATSSettings.model_validate({}),
-            bus=bus,
+            bus=InMemoryEventBus(event_store=event_store, persistence_mode="strict"),
             fetcher=ExchangeStateFetcher(account_service=None),
             comparator=StateComparator(),
             repair_service=ReconciliationRepairService(),
@@ -3063,6 +3065,15 @@ class TestReconciliationServiceIdempotency(unittest.IsolatedAsyncioTestCase):
             price_provider=lambda _symbol: 0.0,
             bootstrap_portfolio_from_exchange=False,
             metrics=None,
+        )
+
+    async def test_duplicate_portfolio_snapshot_event_does_not_create_duplicate_report(self) -> None:
+        now = utc_now()
+        event_store = InMemoryEventStore()
+        reconciliation_repo = InMemoryReconciliationRepository()
+        service = self._make_service(
+            event_store=event_store,
+            reconciliation_repo=reconciliation_repo,
         )
         snapshot = PortfolioSnapshot(
             snapshot_ts=now,
@@ -3106,6 +3117,43 @@ class TestReconciliationServiceIdempotency(unittest.IsolatedAsyncioTestCase):
         report = reconciliation_repo.latest()
         self.assertIsNotNone(report)
         self.assertEqual(report.portfolio_snapshot_ref, envelope.event_id)
+
+    async def test_cache_only_portfolio_snapshot_event_does_not_create_report(self) -> None:
+        now = utc_now()
+        event_store = InMemoryEventStore()
+        reconciliation_repo = InMemoryReconciliationRepository()
+        service = self._make_service(
+            event_store=event_store,
+            reconciliation_repo=reconciliation_repo,
+        )
+        snapshot = PortfolioSnapshot(
+            snapshot_ts=now,
+            decision_id="decision_cache_only_recovery",
+            snapshot_origin="recovery_auto_healed",
+            balances={"USDT": 10_000.0},
+            positions=[],
+            realized_pnl=0.0,
+            unrealized_pnl=0.0,
+            total_equity=10_000.0,
+            gross_exposure=0.0,
+            net_exposure=0.0,
+        )
+        envelope = build_envelope(
+            topic=topics.PORTFOLIO_SNAPSHOTS,
+            key="portfolio",
+            payload_model=snapshot,
+            source_component=PORTFOLIO_SNAPSHOT_CACHE_SOURCE_COMPONENT,
+        )
+        message = {
+            "topic": topics.PORTFOLIO_SNAPSHOTS,
+            "key": "portfolio",
+            "payload": envelope.model_dump(mode="json"),
+        }
+
+        await service.handle_portfolio_snapshot(message)
+
+        self.assertEqual(reconciliation_repo.history(), [])
+        self.assertEqual(event_store.count(topic=topics.RECONCILIATION_REPORTS), 0)
 
     async def test_repair_missing_portfolio_snapshot_rebuilds_and_publishes_snapshot(self) -> None:
         now = utc_now()

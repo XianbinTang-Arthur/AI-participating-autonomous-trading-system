@@ -15,6 +15,7 @@ docs/task/stage_6_slice_6_3_cache_listener_fix_design.md §D7
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -24,10 +25,13 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from aats.bus.memory_bus import InMemoryEventBus
-from aats.schemas.portfolio import PortfolioSnapshot
-from aats.services.portfolio_service.snapshot_cache import PortfolioSnapshotCache
+from aats.schemas.portfolio import PortfolioSnapshot, Position
+from aats.services.portfolio_service.snapshot_cache import (
+    PORTFOLIO_SNAPSHOT_KEY_LATEST,
+    PortfolioSnapshotCache,
+)
 from aats.services.runtime_scope import RuntimeStateScope
-from aats.storage.hot_state_store import InMemoryHotStateStore
+from aats.storage.hot_state_store import InMemoryHotStateStore, make_key
 from aats.storage.portfolio_repo import InMemoryPortfolioRepository
 from aats.storage.portfolio_repo_postgres import PostgresPortfolioRepository
 from aats.storage.sqlalchemy_models import Base
@@ -60,14 +64,17 @@ def _make_snapshot(
     margin_mode: str = "cash",
     decision_id: str | None = "decision-listener-001",
     total_equity: str = "100.00",
+    positions: list[Position] | None = None,
+    snapshot_origin: str = "fill_derived",
 ) -> PortfolioSnapshot:
     if snapshot_ts is None:
         snapshot_ts = datetime(2026, 4, 8, 12, 0, 0, tzinfo=timezone.utc)
     return PortfolioSnapshot(
         decision_id=decision_id,
+        snapshot_origin=snapshot_origin,  # type: ignore[arg-type]
         snapshot_ts=snapshot_ts,
         balances={"USDT": Decimal(total_equity)},
-        positions=[],
+        positions=list(positions or []),
         realized_pnl=Decimal("0"),
         unrealized_pnl=Decimal("0"),
         total_equity=Decimal(total_equity),
@@ -75,6 +82,25 @@ def _make_snapshot(
         net_exposure=Decimal("0"),
         product_type=product_type,  # type: ignore[arg-type]
         margin_mode=margin_mode,  # type: ignore[arg-type]
+    )
+
+
+def _make_derivatives_position() -> Position:
+    return Position(
+        symbol="BTC-USDT-SWAP",
+        position_key="BTC-USDT-SWAP:long",
+        position_qty=Decimal("0.0015"),
+        position_notional=Decimal("117.0838"),
+        avg_entry_price=Decimal("78055.8667"),
+        unrealized_pnl=Decimal("-1.136"),
+        product_type="derivatives",  # type: ignore[arg-type]
+        exposure_side="long",
+        target_leverage=10.91,
+        margin_mode="cross",  # type: ignore[arg-type]
+        position_mode="long_short_mode",
+        pos_side="long",
+        instrument_family="BTC-USDT",
+        settle_currency="USDT",
     )
 
 
@@ -347,6 +373,84 @@ class TestListenerScopeIsolation(unittest.TestCase):
         # 保证没有互相污染
         self.assertEqual(spot_cached.total_equity, Decimal("100.00"))
         self.assertEqual(deriv_cached.total_equity, Decimal("500.00"))
+
+
+class TestRecoveryDirectSaveCrossProcessSync(unittest.IsolatedAsyncioTestCase):
+    async def test_recovery_auto_healed_empty_snapshot_clears_gateway_stale_position(
+        self,
+    ) -> None:
+        repo = InMemoryPortfolioRepository()
+        hot_state_store = InMemoryHotStateStore()
+        bus = InMemoryEventBus()
+        writer_cache = PortfolioSnapshotCache(
+            hot_state_store=hot_state_store,
+            bus=bus,
+            process_role="execution",
+            logger=_make_logger(),
+        )
+        gateway_cache = PortfolioSnapshotCache(
+            hot_state_store=hot_state_store,
+            bus=bus,
+            process_role="gateway",
+            logger=_make_logger(),
+        )
+        scope_fingerprint = "derivatives:cross"
+        await writer_cache.bootstrap(scope_fingerprint=scope_fingerprint)
+        await gateway_cache.bootstrap(scope_fingerprint=scope_fingerprint)
+        repo.attach_snapshot_listener(writer_cache.fire_and_forget_publish)
+        scope = _make_scope(
+            product_type="derivatives",
+            margin_mode="cross",
+            default_symbol="BTC-USDT-SWAP",
+        )
+
+        base_ts = datetime(2026, 4, 26, 22, 34, 18, tzinfo=timezone.utc)
+        stale_position_snapshot = _make_snapshot(
+            snapshot_ts=base_ts,
+            product_type="derivatives",
+            margin_mode="cross",
+            decision_id="fill-derived-old-position",
+            total_equity="117.0838",
+            positions=[_make_derivatives_position()],
+            snapshot_origin="fill_derived",
+        )
+        healed_empty_snapshot = _make_snapshot(
+            snapshot_ts=base_ts + timedelta(minutes=2),
+            product_type="derivatives",
+            margin_mode="cross",
+            decision_id="recovery-healed-empty-position",
+            total_equity="118.2198",
+            positions=[],
+            snapshot_origin="recovery_auto_healed",
+        )
+
+        repo.save_snapshot(stale_position_snapshot)
+        await asyncio.sleep(0.05)
+        gateway_stale = gateway_cache.get_sync(scope)
+        assert gateway_stale is not None
+        self.assertEqual(len(gateway_stale.positions), 1)
+
+        repo.save_snapshot(healed_empty_snapshot)
+        await asyncio.sleep(0.05)
+
+        writer_cached = writer_cache.get_sync(scope)
+        gateway_cached = gateway_cache.get_sync(scope)
+        assert writer_cached is not None
+        assert gateway_cached is not None
+        self.assertEqual(writer_cached.decision_id, "recovery-healed-empty-position")
+        self.assertEqual(gateway_cached.decision_id, "recovery-healed-empty-position")
+        self.assertEqual(writer_cached.positions, [])
+        self.assertEqual(gateway_cached.positions, [])
+
+        redis_payload = await hot_state_store.get(
+            make_key("portfolio", PORTFOLIO_SNAPSHOT_KEY_LATEST, scope_fingerprint)
+        )
+        self.assertIsInstance(redis_payload, dict)
+        assert isinstance(redis_payload, dict)
+        self.assertEqual(
+            redis_payload["decision_id"], "recovery-healed-empty-position"
+        )
+        self.assertEqual(redis_payload["positions"], [])
 
 
 if __name__ == "__main__":
