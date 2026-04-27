@@ -1624,6 +1624,55 @@ def test_created_order_without_submit_command_reports_submission_gap() -> None:
     assert truth_chain["submission_gap_root_cause"] == "execution_command_missing_for_created_order"
 
 
+def test_order_intent_without_order_surface_reports_projection_gap() -> None:
+    mod = load_module()
+
+    truth_chain = mod.summarize_execution_truth_chain(
+        latest_decision={"route_action": "override_target", "primary_family": "directional"},
+        execution_chain={
+            "execution_plan_ref_count": 2,
+            "order_intent_ref_count": 2,
+            "order_state_ref_count": 0,
+            "fill_event_ref_count": 0,
+            "db_order_count": 0,
+            "execution_command_flow_enabled": True,
+            "db_execution_order_created_or_submitting_count": 0,
+            "db_execution_order_submitted_or_later_count": 0,
+            "db_execution_command_count": 0,
+            "db_execution_submit_command_count": 0,
+            "db_order_state_count": 0,
+            "db_order_state_created_or_submitting_count": 0,
+            "db_order_state_submitted_or_later_count": 0,
+            "db_fill_count": 0,
+            "db_fill_via_order_count": 0,
+            "legacy_fill_event_count": 0,
+            "legacy_fill_event_via_order_count": 0,
+        },
+        execution_legs_count=2,
+        candidate_drilldown=[
+            {
+                "family": "directional",
+                "composition": {
+                    "route_action": "override_target",
+                    "execution_behavior": "execute_target",
+                    "requested_delta_position_qty": "-0.01064996606678376941684205709",
+                    "composed_delta_position_qty": "-0.005324983033",
+                },
+                "budget": {},
+                "execution": {"execution_behavior": "execute_target"},
+            },
+        ],
+    )
+
+    assert truth_chain["status"] == "expected_order_submission_missing"
+    assert truth_chain["order_expected"] is True
+    assert truth_chain["fill_expected"] is False
+    assert truth_chain["position_lifecycle_status"] == "position_lifecycle_transition_evidence_missing"
+    assert truth_chain["smallest_missing_field"] == "execution_order_or_order_state_from_order_intent_refs"
+    assert truth_chain["missing_fields"] == ["execution_order_or_order_state_from_order_intent_refs"]
+    assert truth_chain["submission_gap_root_cause"] == "execution_order_missing_for_order_intent"
+
+
 def test_direct_submit_created_order_reports_command_flow_disabled_root_cause() -> None:
     mod = load_module()
 

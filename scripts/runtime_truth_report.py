@@ -1975,6 +1975,13 @@ def summarize_execution_truth_chain(
             has_fill_surface,
         )
     )
+    order_intent_without_order_surface = (
+        order_intent_ref_count > 0
+        and db_order_count == 0
+        and db_order_state_count == 0
+        and not has_submit_surface
+        and not has_fill_surface
+    )
     order_created_but_not_submitted = (
         has_order_surface
         and not has_submit_surface
@@ -2019,7 +2026,10 @@ def summarize_execution_truth_chain(
             f"execution_legs_count={execution_legs_count}",
             f"requested_delta_position_qty={decimal_text(requested_delta_position_qty)}",
             f"composed_delta_position_qty={decimal_text(composed_delta_position_qty)}",
+            f"execution_plan_ref_count={execution_plan_ref_count}",
+            f"order_intent_ref_count={order_intent_ref_count}",
             f"db_order_count={db_order_count}",
+            f"db_order_state_count={db_order_state_count}",
             f"db_fill_count={db_fill_count}",
             f"db_fill_via_order_count={db_fill_via_order_count}",
             f"db_execution_command_count={db_execution_command_count}",
@@ -2054,6 +2064,13 @@ def summarize_execution_truth_chain(
             missing_fields.append("order_intent_refs_or_execution_orders")
         if (
             not missing_fields
+            and order_intent_without_order_surface
+        ):
+            fill_expected = False
+            submission_gap_root_cause = "execution_order_missing_for_order_intent"
+            missing_fields.append("execution_order_or_order_state_from_order_intent_refs")
+        elif (
+            not missing_fields
             and order_created_but_not_submitted
             and not has_fill_surface
         ):
@@ -2077,6 +2094,7 @@ def summarize_execution_truth_chain(
                 in (
                     ["execution_command_or_submitted_order_state"],
                     ["enable_execution_command_flow_or_recover_created_order"],
+                    ["execution_order_or_order_state_from_order_intent_refs"],
                 )
                 else "expected_execution_surface_missing"
             )
