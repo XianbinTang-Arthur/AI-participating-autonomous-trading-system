@@ -574,6 +574,106 @@ def test_slippage_cost_calibration_truth_accepts_command_intent_reference_price(
     assert coverage_audit["by_order_path"][0]["row_count"] == 56
 
 
+def test_directional_command_flow_provenance_separates_current_and_legacy_paths() -> None:
+    mod = load_module()
+    slippage_cost = {
+        "slippage_proxy": {
+            "coverage_audit": {
+                "classification": "missing_reference_price_coverage_is_no_submit_command_path",
+                "reference_policy": "pretrade_order_or_command_reference_only",
+                "by_order_path": [
+                    {
+                        "coverage": "missing",
+                        "source_system": "local_order_manager",
+                        "order_type": "market",
+                        "time_in_force": "IOC",
+                        "execution_style": "local_order_manager",
+                        "strategy_family": "directional",
+                        "order_state": "FILLED",
+                        "command_presence": "no_submit_command",
+                        "command_reference_presence": "command_no_reference",
+                        "submit_command_states": "none",
+                        "row_count": 31,
+                        "order_count": 29,
+                    },
+                    {
+                        "coverage": "covered",
+                        "source_system": "local_order_manager",
+                        "order_type": "market",
+                        "time_in_force": "IOC",
+                        "execution_style": "taker",
+                        "strategy_family": "directional",
+                        "order_state": "FILLED",
+                        "command_presence": "has_submit_command",
+                        "command_reference_presence": "command_has_reference",
+                        "submit_command_states": "ACKED",
+                        "row_count": 17,
+                        "order_count": 12,
+                    },
+                    {
+                        "coverage": "missing",
+                        "source_system": "local_order_manager",
+                        "order_type": "market",
+                        "time_in_force": "IOC",
+                        "execution_style": "null",
+                        "strategy_family": "independent",
+                        "order_state": "FILLED",
+                        "command_presence": "no_submit_command",
+                        "command_reference_presence": "command_no_reference",
+                        "submit_command_states": "none",
+                        "row_count": 25,
+                        "order_count": 25,
+                    },
+                ],
+            },
+        },
+    }
+
+    summary = mod.summarize_directional_command_flow_provenance_truth(slippage_cost)
+
+    assert summary["status"] == "verified_current_directional_command_flow_fill_provenance_present"
+    assert summary["smallest_missing_field"] is None
+    assert summary["current_command_path_reference_gap"] is False
+    assert summary["coverage"]["directional_fill_count"] == 48
+    assert summary["coverage"]["current_submit_command_fill_count"] == 17
+    assert summary["coverage"]["current_submit_command_reference_covered_fill_count"] == 17
+    assert summary["coverage"]["current_submit_command_reference_missing_fill_count"] == 0
+    assert summary["coverage"]["historical_no_submit_command_fill_count"] == 31
+    assert summary["coverage"]["historical_no_submit_command_reference_missing_fill_count"] == 31
+    assert summary["coverage_classification"] == "missing_reference_price_coverage_is_no_submit_command_path"
+    assert summary["reference_policy"] == "pretrade_order_or_command_reference_only"
+    assert len(summary["by_order_path"]) == 2
+
+
+def test_directional_command_flow_provenance_reports_current_reference_gap() -> None:
+    mod = load_module()
+    slippage_cost = {
+        "slippage_proxy": {
+            "coverage_audit": {
+                "classification": "current_command_path_reference_gap_possible",
+                "by_order_path": [
+                    {
+                        "coverage": "missing",
+                        "strategy_family": "directional",
+                        "command_presence": "has_submit_command",
+                        "command_reference_presence": "command_no_reference",
+                        "submit_command_states": "ACKED",
+                        "row_count": 3,
+                        "order_count": 2,
+                    },
+                ],
+            },
+        },
+    }
+
+    summary = mod.summarize_directional_command_flow_provenance_truth(slippage_cost)
+
+    assert summary["status"] == "current_directional_command_flow_reference_gap"
+    assert summary["smallest_missing_field"] == "current_directional_submit_command_reference_price"
+    assert summary["current_command_path_reference_gap"] is True
+    assert summary["coverage"]["current_submit_command_reference_missing_fill_count"] == 3
+
+
 def test_slippage_cost_calibration_truth_reports_missing_slippage_reference() -> None:
     mod = load_module()
     db = {
@@ -1858,6 +1958,18 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 },
             },
         },
+        "directional_command_flow_provenance_truth": {
+            "status": "verified_current_directional_command_flow_fill_provenance_present",
+            "smallest_missing_field": None,
+            "current_command_path_reference_gap": False,
+            "coverage": {
+                "current_submit_command_fill_count": 17,
+                "current_submit_command_reference_covered_fill_count": 17,
+                "current_submit_command_reference_missing_fill_count": 0,
+                "historical_no_submit_command_fill_count": 31,
+                "historical_no_submit_command_reference_missing_fill_count": 31,
+            },
+        },
         "directional_episode_attribution_truth": {
             "status": "verified_directional_episode_edge_cost_pnl_attribution_present",
             "smallest_missing_field": None,
@@ -1979,6 +2091,17 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["slippage_reference_deterministic_backfill_fill_count"] == 62
     assert live_facts["slippage_reference_deterministic_backfill_mutates_database"] is False
     assert live_facts["slippage_reference_policy"] == "pretrade_order_or_command_reference_only"
+    assert (
+        live_facts["directional_command_flow_provenance_truth_status"]
+        == "verified_current_directional_command_flow_fill_provenance_present"
+    )
+    assert live_facts["directional_command_flow_provenance_smallest_missing_field"] is None
+    assert live_facts["directional_command_flow_current_reference_gap"] is False
+    assert live_facts["directional_command_flow_current_submit_fill_count"] == 17
+    assert live_facts["directional_command_flow_current_reference_covered_fill_count"] == 17
+    assert live_facts["directional_command_flow_current_reference_missing_fill_count"] == 0
+    assert live_facts["directional_command_flow_historical_no_submit_fill_count"] == 31
+    assert live_facts["directional_command_flow_historical_no_submit_reference_missing_fill_count"] == 31
     assert (
         live_facts["directional_episode_attribution_truth_status"]
         == "verified_directional_episode_edge_cost_pnl_attribution_present"

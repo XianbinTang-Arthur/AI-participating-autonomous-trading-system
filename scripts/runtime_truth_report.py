@@ -3316,6 +3316,122 @@ def summarize_slippage_cost_calibration_truth(
     }
 
 
+def summarize_directional_command_flow_provenance_truth(
+    slippage_cost_calibration: dict[str, Any],
+) -> dict[str, Any]:
+    slippage_proxy = as_dict(slippage_cost_calibration.get("slippage_proxy"))
+    coverage_audit = as_dict(slippage_proxy.get("coverage_audit"))
+    rows = [
+        as_dict(row)
+        for row in as_list(coverage_audit.get("by_order_path"))
+        if as_dict(row).get("strategy_family") == "directional"
+    ]
+    if not rows:
+        return {
+            "source": "slippage_cost_calibration.coverage_audit",
+            "status": "no_directional_fill_samples",
+            "smallest_missing_field": "directional_execution_fills",
+            "current_command_path_reference_gap": False,
+            "coverage": {
+                "directional_fill_count": 0,
+                "directional_order_count": 0,
+                "current_submit_command_fill_count": 0,
+                "current_submit_command_reference_covered_fill_count": 0,
+                "current_submit_command_reference_missing_fill_count": 0,
+                "historical_no_submit_command_fill_count": 0,
+                "historical_no_submit_command_reference_missing_fill_count": 0,
+            },
+            "by_order_path": [],
+        }
+
+    normalized_rows = []
+    directional_fill_count = 0
+    directional_order_count = 0
+    current_submit_command_fill_count = 0
+    current_submit_command_reference_covered_fill_count = 0
+    current_submit_command_reference_missing_fill_count = 0
+    historical_no_submit_command_fill_count = 0
+    historical_no_submit_command_reference_missing_fill_count = 0
+    for row in rows:
+        row_count = int_or_zero(row.get("row_count"))
+        order_count = int_or_zero(row.get("order_count"))
+        command_presence = row.get("command_presence")
+        coverage = row.get("coverage")
+        directional_fill_count += row_count
+        directional_order_count += order_count
+        if command_presence == "has_submit_command":
+            current_submit_command_fill_count += row_count
+            if coverage == "missing":
+                current_submit_command_reference_missing_fill_count += row_count
+            elif row.get("command_reference_presence") == "command_has_reference":
+                current_submit_command_reference_covered_fill_count += row_count
+        elif command_presence == "no_submit_command":
+            historical_no_submit_command_fill_count += row_count
+            if coverage == "missing":
+                historical_no_submit_command_reference_missing_fill_count += row_count
+        normalized_rows.append(
+            {
+                "coverage": coverage,
+                "source_system": row.get("source_system"),
+                "order_type": row.get("order_type"),
+                "time_in_force": row.get("time_in_force"),
+                "execution_style": row.get("execution_style"),
+                "order_state": row.get("order_state"),
+                "command_presence": command_presence,
+                "command_reference_presence": row.get("command_reference_presence"),
+                "submit_command_states": row.get("submit_command_states"),
+                "row_count": row_count,
+                "order_count": order_count,
+                "first_order_created_at": row.get("first_order_created_at"),
+                "last_order_created_at": row.get("last_order_created_at"),
+                "first_fill_ingestion_ts": row.get("first_fill_ingestion_ts"),
+                "last_fill_ingestion_ts": row.get("last_fill_ingestion_ts"),
+            }
+        )
+
+    current_command_path_reference_gap = current_submit_command_reference_missing_fill_count > 0
+    if current_command_path_reference_gap:
+        status = "current_directional_command_flow_reference_gap"
+        smallest_missing = "current_directional_submit_command_reference_price"
+    elif (
+        current_submit_command_fill_count > 0
+        and current_submit_command_reference_covered_fill_count > 0
+    ):
+        status = "verified_current_directional_command_flow_fill_provenance_present"
+        smallest_missing = None
+    elif historical_no_submit_command_fill_count > 0:
+        status = "historical_directional_no_submit_command_only"
+        smallest_missing = "current_directional_submit_command_fills"
+    else:
+        status = "missing_directional_command_flow_provenance_evidence"
+        smallest_missing = "directional_submit_command_or_order_path"
+
+    return {
+        "source": "slippage_cost_calibration.coverage_audit",
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "current_command_path_reference_gap": current_command_path_reference_gap,
+        "coverage": {
+            "directional_fill_count": directional_fill_count,
+            "directional_order_count": directional_order_count,
+            "current_submit_command_fill_count": current_submit_command_fill_count,
+            "current_submit_command_reference_covered_fill_count": (
+                current_submit_command_reference_covered_fill_count
+            ),
+            "current_submit_command_reference_missing_fill_count": (
+                current_submit_command_reference_missing_fill_count
+            ),
+            "historical_no_submit_command_fill_count": historical_no_submit_command_fill_count,
+            "historical_no_submit_command_reference_missing_fill_count": (
+                historical_no_submit_command_reference_missing_fill_count
+            ),
+        },
+        "coverage_classification": coverage_audit.get("classification"),
+        "reference_policy": coverage_audit.get("reference_policy"),
+        "by_order_path": normalized_rows,
+    }
+
+
 def summarize_directional_episode_attribution_truth(
     db: dict[str, Any],
     rdp_microstructure: dict[str, Any] | None = None,
@@ -3607,6 +3723,8 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     slippage_cost = as_dict(report.get("slippage_cost_calibration_truth"))
     slippage_proxy = as_dict(slippage_cost.get("slippage_proxy"))
     slippage_coverage = as_dict(slippage_proxy.get("coverage_audit"))
+    directional_command_flow = as_dict(report.get("directional_command_flow_provenance_truth"))
+    directional_command_flow_coverage = as_dict(directional_command_flow.get("coverage"))
     directional_attribution = as_dict(report.get("directional_episode_attribution_truth"))
     target_convergence_guard = as_dict(report.get("target_convergence_guard_truth"))
     target_convergence_guard_coverage = as_dict(target_convergence_guard.get("coverage"))
@@ -3734,6 +3852,28 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
             "deterministic_backfill_mutates_database"
         ),
         "slippage_reference_policy": slippage_coverage.get("reference_policy"),
+        "directional_command_flow_provenance_truth_status": directional_command_flow.get("status"),
+        "directional_command_flow_provenance_smallest_missing_field": directional_command_flow.get(
+            "smallest_missing_field"
+        ),
+        "directional_command_flow_current_reference_gap": directional_command_flow.get(
+            "current_command_path_reference_gap"
+        ),
+        "directional_command_flow_current_submit_fill_count": directional_command_flow_coverage.get(
+            "current_submit_command_fill_count"
+        ),
+        "directional_command_flow_current_reference_covered_fill_count": directional_command_flow_coverage.get(
+            "current_submit_command_reference_covered_fill_count"
+        ),
+        "directional_command_flow_current_reference_missing_fill_count": directional_command_flow_coverage.get(
+            "current_submit_command_reference_missing_fill_count"
+        ),
+        "directional_command_flow_historical_no_submit_fill_count": directional_command_flow_coverage.get(
+            "historical_no_submit_command_fill_count"
+        ),
+        "directional_command_flow_historical_no_submit_reference_missing_fill_count": (
+            directional_command_flow_coverage.get("historical_no_submit_command_reference_missing_fill_count")
+        ),
         "directional_episode_attribution_truth_status": directional_attribution.get("status"),
         "directional_episode_attribution_smallest_missing_field": directional_attribution.get(
             "smallest_missing_field"
@@ -3970,6 +4110,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         report["database_truth"],
         report["execution_science_truth"],
         report_generated_at=generated_at,
+    )
+    report["directional_command_flow_provenance_truth"] = summarize_directional_command_flow_provenance_truth(
+        report["slippage_cost_calibration_truth"],
     )
     report["directional_episode_attribution_truth"] = summarize_directional_episode_attribution_truth(
         report["database_truth"],
