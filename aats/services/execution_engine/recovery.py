@@ -8,6 +8,7 @@ from aats.bootstrap.settings import AATSSettings
 
 if TYPE_CHECKING:
     from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
+    from aats.services.ledger.persistent_lot_book import PersistentLotBookService
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshot, is_trusted_baseline_snapshot
@@ -71,6 +72,7 @@ class ExecutionRecoveryService:
         fill_outcome_repo: FillOutcomeRepository | None = None,
         event_store: object | None = None,
         obligation_cache: "ObligationHotStateCache | None" = None,
+        persistent_lot_book_service: "PersistentLotBookService | None" = None,
     ) -> None:
         self.settings = settings
         self.execution_repo = execution_repo
@@ -85,6 +87,7 @@ class ExecutionRecoveryService:
         self.reconciliation_stale_after_seconds = reconciliation_stale_after_seconds
         self.fill_outcome_repo = fill_outcome_repo
         self.event_store = event_store
+        self.persistent_lot_book_service = persistent_lot_book_service
         # Stage 6 Slice 6.5：跨进程 obligation 缓存。_cleanup_orphan_obligations
         # 修复遗留 obligation 后会 best-effort 广播到 cache，让后续进程读路径
         # 拿到的是 release 后的状态。None = 未接线（legacy path），行为退化。
@@ -237,6 +240,10 @@ class ExecutionRecoveryService:
         )
         if gap_count:
             notes.append(f"fill_gap_compensated:{gap_count}")
+        self._rebuild_persistent_lot_book_from_recovery_fills(
+            fills=fills,
+            notes=notes,
+        )
 
         # --- Orphaned decision intent detection ---
         orphaned_intent_count = self._detect_orphaned_intents()
@@ -906,6 +913,42 @@ class ExecutionRecoveryService:
         if failed_count:
             notes.append(f"fill_gap_backfill_failed:{failed_count}")
         return compensated_count
+
+    def _rebuild_persistent_lot_book_from_recovery_fills(
+        self,
+        *,
+        fills: list[FillEvent],
+        notes: list[str],
+    ) -> None:
+        if self.persistent_lot_book_service is None or not fills:
+            return
+        try:
+            self.persistent_lot_book_service.rebuild_from_fills(
+                fills=fills,
+                product_type=self.runtime_scope.product_type,
+                margin_mode=self.runtime_scope.margin_mode,
+            )
+        except Exception as exc:  # pragma: no cover - repository specific failure path
+            notes.append("persistent_lot_book_rebuild_failed:1")
+            log_event(
+                self.logger,
+                "persistent_lot_book_rebuild_from_recovery_failed",
+                level="warning",
+                fill_count=len(fills),
+                product_type=self.runtime_scope.product_type,
+                margin_mode=self.runtime_scope.margin_mode,
+                error=str(exc),
+            )
+            return
+        notes.append(f"persistent_lot_book_rebuilt:{len(fills)}")
+        log_event(
+            self.logger,
+            "persistent_lot_book_rebuilt_from_recovery_fills",
+            level="info",
+            fill_count=len(fills),
+            product_type=self.runtime_scope.product_type,
+            margin_mode=self.runtime_scope.margin_mode,
+        )
 
     @staticmethod
     def _balance_delta_event_from_replay(

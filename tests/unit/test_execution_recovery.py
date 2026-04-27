@@ -30,6 +30,26 @@ from aats.storage.strategy_runtime_repo import InMemoryStrategyRuntimeRepository
 from aats.schemas.reconciliation import ReconciliationReport
 
 
+class _RecordingPersistentLotBookService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def rebuild_from_fills(
+        self,
+        *,
+        fills: list[FillEvent],
+        product_type: str,
+        margin_mode: str,
+    ) -> None:
+        self.calls.append(
+            {
+                "fills": list(fills),
+                "product_type": product_type,
+                "margin_mode": margin_mode,
+            }
+        )
+
+
 class TestExecutionRecovery(unittest.TestCase):
     def test_recovery_tracks_structured_bundle_open_orders_without_halting(self) -> None:
         execution_repo = InMemoryExecutionRepository()
@@ -889,6 +909,98 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertEqual(close_outcome.realized_pnl_delta, Decimal("0.100"))
         self.assertIn("fill_gap_compensated:2", artifacts.status.notes)
 
+    def test_recovery_rebuilds_persistent_lot_book_when_outcomes_already_exist(self) -> None:
+        execution_repo = InMemoryExecutionRepository()
+        fill_outcome_repo = InMemoryFillOutcomeRepository()
+        now = utc_now()
+        execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_open_long",
+                decision_id="decision_open_long",
+                intent_id="intent_open_long",
+                client_order_id="client_open_long",
+                exchange_order_id="exchange_open_long",
+                symbol="BTC-USDT-SWAP",
+                venue="OKX",
+                side="buy",
+                fill_qty=Decimal("0.001"),
+                fill_price=Decimal("78000"),
+                fee_amount=Decimal("0"),
+                fee_currency="USDT",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                exposure_side="long",
+                execution_action="enter",
+                position_intent="open_long",
+                liquidity_role="taker",
+                exchange_timestamp=now,
+                ingestion_timestamp=now,
+            )
+        )
+        execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_close_long",
+                decision_id="decision_close_long",
+                intent_id="intent_close_long",
+                client_order_id="client_close_long",
+                exchange_order_id="exchange_close_long",
+                symbol="BTC-USDT-SWAP",
+                venue="OKX",
+                side="sell",
+                fill_qty=Decimal("0.001"),
+                fill_price=Decimal("78100"),
+                fee_amount=Decimal("0"),
+                fee_currency="USDT",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                exposure_side="long",
+                execution_action="exit",
+                position_intent="close_long",
+                liquidity_role="taker",
+                exchange_timestamp=now + timedelta(seconds=1),
+                ingestion_timestamp=now + timedelta(seconds=1),
+            )
+        )
+        self._service(
+            execution_repo=execution_repo,
+            fill_outcome_repo=fill_outcome_repo,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        ).recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+        lot_book_service = _RecordingPersistentLotBookService()
+        recovery = self._service(
+            execution_repo=execution_repo,
+            fill_outcome_repo=fill_outcome_repo,
+            persistent_lot_book_service=lot_book_service,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        self.assertEqual(len(lot_book_service.calls), 1)
+        call = lot_book_service.calls[0]
+        self.assertEqual(call["product_type"], "derivatives")
+        self.assertEqual(call["margin_mode"], "cross")
+        self.assertEqual(
+            [fill.fill_id for fill in call["fills"]],
+            ["fill_open_long", "fill_close_long"],
+        )
+        self.assertNotIn("fill_gap_compensated:2", artifacts.status.notes)
+        self.assertIn("persistent_lot_book_rebuilt:2", artifacts.status.notes)
+
     @staticmethod
     def _service(
         *,
@@ -900,6 +1012,7 @@ class TestExecutionRecovery(unittest.TestCase):
         reconciliation_repo: InMemoryReconciliationRepository | None = None,
         strategy_runtime_repo: InMemoryStrategyRuntimeRepository | None = None,
         fill_outcome_repo: InMemoryFillOutcomeRepository | None = None,
+        persistent_lot_book_service: object | None = None,
         settings_override: dict | None = None,
     ) -> ExecutionRecoveryService:
         payload = {
@@ -927,4 +1040,5 @@ class TestExecutionRecovery(unittest.TestCase):
             bootstrap_portfolio_from_exchange=bootstrap_portfolio_from_exchange,
             reconciliation_stale_after_seconds=settings.reconciliation_stale_after_seconds,
             fill_outcome_repo=fill_outcome_repo,
+            persistent_lot_book_service=persistent_lot_book_service,  # type: ignore[arg-type]
         )

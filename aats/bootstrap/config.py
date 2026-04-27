@@ -4590,6 +4590,15 @@ def _build_reconciliation_slice(
         recovery_policy=runtime_layering.recovery_policy,
         fill_outcome_repo=storage.fill_outcome_repo,
         event_store=storage.event_store,
+        persistent_lot_book_service=(
+            PersistentLotBookService(
+                position_lot_repo=storage.position_lot_repo,
+                lot_event_repo=storage.lot_event_repo,
+                projection_builder=LotBasedProjectionBuilder(),
+            )
+            if storage.position_lot_repo is not None and storage.lot_event_repo is not None
+            else None
+        ),
         # Stage 6 Slice 6.5：注入 obligation cache，让 _cleanup_orphan_obligations
         # 的释放结果广播到跨进程 cache。
         obligation_cache=slices.obligation_hot_state_cache,
