@@ -677,7 +677,35 @@ def test_directional_episode_attribution_truth_summarizes_edge_cost_fill_and_pnl
 
     parsed = mod.parse_db_probe(json.dumps(raw))
     rows = parsed["directional_episode_attribution"]["recent_decisions"]
-    summary = mod.summarize_directional_episode_attribution_truth(parsed)
+    rdp_microstructure = {
+        "ok": True,
+        "recent_silver_orderbook": [
+            {
+                "ts": "2026-04-27T05:45:00+08:00",
+                "bbo_samples_n": 41,
+                "books5_samples_n": 39,
+                "spread_bps_mean": "0.021",
+                "spread_bps_max": "0.090",
+                "spread_bps_min": "0.010",
+                "mid_price_last": "78800.1",
+                "quality_flags": [],
+            }
+        ],
+        "recent_silver_trade_flow": [
+            {
+                "ts": "2026-04-27T05:45:00+08:00",
+                "trade_count": 120,
+                "total_volume_ccy": "1000000",
+                "taker_buy_ratio": "0.71",
+                "trade_flow_imbalance": "0.42",
+                "vwap": "78790.0",
+                "mid_price_ref": "78800.1",
+                "vwap_minus_mid_bps": "-1.28",
+                "quality_flags": [],
+            }
+        ],
+    }
+    summary = mod.summarize_directional_episode_attribution_truth(parsed, rdp_microstructure)
 
     assert "payload" not in rows[0]
     assert summary["status"] == "verified_directional_episode_edge_cost_pnl_attribution_present"
@@ -696,8 +724,67 @@ def test_directional_episode_attribution_truth_summarizes_edge_cost_fill_and_pnl
     assert latest["latest_fill"]["slippage_reference_source"] == (
         "execution_commands.command_payload.intent.reference_price"
     )
+    assert summary["pretrade_microstructure"]["status"] == (
+        "verified_filled_directional_episode_pretrade_microstructure_present"
+    )
+    assert summary["coverage"]["decisions_with_pretrade_microstructure"] == 1
+    assert summary["coverage"]["filled_decisions_with_pretrade_microstructure"] == 1
+    assert latest["pretrade_microstructure"]["status"] == "verified_pretrade_microstructure_context_present"
+    assert latest["pretrade_microstructure"]["decision_context"]["orderbook"]["spread_bps_mean"] == "0.021"
+    assert latest["pretrade_microstructure"]["latest_fill_context"]["trade_flow"]["taker_buy_ratio"] == "0.71"
     assert "baseline_impulse_override_long" in latest["guard_decision"]["reason_codes"]
     assert "budget_scale_applied" in latest["guard_decision"]["reason_codes"]
+
+
+def test_directional_episode_attribution_truth_reports_missing_microstructure_context() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "directional_episode_attribution": {
+            "symbol": "BTC-USDT-SWAP",
+            "recent_decisions": [
+                {
+                    "allocation_id": "alloc_1",
+                    "decision_id": "decision_without_rdp_bar",
+                    "symbol": "BTC-USDT-SWAP",
+                    "created_at": "2026-04-27T06:00:00+08:00",
+                    "route_action": "override_target",
+                    "primary_family": "directional",
+                    "expected_edge_bps": "12.0",
+                    "expected_cost_bps": "8.0",
+                    "order_count": 1,
+                    "fill_count": 1,
+                    "fill_outcome_count": 0,
+                    "actual_fee_bps_sample_count": 1,
+                    "actual_fee_bps_mean": "5.0",
+                    "slippage_reference_sample_count": 1,
+                    "realized_slippage_sample_count": 1,
+                    "realized_slippage_bps_mean": "2.0",
+                    "latest_fill_ingestion_ts": "2026-04-27T06:00:03+08:00",
+                    "payload": {},
+                }
+            ],
+        },
+    }
+
+    parsed = mod.parse_db_probe(json.dumps(raw))
+    summary = mod.summarize_directional_episode_attribution_truth(
+        parsed,
+        {
+            "ok": True,
+            "recent_silver_orderbook": [],
+            "recent_silver_trade_flow": [],
+        },
+    )
+
+    assert summary["pretrade_microstructure"]["status"] == "missing_pretrade_microstructure_context"
+    assert (
+        summary["pretrade_microstructure"]["smallest_missing_field"]
+        == "rdp.silver.market_orderbook_metrics_15m.decision_bar"
+    )
+    assert summary["latest_filled_decision"]["pretrade_microstructure"]["status"] == (
+        "missing_pretrade_microstructure_context"
+    )
 
 
 def test_latest_decision_no_trade_attribution_detects_inactive_hold_only() -> None:
@@ -1476,6 +1563,16 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 "decisions_with_edge_cost": 12,
                 "decisions_with_fills": 5,
                 "decisions_with_pnl_outcome": 4,
+                "decisions_with_pretrade_microstructure": 9,
+                "filled_decisions_with_pretrade_microstructure": 5,
+            },
+            "pretrade_microstructure": {
+                "status": "verified_filled_directional_episode_pretrade_microstructure_present",
+                "smallest_missing_field": None,
+                "coverage": {
+                    "decisions_with_pretrade_microstructure": 9,
+                    "filled_decisions_with_pretrade_microstructure": 5,
+                },
             },
             "latest_filled_decision": {
                 "decision_id": "decision_episode",
@@ -1483,6 +1580,10 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 "realized_cost_proxy_bps": "6.5",
                 "fill": {"count": 2},
                 "pnl_outcome": {"realized_pnl_usdt": "-0.42"},
+                "pretrade_microstructure": {
+                    "status": "verified_pretrade_microstructure_context_present",
+                    "smallest_missing_field": None,
+                },
             },
         },
         "git": {
@@ -1543,11 +1644,21 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["directional_episode_decisions_with_edge_cost"] == 12
     assert live_facts["directional_episode_decisions_with_fills"] == 5
     assert live_facts["directional_episode_decisions_with_pnl_outcome"] == 4
+    assert live_facts["directional_episode_pretrade_microstructure_status"] == (
+        "verified_filled_directional_episode_pretrade_microstructure_present"
+    )
+    assert live_facts["directional_episode_pretrade_microstructure_smallest_missing_field"] is None
+    assert live_facts["directional_episode_decisions_with_pretrade_microstructure"] == 9
+    assert live_facts["directional_episode_filled_decisions_with_pretrade_microstructure"] == 5
     assert live_facts["latest_directional_episode_decision_id"] == "decision_episode"
     assert live_facts["latest_directional_episode_expected_net_edge_bps"] == "41.19"
     assert live_facts["latest_directional_episode_realized_cost_proxy_bps"] == "6.5"
     assert live_facts["latest_directional_episode_fill_count"] == 2
     assert live_facts["latest_directional_episode_realized_pnl_usdt"] == "-0.42"
+    assert live_facts["latest_directional_episode_pretrade_microstructure_status"] == (
+        "verified_pretrade_microstructure_context_present"
+    )
+    assert live_facts["latest_directional_episode_pretrade_microstructure_smallest_missing_field"] is None
     assert authority["authoritative_source"] == "runtime.live_runtime_facts"
     assert authority["artifact_may_override_live"] is False
 

@@ -53,6 +53,7 @@ ARTIFACT_STALE_AFTER_SECONDS = 1800
 ORDERBOOK_BRONZE_STALE_AFTER_SECONDS = 180
 ORDERBOOK_PAYLOAD_SEQUENCE_WINDOW_MINUTES = 30
 ORDERBOOK_SILVER_STALE_AFTER_SECONDS = 3600
+MICROSTRUCTURE_BAR_MATCH_MAX_AGE_SECONDS = ORDERBOOK_SILVER_STALE_AFTER_SECONDS
 ARTIFACT_COMPARE_FACTS = (
     "latest_decision_id",
     "latest_decision_route_action",
@@ -745,6 +746,35 @@ def latest_silver_trade_flow(conn):
     ).mappings().first()
     return dict(row) if row else None
 
+def recent_silver_orderbook(conn):
+    if not table_exists(conn, "silver.market_orderbook_metrics_15m"):
+        return []
+    rows = conn.execute(
+        text(
+            "select ts, bbo_samples_n, books5_samples_n, spread_bps_mean, "
+            "spread_bps_max, spread_bps_min, mid_price_last, quality_flags "
+            "from silver.market_orderbook_metrics_15m "
+            "where symbol=:symbol order by ts desc limit 192"
+        ),
+        {"symbol": symbol},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+def recent_silver_trade_flow(conn):
+    if not table_exists(conn, "silver.market_trade_flow_15m"):
+        return []
+    rows = conn.execute(
+        text(
+            "select ts, total_volume_ccy, trade_count, taker_buy_ratio, "
+            "trade_flow_imbalance, vwap, mid_price_ref, vwap_minus_mid_bps, "
+            "quality_flags "
+            "from silver.market_trade_flow_15m "
+            "where symbol=:symbol order by ts desc limit 192"
+        ),
+        {"symbol": symbol},
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
 def payload_sequence(conn):
     if not table_exists(conn, "bronze.market_orderbook_payloads"):
         return {"exists": False}
@@ -823,6 +853,8 @@ with engine.connect() as conn:
                 },
                 "latest_silver_orderbook": latest_silver_orderbook(conn),
                 "latest_silver_trade_flow": latest_silver_trade_flow(conn),
+                "recent_silver_orderbook": recent_silver_orderbook(conn),
+                "recent_silver_trade_flow": recent_silver_trade_flow(conn),
                 "payload_sequence": payload_sequence(conn),
                 "workflow": microstructure_workflow(conn),
             },
@@ -1814,6 +1846,211 @@ def classify_directional_episode_row(row: dict[str, Any]) -> str:
     return "decision_without_order"
 
 
+def _nearest_microstructure_bar_at_or_before(
+    rows: list[dict[str, Any]],
+    timestamp: Any,
+) -> tuple[dict[str, Any], int | None]:
+    target = parse_utc_timestamp(str(timestamp)) if timestamp is not None else None
+    if target is None:
+        return {}, None
+    selected: dict[str, Any] = {}
+    selected_ts: datetime | None = None
+    for row in rows:
+        row_ts = parse_utc_timestamp(str(row.get("ts"))) if row.get("ts") is not None else None
+        if row_ts is None or row_ts > target:
+            continue
+        if selected_ts is None or row_ts > selected_ts:
+            selected = row
+            selected_ts = row_ts
+    if selected_ts is None:
+        return {}, None
+    age_seconds = seconds_between(selected_ts, target)
+    if age_seconds is None or age_seconds > MICROSTRUCTURE_BAR_MATCH_MAX_AGE_SECONDS:
+        return {}, age_seconds
+    return selected, age_seconds
+
+
+def _microstructure_orderbook_context(row: dict[str, Any], age_seconds: int | None) -> dict[str, Any]:
+    if not row:
+        return {}
+    return {
+        "bar_ts": row.get("ts"),
+        "bar_age_seconds": age_seconds,
+        "spread_bps_mean": decimal_text(row.get("spread_bps_mean")),
+        "spread_bps_max": decimal_text(row.get("spread_bps_max")),
+        "spread_bps_min": decimal_text(row.get("spread_bps_min")),
+        "mid_price_last": decimal_text(row.get("mid_price_last")),
+        "bbo_samples_n": int_or_zero(row.get("bbo_samples_n")),
+        "books5_samples_n": int_or_zero(row.get("books5_samples_n")),
+        "quality_flags": as_list(row.get("quality_flags")),
+    }
+
+
+def _microstructure_trade_flow_context(row: dict[str, Any], age_seconds: int | None) -> dict[str, Any]:
+    if not row:
+        return {}
+    return {
+        "bar_ts": row.get("ts"),
+        "bar_age_seconds": age_seconds,
+        "trade_count": int_or_zero(row.get("trade_count")),
+        "total_volume_ccy": decimal_text(row.get("total_volume_ccy")),
+        "taker_buy_ratio": decimal_text(row.get("taker_buy_ratio")),
+        "trade_flow_imbalance": decimal_text(row.get("trade_flow_imbalance")),
+        "vwap": decimal_text(row.get("vwap")),
+        "mid_price_ref": decimal_text(row.get("mid_price_ref")),
+        "vwap_minus_mid_bps": decimal_text(row.get("vwap_minus_mid_bps")),
+        "quality_flags": as_list(row.get("quality_flags")),
+    }
+
+
+def _directional_episode_microstructure_context(
+    decision: dict[str, Any],
+    *,
+    rdp_microstructure: dict[str, Any],
+) -> dict[str, Any]:
+    orderbook_rows = [as_dict(row) for row in as_list(rdp_microstructure.get("recent_silver_orderbook"))]
+    trade_flow_rows = [as_dict(row) for row in as_list(rdp_microstructure.get("recent_silver_trade_flow"))]
+    decision_ts = decision.get("created_at")
+    latest_fill = as_dict(decision.get("latest_fill"))
+    fill_count = int_or_zero(as_dict(decision.get("fill")).get("count"))
+    latest_fill_ts = latest_fill.get("ingestion_ts")
+
+    decision_orderbook, decision_orderbook_age = _nearest_microstructure_bar_at_or_before(
+        orderbook_rows,
+        decision_ts,
+    )
+    decision_trade_flow, decision_trade_flow_age = _nearest_microstructure_bar_at_or_before(
+        trade_flow_rows,
+        decision_ts,
+    )
+    fill_orderbook: dict[str, Any] = {}
+    fill_orderbook_age: int | None = None
+    fill_trade_flow: dict[str, Any] = {}
+    fill_trade_flow_age: int | None = None
+    if fill_count > 0:
+        fill_orderbook, fill_orderbook_age = _nearest_microstructure_bar_at_or_before(
+            orderbook_rows,
+            latest_fill_ts,
+        )
+        fill_trade_flow, fill_trade_flow_age = _nearest_microstructure_bar_at_or_before(
+            trade_flow_rows,
+            latest_fill_ts,
+        )
+
+    checks = [
+        ("rdp.silver.market_orderbook_metrics_15m.decision_bar", bool(decision_orderbook)),
+        ("rdp.silver.market_trade_flow_15m.decision_bar", bool(decision_trade_flow)),
+    ]
+    if fill_count > 0:
+        checks.extend(
+            [
+                ("rdp.silver.market_orderbook_metrics_15m.latest_fill_bar", bool(fill_orderbook)),
+                ("rdp.silver.market_trade_flow_15m.latest_fill_bar", bool(fill_trade_flow)),
+            ]
+        )
+    smallest_missing = next((field for field, passed in checks if not passed), None)
+    status = (
+        "verified_pretrade_microstructure_context_present"
+        if smallest_missing is None
+        else "missing_pretrade_microstructure_context"
+    )
+    return {
+        "source": "rdp_microstructure_silver_15m",
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "decision_context": {
+            "decision_ts": decision_ts,
+            "orderbook": _microstructure_orderbook_context(decision_orderbook, decision_orderbook_age),
+            "trade_flow": _microstructure_trade_flow_context(decision_trade_flow, decision_trade_flow_age),
+        },
+        "latest_fill_context": (
+            {
+                "latest_fill_ts": latest_fill_ts,
+                "orderbook": _microstructure_orderbook_context(fill_orderbook, fill_orderbook_age),
+                "trade_flow": _microstructure_trade_flow_context(fill_trade_flow, fill_trade_flow_age),
+            }
+            if fill_count > 0
+            else None
+        ),
+    }
+
+
+def enrich_directional_episodes_with_microstructure(
+    decisions: list[dict[str, Any]],
+    *,
+    rdp_microstructure: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    rdp = as_dict(rdp_microstructure)
+    if not rdp.get("ok"):
+        for decision in decisions:
+            decision["pretrade_microstructure"] = {
+                "source": "rdp_microstructure_silver_15m",
+                "status": "missing_pretrade_microstructure_context",
+                "smallest_missing_field": "rdp_microstructure_truth",
+                "decision_context": {"decision_ts": decision.get("created_at"), "orderbook": {}, "trade_flow": {}},
+                "latest_fill_context": None,
+            }
+        return decisions, {
+            "source": "rdp_microstructure_silver_15m",
+            "status": "missing_pretrade_microstructure_context",
+            "smallest_missing_field": "rdp_microstructure_truth",
+            "coverage": {
+                "decisions_with_pretrade_microstructure": 0,
+                "filled_decisions_with_pretrade_microstructure": 0,
+            },
+        }
+
+    for decision in decisions:
+        decision["pretrade_microstructure"] = _directional_episode_microstructure_context(
+            decision,
+            rdp_microstructure=rdp,
+        )
+
+    decisions_with_context = sum(
+        1
+        for decision in decisions
+        if as_dict(decision.get("pretrade_microstructure")).get("status")
+        == "verified_pretrade_microstructure_context_present"
+    )
+    filled_decisions = [
+        decision for decision in decisions if int_or_zero(as_dict(decision.get("fill")).get("count")) > 0
+    ]
+    filled_decisions_with_context = sum(
+        1
+        for decision in filled_decisions
+        if as_dict(decision.get("pretrade_microstructure")).get("status")
+        == "verified_pretrade_microstructure_context_present"
+    )
+    latest_filled_context = as_dict(filled_decisions[0].get("pretrade_microstructure")) if filled_decisions else {}
+    smallest_missing = next(
+        (
+            as_dict(decision.get("pretrade_microstructure")).get("smallest_missing_field")
+            for decision in decisions
+            if as_dict(decision.get("pretrade_microstructure")).get("smallest_missing_field")
+        ),
+        None,
+    )
+    if not decisions:
+        status = "no_recent_directional_decisions"
+    elif not filled_decisions:
+        status = "no_recent_filled_directional_decisions"
+    elif filled_decisions_with_context > 0:
+        status = "verified_filled_directional_episode_pretrade_microstructure_present"
+    else:
+        status = "missing_pretrade_microstructure_context"
+    return decisions, {
+        "source": "rdp_microstructure_silver_15m",
+        "status": status,
+        "smallest_missing_field": latest_filled_context.get("smallest_missing_field") or smallest_missing,
+        "coverage": {
+            "decisions_with_pretrade_microstructure": decisions_with_context,
+            "filled_decisions_with_pretrade_microstructure": filled_decisions_with_context,
+        },
+        "latest_filled_decision_status": latest_filled_context.get("status"),
+        "latest_filled_decision_smallest_missing_field": latest_filled_context.get("smallest_missing_field"),
+    }
+
+
 def sanitize_directional_episode_attribution(
     raw: dict[str, Any] | None,
 ) -> dict[str, Any]:
@@ -2720,7 +2957,10 @@ def summarize_slippage_cost_calibration_truth(
     }
 
 
-def summarize_directional_episode_attribution_truth(db: dict[str, Any]) -> dict[str, Any]:
+def summarize_directional_episode_attribution_truth(
+    db: dict[str, Any],
+    rdp_microstructure: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     if not db.get("ok"):
         return {
             "source": "live_db",
@@ -2731,6 +2971,10 @@ def summarize_directional_episode_attribution_truth(db: dict[str, Any]) -> dict[
 
     raw = as_dict(db.get("directional_episode_attribution"))
     recent = [as_dict(item) for item in as_list(raw.get("recent_decisions"))]
+    recent, pretrade_microstructure = enrich_directional_episodes_with_microstructure(
+        recent,
+        rdp_microstructure=rdp_microstructure,
+    )
     recent_count = len(recent)
     decisions_with_edge_cost = sum(
         1
@@ -2797,7 +3041,14 @@ def summarize_directional_episode_attribution_truth(db: dict[str, Any]) -> dict[
             "decisions_with_realized_fee": decisions_with_realized_fee,
             "decisions_with_slippage_reference": decisions_with_slippage_reference,
             "decisions_with_pnl_outcome": decisions_with_pnl,
+            "decisions_with_pretrade_microstructure": as_dict(
+                pretrade_microstructure.get("coverage")
+            ).get("decisions_with_pretrade_microstructure"),
+            "filled_decisions_with_pretrade_microstructure": as_dict(
+                pretrade_microstructure.get("coverage")
+            ).get("filled_decisions_with_pretrade_microstructure"),
         },
+        "pretrade_microstructure": pretrade_microstructure,
         "latest_filled_decision": latest_filled,
         "recent_decisions": recent[:12],
     }
@@ -2959,9 +3210,16 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     slippage_coverage = as_dict(slippage_proxy.get("coverage_audit"))
     directional_attribution = as_dict(report.get("directional_episode_attribution_truth"))
     directional_attribution_coverage = as_dict(directional_attribution.get("coverage"))
+    directional_pretrade_microstructure = as_dict(directional_attribution.get("pretrade_microstructure"))
+    directional_pretrade_microstructure_coverage = as_dict(
+        directional_pretrade_microstructure.get("coverage")
+    )
     latest_directional_episode = as_dict(directional_attribution.get("latest_filled_decision"))
     latest_directional_episode_fill = as_dict(latest_directional_episode.get("fill"))
     latest_directional_episode_pnl = as_dict(latest_directional_episode.get("pnl_outcome"))
+    latest_directional_episode_pretrade_microstructure = as_dict(
+        latest_directional_episode.get("pretrade_microstructure")
+    )
     dashboard = ((report.get("runtime") or {}).get("dashboard_bundle") or {})
     git = report.get("git") or {}
     health = report.get("deployment_health") or {}
@@ -3069,6 +3327,16 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "directional_episode_decisions_with_pnl_outcome": directional_attribution_coverage.get(
             "decisions_with_pnl_outcome"
         ),
+        "directional_episode_pretrade_microstructure_status": directional_pretrade_microstructure.get("status"),
+        "directional_episode_pretrade_microstructure_smallest_missing_field": (
+            directional_pretrade_microstructure.get("smallest_missing_field")
+        ),
+        "directional_episode_decisions_with_pretrade_microstructure": (
+            directional_pretrade_microstructure_coverage.get("decisions_with_pretrade_microstructure")
+        ),
+        "directional_episode_filled_decisions_with_pretrade_microstructure": (
+            directional_pretrade_microstructure_coverage.get("filled_decisions_with_pretrade_microstructure")
+        ),
         "latest_directional_episode_decision_id": latest_directional_episode.get("decision_id"),
         "latest_directional_episode_expected_net_edge_bps": latest_directional_episode.get("expected_net_edge_bps"),
         "latest_directional_episode_realized_cost_proxy_bps": latest_directional_episode.get(
@@ -3076,6 +3344,12 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_directional_episode_fill_count": latest_directional_episode_fill.get("count"),
         "latest_directional_episode_realized_pnl_usdt": latest_directional_episode_pnl.get("realized_pnl_usdt"),
+        "latest_directional_episode_pretrade_microstructure_status": (
+            latest_directional_episode_pretrade_microstructure.get("status")
+        ),
+        "latest_directional_episode_pretrade_microstructure_smallest_missing_field": (
+            latest_directional_episode_pretrade_microstructure.get("smallest_missing_field")
+        ),
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),
         "effective_operating_mode_status": (dashboard.get("effective_operating_mode") or {}).get("status"),
         "profile_auto_control_effective": (dashboard.get("profile_auto_control_effective") or {}).get("value"),
@@ -3253,6 +3527,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     )
     report["directional_episode_attribution_truth"] = summarize_directional_episode_attribution_truth(
         report["database_truth"],
+        report["rdp_microstructure_truth"],
     )
     report["runtime"]["ai_timeout_active_blocker"] = False
     runtime_mode = report["runtime"]["dashboard_bundle"].get("effective_operating_mode", {})
