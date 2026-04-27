@@ -83,6 +83,7 @@ IMPULSE_CHASE_GUARD_CODE_MARKERS = (
     "impulse_entry_extreme_chase_unconfirmed",
 )
 OKX_HEDGE_SCALE_IN_MISMATCH_REASON = "okx_leg_action_mismatch_with_position_intent"
+CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE = "execution_command_missing_for_created_order"
 OKX_HEDGE_SCALE_IN_CODE_MARKERS = {
     "aats/schemas/execution.py": (
         "def position_intent_matches_leg_intent",
@@ -421,6 +422,88 @@ with engine.connect() as conn:
 
     def count_row_with_windows(table_sql, params):
         return dict(conn.execute(text(table_sql), params).mappings().first() or {})
+
+    created_no_command_root_cause = "execution_command_missing_for_created_order"
+    execution_orders_missing_submit_command_counts = count_row_with_windows(
+        "select count(*) as total, "
+        "       count(*) filter (where created_at >= now() - interval '24 hour') as last_24h, "
+        "       count(*) filter (where created_at >= now() - interval '1 hour') as last_1h, "
+        "       max(created_at) as latest_created_at "
+        "from execution_orders o "
+        "where o.symbol = :symbol "
+        "  and o.strategy_family = 'directional' "
+        "  and o.state in ('CREATED', 'SUBMITTING') "
+        "  and o.venue_order_id is null "
+        "  and not exists ("
+        "      select 1 from execution_commands c "
+        "      where c.order_id = o.order_id and c.command_type = 'submit'"
+        "  )",
+        {"symbol": symbol},
+    )
+    order_states_missing_submit_command_counts = count_row_with_windows(
+        "select count(*) as total, "
+        "       count(*) filter (where s.created_at >= now() - interval '24 hour') as last_24h, "
+        "       count(*) filter (where s.created_at >= now() - interval '1 hour') as last_1h, "
+        "       max(s.created_at) as latest_created_at "
+        "from order_states s "
+        "where s.symbol = :symbol "
+        "  and s.strategy_family = 'directional' "
+        "  and s.status in ('CREATED', 'SUBMITTING') "
+        "  and s.exchange_order_id is null "
+        "  and not exists ("
+        "      select 1 from execution_orders o "
+        "      join execution_commands c on c.order_id = o.order_id and c.command_type = 'submit' "
+        "      where o.client_order_id = s.client_order_id"
+        "  )",
+        {"symbol": symbol},
+    )
+    latest_created_no_command_execution_order_rows = conn.execute(text(
+        "select o.created_at, o.updated_at, o.order_id, o.client_order_id, o.decision_id, "
+        "       o.state, o.position_intent, o.side, o.pos_side, o.strategy_family, "
+        "       count(c.command_id) as command_count "
+        "from execution_orders o "
+        "left join execution_commands c on c.order_id = o.order_id "
+        "where o.symbol = :symbol "
+        "  and o.strategy_family = 'directional' "
+        "  and o.state in ('CREATED', 'SUBMITTING') "
+        "  and o.venue_order_id is null "
+        "  and not exists ("
+        "      select 1 from execution_commands submit_c "
+        "      where submit_c.order_id = o.order_id and submit_c.command_type = 'submit'"
+        "  ) "
+        "group by o.created_at, o.updated_at, o.order_id, o.client_order_id, o.decision_id, "
+        "         o.state, o.position_intent, o.side, o.pos_side, o.strategy_family "
+        "order by o.created_at desc limit 5"
+    ), {"symbol": symbol}).mappings().all()
+    latest_created_no_command_order_state_rows = conn.execute(text(
+        "select s.created_at, s.last_update_ts, s.client_order_id, s.decision_id, "
+        "       s.status, s.strategy_family "
+        "from order_states s "
+        "where s.symbol = :symbol "
+        "  and s.strategy_family = 'directional' "
+        "  and s.status in ('CREATED', 'SUBMITTING') "
+        "  and s.exchange_order_id is null "
+        "  and not exists ("
+        "      select 1 from execution_orders o "
+        "      join execution_commands c on c.order_id = o.order_id and c.command_type = 'submit' "
+        "      where o.client_order_id = s.client_order_id"
+        "  ) "
+        "order by s.created_at desc limit 5"
+    ), {"symbol": symbol}).mappings().all()
+    created_no_command_directional_order = {
+        "symbol": symbol,
+        "root_cause": created_no_command_root_cause,
+        "execution_order_missing_submit_command_counts": execution_orders_missing_submit_command_counts,
+        "order_state_missing_submit_command_counts": order_states_missing_submit_command_counts,
+        "latest_execution_order_rows": [
+            dict(row)
+            for row in latest_created_no_command_execution_order_rows
+        ],
+        "latest_order_state_rows": [
+            dict(row)
+            for row in latest_created_no_command_order_state_rows
+        ],
+    }
 
     okx_scale_in_history_counts = count_row_with_windows(
         "select count(*) as total, "
@@ -964,6 +1047,7 @@ print(json.dumps({
     "directional_episode_attribution": directional_episode_attribution,
     "target_convergence_guard": target_convergence_guard,
     "directional_impulse_chase_guard": directional_impulse_chase_guard,
+    "created_no_command_directional_order": created_no_command_directional_order,
     "okx_hedge_scale_in_intent": okx_hedge_scale_in_intent,
 }, default=str, sort_keys=True))
 """
@@ -3470,6 +3554,94 @@ def summarize_okx_hedge_scale_in_intent_truth(
     }
 
 
+def summarize_created_no_command_directional_order_truth(
+    db: dict[str, Any],
+    git: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    raw = as_dict(db.get("created_no_command_directional_order"))
+    if not db.get("ok"):
+        return {
+            "status": "missing_database_truth",
+            "smallest_missing_field": "database_truth",
+            "root_cause": CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE,
+            "report_generated_at": report_generated_at,
+            "interpretation": "database probe did not return authoritative created/no-command order facts",
+        }
+    if not raw:
+        return {
+            "status": "missing_created_no_command_directional_order_probe",
+            "smallest_missing_field": "database_truth.created_no_command_directional_order",
+            "root_cause": CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE,
+            "report_generated_at": report_generated_at,
+            "interpretation": "runtime truth report lacks historical created/no-command order coverage",
+        }
+
+    execution_counts = as_dict(raw.get("execution_order_missing_submit_command_counts"))
+    order_state_counts = as_dict(raw.get("order_state_missing_submit_command_counts"))
+    execution_total = int_or_zero(execution_counts.get("total"))
+    order_state_total = int_or_zero(order_state_counts.get("total"))
+    missing_total = max(execution_total, order_state_total)
+    missing_24h = max(
+        int_or_zero(execution_counts.get("last_24h")),
+        int_or_zero(order_state_counts.get("last_24h")),
+    )
+    missing_1h = max(
+        int_or_zero(execution_counts.get("last_1h")),
+        int_or_zero(order_state_counts.get("last_1h")),
+    )
+    deployed_matches_windows = git.get("deployed_matches_windows")
+
+    status = "verified_no_created_no_command_directional_orders"
+    smallest_missing_field = None
+    interpretation = (
+        "no current directional CREATED/SUBMITTING order without a submit command is present; "
+        "historical recovery task is stale unless new runtime evidence appears"
+    )
+    if deployed_matches_windows is False:
+        status = "deployment_mismatch_created_no_command_truth_not_authoritative"
+        smallest_missing_field = "deployed_head_matches_windows_head"
+        interpretation = "runtime may not be running the local created/no-command truth probe"
+    elif missing_1h > 0:
+        status = "active_created_no_command_directional_order"
+        smallest_missing_field = CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE
+        interpretation = "a recent directional CREATED/SUBMITTING order still lacks a submit command"
+    elif missing_total > 0:
+        status = "historical_created_no_command_directional_order_still_present"
+        smallest_missing_field = CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE
+        interpretation = (
+            "a historical directional CREATED/SUBMITTING order without submit command remains in persisted state"
+        )
+
+    latest_created_at = first_present(
+        execution_counts.get("latest_created_at"),
+        order_state_counts.get("latest_created_at"),
+    )
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing_field,
+        "root_cause": raw.get("root_cause") or CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE,
+        "report_generated_at": report_generated_at,
+        "deployed_matches_windows": deployed_matches_windows,
+        "coverage": {
+            "missing_total": missing_total,
+            "missing_24h": missing_24h,
+            "missing_1h": missing_1h,
+            "execution_order_missing_total": execution_total,
+            "execution_order_missing_24h": int_or_zero(execution_counts.get("last_24h")),
+            "execution_order_missing_1h": int_or_zero(execution_counts.get("last_1h")),
+            "order_state_missing_total": order_state_total,
+            "order_state_missing_24h": int_or_zero(order_state_counts.get("last_24h")),
+            "order_state_missing_1h": int_or_zero(order_state_counts.get("last_1h")),
+            "latest_created_at": latest_created_at,
+        },
+        "latest_execution_order_rows": as_list(raw.get("latest_execution_order_rows")),
+        "latest_order_state_rows": as_list(raw.get("latest_order_state_rows")),
+        "interpretation": interpretation,
+    }
+
+
 def summarize_microstructure_table(
     raw: dict[str, Any],
     *,
@@ -4410,6 +4582,12 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     okx_hedge_scale_in_intent = as_dict(report.get("okx_hedge_scale_in_intent_truth"))
     okx_hedge_scale_in_intent_code = as_dict(okx_hedge_scale_in_intent.get("code"))
     okx_hedge_scale_in_intent_coverage = as_dict(okx_hedge_scale_in_intent.get("coverage"))
+    created_no_command_directional_order = as_dict(
+        report.get("created_no_command_directional_order_truth")
+    )
+    created_no_command_directional_order_coverage = as_dict(
+        created_no_command_directional_order.get("coverage")
+    )
     directional_attribution_coverage = as_dict(directional_attribution.get("coverage"))
     directional_pretrade_microstructure = as_dict(directional_attribution.get("pretrade_microstructure"))
     directional_pretrade_microstructure_coverage = as_dict(
@@ -4638,6 +4816,28 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "okx_hedge_scale_in_intent_latest_mismatch_created_at": (
             okx_hedge_scale_in_intent.get("latest_mismatch_created_at")
+        ),
+        "created_no_command_directional_order_truth_status": created_no_command_directional_order.get("status"),
+        "created_no_command_directional_order_smallest_missing_field": (
+            created_no_command_directional_order.get("smallest_missing_field")
+        ),
+        "created_no_command_directional_order_deployed_matches_windows": (
+            created_no_command_directional_order.get("deployed_matches_windows")
+        ),
+        "created_no_command_directional_order_root_cause": created_no_command_directional_order.get(
+            "root_cause"
+        ),
+        "created_no_command_directional_order_missing_total": (
+            created_no_command_directional_order_coverage.get("missing_total")
+        ),
+        "created_no_command_directional_order_missing_24h": (
+            created_no_command_directional_order_coverage.get("missing_24h")
+        ),
+        "created_no_command_directional_order_missing_1h": (
+            created_no_command_directional_order_coverage.get("missing_1h")
+        ),
+        "created_no_command_directional_order_latest_created_at": (
+            created_no_command_directional_order_coverage.get("latest_created_at")
         ),
         "directional_episode_recent_decision_count": directional_attribution_coverage.get("recent_decision_count"),
         "directional_episode_decisions_with_edge_cost": directional_attribution_coverage.get(
@@ -4915,6 +5115,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         report["database_truth"],
         report["git"],
         okx_hedge_scale_in_code_markers(repo_root),
+        report_generated_at=generated_at,
+    )
+    report["created_no_command_directional_order_truth"] = summarize_created_no_command_directional_order_truth(
+        report["database_truth"],
+        report["git"],
         report_generated_at=generated_at,
     )
     report["runtime"]["ai_timeout_active_blocker"] = False

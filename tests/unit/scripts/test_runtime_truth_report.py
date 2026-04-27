@@ -178,6 +178,8 @@ def test_db_probe_executable_directional_query_excludes_hold_current_notional() 
     assert "directional_impulse_chase_guard" in mod.DB_PROBE
     assert mod.OKX_HEDGE_SCALE_IN_MISMATCH_REASON in mod.DB_PROBE
     assert "okx_hedge_scale_in_intent" in mod.DB_PROBE
+    assert mod.CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE in mod.DB_PROBE
+    assert "created_no_command_directional_order" in mod.DB_PROBE
     assert (
         "status not in ('FILLED', 'CANCELED', 'REJECTED', 'BLOCKED', 'DRY_RUN', 'FAILED', 'EXPIRED')"
         in mod.DB_PROBE
@@ -2111,6 +2113,112 @@ def test_project_live_runtime_facts_exposes_okx_hedge_scale_in_truth() -> None:
     assert live_facts["okx_hedge_scale_in_intent_mismatch_24h"] == 150
     assert live_facts["okx_hedge_scale_in_intent_mismatch_1h"] == 0
     assert live_facts["okx_hedge_scale_in_open_leg_total"] == 151
+
+
+def test_created_no_command_directional_order_truth_reports_verified_absence() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "created_no_command_directional_order": {
+            "root_cause": mod.CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE,
+            "execution_order_missing_submit_command_counts": {
+                "total": 0,
+                "last_24h": 0,
+                "last_1h": 0,
+                "latest_created_at": None,
+            },
+            "order_state_missing_submit_command_counts": {
+                "total": 0,
+                "last_24h": 0,
+                "last_1h": 0,
+                "latest_created_at": None,
+            },
+            "latest_execution_order_rows": [],
+            "latest_order_state_rows": [],
+        },
+    }
+
+    summary = mod.summarize_created_no_command_directional_order_truth(
+        db,
+        {"deployed_matches_windows": True},
+        report_generated_at="2026-04-27T13:00:32Z",
+    )
+
+    assert summary["status"] == "verified_no_created_no_command_directional_orders"
+    assert summary["smallest_missing_field"] is None
+    assert summary["root_cause"] == mod.CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE
+    assert summary["coverage"]["missing_total"] == 0
+    assert summary["coverage"]["missing_1h"] == 0
+
+
+def test_created_no_command_directional_order_truth_reports_active_gap() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "created_no_command_directional_order": {
+            "root_cause": mod.CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE,
+            "execution_order_missing_submit_command_counts": {
+                "total": 1,
+                "last_24h": 1,
+                "last_1h": 1,
+                "latest_created_at": "2026-04-27 20:58:00+08:00",
+            },
+            "order_state_missing_submit_command_counts": {
+                "total": 1,
+                "last_24h": 1,
+                "last_1h": 1,
+                "latest_created_at": "2026-04-27 20:58:00+08:00",
+            },
+            "latest_execution_order_rows": [{"order_id": "order-1"}],
+            "latest_order_state_rows": [{"client_order_id": "client-1"}],
+        },
+    }
+
+    summary = mod.summarize_created_no_command_directional_order_truth(
+        db,
+        {"deployed_matches_windows": True},
+        report_generated_at="2026-04-27T13:00:32Z",
+    )
+
+    assert summary["status"] == "active_created_no_command_directional_order"
+    assert summary["smallest_missing_field"] == mod.CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE
+    assert summary["coverage"]["missing_total"] == 1
+    assert summary["coverage"]["missing_1h"] == 1
+    assert summary["latest_execution_order_rows"] == [{"order_id": "order-1"}]
+
+
+def test_project_live_runtime_facts_exposes_created_no_command_directional_order_truth() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {"ok": True, "latest_decision": {}, "latest_executable_directional_decision": {}},
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+        "created_no_command_directional_order_truth": {
+            "status": "verified_no_created_no_command_directional_orders",
+            "smallest_missing_field": None,
+            "root_cause": mod.CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE,
+            "deployed_matches_windows": True,
+            "coverage": {
+                "missing_total": 0,
+                "missing_24h": 0,
+                "missing_1h": 0,
+                "latest_created_at": None,
+            },
+        },
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["created_no_command_directional_order_truth_status"] == (
+        "verified_no_created_no_command_directional_orders"
+    )
+    assert live_facts["created_no_command_directional_order_root_cause"] == (
+        mod.CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE
+    )
+    assert live_facts["created_no_command_directional_order_missing_total"] == 0
+    assert live_facts["created_no_command_directional_order_missing_1h"] == 0
 
 
 def test_artifact_last_known_is_non_authoritative_when_live_fact_differs(tmp_path: Path) -> None:
