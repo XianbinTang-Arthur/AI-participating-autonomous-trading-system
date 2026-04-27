@@ -132,6 +132,39 @@ def test_rdp_microstructure_payload_sequence_groups_by_unique_scope() -> None:
     assert "coalesce(channel, '') as channel" in probe
 
 
+def test_gateway_health_probe_falls_back_to_wsl_localhost(monkeypatch) -> None:
+    mod = load_module()
+
+    monkeypatch.setattr(
+        mod,
+        "fetch_json_url",
+        lambda url, timeout=10: {
+            "ok": False,
+            "status": None,
+            "json": None,
+            "error": "<urlopen error [SSL: WRONG_VERSION_NUMBER]>",
+        },
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_command",
+        lambda args, timeout=30, stdin=None, cwd=None: {
+            "ok": True,
+            "returncode": 0,
+            "stdout": '{"status":"ok","process_role":"gateway"}',
+            "stderr": "",
+        },
+    )
+
+    health = mod.gateway_health_probe("https://127.0.0.1:8011", "Ubuntu")
+
+    assert health["ok"] is True
+    assert health["status"] == 200
+    assert health["json"] == {"status": "ok", "process_role": "gateway"}
+    assert health["probe_source"] == "wsl_localhost_fallback"
+    assert health["fallback_from_error"] == "<urlopen error [SSL: WRONG_VERSION_NUMBER]>"
+
+
 def test_db_probe_executable_directional_query_excludes_hold_current_notional() -> None:
     mod = load_module()
 

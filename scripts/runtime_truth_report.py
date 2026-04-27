@@ -2081,6 +2081,56 @@ def fetch_json_url(url: str, *, timeout: int = 10) -> dict[str, Any]:
         return fetched | {"ok": False, "json": None, "error": f"invalid_json:{exc.msg}"}
 
 
+def wsl_fetch_json_url(distro: str, url: str, *, timeout: int = 10) -> dict[str, Any]:
+    completed = run_command(
+        ["wsl", "-d", distro, "--", "bash", "-lc", f"curl -kfsS {shlex.quote(url)}"],
+        timeout=timeout + 5,
+    )
+    if not completed["ok"]:
+        return {
+            "ok": False,
+            "status": None,
+            "body": completed.get("stdout") or "",
+            "json": None,
+            "error": completed.get("stderr") or f"curl_exit_{completed.get('returncode')}",
+        }
+    body = completed["stdout"]
+    try:
+        return {
+            "ok": True,
+            "status": 200,
+            "body": redact_secret_text(body),
+            "json": json.loads(body),
+        }
+    except json.JSONDecodeError as exc:
+        return {
+            "ok": False,
+            "status": 200,
+            "body": redact_secret_text(body),
+            "json": None,
+            "error": f"invalid_json:{exc.msg}",
+        }
+
+
+def gateway_health_probe(api_base: str, distro: str) -> dict[str, Any]:
+    url = f"{api_base.rstrip('/')}/healthz"
+    direct = fetch_json_url(url, timeout=10)
+    if direct.get("ok") and direct.get("json") is not None:
+        return direct | {"probe_source": "windows_api_base"}
+    fallback = wsl_fetch_json_url(distro, url, timeout=10)
+    if fallback.get("ok") and fallback.get("json") is not None:
+        return fallback | {
+            "probe_source": "wsl_localhost_fallback",
+            "fallback_from_error": direct.get("error"),
+            "fallback_from_status": direct.get("status"),
+        }
+    return direct | {
+        "probe_source": "windows_api_base",
+        "wsl_fallback_error": fallback.get("error"),
+        "wsl_fallback_status": fallback.get("status"),
+    }
+
+
 def dashboard_bundle_probe(api_base: str) -> dict[str, Any]:
     query = urlencode(
         [
@@ -2798,7 +2848,7 @@ def git_truth(repo_root: Path, distro: str, wsl_project: str) -> dict[str, Any]:
 
 
 def deployment_health(api_base: str, distro: str) -> dict[str, Any]:
-    health = fetch_json_url(f"{api_base.rstrip('/')}/healthz", timeout=10)
+    health = gateway_health_probe(api_base, distro)
     docker_ps = run_command(
         ["wsl", "-d", distro, "--", "docker", "ps", "--format", "{{.Names}}\t{{.Status}}"],
         timeout=30,
