@@ -171,6 +171,30 @@ with engine.connect() as conn:
             "from decision_audit_records "
             "where decision_id = :decision_id order by audit_revision_id desc limit 1"
         ), {"decision_id": decision_id}).mappings().first()
+        execution_order_terminal_no_fill_summary = conn.execute(
+            text(
+                "select "
+                "string_agg(distinct coalesce(state, 'null'), ',' order by coalesce(state, 'null')) as states, "
+                "string_agg(distinct coalesce(source_system, 'null'), ',' order by coalesce(source_system, 'null')) as source_systems, "
+                "string_agg(distinct coalesce(execution_style, 'null'), ',' order by coalesce(execution_style, 'null')) as execution_styles, "
+                "string_agg(distinct coalesce(position_intent, 'null'), ',' order by coalesce(position_intent, 'null')) as position_intents "
+                "from execution_orders "
+                "where decision_id = :decision_id "
+                "and state in ('FAILED', 'REJECTED', 'CANCELED', 'BLOCKED', 'EXPIRED', 'DRY_RUN')"
+            ),
+            {"decision_id": decision_id},
+        ).mappings().first() or {}
+        order_state_terminal_no_fill_summary = conn.execute(
+            text(
+                "select "
+                "string_agg(distinct coalesce(status, 'null'), ',' order by coalesce(status, 'null')) as statuses, "
+                "string_agg(distinct coalesce(position_intent, 'null'), ',' order by coalesce(position_intent, 'null')) as position_intents "
+                "from order_states "
+                "where decision_id = :decision_id "
+                "and status in ('FAILED', 'REJECTED', 'CANCELED', 'BLOCKED', 'EXPIRED', 'DRY_RUN')"
+            ),
+            {"decision_id": decision_id},
+        ).mappings().first() or {}
         counts = {
             "execution_orders": int(conn.execute(
                 text("select count(*) from execution_orders where decision_id = :decision_id"),
@@ -203,6 +227,10 @@ with engine.connect() as conn:
                 ),
                 {"decision_id": decision_id},
             ).scalar()),
+            "execution_orders_terminal_no_fill_states": execution_order_terminal_no_fill_summary.get("states"),
+            "execution_orders_terminal_no_fill_source_systems": execution_order_terminal_no_fill_summary.get("source_systems"),
+            "execution_orders_terminal_no_fill_execution_styles": execution_order_terminal_no_fill_summary.get("execution_styles"),
+            "execution_orders_terminal_no_fill_position_intents": execution_order_terminal_no_fill_summary.get("position_intents"),
             "execution_commands": int(conn.execute(
                 text(
                     "select count(*) from execution_commands c "
@@ -248,6 +276,8 @@ with engine.connect() as conn:
                 ),
                 {"decision_id": decision_id},
             ).scalar()),
+            "order_states_terminal_no_fill_statuses": order_state_terminal_no_fill_summary.get("statuses"),
+            "order_states_terminal_no_fill_position_intents": order_state_terminal_no_fill_summary.get("position_intents"),
             "execution_fills": int(conn.execute(
                 text("select count(*) from execution_fills where decision_id = :decision_id"),
                 {"decision_id": decision_id},
@@ -1389,6 +1419,31 @@ def compact_unique(values: list[Any], *, limit: int = 16) -> list[str]:
     return compacted
 
 
+def split_aggregate_values(value: Any, *, limit: int = 16) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        values = list(value)
+    else:
+        values = str(value).split(",")
+    return compact_unique([str(item).strip() for item in values], limit=limit)
+
+
+def terminal_no_fill_reason_from_states(states: list[str]) -> str:
+    normalized = {state.upper() for state in states}
+    if "BLOCKED" in normalized:
+        return "terminal_order_blocked_before_fill"
+    if normalized & {"REJECTED", "FAILED"}:
+        return "terminal_order_failed_or_rejected_before_fill"
+    if "CANCELED" in normalized:
+        return "terminal_order_canceled_before_fill"
+    if "EXPIRED" in normalized:
+        return "terminal_order_expired_before_fill"
+    if "DRY_RUN" in normalized:
+        return "terminal_order_dry_run_no_fill_expected"
+    return "terminal_order_surface_without_fill"
+
+
 def collect_reason_codes(payload: dict[str, Any], *, limit: int = 24) -> list[str]:
     """Collect stable reason-code strings without returning raw payload bodies."""
 
@@ -2009,6 +2064,54 @@ def summarize_execution_truth_chain(
         )
         and any((db_order_count, db_order_state_count))
     )
+    terminal_execution_order_states = split_aggregate_values(
+        execution_chain.get("db_execution_order_terminal_no_fill_states"),
+        limit=8,
+    )
+    terminal_order_state_statuses = split_aggregate_values(
+        execution_chain.get("db_order_state_terminal_no_fill_statuses"),
+        limit=8,
+    )
+    terminal_no_fill_states = compact_unique(
+        terminal_execution_order_states + terminal_order_state_statuses,
+        limit=8,
+    )
+    terminal_no_fill_explanation = None
+    if order_surface_terminal_no_fill:
+        terminal_no_fill_explanation = {
+            "classification": "terminal_order_surface_without_fill",
+            "reason": terminal_no_fill_reason_from_states(terminal_no_fill_states),
+            "terminal_states": terminal_no_fill_states,
+            "execution_order_terminal_states": terminal_execution_order_states,
+            "order_state_terminal_statuses": terminal_order_state_statuses,
+            "terminal_source_systems": split_aggregate_values(
+                execution_chain.get("db_execution_order_terminal_no_fill_source_systems"),
+                limit=8,
+            ),
+            "terminal_execution_styles": split_aggregate_values(
+                execution_chain.get("db_execution_order_terminal_no_fill_execution_styles"),
+                limit=8,
+            ),
+            "terminal_position_intents": compact_unique(
+                split_aggregate_values(
+                    execution_chain.get("db_execution_order_terminal_no_fill_position_intents"),
+                    limit=8,
+                )
+                + split_aggregate_values(
+                    execution_chain.get("db_order_state_terminal_no_fill_position_intents"),
+                    limit=8,
+                ),
+                limit=8,
+            ),
+            "execution_order_count": db_order_count,
+            "order_state_count": db_order_state_count,
+            "terminal_execution_order_count": db_execution_order_terminal_no_fill_count,
+            "terminal_order_state_count": db_order_state_terminal_no_fill_count,
+            "created_or_submitting_execution_order_count": db_execution_order_created_or_submitting_count,
+            "created_or_submitting_order_state_count": db_order_state_created_or_submitting_count,
+            "fill_surface_present": has_fill_surface,
+            "operator_summary": "all_visible_order_surfaces_are_terminal_no_fill",
+        }
     zero_delta = (
         decimal_is_zero(requested_delta_position_qty)
         and decimal_is_zero(composed_delta_position_qty)
@@ -2119,6 +2222,7 @@ def summarize_execution_truth_chain(
         "smallest_missing_field": missing_fields[0] if missing_fields else None,
         "missing_fields": missing_fields,
         "submission_gap_root_cause": submission_gap_root_cause,
+        "terminal_no_fill_explanation": terminal_no_fill_explanation,
         "evidence": evidence,
     }
 
@@ -2153,6 +2257,18 @@ def summarize_latest_decision(
         "db_execution_order_terminal_no_fill_count": int(
             counts.get("execution_orders_terminal_no_fill") or 0
         ),
+        "db_execution_order_terminal_no_fill_states": counts.get(
+            "execution_orders_terminal_no_fill_states"
+        ),
+        "db_execution_order_terminal_no_fill_source_systems": counts.get(
+            "execution_orders_terminal_no_fill_source_systems"
+        ),
+        "db_execution_order_terminal_no_fill_execution_styles": counts.get(
+            "execution_orders_terminal_no_fill_execution_styles"
+        ),
+        "db_execution_order_terminal_no_fill_position_intents": counts.get(
+            "execution_orders_terminal_no_fill_position_intents"
+        ),
         "db_execution_command_count": int(counts.get("execution_commands") or 0),
         "db_execution_submit_command_count": int(counts.get("execution_submit_commands") or 0),
         "db_order_state_count": int(counts.get("order_states") or 0),
@@ -2164,6 +2280,12 @@ def summarize_latest_decision(
         ),
         "db_order_state_terminal_no_fill_count": int(
             counts.get("order_states_terminal_no_fill") or 0
+        ),
+        "db_order_state_terminal_no_fill_statuses": counts.get(
+            "order_states_terminal_no_fill_statuses"
+        ),
+        "db_order_state_terminal_no_fill_position_intents": counts.get(
+            "order_states_terminal_no_fill_position_intents"
         ),
         "db_fill_count": int(counts.get("execution_fills") or 0),
         "db_fill_via_order_count": int(counts.get("execution_fills_via_orders") or 0),
@@ -4631,7 +4753,10 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     no_trade = latest.get("no_trade_attribution") if isinstance(latest.get("no_trade_attribution"), dict) else {}
+    latest_truth_chain = latest.get("execution_truth_chain") or {}
+    latest_terminal_no_fill = as_dict(latest_truth_chain.get("terminal_no_fill_explanation"))
     executable_truth_chain = latest_executable_directional.get("execution_truth_chain") or {}
+    executable_terminal_no_fill = as_dict(executable_truth_chain.get("terminal_no_fill_explanation"))
 
     return {
         "source": "live_runtime",
@@ -4650,21 +4775,19 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_decision_no_trade_classification": no_trade.get("classification"),
         "latest_decision_is_current_no_trade": no_trade.get("is_current_no_trade"),
-        "latest_decision_execution_truth_status": (
-            latest.get("execution_truth_chain") or {}
-        ).get("status"),
-        "latest_decision_order_expected": (
-            latest.get("execution_truth_chain") or {}
-        ).get("order_expected"),
-        "latest_decision_fill_expected": (
-            latest.get("execution_truth_chain") or {}
-        ).get("fill_expected"),
-        "latest_decision_position_lifecycle_status": (
-            latest.get("execution_truth_chain") or {}
-        ).get("position_lifecycle_status"),
-        "latest_decision_truth_chain_smallest_missing_field": (
-            latest.get("execution_truth_chain") or {}
-        ).get("smallest_missing_field"),
+        "latest_decision_execution_truth_status": latest_truth_chain.get("status"),
+        "latest_decision_order_expected": latest_truth_chain.get("order_expected"),
+        "latest_decision_fill_expected": latest_truth_chain.get("fill_expected"),
+        "latest_decision_position_lifecycle_status": latest_truth_chain.get("position_lifecycle_status"),
+        "latest_decision_truth_chain_smallest_missing_field": latest_truth_chain.get("smallest_missing_field"),
+        "latest_decision_terminal_no_fill_classification": latest_terminal_no_fill.get("classification"),
+        "latest_decision_terminal_no_fill_reason": latest_terminal_no_fill.get("reason"),
+        "latest_decision_terminal_no_fill_states": latest_terminal_no_fill.get("terminal_states"),
+        "latest_decision_terminal_no_fill_source_systems": latest_terminal_no_fill.get("terminal_source_systems"),
+        "latest_decision_terminal_no_fill_execution_styles": latest_terminal_no_fill.get("terminal_execution_styles"),
+        "latest_decision_terminal_no_fill_position_intents": latest_terminal_no_fill.get("terminal_position_intents"),
+        "latest_decision_terminal_no_fill_order_count": latest_terminal_no_fill.get("execution_order_count"),
+        "latest_decision_terminal_no_fill_order_state_count": latest_terminal_no_fill.get("order_state_count"),
         "latest_executable_directional_decision_id": latest_executable_directional.get("decision_id"),
         "latest_executable_directional_route_action": latest_executable_directional.get("route_action"),
         "latest_executable_directional_created_at": latest_executable_directional.get("created_at"),
@@ -4679,6 +4802,28 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_executable_directional_submission_gap_root_cause": executable_truth_chain.get(
             "submission_gap_root_cause",
+        ),
+        "latest_executable_directional_terminal_no_fill_classification": executable_terminal_no_fill.get(
+            "classification",
+        ),
+        "latest_executable_directional_terminal_no_fill_reason": executable_terminal_no_fill.get("reason"),
+        "latest_executable_directional_terminal_no_fill_states": executable_terminal_no_fill.get(
+            "terminal_states",
+        ),
+        "latest_executable_directional_terminal_no_fill_source_systems": executable_terminal_no_fill.get(
+            "terminal_source_systems",
+        ),
+        "latest_executable_directional_terminal_no_fill_execution_styles": executable_terminal_no_fill.get(
+            "terminal_execution_styles",
+        ),
+        "latest_executable_directional_terminal_no_fill_position_intents": executable_terminal_no_fill.get(
+            "terminal_position_intents",
+        ),
+        "latest_executable_directional_terminal_no_fill_order_count": executable_terminal_no_fill.get(
+            "execution_order_count",
+        ),
+        "latest_executable_directional_terminal_no_fill_order_state_count": executable_terminal_no_fill.get(
+            "order_state_count",
         ),
         "portfolio_allocation_decisions": db.get("portfolio_allocation_decisions") if db.get("ok") else None,
         "execution_fills": db.get("execution_fills") if db.get("ok") else None,

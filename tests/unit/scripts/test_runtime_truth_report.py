@@ -1784,12 +1784,18 @@ def test_terminal_failed_order_without_fill_does_not_expect_fill_surface() -> No
             "db_execution_order_created_or_submitting_count": 0,
             "db_execution_order_submitted_or_later_count": 1,
             "db_execution_order_terminal_no_fill_count": 1,
+            "db_execution_order_terminal_no_fill_states": "BLOCKED",
+            "db_execution_order_terminal_no_fill_source_systems": "semantic_dup_snapshot_blocked",
+            "db_execution_order_terminal_no_fill_execution_styles": "semantic_duplicate_snapshot_blocked",
+            "db_execution_order_terminal_no_fill_position_intents": "scale_in_long",
             "db_execution_command_count": 0,
             "db_execution_submit_command_count": 0,
             "db_order_state_count": 1,
             "db_order_state_created_or_submitting_count": 0,
             "db_order_state_submitted_or_later_count": 1,
             "db_order_state_terminal_no_fill_count": 1,
+            "db_order_state_terminal_no_fill_statuses": "BLOCKED",
+            "db_order_state_terminal_no_fill_position_intents": "scale_in_long",
             "db_fill_count": 0,
             "db_fill_via_order_count": 0,
             "legacy_fill_event_count": 0,
@@ -1818,6 +1824,16 @@ def test_terminal_failed_order_without_fill_does_not_expect_fill_surface() -> No
     assert truth_chain["position_lifecycle_status"] == "no_position_lifecycle_transition_expected"
     assert truth_chain["smallest_missing_field"] is None
     assert truth_chain["missing_fields"] == []
+    explanation = truth_chain["terminal_no_fill_explanation"]
+    assert explanation["classification"] == "terminal_order_surface_without_fill"
+    assert explanation["reason"] == "terminal_order_blocked_before_fill"
+    assert explanation["terminal_states"] == ["BLOCKED"]
+    assert explanation["terminal_source_systems"] == ["semantic_dup_snapshot_blocked"]
+    assert explanation["terminal_execution_styles"] == ["semantic_duplicate_snapshot_blocked"]
+    assert explanation["terminal_position_intents"] == ["scale_in_long"]
+    assert explanation["execution_order_count"] == 1
+    assert explanation["order_state_count"] == 1
+    assert explanation["fill_surface_present"] is False
 
 
 def test_permission_root_cause_missing_evidence_degrades_safely() -> None:
@@ -2348,6 +2364,23 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                 "route_action": "advisory_only",
                 "symbol": "BTC-USDT-SWAP",
                 "primary_family": "independent",
+                "execution_truth_chain": {
+                    "status": "verified_terminal_order_no_fill_expected",
+                    "order_expected": True,
+                    "fill_expected": False,
+                    "position_lifecycle_status": "no_position_lifecycle_transition_expected",
+                    "smallest_missing_field": None,
+                    "terminal_no_fill_explanation": {
+                        "classification": "terminal_order_surface_without_fill",
+                        "reason": "terminal_order_blocked_before_fill",
+                        "terminal_states": ["BLOCKED"],
+                        "terminal_source_systems": ["semantic_dup_snapshot_blocked"],
+                        "terminal_execution_styles": ["semantic_duplicate_snapshot_blocked"],
+                        "terminal_position_intents": ["scale_in_long"],
+                        "execution_order_count": 1,
+                        "order_state_count": 1,
+                    },
+                },
             },
             "latest_executable_directional_decision": {
                 "decision_id": "decision_exec",
@@ -2362,6 +2395,16 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                     "position_lifecycle_status": "position_lifecycle_transition_evidence_present",
                     "smallest_missing_field": None,
                     "submission_gap_root_cause": None,
+                    "terminal_no_fill_explanation": {
+                        "classification": "terminal_order_surface_without_fill",
+                        "reason": "terminal_order_blocked_before_fill",
+                        "terminal_states": ["BLOCKED"],
+                        "terminal_source_systems": ["semantic_dup_snapshot_blocked"],
+                        "terminal_execution_styles": ["semantic_duplicate_snapshot_blocked"],
+                        "terminal_position_intents": ["scale_in_short"],
+                        "execution_order_count": 1,
+                        "order_state_count": 1,
+                    },
                 },
             },
         },
@@ -2536,12 +2579,45 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     )
 
     assert live_facts["latest_decision_id"] == "decision_new"
+    assert live_facts["latest_decision_terminal_no_fill_classification"] == (
+        "terminal_order_surface_without_fill"
+    )
+    assert live_facts["latest_decision_terminal_no_fill_reason"] == "terminal_order_blocked_before_fill"
+    assert live_facts["latest_decision_terminal_no_fill_states"] == ["BLOCKED"]
+    assert live_facts["latest_decision_terminal_no_fill_source_systems"] == [
+        "semantic_dup_snapshot_blocked"
+    ]
+    assert live_facts["latest_decision_terminal_no_fill_execution_styles"] == [
+        "semantic_duplicate_snapshot_blocked"
+    ]
+    assert live_facts["latest_decision_terminal_no_fill_position_intents"] == ["scale_in_long"]
+    assert live_facts["latest_decision_terminal_no_fill_order_count"] == 1
+    assert live_facts["latest_decision_terminal_no_fill_order_state_count"] == 1
     assert live_facts["latest_executable_directional_decision_id"] == "decision_exec"
     assert live_facts["latest_executable_directional_execution_truth_status"] == "verified_execution_surface_present"
     assert live_facts["latest_executable_directional_order_expected"] is True
     assert live_facts["latest_executable_directional_fill_expected"] is True
     assert live_facts["latest_executable_directional_truth_chain_smallest_missing_field"] is None
     assert live_facts["latest_executable_directional_submission_gap_root_cause"] is None
+    assert live_facts["latest_executable_directional_terminal_no_fill_classification"] == (
+        "terminal_order_surface_without_fill"
+    )
+    assert (
+        live_facts["latest_executable_directional_terminal_no_fill_reason"]
+        == "terminal_order_blocked_before_fill"
+    )
+    assert live_facts["latest_executable_directional_terminal_no_fill_states"] == ["BLOCKED"]
+    assert live_facts["latest_executable_directional_terminal_no_fill_source_systems"] == [
+        "semantic_dup_snapshot_blocked"
+    ]
+    assert live_facts["latest_executable_directional_terminal_no_fill_execution_styles"] == [
+        "semantic_duplicate_snapshot_blocked"
+    ]
+    assert live_facts["latest_executable_directional_terminal_no_fill_position_intents"] == [
+        "scale_in_short"
+    ]
+    assert live_facts["latest_executable_directional_terminal_no_fill_order_count"] == 1
+    assert live_facts["latest_executable_directional_terminal_no_fill_order_state_count"] == 1
     assert live_facts["portfolio_allocation_decisions"] == 11
     assert live_facts["active_live_carrier"] == "independent"
     assert live_facts["execution_command_flow_enabled"] is True
