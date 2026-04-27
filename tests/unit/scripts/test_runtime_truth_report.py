@@ -559,6 +559,11 @@ def test_slippage_cost_calibration_truth_accepts_command_intent_reference_price(
     assert coverage_audit["missing_reference_fills_with_submit_command"] == 0
     assert coverage_audit["missing_reference_fills_without_submit_command"] == 56
     assert coverage_audit["covered_reference_fills_with_command_reference"] == 12
+    assert coverage_audit["deterministic_backfill_status"] == "blocked_no_persisted_pretrade_reference_price"
+    assert coverage_audit["deterministic_backfill_fill_count"] == 56
+    assert coverage_audit["deterministic_backfill_mutates_database"] is False
+    assert coverage_audit["reference_policy"] == "pretrade_order_or_command_reference_only"
+    assert "post-trade prices" in coverage_audit["deterministic_backfill_reason"]
     assert coverage_audit["by_order_path"][0]["source_system"] == "local_order_manager"
     assert coverage_audit["by_order_path"][0]["row_count"] == 56
 
@@ -1744,6 +1749,13 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
                     "missing_reference_fills_with_submit_command": 0,
                     "missing_reference_fills_without_submit_command": 62,
                     "covered_reference_fills_with_command_reference": 0,
+                    "deterministic_backfill_status": "blocked_no_persisted_pretrade_reference_price",
+                    "deterministic_backfill_reason": (
+                        "historical no-submit-command fills have no persisted pre-trade reference price"
+                    ),
+                    "deterministic_backfill_fill_count": 62,
+                    "deterministic_backfill_mutates_database": False,
+                    "reference_policy": "pretrade_order_or_command_reference_only",
                 },
             },
         },
@@ -1843,6 +1855,12 @@ def test_runtime_fact_authority_points_to_live_runtime_facts() -> None:
     assert live_facts["slippage_missing_reference_fills_with_submit_command"] == 0
     assert live_facts["slippage_missing_reference_fills_without_submit_command"] == 62
     assert live_facts["slippage_covered_reference_fills_with_command_reference"] == 0
+    assert live_facts["slippage_reference_deterministic_backfill_status"] == (
+        "blocked_no_persisted_pretrade_reference_price"
+    )
+    assert live_facts["slippage_reference_deterministic_backfill_fill_count"] == 62
+    assert live_facts["slippage_reference_deterministic_backfill_mutates_database"] is False
+    assert live_facts["slippage_reference_policy"] == "pretrade_order_or_command_reference_only"
     assert (
         live_facts["directional_episode_attribution_truth_status"]
         == "verified_directional_episode_edge_cost_pnl_attribution_present"

@@ -3053,6 +3053,31 @@ def summarize_slippage_cost_calibration_truth(
         reference_coverage_classification = "missing_reference_price_coverage_no_submit_command_no_current_coverage"
     else:
         reference_coverage_classification = "reference_price_coverage_unknown"
+    deterministic_backfill_status = "not_required"
+    deterministic_backfill_reason = None
+    deterministic_backfill_fill_count = 0
+    deterministic_backfill_mutates_database = False
+    if reference_coverage_classification == "missing_reference_price_coverage_is_no_submit_command_path":
+        deterministic_backfill_status = "blocked_no_persisted_pretrade_reference_price"
+        deterministic_backfill_reason = (
+            "historical no-submit-command fills have no persisted order, order_state, or execution_command "
+            "pre-trade reference price; reference must not be inferred from fill or post-trade prices"
+        )
+        deterministic_backfill_fill_count = missing_reference_fills_without_submit_command
+    elif reference_coverage_classification == "missing_reference_price_coverage_no_submit_command_no_current_coverage":
+        deterministic_backfill_status = "blocked_no_command_path_reference_coverage"
+        deterministic_backfill_reason = (
+            "missing no-submit-command fills exist and no current command-reference covered fills are available "
+            "to prove the forward collection path"
+        )
+        deterministic_backfill_fill_count = missing_reference_fills_without_submit_command
+    elif reference_coverage_classification == "current_command_path_reference_gap_possible":
+        deterministic_backfill_status = "blocked_current_command_path_reference_gap"
+        deterministic_backfill_reason = (
+            "fills with submit commands still lack persisted pre-trade reference prices; fix the live command "
+            "truth path before attempting historical classification"
+        )
+        deterministic_backfill_fill_count = missing_reference_fills_with_submit_command
 
     return {
         "source": "live_db_and_rdp_microstructure",
@@ -3116,6 +3141,11 @@ def summarize_slippage_cost_calibration_truth(
                 "missing_reference_fills_with_submit_command": missing_reference_fills_with_submit_command,
                 "missing_reference_fills_without_submit_command": missing_reference_fills_without_submit_command,
                 "covered_reference_fills_with_command_reference": covered_reference_fills_with_command_reference,
+                "deterministic_backfill_status": deterministic_backfill_status,
+                "deterministic_backfill_reason": deterministic_backfill_reason,
+                "deterministic_backfill_fill_count": deterministic_backfill_fill_count,
+                "deterministic_backfill_mutates_database": deterministic_backfill_mutates_database,
+                "reference_policy": "pretrade_order_or_command_reference_only",
                 "by_order_path": reference_coverage_rows,
             },
         },
@@ -3530,6 +3560,19 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "slippage_covered_reference_fills_with_command_reference": slippage_coverage.get(
             "covered_reference_fills_with_command_reference"
         ),
+        "slippage_reference_deterministic_backfill_status": slippage_coverage.get(
+            "deterministic_backfill_status"
+        ),
+        "slippage_reference_deterministic_backfill_reason": slippage_coverage.get(
+            "deterministic_backfill_reason"
+        ),
+        "slippage_reference_deterministic_backfill_fill_count": slippage_coverage.get(
+            "deterministic_backfill_fill_count"
+        ),
+        "slippage_reference_deterministic_backfill_mutates_database": slippage_coverage.get(
+            "deterministic_backfill_mutates_database"
+        ),
+        "slippage_reference_policy": slippage_coverage.get("reference_policy"),
         "directional_episode_attribution_truth_status": directional_attribution.get("status"),
         "directional_episode_attribution_smallest_missing_field": directional_attribution.get(
             "smallest_missing_field"
