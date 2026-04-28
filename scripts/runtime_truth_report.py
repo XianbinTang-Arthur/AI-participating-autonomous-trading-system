@@ -5232,6 +5232,136 @@ def summarize_directional_episode_attribution_truth(
     }
 
 
+def summarize_latest_decision_fill_feasibility_truth(
+    db: dict[str, Any],
+    directional_attribution: dict[str, Any],
+    execution_science: dict[str, Any],
+) -> dict[str, Any]:
+    if not db.get("ok"):
+        return {
+            "source": "live_db_directional_episode_attribution_and_rdp_microstructure",
+            "ok": False,
+            "status": "live_db_unavailable",
+            "smallest_missing_field": "database_truth",
+        }
+
+    latest = as_dict(db.get("latest_decision"))
+    latest_decision_id = latest.get("decision_id")
+    if not latest_decision_id:
+        return {
+            "source": "live_db_directional_episode_attribution_and_rdp_microstructure",
+            "ok": True,
+            "status": "missing_latest_decision_truth",
+            "smallest_missing_field": "database_truth.latest_decision.decision_id",
+        }
+
+    truth_chain = as_dict(latest.get("execution_truth_chain"))
+    no_trade = as_dict(latest.get("no_trade_attribution"))
+    primary_candidate = as_dict(no_trade.get("primary_family_candidate_truth"))
+    recent_decision = next(
+        (
+            as_dict(item)
+            for item in as_list(directional_attribution.get("recent_decisions"))
+            if as_dict(item).get("decision_id") == latest_decision_id
+        ),
+        {},
+    )
+    pretrade = as_dict(recent_decision.get("pretrade_microstructure"))
+    decision_context = as_dict(pretrade.get("decision_context"))
+    orderbook = as_dict(decision_context.get("orderbook"))
+    trade_flow = as_dict(decision_context.get("trade_flow"))
+    pretrade_status = pretrade.get("status")
+    pretrade_context_present = pretrade_status == "verified_pretrade_microstructure_context_present"
+    order_expected = truth_chain.get("order_expected")
+    if order_expected is None:
+        order_expected = primary_candidate.get("order_expected_from_primary_candidate")
+    fill_expected = truth_chain.get("fill_expected")
+    fill_feasibility_applicable = bool(order_expected)
+
+    if not recent_decision:
+        smallest_missing = "directional_episode_attribution.latest_decision"
+    elif pretrade_context_present:
+        smallest_missing = None
+    else:
+        smallest_missing = pretrade.get("smallest_missing_field") or "directional_episode.pretrade_microstructure"
+
+    if not fill_feasibility_applicable and pretrade_context_present:
+        status = "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context"
+    elif not fill_feasibility_applicable:
+        status = "no_order_fill_feasibility_not_applicable_missing_pretrade_context"
+    elif pretrade_context_present:
+        status = "verified_order_expected_pretrade_fill_feasibility_context_present"
+    else:
+        status = "missing_order_expected_pretrade_fill_feasibility_context"
+
+    return {
+        "source": "live_db_directional_episode_attribution_and_rdp_microstructure",
+        "ok": True,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "decision_id": latest_decision_id,
+        "created_at": latest.get("created_at") or recent_decision.get("created_at"),
+        "symbol": latest.get("symbol") or recent_decision.get("symbol"),
+        "route_action": latest.get("route_action") or recent_decision.get("route_action"),
+        "primary_family": latest.get("primary_family") or recent_decision.get("primary_family"),
+        "order_expected": order_expected,
+        "fill_expected": fill_expected,
+        "fill_feasibility_applicable": fill_feasibility_applicable,
+        "execution_truth_status": truth_chain.get("status"),
+        "no_order": {
+            "classification": no_trade.get("classification"),
+            "primary_blocker": no_trade.get("primary_blocker"),
+            "final_blockers": no_trade.get("final_blockers"),
+            "primary_candidate_truth_status": primary_candidate.get("status"),
+            "primary_candidate_order_expected": primary_candidate.get(
+                "order_expected_from_primary_candidate"
+            ),
+            "primary_candidate_no_order_root_cause": primary_candidate.get("no_order_root_cause"),
+            "primary_candidate_smallest_missing_field": primary_candidate.get("smallest_missing_field"),
+        },
+        "pretrade_microstructure": {
+            "source": pretrade.get("source"),
+            "status": pretrade_status,
+            "smallest_missing_field": pretrade.get("smallest_missing_field"),
+            "orderbook": {
+                "bar_ts": orderbook.get("bar_ts"),
+                "bar_age_seconds": orderbook.get("bar_age_seconds"),
+                "bbo_samples_n": orderbook.get("bbo_samples_n"),
+                "books5_samples_n": orderbook.get("books5_samples_n"),
+                "mid_price_last": orderbook.get("mid_price_last"),
+                "spread_bps_mean": orderbook.get("spread_bps_mean"),
+                "spread_bps_max": orderbook.get("spread_bps_max"),
+                "spread_bps_min": orderbook.get("spread_bps_min"),
+                "quality_flags": orderbook.get("quality_flags"),
+            },
+            "trade_flow": {
+                "bar_ts": trade_flow.get("bar_ts"),
+                "bar_age_seconds": trade_flow.get("bar_age_seconds"),
+                "trade_count": trade_flow.get("trade_count"),
+                "total_volume_ccy": trade_flow.get("total_volume_ccy"),
+                "taker_buy_ratio": trade_flow.get("taker_buy_ratio"),
+                "trade_flow_imbalance": trade_flow.get("trade_flow_imbalance"),
+                "vwap_minus_mid_bps": trade_flow.get("vwap_minus_mid_bps"),
+                "quality_flags": trade_flow.get("quality_flags"),
+            },
+        },
+        "execution_science": {
+            "status": execution_science.get("status"),
+            "fill_feasibility_truth_status": execution_science.get("fill_feasibility_truth_status"),
+            "orderbook_sequence_validation_status": as_dict(
+                execution_science.get("payload_sequence")
+            ).get("status"),
+            "silver_orderbook_status": as_dict(execution_science.get("silver_orderbook")).get("status"),
+            "silver_trade_flow_status": as_dict(execution_science.get("silver_trade_flow")).get("status"),
+        },
+        "interpretation": {
+            "fill_feasibility_applicable_when_order_expected": True,
+            "no_order_decision": "fill feasibility is not expected to produce an OKX order/fill",
+            "pretrade_context": "silver orderbook and trade-flow context still explains the decision-time market state",
+        },
+    }
+
+
 def summarize_directional_spike_reversion_truth(
     directional_attribution: dict[str, Any],
 ) -> dict[str, Any]:
@@ -5595,6 +5725,19 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     directional_command_flow = as_dict(report.get("directional_command_flow_provenance_truth"))
     directional_command_flow_coverage = as_dict(directional_command_flow.get("coverage"))
     directional_attribution = as_dict(report.get("directional_episode_attribution_truth"))
+    latest_decision_fill_feasibility = as_dict(report.get("latest_decision_fill_feasibility_truth"))
+    latest_decision_fill_feasibility_no_order = as_dict(
+        latest_decision_fill_feasibility.get("no_order")
+    )
+    latest_decision_fill_feasibility_pretrade = as_dict(
+        latest_decision_fill_feasibility.get("pretrade_microstructure")
+    )
+    latest_decision_fill_feasibility_orderbook = as_dict(
+        latest_decision_fill_feasibility_pretrade.get("orderbook")
+    )
+    latest_decision_fill_feasibility_trade_flow = as_dict(
+        latest_decision_fill_feasibility_pretrade.get("trade_flow")
+    )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
     latest_directional_spike_reversion = as_dict(directional_spike_reversion.get("latest_filled_decision"))
@@ -5823,6 +5966,55 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
             as_dict(execution_science.get("payload_sequence")).get("status")
         ),
         "fill_feasibility_truth_status": execution_science.get("fill_feasibility_truth_status"),
+        "latest_decision_fill_feasibility_truth_status": latest_decision_fill_feasibility.get("status"),
+        "latest_decision_fill_feasibility_smallest_missing_field": (
+            latest_decision_fill_feasibility.get("smallest_missing_field")
+        ),
+        "latest_decision_fill_feasibility_applicable": (
+            latest_decision_fill_feasibility.get("fill_feasibility_applicable")
+        ),
+        "latest_decision_fill_feasibility_order_expected": (
+            latest_decision_fill_feasibility.get("order_expected")
+        ),
+        "latest_decision_fill_feasibility_fill_expected": (
+            latest_decision_fill_feasibility.get("fill_expected")
+        ),
+        "latest_decision_fill_feasibility_pretrade_status": (
+            latest_decision_fill_feasibility_pretrade.get("status")
+        ),
+        "latest_decision_fill_feasibility_pretrade_smallest_missing_field": (
+            latest_decision_fill_feasibility_pretrade.get("smallest_missing_field")
+        ),
+        "latest_decision_fill_feasibility_no_order_classification": (
+            latest_decision_fill_feasibility_no_order.get("classification")
+        ),
+        "latest_decision_fill_feasibility_no_order_primary_blocker": (
+            latest_decision_fill_feasibility_no_order.get("primary_blocker")
+        ),
+        "latest_decision_fill_feasibility_orderbook_bar_age_seconds": (
+            latest_decision_fill_feasibility_orderbook.get("bar_age_seconds")
+        ),
+        "latest_decision_fill_feasibility_orderbook_bbo_samples_n": (
+            latest_decision_fill_feasibility_orderbook.get("bbo_samples_n")
+        ),
+        "latest_decision_fill_feasibility_orderbook_books5_samples_n": (
+            latest_decision_fill_feasibility_orderbook.get("books5_samples_n")
+        ),
+        "latest_decision_fill_feasibility_orderbook_spread_bps_mean": (
+            latest_decision_fill_feasibility_orderbook.get("spread_bps_mean")
+        ),
+        "latest_decision_fill_feasibility_trade_flow_bar_age_seconds": (
+            latest_decision_fill_feasibility_trade_flow.get("bar_age_seconds")
+        ),
+        "latest_decision_fill_feasibility_trade_count": (
+            latest_decision_fill_feasibility_trade_flow.get("trade_count")
+        ),
+        "latest_decision_fill_feasibility_taker_buy_ratio": (
+            latest_decision_fill_feasibility_trade_flow.get("taker_buy_ratio")
+        ),
+        "latest_decision_fill_feasibility_vwap_minus_mid_bps": (
+            latest_decision_fill_feasibility_trade_flow.get("vwap_minus_mid_bps")
+        ),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
         ),
@@ -6415,6 +6607,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["directional_episode_attribution_truth"] = summarize_directional_episode_attribution_truth(
         report["database_truth"],
         report["rdp_microstructure_truth"],
+    )
+    report["latest_decision_fill_feasibility_truth"] = summarize_latest_decision_fill_feasibility_truth(
+        report["database_truth"],
+        report["directional_episode_attribution_truth"],
+        report["execution_science_truth"],
     )
     report["directional_spike_reversion_truth"] = summarize_directional_spike_reversion_truth(
         report["directional_episode_attribution_truth"],

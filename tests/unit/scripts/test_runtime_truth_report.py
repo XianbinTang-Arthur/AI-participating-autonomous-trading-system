@@ -965,6 +965,94 @@ def test_directional_spike_reversion_truth_classifies_adverse_fill_and_reversion
     assert latest["decision_trade_flow_vwap_minus_mid_bps"] == "14.0"
 
 
+def test_latest_decision_fill_feasibility_marks_no_order_not_applicable_with_context() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "latest_decision": {
+            "decision_id": "decision_current",
+            "created_at": "2026-04-29 00:15:39+08:00",
+            "symbol": "BTC-USDT-SWAP",
+            "route_action": "advisory_only",
+            "primary_family": "directional",
+            "execution_truth_chain": {
+                "status": "verified_no_order_expected",
+                "order_expected": False,
+                "fill_expected": False,
+            },
+            "no_trade_attribution": {
+                "classification": "no_order_fill_expected_for_latest_decision",
+                "primary_blocker": "candidate_execution_incompatible",
+                "final_blockers": ["candidate_execution_incompatible", "no_execution_plan_emitted"],
+                "primary_family_candidate_truth": {
+                    "status": "primary_family_candidate_truth_present",
+                    "smallest_missing_field": "primary_candidate_order_expectation_classification",
+                    "order_expected_from_primary_candidate": None,
+                    "no_order_root_cause": None,
+                },
+            },
+        },
+    }
+    directional_attribution = {
+        "recent_decisions": [
+            {
+                "decision_id": "decision_current",
+                "created_at": "2026-04-29 00:15:39+08:00",
+                "symbol": "BTC-USDT-SWAP",
+                "route_action": "advisory_only",
+                "primary_family": "directional",
+                "pretrade_microstructure": {
+                    "source": "rdp_microstructure_silver_15m",
+                    "status": "verified_pretrade_microstructure_context_present",
+                    "smallest_missing_field": None,
+                    "decision_context": {
+                        "orderbook": {
+                            "bar_ts": "2026-04-29 00:00:00+08:00",
+                            "bar_age_seconds": 939,
+                            "bbo_samples_n": 859,
+                            "books5_samples_n": 1568,
+                            "mid_price_last": "75988.2500000000",
+                            "spread_bps_mean": "0.0132",
+                            "quality_flags": [],
+                        },
+                        "trade_flow": {
+                            "bar_ts": "2026-04-29 00:00:00+08:00",
+                            "bar_age_seconds": 939,
+                            "trade_count": 15454,
+                            "taker_buy_ratio": "0.53400222",
+                            "vwap_minus_mid_bps": "2.1660",
+                            "quality_flags": [],
+                        },
+                    },
+                },
+            },
+        ],
+    }
+    execution_science = {
+        "status": "verified_orderbook_sequence_and_silver_bar_present",
+        "fill_feasibility_truth_status": "verified_preorder_orderbook_features_available",
+        "payload_sequence": {"status": "sequence_continuous"},
+        "silver_orderbook": {"status": "verified_silver_orderbook_bar_present"},
+        "silver_trade_flow": {"status": "verified_silver_trade_flow_bar_present"},
+    }
+
+    truth = mod.summarize_latest_decision_fill_feasibility_truth(
+        db,
+        directional_attribution,
+        execution_science,
+    )
+
+    assert truth["status"] == "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context"
+    assert truth["smallest_missing_field"] is None
+    assert truth["fill_feasibility_applicable"] is False
+    assert truth["order_expected"] is False
+    assert truth["fill_expected"] is False
+    assert truth["pretrade_microstructure"]["status"] == "verified_pretrade_microstructure_context_present"
+    assert truth["pretrade_microstructure"]["orderbook"]["books5_samples_n"] == 1568
+    assert truth["pretrade_microstructure"]["trade_flow"]["trade_count"] == 15454
+    assert truth["execution_science"]["orderbook_sequence_validation_status"] == "sequence_continuous"
+
+
 def test_directional_episode_pnl_lifecycle_classifies_open_unrealized_position() -> None:
     mod = load_module()
     raw = {
@@ -2522,6 +2610,33 @@ def test_project_live_runtime_facts_exposes_primary_candidate_truth() -> None:
             },
             "latest_executable_directional_decision": {},
         },
+        "latest_decision_fill_feasibility_truth": {
+            "status": "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context",
+            "smallest_missing_field": None,
+            "order_expected": False,
+            "fill_expected": False,
+            "fill_feasibility_applicable": False,
+            "no_order": {
+                "classification": "no_order_fill_expected_for_latest_decision",
+                "primary_blocker": "candidate_execution_incompatible",
+            },
+            "pretrade_microstructure": {
+                "status": "verified_pretrade_microstructure_context_present",
+                "smallest_missing_field": None,
+                "orderbook": {
+                    "bar_age_seconds": 939,
+                    "bbo_samples_n": 859,
+                    "books5_samples_n": 1568,
+                    "spread_bps_mean": "0.0132",
+                },
+                "trade_flow": {
+                    "bar_age_seconds": 939,
+                    "trade_count": 15454,
+                    "taker_buy_ratio": "0.53400222",
+                    "vwap_minus_mid_bps": "2.1660",
+                },
+            },
+        },
         "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
         "scope": {"shadow_benchmark": "none_verified"},
         "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
@@ -2548,6 +2663,21 @@ def test_project_live_runtime_facts_exposes_primary_candidate_truth() -> None:
     assert live_facts["latest_decision_primary_candidate_global_blocker_scope"] == (
         "other_candidate_or_portfolio_level"
     )
+    assert live_facts["latest_decision_fill_feasibility_truth_status"] == (
+        "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context"
+    )
+    assert live_facts["latest_decision_fill_feasibility_applicable"] is False
+    assert live_facts["latest_decision_fill_feasibility_order_expected"] is False
+    assert live_facts["latest_decision_fill_feasibility_pretrade_status"] == (
+        "verified_pretrade_microstructure_context_present"
+    )
+    assert live_facts["latest_decision_fill_feasibility_no_order_primary_blocker"] == (
+        "candidate_execution_incompatible"
+    )
+    assert live_facts["latest_decision_fill_feasibility_orderbook_books5_samples_n"] == 1568
+    assert live_facts["latest_decision_fill_feasibility_orderbook_spread_bps_mean"] == "0.0132"
+    assert live_facts["latest_decision_fill_feasibility_trade_count"] == 15454
+    assert live_facts["latest_decision_fill_feasibility_vwap_minus_mid_bps"] == "2.1660"
 
 
 def test_execution_order_payload_status_residual_truth_classifies_non_authoritative_status() -> None:
