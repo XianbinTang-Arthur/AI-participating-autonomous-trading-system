@@ -13,6 +13,8 @@
 // 不要回退这里的默认值。
 const DEFAULT_TIMEOUT_MS = 30_000;
 export const DEFERRED_BUNDLE_TIMEOUT_MS = 45_000;
+const REQUEST_TIMEOUT_MESSAGE = "请求超时，请稍后重试。";
+const REQUEST_ABORTED_MESSAGE = "请求已取消。";
 
 export async function requestJson(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -27,7 +29,11 @@ export async function requestJson(path, options = {}) {
   // provided, which defeated the purpose of having a deadline.
   const timeoutMs = options.timeout ?? DEFAULT_TIMEOUT_MS;
   const controller = new AbortController();
-  const timeoutId = timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+  let abortMessage = null;
+  const timeoutId = timeoutMs > 0 ? setTimeout(() => {
+    abortMessage = REQUEST_TIMEOUT_MESSAGE;
+    controller.abort();
+  }, timeoutMs) : undefined;
 
   let externalAbortForwarder = null;
   if (options.signal) {
@@ -36,11 +42,12 @@ export async function requestJson(path, options = {}) {
       // fetch(signal=aborted) 会立即拒绝，但这条路径和下面 try 块的正常分支风格
       // 不对称、还要走一轮异步 reject。现在直接 throw AbortError，调用方立即感知。
       if (timeoutId !== undefined) clearTimeout(timeoutId);
-      const abortError = new Error("请求在发起前已被外部信号取消。");
-      abortError.name = "AbortError";
-      throw abortError;
+      throw createAbortError(readableAbortMessage(options.signal.reason, REQUEST_ABORTED_MESSAGE));
     }
-    externalAbortForwarder = () => controller.abort();
+    externalAbortForwarder = () => {
+      abortMessage = readableAbortMessage(options.signal.reason, REQUEST_ABORTED_MESSAGE);
+      controller.abort();
+    };
     options.signal.addEventListener("abort", externalAbortForwarder);
   }
 
@@ -61,6 +68,12 @@ export async function requestJson(path, options = {}) {
     try {
       response = await fetch(path, fetchOpts);
     } catch (fetchError) {
+      if (isAbortError(fetchError) || controller.signal.aborted) {
+        throw createAbortError(
+          abortMessage || readableAbortMessage(controller.signal.reason, REQUEST_ABORTED_MESSAGE),
+          fetchError,
+        );
+      }
       if (
         method === "GET" &&
         fetchError instanceof TypeError &&
@@ -69,7 +82,17 @@ export async function requestJson(path, options = {}) {
       ) {
         // eslint-disable-next-line no-console
         console.warn("[api-client] 网络层错误，自动重试一次", fetchError.message);
-        response = await fetch(path, fetchOpts);
+        try {
+          response = await fetch(path, fetchOpts);
+        } catch (retryError) {
+          if (isAbortError(retryError) || controller.signal.aborted) {
+            throw createAbortError(
+              abortMessage || readableAbortMessage(controller.signal.reason, REQUEST_ABORTED_MESSAGE),
+              retryError,
+            );
+          }
+          throw retryError;
+        }
       } else {
         throw fetchError;
       }
@@ -171,6 +194,30 @@ function localizePanelResults(results) {
 function localizePanelError(error) {
   if (error === null || error === undefined || error === "") return null;
   return localizeError(typeof error === "string" ? error : JSON.stringify(error));
+}
+
+function createAbortError(message, cause = null) {
+  const abortError = new Error(message || REQUEST_ABORTED_MESSAGE);
+  abortError.name = "AbortError";
+  if (cause) abortError.cause = cause;
+  return abortError;
+}
+
+function readableAbortMessage(reason, fallback) {
+  const text =
+    typeof reason === "string"
+      ? reason
+      : reason instanceof Error && typeof reason.message === "string"
+        ? reason.message
+        : "";
+  const trimmed = text.trim();
+  if (!trimmed || isRawAbortMessage(trimmed)) return fallback;
+  return localizeError(trimmed);
+}
+
+function isRawAbortMessage(message) {
+  return /^(AbortError|The operation was aborted\.?|This operation was aborted\.?|signal is aborted without reason)$/i
+    .test(message);
 }
 
 function isAbortError(error) {

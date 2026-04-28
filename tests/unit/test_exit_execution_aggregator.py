@@ -409,6 +409,53 @@ class TestExitExecutionAggregator(unittest.TestCase):
         self.assertEqual(updated_parent.child_order_ids, ["child_refresh_atomic"])
         self.assertEqual(updated_parent.aggregate_status, "WORKING")
 
+    def test_refresh_skips_terminal_historical_parents(self) -> None:
+        settings = AATSSettings.model_validate({})
+        execution_repo = InMemoryExecutionRepository()
+
+        class _FailIfTerminalChildRefsQueriedRepo(InMemoryExitExecutionRepository):
+            def child_refs_for_parent(self, *, parent_intent_id: str):
+                raise AssertionError("terminal parents should not be refreshed")
+
+        class _RecordingBatchWriter(ExitExecutionWriter):
+            def __init__(self, repo):
+                super().__init__(repo)
+                self.batch_calls = 0
+
+            def save_child_refs_and_recompute_parent(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                self.batch_calls += 1
+                return super().save_child_refs_and_recompute_parent(*args, **kwargs)
+
+        exit_repo = _FailIfTerminalChildRefsQueriedRepo()
+        parent = _make_parent(quantity="5").model_copy(
+            update={
+                "aggregate_status": "COMPLETED",
+                "remaining_dispatchable_quantity": Decimal("0"),
+                "remaining_unresolved_quantity": Decimal("0"),
+            }
+        )
+        exit_repo.save_exit_execution_intent(parent)
+        execution_repo.save_order_state(
+            _make_order_state(
+                client_order_id="child_terminal_history",
+                status="FILLED",
+                requested_qty="5",
+                filled_qty="5",
+                remaining_qty="0",
+            )
+        )
+        writer = _RecordingBatchWriter(exit_repo)
+
+        refreshed = refresh_exit_execution_intents(
+            execution_repo=execution_repo,
+            exit_execution_repo=exit_repo,
+            settings=settings,
+            exit_execution_writer=writer,
+        )
+
+        self.assertEqual(refreshed, [])
+        self.assertEqual(writer.batch_calls, 0)
+
 
 class TestExitExecutionKindConstants(unittest.TestCase):
     """Task 142 锚点：防止 aggregator 的 review kind 常量和

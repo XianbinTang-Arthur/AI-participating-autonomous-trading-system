@@ -743,6 +743,12 @@ def refresh_exit_execution_intents(
     for parent in exit_execution_repo.list_exit_execution_intents():
         if not _parent_in_scope(parent=parent, scope=scope):
             continue
+        if parent.aggregate_status in _TERMINAL_PARENT_STATUSES:
+            # Terminal parents do not block resume and writer sticky semantics
+            # already prevent them from being reopened by aggregate refresh.
+            # Skipping them keeps recovery/rebaseline validation bounded to
+            # live unresolved exit work instead of rewriting historical parents.
+            continue
         child_refs = _refreshed_child_refs_for_parent(
             parent=parent,
             settings=settings,

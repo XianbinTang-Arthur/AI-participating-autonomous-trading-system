@@ -22,6 +22,30 @@ if TYPE_CHECKING:
     from aats.services.operator.query_service import OperatorQueryService
 
 
+def _rebaseline_shadow_obligations_to_sync(
+    *,
+    obligation_repo: Any,
+    reservation_repo: Any,
+) -> tuple[list[Any], dict[str, int | str | None]]:
+    all_obligations = list(obligation_repo.all_obligations())
+    obligation_count = len(all_obligations)
+    reservation_count: int | None = None
+    count_reservations = getattr(reservation_repo, "count_reservations", None)
+    if callable(count_reservations):
+        reservation_count = int(count_reservations())
+        if reservation_count >= obligation_count:
+            return [], {
+                "reason": "shadow_reservations_current",
+                "obligation_count": obligation_count,
+                "reservation_count": reservation_count,
+            }
+    return all_obligations, {
+        "reason": "shadow_reservation_backlog",
+        "obligation_count": obligation_count,
+        "reservation_count": reservation_count,
+    }
+
+
 class ReconciliationSystemQueryFacade:
     def __init__(self, owner: "OperatorQueryService") -> None:
         self.owner = owner
@@ -480,9 +504,12 @@ class ReconciliationSystemQueryFacade:
             ledger_svc = getattr(self.owner.runtime, "phase1_ledger_mirror_service", None)
             obligation_repo = getattr(self.owner.runtime, "obligation_repo", None)
             if ledger_svc is not None and obligation_repo is not None:
-                all_obligations = obligation_repo.all_obligations()
+                obligations_to_sync, sync_plan = _rebaseline_shadow_obligations_to_sync(
+                    obligation_repo=obligation_repo,
+                    reservation_repo=getattr(ledger_svc, "reservation_repo", None),
+                )
                 synced_count = 0
-                for obl in all_obligations:
+                for obl in obligations_to_sync:
                     ledger_svc.sync_obligation(obl, reason="operator_rebaseline_shadow_sync", related_fill=None)
                     synced_count += 1
                 if synced_count:
@@ -491,6 +518,15 @@ class ReconciliationSystemQueryFacade:
                         "operator.rebaseline.shadow_obligations_synced",
                         synced_count=synced_count,
                         reason=reason,
+                    )
+                elif int(sync_plan.get("obligation_count") or 0) > 0:
+                    log_event(
+                        self.owner.logger,
+                        "operator.rebaseline.shadow_obligations_sync_skipped",
+                        reason=reason,
+                        skip_reason=sync_plan.get("reason"),
+                        obligation_count=sync_plan.get("obligation_count"),
+                        reservation_count=sync_plan.get("reservation_count"),
                     )
         except Exception:
             log_event(self.owner.logger, "operator.rebaseline.shadow_obligation_sync_failed", level="warning")

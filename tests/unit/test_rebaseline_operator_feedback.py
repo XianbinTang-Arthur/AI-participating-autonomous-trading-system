@@ -6,7 +6,10 @@ from unittest.mock import Mock
 
 from aats.schemas.blocker_control import BlockerControlSnapshot, BlockerControlTask
 from aats.services.blocker_control.actions import BlockerActionService
-from aats.services.operator.reconciliation_system_queries import ReconciliationSystemQueryFacade
+from aats.services.operator.reconciliation_system_queries import (
+    ReconciliationSystemQueryFacade,
+    _rebaseline_shadow_obligations_to_sync,
+)
 
 
 class _ProxyClient:
@@ -22,6 +25,22 @@ class _FailingProxyClient:
     async def invoke(self, *, command: str, payload: dict[str, object]) -> dict[str, object]:
         _ = command, payload
         raise RuntimeError("proxy_timeout_after_remote_command")
+
+
+class _ObligationRepo:
+    def __init__(self, count: int) -> None:
+        self._obligations = [object() for _ in range(count)]
+
+    def all_obligations(self) -> list[object]:
+        return list(self._obligations)
+
+
+class _ReservationRepo:
+    def __init__(self, count: int) -> None:
+        self._count = count
+
+    def count_reservations(self) -> int:
+        return self._count
 
 
 def _blocker_snapshot() -> BlockerControlSnapshot:
@@ -163,6 +182,28 @@ class TestRebaselineOperatorFeedback(unittest.IsolatedAsyncioTestCase):
 
 
 class TestRebaselineMessage(unittest.TestCase):
+    def test_shadow_sync_plan_skips_when_reservations_are_current(self) -> None:
+        obligations, plan = _rebaseline_shadow_obligations_to_sync(
+            obligation_repo=_ObligationRepo(3),
+            reservation_repo=_ReservationRepo(3),
+        )
+
+        self.assertEqual(obligations, [])
+        self.assertEqual(plan["reason"], "shadow_reservations_current")
+        self.assertEqual(plan["obligation_count"], 3)
+        self.assertEqual(plan["reservation_count"], 3)
+
+    def test_shadow_sync_plan_syncs_all_when_backlog_exists(self) -> None:
+        obligations, plan = _rebaseline_shadow_obligations_to_sync(
+            obligation_repo=_ObligationRepo(3),
+            reservation_repo=_ReservationRepo(2),
+        )
+
+        self.assertEqual(len(obligations), 3)
+        self.assertEqual(plan["reason"], "shadow_reservation_backlog")
+        self.assertEqual(plan["obligation_count"], 3)
+        self.assertEqual(plan["reservation_count"], 2)
+
     def test_blocked_rebaseline_message_lists_actual_blockers(self) -> None:
         message = ReconciliationSystemQueryFacade._rebaseline_result_message(
             rebaseline_status="resume_blocked",

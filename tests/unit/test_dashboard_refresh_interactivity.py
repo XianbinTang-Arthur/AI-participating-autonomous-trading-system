@@ -25,6 +25,61 @@ def _run_node_module_script(script: str) -> subprocess.CompletedProcess[str]:
 
 
 class TestDashboardRefreshInteractivity(unittest.TestCase):
+    def test_request_json_timeout_uses_localized_abort_error(self) -> None:
+        script = r"""
+import { requestJson } from './aats/api/static/modules/api-client.js';
+
+globalThis.fetch = (_path, options) => new Promise((_resolve, reject) => {
+  options.signal.addEventListener('abort', () => {
+    const error = new Error('signal is aborted without reason');
+    error.name = 'AbortError';
+    reject(error);
+  });
+});
+
+try {
+  await requestJson('/slow-action', { timeout: 1 });
+  console.log(JSON.stringify({ ok: true }));
+} catch (error) {
+  console.log(JSON.stringify({
+    ok: false,
+    name: error?.name,
+    message: error?.message,
+  }));
+}
+"""
+        result = _run_node_module_script(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["name"], "AbortError")
+        self.assertEqual(payload["message"], "请求超时，请稍后重试。")
+
+    def test_request_json_external_abort_uses_localized_abort_error(self) -> None:
+        script = r"""
+import { requestJson } from './aats/api/static/modules/api-client.js';
+
+const controller = new AbortController();
+controller.abort();
+
+try {
+  await requestJson('/cancelled-action', { signal: controller.signal });
+  console.log(JSON.stringify({ ok: true }));
+} catch (error) {
+  console.log(JSON.stringify({
+    ok: false,
+    name: error?.name,
+    message: error?.message,
+  }));
+}
+"""
+        result = _run_node_module_script(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertFalse(payload["ok"])
+        self.assertEqual(payload["name"], "AbortError")
+        self.assertEqual(payload["message"], "请求已取消。")
+
     def test_rebaseline_actions_use_long_request_timeout(self) -> None:
         script = r"""
 import {
