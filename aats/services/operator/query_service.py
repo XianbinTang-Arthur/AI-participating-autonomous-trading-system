@@ -13661,7 +13661,19 @@ class OperatorQueryService:
             return False
         exchange_fill_view = fill_diff.get("exchange")
         exchange_fill_view = exchange_fill_view if isinstance(exchange_fill_view, dict) else {}
+        tolerated_historical_fill_ids: set[str] = set()
         if OperatorQueryService._report_value_has_truthy_items(exchange_fill_view):
+            tolerated_historical_fill_ids = (
+                OperatorQueryService._nonblocking_historical_exchange_fill_diff_ids(
+                    report,
+                    exchange_fill_view=exchange_fill_view,
+                )
+                or set()
+            )
+        if (
+            OperatorQueryService._report_value_has_truthy_items(exchange_fill_view)
+            and not tolerated_historical_fill_ids
+        ):
             return False
 
         balance_diff = OperatorQueryService._report_field(report, "balance_diff", {})
@@ -13689,25 +13701,93 @@ class OperatorQueryService:
             "local_open_orders_diverge_from_exchange_open_orders",
             "derivatives_local_order_missing_from_exchange_open_order_view",
         }
+        if tolerated_historical_fill_ids:
+            allowed_reasons.add("local_exchange_fill_set_diverges_from_exchange_fill_set")
         reasons = OperatorQueryService._string_set_from_report_value(
             OperatorQueryService._report_field(report, "mismatch_reasons", [])
         )
         if reasons and not reasons.issubset(allowed_reasons):
             return False
 
+        allowed_finding_reason_codes = {
+            *allowed_reasons,
+            "order_state_unknown_on_exchange",
+            "derivatives_order_state_unknown_on_exchange",
+        }
         findings = OperatorQueryService._report_field(report, "findings", [])
         if isinstance(findings, list):
             for finding in findings:
+                if OperatorQueryService._is_nonblocking_historical_fill_finding(
+                    finding,
+                    tolerated_fill_ids=tolerated_historical_fill_ids,
+                ):
+                    continue
                 reason_code = (
                     OperatorQueryService._report_field(finding, "reason_code", "")
                     if not isinstance(finding, dict)
                     else finding.get("reason_code", "")
                 )
-                if reason_code and str(reason_code).strip() not in allowed_reasons:
+                if reason_code and str(reason_code).strip() not in allowed_finding_reason_codes:
                     return False
         elif findings:
             return False
         return True
+
+    @staticmethod
+    def _nonblocking_historical_exchange_fill_diff_ids(
+        report,
+        *,
+        exchange_fill_view: dict[str, Any],
+    ) -> set[str] | None:
+        missing_on_exchange = OperatorQueryService._string_set_from_report_value(
+            exchange_fill_view.get("missing_on_exchange")
+        )
+        unexpected_on_exchange = OperatorQueryService._string_set_from_report_value(
+            exchange_fill_view.get("unexpected_on_exchange")
+        )
+        if not missing_on_exchange or unexpected_on_exchange:
+            return None
+        for key, value in exchange_fill_view.items():
+            if key in {"missing_on_exchange", "unexpected_on_exchange"}:
+                continue
+            if OperatorQueryService._report_value_has_truthy_items(value):
+                return None
+
+        findings = OperatorQueryService._report_field(report, "findings", [])
+        if not isinstance(findings, list):
+            return None
+        historical_ids = {
+            str(OperatorQueryService._report_field(finding, "scope_ref", "")).strip()
+            for finding in findings
+            if OperatorQueryService._is_nonblocking_historical_fill_finding(
+                finding,
+                tolerated_fill_ids=missing_on_exchange,
+            )
+        }
+        return missing_on_exchange if missing_on_exchange.issubset(historical_ids) else None
+
+    @staticmethod
+    def _is_nonblocking_historical_fill_finding(
+        finding,
+        *,
+        tolerated_fill_ids: set[str],
+    ) -> bool:
+        if not tolerated_fill_ids:
+            return False
+        scope_ref = str(OperatorQueryService._report_field(finding, "scope_ref", "")).strip()
+        return (
+            scope_ref in tolerated_fill_ids
+            and str(OperatorQueryService._report_field(finding, "scope_kind", "")).strip() == "fill"
+            and str(OperatorQueryService._report_field(finding, "finding_type", "")).strip()
+            == "historic_orphan_fill"
+            and str(OperatorQueryService._report_field(finding, "severity_class", "")).strip() == "info"
+            and str(OperatorQueryService._report_field(finding, "reason_code", "")).strip()
+            == "local_fill_older_than_exchange_lookback_window"
+            and not bool(OperatorQueryService._report_field(finding, "review_required", False))
+            and not bool(OperatorQueryService._report_field(finding, "halt_required", False))
+            and not bool(OperatorQueryService._report_field(finding, "blocks_resume", False))
+            and not bool(OperatorQueryService._report_field(finding, "only_reduce_required", False))
+        )
 
     @staticmethod
     def _string_set_from_report_value(value: Any) -> set[str]:
