@@ -788,6 +788,83 @@ def test_directional_command_flow_provenance_separates_current_and_legacy_paths(
     assert len(summary["by_order_path"]) == 2
 
 
+def test_depth_slippage_lifecycle_truth_marks_forward_ready_without_recent_filled_episode() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_depth_slippage_lifecycle_truth(
+        orderbook_payload_depth={
+            "status": "verified_books5_payload_depth_evidence_present",
+            "raw_payload_exposed": False,
+            "books5_payload": {
+                "payload_hash_present": True,
+                "row_checksum_present": True,
+                "exchange_sequence_id_present": True,
+            },
+            "sequence": {
+                "books5_row_count": 90,
+                "books5_sequence_gap_count": 0,
+                "diff_payload_persisted_row_count": 4486,
+            },
+            "silver_orderbook": {"books5_samples_n": 1527},
+        },
+        slippage_cost={
+            "status": "verified_slippage_cost_calibration_evidence_present",
+            "fills_total": 73,
+            "fills_24h": 0,
+            "fee": {"sample_count": 73},
+            "slippage_proxy": {
+                "sample_count": 17,
+                "coverage_audit": {
+                    "classification": "missing_reference_price_coverage_is_no_submit_command_path",
+                    "missing_reference_fills": 56,
+                    "covered_reference_fills_with_command_reference": 17,
+                    "deterministic_backfill_status": "blocked_no_persisted_pretrade_reference_price",
+                    "reference_policy": "pretrade_order_or_command_reference_only",
+                },
+            },
+        },
+        directional_command_flow={
+            "status": "verified_current_directional_command_flow_fill_provenance_present",
+            "coverage": {
+                "current_submit_command_fill_count": 17,
+                "current_submit_command_reference_covered_fill_count": 17,
+                "current_submit_command_reference_missing_fill_count": 0,
+                "historical_no_submit_command_reference_missing_fill_count": 31,
+            },
+        },
+        directional_attribution={
+            "status": "partial_directional_episode_decisions_without_fills",
+            "coverage": {
+                "recent_decision_count": 24,
+                "decisions_with_fills": 0,
+                "decisions_with_slippage_reference": 0,
+                "filled_decisions_with_pretrade_microstructure": 0,
+                "filled_decisions_with_resolved_pnl_lifecycle": 0,
+            },
+            "pnl_lifecycle": {
+                "status": "no_recent_filled_directional_decisions",
+                "smallest_missing_field": None,
+            },
+        },
+    )
+
+    assert truth["status"] == "forward_depth_ready_no_recent_directional_filled_episode"
+    assert truth["smallest_missing_field"] == (
+        "directional_episode_attribution.recent_directional_filled_decisions"
+    )
+    assert truth["raw_payload_exposed"] is False
+    assert truth["depth_readiness"]["books5_sequence_gap_count"] == 0
+    assert truth["slippage_baseline"]["slippage_proxy_sample_count"] == 17
+    assert truth["directional_command_coverage"][
+        "current_submit_command_reference_covered_fill_count"
+    ] == 17
+    assert truth["recent_directional_lifecycle_coverage"]["recent_filled_decision_count"] == 0
+    assert truth["interpretation"]["forward_depth_ready"] is True
+    assert truth["interpretation"]["existing_fill_slippage_baseline_present"] is True
+    assert truth["interpretation"]["per_recent_directional_fill_depth_lifecycle_link_present"] is False
+    assert truth["interpretation"]["does_not_claim_historical_fills_have_sidecar_payload_depth"] is True
+
+
 def test_directional_command_flow_provenance_reports_current_reference_gap() -> None:
     mod = load_module()
     slippage_cost = {
@@ -2828,6 +2905,72 @@ def test_project_live_runtime_facts_exposes_orderbook_payload_depth_truth() -> N
     assert live_facts["orderbook_payload_depth_bbo_row_count"] == 300
     assert live_facts["orderbook_payload_depth_diff_payload_persisted_row_count"] == 900
     assert live_facts["orderbook_payload_depth_silver_books5_samples_n"] == 1528
+
+
+def test_project_live_runtime_facts_exposes_depth_slippage_lifecycle_truth() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "depth_slippage_lifecycle_truth": {
+            "status": "forward_depth_ready_no_recent_directional_filled_episode",
+            "smallest_missing_field": (
+                "directional_episode_attribution.recent_directional_filled_decisions"
+            ),
+            "raw_payload_exposed": False,
+            "depth_readiness": {
+                "books5_row_count": 90,
+                "books5_sequence_gap_count": 0,
+            },
+            "slippage_baseline": {
+                "fee_sample_count": 73,
+                "slippage_proxy_sample_count": 17,
+            },
+            "directional_command_coverage": {
+                "current_submit_command_reference_covered_fill_count": 17,
+                "current_submit_command_reference_missing_fill_count": 0,
+            },
+            "recent_directional_lifecycle_coverage": {
+                "recent_filled_decision_count": 0,
+                "recent_filled_with_pretrade_microstructure": 0,
+                "recent_filled_with_resolved_pnl_lifecycle": 0,
+            },
+            "interpretation": {
+                "forward_depth_ready": True,
+                "existing_fill_slippage_baseline_present": True,
+                "per_recent_directional_fill_depth_lifecycle_link_present": False,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["depth_slippage_lifecycle_truth_status"] == (
+        "forward_depth_ready_no_recent_directional_filled_episode"
+    )
+    assert live_facts["depth_slippage_lifecycle_smallest_missing_field"] == (
+        "directional_episode_attribution.recent_directional_filled_decisions"
+    )
+    assert live_facts["depth_slippage_lifecycle_raw_payload_exposed"] is False
+    assert live_facts["depth_slippage_lifecycle_forward_depth_ready"] is True
+    assert live_facts["depth_slippage_lifecycle_existing_fill_slippage_baseline_present"] is True
+    assert live_facts["depth_slippage_lifecycle_per_recent_directional_fill_link_present"] is False
+    assert live_facts["depth_slippage_lifecycle_depth_books5_row_count"] == 90
+    assert live_facts["depth_slippage_lifecycle_depth_books5_sequence_gap_count"] == 0
+    assert live_facts["depth_slippage_lifecycle_slippage_proxy_sample_count"] == 17
+    assert live_facts["depth_slippage_lifecycle_fee_sample_count"] == 73
+    assert live_facts["depth_slippage_lifecycle_current_submit_reference_covered_fill_count"] == 17
+    assert live_facts["depth_slippage_lifecycle_current_submit_reference_missing_fill_count"] == 0
+    assert live_facts["depth_slippage_lifecycle_recent_filled_decision_count"] == 0
+    assert live_facts["depth_slippage_lifecycle_recent_filled_with_pretrade_microstructure"] == 0
+    assert live_facts["depth_slippage_lifecycle_recent_filled_with_resolved_pnl_lifecycle"] == 0
 
 
 def test_execution_order_payload_status_residual_truth_classifies_non_authoritative_status() -> None:

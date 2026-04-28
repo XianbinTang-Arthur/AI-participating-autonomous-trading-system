@@ -5392,6 +5392,158 @@ def summarize_directional_episode_attribution_truth(
     }
 
 
+def summarize_depth_slippage_lifecycle_truth(
+    *,
+    orderbook_payload_depth: dict[str, Any],
+    slippage_cost: dict[str, Any],
+    directional_command_flow: dict[str, Any],
+    directional_attribution: dict[str, Any],
+) -> dict[str, Any]:
+    depth = as_dict(orderbook_payload_depth)
+    slippage = as_dict(slippage_cost)
+    slippage_fee = as_dict(slippage.get("fee"))
+    slippage_proxy = as_dict(slippage.get("slippage_proxy"))
+    slippage_coverage = as_dict(slippage_proxy.get("coverage_audit"))
+    command_coverage = as_dict(as_dict(directional_command_flow).get("coverage"))
+    directional_coverage = as_dict(as_dict(directional_attribution).get("coverage"))
+    pnl_lifecycle = as_dict(as_dict(directional_attribution).get("pnl_lifecycle"))
+
+    depth_status = depth.get("status")
+    depth_ready = depth_status == "verified_books5_payload_depth_evidence_present"
+    slippage_status = slippage.get("status")
+    slippage_verified = slippage_status == "verified_slippage_cost_calibration_evidence_present"
+    fills_total = int_or_zero(slippage.get("fills_total"))
+    fee_samples = int_or_zero(slippage_fee.get("sample_count"))
+    slippage_samples = int_or_zero(slippage_proxy.get("sample_count"))
+    current_submit_fill_count = int_or_zero(command_coverage.get("current_submit_command_fill_count"))
+    current_submit_reference_covered_count = int_or_zero(
+        command_coverage.get("current_submit_command_reference_covered_fill_count")
+    )
+    current_submit_reference_missing_count = int_or_zero(
+        command_coverage.get("current_submit_command_reference_missing_fill_count")
+    )
+    recent_directional_decisions = int_or_zero(directional_coverage.get("recent_decision_count"))
+    recent_directional_filled_decisions = int_or_zero(directional_coverage.get("decisions_with_fills"))
+    recent_filled_with_pretrade = int_or_zero(
+        directional_coverage.get("filled_decisions_with_pretrade_microstructure")
+    )
+    recent_filled_with_slippage = int_or_zero(directional_coverage.get("decisions_with_slippage_reference"))
+    recent_filled_with_resolved_pnl = int_or_zero(
+        directional_coverage.get("filled_decisions_with_resolved_pnl_lifecycle")
+    )
+
+    checks = [
+        ("orderbook_payload_depth_truth.verified_books5_depth_evidence", depth_ready),
+        ("slippage_cost_calibration_truth.verified", slippage_verified),
+        ("execution_fills", fills_total > 0),
+        ("execution_fills.actual_fee_bps", fee_samples > 0),
+        ("slippage_cost_calibration.slippage_proxy_samples", slippage_samples > 0),
+        (
+            "directional_command_flow.current_submit_reference_covered_fill_count",
+            current_submit_reference_covered_count > 0,
+        ),
+        ("directional_episode_attribution.recent_directional_filled_decisions", recent_directional_filled_decisions > 0),
+        (
+            "directional_episode_attribution.filled_decisions_with_pretrade_microstructure",
+            recent_filled_with_pretrade > 0,
+        ),
+        (
+            "directional_episode_attribution.filled_decisions_with_resolved_pnl_lifecycle",
+            recent_filled_with_resolved_pnl > 0,
+        ),
+    ]
+    smallest_missing = next((field for field, passed in checks if not passed), None)
+
+    if not depth_ready:
+        status = "blocked_missing_orderbook_payload_depth_evidence"
+    elif not slippage_verified:
+        status = "blocked_missing_slippage_cost_calibration"
+    elif fills_total <= 0:
+        status = "no_live_fill_samples"
+    elif slippage_samples <= 0:
+        status = "blocked_missing_slippage_reference_samples"
+    elif current_submit_reference_covered_count <= 0:
+        status = "blocked_missing_current_submit_reference_coverage"
+    elif recent_directional_filled_decisions <= 0:
+        status = "forward_depth_ready_no_recent_directional_filled_episode"
+    elif recent_filled_with_pretrade <= 0:
+        status = "partial_recent_directional_fill_missing_pretrade_depth_context"
+    elif recent_filled_with_resolved_pnl <= 0:
+        status = "partial_recent_directional_fill_missing_resolved_pnl_lifecycle"
+    elif smallest_missing is None:
+        status = "verified_depth_slippage_lifecycle_coverage_present"
+    else:
+        status = "missing_depth_slippage_lifecycle_evidence"
+
+    return {
+        "source": "orderbook_payload_depth_slippage_cost_and_directional_lifecycle",
+        "ok": True,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "depth_readiness": {
+            "status": depth_status,
+            "books5_payload_hash_present": as_dict(depth.get("books5_payload")).get("payload_hash_present"),
+            "books5_row_checksum_present": as_dict(depth.get("books5_payload")).get("row_checksum_present"),
+            "books5_exchange_sequence_id_present": as_dict(depth.get("books5_payload")).get(
+                "exchange_sequence_id_present"
+            ),
+            "books5_row_count": as_dict(depth.get("sequence")).get("books5_row_count"),
+            "books5_sequence_gap_count": as_dict(depth.get("sequence")).get("books5_sequence_gap_count"),
+            "diff_payload_persisted_row_count": as_dict(depth.get("sequence")).get(
+                "diff_payload_persisted_row_count"
+            ),
+            "silver_books5_samples_n": as_dict(depth.get("silver_orderbook")).get("books5_samples_n"),
+        },
+        "slippage_baseline": {
+            "status": slippage_status,
+            "fills_total": fills_total,
+            "fills_24h": int_or_zero(slippage.get("fills_24h")),
+            "fee_sample_count": fee_samples,
+            "slippage_proxy_sample_count": slippage_samples,
+            "missing_reference_fills": int_or_zero(slippage_coverage.get("missing_reference_fills")),
+            "covered_reference_fills_with_command_reference": int_or_zero(
+                slippage_coverage.get("covered_reference_fills_with_command_reference")
+            ),
+            "reference_coverage_classification": slippage_coverage.get("classification"),
+            "deterministic_backfill_status": slippage_coverage.get("deterministic_backfill_status"),
+            "reference_policy": slippage_coverage.get("reference_policy"),
+        },
+        "directional_command_coverage": {
+            "status": as_dict(directional_command_flow).get("status"),
+            "current_submit_command_fill_count": current_submit_fill_count,
+            "current_submit_command_reference_covered_fill_count": (
+                current_submit_reference_covered_count
+            ),
+            "current_submit_command_reference_missing_fill_count": (
+                current_submit_reference_missing_count
+            ),
+            "historical_no_submit_command_reference_missing_fill_count": int_or_zero(
+                command_coverage.get("historical_no_submit_command_reference_missing_fill_count")
+            ),
+        },
+        "recent_directional_lifecycle_coverage": {
+            "directional_episode_status": as_dict(directional_attribution).get("status"),
+            "recent_decision_count": recent_directional_decisions,
+            "recent_filled_decision_count": recent_directional_filled_decisions,
+            "recent_filled_with_pretrade_microstructure": recent_filled_with_pretrade,
+            "recent_filled_with_slippage_reference": recent_filled_with_slippage,
+            "recent_filled_with_resolved_pnl_lifecycle": recent_filled_with_resolved_pnl,
+            "pnl_lifecycle_status": pnl_lifecycle.get("status"),
+            "pnl_lifecycle_smallest_missing_field": pnl_lifecycle.get("smallest_missing_field"),
+        },
+        "interpretation": {
+            "forward_depth_ready": depth_ready,
+            "existing_fill_slippage_baseline_present": slippage_verified and slippage_samples > 0,
+            "per_recent_directional_fill_depth_lifecycle_link_present": (
+                recent_filled_with_pretrade > 0 and recent_filled_with_resolved_pnl > 0
+            ),
+            "does_not_claim_historical_fills_have_sidecar_payload_depth": True,
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -5890,6 +6042,18 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     directional_command_flow = as_dict(report.get("directional_command_flow_provenance_truth"))
     directional_command_flow_coverage = as_dict(directional_command_flow.get("coverage"))
     directional_attribution = as_dict(report.get("directional_episode_attribution_truth"))
+    depth_slippage_lifecycle = as_dict(report.get("depth_slippage_lifecycle_truth"))
+    depth_slippage_lifecycle_depth = as_dict(depth_slippage_lifecycle.get("depth_readiness"))
+    depth_slippage_lifecycle_slippage = as_dict(depth_slippage_lifecycle.get("slippage_baseline"))
+    depth_slippage_lifecycle_command = as_dict(
+        depth_slippage_lifecycle.get("directional_command_coverage")
+    )
+    depth_slippage_lifecycle_recent = as_dict(
+        depth_slippage_lifecycle.get("recent_directional_lifecycle_coverage")
+    )
+    depth_slippage_lifecycle_interpretation = as_dict(
+        depth_slippage_lifecycle.get("interpretation")
+    )
     latest_decision_fill_feasibility = as_dict(report.get("latest_decision_fill_feasibility_truth"))
     latest_decision_fill_feasibility_no_order = as_dict(
         latest_decision_fill_feasibility.get("no_order")
@@ -6257,6 +6421,55 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
             "deterministic_backfill_mutates_database"
         ),
         "slippage_reference_policy": slippage_coverage.get("reference_policy"),
+        "depth_slippage_lifecycle_truth_status": depth_slippage_lifecycle.get("status"),
+        "depth_slippage_lifecycle_smallest_missing_field": (
+            depth_slippage_lifecycle.get("smallest_missing_field")
+        ),
+        "depth_slippage_lifecycle_raw_payload_exposed": depth_slippage_lifecycle.get(
+            "raw_payload_exposed"
+        ),
+        "depth_slippage_lifecycle_forward_depth_ready": (
+            depth_slippage_lifecycle_interpretation.get("forward_depth_ready")
+        ),
+        "depth_slippage_lifecycle_existing_fill_slippage_baseline_present": (
+            depth_slippage_lifecycle_interpretation.get("existing_fill_slippage_baseline_present")
+        ),
+        "depth_slippage_lifecycle_per_recent_directional_fill_link_present": (
+            depth_slippage_lifecycle_interpretation.get(
+                "per_recent_directional_fill_depth_lifecycle_link_present"
+            )
+        ),
+        "depth_slippage_lifecycle_depth_books5_row_count": (
+            depth_slippage_lifecycle_depth.get("books5_row_count")
+        ),
+        "depth_slippage_lifecycle_depth_books5_sequence_gap_count": (
+            depth_slippage_lifecycle_depth.get("books5_sequence_gap_count")
+        ),
+        "depth_slippage_lifecycle_slippage_proxy_sample_count": (
+            depth_slippage_lifecycle_slippage.get("slippage_proxy_sample_count")
+        ),
+        "depth_slippage_lifecycle_fee_sample_count": (
+            depth_slippage_lifecycle_slippage.get("fee_sample_count")
+        ),
+        "depth_slippage_lifecycle_current_submit_reference_covered_fill_count": (
+            depth_slippage_lifecycle_command.get(
+                "current_submit_command_reference_covered_fill_count"
+            )
+        ),
+        "depth_slippage_lifecycle_current_submit_reference_missing_fill_count": (
+            depth_slippage_lifecycle_command.get(
+                "current_submit_command_reference_missing_fill_count"
+            )
+        ),
+        "depth_slippage_lifecycle_recent_filled_decision_count": (
+            depth_slippage_lifecycle_recent.get("recent_filled_decision_count")
+        ),
+        "depth_slippage_lifecycle_recent_filled_with_pretrade_microstructure": (
+            depth_slippage_lifecycle_recent.get("recent_filled_with_pretrade_microstructure")
+        ),
+        "depth_slippage_lifecycle_recent_filled_with_resolved_pnl_lifecycle": (
+            depth_slippage_lifecycle_recent.get("recent_filled_with_resolved_pnl_lifecycle")
+        ),
         "directional_command_flow_provenance_truth_status": directional_command_flow.get("status"),
         "directional_command_flow_provenance_smallest_missing_field": directional_command_flow.get(
             "smallest_missing_field"
@@ -6815,6 +7028,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["directional_episode_attribution_truth"] = summarize_directional_episode_attribution_truth(
         report["database_truth"],
         report["rdp_microstructure_truth"],
+    )
+    report["depth_slippage_lifecycle_truth"] = summarize_depth_slippage_lifecycle_truth(
+        orderbook_payload_depth=report["orderbook_payload_depth_truth"],
+        slippage_cost=report["slippage_cost_calibration_truth"],
+        directional_command_flow=report["directional_command_flow_provenance_truth"],
+        directional_attribution=report["directional_episode_attribution_truth"],
     )
     report["latest_decision_fill_feasibility_truth"] = summarize_latest_decision_fill_feasibility_truth(
         report["database_truth"],
