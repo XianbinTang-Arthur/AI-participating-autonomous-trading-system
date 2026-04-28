@@ -632,17 +632,19 @@ async function runAction(path, body, successMessage, { target = null, pendingLab
     const result = await requestJson(path, { method: "POST", body });
     setFlash(state, "info", result?.message || successMessage);
     await refreshDashboard({ manual: true });
+    return { ok: true, result };
   } catch (error) {
     setFlash(state, "danger", error instanceof Error ? error.message : String(error));
     renderBanners();
+    return { ok: false, error };
   } finally {
     finishAction();
   }
 }
 
 async function runDangerousAction({ path, body, successMessage, confirmMessage, target = null, pendingLabel = "正在提交请求…" }) {
-  if (!window.confirm(confirmMessage)) return;
-  await runAction(path, body, successMessage, { target, pendingLabel });
+  if (!window.confirm(confirmMessage)) return { ok: false, canceled: true };
+  return runAction(path, body, successMessage, { target, pendingLabel });
 }
 
 

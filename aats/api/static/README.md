@@ -943,7 +943,7 @@ Trial guard 助手：
 **内部**
 - `inspectOrder(orderId)` — `GET /orders/:id` → `buildOrderDrawer` → `openDrawer`；失败 setFlash + renderBanners。
 - `inspectFill(fillId)` — `GET /fills/:id` → `buildFillDrawer` → `openDrawer`。
-- `resolveStuckOrder(orderId)` — `runDangerousAction({ path: "/orders/:id/resolve-stuck-submission", body: { reason: "ui_resolve_stuck_submission", operator_confirmation: "resolve_claimed_submit_as_failed:<orderId>" }, successMessage, confirmMessage })`。
+- `resolveStuckOrder(orderId)` — 先用 `reason: "ui_resolve_stuck_submission"` 提交普通卡单恢复；若后端返回 `claimed_submit_requires_operator_confirmation`，再展示 CLAIMED 提交命令专用二次确认并带 `operator_confirmation: "resolve_claimed_submit_as_failed:<orderId>"` 重试。
 
 **actionHandlers 映射**
 - `inspect-order / inspect-fill / resolve-stuck-order / load-more-orders / collapse-orders / load-more-fills / collapse-fills`。
