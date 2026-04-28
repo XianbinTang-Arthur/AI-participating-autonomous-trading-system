@@ -1575,6 +1575,100 @@ def test_directional_hold_current_zero_delta_has_verified_no_order_expectation()
     assert summarized["no_trade_attribution"]["classification"] == (
         "execution_activity_or_positive_allocation_present"
     )
+    primary_candidate_truth = summarized["no_trade_attribution"]["primary_family_candidate_truth"]
+    assert primary_candidate_truth["status"] == "verified_primary_candidate_hold_current_zero_delta_no_order_expected"
+    assert primary_candidate_truth["primary_family"] == "directional"
+    assert primary_candidate_truth["candidate_execution_compatible"] is True
+    assert primary_candidate_truth["order_expected_from_primary_candidate"] is False
+    assert primary_candidate_truth["no_order_root_cause"] == "primary_candidate_hold_current_zero_delta"
+
+
+def test_primary_family_candidate_truth_separates_directional_hold_from_global_blocker() -> None:
+    mod = load_module()
+    latest = {
+        "allocation_id": "alloc-1",
+        "decision_id": "decision-1",
+        "symbol": "BTC-USDT-SWAP",
+        "route_action": "advisory_only",
+        "primary_family": "directional",
+        "portfolio_requested_notional": "0",
+        "portfolio_approved_notional": "0",
+        "portfolio_budget_cut_notional": "0",
+        "payload": {
+            "reason_codes": [
+                "candidate_execution_incompatible",
+                "composed_as_advisory_only",
+                "allocator_zero_notional_advisory",
+            ],
+            "execution_legs": [],
+            "strategy_sleeve_intents": [
+                {
+                    "family": "directional",
+                    "strategy_sleeve_id": "sleeve-directional",
+                    "route_action": "hold_current",
+                    "target_notional": "0",
+                    "reason_codes": ["directional_strategy_target"],
+                    "control_trace": {
+                        "permission": {
+                            "approved_for_execution": True,
+                            "candidate_enabled": True,
+                            "candidate_execution_compatible": True,
+                            "execution_prerequisites_supported": True,
+                            "configured_auto_execution_enabled": True,
+                            "permission_mode": "approved",
+                            "runtime_supported": True,
+                            "state_runtime_supported": True,
+                            "reason_codes": ["approved_for_non_protective_execution"],
+                        },
+                        "composition": {
+                            "approved_for_execution": True,
+                            "route_action": "hold_current",
+                            "execution_behavior": "hold_current",
+                            "execution_control_mode": "approved",
+                            "requested_delta_position_qty": "0E-17",
+                            "composed_delta_position_qty": "0",
+                            "reason_codes": ["composed_as_hold_current"],
+                        },
+                        "budget": {
+                            "base_scale": "1",
+                            "effective_scale": "1",
+                            "requested_delta_position_qty": "0",
+                            "scaled_delta_position_qty": "0",
+                            "budget_zero_suppressed": False,
+                            "reason_codes": ["no_budget_contraction"],
+                        },
+                    },
+                }
+            ],
+        },
+    }
+
+    summarized = mod.summarize_latest_decision(
+        latest,
+        {
+            "execution_plan_ref": None,
+            "execution_plan_refs": [],
+            "order_intent_refs": [],
+            "order_state_refs": [],
+            "fill_event_refs": [],
+        },
+        {"execution_orders": 0, "order_states": 0, "execution_fills": 0, "legacy_fill_events": 0},
+    )
+
+    assert summarized is not None
+    attribution = summarized["no_trade_attribution"]
+    assert attribution["primary_blocker"] == "candidate_execution_incompatible"
+    truth = attribution["primary_family_candidate_truth"]
+    assert truth["status"] == "verified_primary_candidate_hold_current_zero_delta_no_order_expected"
+    assert truth["primary_family"] == "directional"
+    assert truth["candidate_execution_compatible"] is True
+    assert truth["candidate_route_action"] == "hold_current"
+    assert truth["candidate_execution_behavior"] == "hold_current"
+    assert truth["order_expected_from_primary_candidate"] is False
+    assert truth["no_order_root_cause"] == "primary_candidate_hold_current_zero_delta"
+    assert truth["global_primary_blocker"] == "candidate_execution_incompatible"
+    assert truth["global_primary_blocker_applies_to_candidate"] is False
+    assert truth["global_primary_blocker_scope"] == "other_candidate_or_portfolio_level"
 
 
 def test_expected_execution_surface_reports_smallest_missing_field() -> None:
@@ -2391,6 +2485,69 @@ def test_project_live_runtime_facts_exposes_created_no_command_directional_order
     )
     assert live_facts["created_no_command_directional_order_missing_total"] == 0
     assert live_facts["created_no_command_directional_order_missing_1h"] == 0
+
+
+def test_project_live_runtime_facts_exposes_primary_candidate_truth() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "route_action": "advisory_only",
+                "symbol": "BTC-USDT-SWAP",
+                "primary_family": "directional",
+                "no_trade_attribution": {
+                    "primary_blocker": "candidate_execution_incompatible",
+                    "candidate_execution_drilldown": [{}],
+                    "primary_family_candidate_truth": {
+                        "status": "verified_primary_candidate_hold_current_zero_delta_no_order_expected",
+                        "smallest_missing_field": None,
+                        "primary_family": "directional",
+                        "candidate_route_action": "hold_current",
+                        "candidate_execution_behavior": "hold_current",
+                        "order_expected_from_primary_candidate": False,
+                        "no_order_root_cause": "primary_candidate_hold_current_zero_delta",
+                        "candidate_execution_compatible": True,
+                        "candidate_approved_for_execution": True,
+                        "candidate_permission_mode": "approved",
+                        "composed_delta_position_qty": "0",
+                        "target_notional": "0",
+                        "global_primary_blocker": "candidate_execution_incompatible",
+                        "global_primary_blocker_applies_to_candidate": False,
+                        "global_primary_blocker_scope": "other_candidate_or_portfolio_level",
+                    },
+                },
+                "execution_truth_chain": {},
+            },
+            "latest_executable_directional_decision": {},
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["latest_decision_primary_candidate_truth_status"] == (
+        "verified_primary_candidate_hold_current_zero_delta_no_order_expected"
+    )
+    assert live_facts["latest_decision_primary_candidate_family"] == "directional"
+    assert live_facts["latest_decision_primary_candidate_route_action"] == "hold_current"
+    assert live_facts["latest_decision_primary_candidate_execution_behavior"] == "hold_current"
+    assert live_facts["latest_decision_primary_candidate_order_expected"] is False
+    assert live_facts["latest_decision_primary_candidate_no_order_root_cause"] == (
+        "primary_candidate_hold_current_zero_delta"
+    )
+    assert live_facts["latest_decision_primary_candidate_execution_compatible"] is True
+    assert live_facts["latest_decision_primary_candidate_global_primary_blocker"] == (
+        "candidate_execution_incompatible"
+    )
+    assert live_facts["latest_decision_primary_candidate_global_blocker_applies"] is False
+    assert live_facts["latest_decision_primary_candidate_global_blocker_scope"] == (
+        "other_candidate_or_portfolio_level"
+    )
 
 
 def test_execution_order_payload_status_residual_truth_classifies_non_authoritative_status() -> None:

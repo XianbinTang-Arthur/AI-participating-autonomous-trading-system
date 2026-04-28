@@ -2186,6 +2186,160 @@ def summarize_candidate_execution_drilldown(
     return summaries
 
 
+def summarize_primary_family_candidate_truth(
+    *,
+    latest_decision: dict[str, Any],
+    candidate_drilldown: list[dict[str, Any]],
+    no_trade_classification: dict[str, Any],
+    execution_legs_count: int,
+) -> dict[str, Any]:
+    primary_family = latest_decision.get("primary_family")
+    primary_candidate = next(
+        (
+            item
+            for item in candidate_drilldown
+            if item.get("family") == primary_family
+        ),
+        {},
+    )
+    if not primary_candidate:
+        return {
+            "status": "missing_primary_family_candidate_truth",
+            "smallest_missing_field": "no_trade_attribution.candidate_execution_drilldown.primary_family",
+            "primary_family": primary_family,
+            "global_primary_blocker": no_trade_classification.get("primary_blocker"),
+            "global_primary_blocker_applies_to_candidate": None,
+            "global_primary_blocker_scope": "unknown_missing_primary_candidate",
+            "order_expected_from_primary_candidate": None,
+            "no_order_root_cause": "missing_primary_family_candidate_drilldown",
+            "evidence": [],
+        }
+
+    permission = as_dict(primary_candidate.get("permission"))
+    execution = as_dict(primary_candidate.get("execution"))
+    composition = as_dict(primary_candidate.get("composition"))
+    budget = as_dict(primary_candidate.get("budget"))
+    permission_root_cause = as_dict(primary_candidate.get("permission_root_cause"))
+    route_action = first_present(composition.get("route_action"), primary_candidate.get("route_action"))
+    execution_behavior = first_present(
+        composition.get("execution_behavior"),
+        execution.get("execution_behavior"),
+    )
+    requested_delta_position_qty = first_present(
+        composition.get("requested_delta_position_qty"),
+        budget.get("requested_delta_position_qty"),
+    )
+    composed_delta_position_qty = first_present(
+        composition.get("composed_delta_position_qty"),
+        budget.get("scaled_delta_position_qty"),
+        requested_delta_position_qty,
+    )
+    zero_delta = (
+        decimal_is_zero(requested_delta_position_qty)
+        and decimal_is_zero(composed_delta_position_qty)
+    )
+    root_primary = permission_root_cause.get("primary")
+    global_primary_blocker = no_trade_classification.get("primary_blocker")
+    candidate_execution_compatible = first_present(
+        permission.get("candidate_execution_compatible"),
+        execution.get("execution_compatible"),
+    )
+    candidate_reason_codes = compact_unique(
+        as_list(primary_candidate.get("reason_codes"))
+        + as_list(permission.get("reason_codes"))
+        + as_list(composition.get("reason_codes"))
+        + as_list(budget.get("reason_codes"))
+        + ([root_primary] if root_primary else []),
+        limit=16,
+    )
+    global_primary_blocker_applies = bool(
+        global_primary_blocker and global_primary_blocker in candidate_reason_codes
+    )
+    status = "primary_family_candidate_truth_present"
+    smallest_missing_field = None
+    no_order_root_cause = None
+    order_expected_from_primary_candidate: bool | None = None
+
+    if root_primary:
+        status = "primary_family_candidate_execution_blocked"
+        no_order_root_cause = root_primary
+        order_expected_from_primary_candidate = False
+    elif route_action == "hold_current" and execution_behavior == "hold_current" and zero_delta:
+        status = "verified_primary_candidate_hold_current_zero_delta_no_order_expected"
+        no_order_root_cause = "primary_candidate_hold_current_zero_delta"
+        order_expected_from_primary_candidate = False
+    elif route_action == "advisory_only" and zero_delta:
+        status = "verified_primary_candidate_advisory_zero_delta_no_order_expected"
+        no_order_root_cause = "primary_candidate_advisory_zero_delta"
+        order_expected_from_primary_candidate = False
+    elif route_action not in {None, "advisory_only", "hold_current"} or execution_legs_count > 0:
+        status = "primary_family_candidate_order_expected_or_already_surfaced"
+        order_expected_from_primary_candidate = True
+    elif zero_delta:
+        status = "primary_family_candidate_zero_delta_no_order_expected"
+        no_order_root_cause = "primary_candidate_zero_delta"
+        order_expected_from_primary_candidate = False
+    else:
+        smallest_missing_field = "primary_candidate_order_expectation_classification"
+
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing_field,
+        "primary_family": primary_family,
+        "strategy_sleeve_id": primary_candidate.get("strategy_sleeve_id"),
+        "candidate_state": primary_candidate.get("state"),
+        "candidate_state_phase": primary_candidate.get("state_phase"),
+        "candidate_route_action": route_action,
+        "candidate_execution_behavior": execution_behavior,
+        "candidate_execution_compatible": candidate_execution_compatible,
+        "candidate_approved_for_execution": first_present(
+            permission.get("approved_for_execution"),
+            execution.get("approved_for_execution"),
+        ),
+        "candidate_selectable": execution.get("selectable"),
+        "candidate_permission_mode": first_present(
+            permission.get("permission_mode"),
+            execution.get("permission_mode"),
+        ),
+        "candidate_execution_prerequisites_supported": first_present(
+            permission.get("execution_prerequisites_supported"),
+            execution.get("execution_prerequisites_supported"),
+        ),
+        "requested_delta_position_qty": decimal_text(requested_delta_position_qty),
+        "composed_delta_position_qty": decimal_text(composed_delta_position_qty),
+        "target_notional": decimal_text(primary_candidate.get("target_notional")),
+        "effective_scale": decimal_text(budget.get("effective_scale")),
+        "order_expected_from_primary_candidate": order_expected_from_primary_candidate,
+        "no_order_root_cause": no_order_root_cause,
+        "global_primary_blocker": global_primary_blocker,
+        "global_primary_blocker_applies_to_candidate": global_primary_blocker_applies,
+        "global_primary_blocker_scope": (
+            "primary_family_candidate"
+            if global_primary_blocker_applies
+            else "other_candidate_or_portfolio_level"
+        ),
+        "reason_codes": candidate_reason_codes,
+        "permission_root_cause": permission_root_cause,
+        "evidence": compact_unique(
+            [
+                f"primary_family={primary_family}" if primary_family else None,
+                f"candidate_route_action={route_action}" if route_action else None,
+                f"candidate_execution_behavior={execution_behavior}" if execution_behavior else None,
+                (
+                    f"candidate_execution_compatible={str(candidate_execution_compatible).lower()}"
+                    if candidate_execution_compatible is not None
+                    else None
+                ),
+                f"requested_delta_position_qty={decimal_text(requested_delta_position_qty)}",
+                f"composed_delta_position_qty={decimal_text(composed_delta_position_qty)}",
+                f"execution_legs_count={execution_legs_count}",
+                f"global_primary_blocker={global_primary_blocker}" if global_primary_blocker else None,
+            ],
+            limit=12,
+        ),
+    }
+
+
 def classify_no_trade(
     *,
     latest_decision: dict[str, Any],
@@ -2698,6 +2852,12 @@ def summarize_latest_decision(
         execution_legs_count=execution_legs_count,
         candidate_drilldown=candidate_drilldown,
     )
+    primary_family_candidate_truth = summarize_primary_family_candidate_truth(
+        latest_decision=latest,
+        candidate_drilldown=candidate_drilldown,
+        no_trade_classification=classification,
+        execution_legs_count=execution_legs_count,
+    )
     no_trade_attribution = {
         **classification,
         "reason_codes": reason_codes,
@@ -2705,6 +2865,7 @@ def summarize_latest_decision(
         "execution_legs_count": execution_legs_count,
         "sleeve_intent_summary": sleeve_summaries,
         "candidate_execution_drilldown": candidate_drilldown,
+        "primary_family_candidate_truth": primary_family_candidate_truth,
     }
     return {
         "allocation_id": latest.get("allocation_id"),
@@ -5515,9 +5676,18 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     no_trade = latest.get("no_trade_attribution") if isinstance(latest.get("no_trade_attribution"), dict) else {}
+    latest_primary_candidate_truth = as_dict(no_trade.get("primary_family_candidate_truth"))
     latest_truth_chain = latest.get("execution_truth_chain") or {}
     latest_terminal_no_fill = as_dict(latest_truth_chain.get("terminal_no_fill_explanation"))
     executable_truth_chain = latest_executable_directional.get("execution_truth_chain") or {}
+    executable_no_trade = (
+        latest_executable_directional.get("no_trade_attribution")
+        if isinstance(latest_executable_directional.get("no_trade_attribution"), dict)
+        else {}
+    )
+    executable_primary_candidate_truth = as_dict(
+        executable_no_trade.get("primary_family_candidate_truth")
+    )
     executable_terminal_no_fill = as_dict(executable_truth_chain.get("terminal_no_fill_explanation"))
 
     return {
@@ -5537,6 +5707,47 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_decision_no_trade_classification": no_trade.get("classification"),
         "latest_decision_is_current_no_trade": no_trade.get("is_current_no_trade"),
+        "latest_decision_primary_candidate_truth_status": latest_primary_candidate_truth.get("status"),
+        "latest_decision_primary_candidate_smallest_missing_field": (
+            latest_primary_candidate_truth.get("smallest_missing_field")
+        ),
+        "latest_decision_primary_candidate_family": latest_primary_candidate_truth.get("primary_family"),
+        "latest_decision_primary_candidate_route_action": latest_primary_candidate_truth.get(
+            "candidate_route_action"
+        ),
+        "latest_decision_primary_candidate_execution_behavior": latest_primary_candidate_truth.get(
+            "candidate_execution_behavior"
+        ),
+        "latest_decision_primary_candidate_order_expected": latest_primary_candidate_truth.get(
+            "order_expected_from_primary_candidate"
+        ),
+        "latest_decision_primary_candidate_no_order_root_cause": latest_primary_candidate_truth.get(
+            "no_order_root_cause"
+        ),
+        "latest_decision_primary_candidate_execution_compatible": latest_primary_candidate_truth.get(
+            "candidate_execution_compatible"
+        ),
+        "latest_decision_primary_candidate_approved_for_execution": latest_primary_candidate_truth.get(
+            "candidate_approved_for_execution"
+        ),
+        "latest_decision_primary_candidate_permission_mode": latest_primary_candidate_truth.get(
+            "candidate_permission_mode"
+        ),
+        "latest_decision_primary_candidate_composed_delta_position_qty": (
+            latest_primary_candidate_truth.get("composed_delta_position_qty")
+        ),
+        "latest_decision_primary_candidate_target_notional": latest_primary_candidate_truth.get(
+            "target_notional"
+        ),
+        "latest_decision_primary_candidate_global_primary_blocker": latest_primary_candidate_truth.get(
+            "global_primary_blocker"
+        ),
+        "latest_decision_primary_candidate_global_blocker_applies": (
+            latest_primary_candidate_truth.get("global_primary_blocker_applies_to_candidate")
+        ),
+        "latest_decision_primary_candidate_global_blocker_scope": latest_primary_candidate_truth.get(
+            "global_primary_blocker_scope"
+        ),
         "latest_decision_execution_truth_status": latest_truth_chain.get("status"),
         "latest_decision_order_expected": latest_truth_chain.get("order_expected"),
         "latest_decision_fill_expected": latest_truth_chain.get("fill_expected"),
@@ -5553,6 +5764,21 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "latest_executable_directional_decision_id": latest_executable_directional.get("decision_id"),
         "latest_executable_directional_route_action": latest_executable_directional.get("route_action"),
         "latest_executable_directional_created_at": latest_executable_directional.get("created_at"),
+        "latest_executable_directional_primary_candidate_truth_status": (
+            executable_primary_candidate_truth.get("status")
+        ),
+        "latest_executable_directional_primary_candidate_order_expected": (
+            executable_primary_candidate_truth.get("order_expected_from_primary_candidate")
+        ),
+        "latest_executable_directional_primary_candidate_no_order_root_cause": (
+            executable_primary_candidate_truth.get("no_order_root_cause")
+        ),
+        "latest_executable_directional_primary_candidate_execution_compatible": (
+            executable_primary_candidate_truth.get("candidate_execution_compatible")
+        ),
+        "latest_executable_directional_primary_candidate_global_blocker_scope": (
+            executable_primary_candidate_truth.get("global_primary_blocker_scope")
+        ),
         "latest_executable_directional_execution_truth_status": executable_truth_chain.get("status"),
         "latest_executable_directional_order_expected": executable_truth_chain.get("order_expected"),
         "latest_executable_directional_fill_expected": executable_truth_chain.get("fill_expected"),
