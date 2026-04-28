@@ -510,6 +510,7 @@ class PostgresExecutionOutboxPublisher:
         raw_payload = {
             **existing_payload,
             "client_order_id": order_state.client_order_id,
+            "status": order_state.status,
             "venue_order_id": order_state.exchange_order_id,
             "source_system": source_component,
             "order_state": order_state.model_dump(mode="python"),

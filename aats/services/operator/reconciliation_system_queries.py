@@ -249,6 +249,7 @@ class ReconciliationSystemQueryFacade:
                 "cancel_reason": reason,
             }
         )
+        resolved_obligation = self._preview_terminal_obligation_for_order_state(resolved_state)
         execution_outbox_publisher = getattr(
             self.owner.runtime,
             "execution_outbox_publisher",
@@ -262,6 +263,7 @@ class ReconciliationSystemQueryFacade:
                 emit_execution_error_summary=False,
                 sync_execution_order_truth=True,
                 history_reason_code="operator_state_sync",
+                obligation=resolved_obligation,
             )
         else:
             persisted = save_order_state_direct_legacy_only(
@@ -285,6 +287,8 @@ class ReconciliationSystemQueryFacade:
                     key=persisted.symbol,
                     payload_model=persisted,
                 )
+            self._finalize_terminal_obligation_direct(persisted)
+        obligation_finalized = resolved_obligation is not None
         await publish_model(
             bus=self.owner.runtime.bus,
             topic=topics.EXECUTION_ERROR_SUMMARIES,
@@ -330,6 +334,7 @@ class ReconciliationSystemQueryFacade:
                     "claimed_submit_command_present": claimed_submit_command is not None,
                     "claimed_submit_command_id": claimed_submit_command_id,
                     "claimed_submit_idempotency_key": claimed_submit_idempotency_key,
+                    "obligation_finalized": obligation_finalized,
                 },
             ),
         )
@@ -347,13 +352,40 @@ class ReconciliationSystemQueryFacade:
             previous_status=order.status,
             final_status=persisted.status,
             reason=reason,
+            obligation_finalized=obligation_finalized,
         )
         return {
             "order": persisted.model_dump(mode="json"),
-            "resolution": resolution,
+            "resolution": {
+                **resolution,
+                "obligation_finalized": obligation_finalized,
+            },
             "reconciliation": report.model_dump(mode="json"),
             "recovery": self.owner.recovery_view(),
         }
+
+    def _preview_terminal_obligation_for_order_state(self, order_state: Any) -> Any | None:
+        obligation_service = getattr(self.owner.runtime, "obligation_service", None)
+        preview = getattr(obligation_service, "preview_obligation_for_order_state", None)
+        if not callable(preview):
+            return None
+        obligation = preview(order_state)
+        if obligation is None:
+            return None
+        current = None
+        obligation_repo = getattr(obligation_service, "obligation_repo", None)
+        get_obligation = getattr(obligation_repo, "get_obligation", None)
+        if callable(get_obligation):
+            current = get_obligation(order_state.client_order_id)
+        if current is not None and current.model_dump(mode="json") == obligation.model_dump(mode="json"):
+            return None
+        return obligation
+
+    def _finalize_terminal_obligation_direct(self, order_state: Any) -> None:
+        obligation_service = getattr(self.owner.runtime, "obligation_service", None)
+        finalize = getattr(obligation_service, "finalize_for_order_state", None)
+        if callable(finalize):
+            finalize(order_state)
 
     async def rebaseline(
         self,

@@ -10,7 +10,7 @@ import pytest
 
 from aats.events import topics
 from aats.schemas.common import utc_now
-from aats.schemas.execution import OrderState
+from aats.schemas.execution import OrderObligation, OrderState
 from aats.services.operator.reconciliation_system_queries import ReconciliationSystemQueryFacade
 from aats.services.recovery_control.exchange_order_reconciler import reconcile_stuck_orders
 
@@ -45,6 +45,33 @@ class _RecordingOutboxWriter:
     async def persist_order_state(self, **kwargs: Any) -> OrderState:
         self.calls.append(kwargs)
         return kwargs["order_state"]
+
+
+class _RecordingObligationService:
+    def __init__(self, obligation: OrderObligation | None) -> None:
+        self._obligation = obligation
+        self.finalized: list[OrderState] = []
+        self.obligation_repo = SimpleNamespace(get_obligation=self.get_obligation)
+
+    def get_obligation(self, client_order_id: str) -> OrderObligation | None:
+        if self._obligation is None or self._obligation.client_order_id != client_order_id:
+            return None
+        return self._obligation
+
+    def preview_obligation_for_order_state(self, order_state: OrderState) -> OrderObligation | None:
+        if self._obligation is None or self._obligation.client_order_id != order_state.client_order_id:
+            return None
+        return self._obligation.model_copy(
+            update={
+                "status": "FAILED",
+                "released_amount": self._obligation.reserved_amount,
+                "last_update_ts": order_state.last_update_ts,
+            }
+        )
+
+    def finalize_for_order_state(self, order_state: OrderState) -> OrderObligation | None:
+        self.finalized.append(order_state)
+        return self.preview_obligation_for_order_state(order_state)
 
 
 class _NoDirectExecutionRepo:
@@ -99,6 +126,7 @@ class _OperatorOwner:
         order: OrderState,
         outbox: _RecordingOutboxWriter,
         claimed_submit_command: dict[str, Any] | None = None,
+        obligation_service: Any | None = None,
     ) -> None:
         self._order = order
         self._claimed_submit_command = claimed_submit_command
@@ -108,6 +136,7 @@ class _OperatorOwner:
             execution_outbox_publisher=outbox,
             execution_repo=_NoDirectExecutionRepo(),
             bus=_RecordingBus(),
+            obligation_service=obligation_service,
         )
 
     def _control_plane_order_state(self, client_order_id: str) -> OrderState | None:
@@ -190,6 +219,42 @@ async def test_operator_stuck_submission_resolution_persists_order_state_via_out
     assert [message["topic"] for message in owner.runtime.bus.messages] == [
         topics.EXECUTION_ERROR_SUMMARIES
     ]
+
+
+@pytest.mark.asyncio
+async def test_operator_stuck_submission_resolution_finalizes_matching_obligation_via_outbox() -> None:
+    order = _order_state(client_order_id="ord_stuck_with_obligation")
+    obligation = OrderObligation(
+        client_order_id=order.client_order_id,
+        decision_id=order.decision_id,
+        intent_id=order.intent_id,
+        symbol=order.symbol,
+        side="sell",
+        reserve_currency="USDT",
+        reserved_amount=Decimal("5.5"),
+        product_type="derivatives",
+        margin_mode="cross",
+        strategy_bundle_id="bundle_stuck",
+    )
+    outbox = _RecordingOutboxWriter()
+    owner = _OperatorOwner(
+        order=order,
+        outbox=outbox,
+        obligation_service=_RecordingObligationService(obligation),
+    )
+
+    result = await ReconciliationSystemQueryFacade(owner).resolve_stuck_submission(
+        client_order_id=order.client_order_id,
+        reason="operator_confirmed_absent_on_okx",
+        actor_role="admin",
+    )
+
+    call = outbox.calls[0]
+    finalized = call["obligation"]
+    assert finalized.client_order_id == order.client_order_id
+    assert finalized.status == "FAILED"
+    assert finalized.released_amount == Decimal("5.5")
+    assert result["resolution"]["obligation_finalized"] is True
 
 
 @pytest.mark.asyncio

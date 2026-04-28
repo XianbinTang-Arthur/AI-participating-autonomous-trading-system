@@ -280,6 +280,7 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_order["state"], "FAILED")
             raw_payload = dict(stored_order["raw_payload"])
             self.assertEqual(raw_payload["source_system"], "operator_api")
+            self.assertEqual(raw_payload["status"], "FAILED")
             self.assertEqual(raw_payload["operator_note"], "preserve_me")
             self.assertEqual(raw_payload["intent"]["intent_id"], initial.intent_id)
             self.assertEqual(raw_payload["lifecycle_snapshot_refs"]["submit"]["source"], "seed_submit")
