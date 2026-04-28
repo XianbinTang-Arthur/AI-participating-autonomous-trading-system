@@ -175,6 +175,76 @@ def validate_confirmation_packet(
     }
 
 
+def build_operator_handoff(
+    *,
+    validation: dict[str, Any],
+    packet: dict[str, Any],
+    runtime_truth: dict[str, Any],
+    packet_path: Path,
+    runtime_truth_path: Path,
+) -> dict[str, Any]:
+    protected_path = as_dict(packet.get("protected_execution_path"))
+    current_runtime_truth = as_dict(packet.get("current_runtime_truth"))
+    if validation.get("ready_for_protected_recovery") is True:
+        handoff_status = "ready_for_protected_recovery"
+        next_action = "run_protected_resolve_stuck_submission"
+    elif validation.get("valid") is True:
+        handoff_status = "awaiting_external_operator_confirmation"
+        next_action = "operator_verify_okx_absence_then_rerun_verifier_with_exact_confirmation"
+    else:
+        handoff_status = "blocked_packet_or_runtime_mismatch"
+        next_action = "regenerate_runtime_truth_and_confirmation_packet_before_operator_action"
+
+    return {
+        "artifact_type": "claimed_submit_operator_handoff",
+        "generated_from_runtime_truth_at": runtime_truth.get("generated_at"),
+        "handoff_status": handoff_status,
+        "next_action": next_action,
+        "source_artifacts": {
+            "packet": str(packet_path),
+            "runtime_truth": str(runtime_truth_path),
+        },
+        "validation": {
+            "valid": validation.get("valid"),
+            "ready_for_protected_recovery": validation.get("ready_for_protected_recovery"),
+            "status": validation.get("status"),
+            "failures": validation.get("failures", []),
+            "warnings": validation.get("warnings", []),
+            "operator_confirmation_matched": validation.get("operator_confirmation_matched"),
+        },
+        "order": {
+            "client_order_id": validation.get("client_order_id"),
+            "command_id": validation.get("command_id"),
+            "evidence_sha256": validation.get("evidence_sha256"),
+            "exact_confirmation_required": validation.get("exact_confirmation_required"),
+        },
+        "operator_must_verify_on_okx": packet.get("operator_must_verify_on_okx", []),
+        "protected_execution_path": {
+            "api_method": protected_path.get("api_method"),
+            "api_endpoint": protected_path.get("api_endpoint"),
+            "required_role": protected_path.get("required_role"),
+            "request_body": protected_path.get("request_body"),
+            "terminal_state_if_success": protected_path.get("terminal_state_if_success"),
+        },
+        "forbidden_actions": packet.get("forbidden_actions", []),
+        "acceptance_after_operator_confirmation": packet.get(
+            "acceptance_after_operator_confirmation",
+            [],
+        ),
+        "runtime_guardrails": {
+            "runtime_truth_ok": current_runtime_truth.get("ok"),
+            "deployed_matches_windows": current_runtime_truth.get("deployed_matches_windows"),
+            "gateway_health_ok": current_runtime_truth.get("gateway_health_ok"),
+            "required_app_containers_healthy": current_runtime_truth.get(
+                "required_app_containers_healthy",
+            ),
+            "ai_timeout_active_blocker": current_runtime_truth.get("ai_timeout_active_blocker"),
+            "shadow_benchmark": current_runtime_truth.get("shadow_benchmark"),
+        },
+        "rollback": packet.get("rollback"),
+    }
+
+
 def load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as fh:
         data = json.load(fh)
@@ -190,6 +260,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--packet", required=True, type=Path)
     parser.add_argument("--runtime-truth", required=True, type=Path)
     parser.add_argument("--operator-confirmation")
+    parser.add_argument(
+        "--handoff-output",
+        type=Path,
+        help="Write a no-secret operator handoff JSON artifact for the current validation result.",
+    )
     parser.add_argument("--pretty", action="store_true")
     return parser
 
@@ -203,6 +278,19 @@ def main(argv: list[str] | None = None) -> int:
         runtime_truth,
         operator_confirmation=args.operator_confirmation,
     )
+    if args.handoff_output is not None:
+        handoff = build_operator_handoff(
+            validation=result,
+            packet=packet,
+            runtime_truth=runtime_truth,
+            packet_path=args.packet,
+            runtime_truth_path=args.runtime_truth,
+        )
+        args.handoff_output.parent.mkdir(parents=True, exist_ok=True)
+        args.handoff_output.write_text(
+            json.dumps(handoff, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2 if args.pretty else None, sort_keys=True))
     return 0 if result["valid"] else 2
 

@@ -160,3 +160,60 @@ def test_packet_blocks_when_operator_confirmation_mismatches() -> None:
 
     assert result["valid"] is False
     assert "operator_confirmation_mismatch" in result["failures"]
+
+
+def test_handoff_waits_for_external_confirmation() -> None:
+    mod = load_module()
+    packet = _packet(mod)
+    runtime_truth = _runtime_truth()
+    result = mod.validate_confirmation_packet(packet, runtime_truth)
+
+    handoff = mod.build_operator_handoff(
+        validation=result,
+        packet={
+            **packet,
+            "operator_must_verify_on_okx": ["No open order exists on OKX."],
+            "protected_execution_path": {
+                "api_method": "POST",
+                "api_endpoint": "/orders/{client_order_id}/resolve-stuck-submission",
+                "required_role": "admin",
+                "request_body": {
+                    "operator_confirmation": "resolve_claimed_submit_as_failed:cl_stuck",
+                },
+                "terminal_state_if_success": "FAILED",
+            },
+            "forbidden_actions": ["Do not hand-edit order state."],
+            "acceptance_after_operator_confirmation": ["Post-action runtime truth generated."],
+        },
+        runtime_truth=runtime_truth,
+        packet_path=Path("packet.json"),
+        runtime_truth_path=Path("runtime.json"),
+    )
+
+    assert handoff["handoff_status"] == "awaiting_external_operator_confirmation"
+    assert handoff["next_action"] == "operator_verify_okx_absence_then_rerun_verifier_with_exact_confirmation"
+    assert handoff["order"]["exact_confirmation_required"] == "resolve_claimed_submit_as_failed:cl_stuck"
+    assert handoff["protected_execution_path"]["required_role"] == "admin"
+    assert handoff["forbidden_actions"] == ["Do not hand-edit order state."]
+
+
+def test_handoff_ready_after_exact_confirmation() -> None:
+    mod = load_module()
+    packet = _packet(mod)
+    runtime_truth = _runtime_truth()
+    result = mod.validate_confirmation_packet(
+        packet,
+        runtime_truth,
+        operator_confirmation="resolve_claimed_submit_as_failed:cl_stuck",
+    )
+
+    handoff = mod.build_operator_handoff(
+        validation=result,
+        packet=packet,
+        runtime_truth=runtime_truth,
+        packet_path=Path("packet.json"),
+        runtime_truth_path=Path("runtime.json"),
+    )
+
+    assert handoff["handoff_status"] == "ready_for_protected_recovery"
+    assert handoff["next_action"] == "run_protected_resolve_stuck_submission"
