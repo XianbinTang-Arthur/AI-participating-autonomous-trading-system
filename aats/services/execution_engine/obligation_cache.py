@@ -32,6 +32,7 @@ gateway 进程的 dashboard polling 也频繁查 ``all_obligations()``。本 sli
     Redis ``aats:hot:obligation:by_coid:<client_order_id>`` —— per-coid KV
     Redis ``aats:hot:obligation:index`` —— 存 all_coids/active_coids/version
     NATS ``execution.obligation_updates`` —— 单条 OrderObligation envelope
+    或 operator repair 的 replace-index envelope
 
 关键决策（详见设计文档 §2）
 ========
@@ -87,6 +88,9 @@ OBLIGATION_INDEX_KEY = make_key(_NS_OBLIGATION, "index")
 
 OBLIGATION_EVENT_TYPE = "OrderObligationUpdated"
 """Event envelope ``event_type`` field for obligation broadcasts."""
+
+OBLIGATION_REPLACE_EVENT_TYPE = "OrderObligationCacheReplaced"
+"""Event envelope ``event_type`` field for cache replacement broadcasts."""
 
 OBLIGATION_SOURCE_COMPONENT = "aats.execution_engine.obligation_cache"
 """Event envelope ``source_component`` for obligation broadcasts."""
@@ -427,6 +431,7 @@ class ObligationHotStateCache:
 
         self._latest = replacement
         self._bootstrapped = True
+        await self._best_effort_nats_replace_broadcast(replacement)
         for obligation in replacement.values():
             await self._best_effort_nats_broadcast(obligation)
         active_count = sum(
@@ -582,6 +587,9 @@ class ObligationHotStateCache:
         """
         try:
             envelope = parse_envelope(message)
+            if self._is_replace_payload(envelope.payload):
+                self._apply_remote_replace_event(envelope.payload)
+                return
             obligation = OrderObligation.model_validate(envelope.payload)
         except Exception as exc:
             log_event(
@@ -610,6 +618,36 @@ class ObligationHotStateCache:
             process_role=self._process_role,
             client_order_id=obligation.client_order_id,
             status=obligation.status,
+        )
+
+    @staticmethod
+    def _is_replace_payload(payload: Any) -> bool:
+        return isinstance(payload, dict) and payload.get("cache_event") == "replace_all"
+
+    def _apply_remote_replace_event(self, payload: dict[str, Any]) -> None:
+        all_coids = {
+            str(coid)
+            for coid in payload.get("all_coids") or []
+            if str(coid or "").strip()
+        }
+        before = set(self._latest.keys())
+        stale_coids = before - all_coids
+        for coid in stale_coids:
+            self._latest.pop(coid, None)
+        try:
+            version = int(payload.get("version") or 0)
+        except Exception:
+            version = 0
+        if version > self._index_version:
+            self._index_version = version
+        log_event(
+            self._logger,
+            "obligation_cache_remote_replace_applied",
+            process_role=self._process_role,
+            removed_count=len(stale_coids),
+            cached_count=len(self._latest),
+            replacement_count=len(all_coids),
+            version=self._index_version,
         )
 
     # ──────────────────────────────────────────────────────────────────
@@ -711,6 +749,51 @@ class ObligationHotStateCache:
                 level="warning",
                 process_role=self._process_role,
                 client_order_id=obligation.client_order_id,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    async def _best_effort_nats_replace_broadcast(
+        self,
+        replacement: dict[str, OrderObligation],
+    ) -> None:
+        """Broadcast a compact replace-index event so peers drop stale local rows."""
+        if self._bus is None:
+            return
+        active_coids = [
+            coid
+            for coid, obligation in replacement.items()
+            if obligation.status in {"ACTIVE", "PARTIALLY_CONSUMED"}
+        ]
+        try:
+            envelope = EventEnvelope(
+                event_type=OBLIGATION_REPLACE_EVENT_TYPE,
+                source_component=OBLIGATION_SOURCE_COMPONENT,
+                topic=topics.OBLIGATION_UPDATES,
+                key="replace_all",
+                payload=dump_payload_exact(
+                    {
+                        "cache_event": "replace_all",
+                        "all_coids": list(replacement.keys()),
+                        "active_coids": active_coids,
+                        "version": self._index_version,
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "writer_role": self._process_role,
+                    }
+                ),
+            )
+            await self._bus.publish(
+                topic=topics.OBLIGATION_UPDATES,
+                key="replace_all",
+                payload=envelope.model_dump(mode="json"),
+            )
+        except Exception as exc:
+            log_event(
+                self._logger,
+                "obligation_cache_replace_nats_publish_failed",
+                level="warning",
+                process_role=self._process_role,
+                replacement_count=len(replacement),
                 error_type=type(exc).__name__,
                 error=str(exc),
             )

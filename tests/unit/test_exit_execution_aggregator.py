@@ -20,6 +20,7 @@ from aats.services.execution_engine.exit_intent_aggregator import (
     recompute_exit_execution_intent,
     request_cancel_exit_execution_intent,
 )
+from aats.services.execution_engine.exit_execution_writer import ExitExecutionWriter
 from aats.services.governance_engine.recovery_posture import RecoveryPostureEvaluator
 from aats.storage.execution_repo import InMemoryExecutionRepository
 from aats.storage.exit_execution_repo import InMemoryExitExecutionRepository
@@ -358,6 +359,55 @@ class TestExitExecutionAggregator(unittest.TestCase):
         second_updated_at = second_state.metadata["resume_issue"]["updated_at"]
 
         self.assertEqual(first_updated_at, second_updated_at)
+
+    def test_refresh_persists_child_refs_and_parent_through_batch_writer(self) -> None:
+        settings = AATSSettings.model_validate({})
+        execution_repo = InMemoryExecutionRepository()
+        exit_repo = InMemoryExitExecutionRepository()
+        parent = _make_parent(quantity="5").model_copy(
+            update={
+                "aggregate_status": "WORKING",
+                "remaining_dispatchable_quantity": Decimal("5"),
+                "remaining_unresolved_quantity": Decimal("5"),
+            }
+        )
+        exit_repo.save_exit_execution_intent(parent)
+        execution_repo.save_order_state(
+            _make_order_state(
+                client_order_id="child_refresh_atomic",
+                status="SUBMITTED",
+                requested_qty="5",
+                filled_qty="0",
+            )
+        )
+
+        class _RecordingBatchWriter(ExitExecutionWriter):
+            def __init__(self, repo):
+                super().__init__(repo)
+                self.batch_calls = 0
+
+            def save_child_exit_order_ref(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                raise AssertionError("refresh must not persist child refs outside the aggregate writer batch")
+
+            def save_child_refs_and_recompute_parent(self, *args, **kwargs):  # noqa: ANN002, ANN003
+                self.batch_calls += 1
+                return super().save_child_refs_and_recompute_parent(*args, **kwargs)
+
+        writer = _RecordingBatchWriter(exit_repo)
+
+        refreshed = refresh_exit_execution_intents(
+            execution_repo=execution_repo,
+            exit_execution_repo=exit_repo,
+            settings=settings,
+            exit_execution_writer=writer,
+        )
+
+        self.assertEqual(writer.batch_calls, 1)
+        self.assertEqual(len(refreshed), 1)
+        updated_parent = exit_repo.get_exit_execution_intent(parent.parent_intent_id)
+        assert updated_parent is not None
+        self.assertEqual(updated_parent.child_order_ids, ["child_refresh_atomic"])
+        self.assertEqual(updated_parent.aggregate_status, "WORKING")
 
 
 class TestExitExecutionKindConstants(unittest.TestCase):

@@ -98,15 +98,19 @@ class ExitExecutionWriter:
                     parent_intent_id=parent_intent_id,
                 )
                 recomputed = recompute_parent(transform_parent(current), child_refs)
-                saved = self.exit_execution_repo.save_exit_execution_intent_in_session(session, recomputed)
+                saved = self.exit_execution_repo.save_exit_execution_intent_in_session(
+                    session,
+                    self._merge_sticky_parent_fields(current=current, incoming=recomputed),
+                )
                 session.commit()
         else:
             current = self.exit_execution_repo.get_exit_execution_intent(parent_intent_id)
             if current is None:
                 raise KeyError(f"exit_execution_intent_not_found parent_intent_id={parent_intent_id}")
             child_refs = self.exit_execution_repo.child_refs_for_parent(parent_intent_id=parent_intent_id)
+            recomputed = recompute_parent(transform_parent(current), child_refs)
             saved = self.exit_execution_repo.save_exit_execution_intent(
-                recompute_parent(transform_parent(current), child_refs)
+                self._merge_sticky_parent_fields(current=current, incoming=recomputed)
             )
         self._log_parent_saved(saved, source_component=source_component, reason_code=reason_code)
         return saved
@@ -137,19 +141,83 @@ class ExitExecutionWriter:
                     parent_intent_id=parent_base.parent_intent_id,
                 )
                 recomputed = recompute_parent(parent_base, child_refs)
-                saved_parent = self.exit_execution_repo.save_exit_execution_intent_in_session(session, recomputed)
+                saved_parent = self.exit_execution_repo.save_exit_execution_intent_in_session(
+                    session,
+                    self._merge_sticky_parent_fields(current=parent_base, incoming=recomputed),
+                )
                 session.commit()
         else:
             existing_parent = self.exit_execution_repo.get_exit_execution_intent(parent_intent.parent_intent_id)
             parent_base = existing_parent or self.exit_execution_repo.save_exit_execution_intent(parent_intent)
             saved_child = self.exit_execution_repo.save_child_exit_order_ref(child_ref)
             child_refs = self.exit_execution_repo.child_refs_for_parent(parent_intent_id=parent_base.parent_intent_id)
+            recomputed = recompute_parent(parent_base, child_refs)
             saved_parent = self.exit_execution_repo.save_exit_execution_intent(
-                recompute_parent(parent_base, child_refs)
+                self._merge_sticky_parent_fields(current=parent_base, incoming=recomputed)
             )
         self._log_child_saved(saved_child, source_component=source_component, reason_code=f"{reason_code}:child_ref")
         self._log_parent_saved(saved_parent, source_component=source_component, reason_code=f"{reason_code}:parent")
         return saved_child, saved_parent
+
+    def save_child_refs_and_recompute_parent(
+        self,
+        *,
+        parent_intent: ExitExecutionIntent,
+        child_refs: list[ChildExitOrderRef],
+        transform_parent: ParentTransform,
+        recompute_parent: ParentRecompute,
+        source_component: str,
+        reason_code: str,
+    ) -> ExitExecutionIntent:
+        if isinstance(self.exit_execution_repo, PostgresExitExecutionRepository):
+            with self.exit_execution_repo.session_factory() as session:
+                current = self.exit_execution_repo.get_exit_execution_intent_in_session(
+                    session,
+                    parent_intent.parent_intent_id,
+                    for_update=True,
+                )
+                parent_base = current or parent_intent
+                if current is None:
+                    self.exit_execution_repo.save_exit_execution_intent_in_session(session, parent_base)
+                    session.flush()
+                for child_ref in child_refs:
+                    self.exit_execution_repo.save_child_exit_order_ref_in_session(session, child_ref)
+                persisted_child_refs = self.exit_execution_repo.child_refs_for_parent_in_session(
+                    session,
+                    parent_intent_id=parent_base.parent_intent_id,
+                )
+                recomputed = recompute_parent(transform_parent(parent_base), persisted_child_refs)
+                saved_parent = self.exit_execution_repo.save_exit_execution_intent_in_session(
+                    session,
+                    self._merge_sticky_parent_fields(current=parent_base, incoming=recomputed),
+                )
+                session.commit()
+        else:
+            existing_parent = self.exit_execution_repo.get_exit_execution_intent(parent_intent.parent_intent_id)
+            parent_base = existing_parent or self.exit_execution_repo.save_exit_execution_intent(parent_intent)
+            for child_ref in child_refs:
+                self.exit_execution_repo.save_child_exit_order_ref(child_ref)
+                self._log_child_saved(
+                    child_ref,
+                    source_component=source_component,
+                    reason_code=f"{reason_code}:child_ref",
+                )
+            persisted_child_refs = self.exit_execution_repo.child_refs_for_parent(
+                parent_intent_id=parent_base.parent_intent_id
+            )
+            recomputed = recompute_parent(transform_parent(parent_base), persisted_child_refs)
+            saved_parent = self.exit_execution_repo.save_exit_execution_intent(
+                self._merge_sticky_parent_fields(current=parent_base, incoming=recomputed)
+            )
+        if isinstance(self.exit_execution_repo, PostgresExitExecutionRepository):
+            for child_ref in child_refs:
+                self._log_child_saved(
+                    child_ref,
+                    source_component=source_component,
+                    reason_code=f"{reason_code}:child_ref",
+                )
+        self._log_parent_saved(saved_parent, source_component=source_component, reason_code=f"{reason_code}:parent")
+        return saved_parent
 
     def _log_parent_saved(
         self,
@@ -196,13 +264,83 @@ class ExitExecutionWriter:
         if current is None:
             return incoming
         updates: dict[str, Any] = {}
+        stale_incoming = int(incoming.aggregate_version) <= int(current.aggregate_version)
         if current.cancel_requested and not incoming.cancel_requested:
             updates["cancel_requested"] = True
             updates["cancel_requested_ts"] = current.cancel_requested_ts
             if incoming.aggregate_status not in _TERMINAL_PARENT_STATUSES:
                 updates["aggregate_status"] = "CANCEL_PENDING"
-        if int(incoming.aggregate_version) <= int(current.aggregate_version):
+        terminal_snapshot_is_sticky = current.aggregate_status in _TERMINAL_PARENT_STATUSES and (
+            stale_incoming or incoming.aggregate_status != current.aggregate_status
+        )
+        if terminal_snapshot_is_sticky:
+            updates.update(
+                {
+                    "aggregated_filled_quantity": current.aggregated_filled_quantity,
+                    "aggregated_canceled_quantity": current.aggregated_canceled_quantity,
+                    "aggregated_rejected_quantity": current.aggregated_rejected_quantity,
+                    "open_child_working_quantity": current.open_child_working_quantity,
+                    "open_child_unknown_quantity": current.open_child_unknown_quantity,
+                    "remaining_dispatchable_quantity": current.remaining_dispatchable_quantity,
+                    "remaining_unresolved_quantity": current.remaining_unresolved_quantity,
+                    "aggregate_status": current.aggregate_status,
+                    "reconciliation_state": current.reconciliation_state,
+                    "risk_reducing_invariant": current.risk_reducing_invariant,
+                    "child_order_ids": list(current.child_order_ids),
+                    "completed_at": current.completed_at,
+                    "operator_review_required": current.operator_review_required,
+                    "operator_review_reason": current.operator_review_reason,
+                    "metadata": dict(current.metadata),
+                }
+            )
+        if stale_incoming:
+            if (
+                current.aggregate_status == "REVIEW_REQUIRED"
+                and incoming.aggregate_status != current.aggregate_status
+                and incoming.aggregate_status not in _TERMINAL_PARENT_STATUSES
+            ):
+                updates["aggregate_status"] = "REVIEW_REQUIRED"
+                updates["reconciliation_state"] = "review_required"
+            if current.operator_review_required and not incoming.operator_review_required:
+                updates["operator_review_required"] = True
+                updates["operator_review_reason"] = current.operator_review_reason
+                if (
+                    current.aggregate_status not in _TERMINAL_PARENT_STATUSES
+                    and incoming.aggregate_status not in _TERMINAL_PARENT_STATUSES
+                ):
+                    updates["aggregate_status"] = "REVIEW_REQUIRED"
+                    updates["reconciliation_state"] = "review_required"
+            current_resume_issue = ExitExecutionWriter._resume_issue(current)
+            incoming_resume_issue = ExitExecutionWriter._resume_issue(incoming)
+            incoming_replaces_current_issue = (
+                current_resume_issue is not None
+                and incoming_resume_issue is not None
+                and str(incoming_resume_issue.get("prior_kind") or "").strip()
+                == str(current_resume_issue.get("kind") or "").strip()
+            )
+            if (
+                current_resume_issue is not None
+                and incoming_resume_issue != current_resume_issue
+                and not incoming_replaces_current_issue
+            ):
+                metadata = dict(updates.get("metadata") or incoming.metadata)
+                metadata["resume_issue"] = current_resume_issue
+                updates["metadata"] = metadata
+                updates["operator_review_required"] = True
+                if current.operator_review_reason and not incoming.operator_review_reason:
+                    updates["operator_review_reason"] = current.operator_review_reason
+                if (
+                    current.aggregate_status not in _TERMINAL_PARENT_STATUSES
+                    and incoming.aggregate_status not in _TERMINAL_PARENT_STATUSES
+                ):
+                    updates["aggregate_status"] = "REVIEW_REQUIRED"
+                    updates["reconciliation_state"] = "review_required"
             updates["aggregate_version"] = int(current.aggregate_version) + 1
         if not updates:
             return incoming
         return incoming.model_copy(update=updates)
+
+    @staticmethod
+    def _resume_issue(parent: ExitExecutionIntent) -> dict[str, Any] | None:
+        issue = parent.metadata.get("resume_issue")
+        return dict(issue) if isinstance(issue, dict) else None

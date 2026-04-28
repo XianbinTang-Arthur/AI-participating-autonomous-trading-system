@@ -140,6 +140,59 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
 
+    async def test_order_state_obligation_write_enqueues_durable_obligation_update(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            event_store = PostgresEventStore(runtime.session_factory)
+            execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            obligation_repo = PostgresExecutionObligationRepository(runtime.session_factory)
+            outbox_repo = PostgresOutboxRepository(runtime.session_factory)
+            bus = InMemoryEventBus()
+            received_topics: list[str] = []
+
+            async def handler(message: dict) -> None:
+                received_topics.append(str(message["topic"]))
+
+            await bus.subscribe(topics.ORDER_UPDATES, handler)
+            await bus.subscribe(topics.OBLIGATION_UPDATES, handler)
+            publisher = PostgresExecutionOutboxPublisher(
+                session_factory=runtime.session_factory,
+                event_store=event_store,
+                execution_repo=execution_repo,
+                obligation_repo=obligation_repo,
+                outbox_repo=outbox_repo,
+                bus=bus,
+            )
+            state = self._order_state(client_order_id="clord_order_obligation_outbox", status="CREATED")
+            obligation = OrderObligation(
+                client_order_id=state.client_order_id,
+                decision_id=state.decision_id,
+                intent_id=state.intent_id,
+                symbol=state.symbol,
+                side="sell",
+                reserve_currency="USDT",
+                reserved_amount=Decimal("15"),
+                status="ACTIVE",
+                product_type="derivatives",
+                margin_mode="cross",
+                last_update_ts=utc_now(),
+            )
+
+            await publisher.persist_order_state(
+                order_state=state,
+                key=state.symbol,
+                obligation=obligation,
+            )
+
+            self.assertIsNotNone(obligation_repo.get_obligation(state.client_order_id))
+            self.assertEqual(event_store.count(topic=topics.ORDER_UPDATES), 1)
+            self.assertEqual(event_store.count(topic=topics.OBLIGATION_UPDATES), 1)
+            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 2, "failed": 0})
+            self.assertEqual(received_topics, [topics.ORDER_UPDATES, topics.OBLIGATION_UPDATES])
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
     async def test_persist_order_state_can_sync_existing_execution_order_truth_for_repair(self) -> None:
         runtime, admin_engine, schema_name = self._schema_runtime()
         try:
@@ -667,7 +720,8 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored_obligation.consumed_amount, Decimal("60.0"))
             self.assertEqual(stored_obligation.status, "RELEASED")
             self.assertEqual(event_store.count(topic=topics.FILL_EVENTS), 1)
-            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
+            self.assertEqual(event_store.count(topic=topics.OBLIGATION_UPDATES), 1)
+            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 2, "failed": 0})
         finally:
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)

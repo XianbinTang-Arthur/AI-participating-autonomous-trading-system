@@ -31,6 +31,7 @@ from typing import Any
 from aats.bus.memory_bus import InMemoryEventBus
 from aats.events import topics
 from aats.events.envelopes import build_envelope
+from aats.schemas.common import EventEnvelope
 from aats.schemas.execution import OrderObligation
 from aats.services.execution_engine.obligation_cache import (
     OBLIGATION_INDEX_KEY,
@@ -157,6 +158,26 @@ def _make_remote_message(obligation: OrderObligation) -> dict[str, Any]:
     return {
         "topic": topics.OBLIGATION_UPDATES,
         "key": obligation.client_order_id,
+        "payload": envelope.model_dump(mode="json"),
+    }
+
+
+def _make_replace_message(*, all_coids: list[str], version: int = 1) -> dict[str, Any]:
+    envelope = EventEnvelope(
+        event_type="OrderObligationCacheReplaced",
+        source_component="aats.execution_engine.obligation_cache",
+        topic=topics.OBLIGATION_UPDATES,
+        key="replace_all",
+        payload={
+            "cache_event": "replace_all",
+            "all_coids": all_coids,
+            "active_coids": all_coids,
+            "version": version,
+        },
+    )
+    return {
+        "topic": topics.OBLIGATION_UPDATES,
+        "key": "replace_all",
         "payload": envelope.model_dump(mode="json"),
     }
 
@@ -511,6 +532,22 @@ class TestObligationHotStateCacheRemoteEvent(unittest.IsolatedAsyncioTestCase):
         cached = cache.get_sync("coid-R2")
         assert cached is not None
         self.assertEqual(cached.status, "PARTIALLY_CONSUMED")
+
+    async def test_remote_replace_event_removes_stale_local_obligations(self) -> None:
+        cache = _make_cache()
+        await _boot(cache, process_role="decision")
+        keep = _make_obligation(client_order_id="coid-keep", status="ACTIVE")
+        stale = _make_obligation(client_order_id="coid-stale", status="ACTIVE")
+        await cache._handle_remote_event(_make_remote_message(keep))
+        await cache._handle_remote_event(_make_remote_message(stale))
+
+        await cache._handle_remote_event(_make_replace_message(all_coids=["coid-keep"], version=7))
+
+        self.assertIsNotNone(cache.get_sync("coid-keep"))
+        self.assertIsNone(cache.get_sync("coid-stale"))
+        active_ids = [item.client_order_id for item in cache.active_sync() or []]
+        self.assertEqual(active_ids, ["coid-keep"])
+        self.assertEqual(cache.snapshot()["index_version"], 7)
 
     async def test_remote_event_parse_failure_does_not_raise(self) -> None:
         cache = _make_cache()

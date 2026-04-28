@@ -244,8 +244,9 @@ class PostgresExecutionOutboxPublisher:
                 )
             else:
                 self._ensure_execution_order_row(session, order_state=persisted)
+            saved_obligation = None
             if obligation is not None:
-                self.obligation_repo.save_obligation_in_session(session, obligation)
+                saved_obligation = self.obligation_repo.save_obligation_in_session(session, obligation)
             envelopes = [
                 self._order_update_envelope(
                     key=key,
@@ -264,6 +265,13 @@ class PostgresExecutionOutboxPublisher:
             )
             if summary is not None:
                 envelopes.append(summary)
+            if saved_obligation is not None:
+                envelopes.append(
+                    self._obligation_update_envelope(
+                        obligation=saved_obligation,
+                        source_component=source_component,
+                    )
+                )
             for envelope in envelopes:
                 self.event_store.append_in_session(session, envelope)
                 self.outbox_repo.enqueue_in_session(session, envelope)
@@ -378,12 +386,20 @@ class PostgresExecutionOutboxPublisher:
                 command_type=command_type,
                 command_payload=command_payload,
             )
+            saved_obligation = None
             if obligation is not None:
-                self.obligation_repo.save_obligation_in_session(session, obligation)
+                saved_obligation = self.obligation_repo.save_obligation_in_session(session, obligation)
             envelopes = [self._order_update_envelope(key=key, persisted=persisted)]
             summary = self._execution_error_summary(previous=previous, persisted=persisted)
             if summary is not None:
                 envelopes.append(summary)
+            if saved_obligation is not None:
+                envelopes.append(
+                    self._obligation_update_envelope(
+                        obligation=saved_obligation,
+                        source_component="execution_engine",
+                    )
+                )
             for envelope in envelopes:
                 self.event_store.append_in_session(session, envelope)
                 self.outbox_repo.enqueue_in_session(session, envelope)
@@ -642,16 +658,27 @@ class PostgresExecutionOutboxPublisher:
                 session.rollback()
                 return False
             self._ensure_execution_fill_row(session, fill=fill)
+            saved_obligation = None
             if obligation is not None:
-                self.obligation_repo.save_obligation_in_session(session, obligation)
-            envelope = build_envelope(
-                topic=topics.FILL_EVENTS,
-                key=fill.symbol,
-                payload_model=fill,
-                source_component="execution_engine",
-            )
-            self.event_store.append_in_session(session, envelope)
-            self.outbox_repo.enqueue_in_session(session, envelope)
+                saved_obligation = self.obligation_repo.save_obligation_in_session(session, obligation)
+            envelopes = [
+                build_envelope(
+                    topic=topics.FILL_EVENTS,
+                    key=fill.symbol,
+                    payload_model=fill,
+                    source_component="execution_engine",
+                )
+            ]
+            if saved_obligation is not None:
+                envelopes.append(
+                    self._obligation_update_envelope(
+                        obligation=saved_obligation,
+                        source_component="execution_engine",
+                    )
+                )
+            for envelope in envelopes:
+                self.event_store.append_in_session(session, envelope)
+                self.outbox_repo.enqueue_in_session(session, envelope)
             session.commit()
         return True
 
@@ -710,12 +737,13 @@ class PostgresExecutionOutboxPublisher:
             if summary is not None:
                 envelopes.append(summary)
             # 逐 fill 写入同一 session
+            latest_saved_obligation: OrderObligation | None = None
             for fill, obl in zip(fills, obligations_per_fill):
                 saved = self.execution_repo.save_fill_in_session(session, fill)  # type: ignore[attr-defined]
                 if saved:
                     self._ensure_execution_fill_row(session, fill=fill)
                     if obl is not None:
-                        self.obligation_repo.save_obligation_in_session(session, obl)
+                        latest_saved_obligation = self.obligation_repo.save_obligation_in_session(session, obl)
                     envelopes.append(
                         build_envelope(
                             topic=topics.FILL_EVENTS,
@@ -727,7 +755,14 @@ class PostgresExecutionOutboxPublisher:
                     saved_fills.append(fill)
             # 终态 obligation finalization
             if final_obligation is not None:
-                self.obligation_repo.save_obligation_in_session(session, final_obligation)
+                latest_saved_obligation = self.obligation_repo.save_obligation_in_session(session, final_obligation)
+            if latest_saved_obligation is not None:
+                envelopes.append(
+                    self._obligation_update_envelope(
+                        obligation=latest_saved_obligation,
+                        source_component="execution_engine",
+                    )
+                )
             for envelope in envelopes:
                 self.event_store.append_in_session(session, envelope)
                 self.outbox_repo.enqueue_in_session(session, envelope)
@@ -891,6 +926,19 @@ class PostgresExecutionOutboxPublisher:
             topic=topics.ORDER_UPDATES,
             key=key,
             payload_model=persisted,
+            source_component=source_component,
+        )
+
+    @staticmethod
+    def _obligation_update_envelope(
+        *,
+        obligation: OrderObligation,
+        source_component: str,
+    ) -> EventEnvelope:
+        return build_envelope(
+            topic=topics.OBLIGATION_UPDATES,
+            key=obligation.client_order_id,
+            payload_model=obligation,
             source_component=source_component,
         )
 

@@ -259,6 +259,200 @@ def test_exit_execution_writer_preserves_sticky_cancel_on_stale_parent_save() ->
     assert saved.aggregate_version == 6
 
 
+def test_exit_execution_writer_preserves_terminal_parent_on_stale_save() -> None:
+    repo = InMemoryExitExecutionRepository()
+    writer = ExitExecutionWriter(repo)
+    current = ExitExecutionIntent(
+        parent_intent_id="parent_exit_terminal_merge",
+        execution_chain_id="chain_exit_terminal_merge",
+        symbol="BTC-USDT-SWAP",
+        side="sell",
+        intent_kind="close",
+        target_exit_quantity=Decimal("0.01"),
+        aggregated_filled_quantity=Decimal("0.01"),
+        remaining_dispatchable_quantity=Decimal("0"),
+        remaining_unresolved_quantity=Decimal("0"),
+        aggregate_status="COMPLETED",
+        reconciliation_state="clean",
+        child_order_ids=["child_done"],
+        completed_at=utc_now(),
+        aggregate_version=7,
+    )
+    repo.save_exit_execution_intent(current)
+    stale_refresh = current.model_copy(
+        update={
+            "aggregated_filled_quantity": Decimal("0"),
+            "remaining_dispatchable_quantity": Decimal("0.01"),
+            "remaining_unresolved_quantity": Decimal("0.01"),
+            "aggregate_status": "WORKING",
+            "child_order_ids": [],
+            "completed_at": None,
+            "aggregate_version": 6,
+        }
+    )
+
+    saved = writer.save_exit_execution_intent(
+        stale_refresh,
+        source_component="test",
+        reason_code="stale_terminal_refresh",
+    )
+
+    assert saved.aggregate_status == "COMPLETED"
+    assert saved.aggregated_filled_quantity == Decimal("0.01")
+    assert saved.remaining_dispatchable_quantity == Decimal("0")
+    assert saved.child_order_ids == ["child_done"]
+    assert saved.completed_at == current.completed_at
+    assert saved.aggregate_version == 8
+
+
+def test_exit_execution_writer_preserves_terminal_snapshot_on_stale_same_status_save() -> None:
+    repo = InMemoryExitExecutionRepository()
+    writer = ExitExecutionWriter(repo)
+    current = ExitExecutionIntent(
+        parent_intent_id="parent_exit_terminal_same_status_merge",
+        execution_chain_id="chain_exit_terminal_same_status_merge",
+        symbol="BTC-USDT-SWAP",
+        side="sell",
+        intent_kind="close",
+        target_exit_quantity=Decimal("0.01"),
+        aggregated_filled_quantity=Decimal("0.01"),
+        remaining_dispatchable_quantity=Decimal("0"),
+        remaining_unresolved_quantity=Decimal("0"),
+        aggregate_status="COMPLETED",
+        reconciliation_state="clean",
+        child_order_ids=["child_done"],
+        completed_at=utc_now(),
+        aggregate_version=7,
+    )
+    repo.save_exit_execution_intent(current)
+    stale_refresh = current.model_copy(
+        update={
+            "aggregated_filled_quantity": Decimal("0.005"),
+            "remaining_dispatchable_quantity": Decimal("0.005"),
+            "remaining_unresolved_quantity": Decimal("0.005"),
+            "child_order_ids": ["child_stale"],
+            "aggregate_version": 6,
+        }
+    )
+
+    saved = writer.save_exit_execution_intent(
+        stale_refresh,
+        source_component="test",
+        reason_code="stale_terminal_same_status_refresh",
+    )
+
+    assert saved.aggregate_status == "COMPLETED"
+    assert saved.aggregated_filled_quantity == Decimal("0.01")
+    assert saved.remaining_dispatchable_quantity == Decimal("0")
+    assert saved.child_order_ids == ["child_done"]
+    assert saved.aggregate_version == 8
+
+
+def test_exit_execution_writer_preserves_terminal_parent_during_child_recompute() -> None:
+    repo = InMemoryExitExecutionRepository()
+    writer = ExitExecutionWriter(repo)
+    current = ExitExecutionIntent(
+        parent_intent_id="parent_exit_terminal_recompute",
+        execution_chain_id="chain_exit_terminal_recompute",
+        symbol="BTC-USDT-SWAP",
+        side="sell",
+        intent_kind="close",
+        target_exit_quantity=Decimal("0.01"),
+        aggregated_filled_quantity=Decimal("0.01"),
+        remaining_dispatchable_quantity=Decimal("0"),
+        remaining_unresolved_quantity=Decimal("0"),
+        aggregate_status="COMPLETED",
+        reconciliation_state="clean",
+        child_order_ids=["child_done"],
+        completed_at=utc_now(),
+        aggregate_version=7,
+    )
+    repo.save_exit_execution_intent(current)
+    child_ref = ChildExitOrderRef(
+        parent_intent_id=current.parent_intent_id,
+        child_order_id="child_working",
+        client_order_id="child_working",
+        execution_chain_id=current.execution_chain_id,
+        symbol=current.symbol,
+        planned_quantity=Decimal("0.01"),
+        child_status="SUBMITTED",
+        aggregate_category="WORKING",
+    )
+
+    _saved_child, saved = writer.save_child_ref_and_recompute_parent(
+        parent_intent=current,
+        child_ref=child_ref,
+        recompute_parent=lambda parent_intent, child_refs: parent_intent.model_copy(
+            update={
+                "aggregated_filled_quantity": Decimal("0"),
+                "remaining_dispatchable_quantity": Decimal("0.01"),
+                "remaining_unresolved_quantity": Decimal("0.01"),
+                "aggregate_status": "WORKING",
+                "child_order_ids": [ref.client_order_id for ref in child_refs],
+                "completed_at": None,
+                "aggregate_version": int(parent_intent.aggregate_version) + 1,
+            }
+        ),
+        source_component="test",
+        reason_code="terminal_child_recompute",
+    )
+
+    assert saved.aggregate_status == "COMPLETED"
+    assert saved.aggregated_filled_quantity == Decimal("0.01")
+    assert saved.remaining_dispatchable_quantity == Decimal("0")
+    assert saved.child_order_ids == ["child_done"]
+    assert saved.completed_at == current.completed_at
+    assert saved.aggregate_version == 8
+
+
+def test_exit_execution_writer_preserves_review_resume_issue_on_stale_save() -> None:
+    repo = InMemoryExitExecutionRepository()
+    writer = ExitExecutionWriter(repo)
+    current = ExitExecutionIntent(
+        parent_intent_id="parent_exit_review_merge",
+        execution_chain_id="chain_exit_review_merge",
+        symbol="BTC-USDT-SWAP",
+        side="sell",
+        intent_kind="close",
+        target_exit_quantity=Decimal("0.01"),
+        aggregate_status="REVIEW_REQUIRED",
+        reconciliation_state="review_required",
+        operator_review_required=True,
+        operator_review_reason="child_unknown_truth_requires_review",
+        metadata={
+            "resume_issue": {
+                "kind": "resume_limit_lookup_failed",
+                "operator_review_required": True,
+            }
+        },
+        aggregate_version=3,
+    )
+    repo.save_exit_execution_intent(current)
+    stale_refresh = current.model_copy(
+        update={
+            "aggregate_status": "WORKING",
+            "reconciliation_state": "clean",
+            "operator_review_required": False,
+            "operator_review_reason": None,
+            "metadata": {},
+            "aggregate_version": 2,
+        }
+    )
+
+    saved = writer.save_exit_execution_intent(
+        stale_refresh,
+        source_component="test",
+        reason_code="stale_review_refresh",
+    )
+
+    assert saved.aggregate_status == "REVIEW_REQUIRED"
+    assert saved.reconciliation_state == "review_required"
+    assert saved.operator_review_required is True
+    assert saved.operator_review_reason == "child_unknown_truth_requires_review"
+    assert saved.metadata["resume_issue"]["kind"] == "resume_limit_lookup_failed"
+    assert saved.aggregate_version == 4
+
+
 @pytest.mark.asyncio
 async def test_postgres_obligation_direct_reserve_requires_writer() -> None:
     settings = AATSSettings.model_validate(

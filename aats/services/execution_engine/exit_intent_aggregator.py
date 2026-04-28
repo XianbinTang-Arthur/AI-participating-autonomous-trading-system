@@ -749,7 +749,6 @@ def refresh_exit_execution_intents(
             states_by_client_order_id=states_by_client_order_id,
             states_by_execution_chain=states_by_execution_chain,
             exit_execution_repo=exit_execution_repo,
-            exit_execution_writer=writer,
         )
         if not child_refs:
             if parent.aggregate_status in _TERMINAL_PARENT_STATUSES:
@@ -763,13 +762,18 @@ def refresh_exit_execution_intents(
                 )
             )
             continue
-        recomputed = recompute_exit_execution_intent(
-            parent_intent=clear_resume_issue(parent, kind=MISSING_CHILD_REFS_RESUME_ISSUE_KIND),
-            child_refs=child_refs,
-        )
         refreshed.append(
-            writer.save_exit_execution_intent(
-                recomputed,
+            writer.save_child_refs_and_recompute_parent(
+                parent_intent=parent,
+                child_refs=child_refs,
+                transform_parent=lambda parent_intent: clear_resume_issue(
+                    parent_intent,
+                    kind=MISSING_CHILD_REFS_RESUME_ISSUE_KIND,
+                ),
+                recompute_parent=lambda parent_intent, persisted_child_refs: recompute_exit_execution_intent(
+                    parent_intent=parent_intent,
+                    child_refs=persisted_child_refs,
+                ),
                 source_component="exit_intent_aggregator",
                 reason_code="refresh_parent_from_child_refs",
             )
@@ -850,7 +854,6 @@ def _refreshed_child_refs_for_parent(
     states_by_client_order_id: dict[str, OrderState],
     states_by_execution_chain: dict[str, list[OrderState]],
     exit_execution_repo: ExitExecutionRepository,
-    exit_execution_writer: ExitExecutionWriter,
 ) -> list[ChildExitOrderRef]:
     refreshed_by_child_id: dict[str, ChildExitOrderRef] = {}
     for existing_ref in exit_execution_repo.child_refs_for_parent(parent_intent_id=parent.parent_intent_id):
@@ -863,11 +866,6 @@ def _refreshed_child_refs_for_parent(
             order_state=state,
             settings=settings,
         )
-        exit_execution_writer.save_child_exit_order_ref(
-            refreshed_ref,
-            source_component="exit_intent_aggregator",
-            reason_code="refresh_existing_child_ref",
-        )
         refreshed_by_child_id[refreshed_ref.client_order_id] = refreshed_ref
     for state in states_by_execution_chain.get(parent.execution_chain_id, []):
         if not is_risk_reducing_order_state(state):
@@ -878,11 +876,6 @@ def _refreshed_child_refs_for_parent(
             parent_intent_id=parent.parent_intent_id,
             order_state=state,
             settings=settings,
-        )
-        exit_execution_writer.save_child_exit_order_ref(
-            refreshed_ref,
-            source_component="exit_intent_aggregator",
-            reason_code="reconstruct_missing_child_ref",
         )
         refreshed_by_child_id[refreshed_ref.client_order_id] = refreshed_ref
     return list(refreshed_by_child_id.values())
