@@ -92,6 +92,8 @@ IMPULSE_CHASE_GUARD_CODE_MARKERS = (
 )
 OKX_HEDGE_SCALE_IN_MISMATCH_REASON = "okx_leg_action_mismatch_with_position_intent"
 CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE = "execution_command_missing_for_created_order"
+CLAIMED_SUBMIT_STUCK_ROOT_CAUSE = "execution_submit_command_claimed_without_terminal_order_ack"
+CLAIMED_SUBMIT_RECOVERY_CONFIRMATION_PREFIX = "resolve_claimed_submit_as_failed:"
 OKX_HEDGE_SCALE_IN_CODE_MARKERS = {
     "aats/schemas/execution.py": (
         "def position_intent_matches_leg_intent",
@@ -409,6 +411,156 @@ with engine.connect() as conn:
             "execution_orders": execution_open_orders,
             "legacy_order_states": legacy_open_order_states,
         },
+    }
+
+    claimed_submit_counts = dict(conn.execute(text(
+        "select count(*) as total, "
+        "       count(*) filter (where o.created_at >= now() - interval '24 hour') as last_24h, "
+        "       count(*) filter (where o.created_at >= now() - interval '1 hour') as last_1h, "
+        "       min(o.created_at) as oldest_created_at, "
+        "       max(o.updated_at) as latest_updated_at "
+        "from execution_orders o "
+        "join execution_commands c on c.order_id = o.order_id "
+        "where o.symbol = :symbol "
+        "and o.state in ('CREATED', 'SUBMITTING') "
+        "and o.venue_order_id is null "
+        "and c.command_type = 'submit' "
+        "and c.state = 'CLAIMED' "
+        "and not exists ("
+        "    select 1 from execution_fills f "
+        "    where f.order_id = o.order_id or f.client_order_id = o.client_order_id"
+        ")"
+    ), {"symbol": symbol}).mappings().first() or {})
+    latest_claimed_submit = conn.execute(text(
+        "select o.order_id, o.client_order_id, o.intent_id, o.decision_id, "
+        "       o.symbol, o.state as execution_order_state, o.venue_order_id, "
+        "       o.position_intent, o.reduce_only, o.close_only, o.product_type, o.margin_mode, "
+        "       o.created_at as order_created_at, o.updated_at as order_updated_at, "
+        "       o.raw_payload ->> 'status' as raw_payload_status, "
+        "       o.raw_payload ->> 'venue_order_id' as raw_payload_venue_order_id, "
+        "       o.raw_payload ->> 'exchange_order_id' as raw_payload_exchange_order_id, "
+        "       s.status as order_state_status, s.exchange_order_id, "
+        "       s.payload ->> 'status' as order_state_payload_status, "
+        "       s.payload ->> 'exchange_order_id' as order_state_payload_exchange_order_id, "
+        "       s.row_version as order_state_row_version, "
+        "       c.command_id, c.state as command_state, c.attempt_count, c.last_error, "
+        "       c.created_at as command_created_at, c.updated_at as command_updated_at, "
+        "       coalesce(f.fill_count, 0) as execution_fill_count, "
+        "       coalesce(fe.fill_event_count, 0) as fill_event_count, "
+        "       ob.obligation_id, ob.status as obligation_status "
+        "from execution_orders o "
+        "join execution_commands c on c.order_id = o.order_id "
+        "left join order_states s on s.client_order_id = o.client_order_id "
+        "left join ("
+        "    select order_id, client_order_id, count(*) as fill_count "
+        "    from execution_fills group by order_id, client_order_id"
+        ") f on f.order_id = o.order_id or f.client_order_id = o.client_order_id "
+        "left join ("
+        "    select client_order_id, count(*) as fill_event_count "
+        "    from fill_events group by client_order_id"
+        ") fe on fe.client_order_id = o.client_order_id "
+        "left join order_obligations ob on ob.client_order_id = o.client_order_id "
+        "where o.symbol = :symbol "
+        "and o.state in ('CREATED', 'SUBMITTING') "
+        "and o.venue_order_id is null "
+        "and c.command_type = 'submit' "
+        "and c.state = 'CLAIMED' "
+        "and coalesce(f.fill_count, 0) = 0 "
+        "order by o.updated_at desc, c.updated_at desc "
+        "limit 1"
+    ), {"symbol": symbol}).mappings().first()
+    latest_reconciliation = conn.execute(text(
+        "select reconciliation_id, decision_id, as_of_ts, created_at, severity, halt_required, "
+        "       product_type, margin_mode, primary_symbol, "
+        "       payload ->> 'recommended_operator_action' as recommended_operator_action, "
+        "       payload ->> 'auto_repairable' as auto_repairable, "
+        "       payload ->> 'safe_to_resume' as safe_to_resume "
+        "from reconciliation_reports "
+        "order by as_of_ts desc, created_at desc limit 1"
+    )).mappings().first()
+    latest_baseline = conn.execute(text(
+        "select generation_id, baseline_kind, account_source, product_type, margin_mode, "
+        "       allowed_symbols, exchange_snapshot_ts, imported_at, "
+        "       safe_for_automatic_continuation, requires_operator_review, "
+        "       operator_action_ref, trigger_reason, reason_codes, "
+        "       balance_count, position_count, open_order_count, fill_count, created_at "
+        "from baseline_generations "
+        "order by imported_at desc, created_at desc limit 1"
+    )).mappings().first()
+    claimed_submit_client_order_id = (
+        latest_claimed_submit["client_order_id"] if latest_claimed_submit else None
+    )
+    claimed_submit_findings = []
+    claimed_submit_finding_counts = {}
+    if latest_reconciliation and claimed_submit_client_order_id:
+        claimed_submit_findings = [
+            dict(row)
+            for row in conn.execute(text(
+                "select finding_id, scope_kind, scope_ref, layer, finding_type, severity_class, "
+                "       review_required, only_reduce_required, halt_required, blocks_resume, "
+                "       reason_code, created_at "
+                "from reconciliation_findings "
+                "where reconciliation_id = :reconciliation_id "
+                "and (scope_ref = :client_order_id or details::text like '%' || :client_order_id || '%') "
+                "order by created_at desc"
+            ), {
+                "reconciliation_id": latest_reconciliation["reconciliation_id"],
+                "client_order_id": claimed_submit_client_order_id,
+            }).mappings().all()
+        ]
+        claimed_submit_finding_counts = dict(conn.execute(text(
+            "select count(*) as total, "
+            "       count(*) filter (where review_required or only_reduce_required "
+            "           or halt_required or blocks_resume) as blocking, "
+            "       count(*) filter (where severity_class = 'info' "
+            "           and reason_code = 'local_fill_older_than_exchange_lookback_window') "
+            "           as historic_orphan_fill_info, "
+            "       count(*) filter (where scope_ref = :client_order_id "
+            "           or details::text like '%' || :client_order_id || '%') as mentions_stuck_order "
+            "from reconciliation_findings "
+            "where reconciliation_id = :reconciliation_id"
+        ), {
+            "reconciliation_id": latest_reconciliation["reconciliation_id"],
+            "client_order_id": claimed_submit_client_order_id,
+        }).mappings().first() or {})
+    claimed_submit_operator_actions = {}
+    latest_claimed_submit_operator_action = None
+    if claimed_submit_client_order_id:
+        claimed_submit_operator_actions = dict(conn.execute(text(
+            "select count(*) filter (where payload::text ilike '%resolve_stuck_submission%') "
+            "           as resolve_stuck_submission_total, "
+            "       count(*) filter (where payload::text ilike '%' || :client_order_id || '%') "
+            "           as mentions_stuck_order_total, "
+            "       count(*) filter (where payload::text ilike '%resolve_stuck_submission%' "
+            "           and payload::text ilike '%' || :client_order_id || '%') "
+            "           as resolve_stuck_submission_for_order "
+            "from event_store where topic = 'system.operator_actions'"
+        ), {"client_order_id": claimed_submit_client_order_id}).mappings().first() or {})
+        latest_claimed_submit_operator_action = conn.execute(text(
+            "select event_id, event_timestamp, event_type, source_component, "
+            "       payload ->> 'action' as action, payload ->> 'status' as status, "
+            "       payload ->> 'reason' as reason "
+            "from event_store "
+            "where topic = 'system.operator_actions' "
+            "and payload::text ilike '%' || :client_order_id || '%' "
+            "order by event_timestamp desc, sequence_id desc limit 1"
+        ), {"client_order_id": claimed_submit_client_order_id}).mappings().first()
+    claimed_submit_stuck_submission = {
+        "symbol": symbol,
+        "root_cause": "execution_submit_command_claimed_without_terminal_order_ack",
+        "required_operator_confirmation_prefix": "resolve_claimed_submit_as_failed:",
+        "coverage": claimed_submit_counts,
+        "latest_order": dict(latest_claimed_submit) if latest_claimed_submit else None,
+        "latest_reconciliation": dict(latest_reconciliation) if latest_reconciliation else None,
+        "latest_reconciliation_finding_counts": claimed_submit_finding_counts,
+        "latest_reconciliation_findings_for_order": claimed_submit_findings,
+        "latest_baseline": dict(latest_baseline) if latest_baseline else None,
+        "operator_action_counts": claimed_submit_operator_actions,
+        "latest_operator_action_for_order": (
+            dict(latest_claimed_submit_operator_action)
+            if latest_claimed_submit_operator_action
+            else None
+        ),
     }
     impulse_chase_guard_flags = (
         "long_impulse_entry_post_spike_pullback_unconfirmed",
@@ -1120,6 +1272,7 @@ print(json.dumps({
     "slippage_cost_calibration": slippage_cost_calibration,
     "directional_episode_attribution": directional_episode_attribution,
     "target_convergence_guard": target_convergence_guard,
+    "claimed_submit_stuck_submission": claimed_submit_stuck_submission,
     "directional_impulse_chase_guard": directional_impulse_chase_guard,
     "created_no_command_directional_order": created_no_command_directional_order,
     "okx_hedge_scale_in_intent": okx_hedge_scale_in_intent,
@@ -3456,6 +3609,93 @@ def int_or_zero(value: Any) -> int:
         return 0
 
 
+def summarize_claimed_submit_stuck_submission_truth(
+    db: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    raw = as_dict(db.get("claimed_submit_stuck_submission"))
+    if not db.get("ok"):
+        return {
+            "status": "missing_database_truth",
+            "smallest_missing_field": "database_truth",
+            "root_cause": CLAIMED_SUBMIT_STUCK_ROOT_CAUSE,
+            "report_generated_at": report_generated_at,
+            "interpretation": "database probe did not return authoritative live facts",
+        }
+    if not raw:
+        return {
+            "status": "missing_claimed_submit_stuck_submission_probe",
+            "smallest_missing_field": "database_truth.claimed_submit_stuck_submission",
+            "root_cause": CLAIMED_SUBMIT_STUCK_ROOT_CAUSE,
+            "report_generated_at": report_generated_at,
+            "interpretation": "runtime truth report lacks claimed submit stuck-submission coverage",
+        }
+
+    coverage = as_dict(raw.get("coverage"))
+    latest_order = as_dict(raw.get("latest_order"))
+    latest_reconciliation = as_dict(raw.get("latest_reconciliation"))
+    latest_baseline = as_dict(raw.get("latest_baseline"))
+    finding_counts = as_dict(raw.get("latest_reconciliation_finding_counts"))
+    operator_action_counts = as_dict(raw.get("operator_action_counts"))
+    count = int_or_zero(coverage.get("total"))
+
+    if count == 0:
+        status = "verified_no_claimed_submit_stuck_submission"
+        smallest_missing_field = None
+        current_blocker = None
+        required_confirmation = None
+        interpretation = "no CREATED/SUBMITTING no-venue order has a CLAIMED submit command without fills"
+    else:
+        client_order_id = latest_order.get("client_order_id")
+        required_confirmation = (
+            f"{CLAIMED_SUBMIT_RECOVERY_CONFIRMATION_PREFIX}{client_order_id}"
+            if client_order_id
+            else None
+        )
+        action_count = int_or_zero(operator_action_counts.get("resolve_stuck_submission_for_order"))
+        if action_count > 0:
+            status = "recovery_action_attempted_claimed_submit_still_present"
+            interpretation = (
+                "a resolve_stuck_submission action mentions the order, but the claimed submit blocker still exists"
+            )
+        else:
+            status = "blocked_external_operator_confirmation_required"
+            interpretation = (
+                "claimed submit outcome is unknown on exchange; protected recovery requires explicit operator "
+                "confirmation that OKX has no matching order"
+            )
+        smallest_missing_field = "operator_confirmation"
+        current_blocker = "external_operator_confirmation_required_before_resolve_stuck_submission"
+
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing_field,
+        "root_cause": raw.get("root_cause") or CLAIMED_SUBMIT_STUCK_ROOT_CAUSE,
+        "report_generated_at": report_generated_at,
+        "symbol": raw.get("symbol"),
+        "current_blocker": current_blocker,
+        "required_operator_confirmation": required_confirmation,
+        "coverage": {
+            "claimed_submit_stuck_submission_count": count,
+            "claimed_submit_stuck_submission_24h": int_or_zero(coverage.get("last_24h")),
+            "claimed_submit_stuck_submission_1h": int_or_zero(coverage.get("last_1h")),
+            "oldest_created_at": coverage.get("oldest_created_at"),
+            "latest_updated_at": coverage.get("latest_updated_at"),
+        },
+        "latest_order": latest_order or None,
+        "latest_reconciliation": latest_reconciliation or None,
+        "latest_reconciliation_finding_counts": finding_counts,
+        "latest_reconciliation_findings_for_order": as_list(
+            raw.get("latest_reconciliation_findings_for_order"),
+        ),
+        "latest_baseline": latest_baseline or None,
+        "operator_action_counts": operator_action_counts,
+        "latest_operator_action_for_order": raw.get("latest_operator_action_for_order"),
+        "interpretation": interpretation,
+    }
+
+
 def summarize_target_convergence_guard_truth(
     db: dict[str, Any],
     git: dict[str, Any],
@@ -4843,6 +5083,20 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     created_no_command_directional_order_coverage = as_dict(
         created_no_command_directional_order.get("coverage")
     )
+    claimed_submit_stuck_submission = as_dict(report.get("claimed_submit_stuck_submission_truth"))
+    claimed_submit_stuck_submission_coverage = as_dict(
+        claimed_submit_stuck_submission.get("coverage")
+    )
+    claimed_submit_latest_order = as_dict(claimed_submit_stuck_submission.get("latest_order"))
+    claimed_submit_latest_reconciliation = as_dict(
+        claimed_submit_stuck_submission.get("latest_reconciliation")
+    )
+    claimed_submit_latest_baseline = as_dict(
+        claimed_submit_stuck_submission.get("latest_baseline")
+    )
+    claimed_submit_operator_action_counts = as_dict(
+        claimed_submit_stuck_submission.get("operator_action_counts")
+    )
     directional_attribution_coverage = as_dict(directional_attribution.get("coverage"))
     directional_pretrade_microstructure = as_dict(directional_attribution.get("pretrade_microstructure"))
     directional_pretrade_microstructure_coverage = as_dict(
@@ -5117,6 +5371,68 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "created_no_command_directional_order_latest_created_at": (
             created_no_command_directional_order_coverage.get("latest_created_at")
         ),
+        "claimed_submit_stuck_submission_truth_status": claimed_submit_stuck_submission.get("status"),
+        "claimed_submit_stuck_submission_smallest_missing_field": (
+            claimed_submit_stuck_submission.get("smallest_missing_field")
+        ),
+        "claimed_submit_stuck_submission_root_cause": claimed_submit_stuck_submission.get("root_cause"),
+        "claimed_submit_stuck_submission_count": (
+            claimed_submit_stuck_submission_coverage.get("claimed_submit_stuck_submission_count")
+        ),
+        "claimed_submit_stuck_submission_24h": (
+            claimed_submit_stuck_submission_coverage.get("claimed_submit_stuck_submission_24h")
+        ),
+        "claimed_submit_stuck_submission_1h": (
+            claimed_submit_stuck_submission_coverage.get("claimed_submit_stuck_submission_1h")
+        ),
+        "claimed_submit_stuck_submission_client_order_id": claimed_submit_latest_order.get(
+            "client_order_id"
+        ),
+        "claimed_submit_stuck_submission_command_id": claimed_submit_latest_order.get("command_id"),
+        "claimed_submit_stuck_submission_execution_order_state": claimed_submit_latest_order.get(
+            "execution_order_state"
+        ),
+        "claimed_submit_stuck_submission_command_state": claimed_submit_latest_order.get(
+            "command_state"
+        ),
+        "claimed_submit_stuck_submission_position_intent": claimed_submit_latest_order.get(
+            "position_intent"
+        ),
+        "claimed_submit_stuck_submission_reduce_only": claimed_submit_latest_order.get("reduce_only"),
+        "claimed_submit_stuck_submission_close_only": claimed_submit_latest_order.get("close_only"),
+        "claimed_submit_stuck_submission_execution_fill_count": claimed_submit_latest_order.get(
+            "execution_fill_count"
+        ),
+        "claimed_submit_stuck_submission_fill_event_count": claimed_submit_latest_order.get(
+            "fill_event_count"
+        ),
+        "claimed_submit_stuck_submission_required_operator_confirmation": (
+            claimed_submit_stuck_submission.get("required_operator_confirmation")
+        ),
+        "claimed_submit_stuck_submission_current_blocker": claimed_submit_stuck_submission.get(
+            "current_blocker"
+        ),
+        "claimed_submit_stuck_submission_latest_reconciliation_id": (
+            claimed_submit_latest_reconciliation.get("reconciliation_id")
+        ),
+        "claimed_submit_stuck_submission_latest_reconciliation_severity": (
+            claimed_submit_latest_reconciliation.get("severity")
+        ),
+        "claimed_submit_stuck_submission_latest_reconciliation_halt_required": (
+            claimed_submit_latest_reconciliation.get("halt_required")
+        ),
+        "claimed_submit_stuck_submission_latest_baseline_kind": claimed_submit_latest_baseline.get(
+            "baseline_kind"
+        ),
+        "claimed_submit_stuck_submission_latest_baseline_safe_for_automatic_continuation": (
+            claimed_submit_latest_baseline.get("safe_for_automatic_continuation")
+        ),
+        "claimed_submit_stuck_submission_latest_baseline_requires_operator_review": (
+            claimed_submit_latest_baseline.get("requires_operator_review")
+        ),
+        "claimed_submit_stuck_submission_resolve_action_count_for_order": (
+            claimed_submit_operator_action_counts.get("resolve_stuck_submission_for_order")
+        ),
         "directional_episode_recent_decision_count": directional_attribution_coverage.get("recent_decision_count"),
         "directional_episode_decisions_with_edge_cost": directional_attribution_coverage.get(
             "decisions_with_edge_cost"
@@ -5382,6 +5698,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         report["database_truth"],
         report["git"],
         report_generated_at=generated_at,
+    )
+    report["claimed_submit_stuck_submission_truth"] = (
+        summarize_claimed_submit_stuck_submission_truth(
+            report["database_truth"],
+            report_generated_at=generated_at,
+        )
     )
     report["directional_impulse_chase_guard_truth"] = summarize_directional_impulse_chase_guard_truth(
         report["database_truth"],

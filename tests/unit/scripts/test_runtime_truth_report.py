@@ -218,6 +218,9 @@ def test_db_probe_executable_directional_query_excludes_hold_current_notional() 
     assert "okx_hedge_scale_in_intent" in mod.DB_PROBE
     assert mod.CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE in mod.DB_PROBE
     assert "created_no_command_directional_order" in mod.DB_PROBE
+    assert mod.CLAIMED_SUBMIT_STUCK_ROOT_CAUSE in mod.DB_PROBE
+    assert "claimed_submit_stuck_submission" in mod.DB_PROBE
+    assert "resolve_claimed_submit_as_failed:" in mod.DB_PROBE
     assert (
         "status not in ('FILLED', 'CANCELED', 'REJECTED', 'BLOCKED', 'DRY_RUN', 'FAILED', 'EXPIRED')"
         in mod.DB_PROBE
@@ -2384,6 +2387,164 @@ def test_project_live_runtime_facts_exposes_created_no_command_directional_order
     )
     assert live_facts["created_no_command_directional_order_missing_total"] == 0
     assert live_facts["created_no_command_directional_order_missing_1h"] == 0
+
+
+def test_claimed_submit_stuck_submission_truth_requires_operator_confirmation() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "claimed_submit_stuck_submission": {
+            "symbol": "BTC-USDT-SWAP",
+            "root_cause": mod.CLAIMED_SUBMIT_STUCK_ROOT_CAUSE,
+            "coverage": {
+                "total": 1,
+                "last_24h": 1,
+                "last_1h": 0,
+                "oldest_created_at": "2026-04-28T03:40:50+08:00",
+                "latest_updated_at": "2026-04-28T03:40:57+08:00",
+            },
+            "latest_order": {
+                "client_order_id": "cl_stuck",
+                "command_id": "cmd_stuck",
+                "execution_order_state": "SUBMITTING",
+                "command_state": "CLAIMED",
+                "position_intent": "close_long",
+                "reduce_only": True,
+                "close_only": True,
+                "execution_fill_count": 0,
+                "fill_event_count": 0,
+            },
+            "latest_reconciliation": {
+                "reconciliation_id": "recon_stuck",
+                "severity": "HARD_MISMATCH",
+                "halt_required": True,
+            },
+            "latest_reconciliation_finding_counts": {
+                "total": 28,
+                "blocking": 3,
+                "mentions_stuck_order": 2,
+            },
+            "latest_reconciliation_findings_for_order": [
+                {"reason_code": "order_state_unknown_on_exchange", "blocks_resume": True},
+            ],
+            "latest_baseline": {
+                "baseline_kind": "operator_rebaseline",
+                "safe_for_automatic_continuation": True,
+                "requires_operator_review": False,
+            },
+            "operator_action_counts": {
+                "resolve_stuck_submission_for_order": 0,
+            },
+        },
+    }
+
+    summary = mod.summarize_claimed_submit_stuck_submission_truth(
+        db,
+        report_generated_at="2026-04-28T08:12:27Z",
+    )
+
+    assert summary["status"] == "blocked_external_operator_confirmation_required"
+    assert summary["smallest_missing_field"] == "operator_confirmation"
+    assert summary["root_cause"] == mod.CLAIMED_SUBMIT_STUCK_ROOT_CAUSE
+    assert summary["current_blocker"] == (
+        "external_operator_confirmation_required_before_resolve_stuck_submission"
+    )
+    assert summary["required_operator_confirmation"] == "resolve_claimed_submit_as_failed:cl_stuck"
+    assert summary["coverage"]["claimed_submit_stuck_submission_count"] == 1
+    assert summary["latest_order"]["command_state"] == "CLAIMED"
+
+
+def test_claimed_submit_stuck_submission_truth_reports_verified_absence() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "claimed_submit_stuck_submission": {
+            "symbol": "BTC-USDT-SWAP",
+            "root_cause": mod.CLAIMED_SUBMIT_STUCK_ROOT_CAUSE,
+            "coverage": {
+                "total": 0,
+                "last_24h": 0,
+                "last_1h": 0,
+                "oldest_created_at": None,
+                "latest_updated_at": None,
+            },
+        },
+    }
+
+    summary = mod.summarize_claimed_submit_stuck_submission_truth(
+        db,
+        report_generated_at="2026-04-28T08:12:27Z",
+    )
+
+    assert summary["status"] == "verified_no_claimed_submit_stuck_submission"
+    assert summary["smallest_missing_field"] is None
+    assert summary["required_operator_confirmation"] is None
+    assert summary["coverage"]["claimed_submit_stuck_submission_count"] == 0
+
+
+def test_project_live_runtime_facts_exposes_claimed_submit_stuck_submission_truth() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {"ok": True, "latest_decision": {}, "latest_executable_directional_decision": {}},
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+        "claimed_submit_stuck_submission_truth": {
+            "status": "blocked_external_operator_confirmation_required",
+            "smallest_missing_field": "operator_confirmation",
+            "root_cause": mod.CLAIMED_SUBMIT_STUCK_ROOT_CAUSE,
+            "current_blocker": "external_operator_confirmation_required_before_resolve_stuck_submission",
+            "required_operator_confirmation": "resolve_claimed_submit_as_failed:cl_stuck",
+            "coverage": {
+                "claimed_submit_stuck_submission_count": 1,
+                "claimed_submit_stuck_submission_24h": 1,
+                "claimed_submit_stuck_submission_1h": 0,
+            },
+            "latest_order": {
+                "client_order_id": "cl_stuck",
+                "command_id": "cmd_stuck",
+                "execution_order_state": "SUBMITTING",
+                "command_state": "CLAIMED",
+                "position_intent": "close_long",
+                "reduce_only": True,
+                "close_only": True,
+                "execution_fill_count": 0,
+                "fill_event_count": 0,
+            },
+            "latest_reconciliation": {
+                "reconciliation_id": "recon_stuck",
+                "severity": "HARD_MISMATCH",
+                "halt_required": True,
+            },
+            "latest_baseline": {
+                "baseline_kind": "operator_rebaseline",
+                "safe_for_automatic_continuation": True,
+                "requires_operator_review": False,
+            },
+            "operator_action_counts": {
+                "resolve_stuck_submission_for_order": 0,
+            },
+        },
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["claimed_submit_stuck_submission_truth_status"] == (
+        "blocked_external_operator_confirmation_required"
+    )
+    assert live_facts["claimed_submit_stuck_submission_client_order_id"] == "cl_stuck"
+    assert live_facts["claimed_submit_stuck_submission_command_id"] == "cmd_stuck"
+    assert live_facts["claimed_submit_stuck_submission_required_operator_confirmation"] == (
+        "resolve_claimed_submit_as_failed:cl_stuck"
+    )
+    assert live_facts["claimed_submit_stuck_submission_latest_reconciliation_severity"] == (
+        "HARD_MISMATCH"
+    )
+    assert live_facts["claimed_submit_stuck_submission_latest_baseline_kind"] == (
+        "operator_rebaseline"
+    )
+    assert live_facts["claimed_submit_stuck_submission_resolve_action_count_for_order"] == 0
 
 
 def test_artifact_last_known_is_non_authoritative_when_live_fact_differs(tmp_path: Path) -> None:
