@@ -2547,6 +2547,162 @@ def test_project_live_runtime_facts_exposes_claimed_submit_stuck_submission_trut
     assert live_facts["claimed_submit_stuck_submission_resolve_action_count_for_order"] == 0
 
 
+def test_claimed_submit_operator_handoff_truth_uses_latest_matching_artifact(tmp_path: Path) -> None:
+    mod = load_module()
+    artifact_dir = tmp_path / "artifacts" / "automation"
+    artifact_dir.mkdir(parents=True)
+    claimed_submit_truth = {
+        "coverage": {"claimed_submit_stuck_submission_count": 1},
+        "latest_order": {"client_order_id": "cl_stuck"},
+        "required_operator_confirmation": "resolve_claimed_submit_as_failed:cl_stuck",
+    }
+    old_handoff = {
+        "artifact_type": "claimed_submit_operator_handoff",
+        "generated_from_runtime_truth_at": "2026-04-28T08:00:00Z",
+        "handoff_status": "awaiting_external_operator_confirmation",
+        "next_action": "operator_verify_okx_absence_then_rerun_verifier_with_exact_confirmation",
+        "order": {
+            "client_order_id": "cl_old",
+            "command_id": "cmd_old",
+            "exact_confirmation_required": "resolve_claimed_submit_as_failed:cl_old",
+        },
+        "source_artifacts": {"runtime_truth": "old_runtime.json", "packet": "old_packet.json"},
+        "validation": {
+            "valid": True,
+            "ready_for_protected_recovery": False,
+            "operator_confirmation_matched": False,
+            "status": "awaiting_external_operator_confirmation",
+            "warnings": [],
+            "failures": [],
+        },
+    }
+    latest_handoff = {
+        "artifact_type": "claimed_submit_operator_handoff",
+        "generated_from_runtime_truth_at": "2026-04-28T10:50:30Z",
+        "handoff_status": "awaiting_external_operator_confirmation",
+        "next_action": "operator_verify_okx_absence_then_rerun_verifier_with_exact_confirmation",
+        "order": {
+            "client_order_id": "cl_stuck",
+            "command_id": "cmd_stuck",
+            "exact_confirmation_required": "resolve_claimed_submit_as_failed:cl_stuck",
+        },
+        "source_artifacts": {"runtime_truth": "latest_runtime.json", "packet": "packet.json"},
+        "validation": {
+            "valid": True,
+            "ready_for_protected_recovery": False,
+            "operator_confirmation_matched": False,
+            "status": "awaiting_external_operator_confirmation",
+            "warnings": ["runtime_reconciliation_id_changed_since_packet"],
+            "failures": [],
+        },
+    }
+    (artifact_dir / "claimed_submit_operator_handoff_2026_04_28T08_00_00Z.json").write_text(
+        json.dumps(old_handoff),
+        encoding="utf-8",
+    )
+    latest_path = artifact_dir / "claimed_submit_operator_handoff_2026_04_28T10_50_30Z.json"
+    latest_path.write_text(json.dumps(latest_handoff), encoding="utf-8")
+
+    summary = mod.summarize_claimed_submit_operator_handoff_truth(
+        tmp_path,
+        claimed_submit_truth,
+        report_generated_at="2026-04-28T11:13:33Z",
+    )
+
+    assert summary["status"] == "awaiting_external_operator_confirmation"
+    assert summary["smallest_missing_field"] == "operator_confirmation"
+    assert summary["artifact_path"] == "artifacts/automation/claimed_submit_operator_handoff_2026_04_28T10_50_30Z.json"
+    assert summary["valid"] is True
+    assert summary["ready_for_protected_recovery"] is False
+    assert summary["matches_current_order"] is True
+    assert summary["source_artifacts"]["runtime_truth"] == "latest_runtime.json"
+    assert summary["warnings"] == ["runtime_reconciliation_id_changed_since_packet"]
+
+
+def test_claimed_submit_operator_handoff_truth_rejects_mismatched_order(tmp_path: Path) -> None:
+    mod = load_module()
+    artifact_dir = tmp_path / "artifacts" / "automation"
+    artifact_dir.mkdir(parents=True)
+    claimed_submit_truth = {
+        "coverage": {"claimed_submit_stuck_submission_count": 1},
+        "latest_order": {"client_order_id": "cl_current"},
+        "required_operator_confirmation": "resolve_claimed_submit_as_failed:cl_current",
+    }
+    handoff = {
+        "artifact_type": "claimed_submit_operator_handoff",
+        "generated_from_runtime_truth_at": "2026-04-28T10:50:30Z",
+        "handoff_status": "ready_for_protected_recovery",
+        "next_action": "run_protected_resolve_stuck_submission",
+        "order": {
+            "client_order_id": "cl_old",
+            "command_id": "cmd_old",
+            "exact_confirmation_required": "resolve_claimed_submit_as_failed:cl_old",
+        },
+        "validation": {
+            "valid": True,
+            "ready_for_protected_recovery": True,
+            "operator_confirmation_matched": True,
+            "status": "ready_for_protected_recovery",
+            "warnings": [],
+            "failures": [],
+        },
+    }
+    (artifact_dir / "claimed_submit_operator_handoff_2026_04_28T10_50_30Z.json").write_text(
+        json.dumps(handoff),
+        encoding="utf-8",
+    )
+
+    summary = mod.summarize_claimed_submit_operator_handoff_truth(
+        tmp_path,
+        claimed_submit_truth,
+        report_generated_at="2026-04-28T11:13:33Z",
+    )
+
+    assert summary["status"] == "stale_or_mismatched_operator_handoff"
+    assert summary["smallest_missing_field"] == "operator_handoff.order.client_order_id"
+    assert summary["ready_for_protected_recovery"] is False
+    assert summary["matches_current_order"] is False
+
+
+def test_project_live_runtime_facts_exposes_claimed_submit_operator_handoff_truth() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {"ok": True, "latest_decision": {}, "latest_executable_directional_decision": {}},
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+        "claimed_submit_operator_handoff_truth": {
+            "status": "awaiting_external_operator_confirmation",
+            "smallest_missing_field": "operator_confirmation",
+            "current_blocker": "external_operator_confirmation_required_before_resolve_stuck_submission",
+            "artifact_path": "artifacts/automation/claimed_submit_operator_handoff_current.json",
+            "generated_from_runtime_truth_at": "2026-04-28T10:50:30Z",
+            "handoff_status": "awaiting_external_operator_confirmation",
+            "validation_status": "awaiting_external_operator_confirmation",
+            "next_action": "operator_verify_okx_absence_then_rerun_verifier_with_exact_confirmation",
+            "valid": True,
+            "ready_for_protected_recovery": False,
+            "operator_confirmation_matched": False,
+            "matches_current_order": True,
+            "matches_required_confirmation": True,
+            "source_artifacts": {"runtime_truth": "runtime.json", "packet": "packet.json"},
+        },
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["claimed_submit_operator_handoff_truth_status"] == (
+        "awaiting_external_operator_confirmation"
+    )
+    assert live_facts["claimed_submit_operator_handoff_artifact"] == (
+        "artifacts/automation/claimed_submit_operator_handoff_current.json"
+    )
+    assert live_facts["claimed_submit_operator_handoff_ready_for_protected_recovery"] is False
+    assert live_facts["claimed_submit_operator_handoff_matches_current_order"] is True
+    assert live_facts["claimed_submit_operator_handoff_source_packet"] == "packet.json"
+
+
 def test_artifact_last_known_is_non_authoritative_when_live_fact_differs(tmp_path: Path) -> None:
     mod = load_module()
     artifact_dir = tmp_path / "artifacts" / "automation"

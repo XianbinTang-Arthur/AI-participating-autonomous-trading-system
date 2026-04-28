@@ -94,6 +94,7 @@ OKX_HEDGE_SCALE_IN_MISMATCH_REASON = "okx_leg_action_mismatch_with_position_inte
 CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE = "execution_command_missing_for_created_order"
 CLAIMED_SUBMIT_STUCK_ROOT_CAUSE = "execution_submit_command_claimed_without_terminal_order_ack"
 CLAIMED_SUBMIT_RECOVERY_CONFIRMATION_PREFIX = "resolve_claimed_submit_as_failed:"
+CLAIMED_SUBMIT_OPERATOR_HANDOFF_PATTERN = "claimed_submit_operator_handoff_*.json"
 OKX_HEDGE_SCALE_IN_CODE_MARKERS = {
     "aats/schemas/execution.py": (
         "def position_intent_matches_leg_intent",
@@ -5050,6 +5051,152 @@ def load_artifact_runtime_projection(repo_root: Path, report_generated_at: str) 
     }
 
 
+def _relative_artifact_path(repo_root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(repo_root).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def load_latest_claimed_submit_operator_handoff(repo_root: Path) -> dict[str, Any] | None:
+    artifact_dir = repo_root / "artifacts" / "automation"
+    if not artifact_dir.exists():
+        return None
+
+    candidates: list[tuple[str, str, Path, dict[str, Any]]] = []
+    for path in artifact_dir.glob(CLAIMED_SUBMIT_OPERATOR_HANDOFF_PATTERN):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("artifact_type") != "claimed_submit_operator_handoff":
+            continue
+        generated_key = str(payload.get("generated_from_runtime_truth_at") or "")
+        candidates.append((generated_key, path.name, path, payload))
+
+    if not candidates:
+        return None
+
+    _, _, path, payload = sorted(candidates, key=lambda item: (item[0], item[1]))[-1]
+    result = dict(payload)
+    result["_artifact_path"] = _relative_artifact_path(repo_root, path)
+    return result
+
+
+def summarize_claimed_submit_operator_handoff_truth(
+    repo_root: Path,
+    claimed_submit_truth: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    claimed_submit = as_dict(claimed_submit_truth)
+    coverage = as_dict(claimed_submit.get("coverage"))
+    count = int_or_zero(coverage.get("claimed_submit_stuck_submission_count"))
+    current_order = as_dict(claimed_submit.get("latest_order"))
+    current_client_order_id = current_order.get("client_order_id")
+    required_confirmation = claimed_submit.get("required_operator_confirmation")
+
+    if count == 0:
+        return {
+            "status": "not_required_no_claimed_submit_blocker",
+            "smallest_missing_field": None,
+            "report_generated_at": report_generated_at,
+            "ready_for_protected_recovery": False,
+            "interpretation": "no claimed-submit stuck submission currently requires an operator handoff",
+        }
+
+    handoff = load_latest_claimed_submit_operator_handoff(repo_root)
+    if not handoff:
+        return {
+            "status": "missing_operator_handoff_artifact",
+            "smallest_missing_field": "artifacts.automation.claimed_submit_operator_handoff",
+            "report_generated_at": report_generated_at,
+            "current_client_order_id": current_client_order_id,
+            "required_operator_confirmation": required_confirmation,
+            "ready_for_protected_recovery": False,
+            "interpretation": "claimed-submit blocker exists, but no operator handoff artifact was found",
+        }
+
+    validation = as_dict(handoff.get("validation"))
+    order = as_dict(handoff.get("order"))
+    source_artifacts = as_dict(handoff.get("source_artifacts"))
+    handoff_client_order_id = order.get("client_order_id")
+    handoff_confirmation = order.get("exact_confirmation_required")
+    matches_current_order = (
+        not current_client_order_id
+        or handoff_client_order_id == current_client_order_id
+    )
+    matches_required_confirmation = (
+        not required_confirmation
+        or handoff_confirmation == required_confirmation
+    )
+    valid = bool(validation.get("valid"))
+    raw_ready = bool(validation.get("ready_for_protected_recovery"))
+    ready = bool(
+        valid
+        and raw_ready
+        and matches_current_order
+        and matches_required_confirmation
+    )
+
+    if not matches_current_order:
+        status = "stale_or_mismatched_operator_handoff"
+        smallest_missing_field = "operator_handoff.order.client_order_id"
+        current_blocker = "operator_handoff_does_not_match_current_claimed_submit_order"
+    elif not matches_required_confirmation:
+        status = "stale_or_mismatched_operator_handoff"
+        smallest_missing_field = "operator_handoff.order.exact_confirmation_required"
+        current_blocker = "operator_handoff_confirmation_does_not_match_current_required_confirmation"
+    elif ready:
+        status = "ready_for_protected_recovery"
+        smallest_missing_field = None
+        current_blocker = None
+    elif valid:
+        status = (
+            handoff.get("handoff_status")
+            or validation.get("status")
+            or "awaiting_external_operator_confirmation"
+        )
+        smallest_missing_field = "operator_confirmation"
+        current_blocker = "external_operator_confirmation_required_before_resolve_stuck_submission"
+    else:
+        status = "invalid_operator_handoff"
+        smallest_missing_field = "operator_handoff.validation.failures"
+        current_blocker = "operator_handoff_validation_failed"
+
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing_field,
+        "current_blocker": current_blocker,
+        "report_generated_at": report_generated_at,
+        "artifact_path": handoff.get("_artifact_path"),
+        "generated_from_runtime_truth_at": handoff.get("generated_from_runtime_truth_at"),
+        "handoff_status": handoff.get("handoff_status"),
+        "validation_status": validation.get("status"),
+        "next_action": handoff.get("next_action"),
+        "valid": valid,
+        "ready_for_protected_recovery": ready,
+        "raw_ready_for_protected_recovery": raw_ready,
+        "operator_confirmation_matched": bool(validation.get("operator_confirmation_matched")),
+        "matches_current_order": matches_current_order,
+        "matches_required_confirmation": matches_required_confirmation,
+        "current_client_order_id": current_client_order_id,
+        "handoff_client_order_id": handoff_client_order_id,
+        "command_id": order.get("command_id"),
+        "required_operator_confirmation": required_confirmation,
+        "handoff_exact_confirmation_required": handoff_confirmation,
+        "source_artifacts": source_artifacts,
+        "warnings": as_list(validation.get("warnings")),
+        "failures": as_list(validation.get("failures")),
+        "interpretation": (
+            "operator handoff is current only if it matches the live claimed-submit order "
+            "and the current required confirmation"
+        ),
+    }
+
+
 def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     db = report.get("database_truth") or {}
     execution_science = as_dict(report.get("execution_science_truth"))
@@ -5096,6 +5243,12 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     )
     claimed_submit_operator_action_counts = as_dict(
         claimed_submit_stuck_submission.get("operator_action_counts")
+    )
+    claimed_submit_operator_handoff = as_dict(
+        report.get("claimed_submit_operator_handoff_truth")
+    )
+    claimed_submit_operator_handoff_sources = as_dict(
+        claimed_submit_operator_handoff.get("source_artifacts")
     )
     directional_attribution_coverage = as_dict(directional_attribution.get("coverage"))
     directional_pretrade_microstructure = as_dict(directional_attribution.get("pretrade_microstructure"))
@@ -5433,6 +5586,41 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "claimed_submit_stuck_submission_resolve_action_count_for_order": (
             claimed_submit_operator_action_counts.get("resolve_stuck_submission_for_order")
         ),
+        "claimed_submit_operator_handoff_truth_status": claimed_submit_operator_handoff.get("status"),
+        "claimed_submit_operator_handoff_smallest_missing_field": (
+            claimed_submit_operator_handoff.get("smallest_missing_field")
+        ),
+        "claimed_submit_operator_handoff_current_blocker": (
+            claimed_submit_operator_handoff.get("current_blocker")
+        ),
+        "claimed_submit_operator_handoff_artifact": claimed_submit_operator_handoff.get("artifact_path"),
+        "claimed_submit_operator_handoff_generated_from_runtime_truth_at": (
+            claimed_submit_operator_handoff.get("generated_from_runtime_truth_at")
+        ),
+        "claimed_submit_operator_handoff_status": claimed_submit_operator_handoff.get("handoff_status"),
+        "claimed_submit_operator_handoff_validation_status": (
+            claimed_submit_operator_handoff.get("validation_status")
+        ),
+        "claimed_submit_operator_handoff_next_action": claimed_submit_operator_handoff.get("next_action"),
+        "claimed_submit_operator_handoff_valid": claimed_submit_operator_handoff.get("valid"),
+        "claimed_submit_operator_handoff_ready_for_protected_recovery": (
+            claimed_submit_operator_handoff.get("ready_for_protected_recovery")
+        ),
+        "claimed_submit_operator_handoff_operator_confirmation_matched": (
+            claimed_submit_operator_handoff.get("operator_confirmation_matched")
+        ),
+        "claimed_submit_operator_handoff_matches_current_order": (
+            claimed_submit_operator_handoff.get("matches_current_order")
+        ),
+        "claimed_submit_operator_handoff_matches_required_confirmation": (
+            claimed_submit_operator_handoff.get("matches_required_confirmation")
+        ),
+        "claimed_submit_operator_handoff_source_runtime_truth": (
+            claimed_submit_operator_handoff_sources.get("runtime_truth")
+        ),
+        "claimed_submit_operator_handoff_source_packet": (
+            claimed_submit_operator_handoff_sources.get("packet")
+        ),
         "directional_episode_recent_decision_count": directional_attribution_coverage.get("recent_decision_count"),
         "directional_episode_decisions_with_edge_cost": directional_attribution_coverage.get(
             "decisions_with_edge_cost"
@@ -5702,6 +5890,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["claimed_submit_stuck_submission_truth"] = (
         summarize_claimed_submit_stuck_submission_truth(
             report["database_truth"],
+            report_generated_at=generated_at,
+        )
+    )
+    report["claimed_submit_operator_handoff_truth"] = (
+        summarize_claimed_submit_operator_handoff_truth(
+            repo_root,
+            report["claimed_submit_stuck_submission_truth"],
             report_generated_at=generated_at,
         )
     )
