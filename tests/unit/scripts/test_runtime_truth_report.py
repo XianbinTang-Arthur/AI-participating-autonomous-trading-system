@@ -480,6 +480,97 @@ def test_execution_science_truth_reports_smallest_missing_orderbook_field() -> N
     assert summary["fill_feasibility_truth_status"] == "blocked_missing_orderbook_truth"
 
 
+def test_orderbook_payload_depth_truth_verifies_books5_sidecar_evidence() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "symbol": "BTC-USDT-SWAP",
+        "latest_orderbook_payloads": {
+            "exists": True,
+            "rows": [
+                {
+                    "channel": "bbo-tbt",
+                    "storage_table": "bronze.market_orderbook_payloads",
+                    "snapshot_table": "bronze.market_orderbook_bbo",
+                    "ts": "2026-04-29T00:59:59Z",
+                    "collector_sequence": 1001,
+                    "collector_sequence_scope": "per_ingest_run_symbol_channel",
+                    "ingest_run_id_prefix": "9a527fc4",
+                    "row_checksum_present": True,
+                    "checksum_version": "orderbook_row_v1",
+                    "capture_status": "diff_payload_persisted",
+                    "payload_hash_present": True,
+                    "payload_schema_version": "orderbook_payload_v1",
+                    "payload_kind": "okx_public_orderbook",
+                    "exchange_sequence_id_present": True,
+                    "previous_payload_hash_present": True,
+                },
+                {
+                    "channel": "books5",
+                    "storage_table": "bronze.market_orderbook_payloads",
+                    "snapshot_table": "bronze.market_orderbook_books5",
+                    "ts": "2026-04-29T01:00:01Z",
+                    "collector_sequence": 2002,
+                    "collector_sequence_scope": "per_ingest_run_symbol_channel",
+                    "ingest_run_id_prefix": "9a527fc4",
+                    "row_checksum_present": True,
+                    "checksum_version": "orderbook_row_v1",
+                    "capture_status": "diff_payload_persisted",
+                    "payload_hash_present": True,
+                    "payload_schema_version": "orderbook_payload_v1",
+                    "payload_kind": "okx_public_orderbook",
+                    "exchange_sequence_id_present": True,
+                    "previous_payload_hash_present": True,
+                },
+            ],
+        },
+    }
+    execution_science = {
+        "payload_sequence": {
+            "status": "sequence_continuous",
+            "window_minutes": 30,
+            "scopes": [
+                {
+                    "channel": "bbo-tbt",
+                    "row_count": 300,
+                    "sequence_gap_count": 0,
+                },
+                {
+                    "channel": "books5",
+                    "row_count": 600,
+                    "sequence_gap_count": 0,
+                },
+            ],
+            "capture_status_counts": [
+                {
+                    "capture_status": "diff_payload_persisted",
+                    "row_count": 900,
+                }
+            ],
+        },
+        "silver_orderbook": {
+            "status": "verified_silver_orderbook_bar_present",
+            "latest_bar_ts": "2026-04-29T00:45:00Z",
+            "books5_samples_n": 1528,
+            "bbo_samples_n": 845,
+            "spread_bps_mean": "0.0135",
+        },
+    }
+
+    truth = mod.summarize_orderbook_payload_depth_truth(raw, execution_science)
+
+    assert truth["status"] == "verified_books5_payload_depth_evidence_present"
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["books5_payload"]["payload_hash_present"] is True
+    assert truth["books5_payload"]["row_checksum_present"] is True
+    assert truth["books5_payload"]["exchange_sequence_id_present"] is True
+    assert truth["sequence"]["books5_row_count"] == 600
+    assert truth["sequence"]["books5_sequence_gap_count"] == 0
+    assert truth["sequence"]["diff_payload_persisted_row_count"] == 900
+    assert truth["silver_orderbook"]["books5_samples_n"] == 1528
+
+
 def test_slippage_cost_calibration_truth_verifies_fee_and_slippage_context() -> None:
     mod = load_module()
     db = {
@@ -2678,6 +2769,65 @@ def test_project_live_runtime_facts_exposes_primary_candidate_truth() -> None:
     assert live_facts["latest_decision_fill_feasibility_orderbook_spread_bps_mean"] == "0.0132"
     assert live_facts["latest_decision_fill_feasibility_trade_count"] == 15454
     assert live_facts["latest_decision_fill_feasibility_vwap_minus_mid_bps"] == "2.1660"
+
+
+def test_project_live_runtime_facts_exposes_orderbook_payload_depth_truth() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "orderbook_payload_depth_truth": {
+            "status": "verified_books5_payload_depth_evidence_present",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "books5_payload": {
+                "payload_hash_present": True,
+                "row_checksum_present": True,
+                "exchange_sequence_id_present": True,
+                "capture_status": "diff_payload_persisted",
+                "collector_sequence": 2002,
+            },
+            "bbo_payload": {
+                "payload_hash_present": True,
+            },
+            "sequence": {
+                "books5_row_count": 600,
+                "books5_sequence_gap_count": 0,
+                "bbo_row_count": 300,
+                "bbo_sequence_gap_count": 0,
+                "diff_payload_persisted_row_count": 900,
+            },
+            "silver_orderbook": {
+                "books5_samples_n": 1528,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["orderbook_payload_depth_truth_status"] == (
+        "verified_books5_payload_depth_evidence_present"
+    )
+    assert live_facts["orderbook_payload_depth_smallest_missing_field"] is None
+    assert live_facts["orderbook_payload_depth_raw_payload_exposed"] is False
+    assert live_facts["orderbook_payload_depth_books5_payload_hash_present"] is True
+    assert live_facts["orderbook_payload_depth_books5_row_checksum_present"] is True
+    assert live_facts["orderbook_payload_depth_books5_exchange_sequence_id_present"] is True
+    assert live_facts["orderbook_payload_depth_books5_capture_status"] == "diff_payload_persisted"
+    assert live_facts["orderbook_payload_depth_books5_collector_sequence"] == 2002
+    assert live_facts["orderbook_payload_depth_books5_row_count"] == 600
+    assert live_facts["orderbook_payload_depth_books5_sequence_gap_count"] == 0
+    assert live_facts["orderbook_payload_depth_bbo_payload_hash_present"] is True
+    assert live_facts["orderbook_payload_depth_bbo_row_count"] == 300
+    assert live_facts["orderbook_payload_depth_diff_payload_persisted_row_count"] == 900
+    assert live_facts["orderbook_payload_depth_silver_books5_samples_n"] == 1528
 
 
 def test_execution_order_payload_status_residual_truth_classifies_non_authoritative_status() -> None:

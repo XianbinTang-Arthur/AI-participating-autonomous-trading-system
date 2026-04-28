@@ -214,27 +214,34 @@ class TestCollectingBus(unittest.IsolatedAsyncioTestCase):
         downstream = _RecordingBus()
         bus = _CollectingBus(downstream)
 
-        async def sleepy(_: dict) -> None:
-            await asyncio.sleep(0.1)
+        release = asyncio.Event()
+        ready_events = [asyncio.Event() for _ in range(3)]
+        next_ready_index = 0
 
-        await bus.subscribe("topic.a", sleepy)
-        await bus.subscribe("topic.a", sleepy)
-        await bus.subscribe("topic.a", sleepy)
+        async def gated(_: dict) -> None:
+            nonlocal next_ready_index
+            ready_event = ready_events[next_ready_index]
+            next_ready_index += 1
+            ready_event.set()
+            await release.wait()
+
+        await bus.subscribe("topic.a", gated)
+        await bus.subscribe("topic.a", gated)
+        await bus.subscribe("topic.a", gated)
         await bus.flush()
 
         _, fan_out = downstream.subscriptions[0]
-        start = time.perf_counter()
-        await fan_out({"topic": "topic.a", "key": "k", "payload": {}})
-        elapsed = time.perf_counter() - start
-
-        # 并行下 3 个并发 sleep(0.1s) ≈ 0.1-0.15s；串行会 ≥ 0.3s。
-        # 用 0.25s 作为宽裕的 upper bound 容纳 CI 抖动，同时足够 distinguish
-        # 串行 (≥0.3s) vs 并行 (≈0.1s)。
-        self.assertLess(
-            elapsed,
-            0.25,
-            f"fan_out 疑似串行执行（耗时 {elapsed:.3f}s，应接近 0.1s）",
+        fan_out_task = asyncio.create_task(
+            fan_out({"topic": "topic.a", "key": "k", "payload": {}})
         )
+        await asyncio.wait_for(
+            asyncio.gather(*(event.wait() for event in ready_events)),
+            timeout=1.0,
+        )
+        self.assertFalse(fan_out_task.done(), "fan_out 不应在 release 前完成")
+
+        release.set()
+        await asyncio.wait_for(fan_out_task, timeout=1.0)
 
     async def test_fan_out_one_slow_handler_does_not_block_others(self) -> None:
         """2026-04-23 P1-b 锚定：一个慢 handler 不应阻塞其他 handler 的开始执行。

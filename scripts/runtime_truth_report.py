@@ -1528,6 +1528,28 @@ def payload_sequence(conn):
         "capture_status_counts": [dict(row) for row in capture_rows],
     }
 
+def latest_orderbook_payloads(conn):
+    if not table_exists(conn, "bronze.market_orderbook_payloads"):
+        return {"exists": False, "rows": []}
+    rows = conn.execute(
+        text(
+            "select distinct on (coalesce(channel, '')) "
+            "       coalesce(channel, '') as channel, storage_table, snapshot_table, "
+            "       ts, source_ts, received_at, collector_sequence, collector_sequence_scope, "
+            "       left(ingest_run_id::text, 8) as ingest_run_id_prefix, "
+            "       row_checksum is not null as row_checksum_present, checksum_version, "
+            "       capture_status, payload_hash is not null as payload_hash_present, "
+            "       payload_schema_version, payload_kind, "
+            "       exchange_sequence_id is not null as exchange_sequence_id_present, "
+            "       previous_payload_hash is not null as previous_payload_hash_present "
+            "from bronze.market_orderbook_payloads "
+            "where symbol=:symbol "
+            "order by coalesce(channel, ''), ts desc"
+        ),
+        {"symbol": symbol},
+    ).mappings().all()
+    return {"exists": True, "rows": [dict(row) for row in rows]}
+
 def microstructure_workflow(conn):
     if not table_exists(conn, "governance.rdp_task_queue"):
         return {"exists": False}
@@ -1570,6 +1592,7 @@ with engine.connect() as conn:
                 "recent_silver_orderbook": recent_silver_orderbook(conn),
                 "recent_silver_trade_flow": recent_silver_trade_flow(conn),
                 "payload_sequence": payload_sequence(conn),
+                "latest_orderbook_payloads": latest_orderbook_payloads(conn),
                 "workflow": microstructure_workflow(conn),
             },
             default=str,
@@ -4691,6 +4714,143 @@ def summarize_latest_silver_trade_flow(
     }
 
 
+def summarize_orderbook_payload_depth_truth(
+    raw: dict[str, Any],
+    execution_science: dict[str, Any],
+) -> dict[str, Any]:
+    if not raw.get("ok"):
+        return {
+            "source": "rdp_microstructure.orderbook_payload_sidecar",
+            "ok": False,
+            "status": "rdp_microstructure_unavailable",
+            "smallest_missing_field": "rdp_microstructure_probe",
+            "raw_payload_exposed": False,
+        }
+
+    latest_payloads_raw = as_dict(raw.get("latest_orderbook_payloads"))
+    payload_rows = [as_dict(row) for row in as_list(latest_payloads_raw.get("rows"))]
+    payload_sequence = as_dict(execution_science.get("payload_sequence"))
+    silver_orderbook = as_dict(execution_science.get("silver_orderbook"))
+    scopes = [as_dict(item) for item in as_list(payload_sequence.get("scopes"))]
+    capture_status_counts = [
+        as_dict(item) for item in as_list(payload_sequence.get("capture_status_counts"))
+    ]
+
+    def _channel_row(channel: str) -> dict[str, Any]:
+        return next((row for row in payload_rows if row.get("channel") == channel), {})
+
+    def _channel_scope(channel: str) -> dict[str, Any]:
+        return next((scope for scope in scopes if scope.get("channel") == channel), {})
+
+    books5_payload = _channel_row("books5")
+    bbo_payload = _channel_row("bbo-tbt") or _channel_row("bbo")
+    books5_scope = _channel_scope("books5")
+    bbo_scope = _channel_scope("bbo-tbt") or _channel_scope("bbo")
+    diff_payload_count = sum(
+        int_or_zero(item.get("row_count") or item.get("n"))
+        for item in capture_status_counts
+        if item.get("capture_status") == "diff_payload_persisted"
+    )
+    latest_payload_exists = bool(latest_payloads_raw.get("exists"))
+    books5_sequence_gap_count = int_or_zero(books5_scope.get("sequence_gap_count"))
+    bbo_sequence_gap_count = int_or_zero(bbo_scope.get("sequence_gap_count"))
+    books5_row_count = int_or_zero(books5_scope.get("row_count"))
+    bbo_row_count = int_or_zero(bbo_scope.get("row_count"))
+
+    checks = [
+        ("bronze.market_orderbook_payloads", latest_payload_exists),
+        ("bronze.market_orderbook_payloads.latest_books5_payload", bool(books5_payload)),
+        ("bronze.market_orderbook_payloads.books5_payload_hash", bool(books5_payload.get("payload_hash_present"))),
+        ("bronze.market_orderbook_payloads.books5_row_checksum", bool(books5_payload.get("row_checksum_present"))),
+        ("bronze.market_orderbook_payloads.books5_sequence", books5_row_count > 0),
+        ("bronze.market_orderbook_payloads.books5_sequence_gap_count", books5_sequence_gap_count == 0),
+        ("bronze.market_orderbook_payloads.diff_payload_persisted", diff_payload_count > 0),
+        (
+            "silver.market_orderbook_metrics_15m.books5_samples_n",
+            int_or_zero(silver_orderbook.get("books5_samples_n")) > 0,
+        ),
+    ]
+    smallest_missing = next((field for field, passed in checks if not passed), None)
+
+    if smallest_missing is None:
+        status = "verified_books5_payload_depth_evidence_present"
+    elif bool(bbo_payload.get("payload_hash_present")) and bbo_row_count > 0:
+        status = "top_of_book_payload_evidence_present_depth_not_verified"
+    else:
+        status = "missing_orderbook_payload_depth_evidence"
+
+    return {
+        "source": "rdp_microstructure.orderbook_payload_sidecar",
+        "ok": True,
+        "symbol": raw.get("symbol"),
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "books5_payload": {
+            "channel": books5_payload.get("channel"),
+            "snapshot_table": books5_payload.get("snapshot_table"),
+            "storage_table": books5_payload.get("storage_table"),
+            "ts": books5_payload.get("ts"),
+            "source_ts": books5_payload.get("source_ts"),
+            "received_at": books5_payload.get("received_at"),
+            "collector_sequence": books5_payload.get("collector_sequence"),
+            "collector_sequence_scope": books5_payload.get("collector_sequence_scope"),
+            "ingest_run_id_prefix": books5_payload.get("ingest_run_id_prefix"),
+            "row_checksum_present": bool(books5_payload.get("row_checksum_present")),
+            "checksum_version": books5_payload.get("checksum_version"),
+            "capture_status": books5_payload.get("capture_status"),
+            "payload_hash_present": bool(books5_payload.get("payload_hash_present")),
+            "payload_schema_version": books5_payload.get("payload_schema_version"),
+            "payload_kind": books5_payload.get("payload_kind"),
+            "exchange_sequence_id_present": bool(books5_payload.get("exchange_sequence_id_present")),
+            "previous_payload_hash_present": bool(books5_payload.get("previous_payload_hash_present")),
+        },
+        "bbo_payload": {
+            "channel": bbo_payload.get("channel"),
+            "snapshot_table": bbo_payload.get("snapshot_table"),
+            "storage_table": bbo_payload.get("storage_table"),
+            "ts": bbo_payload.get("ts"),
+            "source_ts": bbo_payload.get("source_ts"),
+            "received_at": bbo_payload.get("received_at"),
+            "collector_sequence": bbo_payload.get("collector_sequence"),
+            "collector_sequence_scope": bbo_payload.get("collector_sequence_scope"),
+            "ingest_run_id_prefix": bbo_payload.get("ingest_run_id_prefix"),
+            "row_checksum_present": bool(bbo_payload.get("row_checksum_present")),
+            "checksum_version": bbo_payload.get("checksum_version"),
+            "capture_status": bbo_payload.get("capture_status"),
+            "payload_hash_present": bool(bbo_payload.get("payload_hash_present")),
+            "payload_schema_version": bbo_payload.get("payload_schema_version"),
+            "payload_kind": bbo_payload.get("payload_kind"),
+            "exchange_sequence_id_present": bool(bbo_payload.get("exchange_sequence_id_present")),
+            "previous_payload_hash_present": bool(bbo_payload.get("previous_payload_hash_present")),
+        },
+        "sequence": {
+            "status": payload_sequence.get("status"),
+            "window_minutes": payload_sequence.get("window_minutes"),
+            "books5_row_count": books5_row_count,
+            "books5_sequence_gap_count": books5_sequence_gap_count,
+            "bbo_row_count": bbo_row_count,
+            "bbo_sequence_gap_count": bbo_sequence_gap_count,
+            "diff_payload_persisted_row_count": diff_payload_count,
+        },
+        "silver_orderbook": {
+            "status": silver_orderbook.get("status"),
+            "latest_bar_ts": silver_orderbook.get("latest_bar_ts"),
+            "books5_samples_n": silver_orderbook.get("books5_samples_n"),
+            "bbo_samples_n": silver_orderbook.get("bbo_samples_n"),
+            "spread_bps_mean": silver_orderbook.get("spread_bps_mean"),
+        },
+        "interpretation": {
+            "raw_payload_exposed": False,
+            "depth_readiness": (
+                "books5 sidecar payload hash/checksum plus continuous collector sequence can support "
+                "depth-aware fill-feasibility projections"
+            ),
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_execution_science_truth(
     raw: dict[str, Any],
     *,
@@ -5719,6 +5879,11 @@ def summarize_claimed_submit_operator_handoff_truth(
 def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     db = report.get("database_truth") or {}
     execution_science = as_dict(report.get("execution_science_truth"))
+    orderbook_payload_depth = as_dict(report.get("orderbook_payload_depth_truth"))
+    orderbook_payload_depth_books5 = as_dict(orderbook_payload_depth.get("books5_payload"))
+    orderbook_payload_depth_bbo = as_dict(orderbook_payload_depth.get("bbo_payload"))
+    orderbook_payload_depth_sequence = as_dict(orderbook_payload_depth.get("sequence"))
+    orderbook_payload_depth_silver = as_dict(orderbook_payload_depth.get("silver_orderbook"))
     slippage_cost = as_dict(report.get("slippage_cost_calibration_truth"))
     slippage_proxy = as_dict(slippage_cost.get("slippage_proxy"))
     slippage_coverage = as_dict(slippage_proxy.get("coverage_audit"))
@@ -6020,6 +6185,45 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "silver_trade_flow_truth_status": (
             as_dict(execution_science.get("silver_trade_flow")).get("status")
+        ),
+        "orderbook_payload_depth_truth_status": orderbook_payload_depth.get("status"),
+        "orderbook_payload_depth_smallest_missing_field": (
+            orderbook_payload_depth.get("smallest_missing_field")
+        ),
+        "orderbook_payload_depth_raw_payload_exposed": orderbook_payload_depth.get("raw_payload_exposed"),
+        "orderbook_payload_depth_books5_payload_hash_present": (
+            orderbook_payload_depth_books5.get("payload_hash_present")
+        ),
+        "orderbook_payload_depth_books5_row_checksum_present": (
+            orderbook_payload_depth_books5.get("row_checksum_present")
+        ),
+        "orderbook_payload_depth_books5_exchange_sequence_id_present": (
+            orderbook_payload_depth_books5.get("exchange_sequence_id_present")
+        ),
+        "orderbook_payload_depth_books5_capture_status": (
+            orderbook_payload_depth_books5.get("capture_status")
+        ),
+        "orderbook_payload_depth_books5_collector_sequence": (
+            orderbook_payload_depth_books5.get("collector_sequence")
+        ),
+        "orderbook_payload_depth_books5_row_count": (
+            orderbook_payload_depth_sequence.get("books5_row_count")
+        ),
+        "orderbook_payload_depth_books5_sequence_gap_count": (
+            orderbook_payload_depth_sequence.get("books5_sequence_gap_count")
+        ),
+        "orderbook_payload_depth_bbo_payload_hash_present": (
+            orderbook_payload_depth_bbo.get("payload_hash_present")
+        ),
+        "orderbook_payload_depth_bbo_row_count": orderbook_payload_depth_sequence.get("bbo_row_count"),
+        "orderbook_payload_depth_bbo_sequence_gap_count": (
+            orderbook_payload_depth_sequence.get("bbo_sequence_gap_count")
+        ),
+        "orderbook_payload_depth_diff_payload_persisted_row_count": (
+            orderbook_payload_depth_sequence.get("diff_payload_persisted_row_count")
+        ),
+        "orderbook_payload_depth_silver_books5_samples_n": (
+            orderbook_payload_depth_silver.get("books5_samples_n")
         ),
         "slippage_cost_calibration_truth_status": slippage_cost.get("status"),
         "slippage_cost_calibration_smallest_missing_field": slippage_cost.get("smallest_missing_field"),
@@ -6595,6 +6799,10 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["execution_science_truth"] = summarize_execution_science_truth(
         report["rdp_microstructure_truth"],
         report_generated_at=generated_at,
+    )
+    report["orderbook_payload_depth_truth"] = summarize_orderbook_payload_depth_truth(
+        report["rdp_microstructure_truth"],
+        report["execution_science_truth"],
     )
     report["slippage_cost_calibration_truth"] = summarize_slippage_cost_calibration_truth(
         report["database_truth"],
