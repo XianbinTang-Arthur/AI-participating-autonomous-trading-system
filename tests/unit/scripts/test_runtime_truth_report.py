@@ -2393,6 +2393,109 @@ def test_project_live_runtime_facts_exposes_created_no_command_directional_order
     assert live_facts["created_no_command_directional_order_missing_1h"] == 0
 
 
+def test_execution_order_payload_status_residual_truth_classifies_non_authoritative_status() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "execution_order_payload_status_residual": {
+            "symbol": "BTC-USDT-SWAP",
+            "authority": {
+                "order_status_source": "execution_orders.state",
+                "order_state_status_source": "order_states.status",
+                "raw_payload_top_level_status_authoritative": False,
+                "notes": ["column state is authoritative"],
+            },
+            "coverage": {
+                "top_level_status_mismatch_count": 319,
+                "nested_status_mismatch_count": 417,
+                "terminal_column_nonterminal_top_level_count": 1,
+                "open_column_terminal_top_level_count": 0,
+                "open_by_column_count": 0,
+                "open_by_top_level_raw_payload_count": 319,
+                "terminal_column_nonterminal_nested_count": 417,
+                "open_column_terminal_nested_count": 0,
+            },
+            "target_order": {
+                "client_order_id": "cl9d7875bd332bf6fb8a5e2bd248ba21",
+                "state": "FAILED",
+                "raw_payload_status": "SUBMITTING",
+                "nested_order_state_status": "FAILED",
+            },
+            "latest_mismatch_rows": [],
+            "top_level_status_mismatch_groups": [],
+            "nested_status_mismatch_groups": [],
+        },
+    }
+
+    summary = mod.summarize_execution_order_payload_status_residual_truth(
+        db,
+        report_generated_at="2026-04-28T14:41:34Z",
+    )
+
+    assert summary["status"] == "classified_non_authoritative_top_level_payload_status_residual"
+    assert summary["smallest_missing_field"] is None
+    assert summary["authority"]["order_status_source"] == "execution_orders.state"
+    assert summary["authority"]["raw_payload_top_level_status_authoritative"] is False
+    assert summary["coverage"]["open_by_column_count"] == 0
+    assert summary["coverage"]["open_by_top_level_raw_payload_count"] == 319
+    assert summary["coverage"]["raw_payload_status_would_misclassify_open_orders"] is True
+    assert summary["target_order"]["top_level_status_mismatch"] is True
+    assert summary["target_order"]["nested_status_matches_column"] is True
+    assert "top-level raw_payload.status" in summary["consumer_audit"][2]
+
+
+def test_project_live_runtime_facts_exposes_execution_order_payload_status_residual_truth() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {"ok": True, "latest_decision": {}, "latest_executable_directional_decision": {}},
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+        "execution_order_payload_status_residual_truth": {
+            "status": "classified_non_authoritative_top_level_payload_status_residual",
+            "smallest_missing_field": None,
+            "authority": {
+                "order_status_source": "execution_orders.state",
+                "raw_payload_top_level_status_authoritative": False,
+            },
+            "coverage": {
+                "top_level_status_mismatch_count": 319,
+                "nested_status_mismatch_count": 417,
+                "terminal_column_nonterminal_top_level_count": 1,
+                "open_column_terminal_top_level_count": 0,
+                "open_by_column_count": 0,
+                "open_by_top_level_raw_payload_count": 319,
+                "raw_payload_status_would_misclassify_open_orders": True,
+                "terminal_column_nonterminal_nested_count": 417,
+                "open_column_terminal_nested_count": 0,
+            },
+            "target_order": {
+                "client_order_id": "cl9d7875bd332bf6fb8a5e2bd248ba21",
+                "state": "FAILED",
+                "raw_payload_status": "SUBMITTING",
+                "nested_order_state_status": "FAILED",
+                "top_level_status_mismatch": True,
+                "nested_status_matches_column": True,
+            },
+        },
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["execution_order_payload_status_residual_truth_status"] == (
+        "classified_non_authoritative_top_level_payload_status_residual"
+    )
+    assert live_facts["execution_order_payload_status_authoritative_source"] == "execution_orders.state"
+    assert live_facts["execution_order_payload_status_top_level_authoritative"] is False
+    assert live_facts["execution_order_payload_status_open_by_column_count"] == 0
+    assert live_facts["execution_order_payload_status_open_by_top_level_raw_payload_count"] == 319
+    assert live_facts["execution_order_payload_status_raw_payload_status_would_misclassify_open_orders"] is True
+    assert live_facts["execution_order_payload_status_target_state"] == "FAILED"
+    assert live_facts["execution_order_payload_status_target_raw_payload_status"] == "SUBMITTING"
+    assert live_facts["execution_order_payload_status_target_nested_matches_column"] is True
+
+
 def test_claimed_submit_stuck_submission_truth_requires_operator_confirmation() -> None:
     mod = load_module()
     db = {

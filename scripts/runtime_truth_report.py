@@ -806,6 +806,118 @@ with engine.connect() as conn:
             for row in latest_okx_scale_in_mismatch_rows
         ],
     }
+    top_level_status_mismatch_groups = [
+        dict(row)
+        for row in conn.execute(text(
+            "select state, "
+            "       coalesce(raw_payload ->> 'status', '<missing>') as raw_payload_status, "
+            "       coalesce(raw_payload -> 'order_state' ->> 'status', '<missing>') "
+            "           as nested_order_state_status, "
+            "       count(*) as count, "
+            "       max(updated_at) as latest_updated_at "
+            "from execution_orders "
+            "where coalesce(raw_payload ->> 'status', '') <> coalesce(state, '') "
+            "group by state, "
+            "         coalesce(raw_payload ->> 'status', '<missing>'), "
+            "         coalesce(raw_payload -> 'order_state' ->> 'status', '<missing>') "
+            "order by count desc, state, raw_payload_status"
+        )).mappings().all()
+    ]
+    nested_status_mismatch_groups = [
+        dict(row)
+        for row in conn.execute(text(
+            "select state, "
+            "       coalesce(raw_payload -> 'order_state' ->> 'status', '<missing>') "
+            "           as nested_order_state_status, "
+            "       count(*) as count, "
+            "       max(updated_at) as latest_updated_at "
+            "from execution_orders "
+            "where coalesce(raw_payload -> 'order_state' ->> 'status', '') <> coalesce(state, '') "
+            "group by state, coalesce(raw_payload -> 'order_state' ->> 'status', '<missing>') "
+            "order by count desc, state"
+        )).mappings().all()
+    ]
+    latest_status_mismatch_rows = [
+        dict(row)
+        for row in conn.execute(text(
+            "select order_id, client_order_id, symbol, state, "
+            "       raw_payload ->> 'status' as raw_payload_status, "
+            "       raw_payload -> 'order_state' ->> 'status' as nested_order_state_status, "
+            "       created_at, updated_at "
+            "from execution_orders "
+            "where coalesce(raw_payload ->> 'status', '') <> coalesce(state, '') "
+            "order by updated_at desc "
+            "limit 10"
+        )).mappings().all()
+    ]
+    target_payload_status_residual = conn.execute(text(
+        "select order_id, client_order_id, symbol, state, "
+        "       raw_payload ->> 'status' as raw_payload_status, "
+        "       raw_payload -> 'order_state' ->> 'status' as nested_order_state_status, "
+        "       venue_order_id, updated_at "
+        "from execution_orders "
+        "where client_order_id = 'cl9d7875bd332bf6fb8a5e2bd248ba21' "
+        "limit 1"
+    )).mappings().first()
+    execution_order_payload_status_residual = {
+        "symbol": symbol,
+        "authority": {
+            "order_status_source": "execution_orders.state",
+            "order_state_status_source": "order_states.status",
+            "raw_payload_top_level_status_authoritative": False,
+            "notes": [
+                "Open-order counts and claimed-submit recovery gates filter execution_orders.state/order_states.status.",
+                "raw_payload.status is retained as diagnostic payload and may be missing or stale on historical rows.",
+            ],
+        },
+        "coverage": {
+            "top_level_status_mismatch_count": sum(
+                int(row.get("count") or 0) for row in top_level_status_mismatch_groups
+            ),
+            "nested_status_mismatch_count": sum(
+                int(row.get("count") or 0) for row in nested_status_mismatch_groups
+            ),
+            "terminal_column_nonterminal_top_level_count": int(conn.execute(text(
+                "select count(*) from execution_orders "
+                "where state in ('FILLED','CANCELED','REJECTED','BLOCKED','DRY_RUN','FAILED','EXPIRED') "
+                "  and coalesce(raw_payload ->> 'status', '') "
+                "      not in ('FILLED','CANCELED','REJECTED','BLOCKED','DRY_RUN','FAILED','EXPIRED')"
+            )).scalar() or 0),
+            "open_column_terminal_top_level_count": int(conn.execute(text(
+                "select count(*) from execution_orders "
+                "where state not in ('FILLED','CANCELED','REJECTED','BLOCKED','DRY_RUN','FAILED','EXPIRED') "
+                "  and coalesce(raw_payload ->> 'status', '') "
+                "      in ('FILLED','CANCELED','REJECTED','BLOCKED','DRY_RUN','FAILED','EXPIRED')"
+            )).scalar() or 0),
+            "open_by_column_count": int(conn.execute(text(
+                "select count(*) from execution_orders "
+                "where symbol = :symbol "
+                "  and state not in ('FILLED','CANCELED','REJECTED','BLOCKED','DRY_RUN','FAILED','EXPIRED')"
+            ), {"symbol": symbol}).scalar() or 0),
+            "open_by_top_level_raw_payload_count": int(conn.execute(text(
+                "select count(*) from execution_orders "
+                "where symbol = :symbol "
+                "  and coalesce(raw_payload ->> 'status', '') "
+                "      not in ('FILLED','CANCELED','REJECTED','BLOCKED','DRY_RUN','FAILED','EXPIRED')"
+            ), {"symbol": symbol}).scalar() or 0),
+            "terminal_column_nonterminal_nested_count": int(conn.execute(text(
+                "select count(*) from execution_orders "
+                "where state in ('FILLED','CANCELED','REJECTED','BLOCKED','DRY_RUN','FAILED','EXPIRED') "
+                "  and coalesce(raw_payload -> 'order_state' ->> 'status', '') "
+                "      not in ('FILLED','CANCELED','REJECTED','BLOCKED','DRY_RUN','FAILED','EXPIRED')"
+            )).scalar() or 0),
+            "open_column_terminal_nested_count": int(conn.execute(text(
+                "select count(*) from execution_orders "
+                "where state not in ('FILLED','CANCELED','REJECTED','BLOCKED','DRY_RUN','FAILED','EXPIRED') "
+                "  and coalesce(raw_payload -> 'order_state' ->> 'status', '') "
+                "      in ('FILLED','CANCELED','REJECTED','BLOCKED','DRY_RUN','FAILED','EXPIRED')"
+            )).scalar() or 0),
+        },
+        "top_level_status_mismatch_groups": top_level_status_mismatch_groups[:20],
+        "nested_status_mismatch_groups": nested_status_mismatch_groups[:20],
+        "latest_mismatch_rows": latest_status_mismatch_rows,
+        "target_order": dict(target_payload_status_residual) if target_payload_status_residual else None,
+    }
     slippage_cost_row = conn.execute(text(
         "with command_refs as ("
         "  select order_id, "
@@ -1280,6 +1392,7 @@ print(json.dumps({
     "directional_impulse_chase_guard": directional_impulse_chase_guard,
     "created_no_command_directional_order": created_no_command_directional_order,
     "okx_hedge_scale_in_intent": okx_hedge_scale_in_intent,
+    "execution_order_payload_status_residual": execution_order_payload_status_residual,
 }, default=str, sort_keys=True))
 """
 
@@ -4141,6 +4254,118 @@ def summarize_created_no_command_directional_order_truth(
     }
 
 
+def summarize_execution_order_payload_status_residual_truth(
+    db: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    raw = as_dict(db.get("execution_order_payload_status_residual"))
+    if not db.get("ok"):
+        return {
+            "status": "missing_database_truth",
+            "smallest_missing_field": "database_truth",
+            "report_generated_at": report_generated_at,
+            "interpretation": "database probe did not return authoritative order status facts",
+        }
+    if not raw:
+        return {
+            "status": "missing_execution_order_payload_status_residual_probe",
+            "smallest_missing_field": "database_truth.execution_order_payload_status_residual",
+            "report_generated_at": report_generated_at,
+            "interpretation": "runtime truth report lacks execution order payload status residual coverage",
+        }
+
+    authority = as_dict(raw.get("authority"))
+    coverage = as_dict(raw.get("coverage"))
+    top_level_mismatch_count = int_or_zero(coverage.get("top_level_status_mismatch_count"))
+    nested_mismatch_count = int_or_zero(coverage.get("nested_status_mismatch_count"))
+    terminal_column_nonterminal_top_level_count = int_or_zero(
+        coverage.get("terminal_column_nonterminal_top_level_count")
+    )
+    open_column_terminal_top_level_count = int_or_zero(
+        coverage.get("open_column_terminal_top_level_count")
+    )
+    open_by_column_count = int_or_zero(coverage.get("open_by_column_count"))
+    open_by_top_level_raw_payload_count = int_or_zero(
+        coverage.get("open_by_top_level_raw_payload_count")
+    )
+    terminal_column_nonterminal_nested_count = int_or_zero(
+        coverage.get("terminal_column_nonterminal_nested_count")
+    )
+    open_column_terminal_nested_count = int_or_zero(
+        coverage.get("open_column_terminal_nested_count")
+    )
+    target_order = as_dict(raw.get("target_order"))
+    target_state = target_order.get("state")
+    target_raw_status = target_order.get("raw_payload_status")
+    target_nested_status = target_order.get("nested_order_state_status")
+    target_top_level_mismatch = bool(target_order) and target_raw_status != target_state
+    target_nested_matches_column = bool(target_order) and target_nested_status == target_state
+    raw_payload_status_would_misclassify_open_orders = (
+        open_by_top_level_raw_payload_count != open_by_column_count
+    )
+
+    status = "classified_non_authoritative_top_level_payload_status_residual"
+    smallest_missing_field = None
+    interpretation = (
+        "execution_orders.state remains authoritative; top-level raw_payload.status is diagnostic "
+        "and can be stale or missing on historical rows"
+    )
+    if open_column_terminal_top_level_count > 0:
+        status = "potential_raw_payload_status_authority_conflict_requires_review"
+        smallest_missing_field = "execution_orders.raw_payload.status.open_column_terminal_conflict"
+        interpretation = (
+            "at least one non-terminal execution_orders.state row carries terminal top-level raw payload status"
+        )
+    elif top_level_mismatch_count == 0 and nested_mismatch_count == 0:
+        status = "verified_payload_status_layers_aligned"
+        interpretation = "execution order column, top-level raw payload, and nested order_state statuses align"
+
+    enriched_target_order: dict[str, Any] | None = None
+    if target_order:
+        enriched_target_order = {
+            **target_order,
+            "top_level_status_mismatch": target_top_level_mismatch,
+            "nested_status_matches_column": target_nested_matches_column,
+        }
+
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing_field,
+        "report_generated_at": report_generated_at,
+        "symbol": raw.get("symbol"),
+        "authority": {
+            "order_status_source": authority.get("order_status_source") or "execution_orders.state",
+            "order_state_status_source": authority.get("order_state_status_source") or "order_states.status",
+            "raw_payload_top_level_status_authoritative": False,
+            "notes": as_list(authority.get("notes")),
+        },
+        "coverage": {
+            "top_level_status_mismatch_count": top_level_mismatch_count,
+            "nested_status_mismatch_count": nested_mismatch_count,
+            "terminal_column_nonterminal_top_level_count": terminal_column_nonterminal_top_level_count,
+            "open_column_terminal_top_level_count": open_column_terminal_top_level_count,
+            "open_by_column_count": open_by_column_count,
+            "open_by_top_level_raw_payload_count": open_by_top_level_raw_payload_count,
+            "raw_payload_status_would_misclassify_open_orders": (
+                raw_payload_status_would_misclassify_open_orders
+            ),
+            "terminal_column_nonterminal_nested_count": terminal_column_nonterminal_nested_count,
+            "open_column_terminal_nested_count": open_column_terminal_nested_count,
+        },
+        "target_order": enriched_target_order,
+        "latest_mismatch_rows": as_list(raw.get("latest_mismatch_rows")),
+        "top_level_status_mismatch_groups": as_list(raw.get("top_level_status_mismatch_groups")),
+        "nested_status_mismatch_groups": as_list(raw.get("nested_status_mismatch_groups")),
+        "consumer_audit": [
+            "open-order and claimed-submit recovery checks filter execution_orders.state/order_states.status",
+            "exchange reconciler reads nested raw_payload.order_state before any raw payload fallback",
+            "top-level raw_payload.status is exposed only as diagnostic truth-report context",
+        ],
+        "interpretation": interpretation,
+    }
+
+
 def summarize_microstructure_table(
     raw: dict[str, Any],
     *,
@@ -5233,6 +5458,18 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     created_no_command_directional_order_coverage = as_dict(
         created_no_command_directional_order.get("coverage")
     )
+    execution_order_payload_status_residual = as_dict(
+        report.get("execution_order_payload_status_residual_truth")
+    )
+    execution_order_payload_status_residual_authority = as_dict(
+        execution_order_payload_status_residual.get("authority")
+    )
+    execution_order_payload_status_residual_coverage = as_dict(
+        execution_order_payload_status_residual.get("coverage")
+    )
+    execution_order_payload_status_residual_target = as_dict(
+        execution_order_payload_status_residual.get("target_order")
+    )
     claimed_submit_stuck_submission = as_dict(report.get("claimed_submit_stuck_submission_truth"))
     claimed_submit_stuck_submission_coverage = as_dict(
         claimed_submit_stuck_submission.get("coverage")
@@ -5526,6 +5763,77 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "created_no_command_directional_order_latest_created_at": (
             created_no_command_directional_order_coverage.get("latest_created_at")
+        ),
+        "execution_order_payload_status_residual_truth_status": (
+            execution_order_payload_status_residual.get("status")
+        ),
+        "execution_order_payload_status_residual_smallest_missing_field": (
+            execution_order_payload_status_residual.get("smallest_missing_field")
+        ),
+        "execution_order_payload_status_authoritative_source": (
+            execution_order_payload_status_residual_authority.get("order_status_source")
+        ),
+        "execution_order_payload_status_top_level_authoritative": (
+            execution_order_payload_status_residual_authority.get(
+                "raw_payload_top_level_status_authoritative"
+            )
+        ),
+        "execution_order_payload_status_top_level_mismatch_count": (
+            execution_order_payload_status_residual_coverage.get("top_level_status_mismatch_count")
+        ),
+        "execution_order_payload_status_nested_mismatch_count": (
+            execution_order_payload_status_residual_coverage.get("nested_status_mismatch_count")
+        ),
+        "execution_order_payload_status_terminal_column_nonterminal_top_level_count": (
+            execution_order_payload_status_residual_coverage.get(
+                "terminal_column_nonterminal_top_level_count"
+            )
+        ),
+        "execution_order_payload_status_open_column_terminal_top_level_count": (
+            execution_order_payload_status_residual_coverage.get(
+                "open_column_terminal_top_level_count"
+            )
+        ),
+        "execution_order_payload_status_open_by_column_count": (
+            execution_order_payload_status_residual_coverage.get("open_by_column_count")
+        ),
+        "execution_order_payload_status_open_by_top_level_raw_payload_count": (
+            execution_order_payload_status_residual_coverage.get(
+                "open_by_top_level_raw_payload_count"
+            )
+        ),
+        "execution_order_payload_status_raw_payload_status_would_misclassify_open_orders": (
+            execution_order_payload_status_residual_coverage.get(
+                "raw_payload_status_would_misclassify_open_orders"
+            )
+        ),
+        "execution_order_payload_status_terminal_column_nonterminal_nested_count": (
+            execution_order_payload_status_residual_coverage.get(
+                "terminal_column_nonterminal_nested_count"
+            )
+        ),
+        "execution_order_payload_status_open_column_terminal_nested_count": (
+            execution_order_payload_status_residual_coverage.get(
+                "open_column_terminal_nested_count"
+            )
+        ),
+        "execution_order_payload_status_target_client_order_id": (
+            execution_order_payload_status_residual_target.get("client_order_id")
+        ),
+        "execution_order_payload_status_target_state": (
+            execution_order_payload_status_residual_target.get("state")
+        ),
+        "execution_order_payload_status_target_raw_payload_status": (
+            execution_order_payload_status_residual_target.get("raw_payload_status")
+        ),
+        "execution_order_payload_status_target_nested_order_state_status": (
+            execution_order_payload_status_residual_target.get("nested_order_state_status")
+        ),
+        "execution_order_payload_status_target_top_level_mismatch": (
+            execution_order_payload_status_residual_target.get("top_level_status_mismatch")
+        ),
+        "execution_order_payload_status_target_nested_matches_column": (
+            execution_order_payload_status_residual_target.get("nested_status_matches_column")
         ),
         "claimed_submit_stuck_submission_truth_status": claimed_submit_stuck_submission.get("status"),
         "claimed_submit_stuck_submission_smallest_missing_field": (
@@ -5919,6 +6227,12 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         report["database_truth"],
         report["git"],
         report_generated_at=generated_at,
+    )
+    report["execution_order_payload_status_residual_truth"] = (
+        summarize_execution_order_payload_status_residual_truth(
+            report["database_truth"],
+            report_generated_at=generated_at,
+        )
     )
     report["runtime"]["ai_timeout_active_blocker"] = False
     runtime_mode = report["runtime"]["dashboard_bundle"].get("effective_operating_mode", {})
