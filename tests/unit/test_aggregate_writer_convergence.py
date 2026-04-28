@@ -222,6 +222,43 @@ def test_exit_execution_writer_saves_child_and_recomputes_parent_together() -> N
     assert repo.child_refs_for_parent(parent_intent_id=parent.parent_intent_id) == [child_ref]
 
 
+def test_exit_execution_writer_preserves_sticky_cancel_on_stale_parent_save() -> None:
+    repo = InMemoryExitExecutionRepository()
+    writer = ExitExecutionWriter(repo)
+    current = ExitExecutionIntent(
+        parent_intent_id="parent_exit_cancel_merge",
+        execution_chain_id="chain_exit_cancel_merge",
+        symbol="BTC-USDT-SWAP",
+        side="sell",
+        intent_kind="close",
+        target_exit_quantity=Decimal("0.01"),
+        aggregate_status="CANCEL_PENDING",
+        cancel_requested=True,
+        cancel_requested_ts=utc_now(),
+        aggregate_version=5,
+    )
+    repo.save_exit_execution_intent(current)
+    stale_refresh = current.model_copy(
+        update={
+            "aggregate_status": "WORKING",
+            "cancel_requested": False,
+            "cancel_requested_ts": None,
+            "aggregate_version": 4,
+        }
+    )
+
+    saved = writer.save_exit_execution_intent(
+        stale_refresh,
+        source_component="test",
+        reason_code="stale_refresh",
+    )
+
+    assert saved.cancel_requested is True
+    assert saved.cancel_requested_ts == current.cancel_requested_ts
+    assert saved.aggregate_status == "CANCEL_PENDING"
+    assert saved.aggregate_version == 6
+
+
 @pytest.mark.asyncio
 async def test_postgres_obligation_direct_reserve_requires_writer() -> None:
     settings = AATSSettings.model_validate(

@@ -11,6 +11,7 @@ from aats.storage.exit_execution_repo_postgres import PostgresExitExecutionRepos
 
 ParentTransform = Callable[[ExitExecutionIntent], ExitExecutionIntent]
 ParentRecompute = Callable[[ExitExecutionIntent, list[ChildExitOrderRef]], ExitExecutionIntent]
+_TERMINAL_PARENT_STATUSES = {"COMPLETED", "CANCELED", "FAILED_SAFE"}
 
 
 @dataclass(slots=True)
@@ -28,7 +29,20 @@ class ExitExecutionWriter:
         source_component: str,
         reason_code: str,
     ) -> ExitExecutionIntent:
-        saved = self.exit_execution_repo.save_exit_execution_intent(intent)
+        if isinstance(self.exit_execution_repo, PostgresExitExecutionRepository):
+            with self.exit_execution_repo.session_factory() as session:
+                current = self.exit_execution_repo.get_exit_execution_intent_in_session(
+                    session,
+                    intent.parent_intent_id,
+                    for_update=True,
+                )
+                merged = self._merge_sticky_parent_fields(current=current, incoming=intent)
+                saved = self.exit_execution_repo.save_exit_execution_intent_in_session(session, merged)
+                session.commit()
+        else:
+            current = self.exit_execution_repo.get_exit_execution_intent(intent.parent_intent_id)
+            merged = self._merge_sticky_parent_fields(current=current, incoming=intent)
+            saved = self.exit_execution_repo.save_exit_execution_intent(merged)
         log_event(
             self.logger,
             "exit_execution_intent_persisted",
@@ -172,3 +186,23 @@ class ExitExecutionWriter:
             child_status=saved.child_status,
             aggregate_category=saved.aggregate_category,
         )
+
+    @staticmethod
+    def _merge_sticky_parent_fields(
+        *,
+        current: ExitExecutionIntent | None,
+        incoming: ExitExecutionIntent,
+    ) -> ExitExecutionIntent:
+        if current is None:
+            return incoming
+        updates: dict[str, Any] = {}
+        if current.cancel_requested and not incoming.cancel_requested:
+            updates["cancel_requested"] = True
+            updates["cancel_requested_ts"] = current.cancel_requested_ts
+            if incoming.aggregate_status not in _TERMINAL_PARENT_STATUSES:
+                updates["aggregate_status"] = "CANCEL_PENDING"
+        if int(incoming.aggregate_version) <= int(current.aggregate_version):
+            updates["aggregate_version"] = int(current.aggregate_version) + 1
+        if not updates:
+            return incoming
+        return incoming.model_copy(update=updates)
