@@ -25,6 +25,70 @@ def _run_node_module_script(script: str) -> subprocess.CompletedProcess[str]:
 
 
 class TestDashboardRefreshInteractivity(unittest.TestCase):
+    def test_rebaseline_actions_use_long_request_timeout(self) -> None:
+        script = r"""
+import {
+  REBASELINE_REQUEST_TIMEOUT_MS,
+  createRiskActionHandlers,
+} from './aats/api/static/modules/actions/risk-actions.js';
+
+globalThis.window = { confirm: () => true };
+
+const dangerousCalls = [];
+const actionCalls = [];
+const noop = () => {};
+
+const handlers = createRiskActionHandlers({
+  activeExitExecutionHistoryState: () => ({}),
+  activeExitExecutionHistoryView: () => 'risk',
+  activePhase1ShadowBlocker: () => null,
+  beginAction: () => () => {},
+  controlPermissionMessage: () => '',
+  ensureExitExecutionHistoryState: () => ({}),
+  localizedRecoveryReasons: () => '',
+  openDrawer: noop,
+  refreshDashboard: async () => {},
+  renderBanners: noop,
+  requestJson: async () => ({}),
+  runAction: async (...args) => {
+    actionCalls.push(args);
+    return { ok: true };
+  },
+  runDangerousAction: async (payload) => {
+    dangerousCalls.push(payload);
+    return { ok: true };
+  },
+  scrollExitExecutionWorkspaceIntoView: noop,
+  state: { data: { blockerControl: { panel_version: 'panel-v1' } } },
+  syncActiveViewLocationState: noop,
+  syncExitExecutionHistoryFilterRoots: noop,
+  syncExitExecutionHistoryFiltersAcrossViews: noop,
+});
+
+await handlers['trigger-rebaseline']('', { dataset: {} });
+await handlers['trigger-blocker-action']('accept-rebaseline::operator_rebaseline_required', { dataset: {} });
+
+console.log(JSON.stringify({
+  timeoutConstant: REBASELINE_REQUEST_TIMEOUT_MS,
+  directTimeout: dangerousCalls[0]?.requestOptions?.timeout,
+  blockerPath: actionCalls[0]?.[0],
+  blockerTimeout: actionCalls[0]?.[3]?.requestOptions?.timeout,
+}));
+"""
+        result = _run_node_module_script(script)
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["timeoutConstant"], 120_000)
+        self.assertEqual(payload["directTimeout"], 120_000)
+        self.assertEqual(payload["blockerPath"], "/system/blocker-actions/accept-rebaseline")
+        self.assertEqual(payload["blockerTimeout"], 120_000)
+
+    def test_app_action_runner_forwards_request_options_to_request_json(self) -> None:
+        app_js = (REPO_ROOT / "aats" / "api" / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("requestOptions = {}", app_js)
+        self.assertIn('requestJson(path, { method: "POST", body, ...requestOptions })', app_js)
+        self.assertIn("return runAction(path, body, successMessage, { target, pendingLabel, requestOptions });", app_js)
+
     def test_sync_refresh_disabled_buttons_locks_and_restores_scope_buttons(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]
         script = """

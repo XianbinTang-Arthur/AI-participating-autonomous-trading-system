@@ -622,14 +622,23 @@ function beginAction(target, pendingLabel) {
   };
 }
 
-async function runAction(path, body, successMessage, { target = null, pendingLabel = "正在提交请求…" } = {}) {
+async function runAction(
+  path,
+  body,
+  successMessage,
+  {
+    target = null,
+    pendingLabel = "正在提交请求…",
+    requestOptions = {},
+  } = {},
+) {
   // ensureNotBusy surfaces an explicit "请等待上一次完成" flash instead of
   // silently dropping the click. Without this guard the user has no way to
   // tell the request was ignored.
   if (!ensureNotBusy(state, renderBanners)) return;
   const finishAction = beginAction(target, pendingLabel);
   try {
-    const result = await requestJson(path, { method: "POST", body });
+    const result = await requestJson(path, { method: "POST", body, ...requestOptions });
     setFlash(state, "info", result?.message || successMessage);
     await refreshDashboard({ manual: true });
     return { ok: true, result };
@@ -642,9 +651,17 @@ async function runAction(path, body, successMessage, { target = null, pendingLab
   }
 }
 
-async function runDangerousAction({ path, body, successMessage, confirmMessage, target = null, pendingLabel = "正在提交请求…" }) {
+async function runDangerousAction({
+  path,
+  body,
+  successMessage,
+  confirmMessage,
+  target = null,
+  pendingLabel = "正在提交请求…",
+  requestOptions = {},
+}) {
   if (!window.confirm(confirmMessage)) return { ok: false, canceled: true };
-  return runAction(path, body, successMessage, { target, pendingLabel });
+  return runAction(path, body, successMessage, { target, pendingLabel, requestOptions });
 }
 
 

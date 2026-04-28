@@ -5,6 +5,11 @@ import { buildPhase1ShadowDrawer } from "../shadow-drawer.js";
 import { DEFAULT_EXIT_EXECUTION_HISTORY_FILTERS } from "../store.js";
 import { localizeError } from "../terms.js";
 
+// Rebaseline can proxy through gateway -> execution and perform OKX account
+// refresh + baseline import + auto-resume. The command bridge allows 90s and
+// field runs have been ~35-40s, so the 30s default request timeout is too low.
+export const REBASELINE_REQUEST_TIMEOUT_MS = 120_000;
+
 export function createRiskActionHandlers({
   activeExitExecutionHistoryState,
   activeExitExecutionHistoryView,
@@ -93,6 +98,7 @@ export function createRiskActionHandlers({
       confirmMessage: "确认把当前账户、仓位和挂单状态接受为新的人工基线吗？这会覆盖旧的恢复参照。",
       target,
       pendingLabel: "正在重设基线…",
+      requestOptions: { timeout: REBASELINE_REQUEST_TIMEOUT_MS },
     });
   }
 
@@ -452,6 +458,7 @@ export function createRiskActionHandlers({
       {
         target,
         pendingLabel: blockerActionPendingLabel(actionId),
+        requestOptions: actionId === "accept-rebaseline" ? { timeout: REBASELINE_REQUEST_TIMEOUT_MS } : {},
       },
     );
   }
