@@ -80,6 +80,66 @@ class TestExecutionOutboxPostgres(unittest.IsolatedAsyncioTestCase):
             runtime.dispose()
             self._drop_schema(admin_engine, schema_name)
 
+    async def test_standalone_obligation_persist_enqueues_durable_outbox_event(self) -> None:
+        runtime, admin_engine, schema_name = self._schema_runtime()
+        try:
+            event_store = PostgresEventStore(runtime.session_factory)
+            execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            obligation_repo = PostgresExecutionObligationRepository(runtime.session_factory)
+            outbox_repo = PostgresOutboxRepository(runtime.session_factory)
+            bus = InMemoryEventBus()
+            received: list[dict] = []
+
+            async def handler(message: dict) -> None:
+                received.append(message)
+
+            await bus.subscribe(topics.OBLIGATION_UPDATES, handler)
+            publisher = PostgresExecutionOutboxPublisher(
+                session_factory=runtime.session_factory,
+                event_store=event_store,
+                execution_repo=execution_repo,
+                obligation_repo=obligation_repo,
+                outbox_repo=outbox_repo,
+                bus=bus,
+            )
+            now = utc_now()
+            obligation = OrderObligation(
+                client_order_id="clord_obligation_outbox",
+                decision_id="decision_obligation_outbox",
+                intent_id="intent_obligation_outbox",
+                symbol="BTC-USDT-SWAP",
+                side="buy",
+                reserve_currency="USDT",
+                reserved_amount=Decimal("12.34"),
+                status="ACTIVE",
+                product_type="derivatives",
+                margin_mode="cross",
+                created_at=now,
+                last_update_ts=now,
+            )
+
+            saved = publisher.persist_obligation_sync(
+                obligation=obligation,
+                source_component="test_execution_outbox",
+                reason_code="standalone_obligation_test",
+            )
+
+            self.assertEqual(saved.client_order_id, "clord_obligation_outbox")
+            stored = obligation_repo.get_obligation("clord_obligation_outbox")
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored.status, "ACTIVE")
+            self.assertEqual(event_store.count(topic=topics.OBLIGATION_UPDATES), 1)
+            self.assertEqual(outbox_repo.counts(), {"pending": 1, "published": 0, "failed": 0})
+            self.assertEqual(received, [])
+
+            await publisher.flush_pending()
+
+            self.assertEqual(outbox_repo.counts(), {"pending": 0, "published": 1, "failed": 0})
+            self.assertEqual(len(received), 1)
+        finally:
+            runtime.dispose()
+            self._drop_schema(admin_engine, schema_name)
+
     async def test_persist_order_state_can_sync_existing_execution_order_truth_for_repair(self) -> None:
         runtime, admin_engine, schema_name = self._schema_runtime()
         try:

@@ -8,8 +8,8 @@
 
 - `order/fill/obligation`：Postgres 生产路径必须经 `PostgresExecutionOutboxPublisher` 的事务写入或 obligation writer 入口写入；service 层只负责 preview / domain 计算。
 - `portfolio snapshot + fill outcome + balance delta`：恢复补偿必须经 `PostgresPortfolioOutboxPublisher` 的 fill projection 路径；无 publisher 的非 Postgres legacy 单测路径才允许直接 repo 写。
-- `exit_execution`：新增 writer service，order manager、refresh、startup recovery 只能经 writer 写 parent intent / child ref。
-- operator clear cache 不再制造空 authoritative cache，清理 Redis 后必须从 DB active obligations 重建本地/Redis 可见状态。
+- `exit_execution`：新增 writer service，order manager、refresh、startup recovery 只能经 writer 写 parent intent / child ref；order manager 的 child ref + parent recompute 走同一 writer/session。
+- operator clear cache 不再制造空 authoritative cache；必须先从 DB 构造替换集并写入 Redis index，成功后才替换本地 cache。
 
 不做：本次不改表结构，不引入新的外部 broker，不改变 operator API 入参/返回主形状。
 
@@ -50,9 +50,9 @@
 ## 5. Transactions / concurrency
 
 - obligation 与 order/fill 同事务路径继续由 `PostgresExecutionOutboxPublisher` 完成。
-- orphan obligation cleanup 走 execution outbox publisher 的 standalone obligation writer，commit 后发布 hot cache。
+- orphan obligation cleanup 走 execution outbox publisher 的 standalone obligation writer，commit 时同步写 obligation row + event_store + durable outbox，commit 后发布 hot cache。
 - recovery fill outcome backfill 走 portfolio outbox publisher 的 sync projection，单事务写 snapshot + outcome + balance delta outbox。
-- exit_execution 先收敛入口，不在本次引入 OCC；writer method 保留 source/reason 参数，为后续 history/OCC 加载点预留。
+- exit_execution 先收敛入口；order manager 的 operator cancel 与 child-ref recompute 在 writer 内读取当前 parent/children，并在 Postgres session 内锁定 parent 后重算，降低 parent 字段被旧快照覆盖的窗口。完整 history/OCC schema 仍作为后续演进。
 
 ## 6. Auth / security
 
@@ -60,7 +60,8 @@
 
 ## 7. Error handling / idempotency
 
-- cache publish 仍 fail-soft，DB commit 成功后发布失败只记录 warning。
+- operator clear cache fail-closed：DB 读取或 Redis/index 替换失败时不清空本地 authoritative cache，并记录 failed operator action。
+- cache publish 仍 fail-soft，DB commit 成功后发布失败只记录 warning；standalone obligation 的跨进程事件同时进入 durable outbox，后台 flush 可重放。
 - missing fill outcome backfill 对已有 outcome 幂等跳过；projection 失败计入 notes 并继续后续 fill。
 - direct Postgres legacy writer 触发明确异常，避免静默绕过 outbox。
 
@@ -72,7 +73,7 @@
 
 ## 9. Caching / performance
 
-- clear obligation cache 清 Redis index 后从 DB active obligations 重建本地 cache 与 Redis，避免 risk/gateway 看到空 cache。
+- clear obligation cache 先从 DB 读取 replacement set，再写新 Redis per-key 与 index，最后替换本地 cache，避免 risk/gateway 看到空 cache。
 - recovery sync projection 只在启动/恢复补偿路径执行，不影响热路径成交延迟。
 
 ## 10. Logging / auditing
@@ -83,8 +84,8 @@
 
 ## 11. Testing strategy
 
-- 单元测试：obligation clear cache rebuild、obligation production direct-write guard、recovery fill outcome 走 portfolio outbox、exit_execution writer routing。
-- 契约扫描：生产 services 中 direct `save_obligation` / `fill_outcome_repo.save_outcome` / `exit_execution_repo.save_*` 只能出现在 writer 或 legacy fallback 白名单。
+- 单元测试：obligation clear cache rebuild/fail-closed、obligation production direct-write/reserve guard、recovery fill outcome 走 portfolio outbox、exit_execution writer child+parent recompute routing。
+- 契约扫描：生产 `aats/` 中 direct `save_obligation` / `reserve_obligation_transactional` / `fill_outcome_repo.save_outcome` / `exit_execution_repo.save_*` 只能出现在 writer 或 legacy fallback 白名单。
 - 集成测试：跑最窄 Postgres outbox / recovery 相关测试。
 
 ## 12. Migration / rollback
