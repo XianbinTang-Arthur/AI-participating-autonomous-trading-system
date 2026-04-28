@@ -49,7 +49,10 @@ export function createExecutionActionHandlers({
     if (!orderId) return;
     await runDangerousAction({
       path: `/orders/${encodeURIComponent(orderId)}/resolve-stuck-submission`,
-      body: { reason: "ui_resolve_stuck_submission" },
+      body: {
+        reason: "ui_resolve_stuck_submission",
+        operator_confirmation: `resolve_claimed_submit_as_failed:${orderId}`,
+      },
       successMessage: "已提交卡单处理请求。",
       confirmMessage: "确认对这笔长时间卡住的委托执行人工恢复处理吗？",
     });

@@ -60,6 +60,7 @@ from aats.services.execution_engine.orderbook_snapshot_refs import (
     resolve_orderbook_snapshot_ref_row,
 )
 from aats.services.execution_engine.state_writer import sync_execution_order_truth_direct_legacy_only
+from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.okx_account import derivatives_position_mode_contract
 from aats.services.execution_engine.exit_intent_aggregator import exit_execution_review_items
 from aats.services.fill_ordering import fill_processing_sort_key
@@ -12560,6 +12561,7 @@ class OperatorQueryService:
         client_order_id: str,
         reason: str,
         actor_role: OperatorRole,
+        operator_confirmation: str | None = None,
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
@@ -12570,6 +12572,7 @@ class OperatorQueryService:
                 payload={
                     "client_order_id": client_order_id,
                     "reason": reason,
+                    "operator_confirmation": operator_confirmation,
                     "actor_role": actor_role,
                     "actor_identity": actor_identity,
                     "auth_source": auth_source,
@@ -12582,6 +12585,7 @@ class OperatorQueryService:
         return await self.reconciliation_system_queries.resolve_stuck_submission(
             client_order_id=client_order_id,
             reason=reason,
+            operator_confirmation=operator_confirmation,
             actor_role=actor_role,
             actor_identity=actor_identity,
             auth_source=auth_source,
@@ -13526,6 +13530,26 @@ class OperatorQueryService:
             "private_ws_order_present": private_ws_order_present,
             "private_ws_fill_present": private_ws_fill_present,
         }
+
+    def _claimed_submit_command_for_order(self, order: OrderState) -> dict[str, Any] | None:
+        command_repo = getattr(self.runtime, "execution_command_repo", None)
+        if command_repo is None:
+            return None
+        lookup = getattr(command_repo, "get_by_idempotency_key", None)
+        if not callable(lookup):
+            return None
+        for key in ExecutionOrderService.submit_command_lookup_keys(
+            client_order_id=order.client_order_id,
+            intent_id=order.intent_id,
+        ):
+            command = lookup(key)
+            if not isinstance(command, dict):
+                continue
+            command_type = str(command.get("command_type") or "").strip().lower()
+            command_state = str(command.get("state") or "").strip().upper()
+            if command_type == "submit" and command_state == "CLAIMED":
+                return dict(command)
+        return None
 
     @staticmethod
     def _latest_reconciliation_allows_stuck_submission_resolution(

@@ -36,6 +36,7 @@ class CancelOrderRequest(BaseModel):
 
 class ResolveStuckSubmissionRequest(BaseModel):
     reason: str = "operator_resolve_stuck_submission"
+    operator_confirmation: str | None = None
 
 
 class ValidationRequest(BaseModel):
@@ -752,6 +753,7 @@ async def resolve_stuck_submission(
         return await _query(request).resolve_stuck_submission(
             client_order_id=client_order_id,
             reason=payload.reason if payload is not None else "operator_resolve_stuck_submission",
+            operator_confirmation=payload.operator_confirmation if payload is not None else None,
             actor_role=principal.role,
             actor_identity=principal.identity,
             auth_source=principal.auth_source,

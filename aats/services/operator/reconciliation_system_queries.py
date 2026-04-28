@@ -162,6 +162,7 @@ class ReconciliationSystemQueryFacade:
         client_order_id: str,
         reason: str,
         actor_role: OperatorRole,
+        operator_confirmation: str | None = None,
         actor_identity: str | None = None,
         auth_source: AuthSource = "anonymous",
     ) -> dict[str, Any]:
@@ -186,6 +187,34 @@ class ReconciliationSystemQueryFacade:
         )
         if not resolution["eligible"]:
             raise ValueError(f"stuck_submission_resolution_blocked:{resolution['reason_code']}")
+        command_lookup = getattr(self.owner, "_claimed_submit_command_for_order", None)
+        claimed_submit_command = command_lookup(order) if callable(command_lookup) else None
+        claimed_submit_command_id = None
+        claimed_submit_idempotency_key = None
+        operator_confirmation_required = claimed_submit_command is not None
+        if isinstance(claimed_submit_command, dict):
+            claimed_submit_command_id = str(claimed_submit_command.get("command_id") or "").strip() or None
+            claimed_submit_idempotency_key = str(claimed_submit_command.get("idempotency_key") or "").strip() or None
+            expected_confirmation = f"resolve_claimed_submit_as_failed:{client_order_id}"
+            if str(operator_confirmation or "").strip() != expected_confirmation:
+                raise ValueError(
+                    "stuck_submission_resolution_blocked:"
+                    "claimed_submit_requires_operator_confirmation"
+                )
+        resolution = dict(resolution)
+        resolution.update(
+            {
+                "claimed_submit_command_present": claimed_submit_command is not None,
+                "claimed_submit_command_id": claimed_submit_command_id,
+                "claimed_submit_idempotency_key": claimed_submit_idempotency_key,
+                "operator_confirmation_required": operator_confirmation_required,
+                "operator_confirmation_matched": (
+                    not operator_confirmation_required
+                    or str(operator_confirmation or "").strip()
+                    == f"resolve_claimed_submit_as_failed:{client_order_id}"
+                ),
+            }
+        )
 
         now = utc_now()
         resolved_state = order.model_copy(
@@ -273,6 +302,10 @@ class ReconciliationSystemQueryFacade:
                     "previous_order_status": order.status,
                     "final_order_status": persisted.status,
                     "resolution": resolution,
+                    "operator_confirmation_required": operator_confirmation_required,
+                    "claimed_submit_command_present": claimed_submit_command is not None,
+                    "claimed_submit_command_id": claimed_submit_command_id,
+                    "claimed_submit_idempotency_key": claimed_submit_idempotency_key,
                 },
             ),
         )

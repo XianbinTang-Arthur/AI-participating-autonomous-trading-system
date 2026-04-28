@@ -93,8 +93,15 @@ class _OperatorOwner:
     state_scope = None
     logger = logging.getLogger("test_execution_state_single_writer.operator")
 
-    def __init__(self, *, order: OrderState, outbox: _RecordingOutboxWriter) -> None:
+    def __init__(
+        self,
+        *,
+        order: OrderState,
+        outbox: _RecordingOutboxWriter,
+        claimed_submit_command: dict[str, Any] | None = None,
+    ) -> None:
         self._order = order
+        self._claimed_submit_command = claimed_submit_command
         self.events: list[dict[str, Any]] = []
         self.runtime = SimpleNamespace(
             reconciliation_service=_FakeReconciliationService(),
@@ -123,6 +130,11 @@ class _OperatorOwner:
         exchange_snapshot: dict[str, Any],
     ) -> dict[str, Any]:
         return {"eligible": True, "reason_code": "exchange_absent_after_restart"}
+
+    def _claimed_submit_command_for_order(self, order: OrderState) -> dict[str, Any] | None:
+        if order.client_order_id != self._order.client_order_id:
+            return None
+        return self._claimed_submit_command
 
     def _update_recovery_status_for_report(self, _report: _FakeReport) -> None:
         return None
@@ -178,6 +190,67 @@ async def test_operator_stuck_submission_resolution_persists_order_state_via_out
     assert [message["topic"] for message in owner.runtime.bus.messages] == [
         topics.EXECUTION_ERROR_SUMMARIES
     ]
+
+
+@pytest.mark.asyncio
+async def test_operator_claimed_submit_resolution_requires_explicit_confirmation() -> None:
+    order = _order_state(client_order_id="ord_claimed_submit")
+    outbox = _RecordingOutboxWriter()
+    owner = _OperatorOwner(
+        order=order,
+        outbox=outbox,
+        claimed_submit_command={
+            "command_id": "cmd_claimed_submit",
+            "idempotency_key": f"submit:{order.client_order_id}",
+            "command_type": "submit",
+            "state": "CLAIMED",
+        },
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        await ReconciliationSystemQueryFacade(owner).resolve_stuck_submission(
+            client_order_id=order.client_order_id,
+            reason="operator_confirmed_absent_on_okx",
+            actor_role="admin",
+        )
+
+    assert str(excinfo.value) == (
+        "stuck_submission_resolution_blocked:"
+        "claimed_submit_requires_operator_confirmation"
+    )
+    assert outbox.calls == []
+
+
+@pytest.mark.asyncio
+async def test_operator_claimed_submit_resolution_records_confirmation_gate() -> None:
+    order = _order_state(client_order_id="ord_claimed_confirmed")
+    outbox = _RecordingOutboxWriter()
+    owner = _OperatorOwner(
+        order=order,
+        outbox=outbox,
+        claimed_submit_command={
+            "command_id": "cmd_claimed_confirmed",
+            "idempotency_key": f"submit:{order.client_order_id}",
+            "command_type": "submit",
+            "state": "CLAIMED",
+        },
+    )
+
+    result = await ReconciliationSystemQueryFacade(owner).resolve_stuck_submission(
+        client_order_id=order.client_order_id,
+        reason="operator_confirmed_absent_on_okx",
+        operator_confirmation=f"resolve_claimed_submit_as_failed:{order.client_order_id}",
+        actor_role="admin",
+    )
+
+    assert result["order"]["status"] == "FAILED"
+    assert result["resolution"]["claimed_submit_command_present"] is True
+    assert result["resolution"]["claimed_submit_command_id"] == "cmd_claimed_confirmed"
+    assert result["resolution"]["operator_confirmation_required"] is True
+    assert result["resolution"]["operator_confirmation_matched"] is True
+    action = next(event["payload_model"] for event in owner.events if event["topic"] == topics.OPERATOR_ACTIONS)
+    assert action.details["claimed_submit_command_present"] is True
+    assert action.details["claimed_submit_command_id"] == "cmd_claimed_confirmed"
 
 
 class _FakeExchange:

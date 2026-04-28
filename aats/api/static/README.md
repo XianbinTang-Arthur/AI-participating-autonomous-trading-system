@@ -943,7 +943,7 @@ Trial guard 助手：
 **内部**
 - `inspectOrder(orderId)` — `GET /orders/:id` → `buildOrderDrawer` → `openDrawer`；失败 setFlash + renderBanners。
 - `inspectFill(fillId)` — `GET /fills/:id` → `buildFillDrawer` → `openDrawer`。
-- `resolveStuckOrder(orderId)` — `runDangerousAction({ path: "/orders/:id/resolve-stuck-submission", body: { reason: "ui_resolve_stuck_submission" }, successMessage, confirmMessage })`。
+- `resolveStuckOrder(orderId)` — `runDangerousAction({ path: "/orders/:id/resolve-stuck-submission", body: { reason: "ui_resolve_stuck_submission", operator_confirmation: "resolve_claimed_submit_as_failed:<orderId>" }, successMessage, confirmMessage })`。
 
 **actionHandlers 映射**
 - `inspect-order / inspect-fill / resolve-stuck-order / load-more-orders / collapse-orders / load-more-fills / collapse-fills`。

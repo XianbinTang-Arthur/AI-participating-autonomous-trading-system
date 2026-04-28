@@ -5681,6 +5681,7 @@ async def build_runtime(
             return await service.resolve_stuck_submission(
                 client_order_id=payload["client_order_id"],
                 reason=payload.get("reason", ""),
+                operator_confirmation=payload.get("operator_confirmation"),
                 actor_role=payload.get("actor_role", "anonymous"),
                 actor_identity=payload.get("actor_identity"),
                 auth_source=payload.get("auth_source", "anonymous"),

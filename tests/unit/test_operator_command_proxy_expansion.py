@@ -170,12 +170,17 @@ class TestGatewayProxyBranch(unittest.IsolatedAsyncioTestCase):
         result = await service.resolve_stuck_submission(
             client_order_id="ord_stuck",
             reason="proxy_test",
+            operator_confirmation="resolve_claimed_submit_as_failed:ord_stuck",
             actor_role="admin",
         )
         self.assertEqual(result, {"resolved": True})
         call_kwargs = mock_client.invoke.call_args.kwargs
         self.assertEqual(call_kwargs["command"], "resolve_stuck_submission")
         self.assertEqual(call_kwargs["payload"]["client_order_id"], "ord_stuck")
+        self.assertEqual(
+            call_kwargs["payload"]["operator_confirmation"],
+            "resolve_claimed_submit_as_failed:ord_stuck",
+        )
         service._invalidate_cache.assert_called_once()
 
     async def test_refresh_exchange_state_proxies_to_client(self) -> None:
