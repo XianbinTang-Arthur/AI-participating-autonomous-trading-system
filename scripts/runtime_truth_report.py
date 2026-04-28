@@ -49,6 +49,9 @@ STATIC_MARKERS = {
         "terminal_no_fill_explanation",
         "无成交终局",
         "终端无成交解释",
+        "claimedSubmitGate",
+        "恢复仍被 CLAIMED 提交阻断",
+        "已接受新基线不等于清除 CLAIMED 提交",
     ),
     "/ui/modules/no-trade-display.js": (
         "hasPreOrderFeasibility",

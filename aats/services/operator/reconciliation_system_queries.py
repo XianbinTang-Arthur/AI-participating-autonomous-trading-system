@@ -682,6 +682,11 @@ class ReconciliationSystemQueryFacade:
         auto_resume: dict[str, Any] | None,
     ) -> list[str]:
         blockers: list[str] = []
+        claimed_submit_blocker = ReconciliationSystemQueryFacade._claimed_submit_gate_blocker_text(
+            effective_recovery.get("claimed_submit_recovery_gate"),
+        )
+        if claimed_submit_blocker:
+            blockers.append(claimed_submit_blocker)
         baseline_open_orders = baseline.get("open_order_count")
         if isinstance(baseline_open_orders, int) and baseline_open_orders > 0:
             blockers.append(f"交易所仍有 {baseline_open_orders} 条挂单")
@@ -990,6 +995,11 @@ class ReconciliationSystemQueryFacade:
         reasons: list[str] = []
         if refresh_error is not None:
             reasons.append("账户状态刷新失败")
+        claimed_submit_blocker = ReconciliationSystemQueryFacade._claimed_submit_gate_blocker_text(
+            recovery.get("claimed_submit_recovery_gate"),
+        )
+        if claimed_submit_blocker:
+            reasons.append(claimed_submit_blocker)
         for reason in recovery.get("resume_blocked_reasons") or []:
             if reason:
                 reasons.append(str(reason))
@@ -1000,3 +1010,18 @@ class ReconciliationSystemQueryFacade:
             if code:
                 reasons.append(str(code))
         return list(dict.fromkeys(reasons))
+
+    @staticmethod
+    def _claimed_submit_gate_blocker_text(gate: Any) -> str | None:
+        if not isinstance(gate, dict) or not bool(gate.get("active")):
+            return None
+        client_order_id = str(gate.get("client_order_id") or "").strip()
+        confirmation = str(gate.get("required_operator_confirmation") or "").strip()
+        command_id = str(gate.get("command_id") or "").strip()
+        order_part = f"本地订单 {client_order_id}" if client_order_id else "一笔本地订单"
+        command_part = f"、命令 {command_id}" if command_id else ""
+        confirmation_part = f"，确认串 {confirmation}" if confirmation else ""
+        return (
+            f"{order_part}{command_part} 仍是 CLAIMED 提交态且无交易所订单号/成交；"
+            f"需先在 OKX 确认没有对应订单或成交{confirmation_part}"
+        )

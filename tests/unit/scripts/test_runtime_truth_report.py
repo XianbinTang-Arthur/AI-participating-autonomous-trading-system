@@ -109,7 +109,8 @@ def test_static_truth_surface_checks_terminal_no_fill_ui_markers(monkeypatch) ->
             "terminal_no_fill_explanation 无成交终局 这次为什么没有成交"
         ),
         "/ui/modules/views/overview-view.js": (
-            "terminal_no_fill_explanation 无成交终局 终端无成交解释"
+            "terminal_no_fill_explanation 无成交终局 终端无成交解释 "
+            "claimedSubmitGate 恢复仍被 CLAIMED 提交阻断 已接受新基线不等于清除 CLAIMED 提交"
         ),
         "/ui/modules/no-trade-display.js": (
             "hasPreOrderFeasibility preOrderFeasibilitySummary 执行可行性 阻断维度"
@@ -135,6 +136,9 @@ def test_static_truth_surface_checks_terminal_no_fill_ui_markers(monkeypatch) ->
     assert overview_markers["terminal_no_fill_explanation"] is True
     assert overview_markers["无成交终局"] is True
     assert overview_markers["终端无成交解释"] is True
+    assert overview_markers["claimedSubmitGate"] is True
+    assert overview_markers["恢复仍被 CLAIMED 提交阻断"] is True
+    assert overview_markers["已接受新基线不等于清除 CLAIMED 提交"] is True
     assert all(surface["ok"] for surface in result.values())
 
 

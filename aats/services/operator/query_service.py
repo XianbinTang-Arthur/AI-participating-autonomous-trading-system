@@ -13684,8 +13684,9 @@ class OperatorQueryService:
             return False
         if bool(OperatorQueryService._report_field(report, "financial_review_required", False)):
             return False
-        if bool(OperatorQueryService._report_field(report, "structural_review_required", False)):
-            return False
+        structural_review_required = bool(
+            OperatorQueryService._report_field(report, "structural_review_required", False)
+        )
 
         allowed_categories = {
             "local_open_order_divergence",
@@ -13715,21 +13716,44 @@ class OperatorQueryService:
             "derivatives_order_state_unknown_on_exchange",
         }
         findings = OperatorQueryService._report_field(report, "findings", [])
+        allowed_finding_count = 0
         if isinstance(findings, list):
             for finding in findings:
                 if OperatorQueryService._is_nonblocking_historical_fill_finding(
                     finding,
                     tolerated_fill_ids=tolerated_historical_fill_ids,
                 ):
+                    allowed_finding_count += 1
                     continue
                 reason_code = (
                     OperatorQueryService._report_field(finding, "reason_code", "")
                     if not isinstance(finding, dict)
                     else finding.get("reason_code", "")
                 )
-                if reason_code and str(reason_code).strip() not in allowed_finding_reason_codes:
+                reason_code_text = str(reason_code or "").strip()
+                if reason_code_text and reason_code_text not in allowed_finding_reason_codes:
                     return False
+                scope_kind = (
+                    OperatorQueryService._report_field(finding, "scope_kind", "")
+                    if not isinstance(finding, dict)
+                    else finding.get("scope_kind", "")
+                )
+                scope_ref = (
+                    OperatorQueryService._report_field(finding, "scope_ref", "")
+                    if not isinstance(finding, dict)
+                    else finding.get("scope_ref", "")
+                )
+                if (
+                    reason_code_text
+                    and str(scope_kind or "").strip() == "order"
+                    and str(scope_ref or "").strip() not in {"", client_order_id}
+                ):
+                    return False
+                if reason_code_text:
+                    allowed_finding_count += 1
         elif findings:
+            return False
+        if structural_review_required and allowed_finding_count <= 0:
             return False
         return True
 

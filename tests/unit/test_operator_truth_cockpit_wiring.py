@@ -28,6 +28,9 @@ class TestOperatorTruthCockpitWiring(unittest.TestCase):
         self.assertIn("terminal_no_fill_explanation", source)
         self.assertIn("无成交终局", source)
         self.assertIn("终端无成交解释", source)
+        self.assertIn("claimedSubmitGate", source)
+        self.assertIn("恢复仍被 CLAIMED 提交阻断", source)
+        self.assertIn("已接受新基线不等于清除 CLAIMED 提交", source)
         self.assertIn("data.strategyRuntime", source)
         self.assertIn("data.aiRuntime", source)
 
@@ -69,6 +72,8 @@ class TestOperatorTruthCockpitWiring(unittest.TestCase):
         self.assertIn('not_loaded: "未装载"', terms)
         self.assertIn('local_stub: "本地占位状态"', terms)
         self.assertIn('remote_decision: "远端决策进程"', terms)
+        self.assertIn('claimed_submit_commands_require_exchange_reconciliation', terms)
+        self.assertIn('external_operator_confirmation_required_before_resolve_stuck_submission', terms)
 
 
 if __name__ == "__main__":

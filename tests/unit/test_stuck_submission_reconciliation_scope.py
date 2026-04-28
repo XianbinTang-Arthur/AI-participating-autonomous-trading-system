@@ -122,6 +122,56 @@ def test_stuck_submission_allows_self_blocking_order_findings() -> None:
     )
 
 
+def test_stuck_submission_allows_self_blocking_structural_review_with_allowed_findings() -> None:
+    report = _report(
+        structural_review_required=True,
+        mismatch_categories=[
+            "local_open_order_divergence",
+            "derivatives_order_state_unknown_on_exchange",
+        ],
+        mismatch_reasons=[
+            "local_open_orders_diverge_from_exchange_open_orders",
+            "derivatives_local_order_missing_from_exchange_open_order_view",
+        ],
+        findings=[
+            _finding(
+                scope_kind="account",
+                scope_ref=None,
+                finding_type="derivatives_order_state_unknown_on_exchange",
+                severity_class="halt",
+                reason_code="derivatives_order_state_unknown_on_exchange",
+                review_required=True,
+                halt_required=True,
+                blocks_resume=True,
+            ),
+            _finding(
+                scope_kind="order",
+                scope_ref="cl_target",
+                finding_type="exchange_open_order_missing",
+                severity_class="review",
+                reason_code="local_open_orders_diverge_from_exchange_open_orders",
+                review_required=True,
+                blocks_resume=True,
+            ),
+            _finding(
+                scope_kind="order",
+                scope_ref="cl_target",
+                finding_type="order_state_unknown_on_exchange",
+                severity_class="halt",
+                reason_code="order_state_unknown_on_exchange",
+                review_required=True,
+                halt_required=True,
+                blocks_resume=True,
+            ),
+        ],
+    )
+
+    assert OperatorQueryService._latest_reconciliation_allows_stuck_submission_resolution(
+        report,
+        client_order_id="cl_target",
+    )
+
+
 def test_stuck_submission_allows_nonblocking_historical_fill_lookback_gap() -> None:
     report = _report(
         fill_diff={
@@ -184,6 +234,28 @@ def test_stuck_submission_rejects_reconciliation_with_other_unknown_order() -> N
                 "symbol": "BTC-USDT-SWAP",
                 "order_key": "cl_other",
             },
+        ],
+    )
+
+    assert not OperatorQueryService._latest_reconciliation_allows_stuck_submission_resolution(
+        report,
+        client_order_id="cl_target",
+    )
+
+
+def test_stuck_submission_rejects_allowed_finding_scoped_to_other_order() -> None:
+    report = _report(
+        structural_review_required=True,
+        findings=[
+            _finding(
+                scope_kind="order",
+                scope_ref="cl_other",
+                finding_type="exchange_open_order_missing",
+                severity_class="review",
+                reason_code="local_open_orders_diverge_from_exchange_open_orders",
+                review_required=True,
+                blocks_resume=True,
+            )
         ],
     )
 

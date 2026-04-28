@@ -228,6 +228,31 @@ class TestRebaselineMessage(unittest.TestCase):
         self.assertIn("最新对账要求暂停", message)
         self.assertIn("operator_rebaseline_required", message)
 
+    def test_blocked_rebaseline_message_lists_claimed_submit_gate(self) -> None:
+        message = ReconciliationSystemQueryFacade._rebaseline_result_message(
+            rebaseline_status="resume_blocked",
+            effective_recovery={
+                "recovery_state": "resume_blocked",
+                "safe_to_trade": False,
+                "resume_eligible": False,
+                "resume_blocked_reasons": ["claimed_submit_commands_require_exchange_reconciliation"],
+                "claimed_submit_recovery_gate": {
+                    "active": True,
+                    "client_order_id": "cl_stuck",
+                    "command_id": "cmd_stuck",
+                    "required_operator_confirmation": "resolve_claimed_submit_as_failed:cl_stuck",
+                },
+            },
+            baseline={"open_order_count": 0, "requires_operator_review": False},
+            reconciliation={"halt_required": True, "review_required": True},
+            auto_resume=None,
+        )
+
+        self.assertIn("已接受当前状态为新基线", message)
+        self.assertIn("CLAIMED 提交态", message)
+        self.assertIn("cl_stuck", message)
+        self.assertIn("resolve_claimed_submit_as_failed:cl_stuck", message)
+
     def test_completed_rebaseline_message_reports_auto_resume(self) -> None:
         message = ReconciliationSystemQueryFacade._rebaseline_result_message(
             rebaseline_status="rebaseline_completed",
@@ -264,6 +289,29 @@ class TestRebaselineMessage(unittest.TestCase):
         self.assertIn("恢复自动运行被阻断", message)
         self.assertIn("operator_rebaseline_required", message)
         self.assertIn("latest_reconciliation_not_clean", message)
+
+    def test_blocked_resume_message_lists_claimed_submit_gate(self) -> None:
+        message = ReconciliationSystemQueryFacade._resume_result_message(
+            status="resume_blocked",
+            runnable=False,
+            blockers=[],
+            recovery={
+                "recovery_state": "resume_blocked",
+                "safe_to_trade": False,
+                "resume_eligible": False,
+                "resume_blocked_reasons": [],
+                "claimed_submit_recovery_gate": {
+                    "active": True,
+                    "client_order_id": "cl_stuck",
+                    "command_id": "cmd_stuck",
+                    "required_operator_confirmation": "resolve_claimed_submit_as_failed:cl_stuck",
+                },
+            },
+        )
+
+        self.assertIn("恢复自动运行被阻断", message)
+        self.assertIn("CLAIMED 提交态", message)
+        self.assertIn("cl_stuck", message)
 
 
 if __name__ == "__main__":

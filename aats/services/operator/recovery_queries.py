@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from aats.events import topics
+from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.operator._parallel import parallel_fetch
 from aats.services.runtime_scope import latest_topic_event_for_scope
 
@@ -112,9 +113,11 @@ class RecoveryQueryFacade:
         base_payload["independent_recovery_snapshots"] = self.owner._independent_recovery_snapshots_view(
             base_payload.get("independent_recovery_snapshots") or []
         )
+        claimed_submit_recovery_gate = self._claimed_submit_recovery_gate()
 
         return {
             **base_payload,
+            "claimed_submit_recovery_gate": claimed_submit_recovery_gate,
             "last_rebaseline_action": latest_rebaseline_action,
             "last_resume_action": latest_resume_action,
             "latest_account_baseline": latest_baseline,
@@ -141,6 +144,144 @@ class RecoveryQueryFacade:
             "latest_ai_shadow_evaluation": self.owner.payload(latest_ai_shadow_evaluation),
             "ai_runtime": self.owner.ai_runtime(),
         }
+
+    def _claimed_submit_recovery_gate(self) -> dict[str, Any]:
+        try:
+            order = self.owner.latest_order()
+        except Exception as exc:  # pragma: no cover - defensive read surface
+            return {
+                "active": False,
+                "status": "latest_order_lookup_failed",
+                "error": type(exc).__name__,
+            }
+        if order is None:
+            return {"active": False, "status": "no_latest_order"}
+
+        client_order_id = self._order_value(order, "client_order_id", "order_id")
+        status = str(self._order_value(order, "status", "state") or "").strip().upper()
+        exchange_order_id = self._order_value(order, "exchange_order_id", "venue_order_id")
+        raw_payload = self._order_value(order, "raw_payload")
+        if isinstance(raw_payload, dict):
+            exchange_order_id = exchange_order_id or raw_payload.get("exchange_order_id") or raw_payload.get("venue_order_id")
+        if status not in {"CREATED", "SUBMITTING"}:
+            return {"active": False, "status": "latest_order_not_in_claimed_submit_state"}
+        if exchange_order_id:
+            return {"active": False, "status": "latest_order_has_exchange_order_id"}
+        if not client_order_id:
+            return {"active": False, "status": "latest_order_missing_client_order_id"}
+
+        fills = self._fills_for_order(client_order_id)
+        if fills:
+            return {
+                "active": False,
+                "status": "latest_order_has_local_fills",
+                "client_order_id": client_order_id,
+                "local_fill_count": len(fills),
+            }
+
+        intent_id = self._order_value(order, "intent_id")
+        hydrated_order = self._hydrated_order(client_order_id)
+        command = self._claimed_submit_command(hydrated_order or order, client_order_id=client_order_id, intent_id=intent_id)
+        if command is None:
+            return {
+                "active": False,
+                "status": "latest_order_has_no_claimed_submit_command",
+                "client_order_id": client_order_id,
+            }
+
+        required_confirmation = f"resolve_claimed_submit_as_failed:{client_order_id}"
+        return {
+            "active": True,
+            "status": "awaiting_external_operator_confirmation",
+            "blocker": "external_operator_confirmation_required_before_resolve_stuck_submission",
+            "client_order_id": client_order_id,
+            "command_id": str(command.get("command_id") or "").strip() or None,
+            "idempotency_key": str(command.get("idempotency_key") or "").strip() or None,
+            "order_status": status,
+            "position_intent": self._order_value(order, "position_intent"),
+            "reduce_only": self._order_bool(order, "reduce_only"),
+            "close_only": self._order_bool(order, "close_only"),
+            "local_fill_count": 0,
+            "exchange_order_id_present": False,
+            "required_operator_confirmation": required_confirmation,
+            "next_action": "verify_okx_absence_then_resolve_with_exact_confirmation",
+            "operator_guidance": (
+                "已确认新基线并不会自动关闭这笔 CLAIMED 提交。先在 OKX 核对该 client order id "
+                "没有挂单、订单记录、成交、交易或账单，然后用精确确认串走受保护恢复。"
+            ),
+        }
+
+    @staticmethod
+    def _order_value(order: Any, *names: str) -> Any:
+        for name in names:
+            if isinstance(order, dict) and name in order:
+                return order.get(name)
+            value = getattr(order, name, None)
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _order_bool(cls, order: Any, name: str) -> bool | None:
+        value = cls._order_value(order, name)
+        if value is None:
+            raw_payload = cls._order_value(order, "raw_payload")
+            if isinstance(raw_payload, dict):
+                value = raw_payload.get(name)
+        if value is None:
+            return None
+        return bool(value)
+
+    def _fills_for_order(self, client_order_id: str) -> list[Any]:
+        lookup = getattr(self.owner, "_control_plane_fills_for_order", None)
+        if not callable(lookup):
+            return []
+        try:
+            return list(lookup(client_order_id))
+        except Exception:
+            return []
+
+    def _hydrated_order(self, client_order_id: str) -> Any | None:
+        lookup = getattr(self.owner, "_control_plane_order_state", None)
+        if not callable(lookup):
+            return None
+        try:
+            return lookup(client_order_id)
+        except Exception:
+            return None
+
+    def _claimed_submit_command(
+        self,
+        order: Any,
+        *,
+        client_order_id: str,
+        intent_id: Any,
+    ) -> dict[str, Any] | None:
+        owner_lookup = getattr(self.owner, "_claimed_submit_command_for_order", None)
+        if callable(owner_lookup):
+            try:
+                command = owner_lookup(order)
+            except Exception:
+                command = None
+            if isinstance(command, dict):
+                return dict(command)
+
+        command_repo = getattr(self.owner.runtime, "execution_command_repo", None)
+        repo_lookup = getattr(command_repo, "get_by_idempotency_key", None)
+        if not callable(repo_lookup):
+            return None
+        for key in ExecutionOrderService.submit_command_lookup_keys(
+            client_order_id=client_order_id,
+            intent_id=str(intent_id or "").strip() or None,
+        ):
+            command = repo_lookup(key)
+            if not isinstance(command, dict):
+                continue
+            command_type = str(command.get("command_type") or "").strip().lower()
+            command_state = str(command.get("state") or "").strip().upper()
+            if command_type == "submit" and command_state == "CLAIMED":
+                return dict(command)
+        return None
 
     def system_recovery(self) -> dict[str, Any]:
         recovery = self.recovery_view()

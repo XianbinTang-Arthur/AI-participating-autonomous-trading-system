@@ -30,6 +30,7 @@ export function renderOverviewView(data) {
   const latestFill = data.executionLatest?.latest_fill || null;
   const terminalNoFill = data.executionLatest?.terminal_no_fill_explanation || null;
   const reconciliation = data.reconciliationLatest?.reconciliation || null;
+  const claimedSubmitGate = recovery.claimed_submit_recovery_gate || {};
   const positionsView = data.positions || {};
   const metrics = data.metrics || {};
   const aiRuntime = data.aiRuntime || {};
@@ -50,6 +51,7 @@ export function renderOverviewView(data) {
     metrics,
     blockers,
     recovery,
+    claimedSubmitGate,
     reconciliation,
   });
 
@@ -134,7 +136,7 @@ export function renderOverviewView(data) {
           panelKey: "reconciliationLatest",
           copy: blockers.length ? "这里专门提醒当前最需要关注的风险和限制。" : "当前暂无新的硬阻断，但仍保留恢复和对账上下文。",
           classes: blockers.length || !recovery.safe_to_trade ? "" : "is-muted",
-          content: timeline(overviewFocusItems({ blockers, recovery, reconciliation, uiHints }), "当前暂无新的高优先级关注项。"),
+          content: timeline(overviewFocusItems({ blockers, recovery, reconciliation, claimedSubmitGate, uiHints }), "当前暂无新的高优先级关注项。"),
         })}
       </div>
 
@@ -225,6 +227,7 @@ function buildOperatorTruthCockpit({
   metrics,
   blockers,
   recovery,
+  claimedSubmitGate,
   reconciliation,
 }) {
   const configuredMode = textOrFallback(aiRuntime.configured_operating_mode || aiRuntime.legacy_modes?.configured_operating_mode);
@@ -290,9 +293,9 @@ function buildOperatorTruthCockpit({
       },
       {
         label: "阻断队列",
-        value: blockers.length ? `${formatNumber(blockers.length, 0)} 条` : recovery.safe_to_trade ? "清空" : "恢复受限",
-        meta: blockers[0] ? localizeError(blockers[0].blocker) : reconciliation ? `对账 ${readableState(reconciliation.severity)}` : "当前没有硬阻断",
-        tone: blockers.length ? "danger" : recovery.safe_to_trade ? "positive" : "warning",
+        value: blockers.length ? `${formatNumber(blockers.length, 0)} 条` : recovery.safe_to_trade ? "清空" : claimedSubmitGate.active ? "确认待完成" : "恢复受限",
+        meta: blockers[0] ? localizeError(blockers[0].blocker) : claimedSubmitGate.active ? claimedSubmitGateSummary(claimedSubmitGate) : reconciliation ? `对账 ${readableState(reconciliation.severity)}` : "当前没有硬阻断",
+        tone: blockers.length || claimedSubmitGate.active ? "danger" : recovery.safe_to_trade ? "positive" : "warning",
       },
     ],
     items: [
@@ -335,6 +338,13 @@ function buildOperatorTruthCockpit({
             detail: localizeError(blockers[0].recommended_action || blockers[0].blocker),
             pill: pill(blockers[0].affects_execution ? "阻断执行" : "人工关注", blockers[0].affects_execution ? "danger" : "warning"),
           }
+        : claimedSubmitGate.active
+          ? {
+              title: "恢复仍被 CLAIMED 提交阻断",
+              subtitle: middleEllipsis(claimedSubmitGate.client_order_id, 12, 8, "订单待确认"),
+              detail: claimedSubmitGateSummary(claimedSubmitGate),
+              pill: pill("需 OKX 外部确认", "danger"),
+            }
         : {
             title: "恢复与对账",
             subtitle: recovery.safe_to_trade ? "当前允许执行" : readableState(recovery.recovery_state),
@@ -344,6 +354,13 @@ function buildOperatorTruthCockpit({
           },
     ].filter(Boolean),
   };
+}
+
+function claimedSubmitGateSummary(gate = {}) {
+  const confirmation = gate.required_operator_confirmation
+    ? `确认串 ${gate.required_operator_confirmation}`
+    : "确认串待生成";
+  return `已接受新基线不等于清除 CLAIMED 提交。需先在 OKX 确认无对应订单或成交，再走受保护恢复；${confirmation}。`;
 }
 
 function textOrFallback(value, fallback = "unknown") {
@@ -395,7 +412,7 @@ function terminalNoFillMeta(explanation) {
   return `${terminalNoFillIntentSummary(explanation)} | ${terminalNoFillStateSummary(explanation)}`;
 }
 
-function overviewFocusItems({ blockers, recovery, reconciliation, uiHints }) {
+function overviewFocusItems({ blockers, recovery, reconciliation, claimedSubmitGate = {}, uiHints }) {
   if (blockers.length > 0) {
     return blockers.slice(0, 3).map((item) => ({
       title: localizeError(item.blocker),
@@ -405,6 +422,14 @@ function overviewFocusItems({ blockers, recovery, reconciliation, uiHints }) {
     }));
   }
   const items = [];
+  if (claimedSubmitGate.active) {
+    items.push({
+      title: "恢复仍被 CLAIMED 提交阻断",
+      subtitle: middleEllipsis(claimedSubmitGate.client_order_id, 12, 8, "订单待确认"),
+      detail: claimedSubmitGateSummary(claimedSubmitGate),
+      pill: pill("需 OKX 外部确认", "danger"),
+    });
+  }
   if (!recovery.safe_to_trade) {
     items.push({
       title: statusHeadline(recovery.halted && recovery.resume_eligible ? "待恢复" : "恢复受限"),

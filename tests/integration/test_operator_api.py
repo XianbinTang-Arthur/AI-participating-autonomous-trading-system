@@ -48,7 +48,7 @@ from aats.events import topics
 from aats.schemas.operator import ExecutionErrorSummary, ReplayValidationSummary
 from aats.schemas.operator import OperatorActionRecord, OperatorUserRecord
 from aats.schemas.portfolio import FillOutcomeRecord, FundingFeeRecord, PortfolioSnapshot, Position
-from aats.schemas.reconciliation import ReconciliationReport, ReconciliationStateSnapshot
+from aats.schemas.reconciliation import ReconciliationFinding, ReconciliationReport, ReconciliationStateSnapshot
 from aats.schemas.strategy_profiles import (
     StrategyProfileMarketRegimeAssessment,
     StrategyProfileRecommendation,
@@ -8413,9 +8413,10 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 submission_payload={},
             )
         )
+        recon_id = "recon_self_blocking_stuck_submission"
         runtime.reconciliation_repo.save_report(
             ReconciliationReport(
-                reconciliation_id="recon_self_blocking_stuck_submission",
+                reconciliation_id=recon_id,
                 as_of_ts=utc_now(),
                 exchange_snapshot_ts=FakeOperatorAccountService.SNAPSHOT.fetched_at,
                 product_type="spot",
@@ -8445,6 +8446,55 @@ class TestOperatorAPI(unittest.IsolatedAsyncioTestCase):
                 severity="HARD_MISMATCH",
                 review_required=True,
                 halt_required=True,
+                structural_review_required=True,
+                findings=[
+                    ReconciliationFinding(
+                        reconciliation_id=recon_id,
+                        scope_kind="account",
+                        product_type="spot",
+                        margin_mode="cash",
+                        primary_symbol=settings.default_symbol,
+                        layer="structural",
+                        finding_type="derivatives_order_state_unknown_on_exchange",
+                        severity_class="halt",
+                        structural=True,
+                        review_required=True,
+                        halt_required=True,
+                        blocks_resume=True,
+                        reason_code="derivatives_order_state_unknown_on_exchange",
+                    ),
+                    ReconciliationFinding(
+                        reconciliation_id=recon_id,
+                        scope_kind="order",
+                        scope_ref="cl_restart_stuck_self_blocking",
+                        product_type="spot",
+                        margin_mode="cash",
+                        primary_symbol=settings.default_symbol,
+                        layer="structural",
+                        finding_type="exchange_open_order_missing",
+                        severity_class="review",
+                        structural=True,
+                        review_required=True,
+                        blocks_resume=True,
+                        reason_code="local_open_orders_diverge_from_exchange_open_orders",
+                    ),
+                    ReconciliationFinding(
+                        reconciliation_id=recon_id,
+                        scope_kind="order",
+                        scope_ref="cl_restart_stuck_self_blocking",
+                        product_type="spot",
+                        margin_mode="cash",
+                        primary_symbol=settings.default_symbol,
+                        layer="structural",
+                        finding_type="order_state_unknown_on_exchange",
+                        severity_class="halt",
+                        structural=True,
+                        review_required=True,
+                        halt_required=True,
+                        blocks_resume=True,
+                        reason_code="order_state_unknown_on_exchange",
+                    ),
+                ],
             )
         )
         runtime.started_at = utc_now()
