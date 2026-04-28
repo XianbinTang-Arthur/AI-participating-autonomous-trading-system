@@ -197,6 +197,7 @@ class OperatorActionRecord(SchemaBase):
         "ai_review_restore",
         "ai_review_degrade_to_baseline",
         "phase1_shadow_review",
+        "clear_obligation_cache",
         "refresh_exchange_state",
         "retry_limit_lookup",
         "safe_cancel",

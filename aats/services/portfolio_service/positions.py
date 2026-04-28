@@ -25,6 +25,7 @@ from aats.services.accounting import (
     UnsupportedFeeCurrencyError,
 )
 from aats.services.portfolio_service.decimals import EPSILON_DECIMAL_12, is_effectively_zero, to_decimal
+from aats.services.portfolio_service.fill_projection_writer import save_fill_outcome_direct_legacy_only
 from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 from aats.services.portfolio_service.snapshot_writer import save_snapshot_direct_legacy_only
 from aats.services.portfolio_service.position_keys import (
@@ -598,7 +599,13 @@ class PortfolioService:
                 # 同 save_snapshot fallback：fill_outcome_repo.save_outcome 是
                 # 同步 INSERT，非 outbox 路径下走 to_thread 让 event loop 有空
                 # 调度 HTTP handler。
-                await asyncio.to_thread(self.fill_outcome_repo.save_outcome, outcome)
+                await asyncio.to_thread(
+                    save_fill_outcome_direct_legacy_only,
+                    fill_outcome_repo=self.fill_outcome_repo,
+                    outcome=outcome,
+                    source_component="portfolio_service",
+                    logger=self.logger,
+                )
         except Exception as exc:
             self.state.restore(checkpoint)
             log_event(

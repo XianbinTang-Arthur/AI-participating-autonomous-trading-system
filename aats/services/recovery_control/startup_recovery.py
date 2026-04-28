@@ -12,6 +12,7 @@ from aats.services.execution_engine.exit_intent_aggregator import (
     exit_execution_review_items,
     refresh_exit_execution_intents,
 )
+from aats.services.execution_engine.exit_execution_writer import ExitExecutionWriter
 from aats.services.execution_control.order_service import ExecutionOrderService
 from aats.services.execution_engine.recovery import ExecutionRecoveryService, RecoveryArtifacts
 from aats.services.governance_engine.kill_switch import KillSwitch
@@ -30,6 +31,7 @@ def startup_refresh_exit_execution_truth(
     execution_repo: object | None,
     exit_execution_repo: object | None,
     scope: object | None,
+    exit_execution_writer: ExitExecutionWriter | None = None,
 ) -> tuple[list[ExitExecutionIntent], list[str]]:
     if execution_repo is None or exit_execution_repo is None:
         return [], []
@@ -39,6 +41,7 @@ def startup_refresh_exit_execution_truth(
             exit_execution_repo=exit_execution_repo,
             settings=settings,
             scope=scope,
+            exit_execution_writer=exit_execution_writer,
         )
     except Exception as exc:  # pragma: no cover - guarded by dedicated unit test via fake repo
         return [], [

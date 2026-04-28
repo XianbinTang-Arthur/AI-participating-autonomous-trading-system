@@ -18,6 +18,7 @@ from aats.services.ledger.lot_projection import LotBasedProjectionBuilder
 from aats.services.ledger.persistent_lot_book import PersistentLotBookService
 from aats.services.ledger.settlement_posting import FillSettlementProjection, LedgerSettlementPostingService
 from aats.services.portfolio_service.positions import PortfolioService, PortfolioState
+from aats.services.portfolio_service.fill_projection_writer import save_fill_outcome_direct_legacy_only
 from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 from aats.services.portfolio_service.snapshot_writer import (
     ensure_direct_snapshot_write_allowed,
@@ -237,7 +238,12 @@ class LedgerBackedPortfolioService:
                 ending_avg_entry_price=ending_avg_entry_price,
             )
             if self.portfolio_outbox_publisher is None:
-                self.fill_outcome_repo.save_outcome(outcome)
+                save_fill_outcome_direct_legacy_only(
+                    fill_outcome_repo=self.fill_outcome_repo,
+                    outcome=outcome,
+                    source_component="ledger_portfolio_projection",
+                    logger=self.logger,
+                )
         except Exception as exc:
             log_event(
                 self.logger,

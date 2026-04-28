@@ -11,10 +11,19 @@ from aats.events.envelopes import build_envelope
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderState
 from aats.services.execution_engine.order_manager import OrderManager
+from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
 from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.storage.event_store import InMemoryEventStore
-from aats.storage.execution_repo_postgres import PostgresExecutionRepository
+from aats.storage.event_store_postgres import PostgresEventStore
+from aats.storage.execution_fill_repo_v2_postgres import PostgresExecutionFillRepositoryV2
+from aats.storage.execution_order_repo_postgres import (
+    PostgresExecutionOrderHistoryRepository,
+    PostgresExecutionOrderRepository,
+)
+from aats.storage.execution_repo_converged_postgres import ConvergedPostgresExecutionRepository
 from aats.storage.exit_execution_repo_postgres import PostgresExitExecutionRepository
+from aats.storage.obligation_repo_postgres import PostgresExecutionObligationRepository
+from aats.storage.outbox_repo_postgres import PostgresOutboxRepository
 from tests.support.postgres import temporary_postgres_runtime, temporary_postgres_url
 
 
@@ -208,7 +217,7 @@ class TestPostgresExitExecutionResume(unittest.IsolatedAsyncioTestCase):
                     storage.database_runtime.dispose()
 
     async def test_postgres_exit_parent_template_persists_and_resumes_after_restart(self) -> None:
-        with temporary_postgres_runtime(use_migrations=True) as (runtime, _admin_engine, _schema_name):
+        with temporary_postgres_runtime() as (runtime, _admin_engine, _schema_name):
             settings = AATSSettings.model_validate(
                 {
                     "storage_mode": "postgres",
@@ -219,15 +228,36 @@ class TestPostgresExitExecutionResume(unittest.IsolatedAsyncioTestCase):
                     "allowed_symbols": ("BTC-USDT-SWAP",),
                 }
             )
-            execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            order_history_repo = PostgresExecutionOrderHistoryRepository(runtime.session_factory)
+            fill_repo = PostgresExecutionFillRepositoryV2(runtime.session_factory)
+            execution_repo = ConvergedPostgresExecutionRepository(
+                runtime.session_factory,
+                execution_order_repo=order_repo,
+                execution_order_history_repo=order_history_repo,
+                execution_fill_repo=fill_repo,
+            )
+            bus_first = InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict")
+            execution_outbox = PostgresExecutionOutboxPublisher(
+                session_factory=runtime.session_factory,
+                event_store=PostgresEventStore(runtime.session_factory),
+                execution_repo=execution_repo,
+                obligation_repo=PostgresExecutionObligationRepository(runtime.session_factory),
+                outbox_repo=PostgresOutboxRepository(runtime.session_factory),
+                bus=bus_first,
+                execution_order_repo=order_repo,
+                execution_order_history_repo=order_history_repo,
+                execution_fill_repo=fill_repo,
+            )
             exit_execution_repo = PostgresExitExecutionRepository(runtime.session_factory)
             adapter_first = _PostgresSplitAdapter(first_child_live=True)
             manager_first = OrderManager(
                 settings=settings,
-                bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+                bus=bus_first,
                 adapter=adapter_first,
                 execution_repo=execution_repo,
                 exit_execution_repo=exit_execution_repo,
+                execution_outbox_publisher=execution_outbox,
                 kill_switch=KillSwitch(),
             )
             intent = OrderIntent(
@@ -275,14 +305,35 @@ class TestPostgresExitExecutionResume(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(adapter_first.submit_quantities, [Decimal("2")])
 
             adapter_resumed = _PostgresSplitAdapter()
-            resumed_execution_repo = PostgresExecutionRepository(runtime.session_factory)
+            resumed_order_repo = PostgresExecutionOrderRepository(runtime.session_factory)
+            resumed_order_history_repo = PostgresExecutionOrderHistoryRepository(runtime.session_factory)
+            resumed_fill_repo = PostgresExecutionFillRepositoryV2(runtime.session_factory)
+            resumed_execution_repo = ConvergedPostgresExecutionRepository(
+                runtime.session_factory,
+                execution_order_repo=resumed_order_repo,
+                execution_order_history_repo=resumed_order_history_repo,
+                execution_fill_repo=resumed_fill_repo,
+            )
+            bus_resumed = InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict")
+            resumed_outbox = PostgresExecutionOutboxPublisher(
+                session_factory=runtime.session_factory,
+                event_store=PostgresEventStore(runtime.session_factory),
+                execution_repo=resumed_execution_repo,
+                obligation_repo=PostgresExecutionObligationRepository(runtime.session_factory),
+                outbox_repo=PostgresOutboxRepository(runtime.session_factory),
+                bus=bus_resumed,
+                execution_order_repo=resumed_order_repo,
+                execution_order_history_repo=resumed_order_history_repo,
+                execution_fill_repo=resumed_fill_repo,
+            )
             resumed_exit_repo = PostgresExitExecutionRepository(runtime.session_factory)
             manager_resumed = OrderManager(
                 settings=settings,
-                bus=InMemoryEventBus(event_store=InMemoryEventStore(), persistence_mode="strict"),
+                bus=bus_resumed,
                 adapter=adapter_resumed,
                 execution_repo=resumed_execution_repo,
                 exit_execution_repo=resumed_exit_repo,
+                execution_outbox_publisher=resumed_outbox,
                 kill_switch=KillSwitch(),
             )
 

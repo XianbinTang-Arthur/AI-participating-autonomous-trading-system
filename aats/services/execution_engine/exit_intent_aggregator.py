@@ -19,6 +19,7 @@ from aats.services.execution_engine.order_truth import (
     unknown_write_state,
 )
 from aats.services.execution_engine.bundle_recovery import _ordered_unique
+from aats.services.execution_engine.exit_execution_writer import ExitExecutionWriter
 from aats.storage.base import ExecutionRepository, ExitExecutionRepository
 
 
@@ -722,7 +723,9 @@ def refresh_exit_execution_intents(
     exit_execution_repo: ExitExecutionRepository,
     settings: AATSSettings,
     scope: object | None = None,
+    exit_execution_writer: ExitExecutionWriter | None = None,
 ) -> list[ExitExecutionIntent]:
+    writer = exit_execution_writer or ExitExecutionWriter(exit_execution_repo)
     order_states = execution_repo.order_states()
     states_by_client_order_id = {
         state.client_order_id: state
@@ -746,18 +749,31 @@ def refresh_exit_execution_intents(
             states_by_client_order_id=states_by_client_order_id,
             states_by_execution_chain=states_by_execution_chain,
             exit_execution_repo=exit_execution_repo,
+            exit_execution_writer=writer,
         )
         if not child_refs:
             if parent.aggregate_status in _TERMINAL_PARENT_STATUSES:
                 continue
             childless_parent = _mark_parent_missing_child_refs(parent)
-            refreshed.append(exit_execution_repo.save_exit_execution_intent(childless_parent))
+            refreshed.append(
+                writer.save_exit_execution_intent(
+                    childless_parent,
+                    source_component="exit_intent_aggregator",
+                    reason_code="missing_child_refs_refresh",
+                )
+            )
             continue
         recomputed = recompute_exit_execution_intent(
             parent_intent=clear_resume_issue(parent, kind=MISSING_CHILD_REFS_RESUME_ISSUE_KIND),
             child_refs=child_refs,
         )
-        refreshed.append(exit_execution_repo.save_exit_execution_intent(recomputed))
+        refreshed.append(
+            writer.save_exit_execution_intent(
+                recomputed,
+                source_component="exit_intent_aggregator",
+                reason_code="refresh_parent_from_child_refs",
+            )
+        )
     return refreshed
 
 
@@ -834,6 +850,7 @@ def _refreshed_child_refs_for_parent(
     states_by_client_order_id: dict[str, OrderState],
     states_by_execution_chain: dict[str, list[OrderState]],
     exit_execution_repo: ExitExecutionRepository,
+    exit_execution_writer: ExitExecutionWriter,
 ) -> list[ChildExitOrderRef]:
     refreshed_by_child_id: dict[str, ChildExitOrderRef] = {}
     for existing_ref in exit_execution_repo.child_refs_for_parent(parent_intent_id=parent.parent_intent_id):
@@ -846,7 +863,11 @@ def _refreshed_child_refs_for_parent(
             order_state=state,
             settings=settings,
         )
-        exit_execution_repo.save_child_exit_order_ref(refreshed_ref)
+        exit_execution_writer.save_child_exit_order_ref(
+            refreshed_ref,
+            source_component="exit_intent_aggregator",
+            reason_code="refresh_existing_child_ref",
+        )
         refreshed_by_child_id[refreshed_ref.client_order_id] = refreshed_ref
     for state in states_by_execution_chain.get(parent.execution_chain_id, []):
         if not is_risk_reducing_order_state(state):
@@ -858,7 +879,11 @@ def _refreshed_child_refs_for_parent(
             order_state=state,
             settings=settings,
         )
-        exit_execution_repo.save_child_exit_order_ref(refreshed_ref)
+        exit_execution_writer.save_child_exit_order_ref(
+            refreshed_ref,
+            source_component="exit_intent_aggregator",
+            reason_code="reconstruct_missing_child_ref",
+        )
         refreshed_by_child_id[refreshed_ref.client_order_id] = refreshed_ref
     return list(refreshed_by_child_id.values())
 

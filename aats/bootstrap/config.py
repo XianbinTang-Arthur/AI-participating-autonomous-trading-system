@@ -83,6 +83,7 @@ from aats.services.execution_engine.obligation_cache import ObligationHotStateCa
 from aats.services.execution_engine.order_manager import OrderManager
 from aats.services.execution_engine.orderbook_snapshot_refs import default_orderbook_snapshot_read_source
 from aats.services.execution_engine.outbox import PostgresExecutionOutboxPublisher
+from aats.services.execution_engine.exit_execution_writer import ExitExecutionWriter
 from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
 from aats.services.portfolio_service.snapshot_cache import PortfolioSnapshotCache
 from aats.services.execution_engine.paper_adapter import PaperExecutionAdapter
@@ -1617,6 +1618,16 @@ def _backfill_fill_outcomes_from_event_store(
     fill_outcome_repo: FillOutcomeRepository,
     execution_repo: ExecutionRepository,
 ) -> None:
+    from aats.services.portfolio_service.fill_projection_writer import save_fill_outcome_direct_legacy_only
+    from aats.storage.fill_outcome_repo_postgres import PostgresFillOutcomeRepository
+
+    if isinstance(fill_outcome_repo, PostgresFillOutcomeRepository):
+        # Production Postgres projections must be reconstructed through
+        # PostgresPortfolioOutboxPublisher/recovery projection paths, not by
+        # replaying event-store deltas directly into fill_outcomes during
+        # bootstrap.
+        return
+
     fill_by_id = {fill.fill_id: fill for fill in execution_repo.fills()}
     for event in event_store.by_topic(topics.PORTFOLIO_BALANCE_DELTAS):
         try:
@@ -1634,7 +1645,12 @@ def _backfill_fill_outcomes_from_event_store(
                 balance_delta=balance_delta,
             )
         )
-        fill_outcome_repo.save_outcome(outcome)
+        save_fill_outcome_direct_legacy_only(
+            fill_outcome_repo=fill_outcome_repo,
+            outcome=outcome,
+            source_component="bootstrap_event_store_backfill",
+            logger=_log,
+        )
 
 
 def build_storage_backends(
@@ -3712,6 +3728,7 @@ class _RuntimeSlices:
 
     # ---- execution ----
     obligation_service: Any = None
+    exit_execution_writer: Any = None
     execution_outbox_publisher: Any = None
     portfolio_outbox_publisher: Any = None
     execution_order_service: Any = None
@@ -4307,6 +4324,9 @@ def _build_execution_slice(
             order_state_cache=slices.order_state_hot_cache,
             fill_event_cache=slices.fill_event_hot_cache,
         )
+        slices.obligation_service.attach_obligation_writer(slices.execution_outbox_publisher)
+    if storage.exit_execution_repo is not None:
+        slices.exit_execution_writer = ExitExecutionWriter(storage.exit_execution_repo)
     if (
         storage.database_runtime is not None
         and isinstance(storage.event_store, PostgresEventStore)
@@ -4382,6 +4402,7 @@ def _build_execution_slice(
         adapter=slices.execution_adapter,
         execution_repo=storage.execution_repo,
         exit_execution_repo=storage.exit_execution_repo,
+        exit_execution_writer=slices.exit_execution_writer,
         obligation_service=slices.obligation_service,
         execution_outbox_publisher=slices.execution_outbox_publisher,
         persistent_order_service=slices.execution_order_service,
@@ -4573,6 +4594,7 @@ def _build_reconciliation_slice(
         metrics=slices.metrics,
         reconciliation_classifier=slices.reconciliation_classifier,
         portfolio_outbox_publisher=slices.portfolio_outbox_publisher,
+        exit_execution_writer=slices.exit_execution_writer,
     )
     slices.base_recovery_service = ExecutionRecoveryService(
         settings=runtime_settings,
@@ -4604,7 +4626,9 @@ def _build_reconciliation_slice(
         # Stage 6 Slice 6.5：注入 obligation cache，让 _cleanup_orphan_obligations
         # 的释放结果广播到跨进程 cache。
         obligation_cache=slices.obligation_hot_state_cache,
+        obligation_writer=slices.execution_outbox_publisher,
         portfolio_outbox_publisher=slices.portfolio_outbox_publisher,
+        sleeve_pnl_projection_service=slices.sleeve_pnl_projection_service,
     )
     # OKXExecutionAdapter.client satisfies ExchangeOrderQuerier protocol.
     _exchange_order_client = (
@@ -5473,6 +5497,7 @@ async def build_runtime(
                 execution_repo=storage.execution_repo,
                 exit_execution_repo=storage.exit_execution_repo,
                 scope=state_scope,
+                exit_execution_writer=slices.exit_execution_writer,
             )
             recovery_status = apply_startup_exit_execution_review_overlay(
                 base_status=recovery_status,

@@ -203,6 +203,28 @@ class PostgresPortfolioOutboxPublisher:
         await self._publish_to_cache(snapshot)
         await self.flush_pending()
 
+    def persist_fill_projection_sync(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        balance_delta: PortfolioBalanceDelta,
+        outcome: FillOutcomeRecord,
+        source_component: str,
+        pre_commit_actions: Sequence[Callable[[Session], None]] = (),
+        schedule_post_commit: bool = True,
+    ) -> None:
+        """Sync entrypoint for recovery/backfill fill projection writes."""
+
+        self._persist_fill_projection_sync(
+            snapshot=snapshot,
+            balance_delta=balance_delta,
+            outcome=outcome,
+            source_component=source_component,
+            pre_commit_actions=pre_commit_actions,
+        )
+        if schedule_post_commit:
+            self._schedule_committed_snapshot_effects(snapshot)
+
     def _persist_fill_projection_sync(
         self,
         *,

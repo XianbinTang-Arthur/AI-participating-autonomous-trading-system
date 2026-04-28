@@ -45,6 +45,7 @@ from aats.services.execution_engine.exit_intent_aggregator import (
     resume_block_reason,
     request_cancel_exit_execution_intent,
 )
+from aats.services.execution_engine.exit_execution_writer import ExitExecutionWriter
 from aats.services.execution_engine.obligations import ExecutionObligationService, ExecutionReservationError
 from aats.services.execution_engine.order_truth import (
     blocks_new_risk_actions,
@@ -94,6 +95,7 @@ class OrderManager:
         adapter: ExchangeAdapter,
         execution_repo: ExecutionRepository,
         exit_execution_repo: ExitExecutionRepository | None = None,
+        exit_execution_writer: ExitExecutionWriter | None = None,
         obligation_service: ExecutionObligationService | None = None,
         execution_outbox_publisher: PostgresExecutionOutboxPublisher | None = None,
         persistent_order_service: ExecutionOrderService | None = None,
@@ -111,6 +113,13 @@ class OrderManager:
         self.adapter = adapter
         self.execution_repo = execution_repo
         self.exit_execution_repo = exit_execution_repo
+        self.exit_execution_writer = (
+            exit_execution_writer
+            if exit_execution_writer is not None
+            else ExitExecutionWriter(exit_execution_repo)
+            if exit_execution_repo is not None
+            else None
+        )
         self.obligation_service = obligation_service
         self.execution_outbox_publisher = execution_outbox_publisher
         self.persistent_order_service = persistent_order_service
@@ -1372,20 +1381,107 @@ class OrderManager:
         candidates = await asyncio.to_thread(self._sync_candidates)
         order_states, fills = await self.adapter.sync(candidates)
         persisted_states: list[OrderState] = []
-        for order_state in order_states:
-            persisted_states.append(
-                await self._persist_order_state(
-                    order_state=order_state,
-                    key=order_state.symbol,
-                    obligation=self._terminal_outbox_obligation(order_state=order_state, fills=[]),
-                )
-            )
+        atomically_settled_order_ids: set[str] = set()
+        fills_by_order: dict[str, list[FillEvent]] = {}
         for fill in fills:
-            await self._persist_fill(fill)
+            fills_by_order.setdefault(fill.client_order_id, []).append(fill)
+        for order_state in order_states:
+            order_fills = fills_by_order.pop(order_state.client_order_id, [])
+            atomic_persisted = await self._persist_order_state_with_fills_atomic(
+                order_state=order_state,
+                key=order_state.symbol,
+                fills=order_fills,
+            )
+            if atomic_persisted is not None:
+                persisted_states.append(atomic_persisted)
+                atomically_settled_order_ids.add(atomic_persisted.client_order_id)
+                continue
+            persisted = await self._persist_order_state(
+                order_state=order_state,
+                key=order_state.symbol,
+                obligation=self._terminal_outbox_obligation(order_state=order_state, fills=order_fills),
+            )
+            persisted_states.append(persisted)
+            for fill in order_fills:
+                await self._persist_fill(fill)
+        for order_fills in fills_by_order.values():
+            for fill in order_fills:
+                await self._persist_fill(fill)
         for order_state in persisted_states:
+            if order_state.client_order_id in atomically_settled_order_ids:
+                continue
             self._finalize_obligation(order_state=order_state)
         self._refresh_exit_execution_intents()
         await self._resume_exit_execution_after_sync()
+
+    async def _persist_order_state_with_fills_atomic(
+        self,
+        *,
+        order_state: OrderState,
+        key: str,
+        fills: list[FillEvent],
+        intent: OrderIntent | None = None,
+    ) -> OrderState | None:
+        if not fills or self.execution_outbox_publisher is None or self.obligation_service is None:
+            return None
+        normalized_fills: list[FillEvent] = []
+        for fill in fills:
+            if fill.client_order_id != order_state.client_order_id:
+                fill = fill.model_copy(
+                    update={
+                        "client_order_id": order_state.client_order_id,
+                        "execution_attempt_id": (
+                            order_state.execution_attempt_id
+                            or execution_attempt_id_from_components(
+                                client_order_id=order_state.client_order_id,
+                                execution_chain_id=order_state.execution_chain_id,
+                                intent_id=order_state.intent_id,
+                            )
+                        ),
+                    }
+                )
+            normalized_fills.append(fill)
+        per_fill_obligations, final_obligation = (
+            self.obligation_service.preview_chained_fill_obligations_and_finalize(
+                fills=normalized_fills,
+                order_state=order_state,
+            )
+        )
+        persisted_order_state = await self.execution_outbox_publisher.persist_order_state_with_fills(
+            order_state=order_state,
+            key=key,
+            fills=normalized_fills,
+            obligations_per_fill=per_fill_obligations,
+            final_obligation=final_obligation,
+        )
+        log_event(
+            self.logger,
+            "order_state_persisted",
+            **correlation_fields(
+                decision_id=persisted_order_state.decision_id,
+                intent_id=persisted_order_state.intent_id,
+                order_id=persisted_order_state.client_order_id,
+                status=persisted_order_state.status,
+                venue=persisted_order_state.venue,
+                submission_mode=persisted_order_state.submission_mode,
+                fill_count=len(normalized_fills),
+            ),
+        )
+        self._shadow_write_order_state(order_state=persisted_order_state, intent=intent)
+        self._sync_strategy_bundle_status(order_state=persisted_order_state)
+        self._sync_exit_execution_intent(order_state=persisted_order_state, intent=intent)
+        for fill in normalized_fills:
+            self._shadow_write_fill(fill)
+        mirrored_obligation = final_obligation or next(
+            (obligation for obligation in reversed(per_fill_obligations) if obligation is not None),
+            None,
+        )
+        self._shadow_sync_obligation(
+            mirrored_obligation,
+            reason="atomic_settlement",
+            related_fill=normalized_fills[-1] if normalized_fills else None,
+        )
+        return persisted_order_state
 
     def _sync_candidates(self) -> list[OrderState]:
         open_states = self.execution_repo.open_order_states()
@@ -1419,6 +1515,7 @@ class OrderManager:
             execution_repo=self.execution_repo,
             exit_execution_repo=self.exit_execution_repo,
             settings=self.settings,
+            exit_execution_writer=self.exit_execution_writer,
         )
 
     async def _resume_exit_execution_after_sync(self) -> None:
@@ -2021,15 +2118,16 @@ class OrderManager:
     def request_cancel_exit_intent(self, parent_intent_id: str):
         if self.exit_execution_repo is None:
             raise KeyError("exit_execution_repo_not_configured")
-        parent = self.exit_execution_repo.get_exit_execution_intent(parent_intent_id)
-        if parent is None:
-            raise KeyError(f"exit_execution_intent_not_found parent_intent_id={parent_intent_id}")
-        updated_parent = request_cancel_exit_execution_intent(parent)
-        recomputed = recompute_exit_execution_intent(
-            parent_intent=updated_parent,
-            child_refs=self.exit_execution_repo.child_refs_for_parent(parent_intent_id=parent_intent_id),
+        return self.exit_execution_writer.recompute_parent(
+            parent_intent_id=parent_intent_id,
+            transform_parent=request_cancel_exit_execution_intent,
+            recompute_parent=lambda parent, child_refs: recompute_exit_execution_intent(
+                parent_intent=parent,
+                child_refs=child_refs,
+            ),
+            source_component="order_manager",
+            reason_code="operator_request_cancel_parent",
         )
-        return self.exit_execution_repo.save_exit_execution_intent(recomputed)
 
     async def retry_exit_execution_limit_lookup(self, parent_intent_id: str):
         if self.exit_execution_repo is None:
@@ -2098,6 +2196,13 @@ class OrderManager:
         if pre_submit_canceled is not None:
             return pre_submit_canceled
         state, fills = await self.adapter.cancel(current)
+        atomic_persisted = await self._persist_order_state_with_fills_atomic(
+            order_state=state,
+            key=current.symbol,
+            fills=fills,
+        )
+        if atomic_persisted is not None:
+            return atomic_persisted
         persisted = await self._persist_order_state(
             order_state=state,
             key=current.symbol,
@@ -2210,12 +2315,16 @@ class OrderManager:
             order_state=order_state,
             settings=self.settings,
         )
-        self.exit_execution_repo.save_child_exit_order_ref(child_ref)
-        recomputed = recompute_exit_execution_intent(
+        self.exit_execution_writer.save_child_ref_and_recompute_parent(
             parent_intent=parent,
-            child_refs=self.exit_execution_repo.child_refs_for_parent(parent_intent_id=parent.parent_intent_id),
+            child_ref=child_ref,
+            recompute_parent=lambda parent_intent, child_refs: recompute_exit_execution_intent(
+                parent_intent=parent_intent,
+                child_refs=child_refs,
+            ),
+            source_component="order_manager",
+            reason_code="sync_child_ref_from_order_state",
         )
-        self.exit_execution_repo.save_exit_execution_intent(recomputed)
 
     def _ensure_exit_execution_intent(
         self,
@@ -2246,7 +2355,7 @@ class OrderManager:
             return self._save_exit_execution_intent_with_template(parent=parent, intent=intent)
         if is_risk_reducing_order_state(order_state):
             parent = create_exit_execution_intent_from_order_state(order_state)
-            return self.exit_execution_repo.save_exit_execution_intent(parent)
+            return self._save_exit_execution_parent(parent)
         return None
 
     def _save_exit_execution_intent_with_template(self, *, parent, intent: OrderIntent):
@@ -2263,7 +2372,11 @@ class OrderManager:
     def _save_exit_execution_parent(self, parent):
         if self.exit_execution_repo is None:
             return parent
-        return self.exit_execution_repo.save_exit_execution_intent(parent)
+        return self.exit_execution_writer.save_exit_execution_intent(
+            parent,
+            source_component="order_manager",
+            reason_code="save_exit_execution_parent",
+        )
 
     def _sync_strategy_bundle_status(self, *, order_state: OrderState) -> None:
         if self.strategy_runtime_repo is None:
@@ -2383,6 +2496,23 @@ class OrderManager:
 
     def _finalize_obligation(self, *, order_state: OrderState) -> None:
         if self.obligation_service is None:
+            return
+        if self.execution_outbox_publisher is not None:
+            current = self.obligation_service.obligation_repo.get_obligation(order_state.client_order_id)
+            obligation = self.obligation_service.preview_obligation_for_order_state(order_state)
+            if (
+                obligation is not None
+                and (
+                    current is None
+                    or current.model_dump(mode="json") != obligation.model_dump(mode="json")
+                )
+            ):
+                obligation = self.execution_outbox_publisher.persist_obligation_sync(
+                    obligation=obligation,
+                    source_component="execution_engine",
+                    reason_code="finalize_for_order_state",
+                )
+            self._shadow_sync_obligation(obligation, reason="reservation_release", related_fill=None)
             return
         obligation = self.obligation_service.finalize_for_order_state(order_state)
         self._shadow_sync_obligation(obligation, reason="reservation_release", related_fill=None)

@@ -8,8 +8,10 @@ from aats.bootstrap.settings import AATSSettings
 
 if TYPE_CHECKING:
     from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
+    from aats.services.execution_engine.obligation_writer import ObligationWriter
     from aats.services.ledger.persistent_lot_book import PersistentLotBookService
     from aats.services.portfolio_service.outbox import PostgresPortfolioOutboxPublisher
+    from aats.services.strategy_engines.sleeve_pnl_projection import SleevePnLProjectionService
 from aats.schemas.common import utc_now
 from aats.schemas.exchange import AccountBaselineSnapshot
 from aats.schemas.portfolio import FillOutcomeRecord, PortfolioBalanceDelta, PortfolioSnapshot, is_trusted_baseline_snapshot
@@ -24,9 +26,11 @@ from aats.services.governance_engine.kill_switch import KillSwitch
 from aats.services.governance_engine.runtime_layers import RecoveryPolicy
 from aats.services.portfolio_service.position_keys import position_key_for_snapshot_position
 from aats.services.portfolio_service.decimals import to_decimal
+from aats.services.portfolio_service.fill_projection_writer import save_fill_outcome_direct_legacy_only
 from aats.services.portfolio_service.positions import PortfolioState
 from aats.services.portfolio_service.reconstruction import PortfolioReconstructionService
 from aats.services.portfolio_service.snapshot_writer import save_snapshot_direct_legacy_only
+from aats.services.execution_engine.obligation_writer import save_obligation_direct_legacy_only
 from aats.services.runtime_scope import (
     fills_for_scope,
     latest_reconciliation_for_scope,
@@ -74,8 +78,10 @@ class ExecutionRecoveryService:
         fill_outcome_repo: FillOutcomeRepository | None = None,
         event_store: object | None = None,
         obligation_cache: "ObligationHotStateCache | None" = None,
+        obligation_writer: "ObligationWriter | None" = None,
         persistent_lot_book_service: "PersistentLotBookService | None" = None,
         portfolio_outbox_publisher: "PostgresPortfolioOutboxPublisher | None" = None,
+        sleeve_pnl_projection_service: "SleevePnLProjectionService | None" = None,
     ) -> None:
         self.settings = settings
         self.execution_repo = execution_repo
@@ -92,11 +98,13 @@ class ExecutionRecoveryService:
         self.event_store = event_store
         self.persistent_lot_book_service = persistent_lot_book_service
         self.portfolio_outbox_publisher = portfolio_outbox_publisher
+        self.sleeve_pnl_projection_service = sleeve_pnl_projection_service
         # Stage 6 Slice 6.5：跨进程 obligation 缓存。_cleanup_orphan_obligations
         # 修复遗留 obligation 后会 best-effort 广播到 cache，让后续进程读路径
         # 拿到的是 release 后的状态。None = 未接线（legacy path），行为退化。
         # 设计文档：docs/task/stage_6_slice_6_5_obligation_hot_state_design.md
         self._obligation_cache = obligation_cache
+        self._obligation_writer = obligation_writer
         self.logger = get_logger("aats.recovery")
         self.recovery_policy = recovery_policy or RecoveryPolicy(
             name="default_recovery",
@@ -513,14 +521,24 @@ class ExecutionRecoveryService:
             updated = self._resolved_obligation(obligation=obligation, order_state=order_state)
             if updated is None:
                 continue
-            saved = self.obligation_repo.save_obligation(updated)
-            # Stage 6 Slice 6.5：startup recovery 过程中清理遗留 obligation 后，
-            # best-effort 把 released 状态广播到跨进程 cache。其它已经起来的
-            # 进程（如果有的话）立即看到清理结果。cache 未接线时 noop。
-            # recovery 是 sync 路径，但整个 build_runtime 在 async context 中
-            # 跑，fire_and_forget_publish 能 schedule 到 running loop。
-            if saved is not None and self._obligation_cache is not None:
-                self._obligation_cache.fire_and_forget_publish(saved)
+            if self._obligation_writer is not None:
+                saved = self._obligation_writer.persist_obligation_sync(
+                    obligation=updated,
+                    source_component="execution_recovery",
+                    reason_code="orphan_obligation_cleanup",
+                )
+            else:
+                saved = save_obligation_direct_legacy_only(
+                    obligation_repo=self.obligation_repo,
+                    obligation=updated,
+                    source_component="execution_recovery",
+                    reason_code="orphan_obligation_cleanup",
+                    logger=self.logger,
+                )
+                # Stage 6 Slice 6.5：legacy path。Postgres production path 由
+                # obligation writer 的 commit hook 负责发布 cache。
+                if saved is not None and self._obligation_cache is not None:
+                    self._obligation_cache.fire_and_forget_publish(saved)
             released += 1
         return released
 
@@ -912,8 +930,43 @@ class ExecutionRecoveryService:
                 ending_position_qty=application_result.ending_quantity,
                 ending_avg_entry_price=application_result.ending_avg_entry_price,
             )
+            snapshot = self.reconstruction_service.snapshot_builder.build(
+                state=replay_state,
+                price_provider=self.price_provider,
+                decision_id=fill.decision_id,
+                source_intent_id=fill.intent_id,
+                source_fill_id=fill.fill_id,
+                snapshot_origin="fill_derived",
+            ).model_copy(
+                update={
+                    "product_type": self.runtime_scope.product_type,
+                    "margin_mode": self.runtime_scope.margin_mode,
+                }
+            )
             try:
-                self.fill_outcome_repo.save_outcome(outcome)
+                if self.portfolio_outbox_publisher is not None:
+                    pre_commit_actions = []
+                    if self.sleeve_pnl_projection_service is not None:
+                        pre_commit_actions.append(
+                            lambda session, outcome=outcome: self.sleeve_pnl_projection_service.save_fill_outcome_in_session(
+                                session,
+                                outcome=outcome,
+                            )
+                        )
+                    self.portfolio_outbox_publisher.persist_fill_projection_sync(
+                        snapshot=snapshot,
+                        balance_delta=balance_delta,
+                        outcome=outcome,
+                        source_component="execution_recovery",
+                        pre_commit_actions=tuple(pre_commit_actions),
+                    )
+                else:
+                    save_fill_outcome_direct_legacy_only(
+                        fill_outcome_repo=self.fill_outcome_repo,
+                        outcome=outcome,
+                        source_component="execution_recovery",
+                        logger=self.logger,
+                    )
             except Exception as exc:  # pragma: no cover - repository specific failure path
                 failed_count += 1
                 log_event(

@@ -5,6 +5,7 @@ from decimal import Decimal
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
+from aats.bootstrap.logging import get_logger
 from aats.bootstrap.settings import AATSSettings
 from aats.schemas.common import utc_now
 from aats.schemas.execution import FillEvent, OrderIntent, OrderObligation, OrderState
@@ -20,6 +21,11 @@ from aats.services.accounting import (
 )
 from aats.services.fee_resolver import EffectiveFeeResolver
 from aats.services.portfolio_service.decimals import to_decimal
+from aats.services.execution_engine.obligation_writer import (
+    ObligationWriter,
+    reserve_obligation_direct_legacy_only,
+    save_obligation_direct_legacy_only,
+)
 
 if TYPE_CHECKING:
     from aats.services.execution_engine.obligation_cache import ObligationHotStateCache
@@ -41,6 +47,7 @@ class ExecutionObligationService:
         price_provider: Callable[[str], Decimal] | None = None,
         fee_resolver: EffectiveFeeResolver | None = None,
         obligation_cache: "ObligationHotStateCache | None" = None,
+        obligation_writer: ObligationWriter | None = None,
     ) -> None:
         self.settings = settings
         self.obligation_repo = obligation_repo
@@ -54,6 +61,11 @@ class ExecutionObligationService:
         # 此时本 service 的行为和 6.5 之前完全一样。
         # 设计文档：docs/task/stage_6_slice_6_5_obligation_hot_state_design.md
         self._obligation_cache = obligation_cache
+        self._obligation_writer = obligation_writer
+        self.logger = get_logger("aats.execution_obligation")
+
+    def attach_obligation_writer(self, obligation_writer: ObligationWriter | None) -> None:
+        self._obligation_writer = obligation_writer
 
     async def reserve_for_intent(
         self,
@@ -71,10 +83,13 @@ class ExecutionObligationService:
             # snapshot_available 为 None 表示 obligation 已存在（幂等返回），
             # 此时跳过事务保存直接返回。
             if snapshot_available is not None:
-                saved = self.obligation_repo.reserve_obligation_transactional(
+                saved = reserve_obligation_direct_legacy_only(
+                    obligation_repo=self.obligation_repo,
                     obligation=obligation,
                     snapshot_available_balance=snapshot_available,
                     epsilon=self._EPSILON,
+                    source_component="execution_obligation_service",
+                    logger=self.logger,
                 )
             else:
                 saved = obligation
@@ -88,12 +103,11 @@ class ExecutionObligationService:
     def persist_previewed_obligation(self, obligation: OrderObligation | None) -> OrderObligation | None:
         if obligation is None:
             return None
-        saved = self.obligation_repo.save_obligation(obligation)
-        # Stage 6 Slice 6.5：sync path 用 fire_and_forget_publish。eager local apply
-        # 保证同 stack 内 read-after-write 立即可见，Redis+NATS 走 schedule task。
-        if saved is not None and self._obligation_cache is not None:
-            self._obligation_cache.fire_and_forget_publish(saved)
-        return saved
+        return self._persist_obligation_sync(
+            obligation,
+            source_component="execution_obligation_service",
+            reason_code="persist_previewed_obligation",
+        )
 
     async def preview_reservation_for_intent(
         self,
@@ -179,11 +193,11 @@ class ExecutionObligationService:
         updated = self.preview_obligation_for_fill(fill)
         if updated is None:
             return None
-        saved = self.obligation_repo.save_obligation(updated)
-        # Stage 6 Slice 6.5：同 persist_previewed_obligation 模板。
-        if saved is not None and self._obligation_cache is not None:
-            self._obligation_cache.fire_and_forget_publish(saved)
-        return saved
+        return self._persist_obligation_sync(
+            updated,
+            source_component="execution_obligation_service",
+            reason_code="consume_for_fill",
+        )
 
     def preview_obligation_for_fill(self, fill: FillEvent) -> OrderObligation | None:
         obligation = self.obligation_repo.get_obligation(fill.client_order_id)
@@ -281,15 +295,42 @@ class ExecutionObligationService:
         updated = self.preview_obligation_for_order_state(order_state)
         if updated is None:
             return None
-        saved = self.obligation_repo.save_obligation(updated)
-        # Stage 6 Slice 6.5：同 persist_previewed_obligation 模板。
-        if saved is not None and self._obligation_cache is not None:
-            self._obligation_cache.fire_and_forget_publish(saved)
-        return saved
+        return self._persist_obligation_sync(
+            updated,
+            source_component="execution_obligation_service",
+            reason_code="finalize_for_order_state",
+        )
 
     def preview_obligation_for_order_state(self, order_state: OrderState) -> OrderObligation | None:
         obligation = self.obligation_repo.get_obligation(order_state.client_order_id)
         return self._apply_finalization_to_obligation(order_state, obligation)
+
+    def _persist_obligation_sync(
+        self,
+        obligation: OrderObligation,
+        *,
+        source_component: str,
+        reason_code: str,
+    ) -> OrderObligation:
+        if self._obligation_writer is not None:
+            return self._obligation_writer.persist_obligation_sync(
+                obligation=obligation,
+                source_component=source_component,
+                reason_code=reason_code,
+            )
+        saved = save_obligation_direct_legacy_only(
+            obligation_repo=self.obligation_repo,
+            obligation=obligation,
+            source_component=source_component,
+            reason_code=reason_code,
+            logger=self.logger,
+        )
+        # Stage 6 Slice 6.5：sync legacy path 用 fire_and_forget_publish。eager
+        # local apply 保证同 stack 内 read-after-write 立即可见，Redis+NATS 走
+        # schedule task。Postgres production path 由 writer commit hook 负责。
+        if saved is not None and self._obligation_cache is not None:
+            self._obligation_cache.fire_and_forget_publish(saved)
+        return saved
 
     @classmethod
     def remaining_amount(cls, obligation: OrderObligation) -> Decimal:

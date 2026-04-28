@@ -355,6 +355,99 @@ class ObligationHotStateCache:
         """
         self._apply_locally(obligation)
 
+    async def replace_all_from_source(
+        self,
+        obligations: list[OrderObligation],
+        *,
+        source_component: str,
+    ) -> dict[str, int]:
+        """Atomically replace the authoritative local/Redis obligation view.
+
+        Operator cache repair must not clear an already-bootstrapped cache before
+        the replacement state is durably visible in Redis.  This method writes the
+        new per-obligation keys and index first; only after those writes succeed
+        does it swap the in-memory dict used by sync readers.
+        """
+
+        replacement = {obligation.client_order_id: obligation for obligation in obligations}
+        previous = dict(self._latest)
+        previous_index_coids: set[str] = set(previous.keys())
+        if self._hot_state_store is not None:
+            try:
+                existing_index = await self._hot_state_store.get(OBLIGATION_INDEX_KEY)
+                if isinstance(existing_index, dict):
+                    previous_index_coids.update(str(coid) for coid in existing_index.get("all_coids") or [])
+            except Exception as exc:
+                log_event(
+                    self._logger,
+                    "obligation_cache_replace_index_read_failed",
+                    level="warning",
+                    source_component=source_component,
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            for obligation in replacement.values():
+                await self._hot_state_store.set(
+                    _obligation_key(obligation.client_order_id),
+                    obligation.model_dump(mode="json"),
+                    ttl_seconds=_REDIS_TTL_SECONDS,
+                )
+            next_version = self._index_version + 1
+            await self._hot_state_store.set(
+                OBLIGATION_INDEX_KEY,
+                {
+                    "all_coids": list(replacement.keys()),
+                    "active_coids": [
+                        coid
+                        for coid, obligation in replacement.items()
+                        if obligation.status in {"ACTIVE", "PARTIALLY_CONSUMED"}
+                    ],
+                    "version": next_version,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                    "writer_role": self._process_role,
+                    "source_component": source_component,
+                },
+                ttl_seconds=_REDIS_TTL_SECONDS,
+            )
+            stale_coids = previous_index_coids - set(replacement.keys())
+            for coid in stale_coids:
+                try:
+                    await self._hot_state_store.delete(_obligation_key(coid))
+                except Exception as exc:
+                    log_event(
+                        self._logger,
+                        "obligation_cache_replace_stale_delete_failed",
+                        level="warning",
+                        source_component=source_component,
+                        client_order_id=coid,
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+            self._index_version = next_version
+
+        self._latest = replacement
+        self._bootstrapped = True
+        for obligation in replacement.values():
+            await self._best_effort_nats_broadcast(obligation)
+        active_count = sum(
+            1
+            for obligation in replacement.values()
+            if obligation.status in {"ACTIVE", "PARTIALLY_CONSUMED"}
+        )
+        log_event(
+            self._logger,
+            "obligation_cache_replaced_from_source",
+            source_component=source_component,
+            cached_count=len(replacement),
+            active_count=active_count,
+            removed_count=len(set(previous.keys()) - set(replacement.keys())),
+        )
+        return {
+            "cached_count": len(replacement),
+            "active_count": active_count,
+            "removed_count": len(set(previous.keys()) - set(replacement.keys())),
+        }
+
     def fire_and_forget_publish(self, obligation: OrderObligation | None) -> None:
         """Sync-friendly fire-and-forget wrapper for ``publish()``.
 

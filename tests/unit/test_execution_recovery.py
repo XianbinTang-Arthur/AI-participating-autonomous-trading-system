@@ -69,6 +69,37 @@ class _RecordingPortfolioOutboxPublisher:
             }
         )
 
+    def persist_fill_projection_sync(
+        self,
+        *,
+        snapshot: PortfolioSnapshot,
+        balance_delta,
+        outcome,
+        source_component: str,
+        pre_commit_actions=(),
+        schedule_post_commit: bool = True,
+    ) -> None:
+        session = object()
+        for action in pre_commit_actions:
+            action(session)
+        self.persisted.append(
+            {
+                "snapshot": snapshot,
+                "balance_delta": balance_delta,
+                "outcome": outcome,
+                "source_component": source_component,
+                "schedule_post_commit": schedule_post_commit,
+            }
+        )
+
+
+class _RecordingSleevePnlProjectionService:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def save_fill_outcome_in_session(self, session, *, outcome) -> None:
+        self.calls.append({"session": session, "outcome": outcome})
+
 
 class TestExecutionRecovery(unittest.TestCase):
     def test_recovery_tracks_structured_bundle_open_orders_without_halting(self) -> None:
@@ -972,6 +1003,64 @@ class TestExecutionRecovery(unittest.TestCase):
         self.assertEqual(close_outcome.realized_pnl_delta, Decimal("0.100"))
         self.assertIn("fill_gap_compensated:2", artifacts.status.notes)
 
+    def test_recovery_backfills_fill_outcomes_via_portfolio_outbox_projection(self) -> None:
+        execution_repo = InMemoryExecutionRepository()
+        fill_outcome_repo = InMemoryFillOutcomeRepository()
+        outbox = _RecordingPortfolioOutboxPublisher()
+        sleeve_projection = _RecordingSleevePnlProjectionService()
+        now = utc_now()
+        execution_repo.save_fill(
+            FillEvent(
+                fill_id="fill_recovery_projection",
+                decision_id="decision_recovery_projection",
+                intent_id="intent_recovery_projection",
+                client_order_id="client_recovery_projection",
+                exchange_order_id="exchange_recovery_projection",
+                symbol="BTC-USDT-SWAP",
+                venue="OKX",
+                side="buy",
+                fill_qty=Decimal("0.001"),
+                fill_price=Decimal("78000"),
+                fee_amount=Decimal("0"),
+                fee_currency="USDT",
+                product_type="derivatives",
+                margin_mode="cross",
+                position_mode="long_short_mode",
+                pos_side="long",
+                exposure_side="long",
+                execution_action="enter",
+                position_intent="open_long",
+                liquidity_role="taker",
+                exchange_timestamp=now,
+                ingestion_timestamp=now,
+            )
+        )
+        recovery = self._service(
+            execution_repo=execution_repo,
+            fill_outcome_repo=fill_outcome_repo,
+            portfolio_outbox_publisher=outbox,
+            sleeve_pnl_projection_service=sleeve_projection,
+            settings_override={
+                "trading_product_type": "derivatives",
+                "margin_mode": "cross",
+                "default_symbol": "BTC-USDT-SWAP",
+                "allowed_symbols": ["BTC-USDT-SWAP"],
+            },
+        )
+
+        artifacts = recovery.recover(portfolio_state=PortfolioState(initial_usdt_balance=10_000.0))
+
+        projection_calls = [item for item in outbox.persisted if "outcome" in item]
+        self.assertEqual(len(projection_calls), 1)
+        projection = projection_calls[0]
+        self.assertEqual(projection["source_component"], "execution_recovery")
+        self.assertEqual(projection["outcome"].fill_id, "fill_recovery_projection")
+        self.assertEqual(projection["snapshot"].source_fill_id, "fill_recovery_projection")
+        self.assertIsNone(fill_outcome_repo.get_outcome("fill_recovery_projection"))
+        self.assertEqual(len(sleeve_projection.calls), 1)
+        self.assertEqual(sleeve_projection.calls[0]["outcome"].fill_id, "fill_recovery_projection")
+        self.assertIn("fill_gap_compensated:1", artifacts.status.notes)
+
     def test_recovery_rebuilds_persistent_lot_book_when_outcomes_already_exist(self) -> None:
         execution_repo = InMemoryExecutionRepository()
         fill_outcome_repo = InMemoryFillOutcomeRepository()
@@ -1077,6 +1166,7 @@ class TestExecutionRecovery(unittest.TestCase):
         fill_outcome_repo: InMemoryFillOutcomeRepository | None = None,
         persistent_lot_book_service: object | None = None,
         portfolio_outbox_publisher: object | None = None,
+        sleeve_pnl_projection_service: object | None = None,
         settings_override: dict | None = None,
     ) -> ExecutionRecoveryService:
         payload = {
@@ -1106,4 +1196,5 @@ class TestExecutionRecovery(unittest.TestCase):
             fill_outcome_repo=fill_outcome_repo,
             persistent_lot_book_service=persistent_lot_book_service,  # type: ignore[arg-type]
             portfolio_outbox_publisher=portfolio_outbox_publisher,  # type: ignore[arg-type]
+            sleeve_pnl_projection_service=sleeve_pnl_projection_service,  # type: ignore[arg-type]
         )

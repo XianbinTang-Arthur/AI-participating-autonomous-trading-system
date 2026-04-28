@@ -6529,55 +6529,109 @@ class OperatorQueryService:
         """
         _obligation_cache = getattr(self.runtime, "obligation_hot_state_cache", None)
         _hot_state_store = getattr(self.runtime, "hot_state_store", None)
+        recovery_before = self.recovery_view()["recovery_state"]
+
+        def _record_action(*, status: str, details: dict[str, Any]) -> dict[str, Any]:
+            action = OperatorActionRecord(
+                action="clear_obligation_cache",
+                actor_role=actor_role,
+                actor_identity=actor_identity,
+                auth_source=auth_source,
+                reason=reason,
+                status=status,
+                recovery_state_before=recovery_before,
+                recovery_state_after=recovery_before,
+                details={
+                    **details,
+                    "cleared_at": utc_now(),
+                },
+            )
+            envelope = self._append_event(
+                topic=topics.OPERATOR_ACTIONS,
+                key="clear_obligation_cache",
+                payload_model=action,
+            )
+            payload = action.model_dump(mode="json")
+            payload["_event_id"] = envelope.event_id
+            payload["_topic"] = envelope.topic
+            return payload
 
         cleared_redis = False
-        if _hot_state_store is not None:
-            from aats.services.execution_engine.obligation_cache import (
-                OBLIGATION_INDEX_KEY,
-            )
-            try:
-                # 读 index 获取所有 coid keys
-                index = await _hot_state_store.get(OBLIGATION_INDEX_KEY)
-                keys_to_delete = [OBLIGATION_INDEX_KEY]
-                if isinstance(index, dict):
-                    for coid in (index.get("all_coids") or []):
-                        keys_to_delete.append(f"aats:hot:obligation:by_coid:{coid}")
-                for key in keys_to_delete:
-                    await _hot_state_store.delete(key)
-                cleared_redis = True
-            except Exception:
-                cleared_redis = False
-
         cleared_local = False
-        if _obligation_cache is not None and hasattr(_obligation_cache, "_latest"):
-            _obligation_cache._latest.clear()
-            cleared_local = True
+        rebuilt_count = 0
+        active_rebuilt_count = 0
+        removed_local_count = 0
+        rebuild_failed_count = 0
+        rebuild_error: str | None = None
 
-        recovery_before = self.recovery_view()["recovery_state"]
-        action = OperatorActionRecord(
-            action="clear_obligation_cache",
-            actor_role=actor_role,
-            actor_identity=actor_identity,
-            auth_source=auth_source,
-            reason=reason,
+        if _obligation_cache is None:
+            if _hot_state_store is not None:
+                rebuild_error = "obligation_cache_unavailable"
+                _record_action(
+                    status="failed",
+                    details={
+                        "cleared_redis": False,
+                        "cleared_local": False,
+                        "rebuilt_obligation_count": 0,
+                        "active_rebuilt_obligation_count": 0,
+                        "removed_local_obligation_count": 0,
+                        "rebuild_failed_count": 1,
+                        "rebuild_error": rebuild_error,
+                    },
+                )
+                raise ValueError(f"clear_obligation_cache_rebuild_failed:{rebuild_error}")
+        else:
+            _obligation_repo = getattr(self.runtime, "obligation_repo", None)
+            obligations_to_rebuild = []
+            try:
+                if _obligation_repo is None:
+                    raise RuntimeError("obligation_repo_unavailable")
+                all_obligations = getattr(_obligation_repo, "all_obligations", None)
+                if callable(all_obligations):
+                    obligations_to_rebuild = list(all_obligations())
+                else:
+                    obligations_to_rebuild = list(_obligation_repo.active_obligations())
+                replace_all = getattr(_obligation_cache, "replace_all_from_source", None)
+                if not callable(replace_all):
+                    raise RuntimeError("obligation_cache_replace_unsupported")
+                replace_stats = await replace_all(
+                    obligations_to_rebuild,
+                    source_component="operator_clear_obligation_cache",
+                )
+                rebuilt_count = int(replace_stats.get("cached_count") or 0)
+                active_rebuilt_count = int(replace_stats.get("active_count") or 0)
+                removed_local_count = int(replace_stats.get("removed_count") or 0)
+                cleared_local = True
+                cleared_redis = _hot_state_store is not None
+            except Exception as exc:
+                rebuild_failed_count = 1
+                rebuild_error = f"{type(exc).__name__}:{exc}"
+                _record_action(
+                    status="failed",
+                    details={
+                        "cleared_redis": False,
+                        "cleared_local": False,
+                        "rebuilt_obligation_count": 0,
+                        "active_rebuilt_obligation_count": 0,
+                        "removed_local_obligation_count": 0,
+                        "rebuild_failed_count": rebuild_failed_count,
+                        "rebuild_error": rebuild_error,
+                    },
+                )
+                raise ValueError(f"clear_obligation_cache_rebuild_failed:{rebuild_error}") from exc
+
+        return _record_action(
             status="completed",
-            recovery_state_before=recovery_before,
-            recovery_state_after=recovery_before,
             details={
                 "cleared_redis": cleared_redis,
                 "cleared_local": cleared_local,
-                "cleared_at": utc_now(),
+                "rebuilt_obligation_count": rebuilt_count,
+                "active_rebuilt_obligation_count": active_rebuilt_count,
+                "removed_local_obligation_count": removed_local_count,
+                "rebuild_failed_count": rebuild_failed_count,
+                "rebuild_error": rebuild_error,
             },
         )
-        envelope = self._append_event(
-            topic=topics.OPERATOR_ACTIONS,
-            key="clear_obligation_cache",
-            payload_model=action,
-        )
-        payload = action.model_dump(mode="json")
-        payload["_event_id"] = envelope.event_id
-        payload["_topic"] = envelope.topic
-        return payload
 
     def runtime_profile_ai_config_snapshot(self) -> dict[str, Any]:
         snapshot = self.runtime_profile_snapshot()

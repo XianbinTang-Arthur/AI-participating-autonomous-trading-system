@@ -88,6 +88,56 @@ class PostgresExecutionOutboxPublisher:
     def __post_init__(self) -> None:
         self.logger = get_logger("aats.execution_outbox")
 
+    def persist_obligation_sync(
+        self,
+        *,
+        obligation: OrderObligation,
+        source_component: str,
+        reason_code: str,
+    ) -> OrderObligation:
+        """Persist a standalone obligation update through the execution writer.
+
+        Order/fill hot paths should keep using the atomic order/fill methods
+        below.  This entrypoint is for recovery/operator paths that need to
+        release an obligation without changing an order/fill row in the same
+        transaction.
+        """
+
+        saved = self._persist_standalone_obligation_sync(
+            obligation=obligation,
+            source_component=source_component,
+        )
+        self._publish_obligation_to_cache(saved)
+        log_event(
+            self.logger,
+            "execution_obligation_persisted",
+            source_component=source_component,
+            reason_code=reason_code,
+            client_order_id=saved.client_order_id,
+            obligation_id=saved.obligation_id,
+            status=saved.status,
+        )
+        return saved
+
+    def _persist_standalone_obligation_sync(
+        self,
+        *,
+        obligation: OrderObligation,
+        source_component: str,
+    ) -> OrderObligation:
+        with self.session_factory() as session:
+            saved = self.obligation_repo.save_obligation_in_session(session, obligation)
+            envelope = build_envelope(
+                topic=topics.OBLIGATION_UPDATES,
+                key=saved.client_order_id,
+                payload_model=saved,
+                source_component=source_component,
+            )
+            self.event_store.append_in_session(session, envelope)
+            self.outbox_repo.enqueue_in_session(session, envelope)
+            session.commit()
+        return saved
+
     async def persist_order_state(
         self,
         *,

@@ -35,6 +35,7 @@ from aats.services.execution_engine.exit_intent_aggregator import (
     augment_reconciliation_report_with_exit_execution,
     refresh_exit_execution_intents,
 )
+from aats.services.execution_engine.exit_execution_writer import ExitExecutionWriter
 from aats.services.runtime_scope import (
     fills_for_scope,
     latest_baseline_for_scope,
@@ -94,6 +95,7 @@ class ReconciliationRepairService:
     runtime_scope: object | None = None
     settings: AATSSettings | None = None
     portfolio_outbox_publisher: "PostgresPortfolioOutboxPublisher | None" = None
+    exit_execution_writer: ExitExecutionWriter | None = None
 
     def configure(
         self,
@@ -106,6 +108,7 @@ class ReconciliationRepairService:
         price_provider: Callable[[str], Decimal],
         runtime_scope,
         portfolio_outbox_publisher: "PostgresPortfolioOutboxPublisher | None" = None,
+        exit_execution_writer: ExitExecutionWriter | None = None,
     ) -> None:
         self.settings = settings
         self.portfolio_repo = portfolio_repo
@@ -115,6 +118,7 @@ class ReconciliationRepairService:
         self.price_provider = price_provider
         self.runtime_scope = runtime_scope
         self.portfolio_outbox_publisher = portfolio_outbox_publisher
+        self.exit_execution_writer = exit_execution_writer
 
     def repair(
         self,
@@ -231,6 +235,7 @@ class ReconciliationRepairService:
             exit_execution_repo=self.exit_execution_repo,
             settings=self.settings,
             scope=self.runtime_scope,
+            exit_execution_writer=self.exit_execution_writer,
         )
 
 
@@ -255,6 +260,7 @@ class ReconciliationService:
         metrics: MetricsRegistry | None = None,
         reconciliation_classifier: RecoveryReconciliationClassifier | None = None,
         portfolio_outbox_publisher: "PostgresPortfolioOutboxPublisher | None" = None,
+        exit_execution_writer: ExitExecutionWriter | None = None,
     ) -> None:
         self.settings = settings
         self.bus = bus
@@ -272,6 +278,9 @@ class ReconciliationService:
         self.metrics = metrics
         self.reconciliation_classifier = reconciliation_classifier
         self.portfolio_outbox_publisher = portfolio_outbox_publisher
+        self.exit_execution_writer = exit_execution_writer or (
+            ExitExecutionWriter(exit_execution_repo) if exit_execution_repo is not None else None
+        )
         self.runtime_scope = runtime_state_scope(settings)
         configure_comparator = getattr(self.comparator, "configure", None)
         if callable(configure_comparator):
@@ -287,6 +296,7 @@ class ReconciliationService:
                 price_provider=self.price_provider,
                 runtime_scope=self.runtime_scope,
                 portfolio_outbox_publisher=self.portfolio_outbox_publisher,
+                exit_execution_writer=self.exit_execution_writer,
             )
 
     async def handle_portfolio_snapshot(self, message: dict) -> None:
