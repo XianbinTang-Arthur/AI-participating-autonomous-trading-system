@@ -310,6 +310,7 @@ def _protected_dashboard_panel_payload(
     *,
     request: Request,
     query: OperatorQueryService,
+    view: str | None = None,
     panel_key: str,
     recent_decisions_limit: int,
     recent_orders_limit: int,
@@ -355,6 +356,9 @@ def _protected_dashboard_panel_payload(
         return query.strategy_runtime()
     if panel_key == "strategyAttribution":
         return query.strategy_attribution_report(limit=200)
+    if panel_key == "positionLifecycleAttribution":
+        limit = 6 if view == "strategy" else 8
+        return query.position_lifecycle_attribution(limit=limit)
     if panel_key == "recentDecisions":
         return query.recent_decisions(limit=recent_decisions_limit, offset=0)
     if panel_key == "trialReviewSummary":
@@ -698,6 +702,7 @@ async def dashboard_bundle(
                     payload = _protected_dashboard_panel_payload(
                         request=request,
                         query=query,
+                        view=view,
                         panel_key=panel_key,
                         recent_decisions_limit=recent_decisions,
                         recent_orders_limit=recent_orders,

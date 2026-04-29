@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from aats.api.auth_routes import _strategy_view_strategy_runtime_payload, auth_router
+from aats.api.auth_routes import _protected_dashboard_panel_payload, _strategy_view_strategy_runtime_payload, auth_router
 from aats.api.ui import ui_router
 from aats.bootstrap.settings import AATSSettings
 
@@ -133,6 +133,34 @@ console.log(JSON.stringify({{
 
 
 class TestDashboardUI(unittest.TestCase):
+    def test_dashboard_bundle_dispatches_position_lifecycle_attribution_panel(self) -> None:
+        calls: list[int] = []
+
+        class Query:
+            def position_lifecycle_attribution(self, *, limit: int) -> dict[str, object]:
+                calls.append(limit)
+                return {"lifecycles": [], "summary": {"limit": limit}}
+
+        common = {
+            "request": SimpleNamespace(),
+            "query": Query(),
+            "panel_key": "positionLifecycleAttribution",
+            "recent_decisions_limit": 8,
+            "recent_orders_limit": 8,
+            "recent_fills_limit": 8,
+            "recent_replay_validations_limit": 8,
+            "recent_ai_assessments_limit": 8,
+            "recent_ai_shadow_decisions_limit": 8,
+            "recent_ai_shadow_evaluations_limit": 8,
+        }
+
+        strategy_payload = _protected_dashboard_panel_payload(view="strategy", **common)
+        execution_payload = _protected_dashboard_panel_payload(view="execution", **common)
+
+        self.assertEqual(strategy_payload["summary"]["limit"], 6)
+        self.assertEqual(execution_payload["summary"]["limit"], 8)
+        self.assertEqual(calls, [6, 8])
+
     def test_dashboard_routes_serve_html_and_assets_when_auth_is_disabled(self) -> None:
         app = FastAPI()
         app.include_router(auth_router)
@@ -368,6 +396,10 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("dashboardBundlePanelKeys", store_text)
         self.assertIn("buildDashboardBundleRequestPlan", store_text)
         self.assertIn('["positionLifecycleAttribution", "/reports/position-lifecycle-attribution?limit=8"]', store_text)
+        self.assertIn('["guardedLivePreflight", "/system/guarded-live-preflight"]', store_text)
+        self.assertIn('["guardedLiveRunPacket", "/reports/guarded-live-run-packet"]', store_text)
+        self.assertNotIn("/system/guarded-live/preflight", store_text)
+        self.assertNotIn("/system/guarded-live/run-packet", store_text)
         self.assertIn('params.append("panel", key);', store_text)
         self.assertIn('recentAIAssessments: String(limits.recentAIAssessments)', store_text)
         self.assertIn('recentAIShadowDecisions: String(limits.recentAIShadowDecisions)', store_text)
@@ -3610,6 +3642,78 @@ console.log(JSON.stringify({
         self.assertIn('"refreshCount":2', result.stdout)
         self.assertIn('"createReleaseUsesEnvWindow":true', result.stdout)
         self.assertIn('"runObservationUsesReleaseWindow":true', result.stdout)
+
+    def test_rdp_rollback_handler_obtains_token_before_rollback(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        script = """
+import { createRdpActionHandlers } from './aats/api/static/modules/actions/rdp-actions.js';
+
+const requests = [];
+let refreshCount = 0;
+const state = {
+  actionInFlight: false,
+  flash: null,
+  data: {},
+};
+
+const handlers = createRdpActionHandlers({
+  beginAction: () => {
+    state.actionInFlight = true;
+    return () => {
+      state.actionInFlight = false;
+    };
+  },
+  renderBanners: () => {},
+  refreshDashboard: async () => {
+    refreshCount += 1;
+  },
+  requestJson: async (path, options = {}) => {
+    requests.push({
+      path,
+      method: options.method || 'GET',
+      body: options.body || null,
+      headers: options.headers || {},
+    });
+    if (path === '/rdp/operator-tokens') {
+      return { token: 'rollback-token-1', action: 'rollback', ttl_seconds: 300 };
+    }
+    if (path === '/rdp/parameters/rollback') {
+      return { ok: true };
+    }
+    return { ok: true };
+  },
+  state,
+  windowRef: {
+    confirm: () => true,
+  },
+});
+
+await handlers['rdp-rollback-parameters']('independent/15m');
+
+const tokenRequest = requests.find((item) => item.path === '/rdp/operator-tokens');
+const rollbackRequest = requests.find((item) => item.path === '/rdp/parameters/rollback');
+console.log(JSON.stringify({
+  refreshCount,
+  tokenRequestedFirst: requests[0]?.path === '/rdp/operator-tokens',
+  tokenAction: tokenRequest?.body?.action,
+  rollbackHasTokenHeader: rollbackRequest?.headers?.['X-Rdp-Apply-Token'] === 'rollback-token-1',
+  rollbackBodyAligned: rollbackRequest?.body?.family === 'independent'
+    && rollbackRequest?.body?.timeframe === '15m'
+    && rollbackRequest?.body?.actor === 'operator',
+}));
+"""
+        result = subprocess.run(
+            ["node", "--input-type=module", "-e", script],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertIn('"refreshCount":1', result.stdout)
+        self.assertIn('"tokenRequestedFirst":true', result.stdout)
+        self.assertIn('"tokenAction":"rollback"', result.stdout)
+        self.assertIn('"rollbackHasTokenHeader":true', result.stdout)
+        self.assertIn('"rollbackBodyAligned":true', result.stdout)
 
     def test_strategy_view_renders_smart_arbitrage_config_card_and_threshold_copy(self) -> None:
         repo_root = Path(__file__).resolve().parents[2]

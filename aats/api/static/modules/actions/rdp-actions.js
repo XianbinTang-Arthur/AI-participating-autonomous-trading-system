@@ -270,8 +270,17 @@ export function createRdpActionHandlers({
     if (!ensureNotBusy()) return;
     const finishAction = beginAction(null, `正在回滚 ${family}/${timeframe}…`);
     try {
+      const tokenPayload = await requestJson("/rdp/operator-tokens", {
+        method: "POST",
+        body: { action: "rollback" },
+      });
+      const rollbackToken = tokenPayload?.token;
+      if (!rollbackToken) {
+        throw new Error("回滚令牌签发失败，请刷新后重试。");
+      }
       const result = await requestJson("/rdp/parameters/rollback", {
         method: "POST",
+        headers: { "X-Rdp-Apply-Token": rollbackToken },
         body: { family, timeframe, actor: "operator", notes: "UI 回滚" },
       });
       if (result.ok) {
