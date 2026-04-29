@@ -3,7 +3,7 @@
 ## Business objectives and boundaries
 - 目标：修复 RDP 工作台“运行完整 RDP”按钮显示已排队，但实际 `full_pipeline` 未执行的问题。
 - 目标：保持按钮语义真实——操作员点击“运行完整 RDP”时，应运行完整 RDP pipeline。
-- 边界：只开放 `research_cycle.full_pipeline` 的人工触发；`research_cycle.schedule.enabled` 继续为 false，不恢复 weekly 自动调度。
+- 边界：开放 `research_cycle.full_pipeline` 的人工触发与 weekly 自动调度；发布仍需审批与 gate，不开放自动发布/apply。
 - 边界：不开放 `release_cycle` queue boundary freeze，不改 live trading 主链路、不改参数发布语义。
 
 ## Module responsibilities and domain model
@@ -14,14 +14,14 @@
 
 ## Input/output interfaces
 - 输入：`POST /rdp/tasks/trigger` 的 `workflow` 字段。
-- 输出：当前配置下 `research_cycle` 可手动入队，daemon 会执行 `full_pipeline`。
+- 输出：当前配置下 `research_cycle` 可自动或手动入队，daemon 会执行 `full_pipeline`。
 - 输出：若未来配置再次禁用 `full_pipeline`，接口返回 `ok=false`、`blocked_by_config=true` 和中文原因，避免假成功。
 - UI 输出：当前配置下“运行完整 RDP”按钮可用。
 
 ## Database schema / tables / indexes / constraints
 - 不改 schema。
 - 不改 `governance.rdp_task_queue` 索引或状态字段。
-- 当前配置下完整 RDP 手动触发会写入 pending 任务。
+- 当前配置下完整 RDP 自动/手动触发会写入 pending 任务。
 - 未来若配置禁用，手动触发不会写入 pending 任务。
 
 ## Transactions, consistency, concurrency
@@ -41,7 +41,7 @@
 
 ## State transition and lifecycle
 - 修复前：`research_cycle` 可入队，daemon 执行后 `refresh_recent_data` 成功、`full_pipeline` skipped，任务仍标记 done。
-- 修复后：当前 `full_pipeline` 人工触发可执行；若配置再次禁用，手动触发不会进入 pending/running 生命周期。
+- 修复后：当前 `full_pipeline` 自动/人工触发均可执行；若配置再次禁用，触发不会进入 pending/running 生命周期。
 - 已存在的历史任务不迁移、不回写。
 
 ## Caching and performance
@@ -55,7 +55,7 @@
 
 ## Testing strategy
 - 单元测试覆盖 workflow 手动触发可用性。
-- 单元测试覆盖当前 `research_cycle.full_pipeline` 为人工可触发。
+- 单元测试覆盖当前 `research_cycle.full_pipeline` 为自动和人工均可触发。
 - API 集成测试覆盖 `research_cycle.full_pipeline=false` 时拒绝入队。
 - UI/workbench payload 测试覆盖当前“运行完整 RDP”按钮可用。
 
@@ -75,11 +75,12 @@
 
 ## Documentation and operations manual
 - 本 SOW 记录“按钮名称必须匹配实际会执行的 workflow 内容”的操作契约。
-- 当前已恢复 `full_pipeline.enabled=true` 的人工触发语义。
+- 当前已恢复 `full_pipeline.enabled=true` 与 `schedule.enabled=true`。
 - 若未来再次冻结，应改配置并依赖 UI/API 可用性检查阻止假成功。
 
 ## Deployment and acceptance criteria
 - `POST /rdp/tasks/trigger` 对当前 `research_cycle` 返回 `ok=true` 并入队。
+- scheduler 对当前 `research_cycle` 会在 weekly Sunday 08:00 UTC 自动入队。
 - `POST /rdp/tasks/trigger` 对配置禁用的 `research_cycle` 返回 `ok=false`。
 - RDP 工作台“运行完整 RDP”在当前配置下可点击。
 - `data_maintenance` 仍可手动触发。

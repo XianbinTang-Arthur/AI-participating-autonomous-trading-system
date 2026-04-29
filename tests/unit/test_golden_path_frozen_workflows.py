@@ -1,14 +1,15 @@
 """
 Frozen golden-path workflow 去冲突语义锁定测试。
 
-对应 task: 关闭 research_cycle / decision_cycle / release_cycle 的自动调度,
+对应 task: 关闭 decision_cycle / release_cycle 的自动调度,
 并关闭 governance_cycle.auto_import_candidates 自动导入, 同时保留
 observation_cycle / reliability_cycle / governance_cycle.quality_monitor
-这些 frozen golden-path 仍需运行的 workflow / task.
+这些 frozen golden-path 仍需运行的 workflow / task. research_cycle
+恢复 weekly 自动调度，因为完整 RDP 只产生治理建议，发布仍需审批和 gate。
 
 这些测试直接读取 configs/rdp_workflows/*.json, 锁定 semantic_freeze 状态。
-research_cycle 的 full_pipeline 保持人工可触发，因为 UI 的“运行完整 RDP”
-语义必须真实执行完整研究闭环；冻结的是自动调度，不是操作员显式触发。
+research_cycle 的 full_pipeline 保持自动与人工均可触发，因为 UI 的
+“运行完整 RDP”语义必须真实执行完整研究闭环。
 """
 from __future__ import annotations
 
@@ -35,8 +36,8 @@ def _task(cfg: dict, name: str) -> dict:
 
 # ── research_cycle ──────────────────────────────────────────────
 
-def test_research_cycle_schedule_disabled() -> None:
-    assert _load("research_cycle")["schedule"]["enabled"] is False
+def test_research_cycle_schedule_enabled() -> None:
+    assert _load("research_cycle")["schedule"]["enabled"] is True
 
 
 def test_research_cycle_full_pipeline_task_enabled_for_manual_trigger() -> None:

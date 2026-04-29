@@ -3,7 +3,7 @@
   "description": "研究层周期任务，串联数据刷新与完整 Phase 2/3/4/5/6 研究闭环。",
   "schedule_hint": "weekly Sunday 08:00 UTC or on-demand",
   "schedule": {
-    "enabled": false,
+    "enabled": true,
     "frequency": "weekly",
     "weekday_utc": "SUN",
     "hour_utc": 8,
@@ -20,7 +20,7 @@
     },
     {
       "name": "full_pipeline",
-      "description": "一键运行 Phase 2 -> Step 3 -> 导入 -> Phase 3 -> Phase 4 -> 治理 -> 决策。仅允许人工触发；weekly schedule 仍关闭，避免自动推进研究闭环。",
+      "description": "一键运行 Phase 2 -> Step 3 -> 导入 -> Phase 3 -> Phase 4 -> 治理 -> 决策。可由 weekly schedule 自动触发，也可由操作员手动触发；发布仍需经过审批与 gate。",
       "command": "python scripts/rdp_run_full_pipeline.py --lookback-days 90 --replay-only --no-stop-on-failure",
       "timeout_seconds": 1800,
       "enabled": true,
