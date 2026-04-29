@@ -3,7 +3,7 @@ import { actorTags, actionButton, callout, kvList, summaryStrip, surfaceCard } f
 // summarizeList），直接 import 统一版本，删除本地重复定义。
 import { localizeList, summarizeLocalizedList, textOrFallback } from "../copy.js";
 import { formatNumber } from "../formatters.js";
-import { readableState } from "../terms.js";
+import { localizeError, readableState } from "../terms.js";
 
 const PROFILE_OPTIONS = [
   ["trend_aggressive", "趋势激进", "primary"],
@@ -126,7 +126,7 @@ function renderManualOperatingModePanel({ runtime = {}, canAdmin = false }) {
         {
           label: "AI 状态",
           value: runtime.degraded ? "已降级" : "正常",
-          meta: runtime.degradation_reason || "当前没有新的 AI 降级原因",
+          meta: runtime.degradation_reason ? localizeError(runtime.degradation_reason) : "当前没有新的 AI 降级原因",
           tone: runtime.degraded ? "warning" : "positive",
           badge: actorTags("ai", "system"),
         },

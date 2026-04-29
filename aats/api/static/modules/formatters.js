@@ -92,7 +92,12 @@ export function emptyState(message) {
 }
 
 export function rawJson(value) {
-  return `<pre class="raw-json">${escapeHtml(JSON.stringify(value ?? {}, null, 2))}</pre>`;
+  return `
+    <details class="debug-json">
+      <summary>展开排障原文</summary>
+      <pre class="raw-json">${escapeHtml(JSON.stringify(value ?? {}, null, 2))}</pre>
+    </details>
+  `;
 }
 
 // #21 修复说明：把 "Z" → "+00:00" 这个字符串替换的来由写清楚，避免后人觉得是

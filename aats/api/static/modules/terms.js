@@ -402,6 +402,26 @@
   baseline_only: "仅按基础策略运行",
   ai_assisted: "AI 辅助决策",
   ai_decision_maker: "AI 决策者",
+  ai_timeout: "AI 请求超时",
+  ai_shadow_timeout: "策略层 shadow 请求超时",
+  baseline_only_mode: "当前仅按基础策略运行",
+  baseline_regime_breakout_threshold_crossed: "基础策略识别到突破阈值已触发",
+  baseline_direction_threshold_breakout_0_060: "基础策略方向阈值已达到突破条件",
+  primary_candidate_advisory_only_suppressed_after_approval: "主候选已批准，但资金分配压零，仅保留为建议",
+  primary_candidate_hold_current_zero_delta: "主候选维持当前仓位，本轮无需调整",
+  candidate_execution_incompatible: "候选执行条件不兼容",
+  composed_as_advisory_only: "已合成为仅建议",
+  allocator_zero_notional_advisory: "资金分配后名义金额为零，仅建议",
+  no_execution_plan_emitted: "未生成执行计划",
+  no_order_fill_expected_for_latest_decision: "最新决策不预期下单或成交",
+  verified_primary_candidate_advisory_suppressed_after_approval_no_order_expected: "已验证：主候选批准后被转为建议，不预期下单",
+  verified_no_order_fill_feasibility_not_applicable_with_pretrade_context: "已验证：无订单预期，成交可行性不适用，已保留盘前上下文",
+  approved_for_non_protective_execution: "已批准非保护性执行",
+  execution_submit_command_claimed_without_terminal_order_ack: "提交命令已声明，但缺少终态订单确认",
+  reconciliation_contraction_active: "对账收缩仍在生效",
+  pnl_contraction_active: "盈亏收缩仍在生效",
+  budget_contracted_to_zero: "预算已收缩到零",
+  approved_but_budget_zero_suppressed: "已批准但预算为零，执行被抑制",
   baseline: "基础策略路径",
   ai: "AI 决策路径",
   admin_override: "管理员覆盖路径",
@@ -509,6 +529,21 @@
   env_default: "沿用启动默认档位",
   advisory: "AI 辅助建议",
   underperforming: "表现落后",
+  local_fill_older_than_exchange_lookback_window: "本地成交早于交易所回看窗口",
+  fill_history_visibility_is_incomplete: "交易所成交历史可见范围不完整",
+  no_fill: "暂无成交",
+  "no-fill": "暂无成交",
+  allocator_v2_phase2_applied: "资金分配器第二阶段已应用",
+  legacy_configured_strategy_family_directional_unavailable: "旧配置中的方向策略家族当前不可用",
+  strategy_family_protective_disabled: "策略家族保护腿当前未启用",
+  lifecycle: "生命周期",
+  data_maintenance: "数据维护",
+  governance_cycle: "治理流程",
+  decision_cycle: "决策流程",
+  rollback_triggered: "已触发回滚",
+  positive: "正向",
+  negative: "负向",
+  operations: "运维",
 };
 
 const ERROR_MAP = {
@@ -749,7 +784,195 @@ const ERROR_MAP = {
 
 export function readableState(value, fallback = "待确认") {
   if (value === null || value === undefined || value === "") return fallback;
-  return TERM_MAP[String(value).toLowerCase()] || String(value);
+  const normalized = String(value).trim();
+  return TERM_MAP[normalized.toLowerCase()] || humanizeMachineText(normalized, fallback);
+}
+
+const MACHINE_PREFIX_LABELS = {
+  strategy_snapshot_ref: "策略快照引用",
+  event_ref: "事件引用",
+  snapshot_ref: "快照引用",
+  bundle_ref: "策略包引用",
+  decision_ref: "决策引用",
+};
+
+const MACHINE_IDENTIFIER_PREFIXES = {
+  evt_: "事件记录",
+  bundle_: "策略包",
+  decision_: "决策",
+  fill_: "成交",
+  order_: "订单",
+  rel_: "发布记录",
+  ps_: "参数集",
+  opuser_: "操作员账号",
+};
+
+const MACHINE_TOKEN_WORDS = {
+  ai: "AI",
+  ack: "确认",
+  after: "后",
+  allocator: "资金分配器",
+  applied: "已应用",
+  approval: "批准",
+  approved: "已批准",
+  baseline: "基础策略",
+  blocked: "已阻断",
+  blocker: "阻断项",
+  book: "账本",
+  by: "由",
+  candidate: "候选",
+  churn: "来回交易",
+  claimed: "已声明",
+  command: "命令",
+  configured: "已配置",
+  contracted: "已收缩",
+  cost: "成本",
+  cycle: "流程",
+  data: "数据",
+  decision: "决策",
+  degraded: "已降级",
+  delta: "调整量",
+  direction: "方向",
+  directional: "方向策略",
+  disabled: "未启用",
+  drag: "拖累",
+  edge: "优势",
+  exchange: "交易所",
+  execution: "执行",
+  expected: "预期",
+  fallback: "回退",
+  fee: "手续费",
+  fill: "成交",
+  for: "用于",
+  governance: "治理",
+  guard: "守卫",
+  guarded: "受保护",
+  history: "历史",
+  hold: "保持",
+  incomplete: "不完整",
+  incompatible: "不兼容",
+  latest: "最近",
+  legacy: "旧链路",
+  local: "本地",
+  maintenance: "维护",
+  maker: "决策者",
+  mode: "模式",
+  negative: "负向",
+  non: "非",
+  not: "未",
+  ok: "正常",
+  only: "仅",
+  operations: "运维",
+  order: "订单",
+  positive: "正向",
+  primary: "主",
+  protective: "保护性",
+  provider: "模型服务",
+  reason: "原因",
+  reference: "参考",
+  regime: "市场状态",
+  rollback: "回滚",
+  shadow: "影子评估",
+  status: "状态",
+  strategy: "策略",
+  submit: "提交",
+  suppressed: "已抑制",
+  terminal: "终态",
+  threshold: "阈值",
+  timeout: "超时",
+  triggered: "已触发",
+  underperformed: "表现落后",
+  unavailable: "不可用",
+  unknown: "待确认",
+  v2: "V2",
+  visibility: "可见范围",
+  without: "缺少",
+  window: "窗口",
+  zero: "零",
+};
+
+function humanizeMachineText(value, fallback = "当前没有额外说明") {
+  const text = String(value || "").trim();
+  if (!text) return fallback;
+  if (containsChinese(text)) return cleanSentencePunctuation(text);
+  if (looksLikeStructuredStatus(text)) {
+    return text
+      .split(";")
+      .map((segment) => segment.trim())
+      .filter(Boolean)
+      .map((segment) => {
+        const [rawKey, ...rest] = segment.split("=");
+        const rawValue = rest.join("=");
+        if (!rawValue) return humanizeMachineToken(rawKey);
+        return `${humanizeMachineToken(rawKey)}：${humanizeMachineToken(rawValue)}`;
+      })
+      .join("；");
+  }
+  return cleanSentencePunctuation(humanizeMachineToken(text) || fallback);
+}
+
+function humanizeMachineToken(value) {
+  const token = String(value || "").trim();
+  if (!token) return "";
+  const exact = ERROR_MAP[token] || TERM_MAP[token.toLowerCase()];
+  if (exact) return exact;
+  const colonIndex = token.indexOf(":");
+  if (colonIndex > 0) {
+    const prefix = token.slice(0, colonIndex);
+    const suffix = token.slice(colonIndex + 1);
+    const label = MACHINE_PREFIX_LABELS[prefix] || humanizeMachineToken(prefix);
+    return suffix ? `${label}：${shortMachineIdentifier(suffix)}` : label;
+  }
+  const identifier = shortKnownIdentifier(token);
+  if (identifier) return identifier;
+  if (!looksLikeMachineToken(token)) return token;
+  const parts = token
+    .replace(/[.\/:\-]+/gu, "_")
+    .split(/_+/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!parts.length) return token;
+  const translated = parts.map((part) => MACHINE_TOKEN_WORDS[part.toLowerCase()] || part);
+  const allKnown = parts.every((part) => Boolean(MACHINE_TOKEN_WORDS[part.toLowerCase()]));
+  return allKnown ? translated.join("") : translated.join(" / ");
+}
+
+function looksLikeStructuredStatus(text) {
+  return text.includes(";") && text.includes("=");
+}
+
+function looksLikeMachineToken(text) {
+  if (looksLikeSymbolCode(text)) return false;
+  return /[_:]/u.test(text) || /^[a-z][a-z0-9.]*$/iu.test(text);
+}
+
+function looksLikeSymbolCode(text) {
+  return /^[A-Z0-9]+(?:-[A-Z0-9]+)+$/u.test(String(text || "").trim());
+}
+
+function containsChinese(text) {
+  return /[\u3400-\u9fff]/u.test(text);
+}
+
+function cleanSentencePunctuation(text) {
+  return String(text || "").replace(/[。；;,\s]+$/u, "");
+}
+
+function shortKnownIdentifier(token) {
+  const text = String(token || "").trim();
+  for (const [prefix, label] of Object.entries(MACHINE_IDENTIFIER_PREFIXES)) {
+    if (text.startsWith(prefix)) {
+      return `${label} ${shortMachineIdentifier(text)}`;
+    }
+  }
+  return "";
+}
+
+function shortMachineIdentifier(value) {
+  const text = String(value || "").trim();
+  if (!text) return "编号待确认";
+  if (text.length <= 22) return text;
+  return `${text.slice(0, 10)}...${text.slice(-8)}`;
 }
 
 function normalizedFamilyExecutionSummary(source = {}) {
@@ -1479,7 +1702,7 @@ export function readableOverlayParentLegQuantitySummary(source = {}, fallback = 
 export function localizeError(value, fallback = "当前没有额外说明") {
   if (!value) return fallback;
   const normalized = String(value).trim();
-  return ERROR_MAP[normalized] || TERM_MAP[normalized.toLowerCase()] || normalized;
+  return ERROR_MAP[normalized] || TERM_MAP[normalized.toLowerCase()] || humanizeMachineText(normalized, fallback);
 }
 
 export function toneForRuntimeState(runtimeState) {

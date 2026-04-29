@@ -420,10 +420,17 @@ export function createRiskActionHandlers({
 
   async function inspectPhase1Shadow() {
     try {
-      const [detail, history] = await Promise.all([
+      const [detailResult, historyResult] = await Promise.allSettled([
         requestJson("/system/shadow"),
         requestJson("/system/shadow/history?limit=12"),
       ]);
+      const detail = detailResult.status === "fulfilled"
+        ? detailResult.value
+        : state.data.phase1Shadow || state.data.metrics?.phase1_shadow || {};
+      const history = historyResult.status === "fulfilled" ? historyResult.value : { history: [] };
+      if (!detail || !Object.keys(detail).length) {
+        throw detailResult.status === "rejected" ? detailResult.reason : new Error("当前还没有影子兼容层详情。");
+      }
       openDrawer(
         buildPhase1ShadowDrawer(detail, {
           shadowBlocker: activePhase1ShadowBlocker(),
@@ -433,6 +440,10 @@ export function createRiskActionHandlers({
           history: history?.history || [],
         }),
       );
+      if (detailResult.status === "rejected" || historyResult.status === "rejected") {
+        setFlash(state, "warning", "已打开当前已缓存的影子兼容层状态，部分历史详情暂时没有返回。");
+        renderBanners();
+      }
     } catch (error) {
       setFlash(state, "danger", error instanceof Error ? error.message : String(error));
       renderBanners();

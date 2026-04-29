@@ -60,7 +60,9 @@ export function buildLifecycleAttributionDrawer(detail = {}) {
         content: renderChildFillTable(detail.child_fills || []),
       }),
       surfaceCard({
-        title: "原始记录",
+        title: "排障原文",
+        kicker: "默认折叠",
+        copy: "普通值班只看上面的摘要；只有排查字段来源时再展开这里。",
         content: rawJson(detail),
       }),
     ].join(""),

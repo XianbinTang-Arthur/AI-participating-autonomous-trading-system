@@ -14,6 +14,7 @@ import {
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
+  operationalStatusLabel,
   readableOverlayParentSignalSummary,
   readableState,
   reviewStatusLabel,
@@ -112,26 +113,26 @@ export function createDashboardShellRenderer({
     let title = "";
     if (effective === "baseline_only") {
       toneClass = "runtime-mode-badge--baseline-only";
-      text = "baseline_only · reference only · 仅 baseline, 不使用 AI";
-      title = "当前不调用 AI 参与决策,仅按 baseline 决策与下单。是否下单由 baseline 信号决定。点击查看语义文档。";
+      text = "仅按基础策略运行";
+      title = "当前不让 AI 参与真实交易决策，是否下单由基础策略和风控共同决定。点击查看语义说明。";
     } else if (effective === "ai_assisted") {
       toneClass = "runtime-mode-badge--ai-assisted";
-      text = "ai_assisted · advisory · AI 咨询实盘中";
-      title = "AI 咨询模式,baseline 决定下单。真金白银运行中。点击查看语义文档。";
+      text = "AI 辅助判断";
+      title = "AI 提供辅助判断，最终是否下单仍由基础策略、风控和执行边界共同决定。点击查看语义说明。";
     } else if (effective === "ai_decision_maker") {
       toneClass = "runtime-mode-badge--ai-decision-maker";
-      text = "ai_decision_maker · final_decision · AI 决策者已启用";
-      title = "AI 决策者模式已启用；AI 给出最终交易意图，仍受风控、kill switch、执行门与审计链约束。点击查看语义文档。";
+      text = "AI 决策者已启用";
+      title = "AI 可以给出最终交易意图，但仍受风控、暂停开关、执行门与审计链约束。点击查看语义说明。";
     } else {
       toneClass = "runtime-mode-badge--unknown";
-      text = `${effective} · 未知模式`;
-      title = `未识别的 operating_mode=${effective}。点击查看已知语义。`;
+      text = "运行模式待确认";
+      title = "当前运行模式不在已知语义列表内，请以配置和运行日志为准。点击查看已知语义。";
     }
 
     // 若 effective 与 configured 不一致, 提示 operator 手动 override 状态
     if (configured && configured !== effective) {
-      text += ` (默认 ${configured})`;
-      title += ` 配置默认是 ${configured},但当前以 ${effective} 生效(可能是临时 manual override)。`;
+      text += `（默认：${readableState(configured)}）`;
+      title += ` 配置默认是${readableState(configured)}，但当前以${readableState(effective)}生效。`;
     }
 
     patchClassName(badge, `runtime-mode-badge ${toneClass}`);
@@ -182,6 +183,8 @@ export function createDashboardShellRenderer({
     const latestDecision = state.data.latestDecision || {};
     const latestOrder = state.data.executionLatest?.latest_order || null;
     const metrics = state.data.metrics || {};
+    const operationalLabel = operationalStatusLabel({ health, recovery, blockers, reconciliation });
+    const runtimeStateValue = health.runtime_state || health.overall_status;
 
     if (!nodes.statusRibbon) return;
     patchClassName(nodes.statusRibbon, "status-ribbon status-ribbon--home");
@@ -195,7 +198,7 @@ export function createDashboardShellRenderer({
           summary: "",
           tone: homeRibbonTone({ health, recovery, blockers, reconciliation }),
           pills: [
-            pill(`运行状态 ${readableState(health.runtime_state || health.overall_status)}`, toneForRuntimeState(health.runtime_state || health.overall_status)),
+            pill(`运行状态 ${runtimeStateValue ? readableState(runtimeStateValue) : operationalLabel}`, toneForRuntimeState(runtimeStateValue || recovery.recovery_state)),
             pill(`自动交易 ${tradingStatusLabel(recovery)}`, recovery.safe_to_trade ? "positive" : isPausedAwaitingResume(recovery) ? "warning" : "danger"),
             pill(`人工复核 ${reviewStatusLabel(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
           ],
@@ -208,12 +211,12 @@ export function createDashboardShellRenderer({
                     formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts),
                     readableOverlayParentSignalSummary(latestDecision.position_target || {}, ""),
                   ].filter(Boolean).join(" | ")
-                : formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts),
+                : "当前还没有最近决策记录",
               tone: latestDecision.decision_id ? "info" : "neutral",
             },
             {
               label: "最新委托",
-              value: readableState(latestOrder?.status || "unknown"),
+              value: latestOrder ? readableState(latestOrder.status || "unknown") : "暂无活动委托",
               meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"),
               tone: toneForOrderStatus(latestOrder?.status),
             },
@@ -238,7 +241,7 @@ export function createDashboardShellRenderer({
             {
               label: "账户权益",
               value: formatNumber(portfolio.total_equity),
-              meta: `活动委托 ${formatNumber(metrics.current_open_order_count)}`,
+              meta: `活动委托 ${formatNumber(metrics.current_open_order_count, 0, "0")}`,
               tone: "info",
             },
           ],

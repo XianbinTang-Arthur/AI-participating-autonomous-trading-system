@@ -26,6 +26,10 @@ function humanError(value) {
   return localizeError(String(value).trim());
 }
 
+function sentenceFragment(value, fallback = "当前没有额外说明") {
+  return String(value || fallback).replace(/[。；;,\s]+$/u, "");
+}
+
 function activeDegradationReasons(downgradeState = {}) {
   const reasons = [];
   if (downgradeState.provider_state && downgradeState.provider_state !== "healthy" && hasMeaningfulValue(downgradeState.degradation_reason)) {
@@ -536,7 +540,7 @@ function aiRuntimeNarrative(runtime, latestDegradation) {
     return `当前运行模式与配置一致：${humanState(effectiveMode(runtime))}。虽然存在手动选择记录，但它没有改变当前配置目标。`;
   }
   if (effectiveMode(runtime) === "baseline_only" && configuredMode(runtime) !== "baseline_only") {
-    return `AI 当前没有真实参与下单决策链路。最近一次降级原因：${humanError(runtime.degradation_reason || latestDegradation?.reason_code)}。`;
+    return `AI 当前没有真实参与下单决策链路。最近一次降级原因：${sentenceFragment(humanError(runtime.degradation_reason || latestDegradation?.reason_code))}。`;
   }
   if (runtime.review_resolution && latestDegradation?.reason_code === "operator_review_restore_ai") {
     return "当前运行模式已经恢复为 AI 决策链路。最近一次人工处理是确认恢复 AI 决策，但最近一轮真实决策结果是否采用 AI，仍取决于当轮门禁。";

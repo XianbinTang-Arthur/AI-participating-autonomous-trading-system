@@ -36,6 +36,7 @@ import {
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
+  operationalStatusLabel,
   readableIndependentTransitionExceptionMeta,
   readableIndependentTransitionExceptionSummary,
   readableState,
@@ -93,6 +94,14 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
     runtime: data.runtime || {},
     uiHints,
   };
+  const operationalLabel = operationalStatusLabel({
+    health,
+    recovery,
+    blockers: primaryBlocker ? [primaryBlocker] : blockers,
+    reconciliation,
+    readyLabel: "持续观察",
+  });
+  const runtimeStateValue = health.runtime_state || health.overall_status;
 
   return {
     riskHero: primaryStatusPanel({
@@ -111,7 +120,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
         ? actionButton("查看最新对账", "inspect-reconciliation", reconciliation.reconciliation_id, "ghost")
         : "",
       pills: [
-        pill(`运行状态 ${readableState(health.runtime_state || health.overall_status || "unknown")}`, toneForRuntimeState(health.runtime_state || health.overall_status)),
+        pill(`运行状态 ${runtimeStateValue ? readableState(runtimeStateValue) : operationalLabel}`, toneForRuntimeState(runtimeStateValue || recovery.recovery_state)),
         pill(`自动交易 ${tradingStatusLabel(recovery)}`, recovery.safe_to_trade ? "positive" : recovery.resume_eligible ? "warning" : "danger"),
         pill(`人工复核 ${reviewStatusLabel(recovery.review_required)}`, recovery.review_required ? "warning" : "outline"),
       ],
@@ -450,7 +459,7 @@ export function renderRiskSections(data, uiState = data.uiState || {}) {
         {
           label: "当前状态",
           value: phase1ShadowLabel(phase1Shadow.status),
-          meta: phase1Shadow.summary || "当前没有额外兼容层说明",
+          meta: phase1ShadowText(phase1Shadow.summary, "当前没有额外兼容层说明"),
           tone: phase1ShadowTone(phase1Shadow.status),
         },
         {
@@ -1338,9 +1347,20 @@ function phase1ShadowReviewMeta(action) {
 }
 
 function phase1ShadowLastError(phase1Shadow) {
-  return (
+  return phase1ShadowText(
     phase1Shadow.execution_shadow?.last_error
     || phase1Shadow.ledger_shadow?.last_error
-    || "当前没有兼容层错误"
+    || "",
+    "当前没有兼容层错误",
   );
+}
+
+function phase1ShadowText(value, fallback = "当前没有额外说明") {
+  const text = String(value || "").trim();
+  if (!text) return fallback;
+  const knownEnglish = {
+    "Phase 1 shadow compatibility layer is tracking legacy execution and obligation flows.": "影子兼容层正在跟踪旧执行链和保留金链路。",
+    "Phase 1 shadow compatibility layer is behind the legacy runtime.": "影子兼容层仍落后于旧运行链路。",
+  };
+  return knownEnglish[text] || localizeError(text, fallback);
 }

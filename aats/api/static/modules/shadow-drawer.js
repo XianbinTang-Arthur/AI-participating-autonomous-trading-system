@@ -1,5 +1,6 @@
 import { actionButton, kvList, summaryStrip, surfaceCard, timeline } from "./components.js";
-import { escapeHtml, formatMaybeTimestamp, formatRelativeAge, listOrDash, rawJson } from "./formatters.js";
+import { escapeHtml, formatMaybeTimestamp, formatRelativeAge, rawJson } from "./formatters.js";
+import { localizeError } from "./terms.js";
 
 export function buildPhase1ShadowDrawer(detail, { shadowBlocker = null, uiHints = {}, history = [] } = {}) {
   const lag = detail?.lag || {};
@@ -23,7 +24,7 @@ export function buildPhase1ShadowDrawer(detail, { shadowBlocker = null, uiHints 
           {
             label: "当前状态",
             value: readableShadowStatus(status),
-            meta: detail?.detail || detail?.summary || "当前没有额外状态说明",
+            meta: localizedShadowText(detail?.detail || detail?.summary, "当前没有额外状态说明"),
             tone: toneForShadowStatus(status),
           },
           {
@@ -34,7 +35,7 @@ export function buildPhase1ShadowDrawer(detail, { shadowBlocker = null, uiHints 
           },
           {
             label: "当前阻断",
-            value: listOrDash(detail?.blockers, "当前没有额外阻断"),
+            value: localizedShadowList(detail?.blockers, "当前没有额外阻断"),
             meta: shadowBlocker?.recommended_next_step || "当前没有额外处理建议",
             tone: Array.isArray(detail?.blockers) && detail.blockers.length ? "danger" : "neutral",
           },
@@ -74,10 +75,10 @@ export function buildPhase1ShadowDrawer(detail, { shadowBlocker = null, uiHints 
         // components.kvList 的 row markup。一旦 kv-list / kv-row 的 class 名或
         // DOM 结构改动，shadow-drawer 不会自动跟上。改为直接调用 kvList。
         content: kvList([
-          ["最近告警", latestAlert?.message || "当前没有影子兼容层告警", formatMaybeTimestamp(latestAlert?.observed_at)],
-          ["最近处理失败", latestFailure?.message || "当前没有影子兼容层处理失败记录", formatMaybeTimestamp(latestFailure?.observed_at)],
-          ["执行影子最近错误", executionShadow?.last_error || "当前没有执行影子错误", formatMaybeTimestamp(executionShadow?.last_failure_ts)],
-          ["账本影子最近错误", ledgerShadow?.last_error || "当前没有账本影子错误", formatMaybeTimestamp(ledgerShadow?.last_failure_ts)],
+          ["最近告警", localizedShadowText(latestAlert?.message, "当前没有影子兼容层告警"), formatMaybeTimestamp(latestAlert?.observed_at)],
+          ["最近处理失败", localizedShadowText(latestFailure?.message, "当前没有影子兼容层处理失败记录"), formatMaybeTimestamp(latestFailure?.observed_at)],
+          ["执行影子最近错误", localizedShadowText(executionShadow?.last_error, "当前没有执行影子错误"), formatMaybeTimestamp(executionShadow?.last_failure_ts)],
+          ["账本影子最近错误", localizedShadowText(ledgerShadow?.last_error, "当前没有账本影子错误"), formatMaybeTimestamp(ledgerShadow?.last_failure_ts)],
         ]),
       }),
       surfaceCard({
@@ -96,7 +97,7 @@ export function buildPhase1ShadowDrawer(detail, { shadowBlocker = null, uiHints 
           {
             label: "核查结论",
             value: latestReviewAction?.details?.snapshot_status ? readableShadowStatus(latestReviewAction.details.snapshot_status) : "待确认",
-            meta: latestReviewAction?.reason || "当前没有核查原因记录",
+            meta: localizedShadowText(latestReviewAction?.reason, "当前没有核查原因记录"),
             tone: latestReviewAction ? toneForShadowStatus(String(latestReviewAction.details?.snapshot_status || status)) : "neutral",
           },
           {
@@ -104,7 +105,7 @@ export function buildPhase1ShadowDrawer(detail, { shadowBlocker = null, uiHints 
             value: latestReviewAction
               ? `订单 ${backlogValue(latestReviewAction.details?.lag?.order_backlog)} / 成交 ${backlogValue(latestReviewAction.details?.lag?.fill_backlog)} / 保留金 ${backlogValue(latestReviewAction.details?.lag?.obligation_backlog)}`
               : "待确认",
-            meta: latestReviewAction?.details?.summary || "当前没有额外核查摘要",
+            meta: localizedShadowText(latestReviewAction?.details?.summary, "当前没有额外核查摘要"),
             tone: latestReviewAction ? "warning" : "neutral",
           },
         ]),
@@ -116,8 +117,8 @@ export function buildPhase1ShadowDrawer(detail, { shadowBlocker = null, uiHints 
         content: renderHistory(history),
       }),
       surfaceCard({
-        title: "原始记录",
-        kicker: "调试原文",
+        title: "排障原文",
+        kicker: "默认折叠",
         copy: "当摘要信息不够时，再往下看原始 JSON，避免把主视图变成日志墙。",
         content: rawJson(detail),
       }),
@@ -207,7 +208,7 @@ function renderHistory(rows) {
     rows.slice(0, 12).map((row) => ({
       title: historyTitle(row),
       subtitle: historySubtitle(row),
-      detail: String(row?.summary || "当前没有额外说明"),
+      detail: localizedShadowText(row?.summary, "当前没有额外说明"),
       timestamp: formatMaybeTimestamp(row?.observed_at),
       pill: `<span class="signal-pill tone-${escapeHtml(historyTone(row))}">${escapeHtml(historyPill(row))}</span>`,
     })),
@@ -226,7 +227,7 @@ function historySubtitle(row) {
   if (row?.entry_type === "review") {
     return `${row?.actor_identity || row?.actor_role || "未知操作人"} · ${readableShadowStatus(String(row?.status || "unknown"))}`;
   }
-  return row?.reason ? String(row.reason) : readableShadowStatus(String(row?.status || "unknown"));
+  return row?.reason ? localizedShadowText(row.reason, "原因待确认") : readableShadowStatus(String(row?.status || "unknown"));
 }
 
 function historyTone(row) {
@@ -241,4 +242,22 @@ function historyPill(row) {
   if (row?.entry_type === "alert") return "告警";
   if (row?.entry_type === "failure") return "失败";
   return "记录";
+}
+
+function localizedShadowText(value, fallback = "当前没有额外说明") {
+  const text = String(value || "").trim();
+  if (!text) return fallback;
+  const knownEnglish = {
+    "Phase 1 shadow compatibility layer is tracking legacy execution and obligation flows.": "影子兼容层正在跟踪旧执行链和保留金链路。",
+    "Phase 1 shadow compatibility layer is behind the legacy runtime.": "影子兼容层仍落后于旧运行链路。",
+  };
+  return knownEnglish[text] || localizeError(text, fallback);
+}
+
+function localizedShadowList(value, fallback = "当前没有额外说明") {
+  const items = Array.isArray(value) ? value : [value];
+  const localized = items
+    .map((item) => localizedShadowText(item, ""))
+    .filter(Boolean);
+  return localized.length ? localized.join(" / ") : fallback;
 }

@@ -483,6 +483,7 @@ h3 {
 .runtime-mode-badge {
   display: inline-flex;
   align-items: center;
+  max-width: 100%;
   gap: 8px;
   padding: 8px 14px;
   margin: 10px 0 0 0;
@@ -516,7 +517,10 @@ h3 {
 }
 
 .runtime-mode-badge__body {
-  white-space: nowrap;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
 }
 
 /* 默认 (未知) — 接近 neutral */
@@ -1977,6 +1981,28 @@ h3 {
   font-size: 12px;
   line-height: 1.6;
   font-family: var(--font-mono);
+}
+
+.debug-json {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.02);
+  overflow: hidden;
+}
+
+.debug-json summary {
+  cursor: pointer;
+  padding: 12px 14px;
+  color: var(--text-soft);
+  font-weight: 800;
+  font-size: 13px;
+}
+
+.debug-json .raw-json {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: 0;
 }
 
 .field-grid {

@@ -8,6 +8,7 @@ import {
   surfaceCard,
 } from "../components.js";
 import { escapeHtml } from "../formatters.js";
+import { localizeError, readableState } from "../terms.js";
 
 const CONFIDENCE_LABELS = {
   high: "高",
@@ -198,11 +199,11 @@ function labelForEnvironment(environment) {
 }
 
 function labelForHealth(status) {
-  return HEALTH_LABELS[status] || status || "未知";
+  return HEALTH_LABELS[status] || readableState(status || "unknown", "未知");
 }
 
 function labelForGate(status) {
-  return GATE_LABELS[status] || status || "未运行";
+  return GATE_LABELS[status] || readableState(status || "unknown", "未运行");
 }
 
 function labelForConfidence(confidence) {
@@ -210,27 +211,27 @@ function labelForConfidence(confidence) {
 }
 
 function labelForObservationStatus(status) {
-  return OBSERVATION_STATUS_LABELS[status] || status || "未知";
+  return OBSERVATION_STATUS_LABELS[status] || readableState(status || "unknown", "未知");
 }
 
 function labelForApplyResult(status) {
-  return APPLY_RESULT_LABELS[status] || status || "未执行";
+  return APPLY_RESULT_LABELS[status] || readableState(status || "unknown", "未执行");
 }
 
 function labelForWorkflow(workflow) {
-  return WORKFLOW_LABELS[workflow] || workflow || "暂无";
+  return WORKFLOW_LABELS[workflow] || readableState(workflow || "none", "暂无");
 }
 
 function labelForEvidencePhase(phase) {
-  return EVIDENCE_PHASE_LABELS[phase] || phase || "未知阶段";
+  return EVIDENCE_PHASE_LABELS[phase] || readableState(phase || "unknown", "未知阶段");
 }
 
 function labelForEvidenceStatus(status) {
-  return EVIDENCE_STATUS_LABELS[status] || status || "未知";
+  return EVIDENCE_STATUS_LABELS[status] || readableState(status || "unknown", "未知");
 }
 
 function labelForEvidenceMetric(key) {
-  return EVIDENCE_METRIC_LABELS[key] || key || "指标";
+  return EVIDENCE_METRIC_LABELS[key] || localizeError(key || "", "指标");
 }
 
 function labelForSourceRound(key) {
@@ -238,12 +239,12 @@ function labelForSourceRound(key) {
 }
 
 function labelForIncompleteReason(reason) {
-  return INCOMPLETE_REASON_LABELS[reason] || reason || "未知";
+  return INCOMPLETE_REASON_LABELS[reason] || localizeError(reason || "", "未知");
 }
 
 function formatEvidenceMetricValue(key, value) {
-  if (key === "decision_status") return DECISION_STATUS_LABELS[value] || value;
-  if (key === "runtime_source") return RUNTIME_SOURCE_LABELS[value] || value;
+  if (key === "decision_status") return DECISION_STATUS_LABELS[value] || readableState(value, "待确认");
+  if (key === "runtime_source") return RUNTIME_SOURCE_LABELS[value] || readableState(value, "待确认");
   return value;
 }
 
@@ -352,7 +353,7 @@ function renderActionDescriptor(action = {}, canAdmin, tone = "secondary") {
   const enabled = Boolean(action.enabled);
   const title = !canAdmin
     ? "当前账号只有查看权限"
-    : (!enabled ? (action.disabled_reason || "当前不可执行") : undefined);
+    : (!enabled ? localizeError(action.disabled_reason || "当前不可执行") : undefined);
   const effectiveTone = toneForUiAction(action.ui_action, tone);
   return actionButton(
     action.label || "执行",
@@ -384,7 +385,7 @@ function renderWorkbenchHero({
   const disabledActionNotes = canAdmin
     ? allActions
       .filter((action) => action && action.enabled === false && action.disabled_reason)
-      .map((action) => `<span>${escapeHtml(`${action.label}：${action.disabled_reason}`)}</span>`)
+      .map((action) => `<span>${escapeHtml(`${action.label}：${localizeError(action.disabled_reason)}`)}</span>`)
       .join("")
     : "";
   const counts = overview.summary_counts || {};
@@ -472,22 +473,22 @@ function renderWorkbenchItemsCard({
       ${item.approval_enabled === false && item.approval_blocked_reason
         ? callout({
           title: "审批已阻断",
-          copy: item.approval_blocked_reason,
+          copy: localizeError(item.approval_blocked_reason),
           tone: "danger",
           pills: [actorTags("system")],
         })
         : ""}
       ${item.reason_summary?.length
-        ? `<ul class="rdp-bullet-list">${item.reason_summary.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>`
+        ? `<ul class="rdp-bullet-list">${item.reason_summary.map((reason) => `<li>${escapeHtml(localizeError(reason))}</li>`).join("")}</ul>`
         : ""}
       ${item.missing_evidence?.length
-        ? `<p class="meta-copy">还缺：${escapeHtml(item.missing_evidence.join("；"))}</p>`
+        ? `<p class="meta-copy">还缺：${escapeHtml(item.missing_evidence.map((entry) => localizeError(entry)).join("；"))}</p>`
         : ""}
       ${renderEvidenceDigest(item)}
     `,
     meta: [
       item.created_at ? `生成于 ${relativeTime(item.created_at)}` : "",
-      item.blocking_flags?.length ? `风险提示：${item.blocking_flags[0]}` : "",
+      item.blocking_flags?.length ? `风险提示：${localizeError(item.blocking_flags[0])}` : "",
     ],
     actions: (item.actions || [])
       .map((action, index) => renderActionDescriptor(action, canAdmin, index === 0 ? "primary" : "ghost"))
@@ -524,7 +525,7 @@ function renderReleaseCandidatesCard({
       <p class="meta-copy">${escapeHtml(item.decision_summary || "这组参数已经批准，可以继续进入发布。")}</p>
       ${item.gate_note ? `<p class="meta-copy">最近 Gate：${escapeHtml(item.gate_note)}</p>` : ""}
       ${item.reason_summary?.length
-        ? `<ul class="rdp-bullet-list">${item.reason_summary.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>`
+        ? `<ul class="rdp-bullet-list">${item.reason_summary.map((reason) => `<li>${escapeHtml(localizeError(reason))}</li>`).join("")}</ul>`
         : ""}
     `,
     meta: [
@@ -699,9 +700,9 @@ function renderTuningCard({
               statusPill("待审核", "warning"),
             ],
             body: `
-              <p class="meta-copy">${escapeHtml((item.proposed_changes || []).map((change) => `${change.key}: ${change.from} -> ${change.to}`).join("；"))}</p>
+              <p class="meta-copy">${escapeHtml((item.proposed_changes || []).map((change) => `${localizeError(change.key || "参数")}: ${change.from} -> ${change.to}`).join("；"))}</p>
               ${item.reason_summary?.length
-                ? `<ul class="rdp-bullet-list">${item.reason_summary.map((reason) => `<li>${escapeHtml(reason)}</li>`).join("")}</ul>`
+                ? `<ul class="rdp-bullet-list">${item.reason_summary.map((reason) => `<li>${escapeHtml(localizeError(reason))}</li>`).join("")}</ul>`
                 : ""}
             `,
             meta: [
@@ -813,7 +814,7 @@ function renderEvidenceDigest(item = {}) {
             <section class="rdp-inline-detail__section">
               <h5>风险摘要</h5>
               <ul class="rdp-bullet-list">
-                ${detailSummary.risk_summary.map((risk) => `<li>${escapeHtml(String(risk))}</li>`).join("")}
+                ${detailSummary.risk_summary.map((risk) => `<li>${escapeHtml(localizeError(String(risk)))}</li>`).join("")}
               </ul>
             </section>
           `

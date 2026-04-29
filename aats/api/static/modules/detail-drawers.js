@@ -7,7 +7,6 @@ import {
   formatMaybeTimestamp,
   formatNumber,
   formatRelativeAge,
-  listOrDash,
   rawJson,
 } from "./formatters.js";
 import {
@@ -139,7 +138,9 @@ export function buildDecisionDrawer(detail) {
           })
         : "",
       surfaceCard({
-        title: "原始记录",
+        title: "排障原文",
+        kicker: "默认折叠",
+        copy: "普通值班只看上面的摘要；只有排查字段来源时再展开这里。",
         content: rawJson(detail),
       }),
     ].join(""),
@@ -174,7 +175,9 @@ export function buildOrderDrawer(detail) {
           : emptyState("这笔委托暂时还没有对应成交。"),
       }),
       surfaceCard({
-        title: "原始记录",
+        title: "排障原文",
+        kicker: "默认折叠",
+        copy: "普通值班只看上面的摘要；只有排查字段来源时再展开这里。",
         content: rawJson(detail),
       }),
     ].join(""),
@@ -196,7 +199,9 @@ export function buildFillDrawer(detail) {
         ]),
       }),
       surfaceCard({
-        title: "原始记录",
+        title: "排障原文",
+        kicker: "默认折叠",
+        copy: "普通值班只看上面的摘要；只有排查字段来源时再展开这里。",
         content: rawJson(detail),
       }),
     ].join(""),
@@ -242,7 +247,9 @@ export function buildReconciliationDrawer(detail, { recovery = {}, latestReconci
         `,
       }),
       surfaceCard({
-        title: "原始记录",
+        title: "排障原文",
+        kicker: "默认折叠",
+        copy: "普通值班只看上面的摘要；只有排查字段来源时再展开这里。",
         content: rawJson(detail),
       }),
     ].join(""),
@@ -701,10 +708,12 @@ function drawerText(value, fallback = "待确认") {
 
 function drawerListText(value, fallback = "当前没有额外说明") {
   if (Array.isArray(value)) {
-    const filtered = value.map((item) => String(item ?? "").trim()).filter(Boolean);
+    const filtered = value
+      .map((item) => localizeError(String(item ?? "").trim(), ""))
+      .filter(Boolean);
     return filtered.length ? filtered.join(" / ") : fallback;
   }
-  return drawerText(value, fallback);
+  return localizeError(drawerText(value, ""), fallback);
 }
 
 function strategySummary(detail) {
@@ -720,7 +729,7 @@ function strategySummary(detail) {
   }
   return `系统当前对 ${detail.decision_context?.symbol || "当前标的"} 的交易结论是 ${describeDecisionIntent(detail)}。`
     + `${policy.execution_allowed ? "策略门禁已通过，" : "策略门禁未通过，"}`
-    + `${risk.approved ? "风控当前没有继续阻断。" : `风控仍在拦截：${listOrDash(risk.rejection_reasons)}。`}`;
+    + `${risk.approved ? "风控当前没有继续阻断。" : `风控仍在拦截：${drawerListText(risk.rejection_reasons)}。`}`;
 }
 
 function isNoOrderDecision(detail = {}) {
