@@ -2289,8 +2289,8 @@ input::placeholder {
 }
 
 .login-panel {
-  width: min(560px, 100%);
-  max-width: 100%;
+  width: 100%;
+  max-width: 560px;
   min-width: 0;
   padding: 28px;
   border-radius: var(--radius-xl);

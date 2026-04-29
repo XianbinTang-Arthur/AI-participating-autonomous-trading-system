@@ -34,7 +34,8 @@ def test_login_page_has_mobile_width_guards() -> None:
     assert ".login-shell" in css
     assert "grid-template-columns: minmax(0, 1fr);" in css
     assert ".login-panel" in css
-    assert "max-width: 100%;" in css
+    assert "width: 100%;" in css
+    assert "max-width: 560px;" in css
     assert ".login-copy h1,\n.login-copy .lead,\n.login-panel .notice-card" in css
     assert "overflow-wrap: anywhere;" in css
 
