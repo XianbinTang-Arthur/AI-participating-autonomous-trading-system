@@ -366,14 +366,17 @@ export function renderStrategySections(data) {
         ])}
         ${responsiveTable(
           ["子策略", "执行状态", "控制模式", "预算", "权重", "净收益"],
-          displayedAutomationDecisions.map((item) => [
-            `<div><strong>${middleEllipsis(item.strategy_sleeve_id, 8, 6, "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div></div>`,
-            escapeHtml(readableExecutionBehavior(item.execution_behavior || item.metrics?.auto_execution_behavior)),
-            escapeHtml(readableExecutionControlMode(item.execution_control_mode || item.metrics?.auto_execution_control_mode)),
-            formatNumber(item.budget_multiplier, 2, "0"),
-            formatNumber(item.allocator_weight, 2, "0"),
-            formatSigned(item.recent_net_pnl),
-          ]),
+          displayedAutomationDecisions.map((item) => {
+            const operatorSummary = String(item.operator_summary || item.metrics?.operator_summary || "").trim();
+            return [
+              `<div><strong>${middleEllipsis(item.strategy_sleeve_id, 8, 6, "未归属")}</strong><div class="table-meta">${escapeHtml(readableState(item.family || "unknown"))}</div>${operatorSummary ? `<div class="table-meta">${escapeHtml(operatorSummary)}</div>` : ""}</div>`,
+              escapeHtml(readableExecutionBehavior(item.execution_behavior || item.metrics?.auto_execution_behavior)),
+              escapeHtml(readableExecutionControlMode(item.execution_control_mode || item.metrics?.auto_execution_control_mode)),
+              formatNumber(item.budget_multiplier, 2, "0"),
+              formatNumber(item.allocator_weight, 2, "0"),
+              formatSigned(item.recent_net_pnl),
+            ];
+          }),
           "当前还没有自动预算与启停决策。"
         )}
       `,
