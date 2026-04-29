@@ -1839,6 +1839,124 @@ def test_directional_hold_current_zero_delta_has_verified_no_order_expectation()
     assert primary_candidate_truth["no_order_root_cause"] == "primary_candidate_hold_current_zero_delta"
 
 
+def test_advisory_only_suppressed_after_approval_has_verified_no_order_expectation() -> None:
+    mod = load_module()
+    latest = {
+        "allocation_id": "alloc-directional",
+        "decision_id": "decision-directional",
+        "symbol": "BTC-USDT-SWAP",
+        "route_action": "advisory_only",
+        "primary_family": "directional",
+        "portfolio_requested_notional": "835.641748373740",
+        "portfolio_approved_notional": "0",
+        "portfolio_budget_cut_notional": "835.641748373740",
+        "payload": {
+            "reason_codes": [
+                "candidate_execution_incompatible",
+                "approved_for_non_protective_execution",
+                "reconciliation_contraction_active",
+                "pnl_contraction_active",
+                "directional_loss_blocks_risk_increase",
+                "budget_contracted_to_zero",
+                "approved_but_budget_zero_suppressed",
+                "composed_as_advisory_only",
+            ],
+            "execution_legs": [],
+            "strategy_sleeve_intents": [
+                {
+                    "family": "directional",
+                    "strategy_sleeve_id": "sleeve-directional",
+                    "route_action": "advisory_only",
+                    "approved_for_execution": True,
+                    "execution_behavior": "suppressed_after_approval",
+                    "execution_control_mode": "approved",
+                    "permission_mode": "approved",
+                    "automatic_enabled": True,
+                    "selectable": True,
+                    "target_notional": "835.641748373740",
+                    "reason_codes": ["directional_strategy_target"],
+                    "control_trace": {
+                        "permission": {
+                            "approved_for_execution": True,
+                            "candidate_enabled": True,
+                            "candidate_execution_compatible": True,
+                            "execution_prerequisites_supported": True,
+                            "configured_auto_execution_enabled": True,
+                            "permission_mode": "approved",
+                            "runtime_supported": True,
+                            "state_runtime_supported": True,
+                            "reason_codes": ["approved_for_non_protective_execution"],
+                        },
+                        "composition": {
+                            "approved_for_execution": True,
+                            "route_action": "advisory_only",
+                            "execution_behavior": "suppressed_after_approval",
+                            "execution_control_mode": "approved",
+                            "requested_delta_position_qty": "0.01093143793518829278521917663",
+                            "composed_delta_position_qty": "0",
+                            "reason_codes": ["composed_as_advisory_only"],
+                        },
+                        "budget": {
+                            "base_scale": "1",
+                            "effective_scale": "0",
+                            "requested_delta_position_qty": "0.01093143793518829278521917663",
+                            "scaled_delta_position_qty": "0",
+                            "budget_zero_suppressed": True,
+                            "reason_codes": [
+                                "reconciliation_contraction_active",
+                                "pnl_contraction_active",
+                                "directional_loss_blocks_risk_increase",
+                                "budget_contracted_to_zero",
+                                "approved_but_budget_zero_suppressed",
+                            ],
+                        },
+                    },
+                },
+            ],
+        },
+    }
+
+    summarized = mod.summarize_latest_decision(
+        latest,
+        {
+            "execution_plan_ref": None,
+            "execution_plan_refs": [],
+            "order_intent_refs": [],
+            "order_state_refs": [],
+            "fill_event_refs": [],
+            "strategy_sleeve_intent_refs": ["intent-directional"],
+            "portfolio_allocation_decision_ref": "alloc-directional",
+            "risk_decision_ref": "risk-directional",
+            "decision_outcome_ref": "outcome-directional",
+        },
+        {"execution_orders": 0, "order_states": 0, "execution_fills": 0, "legacy_fill_events": 0},
+    )
+
+    assert summarized is not None
+    truth_chain = summarized["execution_truth_chain"]
+    assert truth_chain["status"] == "verified_no_order_expected"
+    assert truth_chain["order_expected"] is False
+    assert truth_chain["fill_expected"] is False
+    assert truth_chain["smallest_missing_field"] is None
+    primary_candidate_truth = summarized["no_trade_attribution"]["primary_family_candidate_truth"]
+    assert primary_candidate_truth["status"] == (
+        "verified_primary_candidate_advisory_suppressed_after_approval_no_order_expected"
+    )
+    assert primary_candidate_truth["primary_family"] == "directional"
+    assert primary_candidate_truth["candidate_route_action"] == "advisory_only"
+    assert primary_candidate_truth["candidate_execution_behavior"] == "suppressed_after_approval"
+    assert primary_candidate_truth["candidate_execution_compatible"] is True
+    assert primary_candidate_truth["candidate_approved_for_execution"] is True
+    assert primary_candidate_truth["order_expected_from_primary_candidate"] is False
+    assert primary_candidate_truth["no_order_root_cause"] == (
+        "primary_candidate_advisory_only_suppressed_after_approval"
+    )
+    assert primary_candidate_truth["smallest_missing_field"] is None
+    assert primary_candidate_truth["global_primary_blocker"] == "candidate_execution_incompatible"
+    assert primary_candidate_truth["global_primary_blocker_applies_to_candidate"] is False
+    assert primary_candidate_truth["global_primary_blocker_scope"] == "other_candidate_or_portfolio_level"
+
+
 def test_primary_family_candidate_truth_separates_directional_hold_from_global_blocker() -> None:
     mod = load_module()
     latest = {

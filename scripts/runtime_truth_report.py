@@ -2278,6 +2278,12 @@ def summarize_primary_family_candidate_truth(
     global_primary_blocker_applies = bool(
         global_primary_blocker and global_primary_blocker in candidate_reason_codes
     )
+    advisory_suppressed_after_approval = (
+        route_action == "advisory_only"
+        and execution_behavior == "suppressed_after_approval"
+        and decimal_is_zero(composed_delta_position_qty)
+        and execution_legs_count == 0
+    )
     status = "primary_family_candidate_truth_present"
     smallest_missing_field = None
     no_order_root_cause = None
@@ -2294,6 +2300,10 @@ def summarize_primary_family_candidate_truth(
     elif route_action == "advisory_only" and zero_delta:
         status = "verified_primary_candidate_advisory_zero_delta_no_order_expected"
         no_order_root_cause = "primary_candidate_advisory_zero_delta"
+        order_expected_from_primary_candidate = False
+    elif advisory_suppressed_after_approval:
+        status = "verified_primary_candidate_advisory_suppressed_after_approval_no_order_expected"
+        no_order_root_cause = "primary_candidate_advisory_only_suppressed_after_approval"
         order_expected_from_primary_candidate = False
     elif route_action not in {None, "advisory_only", "hold_current"} or execution_legs_count > 0:
         status = "primary_family_candidate_order_expected_or_already_surfaced"
