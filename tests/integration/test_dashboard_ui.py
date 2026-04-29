@@ -1770,8 +1770,8 @@ console.log(JSON.stringify({
                 "runtime",
                 "systemRecovery",
                 "blockerControl",
-                "aiOverview",
                 "aiRuntime",
+                "aiOverview",
                 "aiLatest",
                 "aiShadowLatest",
                 "profileControlSummary",
@@ -1785,6 +1785,7 @@ console.log(JSON.stringify({
         script = """
 import { renderAIAnalysisView } from './aats/api/static/modules/views/ai-analysis-view.js';
 import { renderAIConfigView } from './aats/api/static/modules/views/ai-config-view.js';
+import { renderRdpView } from './aats/api/static/modules/views/rdp-view.js';
 import { buildDecisionDrawer } from './aats/api/static/modules/detail-drawers.js';
 
 const analysisHtml = renderAIAnalysisView({
@@ -2448,6 +2449,39 @@ const configHtml = renderAIConfigView({
   rdpTuningProposals: baseTuningProposals,
 });
 
+const configAndRdpHtml = configHtml + renderRdpView({
+  session: { role: 'admin' },
+  rdpControl: {
+    environment: { name: 'staging' },
+    observation_queue: [
+      {
+        release_id: 'rel-1',
+        family: 'independent',
+        timeframe: '15m',
+        combo_key: 'independent_15m',
+        recommendation_id: 'rec-older',
+        parameter_set_id: 'ps_live_1',
+        previous_parameter_set_id: 'ps_base_1',
+        created_at: '2026-03-21T12:00:00Z',
+        gate_status: 'pass',
+        apply_result: 'success',
+        observation_status: 'observing',
+        observation_window_hours: 24,
+        observation: { status: 'observing', recommendation: 'keep' },
+        effectiveness: { conclusion: 'mixed' },
+        current_active_parameter_set_id: 'ps_live_1',
+        is_current_active_release: true,
+      },
+    ],
+  },
+  rdpWorkbenchOverview: baseWorkbenchOverview,
+  rdpWorkbenchItems: baseWorkbenchItems,
+  rdpWorkbenchAlerts: baseWorkbenchAlerts,
+  rdpTuningOverview: baseTuningOverview,
+  rdpTuningProposals: baseTuningProposals,
+  uiState: { rdp: {} },
+});
+
 const manualOnlyConfigHtml = renderAIConfigView({
   session: { role: 'admin' },
   aiRuntime: {
@@ -2686,6 +2720,69 @@ const releaseEmptyConfigHtml = renderAIConfigView({
   },
 });
 
+const releaseEmptyCombinedHtml = releaseEmptyConfigHtml + renderRdpView({
+  session: { role: 'admin' },
+  rdpControl: {
+    environment: { name: 'dev' },
+    observation_queue: [],
+  },
+  rdpWorkbenchOverview: {
+    overall_status: 'needs_approval',
+    headline: '当前有 1 个组合待处理。',
+    subheadline: '先看结论，再决定是否批准。',
+    primary_action: {
+      key: 'trigger_data_maintenance',
+      label: '刷新数据',
+      ui_action: 'rdp-trigger-workflow',
+      value: 'data_maintenance',
+      enabled: true,
+    },
+    secondary_actions: [],
+    blockers: [],
+    summary_counts: {
+      pending_items: 1,
+      ready_release_items: 0,
+      integrity_blocked_items: 0,
+      observing_releases: 0,
+      tuning_pending: 0,
+    },
+    current_execution: { workflow: null, status: 'idle' },
+    next_queue: { workflow: null, status: 'none' },
+    health: {
+      daemon: 'healthy',
+      governance_db: 'healthy',
+      latest_gate: 'not_run',
+    },
+  },
+  rdpWorkbenchItems: {
+    total: 1,
+    items: [
+      {
+        combo_key: 'directional_1h',
+        family: 'Directional',
+        timeframe: '1H',
+        headline: '参数候选待审批',
+        decision_summary: '这轮产出了一组新参数，确认后就会进入待发布。',
+        reason_summary: ['当前轮次只有 1 个 directional 组合需要审批'],
+        integrity_status: 'complete',
+        actions: [],
+      },
+    ],
+    release_candidates: { total: 0, items: [] },
+  },
+  rdpWorkbenchAlerts: {
+    integrity_alerts: [],
+    operational_alerts: [],
+  },
+  rdpTuningOverview: {
+    pending_review_count: 0,
+    active_override_count: 0,
+    headline: '当前没有新的自动调优提案。',
+  },
+  rdpTuningProposals: { total: 0, items: [] },
+  uiState: { rdp: {} },
+});
+
 const rollbackConfigHtml = renderAIConfigView({
   session: { role: 'admin' },
   aiRuntime: {
@@ -2847,6 +2944,83 @@ const rollbackConfigHtml = renderAIConfigView({
   },
 });
 
+const rollbackCombinedHtml = rollbackConfigHtml + renderRdpView({
+  session: { role: 'admin' },
+  rdpControl: {
+    environment: { name: 'prod' },
+    observation_queue: [
+      {
+        release_id: 'rel-rollback-1',
+        family: 'independent',
+        timeframe: '15m',
+        combo_key: 'independent_15m',
+        recommendation_id: 'rec-old',
+        parameter_set_id: 'ps_live_rollback',
+        previous_parameter_set_id: 'ps_prev_rollback',
+        created_at: '2026-03-21T10:00:00Z',
+        gate_status: 'pass',
+        apply_result: 'success',
+        observation_status: 'rollback_recommended',
+        observation_window_hours: 72,
+        observation: {
+          status: 'rollback_recommended',
+          recommendation: 'rollback_recommended',
+        },
+        effectiveness: {
+          conclusion: 'negative',
+          detail: '实盘表现显著回撤',
+        },
+        current_active_parameter_set_id: 'ps_live_rollback',
+        is_current_active_release: true,
+      },
+    ],
+  },
+  rdpWorkbenchOverview: {
+    overall_status: 'rollback_required',
+    headline: '有发布进入回滚建议状态，先处理回滚。',
+    subheadline: '回滚优先级高于当前轮次里的新建议与新发布。',
+    primary_action: {
+      key: 'rollback',
+      label: '执行回滚',
+      ui_action: 'rdp-rollback-parameters',
+      value: 'independent/15m',
+      enabled: true,
+    },
+    secondary_actions: [],
+    blockers: [
+      {
+        code: 'rollback_pending',
+        severity: 'danger',
+        title: '当前有发布进入回滚建议状态',
+        message: '应先回滚，再处理新的发布与审批。',
+        blocks_approval: true,
+      },
+    ],
+    summary_counts: {
+      pending_items: 0,
+      integrity_blocked_items: 0,
+      observing_releases: 1,
+      tuning_pending: 0,
+    },
+    current_execution: { workflow: null, status: 'idle' },
+    next_queue: { workflow: null, status: 'none' },
+    health: {
+      daemon: 'healthy',
+      governance_db: 'healthy',
+      latest_gate: 'pass',
+    },
+  },
+  rdpWorkbenchItems: { total: 0, items: [], release_candidates: { total: 0, items: [] } },
+  rdpWorkbenchAlerts: { integrity_alerts: [], operational_alerts: [] },
+  rdpTuningOverview: {
+    pending_review_count: 0,
+    active_override_count: 0,
+    headline: '当前没有新的自动调优提案。',
+  },
+  rdpTuningProposals: { total: 0, items: [] },
+  uiState: { rdp: {} },
+});
+
 const drawer = buildDecisionDrawer({
   decision_id: 'dec-1',
   decision_context: { symbol: 'BTC-USDT-SWAP', current_position_qty: 0 },
@@ -2874,29 +3048,29 @@ console.log(JSON.stringify({
   analysisNoTopNavButtons: !analysisHtml.includes('前往 AI 工作台') && !analysisHtml.includes('前往 AI 配置'),
   configHasRuntimeModeCard: configHtml.includes('运行模式切换'),
   configHasAutoProfileControlCard: configHtml.includes('自动换档控制'),
-  configUsesWorkbenchIdentity: configHtml.includes('RDP 工作台') && !configHtml.includes('RDP 核心面板'),
-  configHasWorkbenchHero: configHtml.includes('当前轮次'),
-  configHasCoreQueue: configHtml.includes('当前待处理'),
-  configHasIntegrityPanel: configHtml.includes('当前阻断'),
-  configHasRuntimeRail: configHtml.includes('后台状态'),
-  configHasTuningCard: configHtml.includes('自动调优'),
-  configShowsTaskOrientedMetrics: configHtml.includes('待处理') && configHtml.includes('当前运行') && configHtml.includes('下一项'),
-  configShowsManualWorkflowActions: configHtml.includes('刷新数据') && configHtml.includes('运行完整 RDP') && !configHtml.includes('只跑治理检查') && !configHtml.includes('只跑决策链'),
-  configRemovesWorkflowGridNoise: !configHtml.includes('数据刷新执行') && !configHtml.includes('研究流程排队'),
-  configNoDirectApplyLanguage: !configHtml.includes('data-action="rdp-approve-and-apply"') && !configHtml.includes('data-action="rdp-apply-only"'),
-  configShowsDecisionSummaryNotRawEvidence: configHtml.includes('这轮产出了一组新参数，确认后就会进入待发布。') && !configHtml.includes('[phase2_research]') && !configHtml.includes('[phase3_attribution]'),
-  configExplainsApprovalEffect: configHtml.includes('如果批准：批准后进入待发布，下一步是运行 Gate 或创建发布。'),
-  configShowsReleaseCandidates: configHtml.includes('待发布候选') && configHtml.includes('运行 Gate') && configHtml.includes('创建发布'),
-  configShowsApprovalBlockedCallout: configHtml.includes('审批已阻断') && configHtml.includes('证据不完整，当前不能审批。'),
-  configShowsEvidenceDrilldown: configHtml.includes('查看证据详情') && configHtml.includes('来源轮次') && configHtml.includes('Step2 研究证据当前不可直接审批') && configHtml.includes('Step2 轮次'),
-  configShowsIntegrityAlerts: configHtml.includes('最新归因结果不完整') && configHtml.includes('治理数据库还没有接通，发布链路现在不可用。'),
-  configShowsTuningProposalActions: configHtml.includes('批准调优') && configHtml.includes('拒绝调优'),
-  configKeepsObservationSeparate: configHtml.includes('观察与回滚') && configHtml.includes('这些发布还在观察窗口内'),
-  releaseEmptyUsesWorkbenchLayout: releaseEmptyConfigHtml.includes('Directional / 1H') && releaseEmptyConfigHtml.includes('参数候选待审批') && releaseEmptyConfigHtml.includes('当前没有待审核的自动调优提案') && !releaseEmptyConfigHtml.includes('待发布候选'),
+  configUsesWorkbenchIdentity: configAndRdpHtml.includes('RDP 工作台') && !configAndRdpHtml.includes('RDP 核心面板'),
+  configHasWorkbenchHero: configAndRdpHtml.includes('当前轮次'),
+  configHasCoreQueue: configAndRdpHtml.includes('当前待处理'),
+  configHasIntegrityPanel: configAndRdpHtml.includes('当前阻断'),
+  configHasRuntimeRail: configAndRdpHtml.includes('后台状态'),
+  configHasTuningCard: configAndRdpHtml.includes('自动调优'),
+  configShowsTaskOrientedMetrics: configAndRdpHtml.includes('待处理') && configAndRdpHtml.includes('当前运行') && configAndRdpHtml.includes('下一项'),
+  configShowsManualWorkflowActions: configAndRdpHtml.includes('刷新数据') && configAndRdpHtml.includes('运行完整 RDP') && !configAndRdpHtml.includes('只跑治理检查') && !configAndRdpHtml.includes('只跑决策链'),
+  configRemovesWorkflowGridNoise: !configAndRdpHtml.includes('数据刷新执行') && !configAndRdpHtml.includes('研究流程排队'),
+  configNoDirectApplyLanguage: !configAndRdpHtml.includes('data-action="rdp-approve-and-apply"') && !configAndRdpHtml.includes('data-action="rdp-apply-only"'),
+  configShowsDecisionSummaryNotRawEvidence: configAndRdpHtml.includes('这轮产出了一组新参数，确认后就会进入待发布。') && !configAndRdpHtml.includes('[phase2_research]') && !configAndRdpHtml.includes('[phase3_attribution]'),
+  configExplainsApprovalEffect: configAndRdpHtml.includes('如果批准：批准后进入待发布，下一步是运行 Gate 或创建发布。'),
+  configShowsReleaseCandidates: configAndRdpHtml.includes('待发布候选') && configAndRdpHtml.includes('运行 Gate') && configAndRdpHtml.includes('创建发布'),
+  configShowsApprovalBlockedCallout: configAndRdpHtml.includes('审批已阻断') && configAndRdpHtml.includes('证据不完整，当前不能审批'),
+  configShowsEvidenceDrilldown: configAndRdpHtml.includes('查看证据详情') && configAndRdpHtml.includes('来源轮次') && configAndRdpHtml.includes('Step2 研究证据当前不可直接审批') && configAndRdpHtml.includes('Step2 轮次'),
+  configShowsIntegrityAlerts: configAndRdpHtml.includes('最新归因结果不完整') && configAndRdpHtml.includes('治理数据库还没有接通，发布链路现在不可用。'),
+  configShowsTuningProposalActions: configAndRdpHtml.includes('批准调优') && configAndRdpHtml.includes('拒绝调优'),
+  configKeepsObservationSeparate: configAndRdpHtml.includes('观察与回滚') && configAndRdpHtml.includes('这些发布还在观察窗口内'),
+  releaseEmptyUsesWorkbenchLayout: releaseEmptyCombinedHtml.includes('Directional / 1H') && releaseEmptyCombinedHtml.includes('参数候选待审批') && releaseEmptyCombinedHtml.includes('当前没有待审核的自动调优提案') && !releaseEmptyCombinedHtml.includes('待发布候选'),
   rollbackHeroPrioritizesRollback:
-    rollbackConfigHtml.split('当前待处理')[0].includes('data-action="rdp-rollback-parameters"')
-    && !rollbackConfigHtml.split('当前待处理')[0].includes('data-action="rdp-create-release"'),
-  rollbackHeroExplainsPriority: rollbackConfigHtml.includes('有发布进入回滚建议状态，先处理回滚。'),
+    rollbackCombinedHtml.split('当前待处理')[0].includes('data-action="rdp-rollback-parameters"')
+    && !rollbackCombinedHtml.split('当前待处理')[0].includes('data-action="rdp-create-release"'),
+  rollbackHeroExplainsPriority: rollbackCombinedHtml.includes('有发布进入回滚建议状态，先处理回滚。'),
   configHasRuntimeParams: configHtml.includes('运行参数概览'),
   configOmitsAdaptiveControls: !configHtml.includes('风险预算乘数') && !configHtml.includes('执行侵略性乘数'),
   configHasTimingControls: configHtml.includes('持有与冷却') && configHtml.includes('低边际保护'),
@@ -2904,8 +3078,11 @@ console.log(JSON.stringify({
   configHasExecutionShadow: configHtml.includes('执行层 shadow'),
   configHasProfileControlModeButtons: configHtml.includes('手动切档') && configHtml.includes('自动切档'),
   configNoJumpButtons: !configHtml.includes('前往 AI 工作台') && !configHtml.includes('查看 AI 分析'),
+  configAndRdpKeepsRdpWorkbench: configAndRdpHtml.includes('RDP 工作台') && configAndRdpHtml.includes('观察与回滚'),
+  releaseEmptyCombinedShowsApprovalQueue: releaseEmptyCombinedHtml.includes('Directional / 1H') && releaseEmptyCombinedHtml.includes('参数候选待审批'),
+  rollbackCombinedPrioritizesRollback: rollbackCombinedHtml.includes('有发布进入回滚建议状态，先处理回滚。') && rollbackCombinedHtml.includes('data-action="rdp-rollback-parameters"'),
   analysisHasAdaptiveControls: analysisHtml.includes('风险预算乘数') && analysisHtml.includes('自动切档闸门'),
-  drawerExplainsFallback: drawer.body.includes('当前运行模式允许 AI 参与'),
+  drawerExplainsFallback: drawer.body.includes('AI 已参与本轮评估'),
   drawerUsesHumanDecisionSource: drawer.body.includes('AI 未被采纳，沿用基础策略'),
   manualOnlyProfileDefaultsToManual: /<button class="primary-button" data-action="set-profile-control-mode" data-value="manual"[^>]*disabled/.test(manualOnlyConfigHtml),
   manualOnlyProfileAutoEnabled: /<button class="secondary-button" data-action="set-profile-control-mode" data-value="auto"/.test(manualOnlyConfigHtml),
@@ -2950,6 +3127,9 @@ console.log(JSON.stringify({
         self.assertIn('"configHasExecutionShadow":true', result.stdout)
         self.assertIn('"configHasProfileControlModeButtons":true', result.stdout)
         self.assertIn('"configNoJumpButtons":true', result.stdout)
+        self.assertIn('"configAndRdpKeepsRdpWorkbench":true', result.stdout)
+        self.assertIn('"releaseEmptyCombinedShowsApprovalQueue":true', result.stdout)
+        self.assertIn('"rollbackCombinedPrioritizesRollback":true', result.stdout)
         self.assertIn('"analysisHasAdaptiveControls":true', result.stdout)
         self.assertIn('"drawerExplainsFallback":true', result.stdout)
         self.assertIn('"drawerUsesHumanDecisionSource":true', result.stdout)
@@ -3260,11 +3440,11 @@ console.log(JSON.stringify({
         self.assertIn('"currentSafetyButtonWarning":true', result.stdout)
         self.assertIn('"avoidsMisleadingObserveCopy":true', result.stdout)
 
-    def test_ai_config_view_surfaces_auth_failures_instead_of_fake_rdp_loading(self) -> None:
+    def test_rdp_view_surfaces_auth_failures_instead_of_fake_loading(self) -> None:
         script = """
-import { renderAIConfigView } from './aats/api/static/modules/views/ai-config-view.js';
+import { renderRdpView } from './aats/api/static/modules/views/rdp-view.js';
 
-const html = renderAIConfigView({
+const html = renderRdpView({
   session: {
     authenticated: false,
     role: 'anonymous',
