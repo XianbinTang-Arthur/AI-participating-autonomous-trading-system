@@ -95,6 +95,89 @@ def test_trigger_task_api_rejects_release_cycle_under_golden_path_freeze() -> No
     assert "golden-path freeze" in payload["message"]
 
 
+def test_trigger_task_api_accepts_research_cycle_when_full_pipeline_enabled(tmp_path) -> None:
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+    workflow_dir = tmp_path / "configs" / "rdp_workflows"
+    workflow_dir.mkdir(parents=True, exist_ok=True)
+    (workflow_dir / "research_cycle.json").write_text(
+        json.dumps(
+            {
+                "workflow": "research_cycle",
+                "tasks": [
+                    {"name": "refresh_recent_data", "command": "python refresh.py", "enabled": True},
+                    {"name": "full_pipeline", "command": "python full.py", "enabled": True},
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: tmp_path),
+        patch(
+            "aats.data_platform.governance.rdp_task_db.db_create_task_if_idle",
+            return_value=("task_demo_research", None),
+        ) as create_task,
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/tasks/trigger",
+            json={"workflow": "research_cycle", "actor": "operator"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is True
+    assert payload["task_id"] == "task_demo_research"
+    assert payload["workflow"] == "research_cycle"
+    create_task.assert_called_once()
+
+
+def test_trigger_task_api_rejects_research_cycle_when_full_pipeline_frozen(tmp_path) -> None:
+    app = FastAPI()
+    app.include_router(rdp_router)
+    app.state.runtime = _build_runtime()
+    workflow_dir = tmp_path / "configs" / "rdp_workflows"
+    workflow_dir.mkdir(parents=True, exist_ok=True)
+    (workflow_dir / "research_cycle.json").write_text(
+        json.dumps(
+            {
+                "workflow": "research_cycle",
+                "tasks": [
+                    {"name": "refresh_recent_data", "command": "python refresh.py", "enabled": True},
+                    {"name": "full_pipeline", "command": "python full.py", "enabled": False},
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    with (
+        patch("aats.api.rdp_routes._project_root", lambda _request: tmp_path),
+        patch("aats.data_platform.governance.rdp_task_db.db_create_task_if_idle") as create_task,
+    ):
+        client = TestClient(app)
+        response = client.post(
+            "/rdp/tasks/trigger",
+            json={"workflow": "research_cycle", "actor": "operator"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["ok"] is False
+    assert payload["workflow"] == "research_cycle"
+    assert payload["task_id"] is None
+    assert payload["blocked_by_config"] is True
+    assert "full_pipeline 任务已禁用" in payload["message"]
+    create_task.assert_not_called()
+
+
 def test_tuning_review_routes_expose_and_review_pending_proposals(tmp_path) -> None:
     app = FastAPI()
     app.include_router(rdp_router)
@@ -142,7 +225,11 @@ def test_tuning_review_routes_expose_and_review_pending_proposals(tmp_path) -> N
     with (
         patch("aats.api.rdp_routes._project_root", lambda _request: root),
         patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
-        patch("aats.data_platform.operations.strategy_tuning_registry.try_governance_db", lambda: (None, False)),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry._step2_snapshot_blocking_reason",
+            return_value=None,
+        ),
+        _tuning_json_mode(),
     ):
         client = TestClient(app)
 
@@ -190,6 +277,35 @@ def _seed_tuning_registry(root, proposals: list[dict[str, object]]) -> None:
     )
 
 
+@contextmanager
+def _tuning_json_mode():
+    """Keep tuning route tests focused on JSON-mode API contracts."""
+    from aats.data_platform.operations import strategy_tuning_registry
+
+    strategy_tuning_registry._reset_overrides_cache_for_tests()
+    with (
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
+            lambda: (None, False),
+        ),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.get_cached_governance_engine",
+            lambda: None,
+        ),
+        patch(
+            "aats.data_platform.operations.strategy_tuning_registry.load_strategy_tuning_overrides",
+            lambda _root: {
+                "generated_at": None,
+                "combo_overrides": {},
+                "stale": True,
+                "source": "test",
+            },
+        ),
+    ):
+        yield
+    strategy_tuning_registry._reset_overrides_cache_for_tests()
+
+
 def test_tuning_approve_returns_not_found_for_unknown_proposal(tmp_path) -> None:
     """审批不存在的 proposal_id 应返回 ok=False，消息包含“未找到”。"""
 
@@ -220,9 +336,10 @@ def test_tuning_approve_returns_not_found_for_unknown_proposal(tmp_path) -> None
         patch("aats.api.rdp_routes._project_root", lambda _request: root),
         patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
         patch(
-            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
-            lambda: (None, False),
+            "aats.data_platform.operations.strategy_tuning_registry._step2_snapshot_blocking_reason",
+            return_value=None,
         ),
+        _tuning_json_mode(),
     ):
         client = TestClient(app)
         response = client.post(
@@ -251,9 +368,10 @@ def test_tuning_reject_returns_not_found_for_unknown_proposal(tmp_path) -> None:
         patch("aats.api.rdp_routes._project_root", lambda _request: root),
         patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
         patch(
-            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
-            lambda: (None, False),
+            "aats.data_platform.operations.strategy_tuning_registry._step2_snapshot_blocking_reason",
+            return_value=None,
         ),
+        _tuning_json_mode(),
     ):
         client = TestClient(app)
         response = client.post(
@@ -298,9 +416,10 @@ def test_tuning_approve_twice_blocks_second_review(tmp_path) -> None:
         patch("aats.api.rdp_routes._project_root", lambda _request: root),
         patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
         patch(
-            "aats.data_platform.operations.strategy_tuning_registry.try_governance_db",
-            lambda: (None, False),
+            "aats.data_platform.operations.strategy_tuning_registry._step2_snapshot_blocking_reason",
+            return_value=None,
         ),
+        _tuning_json_mode(),
     ):
         client = TestClient(app)
 
@@ -452,15 +571,31 @@ def test_workbench_detail_routes_expose_evidence_and_integrity_block(tmp_path) -
     assert evidence["phase2"]["status"] == "blocked"
 
 
-def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_path) -> None:
+def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_path, monkeypatch) -> None:
     app = FastAPI()
     app.include_router(rdp_router)
     app.state.runtime = _build_runtime()
 
     root = tmp_path
+    monkeypatch.setenv("RDP_APPLY_TOKEN_SECRET", "test-secret")
     (root / "artifacts" / "decision_system").mkdir(parents=True, exist_ok=True)
     (root / "artifacts" / "governance").mkdir(parents=True, exist_ok=True)
     (root / "artifacts" / "production_workflow" / "gates" / "gate_demo_1").mkdir(parents=True, exist_ok=True)
+    workflow_dir = root / "configs" / "rdp_workflows"
+    workflow_dir.mkdir(parents=True, exist_ok=True)
+    (workflow_dir / "data_maintenance.json").write_text(
+        json.dumps(
+            {
+                "workflow": "data_maintenance",
+                "tasks": [
+                    {"name": "refresh_recent_data", "command": "python refresh.py", "enabled": True},
+                ],
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     (root / "artifacts" / "decision_system" / "recommendation_registry.json").write_text(
         json.dumps(
@@ -618,11 +753,18 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             "message": "rollback success",
             "family": family,
             "timeframe": timeframe,
-            "to_parameter_set_id": "ps_live_0",
-        }
+                "to_parameter_set_id": "ps_live_0",
+            }
+
+    def _fake_save_release_history(history, project_root):
+        path = project_root / "artifacts" / "production_workflow" / "parameter_release_history.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
+        return path
 
     with (
         patch("aats.api.rdp_routes._project_root", lambda _request: root),
+        patch("aats.api.rdp_routes._step2_integrity_blocking_reason", return_value=None),
         patch("aats.api.rdp_routes._governance_session", _fake_governance_session),
         patch("aats.api.rdp_control_summary._project_root", lambda _request: root),
         patch("aats.api.rdp_control_summary._governance_session", _fake_governance_session),
@@ -651,8 +793,10 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
             "decisions": [],
         }),
         patch("aats.data_platform.decision_system.recommendation_registry.try_governance_db", lambda: (None, False)),
+        patch("aats.data_platform.decision_system.recommendation_registry._db_update_rec_status", return_value=True),
         patch("aats.data_platform.governance.parameter_registry.try_governance_db", lambda: (None, False)),
         patch("aats.data_platform.production_workflow.release_registry.try_governance_db", lambda: (None, False)),
+        patch("aats.data_platform.production_workflow.release_registry.save_release_history", _fake_save_release_history),
         patch("aats.data_platform.production_workflow.observation_window.try_governance_db", lambda: (None, False)),
         patch("aats.data_platform.production_workflow.pre_apply_gate.run_pre_apply_gate", _fake_gate),
         patch("aats.data_platform.decision_system.active_parameter_apply.apply_approved_recommendation", _fake_apply),
@@ -671,7 +815,7 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
 
         triggered = client.post(
             "/rdp/tasks/trigger",
-            json={"workflow": "research_cycle", "actor": "operator"},
+            json={"workflow": "data_maintenance", "actor": "operator"},
         ).json()
         assert triggered["ok"] is True
 
@@ -710,8 +854,11 @@ def test_rdp_route_chain_updates_control_summary_after_release_and_rollback(tmp_
         ).json()
         assert observed["status"] == "observing"
 
+        from aats.api.rdp_apply_token import emit_token
+
         rolled_back = client.post(
             "/rdp/parameters/rollback",
+            headers={"X-Rdp-Apply-Token": emit_token("operator", "rollback")},
             json={"family": "independent", "timeframe": "15m", "actor": "operator"},
         ).json()
         assert rolled_back["ok"] is True
@@ -950,10 +1097,14 @@ def test_apply_parameter_blocked_when_step2_snapshot_incomplete(tmp_path) -> Non
                 "apply_approved_recommendation 不能在 integrity gate 命中时被调用"
             ),
         ),
+        patch.dict(os.environ, {"RDP_APPLY_TOKEN_SECRET": "test-secret"}, clear=False),
     ):
+        from aats.api.rdp_apply_token import emit_token
+
         client = TestClient(app)
         response = client.post(
             "/rdp/parameters/apply",
+            headers={"X-Rdp-Apply-Token": emit_token("operator", "apply")},
             json={
                 "recommendation_id": "rec_apply_bypass_attempt",
                 "actor": "operator",
@@ -1049,10 +1200,14 @@ def test_rollback_parameter_not_blocked_when_step2_snapshot_incomplete(tmp_path)
             "rollback_active_parameter_set",
             return_value={"ok": True, "rolled_back_to": "ps_prev"},
         ),
+        patch.dict(os.environ, {"RDP_APPLY_TOKEN_SECRET": "test-secret"}, clear=False),
     ):
+        from aats.api.rdp_apply_token import emit_token
+
         client = TestClient(app)
         response = client.post(
             "/rdp/parameters/rollback",
+            headers={"X-Rdp-Apply-Token": emit_token("operator", "rollback")},
             json={
                 "family": "independent",
                 "timeframe": "15m",

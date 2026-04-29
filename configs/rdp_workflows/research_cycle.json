@@ -20,10 +20,10 @@
     },
     {
       "name": "full_pipeline",
-      "description": "一键运行 Phase 2 -> Step 3 -> 导入 -> Phase 3 -> Phase 4 -> 治理 -> 决策。frozen golden-path 下禁用：避免通过 replay-only 链自动推进研究闭环。",
+      "description": "一键运行 Phase 2 -> Step 3 -> 导入 -> Phase 3 -> Phase 4 -> 治理 -> 决策。仅允许人工触发；weekly schedule 仍关闭，避免自动推进研究闭环。",
       "command": "python scripts/rdp_run_full_pipeline.py --lookback-days 90 --replay-only --no-stop-on-failure",
       "timeout_seconds": 1800,
-      "enabled": false,
+      "enabled": true,
       "allow_failure": false
     }
   ]

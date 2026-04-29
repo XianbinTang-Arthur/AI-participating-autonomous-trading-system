@@ -75,6 +75,83 @@ def list_available_workflows(project_root: Path) -> list[str]:
     )
 
 
+def _is_task_enabled(task: dict[str, Any]) -> bool:
+    return task.get("enabled", True) is not False
+
+
+def describe_manual_trigger_availability(
+    project_root: Path,
+    workflow_name: str,
+) -> dict[str, Any]:
+    """Return whether an operator-triggered workflow matches executable config.
+
+    This guard is intentionally narrower than daemon execution. The daemon may
+    still process scheduler-created maintenance workflows, but an operator UI
+    button must not advertise "运行完整 RDP" when the configured full pipeline is
+    frozen and would be skipped.
+    """
+    try:
+        config = load_workflow_config(project_root, workflow_name)
+    except FileNotFoundError:
+        return {
+            "enabled": False,
+            "disabled_reason": f"{workflow_name} 的 workflow 配置不存在，不能手动触发。",
+            "enabled_task_names": [],
+        }
+    except Exception:
+        log.exception("Failed to inspect workflow manual trigger availability: %s", workflow_name)
+        return {
+            "enabled": False,
+            "disabled_reason": f"{workflow_name} 的 workflow 配置暂时不可读取，不能手动触发。",
+            "enabled_task_names": [],
+        }
+
+    tasks = [
+        task for task in (config.get("tasks") or [])
+        if isinstance(task, dict)
+    ]
+    enabled_task_names = [
+        str(task.get("name") or "")
+        for task in tasks
+        if _is_task_enabled(task) and str(task.get("name") or "").strip()
+    ]
+
+    if workflow_name == "research_cycle":
+        full_pipeline_task = next(
+            (task for task in tasks if task.get("name") == "full_pipeline"),
+            None,
+        )
+        if full_pipeline_task is None:
+            return {
+                "enabled": False,
+                "disabled_reason": "完整 RDP 缺少 full_pipeline 任务配置，不能手动触发。",
+                "enabled_task_names": enabled_task_names,
+            }
+        if not _is_task_enabled(full_pipeline_task):
+            return {
+                "enabled": False,
+                "disabled_reason": (
+                    "完整 RDP 当前被冻结，full_pipeline 任务已禁用；"
+                    "提交 research_cycle 只会刷新数据，不会运行研究闭环。"
+                    "请先使用“刷新数据”。"
+                ),
+                "enabled_task_names": enabled_task_names,
+            }
+
+    if not enabled_task_names:
+        return {
+            "enabled": False,
+            "disabled_reason": f"{workflow_name} 当前没有启用的任务，不能手动触发。",
+            "enabled_task_names": [],
+        }
+
+    return {
+        "enabled": True,
+        "disabled_reason": None,
+        "enabled_task_names": enabled_task_names,
+    }
+
+
 # ── 任务执行 ──────────────────────────────────────────────────────
 
 

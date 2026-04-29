@@ -1140,12 +1140,20 @@ def _humanize_operational_alert(title: str | None, message: str | None, code: st
     return friendly_title, normalized_message or "当前存在需要处理的系统告警。"
 
 
-def _build_manual_workflow_actions(tasks: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+def _build_manual_workflow_actions(
+    project_root: Path,
+    tasks: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    from aats.data_platform.operations.workflow_dispatcher import (
+        describe_manual_trigger_availability,
+    )
+
     actions: list[dict[str, Any]] = []
     for workflow in ("data_maintenance", "research_cycle"):
         lane = (tasks or {}).get(workflow) or {}
-        disabled_reason = None
-        enabled = True
+        availability = describe_manual_trigger_availability(project_root, workflow)
+        disabled_reason = availability.get("disabled_reason")
+        enabled = bool(availability.get("enabled"))
         if lane.get("running_task"):
             enabled = False
             disabled_reason = _workflow_disabled_reason(workflow, "running")
@@ -1931,7 +1939,7 @@ def build_rdp_workbench_overview(request: Request) -> dict[str, Any]:
     release_candidates_payload = _build_release_candidates_payload(summary)
     tuning_payload = _build_tuning_overview_payload(root)
     current_execution, next_queue = _build_task_lane_summary(summary.get("tasks") or {})
-    primary_action, secondary_actions = _build_manual_workflow_actions(summary.get("tasks") or {})
+    primary_action, secondary_actions = _build_manual_workflow_actions(root, summary.get("tasks") or {})
     observation_queue = summary.get("observation_queue") or []
     operations_summary = summary.get("operations_summary") or {}
 

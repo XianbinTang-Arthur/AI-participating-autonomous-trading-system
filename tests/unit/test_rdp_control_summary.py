@@ -868,6 +868,18 @@ class TestRdpControlSummary(TestCase):
         self.assertEqual(payload["secondary_actions"][0]["label"], "运行完整 RDP")
         self.assertEqual(len(payload["secondary_actions"]), 1)
 
+    def test_workbench_manual_actions_enable_full_rdp_when_config_enabled(self) -> None:
+        primary_action, secondary_actions = rdp_control_summary._build_manual_workflow_actions(
+            Path.cwd(),
+            {},
+        )
+
+        self.assertEqual(primary_action["label"], "刷新数据")
+        self.assertTrue(primary_action["enabled"])
+        self.assertEqual(len(secondary_actions), 1)
+        self.assertEqual(secondary_actions[0]["label"], "运行完整 RDP")
+        self.assertTrue(secondary_actions[0]["enabled"])
+
     def test_workbench_items_disable_approval_when_integrity_alert_blocks_round(self) -> None:
         request = _fake_request()
 

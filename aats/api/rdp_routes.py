@@ -1157,6 +1157,9 @@ async def trigger_task_api(
         WorkflowEnqueueBlockedError,
         db_create_task_if_idle,
     )
+    from aats.data_platform.operations.workflow_dispatcher import (
+        describe_manual_trigger_availability,
+    )
 
     def _response(
         *,
@@ -1183,6 +1186,17 @@ async def trigger_task_api(
                 f"未知的 workflow: {body.workflow}，"
                 f"可选: {', '.join(sorted(VALID_WORKFLOWS))}"
             ),
+        )
+
+    availability = describe_manual_trigger_availability(
+        _project_root(request),
+        body.workflow,
+    )
+    if not availability.get("enabled"):
+        return _response(
+            ok=False,
+            message=str(availability.get("disabled_reason") or "当前 workflow 不能手动触发。"),
+            blocked_by_config=True,
         )
 
     try:

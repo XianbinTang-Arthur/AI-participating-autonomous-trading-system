@@ -9,7 +9,10 @@ from pathlib import Path
 
 import pytest
 
-from aats.data_platform.operations.workflow_dispatcher import run_workflow
+from aats.data_platform.operations.workflow_dispatcher import (
+    describe_manual_trigger_availability,
+    run_workflow,
+)
 
 
 def _write_json(path: Path, payload: dict | list) -> None:
@@ -78,6 +81,44 @@ def test_workflow_dispatcher_fails_when_success_marker_missing(tmp_path: Path) -
     task = report["tasks"][0]
     assert task["status"] == "failed"
     assert task["missing_success_markers"] == ["Phase 6 Decision Round completed"]
+
+
+def test_manual_research_cycle_trigger_disabled_when_full_pipeline_frozen(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "configs" / "rdp_workflows" / "research_cycle.json",
+        {
+            "workflow": "research_cycle",
+            "tasks": [
+                {"name": "refresh_recent_data", "command": "python refresh.py", "enabled": True},
+                {"name": "full_pipeline", "command": "python full.py", "enabled": False},
+            ],
+        },
+    )
+
+    availability = describe_manual_trigger_availability(tmp_path, "research_cycle")
+
+    assert availability["enabled"] is False
+    assert "full_pipeline 任务已禁用" in availability["disabled_reason"]
+    assert availability["enabled_task_names"] == ["refresh_recent_data"]
+
+
+def test_manual_research_cycle_trigger_enabled_when_full_pipeline_enabled(tmp_path: Path) -> None:
+    _write_json(
+        tmp_path / "configs" / "rdp_workflows" / "research_cycle.json",
+        {
+            "workflow": "research_cycle",
+            "tasks": [
+                {"name": "refresh_recent_data", "command": "python refresh.py", "enabled": True},
+                {"name": "full_pipeline", "command": "python full.py", "enabled": True},
+            ],
+        },
+    )
+
+    availability = describe_manual_trigger_availability(tmp_path, "research_cycle")
+
+    assert availability["enabled"] is True
+    assert availability["disabled_reason"] is None
+    assert availability["enabled_task_names"] == ["refresh_recent_data", "full_pipeline"]
 
 
 def test_rdp_run_scheduled_workflow_prints_task_output_tail(monkeypatch, tmp_path: Path) -> None:

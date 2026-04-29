@@ -7,7 +7,8 @@ observation_cycle / reliability_cycle / governance_cycle.quality_monitor
 这些 frozen golden-path 仍需运行的 workflow / task.
 
 这些测试直接读取 configs/rdp_workflows/*.json, 锁定 semantic_freeze 状态。
-禁止任何回退把这些 flag 改回 true —— 会立即让 freeze 状态退回 partial。
+research_cycle 的 full_pipeline 保持人工可触发，因为 UI 的“运行完整 RDP”
+语义必须真实执行完整研究闭环；冻结的是自动调度，不是操作员显式触发。
 """
 from __future__ import annotations
 
@@ -38,9 +39,9 @@ def test_research_cycle_schedule_disabled() -> None:
     assert _load("research_cycle")["schedule"]["enabled"] is False
 
 
-def test_research_cycle_full_pipeline_task_disabled() -> None:
+def test_research_cycle_full_pipeline_task_enabled_for_manual_trigger() -> None:
     cfg = _load("research_cycle")
-    assert _task(cfg, "full_pipeline")["enabled"] is False
+    assert _task(cfg, "full_pipeline")["enabled"] is True
 
 
 # ── decision_cycle ──────────────────────────────────────────────
