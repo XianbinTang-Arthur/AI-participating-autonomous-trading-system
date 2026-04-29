@@ -28,6 +28,17 @@ def test_login_page_exposes_runtime_role_copy_target() -> None:
     assert "使用${roleText}登录" in script
 
 
+def test_login_page_has_mobile_width_guards() -> None:
+    css = (REPO_ROOT / "aats" / "api" / "static" / "app.css").read_text(encoding="utf-8")
+
+    assert ".login-shell" in css
+    assert "grid-template-columns: minmax(0, 1fr);" in css
+    assert ".login-panel" in css
+    assert "max-width: 100%;" in css
+    assert ".login-copy h1,\n.login-copy .lead,\n.login-panel .notice-card" in css
+    assert "overflow-wrap: anywhere;" in css
+
+
 def test_login_script_surfaces_form_validation_in_page_notice() -> None:
     text = (REPO_ROOT / "aats" / "api" / "static" / "login.js").read_text(encoding="utf-8")
 
