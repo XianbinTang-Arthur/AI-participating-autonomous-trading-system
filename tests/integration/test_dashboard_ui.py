@@ -259,7 +259,7 @@ class TestDashboardUI(unittest.TestCase):
         # character-perfect. Re-ordering, adding more helpers, or aliasing
         # should not break the test — see the helper docstring above.
         _assert_imports_helper(self, dashboard_refresh_text, ["setFlash", "isFlashLive"], "flash.js")
-        _assert_imports_helper(self, shell_renderer_text, ["clearFlash", "FLASH_DEFAULT_TTL_MS"], "flash.js")
+        _assert_imports_helper(self, shell_renderer_text, ["clearFlash", "getFlashTtl"], "flash.js")
         _assert_imports_helper(self, app_js_text, ["ensureNotBusy", "setFlash"], "flash.js")
         _assert_imports_helper(self, risk_actions_text, ["ensureNotBusy", "setFlash"], "flash.js")
         _assert_imports_helper(self, execution_actions_text, ["setFlash"], "flash.js")
@@ -295,7 +295,7 @@ class TestDashboardUI(unittest.TestCase):
         self.assertIn("const riskActionHandlers = createRiskActionHandlers({", app_js_text)
         self.assertIn("const executionActionHandlers = createExecutionActionHandlers({", app_js_text)
         self.assertIn("const adminActions = createAdminActions({", app_js_text)
-        self.assertIn("const domainHandler = riskActionHandlers[action] || executionActionHandlers[action] || adminActionHandlers[action];", app_js_text)
+        self.assertIn("const domainHandler = riskActionHandlers[action] || executionActionHandlers[action] || adminActionHandlers[action] || rdpActionHandlers[action];", app_js_text)
         self.assertNotIn("const VIEW_ROUTES = {", app_js_text)
         self.assertNotIn("const VIEW_META = {", app_js_text)
         self.assertNotIn("function scheduleRefresh() {", app_js_text)
@@ -1410,8 +1410,10 @@ console.log(JSON.stringify({
                 "runtime",
                 "systemRecovery",
                 "blockerControl",
+                "aiRuntime",
                 "strategyRuntime",
                 "strategyAttribution",
+                "positionLifecycleAttribution",
                 "latestDecision",
                 "recentDecisions",
                 "executionLatest",
