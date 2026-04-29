@@ -3581,7 +3581,7 @@ const handlers = createRdpActionHandlers({
 });
 
 await handlers['rdp-create-release']('rec-1');
-await handlers['rdp-run-observation']('rel-1|48');
+await handlers['rdp-run-observation']('rel-1', { dataset: { hours: '48' } });
 
 console.log(JSON.stringify({
   promptCount,
@@ -4344,7 +4344,7 @@ console.log(JSON.stringify({
   hidesReferenceSection: !html.includes('展开配置与成本参考') && !html.includes('统一交易成本配置') && !html.includes('智能套利配置'),
   hidesCoordinatorDetails: !html.includes('预算快照') && !html.includes('冲突解算') && !html.includes('净额决策') && !html.includes('调度结论'),
   keepsCoordinatorSummary: html.includes('策略家族模式') && html.includes('最近一次选中') && html.includes('最近执行包') && html.includes('组合预算变化'),
-  hasCollapsedHistory: html.includes('展开归因与历史记录') && html.includes('默认折叠，保留复盘能力但不抢主视线'),
+  hasCollapsedHistory: html.includes('归因与历史记录') && html.includes('复盘最近为什么赚钱/亏钱、或者核对历史策略输出，直接在这里查看。'),
 }));
 """
         result = subprocess.run(
@@ -8480,11 +8480,11 @@ const drawer = buildDecisionDrawer({
 });
 
     console.log(JSON.stringify({
-      hasRuntimeStateRow:
-        drawer.body.includes('每条书当前状态')
-        && drawer.body.includes('多书准备开仓')
-        && drawer.body.includes('空书准备收口')
-        && drawer.body.includes('thesis失效'),
+          hasRuntimeStateRow:
+            drawer.body.includes('每条书当前状态')
+            && drawer.body.includes('多书 准备开仓')
+            && drawer.body.includes('空书 准备收口')
+            && drawer.body.includes('thesis失效'),
     }));
 """
         result = subprocess.run(
