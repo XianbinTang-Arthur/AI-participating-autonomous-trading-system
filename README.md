@@ -142,8 +142,10 @@ pip install -e .[otel]
 
 默认访问：
 
-- UI: `http://127.0.0.1:8011/ui`
-- liveness: `http://127.0.0.1:8011/healthz`
+- UI: `https://127.0.0.1:8011/ui`
+- liveness: `https://127.0.0.1:8011/healthz`
+
+本地 operator 会话要求 HTTPS。若浏览器提示本地证书未受信任，需先信任本地 operator TLS 证书；安全会话模式下不要使用 HTTP 入口。
 
 ### 7.3 本地 paper loop
 

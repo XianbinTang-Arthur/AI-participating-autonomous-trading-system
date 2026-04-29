@@ -17,3 +17,29 @@ def test_login_script_surfaces_https_requirement_for_secure_sessions() -> None:
 
     assert "operator_https_required_for_secure_session" in text
     assert "当前入口使用 HTTP，安全会话只能通过 HTTPS 建立。请使用 HTTPS 访问控制台。" in text
+
+
+def test_login_page_exposes_runtime_role_copy_target() -> None:
+    html = (REPO_ROOT / "aats" / "api" / "static" / "login.html").read_text(encoding="utf-8")
+    script = (REPO_ROOT / "aats" / "api" / "static" / "login.js").read_text(encoding="utf-8")
+
+    assert 'id="loginLead"' in html
+    assert "configured_roles" in script
+    assert "使用${roleText}登录" in script
+
+
+def test_login_script_surfaces_form_validation_in_page_notice() -> None:
+    text = (REPO_ROOT / "aats" / "api" / "static" / "login.js").read_text(encoding="utf-8")
+
+    assert 'addEventListener("invalid", showFormValidationMessage)' in text
+    assert "请先填写用户名和密码。" in text
+    assert "请先填写用户名。" in text
+    assert "请先填写密码。" in text
+
+
+def test_readme_points_local_operator_ui_to_https() -> None:
+    text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+
+    assert "https://127.0.0.1:8011/ui" in text
+    assert "https://127.0.0.1:8011/healthz" in text
+    assert "http://127.0.0.1:8011/ui" not in text

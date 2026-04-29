@@ -2386,6 +2386,15 @@ input::placeholder {
     padding: 14px 12px 24px;
   }
 
+  .login-shell {
+    padding: 18px 12px;
+  }
+
+  .login-copy h1 {
+    font-size: clamp(32px, 9vw, 42px);
+    line-height: 1.05;
+  }
+
   .workspace {
     margin-top: 14px;
   }
@@ -2576,6 +2585,17 @@ input::placeholder {
 
   .detail-drawer {
     width: 100vw;
+  }
+}
+
+@media (max-width: 360px) {
+  .login-panel {
+    padding: 22px 20px;
+  }
+
+  .login-copy h1 {
+    font-size: 30px;
+    line-height: 1.08;
   }
 }
 

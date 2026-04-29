@@ -1350,14 +1350,15 @@ console.log(JSON.stringify({
             login = client.get("/login")
 
         self.assertEqual(root.status_code, 303)
-        self.assertEqual(root.headers["location"], "/login")
+        self.assertEqual(root.headers["location"], "/login?reason=operator_auth_required")
         self.assertEqual(ai.status_code, 303)
-        self.assertEqual(ai.headers["location"], "/login")
+        self.assertEqual(ai.headers["location"], "/login?reason=operator_auth_required")
         self.assertEqual(ai_analysis.status_code, 303)
-        self.assertEqual(ai_analysis.headers["location"], "/login")
+        self.assertEqual(ai_analysis.headers["location"], "/login?reason=operator_auth_required")
         self.assertEqual(ai_config.status_code, 303)
-        self.assertEqual(ai_config.headers["location"], "/login")
+        self.assertEqual(ai_config.headers["location"], "/login?reason=operator_auth_required")
         self.assertEqual(login.status_code, 200)
+        self.assertIn("loginLead", login.text)
         self.assertIn("login", login.text.lower())
 
     def test_build_dashboard_bundle_path_uses_frontend_panel_registry(self) -> None:

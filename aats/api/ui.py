@@ -16,6 +16,7 @@ ui_router = APIRouter(include_in_schema=False)
 
 PAGE_NO_STORE_HEADERS = {"Cache-Control": "no-store"}
 STATIC_ASSET_HEADERS = {"Cache-Control": "public, max-age=120"}
+LOGIN_AUTH_REQUIRED_URL = "/login?reason=operator_auth_required"
 
 
 def _auth_enabled(request: Request) -> bool:
@@ -31,7 +32,7 @@ def _dashboard_allowed(request: Request) -> bool:
 
 def _serve_dashboard_page(request: Request, page_name: str) -> FileResponse | RedirectResponse:
     if not _dashboard_allowed(request):
-        return RedirectResponse(url="/login", status_code=303)
+        return RedirectResponse(url=LOGIN_AUTH_REQUIRED_URL, status_code=303)
     if page_name not in {"home", "overview", "strategy", "execution", "risk", "exit-execution", "replay", "ai-analysis", "ai-config", "settings", "rdp"}:
         raise HTTPException(status_code=404, detail="ui_page_not_found")
     return FileResponse(DASHBOARD_SHELL, media_type="text/html; charset=utf-8", headers=PAGE_NO_STORE_HEADERS)
@@ -81,7 +82,7 @@ async def replay_index(request: Request):
 @ui_router.get("/ui/ai")
 async def ai_index(request: Request):
     if not _dashboard_allowed(request):
-        return RedirectResponse(url="/login", status_code=303)
+        return RedirectResponse(url=LOGIN_AUTH_REQUIRED_URL, status_code=303)
     return RedirectResponse(url="/ui/ai-analysis", status_code=303)
 
 
