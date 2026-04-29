@@ -37,7 +37,7 @@ export function renderExecutionSections(data) {
       actions: latestOrder?.client_order_id ? actionButton("查看最新委托", "inspect-order", latestOrder.client_order_id) : "",
       pills: [
         pill(`最新委托 ${latestOrderStatusLabel(latestOrder)}`, executionTone({ latestOrder, errors })),
-        pill(`活动委托 ${formatNumber(metrics.current_open_order_count, 0)}`, metrics.current_open_order_count > 0 ? "warning" : "outline"),
+        pill(`活动委托 ${formatNumber(metrics.current_open_order_count, 0, "0")}`, metrics.current_open_order_count > 0 ? "warning" : "outline"),
         pill(`最近异常 ${formatNumber(errors.length, 0)}`, errors.length > 0 ? "danger" : "positive"),
       ],
       metrics: [
@@ -139,7 +139,7 @@ function renderOrderGroups(recentOrders) {
           ${responsiveTable(
             orderTableHeaders(group.scene),
             group.records.map((order) => [
-              `<div><strong>${escapeHtml(order.symbol || "标的待确认")}</strong><div class="table-meta">${group.scene === "derivatives" ? `${readableState(order.margin_mode, "保证金模式待确认")} | ${readableState(order.exposure_side, "方向待确认")}` : readableState(order.order_type, "委托类型待确认")}</div></div>`,
+              `<div><strong>${escapeHtml(order.symbol || "标的待确认")}</strong><div class="table-meta">${group.scene === "derivatives" ? `${readableState(order.margin_mode, "保证金模式待确认")} | ${readableState(order.exposure_side, "方向待确认")}` : readableState(order.order_type, "订单类型未记录")}</div></div>`,
               `<div><strong>${orderRowTitle(order)}</strong><div class="table-meta">${orderRowMeta(order)}</div></div>`,
               `<div><strong>${readableState(order.status)}</strong><div class="table-meta">${escapeHtml(order.exchange_order_id || "等待交易所回执")}</div></div>`,
               `<div><strong>${formatRelativeAge(order.last_update_ts || order.created_at)}</strong><div class="table-meta">${formatMaybeTimestamp(order.last_update_ts || order.created_at)}</div></div>`,
@@ -153,7 +153,7 @@ function renderOrderGroups(recentOrders) {
               tone: ["failed", "rejected"].includes(String(order.status || "").toLowerCase()) ? "danger" : ["created", "submitting", "partially_filled", "cancel_pending"].includes(String(order.status || "").toLowerCase()) ? "warning" : "positive",
               badge: pill(readableState(order.status), ["failed", "rejected"].includes(String(order.status || "").toLowerCase()) ? "danger" : ["created", "submitting", "partially_filled", "cancel_pending"].includes(String(order.status || "").toLowerCase()) ? "warning" : "positive"),
               fields: [
-                { label: "交易场景", value: group.scene === "derivatives" ? "合约委托" : "现货委托", meta: group.scene === "derivatives" ? `${readableState(order.margin_mode, "保证金模式待确认")} | ${readableState(order.exposure_side, "方向待确认")}` : readableState(order.order_type, "委托类型待确认") },
+                { label: "交易场景", value: group.scene === "derivatives" ? "合约委托" : "现货委托", meta: group.scene === "derivatives" ? `${readableState(order.margin_mode, "保证金模式待确认")} | ${readableState(order.exposure_side, "方向待确认")}` : readableState(order.order_type, "订单类型未记录") },
                 { label: "委托摘要", value: orderRowTitle(order), meta: orderRowMeta(order) },
                 { label: "交易所回执", value: order.exchange_order_id || "等待回执" },
               ],
@@ -286,7 +286,7 @@ function renderLifecycleDiagnostics(payload = {}) {
   return `
     ${summaryStrip([
       {
-        label: "Lifecycle 数",
+        label: "生命周期数",
         value: formatNumber(summary.lifecycle_count, 0, "0"),
         meta: `最近展示 ${formatNumber(lifecycles.length, 0, "0")} 笔`,
         tone: "info",
@@ -300,26 +300,26 @@ function renderLifecycleDiagnostics(payload = {}) {
       {
         label: "总手续费",
         value: formatSigned(summary.total_fee_quote),
-        meta: `funding ${formatSigned(summary.funding_fee_quote)}`,
+        meta: `资金费 ${formatSigned(summary.funding_fee_quote)}`,
         tone: Number(summary.total_fee_quote || 0) > 0 ? "warning" : "info",
       },
       {
-        label: "未归属 funding",
+        label: "未归属资金费",
         value: formatNumber(summary.unassigned_funding_fee_count, 0, "0"),
-        meta: "用于暴露仍未归到 lifecycle 的账单事件",
+        meta: "用于暴露仍未归到整笔仓位的账单事件",
         tone: Number(summary.unassigned_funding_fee_count || 0) > 0 ? "warning" : "positive",
       },
     ])}
     ${responsiveTable(
-      ["仓位", "综合净收益", "费用 / funding", "持有与退出", "操作"],
+      ["仓位", "综合净收益", "费用 / 资金费", "持有与退出", "操作"],
       lifecycles.map((item) => [
         `<div><strong>${escapeHtml(item.symbol || "标的待确认")}</strong><div class="table-meta">${escapeHtml(lifecycleHeadline(item))}</div></div>`,
         `<div><strong>${formatSigned(item.combined_net_realized_pnl)}</strong><div class="table-meta">毛收益 ${formatSigned(item.gross_realized_pnl)}</div></div>`,
-        `<div><strong>${formatSigned(item.total_fee_quote)}</strong><div class="table-meta">开 ${formatSigned(item.entry_fee_quote)} / 平 ${formatSigned(item.exit_fee_quote)} / funding ${formatSigned(item.funding_fee_quote)}</div></div>`,
+        `<div><strong>${formatSigned(item.total_fee_quote)}</strong><div class="table-meta">开 ${formatSigned(item.entry_fee_quote)} / 平 ${formatSigned(item.exit_fee_quote)} / 资金费 ${formatSigned(item.funding_fee_quote)}</div></div>`,
         `<div><strong>${formatDuration(item.hold_seconds, "持有时长待确认")}</strong><div class="table-meta">${escapeHtml(lifecycleExitReasonSummary(item.exit_reason_breakdown))}</div></div>`,
         item.lifecycle_id ? actionButton("查看诊断", "inspect-lifecycle-attribution", item.lifecycle_id) : "",
       ]),
-      "当前还没有 lifecycle 级诊断样本。",
+      "当前还没有仓位生命周期诊断样本。",
       lifecycles.map((item) => ({
         kicker: "仓位生命周期",
         title: `${item.symbol || "标的待确认"} | ${lifecycleHeadline(item)}`,
@@ -331,15 +331,15 @@ function renderLifecycleDiagnostics(payload = {}) {
         ),
         fields: [
           { label: "综合净收益", value: formatSigned(item.combined_net_realized_pnl), meta: `毛收益 ${formatSigned(item.gross_realized_pnl)}` },
-          { label: "总手续费", value: formatSigned(item.total_fee_quote), meta: `funding ${formatSigned(item.funding_fee_quote)}` },
+          { label: "总手续费", value: formatSigned(item.total_fee_quote), meta: `资金费 ${formatSigned(item.funding_fee_quote)}` },
           { label: "持有时长", value: formatDuration(item.hold_seconds, "持有时长待确认"), meta: lifecycleExitReasonSummary(item.exit_reason_breakdown) },
         ],
         details: [
           { label: "生命周期编号", value: item.lifecycle_id || "当前没有编号" },
           { label: "成交拆分", value: `${formatNumber(item.entry_fill_count, 0, "0")} 开 / ${formatNumber(item.exit_fill_count, 0, "0")} 平` },
-          { label: "Child Order", value: formatNumber(item.child_order_count, 0, "0") },
+          { label: "子委托", value: formatNumber(item.child_order_count, 0, "0") },
         ],
-        detailLabel: "展开 lifecycle 摘要",
+        detailLabel: "展开仓位生命周期摘要",
         action: item.lifecycle_id ? actionButton("查看诊断", "inspect-lifecycle-attribution", item.lifecycle_id) : "",
       })),
     )}
@@ -369,5 +369,5 @@ function lifecycleTransitionLabel(value) {
   if (key === "strategy_exit") return "策略退出";
   if (key === "protective_exit") return "保护退出";
   if (key === "execution_guard_exit") return "执行守护退出";
-  return key ? key : "退出分类待确认";
+  return key ? readableState(key, "退出分类待确认") : "退出分类待确认";
 }

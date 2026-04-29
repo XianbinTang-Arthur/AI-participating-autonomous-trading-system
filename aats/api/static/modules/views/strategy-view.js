@@ -415,7 +415,7 @@ export function renderStrategySections(data) {
           [
             "主要子策略收益",
             sleeveProfitability[0]?.strategy_sleeve_id || "当前没有子策略收益记录",
-            sleeveProfitability[0] ? `净收益 ${formatSigned(sleeveProfitability[0].combined_net_realized_pnl)} | 记录 ${formatNumber(sleeveProfitability[0].record_count, 0, "0")} 条` : "等第一批 fill / funding fee 归因记录落地后，这里会自动出现。",
+            sleeveProfitability[0] ? `净收益 ${formatSigned(sleeveProfitability[0].combined_net_realized_pnl)} | 记录 ${formatNumber(sleeveProfitability[0].record_count, 0, "0")} 条` : "等第一批成交和资金费归因记录落地后，这里会自动出现。",
           ],
           [
             "库存归属概览",
@@ -429,10 +429,10 @@ export function renderStrategySections(data) {
           ],
           [
             "整笔仓位复盘",
-            lifecycleRows[0]?.lifecycle_id || "当前没有 lifecycle 诊断样本",
+            lifecycleRows[0]?.lifecycle_id || "当前没有仓位生命周期诊断样本",
             lifecycleRows[0]
               ? `综合净收益 ${formatSigned(lifecycleRows[0].combined_net_realized_pnl)} | 持有 ${formatDuration(lifecycleRows[0].hold_seconds, "时长待确认")} | 整笔仓位口径`
-              : "这里按整笔仓位口径提供最近 lifecycle 下钻，不改变策略页默认主值口径。",
+              : "这里按整笔仓位口径提供最近仓位生命周期下钻，不改变策略页默认主值口径。",
           ],
         ])}
         ${responsiveTable(
@@ -450,11 +450,11 @@ export function renderStrategySections(data) {
           "当前还没有可展示的 sleeve 归因记录。"
         )}
         ${responsiveTable(
-          ["仓位", "综合净收益", "费用 / funding", "退出链摘要", "操作"],
+          ["仓位", "综合净收益", "费用 / 资金费", "退出链摘要", "操作"],
           displayedLifecycleRows.map((item) => [
             `<div><strong>${escapeHtml(item.symbol || "标的待确认")}</strong><div class="table-meta">${escapeHtml(strategyLifecycleHeadline(item))}</div></div>`,
             `<div><strong>${formatSigned(item.combined_net_realized_pnl)}</strong><div class="table-meta">毛收益 ${formatSigned(item.gross_realized_pnl)}</div></div>`,
-            `<div><strong>${formatSigned(item.total_fee_quote)}</strong><div class="table-meta">开 ${formatSigned(item.entry_fee_quote)} / 平 ${formatSigned(item.exit_fee_quote)} / funding ${formatSigned(item.funding_fee_quote)}</div></div>`,
+            `<div><strong>${formatSigned(item.total_fee_quote)}</strong><div class="table-meta">开 ${formatSigned(item.entry_fee_quote)} / 平 ${formatSigned(item.exit_fee_quote)} / 资金费 ${formatSigned(item.funding_fee_quote)}</div></div>`,
             `<div><strong>${formatDuration(item.hold_seconds, "时长待确认")}</strong><div class="table-meta">${escapeHtml(strategyLifecycleExitReasonSummary(item.exit_reason_breakdown))}</div></div>`,
             item.lifecycle_id ? actionButton("查看诊断", "inspect-lifecycle-attribution", item.lifecycle_id) : "",
           ]),
@@ -470,13 +470,13 @@ export function renderStrategySections(data) {
             ),
             fields: [
               { label: "综合净收益", value: formatSigned(item.combined_net_realized_pnl), meta: "整笔仓位口径" },
-              { label: "总手续费", value: formatSigned(item.total_fee_quote), meta: `funding ${formatSigned(item.funding_fee_quote)}` },
+              { label: "总手续费", value: formatSigned(item.total_fee_quote), meta: `资金费 ${formatSigned(item.funding_fee_quote)}` },
               { label: "持有时长", value: formatDuration(item.hold_seconds, "时长待确认"), meta: strategyLifecycleExitReasonSummary(item.exit_reason_breakdown) },
             ],
             details: [
-              { label: "Lifecycle", value: item.lifecycle_id || "当前没有编号" },
+              { label: "生命周期编号", value: item.lifecycle_id || "当前没有编号" },
               { label: "成交拆分", value: `${formatNumber(item.entry_fill_count, 0, "0")} 开 / ${formatNumber(item.exit_fill_count, 0, "0")} 平` },
-              { label: "Child Order", value: formatNumber(item.child_order_count, 0, "0") },
+              { label: "子委托", value: formatNumber(item.child_order_count, 0, "0") },
             ],
             detailLabel: "展开整笔仓位摘要",
             action: item.lifecycle_id ? actionButton("查看诊断", "inspect-lifecycle-attribution", item.lifecycle_id) : "",
@@ -1889,7 +1889,7 @@ function smartArbitrageAdvancedConfigRows(config = {}) {
       "细分成本模型开关",
       costModelEnabled ? "true" : "false",
       costModelEnabled
-        ? "开启后会优先用 fee / slippage / funding / borrow 细分成本，再回退综合成本兜底。"
+        ? "开启后会优先用手续费、滑点、资金费、借币成本细分成本，再回退综合成本兜底。"
         : "关闭后只看综合成本兜底，不再区分费用来源。",
       costModelEnabled
         ? "若细分成本全是 0，系统仍会回退 estimated_cost_bps。"

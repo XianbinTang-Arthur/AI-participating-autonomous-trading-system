@@ -9,6 +9,7 @@ import {
   localizeError,
   operationalStatusCopy,
   operationalStatusHeadline,
+  operationalStatusLabel,
   readableState,
   reconciliationStatusLabel,
   statusHeadline,
@@ -54,6 +55,10 @@ export function renderOverviewView(data) {
     claimedSubmitGate,
     reconciliation,
   });
+  const runtimeStateValue = health.runtime_state || health.overall_status;
+  const runtimeStatusLabel = runtimeStateValue
+    ? readableState(runtimeStateValue)
+    : operationalStatusLabel({ health, recovery, blockers, reconciliation });
 
   return `
     <div class="panel-grid">
@@ -87,9 +92,9 @@ export function renderOverviewView(data) {
           tone: overviewTone({ health, recovery, blockers, latestOrder }),
           actions: latestDecision.decision_id ? actionButton("查看决策链", "inspect-decision", latestDecision.decision_id) : "",
           pills: [
-            pill(`运行状态 ${readableState(health.runtime_state || health.overall_status)}`, toneForRuntimeState(health.runtime_state || health.overall_status)),
+            pill(`运行状态 ${runtimeStatusLabel}`, toneForRuntimeState(runtimeStateValue)),
             pill(`自动交易 ${tradingStatusLabel(recovery)}`, recovery.safe_to_trade ? "positive" : recovery.halted && recovery.resume_eligible ? "warning" : "danger"),
-            pill(`最新委托 ${readableState(latestOrder?.status || "unknown")}`, toneForOrderStatus(latestOrder?.status)),
+            pill(`最新委托 ${latestOrder ? readableState(latestOrder.status) : "暂无委托"}`, toneForOrderStatus(latestOrder?.status)),
           ],
           metrics: [
             { label: "最新决策时间", value: formatMaybeTimestamp(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), meta: formatRelativeAge(latestDecision.decision_time || latestDecision.decision_context?.as_of_ts), tone: latestDecision.decision_id ? "info" : "neutral" },
@@ -121,10 +126,10 @@ export function renderOverviewView(data) {
           panelKey: ["executionLatest", "reconciliationLatest"],
           copy: "用一组摘要判断当前动作是否已经真正进入执行链路。",
           content: summaryStrip([
-            { label: "最新委托", value: readableState(latestOrder?.status || "unknown"), meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
+            { label: "最新委托", value: latestOrder ? readableState(latestOrder.status) : "暂无委托", meta: middleEllipsis(latestOrder?.client_order_id, 10, 6, "暂未生成委托"), tone: toneForOrderStatus(latestOrder?.status) },
             { label: "最新成交", value: latestFill ? `${formatNumber(latestFill.fill_qty)} @ ${formatNumber(latestFill.fill_price)}` : "暂未成交", meta: middleEllipsis(latestFill?.fill_id, 10, 6, "当前暂无成交编号"), tone: latestFill ? "positive" : "neutral" },
             { label: "对账结果", value: readableState(reconciliation?.severity || "unknown"), meta: middleEllipsis(reconciliation?.reconciliation_id, 10, 6, "暂时没有最新对账"), tone: reconciliation?.halt_required ? "danger" : toneForReconciliationSeverity(reconciliation?.severity) },
-            { label: "活动委托", value: formatNumber(metrics.current_open_order_count, 0), meta: activityOrderMeta({ currentOpenOrderCount: metrics.current_open_order_count, positionCount: (portfolio.positions || []).length }), tone: metrics.current_open_order_count > 0 ? "warning" : "positive" },
+            { label: "活动委托", value: formatNumber(metrics.current_open_order_count, 0, "0"), meta: activityOrderMeta({ currentOpenOrderCount: metrics.current_open_order_count, positionCount: (portfolio.positions || []).length }), tone: metrics.current_open_order_count > 0 ? "warning" : "positive" },
           ]),
         })}
       </div>
@@ -317,7 +322,7 @@ function buildOperatorTruthCockpit({
         ? {
             title: "最新决策证据",
             subtitle: middleEllipsis(latestDecision.decision_id, 12, 8),
-            detail: `${overviewIntentLabel(latestDecision)}；${latestOrder ? `委托 ${readableState(latestOrder.status)}` : "未生成新委托"}；成交累计 ${formatNumber(metrics.fill_count, 0)}。`,
+            detail: `${overviewIntentLabel(latestDecision)}；${latestOrder ? `委托 ${readableState(latestOrder.status)}` : "未生成新委托"}；成交累计 ${formatNumber(metrics.fill_count, 0, "0")}。`,
             timestamp: formatMaybeTimestamp(decisionFreshness),
             pill: pill("链路", latestOrder ? toneForOrderStatus(latestOrder.status) : "info"),
           }
@@ -328,7 +333,7 @@ function buildOperatorTruthCockpit({
             subtitle: readableTerminalNoFillReason(terminalNoFill.reason),
             detail: `这不是成交链路丢失；${terminalNoFillMeta(terminalNoFill)}。`,
             timestamp: formatMaybeTimestamp(terminalNoFill.latest_order_updated_at, "执行时间待同步"),
-            pill: pill("no-fill已解释", "warning"),
+            pill: pill("无成交已解释", "warning"),
           }
         : null,
       blockers.length
@@ -598,7 +603,7 @@ function buildTimeline({ latestDecision, latestOrder, latestFill, terminalNoFill
           subtitle: readableTerminalNoFillReason(terminalNoFill.reason),
           detail: terminalNoFillMeta(terminalNoFill),
           timestamp: formatMaybeTimestamp(terminalNoFill.latest_order_updated_at),
-          pill: pill("no-fill", "warning"),
+          pill: pill("无成交", "warning"),
         }
       : null,
     reconciliation?.reconciliation_id

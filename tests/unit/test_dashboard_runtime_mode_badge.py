@@ -29,10 +29,13 @@ class TestRuntimeModeBadgeWiring(unittest.TestCase):
         # data-action 必须和 LOCAL_DISPATCH_ACTIONS 里注册的名一致
         self.assertIn('data-action="show-runtime-mode-info"', html)
         self.assertIn('data-action="close-runtime-mode-info"', html)
-        # 关键内容检查:spec 要求 badge 解释 baseline_only 是按设计
-        self.assertIn("baseline_only", html)
-        self.assertIn("reference_only", html)
-        self.assertIn("ai_decision_maker", html)
+        # 面向值班用户的 modal 不应直接暴露机器码。
+        self.assertIn("仅按基础策略运行", html)
+        self.assertIn("AI 辅助判断", html)
+        self.assertIn("AI 决策者", html)
+        self.assertNotIn("baseline_only", html)
+        self.assertNotIn("reference_only", html)
+        self.assertNotIn("ai_decision_maker", html)
         self.assertIn("风控", html)
         self.assertNotIn("AATS_ALLOW_UI_OPERATING_MODE_OVERRIDE", html)
 

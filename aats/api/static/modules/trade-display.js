@@ -1,5 +1,5 @@
 ﻿import { formatNumber, formatSigned, listOrDash } from "./formatters.js";
-import { readableState } from "./terms.js";
+import { localizeError, readableState } from "./terms.js";
 
 // #32 修复：原本 detail-drawers.js 和 ai-view.js 各定义了一份同名 EXECUTION_SUGGESTION_LABELS
 // 和 executionSuggestionLabel，一改要改两处（strategy-view 之前也有一份，已在更早的重构里
@@ -79,9 +79,9 @@ export function orderRowTitle(order = {}) {
 
 export function orderRowMeta(order = {}) {
   if (inferTradeScene(order) === "derivatives") {
-    return `${readableState(order.order_type, "委托类型待确认")} | 仓位调整 ${formatSigned(order.requested_qty)}`;
+    return `${readableState(order.order_type, "订单类型未记录")} | 仓位调整 ${formatSigned(order.requested_qty)}`;
   }
-  return `${readableState(order.order_type, "委托类型待确认")} | 买卖数量 ${formatAssetAmount(order.symbol, order.requested_qty, true)}`;
+  return `${readableState(order.order_type, "订单类型未记录")} | 买卖数量 ${formatAssetAmount(order.symbol, order.requested_qty, true)}`;
 }
 
 export function fillRowTitle(fill = {}) {
@@ -136,7 +136,7 @@ export function orderDrawerRows(order = {}) {
         ["已成交仓位", formatNumber(order.filled_qty), `成交均价 ${formatQuotePrice(order.symbol, order.average_fill_price)}`],
       ]
     : [
-        ["现货标的", order.symbol || "标的待确认", `${readableState(order.order_type, "委托类型待确认")} | ${spotOrderAction(order)}`],
+        ["现货标的", order.symbol || "标的待确认", `${readableState(order.order_type, "订单类型未记录")} | ${spotOrderAction(order)}`],
         ["委托状态", readableState(order.status), order.exchange_order_id || "等待交易所订单号"],
         ["计划买卖数量", formatAssetAmount(order.symbol, order.requested_qty, true), `剩余未成 ${formatAssetAmount(order.symbol, order.remaining_qty)}`],
         ["已成交数量", formatAssetAmount(order.symbol, order.filled_qty), `成交均价 ${formatQuotePrice(order.symbol, order.average_fill_price)}`],
@@ -220,9 +220,17 @@ function gateStateText(value) {
 }
 
 function gateMetaText(reasons, noOrderTarget, fallback, noOrderCopy) {
-  const reasonText = listOrDash(reasons, fallback);
+  const reasonText = localizedReasonText(reasons, fallback);
   if (!noOrderTarget || reasonText !== fallback) return reasonText;
   return noOrderCopy;
+}
+
+function localizedReasonText(reasons, fallback) {
+  const items = Array.isArray(reasons) ? reasons : [reasons];
+  const localized = items
+    .map((item) => localizeError(String(item ?? "").trim(), ""))
+    .filter(Boolean);
+  return localized.length ? localized.join(" / ") : fallback;
 }
 
 function spotOrderAction(order = {}) {
