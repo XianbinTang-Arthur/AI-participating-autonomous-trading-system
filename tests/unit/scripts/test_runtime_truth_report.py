@@ -1868,6 +1868,39 @@ def test_directional_episode_attribution_truth_summarizes_edge_cost_fill_and_pnl
     assert "budget_scale_applied" in latest["guard_decision"]["reason_codes"]
 
 
+def test_db_probe_directional_episode_attribution_uses_compact_payload_projection() -> None:
+    mod = load_module()
+
+    assert "portfolio_budget_cut_notional, expected_edge_bps, expected_cost_bps, payload " not in mod.DB_PROBE
+    assert "rd.expected_edge_bps, rd.expected_cost_bps, rd.payload," in mod.DB_PROBE
+    assert "jsonb_strip_nulls(jsonb_build_object(" in mod.DB_PROBE
+    assert "payload::jsonb -> 'strategy_sleeve_intents'" in mod.DB_PROBE
+    assert "'expected_signal_edge_bps'," in mod.DB_PROBE
+
+
+def test_database_truth_probe_uses_measured_runtime_timeout_budget(monkeypatch) -> None:
+    mod = load_module()
+    calls = []
+
+    def fake_run_command(args, *, timeout=None, stdin=None, **_kwargs):
+        calls.append({"args": args, "timeout": timeout, "stdin": stdin})
+        return {
+            "ok": True,
+            "returncode": 0,
+            "stdout": '{"ok": true, "portfolio_allocation_decisions": 0, "execution_fills": 0}',
+            "stderr": "",
+        }
+
+    monkeypatch.setattr(mod, "run_command", fake_run_command)
+
+    result = mod.database_truth_probe("Ubuntu", "aats-gateway")
+
+    assert result["ok"] is True
+    assert calls[0]["timeout"] == mod.DATABASE_TRUTH_PROBE_TIMEOUT_SECONDS
+    assert mod.DATABASE_TRUTH_PROBE_TIMEOUT_SECONDS == 75
+    assert calls[0]["stdin"] == mod.DB_PROBE
+
+
 def test_directional_episode_attribution_uses_payload_expected_edge_cost_fallback() -> None:
     mod = load_module()
     raw = {

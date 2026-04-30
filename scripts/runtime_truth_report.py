@@ -32,6 +32,7 @@ DEFAULT_WSL_DISTRO = "Ubuntu"
 DEFAULT_WSL_PROJECT = "~/aats"
 DEFAULT_GATEWAY_CONTAINER = "aats-gateway"
 DEFAULT_MICROSTRUCTURE_CONTAINER = "aats-microstructure-collector"
+DATABASE_TRUTH_PROBE_TIMEOUT_SECONDS = 75
 MICROSTRUCTURE_HEARTBEAT_PATH = "/tmp/aats_microstructure_heartbeat"
 REQUIRED_APP_CONTAINERS = (
     "aats-gateway",
@@ -1225,7 +1226,55 @@ with engine.connect() as conn:
                 "with recent_decisions as ("
                 "  select allocation_id, decision_id, symbol, created_at, route_action, primary_family, "
                 "         portfolio_requested_notional, portfolio_approved_notional, "
-                "         portfolio_budget_cut_notional, expected_edge_bps, expected_cost_bps, payload "
+                "         portfolio_budget_cut_notional, expected_edge_bps, expected_cost_bps, "
+                "         jsonb_strip_nulls(jsonb_build_object("
+                "           'operator_summary', payload::jsonb -> 'operator_summary', "
+                "           'expected_edge_bps', payload::jsonb -> 'expected_edge_bps', "
+                "           'expected_cost_bps', payload::jsonb -> 'expected_cost_bps', "
+                "           'reason_codes', payload::jsonb -> 'reason_codes', "
+                "           'blocked_reason_codes', payload::jsonb -> 'blocked_reason_codes', "
+                "           'budget_cut_reason_codes', payload::jsonb -> 'budget_cut_reason_codes', "
+                "           'strategy_sleeve_intents', ("
+                "             select jsonb_agg(sleeve_compact) from ("
+                "               select jsonb_strip_nulls(jsonb_build_object("
+                "                 'family', sleeve -> 'family', "
+                "                 'strategy_family', sleeve -> 'strategy_family', "
+                "                 'strategy_sleeve_id', sleeve -> 'strategy_sleeve_id', "
+                "                 'sleeve_id', sleeve -> 'sleeve_id', "
+                "                 'route_action', sleeve -> 'route_action', "
+                "                 'approved_for_execution', sleeve -> 'approved_for_execution', "
+                "                 'permission_mode', sleeve -> 'permission_mode', "
+                "                 'effective_scale', sleeve -> 'effective_scale', "
+                "                 'position_intent', sleeve -> 'position_intent', "
+                "                 'target_notional', sleeve -> 'target_notional', "
+                "                 'target_exposure_notional', sleeve -> 'target_exposure_notional', "
+                "                 'delta_notional', sleeve -> 'delta_notional', "
+                "                 'net_delta_notional', sleeve -> 'net_delta_notional', "
+                "                 'reason_codes', sleeve -> 'reason_codes', "
+                "                 'blocked_reason_codes', sleeve -> 'blocked_reason_codes', "
+                "                 'metrics', jsonb_strip_nulls(jsonb_build_object("
+                "                   'expected_edge_bps', sleeve #> '{metrics,expected_edge_bps}', "
+                "                   'expected_signal_edge_bps', "
+                "                       sleeve #> '{metrics,expected_signal_edge_bps}', "
+                "                   'expected_cost_bps', sleeve #> '{metrics,expected_cost_bps}', "
+                "                   'expected_net_edge_bps', sleeve #> '{metrics,expected_net_edge_bps}'"
+                "                 ))"
+                "               )) as sleeve_compact "
+                "               from jsonb_array_elements("
+                "                 case "
+                "                   when jsonb_typeof(payload::jsonb -> 'strategy_sleeve_intents') = 'array' "
+                "                     then payload::jsonb -> 'strategy_sleeve_intents' "
+                "                   when jsonb_typeof(payload::jsonb -> 'sleeve_intents') = 'array' "
+                "                     then payload::jsonb -> 'sleeve_intents' "
+                "                   when jsonb_typeof(payload::jsonb -> 'sleeve_decisions') = 'array' "
+                "                     then payload::jsonb -> 'sleeve_decisions' "
+                "                   else '[]'::jsonb "
+                "                 end"
+                "               ) with ordinality as sleeve_source(sleeve, ord) "
+                "               where ord <= 8"
+                "             ) compact_sleeves"
+                "           )"
+                "         )) as payload "
                 "  from portfolio_allocation_decisions "
                 "  where symbol = :symbol and primary_family = 'directional' "
                 "  order by created_at desc limit 24"
@@ -4811,7 +4860,11 @@ def parse_db_probe(stdout: str, stderr: str = "") -> dict[str, Any]:
 
 
 def database_truth_probe(distro: str, gateway_container: str) -> dict[str, Any]:
-    completed = run_command(db_probe_command(distro, gateway_container), timeout=45, stdin=DB_PROBE)
+    completed = run_command(
+        db_probe_command(distro, gateway_container),
+        timeout=DATABASE_TRUTH_PROBE_TIMEOUT_SECONDS,
+        stdin=DB_PROBE,
+    )
     if not completed["ok"]:
         return {
             "ok": False,
