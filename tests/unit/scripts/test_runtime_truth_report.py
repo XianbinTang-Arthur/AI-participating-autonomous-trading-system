@@ -1207,11 +1207,30 @@ def test_directional_episode_attribution_uses_payload_expected_edge_cost_fallbac
     assert summary["status"] == "verified_directional_episode_no_order_expected"
     assert summary["smallest_missing_field"] is None
     assert summary["coverage"]["decisions_with_no_order_expected"] == 1
+    assert summary["coverage"]["decisions_with_no_order_semantics"] == 1
+    assert summary["coverage"]["decisions_with_stable_no_order_equivalence_class"] == 1
+    assert summary["coverage"]["all_no_order_expected_decisions_have_no_order_semantics"] is True
+    assert summary["coverage"]["all_no_order_expected_decisions_stable_equivalence_class"] is True
     assert summary["coverage"]["decisions_with_order_surface_or_no_order_expectation"] == 1
     assert summary["coverage"]["decisions_missing_order_surface"] == 0
     assert summary["coverage"]["all_recent_decisions_no_order_expected"] is True
     assert decision["order_expectation"]["classification"] == "no_order_expected_by_route_action"
     assert decision["order_expectation"]["smallest_missing_field"] is None
+    assert decision["no_order_semantics"]["status"] == (
+        "verified_directional_decision_no_order_expected_semantics"
+    )
+    assert decision["no_order_semantics"]["equivalence_class"] == (
+        "verified_non_executable_no_order_expected"
+    )
+    assert decision["no_order_semantics"]["root_cause_is_material_without_order_or_fill_change"] is False
+    assert decision["no_order_semantics"]["requires_order_or_fill_change_for_materiality"] is True
+    assert summary["no_order_semantics"]["status"] == "verified_recent_no_order_semantics_present"
+    assert summary["no_order_semantics"]["smallest_missing_field"] is None
+    assert summary["no_order_semantics"]["equivalence_classes"] == [
+        "verified_non_executable_no_order_expected"
+    ]
+    assert summary["no_order_semantics"]["root_cause_is_material_without_order_or_fill_change"] is False
+    assert summary["no_order_semantics"]["requires_order_or_fill_change_for_materiality"] is True
 
 
 def test_directional_episode_attribution_keeps_missing_order_for_executable_no_order() -> None:
@@ -1247,16 +1266,25 @@ def test_directional_episode_attribution_keeps_missing_order_for_executable_no_o
         "directional_episode_attribution.order_surface_or_no_order_expectation"
     )
     assert summary["coverage"]["decisions_with_no_order_expected"] == 0
+    assert summary["coverage"]["decisions_with_no_order_semantics"] == 0
+    assert summary["coverage"]["decisions_with_stable_no_order_equivalence_class"] == 0
     assert summary["coverage"]["decisions_requiring_order_surface"] == 1
     assert summary["coverage"]["decisions_missing_order_surface"] == 1
     assert summary["coverage"]["decisions_with_order_surface_or_no_order_expectation"] == 0
     assert summary["coverage"]["all_recent_decisions_no_order_expected"] is False
+    assert summary["no_order_semantics"]["status"] == (
+        "not_applicable_no_recent_no_order_expected_decisions"
+    )
     assert decision["order_expectation"]["classification"] == (
         "order_surface_missing_for_order_expected_decision"
     )
     assert decision["order_expectation"]["smallest_missing_field"] == (
         "execution_orders.directional_recent_decision"
     )
+    assert decision["no_order_semantics"]["status"] == (
+        "directional_decision_no_order_semantics_not_verified"
+    )
+    assert decision["no_order_semantics"]["root_cause_is_material_without_order_or_fill_change"] is True
 
 
 def test_directional_episode_attribution_uses_sleeve_metric_expected_edge_cost_fallback() -> None:
@@ -3256,6 +3284,66 @@ def test_primary_candidate_no_order_semantics_groups_verified_non_executable_roo
     assert advisory_suppressed["root_cause_is_material_without_order_or_fill_change"] is False
     assert hold_current["requires_order_or_fill_change_for_materiality"] is True
     assert advisory_suppressed["requires_order_or_fill_change_for_materiality"] is True
+
+
+def test_project_live_runtime_facts_exposes_directional_no_order_semantics() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "directional_episode_attribution_truth": {
+            "status": "verified_directional_episode_no_order_expected",
+            "smallest_missing_field": None,
+            "coverage": {
+                "recent_decision_count": 24,
+                "decisions_with_no_order_expected": 24,
+                "decisions_with_no_order_semantics": 24,
+                "decisions_with_stable_no_order_equivalence_class": 24,
+                "all_no_order_expected_decisions_have_no_order_semantics": True,
+                "all_no_order_expected_decisions_stable_equivalence_class": True,
+            },
+            "no_order_semantics": {
+                "status": "verified_recent_no_order_semantics_present",
+                "smallest_missing_field": None,
+                "coverage": {
+                    "decisions_with_no_order_expected": 24,
+                    "decisions_with_no_order_semantics": 24,
+                    "decisions_with_stable_no_order_equivalence_class": 24,
+                    "all_no_order_expected_decisions_have_no_order_semantics": True,
+                    "all_no_order_expected_decisions_stable_equivalence_class": True,
+                },
+                "equivalence_classes": ["verified_non_executable_no_order_expected"],
+                "root_cause_is_material_without_order_or_fill_change": False,
+                "requires_order_or_fill_change_for_materiality": True,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["directional_episode_no_order_semantics_status"] == (
+        "verified_recent_no_order_semantics_present"
+    )
+    assert live_facts["directional_episode_no_order_semantics_smallest_missing_field"] is None
+    assert live_facts["directional_episode_decisions_with_no_order_semantics"] == 24
+    assert live_facts["directional_episode_decisions_with_stable_no_order_equivalence_class"] == 24
+    assert (
+        live_facts["directional_episode_all_no_order_expected_decisions_have_no_order_semantics"]
+        is True
+    )
+    assert live_facts["directional_episode_all_no_order_expected_decisions_stable_equivalence_class"] is True
+    assert live_facts["directional_episode_no_order_equivalence_classes"] == [
+        "verified_non_executable_no_order_expected"
+    ]
+    assert live_facts["directional_episode_no_order_root_material_without_order_or_fill_change"] is False
+    assert live_facts["directional_episode_no_order_requires_order_or_fill_change_for_materiality"] is True
 
 
 def test_project_live_runtime_facts_exposes_orderbook_payload_depth_truth() -> None:

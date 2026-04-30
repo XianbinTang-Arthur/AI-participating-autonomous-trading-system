@@ -3109,6 +3109,52 @@ def classify_directional_episode_order_expectation(decision: dict[str, Any]) -> 
     }
 
 
+def classify_directional_episode_no_order_semantics(decision: dict[str, Any]) -> dict[str, Any]:
+    order_expectation = as_dict(decision.get("order_expectation"))
+    route_action = order_expectation.get("route_action") or decision.get("route_action")
+    no_order_expected = order_expectation.get("no_order_expected")
+    order_surface_present = order_expectation.get("order_surface_present")
+    smallest_missing = order_expectation.get("smallest_missing_field")
+
+    if no_order_expected is True and smallest_missing is None:
+        return {
+            "status": "verified_directional_decision_no_order_expected_semantics",
+            "equivalence_class": "verified_non_executable_no_order_expected",
+            "root_cause": f"decision_route_action_{route_action}_no_order_expected",
+            "route_action": route_action,
+            "root_cause_is_material_without_order_or_fill_change": False,
+            "requires_order_or_fill_change_for_materiality": True,
+            "reason": (
+                "The recent directional decision is verified as no-order expected; route-action root "
+                "switches inside this equivalence class are not order/fill materiality."
+            ),
+        }
+
+    if order_surface_present is True:
+        return {
+            "status": "directional_decision_order_surface_present",
+            "equivalence_class": "order_surface_present",
+            "root_cause": None,
+            "route_action": route_action,
+            "root_cause_is_material_without_order_or_fill_change": True,
+            "requires_order_or_fill_change_for_materiality": False,
+            "reason": "Execution order surface exists, so no-order semantic equivalence does not apply.",
+        }
+
+    return {
+        "status": "directional_decision_no_order_semantics_not_verified",
+        "equivalence_class": None,
+        "root_cause": order_expectation.get("classification"),
+        "route_action": route_action,
+        "root_cause_is_material_without_order_or_fill_change": True,
+        "requires_order_or_fill_change_for_materiality": False,
+        "reason": (
+            "The recent directional decision is not verified as no-order expected and has no order "
+            "surface, so this is still a material truth-chain gap."
+        ),
+    }
+
+
 OPEN_POSITION_INTENTS = {
     "open_long",
     "open_short",
@@ -3699,6 +3745,7 @@ def sanitize_directional_episode_attribution(
             "classification": classify_directional_episode_row(row),
         }
         decision["order_expectation"] = classify_directional_episode_order_expectation(decision)
+        decision["no_order_semantics"] = classify_directional_episode_no_order_semantics(decision)
         decision["pnl_lifecycle"] = classify_directional_episode_pnl_lifecycle(decision)
         decisions.append(decision)
     return {
@@ -5464,6 +5511,48 @@ def summarize_directional_episode_attribution_truth(
     decisions_with_no_order_expected = sum(
         1 for item in recent if as_dict(item.get("order_expectation")).get("no_order_expected") is True
     )
+    no_order_semantics_records = [
+        as_dict(item.get("no_order_semantics"))
+        for item in recent
+        if as_dict(item.get("order_expectation")).get("no_order_expected") is True
+    ]
+    decisions_with_no_order_semantics = sum(
+        1
+        for item in no_order_semantics_records
+        if item.get("status") == "verified_directional_decision_no_order_expected_semantics"
+    )
+    decisions_with_stable_no_order_equivalence_class = sum(
+        1
+        for item in no_order_semantics_records
+        if item.get("equivalence_class") == "verified_non_executable_no_order_expected"
+    )
+    no_order_equivalence_classes = compact_unique(
+        [
+            item.get("equivalence_class")
+            for item in no_order_semantics_records
+            if item.get("equivalence_class")
+        ],
+        limit=8,
+    )
+    no_order_semantics_complete = (
+        decisions_with_no_order_expected <= 0
+        or decisions_with_no_order_semantics == decisions_with_no_order_expected
+    )
+    no_order_semantics_stable = (
+        decisions_with_no_order_expected <= 0
+        or decisions_with_stable_no_order_equivalence_class == decisions_with_no_order_expected
+    )
+    no_order_semantics_smallest_missing = (
+        None
+        if no_order_semantics_complete and no_order_semantics_stable
+        else "directional_episode_attribution.no_order_semantics"
+    )
+    if decisions_with_no_order_expected <= 0:
+        no_order_semantics_status = "not_applicable_no_recent_no_order_expected_decisions"
+    elif no_order_semantics_complete and no_order_semantics_stable:
+        no_order_semantics_status = "verified_recent_no_order_semantics_present"
+    else:
+        no_order_semantics_status = "missing_recent_no_order_semantics"
     decisions_with_order_surface_or_no_order_expectation = sum(
         1
         for item in recent
@@ -5534,6 +5623,10 @@ def summarize_directional_episode_attribution_truth(
             "directional_episode_attribution.order_surface_or_no_order_expectation",
             order_surface_or_no_order_expectation_complete,
         ),
+        (
+            "directional_episode_attribution.no_order_semantics",
+            decisions_with_no_order_expected <= 0 or no_order_semantics_smallest_missing is None,
+        ),
         ("execution_fills.directional_recent_decision", decisions_with_fills > 0 or all_recent_decisions_no_order_expected),
         ("execution_fills.actual_fee_bps", decisions_with_realized_fee > 0 or all_recent_decisions_no_order_expected),
         (
@@ -5574,6 +5667,12 @@ def summarize_directional_episode_attribution_truth(
             "decisions_with_edge_cost": decisions_with_edge_cost,
             "decisions_with_orders": decisions_with_orders,
             "decisions_with_no_order_expected": decisions_with_no_order_expected,
+            "decisions_with_no_order_semantics": decisions_with_no_order_semantics,
+            "decisions_with_stable_no_order_equivalence_class": (
+                decisions_with_stable_no_order_equivalence_class
+            ),
+            "all_no_order_expected_decisions_have_no_order_semantics": no_order_semantics_complete,
+            "all_no_order_expected_decisions_stable_equivalence_class": no_order_semantics_stable,
             "decisions_with_order_surface_or_no_order_expectation": (
                 decisions_with_order_surface_or_no_order_expectation
             ),
@@ -5592,6 +5691,31 @@ def summarize_directional_episode_attribution_truth(
             ).get("filled_decisions_with_pretrade_microstructure"),
             "filled_decisions_with_pnl_lifecycle_classification": len(filled_with_pnl_lifecycle),
             "filled_decisions_with_resolved_pnl_lifecycle": len(filled_with_resolved_pnl_lifecycle),
+        },
+        "no_order_semantics": {
+            "source": "live_db_directional_route_action_order_expectation",
+            "status": no_order_semantics_status,
+            "smallest_missing_field": no_order_semantics_smallest_missing,
+            "coverage": {
+                "decisions_with_no_order_expected": decisions_with_no_order_expected,
+                "decisions_with_no_order_semantics": decisions_with_no_order_semantics,
+                "decisions_with_stable_no_order_equivalence_class": (
+                    decisions_with_stable_no_order_equivalence_class
+                ),
+                "all_no_order_expected_decisions_have_no_order_semantics": (
+                    no_order_semantics_complete
+                ),
+                "all_no_order_expected_decisions_stable_equivalence_class": (
+                    no_order_semantics_stable
+                ),
+            },
+            "equivalence_classes": no_order_equivalence_classes,
+            "root_cause_is_material_without_order_or_fill_change": (
+                False if no_order_semantics_stable and decisions_with_no_order_expected > 0 else None
+            ),
+            "requires_order_or_fill_change_for_materiality": (
+                True if no_order_semantics_stable and decisions_with_no_order_expected > 0 else None
+            ),
         },
         "pretrade_microstructure": pretrade_microstructure,
         "pnl_lifecycle": {
@@ -6376,6 +6500,10 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         claimed_submit_operator_handoff.get("source_artifacts")
     )
     directional_attribution_coverage = as_dict(directional_attribution.get("coverage"))
+    directional_no_order_semantics = as_dict(directional_attribution.get("no_order_semantics"))
+    directional_no_order_semantics_coverage = as_dict(
+        directional_no_order_semantics.get("coverage")
+    )
     directional_pretrade_microstructure = as_dict(directional_attribution.get("pretrade_microstructure"))
     directional_pretrade_microstructure_coverage = as_dict(
         directional_pretrade_microstructure.get("coverage")
@@ -7050,6 +7178,37 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "directional_episode_decisions_with_no_order_expected": directional_attribution_coverage.get(
             "decisions_with_no_order_expected"
+        ),
+        "directional_episode_no_order_semantics_status": directional_no_order_semantics.get("status"),
+        "directional_episode_no_order_semantics_smallest_missing_field": (
+            directional_no_order_semantics.get("smallest_missing_field")
+        ),
+        "directional_episode_decisions_with_no_order_semantics": (
+            directional_no_order_semantics_coverage.get("decisions_with_no_order_semantics")
+        ),
+        "directional_episode_decisions_with_stable_no_order_equivalence_class": (
+            directional_no_order_semantics_coverage.get(
+                "decisions_with_stable_no_order_equivalence_class"
+            )
+        ),
+        "directional_episode_all_no_order_expected_decisions_have_no_order_semantics": (
+            directional_no_order_semantics_coverage.get(
+                "all_no_order_expected_decisions_have_no_order_semantics"
+            )
+        ),
+        "directional_episode_all_no_order_expected_decisions_stable_equivalence_class": (
+            directional_no_order_semantics_coverage.get(
+                "all_no_order_expected_decisions_stable_equivalence_class"
+            )
+        ),
+        "directional_episode_no_order_equivalence_classes": (
+            directional_no_order_semantics.get("equivalence_classes")
+        ),
+        "directional_episode_no_order_root_material_without_order_or_fill_change": (
+            directional_no_order_semantics.get("root_cause_is_material_without_order_or_fill_change")
+        ),
+        "directional_episode_no_order_requires_order_or_fill_change_for_materiality": (
+            directional_no_order_semantics.get("requires_order_or_fill_change_for_materiality")
         ),
         "directional_episode_decisions_with_order_surface_or_no_order_expectation": (
             directional_attribution_coverage.get("decisions_with_order_surface_or_no_order_expectation")
