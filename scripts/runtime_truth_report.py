@@ -8410,6 +8410,215 @@ def summarize_latest_directional_no_order_primary_candidate_bridge_truth(
     }
 
 
+def summarize_recent_directional_no_order_primary_candidate_bridge_density_truth(
+    *,
+    directional_attribution: dict[str, Any],
+    recent_no_order_root_density: dict[str, Any],
+    latest_bridge: dict[str, Any],
+) -> dict[str, Any]:
+    attribution = as_dict(directional_attribution)
+    recent_root = as_dict(recent_no_order_root_density)
+    latest = as_dict(latest_bridge)
+    attribution_coverage = as_dict(attribution.get("coverage"))
+    root_coverage = as_dict(recent_root.get("coverage"))
+    root_distributions = as_dict(recent_root.get("distributions"))
+    root_interpretation = as_dict(recent_root.get("interpretation"))
+    latest_latest_decision = as_dict(latest.get("latest_decision"))
+    latest_bridge_fields = as_dict(latest.get("bridge"))
+    latest_interpretation = as_dict(latest.get("interpretation"))
+
+    recent_decision_rows = [
+        as_dict(row) for row in as_list(attribution.get("recent_decisions"))
+    ]
+    recent_decision_ids = [
+        row.get("decision_id") for row in recent_decision_rows if row.get("decision_id")
+    ]
+    latest_bridge_decision_id = latest_latest_decision.get("decision_id")
+    latest_bridge_decision_present_in_recent_decisions = (
+        latest_bridge_decision_id in recent_decision_ids
+        if latest_bridge_decision_id and recent_decision_ids
+        else None
+    )
+
+    recent_decision_count = int_or_zero(
+        root_coverage.get(
+            "recent_decision_count",
+            attribution_coverage.get("recent_decision_count"),
+        )
+    )
+    no_order_expected_decision_count = int_or_zero(
+        root_coverage.get(
+            "no_order_expected_decision_count",
+            attribution_coverage.get("decisions_with_no_order_expected"),
+        )
+    )
+    decisions_with_no_order_semantics = int_or_zero(
+        root_coverage.get(
+            "decisions_with_no_order_semantics",
+            attribution_coverage.get("decisions_with_no_order_semantics"),
+        )
+    )
+    decisions_with_root_cause = int_or_zero(
+        root_coverage.get("decisions_with_root_cause")
+    )
+    decisions_with_root_materiality = int_or_zero(
+        root_coverage.get("decisions_with_root_materiality")
+    )
+    latest_bridge_verified = (
+        latest.get("status")
+        == "verified_latest_directional_no_order_primary_candidate_bridge"
+    )
+    recent_root_verified = (
+        recent_root.get("status")
+        == "verified_recent_directional_no_order_root_cause_density"
+    )
+    route_root_and_primary_candidate_root_distinct = (
+        latest_bridge_fields.get("route_root_and_primary_candidate_root_distinct") is True
+    )
+    route_action_differs = (
+        latest_bridge_fields.get(
+            "latest_route_action_differs_from_primary_candidate_route_action"
+        )
+        is True
+    )
+    raw_payload_exposed = (
+        recent_root.get("raw_payload_exposed") is True
+        or latest.get("raw_payload_exposed") is True
+    )
+
+    if attribution.get("ok") is False:
+        status = "directional_episode_attribution_unavailable"
+        smallest_missing = (
+            attribution.get("smallest_missing_field") or "directional_episode_attribution_truth"
+        )
+        ok = False
+    elif recent_decision_count <= 0:
+        status = "no_recent_directional_decisions"
+        smallest_missing = "portfolio_allocation_decisions.directional"
+        ok = False
+    elif raw_payload_exposed:
+        status = "recent_directional_no_order_bridge_density_raw_payload_exposed"
+        smallest_missing = "raw_payload_redaction"
+        ok = False
+    elif not recent_root_verified:
+        status = "missing_recent_directional_no_order_root_density"
+        smallest_missing = (
+            recent_root.get("smallest_missing_field")
+            or "recent_directional_no_order_root_cause_density_truth"
+        )
+        ok = False
+    elif not latest_bridge_verified:
+        status = "missing_latest_directional_no_order_primary_candidate_bridge"
+        smallest_missing = (
+            latest.get("smallest_missing_field")
+            or "latest_directional_no_order_primary_candidate_bridge_truth"
+        )
+        ok = False
+    elif latest_bridge_decision_present_in_recent_decisions is False:
+        status = "latest_bridge_decision_not_in_recent_directional_window"
+        smallest_missing = "directional_episode_attribution.recent_decisions.latest_bridge_decision"
+        ok = False
+    elif not route_root_and_primary_candidate_root_distinct:
+        status = "latest_bridge_roots_not_distinct"
+        smallest_missing = "latest_directional_no_order_primary_candidate_bridge_truth.bridge.root_distinction"
+        ok = False
+    else:
+        status = "verified_recent_directional_no_order_primary_candidate_bridge_density"
+        smallest_missing = None
+        ok = True
+
+    return {
+        "source": (
+            "recent_directional_no_order_root_cause_density_truth_plus_"
+            "latest_directional_no_order_primary_candidate_bridge_truth"
+        ),
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "coverage": {
+            "recent_decision_count": recent_decision_count,
+            "no_order_expected_decision_count": no_order_expected_decision_count,
+            "decisions_with_no_order_semantics": decisions_with_no_order_semantics,
+            "decisions_with_root_cause": decisions_with_root_cause,
+            "decisions_with_root_materiality": decisions_with_root_materiality,
+            "recent_portfolio_route_root_density_status": recent_root.get("status"),
+            "latest_primary_candidate_bridge_status": latest.get("status"),
+            "latest_primary_candidate_bridge_verified": latest_bridge_verified,
+            "latest_bridge_decision_id": latest_bridge_decision_id,
+            "latest_bridge_decision_present_in_recent_decisions": (
+                latest_bridge_decision_present_in_recent_decisions
+            ),
+            "historical_primary_candidate_bridge_scope": "latest_decision_only",
+            "historical_primary_candidate_bridge_available_for_recent_decisions": False,
+            "historical_primary_candidate_bridge_not_claimed": True,
+        },
+        "recent_portfolio_route_roots": {
+            "top_root_cause": recent_root.get("top_root_cause"),
+            "top_equivalence_class": recent_root.get("top_equivalence_class"),
+            "top_route_action": recent_root.get("top_route_action"),
+            "root_cause_distribution": as_list(root_distributions.get("root_cause")),
+            "route_action_distribution": as_list(
+                root_distributions.get("route_action")
+            ),
+            "equivalence_class_distribution": as_list(
+                root_distributions.get("equivalence_class")
+            ),
+        },
+        "latest_bridge": {
+            "decision_id": latest_bridge_decision_id,
+            "status": latest.get("status"),
+            "latest_route_action": latest_bridge_fields.get("latest_route_action"),
+            "primary_candidate_route_action": latest_bridge_fields.get(
+                "primary_candidate_route_action"
+            ),
+            "route_action_differs": route_action_differs,
+            "portfolio_route_no_order_root_cause": latest_bridge_fields.get(
+                "portfolio_route_no_order_root_cause"
+            ),
+            "primary_candidate_no_order_root_cause": latest_bridge_fields.get(
+                "primary_candidate_no_order_root_cause"
+            ),
+            "route_root_and_primary_candidate_root_distinct": (
+                route_root_and_primary_candidate_root_distinct
+            ),
+            "latest_decision_order_expected": latest_bridge_fields.get(
+                "latest_decision_order_expected"
+            ),
+            "primary_candidate_order_expected": latest_bridge_fields.get(
+                "primary_candidate_order_expected"
+            ),
+        },
+        "interpretation": {
+            "recent_portfolio_route_roots_non_material_without_order_or_fill_change": (
+                root_interpretation.get(
+                    "all_roots_non_material_without_order_or_fill_change"
+                )
+            ),
+            "recent_portfolio_route_roots_require_order_or_fill_change_for_materiality": (
+                root_interpretation.get(
+                    "all_roots_require_order_or_fill_change_for_materiality"
+                )
+            ),
+            "latest_primary_candidate_root_distinct_from_portfolio_route_root": (
+                route_root_and_primary_candidate_root_distinct
+            ),
+            "latest_portfolio_route_action_is_not_primary_candidate_root": (
+                latest_interpretation.get(
+                    "portfolio_route_action_is_not_primary_candidate_root"
+                )
+            ),
+            "latest_hold_current_zero_delta_explains_primary_directional_no_order": (
+                latest_interpretation.get(
+                    "hold_current_zero_delta_explains_primary_directional_no_order"
+                )
+            ),
+            "historical_primary_candidate_bridge_not_claimed": True,
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -9230,6 +9439,21 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     latest_no_order_primary_candidate_bridge_interpretation = as_dict(
         latest_no_order_primary_candidate_bridge.get("interpretation")
     )
+    recent_no_order_primary_candidate_bridge_density = as_dict(
+        report.get("recent_directional_no_order_primary_candidate_bridge_density_truth")
+    )
+    recent_no_order_primary_candidate_bridge_density_coverage = as_dict(
+        recent_no_order_primary_candidate_bridge_density.get("coverage")
+    )
+    recent_no_order_primary_candidate_bridge_density_roots = as_dict(
+        recent_no_order_primary_candidate_bridge_density.get("recent_portfolio_route_roots")
+    )
+    recent_no_order_primary_candidate_bridge_density_latest = as_dict(
+        recent_no_order_primary_candidate_bridge_density.get("latest_bridge")
+    )
+    recent_no_order_primary_candidate_bridge_density_interpretation = as_dict(
+        recent_no_order_primary_candidate_bridge_density.get("interpretation")
+    )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
     latest_directional_spike_reversion = as_dict(directional_spike_reversion.get("latest_filled_decision"))
@@ -10039,6 +10263,131 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_directional_no_order_bridge_not_alpha_or_profitability_evidence": (
             latest_no_order_primary_candidate_bridge_interpretation.get(
+                "not_alpha_or_profitability_evidence"
+            )
+        ),
+        "recent_directional_no_order_primary_candidate_bridge_density_truth_status": (
+            recent_no_order_primary_candidate_bridge_density.get("status")
+        ),
+        "recent_directional_no_order_primary_candidate_bridge_density_smallest_missing_field": (
+            recent_no_order_primary_candidate_bridge_density.get("smallest_missing_field")
+        ),
+        "recent_directional_no_order_primary_candidate_bridge_density_raw_payload_exposed": (
+            recent_no_order_primary_candidate_bridge_density.get("raw_payload_exposed")
+        ),
+        "recent_directional_no_order_bridge_density_recent_decision_count": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "recent_decision_count"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_no_order_expected_decision_count": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "no_order_expected_decision_count"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_decisions_with_no_order_semantics": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "decisions_with_no_order_semantics"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_recent_root_density_status": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "recent_portfolio_route_root_density_status"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_latest_bridge_status": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "latest_primary_candidate_bridge_status"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_latest_bridge_verified": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "latest_primary_candidate_bridge_verified"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_latest_bridge_decision_id": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "latest_bridge_decision_id"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_latest_bridge_decision_present_in_recent": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "latest_bridge_decision_present_in_recent_decisions"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_historical_primary_candidate_bridge_scope": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "historical_primary_candidate_bridge_scope"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_historical_primary_candidate_bridge_available": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "historical_primary_candidate_bridge_available_for_recent_decisions"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_historical_primary_candidate_bridge_not_claimed": (
+            recent_no_order_primary_candidate_bridge_density_coverage.get(
+                "historical_primary_candidate_bridge_not_claimed"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_top_portfolio_route_root_cause": (
+            recent_no_order_primary_candidate_bridge_density_roots.get("top_root_cause")
+        ),
+        "recent_directional_no_order_bridge_density_top_portfolio_route_action": (
+            recent_no_order_primary_candidate_bridge_density_roots.get("top_route_action")
+        ),
+        "recent_directional_no_order_bridge_density_portfolio_root_distribution": as_list(
+            recent_no_order_primary_candidate_bridge_density_roots.get(
+                "root_cause_distribution"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_latest_route_action": (
+            recent_no_order_primary_candidate_bridge_density_latest.get(
+                "latest_route_action"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_primary_candidate_route_action": (
+            recent_no_order_primary_candidate_bridge_density_latest.get(
+                "primary_candidate_route_action"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_route_action_differs": (
+            recent_no_order_primary_candidate_bridge_density_latest.get(
+                "route_action_differs"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_route_roots_distinct": (
+            recent_no_order_primary_candidate_bridge_density_latest.get(
+                "route_root_and_primary_candidate_root_distinct"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_primary_candidate_root_cause": (
+            recent_no_order_primary_candidate_bridge_density_latest.get(
+                "primary_candidate_no_order_root_cause"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_portfolio_route_root_cause": (
+            recent_no_order_primary_candidate_bridge_density_latest.get(
+                "portfolio_route_no_order_root_cause"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_recent_roots_non_material": (
+            recent_no_order_primary_candidate_bridge_density_interpretation.get(
+                "recent_portfolio_route_roots_non_material_without_order_or_fill_change"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_recent_roots_require_order_or_fill_change": (
+            recent_no_order_primary_candidate_bridge_density_interpretation.get(
+                "recent_portfolio_route_roots_require_order_or_fill_change_for_materiality"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_latest_root_distinct": (
+            recent_no_order_primary_candidate_bridge_density_interpretation.get(
+                "latest_primary_candidate_root_distinct_from_portfolio_route_root"
+            )
+        ),
+        "recent_directional_no_order_bridge_density_not_alpha_or_profitability_evidence": (
+            recent_no_order_primary_candidate_bridge_density_interpretation.get(
                 "not_alpha_or_profitability_evidence"
             )
         ),
@@ -10905,6 +11254,17 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["latest_directional_no_order_primary_candidate_bridge_truth"] = (
         summarize_latest_directional_no_order_primary_candidate_bridge_truth(
             db=report["database_truth"],
+        )
+    )
+    report["recent_directional_no_order_primary_candidate_bridge_density_truth"] = (
+        summarize_recent_directional_no_order_primary_candidate_bridge_density_truth(
+            directional_attribution=report["directional_episode_attribution_truth"],
+            recent_no_order_root_density=report[
+                "recent_directional_no_order_root_cause_density_truth"
+            ],
+            latest_bridge=report[
+                "latest_directional_no_order_primary_candidate_bridge_truth"
+            ],
         )
     )
     report["directional_spike_reversion_truth"] = summarize_directional_spike_reversion_truth(

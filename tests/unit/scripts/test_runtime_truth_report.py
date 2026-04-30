@@ -2943,6 +2943,152 @@ def test_latest_directional_no_order_primary_candidate_bridge_reports_missing_ca
     assert truth["raw_payload_exposed"] is False
 
 
+def test_recent_directional_no_order_primary_candidate_bridge_density_verifies_latest_scope() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_recent_directional_no_order_primary_candidate_bridge_density_truth(
+        directional_attribution={
+            "ok": True,
+            "coverage": {"recent_decision_count": 2},
+            "recent_decisions": [
+                {"decision_id": "decision-current"},
+                {"decision_id": "decision-previous"},
+            ],
+        },
+        recent_no_order_root_density={
+            "status": "verified_recent_directional_no_order_root_cause_density",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "recent_decision_count": 2,
+                "no_order_expected_decision_count": 2,
+                "decisions_with_no_order_semantics": 2,
+                "decisions_with_root_cause": 2,
+                "decisions_with_root_materiality": 2,
+            },
+            "top_root_cause": "decision_route_action_advisory_only_no_order_expected",
+            "top_equivalence_class": "verified_non_executable_no_order_expected",
+            "top_route_action": "advisory_only",
+            "distributions": {
+                "root_cause": [
+                    {
+                        "value": "decision_route_action_advisory_only_no_order_expected",
+                        "count": 2,
+                    }
+                ],
+                "route_action": [{"value": "advisory_only", "count": 2}],
+            },
+            "interpretation": {
+                "all_roots_non_material_without_order_or_fill_change": True,
+                "all_roots_require_order_or_fill_change_for_materiality": True,
+            },
+        },
+        latest_bridge={
+            "status": "verified_latest_directional_no_order_primary_candidate_bridge",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "latest_decision": {"decision_id": "decision-current"},
+            "bridge": {
+                "latest_route_action": "advisory_only",
+                "primary_candidate_route_action": "hold_current",
+                "latest_route_action_differs_from_primary_candidate_route_action": True,
+                "portfolio_route_no_order_root_cause": (
+                    "decision_route_action_advisory_only_no_order_expected"
+                ),
+                "primary_candidate_no_order_root_cause": (
+                    "primary_candidate_hold_current_zero_delta"
+                ),
+                "route_root_and_primary_candidate_root_distinct": True,
+                "latest_decision_order_expected": False,
+                "primary_candidate_order_expected": False,
+            },
+            "interpretation": {
+                "portfolio_route_action_is_not_primary_candidate_root": True,
+                "hold_current_zero_delta_explains_primary_directional_no_order": True,
+                "not_alpha_or_profitability_evidence": True,
+            },
+        },
+    )
+
+    assert truth["ok"] is True
+    assert (
+        truth["status"]
+        == "verified_recent_directional_no_order_primary_candidate_bridge_density"
+    )
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["coverage"]["recent_decision_count"] == 2
+    assert truth["coverage"]["latest_primary_candidate_bridge_verified"] is True
+    assert truth["coverage"]["latest_bridge_decision_id"] == "decision-current"
+    assert (
+        truth["coverage"]["latest_bridge_decision_present_in_recent_decisions"]
+        is True
+    )
+    assert truth["coverage"]["historical_primary_candidate_bridge_scope"] == (
+        "latest_decision_only"
+    )
+    assert (
+        truth["coverage"][
+            "historical_primary_candidate_bridge_available_for_recent_decisions"
+        ]
+        is False
+    )
+    assert (
+        truth["coverage"]["historical_primary_candidate_bridge_not_claimed"] is True
+    )
+    assert truth["recent_portfolio_route_roots"]["top_route_action"] == "advisory_only"
+    assert truth["latest_bridge"]["primary_candidate_route_action"] == "hold_current"
+    assert truth["latest_bridge"]["route_root_and_primary_candidate_root_distinct"] is True
+    assert (
+        truth["interpretation"][
+            "latest_primary_candidate_root_distinct_from_portfolio_route_root"
+        ]
+        is True
+    )
+    assert truth["interpretation"]["historical_primary_candidate_bridge_not_claimed"] is True
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+
+
+def test_recent_directional_no_order_primary_candidate_bridge_density_reports_missing_latest_bridge() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_recent_directional_no_order_primary_candidate_bridge_density_truth(
+        directional_attribution={
+            "ok": True,
+            "coverage": {"recent_decision_count": 2},
+            "recent_decisions": [{"decision_id": "decision-current"}],
+        },
+        recent_no_order_root_density={
+            "status": "verified_recent_directional_no_order_root_cause_density",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "recent_decision_count": 2,
+                "no_order_expected_decision_count": 2,
+            },
+        },
+        latest_bridge={
+            "status": "missing_latest_directional_primary_candidate_truth",
+            "smallest_missing_field": (
+                "database_truth.latest_decision.no_trade_attribution."
+                "primary_family_candidate_truth"
+            ),
+            "raw_payload_exposed": False,
+        },
+    )
+
+    assert truth["ok"] is False
+    assert (
+        truth["status"]
+        == "missing_latest_directional_no_order_primary_candidate_bridge"
+    )
+    assert truth["smallest_missing_field"] == (
+        "database_truth.latest_decision.no_trade_attribution."
+        "primary_family_candidate_truth"
+    )
+    assert truth["raw_payload_exposed"] is False
+
+
 def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science_continuity() -> None:
     mod = load_module()
     report = {
@@ -3273,6 +3419,129 @@ def test_project_live_runtime_facts_exposes_latest_directional_no_order_primary_
     assert live_facts[
         "latest_directional_no_order_bridge_not_alpha_or_profitability_evidence"
     ] is True
+
+
+def test_project_live_runtime_facts_exposes_recent_no_order_primary_candidate_bridge_density() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "recent_directional_no_order_primary_candidate_bridge_density_truth": {
+            "status": (
+                "verified_recent_directional_no_order_primary_candidate_bridge_density"
+            ),
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "recent_decision_count": 24,
+                "no_order_expected_decision_count": 24,
+                "decisions_with_no_order_semantics": 24,
+                "recent_portfolio_route_root_density_status": (
+                    "verified_recent_directional_no_order_root_cause_density"
+                ),
+                "latest_primary_candidate_bridge_status": (
+                    "verified_latest_directional_no_order_primary_candidate_bridge"
+                ),
+                "latest_primary_candidate_bridge_verified": True,
+                "latest_bridge_decision_id": "decision-current",
+                "latest_bridge_decision_present_in_recent_decisions": True,
+                "historical_primary_candidate_bridge_scope": "latest_decision_only",
+                "historical_primary_candidate_bridge_available_for_recent_decisions": False,
+                "historical_primary_candidate_bridge_not_claimed": True,
+            },
+            "recent_portfolio_route_roots": {
+                "top_root_cause": "decision_route_action_advisory_only_no_order_expected",
+                "top_route_action": "advisory_only",
+                "root_cause_distribution": [
+                    {
+                        "value": "decision_route_action_advisory_only_no_order_expected",
+                        "count": 24,
+                    }
+                ],
+            },
+            "latest_bridge": {
+                "latest_route_action": "advisory_only",
+                "primary_candidate_route_action": "hold_current",
+                "route_action_differs": True,
+                "portfolio_route_no_order_root_cause": (
+                    "decision_route_action_advisory_only_no_order_expected"
+                ),
+                "primary_candidate_no_order_root_cause": (
+                    "primary_candidate_hold_current_zero_delta"
+                ),
+                "route_root_and_primary_candidate_root_distinct": True,
+            },
+            "interpretation": {
+                "recent_portfolio_route_roots_non_material_without_order_or_fill_change": True,
+                "recent_portfolio_route_roots_require_order_or_fill_change_for_materiality": True,
+                "latest_primary_candidate_root_distinct_from_portfolio_route_root": True,
+                "not_alpha_or_profitability_evidence": True,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts[
+        "recent_directional_no_order_primary_candidate_bridge_density_truth_status"
+    ] == "verified_recent_directional_no_order_primary_candidate_bridge_density"
+    assert (
+        live_facts[
+            "recent_directional_no_order_primary_candidate_bridge_density_raw_payload_exposed"
+        ]
+        is False
+    )
+    assert (
+        live_facts["recent_directional_no_order_bridge_density_recent_decision_count"]
+        == 24
+    )
+    assert (
+        live_facts[
+            "recent_directional_no_order_bridge_density_latest_bridge_verified"
+        ]
+        is True
+    )
+    assert live_facts[
+        "recent_directional_no_order_bridge_density_latest_bridge_decision_id"
+    ] == "decision-current"
+    assert (
+        live_facts[
+            "recent_directional_no_order_bridge_density_latest_bridge_decision_present_in_recent"
+        ]
+        is True
+    )
+    assert live_facts[
+        "recent_directional_no_order_bridge_density_historical_primary_candidate_bridge_scope"
+    ] == "latest_decision_only"
+    assert (
+        live_facts[
+            "recent_directional_no_order_bridge_density_historical_primary_candidate_bridge_not_claimed"
+        ]
+        is True
+    )
+    assert live_facts[
+        "recent_directional_no_order_bridge_density_top_portfolio_route_action"
+    ] == "advisory_only"
+    assert live_facts[
+        "recent_directional_no_order_bridge_density_primary_candidate_route_action"
+    ] == "hold_current"
+    assert (
+        live_facts["recent_directional_no_order_bridge_density_route_roots_distinct"]
+        is True
+    )
+    assert (
+        live_facts[
+            "recent_directional_no_order_bridge_density_not_alpha_or_profitability_evidence"
+        ]
+        is True
+    )
 
 
 def test_directional_episode_pnl_lifecycle_classifies_open_unrealized_position() -> None:
