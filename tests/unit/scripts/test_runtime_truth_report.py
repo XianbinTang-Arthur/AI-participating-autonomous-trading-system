@@ -572,6 +572,151 @@ def test_directional_executable_episode_truth_summarizes_terminal_no_fill_surfac
     assert live_facts["directional_executable_episode_terminal_no_fill_drilldown_fill_absent_count"] == 2
 
 
+def test_executable_terminal_no_fill_pretrade_microstructure_drilldown_links_context() -> None:
+    mod = load_module()
+    executable_episode = {
+        "status": "verified_executable_terminal_order_no_fill_truth",
+        "latest_executable_decision": {
+            "decision_id": "decision_exec",
+            "created_at": "2026-04-28T03:40:50+08:00",
+            "symbol": "BTC-USDT-SWAP",
+            "route_action": "override_target",
+            "primary_family": "directional",
+            "order_expected": True,
+            "fill_expected": False,
+            "expected_edge_bps": "14.1",
+            "expected_cost_bps": "11.5",
+        },
+        "terminal_no_fill": {
+            "terminal_states": ["BLOCKED", "FAILED"],
+            "terminal_source_systems": ["local_order_manager", "semantic_dup_snapshot_blocked"],
+            "terminal_execution_styles": ["taker", "semantic_dup_snapshot_blocked"],
+        },
+        "terminal_no_fill_drilldown": {
+            "status": "verified_terminal_no_fill_order_state_drilldown",
+            "coverage": {
+                "drilldown_order_count": 2,
+                "exchange_ack_absent_count": 2,
+                "fill_absent_count": 2,
+                "terminal_state_verified_count": 2,
+            },
+        },
+    }
+    rdp_microstructure = {
+        "ok": True,
+        "recent_silver_limit": 672,
+        "recent_silver_orderbook": [
+            {
+                "ts": "2026-04-28T03:30:00+08:00",
+                "bbo_samples_n": 820,
+                "books5_samples_n": 1600,
+                "mid_price_last": "76000.0",
+                "spread_bps_mean": "0.0132",
+                "spread_bps_max": "0.0133",
+                "spread_bps_min": "0.0131",
+                "quality_flags": [],
+            }
+        ],
+        "recent_silver_trade_flow": [
+            {
+                "ts": "2026-04-28T03:30:00+08:00",
+                "trade_count": 12400,
+                "total_volume_ccy": "1000",
+                "taker_buy_ratio": "0.52",
+                "trade_flow_imbalance": "0.04",
+                "vwap_minus_mid_bps": "1.25",
+                "quality_flags": [],
+            }
+        ],
+    }
+    execution_science = {
+        "status": "verified_orderbook_sequence_and_silver_bar_present",
+        "payload_sequence": {
+            "status": "sequence_continuous",
+            "window_minutes": 30,
+            "sequence_gap_count": 0,
+            "latest_ts": "2026-04-30T09:00:00Z",
+        },
+    }
+    orderbook_payload_depth = {
+        "status": "verified_books5_payload_depth_evidence_present",
+        "raw_payload_exposed": False,
+        "sequence": {
+            "books5_row_count": 120,
+            "books5_sequence_gap_count": 0,
+            "diff_payload_persisted_row_count": 400,
+        },
+    }
+    depth_slippage_lifecycle = {
+        "status": "forward_depth_ready_no_order_expected_regime",
+        "interpretation": {
+            "forward_depth_ready": True,
+            "existing_fill_slippage_baseline_present": True,
+        },
+    }
+    slippage_cost = {
+        "status": "verified_slippage_cost_calibration_evidence_present",
+        "fee": {"sample_count": 73},
+        "slippage_proxy": {
+            "sample_count": 17,
+            "coverage_audit": {
+                "classification": "missing_reference_price_coverage_is_no_submit_command_path",
+                "covered_reference_fills_with_command_reference": 17,
+                "missing_reference_fills": 56,
+                "reference_policy": "pretrade_order_or_command_reference_only",
+            },
+        },
+    }
+
+    truth = mod.summarize_directional_executable_terminal_no_fill_pretrade_microstructure_truth(
+        directional_executable_episode=executable_episode,
+        rdp_microstructure=rdp_microstructure,
+        execution_science=execution_science,
+        orderbook_payload_depth=orderbook_payload_depth,
+        depth_slippage_lifecycle=depth_slippage_lifecycle,
+        slippage_cost=slippage_cost,
+    )
+    live_facts = mod.project_live_runtime_facts(
+        {
+            "runtime": {"dashboard_bundle": {}},
+            "database_truth": {"ok": True},
+            "directional_executable_episode_truth": executable_episode,
+            "directional_executable_terminal_no_fill_pretrade_microstructure_truth": truth,
+            "execution_science_truth": execution_science,
+            "orderbook_payload_depth_truth": orderbook_payload_depth,
+            "slippage_cost_calibration_truth": slippage_cost,
+            "depth_slippage_lifecycle_truth": depth_slippage_lifecycle,
+            "git": {},
+            "deployment_health": {},
+        }
+    )
+
+    assert truth["status"] == "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+    assert truth["smallest_missing_field"] is None
+    assert truth["pretrade_microstructure"]["status"] == "verified_pretrade_microstructure_context_present"
+    assert truth["pretrade_microstructure"]["decision_context"]["orderbook"]["books5_samples_n"] == 1600
+    assert truth["snapshot_diff_sequence"]["status"] == "sequence_continuous"
+    assert truth["orderbook_payload_depth"]["books5_sequence_gap_count"] == 0
+    assert truth["local_fill_feasibility"]["status"] == "terminal_no_fill_before_exchange_ack"
+    assert truth["local_fill_feasibility"]["market_fill_feasibility_observable"] is False
+    assert truth["slippage_baseline"]["slippage_proxy_sample_count"] == 17
+    assert live_facts[
+        "directional_executable_terminal_no_fill_pretrade_microstructure_status"
+    ] == "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+    assert live_facts[
+        "directional_executable_terminal_no_fill_pretrade_microstructure_decision_id"
+    ] == "decision_exec"
+    assert live_facts[
+        "directional_executable_terminal_no_fill_pretrade_microstructure_orderbook_books5_samples_n"
+    ] == 1600
+    assert live_facts[
+        "directional_executable_terminal_no_fill_local_fill_feasibility_status"
+    ] == "terminal_no_fill_before_exchange_ack"
+    assert live_facts[
+        "directional_executable_terminal_no_fill_market_fill_feasibility_observable"
+    ] is False
+
+
 def test_execution_science_truth_verifies_orderbook_sequence_and_silver_bar() -> None:
     mod = load_module()
     raw = {

@@ -1463,6 +1463,11 @@ if not url:
     raise SystemExit(0)
 
 symbol = os.environ.get("AATS_EXECUTION_SCIENCE_SYMBOL", "BTC-USDT-SWAP")
+try:
+    recent_silver_limit = int(os.environ.get("AATS_EXECUTION_SCIENCE_RECENT_SILVER_BARS", "672"))
+except ValueError:
+    recent_silver_limit = 672
+recent_silver_limit = max(192, min(recent_silver_limit, 1344))
 engine = create_engine(url)
 
 def table_exists(conn, name):
@@ -1524,9 +1529,9 @@ def recent_silver_orderbook(conn):
             "select ts, bbo_samples_n, books5_samples_n, spread_bps_mean, "
             "spread_bps_max, spread_bps_min, mid_price_last, quality_flags "
             "from silver.market_orderbook_metrics_15m "
-            "where symbol=:symbol order by ts desc limit 192"
+            "where symbol=:symbol order by ts desc limit :limit"
         ),
-        {"symbol": symbol},
+        {"symbol": symbol, "limit": recent_silver_limit},
     ).mappings().all()
     return [dict(row) for row in rows]
 
@@ -1539,9 +1544,9 @@ def recent_silver_trade_flow(conn):
             "trade_flow_imbalance, vwap, mid_price_ref, vwap_minus_mid_bps, "
             "quality_flags "
             "from silver.market_trade_flow_15m "
-            "where symbol=:symbol order by ts desc limit 192"
+            "where symbol=:symbol order by ts desc limit :limit"
         ),
-        {"symbol": symbol},
+        {"symbol": symbol, "limit": recent_silver_limit},
     ).mappings().all()
     return [dict(row) for row in rows]
 
@@ -1645,6 +1650,7 @@ with engine.connect() as conn:
                 },
                 "latest_silver_orderbook": latest_silver_orderbook(conn),
                 "latest_silver_trade_flow": latest_silver_trade_flow(conn),
+                "recent_silver_limit": recent_silver_limit,
                 "recent_silver_orderbook": recent_silver_orderbook(conn),
                 "recent_silver_trade_flow": recent_silver_trade_flow(conn),
                 "payload_sequence": payload_sequence(conn),
@@ -6445,6 +6451,165 @@ def summarize_latest_decision_fill_feasibility_truth(
     }
 
 
+def summarize_directional_executable_terminal_no_fill_pretrade_microstructure_truth(
+    *,
+    directional_executable_episode: dict[str, Any],
+    rdp_microstructure: dict[str, Any],
+    execution_science: dict[str, Any],
+    orderbook_payload_depth: dict[str, Any],
+    depth_slippage_lifecycle: dict[str, Any],
+    slippage_cost: dict[str, Any],
+) -> dict[str, Any]:
+    executable = as_dict(directional_executable_episode)
+    latest = as_dict(executable.get("latest_executable_decision"))
+    decision_id = latest.get("decision_id")
+    if not decision_id:
+        return {
+            "source": "directional_executable_episode_truth_and_rdp_microstructure",
+            "ok": False,
+            "status": "missing_executable_terminal_no_fill_decision",
+            "smallest_missing_field": "directional_executable_episode.latest_executable_decision",
+        }
+
+    terminal_drilldown = as_dict(executable.get("terminal_no_fill_drilldown"))
+    terminal_coverage = as_dict(terminal_drilldown.get("coverage"))
+    terminal_verified = (
+        executable.get("status") == "verified_executable_terminal_order_no_fill_truth"
+        and terminal_drilldown.get("status") == "verified_terminal_no_fill_order_state_drilldown"
+    )
+    decision_for_microstructure = {
+        "decision_id": decision_id,
+        "created_at": latest.get("created_at"),
+        "symbol": latest.get("symbol"),
+        "route_action": latest.get("route_action"),
+        "primary_family": latest.get("primary_family"),
+        "fill": {"count": 0},
+        "latest_fill": {},
+    }
+    pretrade = _directional_episode_microstructure_context(
+        decision_for_microstructure,
+        rdp_microstructure=as_dict(rdp_microstructure),
+    )
+    sequence = as_dict(execution_science.get("payload_sequence"))
+    depth = as_dict(orderbook_payload_depth)
+    depth_sequence = as_dict(depth.get("sequence"))
+    depth_lifecycle = as_dict(depth_slippage_lifecycle)
+    depth_lifecycle_interpretation = as_dict(depth_lifecycle.get("interpretation"))
+    slippage = as_dict(slippage_cost)
+    slippage_proxy = as_dict(slippage.get("slippage_proxy"))
+    slippage_coverage = as_dict(slippage_proxy.get("coverage_audit"))
+
+    pretrade_present = pretrade.get("status") == "verified_pretrade_microstructure_context_present"
+    sequence_continuous = sequence.get("status") == "sequence_continuous"
+    depth_ready = depth.get("status") == "verified_books5_payload_depth_evidence_present"
+    slippage_verified = slippage.get("status") == "verified_slippage_cost_calibration_evidence_present"
+    order_count = int_or_zero(terminal_coverage.get("drilldown_order_count"))
+    exchange_ack_absent_count = int_or_zero(terminal_coverage.get("exchange_ack_absent_count"))
+    fill_absent_count = int_or_zero(terminal_coverage.get("fill_absent_count"))
+    all_orders_lack_exchange_ack = order_count > 0 and exchange_ack_absent_count >= order_count
+    all_orders_lack_fill = order_count > 0 and fill_absent_count >= order_count
+    local_fill_feasibility_status = (
+        "terminal_no_fill_before_exchange_ack"
+        if terminal_verified and all_orders_lack_exchange_ack and all_orders_lack_fill
+        else "terminal_no_fill_local_feasibility_incomplete"
+    )
+
+    checks = [
+        ("directional_executable_episode.terminal_no_fill_drilldown", terminal_verified),
+        ("rdp.silver.executable_decision_pretrade_microstructure", pretrade_present),
+        ("execution_science.payload_sequence.sequence_continuous", sequence_continuous),
+        ("orderbook_payload_depth.verified_books5_depth_evidence", depth_ready),
+        ("slippage_cost_calibration_truth.verified", slippage_verified),
+    ]
+    smallest_missing = next((field for field, passed in checks if not passed), None)
+    if not terminal_verified:
+        status = "blocked_missing_terminal_no_fill_drilldown"
+    elif not pretrade_present:
+        status = "missing_executable_terminal_no_fill_pretrade_microstructure_context"
+    elif not sequence_continuous:
+        status = "blocked_missing_snapshot_diff_sequence_validation"
+    elif not depth_ready:
+        status = "blocked_missing_orderbook_payload_depth"
+    elif not slippage_verified:
+        status = "blocked_missing_slippage_cost_calibration_context"
+    else:
+        status = "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+
+    return {
+        "source": "directional_executable_episode_truth_and_rdp_microstructure",
+        "ok": smallest_missing is None,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "decision": {
+            "decision_id": decision_id,
+            "created_at": latest.get("created_at"),
+            "symbol": latest.get("symbol"),
+            "route_action": latest.get("route_action"),
+            "primary_family": latest.get("primary_family"),
+            "order_expected": latest.get("order_expected"),
+            "fill_expected": latest.get("fill_expected"),
+            "expected_edge_bps": latest.get("expected_edge_bps"),
+            "expected_cost_bps": latest.get("expected_cost_bps"),
+        },
+        "pretrade_microstructure": pretrade,
+        "snapshot_diff_sequence": {
+            "status": sequence.get("status"),
+            "window_minutes": sequence.get("window_minutes"),
+            "sequence_gap_count": sequence.get("sequence_gap_count"),
+            "latest_ts": sequence.get("latest_ts"),
+        },
+        "orderbook_payload_depth": {
+            "status": depth.get("status"),
+            "books5_row_count": depth_sequence.get("books5_row_count"),
+            "books5_sequence_gap_count": depth_sequence.get("books5_sequence_gap_count"),
+            "diff_payload_persisted_row_count": depth_sequence.get("diff_payload_persisted_row_count"),
+            "raw_payload_exposed": depth.get("raw_payload_exposed"),
+        },
+        "local_fill_feasibility": {
+            "status": local_fill_feasibility_status,
+            "order_expected": latest.get("order_expected"),
+            "fill_expected": latest.get("fill_expected"),
+            "market_fill_feasibility_observable": not all_orders_lack_exchange_ack,
+            "exchange_ack_absent_count": exchange_ack_absent_count,
+            "fill_absent_count": fill_absent_count,
+            "terminal_order_count": order_count,
+            "terminal_states": as_dict(executable.get("terminal_no_fill")).get("terminal_states"),
+            "terminal_source_systems": as_dict(executable.get("terminal_no_fill")).get(
+                "terminal_source_systems"
+            ),
+            "terminal_execution_styles": as_dict(executable.get("terminal_no_fill")).get(
+                "terminal_execution_styles"
+            ),
+        },
+        "slippage_baseline": {
+            "status": slippage.get("status"),
+            "fee_sample_count": as_dict(slippage.get("fee")).get("sample_count"),
+            "slippage_proxy_sample_count": slippage_proxy.get("sample_count"),
+            "reference_coverage_classification": slippage_coverage.get("classification"),
+            "current_submit_reference_covered_fill_count": slippage_coverage.get(
+                "covered_reference_fills_with_command_reference"
+            ),
+            "missing_reference_fills": slippage_coverage.get("missing_reference_fills"),
+            "reference_policy": slippage_coverage.get("reference_policy"),
+        },
+        "depth_slippage_lifecycle": {
+            "status": depth_lifecycle.get("status"),
+            "forward_depth_ready": depth_lifecycle_interpretation.get("forward_depth_ready"),
+            "existing_fill_slippage_baseline_present": depth_lifecycle_interpretation.get(
+                "existing_fill_slippage_baseline_present"
+            ),
+        },
+        "interpretation": {
+            "decision_time_pretrade_context_present": pretrade_present,
+            "snapshot_diff_sequence_current": sequence_continuous,
+            "market_fill_feasibility_requires_exchange_ack": True,
+            "terminal_no_fill_before_exchange_ack": all_orders_lack_exchange_ack,
+            "not_alpha_or_profitability_evidence": True,
+            "raw_payload_exposed": False,
+        },
+    }
+
+
 def summarize_directional_spike_reversion_truth(
     directional_attribution: dict[str, Any],
 ) -> dict[str, Any]:
@@ -6832,6 +6997,34 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     directional_executable_interpretation = as_dict(
         directional_executable_episode.get("interpretation")
     )
+    executable_terminal_pretrade = as_dict(
+        report.get("directional_executable_terminal_no_fill_pretrade_microstructure_truth")
+    )
+    executable_terminal_pretrade_decision = as_dict(executable_terminal_pretrade.get("decision"))
+    executable_terminal_pretrade_microstructure = as_dict(
+        executable_terminal_pretrade.get("pretrade_microstructure")
+    )
+    executable_terminal_pretrade_decision_context = as_dict(
+        executable_terminal_pretrade_microstructure.get("decision_context")
+    )
+    executable_terminal_pretrade_orderbook = as_dict(
+        executable_terminal_pretrade_decision_context.get("orderbook")
+    )
+    executable_terminal_pretrade_trade_flow = as_dict(
+        executable_terminal_pretrade_decision_context.get("trade_flow")
+    )
+    executable_terminal_pretrade_sequence = as_dict(
+        executable_terminal_pretrade.get("snapshot_diff_sequence")
+    )
+    executable_terminal_pretrade_depth = as_dict(
+        executable_terminal_pretrade.get("orderbook_payload_depth")
+    )
+    executable_terminal_pretrade_fill_feasibility = as_dict(
+        executable_terminal_pretrade.get("local_fill_feasibility")
+    )
+    executable_terminal_pretrade_slippage = as_dict(
+        executable_terminal_pretrade.get("slippage_baseline")
+    )
     depth_slippage_lifecycle = as_dict(report.get("depth_slippage_lifecycle_truth"))
     depth_slippage_lifecycle_depth = as_dict(depth_slippage_lifecycle.get("depth_readiness"))
     depth_slippage_lifecycle_slippage = as_dict(depth_slippage_lifecycle.get("slippage_baseline"))
@@ -7149,6 +7342,63 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "directional_executable_episode_terminal_no_fill_drilldown_terminal_verified_count": (
             directional_executable_terminal_drilldown_coverage.get("terminal_state_verified_count")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_status": (
+            executable_terminal_pretrade.get("status")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_smallest_missing_field": (
+            executable_terminal_pretrade.get("smallest_missing_field")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_decision_id": (
+            executable_terminal_pretrade_decision.get("decision_id")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_order_expected": (
+            executable_terminal_pretrade_decision.get("order_expected")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_fill_expected": (
+            executable_terminal_pretrade_decision.get("fill_expected")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_context_status": (
+            executable_terminal_pretrade_microstructure.get("status")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_orderbook_bar_age_seconds": (
+            executable_terminal_pretrade_orderbook.get("bar_age_seconds")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_orderbook_books5_samples_n": (
+            executable_terminal_pretrade_orderbook.get("books5_samples_n")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_orderbook_spread_bps_mean": (
+            executable_terminal_pretrade_orderbook.get("spread_bps_mean")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_trade_count": (
+            executable_terminal_pretrade_trade_flow.get("trade_count")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_taker_buy_ratio": (
+            executable_terminal_pretrade_trade_flow.get("taker_buy_ratio")
+        ),
+        "directional_executable_terminal_no_fill_pretrade_microstructure_vwap_minus_mid_bps": (
+            executable_terminal_pretrade_trade_flow.get("vwap_minus_mid_bps")
+        ),
+        "directional_executable_terminal_no_fill_snapshot_diff_sequence_status": (
+            executable_terminal_pretrade_sequence.get("status")
+        ),
+        "directional_executable_terminal_no_fill_snapshot_diff_sequence_gap_count": (
+            executable_terminal_pretrade_sequence.get("sequence_gap_count")
+        ),
+        "directional_executable_terminal_no_fill_orderbook_depth_status": (
+            executable_terminal_pretrade_depth.get("status")
+        ),
+        "directional_executable_terminal_no_fill_orderbook_depth_books5_sequence_gap_count": (
+            executable_terminal_pretrade_depth.get("books5_sequence_gap_count")
+        ),
+        "directional_executable_terminal_no_fill_local_fill_feasibility_status": (
+            executable_terminal_pretrade_fill_feasibility.get("status")
+        ),
+        "directional_executable_terminal_no_fill_market_fill_feasibility_observable": (
+            executable_terminal_pretrade_fill_feasibility.get("market_fill_feasibility_observable")
+        ),
+        "directional_executable_terminal_no_fill_slippage_baseline_status": (
+            executable_terminal_pretrade_slippage.get("status")
         ),
         "directional_executable_episode_provenance_order_count": (
             directional_executable_provenance.get("db_order_count")
@@ -7969,6 +8219,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         slippage_cost=report["slippage_cost_calibration_truth"],
         directional_command_flow=report["directional_command_flow_provenance_truth"],
         directional_attribution=report["directional_episode_attribution_truth"],
+    )
+    report["directional_executable_terminal_no_fill_pretrade_microstructure_truth"] = (
+        summarize_directional_executable_terminal_no_fill_pretrade_microstructure_truth(
+            directional_executable_episode=report["directional_executable_episode_truth"],
+            rdp_microstructure=report["rdp_microstructure_truth"],
+            execution_science=report["execution_science_truth"],
+            orderbook_payload_depth=report["orderbook_payload_depth_truth"],
+            depth_slippage_lifecycle=report["depth_slippage_lifecycle_truth"],
+            slippage_cost=report["slippage_cost_calibration_truth"],
+        )
     )
     report["latest_decision_fill_feasibility_truth"] = summarize_latest_decision_fill_feasibility_truth(
         report["database_truth"],
