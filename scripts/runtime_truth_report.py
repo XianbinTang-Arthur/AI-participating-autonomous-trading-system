@@ -1742,6 +1742,63 @@ def first_present(*values: Any) -> Any:
     return None
 
 
+def _allocation_payload_metric_candidate(row: dict[str, Any], field: str) -> tuple[Any, str | None]:
+    payload = as_dict(row.get("payload"))
+    value = payload.get(field)
+    if value is not None:
+        return value, f"portfolio_allocation_decisions.payload.{field}"
+
+    candidate_keys = (
+        ("expected_edge_bps", "expected_signal_edge_bps")
+        if field == "expected_edge_bps"
+        else ("expected_cost_bps",)
+    )
+    candidates = (
+        payload.get("strategy_sleeve_intents")
+        or payload.get("sleeve_intents")
+        or payload.get("sleeve_decisions")
+        or []
+    )
+    primary_family = row.get("primary_family")
+    fallback: tuple[Any, str | None] = (None, None)
+    for item in as_list(candidates):
+        item_dict = as_dict(item)
+        if not item_dict:
+            continue
+        family = item_dict.get("family") or item_dict.get("strategy_family")
+        metrics = as_dict(item_dict.get("metrics"))
+        for key in candidate_keys:
+            metric = metrics.get(key)
+            if metric is None:
+                continue
+            source = f"portfolio_allocation_decisions.payload.sleeve_intents[].metrics.{key}"
+            if primary_family is None or family == primary_family:
+                return metric, source
+            if fallback[0] is None:
+                fallback = (metric, source)
+    return fallback
+
+
+def allocation_expected_metric_value(row: dict[str, Any], field: str) -> Any:
+    value = row.get(field)
+    if value is not None:
+        return value
+    payload_value, _source = _allocation_payload_metric_candidate(row, field)
+    return payload_value
+
+
+def allocation_expected_metric_source(row: dict[str, Any], field: str) -> str | None:
+    source = row.get(f"{field}_source")
+    if source:
+        return str(source)
+    if row.get(field) is not None:
+        return f"portfolio_allocation_decisions.{field}"
+    _payload_value, payload_source = _allocation_payload_metric_candidate(row, field)
+    if payload_source:
+        return payload_source
+    return None
+
+
 def compact_unique(values: list[Any], *, limit: int = 16) -> list[str]:
     seen: set[str] = set()
     compacted: list[str] = []
@@ -2803,6 +2860,8 @@ def summarize_latest_decision(
     if not isinstance(latest, dict):
         return None
     payload = as_dict(latest.get("payload"))
+    expected_edge_bps = allocation_expected_metric_value(latest, "expected_edge_bps")
+    expected_cost_bps = allocation_expected_metric_value(latest, "expected_cost_bps")
     audit_payload = as_dict(audit)
     counts = as_dict(decision_counts)
     execution_plan_refs = as_list(audit_payload.get("execution_plan_refs"))
@@ -2910,8 +2969,10 @@ def summarize_latest_decision(
         "portfolio_requested_notional": decimal_text(latest.get("portfolio_requested_notional")),
         "portfolio_approved_notional": decimal_text(latest.get("portfolio_approved_notional")),
         "portfolio_budget_cut_notional": decimal_text(latest.get("portfolio_budget_cut_notional")),
-        "expected_edge_bps": decimal_text(latest.get("expected_edge_bps")),
-        "expected_cost_bps": decimal_text(latest.get("expected_cost_bps")),
+        "expected_edge_bps": decimal_text(expected_edge_bps),
+        "expected_cost_bps": decimal_text(expected_cost_bps),
+        "expected_edge_bps_source": allocation_expected_metric_source(latest, "expected_edge_bps"),
+        "expected_cost_bps_source": allocation_expected_metric_source(latest, "expected_cost_bps"),
         "audit_refs": {
             "portfolio_allocation_decision_ref": audit_payload.get("portfolio_allocation_decision_ref"),
             "decision_outcome_ref_present": bool(audit_payload.get("decision_outcome_ref")),
@@ -3423,6 +3484,8 @@ def sanitize_directional_episode_attribution(
     decisions: list[dict[str, Any]] = []
     for row in [as_dict(item) for item in as_list(raw.get("recent_decisions"))]:
         payload = as_dict(row.get("payload"))
+        expected_edge_bps = allocation_expected_metric_value(row, "expected_edge_bps")
+        expected_cost_bps = allocation_expected_metric_value(row, "expected_cost_bps")
         sleeve_summaries = summarize_sleeve_intents(payload)
         reason_codes = compact_unique(
             collect_reason_codes(payload) + collect_sleeve_reason_codes(sleeve_summaries),
@@ -3442,15 +3505,17 @@ def sanitize_directional_episode_attribution(
             "portfolio_requested_notional": decimal_text(row.get("portfolio_requested_notional")),
             "portfolio_approved_notional": decimal_text(row.get("portfolio_approved_notional")),
             "portfolio_budget_cut_notional": decimal_text(row.get("portfolio_budget_cut_notional")),
-            "expected_edge_bps": decimal_text(row.get("expected_edge_bps")),
-            "expected_cost_bps": decimal_text(row.get("expected_cost_bps")),
+            "expected_edge_bps": decimal_text(expected_edge_bps),
+            "expected_cost_bps": decimal_text(expected_cost_bps),
+            "expected_edge_bps_source": allocation_expected_metric_source(row, "expected_edge_bps"),
+            "expected_cost_bps_source": allocation_expected_metric_source(row, "expected_cost_bps"),
             "expected_net_edge_bps": decimal_subtract_text(
-                row.get("expected_edge_bps"),
-                row.get("expected_cost_bps"),
+                expected_edge_bps,
+                expected_cost_bps,
             ),
             "realized_cost_proxy_bps": realized_cost_proxy_bps,
             "edge_after_realized_cost_proxy_bps": decimal_subtract_text(
-                row.get("expected_edge_bps"),
+                expected_edge_bps,
                 realized_cost_proxy_bps,
             ),
             "order": {

@@ -1070,6 +1070,122 @@ def test_directional_episode_attribution_truth_summarizes_edge_cost_fill_and_pnl
     assert "budget_scale_applied" in latest["guard_decision"]["reason_codes"]
 
 
+def test_directional_episode_attribution_uses_payload_expected_edge_cost_fallback() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "latest_decision": {
+            "allocation_id": "alloc_payload",
+            "decision_id": "decision_payload_edge_cost",
+            "symbol": "BTC-USDT-SWAP",
+            "created_at": "2026-04-30T09:12:13+08:00",
+            "route_action": "advisory_only",
+            "primary_family": "directional",
+            "expected_edge_bps": None,
+            "expected_cost_bps": None,
+            "payload": {
+                "expected_edge_bps": "12.50",
+                "expected_cost_bps": "6.00",
+                "reason_codes": ["approved_but_budget_zero_suppressed"],
+            },
+        },
+        "latest_decision_counts": {},
+        "directional_episode_attribution": {
+            "symbol": "BTC-USDT-SWAP",
+            "recent_decisions": [
+                {
+                    "allocation_id": "alloc_payload",
+                    "decision_id": "decision_payload_edge_cost",
+                    "symbol": "BTC-USDT-SWAP",
+                    "created_at": "2026-04-30T09:12:13+08:00",
+                    "route_action": "advisory_only",
+                    "primary_family": "directional",
+                    "expected_edge_bps": None,
+                    "expected_cost_bps": None,
+                    "order_count": 0,
+                    "fill_count": 0,
+                    "payload": {
+                        "expected_edge_bps": "12.50",
+                        "expected_cost_bps": "6.00",
+                        "reason_codes": ["approved_but_budget_zero_suppressed"],
+                    },
+                }
+            ],
+        },
+    }
+
+    parsed = mod.parse_db_probe(json.dumps(raw))
+    latest = parsed["latest_decision"]
+    summary = mod.summarize_directional_episode_attribution_truth(parsed, {"ok": False})
+    decision = summary["recent_decisions"][0]
+
+    assert latest["expected_edge_bps"] == "12.50"
+    assert latest["expected_cost_bps"] == "6.00"
+    assert latest["expected_edge_bps_source"] == "portfolio_allocation_decisions.payload.expected_edge_bps"
+    assert latest["expected_cost_bps_source"] == "portfolio_allocation_decisions.payload.expected_cost_bps"
+    assert decision["expected_edge_bps"] == "12.50"
+    assert decision["expected_cost_bps"] == "6.00"
+    assert decision["expected_net_edge_bps"] == "6.5"
+    assert decision["expected_edge_bps_source"] == "portfolio_allocation_decisions.payload.expected_edge_bps"
+    assert decision["expected_cost_bps_source"] == "portfolio_allocation_decisions.payload.expected_cost_bps"
+    assert summary["coverage"]["decisions_with_edge_cost"] == 1
+    assert summary["smallest_missing_field"] == "execution_orders.directional_recent_decision"
+
+
+def test_directional_episode_attribution_uses_sleeve_metric_expected_edge_cost_fallback() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "directional_episode_attribution": {
+            "symbol": "BTC-USDT-SWAP",
+            "recent_decisions": [
+                {
+                    "allocation_id": "alloc_metric_payload",
+                    "decision_id": "decision_metric_payload_edge_cost",
+                    "symbol": "BTC-USDT-SWAP",
+                    "created_at": "2026-04-30T09:24:13+08:00",
+                    "route_action": "advisory_only",
+                    "primary_family": "directional",
+                    "expected_edge_bps": None,
+                    "expected_cost_bps": None,
+                    "order_count": 0,
+                    "fill_count": 0,
+                    "payload": {
+                        "expected_edge_bps": None,
+                        "expected_cost_bps": None,
+                        "sleeve_intents": [
+                            {
+                                "family": "directional",
+                                "route_action": "advisory_only",
+                                "metrics": {
+                                    "expected_signal_edge_bps": "18.25",
+                                    "expected_cost_bps": "6.00",
+                                    "expected_net_edge_bps": "12.25",
+                                },
+                            }
+                        ],
+                    },
+                }
+            ],
+        },
+    }
+
+    parsed = mod.parse_db_probe(json.dumps(raw))
+    summary = mod.summarize_directional_episode_attribution_truth(parsed, {"ok": False})
+    decision = summary["recent_decisions"][0]
+
+    assert decision["expected_edge_bps"] == "18.25"
+    assert decision["expected_cost_bps"] == "6.00"
+    assert decision["expected_net_edge_bps"] == "12.25"
+    assert decision["expected_edge_bps_source"] == (
+        "portfolio_allocation_decisions.payload.sleeve_intents[].metrics.expected_signal_edge_bps"
+    )
+    assert decision["expected_cost_bps_source"] == (
+        "portfolio_allocation_decisions.payload.sleeve_intents[].metrics.expected_cost_bps"
+    )
+    assert summary["coverage"]["decisions_with_edge_cost"] == 1
+
+
 def test_directional_spike_reversion_truth_classifies_adverse_fill_and_reversion() -> None:
     mod = load_module()
     decision = {
