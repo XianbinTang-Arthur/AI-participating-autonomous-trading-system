@@ -100,6 +100,126 @@ def test_dashboard_auth_required_is_not_confused_with_runtime_mode() -> None:
     }
 
 
+def test_ai_runtime_effective_mode_truth_marks_auth_gate_not_timeout_blocker() -> None:
+    mod = load_module()
+    dashboard = {
+        "status": "auth_required",
+        "access_state": "auth_required",
+        "primary_error": "operator_auth_required",
+        "effective_operating_mode": {"status": "unknown_auth_required", "value": None},
+        "profile_auto_control_effective": {"status": "unknown_auth_required", "value": None},
+    }
+    endpoint = {
+        "status": "auth_required",
+        "http_status": 401,
+        "error": "operator_auth_required",
+        "runtime": {},
+        "raw_payload_exposed": False,
+    }
+
+    truth = mod.summarize_ai_runtime_effective_mode_truth(
+        dashboard_bundle=dashboard,
+        ai_runtime_endpoint=endpoint,
+    )
+    live_facts = mod.project_live_runtime_facts(
+        {
+            "scope": {"shadow_benchmark": "none_verified"},
+            "runtime": {
+                "dashboard_bundle": dashboard,
+                "ai_runtime_endpoint": endpoint,
+                "ai_timeout_active_blocker": truth["ai_timeout"]["active_blocker"],
+            },
+            "ai_runtime_effective_mode_truth": truth,
+            "database_truth": {"ok": True, "latest_decision": {}},
+            "git": {},
+            "deployment_health": {},
+        }
+    )
+
+    assert truth["status"] == "auth_gated_effective_ai_runtime_truth"
+    assert truth["smallest_missing_field"] == "operator_authenticated_runtime_read_access"
+    assert truth["configured_target"]["status"] == "unknown_auth_required"
+    assert truth["effective_runtime_mode"]["status"] == "unknown_auth_required"
+    assert truth["provider"]["path_evidence_present"] is False
+    assert truth["provider"]["path_active"] is None
+    assert truth["ai_timeout"]["active_blocker"] is False
+    assert (
+        truth["ai_timeout"]["classification"]
+        == "not_active_blocker_auth_gated_provider_path_not_verified"
+    )
+    assert live_facts["ai_runtime_effective_truth_status"] == "auth_gated_effective_ai_runtime_truth"
+    assert live_facts["ai_runtime_effective_auth_required"] is True
+    assert live_facts["ai_runtime_endpoint_http_status"] == 401
+    assert live_facts["ai_runtime_timeout_blocker_classification"] == (
+        "not_active_blocker_auth_gated_provider_path_not_verified"
+    )
+
+
+def test_ai_runtime_effective_mode_truth_projects_verified_provider_path() -> None:
+    mod = load_module()
+    endpoint = {
+        "status": "verified",
+        "http_status": 200,
+        "runtime": mod.summarize_ai_runtime_endpoint_payload(
+            {
+                "configured_operating_mode": "ai_decision_maker",
+                "effective_operating_mode": "ai_decision_maker",
+                "manual_override_active": False,
+                "manual_override_mode": None,
+                "provider": "deepseek",
+                "configured": True,
+                "provider_ready": True,
+                "provider_degraded": False,
+                "provider_state": "healthy",
+                "recent_timeout_count": 0,
+                "shadow_mode_enabled": True,
+                "strategy_profile_auto_control_effective": True,
+                "ai_runtime_source": "remote_decision",
+                "queried_from_process_role": "gateway",
+                "ai_service_loaded": True,
+            }
+        ),
+    }
+    dashboard = {
+        "status": "verified",
+        "effective_operating_mode": {"status": "verified", "value": "ai_decision_maker"},
+        "profile_auto_control_effective": {"status": "verified", "value": True},
+    }
+
+    truth = mod.summarize_ai_runtime_effective_mode_truth(
+        dashboard_bundle=dashboard,
+        ai_runtime_endpoint=endpoint,
+    )
+    live_facts = mod.project_live_runtime_facts(
+        {
+            "scope": {"shadow_benchmark": "none_verified"},
+            "runtime": {
+                "dashboard_bundle": dashboard,
+                "ai_runtime_endpoint": endpoint,
+                "ai_timeout_active_blocker": truth["ai_timeout"]["active_blocker"],
+            },
+            "ai_runtime_effective_mode_truth": truth,
+            "database_truth": {"ok": True, "latest_decision": {}},
+            "git": {},
+            "deployment_health": {},
+        }
+    )
+
+    assert truth["status"] == "verified_effective_ai_runtime_truth"
+    assert truth["provider"]["path_evidence_present"] is True
+    assert truth["provider"]["path_active"] is True
+    assert truth["ai_timeout"]["classification"] == "not_active_blocker_no_recent_timeout"
+    assert truth["manual_override"]["status"] == "verified"
+    assert truth["manual_override"]["active"] is False
+    assert live_facts["ai_runtime_configured_operating_mode"] == "ai_decision_maker"
+    assert live_facts["ai_runtime_effective_operating_mode"] == "ai_decision_maker"
+    assert live_facts["ai_runtime_provider_configured"] is True
+    assert live_facts["ai_runtime_provider_ready"] is True
+    assert live_facts["ai_runtime_provider_path_active"] is True
+    assert live_facts["ai_runtime_shadow_enabled"] is True
+    assert live_facts["ai_runtime_profile_auto_control_effective"] is True
+
+
 def test_static_truth_surface_checks_terminal_no_fill_ui_markers(monkeypatch) -> None:
     mod = load_module()
 

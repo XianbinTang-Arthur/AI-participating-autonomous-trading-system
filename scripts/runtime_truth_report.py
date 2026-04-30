@@ -4393,6 +4393,98 @@ def dashboard_bundle_probe(api_base: str) -> dict[str, Any]:
     return summarize_dashboard_bundle(response["json"])
 
 
+def parse_json_object_body(body: str | None) -> dict[str, Any]:
+    if not body:
+        return {}
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def ai_runtime_endpoint_probe(api_base: str) -> dict[str, Any]:
+    response = fetch_url_text(f"{api_base.rstrip('/')}/ai/runtime", timeout=10)
+    body = parse_json_object_body(response.get("body"))
+    if response.get("ok"):
+        return {
+            "status": "verified",
+            "http_status": response.get("status"),
+            "runtime": summarize_ai_runtime_endpoint_payload(body),
+            "raw_payload_exposed": False,
+        }
+
+    detail = body.get("detail")
+    if response.get("status") == 401 and detail == "operator_auth_required":
+        return {
+            "status": "auth_required",
+            "http_status": response.get("status"),
+            "error": "operator_auth_required",
+            "runtime": {},
+            "raw_payload_exposed": False,
+        }
+
+    return {
+        "status": "request_failed",
+        "http_status": response.get("status"),
+        "error": response.get("error") or body.get("detail") or "ai_runtime_unavailable",
+        "runtime": {},
+        "raw_payload_exposed": False,
+    }
+
+
+def summarized_field(value: Any, *, missing_status: str = "missing") -> dict[str, Any]:
+    return {
+        "status": "verified" if value is not None else missing_status,
+        "value": value,
+    }
+
+
+def unknown_auth_required_field() -> dict[str, Any]:
+    return {"status": "unknown_auth_required", "value": None}
+
+
+def summarize_ai_runtime_endpoint_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    manual_override_active = payload.get("manual_override_active")
+    if isinstance(manual_override_active, bool):
+        manual_override_status = "verified"
+        manual_override_mode_status = (
+            "verified"
+            if manual_override_active and payload.get("manual_override_mode") is not None
+            else "not_applicable_no_manual_override"
+        )
+    else:
+        manual_override_status = "missing"
+        manual_override_mode_status = "missing"
+
+    return {
+        "configured_operating_mode": summarized_field(payload.get("configured_operating_mode")),
+        "effective_operating_mode": summarized_field(payload.get("effective_operating_mode")),
+        "manual_override": {
+            "status": manual_override_status,
+            "active": manual_override_active if isinstance(manual_override_active, bool) else None,
+            "mode": payload.get("manual_override_mode"),
+            "mode_status": manual_override_mode_status,
+            "freeze_until": payload.get("manual_override_freeze_until"),
+        },
+        "provider": {
+            "name": payload.get("provider"),
+            "state": payload.get("provider_state"),
+            "configured": summarized_field(payload.get("configured")),
+            "ready": summarized_field(payload.get("provider_ready")),
+            "degraded": summarized_field(payload.get("provider_degraded")),
+            "recent_timeout_count": payload.get("recent_timeout_count"),
+        },
+        "shadow_enabled": summarized_field(payload.get("shadow_mode_enabled")),
+        "profile_auto_control_effective": summarized_field(
+            payload.get("strategy_profile_auto_control_effective")
+        ),
+        "runtime_source": payload.get("ai_runtime_source"),
+        "queried_from_process_role": payload.get("queried_from_process_role"),
+        "ai_service_loaded": payload.get("ai_service_loaded"),
+    }
+
+
 def summarize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
     auth = payload.get("auth") or {}
     panels = payload.get("panels") or {}
@@ -4417,6 +4509,11 @@ def summarize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
     ai_runtime = ((panels.get("aiRuntime") or {}).get("data") or {})
     mode = ((panels.get("mode") or {}).get("data") or {})
     profile = ((panels.get("profileControlSummary") or {}).get("data") or {})
+    configured_mode = (
+        ai_runtime.get("configured_operating_mode")
+        or mode.get("configured_operating_mode")
+        or mode.get("canonical_configured_operating_mode")
+    )
     effective_mode = (
         ai_runtime.get("effective_operating_mode")
         or mode.get("effective_operating_mode")
@@ -4431,6 +4528,10 @@ def summarize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
         "status": "verified",
         "access_state": access_state,
         "primary_error": primary_error,
+        "configured_operating_mode": {
+            "status": "verified" if configured_mode else "missing",
+            "value": configured_mode,
+        },
         "effective_operating_mode": {
             "status": "verified" if effective_mode else "missing",
             "value": effective_mode,
@@ -4438,6 +4539,153 @@ def summarize_dashboard_bundle(payload: dict[str, Any]) -> dict[str, Any]:
         "profile_auto_control_effective": {
             "status": "verified" if profile_effective is not None else "missing",
             "value": profile_effective,
+        },
+    }
+
+
+def summarize_ai_runtime_effective_mode_truth(
+    *,
+    dashboard_bundle: dict[str, Any],
+    ai_runtime_endpoint: dict[str, Any],
+) -> dict[str, Any]:
+    dashboard = as_dict(dashboard_bundle)
+    endpoint = as_dict(ai_runtime_endpoint)
+    endpoint_runtime = as_dict(endpoint.get("runtime"))
+    endpoint_status = endpoint.get("status")
+    dashboard_status = dashboard.get("status")
+    auth_gated = endpoint_status == "auth_required" or dashboard_status == "auth_required"
+
+    if endpoint_status == "verified":
+        configured = as_dict(endpoint_runtime.get("configured_operating_mode"))
+        effective = as_dict(endpoint_runtime.get("effective_operating_mode"))
+        manual_override = as_dict(endpoint_runtime.get("manual_override"))
+        provider = as_dict(endpoint_runtime.get("provider"))
+        shadow = as_dict(endpoint_runtime.get("shadow_enabled"))
+        profile_auto = as_dict(endpoint_runtime.get("profile_auto_control_effective"))
+    elif auth_gated:
+        configured = unknown_auth_required_field()
+        effective = unknown_auth_required_field()
+        manual_override = {
+            "status": "unknown_auth_required",
+            "active": None,
+            "mode": None,
+            "mode_status": "unknown_auth_required",
+            "freeze_until": None,
+        }
+        provider = {
+            "name": None,
+            "state": None,
+            "configured": unknown_auth_required_field(),
+            "ready": unknown_auth_required_field(),
+            "degraded": unknown_auth_required_field(),
+            "recent_timeout_count": None,
+        }
+        shadow = unknown_auth_required_field()
+        profile_auto = unknown_auth_required_field()
+    else:
+        configured = summarized_field(None)
+        effective = summarized_field(None)
+        manual_override = {
+            "status": "missing",
+            "active": None,
+            "mode": None,
+            "mode_status": "missing",
+            "freeze_until": None,
+        }
+        provider = {
+            "name": None,
+            "state": None,
+            "configured": summarized_field(None),
+            "ready": summarized_field(None),
+            "degraded": summarized_field(None),
+            "recent_timeout_count": None,
+        }
+        shadow = summarized_field(None)
+        profile_auto = summarized_field(None)
+
+    effective_value = effective.get("value")
+    provider_configured = as_dict(provider.get("configured"))
+    provider_ready = as_dict(provider.get("ready"))
+    provider_degraded = as_dict(provider.get("degraded"))
+    provider_path_evidence_present = (
+        effective.get("status") == "verified"
+        and provider_configured.get("status") == "verified"
+        and provider_ready.get("status") == "verified"
+    )
+    provider_path_active = None
+    if provider_path_evidence_present:
+        provider_path_active = (
+            effective_value not in (None, "baseline_only")
+            and bool(provider_configured.get("value"))
+            and bool(provider_ready.get("value"))
+        )
+
+    recent_timeout_count = int_or_zero(provider.get("recent_timeout_count"))
+    if auth_gated:
+        timeout_classification = "not_active_blocker_auth_gated_provider_path_not_verified"
+        ai_timeout_active_blocker: bool | str = False
+    elif not provider_path_evidence_present:
+        timeout_classification = "not_active_blocker_missing_provider_path_evidence"
+        ai_timeout_active_blocker = False
+    elif not provider_path_active:
+        timeout_classification = "not_active_blocker_provider_path_inactive"
+        ai_timeout_active_blocker = False
+    elif recent_timeout_count > 0:
+        timeout_classification = "active_provider_timeout_evidence_present"
+        ai_timeout_active_blocker = True
+    else:
+        timeout_classification = "not_active_blocker_no_recent_timeout"
+        ai_timeout_active_blocker = False
+
+    if endpoint_status == "verified" and effective.get("status") == "verified":
+        status = "verified_effective_ai_runtime_truth"
+        smallest_missing = None
+    elif auth_gated:
+        status = "auth_gated_effective_ai_runtime_truth"
+        smallest_missing = "operator_authenticated_runtime_read_access"
+    else:
+        status = "missing_effective_ai_runtime_truth"
+        smallest_missing = "ai_runtime_endpoint.effective_operating_mode"
+
+    return {
+        "source": "gateway_ai_runtime_and_dashboard_bundle",
+        "ok": status != "missing_effective_ai_runtime_truth",
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "auth_gate": {
+            "auth_required": auth_gated,
+            "dashboard_status": dashboard_status,
+            "ai_runtime_endpoint_status": endpoint_status,
+            "ai_runtime_http_status": endpoint.get("http_status"),
+            "primary_error": dashboard.get("primary_error") or endpoint.get("error"),
+        },
+        "configured_target": configured,
+        "effective_runtime_mode": effective,
+        "manual_override": manual_override,
+        "provider": {
+            "name": provider.get("name"),
+            "state": provider.get("state"),
+            "configured": provider_configured,
+            "ready": provider_ready,
+            "degraded": provider_degraded,
+            "path_evidence_present": provider_path_evidence_present,
+            "path_active": provider_path_active,
+            "recent_timeout_count": provider.get("recent_timeout_count"),
+        },
+        "shadow_enabled": shadow,
+        "profile_auto_control_effective": profile_auto,
+        "runtime_source": endpoint_runtime.get("runtime_source"),
+        "queried_from_process_role": endpoint_runtime.get("queried_from_process_role"),
+        "ai_service_loaded": endpoint_runtime.get("ai_service_loaded"),
+        "ai_timeout": {
+            "classification": timeout_classification,
+            "active_blocker": ai_timeout_active_blocker,
+        },
+        "interpretation": {
+            "configured_target_is_not_effective_runtime": True,
+            "auth_required_does_not_imply_baseline_only": auth_gated,
+            "ai_timeout_requires_verified_provider_path": True,
+            "raw_payload_exposed": False,
         },
     }
 
@@ -7125,6 +7373,18 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         latest_directional_episode.get("pretrade_microstructure")
     )
     dashboard = ((report.get("runtime") or {}).get("dashboard_bundle") or {})
+    ai_runtime_effective = as_dict(report.get("ai_runtime_effective_mode_truth"))
+    ai_runtime_configured = as_dict(ai_runtime_effective.get("configured_target"))
+    ai_runtime_effective_mode = as_dict(ai_runtime_effective.get("effective_runtime_mode"))
+    ai_runtime_manual_override = as_dict(ai_runtime_effective.get("manual_override"))
+    ai_runtime_provider = as_dict(ai_runtime_effective.get("provider"))
+    ai_runtime_provider_configured = as_dict(ai_runtime_provider.get("configured"))
+    ai_runtime_provider_ready = as_dict(ai_runtime_provider.get("ready"))
+    ai_runtime_provider_degraded = as_dict(ai_runtime_provider.get("degraded"))
+    ai_runtime_shadow = as_dict(ai_runtime_effective.get("shadow_enabled"))
+    ai_runtime_profile_auto = as_dict(ai_runtime_effective.get("profile_auto_control_effective"))
+    ai_runtime_auth_gate = as_dict(ai_runtime_effective.get("auth_gate"))
+    ai_runtime_timeout = as_dict(ai_runtime_effective.get("ai_timeout"))
     git = report.get("git") or {}
     health = report.get("deployment_health") or {}
     runtime_config = db.get("runtime_config") if isinstance(db.get("runtime_config"), dict) else {}
@@ -8025,6 +8285,38 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "latest_directional_spike_reversion_decision_trade_flow_vwap_minus_mid_bps": (
             latest_directional_spike_reversion.get("decision_trade_flow_vwap_minus_mid_bps")
         ),
+        "ai_runtime_effective_truth_status": ai_runtime_effective.get("status"),
+        "ai_runtime_effective_truth_smallest_missing_field": ai_runtime_effective.get(
+            "smallest_missing_field"
+        ),
+        "ai_runtime_effective_auth_required": ai_runtime_auth_gate.get("auth_required"),
+        "ai_runtime_effective_dashboard_status": ai_runtime_auth_gate.get("dashboard_status"),
+        "ai_runtime_endpoint_status": ai_runtime_auth_gate.get("ai_runtime_endpoint_status"),
+        "ai_runtime_endpoint_http_status": ai_runtime_auth_gate.get("ai_runtime_http_status"),
+        "ai_runtime_configured_operating_mode": ai_runtime_configured.get("value"),
+        "ai_runtime_configured_operating_mode_status": ai_runtime_configured.get("status"),
+        "ai_runtime_effective_operating_mode": ai_runtime_effective_mode.get("value"),
+        "ai_runtime_effective_operating_mode_status": ai_runtime_effective_mode.get("status"),
+        "ai_runtime_manual_override_status": ai_runtime_manual_override.get("status"),
+        "ai_runtime_manual_override_active": ai_runtime_manual_override.get("active"),
+        "ai_runtime_manual_override_mode": ai_runtime_manual_override.get("mode"),
+        "ai_runtime_provider_name": ai_runtime_provider.get("name"),
+        "ai_runtime_provider_state": ai_runtime_provider.get("state"),
+        "ai_runtime_provider_configured": ai_runtime_provider_configured.get("value"),
+        "ai_runtime_provider_configured_status": ai_runtime_provider_configured.get("status"),
+        "ai_runtime_provider_ready": ai_runtime_provider_ready.get("value"),
+        "ai_runtime_provider_ready_status": ai_runtime_provider_ready.get("status"),
+        "ai_runtime_provider_degraded": ai_runtime_provider_degraded.get("value"),
+        "ai_runtime_provider_degraded_status": ai_runtime_provider_degraded.get("status"),
+        "ai_runtime_provider_path_evidence_present": ai_runtime_provider.get(
+            "path_evidence_present"
+        ),
+        "ai_runtime_provider_path_active": ai_runtime_provider.get("path_active"),
+        "ai_runtime_shadow_enabled": ai_runtime_shadow.get("value"),
+        "ai_runtime_shadow_enabled_status": ai_runtime_shadow.get("status"),
+        "ai_runtime_profile_auto_control_effective": ai_runtime_profile_auto.get("value"),
+        "ai_runtime_profile_auto_control_status": ai_runtime_profile_auto.get("status"),
+        "ai_runtime_timeout_blocker_classification": ai_runtime_timeout.get("classification"),
         "effective_operating_mode": (dashboard.get("effective_operating_mode") or {}).get("value"),
         "effective_operating_mode_status": (dashboard.get("effective_operating_mode") or {}).get("status"),
         "profile_auto_control_effective": (dashboard.get("profile_auto_control_effective") or {}).get("value"),
@@ -8183,6 +8475,7 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "deployment_health": deployment_health(args.api_base, args.wsl_distro),
         "runtime": {
             "dashboard_bundle": dashboard_bundle_probe(args.api_base),
+            "ai_runtime_endpoint": ai_runtime_endpoint_probe(args.api_base),
             "artifact_last_known": artifact_projection["facts"],
             "artifact_last_known_sources": artifact_projection["sources"],
             "artifact_last_known_status": artifact_projection["status"],
@@ -8279,10 +8572,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             report_generated_at=generated_at,
         )
     )
-    report["runtime"]["ai_timeout_active_blocker"] = False
-    runtime_mode = report["runtime"]["dashboard_bundle"].get("effective_operating_mode", {})
-    if runtime_mode.get("value") not in (None, "baseline_only"):
-        report["runtime"]["ai_timeout_active_blocker"] = "requires_provider_path_evidence"
+    report["ai_runtime_effective_mode_truth"] = summarize_ai_runtime_effective_mode_truth(
+        dashboard_bundle=report["runtime"]["dashboard_bundle"],
+        ai_runtime_endpoint=report["runtime"]["ai_runtime_endpoint"],
+    )
+    report["runtime"]["ai_timeout_active_blocker"] = report["ai_runtime_effective_mode_truth"][
+        "ai_timeout"
+    ]["active_blocker"]
     live_facts = project_live_runtime_facts(report)
     apply_live_runtime_scope(report, live_facts)
     artifact_status = summarize_artifact_runtime_status(
