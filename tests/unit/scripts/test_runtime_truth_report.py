@@ -2568,6 +2568,130 @@ def test_decision_lifecycle_execution_science_continuity_reports_missing_termina
     assert truth["raw_payload_exposed"] is False
 
 
+def test_recent_directional_decision_chain_density_verifies_no_order_regime() -> None:
+    mod = load_module()
+
+    directional_attribution = {
+        "ok": True,
+        "status": "verified_directional_episode_no_order_expected",
+        "smallest_missing_field": None,
+        "coverage": {
+            "recent_decision_count": 24,
+            "decisions_with_order_surface_or_no_order_expectation": 24,
+            "decisions_missing_order_surface": 0,
+            "decisions_with_no_order_expected": 24,
+            "all_recent_decisions_no_order_expected": True,
+            "decisions_with_no_order_semantics": 24,
+            "decisions_with_stable_no_order_equivalence_class": 24,
+            "all_no_order_expected_decisions_have_no_order_semantics": True,
+            "all_no_order_expected_decisions_stable_equivalence_class": True,
+            "decisions_with_fills": 0,
+            "decisions_with_pnl_outcome": 0,
+            "filled_decisions_with_pnl_lifecycle_classification": 0,
+            "filled_decisions_with_resolved_pnl_lifecycle": 0,
+            "decisions_with_pretrade_microstructure": 24,
+            "filled_decisions_with_pretrade_microstructure": 0,
+        },
+        "no_order_semantics": {
+            "coverage": {
+                "all_no_order_expected_decisions_have_no_order_semantics": True,
+                "all_no_order_expected_decisions_stable_equivalence_class": True,
+            },
+        },
+        "recent_decisions": [
+            {
+                "decision_id": "decision_latest",
+                "created_at": "2026-04-30T17:50:00Z",
+                "route_action": "advisory_only",
+                "order_expectation": {
+                    "order_surface_present": False,
+                    "no_order_expected": True,
+                },
+                "no_order_semantics": {
+                    "status": "verified_directional_decision_no_order_expected_semantics",
+                },
+                "fill": {"count": 0},
+                "pnl_lifecycle": {},
+                "pretrade_microstructure": {
+                    "status": "verified_pretrade_microstructure_context_present",
+                },
+            },
+        ],
+    }
+
+    truth = mod.summarize_recent_directional_decision_chain_density_truth(
+        directional_attribution=directional_attribution,
+        decision_lifecycle_provenance_continuity={
+            "status": "verified_current_no_order_plus_executable_terminal_no_fill_continuity",
+            "smallest_missing_field": None,
+        },
+        decision_lifecycle_execution_science_continuity={
+            "status": "verified_no_order_terminal_no_fill_execution_science_continuity",
+            "smallest_missing_field": None,
+        },
+        directional_command_flow={
+            "status": "verified_current_directional_command_flow_fill_provenance_present",
+            "smallest_missing_field": None,
+            "current_command_path_reference_gap": False,
+        },
+    )
+
+    assert truth["ok"] is True
+    assert truth["status"] == "verified_recent_directional_decision_chain_density_no_order_regime"
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["coverage"]["recent_decision_count"] == 24
+    assert truth["coverage"]["all_recent_decisions_no_order_expected"] is True
+    assert truth["interpretation"]["waiting_for_executable_directional_episode"] is True
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+    assert truth["recent_decisions"][0]["decision_id"] == "decision_latest"
+    assert truth["recent_decisions"][0]["no_order_expected"] is True
+
+
+def test_recent_directional_decision_chain_density_reports_missing_order_surface() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_recent_directional_decision_chain_density_truth(
+        directional_attribution={
+            "ok": True,
+            "status": "missing_directional_episode_order_surface_or_no_order_expectation",
+            "smallest_missing_field": (
+                "directional_episode_attribution.order_surface_or_no_order_expectation"
+            ),
+            "coverage": {
+                "recent_decision_count": 1,
+                "decisions_with_order_surface_or_no_order_expectation": 0,
+                "decisions_missing_order_surface": 1,
+                "decisions_with_no_order_expected": 0,
+                "all_recent_decisions_no_order_expected": False,
+                "decisions_with_no_order_semantics": 0,
+                "decisions_with_stable_no_order_equivalence_class": 0,
+                "decisions_with_fills": 0,
+            },
+        },
+        decision_lifecycle_provenance_continuity={
+            "status": "verified_decision_lifecycle_provenance_continuity",
+            "smallest_missing_field": None,
+        },
+        decision_lifecycle_execution_science_continuity={
+            "status": "verified_decision_lifecycle_execution_science_continuity",
+            "smallest_missing_field": None,
+        },
+        directional_command_flow={
+            "smallest_missing_field": None,
+            "current_command_path_reference_gap": False,
+        },
+    )
+
+    assert truth["ok"] is False
+    assert truth["status"] == "missing_recent_directional_order_surface_or_no_order_expectation"
+    assert truth["smallest_missing_field"] == (
+        "directional_episode_attribution.order_surface_or_no_order_expectation"
+    )
+    assert truth["coverage"]["decisions_missing_order_surface"] == 1
+    assert truth["raw_payload_exposed"] is False
+
+
 def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science_continuity() -> None:
     mod = load_module()
     report = {
@@ -2652,6 +2776,61 @@ def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science
         "verified_slippage_cost_calibration_evidence_present"
     )
     assert live_facts["decision_lifecycle_execution_science_continuity_slippage_proxy_sample_count"] == 17
+
+
+def test_project_live_runtime_facts_exposes_recent_directional_decision_chain_density() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "recent_directional_decision_chain_density_truth": {
+            "status": "verified_recent_directional_decision_chain_density_no_order_regime",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "recent_decision_count": 24,
+                "decisions_with_order_surface_or_no_order_expectation": 24,
+                "decisions_missing_order_surface": 0,
+                "all_recent_decisions_no_order_expected": True,
+                "decisions_with_no_order_semantics": 24,
+                "decisions_with_fills": 0,
+                "decisions_with_pnl_outcome": 0,
+                "filled_decisions_with_resolved_pnl_lifecycle": 0,
+                "filled_decisions_with_pretrade_microstructure": 0,
+            },
+            "interpretation": {
+                "waiting_for_executable_directional_episode": True,
+                "not_alpha_or_profitability_evidence": True,
+            },
+            "latest_filled_decision": {
+                "decision_id": None,
+                "pnl_lifecycle_status": None,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["recent_directional_decision_chain_density_truth_status"] == (
+        "verified_recent_directional_decision_chain_density_no_order_regime"
+    )
+    assert live_facts["recent_directional_decision_chain_density_smallest_missing_field"] is None
+    assert live_facts["recent_directional_decision_chain_density_raw_payload_exposed"] is False
+    assert live_facts["recent_directional_chain_recent_decision_count"] == 24
+    assert live_facts["recent_directional_chain_order_surface_or_no_order_count"] == 24
+    assert live_facts["recent_directional_chain_decisions_missing_order_surface"] == 0
+    assert live_facts["recent_directional_chain_all_recent_decisions_no_order_expected"] is True
+    assert live_facts["recent_directional_chain_decisions_with_no_order_semantics"] == 24
+    assert live_facts["recent_directional_chain_decisions_with_fills"] == 0
+    assert live_facts["recent_directional_chain_waiting_for_executable_directional_episode"] is True
+    assert live_facts["recent_directional_chain_not_alpha_or_profitability_evidence"] is True
 
 
 def test_directional_episode_pnl_lifecycle_classifies_open_unrealized_position() -> None:

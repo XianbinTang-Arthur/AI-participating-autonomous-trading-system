@@ -7512,6 +7512,257 @@ def summarize_decision_lifecycle_execution_science_continuity_truth(
     }
 
 
+def summarize_recent_directional_decision_chain_density_truth(
+    *,
+    directional_attribution: dict[str, Any],
+    decision_lifecycle_provenance_continuity: dict[str, Any],
+    decision_lifecycle_execution_science_continuity: dict[str, Any],
+    directional_command_flow: dict[str, Any],
+) -> dict[str, Any]:
+    attribution = as_dict(directional_attribution)
+    lifecycle = as_dict(decision_lifecycle_provenance_continuity)
+    execution_science_continuity = as_dict(decision_lifecycle_execution_science_continuity)
+    command_flow = as_dict(directional_command_flow)
+    coverage = as_dict(attribution.get("coverage"))
+    no_order_semantics = as_dict(attribution.get("no_order_semantics"))
+    no_order_semantics_coverage = as_dict(no_order_semantics.get("coverage"))
+    latest_filled = as_dict(attribution.get("latest_filled_decision"))
+    latest_filled_fill = as_dict(latest_filled.get("fill"))
+    latest_filled_pnl = as_dict(latest_filled.get("pnl_lifecycle"))
+    latest_filled_pretrade = as_dict(latest_filled.get("pretrade_microstructure"))
+
+    recent_decision_count = int_or_zero(coverage.get("recent_decision_count"))
+    decisions_with_order_surface_or_no_order_expectation = int_or_zero(
+        coverage.get("decisions_with_order_surface_or_no_order_expectation")
+    )
+    decisions_missing_order_surface = int_or_zero(
+        coverage.get("decisions_missing_order_surface")
+    )
+    decisions_with_no_order_expected = int_or_zero(
+        coverage.get("decisions_with_no_order_expected")
+    )
+    decisions_with_no_order_semantics = int_or_zero(
+        coverage.get("decisions_with_no_order_semantics")
+    )
+    decisions_with_stable_no_order_equivalence_class = int_or_zero(
+        coverage.get("decisions_with_stable_no_order_equivalence_class")
+    )
+    decisions_with_fills = int_or_zero(coverage.get("decisions_with_fills"))
+    decisions_with_pnl_outcome = int_or_zero(coverage.get("decisions_with_pnl_outcome"))
+    decisions_with_pretrade_microstructure = int_or_zero(
+        coverage.get("decisions_with_pretrade_microstructure")
+    )
+    filled_decisions_with_pretrade_microstructure = int_or_zero(
+        coverage.get("filled_decisions_with_pretrade_microstructure")
+    )
+    filled_decisions_with_pnl_lifecycle_classification = int_or_zero(
+        coverage.get("filled_decisions_with_pnl_lifecycle_classification")
+    )
+    filled_decisions_with_resolved_pnl_lifecycle = int_or_zero(
+        coverage.get("filled_decisions_with_resolved_pnl_lifecycle")
+    )
+    all_recent_decisions_no_order_expected = (
+        coverage.get("all_recent_decisions_no_order_expected") is True
+    )
+    all_no_order_expected_have_semantics = (
+        coverage.get("all_no_order_expected_decisions_have_no_order_semantics") is True
+        or no_order_semantics_coverage.get(
+            "all_no_order_expected_decisions_have_no_order_semantics"
+        )
+        is True
+    )
+    all_no_order_expected_stable = (
+        coverage.get("all_no_order_expected_decisions_stable_equivalence_class") is True
+        or no_order_semantics_coverage.get(
+            "all_no_order_expected_decisions_stable_equivalence_class"
+        )
+        is True
+    )
+    lifecycle_ok = (
+        lifecycle.get("smallest_missing_field") is None
+        and lifecycle.get("status")
+        in {
+            "verified_current_no_order_plus_executable_terminal_no_fill_continuity",
+            "verified_decision_lifecycle_provenance_continuity",
+        }
+    )
+    execution_science_ok = (
+        execution_science_continuity.get("smallest_missing_field") is None
+        and execution_science_continuity.get("status")
+        in {
+            "verified_no_order_terminal_no_fill_execution_science_continuity",
+            "verified_decision_lifecycle_execution_science_continuity",
+        }
+    )
+    command_flow_ok = (
+        command_flow.get("smallest_missing_field") is None
+        and command_flow.get("current_command_path_reference_gap") is not True
+    )
+    filled_decisions_with_complete_pnl_lifecycle = (
+        decisions_with_fills > 0
+        and decisions_with_pnl_outcome >= decisions_with_fills
+        and filled_decisions_with_resolved_pnl_lifecycle >= decisions_with_fills
+    )
+    filled_decisions_with_complete_pretrade = (
+        decisions_with_fills > 0
+        and filled_decisions_with_pretrade_microstructure >= decisions_with_fills
+    )
+
+    if attribution.get("ok") is False:
+        status = "directional_episode_attribution_unavailable"
+        smallest_missing = (
+            attribution.get("smallest_missing_field") or "directional_episode_attribution_truth"
+        )
+        ok = False
+    elif recent_decision_count <= 0:
+        status = "no_recent_directional_decisions"
+        smallest_missing = "portfolio_allocation_decisions.directional"
+        ok = False
+    elif decisions_with_order_surface_or_no_order_expectation < recent_decision_count:
+        status = "missing_recent_directional_order_surface_or_no_order_expectation"
+        smallest_missing = "directional_episode_attribution.order_surface_or_no_order_expectation"
+        ok = False
+    elif all_recent_decisions_no_order_expected and not (
+        all_no_order_expected_have_semantics and all_no_order_expected_stable
+    ):
+        status = "missing_recent_directional_no_order_semantics"
+        smallest_missing = "directional_episode_attribution.no_order_semantics"
+        ok = False
+    elif not lifecycle_ok:
+        status = "missing_decision_lifecycle_provenance_continuity"
+        smallest_missing = "decision_lifecycle_provenance_continuity_truth"
+        ok = False
+    elif not execution_science_ok:
+        status = "missing_decision_lifecycle_execution_science_continuity"
+        smallest_missing = "decision_lifecycle_execution_science_continuity_truth"
+        ok = False
+    elif not command_flow_ok:
+        status = "missing_directional_command_flow_provenance_continuity"
+        smallest_missing = "directional_command_flow_provenance_truth"
+        ok = False
+    elif all_recent_decisions_no_order_expected:
+        status = "verified_recent_directional_decision_chain_density_no_order_regime"
+        smallest_missing = None
+        ok = True
+    elif decisions_with_fills <= 0:
+        status = "partial_recent_directional_decisions_without_fills"
+        smallest_missing = "execution_fills.directional_recent_decision"
+        ok = False
+    elif not filled_decisions_with_complete_pnl_lifecycle:
+        status = "partial_recent_directional_fills_without_complete_pnl_lifecycle"
+        smallest_missing = "directional_episode_attribution.filled_pnl_lifecycle"
+        ok = False
+    elif not filled_decisions_with_complete_pretrade:
+        status = "partial_recent_directional_fills_without_pretrade_microstructure"
+        smallest_missing = "directional_episode_attribution.filled_pretrade_microstructure"
+        ok = False
+    else:
+        status = "verified_recent_directional_decision_chain_density_with_fills"
+        smallest_missing = None
+        ok = True
+
+    recent_preview = []
+    for item in [as_dict(row) for row in as_list(attribution.get("recent_decisions"))[:8]]:
+        order_expectation = as_dict(item.get("order_expectation"))
+        no_order = as_dict(item.get("no_order_semantics"))
+        fill = as_dict(item.get("fill"))
+        pnl_lifecycle = as_dict(item.get("pnl_lifecycle"))
+        pretrade = as_dict(item.get("pretrade_microstructure"))
+        recent_preview.append(
+            {
+                "decision_id": item.get("decision_id"),
+                "created_at": item.get("created_at"),
+                "route_action": item.get("route_action"),
+                "order_surface_present": order_expectation.get("order_surface_present"),
+                "no_order_expected": order_expectation.get("no_order_expected"),
+                "no_order_semantics_status": no_order.get("status"),
+                "fill_count": int_or_zero(fill.get("count")),
+                "pnl_lifecycle_status": pnl_lifecycle.get("status"),
+                "pretrade_microstructure_status": pretrade.get("status"),
+            }
+        )
+
+    return {
+        "source": "directional_episode_attribution_truth.recent_decisions",
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "coverage": {
+            "recent_decision_count": recent_decision_count,
+            "decisions_with_order_surface_or_no_order_expectation": (
+                decisions_with_order_surface_or_no_order_expectation
+            ),
+            "decisions_missing_order_surface": decisions_missing_order_surface,
+            "decisions_with_no_order_expected": decisions_with_no_order_expected,
+            "all_recent_decisions_no_order_expected": all_recent_decisions_no_order_expected,
+            "decisions_with_no_order_semantics": decisions_with_no_order_semantics,
+            "decisions_with_stable_no_order_equivalence_class": (
+                decisions_with_stable_no_order_equivalence_class
+            ),
+            "all_no_order_expected_decisions_have_no_order_semantics": (
+                all_no_order_expected_have_semantics
+            ),
+            "all_no_order_expected_decisions_stable_equivalence_class": (
+                all_no_order_expected_stable
+            ),
+            "decisions_with_fills": decisions_with_fills,
+            "decisions_with_pnl_outcome": decisions_with_pnl_outcome,
+            "filled_decisions_with_pnl_lifecycle_classification": (
+                filled_decisions_with_pnl_lifecycle_classification
+            ),
+            "filled_decisions_with_resolved_pnl_lifecycle": (
+                filled_decisions_with_resolved_pnl_lifecycle
+            ),
+            "decisions_with_pretrade_microstructure": (
+                decisions_with_pretrade_microstructure
+            ),
+            "filled_decisions_with_pretrade_microstructure": (
+                filled_decisions_with_pretrade_microstructure
+            ),
+        },
+        "current_decision_continuity": {
+            "status": lifecycle.get("status"),
+            "smallest_missing_field": lifecycle.get("smallest_missing_field"),
+        },
+        "execution_science_continuity": {
+            "status": execution_science_continuity.get("status"),
+            "smallest_missing_field": execution_science_continuity.get("smallest_missing_field"),
+        },
+        "command_flow": {
+            "status": command_flow.get("status"),
+            "smallest_missing_field": command_flow.get("smallest_missing_field"),
+            "current_command_path_reference_gap": command_flow.get(
+                "current_command_path_reference_gap"
+            ),
+        },
+        "latest_filled_decision": {
+            "decision_id": latest_filled.get("decision_id"),
+            "classification": latest_filled.get("classification"),
+            "fill_count": int_or_zero(latest_filled_fill.get("count")),
+            "pnl_lifecycle_status": latest_filled_pnl.get("status"),
+            "pnl_lifecycle_smallest_missing_field": latest_filled_pnl.get(
+                "smallest_missing_field"
+            ),
+            "pretrade_microstructure_status": latest_filled_pretrade.get("status"),
+        },
+        "recent_decisions": recent_preview,
+        "interpretation": {
+            "no_order_expected_regime": all_recent_decisions_no_order_expected,
+            "waiting_for_executable_directional_episode": (
+                all_recent_decisions_no_order_expected and decisions_with_fills <= 0
+            ),
+            "filled_decisions_have_complete_pnl_lifecycle": (
+                filled_decisions_with_complete_pnl_lifecycle
+            ),
+            "filled_decisions_have_pretrade_microstructure": (
+                filled_decisions_with_complete_pretrade
+            ),
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -8293,6 +8544,18 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     decision_lifecycle_execution_science_slippage = as_dict(
         decision_lifecycle_execution_science.get("slippage_cost_calibration")
     )
+    recent_directional_chain_density = as_dict(
+        report.get("recent_directional_decision_chain_density_truth")
+    )
+    recent_directional_chain_density_coverage = as_dict(
+        recent_directional_chain_density.get("coverage")
+    )
+    recent_directional_chain_density_interpretation = as_dict(
+        recent_directional_chain_density.get("interpretation")
+    )
+    recent_directional_chain_density_latest_filled = as_dict(
+        recent_directional_chain_density.get("latest_filled_decision")
+    )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
     latest_directional_spike_reversion = as_dict(directional_spike_reversion.get("latest_filled_decision"))
@@ -8905,6 +9168,66 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "decision_lifecycle_execution_science_continuity_slippage_proxy_sample_count": (
             decision_lifecycle_execution_science_slippage.get("slippage_proxy_sample_count")
+        ),
+        "recent_directional_decision_chain_density_truth_status": (
+            recent_directional_chain_density.get("status")
+        ),
+        "recent_directional_decision_chain_density_smallest_missing_field": (
+            recent_directional_chain_density.get("smallest_missing_field")
+        ),
+        "recent_directional_decision_chain_density_raw_payload_exposed": (
+            recent_directional_chain_density.get("raw_payload_exposed")
+        ),
+        "recent_directional_chain_recent_decision_count": (
+            recent_directional_chain_density_coverage.get("recent_decision_count")
+        ),
+        "recent_directional_chain_order_surface_or_no_order_count": (
+            recent_directional_chain_density_coverage.get(
+                "decisions_with_order_surface_or_no_order_expectation"
+            )
+        ),
+        "recent_directional_chain_decisions_missing_order_surface": (
+            recent_directional_chain_density_coverage.get("decisions_missing_order_surface")
+        ),
+        "recent_directional_chain_all_recent_decisions_no_order_expected": (
+            recent_directional_chain_density_coverage.get(
+                "all_recent_decisions_no_order_expected"
+            )
+        ),
+        "recent_directional_chain_decisions_with_no_order_semantics": (
+            recent_directional_chain_density_coverage.get("decisions_with_no_order_semantics")
+        ),
+        "recent_directional_chain_decisions_with_fills": (
+            recent_directional_chain_density_coverage.get("decisions_with_fills")
+        ),
+        "recent_directional_chain_decisions_with_pnl_outcome": (
+            recent_directional_chain_density_coverage.get("decisions_with_pnl_outcome")
+        ),
+        "recent_directional_chain_filled_decisions_with_resolved_pnl_lifecycle": (
+            recent_directional_chain_density_coverage.get(
+                "filled_decisions_with_resolved_pnl_lifecycle"
+            )
+        ),
+        "recent_directional_chain_filled_decisions_with_pretrade_microstructure": (
+            recent_directional_chain_density_coverage.get(
+                "filled_decisions_with_pretrade_microstructure"
+            )
+        ),
+        "recent_directional_chain_waiting_for_executable_directional_episode": (
+            recent_directional_chain_density_interpretation.get(
+                "waiting_for_executable_directional_episode"
+            )
+        ),
+        "recent_directional_chain_not_alpha_or_profitability_evidence": (
+            recent_directional_chain_density_interpretation.get(
+                "not_alpha_or_profitability_evidence"
+            )
+        ),
+        "recent_directional_chain_latest_filled_decision_id": (
+            recent_directional_chain_density_latest_filled.get("decision_id")
+        ),
+        "recent_directional_chain_latest_filled_pnl_lifecycle_status": (
+            recent_directional_chain_density_latest_filled.get("pnl_lifecycle_status")
         ),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
@@ -9747,6 +10070,18 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             depth_slippage_lifecycle=report["depth_slippage_lifecycle_truth"],
             execution_science=report["execution_science_truth"],
             slippage_cost=report["slippage_cost_calibration_truth"],
+        )
+    )
+    report["recent_directional_decision_chain_density_truth"] = (
+        summarize_recent_directional_decision_chain_density_truth(
+            directional_attribution=report["directional_episode_attribution_truth"],
+            decision_lifecycle_provenance_continuity=report[
+                "decision_lifecycle_provenance_continuity_truth"
+            ],
+            decision_lifecycle_execution_science_continuity=report[
+                "decision_lifecycle_execution_science_continuity_truth"
+            ],
+            directional_command_flow=report["directional_command_flow_provenance_truth"],
         )
     )
     report["directional_spike_reversion_truth"] = summarize_directional_spike_reversion_truth(
