@@ -31,6 +31,8 @@ DEFAULT_API_BASE = "https://127.0.0.1:8011"
 DEFAULT_WSL_DISTRO = "Ubuntu"
 DEFAULT_WSL_PROJECT = "~/aats"
 DEFAULT_GATEWAY_CONTAINER = "aats-gateway"
+DEFAULT_MICROSTRUCTURE_CONTAINER = "aats-microstructure-collector"
+MICROSTRUCTURE_HEARTBEAT_PATH = "/tmp/aats_microstructure_heartbeat"
 REQUIRED_APP_CONTAINERS = (
     "aats-gateway",
     "aats-market",
@@ -65,6 +67,9 @@ ARTIFACT_STALE_AFTER_SECONDS = 1800
 ORDERBOOK_BRONZE_STALE_AFTER_SECONDS = 180
 ORDERBOOK_PAYLOAD_SEQUENCE_WINDOW_MINUTES = 30
 ORDERBOOK_SILVER_STALE_AFTER_SECONDS = 3600
+MICROSTRUCTURE_HEARTBEAT_STALE_AFTER_SECONDS = 60
+MICROSTRUCTURE_BRONZE_GROWTH_WINDOW_MINUTES = 5
+MICROSTRUCTURE_WORKFLOW_STALE_AFTER_SECONDS = 1800
 MICROSTRUCTURE_BAR_MATCH_MAX_AGE_SECONDS = ORDERBOOK_SILVER_STALE_AFTER_SECONDS
 ARTIFACT_COMPARE_FACTS = (
     "latest_decision_id",
@@ -1481,14 +1486,21 @@ def table_stats(conn, schema, table):
     if not exists:
         return stats
     row = conn.execute(
-        text(f"select count(*) as n, max(ts) as max_ts, min(ts) as min_ts from {name} where symbol=:symbol"),
-        {"symbol": symbol},
+        text(
+            f"select count(*) as n, max(ts) as max_ts, min(ts) as min_ts, "
+            f"count(*) filter (where ts >= now() - (:recent_minutes * interval '1 minute')) "
+            f"as recent_count "
+            f"from {name} where symbol=:symbol"
+        ),
+        {"symbol": symbol, "recent_minutes": 5},
     ).mappings().first()
     stats.update(
         {
             "count": int((row or {}).get("n") or 0),
             "max_ts": (row or {}).get("max_ts"),
             "min_ts": (row or {}).get("min_ts"),
+            "recent_window_minutes": 5,
+            "recent_count": int((row or {}).get("recent_count") or 0),
         }
     )
     return stats
@@ -1630,10 +1642,20 @@ def microstructure_workflow(conn):
             "where workflow='microstructure_silver_15m' and status in ('pending', 'running')"
         )
     ).scalar()
+    latest = conn.execute(
+        text(
+            "select task_id, workflow, status, exit_code, requested_at, started_at, finished_at, "
+            "       coalesce(finished_at, started_at, requested_at, created_at) as max_seen "
+            "from governance.rdp_task_queue "
+            "where workflow='microstructure_silver_15m' "
+            "order by coalesce(finished_at, started_at, requested_at, created_at) desc limit 1"
+        )
+    ).mappings().first()
     return {
         "exists": True,
         "active_count": int(active or 0),
         "status_counts": [dict(row) for row in rows],
+        "latest_task": dict(latest) if latest else None,
     }
 
 with engine.connect() as conn:
@@ -1643,11 +1665,15 @@ with engine.connect() as conn:
                 "ok": True,
                 "symbol": symbol,
                 "tables": {
+                    "bronze.market_trades": table_stats(conn, "bronze", "market_trades"),
                     "bronze.market_orderbook_bbo": table_stats(conn, "bronze", "market_orderbook_bbo"),
                     "bronze.market_orderbook_books5": table_stats(conn, "bronze", "market_orderbook_books5"),
                     "bronze.market_orderbook_payloads": table_stats(conn, "bronze", "market_orderbook_payloads"),
+                    "silver.market_liquidation_metrics_15m": table_stats(conn, "silver", "market_liquidation_metrics_15m"),
+                    "silver.market_oi_funding_metrics_15m": table_stats(conn, "silver", "market_oi_funding_metrics_15m"),
                     "silver.market_orderbook_metrics_15m": table_stats(conn, "silver", "market_orderbook_metrics_15m"),
                     "silver.market_trade_flow_15m": table_stats(conn, "silver", "market_trade_flow_15m"),
+                    "silver.market_volume_profile_15m": table_stats(conn, "silver", "market_volume_profile_15m"),
                 },
                 "latest_silver_orderbook": latest_silver_orderbook(conn),
                 "latest_silver_trade_flow": latest_silver_trade_flow(conn),
@@ -4845,6 +4871,118 @@ def rdp_microstructure_truth_probe(distro: str, gateway_container: str) -> dict[
     return parse_rdp_microstructure_probe(completed["stdout"], completed["stderr"])
 
 
+def microstructure_collector_truth_probe(distro: str, container: str) -> dict[str, Any]:
+    ps = run_command(
+        [
+            "wsl",
+            "-d",
+            distro,
+            "--",
+            "docker",
+            "ps",
+            "--filter",
+            f"name={container}",
+            "--format",
+            "{{.Names}}\t{{.Status}}",
+        ],
+        timeout=30,
+    )
+    status = None
+    if ps["ok"] and ps["stdout"].strip():
+        statuses = parse_docker_ps(ps["stdout"])
+        status = statuses.get(container) or next(iter(statuses.values()), None)
+    running = bool(status and status.startswith("Up"))
+    healthy = bool(status and "(healthy)" in status)
+
+    cmdline = None
+    if running:
+        cmdline_result = run_command(
+            [
+                "wsl",
+                "-d",
+                distro,
+                "--",
+                "docker",
+                "exec",
+                container,
+                "cat",
+                "/proc/1/cmdline",
+            ],
+            timeout=10,
+        )
+        if cmdline_result["ok"]:
+            cmdline = " ".join(part for part in cmdline_result["stdout"].replace("\x00", " ").split() if part)
+
+    heartbeat: dict[str, Any] = {
+        "path": MICROSTRUCTURE_HEARTBEAT_PATH,
+        "exists": False,
+        "fresh": False,
+        "age_seconds": None,
+        "stale_after_seconds": MICROSTRUCTURE_HEARTBEAT_STALE_AFTER_SECONDS,
+        "mtime_utc": None,
+    }
+    if running:
+        now_result = run_command(
+            ["wsl", "-d", distro, "--", "docker", "exec", container, "date", "+%s"],
+            timeout=10,
+        )
+        stat_result = run_command(
+            [
+                "wsl",
+                "-d",
+                distro,
+                "--",
+                "docker",
+                "exec",
+                container,
+                "stat",
+                "-c",
+                "%Y",
+                MICROSTRUCTURE_HEARTBEAT_PATH,
+            ],
+            timeout=10,
+        )
+        if now_result["ok"] and stat_result["ok"] and stat_result["stdout"].strip():
+            now_epoch = int_or_zero(now_result["stdout"])
+            mtime_epoch = int_or_zero(stat_result["stdout"])
+            age_seconds = max(0, now_epoch - mtime_epoch) if now_epoch and mtime_epoch else None
+            heartbeat.update(
+                {
+                    "exists": True,
+                    "mtime_epoch": mtime_epoch,
+                    "mtime_utc": (
+                        datetime.fromtimestamp(mtime_epoch, UTC)
+                        .replace(microsecond=0)
+                        .isoformat()
+                        .replace("+00:00", "Z")
+                        if mtime_epoch
+                        else None
+                    ),
+                    "age_seconds": age_seconds,
+                    "fresh": (
+                        age_seconds is not None
+                        and age_seconds <= MICROSTRUCTURE_HEARTBEAT_STALE_AFTER_SECONDS
+                    ),
+                }
+            )
+        elif stat_result["returncode"] not in (None, 0):
+            heartbeat["stat_error"] = redact_secret_text(stat_result["stderr"])
+
+    return {
+        "ok": bool(running and healthy),
+        "container": container,
+        "status": status or "missing",
+        "running": running,
+        "healthy": healthy,
+        "cmdline": redact_secret_text(cmdline) if cmdline else None,
+        "daemon_script_detected": bool(cmdline and "scripts/microstructure_ws_daemon.py" in cmdline),
+        "heartbeat": heartbeat,
+        "errors": {
+            "docker_ps": None if ps["ok"] else ps["stderr"],
+        },
+    }
+
+
 def int_or_zero(value: Any) -> int:
     try:
         return int(value or 0)
@@ -5520,6 +5658,8 @@ def summarize_microstructure_table(
         "latest_ts": latest_ts,
         "age_seconds": age_seconds,
         "stale_after_seconds": stale_after_seconds,
+        "recent_window_minutes": raw.get("recent_window_minutes"),
+        "recent_count": int_or_zero(raw.get("recent_count")),
         "status": status,
     }
 
@@ -5879,6 +6019,207 @@ def summarize_execution_science_truth(
             if smallest_missing is None
             else "blocked_missing_orderbook_truth"
         ),
+    }
+
+
+def summarize_microstructure_runtime_growth_truth(
+    collector: dict[str, Any],
+    raw: dict[str, Any],
+    execution_science: dict[str, Any],
+    *,
+    report_generated_at: str,
+) -> dict[str, Any]:
+    if not raw.get("ok"):
+        return {
+            "source": "microstructure_collector_and_rdp",
+            "ok": False,
+            "status": "rdp_microstructure_unavailable",
+            "smallest_missing_field": "rdp_microstructure_probe",
+            "raw_payload_exposed": False,
+            "reason": raw.get("reason"),
+        }
+
+    tables = raw.get("tables") if isinstance(raw.get("tables"), dict) else {}
+
+    def _table(name: str, stale_after_seconds: int) -> dict[str, Any]:
+        return summarize_microstructure_table(
+            as_dict(tables.get(name)),
+            report_generated_at=report_generated_at,
+            stale_after_seconds=stale_after_seconds,
+        )
+
+    bronze_tables = {
+        "market_trades": _table("bronze.market_trades", ORDERBOOK_BRONZE_STALE_AFTER_SECONDS),
+        "market_orderbook_bbo": _table(
+            "bronze.market_orderbook_bbo",
+            ORDERBOOK_BRONZE_STALE_AFTER_SECONDS,
+        ),
+        "market_orderbook_books5": _table(
+            "bronze.market_orderbook_books5",
+            ORDERBOOK_BRONZE_STALE_AFTER_SECONDS,
+        ),
+        "market_orderbook_payloads": _table(
+            "bronze.market_orderbook_payloads",
+            ORDERBOOK_BRONZE_STALE_AFTER_SECONDS,
+        ),
+    }
+    silver_tables = {
+        "market_liquidation_metrics_15m": _table(
+            "silver.market_liquidation_metrics_15m",
+            ORDERBOOK_SILVER_STALE_AFTER_SECONDS,
+        ),
+        "market_oi_funding_metrics_15m": _table(
+            "silver.market_oi_funding_metrics_15m",
+            ORDERBOOK_SILVER_STALE_AFTER_SECONDS,
+        ),
+        "market_orderbook_metrics_15m": _table(
+            "silver.market_orderbook_metrics_15m",
+            ORDERBOOK_SILVER_STALE_AFTER_SECONDS,
+        ),
+        "market_trade_flow_15m": _table(
+            "silver.market_trade_flow_15m",
+            ORDERBOOK_SILVER_STALE_AFTER_SECONDS,
+        ),
+        "market_volume_profile_15m": _table(
+            "silver.market_volume_profile_15m",
+            ORDERBOOK_SILVER_STALE_AFTER_SECONDS,
+        ),
+    }
+
+    workflow = as_dict(raw.get("workflow"))
+    latest_task = as_dict(workflow.get("latest_task"))
+    report_time = parse_utc_timestamp(report_generated_at)
+    workflow_seen = latest_task.get("max_seen")
+    workflow_seen_time = parse_utc_timestamp(str(workflow_seen)) if workflow_seen is not None else None
+    workflow_age_seconds = seconds_between(workflow_seen_time, report_time)
+    latest_done = latest_task.get("status") == "done" and int_or_zero(latest_task.get("exit_code")) == 0
+    workflow_recent = (
+        workflow_age_seconds is not None
+        and workflow_age_seconds <= MICROSTRUCTURE_WORKFLOW_STALE_AFTER_SECONDS
+    )
+    if latest_done and workflow_recent:
+        workflow_status = "latest_done_recent"
+    elif latest_done:
+        workflow_status = "latest_done_stale"
+    elif latest_task:
+        workflow_status = "latest_not_done"
+    else:
+        workflow_status = "missing_latest_task"
+
+    heartbeat = as_dict(collector.get("heartbeat"))
+    payload_sequence = as_dict(execution_science.get("payload_sequence"))
+    bronze_growth = {
+        key: {
+            "fresh": value.get("status") == "fresh",
+            "recent_rows": int_or_zero(value.get("recent_count")),
+            "recent_window_minutes": value.get("recent_window_minutes"),
+            "latest_ts": value.get("latest_ts"),
+            "age_seconds": value.get("age_seconds"),
+            "status": value.get("status"),
+        }
+        for key, value in bronze_tables.items()
+    }
+    silver_update = {
+        key: {
+            "fresh": value.get("status") == "fresh",
+            "latest_ts": value.get("latest_ts"),
+            "age_seconds": value.get("age_seconds"),
+            "status": value.get("status"),
+        }
+        for key, value in silver_tables.items()
+    }
+
+    checks = [
+        ("microstructure_ws_daemon.running", bool(collector.get("running"))),
+        ("microstructure_ws_daemon.healthy", bool(collector.get("healthy"))),
+        ("microstructure_ws_daemon.script", bool(collector.get("daemon_script_detected"))),
+        ("microstructure_ws_daemon.heartbeat", bool(heartbeat.get("fresh"))),
+        (
+            "bronze.market_trades.recent_growth",
+            bronze_growth["market_trades"]["fresh"]
+            and bronze_growth["market_trades"]["recent_rows"] > 0,
+        ),
+        (
+            "bronze.market_orderbook_bbo.recent_growth",
+            bronze_growth["market_orderbook_bbo"]["fresh"]
+            and bronze_growth["market_orderbook_bbo"]["recent_rows"] > 0,
+        ),
+        (
+            "bronze.market_orderbook_books5.recent_growth",
+            bronze_growth["market_orderbook_books5"]["fresh"]
+            and bronze_growth["market_orderbook_books5"]["recent_rows"] > 0,
+        ),
+        (
+            "bronze.market_orderbook_payloads.recent_growth",
+            bronze_growth["market_orderbook_payloads"]["fresh"]
+            and bronze_growth["market_orderbook_payloads"]["recent_rows"] > 0,
+        ),
+        ("bronze.market_orderbook_payloads.sequence", payload_sequence.get("status") == "sequence_continuous"),
+        ("governance.microstructure_silver_15m.latest_done", latest_done),
+        ("governance.microstructure_silver_15m.recent", workflow_recent),
+        *[
+            (f"silver.{name}.fresh", value["fresh"])
+            for name, value in silver_update.items()
+        ],
+    ]
+    smallest_missing = next((field for field, passed in checks if not passed), None)
+    if smallest_missing is None:
+        status = "verified_microstructure_runtime_growth"
+    elif not bool(collector.get("running")) or not bool(heartbeat.get("fresh")):
+        status = "collector_not_fresh"
+    elif any(not item["fresh"] or item["recent_rows"] <= 0 for item in bronze_growth.values()):
+        status = "bronze_not_growing"
+    elif not latest_done or not workflow_recent:
+        status = "silver_workflow_not_recent_done"
+    elif any(not item["fresh"] for item in silver_update.values()):
+        status = "silver_not_fresh"
+    else:
+        status = "microstructure_growth_incomplete"
+
+    return {
+        "source": "microstructure_collector_and_rdp",
+        "ok": smallest_missing is None,
+        "symbol": raw.get("symbol"),
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "collector": {
+            "container": collector.get("container"),
+            "status": collector.get("status"),
+            "running": bool(collector.get("running")),
+            "healthy": bool(collector.get("healthy")),
+            "daemon_script_detected": bool(collector.get("daemon_script_detected")),
+            "heartbeat_exists": bool(heartbeat.get("exists")),
+            "heartbeat_fresh": bool(heartbeat.get("fresh")),
+            "heartbeat_age_seconds": heartbeat.get("age_seconds"),
+            "heartbeat_stale_after_seconds": heartbeat.get("stale_after_seconds"),
+            "heartbeat_mtime_utc": heartbeat.get("mtime_utc"),
+        },
+        "bronze_growth": bronze_growth,
+        "payload_sequence": {
+            "status": payload_sequence.get("status"),
+            "window_minutes": payload_sequence.get("window_minutes"),
+            "row_count": payload_sequence.get("row_count"),
+            "sequence_gap_count": payload_sequence.get("sequence_gap_count"),
+            "latest_ts": payload_sequence.get("latest_ts"),
+            "age_seconds": payload_sequence.get("age_seconds"),
+        },
+        "silver_workflow": {
+            "status": workflow_status,
+            "latest_task_id": latest_task.get("task_id"),
+            "latest_task_status": latest_task.get("status"),
+            "latest_exit_code": latest_task.get("exit_code"),
+            "latest_seen_at": workflow_seen,
+            "latest_age_seconds": workflow_age_seconds,
+            "stale_after_seconds": MICROSTRUCTURE_WORKFLOW_STALE_AFTER_SECONDS,
+            "active_count": int_or_zero(workflow.get("active_count")),
+        },
+        "silver_update": silver_update,
+        "interpretation": {
+            "evidence_scope": "collector_heartbeat_plus_rdp_bronze_and_silver_freshness",
+            "not_alpha_or_profitability_evidence": True,
+            "raw_payload_exposed": False,
+        },
     }
 
 
@@ -7768,6 +8109,16 @@ def summarize_claimed_submit_operator_handoff_truth(
 def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     db = report.get("database_truth") or {}
     execution_science = as_dict(report.get("execution_science_truth"))
+    microstructure_runtime_growth = as_dict(report.get("microstructure_runtime_growth_truth"))
+    microstructure_growth_collector = as_dict(microstructure_runtime_growth.get("collector"))
+    microstructure_growth_bronze = as_dict(microstructure_runtime_growth.get("bronze_growth"))
+    microstructure_growth_payload_sequence = as_dict(
+        microstructure_runtime_growth.get("payload_sequence")
+    )
+    microstructure_growth_workflow = as_dict(
+        microstructure_runtime_growth.get("silver_workflow")
+    )
+    microstructure_growth_silver = as_dict(microstructure_runtime_growth.get("silver_update"))
     orderbook_payload_depth = as_dict(report.get("orderbook_payload_depth_truth"))
     orderbook_payload_depth_books5 = as_dict(orderbook_payload_depth.get("books5_payload"))
     orderbook_payload_depth_bbo = as_dict(orderbook_payload_depth.get("bbo_payload"))
@@ -8273,6 +8624,89 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "execution_command_flow_flag_present": runtime_config.get("execution_command_flow_flag_present"),
         "execution_science_truth_status": execution_science.get("status"),
         "execution_science_smallest_missing_field": execution_science.get("smallest_missing_field"),
+        "microstructure_runtime_growth_status": microstructure_runtime_growth.get("status"),
+        "microstructure_runtime_growth_smallest_missing_field": (
+            microstructure_runtime_growth.get("smallest_missing_field")
+        ),
+        "microstructure_runtime_growth_raw_payload_exposed": (
+            microstructure_runtime_growth.get("raw_payload_exposed")
+        ),
+        "microstructure_collector_container": microstructure_growth_collector.get("container"),
+        "microstructure_collector_status": microstructure_growth_collector.get("status"),
+        "microstructure_collector_running": microstructure_growth_collector.get("running"),
+        "microstructure_collector_healthy": microstructure_growth_collector.get("healthy"),
+        "microstructure_collector_daemon_script_detected": (
+            microstructure_growth_collector.get("daemon_script_detected")
+        ),
+        "microstructure_heartbeat_exists": microstructure_growth_collector.get("heartbeat_exists"),
+        "microstructure_heartbeat_fresh": microstructure_growth_collector.get("heartbeat_fresh"),
+        "microstructure_heartbeat_age_seconds": (
+            microstructure_growth_collector.get("heartbeat_age_seconds")
+        ),
+        "microstructure_heartbeat_stale_after_seconds": (
+            microstructure_growth_collector.get("heartbeat_stale_after_seconds")
+        ),
+        "microstructure_heartbeat_mtime_utc": (
+            microstructure_growth_collector.get("heartbeat_mtime_utc")
+        ),
+        "microstructure_bronze_market_trades_recent_rows": (
+            as_dict(microstructure_growth_bronze.get("market_trades")).get("recent_rows")
+        ),
+        "microstructure_bronze_market_trades_latest_ts": (
+            as_dict(microstructure_growth_bronze.get("market_trades")).get("latest_ts")
+        ),
+        "microstructure_bronze_market_orderbook_bbo_recent_rows": (
+            as_dict(microstructure_growth_bronze.get("market_orderbook_bbo")).get("recent_rows")
+        ),
+        "microstructure_bronze_market_orderbook_bbo_latest_ts": (
+            as_dict(microstructure_growth_bronze.get("market_orderbook_bbo")).get("latest_ts")
+        ),
+        "microstructure_bronze_market_orderbook_books5_recent_rows": (
+            as_dict(microstructure_growth_bronze.get("market_orderbook_books5")).get("recent_rows")
+        ),
+        "microstructure_bronze_market_orderbook_books5_latest_ts": (
+            as_dict(microstructure_growth_bronze.get("market_orderbook_books5")).get("latest_ts")
+        ),
+        "microstructure_bronze_market_orderbook_payloads_recent_rows": (
+            as_dict(microstructure_growth_bronze.get("market_orderbook_payloads")).get("recent_rows")
+        ),
+        "microstructure_bronze_market_orderbook_payloads_latest_ts": (
+            as_dict(microstructure_growth_bronze.get("market_orderbook_payloads")).get("latest_ts")
+        ),
+        "microstructure_payload_sequence_status": (
+            microstructure_growth_payload_sequence.get("status")
+        ),
+        "microstructure_payload_sequence_gap_count": (
+            microstructure_growth_payload_sequence.get("sequence_gap_count")
+        ),
+        "microstructure_payload_sequence_window_minutes": (
+            microstructure_growth_payload_sequence.get("window_minutes")
+        ),
+        "microstructure_silver_workflow_status": microstructure_growth_workflow.get("status"),
+        "microstructure_silver_workflow_latest_task_status": (
+            microstructure_growth_workflow.get("latest_task_status")
+        ),
+        "microstructure_silver_workflow_latest_exit_code": (
+            microstructure_growth_workflow.get("latest_exit_code")
+        ),
+        "microstructure_silver_workflow_latest_age_seconds": (
+            microstructure_growth_workflow.get("latest_age_seconds")
+        ),
+        "microstructure_silver_market_liquidation_metrics_15m_latest_ts": (
+            as_dict(microstructure_growth_silver.get("market_liquidation_metrics_15m")).get("latest_ts")
+        ),
+        "microstructure_silver_market_oi_funding_metrics_15m_latest_ts": (
+            as_dict(microstructure_growth_silver.get("market_oi_funding_metrics_15m")).get("latest_ts")
+        ),
+        "microstructure_silver_market_orderbook_metrics_15m_latest_ts": (
+            as_dict(microstructure_growth_silver.get("market_orderbook_metrics_15m")).get("latest_ts")
+        ),
+        "microstructure_silver_market_trade_flow_15m_latest_ts": (
+            as_dict(microstructure_growth_silver.get("market_trade_flow_15m")).get("latest_ts")
+        ),
+        "microstructure_silver_market_volume_profile_15m_latest_ts": (
+            as_dict(microstructure_growth_silver.get("market_volume_profile_15m")).get("latest_ts")
+        ),
         "orderbook_sequence_validation_status": (
             as_dict(execution_science.get("payload_sequence")).get("status")
         ),
@@ -9181,10 +9615,20 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         },
         "database_truth": database_truth_probe(args.wsl_distro, args.gateway_container),
         "rdp_microstructure_truth": rdp_microstructure_truth_probe(args.wsl_distro, args.gateway_container),
+        "microstructure_collector_truth": microstructure_collector_truth_probe(
+            args.wsl_distro,
+            args.microstructure_container,
+        ),
         "static_truth_surface": static_truth_surface(args.api_base),
     }
     report["execution_science_truth"] = summarize_execution_science_truth(
         report["rdp_microstructure_truth"],
+        report_generated_at=generated_at,
+    )
+    report["microstructure_runtime_growth_truth"] = summarize_microstructure_runtime_growth_truth(
+        report["microstructure_collector_truth"],
+        report["rdp_microstructure_truth"],
+        report["execution_science_truth"],
         report_generated_at=generated_at,
     )
     report["orderbook_payload_depth_truth"] = summarize_orderbook_payload_depth_truth(
@@ -9330,6 +9774,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--gateway-container",
         default=DEFAULT_GATEWAY_CONTAINER,
         help="Gateway container name used for env-loaded DB probe.",
+    )
+    parser.add_argument(
+        "--microstructure-container",
+        default=DEFAULT_MICROSTRUCTURE_CONTAINER,
+        help="Microstructure collector container used for daemon heartbeat checks.",
     )
     parser.add_argument(
         "--operator-read-api-key-env",

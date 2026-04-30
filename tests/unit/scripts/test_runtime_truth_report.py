@@ -1052,6 +1052,157 @@ def test_execution_science_truth_reports_smallest_missing_orderbook_field() -> N
     assert summary["fill_feasibility_truth_status"] == "blocked_missing_orderbook_truth"
 
 
+def microstructure_runtime_growth_inputs() -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    table = {
+        "exists": True,
+        "count": 10,
+        "min_ts": "2026-04-30T15:00:00Z",
+        "max_ts": "2026-04-30T15:34:55Z",
+        "recent_window_minutes": 5,
+        "recent_count": 3,
+    }
+    silver_table = {
+        "exists": True,
+        "count": 4,
+        "min_ts": "2026-04-30T14:00:00Z",
+        "max_ts": "2026-04-30T15:30:00Z",
+        "recent_window_minutes": 5,
+        "recent_count": 0,
+    }
+    collector = {
+        "container": "aats-microstructure-collector",
+        "status": "Up 2 minutes (healthy)",
+        "running": True,
+        "healthy": True,
+        "daemon_script_detected": True,
+        "heartbeat": {
+            "exists": True,
+            "fresh": True,
+            "age_seconds": 2,
+            "stale_after_seconds": 60,
+            "mtime_utc": "2026-04-30T15:34:58Z",
+        },
+    }
+    raw = {
+        "ok": True,
+        "symbol": "BTC-USDT-SWAP",
+        "tables": {
+            "bronze.market_trades": table,
+            "bronze.market_orderbook_bbo": table,
+            "bronze.market_orderbook_books5": table,
+            "bronze.market_orderbook_payloads": table,
+            "silver.market_liquidation_metrics_15m": silver_table,
+            "silver.market_oi_funding_metrics_15m": silver_table,
+            "silver.market_orderbook_metrics_15m": silver_table,
+            "silver.market_trade_flow_15m": silver_table,
+            "silver.market_volume_profile_15m": silver_table,
+        },
+        "workflow": {
+            "exists": True,
+            "active_count": 0,
+            "latest_task": {
+                "task_id": 42,
+                "workflow": "microstructure_silver_15m",
+                "status": "done",
+                "exit_code": 0,
+                "max_seen": "2026-04-30T15:34:00Z",
+            },
+        },
+    }
+    execution_science = {
+        "payload_sequence": {
+            "status": "sequence_continuous",
+            "window_minutes": 30,
+            "row_count": 120,
+            "sequence_gap_count": 0,
+            "latest_ts": "2026-04-30T15:34:55Z",
+            "age_seconds": 5,
+        },
+    }
+    return collector, raw, execution_science
+
+
+def test_microstructure_runtime_growth_truth_verifies_collector_bronze_silver_growth() -> None:
+    mod = load_module()
+    collector, raw, execution_science = microstructure_runtime_growth_inputs()
+
+    truth = mod.summarize_microstructure_runtime_growth_truth(
+        collector,
+        raw,
+        execution_science,
+        report_generated_at="2026-04-30T15:35:00Z",
+    )
+
+    assert truth["status"] == "verified_microstructure_runtime_growth"
+    assert truth["smallest_missing_field"] is None
+    assert truth["collector"]["heartbeat_fresh"] is True
+    assert truth["bronze_growth"]["market_trades"]["recent_rows"] == 3
+    assert truth["bronze_growth"]["market_orderbook_payloads"]["fresh"] is True
+    assert truth["payload_sequence"]["sequence_gap_count"] == 0
+    assert truth["silver_workflow"]["status"] == "latest_done_recent"
+    assert truth["silver_update"]["market_trade_flow_15m"]["fresh"] is True
+    assert truth["interpretation"]["raw_payload_exposed"] is False
+
+
+def test_microstructure_runtime_growth_truth_blocks_stale_heartbeat_before_db_checks() -> None:
+    mod = load_module()
+    collector, raw, execution_science = microstructure_runtime_growth_inputs()
+    collector["heartbeat"] = {
+        "exists": True,
+        "fresh": False,
+        "age_seconds": 90,
+        "stale_after_seconds": 60,
+        "mtime_utc": "2026-04-30T15:33:30Z",
+    }
+
+    truth = mod.summarize_microstructure_runtime_growth_truth(
+        collector,
+        raw,
+        execution_science,
+        report_generated_at="2026-04-30T15:35:00Z",
+    )
+
+    assert truth["ok"] is False
+    assert truth["status"] == "collector_not_fresh"
+    assert truth["smallest_missing_field"] == "microstructure_ws_daemon.heartbeat"
+    assert truth["collector"]["heartbeat_age_seconds"] == 90
+
+
+def test_project_live_runtime_facts_exposes_microstructure_runtime_growth_truth() -> None:
+    mod = load_module()
+    collector, raw, execution_science = microstructure_runtime_growth_inputs()
+    truth = mod.summarize_microstructure_runtime_growth_truth(
+        collector,
+        raw,
+        execution_science,
+        report_generated_at="2026-04-30T15:35:00Z",
+    )
+
+    live_facts = mod.project_live_runtime_facts(
+        {
+            "database_truth": {"ok": True, "latest_decision": {}},
+            "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+            "scope": {"shadow_benchmark": "none_verified"},
+            "microstructure_runtime_growth_truth": truth,
+            "git": {},
+            "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+        },
+    )
+
+    assert live_facts["microstructure_runtime_growth_status"] == (
+        "verified_microstructure_runtime_growth"
+    )
+    assert live_facts["microstructure_runtime_growth_raw_payload_exposed"] is False
+    assert live_facts["microstructure_collector_running"] is True
+    assert live_facts["microstructure_heartbeat_fresh"] is True
+    assert live_facts["microstructure_bronze_market_trades_recent_rows"] == 3
+    assert live_facts["microstructure_payload_sequence_status"] == "sequence_continuous"
+    assert live_facts["microstructure_silver_workflow_status"] == "latest_done_recent"
+    assert live_facts["microstructure_silver_market_trade_flow_15m_latest_ts"] == (
+        "2026-04-30T15:30:00Z"
+    )
+
+
 def test_orderbook_payload_depth_truth_verifies_books5_sidecar_evidence() -> None:
     mod = load_module()
     raw = {
