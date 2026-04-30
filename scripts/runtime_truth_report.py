@@ -3005,6 +3005,64 @@ def classify_directional_episode_row(row: dict[str, Any]) -> str:
 
 
 NO_ORDER_ROUTE_ACTIONS = {"advisory_only", "hold_current"}
+VERIFIED_PRIMARY_CANDIDATE_NO_ORDER_ROOTS = {
+    "primary_candidate_hold_current_zero_delta",
+    "primary_candidate_advisory_zero_delta",
+    "primary_candidate_advisory_only_suppressed_after_approval",
+    "primary_candidate_zero_delta",
+}
+
+
+def classify_primary_candidate_no_order_semantics(primary_candidate: dict[str, Any]) -> dict[str, Any]:
+    root_cause = primary_candidate.get("no_order_root_cause")
+    order_expected = primary_candidate.get("order_expected_from_primary_candidate")
+    smallest_missing = primary_candidate.get("smallest_missing_field")
+
+    if (
+        order_expected is False
+        and smallest_missing is None
+        and root_cause in VERIFIED_PRIMARY_CANDIDATE_NO_ORDER_ROOTS
+    ):
+        return {
+            "status": "verified_primary_candidate_no_order_expected_semantics",
+            "equivalence_class": "verified_non_executable_no_order_expected",
+            "root_cause": root_cause,
+            "root_cause_is_material_without_order_or_fill_change": False,
+            "requires_order_or_fill_change_for_materiality": True,
+            "reason": (
+                "The primary candidate is verified as no-order expected; root switches inside this "
+                "equivalence class are runtime semantics changes, not order/fill materiality."
+            ),
+        }
+
+    if order_expected is True:
+        return {
+            "status": "primary_candidate_order_expected",
+            "equivalence_class": "order_expected",
+            "root_cause": root_cause,
+            "root_cause_is_material_without_order_or_fill_change": True,
+            "requires_order_or_fill_change_for_materiality": False,
+            "reason": "The primary candidate expects an order, so no-order root equivalence does not apply.",
+        }
+
+    if root_cause:
+        return {
+            "status": "primary_candidate_no_order_root_not_semantically_equivalent",
+            "equivalence_class": "root_specific_no_order",
+            "root_cause": root_cause,
+            "root_cause_is_material_without_order_or_fill_change": True,
+            "requires_order_or_fill_change_for_materiality": False,
+            "reason": "The root cause is specific and not in the verified no-order equivalence class.",
+        }
+
+    return {
+        "status": "missing_primary_candidate_no_order_root_semantics",
+        "equivalence_class": None,
+        "root_cause": root_cause,
+        "root_cause_is_material_without_order_or_fill_change": None,
+        "requires_order_or_fill_change_for_materiality": None,
+        "reason": "The primary candidate no-order root could not be classified from available truth.",
+    }
 
 
 def classify_directional_episode_order_expectation(decision: dict[str, Any]) -> dict[str, Any]:
@@ -5760,6 +5818,9 @@ def summarize_latest_decision_fill_feasibility_truth(
     truth_chain = as_dict(latest.get("execution_truth_chain"))
     no_trade = as_dict(latest.get("no_trade_attribution"))
     primary_candidate = as_dict(no_trade.get("primary_family_candidate_truth"))
+    primary_candidate_no_order_semantics = classify_primary_candidate_no_order_semantics(
+        primary_candidate
+    )
     recent_decision = next(
         (
             as_dict(item)
@@ -5819,6 +5880,7 @@ def summarize_latest_decision_fill_feasibility_truth(
                 "order_expected_from_primary_candidate"
             ),
             "primary_candidate_no_order_root_cause": primary_candidate.get("no_order_root_cause"),
+            "primary_candidate_no_order_semantics": primary_candidate_no_order_semantics,
             "primary_candidate_smallest_missing_field": primary_candidate.get("smallest_missing_field"),
         },
         "pretrade_microstructure": {
@@ -6339,6 +6401,9 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     )
     no_trade = latest.get("no_trade_attribution") if isinstance(latest.get("no_trade_attribution"), dict) else {}
     latest_primary_candidate_truth = as_dict(no_trade.get("primary_family_candidate_truth"))
+    latest_primary_candidate_no_order_semantics = classify_primary_candidate_no_order_semantics(
+        latest_primary_candidate_truth
+    )
     latest_truth_chain = latest.get("execution_truth_chain") or {}
     latest_terminal_no_fill = as_dict(latest_truth_chain.get("terminal_no_fill_explanation"))
     executable_truth_chain = latest_executable_directional.get("execution_truth_chain") or {}
@@ -6385,6 +6450,22 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_decision_primary_candidate_no_order_root_cause": latest_primary_candidate_truth.get(
             "no_order_root_cause"
+        ),
+        "latest_decision_primary_candidate_no_order_semantic_status": (
+            latest_primary_candidate_no_order_semantics.get("status")
+        ),
+        "latest_decision_primary_candidate_no_order_equivalence_class": (
+            latest_primary_candidate_no_order_semantics.get("equivalence_class")
+        ),
+        "latest_decision_primary_candidate_no_order_root_material_without_order_or_fill_change": (
+            latest_primary_candidate_no_order_semantics.get(
+                "root_cause_is_material_without_order_or_fill_change"
+            )
+        ),
+        "latest_decision_primary_candidate_no_order_requires_order_or_fill_change_for_materiality": (
+            latest_primary_candidate_no_order_semantics.get(
+                "requires_order_or_fill_change_for_materiality"
+            )
         ),
         "latest_decision_primary_candidate_execution_compatible": latest_primary_candidate_truth.get(
             "candidate_execution_compatible"

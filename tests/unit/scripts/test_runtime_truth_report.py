@@ -1458,6 +1458,9 @@ def test_latest_decision_fill_feasibility_marks_no_order_not_applicable_with_con
     assert truth["fill_feasibility_applicable"] is False
     assert truth["order_expected"] is False
     assert truth["fill_expected"] is False
+    assert truth["no_order"]["primary_candidate_no_order_semantics"]["status"] == (
+        "missing_primary_candidate_no_order_root_semantics"
+    )
     assert truth["pretrade_microstructure"]["status"] == "verified_pretrade_microstructure_context_present"
     assert truth["pretrade_microstructure"]["orderbook"]["books5_samples_n"] == 1568
     assert truth["pretrade_microstructure"]["trade_flow"]["trade_count"] == 15454
@@ -3184,6 +3187,24 @@ def test_project_live_runtime_facts_exposes_primary_candidate_truth() -> None:
     assert live_facts["latest_decision_primary_candidate_no_order_root_cause"] == (
         "primary_candidate_hold_current_zero_delta"
     )
+    assert live_facts["latest_decision_primary_candidate_no_order_semantic_status"] == (
+        "verified_primary_candidate_no_order_expected_semantics"
+    )
+    assert live_facts["latest_decision_primary_candidate_no_order_equivalence_class"] == (
+        "verified_non_executable_no_order_expected"
+    )
+    assert (
+        live_facts[
+            "latest_decision_primary_candidate_no_order_root_material_without_order_or_fill_change"
+        ]
+        is False
+    )
+    assert (
+        live_facts[
+            "latest_decision_primary_candidate_no_order_requires_order_or_fill_change_for_materiality"
+        ]
+        is True
+    )
     assert live_facts["latest_decision_primary_candidate_execution_compatible"] is True
     assert live_facts["latest_decision_primary_candidate_global_primary_blocker"] == (
         "candidate_execution_incompatible"
@@ -3207,6 +3228,34 @@ def test_project_live_runtime_facts_exposes_primary_candidate_truth() -> None:
     assert live_facts["latest_decision_fill_feasibility_orderbook_spread_bps_mean"] == "0.0132"
     assert live_facts["latest_decision_fill_feasibility_trade_count"] == 15454
     assert live_facts["latest_decision_fill_feasibility_vwap_minus_mid_bps"] == "2.1660"
+
+
+def test_primary_candidate_no_order_semantics_groups_verified_non_executable_roots() -> None:
+    mod = load_module()
+
+    hold_current = mod.classify_primary_candidate_no_order_semantics(
+        {
+            "order_expected_from_primary_candidate": False,
+            "no_order_root_cause": "primary_candidate_hold_current_zero_delta",
+            "smallest_missing_field": None,
+        }
+    )
+    advisory_suppressed = mod.classify_primary_candidate_no_order_semantics(
+        {
+            "order_expected_from_primary_candidate": False,
+            "no_order_root_cause": "primary_candidate_advisory_only_suppressed_after_approval",
+            "smallest_missing_field": None,
+        }
+    )
+
+    assert hold_current["status"] == "verified_primary_candidate_no_order_expected_semantics"
+    assert advisory_suppressed["status"] == "verified_primary_candidate_no_order_expected_semantics"
+    assert hold_current["equivalence_class"] == advisory_suppressed["equivalence_class"]
+    assert hold_current["equivalence_class"] == "verified_non_executable_no_order_expected"
+    assert hold_current["root_cause_is_material_without_order_or_fill_change"] is False
+    assert advisory_suppressed["root_cause_is_material_without_order_or_fill_change"] is False
+    assert hold_current["requires_order_or_fill_change_for_materiality"] is True
+    assert advisory_suppressed["requires_order_or_fill_change_for_materiality"] is True
 
 
 def test_project_live_runtime_facts_exposes_orderbook_payload_depth_truth() -> None:
