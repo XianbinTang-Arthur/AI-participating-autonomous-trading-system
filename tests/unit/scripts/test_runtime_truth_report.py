@@ -1129,7 +1129,59 @@ def test_directional_episode_attribution_uses_payload_expected_edge_cost_fallbac
     assert decision["expected_edge_bps_source"] == "portfolio_allocation_decisions.payload.expected_edge_bps"
     assert decision["expected_cost_bps_source"] == "portfolio_allocation_decisions.payload.expected_cost_bps"
     assert summary["coverage"]["decisions_with_edge_cost"] == 1
-    assert summary["smallest_missing_field"] == "execution_orders.directional_recent_decision"
+    assert summary["status"] == "verified_directional_episode_no_order_expected"
+    assert summary["smallest_missing_field"] is None
+    assert summary["coverage"]["decisions_with_no_order_expected"] == 1
+    assert summary["coverage"]["decisions_with_order_surface_or_no_order_expectation"] == 1
+    assert summary["coverage"]["decisions_missing_order_surface"] == 0
+    assert summary["coverage"]["all_recent_decisions_no_order_expected"] is True
+    assert decision["order_expectation"]["classification"] == "no_order_expected_by_route_action"
+    assert decision["order_expectation"]["smallest_missing_field"] is None
+
+
+def test_directional_episode_attribution_keeps_missing_order_for_executable_no_order() -> None:
+    mod = load_module()
+    raw = {
+        "ok": True,
+        "directional_episode_attribution": {
+            "symbol": "BTC-USDT-SWAP",
+            "recent_decisions": [
+                {
+                    "allocation_id": "alloc_missing_order",
+                    "decision_id": "decision_missing_order",
+                    "symbol": "BTC-USDT-SWAP",
+                    "created_at": "2026-04-30T09:17:13+08:00",
+                    "route_action": "override_target",
+                    "primary_family": "directional",
+                    "expected_edge_bps": "18.25",
+                    "expected_cost_bps": "6.00",
+                    "order_count": 0,
+                    "fill_count": 0,
+                    "payload": {"reason_codes": ["baseline_directional_entry"]},
+                }
+            ],
+        },
+    }
+
+    parsed = mod.parse_db_probe(json.dumps(raw))
+    summary = mod.summarize_directional_episode_attribution_truth(parsed, {"ok": False})
+    decision = summary["recent_decisions"][0]
+
+    assert summary["status"] == "missing_directional_episode_order_surface_or_no_order_expectation"
+    assert summary["smallest_missing_field"] == (
+        "directional_episode_attribution.order_surface_or_no_order_expectation"
+    )
+    assert summary["coverage"]["decisions_with_no_order_expected"] == 0
+    assert summary["coverage"]["decisions_requiring_order_surface"] == 1
+    assert summary["coverage"]["decisions_missing_order_surface"] == 1
+    assert summary["coverage"]["decisions_with_order_surface_or_no_order_expectation"] == 0
+    assert summary["coverage"]["all_recent_decisions_no_order_expected"] is False
+    assert decision["order_expectation"]["classification"] == (
+        "order_surface_missing_for_order_expected_decision"
+    )
+    assert decision["order_expectation"]["smallest_missing_field"] == (
+        "execution_orders.directional_recent_decision"
+    )
 
 
 def test_directional_episode_attribution_uses_sleeve_metric_expected_edge_cost_fallback() -> None:

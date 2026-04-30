@@ -3004,6 +3004,53 @@ def classify_directional_episode_row(row: dict[str, Any]) -> str:
     return "decision_without_order"
 
 
+NO_ORDER_ROUTE_ACTIONS = {"advisory_only", "hold_current"}
+
+
+def classify_directional_episode_order_expectation(decision: dict[str, Any]) -> dict[str, Any]:
+    order = as_dict(decision.get("order"))
+    fill = as_dict(decision.get("fill"))
+    route_action = decision.get("route_action")
+    order_count = int_or_zero(order.get("count"))
+    fill_count = int_or_zero(fill.get("count"))
+
+    if order_count > 0:
+        classification = "order_surface_present"
+        no_order_expected = False
+        order_surface_present = True
+        smallest_missing_field = None
+        reason = "Execution order surface exists for this directional decision."
+    elif fill_count > 0:
+        classification = "fill_surface_without_order_surface"
+        no_order_expected = False
+        order_surface_present = False
+        smallest_missing_field = "execution_orders.directional_recent_decision"
+        reason = "A fill is present but no execution order surface is linked to this directional decision."
+    elif route_action in NO_ORDER_ROUTE_ACTIONS:
+        classification = "no_order_expected_by_route_action"
+        no_order_expected = True
+        order_surface_present = False
+        smallest_missing_field = None
+        reason = (
+            "The allocation route action is advisory_only or hold_current, so no execution order is expected."
+        )
+    else:
+        classification = "order_surface_missing_for_order_expected_decision"
+        no_order_expected = False
+        order_surface_present = False
+        smallest_missing_field = "execution_orders.directional_recent_decision"
+        reason = "The directional route action is executable or unknown, but no execution order surface exists."
+
+    return {
+        "classification": classification,
+        "route_action": route_action,
+        "no_order_expected": no_order_expected,
+        "order_surface_present": order_surface_present,
+        "smallest_missing_field": smallest_missing_field,
+        "reason": reason,
+    }
+
+
 OPEN_POSITION_INTENTS = {
     "open_long",
     "open_short",
@@ -3593,6 +3640,7 @@ def sanitize_directional_episode_attribution(
             },
             "classification": classify_directional_episode_row(row),
         }
+        decision["order_expectation"] = classify_directional_episode_order_expectation(decision)
         decision["pnl_lifecycle"] = classify_directional_episode_pnl_lifecycle(decision)
         decisions.append(decision)
     return {
@@ -5355,6 +5403,26 @@ def summarize_directional_episode_attribution_truth(
         if item.get("expected_edge_bps") is not None and item.get("expected_cost_bps") is not None
     )
     decisions_with_orders = sum(1 for item in recent if int_or_zero(as_dict(item.get("order")).get("count")) > 0)
+    decisions_with_no_order_expected = sum(
+        1 for item in recent if as_dict(item.get("order_expectation")).get("no_order_expected") is True
+    )
+    decisions_with_order_surface_or_no_order_expectation = sum(
+        1
+        for item in recent
+        if as_dict(item.get("order_expectation")).get("order_surface_present") is True
+        or as_dict(item.get("order_expectation")).get("no_order_expected") is True
+    )
+    decisions_requiring_order_surface = recent_count - decisions_with_no_order_expected
+    decisions_missing_order_surface = sum(
+        1
+        for item in recent
+        if as_dict(item.get("order_expectation")).get("no_order_expected") is not True
+        and as_dict(item.get("order_expectation")).get("order_surface_present") is not True
+    )
+    all_recent_decisions_no_order_expected = recent_count > 0 and decisions_with_no_order_expected == recent_count
+    order_surface_or_no_order_expectation_complete = (
+        recent_count > 0 and decisions_with_order_surface_or_no_order_expectation == recent_count
+    )
     decisions_with_fills = sum(1 for item in recent if int_or_zero(as_dict(item.get("fill")).get("count")) > 0)
     decisions_with_pnl = sum(
         1
@@ -5404,16 +5472,28 @@ def summarize_directional_episode_attribution_truth(
     missing_checks = [
         ("portfolio_allocation_decisions.directional", recent_count > 0),
         ("portfolio_allocation_decisions.expected_edge_bps_or_expected_cost_bps", decisions_with_edge_cost > 0),
-        ("execution_orders.directional_recent_decision", decisions_with_orders > 0),
-        ("execution_fills.directional_recent_decision", decisions_with_fills > 0),
-        ("execution_fills.actual_fee_bps", decisions_with_realized_fee > 0),
-        ("order_or_command_reference_price_for_recent_directional_fills", decisions_with_slippage_reference > 0),
-        ("fill_outcomes.realized_pnl_delta", decisions_with_pnl > 0),
+        (
+            "directional_episode_attribution.order_surface_or_no_order_expectation",
+            order_surface_or_no_order_expectation_complete,
+        ),
+        ("execution_fills.directional_recent_decision", decisions_with_fills > 0 or all_recent_decisions_no_order_expected),
+        ("execution_fills.actual_fee_bps", decisions_with_realized_fee > 0 or all_recent_decisions_no_order_expected),
+        (
+            "order_or_command_reference_price_for_recent_directional_fills",
+            decisions_with_slippage_reference > 0 or all_recent_decisions_no_order_expected,
+        ),
+        ("fill_outcomes.realized_pnl_delta", decisions_with_pnl > 0 or all_recent_decisions_no_order_expected),
     ]
     smallest_missing = next((field for field, passed in missing_checks if not passed), None)
 
     if recent_count <= 0:
         status = "no_recent_directional_decisions"
+    elif decisions_with_edge_cost <= 0:
+        status = "missing_directional_episode_attribution_evidence"
+    elif not order_surface_or_no_order_expectation_complete:
+        status = "missing_directional_episode_order_surface_or_no_order_expectation"
+    elif all_recent_decisions_no_order_expected:
+        status = "verified_directional_episode_no_order_expected"
     elif decisions_with_fills <= 0:
         status = "partial_directional_episode_decisions_without_fills"
     elif decisions_with_pnl <= 0:
@@ -5435,6 +5515,13 @@ def summarize_directional_episode_attribution_truth(
             "recent_decision_count": recent_count,
             "decisions_with_edge_cost": decisions_with_edge_cost,
             "decisions_with_orders": decisions_with_orders,
+            "decisions_with_no_order_expected": decisions_with_no_order_expected,
+            "decisions_with_order_surface_or_no_order_expectation": (
+                decisions_with_order_surface_or_no_order_expectation
+            ),
+            "decisions_requiring_order_surface": decisions_requiring_order_surface,
+            "decisions_missing_order_surface": decisions_missing_order_surface,
+            "all_recent_decisions_no_order_expected": all_recent_decisions_no_order_expected,
             "decisions_with_fills": decisions_with_fills,
             "decisions_with_realized_fee": decisions_with_realized_fee,
             "decisions_with_slippage_reference": decisions_with_slippage_reference,
@@ -6845,6 +6932,21 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "directional_episode_recent_decision_count": directional_attribution_coverage.get("recent_decision_count"),
         "directional_episode_decisions_with_edge_cost": directional_attribution_coverage.get(
             "decisions_with_edge_cost"
+        ),
+        "directional_episode_decisions_with_no_order_expected": directional_attribution_coverage.get(
+            "decisions_with_no_order_expected"
+        ),
+        "directional_episode_decisions_with_order_surface_or_no_order_expectation": (
+            directional_attribution_coverage.get("decisions_with_order_surface_or_no_order_expectation")
+        ),
+        "directional_episode_decisions_requiring_order_surface": directional_attribution_coverage.get(
+            "decisions_requiring_order_surface"
+        ),
+        "directional_episode_decisions_missing_order_surface": directional_attribution_coverage.get(
+            "decisions_missing_order_surface"
+        ),
+        "directional_episode_all_recent_decisions_no_order_expected": directional_attribution_coverage.get(
+            "all_recent_decisions_no_order_expected"
         ),
         "directional_episode_decisions_with_fills": directional_attribution_coverage.get("decisions_with_fills"),
         "directional_episode_decisions_with_pnl_outcome": directional_attribution_coverage.get(
