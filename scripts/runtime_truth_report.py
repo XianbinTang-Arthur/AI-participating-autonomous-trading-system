@@ -2985,6 +2985,135 @@ def summarize_latest_decision(
     }
 
 
+def summarize_directional_executable_episode_truth(db: dict[str, Any]) -> dict[str, Any]:
+    latest = as_dict(db.get("latest_executable_directional_decision"))
+    if not latest:
+        return {
+            "ok": False,
+            "source": "live_db_latest_executable_directional_decision",
+            "status": "missing_latest_executable_directional_decision",
+            "smallest_missing_field": "database_truth.latest_executable_directional_decision",
+            "latest_executable_decision": None,
+            "terminal_no_fill": None,
+            "provenance": {},
+        }
+
+    execution_chain = as_dict(latest.get("execution_chain"))
+    truth_chain = as_dict(latest.get("execution_truth_chain"))
+    terminal_no_fill = as_dict(truth_chain.get("terminal_no_fill_explanation"))
+    smallest_missing = truth_chain.get("smallest_missing_field")
+    truth_status = truth_chain.get("status")
+
+    terminal_no_fill_verified = (
+        truth_status == "verified_terminal_order_no_fill_expected"
+        and terminal_no_fill.get("classification") == "terminal_order_surface_without_fill"
+        and smallest_missing is None
+    )
+    if terminal_no_fill_verified:
+        status = "verified_executable_terminal_order_no_fill_truth"
+        ok = True
+        surface_missing = None
+    elif truth_status == "verified_execution_surface_present" and smallest_missing is None:
+        status = "verified_executable_order_fill_truth_surface"
+        ok = True
+        surface_missing = None
+    elif truth_status:
+        status = "missing_executable_directional_truth_chain_evidence"
+        ok = False
+        surface_missing = smallest_missing or "execution_truth_chain.terminal_state_or_fill_surface"
+    else:
+        status = "missing_executable_directional_truth_chain"
+        ok = False
+        surface_missing = "database_truth.latest_executable_directional_decision.execution_truth_chain"
+
+    terminal_surface = None
+    if terminal_no_fill:
+        terminal_surface = {
+            "classification": terminal_no_fill.get("classification"),
+            "reason": terminal_no_fill.get("reason"),
+            "terminal_states": terminal_no_fill.get("terminal_states"),
+            "terminal_source_systems": terminal_no_fill.get("terminal_source_systems"),
+            "terminal_execution_styles": terminal_no_fill.get("terminal_execution_styles"),
+            "terminal_position_intents": terminal_no_fill.get("terminal_position_intents"),
+            "execution_order_count": terminal_no_fill.get("execution_order_count"),
+            "order_state_count": terminal_no_fill.get("order_state_count"),
+            "terminal_execution_order_count": terminal_no_fill.get("terminal_execution_order_count"),
+            "terminal_order_state_count": terminal_no_fill.get("terminal_order_state_count"),
+            "operator_summary": terminal_no_fill.get("operator_summary"),
+        }
+
+    return {
+        "ok": ok,
+        "source": "live_db_latest_executable_directional_decision",
+        "status": status,
+        "smallest_missing_field": surface_missing,
+        "latest_executable_decision": {
+            "decision_id": latest.get("decision_id"),
+            "allocation_id": latest.get("allocation_id"),
+            "created_at": latest.get("created_at"),
+            "symbol": latest.get("symbol"),
+            "primary_family": latest.get("primary_family"),
+            "route_action": latest.get("route_action"),
+            "expected_edge_bps": latest.get("expected_edge_bps"),
+            "expected_cost_bps": latest.get("expected_cost_bps"),
+            "portfolio_requested_notional": latest.get("portfolio_requested_notional"),
+            "portfolio_approved_notional": latest.get("portfolio_approved_notional"),
+            "portfolio_budget_cut_notional": latest.get("portfolio_budget_cut_notional"),
+            "execution_truth_status": truth_status,
+            "order_expected": truth_chain.get("order_expected"),
+            "fill_expected": truth_chain.get("fill_expected"),
+            "position_lifecycle_status": truth_chain.get("position_lifecycle_status"),
+            "submission_gap_root_cause": truth_chain.get("submission_gap_root_cause"),
+        },
+        "terminal_no_fill": terminal_surface,
+        "provenance": {
+            "execution_plan_ref_count": int_or_zero(execution_chain.get("execution_plan_ref_count")),
+            "order_intent_ref_count": int_or_zero(execution_chain.get("order_intent_ref_count")),
+            "order_state_ref_count": int_or_zero(execution_chain.get("order_state_ref_count")),
+            "fill_event_ref_count": int_or_zero(execution_chain.get("fill_event_ref_count")),
+            "db_order_count": int_or_zero(execution_chain.get("db_order_count")),
+            "db_order_state_count": int_or_zero(execution_chain.get("db_order_state_count")),
+            "db_fill_count": int_or_zero(execution_chain.get("db_fill_count")),
+            "db_fill_via_order_count": int_or_zero(execution_chain.get("db_fill_via_order_count")),
+            "db_execution_command_count": int_or_zero(execution_chain.get("db_execution_command_count")),
+            "db_execution_submit_command_count": int_or_zero(
+                execution_chain.get("db_execution_submit_command_count")
+            ),
+            "db_execution_submit_command_pending_count": int_or_zero(
+                execution_chain.get("db_execution_submit_command_pending_count")
+            ),
+            "db_execution_submit_command_claimed_count": int_or_zero(
+                execution_chain.get("db_execution_submit_command_claimed_count")
+            ),
+            "db_execution_submit_command_sent_count": int_or_zero(
+                execution_chain.get("db_execution_submit_command_sent_count")
+            ),
+            "db_execution_submit_command_failed_count": int_or_zero(
+                execution_chain.get("db_execution_submit_command_failed_count")
+            ),
+            "db_execution_order_terminal_no_fill_count": int_or_zero(
+                execution_chain.get("db_execution_order_terminal_no_fill_count")
+            ),
+            "db_order_state_terminal_no_fill_count": int_or_zero(
+                execution_chain.get("db_order_state_terminal_no_fill_count")
+            ),
+            "execution_command_flow_enabled": execution_chain.get("execution_command_flow_enabled"),
+            "execution_command_flow_flag_present": execution_chain.get(
+                "execution_command_flow_flag_present"
+            ),
+        },
+        "interpretation": {
+            "terminal_no_fill_verified": terminal_no_fill_verified,
+            "order_surface_present": int_or_zero(execution_chain.get("db_order_count")) > 0
+            or int_or_zero(execution_chain.get("db_order_state_count")) > 0,
+            "fill_surface_present": int_or_zero(execution_chain.get("db_fill_count")) > 0
+            or int_or_zero(execution_chain.get("db_fill_via_order_count")) > 0
+            or int_or_zero(execution_chain.get("fill_event_ref_count")) > 0,
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def classify_directional_episode_row(row: dict[str, Any]) -> str:
     fill_count = int_or_zero(row.get("fill_count"))
     order_count = int_or_zero(row.get("order_count"))
@@ -6418,6 +6547,19 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     directional_command_flow = as_dict(report.get("directional_command_flow_provenance_truth"))
     directional_command_flow_coverage = as_dict(directional_command_flow.get("coverage"))
     directional_attribution = as_dict(report.get("directional_episode_attribution_truth"))
+    directional_executable_episode = as_dict(report.get("directional_executable_episode_truth"))
+    directional_executable_latest = as_dict(
+        directional_executable_episode.get("latest_executable_decision")
+    )
+    directional_executable_terminal = as_dict(
+        directional_executable_episode.get("terminal_no_fill")
+    )
+    directional_executable_provenance = as_dict(
+        directional_executable_episode.get("provenance")
+    )
+    directional_executable_interpretation = as_dict(
+        directional_executable_episode.get("interpretation")
+    )
     depth_slippage_lifecycle = as_dict(report.get("depth_slippage_lifecycle_truth"))
     depth_slippage_lifecycle_depth = as_dict(depth_slippage_lifecycle.get("depth_readiness"))
     depth_slippage_lifecycle_slippage = as_dict(depth_slippage_lifecycle.get("slippage_baseline"))
@@ -6683,6 +6825,52 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_executable_directional_terminal_no_fill_order_state_count": executable_terminal_no_fill.get(
             "order_state_count",
+        ),
+        "directional_executable_episode_truth_status": directional_executable_episode.get("status"),
+        "directional_executable_episode_smallest_missing_field": (
+            directional_executable_episode.get("smallest_missing_field")
+        ),
+        "directional_executable_episode_latest_decision_id": directional_executable_latest.get(
+            "decision_id"
+        ),
+        "directional_executable_episode_latest_route_action": directional_executable_latest.get(
+            "route_action"
+        ),
+        "directional_executable_episode_order_expected": directional_executable_latest.get(
+            "order_expected"
+        ),
+        "directional_executable_episode_fill_expected": directional_executable_latest.get(
+            "fill_expected"
+        ),
+        "directional_executable_episode_execution_truth_status": directional_executable_latest.get(
+            "execution_truth_status"
+        ),
+        "directional_executable_episode_terminal_no_fill_classification": (
+            directional_executable_terminal.get("classification")
+        ),
+        "directional_executable_episode_terminal_no_fill_reason": (
+            directional_executable_terminal.get("reason")
+        ),
+        "directional_executable_episode_terminal_no_fill_states": (
+            directional_executable_terminal.get("terminal_states")
+        ),
+        "directional_executable_episode_terminal_no_fill_position_intents": (
+            directional_executable_terminal.get("terminal_position_intents")
+        ),
+        "directional_executable_episode_provenance_order_count": (
+            directional_executable_provenance.get("db_order_count")
+        ),
+        "directional_executable_episode_provenance_order_state_count": (
+            directional_executable_provenance.get("db_order_state_count")
+        ),
+        "directional_executable_episode_provenance_fill_count": (
+            directional_executable_provenance.get("db_fill_count")
+        ),
+        "directional_executable_episode_provenance_execution_command_count": (
+            directional_executable_provenance.get("db_execution_command_count")
+        ),
+        "directional_executable_episode_terminal_no_fill_verified": (
+            directional_executable_interpretation.get("terminal_no_fill_verified")
         ),
         "portfolio_allocation_decisions": db.get("portfolio_allocation_decisions") if db.get("ok") else None,
         "execution_fills": db.get("execution_fills") if db.get("ok") else None,
@@ -7479,6 +7667,9 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["directional_episode_attribution_truth"] = summarize_directional_episode_attribution_truth(
         report["database_truth"],
         report["rdp_microstructure_truth"],
+    )
+    report["directional_executable_episode_truth"] = summarize_directional_executable_episode_truth(
+        report["database_truth"],
     )
     report["depth_slippage_lifecycle_truth"] = summarize_depth_slippage_lifecycle_truth(
         orderbook_payload_depth=report["orderbook_payload_depth_truth"],

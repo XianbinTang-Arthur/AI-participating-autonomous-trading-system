@@ -372,6 +372,99 @@ def test_parse_db_probe_summarizes_latest_executable_directional_decision() -> N
     assert executable["execution_truth_chain"]["smallest_missing_field"] is None
 
 
+def test_directional_executable_episode_truth_summarizes_terminal_no_fill_surface() -> None:
+    mod = load_module()
+    db = {
+        "ok": True,
+        "portfolio_allocation_decisions": 120,
+        "execution_fills": 7,
+        "latest_decision": {},
+        "latest_executable_directional_decision": {
+            "allocation_id": "alloc-exec",
+            "decision_id": "decision_exec",
+            "created_at": "2026-04-26T15:00:00Z",
+            "route_action": "override_target",
+            "symbol": "BTC-USDT-SWAP",
+            "primary_family": "directional",
+            "portfolio_requested_notional": "1000",
+            "portfolio_approved_notional": "1000",
+            "portfolio_budget_cut_notional": "0",
+            "expected_edge_bps": "12.5",
+            "expected_cost_bps": "1.2",
+            "execution_chain": {
+                "execution_plan_ref_count": 1,
+                "order_intent_ref_count": 1,
+                "order_state_ref_count": 1,
+                "fill_event_ref_count": 0,
+                "db_order_count": 2,
+                "db_order_state_count": 2,
+                "db_fill_count": 0,
+                "db_fill_via_order_count": 0,
+                "db_execution_command_count": 1,
+                "db_execution_submit_command_count": 1,
+                "db_execution_order_terminal_no_fill_count": 2,
+                "db_order_state_terminal_no_fill_count": 2,
+                "execution_command_flow_enabled": True,
+                "execution_command_flow_flag_present": True,
+            },
+            "execution_truth_chain": {
+                "status": "verified_terminal_order_no_fill_expected",
+                "order_expected": True,
+                "fill_expected": False,
+                "position_lifecycle_status": "no_position_lifecycle_transition_expected",
+                "smallest_missing_field": None,
+                "terminal_no_fill_explanation": {
+                    "classification": "terminal_order_surface_without_fill",
+                    "reason": "terminal_order_blocked_before_fill",
+                    "terminal_states": ["BLOCKED", "FAILED"],
+                    "terminal_source_systems": ["local_order_manager"],
+                    "terminal_execution_styles": ["semantic_dup_snapshot_blocked", "taker"],
+                    "terminal_position_intents": ["close_long", "open_short"],
+                    "execution_order_count": 2,
+                    "order_state_count": 2,
+                    "terminal_execution_order_count": 2,
+                    "terminal_order_state_count": 2,
+                    "operator_summary": "all_visible_order_surfaces_are_terminal_no_fill",
+                },
+            },
+        },
+    }
+
+    summary = mod.summarize_directional_executable_episode_truth(db)
+    live_facts = mod.project_live_runtime_facts(
+        {
+            "runtime": {"dashboard_bundle": {}},
+            "database_truth": db,
+            "directional_executable_episode_truth": summary,
+            "git": {},
+            "deployment_health": {},
+        }
+    )
+
+    assert summary["status"] == "verified_executable_terminal_order_no_fill_truth"
+    assert summary["smallest_missing_field"] is None
+    assert summary["latest_executable_decision"]["decision_id"] == "decision_exec"
+    assert summary["latest_executable_decision"]["order_expected"] is True
+    assert summary["latest_executable_decision"]["fill_expected"] is False
+    assert summary["terminal_no_fill"]["reason"] == "terminal_order_blocked_before_fill"
+    assert summary["terminal_no_fill"]["terminal_position_intents"] == [
+        "close_long",
+        "open_short",
+    ]
+    assert summary["provenance"]["db_order_count"] == 2
+    assert summary["provenance"]["db_execution_command_count"] == 1
+    assert summary["interpretation"]["terminal_no_fill_verified"] is True
+    assert live_facts["directional_executable_episode_truth_status"] == (
+        "verified_executable_terminal_order_no_fill_truth"
+    )
+    assert live_facts["directional_executable_episode_latest_decision_id"] == "decision_exec"
+    assert live_facts["directional_executable_episode_fill_expected"] is False
+    assert live_facts["directional_executable_episode_terminal_no_fill_states"] == [
+        "BLOCKED",
+        "FAILED",
+    ]
+
+
 def test_execution_science_truth_verifies_orderbook_sequence_and_silver_bar() -> None:
     mod = load_module()
     raw = {
