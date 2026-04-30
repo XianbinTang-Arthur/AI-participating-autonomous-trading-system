@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shlex
 import ssl
@@ -4293,9 +4294,12 @@ def summarize_container_health(statuses: dict[str, str]) -> dict[str, Any]:
     }
 
 
-def fetch_url_text(url: str, *, timeout: int = 10) -> dict[str, Any]:
+def fetch_url_text(url: str, *, timeout: int = 10, headers: dict[str, str] | None = None) -> dict[str, Any]:
     context = ssl._create_unverified_context()
-    request = Request(url, headers={"User-Agent": "aats-runtime-truth-report/1.0"})
+    request_headers = {"User-Agent": "aats-runtime-truth-report/1.0"}
+    if headers:
+        request_headers.update(headers)
+    request = Request(url, headers=request_headers)
     try:
         with urlopen(request, timeout=timeout, context=context) as response:
             body = response.read().decode("utf-8", errors="replace")
@@ -4312,8 +4316,8 @@ def fetch_url_text(url: str, *, timeout: int = 10) -> dict[str, Any]:
         return {"ok": False, "status": None, "body": "", "error": redact_secret_text(str(exc))}
 
 
-def fetch_json_url(url: str, *, timeout: int = 10) -> dict[str, Any]:
-    fetched = fetch_url_text(url, timeout=timeout)
+def fetch_json_url(url: str, *, timeout: int = 10, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    fetched = fetch_url_text(url, timeout=timeout, headers=headers)
     if not fetched["ok"]:
         return fetched | {"json": None}
     try:
@@ -4372,7 +4376,49 @@ def gateway_health_probe(api_base: str, distro: str) -> dict[str, Any]:
     }
 
 
-def dashboard_bundle_probe(api_base: str) -> dict[str, Any]:
+def operator_read_auth_context(env_var: str | None) -> dict[str, Any]:
+    env_name = (env_var or "").strip()
+    if not env_name:
+        return {
+            "status": "disabled",
+            "method": "api_key_env",
+            "env_var": None,
+            "credential_present": False,
+            "headers": {},
+            "raw_credential_exposed": False,
+        }
+    credential = os.environ.get(env_name)
+    if credential:
+        return {
+            "status": "credential_present",
+            "method": "api_key_env",
+            "env_var": env_name,
+            "credential_present": True,
+            "headers": {"X-AATS-API-Key": credential},
+            "raw_credential_exposed": False,
+        }
+    return {
+        "status": "credential_missing",
+        "method": "api_key_env",
+        "env_var": env_name,
+        "credential_present": False,
+        "headers": {},
+        "raw_credential_exposed": False,
+    }
+
+
+def operator_read_auth_report(auth_context: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "status": auth_context.get("status"),
+        "method": auth_context.get("method"),
+        "env_var": auth_context.get("env_var"),
+        "credential_present": bool(auth_context.get("credential_present")),
+        "header_injected": bool(auth_context.get("headers")),
+        "raw_credential_exposed": False,
+    }
+
+
+def dashboard_bundle_probe(api_base: str, *, headers: dict[str, str] | None = None) -> dict[str, Any]:
     query = urlencode(
         [
             ("view", "strategy"),
@@ -4383,7 +4429,7 @@ def dashboard_bundle_probe(api_base: str) -> dict[str, Any]:
             ("panel", "profileControlSummary"),
         ],
     )
-    response = fetch_json_url(f"{api_base.rstrip('/')}/dashboard/bundle?{query}", timeout=10)
+    response = fetch_json_url(f"{api_base.rstrip('/')}/dashboard/bundle?{query}", timeout=10, headers=headers)
     if not response["ok"] or response.get("json") is None:
         return {
             "status": "request_failed",
@@ -4403,24 +4449,33 @@ def parse_json_object_body(body: str | None) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def ai_runtime_endpoint_probe(api_base: str) -> dict[str, Any]:
-    response = fetch_url_text(f"{api_base.rstrip('/')}/ai/runtime", timeout=10)
+def ai_runtime_endpoint_probe(
+    api_base: str,
+    *,
+    headers: dict[str, str] | None = None,
+    auth_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    response = fetch_url_text(f"{api_base.rstrip('/')}/ai/runtime", timeout=10, headers=headers)
     body = parse_json_object_body(response.get("body"))
+    auth_attempt = operator_read_auth_report(auth_context or {})
     if response.get("ok"):
         return {
             "status": "verified",
             "http_status": response.get("status"),
             "runtime": summarize_ai_runtime_endpoint_payload(body),
+            "auth_attempt": auth_attempt,
             "raw_payload_exposed": False,
         }
 
     detail = body.get("detail")
     if response.get("status") == 401 and detail == "operator_auth_required":
+        status = "auth_failed" if auth_attempt.get("credential_present") else "auth_required"
         return {
-            "status": "auth_required",
+            "status": status,
             "http_status": response.get("status"),
             "error": "operator_auth_required",
             "runtime": {},
+            "auth_attempt": auth_attempt,
             "raw_payload_exposed": False,
         }
 
@@ -4429,6 +4484,7 @@ def ai_runtime_endpoint_probe(api_base: str) -> dict[str, Any]:
         "http_status": response.get("status"),
         "error": response.get("error") or body.get("detail") or "ai_runtime_unavailable",
         "runtime": {},
+        "auth_attempt": auth_attempt,
         "raw_payload_exposed": False,
     }
 
@@ -4554,6 +4610,7 @@ def summarize_ai_runtime_effective_mode_truth(
     endpoint_status = endpoint.get("status")
     dashboard_status = dashboard.get("status")
     auth_gated = endpoint_status == "auth_required" or dashboard_status == "auth_required"
+    auth_failed = endpoint_status == "auth_failed"
 
     if endpoint_status == "verified":
         configured = as_dict(endpoint_runtime.get("configured_operating_mode"))
@@ -4562,7 +4619,7 @@ def summarize_ai_runtime_effective_mode_truth(
         provider = as_dict(endpoint_runtime.get("provider"))
         shadow = as_dict(endpoint_runtime.get("shadow_enabled"))
         profile_auto = as_dict(endpoint_runtime.get("profile_auto_control_effective"))
-    elif auth_gated:
+    elif auth_gated or auth_failed:
         configured = unknown_auth_required_field()
         effective = unknown_auth_required_field()
         manual_override = {
@@ -4621,9 +4678,12 @@ def summarize_ai_runtime_effective_mode_truth(
         )
 
     recent_timeout_count = int_or_zero(provider.get("recent_timeout_count"))
-    if auth_gated:
-        timeout_classification = "not_active_blocker_auth_gated_provider_path_not_verified"
+    if auth_failed:
+        timeout_classification = "not_active_blocker_auth_failed_provider_path_not_verified"
         ai_timeout_active_blocker: bool | str = False
+    elif auth_gated:
+        timeout_classification = "not_active_blocker_auth_gated_provider_path_not_verified"
+        ai_timeout_active_blocker = False
     elif not provider_path_evidence_present:
         timeout_classification = "not_active_blocker_missing_provider_path_evidence"
         ai_timeout_active_blocker = False
@@ -4640,6 +4700,9 @@ def summarize_ai_runtime_effective_mode_truth(
     if endpoint_status == "verified" and effective.get("status") == "verified":
         status = "verified_effective_ai_runtime_truth"
         smallest_missing = None
+    elif auth_failed:
+        status = "auth_failed_effective_ai_runtime_truth"
+        smallest_missing = "valid_operator_read_credential"
     elif auth_gated:
         status = "auth_gated_effective_ai_runtime_truth"
         smallest_missing = "operator_authenticated_runtime_read_access"
@@ -4659,6 +4722,7 @@ def summarize_ai_runtime_effective_mode_truth(
             "ai_runtime_http_status": endpoint.get("http_status"),
             "primary_error": dashboard.get("primary_error") or endpoint.get("error"),
         },
+        "operator_read_auth": endpoint.get("auth_attempt") or {},
         "configured_target": configured,
         "effective_runtime_mode": effective,
         "manual_override": manual_override,
@@ -4684,6 +4748,7 @@ def summarize_ai_runtime_effective_mode_truth(
         "interpretation": {
             "configured_target_is_not_effective_runtime": True,
             "auth_required_does_not_imply_baseline_only": auth_gated,
+            "auth_failed_does_not_imply_provider_timeout": auth_failed,
             "ai_timeout_requires_verified_provider_path": True,
             "raw_payload_exposed": False,
         },
@@ -7373,6 +7438,7 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         latest_directional_episode.get("pretrade_microstructure")
     )
     dashboard = ((report.get("runtime") or {}).get("dashboard_bundle") or {})
+    operator_read_auth = as_dict((report.get("runtime") or {}).get("operator_read_auth"))
     ai_runtime_effective = as_dict(report.get("ai_runtime_effective_mode_truth"))
     ai_runtime_configured = as_dict(ai_runtime_effective.get("configured_target"))
     ai_runtime_effective_mode = as_dict(ai_runtime_effective.get("effective_runtime_mode"))
@@ -8293,6 +8359,13 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "ai_runtime_effective_dashboard_status": ai_runtime_auth_gate.get("dashboard_status"),
         "ai_runtime_endpoint_status": ai_runtime_auth_gate.get("ai_runtime_endpoint_status"),
         "ai_runtime_endpoint_http_status": ai_runtime_auth_gate.get("ai_runtime_http_status"),
+        "ai_runtime_operator_read_auth_status": operator_read_auth.get("status"),
+        "ai_runtime_operator_read_auth_method": operator_read_auth.get("method"),
+        "ai_runtime_operator_read_auth_env_var": operator_read_auth.get("env_var"),
+        "ai_runtime_operator_read_auth_credential_present": operator_read_auth.get(
+            "credential_present"
+        ),
+        "ai_runtime_operator_read_auth_header_injected": operator_read_auth.get("header_injected"),
         "ai_runtime_configured_operating_mode": ai_runtime_configured.get("value"),
         "ai_runtime_configured_operating_mode_status": ai_runtime_configured.get("status"),
         "ai_runtime_effective_operating_mode": ai_runtime_effective_mode.get("value"),
@@ -8462,6 +8535,8 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     repo_root = Path(args.repo_root).resolve()
     generated_at = utc_now_iso()
     artifact_projection = load_artifact_runtime_projection(repo_root, generated_at)
+    operator_auth_context = operator_read_auth_context(args.operator_read_api_key_env)
+    operator_auth_headers = operator_auth_context.get("headers") or None
     report: dict[str, Any] = {
         "ok": True,
         "generated_at": generated_at,
@@ -8474,8 +8549,13 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         "git": git_truth(repo_root, args.wsl_distro, args.wsl_project),
         "deployment_health": deployment_health(args.api_base, args.wsl_distro),
         "runtime": {
-            "dashboard_bundle": dashboard_bundle_probe(args.api_base),
-            "ai_runtime_endpoint": ai_runtime_endpoint_probe(args.api_base),
+            "operator_read_auth": operator_read_auth_report(operator_auth_context),
+            "dashboard_bundle": dashboard_bundle_probe(args.api_base, headers=operator_auth_headers),
+            "ai_runtime_endpoint": ai_runtime_endpoint_probe(
+                args.api_base,
+                headers=operator_auth_headers,
+                auth_context=operator_auth_context,
+            ),
             "artifact_last_known": artifact_projection["facts"],
             "artifact_last_known_sources": artifact_projection["sources"],
             "artifact_last_known_status": artifact_projection["status"],
@@ -8606,6 +8686,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--gateway-container",
         default=DEFAULT_GATEWAY_CONTAINER,
         help="Gateway container name used for env-loaded DB probe.",
+    )
+    parser.add_argument(
+        "--operator-read-api-key-env",
+        default="AATS_RUNTIME_TRUTH_OPERATOR_READ_API_KEY",
+        help=(
+            "Optional env var containing an operator read API key for authenticated "
+            "read-only probes. The value is never printed."
+        ),
     )
     parser.add_argument("--pretty", action="store_true", help="Pretty-print JSON.")
     return parser.parse_args(argv)

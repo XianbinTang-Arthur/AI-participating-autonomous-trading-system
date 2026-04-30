@@ -100,6 +100,113 @@ def test_dashboard_auth_required_is_not_confused_with_runtime_mode() -> None:
     }
 
 
+def test_operator_read_auth_context_never_exposes_env_secret(monkeypatch) -> None:
+    mod = load_module()
+    monkeypatch.setenv("AATS_TEST_READ_KEY", "super-secret-read-key")
+
+    context = mod.operator_read_auth_context("AATS_TEST_READ_KEY")
+    report = mod.operator_read_auth_report(context)
+
+    assert context["headers"] == {"X-AATS-API-Key": "super-secret-read-key"}
+    assert report == {
+        "status": "credential_present",
+        "method": "api_key_env",
+        "env_var": "AATS_TEST_READ_KEY",
+        "credential_present": True,
+        "header_injected": True,
+        "raw_credential_exposed": False,
+    }
+    assert "super-secret-read-key" not in json.dumps(report)
+
+
+def test_ai_runtime_endpoint_probe_uses_read_header_without_exposing_secret(monkeypatch) -> None:
+    mod = load_module()
+
+    def fake_fetch_url_text(
+        url: str,
+        *,
+        timeout: int,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        assert url == "https://operator.local/ai/runtime"
+        assert timeout == 10
+        assert headers == {"X-AATS-API-Key": "super-secret-read-key"}
+        return {
+            "ok": True,
+            "status": 200,
+            "body": json.dumps(
+                {
+                    "configured_operating_mode": "ai_decision_maker",
+                    "effective_operating_mode": "ai_decision_maker",
+                    "manual_override_active": False,
+                    "provider": "deepseek",
+                    "configured": True,
+                    "provider_ready": True,
+                    "provider_degraded": False,
+                    "shadow_mode_enabled": True,
+                    "strategy_profile_auto_control_effective": True,
+                }
+            ),
+        }
+
+    monkeypatch.setattr(mod, "fetch_url_text", fake_fetch_url_text)
+    auth_context = {
+        "status": "credential_present",
+        "method": "api_key_env",
+        "env_var": "AATS_TEST_READ_KEY",
+        "credential_present": True,
+        "headers": {"X-AATS-API-Key": "super-secret-read-key"},
+        "raw_credential_exposed": False,
+    }
+
+    result = mod.ai_runtime_endpoint_probe(
+        "https://operator.local",
+        headers=auth_context["headers"],
+        auth_context=auth_context,
+    )
+
+    assert result["status"] == "verified"
+    assert result["auth_attempt"]["credential_present"] is True
+    assert result["auth_attempt"]["header_injected"] is True
+    assert result["runtime"]["effective_operating_mode"] == {
+        "status": "verified",
+        "value": "ai_decision_maker",
+    }
+    assert "super-secret-read-key" not in json.dumps(result)
+
+
+def test_ai_runtime_auth_failed_is_not_timeout_blocker() -> None:
+    mod = load_module()
+    truth = mod.summarize_ai_runtime_effective_mode_truth(
+        dashboard_bundle={"status": "auth_required", "primary_error": "operator_auth_required"},
+        ai_runtime_endpoint={
+            "status": "auth_failed",
+            "http_status": 401,
+            "error": "operator_auth_required",
+            "auth_attempt": {
+                "status": "credential_present",
+                "method": "api_key_env",
+                "env_var": "AATS_TEST_READ_KEY",
+                "credential_present": True,
+                "header_injected": True,
+                "raw_credential_exposed": False,
+            },
+            "runtime": {},
+            "raw_payload_exposed": False,
+        },
+    )
+
+    assert truth["status"] == "auth_failed_effective_ai_runtime_truth"
+    assert truth["smallest_missing_field"] == "valid_operator_read_credential"
+    assert truth["operator_read_auth"]["credential_present"] is True
+    assert truth["provider"]["path_active"] is None
+    assert truth["ai_timeout"]["active_blocker"] is False
+    assert (
+        truth["ai_timeout"]["classification"]
+        == "not_active_blocker_auth_failed_provider_path_not_verified"
+    )
+
+
 def test_ai_runtime_effective_mode_truth_marks_auth_gate_not_timeout_blocker() -> None:
     mod = load_module()
     dashboard = {
