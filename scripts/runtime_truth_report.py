@@ -98,6 +98,7 @@ CREATED_NO_COMMAND_DIRECTIONAL_ROOT_CAUSE = "execution_command_missing_for_creat
 CLAIMED_SUBMIT_STUCK_ROOT_CAUSE = "execution_submit_command_claimed_without_terminal_order_ack"
 CLAIMED_SUBMIT_RECOVERY_CONFIRMATION_PREFIX = "resolve_claimed_submit_as_failed:"
 CLAIMED_SUBMIT_OPERATOR_HANDOFF_PATTERN = "claimed_submit_operator_handoff_*.json"
+TERMINAL_NO_FILL_STATES = {"FAILED", "REJECTED", "CANCELED", "BLOCKED", "EXPIRED", "DRY_RUN"}
 OKX_HEDGE_SCALE_IN_CODE_MARKERS = {
     "aats/schemas/execution.py": (
         "def position_intent_matches_leg_intent",
@@ -209,6 +210,60 @@ with engine.connect() as conn:
             ),
             {"decision_id": decision_id},
         ).mappings().first() or {}
+        terminal_no_fill_order_state_drilldown = [
+            dict(row)
+            for row in conn.execute(
+                text(
+                    "select o.order_id, o.client_order_id, o.intent_id, o.allocation_id, o.decision_id, "
+                    "       o.symbol, o.side, o.pos_side, o.position_intent, o.execution_action, "
+                    "       o.order_type, o.time_in_force, o.source_system, o.execution_style, "
+                    "       o.reduce_only, o.close_only, o.state as execution_order_state, "
+                    "       o.created_at as execution_order_created_at, o.updated_at as execution_order_updated_at, "
+                    "       o.raw_payload ->> 'status' as execution_order_payload_status, "
+                    "       o.raw_payload -> 'order_state' ->> 'status' as nested_order_state_status, "
+                    "       nullif(o.venue_order_id, '') is not null as venue_order_id_present, "
+                    "       nullif(o.raw_payload ->> 'venue_order_id', '') is not null "
+                    "           as raw_payload_venue_order_id_present, "
+                    "       nullif(o.raw_payload ->> 'exchange_order_id', '') is not null "
+                    "           as raw_payload_exchange_order_id_present, "
+                    "       s.status as order_state_status, "
+                    "       s.created_at as order_state_created_at, s.submitted_ts, s.last_update_ts, "
+                    "       s.row_version as order_state_row_version, "
+                    "       s.payload ->> 'status' as order_state_payload_status, "
+                    "       nullif(s.exchange_order_id, '') is not null as order_state_exchange_order_id_present, "
+                    "       nullif(s.payload ->> 'exchange_order_id', '') is not null "
+                    "           as order_state_payload_exchange_order_id_present, "
+                    "       c.command_id, c.command_type, c.state as command_state, "
+                    "       c.attempt_count, c.last_error is not null as command_has_last_error, "
+                    "       c.created_at as command_created_at, c.updated_at as command_updated_at, "
+                    "       coalesce(f.execution_fill_count, 0) as execution_fill_count, "
+                    "       coalesce(fe.legacy_fill_event_count, 0) as legacy_fill_event_count "
+                    "from execution_orders o "
+                    "left join order_states s on s.client_order_id = o.client_order_id "
+                    "left join lateral ("
+                    "    select command_id, command_type, state, attempt_count, last_error, created_at, updated_at "
+                    "    from execution_commands "
+                    "    where order_id = o.order_id and command_type = 'submit' "
+                    "    order by updated_at desc, created_at desc limit 1"
+                    ") c on true "
+                    "left join ("
+                    "    select order_id, client_order_id, count(*) as execution_fill_count "
+                    "    from execution_fills group by order_id, client_order_id"
+                    ") f on f.order_id = o.order_id or f.client_order_id = o.client_order_id "
+                    "left join ("
+                    "    select client_order_id, count(*) as legacy_fill_event_count "
+                    "    from fill_events group by client_order_id"
+                    ") fe on fe.client_order_id = o.client_order_id "
+                    "where o.decision_id = :decision_id "
+                    "and ("
+                    "    o.state in ('FAILED', 'REJECTED', 'CANCELED', 'BLOCKED', 'EXPIRED', 'DRY_RUN') "
+                    "    or s.status in ('FAILED', 'REJECTED', 'CANCELED', 'BLOCKED', 'EXPIRED', 'DRY_RUN')"
+                    ") "
+                    "order by o.created_at asc, o.order_id asc limit 8"
+                ),
+                {"decision_id": decision_id},
+            ).mappings().all()
+        ]
         counts = {
             "execution_orders": int(conn.execute(
                 text("select count(*) from execution_orders where decision_id = :decision_id"),
@@ -328,6 +383,7 @@ with engine.connect() as conn:
             ).scalar()),
             "order_states_terminal_no_fill_statuses": order_state_terminal_no_fill_summary.get("statuses"),
             "order_states_terminal_no_fill_position_intents": order_state_terminal_no_fill_summary.get("position_intents"),
+            "terminal_no_fill_order_state_drilldown": terminal_no_fill_order_state_drilldown,
             "execution_fills": int(conn.execute(
                 text("select count(*) from execution_fills where decision_id = :decision_id"),
                 {"decision_id": decision_id},
@@ -2918,6 +2974,9 @@ def summarize_latest_decision(
         "db_order_state_terminal_no_fill_position_intents": counts.get(
             "order_states_terminal_no_fill_position_intents"
         ),
+        "terminal_no_fill_order_state_drilldown": as_list(
+            counts.get("terminal_no_fill_order_state_drilldown")
+        ),
         "db_fill_count": int(counts.get("execution_fills") or 0),
         "db_fill_via_order_count": int(counts.get("execution_fills_via_orders") or 0),
         "legacy_fill_event_count": int(counts.get("legacy_fill_events") or 0),
@@ -2985,6 +3044,203 @@ def summarize_latest_decision(
     }
 
 
+def _terminal_state_present(*values: Any) -> bool:
+    return any(str(value).upper() in TERMINAL_NO_FILL_STATES for value in values if value)
+
+
+def summarize_terminal_no_fill_order_state_drilldown(
+    *,
+    latest: dict[str, Any],
+    terminal_surface: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not terminal_surface:
+        return None
+
+    execution_chain = as_dict(latest.get("execution_chain"))
+    raw_rows = as_list(execution_chain.get("terminal_no_fill_order_state_drilldown"))
+    expected_order_count = int_or_zero(
+        terminal_surface.get("execution_order_count")
+        or terminal_surface.get("terminal_execution_order_count")
+        or execution_chain.get("db_order_count")
+    )
+    expected_order_state_count = int_or_zero(
+        terminal_surface.get("order_state_count")
+        or terminal_surface.get("terminal_order_state_count")
+        or execution_chain.get("db_order_state_count")
+    )
+
+    per_order: list[dict[str, Any]] = []
+    for raw in raw_rows:
+        row = as_dict(raw)
+        execution_order_state = row.get("execution_order_state")
+        order_state_status = row.get("order_state_status")
+        payload_statuses = compact_unique(
+            [
+                row.get("execution_order_payload_status"),
+                row.get("nested_order_state_status"),
+                row.get("order_state_payload_status"),
+            ],
+            limit=6,
+        )
+        exchange_ack_sources = compact_unique(
+            [
+                "execution_orders.venue_order_id" if row.get("venue_order_id_present") else None,
+                (
+                    "execution_orders.raw_payload.venue_order_id"
+                    if row.get("raw_payload_venue_order_id_present")
+                    else None
+                ),
+                (
+                    "execution_orders.raw_payload.exchange_order_id"
+                    if row.get("raw_payload_exchange_order_id_present")
+                    else None
+                ),
+                "order_states.exchange_order_id" if row.get("order_state_exchange_order_id_present") else None,
+                (
+                    "order_states.payload.exchange_order_id"
+                    if row.get("order_state_payload_exchange_order_id_present")
+                    else None
+                ),
+            ],
+            limit=6,
+        )
+        execution_fill_count = int_or_zero(row.get("execution_fill_count"))
+        legacy_fill_event_count = int_or_zero(row.get("legacy_fill_event_count"))
+        terminal_state_verified = _terminal_state_present(
+            execution_order_state,
+            order_state_status,
+            *payload_statuses,
+        )
+        fill_absent = execution_fill_count == 0 and legacy_fill_event_count == 0
+        command_present = bool(row.get("command_id"))
+        order_intent_present = bool(row.get("intent_id"))
+        exchange_ack_present = bool(exchange_ack_sources)
+        if terminal_state_verified and fill_absent:
+            classification = "terminal_no_fill_order_state_link_verified"
+        elif not fill_absent:
+            classification = "unexpected_fill_surface_for_terminal_no_fill_order"
+        else:
+            classification = "terminal_no_fill_order_state_link_incomplete"
+
+        per_order.append(
+            {
+                "decision": {
+                    "decision_id": row.get("decision_id") or latest.get("decision_id"),
+                    "allocation_id": row.get("allocation_id") or latest.get("allocation_id"),
+                    "symbol": row.get("symbol") or latest.get("symbol"),
+                },
+                "order_intent": {
+                    "intent_id": row.get("intent_id"),
+                    "present": order_intent_present,
+                },
+                "execution_command": {
+                    "command_id": row.get("command_id"),
+                    "command_type": row.get("command_type"),
+                    "state": row.get("command_state"),
+                    "attempt_count": int_or_zero(row.get("attempt_count")),
+                    "has_last_error": bool(row.get("command_has_last_error")),
+                    "created_at": row.get("command_created_at"),
+                    "updated_at": row.get("command_updated_at"),
+                    "present": command_present,
+                },
+                "execution_order": {
+                    "order_id": row.get("order_id"),
+                    "client_order_id": row.get("client_order_id"),
+                    "state": execution_order_state,
+                    "payload_statuses": payload_statuses,
+                    "side": row.get("side"),
+                    "pos_side": row.get("pos_side"),
+                    "position_intent": row.get("position_intent"),
+                    "execution_action": row.get("execution_action"),
+                    "order_type": row.get("order_type"),
+                    "time_in_force": row.get("time_in_force"),
+                    "source_system": row.get("source_system"),
+                    "execution_style": row.get("execution_style"),
+                    "reduce_only": row.get("reduce_only"),
+                    "close_only": row.get("close_only"),
+                    "created_at": row.get("execution_order_created_at"),
+                    "updated_at": row.get("execution_order_updated_at"),
+                },
+                "order_state": {
+                    "status": order_state_status,
+                    "payload_statuses": payload_statuses,
+                    "created_at": row.get("order_state_created_at"),
+                    "submitted_ts": row.get("submitted_ts"),
+                    "last_update_ts": row.get("last_update_ts"),
+                    "row_version": row.get("order_state_row_version"),
+                    "present": bool(row.get("order_state_status")),
+                },
+                "exchange_ack": {
+                    "present": exchange_ack_present,
+                    "absent": not exchange_ack_present,
+                    "sources": exchange_ack_sources,
+                },
+                "fill_absence": {
+                    "execution_fill_count": execution_fill_count,
+                    "legacy_fill_event_count": legacy_fill_event_count,
+                    "verified": fill_absent,
+                },
+                "terminal_status_alignment": {
+                    "terminal_state_verified": terminal_state_verified,
+                    "states_considered": compact_unique(
+                        [execution_order_state, order_state_status] + payload_statuses,
+                        limit=8,
+                    ),
+                },
+                "classification": classification,
+            }
+        )
+
+    row_count = len(per_order)
+    command_present_count = sum(1 for row in per_order if row["execution_command"]["present"])
+    exchange_ack_absent_count = sum(1 for row in per_order if row["exchange_ack"]["absent"])
+    fill_absent_count = sum(1 for row in per_order if row["fill_absence"]["verified"])
+    terminal_verified_count = sum(
+        1
+        for row in per_order
+        if row["terminal_status_alignment"]["terminal_state_verified"]
+    )
+    if row_count == 0:
+        status = "missing_terminal_no_fill_order_state_drilldown"
+        smallest_missing_field = "execution_chain.terminal_no_fill_order_state_drilldown"
+    elif fill_absent_count < row_count:
+        status = "inconsistent_terminal_no_fill_drilldown_has_fill_surface"
+        smallest_missing_field = "terminal_no_fill_drilldown.fill_absence"
+    elif terminal_verified_count < row_count:
+        status = "partial_terminal_no_fill_order_state_drilldown"
+        smallest_missing_field = "terminal_no_fill_drilldown.terminal_status_alignment"
+    elif expected_order_count and row_count < expected_order_count:
+        status = "partial_terminal_no_fill_order_state_drilldown"
+        smallest_missing_field = "terminal_no_fill_drilldown.expected_execution_order_rows"
+    else:
+        status = "verified_terminal_no_fill_order_state_drilldown"
+        smallest_missing_field = None
+
+    return {
+        "status": status,
+        "smallest_missing_field": smallest_missing_field,
+        "source": "live_db_execution_orders_order_states_execution_commands_fills",
+        "coverage": {
+            "expected_execution_order_count": expected_order_count,
+            "expected_order_state_count": expected_order_state_count,
+            "drilldown_order_count": row_count,
+            "command_present_count": command_present_count,
+            "command_absent_count": row_count - command_present_count,
+            "exchange_ack_present_count": row_count - exchange_ack_absent_count,
+            "exchange_ack_absent_count": exchange_ack_absent_count,
+            "fill_absent_count": fill_absent_count,
+            "terminal_state_verified_count": terminal_verified_count,
+        },
+        "per_order": per_order,
+        "interpretation": {
+            "not_alpha_or_profitability_evidence": True,
+            "raw_payload_exposed": False,
+            "exchange_ack_absence_is_diagnostic": True,
+            "command_absence_can_be_expected_for_local_blocked_orders": True,
+        },
+    }
+
+
 def summarize_directional_executable_episode_truth(db: dict[str, Any]) -> dict[str, Any]:
     latest = as_dict(db.get("latest_executable_directional_decision"))
     if not latest:
@@ -2995,6 +3251,7 @@ def summarize_directional_executable_episode_truth(db: dict[str, Any]) -> dict[s
             "smallest_missing_field": "database_truth.latest_executable_directional_decision",
             "latest_executable_decision": None,
             "terminal_no_fill": None,
+            "terminal_no_fill_drilldown": None,
             "provenance": {},
         }
 
@@ -3041,6 +3298,10 @@ def summarize_directional_executable_episode_truth(db: dict[str, Any]) -> dict[s
             "terminal_order_state_count": terminal_no_fill.get("terminal_order_state_count"),
             "operator_summary": terminal_no_fill.get("operator_summary"),
         }
+    terminal_no_fill_drilldown = summarize_terminal_no_fill_order_state_drilldown(
+        latest=latest,
+        terminal_surface=terminal_surface,
+    )
 
     return {
         "ok": ok,
@@ -3066,6 +3327,7 @@ def summarize_directional_executable_episode_truth(db: dict[str, Any]) -> dict[s
             "submission_gap_root_cause": truth_chain.get("submission_gap_root_cause"),
         },
         "terminal_no_fill": terminal_surface,
+        "terminal_no_fill_drilldown": terminal_no_fill_drilldown,
         "provenance": {
             "execution_plan_ref_count": int_or_zero(execution_chain.get("execution_plan_ref_count")),
             "order_intent_ref_count": int_or_zero(execution_chain.get("order_intent_ref_count")),
@@ -3104,6 +3366,10 @@ def summarize_directional_executable_episode_truth(db: dict[str, Any]) -> dict[s
         },
         "interpretation": {
             "terminal_no_fill_verified": terminal_no_fill_verified,
+            "terminal_no_fill_order_state_drilldown_verified": (
+                as_dict(terminal_no_fill_drilldown).get("status")
+                == "verified_terminal_no_fill_order_state_drilldown"
+            ),
             "order_surface_present": int_or_zero(execution_chain.get("db_order_count")) > 0
             or int_or_zero(execution_chain.get("db_order_state_count")) > 0,
             "fill_surface_present": int_or_zero(execution_chain.get("db_fill_count")) > 0
@@ -6554,6 +6820,12 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     directional_executable_terminal = as_dict(
         directional_executable_episode.get("terminal_no_fill")
     )
+    directional_executable_terminal_drilldown = as_dict(
+        directional_executable_episode.get("terminal_no_fill_drilldown")
+    )
+    directional_executable_terminal_drilldown_coverage = as_dict(
+        directional_executable_terminal_drilldown.get("coverage")
+    )
     directional_executable_provenance = as_dict(
         directional_executable_episode.get("provenance")
     )
@@ -6856,6 +7128,27 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "directional_executable_episode_terminal_no_fill_position_intents": (
             directional_executable_terminal.get("terminal_position_intents")
+        ),
+        "directional_executable_episode_terminal_no_fill_drilldown_status": (
+            directional_executable_terminal_drilldown.get("status")
+        ),
+        "directional_executable_episode_terminal_no_fill_drilldown_smallest_missing_field": (
+            directional_executable_terminal_drilldown.get("smallest_missing_field")
+        ),
+        "directional_executable_episode_terminal_no_fill_drilldown_order_count": (
+            directional_executable_terminal_drilldown_coverage.get("drilldown_order_count")
+        ),
+        "directional_executable_episode_terminal_no_fill_drilldown_command_present_count": (
+            directional_executable_terminal_drilldown_coverage.get("command_present_count")
+        ),
+        "directional_executable_episode_terminal_no_fill_drilldown_exchange_ack_absent_count": (
+            directional_executable_terminal_drilldown_coverage.get("exchange_ack_absent_count")
+        ),
+        "directional_executable_episode_terminal_no_fill_drilldown_fill_absent_count": (
+            directional_executable_terminal_drilldown_coverage.get("fill_absent_count")
+        ),
+        "directional_executable_episode_terminal_no_fill_drilldown_terminal_verified_count": (
+            directional_executable_terminal_drilldown_coverage.get("terminal_state_verified_count")
         ),
         "directional_executable_episode_provenance_order_count": (
             directional_executable_provenance.get("db_order_count")

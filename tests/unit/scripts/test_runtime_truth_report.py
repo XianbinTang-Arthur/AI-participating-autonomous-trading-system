@@ -406,6 +406,78 @@ def test_directional_executable_episode_truth_summarizes_terminal_no_fill_surfac
                 "db_order_state_terminal_no_fill_count": 2,
                 "execution_command_flow_enabled": True,
                 "execution_command_flow_flag_present": True,
+                "terminal_no_fill_order_state_drilldown": [
+                    {
+                        "decision_id": "decision_exec",
+                        "allocation_id": "alloc-exec",
+                        "order_id": "order_close",
+                        "client_order_id": "cl_close",
+                        "intent_id": "intent_close",
+                        "symbol": "BTC-USDT-SWAP",
+                        "side": "sell",
+                        "pos_side": "long",
+                        "position_intent": "close_long",
+                        "execution_action": "close",
+                        "order_type": "market",
+                        "time_in_force": "IOC",
+                        "source_system": "local_order_manager",
+                        "execution_style": "taker",
+                        "reduce_only": True,
+                        "close_only": True,
+                        "execution_order_state": "FAILED",
+                        "execution_order_payload_status": "FAILED",
+                        "nested_order_state_status": "FAILED",
+                        "venue_order_id_present": False,
+                        "raw_payload_venue_order_id_present": False,
+                        "raw_payload_exchange_order_id_present": False,
+                        "order_state_status": "FAILED",
+                        "order_state_payload_status": "FAILED",
+                        "order_state_exchange_order_id_present": False,
+                        "order_state_payload_exchange_order_id_present": False,
+                        "command_id": "cmd_close",
+                        "command_type": "submit",
+                        "command_state": "FAILED",
+                        "attempt_count": 1,
+                        "command_has_last_error": True,
+                        "execution_fill_count": 0,
+                        "legacy_fill_event_count": 0,
+                    },
+                    {
+                        "decision_id": "decision_exec",
+                        "allocation_id": "alloc-exec",
+                        "order_id": "order_open",
+                        "client_order_id": "cl_open",
+                        "intent_id": "intent_open",
+                        "symbol": "BTC-USDT-SWAP",
+                        "side": "sell",
+                        "pos_side": "short",
+                        "position_intent": "open_short",
+                        "execution_action": "open",
+                        "order_type": "market",
+                        "time_in_force": "IOC",
+                        "source_system": "semantic_dup_snapshot_blocked",
+                        "execution_style": "semantic_dup_snapshot_blocked",
+                        "reduce_only": False,
+                        "close_only": False,
+                        "execution_order_state": "BLOCKED",
+                        "execution_order_payload_status": "SUBMITTING",
+                        "nested_order_state_status": "BLOCKED",
+                        "venue_order_id_present": False,
+                        "raw_payload_venue_order_id_present": False,
+                        "raw_payload_exchange_order_id_present": False,
+                        "order_state_status": "BLOCKED",
+                        "order_state_payload_status": "BLOCKED",
+                        "order_state_exchange_order_id_present": False,
+                        "order_state_payload_exchange_order_id_present": False,
+                        "command_id": None,
+                        "command_type": None,
+                        "command_state": None,
+                        "attempt_count": None,
+                        "command_has_last_error": False,
+                        "execution_fill_count": 0,
+                        "legacy_fill_event_count": 0,
+                    },
+                ],
             },
             "execution_truth_chain": {
                 "status": "verified_terminal_order_no_fill_expected",
@@ -451,9 +523,33 @@ def test_directional_executable_episode_truth_summarizes_terminal_no_fill_surfac
         "close_long",
         "open_short",
     ]
+    assert summary["terminal_no_fill_drilldown"]["status"] == (
+        "verified_terminal_no_fill_order_state_drilldown"
+    )
+    assert summary["terminal_no_fill_drilldown"]["coverage"] == {
+        "expected_execution_order_count": 2,
+        "expected_order_state_count": 2,
+        "drilldown_order_count": 2,
+        "command_present_count": 1,
+        "command_absent_count": 1,
+        "exchange_ack_present_count": 0,
+        "exchange_ack_absent_count": 2,
+        "fill_absent_count": 2,
+        "terminal_state_verified_count": 2,
+    }
+    drilldown_order = summary["terminal_no_fill_drilldown"]["per_order"][0]
+    assert drilldown_order["decision"]["decision_id"] == "decision_exec"
+    assert drilldown_order["order_intent"]["intent_id"] == "intent_close"
+    assert drilldown_order["execution_command"]["command_id"] == "cmd_close"
+    assert drilldown_order["execution_order"]["state"] == "FAILED"
+    assert drilldown_order["order_state"]["status"] == "FAILED"
+    assert drilldown_order["exchange_ack"]["absent"] is True
+    assert drilldown_order["fill_absence"]["verified"] is True
+    assert drilldown_order["classification"] == "terminal_no_fill_order_state_link_verified"
     assert summary["provenance"]["db_order_count"] == 2
     assert summary["provenance"]["db_execution_command_count"] == 1
     assert summary["interpretation"]["terminal_no_fill_verified"] is True
+    assert summary["interpretation"]["terminal_no_fill_order_state_drilldown_verified"] is True
     assert live_facts["directional_executable_episode_truth_status"] == (
         "verified_executable_terminal_order_no_fill_truth"
     )
@@ -463,6 +559,17 @@ def test_directional_executable_episode_truth_summarizes_terminal_no_fill_surfac
         "BLOCKED",
         "FAILED",
     ]
+    assert live_facts["directional_executable_episode_terminal_no_fill_drilldown_status"] == (
+        "verified_terminal_no_fill_order_state_drilldown"
+    )
+    assert live_facts["directional_executable_episode_terminal_no_fill_drilldown_order_count"] == 2
+    assert (
+        live_facts[
+            "directional_executable_episode_terminal_no_fill_drilldown_exchange_ack_absent_count"
+        ]
+        == 2
+    )
+    assert live_facts["directional_executable_episode_terminal_no_fill_drilldown_fill_absent_count"] == 2
 
 
 def test_execution_science_truth_verifies_orderbook_sequence_and_silver_bar() -> None:
