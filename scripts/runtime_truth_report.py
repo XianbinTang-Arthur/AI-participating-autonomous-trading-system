@@ -6630,6 +6630,248 @@ def summarize_depth_slippage_lifecycle_truth(
     }
 
 
+def summarize_decision_lifecycle_provenance_continuity_truth(
+    *,
+    db: dict[str, Any],
+    directional_attribution: dict[str, Any],
+    directional_executable_episode: dict[str, Any],
+    latest_decision_fill_feasibility: dict[str, Any],
+    directional_command_flow: dict[str, Any],
+    depth_slippage_lifecycle: dict[str, Any],
+) -> dict[str, Any]:
+    if not db.get("ok"):
+        return {
+            "source": "live_runtime_truth_surfaces",
+            "ok": False,
+            "status": "live_db_unavailable",
+            "smallest_missing_field": "database_truth",
+            "raw_payload_exposed": False,
+        }
+
+    latest = as_dict(db.get("latest_decision"))
+    if not latest:
+        return {
+            "source": "live_runtime_truth_surfaces",
+            "ok": False,
+            "status": "missing_latest_decision_lifecycle_provenance",
+            "smallest_missing_field": "database_truth.latest_decision",
+            "raw_payload_exposed": False,
+        }
+
+    latest_chain = as_dict(latest.get("execution_truth_chain"))
+    latest_no_trade = as_dict(latest.get("no_trade_attribution"))
+    latest_execution_chain = as_dict(latest.get("execution_chain"))
+    latest_fill_feasibility = as_dict(latest_decision_fill_feasibility)
+    latest_fill_feasibility_no_order = as_dict(
+        latest_fill_feasibility.get("no_order")
+        or latest_fill_feasibility.get("no_order_context")
+    )
+    latest_chain_status = latest_chain.get("status")
+    latest_chain_missing = latest_chain.get("smallest_missing_field")
+    latest_order_expected = latest_chain.get("order_expected")
+    latest_fill_expected = latest_chain.get("fill_expected")
+    latest_no_order_expected = latest_order_expected is False and latest_fill_expected is False
+    latest_chain_complete = (
+        latest_chain_status
+        in {
+            "verified_no_order_expected",
+            "verified_terminal_order_no_fill_expected",
+            "verified_execution_surface_present",
+        }
+        and latest_chain_missing is None
+    )
+    latest_no_order_feasibility_consistent = (
+        not latest_no_order_expected
+        or (
+            latest_fill_feasibility.get("status")
+            == "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context"
+            and latest_fill_feasibility.get("fill_feasibility_applicable") is False
+        )
+    )
+
+    executable_latest = as_dict(directional_executable_episode.get("latest_executable_decision"))
+    executable_provenance = as_dict(directional_executable_episode.get("provenance"))
+    executable_drilldown = as_dict(directional_executable_episode.get("terminal_no_fill_drilldown"))
+    executable_status = directional_executable_episode.get("status")
+    executable_missing = directional_executable_episode.get("smallest_missing_field")
+    executable_terminal_no_fill_verified = (
+        executable_status == "verified_executable_terminal_order_no_fill_truth"
+        and executable_missing is None
+        and executable_drilldown.get("status") == "verified_terminal_no_fill_order_state_drilldown"
+    )
+    executable_order_fill_verified = (
+        executable_status == "verified_executable_order_fill_truth_surface"
+        and executable_missing is None
+    )
+    executable_lane_complete = executable_terminal_no_fill_verified or executable_order_fill_verified
+
+    attribution_coverage = as_dict(directional_attribution.get("coverage"))
+    attribution_status = directional_attribution.get("status")
+    attribution_missing = directional_attribution.get("smallest_missing_field")
+    recent_batch_complete = attribution_missing is None and attribution_status in {
+        "verified_directional_episode_no_order_expected",
+        "verified_directional_episode_edge_cost_pnl_attribution_present",
+    }
+
+    command_coverage = as_dict(directional_command_flow.get("coverage"))
+    command_flow_complete = (
+        directional_command_flow.get("smallest_missing_field") is None
+        and directional_command_flow.get("current_command_path_reference_gap") is not True
+    )
+    depth_recent = as_dict(depth_slippage_lifecycle.get("recent_directional_lifecycle_coverage"))
+    depth_status = depth_slippage_lifecycle.get("status")
+    depth_complete = depth_slippage_lifecycle.get("smallest_missing_field") is None and depth_status in {
+        "forward_depth_ready_no_order_expected_regime",
+        "forward_depth_ready_no_recent_directional_filled_episode",
+        "verified_depth_slippage_lifecycle_coverage_present",
+    }
+
+    checks = [
+        ("latest_decision.execution_truth_chain", latest_chain_complete),
+        ("latest_decision.fill_feasibility_no_order_context", latest_no_order_feasibility_consistent),
+        ("directional_executable_episode_truth", executable_lane_complete),
+        ("directional_episode_attribution_truth", recent_batch_complete),
+        ("directional_command_flow_provenance_truth", command_flow_complete),
+        ("depth_slippage_lifecycle_truth", depth_complete),
+    ]
+    smallest_missing = next((field for field, passed in checks if not passed), None)
+
+    if not latest_chain_complete:
+        status = "missing_latest_decision_lifecycle_provenance"
+        ok = False
+    elif not latest_no_order_feasibility_consistent:
+        status = "inconsistent_latest_no_order_fill_feasibility"
+        ok = False
+    elif not executable_lane_complete:
+        status = "missing_latest_executable_directional_lifecycle_provenance"
+        ok = False
+    elif not recent_batch_complete:
+        status = "missing_recent_directional_lifecycle_provenance"
+        ok = False
+    elif not command_flow_complete:
+        status = "missing_directional_command_flow_provenance_continuity"
+        ok = False
+    elif not depth_complete:
+        status = "missing_depth_slippage_lifecycle_continuity"
+        ok = False
+    elif latest_no_order_expected and executable_terminal_no_fill_verified:
+        status = "verified_current_no_order_plus_executable_terminal_no_fill_continuity"
+        ok = True
+    else:
+        status = "verified_decision_lifecycle_provenance_continuity"
+        ok = True
+
+    return {
+        "source": "live_runtime_truth_surfaces",
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "current_decision": {
+            "decision_id": latest.get("decision_id"),
+            "created_at": latest.get("created_at"),
+            "primary_family": latest.get("primary_family"),
+            "route_action": latest.get("route_action"),
+            "execution_truth_status": latest_chain_status,
+            "order_expected": latest_order_expected,
+            "fill_expected": latest_fill_expected,
+            "position_lifecycle_status": latest_chain.get("position_lifecycle_status"),
+            "truth_chain_smallest_missing_field": latest_chain_missing,
+            "no_trade_classification": latest_no_trade.get("classification"),
+            "no_trade_primary_blocker": latest_no_trade.get("primary_blocker"),
+            "fill_feasibility_status": latest_fill_feasibility.get("status"),
+            "fill_feasibility_applicable": latest_fill_feasibility.get(
+                "fill_feasibility_applicable"
+            ),
+            "no_order_feasibility_classification": latest_fill_feasibility_no_order.get(
+                "classification"
+            ),
+        },
+        "current_decision_provenance_counts": {
+            "execution_plan_ref_count": int_or_zero(
+                latest_execution_chain.get("execution_plan_ref_count")
+            ),
+            "order_intent_ref_count": int_or_zero(
+                latest_execution_chain.get("order_intent_ref_count")
+            ),
+            "order_state_ref_count": int_or_zero(
+                latest_execution_chain.get("order_state_ref_count")
+            ),
+            "fill_event_ref_count": int_or_zero(latest_execution_chain.get("fill_event_ref_count")),
+            "db_order_count": int_or_zero(latest_execution_chain.get("db_order_count")),
+            "db_order_state_count": int_or_zero(latest_execution_chain.get("db_order_state_count")),
+            "db_fill_count": int_or_zero(latest_execution_chain.get("db_fill_count")),
+            "db_execution_command_count": int_or_zero(
+                latest_execution_chain.get("db_execution_command_count")
+            ),
+        },
+        "latest_executable_directional_episode": {
+            "decision_id": executable_latest.get("decision_id"),
+            "created_at": executable_latest.get("created_at"),
+            "status": executable_status,
+            "smallest_missing_field": executable_missing,
+            "execution_truth_status": executable_latest.get("execution_truth_status"),
+            "order_expected": executable_latest.get("order_expected"),
+            "fill_expected": executable_latest.get("fill_expected"),
+            "position_lifecycle_status": executable_latest.get("position_lifecycle_status"),
+            "terminal_no_fill_drilldown_status": executable_drilldown.get("status"),
+        },
+        "latest_executable_directional_provenance_counts": executable_provenance,
+        "recent_directional_batch": {
+            "status": attribution_status,
+            "smallest_missing_field": attribution_missing,
+            "recent_decision_count": int_or_zero(attribution_coverage.get("recent_decision_count")),
+            "decisions_with_no_order_expected": int_or_zero(
+                attribution_coverage.get("decisions_with_no_order_expected")
+            ),
+            "decisions_with_orders": int_or_zero(attribution_coverage.get("decisions_with_orders")),
+            "decisions_with_fills": int_or_zero(attribution_coverage.get("decisions_with_fills")),
+            "decisions_missing_order_surface": int_or_zero(
+                attribution_coverage.get("decisions_missing_order_surface")
+            ),
+            "all_recent_decisions_no_order_expected": attribution_coverage.get(
+                "all_recent_decisions_no_order_expected"
+            ),
+            "filled_decisions_with_resolved_pnl_lifecycle": int_or_zero(
+                attribution_coverage.get("filled_decisions_with_resolved_pnl_lifecycle")
+            ),
+        },
+        "command_flow": {
+            "status": directional_command_flow.get("status"),
+            "smallest_missing_field": directional_command_flow.get("smallest_missing_field"),
+            "current_command_path_reference_gap": directional_command_flow.get(
+                "current_command_path_reference_gap"
+            ),
+            "current_submit_command_fill_count": int_or_zero(
+                command_coverage.get("current_submit_command_fill_count")
+            ),
+            "current_submit_command_reference_covered_fill_count": int_or_zero(
+                command_coverage.get("current_submit_command_reference_covered_fill_count")
+            ),
+            "current_submit_command_reference_missing_fill_count": int_or_zero(
+                command_coverage.get("current_submit_command_reference_missing_fill_count")
+            ),
+        },
+        "depth_slippage_lifecycle": {
+            "status": depth_status,
+            "smallest_missing_field": depth_slippage_lifecycle.get("smallest_missing_field"),
+            "recent_filled_decision_count": depth_recent.get("recent_filled_decision_count"),
+            "recent_filled_with_resolved_pnl_lifecycle": depth_recent.get(
+                "recent_filled_with_resolved_pnl_lifecycle"
+            ),
+            "no_order_expected_regime": depth_recent.get("no_order_expected_regime"),
+        },
+        "interpretation": {
+            "current_decision_no_order_expected": latest_no_order_expected,
+            "latest_executable_terminal_no_fill_verified": executable_terminal_no_fill_verified,
+            "recent_batch_lifecycle_complete": recent_batch_complete,
+            "command_flow_continuity_complete": command_flow_complete,
+            "depth_slippage_lifecycle_complete": depth_complete,
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -7363,6 +7605,20 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     latest_decision_fill_feasibility_trade_flow = as_dict(
         latest_decision_fill_feasibility_pretrade.get("trade_flow")
     )
+    decision_lifecycle_continuity = as_dict(
+        report.get("decision_lifecycle_provenance_continuity_truth")
+    )
+    decision_lifecycle_current = as_dict(decision_lifecycle_continuity.get("current_decision"))
+    decision_lifecycle_executable = as_dict(
+        decision_lifecycle_continuity.get("latest_executable_directional_episode")
+    )
+    decision_lifecycle_recent = as_dict(
+        decision_lifecycle_continuity.get("recent_directional_batch")
+    )
+    decision_lifecycle_command = as_dict(decision_lifecycle_continuity.get("command_flow"))
+    decision_lifecycle_depth = as_dict(
+        decision_lifecycle_continuity.get("depth_slippage_lifecycle")
+    )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
     latest_directional_spike_reversion = as_dict(directional_spike_reversion.get("latest_filled_decision"))
@@ -7799,6 +8055,48 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "latest_decision_fill_feasibility_vwap_minus_mid_bps": (
             latest_decision_fill_feasibility_trade_flow.get("vwap_minus_mid_bps")
+        ),
+        "decision_lifecycle_provenance_continuity_status": (
+            decision_lifecycle_continuity.get("status")
+        ),
+        "decision_lifecycle_provenance_continuity_smallest_missing_field": (
+            decision_lifecycle_continuity.get("smallest_missing_field")
+        ),
+        "decision_lifecycle_provenance_continuity_current_decision_id": (
+            decision_lifecycle_current.get("decision_id")
+        ),
+        "decision_lifecycle_provenance_continuity_current_order_expected": (
+            decision_lifecycle_current.get("order_expected")
+        ),
+        "decision_lifecycle_provenance_continuity_current_fill_expected": (
+            decision_lifecycle_current.get("fill_expected")
+        ),
+        "decision_lifecycle_provenance_continuity_current_truth_status": (
+            decision_lifecycle_current.get("execution_truth_status")
+        ),
+        "decision_lifecycle_provenance_continuity_current_fill_feasibility_status": (
+            decision_lifecycle_current.get("fill_feasibility_status")
+        ),
+        "decision_lifecycle_provenance_continuity_executable_decision_id": (
+            decision_lifecycle_executable.get("decision_id")
+        ),
+        "decision_lifecycle_provenance_continuity_executable_status": (
+            decision_lifecycle_executable.get("status")
+        ),
+        "decision_lifecycle_provenance_continuity_executable_terminal_no_fill_drilldown_status": (
+            decision_lifecycle_executable.get("terminal_no_fill_drilldown_status")
+        ),
+        "decision_lifecycle_provenance_continuity_recent_decision_count": (
+            decision_lifecycle_recent.get("recent_decision_count")
+        ),
+        "decision_lifecycle_provenance_continuity_recent_filled_decisions": (
+            decision_lifecycle_recent.get("decisions_with_fills")
+        ),
+        "decision_lifecycle_provenance_continuity_command_flow_status": (
+            decision_lifecycle_command.get("status")
+        ),
+        "decision_lifecycle_provenance_continuity_depth_slippage_status": (
+            decision_lifecycle_depth.get("status")
         ),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
@@ -8607,6 +8905,16 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
         report["database_truth"],
         report["directional_episode_attribution_truth"],
         report["execution_science_truth"],
+    )
+    report["decision_lifecycle_provenance_continuity_truth"] = (
+        summarize_decision_lifecycle_provenance_continuity_truth(
+            db=report["database_truth"],
+            directional_attribution=report["directional_episode_attribution_truth"],
+            directional_executable_episode=report["directional_executable_episode_truth"],
+            latest_decision_fill_feasibility=report["latest_decision_fill_feasibility_truth"],
+            directional_command_flow=report["directional_command_flow_provenance_truth"],
+            depth_slippage_lifecycle=report["depth_slippage_lifecycle_truth"],
+        )
     )
     report["directional_spike_reversion_truth"] = summarize_directional_spike_reversion_truth(
         report["directional_episode_attribution_truth"],
