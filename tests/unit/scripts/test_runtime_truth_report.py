@@ -3089,6 +3089,206 @@ def test_recent_directional_no_order_primary_candidate_bridge_density_reports_mi
     assert truth["raw_payload_exposed"] is False
 
 
+def test_recent_directional_no_order_bridge_decision_context_verifies_current_bridge() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_recent_directional_no_order_bridge_decision_context_truth(
+        db={
+            "ok": True,
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "created_at": "2026-04-30T23:12:13Z",
+                "symbol": "BTC-USDT-SWAP",
+                "primary_family": "directional",
+                "route_action": "advisory_only",
+                "execution_truth_chain": {
+                    "status": "verified_no_order_expected",
+                    "order_expected": False,
+                    "fill_expected": False,
+                },
+                "no_trade_attribution": {
+                    "classification": "no_order_fill_expected_for_latest_decision",
+                    "primary_blocker": "candidate_execution_incompatible",
+                },
+            },
+        },
+        recent_decision_chain_density={
+            "status": "verified_recent_directional_decision_chain_density_no_order_regime",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "recent_decision_count": 24,
+                "decisions_with_no_order_expected": 24,
+                "all_recent_decisions_no_order_expected": True,
+                "decisions_with_fills": 0,
+            },
+            "recent_decisions": [{"decision_id": "decision-current"}],
+            "latest_filled_decision": {
+                "decision_id": None,
+                "fill_count": 0,
+                "pnl_lifecycle_status": None,
+            },
+            "interpretation": {
+                "waiting_for_executable_directional_episode": True,
+            },
+        },
+        recent_no_order_bridge_density={
+            "status": (
+                "verified_recent_directional_no_order_primary_candidate_bridge_density"
+            ),
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "recent_decision_count": 24,
+                "no_order_expected_decision_count": 24,
+                "decisions_with_fills": 0,
+                "latest_bridge_decision_id": "decision-current",
+                "latest_bridge_decision_present_in_recent_decisions": True,
+                "historical_primary_candidate_bridge_scope": "latest_decision_only",
+                "historical_primary_candidate_bridge_not_claimed": True,
+            },
+            "latest_bridge": {
+                "decision_id": "decision-current",
+                "latest_route_action": "advisory_only",
+                "primary_candidate_route_action": "hold_current",
+                "portfolio_route_no_order_root_cause": (
+                    "decision_route_action_advisory_only_no_order_expected"
+                ),
+                "primary_candidate_no_order_root_cause": (
+                    "primary_candidate_hold_current_zero_delta"
+                ),
+                "route_root_and_primary_candidate_root_distinct": True,
+            },
+            "interpretation": {
+                "latest_primary_candidate_root_distinct_from_portfolio_route_root": True,
+            },
+        },
+        latest_bridge={
+            "status": "verified_latest_directional_no_order_primary_candidate_bridge",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "latest_decision": {"decision_id": "decision-current"},
+            "bridge": {
+                "latest_route_action": "advisory_only",
+                "primary_candidate_route_action": "hold_current",
+                "route_root_and_primary_candidate_root_distinct": True,
+            },
+        },
+        decision_lifecycle_provenance_continuity={
+            "status": "verified_current_no_order_plus_executable_terminal_no_fill_continuity",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "current_decision": {
+                "execution_truth_status": "verified_no_order_expected",
+                "fill_feasibility_status": (
+                    "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context"
+                ),
+                "position_lifecycle_status": "no_position_lifecycle_transition_expected",
+            },
+            "latest_executable_directional_episode": {
+                "decision_id": "decision-executable",
+                "status": "verified_executable_terminal_order_no_fill_truth",
+                "terminal_no_fill_drilldown_status": (
+                    "verified_terminal_no_fill_order_state_drilldown"
+                ),
+            },
+            "recent_directional_batch": {
+                "status": "verified_directional_episode_no_order_expected",
+                "decisions_with_fills": 0,
+            },
+        },
+        decision_lifecycle_execution_science_continuity={
+            "status": "verified_no_order_terminal_no_fill_execution_science_continuity",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "latest_decision_fill_feasibility": {
+                "status": (
+                    "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context"
+                )
+            },
+            "terminal_no_fill_execution_science": {
+                "status": (
+                    "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+                ),
+                "market_fill_feasibility_observable": False,
+            },
+            "execution_science": {"payload_sequence_status": "sequence_continuous"},
+        },
+    )
+
+    assert truth["ok"] is True
+    assert (
+        truth["status"]
+        == "verified_recent_directional_no_order_bridge_decision_context"
+    )
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["coverage"]["recent_decision_count"] == 24
+    assert truth["coverage"]["decisions_with_fills"] == 0
+    assert truth["coverage"]["latest_decision_matches_bridge"] is True
+    assert truth["current_decision_context"]["route_action"] == "advisory_only"
+    assert (
+        truth["current_decision_context"]["primary_candidate_route_action"]
+        == "hold_current"
+    )
+    assert (
+        truth["chain_context"]["latest_executable_decision_id"]
+        == "decision-executable"
+    )
+    assert truth["interpretation"]["recent_window_no_order_regime"] is True
+    assert truth["interpretation"]["no_recent_fills_in_context_window"] is True
+    assert truth["interpretation"]["historical_primary_candidate_bridge_not_claimed"] is True
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+
+
+def test_recent_directional_no_order_bridge_decision_context_reports_missing_bridge_density() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_recent_directional_no_order_bridge_decision_context_truth(
+        db={
+            "ok": True,
+            "latest_decision": {"decision_id": "decision-current"},
+        },
+        recent_decision_chain_density={
+            "status": "verified_recent_directional_decision_chain_density_no_order_regime",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {"all_recent_decisions_no_order_expected": True},
+        },
+        recent_no_order_bridge_density={
+            "status": "missing_latest_directional_no_order_primary_candidate_bridge",
+            "smallest_missing_field": (
+                "latest_directional_no_order_primary_candidate_bridge_truth"
+            ),
+            "raw_payload_exposed": False,
+        },
+        latest_bridge={
+            "status": "verified_latest_directional_no_order_primary_candidate_bridge",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+        },
+        decision_lifecycle_provenance_continuity={
+            "status": "verified_current_no_order_plus_executable_terminal_no_fill_continuity",
+            "smallest_missing_field": None,
+        },
+        decision_lifecycle_execution_science_continuity={
+            "status": "verified_no_order_terminal_no_fill_execution_science_continuity",
+            "smallest_missing_field": None,
+        },
+    )
+
+    assert truth["ok"] is False
+    assert (
+        truth["status"]
+        == "missing_recent_directional_no_order_primary_candidate_bridge_density"
+    )
+    assert (
+        truth["smallest_missing_field"]
+        == "latest_directional_no_order_primary_candidate_bridge_truth"
+    )
+    assert truth["raw_payload_exposed"] is False
+
+
 def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science_continuity() -> None:
     mod = load_module()
     report = {
@@ -3539,6 +3739,126 @@ def test_project_live_runtime_facts_exposes_recent_no_order_primary_candidate_br
     assert (
         live_facts[
             "recent_directional_no_order_bridge_density_not_alpha_or_profitability_evidence"
+        ]
+        is True
+    )
+
+
+def test_project_live_runtime_facts_exposes_recent_no_order_bridge_decision_context() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "recent_directional_no_order_bridge_decision_context_truth": {
+            "status": "verified_recent_directional_no_order_bridge_decision_context",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "recent_decision_count": 24,
+                "no_order_expected_decision_count": 24,
+                "decisions_with_fills": 0,
+                "recent_decision_chain_density_status": (
+                    "verified_recent_directional_decision_chain_density_no_order_regime"
+                ),
+                "recent_bridge_density_status": (
+                    "verified_recent_directional_no_order_primary_candidate_bridge_density"
+                ),
+                "decision_lifecycle_provenance_status": (
+                    "verified_current_no_order_plus_executable_terminal_no_fill_continuity"
+                ),
+                "decision_lifecycle_execution_science_status": (
+                    "verified_no_order_terminal_no_fill_execution_science_continuity"
+                ),
+                "latest_decision_id": "decision-current",
+                "latest_decision_matches_bridge": True,
+                "historical_primary_candidate_bridge_scope": "latest_decision_only",
+                "historical_primary_candidate_bridge_not_claimed": True,
+            },
+            "current_decision_context": {
+                "latest_bridge_route_action": "advisory_only",
+                "primary_candidate_route_action": "hold_current",
+                "route_root_and_primary_candidate_root_distinct": True,
+            },
+            "chain_context": {
+                "latest_executable_decision_id": "decision-executable",
+                "terminal_pretrade_status": (
+                    "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+                ),
+                "payload_sequence_status": "sequence_continuous",
+            },
+            "interpretation": {
+                "waiting_for_executable_directional_episode": True,
+                "no_recent_fills_in_context_window": True,
+                "not_alpha_or_profitability_evidence": True,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts[
+        "recent_directional_no_order_bridge_decision_context_truth_status"
+    ] == "verified_recent_directional_no_order_bridge_decision_context"
+    assert (
+        live_facts[
+            "recent_directional_no_order_bridge_decision_context_raw_payload_exposed"
+        ]
+        is False
+    )
+    assert (
+        live_facts["recent_directional_no_order_bridge_context_recent_decision_count"]
+        == 24
+    )
+    assert (
+        live_facts["recent_directional_no_order_bridge_context_decisions_with_fills"]
+        == 0
+    )
+    assert (
+        live_facts[
+            "recent_directional_no_order_bridge_context_latest_decision_matches_bridge"
+        ]
+        is True
+    )
+    assert live_facts[
+        "recent_directional_no_order_bridge_context_latest_route_action"
+    ] == "advisory_only"
+    assert live_facts[
+        "recent_directional_no_order_bridge_context_primary_candidate_route_action"
+    ] == "hold_current"
+    assert (
+        live_facts[
+            "recent_directional_no_order_bridge_context_route_roots_distinct"
+        ]
+        is True
+    )
+    assert live_facts[
+        "recent_directional_no_order_bridge_context_latest_executable_decision_id"
+    ] == "decision-executable"
+    assert live_facts[
+        "recent_directional_no_order_bridge_context_payload_sequence_status"
+    ] == "sequence_continuous"
+    assert (
+        live_facts[
+            "recent_directional_no_order_bridge_context_historical_primary_candidate_bridge_scope"
+        ]
+        == "latest_decision_only"
+    )
+    assert (
+        live_facts[
+            "recent_directional_no_order_bridge_context_waiting_for_executable_directional_episode"
+        ]
+        is True
+    )
+    assert (
+        live_facts[
+            "recent_directional_no_order_bridge_context_not_alpha_or_profitability_evidence"
         ]
         is True
     )

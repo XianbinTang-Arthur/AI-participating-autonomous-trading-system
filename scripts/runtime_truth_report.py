@@ -8619,6 +8619,302 @@ def summarize_recent_directional_no_order_primary_candidate_bridge_density_truth
     }
 
 
+def summarize_recent_directional_no_order_bridge_decision_context_truth(
+    *,
+    db: dict[str, Any],
+    recent_decision_chain_density: dict[str, Any],
+    recent_no_order_bridge_density: dict[str, Any],
+    latest_bridge: dict[str, Any],
+    decision_lifecycle_provenance_continuity: dict[str, Any],
+    decision_lifecycle_execution_science_continuity: dict[str, Any],
+) -> dict[str, Any]:
+    source = (
+        "recent_directional_decision_chain_density_truth_plus_"
+        "recent_directional_no_order_primary_candidate_bridge_density_truth"
+    )
+    chain = as_dict(recent_decision_chain_density)
+    bridge_density = as_dict(recent_no_order_bridge_density)
+    latest_bridge_truth = as_dict(latest_bridge)
+    lifecycle = as_dict(decision_lifecycle_provenance_continuity)
+    execution_science = as_dict(decision_lifecycle_execution_science_continuity)
+    latest = as_dict(db.get("latest_decision"))
+    truth_chain = as_dict(latest.get("execution_truth_chain"))
+    no_trade = as_dict(latest.get("no_trade_attribution"))
+
+    chain_coverage = as_dict(chain.get("coverage"))
+    chain_interpretation = as_dict(chain.get("interpretation"))
+    chain_latest_filled = as_dict(chain.get("latest_filled_decision"))
+    bridge_coverage = as_dict(bridge_density.get("coverage"))
+    bridge_latest = as_dict(bridge_density.get("latest_bridge"))
+    bridge_interpretation = as_dict(bridge_density.get("interpretation"))
+    latest_bridge_latest_decision = as_dict(latest_bridge_truth.get("latest_decision"))
+    latest_bridge_fields = as_dict(latest_bridge_truth.get("bridge"))
+    lifecycle_current = as_dict(lifecycle.get("current_decision"))
+    lifecycle_executable = as_dict(lifecycle.get("latest_executable_directional_episode"))
+    lifecycle_recent = as_dict(lifecycle.get("recent_directional_batch"))
+    execution_science_lifecycle = as_dict(execution_science.get("lifecycle_provenance"))
+    execution_science_latest_fill = as_dict(
+        execution_science.get("latest_decision_fill_feasibility")
+    )
+    execution_science_terminal = as_dict(
+        execution_science.get("terminal_no_fill_execution_science")
+    )
+    execution_science_sequence = as_dict(execution_science.get("execution_science"))
+
+    latest_decision_id = latest.get("decision_id")
+    latest_bridge_decision_id = (
+        bridge_coverage.get("latest_bridge_decision_id")
+        or bridge_latest.get("decision_id")
+        or latest_bridge_latest_decision.get("decision_id")
+    )
+    latest_decision_matches_bridge = (
+        latest_decision_id == latest_bridge_decision_id
+        if latest_decision_id and latest_bridge_decision_id
+        else None
+    )
+    recent_preview_ids = [
+        as_dict(row).get("decision_id")
+        for row in as_list(chain.get("recent_decisions"))
+        if as_dict(row).get("decision_id")
+    ]
+    latest_decision_present_in_recent_preview = (
+        latest_decision_id in recent_preview_ids
+        if latest_decision_id and recent_preview_ids
+        else None
+    )
+
+    recent_decision_count = int_or_zero(chain_coverage.get("recent_decision_count"))
+    no_order_expected_decision_count = int_or_zero(
+        chain_coverage.get("decisions_with_no_order_expected")
+    )
+    decisions_with_fills = int_or_zero(chain_coverage.get("decisions_with_fills"))
+    all_recent_decisions_no_order_expected = (
+        chain_coverage.get("all_recent_decisions_no_order_expected") is True
+    )
+    bridge_verified = (
+        bridge_density.get("status")
+        == "verified_recent_directional_no_order_primary_candidate_bridge_density"
+    )
+    latest_bridge_verified = (
+        latest_bridge_truth.get("status")
+        == "verified_latest_directional_no_order_primary_candidate_bridge"
+    )
+    chain_verified = (
+        chain.get("status")
+        == "verified_recent_directional_decision_chain_density_no_order_regime"
+    )
+    lifecycle_verified = (
+        lifecycle.get("smallest_missing_field") is None
+        and lifecycle.get("status")
+        in {
+            "verified_current_no_order_plus_executable_terminal_no_fill_continuity",
+            "verified_decision_lifecycle_provenance_continuity",
+        }
+    )
+    execution_science_verified = (
+        execution_science.get("smallest_missing_field") is None
+        and execution_science.get("status")
+        in {
+            "verified_no_order_terminal_no_fill_execution_science_continuity",
+            "verified_decision_lifecycle_execution_science_continuity",
+        }
+    )
+    upstream_raw_payload_exposed = (
+        chain.get("raw_payload_exposed") is True
+        or bridge_density.get("raw_payload_exposed") is True
+        or latest_bridge_truth.get("raw_payload_exposed") is True
+        or lifecycle.get("raw_payload_exposed") is True
+        or execution_science.get("raw_payload_exposed") is True
+    )
+
+    if not db.get("ok"):
+        status = "live_db_unavailable"
+        smallest_missing = "database_truth"
+        ok = False
+    elif not latest_decision_id:
+        status = "missing_latest_decision_context"
+        smallest_missing = "database_truth.latest_decision.decision_id"
+        ok = False
+    elif upstream_raw_payload_exposed:
+        status = "recent_directional_no_order_bridge_context_raw_payload_exposed"
+        smallest_missing = "raw_payload_redaction"
+        ok = False
+    elif not bridge_verified:
+        status = "missing_recent_directional_no_order_primary_candidate_bridge_density"
+        smallest_missing = (
+            bridge_density.get("smallest_missing_field")
+            or "recent_directional_no_order_primary_candidate_bridge_density_truth"
+        )
+        ok = False
+    elif not latest_bridge_verified:
+        status = "missing_latest_directional_no_order_primary_candidate_bridge"
+        smallest_missing = (
+            latest_bridge_truth.get("smallest_missing_field")
+            or "latest_directional_no_order_primary_candidate_bridge_truth"
+        )
+        ok = False
+    elif not chain_verified:
+        status = "missing_recent_directional_decision_chain_density_no_order_regime"
+        smallest_missing = (
+            chain.get("smallest_missing_field")
+            or "recent_directional_decision_chain_density_truth"
+        )
+        ok = False
+    elif not all_recent_decisions_no_order_expected:
+        status = "recent_directional_decision_chain_not_no_order_regime"
+        smallest_missing = (
+            "recent_directional_decision_chain_density_truth."
+            "coverage.all_recent_decisions_no_order_expected"
+        )
+        ok = False
+    elif not lifecycle_verified:
+        status = "missing_decision_lifecycle_provenance_continuity"
+        smallest_missing = (
+            lifecycle.get("smallest_missing_field")
+            or "decision_lifecycle_provenance_continuity_truth"
+        )
+        ok = False
+    elif not execution_science_verified:
+        status = "missing_decision_lifecycle_execution_science_continuity"
+        smallest_missing = (
+            execution_science.get("smallest_missing_field")
+            or "decision_lifecycle_execution_science_continuity_truth"
+        )
+        ok = False
+    elif latest_decision_matches_bridge is False:
+        status = "latest_decision_bridge_context_mismatch"
+        smallest_missing = (
+            "database_truth.latest_decision.decision_id/"
+            "recent_directional_no_order_primary_candidate_bridge_density_truth."
+            "coverage.latest_bridge_decision_id"
+        )
+        ok = False
+    else:
+        status = "verified_recent_directional_no_order_bridge_decision_context"
+        smallest_missing = None
+        ok = True
+
+    return {
+        "source": source,
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "coverage": {
+            "recent_decision_count": recent_decision_count,
+            "no_order_expected_decision_count": no_order_expected_decision_count,
+            "decisions_with_fills": decisions_with_fills,
+            "all_recent_decisions_no_order_expected": all_recent_decisions_no_order_expected,
+            "recent_decision_chain_density_status": chain.get("status"),
+            "recent_bridge_density_status": bridge_density.get("status"),
+            "latest_bridge_status": latest_bridge_truth.get("status"),
+            "decision_lifecycle_provenance_status": lifecycle.get("status"),
+            "decision_lifecycle_execution_science_status": execution_science.get("status"),
+            "latest_decision_id": latest_decision_id,
+            "latest_bridge_decision_id": latest_bridge_decision_id,
+            "latest_decision_matches_bridge": latest_decision_matches_bridge,
+            "latest_bridge_decision_present_in_recent_decisions": bridge_coverage.get(
+                "latest_bridge_decision_present_in_recent_decisions"
+            ),
+            "latest_decision_present_in_recent_chain_preview": (
+                latest_decision_present_in_recent_preview
+            ),
+            "historical_primary_candidate_bridge_scope": bridge_coverage.get(
+                "historical_primary_candidate_bridge_scope"
+            ),
+            "historical_primary_candidate_bridge_not_claimed": bridge_coverage.get(
+                "historical_primary_candidate_bridge_not_claimed"
+            ),
+        },
+        "current_decision_context": {
+            "decision_id": latest_decision_id,
+            "created_at": latest.get("created_at"),
+            "symbol": latest.get("symbol"),
+            "primary_family": latest.get("primary_family"),
+            "route_action": latest.get("route_action"),
+            "no_trade_classification": no_trade.get("classification"),
+            "no_trade_primary_blocker": no_trade.get("primary_blocker"),
+            "execution_truth_status": truth_chain.get("status"),
+            "order_expected": truth_chain.get("order_expected"),
+            "fill_expected": truth_chain.get("fill_expected"),
+            "latest_bridge_route_action": bridge_latest.get("latest_route_action")
+            or latest_bridge_fields.get("latest_route_action"),
+            "primary_candidate_route_action": bridge_latest.get(
+                "primary_candidate_route_action"
+            )
+            or latest_bridge_fields.get("primary_candidate_route_action"),
+            "portfolio_route_no_order_root_cause": bridge_latest.get(
+                "portfolio_route_no_order_root_cause"
+            )
+            or latest_bridge_fields.get("portfolio_route_no_order_root_cause"),
+            "primary_candidate_no_order_root_cause": bridge_latest.get(
+                "primary_candidate_no_order_root_cause"
+            )
+            or latest_bridge_fields.get("primary_candidate_no_order_root_cause"),
+            "route_root_and_primary_candidate_root_distinct": bridge_latest.get(
+                "route_root_and_primary_candidate_root_distinct"
+            )
+            or latest_bridge_fields.get("route_root_and_primary_candidate_root_distinct"),
+        },
+        "chain_context": {
+            "current_lifecycle_status": lifecycle_current.get("execution_truth_status")
+            or execution_science_lifecycle.get("current_truth_status"),
+            "current_fill_feasibility_status": lifecycle_current.get(
+                "fill_feasibility_status"
+            )
+            or execution_science_latest_fill.get("status"),
+            "current_position_lifecycle_status": lifecycle_current.get(
+                "position_lifecycle_status"
+            ),
+            "latest_executable_decision_id": lifecycle_executable.get("decision_id")
+            or execution_science_lifecycle.get("executable_decision_id"),
+            "latest_executable_status": lifecycle_executable.get("status")
+            or execution_science_lifecycle.get("executable_status"),
+            "latest_executable_terminal_no_fill_drilldown_status": (
+                lifecycle_executable.get("terminal_no_fill_drilldown_status")
+                or execution_science_lifecycle.get(
+                    "executable_terminal_no_fill_drilldown_status"
+                )
+            ),
+            "recent_batch_status": lifecycle_recent.get("status"),
+            "recent_batch_decisions_with_fills": lifecycle_recent.get(
+                "decisions_with_fills"
+            ),
+            "execution_science_status": execution_science.get("status"),
+            "terminal_pretrade_status": execution_science_terminal.get("status"),
+            "payload_sequence_status": execution_science_sequence.get(
+                "payload_sequence_status"
+            ),
+            "market_fill_feasibility_observable": execution_science_terminal.get(
+                "market_fill_feasibility_observable"
+            ),
+            "latest_filled_decision_id": chain_latest_filled.get("decision_id"),
+            "latest_filled_fill_count": chain_latest_filled.get("fill_count"),
+            "latest_filled_pnl_lifecycle_status": chain_latest_filled.get(
+                "pnl_lifecycle_status"
+            ),
+        },
+        "interpretation": {
+            "recent_window_no_order_regime": all_recent_decisions_no_order_expected,
+            "latest_bridge_context_is_current_decision": latest_decision_matches_bridge,
+            "latest_bridge_context_complete": ok,
+            "no_recent_fills_in_context_window": decisions_with_fills == 0,
+            "waiting_for_executable_directional_episode": chain_interpretation.get(
+                "waiting_for_executable_directional_episode"
+            ),
+            "historical_primary_candidate_bridge_not_claimed": bridge_coverage.get(
+                "historical_primary_candidate_bridge_not_claimed"
+            ),
+            "latest_primary_candidate_root_distinct_from_portfolio_route_root": (
+                bridge_interpretation.get(
+                    "latest_primary_candidate_root_distinct_from_portfolio_route_root"
+                )
+            ),
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -9453,6 +9749,21 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     )
     recent_no_order_primary_candidate_bridge_density_interpretation = as_dict(
         recent_no_order_primary_candidate_bridge_density.get("interpretation")
+    )
+    recent_no_order_bridge_decision_context = as_dict(
+        report.get("recent_directional_no_order_bridge_decision_context_truth")
+    )
+    recent_no_order_bridge_decision_context_coverage = as_dict(
+        recent_no_order_bridge_decision_context.get("coverage")
+    )
+    recent_no_order_bridge_decision_context_current = as_dict(
+        recent_no_order_bridge_decision_context.get("current_decision_context")
+    )
+    recent_no_order_bridge_decision_context_chain = as_dict(
+        recent_no_order_bridge_decision_context.get("chain_context")
+    )
+    recent_no_order_bridge_decision_context_interpretation = as_dict(
+        recent_no_order_bridge_decision_context.get("interpretation")
     )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
@@ -10391,6 +10702,103 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
                 "not_alpha_or_profitability_evidence"
             )
         ),
+        "recent_directional_no_order_bridge_decision_context_truth_status": (
+            recent_no_order_bridge_decision_context.get("status")
+        ),
+        "recent_directional_no_order_bridge_decision_context_smallest_missing_field": (
+            recent_no_order_bridge_decision_context.get("smallest_missing_field")
+        ),
+        "recent_directional_no_order_bridge_decision_context_raw_payload_exposed": (
+            recent_no_order_bridge_decision_context.get("raw_payload_exposed")
+        ),
+        "recent_directional_no_order_bridge_context_recent_decision_count": (
+            recent_no_order_bridge_decision_context_coverage.get("recent_decision_count")
+        ),
+        "recent_directional_no_order_bridge_context_no_order_expected_decision_count": (
+            recent_no_order_bridge_decision_context_coverage.get(
+                "no_order_expected_decision_count"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_decisions_with_fills": (
+            recent_no_order_bridge_decision_context_coverage.get("decisions_with_fills")
+        ),
+        "recent_directional_no_order_bridge_context_chain_density_status": (
+            recent_no_order_bridge_decision_context_coverage.get(
+                "recent_decision_chain_density_status"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_bridge_density_status": (
+            recent_no_order_bridge_decision_context_coverage.get(
+                "recent_bridge_density_status"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_lifecycle_status": (
+            recent_no_order_bridge_decision_context_coverage.get(
+                "decision_lifecycle_provenance_status"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_execution_science_status": (
+            recent_no_order_bridge_decision_context_coverage.get(
+                "decision_lifecycle_execution_science_status"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_latest_decision_id": (
+            recent_no_order_bridge_decision_context_coverage.get("latest_decision_id")
+        ),
+        "recent_directional_no_order_bridge_context_latest_decision_matches_bridge": (
+            recent_no_order_bridge_decision_context_coverage.get(
+                "latest_decision_matches_bridge"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_latest_route_action": (
+            recent_no_order_bridge_decision_context_current.get("latest_bridge_route_action")
+        ),
+        "recent_directional_no_order_bridge_context_primary_candidate_route_action": (
+            recent_no_order_bridge_decision_context_current.get(
+                "primary_candidate_route_action"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_route_roots_distinct": (
+            recent_no_order_bridge_decision_context_current.get(
+                "route_root_and_primary_candidate_root_distinct"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_historical_primary_candidate_bridge_scope": (
+            recent_no_order_bridge_decision_context_coverage.get(
+                "historical_primary_candidate_bridge_scope"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_historical_primary_candidate_bridge_not_claimed": (
+            recent_no_order_bridge_decision_context_coverage.get(
+                "historical_primary_candidate_bridge_not_claimed"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_latest_executable_decision_id": (
+            recent_no_order_bridge_decision_context_chain.get(
+                "latest_executable_decision_id"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_terminal_pretrade_status": (
+            recent_no_order_bridge_decision_context_chain.get("terminal_pretrade_status")
+        ),
+        "recent_directional_no_order_bridge_context_payload_sequence_status": (
+            recent_no_order_bridge_decision_context_chain.get("payload_sequence_status")
+        ),
+        "recent_directional_no_order_bridge_context_waiting_for_executable_directional_episode": (
+            recent_no_order_bridge_decision_context_interpretation.get(
+                "waiting_for_executable_directional_episode"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_no_recent_fills": (
+            recent_no_order_bridge_decision_context_interpretation.get(
+                "no_recent_fills_in_context_window"
+            )
+        ),
+        "recent_directional_no_order_bridge_context_not_alpha_or_profitability_evidence": (
+            recent_no_order_bridge_decision_context_interpretation.get(
+                "not_alpha_or_profitability_evidence"
+            )
+        ),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
         ),
@@ -11264,6 +11672,26 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             ],
             latest_bridge=report[
                 "latest_directional_no_order_primary_candidate_bridge_truth"
+            ],
+        )
+    )
+    report["recent_directional_no_order_bridge_decision_context_truth"] = (
+        summarize_recent_directional_no_order_bridge_decision_context_truth(
+            db=report["database_truth"],
+            recent_decision_chain_density=report[
+                "recent_directional_decision_chain_density_truth"
+            ],
+            recent_no_order_bridge_density=report[
+                "recent_directional_no_order_primary_candidate_bridge_density_truth"
+            ],
+            latest_bridge=report[
+                "latest_directional_no_order_primary_candidate_bridge_truth"
+            ],
+            decision_lifecycle_provenance_continuity=report[
+                "decision_lifecycle_provenance_continuity_truth"
+            ],
+            decision_lifecycle_execution_science_continuity=report[
+                "decision_lifecycle_execution_science_continuity_truth"
             ],
         )
     )
