@@ -2209,6 +2209,267 @@ def test_decision_lifecycle_provenance_continuity_reports_missing_latest_decisio
     assert truth["raw_payload_exposed"] is False
 
 
+def test_decision_lifecycle_execution_science_continuity_verifies_no_order_terminal_no_fill() -> None:
+    mod = load_module()
+
+    lifecycle = {
+        "ok": True,
+        "status": "verified_current_no_order_plus_executable_terminal_no_fill_continuity",
+        "smallest_missing_field": None,
+        "current_decision": {
+            "decision_id": "decision_latest",
+            "order_expected": False,
+            "fill_expected": False,
+            "execution_truth_status": "verified_no_order_expected",
+            "fill_feasibility_status": (
+                "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context"
+            ),
+        },
+        "latest_executable_directional_episode": {
+            "decision_id": "decision_exec",
+            "status": "verified_executable_terminal_order_no_fill_truth",
+            "terminal_no_fill_drilldown_status": "verified_terminal_no_fill_order_state_drilldown",
+        },
+        "recent_directional_batch": {
+            "recent_decision_count": 24,
+            "decisions_with_fills": 0,
+        },
+        "command_flow": {
+            "status": "verified_current_directional_command_flow_fill_provenance_present",
+        },
+    }
+    terminal_pretrade = {
+        "status": "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown",
+        "smallest_missing_field": None,
+        "decision": {"decision_id": "decision_exec"},
+        "snapshot_diff_sequence": {
+            "status": "sequence_continuous",
+            "sequence_gap_count": 0,
+        },
+        "local_fill_feasibility": {
+            "status": "terminal_no_fill_before_exchange_ack",
+            "market_fill_feasibility_observable": False,
+            "terminal_order_count": 2,
+            "exchange_ack_absent_count": 2,
+            "fill_absent_count": 2,
+        },
+        "slippage_baseline": {
+            "status": "verified_slippage_cost_calibration_evidence_present",
+        },
+    }
+    orderbook_depth = {
+        "status": "verified_books5_payload_depth_evidence_present",
+        "smallest_missing_field": None,
+        "raw_payload_exposed": False,
+        "books5_payload": {"payload_hash_present": True},
+        "sequence": {
+            "books5_row_count": 120,
+            "books5_sequence_gap_count": 0,
+            "diff_payload_persisted_row_count": 400,
+        },
+    }
+    latest_fill_feasibility = {
+        "status": "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context",
+        "smallest_missing_field": None,
+        "decision_id": "decision_latest",
+        "order_expected": False,
+        "fill_expected": False,
+        "fill_feasibility_applicable": False,
+    }
+    depth_lifecycle = {
+        "status": "forward_depth_ready_no_order_expected_regime",
+        "smallest_missing_field": None,
+        "interpretation": {
+            "forward_depth_ready": True,
+            "no_order_expected_regime": True,
+        },
+        "recent_directional_lifecycle_coverage": {
+            "recent_filled_decision_count": 0,
+        },
+        "slippage_baseline": {
+            "slippage_proxy_sample_count": 17,
+            "fee_sample_count": 73,
+        },
+    }
+    execution_science = {
+        "status": "verified_orderbook_sequence_and_silver_bar_present",
+        "payload_sequence": {
+            "status": "sequence_continuous",
+            "sequence_gap_count": 0,
+        },
+        "fill_feasibility_truth_status": "verified_fill_feasibility_surface_present",
+    }
+    slippage_cost = {
+        "status": "verified_slippage_cost_calibration_evidence_present",
+        "smallest_missing_field": None,
+        "fee": {"sample_count": 73},
+        "slippage_proxy": {
+            "sample_count": 17,
+            "coverage_audit": {
+                "classification": "missing_reference_price_coverage_is_no_submit_command_path",
+                "missing_reference_fills": 56,
+                "covered_reference_fills_with_command_reference": 17,
+            },
+        },
+    }
+
+    truth = mod.summarize_decision_lifecycle_execution_science_continuity_truth(
+        decision_lifecycle_provenance_continuity=lifecycle,
+        executable_terminal_pretrade_microstructure=terminal_pretrade,
+        orderbook_payload_depth=orderbook_depth,
+        latest_decision_fill_feasibility=latest_fill_feasibility,
+        depth_slippage_lifecycle=depth_lifecycle,
+        execution_science=execution_science,
+        slippage_cost=slippage_cost,
+    )
+
+    assert truth["ok"] is True
+    assert truth["status"] == "verified_no_order_terminal_no_fill_execution_science_continuity"
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["lifecycle_provenance"]["current_decision_id"] == "decision_latest"
+    assert truth["terminal_no_fill_execution_science"]["decision_id"] == "decision_exec"
+    assert truth["terminal_no_fill_execution_science"]["local_fill_feasibility_status"] == (
+        "terminal_no_fill_before_exchange_ack"
+    )
+    assert truth["orderbook_payload_depth"]["books5_sequence_gap_count"] == 0
+    assert truth["slippage_cost_calibration"]["slippage_proxy_sample_count"] == 17
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+
+
+def test_decision_lifecycle_execution_science_continuity_reports_missing_terminal_context() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_decision_lifecycle_execution_science_continuity_truth(
+        decision_lifecycle_provenance_continuity={
+            "ok": True,
+            "status": "verified_current_no_order_plus_executable_terminal_no_fill_continuity",
+            "smallest_missing_field": None,
+            "current_decision": {
+                "order_expected": False,
+                "fill_expected": False,
+            },
+        },
+        executable_terminal_pretrade_microstructure={
+            "status": "blocked_missing_snapshot_diff_sequence_validation",
+            "smallest_missing_field": "execution_science.payload_sequence.sequence_continuous",
+        },
+        orderbook_payload_depth={
+            "status": "verified_books5_payload_depth_evidence_present",
+            "smallest_missing_field": None,
+        },
+        latest_decision_fill_feasibility={
+            "status": "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context",
+            "smallest_missing_field": None,
+        },
+        depth_slippage_lifecycle={
+            "status": "forward_depth_ready_no_order_expected_regime",
+            "smallest_missing_field": None,
+        },
+        execution_science={
+            "status": "verified_orderbook_sequence_and_silver_bar_present",
+            "payload_sequence": {"status": "sequence_continuous"},
+        },
+        slippage_cost={
+            "status": "verified_slippage_cost_calibration_evidence_present",
+            "smallest_missing_field": None,
+        },
+    )
+
+    assert truth["ok"] is False
+    assert truth["status"] == "missing_terminal_no_fill_execution_science_context"
+    assert truth["smallest_missing_field"] == (
+        "directional_executable_terminal_no_fill_pretrade_microstructure_truth"
+    )
+    assert truth["raw_payload_exposed"] is False
+
+
+def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science_continuity() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "decision_lifecycle_execution_science_continuity_truth": {
+            "status": "verified_no_order_terminal_no_fill_execution_science_continuity",
+            "smallest_missing_field": None,
+            "lifecycle_provenance": {
+                "current_decision_id": "decision_latest",
+                "current_order_expected": False,
+                "current_fill_expected": False,
+                "executable_decision_id": "decision_exec",
+            },
+            "latest_decision_fill_feasibility": {
+                "status": "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context",
+            },
+            "terminal_no_fill_execution_science": {
+                "status": "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown",
+                "snapshot_diff_sequence_status": "sequence_continuous",
+                "local_fill_feasibility_status": "terminal_no_fill_before_exchange_ack",
+                "market_fill_feasibility_observable": False,
+            },
+            "orderbook_payload_depth": {
+                "status": "verified_books5_payload_depth_evidence_present",
+                "books5_sequence_gap_count": 0,
+            },
+            "depth_slippage_lifecycle": {
+                "status": "forward_depth_ready_no_order_expected_regime",
+            },
+            "execution_science": {
+                "payload_sequence_status": "sequence_continuous",
+            },
+            "slippage_cost_calibration": {
+                "status": "verified_slippage_cost_calibration_evidence_present",
+                "slippage_proxy_sample_count": 17,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["decision_lifecycle_execution_science_continuity_status"] == (
+        "verified_no_order_terminal_no_fill_execution_science_continuity"
+    )
+    assert live_facts["decision_lifecycle_execution_science_continuity_smallest_missing_field"] is None
+    assert live_facts["decision_lifecycle_execution_science_continuity_current_decision_id"] == (
+        "decision_latest"
+    )
+    assert live_facts["decision_lifecycle_execution_science_continuity_current_order_expected"] is False
+    assert live_facts["decision_lifecycle_execution_science_continuity_executable_decision_id"] == (
+        "decision_exec"
+    )
+    assert live_facts["decision_lifecycle_execution_science_continuity_terminal_pretrade_status"] == (
+        "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+    )
+    assert live_facts["decision_lifecycle_execution_science_continuity_snapshot_sequence_status"] == (
+        "sequence_continuous"
+    )
+    assert live_facts["decision_lifecycle_execution_science_continuity_local_fill_feasibility_status"] == (
+        "terminal_no_fill_before_exchange_ack"
+    )
+    assert live_facts["decision_lifecycle_execution_science_continuity_market_fill_observable"] is False
+    assert live_facts["decision_lifecycle_execution_science_continuity_orderbook_depth_status"] == (
+        "verified_books5_payload_depth_evidence_present"
+    )
+    assert live_facts["decision_lifecycle_execution_science_continuity_books5_sequence_gap_count"] == 0
+    assert live_facts["decision_lifecycle_execution_science_continuity_latest_fill_feasibility_status"] == (
+        "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context"
+    )
+    assert live_facts["decision_lifecycle_execution_science_continuity_execution_sequence_status"] == (
+        "sequence_continuous"
+    )
+    assert live_facts["decision_lifecycle_execution_science_continuity_slippage_cost_status"] == (
+        "verified_slippage_cost_calibration_evidence_present"
+    )
+    assert live_facts["decision_lifecycle_execution_science_continuity_slippage_proxy_sample_count"] == 17
+
+
 def test_directional_episode_pnl_lifecycle_classifies_open_unrealized_position() -> None:
     mod = load_module()
     raw = {

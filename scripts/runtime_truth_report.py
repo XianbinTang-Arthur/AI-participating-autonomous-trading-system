@@ -6872,6 +6872,252 @@ def summarize_decision_lifecycle_provenance_continuity_truth(
     }
 
 
+def summarize_decision_lifecycle_execution_science_continuity_truth(
+    *,
+    decision_lifecycle_provenance_continuity: dict[str, Any],
+    executable_terminal_pretrade_microstructure: dict[str, Any],
+    orderbook_payload_depth: dict[str, Any],
+    latest_decision_fill_feasibility: dict[str, Any],
+    depth_slippage_lifecycle: dict[str, Any],
+    execution_science: dict[str, Any],
+    slippage_cost: dict[str, Any],
+) -> dict[str, Any]:
+    lifecycle = as_dict(decision_lifecycle_provenance_continuity)
+    terminal_pretrade = as_dict(executable_terminal_pretrade_microstructure)
+    orderbook_depth = as_dict(orderbook_payload_depth)
+    latest_fill_feasibility = as_dict(latest_decision_fill_feasibility)
+    depth_lifecycle = as_dict(depth_slippage_lifecycle)
+    execution = as_dict(execution_science)
+    slippage = as_dict(slippage_cost)
+
+    lifecycle_status = lifecycle.get("status")
+    terminal_status = terminal_pretrade.get("status")
+    orderbook_depth_status = orderbook_depth.get("status")
+    latest_fill_feasibility_status = latest_fill_feasibility.get("status")
+    depth_lifecycle_status = depth_lifecycle.get("status")
+    execution_status = execution.get("status")
+    slippage_status = slippage.get("status")
+
+    lifecycle_current = as_dict(lifecycle.get("current_decision"))
+    lifecycle_executable = as_dict(lifecycle.get("latest_executable_directional_episode"))
+    lifecycle_recent = as_dict(lifecycle.get("recent_directional_batch"))
+    lifecycle_command = as_dict(lifecycle.get("command_flow"))
+    terminal_sequence = as_dict(terminal_pretrade.get("snapshot_diff_sequence"))
+    terminal_fill_feasibility = as_dict(terminal_pretrade.get("local_fill_feasibility"))
+    terminal_slippage = as_dict(terminal_pretrade.get("slippage_baseline"))
+    orderbook_depth_sequence = as_dict(orderbook_depth.get("sequence"))
+    orderbook_depth_books5 = as_dict(orderbook_depth.get("books5_payload"))
+    depth_lifecycle_interpretation = as_dict(depth_lifecycle.get("interpretation"))
+    depth_lifecycle_slippage = as_dict(depth_lifecycle.get("slippage_baseline"))
+    depth_lifecycle_recent = as_dict(depth_lifecycle.get("recent_directional_lifecycle_coverage"))
+    execution_payload_sequence = as_dict(execution.get("payload_sequence"))
+    slippage_proxy = as_dict(slippage.get("slippage_proxy"))
+    slippage_coverage = as_dict(slippage_proxy.get("coverage_audit"))
+
+    lifecycle_ok = (
+        lifecycle.get("ok") is True
+        and lifecycle.get("smallest_missing_field") is None
+        and lifecycle_status
+        in {
+            "verified_current_no_order_plus_executable_terminal_no_fill_continuity",
+            "verified_decision_lifecycle_provenance_continuity",
+        }
+    )
+    terminal_pretrade_ok = (
+        terminal_pretrade.get("smallest_missing_field") is None
+        and terminal_status
+        == "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+    )
+    orderbook_depth_ok = (
+        orderbook_depth.get("smallest_missing_field") is None
+        and orderbook_depth_status == "verified_books5_payload_depth_evidence_present"
+    )
+    latest_fill_feasibility_ok = (
+        latest_fill_feasibility.get("smallest_missing_field") is None
+        and latest_fill_feasibility_status
+        in {
+            "verified_no_order_fill_feasibility_not_applicable_with_pretrade_context",
+            "verified_order_expected_pretrade_fill_feasibility_context_present",
+        }
+    )
+    depth_lifecycle_ok = (
+        depth_lifecycle.get("smallest_missing_field") is None
+        and depth_lifecycle_status
+        in {
+            "forward_depth_ready_no_order_expected_regime",
+            "forward_depth_ready_no_recent_directional_filled_episode",
+            "verified_depth_slippage_lifecycle_coverage_present",
+        }
+    )
+    execution_sequence_ok = (
+        execution_status == "verified_orderbook_sequence_and_silver_bar_present"
+        and execution_payload_sequence.get("status") == "sequence_continuous"
+    )
+    slippage_ok = (
+        slippage.get("smallest_missing_field") is None
+        and slippage_status == "verified_slippage_cost_calibration_evidence_present"
+    )
+
+    checks = [
+        ("decision_lifecycle_provenance_continuity_truth", lifecycle_ok),
+        (
+            "directional_executable_terminal_no_fill_pretrade_microstructure_truth",
+            terminal_pretrade_ok,
+        ),
+        ("orderbook_payload_depth_truth", orderbook_depth_ok),
+        ("latest_decision_fill_feasibility_truth", latest_fill_feasibility_ok),
+        ("depth_slippage_lifecycle_truth", depth_lifecycle_ok),
+        ("execution_science_truth.payload_sequence", execution_sequence_ok),
+        ("slippage_cost_calibration_truth", slippage_ok),
+    ]
+    smallest_missing = next((field for field, passed in checks if not passed), None)
+
+    current_no_order_expected = (
+        lifecycle_current.get("order_expected") is False
+        and lifecycle_current.get("fill_expected") is False
+    )
+    terminal_no_fill_before_exchange_ack = (
+        terminal_fill_feasibility.get("status") == "terminal_no_fill_before_exchange_ack"
+    )
+    if not lifecycle_ok:
+        status = "missing_decision_lifecycle_provenance_continuity"
+        ok = False
+    elif not terminal_pretrade_ok:
+        status = "missing_terminal_no_fill_execution_science_context"
+        ok = False
+    elif not orderbook_depth_ok:
+        status = "missing_orderbook_payload_depth_continuity"
+        ok = False
+    elif not latest_fill_feasibility_ok:
+        status = "missing_latest_decision_fill_feasibility_context"
+        ok = False
+    elif not depth_lifecycle_ok:
+        status = "missing_depth_slippage_lifecycle_continuity"
+        ok = False
+    elif not execution_sequence_ok:
+        status = "missing_execution_science_sequence_context"
+        ok = False
+    elif not slippage_ok:
+        status = "missing_slippage_cost_calibration_context"
+        ok = False
+    elif current_no_order_expected and terminal_no_fill_before_exchange_ack:
+        status = "verified_no_order_terminal_no_fill_execution_science_continuity"
+        ok = True
+    else:
+        status = "verified_decision_lifecycle_execution_science_continuity"
+        ok = True
+
+    return {
+        "source": "live_runtime_truth_surfaces",
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "lifecycle_provenance": {
+            "status": lifecycle_status,
+            "smallest_missing_field": lifecycle.get("smallest_missing_field"),
+            "current_decision_id": lifecycle_current.get("decision_id"),
+            "current_order_expected": lifecycle_current.get("order_expected"),
+            "current_fill_expected": lifecycle_current.get("fill_expected"),
+            "current_truth_status": lifecycle_current.get("execution_truth_status"),
+            "current_fill_feasibility_status": lifecycle_current.get(
+                "fill_feasibility_status"
+            ),
+            "executable_decision_id": lifecycle_executable.get("decision_id"),
+            "executable_status": lifecycle_executable.get("status"),
+            "executable_terminal_no_fill_drilldown_status": lifecycle_executable.get(
+                "terminal_no_fill_drilldown_status"
+            ),
+            "recent_decision_count": lifecycle_recent.get("recent_decision_count"),
+            "recent_filled_decisions": lifecycle_recent.get("decisions_with_fills"),
+            "command_flow_status": lifecycle_command.get("status"),
+        },
+        "latest_decision_fill_feasibility": {
+            "status": latest_fill_feasibility_status,
+            "smallest_missing_field": latest_fill_feasibility.get("smallest_missing_field"),
+            "decision_id": latest_fill_feasibility.get("decision_id"),
+            "order_expected": latest_fill_feasibility.get("order_expected"),
+            "fill_expected": latest_fill_feasibility.get("fill_expected"),
+            "fill_feasibility_applicable": latest_fill_feasibility.get(
+                "fill_feasibility_applicable"
+            ),
+        },
+        "terminal_no_fill_execution_science": {
+            "status": terminal_status,
+            "smallest_missing_field": terminal_pretrade.get("smallest_missing_field"),
+            "decision_id": as_dict(terminal_pretrade.get("decision")).get("decision_id"),
+            "snapshot_diff_sequence_status": terminal_sequence.get("status"),
+            "snapshot_diff_sequence_gap_count": terminal_sequence.get("sequence_gap_count"),
+            "local_fill_feasibility_status": terminal_fill_feasibility.get("status"),
+            "market_fill_feasibility_observable": terminal_fill_feasibility.get(
+                "market_fill_feasibility_observable"
+            ),
+            "terminal_order_count": terminal_fill_feasibility.get("terminal_order_count"),
+            "exchange_ack_absent_count": terminal_fill_feasibility.get(
+                "exchange_ack_absent_count"
+            ),
+            "fill_absent_count": terminal_fill_feasibility.get("fill_absent_count"),
+            "slippage_baseline_status": terminal_slippage.get("status"),
+        },
+        "orderbook_payload_depth": {
+            "status": orderbook_depth_status,
+            "smallest_missing_field": orderbook_depth.get("smallest_missing_field"),
+            "raw_payload_exposed": orderbook_depth.get("raw_payload_exposed"),
+            "books5_payload_hash_present": orderbook_depth_books5.get(
+                "payload_hash_present"
+            ),
+            "books5_row_count": orderbook_depth_sequence.get("books5_row_count"),
+            "books5_sequence_gap_count": orderbook_depth_sequence.get(
+                "books5_sequence_gap_count"
+            ),
+            "diff_payload_persisted_row_count": orderbook_depth_sequence.get(
+                "diff_payload_persisted_row_count"
+            ),
+        },
+        "depth_slippage_lifecycle": {
+            "status": depth_lifecycle_status,
+            "smallest_missing_field": depth_lifecycle.get("smallest_missing_field"),
+            "forward_depth_ready": depth_lifecycle_interpretation.get("forward_depth_ready"),
+            "no_order_expected_regime": depth_lifecycle_interpretation.get(
+                "no_order_expected_regime"
+            ),
+            "recent_filled_decision_count": depth_lifecycle_recent.get(
+                "recent_filled_decision_count"
+            ),
+            "slippage_proxy_sample_count": depth_lifecycle_slippage.get(
+                "slippage_proxy_sample_count"
+            ),
+            "fee_sample_count": depth_lifecycle_slippage.get("fee_sample_count"),
+        },
+        "execution_science": {
+            "status": execution_status,
+            "payload_sequence_status": execution_payload_sequence.get("status"),
+            "payload_sequence_gap_count": execution_payload_sequence.get("sequence_gap_count"),
+            "fill_feasibility_truth_status": execution.get("fill_feasibility_truth_status"),
+        },
+        "slippage_cost_calibration": {
+            "status": slippage_status,
+            "smallest_missing_field": slippage.get("smallest_missing_field"),
+            "fee_sample_count": as_dict(slippage.get("fee")).get("sample_count"),
+            "slippage_proxy_sample_count": slippage_proxy.get("sample_count"),
+            "reference_coverage_classification": slippage_coverage.get("classification"),
+            "missing_reference_fills": slippage_coverage.get("missing_reference_fills"),
+            "covered_reference_fills_with_command_reference": slippage_coverage.get(
+                "covered_reference_fills_with_command_reference"
+            ),
+        },
+        "interpretation": {
+            "current_no_order_expected": current_no_order_expected,
+            "terminal_no_fill_before_exchange_ack": terminal_no_fill_before_exchange_ack,
+            "market_fill_feasibility_observable": terminal_fill_feasibility.get(
+                "market_fill_feasibility_observable"
+            ),
+            "execution_science_is_pretrade_observability_not_alpha": True,
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -7619,6 +7865,30 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     decision_lifecycle_depth = as_dict(
         decision_lifecycle_continuity.get("depth_slippage_lifecycle")
     )
+    decision_lifecycle_execution_science = as_dict(
+        report.get("decision_lifecycle_execution_science_continuity_truth")
+    )
+    decision_lifecycle_execution_science_lifecycle = as_dict(
+        decision_lifecycle_execution_science.get("lifecycle_provenance")
+    )
+    decision_lifecycle_execution_science_latest_fill = as_dict(
+        decision_lifecycle_execution_science.get("latest_decision_fill_feasibility")
+    )
+    decision_lifecycle_execution_science_terminal = as_dict(
+        decision_lifecycle_execution_science.get("terminal_no_fill_execution_science")
+    )
+    decision_lifecycle_execution_science_depth = as_dict(
+        decision_lifecycle_execution_science.get("orderbook_payload_depth")
+    )
+    decision_lifecycle_execution_science_depth_lifecycle = as_dict(
+        decision_lifecycle_execution_science.get("depth_slippage_lifecycle")
+    )
+    decision_lifecycle_execution_science_sequence = as_dict(
+        decision_lifecycle_execution_science.get("execution_science")
+    )
+    decision_lifecycle_execution_science_slippage = as_dict(
+        decision_lifecycle_execution_science.get("slippage_cost_calibration")
+    )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
     latest_directional_spike_reversion = as_dict(directional_spike_reversion.get("latest_filled_decision"))
@@ -8097,6 +8367,57 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "decision_lifecycle_provenance_continuity_depth_slippage_status": (
             decision_lifecycle_depth.get("status")
+        ),
+        "decision_lifecycle_execution_science_continuity_status": (
+            decision_lifecycle_execution_science.get("status")
+        ),
+        "decision_lifecycle_execution_science_continuity_smallest_missing_field": (
+            decision_lifecycle_execution_science.get("smallest_missing_field")
+        ),
+        "decision_lifecycle_execution_science_continuity_current_decision_id": (
+            decision_lifecycle_execution_science_lifecycle.get("current_decision_id")
+        ),
+        "decision_lifecycle_execution_science_continuity_current_order_expected": (
+            decision_lifecycle_execution_science_lifecycle.get("current_order_expected")
+        ),
+        "decision_lifecycle_execution_science_continuity_current_fill_expected": (
+            decision_lifecycle_execution_science_lifecycle.get("current_fill_expected")
+        ),
+        "decision_lifecycle_execution_science_continuity_executable_decision_id": (
+            decision_lifecycle_execution_science_lifecycle.get("executable_decision_id")
+        ),
+        "decision_lifecycle_execution_science_continuity_terminal_pretrade_status": (
+            decision_lifecycle_execution_science_terminal.get("status")
+        ),
+        "decision_lifecycle_execution_science_continuity_snapshot_sequence_status": (
+            decision_lifecycle_execution_science_terminal.get("snapshot_diff_sequence_status")
+        ),
+        "decision_lifecycle_execution_science_continuity_local_fill_feasibility_status": (
+            decision_lifecycle_execution_science_terminal.get("local_fill_feasibility_status")
+        ),
+        "decision_lifecycle_execution_science_continuity_market_fill_observable": (
+            decision_lifecycle_execution_science_terminal.get("market_fill_feasibility_observable")
+        ),
+        "decision_lifecycle_execution_science_continuity_orderbook_depth_status": (
+            decision_lifecycle_execution_science_depth.get("status")
+        ),
+        "decision_lifecycle_execution_science_continuity_books5_sequence_gap_count": (
+            decision_lifecycle_execution_science_depth.get("books5_sequence_gap_count")
+        ),
+        "decision_lifecycle_execution_science_continuity_latest_fill_feasibility_status": (
+            decision_lifecycle_execution_science_latest_fill.get("status")
+        ),
+        "decision_lifecycle_execution_science_continuity_depth_slippage_lifecycle_status": (
+            decision_lifecycle_execution_science_depth_lifecycle.get("status")
+        ),
+        "decision_lifecycle_execution_science_continuity_execution_sequence_status": (
+            decision_lifecycle_execution_science_sequence.get("payload_sequence_status")
+        ),
+        "decision_lifecycle_execution_science_continuity_slippage_cost_status": (
+            decision_lifecycle_execution_science_slippage.get("status")
+        ),
+        "decision_lifecycle_execution_science_continuity_slippage_proxy_sample_count": (
+            decision_lifecycle_execution_science_slippage.get("slippage_proxy_sample_count")
         ),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
@@ -8914,6 +9235,21 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             latest_decision_fill_feasibility=report["latest_decision_fill_feasibility_truth"],
             directional_command_flow=report["directional_command_flow_provenance_truth"],
             depth_slippage_lifecycle=report["depth_slippage_lifecycle_truth"],
+        )
+    )
+    report["decision_lifecycle_execution_science_continuity_truth"] = (
+        summarize_decision_lifecycle_execution_science_continuity_truth(
+            decision_lifecycle_provenance_continuity=report[
+                "decision_lifecycle_provenance_continuity_truth"
+            ],
+            executable_terminal_pretrade_microstructure=report[
+                "directional_executable_terminal_no_fill_pretrade_microstructure_truth"
+            ],
+            orderbook_payload_depth=report["orderbook_payload_depth_truth"],
+            latest_decision_fill_feasibility=report["latest_decision_fill_feasibility_truth"],
+            depth_slippage_lifecycle=report["depth_slippage_lifecycle_truth"],
+            execution_science=report["execution_science_truth"],
+            slippage_cost=report["slippage_cost_calibration_truth"],
         )
     )
     report["directional_spike_reversion_truth"] = summarize_directional_spike_reversion_truth(
