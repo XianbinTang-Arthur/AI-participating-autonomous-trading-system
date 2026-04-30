@@ -2692,6 +2692,140 @@ def test_recent_directional_decision_chain_density_reports_missing_order_surface
     assert truth["raw_payload_exposed"] is False
 
 
+def test_recent_directional_no_order_root_cause_density_verifies_roots() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_recent_directional_no_order_root_cause_density_truth(
+        directional_attribution={
+            "ok": True,
+            "coverage": {
+                "recent_decision_count": 2,
+                "decisions_with_order_surface_or_no_order_expectation": 2,
+                "decisions_missing_order_surface": 0,
+                "decisions_with_no_order_expected": 2,
+                "all_recent_decisions_no_order_expected": True,
+                "decisions_with_no_order_semantics": 2,
+                "decisions_with_stable_no_order_equivalence_class": 2,
+                "all_no_order_expected_decisions_have_no_order_semantics": True,
+                "all_no_order_expected_decisions_stable_equivalence_class": True,
+            },
+            "no_order_semantics": {
+                "status": "verified_recent_no_order_semantics_present",
+                "smallest_missing_field": None,
+                "coverage": {
+                    "decisions_with_no_order_expected": 2,
+                    "decisions_with_no_order_semantics": 2,
+                    "decisions_with_stable_no_order_equivalence_class": 2,
+                    "decisions_with_root_cause": 2,
+                    "decisions_with_root_materiality": 2,
+                    "decisions_with_materiality_requirement": 2,
+                    "all_no_order_expected_decisions_have_no_order_semantics": True,
+                    "all_no_order_expected_decisions_stable_equivalence_class": True,
+                    "all_root_causes_non_material_without_order_or_fill_change": True,
+                    "all_root_causes_require_order_or_fill_change_for_materiality": True,
+                },
+                "distributions": {
+                    "root_cause": [
+                        {
+                            "value": "decision_route_action_advisory_only_no_order_expected",
+                            "count": 2,
+                        }
+                    ],
+                    "equivalence_class": [
+                        {
+                            "value": "verified_non_executable_no_order_expected",
+                            "count": 2,
+                        }
+                    ],
+                    "route_action": [{"value": "advisory_only", "count": 2}],
+                    "semantic_status": [
+                        {
+                            "value": (
+                                "verified_directional_decision_no_order_expected_semantics"
+                            ),
+                            "count": 2,
+                        }
+                    ],
+                },
+            },
+            "recent_decisions": [
+                {
+                    "decision_id": "decision_latest",
+                    "created_at": "2026-04-30T17:50:00Z",
+                    "route_action": "advisory_only",
+                    "order_expectation": {
+                        "classification": "no_order_expected_by_route_action",
+                        "no_order_expected": True,
+                    },
+                    "no_order_semantics": {
+                        "status": "verified_directional_decision_no_order_expected_semantics",
+                        "equivalence_class": "verified_non_executable_no_order_expected",
+                        "root_cause": "decision_route_action_advisory_only_no_order_expected",
+                        "root_cause_is_material_without_order_or_fill_change": False,
+                        "requires_order_or_fill_change_for_materiality": True,
+                    },
+                }
+            ],
+        }
+    )
+
+    assert truth["ok"] is True
+    assert truth["status"] == "verified_recent_directional_no_order_root_cause_density"
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["coverage"]["no_order_expected_decision_count"] == 2
+    assert truth["coverage"]["decisions_missing_root_cause"] == 0
+    assert truth["top_root_cause"] == "decision_route_action_advisory_only_no_order_expected"
+    assert truth["top_equivalence_class"] == "verified_non_executable_no_order_expected"
+    assert truth["top_route_action"] == "advisory_only"
+    assert truth["interpretation"][
+        "all_roots_non_material_without_order_or_fill_change"
+    ] is True
+    assert truth["interpretation"][
+        "root_cause_switch_without_order_or_fill_is_non_material"
+    ] is True
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+
+
+def test_recent_directional_no_order_root_cause_density_reports_missing_semantics() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_recent_directional_no_order_root_cause_density_truth(
+        directional_attribution={
+            "ok": True,
+            "coverage": {
+                "recent_decision_count": 2,
+                "decisions_with_order_surface_or_no_order_expectation": 2,
+                "decisions_missing_order_surface": 0,
+                "decisions_with_no_order_expected": 2,
+                "all_recent_decisions_no_order_expected": True,
+                "decisions_with_no_order_semantics": 1,
+                "decisions_with_stable_no_order_equivalence_class": 1,
+                "all_no_order_expected_decisions_have_no_order_semantics": False,
+                "all_no_order_expected_decisions_stable_equivalence_class": False,
+            },
+            "no_order_semantics": {
+                "coverage": {
+                    "decisions_with_no_order_expected": 2,
+                    "decisions_with_no_order_semantics": 1,
+                    "decisions_with_stable_no_order_equivalence_class": 1,
+                    "all_no_order_expected_decisions_have_no_order_semantics": False,
+                    "all_no_order_expected_decisions_stable_equivalence_class": False,
+                }
+            },
+        }
+    )
+
+    assert truth["ok"] is False
+    assert truth["status"] == "missing_recent_directional_no_order_root_semantics"
+    assert truth["smallest_missing_field"] == (
+        "directional_episode_attribution.no_order_semantics"
+    )
+    assert truth["coverage"]["decisions_missing_no_order_semantics"] == 1
+    assert truth["coverage"]["decisions_missing_stable_no_order_equivalence_class"] == 1
+    assert truth["raw_payload_exposed"] is False
+
+
 def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science_continuity() -> None:
     mod = load_module()
     report = {
@@ -2831,6 +2965,99 @@ def test_project_live_runtime_facts_exposes_recent_directional_decision_chain_de
     assert live_facts["recent_directional_chain_decisions_with_fills"] == 0
     assert live_facts["recent_directional_chain_waiting_for_executable_directional_episode"] is True
     assert live_facts["recent_directional_chain_not_alpha_or_profitability_evidence"] is True
+
+
+def test_project_live_runtime_facts_exposes_recent_no_order_root_density() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "recent_directional_no_order_root_cause_density_truth": {
+            "status": "verified_recent_directional_no_order_root_cause_density",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "coverage": {
+                "recent_decision_count": 24,
+                "no_order_expected_decision_count": 24,
+                "decisions_missing_no_order_semantics": 0,
+                "decisions_missing_root_cause": 0,
+                "decisions_missing_root_materiality": 0,
+            },
+            "top_root_cause": "decision_route_action_advisory_only_no_order_expected",
+            "top_equivalence_class": "verified_non_executable_no_order_expected",
+            "top_route_action": "advisory_only",
+            "distributions": {
+                "root_cause": [
+                    {
+                        "value": "decision_route_action_advisory_only_no_order_expected",
+                        "count": 24,
+                    }
+                ]
+            },
+            "interpretation": {
+                "all_roots_non_material_without_order_or_fill_change": True,
+                "all_roots_require_order_or_fill_change_for_materiality": True,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts["recent_directional_no_order_root_cause_density_truth_status"] == (
+        "verified_recent_directional_no_order_root_cause_density"
+    )
+    assert (
+        live_facts[
+            "recent_directional_no_order_root_cause_density_smallest_missing_field"
+        ]
+        is None
+    )
+    assert (
+        live_facts["recent_directional_no_order_root_cause_density_raw_payload_exposed"]
+        is False
+    )
+    assert live_facts["recent_directional_no_order_root_recent_decision_count"] == 24
+    assert (
+        live_facts[
+            "recent_directional_no_order_root_no_order_expected_decision_count"
+        ]
+        == 24
+    )
+    assert (
+        live_facts["recent_directional_no_order_root_decisions_missing_root_cause"]
+        == 0
+    )
+    assert live_facts["recent_directional_no_order_root_top_root_cause"] == (
+        "decision_route_action_advisory_only_no_order_expected"
+    )
+    assert live_facts["recent_directional_no_order_root_top_route_action"] == (
+        "advisory_only"
+    )
+    assert (
+        live_facts[
+            "recent_directional_no_order_root_all_roots_non_material_without_order_or_fill_change"
+        ]
+        is True
+    )
+    assert (
+        live_facts[
+            "recent_directional_no_order_root_requires_order_or_fill_change_for_materiality"
+        ]
+        is True
+    )
+    assert live_facts["recent_directional_no_order_root_distribution_root_cause"] == [
+        {
+            "value": "decision_route_action_advisory_only_no_order_expected",
+            "count": 24,
+        }
+    ]
 
 
 def test_directional_episode_pnl_lifecycle_classifies_open_unrealized_position() -> None:

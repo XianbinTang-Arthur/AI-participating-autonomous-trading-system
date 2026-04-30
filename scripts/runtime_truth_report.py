@@ -1951,6 +1951,25 @@ def compact_unique(values: list[Any], *, limit: int = 16) -> list[str]:
     return compacted
 
 
+def compact_count_distribution(values: list[Any], *, limit: int = 12) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for value in values:
+        text = truncate_text(value, limit=128) or "unknown"
+        counts[text] = counts.get(text, 0) + 1
+    return [
+        {"value": key, "count": count}
+        for key, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[
+            :limit
+        ]
+    ]
+
+
+def compact_distribution_top_value(distribution: Any) -> str | None:
+    first = next((as_dict(item) for item in as_list(distribution) if as_dict(item)), {})
+    value = first.get("value")
+    return str(value) if value is not None else None
+
+
 def split_aggregate_values(value: Any, *, limit: int = 16) -> list[str]:
     if value is None:
         return []
@@ -6642,6 +6661,35 @@ def summarize_directional_episode_attribution_truth(
         ],
         limit=8,
     )
+    no_order_root_cause_count = sum(
+        1 for item in no_order_semantics_records if item.get("root_cause")
+    )
+    no_order_root_materiality_count = sum(
+        1
+        for item in no_order_semantics_records
+        if item.get("root_cause_is_material_without_order_or_fill_change") is not None
+    )
+    no_order_materiality_requirement_count = sum(
+        1
+        for item in no_order_semantics_records
+        if item.get("requires_order_or_fill_change_for_materiality") is not None
+    )
+    no_order_roots_non_material = (
+        decisions_with_no_order_expected > 0
+        and no_order_root_materiality_count == decisions_with_no_order_expected
+        and all(
+            item.get("root_cause_is_material_without_order_or_fill_change") is False
+            for item in no_order_semantics_records
+        )
+    )
+    no_order_roots_require_order_or_fill_change = (
+        decisions_with_no_order_expected > 0
+        and no_order_materiality_requirement_count == decisions_with_no_order_expected
+        and all(
+            item.get("requires_order_or_fill_change_for_materiality") is True
+            for item in no_order_semantics_records
+        )
+    )
     no_order_semantics_complete = (
         decisions_with_no_order_expected <= 0
         or decisions_with_no_order_semantics == decisions_with_no_order_expected
@@ -6810,19 +6858,66 @@ def summarize_directional_episode_attribution_truth(
                 "decisions_with_stable_no_order_equivalence_class": (
                     decisions_with_stable_no_order_equivalence_class
                 ),
+                "decisions_with_root_cause": no_order_root_cause_count,
+                "decisions_with_root_materiality": no_order_root_materiality_count,
+                "decisions_with_materiality_requirement": (
+                    no_order_materiality_requirement_count
+                ),
                 "all_no_order_expected_decisions_have_no_order_semantics": (
                     no_order_semantics_complete
                 ),
                 "all_no_order_expected_decisions_stable_equivalence_class": (
                     no_order_semantics_stable
                 ),
+                "all_root_causes_non_material_without_order_or_fill_change": (
+                    no_order_roots_non_material
+                ),
+                "all_root_causes_require_order_or_fill_change_for_materiality": (
+                    no_order_roots_require_order_or_fill_change
+                ),
             },
             "equivalence_classes": no_order_equivalence_classes,
+            "distributions": {
+                "root_cause": compact_count_distribution(
+                    [item.get("root_cause") for item in no_order_semantics_records],
+                    limit=8,
+                ),
+                "equivalence_class": compact_count_distribution(
+                    [item.get("equivalence_class") for item in no_order_semantics_records],
+                    limit=8,
+                ),
+                "route_action": compact_count_distribution(
+                    [item.get("route_action") for item in no_order_semantics_records],
+                    limit=8,
+                ),
+                "semantic_status": compact_count_distribution(
+                    [item.get("status") for item in no_order_semantics_records],
+                    limit=8,
+                ),
+                "root_material_without_order_or_fill_change": (
+                    compact_count_distribution(
+                        [
+                            item.get("root_cause_is_material_without_order_or_fill_change")
+                            for item in no_order_semantics_records
+                        ],
+                        limit=8,
+                    )
+                ),
+                "requires_order_or_fill_change_for_materiality": (
+                    compact_count_distribution(
+                        [
+                            item.get("requires_order_or_fill_change_for_materiality")
+                            for item in no_order_semantics_records
+                        ],
+                        limit=8,
+                    )
+                ),
+            },
             "root_cause_is_material_without_order_or_fill_change": (
-                False if no_order_semantics_stable and decisions_with_no_order_expected > 0 else None
+                False if no_order_roots_non_material else None
             ),
             "requires_order_or_fill_change_for_materiality": (
-                True if no_order_semantics_stable and decisions_with_no_order_expected > 0 else None
+                True if no_order_roots_require_order_or_fill_change else None
             ),
         },
         "pretrade_microstructure": pretrade_microstructure,
@@ -7763,6 +7858,318 @@ def summarize_recent_directional_decision_chain_density_truth(
     }
 
 
+def summarize_recent_directional_no_order_root_cause_density_truth(
+    *,
+    directional_attribution: dict[str, Any],
+) -> dict[str, Any]:
+    attribution = as_dict(directional_attribution)
+    coverage = as_dict(attribution.get("coverage"))
+    no_order_semantics = as_dict(attribution.get("no_order_semantics"))
+    no_order_coverage = as_dict(no_order_semantics.get("coverage"))
+    distributions = as_dict(no_order_semantics.get("distributions"))
+
+    recent_decision_count = int_or_zero(coverage.get("recent_decision_count"))
+    no_order_expected_decision_count = int_or_zero(
+        coverage.get("decisions_with_no_order_expected")
+    )
+    decisions_with_order_surface_or_no_order_expectation = int_or_zero(
+        coverage.get("decisions_with_order_surface_or_no_order_expectation")
+    )
+    decisions_missing_order_surface = int_or_zero(
+        coverage.get("decisions_missing_order_surface")
+    )
+    decisions_with_no_order_semantics = int_or_zero(
+        no_order_coverage.get(
+            "decisions_with_no_order_semantics",
+            coverage.get("decisions_with_no_order_semantics"),
+        )
+    )
+    decisions_with_stable_no_order_equivalence_class = int_or_zero(
+        no_order_coverage.get(
+            "decisions_with_stable_no_order_equivalence_class",
+            coverage.get("decisions_with_stable_no_order_equivalence_class"),
+        )
+    )
+    decisions_with_root_cause = int_or_zero(
+        no_order_coverage.get("decisions_with_root_cause")
+    )
+    decisions_with_root_materiality = int_or_zero(
+        no_order_coverage.get("decisions_with_root_materiality")
+    )
+    decisions_with_materiality_requirement = int_or_zero(
+        no_order_coverage.get("decisions_with_materiality_requirement")
+    )
+    recent_decision_rows = [as_dict(row) for row in as_list(attribution.get("recent_decisions"))]
+    no_order_rows = [
+        item
+        for item in recent_decision_rows
+        if as_dict(item.get("order_expectation")).get("no_order_expected") is True
+    ]
+    if decisions_with_root_cause <= 0 and no_order_rows:
+        decisions_with_root_cause = sum(
+            1 for item in no_order_rows if as_dict(item.get("no_order_semantics")).get("root_cause")
+        )
+    if decisions_with_root_materiality <= 0 and no_order_rows:
+        decisions_with_root_materiality = sum(
+            1
+            for item in no_order_rows
+            if as_dict(item.get("no_order_semantics")).get(
+                "root_cause_is_material_without_order_or_fill_change"
+            )
+            is not None
+        )
+    if decisions_with_materiality_requirement <= 0 and no_order_rows:
+        decisions_with_materiality_requirement = sum(
+            1
+            for item in no_order_rows
+            if as_dict(item.get("no_order_semantics")).get(
+                "requires_order_or_fill_change_for_materiality"
+            )
+            is not None
+        )
+
+    all_recent_decisions_no_order_expected = (
+        recent_decision_count > 0
+        and coverage.get("all_recent_decisions_no_order_expected") is True
+    )
+    all_no_order_expected_have_semantics = (
+        no_order_coverage.get("all_no_order_expected_decisions_have_no_order_semantics")
+        is True
+        or coverage.get("all_no_order_expected_decisions_have_no_order_semantics") is True
+    )
+    all_no_order_expected_stable = (
+        no_order_coverage.get("all_no_order_expected_decisions_stable_equivalence_class")
+        is True
+        or coverage.get("all_no_order_expected_decisions_stable_equivalence_class") is True
+    )
+    all_roots_non_material_without_order_or_fill_change = (
+        no_order_coverage.get("all_root_causes_non_material_without_order_or_fill_change")
+        is True
+        or no_order_semantics.get("root_cause_is_material_without_order_or_fill_change")
+        is False
+    )
+    all_roots_require_order_or_fill_change_for_materiality = (
+        no_order_coverage.get(
+            "all_root_causes_require_order_or_fill_change_for_materiality"
+        )
+        is True
+        or no_order_semantics.get("requires_order_or_fill_change_for_materiality") is True
+    )
+    decisions_missing_no_order_semantics = max(
+        no_order_expected_decision_count - decisions_with_no_order_semantics,
+        0,
+    )
+    decisions_missing_stable_equivalence_class = max(
+        no_order_expected_decision_count
+        - decisions_with_stable_no_order_equivalence_class,
+        0,
+    )
+    decisions_missing_root_cause = max(
+        no_order_expected_decision_count - decisions_with_root_cause,
+        0,
+    )
+    decisions_missing_root_materiality = max(
+        no_order_expected_decision_count - decisions_with_root_materiality,
+        0,
+    )
+    decisions_missing_materiality_requirement = max(
+        no_order_expected_decision_count - decisions_with_materiality_requirement,
+        0,
+    )
+
+    root_cause_distribution = as_list(distributions.get("root_cause"))
+    if not root_cause_distribution and no_order_rows:
+        root_cause_distribution = compact_count_distribution(
+            [
+                as_dict(item.get("no_order_semantics")).get("root_cause")
+                for item in no_order_rows
+            ],
+            limit=8,
+        )
+    equivalence_class_distribution = as_list(distributions.get("equivalence_class"))
+    if not equivalence_class_distribution and no_order_rows:
+        equivalence_class_distribution = compact_count_distribution(
+            [
+                as_dict(item.get("no_order_semantics")).get("equivalence_class")
+                for item in no_order_rows
+            ],
+            limit=8,
+        )
+    route_action_distribution = as_list(distributions.get("route_action"))
+    if not route_action_distribution and no_order_rows:
+        route_action_distribution = compact_count_distribution(
+            [
+                as_dict(item.get("no_order_semantics")).get("route_action")
+                or item.get("route_action")
+                for item in no_order_rows
+            ],
+            limit=8,
+        )
+    semantic_status_distribution = as_list(distributions.get("semantic_status"))
+    if not semantic_status_distribution and no_order_rows:
+        semantic_status_distribution = compact_count_distribution(
+            [
+                as_dict(item.get("no_order_semantics")).get("status")
+                for item in no_order_rows
+            ],
+            limit=8,
+        )
+
+    if attribution.get("ok") is False:
+        status = "directional_episode_attribution_unavailable"
+        smallest_missing = (
+            attribution.get("smallest_missing_field") or "directional_episode_attribution_truth"
+        )
+        ok = False
+    elif recent_decision_count <= 0:
+        status = "no_recent_directional_decisions"
+        smallest_missing = "portfolio_allocation_decisions.directional"
+        ok = False
+    elif decisions_with_order_surface_or_no_order_expectation < recent_decision_count:
+        status = "missing_recent_directional_order_surface_or_no_order_expectation"
+        smallest_missing = "directional_episode_attribution.order_surface_or_no_order_expectation"
+        ok = False
+    elif not all_recent_decisions_no_order_expected:
+        status = "recent_directional_decisions_include_order_expected_cases"
+        smallest_missing = "recent_directional_no_order_regime"
+        ok = False
+    elif not (all_no_order_expected_have_semantics and all_no_order_expected_stable):
+        status = "missing_recent_directional_no_order_root_semantics"
+        smallest_missing = "directional_episode_attribution.no_order_semantics"
+        ok = False
+    elif decisions_missing_root_cause > 0:
+        status = "missing_recent_directional_no_order_root_cause"
+        smallest_missing = "directional_episode_attribution.no_order_semantics.root_cause"
+        ok = False
+    elif decisions_missing_root_materiality > 0:
+        status = "missing_recent_directional_no_order_root_materiality"
+        smallest_missing = (
+            "directional_episode_attribution.no_order_semantics."
+            "root_cause_is_material_without_order_or_fill_change"
+        )
+        ok = False
+    elif decisions_missing_materiality_requirement > 0:
+        status = "missing_recent_directional_no_order_materiality_requirement"
+        smallest_missing = (
+            "directional_episode_attribution.no_order_semantics."
+            "requires_order_or_fill_change_for_materiality"
+        )
+        ok = False
+    elif not all_roots_non_material_without_order_or_fill_change:
+        status = "unresolved_recent_directional_no_order_root_materiality"
+        smallest_missing = "directional_episode_attribution.no_order_semantics.root_materiality"
+        ok = False
+    elif not all_roots_require_order_or_fill_change_for_materiality:
+        status = "unresolved_recent_directional_no_order_materiality_requirement"
+        smallest_missing = (
+            "directional_episode_attribution.no_order_semantics.materiality_requirement"
+        )
+        ok = False
+    else:
+        status = "verified_recent_directional_no_order_root_cause_density"
+        smallest_missing = None
+        ok = True
+
+    recent_preview: list[dict[str, Any]] = []
+    for item in recent_decision_rows[:8]:
+        order_expectation = as_dict(item.get("order_expectation"))
+        no_order = as_dict(item.get("no_order_semantics"))
+        recent_preview.append(
+            {
+                "decision_id": item.get("decision_id"),
+                "created_at": item.get("created_at"),
+                "route_action": item.get("route_action"),
+                "order_expectation_classification": order_expectation.get(
+                    "classification"
+                ),
+                "no_order_expected": order_expectation.get("no_order_expected"),
+                "no_order_semantics_status": no_order.get("status"),
+                "no_order_equivalence_class": no_order.get("equivalence_class"),
+                "no_order_root_cause": no_order.get("root_cause"),
+                "root_cause_is_material_without_order_or_fill_change": no_order.get(
+                    "root_cause_is_material_without_order_or_fill_change"
+                ),
+                "requires_order_or_fill_change_for_materiality": no_order.get(
+                    "requires_order_or_fill_change_for_materiality"
+                ),
+            }
+        )
+
+    distribution_source = (
+        "directional_episode_attribution_truth.no_order_semantics.distributions"
+        if distributions
+        else "directional_episode_attribution_truth.recent_decisions_preview"
+    )
+    return {
+        "source": "directional_episode_attribution_truth.no_order_semantics",
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "coverage": {
+            "recent_decision_count": recent_decision_count,
+            "no_order_expected_decision_count": no_order_expected_decision_count,
+            "all_recent_decisions_no_order_expected": all_recent_decisions_no_order_expected,
+            "decisions_with_order_surface_or_no_order_expectation": (
+                decisions_with_order_surface_or_no_order_expectation
+            ),
+            "decisions_missing_order_surface": decisions_missing_order_surface,
+            "decisions_with_no_order_semantics": decisions_with_no_order_semantics,
+            "decisions_missing_no_order_semantics": decisions_missing_no_order_semantics,
+            "decisions_with_stable_no_order_equivalence_class": (
+                decisions_with_stable_no_order_equivalence_class
+            ),
+            "decisions_missing_stable_no_order_equivalence_class": (
+                decisions_missing_stable_equivalence_class
+            ),
+            "decisions_with_root_cause": decisions_with_root_cause,
+            "decisions_missing_root_cause": decisions_missing_root_cause,
+            "decisions_with_root_materiality": decisions_with_root_materiality,
+            "decisions_missing_root_materiality": decisions_missing_root_materiality,
+            "decisions_with_materiality_requirement": (
+                decisions_with_materiality_requirement
+            ),
+            "decisions_missing_materiality_requirement": (
+                decisions_missing_materiality_requirement
+            ),
+            "sampled_recent_decision_count": len(recent_decision_rows),
+            "distribution_source": distribution_source,
+        },
+        "distributions": {
+            "root_cause": root_cause_distribution,
+            "equivalence_class": equivalence_class_distribution,
+            "route_action": route_action_distribution,
+            "semantic_status": semantic_status_distribution,
+            "root_material_without_order_or_fill_change": as_list(
+                distributions.get("root_material_without_order_or_fill_change")
+            ),
+            "requires_order_or_fill_change_for_materiality": as_list(
+                distributions.get("requires_order_or_fill_change_for_materiality")
+            ),
+        },
+        "top_root_cause": compact_distribution_top_value(root_cause_distribution),
+        "top_equivalence_class": compact_distribution_top_value(
+            equivalence_class_distribution
+        ),
+        "top_route_action": compact_distribution_top_value(route_action_distribution),
+        "recent_decisions": recent_preview,
+        "interpretation": {
+            "no_order_regime_explained": ok,
+            "all_roots_non_material_without_order_or_fill_change": (
+                all_roots_non_material_without_order_or_fill_change
+            ),
+            "all_roots_require_order_or_fill_change_for_materiality": (
+                all_roots_require_order_or_fill_change_for_materiality
+            ),
+            "root_cause_switch_without_order_or_fill_is_non_material": (
+                all_roots_non_material_without_order_or_fill_change
+                and all_roots_require_order_or_fill_change_for_materiality
+            ),
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -8556,6 +8963,18 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     recent_directional_chain_density_latest_filled = as_dict(
         recent_directional_chain_density.get("latest_filled_decision")
     )
+    recent_directional_no_order_root_density = as_dict(
+        report.get("recent_directional_no_order_root_cause_density_truth")
+    )
+    recent_directional_no_order_root_density_coverage = as_dict(
+        recent_directional_no_order_root_density.get("coverage")
+    )
+    recent_directional_no_order_root_density_interpretation = as_dict(
+        recent_directional_no_order_root_density.get("interpretation")
+    )
+    recent_directional_no_order_root_density_distributions = as_dict(
+        recent_directional_no_order_root_density.get("distributions")
+    )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
     latest_directional_spike_reversion = as_dict(directional_spike_reversion.get("latest_filled_decision"))
@@ -9228,6 +9647,60 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "recent_directional_chain_latest_filled_pnl_lifecycle_status": (
             recent_directional_chain_density_latest_filled.get("pnl_lifecycle_status")
+        ),
+        "recent_directional_no_order_root_cause_density_truth_status": (
+            recent_directional_no_order_root_density.get("status")
+        ),
+        "recent_directional_no_order_root_cause_density_smallest_missing_field": (
+            recent_directional_no_order_root_density.get("smallest_missing_field")
+        ),
+        "recent_directional_no_order_root_cause_density_raw_payload_exposed": (
+            recent_directional_no_order_root_density.get("raw_payload_exposed")
+        ),
+        "recent_directional_no_order_root_recent_decision_count": (
+            recent_directional_no_order_root_density_coverage.get("recent_decision_count")
+        ),
+        "recent_directional_no_order_root_no_order_expected_decision_count": (
+            recent_directional_no_order_root_density_coverage.get(
+                "no_order_expected_decision_count"
+            )
+        ),
+        "recent_directional_no_order_root_decisions_missing_no_order_semantics": (
+            recent_directional_no_order_root_density_coverage.get(
+                "decisions_missing_no_order_semantics"
+            )
+        ),
+        "recent_directional_no_order_root_decisions_missing_root_cause": (
+            recent_directional_no_order_root_density_coverage.get(
+                "decisions_missing_root_cause"
+            )
+        ),
+        "recent_directional_no_order_root_decisions_missing_root_materiality": (
+            recent_directional_no_order_root_density_coverage.get(
+                "decisions_missing_root_materiality"
+            )
+        ),
+        "recent_directional_no_order_root_top_root_cause": (
+            recent_directional_no_order_root_density.get("top_root_cause")
+        ),
+        "recent_directional_no_order_root_top_equivalence_class": (
+            recent_directional_no_order_root_density.get("top_equivalence_class")
+        ),
+        "recent_directional_no_order_root_top_route_action": (
+            recent_directional_no_order_root_density.get("top_route_action")
+        ),
+        "recent_directional_no_order_root_all_roots_non_material_without_order_or_fill_change": (
+            recent_directional_no_order_root_density_interpretation.get(
+                "all_roots_non_material_without_order_or_fill_change"
+            )
+        ),
+        "recent_directional_no_order_root_requires_order_or_fill_change_for_materiality": (
+            recent_directional_no_order_root_density_interpretation.get(
+                "all_roots_require_order_or_fill_change_for_materiality"
+            )
+        ),
+        "recent_directional_no_order_root_distribution_root_cause": as_list(
+            recent_directional_no_order_root_density_distributions.get("root_cause")
         ),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
@@ -10082,6 +10555,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
                 "decision_lifecycle_execution_science_continuity_truth"
             ],
             directional_command_flow=report["directional_command_flow_provenance_truth"],
+        )
+    )
+    report["recent_directional_no_order_root_cause_density_truth"] = (
+        summarize_recent_directional_no_order_root_cause_density_truth(
+            directional_attribution=report["directional_episode_attribution_truth"],
         )
     )
     report["directional_spike_reversion_truth"] = summarize_directional_spike_reversion_truth(
