@@ -5586,6 +5586,21 @@ def summarize_depth_slippage_lifecycle_truth(
     )
     recent_directional_decisions = int_or_zero(directional_coverage.get("recent_decision_count"))
     recent_directional_filled_decisions = int_or_zero(directional_coverage.get("decisions_with_fills"))
+    recent_directional_no_order_expected = int_or_zero(
+        directional_coverage.get("decisions_with_no_order_expected")
+    )
+    recent_directional_missing_order_surface = int_or_zero(
+        directional_coverage.get("decisions_missing_order_surface")
+    )
+    all_recent_directional_no_order_expected = (
+        directional_coverage.get("all_recent_decisions_no_order_expected") is True
+    )
+    no_order_expected_regime = (
+        recent_directional_decisions > 0
+        and all_recent_directional_no_order_expected
+        and recent_directional_no_order_expected == recent_directional_decisions
+        and recent_directional_missing_order_surface == 0
+    )
     recent_filled_with_pretrade = int_or_zero(
         directional_coverage.get("filled_decisions_with_pretrade_microstructure")
     )
@@ -5604,14 +5619,17 @@ def summarize_depth_slippage_lifecycle_truth(
             "directional_command_flow.current_submit_reference_covered_fill_count",
             current_submit_reference_covered_count > 0,
         ),
-        ("directional_episode_attribution.recent_directional_filled_decisions", recent_directional_filled_decisions > 0),
+        (
+            "directional_episode_attribution.recent_directional_filled_decisions",
+            recent_directional_filled_decisions > 0 or no_order_expected_regime,
+        ),
         (
             "directional_episode_attribution.filled_decisions_with_pretrade_microstructure",
-            recent_filled_with_pretrade > 0,
+            recent_filled_with_pretrade > 0 or no_order_expected_regime,
         ),
         (
             "directional_episode_attribution.filled_decisions_with_resolved_pnl_lifecycle",
-            recent_filled_with_resolved_pnl > 0,
+            recent_filled_with_resolved_pnl > 0 or no_order_expected_regime,
         ),
     ]
     smallest_missing = next((field for field, passed in checks if not passed), None)
@@ -5626,6 +5644,8 @@ def summarize_depth_slippage_lifecycle_truth(
         status = "blocked_missing_slippage_reference_samples"
     elif current_submit_reference_covered_count <= 0:
         status = "blocked_missing_current_submit_reference_coverage"
+    elif no_order_expected_regime and recent_directional_filled_decisions <= 0:
+        status = "forward_depth_ready_no_order_expected_regime"
     elif recent_directional_filled_decisions <= 0:
         status = "forward_depth_ready_no_recent_directional_filled_episode"
     elif recent_filled_with_pretrade <= 0:
@@ -5688,6 +5708,10 @@ def summarize_depth_slippage_lifecycle_truth(
             "directional_episode_status": as_dict(directional_attribution).get("status"),
             "recent_decision_count": recent_directional_decisions,
             "recent_filled_decision_count": recent_directional_filled_decisions,
+            "decisions_with_no_order_expected": recent_directional_no_order_expected,
+            "decisions_missing_order_surface": recent_directional_missing_order_surface,
+            "all_recent_decisions_no_order_expected": all_recent_directional_no_order_expected,
+            "no_order_expected_regime": no_order_expected_regime,
             "recent_filled_with_pretrade_microstructure": recent_filled_with_pretrade,
             "recent_filled_with_slippage_reference": recent_filled_with_slippage,
             "recent_filled_with_resolved_pnl_lifecycle": recent_filled_with_resolved_pnl,
@@ -5699,6 +5723,10 @@ def summarize_depth_slippage_lifecycle_truth(
             "existing_fill_slippage_baseline_present": slippage_verified and slippage_samples > 0,
             "per_recent_directional_fill_depth_lifecycle_link_present": (
                 recent_filled_with_pretrade > 0 and recent_filled_with_resolved_pnl > 0
+            ),
+            "no_order_expected_regime": no_order_expected_regime,
+            "waiting_for_executable_directional_episode": (
+                no_order_expected_regime and recent_directional_filled_decisions <= 0
             ),
             "does_not_claim_historical_fills_have_sidecar_payload_depth": True,
             "not_alpha_or_profitability_evidence": True,
@@ -6600,6 +6628,12 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
             depth_slippage_lifecycle_interpretation.get(
                 "per_recent_directional_fill_depth_lifecycle_link_present"
             )
+        ),
+        "depth_slippage_lifecycle_no_order_expected_regime": (
+            depth_slippage_lifecycle_interpretation.get("no_order_expected_regime")
+        ),
+        "depth_slippage_lifecycle_waiting_for_executable_directional_episode": (
+            depth_slippage_lifecycle_interpretation.get("waiting_for_executable_directional_episode")
         ),
         "depth_slippage_lifecycle_depth_books5_row_count": (
             depth_slippage_lifecycle_depth.get("books5_row_count")
