@@ -2826,6 +2826,123 @@ def test_recent_directional_no_order_root_cause_density_reports_missing_semantic
     assert truth["raw_payload_exposed"] is False
 
 
+def test_latest_directional_no_order_primary_candidate_bridge_verifies_distinct_roots() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_latest_directional_no_order_primary_candidate_bridge_truth(
+        db={
+            "ok": True,
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "created_at": "2026-04-30T20:54:08Z",
+                "symbol": "BTC-USDT-SWAP",
+                "primary_family": "directional",
+                "route_action": "advisory_only",
+                "execution_truth_chain": {
+                    "order_expected": False,
+                    "fill_expected": False,
+                },
+                "no_trade_attribution": {
+                    "classification": "no_order_fill_expected_for_latest_decision",
+                    "is_current_no_trade": True,
+                    "primary_blocker": "candidate_execution_incompatible",
+                    "primary_family_candidate_truth": {
+                        "status": "verified_primary_candidate_hold_current_zero_delta_no_order_expected",
+                        "smallest_missing_field": None,
+                        "primary_family": "directional",
+                        "candidate_route_action": "hold_current",
+                        "candidate_execution_behavior": "hold_current",
+                        "order_expected_from_primary_candidate": False,
+                        "no_order_root_cause": "primary_candidate_hold_current_zero_delta",
+                        "candidate_execution_compatible": True,
+                        "candidate_approved_for_execution": True,
+                        "candidate_permission_mode": "approved",
+                        "composed_delta_position_qty": "0",
+                        "target_notional": "0",
+                        "global_primary_blocker": "candidate_execution_incompatible",
+                        "global_primary_blocker_applies_to_candidate": False,
+                        "global_blocker_scope": "other_candidate_or_portfolio_level",
+                    },
+                },
+            },
+        }
+    )
+
+    assert truth["ok"] is True
+    assert truth["status"] == "verified_latest_directional_no_order_primary_candidate_bridge"
+    assert truth["smallest_missing_field"] is None
+    assert truth["raw_payload_exposed"] is False
+    assert truth["latest_decision"]["route_action"] == "advisory_only"
+    assert truth["latest_decision"]["order_expected"] is False
+    assert truth["latest_decision"]["portfolio_route_no_order_root_cause"] == (
+        "decision_route_action_advisory_only_no_order_expected"
+    )
+    assert truth["primary_candidate"]["route_action"] == "hold_current"
+    assert truth["primary_candidate"]["order_expected"] is False
+    assert truth["primary_candidate"]["no_order_root_cause"] == (
+        "primary_candidate_hold_current_zero_delta"
+    )
+    assert truth["primary_candidate"]["no_order_semantic_status"] == (
+        "verified_primary_candidate_no_order_expected_semantics"
+    )
+    assert truth["bridge"]["latest_route_action_differs_from_primary_candidate_route_action"] is True
+    assert truth["bridge"]["route_root_and_primary_candidate_root_distinct"] is True
+    assert truth["bridge"]["global_blocker_scope"] == "other_candidate_or_portfolio_level"
+    assert truth["interpretation"]["portfolio_route_action_is_not_primary_candidate_root"] is True
+    assert (
+        truth["interpretation"][
+            "hold_current_zero_delta_explains_primary_directional_no_order"
+        ]
+        is True
+    )
+    assert (
+        truth["interpretation"][
+            "advisory_only_route_action_explains_portfolio_route_no_order"
+        ]
+        is True
+    )
+    assert (
+        truth["interpretation"][
+            "global_blocker_is_other_candidate_or_portfolio_level"
+        ]
+        is True
+    )
+    assert truth["interpretation"]["not_alpha_or_profitability_evidence"] is True
+
+
+def test_latest_directional_no_order_primary_candidate_bridge_reports_missing_candidate() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_latest_directional_no_order_primary_candidate_bridge_truth(
+        db={
+            "ok": True,
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "symbol": "BTC-USDT-SWAP",
+                "primary_family": "directional",
+                "route_action": "advisory_only",
+                "execution_truth_chain": {
+                    "order_expected": False,
+                    "fill_expected": False,
+                },
+                "no_trade_attribution": {
+                    "classification": "no_order_fill_expected_for_latest_decision",
+                    "is_current_no_trade": True,
+                    "primary_blocker": "candidate_execution_incompatible",
+                },
+            },
+        }
+    )
+
+    assert truth["ok"] is False
+    assert truth["status"] == "missing_latest_directional_primary_candidate_truth"
+    assert truth["smallest_missing_field"] == (
+        "database_truth.latest_decision.no_trade_attribution."
+        "primary_family_candidate_truth"
+    )
+    assert truth["raw_payload_exposed"] is False
+
+
 def test_project_live_runtime_facts_exposes_decision_lifecycle_execution_science_continuity() -> None:
     mod = load_module()
     report = {
@@ -3058,6 +3175,104 @@ def test_project_live_runtime_facts_exposes_recent_no_order_root_density() -> No
             "count": 24,
         }
     ]
+
+
+def test_project_live_runtime_facts_exposes_latest_directional_no_order_primary_candidate_bridge() -> None:
+    mod = load_module()
+    report = {
+        "database_truth": {
+            "ok": True,
+            "latest_decision": {},
+            "latest_executable_directional_decision": {},
+        },
+        "latest_directional_no_order_primary_candidate_bridge_truth": {
+            "status": "verified_latest_directional_no_order_primary_candidate_bridge",
+            "smallest_missing_field": None,
+            "raw_payload_exposed": False,
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "route_action": "advisory_only",
+                "order_expected": False,
+                "portfolio_route_no_order_root_cause": (
+                    "decision_route_action_advisory_only_no_order_expected"
+                ),
+            },
+            "primary_candidate": {
+                "route_action": "hold_current",
+                "order_expected": False,
+                "no_order_root_cause": "primary_candidate_hold_current_zero_delta",
+                "no_order_semantic_status": (
+                    "verified_primary_candidate_no_order_expected_semantics"
+                ),
+                "global_blocker_scope": "other_candidate_or_portfolio_level",
+            },
+            "bridge": {
+                "latest_route_action": "advisory_only",
+                "primary_candidate_route_action": "hold_current",
+                "latest_route_action_differs_from_primary_candidate_route_action": True,
+                "portfolio_route_no_order_root_cause": (
+                    "decision_route_action_advisory_only_no_order_expected"
+                ),
+                "primary_candidate_no_order_root_cause": (
+                    "primary_candidate_hold_current_zero_delta"
+                ),
+                "route_root_and_primary_candidate_root_distinct": True,
+                "latest_decision_order_expected": False,
+                "primary_candidate_order_expected": False,
+            },
+            "interpretation": {
+                "portfolio_route_action_is_not_primary_candidate_root": True,
+                "hold_current_zero_delta_explains_primary_directional_no_order": True,
+                "advisory_only_route_action_explains_portfolio_route_no_order": True,
+                "global_blocker_is_other_candidate_or_portfolio_level": True,
+                "not_alpha_or_profitability_evidence": True,
+            },
+        },
+        "runtime": {"dashboard_bundle": {}, "ai_timeout_active_blocker": False},
+        "scope": {"shadow_benchmark": "none_verified"},
+        "git": {"deployed_matches_windows": True, "windows": {"dirty": False}},
+        "deployment_health": {"gateway_health": {"ok": True}, "containers": {}},
+    }
+
+    live_facts = mod.project_live_runtime_facts(report)
+
+    assert live_facts[
+        "latest_directional_no_order_primary_candidate_bridge_truth_status"
+    ] == "verified_latest_directional_no_order_primary_candidate_bridge"
+    assert (
+        live_facts[
+            "latest_directional_no_order_primary_candidate_bridge_raw_payload_exposed"
+        ]
+        is False
+    )
+    assert live_facts["latest_directional_no_order_bridge_decision_id"] == (
+        "decision-current"
+    )
+    assert live_facts["latest_directional_no_order_bridge_latest_route_action"] == (
+        "advisory_only"
+    )
+    assert live_facts[
+        "latest_directional_no_order_bridge_primary_candidate_route_action"
+    ] == "hold_current"
+    assert live_facts["latest_directional_no_order_bridge_route_action_differs"] is True
+    assert live_facts[
+        "latest_directional_no_order_bridge_route_root_and_primary_candidate_root_distinct"
+    ] is True
+    assert live_facts[
+        "latest_directional_no_order_bridge_primary_candidate_no_order_root_cause"
+    ] == "primary_candidate_hold_current_zero_delta"
+    assert live_facts[
+        "latest_directional_no_order_bridge_portfolio_route_action_is_not_primary_candidate_root"
+    ] is True
+    assert live_facts[
+        "latest_directional_no_order_bridge_hold_current_zero_delta_explains_primary_directional_no_order"
+    ] is True
+    assert live_facts[
+        "latest_directional_no_order_bridge_advisory_only_route_action_explains_portfolio_route_no_order"
+    ] is True
+    assert live_facts[
+        "latest_directional_no_order_bridge_not_alpha_or_profitability_evidence"
+    ] is True
 
 
 def test_directional_episode_pnl_lifecycle_classifies_open_unrealized_position() -> None:

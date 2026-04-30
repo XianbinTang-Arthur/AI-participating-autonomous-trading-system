@@ -8170,6 +8170,246 @@ def summarize_recent_directional_no_order_root_cause_density_truth(
     }
 
 
+def summarize_latest_directional_no_order_primary_candidate_bridge_truth(
+    *,
+    db: dict[str, Any],
+) -> dict[str, Any]:
+    source = (
+        "database_truth.latest_decision.execution_truth_chain_and_no_trade_attribution."
+        "primary_family_candidate_truth"
+    )
+    if not db.get("ok"):
+        return {
+            "source": source,
+            "ok": False,
+            "status": "live_db_unavailable",
+            "smallest_missing_field": "database_truth",
+            "raw_payload_exposed": False,
+        }
+
+    latest = as_dict(db.get("latest_decision"))
+    latest_decision_id = latest.get("decision_id")
+    if not latest_decision_id:
+        return {
+            "source": source,
+            "ok": False,
+            "status": "missing_latest_decision_truth",
+            "smallest_missing_field": "database_truth.latest_decision.decision_id",
+            "raw_payload_exposed": False,
+        }
+
+    truth_chain = as_dict(latest.get("execution_truth_chain"))
+    no_trade = as_dict(latest.get("no_trade_attribution"))
+    primary_candidate = as_dict(no_trade.get("primary_family_candidate_truth"))
+    latest_route_action = latest.get("route_action")
+    if not latest_route_action:
+        latest_route_action = next(
+            (
+                as_dict(item).get("route_action")
+                for item in as_list(no_trade.get("blocker_chain"))
+                if as_dict(item).get("route_action")
+            ),
+            None,
+        )
+
+    latest_order_expected = truth_chain.get("order_expected")
+    if latest_order_expected is None and no_trade.get("classification") == (
+        "no_order_fill_expected_for_latest_decision"
+    ):
+        latest_order_expected = False
+    latest_fill_expected = truth_chain.get("fill_expected")
+    if latest_fill_expected is None and no_trade.get("classification") == (
+        "no_order_fill_expected_for_latest_decision"
+    ):
+        latest_fill_expected = False
+
+    primary_candidate_no_order_semantics = classify_primary_candidate_no_order_semantics(
+        primary_candidate
+    )
+    primary_candidate_route_action = primary_candidate.get("candidate_route_action")
+    primary_candidate_order_expected = primary_candidate.get(
+        "order_expected_from_primary_candidate"
+    )
+    primary_candidate_root_cause = primary_candidate_no_order_semantics.get("root_cause")
+    portfolio_route_no_order_root_cause = (
+        f"decision_route_action_{latest_route_action}_no_order_expected"
+        if latest_route_action in NO_ORDER_ROUTE_ACTIONS
+        else None
+    )
+    route_action_differs = (
+        latest_route_action is not None
+        and primary_candidate_route_action is not None
+        and latest_route_action != primary_candidate_route_action
+    )
+    route_root_and_primary_candidate_root_distinct = (
+        portfolio_route_no_order_root_cause is not None
+        and primary_candidate_root_cause is not None
+        and portfolio_route_no_order_root_cause != primary_candidate_root_cause
+    )
+
+    no_trade_is_current = no_trade.get("is_current_no_trade") is True
+    primary_family = primary_candidate.get("primary_family")
+    if latest_order_expected is True:
+        status = "latest_decision_order_expected_bridge_not_applicable"
+        smallest_missing = None
+        ok = True
+    elif not no_trade_is_current:
+        status = "latest_decision_not_current_no_trade"
+        smallest_missing = (
+            None
+            if latest_order_expected is not False
+            else "database_truth.latest_decision.no_trade_attribution.is_current_no_trade"
+        )
+        ok = latest_order_expected is not False
+    elif not primary_candidate:
+        status = "missing_latest_directional_primary_candidate_truth"
+        smallest_missing = (
+            "database_truth.latest_decision.no_trade_attribution."
+            "primary_family_candidate_truth"
+        )
+        ok = False
+    elif primary_family != "directional":
+        status = "latest_primary_candidate_not_directional"
+        smallest_missing = (
+            "database_truth.latest_decision.no_trade_attribution."
+            "primary_family_candidate_truth.primary_family"
+        )
+        ok = False
+    elif primary_candidate_no_order_semantics.get("status") != (
+        "verified_primary_candidate_no_order_expected_semantics"
+    ):
+        status = "missing_latest_directional_primary_candidate_no_order_semantics"
+        smallest_missing = (
+            primary_candidate.get("smallest_missing_field")
+            or "database_truth.latest_decision.no_trade_attribution."
+            "primary_family_candidate_truth.no_order_root_cause"
+        )
+        ok = False
+    elif latest_order_expected is not False:
+        status = "missing_latest_decision_order_expectation"
+        smallest_missing = "database_truth.latest_decision.execution_truth_chain.order_expected"
+        ok = False
+    elif primary_candidate_order_expected is not False:
+        status = "latest_directional_primary_candidate_order_expected"
+        smallest_missing = (
+            "database_truth.latest_decision.no_trade_attribution."
+            "primary_family_candidate_truth.order_expected_from_primary_candidate"
+        )
+        ok = False
+    else:
+        status = "verified_latest_directional_no_order_primary_candidate_bridge"
+        smallest_missing = None
+        ok = True
+
+    return {
+        "source": source,
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "latest_decision": {
+            "decision_id": latest_decision_id,
+            "created_at": latest.get("created_at"),
+            "symbol": latest.get("symbol"),
+            "primary_family": latest.get("primary_family"),
+            "route_action": latest_route_action,
+            "no_trade_classification": no_trade.get("classification"),
+            "no_trade_primary_blocker": no_trade.get("primary_blocker"),
+            "is_current_no_trade": no_trade.get("is_current_no_trade"),
+            "order_expected": latest_order_expected,
+            "fill_expected": latest_fill_expected,
+            "portfolio_route_no_order_root_cause": portfolio_route_no_order_root_cause,
+        },
+        "primary_candidate": {
+            "truth_status": primary_candidate.get("status"),
+            "family": primary_family,
+            "route_action": primary_candidate_route_action,
+            "execution_behavior": primary_candidate.get("candidate_execution_behavior"),
+            "order_expected": primary_candidate_order_expected,
+            "approved_for_execution": primary_candidate.get(
+                "candidate_approved_for_execution"
+            ),
+            "permission_mode": primary_candidate.get("candidate_permission_mode"),
+            "execution_compatible": primary_candidate.get(
+                "candidate_execution_compatible"
+            ),
+            "target_notional": primary_candidate.get("target_notional"),
+            "composed_delta_position_qty": primary_candidate.get(
+                "composed_delta_position_qty"
+            ),
+            "global_primary_blocker": primary_candidate.get("global_primary_blocker"),
+            "global_blocker_applies_to_candidate": primary_candidate.get(
+                "global_primary_blocker_applies_to_candidate"
+            ),
+            "global_blocker_scope": primary_candidate.get("global_blocker_scope"),
+            "no_order_root_cause": primary_candidate_root_cause,
+            "no_order_semantic_status": primary_candidate_no_order_semantics.get(
+                "status"
+            ),
+            "no_order_equivalence_class": primary_candidate_no_order_semantics.get(
+                "equivalence_class"
+            ),
+            "root_cause_is_material_without_order_or_fill_change": (
+                primary_candidate_no_order_semantics.get(
+                    "root_cause_is_material_without_order_or_fill_change"
+                )
+            ),
+            "requires_order_or_fill_change_for_materiality": (
+                primary_candidate_no_order_semantics.get(
+                    "requires_order_or_fill_change_for_materiality"
+                )
+            ),
+        },
+        "bridge": {
+            "latest_route_action": latest_route_action,
+            "primary_candidate_route_action": primary_candidate_route_action,
+            "latest_route_action_differs_from_primary_candidate_route_action": (
+                route_action_differs
+            ),
+            "portfolio_route_no_order_root_cause": portfolio_route_no_order_root_cause,
+            "primary_candidate_no_order_root_cause": primary_candidate_root_cause,
+            "route_root_and_primary_candidate_root_distinct": (
+                route_root_and_primary_candidate_root_distinct
+            ),
+            "global_blocker_scope": primary_candidate.get("global_blocker_scope"),
+            "global_blocker_applies_to_candidate": primary_candidate.get(
+                "global_primary_blocker_applies_to_candidate"
+            ),
+            "latest_decision_order_expected": latest_order_expected,
+            "primary_candidate_order_expected": primary_candidate_order_expected,
+        },
+        "interpretation": {
+            "portfolio_route_action_is_not_primary_candidate_root": (
+                route_root_and_primary_candidate_root_distinct
+            ),
+            "hold_current_zero_delta_explains_primary_directional_no_order": (
+                primary_candidate_root_cause == "primary_candidate_hold_current_zero_delta"
+            ),
+            "advisory_only_route_action_explains_portfolio_route_no_order": (
+                portfolio_route_no_order_root_cause
+                == "decision_route_action_advisory_only_no_order_expected"
+            ),
+            "global_blocker_is_other_candidate_or_portfolio_level": (
+                primary_candidate.get("global_blocker_scope")
+                == "other_candidate_or_portfolio_level"
+                and primary_candidate.get("global_primary_blocker_applies_to_candidate")
+                is False
+            ),
+            "root_switch_without_order_or_fill_is_non_material": (
+                primary_candidate_no_order_semantics.get(
+                    "root_cause_is_material_without_order_or_fill_change"
+                )
+                is False
+                and primary_candidate_no_order_semantics.get(
+                    "requires_order_or_fill_change_for_materiality"
+                )
+                is True
+            ),
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -8975,6 +9215,21 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     recent_directional_no_order_root_density_distributions = as_dict(
         recent_directional_no_order_root_density.get("distributions")
     )
+    latest_no_order_primary_candidate_bridge = as_dict(
+        report.get("latest_directional_no_order_primary_candidate_bridge_truth")
+    )
+    latest_no_order_primary_candidate_bridge_latest = as_dict(
+        latest_no_order_primary_candidate_bridge.get("latest_decision")
+    )
+    latest_no_order_primary_candidate_bridge_primary = as_dict(
+        latest_no_order_primary_candidate_bridge.get("primary_candidate")
+    )
+    latest_no_order_primary_candidate_bridge_bridge = as_dict(
+        latest_no_order_primary_candidate_bridge.get("bridge")
+    )
+    latest_no_order_primary_candidate_bridge_interpretation = as_dict(
+        latest_no_order_primary_candidate_bridge.get("interpretation")
+    )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
     latest_directional_spike_reversion = as_dict(directional_spike_reversion.get("latest_filled_decision"))
@@ -9701,6 +9956,91 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         ),
         "recent_directional_no_order_root_distribution_root_cause": as_list(
             recent_directional_no_order_root_density_distributions.get("root_cause")
+        ),
+        "latest_directional_no_order_primary_candidate_bridge_truth_status": (
+            latest_no_order_primary_candidate_bridge.get("status")
+        ),
+        "latest_directional_no_order_primary_candidate_bridge_smallest_missing_field": (
+            latest_no_order_primary_candidate_bridge.get("smallest_missing_field")
+        ),
+        "latest_directional_no_order_primary_candidate_bridge_raw_payload_exposed": (
+            latest_no_order_primary_candidate_bridge.get("raw_payload_exposed")
+        ),
+        "latest_directional_no_order_bridge_decision_id": (
+            latest_no_order_primary_candidate_bridge_latest.get("decision_id")
+        ),
+        "latest_directional_no_order_bridge_latest_route_action": (
+            latest_no_order_primary_candidate_bridge_bridge.get("latest_route_action")
+        ),
+        "latest_directional_no_order_bridge_primary_candidate_route_action": (
+            latest_no_order_primary_candidate_bridge_bridge.get(
+                "primary_candidate_route_action"
+            )
+        ),
+        "latest_directional_no_order_bridge_route_action_differs": (
+            latest_no_order_primary_candidate_bridge_bridge.get(
+                "latest_route_action_differs_from_primary_candidate_route_action"
+            )
+        ),
+        "latest_directional_no_order_bridge_portfolio_route_no_order_root_cause": (
+            latest_no_order_primary_candidate_bridge_bridge.get(
+                "portfolio_route_no_order_root_cause"
+            )
+        ),
+        "latest_directional_no_order_bridge_primary_candidate_no_order_root_cause": (
+            latest_no_order_primary_candidate_bridge_bridge.get(
+                "primary_candidate_no_order_root_cause"
+            )
+        ),
+        "latest_directional_no_order_bridge_route_root_and_primary_candidate_root_distinct": (
+            latest_no_order_primary_candidate_bridge_bridge.get(
+                "route_root_and_primary_candidate_root_distinct"
+            )
+        ),
+        "latest_directional_no_order_bridge_latest_decision_order_expected": (
+            latest_no_order_primary_candidate_bridge_bridge.get(
+                "latest_decision_order_expected"
+            )
+        ),
+        "latest_directional_no_order_bridge_primary_candidate_order_expected": (
+            latest_no_order_primary_candidate_bridge_bridge.get(
+                "primary_candidate_order_expected"
+            )
+        ),
+        "latest_directional_no_order_bridge_primary_candidate_semantic_status": (
+            latest_no_order_primary_candidate_bridge_primary.get(
+                "no_order_semantic_status"
+            )
+        ),
+        "latest_directional_no_order_bridge_primary_candidate_global_blocker_scope": (
+            latest_no_order_primary_candidate_bridge_primary.get(
+                "global_blocker_scope"
+            )
+        ),
+        "latest_directional_no_order_bridge_portfolio_route_action_is_not_primary_candidate_root": (
+            latest_no_order_primary_candidate_bridge_interpretation.get(
+                "portfolio_route_action_is_not_primary_candidate_root"
+            )
+        ),
+        "latest_directional_no_order_bridge_hold_current_zero_delta_explains_primary_directional_no_order": (
+            latest_no_order_primary_candidate_bridge_interpretation.get(
+                "hold_current_zero_delta_explains_primary_directional_no_order"
+            )
+        ),
+        "latest_directional_no_order_bridge_advisory_only_route_action_explains_portfolio_route_no_order": (
+            latest_no_order_primary_candidate_bridge_interpretation.get(
+                "advisory_only_route_action_explains_portfolio_route_no_order"
+            )
+        ),
+        "latest_directional_no_order_bridge_global_blocker_is_other_candidate_or_portfolio_level": (
+            latest_no_order_primary_candidate_bridge_interpretation.get(
+                "global_blocker_is_other_candidate_or_portfolio_level"
+            )
+        ),
+        "latest_directional_no_order_bridge_not_alpha_or_profitability_evidence": (
+            latest_no_order_primary_candidate_bridge_interpretation.get(
+                "not_alpha_or_profitability_evidence"
+            )
         ),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
@@ -10560,6 +10900,11 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
     report["recent_directional_no_order_root_cause_density_truth"] = (
         summarize_recent_directional_no_order_root_cause_density_truth(
             directional_attribution=report["directional_episode_attribution_truth"],
+        )
+    )
+    report["latest_directional_no_order_primary_candidate_bridge_truth"] = (
+        summarize_latest_directional_no_order_primary_candidate_bridge_truth(
+            db=report["database_truth"],
         )
     )
     report["directional_spike_reversion_truth"] = summarize_directional_spike_reversion_truth(
