@@ -426,6 +426,16 @@ with engine.connect() as conn:
     latest_executable_directional_audit, latest_executable_directional_counts = decision_audit_and_counts(
         latest_executable_directional
     )
+    latest_kill_switch_state = conn.execute(text(
+        "select event_type, topic, event_key, created_at, event_timestamp, "
+        "       payload ->> 'halted' as halted, "
+        "       payload ->> 'reason' as reason, "
+        "       payload ->> 'source_role' as source_role, "
+        "       payload ->> 'set_at_ts' as set_at_ts "
+        "from event_store "
+        "where topic = 'system.kill_switch_state' "
+        "order by created_at desc limit 1"
+    )).mappings().first()
     target_convergence_guard_flag = "target_convergence_open_orders_block_exposure_increase"
     target_convergence_guard_coverage = dict(conn.execute(text(
         "select count(*) as directional_decisions_total, "
@@ -1496,6 +1506,7 @@ print(json.dumps({
         dict(latest_executable_directional_audit) if latest_executable_directional_audit else None
     ),
     "latest_executable_directional_decision_counts": latest_executable_directional_counts,
+    "latest_kill_switch_state": dict(latest_kill_switch_state) if latest_kill_switch_state else None,
     "runtime_config": runtime_config,
     "slippage_cost_calibration": slippage_cost_calibration,
     "directional_episode_attribution": directional_episode_attribution,
@@ -1805,6 +1816,19 @@ def as_list(value: Any) -> list[Any]:
 
 def as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def bool_value(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    return None
 
 
 def decimal_text(value: Any) -> str | None:
@@ -4251,6 +4275,40 @@ def sanitize_directional_episode_attribution(
     }
 
 
+def summarize_latest_kill_switch_state(raw: Any) -> dict[str, Any]:
+    row = as_dict(raw)
+    if not row:
+        return {
+            "status": "missing_latest_kill_switch_state",
+            "smallest_missing_field": "event_store.system.kill_switch_state",
+            "halted": None,
+            "reason": None,
+            "source_role": None,
+            "created_at": None,
+            "event_timestamp": None,
+        }
+    halted = bool_value(row.get("halted"))
+    return {
+        "status": (
+            "verified_latest_kill_switch_state"
+            if halted is not None
+            else "invalid_latest_kill_switch_state"
+        ),
+        "smallest_missing_field": (
+            None
+            if halted is not None
+            else "event_store.system.kill_switch_state.payload.halted"
+        ),
+        "halted": halted,
+        "reason": row.get("reason"),
+        "source_role": row.get("source_role"),
+        "created_at": row.get("created_at"),
+        "event_timestamp": row.get("event_timestamp"),
+        "event_key": row.get("event_key"),
+        "set_at_ts": row.get("set_at_ts"),
+    }
+
+
 def sanitize_db_probe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     sanitized = dict(payload)
     latest = summarize_latest_decision(
@@ -4265,6 +4323,9 @@ def sanitize_db_probe_payload(payload: dict[str, Any]) -> dict[str, Any]:
     )
     sanitized["latest_decision"] = latest
     sanitized["latest_executable_directional_decision"] = latest_executable_directional
+    sanitized["latest_kill_switch_state"] = summarize_latest_kill_switch_state(
+        sanitized.get("latest_kill_switch_state")
+    )
     sanitized["directional_episode_attribution"] = sanitize_directional_episode_attribution(
         sanitized.get("directional_episode_attribution"),
     )
@@ -10363,6 +10424,7 @@ def summarize_recent_directional_no_order_freshness_truth(
     recent_no_order_provenance_density_gate: dict[str, Any],
     microstructure_runtime_growth: dict[str, Any],
     report_generated_at: str,
+    kill_switch_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source = (
         "database_latest_decision_plus_recent_no_order_provenance_density_gate_plus_"
@@ -10378,6 +10440,9 @@ def summarize_recent_directional_no_order_freshness_truth(
     microstructure_collector = as_dict(microstructure.get("collector"))
     microstructure_payload_sequence = as_dict(microstructure.get("payload_sequence"))
     microstructure_silver_workflow = as_dict(microstructure.get("silver_workflow"))
+    kill_switch = as_dict(kill_switch_state) or as_dict(db.get("latest_kill_switch_state"))
+    kill_switch_halted = kill_switch.get("halted") is True
+    kill_switch_reason = kill_switch.get("reason")
 
     latest_decision_id = latest.get("decision_id")
     gate_latest_decision_id = gate_coverage.get("latest_decision_id")
@@ -10426,6 +10491,10 @@ def summarize_recent_directional_no_order_freshness_truth(
     elif latest_decision_age_seconds is None:
         status = "missing_latest_decision_created_at_for_recent_no_order_freshness"
         smallest_missing = "database_truth.latest_decision.created_at"
+        ok = False
+    elif not latest_decision_recent and kill_switch_halted:
+        status = "decision_cycle_halted_by_kill_switch_for_recent_no_order_freshness"
+        smallest_missing = "runtime.kill_switch.clearance"
         ok = False
     elif not latest_decision_recent:
         status = "latest_decision_stale_for_recent_no_order_freshness"
@@ -10520,8 +10589,20 @@ def summarize_recent_directional_no_order_freshness_truth(
                 "latest_age_seconds"
             ),
         },
+        "decision_cycle_gate": {
+            "kill_switch_status": kill_switch.get("status"),
+            "kill_switch_halted": kill_switch_halted,
+            "kill_switch_reason": kill_switch_reason,
+            "kill_switch_source_role": kill_switch.get("source_role"),
+            "kill_switch_created_at": kill_switch.get("created_at"),
+            "stale_decision_explained_by_kill_switch": (
+                latest_decision_recent is False and kill_switch_halted
+            ),
+        },
         "interpretation": {
             "latest_decision_fresh": latest_decision_recent,
+            "decision_cycle_halted_by_kill_switch": kill_switch_halted,
+            "decision_cycle_halt_reason": kill_switch_reason,
             "provenance_density_gate_verified": gate_verified,
             "latest_decision_identity_consistent": latest_decision_ids_consistent,
             "no_recent_fills_in_context_window": no_recent_fills,
@@ -10794,6 +10875,9 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     recent_no_order_freshness_microstructure = as_dict(
         recent_no_order_freshness.get("microstructure")
     )
+    recent_no_order_freshness_decision_cycle_gate = as_dict(
+        recent_no_order_freshness.get("decision_cycle_gate")
+    )
     recent_no_order_freshness_interpretation = as_dict(
         recent_no_order_freshness.get("interpretation")
     )
@@ -10889,6 +10973,11 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     health = report.get("deployment_health") or {}
     runtime_config = db.get("runtime_config") if isinstance(db.get("runtime_config"), dict) else {}
     latest = db.get("latest_decision") if isinstance(db.get("latest_decision"), dict) else {}
+    latest_kill_switch_state = (
+        db.get("latest_kill_switch_state")
+        if isinstance(db.get("latest_kill_switch_state"), dict)
+        else {}
+    )
     latest_executable_directional = (
         db.get("latest_executable_directional_decision")
         if isinstance(db.get("latest_executable_directional_decision"), dict)
@@ -10917,6 +11006,11 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "authoritative": True,
         "may_be_overridden_by_artifact": False,
         "active_live_carrier": infer_live_carrier_from_database_truth(db),
+        "kill_switch_status": latest_kill_switch_state.get("status"),
+        "kill_switch_halted": latest_kill_switch_state.get("halted"),
+        "kill_switch_reason": latest_kill_switch_state.get("reason"),
+        "kill_switch_source_role": latest_kill_switch_state.get("source_role"),
+        "kill_switch_state_created_at": latest_kill_switch_state.get("created_at"),
         "latest_decision_id": latest.get("decision_id"),
         "latest_decision_created_at": latest.get("created_at"),
         "latest_decision_route_action": latest.get("route_action"),
@@ -12245,6 +12339,17 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
         "recent_directional_no_order_freshness_silver_workflow_status": (
             recent_no_order_freshness_microstructure.get("silver_workflow_status")
         ),
+        "recent_directional_no_order_freshness_kill_switch_halted": (
+            recent_no_order_freshness_decision_cycle_gate.get("kill_switch_halted")
+        ),
+        "recent_directional_no_order_freshness_kill_switch_reason": (
+            recent_no_order_freshness_decision_cycle_gate.get("kill_switch_reason")
+        ),
+        "recent_directional_no_order_freshness_stale_decision_explained_by_kill_switch": (
+            recent_no_order_freshness_decision_cycle_gate.get(
+                "stale_decision_explained_by_kill_switch"
+            )
+        ),
         "recent_directional_no_order_freshness_verified": (
             recent_no_order_freshness_interpretation.get(
                 "latest_decision_fresh"
@@ -12994,6 +13099,11 @@ def collect_blocking_findings(report: dict[str, Any]) -> list[str]:
         blockers.append("database_truth_unavailable")
     recent_no_order_freshness = report.get("recent_directional_no_order_freshness_truth") or {}
     if (
+        recent_no_order_freshness.get("status")
+        == "decision_cycle_halted_by_kill_switch_for_recent_no_order_freshness"
+    ):
+        blockers.append("decision_cycle_halted_by_kill_switch")
+    elif (
         recent_no_order_freshness.get("status")
         == "latest_decision_stale_for_recent_no_order_freshness"
     ):

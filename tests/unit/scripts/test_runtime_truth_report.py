@@ -3786,6 +3786,57 @@ def test_recent_no_order_freshness_truth_reports_stale_latest_decision() -> None
     assert truth["freshness"]["latest_decision_recent"] is False
 
 
+def test_recent_no_order_freshness_truth_attributes_stale_decision_to_kill_switch() -> None:
+    mod = load_module()
+
+    truth = mod.summarize_recent_directional_no_order_freshness_truth(
+        db={
+            "latest_decision": {
+                "decision_id": "decision-current",
+                "created_at": "2026-05-01T13:00:00+00:00",
+                "route_action": "advisory_only",
+                "execution_truth_chain": {"status": "verified_no_order_expected"},
+            },
+            "latest_kill_switch_state": {
+                "status": "verified_latest_kill_switch_state",
+                "halted": True,
+                "reason": "recovery_reconciliation_stale",
+                "source_role": "execution",
+                "created_at": "2026-05-01T15:06:35+00:00",
+            },
+        },
+        recent_no_order_provenance_density_gate={
+            "status": "verified_recent_directional_no_order_provenance_density_gate",
+            "smallest_missing_field": None,
+            "coverage": {
+                "latest_decision_id": "decision-current",
+                "decisions_with_fills": 0,
+                "no_recent_fills": True,
+            },
+            "interpretation": {"gate_verified": True},
+        },
+        microstructure_runtime_growth={
+            "status": "verified_microstructure_runtime_growth",
+            "smallest_missing_field": None,
+            "collector": {"heartbeat_fresh": True},
+        },
+        report_generated_at="2026-05-01T14:05:00Z",
+    )
+
+    assert truth["ok"] is False
+    assert (
+        truth["status"]
+        == "decision_cycle_halted_by_kill_switch_for_recent_no_order_freshness"
+    )
+    assert truth["smallest_missing_field"] == "runtime.kill_switch.clearance"
+    assert truth["decision_cycle_gate"]["kill_switch_halted"] is True
+    assert (
+        truth["decision_cycle_gate"]["kill_switch_reason"]
+        == "recovery_reconciliation_stale"
+    )
+    assert truth["decision_cycle_gate"]["stale_decision_explained_by_kill_switch"] is True
+
+
 def test_recent_no_order_provenance_density_gate_reports_decision_mismatch() -> None:
     mod = load_module()
 
@@ -6060,6 +6111,35 @@ def test_blocking_findings_include_stale_directional_decision() -> None:
 
     assert mod.collect_blocking_findings(report) == [
         "latest_decision_stale_for_recent_no_order_freshness"
+    ]
+
+
+def test_blocking_findings_attribute_stale_decision_to_kill_switch() -> None:
+    mod = load_module()
+    report = {
+        "git": {
+            "windows": {
+                "dirty": False,
+                "origin_divergence": {"ahead": 0, "behind": 0},
+            },
+            "deployed_matches_windows": True,
+        },
+        "deployment_health": {
+            "gateway_health": {"ok": True},
+            "containers": {"all_required_app_containers_healthy": True},
+        },
+        "database_truth": {"ok": True},
+        "recent_directional_no_order_freshness_truth": {
+            "status": "decision_cycle_halted_by_kill_switch_for_recent_no_order_freshness",
+            "decision_cycle_gate": {
+                "kill_switch_halted": True,
+                "kill_switch_reason": "recovery_reconciliation_stale",
+            },
+        },
+    }
+
+    assert mod.collect_blocking_findings(report) == [
+        "decision_cycle_halted_by_kill_switch"
     ]
 
 
