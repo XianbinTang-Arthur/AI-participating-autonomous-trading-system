@@ -12992,6 +12992,12 @@ def collect_blocking_findings(report: dict[str, Any]) -> list[str]:
 
     if not ((report.get("database_truth") or {}).get("ok")):
         blockers.append("database_truth_unavailable")
+    recent_no_order_freshness = report.get("recent_directional_no_order_freshness_truth") or {}
+    if (
+        recent_no_order_freshness.get("status")
+        == "latest_decision_stale_for_recent_no_order_freshness"
+    ):
+        blockers.append("latest_decision_stale_for_recent_no_order_freshness")
     return blockers
 
 

@@ -6038,6 +6038,31 @@ def test_blocking_findings_separate_report_generation_from_runtime_state() -> No
     assert mod.collect_blocking_findings(report) == ["windows_worktree_dirty"]
 
 
+def test_blocking_findings_include_stale_directional_decision() -> None:
+    mod = load_module()
+    report = {
+        "git": {
+            "windows": {
+                "dirty": False,
+                "origin_divergence": {"ahead": 0, "behind": 0},
+            },
+            "deployed_matches_windows": True,
+        },
+        "deployment_health": {
+            "gateway_health": {"ok": True},
+            "containers": {"all_required_app_containers_healthy": True},
+        },
+        "database_truth": {"ok": True},
+        "recent_directional_no_order_freshness_truth": {
+            "status": "latest_decision_stale_for_recent_no_order_freshness",
+        },
+    }
+
+    assert mod.collect_blocking_findings(report) == [
+        "latest_decision_stale_for_recent_no_order_freshness"
+    ]
+
+
 def test_target_convergence_guard_truth_reports_exact_no_trigger_reason() -> None:
     mod = load_module()
     db = {
