@@ -9451,6 +9451,264 @@ def summarize_recent_directional_no_order_candidate_drilldown_context_truth(
     }
 
 
+def summarize_recent_directional_no_order_provenance_density_gate_truth(
+    *,
+    recent_candidate_drilldown_context: dict[str, Any],
+    decision_lifecycle_provenance_continuity: dict[str, Any],
+    decision_lifecycle_execution_science_continuity: dict[str, Any],
+) -> dict[str, Any]:
+    source = (
+        "recent_directional_no_order_candidate_drilldown_context_truth_plus_"
+        "decision_lifecycle_continuity_truths"
+    )
+    context = as_dict(recent_candidate_drilldown_context)
+    lifecycle = as_dict(decision_lifecycle_provenance_continuity)
+    execution_science = as_dict(decision_lifecycle_execution_science_continuity)
+
+    context_coverage = as_dict(context.get("coverage"))
+    context_current = as_dict(context.get("current_decision_context"))
+    context_chain = as_dict(context.get("chain_context"))
+    context_interpretation = as_dict(context.get("interpretation"))
+    lifecycle_current = as_dict(lifecycle.get("current_decision"))
+    lifecycle_executable = as_dict(lifecycle.get("latest_executable_directional_episode"))
+    lifecycle_recent = as_dict(lifecycle.get("recent_directional_batch"))
+    execution_lifecycle = as_dict(execution_science.get("lifecycle_provenance"))
+    execution_terminal = as_dict(execution_science.get("terminal_no_fill_execution_science"))
+    execution_sequence = as_dict(execution_science.get("execution_science"))
+    execution_depth = as_dict(execution_science.get("orderbook_payload_depth"))
+    execution_slippage = as_dict(execution_science.get("slippage_cost_calibration"))
+
+    context_decision_id = context_coverage.get("latest_decision_id")
+    lifecycle_decision_id = lifecycle_current.get("decision_id")
+    execution_decision_id = execution_lifecycle.get("current_decision_id")
+    present_decision_ids = [
+        value
+        for value in (context_decision_id, lifecycle_decision_id, execution_decision_id)
+        if value
+    ]
+    latest_decision_ids_consistent = (
+        len(set(present_decision_ids)) == 1 if present_decision_ids else None
+    )
+
+    recent_decision_count = int_or_zero(context_coverage.get("recent_decision_count"))
+    no_order_expected_decision_count = int_or_zero(
+        context_coverage.get("no_order_expected_decision_count")
+    )
+    decisions_with_fills = int_or_zero(context_coverage.get("decisions_with_fills"))
+    all_recent_decisions_no_order_expected = (
+        recent_decision_count > 0
+        and no_order_expected_decision_count == recent_decision_count
+        and context_interpretation.get("recent_window_no_order_regime") is True
+    )
+    no_recent_fills = (
+        decisions_with_fills == 0
+        and context_interpretation.get("no_recent_fills_in_context_window") is True
+    )
+    current_no_order_expected = (
+        lifecycle_current.get("order_expected") is False
+        and lifecycle_current.get("fill_expected") is False
+        and execution_lifecycle.get("current_order_expected") is False
+        and execution_lifecycle.get("current_fill_expected") is False
+    )
+    context_verified = (
+        context.get("status")
+        == "verified_recent_directional_no_order_candidate_drilldown_context"
+    )
+    lifecycle_verified = (
+        lifecycle.get("smallest_missing_field") is None
+        and lifecycle.get("status")
+        in {
+            "verified_current_no_order_plus_executable_terminal_no_fill_continuity",
+            "verified_decision_lifecycle_provenance_continuity",
+        }
+    )
+    execution_science_verified = (
+        execution_science.get("smallest_missing_field") is None
+        and execution_science.get("status")
+        in {
+            "verified_no_order_terminal_no_fill_execution_science_continuity",
+            "verified_decision_lifecycle_execution_science_continuity",
+        }
+    )
+    terminal_pretrade_status = (
+        context_chain.get("terminal_pretrade_status")
+        or execution_terminal.get("status")
+    )
+    terminal_pretrade_verified = (
+        terminal_pretrade_status
+        == "verified_executable_terminal_no_fill_pretrade_microstructure_drilldown"
+    )
+    payload_sequence_status = (
+        context_chain.get("payload_sequence_status")
+        or execution_terminal.get("snapshot_diff_sequence_status")
+        or execution_sequence.get("payload_sequence_status")
+    )
+    sequence_continuous = payload_sequence_status == "sequence_continuous"
+    upstream_raw_payload_exposed = (
+        context.get("raw_payload_exposed") is True
+        or lifecycle.get("raw_payload_exposed") is True
+        or execution_science.get("raw_payload_exposed") is True
+    )
+
+    if upstream_raw_payload_exposed:
+        status = "recent_no_order_provenance_density_raw_payload_exposed"
+        smallest_missing = "raw_payload_redaction"
+        ok = False
+    elif not context_verified:
+        status = "missing_recent_no_order_candidate_drilldown_context"
+        smallest_missing = (
+            context.get("smallest_missing_field")
+            or "recent_directional_no_order_candidate_drilldown_context_truth"
+        )
+        ok = False
+    elif not lifecycle_verified:
+        status = "missing_decision_lifecycle_provenance_continuity"
+        smallest_missing = (
+            lifecycle.get("smallest_missing_field")
+            or "decision_lifecycle_provenance_continuity_truth"
+        )
+        ok = False
+    elif not execution_science_verified:
+        status = "missing_decision_lifecycle_execution_science_continuity"
+        smallest_missing = (
+            execution_science.get("smallest_missing_field")
+            or "decision_lifecycle_execution_science_continuity_truth"
+        )
+        ok = False
+    elif latest_decision_ids_consistent is False:
+        status = "recent_no_order_provenance_latest_decision_identity_mismatch"
+        smallest_missing = (
+            "recent_directional_no_order_candidate_drilldown_context_truth."
+            "coverage.latest_decision_id/decision_lifecycle_current_decision_id"
+        )
+        ok = False
+    elif not current_no_order_expected:
+        status = "recent_no_order_provenance_current_decision_not_no_order_expected"
+        smallest_missing = "decision_lifecycle_current_order_fill_expectation"
+        ok = False
+    elif not all_recent_decisions_no_order_expected:
+        status = "recent_no_order_provenance_window_not_all_no_order_expected"
+        smallest_missing = (
+            "recent_directional_no_order_candidate_drilldown_context_truth."
+            "coverage.no_order_expected_decision_count"
+        )
+        ok = False
+    elif not no_recent_fills:
+        status = "recent_no_order_provenance_window_has_fills"
+        smallest_missing = (
+            "recent_directional_no_order_candidate_drilldown_context_truth."
+            "coverage.decisions_with_fills"
+        )
+        ok = False
+    elif not terminal_pretrade_verified:
+        status = "missing_recent_no_order_terminal_pretrade_microstructure_context"
+        smallest_missing = (
+            "recent_directional_no_order_candidate_drilldown_context_truth."
+            "chain_context.terminal_pretrade_status"
+        )
+        ok = False
+    elif not sequence_continuous:
+        status = "missing_recent_no_order_continuous_payload_sequence_context"
+        smallest_missing = (
+            "recent_directional_no_order_candidate_drilldown_context_truth."
+            "chain_context.payload_sequence_status"
+        )
+        ok = False
+    else:
+        status = "verified_recent_directional_no_order_provenance_density_gate"
+        smallest_missing = None
+        ok = True
+
+    return {
+        "source": source,
+        "ok": ok,
+        "status": status,
+        "smallest_missing_field": smallest_missing,
+        "raw_payload_exposed": False,
+        "coverage": {
+            "recent_decision_count": recent_decision_count,
+            "no_order_expected_decision_count": no_order_expected_decision_count,
+            "decisions_with_fills": decisions_with_fills,
+            "candidate_drilldown_count": int_or_zero(
+                context_coverage.get("candidate_drilldown_count")
+            ),
+            "latest_decision_id": context_decision_id,
+            "lifecycle_decision_id": lifecycle_decision_id,
+            "execution_science_decision_id": execution_decision_id,
+            "latest_decision_ids_consistent": latest_decision_ids_consistent,
+            "all_recent_decisions_no_order_expected": (
+                all_recent_decisions_no_order_expected
+            ),
+            "no_recent_fills": no_recent_fills,
+            "recent_candidate_drilldown_context_status": context.get("status"),
+            "decision_lifecycle_provenance_status": lifecycle.get("status"),
+            "decision_lifecycle_execution_science_status": execution_science.get(
+                "status"
+            ),
+            "historical_candidate_drilldown_scope": context_coverage.get(
+                "historical_candidate_drilldown_scope"
+            ),
+            "historical_candidate_drilldown_not_claimed": context_coverage.get(
+                "historical_candidate_drilldown_not_claimed"
+            ),
+        },
+        "current_decision": {
+            "latest_route_action": context_current.get("latest_route_action"),
+            "primary_candidate_route_action": context_current.get(
+                "primary_candidate_route_action"
+            ),
+            "primary_candidate_no_order_root_cause": context_current.get(
+                "primary_candidate_no_order_root_cause"
+            ),
+            "primary_candidate_semantic_status": context_current.get(
+                "primary_candidate_semantic_status"
+            ),
+            "primary_drilldown_zero_delta_no_legs": context_current.get(
+                "primary_drilldown_zero_delta_no_legs"
+            ),
+            "order_expected": lifecycle_current.get("order_expected"),
+            "fill_expected": lifecycle_current.get("fill_expected"),
+            "execution_truth_status": lifecycle_current.get("execution_truth_status"),
+        },
+        "executable_episode": {
+            "decision_id": lifecycle_executable.get("decision_id")
+            or execution_lifecycle.get("executable_decision_id"),
+            "status": lifecycle_executable.get("status")
+            or execution_lifecycle.get("executable_status"),
+            "terminal_pretrade_status": terminal_pretrade_status,
+            "payload_sequence_status": payload_sequence_status,
+            "local_fill_feasibility_status": execution_terminal.get(
+                "local_fill_feasibility_status"
+            ),
+            "market_fill_feasibility_observable": execution_terminal.get(
+                "market_fill_feasibility_observable"
+            ),
+            "orderbook_depth_status": execution_depth.get("status"),
+            "slippage_cost_status": execution_slippage.get("status"),
+        },
+        "interpretation": {
+            "gate_verified": ok,
+            "current_decision_no_order_expected": current_no_order_expected,
+            "recent_window_no_order_regime": all_recent_decisions_no_order_expected,
+            "no_recent_fills_in_context_window": no_recent_fills,
+            "latest_decision_identity_consistent": latest_decision_ids_consistent,
+            "latest_drilldown_scope_only": context_interpretation.get(
+                "latest_drilldown_scope_only"
+            ),
+            "historical_candidate_drilldown_not_claimed": context_coverage.get(
+                "historical_candidate_drilldown_not_claimed"
+            ),
+            "recent_batch_lifecycle_complete": lifecycle_recent.get(
+                "all_recent_decisions_no_order_expected"
+            )
+            is True,
+            "terminal_pretrade_verified": terminal_pretrade_verified,
+            "payload_sequence_continuous": sequence_continuous,
+            "not_alpha_or_profitability_evidence": True,
+        },
+    }
+
+
 def summarize_latest_decision_fill_feasibility_truth(
     db: dict[str, Any],
     directional_attribution: dict[str, Any],
@@ -10333,6 +10591,21 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
     )
     recent_no_order_candidate_drilldown_context_interpretation = as_dict(
         recent_no_order_candidate_drilldown_context.get("interpretation")
+    )
+    recent_no_order_provenance_density_gate = as_dict(
+        report.get("recent_directional_no_order_provenance_density_gate_truth")
+    )
+    recent_no_order_provenance_density_gate_coverage = as_dict(
+        recent_no_order_provenance_density_gate.get("coverage")
+    )
+    recent_no_order_provenance_density_gate_current = as_dict(
+        recent_no_order_provenance_density_gate.get("current_decision")
+    )
+    recent_no_order_provenance_density_gate_executable = as_dict(
+        recent_no_order_provenance_density_gate.get("executable_episode")
+    )
+    recent_no_order_provenance_density_gate_interpretation = as_dict(
+        recent_no_order_provenance_density_gate.get("interpretation")
     )
     directional_spike_reversion = as_dict(report.get("directional_spike_reversion_truth"))
     directional_spike_reversion_coverage = as_dict(directional_spike_reversion.get("coverage"))
@@ -11587,6 +11860,140 @@ def project_live_runtime_facts(report: dict[str, Any]) -> dict[str, Any]:
                 "not_alpha_or_profitability_evidence"
             )
         ),
+        "recent_directional_no_order_provenance_density_gate_truth_status": (
+            recent_no_order_provenance_density_gate.get("status")
+        ),
+        "recent_directional_no_order_provenance_density_gate_smallest_missing_field": (
+            recent_no_order_provenance_density_gate.get("smallest_missing_field")
+        ),
+        "recent_directional_no_order_provenance_density_gate_raw_payload_exposed": (
+            recent_no_order_provenance_density_gate.get("raw_payload_exposed")
+        ),
+        "recent_directional_no_order_provenance_density_gate_recent_decision_count": (
+            recent_no_order_provenance_density_gate_coverage.get("recent_decision_count")
+        ),
+        "recent_directional_no_order_provenance_density_gate_no_order_expected_decision_count": (
+            recent_no_order_provenance_density_gate_coverage.get(
+                "no_order_expected_decision_count"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_decisions_with_fills": (
+            recent_no_order_provenance_density_gate_coverage.get("decisions_with_fills")
+        ),
+        "recent_directional_no_order_provenance_density_gate_candidate_count": (
+            recent_no_order_provenance_density_gate_coverage.get(
+                "candidate_drilldown_count"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_latest_decision_id": (
+            recent_no_order_provenance_density_gate_coverage.get("latest_decision_id")
+        ),
+        "recent_directional_no_order_provenance_density_gate_lifecycle_decision_id": (
+            recent_no_order_provenance_density_gate_coverage.get("lifecycle_decision_id")
+        ),
+        "recent_directional_no_order_provenance_density_gate_execution_science_decision_id": (
+            recent_no_order_provenance_density_gate_coverage.get(
+                "execution_science_decision_id"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_latest_decision_ids_consistent": (
+            recent_no_order_provenance_density_gate_coverage.get(
+                "latest_decision_ids_consistent"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_all_recent_no_order": (
+            recent_no_order_provenance_density_gate_coverage.get(
+                "all_recent_decisions_no_order_expected"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_no_recent_fills": (
+            recent_no_order_provenance_density_gate_coverage.get("no_recent_fills")
+        ),
+        "recent_directional_no_order_provenance_density_gate_context_status": (
+            recent_no_order_provenance_density_gate_coverage.get(
+                "recent_candidate_drilldown_context_status"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_lifecycle_status": (
+            recent_no_order_provenance_density_gate_coverage.get(
+                "decision_lifecycle_provenance_status"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_execution_science_status": (
+            recent_no_order_provenance_density_gate_coverage.get(
+                "decision_lifecycle_execution_science_status"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_historical_drilldown_scope": (
+            recent_no_order_provenance_density_gate_coverage.get(
+                "historical_candidate_drilldown_scope"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_historical_drilldown_not_claimed": (
+            recent_no_order_provenance_density_gate_coverage.get(
+                "historical_candidate_drilldown_not_claimed"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_current_order_expected": (
+            recent_no_order_provenance_density_gate_current.get("order_expected")
+        ),
+        "recent_directional_no_order_provenance_density_gate_current_fill_expected": (
+            recent_no_order_provenance_density_gate_current.get("fill_expected")
+        ),
+        "recent_directional_no_order_provenance_density_gate_current_truth_status": (
+            recent_no_order_provenance_density_gate_current.get("execution_truth_status")
+        ),
+        "recent_directional_no_order_provenance_density_gate_primary_candidate_route_action": (
+            recent_no_order_provenance_density_gate_current.get(
+                "primary_candidate_route_action"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_primary_zero_delta_no_legs": (
+            recent_no_order_provenance_density_gate_current.get(
+                "primary_drilldown_zero_delta_no_legs"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_executable_decision_id": (
+            recent_no_order_provenance_density_gate_executable.get("decision_id")
+        ),
+        "recent_directional_no_order_provenance_density_gate_terminal_pretrade_status": (
+            recent_no_order_provenance_density_gate_executable.get(
+                "terminal_pretrade_status"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_payload_sequence_status": (
+            recent_no_order_provenance_density_gate_executable.get(
+                "payload_sequence_status"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_local_fill_feasibility_status": (
+            recent_no_order_provenance_density_gate_executable.get(
+                "local_fill_feasibility_status"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_market_fill_observable": (
+            recent_no_order_provenance_density_gate_executable.get(
+                "market_fill_feasibility_observable"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_verified": (
+            recent_no_order_provenance_density_gate_interpretation.get("gate_verified")
+        ),
+        "recent_directional_no_order_provenance_density_gate_latest_scope_only": (
+            recent_no_order_provenance_density_gate_interpretation.get(
+                "latest_drilldown_scope_only"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_payload_sequence_continuous": (
+            recent_no_order_provenance_density_gate_interpretation.get(
+                "payload_sequence_continuous"
+            )
+        ),
+        "recent_directional_no_order_provenance_density_gate_not_alpha_or_profitability_evidence": (
+            recent_no_order_provenance_density_gate_interpretation.get(
+                "not_alpha_or_profitability_evidence"
+            )
+        ),
         "silver_orderbook_truth_status": (
             as_dict(execution_science.get("silver_orderbook")).get("status")
         ),
@@ -12498,6 +12905,19 @@ def build_report(args: argparse.Namespace) -> dict[str, Any]:
             ],
             latest_candidate_drilldown=report[
                 "latest_directional_no_order_candidate_drilldown_truth"
+            ],
+        )
+    )
+    report["recent_directional_no_order_provenance_density_gate_truth"] = (
+        summarize_recent_directional_no_order_provenance_density_gate_truth(
+            recent_candidate_drilldown_context=report[
+                "recent_directional_no_order_candidate_drilldown_context_truth"
+            ],
+            decision_lifecycle_provenance_continuity=report[
+                "decision_lifecycle_provenance_continuity_truth"
+            ],
+            decision_lifecycle_execution_science_continuity=report[
+                "decision_lifecycle_execution_science_continuity_truth"
             ],
         )
     )
